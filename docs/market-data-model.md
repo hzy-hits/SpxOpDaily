@@ -171,6 +171,15 @@ Useful commands:
 
 ```bash
 scripts/run-mock-collector.sh --underlier 7500 --expiry 20260706 --next-expiry 20260707
+scripts/run-ibkr-collector.sh --dry-run
+scripts/run-ibkr-collector.sh --force --skip-options
 scripts/show-latest-state.sh --instrument index:SPX
 scripts/show-latest-state.sh --all-providers
 ```
+
+IBKR collector notes:
+
+- default mode respects runtime policy and may only write `provider_state=unavailable`
+- `--force` attempts a real TWS/IB Gateway socket connection
+- `--skip-options` collects only base index/ETF/futures quotes
+- without `--skip-options`, the collector estimates ATM and requests the configured SPXW option set

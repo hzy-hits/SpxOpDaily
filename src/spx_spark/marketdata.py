@@ -455,6 +455,28 @@ def quote_from_dict(payload: Mapping[str, Any]) -> Quote:
     )
 
 
+def provider_state_from_dict(payload: Mapping[str, Any]) -> ProviderState:
+    try:
+        provider = Provider(str(payload.get("provider", Provider.UNKNOWN.value)))
+    except ValueError:
+        provider = Provider.UNKNOWN
+    try:
+        status = ProviderStatus(str(payload.get("status", ProviderStatus.UNKNOWN.value)))
+    except ValueError:
+        status = ProviderStatus.UNKNOWN
+
+    return ProviderState(
+        provider=provider,
+        status=status,
+        checked_at=parse_timestamp(payload.get("checked_at")) or datetime.now(tz=timezone.utc),
+        reason=payload.get("reason"),
+        connected=bool_or_none(payload.get("connected")),
+        authenticated=bool_or_none(payload.get("authenticated")),
+        latency_ms=clean_float(payload.get("latency_ms")),
+        priority=int(payload["priority"]) if payload.get("priority") is not None else None,
+    )
+
+
 def choose_best_quote(
     quotes: Iterable[Quote],
     *,

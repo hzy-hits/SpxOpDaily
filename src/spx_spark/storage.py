@@ -15,6 +15,7 @@ from spx_spark.marketdata import (
     as_utc,
     choose_best_quote,
     parse_timestamp,
+    provider_state_from_dict,
     quote_from_dict,
 )
 
@@ -118,11 +119,17 @@ class LatestStateStore:
         payload = json.loads(self.path.read_text(encoding="utf-8"))
         quotes_payload = payload.get("quotes") if isinstance(payload, dict) else []
         best_payload = payload.get("best_quotes") if isinstance(payload, dict) else []
+        provider_states_payload = payload.get("provider_states") if isinstance(payload, dict) else []
         quotes = tuple(
             quote_from_dict(item) for item in quotes_payload if isinstance(item, dict)
         )
         best_quotes = tuple(
             quote_from_dict(item) for item in best_payload if isinstance(item, dict)
+        )
+        provider_states = tuple(
+            provider_state_from_dict(item)
+            for item in provider_states_payload
+            if isinstance(item, dict)
         )
         created_at = as_utc_from_payload(payload.get("created_at")) if isinstance(payload, dict) else now
         as_of = now if refresh_quality else (
@@ -143,6 +150,7 @@ class LatestStateStore:
             as_of=as_of,
             quotes=quotes,
             best_quotes=best_quotes,
+            provider_states=provider_states,
         )
 
     def update(

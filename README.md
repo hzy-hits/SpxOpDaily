@@ -43,6 +43,20 @@ uv run spx-spark-runtime-mode clear
 
 The runtime mode file is local state under `runtime/`. It lets an agent temporarily allow or block IBKR collection without changing permanent config.
 
+## IBKR Collector
+
+```bash
+scripts/run-ibkr-collector.sh --dry-run
+scripts/run-ibkr-collector.sh --skip-options
+scripts/run-ibkr-collector.sh --force --skip-options
+scripts/run-ibkr-collector.sh --force
+```
+
+The collector writes normalized IBKR quotes into the same raw/latest-state path as the mock
+collector. By default it respects runtime mode and will not connect if IBKR is protected or
+outside the allowed schedule. Use `--force` only when you intentionally want this SSH host to
+connect to TWS/IB Gateway.
+
 ## Schwab Verifier
 
 ```bash

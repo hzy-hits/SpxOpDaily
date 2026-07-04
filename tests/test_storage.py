@@ -8,6 +8,8 @@ from spx_spark.marketdata import (
     InstrumentId,
     MarketDataQuality,
     Provider,
+    ProviderState,
+    ProviderStatus,
     Quote,
 )
 from spx_spark.storage import JsonlQuoteWriter, LatestStateStore
@@ -130,3 +132,27 @@ def test_latest_state_keeps_provider_latest_across_updates(tmp_path):
     state = store.load()
     assert len(state.quotes) == 2
     assert state.best_quote("index:SPX").provider == Provider.IBKR
+
+
+def test_latest_state_round_trips_provider_state(tmp_path):
+    settings = make_storage_settings(tmp_path)
+    store = LatestStateStore(settings)
+    now = datetime(2026, 7, 6, 13, 30, tzinfo=timezone.utc)
+    provider_state = ProviderState(
+        provider=Provider.IBKR,
+        status=ProviderStatus.UNAVAILABLE,
+        checked_at=now,
+        reason="runtime policy blocks IBKR collection",
+        connected=False,
+        authenticated=None,
+        latency_ms=None,
+        priority=0,
+    )
+
+    store.update([], now=now, provider_states=[provider_state])
+    state = LatestStateStore(settings).load(now=now)
+
+    assert len(state.provider_states) == 1
+    assert state.provider_states[0].provider == Provider.IBKR
+    assert state.provider_states[0].status == ProviderStatus.UNAVAILABLE
+    assert state.provider_states[0].connected is False
