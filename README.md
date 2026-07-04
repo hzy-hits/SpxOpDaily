@@ -46,12 +46,15 @@ The runtime mode file is local state under `runtime/`. It lets an agent temporar
 ## Schwab Verifier
 
 ```bash
+scripts/create-schwab-token.sh
 scripts/run-schwab-verifier.sh --offline
 scripts/run-schwab-verifier.sh --print-config
 scripts/run-schwab-verifier.sh
 ```
 
-The verifier reads `SCHWAB_ACCESS_TOKEN` or `SCHWAB_TOKEN_FILE`. It checks candidate index quotes, ETF/futures quotes, and option chains without placing orders.
+The token helper runs Schwab's manual OAuth flow for SSH/headless hosts. The verifier reads
+`SCHWAB_ACCESS_TOKEN` or `SCHWAB_TOKEN_FILE`. It checks candidate index quotes, ETF/futures
+quotes, and option chains without placing orders.
 
 ## Maintenance Dry Run
 
