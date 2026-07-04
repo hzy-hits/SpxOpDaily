@@ -100,6 +100,23 @@ The mock collector generates normalized `Quote` rows, writes raw JSONL files und
 `MARKET_DATA_DATA_ROOT/raw/`, and updates `MARKET_DATA_LATEST_STATE_PATH`. It is the
 local no-broker test path for sampler, storage, latest-state, and fallback logic.
 
+## Hyperliquid Collector
+
+```bash
+scripts/run-hyperliquid-collector.sh --print-config
+scripts/run-hyperliquid-collector.sh --list-coins
+scripts/run-hyperliquid-collector.sh --coin SPX --json
+scripts/show-latest-state.sh --all-providers --instrument crypto_perp:SPX
+```
+
+The Hyperliquid collector uses public `POST /info` endpoints and does not need an API key.
+It writes a normalized perp quote plus a Hyperliquid context row with funding, OI,
+oracle premium, book imbalance, and recent-trade burst fields.
+
+Important: live verification showed Hyperliquid `SPX` trading around `0.43`, so that symbol
+is not official Cboe SPX / S&P 500 index data. Treat it as a Hyperliquid crypto/perp asset
+unless a different verified S&P index symbol is found.
+
 ## Market Data Model
 
 IBKR and Schwab payloads are normalized through `spx_spark.marketdata` before they reach

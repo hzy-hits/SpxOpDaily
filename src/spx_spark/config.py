@@ -265,6 +265,33 @@ class SchwabSettings:
 
 
 @dataclass(frozen=True)
+class HyperliquidSettings:
+    api_base_url: str
+    coin: str
+    request_timeout_seconds: float
+    include_book: bool
+    include_trades: bool
+    book_depth_levels: int
+    large_trade_notional_threshold: float
+
+    @classmethod
+    def from_env(cls) -> "HyperliquidSettings":
+        load_dotenv()
+        return cls(
+            api_base_url=_env("HYPERLIQUID_API_BASE_URL", "https://api.hyperliquid.xyz"),
+            coin=_env("HYPERLIQUID_COIN", "SPX").upper(),
+            request_timeout_seconds=_env_float("HYPERLIQUID_REQUEST_TIMEOUT_SECONDS", 10.0),
+            include_book=_env_bool("HYPERLIQUID_INCLUDE_BOOK", True),
+            include_trades=_env_bool("HYPERLIQUID_INCLUDE_TRADES", True),
+            book_depth_levels=_env_int("HYPERLIQUID_BOOK_DEPTH_LEVELS", 5),
+            large_trade_notional_threshold=_env_float(
+                "HYPERLIQUID_LARGE_TRADE_NOTIONAL_THRESHOLD",
+                100_000.0,
+            ),
+        )
+
+
+@dataclass(frozen=True)
 class MaintenanceSettings:
     data_root: str
     logs_root: str

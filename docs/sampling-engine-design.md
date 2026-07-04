@@ -438,4 +438,5 @@ Current status:
 - latest-state fallback store is implemented in `spx_spark.storage`
 - mock collector is implemented in `spx_spark.mock_collector`
 - IBKR one-shot collector is implemented in `spx_spark.ibkr.collector`
+- Hyperliquid public context collector is implemented in `spx_spark.hyperliquid.collector`
 - Parquet writer and compaction are deferred until real quote volume is measured

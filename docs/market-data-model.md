@@ -173,6 +173,7 @@ Useful commands:
 scripts/run-mock-collector.sh --underlier 7500 --expiry 20260706 --next-expiry 20260707
 scripts/run-ibkr-collector.sh --dry-run
 scripts/run-ibkr-collector.sh --force --skip-options
+scripts/run-hyperliquid-collector.sh --coin SPX --json
 scripts/show-latest-state.sh --instrument index:SPX
 scripts/show-latest-state.sh --all-providers
 ```
@@ -183,3 +184,14 @@ IBKR collector notes:
 - `--force` attempts a real TWS/IB Gateway socket connection
 - `--skip-options` collects only base index/ETF/futures quotes
 - without `--skip-options`, the collector estimates ATM and requests the configured SPXW option set
+
+Hyperliquid collector notes:
+
+- uses public `POST /info` endpoints, no API key
+- writes normalized quote rows under `data/raw/provider=hyperliquid/...`
+- writes chain-specific context under
+  `data/context/provider=hyperliquid/coin=<coin>/date=YYYY-MM-DD/hour=HH/asset-context.jsonl`
+- context includes mark, oracle, funding, open interest, day notional volume, book imbalance,
+  recent trade stats, large trade count, and mark-oracle premium
+- live smoke test on 2026-07-04 showed Hyperliquid `SPX` near `0.43`, so it is not official
+  Cboe SPX / S&P 500 index data. Keep `crypto_perp:SPX` separate from `index:SPX`.
