@@ -1,0 +1,11 @@
+[Unit]
+Description=Run SPX Spark IBKR verifier periodically
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=15min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+

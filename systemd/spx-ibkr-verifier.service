@@ -1,0 +1,14 @@
+[Unit]
+Description=SPX Spark IBKR verifier
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/ubuntu/spx-spark
+EnvironmentFile=-/home/ubuntu/spx-spark/.env
+ExecStart=/home/ubuntu/spx-spark/scripts/run-ibkr-verifier.sh
+
+[Install]
+WantedBy=default.target
+

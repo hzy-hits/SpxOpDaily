@@ -1,0 +1,31 @@
+[project]
+name = "spx-spark"
+version = "0.1.0"
+description = "Near-real-time SPX/SPXW data verifier and alert research system"
+requires-python = ">=3.12"
+dependencies = [
+  "ib-async>=2.0.0",
+]
+
+[project.scripts]
+spx-spark-ibkr-verifier = "spx_spark.ibkr.verifier:main"
+spx-spark-maintenance = "spx_spark.maintenance:main"
+spx-spark-runtime-mode = "spx_spark.runtime_mode:main"
+spx-spark-schwab-verifier = "spx_spark.schwab.verifier:main"
+
+[dependency-groups]
+dev = [
+  "pytest>=8.0.0",
+  "ruff>=0.8.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

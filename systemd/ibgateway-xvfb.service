@@ -1,0 +1,16 @@
+[Unit]
+Description=IB Gateway under Xvfb
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/ubuntu/spx-spark
+Environment=DISPLAY=:99
+ExecStartPre=/bin/sh -c 'pgrep -f "Xvfb :99" >/dev/null || Xvfb :99 -screen 0 1280x1024x24 -nolisten tcp &'
+ExecStart=/home/ubuntu/apps/ibgateway/ibgateway
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target
