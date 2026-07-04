@@ -26,7 +26,7 @@ from spx_spark.marketdata import (
     clean_float,
     parse_timestamp,
 )
-from spx_spark.storage import JsonlQuoteWriter, LatestStateStore
+from spx_spark.provider_adapter import ProviderSnapshot, persist_provider_snapshot
 
 
 COIN_ALIASES: dict[str, tuple[str, str]] = {
@@ -539,17 +539,16 @@ def run(argv: list[str] | None = None) -> int:
             latency_ms=(time.perf_counter() - started) * 1000.0,
             reason=post_error(exc),
         )
-        latest_result = LatestStateStore(storage_settings).update(
-            [],
-            now=checked_at,
-            provider_states=[state],
+        write_result = persist_provider_snapshot(
+            ProviderSnapshot.from_state(Provider.HYPERLIQUID, state, received_at=checked_at),
+            storage_settings,
         )
         if args.json:
             print(
                 json.dumps(
                     {
                         "provider_state": state.to_dict(),
-                        "latest_state": latest_result.path,
+                        "latest_state": write_result.latest_state,
                         "quotes_collected": 0,
                     },
                     indent=2,
@@ -560,20 +559,22 @@ def run(argv: list[str] | None = None) -> int:
             print(f"Hyperliquid unavailable: {state.reason}")
         return 1
 
-    raw_result = JsonlQuoteWriter(storage_settings).write_quotes([quote])
     context_file = write_context(storage_settings, context)
-    latest_result = LatestStateStore(storage_settings).update(
-        [quote],
-        now=context.received_at,
-        provider_states=[state],
+    snapshot = ProviderSnapshot(
+        provider=Provider.HYPERLIQUID,
+        received_at=context.received_at,
+        quotes=(quote,),
+        provider_states=(state,),
+        metadata={"context_path": str(context_file)},
     )
+    write_result = persist_provider_snapshot(snapshot, storage_settings)
     summary = {
         "provider_state": state.to_dict(),
         "quote": quote.to_dict(),
         "context": context.to_dict(),
-        "raw_paths": raw_result.path_counts,
+        "raw_paths": write_result.raw_paths,
         "context_path": str(context_file),
-        "latest_state": latest_result.path,
+        "latest_state": write_result.latest_state,
     }
     if args.json:
         print(json.dumps(summary, indent=2, sort_keys=True))
@@ -585,9 +586,9 @@ def run(argv: list[str] | None = None) -> int:
             f"oracle={context.oracle_px} funding={context.funding} "
             f"oi={context.open_interest} premium_bps={context.premium_bps}"
         )
-        print(f"raw: {next(iter(raw_result.path_counts))}")
+        print(f"raw: {next(iter(write_result.raw_paths))}")
         print(f"context: {context_file}")
-        print(f"latest: {latest_result.path}")
+        print(f"latest: {write_result.latest_state}")
     return 0 if state.status != ProviderStatus.UNAVAILABLE else 1
 
 

@@ -12,7 +12,7 @@ from urllib.parse import urlencode, urljoin
 from urllib.request import Request, urlopen
 
 from spx_spark.config import SchwabSettings
-from spx_spark.marketdata import quote_from_schwab_payload
+from spx_spark.schwab.adapter import quotes_from_quote_payload
 
 
 @dataclass(frozen=True)
@@ -80,15 +80,22 @@ def summarize_quote_payload(payload: Any, symbols: list[str]) -> dict[str, Any]:
         return {"symbols_requested": symbols, "payload_type": type(payload).__name__}
 
     summaries: dict[str, Any] = {}
+    normalized_quotes = {
+        quote.provider_symbol: quote for quote in quotes_from_quote_payload(payload, symbols)
+    }
     for symbol in symbols:
         quote = payload.get(symbol)
         if quote is None:
-            summaries[symbol] = {"present": False}
+            normalized = normalized_quotes.get(symbol)
+            summaries[symbol] = {
+                "present": False,
+                "normalized": normalized_summary(normalized) if normalized else None,
+            }
             continue
         if isinstance(quote, dict):
             quote_section = quote.get("quote") if isinstance(quote.get("quote"), dict) else {}
             reference = quote.get("reference") if isinstance(quote.get("reference"), dict) else {}
-            normalized = quote_from_schwab_payload(symbol, quote)
+            normalized = normalized_quotes.get(symbol)
             summaries[symbol] = {
                 "present": True,
                 "assetMainType": quote.get("assetMainType"),
@@ -101,18 +108,22 @@ def summarize_quote_payload(payload: Any, symbols: list[str]) -> dict[str, Any]:
                 "mark": quote_section.get("mark"),
                 "quoteTime": quote_section.get("quoteTime"),
                 "tradeTime": quote_section.get("tradeTime"),
-                "normalized": {
-                    "instrument_id": normalized.instrument.canonical_id,
-                    "provider": normalized.provider.value,
-                    "quality": normalized.quality.value,
-                    "mid": normalized.mid,
-                    "spread_bps": normalized.spread_bps,
-                    "effective_price": normalized.effective_price,
-                },
+                "normalized": normalized_summary(normalized) if normalized else None,
             }
         else:
             summaries[symbol] = {"present": True, "payload_type": type(quote).__name__}
     return {"symbols": summaries}
+
+
+def normalized_summary(quote: Any) -> dict[str, Any]:
+    return {
+        "instrument_id": quote.instrument.canonical_id,
+        "provider": quote.provider.value,
+        "quality": quote.quality.value,
+        "mid": quote.mid,
+        "spread_bps": quote.spread_bps,
+        "effective_price": quote.effective_price,
+    }
 
 
 def summarize_chain_payload(payload: Any) -> dict[str, Any]:

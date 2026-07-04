@@ -120,8 +120,9 @@ different Hyperliquid crypto/perp asset and must not be mixed with `index:SPX`.
 
 ## Market Data Model
 
-IBKR and Schwab payloads are normalized through `spx_spark.marketdata` before they reach
-sampling, feature, greeks, alert, or dashboard code. Fallback should compare normalized
+IBKR, Schwab, and Hyperliquid payloads enter through provider adapters and become
+`ProviderSnapshot` objects before they reach storage, fallback, sampling, features,
+greeks, alerts, or dashboard code. Downstream code should compare normalized
 `Quote.quality` and provider priority instead of branching on provider-specific fields.
 
 ## Notes

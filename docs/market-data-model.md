@@ -10,7 +10,7 @@ symbol formats, timestamps, or data-quality flags.
 The collector boundary is therefore:
 
 ```text
-provider raw payload -> provider adapter -> normalized market data model
+provider raw payload -> provider adapter -> ProviderSnapshot -> normalized storage/fallback
 ```
 
 Everything after that boundary must consume normalized objects only.
@@ -93,13 +93,13 @@ So:
 
 Current adapters:
 
-- `quote_from_ibkr_row`
-- `quote_from_schwab_payload`
-- `quote_from_schwab_option_contract`
-- mock quote generation in `spx_spark.mock_collector`
+- `spx_spark.ibkr.adapter`: IBKR verifier rows -> normalized quotes + provider state
+- `spx_spark.schwab.adapter`: Schwab quote/chain payloads -> normalized quotes + provider state
+- `spx_spark.hyperliquid.collector`: Hyperliquid S&P perp context -> normalized perp quote + provider state
+- `spx_spark.provider_adapter`: shared `ProviderSnapshot`, merge, provider-health, and persist helpers
 
 Future adapters should follow the same rule: raw payloads stay at the edge,
-normalized `Quote` objects move through the system.
+`ProviderSnapshot` objects move through the system.
 
 ## Fallback Contract
 
@@ -117,11 +117,24 @@ Those checks belong only inside adapters and provider health monitors.
 
 ## Snapshot Contract
 
-Verifier snapshots may include raw provider summaries for debugging, but should
-also include normalized quotes. That lets the verifier answer two questions:
+Provider snapshots may include raw provider summaries for debugging, but must
+include normalized quotes and provider state when those are available. That lets
+verifiers and collectors answer two questions:
 
 1. Did the provider return something?
 2. Can the system consume it without caring which provider returned it?
+
+`ProviderSnapshot` contains:
+
+- `provider`
+- `received_at`
+- `quotes`
+- `provider_states`
+- `metadata`
+
+The snapshot validates that quotes and states belong to the same provider. Writing
+to raw JSONL and latest-state should go through `persist_provider_snapshot()`
+instead of each collector hand-writing raw/latest paths.
 
 ## Missing Or Degraded Data
 

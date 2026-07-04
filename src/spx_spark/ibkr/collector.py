@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from spx_spark.config import IbkrSettings, RuntimePolicySettings, StorageSettings
+from spx_spark.ibkr.adapter import snapshot_from_rows
 from spx_spark.ibkr.verifier import (
     IbkrError,
     VerifyRow,
@@ -24,64 +25,10 @@ from spx_spark.marketdata import (
     Provider,
     ProviderState,
     ProviderStatus,
-    Quote,
-    quote_from_ibkr_row,
 )
+from spx_spark.provider_adapter import ProviderSnapshot, persist_provider_snapshot
 from spx_spark.runtime_mode import ibkr_allowed, load_override
-from spx_spark.storage import JsonlQuoteWriter, LatestStateStore
-
-
-def quotes_from_rows(
-    rows: list[VerifyRow],
-    *,
-    received_at: datetime,
-    stale_after_seconds: float,
-) -> list[Quote]:
-    return [
-        quote_from_ibkr_row(
-            row,
-            received_at=received_at,
-            stale_after_seconds=stale_after_seconds,
-        )
-        for row in rows
-    ]
-
-
-def provider_state_from_quotes(
-    quotes: list[Quote],
-    *,
-    checked_at: datetime,
-    connected: bool,
-    authenticated: bool | None,
-    latency_ms: float | None,
-    error_count: int = 0,
-    reason: str | None = None,
-) -> ProviderState:
-    usable_count = sum(1 for quote in quotes if quote.is_usable)
-    error_quote_count = sum(1 for quote in quotes if quote.error)
-    if not connected:
-        status = ProviderStatus.UNAVAILABLE
-        final_reason = reason or "IBKR not connected"
-    elif usable_count == 0:
-        status = ProviderStatus.DEGRADED
-        final_reason = reason or "connected but no usable quotes"
-    elif error_count or error_quote_count:
-        status = ProviderStatus.DEGRADED
-        final_reason = reason or f"{error_count + error_quote_count} IBKR quote/API errors"
-    else:
-        status = ProviderStatus.AVAILABLE
-        final_reason = reason
-
-    return ProviderState(
-        provider=Provider.IBKR,
-        status=status,
-        checked_at=checked_at,
-        reason=final_reason,
-        connected=connected,
-        authenticated=authenticated,
-        latency_ms=latency_ms,
-        priority=0,
-    )
+from spx_spark.storage import LatestStateStore
 
 
 def write_empty_provider_state(
@@ -90,7 +37,10 @@ def write_empty_provider_state(
     storage_settings: StorageSettings,
     now: datetime,
 ) -> None:
-    LatestStateStore(storage_settings).update([], now=now, provider_states=[state])
+    persist_provider_snapshot(
+        ProviderSnapshot.from_state(Provider.IBKR, state, received_at=now),
+        storage_settings,
+    )
 
 
 def print_collector_summary(
@@ -269,25 +219,19 @@ def run(argv: list[str] | None = None) -> int:
             rows = base_rows + snapshot_rows(option_subs, ibkr_settings.stale_after_seconds)
 
         received_at = datetime.now(tz=timezone.utc)
-        quotes = quotes_from_rows(
+        snapshot = snapshot_from_rows(
             rows,
             received_at=received_at,
             stale_after_seconds=ibkr_settings.stale_after_seconds,
-        )
-        state = provider_state_from_quotes(
-            quotes,
-            checked_at=received_at,
             connected=True,
             authenticated=True,
             latency_ms=(time.perf_counter() - start) * 1000.0,
             error_count=len(ibkr_errors),
         )
-        raw_result = JsonlQuoteWriter(storage_settings).write_quotes(quotes)
-        latest_result = LatestStateStore(storage_settings).update(
-            quotes,
-            now=received_at,
-            provider_states=[state],
-        )
+        state = snapshot.provider_state
+        if state is None:
+            raise RuntimeError("IBKR snapshot missing provider state")
+        write_result = persist_provider_snapshot(snapshot, storage_settings)
 
         if not args.no_table:
             print_rows(rows)
@@ -298,21 +242,21 @@ def run(argv: list[str] | None = None) -> int:
 
         summary = {
             "provider_state": state.to_dict(),
-            "quotes_collected": len(quotes),
-            "raw_paths": raw_result.path_counts,
-            "latest_state": latest_result.path,
-            "best_quote_count": latest_result.best_quote_count,
-            "provider_quote_count": latest_result.provider_quote_count,
+            "quotes_collected": snapshot.quote_count,
+            "raw_paths": write_result.raw_paths,
+            "latest_state": write_result.latest_state,
+            "best_quote_count": write_result.best_quote_count,
+            "provider_quote_count": write_result.provider_quote_count,
         }
         if args.json:
             print(json.dumps(summary, indent=2, sort_keys=True))
         else:
             print_collector_summary(
-                raw_paths=raw_result.path_counts,
-                latest_path=latest_result.path,
+                raw_paths=write_result.raw_paths,
+                latest_path=write_result.latest_state,
                 provider_state=state,
-                quote_count=len(quotes),
-                best_quote_count=latest_result.best_quote_count,
+                quote_count=snapshot.quote_count,
+                best_quote_count=write_result.best_quote_count,
             )
         return 0 if state.status != ProviderStatus.UNAVAILABLE else 1
     finally:
