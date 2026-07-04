@@ -125,6 +125,17 @@ IBKR, Schwab, and Hyperliquid payloads enter through provider adapters and becom
 greeks, alerts, or dashboard code. Downstream code should compare normalized
 `Quote.quality` and provider priority instead of branching on provider-specific fields.
 
+## Secret Scan
+
+```bash
+scripts/scan-secrets.sh
+scripts/scan-secrets.sh --all
+```
+
+Default mode scans only git-tracked files. `--all` scans the working tree but excludes
+local runtime noise such as `.venv/`, `.firecrawl/`, cache folders, logs, runtime state,
+and raw data.
+
 ## Notes
 
 - Architecture plan: `docs/architecture-plan.md`
