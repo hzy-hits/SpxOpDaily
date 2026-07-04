@@ -339,7 +339,7 @@ Simple 4-group sampler:
 ```text
 window: ATM +/- 200 points
 groups: 4
-group width: about 100 points each
+strategy: interleaved by strike step
 cadence: one group every 4 seconds
 full scan: about 16 seconds
 ```
@@ -353,7 +353,16 @@ contracts per group, 0DTE only: about 40-42
 contracts per group, 0DTE + 1DTE: about 80-84
 ```
 
-This is simpler and more responsive than a 20-slice one-minute sampler, but each request batch is larger. It is a good compromise if the broker handles batch quotes well.
+Example interleaved groups:
+
+```text
+group 0: 7300, 7320, 7340, ...
+group 1: 7305, 7325, 7345, ...
+group 2: 7310, 7330, 7350, ...
+group 3: 7315, 7335, 7355, ...
+```
+
+This is simpler and more responsive than a 20-slice one-minute sampler, but each request batch is larger. It also avoids having one side of the market stale while the sampler is scanning the other side.
 
 Recommended starting point:
 

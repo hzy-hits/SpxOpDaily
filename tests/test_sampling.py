@@ -11,6 +11,7 @@ def make_settings() -> SamplingSettings:
         group_interval_seconds=4,
         degraded_group_count=20,
         degraded_group_interval_seconds=3,
+        group_strategy="interleaved",
         hot_human_cadence_seconds=8,
         hot_execution_cadence_seconds=2,
         include_next_expiry=True,
@@ -33,7 +34,10 @@ def test_split_groups_keeps_all_strikes():
     assert len(groups) == 4
     assert sum(len(group) for group in groups) == 81
     assert groups[0][0] == 7300
-    assert groups[-1][-1] == 7700
+    assert groups[0][1] == 7320
+    assert groups[0][-1] == 7700
+    assert groups[1][0] == 7305
+    assert groups[-1][-1] == 7695
 
 
 def test_sampling_plan_counts_0dte_and_1dte():

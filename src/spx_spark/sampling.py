@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from spx_spark.config import SamplingSettings, default_spxw_expiry
 
 
+VALID_GROUP_STRATEGIES = {"contiguous", "interleaved"}
 VALID_MODES = {"human_alert", "execution_monitor", "degraded"}
 
 
@@ -39,6 +40,7 @@ class SamplingPlan:
     window_points: int
     hot_window_points: int
     hot_cadence_seconds: int
+    group_strategy: str
     hot_lane: list[OptionContractSpec]
     rolling_groups: list[SamplingGroup]
 
@@ -65,12 +67,17 @@ def build_strikes(center: int, window_points: int, step: int) -> list[int]:
     return [strike for strike in range(start, stop + step, step) if strike > 0]
 
 
-def split_groups(strikes: list[int], group_count: int) -> list[list[int]]:
+def split_groups(strikes: list[int], group_count: int, strategy: str = "interleaved") -> list[list[int]]:
     if group_count <= 0:
         raise ValueError("group_count must be positive")
+    if strategy not in VALID_GROUP_STRATEGIES:
+        raise ValueError(f"Unsupported group strategy: {strategy!r}")
     groups: list[list[int]] = [[] for _ in range(group_count)]
     for index, strike in enumerate(strikes):
-        group_index = min((index * group_count) // len(strikes), group_count - 1)
+        if strategy == "interleaved":
+            group_index = index % group_count
+        else:
+            group_index = min((index * group_count) // len(strikes), group_count - 1)
         groups[group_index].append(strike)
     return [group for group in groups if group]
 
@@ -147,7 +154,9 @@ def build_sampling_plan(
 
     hot_lane = build_contracts(expiries, hot_strikes, lane="hot")
     groups: list[SamplingGroup] = []
-    for index, group_strikes in enumerate(split_groups(rolling_strikes, group_count)):
+    for index, group_strikes in enumerate(
+        split_groups(rolling_strikes, group_count, settings.group_strategy)
+    ):
         groups.append(
             SamplingGroup(
                 index=index,
@@ -172,6 +181,7 @@ def build_sampling_plan(
         window_points=settings.window_points,
         hot_window_points=settings.hot_window_points,
         hot_cadence_seconds=hot_cadence,
+        group_strategy=settings.group_strategy,
         hot_lane=hot_lane,
         rolling_groups=groups,
     )
@@ -185,6 +195,7 @@ def plan_summary(plan: SamplingPlan) -> dict[str, object]:
         "expiries": plan.expiries,
         "hot_contract_count": plan.hot_contract_count,
         "rolling_contract_count": plan.rolling_contract_count,
+        "group_strategy": plan.group_strategy,
         "group_count": len(plan.rolling_groups),
         "full_scan_seconds": plan.full_scan_seconds,
         "groups": [
@@ -194,6 +205,7 @@ def plan_summary(plan: SamplingPlan) -> dict[str, object]:
                 "min_strike": min(group.strikes),
                 "max_strike": max(group.strikes),
                 "strike_count": len(group.strikes),
+                "sample_strikes": group.strikes[:8],
                 "contract_count": len(group.contracts),
             }
             for group in plan.rolling_groups
@@ -213,7 +225,8 @@ def print_summary(plan: SamplingPlan) -> None:
     )
     print(
         "Rolling scan: "
-        f"{len(plan.rolling_groups)} groups, {plan.rolling_contract_count} contracts, "
+        f"{len(plan.rolling_groups)} {plan.group_strategy} groups, "
+        f"{plan.rolling_contract_count} contracts, "
         f"full scan {plan.full_scan_seconds}s"
     )
     print("\nGroups:")
@@ -221,8 +234,13 @@ def print_summary(plan: SamplingPlan) -> None:
         print(
             f"- group {group.index}: {min(group.strikes)}-{max(group.strikes)} "
             f"strikes={len(group.strikes)} contracts={len(group.contracts)} "
-            f"cadence={group.cadence_seconds}s"
+            f"cadence={group.cadence_seconds}s sample={format_strike_sample(group.strikes)}"
         )
+
+
+def format_strike_sample(strikes: list[int]) -> str:
+    sample = ",".join(str(strike) for strike in strikes[:8])
+    return f"{sample},..." if len(strikes) > 8 else sample
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:

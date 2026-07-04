@@ -155,21 +155,18 @@ contracts per group, 0DTE: about 40-42
 contracts per group, 0DTE + 1DTE: about 80-84
 ```
 
-Group construction:
+Default group construction is interleaved, not contiguous:
 
-- group 0: lowest strikes
-- group 1: lower-middle strikes
-- group 2: upper-middle strikes
-- group 3: highest strikes
+```text
+group 0: 7300, 7320, 7340, ...
+group 1: 7305, 7325, 7345, ...
+group 2: 7310, 7330, 7350, ...
+group 3: 7315, 7335, 7355, ...
+```
 
-Alternative construction for faster ATM coverage:
+This means every 4-second batch sees a sparse view across the whole +/-200 point window. The full 16-second scan fills in every 5-point strike.
 
-- group 0: ATM-centered strikes
-- group 1: lower near strikes
-- group 2: upper near strikes
-- group 3: outer strikes
-
-Start with simple contiguous groups. Move to ATM-prioritized groups only if alerts are stale.
+Use contiguous groups only for diagnostic runs or if a provider explicitly favors compact strike ranges.
 
 ## Hot Lane
 

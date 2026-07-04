@@ -313,6 +313,7 @@ class SamplingSettings:
     group_interval_seconds: int
     degraded_group_count: int
     degraded_group_interval_seconds: int
+    group_strategy: str
     hot_human_cadence_seconds: int
     hot_execution_cadence_seconds: int
     include_next_expiry: bool
@@ -329,6 +330,7 @@ class SamplingSettings:
             group_interval_seconds=_env_int("SAMPLING_GROUP_INTERVAL_SECONDS", 4),
             degraded_group_count=_env_int("SAMPLING_DEGRADED_GROUP_COUNT", 20),
             degraded_group_interval_seconds=_env_int("SAMPLING_DEGRADED_GROUP_INTERVAL_SECONDS", 3),
+            group_strategy=_env("SAMPLING_GROUP_STRATEGY", "interleaved").lower(),
             hot_human_cadence_seconds=_env_int("SAMPLING_HOT_HUMAN_CADENCE_SECONDS", 8),
             hot_execution_cadence_seconds=_env_int("SAMPLING_HOT_EXECUTION_CADENCE_SECONDS", 2),
             include_next_expiry=_env_bool("SAMPLING_INCLUDE_NEXT_EXPIRY", True),
