@@ -105,17 +105,18 @@ local no-broker test path for sampler, storage, latest-state, and fallback logic
 ```bash
 scripts/run-hyperliquid-collector.sh --print-config
 scripts/run-hyperliquid-collector.sh --list-coins
-scripts/run-hyperliquid-collector.sh --coin SPX --json
-scripts/show-latest-state.sh --all-providers --instrument crypto_perp:SPX
+scripts/run-hyperliquid-collector.sh --coin 'S&P500-USDC' --json
+scripts/run-hyperliquid-collector.sh --dex xyz --coin xyz:SP500 --json
+scripts/show-latest-state.sh --all-providers --instrument crypto_perp:xyz:SP500
 ```
 
 The Hyperliquid collector uses public `POST /info` endpoints and does not need an API key.
 It writes a normalized perp quote plus a Hyperliquid context row with funding, OI,
 oracle premium, book imbalance, and recent-trade burst fields.
 
-Important: live verification showed Hyperliquid `SPX` trading around `0.43`, so that symbol
-is not official Cboe SPX / S&P 500 index data. Treat it as a Hyperliquid crypto/perp asset
-unless a different verified S&P index symbol is found.
+Live verification found the S&P 500-like perpetual on HIP-3 dex `xyz` as `xyz:SP500`
+around the 7,500 index level. The default-dex `SPX` symbol trades around `0.43`, so it is a
+different Hyperliquid crypto/perp asset and must not be mixed with `index:SPX`.
 
 ## Market Data Model
 

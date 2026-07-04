@@ -11,6 +11,7 @@ from spx_spark.hyperliquid.collector import (
     parse_levels,
     quote_from_context,
     recent_trade_stats,
+    resolve_market,
 )
 from spx_spark.marketdata import InstrumentType, MarketDataQuality, Provider
 
@@ -87,6 +88,8 @@ def test_build_asset_context_and_quote():
 
     context = build_asset_context(
         coin="SPX",
+        dex="",
+        requested_coin="SPX",
         all_mids=all_mids,
         meta_and_contexts=meta_and_contexts,
         book=book,
@@ -116,3 +119,17 @@ def test_infer_symbol_warning_for_low_priced_hyperliquid_spx():
 
     assert warning is not None
     assert "not official Cboe SPX" in warning
+
+
+def test_resolve_market_maps_sp500_usdc_alias_to_xyz_perp():
+    dex, coin = resolve_market("S&P500-USDC", "")
+
+    assert dex == "xyz"
+    assert coin == "xyz:SP500"
+
+
+def test_resolve_market_infers_dex_from_prefixed_coin():
+    dex, coin = resolve_market("mkts:US500", "")
+
+    assert dex == "mkts"
+    assert coin == "mkts:US500"

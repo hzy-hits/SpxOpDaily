@@ -29,6 +29,16 @@ from spx_spark.marketdata import (
 from spx_spark.storage import JsonlQuoteWriter, LatestStateStore
 
 
+COIN_ALIASES: dict[str, tuple[str, str]] = {
+    "S&P500-USDC": ("xyz", "xyz:SP500"),
+    "S&P500/USDC": ("xyz", "xyz:SP500"),
+    "SP500-USDC": ("xyz", "xyz:SP500"),
+    "SP500/USDC": ("xyz", "xyz:SP500"),
+    "SP500": ("xyz", "xyz:SP500"),
+    "S&P500": ("xyz", "xyz:SP500"),
+}
+
+
 @dataclass(frozen=True)
 class HyperliquidTradeStats:
     last_price: float | None
@@ -49,6 +59,8 @@ class HyperliquidTradeStats:
 @dataclass(frozen=True)
 class HyperliquidAssetContext:
     coin: str
+    dex: str
+    requested_coin: str
     received_at: datetime
     mid_px: float | None
     mark_px: float | None
@@ -70,6 +82,8 @@ class HyperliquidAssetContext:
     def to_dict(self, *, include_raw: bool = False) -> dict[str, Any]:
         payload = {
             "coin": self.coin,
+            "dex": self.dex,
+            "requested_coin": self.requested_coin,
             "received_at": self.received_at.isoformat(),
             "mid_px": self.mid_px,
             "mark_px": self.mark_px,
@@ -108,6 +122,26 @@ class HyperliquidClient:
         with urlopen(request, timeout=self.settings.request_timeout_seconds) as response:
             raw = response.read().decode("utf-8")
             return json.loads(raw) if raw else None
+
+
+def normalize_alias_key(value: str) -> str:
+    return value.strip().upper().replace(" ", "")
+
+
+def resolve_market(requested_coin: str, requested_dex: str) -> tuple[str, str]:
+    normalized = normalize_alias_key(requested_coin)
+    if normalized in COIN_ALIASES:
+        return COIN_ALIASES[normalized]
+    if ":" in requested_coin and not requested_dex:
+        return requested_coin.split(":", 1)[0], requested_coin
+    return requested_dex, requested_coin
+
+
+def with_dex(payload: Mapping[str, Any], dex: str) -> dict[str, Any]:
+    result = dict(payload)
+    if dex:
+        result["dex"] = dex
+    return result
 
 
 def first_present(*values: float | None) -> float | None:
@@ -231,6 +265,8 @@ def recent_trade_stats(
 def build_asset_context(
     *,
     coin: str,
+    dex: str,
+    requested_coin: str,
     all_mids: Any,
     meta_and_contexts: Any,
     book: Any,
@@ -257,6 +293,8 @@ def build_asset_context(
     symbol_warning = infer_symbol_warning(coin, first_present(mark_px, mid_px, oracle_px))
     return HyperliquidAssetContext(
         coin=coin,
+        dex=dex,
+        requested_coin=requested_coin,
         received_at=received_at,
         mid_px=mid_px,
         mark_px=mark_px,
@@ -291,7 +329,7 @@ def quote_from_context(context: HyperliquidAssetContext) -> Quote:
         symbol=context.coin,
         instrument_type=InstrumentType.CRYPTO_PERP,
         provider_symbol=f"hyperliquid:{context.coin}",
-        exchange="Hyperliquid",
+        exchange=f"Hyperliquid:{context.dex}" if context.dex else "Hyperliquid",
         currency="USD",
     )
     price = first_present(context.mark_px, context.mid_px, context.trade_stats.last_price)
@@ -360,6 +398,7 @@ def context_path(storage_settings: StorageSettings, context: HyperliquidAssetCon
         Path(storage_settings.data_root)
         / "context"
         / "provider=hyperliquid"
+        / f"dex={context.dex or 'default'}"
         / f"coin={context.coin}"
         / f"date={timestamp.strftime('%Y-%m-%d')}"
         / f"hour={timestamp.strftime('%H')}"
@@ -384,15 +423,23 @@ def collect_once(
     settings: HyperliquidSettings,
     *,
     coin: str,
+    dex: str,
+    requested_coin: str,
 ) -> tuple[HyperliquidAssetContext, Quote, ProviderState, float]:
     start = time.perf_counter()
-    all_mids = client.info({"type": "allMids"})
-    meta_and_contexts = client.info({"type": "metaAndAssetCtxs"})
-    book = client.info({"type": "l2Book", "coin": coin}) if settings.include_book else None
-    trades = client.info({"type": "recentTrades", "coin": coin}) if settings.include_trades else None
+    all_mids = client.info(with_dex({"type": "allMids"}, dex))
+    meta_and_contexts = client.info(with_dex({"type": "metaAndAssetCtxs"}, dex))
+    book = client.info(with_dex({"type": "l2Book", "coin": coin}, dex)) if settings.include_book else None
+    trades = (
+        client.info(with_dex({"type": "recentTrades", "coin": coin}, dex))
+        if settings.include_trades
+        else None
+    )
     received_at = datetime.now(tz=timezone.utc)
     context = build_asset_context(
         coin=coin,
+        dex=dex,
+        requested_coin=requested_coin,
         all_mids=all_mids,
         meta_and_contexts=meta_and_contexts,
         book=book,
@@ -412,8 +459,8 @@ def collect_once(
     return context, quote, state, latency_ms
 
 
-def list_coins(client: HyperliquidClient) -> list[str]:
-    all_mids = client.info({"type": "allMids"})
+def list_coins(client: HyperliquidClient, *, dex: str) -> list[str]:
+    all_mids = client.info(with_dex({"type": "allMids"}, dex))
     if isinstance(all_mids, Mapping):
         return sorted(str(coin) for coin in all_mids)
     return []
@@ -422,6 +469,7 @@ def list_coins(client: HyperliquidClient) -> list[str]:
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Collect one Hyperliquid public SPX perp snapshot.")
     parser.add_argument("--coin", help="Hyperliquid perp coin, default from HYPERLIQUID_COIN.")
+    parser.add_argument("--dex", help="Hyperliquid perp dex, default from HYPERLIQUID_DEX.")
     parser.add_argument("--print-config", action="store_true")
     parser.add_argument("--list-coins", action="store_true", help="Print available allMids coin names.")
     parser.add_argument("--skip-book", action="store_true")
@@ -442,7 +490,9 @@ def run(argv: list[str] | None = None) -> int:
             **(asdict(settings) | {"include_trades": False})
         )
     storage_settings = StorageSettings.from_env()
-    coin = (args.coin or settings.coin).upper()
+    requested_coin = args.coin or settings.coin
+    requested_dex = args.dex if args.dex is not None else settings.dex
+    dex, coin = resolve_market(requested_coin, requested_dex)
     client = HyperliquidClient(settings)
 
     if args.print_config:
@@ -452,6 +502,8 @@ def run(argv: list[str] | None = None) -> int:
                     "hyperliquid": asdict(settings),
                     "storage": asdict(storage_settings),
                     "coin": coin,
+                    "dex": dex,
+                    "requested_coin": requested_coin,
                 },
                 indent=2,
                 sort_keys=True,
@@ -461,7 +513,7 @@ def run(argv: list[str] | None = None) -> int:
 
     if args.list_coins:
         try:
-            coins = list_coins(client)
+            coins = list_coins(client, dex=dex)
         except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as exc:
             print(f"Failed to list Hyperliquid coins: {post_error(exc)}", file=sys.stderr)
             return 1
@@ -473,7 +525,13 @@ def run(argv: list[str] | None = None) -> int:
 
     started = time.perf_counter()
     try:
-        context, quote, state, _ = collect_once(client, settings, coin=coin)
+        context, quote, state, _ = collect_once(
+            client,
+            settings,
+            coin=coin,
+            dex=dex,
+            requested_coin=requested_coin,
+        )
     except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as exc:
         checked_at = datetime.now(tz=timezone.utc)
         state = unavailable_state(

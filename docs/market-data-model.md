@@ -173,7 +173,8 @@ Useful commands:
 scripts/run-mock-collector.sh --underlier 7500 --expiry 20260706 --next-expiry 20260707
 scripts/run-ibkr-collector.sh --dry-run
 scripts/run-ibkr-collector.sh --force --skip-options
-scripts/run-hyperliquid-collector.sh --coin SPX --json
+scripts/run-hyperliquid-collector.sh --coin 'S&P500-USDC' --json
+scripts/run-hyperliquid-collector.sh --dex xyz --coin xyz:SP500 --json
 scripts/show-latest-state.sh --instrument index:SPX
 scripts/show-latest-state.sh --all-providers
 ```
@@ -190,8 +191,11 @@ Hyperliquid collector notes:
 - uses public `POST /info` endpoints, no API key
 - writes normalized quote rows under `data/raw/provider=hyperliquid/...`
 - writes chain-specific context under
-  `data/context/provider=hyperliquid/coin=<coin>/date=YYYY-MM-DD/hour=HH/asset-context.jsonl`
+  `data/context/provider=hyperliquid/dex=<dex>/coin=<coin>/date=YYYY-MM-DD/hour=HH/asset-context.jsonl`
 - context includes mark, oracle, funding, open interest, day notional volume, book imbalance,
   recent trade stats, large trade count, and mark-oracle premium
-- live smoke test on 2026-07-04 showed Hyperliquid `SPX` near `0.43`, so it is not official
-  Cboe SPX / S&P 500 index data. Keep `crypto_perp:SPX` separate from `index:SPX`.
+- live smoke test on 2026-07-04 found HIP-3 dex `xyz` coin `xyz:SP500` around the 7,500
+  index level. The CLI aliases `S&P500-USDC`, `S&P500/USDC`, `SP500-USDC`, and `SP500`
+  resolve to `dex=xyz`, `coin=xyz:SP500`.
+- default-dex `SPX` was near `0.43`, so it is a different Hyperliquid crypto/perp asset.
+  Keep it separate from `index:SPX` and from `crypto_perp:xyz:SP500`.

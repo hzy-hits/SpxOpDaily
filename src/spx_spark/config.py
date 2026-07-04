@@ -267,6 +267,7 @@ class SchwabSettings:
 @dataclass(frozen=True)
 class HyperliquidSettings:
     api_base_url: str
+    dex: str
     coin: str
     request_timeout_seconds: float
     include_book: bool
@@ -279,7 +280,8 @@ class HyperliquidSettings:
         load_dotenv()
         return cls(
             api_base_url=_env("HYPERLIQUID_API_BASE_URL", "https://api.hyperliquid.xyz"),
-            coin=_env("HYPERLIQUID_COIN", "SPX").upper(),
+            dex=_env("HYPERLIQUID_DEX", "xyz"),
+            coin=_env("HYPERLIQUID_COIN", "xyz:SP500"),
             request_timeout_seconds=_env_float("HYPERLIQUID_REQUEST_TIMEOUT_SECONDS", 10.0),
             include_book=_env_bool("HYPERLIQUID_INCLUDE_BOOK", True),
             include_trades=_env_bool("HYPERLIQUID_INCLUDE_TRADES", True),
