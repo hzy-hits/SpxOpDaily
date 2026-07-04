@@ -3,6 +3,7 @@ from zoneinfo import ZoneInfo
 
 from spx_spark.config import (
     RuntimePolicySettings,
+    StorageSettings,
     default_spxw_expiry,
     is_time_in_window,
     next_equity_futures_month,
@@ -86,3 +87,14 @@ def test_runtime_policy_blocks_weekend_collection_in_auto_mode():
     monday = datetime(2026, 7, 6, 14, 0, tzinfo=timezone)
     assert not policy.market_data_collection_allowed(saturday)
     assert policy.market_data_collection_allowed(monday)
+
+
+def test_storage_settings_inherits_maintenance_root(monkeypatch):
+    monkeypatch.setenv("MAINTENANCE_DATA_ROOT", "/tmp/spx-data")
+    monkeypatch.delenv("MARKET_DATA_DATA_ROOT", raising=False)
+    monkeypatch.delenv("MARKET_DATA_LATEST_STATE_PATH", raising=False)
+
+    settings = StorageSettings.from_env()
+
+    assert settings.data_root == "/tmp/spx-data"
+    assert settings.latest_state_path == "/tmp/spx-data/latest/state.json"

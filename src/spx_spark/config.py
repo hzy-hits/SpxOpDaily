@@ -305,6 +305,30 @@ class MaintenanceSettings:
 
 
 @dataclass(frozen=True)
+class StorageSettings:
+    data_root: str
+    latest_state_path: str
+    raw_file_name: str
+    include_raw_payload: bool
+    latest_stale_after_seconds: float
+
+    @classmethod
+    def from_env(cls) -> "StorageSettings":
+        load_dotenv()
+        data_root = _env("MARKET_DATA_DATA_ROOT", _env("MAINTENANCE_DATA_ROOT", "data"))
+        return cls(
+            data_root=data_root,
+            latest_state_path=_env(
+                "MARKET_DATA_LATEST_STATE_PATH",
+                f"{data_root.rstrip('/')}/latest/state.json",
+            ),
+            raw_file_name=_env("MARKET_DATA_RAW_FILE_NAME", "quotes.jsonl"),
+            include_raw_payload=_env_bool("MARKET_DATA_INCLUDE_RAW_PAYLOAD", False),
+            latest_stale_after_seconds=_env_float("MARKET_DATA_LATEST_STALE_AFTER_SECONDS", 15.0),
+        )
+
+
+@dataclass(frozen=True)
 class SamplingSettings:
     strike_step: int
     window_points: int

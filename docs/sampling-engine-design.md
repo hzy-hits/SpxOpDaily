@@ -423,10 +423,18 @@ Clock/timezone mismatch:
 
 1. Schwab verifier
 2. Maintenance dry-run
-3. Raw quote schema and JSONL/Parquet writer
+3. Raw quote schema and JSONL writer
 4. 4-group sampler using mock/provider stubs
 5. Runtime mode integration
 6. Sensitive-window scheduler
 7. Execution-monitor TTL state
 8. Disk watermarks and degradation policy
 9. Alert preservation manifests
+
+Current status:
+
+- raw normalized quote schema is implemented in `spx_spark.marketdata`
+- JSONL raw writer is implemented in `spx_spark.storage`
+- latest-state fallback store is implemented in `spx_spark.storage`
+- mock collector is implemented in `spx_spark.mock_collector`
+- Parquet writer and compaction are deferred until real quote volume is measured

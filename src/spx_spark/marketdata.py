@@ -14,6 +14,7 @@ class Provider(str, Enum):
     HYPERLIQUID = "hyperliquid"
     POLYMARKET = "polymarket"
     INTERNAL = "internal"
+    MOCK = "mock"
     UNKNOWN = "unknown"
 
 
@@ -70,6 +71,7 @@ DEFAULT_PROVIDER_PRIORITY: tuple[Provider, ...] = (
     Provider.HYPERLIQUID,
     Provider.POLYMARKET,
     Provider.INTERNAL,
+    Provider.MOCK,
     Provider.UNKNOWN,
 )
 
@@ -362,6 +364,95 @@ class NormalizedSnapshot:
             "quotes": [quote.to_dict() for quote in self.quotes],
             "provider_states": [state.to_dict() for state in self.provider_states],
         }
+
+
+def instrument_from_dict(payload: Mapping[str, Any]) -> InstrumentId:
+    try:
+        instrument_type = InstrumentType(str(payload.get("instrument_type", "unknown")))
+    except ValueError:
+        instrument_type = InstrumentType.UNKNOWN
+
+    right_value = payload.get("right")
+    right = normalize_option_right(right_value) if right_value else None
+    return InstrumentId(
+        symbol=str(payload.get("symbol") or ""),
+        instrument_type=instrument_type,
+        provider_symbol=payload.get("provider_symbol"),
+        exchange=payload.get("exchange"),
+        currency=str(payload.get("currency") or "USD"),
+        expiry=payload.get("expiry"),
+        strike=clean_float(payload.get("strike")),
+        right=right,
+        multiplier=payload.get("multiplier"),
+        underlier=payload.get("underlier"),
+        trading_class=payload.get("trading_class"),
+    )
+
+
+def greeks_from_dict(payload: Mapping[str, Any] | None) -> OptionGreeks | None:
+    if not payload:
+        return None
+    return OptionGreeks(
+        implied_vol=normalize_implied_vol(payload.get("implied_vol")),
+        delta=clean_float(payload.get("delta")),
+        gamma=clean_float(payload.get("gamma")),
+        theta=clean_float(payload.get("theta")),
+        vega=clean_float(payload.get("vega")),
+        rho=clean_float(payload.get("rho")),
+        underlier_price=clean_float(payload.get("underlier_price")),
+        model=payload.get("model"),
+    )
+
+
+def quote_from_dict(payload: Mapping[str, Any]) -> Quote:
+    instrument_payload = payload.get("instrument")
+    if isinstance(instrument_payload, Mapping):
+        instrument = instrument_from_dict(instrument_payload)
+    else:
+        instrument = InstrumentId(
+            symbol=str(payload.get("instrument_id") or payload.get("symbol") or "UNKNOWN"),
+            instrument_type=InstrumentType.UNKNOWN,
+        )
+
+    try:
+        provider = Provider(str(payload.get("provider", Provider.UNKNOWN.value)))
+    except ValueError:
+        provider = Provider.UNKNOWN
+    try:
+        quality = MarketDataQuality(str(payload.get("quality", MarketDataQuality.UNKNOWN.value)))
+    except ValueError:
+        quality = MarketDataQuality.UNKNOWN
+
+    return Quote(
+        instrument=instrument,
+        provider=provider,
+        provider_symbol=payload.get("provider_symbol"),
+        received_at=parse_timestamp(payload.get("received_at")) or datetime.now(tz=timezone.utc),
+        quality=quality,
+        bid=clean_float(payload.get("bid")),
+        ask=clean_float(payload.get("ask")),
+        last=clean_float(payload.get("last")),
+        mark=clean_float(payload.get("mark")),
+        close=clean_float(payload.get("close")),
+        bid_size=clean_float(payload.get("bid_size")),
+        ask_size=clean_float(payload.get("ask_size")),
+        last_size=clean_float(payload.get("last_size")),
+        volume=clean_float(payload.get("volume")),
+        open_interest=clean_float(payload.get("open_interest")),
+        quote_time=parse_timestamp(payload.get("quote_time")),
+        trade_time=parse_timestamp(payload.get("trade_time")),
+        source_latency_ms=clean_float(payload.get("source_latency_ms")),
+        market_data_type=payload.get("market_data_type"),
+        greeks=greeks_from_dict(
+            payload.get("greeks") if isinstance(payload.get("greeks"), Mapping) else None
+        ),
+        sampling_mode=payload.get("sampling_mode"),
+        sampling_group=int(payload["sampling_group"])
+        if payload.get("sampling_group") is not None
+        else None,
+        error=payload.get("error"),
+        raw=payload.get("raw") if isinstance(payload.get("raw"), Mapping) else None,
+    )
 
 
 def choose_best_quote(

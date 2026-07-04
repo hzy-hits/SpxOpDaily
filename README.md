@@ -71,6 +71,18 @@ scripts/run-sampling-plan.sh --underlier 7500 --mode degraded --summary-json
 
 The planner produces the SPXW hot lane and rolling quote groups for collectors. It does not request market data.
 
+## Mock Data Loop
+
+```bash
+scripts/run-mock-collector.sh --underlier 7500 --expiry 20260706 --next-expiry 20260707
+scripts/show-latest-state.sh --instrument index:SPX
+scripts/show-latest-state.sh --all-providers
+```
+
+The mock collector generates normalized `Quote` rows, writes raw JSONL files under
+`MARKET_DATA_DATA_ROOT/raw/`, and updates `MARKET_DATA_LATEST_STATE_PATH`. It is the
+local no-broker test path for sampler, storage, latest-state, and fallback logic.
+
 ## Market Data Model
 
 IBKR and Schwab payloads are normalized through `spx_spark.marketdata` before they reach

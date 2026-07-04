@@ -69,11 +69,23 @@ Do not store:
 Keep an in-memory and on-disk latest state table:
 
 - latest quote by instrument
+- provider-level latest quote by instrument
+- selected best quote by instrument after quality-aware fallback
 - latest feature by feature name
 - latest provider quality
 - latest alert state and cooldown
 
 This supports dashboard rendering without scanning raw tick files.
+
+Current MVP storage:
+
+```text
+data/raw/provider=<provider>/date=YYYY-MM-DD/hour=HH/quotes.jsonl
+data/latest/state.json
+```
+
+Use JSONL first. Move raw quotes to Parquet/DuckDB compaction after the real
+provider volume and schema stability are measured.
 
 ### Feature Bars
 

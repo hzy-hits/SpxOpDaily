@@ -96,6 +96,7 @@ Current adapters:
 - `quote_from_ibkr_row`
 - `quote_from_schwab_payload`
 - `quote_from_schwab_option_contract`
+- mock quote generation in `spx_spark.mock_collector`
 
 Future adapters should follow the same rule: raw payloads stay at the edge,
 normalized `Quote` objects move through the system.
@@ -132,3 +133,44 @@ Do not substitute silently:
 - If Hyperliquid SPX is used, treat it as sentiment/context, not official SPX.
 
 This keeps alerts explainable and prevents false precision.
+
+## Raw And Latest Storage
+
+Raw normalized quotes are written as JSONL first. Parquet/DuckDB compaction can
+come later after real daily footprint is measured.
+
+Current raw path:
+
+```text
+data/raw/provider=<provider>/date=YYYY-MM-DD/hour=HH/quotes.jsonl
+```
+
+Latest-state path defaults to:
+
+```text
+data/latest/state.json
+```
+
+On the Oracle host, `.env` points these paths at:
+
+```text
+/srv/data/spx-spark/data/raw/...
+/srv/data/spx-spark/data/latest/state.json
+```
+
+The latest-state file keeps provider-level latest quotes and selected best
+quotes. It is not just a single best quote per instrument, because fallback
+needs the current Schwab quote to remain available when IBKR becomes stale or
+unavailable.
+
+When latest state is read, live/frozen quotes older than
+`MARKET_DATA_LATEST_STALE_AFTER_SECONDS` are marked stale and best quotes are
+recomputed.
+
+Useful commands:
+
+```bash
+scripts/run-mock-collector.sh --underlier 7500 --expiry 20260706 --next-expiry 20260707
+scripts/show-latest-state.sh --instrument index:SPX
+scripts/show-latest-state.sh --all-providers
+```
