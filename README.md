@@ -62,6 +62,15 @@ scripts/run-maintenance-dry-run.sh --json --no-write
 
 The dry run scans disk usage and cleanup candidates only. It does not delete files.
 
+## Sampling Plan
+
+```bash
+scripts/run-sampling-plan.sh --underlier 7500 --expiry 20260706 --next-expiry 20260707
+scripts/run-sampling-plan.sh --underlier 7500 --mode degraded --summary-json
+```
+
+The planner produces the SPXW hot lane and rolling quote groups for collectors. It does not request market data.
+
 ## Notes
 
 - Architecture plan: `docs/architecture-plan.md`

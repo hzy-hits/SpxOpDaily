@@ -11,6 +11,7 @@ dependencies = [
 spx-spark-ibkr-verifier = "spx_spark.ibkr.verifier:main"
 spx-spark-maintenance = "spx_spark.maintenance:main"
 spx-spark-runtime-mode = "spx_spark.runtime_mode:main"
+spx-spark-sampling-plan = "spx_spark.sampling:main"
 spx-spark-schwab-verifier = "spx_spark.schwab.verifier:main"
 
 [dependency-groups]

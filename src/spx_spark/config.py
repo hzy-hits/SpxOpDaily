@@ -302,3 +302,35 @@ class MaintenanceSettings:
             prune_pct=_env_float("MAINTENANCE_PRUNE_PCT", 90.0),
             critical_pct=_env_float("MAINTENANCE_CRITICAL_PCT", 95.0),
         )
+
+
+@dataclass(frozen=True)
+class SamplingSettings:
+    strike_step: int
+    window_points: int
+    hot_window_points: int
+    group_count: int
+    group_interval_seconds: int
+    degraded_group_count: int
+    degraded_group_interval_seconds: int
+    hot_human_cadence_seconds: int
+    hot_execution_cadence_seconds: int
+    include_next_expiry: bool
+    default_mode: str
+
+    @classmethod
+    def from_env(cls) -> "SamplingSettings":
+        load_dotenv()
+        return cls(
+            strike_step=_env_int("SAMPLING_STRIKE_STEP", 5),
+            window_points=_env_int("SAMPLING_WINDOW_POINTS", 200),
+            hot_window_points=_env_int("SAMPLING_HOT_WINDOW_POINTS", 50),
+            group_count=_env_int("SAMPLING_GROUP_COUNT", 4),
+            group_interval_seconds=_env_int("SAMPLING_GROUP_INTERVAL_SECONDS", 4),
+            degraded_group_count=_env_int("SAMPLING_DEGRADED_GROUP_COUNT", 20),
+            degraded_group_interval_seconds=_env_int("SAMPLING_DEGRADED_GROUP_INTERVAL_SECONDS", 3),
+            hot_human_cadence_seconds=_env_int("SAMPLING_HOT_HUMAN_CADENCE_SECONDS", 8),
+            hot_execution_cadence_seconds=_env_int("SAMPLING_HOT_EXECUTION_CADENCE_SECONDS", 2),
+            include_next_expiry=_env_bool("SAMPLING_INCLUDE_NEXT_EXPIRY", True),
+            default_mode=_env("SAMPLING_DEFAULT_MODE", "human_alert"),
+        )
