@@ -12,6 +12,7 @@ from urllib.parse import urlencode, urljoin
 from urllib.request import Request, urlopen
 
 from spx_spark.config import SchwabSettings
+from spx_spark.marketdata import quote_from_schwab_payload
 
 
 @dataclass(frozen=True)
@@ -87,6 +88,7 @@ def summarize_quote_payload(payload: Any, symbols: list[str]) -> dict[str, Any]:
         if isinstance(quote, dict):
             quote_section = quote.get("quote") if isinstance(quote.get("quote"), dict) else {}
             reference = quote.get("reference") if isinstance(quote.get("reference"), dict) else {}
+            normalized = quote_from_schwab_payload(symbol, quote)
             summaries[symbol] = {
                 "present": True,
                 "assetMainType": quote.get("assetMainType"),
@@ -99,6 +101,14 @@ def summarize_quote_payload(payload: Any, symbols: list[str]) -> dict[str, Any]:
                 "mark": quote_section.get("mark"),
                 "quoteTime": quote_section.get("quoteTime"),
                 "tradeTime": quote_section.get("tradeTime"),
+                "normalized": {
+                    "instrument_id": normalized.instrument.canonical_id,
+                    "provider": normalized.provider.value,
+                    "quality": normalized.quality.value,
+                    "mid": normalized.mid,
+                    "spread_bps": normalized.spread_bps,
+                    "effective_price": normalized.effective_price,
+                },
             }
         else:
             summaries[symbol] = {"present": True, "payload_type": type(quote).__name__}

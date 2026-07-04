@@ -241,6 +241,10 @@ Preferred for:
 
 ## Data Model
 
+Provider-specific payloads must be normalized before sampler, feature, greeks,
+alert, or dashboard code consumes them. The canonical implementation is
+`src/spx_spark/marketdata.py`; see `docs/market-data-model.md`.
+
 Raw quote row:
 
 ```text

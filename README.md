@@ -71,6 +71,12 @@ scripts/run-sampling-plan.sh --underlier 7500 --mode degraded --summary-json
 
 The planner produces the SPXW hot lane and rolling quote groups for collectors. It does not request market data.
 
+## Market Data Model
+
+IBKR and Schwab payloads are normalized through `spx_spark.marketdata` before they reach
+sampling, feature, greeks, alert, or dashboard code. Fallback should compare normalized
+`Quote.quality` and provider priority instead of branching on provider-specific fields.
+
 ## Notes
 
 - Architecture plan: `docs/architecture-plan.md`
@@ -78,5 +84,6 @@ The planner produces the SPXW hot lane and rolling quote groups for collectors. 
 - Data source decision memo: `docs/data-source-decision.md`
 - IBKR API research: `docs/ibkr-api-research.md`
 - Storage plan: `docs/storage-plan.md`
+- Market data model: `docs/market-data-model.md`
 - Sampling engine design: `docs/sampling-engine-design.md`
 - Operations schedule: `docs/operations-schedule.md`

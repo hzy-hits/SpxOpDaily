@@ -8,6 +8,11 @@ The system should combine exchange data, ETF risk proxies, on-chain derivatives,
 
 ## Current Data Stack
 
+Provider-specific payloads are normalized at the collector edge. Downstream
+sampler, feature, greeks, alert, and dashboard code consume `InstrumentId`,
+`Quote`, `OptionGreeks`, and `ProviderState` instead of IBKR/Schwab raw fields.
+Fallback is based on normalized data quality first and provider priority second.
+
 ### Available Through IBKR
 
 - OPRA L1

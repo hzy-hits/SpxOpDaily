@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from spx_spark.config import IbkrSettings, NY_TZ
+from spx_spark.marketdata import quote_from_ibkr_row
 
 
 def clean_float(value: Any) -> float | None:
@@ -300,6 +301,7 @@ def write_snapshot(settings: IbkrSettings, rows: list[VerifyRow], errors: list[I
         "created_at": datetime.now(tz=timezone.utc).isoformat(),
         "settings": asdict(settings),
         "rows": [asdict(row) | {"live_state": row.live_state} for row in rows],
+        "normalized_quotes": [quote_from_ibkr_row(row).to_dict() for row in rows],
         "ibkr_errors": [asdict(error) for error in errors],
     }
     output_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
