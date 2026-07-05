@@ -8,6 +8,7 @@ from datetime import datetime
 from spx_spark.alert_profile import AlertWindow, active_window, parse_at
 from spx_spark.config import StorageSettings
 from spx_spark.marketdata import MarketDataQuality, Quote
+from spx_spark.options_map import OptionsMap, build_options_map
 from spx_spark.storage import LatestState, LatestStateStore
 
 
@@ -39,6 +40,11 @@ BAD_QUALITIES = {
     MarketDataQuality.ERROR,
     MarketDataQuality.STALE,
     MarketDataQuality.UNKNOWN,
+}
+
+OPTION_GAMMA_ALERT_STATES = {
+    "negative_gamma_acceleration",
+    "zero_gamma_transition",
 }
 
 
@@ -145,6 +151,7 @@ def evaluate_alerts(
     state: LatestState,
     *,
     window: AlertWindow,
+    options_map: OptionsMap | None = None,
 ) -> list[Alert]:
     alerts: list[Alert] = []
     required = set(window.required_instruments)
@@ -168,17 +175,62 @@ def evaluate_alerts(
         if alert is not None:
             alerts.append(alert)
 
+    alerts.extend(option_map_alerts(options_map or build_options_map(state), window=window))
+    return alerts
+
+
+def option_map_alerts(options_map: OptionsMap, *, window: AlertWindow) -> list[Alert]:
+    alerts: list[Alert] = []
+    underlier = options_map.underlier.price
+    wall_threshold = max(10.0, underlier * 0.002 if underlier else 10.0)
+    for expiry in options_map.expiries:
+        if expiry.gamma_state in OPTION_GAMMA_ALERT_STATES:
+            alerts.append(
+                Alert(
+                    severity=severity_for_priority(window.priority),
+                    kind="option_gamma_regime",
+                    instrument_id=f"option_map:SPXW:{expiry.expiry}",
+                    title=f"SPXW {expiry.expiry} {expiry.gamma_state}",
+                    detail=(
+                        f"SPXW {expiry.expiry} gamma state is {expiry.gamma_state}; "
+                        f"zero gamma={expiry.zero_gamma}, net_gamma_ratio={expiry.net_gamma_ratio}."
+                    ),
+                    value=expiry.net_gamma_ratio,
+                )
+            )
+        if expiry.nearest_wall is not None and expiry.nearest_wall_distance_points is not None:
+            distance = abs(expiry.nearest_wall_distance_points)
+            if distance <= wall_threshold:
+                alerts.append(
+                    Alert(
+                        severity=severity_for_priority(window.priority),
+                        kind="option_wall_proximity",
+                        instrument_id=f"option_map:SPXW:{expiry.expiry}",
+                        title=(
+                            f"SPX near SPXW wall {expiry.nearest_wall:.0f} "
+                            f"({expiry.nearest_wall_distance_points:+.1f} pts)"
+                        ),
+                        detail=(
+                            f"Nearest SPXW wall for {expiry.expiry} is "
+                            f"{expiry.nearest_wall:.0f}; threshold={wall_threshold:.1f} pts."
+                        ),
+                        value=expiry.nearest_wall_distance_points,
+                        threshold=wall_threshold,
+                    )
+                )
     return alerts
 
 
 def evaluate_payload(state: LatestState, *, now: datetime | None = None) -> dict[str, object]:
     now = now or state.as_of
     window = active_window(now)
-    alerts = evaluate_alerts(state, window=window)
+    options_map = build_options_map(state)
+    alerts = evaluate_alerts(state, window=window, options_map=options_map)
     return {
         "created_at": datetime.now(tz=now.tzinfo).isoformat(),
         "as_of": state.as_of.isoformat(),
         "window": window.to_dict(now=now),
+        "options_map": options_map.to_dict(),
         "alert_count": len(alerts),
         "alerts": [alert.to_dict() for alert in alerts],
     }

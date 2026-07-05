@@ -142,6 +142,7 @@ scripts/run-alert-profile.sh
 scripts/run-alert-profile.sh --schedule
 scripts/run-alert-profile.sh --at 2026-07-06T14:30:00
 scripts/run-alert-engine.sh --at 2026-07-07T03:15:00
+scripts/run-options-map.sh
 ```
 
 The alert profile is the 24h monitoring layer. It maps New York and Beijing
@@ -153,6 +154,13 @@ Hyperliquid, or Polymarket monitoring.
 The alert engine reads normalized latest state and emits data-health and
 price-move alerts. It is notification-ready but does not send pushes or place
 orders yet.
+
+`run-options-map.sh` is the current options-intelligence feature layer. It reads
+SPXW option quotes from latest state and computes ATM strike, ATM straddle,
+expected move, IV/skew ratios, Greek coverage, and an open-interest-based GEX
+prototype for zero gamma, put wall, and call wall when OI is available. Without
+open interest it intentionally reports `unknown_no_open_interest` instead of
+pretending that gamma-only data is a real wall map.
 
 ## Mock Data Loop
 
