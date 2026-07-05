@@ -135,7 +135,7 @@ Recommended behavior:
 - pause collector when disconnected
 - manual restart after phone trading is done
 - keep API read-only for MVP
-- if IBC is enabled, use read-only login/API and `ExistingSessionDetectedAction=secondary`
+- if IBC Gateway is enabled, use normal Gateway login with `ReadOnlyApi=yes` and `ExistingSessionDetectedAction=secondary`
 
 ### IBKR Escape Hatches
 
@@ -264,7 +264,7 @@ Default automated policy:
 - keep `STRICT_NO_SESSION_FIGHT=true`
 - keep Schwab and chain/prediction feeds running at all times
 - if IB Gateway is already authenticated, the IBKR collector may connect automatically
-- if IBC is explicitly configured, it may restart Gateway and attempt read-only login
+- if IBC is explicitly configured, it may restart Gateway and attempt normal Gateway login with read-only API enabled
 - if phone/desktop trading owns the broker session, IBC should yield and retry later instead of forcing takeover
 - if mobile or desktop trading kicks IBKR out, mark IBKR unavailable and do not immediately fight for the session
 - while IBKR is unavailable because of a competing session, keep sending alerts from Schwab and non-broker feeds

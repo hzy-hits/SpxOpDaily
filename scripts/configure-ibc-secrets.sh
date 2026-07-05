@@ -55,7 +55,7 @@ api_port = prompt(default_port, "Gateway API port")
 if not api_port.isdigit():
     raise SystemExit("Gateway API port must be an integer")
 
-read_only_login = prompt("yes", "Read-only login").lower()
+read_only_login = prompt("no", "Read-only login (IB Gateway does not support this; Read-only API stays yes)").lower()
 if read_only_login not in {"yes", "no"}:
     raise SystemExit("Read-only login must be yes or no")
 

@@ -156,3 +156,40 @@ def test_ibkr_subscribe_can_skip_contract_qualification() -> None:
     assert ticker is not None
     assert row.subscribed is True
     assert row.qualified is False
+
+
+def test_ibkr_subscribe_qualifies_on_missing_conid_hash_error() -> None:
+    class Contract:
+        symbol = "SPX"
+        exchange = "CBOE"
+
+    class FakeIB:
+        qualify_called = False
+        req_count = 0
+
+        def qualifyContracts(self, contract):
+            self.qualify_called = True
+            contract.conId = 416904
+            return [contract]
+
+        def reqMktData(self, contract, generic_tick_list, snapshot, regulatory_snapshot):
+            self.req_count += 1
+            if self.req_count == 1:
+                raise ValueError("can't be hashed because no 'conId' value exists")
+            return object()
+
+    ib = FakeIB()
+
+    rows = qualify_and_subscribe(
+        ib,
+        [("index:SPX", "index", Contract())],
+        qualify=False,
+    )
+
+    assert ib.qualify_called is True
+    assert ib.req_count == 2
+    ticker, row = rows["index:SPX"]
+    assert ticker is not None
+    assert row.subscribed is True
+    assert row.qualified is True
+    assert row.error is None

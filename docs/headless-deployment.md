@@ -99,7 +99,7 @@ It is written with `600` permissions under a `700` runtime directory.
 
 Default security posture from `scripts/configure-ibc-secrets.sh`:
 
-- `ReadOnlyLogin=yes`
+- `ReadOnlyLogin=no` because IB Gateway does not support read-only login
 - `ReadOnlyApi=yes`
 - `TrustedTwsApiClientIPs=127.0.0.1`
 - `AcceptIncomingConnectionAction=accept`
@@ -112,6 +112,9 @@ desktop trading session is active, the IBC Gateway session should yield rather
 than fight for the broker session. The user service has `Restart=always` with a
 300 second delay, so it probes again later and can log back in after the manual
 session is gone.
+
+`ReadOnlyApi=yes` is the key API safety gate. Gateway still performs a normal
+broker login, so this is not equivalent to TWS read-only login.
 
 Inspect:
 

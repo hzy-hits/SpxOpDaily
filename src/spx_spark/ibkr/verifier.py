@@ -217,14 +217,51 @@ def qualify_and_subscribe(
                 result[label] = (None, row)
                 continue
 
+        ticker = subscribe_contract(ib, contract, row, allow_qualify_fallback=not qualify)
+        result[label] = (ticker, row)
+    return result
+
+
+def subscribe_contract(
+    ib: Any,
+    contract: Any,
+    row: VerifyRow,
+    *,
+    allow_qualify_fallback: bool,
+) -> Any | None:
+    try:
+        ticker = ib.reqMktData(contract, "", False, False)
+        row.subscribed = True
+        return ticker
+    except Exception as exc:  # noqa: BLE001
+        if not allow_qualify_fallback or not needs_contract_qualification(exc):
+            row.error = f"subscribe failed: {exc}"
+            return None
+
+        try:
+            qualified = ib.qualifyContracts(contract)
+            if not qualified:
+                row.error = f"subscribe failed: {exc}; qualify fallback returned no contracts"
+                return None
+            contract = qualified[0]
+            row.exchange = getattr(contract, "exchange", row.exchange)
+            row.qualified = True
+        except Exception as qualify_exc:  # noqa: BLE001
+            row.error = f"subscribe failed: {exc}; qualify fallback failed: {qualify_exc}"
+            return None
+
         try:
             ticker = ib.reqMktData(contract, "", False, False)
             row.subscribed = True
-            result[label] = (ticker, row)
-        except Exception as exc:  # noqa: BLE001
-            row.error = f"subscribe failed: {exc}"
-            result[label] = (None, row)
-    return result
+            return ticker
+        except Exception as retry_exc:  # noqa: BLE001
+            row.error = f"subscribe failed after qualify fallback: {retry_exc}"
+            return None
+
+
+def needs_contract_qualification(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return "conid" in message or "can't be hashed" in message or "cannot be hashed" in message
 
 
 def snapshot_rows(
