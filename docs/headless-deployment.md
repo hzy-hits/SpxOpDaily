@@ -211,6 +211,10 @@ the Codex-confirmed explanation rather than both the raw deterministic alert and
 the Codex follow-up. Require an explicit Codex delivery cue in production so
 `不需要推送:` smoke-test or degraded-data conclusions do not reach Weixin.
 
+Human-facing Weixin messages are limited to SPX, SPXW option structure, and ES.
+Other feeds remain hidden scoring context and are kept out of the Codex prompt's
+human-visible explanation.
+
 ## Security
 
 - Do not commit `.env`.

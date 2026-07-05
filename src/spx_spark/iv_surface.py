@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -239,6 +239,11 @@ def load_latest_snapshot(path: str | Path) -> IvSurfaceSnapshot | None:
 
 def raw_snapshot_path(settings: IvSurfaceSettings, snapshot: IvSurfaceSnapshot) -> Path:
     timestamp = snapshot.as_of.astimezone(timezone.utc)
+    return raw_snapshot_path_for_hour(settings, timestamp)
+
+
+def raw_snapshot_path_for_hour(settings: IvSurfaceSettings, timestamp: datetime) -> Path:
+    timestamp = timestamp.astimezone(timezone.utc)
     return (
         Path(settings.data_root)
         / "features"
@@ -247,6 +252,101 @@ def raw_snapshot_path(settings: IvSurfaceSettings, snapshot: IvSurfaceSnapshot) 
         / f"hour={timestamp.strftime('%H')}"
         / settings.raw_file_name
     )
+
+
+def raw_snapshot_paths_for_window(
+    settings: IvSurfaceSettings,
+    *,
+    start: datetime,
+    end: datetime,
+) -> list[Path]:
+    start_utc = start.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
+    end_utc = end.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
+    paths: list[Path] = []
+    current = start_utc
+    while current <= end_utc:
+        paths.append(raw_snapshot_path_for_hour(settings, current))
+        current += timedelta(hours=1)
+    return paths
+
+
+def load_recent_snapshots(
+    settings: IvSurfaceSettings,
+    *,
+    as_of: datetime,
+    lookback_minutes: int = 60,
+) -> list[IvSurfaceSnapshot]:
+    end = as_of.astimezone(timezone.utc)
+    start = end - timedelta(minutes=lookback_minutes)
+    snapshots: list[IvSurfaceSnapshot] = []
+    for path in raw_snapshot_paths_for_window(settings, start=start, end=end):
+        if not path.exists():
+            continue
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            if not line.strip():
+                continue
+            try:
+                snapshot = snapshot_from_dict(json.loads(line))
+            except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+                continue
+            snapshot_as_of = snapshot.as_of.astimezone(timezone.utc)
+            if start <= snapshot_as_of <= end:
+                snapshots.append(snapshot)
+    return sorted(snapshots, key=lambda item: item.as_of)
+
+
+def summarize_surface_history(
+    current: IvSurfaceSnapshot | None,
+    history: list[IvSurfaceSnapshot],
+) -> dict[str, Any] | None:
+    if current is None:
+        return None
+    snapshots = list(history)
+    if all(item.as_of != current.as_of for item in snapshots):
+        snapshots.append(current)
+    snapshots = sorted(snapshots, key=lambda item: item.as_of)
+    first_by_expiry: dict[str, IvSurfaceExpiry] = {}
+    for snapshot in snapshots:
+        for expiry in snapshot.expiries:
+            first_by_expiry.setdefault(expiry.expiry, expiry)
+
+    expiry_rows = []
+    for expiry in current.expiries[:2]:
+        first = first_by_expiry.get(expiry.expiry)
+        expiry_rows.append(
+            {
+                "expiry": expiry.expiry,
+                "atm_iv_change_1h": subtract(expiry.atm_iv, first.atm_iv if first else None),
+                "iv_surface_level_change_1h": subtract(
+                    expiry.iv_surface_level,
+                    first.iv_surface_level if first else None,
+                ),
+                "put_skew_change_1h": subtract(
+                    expiry.put_skew_ratio,
+                    first.put_skew_ratio if first else None,
+                ),
+                "call_skew_change_1h": subtract(
+                    expiry.call_skew_ratio,
+                    first.call_skew_ratio if first else None,
+                ),
+                "smile_curvature_change_1h": subtract(
+                    expiry.smile_curvature,
+                    first.smile_curvature if first else None,
+                ),
+                "surface_fit_quality": expiry.surface_fit_quality,
+            }
+        )
+    return {
+        "lookback_minutes": 60,
+        "snapshot_count": len(snapshots),
+        "start_as_of": snapshots[0].as_of.isoformat() if snapshots else None,
+        "end_as_of": snapshots[-1].as_of.isoformat() if snapshots else None,
+        "expiries": expiry_rows,
+    }
 
 
 def write_snapshot(settings: IvSurfaceSettings, snapshot: IvSurfaceSnapshot) -> dict[str, str]:

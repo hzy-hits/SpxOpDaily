@@ -223,9 +223,10 @@ Pre-open alerts should be graded differently from RTH alerts:
 Do not let the system auto-place orders in this window. The intended workflow is:
 
 1. Collector detects a setup.
-2. Alert includes source, liquidity score, spread quality, stale flags, and invalidation level.
-3. User opens phone/desktop and decides whether to place a limit order.
-4. System records the alert and later compares forward return and option response.
+2. Internal scoring records source, liquidity score, spread quality, stale flags, and invalidation level.
+3. Human alert shows only SPX, SPXW option structure, ES confirmation, and the check that needs attention.
+4. User opens phone/desktop and decides whether to place a limit order.
+5. System records the alert and later compares forward return and option response.
 
 Schwab API should be the preferred broker data source during this window if it passes the account-level verifier, because it should not require a persistent TWS/Gateway session. Still test concurrent use explicitly:
 

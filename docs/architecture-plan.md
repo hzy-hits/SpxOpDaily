@@ -432,6 +432,9 @@ Each alert must include:
 ## Codex/Spark Explanation Layer
 
 Use Codex/Spark as an event explanation layer, not as a tick engine.
+The human-facing explanation is SPX-only: mention SPX, SPXW option structure,
+and ES confirmation. Other feeds can influence the deterministic score, but they
+must remain hidden context and should not appear in the message sent to the user.
 
 Official positioning from Codex docs:
 
@@ -453,11 +456,10 @@ Official positioning from Codex docs:
 Call Spark only when one of these occurs:
 
 - SPXW ATM straddle expands rapidly
-- VIX1D/VIX9D changes abruptly
-- ES/SPY/HL_SPX diverge
-- Hyperliquid OI/funding/large-trade burst is abnormal
-- smart cohort flips direction
-- Polymarket probability jumps
+- SPXW call wall, put wall, or zero-gamma zone becomes immediately relevant
+- SPXW IV surface shifts over the last hour
+- ES confirmation disagrees with the SPX/SPXW map
+- hidden risk/proxy context changes the score enough to justify rechecking SPX
 - macro event window starts or ends
 - user manually requests an explanation
 

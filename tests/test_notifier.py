@@ -6,7 +6,9 @@ from datetime import datetime, timedelta, timezone
 
 from spx_spark.config import NotificationSettings
 from spx_spark.notifier import (
+    build_codex_prompt,
     codex_message_requests_delivery,
+    codex_message_respects_human_scope,
     notify_payload,
     run_codex_exec,
     run_openclaw_agent,
@@ -64,13 +66,49 @@ def make_payload() -> dict[str, object]:
                 {"instrument_id": "equity:QQQ", "quality": "live", "price": 725.0},
             ],
         },
+        "human_focus_context": {
+            "visible_scope": ("SPX", "SPXW", "ES"),
+            "prices": {
+                "spx": {"instrument_id": "index:SPX", "quality": "live", "price": 7500.0},
+                "es": {"instrument_id": "future:ES", "quality": "live", "price": 7508.0},
+            },
+            "spxw_options": {
+                "underlier_price": 7500.0,
+                "expiries": [
+                    {
+                        "expiry": "20260707",
+                        "put_wall": 7450.0,
+                        "call_wall": 7550.0,
+                        "zero_gamma": 7505.0,
+                        "gamma_state": "positive_gamma_pin",
+                    }
+                ],
+            },
+            "spxw_iv_surface": {
+                "history_1h": {
+                    "snapshot_count": 12,
+                    "expiries": [
+                        {
+                            "expiry": "20260707",
+                            "atm_iv_change_1h": 0.04,
+                            "put_skew_change_1h": 0.08,
+                        }
+                    ],
+                }
+            },
+            "micopedia": {
+                "regime": "ordinary_rth",
+                "confidence": "high_observational",
+                "suggested_sampling_mode": "human_alert",
+            },
+        },
         "alerts": [
             {
                 "severity": "high",
                 "kind": "price_move_from_close",
-                "instrument_id": "equity:SPY",
-                "title": "SPY up 31 bps from close",
-                "detail": "SPY moved from close.",
+                "instrument_id": "index:SPX",
+                "title": "SPX up 31 bps from close",
+                "detail": "SPX moved from close.",
             },
             {
                 "severity": "medium",
@@ -267,7 +305,83 @@ def test_codex_delivery_gate_blocks_negative_confirmation(tmp_path) -> None:
     assert len(calls) == 1
 
 
+def test_codex_scope_gate_blocks_non_focus_symbols(tmp_path) -> None:
+    calls: list[list[str]] = []
+
+    def runner(command: list[str], timeout_seconds: float) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        if command[:2] == ["codex", "exec"]:
+            output_path = command[command.index("--output-last-message") + 1]
+            with open(output_path, "w", encoding="utf-8") as handle:
+                handle.write("需要看盘: SPX alert confirmed, but QQQ context also moved")
+        return subprocess.CompletedProcess(command, 0, stdout="{}", stderr="")
+
+    settings = replace(
+        make_settings(str(tmp_path / "notify-state.json")),
+        codex_enabled=True,
+        openclaw_enabled=False,
+    )
+
+    result = notify_payload(
+        make_payload(),
+        settings=settings,
+        runner=runner,
+        now=datetime(2026, 7, 7, 0, 0, tzinfo=timezone.utc),
+    )
+
+    assert result.sent_count == 0
+    assert [sink.sink for sink in result.sinks] == ["codex_exec", "codex_scope_gate"]
+    assert len(calls) == 1
+
+
 def test_codex_message_requests_delivery_uses_explicit_cues() -> None:
     assert codex_message_requests_delivery("需要看盘: VIX and SPX alert confirmed")
     assert not codex_message_requests_delivery("不需要推送: degraded smoke test")
     assert not codex_message_requests_delivery("结论: critical alert, but no explicit delivery cue")
+
+
+def test_codex_message_respects_human_scope_blocks_non_focus_context() -> None:
+    assert codex_message_respects_human_scope("需要看盘: SPX near SPXW call wall; ES confirms.")
+    assert not codex_message_respects_human_scope("需要看盘: SPX setup with VIX context.")
+    assert not codex_message_respects_human_scope("需要看盘: SPX setup with Hyperliquid context.")
+
+
+def test_notifier_filters_non_spx_context_alerts_from_human_push(tmp_path) -> None:
+    calls: list[list[str]] = []
+
+    def runner(command: list[str], timeout_seconds: float) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout="{}", stderr="")
+
+    payload = make_payload()
+    payload["alerts"] = [
+        {
+            "severity": "high",
+            "kind": "price_move_from_close",
+            "instrument_id": "equity:QQQ",
+            "title": "QQQ up 40 bps from close",
+            "detail": "Hidden algorithm context only.",
+        }
+    ]
+
+    result = notify_payload(
+        payload,
+        settings=make_settings(str(tmp_path / "notify-state.json")),
+        runner=runner,
+        now=datetime(2026, 7, 7, 0, 0, tzinfo=timezone.utc),
+    )
+
+    assert result.selected_count == 0
+    assert result.sent_count == 0
+    assert calls == []
+
+
+def test_codex_prompt_hides_non_focus_market_context() -> None:
+    prompt = build_codex_prompt(make_payload(), [make_payload()["alerts"][0]])
+
+    assert "human_focus_context" in prompt
+    assert "equity:QQQ" not in prompt
+    assert "index:VIX" not in prompt
+    assert "qqq_spy" not in prompt
+    assert "SPXW" in prompt
+    assert "future:ES" in prompt

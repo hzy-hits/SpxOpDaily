@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import tempfile
 from collections.abc import Callable
@@ -35,6 +36,45 @@ NEGATIVE_DELIVERY_CUES = (
     "不推送",
     "不需要看盘",
     "无需看盘",
+)
+
+HUMAN_VISIBLE_ALERT_PREFIXES = (
+    "index:SPX",
+    "future:ES",
+    "option:SPX:SPXW",
+    "option_map:SPXW",
+    "iv_surface:SPXW",
+)
+
+BLOCKED_HUMAN_MESSAGE_SYMBOLS = (
+    "VIX",
+    "VVIX",
+    "SKEW",
+    "SPY",
+    "QQQ",
+    "IWM",
+    "DIA",
+    "HYG",
+    "LQD",
+    "TLT",
+    "IEF",
+    "SHY",
+    "UUP",
+    "GLD",
+    "USO",
+    "RSP",
+    "XLU",
+    "NDX",
+    "RUT",
+    "DJX",
+    "DJU",
+)
+
+BLOCKED_HUMAN_MESSAGE_PHRASES = (
+    "hyperliquid",
+    "polymarket",
+    "crypto_perp",
+    "prediction market",
 )
 
 CommandRunner = Callable[[list[str], float], subprocess.CompletedProcess[str]]
@@ -95,6 +135,11 @@ def alert_key(alert: dict[str, object]) -> str:
     )
 
 
+def is_human_visible_alert(alert: dict[str, object]) -> bool:
+    instrument_id = str(alert.get("instrument_id") or "")
+    return any(instrument_id.startswith(prefix) for prefix in HUMAN_VISIBLE_ALERT_PREFIXES)
+
+
 def load_sent_state(path: str) -> dict[str, float]:
     state_path = Path(path)
     if not state_path.exists():
@@ -140,6 +185,8 @@ def select_alerts_for_notification(
     for alert in alerts:
         if not isinstance(alert, dict):
             continue
+        if not is_human_visible_alert(alert):
+            continue
         if severity_value(alert.get("severity")) < min_rank:
             continue
         key = alert_key(alert)
@@ -173,7 +220,7 @@ def format_alert_message(payload: dict[str, object], alerts: list[dict[str, obje
         priority = str(window.get("priority") or "unknown")
 
     lines = [
-        "SPX Spark alert",
+        "SPX/SPXW alert",
         f"window: {window_name} priority={priority}",
         f"as_of: {payload.get('as_of')}",
         f"alerts: {len(alerts)}",
@@ -193,127 +240,56 @@ def format_alert_message(payload: dict[str, object], alerts: list[dict[str, obje
 def build_agent_prompt(payload: dict[str, object], alerts: list[dict[str, object]]) -> str:
     compact_payload = {
         "as_of": payload.get("as_of"),
-        "window": payload.get("window"),
+        "window": compact_window(payload.get("window")),
         "alerts": alerts[:12],
-        "options_map": payload.get("options_map"),
-        "iv_surface": payload.get("iv_surface"),
+        "human_focus_context": payload.get("human_focus_context"),
     }
     return "\n".join(
         (
             "你是 SPX Spark 的盘中告警分析 agent。",
             "只根据下面的 JSON 做简短判断；不要给自动下单指令，不要假设缺失数据。",
-            "输出结构：1. 发生了什么 2. 风险/数据质量 3. 人类需要看的检查项。",
+            "人类只交易 SPX/SPXW；输出只能提 SPX、SPXW、ES、期权墙、gamma、IV surface。",
+            "输出结构：1. 发生了什么 2. 风险/数据质量 3. 人类需要看的 SPX/SPXW 检查项。",
             json.dumps(compact_payload, ensure_ascii=False, sort_keys=True),
         )
     )
+
+
+def compact_window(window: object) -> dict[str, object] | None:
+    if not isinstance(window, dict):
+        return None
+    return {
+        "name": window.get("name"),
+        "priority": window.get("priority"),
+        "cadence_seconds": window.get("cadence_seconds"),
+        "summary_cadence_seconds": window.get("summary_cadence_seconds"),
+        "spxw_sampling_mode": window.get("spxw_sampling_mode"),
+        "user_unattended": window.get("user_unattended"),
+    }
 
 
 def compact_analysis_payload(
     payload: dict[str, object],
     alerts: list[dict[str, object]],
 ) -> dict[str, object]:
-    options_map = payload.get("options_map")
-    compact_options: object = None
-    if isinstance(options_map, dict):
-        compact_options = {
-            "underlier": options_map.get("underlier"),
-            "expiries": [
-                {
-                    "expiry": expiry.get("expiry"),
-                    "gamma_state": expiry.get("gamma_state"),
-                    "zero_gamma": expiry.get("zero_gamma"),
-                    "put_wall": expiry.get("put_wall"),
-                    "call_wall": expiry.get("call_wall"),
-                    "nearest_wall": expiry.get("nearest_wall"),
-                    "nearest_wall_distance_points": expiry.get("nearest_wall_distance_points"),
-                }
-                for expiry in options_map.get("expiries", [])[:2]
-                if isinstance(expiry, dict)
-            ],
-        }
-
-    iv_surface = payload.get("iv_surface")
-    compact_surface: object = None
-    if isinstance(iv_surface, dict):
-        compact_surface = {
-            "front_expiry": iv_surface.get("front_expiry"),
-            "next_expiry": iv_surface.get("next_expiry"),
-            "front_vs_next_atm_iv_gap": iv_surface.get("front_vs_next_atm_iv_gap"),
-            "expiries": [
-                {
-                    "expiry": expiry.get("expiry"),
-                    "atm_iv": expiry.get("atm_iv"),
-                    "atm_iv_jump_5m": expiry.get("atm_iv_jump_5m"),
-                    "put_skew_steepening_5m": expiry.get("put_skew_steepening_5m"),
-                    "iv_surface_shift_5m": expiry.get("iv_surface_shift_5m"),
-                    "surface_fit_quality": expiry.get("surface_fit_quality"),
-                }
-                for expiry in iv_surface.get("expiries", [])[:2]
-                if isinstance(expiry, dict)
-            ],
-        }
-
     market_context = payload.get("market_context")
-    compact_market_context: object = None
+    algorithm_quality: object = None
     if isinstance(market_context, dict):
-        entries = market_context.get("entries")
-        selected_entries = []
-        if isinstance(entries, list):
-            wanted = {
-                "index:SPX",
-                "index:VIX",
-                "index:VIX1D",
-                "index:VIX9D",
-                "index:VIX3M",
-                "index:VVIX",
-                "index:SKEW",
-                "index:NDX",
-                "index:RUT",
-                "index:DJX",
-                "index:DJU",
-                "equity:SPY",
-                "equity:QQQ",
-                "equity:IWM",
-                "equity:DIA",
-                "equity:HYG",
-                "equity:LQD",
-                "equity:TLT",
-                "equity:IEF",
-                "equity:SHY",
-                "equity:UUP",
-                "equity:GLD",
-                "equity:USO",
-                "equity:RSP",
-                "equity:XLU",
-                "future:ES",
-                "future:MES",
-                "crypto_perp:xyz:SP500",
-            }
-            selected_entries = [
-                {
-                    "instrument_id": entry.get("instrument_id"),
-                    "provider": entry.get("provider"),
-                    "quality": entry.get("quality"),
-                    "price": entry.get("price"),
-                    "move_bps": entry.get("move_bps"),
-                    "age_ms": entry.get("age_ms"),
-                }
-                for entry in entries
-                if isinstance(entry, dict) and entry.get("instrument_id") in wanted
-            ]
-        compact_market_context = {
+        algorithm_quality = {
             "quality_summary": market_context.get("quality_summary"),
-            "derived": market_context.get("derived"),
-            "entries": selected_entries,
+            "note": (
+                "Non-focus market context may be used only as hidden algorithm scoring input; "
+                "never mention individual non-SPX/SPXW/ES instruments to the human."
+            ),
         }
 
     return {
         "as_of": payload.get("as_of"),
-        "window": payload.get("window"),
-        "market_context": compact_market_context,
+        "window": compact_window(payload.get("window")),
+        "visible_scope": ("SPX", "SPXW", "ES"),
+        "human_focus_context": payload.get("human_focus_context"),
+        "algorithm_quality": algorithm_quality,
         "alerts": alerts[:8],
-        "options_map": compact_options,
-        "iv_surface": compact_surface,
     }
 
 
@@ -323,7 +299,10 @@ def build_codex_prompt(payload: dict[str, object], alerts: list[dict[str, object
         (
             "你是 SPX Spark 的快速告警确认 agent。",
             "只根据下面的本机 JSON 判断是否需要推送给人类。不要给自动下单指令，不要编造缺失数据。",
-            "输出中文，最多 6 行。必须包含：结论、原因、数据质量、需要人类看的检查项。",
+            "人类只交易 SPX/SPXW；输出只能提 SPX、SPXW、ES、期权墙、gamma、IV surface。",
+            "不要提任何非 SPX/SPXW/ES 标的名；隐藏算法上下文只能影响是否推送，不能进入人类可见解释。",
+            "发送决策必须优先参考 Micopedia、SPXW call wall/put wall/zero gamma、以及过去 1 小时 IV surface/期权变化。",
+            "输出中文，最多 6 行。必须包含：结论、原因、数据质量、需要人类看的 SPX/SPXW 检查项。",
             "如果数据质量不足，明确说 degraded。",
             "如果值得外发，第一行必须用 `需要看盘:` 开头；如果不值得外发，第一行必须用 `不需要推送:` 开头。",
             json.dumps(compact_payload, ensure_ascii=False, sort_keys=True),
@@ -337,6 +316,17 @@ def codex_message_requests_delivery(message: str) -> bool:
         return False
     first_line = normalized.splitlines()[0] if normalized else ""
     return any(first_line.startswith(cue) for cue in POSITIVE_DELIVERY_CUES)
+
+
+def codex_message_respects_human_scope(message: str) -> bool:
+    lowered = message.lower()
+    if any(phrase in lowered for phrase in BLOCKED_HUMAN_MESSAGE_PHRASES):
+        return False
+    uppered = message.upper()
+    return not any(
+        re.search(rf"(?<![A-Z0-9]){re.escape(symbol)}(?![A-Z0-9])", uppered)
+        for symbol in BLOCKED_HUMAN_MESSAGE_SYMBOLS
+    )
 
 
 def openclaw_state_dir() -> Path:
@@ -583,8 +573,19 @@ def notify_payload(
                 if settings.codex_require_delivery_cue
                 else True
             )
+            scope_ok = codex_message_respects_human_scope(codex_message)
             if should_deliver:
-                sinks.append(send_openclaw_message(settings, codex_message, runner=runner))
+                if scope_ok:
+                    sinks.append(send_openclaw_message(settings, codex_message, runner=runner))
+                else:
+                    sinks.append(
+                        SinkResult(
+                            sink="codex_scope_gate",
+                            attempted=True,
+                            ok=True,
+                            error="codex output mentioned non-focus context",
+                        )
+                    )
             else:
                 sinks.append(
                     SinkResult(

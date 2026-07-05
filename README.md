@@ -160,6 +160,12 @@ price-move alerts. Notification is optional and disabled by default. Enable it
 with `ALERT_NOTIFY_ENABLED=true`; `ALERT_NOTIFY_OPENCLAW_DRY_RUN=true` keeps the
 OpenClaw path in dry-run mode while testing.
 
+Human-facing alerts are intentionally SPX-only. The visible push surface is
+limited to SPX, SPXW option structure, and ES confirmation. VIX-family indexes,
+ETF proxies, on-chain data, prediction markets, and macro/risk proxies may feed
+the internal score, but they are not shown to the human and cannot directly
+trigger a push as separate trading instruments.
+
 OpenClaw Weixin is supported through the `openclaw message send` CLI. The Weixin
 channel requires a valid conversation `context_token`; a raw login `userId` may
 dry-run successfully but real sends can fail until the user has messaged the
@@ -182,7 +188,9 @@ ALERT_NOTIFY_CODEX_REQUIRE_DELIVERY_CUE=true
 With `ALERT_NOTIFY_CODEX_REQUIRE_DELIVERY_CUE=true`, Weixin delivery happens
 only when Codex starts with an explicit cue such as `需要看盘:`. Smoke tests or
 degraded-data conclusions that start with `不需要推送:` are recorded but not
-forwarded.
+forwarded. The Codex prompt receives `human_focus_context`, which contains only
+SPX, SPXW walls/gamma/IV surface, ES confirmation, Micopedia guidance, and the
+past-hour SPXW IV-surface summary.
 
 Minimal OpenClaw test:
 
@@ -203,7 +211,9 @@ pretending that gamma-only data is a real wall map.
 `run-iv-surface.sh` writes a 5-minute surface snapshot under
 `data/features/iv_surface/` and `data/latest/iv_surface.json`. It tracks ATM IV,
 skew, surface shift, smile curvature, 0DTE-vs-next-expiry IV gap, and quote
-quality. `run-24h-service.sh` is the modular long-running loop. It runs
+quality. The alert engine also reads the last hour of these snapshots when
+deciding whether an SPXW alert is worth waking the human. `run-24h-service.sh` is
+the modular long-running loop. It runs
 Hyperliquid, IV surface, and alert tasks by default; IBKR is disabled unless
 `SPX_SERVICE_ENABLE_IBKR=true` is set in `.env`.
 

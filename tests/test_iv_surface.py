@@ -1,9 +1,15 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from spx_spark.config import IvSurfaceSettings
-from spx_spark.iv_surface import build_iv_surface_snapshot, load_latest_snapshot, write_snapshot
+from spx_spark.iv_surface import (
+    build_iv_surface_snapshot,
+    load_latest_snapshot,
+    load_recent_snapshots,
+    summarize_surface_history,
+    write_snapshot,
+)
 from spx_spark.marketdata import InstrumentId, MarketDataQuality, OptionGreeks, Provider, Quote
 from spx_spark.storage import LatestState
 
@@ -117,3 +123,34 @@ def test_iv_surface_write_round_trips_latest_snapshot(tmp_path) -> None:
     assert paths["raw_path"].endswith("snapshots.jsonl")
     assert loaded is not None
     assert loaded.front_expiry == "20260706"
+
+
+def test_iv_surface_summarizes_one_hour_history(tmp_path) -> None:
+    start = datetime(2026, 7, 6, 14, 0, tzinfo=timezone.utc)
+    settings = make_settings(tmp_path)
+    first_state = make_state(
+        make_option(expiry="20260706", strike=7500, right="C", mark=10, iv=0.20, now=start),
+        make_option(expiry="20260706", strike=7500, right="P", mark=11, iv=0.22, now=start),
+        now=start,
+    )
+    first = build_iv_surface_snapshot(first_state, settings=settings)
+    write_snapshot(settings, first)
+
+    current_time = start + timedelta(minutes=45)
+    current_state = make_state(
+        make_option(expiry="20260706", strike=7500, right="C", mark=12, iv=0.26, now=current_time),
+        make_option(expiry="20260706", strike=7500, right="P", mark=13, iv=0.28, now=current_time),
+        now=current_time,
+    )
+    current = build_iv_surface_snapshot(current_state, settings=settings, previous=first)
+    write_snapshot(settings, current)
+
+    history = load_recent_snapshots(settings, as_of=current.as_of, lookback_minutes=60)
+    summary = summarize_surface_history(current, history)
+
+    assert len(history) == 2
+    assert summary is not None
+    assert summary["snapshot_count"] == 2
+    expiry = summary["expiries"][0]
+    assert expiry["expiry"] == "20260706"
+    assert round(expiry["atm_iv_change_1h"], 3) == 0.06

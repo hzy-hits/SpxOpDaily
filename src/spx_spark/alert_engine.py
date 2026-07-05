@@ -8,7 +8,13 @@ from datetime import datetime
 
 from spx_spark.alert_profile import AlertWindow, active_window, parse_at
 from spx_spark.config import IvSurfaceSettings, NotificationSettings, StorageSettings
-from spx_spark.iv_surface import IvSurfaceSnapshot, load_latest_snapshot
+from spx_spark.human_focus import build_human_focus_context
+from spx_spark.iv_surface import (
+    IvSurfaceSnapshot,
+    load_latest_snapshot,
+    load_recent_snapshots,
+    summarize_surface_history,
+)
 from spx_spark.market_context import build_market_context
 from spx_spark.marketdata import MarketDataQuality, Quote
 from spx_spark.notifier import notify_payload
@@ -338,9 +344,10 @@ def iv_surface_alerts(surface: IvSurfaceSnapshot, *, window: AlertWindow) -> lis
     return alerts
 
 
-def load_current_iv_surface() -> IvSurfaceSnapshot | None:
+def load_current_iv_surface(settings: IvSurfaceSettings | None = None) -> IvSurfaceSnapshot | None:
+    settings = settings or IvSurfaceSettings.from_env()
     try:
-        return load_latest_snapshot(IvSurfaceSettings.from_env().latest_surface_path)
+        return load_latest_snapshot(settings.latest_surface_path)
     except (OSError, ValueError, json.JSONDecodeError, KeyError):
         return None
 
@@ -348,8 +355,12 @@ def load_current_iv_surface() -> IvSurfaceSnapshot | None:
 def evaluate_payload(state: LatestState, *, now: datetime | None = None) -> dict[str, object]:
     now = now or state.as_of
     window = active_window(now)
+    window_payload = window.to_dict(now=now)
     options_map = build_options_map(state)
-    iv_surface = load_current_iv_surface()
+    iv_settings = IvSurfaceSettings.from_env()
+    iv_surface = load_current_iv_surface(iv_settings)
+    iv_surface_history = load_recent_snapshots(iv_settings, as_of=state.as_of, lookback_minutes=60)
+    iv_surface_history_1h = summarize_surface_history(iv_surface, iv_surface_history)
     alerts = evaluate_alerts(
         state,
         window=window,
@@ -359,10 +370,18 @@ def evaluate_payload(state: LatestState, *, now: datetime | None = None) -> dict
     return {
         "created_at": datetime.now(tz=now.tzinfo).isoformat(),
         "as_of": state.as_of.isoformat(),
-        "window": window.to_dict(now=now),
+        "window": window_payload,
         "market_context": build_market_context(state),
+        "human_focus_context": build_human_focus_context(
+            state,
+            options_map=options_map,
+            iv_surface=iv_surface,
+            iv_surface_history_1h=iv_surface_history_1h,
+            window=window_payload,
+        ),
         "options_map": options_map.to_dict(),
         "iv_surface": iv_surface.to_dict() if iv_surface is not None else None,
+        "iv_surface_history_1h": iv_surface_history_1h,
         "alert_count": len(alerts),
         "alerts": [alert.to_dict() for alert in alerts],
     }
