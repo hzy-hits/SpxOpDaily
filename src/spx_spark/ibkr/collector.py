@@ -85,6 +85,16 @@ def error_payload(errors: list[IbkrError]) -> list[dict[str, object]]:
     return [asdict(error) for error in errors]
 
 
+def collection_failure_reason(exc: Exception, errors: list[IbkrError]) -> str:
+    if has_competing_session_error(errors):
+        return "competing session blocks live market data (IBKR 10197)"
+    message = str(exc) or exc.__class__.__name__
+    normalized = message.lower()
+    if "socket disconnect" in normalized or "connection reset" in normalized:
+        return f"possible competing session or Gateway shutdown interrupted IBKR collection: {message}"
+    return f"collection failed: {message}"
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Collect one IBKR market-data snapshot.")
     parser.add_argument(
@@ -219,35 +229,74 @@ def run(argv: list[str] | None = None) -> int:
             )
             return 1
 
-        ib.errorEvent += on_error
-        ib.reqMarketDataType(ibkr_settings.market_data_type)
+        try:
+            ib.errorEvent += on_error
+            ib.reqMarketDataType(ibkr_settings.market_data_type)
 
-        base_subs = qualify_and_subscribe(
-            ib,
-            build_base_contracts(ibkr_settings),
-            qualify=ibkr_settings.qualify_contracts,
-        )
-        ib.sleep(ibkr_settings.quote_wait_seconds)
-        base_rows = snapshot_rows(base_subs, ibkr_settings.stale_after_seconds)
-
-        atm_reference, atm_source = estimate_atm_reference(base_rows)
-        if args.skip_options:
-            rows = base_rows
-        elif atm_reference is None:
-            if not args.json:
-                print("Could not estimate SPX ATM reference; skipping SPXW options.", file=sys.stderr)
-            rows = base_rows
-        else:
-            if not args.json:
-                print(f"Estimated SPX ATM reference {atm_reference:.2f} from {atm_source}")
-            option_contracts = build_spxw_option_contracts(ibkr_settings, atm_reference)
-            option_subs = qualify_and_subscribe(
+            base_subs = qualify_and_subscribe(
                 ib,
-                option_contracts,
+                build_base_contracts(ibkr_settings),
                 qualify=ibkr_settings.qualify_contracts,
             )
             ib.sleep(ibkr_settings.quote_wait_seconds)
-            rows = base_rows + snapshot_rows(option_subs, ibkr_settings.stale_after_seconds)
+            base_rows = snapshot_rows(base_subs, ibkr_settings.stale_after_seconds)
+
+            atm_reference, atm_source = estimate_atm_reference(base_rows)
+            if args.skip_options:
+                rows = base_rows
+            elif atm_reference is None:
+                if not args.json:
+                    print("Could not estimate SPX ATM reference; skipping SPXW options.", file=sys.stderr)
+                rows = base_rows
+            else:
+                if not args.json:
+                    print(f"Estimated SPX ATM reference {atm_reference:.2f} from {atm_source}")
+                option_contracts = build_spxw_option_contracts(ibkr_settings, atm_reference)
+                option_subs = qualify_and_subscribe(
+                    ib,
+                    option_contracts,
+                    qualify=ibkr_settings.qualify_contracts,
+                )
+                ib.sleep(ibkr_settings.quote_wait_seconds)
+                rows = base_rows + snapshot_rows(option_subs, ibkr_settings.stale_after_seconds)
+        except Exception as exc:  # noqa: BLE001
+            checked_at = datetime.now(tz=timezone.utc)
+            reason = collection_failure_reason(exc, ibkr_errors)
+            connected = ib.isConnected()
+            state = ProviderState(
+                provider=Provider.IBKR,
+                status=ProviderStatus.UNAVAILABLE,
+                checked_at=checked_at,
+                reason=reason,
+                connected=connected,
+                authenticated=True if connected else None,
+                latency_ms=(time.perf_counter() - start) * 1000.0,
+                priority=0,
+            )
+            write_empty_provider_state(state, storage_settings=storage_settings, now=checked_at)
+            summary = {
+                "provider_state": state.to_dict(),
+                "quotes_collected": 0,
+                "error_count": len(ibkr_errors),
+                "provider_error_count": provider_error_count(ibkr_errors) or 1,
+                "errors": error_payload(ibkr_errors),
+                "competing_session": "competing session" in reason.lower(),
+                "raw_paths": {},
+                "latest_state": storage_settings.latest_state_path,
+                "best_quote_count": len(LatestStateStore(storage_settings).load().best_quotes),
+                "provider_quote_count": 0,
+            }
+            if args.json:
+                print(json.dumps(summary, indent=2, sort_keys=True))
+            else:
+                print_collector_summary(
+                    raw_paths={},
+                    latest_path=storage_settings.latest_state_path,
+                    provider_state=state,
+                    quote_count=0,
+                    best_quote_count=int(summary["best_quote_count"]),
+                )
+            return 1
 
         received_at = datetime.now(tz=timezone.utc)
         snapshot = snapshot_from_rows(

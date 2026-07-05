@@ -3,7 +3,11 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from spx_spark.ibkr.adapter import provider_state_from_quotes, quotes_from_rows, snapshot_from_rows
-from spx_spark.ibkr.collector import has_competing_session_error, provider_error_count
+from spx_spark.ibkr.collector import (
+    collection_failure_reason,
+    has_competing_session_error,
+    provider_error_count,
+)
 from spx_spark.ibkr.verifier import IbkrError, VerifyRow, parse_index_spec
 from spx_spark.marketdata import MarketDataQuality, Provider, ProviderStatus
 
@@ -38,6 +42,13 @@ def test_provider_error_count_ignores_farm_status_messages() -> None:
     ]
 
     assert provider_error_count(errors) == 1
+
+
+def test_collection_failure_reason_marks_socket_disconnect_as_possible_competing_session() -> None:
+    reason = collection_failure_reason(ConnectionError("Socket disconnect"), [])
+
+    assert "competing session" in reason
+    assert "Socket disconnect" in reason
 
 
 def test_quotes_from_rows_normalizes_ibkr_verify_rows():
