@@ -15,7 +15,9 @@ fi
 mkdir -p "$CONFIG_DIR"
 chmod 700 "$CONFIG_DIR"
 
-python3 - "$SOURCE_CONFIG" "$CONFIG_PATH" <<'PY'
+PY_SCRIPT="$(mktemp)"
+trap 'rm -f "$PY_SCRIPT"' EXIT
+cat > "$PY_SCRIPT" <<'PY'
 from __future__ import annotations
 
 import getpass
@@ -29,32 +31,18 @@ from pathlib import Path
 source = Path(sys.argv[1])
 target = Path(sys.argv[2])
 
-try:
-    tty = open("/dev/tty", "r+", encoding="utf-8", buffering=1)
-except OSError as exc:
-    raise SystemExit(
-        "This script must be run from an interactive terminal because it prompts "
-        "for IBKR credentials."
-    ) from exc
-
-
-def tty_input(label: str) -> str:
-    tty.write(label)
-    tty.flush()
-    return tty.readline().strip()
-
 
 def prompt(default: str, label: str) -> str:
     suffix = f" [{default}]" if default else ""
-    value = tty_input(f"{label}{suffix}: ")
+    value = input(f"{label}{suffix}: ").strip()
     return value or default
 
 
-login_id = tty_input("IBKR username: ")
+login_id = input("IBKR username: ").strip()
 if not login_id:
     raise SystemExit("IBKR username is required")
 
-password = getpass.getpass("IBKR password: ", stream=tty)
+password = getpass.getpass("IBKR password: ")
 if not password:
     raise SystemExit("IBKR password is required")
 
@@ -71,7 +59,7 @@ read_only_login = prompt("yes", "Read-only login").lower()
 if read_only_login not in {"yes", "no"}:
     raise SystemExit("Read-only login must be yes or no")
 
-second_factor_device = tty_input("Second factor device name, if IBKR shows multiple devices [blank]: ")
+second_factor_device = input("Second factor device name, if IBKR shows multiple devices [blank]: ").strip()
 relogin_after_2fa_timeout = prompt("yes", "Relogin after IBKR Mobile 2FA timeout").lower()
 if relogin_after_2fa_timeout not in {"yes", "no"}:
     raise SystemExit("Relogin after 2FA timeout must be yes or no")
@@ -129,3 +117,5 @@ print(f"OverrideTwsApiPort={api_port}")
 print(f"ReadOnlyLogin={read_only_login}")
 print(f"ExistingSessionDetectedAction={existing_session_action}")
 PY
+
+python3 "$PY_SCRIPT" "$SOURCE_CONFIG" "$CONFIG_PATH"
