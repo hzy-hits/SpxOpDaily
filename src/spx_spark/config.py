@@ -131,6 +131,7 @@ class IbkrSettings:
     max_option_lines: int
     quote_wait_seconds: float
     stale_after_seconds: float
+    qualify_contracts: bool
 
     @classmethod
     def from_env(cls) -> "IbkrSettings":
@@ -159,6 +160,7 @@ class IbkrSettings:
             max_option_lines=_env_int("IBKR_MAX_OPTION_LINES", 40),
             quote_wait_seconds=_env_float("IBKR_QUOTE_WAIT_SECONDS", 8.0),
             stale_after_seconds=_env_float("IBKR_STALE_AFTER_SECONDS", 10.0),
+            qualify_contracts=_env_bool("IBKR_QUALIFY_CONTRACTS", False),
         )
 
 

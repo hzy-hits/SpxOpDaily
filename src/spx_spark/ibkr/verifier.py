@@ -191,7 +191,12 @@ def disable_startup_positions_fetch(ib: Any) -> None:
     ib.reqPositionsAsync = no_startup_positions
 
 
-def qualify_and_subscribe(ib: Any, contracts: list[tuple[str, str, Any]]) -> dict[str, tuple[Any, VerifyRow]]:
+def qualify_and_subscribe(
+    ib: Any,
+    contracts: list[tuple[str, str, Any]],
+    *,
+    qualify: bool = False,
+) -> dict[str, tuple[Any, VerifyRow]]:
     result: dict[str, tuple[Any, VerifyRow]] = {}
     for label, kind, contract in contracts:
         row = VerifyRow(
@@ -200,16 +205,17 @@ def qualify_and_subscribe(ib: Any, contracts: list[tuple[str, str, Any]]) -> dic
             symbol=getattr(contract, "symbol", label),
             exchange=getattr(contract, "exchange", None),
         )
-        try:
-            qualified = ib.qualifyContracts(contract)
-            if qualified:
-                contract = qualified[0]
-                row.exchange = getattr(contract, "exchange", row.exchange)
-            row.qualified = True
-        except Exception as exc:  # noqa: BLE001
-            row.error = f"qualify failed: {exc}"
-            result[label] = (None, row)
-            continue
+        if qualify:
+            try:
+                qualified = ib.qualifyContracts(contract)
+                if qualified:
+                    contract = qualified[0]
+                    row.exchange = getattr(contract, "exchange", row.exchange)
+                row.qualified = True
+            except Exception as exc:  # noqa: BLE001
+                row.error = f"qualify failed: {exc}"
+                result[label] = (None, row)
+                continue
 
         try:
             ticker = ib.reqMktData(contract, "", False, False)
@@ -430,7 +436,7 @@ def run(argv: list[str] | None = None) -> int:
         ib.reqMarketDataType(settings.market_data_type)
 
         base_contracts = build_base_contracts(settings)
-        base_subs = qualify_and_subscribe(ib, base_contracts)
+        base_subs = qualify_and_subscribe(ib, base_contracts, qualify=settings.qualify_contracts)
         ib.sleep(settings.quote_wait_seconds)
         base_rows = snapshot_rows(base_subs, settings.stale_after_seconds)
 
@@ -443,7 +449,11 @@ def run(argv: list[str] | None = None) -> int:
         else:
             print(f"Estimated SPX ATM reference {atm_reference:.2f} from {atm_source}")
             option_contracts = build_spxw_option_contracts(settings, atm_reference)
-            option_subs = qualify_and_subscribe(ib, option_contracts)
+            option_subs = qualify_and_subscribe(
+                ib,
+                option_contracts,
+                qualify=settings.qualify_contracts,
+            )
             ib.sleep(settings.quote_wait_seconds)
             rows = base_rows + snapshot_rows(option_subs, settings.stale_after_seconds)
 

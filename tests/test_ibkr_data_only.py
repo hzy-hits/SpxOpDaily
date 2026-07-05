@@ -5,7 +5,7 @@ import asyncio
 from pathlib import Path
 
 from spx_spark.config import IbkrSettings
-from spx_spark.ibkr.verifier import connect_market_data_only
+from spx_spark.ibkr.verifier import connect_market_data_only, qualify_and_subscribe
 
 
 FORBIDDEN_IBKR_METHODS = {
@@ -116,6 +116,7 @@ def test_ibkr_connect_overrides_library_startup_positions_fetch() -> None:
         max_option_lines=40,
         quote_wait_seconds=1.0,
         stale_after_seconds=10.0,
+        qualify_contracts=False,
     )
     ib = FakeIB()
 
@@ -125,3 +126,33 @@ def test_ibkr_connect_overrides_library_startup_positions_fetch() -> None:
     assert ib.connect_args == ("127.0.0.1", 4001)
     assert ib.connect_kwargs["readonly"] is True
     assert ib.connect_kwargs["fetchFields"].value == 0
+
+
+def test_ibkr_subscribe_can_skip_contract_qualification() -> None:
+    class Contract:
+        symbol = "SPX"
+        exchange = "CBOE"
+
+    class FakeIB:
+        qualify_called = False
+
+        def qualifyContracts(self, contract):
+            self.qualify_called = True
+            return [contract]
+
+        def reqMktData(self, contract, generic_tick_list, snapshot, regulatory_snapshot):
+            return object()
+
+    ib = FakeIB()
+
+    rows = qualify_and_subscribe(
+        ib,
+        [("index:SPX", "index", Contract())],
+        qualify=False,
+    )
+
+    assert ib.qualify_called is False
+    ticker, row = rows["index:SPX"]
+    assert ticker is not None
+    assert row.subscribed is True
+    assert row.qualified is False

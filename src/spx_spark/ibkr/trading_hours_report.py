@@ -455,7 +455,11 @@ def run(argv: list[str] | None = None) -> int:
         ib.errorEvent += on_error
         ib.reqMarketDataType(settings.market_data_type)
 
-        base_subs = qualify_and_subscribe(ib, build_base_contracts(settings))
+        base_subs = qualify_and_subscribe(
+            ib,
+            build_base_contracts(settings),
+            qualify=settings.qualify_contracts,
+        )
         ib.sleep(settings.quote_wait_seconds)
         base_rows = snapshot_rows(base_subs, settings.stale_after_seconds)
 
@@ -477,6 +481,7 @@ def run(argv: list[str] | None = None) -> int:
             option_subs = qualify_and_subscribe(
                 ib,
                 build_spxw_option_contracts(settings, atm_reference),
+                qualify=settings.qualify_contracts,
             )
             ib.sleep(settings.quote_wait_seconds)
             rows = base_rows + snapshot_rows(option_subs, settings.stale_after_seconds)

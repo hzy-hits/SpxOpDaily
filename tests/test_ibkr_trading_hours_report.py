@@ -29,6 +29,7 @@ def make_settings() -> IbkrSettings:
         max_option_lines=40,
         quote_wait_seconds=0.1,
         stale_after_seconds=10.0,
+        qualify_contracts=False,
     )
 
 

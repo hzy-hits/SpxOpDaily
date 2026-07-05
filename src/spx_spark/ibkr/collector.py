@@ -222,7 +222,11 @@ def run(argv: list[str] | None = None) -> int:
         ib.errorEvent += on_error
         ib.reqMarketDataType(ibkr_settings.market_data_type)
 
-        base_subs = qualify_and_subscribe(ib, build_base_contracts(ibkr_settings))
+        base_subs = qualify_and_subscribe(
+            ib,
+            build_base_contracts(ibkr_settings),
+            qualify=ibkr_settings.qualify_contracts,
+        )
         ib.sleep(ibkr_settings.quote_wait_seconds)
         base_rows = snapshot_rows(base_subs, ibkr_settings.stale_after_seconds)
 
@@ -237,7 +241,11 @@ def run(argv: list[str] | None = None) -> int:
             if not args.json:
                 print(f"Estimated SPX ATM reference {atm_reference:.2f} from {atm_source}")
             option_contracts = build_spxw_option_contracts(ibkr_settings, atm_reference)
-            option_subs = qualify_and_subscribe(ib, option_contracts)
+            option_subs = qualify_and_subscribe(
+                ib,
+                option_contracts,
+                qualify=ibkr_settings.qualify_contracts,
+            )
             ib.sleep(ibkr_settings.quote_wait_seconds)
             rows = base_rows + snapshot_rows(option_subs, ibkr_settings.stale_after_seconds)
 

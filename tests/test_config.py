@@ -120,3 +120,4 @@ def test_ibkr_default_verifier_uses_dia_as_dow_proxy(monkeypatch, tmp_path):
     ]
     assert "RSP" in settings.verify_stocks
     assert "XLU" in settings.verify_stocks
+    assert settings.qualify_contracts is False
