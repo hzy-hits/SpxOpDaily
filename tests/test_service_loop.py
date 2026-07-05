@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 
 from spx_spark.service_loop import (
     ServiceLoopSettings,
@@ -80,6 +81,20 @@ def test_run_task_keeps_failure_stdout_tail() -> None:
 
     assert event["ok"] is False
     assert event["stdout_tail"] == "diagnostic payload\n"
+
+
+def test_run_task_times_out_hanging_task(monkeypatch) -> None:
+    monkeypatch.setenv("SPX_SERVICE_TASK_TIMEOUT_SECONDS", "1")
+
+    def hanging_task() -> int:
+        time.sleep(5)
+        return 0
+
+    event = run_task(ServiceTask("hang", 1, hanging_task))
+
+    assert event["ok"] is False
+    assert event["exit_code"] == 1
+    assert event["error"] == "service task exceeded 1s timeout"
 
 
 def test_ibkr_task_extracts_provider_state_from_json_stdout() -> None:

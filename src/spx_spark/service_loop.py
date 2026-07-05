@@ -5,8 +5,10 @@ import contextlib
 import io
 import json
 import os
+import signal
 import time
 from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 
@@ -17,6 +19,7 @@ from spx_spark.ibkr import collector as ibkr_collector
 
 
 TaskFn = Callable[[], int]
+DEFAULT_TASK_TIMEOUT_SECONDS = 120
 
 
 @dataclass(frozen=True)
@@ -77,6 +80,25 @@ def env_int(name: str, default: int) -> int:
     return int(raw)
 
 
+@contextmanager
+def task_timeout(seconds: int):
+    if seconds <= 0:
+        yield
+        return
+
+    def raise_timeout(signum, frame) -> None:  # noqa: ARG001
+        raise TimeoutError(f"service task exceeded {seconds}s timeout")
+
+    previous = signal.getsignal(signal.SIGALRM)
+    signal.signal(signal.SIGALRM, raise_timeout)
+    signal.setitimer(signal.ITIMER_REAL, seconds)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+
+
 def run_hyperliquid() -> int:
     return hyperliquid_collector.run(["--json"])
 
@@ -126,7 +148,8 @@ def run_task(task: ServiceTask) -> dict[str, object]:
     stdout = io.StringIO()
     stderr = io.StringIO()
     try:
-        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+        timeout_seconds = env_int("SPX_SERVICE_TASK_TIMEOUT_SECONDS", DEFAULT_TASK_TIMEOUT_SECONDS)
+        with task_timeout(timeout_seconds), contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
             code = task.fn()
         ok = code == 0
         error = None
