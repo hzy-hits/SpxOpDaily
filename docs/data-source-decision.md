@@ -254,6 +254,7 @@ Default automated policy:
 - if IB Gateway is not authenticated, do not solve login by storing credentials until explicitly approved
 - if mobile or desktop trading kicks IBKR out, mark IBKR unavailable and do not immediately fight for the session
 - while IBKR is unavailable because of a competing session, keep sending alerts from Schwab and non-broker feeds
+- if no live ES/MES/SPX anchor remains, Hyperliquid can only emit a degraded fallback watch prompt that tells the user to verify real SPX/SPXW quotes on the trading device; it must not become SPXW strategy confirmation
 - probe IBKR availability every 5 minutes by default (`IBKR_CONFLICT_PROBE_SECONDS=300`)
 - a probe is not a takeover and must not force-disconnect the phone or desktop session
 - retry ordinary connection failures every few minutes
@@ -290,6 +291,7 @@ Fallback should be feature-level, not a global provider switch:
 - SPXW option quotes and Greeks: IBKR first; Schwab if verified for SPX/SPXW; otherwise unavailable
 - SPY/QQQ/IWM option quotes: Schwab first during protected manual trading; IBKR can cross-check inside its allowed window
 - ES/MES: Schwab or IBKR when entitled; Hyperliquid SPX is context only, not a true ES replacement
+- when IBKR is recently unavailable and no TradFi anchor is live, Hyperliquid can preserve situational awareness through `broker_unavailable_proxy_watch`, but wall/gamma/IV alerts stay disabled until SPXW data is live and fresh
 - SPX/VIX/VVIX/SKEW: IBKR/Cboe when available; otherwise mark unavailable unless another verified vendor is added
 - risk proxies: Schwab/IBKR ETF quotes are interchangeable if live and fresh
 - chain/prediction signals: keep running independently regardless of broker state

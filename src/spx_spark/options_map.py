@@ -41,6 +41,8 @@ class OptionCoverage:
     live: int
     stale: int
     delayed: int
+    unknown_age: int
+    max_age_ms: float | None
     with_bid_ask: int
     with_mid: int
     with_iv: int
@@ -150,14 +152,14 @@ def option_mid(quote: Quote | None) -> float | None:
 
 
 def option_iv(quote: Quote | None) -> float | None:
-    if quote is None or quote.greeks is None:
+    if quote is None or quote.quality in BAD_QUALITIES or quote.greeks is None:
         return None
     value = finite_float(quote.greeks.implied_vol)
     return value if value is not None and value > 0 else None
 
 
 def option_gamma(quote: Quote) -> float | None:
-    if quote.greeks is None:
+    if quote.quality in BAD_QUALITIES or quote.greeks is None:
         return None
     value = finite_float(quote.greeks.gamma)
     return value if value is not None and value > 0 else None
@@ -182,14 +184,18 @@ def pair_by_strike(quotes: list[Quote]) -> dict[float, dict[OptionRight, Quote]]
     return pairs
 
 
-def build_coverage(quotes: list[Quote]) -> OptionCoverage:
+def build_coverage(quotes: list[Quote], *, as_of: datetime) -> OptionCoverage:
     quality_counts = Counter(quote.quality for quote in quotes)
     spreads = [quote.spread_bps for quote in quotes if quote.spread_bps is not None]
+    ages = [quote.quote_age_ms(as_of) for quote in quotes]
+    known_ages = [age for age in ages if age is not None]
     return OptionCoverage(
         total=len(quotes),
         live=quality_counts[MarketDataQuality.LIVE],
         stale=quality_counts[MarketDataQuality.STALE],
         delayed=quality_counts[MarketDataQuality.DELAYED] + quality_counts[MarketDataQuality.DELAYED_FROZEN],
+        unknown_age=sum(1 for age in ages if age is None),
+        max_age_ms=max(known_ages) if known_ages else None,
         with_bid_ask=sum(1 for quote in quotes if quote.mid is not None),
         with_mid=sum(1 for quote in quotes if option_mid(quote) is not None),
         with_iv=sum(1 for quote in quotes if option_iv(quote) is not None),
@@ -290,8 +296,14 @@ def classify_gamma_state(
     return "mixed_gamma"
 
 
-def build_expiry_map(expiry: str, quotes: list[Quote], underlier: float | None) -> ExpiryOptionsMap:
-    coverage = build_coverage(quotes)
+def build_expiry_map(
+    expiry: str,
+    quotes: list[Quote],
+    underlier: float | None,
+    *,
+    as_of: datetime,
+) -> ExpiryOptionsMap:
+    coverage = build_coverage(quotes, as_of=as_of)
     pairs = pair_by_strike(quotes)
     strikes = sorted(pairs)
     warnings: list[str] = []
@@ -407,7 +419,7 @@ def build_options_map(state: LatestState) -> OptionsMap:
         warnings.append("missing SPXW option quotes")
 
     expiries = tuple(
-        build_expiry_map(expiry, quotes, underlier.price)
+        build_expiry_map(expiry, quotes, underlier.price, as_of=state.as_of)
         for expiry, quotes in sorted(grouped.items())
     )
     return OptionsMap(

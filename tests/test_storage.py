@@ -156,3 +156,45 @@ def test_latest_state_round_trips_provider_state(tmp_path):
     assert state.provider_states[0].provider == Provider.IBKR
     assert state.provider_states[0].status == ProviderStatus.UNAVAILABLE
     assert state.provider_states[0].connected is False
+
+
+def test_latest_state_merges_provider_states_across_provider_updates(tmp_path):
+    settings = make_storage_settings(tmp_path)
+    store = LatestStateStore(settings)
+    now = datetime(2026, 7, 6, 13, 30, tzinfo=timezone.utc)
+    ibkr_state = ProviderState(
+        provider=Provider.IBKR,
+        status=ProviderStatus.UNAVAILABLE,
+        checked_at=now,
+        reason="competing session",
+        connected=False,
+        authenticated=False,
+        priority=0,
+    )
+    hyperliquid_state = ProviderState(
+        provider=Provider.HYPERLIQUID,
+        status=ProviderStatus.AVAILABLE,
+        checked_at=now + timedelta(seconds=30),
+        connected=True,
+        authenticated=None,
+        priority=0,
+    )
+
+    store.update([], now=now, provider_states=[ibkr_state])
+    store.update(
+        [
+            make_quote(
+                provider=Provider.HYPERLIQUID,
+                quality=MarketDataQuality.LIVE,
+                mark=7505,
+                received_at=now + timedelta(seconds=30),
+            )
+        ],
+        now=now + timedelta(seconds=30),
+        provider_states=[hyperliquid_state],
+    )
+    state = LatestStateStore(settings).load(now=now + timedelta(seconds=30))
+
+    states_by_provider = {item.provider: item for item in state.provider_states}
+    assert states_by_provider[Provider.IBKR].status == ProviderStatus.UNAVAILABLE
+    assert states_by_provider[Provider.HYPERLIQUID].status == ProviderStatus.AVAILABLE

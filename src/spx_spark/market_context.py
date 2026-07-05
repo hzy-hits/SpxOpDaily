@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+import os
 
 from spx_spark.marketdata import MarketDataQuality, Quote
 from spx_spark.storage import LatestState
@@ -35,6 +36,24 @@ DEFAULT_MARKET_CONTEXT_INSTRUMENTS = (
     "future:ES",
     "future:MES",
     "crypto_perp:xyz:SP500",
+)
+
+BAD_CONTEXT_QUALITIES = {
+    MarketDataQuality.MISSING.value,
+    MarketDataQuality.ERROR.value,
+    MarketDataQuality.STALE.value,
+    MarketDataQuality.UNKNOWN.value,
+}
+
+HYPERLIQUID_PROXY_IDS = (
+    "crypto_perp:xyz:SP500",
+    "crypto_perp:SPX",
+)
+
+TRADFI_ANCHOR_IDS = (
+    "future:ES",
+    "future:MES",
+    "index:SPX",
 )
 
 
@@ -92,6 +111,7 @@ def build_market_context(
             "xlu_spy": ratio(by_id, "equity:XLU", "equity:SPY"),
             "hyg_lqd": ratio(by_id, "equity:HYG", "equity:LQD"),
             "tlt_ief": ratio(by_id, "equity:TLT", "equity:IEF"),
+            "hyperliquid_spx_proxy": hyperliquid_spx_proxy_gate(by_id),
         },
     }
 
@@ -146,3 +166,85 @@ def ratio(
     if numerator.price is None or denominator.price is None or denominator.price <= 0:
         return None
     return numerator.price / denominator.price
+
+
+def env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if not raw:
+        return default
+    return float(raw)
+
+
+def usable_entry(entry: MarketContextEntry | None) -> bool:
+    return bool(entry and entry.price is not None and entry.quality not in BAD_CONTEXT_QUALITIES)
+
+
+def first_usable_entry(
+    entries: dict[str, MarketContextEntry],
+    instrument_ids: tuple[str, ...],
+) -> MarketContextEntry | None:
+    for instrument_id in instrument_ids:
+        entry = entries.get(instrument_id)
+        if usable_entry(entry):
+            return entry
+    return None
+
+
+def hyperliquid_spx_proxy_gate(entries: dict[str, MarketContextEntry]) -> dict[str, object]:
+    warn_bps = env_float("HYPERLIQUID_PROXY_BASIS_WARN_BPS", 50.0)
+    block_bps = env_float("HYPERLIQUID_PROXY_BASIS_BLOCK_BPS", 100.0)
+    proxy = first_usable_entry(entries, HYPERLIQUID_PROXY_IDS)
+    if proxy is None:
+        return {
+            "state": "missing",
+            "usable_for_alert": False,
+            "context_only": True,
+            "reason": "Hyperliquid SPX proxy missing or degraded.",
+            "basis_bps": None,
+            "anchor": None,
+            "warn_bps": warn_bps,
+            "block_bps": block_bps,
+        }
+
+    anchor = first_usable_entry(entries, TRADFI_ANCHOR_IDS)
+    if anchor is None:
+        return {
+            "state": "unanchored_context_only",
+            "usable_for_alert": False,
+            "context_only": True,
+            "reason": "No live ES/MES/SPX anchor; Hyperliquid proxy is context only.",
+            "basis_bps": None,
+            "anchor": None,
+            "proxy": proxy.instrument_id,
+            "warn_bps": warn_bps,
+            "block_bps": block_bps,
+        }
+
+    assert proxy.price is not None
+    assert anchor.price is not None
+    basis_bps = (proxy.price / anchor.price - 1.0) * 10_000.0
+    abs_basis = abs(basis_bps)
+    if abs_basis >= block_bps:
+        state = "basis_blocked"
+        usable_for_alert = False
+    elif abs_basis >= warn_bps:
+        state = "basis_warn"
+        usable_for_alert = False
+    else:
+        state = "basis_ok"
+        usable_for_alert = True
+    return {
+        "state": state,
+        "usable_for_alert": usable_for_alert,
+        "context_only": not usable_for_alert,
+        "reason": (
+            "Hyperliquid proxy is anchored to TradFi."
+            if usable_for_alert
+            else "Hyperliquid proxy basis is too wide for alert scoring."
+        ),
+        "basis_bps": basis_bps,
+        "anchor": anchor.instrument_id,
+        "proxy": proxy.instrument_id,
+        "warn_bps": warn_bps,
+        "block_bps": block_bps,
+    }

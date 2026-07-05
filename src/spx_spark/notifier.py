@@ -136,6 +136,13 @@ def alert_key(alert: dict[str, object]) -> str:
 
 
 def is_human_visible_alert(alert: dict[str, object]) -> bool:
+    if alert.get("research_only") is True:
+        return False
+    kind = str(alert.get("kind") or "").lower()
+    source_gate = str(alert.get("source_gate") or "").lower()
+    blocked_terms = ("smart", "wallet", "onchain", "hyperliquid_proxy")
+    if any(term in kind or term in source_gate for term in blocked_terms):
+        return False
     instrument_id = str(alert.get("instrument_id") or "")
     return any(instrument_id.startswith(prefix) for prefix in HUMAN_VISIBLE_ALERT_PREFIXES)
 
@@ -301,8 +308,12 @@ def build_codex_prompt(payload: dict[str, object], alerts: list[dict[str, object
             "只根据下面的本机 JSON 判断是否需要推送给人类。不要给自动下单指令，不要编造缺失数据。",
             "人类只交易 SPX/SPXW；输出只能提 SPX、SPXW、ES、期权墙、gamma、IV surface。",
             "不要提任何非 SPX/SPXW/ES 标的名；隐藏算法上下文只能影响是否推送，不能进入人类可见解释。",
+            "凡是 research_only、stale、missing、unknown、coverage 不足或 IV surface stale，默认不外发；只说明数据质量。",
+            "带 source_gate 的告警默认不外发，唯一例外是 broker_unavailable_fallback；它只能提示打开交易端核验。",
+            "如果 SPXW 期权 freshness gate 失败，不得基于 wall/gamma/IV 做看盘结论。",
+            "如果 ES/SPX anchor 缺失，不得把任何链上或 proxy 数据当作交易确认。",
             "发送决策必须优先参考 Micopedia、SPXW call wall/put wall/zero gamma、以及过去 1 小时 IV surface/期权变化。",
-            "输出中文，最多 6 行。必须包含：结论、原因、数据质量、需要人类看的 SPX/SPXW 检查项。",
+            "输出中文，最多 6 行。必须包含：结论、原因、数据质量、快照时间、需要人类看的 SPX/SPXW 检查项。",
             "如果数据质量不足，明确说 degraded。",
             "如果值得外发，第一行必须用 `需要看盘:` 开头；如果不值得外发，第一行必须用 `不需要推送:` 开头。",
             json.dumps(compact_payload, ensure_ascii=False, sort_keys=True),

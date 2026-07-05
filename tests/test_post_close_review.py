@@ -7,7 +7,9 @@ from spx_spark.config import IvSurfaceSettings, StorageSettings
 from spx_spark.iv_surface import build_iv_surface_snapshot, write_snapshot
 from spx_spark.marketdata import InstrumentId, MarketDataQuality, OptionGreeks, Provider, Quote
 from spx_spark.post_close_review import (
+    ReviewLlmSettings,
     build_review_payload,
+    maybe_write_llm_review,
     render_markdown,
     resolve_trading_date,
     review_paths,
@@ -155,3 +157,43 @@ def test_post_close_review_summarizes_spx_options_and_writes_hermes_export(tmp_p
     assert "SPX/SPXW Post-Close Review" in markdown
     assert "VIX" not in markdown
     assert Path(written["hermes_latest_markdown_path"]).exists()
+
+
+def test_llm_writer_disabled_keeps_template() -> None:
+    payload = {"trading_date": "2026-07-06"}
+    markdown = "# SPX/SPXW Post-Close Review - 2026-07-06\n\nTemplate"
+    settings = ReviewLlmSettings(
+        enabled=False,
+        provider="deepseek",
+        model="deepseek-v4-pro",
+        url="https://api.deepseek.com/v1/chat/completions",
+        env_file="/no/such/file",
+        timeout_seconds=1,
+        max_tokens=100,
+    )
+
+    output = maybe_write_llm_review(payload, markdown, settings)
+
+    assert output == markdown
+    assert payload["llm_writer"]["status"] == "disabled"
+
+
+def test_llm_writer_falls_back_without_key(monkeypatch) -> None:
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    payload = {"trading_date": "2026-07-06"}
+    markdown = "# SPX/SPXW Post-Close Review - 2026-07-06\n\nTemplate"
+    settings = ReviewLlmSettings(
+        enabled=True,
+        provider="deepseek",
+        model="deepseek-v4-pro",
+        url="https://api.deepseek.com/v1/chat/completions",
+        env_file="/no/such/file",
+        timeout_seconds=1,
+        max_tokens=100,
+    )
+
+    output = maybe_write_llm_review(payload, markdown, settings)
+
+    assert output == markdown
+    assert payload["llm_writer"]["status"] == "fallback_template"
+    assert "missing DEEPSEEK_API_KEY" in payload["llm_writer"]["error"]

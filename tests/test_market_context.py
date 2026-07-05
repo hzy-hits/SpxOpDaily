@@ -4,7 +4,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from spx_spark.market_context import build_market_context
-from spx_spark.marketdata import InstrumentId, MarketDataQuality, Provider, Quote
+from spx_spark.marketdata import InstrumentId, InstrumentType, MarketDataQuality, Provider, Quote
 from spx_spark.storage import LatestState
 
 
@@ -15,6 +15,26 @@ def make_quote(instrument_id: InstrumentId, price: float, close: float, now: dat
     return Quote(
         instrument=instrument_id,
         provider=Provider.IBKR,
+        provider_symbol=instrument_id.canonical_id,
+        received_at=now,
+        quality=MarketDataQuality.LIVE,
+        mark=price,
+        close=close,
+        quote_time=now,
+    )
+
+
+def make_provider_quote(
+    instrument_id: InstrumentId,
+    price: float,
+    close: float,
+    now: datetime,
+    *,
+    provider: Provider,
+) -> Quote:
+    return Quote(
+        instrument=instrument_id,
+        provider=provider,
         provider_symbol=instrument_id.canonical_id,
         received_at=now,
         quality=MarketDataQuality.LIVE,
@@ -52,3 +72,65 @@ def test_market_context_includes_vol_and_cross_asset_ratios() -> None:
     assert context["derived"]["vix_vix3m"] == 18.0 / 20.0
     assert context["derived"]["qqq_spy"] == 725.0 / 750.0
     assert context["derived"]["hyg_lqd"] == 80.0 / 108.0
+
+
+def test_hyperliquid_proxy_gate_is_unanchored_without_es_or_spx() -> None:
+    now = datetime(2026, 7, 7, 3, 15, tzinfo=BJ_TZ)
+    state = LatestState(
+        created_at=now,
+        as_of=now,
+        quotes=(),
+        best_quotes=(
+            make_provider_quote(
+                InstrumentId(
+                    symbol="xyz:SP500",
+                    instrument_type=InstrumentType.CRYPTO_PERP,
+                ),
+                7500.0,
+                7480.0,
+                now,
+                provider=Provider.HYPERLIQUID,
+            ),
+        ),
+    )
+
+    context = build_market_context(state)
+    gate = context["derived"]["hyperliquid_spx_proxy"]
+
+    assert gate["state"] == "unanchored_context_only"
+    assert gate["usable_for_alert"] is False
+
+
+def test_hyperliquid_proxy_gate_blocks_wide_basis() -> None:
+    now = datetime(2026, 7, 7, 3, 15, tzinfo=BJ_TZ)
+    state = LatestState(
+        created_at=now,
+        as_of=now,
+        quotes=(),
+        best_quotes=(
+            make_provider_quote(
+                InstrumentId.future("ES"),
+                7500.0,
+                7480.0,
+                now,
+                provider=Provider.IBKR,
+            ),
+            make_provider_quote(
+                InstrumentId(
+                    symbol="xyz:SP500",
+                    instrument_type=InstrumentType.CRYPTO_PERP,
+                ),
+                7600.0,
+                7480.0,
+                now,
+                provider=Provider.HYPERLIQUID,
+            ),
+        ),
+    )
+
+    context = build_market_context(state)
+    gate = context["derived"]["hyperliquid_spx_proxy"]
+
+    assert gate["state"] == "basis_blocked"
+    assert gate["usable_for_alert"] is False
+    assert gate["anchor"] == "future:ES"

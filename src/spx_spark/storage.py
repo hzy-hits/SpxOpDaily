@@ -10,6 +10,7 @@ from pathlib import Path
 from spx_spark.config import StorageSettings
 from spx_spark.marketdata import (
     MarketDataQuality,
+    Provider,
     ProviderState,
     Quote,
     as_utc,
@@ -162,8 +163,11 @@ class LatestStateStore:
     ) -> LatestUpdateResult:
         now = as_utc(now or datetime.now(tz=timezone.utc))
         incoming = tuple(quotes)
-        existing = self.load(now=now).quotes
-        provider_latest = latest_by_provider(existing + incoming)
+        existing_state = self.load(now=now)
+        provider_latest = latest_by_provider(existing_state.quotes + incoming)
+        provider_states_latest = latest_provider_states(
+            existing_state.provider_states + tuple(provider_states)
+        )
         aged_quotes = tuple(
             degrade_stale_quote(
                 quote,
@@ -178,7 +182,7 @@ class LatestStateStore:
             as_of=now,
             quotes=tuple(sorted(aged_quotes, key=quote_sort_key)),
             best_quotes=tuple(sorted(best_quotes, key=lambda quote: quote.instrument.canonical_id)),
-            provider_states=tuple(provider_states),
+            provider_states=provider_states_latest,
         )
         self.write(state)
         return LatestUpdateResult(
@@ -203,6 +207,15 @@ def latest_by_provider(quotes: Iterable[Quote]) -> tuple[Quote, ...]:
         if previous is None or as_utc(quote.received_at) >= as_utc(previous.received_at):
             result[key] = quote
     return tuple(result.values())
+
+
+def latest_provider_states(states: Iterable[ProviderState]) -> tuple[ProviderState, ...]:
+    result: dict[Provider, ProviderState] = {}
+    for state in states:
+        previous = result.get(state.provider)
+        if previous is None or as_utc(state.checked_at) >= as_utc(previous.checked_at):
+            result[state.provider] = state
+    return tuple(sorted(result.values(), key=lambda item: item.provider.value))
 
 
 def select_best_quotes(quotes: Iterable[Quote], *, as_of: datetime | None = None) -> tuple[Quote, ...]:

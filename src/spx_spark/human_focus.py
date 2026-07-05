@@ -68,6 +68,10 @@ def expiry_options_summary(expiry: ExpiryOptionsMap) -> dict[str, object]:
         "coverage": {
             "total": expiry.coverage.total,
             "live": expiry.coverage.live,
+            "stale": expiry.coverage.stale,
+            "delayed": expiry.coverage.delayed,
+            "unknown_age": expiry.coverage.unknown_age,
+            "max_age_ms": expiry.coverage.max_age_ms,
             "with_iv": expiry.coverage.with_iv,
             "with_gamma": expiry.coverage.with_gamma,
             "with_open_interest": expiry.coverage.with_open_interest,

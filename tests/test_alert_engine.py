@@ -1,10 +1,29 @@
 from __future__ import annotations
 
-from datetime import datetime
+from dataclasses import replace
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from spx_spark.alert_engine import evaluate_payload
-from spx_spark.marketdata import InstrumentId, MarketDataQuality, Provider, Quote
+from spx_spark.alert_engine import (
+    evaluate_alerts,
+    evaluate_payload,
+    iv_surface_freshness_alert,
+    iv_surface_alerts,
+)
+from spx_spark.alert_profile import active_window
+from spx_spark.iv_surface import IvSurfaceExpiry, IvSurfaceSnapshot
+from spx_spark.market_context import build_market_context
+from spx_spark.marketdata import (
+    InstrumentId,
+    InstrumentType,
+    MarketDataQuality,
+    OptionGreeks,
+    Provider,
+    ProviderState,
+    ProviderStatus,
+    Quote,
+)
+from spx_spark.options_map import build_options_map
 from spx_spark.storage import LatestState
 
 
@@ -31,12 +50,97 @@ def make_quote(
     )
 
 
-def make_state(*quotes: Quote, now: datetime) -> LatestState:
+def make_state(
+    *quotes: Quote,
+    now: datetime,
+    provider_states: tuple[ProviderState, ...] = (),
+) -> LatestState:
     return LatestState(
         created_at=now,
         as_of=now,
         quotes=tuple(quotes),
         best_quotes=tuple(quotes),
+        provider_states=provider_states,
+    )
+
+
+def make_option(
+    *,
+    expiry: str,
+    strike: float,
+    right: str,
+    mark: float,
+    now: datetime,
+    quality: MarketDataQuality = MarketDataQuality.LIVE,
+) -> Quote:
+    return Quote(
+        instrument=InstrumentId.option(
+            "SPX",
+            expiry=expiry,
+            strike=strike,
+            right=right,
+            trading_class="SPXW",
+        ),
+        provider=Provider.IBKR,
+        provider_symbol=f"SPXW:{expiry}:{strike}:{right}",
+        received_at=now,
+        quality=quality,
+        bid=mark - 0.1,
+        ask=mark + 0.1,
+        mark=mark,
+        open_interest=1000,
+        quote_time=now,
+        greeks=OptionGreeks(
+            implied_vol=0.22,
+            delta=0.5 if right == "C" else -0.5,
+            gamma=0.003,
+            theta=-1.0,
+            vega=0.3,
+            model="test",
+        ),
+    )
+
+
+def make_surface(*, as_of: datetime) -> IvSurfaceSnapshot:
+    return IvSurfaceSnapshot(
+        created_at=as_of,
+        as_of=as_of,
+        underlier_price=7500.0,
+        underlier_source="index:SPX",
+        front_expiry="20260707",
+        next_expiry="20260708",
+        front_vs_next_atm_iv_gap=0.08,
+        expiries=(
+            IvSurfaceExpiry(
+                expiry="20260707",
+                atm_iv=0.28,
+                atm_straddle_mid=30.0,
+                expected_move_points=28.0,
+                expected_move_pct=0.0037,
+                put_skew_ratio=1.25,
+                call_skew_ratio=1.0,
+                smile_slope=-0.02,
+                smile_curvature=0.01,
+                iv_surface_level=0.29,
+                iv_surface_shift_5m=0.04,
+                atm_iv_jump_5m=0.04,
+                put_skew_steepening_5m=0.10,
+                call_wing_bid=False,
+                smile_curvature_change_5m=0.01,
+                surface_fit_quality="raw_grid",
+                wide_quote_surface_degraded=False,
+                gamma_state="mixed_gamma",
+                zero_gamma=7500.0,
+                put_wall=7450.0,
+                call_wall=7550.0,
+                option_count=20,
+                iv_coverage_ratio=0.9,
+                gamma_coverage_ratio=0.9,
+                avg_spread_bps=100.0,
+                warnings=(),
+            ),
+        ),
+        warnings=(),
     )
 
 
@@ -84,3 +188,105 @@ def test_alert_engine_does_not_warn_for_optional_missing_at_critical_level() -> 
     ]
     assert optional_missing
     assert all(alert["severity"] == "low" for alert in optional_missing)
+
+
+def test_alert_engine_suppresses_option_wall_alert_when_0dte_quotes_are_stale() -> None:
+    now = datetime(2026, 7, 7, 3, 15, tzinfo=BJ_TZ)
+    stale_time = now - timedelta(seconds=30)
+    state = make_state(
+        make_quote(InstrumentId.index("SPX"), mark=7500.0, close=7490.0, now=now),
+        replace(
+            make_option(expiry="20260707", strike=7500, right="C", mark=10.0, now=stale_time),
+            quality=MarketDataQuality.STALE,
+        ),
+        make_option(expiry="20260707", strike=7500, right="P", mark=11.0, now=now),
+        now=now,
+    )
+    window = active_window(now)
+
+    alerts = evaluate_alerts(
+        state,
+        window=window,
+        options_map=build_options_map(state),
+        market_context=build_market_context(state),
+    )
+    kinds = {alert.kind for alert in alerts}
+
+    assert "option_quote_freshness_degraded" in kinds
+    assert "option_wall_proximity" not in kinds
+    assert "option_gamma_regime" not in kinds
+
+
+def test_iv_surface_stale_alert_suppresses_surface_alerts() -> None:
+    now = datetime(2026, 7, 7, 3, 15, tzinfo=BJ_TZ)
+    surface = make_surface(as_of=now - timedelta(minutes=10))
+
+    freshness = iv_surface_freshness_alert(surface, now=now)
+    active_alerts = [] if freshness is not None else iv_surface_alerts(surface, window=active_window(now))
+
+    assert freshness is not None
+    assert freshness.kind == "iv_surface_stale"
+    assert active_alerts == []
+
+
+def test_hyperliquid_proxy_is_context_only_without_tradfi_anchor() -> None:
+    now = datetime(2026, 7, 7, 7, 15, tzinfo=BJ_TZ)
+    hl = Quote(
+        instrument=InstrumentId(
+            symbol="xyz:SP500",
+            instrument_type=InstrumentType.CRYPTO_PERP,
+        ),
+        provider=Provider.HYPERLIQUID,
+        provider_symbol="xyz:SP500",
+        received_at=now,
+        quality=MarketDataQuality.LIVE,
+        mark=7600.0,
+        close=7500.0,
+        quote_time=now,
+    )
+    state = make_state(hl, now=now)
+    context = build_market_context(state)
+
+    alerts = evaluate_alerts(state, window=active_window(now), market_context=context)
+    kinds = {alert.kind for alert in alerts}
+    proxy_alerts = [alert for alert in alerts if alert.kind == "hyperliquid_proxy_quality_gate"]
+
+    assert "price_move_from_close" not in kinds
+    assert proxy_alerts
+    assert proxy_alerts[0].research_only is True
+
+
+def test_hyperliquid_proxy_can_trigger_degraded_watch_when_ibkr_feed_is_unavailable() -> None:
+    now = datetime(2026, 7, 7, 3, 15, tzinfo=BJ_TZ)
+    hl = Quote(
+        instrument=InstrumentId(
+            symbol="xyz:SP500",
+            instrument_type=InstrumentType.CRYPTO_PERP,
+        ),
+        provider=Provider.HYPERLIQUID,
+        provider_symbol="xyz:SP500",
+        received_at=now,
+        quality=MarketDataQuality.LIVE,
+        mark=7600.0,
+        close=7500.0,
+        quote_time=now,
+    )
+    ibkr_state = ProviderState(
+        provider=Provider.IBKR,
+        status=ProviderStatus.UNAVAILABLE,
+        checked_at=now,
+        reason="competing session; phone owns trading session",
+        connected=False,
+        authenticated=False,
+        priority=0,
+    )
+    state = make_state(hl, now=now, provider_states=(ibkr_state,))
+    context = build_market_context(state)
+
+    alerts = evaluate_alerts(state, window=active_window(now), market_context=context)
+    fallback_alerts = [alert for alert in alerts if alert.kind == "broker_unavailable_proxy_watch"]
+
+    assert fallback_alerts
+    assert fallback_alerts[0].instrument_id == "index:SPX"
+    assert fallback_alerts[0].quality == "degraded"
+    assert fallback_alerts[0].research_only is False

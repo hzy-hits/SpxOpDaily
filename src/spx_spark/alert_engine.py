@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from dataclasses import asdict, dataclass
 from dataclasses import replace
 from datetime import datetime
@@ -16,7 +17,7 @@ from spx_spark.iv_surface import (
     summarize_surface_history,
 )
 from spx_spark.market_context import build_market_context
-from spx_spark.marketdata import MarketDataQuality, Quote
+from spx_spark.marketdata import MarketDataQuality, Provider, ProviderState, ProviderStatus, Quote
 from spx_spark.notifier import notify_payload
 from spx_spark.options_map import OptionsMap, build_options_map
 from spx_spark.storage import LatestState, LatestStateStore
@@ -92,6 +93,8 @@ class Alert:
     quality: str | None = None
     value: float | None = None
     threshold: float | None = None
+    research_only: bool = False
+    source_gate: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -110,6 +113,20 @@ def severity_for_priority(priority: str) -> str:
 
 def find_best(state: LatestState, instrument_id: str) -> Quote | None:
     return state.best_quote(instrument_id)
+
+
+def env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if not raw:
+        return default
+    return float(raw)
+
+
+def env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if not raw:
+        return default
+    return raw.lower() in {"1", "true", "yes", "on"}
 
 
 def quote_health_alert(
@@ -186,6 +203,7 @@ def evaluate_alerts(
     window: AlertWindow,
     options_map: OptionsMap | None = None,
     iv_surface: IvSurfaceSnapshot | None = None,
+    market_context: dict[str, object] | None = None,
 ) -> list[Alert]:
     alerts: list[Alert] = []
     required = set(window.required_instruments)
@@ -202,6 +220,8 @@ def evaluate_alerts(
 
     threshold = MOVE_THRESHOLDS_BPS.get(window.priority, MOVE_THRESHOLDS_BPS["normal"])
     for instrument_id in BASELINE_INSTRUMENTS:
+        if instrument_id.startswith("crypto_perp:") and not hyperliquid_proxy_usable(market_context):
+            continue
         quote = find_best(state, instrument_id)
         if quote is None or quote.quality in BAD_QUALITIES:
             continue
@@ -212,7 +232,45 @@ def evaluate_alerts(
     alerts.extend(option_map_alerts(options_map or build_options_map(state), window=window))
     if iv_surface is not None:
         alerts.extend(iv_surface_alerts(iv_surface, window=window))
+    alerts.extend(market_context_alerts(market_context))
+    alerts.extend(proxy_fallback_watch_alerts(state, window=window, market_context=market_context))
     return alerts
+
+
+def option_coverage_is_fresh(expiry: object) -> bool:
+    coverage = getattr(expiry, "coverage", None)
+    if coverage is None or coverage.total <= 0:
+        return False
+    min_live_ratio = env_float("ALERT_MIN_OPTION_LIVE_RATIO", 0.5)
+    if coverage.live / coverage.total < min_live_ratio:
+        return False
+    max_age_ms = coverage.max_age_ms
+    if max_age_ms is not None and max_age_ms > env_float("ALERT_MAX_OPTION_QUOTE_AGE_MS", 20_000.0):
+        return False
+    if env_bool("ALERT_REQUIRE_OPTION_QUOTE_TIMESTAMPS", False):
+        known_ratio = (coverage.total - coverage.unknown_age) / coverage.total
+        if known_ratio < 0.75:
+            return False
+    return True
+
+
+def option_freshness_alert(expiry: object, *, window: AlertWindow) -> Alert:
+    coverage = getattr(expiry, "coverage")
+    expiry_id = getattr(expiry, "expiry")
+    live_ratio = coverage.live / max(coverage.total, 1)
+    return Alert(
+        severity="medium" if window.priority not in {"low", "off"} else "low",
+        kind="option_quote_freshness_degraded",
+        instrument_id=f"option_map:SPXW:{expiry_id}",
+        title=f"SPXW {expiry_id} quote freshness degraded",
+        detail=(
+            f"SPXW {expiry_id} live ratio={live_ratio:.2f}, stale={coverage.stale}, "
+            f"max_age_ms={coverage.max_age_ms}; wall/gamma alerts are suppressed."
+        ),
+        quality="degraded",
+        value=live_ratio,
+        threshold=env_float("ALERT_MIN_OPTION_LIVE_RATIO", 0.5),
+    )
 
 
 def option_map_alerts(options_map: OptionsMap, *, window: AlertWindow) -> list[Alert]:
@@ -220,6 +278,9 @@ def option_map_alerts(options_map: OptionsMap, *, window: AlertWindow) -> list[A
     underlier = options_map.underlier.price
     wall_threshold = max(10.0, underlier * 0.002 if underlier else 10.0)
     for expiry in options_map.expiries:
+        if not option_coverage_is_fresh(expiry):
+            alerts.append(option_freshness_alert(expiry, window=window))
+            continue
         if expiry.gamma_state in OPTION_GAMMA_ALERT_STATES:
             alerts.append(
                 Alert(
@@ -255,6 +316,133 @@ def option_map_alerts(options_map: OptionsMap, *, window: AlertWindow) -> list[A
                     )
                 )
     return alerts
+
+
+def iv_surface_freshness_alert(surface: IvSurfaceSnapshot, *, now: datetime) -> Alert | None:
+    max_age_seconds = env_float("ALERT_MAX_IV_SURFACE_AGE_SECONDS", 420.0)
+    age_seconds = (now - surface.as_of).total_seconds()
+    if age_seconds <= max_age_seconds:
+        return None
+    return Alert(
+        severity="medium",
+        kind="iv_surface_stale",
+        instrument_id="iv_surface:SPXW",
+        title="SPXW IV surface stale",
+        detail=(
+            f"SPXW IV surface age is {age_seconds:.0f}s; IV-surface alerts are suppressed "
+            f"above {max_age_seconds:.0f}s."
+        ),
+        quality="stale",
+        value=age_seconds,
+        threshold=max_age_seconds,
+    )
+
+
+def hyperliquid_proxy_gate(market_context: dict[str, object] | None) -> dict[str, object]:
+    if not isinstance(market_context, dict):
+        return {}
+    derived = market_context.get("derived")
+    if not isinstance(derived, dict):
+        return {}
+    gate = derived.get("hyperliquid_spx_proxy")
+    return gate if isinstance(gate, dict) else {}
+
+
+def hyperliquid_proxy_usable(market_context: dict[str, object] | None) -> bool:
+    return bool(hyperliquid_proxy_gate(market_context).get("usable_for_alert"))
+
+
+def market_context_alerts(market_context: dict[str, object] | None) -> list[Alert]:
+    gate = hyperliquid_proxy_gate(market_context)
+    state = str(gate.get("state") or "")
+    if state in {"", "missing", "basis_ok"}:
+        return []
+    severity = "low" if state == "unanchored_context_only" else "medium"
+    return [
+        Alert(
+            severity=severity,
+            kind="hyperliquid_proxy_quality_gate",
+            instrument_id=str(gate.get("proxy") or "crypto_perp:xyz:SP500"),
+            title=f"Hyperliquid SPX proxy {state}",
+            detail=str(gate.get("reason") or "Hyperliquid proxy is not usable for alert scoring."),
+            quality=state,
+            value=gate.get("basis_bps") if isinstance(gate.get("basis_bps"), (int, float)) else None,
+            threshold=gate.get("block_bps") if isinstance(gate.get("block_bps"), (int, float)) else None,
+            research_only=True,
+            source_gate="hyperliquid_spx_proxy",
+        )
+    ]
+
+
+def provider_state_for(state: LatestState, provider: Provider) -> ProviderState | None:
+    matches = [item for item in state.provider_states if item.provider == provider]
+    if not matches:
+        return None
+    return max(matches, key=lambda item: item.checked_at)
+
+
+def provider_state_is_recent(provider_state: ProviderState, *, now: datetime) -> bool:
+    max_age_seconds = env_float("ALERT_BROKER_STATE_MAX_AGE_SECONDS", 900.0)
+    age_seconds = (now - provider_state.checked_at).total_seconds()
+    return 0 <= age_seconds <= max_age_seconds
+
+
+def ibkr_feed_unavailable_for_fallback(state: LatestState) -> bool:
+    provider_state = provider_state_for(state, Provider.IBKR)
+    if provider_state is None or not provider_state_is_recent(provider_state, now=state.as_of):
+        return False
+    if provider_state.status == ProviderStatus.UNAVAILABLE:
+        return True
+    return provider_state.status == ProviderStatus.DEGRADED and provider_state.connected is not True
+
+
+def proxy_fallback_watch_alerts(
+    state: LatestState,
+    *,
+    window: AlertWindow,
+    market_context: dict[str, object] | None,
+) -> list[Alert]:
+    if not env_bool("ALERT_ALLOW_BROKER_UNAVAILABLE_PROXY_WATCH", True):
+        return []
+    gate = hyperliquid_proxy_gate(market_context)
+    if gate.get("usable_for_alert") is True:
+        return []
+    if str(gate.get("state") or "") != "unanchored_context_only":
+        return []
+    if not ibkr_feed_unavailable_for_fallback(state):
+        return []
+
+    quote = find_best(state, "crypto_perp:xyz:SP500")
+    if quote is None or quote.quality in BAD_QUALITIES:
+        return []
+    move_bps = move_from_close_bps(quote)
+    threshold = env_float(
+        "ALERT_PROXY_FALLBACK_MOVE_BPS",
+        MOVE_THRESHOLDS_BPS.get(window.priority, MOVE_THRESHOLDS_BPS["normal"]),
+    )
+    if move_bps is None or abs(move_bps) < threshold:
+        return []
+
+    direction = "up" if move_bps > 0 else "down"
+    return [
+        Alert(
+            severity=severity_for_priority(window.priority),
+            kind="broker_unavailable_proxy_watch",
+            instrument_id="index:SPX",
+            title=f"SPX fallback monitor {direction} {move_bps:.1f} bps",
+            detail=(
+                "Broker SPX/ES feed is unavailable, likely because the trading session is in use. "
+                "Proxy-only monitor moved enough to open the trading device and verify real SPX/SPXW "
+                "quotes before any decision."
+            ),
+            provider=quote.provider.value,
+            quality="degraded",
+            value=move_bps,
+            threshold=threshold,
+            research_only=False,
+            source_gate="broker_unavailable_fallback",
+        )
+    ]
 
 
 def iv_surface_alerts(surface: IvSurfaceSnapshot, *, window: AlertWindow) -> list[Alert]:
@@ -361,17 +549,25 @@ def evaluate_payload(state: LatestState, *, now: datetime | None = None) -> dict
     iv_surface = load_current_iv_surface(iv_settings)
     iv_surface_history = load_recent_snapshots(iv_settings, as_of=state.as_of, lookback_minutes=60)
     iv_surface_history_1h = summarize_surface_history(iv_surface, iv_surface_history)
+    market_context = build_market_context(state)
+    iv_stale_alert = (
+        iv_surface_freshness_alert(iv_surface, now=state.as_of) if iv_surface is not None else None
+    )
+    iv_surface_for_alerts = None if iv_stale_alert is not None else iv_surface
     alerts = evaluate_alerts(
         state,
         window=window,
         options_map=options_map,
-        iv_surface=iv_surface,
+        iv_surface=iv_surface_for_alerts,
+        market_context=market_context,
     )
+    if iv_stale_alert is not None:
+        alerts.append(iv_stale_alert)
     return {
         "created_at": datetime.now(tz=now.tzinfo).isoformat(),
         "as_of": state.as_of.isoformat(),
         "window": window_payload,
-        "market_context": build_market_context(state),
+        "market_context": market_context,
         "human_focus_context": build_human_focus_context(
             state,
             options_map=options_map,

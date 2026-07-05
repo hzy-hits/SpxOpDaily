@@ -3,13 +3,15 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import urllib.error
+import urllib.request
 from collections import Counter
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from spx_spark.config import NY_TZ, StorageSettings
+from spx_spark.config import NY_TZ, StorageSettings, load_dotenv
 from spx_spark.iv_surface import (
     IvSurfaceSnapshot,
     IvSurfaceExpiry,
@@ -33,6 +35,65 @@ class ReviewPaths:
     latest_json_path: Path
     hermes_markdown_path: Path | None
     hermes_latest_markdown_path: Path | None
+
+
+@dataclass(frozen=True)
+class ReviewLlmSettings:
+    enabled: bool
+    provider: str
+    model: str
+    url: str
+    env_file: str
+    timeout_seconds: float
+    max_tokens: int
+
+    @classmethod
+    def from_env(cls) -> "ReviewLlmSettings":
+        load_dotenv()
+        return cls(
+            enabled=env_bool("SPX_REVIEW_LLM_ENABLED", False),
+            provider=os.getenv("SPX_REVIEW_LLM_PROVIDER", "deepseek").strip(),
+            model=os.getenv("SPX_REVIEW_LLM_MODEL", "deepseek-v4-pro").strip(),
+            url=os.getenv(
+                "SPX_REVIEW_LLM_URL",
+                "https://api.deepseek.com/v1/chat/completions",
+            ).strip(),
+            env_file=os.getenv("SPX_REVIEW_LLM_ENV_FILE", "/home/ubuntu/.hermes/.env").strip(),
+            timeout_seconds=float(os.getenv("SPX_REVIEW_LLM_TIMEOUT_SECONDS", "120")),
+            max_tokens=int(os.getenv("SPX_REVIEW_LLM_MAX_TOKENS", "2200")),
+        )
+
+
+def env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def read_env_file_value(path: str, key: str) -> str:
+    env_path = Path(path).expanduser()
+    try:
+        lines = env_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return ""
+    for raw in lines:
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        if line.startswith("export "):
+            line = line[len("export ") :].strip()
+        name, value = line.split("=", 1)
+        if name.strip() == key:
+            return value.strip().strip('"').strip("'")
+    return ""
+
+
+def deepseek_api_key(settings: ReviewLlmSettings) -> str:
+    return os.getenv("DEEPSEEK_API_KEY", "").strip() or read_env_file_value(
+        settings.env_file,
+        "DEEPSEEK_API_KEY",
+    )
 
 
 def observed_fixed_holiday(year: int, month: int, day: int) -> date:
@@ -504,6 +565,112 @@ def render_markdown(payload: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def build_llm_writer_prompt(payload: dict[str, Any], deterministic_markdown: str) -> str:
+    compact = {
+        "trading_date": payload.get("trading_date"),
+        "coverage": payload.get("coverage"),
+        "verdict": payload.get("verdict"),
+        "spx": payload.get("spx"),
+        "es": payload.get("es"),
+        "spxw_options": payload.get("spxw_options"),
+        "iv_surface": payload.get("iv_surface"),
+    }
+    return "\n".join(
+        (
+            "你是 SPX Spark 的 SPX/SPXW 盘后复盘写手。",
+            "只允许使用给定 JSON 和模板报告里的事实；不要编造价格、新闻、仓位或交易建议。",
+            "人类只交易 SPX/SPXW；正文只能提 SPX、SPXW、ES、IV surface、期权墙、gamma 和数据质量。",
+            "输出一份中文 Markdown。第一行必须是：",
+            f"# SPX/SPXW Post-Close Review - {payload.get('trading_date')}",
+            "结构要紧凑：摘要、价格路径、SPXW 报价覆盖、IV 曲面与期权墙、下一交易日检查点。",
+            "如果数据 degraded，只说明覆盖质量，不给方向性交易建议。",
+            "",
+            "JSON:",
+            json.dumps(compact, ensure_ascii=False, sort_keys=True),
+            "",
+            "模板报告:",
+            deterministic_markdown,
+        )
+    )
+
+
+def call_deepseek_writer(
+    payload: dict[str, Any],
+    deterministic_markdown: str,
+    settings: ReviewLlmSettings,
+) -> tuple[str | None, str | None]:
+    api_key = deepseek_api_key(settings)
+    if not api_key:
+        return None, "missing DEEPSEEK_API_KEY"
+    body = {
+        "model": settings.model,
+        "messages": [
+            {
+                "role": "system",
+                "content": "You write concise SPX options review reports from supplied facts only.",
+            },
+            {"role": "user", "content": build_llm_writer_prompt(payload, deterministic_markdown)},
+        ],
+        "temperature": 0.2,
+        "max_tokens": settings.max_tokens,
+        "stream": False,
+    }
+    request = urllib.request.Request(
+        settings.url,
+        data=json.dumps(body).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=settings.timeout_seconds) as response:
+            raw = response.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")[:300]
+        return None, f"http={exc.code}: {detail}"
+    except OSError as exc:
+        return None, str(exc)
+    try:
+        content = json.loads(raw)["choices"][0]["message"]["content"].strip()
+    except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
+        return None, f"bad response shape: {exc}"
+    if not content:
+        return None, "empty response"
+    expected_title = f"# SPX/SPXW Post-Close Review - {payload.get('trading_date')}"
+    if not content.lstrip().startswith(expected_title):
+        content = expected_title + "\n\n" + content.lstrip("# \n")
+    return content, None
+
+
+def maybe_write_llm_review(
+    payload: dict[str, Any],
+    deterministic_markdown: str,
+    settings: ReviewLlmSettings | None = None,
+) -> str:
+    settings = settings or ReviewLlmSettings.from_env()
+    payload["llm_writer"] = {
+        "enabled": settings.enabled,
+        "provider": settings.provider,
+        "model": settings.model,
+        "status": "disabled",
+    }
+    if not settings.enabled:
+        return deterministic_markdown
+    if settings.provider.lower() != "deepseek":
+        payload["llm_writer"]["status"] = "fallback_template"
+        payload["llm_writer"]["error"] = f"unsupported provider: {settings.provider}"
+        return deterministic_markdown
+    markdown, error = call_deepseek_writer(payload, deterministic_markdown, settings)
+    if error or not markdown:
+        payload["llm_writer"]["status"] = "fallback_template"
+        payload["llm_writer"]["error"] = error or "empty response"
+        return deterministic_markdown
+    payload["llm_writer"]["status"] = "ok"
+    return markdown
+
+
 def price_row(label: str, stats: dict[str, Any]) -> str:
     return (
         f"| {label} | {fmt(stats.get('first'))} | {fmt(stats.get('last'))} | "
@@ -598,6 +765,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--latest-markdown-path", help="Latest Markdown path.")
     parser.add_argument("--hermes-export-dir", help="Hermes daily attachment export directory.")
     parser.add_argument("--no-hermes-export", action="store_true", help="Do not write Hermes export files.")
+    parser.add_argument("--llm", action="store_true", help="Force-enable the configured LLM writer.")
+    parser.add_argument("--no-llm", action="store_true", help="Disable the LLM writer for this run.")
     parser.add_argument("--quiet-if-empty", action="store_true", help="Suppress stdout when there are no raw rows or snapshots.")
     return parser.parse_args(argv)
 
@@ -608,6 +777,28 @@ def run(argv: list[str] | None = None) -> int:
     trading_date = resolve_trading_date(args.date)
     payload = build_review_payload(trading_date=trading_date, settings=settings)
     markdown = render_markdown(payload)
+    llm_settings = ReviewLlmSettings.from_env()
+    if args.llm:
+        llm_settings = ReviewLlmSettings(
+            enabled=True,
+            provider=llm_settings.provider,
+            model=llm_settings.model,
+            url=llm_settings.url,
+            env_file=llm_settings.env_file,
+            timeout_seconds=llm_settings.timeout_seconds,
+            max_tokens=llm_settings.max_tokens,
+        )
+    if args.no_llm:
+        llm_settings = ReviewLlmSettings(
+            enabled=False,
+            provider=llm_settings.provider,
+            model=llm_settings.model,
+            url=llm_settings.url,
+            env_file=llm_settings.env_file,
+            timeout_seconds=llm_settings.timeout_seconds,
+            max_tokens=llm_settings.max_tokens,
+        )
+    markdown = maybe_write_llm_review(payload, markdown, llm_settings)
     paths_payload = None
     if not args.no_write:
         hermes_export_dir = None if args.no_hermes_export else (
