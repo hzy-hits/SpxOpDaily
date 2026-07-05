@@ -215,6 +215,29 @@ Human-facing Weixin messages are limited to SPX, SPXW option structure, and ES.
 Other feeds remain hidden scoring context and are kept out of the Codex prompt's
 human-visible explanation.
 
+## Post-Close SPX Review
+
+Generate the SPX/SPXW daily review manually:
+
+```bash
+scripts/run-post-close-review.sh --date auto
+```
+
+Install the user timer:
+
+```bash
+ln -sfn /home/ubuntu/spx-spark/systemd/spx-spark-post-close-review.service ~/.config/systemd/user/spx-spark-post-close-review.service
+ln -sfn /home/ubuntu/spx-spark/systemd/spx-spark-post-close-review.timer ~/.config/systemd/user/spx-spark-post-close-review.timer
+systemctl --user daemon-reload
+systemctl --user enable --now spx-spark-post-close-review.timer
+```
+
+Hermes can append this file to the local daily report:
+
+```text
+/home/ubuntu/research/finance/daily/spx-options-review/latest-spx-options-review.md
+```
+
 ## Security
 
 - Do not commit `.env`.

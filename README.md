@@ -217,6 +217,25 @@ the modular long-running loop. It runs
 Hyperliquid, IV surface, and alert tasks by default; IBKR is disabled unless
 `SPX_SERVICE_ENABLE_IBKR=true` is set in `.env`.
 
+Post-close SPX/SPXW review:
+
+```bash
+scripts/run-post-close-review.sh --date auto
+scripts/run-post-close-review.sh --date 2026-07-06 --json
+```
+
+The review is designed to run after the US close delay and to be appended by the
+local Hermes daily report. It writes:
+
+- `data/reports/spx_options_review/date=YYYY-MM-DD/review.md`
+- `data/reports/spx_options_review/date=YYYY-MM-DD/review.json`
+- `data/latest/spx_options_review.md`
+- `/home/ubuntu/research/finance/daily/spx-options-review/latest-spx-options-review.md`
+
+The systemd timer `spx-spark-post-close-review.timer` runs Tuesday through
+Saturday at 07:15 Asia/Shanghai, which is after the US close plus two hours in
+both US daylight and standard time.
+
 Install the 24h user service:
 
 ```bash

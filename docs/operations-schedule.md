@@ -344,6 +344,8 @@ Jobs:
 - calculate alert forward returns
 - update data-quality report
 - delete raw data beyond retention, except preserved alert windows
+- build the SPX/SPXW post-close review after the US close plus two hours and
+  export the latest Markdown for Hermes daily-report attachment
 
 Compute policy:
 

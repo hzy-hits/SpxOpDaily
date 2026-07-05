@@ -359,6 +359,8 @@ data/features/interval=1s/date=YYYY-MM-DD/*.parquet
 data/features/interval=1m/date=YYYY-MM-DD/*.parquet
 data/alerts/date=YYYY-MM-DD/*.jsonl
 data/reports/date=YYYY-MM-DD/session.md
+data/reports/spx_options_review/date=YYYY-MM-DD/review.md
+data/reports/spx_options_review/date=YYYY-MM-DD/review.json
 ```
 
 ## Cleanup And Audit
