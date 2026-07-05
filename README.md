@@ -118,6 +118,18 @@ Live verification found the S&P 500-like perpetual on HIP-3 dex `xyz` as `xyz:SP
 around the 7,500 index level. The default-dex `SPX` symbol trades around `0.43`, so it is a
 different Hyperliquid crypto/perp asset and must not be mixed with `index:SPX`.
 
+## MrMicopedia Guidance
+
+```bash
+scripts/run-micopedia-guidance.sh --underlier 7502 --vix1d 12.5 --gamma-state pin --event opex,jpm_collar
+scripts/run-micopedia-guidance.sh --from-latest-state --time-phase open --event cpi --json
+```
+
+This produces an observational `MicopediaSignal`: regime, map focus, trigger
+watchlist, candidate expression shape, risk guardrails, data warnings, and the
+suggested SPXW sampling mode. It is an explanation/checklist layer only and does
+not place orders.
+
 ## Market Data Model
 
 IBKR, Schwab, and Hyperliquid payloads enter through provider adapters and become
@@ -146,3 +158,5 @@ and raw data.
 - Market data model: `docs/market-data-model.md`
 - Sampling engine design: `docs/sampling-engine-design.md`
 - Operations schedule: `docs/operations-schedule.md`
+- MrMicopedia agent guidance: `docs/micopedia-agent-guidance.md`
+- MrMicopedia background knowledge: `docs/micopedia-background-knowledge.md`

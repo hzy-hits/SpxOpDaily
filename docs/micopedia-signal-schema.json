@@ -1,0 +1,112 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "MicopediaSignal",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "created_at",
+    "source",
+    "underlier_price",
+    "regime",
+    "directional_bias",
+    "confidence",
+    "nearest_key_level",
+    "decision_stack",
+    "map_focus",
+    "trigger_watchlist",
+    "candidate_expression",
+    "risk_policy",
+    "invalidation_checks",
+    "data_warnings",
+    "suggested_sampling_mode",
+    "focus_instruments",
+    "next_checks",
+    "inputs"
+  ],
+  "properties": {
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "source": {
+      "const": "mr_micopedia_distilled_framework"
+    },
+    "underlier_price": {
+      "type": ["number", "null"]
+    },
+    "regime": {
+      "type": "string",
+      "enum": [
+        "ordinary_rth",
+        "low_vol_difficult",
+        "positive_gamma_mean_reversion",
+        "negative_gamma_trend",
+        "opex_gamma_pin",
+        "high_vol_event",
+        "liquidity_systematic_flow",
+        "holiday_liquidity"
+      ]
+    },
+    "directional_bias": {
+      "type": "string",
+      "enum": ["bullish", "bearish", "mixed_tactical", "neutral_unclear"]
+    },
+    "confidence": {
+      "type": "string",
+      "enum": ["low_observational", "medium_observational", "high_observational"]
+    },
+    "nearest_key_level": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["level", "distance_points", "distance_bps"],
+      "properties": {
+        "level": { "type": "number" },
+        "distance_points": { "type": "number" },
+        "distance_bps": { "type": ["number", "null"] }
+      }
+    },
+    "decision_stack": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "map_focus": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "trigger_watchlist": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "candidate_expression": {
+      "type": "string"
+    },
+    "risk_policy": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "invalidation_checks": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "data_warnings": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "suggested_sampling_mode": {
+      "type": "string",
+      "enum": ["human_alert", "execution_monitor", "degraded"]
+    },
+    "focus_instruments": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "next_checks": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "inputs": {
+      "type": "object"
+    }
+  }
+}
+
