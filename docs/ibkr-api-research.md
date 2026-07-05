@@ -180,6 +180,7 @@ Expected alert behavior:
 - phone/desktop releases the session: the next IBKR probe can reconnect or resume subscriptions, then IBKR-backed alerts become available again
 - if IBKR Gateway requires fresh login or 2FA: probes will keep failing until the Gateway is authenticated; the system still uses fallback feeds
 - no background process should repeatedly kick the phone session
+- if IBC is configured: use read-only login/API and `ExistingSessionDetectedAction=secondary`; systemd may restart IBC every 300 seconds, but IBC should yield when another session owns the account
 
 ## Sources
 

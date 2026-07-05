@@ -43,7 +43,7 @@ Run:
 Avoid:
 
 - automatic order placement
-- always-on IBKR Gateway with auto-reconnect using the same username as phone trading
+- always-on IBKR Gateway that fights the phone or desktop session
 
 ### Polymarket Role
 
@@ -135,6 +135,7 @@ Recommended behavior:
 - pause collector when disconnected
 - manual restart after phone trading is done
 - keep API read-only for MVP
+- if IBC is enabled, use read-only login/API and `ExistingSessionDetectedAction=secondary`
 
 ### IBKR Escape Hatches
 
@@ -263,7 +264,8 @@ Default automated policy:
 - keep `STRICT_NO_SESSION_FIGHT=true`
 - keep Schwab and chain/prediction feeds running at all times
 - if IB Gateway is already authenticated, the IBKR collector may connect automatically
-- if IB Gateway is not authenticated, do not solve login by storing credentials until explicitly approved
+- if IBC is explicitly configured, it may restart Gateway and attempt read-only login
+- if phone/desktop trading owns the broker session, IBC should yield and retry later instead of forcing takeover
 - if mobile or desktop trading kicks IBKR out, mark IBKR unavailable and do not immediately fight for the session
 - while IBKR is unavailable because of a competing session, keep sending alerts from Schwab and non-broker feeds
 - if no live ES/MES/SPX anchor remains, Hyperliquid can only emit a degraded fallback watch prompt that tells the user to verify real SPX/SPXW quotes on the trading device; it must not become SPXW strategy confirmation

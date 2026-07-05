@@ -42,7 +42,7 @@ Important: Xvfb only supplies a virtual display. To actually interact with the l
 
 - SSH X11 forwarding from a machine with an X server.
 - VNC/x11vnc attached to the virtual display.
-- IBC automation after you have reviewed how credentials will be stored.
+- IBC automation after credentials are deliberately configured under `/srv/data`.
 
 Current manual login path:
 
@@ -65,6 +65,72 @@ processes on the server. Stop it with:
 ```bash
 scripts/stop-ibgateway-vnc.sh
 ```
+
+## IBC Automation
+
+IBC is installed outside the repository:
+
+```bash
+/home/ubuntu/apps/ibc
+```
+
+The project wrapper runs IBC against a compatibility tree at
+`/home/ubuntu/apps/ibc-ibgateway-compat` so IBC does not rename or mutate the
+normal `/home/ubuntu/apps/ibgateway/ibgateway` launcher used by the manual
+Xvfb scripts.
+
+Credentials are not stored in git or `.env`. Configure them interactively:
+
+```bash
+cd /home/ubuntu/spx-spark
+scripts/install-ibc.sh
+scripts/configure-ibc-secrets.sh
+scripts/install-ibc-service.sh
+systemctl --user start ibc-gateway.service
+```
+
+The generated file is:
+
+```text
+/srv/data/spx-spark/runtime/ibc/config.ini
+```
+
+It is written with `600` permissions under a `700` runtime directory.
+
+Default security posture from `scripts/configure-ibc-secrets.sh`:
+
+- `ReadOnlyLogin=yes`
+- `ReadOnlyApi=yes`
+- `TrustedTwsApiClientIPs=127.0.0.1`
+- `AcceptIncomingConnectionAction=accept`
+- `ExistingSessionDetectedAction=secondary`
+- `OverrideTwsApiPort=4001` for live or `4002` for paper
+- `ReloginAfterSecondFactorAuthenticationTimeout=yes`
+
+`ExistingSessionDetectedAction=secondary` is intentional. If the phone or
+desktop trading session is active, the IBC Gateway session should yield rather
+than fight for the broker session. The user service has `Restart=always` with a
+300 second delay, so it probes again later and can log back in after the manual
+session is gone.
+
+Inspect:
+
+```bash
+systemctl --user status ibc-gateway.service --no-pager
+journalctl --user -u ibc-gateway.service -n 100 --no-pager
+scripts/start-ibc-gateway.sh --check
+```
+
+Stop:
+
+```bash
+systemctl --user stop ibc-gateway.service
+# or
+scripts/stop-ibc-gateway.sh
+```
+
+If IBKR changes a login or security-token dialog and IBC cannot handle it,
+use the VNC path above to take over the same Xvfb display manually.
 
 After logging in, keep IB Gateway's Read-Only API setting enabled. This project
 does not need API trading permission for data verification or collection.
@@ -242,7 +308,7 @@ Hermes can append this file to the local daily report:
 
 - Do not commit `.env`.
 - Do not store IBKR credentials in this repository.
-- Do not store IBKR credentials in IBC or any other automation until explicitly approved.
+- Store IBKR credentials only in `/srv/data/spx-spark/runtime/ibc/config.ini` after explicit approval.
 - Keep IB Gateway API access on localhost.
 - Keep IB Gateway Read-Only API enabled for this project.
 - Keep IBKR code market-data only: no orders, account polling, position polling, or execution polling.
