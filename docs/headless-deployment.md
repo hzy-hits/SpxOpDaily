@@ -69,6 +69,17 @@ scripts/stop-ibgateway-vnc.sh
 After logging in, keep IB Gateway's Read-Only API setting enabled. This project
 does not need API trading permission for data verification or collection.
 
+IB Gateway may still listen on all interfaces even when the UI says only
+localhost clients are allowed. Add OS-level loopback-only rules for the common
+TWS/Gateway API ports:
+
+```bash
+scripts/harden-ibkr-api-localhost.sh
+```
+
+These iptables rules are runtime hardening. Re-run the script after reboot unless
+you later persist firewall rules through the host firewall manager.
+
 Development flow:
 
 1. Run TWS locally when debugging contracts and symbols.
