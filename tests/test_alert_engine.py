@@ -359,3 +359,31 @@ def test_ibkr_unknown_state_preserves_interrupted_status_for_restore(tmp_path, m
     )
 
     assert [alert.kind for alert in restored_alerts] == ["ibkr_session_restored"]
+
+
+def test_evaluate_payload_can_detect_system_event_without_persisting(tmp_path, monkeypatch) -> None:
+    state_path = tmp_path / "system-event-state.json"
+    monkeypatch.setenv("ALERT_SYSTEM_EVENT_STATE_PATH", str(state_path))
+    now = datetime(2026, 7, 7, 3, 15, tzinfo=BJ_TZ)
+    interrupted = ProviderState(
+        provider=Provider.IBKR,
+        status=ProviderStatus.UNAVAILABLE,
+        checked_at=now,
+        reason="competing session blocks live market data (IBKR 10197)",
+        connected=False,
+        authenticated=False,
+        priority=0,
+    )
+
+    payload = evaluate_payload(
+        make_state(now=now, provider_states=(interrupted,)),
+        now=now,
+        persist_system_events=False,
+    )
+
+    assert any(
+        alert["kind"] == "ibkr_session_interrupted"
+        for alert in payload["alerts"]
+        if isinstance(alert, dict)
+    )
+    assert not state_path.exists()

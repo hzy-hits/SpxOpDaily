@@ -206,6 +206,7 @@ def evaluate_alerts(
     options_map: OptionsMap | None = None,
     iv_surface: IvSurfaceSnapshot | None = None,
     market_context: dict[str, object] | None = None,
+    persist_system_events: bool = False,
 ) -> list[Alert]:
     alerts: list[Alert] = []
     required = set(window.required_instruments)
@@ -235,7 +236,7 @@ def evaluate_alerts(
     if iv_surface is not None:
         alerts.extend(iv_surface_alerts(iv_surface, window=window))
     alerts.extend(market_context_alerts(market_context))
-    alerts.extend(system_event_alerts(state))
+    alerts.extend(system_event_alerts(state, persist=persist_system_events))
     alerts.extend(proxy_fallback_watch_alerts(state, window=window, market_context=market_context))
     return alerts
 
@@ -439,6 +440,43 @@ def system_event_state_path() -> str:
     )
 
 
+def build_system_event_state_payload(
+    state: LatestState,
+    provider_state: ProviderState,
+    current_status: str,
+    previous: dict[str, object],
+) -> dict[str, object]:
+    if current_status == "unknown":
+        payload = {
+            **previous,
+            "ibkr_last_observed_status": current_status,
+            "ibkr_checked_at": provider_state.checked_at.isoformat(),
+            "updated_at": state.as_of.isoformat(),
+        }
+        if previous.get("ibkr_session_status") is None:
+            payload["ibkr_session_status"] = current_status
+        return payload
+    return {
+        "ibkr_session_status": current_status,
+        "ibkr_last_observed_status": current_status,
+        "ibkr_checked_at": provider_state.checked_at.isoformat(),
+        "updated_at": state.as_of.isoformat(),
+    }
+
+
+def persist_system_event_state(state: LatestState) -> None:
+    provider_state = provider_state_for(state, Provider.IBKR)
+    if provider_state is None:
+        return
+    current_status = ibkr_session_status(provider_state, now=state.as_of)
+    state_path = system_event_state_path()
+    previous = load_system_event_state(state_path)
+    save_system_event_state(
+        state_path,
+        build_system_event_state_payload(state, provider_state, current_status, previous),
+    )
+
+
 def ibkr_session_event_alert(
     provider_state: ProviderState,
     *,
@@ -483,7 +521,7 @@ def ibkr_session_event_alert(
     return None
 
 
-def system_event_alerts(state: LatestState) -> list[Alert]:
+def system_event_alerts(state: LatestState, *, persist: bool = True) -> list[Alert]:
     if not env_bool("ALERT_SYSTEM_EVENTS_ENABLED", True):
         return []
     provider_state = provider_state_for(state, Provider.IBKR)
@@ -494,24 +532,18 @@ def system_event_alerts(state: LatestState) -> list[Alert]:
     previous = load_system_event_state(state_path)
     previous_status = previous.get("ibkr_session_status")
     if current_status == "unknown":
-        payload = {
-            **previous,
-            "ibkr_last_observed_status": current_status,
-            "ibkr_checked_at": provider_state.checked_at.isoformat(),
-            "updated_at": state.as_of.isoformat(),
-        }
-        if previous_status is None:
-            payload["ibkr_session_status"] = current_status
-        save_system_event_state(state_path, payload)
+        if persist:
+            save_system_event_state(
+                state_path,
+                build_system_event_state_payload(state, provider_state, current_status, previous),
+            )
         return []
 
-    payload = {
-        "ibkr_session_status": current_status,
-        "ibkr_last_observed_status": current_status,
-        "ibkr_checked_at": provider_state.checked_at.isoformat(),
-        "updated_at": state.as_of.isoformat(),
-    }
-    save_system_event_state(state_path, payload)
+    if persist:
+        save_system_event_state(
+            state_path,
+            build_system_event_state_payload(state, provider_state, current_status, previous),
+        )
     alert = ibkr_session_event_alert(
         provider_state,
         previous_status=str(previous_status) if previous_status else None,
@@ -664,7 +696,12 @@ def load_current_iv_surface(settings: IvSurfaceSettings | None = None) -> IvSurf
         return None
 
 
-def evaluate_payload(state: LatestState, *, now: datetime | None = None) -> dict[str, object]:
+def evaluate_payload(
+    state: LatestState,
+    *,
+    now: datetime | None = None,
+    persist_system_events: bool = True,
+) -> dict[str, object]:
     now = now or state.as_of
     window = active_window(now)
     window_payload = window.to_dict(now=now)
@@ -684,6 +721,7 @@ def evaluate_payload(state: LatestState, *, now: datetime | None = None) -> dict
         options_map=options_map,
         iv_surface=iv_surface_for_alerts,
         market_context=market_context,
+        persist_system_events=persist_system_events,
     )
     if iv_stale_alert is not None:
         alerts.append(iv_stale_alert)
@@ -734,14 +772,26 @@ def run(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     now = parse_at(args.at) if args.at else None
     state = LatestStateStore(StorageSettings.from_env()).load(now=now)
-    payload = evaluate_payload(state, now=now or state.as_of)
     notification_settings = NotificationSettings.from_env()
     if args.notify:
         notification_settings = replace(notification_settings, enabled=True)
     if args.no_notify:
         notification_settings = replace(notification_settings, enabled=False)
+    payload = evaluate_payload(
+        state,
+        now=now or state.as_of,
+        persist_system_events=False,
+    )
+    system_event_pending = any(
+        isinstance(alert, dict) and alert.get("source_gate") == "ibkr_session_state"
+        for alert in payload.get("alerts", [])
+    )
+    notification_result = None
     if notification_settings.enabled:
-        payload["notification"] = notify_payload(payload, settings=notification_settings).to_dict()
+        notification_result = notify_payload(payload, settings=notification_settings)
+        payload["notification"] = notification_result.to_dict()
+    if not system_event_pending or (notification_result is not None and notification_result.sent_count > 0):
+        persist_system_event_state(state)
     if args.json:
         print(json.dumps(payload, indent=2, sort_keys=True))
     else:
