@@ -33,6 +33,6 @@ fi
 echo
 echo "recent_markers:"
 journalctl --user -u "$SERVICE" -n 240 --no-pager 2>/dev/null \
-  | grep -E 'Second Factor Authentication|Existing session detected|Login has completed|Gateway finished|Read-Only API|TWS API socket port|CommandServer listening|IBC returned exit status|Socket|Login attempt|Authenticating' \
+  | grep -E 'Second Factor Authentication|Existing session detected|Login has completed|Gateway finished|Read-Only API|TWS API socket port|CommandServer listening|IBC returned exit status|Socket disconnect|Login attempt|Authenticating' \
   | tail -40 \
   || true
