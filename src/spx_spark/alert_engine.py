@@ -3,12 +3,14 @@ from __future__ import annotations
 import argparse
 import json
 from dataclasses import asdict, dataclass
+from dataclasses import replace
 from datetime import datetime
 
 from spx_spark.alert_profile import AlertWindow, active_window, parse_at
-from spx_spark.config import IvSurfaceSettings, StorageSettings
+from spx_spark.config import IvSurfaceSettings, NotificationSettings, StorageSettings
 from spx_spark.iv_surface import IvSurfaceSnapshot, load_latest_snapshot
 from spx_spark.marketdata import MarketDataQuality, Quote
+from spx_spark.notifier import notify_payload
 from spx_spark.options_map import OptionsMap, build_options_map
 from spx_spark.storage import LatestState, LatestStateStore
 
@@ -365,6 +367,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate current SPX alert conditions.")
     parser.add_argument("--at", help="ISO timestamp. Naive timestamps are treated as Asia/Shanghai.")
     parser.add_argument("--json", action="store_true", help="Print JSON.")
+    parser.add_argument("--notify", action="store_true", help="Send configured notifications.")
+    parser.add_argument("--no-notify", action="store_true", help="Disable notifications for this run.")
     return parser.parse_args(argv)
 
 
@@ -373,6 +377,13 @@ def run(argv: list[str] | None = None) -> int:
     now = parse_at(args.at) if args.at else None
     state = LatestStateStore(StorageSettings.from_env()).load(now=now)
     payload = evaluate_payload(state, now=now or state.as_of)
+    notification_settings = NotificationSettings.from_env()
+    if args.notify:
+        notification_settings = replace(notification_settings, enabled=True)
+    if args.no_notify:
+        notification_settings = replace(notification_settings, enabled=False)
+    if notification_settings.enabled:
+        payload["notification"] = notify_payload(payload, settings=notification_settings).to_dict()
     if args.json:
         print(json.dumps(payload, indent=2, sort_keys=True))
     else:

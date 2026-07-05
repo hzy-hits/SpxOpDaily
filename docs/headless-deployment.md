@@ -158,6 +158,41 @@ journalctl --user -u spx-spark-24h.service -n 100 --no-pager
 journalctl --user -u spx-spark-24h.service -f
 ```
 
+## OpenClaw Weixin Alerts
+
+OpenClaw is used only for agent analysis and message delivery. It is separate
+from IBKR and never has broker credentials.
+
+Gateway should run on loopback:
+
+```bash
+openclaw config set gateway.mode local
+openclaw config set gateway.bind loopback
+openclaw config set gateway.auth.mode none
+openclaw gateway install --port 18789 --force
+openclaw gateway start
+openclaw gateway status
+openclaw channels status
+```
+
+Install/login Weixin:
+
+```bash
+npx -y @tencent-weixin/openclaw-weixin-cli@latest install
+```
+
+Test delivery:
+
+```bash
+scripts/send-openclaw-test-alert.sh
+ALERT_NOTIFY_OPENCLAW_DRY_RUN=false scripts/send-openclaw-test-alert.sh
+```
+
+The first command is a dry-run unless `ALERT_NOTIFY_OPENCLAW_DRY_RUN=false` is
+set. Real Weixin sends require a valid conversation context token. If the raw
+account `userId` returns `sendMessage ret=-2`, send one message from Weixin to
+the OpenClaw bot first so the gateway can cache context.
+
 ## Security
 
 - Do not commit `.env`.

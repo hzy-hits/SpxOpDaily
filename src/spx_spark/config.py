@@ -380,6 +380,60 @@ class IvSurfaceSettings:
 
 
 @dataclass(frozen=True)
+class NotificationSettings:
+    enabled: bool
+    min_severity: str
+    cooldown_seconds: int
+    state_path: str
+    openclaw_enabled: bool
+    openclaw_command: str
+    openclaw_channel: str
+    openclaw_account: str
+    openclaw_target: str
+    openclaw_dry_run: bool
+    openclaw_timeout_seconds: float
+    openclaw_agent_enabled: bool
+    openclaw_agent_deliver: bool
+    openclaw_agent_name: str
+    openclaw_agent_session_key: str
+    openclaw_agent_thinking: str
+    openclaw_agent_timeout_seconds: float
+
+    @classmethod
+    def from_env(cls) -> "NotificationSettings":
+        load_dotenv()
+        data_root = _env("MARKET_DATA_DATA_ROOT", _env("MAINTENANCE_DATA_ROOT", "data"))
+        return cls(
+            enabled=_env_bool("ALERT_NOTIFY_ENABLED", False),
+            min_severity=_env("ALERT_NOTIFY_MIN_SEVERITY", "high").lower(),
+            cooldown_seconds=_env_int("ALERT_NOTIFY_COOLDOWN_SECONDS", 300),
+            state_path=_env(
+                "ALERT_NOTIFY_STATE_PATH",
+                f"{data_root.rstrip('/')}/latest/alert_notify_state.json",
+            ),
+            openclaw_enabled=_env_bool("ALERT_NOTIFY_OPENCLAW_ENABLED", False),
+            openclaw_command=_env("ALERT_NOTIFY_OPENCLAW_COMMAND", "openclaw"),
+            openclaw_channel=_env("ALERT_NOTIFY_OPENCLAW_CHANNEL", "openclaw-weixin"),
+            openclaw_account=_env("ALERT_NOTIFY_OPENCLAW_ACCOUNT"),
+            openclaw_target=_env("ALERT_NOTIFY_OPENCLAW_TARGET"),
+            openclaw_dry_run=_env_bool("ALERT_NOTIFY_OPENCLAW_DRY_RUN", True),
+            openclaw_timeout_seconds=_env_float("ALERT_NOTIFY_OPENCLAW_TIMEOUT_SECONDS", 20.0),
+            openclaw_agent_enabled=_env_bool("ALERT_NOTIFY_OPENCLAW_AGENT_ENABLED", False),
+            openclaw_agent_deliver=_env_bool("ALERT_NOTIFY_OPENCLAW_AGENT_DELIVER", False),
+            openclaw_agent_name=_env("ALERT_NOTIFY_OPENCLAW_AGENT_NAME", "main"),
+            openclaw_agent_session_key=_env(
+                "ALERT_NOTIFY_OPENCLAW_AGENT_SESSION_KEY",
+                "spx-spark-alerts",
+            ),
+            openclaw_agent_thinking=_env("ALERT_NOTIFY_OPENCLAW_AGENT_THINKING", "low"),
+            openclaw_agent_timeout_seconds=_env_float(
+                "ALERT_NOTIFY_OPENCLAW_AGENT_TIMEOUT_SECONDS",
+                180.0,
+            ),
+        )
+
+
+@dataclass(frozen=True)
 class SamplingSettings:
     strike_step: int
     window_points: int

@@ -145,6 +145,7 @@ scripts/run-alert-engine.sh --at 2026-07-07T03:15:00
 scripts/run-options-map.sh
 scripts/run-iv-surface.sh
 scripts/run-24h-service.sh --print-config
+scripts/send-openclaw-test-alert.sh
 ```
 
 The alert profile is the 24h monitoring layer. It maps New York and Beijing
@@ -154,8 +155,23 @@ entitlement check; it does not replace premarket, after-hours, futures,
 Hyperliquid, or Polymarket monitoring.
 
 The alert engine reads normalized latest state and emits data-health and
-price-move alerts. It is notification-ready but does not send pushes or place
-orders yet.
+price-move alerts. Notification is optional and disabled by default. Enable it
+with `ALERT_NOTIFY_ENABLED=true`; `ALERT_NOTIFY_OPENCLAW_DRY_RUN=true` keeps the
+OpenClaw path in dry-run mode while testing.
+
+OpenClaw Weixin is supported through the `openclaw message send` CLI. The Weixin
+channel requires a valid conversation `context_token`; a raw login `userId` may
+dry-run successfully but real sends can fail until the user has messaged the
+OpenClaw bot and the gateway has cached that context.
+
+Minimal OpenClaw test:
+
+```bash
+openclaw gateway status
+openclaw channels status
+scripts/send-openclaw-test-alert.sh
+ALERT_NOTIFY_OPENCLAW_DRY_RUN=false scripts/send-openclaw-test-alert.sh
+```
 
 `run-options-map.sh` is the current options-intelligence feature layer. It reads
 SPXW option quotes from latest state and computes ATM strike, ATM straddle,
