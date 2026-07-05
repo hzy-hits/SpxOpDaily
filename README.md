@@ -7,7 +7,7 @@ Current scope:
 - Verify IBKR market data permissions.
 - Record the boundary between live, delayed, and missing feeds.
 - Keep the project isolated from the machine's default Codex setup.
-- No automatic order placement.
+- Market-data only: no order placement, account polling, position polling, or credential storage.
 
 ## Quick Start
 
@@ -23,6 +23,7 @@ IBKR requirements:
 - TWS or IB Gateway must be running.
 - API socket must be enabled.
 - Use paper first: IB Gateway paper usually listens on `127.0.0.1:4002`.
+- Keep IBKR Gateway's Read-Only API setting enabled for this project.
 
 ## Isolated Codex Wrapper
 
@@ -60,11 +61,22 @@ connect to TWS/IB Gateway.
 Suggested real-data acceptance sequence:
 
 ```bash
+scripts/start-ibgateway-xvfb.sh
+scripts/start-ibgateway-vnc.sh
 uv run spx-spark-runtime-mode ibkr-on --ttl-minutes 120 --reason "manual IBKR data test"
 scripts/run-ibkr-collector.sh --force --skip-options --json
 scripts/show-latest-state.sh --all-providers
 scripts/run-ibkr-collector.sh --force --json
 ```
+
+On a headless host, view the Gateway login window through an SSH tunnel:
+
+```bash
+ssh -L 5909:127.0.0.1:5909 ubuntu@YOUR_SERVER
+```
+
+Then connect a local VNC viewer to `127.0.0.1:5909`. The VNC bridge is bound
+to localhost and is only for manual Gateway login/configuration.
 
 Keep the P0 index set focused on SPX and vol-regime data:
 `SPX,VIX,VIX1D,VIX9D,VIX3M,VVIX,SKEW`. Optional cross-index checks can be added

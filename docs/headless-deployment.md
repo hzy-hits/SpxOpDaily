@@ -27,6 +27,11 @@ scripts/start-ibgateway-xvfb.sh
 tail -f logs/ibgateway.log
 ```
 
+The startup script uses `setsid` instead of plain `nohup` because this SSH
+execution environment can clean up ordinary background children after the shell
+returns. It also removes stale X lock/socket files and verifies that the virtual
+display is connectable before launching Gateway.
+
 Stop it:
 
 ```bash
@@ -38,6 +43,31 @@ Important: Xvfb only supplies a virtual display. To actually interact with the l
 - SSH X11 forwarding from a machine with an X server.
 - VNC/x11vnc attached to the virtual display.
 - IBC automation after you have reviewed how credentials will be stored.
+
+Current manual login path:
+
+```bash
+cd /home/ubuntu/spx-spark
+scripts/start-ibgateway-xvfb.sh
+scripts/start-ibgateway-vnc.sh
+```
+
+From your local machine:
+
+```bash
+ssh -L 5909:127.0.0.1:5909 ubuntu@YOUR_SERVER
+```
+
+Then open a local VNC viewer at `127.0.0.1:5909`. The x11vnc bridge is started
+with `-localhost -nopw`, so it is reachable only through SSH tunnel or local
+processes on the server. Stop it with:
+
+```bash
+scripts/stop-ibgateway-vnc.sh
+```
+
+After logging in, keep IB Gateway's Read-Only API setting enabled. This project
+does not need API trading permission for data verification or collection.
 
 Development flow:
 
@@ -79,7 +109,10 @@ journalctl --user -u spx-ibkr-verifier.service -n 100 --no-pager
 
 - Do not commit `.env`.
 - Do not store IBKR credentials in this repository.
+- Do not store IBKR credentials in IBC or any other automation until explicitly approved.
 - Keep IB Gateway API access on localhost.
+- Keep IB Gateway Read-Only API enabled for this project.
+- Keep IBKR code market-data only: no orders, account polling, position polling, or execution polling.
 - Use SSH tunnels for remote dashboard access.
 - Keep automatic order placement out of the MVP.
 
