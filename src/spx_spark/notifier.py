@@ -266,6 +266,8 @@ def run_openclaw_agent(
             handle.name,
             "--json",
         ]
+        if settings.openclaw_agent_model:
+            command.extend(["--model", settings.openclaw_agent_model])
         if settings.openclaw_agent_deliver:
             command.append("--deliver")
             command.extend(["--reply-channel", settings.openclaw_channel])

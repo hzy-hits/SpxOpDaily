@@ -395,6 +395,7 @@ class NotificationSettings:
     openclaw_agent_enabled: bool
     openclaw_agent_deliver: bool
     openclaw_agent_name: str
+    openclaw_agent_model: str
     openclaw_agent_session_key: str
     openclaw_agent_thinking: str
     openclaw_agent_timeout_seconds: float
@@ -421,11 +422,15 @@ class NotificationSettings:
             openclaw_agent_enabled=_env_bool("ALERT_NOTIFY_OPENCLAW_AGENT_ENABLED", False),
             openclaw_agent_deliver=_env_bool("ALERT_NOTIFY_OPENCLAW_AGENT_DELIVER", False),
             openclaw_agent_name=_env("ALERT_NOTIFY_OPENCLAW_AGENT_NAME", "main"),
+            openclaw_agent_model=_env(
+                "ALERT_NOTIFY_OPENCLAW_AGENT_MODEL",
+                "gpt-5.3-codex-spark",
+            ),
             openclaw_agent_session_key=_env(
                 "ALERT_NOTIFY_OPENCLAW_AGENT_SESSION_KEY",
                 "spx-spark-alerts",
             ),
-            openclaw_agent_thinking=_env("ALERT_NOTIFY_OPENCLAW_AGENT_THINKING", "low"),
+            openclaw_agent_thinking=_env("ALERT_NOTIFY_OPENCLAW_AGENT_THINKING", "high"),
             openclaw_agent_timeout_seconds=_env_float(
                 "ALERT_NOTIFY_OPENCLAW_AGENT_TIMEOUT_SECONDS",
                 180.0,

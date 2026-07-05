@@ -4,7 +4,7 @@ import subprocess
 from datetime import datetime, timedelta, timezone
 
 from spx_spark.config import NotificationSettings
-from spx_spark.notifier import notify_payload
+from spx_spark.notifier import notify_payload, run_openclaw_agent
 
 
 def make_settings(
@@ -29,8 +29,9 @@ def make_settings(
         openclaw_agent_enabled=False,
         openclaw_agent_deliver=False,
         openclaw_agent_name="main",
+        openclaw_agent_model="gpt-5.3-codex-spark",
         openclaw_agent_session_key="spx-spark-alerts",
-        openclaw_agent_thinking="low",
+        openclaw_agent_thinking="high",
         openclaw_agent_timeout_seconds=180.0,
     )
 
@@ -99,3 +100,22 @@ def test_notifier_reports_missing_openclaw_target(tmp_path) -> None:
     assert result.sent_count == 0
     assert result.sinks[0].attempted is False
     assert result.sinks[0].error == "missing openclaw channel or target"
+
+
+def test_openclaw_agent_uses_configured_model_and_thinking(tmp_path) -> None:
+    calls: list[list[str]] = []
+
+    def runner(command: list[str], timeout_seconds: float) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout="{}", stderr="")
+
+    settings = make_settings(str(tmp_path / "notify-state.json"))
+
+    result = run_openclaw_agent(settings, "analyze this alert", runner=runner)
+
+    assert result.ok is True
+    command = calls[0]
+    assert "--model" in command
+    assert command[command.index("--model") + 1] == "gpt-5.3-codex-spark"
+    assert "--thinking" in command
+    assert command[command.index("--thinking") + 1] == "high"
