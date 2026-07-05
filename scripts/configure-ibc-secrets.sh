@@ -29,18 +29,32 @@ from pathlib import Path
 source = Path(sys.argv[1])
 target = Path(sys.argv[2])
 
+try:
+    tty = open("/dev/tty", "r+", encoding="utf-8", buffering=1)
+except OSError as exc:
+    raise SystemExit(
+        "This script must be run from an interactive terminal because it prompts "
+        "for IBKR credentials."
+    ) from exc
+
+
+def tty_input(label: str) -> str:
+    tty.write(label)
+    tty.flush()
+    return tty.readline().strip()
+
 
 def prompt(default: str, label: str) -> str:
     suffix = f" [{default}]" if default else ""
-    value = input(f"{label}{suffix}: ").strip()
+    value = tty_input(f"{label}{suffix}: ")
     return value or default
 
 
-login_id = input("IBKR username: ").strip()
+login_id = tty_input("IBKR username: ")
 if not login_id:
     raise SystemExit("IBKR username is required")
 
-password = getpass.getpass("IBKR password: ")
+password = getpass.getpass("IBKR password: ", stream=tty)
 if not password:
     raise SystemExit("IBKR password is required")
 
@@ -57,7 +71,7 @@ read_only_login = prompt("yes", "Read-only login").lower()
 if read_only_login not in {"yes", "no"}:
     raise SystemExit("Read-only login must be yes or no")
 
-second_factor_device = input("Second factor device name, if IBKR shows multiple devices [blank]: ").strip()
+second_factor_device = tty_input("Second factor device name, if IBKR shows multiple devices [blank]: ")
 relogin_after_2fa_timeout = prompt("yes", "Relogin after IBKR Mobile 2FA timeout").lower()
 if relogin_after_2fa_timeout not in {"yes", "no"}:
     raise SystemExit("Relogin after 2FA timeout must be yes or no")
