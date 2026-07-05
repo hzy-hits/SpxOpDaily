@@ -10,6 +10,7 @@ dependencies = [
 [project.scripts]
 spx-spark-ibkr-verifier = "spx_spark.ibkr.verifier:main"
 spx-spark-ibkr-collector = "spx_spark.ibkr.collector:main"
+spx-spark-ibkr-trading-hours-report = "spx_spark.ibkr.trading_hours_report:main"
 spx-spark-hyperliquid-collector = "spx_spark.hyperliquid.collector:main"
 spx-spark-latest-state = "spx_spark.latest_state:main"
 spx-spark-maintenance = "spx_spark.maintenance:main"

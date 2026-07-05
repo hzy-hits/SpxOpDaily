@@ -69,6 +69,19 @@ scripts/show-latest-state.sh --all-providers
 scripts/run-ibkr-collector.sh --force --json
 ```
 
+Trading-hours entitlement report:
+
+```bash
+IBKR_PORT=4001 scripts/run-ibkr-trading-hours-report.sh --skip-options
+IBKR_PORT=4001 IBKR_MAX_OPTION_LINES=40 scripts/run-ibkr-trading-hours-report.sh
+```
+
+The report writes `logs/ibkr-trading-hours-report-*.json` and classifies each
+requested row as `ok`, `stale`, `delayed`, `frozen`, `missing_price`,
+`missing_bid_ask`, `missing_greeks`, `missing`, or `error`. Run it during
+regular U.S. trading hours for the real acceptance result; weekend or overnight
+runs are marked `not_rth` unless `--allow-outside-rth` is set.
+
 On a headless host, view the Gateway login window through an SSH tunnel:
 
 ```bash

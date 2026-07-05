@@ -98,6 +98,18 @@ scripts/run-ibkr-verifier.sh
 
 The verifier writes JSON snapshots to `logs/`.
 
+For a trading-hours entitlement report, run Gateway in live mode and then:
+
+```bash
+IBKR_PORT=4001 scripts/run-ibkr-trading-hours-report.sh --skip-options
+IBKR_PORT=4001 IBKR_MAX_OPTION_LINES=40 scripts/run-ibkr-trading-hours-report.sh --strict
+```
+
+The report uses the same market-data-only connection path as the verifier:
+Read-Only API, no startup account fetches, no orders, no positions, and no
+executions. Use `--skip-options` for a fast index/ETF/futures check, then remove
+it during regular trading hours to validate SPXW bid/ask and model greeks.
+
 ## systemd User Timer
 
 Install the verifier timer for the current user:
