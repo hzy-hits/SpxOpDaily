@@ -89,6 +89,7 @@ Derived flags:
 - RSP/SPY: equal-weight breadth if RSP is available
 - XLY/XLP: cyclical vs defensive
 - XLK/XLU: growth/tech vs defensive utilities
+- DJU when available, with XLU as the ETF proxy
 
 Derived flags:
 
@@ -108,6 +109,8 @@ Inputs:
 - VIX3M
 - VVIX
 - SKEW
+- NDX/RUT/DJX/DJU as cross-index context when entitlement and contract
+  definitions are verified
 
 Derived features:
 

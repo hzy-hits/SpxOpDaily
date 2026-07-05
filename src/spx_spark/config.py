@@ -143,10 +143,13 @@ class IbkrSettings:
             market_data_type=_env_int("IBKR_MARKET_DATA_TYPE", 1),
             es_expiry=_env("IBKR_ES_EXPIRY", auto_futures_expiry) or auto_futures_expiry,
             mes_expiry=_env("IBKR_MES_EXPIRY", auto_futures_expiry) or auto_futures_expiry,
-            verify_indexes=_env_csv("IBKR_VERIFY_INDEXES", "SPX,VIX,VIX1D,VIX9D,VIX3M,VVIX,SKEW"),
+            verify_indexes=_env_csv(
+                "IBKR_VERIFY_INDEXES",
+                "SPX,VIX,VIX1D,VIX9D,VIX3M,VVIX,SKEW,NDX,RUT,DJX,DJU",
+            ),
             verify_stocks=_env_csv(
                 "IBKR_VERIFY_STOCKS",
-                "SPY,QQQ,IWM,DIA,HYG,LQD,TLT,IEF,SHY,UUP,GLD,USO",
+                "SPY,QQQ,IWM,DIA,HYG,LQD,TLT,IEF,SHY,UUP,GLD,USO,RSP,XLU",
             ),
             verify_futures=_env_csv("IBKR_VERIFY_FUTURES", "ES,MES"),
             option_expiry=_env("IBKR_OPTION_EXPIRY", default_spxw_expiry())
@@ -250,9 +253,12 @@ class SchwabSettings:
             token_file=_env("SCHWAB_TOKEN_FILE", "runtime/schwab-token.json"),
             verify_indexes=_env_csv(
                 "SCHWAB_VERIFY_INDEXES",
-                "$SPX,$VIX,$VIX1D,$VIX9D,$VIX3M,$VVIX,$SKEW",
+                "$SPX,$VIX,$VIX1D,$VIX9D,$VIX3M,$VVIX,$SKEW,$NDX,$RUT,$DJI,$DJU",
             ),
-            verify_equities=_env_csv("SCHWAB_VERIFY_EQUITIES", "SPY,QQQ,IWM,HYG,LQD,TLT,IEF"),
+            verify_equities=_env_csv(
+                "SCHWAB_VERIFY_EQUITIES",
+                "SPY,QQQ,IWM,DIA,HYG,LQD,TLT,IEF,SHY,UUP,GLD,USO,RSP,XLU",
+            ),
             verify_futures=_env_csv("SCHWAB_VERIFY_FUTURES", "/ES,/MES"),
             verify_option_chains=_env_csv("SCHWAB_VERIFY_OPTION_CHAINS", "SPX,XSP,SPY,QQQ,IWM"),
             option_chain_strike_count=_env_int("SCHWAB_OPTION_CHAIN_STRIKE_COUNT", 10),
@@ -408,6 +414,7 @@ class NotificationSettings:
     codex_sandbox: str
     codex_timeout_seconds: float
     codex_output_max_chars: int
+    codex_require_delivery_cue: bool
 
     @classmethod
     def from_env(cls) -> "NotificationSettings":
@@ -453,6 +460,7 @@ class NotificationSettings:
             codex_sandbox=_env("ALERT_NOTIFY_CODEX_SANDBOX", "read-only"),
             codex_timeout_seconds=_env_float("ALERT_NOTIFY_CODEX_TIMEOUT_SECONDS", 90.0),
             codex_output_max_chars=_env_int("ALERT_NOTIFY_CODEX_OUTPUT_MAX_CHARS", 1800),
+            codex_require_delivery_cue=_env_bool("ALERT_NOTIFY_CODEX_REQUIRE_DELIVERY_CUE", True),
         )
 
 

@@ -108,3 +108,9 @@ def test_ibkr_default_verifier_uses_dia_as_dow_proxy(monkeypatch, tmp_path):
     settings = IbkrSettings.from_env()
 
     assert "DIA" in settings.verify_stocks
+    assert "NDX" in settings.verify_indexes
+    assert "RUT" in settings.verify_indexes
+    assert "DJX" in settings.verify_indexes
+    assert "DJU" in settings.verify_indexes
+    assert "RSP" in settings.verify_stocks
+    assert "XLU" in settings.verify_stocks

@@ -20,6 +20,23 @@ SEVERITY_RANK = {
     "critical": 4,
 }
 
+POSITIVE_DELIVERY_CUES = (
+    "需要看盘",
+    "需要人类",
+    "需要关注",
+    "需要立即",
+    "高风险",
+)
+
+NEGATIVE_DELIVERY_CUES = (
+    "不需要推送",
+    "无需推送",
+    "不要推送",
+    "不推送",
+    "不需要看盘",
+    "无需看盘",
+)
+
 CommandRunner = Callable[[list[str], float], subprocess.CompletedProcess[str]]
 
 
@@ -236,9 +253,64 @@ def compact_analysis_payload(
             ],
         }
 
+    market_context = payload.get("market_context")
+    compact_market_context: object = None
+    if isinstance(market_context, dict):
+        entries = market_context.get("entries")
+        selected_entries = []
+        if isinstance(entries, list):
+            wanted = {
+                "index:SPX",
+                "index:VIX",
+                "index:VIX1D",
+                "index:VIX9D",
+                "index:VIX3M",
+                "index:VVIX",
+                "index:SKEW",
+                "index:NDX",
+                "index:RUT",
+                "index:DJX",
+                "index:DJU",
+                "equity:SPY",
+                "equity:QQQ",
+                "equity:IWM",
+                "equity:DIA",
+                "equity:HYG",
+                "equity:LQD",
+                "equity:TLT",
+                "equity:IEF",
+                "equity:SHY",
+                "equity:UUP",
+                "equity:GLD",
+                "equity:USO",
+                "equity:RSP",
+                "equity:XLU",
+                "future:ES",
+                "future:MES",
+                "crypto_perp:xyz:SP500",
+            }
+            selected_entries = [
+                {
+                    "instrument_id": entry.get("instrument_id"),
+                    "provider": entry.get("provider"),
+                    "quality": entry.get("quality"),
+                    "price": entry.get("price"),
+                    "move_bps": entry.get("move_bps"),
+                    "age_ms": entry.get("age_ms"),
+                }
+                for entry in entries
+                if isinstance(entry, dict) and entry.get("instrument_id") in wanted
+            ]
+        compact_market_context = {
+            "quality_summary": market_context.get("quality_summary"),
+            "derived": market_context.get("derived"),
+            "entries": selected_entries,
+        }
+
     return {
         "as_of": payload.get("as_of"),
         "window": payload.get("window"),
+        "market_context": compact_market_context,
         "alerts": alerts[:8],
         "options_map": compact_options,
         "iv_surface": compact_surface,
@@ -252,10 +324,19 @@ def build_codex_prompt(payload: dict[str, object], alerts: list[dict[str, object
             "你是 SPX Spark 的快速告警确认 agent。",
             "只根据下面的本机 JSON 判断是否需要推送给人类。不要给自动下单指令，不要编造缺失数据。",
             "输出中文，最多 6 行。必须包含：结论、原因、数据质量、需要人类看的检查项。",
-            "如果数据质量不足，明确说 degraded；如果值得看盘，用 `需要看盘` 开头。",
+            "如果数据质量不足，明确说 degraded。",
+            "如果值得外发，第一行必须用 `需要看盘:` 开头；如果不值得外发，第一行必须用 `不需要推送:` 开头。",
             json.dumps(compact_payload, ensure_ascii=False, sort_keys=True),
         )
     )
+
+
+def codex_message_requests_delivery(message: str) -> bool:
+    normalized = message.strip().lower()
+    if any(cue in normalized for cue in NEGATIVE_DELIVERY_CUES):
+        return False
+    first_line = normalized.splitlines()[0] if normalized else ""
+    return any(first_line.startswith(cue) for cue in POSITIVE_DELIVERY_CUES)
 
 
 def openclaw_state_dir() -> Path:
@@ -497,11 +578,26 @@ def notify_payload(
         )
         sinks.append(codex_result)
         if codex_result.ok and settings.codex_deliver:
-            sinks.append(send_openclaw_message(settings, codex_message, runner=runner))
+            should_deliver = (
+                codex_message_requests_delivery(codex_message)
+                if settings.codex_require_delivery_cue
+                else True
+            )
+            if should_deliver:
+                sinks.append(send_openclaw_message(settings, codex_message, runner=runner))
+            else:
+                sinks.append(
+                    SinkResult(
+                        sink="codex_delivery_gate",
+                        attempted=True,
+                        ok=True,
+                        error="codex output did not request delivery",
+                    )
+                )
     if settings.openclaw_agent_enabled:
         sinks.append(run_openclaw_agent(settings, build_agent_prompt(payload, selected), runner=runner))
 
-    sent_count = sum(1 for sink in sinks if sink.ok)
+    sent_count = sum(1 for sink in sinks if sink.sink == "openclaw_message" and sink.ok)
     if sent_count:
         mark_alerts_sent(selected, sent_at_by_key, settings, now=now)
     skipped_reason = None if sinks else "no_enabled_sinks"

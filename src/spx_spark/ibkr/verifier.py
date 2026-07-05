@@ -24,6 +24,7 @@ DEFAULT_INDEX_EXCHANGES: dict[str, str] = {
     "NDX": "NASDAQ",
     "RUT": "RUSSELL",
     "DJX": "CBOE",
+    "DJU": "CBOE",
 }
 
 

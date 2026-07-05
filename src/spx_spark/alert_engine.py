@@ -9,6 +9,7 @@ from datetime import datetime
 from spx_spark.alert_profile import AlertWindow, active_window, parse_at
 from spx_spark.config import IvSurfaceSettings, NotificationSettings, StorageSettings
 from spx_spark.iv_surface import IvSurfaceSnapshot, load_latest_snapshot
+from spx_spark.market_context import build_market_context
 from spx_spark.marketdata import MarketDataQuality, Quote
 from spx_spark.notifier import notify_payload
 from spx_spark.options_map import OptionsMap, build_options_map
@@ -18,12 +19,29 @@ from spx_spark.storage import LatestState, LatestStateStore
 BASELINE_INSTRUMENTS = (
     "index:SPX",
     "index:VIX",
+    "index:VIX1D",
+    "index:VIX9D",
+    "index:VIX3M",
     "index:VVIX",
     "index:SKEW",
+    "index:NDX",
+    "index:RUT",
+    "index:DJX",
+    "index:DJU",
     "equity:SPY",
     "equity:QQQ",
     "equity:IWM",
     "equity:DIA",
+    "equity:HYG",
+    "equity:LQD",
+    "equity:TLT",
+    "equity:IEF",
+    "equity:SHY",
+    "equity:UUP",
+    "equity:GLD",
+    "equity:USO",
+    "equity:RSP",
+    "equity:XLU",
     "future:ES",
     "future:MES",
     "crypto_perp:xyz:SP500",
@@ -342,6 +360,7 @@ def evaluate_payload(state: LatestState, *, now: datetime | None = None) -> dict
         "created_at": datetime.now(tz=now.tzinfo).isoformat(),
         "as_of": state.as_of.isoformat(),
         "window": window.to_dict(now=now),
+        "market_context": build_market_context(state),
         "options_map": options_map.to_dict(),
         "iv_surface": iv_surface.to_dict() if iv_surface is not None else None,
         "alert_count": len(alerts),

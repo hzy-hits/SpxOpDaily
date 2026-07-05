@@ -12,6 +12,7 @@ def test_parse_index_spec_defaults_and_explicit_exchange():
     assert parse_index_spec("NDX") == ("NDX", "NASDAQ")
     assert parse_index_spec("RUT@RUSSELL") == ("RUT", "RUSSELL")
     assert parse_index_spec("DJX:CBOE") == ("DJX", "CBOE")
+    assert parse_index_spec("DJU") == ("DJU", "CBOE")
 
 
 def test_quotes_from_rows_normalizes_ibkr_verify_rows():

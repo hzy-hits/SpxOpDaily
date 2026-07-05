@@ -48,6 +48,7 @@ def test_alert_engine_flags_missing_required_data_for_current_window() -> None:
 
     kinds = {alert["kind"] for alert in payload["alerts"]}
     assert payload["window"]["name"] == "early_premarket_dip_watch"
+    assert payload["market_context"]["quality_summary"]["total_count"] >= 20
     assert "required_data_missing" in kinds
     assert payload["alert_count"] >= 4
 

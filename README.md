@@ -91,18 +91,19 @@ ssh -L 5909:127.0.0.1:5909 ubuntu@YOUR_SERVER
 Then connect a local VNC viewer to `127.0.0.1:5909`. The VNC bridge is bound
 to localhost and is only for manual Gateway login/configuration.
 
-Keep the P0 index set focused on SPX and vol-regime data:
-`SPX,VIX,VIX1D,VIX9D,VIX3M,VVIX,SKEW`. Optional cross-index checks can be added
-temporarily with explicit exchanges, for example:
+Keep the P0 index set focused on SPX, vol-regime data, and a small cross-index
+context set: `SPX,VIX,VIX1D,VIX9D,VIX3M,VVIX,SKEW,NDX,RUT,DJX,DJU`.
+Use explicit exchanges when a broker symbol needs correction, for example:
 
 ```bash
-IBKR_VERIFY_INDEXES='SPX,VIX,VIX1D,VIX9D,VIX3M,VVIX,SKEW,NDX@NASDAQ,RUT@RUSSELL,DJX@CBOE' \
+IBKR_VERIFY_INDEXES='SPX,VIX,VIX1D,VIX9D,VIX3M,VVIX,SKEW,NDX@NASDAQ,RUT@RUSSELL,DJX@CBOE,DJU@CBOE' \
   scripts/run-ibkr-collector.sh --force --skip-options --json
 ```
 
-For NDX/RUT/Dow context, ETF proxies `QQQ/IWM/DIA` are often enough for alerts and
-use ordinary US stock data lines. Add official cash indexes only when they add a
-clear signal or entitlement check.
+For NDX/RUT/Dow/utilities context, ETF proxies `QQQ/IWM/DIA/XLU` are often
+enough for alerts and use ordinary US stock data lines. The alert payload keeps
+official cash indexes separate from proxies; missing official index data degrades
+that layer instead of being silently replaced.
 
 ## Schwab Verifier
 
@@ -175,7 +176,13 @@ ALERT_NOTIFY_CODEX_ENABLED=true
 ALERT_NOTIFY_CODEX_DELIVER=true
 ALERT_NOTIFY_CODEX_MODEL=gpt-5.3-codex-spark
 ALERT_NOTIFY_CODEX_REASONING_EFFORT=high
+ALERT_NOTIFY_CODEX_REQUIRE_DELIVERY_CUE=true
 ```
+
+With `ALERT_NOTIFY_CODEX_REQUIRE_DELIVERY_CUE=true`, Weixin delivery happens
+only when Codex starts with an explicit cue such as `需要看盘:`. Smoke tests or
+degraded-data conclusions that start with `不需要推送:` are recorded but not
+forwarded.
 
 Minimal OpenClaw test:
 

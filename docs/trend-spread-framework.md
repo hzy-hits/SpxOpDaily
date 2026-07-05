@@ -53,8 +53,8 @@ The scoring layer is not useful until the data layer proves these inputs.
 - `future:ES` / `future:MES` when available
 - `equity:HYG`, `equity:LQD`, `equity:TLT`, `equity:IEF`
 - Hyperliquid `crypto_perp:xyz:SP500` context
-- official `index:NDX`, `index:RUT`, `index:DJX` only when entitlement and contract
-  definitions are verified
+- official `index:NDX`, `index:RUT`, `index:DJX`, `index:DJU` only when
+  entitlement and contract definitions are verified
 
 ETF proxies are enough for many alerts:
 
@@ -62,6 +62,7 @@ ETF proxies are enough for many alerts:
 QQQ -> NDX context
 IWM -> RUT context
 DIA -> Dow context
+XLU -> utilities/DJU context
 ```
 
 ## Core Feature Groups

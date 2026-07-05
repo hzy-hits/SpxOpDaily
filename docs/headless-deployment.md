@@ -203,11 +203,13 @@ ALERT_NOTIFY_CODEX_ENABLED=true
 ALERT_NOTIFY_CODEX_DELIVER=true
 ALERT_NOTIFY_CODEX_MODEL=gpt-5.3-codex-spark
 ALERT_NOTIFY_CODEX_REASONING_EFFORT=high
+ALERT_NOTIFY_CODEX_REQUIRE_DELIVERY_CUE=true
 ```
 
 Keep `ALERT_NOTIFY_OPENCLAW_ENABLED=false` for this mode so the user receives
 the Codex-confirmed explanation rather than both the raw deterministic alert and
-the Codex follow-up.
+the Codex follow-up. Require an explicit Codex delivery cue in production so
+`不需要推送:` smoke-test or degraded-data conclusions do not reach Weixin.
 
 ## Security
 

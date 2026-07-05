@@ -5,7 +5,12 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 from spx_spark.config import NotificationSettings
-from spx_spark.notifier import notify_payload, run_codex_exec, run_openclaw_agent
+from spx_spark.notifier import (
+    codex_message_requests_delivery,
+    notify_payload,
+    run_codex_exec,
+    run_openclaw_agent,
+)
 
 
 def make_settings(
@@ -43,6 +48,7 @@ def make_settings(
         codex_sandbox="read-only",
         codex_timeout_seconds=90.0,
         codex_output_max_chars=1800,
+        codex_require_delivery_cue=True,
     )
 
 
@@ -50,6 +56,14 @@ def make_payload() -> dict[str, object]:
     return {
         "as_of": "2026-07-07T03:15:00+08:00",
         "window": {"name": "close_one_hour", "priority": "high"},
+        "market_context": {
+            "quality_summary": {"live_count": 3, "usable_count": 3, "total_count": 25},
+            "derived": {"vix1d_vix9d": 0.9, "qqq_spy": 0.97},
+            "entries": [
+                {"instrument_id": "index:VIX", "quality": "live", "price": 18.0},
+                {"instrument_id": "equity:QQQ", "quality": "live", "price": 725.0},
+            ],
+        },
         "alerts": [
             {
                 "severity": "high",
@@ -217,8 +231,43 @@ def test_notifier_can_use_codex_then_deliver_via_openclaw(tmp_path) -> None:
         now=datetime(2026, 7, 7, 0, 0, tzinfo=timezone.utc),
     )
 
-    assert result.sent_count == 2
+    assert result.sent_count == 1
     assert [sink.sink for sink in result.sinks] == ["codex_exec", "openclaw_message"]
     assert calls[0][:2] == ["codex", "exec"]
     assert calls[1][:3] == ["openclaw", "message", "send"]
     assert "需要看盘: SPX alert confirmed" in calls[1]
+
+
+def test_codex_delivery_gate_blocks_negative_confirmation(tmp_path) -> None:
+    calls: list[list[str]] = []
+
+    def runner(command: list[str], timeout_seconds: float) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        if command[:2] == ["codex", "exec"]:
+            output_path = command[command.index("--output-last-message") + 1]
+            with open(output_path, "w", encoding="utf-8") as handle:
+                handle.write("不需要推送: 只是测试链路")
+        return subprocess.CompletedProcess(command, 0, stdout="{}", stderr="")
+
+    settings = replace(
+        make_settings(str(tmp_path / "notify-state.json")),
+        codex_enabled=True,
+        openclaw_enabled=False,
+    )
+
+    result = notify_payload(
+        make_payload(),
+        settings=settings,
+        runner=runner,
+        now=datetime(2026, 7, 7, 0, 0, tzinfo=timezone.utc),
+    )
+
+    assert result.sent_count == 0
+    assert [sink.sink for sink in result.sinks] == ["codex_exec", "codex_delivery_gate"]
+    assert len(calls) == 1
+
+
+def test_codex_message_requests_delivery_uses_explicit_cues() -> None:
+    assert codex_message_requests_delivery("需要看盘: VIX and SPX alert confirmed")
+    assert not codex_message_requests_delivery("不需要推送: degraded smoke test")
+    assert not codex_message_requests_delivery("结论: critical alert, but no explicit delivery cue")
