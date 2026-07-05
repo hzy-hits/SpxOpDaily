@@ -174,6 +174,7 @@ def build_spxw_option_contracts(
 def connect_market_data_only(ib: Any, settings: IbkrSettings) -> None:
     from ib_async.ib import StartupFetch
 
+    disable_startup_positions_fetch(ib)
     ib.connect(
         settings.host,
         settings.port,
@@ -181,6 +182,13 @@ def connect_market_data_only(ib: Any, settings: IbkrSettings) -> None:
         readonly=True,
         fetchFields=StartupFetch(0),
     )
+
+
+def disable_startup_positions_fetch(ib: Any) -> None:
+    async def no_startup_positions() -> list[Any]:
+        return []
+
+    ib.reqPositionsAsync = no_startup_positions
 
 
 def qualify_and_subscribe(ib: Any, contracts: list[tuple[str, str, Any]]) -> dict[str, tuple[Any, VerifyRow]]:

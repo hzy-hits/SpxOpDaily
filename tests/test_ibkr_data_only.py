@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import ast
+import asyncio
 from pathlib import Path
+
+from spx_spark.config import IbkrSettings
+from spx_spark.ibkr.verifier import connect_market_data_only
 
 
 FORBIDDEN_IBKR_METHODS = {
@@ -82,3 +86,42 @@ def test_ibkr_connect_calls_disable_startup_account_fetches() -> None:
     assert not violations, "IBKR connect must not fetch account/order/position startup state:\n" + "\n".join(
         violations
     )
+
+
+def test_ibkr_connect_overrides_library_startup_positions_fetch() -> None:
+    class FakeIB:
+        def __init__(self) -> None:
+            self.connect_kwargs = {}
+
+        async def reqPositionsAsync(self) -> list[str]:
+            return ["should not be called"]
+
+        def connect(self, *args, **kwargs) -> None:
+            self.connect_args = args
+            self.connect_kwargs = kwargs
+
+    settings = IbkrSettings(
+        host="127.0.0.1",
+        port=4001,
+        client_id=171,
+        market_data_type=1,
+        es_expiry="202609",
+        mes_expiry="202609",
+        verify_indexes=[],
+        verify_stocks=[],
+        verify_futures=[],
+        option_expiry="20260706",
+        option_strike_window_points=50,
+        option_strike_step=5,
+        max_option_lines=40,
+        quote_wait_seconds=1.0,
+        stale_after_seconds=10.0,
+    )
+    ib = FakeIB()
+
+    connect_market_data_only(ib, settings)
+
+    assert asyncio.run(ib.reqPositionsAsync()) == []
+    assert ib.connect_args == ("127.0.0.1", 4001)
+    assert ib.connect_kwargs["readonly"] is True
+    assert ib.connect_kwargs["fetchFields"].value == 0
