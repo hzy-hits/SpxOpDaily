@@ -3,7 +3,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from spx_spark.ibkr.adapter import provider_state_from_quotes, quotes_from_rows, snapshot_from_rows
-from spx_spark.ibkr.verifier import VerifyRow, parse_index_spec
+from spx_spark.ibkr.collector import has_competing_session_error, provider_error_count
+from spx_spark.ibkr.verifier import IbkrError, VerifyRow, parse_index_spec
 from spx_spark.marketdata import MarketDataQuality, Provider, ProviderStatus
 
 
@@ -13,6 +14,30 @@ def test_parse_index_spec_defaults_and_explicit_exchange():
     assert parse_index_spec("RUT@RUSSELL") == ("RUT", "RUSSELL")
     assert parse_index_spec("DJX:CBOE") == ("DJX", "CBOE")
     assert parse_index_spec("DJU") == ("DJU", "CBOE")
+
+
+def test_competing_session_error_detection() -> None:
+    assert has_competing_session_error(
+        [
+            IbkrError(
+                req_id=1,
+                error_code=10197,
+                message="No market data during competing live session",
+                contract=None,
+                ts="2026-07-06T13:30:00+00:00",
+            )
+        ]
+    )
+
+
+def test_provider_error_count_ignores_farm_status_messages() -> None:
+    errors = [
+        IbkrError(1, 2119, "Market data farm is connecting", None, "2026-07-06T13:30:00+00:00"),
+        IbkrError(2, 2104, "Market data farm connection is OK", None, "2026-07-06T13:30:00+00:00"),
+        IbkrError(3, 354, "Requested market data is not subscribed", None, "2026-07-06T13:30:00+00:00"),
+    ]
+
+    assert provider_error_count(errors) == 1
 
 
 def test_quotes_from_rows_normalizes_ibkr_verify_rows():

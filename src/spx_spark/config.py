@@ -145,7 +145,7 @@ class IbkrSettings:
             mes_expiry=_env("IBKR_MES_EXPIRY", auto_futures_expiry) or auto_futures_expiry,
             verify_indexes=_env_csv(
                 "IBKR_VERIFY_INDEXES",
-                "SPX,VIX,VIX1D,VIX9D,VIX3M,VVIX,SKEW,NDX,RUT,DJX,DJU",
+                "SPX,VIX,VIX1D,VIX9D,VIX3M,VVIX,SKEW",
             ),
             verify_stocks=_env_csv(
                 "IBKR_VERIFY_STOCKS",

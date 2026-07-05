@@ -1,6 +1,15 @@
 from __future__ import annotations
 
-from spx_spark.service_loop import ServiceLoopSettings, ServiceTask, build_tasks, run_once, run_task
+import json
+
+from spx_spark.service_loop import (
+    ServiceLoopSettings,
+    ServiceTask,
+    build_tasks,
+    next_delay_seconds,
+    run_once,
+    run_task,
+)
 
 
 def make_settings(**overrides) -> ServiceLoopSettings:
@@ -15,6 +24,8 @@ def make_settings(**overrides) -> ServiceLoopSettings:
         "alert_interval_seconds": 30,
         "heartbeat_seconds": 60,
         "ibkr_skip_options": False,
+        "ibkr_connect_retry_seconds": 300,
+        "ibkr_conflict_probe_seconds": 300,
     }
     values.update(overrides)
     return ServiceLoopSettings(**values)
@@ -69,3 +80,48 @@ def test_run_task_keeps_failure_stdout_tail() -> None:
 
     assert event["ok"] is False
     assert event["stdout_tail"] == "diagnostic payload\n"
+
+
+def test_ibkr_task_extracts_provider_state_from_json_stdout() -> None:
+    def ibkr_task() -> int:
+        print(
+            json.dumps(
+                {
+                    "provider_state": {
+                        "status": "unavailable",
+                        "reason": "competing session blocks live market data (IBKR 10197)",
+                        "connected": True,
+                    },
+                    "competing_session": True,
+                    "error_count": 1,
+                    "provider_error_count": 1,
+                }
+            )
+        )
+        return 0
+
+    event = run_task(ServiceTask("ibkr", 60, ibkr_task))
+
+    assert event["provider_status"] == "unavailable"
+    assert event["provider_connected"] is True
+    assert event["competing_session"] is True
+    assert event["error_count"] == 1
+    assert event["provider_error_count"] == 1
+
+
+def test_ibkr_competing_session_uses_probe_delay() -> None:
+    task = ServiceTask(
+        "ibkr",
+        60,
+        lambda: 0,
+        failure_interval_seconds=300,
+        conflict_probe_seconds=300,
+    )
+    result = {
+        "ok": True,
+        "provider_status": "unavailable",
+        "provider_reason": "competing session blocks live market data (IBKR 10197)",
+        "competing_session": True,
+    }
+
+    assert next_delay_seconds(task, result) == 300

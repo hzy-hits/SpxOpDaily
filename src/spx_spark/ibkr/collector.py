@@ -32,6 +32,14 @@ from spx_spark.runtime_mode import ibkr_allowed, load_override
 from spx_spark.storage import LatestStateStore
 
 
+NON_DEGRADING_ERROR_CODES = {
+    2104,  # market data farm connection is OK
+    2106,  # historical market data farm connection is OK
+    2119,  # market data farm is connecting
+    2158,  # sec-def data farm connection is OK
+}
+
+
 def write_empty_provider_state(
     state: ProviderState,
     *,
@@ -63,6 +71,18 @@ def print_collector_summary(
         print("Raw files:")
         for path, count in sorted(raw_paths.items()):
             print(f"- {path}: {count}")
+
+
+def has_competing_session_error(errors: list[IbkrError]) -> bool:
+    return any(error.error_code == 10197 for error in errors)
+
+
+def provider_error_count(errors: list[IbkrError]) -> int:
+    return sum(1 for error in errors if error.error_code not in NON_DEGRADING_ERROR_CODES)
+
+
+def error_payload(errors: list[IbkrError]) -> list[dict[str, object]]:
+    return [asdict(error) for error in errors]
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -210,10 +230,12 @@ def run(argv: list[str] | None = None) -> int:
         if args.skip_options:
             rows = base_rows
         elif atm_reference is None:
-            print("Could not estimate SPX ATM reference; skipping SPXW options.", file=sys.stderr)
+            if not args.json:
+                print("Could not estimate SPX ATM reference; skipping SPXW options.", file=sys.stderr)
             rows = base_rows
         else:
-            print(f"Estimated SPX ATM reference {atm_reference:.2f} from {atm_source}")
+            if not args.json:
+                print(f"Estimated SPX ATM reference {atm_reference:.2f} from {atm_source}")
             option_contracts = build_spxw_option_contracts(ibkr_settings, atm_reference)
             option_subs = qualify_and_subscribe(ib, option_contracts)
             ib.sleep(ibkr_settings.quote_wait_seconds)
@@ -227,16 +249,34 @@ def run(argv: list[str] | None = None) -> int:
             connected=True,
             authenticated=True,
             latency_ms=(time.perf_counter() - start) * 1000.0,
-            error_count=len(ibkr_errors),
+            error_count=provider_error_count(ibkr_errors),
         )
+        if has_competing_session_error(ibkr_errors):
+            snapshot = ProviderSnapshot(
+                provider=Provider.IBKR,
+                received_at=received_at,
+                quotes=snapshot.quotes,
+                provider_states=(
+                    ProviderState(
+                        provider=Provider.IBKR,
+                        status=ProviderStatus.UNAVAILABLE,
+                        checked_at=received_at,
+                        reason="competing session blocks live market data (IBKR 10197)",
+                        connected=True,
+                        authenticated=True,
+                        latency_ms=(time.perf_counter() - start) * 1000.0,
+                        priority=0,
+                    ),
+                ),
+            )
         state = snapshot.provider_state
         if state is None:
             raise RuntimeError("IBKR snapshot missing provider state")
         write_result = persist_provider_snapshot(snapshot, storage_settings)
 
-        if not args.no_table:
+        if not args.json and not args.no_table:
             print_rows(rows)
-        if ibkr_errors:
+        if ibkr_errors and not args.json:
             print("\nIBKR errors:")
             for error in ibkr_errors:
                 print(f"- reqId={error.req_id} code={error.error_code}: {error.message}")
@@ -244,6 +284,10 @@ def run(argv: list[str] | None = None) -> int:
         summary = {
             "provider_state": state.to_dict(),
             "quotes_collected": snapshot.quote_count,
+            "error_count": len(ibkr_errors),
+            "provider_error_count": provider_error_count(ibkr_errors),
+            "errors": error_payload(ibkr_errors),
+            "competing_session": has_competing_session_error(ibkr_errors),
             "raw_paths": write_result.raw_paths,
             "latest_state": write_result.latest_state,
             "best_quote_count": write_result.best_quote_count,

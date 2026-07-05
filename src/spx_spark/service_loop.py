@@ -31,6 +31,8 @@ class ServiceLoopSettings:
     alert_interval_seconds: int
     heartbeat_seconds: int
     ibkr_skip_options: bool
+    ibkr_connect_retry_seconds: int
+    ibkr_conflict_probe_seconds: int
 
     @classmethod
     def from_env(cls) -> "ServiceLoopSettings":
@@ -46,6 +48,8 @@ class ServiceLoopSettings:
             alert_interval_seconds=env_int("SPX_SERVICE_ALERT_INTERVAL_SECONDS", 30),
             heartbeat_seconds=env_int("SPX_SERVICE_HEARTBEAT_SECONDS", 60),
             ibkr_skip_options=env_bool("SPX_SERVICE_IBKR_SKIP_OPTIONS", False),
+            ibkr_connect_retry_seconds=env_int("IBKR_CONNECT_RETRY_SECONDS", 300),
+            ibkr_conflict_probe_seconds=env_int("IBKR_CONFLICT_PROBE_SECONDS", 300),
         )
 
 
@@ -54,6 +58,8 @@ class ServiceTask:
     name: str
     interval_seconds: int
     fn: TaskFn
+    failure_interval_seconds: int | None = None
+    conflict_probe_seconds: int | None = None
     next_run_monotonic: float = 0.0
 
 
@@ -77,7 +83,7 @@ def run_hyperliquid() -> int:
 
 def make_run_ibkr(*, skip_options: bool) -> TaskFn:
     def run_ibkr() -> int:
-        args = ["--json"]
+        args = ["--json", "--no-table"]
         if skip_options:
             args.append("--skip-options")
         return ibkr_collector.run(args)
@@ -103,6 +109,8 @@ def build_tasks(settings: ServiceLoopSettings) -> list[ServiceTask]:
                 "ibkr",
                 settings.ibkr_interval_seconds,
                 make_run_ibkr(skip_options=settings.ibkr_skip_options),
+                failure_interval_seconds=settings.ibkr_connect_retry_seconds,
+                conflict_probe_seconds=settings.ibkr_conflict_probe_seconds,
             )
         )
     if settings.iv_surface_enabled:
@@ -144,7 +152,43 @@ def run_task(task: ServiceTask) -> dict[str, object]:
             event["stdout_tail"] = stdout_text[-tail_chars:]
         if stderr_text:
             event["stderr_tail"] = stderr_text[-tail_chars:]
+    if task.name == "ibkr":
+        add_ibkr_summary_fields(event, stdout_text)
     return event
+
+
+def add_ibkr_summary_fields(event: dict[str, object], stdout_text: str) -> None:
+    try:
+        summary = json.loads(stdout_text)
+    except json.JSONDecodeError:
+        return
+    if not isinstance(summary, dict):
+        return
+    provider_state = summary.get("provider_state")
+    if isinstance(provider_state, dict):
+        event["provider_status"] = provider_state.get("status")
+        event["provider_reason"] = provider_state.get("reason")
+        event["provider_connected"] = provider_state.get("connected")
+    event["competing_session"] = bool(summary.get("competing_session"))
+    if isinstance(summary.get("error_count"), int):
+        event["error_count"] = summary["error_count"]
+    if isinstance(summary.get("provider_error_count"), int):
+        event["provider_error_count"] = summary["provider_error_count"]
+
+
+def next_delay_seconds(task: ServiceTask, result: dict[str, object]) -> int:
+    delay = max(task.interval_seconds, 1)
+    if task.name != "ibkr":
+        return delay
+    provider_status = str(result.get("provider_status") or "")
+    provider_reason = str(result.get("provider_reason") or "").lower()
+    competing = bool(result.get("competing_session")) or "competing session" in provider_reason
+    unavailable = provider_status == "unavailable" or result.get("ok") is False
+    if competing and task.conflict_probe_seconds is not None:
+        return max(task.conflict_probe_seconds, 1)
+    if unavailable and task.failure_interval_seconds is not None:
+        return max(task.failure_interval_seconds, 1)
+    return delay
 
 
 def print_event(event: dict[str, object]) -> None:
@@ -165,8 +209,9 @@ def run_loop(tasks: list[ServiceTask], *, heartbeat_seconds: int) -> int:
         for task in tasks:
             if now < task.next_run_monotonic:
                 continue
-            print_event(run_task(task))
-            task.next_run_monotonic = time.monotonic() + max(task.interval_seconds, 1)
+            result = run_task(task)
+            print_event(result)
+            task.next_run_monotonic = time.monotonic() + next_delay_seconds(task, result)
 
         if now - last_heartbeat >= heartbeat_seconds:
             print_event(

@@ -104,13 +104,19 @@ def test_storage_settings_inherits_maintenance_root(monkeypatch):
 def test_ibkr_default_verifier_uses_dia_as_dow_proxy(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("IBKR_VERIFY_STOCKS", raising=False)
+    monkeypatch.delenv("IBKR_VERIFY_INDEXES", raising=False)
 
     settings = IbkrSettings.from_env()
 
     assert "DIA" in settings.verify_stocks
-    assert "NDX" in settings.verify_indexes
-    assert "RUT" in settings.verify_indexes
-    assert "DJX" in settings.verify_indexes
-    assert "DJU" in settings.verify_indexes
+    assert settings.verify_indexes == [
+        "SPX",
+        "VIX",
+        "VIX1D",
+        "VIX9D",
+        "VIX3M",
+        "VVIX",
+        "SKEW",
+    ]
     assert "RSP" in settings.verify_stocks
     assert "XLU" in settings.verify_stocks
