@@ -358,6 +358,28 @@ class StorageSettings:
 
 
 @dataclass(frozen=True)
+class IvSurfaceSettings:
+    data_root: str
+    latest_surface_path: str
+    raw_file_name: str
+    wide_quote_spread_bps: float
+
+    @classmethod
+    def from_env(cls) -> "IvSurfaceSettings":
+        load_dotenv()
+        data_root = _env("MARKET_DATA_DATA_ROOT", _env("MAINTENANCE_DATA_ROOT", "data"))
+        return cls(
+            data_root=data_root,
+            latest_surface_path=_env(
+                "IV_SURFACE_LATEST_PATH",
+                f"{data_root.rstrip('/')}/latest/iv_surface.json",
+            ),
+            raw_file_name=_env("IV_SURFACE_RAW_FILE_NAME", "snapshots.jsonl"),
+            wide_quote_spread_bps=_env_float("IV_SURFACE_WIDE_QUOTE_SPREAD_BPS", 250.0),
+        )
+
+
+@dataclass(frozen=True)
 class SamplingSettings:
     strike_step: int
     window_points: int

@@ -1,0 +1,15 @@
+[Unit]
+Description=SPX Spark 24h market-data, feature, and alert loop
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/ubuntu/spx-spark
+EnvironmentFile=-/home/ubuntu/spx-spark/.env
+ExecStart=/home/ubuntu/spx-spark/scripts/run-24h-service.sh
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target

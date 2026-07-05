@@ -128,6 +128,36 @@ Inspect logs:
 journalctl --user -u spx-ibkr-verifier.service -n 100 --no-pager
 ```
 
+## 24h Service Loop
+
+The 24h loop is modular. By default it runs public Hyperliquid collection, IV
+surface snapshots, and alert evaluation. IBKR collection is disabled unless
+`.env` explicitly sets `SPX_SERVICE_ENABLE_IBKR=true`, so the service will not
+take the broker session by accident.
+
+Dry check:
+
+```bash
+scripts/run-24h-service.sh --print-config
+SPX_SERVICE_ENABLE_HYPERLIQUID=false scripts/run-24h-service.sh --once
+```
+
+Install the user service:
+
+```bash
+mkdir -p ~/.config/systemd/user
+ln -sfn /home/ubuntu/spx-spark/systemd/spx-spark-24h.service ~/.config/systemd/user/spx-spark-24h.service
+systemctl --user daemon-reload
+systemctl --user enable --now spx-spark-24h.service
+```
+
+Inspect logs:
+
+```bash
+journalctl --user -u spx-spark-24h.service -n 100 --no-pager
+journalctl --user -u spx-spark-24h.service -f
+```
+
 ## Security
 
 - Do not commit `.env`.

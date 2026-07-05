@@ -6,7 +6,8 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 
 from spx_spark.alert_profile import AlertWindow, active_window, parse_at
-from spx_spark.config import StorageSettings
+from spx_spark.config import IvSurfaceSettings, StorageSettings
+from spx_spark.iv_surface import IvSurfaceSnapshot, load_latest_snapshot
 from spx_spark.marketdata import MarketDataQuality, Quote
 from spx_spark.options_map import OptionsMap, build_options_map
 from spx_spark.storage import LatestState, LatestStateStore
@@ -46,6 +47,12 @@ OPTION_GAMMA_ALERT_STATES = {
     "negative_gamma_acceleration",
     "zero_gamma_transition",
 }
+
+BAD_SURFACE_QUALITIES = {"missing_options", "missing_atm_iv", "low_iv_coverage", "wide_quote_degraded"}
+ATM_IV_JUMP_THRESHOLD = 0.03
+SKEW_STEEPENING_THRESHOLD = 0.08
+SURFACE_SHIFT_THRESHOLD = 0.03
+TERM_GAP_THRESHOLD = 0.05
 
 
 @dataclass(frozen=True)
@@ -152,6 +159,7 @@ def evaluate_alerts(
     *,
     window: AlertWindow,
     options_map: OptionsMap | None = None,
+    iv_surface: IvSurfaceSnapshot | None = None,
 ) -> list[Alert]:
     alerts: list[Alert] = []
     required = set(window.required_instruments)
@@ -176,6 +184,8 @@ def evaluate_alerts(
             alerts.append(alert)
 
     alerts.extend(option_map_alerts(options_map or build_options_map(state), window=window))
+    if iv_surface is not None:
+        alerts.extend(iv_surface_alerts(iv_surface, window=window))
     return alerts
 
 
@@ -221,16 +231,117 @@ def option_map_alerts(options_map: OptionsMap, *, window: AlertWindow) -> list[A
     return alerts
 
 
+def iv_surface_alerts(surface: IvSurfaceSnapshot, *, window: AlertWindow) -> list[Alert]:
+    alerts: list[Alert] = []
+    if (
+        surface.front_vs_next_atm_iv_gap is not None
+        and abs(surface.front_vs_next_atm_iv_gap) >= TERM_GAP_THRESHOLD
+    ):
+        alerts.append(
+            Alert(
+                severity=severity_for_priority(window.priority),
+                kind="iv_term_gap",
+                instrument_id="iv_surface:SPXW",
+                title=f"0DTE vs next ATM IV gap {surface.front_vs_next_atm_iv_gap:.3f}",
+                detail=(
+                    "Front SPXW ATM IV differs from next-expiry ATM IV by "
+                    f"{surface.front_vs_next_atm_iv_gap:.3f}."
+                ),
+                value=surface.front_vs_next_atm_iv_gap,
+                threshold=TERM_GAP_THRESHOLD,
+            )
+        )
+    for expiry in surface.expiries:
+        instrument_id = f"iv_surface:SPXW:{expiry.expiry}"
+        if expiry.surface_fit_quality in BAD_SURFACE_QUALITIES:
+            alerts.append(
+                Alert(
+                    severity="low" if window.priority in {"low", "off"} else "medium",
+                    kind="iv_surface_degraded",
+                    instrument_id=instrument_id,
+                    title=f"SPXW {expiry.expiry} surface {expiry.surface_fit_quality}",
+                    detail=(
+                        f"SPXW {expiry.expiry} IV surface quality is "
+                        f"{expiry.surface_fit_quality}; alerts should discount this expiry."
+                    ),
+                    quality=expiry.surface_fit_quality,
+                )
+            )
+        if expiry.atm_iv_jump_5m is not None and abs(expiry.atm_iv_jump_5m) >= ATM_IV_JUMP_THRESHOLD:
+            alerts.append(
+                Alert(
+                    severity=severity_for_priority(window.priority),
+                    kind="atm_iv_jump_5m",
+                    instrument_id=instrument_id,
+                    title=f"SPXW {expiry.expiry} ATM IV jump {expiry.atm_iv_jump_5m:.3f}",
+                    detail=f"ATM IV changed {expiry.atm_iv_jump_5m:.3f} since the previous surface snapshot.",
+                    value=expiry.atm_iv_jump_5m,
+                    threshold=ATM_IV_JUMP_THRESHOLD,
+                )
+            )
+        if (
+            expiry.put_skew_steepening_5m is not None
+            and expiry.put_skew_steepening_5m >= SKEW_STEEPENING_THRESHOLD
+        ):
+            alerts.append(
+                Alert(
+                    severity=severity_for_priority(window.priority),
+                    kind="put_skew_steepening_5m",
+                    instrument_id=instrument_id,
+                    title=f"SPXW {expiry.expiry} put skew steepening {expiry.put_skew_steepening_5m:.3f}",
+                    detail=(
+                        f"Put skew ratio increased {expiry.put_skew_steepening_5m:.3f} "
+                        "since the previous surface snapshot."
+                    ),
+                    value=expiry.put_skew_steepening_5m,
+                    threshold=SKEW_STEEPENING_THRESHOLD,
+                )
+            )
+        if (
+            expiry.iv_surface_shift_5m is not None
+            and abs(expiry.iv_surface_shift_5m) >= SURFACE_SHIFT_THRESHOLD
+        ):
+            alerts.append(
+                Alert(
+                    severity=severity_for_priority(window.priority),
+                    kind="iv_surface_shift_5m",
+                    instrument_id=instrument_id,
+                    title=f"SPXW {expiry.expiry} surface shift {expiry.iv_surface_shift_5m:.3f}",
+                    detail=(
+                        f"Average raw-grid IV shifted {expiry.iv_surface_shift_5m:.3f} "
+                        "since the previous surface snapshot."
+                    ),
+                    value=expiry.iv_surface_shift_5m,
+                    threshold=SURFACE_SHIFT_THRESHOLD,
+                )
+            )
+    return alerts
+
+
+def load_current_iv_surface() -> IvSurfaceSnapshot | None:
+    try:
+        return load_latest_snapshot(IvSurfaceSettings.from_env().latest_surface_path)
+    except (OSError, ValueError, json.JSONDecodeError, KeyError):
+        return None
+
+
 def evaluate_payload(state: LatestState, *, now: datetime | None = None) -> dict[str, object]:
     now = now or state.as_of
     window = active_window(now)
     options_map = build_options_map(state)
-    alerts = evaluate_alerts(state, window=window, options_map=options_map)
+    iv_surface = load_current_iv_surface()
+    alerts = evaluate_alerts(
+        state,
+        window=window,
+        options_map=options_map,
+        iv_surface=iv_surface,
+    )
     return {
         "created_at": datetime.now(tz=now.tzinfo).isoformat(),
         "as_of": state.as_of.isoformat(),
         "window": window.to_dict(now=now),
         "options_map": options_map.to_dict(),
+        "iv_surface": iv_surface.to_dict() if iv_surface is not None else None,
         "alert_count": len(alerts),
         "alerts": [alert.to_dict() for alert in alerts],
     }

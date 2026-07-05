@@ -143,6 +143,8 @@ scripts/run-alert-profile.sh --schedule
 scripts/run-alert-profile.sh --at 2026-07-06T14:30:00
 scripts/run-alert-engine.sh --at 2026-07-07T03:15:00
 scripts/run-options-map.sh
+scripts/run-iv-surface.sh
+scripts/run-24h-service.sh --print-config
 ```
 
 The alert profile is the 24h monitoring layer. It maps New York and Beijing
@@ -161,6 +163,23 @@ expected move, IV/skew ratios, Greek coverage, and an open-interest-based GEX
 prototype for zero gamma, put wall, and call wall when OI is available. Without
 open interest it intentionally reports `unknown_no_open_interest` instead of
 pretending that gamma-only data is a real wall map.
+
+`run-iv-surface.sh` writes a 5-minute surface snapshot under
+`data/features/iv_surface/` and `data/latest/iv_surface.json`. It tracks ATM IV,
+skew, surface shift, smile curvature, 0DTE-vs-next-expiry IV gap, and quote
+quality. `run-24h-service.sh` is the modular long-running loop. It runs
+Hyperliquid, IV surface, and alert tasks by default; IBKR is disabled unless
+`SPX_SERVICE_ENABLE_IBKR=true` is set in `.env`.
+
+Install the 24h user service:
+
+```bash
+mkdir -p ~/.config/systemd/user
+ln -sfn /home/ubuntu/spx-spark/systemd/spx-spark-24h.service ~/.config/systemd/user/spx-spark-24h.service
+systemctl --user daemon-reload
+systemctl --user enable --now spx-spark-24h.service
+journalctl --user -u spx-spark-24h.service -f
+```
 
 ## Mock Data Loop
 
