@@ -13,6 +13,20 @@ from spx_spark.config import IbkrSettings, NY_TZ
 from spx_spark.marketdata import quote_from_ibkr_row
 
 
+DEFAULT_INDEX_EXCHANGES: dict[str, str] = {
+    "SPX": "CBOE",
+    "VIX": "CBOE",
+    "VIX1D": "CBOE",
+    "VIX9D": "CBOE",
+    "VIX3M": "CBOE",
+    "VVIX": "CBOE",
+    "SKEW": "CBOE",
+    "NDX": "NASDAQ",
+    "RUT": "RUSSELL",
+    "DJX": "CBOE",
+}
+
+
 def clean_float(value: Any) -> float | None:
     if value is None:
         return None
@@ -38,6 +52,7 @@ class VerifyRow:
     label: str
     kind: str
     symbol: str
+    exchange: str | None = None
     qualified: bool = False
     subscribed: bool = False
     market_data_type: int | None = None
@@ -81,13 +96,33 @@ class IbkrError:
     ts: str
 
 
+def parse_index_spec(spec: str) -> tuple[str, str]:
+    raw = spec.strip()
+    if not raw:
+        raise ValueError("empty index spec")
+
+    if "@" in raw:
+        symbol, exchange = raw.split("@", 1)
+    elif ":" in raw:
+        symbol, exchange = raw.split(":", 1)
+    else:
+        symbol, exchange = raw, DEFAULT_INDEX_EXCHANGES.get(raw.upper(), "CBOE")
+
+    symbol = symbol.strip().upper()
+    exchange = exchange.strip().upper()
+    if not symbol or not exchange:
+        raise ValueError(f"invalid index spec: {spec!r}")
+    return symbol, exchange
+
+
 def build_base_contracts(settings: IbkrSettings) -> list[tuple[str, str, Any]]:
     from ib_async import Future, Index, Stock
 
     contracts: list[tuple[str, str, Any]] = []
 
-    for symbol in settings.verify_indexes:
-        contracts.append((f"index:{symbol}", "index", Index(symbol, "CBOE", "USD")))
+    for spec in settings.verify_indexes:
+        symbol, exchange = parse_index_spec(spec)
+        contracts.append((f"index:{symbol}", "index", Index(symbol, exchange, "USD")))
 
     for symbol in settings.verify_stocks:
         contracts.append((f"stock:{symbol}", "stock", Stock(symbol, "SMART", "USD")))
@@ -138,11 +173,17 @@ def build_spxw_option_contracts(
 def qualify_and_subscribe(ib: Any, contracts: list[tuple[str, str, Any]]) -> dict[str, tuple[Any, VerifyRow]]:
     result: dict[str, tuple[Any, VerifyRow]] = {}
     for label, kind, contract in contracts:
-        row = VerifyRow(label=label, kind=kind, symbol=getattr(contract, "symbol", label))
+        row = VerifyRow(
+            label=label,
+            kind=kind,
+            symbol=getattr(contract, "symbol", label),
+            exchange=getattr(contract, "exchange", None),
+        )
         try:
             qualified = ib.qualifyContracts(contract)
             if qualified:
                 contract = qualified[0]
+                row.exchange = getattr(contract, "exchange", row.exchange)
             row.qualified = True
         except Exception as exc:  # noqa: BLE001
             row.error = f"qualify failed: {exc}"

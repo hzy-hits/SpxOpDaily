@@ -3,8 +3,15 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from spx_spark.ibkr.adapter import provider_state_from_quotes, quotes_from_rows, snapshot_from_rows
-from spx_spark.ibkr.verifier import VerifyRow
+from spx_spark.ibkr.verifier import VerifyRow, parse_index_spec
 from spx_spark.marketdata import MarketDataQuality, Provider, ProviderStatus
+
+
+def test_parse_index_spec_defaults_and_explicit_exchange():
+    assert parse_index_spec("SPX") == ("SPX", "CBOE")
+    assert parse_index_spec("NDX") == ("NDX", "NASDAQ")
+    assert parse_index_spec("RUT@RUSSELL") == ("RUT", "RUSSELL")
+    assert parse_index_spec("DJX:CBOE") == ("DJX", "CBOE")
 
 
 def test_quotes_from_rows_normalizes_ibkr_verify_rows():
@@ -28,6 +35,26 @@ def test_quotes_from_rows_normalizes_ibkr_verify_rows():
     assert quotes[0].provider == Provider.IBKR
     assert quotes[0].quality == MarketDataQuality.LIVE
     assert quotes[0].effective_price == 7500.5
+
+
+def test_quotes_from_rows_preserves_non_cboe_index_exchange():
+    received_at = datetime(2026, 7, 6, 13, 30, tzinfo=timezone.utc)
+    row = VerifyRow(
+        label="index:NDX",
+        kind="index",
+        symbol="NDX",
+        exchange="NASDAQ",
+        market_data_type=1,
+        bid=19000.0,
+        ask=19001.0,
+        market_price=19000.5,
+        ticker_time=received_at.isoformat(),
+    )
+
+    quote = quotes_from_rows([row], received_at=received_at, stale_after_seconds=15.0)[0]
+
+    assert quote.instrument.canonical_id == "index:NDX"
+    assert quote.instrument.exchange == "NASDAQ"
 
 
 def test_provider_state_from_quotes_marks_available_without_errors():

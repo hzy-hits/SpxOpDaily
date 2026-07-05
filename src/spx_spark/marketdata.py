@@ -514,12 +514,18 @@ def quote_from_ibkr_row(
     label = str(get_value(row, "label", "") or "")
     kind = str(get_value(row, "kind", "unknown") or "unknown")
     symbol = str(get_value(row, "symbol", "") or label or "UNKNOWN")
+    exchange = str(get_value(row, "exchange", "") or "")
     error = get_value(row, "error")
     market_data_type = get_value(row, "market_data_type")
     quote_time = parse_timestamp(get_value(row, "ticker_time"))
     row_stale = bool(get_value(row, "stale")) if get_value(row, "stale") is not None else None
 
-    instrument = instrument_from_ibkr_label(label, kind=kind, symbol=symbol)
+    instrument = instrument_from_ibkr_label(
+        label,
+        kind=kind,
+        symbol=symbol,
+        exchange=exchange or None,
+    )
     quality = classify_quote_quality(
         market_data_type=market_data_type,
         quote_time=quote_time,
@@ -693,7 +699,13 @@ def quote_from_schwab_option_contract(
     )
 
 
-def instrument_from_ibkr_label(label: str, *, kind: str, symbol: str) -> InstrumentId:
+def instrument_from_ibkr_label(
+    label: str,
+    *,
+    kind: str,
+    symbol: str,
+    exchange: str | None = None,
+) -> InstrumentId:
     parts = label.split(":")
     if len(parts) >= 5 and parts[0] == "option":
         trading_class = parts[1]
@@ -707,9 +719,9 @@ def instrument_from_ibkr_label(label: str, *, kind: str, symbol: str) -> Instrum
             provider_symbol=label,
         )
     if len(parts) >= 2 and parts[0] == "index":
-        return InstrumentId.index(parts[1], provider_symbol=label, exchange="CBOE")
+        return InstrumentId.index(parts[1], provider_symbol=label, exchange=exchange or "CBOE")
     if len(parts) >= 2 and parts[0] == "future":
-        return InstrumentId.future(parts[1], provider_symbol=label, exchange="CME")
+        return InstrumentId.future(parts[1], provider_symbol=label, exchange=exchange or "CME")
     if len(parts) >= 2 and parts[0] in {"stock", "equity"}:
         return InstrumentId.equity(parts[1], provider_symbol=label)
 

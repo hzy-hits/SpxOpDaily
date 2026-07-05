@@ -146,7 +146,7 @@ class IbkrSettings:
             verify_indexes=_env_csv("IBKR_VERIFY_INDEXES", "SPX,VIX,VIX1D,VIX9D,VIX3M,VVIX,SKEW"),
             verify_stocks=_env_csv(
                 "IBKR_VERIFY_STOCKS",
-                "SPY,QQQ,IWM,HYG,LQD,TLT,IEF,SHY,UUP,GLD,USO",
+                "SPY,QQQ,IWM,DIA,HYG,LQD,TLT,IEF,SHY,UUP,GLD,USO",
             ),
             verify_futures=_env_csv("IBKR_VERIFY_FUTURES", "ES,MES"),
             option_expiry=_env("IBKR_OPTION_EXPIRY", default_spxw_expiry())

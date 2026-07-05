@@ -57,6 +57,28 @@ collector. By default it respects runtime mode and will not connect if IBKR is p
 outside the allowed schedule. Use `--force` only when you intentionally want this SSH host to
 connect to TWS/IB Gateway.
 
+Suggested real-data acceptance sequence:
+
+```bash
+uv run spx-spark-runtime-mode ibkr-on --ttl-minutes 120 --reason "manual IBKR data test"
+scripts/run-ibkr-collector.sh --force --skip-options --json
+scripts/show-latest-state.sh --all-providers
+scripts/run-ibkr-collector.sh --force --json
+```
+
+Keep the P0 index set focused on SPX and vol-regime data:
+`SPX,VIX,VIX1D,VIX9D,VIX3M,VVIX,SKEW`. Optional cross-index checks can be added
+temporarily with explicit exchanges, for example:
+
+```bash
+IBKR_VERIFY_INDEXES='SPX,VIX,VIX1D,VIX9D,VIX3M,VVIX,SKEW,NDX@NASDAQ,RUT@RUSSELL,DJX@CBOE' \
+  scripts/run-ibkr-collector.sh --force --skip-options --json
+```
+
+For NDX/RUT/Dow context, ETF proxies `QQQ/IWM/DIA` are often enough for alerts and
+use ordinary US stock data lines. Add official cash indexes only when they add a
+clear signal or entitlement check.
+
 ## Schwab Verifier
 
 ```bash
