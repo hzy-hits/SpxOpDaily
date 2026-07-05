@@ -399,6 +399,15 @@ class NotificationSettings:
     openclaw_agent_session_key: str
     openclaw_agent_thinking: str
     openclaw_agent_timeout_seconds: float
+    codex_enabled: bool
+    codex_deliver: bool
+    codex_command: str
+    codex_model: str
+    codex_reasoning_effort: str
+    codex_cwd: str
+    codex_sandbox: str
+    codex_timeout_seconds: float
+    codex_output_max_chars: int
 
     @classmethod
     def from_env(cls) -> "NotificationSettings":
@@ -435,6 +444,15 @@ class NotificationSettings:
                 "ALERT_NOTIFY_OPENCLAW_AGENT_TIMEOUT_SECONDS",
                 180.0,
             ),
+            codex_enabled=_env_bool("ALERT_NOTIFY_CODEX_ENABLED", False),
+            codex_deliver=_env_bool("ALERT_NOTIFY_CODEX_DELIVER", True),
+            codex_command=_env("ALERT_NOTIFY_CODEX_COMMAND", "codex"),
+            codex_model=_env("ALERT_NOTIFY_CODEX_MODEL", "gpt-5.3-codex-spark"),
+            codex_reasoning_effort=_env("ALERT_NOTIFY_CODEX_REASONING_EFFORT", "high"),
+            codex_cwd=_env("ALERT_NOTIFY_CODEX_CWD", "."),
+            codex_sandbox=_env("ALERT_NOTIFY_CODEX_SANDBOX", "read-only"),
+            codex_timeout_seconds=_env_float("ALERT_NOTIFY_CODEX_TIMEOUT_SECONDS", 90.0),
+            codex_output_max_chars=_env_int("ALERT_NOTIFY_CODEX_OUTPUT_MAX_CHARS", 1800),
         )
 
 

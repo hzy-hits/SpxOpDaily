@@ -164,16 +164,17 @@ channel requires a valid conversation `context_token`; a raw login `userId` may
 dry-run successfully but real sends can fail until the user has messaged the
 OpenClaw bot and the gateway has cached that context.
 
-For fast agent-confirmed pushes, use the OpenClaw agent sink with Codex Spark
-and keep raw message pushes off:
+For fast agent-confirmed pushes, use the local Codex CLI sink. It uses this
+machine's Codex/ChatGPT login and then delivers the short confirmation through
+OpenClaw Weixin. Keep raw message pushes off:
 
 ```env
 ALERT_NOTIFY_ENABLED=true
 ALERT_NOTIFY_OPENCLAW_ENABLED=false
-ALERT_NOTIFY_OPENCLAW_AGENT_ENABLED=true
-ALERT_NOTIFY_OPENCLAW_AGENT_DELIVER=true
-ALERT_NOTIFY_OPENCLAW_AGENT_MODEL=gpt-5.3-codex-spark
-ALERT_NOTIFY_OPENCLAW_AGENT_THINKING=high
+ALERT_NOTIFY_CODEX_ENABLED=true
+ALERT_NOTIFY_CODEX_DELIVER=true
+ALERT_NOTIFY_CODEX_MODEL=gpt-5.3-codex-spark
+ALERT_NOTIFY_CODEX_REASONING_EFFORT=high
 ```
 
 Minimal OpenClaw test:

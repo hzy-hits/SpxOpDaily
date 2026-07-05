@@ -193,20 +193,21 @@ set. Real Weixin sends require a valid conversation context token. If the raw
 account `userId` returns `sendMessage ret=-2`, send one message from Weixin to
 the OpenClaw bot first so the gateway can cache context.
 
-Fast agent-confirmed alert pushes can use Codex Spark through OpenClaw:
+Fast agent-confirmed alert pushes should use the local Codex CLI, then deliver
+the resulting confirmation through OpenClaw Weixin:
 
 ```env
 ALERT_NOTIFY_ENABLED=true
 ALERT_NOTIFY_OPENCLAW_ENABLED=false
-ALERT_NOTIFY_OPENCLAW_AGENT_ENABLED=true
-ALERT_NOTIFY_OPENCLAW_AGENT_DELIVER=true
-ALERT_NOTIFY_OPENCLAW_AGENT_MODEL=gpt-5.3-codex-spark
-ALERT_NOTIFY_OPENCLAW_AGENT_THINKING=high
+ALERT_NOTIFY_CODEX_ENABLED=true
+ALERT_NOTIFY_CODEX_DELIVER=true
+ALERT_NOTIFY_CODEX_MODEL=gpt-5.3-codex-spark
+ALERT_NOTIFY_CODEX_REASONING_EFFORT=high
 ```
 
 Keep `ALERT_NOTIFY_OPENCLAW_ENABLED=false` for this mode so the user receives
-the agent-confirmed explanation rather than both the raw deterministic alert and
-the agent follow-up.
+the Codex-confirmed explanation rather than both the raw deterministic alert and
+the Codex follow-up.
 
 ## Security
 
