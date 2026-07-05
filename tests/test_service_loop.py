@@ -109,6 +109,51 @@ def test_ibkr_task_extracts_provider_state_from_json_stdout() -> None:
     assert event["provider_error_count"] == 1
 
 
+def test_alert_task_extracts_notification_summary_from_json_stdout() -> None:
+    def alert_task() -> int:
+        print(
+            json.dumps(
+                {
+                    "alert_count": 1,
+                    "notification": {
+                        "enabled": True,
+                        "selected_count": 1,
+                        "sent_count": 0,
+                        "skipped_reason": None,
+                        "sinks": [
+                            {
+                                "sink": "openclaw_message",
+                                "attempted": True,
+                                "ok": False,
+                                "dry_run": False,
+                                "exit_code": 0,
+                                "error": "openclaw returned ret=-2",
+                            }
+                        ],
+                    },
+                }
+            )
+        )
+        return 0
+
+    event = run_task(ServiceTask("alert_engine", 30, alert_task))
+
+    assert event["alert_count"] == 1
+    assert event["notification_enabled"] is True
+    assert event["notification_selected_count"] == 1
+    assert event["notification_sent_count"] == 0
+    assert event["notification_sinks"] == [
+        {
+            "sink": "openclaw_message",
+            "attempted": True,
+            "ok": False,
+            "dry_run": False,
+            "exit_code": 0,
+            "error": "openclaw returned ret=-2",
+        }
+    ]
+
+
 def test_ibkr_competing_session_uses_probe_delay() -> None:
     task = ServiceTask(
         "ibkr",

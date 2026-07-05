@@ -10,6 +10,7 @@ from spx_spark.notifier import (
     codex_message_requests_delivery,
     codex_message_respects_human_scope,
     notify_payload,
+    openclaw_delivery_error,
     run_codex_exec,
     run_openclaw_agent,
 )
@@ -165,6 +166,38 @@ def test_notifier_reports_missing_openclaw_target(tmp_path) -> None:
     assert result.sent_count == 0
     assert result.sinks[0].attempted is False
     assert result.sinks[0].error == "missing openclaw channel or target"
+
+
+def test_notifier_does_not_mark_openclaw_application_error_as_sent(tmp_path) -> None:
+    def runner(command: list[str], timeout_seconds: float) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout='{"ret":-2,"errMsg":"missing conversation context"}',
+            stderr="",
+        )
+
+    result = notify_payload(
+        make_payload(),
+        settings=make_settings(str(tmp_path / "notify-state.json")),
+        runner=runner,
+        now=datetime(2026, 7, 7, 0, 0, tzinfo=timezone.utc),
+    )
+
+    assert result.selected_count == 1
+    assert result.sent_count == 0
+    assert result.sinks[0].ok is False
+    assert result.sinks[0].error == "openclaw returned ret=-2"
+    assert not (tmp_path / "notify-state.json").exists()
+
+
+def test_openclaw_delivery_error_accepts_dry_run_payload() -> None:
+    assert (
+        openclaw_delivery_error(
+            '{"action":"send","channel":"openclaw-weixin","dryRun":true,"handledBy":"core"}'
+        )
+        is None
+    )
 
 
 def test_notifier_auto_resolves_default_weixin_target(tmp_path, monkeypatch) -> None:

@@ -488,14 +488,54 @@ def send_openclaw_message(
             dry_run=settings.openclaw_dry_run,
             error=str(exc),
         )
+    delivery_error = openclaw_delivery_error(completed.stdout)
+    ok = completed.returncode == 0 and delivery_error is None
     return SinkResult(
         sink="openclaw_message",
         attempted=True,
-        ok=completed.returncode == 0,
+        ok=ok,
         dry_run=settings.openclaw_dry_run,
         exit_code=completed.returncode,
-        error=(completed.stderr or completed.stdout).strip() if completed.returncode else None,
+        error=delivery_error or ((completed.stderr or completed.stdout).strip() if completed.returncode else None),
     )
+
+
+def openclaw_delivery_error(stdout: str) -> str | None:
+    if not stdout.strip():
+        return None
+    try:
+        payload = json.loads(stdout)
+    except json.JSONDecodeError:
+        return None
+    return openclaw_payload_error(payload)
+
+
+def openclaw_payload_error(payload: object) -> str | None:
+    if isinstance(payload, dict):
+        for key in ("ok", "success"):
+            if payload.get(key) is False:
+                return f"openclaw returned {key}=false"
+        for key in ("ret", "code", "errCode", "errno"):
+            value = payload.get(key)
+            if isinstance(value, int | float) and value != 0:
+                return f"openclaw returned {key}={value:g}"
+        status = str(payload.get("status") or "").lower()
+        if status in {"error", "failed", "failure"}:
+            return f"openclaw returned status={status}"
+        for key in ("error", "err", "errMsg"):
+            value = payload.get(key)
+            if value:
+                return f"openclaw returned {key}={value}"
+        for value in payload.values():
+            nested = openclaw_payload_error(value)
+            if nested:
+                return nested
+    if isinstance(payload, list):
+        for value in payload:
+            nested = openclaw_payload_error(value)
+            if nested:
+                return nested
+    return None
 
 
 def run_openclaw_agent(

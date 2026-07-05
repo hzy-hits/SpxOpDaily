@@ -154,6 +154,8 @@ def run_task(task: ServiceTask) -> dict[str, object]:
             event["stderr_tail"] = stderr_text[-tail_chars:]
     if task.name == "ibkr":
         add_ibkr_summary_fields(event, stdout_text)
+    if task.name == "alert_engine":
+        add_alert_summary_fields(event, stdout_text)
     return event
 
 
@@ -174,6 +176,38 @@ def add_ibkr_summary_fields(event: dict[str, object], stdout_text: str) -> None:
         event["error_count"] = summary["error_count"]
     if isinstance(summary.get("provider_error_count"), int):
         event["provider_error_count"] = summary["provider_error_count"]
+
+
+def add_alert_summary_fields(event: dict[str, object], stdout_text: str) -> None:
+    try:
+        summary = json.loads(stdout_text)
+    except json.JSONDecodeError:
+        return
+    if not isinstance(summary, dict):
+        return
+    if isinstance(summary.get("alert_count"), int):
+        event["alert_count"] = summary["alert_count"]
+    notification = summary.get("notification")
+    if not isinstance(notification, dict):
+        return
+    event["notification_enabled"] = notification.get("enabled")
+    event["notification_selected_count"] = notification.get("selected_count")
+    event["notification_sent_count"] = notification.get("sent_count")
+    event["notification_skipped_reason"] = notification.get("skipped_reason")
+    sinks = notification.get("sinks")
+    if isinstance(sinks, list):
+        event["notification_sinks"] = [
+            {
+                "sink": sink.get("sink"),
+                "attempted": sink.get("attempted"),
+                "ok": sink.get("ok"),
+                "dry_run": sink.get("dry_run"),
+                "exit_code": sink.get("exit_code"),
+                "error": sink.get("error"),
+            }
+            for sink in sinks
+            if isinstance(sink, dict)
+        ]
 
 
 def next_delay_seconds(task: ServiceTask, result: dict[str, object]) -> int:
