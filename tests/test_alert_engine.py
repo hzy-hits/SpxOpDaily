@@ -9,6 +9,7 @@ from spx_spark.alert_engine import (
     evaluate_payload,
     iv_surface_freshness_alert,
     iv_surface_alerts,
+    system_event_alerts,
 )
 from spx_spark.alert_profile import active_window
 from spx_spark.iv_surface import IvSurfaceExpiry, IvSurfaceSnapshot
@@ -290,3 +291,71 @@ def test_hyperliquid_proxy_can_trigger_degraded_watch_when_ibkr_feed_is_unavaila
     assert fallback_alerts[0].instrument_id == "index:SPX"
     assert fallback_alerts[0].quality == "degraded"
     assert fallback_alerts[0].research_only is False
+
+
+def test_ibkr_session_transition_alerts_are_edge_triggered(tmp_path, monkeypatch) -> None:
+    state_path = tmp_path / "system-event-state.json"
+    monkeypatch.setenv("ALERT_SYSTEM_EVENT_STATE_PATH", str(state_path))
+    now = datetime(2026, 7, 7, 3, 15, tzinfo=BJ_TZ)
+    interrupted = ProviderState(
+        provider=Provider.IBKR,
+        status=ProviderStatus.UNAVAILABLE,
+        checked_at=now,
+        reason="competing session blocks live market data (IBKR 10197)",
+        connected=False,
+        authenticated=False,
+        priority=0,
+    )
+    state = make_state(now=now, provider_states=(interrupted,))
+
+    first_alerts = system_event_alerts(state)
+    repeated_alerts = system_event_alerts(state)
+    restored = replace(
+        interrupted,
+        status=ProviderStatus.AVAILABLE,
+        checked_at=now + timedelta(minutes=5),
+        reason=None,
+        connected=True,
+        authenticated=True,
+    )
+    restored_alerts = system_event_alerts(
+        make_state(now=now + timedelta(minutes=5), provider_states=(restored,))
+    )
+
+    assert [alert.kind for alert in first_alerts] == ["ibkr_session_interrupted"]
+    assert first_alerts[0].instrument_id == "index:SPX"
+    assert first_alerts[0].source_gate == "ibkr_session_state"
+    assert repeated_alerts == []
+    assert [alert.kind for alert in restored_alerts] == ["ibkr_session_restored"]
+
+
+def test_ibkr_unknown_state_preserves_interrupted_status_for_restore(tmp_path, monkeypatch) -> None:
+    state_path = tmp_path / "system-event-state.json"
+    monkeypatch.setenv("ALERT_SYSTEM_EVENT_STATE_PATH", str(state_path))
+    now = datetime(2026, 7, 7, 3, 15, tzinfo=BJ_TZ)
+    interrupted = ProviderState(
+        provider=Provider.IBKR,
+        status=ProviderStatus.UNAVAILABLE,
+        checked_at=now,
+        reason="competing session blocks live market data (IBKR 10197)",
+        connected=False,
+        authenticated=False,
+        priority=0,
+    )
+    stale = replace(interrupted, checked_at=now - timedelta(hours=1))
+    restored = replace(
+        interrupted,
+        status=ProviderStatus.AVAILABLE,
+        checked_at=now + timedelta(minutes=1),
+        reason=None,
+        connected=True,
+        authenticated=True,
+    )
+
+    assert system_event_alerts(make_state(now=now, provider_states=(interrupted,)))
+    assert system_event_alerts(make_state(now=now, provider_states=(stale,))) == []
+    restored_alerts = system_event_alerts(
+        make_state(now=now + timedelta(minutes=1), provider_states=(restored,))
+    )
+
+    assert [alert.kind for alert in restored_alerts] == ["ibkr_session_restored"]

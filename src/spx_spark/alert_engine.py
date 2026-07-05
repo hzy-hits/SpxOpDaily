@@ -6,6 +6,7 @@ import os
 from dataclasses import asdict, dataclass
 from dataclasses import replace
 from datetime import datetime
+from pathlib import Path
 
 from spx_spark.alert_profile import AlertWindow, active_window, parse_at
 from spx_spark.config import IvSurfaceSettings, NotificationSettings, StorageSettings
@@ -80,6 +81,7 @@ ATM_IV_JUMP_THRESHOLD = 0.03
 SKEW_STEEPENING_THRESHOLD = 0.08
 SURFACE_SHIFT_THRESHOLD = 0.03
 TERM_GAP_THRESHOLD = 0.05
+IBKR_INTERRUPTED_SESSION_STATUSES = {"competing_session", "unavailable"}
 
 
 @dataclass(frozen=True)
@@ -233,6 +235,7 @@ def evaluate_alerts(
     if iv_surface is not None:
         alerts.extend(iv_surface_alerts(iv_surface, window=window))
     alerts.extend(market_context_alerts(market_context))
+    alerts.extend(system_event_alerts(state))
     alerts.extend(proxy_fallback_watch_alerts(state, window=window, market_context=market_context))
     return alerts
 
@@ -394,6 +397,127 @@ def ibkr_feed_unavailable_for_fallback(state: LatestState) -> bool:
     if provider_state.status == ProviderStatus.UNAVAILABLE:
         return True
     return provider_state.status == ProviderStatus.DEGRADED and provider_state.connected is not True
+
+
+def ibkr_session_status(provider_state: ProviderState | None, *, now: datetime) -> str:
+    if provider_state is None or not provider_state_is_recent(provider_state, now=now):
+        return "unknown"
+    reason = (provider_state.reason or "").lower()
+    if provider_state.status == ProviderStatus.AVAILABLE:
+        return "available"
+    if "competing session" in reason or "10197" in reason:
+        return "competing_session"
+    if provider_state.status == ProviderStatus.UNAVAILABLE:
+        return "unavailable"
+    if provider_state.status == ProviderStatus.DEGRADED:
+        return "degraded"
+    return provider_state.status.value
+
+
+def load_system_event_state(path: str | Path) -> dict[str, object]:
+    state_path = Path(path)
+    try:
+        payload = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def save_system_event_state(path: str | Path, payload: dict[str, object]) -> None:
+    state_path = Path(path)
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = state_path.with_suffix(f"{state_path.suffix}.tmp")
+    temp_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    temp_path.replace(state_path)
+
+
+def system_event_state_path() -> str:
+    data_root = os.getenv("MARKET_DATA_DATA_ROOT") or os.getenv("MAINTENANCE_DATA_ROOT") or "data"
+    return os.getenv(
+        "ALERT_SYSTEM_EVENT_STATE_PATH",
+        f"{data_root.rstrip('/')}/latest/system_event_state.json",
+    )
+
+
+def ibkr_session_event_alert(
+    provider_state: ProviderState,
+    *,
+    previous_status: str | None,
+    current_status: str,
+) -> Alert | None:
+    if (
+        current_status in IBKR_INTERRUPTED_SESSION_STATUSES
+        and previous_status not in IBKR_INTERRUPTED_SESSION_STATUSES
+    ):
+        return Alert(
+            severity="high",
+            kind="ibkr_session_interrupted",
+            instrument_id="index:SPX",
+            title="IBKR market-data session interrupted",
+            detail=(
+                "IBKR data session is unavailable"
+                + (
+                    " because another IBKR session appears to own market data."
+                    if current_status == "competing_session"
+                    else "."
+                )
+                + " Collector will keep fallback feeds running and probe again on the configured interval."
+            ),
+            provider=Provider.IBKR.value,
+            quality=current_status,
+            research_only=False,
+            source_gate="ibkr_session_state",
+        )
+    if current_status == "available" and previous_status in IBKR_INTERRUPTED_SESSION_STATUSES:
+        return Alert(
+            severity="high",
+            kind="ibkr_session_restored",
+            instrument_id="index:SPX",
+            title="IBKR market-data session restored",
+            detail="IBKR data session is available again; SPX/SPXW/ES collection can resume.",
+            provider=Provider.IBKR.value,
+            quality=current_status,
+            research_only=False,
+            source_gate="ibkr_session_state",
+        )
+    return None
+
+
+def system_event_alerts(state: LatestState) -> list[Alert]:
+    if not env_bool("ALERT_SYSTEM_EVENTS_ENABLED", True):
+        return []
+    provider_state = provider_state_for(state, Provider.IBKR)
+    if provider_state is None:
+        return []
+    current_status = ibkr_session_status(provider_state, now=state.as_of)
+    state_path = system_event_state_path()
+    previous = load_system_event_state(state_path)
+    previous_status = previous.get("ibkr_session_status")
+    if current_status == "unknown":
+        payload = {
+            **previous,
+            "ibkr_last_observed_status": current_status,
+            "ibkr_checked_at": provider_state.checked_at.isoformat(),
+            "updated_at": state.as_of.isoformat(),
+        }
+        if previous_status is None:
+            payload["ibkr_session_status"] = current_status
+        save_system_event_state(state_path, payload)
+        return []
+
+    payload = {
+        "ibkr_session_status": current_status,
+        "ibkr_last_observed_status": current_status,
+        "ibkr_checked_at": provider_state.checked_at.isoformat(),
+        "updated_at": state.as_of.isoformat(),
+    }
+    save_system_event_state(state_path, payload)
+    alert = ibkr_session_event_alert(
+        provider_state,
+        previous_status=str(previous_status) if previous_status else None,
+        current_status=current_status,
+    )
+    return [alert] if alert is not None else []
 
 
 def proxy_fallback_watch_alerts(

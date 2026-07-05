@@ -25,8 +25,10 @@ This document incorporates a DeepSeek architecture review run on 2026-07-05 agai
 
 6. Broker-session fallback is a watch prompt, not strategy confirmation.
    If recent IBKR provider state is unavailable/degraded and no ES/MES/SPX anchor is live, Hyperliquid may emit `broker_unavailable_proxy_watch` after a large move. This alert means "open the trading device and verify real SPX/SPXW quotes." It cannot trigger wall, gamma, IV, or SPXW strategy conclusions.
+7. IBKR session state transitions are human-facing system events.
+   `ibkr_session_interrupted` is emitted once when IBKR market data changes from available/unknown into a competing-session or unavailable state. `ibkr_session_restored` is emitted once when IBKR returns from that interrupted state to available. These alerts explain data-source status only; they are not strategy signals.
 
-7. On-chain smart-money signals are research-only.
+8. On-chain smart-money signals are research-only.
    Any alert marked `research_only`, or with `smart`, `wallet`, `onchain`, or `hyperliquid_proxy` in the kind/source gate, is blocked from human notification selection.
 
 8. Codex/Spark confirmation is a delivery gate, not a strategy oracle.

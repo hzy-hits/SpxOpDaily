@@ -471,6 +471,75 @@ def test_notifier_allows_broker_unavailable_proxy_watch(tmp_path) -> None:
     assert calls
 
 
+def test_notifier_allows_ibkr_session_state_events(tmp_path) -> None:
+    calls: list[list[str]] = []
+
+    def runner(command: list[str], timeout_seconds: float) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout="{}", stderr="")
+
+    payload = make_payload()
+    payload["alerts"] = [
+        {
+            "severity": "high",
+            "kind": "ibkr_session_interrupted",
+            "instrument_id": "index:SPX",
+            "title": "IBKR market-data session interrupted",
+            "detail": "IBKR data session is unavailable because another session owns market data.",
+            "quality": "competing_session",
+            "source_gate": "ibkr_session_state",
+        }
+    ]
+
+    result = notify_payload(
+        payload,
+        settings=make_settings(str(tmp_path / "notify-state.json")),
+        runner=runner,
+        now=datetime(2026, 7, 7, 0, 0, tzinfo=timezone.utc),
+    )
+
+    assert result.selected_count == 1
+    assert result.sent_count == 1
+    assert calls
+
+
+def test_notifier_sends_system_events_even_when_raw_openclaw_sink_is_disabled(tmp_path) -> None:
+    calls: list[list[str]] = []
+
+    def runner(command: list[str], timeout_seconds: float) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout="{}", stderr="")
+
+    payload = make_payload()
+    payload["alerts"] = [
+        {
+            "severity": "high",
+            "kind": "ibkr_session_restored",
+            "instrument_id": "index:SPX",
+            "title": "IBKR market-data session restored",
+            "detail": "IBKR data session is available again.",
+            "quality": "available",
+            "source_gate": "ibkr_session_state",
+        }
+    ]
+    settings = replace(
+        make_settings(str(tmp_path / "notify-state.json")),
+        openclaw_enabled=False,
+        codex_enabled=False,
+    )
+
+    result = notify_payload(
+        payload,
+        settings=settings,
+        runner=runner,
+        now=datetime(2026, 7, 7, 0, 0, tzinfo=timezone.utc),
+    )
+
+    assert result.selected_count == 1
+    assert result.sent_count == 1
+    assert calls
+
+
 def test_codex_prompt_hides_non_focus_market_context() -> None:
     prompt = build_codex_prompt(make_payload(), [make_payload()["alerts"][0]])
 
@@ -480,3 +549,4 @@ def test_codex_prompt_hides_non_focus_market_context() -> None:
     assert "qqq_spy" not in prompt
     assert "SPXW" in prompt
     assert "future:ES" in prompt
+    assert "ibkr_session_state" in prompt

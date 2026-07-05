@@ -77,6 +77,11 @@ BLOCKED_HUMAN_MESSAGE_PHRASES = (
     "prediction market",
 )
 
+SYSTEM_EVENT_ALERT_KINDS = {
+    "ibkr_session_interrupted",
+    "ibkr_session_restored",
+}
+
 CommandRunner = Callable[[list[str], float], subprocess.CompletedProcess[str]]
 
 
@@ -145,6 +150,10 @@ def is_human_visible_alert(alert: dict[str, object]) -> bool:
         return False
     instrument_id = str(alert.get("instrument_id") or "")
     return any(instrument_id.startswith(prefix) for prefix in HUMAN_VISIBLE_ALERT_PREFIXES)
+
+
+def is_system_event_alert(alert: dict[str, object]) -> bool:
+    return str(alert.get("kind") or "") in SYSTEM_EVENT_ALERT_KINDS
 
 
 def load_sent_state(path: str) -> dict[str, float]:
@@ -309,7 +318,7 @@ def build_codex_prompt(payload: dict[str, object], alerts: list[dict[str, object
             "人类只交易 SPX/SPXW；输出只能提 SPX、SPXW、ES、期权墙、gamma、IV surface。",
             "不要提任何非 SPX/SPXW/ES 标的名；隐藏算法上下文只能影响是否推送，不能进入人类可见解释。",
             "凡是 research_only、stale、missing、unknown、coverage 不足或 IV surface stale，默认不外发；只说明数据质量。",
-            "带 source_gate 的告警默认不外发，唯一例外是 broker_unavailable_fallback；它只能提示打开交易端核验。",
+            "带 source_gate 的告警默认不外发，唯一例外是 broker_unavailable_fallback 和 ibkr_session_state；它们只能提示打开交易端核验或说明 IBKR 数据会话状态。",
             "如果 SPXW 期权 freshness gate 失败，不得基于 wall/gamma/IV 做看盘结论。",
             "如果 ES/SPX anchor 缺失，不得把任何链上或 proxy 数据当作交易确认。",
             "发送决策必须优先参考 Micopedia、SPXW call wall/put wall/zero gamma、以及过去 1 小时 IV surface/期权变化。",
@@ -571,6 +580,16 @@ def notify_payload(
     message = format_alert_message(payload, selected)
     if settings.openclaw_enabled:
         sinks.append(send_openclaw_message(settings, message, runner=runner))
+    else:
+        system_alerts = [alert for alert in selected if is_system_event_alert(alert)]
+        if system_alerts:
+            sinks.append(
+                send_openclaw_message(
+                    settings,
+                    format_alert_message(payload, system_alerts),
+                    runner=runner,
+                )
+            )
     if settings.codex_enabled:
         codex_result, codex_message = run_codex_exec(
             settings,
