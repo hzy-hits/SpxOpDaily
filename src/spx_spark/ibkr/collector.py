@@ -16,6 +16,7 @@ from spx_spark.ibkr.verifier import (
     build_base_contracts,
     build_spxw_option_contracts,
     cancel_subscriptions,
+    connect_market_data_only,
     estimate_atm_reference,
     print_rows,
     qualify_and_subscribe,
@@ -175,7 +176,7 @@ def run(argv: list[str] | None = None) -> int:
     start = time.perf_counter()
     try:
         try:
-            ib.connect(ibkr_settings.host, ibkr_settings.port, clientId=ibkr_settings.client_id)
+            connect_market_data_only(ib, ibkr_settings)
         except Exception as exc:  # noqa: BLE001
             checked_at = datetime.now(tz=timezone.utc)
             state = ProviderState(

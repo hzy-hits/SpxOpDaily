@@ -170,6 +170,18 @@ def build_spxw_option_contracts(
     return contracts[: settings.max_option_lines]
 
 
+def connect_market_data_only(ib: Any, settings: IbkrSettings) -> None:
+    from ib_async.ib import StartupFetch
+
+    ib.connect(
+        settings.host,
+        settings.port,
+        clientId=settings.client_id,
+        readonly=True,
+        fetchFields=StartupFetch(0),
+    )
+
+
 def qualify_and_subscribe(ib: Any, contracts: list[tuple[str, str, Any]]) -> dict[str, tuple[Any, VerifyRow]]:
     result: dict[str, tuple[Any, VerifyRow]] = {}
     for label, kind, contract in contracts:
@@ -396,7 +408,7 @@ def run(argv: list[str] | None = None) -> int:
     try:
         print(f"Connecting to IBKR at {settings.host}:{settings.port} clientId={settings.client_id}")
         try:
-            ib.connect(settings.host, settings.port, clientId=settings.client_id)
+            connect_market_data_only(ib, settings)
         except Exception as exc:  # noqa: BLE001
             print(
                 "Failed to connect to IBKR. Confirm TWS/IB Gateway is running, "
