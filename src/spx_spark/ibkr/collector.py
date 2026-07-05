@@ -220,13 +220,34 @@ def run(argv: list[str] | None = None) -> int:
                 priority=0,
             )
             write_empty_provider_state(state, storage_settings=storage_settings, now=checked_at)
-            print_collector_summary(
-                raw_paths={},
-                latest_path=storage_settings.latest_state_path,
-                provider_state=state,
-                quote_count=0,
-                best_quote_count=len(LatestStateStore(storage_settings).load().best_quotes),
-            )
+            best_quote_count = len(LatestStateStore(storage_settings).load().best_quotes)
+            if args.json:
+                print(
+                    json.dumps(
+                        {
+                            "provider_state": state.to_dict(),
+                            "quotes_collected": 0,
+                            "error_count": 1,
+                            "provider_error_count": 1,
+                            "errors": [],
+                            "competing_session": False,
+                            "raw_paths": {},
+                            "latest_state": storage_settings.latest_state_path,
+                            "best_quote_count": best_quote_count,
+                            "provider_quote_count": 0,
+                        },
+                        indent=2,
+                        sort_keys=True,
+                    )
+                )
+            else:
+                print_collector_summary(
+                    raw_paths={},
+                    latest_path=storage_settings.latest_state_path,
+                    provider_state=state,
+                    quote_count=0,
+                    best_quote_count=best_quote_count,
+                )
             return 1
 
         try:

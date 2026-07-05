@@ -58,8 +58,8 @@ class ServiceLoopSettings:
             alert_interval_seconds=env_int("SPX_SERVICE_ALERT_INTERVAL_SECONDS", 30),
             heartbeat_seconds=env_int("SPX_SERVICE_HEARTBEAT_SECONDS", 60),
             ibkr_skip_options=env_bool("SPX_SERVICE_IBKR_SKIP_OPTIONS", False),
-            ibkr_connect_retry_seconds=env_int("IBKR_CONNECT_RETRY_SECONDS", 300),
-            ibkr_conflict_probe_seconds=env_int("IBKR_CONFLICT_PROBE_SECONDS", 300),
+            ibkr_connect_retry_seconds=env_int("IBKR_CONNECT_RETRY_SECONDS", 60),
+            ibkr_conflict_probe_seconds=env_int("IBKR_CONFLICT_PROBE_SECONDS", 60),
         )
 
 

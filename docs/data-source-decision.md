@@ -269,7 +269,7 @@ Default automated policy:
 - if mobile or desktop trading kicks IBKR out, mark IBKR unavailable and do not immediately fight for the session
 - while IBKR is unavailable because of a competing session, keep sending alerts from Schwab and non-broker feeds
 - if no live ES/MES/SPX anchor remains, Hyperliquid can only emit a degraded fallback watch prompt that tells the user to verify real SPX/SPXW quotes on the trading device; it must not become SPXW strategy confirmation
-- probe IBKR availability every 5 minutes by default (`IBKR_CONFLICT_PROBE_SECONDS=300`)
+- probe IBKR availability every 1 minute by default (`IBKR_CONFLICT_PROBE_SECONDS=60`)
 - a probe is not a takeover and must not force-disconnect the phone or desktop session
 - retry ordinary connection failures every few minutes
 - do not retry competing-session conflicts unless `STRICT_NO_SESSION_FIGHT=false`

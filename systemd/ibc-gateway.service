@@ -3,8 +3,8 @@ Description=IBC-managed IB Gateway
 After=network-online.target
 Wants=network-online.target
 ConditionPathExists=/srv/data/spx-spark/runtime/ibc/config.ini
-StartLimitIntervalSec=1800
-StartLimitBurst=5
+StartLimitIntervalSec=3600
+StartLimitBurst=60
 
 [Service]
 Type=simple
@@ -14,7 +14,7 @@ Environment=IBC_CONFIG=/srv/data/spx-spark/runtime/ibc/config.ini
 Environment=IBC_LOG_DIR=/srv/data/spx-spark/logs/ibc
 ExecStart=/home/ubuntu/spx-spark/scripts/start-ibc-gateway.sh
 Restart=always
-RestartSec=300
+RestartSec=60
 TimeoutStopSec=45
 KillSignal=SIGTERM
 
