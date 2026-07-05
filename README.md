@@ -180,5 +180,6 @@ and raw data.
 - Market data model: `docs/market-data-model.md`
 - Sampling engine design: `docs/sampling-engine-design.md`
 - Operations schedule: `docs/operations-schedule.md`
+- Trend spread framework: `docs/trend-spread-framework.md`
 - MrMicopedia agent guidance: `docs/micopedia-agent-guidance.md`
 - MrMicopedia background knowledge: `docs/micopedia-background-knowledge.md`
