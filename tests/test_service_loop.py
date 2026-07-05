@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import time
 
 from spx_spark.service_loop import (
@@ -37,6 +38,7 @@ def test_service_loop_defaults_do_not_enable_ibkr() -> None:
 
     names = [task.name for task in tasks]
     assert names == ["hyperliquid", "iv_surface", "alert_engine"]
+    assert all(task.command for task in tasks)
 
 
 def test_service_loop_can_enable_ibkr_explicitly() -> None:
@@ -94,6 +96,23 @@ def test_run_task_times_out_hanging_task(monkeypatch) -> None:
 
     assert event["ok"] is False
     assert event["exit_code"] == 1
+    assert event["error"] == "service task exceeded 1s timeout"
+
+
+def test_run_task_times_out_hanging_command(monkeypatch) -> None:
+    monkeypatch.setenv("SPX_SERVICE_TASK_TIMEOUT_SECONDS", "1")
+
+    event = run_task(
+        ServiceTask(
+            "command_hang",
+            1,
+            lambda: 0,
+            command=(sys.executable, "-c", "import time; time.sleep(5)"),
+        )
+    )
+
+    assert event["ok"] is False
+    assert event["exit_code"] == 124
     assert event["error"] == "service task exceeded 1s timeout"
 
 
