@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -72,6 +73,42 @@ def test_market_context_includes_vol_and_cross_asset_ratios() -> None:
     assert context["derived"]["vix_vix3m"] == 18.0 / 20.0
     assert context["derived"]["qqq_spy"] == 725.0 / 750.0
     assert context["derived"]["hyg_lqd"] == 80.0 / 108.0
+
+
+def test_market_context_missing_polymarket_is_research_only(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("POLYMARKET_LATEST_CONTEXT_PATH", str(tmp_path / "missing.json"))
+    now = datetime(2026, 7, 7, 3, 15, tzinfo=BJ_TZ)
+    state = LatestState(created_at=now, as_of=now, quotes=(), best_quotes=())
+
+    context = build_market_context(state)
+    polymarket = context["derived"]["polymarket_context"]
+
+    assert polymarket["state"] == "missing"
+    assert polymarket["research_only"] is True
+    assert polymarket["human_visible"] is False
+    assert polymarket["usage_gate"] == "context_only_no_kelly_no_direct_alert"
+
+
+def test_market_context_loads_latest_polymarket_context(monkeypatch, tmp_path) -> None:
+    path = tmp_path / "polymarket_context.json"
+    path.write_text(
+        json.dumps(
+            {
+                "research_only": True,
+                "human_visible": False,
+                "usage_gate": "context_only_no_kelly_no_direct_alert",
+                "market_count": 2,
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("POLYMARKET_LATEST_CONTEXT_PATH", str(path))
+    now = datetime(2026, 7, 7, 3, 15, tzinfo=BJ_TZ)
+    state = LatestState(created_at=now, as_of=now, quotes=(), best_quotes=())
+
+    context = build_market_context(state)
+
+    assert context["derived"]["polymarket_context"]["market_count"] == 2
 
 
 def test_hyperliquid_proxy_gate_is_unanchored_without_es_or_spx() -> None:

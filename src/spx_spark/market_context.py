@@ -1,7 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+import json
 import os
+from dataclasses import asdict, dataclass
+from pathlib import Path
 
 from spx_spark.marketdata import MarketDataQuality, Quote
 from spx_spark.storage import LatestState
@@ -112,6 +114,7 @@ def build_market_context(
             "hyg_lqd": ratio(by_id, "equity:HYG", "equity:LQD"),
             "tlt_ief": ratio(by_id, "equity:TLT", "equity:IEF"),
             "hyperliquid_spx_proxy": hyperliquid_spx_proxy_gate(by_id),
+            "polymarket_context": load_latest_polymarket_context(),
         },
     }
 
@@ -173,6 +176,32 @@ def env_float(name: str, default: float) -> float:
     if not raw:
         return default
     return float(raw)
+
+
+def latest_polymarket_context_path() -> Path:
+    explicit = os.getenv("POLYMARKET_LATEST_CONTEXT_PATH")
+    if explicit:
+        return Path(explicit)
+    data_root = os.getenv("MARKET_DATA_DATA_ROOT") or os.getenv("MAINTENANCE_DATA_ROOT") or "data"
+    return Path(data_root) / "latest" / "polymarket_context.json"
+
+
+def missing_polymarket_context() -> dict[str, object]:
+    return {
+        "state": "missing",
+        "research_only": True,
+        "human_visible": False,
+        "usage_gate": "context_only_no_kelly_no_direct_alert",
+    }
+
+
+def load_latest_polymarket_context() -> dict[str, object]:
+    path = latest_polymarket_context_path()
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return missing_polymarket_context()
+    return payload if isinstance(payload, dict) else missing_polymarket_context()
 
 
 def usable_entry(entry: MarketContextEntry | None) -> bool:

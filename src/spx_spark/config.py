@@ -47,6 +47,11 @@ def _env_csv(name: str, default: str) -> list[str]:
     return [part.strip().upper() for part in raw.split(",") if part.strip()]
 
 
+def _env_csv_preserve(name: str, default: str) -> list[str]:
+    raw = _env(name, default)
+    return [part.strip() for part in raw.split(",") if part.strip()]
+
+
 def load_dotenv(path: str = ".env") -> None:
     """Load a small .env file without requiring python-dotenv."""
     if not os.path.exists(path):
@@ -297,6 +302,46 @@ class HyperliquidSettings:
             large_trade_notional_threshold=_env_float(
                 "HYPERLIQUID_LARGE_TRADE_NOTIONAL_THRESHOLD",
                 100_000.0,
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class PolymarketSettings:
+    gamma_api_base_url: str
+    request_timeout_seconds: float
+    search_terms: list[str]
+    event_slugs: list[str]
+    market_slugs: list[str]
+    max_results_per_query: int
+    max_markets_per_run: int
+    min_liquidity: float
+    min_volume_24h: float
+    min_relevance_score: float
+    include_closed: bool
+    user_agent: str
+
+    @classmethod
+    def from_env(cls) -> "PolymarketSettings":
+        load_dotenv()
+        return cls(
+            gamma_api_base_url=_env("POLYMARKET_GAMMA_API_BASE_URL", "https://gamma-api.polymarket.com"),
+            request_timeout_seconds=_env_float("POLYMARKET_REQUEST_TIMEOUT_SECONDS", 12.0),
+            search_terms=_env_csv_preserve(
+                "POLYMARKET_SEARCH_TERMS",
+                "SPY,Fed decision,CPI,FOMC,Powell,NFP",
+            ),
+            event_slugs=_env_csv_preserve("POLYMARKET_EVENT_SLUGS", ""),
+            market_slugs=_env_csv_preserve("POLYMARKET_MARKET_SLUGS", ""),
+            max_results_per_query=_env_int("POLYMARKET_MAX_RESULTS_PER_QUERY", 5),
+            max_markets_per_run=_env_int("POLYMARKET_MAX_MARKETS_PER_RUN", 80),
+            min_liquidity=_env_float("POLYMARKET_MIN_LIQUIDITY", 0.0),
+            min_volume_24h=_env_float("POLYMARKET_MIN_VOLUME_24H", 0.0),
+            min_relevance_score=_env_float("POLYMARKET_MIN_RELEVANCE_SCORE", 0.35),
+            include_closed=_env_bool("POLYMARKET_INCLUDE_CLOSED", False),
+            user_agent=_env(
+                "POLYMARKET_USER_AGENT",
+                "Mozilla/5.0 spx-spark research collector",
             ),
         )
 

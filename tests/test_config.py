@@ -3,6 +3,7 @@ from zoneinfo import ZoneInfo
 
 from spx_spark.config import (
     IbkrSettings,
+    PolymarketSettings,
     RuntimePolicySettings,
     StorageSettings,
     default_spxw_expiry,
@@ -121,3 +122,19 @@ def test_ibkr_default_verifier_uses_dia_as_dow_proxy(monkeypatch, tmp_path):
     assert "RSP" in settings.verify_stocks
     assert "XLU" in settings.verify_stocks
     assert settings.qualify_contracts is False
+
+
+def test_polymarket_settings_defaults_are_research_context(monkeypatch, tmp_path) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("POLYMARKET_SEARCH_TERMS", raising=False)
+    monkeypatch.delenv("POLYMARKET_USER_AGENT", raising=False)
+
+    settings = PolymarketSettings.from_env()
+
+    assert settings.gamma_api_base_url == "https://gamma-api.polymarket.com"
+    assert settings.search_terms == ["SPY", "Fed decision", "CPI", "FOMC", "Powell", "NFP"]
+    assert settings.max_results_per_query == 5
+    assert settings.max_markets_per_run == 80
+    assert settings.min_relevance_score == 0.35
+    assert settings.include_closed is False
+    assert settings.user_agent

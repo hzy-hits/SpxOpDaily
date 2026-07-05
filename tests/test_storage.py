@@ -31,12 +31,13 @@ def make_quote(
     quality: MarketDataQuality,
     mark: float,
     received_at: datetime,
+    symbol: str = "SPX",
     quote_time: datetime | None = None,
 ) -> Quote:
     return Quote(
-        instrument=InstrumentId.index("SPX"),
+        instrument=InstrumentId.index(symbol),
         provider=provider,
-        provider_symbol=f"{provider.value}:SPX",
+        provider_symbol=f"{provider.value}:{symbol}",
         received_at=received_at,
         quality=quality,
         bid=mark - 0.5,
@@ -132,6 +133,50 @@ def test_latest_state_keeps_provider_latest_across_updates(tmp_path):
     state = store.load()
     assert len(state.quotes) == 2
     assert state.best_quote("index:SPX").provider == Provider.IBKR
+
+
+def test_latest_state_can_replace_a_dynamic_provider_quote_set(tmp_path):
+    settings = make_storage_settings(tmp_path)
+    store = LatestStateStore(settings)
+    now = datetime(2026, 7, 6, 13, 30, tzinfo=timezone.utc)
+    store.update(
+        [
+            make_quote(
+                provider=Provider.POLYMARKET,
+                quality=MarketDataQuality.LIVE,
+                mark=0.6,
+                received_at=now,
+                symbol="POLY-OLD",
+            ),
+            make_quote(
+                provider=Provider.IBKR,
+                quality=MarketDataQuality.LIVE,
+                mark=7500,
+                received_at=now,
+            ),
+        ],
+        now=now,
+    )
+
+    store.update(
+        [
+            make_quote(
+                provider=Provider.POLYMARKET,
+                quality=MarketDataQuality.LIVE,
+                mark=0.7,
+                received_at=now + timedelta(seconds=30),
+                symbol="POLY-NEW",
+            )
+        ],
+        now=now + timedelta(seconds=30),
+        replace_providers=(Provider.POLYMARKET,),
+    )
+    state = store.load(now=now + timedelta(seconds=30))
+
+    quote_ids = {quote.instrument.canonical_id for quote in state.quotes}
+    assert "index:POLY-OLD" not in quote_ids
+    assert "index:POLY-NEW" in quote_ids
+    assert "index:SPX" in quote_ids
 
 
 def test_latest_state_round_trips_provider_state(tmp_path):

@@ -45,6 +45,18 @@ Avoid:
 - automatic order placement
 - always-on IBKR Gateway with auto-reconnect using the same username as phone trading
 
+### Polymarket Role
+
+Polymarket is an always-on research context feed, not a trading signal source.
+
+The collector reads public Gamma markets by configured search terms and optional explicit event or market slugs. It stores normalized prediction-market quotes, raw context records, and a latest context snapshot marked:
+
+- `research_only: true`
+- `human_visible: false`
+- `usage_gate: context_only_no_kelly_no_direct_alert`
+
+These probabilities can support later lead/lag research around SPX, SPY, Fed, CPI, FOMC, Powell, and NFP events. They do not enter Kelly sizing or direct human-alert scoring in the current production contract.
+
 ### Windows Desktop
 
 Use for:

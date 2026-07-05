@@ -17,10 +17,12 @@ from spx_spark.service_loop import (
 def make_settings(**overrides) -> ServiceLoopSettings:
     values = {
         "hyperliquid_enabled": True,
+        "polymarket_enabled": False,
         "ibkr_enabled": False,
         "iv_surface_enabled": True,
         "alert_enabled": True,
         "hyperliquid_interval_seconds": 30,
+        "polymarket_interval_seconds": 60,
         "ibkr_interval_seconds": 60,
         "iv_surface_interval_seconds": 300,
         "alert_interval_seconds": 30,
@@ -47,6 +49,17 @@ def test_service_loop_can_enable_ibkr_explicitly() -> None:
     assert [task.name for task in tasks] == [
         "hyperliquid",
         "ibkr",
+        "iv_surface",
+        "alert_engine",
+    ]
+
+
+def test_service_loop_can_enable_polymarket_explicitly() -> None:
+    tasks = build_tasks(make_settings(polymarket_enabled=True))
+
+    assert [task.name for task in tasks] == [
+        "hyperliquid",
+        "polymarket",
         "iv_surface",
         "alert_engine",
     ]

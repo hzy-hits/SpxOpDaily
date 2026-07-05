@@ -371,6 +371,8 @@ Implementation phases:
 
 Use Polymarket as an event-probability layer.
 
+Current MVP: collect public Gamma search/event/market payloads, normalize Yes/No probabilities, persist raw/latest/features, and keep the feed behind `context_only_no_kelly_no_direct_alert`. CLOB depth and validation-based scoring are later phases.
+
 Market types:
 
 - S&P 500 close above/below level

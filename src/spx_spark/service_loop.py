@@ -28,10 +28,12 @@ DEFAULT_TASK_TIMEOUT_SECONDS = 120
 @dataclass(frozen=True)
 class ServiceLoopSettings:
     hyperliquid_enabled: bool
+    polymarket_enabled: bool
     ibkr_enabled: bool
     iv_surface_enabled: bool
     alert_enabled: bool
     hyperliquid_interval_seconds: int
+    polymarket_interval_seconds: int
     ibkr_interval_seconds: int
     iv_surface_interval_seconds: int
     alert_interval_seconds: int
@@ -45,10 +47,12 @@ class ServiceLoopSettings:
         load_dotenv()
         return cls(
             hyperliquid_enabled=env_bool("SPX_SERVICE_ENABLE_HYPERLIQUID", True),
+            polymarket_enabled=env_bool("SPX_SERVICE_ENABLE_POLYMARKET", False),
             ibkr_enabled=env_bool("SPX_SERVICE_ENABLE_IBKR", False),
             iv_surface_enabled=env_bool("SPX_SERVICE_ENABLE_IV_SURFACE", True),
             alert_enabled=env_bool("SPX_SERVICE_ENABLE_ALERTS", True),
             hyperliquid_interval_seconds=env_int("SPX_SERVICE_HYPERLIQUID_INTERVAL_SECONDS", 30),
+            polymarket_interval_seconds=env_int("SPX_SERVICE_POLYMARKET_INTERVAL_SECONDS", 60),
             ibkr_interval_seconds=env_int("SPX_SERVICE_IBKR_INTERVAL_SECONDS", 60),
             iv_surface_interval_seconds=env_int("SPX_SERVICE_IV_SURFACE_INTERVAL_SECONDS", 300),
             alert_interval_seconds=env_int("SPX_SERVICE_ALERT_INTERVAL_SECONDS", 30),
@@ -107,6 +111,12 @@ def run_hyperliquid() -> int:
     return hyperliquid_collector.run(["--json"])
 
 
+def run_polymarket() -> int:
+    from spx_spark.polymarket import collector as polymarket_collector
+
+    return polymarket_collector.run(["--json"])
+
+
 def make_run_ibkr(*, skip_options: bool) -> TaskFn:
     def run_ibkr() -> int:
         args = ["--json", "--no-table"]
@@ -138,6 +148,15 @@ def build_tasks(settings: ServiceLoopSettings) -> list[ServiceTask]:
                 settings.hyperliquid_interval_seconds,
                 run_hyperliquid,
                 command=(console_script("spx-spark-hyperliquid-collector"), "--json"),
+            )
+        )
+    if settings.polymarket_enabled:
+        tasks.append(
+            ServiceTask(
+                "polymarket",
+                settings.polymarket_interval_seconds,
+                run_polymarket,
+                command=(console_script("spx-spark-polymarket-collector"), "--json"),
             )
         )
     if settings.ibkr_enabled:

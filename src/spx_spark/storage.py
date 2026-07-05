@@ -160,11 +160,16 @@ class LatestStateStore:
         *,
         now: datetime | None = None,
         provider_states: Iterable[ProviderState] = (),
+        replace_providers: Iterable[Provider] = (),
     ) -> LatestUpdateResult:
         now = as_utc(now or datetime.now(tz=timezone.utc))
         incoming = tuple(quotes)
         existing_state = self.load(now=now)
-        provider_latest = latest_by_provider(existing_state.quotes + incoming)
+        replacement_providers = set(replace_providers)
+        existing_quotes = tuple(
+            quote for quote in existing_state.quotes if quote.provider not in replacement_providers
+        )
+        provider_latest = latest_by_provider(existing_quotes + incoming)
         provider_states_latest = latest_provider_states(
             existing_state.provider_states + tuple(provider_states)
         )

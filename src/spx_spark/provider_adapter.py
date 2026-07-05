@@ -183,10 +183,14 @@ def persist_provider_snapshot(
     storage_settings: StorageSettings,
 ) -> ProviderSnapshotWriteResult:
     raw_result = JsonlQuoteWriter(storage_settings).write_quotes(snapshot.quotes)
+    replace_providers = (
+        (snapshot.provider,) if snapshot.metadata.get("replace_provider_quotes") is True else ()
+    )
     latest_result = LatestStateStore(storage_settings).update(
         snapshot.quotes,
         now=snapshot.received_at,
         provider_states=snapshot.provider_states,
+        replace_providers=replace_providers,
     )
     return ProviderSnapshotWriteResult(
         raw_paths=raw_result.path_counts,

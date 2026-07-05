@@ -31,7 +31,10 @@ This document incorporates a DeepSeek architecture review run on 2026-07-05 agai
 8. On-chain smart-money signals are research-only.
    Any alert marked `research_only`, or with `smart`, `wallet`, `onchain`, or `hyperliquid_proxy` in the kind/source gate, is blocked from human notification selection.
 
-8. Codex/Spark confirmation is a delivery gate, not a strategy oracle.
+9. Polymarket probabilities are context-only and not Kelly inputs.
+   Polymarket markets may be captured, stored, and reviewed as event-probability context. They must not size trades, change Kelly fractions, or directly trigger human alert delivery until forward validation promotes a specific feature.
+
+10. Codex/Spark confirmation is a delivery gate, not a strategy oracle.
    It can only accept or reject an already selected alert using the local compact JSON payload. It must not invent missing data, mention non-focus symbols, or override freshness/source gates.
 
 ## Codex/Spark Prompt Contract
@@ -46,6 +49,7 @@ The prompt used for fast alert confirmation must enforce:
 - Alerts with `source_gate` default to no external push except `broker_unavailable_fallback`, which can only prompt device verification.
 - If SPXW option freshness fails, do not base a watch decision on wall, gamma, or IV.
 - If ES/SPX anchor is missing, do not treat Hyperliquid or other proxy data as confirmation. It can only justify a degraded "verify on trading device" prompt when broker state is recently unavailable.
+- Do not use Polymarket probabilities as Kelly, sizing, or direct alert inputs.
 - Output must include conclusion, reason, data quality, snapshot time, and SPX/SPXW checks.
 - Delivery requires an explicit first-line cue: `需要看盘:`. Suppression requires `不需要推送:`.
 
@@ -55,6 +59,7 @@ The prompt used for fast alert confirmation must enforce:
 - Add IV surface age gating.
 - Add Hyperliquid proxy basis gating against ES/MES/SPX.
 - Keep smart-money and wallet signals research-only until validated.
+- Keep Polymarket prediction markets context-only; no Kelly or direct human alert scoring before validation.
 - Force Codex/Spark to reject alerts when data quality is degraded.
 - Add source-level degradation monitoring before trusting recovered data feeds.
 
@@ -68,6 +73,7 @@ These are useful, but not implemented yet:
 - Track 60-minute provider missing-rate and hold a feed in degraded state until recovery is stable.
 - Forward-test wallet cohorts for at least 30 trading days before allowing any smart-money feature into scoring.
 - Compare candidate wallets against random active-wallet and whale-only control cohorts.
+- Forward-test Polymarket event-probability jumps against SPX/ES returns before allowing any weak overlay score.
 
 ## Strategy Model Boundary
 
