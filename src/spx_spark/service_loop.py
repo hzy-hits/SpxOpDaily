@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import json
 import os
 import time
@@ -113,22 +115,36 @@ def build_tasks(settings: ServiceLoopSettings) -> list[ServiceTask]:
 def run_task(task: ServiceTask) -> dict[str, object]:
     started = time.perf_counter()
     now = datetime.now(tz=timezone.utc).isoformat()
+    stdout = io.StringIO()
+    stderr = io.StringIO()
     try:
-        code = task.fn()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            code = task.fn()
         ok = code == 0
         error = None
     except Exception as exc:  # noqa: BLE001
         code = 1
         ok = False
         error = str(exc)
-    return {
+    stdout_text = stdout.getvalue()
+    stderr_text = stderr.getvalue()
+    event: dict[str, object] = {
         "task": task.name,
         "ok": ok,
         "exit_code": code,
         "duration_ms": (time.perf_counter() - started) * 1000.0,
         "finished_at": now,
         "error": error,
+        "stdout_chars": len(stdout_text),
+        "stderr_chars": len(stderr_text),
     }
+    if not ok:
+        tail_chars = env_int("SPX_SERVICE_OUTPUT_TAIL_CHARS", 1200)
+        if stdout_text:
+            event["stdout_tail"] = stdout_text[-tail_chars:]
+        if stderr_text:
+            event["stderr_tail"] = stderr_text[-tail_chars:]
+    return event
 
 
 def print_event(event: dict[str, object]) -> None:
