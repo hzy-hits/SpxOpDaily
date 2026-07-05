@@ -135,6 +135,25 @@ scripts/run-sampling-plan.sh --underlier 7500 --mode degraded --summary-json
 
 The planner produces the SPXW hot lane and rolling quote groups for collectors. It does not request market data.
 
+## Alert Profile
+
+```bash
+scripts/run-alert-profile.sh
+scripts/run-alert-profile.sh --schedule
+scripts/run-alert-profile.sh --at 2026-07-06T14:30:00
+scripts/run-alert-engine.sh --at 2026-07-07T03:15:00
+```
+
+The alert profile is the 24h monitoring layer. It maps New York and Beijing
+time to the current monitoring window, source priority, alert cadence, summary
+cadence, and SPXW sampling mode. The IBKR trading-hours report remains a data
+entitlement check; it does not replace premarket, after-hours, futures,
+Hyperliquid, or Polymarket monitoring.
+
+The alert engine reads normalized latest state and emits data-health and
+price-move alerts. It is notification-ready but does not send pushes or place
+orders yet.
+
 ## Mock Data Loop
 
 ```bash
