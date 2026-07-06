@@ -2,6 +2,8 @@
 Description=SPX Spark persistent streaming IBKR collector
 After=network-online.target
 Wants=network-online.target
+# Never give up on reconnect after crashes or session conflicts.
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -13,7 +15,6 @@ Restart=always
 RestartSec=15
 # The process itself already respects runtime mode, probes conflicts
 # non-invasively, and reconnects with backoff; systemd only covers crashes.
-StartLimitIntervalSec=0
 
 [Install]
 WantedBy=default.target

@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+USER_UNIT_DIR="$HOME/.config/systemd/user"
+
+mkdir -p "$USER_UNIT_DIR"
+ln -sfn "$ROOT/systemd/spx-spark-24h.service" "$USER_UNIT_DIR/spx-spark-24h.service"
+ln -sfn "$ROOT/systemd/spx-spark-ibkr-stream.service" "$USER_UNIT_DIR/spx-spark-ibkr-stream.service"
+ln -sfn "$ROOT/systemd/spx-spark-post-close-review.service" "$USER_UNIT_DIR/spx-spark-post-close-review.service"
+ln -sfn "$ROOT/systemd/spx-spark-post-close-review.timer" "$USER_UNIT_DIR/spx-spark-post-close-review.timer"
+
+systemctl --user daemon-reload
+systemctl --user enable spx-spark-24h.service
+systemctl --user enable spx-spark-ibkr-stream.service
+systemctl --user enable spx-spark-post-close-review.timer
+
+echo "Installed user services:"
+echo "  spx-spark-24h.service"
+echo "  spx-spark-ibkr-stream.service"
+echo "  spx-spark-post-close-review.timer"
+
+if ! loginctl show-user "$USER" -p Linger 2>/dev/null | grep -q 'Linger=yes'; then
+  echo "WARNING: user lingering is off; user services stop at logout and do not start at boot."
+  echo "Enable it with: sudo loginctl enable-linger $USER"
+fi
+
+if [[ "${1:-}" == "--now" ]]; then
+  systemctl --user restart spx-spark-24h.service
+  systemctl --user restart spx-spark-ibkr-stream.service
+  systemctl --user status spx-spark-24h.service spx-spark-ibkr-stream.service --no-pager
+fi
