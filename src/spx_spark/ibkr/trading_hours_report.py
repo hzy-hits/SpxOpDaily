@@ -105,6 +105,8 @@ def row_group(row: VerifyRow) -> str:
         return "spxw_options"
     if row.kind == "future":
         return "futures"
+    if row.kind == "cfd":
+        return "cfd_proxies"
     if row.kind == "stock":
         return "etf_proxies"
     if row.label in P0_INDEX_LABELS:
@@ -277,6 +279,7 @@ def report_payload(
         "secondary_indexes": summarize_group("secondary_indexes", checks),
         "etf_proxies": summarize_group("etf_proxies", checks),
         "futures": summarize_group("futures", checks),
+        "cfd_proxies": summarize_group("cfd_proxies", checks),
         "spxw_options": summarize_group("spxw_options", checks),
         "other": summarize_group("other", checks),
     }
@@ -335,7 +338,7 @@ def print_report_summary(payload: dict[str, Any], output_path: Path | None = Non
     print(f"Rows: {payload['summary']['row_count']} options={payload['summary']['option_count']}")
     print("Groups:")
     for name, group in payload["groups"].items():
-        if group["total"] == 0 and name in {"secondary_indexes", "other"}:
+        if group["total"] == 0 and name in {"secondary_indexes", "cfd_proxies", "other"}:
             continue
         counts = ", ".join(f"{status}={count}" for status, count in group["counts"].items())
         print(f"- {name}: {group['status']} total={group['total']} {counts}".rstrip())

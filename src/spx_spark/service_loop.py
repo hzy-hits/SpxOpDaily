@@ -8,8 +8,10 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Callable
+from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -41,6 +43,7 @@ class ServiceLoopSettings:
     ibkr_skip_options: bool
     ibkr_connect_retry_seconds: int
     ibkr_conflict_probe_seconds: int
+    max_concurrent_tasks: int = 4
 
     @classmethod
     def from_env(cls) -> "ServiceLoopSettings":
@@ -60,6 +63,7 @@ class ServiceLoopSettings:
             ibkr_skip_options=env_bool("SPX_SERVICE_IBKR_SKIP_OPTIONS", False),
             ibkr_connect_retry_seconds=env_int("IBKR_CONNECT_RETRY_SECONDS", 60),
             ibkr_conflict_probe_seconds=env_int("IBKR_CONFLICT_PROBE_SECONDS", 60),
+            max_concurrent_tasks=env_int("SPX_SERVICE_MAX_CONCURRENT_TASKS", 4),
         )
 
 
@@ -90,7 +94,10 @@ def env_int(name: str, default: int) -> int:
 
 @contextmanager
 def task_timeout(seconds: int):
-    if seconds <= 0:
+    # SIGALRM only works in the main thread. In-process fn tasks running on a
+    # worker thread get no hard timeout; real service tasks all run as child
+    # processes (ServiceTask.command), which have their own subprocess timeout.
+    if seconds <= 0 or threading.current_thread() is not threading.main_thread():
         yield
         return
 
@@ -344,28 +351,91 @@ def run_once(tasks: list[ServiceTask]) -> int:
     return 0 if all(result["ok"] for result in results) else 1
 
 
-def run_loop(tasks: list[ServiceTask], *, heartbeat_seconds: int) -> int:
-    last_heartbeat = 0.0
-    while True:
-        now = time.monotonic()
-        for task in tasks:
-            if now < task.next_run_monotonic:
-                continue
-            result = run_task(task)
-            print_event(result)
-            task.next_run_monotonic = time.monotonic() + next_delay_seconds(task, result)
+def submit_due_tasks(
+    tasks: list[ServiceTask],
+    in_flight: dict[str, Future],
+    submit: Callable[[ServiceTask], Future],
+    *,
+    now: float,
+) -> None:
+    for task in tasks:
+        if task.name in in_flight or now < task.next_run_monotonic:
+            continue
+        in_flight[task.name] = submit(task)
 
-        if now - last_heartbeat >= heartbeat_seconds:
-            print_event(
-                {
-                    "task": "heartbeat",
-                    "ok": True,
-                    "finished_at": datetime.now(tz=timezone.utc).isoformat(),
-                    "scheduled_tasks": [task.name for task in tasks],
-                }
-            )
-            last_heartbeat = now
-        time.sleep(1.0)
+
+def drain_finished_tasks(
+    tasks: list[ServiceTask],
+    in_flight: dict[str, Future],
+) -> list[dict[str, object]]:
+    events: list[dict[str, object]] = []
+    for task in tasks:
+        future = in_flight.get(task.name)
+        if future is None or not future.done():
+            continue
+        del in_flight[task.name]
+        event = future_event(task, future)
+        events.append(event)
+        task.next_run_monotonic = time.monotonic() + next_delay_seconds(task, event)
+    return events
+
+
+def future_event(task: ServiceTask, future: Future) -> dict[str, object]:
+    try:
+        return future.result()
+    except Exception as exc:  # noqa: BLE001 - run_task already catches; this is a backstop
+        return {
+            "task": task.name,
+            "ok": False,
+            "exit_code": 1,
+            "duration_ms": None,
+            "finished_at": datetime.now(tz=timezone.utc).isoformat(),
+            "error": f"task future failed: {exc}",
+            "stdout_chars": 0,
+            "stderr_chars": 0,
+        }
+
+
+def run_loop(
+    tasks: list[ServiceTask],
+    *,
+    heartbeat_seconds: int,
+    max_concurrent_tasks: int = 4,
+) -> int:
+    """Concurrent scheduler: one slow task no longer delays every other task.
+
+    Each task runs on a worker thread (real tasks are child processes with
+    their own timeout) and at most one instance of a given task is in flight,
+    so a hung IBKR cycle cannot skew the alert/Hyperliquid cadence and tasks
+    can never pile up on themselves.
+    """
+    executor = ThreadPoolExecutor(
+        max_workers=max(max_concurrent_tasks, 1),
+        thread_name_prefix="spx-task",
+    )
+    in_flight: dict[str, Future] = {}
+    last_heartbeat = 0.0
+    try:
+        while True:
+            now = time.monotonic()
+            submit_due_tasks(tasks, in_flight, lambda task: executor.submit(run_task, task), now=now)
+            for event in drain_finished_tasks(tasks, in_flight):
+                print_event(event)
+
+            if now - last_heartbeat >= heartbeat_seconds:
+                print_event(
+                    {
+                        "task": "heartbeat",
+                        "ok": True,
+                        "finished_at": datetime.now(tz=timezone.utc).isoformat(),
+                        "scheduled_tasks": [task.name for task in tasks],
+                        "in_flight_tasks": sorted(in_flight),
+                    }
+                )
+                last_heartbeat = now
+            time.sleep(0.5)
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -393,7 +463,11 @@ def run(argv: list[str] | None = None) -> int:
         return 1
     if args.once:
         return run_once(tasks)
-    return run_loop(tasks, heartbeat_seconds=settings.heartbeat_seconds)
+    return run_loop(
+        tasks,
+        heartbeat_seconds=settings.heartbeat_seconds,
+        max_concurrent_tasks=settings.max_concurrent_tasks,
+    )
 
 
 def main() -> None:

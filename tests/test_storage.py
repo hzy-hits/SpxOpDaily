@@ -179,6 +179,35 @@ def test_latest_state_can_replace_a_dynamic_provider_quote_set(tmp_path):
     assert "index:SPX" in quote_ids
 
 
+def test_latest_state_concurrent_updates_do_not_lose_quotes(tmp_path):
+    settings = make_storage_settings(tmp_path)
+    now = datetime(2026, 7, 6, 13, 30, tzinfo=timezone.utc)
+    symbols = [f"SYM{i}" for i in range(20)]
+
+    def update_one(symbol: str) -> None:
+        LatestStateStore(settings).update(
+            [
+                make_quote(
+                    provider=Provider.IBKR,
+                    quality=MarketDataQuality.LIVE,
+                    mark=7500,
+                    received_at=now,
+                    symbol=symbol,
+                )
+            ],
+            now=now,
+        )
+
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        list(executor.map(update_one, symbols))
+
+    state = LatestStateStore(settings).load(now=now)
+    quote_ids = {quote.instrument.canonical_id for quote in state.quotes}
+    assert quote_ids == {f"index:{symbol}" for symbol in symbols}
+
+
 def test_latest_state_round_trips_provider_state(tmp_path):
     settings = make_storage_settings(tmp_path)
     store = LatestStateStore(settings)

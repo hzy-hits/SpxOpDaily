@@ -68,6 +68,13 @@ existing_session_action = prompt("secondary", "Existing session action").lower()
 if existing_session_action not in {"secondary", "primary", "primaryoverride", "manual"}:
     raise SystemExit("Existing session action must be secondary, primary, primaryoverride, or manual")
 
+# Gateway forces a daily logoff or restart. AutoRestartTime keeps the broker
+# session alive across the daily restart without a full relogin/2FA, so the
+# feed stays up for roughly a week between authentications.
+auto_restart_time = prompt("03:55 AM", "Gateway daily auto-restart time, hh:mm AM/PM server time (blank disables)")
+if auto_restart_time and not re.fullmatch(r"(0?[1-9]|1[0-2]):[0-5][0-9] (AM|PM)", auto_restart_time.upper()):
+    raise SystemExit("Auto-restart time must look like 03:55 AM or be blank")
+
 command_server_port = prompt("7462", "IBC command server port")
 if not command_server_port.isdigit():
     raise SystemExit("IBC command server port must be an integer")
@@ -92,6 +99,7 @@ updates = {
     "ExitAfterSecondFactorAuthenticationTimeout": relogin_after_2fa_timeout,
     "AcceptNonBrokerageAccountWarning": "yes",
     "ExistingSessionDetectedAction": existing_session_action,
+    "AutoRestartTime": auto_restart_time.upper() if auto_restart_time else "",
     "OverrideTwsApiPort": api_port,
     "ReadOnlyLogin": read_only_login,
     "ReadOnlyApi": "yes",
@@ -116,6 +124,7 @@ print(f"TradingMode={mode}")
 print(f"OverrideTwsApiPort={api_port}")
 print(f"ReadOnlyLogin={read_only_login}")
 print(f"ExistingSessionDetectedAction={existing_session_action}")
+print(f"AutoRestartTime={auto_restart_time.upper() if auto_restart_time else '(disabled)'}")
 PY
 
 python3 "$PY_SCRIPT" "$SOURCE_CONFIG" "$CONFIG_PATH"

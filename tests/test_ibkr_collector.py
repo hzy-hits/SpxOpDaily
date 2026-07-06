@@ -8,8 +8,39 @@ from spx_spark.ibkr.collector import (
     has_competing_session_error,
     provider_error_count,
 )
-from spx_spark.ibkr.verifier import IbkrError, VerifyRow, parse_index_spec
-from spx_spark.marketdata import MarketDataQuality, Provider, ProviderStatus
+from spx_spark.config import IbkrSettings
+from spx_spark.ibkr.verifier import (
+    IbkrError,
+    VerifyRow,
+    build_base_contracts,
+    estimate_atm_reference,
+    parse_index_spec,
+)
+from spx_spark.marketdata import InstrumentType, MarketDataQuality, Provider, ProviderStatus
+
+
+def make_settings(**overrides) -> IbkrSettings:
+    defaults = dict(
+        host="127.0.0.1",
+        port=4001,
+        client_id=171,
+        market_data_type=1,
+        es_expiry="202609",
+        mes_expiry="202609",
+        verify_indexes=[],
+        verify_stocks=[],
+        verify_futures=[],
+        verify_cfds=[],
+        option_expiry="20260706",
+        option_strike_window_points=50,
+        option_strike_step=5,
+        max_option_lines=40,
+        quote_wait_seconds=0.1,
+        stale_after_seconds=10.0,
+        qualify_contracts=False,
+    )
+    defaults.update(overrides)
+    return IbkrSettings(**defaults)
 
 
 def test_parse_index_spec_defaults_and_explicit_exchange():
@@ -92,6 +123,68 @@ def test_quotes_from_rows_preserves_non_cboe_index_exchange():
 
     assert quote.instrument.canonical_id == "index:NDX"
     assert quote.instrument.exchange == "NASDAQ"
+
+
+def test_build_base_contracts_includes_cfds():
+    settings = make_settings(verify_cfds=["IBUS500"])
+
+    contracts = build_base_contracts(settings)
+
+    assert len(contracts) == 1
+    label, kind, contract = contracts[0]
+    assert label == "cfd:IBUS500"
+    assert kind == "cfd"
+    assert contract.symbol == "IBUS500"
+    assert contract.secType == "CFD"
+    assert contract.exchange == "SMART"
+
+
+def test_quotes_from_rows_normalizes_cfd_rows():
+    received_at = datetime(2026, 7, 6, 13, 30, tzinfo=timezone.utc)
+    row = VerifyRow(
+        label="cfd:IBUS500",
+        kind="cfd",
+        symbol="IBUS500",
+        exchange="SMART",
+        market_data_type=1,
+        bid=7500.0,
+        ask=7500.5,
+        market_price=7500.25,
+        ticker_time=received_at.isoformat(),
+    )
+
+    quote = quotes_from_rows([row], received_at=received_at, stale_after_seconds=15.0)[0]
+
+    assert quote.instrument.canonical_id == "cfd:IBUS500"
+    assert quote.instrument.instrument_type == InstrumentType.CFD
+    assert quote.instrument.underlier == "SPX"
+    assert quote.quality == MarketDataQuality.LIVE
+    assert quote.effective_price == 7500.25
+
+
+def test_estimate_atm_reference_falls_back_to_ibus500_cfd():
+    cfd_row = VerifyRow(
+        label="cfd:IBUS500",
+        kind="cfd",
+        symbol="IBUS500",
+        bid=7500.0,
+        ask=7500.5,
+    )
+
+    reference, source = estimate_atm_reference([cfd_row])
+
+    assert reference == 7500.25
+    assert source == "IBUS500"
+
+
+def test_estimate_atm_reference_prefers_spx_over_cfd():
+    spx_row = VerifyRow(label="index:SPX", kind="index", symbol="SPX", last=7490.0)
+    cfd_row = VerifyRow(label="cfd:IBUS500", kind="cfd", symbol="IBUS500", last=7500.0)
+
+    reference, source = estimate_atm_reference([spx_row, cfd_row])
+
+    assert reference == 7490.0
+    assert source == "SPX"
 
 
 def test_provider_state_from_quotes_marks_available_without_errors():

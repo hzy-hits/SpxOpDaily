@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
@@ -137,6 +137,9 @@ class IbkrSettings:
     quote_wait_seconds: float
     stale_after_seconds: float
     qualify_contracts: bool
+    # IBKR index CFDs such as IBUS500 (S&P 500 CFD). Defaults empty in code so
+    # existing callers are unaffected; from_env defaults to IBUS500.
+    verify_cfds: list[str] = field(default_factory=list)
 
     @classmethod
     def from_env(cls) -> "IbkrSettings":
@@ -158,6 +161,7 @@ class IbkrSettings:
                 "SPY,QQQ,IWM,DIA,HYG,LQD,TLT,IEF,SHY,UUP,GLD,USO,RSP,XLU",
             ),
             verify_futures=_env_csv("IBKR_VERIFY_FUTURES", "ES,MES"),
+            verify_cfds=_env_csv("IBKR_VERIFY_CFDS", "IBUS500"),
             option_expiry=_env("IBKR_OPTION_EXPIRY", default_spxw_expiry())
             or default_spxw_expiry(),
             option_strike_window_points=_env_int("IBKR_OPTION_STRIKE_WINDOW_POINTS", 50),
@@ -166,6 +170,38 @@ class IbkrSettings:
             quote_wait_seconds=_env_float("IBKR_QUOTE_WAIT_SECONDS", 8.0),
             stale_after_seconds=_env_float("IBKR_STALE_AFTER_SECONDS", 10.0),
             qualify_contracts=_env_bool("IBKR_QUALIFY_CONTRACTS", False),
+        )
+
+
+@dataclass(frozen=True)
+class IbkrStreamSettings:
+    """Settings for the persistent streaming IBKR collector."""
+
+    client_id: int
+    flush_interval_seconds: float
+    policy_check_seconds: float
+    replan_drift_points: float
+    max_option_lines: int
+    hot_lane_share: float
+    reconnect_min_seconds: float
+    reconnect_max_seconds: float
+    skip_options: bool
+
+    @classmethod
+    def from_env(cls) -> "IbkrStreamSettings":
+        load_dotenv()
+        return cls(
+            # Distinct from the snapshot collector's client id so an accidental
+            # overlap does not kick the other API session.
+            client_id=_env_int("IBKR_STREAM_CLIENT_ID", 172),
+            flush_interval_seconds=_env_float("IBKR_STREAM_FLUSH_SECONDS", 5.0),
+            policy_check_seconds=_env_float("IBKR_STREAM_POLICY_CHECK_SECONDS", 30.0),
+            replan_drift_points=_env_float("IBKR_STREAM_REPLAN_DRIFT_POINTS", 10.0),
+            max_option_lines=_env_int("IBKR_STREAM_MAX_OPTION_LINES", 60),
+            hot_lane_share=_env_float("IBKR_STREAM_HOT_LANE_SHARE", 0.7),
+            reconnect_min_seconds=_env_float("IBKR_STREAM_RECONNECT_MIN_SECONDS", 5.0),
+            reconnect_max_seconds=_env_float("IBKR_STREAM_RECONNECT_MAX_SECONDS", 300.0),
+            skip_options=_env_bool("IBKR_STREAM_SKIP_OPTIONS", False),
         )
 
 

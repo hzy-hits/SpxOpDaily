@@ -117,7 +117,7 @@ def parse_index_spec(spec: str) -> tuple[str, str]:
 
 
 def build_base_contracts(settings: IbkrSettings) -> list[tuple[str, str, Any]]:
-    from ib_async import Future, Index, Stock
+    from ib_async import CFD, Future, Index, Stock
 
     contracts: list[tuple[str, str, Any]] = []
 
@@ -131,6 +131,9 @@ def build_base_contracts(settings: IbkrSettings) -> list[tuple[str, str, Any]]:
     for symbol in settings.verify_futures:
         expiry = settings.mes_expiry if symbol == "MES" else settings.es_expiry
         contracts.append((f"future:{symbol}", "future", Future(symbol, expiry, "CME", currency="USD")))
+
+    for symbol in settings.verify_cfds:
+        contracts.append((f"cfd:{symbol}", "cfd", CFD(symbol, "SMART", "USD")))
 
     return contracts
 
@@ -336,6 +339,13 @@ def estimate_atm_reference(rows: list[VerifyRow]) -> tuple[float | None, str]:
         price = first_present(es.market_price, es.last, midpoint(es.bid, es.ask), es.close)
         if price:
             return price, "ES"
+
+    # IBUS500 is IBKR's S&P 500 index CFD and quotes at the cash index level.
+    cfd = by_label.get("cfd:IBUS500")
+    if cfd:
+        price = first_present(cfd.market_price, cfd.last, midpoint(cfd.bid, cfd.ask), cfd.close)
+        if price:
+            return price, "IBUS500"
 
     spy = by_label.get("stock:SPY")
     if spy:

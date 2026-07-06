@@ -4,13 +4,17 @@ import json
 import sys
 import time
 
+from concurrent.futures import ThreadPoolExecutor
+
 from spx_spark.service_loop import (
     ServiceLoopSettings,
     ServiceTask,
     build_tasks,
+    drain_finished_tasks,
     next_delay_seconds,
     run_once,
     run_task,
+    submit_due_tasks,
 )
 
 
@@ -199,6 +203,70 @@ def test_alert_task_extracts_notification_summary_from_json_stdout() -> None:
             "error": "openclaw returned ret=-2",
         }
     ]
+
+
+def test_submit_due_tasks_skips_in_flight_and_not_due_tasks() -> None:
+    ready = ServiceTask("ready", 1, lambda: 0)
+    busy = ServiceTask("busy", 1, lambda: 0)
+    later = ServiceTask("later", 1, lambda: 0, next_run_monotonic=10**12)
+    submitted: list[str] = []
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        in_flight = {"busy": executor.submit(lambda: {"task": "busy", "ok": True})}
+
+        def submit(task: ServiceTask):
+            submitted.append(task.name)
+            return executor.submit(run_task, task)
+
+        submit_due_tasks([ready, busy, later], in_flight, submit, now=0.0)
+
+        assert submitted == ["ready"]
+        assert set(in_flight) == {"ready", "busy"}
+
+
+def test_drain_finished_tasks_emits_events_and_reschedules() -> None:
+    task = ServiceTask("noop", interval_seconds=30, fn=lambda: 0)
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        in_flight = {"noop": executor.submit(run_task, task)}
+        in_flight["noop"].result()
+
+        events = drain_finished_tasks([task], in_flight)
+
+    assert len(events) == 1
+    assert events[0]["task"] == "noop"
+    assert events[0]["ok"] is True
+    assert in_flight == {}
+    assert task.next_run_monotonic > 0.0
+
+
+def test_slow_task_does_not_block_other_tasks() -> None:
+    order: list[str] = []
+
+    def slow() -> int:
+        time.sleep(0.5)
+        order.append("slow")
+        return 0
+
+    def fast() -> int:
+        order.append("fast")
+        return 0
+
+    slow_task = ServiceTask("slow", 1, slow)
+    fast_task = ServiceTask("fast", 1, fast)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        in_flight: dict = {}
+        submit_due_tasks(
+            [slow_task, fast_task],
+            in_flight,
+            lambda task: executor.submit(run_task, task),
+            now=0.0,
+        )
+        in_flight["fast"].result(timeout=5)
+        in_flight["slow"].result(timeout=5)
+
+    assert order == ["fast", "slow"]
 
 
 def test_ibkr_competing_session_uses_probe_delay() -> None:

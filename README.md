@@ -91,6 +91,53 @@ ssh -L 5909:127.0.0.1:5909 ubuntu@YOUR_SERVER
 Then connect a local VNC viewer to `127.0.0.1:5909`. The VNC bridge is bound
 to localhost and is only for manual Gateway login/configuration.
 
+### Streaming Collector
+
+`spx-spark-ibkr-stream` is the persistent alternative to the snapshot
+collector. It keeps one read-only connection (own client id 172) with base
+contracts always subscribed, a hot SPXW lane near ATM, and the remaining
+option-line budget rotating through the sampling planner's strike groups. It
+flushes to raw storage and latest state every 5 seconds, re-plans when SPX
+drifts 10+ points, reconnects with exponential backoff, backs off politely on
+a competing session (IBKR 10197), and re-checks runtime mode continuously.
+
+```bash
+scripts/run-ibkr-stream.sh --print-config
+scripts/run-ibkr-stream.sh --force --skip-options --duration-seconds 60
+scripts/run-ibkr-stream.sh --force
+```
+
+Run it as a service (keep `SPX_SERVICE_ENABLE_IBKR=false` in the 24h loop so
+only one IBKR writer is active):
+
+```bash
+ln -sfn /home/ubuntu/spx-spark/systemd/spx-spark-ibkr-stream.service ~/.config/systemd/user/spx-spark-ibkr-stream.service
+systemctl --user daemon-reload
+systemctl --user enable --now spx-spark-ibkr-stream.service
+```
+
+### IBKR Index CFDs
+
+`IBKR_VERIFY_CFDS` (default `IBUS500`) adds IBKR index CFDs to the collector
+and verifier universe. `IBUS500` tracks the S&P 500 cash index at the same
+price level and trades nearly 24h on weekdays, so it doubles as an off-hours
+SPX price proxy and as an extra ATM-reference fallback (`SPX -> ES -> IBUS500 ->
+SPY*10`). Rows appear as `cfd:IBUS500` and the trading-hours report groups them
+under `cfd_proxies` (optional group; it never fails the overall status). CFD
+market data requires the account's CFD permission; without it the row shows an
+entitlement error and everything else keeps working. Set `IBKR_VERIFY_CFDS=` to
+disable.
+
+### Session Recovery
+
+If a manual phone/desktop login preempts the automated Gateway session, the
+recovery chain is: IBC yields (`ExistingSessionDetectedAction=secondary`) ->
+systemd restarts the service every 60s indefinitely (`StartLimitIntervalSec=0`)
+-> login succeeds once the manual session ends -> the collector conflict probe
+returns to IBKR automatically. A watchdog timer (`ibc-watchdog.timer`) also
+restarts the Gateway when the process is alive but the API port stays dead.
+See `docs/headless-deployment.md` (Session Recovery Chain) for details.
+
 Keep the P0 index set focused on SPX, vol-regime data, and a small cross-index
 context set: `SPX,VIX,VIX1D,VIX9D,VIX3M,VVIX,SKEW,NDX,RUT,DJX,DJU`.
 Use explicit exchanges when a broker symbol needs correction, for example:
@@ -309,6 +356,7 @@ and raw data.
 ## Notes
 
 - Architecture plan: `docs/architecture-plan.md`
+- Design review and improvement plan: `docs/design-review.md`
 - Headless deployment: `docs/headless-deployment.md`
 - Data source decision memo: `docs/data-source-decision.md`
 - IBKR API research: `docs/ibkr-api-research.md`

@@ -1,0 +1,10 @@
+[Unit]
+Description=Run the IBC Gateway API watchdog every 2 minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=2min
+Unit=ibc-watchdog.service
+
+[Install]
+WantedBy=timers.target

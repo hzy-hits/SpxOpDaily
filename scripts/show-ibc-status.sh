@@ -24,7 +24,7 @@ fi
 echo
 echo "safe_config:"
 if [[ -r "$CONFIG" ]]; then
-  grep -E '^(TradingMode|SecondFactorDevice|SecondFactorAuthenticationTimeout|ReloginAfterSecondFactorAuthenticationTimeout|ExitAfterSecondFactorAuthenticationTimeout|ExistingSessionDetectedAction|ReadOnlyLogin|ReadOnlyApi|OverrideTwsApiPort)=' "$CONFIG" \
+  grep -E '^(TradingMode|SecondFactorDevice|SecondFactorAuthenticationTimeout|ReloginAfterSecondFactorAuthenticationTimeout|ExitAfterSecondFactorAuthenticationTimeout|ExistingSessionDetectedAction|ReadOnlyLogin|ReadOnlyApi|OverrideTwsApiPort|AutoRestartTime|AutoLogoffTime)=' "$CONFIG" \
     | sed -E 's/^(IbLoginId|IbPassword)=.*/\1=<redacted>/'
 else
   echo "  config not readable: $CONFIG"

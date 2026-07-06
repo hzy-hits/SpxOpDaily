@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import fcntl
 import json
 from collections import defaultdict
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -111,6 +113,24 @@ class LatestStateStore:
     def __init__(self, settings: StorageSettings) -> None:
         self.settings = settings
         self.path = Path(settings.latest_state_path)
+        self.lock_path = self.path.with_name(self.path.name + ".lock")
+
+    @contextmanager
+    def exclusive_lock(self) -> Iterator[None]:
+        """Serialize read-modify-write cycles across processes.
+
+        update() is load -> merge -> write. The tmp+rename write is atomic on
+        its own, but two concurrent updaters (24h loop, manual collector,
+        stream collector) would each merge against the same base state and the
+        second rename would silently drop the first writer's quotes.
+        """
+        self.lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with self.lock_path.open("a", encoding="utf-8") as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
     def load(self, *, now: datetime | None = None, refresh_quality: bool = True) -> LatestState:
         now = as_utc(now or datetime.now(tz=timezone.utc))
@@ -164,32 +184,35 @@ class LatestStateStore:
     ) -> LatestUpdateResult:
         now = as_utc(now or datetime.now(tz=timezone.utc))
         incoming = tuple(quotes)
-        existing_state = self.load(now=now)
-        replacement_providers = set(replace_providers)
-        existing_quotes = tuple(
-            quote for quote in existing_state.quotes if quote.provider not in replacement_providers
-        )
-        provider_latest = latest_by_provider(existing_quotes + incoming)
-        provider_states_latest = latest_provider_states(
-            existing_state.provider_states + tuple(provider_states)
-        )
-        aged_quotes = tuple(
-            degrade_stale_quote(
-                quote,
-                as_of=now,
-                stale_after_seconds=self.settings.latest_stale_after_seconds,
+        with self.exclusive_lock():
+            existing_state = self.load(now=now)
+            replacement_providers = set(replace_providers)
+            existing_quotes = tuple(
+                quote for quote in existing_state.quotes if quote.provider not in replacement_providers
             )
-            for quote in provider_latest
-        )
-        best_quotes = select_best_quotes(aged_quotes, as_of=now)
-        state = LatestState(
-            created_at=datetime.now(tz=timezone.utc),
-            as_of=now,
-            quotes=tuple(sorted(aged_quotes, key=quote_sort_key)),
-            best_quotes=tuple(sorted(best_quotes, key=lambda quote: quote.instrument.canonical_id)),
-            provider_states=provider_states_latest,
-        )
-        self.write(state)
+            provider_latest = latest_by_provider(existing_quotes + incoming)
+            provider_states_latest = latest_provider_states(
+                existing_state.provider_states + tuple(provider_states)
+            )
+            aged_quotes = tuple(
+                degrade_stale_quote(
+                    quote,
+                    as_of=now,
+                    stale_after_seconds=self.settings.latest_stale_after_seconds,
+                )
+                for quote in provider_latest
+            )
+            best_quotes = select_best_quotes(aged_quotes, as_of=now)
+            state = LatestState(
+                created_at=datetime.now(tz=timezone.utc),
+                as_of=now,
+                quotes=tuple(sorted(aged_quotes, key=quote_sort_key)),
+                best_quotes=tuple(
+                    sorted(best_quotes, key=lambda quote: quote.instrument.canonical_id)
+                ),
+                provider_states=provider_states_latest,
+            )
+            self.write(state)
         return LatestUpdateResult(
             path=str(self.path),
             provider_quote_count=len(state.quotes),

@@ -106,12 +106,51 @@ Default security posture from `scripts/configure-ibc-secrets.sh`:
 - `ExistingSessionDetectedAction=secondary`
 - `OverrideTwsApiPort=4001` for live or `4002` for paper
 - `ReloginAfterSecondFactorAuthenticationTimeout=yes`
+- `AutoRestartTime=03:55 AM` (server time) so the daily Gateway restart keeps
+  the authenticated session instead of forcing a full relogin and a new 2FA
+  round; one 2FA approval then lasts roughly a week
 
 `ExistingSessionDetectedAction=secondary` is intentional. If the phone or
 desktop trading session is active, the IBC Gateway session should yield rather
 than fight for the broker session. The user service has `Restart=always` with a
-60 second delay, so it probes again later and can log back in after the manual
-session is gone.
+60 second delay and `StartLimitIntervalSec=0`, so it keeps retrying forever and
+logs back in automatically once the manual session is gone. Do not reintroduce
+a finite start limit: with 60-second retries a limit of 60 starts per hour is
+exhausted by any manual session longer than an hour, after which systemd marks
+the service failed and never logs back in.
+
+## Session Recovery Chain
+
+What happens when a phone/desktop login preempts the automated session:
+
+1. Gateway detects the existing session and yields (`secondary`); IBC exits.
+2. systemd restarts the service every 60 seconds, indefinitely. Each attempt
+   yields again while the manual session is still active, so nothing fights
+   the human.
+3. When the manual session ends, the next attempt logs in and the API port
+   comes back.
+4. The collector probe (`IBKR_CONFLICT_PROBE_SECONDS=60`) notices IBKR is
+   available again and collection resumes on the primary source.
+
+For the failure mode where the Gateway process stays alive but the API is dead
+(stuck login dialog, silent session loss), a watchdog timer checks the API port
+every 2 minutes and restarts `ibc-gateway.service` after 3 consecutive failures
+(`IBC_WATCHDOG_FAILURE_THRESHOLD`). It skips while runtime mode is `protected`
+and while the service is disabled, and a healthy port always resets its
+counter, so it can never kick a working or manual session:
+
+```bash
+scripts/install-ibc-service.sh        # links and enables ibc-watchdog.timer too
+systemctl --user list-timers ibc-watchdog.timer
+journalctl --user -u ibc-watchdog.service -n 20 --no-pager
+```
+
+All units are user services. Enable lingering once, or nothing survives logout
+or reboot:
+
+```bash
+sudo loginctl enable-linger ubuntu
+```
 
 `ReadOnlyApi=yes` is the key API safety gate. Gateway still performs a normal
 broker login, so this is not equivalent to TWS read-only login.

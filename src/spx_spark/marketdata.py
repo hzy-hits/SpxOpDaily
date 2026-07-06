@@ -24,6 +24,7 @@ class InstrumentType(str, Enum):
     ETF = "etf"
     FUTURE = "future"
     OPTION = "option"
+    CFD = "cfd"
     CRYPTO_PERP = "crypto_perp"
     PREDICTION_MARKET = "prediction_market"
     UNKNOWN = "unknown"
@@ -63,6 +64,14 @@ QUALITY_RANK: dict[MarketDataQuality, int] = {
     MarketDataQuality.STALE: 20,
     MarketDataQuality.MISSING: 0,
     MarketDataQuality.ERROR: 0,
+}
+
+# IBKR index CFD symbols and the cash index each one tracks.
+CFD_UNDERLIERS: dict[str, str] = {
+    "IBUS500": "SPX",
+    "IBUS30": "DJI",
+    "IBUST100": "NDX",
+    "IBUS2000": "RUT",
 }
 
 DEFAULT_PROVIDER_PRIORITY: tuple[Provider, ...] = (
@@ -122,6 +131,25 @@ class InstrumentId:
             provider_symbol=provider_symbol,
             exchange=exchange,
             currency=currency,
+        )
+
+    @classmethod
+    def cfd(
+        cls,
+        symbol: str,
+        *,
+        provider_symbol: str | None = None,
+        exchange: str | None = None,
+        currency: str = "USD",
+        underlier: str | None = None,
+    ) -> InstrumentId:
+        return cls(
+            symbol=symbol,
+            instrument_type=InstrumentType.CFD,
+            provider_symbol=provider_symbol,
+            exchange=exchange,
+            currency=currency,
+            underlier=underlier,
         )
 
     @classmethod
@@ -722,6 +750,13 @@ def instrument_from_ibkr_label(
         return InstrumentId.index(parts[1], provider_symbol=label, exchange=exchange or "CBOE")
     if len(parts) >= 2 and parts[0] == "future":
         return InstrumentId.future(parts[1], provider_symbol=label, exchange=exchange or "CME")
+    if len(parts) >= 2 and parts[0] == "cfd":
+        return InstrumentId.cfd(
+            parts[1],
+            provider_symbol=label,
+            exchange=exchange or "SMART",
+            underlier=CFD_UNDERLIERS.get(parts[1].upper()),
+        )
     if len(parts) >= 2 and parts[0] in {"stock", "equity"}:
         return InstrumentId.equity(parts[1], provider_symbol=label)
 
@@ -729,6 +764,7 @@ def instrument_from_ibkr_label(
         "index": InstrumentType.INDEX,
         "future": InstrumentType.FUTURE,
         "option": InstrumentType.OPTION,
+        "cfd": InstrumentType.CFD,
         "stock": InstrumentType.EQUITY,
         "equity": InstrumentType.EQUITY,
     }

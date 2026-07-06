@@ -3,8 +3,13 @@ Description=IBC-managed IB Gateway
 After=network-online.target
 Wants=network-online.target
 ConditionPathExists=/srv/data/spx-spark/runtime/ibc/config.ini
-StartLimitIntervalSec=3600
-StartLimitBurst=60
+# Never give up on relogin. With ExistingSessionDetectedAction=secondary the
+# IBC session yields to a manual phone/desktop login and exits; systemd must
+# keep retrying (once per RestartSec) until the manual session is gone so the
+# feed recovers by itself. A finite start limit here (previously 60/3600s,
+# exactly one hour of 60s retries) made systemd permanently stop the service
+# after a long manual session.
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
