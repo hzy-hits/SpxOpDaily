@@ -108,12 +108,12 @@ def gamma_state_for_micopedia(options_map: OptionsMap) -> str:
     if not options_map.expiries:
         return "unknown"
     raw = options_map.expiries[0].gamma_state
-    if raw in {"positive_gamma_pin", "zero_gamma_transition"}:
+    if raw == "positive_gamma_pin":
         return "pin"
+    if raw == "zero_gamma_transition":
+        return "transition"
     if raw == "negative_gamma_acceleration":
         return "negative"
-    if raw == "mixed_gamma":
-        return "unknown"
     return "unknown"
 
 

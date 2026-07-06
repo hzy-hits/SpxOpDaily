@@ -131,11 +131,12 @@ def severity_value(value: object) -> int:
 
 
 def alert_key(alert: dict[str, object]) -> str:
+    dedup_group = alert.get("dedup_group")
     return "|".join(
         (
             str(alert.get("kind") or ""),
             str(alert.get("instrument_id") or ""),
-            str(alert.get("title") or ""),
+            "" if dedup_group is None else str(dedup_group),
         )
     )
 
@@ -265,6 +266,7 @@ def build_agent_prompt(payload: dict[str, object], alerts: list[dict[str, object
             "你是 SPX Spark 的盘中告警分析 agent。",
             "只根据下面的 JSON 做简短判断；不要给自动下单指令，不要假设缺失数据。",
             "人类只交易 SPX/SPXW；输出只能提 SPX、SPXW、ES、期权墙、gamma、IV surface。",
+            "如果 options_map 警告含 underlier_mismatch 或 gamma_state 以 unknown 开头，只说明数据降级，不下 wall/gamma 结论。",
             "输出结构：1. 发生了什么 2. 风险/数据质量 3. 人类需要看的 SPX/SPXW 检查项。",
             json.dumps(compact_payload, ensure_ascii=False, sort_keys=True),
         )
@@ -320,7 +322,10 @@ def build_codex_prompt(payload: dict[str, object], alerts: list[dict[str, object
             "凡是 research_only、stale、missing、unknown、coverage 不足或 IV surface stale，默认不外发；只说明数据质量。",
             "带 source_gate 的告警默认不外发，唯一例外是 broker_unavailable_fallback 和 ibkr_session_state；它们只能提示打开交易端核验或说明 IBKR 数据会话状态。",
             "如果 SPXW 期权 freshness gate 失败，不得基于 wall/gamma/IV 做看盘结论。",
+            "如果 options_map 警告含 underlier_mismatch，或 gamma_state 以 unknown 开头，不得基于 wall/gamma 下结论，只能说明数据降级。",
+            "gamma_state 为 zero_gamma_transition（micopedia 为 transition）表示零 gamma 交叉区：突破后波动可能放大，不得按 pin/均值回归解读。",
             "如果 ES/SPX anchor 缺失，不得把任何链上或 proxy 数据当作交易确认。",
+            "如果 window.user_unattended 为 true，说明人类大概率在睡觉：只有 critical/high 且数据质量完好的 SPX/SPXW 风险才值得外发，其余一律不推送。",
             "发送决策必须优先参考 Micopedia、SPXW call wall/put wall/zero gamma、以及过去 1 小时 IV surface/期权变化。",
             "输出中文，最多 6 行。必须包含：结论、原因、数据质量、快照时间、需要人类看的 SPX/SPXW 检查项。",
             "如果数据质量不足，明确说 degraded。",

@@ -146,6 +146,13 @@ def test_hyperliquid_proxy_gate_blocks_wide_basis() -> None:
         quotes=(),
         best_quotes=(
             make_provider_quote(
+                InstrumentId.index("SPX"),
+                7500.0,
+                7480.0,
+                now,
+                provider=Provider.IBKR,
+            ),
+            make_provider_quote(
                 InstrumentId.future("ES"),
                 7500.0,
                 7480.0,
@@ -170,4 +177,118 @@ def test_hyperliquid_proxy_gate_blocks_wide_basis() -> None:
 
     assert gate["state"] == "basis_blocked"
     assert gate["usable_for_alert"] is False
-    assert gate["anchor"] == "future:ES"
+    assert gate["anchor"] == "index:SPX"
+    assert gate["anchor_is_future"] is False
+
+
+def test_hyperliquid_proxy_gate_prefers_spx_over_es_anchor() -> None:
+    now = datetime(2026, 7, 7, 3, 15, tzinfo=BJ_TZ)
+    state = LatestState(
+        created_at=now,
+        as_of=now,
+        quotes=(),
+        best_quotes=(
+            make_provider_quote(
+                InstrumentId.index("SPX"),
+                7500.0,
+                7480.0,
+                now,
+                provider=Provider.IBKR,
+            ),
+            make_provider_quote(
+                InstrumentId.future("ES"),
+                7510.0,
+                7480.0,
+                now,
+                provider=Provider.IBKR,
+            ),
+            make_provider_quote(
+                InstrumentId(
+                    symbol="xyz:SP500",
+                    instrument_type=InstrumentType.CRYPTO_PERP,
+                ),
+                7567.5,
+                7480.0,
+                now,
+                provider=Provider.HYPERLIQUID,
+            ),
+        ),
+    )
+
+    context = build_market_context(state)
+    gate = context["derived"]["hyperliquid_spx_proxy"]
+
+    assert gate["anchor"] == "index:SPX"
+    assert gate["anchor_is_future"] is False
+    assert gate["state"] == "basis_warn"
+    assert gate["warn_bps"] == 50.0
+    assert gate["block_bps"] == 100.0
+
+
+def test_hyperliquid_proxy_gate_uses_futures_thresholds_when_only_es_anchor() -> None:
+    now = datetime(2026, 7, 7, 3, 15, tzinfo=BJ_TZ)
+    es_price = 7500.0
+    proxy_90bps = es_price * 1.009
+    proxy_120bps = es_price * 1.012
+    state_90 = LatestState(
+        created_at=now,
+        as_of=now,
+        quotes=(),
+        best_quotes=(
+            make_provider_quote(
+                InstrumentId.future("ES"),
+                es_price,
+                7480.0,
+                now,
+                provider=Provider.IBKR,
+            ),
+            make_provider_quote(
+                InstrumentId(
+                    symbol="xyz:SP500",
+                    instrument_type=InstrumentType.CRYPTO_PERP,
+                ),
+                proxy_90bps,
+                7480.0,
+                now,
+                provider=Provider.HYPERLIQUID,
+            ),
+        ),
+    )
+    state_120 = LatestState(
+        created_at=now,
+        as_of=now,
+        quotes=(),
+        best_quotes=(
+            make_provider_quote(
+                InstrumentId.future("ES"),
+                es_price,
+                7480.0,
+                now,
+                provider=Provider.IBKR,
+            ),
+            make_provider_quote(
+                InstrumentId(
+                    symbol="xyz:SP500",
+                    instrument_type=InstrumentType.CRYPTO_PERP,
+                ),
+                proxy_120bps,
+                7480.0,
+                now,
+                provider=Provider.HYPERLIQUID,
+            ),
+        ),
+    )
+
+    gate_90 = build_market_context(state_90)["derived"]["hyperliquid_spx_proxy"]
+    gate_120 = build_market_context(state_120)["derived"]["hyperliquid_spx_proxy"]
+
+    assert gate_90["anchor"] == "future:ES"
+    assert gate_90["anchor_is_future"] is True
+    assert gate_90["state"] == "basis_warn"
+    assert gate_90["warn_bps"] == 80.0
+    assert gate_90["block_bps"] == 150.0
+
+    assert gate_120["anchor"] == "future:ES"
+    assert gate_120["anchor_is_future"] is True
+    assert gate_120["state"] == "basis_warn"
+    assert gate_120["usable_for_alert"] is False

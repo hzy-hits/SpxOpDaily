@@ -97,6 +97,7 @@ class Alert:
     threshold: float | None = None
     research_only: bool = False
     source_gate: str | None = None
+    dedup_group: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -171,32 +172,153 @@ def move_from_close_bps(quote: Quote) -> float | None:
     return (price / close - 1.0) * 10_000.0
 
 
-def movement_alert(
-    *,
-    quote: Quote,
-    window: AlertWindow,
-    threshold_bps: float,
-) -> Alert | None:
-    move_bps = move_from_close_bps(quote)
-    if move_bps is None or abs(move_bps) < threshold_bps:
-        return None
-
-    instrument_id = quote.instrument.canonical_id
+def movement_bucket_and_direction(move_bps: float, threshold_bps: float) -> tuple[int, str]:
     direction = "up" if move_bps > 0 else "down"
-    return Alert(
-        severity=severity_for_priority(window.priority),
-        kind="price_move_from_close",
-        instrument_id=instrument_id,
-        title=f"{instrument_id} {direction} {move_bps:.1f} bps from close",
-        detail=(
-            f"{instrument_id} effective price moved {move_bps:.1f} bps from close "
-            f"during {window.name}."
-        ),
-        provider=quote.provider.value,
-        quality=quote.quality.value,
-        value=move_bps,
-        threshold=threshold_bps,
+    if abs(move_bps) < threshold_bps:
+        return 0, direction
+    return int(abs(move_bps) // threshold_bps), direction
+
+
+def load_movement_state(path: str | Path) -> dict[str, object]:
+    state_path = Path(path)
+    try:
+        payload = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def save_movement_state(path: str | Path, payload: dict[str, object]) -> None:
+    state_path = Path(path)
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = state_path.with_suffix(f"{state_path.suffix}.tmp")
+    temp_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    temp_path.replace(state_path)
+
+
+def movement_state_path() -> str:
+    data_root = os.getenv("MARKET_DATA_DATA_ROOT") or os.getenv("MAINTENANCE_DATA_ROOT") or "data"
+    return os.getenv(
+        "ALERT_MOVEMENT_STATE_PATH",
+        f"{data_root.rstrip('/')}/latest/movement_state.json",
     )
+
+
+def parse_movement_instrument_state(value: object) -> dict[str, object] | None:
+    if not isinstance(value, dict):
+        return None
+    bucket = value.get("bucket")
+    direction = value.get("direction")
+    if not isinstance(bucket, int) or direction not in {"up", "down"}:
+        return None
+    return {"bucket": bucket, "direction": str(direction)}
+
+
+def build_movement_state_payload(
+    state: LatestState,
+    *,
+    window: AlertWindow,
+    market_context: dict[str, object] | None,
+) -> dict[str, object]:
+    threshold = MOVE_THRESHOLDS_BPS.get(window.priority, MOVE_THRESHOLDS_BPS["normal"])
+    instruments: dict[str, object] = {}
+    for instrument_id in BASELINE_INSTRUMENTS:
+        if instrument_id.startswith("crypto_perp:") and not hyperliquid_proxy_usable(market_context):
+            continue
+        quote = find_best(state, instrument_id)
+        if quote is None or quote.quality in BAD_QUALITIES:
+            continue
+        move_bps = move_from_close_bps(quote)
+        if move_bps is None:
+            continue
+        bucket, direction = movement_bucket_and_direction(move_bps, threshold)
+        if bucket >= 1:
+            instruments[instrument_id] = {"bucket": bucket, "direction": direction}
+    return {
+        "instruments": instruments,
+        "updated_at": state.as_of.isoformat(),
+    }
+
+
+def persist_movement_state_snapshot(
+    state: LatestState,
+    *,
+    window: AlertWindow | None = None,
+    market_context: dict[str, object] | None = None,
+) -> None:
+    window = window or active_window(state.as_of)
+    if market_context is None:
+        market_context = build_market_context(state)
+    save_movement_state(
+        movement_state_path(),
+        build_movement_state_payload(state, window=window, market_context=market_context),
+    )
+
+
+def movement_alerts(
+    state: LatestState,
+    *,
+    window: AlertWindow,
+    market_context: dict[str, object] | None,
+    persist: bool = False,
+) -> list[Alert]:
+    threshold = MOVE_THRESHOLDS_BPS.get(window.priority, MOVE_THRESHOLDS_BPS["normal"])
+    state_path = movement_state_path()
+    previous_payload = load_movement_state(state_path)
+    previous_instruments = previous_payload.get("instruments")
+    if not isinstance(previous_instruments, dict):
+        previous_instruments = {}
+
+    alerts: list[Alert] = []
+    new_instruments: dict[str, object] = {}
+    for instrument_id in BASELINE_INSTRUMENTS:
+        if instrument_id.startswith("crypto_perp:") and not hyperliquid_proxy_usable(market_context):
+            continue
+        quote = find_best(state, instrument_id)
+        if quote is None or quote.quality in BAD_QUALITIES:
+            continue
+        move_bps = move_from_close_bps(quote)
+        if move_bps is None:
+            continue
+        bucket, direction = movement_bucket_and_direction(move_bps, threshold)
+        if bucket == 0:
+            continue
+        previous = parse_movement_instrument_state(previous_instruments.get(instrument_id))
+        should_alert = (
+            previous is None
+            or bucket > int(previous["bucket"])
+            or direction != str(previous["direction"])
+        )
+        new_instruments[instrument_id] = {"bucket": bucket, "direction": direction}
+        if not should_alert:
+            continue
+        alerts.append(
+            Alert(
+                severity=severity_for_priority(window.priority),
+                kind="price_move_from_close",
+                instrument_id=instrument_id,
+                title=f"{instrument_id} {direction} {move_bps:.1f} bps from close",
+                detail=(
+                    f"{instrument_id} effective price moved {move_bps:.1f} bps from close "
+                    f"during {window.name}."
+                ),
+                provider=quote.provider.value,
+                quality=quote.quality.value,
+                value=move_bps,
+                threshold=threshold,
+                dedup_group=f"{direction}:{bucket}",
+            )
+        )
+
+    if persist:
+        save_movement_state(
+            state_path,
+            {
+                "instruments": new_instruments,
+                "updated_at": state.as_of.isoformat(),
+            },
+        )
+    return alerts
 
 
 def evaluate_alerts(
@@ -207,6 +329,7 @@ def evaluate_alerts(
     iv_surface: IvSurfaceSnapshot | None = None,
     market_context: dict[str, object] | None = None,
     persist_system_events: bool = False,
+    persist_movement_state: bool = False,
 ) -> list[Alert]:
     alerts: list[Alert] = []
     required = set(window.required_instruments)
@@ -221,16 +344,16 @@ def evaluate_alerts(
         if alert is not None:
             alerts.append(alert)
 
-    threshold = MOVE_THRESHOLDS_BPS.get(window.priority, MOVE_THRESHOLDS_BPS["normal"])
-    for instrument_id in BASELINE_INSTRUMENTS:
-        if instrument_id.startswith("crypto_perp:") and not hyperliquid_proxy_usable(market_context):
-            continue
-        quote = find_best(state, instrument_id)
-        if quote is None or quote.quality in BAD_QUALITIES:
-            continue
-        alert = movement_alert(quote=quote, window=window, threshold_bps=threshold)
-        if alert is not None:
-            alerts.append(alert)
+    if market_context is None:
+        market_context = build_market_context(state)
+    alerts.extend(
+        movement_alerts(
+            state,
+            window=window,
+            market_context=market_context,
+            persist=persist_movement_state,
+        )
+    )
 
     alerts.extend(option_map_alerts(options_map or build_options_map(state), window=window))
     if iv_surface is not None:
@@ -297,6 +420,7 @@ def option_map_alerts(options_map: OptionsMap, *, window: AlertWindow) -> list[A
                         f"zero gamma={expiry.zero_gamma}, net_gamma_ratio={expiry.net_gamma_ratio}."
                     ),
                     value=expiry.net_gamma_ratio,
+                    dedup_group=expiry.gamma_state,
                 )
             )
         if expiry.nearest_wall is not None and expiry.nearest_wall_distance_points is not None:
@@ -317,6 +441,7 @@ def option_map_alerts(options_map: OptionsMap, *, window: AlertWindow) -> list[A
                         ),
                         value=expiry.nearest_wall_distance_points,
                         threshold=wall_threshold,
+                        dedup_group=f"{expiry.nearest_wall:.0f}",
                     )
                 )
     return alerts
@@ -637,6 +762,7 @@ def iv_surface_alerts(surface: IvSurfaceSnapshot, *, window: AlertWindow) -> lis
                     quality=expiry.surface_fit_quality,
                 )
             )
+            continue
         if expiry.atm_iv_jump_5m is not None and abs(expiry.atm_iv_jump_5m) >= ATM_IV_JUMP_THRESHOLD:
             alerts.append(
                 Alert(
@@ -701,6 +827,7 @@ def evaluate_payload(
     *,
     now: datetime | None = None,
     persist_system_events: bool = True,
+    persist_movement_state: bool = False,
 ) -> dict[str, object]:
     now = now or state.as_of
     window = active_window(now)
@@ -722,6 +849,7 @@ def evaluate_payload(
         iv_surface=iv_surface_for_alerts,
         market_context=market_context,
         persist_system_events=persist_system_events,
+        persist_movement_state=persist_movement_state,
     )
     if iv_stale_alert is not None:
         alerts.append(iv_stale_alert)
@@ -781,9 +909,14 @@ def run(argv: list[str] | None = None) -> int:
         state,
         now=now or state.as_of,
         persist_system_events=False,
+        persist_movement_state=False,
     )
     system_event_pending = any(
         isinstance(alert, dict) and alert.get("source_gate") == "ibkr_session_state"
+        for alert in payload.get("alerts", [])
+    )
+    movement_pending = any(
+        isinstance(alert, dict) and alert.get("kind") == "price_move_from_close"
         for alert in payload.get("alerts", [])
     )
     notification_result = None
@@ -792,6 +925,8 @@ def run(argv: list[str] | None = None) -> int:
         payload["notification"] = notification_result.to_dict()
     if not system_event_pending or (notification_result is not None and notification_result.sent_count > 0):
         persist_system_event_state(state)
+    if not movement_pending or (notification_result is not None and notification_result.sent_count > 0):
+        persist_movement_state_snapshot(state)
     if args.json:
         print(json.dumps(payload, indent=2, sort_keys=True))
     else:

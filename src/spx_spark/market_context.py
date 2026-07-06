@@ -53,9 +53,9 @@ HYPERLIQUID_PROXY_IDS = (
 )
 
 TRADFI_ANCHOR_IDS = (
+    "index:SPX",
     "future:ES",
     "future:MES",
-    "index:SPX",
 )
 
 
@@ -220,8 +220,8 @@ def first_usable_entry(
 
 
 def hyperliquid_spx_proxy_gate(entries: dict[str, MarketContextEntry]) -> dict[str, object]:
-    warn_bps = env_float("HYPERLIQUID_PROXY_BASIS_WARN_BPS", 50.0)
-    block_bps = env_float("HYPERLIQUID_PROXY_BASIS_BLOCK_BPS", 100.0)
+    default_warn_bps = env_float("HYPERLIQUID_PROXY_BASIS_WARN_BPS", 50.0)
+    default_block_bps = env_float("HYPERLIQUID_PROXY_BASIS_BLOCK_BPS", 100.0)
     proxy = first_usable_entry(entries, HYPERLIQUID_PROXY_IDS)
     if proxy is None:
         return {
@@ -231,8 +231,9 @@ def hyperliquid_spx_proxy_gate(entries: dict[str, MarketContextEntry]) -> dict[s
             "reason": "Hyperliquid SPX proxy missing or degraded.",
             "basis_bps": None,
             "anchor": None,
-            "warn_bps": warn_bps,
-            "block_bps": block_bps,
+            "anchor_is_future": False,
+            "warn_bps": default_warn_bps,
+            "block_bps": default_block_bps,
         }
 
     anchor = first_usable_entry(entries, TRADFI_ANCHOR_IDS)
@@ -245,9 +246,18 @@ def hyperliquid_spx_proxy_gate(entries: dict[str, MarketContextEntry]) -> dict[s
             "basis_bps": None,
             "anchor": None,
             "proxy": proxy.instrument_id,
-            "warn_bps": warn_bps,
-            "block_bps": block_bps,
+            "anchor_is_future": False,
+            "warn_bps": default_warn_bps,
+            "block_bps": default_block_bps,
         }
+
+    anchor_is_future = anchor.instrument_id.startswith("future:")
+    if anchor_is_future:
+        warn_bps = env_float("HYPERLIQUID_PROXY_FUTURES_BASIS_WARN_BPS", 80.0)
+        block_bps = env_float("HYPERLIQUID_PROXY_FUTURES_BASIS_BLOCK_BPS", 150.0)
+    else:
+        warn_bps = default_warn_bps
+        block_bps = default_block_bps
 
     assert proxy.price is not None
     assert anchor.price is not None
@@ -274,6 +284,7 @@ def hyperliquid_spx_proxy_gate(entries: dict[str, MarketContextEntry]) -> dict[s
         "basis_bps": basis_bps,
         "anchor": anchor.instrument_id,
         "proxy": proxy.instrument_id,
+        "anchor_is_future": anchor_is_future,
         "warn_bps": warn_bps,
         "block_bps": block_bps,
     }

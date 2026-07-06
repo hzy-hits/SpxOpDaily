@@ -12,7 +12,7 @@ from spx_spark.storage import LatestState, LatestStateStore
 
 
 VALID_BIASES = {"bullish", "bearish", "mixed_tactical", "neutral_unclear"}
-VALID_GAMMA_STATES = {"positive", "negative", "pin", "unknown"}
+VALID_GAMMA_STATES = {"positive", "negative", "pin", "transition", "unknown"}
 VALID_TIME_PHASES = {"premarket", "open", "midday", "late", "closed", "unknown"}
 
 EVENT_ALIASES = {
@@ -151,7 +151,7 @@ def classify_regime(inputs: MicopediaInputs) -> str:
         return "high_vol_event"
     if inputs.vix1d is not None and inputs.vix1d < 10:
         return "low_vol_difficult"
-    if inputs.gamma_state == "negative":
+    if inputs.gamma_state in {"negative", "transition"}:
         return "negative_gamma_trend"
     if inputs.gamma_state == "positive":
         return "positive_gamma_mean_reversion"
@@ -246,7 +246,12 @@ def trigger_watchlist(inputs: MicopediaInputs, regime: str) -> tuple[str, ...]:
     else:
         triggers.append("RTH: require a level reaction or failed breakout before activating any directional read.")
 
-    if inputs.gamma_state == "negative" or regime == "negative_gamma_trend":
+    if inputs.gamma_state == "transition":
+        triggers.append(
+            "Zero-gamma transition: dealer hedging flips near this zone; "
+            "a break can expand volatility and accelerate—do not treat it as a pin or fade toward walls."
+        )
+    elif inputs.gamma_state == "negative" or regime == "negative_gamma_trend":
         triggers.append("Negative gamma: a clean break can accelerate; avoid fading until reclaim or exhaustion is visible.")
     elif inputs.gamma_state in {"positive", "pin"} or regime == "opex_gamma_pin":
         triggers.append("Positive/pin gamma: expect mean reversion near walls unless price accepts beyond the level.")

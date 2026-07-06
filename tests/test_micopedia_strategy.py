@@ -93,3 +93,50 @@ def test_signal_schema_contains_required_guardrail_fields():
     assert "risk_policy" in required
     assert "data_warnings" in required
     assert "candidate_expression" in required
+
+
+def test_transition_regime_is_not_opex_gamma_pin():
+    inputs = MicopediaInputs(
+        created_at=datetime(2026, 7, 6, 14, 0, tzinfo=timezone.utc),
+        underlier_price=7502.0,
+        vix1d=12.5,
+        gamma_state="transition",
+        directional_bias="neutral_unclear",
+        time_phase="midday",
+        has_option_chain=True,
+        has_es_data=True,
+    )
+
+    signal = build_micopedia_signal(inputs)
+
+    assert signal.regime == "negative_gamma_trend"
+    assert signal.regime != "opex_gamma_pin"
+
+
+def test_transition_watchlist_uses_transition_guidance_not_mean_reversion():
+    inputs = MicopediaInputs(
+        created_at=datetime(2026, 7, 6, 14, 0, tzinfo=timezone.utc),
+        underlier_price=7502.0,
+        vix1d=12.5,
+        gamma_state="transition",
+        directional_bias="neutral_unclear",
+        time_phase="midday",
+        has_option_chain=True,
+        has_es_data=True,
+    )
+
+    signal = build_micopedia_signal(inputs)
+    watchlist_text = " ".join(signal.trigger_watchlist).lower()
+
+    assert "zero-gamma transition" in watchlist_text
+    assert "dealer hedging flips" in watchlist_text
+    assert "mean reversion" not in watchlist_text
+
+
+def test_transition_gamma_state_normalizes():
+    inputs = MicopediaInputs(
+        created_at=datetime(2026, 7, 6, 14, 0, tzinfo=timezone.utc),
+        gamma_state="transition",
+    )
+
+    assert inputs.gamma_state == "transition"

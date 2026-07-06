@@ -26,6 +26,8 @@ BAD_QUALITIES = {
     MarketDataQuality.ERROR,
     MarketDataQuality.STALE,
     MarketDataQuality.UNKNOWN,
+    MarketDataQuality.DELAYED,
+    MarketDataQuality.DELAYED_FROZEN,
 }
 
 
@@ -281,7 +283,10 @@ def classify_gamma_state(
     zero_gamma_distance_points: float | None,
     underlier: float | None,
     gex_quality: str,
+    underlier_mismatch: bool = False,
 ) -> str:
+    if underlier_mismatch:
+        return "unknown_underlier_mismatch"
     if gex_quality == "no_open_interest_gex":
         return "unknown_no_open_interest"
     if net_gamma_ratio is None:
@@ -302,6 +307,7 @@ def build_expiry_map(
     underlier: float | None,
     *,
     as_of: datetime,
+    underlier_mismatch: bool = False,
 ) -> ExpiryOptionsMap:
     coverage = build_coverage(quotes, as_of=as_of)
     pairs = pair_by_strike(quotes)
@@ -363,6 +369,8 @@ def build_expiry_map(
         warnings.append("low gamma coverage")
     if coverage.with_open_interest == 0:
         warnings.append("missing open interest; call/put wall and GEX are unavailable")
+    if underlier_mismatch:
+        warnings.append("underlier mismatch; wall distance and gamma alerts suppressed")
 
     expected_move_pct = straddle / underlier if straddle is not None and underlier else None
     gamma_state = classify_gamma_state(
@@ -370,7 +378,11 @@ def build_expiry_map(
         zero_gamma_distance_points=zero_distance,
         underlier=underlier,
         gex_quality=gex_quality,
+        underlier_mismatch=underlier_mismatch,
     )
+    if underlier_mismatch:
+        nearest_wall_value = None
+        nearest_wall_distance = None
     return ExpiryOptionsMap(
         expiry=expiry,
         option_count=len(quotes),
@@ -413,13 +425,24 @@ def build_options_map(state: LatestState) -> OptionsMap:
         grouped[expiry].append(quote)
 
     warnings: list[str] = []
+    underlier_mismatch = underlier.source is not None and underlier.source != "index:SPX"
     if underlier.price is None:
         warnings.append("missing SPX underlier reference")
+    elif underlier_mismatch:
+        warnings.append(
+            f"underlier_mismatch: using {underlier.source} price for SPX strikes; wall/gamma alerts suppressed"
+        )
     if not grouped:
         warnings.append("missing SPXW option quotes")
 
     expiries = tuple(
-        build_expiry_map(expiry, quotes, underlier.price, as_of=state.as_of)
+        build_expiry_map(
+            expiry,
+            quotes,
+            underlier.price,
+            as_of=state.as_of,
+            underlier_mismatch=underlier_mismatch,
+        )
         for expiry, quotes in sorted(grouped.items())
     )
     return OptionsMap(

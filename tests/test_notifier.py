@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 
 from spx_spark.config import NotificationSettings
 from spx_spark.notifier import (
+    alert_key,
     build_codex_prompt,
     codex_message_requests_delivery,
     codex_message_respects_human_scope,
@@ -13,6 +14,7 @@ from spx_spark.notifier import (
     openclaw_delivery_error,
     run_codex_exec,
     run_openclaw_agent,
+    select_alerts_for_notification,
 )
 
 
@@ -583,3 +585,55 @@ def test_codex_prompt_hides_non_focus_market_context() -> None:
     assert "SPXW" in prompt
     assert "future:ES" in prompt
     assert "ibkr_session_state" in prompt
+
+
+def test_alert_key_uses_dedup_group_not_title() -> None:
+    alert = {
+        "kind": "price_move_from_close",
+        "instrument_id": "index:SPX",
+        "title": "index:SPX up 23.4 bps from close",
+        "dedup_group": "up:1",
+    }
+    assert alert_key(alert) == "price_move_from_close|index:SPX|up:1"
+    assert "23.4" not in alert_key(alert)
+
+
+def test_notifier_cooldown_ignores_title_when_dedup_group_matches(tmp_path) -> None:
+    calls: list[list[str]] = []
+
+    def runner(command: list[str], timeout_seconds: float) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout="{}", stderr="")
+
+    settings = make_settings(str(tmp_path / "notify-state.json"))
+    now = datetime(2026, 7, 7, 0, 0, tzinfo=timezone.utc)
+    base_alert = {
+        "severity": "high",
+        "kind": "price_move_from_close",
+        "instrument_id": "index:SPX",
+        "dedup_group": "up:1",
+        "detail": "SPX moved from close.",
+    }
+
+    first_payload = {
+        "as_of": "2026-07-07T03:15:00+08:00",
+        "window": {"name": "close_one_hour", "priority": "high"},
+        "alerts": [{**base_alert, "title": "index:SPX up 31.0 bps from close"}],
+    }
+    second_payload = {
+        "as_of": "2026-07-07T03:16:00+08:00",
+        "window": {"name": "close_one_hour", "priority": "high"},
+        "alerts": [{**base_alert, "title": "index:SPX up 31.7 bps from close"}],
+    }
+
+    first = notify_payload(first_payload, settings=settings, runner=runner, now=now)
+    assert first.selected_count == 1
+    assert first.sent_count == 1
+
+    selected, _ = select_alerts_for_notification(
+        second_payload,
+        settings,
+        now=now + timedelta(seconds=60),
+    )
+    assert selected == []
+    assert len(calls) == 1
