@@ -320,7 +320,8 @@ def build_codex_prompt(payload: dict[str, object], alerts: list[dict[str, object
             "人类只交易 SPX/SPXW；输出只能提 SPX、SPXW、ES、期权墙、gamma、IV surface。",
             "不要提任何非 SPX/SPXW/ES 标的名；隐藏算法上下文只能影响是否推送，不能进入人类可见解释。",
             "凡是 research_only、stale、missing、unknown、coverage 不足或 IV surface stale，默认不外发；只说明数据质量。",
-            "带 source_gate 的告警默认不外发，唯一例外是 broker_unavailable_fallback 和 ibkr_session_state；它们只能提示打开交易端核验或说明 IBKR 数据会话状态。",
+            "带 source_gate 的告警默认不外发，唯一例外是 broker_unavailable_fallback、ibkr_session_state、ibkr_positions；"
+            "ibkr_positions 表示 IBKR 实盘 SPXW 持仓变化或风险，应结合 Micopedia/wall/gamma 判断是否值得外发。",
             "如果 SPXW 期权 freshness gate 失败，不得基于 wall/gamma/IV 做看盘结论。",
             "如果 options_map 警告含 underlier_mismatch，或 gamma_state 以 unknown 开头，不得基于 wall/gamma 下结论，只能说明数据降级。",
             "gamma_state 为 zero_gamma_transition（micopedia 为 transition）表示零 gamma 交叉区：突破后波动可能放大，不得按 pin/均值回归解读。",

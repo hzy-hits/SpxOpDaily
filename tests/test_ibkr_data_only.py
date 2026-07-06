@@ -55,8 +55,11 @@ def test_ibkr_package_stays_data_only() -> None:
 def test_ibkr_connect_calls_disable_startup_account_fetches() -> None:
     root = Path(__file__).resolve().parents[1] / "src" / "spx_spark" / "ibkr"
     violations: list[str] = []
+    position_only_files = {"position_watcher.py"}
 
     for path in iter_python_files(root):
+        if path.name in position_only_files:
+            continue
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):

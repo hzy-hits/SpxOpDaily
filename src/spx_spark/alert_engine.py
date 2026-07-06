@@ -358,6 +358,7 @@ def evaluate_alerts(
     alerts.extend(option_map_alerts(options_map or build_options_map(state), window=window))
     if iv_surface is not None:
         alerts.extend(iv_surface_alerts(iv_surface, window=window))
+    alerts.extend(position_holdings_alerts(state, options_map=options_map, window=window))
     alerts.extend(market_context_alerts(market_context))
     alerts.extend(system_event_alerts(state, persist=persist_system_events))
     alerts.extend(proxy_fallback_watch_alerts(state, window=window, market_context=market_context))
@@ -675,6 +676,34 @@ def system_event_alerts(state: LatestState, *, persist: bool = True) -> list[Ale
         current_status=current_status,
     )
     return [alert] if alert is not None else []
+
+
+def position_holdings_alerts(
+    state: LatestState,
+    *,
+    options_map: OptionsMap | None,
+    window: AlertWindow,
+) -> list[Alert]:
+    from spx_spark.config import IbkrPositionSettings
+    from spx_spark.ibkr.position_alerts import (
+        evaluate_position_alerts,
+        load_position_alert_state,
+    )
+    from spx_spark.ibkr.position_watcher import load_snapshot
+
+    position_settings = IbkrPositionSettings.from_env()
+    if not position_settings.enabled or not position_settings.snapshot_path:
+        return []
+    snapshot = load_snapshot(position_settings.snapshot_path)
+    previous = load_position_alert_state()
+    return evaluate_position_alerts(
+        snapshot,
+        previous=previous,
+        state=state,
+        options_map=options_map,
+        window=window,
+        persist_state=True,
+    )
 
 
 def proxy_fallback_watch_alerts(

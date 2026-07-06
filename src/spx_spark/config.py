@@ -218,6 +218,27 @@ class IbkrStreamSettings:
 
 
 @dataclass(frozen=True)
+class IbkrPositionSettings:
+    enabled: bool
+    client_id: int
+    poll_interval_seconds: int
+    snapshot_path: str | None
+
+    @classmethod
+    def from_env(cls) -> "IbkrPositionSettings":
+        load_dotenv()
+        data_root = _env("MARKET_DATA_DATA_ROOT", _env("MAINTENANCE_DATA_ROOT", "data"))
+        default_snapshot = f"{data_root.rstrip('/')}/latest/ibkr_positions.json"
+        snapshot_path = _env("IBKR_POSITIONS_SNAPSHOT_PATH", default_snapshot) or default_snapshot
+        return cls(
+            enabled=_env_bool("IBKR_POSITIONS_ENABLED", False),
+            client_id=_env_int("IBKR_POSITIONS_CLIENT_ID", 174),
+            poll_interval_seconds=_env_int("IBKR_POSITIONS_POLL_SECONDS", 60),
+            snapshot_path=snapshot_path,
+        )
+
+
+@dataclass(frozen=True)
 class RuntimePolicySettings:
     ibkr_schedule_enabled: bool
     ibkr_schedule_timezone: str

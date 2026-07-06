@@ -2,7 +2,7 @@ import os
 from datetime import datetime, timedelta, timezone
 
 from spx_spark.config import MaintenanceSettings
-from spx_spark.maintenance import build_report
+from spx_spark.maintenance import build_report, execute_prune, is_protected_path
 
 
 def make_settings(tmp_path) -> MaintenanceSettings:
@@ -25,20 +25,80 @@ def make_settings(tmp_path) -> MaintenanceSettings:
     )
 
 
+def touch_old(path, *, now: datetime, days: int) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"12345")
+    old_mtime = (now - timedelta(days=days)).timestamp()
+    os.utime(path, (old_mtime, old_mtime))
+
+
 def test_maintenance_dry_run_finds_old_raw_file(tmp_path):
     settings = make_settings(tmp_path)
     raw_dir = tmp_path / "data" / "raw" / "provider=schwab" / "date=2026-01-01"
-    raw_dir.mkdir(parents=True)
     old_file = raw_dir / "old.parquet"
-    old_file.write_bytes(b"12345")
-
     now = datetime(2026, 7, 4, tzinfo=timezone.utc)
-    old_mtime = (now - timedelta(days=20)).timestamp()
-    old_file.touch()
-    os.utime(old_file, (old_mtime, old_mtime))
+    touch_old(old_file, now=now, days=20)
 
     report = build_report(settings, now=now)
 
     assert len(report.prune_candidates) == 1
     assert report.prune_candidates[0].path.endswith("old.parquet")
     assert "raw older" in (report.prune_candidates[0].reason or "")
+
+
+def test_latest_state_is_never_a_prune_candidate(tmp_path):
+    settings = make_settings(tmp_path)
+    now = datetime(2026, 7, 4, tzinfo=timezone.utc)
+    latest = tmp_path / "data" / "latest" / "state.json"
+    touch_old(latest, now=now, days=90)
+
+    report = build_report(settings, now=now)
+
+    assert report.prune_candidates == []
+    assert is_protected_path(latest, tmp_path / "data")
+
+
+def test_prune_dry_run_does_not_delete_files(tmp_path):
+    settings = make_settings(tmp_path)
+    now = datetime(2026, 7, 4, tzinfo=timezone.utc)
+    old_file = tmp_path / "data" / "context" / "provider=ibkr" / "date=2026-01-01" / "quotes.jsonl"
+    touch_old(old_file, now=now, days=20)
+
+    report = build_report(settings, now=now)
+    result = execute_prune(report, settings, execute=False)
+
+    assert old_file.exists()
+    assert result.deleted_files == 0
+    assert result.executed is False
+    assert len(report.prune_candidates) == 1
+    assert "context older" in (report.prune_candidates[0].reason or "")
+
+
+def test_prune_execute_deletes_expired_raw_and_empty_dirs(tmp_path):
+    settings = make_settings(tmp_path)
+    now = datetime(2026, 7, 4, tzinfo=timezone.utc)
+    old_file = tmp_path / "data" / "raw" / "provider=mock" / "date=2026-01-01" / "quotes.jsonl"
+    fresh_file = tmp_path / "data" / "raw" / "provider=ibkr" / "date=2026-07-04" / "quotes.jsonl"
+    touch_old(old_file, now=now, days=20)
+    touch_old(fresh_file, now=now, days=1)
+
+    report = build_report(settings, now=now)
+    result = execute_prune(report, settings, execute=True)
+
+    assert result.deleted_files == 1
+    assert not old_file.exists()
+    assert fresh_file.exists()
+    assert result.removed_empty_dirs >= 1
+
+
+def test_prune_execute_deletes_old_logs(tmp_path):
+    settings = make_settings(tmp_path)
+    now = datetime(2026, 7, 4, tzinfo=timezone.utc)
+    old_log = tmp_path / "logs" / "maintenance-dry-run-old.json"
+    touch_old(old_log, now=now, days=20)
+
+    report = build_report(settings, now=now)
+    result = execute_prune(report, settings, execute=True)
+
+    assert result.deleted_files == 1
+    assert not old_log.exists()

@@ -10,6 +10,7 @@ from pathlib import Path
 from spx_spark.config import MaintenanceSettings
 
 
+PROTECTED_DATA_SEGMENTS = frozenset({"latest", "runtime"})
 @dataclass(frozen=True)
 class FileEntry:
     path: str
@@ -56,10 +57,28 @@ def human_bytes(value: int) -> str:
     return f"{amount:.1f}TB"
 
 
+@dataclass(frozen=True)
+class PruneResult:
+    created_at: str
+    executed: bool
+    deleted_files: int
+    deleted_bytes: int
+    removed_empty_dirs: int
+    skipped_protected: int
+    errors: list[str]
+    deleted_paths: list[str]
+
+
 def classify_path(path: Path) -> str:
     parts = set(path.parts)
+    if "latest" in parts:
+        return "latest"
+    if "preserved" in parts or "alert_windows" in parts:
+        return "alerts"
     if "raw" in parts:
         return "raw"
+    if "context" in parts:
+        return "context"
     if "features" in parts:
         if "interval=1s" in parts:
             return "feature_1s"
@@ -75,15 +94,29 @@ def classify_path(path: Path) -> str:
     return "logs" if "logs" in parts else "other"
 
 
+def is_protected_path(path: Path, data_root: Path) -> bool:
+    if path.name.endswith(".lock"):
+        return True
+    try:
+        relative = path.relative_to(data_root)
+    except ValueError:
+        return False
+    return any(segment in PROTECTED_DATA_SEGMENTS for segment in relative.parts)
+
+
 def prune_reason(
     category: str,
     modified_at: datetime,
     now: datetime,
     settings: MaintenanceSettings,
 ) -> str | None:
+    if category in {"latest", "other", "reports"}:
+        return None
     age = now - modified_at
-    if category == "raw" and age > timedelta(days=settings.raw_retention_days):
-        return f"raw older than {settings.raw_retention_days} days"
+    if category in {"raw", "context"} and age > timedelta(days=settings.raw_retention_days):
+        return f"{category} older than {settings.raw_retention_days} days"
+    if category == "alerts" and age > timedelta(days=settings.alert_window_retention_days):
+        return f"alerts older than {settings.alert_window_retention_days} days"
     if category == "feature_1s" and age > timedelta(days=settings.feature_1s_retention_days):
         return f"1s features older than {settings.feature_1s_retention_days} days"
     if category == "feature_5s" and age > timedelta(days=settings.feature_5s_retention_days):
@@ -92,6 +125,8 @@ def prune_reason(
         return f"logs older than {settings.log_retention_days} days"
     if category == "trash" and age > timedelta(days=settings.trash_retention_days):
         return f"trash older than {settings.trash_retention_days} days"
+    if category == "features" and age > timedelta(days=settings.feature_5s_retention_days):
+        return f"features older than {settings.feature_5s_retention_days} days"
     return None
 
 
@@ -118,7 +153,10 @@ def scan_directory(
             continue
         modified_at = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
         category = classify_path(path)
-        reason = prune_reason(category, modified_at, now, settings)
+        if is_protected_path(path, Path(settings.data_root)):
+            reason = None
+        else:
+            reason = prune_reason(category, modified_at, now, settings)
         total_bytes += stat.st_size
         if reason:
             candidate_count += 1
@@ -238,12 +276,127 @@ def print_report(report: MaintenanceReport) -> None:
         print(f"... {len(report.prune_candidates) - 20} more candidates in JSON report")
 
 
+def remove_empty_directories(roots: list[Path]) -> int:
+    removed = 0
+    seen: set[Path] = set()
+    for root in roots:
+        if not root.exists():
+            continue
+        for path in sorted((p for p in root.rglob("*") if p.is_dir()), reverse=True):
+            if path in seen:
+                continue
+            seen.add(path)
+            try:
+                path.rmdir()
+            except OSError:
+                continue
+            removed += 1
+    return removed
+
+
+def execute_prune(
+    report: MaintenanceReport,
+    settings: MaintenanceSettings,
+    *,
+    execute: bool,
+) -> PruneResult:
+    data_root = Path(settings.data_root)
+    deleted_paths: list[str] = []
+    deleted_bytes = 0
+    skipped_protected = 0
+    errors: list[str] = []
+
+    for entry in report.prune_candidates:
+        path = Path(entry.path)
+        if is_protected_path(path, data_root):
+            skipped_protected += 1
+            continue
+        if not execute:
+            continue
+        try:
+            path.unlink()
+            deleted_paths.append(entry.path)
+            deleted_bytes += entry.size_bytes
+        except OSError as exc:
+            errors.append(f"{entry.path}: {exc}")
+
+    removed_empty_dirs = 0
+    if execute:
+        roots = [data_root]
+        logs_root = Path(settings.logs_root)
+        if logs_root != data_root:
+            roots.append(logs_root)
+        removed_empty_dirs = remove_empty_directories(roots)
+
+    return PruneResult(
+        created_at=report.created_at,
+        executed=execute,
+        deleted_files=len(deleted_paths),
+        deleted_bytes=deleted_bytes,
+        removed_empty_dirs=removed_empty_dirs,
+        skipped_protected=skipped_protected,
+        errors=errors,
+        deleted_paths=deleted_paths,
+    )
+
+
+def write_prune_result(result: PruneResult, output_root: str) -> Path:
+    output_dir = Path(output_root)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    suffix = "executed" if result.executed else "dry-run"
+    timestamp = datetime.now(tz=timezone.utc).strftime("%Y%m%d-%H%M%S")
+    output_path = output_dir / f"maintenance-prune-{suffix}-{timestamp}.json"
+    output_path.write_text(json.dumps(asdict(result), indent=2, sort_keys=True), encoding="utf-8")
+    return output_path
+
+
+def print_prune_result(report: MaintenanceReport, result: PruneResult) -> None:
+    mode = "EXECUTED" if result.executed else "DRY-RUN"
+    print(f"Prune mode: {mode}")
+    print(f"Action level: {report.action_level}")
+    print(
+        f"Candidates: {len(report.prune_candidates)} files, "
+        f"{human_bytes(sum(entry.size_bytes for entry in report.prune_candidates))}"
+    )
+    if result.executed:
+        print(
+            f"Deleted: {result.deleted_files} files, "
+            f"{human_bytes(result.deleted_bytes)}, "
+            f"empty_dirs_removed={result.removed_empty_dirs}"
+        )
+    else:
+        printable = sum(
+            entry.size_bytes
+            for entry in report.prune_candidates
+            if not is_protected_path(Path(entry.path), Path(report.settings["data_root"]))
+        )
+        print(f"Would delete: {len(report.prune_candidates) - result.skipped_protected} files, {human_bytes(printable)}")
+    if result.skipped_protected:
+        print(f"Skipped protected: {result.skipped_protected}")
+    if result.errors:
+        print("Errors:")
+        for error in result.errors:
+            print(f"- {error}")
+    for entry in report.prune_candidates[:20]:
+        print(f"- {entry.path} {human_bytes(entry.size_bytes)}: {entry.reason}")
+    if len(report.prune_candidates) > 20:
+        print(f"... {len(report.prune_candidates) - 20} more candidates in JSON report")
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="SPX Spark maintenance utilities.")
     subparsers = parser.add_subparsers(dest="command", required=True)
     dry_run = subparsers.add_parser("dry-run", help="Scan disk and report cleanup candidates.")
     dry_run.add_argument("--json", action="store_true", help="Print full JSON report to stdout.")
     dry_run.add_argument("--no-write", action="store_true", help="Do not write report to disk.")
+    prune = subparsers.add_parser("prune", help="Delete files older than retention policy.")
+    prune.add_argument(
+        "--execute",
+        action="store_true",
+        help="Actually delete prune candidates. Default is dry-run only.",
+    )
+    prune.add_argument("--json", action="store_true", help="Print prune JSON to stdout.")
+    prune.add_argument("--no-write", action="store_true", help="Do not write prune report to disk.")
     return parser.parse_args(argv)
 
 
@@ -260,6 +413,21 @@ def run(argv: list[str] | None = None) -> int:
             output_path = write_report(report, settings.output_root)
             print(f"\nWrote JSON report: {output_path}")
         return 0
+    if args.command == "prune":
+        report = build_report(settings)
+        result = execute_prune(report, settings, execute=args.execute)
+        payload = {
+            "report": asdict(report),
+            "result": asdict(result),
+        }
+        if args.json:
+            print(json.dumps(payload, indent=2, sort_keys=True))
+        else:
+            print_prune_result(report, result)
+        if not args.no_write:
+            output_path = write_prune_result(result, settings.output_root)
+            print(f"\nWrote JSON report: {output_path}")
+        return 1 if result.errors else 0
     return 2
 
 

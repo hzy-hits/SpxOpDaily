@@ -40,6 +40,8 @@ class ServiceLoopSettings:
     iv_surface_interval_seconds: int
     alert_interval_seconds: int
     heartbeat_seconds: int
+    ibkr_positions_enabled: bool
+    ibkr_positions_interval_seconds: int
     ibkr_skip_options: bool
     ibkr_connect_retry_seconds: int
     ibkr_conflict_probe_seconds: int
@@ -60,6 +62,8 @@ class ServiceLoopSettings:
             iv_surface_interval_seconds=env_int("SPX_SERVICE_IV_SURFACE_INTERVAL_SECONDS", 300),
             alert_interval_seconds=env_int("SPX_SERVICE_ALERT_INTERVAL_SECONDS", 30),
             heartbeat_seconds=env_int("SPX_SERVICE_HEARTBEAT_SECONDS", 60),
+            ibkr_positions_enabled=env_bool("IBKR_POSITIONS_ENABLED", False),
+            ibkr_positions_interval_seconds=env_int("IBKR_POSITIONS_POLL_SECONDS", 60),
             ibkr_skip_options=env_bool("SPX_SERVICE_IBKR_SKIP_OPTIONS", False),
             ibkr_connect_retry_seconds=env_int("IBKR_CONNECT_RETRY_SECONDS", 60),
             ibkr_conflict_probe_seconds=env_int("IBKR_CONFLICT_PROBE_SECONDS", 60),
@@ -142,6 +146,12 @@ def run_alert_engine() -> int:
     return alert_engine.run(["--json"])
 
 
+def run_ibkr_positions() -> int:
+    from spx_spark.ibkr import position_watcher
+
+    return position_watcher.run(["--json"])
+
+
 def console_script(name: str) -> str:
     return str(Path(sys.executable).with_name(name))
 
@@ -196,6 +206,15 @@ def build_tasks(settings: ServiceLoopSettings) -> list[ServiceTask]:
                 settings.alert_interval_seconds,
                 run_alert_engine,
                 command=(console_script("spx-spark-alert-engine"), "--json"),
+            )
+        )
+    if settings.ibkr_positions_enabled:
+        tasks.append(
+            ServiceTask(
+                "ibkr_positions",
+                settings.ibkr_positions_interval_seconds,
+                run_ibkr_positions,
+                command=(console_script("spx-spark-ibkr-positions"), "--json"),
             )
         )
     return tasks
