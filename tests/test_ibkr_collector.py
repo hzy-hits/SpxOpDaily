@@ -38,6 +38,7 @@ def make_settings(**overrides) -> IbkrSettings:
         quote_wait_seconds=0.1,
         stale_after_seconds=10.0,
         qualify_contracts=False,
+        request_timeout_seconds=30.0,
     )
     defaults.update(overrides)
     return IbkrSettings(**defaults)

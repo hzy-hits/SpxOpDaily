@@ -37,9 +37,13 @@ from spx_spark.config import (
     default_spxw_expiry,
 )
 from spx_spark.ibkr.adapter import snapshot_from_rows
-from spx_spark.ibkr.collector import (
+from spx_spark.ibkr.collector import has_competing_session_error
+from spx_spark.ibkr.farm_health import (
+    FarmHealthTracker,
     NON_DEGRADING_ERROR_CODES,
-    has_competing_session_error,
+    probe_data_plane,
+    request_gateway_restart,
+    runtime_blocks_gateway_restart,
 )
 from spx_spark.ibkr.verifier import (
     IbkrError,
@@ -48,6 +52,7 @@ from spx_spark.ibkr.verifier import (
     cancel_subscriptions,
     connect_market_data_only,
     estimate_atm_reference,
+    prepare_ib_client,
     qualify_and_subscribe,
     snapshot_rows,
 )
@@ -65,6 +70,7 @@ class StreamAction(str, Enum):
     RECONNECT = "reconnect"
     CONFLICT_WAIT = "conflict_wait"
     POLICY_BLOCKED = "policy_blocked"
+    GATEWAY_RESTART = "gateway_restart"
 
 
 @dataclass
@@ -202,9 +208,12 @@ def decide_after_flush(
     connected: bool,
     allowed: bool,
     competing_session: bool,
+    gateway_restart: bool = False,
 ) -> StreamAction:
     if competing_session:
         return StreamAction.CONFLICT_WAIT
+    if gateway_restart:
+        return StreamAction.GATEWAY_RESTART
     if not connected:
         return StreamAction.RECONNECT
     if not allowed:
@@ -214,6 +223,18 @@ def decide_after_flush(
 
 def provider_error_count(errors: list[IbkrError]) -> int:
     return sum(1 for error in errors if error.error_code not in NON_DEGRADING_ERROR_CODES)
+
+
+def connected_state() -> ProviderState:
+    return ProviderState(
+        provider=Provider.IBKR,
+        status=ProviderStatus.DEGRADED,
+        checked_at=datetime.now(tz=timezone.utc),
+        reason="connected; awaiting first flush",
+        connected=True,
+        authenticated=True,
+        priority=0,
+    )
 
 
 def unavailable_state(reason: str, *, connected: bool = False) -> ProviderState:
@@ -271,20 +292,26 @@ class StreamCollector:
         self.rotation_index = 0
         self.errors: list[IbkrError] = []
         self.last_policy_check = 0.0
+        self.farm_health = FarmHealthTracker(
+            broken_restart_seconds=stream_settings.farm_broken_restart_seconds,
+        )
 
         ib.errorEvent += self._on_error
 
     def _on_error(self, req_id: int, error_code: int, message: str, contract: Any) -> None:
-        self.errors.append(
-            IbkrError(
-                req_id=req_id,
-                error_code=error_code,
-                message=message,
-                contract=str(contract) if contract is not None else None,
-                ts=datetime.now(tz=timezone.utc).isoformat(),
-            )
+        error = IbkrError(
+            req_id=req_id,
+            error_code=error_code,
+            message=message,
+            contract=str(contract) if contract is not None else None,
+            ts=datetime.now(tz=timezone.utc).isoformat(),
         )
+        self.errors.append(error)
         del self.errors[:-MAX_TRACKED_ERRORS]
+
+        event = self.farm_health.observe(error_code, message)
+        if event is not None:
+            log_event(event.to_log_event(task="ibkr_stream"))
 
     def allowed(self) -> bool:
         if self.force:
@@ -300,11 +327,38 @@ class StreamCollector:
         self.ib.reqMarketDataType(self.ibkr_settings.market_data_type)
 
     def subscribe_base(self) -> None:
+        contracts = build_base_contracts(self.ibkr_settings)
+        log_event(
+            {
+                "task": "ibkr_stream",
+                "event": "subscribe_base_start",
+                "contracts": len(contracts),
+            }
+        )
+
+        def on_progress(**payload: object) -> None:
+            log_event({"task": "ibkr_stream", "event": "subscribe_progress", **payload})
+
         self.base_subs = qualify_and_subscribe(
             self.ib,
-            build_base_contracts(self.ibkr_settings),
+            contracts,
             qualify=self.ibkr_settings.qualify_contracts,
+            on_progress=on_progress,
         )
+        subscribed = sum(1 for _, row in self.base_subs.values() if row.subscribed)
+        failed = sum(1 for _, row in self.base_subs.values() if row.error)
+        log_event(
+            {
+                "task": "ibkr_stream",
+                "event": "subscribe_base_done",
+                "subscribed": subscribed,
+                "failed": failed,
+                "total": len(contracts),
+            }
+        )
+        if subscribed == 0:
+            raise RuntimeError(f"no base contracts subscribed ({failed} failed)")
+        self.ib.sleep(self.ibkr_settings.quote_wait_seconds)
 
     def ensure_option_plan(self, rows: list[VerifyRow]) -> None:
         if self.skip_options:
@@ -420,6 +474,7 @@ class StreamRuntime:
     runtime_policy: RuntimePolicySettings
     reconnect: ReconnectPolicy = field(init=False)
     deadline: float | None = None
+    last_gateway_restart_at: float | None = None
 
     def __post_init__(self) -> None:
         self.reconnect = ReconnectPolicy(
@@ -462,10 +517,22 @@ class StreamRuntime:
 
             self.reconnect.reset()
             log_event({"task": "ibkr_stream", "event": "connected"})
+            persist_state_only(connected_state(), self.storage_settings)
+
+            probe = probe_data_plane(self.collector.ib, self.collector.ibkr_settings)
+            log_event(probe.to_log_event())
+            if not probe.ok:
+                event = self.collector.farm_health.mark_probe_failed(probe)
+                log_event(event.to_log_event(task="ibkr_stream"))
+
             try:
                 self.collector.subscribe_base()
                 self.session_loop()
             except Exception as exc:  # noqa: BLE001
+                persist_state_only(
+                    unavailable_state(f"session failed: {exc}", connected=False),
+                    self.storage_settings,
+                )
                 log_event({"task": "ibkr_stream", "event": "session_error", "error": str(exc)})
             finally:
                 self.collector.teardown()
@@ -479,13 +546,19 @@ class StreamRuntime:
 
             new_errors = self.collector.drain_new_errors()
             competing = has_competing_session_error(new_errors)
+            gateway_restart = self._should_restart_gateway()
             action = decide_after_flush(
                 connected=self.collector.ib.isConnected(),
                 allowed=self.collector.allowed(),
                 competing_session=competing,
+                gateway_restart=gateway_restart,
             )
             if action is StreamAction.CONTINUE:
                 continue
+
+            if action is StreamAction.GATEWAY_RESTART:
+                self._restart_gateway_for_farm_outage()
+                return
 
             if action is StreamAction.CONFLICT_WAIT:
                 persist_state_only(
@@ -513,6 +586,44 @@ class StreamRuntime:
             # RECONNECT: fall back to the outer loop's backoff.
             log_event({"task": "ibkr_stream", "event": "disconnected"})
             return
+
+    def _should_restart_gateway(self) -> bool:
+        if not self.stream_settings.auto_restart_gateway_on_farm_broken:
+            return False
+        if runtime_blocks_gateway_restart(self.runtime_policy, force=self.collector.force):
+            return False
+        if not self.collector.farm_health.should_restart_gateway():
+            return False
+        if self.last_gateway_restart_at is not None:
+            elapsed = time.monotonic() - self.last_gateway_restart_at
+            if elapsed < self.stream_settings.gateway_restart_cooldown_seconds:
+                return False
+        return True
+
+    def _restart_gateway_for_farm_outage(self) -> None:
+        broken_seconds = self.collector.farm_health.broken_duration()
+        persist_state_only(
+            unavailable_state(
+                "IBKR data farms broken; restarting gateway",
+                connected=self.collector.ib.isConnected(),
+            ),
+            self.storage_settings,
+        )
+        restarted = request_gateway_restart()
+        self.last_gateway_restart_at = time.monotonic()
+        self.collector.farm_health.reset()
+        log_event(
+            {
+                "task": "ibkr_stream",
+                "event": "gateway_restart_requested",
+                "restarted": restarted,
+                "broken_seconds": round(broken_seconds or 0.0, 1),
+                "farm": self.collector.farm_health.last_farm,
+                "cooldown_seconds": self.stream_settings.gateway_restart_cooldown_seconds,
+            }
+        )
+        self.collector.teardown()
+        self.sleep(self.stream_settings.gateway_restart_cooldown_seconds)
 
     def sleep(self, seconds: float) -> None:
         remaining = seconds
@@ -584,6 +695,7 @@ def run(argv: list[str] | None = None) -> int:
         force=args.force,
         skip_options=args.skip_options,
     )
+    prepare_ib_client(collector.ib, request_timeout_seconds=ibkr_settings.request_timeout_seconds)
     runtime = StreamRuntime(
         collector=collector,
         stream_settings=stream_settings,

@@ -106,6 +106,8 @@ def test_ibkr_default_verifier_uses_dia_as_dow_proxy(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("IBKR_VERIFY_STOCKS", raising=False)
     monkeypatch.delenv("IBKR_VERIFY_INDEXES", raising=False)
+    monkeypatch.delenv("IBKR_QUALIFY_CONTRACTS", raising=False)
+    monkeypatch.delenv("IBKR_REQUEST_TIMEOUT_SECONDS", raising=False)
 
     settings = IbkrSettings.from_env()
 
@@ -121,7 +123,8 @@ def test_ibkr_default_verifier_uses_dia_as_dow_proxy(monkeypatch, tmp_path):
     ]
     assert "RSP" in settings.verify_stocks
     assert "XLU" in settings.verify_stocks
-    assert settings.qualify_contracts is False
+    assert settings.qualify_contracts is True
+    assert settings.request_timeout_seconds == 30.0
 
 
 def test_polymarket_settings_defaults_are_research_context(monkeypatch, tmp_path) -> None:

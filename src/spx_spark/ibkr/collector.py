@@ -10,6 +10,7 @@ from typing import Any
 
 from spx_spark.config import IbkrSettings, RuntimePolicySettings, StorageSettings
 from spx_spark.ibkr.adapter import snapshot_from_rows
+from spx_spark.ibkr.farm_health import NON_DEGRADING_ERROR_CODES
 from spx_spark.ibkr.verifier import (
     IbkrError,
     VerifyRow,
@@ -18,6 +19,7 @@ from spx_spark.ibkr.verifier import (
     cancel_subscriptions,
     connect_market_data_only,
     estimate_atm_reference,
+    prepare_ib_client,
     print_rows,
     qualify_and_subscribe,
     snapshot_rows,
@@ -30,14 +32,6 @@ from spx_spark.marketdata import (
 from spx_spark.provider_adapter import ProviderSnapshot, persist_provider_snapshot
 from spx_spark.runtime_mode import ibkr_allowed, load_override
 from spx_spark.storage import LatestStateStore
-
-
-NON_DEGRADING_ERROR_CODES = {
-    2104,  # market data farm connection is OK
-    2106,  # historical market data farm connection is OK
-    2119,  # market data farm is connecting
-    2158,  # sec-def data farm connection is OK
-}
 
 
 def write_empty_provider_state(
@@ -188,6 +182,7 @@ def run(argv: list[str] | None = None) -> int:
         raise SystemExit(2) from exc
 
     ib = IB()
+    prepare_ib_client(ib, request_timeout_seconds=ibkr_settings.request_timeout_seconds)
     base_subs: dict[str, tuple[Any, VerifyRow]] = {}
     option_subs: dict[str, tuple[Any, VerifyRow]] = {}
     ibkr_errors: list[IbkrError] = []

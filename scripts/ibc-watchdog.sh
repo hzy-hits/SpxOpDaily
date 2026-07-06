@@ -63,8 +63,36 @@ PY
 fi
 
 if timeout 5 bash -c "exec 3<>/dev/tcp/$HOST/$PORT" 2>/dev/null; then
-  rm -f "$STATE_FILE"
-  log "API port $HOST:$PORT is healthy"
+  ROOT="${SPX_SPARK_ROOT:-/home/ubuntu/spx-spark}"
+  DATA_PLANE_STATE="${IBC_DATA_PLANE_STATE:-/srv/data/spx-spark/runtime/ibc/data-plane-failures}"
+  DATA_PLANE_THRESHOLD="${IBC_DATA_PLANE_FAILURE_THRESHOLD:-3}"
+
+  if (
+    cd "$ROOT"
+    timeout 60 uv run spx-spark-ibkr-farm-probe --json >/dev/null 2>&1
+  ); then
+    rm -f "$STATE_FILE" "$DATA_PLANE_STATE"
+    log "API port $HOST:$PORT and data plane are healthy"
+    exit 0
+  fi
+
+  mkdir -p "$(dirname "$DATA_PLANE_STATE")"
+  probe_failures=0
+  if [[ -f "$DATA_PLANE_STATE" ]]; then
+    probe_failures="$(tr -d '[:space:]' < "$DATA_PLANE_STATE" || echo 0)"
+  fi
+  [[ "$probe_failures" =~ ^[0-9]+$ ]] || probe_failures=0
+  probe_failures=$((probe_failures + 1))
+  printf '%s\n' "$probe_failures" > "$DATA_PLANE_STATE"
+
+  if (( probe_failures < DATA_PLANE_THRESHOLD )); then
+    log "API port $HOST:$PORT is up but data plane probe failed ($probe_failures/$DATA_PLANE_THRESHOLD)"
+    exit 0
+  fi
+
+  log "data plane unhealthy for $probe_failures consecutive checks; restarting $SERVICE"
+  rm -f "$STATE_FILE" "$DATA_PLANE_STATE"
+  systemctl --user restart "$SERVICE"
   exit 0
 fi
 

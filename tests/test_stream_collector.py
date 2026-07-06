@@ -119,6 +119,15 @@ def test_decide_after_flush_priorities():
         is StreamAction.CONFLICT_WAIT
     )
     assert (
+        decide_after_flush(
+            connected=True,
+            allowed=True,
+            competing_session=False,
+            gateway_restart=True,
+        )
+        is StreamAction.GATEWAY_RESTART
+    )
+    assert (
         decide_after_flush(connected=False, allowed=True, competing_session=False)
         is StreamAction.RECONNECT
     )

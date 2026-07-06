@@ -27,6 +27,19 @@ DEFAULT_INDEX_EXCHANGES: dict[str, str] = {
     "DJU": "CBOE",
 }
 
+# Stable IB conIds for cash indexes. Used only when qualifyContracts times out
+# but Gateway still accepts streaming subscriptions for the resolved symbol.
+KNOWN_INDEX_CONIDS: dict[str, int] = {
+    "SPX": 416904,
+    "VIX": 13455774,
+    "VIX1D": 761320230,
+    "VIX9D": 755117926,
+    "VIX3M": 196544,
+    "VVIX": 105068632,
+    "SKEW": 84597750,
+    "NDX": 416843,
+}
+
 
 def clean_float(value: Any) -> float | None:
     if value is None:
@@ -174,6 +187,59 @@ def build_spxw_option_contracts(
     return contracts[: settings.max_option_lines]
 
 
+def prepare_ib_client(ib: Any, *, request_timeout_seconds: float) -> None:
+    """Start ib_async's background loop and bound blocking API calls.
+
+    Without ``util.startLoop()``, ``reqMktData`` on contracts missing ``conId``
+    can block forever instead of raising. Without ``RequestTimeout``, a broken
+    Gateway data farm (sec-def / HMDS) leaves ``qualifyContracts`` hanging.
+    """
+    from ib_async import util
+
+    util.startLoop()
+    ib.RequestTimeout = request_timeout_seconds
+
+
+def contract_has_con_id(contract: Any) -> bool:
+    con_id = getattr(contract, "conId", 0)
+    return bool(con_id)
+
+
+def apply_known_index_conid(contract: Any) -> Any | None:
+    sec_type = getattr(contract, "secType", "") or "IND"
+    if sec_type != "IND":
+        return None
+    symbol = str(getattr(contract, "symbol", "")).upper()
+    con_id = KNOWN_INDEX_CONIDS.get(symbol)
+    if con_id is None:
+        return None
+    contract.conId = con_id
+    return contract
+
+
+def resolve_contract_for_market_data(ib: Any, contract: Any, row: VerifyRow) -> Any | None:
+    if contract_has_con_id(contract):
+        return contract
+
+    try:
+        qualified = ib.qualifyContracts(contract)
+        if qualified:
+            resolved = qualified[0]
+            row.exchange = getattr(resolved, "exchange", row.exchange)
+            row.qualified = True
+            return resolved
+        row.error = "qualify returned no contracts"
+    except Exception as exc:  # noqa: BLE001
+        row.error = f"qualify failed: {exc}"
+
+    fallback = apply_known_index_conid(contract)
+    if fallback is not None:
+        row.qualified = True
+        row.error = None
+        return fallback
+    return None
+
+
 def connect_market_data_only(ib: Any, settings: IbkrSettings) -> None:
     from ib_async.ib import StartupFetch
 
@@ -199,29 +265,40 @@ def qualify_and_subscribe(
     contracts: list[tuple[str, str, Any]],
     *,
     qualify: bool = False,
+    on_progress: Any | None = None,
 ) -> dict[str, tuple[Any, VerifyRow]]:
     result: dict[str, tuple[Any, VerifyRow]] = {}
-    for label, kind, contract in contracts:
+    for index, (label, kind, contract) in enumerate(contracts, start=1):
         row = VerifyRow(
             label=label,
             kind=kind,
             symbol=getattr(contract, "symbol", label),
             exchange=getattr(contract, "exchange", None),
         )
-        if qualify:
-            try:
-                qualified = ib.qualifyContracts(contract)
-                if qualified:
-                    contract = qualified[0]
-                    row.exchange = getattr(contract, "exchange", row.exchange)
-                row.qualified = True
-            except Exception as exc:  # noqa: BLE001
-                row.error = f"qualify failed: {exc}"
+        if on_progress is not None:
+            on_progress(label=label, index=index, total=len(contracts), phase="start")
+
+        if qualify or not contract_has_con_id(contract):
+            resolved = resolve_contract_for_market_data(ib, contract, row)
+            if resolved is None:
                 result[label] = (None, row)
+                if on_progress is not None:
+                    on_progress(label=label, index=index, total=len(contracts), phase="failed", error=row.error)
                 continue
+            contract = resolved
+        elif qualify:
+            row.qualified = True
 
         ticker = subscribe_contract(ib, contract, row, allow_qualify_fallback=not qualify)
         result[label] = (ticker, row)
+        if on_progress is not None:
+            on_progress(
+                label=label,
+                index=index,
+                total=len(contracts),
+                phase="subscribed" if row.subscribed else "failed",
+                error=row.error,
+            )
     return result
 
 
@@ -232,6 +309,12 @@ def subscribe_contract(
     *,
     allow_qualify_fallback: bool,
 ) -> Any | None:
+    if not contract_has_con_id(contract):
+        resolved = resolve_contract_for_market_data(ib, contract, row)
+        if resolved is None:
+            return None
+        contract = resolved
+
     try:
         ticker = ib.reqMktData(contract, "", False, False)
         row.subscribed = True
@@ -452,6 +535,7 @@ def run(argv: list[str] | None = None) -> int:
         raise SystemExit(2) from exc
 
     ib = IB()
+    prepare_ib_client(ib, request_timeout_seconds=settings.request_timeout_seconds)
     base_subs: dict[str, tuple[Any, VerifyRow]] = {}
     option_subs: dict[str, tuple[Any, VerifyRow]] = {}
     ibkr_errors: list[IbkrError] = []

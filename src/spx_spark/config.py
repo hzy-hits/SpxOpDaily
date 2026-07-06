@@ -137,6 +137,7 @@ class IbkrSettings:
     quote_wait_seconds: float
     stale_after_seconds: float
     qualify_contracts: bool
+    request_timeout_seconds: float
     # IBKR index CFDs such as IBUS500 (S&P 500 CFD). Defaults empty in code so
     # existing callers are unaffected; from_env defaults to IBUS500.
     verify_cfds: list[str] = field(default_factory=list)
@@ -169,7 +170,8 @@ class IbkrSettings:
             max_option_lines=_env_int("IBKR_MAX_OPTION_LINES", 40),
             quote_wait_seconds=_env_float("IBKR_QUOTE_WAIT_SECONDS", 8.0),
             stale_after_seconds=_env_float("IBKR_STALE_AFTER_SECONDS", 10.0),
-            qualify_contracts=_env_bool("IBKR_QUALIFY_CONTRACTS", False),
+            qualify_contracts=_env_bool("IBKR_QUALIFY_CONTRACTS", True),
+            request_timeout_seconds=_env_float("IBKR_REQUEST_TIMEOUT_SECONDS", 30.0),
         )
 
 
@@ -186,6 +188,9 @@ class IbkrStreamSettings:
     reconnect_min_seconds: float
     reconnect_max_seconds: float
     skip_options: bool
+    farm_broken_restart_seconds: float
+    gateway_restart_cooldown_seconds: float
+    auto_restart_gateway_on_farm_broken: bool
 
     @classmethod
     def from_env(cls) -> "IbkrStreamSettings":
@@ -202,6 +207,13 @@ class IbkrStreamSettings:
             reconnect_min_seconds=_env_float("IBKR_STREAM_RECONNECT_MIN_SECONDS", 5.0),
             reconnect_max_seconds=_env_float("IBKR_STREAM_RECONNECT_MAX_SECONDS", 300.0),
             skip_options=_env_bool("IBKR_STREAM_SKIP_OPTIONS", False),
+            farm_broken_restart_seconds=_env_float("IBKR_FARM_BROKEN_RESTART_SECONDS", 180.0),
+            gateway_restart_cooldown_seconds=_env_float(
+                "IBKR_GATEWAY_RESTART_COOLDOWN_SECONDS", 120.0
+            ),
+            auto_restart_gateway_on_farm_broken=_env_bool(
+                "IBKR_AUTO_RESTART_GATEWAY_ON_FARM_BROKEN", True
+            ),
         )
 
 

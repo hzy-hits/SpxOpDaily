@@ -5,7 +5,7 @@ import asyncio
 from pathlib import Path
 
 from spx_spark.config import IbkrSettings
-from spx_spark.ibkr.verifier import connect_market_data_only, qualify_and_subscribe
+from spx_spark.ibkr.verifier import connect_market_data_only, qualify_and_subscribe, apply_known_index_conid, resolve_contract_for_market_data, VerifyRow
 
 
 FORBIDDEN_IBKR_METHODS = {
@@ -117,6 +117,7 @@ def test_ibkr_connect_overrides_library_startup_positions_fetch() -> None:
         quote_wait_seconds=1.0,
         stale_after_seconds=10.0,
         qualify_contracts=False,
+        request_timeout_seconds=30.0,
     )
     ib = FakeIB()
 
@@ -132,6 +133,7 @@ def test_ibkr_subscribe_can_skip_contract_qualification() -> None:
     class Contract:
         symbol = "SPX"
         exchange = "CBOE"
+        conId = 416904
 
     class FakeIB:
         qualify_called = False
@@ -191,5 +193,25 @@ def test_ibkr_subscribe_qualifies_on_missing_conid_hash_error() -> None:
     ticker, row = rows["index:SPX"]
     assert ticker is not None
     assert row.subscribed is True
+    assert row.qualified is True
+    assert row.error is None
+
+
+def test_resolve_contract_uses_known_index_conid_when_qualify_fails() -> None:
+    class Contract:
+        secType = "IND"
+        symbol = "SPX"
+        exchange = "CBOE"
+        conId = 0
+
+    class FakeIB:
+        def qualifyContracts(self, contract):
+            raise TimeoutError("sec-def farm unavailable")
+
+    row = VerifyRow(label="index:SPX", kind="index", symbol="SPX", exchange="CBOE")
+    resolved = resolve_contract_for_market_data(FakeIB(), Contract(), row)
+
+    assert resolved is not None
+    assert resolved.conId == 416904
     assert row.qualified is True
     assert row.error is None
