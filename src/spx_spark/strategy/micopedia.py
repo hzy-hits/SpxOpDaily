@@ -46,6 +46,8 @@ class MicopediaInputs:
     underlier_price: float | None = None
     vix1d: float | None = None
     vix: float | None = None
+    skew_index: float | None = None
+    put_skew_ratio: float | None = None
     gamma_state: str = "unknown"
     directional_bias: str = "neutral_unclear"
     time_phase: str = "unknown"
@@ -76,6 +78,12 @@ class MicopediaInputs:
         distance_bps = distance / self.underlier_price * 10_000 if self.underlier_price else None
         return KeyLevelDistance(level=level, distance_points=distance, distance_bps=distance_bps)
 
+    @property
+    def vix_ratio(self) -> float | None:
+        if self.vix1d is None or self.vix is None or self.vix <= 0:
+            return None
+        return self.vix1d / self.vix
+
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
         payload["created_at"] = self.created_at.isoformat()
@@ -90,6 +98,7 @@ class MicopediaSignal:
     regime: str
     directional_bias: str
     confidence: str
+    dip_context: str
     nearest_key_level: KeyLevelDistance | None
     decision_stack: tuple[str, ...]
     map_focus: tuple[str, ...]
@@ -147,6 +156,8 @@ def classify_regime(inputs: MicopediaInputs) -> str:
         return "liquidity_systematic_flow"
     if {"holiday", "window_dressing"} & tags:
         return "holiday_liquidity"
+    if inputs.vix_ratio is not None and inputs.vix_ratio >= 0.95:
+        return "high_vol_event"
     if inputs.vix1d is not None and inputs.vix1d >= 25:
         return "high_vol_event"
     if inputs.vix1d is not None and inputs.vix1d < 10:
@@ -156,6 +167,25 @@ def classify_regime(inputs: MicopediaInputs) -> str:
     if inputs.gamma_state == "positive":
         return "positive_gamma_mean_reversion"
     return "ordinary_rth"
+
+
+def tail_protection_expensive(inputs: MicopediaInputs) -> bool:
+    if inputs.skew_index is not None and inputs.skew_index >= 150:
+        return True
+    if inputs.put_skew_ratio is not None and inputs.put_skew_ratio >= 1.15:
+        return True
+    return False
+
+
+def classify_dip_context(inputs: MicopediaInputs) -> str:
+    expensive_tail = tail_protection_expensive(inputs)
+    if expensive_tail and inputs.gamma_state in {"negative", "transition"}:
+        return "dip_acceleration_risk"
+    if expensive_tail:
+        return "expensive_tail_protection"
+    if inputs.vix_ratio is not None and inputs.vix_ratio < 0.65 and not expensive_tail:
+        return "dip_buy_friendly"
+    return "neutral"
 
 
 def classify_confidence(inputs: MicopediaInputs, regime: str) -> str:
@@ -185,6 +215,7 @@ def classify_confidence(inputs: MicopediaInputs, regime: str) -> str:
 
 def build_micopedia_signal(inputs: MicopediaInputs) -> MicopediaSignal:
     regime = classify_regime(inputs)
+    dip_context = classify_dip_context(inputs)
     return MicopediaSignal(
         created_at=datetime.now(tz=timezone.utc),
         source="mr_micopedia_distilled_framework",
@@ -192,10 +223,11 @@ def build_micopedia_signal(inputs: MicopediaInputs) -> MicopediaSignal:
         regime=regime,
         directional_bias=inputs.directional_bias,
         confidence=classify_confidence(inputs, regime),
+        dip_context=dip_context,
         nearest_key_level=inputs.nearest_key_level(),
         decision_stack=decision_stack(),
         map_focus=map_focus(inputs, regime),
-        trigger_watchlist=trigger_watchlist(inputs, regime),
+        trigger_watchlist=trigger_watchlist(inputs, regime, dip_context=dip_context),
         candidate_expression=candidate_expression(inputs, regime),
         risk_policy=risk_policy(),
         invalidation_checks=invalidation_checks(inputs, regime),
@@ -235,7 +267,12 @@ def map_focus(inputs: MicopediaInputs, regime: str) -> tuple[str, ...]:
     return tuple(focus)
 
 
-def trigger_watchlist(inputs: MicopediaInputs, regime: str) -> tuple[str, ...]:
+def trigger_watchlist(
+    inputs: MicopediaInputs,
+    regime: str,
+    *,
+    dip_context: str | None = None,
+) -> tuple[str, ...]:
     triggers: list[str] = []
     if inputs.time_phase == "premarket":
         triggers.append("Premarket: build scenarios and max-loss structures; do not convert macro opinion into an order.")
@@ -264,6 +301,23 @@ def trigger_watchlist(inputs: MicopediaInputs, regime: str) -> tuple[str, ...]:
         triggers.append("Mixed branch: prefer range/pin hypotheses and avoid forcing a one-way read.")
     else:
         triggers.append("Neutral branch: keep the map live and wait for trigger confirmation.")
+
+    context = dip_context if dip_context is not None else classify_dip_context(inputs)
+    if context == "dip_acceleration_risk":
+        triggers.append(
+            "Dip context: tail protection is bid while gamma is negative/transition; "
+            "treat dips as potential acceleration, do not knife-catch."
+        )
+    elif context == "expensive_tail_protection":
+        triggers.append(
+            "Dip context: SKEW/put skew is rich; check whether hedging flow rather than "
+            "opinion is driving any dip."
+        )
+    elif context == "dip_buy_friendly":
+        triggers.append(
+            "Dip context: overnight/event vol is cheap; disciplined dip-buy setups are "
+            "viable after level confirmation."
+        )
     return tuple(triggers)
 
 
@@ -422,6 +476,7 @@ def print_signal(signal: MicopediaSignal) -> None:
     print(f"Regime: {signal.regime}")
     print(f"Bias: {signal.directional_bias}")
     print(f"Confidence: {signal.confidence}")
+    print(f"Dip context: {signal.dip_context}")
     print(f"Underlier: {format_optional_number(signal.underlier_price)}")
     if signal.nearest_key_level:
         print(

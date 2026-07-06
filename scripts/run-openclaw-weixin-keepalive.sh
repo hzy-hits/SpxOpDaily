@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+export PATH="$HOME/.local/bin:$PATH"
+
 cd "$(dirname "$0")/.."
 
 if [[ -f .env ]]; then
@@ -132,6 +134,11 @@ jq -n \
   --arg has_context_token "$has_context_token" \
   '{ok:$ok,skipped:false,target:$target,account:$account,has_context_token:($has_context_token=="true"),message_id:$message_id,error:$error,at:$at}' \
   | tee "$state_path"
+
+if [[ "$ok" == "true" ]]; then
+  # Channel proven alive; flush any missed-message digest (best effort).
+  uv run spx-spark-weixin-digest || true
+fi
 
 if [[ "$ok" != "true" ]]; then
   echo "OpenClaw Weixin keepalive failed: $error" >&2

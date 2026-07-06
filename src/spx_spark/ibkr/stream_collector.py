@@ -53,6 +53,8 @@ from spx_spark.ibkr.verifier import (
     cancel_subscriptions,
     connect_market_data_only,
     estimate_atm_reference,
+    first_present,
+    midpoint,
     prepare_ib_client,
     qualify_and_subscribe,
     snapshot_rows,
@@ -205,6 +207,51 @@ def option_contracts_from_specs(specs: tuple[OptionContractSpec, ...]) -> list[t
     return contracts
 
 
+def estimate_spy_reference(rows: list[VerifyRow]) -> float | None:
+    by_label = {row.label: row for row in rows}
+    spy = by_label.get("stock:SPY")
+    if spy:
+        price = first_present(spy.market_price, spy.last, midpoint(spy.bid, spy.ask), spy.close)
+        if price:
+            return price
+    return None
+
+
+def build_spy_option_strikes(spy_price: float, *, lines: int, step: int) -> list[int]:
+    n_strikes = max(1, lines // 2)
+    atm = round(spy_price / step) * step
+    return [atm + step * i for i in range(-(n_strikes // 2), n_strikes - n_strikes // 2)]
+
+
+def spy_option_spec_label(expiry: str, strike: int, right: str) -> str:
+    return f"option:SPY:{expiry}:{strike}:{right}"
+
+
+def spy_option_contracts(expiry: str, strikes: list[int]) -> list[tuple[str, str, Any]]:
+    from ib_async import Option
+
+    contracts: list[tuple[str, str, Any]] = []
+    for strike in strikes:
+        for right in ("C", "P"):
+            contracts.append(
+                (
+                    spy_option_spec_label(expiry, strike, right),
+                    "option",
+                    Option(
+                        "SPY",
+                        expiry,
+                        float(strike),
+                        right,
+                        "SMART",
+                        multiplier="100",
+                        currency="USD",
+                        tradingClass="SPY",
+                    ),
+                )
+            )
+    return contracts
+
+
 def decide_after_flush(
     *,
     connected: bool,
@@ -309,6 +356,7 @@ class StreamCollector:
         self.base_subs: dict[str, tuple[Any, VerifyRow]] = {}
         self.hot_subs: dict[str, tuple[Any, VerifyRow]] = {}
         self.rotation_subs: dict[str, tuple[Any, VerifyRow]] = {}
+        self.spy_subs: dict[str, tuple[Any, VerifyRow]] = {}
         self.option_plan: OptionSubscriptionPlan | None = None
         self.rotation_index = 0
         self.errors: list[IbkrError] = []
@@ -424,6 +472,29 @@ class StreamCollector:
             }
         )
 
+        if self.stream_settings.spy_option_lines >= 2 and not self.skip_options:
+            spy_price = estimate_spy_reference(rows)
+            if spy_price is not None:
+                strikes = build_spy_option_strikes(
+                    spy_price,
+                    lines=self.stream_settings.spy_option_lines,
+                    step=self.stream_settings.spy_strike_step,
+                )
+                cancel_subscriptions(self.ib, self.spy_subs)
+                self.spy_subs = qualify_and_subscribe(
+                    self.ib,
+                    spy_option_contracts(plan.expiry, strikes),
+                    qualify=self.ibkr_settings.qualify_contracts,
+                )
+                log_event(
+                    {
+                        "task": "ibkr_stream",
+                        "event": "spy_option_replan",
+                        "spy_atm": strikes[len(strikes) // 2] if strikes else None,
+                        "contracts": len(strikes) * 2,
+                    }
+                )
+
     def rotate_options(self) -> None:
         plan = self.option_plan
         if plan is None or not plan.rotations:
@@ -439,7 +510,12 @@ class StreamCollector:
 
     def flush(self) -> dict[str, object]:
         received_at = datetime.now(tz=timezone.utc)
-        subscriptions = {**self.base_subs, **self.hot_subs, **self.rotation_subs}
+        subscriptions = {
+            **self.base_subs,
+            **self.hot_subs,
+            **self.rotation_subs,
+            **self.spy_subs,
+        }
         rows = snapshot_rows(
             subscriptions,
             self.ibkr_settings.stale_after_seconds,
@@ -473,10 +549,12 @@ class StreamCollector:
     def teardown(self) -> None:
         cancel_subscriptions(self.ib, self.rotation_subs)
         cancel_subscriptions(self.ib, self.hot_subs)
+        cancel_subscriptions(self.ib, self.spy_subs)
         cancel_subscriptions(self.ib, self.base_subs)
         self.base_subs = {}
         self.hot_subs = {}
         self.rotation_subs = {}
+        self.spy_subs = {}
         self.option_plan = None
         self.rotation_index = 0
         if self.ib.isConnected():

@@ -384,16 +384,20 @@ def option_map_alerts(options_map: OptionsMap, *, window: AlertWindow) -> list[A
             alerts.append(option_freshness_alert(expiry, window=window))
             continue
         if expiry.gamma_state in OPTION_GAMMA_ALERT_STATES:
+            gamma_detail = (
+                f"SPXW {expiry.expiry} gamma state is {expiry.gamma_state}; "
+                f"zero gamma={expiry.zero_gamma}, net_gamma_ratio={expiry.net_gamma_ratio}."
+            )
+            if expiry.gamma_flip_zone is not None:
+                left, right = expiry.gamma_flip_zone
+                gamma_detail += f" flip_zone={left:.0f}-{right:.0f}."
             alerts.append(
                 Alert(
                     severity=severity_for_priority(window.priority),
                     kind="option_gamma_regime",
                     instrument_id=f"option_map:SPXW:{expiry.expiry}",
                     title=f"SPXW {expiry.expiry} {expiry.gamma_state}",
-                    detail=(
-                        f"SPXW {expiry.expiry} gamma state is {expiry.gamma_state}; "
-                        f"zero gamma={expiry.zero_gamma}, net_gamma_ratio={expiry.net_gamma_ratio}."
-                    ),
+                    detail=gamma_detail,
                     value=expiry.net_gamma_ratio,
                     dedup_group=expiry.gamma_state,
                 )
@@ -401,6 +405,21 @@ def option_map_alerts(options_map: OptionsMap, *, window: AlertWindow) -> list[A
         if expiry.nearest_wall is not None and expiry.nearest_wall_distance_points is not None:
             distance = abs(expiry.nearest_wall_distance_points)
             if distance <= wall_threshold:
+                wall_detail = (
+                    f"Nearest SPXW wall for {expiry.expiry} is "
+                    f"{expiry.nearest_wall:.0f}; threshold={wall_threshold:.1f} pts."
+                )
+                for lp in expiry.level_probabilities:
+                    if (
+                        lp.prob_touch is not None
+                        and lp.level is not None
+                        and abs(lp.level - expiry.nearest_wall) <= 0.01
+                    ):
+                        wall_detail += (
+                            f" touch_prob≈{lp.prob_touch:.0%}, "
+                            f"close_beyond≈{lp.prob_close_beyond:.0%}."
+                        )
+                        break
                 alerts.append(
                     Alert(
                         severity=severity_for_priority(window.priority),
@@ -410,10 +429,7 @@ def option_map_alerts(options_map: OptionsMap, *, window: AlertWindow) -> list[A
                             f"SPX near SPXW wall {expiry.nearest_wall:.0f} "
                             f"({expiry.nearest_wall_distance_points:+.1f} pts)"
                         ),
-                        detail=(
-                            f"Nearest SPXW wall for {expiry.expiry} is "
-                            f"{expiry.nearest_wall:.0f}; threshold={wall_threshold:.1f} pts."
-                        ),
+                        detail=wall_detail,
                         value=expiry.nearest_wall_distance_points,
                         threshold=wall_threshold,
                         dedup_group=f"{expiry.nearest_wall:.0f}",

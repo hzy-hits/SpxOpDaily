@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from spx_spark.config import env_csv
 from spx_spark.iv_surface import IvSurfaceSnapshot
 from spx_spark.marketdata import MarketDataQuality, Quote
 from spx_spark.options_map import ExpiryOptionsMap, OptionsMap
@@ -78,6 +79,21 @@ def expiry_options_summary(expiry: ExpiryOptionsMap) -> dict[str, object]:
             "avg_spread_bps": expiry.coverage.avg_spread_bps,
         },
         "warnings": expiry.warnings,
+        "level_probabilities": [lp.to_dict() for lp in expiry.level_probabilities],
+        "gamma_profile": {
+            "zero_gamma": expiry.zero_gamma,
+            "flip_zone": list(expiry.gamma_flip_zone) if expiry.gamma_flip_zone else None,
+            "net_gamma_ratio": expiry.net_gamma_ratio,
+            "top_strikes": [
+                {
+                    "strike": row.strike,
+                    "net_gex": row.net_gex,
+                    "call_oi": row.call_open_interest,
+                    "put_oi": row.put_open_interest,
+                }
+                for row in expiry.top_gex_strikes[:6]
+            ],
+        },
     }
 
 
@@ -154,9 +170,12 @@ def micopedia_context(
         underlier_price=options_map.underlier.price,
         vix1d=effective_price(state, "index:VIX1D"),
         vix=effective_price(state, "index:VIX"),
+        skew_index=effective_price(state, "index:SKEW"),
+        put_skew_ratio=(front.put_skew_ratio if front else None),
         gamma_state=gamma_state_for_micopedia(options_map),
         directional_bias="neutral_unclear",
         time_phase=time_phase_from_window(window),
+        event_tags=tuple(env_csv("MICOPEDIA_EVENT_TAGS", "")),
         key_levels=tuple(key_levels),
         has_option_chain=bool(options_map.expiries),
         has_es_data=has_es_data,
@@ -167,6 +186,9 @@ def micopedia_context(
         "regime": signal.regime,
         "directional_bias": signal.directional_bias,
         "confidence": signal.confidence,
+        "dip_context": signal.dip_context,
+        "vix_ratio": inputs.vix_ratio,
+        "event_tags": list(inputs.event_tags),
         "suggested_sampling_mode": signal.suggested_sampling_mode,
         "candidate_expression": signal.candidate_expression,
         "map_focus": (
@@ -250,6 +272,9 @@ def build_human_focus_context(
             "underlier_price": options_map.underlier.price,
             "expiries": [expiry_options_summary(expiry) for expiry in options_map.expiries[:2]],
             "warnings": options_map.warnings,
+            "wall_confluence": (
+                options_map.spy_confluence.to_dict() if options_map.spy_confluence else None
+            ),
         },
         "spxw_iv_surface": {
             "front_expiry": iv_surface.front_expiry if iv_surface else None,

@@ -75,6 +75,35 @@ class StrikeGex:
 
 
 @dataclass(frozen=True)
+class LevelProbability:
+    level_name: str
+    level: float
+    prob_close_beyond: float | None
+    prob_touch: float | None
+    source_strike: float | None
+    source_delta: float | None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class WallConfluence:
+    spy_underlier: float | None
+    spy_front_expiry: str | None
+    spy_call_wall_spx: float | None
+    spy_put_wall_spx: float | None
+    call_wall_confluent: bool | None
+    put_wall_confluent: bool | None
+    tolerance_points: float
+    spy_option_count: int
+    quality: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
 class ExpiryOptionsMap:
     expiry: str
     option_count: int
@@ -104,6 +133,8 @@ class ExpiryOptionsMap:
     coverage: OptionCoverage
     top_gex_strikes: tuple[StrikeGex, ...]
     warnings: tuple[str, ...]
+    level_probabilities: tuple[LevelProbability, ...] = ()
+    gamma_flip_zone: tuple[float, float] | None = None
 
 
 @dataclass(frozen=True)
@@ -113,6 +144,7 @@ class OptionsMap:
     underlier: UnderlierReference
     expiries: tuple[ExpiryOptionsMap, ...]
     warnings: tuple[str, ...]
+    spy_confluence: WallConfluence | None = None
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
@@ -183,6 +215,50 @@ def option_gamma(quote: Quote) -> float | None:
         return None
     value = finite_float(quote.greeks.gamma)
     return value if value is not None and value > 0 else None
+
+
+def usable_delta(quote: Quote | None) -> float | None:
+    if quote is None or quote.quality in BAD_QUALITIES or quote.greeks is None:
+        return None
+    value = finite_float(quote.greeks.delta)
+    if value is None or not math.isfinite(value):
+        return None
+    return value
+
+
+def median_strike_step(strikes: list[float]) -> float:
+    if len(strikes) < 2:
+        return 5.0
+    diffs = [strikes[index + 1] - strikes[index] for index in range(len(strikes) - 1)]
+    diffs.sort()
+    mid = len(diffs) // 2
+    if len(diffs) % 2:
+        return diffs[mid]
+    return (diffs[mid - 1] + diffs[mid]) / 2.0
+
+
+def probability_for_level(
+    level: float,
+    *,
+    underlier: float,
+    pairs: dict[float, dict[OptionRight, Quote]],
+    strike_step: float,
+) -> tuple[float | None, float | None, float | None, float | None]:
+    right = OptionRight.CALL if level >= underlier else OptionRight.PUT
+    candidates: list[tuple[float, float, float]] = []
+    for strike, pair in pairs.items():
+        delta = usable_delta(pair.get(right))
+        if delta is None:
+            continue
+        candidates.append((strike, abs(strike - level), delta))
+    if not candidates:
+        return (None, None, None, None)
+    source_strike, distance, source_delta = min(candidates, key=lambda item: item[1])
+    if distance > 2 * strike_step:
+        return (None, None, None, None)
+    prob_close_beyond = max(0.0, min(1.0, source_delta if right == OptionRight.CALL else abs(source_delta)))
+    prob_touch = min(1.0, 2 * prob_close_beyond)
+    return (prob_close_beyond, prob_touch, source_strike, source_delta)
 
 
 def weighted_mean(items: list[tuple[float, float]]) -> float | None:
@@ -295,6 +371,116 @@ def nearest_zero(gex_rows: list[StrikeGex], underlier: float) -> float | None:
     return min(zeros, key=lambda value: abs(value - underlier))
 
 
+def zero_gamma_bracket(gex_rows: list[StrikeGex], underlier: float) -> tuple[float, float] | None:
+    if not gex_rows:
+        return None
+    brackets: list[tuple[float, float, float]] = []
+    for left, right in zip(gex_rows, gex_rows[1:]):
+        if abs(left.net_gex) <= 1e-12:
+            brackets.append((left.strike, left.strike, abs(left.strike - underlier)))
+        elif left.net_gex * right.net_gex < 0:
+            zero = interpolate_zero(left, right)
+            if zero is not None:
+                brackets.append((left.strike, right.strike, abs(zero - underlier)))
+    if abs(gex_rows[-1].net_gex) <= 1e-12:
+        last = gex_rows[-1].strike
+        brackets.append((last, last, abs(last - underlier)))
+    if not brackets:
+        return None
+    left_strike, right_strike, _distance = min(brackets, key=lambda item: item[2])
+    return (left_strike, right_strike)
+
+
+def is_spy_option(quote: Quote) -> bool:
+    instrument = quote.instrument
+    if instrument.instrument_type != InstrumentType.OPTION:
+        return False
+    return (instrument.underlier or instrument.symbol).upper() == "SPY"
+
+
+def build_spy_confluence(
+    state: LatestState,
+    front_spxw: ExpiryOptionsMap | None,
+) -> WallConfluence:
+    spy_quotes = [quote for quote in state.best_quotes if is_spy_option(quote)]
+    if not spy_quotes:
+        return WallConfluence(
+            spy_underlier=None,
+            spy_front_expiry=None,
+            spy_call_wall_spx=None,
+            spy_put_wall_spx=None,
+            call_wall_confluent=None,
+            put_wall_confluent=None,
+            tolerance_points=10.0,
+            spy_option_count=0,
+            quality="missing_spy_chain",
+        )
+
+    spy_underlier_quote = state.best_quote("equity:SPY")
+    spy_underlier = (
+        spy_underlier_quote.effective_price
+        if spy_underlier_quote is not None
+        else None
+    )
+    if spy_underlier is None or spy_underlier <= 0:
+        return WallConfluence(
+            spy_underlier=None,
+            spy_front_expiry=None,
+            spy_call_wall_spx=None,
+            spy_put_wall_spx=None,
+            call_wall_confluent=None,
+            put_wall_confluent=None,
+            tolerance_points=10.0,
+            spy_option_count=len(spy_quotes),
+            quality="missing_spy_underlier",
+        )
+
+    front_expiry = min(
+        (quote.instrument.expiry or "unknown" for quote in spy_quotes),
+        default=None,
+    )
+    front_quotes = [
+        quote
+        for quote in spy_quotes
+        if (quote.instrument.expiry or "unknown") == front_expiry
+    ]
+    pairs = pair_by_strike(front_quotes)
+    gex_rows = build_gex_by_strike(pairs, underlier=spy_underlier)
+    call_wall_row = max(gex_rows, key=lambda row: row.call_gex) if gex_rows else None
+    put_wall_row = min(gex_rows, key=lambda row: row.put_gex) if gex_rows else None
+    spy_call_wall = (
+        call_wall_row.strike if call_wall_row and call_wall_row.call_gex > 0 else None
+    )
+    spy_put_wall = put_wall_row.strike if put_wall_row and put_wall_row.put_gex < 0 else None
+    spy_call_wall_spx = spy_call_wall * 10.0 if spy_call_wall is not None else None
+    spy_put_wall_spx = spy_put_wall * 10.0 if spy_put_wall is not None else None
+
+    spx_quote = state.best_quote("index:SPX")
+    spxw_underlier = spx_quote.effective_price if spx_quote is not None else None
+    tolerance_reference = spxw_underlier if spxw_underlier is not None else spy_underlier * 10.0
+    tolerance = max(10.0, tolerance_reference * 0.0015)
+
+    call_wall_confluent: bool | None = None
+    put_wall_confluent: bool | None = None
+    if front_spxw is not None:
+        if spy_call_wall_spx is not None and front_spxw.call_wall is not None:
+            call_wall_confluent = abs(spy_call_wall_spx - front_spxw.call_wall) <= tolerance
+        if spy_put_wall_spx is not None and front_spxw.put_wall is not None:
+            put_wall_confluent = abs(spy_put_wall_spx - front_spxw.put_wall) <= tolerance
+
+    return WallConfluence(
+        spy_underlier=spy_underlier,
+        spy_front_expiry=front_expiry,
+        spy_call_wall_spx=spy_call_wall_spx,
+        spy_put_wall_spx=spy_put_wall_spx,
+        call_wall_confluent=call_wall_confluent,
+        put_wall_confluent=put_wall_confluent,
+        tolerance_points=tolerance,
+        spy_option_count=len(spy_quotes),
+        quality="ok",
+    )
+
+
 def classify_gamma_state(
     *,
     net_gamma_ratio: float | None,
@@ -401,6 +587,35 @@ def build_expiry_map(
     if underlier_mismatch:
         nearest_wall_value = None
         nearest_wall_distance = None
+
+    strike_step = median_strike_step(strikes)
+    gamma_flip_zone = zero_gamma_bracket(gex_rows, underlier) if underlier else None
+    level_probabilities: list[LevelProbability] = []
+    if underlier is not None:
+        for level_name, level_value in (
+            ("put_wall", put_wall),
+            ("zero_gamma", zero),
+            ("call_wall", call_wall),
+        ):
+            if level_value is None:
+                continue
+            prob_close, prob_touch, source_strike, source_delta = probability_for_level(
+                level_value,
+                underlier=underlier,
+                pairs=pairs,
+                strike_step=strike_step,
+            )
+            level_probabilities.append(
+                LevelProbability(
+                    level_name=level_name,
+                    level=level_value,
+                    prob_close_beyond=prob_close,
+                    prob_touch=prob_touch,
+                    source_strike=source_strike,
+                    source_delta=source_delta,
+                )
+            )
+
     return ExpiryOptionsMap(
         expiry=expiry,
         option_count=len(quotes),
@@ -430,6 +645,8 @@ def build_expiry_map(
         coverage=coverage,
         top_gex_strikes=tuple(sorted(gex_rows, key=lambda row: row.abs_gex, reverse=True)[:10]),
         warnings=tuple(dict.fromkeys(warnings)),
+        level_probabilities=tuple(level_probabilities),
+        gamma_flip_zone=gamma_flip_zone,
     )
 
 
@@ -480,12 +697,15 @@ def build_options_map(state: LatestState) -> OptionsMap:
         )
         for expiry, quotes in sorted(grouped.items())
     )
+    front_spxw = expiries[0] if expiries else None
+    spy_confluence = build_spy_confluence(state, front_spxw)
     return OptionsMap(
         created_at=datetime.now(tz=state.as_of.tzinfo),
         as_of=state.as_of,
         underlier=underlier,
         expiries=expiries,
         warnings=tuple(dict.fromkeys(warnings)),
+        spy_confluence=spy_confluence,
     )
 
 

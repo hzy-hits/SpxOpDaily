@@ -286,6 +286,8 @@ def extract_openclaw_agent_message(stdout: str) -> str:
                 if isinstance(value, str) and value.strip():
                     return value.strip()
         payloads = payload.get("payloads")
+        if not isinstance(payloads, list) and isinstance(result, dict):
+            payloads = result.get("payloads")
         if isinstance(payloads, list):
             parts = [
                 str(item.get("text"))

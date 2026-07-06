@@ -199,6 +199,8 @@ class IbkrStreamSettings:
     farm_broken_restart_seconds: float
     gateway_restart_cooldown_seconds: float
     auto_restart_gateway_on_farm_broken: bool
+    spy_option_lines: int = 16
+    spy_strike_step: int = 2
 
     @classmethod
     def from_env(cls) -> "IbkrStreamSettings":
@@ -222,6 +224,8 @@ class IbkrStreamSettings:
             auto_restart_gateway_on_farm_broken=env_bool(
                 "IBKR_AUTO_RESTART_GATEWAY_ON_FARM_BROKEN", True
             ),
+            spy_option_lines=env_int("IBKR_STREAM_SPY_OPTION_LINES", 16),
+            spy_strike_step=env_int("IBKR_STREAM_SPY_STRIKE_STEP", 2),
         )
 
 
@@ -553,6 +557,7 @@ class NotificationSettings:
     bark_group: str = "spx-spark"
     bark_level: str = "timeSensitive"
     bark_timeout_seconds: float = 10.0
+    missed_queue_path: str = ""
 
     @classmethod
     def from_env(cls) -> "NotificationSettings":
@@ -604,6 +609,10 @@ class NotificationSettings:
             bark_group=env_str("ALERT_NOTIFY_BARK_GROUP", "spx-spark"),
             bark_level=env_str("ALERT_NOTIFY_BARK_LEVEL", "timeSensitive"),
             bark_timeout_seconds=env_float("ALERT_NOTIFY_BARK_TIMEOUT_SECONDS", 10.0),
+            missed_queue_path=env_str(
+                "ALERT_NOTIFY_MISSED_QUEUE_PATH",
+                f"{data_root.rstrip('/')}/latest/weixin_missed_queue.jsonl",
+            ),
         )
 
 

@@ -11,7 +11,10 @@ from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from spx_spark.config import NY_TZ, StorageSettings, load_dotenv
+from spx_spark.config import NY_TZ, NotificationSettings, StorageSettings, env_bool, load_dotenv
+from spx_spark.notifier.missed_queue import append_missed
+from spx_spark.notifier.model import CommandRunner, default_runner
+from spx_spark.notifier.sinks import run_openclaw_agent, send_bark_message, send_openclaw_message
 from spx_spark.iv_surface import (
     IvSurfaceSnapshot,
     IvSurfaceExpiry,
@@ -62,13 +65,6 @@ class ReviewLlmSettings:
             timeout_seconds=float(os.getenv("SPX_REVIEW_LLM_TIMEOUT_SECONDS", "120")),
             max_tokens=int(os.getenv("SPX_REVIEW_LLM_MAX_TOKENS", "2200")),
         )
-
-
-def env_bool(name: str, default: bool) -> bool:
-    raw = os.getenv(name)
-    if raw is None or not raw.strip():
-        return default
-    return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def read_env_file_value(path: str, key: str) -> str:
@@ -755,6 +751,114 @@ def write_outputs(payload: dict[str, Any], markdown: str, paths: ReviewPaths) ->
     return result
 
 
+def build_push_summary(payload: dict[str, Any], *, latest_markdown_path: str) -> str:
+    trading_date = payload.get("trading_date", "-")
+    spx = payload.get("spx") if isinstance(payload.get("spx"), dict) else {}
+    first = spx.get("first")
+    last = spx.get("last")
+    change_points = spx.get("change_points")
+    change_bps = spx.get("change_bps")
+    range_points = spx.get("range_points")
+    low = spx.get("low")
+    high = spx.get("high")
+
+    iv_surface = payload.get("iv_surface") if isinstance(payload.get("iv_surface"), dict) else {}
+    expiries = iv_surface.get("expiries") if isinstance(iv_surface.get("expiries"), list) else []
+    front = expiries[0] if expiries and isinstance(expiries[0], dict) else {}
+
+    put_wall_last = front.get("put_wall_last")
+    call_wall_last = front.get("call_wall_last")
+    zero_gamma_last = front.get("zero_gamma_last")
+    gamma_state_last = front.get("gamma_state_last")
+
+    atm_iv = front.get("atm_iv") if isinstance(front.get("atm_iv"), dict) else {}
+    put_skew = front.get("put_skew_ratio") if isinstance(front.get("put_skew_ratio"), dict) else {}
+    atm_iv_text = f"{fmt(atm_iv.get('first'), 4)}→{fmt(atm_iv.get('last'), 4)}"
+    put_skew_text = f"{fmt(put_skew.get('first'), 3)}→{fmt(put_skew.get('last'), 3)}"
+
+    verdict = payload.get("verdict") if isinstance(payload.get("verdict"), dict) else {}
+    status = verdict.get("status", "-")
+    warnings = verdict.get("warnings") if isinstance(verdict.get("warnings"), list) else []
+    warning_text = f" ({', '.join(str(item) for item in warnings)})" if warnings else ""
+
+    change_points_text = "-" if change_points is None else f"{float(change_points):+.1f}"
+    change_bps_text = "-" if change_bps is None else f"{float(change_bps):+.0f}"
+    range_text = "-" if range_points is None else f"{float(range_points):.1f}"
+
+    lines = [
+        f"【盘后复盘 {trading_date}】",
+        (
+            f"SPX: {fmt(first)}→{fmt(last)}({change_points_text} 点/{change_bps_text}bp), "
+            f"区间 {range_text} 点(低 {fmt(low)} 高 {fmt(high)})"
+        ),
+        (
+            f"0DTE 收盘墙位: put {fmt(put_wall_last, 0)} call {fmt(call_wall_last, 0)}, "
+            f"zero gamma {fmt(zero_gamma_last, 0)}, gamma {fmt(gamma_state_last)}"
+        ),
+        f"ATM IV: {atm_iv_text}, put skew: {put_skew_text}",
+        f"数据: {status}{warning_text}",
+        f"完整报告: {latest_markdown_path}",
+    ]
+    return "\n".join(lines)
+
+
+def build_review_push_prompt(payload: dict[str, Any], summary: str) -> str:
+    return "\n".join(
+        (
+            "你是 SPX Spark 的盘后复盘播报员，对象是白天睡觉、只交易 SPX/SPXW 0DTE 期权的人。",
+            "只依据 JSON 与摘要事实。输出中文最多 12 行，第一行必须是摘要第一行。",
+            "必须包含：当日价格路径一句话、墙位/zero gamma/gamma state 收盘位、IV 与 skew 当日变化、"
+            "用 2-3 句交易员口吻点评当日结构(pin 住了吗？墙被打穿过吗？IV 是 crush 还是抬升？)，"
+            "最后给出 2-3 条『下一交易日开盘前检查项』。数据 degraded 时如实说明。",
+            "JSON:" + json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+            "摘要:" + summary,
+        )
+    )
+
+
+def push_review(
+    payload: dict[str, Any],
+    *,
+    latest_markdown_path: str,
+    runner: CommandRunner = default_runner,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    now = now or datetime.now(tz=timezone.utc)
+    if not env_bool("SPX_REVIEW_PUSH_ENABLED", True):
+        return {"skipped": True, "reason": "push_disabled"}
+
+    settings = NotificationSettings.from_env()
+    summary = build_push_summary(payload, latest_markdown_path=latest_markdown_path)
+    used_agent = False
+    text = summary
+
+    if settings.openclaw_agent_enabled:
+        sink, reply = run_openclaw_agent(
+            settings,
+            build_review_push_prompt(payload, summary),
+            runner=runner,
+        )
+        if reply and sink.ok:
+            text = reply
+            used_agent = True
+
+    weixin_result = send_openclaw_message(settings, text, runner=runner)
+    if not weixin_result.ok:
+        append_missed(settings.missed_queue_path, text, kind="post_close_review", at=now)
+
+    bark_ok = True
+    if settings.bark_enabled:
+        bark_result = send_bark_message(settings, "盘后复盘", text)
+        bark_ok = bark_result.ok
+
+    return {
+        "text": text,
+        "used_agent": used_agent,
+        "weixin_ok": weixin_result.ok,
+        "bark_ok": bark_ok,
+    }
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build an SPX/SPXW post-close daily review.")
     parser.add_argument("--date", default="auto", help="NY trading date, YYYY-MM-DD, or auto.")
@@ -768,6 +872,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--llm", action="store_true", help="Force-enable the configured LLM writer.")
     parser.add_argument("--no-llm", action="store_true", help="Disable the LLM writer for this run.")
     parser.add_argument("--quiet-if-empty", action="store_true", help="Suppress stdout when there are no raw rows or snapshots.")
+    parser.add_argument("--no-push", action="store_true", help="Do not push review summary to WeChat/Bark.")
     return parser.parse_args(argv)
 
 
@@ -813,6 +918,16 @@ def run(argv: list[str] | None = None) -> int:
         )
         paths_payload = write_outputs(payload, markdown, paths)
         payload["paths"] = paths_payload
+
+    latest_markdown_path = str(
+        paths_payload["latest_markdown_path"]
+        if paths_payload
+        else default_latest_markdown_path(settings)
+    )
+    if not args.no_push:
+        coverage = payload["coverage"]
+        if not (coverage["raw_quote_rows"] == 0 and coverage["iv_surface_snapshots"] == 0):
+            payload["push"] = push_review(payload, latest_markdown_path=latest_markdown_path)
 
     if (
         args.quiet_if_empty

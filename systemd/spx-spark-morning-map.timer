@@ -1,0 +1,10 @@
+[Unit]
+Description=Run SPX Spark pre-market map push before US open
+
+[Timer]
+OnCalendar=Mon..Fri 21:00 Asia/Shanghai
+OnCalendar=Mon..Fri 22:00 Asia/Shanghai
+Persistent=false
+
+[Install]
+WantedBy=timers.target

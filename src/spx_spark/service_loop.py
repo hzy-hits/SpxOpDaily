@@ -45,6 +45,8 @@ class ServiceLoopSettings:
     ibkr_conflict_probe_seconds: int
     ibkr_positions_enabled: bool = False
     ibkr_positions_interval_seconds: int = 60
+    schwab_chains_enabled: bool = False
+    schwab_chains_interval_seconds: int = 300
     max_concurrent_tasks: int = 4
 
     @classmethod
@@ -64,6 +66,8 @@ class ServiceLoopSettings:
             heartbeat_seconds=env_int("SPX_SERVICE_HEARTBEAT_SECONDS", 60),
             ibkr_positions_enabled=env_bool("IBKR_POSITIONS_ENABLED", False),
             ibkr_positions_interval_seconds=env_int("IBKR_POSITIONS_POLL_SECONDS", 60),
+            schwab_chains_enabled=env_bool("SPX_SERVICE_SCHWAB_CHAINS_ENABLED", False),
+            schwab_chains_interval_seconds=env_int("SPX_SERVICE_SCHWAB_CHAINS_INTERVAL_SECONDS", 300),
             ibkr_skip_options=env_bool("SPX_SERVICE_IBKR_SKIP_OPTIONS", False),
             ibkr_connect_retry_seconds=env_int("IBKR_CONNECT_RETRY_SECONDS", 60),
             ibkr_conflict_probe_seconds=env_int("IBKR_CONFLICT_PROBE_SECONDS", 60),
@@ -152,6 +156,12 @@ def run_ibkr_positions() -> int:
     return position_watcher.run(["--json"])
 
 
+def run_schwab_collector() -> int:
+    from spx_spark.schwab import collector as schwab_collector
+
+    return schwab_collector.run()
+
+
 def console_script(name: str) -> str:
     return str(Path(sys.executable).with_name(name))
 
@@ -215,6 +225,15 @@ def build_tasks(settings: ServiceLoopSettings) -> list[ServiceTask]:
                 settings.ibkr_positions_interval_seconds,
                 run_ibkr_positions,
                 command=(console_script("spx-spark-ibkr-positions"), "--json"),
+            )
+        )
+    if settings.schwab_chains_enabled:
+        tasks.append(
+            ServiceTask(
+                "schwab_chains",
+                settings.schwab_chains_interval_seconds,
+                run_schwab_collector,
+                command=(console_script("spx-spark-schwab-collector"),),
             )
         )
     return tasks

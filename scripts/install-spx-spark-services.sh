@@ -9,6 +9,8 @@ ln -sfn "$ROOT/systemd/spx-spark-24h.service" "$USER_UNIT_DIR/spx-spark-24h.serv
 ln -sfn "$ROOT/systemd/spx-spark-ibkr-stream.service" "$USER_UNIT_DIR/spx-spark-ibkr-stream.service"
 ln -sfn "$ROOT/systemd/spx-spark-post-close-review.service" "$USER_UNIT_DIR/spx-spark-post-close-review.service"
 ln -sfn "$ROOT/systemd/spx-spark-post-close-review.timer" "$USER_UNIT_DIR/spx-spark-post-close-review.timer"
+ln -sfn "$ROOT/systemd/spx-spark-morning-map.service" "$USER_UNIT_DIR/spx-spark-morning-map.service"
+ln -sfn "$ROOT/systemd/spx-spark-morning-map.timer" "$USER_UNIT_DIR/spx-spark-morning-map.timer"
 ln -sfn "$ROOT/systemd/spx-spark-maintenance-daily.service" "$USER_UNIT_DIR/spx-spark-maintenance-daily.service"
 ln -sfn "$ROOT/systemd/spx-spark-maintenance-daily.timer" "$USER_UNIT_DIR/spx-spark-maintenance-daily.timer"
 ln -sfn "$ROOT/systemd/spx-spark-maintenance-weekly.service" "$USER_UNIT_DIR/spx-spark-maintenance-weekly.service"
@@ -20,6 +22,7 @@ systemctl --user daemon-reload
 systemctl --user enable spx-spark-24h.service
 systemctl --user enable spx-spark-ibkr-stream.service
 systemctl --user enable spx-spark-post-close-review.timer
+systemctl --user enable spx-spark-morning-map.timer
 systemctl --user enable --now spx-spark-maintenance-daily.timer
 systemctl --user enable --now spx-spark-maintenance-weekly.timer
 systemctl --user enable --now spx-spark-openclaw-weixin-keepalive.timer
@@ -28,6 +31,7 @@ echo "Installed user services:"
 echo "  spx-spark-24h.service"
 echo "  spx-spark-ibkr-stream.service"
 echo "  spx-spark-post-close-review.timer"
+echo "  spx-spark-morning-map.timer"
 echo "  spx-spark-maintenance-daily.timer (09:00 CST dry-run)"
 echo "  spx-spark-maintenance-weekly.timer (Sat 10:00 CST prune)"
 echo "  spx-spark-openclaw-weixin-keepalive.timer (every 90m Weixin context refresh)"

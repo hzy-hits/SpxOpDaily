@@ -21,6 +21,7 @@ spx-spark-hyperliquid-collector = "spx_spark.hyperliquid.collector:main"
 spx-spark-latest-state = "spx_spark.latest_state:main"
 spx-spark-maintenance = "spx_spark.maintenance:main"
 spx-spark-micopedia-guidance = "spx_spark.strategy.micopedia:main"
+spx-spark-morning-map = "spx_spark.morning_map:main"
 spx-spark-mock-collector = "spx_spark.mock_collector:main"
 spx-spark-options-map = "spx_spark.options_map:main"
 spx-spark-post-close-review = "spx_spark.post_close_review:main"
@@ -29,6 +30,8 @@ spx-spark-runtime-mode = "spx_spark.runtime_mode:main"
 spx-spark-service-loop = "spx_spark.service_loop:main"
 spx-spark-sampling-plan = "spx_spark.sampling:main"
 spx-spark-schwab-verifier = "spx_spark.schwab.verifier:main"
+spx-spark-schwab-collector = "spx_spark.schwab.collector:main"
+spx-spark-weixin-digest = "spx_spark.notifier.digest_cli:main"
 
 [dependency-groups]
 dev = [

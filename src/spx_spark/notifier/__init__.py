@@ -1,5 +1,6 @@
 """通知管道:选取→审阅→gate→双通道投递。"""
 
+from spx_spark.notifier.missed_queue import append_missed, flush_missed
 from spx_spark.notifier.model import (
     CommandRunner,
     NotificationResult,
@@ -29,7 +30,9 @@ from spx_spark.notifier.state import (
 )
 
 __all__ = [
+    "append_missed",
     "CommandRunner",
+    "flush_missed",
     "NotificationResult",
     "SinkResult",
     "alert_key",

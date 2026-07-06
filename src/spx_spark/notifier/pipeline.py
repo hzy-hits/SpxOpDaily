@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 from spx_spark.config import NotificationSettings
+from spx_spark.notifier.missed_queue import append_missed, flush_missed
 from spx_spark.notifier.model import CommandRunner, NotificationResult, SinkResult, default_runner
 from spx_spark.notifier.policy import (
     codex_message_requests_delivery,
@@ -48,6 +49,16 @@ def notify_payload(
         )
 
     sinks: list[SinkResult] = []
+    now_utc = now or datetime.now(tz=timezone.utc)
+    if (
+        settings.openclaw_enabled
+        or settings.openclaw_agent_enabled
+        or settings.codex_enabled
+    ):
+        digest_result = flush_missed(settings, runner=runner)
+        if digest_result is not None:
+            sinks.append(digest_result)
+
     message = format_alert_message(payload, selected)
     bypass_alerts = direct_push_alerts(selected)
     review_candidates = [alert for alert in selected if alert not in bypass_alerts]
@@ -55,6 +66,13 @@ def notify_payload(
     if settings.openclaw_enabled:
         direct_result = send_openclaw_message(settings, message, runner=runner)
         sinks.append(direct_result)
+        if not direct_result.ok:
+            append_missed(
+                settings.missed_queue_path,
+                message,
+                kind="direct",
+                at=now_utc,
+            )
         delivered_ok = direct_result.ok
         if settings.bark_enabled:
             bark_result = send_bark_message(settings, bark_title_for_alerts(selected), message)
@@ -66,6 +84,13 @@ def notify_payload(
         bypass_message = format_alert_message(payload, bypass_alerts)
         direct_result = send_openclaw_message(settings, bypass_message, runner=runner)
         sinks.append(direct_result)
+        if not direct_result.ok:
+            append_missed(
+                settings.missed_queue_path,
+                bypass_message,
+                kind="direct",
+                at=now_utc,
+            )
         delivered_ok = direct_result.ok
         if settings.bark_enabled:
             bark_result = send_bark_message(
@@ -95,6 +120,13 @@ def notify_payload(
                 if settings.openclaw_agent_deliver:
                     agent_delivery = send_openclaw_message(settings, agent_message, runner=runner)
                     sinks.append(agent_delivery)
+                    if not agent_delivery.ok:
+                        append_missed(
+                            settings.missed_queue_path,
+                            agent_message,
+                            kind="agent",
+                            at=now_utc,
+                        )
                     delivered_ok = agent_delivery.ok
                     if settings.bark_enabled:
                         bark_result = send_bark_message(
@@ -150,6 +182,13 @@ def notify_payload(
                 if scope_ok:
                     codex_delivery = send_openclaw_message(settings, codex_message, runner=runner)
                     sinks.append(codex_delivery)
+                    if not codex_delivery.ok:
+                        append_missed(
+                            settings.missed_queue_path,
+                            codex_message,
+                            kind="codex",
+                            at=now_utc,
+                        )
                     delivered_ok = codex_delivery.ok
                     if settings.bark_enabled:
                         bark_result = send_bark_message(

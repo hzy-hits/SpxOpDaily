@@ -4,13 +4,20 @@ from datetime import datetime, timezone
 
 import pytest
 
-from spx_spark.human_focus import gamma_state_for_micopedia
+from spx_spark.human_focus import (
+    build_human_focus_context,
+    gamma_state_for_micopedia,
+    micopedia_context,
+)
+from spx_spark.marketdata import InstrumentId, MarketDataQuality, Provider, Quote
 from spx_spark.options_map import (
     ExpiryOptionsMap,
     OptionCoverage,
     OptionsMap,
+    StrikeGex,
     UnderlierReference,
 )
+from spx_spark.storage import LatestState
 
 
 def default_coverage() -> OptionCoverage:
@@ -62,7 +69,19 @@ def make_options_map(*, gamma_state: str) -> OptionsMap:
         gamma_state=gamma_state,
         gex_quality="ok",
         coverage=default_coverage(),
-        top_gex_strikes=(),
+        top_gex_strikes=(
+            StrikeGex(
+                strike=7550.0,
+                call_gex=100.0,
+                put_gex=-20.0,
+                net_gex=80.0,
+                abs_gex=120.0,
+                call_open_interest=2500.0,
+                put_open_interest=500.0,
+            ),
+        ),
+        level_probabilities=(),
+        gamma_flip_zone=(7495.0, 7505.0),
         warnings=(),
     )
     return OptionsMap(
@@ -101,3 +120,52 @@ def test_gamma_state_for_micopedia_empty_expiries_returns_unknown() -> None:
         warnings=(),
     )
     assert gamma_state_for_micopedia(options_map) == "unknown"
+
+
+def test_expiry_summary_includes_gamma_profile_and_level_probabilities() -> None:
+    now = datetime(2026, 7, 6, 14, 0, tzinfo=timezone.utc)
+    options_map = make_options_map(gamma_state="positive_gamma_pin")
+    state = LatestState(created_at=now, as_of=now, quotes=(), best_quotes=())
+    context = build_human_focus_context(
+        state,
+        options_map=options_map,
+        iv_surface=None,
+        iv_surface_history_1h=None,
+        window={"name": "rth"},
+    )
+    expiry = context["spxw_options"]["expiries"][0]
+    assert "gamma_profile" in expiry
+    assert expiry["gamma_profile"]["top_strikes"]
+    assert "level_probabilities" in expiry
+
+
+def test_micopedia_context_includes_dip_context_vix_ratio_and_event_tags(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 7, 6, 14, 0, tzinfo=timezone.utc)
+    options_map = make_options_map(gamma_state="mixed_gamma")
+    vix1d = Quote(
+        instrument=InstrumentId.index("VIX1D"),
+        provider=Provider.IBKR,
+        received_at=now,
+        quality=MarketDataQuality.LIVE,
+        mark=19.0,
+    )
+    vix = Quote(
+        instrument=InstrumentId.index("VIX"),
+        provider=Provider.IBKR,
+        received_at=now,
+        quality=MarketDataQuality.LIVE,
+        mark=20.0,
+    )
+    state = LatestState(
+        created_at=now,
+        as_of=now,
+        quotes=(vix1d, vix),
+        best_quotes=(vix1d, vix),
+    )
+    monkeypatch.setenv("MICOPEDIA_EVENT_TAGS", "fomc")
+    context = micopedia_context(state, options_map=options_map, window={"name": "rth"})
+    assert context["dip_context"]
+    assert context["vix_ratio"] == 0.95
+    assert context["regime"] == "high_vol_event"
