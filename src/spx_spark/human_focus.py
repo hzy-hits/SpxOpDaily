@@ -233,10 +233,18 @@ def build_human_focus_context(
     surface_payload = iv_surface.to_dict() if iv_surface is not None else None
     surface_expiries = surface_payload.get("expiries", []) if isinstance(surface_payload, dict) else []
     return {
-        "visible_scope": ("SPX", "SPXW", "ES"),
+        "visible_scope": ("SPX", "SPXW", "ES", "VIX", "VIX1D", "VIX9D", "VIX3M", "VVIX", "SKEW"),
         "prices": {
             "spx": quote_summary(state, "index:SPX"),
             "es": quote_summary(state, "future:ES"),
+        },
+        "vol_context": {
+            "vix": quote_summary(state, "index:VIX"),
+            "vix1d": quote_summary(state, "index:VIX1D"),
+            "vix9d": quote_summary(state, "index:VIX9D"),
+            "vix3m": quote_summary(state, "index:VIX3M"),
+            "vvix": quote_summary(state, "index:VVIX"),
+            "skew": quote_summary(state, "index:SKEW"),
         },
         "spxw_options": {
             "underlier_price": options_map.underlier.price,

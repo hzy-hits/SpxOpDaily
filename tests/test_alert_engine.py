@@ -434,7 +434,7 @@ def test_movement_alerts_are_edge_triggered(tmp_path, monkeypatch) -> None:
     assert recross[0].dedup_group == "up:1"
 
 
-def test_iv_surface_degraded_expiry_skips_threshold_alerts() -> None:
+def test_iv_surface_degraded_expiry_still_emits_movement_alerts() -> None:
     now = datetime(2026, 7, 7, 3, 15, tzinfo=BJ_TZ)
     surface = IvSurfaceSnapshot(
         created_at=now,
@@ -480,4 +480,28 @@ def test_iv_surface_degraded_expiry_skips_threshold_alerts() -> None:
     alerts = iv_surface_alerts(surface, window=active_window(now))
     kinds = {alert.kind for alert in alerts}
 
-    assert kinds == {"iv_surface_degraded"}
+    assert "iv_surface_degraded" in kinds
+    assert "atm_iv_jump_5m" in kinds
+    assert "put_skew_steepening_5m" in kinds
+    assert "iv_surface_shift_5m" in kinds
+    degraded_jump = next(alert for alert in alerts if alert.kind == "atm_iv_jump_5m")
+    assert "[degraded IV coverage]" in degraded_jump.detail
+
+
+def test_iv_surface_history_emits_1h_shift_alert() -> None:
+    now = datetime(2026, 7, 7, 3, 15, tzinfo=BJ_TZ)
+    surface = make_surface(as_of=now)
+    history = {
+        "expiries": [
+            {
+                "expiry": "20260707",
+                "iv_surface_level_change_1h": 0.09,
+                "atm_iv_change_1h": 0.02,
+                "surface_fit_quality": "low_iv_coverage",
+            }
+        ]
+    }
+    alerts = iv_surface_alerts(surface, window=active_window(now), history_1h=history)
+    kinds = {alert.kind for alert in alerts}
+    assert "iv_surface_shift_1h" in kinds
+    assert "atm_iv_change_1h" not in kinds

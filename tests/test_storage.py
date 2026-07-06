@@ -22,6 +22,8 @@ def make_storage_settings(tmp_path) -> StorageSettings:
         raw_file_name="quotes.jsonl",
         include_raw_payload=False,
         latest_stale_after_seconds=15.0,
+        slow_index_stale_after_seconds=300.0,
+        slow_index_labels=frozenset({"index:SKEW", "index:VVIX"}),
     )
 
 
@@ -91,7 +93,7 @@ def test_latest_state_falls_back_from_stale_ibkr_to_live_schwab(tmp_path):
     )
 
     result = store.update([ibkr, schwab], now=now)
-    state = LatestStateStore(settings).load()
+    state = LatestStateStore(settings).load(now=now)
     best = state.best_quote("index:SPX")
 
     assert result.provider_quote_count == 2

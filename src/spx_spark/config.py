@@ -9,29 +9,29 @@ from zoneinfo import ZoneInfo
 NY_TZ = ZoneInfo("America/New_York")
 
 
-def _env(name: str, default: str = "") -> str:
+def env_str(name: str, default: str = "") -> str:
     value = os.getenv(name)
     if value is None:
         return default
     return value.strip()
 
 
-def _env_int(name: str, default: int) -> int:
-    raw = _env(name)
+def env_int(name: str, default: int) -> int:
+    raw = env_str(name)
     if not raw:
         return default
     return int(raw)
 
 
-def _env_float(name: str, default: float) -> float:
-    raw = _env(name)
+def env_float(name: str, default: float) -> float:
+    raw = env_str(name)
     if not raw:
         return default
     return float(raw)
 
 
-def _env_bool(name: str, default: bool) -> bool:
-    raw = _env(name)
+def env_bool(name: str, default: bool) -> bool:
+    raw = env_str(name)
     if not raw:
         return default
     normalized = raw.lower()
@@ -42,13 +42,13 @@ def _env_bool(name: str, default: bool) -> bool:
     raise ValueError(f"{name} must be a boolean-like value, got {raw!r}")
 
 
-def _env_csv(name: str, default: str) -> list[str]:
-    raw = _env(name, default)
+def env_csv(name: str, default: str) -> list[str]:
+    raw = env_str(name, default)
     return [part.strip().upper() for part in raw.split(",") if part.strip()]
 
 
-def _env_csv_preserve(name: str, default: str) -> list[str]:
-    raw = _env(name, default)
+def env_csv_preserve(name: str, default: str) -> list[str]:
+    raw = env_str(name, default)
     return [part.strip() for part in raw.split(",") if part.strip()]
 
 
@@ -138,6 +138,10 @@ class IbkrSettings:
     stale_after_seconds: float
     qualify_contracts: bool
     request_timeout_seconds: float
+    # Slow-updating indices (SKEW/VVIX tick every few minutes) use a longer
+    # stale threshold so they do not flap between live and stale.
+    slow_index_stale_after_seconds: float = 300.0
+    slow_index_labels: frozenset[str] = frozenset({"index:SKEW", "index:VVIX"})
     # IBKR index CFDs such as IBUS500 (S&P 500 CFD). Defaults empty in code so
     # existing callers are unaffected; from_env defaults to IBUS500.
     verify_cfds: list[str] = field(default_factory=list)
@@ -147,31 +151,35 @@ class IbkrSettings:
         load_dotenv()
         auto_futures_expiry = next_equity_futures_month()
         return cls(
-            host=_env("IBKR_HOST", "127.0.0.1"),
-            port=_env_int("IBKR_PORT", 4002),
-            client_id=_env_int("IBKR_CLIENT_ID", 171),
-            market_data_type=_env_int("IBKR_MARKET_DATA_TYPE", 1),
-            es_expiry=_env("IBKR_ES_EXPIRY", auto_futures_expiry) or auto_futures_expiry,
-            mes_expiry=_env("IBKR_MES_EXPIRY", auto_futures_expiry) or auto_futures_expiry,
-            verify_indexes=_env_csv(
+            host=env_str("IBKR_HOST", "127.0.0.1"),
+            port=env_int("IBKR_PORT", 4002),
+            client_id=env_int("IBKR_CLIENT_ID", 171),
+            market_data_type=env_int("IBKR_MARKET_DATA_TYPE", 1),
+            es_expiry=env_str("IBKR_ES_EXPIRY", auto_futures_expiry) or auto_futures_expiry,
+            mes_expiry=env_str("IBKR_MES_EXPIRY", auto_futures_expiry) or auto_futures_expiry,
+            verify_indexes=env_csv(
                 "IBKR_VERIFY_INDEXES",
                 "SPX,VIX,VIX1D,VIX9D,VIX3M,VVIX,SKEW",
             ),
-            verify_stocks=_env_csv(
+            verify_stocks=env_csv(
                 "IBKR_VERIFY_STOCKS",
                 "SPY,QQQ,IWM,DIA,HYG,LQD,TLT,IEF,SHY,UUP,GLD,USO,RSP,XLU",
             ),
-            verify_futures=_env_csv("IBKR_VERIFY_FUTURES", "ES,MES"),
-            verify_cfds=_env_csv("IBKR_VERIFY_CFDS", "IBUS500"),
-            option_expiry=_env("IBKR_OPTION_EXPIRY", default_spxw_expiry())
+            verify_futures=env_csv("IBKR_VERIFY_FUTURES", "ES,MES"),
+            verify_cfds=env_csv("IBKR_VERIFY_CFDS", "IBUS500"),
+            option_expiry=env_str("IBKR_OPTION_EXPIRY", default_spxw_expiry())
             or default_spxw_expiry(),
-            option_strike_window_points=_env_int("IBKR_OPTION_STRIKE_WINDOW_POINTS", 50),
-            option_strike_step=_env_int("IBKR_OPTION_STRIKE_STEP", 5),
-            max_option_lines=_env_int("IBKR_MAX_OPTION_LINES", 40),
-            quote_wait_seconds=_env_float("IBKR_QUOTE_WAIT_SECONDS", 8.0),
-            stale_after_seconds=_env_float("IBKR_STALE_AFTER_SECONDS", 10.0),
-            qualify_contracts=_env_bool("IBKR_QUALIFY_CONTRACTS", True),
-            request_timeout_seconds=_env_float("IBKR_REQUEST_TIMEOUT_SECONDS", 30.0),
+            option_strike_window_points=env_int("IBKR_OPTION_STRIKE_WINDOW_POINTS", 50),
+            option_strike_step=env_int("IBKR_OPTION_STRIKE_STEP", 5),
+            max_option_lines=env_int("IBKR_MAX_OPTION_LINES", 40),
+            quote_wait_seconds=env_float("IBKR_QUOTE_WAIT_SECONDS", 8.0),
+            stale_after_seconds=env_float("IBKR_STALE_AFTER_SECONDS", 10.0),
+            slow_index_stale_after_seconds=env_float("IBKR_SLOW_INDEX_STALE_AFTER_SECONDS", 300.0),
+            slow_index_labels=frozenset(
+                env_csv("IBKR_SLOW_INDEX_LABELS", "index:SKEW,index:VVIX")
+            ),
+            qualify_contracts=env_bool("IBKR_QUALIFY_CONTRACTS", True),
+            request_timeout_seconds=env_float("IBKR_REQUEST_TIMEOUT_SECONDS", 30.0),
         )
 
 
@@ -198,20 +206,20 @@ class IbkrStreamSettings:
         return cls(
             # Distinct from the snapshot collector's client id so an accidental
             # overlap does not kick the other API session.
-            client_id=_env_int("IBKR_STREAM_CLIENT_ID", 172),
-            flush_interval_seconds=_env_float("IBKR_STREAM_FLUSH_SECONDS", 5.0),
-            policy_check_seconds=_env_float("IBKR_STREAM_POLICY_CHECK_SECONDS", 30.0),
-            replan_drift_points=_env_float("IBKR_STREAM_REPLAN_DRIFT_POINTS", 10.0),
-            max_option_lines=_env_int("IBKR_STREAM_MAX_OPTION_LINES", 60),
-            hot_lane_share=_env_float("IBKR_STREAM_HOT_LANE_SHARE", 0.7),
-            reconnect_min_seconds=_env_float("IBKR_STREAM_RECONNECT_MIN_SECONDS", 5.0),
-            reconnect_max_seconds=_env_float("IBKR_STREAM_RECONNECT_MAX_SECONDS", 300.0),
-            skip_options=_env_bool("IBKR_STREAM_SKIP_OPTIONS", False),
-            farm_broken_restart_seconds=_env_float("IBKR_FARM_BROKEN_RESTART_SECONDS", 180.0),
-            gateway_restart_cooldown_seconds=_env_float(
+            client_id=env_int("IBKR_STREAM_CLIENT_ID", 172),
+            flush_interval_seconds=env_float("IBKR_STREAM_FLUSH_SECONDS", 5.0),
+            policy_check_seconds=env_float("IBKR_STREAM_POLICY_CHECK_SECONDS", 30.0),
+            replan_drift_points=env_float("IBKR_STREAM_REPLAN_DRIFT_POINTS", 10.0),
+            max_option_lines=env_int("IBKR_STREAM_MAX_OPTION_LINES", 60),
+            hot_lane_share=env_float("IBKR_STREAM_HOT_LANE_SHARE", 0.7),
+            reconnect_min_seconds=env_float("IBKR_STREAM_RECONNECT_MIN_SECONDS", 5.0),
+            reconnect_max_seconds=env_float("IBKR_STREAM_RECONNECT_MAX_SECONDS", 300.0),
+            skip_options=env_bool("IBKR_STREAM_SKIP_OPTIONS", False),
+            farm_broken_restart_seconds=env_float("IBKR_FARM_BROKEN_RESTART_SECONDS", 180.0),
+            gateway_restart_cooldown_seconds=env_float(
                 "IBKR_GATEWAY_RESTART_COOLDOWN_SECONDS", 120.0
             ),
-            auto_restart_gateway_on_farm_broken=_env_bool(
+            auto_restart_gateway_on_farm_broken=env_bool(
                 "IBKR_AUTO_RESTART_GATEWAY_ON_FARM_BROKEN", True
             ),
         )
@@ -227,13 +235,13 @@ class IbkrPositionSettings:
     @classmethod
     def from_env(cls) -> "IbkrPositionSettings":
         load_dotenv()
-        data_root = _env("MARKET_DATA_DATA_ROOT", _env("MAINTENANCE_DATA_ROOT", "data"))
+        data_root = env_str("MARKET_DATA_DATA_ROOT", env_str("MAINTENANCE_DATA_ROOT", "data"))
         default_snapshot = f"{data_root.rstrip('/')}/latest/ibkr_positions.json"
-        snapshot_path = _env("IBKR_POSITIONS_SNAPSHOT_PATH", default_snapshot) or default_snapshot
+        snapshot_path = env_str("IBKR_POSITIONS_SNAPSHOT_PATH", default_snapshot) or default_snapshot
         return cls(
-            enabled=_env_bool("IBKR_POSITIONS_ENABLED", False),
-            client_id=_env_int("IBKR_POSITIONS_CLIENT_ID", 174),
-            poll_interval_seconds=_env_int("IBKR_POSITIONS_POLL_SECONDS", 60),
+            enabled=env_bool("IBKR_POSITIONS_ENABLED", False),
+            client_id=env_int("IBKR_POSITIONS_CLIENT_ID", 174),
+            poll_interval_seconds=env_int("IBKR_POSITIONS_POLL_SECONDS", 60),
             snapshot_path=snapshot_path,
         )
 
@@ -257,18 +265,18 @@ class RuntimePolicySettings:
     def from_env(cls) -> "RuntimePolicySettings":
         load_dotenv()
         return cls(
-            ibkr_schedule_enabled=_env_bool("IBKR_SCHEDULE_ENABLED", True),
-            ibkr_schedule_timezone=_env("IBKR_SCHEDULE_TZ", "Asia/Shanghai"),
-            ibkr_schedule_start=parse_hhmm(_env("IBKR_SCHEDULE_START", "00:00")),
-            ibkr_schedule_stop=parse_hhmm(_env("IBKR_SCHEDULE_STOP", "00:00")),
-            ibkr_connect_retry_seconds=_env_int("IBKR_CONNECT_RETRY_SECONDS", 60),
-            ibkr_conflict_retry_minutes=_env_int("IBKR_CONFLICT_RETRY_MINUTES", 0),
-            ibkr_conflict_probe_seconds=_env_int("IBKR_CONFLICT_PROBE_SECONDS", 60),
-            ibkr_fallback_provider=_env("IBKR_FALLBACK_PROVIDER", "schwab").lower(),
-            strict_no_session_fight=_env_bool("STRICT_NO_SESSION_FIGHT", True),
-            weekend_maintenance_mode=_env_bool("WEEKEND_MAINTENANCE_MODE", True),
-            runtime_mode_path=_env("RUNTIME_MODE_PATH", "runtime/mode.json"),
-            agent_override_default_ttl_minutes=_env_int(
+            ibkr_schedule_enabled=env_bool("IBKR_SCHEDULE_ENABLED", True),
+            ibkr_schedule_timezone=env_str("IBKR_SCHEDULE_TZ", "Asia/Shanghai"),
+            ibkr_schedule_start=parse_hhmm(env_str("IBKR_SCHEDULE_START", "00:00")),
+            ibkr_schedule_stop=parse_hhmm(env_str("IBKR_SCHEDULE_STOP", "00:00")),
+            ibkr_connect_retry_seconds=env_int("IBKR_CONNECT_RETRY_SECONDS", 60),
+            ibkr_conflict_retry_minutes=env_int("IBKR_CONFLICT_RETRY_MINUTES", 0),
+            ibkr_conflict_probe_seconds=env_int("IBKR_CONFLICT_PROBE_SECONDS", 60),
+            ibkr_fallback_provider=env_str("IBKR_FALLBACK_PROVIDER", "schwab").lower(),
+            strict_no_session_fight=env_bool("STRICT_NO_SESSION_FIGHT", True),
+            weekend_maintenance_mode=env_bool("WEEKEND_MAINTENANCE_MODE", True),
+            runtime_mode_path=env_str("RUNTIME_MODE_PATH", "runtime/mode.json"),
+            agent_override_default_ttl_minutes=env_int(
                 "AGENT_OVERRIDE_DEFAULT_TTL_MINUTES",
                 120,
             ),
@@ -324,25 +332,25 @@ class SchwabSettings:
     def from_env(cls) -> "SchwabSettings":
         load_dotenv()
         return cls(
-            api_base_url=_env("SCHWAB_API_BASE_URL", "https://api.schwabapi.com"),
-            access_token=_env("SCHWAB_ACCESS_TOKEN"),
-            token_file=_env("SCHWAB_TOKEN_FILE", "runtime/schwab-token.json"),
-            verify_indexes=_env_csv(
+            api_base_url=env_str("SCHWAB_API_BASE_URL", "https://api.schwabapi.com"),
+            access_token=env_str("SCHWAB_ACCESS_TOKEN"),
+            token_file=env_str("SCHWAB_TOKEN_FILE", "runtime/schwab-token.json"),
+            verify_indexes=env_csv(
                 "SCHWAB_VERIFY_INDEXES",
                 "$SPX,$VIX,$VIX1D,$VIX9D,$VIX3M,$VVIX,$SKEW,$NDX,$RUT,$DJI,$DJU",
             ),
-            verify_equities=_env_csv(
+            verify_equities=env_csv(
                 "SCHWAB_VERIFY_EQUITIES",
                 "SPY,QQQ,IWM,DIA,HYG,LQD,TLT,IEF,SHY,UUP,GLD,USO,RSP,XLU",
             ),
-            verify_futures=_env_csv("SCHWAB_VERIFY_FUTURES", "/ES,/MES"),
-            verify_option_chains=_env_csv("SCHWAB_VERIFY_OPTION_CHAINS", "SPX,XSP,SPY,QQQ,IWM"),
-            option_chain_strike_count=_env_int("SCHWAB_OPTION_CHAIN_STRIKE_COUNT", 10),
-            quote_fields=_env(
+            verify_futures=env_csv("SCHWAB_VERIFY_FUTURES", "/ES,/MES"),
+            verify_option_chains=env_csv("SCHWAB_VERIFY_OPTION_CHAINS", "SPX,XSP,SPY,QQQ,IWM"),
+            option_chain_strike_count=env_int("SCHWAB_OPTION_CHAIN_STRIKE_COUNT", 10),
+            quote_fields=env_str(
                 "SCHWAB_QUOTE_FIELDS",
                 "quote,reference,extended,regular",
             ),
-            request_timeout_seconds=_env_float("SCHWAB_REQUEST_TIMEOUT_SECONDS", 12.0),
+            request_timeout_seconds=env_float("SCHWAB_REQUEST_TIMEOUT_SECONDS", 12.0),
         )
 
 
@@ -361,14 +369,14 @@ class HyperliquidSettings:
     def from_env(cls) -> "HyperliquidSettings":
         load_dotenv()
         return cls(
-            api_base_url=_env("HYPERLIQUID_API_BASE_URL", "https://api.hyperliquid.xyz"),
-            dex=_env("HYPERLIQUID_DEX", "xyz"),
-            coin=_env("HYPERLIQUID_COIN", "xyz:SP500"),
-            request_timeout_seconds=_env_float("HYPERLIQUID_REQUEST_TIMEOUT_SECONDS", 10.0),
-            include_book=_env_bool("HYPERLIQUID_INCLUDE_BOOK", True),
-            include_trades=_env_bool("HYPERLIQUID_INCLUDE_TRADES", True),
-            book_depth_levels=_env_int("HYPERLIQUID_BOOK_DEPTH_LEVELS", 5),
-            large_trade_notional_threshold=_env_float(
+            api_base_url=env_str("HYPERLIQUID_API_BASE_URL", "https://api.hyperliquid.xyz"),
+            dex=env_str("HYPERLIQUID_DEX", "xyz"),
+            coin=env_str("HYPERLIQUID_COIN", "xyz:SP500"),
+            request_timeout_seconds=env_float("HYPERLIQUID_REQUEST_TIMEOUT_SECONDS", 10.0),
+            include_book=env_bool("HYPERLIQUID_INCLUDE_BOOK", True),
+            include_trades=env_bool("HYPERLIQUID_INCLUDE_TRADES", True),
+            book_depth_levels=env_int("HYPERLIQUID_BOOK_DEPTH_LEVELS", 5),
+            large_trade_notional_threshold=env_float(
                 "HYPERLIQUID_LARGE_TRADE_NOTIONAL_THRESHOLD",
                 100_000.0,
             ),
@@ -394,21 +402,21 @@ class PolymarketSettings:
     def from_env(cls) -> "PolymarketSettings":
         load_dotenv()
         return cls(
-            gamma_api_base_url=_env("POLYMARKET_GAMMA_API_BASE_URL", "https://gamma-api.polymarket.com"),
-            request_timeout_seconds=_env_float("POLYMARKET_REQUEST_TIMEOUT_SECONDS", 12.0),
-            search_terms=_env_csv_preserve(
+            gamma_api_base_url=env_str("POLYMARKET_GAMMA_API_BASE_URL", "https://gamma-api.polymarket.com"),
+            request_timeout_seconds=env_float("POLYMARKET_REQUEST_TIMEOUT_SECONDS", 12.0),
+            search_terms=env_csv_preserve(
                 "POLYMARKET_SEARCH_TERMS",
                 "SPY,Fed decision,CPI,FOMC,Powell,NFP",
             ),
-            event_slugs=_env_csv_preserve("POLYMARKET_EVENT_SLUGS", ""),
-            market_slugs=_env_csv_preserve("POLYMARKET_MARKET_SLUGS", ""),
-            max_results_per_query=_env_int("POLYMARKET_MAX_RESULTS_PER_QUERY", 5),
-            max_markets_per_run=_env_int("POLYMARKET_MAX_MARKETS_PER_RUN", 80),
-            min_liquidity=_env_float("POLYMARKET_MIN_LIQUIDITY", 0.0),
-            min_volume_24h=_env_float("POLYMARKET_MIN_VOLUME_24H", 0.0),
-            min_relevance_score=_env_float("POLYMARKET_MIN_RELEVANCE_SCORE", 0.35),
-            include_closed=_env_bool("POLYMARKET_INCLUDE_CLOSED", False),
-            user_agent=_env(
+            event_slugs=env_csv_preserve("POLYMARKET_EVENT_SLUGS", ""),
+            market_slugs=env_csv_preserve("POLYMARKET_MARKET_SLUGS", ""),
+            max_results_per_query=env_int("POLYMARKET_MAX_RESULTS_PER_QUERY", 5),
+            max_markets_per_run=env_int("POLYMARKET_MAX_MARKETS_PER_RUN", 80),
+            min_liquidity=env_float("POLYMARKET_MIN_LIQUIDITY", 0.0),
+            min_volume_24h=env_float("POLYMARKET_MIN_VOLUME_24H", 0.0),
+            min_relevance_score=env_float("POLYMARKET_MIN_RELEVANCE_SCORE", 0.35),
+            include_closed=env_bool("POLYMARKET_INCLUDE_CLOSED", False),
+            user_agent=env_str(
                 "POLYMARKET_USER_AGENT",
                 "Mozilla/5.0 spx-spark research collector",
             ),
@@ -437,21 +445,21 @@ class MaintenanceSettings:
     def from_env(cls) -> "MaintenanceSettings":
         load_dotenv()
         return cls(
-            data_root=_env("MAINTENANCE_DATA_ROOT", "data"),
-            logs_root=_env("MAINTENANCE_LOGS_ROOT", "logs"),
-            output_root=_env("MAINTENANCE_OUTPUT_ROOT", "logs"),
-            data_budget_gb=_env_float("MAINTENANCE_DATA_BUDGET_GB", 80.0),
-            raw_retention_days=_env_int("MAINTENANCE_RAW_RETENTION_DAYS", 10),
-            alert_window_retention_days=_env_int("MAINTENANCE_ALERT_WINDOW_RETENTION_DAYS", 60),
-            feature_1s_retention_days=_env_int("MAINTENANCE_FEATURE_1S_RETENTION_DAYS", 30),
-            feature_5s_retention_days=_env_int("MAINTENANCE_FEATURE_5S_RETENTION_DAYS", 90),
-            log_retention_days=_env_int("MAINTENANCE_LOG_RETENTION_DAYS", 14),
-            trash_retention_days=_env_int("MAINTENANCE_TRASH_RETENTION_DAYS", 7),
-            warn_pct=_env_float("MAINTENANCE_WARN_PCT", 70.0),
-            compact_pct=_env_float("MAINTENANCE_COMPACT_PCT", 80.0),
-            degraded_pct=_env_float("MAINTENANCE_DEGRADED_PCT", 85.0),
-            prune_pct=_env_float("MAINTENANCE_PRUNE_PCT", 90.0),
-            critical_pct=_env_float("MAINTENANCE_CRITICAL_PCT", 95.0),
+            data_root=env_str("MAINTENANCE_DATA_ROOT", "data"),
+            logs_root=env_str("MAINTENANCE_LOGS_ROOT", "logs"),
+            output_root=env_str("MAINTENANCE_OUTPUT_ROOT", "logs"),
+            data_budget_gb=env_float("MAINTENANCE_DATA_BUDGET_GB", 80.0),
+            raw_retention_days=env_int("MAINTENANCE_RAW_RETENTION_DAYS", 10),
+            alert_window_retention_days=env_int("MAINTENANCE_ALERT_WINDOW_RETENTION_DAYS", 60),
+            feature_1s_retention_days=env_int("MAINTENANCE_FEATURE_1S_RETENTION_DAYS", 30),
+            feature_5s_retention_days=env_int("MAINTENANCE_FEATURE_5S_RETENTION_DAYS", 90),
+            log_retention_days=env_int("MAINTENANCE_LOG_RETENTION_DAYS", 14),
+            trash_retention_days=env_int("MAINTENANCE_TRASH_RETENTION_DAYS", 7),
+            warn_pct=env_float("MAINTENANCE_WARN_PCT", 70.0),
+            compact_pct=env_float("MAINTENANCE_COMPACT_PCT", 80.0),
+            degraded_pct=env_float("MAINTENANCE_DEGRADED_PCT", 85.0),
+            prune_pct=env_float("MAINTENANCE_PRUNE_PCT", 90.0),
+            critical_pct=env_float("MAINTENANCE_CRITICAL_PCT", 95.0),
         )
 
 
@@ -462,20 +470,29 @@ class StorageSettings:
     raw_file_name: str
     include_raw_payload: bool
     latest_stale_after_seconds: float
+    slow_index_stale_after_seconds: float
+    slow_index_labels: frozenset[str]
 
     @classmethod
     def from_env(cls) -> "StorageSettings":
         load_dotenv()
-        data_root = _env("MARKET_DATA_DATA_ROOT", _env("MAINTENANCE_DATA_ROOT", "data"))
+        data_root = env_str("MARKET_DATA_DATA_ROOT", env_str("MAINTENANCE_DATA_ROOT", "data"))
         return cls(
             data_root=data_root,
-            latest_state_path=_env(
+            latest_state_path=env_str(
                 "MARKET_DATA_LATEST_STATE_PATH",
                 f"{data_root.rstrip('/')}/latest/state.json",
             ),
-            raw_file_name=_env("MARKET_DATA_RAW_FILE_NAME", "quotes.jsonl"),
-            include_raw_payload=_env_bool("MARKET_DATA_INCLUDE_RAW_PAYLOAD", False),
-            latest_stale_after_seconds=_env_float("MARKET_DATA_LATEST_STALE_AFTER_SECONDS", 15.0),
+            raw_file_name=env_str("MARKET_DATA_RAW_FILE_NAME", "quotes.jsonl"),
+            include_raw_payload=env_bool("MARKET_DATA_INCLUDE_RAW_PAYLOAD", False),
+            latest_stale_after_seconds=env_float("MARKET_DATA_LATEST_STALE_AFTER_SECONDS", 15.0),
+            slow_index_stale_after_seconds=env_float(
+                "MARKET_DATA_SLOW_INDEX_STALE_AFTER_SECONDS",
+                env_float("IBKR_SLOW_INDEX_STALE_AFTER_SECONDS", 300.0),
+            ),
+            slow_index_labels=frozenset(
+                env_csv("MARKET_DATA_SLOW_INDEX_LABELS", "index:SKEW,index:VVIX")
+            ),
         )
 
 
@@ -489,15 +506,15 @@ class IvSurfaceSettings:
     @classmethod
     def from_env(cls) -> "IvSurfaceSettings":
         load_dotenv()
-        data_root = _env("MARKET_DATA_DATA_ROOT", _env("MAINTENANCE_DATA_ROOT", "data"))
+        data_root = env_str("MARKET_DATA_DATA_ROOT", env_str("MAINTENANCE_DATA_ROOT", "data"))
         return cls(
             data_root=data_root,
-            latest_surface_path=_env(
+            latest_surface_path=env_str(
                 "IV_SURFACE_LATEST_PATH",
                 f"{data_root.rstrip('/')}/latest/iv_surface.json",
             ),
-            raw_file_name=_env("IV_SURFACE_RAW_FILE_NAME", "snapshots.jsonl"),
-            wide_quote_spread_bps=_env_float("IV_SURFACE_WIDE_QUOTE_SPREAD_BPS", 250.0),
+            raw_file_name=env_str("IV_SURFACE_RAW_FILE_NAME", "snapshots.jsonl"),
+            wide_quote_spread_bps=env_float("IV_SURFACE_WIDE_QUOTE_SPREAD_BPS", 250.0),
         )
 
 
@@ -531,52 +548,62 @@ class NotificationSettings:
     codex_timeout_seconds: float
     codex_output_max_chars: int
     codex_require_delivery_cue: bool
+    bark_enabled: bool = False
+    bark_url: str = ""
+    bark_group: str = "spx-spark"
+    bark_level: str = "timeSensitive"
+    bark_timeout_seconds: float = 10.0
 
     @classmethod
     def from_env(cls) -> "NotificationSettings":
         load_dotenv()
-        data_root = _env("MARKET_DATA_DATA_ROOT", _env("MAINTENANCE_DATA_ROOT", "data"))
+        data_root = env_str("MARKET_DATA_DATA_ROOT", env_str("MAINTENANCE_DATA_ROOT", "data"))
         return cls(
-            enabled=_env_bool("ALERT_NOTIFY_ENABLED", False),
-            min_severity=_env("ALERT_NOTIFY_MIN_SEVERITY", "high").lower(),
-            cooldown_seconds=_env_int("ALERT_NOTIFY_COOLDOWN_SECONDS", 300),
-            state_path=_env(
+            enabled=env_bool("ALERT_NOTIFY_ENABLED", False),
+            min_severity=env_str("ALERT_NOTIFY_MIN_SEVERITY", "high").lower(),
+            cooldown_seconds=env_int("ALERT_NOTIFY_COOLDOWN_SECONDS", 300),
+            state_path=env_str(
                 "ALERT_NOTIFY_STATE_PATH",
                 f"{data_root.rstrip('/')}/latest/alert_notify_state.json",
             ),
-            openclaw_enabled=_env_bool("ALERT_NOTIFY_OPENCLAW_ENABLED", False),
-            openclaw_command=_env("ALERT_NOTIFY_OPENCLAW_COMMAND", "openclaw"),
-            openclaw_channel=_env("ALERT_NOTIFY_OPENCLAW_CHANNEL", "openclaw-weixin"),
-            openclaw_account=_env("ALERT_NOTIFY_OPENCLAW_ACCOUNT"),
-            openclaw_target=_env("ALERT_NOTIFY_OPENCLAW_TARGET"),
-            openclaw_dry_run=_env_bool("ALERT_NOTIFY_OPENCLAW_DRY_RUN", True),
-            openclaw_timeout_seconds=_env_float("ALERT_NOTIFY_OPENCLAW_TIMEOUT_SECONDS", 20.0),
-            openclaw_agent_enabled=_env_bool("ALERT_NOTIFY_OPENCLAW_AGENT_ENABLED", False),
-            openclaw_agent_deliver=_env_bool("ALERT_NOTIFY_OPENCLAW_AGENT_DELIVER", False),
-            openclaw_agent_name=_env("ALERT_NOTIFY_OPENCLAW_AGENT_NAME", "main"),
-            openclaw_agent_model=_env(
+            openclaw_enabled=env_bool("ALERT_NOTIFY_OPENCLAW_ENABLED", False),
+            openclaw_command=env_str("ALERT_NOTIFY_OPENCLAW_COMMAND", "openclaw"),
+            openclaw_channel=env_str("ALERT_NOTIFY_OPENCLAW_CHANNEL", "openclaw-weixin"),
+            openclaw_account=env_str("ALERT_NOTIFY_OPENCLAW_ACCOUNT"),
+            openclaw_target=env_str("ALERT_NOTIFY_OPENCLAW_TARGET"),
+            openclaw_dry_run=env_bool("ALERT_NOTIFY_OPENCLAW_DRY_RUN", True),
+            openclaw_timeout_seconds=env_float("ALERT_NOTIFY_OPENCLAW_TIMEOUT_SECONDS", 20.0),
+            openclaw_agent_enabled=env_bool("ALERT_NOTIFY_OPENCLAW_AGENT_ENABLED", False),
+            openclaw_agent_deliver=env_bool("ALERT_NOTIFY_OPENCLAW_AGENT_DELIVER", False),
+            openclaw_agent_name=env_str("ALERT_NOTIFY_OPENCLAW_AGENT_NAME", "main"),
+            openclaw_agent_model=env_str(
                 "ALERT_NOTIFY_OPENCLAW_AGENT_MODEL",
                 "gpt-5.3-codex-spark",
             ),
-            openclaw_agent_session_key=_env(
+            openclaw_agent_session_key=env_str(
                 "ALERT_NOTIFY_OPENCLAW_AGENT_SESSION_KEY",
                 "spx-spark-alerts",
             ),
-            openclaw_agent_thinking=_env("ALERT_NOTIFY_OPENCLAW_AGENT_THINKING", "high"),
-            openclaw_agent_timeout_seconds=_env_float(
+            openclaw_agent_thinking=env_str("ALERT_NOTIFY_OPENCLAW_AGENT_THINKING", "high"),
+            openclaw_agent_timeout_seconds=env_float(
                 "ALERT_NOTIFY_OPENCLAW_AGENT_TIMEOUT_SECONDS",
                 180.0,
             ),
-            codex_enabled=_env_bool("ALERT_NOTIFY_CODEX_ENABLED", False),
-            codex_deliver=_env_bool("ALERT_NOTIFY_CODEX_DELIVER", True),
-            codex_command=_env("ALERT_NOTIFY_CODEX_COMMAND", "codex"),
-            codex_model=_env("ALERT_NOTIFY_CODEX_MODEL", "gpt-5.3-codex-spark"),
-            codex_reasoning_effort=_env("ALERT_NOTIFY_CODEX_REASONING_EFFORT", "high"),
-            codex_cwd=_env("ALERT_NOTIFY_CODEX_CWD", "."),
-            codex_sandbox=_env("ALERT_NOTIFY_CODEX_SANDBOX", "read-only"),
-            codex_timeout_seconds=_env_float("ALERT_NOTIFY_CODEX_TIMEOUT_SECONDS", 90.0),
-            codex_output_max_chars=_env_int("ALERT_NOTIFY_CODEX_OUTPUT_MAX_CHARS", 1800),
-            codex_require_delivery_cue=_env_bool("ALERT_NOTIFY_CODEX_REQUIRE_DELIVERY_CUE", True),
+            codex_enabled=env_bool("ALERT_NOTIFY_CODEX_ENABLED", False),
+            codex_deliver=env_bool("ALERT_NOTIFY_CODEX_DELIVER", True),
+            codex_command=env_str("ALERT_NOTIFY_CODEX_COMMAND", "codex"),
+            codex_model=env_str("ALERT_NOTIFY_CODEX_MODEL", "gpt-5.3-codex-spark"),
+            codex_reasoning_effort=env_str("ALERT_NOTIFY_CODEX_REASONING_EFFORT", "high"),
+            codex_cwd=env_str("ALERT_NOTIFY_CODEX_CWD", "."),
+            codex_sandbox=env_str("ALERT_NOTIFY_CODEX_SANDBOX", "read-only"),
+            codex_timeout_seconds=env_float("ALERT_NOTIFY_CODEX_TIMEOUT_SECONDS", 90.0),
+            codex_output_max_chars=env_int("ALERT_NOTIFY_CODEX_OUTPUT_MAX_CHARS", 1800),
+            codex_require_delivery_cue=env_bool("ALERT_NOTIFY_CODEX_REQUIRE_DELIVERY_CUE", True),
+            bark_enabled=env_bool("ALERT_NOTIFY_BARK_ENABLED", False),
+            bark_url=env_str("ALERT_NOTIFY_BARK_URL", "").rstrip("/"),
+            bark_group=env_str("ALERT_NOTIFY_BARK_GROUP", "spx-spark"),
+            bark_level=env_str("ALERT_NOTIFY_BARK_LEVEL", "timeSensitive"),
+            bark_timeout_seconds=env_float("ALERT_NOTIFY_BARK_TIMEOUT_SECONDS", 10.0),
         )
 
 
@@ -599,16 +626,16 @@ class SamplingSettings:
     def from_env(cls) -> "SamplingSettings":
         load_dotenv()
         return cls(
-            strike_step=_env_int("SAMPLING_STRIKE_STEP", 5),
-            window_points=_env_int("SAMPLING_WINDOW_POINTS", 200),
-            hot_window_points=_env_int("SAMPLING_HOT_WINDOW_POINTS", 50),
-            group_count=_env_int("SAMPLING_GROUP_COUNT", 4),
-            group_interval_seconds=_env_int("SAMPLING_GROUP_INTERVAL_SECONDS", 4),
-            degraded_group_count=_env_int("SAMPLING_DEGRADED_GROUP_COUNT", 20),
-            degraded_group_interval_seconds=_env_int("SAMPLING_DEGRADED_GROUP_INTERVAL_SECONDS", 3),
-            group_strategy=_env("SAMPLING_GROUP_STRATEGY", "interleaved").lower(),
-            hot_human_cadence_seconds=_env_int("SAMPLING_HOT_HUMAN_CADENCE_SECONDS", 8),
-            hot_execution_cadence_seconds=_env_int("SAMPLING_HOT_EXECUTION_CADENCE_SECONDS", 2),
-            include_next_expiry=_env_bool("SAMPLING_INCLUDE_NEXT_EXPIRY", True),
-            default_mode=_env("SAMPLING_DEFAULT_MODE", "human_alert"),
+            strike_step=env_int("SAMPLING_STRIKE_STEP", 5),
+            window_points=env_int("SAMPLING_WINDOW_POINTS", 200),
+            hot_window_points=env_int("SAMPLING_HOT_WINDOW_POINTS", 50),
+            group_count=env_int("SAMPLING_GROUP_COUNT", 4),
+            group_interval_seconds=env_int("SAMPLING_GROUP_INTERVAL_SECONDS", 4),
+            degraded_group_count=env_int("SAMPLING_DEGRADED_GROUP_COUNT", 20),
+            degraded_group_interval_seconds=env_int("SAMPLING_DEGRADED_GROUP_INTERVAL_SECONDS", 3),
+            group_strategy=env_str("SAMPLING_GROUP_STRATEGY", "interleaved").lower(),
+            hot_human_cadence_seconds=env_int("SAMPLING_HOT_HUMAN_CADENCE_SECONDS", 8),
+            hot_execution_cadence_seconds=env_int("SAMPLING_HOT_EXECUTION_CADENCE_SECONDS", 2),
+            include_next_expiry=env_bool("SAMPLING_INCLUDE_NEXT_EXPIRY", True),
+            default_mode=env_str("SAMPLING_DEFAULT_MODE", "human_alert"),
         )

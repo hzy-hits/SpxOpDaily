@@ -30,6 +30,8 @@ def make_storage_settings(tmp_path) -> StorageSettings:
         raw_file_name="quotes.jsonl",
         include_raw_payload=False,
         latest_stale_after_seconds=15.0,
+        slow_index_stale_after_seconds=300.0,
+        slow_index_labels=frozenset({"index:SKEW", "index:VVIX"}),
     )
 
 
@@ -139,3 +141,57 @@ def test_persist_provider_snapshot_writes_raw_and_latest(tmp_path):
     record = json.loads(Path(raw_path).read_text(encoding="utf-8").splitlines()[0])
     assert record["provider"] == "hyperliquid"
     assert state.best_quote("index:SPX").provider == Provider.HYPERLIQUID
+
+
+def test_persist_provider_snapshot_can_replace_ibkr_quotes(tmp_path):
+    settings = make_storage_settings(tmp_path)
+    store = LatestStateStore(settings)
+    now = datetime(2026, 7, 6, 13, 30, tzinfo=timezone.utc)
+    old_option = Quote(
+        instrument=InstrumentId.option("SPX", expiry="20260706", strike=7300, right="C", trading_class="SPXW"),
+        provider=Provider.IBKR,
+        received_at=now,
+        quality=MarketDataQuality.STALE,
+        provider_symbol="option:SPXW:20260706:7300:C",
+        mark=1.0,
+        quote_time=now - timedelta(days=2),
+    )
+    other_provider = make_quote(
+        provider=Provider.HYPERLIQUID,
+        quality=MarketDataQuality.LIVE,
+        mark=7493.5,
+        received_at=now,
+    )
+    store.update([old_option, other_provider], now=now)
+
+    new_option = Quote(
+        instrument=InstrumentId.option("SPX", expiry="20260706", strike=7500, right="C", trading_class="SPXW"),
+        provider=Provider.IBKR,
+        received_at=now + timedelta(seconds=12),
+        quality=MarketDataQuality.LIVE,
+        provider_symbol="option:SPXW:20260706:7500:C",
+        mark=20.0,
+        quote_time=now + timedelta(seconds=12),
+    )
+    index_quote = make_quote(
+        provider=Provider.IBKR,
+        quality=MarketDataQuality.LIVE,
+        mark=7524.0,
+        received_at=now + timedelta(seconds=12),
+    )
+    snapshot = ProviderSnapshot(
+        provider=Provider.IBKR,
+        received_at=now + timedelta(seconds=12),
+        quotes=(index_quote, new_option),
+        provider_states=(make_state(Provider.IBKR, checked_at=now + timedelta(seconds=12)),),
+        metadata={"replace_provider_quotes": True},
+    )
+
+    persist_provider_snapshot(snapshot, settings)
+    state = store.load(now=now + timedelta(seconds=12))
+    quote_ids = {quote.instrument.canonical_id for quote in state.quotes}
+
+    assert "option:SPX:SPXW:20260706:7300:C" not in quote_ids
+    assert "option:SPX:SPXW:20260706:7500:C" in quote_ids
+    assert "index:SPX" in quote_ids
+    assert any(quote.provider == Provider.HYPERLIQUID for quote in state.quotes)

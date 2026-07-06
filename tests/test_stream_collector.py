@@ -1,6 +1,8 @@
-from __future__ import annotations
+from datetime import datetime, timezone
 
 from spx_spark.config import SamplingSettings
+from spx_spark.ibkr.adapter import snapshot_from_rows
+from spx_spark.ibkr.verifier import VerifyRow
 from spx_spark.ibkr.stream_collector import (
     OptionSubscriptionPlan,
     ReconnectPolicy,
@@ -30,6 +32,33 @@ def make_sampling_settings(**overrides) -> SamplingSettings:
     }
     values.update(overrides)
     return SamplingSettings(**values)
+
+
+def test_snapshot_from_rows_can_request_provider_replace():
+    now = datetime(2026, 7, 6, 14, 0, tzinfo=timezone.utc)
+    rows = [
+        VerifyRow(
+            label="index:SPX",
+            kind="index",
+            symbol="SPX",
+            exchange="CBOE",
+            market_data_type=1,
+            market_price=7524.0,
+            ticker_time=now.isoformat(),
+        )
+    ]
+
+    snapshot = snapshot_from_rows(
+        rows,
+        received_at=now,
+        stale_after_seconds=15.0,
+        connected=True,
+        authenticated=True,
+        latency_ms=12.0,
+        replace_provider_quotes=True,
+    )
+
+    assert snapshot.metadata["replace_provider_quotes"] is True
 
 
 def test_option_plan_respects_line_budget_and_keeps_pairs():

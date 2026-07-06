@@ -9,7 +9,7 @@ from datetime import datetime
 from typing import Any
 
 from spx_spark.config import StorageSettings
-from spx_spark.marketdata import InstrumentType, MarketDataQuality, OptionRight, Quote
+from spx_spark.marketdata import InstrumentType, MarketDataQuality, OptionRight, Provider, ProviderStatus, Quote
 from spx_spark.storage import LatestState, LatestStateStore
 
 
@@ -18,7 +18,14 @@ UNDERLIER_CANDIDATES = (
     ("future:ES", 1.0),
     ("future:MES", 1.0),
     ("equity:SPY", 10.0),
-    ("crypto_perp:xyz:SP500", 1.0),
+)
+
+UNDERLIER_MISMATCH_SOURCES = frozenset(
+    {
+        "future:ES",
+        "future:MES",
+        "equity:SPY",
+    }
 )
 
 BAD_QUALITIES = {
@@ -124,6 +131,17 @@ def finite_float(value: Any) -> float | None:
     if not math.isfinite(out):
         return None
     return out
+
+
+def ibkr_provider_unavailable(state: LatestState) -> bool:
+    for provider_state in state.provider_states:
+        if provider_state.provider != Provider.IBKR:
+            continue
+        if provider_state.status == ProviderStatus.UNAVAILABLE:
+            return True
+        if provider_state.status == ProviderStatus.DEGRADED and provider_state.connected is not True:
+            return True
+    return False
 
 
 def select_underlier(state: LatestState) -> UnderlierReference:
@@ -415,17 +433,32 @@ def build_expiry_map(
     )
 
 
-def build_options_map(state: LatestState) -> OptionsMap:
-    underlier = select_underlier(state)
+def group_spxw_option_quotes(state: LatestState) -> dict[str, list[Quote]]:
+    ibkr_down = ibkr_provider_unavailable(state)
+    use_ibkr_only = not ibkr_down and any(
+        is_spxw_option(quote) and quote.provider == Provider.IBKR for quote in state.best_quotes
+    )
     grouped: dict[str, list[Quote]] = defaultdict(list)
     for quote in state.best_quotes:
         if not is_spxw_option(quote):
             continue
+        if quote.provider == Provider.IBKR and ibkr_down:
+            continue
+        if use_ibkr_only and quote.provider != Provider.IBKR:
+            continue
         expiry = quote.instrument.expiry or "unknown"
         grouped[expiry].append(quote)
+    return grouped
+
+
+def build_options_map(state: LatestState) -> OptionsMap:
+    underlier = select_underlier(state)
+    grouped = group_spxw_option_quotes(state)
 
     warnings: list[str] = []
-    underlier_mismatch = underlier.source is not None and underlier.source != "index:SPX"
+    underlier_mismatch = (
+        underlier.source is not None and underlier.source in UNDERLIER_MISMATCH_SOURCES
+    )
     if underlier.price is None:
         warnings.append("missing SPX underlier reference")
     elif underlier_mismatch:
@@ -434,6 +467,8 @@ def build_options_map(state: LatestState) -> OptionsMap:
         )
     if not grouped:
         warnings.append("missing SPXW option quotes")
+    if ibkr_provider_unavailable(state):
+        warnings.append("IBKR feed unavailable; stale SPXW option quotes suppressed")
 
     expiries = tuple(
         build_expiry_map(

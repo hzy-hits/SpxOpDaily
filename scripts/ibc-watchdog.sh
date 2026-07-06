@@ -16,12 +16,21 @@ set -euo pipefail
 #   restart a working session or fight a phone login (IBC uses
 #   ExistingSessionDetectedAction=secondary and yields anyway).
 
+# systemd user services do not include ~/.local/bin in PATH; without this the
+# `uv run` data-plane probe exits 127 and every probe "fails", which restarts
+# the Gateway (and triggers a fresh 2FA push) every THRESHOLD checks forever.
+export PATH="$HOME/.local/bin:$PATH"
+
 SERVICE="${IBC_SYSTEMD_SERVICE:-ibc-gateway.service}"
 HOST="${IBKR_HOST:-127.0.0.1}"
 PORT="${IBKR_PORT:-4001}"
 STATE_FILE="${IBC_WATCHDOG_STATE:-/srv/data/spx-spark/runtime/ibc/watchdog-failures}"
 THRESHOLD="${IBC_WATCHDOG_FAILURE_THRESHOLD:-3}"
 RUNTIME_MODE_FILE="${RUNTIME_MODE_PATH:-runtime/mode.json}"
+# Grace period after a gateway (re)start: login + 2FA + farm reconnect can take
+# minutes, and counting probe failures during that window creates a restart ->
+# 2FA -> restart loop.
+STARTUP_GRACE_SECONDS="${IBC_WATCHDOG_STARTUP_GRACE_SECONDS:-600}"
 
 log() { echo "[ibc-watchdog] $*"; }
 
@@ -62,19 +71,40 @@ PY
   fi
 fi
 
+service_uptime_seconds() {
+  local started_at started_epoch
+  started_at="$(systemctl --user show "$SERVICE" --property=ActiveEnterTimestamp --value 2>/dev/null || true)"
+  [[ -n "$started_at" ]] || { echo ""; return; }
+  started_epoch="$(date -d "$started_at" +%s 2>/dev/null || true)"
+  [[ -n "$started_epoch" ]] || { echo ""; return; }
+  echo "$(( $(date +%s) - started_epoch ))"
+}
+
 if timeout 5 bash -c "exec 3<>/dev/tcp/$HOST/$PORT" 2>/dev/null; then
   ROOT="${SPX_SPARK_ROOT:-/home/ubuntu/spx-spark}"
   DATA_PLANE_STATE="${IBC_DATA_PLANE_STATE:-/srv/data/spx-spark/runtime/ibc/data-plane-failures}"
   DATA_PLANE_THRESHOLD="${IBC_DATA_PLANE_FAILURE_THRESHOLD:-3}"
 
-  if (
-    cd "$ROOT"
-    timeout 60 uv run spx-spark-ibkr-farm-probe --json >/dev/null 2>&1
-  ); then
+  if ! command -v uv >/dev/null 2>&1; then
+    log "uv not found in PATH; skipping data plane probe instead of counting a failure"
+    rm -f "$STATE_FILE"
+    exit 0
+  fi
+
+  probe_exit=0
+  probe_output="$(cd "$ROOT" && timeout 60 uv run spx-spark-ibkr-farm-probe --json 2>&1)" || probe_exit=$?
+  if (( probe_exit == 0 )); then
     rm -f "$STATE_FILE" "$DATA_PLANE_STATE"
     log "API port $HOST:$PORT and data plane are healthy"
     exit 0
   fi
+
+  uptime_seconds="$(service_uptime_seconds)"
+  if [[ -n "$uptime_seconds" ]] && (( uptime_seconds < STARTUP_GRACE_SECONDS )); then
+    log "data plane probe failed but $SERVICE started ${uptime_seconds}s ago (<${STARTUP_GRACE_SECONDS}s grace); not counting"
+    exit 0
+  fi
+  log "data plane probe exit=$probe_exit: $(tail -n 1 <<<"$probe_output")"
 
   mkdir -p "$(dirname "$DATA_PLANE_STATE")"
   probe_failures=0

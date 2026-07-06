@@ -91,7 +91,8 @@ def test_runtime_policy_blocks_weekend_collection_in_auto_mode():
     assert policy.market_data_collection_allowed(monday)
 
 
-def test_storage_settings_inherits_maintenance_root(monkeypatch):
+def test_storage_settings_inherits_maintenance_root(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("MAINTENANCE_DATA_ROOT", "/tmp/spx-data")
     monkeypatch.delenv("MARKET_DATA_DATA_ROOT", raising=False)
     monkeypatch.delenv("MARKET_DATA_LATEST_STATE_PATH", raising=False)

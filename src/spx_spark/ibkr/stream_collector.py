@@ -45,6 +45,7 @@ from spx_spark.ibkr.farm_health import (
     request_gateway_restart,
     runtime_blocks_gateway_restart,
 )
+from spx_spark.ibkr.gateway import api_port_open
 from spx_spark.ibkr.verifier import (
     IbkrError,
     VerifyRow,
@@ -58,6 +59,7 @@ from spx_spark.ibkr.verifier import (
 )
 from spx_spark.marketdata import Provider, ProviderState, ProviderStatus
 from spx_spark.provider_adapter import ProviderSnapshot, persist_provider_snapshot
+from spx_spark.storage import LatestStateStore
 from spx_spark.runtime_mode import ibkr_allowed, load_override
 from spx_spark.sampling import OptionContractSpec, build_sampling_plan
 
@@ -254,6 +256,25 @@ def persist_state_only(state: ProviderState, storage_settings: StorageSettings) 
         ProviderSnapshot.from_state(Provider.IBKR, state, received_at=state.checked_at),
         storage_settings,
     )
+    if state.status == ProviderStatus.UNAVAILABLE:
+        LatestStateStore(storage_settings).purge_provider_quotes(Provider.IBKR)
+
+
+def sleep_until_reconnect(
+    *,
+    host: str,
+    port: int,
+    delay_seconds: float,
+    poll_seconds: float = 5.0,
+) -> None:
+    deadline = time.monotonic() + max(delay_seconds, 0.0)
+    while True:
+        if api_port_open(host, port):
+            return
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        time.sleep(min(poll_seconds, remaining))
 
 
 def log_event(event: dict[str, object]) -> None:
@@ -419,7 +440,12 @@ class StreamCollector:
     def flush(self) -> dict[str, object]:
         received_at = datetime.now(tz=timezone.utc)
         subscriptions = {**self.base_subs, **self.hot_subs, **self.rotation_subs}
-        rows = snapshot_rows(subscriptions, self.ibkr_settings.stale_after_seconds)
+        rows = snapshot_rows(
+            subscriptions,
+            self.ibkr_settings.stale_after_seconds,
+            slow_index_stale_after_seconds=self.ibkr_settings.slow_index_stale_after_seconds,
+            slow_index_labels=self.ibkr_settings.slow_index_labels,
+        )
         snapshot = snapshot_from_rows(
             rows,
             received_at=received_at,
@@ -428,6 +454,7 @@ class StreamCollector:
             authenticated=True,
             latency_ms=None,
             error_count=provider_error_count(self.errors),
+            replace_provider_quotes=True,
         )
         write_result = persist_provider_snapshot(snapshot, self.storage_settings)
         self.ensure_option_plan(rows)
@@ -512,7 +539,11 @@ class StreamRuntime:
                         "retry_in_seconds": delay,
                     }
                 )
-                self.sleep(delay)
+                sleep_until_reconnect(
+                    host=self.collector.ibkr_settings.host,
+                    port=self.collector.ibkr_settings.port,
+                    delay_seconds=delay,
+                )
                 continue
 
             self.reconnect.reset()

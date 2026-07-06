@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from spx_spark.config import IbkrSettings, NY_TZ
-from spx_spark.marketdata import quote_from_ibkr_row
+from spx_spark.ibkr.adapter import quote_from_ibkr_row
 
 
 DEFAULT_INDEX_EXCHANGES: dict[str, str] = {
@@ -78,6 +78,8 @@ class VerifyRow:
     bid_size: float | None = None
     ask_size: float | None = None
     last_size: float | None = None
+    volume: float | None = None
+    open_interest: float | None = None
     model_iv: float | None = None
     delta: float | None = None
     gamma: float | None = None
@@ -316,7 +318,7 @@ def subscribe_contract(
         contract = resolved
 
     try:
-        ticker = ib.reqMktData(contract, "", False, False)
+        ticker = ib.reqMktData(contract, generic_ticks_for_contract(contract), False, False)
         row.subscribed = True
         return ticker
     except Exception as exc:  # noqa: BLE001
@@ -337,7 +339,7 @@ def subscribe_contract(
             return None
 
         try:
-            ticker = ib.reqMktData(contract, "", False, False)
+            ticker = ib.reqMktData(contract, generic_ticks_for_contract(contract), False, False)
             row.subscribed = True
             return ticker
         except Exception as retry_exc:  # noqa: BLE001
@@ -350,13 +352,44 @@ def needs_contract_qualification(exc: Exception) -> bool:
     return "conid" in message or "can't be hashed" in message or "cannot be hashed" in message
 
 
+# Generic tick 100 = option volume, 101 = option open interest. Without 101
+# IBKR never sends OI, which leaves GEX/call-put walls/zero-gamma unavailable
+# (`gex_quality=no_open_interest_gex`).
+OPTION_GENERIC_TICKS = "100,101"
+
+
+def generic_ticks_for_contract(contract: Any) -> str:
+    if str(getattr(contract, "secType", "")).upper() == "OPT":
+        return OPTION_GENERIC_TICKS
+    return ""
+
+
+def option_open_interest_from_ticker(ticker: Any) -> float | None:
+    right = str(getattr(getattr(ticker, "contract", None), "right", "") or "").upper()
+    if right.startswith("C"):
+        return clean_float(getattr(ticker, "callOpenInterest", None))
+    if right.startswith("P"):
+        return clean_float(getattr(ticker, "putOpenInterest", None))
+    return None
+
+
 def snapshot_rows(
     subscriptions: dict[str, tuple[Any, VerifyRow]],
     stale_after_seconds: float,
+    *,
+    slow_index_stale_after_seconds: float | None = None,
+    slow_index_labels: frozenset[str] | None = None,
 ) -> list[VerifyRow]:
     now = datetime.now(tz=timezone.utc)
     rows: list[VerifyRow] = []
-    for _, (ticker, row) in subscriptions.items():
+    slow_labels = slow_index_labels or frozenset()
+    for label, (ticker, row) in subscriptions.items():
+        row_label = str(getattr(row, "label", "") or label)
+        row_stale_after = (
+            slow_index_stale_after_seconds
+            if slow_index_stale_after_seconds is not None and row_label in slow_labels
+            else stale_after_seconds
+        )
         if ticker is None:
             rows.append(row)
             continue
@@ -369,6 +402,9 @@ def snapshot_rows(
         row.bid_size = clean_float(getattr(ticker, "bidSize", None))
         row.ask_size = clean_float(getattr(ticker, "askSize", None))
         row.last_size = clean_float(getattr(ticker, "lastSize", None))
+        row.volume = clean_float(getattr(ticker, "volume", None))
+        if row.kind == "option":
+            row.open_interest = option_open_interest_from_ticker(ticker)
 
         try:
             row.market_price = clean_float(ticker.marketPrice())
@@ -380,7 +416,7 @@ def snapshot_rows(
             if ticker_time.tzinfo is None:
                 ticker_time = ticker_time.replace(tzinfo=timezone.utc)
             row.ticker_time = ticker_time.astimezone(timezone.utc).isoformat()
-            row.stale = (now - ticker_time.astimezone(timezone.utc)).total_seconds() > stale_after_seconds
+            row.stale = (now - ticker_time.astimezone(timezone.utc)).total_seconds() > row_stale_after
 
         greeks = getattr(ticker, "modelGreeks", None)
         if greeks is not None:

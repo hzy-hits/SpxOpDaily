@@ -3,13 +3,19 @@ from __future__ import annotations
 import argparse
 import json
 import os
-from dataclasses import asdict, dataclass
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 
+from spx_spark.alert_model import Alert, severity_for_priority
 from spx_spark.alert_profile import AlertWindow, active_window, parse_at
-from spx_spark.config import IvSurfaceSettings, NotificationSettings, StorageSettings
+from spx_spark.config import (
+    IvSurfaceSettings,
+    NotificationSettings,
+    StorageSettings,
+    env_bool,
+    env_float,
+)
 from spx_spark.human_focus import build_human_focus_context
 from spx_spark.iv_surface import (
     IvSurfaceSnapshot,
@@ -21,6 +27,7 @@ from spx_spark.market_context import build_market_context
 from spx_spark.marketdata import MarketDataQuality, Provider, ProviderState, ProviderStatus, Quote
 from spx_spark.notifier import notify_payload
 from spx_spark.options_map import OptionsMap, build_options_map
+from spx_spark.position_alerts import position_holdings_alerts
 from spx_spark.storage import LatestState, LatestStateStore
 
 
@@ -77,59 +84,19 @@ OPTION_GAMMA_ALERT_STATES = {
 }
 
 BAD_SURFACE_QUALITIES = {"missing_options", "missing_atm_iv", "low_iv_coverage", "wide_quote_degraded"}
+BLOCKING_SURFACE_QUALITIES = {"missing_options", "missing_atm_iv"}
+DEGRADED_SURFACE_QUALITIES = {"low_iv_coverage", "wide_quote_degraded"}
 ATM_IV_JUMP_THRESHOLD = 0.03
 SKEW_STEEPENING_THRESHOLD = 0.08
 SURFACE_SHIFT_THRESHOLD = 0.03
 TERM_GAP_THRESHOLD = 0.05
+SURFACE_SHIFT_1H_THRESHOLD = 0.05
+ATM_IV_CHANGE_1H_THRESHOLD = 0.04
 IBKR_INTERRUPTED_SESSION_STATUSES = {"competing_session", "unavailable"}
-
-
-@dataclass(frozen=True)
-class Alert:
-    severity: str
-    kind: str
-    instrument_id: str | None
-    title: str
-    detail: str
-    provider: str | None = None
-    quality: str | None = None
-    value: float | None = None
-    threshold: float | None = None
-    research_only: bool = False
-    source_gate: str | None = None
-    dedup_group: str | None = None
-
-    def to_dict(self) -> dict[str, object]:
-        return asdict(self)
-
-
-def severity_for_priority(priority: str) -> str:
-    return {
-        "critical": "critical",
-        "high": "high",
-        "elevated": "medium",
-        "normal": "medium",
-        "low": "low",
-        "off": "info",
-    }.get(priority, "medium")
 
 
 def find_best(state: LatestState, instrument_id: str) -> Quote | None:
     return state.best_quote(instrument_id)
-
-
-def env_float(name: str, default: float) -> float:
-    raw = os.getenv(name)
-    if not raw:
-        return default
-    return float(raw)
-
-
-def env_bool(name: str, default: bool) -> bool:
-    raw = os.getenv(name)
-    if not raw:
-        return default
-    return raw.lower() in {"1", "true", "yes", "on"}
 
 
 def quote_health_alert(
@@ -327,6 +294,7 @@ def evaluate_alerts(
     window: AlertWindow,
     options_map: OptionsMap | None = None,
     iv_surface: IvSurfaceSnapshot | None = None,
+    iv_surface_history_1h: dict[str, object] | None = None,
     market_context: dict[str, object] | None = None,
     persist_system_events: bool = False,
     persist_movement_state: bool = False,
@@ -357,7 +325,13 @@ def evaluate_alerts(
 
     alerts.extend(option_map_alerts(options_map or build_options_map(state), window=window))
     if iv_surface is not None:
-        alerts.extend(iv_surface_alerts(iv_surface, window=window))
+        alerts.extend(
+            iv_surface_alerts(
+                iv_surface,
+                window=window,
+                history_1h=iv_surface_history_1h,
+            )
+        )
     alerts.extend(position_holdings_alerts(state, options_map=options_map, window=window))
     alerts.extend(market_context_alerts(market_context))
     alerts.extend(system_event_alerts(state, persist=persist_system_events))
@@ -678,34 +652,6 @@ def system_event_alerts(state: LatestState, *, persist: bool = True) -> list[Ale
     return [alert] if alert is not None else []
 
 
-def position_holdings_alerts(
-    state: LatestState,
-    *,
-    options_map: OptionsMap | None,
-    window: AlertWindow,
-) -> list[Alert]:
-    from spx_spark.config import IbkrPositionSettings
-    from spx_spark.ibkr.position_alerts import (
-        evaluate_position_alerts,
-        load_position_alert_state,
-    )
-    from spx_spark.ibkr.position_watcher import load_snapshot
-
-    position_settings = IbkrPositionSettings.from_env()
-    if not position_settings.enabled or not position_settings.snapshot_path:
-        return []
-    snapshot = load_snapshot(position_settings.snapshot_path)
-    previous = load_position_alert_state()
-    return evaluate_position_alerts(
-        snapshot,
-        previous=previous,
-        state=state,
-        options_map=options_map,
-        window=window,
-        persist_state=True,
-    )
-
-
 def proxy_fallback_watch_alerts(
     state: LatestState,
     *,
@@ -755,8 +701,43 @@ def proxy_fallback_watch_alerts(
     ]
 
 
-def iv_surface_alerts(surface: IvSurfaceSnapshot, *, window: AlertWindow) -> list[Alert]:
+def magnitude_bucket(value: float, threshold: float) -> str:
+    """Dedup key for movement alerts: same direction and magnitude bucket share
+    a cooldown slot, while a clearly larger move (next bucket) can still push
+    through the cooldown."""
+    direction = "up" if value >= 0 else "down"
+    bucket = int(abs(value) // threshold) if threshold > 0 else 0
+    return f"{direction}:{bucket}"
+
+
+def iv_surface_movement_detail(body: str, *, degraded: bool) -> str:
+    if degraded:
+        return f"[degraded IV coverage] {body}"
+    return body
+
+
+def iv_surface_movement_severity(
+    window: AlertWindow,
+    *,
+    value: float,
+    threshold: float,
+    degraded: bool,
+) -> str:
+    base = severity_for_priority(window.priority)
+    if degraded and abs(value) >= threshold * 1.5:
+        return "high" if base in {"medium", "low", "info"} else base
+    return base
+
+
+def iv_surface_alerts(
+    surface: IvSurfaceSnapshot,
+    *,
+    window: AlertWindow,
+    history_1h: dict[str, object] | None = None,
+) -> list[Alert]:
     alerts: list[Alert] = []
+    shift_1h_threshold = env_float("ALERT_IV_SURFACE_SHIFT_1H_THRESHOLD", SURFACE_SHIFT_1H_THRESHOLD)
+    atm_change_1h_threshold = env_float("ALERT_IV_ATM_CHANGE_1H_THRESHOLD", ATM_IV_CHANGE_1H_THRESHOLD)
     if (
         surface.front_vs_next_atm_iv_gap is not None
         and abs(surface.front_vs_next_atm_iv_gap) >= TERM_GAP_THRESHOLD
@@ -773,10 +754,13 @@ def iv_surface_alerts(surface: IvSurfaceSnapshot, *, window: AlertWindow) -> lis
                 ),
                 value=surface.front_vs_next_atm_iv_gap,
                 threshold=TERM_GAP_THRESHOLD,
+                source_gate="iv_surface",
             )
         )
     for expiry in surface.expiries:
         instrument_id = f"iv_surface:SPXW:{expiry.expiry}"
+        blocked = expiry.surface_fit_quality in BLOCKING_SURFACE_QUALITIES
+        degraded = expiry.surface_fit_quality in DEGRADED_SURFACE_QUALITIES
         if expiry.surface_fit_quality in BAD_SURFACE_QUALITIES:
             alerts.append(
                 Alert(
@@ -786,22 +770,35 @@ def iv_surface_alerts(surface: IvSurfaceSnapshot, *, window: AlertWindow) -> lis
                     title=f"SPXW {expiry.expiry} surface {expiry.surface_fit_quality}",
                     detail=(
                         f"SPXW {expiry.expiry} IV surface quality is "
-                        f"{expiry.surface_fit_quality}; alerts should discount this expiry."
+                        f"{expiry.surface_fit_quality}; movement alerts may be discounted."
                     ),
                     quality=expiry.surface_fit_quality,
+                    source_gate="iv_surface",
                 )
             )
+        if blocked:
             continue
         if expiry.atm_iv_jump_5m is not None and abs(expiry.atm_iv_jump_5m) >= ATM_IV_JUMP_THRESHOLD:
             alerts.append(
                 Alert(
-                    severity=severity_for_priority(window.priority),
+                    severity=iv_surface_movement_severity(
+                        window,
+                        value=expiry.atm_iv_jump_5m,
+                        threshold=ATM_IV_JUMP_THRESHOLD,
+                        degraded=degraded,
+                    ),
                     kind="atm_iv_jump_5m",
                     instrument_id=instrument_id,
                     title=f"SPXW {expiry.expiry} ATM IV jump {expiry.atm_iv_jump_5m:.3f}",
-                    detail=f"ATM IV changed {expiry.atm_iv_jump_5m:.3f} since the previous surface snapshot.",
+                    detail=iv_surface_movement_detail(
+                        f"ATM IV changed {expiry.atm_iv_jump_5m:.3f} since the previous surface snapshot.",
+                        degraded=degraded,
+                    ),
                     value=expiry.atm_iv_jump_5m,
                     threshold=ATM_IV_JUMP_THRESHOLD,
+                    quality=expiry.surface_fit_quality if degraded else None,
+                    source_gate="iv_surface",
+                    dedup_group=magnitude_bucket(expiry.atm_iv_jump_5m, ATM_IV_JUMP_THRESHOLD),
                 )
             )
         if (
@@ -810,16 +807,25 @@ def iv_surface_alerts(surface: IvSurfaceSnapshot, *, window: AlertWindow) -> lis
         ):
             alerts.append(
                 Alert(
-                    severity=severity_for_priority(window.priority),
+                    severity=iv_surface_movement_severity(
+                        window,
+                        value=expiry.put_skew_steepening_5m,
+                        threshold=SKEW_STEEPENING_THRESHOLD,
+                        degraded=degraded,
+                    ),
                     kind="put_skew_steepening_5m",
                     instrument_id=instrument_id,
                     title=f"SPXW {expiry.expiry} put skew steepening {expiry.put_skew_steepening_5m:.3f}",
-                    detail=(
+                    detail=iv_surface_movement_detail(
                         f"Put skew ratio increased {expiry.put_skew_steepening_5m:.3f} "
-                        "since the previous surface snapshot."
+                        "since the previous surface snapshot.",
+                        degraded=degraded,
                     ),
                     value=expiry.put_skew_steepening_5m,
                     threshold=SKEW_STEEPENING_THRESHOLD,
+                    quality=expiry.surface_fit_quality if degraded else None,
+                    source_gate="iv_surface",
+                    dedup_group=magnitude_bucket(expiry.put_skew_steepening_5m, SKEW_STEEPENING_THRESHOLD),
                 )
             )
         if (
@@ -828,18 +834,98 @@ def iv_surface_alerts(surface: IvSurfaceSnapshot, *, window: AlertWindow) -> lis
         ):
             alerts.append(
                 Alert(
-                    severity=severity_for_priority(window.priority),
+                    severity=iv_surface_movement_severity(
+                        window,
+                        value=expiry.iv_surface_shift_5m,
+                        threshold=SURFACE_SHIFT_THRESHOLD,
+                        degraded=degraded,
+                    ),
                     kind="iv_surface_shift_5m",
                     instrument_id=instrument_id,
                     title=f"SPXW {expiry.expiry} surface shift {expiry.iv_surface_shift_5m:.3f}",
-                    detail=(
+                    detail=iv_surface_movement_detail(
                         f"Average raw-grid IV shifted {expiry.iv_surface_shift_5m:.3f} "
-                        "since the previous surface snapshot."
+                        "since the previous surface snapshot.",
+                        degraded=degraded,
                     ),
                     value=expiry.iv_surface_shift_5m,
                     threshold=SURFACE_SHIFT_THRESHOLD,
+                    quality=expiry.surface_fit_quality if degraded else None,
+                    source_gate="iv_surface",
+                    dedup_group=magnitude_bucket(expiry.iv_surface_shift_5m, SURFACE_SHIFT_THRESHOLD),
                 )
             )
+    if isinstance(history_1h, dict):
+        expiry_rows = history_1h.get("expiries")
+        if isinstance(expiry_rows, list):
+            for row in expiry_rows:
+                if not isinstance(row, dict):
+                    continue
+                expiry_name = str(row.get("expiry") or "")
+                if not expiry_name:
+                    continue
+                fit_quality = str(row.get("surface_fit_quality") or "")
+                blocked = fit_quality in BLOCKING_SURFACE_QUALITIES
+                degraded = fit_quality in DEGRADED_SURFACE_QUALITIES
+                instrument_id = f"iv_surface:SPXW:{expiry_name}"
+                shift_1h = row.get("iv_surface_level_change_1h")
+                if (
+                    not blocked
+                    and isinstance(shift_1h, (int, float))
+                    and abs(float(shift_1h)) >= shift_1h_threshold
+                ):
+                    shift_value = float(shift_1h)
+                    alerts.append(
+                        Alert(
+                            severity=iv_surface_movement_severity(
+                                window,
+                                value=shift_value,
+                                threshold=shift_1h_threshold,
+                                degraded=degraded,
+                            ),
+                            kind="iv_surface_shift_1h",
+                            instrument_id=instrument_id,
+                            title=f"SPXW {expiry_name} 1h surface shift {shift_value:.3f}",
+                            detail=iv_surface_movement_detail(
+                                f"Average raw-grid IV shifted {shift_value:.3f} over the last hour.",
+                                degraded=degraded,
+                            ),
+                            value=shift_value,
+                            threshold=shift_1h_threshold,
+                            quality=fit_quality if degraded else None,
+                            source_gate="iv_surface",
+                            dedup_group=f"{int(shift_value * 100) // int(shift_1h_threshold * 100)}",
+                        )
+                    )
+                atm_change_1h = row.get("atm_iv_change_1h")
+                if (
+                    not blocked
+                    and isinstance(atm_change_1h, (int, float))
+                    and abs(float(atm_change_1h)) >= atm_change_1h_threshold
+                ):
+                    atm_value = float(atm_change_1h)
+                    alerts.append(
+                        Alert(
+                            severity=iv_surface_movement_severity(
+                                window,
+                                value=atm_value,
+                                threshold=atm_change_1h_threshold,
+                                degraded=degraded,
+                            ),
+                            kind="atm_iv_change_1h",
+                            instrument_id=instrument_id,
+                            title=f"SPXW {expiry_name} 1h ATM IV change {atm_value:.3f}",
+                            detail=iv_surface_movement_detail(
+                                f"ATM IV changed {atm_value:.3f} over the last hour.",
+                                degraded=degraded,
+                            ),
+                            value=atm_value,
+                            threshold=atm_change_1h_threshold,
+                            quality=fit_quality if degraded else None,
+                            source_gate="iv_surface",
+                            dedup_group=f"{int(atm_value * 100) // int(atm_change_1h_threshold * 100)}",
+                        )
+                    )
     return alerts
 
 
@@ -876,6 +962,7 @@ def evaluate_payload(
         window=window,
         options_map=options_map,
         iv_surface=iv_surface_for_alerts,
+        iv_surface_history_1h=iv_surface_history_1h,
         market_context=market_context,
         persist_system_events=persist_system_events,
         persist_movement_state=persist_movement_state,

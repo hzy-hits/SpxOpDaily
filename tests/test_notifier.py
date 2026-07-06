@@ -15,6 +15,7 @@ from spx_spark.notifier import (
     run_codex_exec,
     run_openclaw_agent,
     select_alerts_for_notification,
+    send_bark_message,
 )
 
 
@@ -246,14 +247,240 @@ def test_openclaw_agent_uses_configured_model_and_thinking(tmp_path) -> None:
 
     settings = make_settings(str(tmp_path / "notify-state.json"))
 
-    result = run_openclaw_agent(settings, "analyze this alert", runner=runner)
+    result, message = run_openclaw_agent(settings, "analyze this alert", runner=runner)
 
     assert result.ok is True
+    assert message == "{}"
     command = calls[0]
     assert "--model" in command
     assert command[command.index("--model") + 1] == "gpt-5.3-codex-spark"
     assert "--thinking" in command
     assert command[command.index("--thinking") + 1] == "high"
+    assert "--deliver" not in command
+
+
+def test_notifier_uses_openclaw_agent_single_track_for_review_candidates(tmp_path) -> None:
+    calls: list[list[str]] = []
+
+    def runner(command: list[str], timeout_seconds: float) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        if command[:2] == ["openclaw", "agent"]:
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout='{"text":"需要看盘: SPX alert confirmed"}',
+                stderr="",
+            )
+        return subprocess.CompletedProcess(command, 0, stdout="{}", stderr="")
+
+    settings = replace(
+        make_settings(str(tmp_path / "notify-state.json")),
+        openclaw_enabled=False,
+        openclaw_agent_enabled=True,
+        openclaw_agent_deliver=True,
+        codex_enabled=False,
+    )
+
+    result = notify_payload(
+        make_payload(),
+        settings=settings,
+        runner=runner,
+        now=datetime(2026, 7, 7, 0, 0, tzinfo=timezone.utc),
+    )
+
+    assert result.sent_count == 1
+    assert [sink.sink for sink in result.sinks] == ["openclaw_agent", "openclaw_message"]
+    assert calls[0][:2] == ["openclaw", "agent"]
+    assert "--deliver" not in calls[0]
+    assert calls[0][calls[0].index("--session-key") + 1] == "spx-spark-alerts"
+    assert calls[1][:3] == ["openclaw", "message", "send"]
+    assert calls[1][calls[1].index("--message") + 1] == "需要看盘: SPX alert confirmed"
+
+
+def test_send_bark_message_posts_title_body_and_group(tmp_path) -> None:
+    posts: list[tuple[str, dict[str, object], float]] = []
+
+    def poster(url: str, payload: dict[str, object], timeout: float) -> dict[str, object]:
+        posts.append((url, payload, timeout))
+        return {"code": 200}
+
+    settings = replace(
+        make_settings(str(tmp_path / "notify-state.json")),
+        bark_enabled=True,
+        bark_url="https://api.day.app/test-key",
+    )
+
+    result = send_bark_message(settings, "SPX Spark HIGH", "需要看盘: test", poster=poster)
+
+    assert result.ok is True
+    url, payload, timeout = posts[0]
+    assert url == "https://api.day.app/test-key"
+    assert payload["title"] == "SPX Spark HIGH"
+    assert payload["body"] == "需要看盘: test"
+    assert payload["group"] == "spx-spark"
+    assert payload["level"] == "timeSensitive"
+
+
+def test_send_bark_message_reports_non_200_as_error(tmp_path) -> None:
+    settings = replace(
+        make_settings(str(tmp_path / "notify-state.json")),
+        bark_enabled=True,
+        bark_url="https://api.day.app/test-key",
+    )
+
+    result = send_bark_message(
+        settings,
+        "t",
+        "b",
+        poster=lambda *_: {"code": 400, "message": "device key invalid"},
+    )
+
+    assert result.ok is False
+    assert "400" in (result.error or "")
+
+
+def test_notifier_agent_approved_message_also_goes_to_bark(tmp_path, monkeypatch) -> None:
+    bark_posts: list[dict[str, object]] = []
+
+    def fake_post_bark(url: str, payload: dict[str, object], timeout: float) -> dict[str, object]:
+        bark_posts.append(payload)
+        return {"code": 200}
+
+    monkeypatch.setattr("spx_spark.notifier.sinks.post_bark", fake_post_bark)
+
+    def runner(command: list[str], timeout_seconds: float) -> subprocess.CompletedProcess[str]:
+        if command[:2] == ["openclaw", "agent"]:
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout='{"text":"需要看盘: SPX alert confirmed"}',
+                stderr="",
+            )
+        return subprocess.CompletedProcess(command, 0, stdout="{}", stderr="")
+
+    settings = replace(
+        make_settings(str(tmp_path / "notify-state.json")),
+        openclaw_enabled=False,
+        openclaw_agent_enabled=True,
+        openclaw_agent_deliver=True,
+        codex_enabled=False,
+        bark_enabled=True,
+        bark_url="https://api.day.app/test-key",
+    )
+
+    result = notify_payload(
+        make_payload(),
+        settings=settings,
+        runner=runner,
+        now=datetime(2026, 7, 7, 0, 0, tzinfo=timezone.utc),
+    )
+
+    assert [sink.sink for sink in result.sinks] == [
+        "openclaw_agent",
+        "openclaw_message",
+        "bark",
+    ]
+    assert result.sent_count == 2
+    assert bark_posts[0]["body"] == "需要看盘: SPX alert confirmed"
+    assert str(bark_posts[0]["title"]).startswith("SPX Spark HIGH")
+
+
+def test_notifier_bark_delivery_alone_still_starts_cooldown(tmp_path, monkeypatch) -> None:
+    """If the Weixin token is dead but Bark reaches the human, the alert
+    counts as delivered and must enter cooldown."""
+    monkeypatch.setattr(
+        "spx_spark.notifier.sinks.post_bark",
+        lambda *_: {"code": 200},
+    )
+
+    calls: list[list[str]] = []
+
+    def runner(command: list[str], timeout_seconds: float) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        if command[:2] == ["openclaw", "agent"]:
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout='{"text":"需要看盘: SPX alert confirmed"}',
+                stderr="",
+            )
+        # Weixin delivery fails (expired contextToken).
+        return subprocess.CompletedProcess(command, 1, stdout="", stderr="ret=-2")
+
+    settings = replace(
+        make_settings(str(tmp_path / "notify-state.json")),
+        openclaw_enabled=False,
+        openclaw_agent_enabled=True,
+        openclaw_agent_deliver=True,
+        codex_enabled=False,
+        bark_enabled=True,
+        bark_url="https://api.day.app/test-key",
+    )
+
+    first = notify_payload(
+        make_payload(),
+        settings=settings,
+        runner=runner,
+        now=datetime(2026, 7, 7, 0, 0, tzinfo=timezone.utc),
+    )
+    assert first.sent_count == 1
+
+    second = notify_payload(
+        make_payload(),
+        settings=settings,
+        runner=runner,
+        now=datetime(2026, 7, 7, 0, 2, tzinfo=timezone.utc),
+    )
+    assert second.selected_count == 0
+
+
+def test_notifier_agent_no_push_verdict_is_not_delivered_and_starts_cooldown(tmp_path) -> None:
+    calls: list[list[str]] = []
+
+    def runner(command: list[str], timeout_seconds: float) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        if command[:2] == ["openclaw", "agent"]:
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout='{"text":"不需要推送: 数据降级，仅记录。"}',
+                stderr="",
+            )
+        return subprocess.CompletedProcess(command, 0, stdout="{}", stderr="")
+
+    settings = replace(
+        make_settings(str(tmp_path / "notify-state.json")),
+        openclaw_enabled=False,
+        openclaw_agent_enabled=True,
+        openclaw_agent_deliver=True,
+        codex_enabled=False,
+    )
+
+    first = notify_payload(
+        make_payload(),
+        settings=settings,
+        runner=runner,
+        now=datetime(2026, 7, 7, 0, 0, tzinfo=timezone.utc),
+    )
+
+    assert first.sent_count == 0
+    assert [sink.sink for sink in first.sinks] == [
+        "openclaw_agent",
+        "openclaw_agent_delivery_gate",
+    ]
+    assert all(call[:3] != ["openclaw", "message", "send"] for call in calls)
+
+    # Same alerts again shortly after: the rejected bucket is in cooldown, so
+    # the agent must not be re-run.
+    second = notify_payload(
+        make_payload(),
+        settings=settings,
+        runner=runner,
+        now=datetime(2026, 7, 7, 0, 2, tzinfo=timezone.utc),
+    )
+
+    assert second.selected_count == 0
+    assert len(calls) == 1
 
 
 def test_codex_exec_uses_local_codex_model_and_reasoning(tmp_path) -> None:
@@ -348,7 +575,7 @@ def test_codex_scope_gate_blocks_non_focus_symbols(tmp_path) -> None:
         if command[:2] == ["codex", "exec"]:
             output_path = command[command.index("--output-last-message") + 1]
             with open(output_path, "w", encoding="utf-8") as handle:
-                handle.write("需要看盘: SPX alert confirmed, but QQQ context also moved")
+                handle.write("需要看盘: SPX alert confirmed, but Hyperliquid proxy also moved")
         return subprocess.CompletedProcess(command, 0, stdout="{}", stderr="")
 
     settings = replace(
@@ -377,8 +604,11 @@ def test_codex_message_requests_delivery_uses_explicit_cues() -> None:
 
 def test_codex_message_respects_human_scope_blocks_non_focus_context() -> None:
     assert codex_message_respects_human_scope("需要看盘: SPX near SPXW call wall; ES confirms.")
-    assert not codex_message_respects_human_scope("需要看盘: SPX setup with VIX context.")
+    assert codex_message_respects_human_scope("需要看盘: SPX setup with VIX context.")
+    assert codex_message_respects_human_scope("需要看盘: gamma transition, VIX1D 18 -> 21, SKEW rising.")
+    assert codex_message_respects_human_scope("需要看盘: SPX setup, SPY/QQQ confirm the move.")
     assert not codex_message_respects_human_scope("需要看盘: SPX setup with Hyperliquid context.")
+    assert not codex_message_respects_human_scope("需要看盘: Polymarket odds shifted.")
 
 
 def test_notifier_filters_non_spx_context_alerts_from_human_push(tmp_path) -> None:
@@ -573,6 +803,123 @@ def test_notifier_sends_system_events_even_when_raw_openclaw_sink_is_disabled(tm
     assert result.selected_count == 1
     assert result.sent_count == 1
     assert calls
+
+
+def test_notifier_sends_position_holding_alerts_without_codex(tmp_path) -> None:
+    calls: list[list[str]] = []
+
+    def runner(command: list[str], timeout_seconds: float) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout="{}", stderr="")
+
+    payload = make_payload()
+    payload["alerts"] = [
+        {
+            "severity": "high",
+            "kind": "spxw_position_book_pnl",
+            "instrument_id": "option_map:SPXW",
+            "title": "SPXW 浮盈浮亏 $-438 (-11.7%)",
+            "detail": "book loss beyond $-400\nSPX 7483",
+            "quality": "live",
+            "source_gate": "ibkr_positions",
+        }
+    ]
+    settings = replace(
+        make_settings(str(tmp_path / "notify-state.json")),
+        openclaw_enabled=False,
+        codex_enabled=True,
+    )
+
+    result = notify_payload(
+        payload,
+        settings=settings,
+        runner=runner,
+        now=datetime(2026, 7, 7, 0, 0, tzinfo=timezone.utc),
+    )
+
+    assert result.selected_count == 1
+    assert result.sent_count == 1
+    assert len(calls) == 1
+    assert calls[0][0:3] == ["openclaw", "message", "send"]
+    message_index = calls[0].index("--message") + 1
+    assert "浮盈浮亏" in calls[0][message_index]
+
+
+def test_notifier_skips_near_expiry_position_noise(tmp_path) -> None:
+    calls: list[list[str]] = []
+
+    def runner(command: list[str], timeout_seconds: float) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout="{}", stderr="")
+
+    payload = make_payload()
+    payload["alerts"] = [
+        {
+            "severity": "high",
+            "kind": "spxw_position_near_expiry",
+            "instrument_id": "option:SPX:SPXW:20260706:7480:C",
+            "title": "SPXW 20260706 7480C expires in 0d",
+            "detail": "Held SPXW expires today; qty=1.",
+            "quality": "live",
+            "source_gate": "ibkr_positions",
+        }
+    ]
+    settings = replace(
+        make_settings(str(tmp_path / "notify-state.json")),
+        openclaw_enabled=False,
+        codex_enabled=False,
+    )
+
+    result = notify_payload(
+        payload,
+        settings=settings,
+        runner=runner,
+        now=datetime(2026, 7, 7, 0, 0, tzinfo=timezone.utc),
+    )
+
+    assert result.selected_count == 1
+    assert result.sent_count == 0
+    assert calls == []
+
+
+def test_notifier_routes_iv_surface_alerts_through_review(tmp_path) -> None:
+    """IV-surface movement alerts must not bypass review with a raw push; they
+    go to the codex/agent review path so the human gets gamma/VIX context."""
+    calls: list[list[str]] = []
+
+    def runner(command: list[str], timeout_seconds: float) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout="{}", stderr="")
+
+    payload = make_payload()
+    payload["alerts"] = [
+        {
+            "severity": "critical",
+            "kind": "iv_term_gap",
+            "instrument_id": "iv_surface:SPXW",
+            "title": "0DTE vs next ATM IV gap 0.051",
+            "detail": "Front SPXW ATM IV differs from next-expiry ATM IV by 0.051.",
+            "quality": "live",
+            "source_gate": "iv_surface",
+        }
+    ]
+    settings = replace(
+        make_settings(str(tmp_path / "notify-state.json")),
+        openclaw_enabled=False,
+        codex_enabled=True,
+    )
+
+    result = notify_payload(
+        payload,
+        settings=settings,
+        runner=runner,
+        now=datetime(2026, 7, 7, 0, 0, tzinfo=timezone.utc),
+    )
+
+    assert result.selected_count == 1
+    assert len(calls) == 1
+    assert calls[0][1] == "exec"
+    assert "--message" not in calls[0]
 
 
 def test_codex_prompt_hides_non_focus_market_context() -> None:

@@ -3,7 +3,6 @@ from __future__ import annotations
 from spx_spark.ibkr.position_watcher import (
     build_canonical_id,
     is_spxw_contract,
-    normalize_expiry,
 )
 
 

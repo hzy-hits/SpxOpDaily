@@ -66,6 +66,9 @@ class PositionSnapshot:
     positions: tuple[SpxwPosition, ...]
     spx_reference_price: float | None
     spx_reference_source: str | None
+    book_unrealized_pnl: float | None = None
+    book_cost_basis: float | None = None
+    book_unrealized_pnl_pct: float | None = None
 
     @property
     def total_contracts(self) -> int:
@@ -179,12 +182,23 @@ def position_from_ib(
     )
 
 
+def snapshot_book_metrics(
+    positions: tuple[SpxwPosition, ...],
+) -> tuple[float | None, float | None, float | None]:
+    pnls = [item.unrealized_pnl for item in positions if item.unrealized_pnl is not None]
+    if not pnls:
+        return None, None, None
+    book_pnl = sum(pnls)
+    book_cost = sum(abs(item.avg_cost) for item in positions if item.unrealized_pnl is not None)
+    book_pnl_pct = (book_pnl / book_cost * 100.0) if book_cost else None
+    return book_pnl, book_cost, book_pnl_pct
+
+
 def fetch_positions(
     ib: Any,
     *,
     storage_settings: StorageSettings,
 ) -> PositionSnapshot:
-    from ib_async.ib import StartupFetch
 
     store = LatestStateStore(storage_settings)
     spx_price, spx_source = spx_reference_from_state(store)
@@ -198,12 +212,16 @@ def fetch_positions(
     ]
     accounts = {item.account for item in rows}
     fetched_at = datetime.now(tz=timezone.utc).isoformat()
+    book_pnl, book_cost, book_pnl_pct = snapshot_book_metrics(tuple(rows))
     return PositionSnapshot(
         fetched_at=fetched_at,
         account_count=len(accounts),
         positions=tuple(sorted(rows, key=lambda item: (item.expiry, item.strike, item.right, item.qty))),
         spx_reference_price=spx_price,
         spx_reference_source=spx_source,
+        book_unrealized_pnl=book_pnl,
+        book_cost_basis=book_cost,
+        book_unrealized_pnl_pct=book_pnl_pct,
     )
 
 
@@ -238,12 +256,20 @@ def load_snapshot(path: str) -> PositionSnapshot | None:
     except (OSError, json.JSONDecodeError):
         return None
     positions = tuple(SpxwPosition(**item) for item in raw.get("positions", []))
+    book_pnl = raw.get("book_unrealized_pnl")
+    book_cost = raw.get("book_cost_basis")
+    book_pnl_pct = raw.get("book_unrealized_pnl_pct")
+    if book_pnl is None and positions:
+        book_pnl, book_cost, book_pnl_pct = snapshot_book_metrics(positions)
     return PositionSnapshot(
         fetched_at=str(raw.get("fetched_at") or ""),
         account_count=int(raw.get("account_count") or 0),
         positions=positions,
         spx_reference_price=raw.get("spx_reference_price"),
         spx_reference_source=raw.get("spx_reference_source"),
+        book_unrealized_pnl=float(book_pnl) if isinstance(book_pnl, int | float) else book_pnl,
+        book_cost_basis=float(book_cost) if isinstance(book_cost, int | float) else book_cost,
+        book_unrealized_pnl_pct=float(book_pnl_pct) if isinstance(book_pnl_pct, int | float) else book_pnl_pct,
     )
 
 
@@ -302,8 +328,15 @@ def run(argv: list[str] | None = None) -> int:
         print(json.dumps(asdict(snapshot), indent=2, sort_keys=True))
     else:
         print(f"SPXW positions: {snapshot.total_contracts}")
+        if snapshot.book_unrealized_pnl is not None:
+            pct = (
+                f" ({snapshot.book_unrealized_pnl_pct:+.1f}%)"
+                if snapshot.book_unrealized_pnl_pct is not None
+                else ""
+            )
+            print(f"Book unrealized: ${snapshot.book_unrealized_pnl:+,.0f}{pct}")
         for item in snapshot.positions:
-            pnl = "-" if item.unrealized_pnl_pct is None else f"{item.unrealized_pnl_pct:.1f}%"
+            pnl = "-" if item.unrealized_pnl_pct is None else f"{item.unrealized_pnl_pct:+.1f}%"
             print(f"- {item.label} qty={item.qty:g} pnl={pnl}")
         print(f"Wrote snapshot: {output_path}")
     return 0

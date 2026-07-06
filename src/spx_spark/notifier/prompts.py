@@ -1,0 +1,115 @@
+from __future__ import annotations
+
+import json
+
+
+def format_alert_message(payload: dict[str, object], alerts: list[dict[str, object]]) -> str:
+    window = payload.get("window")
+    window_name = "unknown"
+    priority = "unknown"
+    if isinstance(window, dict):
+        window_name = str(window.get("name") or "unknown")
+        priority = str(window.get("priority") or "unknown")
+
+    lines = [
+        "SPX/SPXW alert",
+        f"window: {window_name} priority={priority}",
+        f"as_of: {payload.get('as_of')}",
+        f"alerts: {len(alerts)}",
+    ]
+    for alert in alerts[:6]:
+        severity = alert.get("severity")
+        title = alert.get("title")
+        detail = alert.get("detail")
+        lines.append(f"- [{severity}] {title}")
+        if detail:
+            lines.append(f"  {detail}")
+    if len(alerts) > 6:
+        lines.append(f"... {len(alerts) - 6} more alerts suppressed in push body")
+    return "\n".join(lines)
+
+
+def build_agent_prompt(payload: dict[str, object], alerts: list[dict[str, object]]) -> str:
+    compact_payload = {
+        "as_of": payload.get("as_of"),
+        "window": compact_window(payload.get("window")),
+        "alerts": alerts[:12],
+        "human_focus_context": payload.get("human_focus_context"),
+    }
+    return "\n".join(
+        (
+            "你是 SPX Spark 的盘中告警分析 agent。",
+            "只根据下面的 JSON 做简短判断；不要给自动下单指令，不要假设缺失数据。",
+            "人类只交易 SPX/SPXW；结论必须落在 SPX/SPXW/ES、期权墙、gamma、IV surface 上，"
+            "VIX/VIX1D/VVIX/SKEW 作 vol regime 上下文，SPY/QQQ 可少量引用作确认；不要提加密或预测市场数据源。",
+            "如果 options_map 警告含 underlier_mismatch 或 gamma_state 以 unknown 开头，只说明数据降级，不下 wall/gamma 结论。",
+            "输出结构：1. 发生了什么 2. gamma 状态与 vol regime 3. 风险/数据质量 4. 人类需要看的 SPX/SPXW 检查项。",
+            json.dumps(compact_payload, ensure_ascii=False, sort_keys=True),
+        )
+    )
+
+
+def compact_window(window: object) -> dict[str, object] | None:
+    if not isinstance(window, dict):
+        return None
+    return {
+        "name": window.get("name"),
+        "priority": window.get("priority"),
+        "cadence_seconds": window.get("cadence_seconds"),
+        "summary_cadence_seconds": window.get("summary_cadence_seconds"),
+        "spxw_sampling_mode": window.get("spxw_sampling_mode"),
+        "user_unattended": window.get("user_unattended"),
+    }
+
+
+def compact_analysis_payload(
+    payload: dict[str, object],
+    alerts: list[dict[str, object]],
+) -> dict[str, object]:
+    market_context = payload.get("market_context")
+    algorithm_quality: object = None
+    if isinstance(market_context, dict):
+        algorithm_quality = {
+            "quality_summary": market_context.get("quality_summary"),
+            "note": (
+                "Non-focus market context may be used only as hidden algorithm scoring input; "
+                "never mention individual non-SPX/SPXW/ES instruments to the human."
+            ),
+        }
+
+    return {
+        "as_of": payload.get("as_of"),
+        "window": compact_window(payload.get("window")),
+        "visible_scope": ("SPX", "SPXW", "ES"),
+        "human_focus_context": payload.get("human_focus_context"),
+        "algorithm_quality": algorithm_quality,
+        "alerts": alerts[:8],
+    }
+
+
+def build_codex_prompt(payload: dict[str, object], alerts: list[dict[str, object]]) -> str:
+    compact_payload = compact_analysis_payload(payload, alerts)
+    return "\n".join(
+        (
+            "你是 SPX Spark 的快速告警确认 agent。",
+            "只根据下面的本机 JSON 判断是否需要推送给人类。不要给自动下单指令，不要编造缺失数据。",
+            "人类只交易 SPX/SPXW；结论和检查项必须落在 SPX/SPXW/ES、期权墙、gamma、IV surface 上，"
+            "VIX/VIX1D/VVIX/SKEW 等波动率指数作 vol regime 上下文，SPY/QQQ 等指数 ETF 可少量引用作确认上下文。",
+            "不要提加密、链上、预测市场类数据源；隐藏算法上下文只能影响是否推送，不能进入人类可见解释。",
+            "凡是 research_only、stale、missing、unknown、coverage 不足或 IV surface stale，默认不外发；只说明数据质量。",
+            "带 source_gate 的告警默认不外发，唯一例外是 broker_unavailable_fallback、ibkr_session_state、ibkr_positions、iv_surface；"
+            "ibkr_positions 表示 IBKR 实盘 SPXW 持仓变化或风险；iv_surface 表示 SPXW IV 曲面期限差或异动。",
+            "如果 SPXW 期权 freshness gate 失败，不得基于 wall/gamma/IV 做看盘结论。",
+            "如果 options_map 警告含 underlier_mismatch，或 gamma_state 以 unknown 开头，不得基于 wall/gamma 下结论，只能说明数据降级。",
+            "gamma_state 为 zero_gamma_transition（micopedia 为 transition）表示零 gamma 交叉区：突破后波动可能放大，不得按 pin/均值回归解读。",
+            "如果 ES/SPX anchor 缺失，不得把任何链上或 proxy 数据当作交易确认。",
+            "如果 window.user_unattended 为 true，说明人类大概率在睡觉：只有 critical/high 且数据质量完好的 SPX/SPXW 风险才值得外发，其余一律不推送。",
+            "发送决策必须优先参考 Micopedia、SPXW call wall/put wall/zero gamma、以及过去 1 小时 IV surface/期权变化。",
+            "单一指标（如仅 put skew 变陡）默认不足以外发；需要 gamma 状态、VIX/vol regime 或价格行为中至少一项共振确认，否则判为不需要推送。",
+            "输出中文，最多 7 行。必须包含：结论、原因、gamma 状态（pin/transition/negative/unknown）与 VIX/VIX1D 所处 vol regime、数据质量、快照时间、需要人类看的 SPX/SPXW 检查项。",
+            "如果数据质量不足，明确说 degraded。",
+            "如果值得外发，第一行必须用 `需要看盘:` 开头；如果不值得外发，第一行必须用 `不需要推送:` 开头。",
+            "你的回复不会直接发给人类：只有以 `需要看盘:` 开头并通过范围校验的内容才会被转发，其余仅记录在案。",
+            json.dumps(compact_payload, ensure_ascii=False, sort_keys=True),
+        )
+    )

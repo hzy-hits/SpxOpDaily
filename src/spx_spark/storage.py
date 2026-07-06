@@ -162,6 +162,8 @@ class LatestStateStore:
                     quote,
                     as_of=as_of,
                     stale_after_seconds=self.settings.latest_stale_after_seconds,
+                    slow_stale_after_seconds=self.settings.slow_index_stale_after_seconds,
+                    slow_labels=self.settings.slow_index_labels,
                 )
                 for quote in quotes
             )
@@ -199,6 +201,8 @@ class LatestStateStore:
                     quote,
                     as_of=now,
                     stale_after_seconds=self.settings.latest_stale_after_seconds,
+                    slow_stale_after_seconds=self.settings.slow_index_stale_after_seconds,
+                    slow_labels=self.settings.slow_index_labels,
                 )
                 for quote in provider_latest
             )
@@ -218,6 +222,36 @@ class LatestStateStore:
             provider_quote_count=len(state.quotes),
             best_quote_count=len(state.best_quotes),
             updated_quote_count=len(incoming),
+        )
+
+    def purge_provider_quotes(
+        self,
+        provider: Provider,
+        *,
+        now: datetime | None = None,
+    ) -> LatestUpdateResult:
+        now = as_utc(now or datetime.now(tz=timezone.utc))
+        with self.exclusive_lock():
+            existing_state = self.load(now=now, refresh_quality=False)
+            remaining_quotes = tuple(
+                quote for quote in existing_state.quotes if quote.provider != provider
+            )
+            best_quotes = select_best_quotes(remaining_quotes, as_of=now)
+            state = LatestState(
+                created_at=datetime.now(tz=timezone.utc),
+                as_of=now,
+                quotes=tuple(sorted(remaining_quotes, key=quote_sort_key)),
+                best_quotes=tuple(
+                    sorted(best_quotes, key=lambda quote: quote.instrument.canonical_id)
+                ),
+                provider_states=existing_state.provider_states,
+            )
+            self.write(state)
+        return LatestUpdateResult(
+            path=str(self.path),
+            provider_quote_count=len(state.quotes),
+            best_quote_count=len(state.best_quotes),
+            updated_quote_count=0,
         )
 
     def write(self, state: LatestState) -> None:
@@ -259,13 +293,38 @@ def select_best_quotes(quotes: Iterable[Quote], *, as_of: datetime | None = None
     return tuple(best)
 
 
-def degrade_stale_quote(quote: Quote, *, as_of: datetime, stale_after_seconds: float) -> Quote:
+def resolve_stale_after_seconds(
+    instrument_id: str,
+    *,
+    default_seconds: float,
+    slow_seconds: float,
+    slow_labels: frozenset[str],
+) -> float:
+    return slow_seconds if instrument_id in slow_labels else default_seconds
+
+
+def degrade_stale_quote(
+    quote: Quote,
+    *,
+    as_of: datetime,
+    stale_after_seconds: float,
+    slow_stale_after_seconds: float | None = None,
+    slow_labels: frozenset[str] | None = None,
+) -> Quote:
     if quote.quality not in {MarketDataQuality.LIVE, MarketDataQuality.FROZEN}:
         return quote
     age_ms = quote.quote_age_ms(as_of)
     if age_ms is None:
         return quote
-    if age_ms <= stale_after_seconds * 1000.0:
+    threshold = stale_after_seconds
+    if slow_stale_after_seconds is not None and slow_labels:
+        threshold = resolve_stale_after_seconds(
+            quote.instrument.canonical_id,
+            default_seconds=stale_after_seconds,
+            slow_seconds=slow_stale_after_seconds,
+            slow_labels=slow_labels,
+        )
+    if age_ms <= threshold * 1000.0:
         return quote
     return replace(quote, quality=MarketDataQuality.STALE)
 

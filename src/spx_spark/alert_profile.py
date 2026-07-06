@@ -110,8 +110,8 @@ WINDOWS: tuple[AlertWindow, ...] = (
         summary_cadence_seconds=180,
         spxw_sampling_mode="human_alert",
         primary_sources=("ibkr_indexes", "ibkr_spxw_options", "ibkr_etf", "hyperliquid"),
-        required_instruments=("index:SPX", "index:VIX", "index:VVIX", "index:SKEW"),
-        optional_instruments=("equity:SPY", "equity:QQQ", "equity:IWM", "equity:DIA"),
+        required_instruments=("index:SPX", "index:VIX"),
+        optional_instruments=("index:VVIX", "index:SKEW", "equity:SPY", "equity:QQQ", "equity:IWM", "equity:DIA"),
         focus=("opening drive or fade", "SPXW greek availability", "vol regime shift"),
     ),
     AlertWindow(

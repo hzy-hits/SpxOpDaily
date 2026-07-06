@@ -5,13 +5,15 @@ from types import SimpleNamespace
 
 import pytest
 
+from spx_spark.ibkr.adapter import quote_from_ibkr_row
 from spx_spark.marketdata import (
     InstrumentId,
     MarketDataQuality,
     Provider,
     Quote,
     choose_best_quote,
-    quote_from_ibkr_row,
+)
+from spx_spark.schwab.adapter import (
     quote_from_schwab_option_contract,
     quote_from_schwab_payload,
 )
@@ -76,6 +78,8 @@ def test_ibkr_row_normalizes_option_quote_and_greeks():
         theta=-1.2,
         vega=0.4,
         und_price=7501.0,
+        volume=1250,
+        open_interest=4321,
         error=None,
     )
 
@@ -88,6 +92,8 @@ def test_ibkr_row_normalizes_option_quote_and_greeks():
     assert quote.effective_price == 10.25
     assert quote.greeks is not None
     assert quote.greeks.delta == 0.51
+    assert quote.volume == 1250
+    assert quote.open_interest == 4321
 
 
 def test_schwab_option_contract_normalizes_chain_fields():

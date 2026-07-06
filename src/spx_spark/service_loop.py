@@ -40,11 +40,11 @@ class ServiceLoopSettings:
     iv_surface_interval_seconds: int
     alert_interval_seconds: int
     heartbeat_seconds: int
-    ibkr_positions_enabled: bool
-    ibkr_positions_interval_seconds: int
     ibkr_skip_options: bool
     ibkr_connect_retry_seconds: int
     ibkr_conflict_probe_seconds: int
+    ibkr_positions_enabled: bool = False
+    ibkr_positions_interval_seconds: int = 60
     max_concurrent_tasks: int = 4
 
     @classmethod

@@ -25,6 +25,8 @@ def storage_settings(tmp_path: Path) -> StorageSettings:
         raw_file_name="quotes.jsonl",
         include_raw_payload=False,
         latest_stale_after_seconds=15.0,
+        slow_index_stale_after_seconds=300.0,
+        slow_index_labels=frozenset({"index:SKEW", "index:VVIX"}),
     )
 
 

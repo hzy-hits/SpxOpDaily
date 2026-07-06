@@ -7,7 +7,9 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from spx_spark.config import MaintenanceSettings
+from spx_spark.config import MaintenanceSettings, StorageSettings
+from spx_spark.marketdata import Provider
+from spx_spark.storage import LatestStateStore
 
 
 PROTECTED_DATA_SEGMENTS = frozenset({"latest", "runtime"})
@@ -383,6 +385,26 @@ def print_prune_result(report: MaintenanceReport, result: PruneResult) -> None:
         print(f"... {len(report.prune_candidates) - 20} more candidates in JSON report")
 
 
+def purge_latest_provider(provider_name: str, *, settings: MaintenanceSettings) -> dict[str, object]:
+    provider = Provider(provider_name.strip().lower())
+    storage_settings = StorageSettings(
+        data_root=settings.data_root,
+        latest_state_path=f"{settings.data_root.rstrip('/')}/latest/state.json",
+        raw_file_name="quotes.jsonl",
+        include_raw_payload=False,
+        latest_stale_after_seconds=15.0,
+        slow_index_stale_after_seconds=300.0,
+        slow_index_labels=frozenset({"index:SKEW", "index:VVIX"}),
+    )
+    result = LatestStateStore(storage_settings).purge_provider_quotes(provider)
+    return {
+        "provider": provider.value,
+        "latest_state": result.path,
+        "provider_quote_count": result.provider_quote_count,
+        "best_quote_count": result.best_quote_count,
+    }
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="SPX Spark maintenance utilities.")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -397,6 +419,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     prune.add_argument("--json", action="store_true", help="Print prune JSON to stdout.")
     prune.add_argument("--no-write", action="store_true", help="Do not write prune report to disk.")
+    purge_latest = subparsers.add_parser(
+        "purge-latest-provider",
+        help="Remove one provider's quotes from latest/state.json.",
+    )
+    purge_latest.add_argument(
+        "--provider",
+        required=True,
+        help="Provider id to purge from latest state (e.g. mock, ibkr).",
+    )
+    purge_latest.add_argument("--json", action="store_true", help="Print JSON result to stdout.")
     return parser.parse_args(argv)
 
 
@@ -428,6 +460,16 @@ def run(argv: list[str] | None = None) -> int:
             output_path = write_prune_result(result, settings.output_root)
             print(f"\nWrote JSON report: {output_path}")
         return 1 if result.errors else 0
+    if args.command == "purge-latest-provider":
+        payload = purge_latest_provider(args.provider, settings=settings)
+        if args.json:
+            print(json.dumps(payload, indent=2, sort_keys=True))
+        else:
+            print(
+                f"Purged provider={payload['provider']} from latest state "
+                f"({payload['best_quote_count']} best quotes remain)."
+            )
+        return 0
     return 2
 
 

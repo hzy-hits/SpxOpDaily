@@ -5,7 +5,15 @@ import asyncio
 from pathlib import Path
 
 from spx_spark.config import IbkrSettings
-from spx_spark.ibkr.verifier import connect_market_data_only, qualify_and_subscribe, apply_known_index_conid, resolve_contract_for_market_data, VerifyRow
+from spx_spark.ibkr.verifier import (
+    VerifyRow,
+    connect_market_data_only,
+    generic_ticks_for_contract,
+    option_open_interest_from_ticker,
+    qualify_and_subscribe,
+    resolve_contract_for_market_data,
+    snapshot_rows,
+)
 
 
 FORBIDDEN_IBKR_METHODS = {
@@ -119,6 +127,8 @@ def test_ibkr_connect_overrides_library_startup_positions_fetch() -> None:
         max_option_lines=40,
         quote_wait_seconds=1.0,
         stale_after_seconds=10.0,
+        slow_index_stale_after_seconds=300.0,
+        slow_index_labels=frozenset(),
         qualify_contracts=False,
         request_timeout_seconds=30.0,
     )
@@ -198,6 +208,101 @@ def test_ibkr_subscribe_qualifies_on_missing_conid_hash_error() -> None:
     assert row.subscribed is True
     assert row.qualified is True
     assert row.error is None
+
+
+def test_option_subscriptions_request_open_interest_generic_ticks() -> None:
+    class OptionContract:
+        secType = "OPT"
+        symbol = "SPX"
+        conId = 12345
+
+    class IndexContract:
+        secType = "IND"
+        symbol = "SPX"
+        conId = 416904
+
+    assert generic_ticks_for_contract(OptionContract()) == "100,101"
+    assert generic_ticks_for_contract(IndexContract()) == ""
+
+    seen: list[str] = []
+
+    class FakeIB:
+        def reqMktData(self, contract, generic_tick_list, snapshot, regulatory_snapshot):
+            seen.append(generic_tick_list)
+            return object()
+
+    qualify_and_subscribe(
+        FakeIB(),
+        [
+            ("option:SPXW:20260706:7500:C", "option", OptionContract()),
+            ("index:SPX", "index", IndexContract()),
+        ],
+        qualify=False,
+    )
+    assert seen == ["100,101", ""]
+
+
+def test_snapshot_rows_collects_option_open_interest_by_right() -> None:
+    from types import SimpleNamespace
+
+    call_ticker = SimpleNamespace(
+        contract=SimpleNamespace(right="C"),
+        marketDataType=1,
+        bid=10.0,
+        ask=10.5,
+        last=10.2,
+        close=9.8,
+        bidSize=1,
+        askSize=2,
+        lastSize=1,
+        volume=1500.0,
+        callOpenInterest=4321.0,
+        putOpenInterest=float("nan"),
+        time=None,
+        modelGreeks=None,
+        marketPrice=lambda: 10.25,
+    )
+    put_ticker = SimpleNamespace(
+        contract=SimpleNamespace(right="P"),
+        marketDataType=1,
+        bid=8.0,
+        ask=8.5,
+        last=8.2,
+        close=8.1,
+        bidSize=1,
+        askSize=2,
+        lastSize=1,
+        volume=900.0,
+        callOpenInterest=float("nan"),
+        putOpenInterest=1234.0,
+        time=None,
+        modelGreeks=None,
+        marketPrice=lambda: 8.25,
+    )
+    subscriptions = {
+        "option:SPXW:20260706:7500:C": (
+            call_ticker,
+            VerifyRow(label="option:SPXW:20260706:7500:C", kind="option", symbol="SPX"),
+        ),
+        "option:SPXW:20260706:7500:P": (
+            put_ticker,
+            VerifyRow(label="option:SPXW:20260706:7500:P", kind="option", symbol="SPX"),
+        ),
+    }
+
+    rows = snapshot_rows(subscriptions, 10.0)
+    by_label = {row.label: row for row in rows}
+
+    assert by_label["option:SPXW:20260706:7500:C"].open_interest == 4321.0
+    assert by_label["option:SPXW:20260706:7500:P"].open_interest == 1234.0
+    assert by_label["option:SPXW:20260706:7500:C"].volume == 1500.0
+
+
+def test_option_open_interest_ignores_missing_right() -> None:
+    from types import SimpleNamespace
+
+    ticker = SimpleNamespace(contract=SimpleNamespace(right=""), callOpenInterest=5.0, putOpenInterest=6.0)
+    assert option_open_interest_from_ticker(ticker) is None
 
 
 def test_resolve_contract_uses_known_index_conid_when_qualify_fails() -> None:
