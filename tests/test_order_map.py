@@ -453,6 +453,45 @@ def test_render_template_shows_frontrun_and_stop_trigger_notes() -> None:
     assert "挂单参考: 激进 15.90" not in text
 
 
+def test_resolve_spx_spot_prefers_perp_when_cash_closed_and_diverged() -> None:
+    from spx_spark.order_map import resolve_spx_spot
+
+    from spx_spark.marketdata import InstrumentType
+
+    now = datetime(2026, 7, 7, 6, 0, tzinfo=timezone.utc)  # 2:00 ET, cash closed
+    hl_quote = Quote(
+        instrument=InstrumentId(symbol="xyz:SP500", instrument_type=InstrumentType.CRYPTO_PERP),
+        provider=Provider.HYPERLIQUID,
+        provider_symbol="xyz:SP500",
+        received_at=now,
+        quality=MarketDataQuality.LIVE,
+        mark=7520.0,
+        quote_time=now,
+    )
+    # Parity pair implies 7533 (C-P=8 at 7525): 17bps above the perp.
+    state = make_state(
+        hl_quote,
+        make_option(expiry="20260707", strike=7525, right="C", mark=18.0, delta=0.55, gamma=0.008, now=now),
+        make_option(expiry="20260707", strike=7525, right="P", mark=10.0, delta=-0.45, gamma=0.008, now=now),
+        now=now,
+    )
+    options_map = make_options_map(make_front_expiry())
+
+    warnings: list[str] = []
+    spot, source = resolve_spx_spot(state, options_map, warnings=warnings, now=now)
+    assert source == "hl_perp"
+    assert spot == pytest.approx(7520.0)
+    assert any("参考价采用 perp" in item for item in warnings)
+
+    # Same divergence during cash hours: the chain's own view wins.
+    rth = datetime(2026, 7, 7, 15, 0, tzinfo=timezone.utc)  # 11:00 ET
+    warnings_rth: list[str] = []
+    spot_rth, source_rth = resolve_spx_spot(state, options_map, warnings=warnings_rth, now=rth)
+    assert source_rth == "chain_implied"
+    assert spot_rth == pytest.approx(7533.0)
+    assert any("diverges" in item for item in warnings_rth)
+
+
 def test_push_context_roundtrip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from spx_spark.notifier.llm_writer import load_previous_push, record_push
 

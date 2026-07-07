@@ -277,6 +277,16 @@ HL_SP500_PROXY_ID = "crypto_perp:xyz:SP500"
 # stale GTH option quotes; surface it instead of silently trusting either.
 HL_DIVERGENCE_WARN_BPS = 15.0
 
+SPX_CASH_OPEN_ET = time(9, 30)
+SPX_CASH_CLOSE_ET = time(16, 0)
+
+
+def spx_cash_session_open(now_utc: datetime) -> bool:
+    ny = now_utc.astimezone(NY_TZ)
+    if ny.weekday() >= 5:
+        return False
+    return SPX_CASH_OPEN_ET <= ny.time() < SPX_CASH_CLOSE_ET
+
 
 def hyperliquid_sp500_price(state: LatestState) -> float | None:
     quote = state.best_quote(HL_SP500_PROXY_ID)
@@ -290,27 +300,39 @@ def resolve_spx_spot(
     options_map: OptionsMap,
     *,
     warnings: list[str] | None = None,
+    now: datetime | None = None,
 ) -> tuple[float | None, str]:
     """Return (spot, source_label) for projections.
 
-    Priority: chain-implied put-call parity (the option market's own view)
-    with the Hyperliquid SP500 perp as a cross-check, then the perp itself,
-    then the stream underlier (ES carries basis vs SPX -> warned).
+    During SPX cash hours the chain-implied parity spot is the option
+    market's own view and wins. Outside cash hours SPXW GTH quotes go wide
+    and the parity spot drifts, so when it diverges from the Hyperliquid
+    SP500 perp (24/7 liquid) beyond the threshold, the perp wins.
     """
+    now = now or datetime.now(tz=timezone.utc)
     hl_price = hyperliquid_sp500_price(state)
     if options_map.expiries:
         front = options_map.expiries[0]
         pairs = pair_by_strike(_front_expiry_quotes(state, front.expiry))
         implied = chain_implied_spot(pairs)
         if implied is not None:
-            if hl_price is not None and warnings is not None:
+            if hl_price is not None:
                 divergence_bps = abs(implied / hl_price - 1.0) * 10_000.0
                 if divergence_bps > HL_DIVERGENCE_WARN_BPS:
-                    warnings.append(
-                        f"chain-implied spot {implied:.1f} diverges from "
-                        f"hyperliquid SP500 perp {hl_price:.1f} "
-                        f"({divergence_bps:.0f} bps); GTH quotes may be wide"
-                    )
+                    if not spx_cash_session_open(now):
+                        if warnings is not None:
+                            warnings.append(
+                                f"SPX 现货闭市: 链隐含 {implied:.1f} 与 HL perp "
+                                f"{hl_price:.1f} 分歧 {divergence_bps:.0f} bps,"
+                                "GTH 报价偏宽,参考价采用 perp"
+                            )
+                        return hl_price, "hl_perp"
+                    if warnings is not None:
+                        warnings.append(
+                            f"chain-implied spot {implied:.1f} diverges from "
+                            f"hyperliquid SP500 perp {hl_price:.1f} "
+                            f"({divergence_bps:.0f} bps); GTH quotes may be wide"
+                        )
             return implied, "chain_implied"
     if hl_price is not None:
         if warnings is not None:
@@ -327,6 +349,8 @@ def build_candidates(
     state: LatestState,
     options_map: OptionsMap,
     warnings: list[str] | None = None,
+    *,
+    now: datetime | None = None,
 ) -> list[OrderCandidate]:
     local_warnings = warnings if warnings is not None else []
     if not options_map.expiries:
@@ -340,7 +364,7 @@ def build_candidates(
     strike_step = median_strike_step(strikes)
     strike_step_int = max(1, int(round(strike_step)))
 
-    spot, _spot_source = resolve_spx_spot(state, options_map, warnings=local_warnings)
+    spot, _spot_source = resolve_spx_spot(state, options_map, warnings=local_warnings, now=now)
     if spot is None:
         local_warnings.append("missing underlier price")
         return []
@@ -436,8 +460,8 @@ def build_order_payload(state: LatestState, *, now: datetime | None = None) -> d
     if front is not None and front.gex_quality == "no_open_interest_gex":
         warnings.append("no open interest; walls unavailable")
 
-    spot, spot_source = resolve_spx_spot(state, options_map)
-    candidates = build_candidates(state, options_map, warnings)
+    spot, spot_source = resolve_spx_spot(state, options_map, now=now)
+    candidates = build_candidates(state, options_map, warnings, now=now)
     beijing = now.astimezone(SHANGHAI_TZ)
 
     return {
