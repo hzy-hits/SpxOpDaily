@@ -28,6 +28,7 @@ from spx_spark.order_map import (
     build_candidates,
     build_order_payload,
     chain_implied_spot,
+    frontrun_level_for,
     mark_sent,
     material_changes,
     minutes_to_open,
@@ -335,6 +336,121 @@ def test_build_candidates_produces_three_plays_with_limits() -> None:
         assert candidate.limit_aggressive == round_to_tick(candidate.projected_mid)
         assert candidate.limit_conservative == round_to_tick(candidate.projected_mid * 0.85)
         assert math.isfinite(candidate.projected_mid)
+
+
+def test_frontrun_level_shifts_toward_spot_with_caps() -> None:
+    # Spot above the level: rung sits above the level (30% of a 24pt distance).
+    assert frontrun_level_for(7524.0, 7500.0) == pytest.approx(7507.2)
+    # Spot below the level: rung sits below the level.
+    assert frontrun_level_for(7524.0, 7550.0) == pytest.approx(7542.2)
+    # Distance under the minimum: no rung (level is already close enough).
+    assert frontrun_level_for(7524.0, 7523.0) is None
+    # Offset floor: 30% of 8pts = 2.4 >= 2.0 min.
+    assert frontrun_level_for(7508.0, 7500.0) == pytest.approx(7502.4)
+    # Offset cap at 8 points for far levels.
+    assert frontrun_level_for(7600.0, 7500.0) == pytest.approx(7508.0)
+
+
+def test_build_candidates_marks_stop_trigger_and_frontrun() -> None:
+    now = datetime(2026, 7, 7, 6, 0, tzinfo=timezone.utc)
+    underlier = Quote(
+        instrument=InstrumentId.future("ES"),
+        provider=Provider.IBKR,
+        provider_symbol="future:ES",
+        received_at=now,
+        quality=MarketDataQuality.LIVE,
+        mark=7569.0,
+        quote_time=now,
+    )
+    # Option marks are put-call-parity consistent with spot 7569 so the
+    # chain-implied spot matches the ES reference.
+    state = make_state(
+        underlier,
+        make_option(expiry="20260707", strike=7500, right="C", mark=73.2, delta=0.85, gamma=0.004, now=now),
+        make_option(expiry="20260707", strike=7500, right="P", mark=4.2, delta=-0.15, gamma=0.004, now=now),
+        make_option(expiry="20260707", strike=7530, right="P", mark=9.1, delta=-0.28, gamma=0.007, now=now),
+        make_option(expiry="20260707", strike=7550, right="P", mark=11.0, delta=-0.22, gamma=0.006, now=now),
+        make_option(expiry="20260707", strike=7550, right="C", mark=30.0, delta=0.45, gamma=0.006, now=now),
+        now=now,
+    )
+    candidates = build_candidates(state, make_options_map(make_front_expiry()))
+    by_play = {candidate.play: candidate for candidate in candidates}
+
+    # Spot 7569 dropping to put wall 7500: the call gets cheaper -> resting limit.
+    bounce = by_play["put_wall_bounce_call"]
+    assert bounce.order_style == "resting_limit"
+    # 30% of the 69pt distance exceeds the 8pt cap -> rung at wall + 8.
+    assert bounce.frontrun_level == pytest.approx(7508.0)
+    assert bounce.frontrun_projected_mid is not None
+    assert bounce.frontrun_projected_mid > bounce.projected_mid
+
+    # Spot 7569 breaking below flip 7530: the put gets dearer -> stop trigger.
+    breakdown = by_play["flip_breakdown_put"]
+    assert breakdown.order_style == "stop_trigger"
+
+
+def test_render_template_shows_frontrun_and_stop_trigger_notes() -> None:
+    payload = {
+        "kind": "order_map",
+        "trading_date": "2026-07-07",
+        "beijing_time": "14:00",
+        "expiry": "20260707",
+        "underlier": {"price": 7524.0, "source": "chain_implied"},
+        "expected_move_points": 24.7,
+        "gamma_state": "zero_gamma_transition",
+        "zero_gamma": 7516.1,
+        "flip_zone": [7515.0, 7520.0],
+        "candidates": [
+            {
+                "play": "put_wall_bounce_call",
+                "level": 7500.0,
+                "level_label": "put wall 7500",
+                "contract_id": "option:SPX:SPXW:20260707:7500:C",
+                "strike": 7500,
+                "right": "C",
+                "current_mid": 31.05,
+                "projected_mid": 15.73,
+                "limit_aggressive": 15.7,
+                "limit_conservative": 13.3,
+                "prob_touch": 0.54,
+                "prob_close_beyond": 0.27,
+                "delta": 0.6,
+                "gamma": 0.01,
+                "frontrun_level": 7507.2,
+                "frontrun_projected_mid": 19.85,
+                "frontrun_limit": 19.8,
+                "frontrun_prob_touch": 0.62,
+                "order_style": "resting_limit",
+            },
+            {
+                "play": "flip_breakdown_put",
+                "level": 7515.0,
+                "level_label": "flip zone 7515",
+                "contract_id": "option:SPX:SPXW:20260707:7515:P",
+                "strike": 7515,
+                "right": "P",
+                "current_mid": 8.4,
+                "projected_mid": 15.92,
+                "limit_aggressive": 15.9,
+                "limit_conservative": 13.5,
+                "prob_touch": 0.65,
+                "prob_close_beyond": 0.32,
+                "delta": -0.4,
+                "gamma": 0.01,
+                "frontrun_level": None,
+                "frontrun_projected_mid": None,
+                "frontrun_limit": None,
+                "frontrun_prob_touch": None,
+                "order_style": "stop_trigger",
+            },
+        ],
+        "warnings": [],
+    }
+    text = render_template(payload)
+    assert "先手挡 7507.2: 限价 19.80" in text
+    assert "触达≈62%" in text
+    assert "被动限价会立即成交" in text
+    assert "挂单参考: 激进 15.90" not in text
 
 
 def test_chain_implied_spot_uses_put_call_parity() -> None:

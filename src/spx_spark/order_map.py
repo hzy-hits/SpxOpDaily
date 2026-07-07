@@ -84,6 +84,32 @@ class OrderCandidate:
     prob_close_beyond: float | None
     delta: float
     gamma: float
+    # Front-run rung: dealers defend walls before the exact strike, so price
+    # often reverses a few points short. This rung prices the option at a level
+    # shifted toward spot for a much higher fill probability.
+    frontrun_level: float | None = None
+    frontrun_projected_mid: float | None = None
+    frontrun_limit: float | None = None
+    frontrun_prob_touch: float | None = None
+    # "resting_limit": projected <= current, a passive buy limit rests until
+    # the move happens. "stop_trigger": projected > current, a plain buy limit
+    # would fill immediately at market -> needs a stop-limit trigger instead.
+    order_style: str = "resting_limit"
+
+
+FRONTRUN_FRACTION = 0.30
+FRONTRUN_MIN_POINTS = 2.0
+FRONTRUN_MAX_POINTS = 8.0
+
+
+def frontrun_level_for(spot: float, level: float) -> float | None:
+    """Level shifted from the target back toward spot by a capped fraction."""
+    distance = abs(spot - level)
+    if distance <= FRONTRUN_MIN_POINTS:
+        return None
+    offset = min(max(FRONTRUN_FRACTION * distance, FRONTRUN_MIN_POINTS), FRONTRUN_MAX_POINTS)
+    direction = 1.0 if spot > level else -1.0
+    return round(level + direction * offset, 1)
 
 
 def _dash(value: Any) -> str:
@@ -200,6 +226,22 @@ def _build_candidate(
         strike_step=strike_step,
     )
 
+    frontrun_level = frontrun_level_for(spot, level)
+    frontrun_projected = None
+    frontrun_limit = None
+    frontrun_prob_touch = None
+    if frontrun_level is not None:
+        frontrun_projected = project_option_price(mid, delta, gamma, spot, frontrun_level)
+        frontrun_limit = round_to_tick(frontrun_projected)
+        _, frontrun_prob_touch, _, _ = probability_for_level(
+            frontrun_level,
+            underlier=spot,
+            pairs=pairs,
+            strike_step=strike_step,
+        )
+
+    order_style = "stop_trigger" if projected > mid else "resting_limit"
+
     strike_value = int(round(finite_float(quote.instrument.strike) or target_strike))
     return OrderCandidate(
         play=play,
@@ -216,6 +258,11 @@ def _build_candidate(
         prob_close_beyond=prob_close,
         delta=delta,
         gamma=gamma,
+        frontrun_level=frontrun_level,
+        frontrun_projected_mid=frontrun_projected,
+        frontrun_limit=frontrun_limit,
+        frontrun_prob_touch=frontrun_prob_touch,
+        order_style=order_style,
     )
 
 
@@ -475,15 +522,30 @@ def render_template(payload: dict[str, Any]) -> str:
             f"到位时预估价≈{_fmt_premium(candidate.get('projected_mid'))}"
             f"(现价 {_fmt_premium(candidate.get('current_mid'))})"
         )
-        lines.append(
-            "   挂单参考: 激进 "
-            f"{_fmt_premium(candidate.get('limit_aggressive'))} / 保守 "
-            f"{_fmt_premium(candidate.get('limit_conservative'))}"
-        )
+        if candidate.get("order_style") == "stop_trigger":
+            lines.append(
+                "   注意: 预估价高于现价,被动限价会立即成交;"
+                "此单需破位确认后下条件单/市价,不适合提前挂"
+            )
+        else:
+            lines.append(
+                "   挂单参考: 激进 "
+                f"{_fmt_premium(candidate.get('limit_aggressive'))} / 保守 "
+                f"{_fmt_premium(candidate.get('limit_conservative'))}"
+            )
+            frontrun_level = candidate.get("frontrun_level")
+            if frontrun_level is not None:
+                lines.append(
+                    f"   先手挡 {_dash(frontrun_level)}: 限价 "
+                    f"{_fmt_premium(candidate.get('frontrun_limit'))}, "
+                    f"触达≈{_fmt_prob(candidate.get('frontrun_prob_touch'))}"
+                    "(墙前反转也能吃到)"
+                )
 
     lines.append(
-        "注: 预估价按当前 delta/gamma 外推,未计时间衰减(0DTE 下午触发会更便宜);"
-        "保守价≈预估×0.85。仅供挂单参考,不是订单指令。"
+        "注: 墙位是 OI 真实聚集处(多在整数位),但价格常在墙前几点反转;"
+        "先手挡=向现价方向让 30% 距离,成交率高、价格稍差。"
+        "预估价按 delta/gamma 外推,未计时间衰减;保守价≈预估×0.85。仅供参考,不是订单指令。"
     )
 
     warnings = payload.get("warnings")
@@ -498,9 +560,11 @@ def build_order_prompt(payload: dict[str, Any], template: str) -> str:
         (
             "你是 SPX Spark 的挂单地图写手，为一个只交易 SPX/SPXW 0DTE/1DTE 期权(买 call/put 或垂直价差)的人写盘前挂单参考。",
             "只依据下面 JSON 与模板事实，不得编造数字、新闻或仓位；不给下单指令。",
-            "输出中文，最多 14 行，第一行必须是『挂单参考:』开头，并复述模板第一行。",
-            "必须覆盖：参考价与预期波幅、gamma 地形、三类 play 的触达概率与激进/保守限价；数字必须与模板一致。",
-            "在数字之外，用 2-3 句交易员口吻解读：今天更适合反弹买 call、跌破买 put 还是冲墙 fade，以及保守限价为何留安全边际。",
+            "输出中文，最多 16 行，第一行必须是『挂单参考:』开头，并复述模板第一行。",
+            "必须覆盖：参考价与预期波幅、gamma 地形、各 play 的触达概率与限价；数字必须与模板一致。",
+            "凡带『先手挡』的 play，必须同时给墙位价和先手挡价，并说明取舍：墙位价更便宜但价格常在墙前几点反转吃不到，先手挡成交率明显更高。",
+            "凡标注 order_style=stop_trigger 的 play，必须提醒：预估价高于现价，提前挂被动限价会立即按市价成交，应等破位确认后用条件单，不要提前挂。",
+            "在数字之外，用 2-3 句交易员口吻解读：今天更适合反弹买 call、跌破买 put 还是冲墙 fade。",
             "数据 degraded 时如实说明，不给方向判断。",
             "JSON:" + json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
             "模板:" + template,
