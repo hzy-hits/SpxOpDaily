@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from spx_spark.config import NotificationSettings
+from spx_spark.notifier.llm_writer import load_previous_push, record_push
 from spx_spark.notifier.missed_queue import append_missed, flush_missed
 from spx_spark.notifier.model import CommandRunner, NotificationResult, SinkResult, default_runner
 from spx_spark.notifier.policy import (
@@ -145,7 +146,7 @@ def notify_payload(
     if settings.openclaw_agent_enabled and review_candidates:
         agent_result, agent_message = run_openclaw_agent(
             settings,
-            build_codex_prompt(payload, review_candidates),
+            build_codex_prompt(payload, review_candidates, previous_push=load_previous_push()),
             runner=runner,
         )
         sinks.append(agent_result)
@@ -178,6 +179,10 @@ def notify_payload(
                         delivered_ok = delivered_ok or bark_result.ok
                     if delivered_ok:
                         alerts_marked_sent.extend(review_candidates)
+                        # Feed continuity: the next writer (status report / next
+                        # intraday alert) sees this as previous_push, so it can
+                        # detect repetition and script flips.
+                        record_push("intraday_alert", agent_message, at=now_utc.isoformat())
                 else:
                     # Analysis-only mode: still start the cooldown so the same
                     # bucket is not re-reviewed every cycle.
@@ -217,7 +222,7 @@ def notify_payload(
     elif settings.codex_enabled and review_candidates:
         codex_result, codex_message = run_codex_exec(
             settings,
-            build_codex_prompt(payload, review_candidates),
+            build_codex_prompt(payload, review_candidates, previous_push=load_previous_push()),
             runner=runner,
         )
         sinks.append(codex_result)
@@ -250,6 +255,7 @@ def notify_payload(
                         delivered_ok = delivered_ok or bark_result.ok
                     if delivered_ok:
                         alerts_marked_sent.extend(review_candidates)
+                        record_push("intraday_alert", codex_message, at=now_utc.isoformat())
                 else:
                     sinks.append(
                         SinkResult(

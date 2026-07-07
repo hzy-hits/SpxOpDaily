@@ -65,6 +65,17 @@ def expiry_options_summary(expiry: ExpiryOptionsMap) -> dict[str, object]:
         "zero_gamma_distance_points": expiry.zero_gamma_distance_points,
         "put_wall": expiry.put_wall,
         "call_wall": expiry.call_wall,
+        "wall_ladder": {
+            "method": expiry.wall_method,
+            "call_walls": [
+                {"strike": wall.strike, "oi": wall.open_interest, "gex": wall.gex}
+                for wall in expiry.call_walls
+            ],
+            "put_walls": [
+                {"strike": wall.strike, "oi": wall.open_interest, "gex": wall.gex}
+                for wall in expiry.put_walls
+            ],
+        },
         "nearest_wall": expiry.nearest_wall,
         "nearest_wall_distance_points": expiry.nearest_wall_distance_points,
         "net_gamma_ratio": expiry.net_gamma_ratio,

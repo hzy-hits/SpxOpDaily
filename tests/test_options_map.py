@@ -14,9 +14,11 @@ from spx_spark.marketdata import (
     Quote,
 )
 from spx_spark.options_map import (
+    StrikeGex,
     bs_gamma,
     build_gex_by_strike,
     build_options_map,
+    build_wall_ladder,
     gex_weight,
     interpolated_atm_iv,
     pair_by_strike,
@@ -145,6 +147,113 @@ def test_options_map_builds_atm_straddle_iv_skew_and_walls() -> None:
     assert expiry.call_wall == 7550
     assert expiry.gex_quality == "open_interest_gex"
     assert expiry.coverage.with_open_interest == 4
+
+
+def _gex_row(
+    strike: float,
+    *,
+    call_gex: float = 0.0,
+    put_gex: float = 0.0,
+    call_oi: float = 0.0,
+    put_oi: float = 0.0,
+) -> StrikeGex:
+    return StrikeGex(
+        strike=strike,
+        call_gex=call_gex,
+        put_gex=put_gex,
+        net_gex=call_gex + put_gex,
+        abs_gex=abs(call_gex) + abs(put_gex),
+        call_open_interest=call_oi,
+        put_open_interest=put_oi,
+    )
+
+
+def test_build_wall_ladder_is_side_constrained_and_ranked() -> None:
+    rows = [
+        _gex_row(7400, put_gex=-3.0, put_oi=3300),
+        _gex_row(7450, put_gex=-4.0, put_oi=2900),
+        _gex_row(7480, put_gex=-5.0, put_oi=1500),
+        _gex_row(7500, put_gex=-6.0, put_oi=3600),
+        # Put OI above spot must not appear as "support" (2026-07-07: the top
+        # put OI strike 7550 sat above spot all afternoon).
+        _gex_row(7550, put_gex=-8.0, put_oi=4900, call_gex=6.0, call_oi=6500),
+        _gex_row(7600, call_gex=5.0, call_oi=6533),
+        # Call gamma below spot (heavy 2-way ATM volume) must not become a
+        # "call wall" under the price.
+        _gex_row(7460, call_gex=9.0, call_oi=100),
+    ]
+    call_walls, put_walls = build_wall_ladder(rows, underlier=7490.0, strike_step=5.0)
+
+    # 7500 (broken, above spot) and 7550 puts are excluded: no longer support.
+    assert [wall.strike for wall in put_walls] == [7480, 7450, 7400]
+    assert all(wall.strike <= 7490.0 + 2.5 for wall in put_walls)
+    assert [wall.strike for wall in call_walls] == [7550, 7600]
+    assert put_walls[0].open_interest == 1500
+    assert put_walls[0].distance_points == pytest.approx(-10.0)
+
+
+def test_walls_come_from_ladder_and_respect_spot_side() -> None:
+    now = datetime(2026, 7, 6, 14, 0, tzinfo=timezone.utc)
+    underlier = Quote(
+        instrument=InstrumentId.index("SPX"),
+        provider=Provider.IBKR,
+        provider_symbol="index:SPX",
+        received_at=now,
+        quality=MarketDataQuality.LIVE,
+        mark=7500.0,
+        quote_time=now,
+    )
+    state = make_state(
+        underlier,
+        # Biggest put GEX sits above spot -> must not be the put wall.
+        make_option(
+            expiry="20260706",
+            strike=7550,
+            right="P",
+            mark=52.0,
+            iv=0.22,
+            gamma=0.006,
+            open_interest=5000,
+            now=now,
+        ),
+        make_option(
+            expiry="20260706",
+            strike=7450,
+            right="P",
+            mark=8.0,
+            iv=0.24,
+            gamma=0.004,
+            open_interest=2000,
+            now=now,
+        ),
+        make_option(
+            expiry="20260706",
+            strike=7400,
+            right="P",
+            mark=4.0,
+            iv=0.26,
+            gamma=0.002,
+            open_interest=3000,
+            now=now,
+        ),
+        make_option(
+            expiry="20260706",
+            strike=7550,
+            right="C",
+            mark=7.5,
+            iv=0.19,
+            gamma=0.004,
+            open_interest=2500,
+            now=now,
+        ),
+        now=now,
+    )
+
+    expiry = build_options_map(state).expiries[0]
+    assert expiry.put_wall == 7450
+    assert [wall.strike for wall in expiry.put_walls] == [7450, 7400]
+    assert expiry.call_wall == 7550
+    assert expiry.wall_method == "oi_gex"
 
 
 def test_options_map_warns_when_open_interest_missing() -> None:

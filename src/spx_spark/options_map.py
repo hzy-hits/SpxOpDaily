@@ -72,6 +72,28 @@ class StrikeGex:
     abs_gex: float
     call_open_interest: float
     put_open_interest: float
+    call_volume: float = 0.0
+    put_volume: float = 0.0
+
+
+@dataclass(frozen=True)
+class WallLevel:
+    """One rung of the wall ladder: a strike with concentrated dealer gamma.
+
+    Side-constrained (put walls at/below spot, call walls at/above spot) and
+    weighted by OI-based GEX so the ladder reflects positioning instead of
+    chasing wherever intraday volume happens to print.
+    """
+
+    strike: float
+    side: str  # "call" | "put"
+    gex: float
+    open_interest: float
+    volume: float
+    distance_points: float
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
 
 
 @dataclass(frozen=True)
@@ -140,6 +162,11 @@ class ExpiryOptionsMap:
     put_skew_25d: float | None = None
     call_skew_25d: float | None = None
     skew_method: str = "moneyness_fallback"
+    # Wall ladder: top-4 call walls at/above spot and put walls at/below spot,
+    # from OI-weighted GEX (positioning), not intraday volume.
+    call_walls: tuple[WallLevel, ...] = ()
+    put_walls: tuple[WallLevel, ...] = ()
+    wall_method: str = "oi_gex"
 
 
 @dataclass(frozen=True)
@@ -373,9 +400,62 @@ def build_gex_by_strike(
                 abs_gex=abs(call_value) + abs(put_value),
                 call_open_interest=(finite_float(call.open_interest) or 0.0) if call else 0.0,
                 put_open_interest=(finite_float(put.open_interest) or 0.0) if put else 0.0,
+                call_volume=(finite_float(call.volume) or 0.0) if call else 0.0,
+                put_volume=(finite_float(put.volume) or 0.0) if put else 0.0,
             )
         )
     return rows
+
+
+WALL_LADDER_DEPTH = 4
+
+
+def build_wall_ladder(
+    gex_rows: list[StrikeGex],
+    *,
+    underlier: float,
+    strike_step: float,
+    depth: int = WALL_LADDER_DEPTH,
+) -> tuple[tuple[WallLevel, ...], tuple[WallLevel, ...]]:
+    """Top-N call walls at/above spot and put walls at/below spot by |GEX|.
+
+    Side constraint matters: without it a broken put wall keeps being quoted
+    as "support" from above, and heavy 2-way ATM volume gets mislabeled as a
+    call wall below spot. Half a strike step of tolerance keeps the ATM strike
+    eligible on both sides.
+    """
+    tolerance = strike_step / 2.0
+    call_rows = [
+        row for row in gex_rows if row.call_gex > 0 and row.strike >= underlier - tolerance
+    ]
+    put_rows = [
+        row for row in gex_rows if row.put_gex < 0 and row.strike <= underlier + tolerance
+    ]
+    call_rows.sort(key=lambda row: -row.call_gex)
+    put_rows.sort(key=lambda row: row.put_gex)
+    call_walls = tuple(
+        WallLevel(
+            strike=row.strike,
+            side="call",
+            gex=row.call_gex,
+            open_interest=row.call_open_interest,
+            volume=row.call_volume,
+            distance_points=row.strike - underlier,
+        )
+        for row in call_rows[:depth]
+    )
+    put_walls = tuple(
+        WallLevel(
+            strike=row.strike,
+            side="put",
+            gex=row.put_gex,
+            open_interest=row.put_open_interest,
+            volume=row.put_volume,
+            distance_points=row.strike - underlier,
+        )
+        for row in put_rows[:depth]
+    )
+    return call_walls, put_walls
 
 
 def gex_weight(quote: Quote, *, intraday: bool) -> float | None:
@@ -785,10 +865,32 @@ def build_expiry_map(
         zero = None
         gamma_flip_zone = None
     zero_distance = zero - underlier if zero is not None and underlier is not None else None
-    call_wall_row = max(gex_rows, key=lambda row: row.call_gex) if gex_rows else None
-    put_wall_row = min(gex_rows, key=lambda row: row.put_gex) if gex_rows else None
-    call_wall = call_wall_row.strike if call_wall_row and call_wall_row.call_gex > 0 else None
-    put_wall = put_wall_row.strike if put_wall_row and put_wall_row.put_gex < 0 else None
+
+    # Walls come from OI-weighted GEX: OI is positioning (where hedging flow
+    # will actually defend), while intraday volume piles up at whatever ATM
+    # strikes price already visited and makes walls chase the tape. When OI is
+    # entirely missing (e.g. GTH before the OCC update), fall back to the
+    # intraday-weighted rows so the map is not empty.
+    strike_step = median_strike_step(strikes)
+    wall_rows = gex_rows
+    wall_method = "oi_plus_volume_gex" if intraday else "oi_gex"
+    if intraday:
+        oi_rows = build_gex_by_strike(pairs, underlier=underlier, intraday=False) if underlier else []
+        if oi_rows:
+            wall_rows = oi_rows
+            wall_method = "oi_gex"
+        else:
+            wall_method = "volume_fallback"
+    call_walls: tuple[WallLevel, ...] = ()
+    put_walls: tuple[WallLevel, ...] = ()
+    if underlier and wall_rows:
+        call_walls, put_walls = build_wall_ladder(
+            wall_rows,
+            underlier=underlier,
+            strike_step=strike_step,
+        )
+    call_wall = call_walls[0].strike if call_walls else None
+    put_wall = put_walls[0].strike if put_walls else None
     walls = [wall for wall in (call_wall, put_wall) if wall is not None]
     nearest_wall_value = min(walls, key=lambda wall: abs(wall - underlier)) if walls and underlier else None
     nearest_wall_distance = nearest_wall_value - underlier if nearest_wall_value is not None and underlier else None
@@ -823,7 +925,6 @@ def build_expiry_map(
         nearest_wall_value = None
         nearest_wall_distance = None
 
-    strike_step = median_strike_step(strikes)
     level_probabilities: list[LevelProbability] = []
     if underlier is not None:
         for level_name, level_value in (
@@ -886,6 +987,9 @@ def build_expiry_map(
         put_skew_25d=put_skew_25d,
         call_skew_25d=call_skew_25d,
         skew_method=skew_method,
+        call_walls=call_walls,
+        put_walls=put_walls,
+        wall_method=wall_method,
     )
 
 

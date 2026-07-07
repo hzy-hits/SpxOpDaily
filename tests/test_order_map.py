@@ -264,14 +264,17 @@ def test_build_candidates_produces_three_plays_with_limits() -> None:
         mark=7569.0,
         quote_time=now,
     )
+    # Option marks are put-call-parity consistent with spot ~7569 so the
+    # chain-implied spot sits above the flip zone (7530) and all three plays
+    # stay valid (breakdown level must be below spot).
     state = make_state(
         underlier,
         make_option(
             expiry="20260707",
             strike=7500,
             right="C",
-            mark=4.2,
-            delta=0.35,
+            mark=73.2,
+            delta=0.85,
             gamma=0.008,
             now=now,
         ),
@@ -297,8 +300,8 @@ def test_build_candidates_produces_three_plays_with_limits() -> None:
             expiry="20260707",
             strike=7550,
             right="C",
-            delta=0.20,
-            mark=5.0,
+            delta=0.45,
+            mark=30.0,
             gamma=0.005,
             now=now,
         ),
@@ -306,8 +309,8 @@ def test_build_candidates_produces_three_plays_with_limits() -> None:
             expiry="20260707",
             strike=7500,
             right="P",
-            delta=-0.25,
-            mark=8.0,
+            delta=-0.15,
+            mark=4.2,
             gamma=0.006,
             now=now,
         ),
@@ -387,6 +390,74 @@ def test_build_candidates_marks_stop_trigger_and_frontrun() -> None:
     # Spot 7569 breaking below flip 7530: the put gets dearer -> stop trigger.
     breakdown = by_play["flip_breakdown_put"]
     assert breakdown.order_style == "stop_trigger"
+
+
+def test_build_candidates_skips_stale_breakdown_and_reanchors_walls() -> None:
+    # 2026-07-07 regression: spot 7490 with flip zone 7570-7575 produced a
+    # "7570 跌破买 put" while the breakdown had already happened 80 points ago.
+    now = datetime(2026, 7, 7, 6, 0, tzinfo=timezone.utc)
+    underlier = Quote(
+        instrument=InstrumentId.future("ES"),
+        provider=Provider.IBKR,
+        provider_symbol="future:ES",
+        received_at=now,
+        quality=MarketDataQuality.LIVE,
+        mark=7490.0,
+        quote_time=now,
+    )
+    # Parity-consistent with spot ~7490.
+    state = make_state(
+        underlier,
+        make_option(expiry="20260707", strike=7480, right="C", mark=18.0, delta=0.55, gamma=0.008, now=now),
+        make_option(expiry="20260707", strike=7480, right="P", mark=8.0, delta=-0.45, gamma=0.008, now=now),
+        make_option(expiry="20260707", strike=7550, right="P", mark=62.0, delta=-0.85, gamma=0.004, now=now),
+        make_option(expiry="20260707", strike=7550, right="C", mark=2.0, delta=0.10, gamma=0.004, now=now),
+        now=now,
+    )
+    warnings: list[str] = []
+    front = make_front_expiry(
+        put_wall=7480.0,
+        call_wall=7550.0,
+        zero_gamma=7572.0,
+        flip_zone=(7570.0, 7575.0),
+    )
+    candidates = build_candidates(state, make_options_map(front), warnings)
+    plays = {candidate.play for candidate in candidates}
+
+    assert "flip_breakdown_put" not in plays
+    assert any("above_spot_breakdown_already_done" in warning for warning in warnings)
+    assert "put_wall_bounce_call" in plays
+    assert "call_wall_fade_put" in plays
+
+
+def test_render_template_includes_wall_ladder_lines() -> None:
+    payload = {
+        "kind": "order_map",
+        "trading_date": "2026-07-07",
+        "beijing_time": "14:00",
+        "expiry": "20260707",
+        "underlier": {"price": 7524.0, "source": "chain_implied"},
+        "expected_move_points": 24.7,
+        "gamma_state": "zero_gamma_transition",
+        "zero_gamma": 7516.1,
+        "flip_zone": [7515.0, 7520.0],
+        "candidates": [],
+        "wall_ladder": {
+            "put_walls": [
+                {"strike": 7500.0, "open_interest": 3604, "prob_touch": 0.47},
+                {"strike": 7480.0, "open_interest": 1500, "prob_touch": 0.30},
+                {"strike": 7450.0, "open_interest": 2876, "prob_touch": 0.18},
+            ],
+            "call_walls": [
+                {"strike": 7550.0, "open_interest": 6555, "prob_touch": 0.51},
+                {"strike": 7600.0, "open_interest": 6533, "prob_touch": 0.12},
+            ],
+        },
+        "warnings": [],
+    }
+    text = render_template(payload)
+    assert "put 墙阶梯(下方支撑): ★7500(OI 3604,触达47%) > 7480(OI 1500,触达30%) > 7450(OI 2876,触达18%) (★=主墙)" in text
+    assert "call 墙阶梯(上方阻力): ★7550(OI 6555,触达51%) > 7600(OI 6533,触达12%) (★=主墙)" in text
 
 
 def test_render_template_shows_frontrun_and_stop_trigger_notes() -> None:

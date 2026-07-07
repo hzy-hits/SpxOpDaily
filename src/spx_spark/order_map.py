@@ -371,12 +371,25 @@ def build_candidates(
 
     candidates: list[OrderCandidate] = []
 
-    if front.put_wall is not None:
-        target_strike = round_to_step(front.put_wall, strike_step_int)
+    # Side guards: options_map constrains walls against its own underlier, but
+    # the projection spot here can differ (chain parity vs perp). A "bounce"
+    # level above spot or a "breakdown" level above spot is a stale/nonsense
+    # play — the 2026-07-07 session pushed a 7570 breakdown put with spot at
+    # 7490 exactly this way.
+    put_wall_level = front.put_wall
+    if put_wall_level is not None and put_wall_level > spot + strike_step:
+        local_warnings.append(f"put_wall_{_dash(put_wall_level)}_above_spot_skipped")
+        put_wall_level = next(
+            (wall.strike for wall in front.put_walls if wall.strike <= spot + strike_step),
+            None,
+        )
+
+    if put_wall_level is not None:
+        target_strike = round_to_step(put_wall_level, strike_step_int)
         candidate = _build_candidate(
             play="put_wall_bounce_call",
-            level=front.put_wall,
-            level_label=f"put wall {_dash(front.put_wall)}",
+            level=put_wall_level,
+            level_label=f"put wall {_dash(put_wall_level)}",
             target_strike=target_strike,
             right="C",
             spot=spot,
@@ -397,6 +410,13 @@ def build_candidates(
         flip_level = front.zero_gamma
         flip_label = f"zero gamma {_dash(flip_level)}"
 
+    if flip_level is not None and flip_level > spot + strike_step:
+        # Spot already below the flip zone: the breakdown has happened; a
+        # "跌破买 put" limit anchored above spot would be a stale play.
+        local_warnings.append(f"flip_{_dash(flip_level)}_above_spot_breakdown_already_done")
+        flip_level = None
+        flip_label = None
+
     if flip_level is not None and flip_label is not None:
         target_strike = round_to_step(flip_level, strike_step_int)
         candidate = _build_candidate(
@@ -414,12 +434,20 @@ def build_candidates(
         if candidate is not None:
             candidates.append(candidate)
 
-    if front.call_wall is not None:
-        target_strike = round_to_step(front.call_wall, strike_step_int)
+    call_wall_level = front.call_wall
+    if call_wall_level is not None and call_wall_level < spot - strike_step:
+        local_warnings.append(f"call_wall_{_dash(call_wall_level)}_below_spot_skipped")
+        call_wall_level = next(
+            (wall.strike for wall in front.call_walls if wall.strike >= spot - strike_step),
+            None,
+        )
+
+    if call_wall_level is not None:
+        target_strike = round_to_step(call_wall_level, strike_step_int)
         candidate = _build_candidate(
             play="call_wall_fade_put",
-            level=front.call_wall,
-            level_label=f"call wall {_dash(front.call_wall)}",
+            level=call_wall_level,
+            level_label=f"call wall {_dash(call_wall_level)}",
             target_strike=target_strike,
             right="P",
             spot=spot,
@@ -432,6 +460,47 @@ def build_candidates(
             candidates.append(candidate)
 
     return candidates
+
+
+def _wall_ladder_payload(
+    state: LatestState,
+    options_map: OptionsMap,
+    spot: float | None,
+) -> dict[str, list[dict[str, Any]]]:
+    """Top-4 call/put walls with touch probabilities for the payload.
+
+    A single wall per side loses the structure: on 2026-07-07 the put side was
+    a near-flat band (7460-7500) and price ground to 7479, ten points past the
+    "the" put wall. The ladder lets the writer talk about bands and second
+    entries instead of one line in the sand.
+    """
+    ladder: dict[str, list[dict[str, Any]]] = {"call_walls": [], "put_walls": []}
+    if not options_map.expiries:
+        return ladder
+    front = options_map.expiries[0]
+    pairs = pair_by_strike(_front_expiry_quotes(state, front.expiry))
+    strike_step = median_strike_step(sorted(pairs))
+    for key, walls in (("call_walls", front.call_walls), ("put_walls", front.put_walls)):
+        for wall in walls:
+            prob_touch = None
+            if spot is not None:
+                _, prob_touch, _, _ = probability_for_level(
+                    wall.strike,
+                    underlier=spot,
+                    pairs=pairs,
+                    strike_step=strike_step,
+                )
+            ladder[key].append(
+                {
+                    "strike": wall.strike,
+                    "gex": wall.gex,
+                    "open_interest": wall.open_interest,
+                    "volume": wall.volume,
+                    "distance_points": round(wall.strike - spot, 1) if spot is not None else None,
+                    "prob_touch": prob_touch,
+                }
+            )
+    return ladder
 
 
 def _index_value(state: LatestState, canonical_id: str) -> float | None:
@@ -479,6 +548,8 @@ def build_order_payload(state: LatestState, *, now: datetime | None = None) -> d
         "gamma_state": gamma_state,
         "zero_gamma": zero_gamma,
         "flip_zone": flip_zone,
+        "wall_ladder": _wall_ladder_payload(state, options_map, spot),
+        "wall_method": front.wall_method if front is not None else None,
         "vol_context": {
             "vix": _index_value(state, "index:VIX"),
             "vix1d": _index_value(state, "index:VIX1D"),
@@ -535,6 +606,35 @@ def build_order_payload_with_retry(
     return payload
 
 
+def _wall_ladder_lines(payload: dict[str, Any]) -> list[str]:
+    ladder = payload.get("wall_ladder") if isinstance(payload.get("wall_ladder"), dict) else {}
+    lines: list[str] = []
+    for key, label in (("put_walls", "put 墙阶梯(下方支撑)"), ("call_walls", "call 墙阶梯(上方阻力)")):
+        rungs = [rung for rung in (ladder.get(key) or []) if isinstance(rung, dict)]
+        if not rungs:
+            continue
+        # Payload order is GEX rank; rungs[0] is the primary wall. Display in
+        # spatial order (nearest first) so it reads as an actual ladder.
+        primary_strike = rungs[0].get("strike")
+        spatial = sorted(
+            rungs,
+            key=lambda rung: -(rung.get("strike") or 0.0),
+            reverse=(key == "call_walls"),
+        )
+        parts = []
+        for rung in spatial:
+            strike = _dash(rung.get("strike"))
+            if rung.get("strike") == primary_strike:
+                strike = f"★{strike}"
+            oi = rung.get("open_interest")
+            oi_text = f"OI {int(oi)}" if isinstance(oi, (int, float)) and oi > 0 else "OI -"
+            prob = rung.get("prob_touch")
+            prob_text = f",触达{_fmt_prob(prob)}" if prob is not None else ""
+            parts.append(f"{strike}({oi_text}{prob_text})")
+        lines.append(f"{label}: " + " > ".join(parts) + " (★=主墙)")
+    return lines
+
+
 def _candidate_by_play(payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
     raw_candidates = payload.get("candidates")
     if not isinstance(raw_candidates, list):
@@ -574,6 +674,8 @@ def render_template(payload: dict[str, Any]) -> str:
             f"flip zone {flip_lo}-{flip_hi}"
         ),
     ]
+    ladder_lines = _wall_ladder_lines(payload)
+    lines.extend(ladder_lines)
 
     by_play = _candidate_by_play(payload)
     for index, play in enumerate(PLAY_ORDER, start=1):
@@ -639,6 +741,7 @@ def build_order_prompt(
             "本条推送是『挂单地图』，要回答读者的一个问题：现在挂什么单、挂什么价。",
             "输出中文，最多 18 行。第一行必须以『挂单参考:』开头，并复述模板第一行（日期与时间）。",
             "接着 1-2 行地形结论：今天是 pin 还是 transition，哪类 play 优先级最高，为什么。",
+            "然后 1-2 行墙位阶梯解读（数据在 wall_ladder 字段，OI 定位）：不要只说单一墙位——若相邻几档 put 墙 OI 接近（差距在三成以内），要说成一条支撑带（如『7460-7500 是一条支撑带，7500 破了下一档在 7480/7460』）；反之若第一档独大，才说单点硬墙。call 侧同理。",
             "然后逐条 play（最多 3 条，每条 2-3 行）：",
             "- 给墙位价与先手挡价（数字取自模板），并说取舍：墙位价更便宜但常在墙前几点反转吃不到，先手挡成交率更高；",
             "- 给赔率判断：把触达概率、到位预估价、现价放在一起，说这笔单在赌一次多大概率的什么事件、期权价从现价到预估价的变化幅度是否配得上这个概率；",
@@ -882,6 +985,7 @@ def render_status_template(
             f"预期波幅 ±{_dash(payload.get('expected_move_points'))} 点"
         ),
         f"关键位: {_level_probs_line(payload)}",
+        *_wall_ladder_lines(payload),
         (
             f"vol: VIX {_dash(vol.get('vix'))}, VIX1D {_dash(vol.get('vix1d'))}, "
             f"VVIX {_dash(vol.get('vvix'))}, SKEW {_dash(vol.get('skew'))}"
@@ -908,7 +1012,7 @@ def build_status_prompt(
             "本条推送是『市场状态』。读者已按之前的挂单地图挂好单，每 30 分钟想知道：剧本变了没有、挂的单要不要动、走进开盘的这段时间该注意什么。",
             "输出中文，10-14 行。第一行必须以『市场状态:』开头，保留模板第一行的时间与距开盘信息，并紧跟结论：『剧本维持』或『剧本有变: 一句话说变化』。",
             "判断『变没变』的基准是 previous_push 字段里的上一条推送正文，以及模板里的『较上次推送』一行。",
-            "第 2-4 行位置读数：参考价此刻在 flip zone/zero gamma/两侧墙位构成的地形里的具体位置(距各关键位多少点)，以及这个位置对开盘意味着什么(偏 pin 还是易加速)。",
+            "第 2-4 行位置读数：参考价此刻在 flip zone/zero gamma/两侧墙位阶梯(wall_ladder,各 4 档)构成的地形里的具体位置(距各关键位多少点)，以及这个位置对开盘意味着什么(偏 pin 还是易加速)。相邻 put 墙 OI 接近时说成支撑带并给出第二、第三档位，不要只报一个点。",
             "第 5-6 行赔率读数：三张挂单此刻的触达概率各是多少、和上一条相比谁在改善谁在恶化(引用百分比变化)，现在哪张单性价比最高。",
             "1 行 vol 面：VIX1D/VIX 水平说明隔夜与今日 vol 定价贵还是便宜，SKEW 有无异常。",
             "然后 2-3 行 if/then，必须覆盖上下两个方向：开盘前参考价若上行到哪个位置、下行到哪个位置，分别哪张挂单赔率变差该撤/改价、哪个剧本被激活。",

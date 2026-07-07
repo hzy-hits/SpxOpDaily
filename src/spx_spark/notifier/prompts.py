@@ -44,6 +44,7 @@ def build_agent_prompt(payload: dict[str, object], alerts: list[dict[str, object
             "人类只交易 SPX/SPXW；结论必须落在 SPX/SPXW/ES、期权墙、gamma、IV surface 上，"
             "VIX/VIX1D/VVIX/SKEW 作 vol regime 上下文，SPY/QQQ 可少量引用作确认；不要提加密或预测市场数据源。",
             "如果 options_map 警告含 underlier_mismatch 或 gamma_state 以 unknown 开头，只说明数据降级，不下 wall/gamma 结论。",
+            "剧本必须双向对称：跌破关键位讲防守，但价格收复关键位并站稳时必须明确说反弹剧本激活，不允许只重复防守结论。",
             "输出中文，最多 12 行，结论先行：",
             "第 1 行=一句话说清发生了什么以及这对挂单/持仓意味着什么(例如『价格逼近 7500 put wall，反弹买 call 的挂单可能马上成交』)。",
             "然后 2-3 行证据：引用触发告警的关键数字 + gamma 地形(flip_zone、zero gamma、墙位触及/收破概率)。",
@@ -94,8 +95,18 @@ def compact_analysis_payload(
     }
 
 
-def build_codex_prompt(payload: dict[str, object], alerts: list[dict[str, object]]) -> str:
+def build_codex_prompt(
+    payload: dict[str, object],
+    alerts: list[dict[str, object]],
+    previous_push: dict[str, object] | None = None,
+) -> str:
     compact_payload = compact_analysis_payload(payload, alerts)
+    previous_text = ""
+    if isinstance(previous_push, dict) and previous_push.get("text"):
+        previous_text = json.dumps(
+            {"at": previous_push.get("at"), "kind": previous_push.get("kind"), "text": previous_push.get("text")},
+            ensure_ascii=False,
+        )
     return "\n".join(
         (
             "你是 SPX Spark 的快速告警确认 agent。",
@@ -108,7 +119,11 @@ def build_codex_prompt(payload: dict[str, object], alerts: list[dict[str, object
             "ibkr_positions 表示 IBKR 实盘 SPXW 持仓变化或风险；iv_surface 表示 SPXW IV 曲面期限差或异动。",
             "如果 SPXW 期权 freshness gate 失败，不得基于 wall/gamma/IV 做看盘结论。",
             "如果 options_map 警告含 underlier_mismatch，或 gamma_state 以 unknown 开头，不得基于 wall/gamma 下结论，只能说明数据降级。",
-            "gamma_state 为 zero_gamma_transition（micopedia 为 transition）表示零 gamma 交叉区：突破后波动可能放大，不得按 pin/均值回归解读。",
+            "gamma_state 为 zero_gamma_transition（micopedia 为 transition）表示零 gamma 交叉区：突破后波动可能放大，不得把靠近墙位直接当作支撑确认。",
+            "剧本必须双向对称：跌破关键位后要讲防守；但若价格随后收复该关键位（回到 put wall/flip zone 上方）并持续站稳，这是反弹剧本被激活的信号，必须明确说『XX 已收复，反弹剧本激活，若回踩不破 XX 可视为确认』，不允许在价格已回升时仍只重复防守结论。",
+            "墙位阶梯（human_focus_context 里的 wall_ladder）有上下各 4 档：判断支撑/阻力时看整条阶梯而不是单点；相邻 put 墙 OI 接近时按支撑带表述（如 7460-7500 带），价格在带内磨底不等于支撑失效。",
+            "previous_push 是最近一条已外发推送；若本次结论与它实质相同（同方向、同关键位、无新概率/位置增量），判为不需要推送。若结论方向相对它发生反转（防守→反弹或反之），必须点明『相对上一条，剧本已变』并说明触发原因。",
+            ("previous_push: " + previous_text) if previous_text else "previous_push: null",
             "如果 ES/SPX anchor 缺失，不得把任何链上或 proxy 数据当作交易确认。",
             "如果 window.user_unattended 为 true，说明人类大概率在睡觉：只有 critical/high 且数据质量完好的 SPX/SPXW 风险才值得外发，其余一律不推送。",
             "发送决策必须优先参考 Micopedia、SPXW call wall/put wall/zero gamma、以及过去 1 小时 IV surface/期权变化。",
