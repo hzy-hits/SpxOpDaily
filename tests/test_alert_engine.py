@@ -646,20 +646,21 @@ def test_effective_move_threshold_bps_static_floor_when_em_too_low() -> None:
 
 
 def test_effective_move_threshold_quiet_window_scales_down_to_em() -> None:
-    # Low-vol regime: day EM 41 bps, quiet window. Static 85 bps would never
-    # fire overnight; the bar should drop to 0.6 x EM instead.
-    threshold, source = effective_move_threshold_bps("low", 0.0041)
-    assert threshold == pytest.approx(24.6)
+    # Low-vol regime: day EM 60 bps, quiet window. Static 85 bps would never
+    # fire overnight; the bar should drop to 0.35 x EM instead.
+    threshold, source = effective_move_threshold_bps("low", 0.006)
+    assert threshold == pytest.approx(21.0)
     assert source == "em_normalized_quiet"
 
 
 def test_effective_move_threshold_quiet_window_keeps_floor() -> None:
     threshold, source = effective_move_threshold_bps("low", 0.0005)
-    assert threshold == 20.0
+    assert threshold == 15.0
     assert source == "em_normalized_quiet"
 
 
-def test_effective_move_threshold_quiet_window_high_vol_uses_em() -> None:
-    threshold, source = effective_move_threshold_bps("low", 0.02)
-    assert threshold == pytest.approx(120.0)
+def test_effective_move_threshold_quiet_window_high_vol_scales_up() -> None:
+    # Day EM 300 bps: quiet bar rises to 0.35 x EM above the static 85.
+    threshold, source = effective_move_threshold_bps("low", 0.03)
+    assert threshold == pytest.approx(105.0)
     assert source == "em_normalized"

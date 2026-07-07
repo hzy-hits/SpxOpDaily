@@ -77,18 +77,20 @@ EM_MOVE_FRACTIONS = {
     "high": 0.30,
     "elevated": 0.40,
     "normal": 0.50,
-    "low": 0.60,
+    "low": 0.35,
     "off": 9.0,
 }
 
 # In quiet (low-priority) windows the static 85 bps bar is unreachable in
 # low-vol regimes, so overnight dips never alert. When expected move is known,
 # scale the bar down to the EM fraction instead (floored to avoid tick noise).
-QUIET_EM_THRESHOLD_FLOOR_BPS = 20.0
+QUIET_EM_THRESHOLD_FLOOR_BPS_DEFAULT = 15.0
 
 # A move consuming this fraction of the day's expected move is escalated to
 # high severity so it clears the notify gate even in low-priority windows.
-MOVE_HIGH_SEVERITY_EM_FRACTION_DEFAULT = 0.6
+# Kept equal to the quiet EM fraction so any move that crosses the quiet bar
+# also clears the notify severity gate.
+MOVE_HIGH_SEVERITY_EM_FRACTION_DEFAULT = 0.35
 
 BAD_QUALITIES = {
     MarketDataQuality.MISSING,
@@ -177,7 +179,8 @@ def effective_move_threshold_bps(
     if em_bps > static:
         return (em_bps, "em_normalized")
     if priority == "low":
-        return (max(em_bps, QUIET_EM_THRESHOLD_FLOOR_BPS), "em_normalized_quiet")
+        floor = env_float("ALERT_MOVE_QUIET_FLOOR_BPS", QUIET_EM_THRESHOLD_FLOOR_BPS_DEFAULT)
+        return (max(em_bps, floor), "em_normalized_quiet")
     return (static, "static")
 
 

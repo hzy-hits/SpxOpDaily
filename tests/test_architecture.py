@@ -32,11 +32,19 @@ LAYERS = {
     "post_close_review": 5,
     "latest_state": 5,
     "morning_map": 5,
+    "order_map": 5,
 }
 
 L0_MODULES = {"config", "marketdata", "alert_model"}
 L2_PROVIDERS = {"ibkr", "schwab", "hyperliquid", "polymarket", "mock_collector"}
-L5_MODULES = {"service_loop", "maintenance", "post_close_review", "latest_state", "morning_map"}
+L5_MODULES = {
+    "service_loop",
+    "maintenance",
+    "post_close_review",
+    "latest_state",
+    "morning_map",
+    "order_map",
+}
 
 POSITION_ALERTS_ALLOWED_L2_IMPORT = "ibkr.position_watcher"
 
