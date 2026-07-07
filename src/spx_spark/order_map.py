@@ -567,6 +567,9 @@ def build_order_payload(state: LatestState, *, now: datetime | None = None) -> d
             "points": day_move_points,
             "em_used_fraction": em_used_fraction,
         },
+        "rn_density": (
+            front.rn_density.to_dict() if front is not None and front.rn_density else None
+        ),
         "vol_context": {
             "vix": _index_value(state, "index:VIX"),
             "vix1d": _index_value(state, "index:VIX1D"),
@@ -631,6 +634,25 @@ def _day_move_line(payload: dict[str, Any]) -> str | None:
     em_used = day_move.get("em_used_fraction")
     em_text = f",已用当日预期波幅的 {em_used:.0%}" if isinstance(em_used, (int, float)) else ""
     return f"较昨收: {points:+.1f} 点{em_text}"
+
+
+def _rn_density_line(payload: dict[str, Any]) -> str | None:
+    density = payload.get("rn_density") if isinstance(payload.get("rn_density"), dict) else None
+    if not density or density.get("median") is None:
+        return None
+    quality = density.get("quality") or "-"
+    parts = [f"中位 {_dash(density.get('median'))}"]
+    p10, p90 = density.get("p10"), density.get("p90")
+    if p10 is not None and p90 is not None:
+        parts.append(f"80%区间 {_dash(p10)}-{_dash(p90)}")
+    below = density.get("prob_below_put_wall")
+    if below is not None:
+        parts.append(f"收破put墙 {_fmt_prob(below)}")
+    above = density.get("prob_above_call_wall")
+    if above is not None:
+        parts.append(f"越call墙 {_fmt_prob(above)}")
+    suffix = f" [{quality}]" if quality != "ok" else ""
+    return "收盘分布(B-L市场定价): " + ", ".join(parts) + suffix
 
 
 def _wall_ladder_lines(payload: dict[str, Any]) -> list[str]:
@@ -706,6 +728,9 @@ def render_template(payload: dict[str, Any]) -> str:
         lines.append(day_move_line)
     ladder_lines = _wall_ladder_lines(payload)
     lines.extend(ladder_lines)
+    density_line = _rn_density_line(payload)
+    if density_line:
+        lines.append(density_line)
 
     by_play = _candidate_by_play(payload)
     for index, play in enumerate(PLAY_ORDER, start=1):
@@ -772,6 +797,7 @@ def build_order_prompt(
             "输出中文，最多 18 行。第一行必须以『挂单参考:』开头，并复述模板第一行（日期与时间）。",
             "接着 1-2 行地形结论：今天是 pin 还是 transition，哪类 play 优先级最高，为什么。",
             "然后 1-2 行墙位阶梯解读（数据在 wall_ladder 字段，OI 定位）：不要只说单一墙位——若相邻几档 put 墙 OI 接近（差距在三成以内），要说成一条支撑带（如『7460-7500 是一条支撑带，7500 破了下一档在 7480/7460』）；反之若第一档独大，才说单点硬墙。call 侧同理。",
+            "rn_density 是 B-L 风险中性收盘分布（市场用真金白银定价的收盘概率）：中位数是市场认为的收盘中枢，80% 区间(p10-p90)之外是市场只给 20% 的尾部；给垂直价差选腿时引用它——买腿放在赌的方向内、卖腿放在 80% 区间外沿附近最划算；quality 非 ok 时注明并降权。",
             "然后逐条 play（最多 3 条，每条 2-3 行）：",
             "- 给墙位价与先手挡价（数字取自模板），并说取舍：墙位价更便宜但常在墙前几点反转吃不到，先手挡成交率更高；",
             "- 给赔率判断：把触达概率、到位预估价、现价放在一起，说这笔单在赌一次多大概率的什么事件、期权价从现价到预估价的变化幅度是否配得上这个概率；",
@@ -1024,6 +1050,7 @@ def render_status_template(
         f"关键位: {_level_probs_line(payload)}",
         *( [line] if (line := _day_move_line(payload)) else [] ),
         *_wall_ladder_lines(payload),
+        *( [line] if (line := _rn_density_line(payload)) else [] ),
         (
             f"vol: VIX {_dash(vol.get('vix'))}, VIX1D {_dash(vol.get('vix1d'))}, "
             f"VVIX {_dash(vol.get('vvix'))}, SKEW {_dash(vol.get('skew'))}"
@@ -1052,6 +1079,7 @@ def build_status_prompt(
             "判断『变没变』的基准是 previous_push 字段里的上一条推送正文，以及模板里的『较上次推送』一行。",
             "第 2-4 行位置读数：参考价此刻在 flip zone/zero gamma/两侧墙位阶梯(wall_ladder,各 4 档)构成的地形里的具体位置(距各关键位多少点)，以及这个位置对开盘意味着什么(偏 pin 还是易加速)。相邻 put 墙 OI 接近时说成支撑带并给出第二、第三档位，不要只报一个点。",
             "第 5-6 行赔率读数：三张挂单此刻的触达概率各是多少、和上一条相比谁在改善谁在恶化(引用百分比变化)，现在哪张单性价比最高。",
+            "若 rn_density 可用(quality=ok)：引用市场定价的收盘中位与 80% 区间说『市场把收盘定价在哪』，与当前价格方向对照——价格在中位下方说明市场定价偏回归，在 80% 区间边缘说明已到市场定价的尾部。",
             "1 行 vol 面：VIX1D/VIX 水平说明隔夜与今日 vol 定价贵还是便宜，SKEW 有无异常。",
             "然后 2-3 行 if/then，必须覆盖上下两个方向：参考价若上行到哪个位置、下行到哪个位置，分别哪张挂单赔率变差该撤/改价、哪个剧本被激活。",
             "反 FOMO/反恐慌规则(开盘后尤其重要，违反即失职)：",

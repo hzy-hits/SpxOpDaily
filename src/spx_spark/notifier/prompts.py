@@ -127,6 +127,7 @@ def build_codex_prompt(
             "(c) 价格已进入 put 墙支撑带时，明确写『支撑带内是计划中的接多区，不是割肉点；防守只在跌破 XX(带下沿)后执行』；急拉进 call 墙带时对称提醒不追多；",
             "(d) 读者若可能持有浮亏仓位（价格深跌后反弹途中），提醒『离场决策看位置不看盈亏：现在在 XX 位置，剧本是 XX，按剧本而不是按回本冲动操作』。",
             "墙位阶梯（human_focus_context 里的 wall_ladder）有上下各 4 档：判断支撑/阻力时看整条阶梯而不是单点；相邻 put 墙 OI 接近时按支撑带表述（如 7460-7500 带），价格在带内磨底不等于支撑失效。",
+            "rn_density（若 quality=ok）是市场定价的收盘分布：价格逼近 p10/p90（80% 区间边缘）时应指出『已到市场定价的尾部，顺方向继续赌需要新信息』；prob_below_put_wall/prob_above_call_wall 给出收在墙外的市场定价概率，可直接引用。",
             "previous_push 是最近一条已外发推送；若本次结论与它实质相同（同方向、同关键位、无新概率/位置增量），判为不需要推送。若结论方向相对它发生反转（防守→反弹或反之），必须点明『相对上一条，剧本已变』并说明触发原因。",
             ("previous_push: " + previous_text) if previous_text else "previous_push: null",
             "如果 ES/SPX anchor 缺失，不得把任何链上或 proxy 数据当作交易确认。",

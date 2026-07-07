@@ -18,6 +18,7 @@ from spx_spark.options_map import (
     bs_gamma,
     build_gex_by_strike,
     build_options_map,
+    build_rn_density,
     build_wall_ladder,
     gex_weight,
     interpolated_atm_iv,
@@ -254,6 +255,81 @@ def test_walls_come_from_ladder_and_respect_spot_side() -> None:
     assert [wall.strike for wall in expiry.put_walls] == [7450, 7400]
     assert expiry.call_wall == 7550
     assert expiry.wall_method == "oi_gex"
+
+
+def _bs_price(spot: float, strike: float, iv: float, t_years: float, right: str) -> float:
+    import math
+
+    sqrt_t = math.sqrt(t_years)
+    d1 = (math.log(spot / strike) + 0.5 * iv * iv * t_years) / (iv * sqrt_t)
+    d2 = d1 - iv * sqrt_t
+    n = lambda x: 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))  # noqa: E731
+    call = spot * n(d1) - strike * n(d2)
+    if right == "C":
+        return call
+    return call - spot + strike  # parity, r=0
+
+
+def test_rn_density_recovers_lognormal_from_bs_chain() -> None:
+    now = datetime(2026, 7, 6, 14, 0, tzinfo=timezone.utc)
+    spot, iv, t_years = 7500.0, 0.12, 1.0 / 365.0
+    sigma_points = spot * iv * (t_years**0.5)  # ~47 points
+
+    quotes = []
+    for strike in range(7300, 7701, 10):
+        for right in ("C", "P"):
+            mark = _bs_price(spot, float(strike), iv, t_years, right)
+            quotes.append(
+                make_option(
+                    expiry="20260706",
+                    strike=float(strike),
+                    right=right,
+                    mark=max(mark, 0.05),
+                    iv=iv,
+                    gamma=0.003,
+                    open_interest=1000,
+                    now=now,
+                )
+            )
+    pairs = pair_by_strike(quotes)
+
+    density = build_rn_density(
+        pairs,
+        underlier=spot,
+        put_wall=7450.0,
+        call_wall=7550.0,
+        expected_move_points=sigma_points,
+    )
+
+    assert density.quality == "ok"
+    # Lognormal median = forward (r=0 -> spot); allow one strike step of slack.
+    assert density.median == pytest.approx(spot, abs=10.0)
+    # p90-p10 spans ~2.56 sigma for a (log)normal.
+    assert density.p90 - density.p10 == pytest.approx(2.56 * sigma_points, rel=0.15)
+    # Close below 7450 (-1.06 sigma) ~ 14%; above 7550 (+1.06 sigma) ~ 14%.
+    assert density.prob_below_put_wall == pytest.approx(0.145, abs=0.05)
+    assert density.prob_above_call_wall == pytest.approx(0.145, abs=0.05)
+    assert density.clipped_mass_fraction < 0.05
+
+
+def test_rn_density_insufficient_strikes() -> None:
+    now = datetime(2026, 7, 6, 14, 0, tzinfo=timezone.utc)
+    quotes = [
+        make_option(
+            expiry="20260706",
+            strike=strike,
+            right="C",
+            mark=10.0,
+            iv=0.2,
+            gamma=0.003,
+            open_interest=100,
+            now=now,
+        )
+        for strike in (7480.0, 7500.0, 7520.0)
+    ]
+    density = build_rn_density(pair_by_strike(quotes), underlier=7500.0)
+    assert density.quality == "insufficient_strikes"
+    assert density.median is None
 
 
 def test_options_map_warns_when_open_interest_missing() -> None:

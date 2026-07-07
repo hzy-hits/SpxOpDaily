@@ -76,6 +76,7 @@ def expiry_options_summary(expiry: ExpiryOptionsMap) -> dict[str, object]:
                 for wall in expiry.put_walls
             ],
         },
+        "rn_density": expiry.rn_density.to_dict() if expiry.rn_density else None,
         "nearest_wall": expiry.nearest_wall,
         "nearest_wall_distance_points": expiry.nearest_wall_distance_points,
         "net_gamma_ratio": expiry.net_gamma_ratio,
