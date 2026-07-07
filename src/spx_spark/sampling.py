@@ -88,10 +88,19 @@ def build_contracts(
     *,
     lane: str,
     group_index: int | None = None,
+    next_expiry_strikes: set[int] | None = None,
 ) -> list[OptionContractSpec]:
+    """Build C/P specs for each expiry.
+
+    The first expiry (0DTE) always gets the full strike list. Later expiries
+    (1DTE) are restricted to `next_expiry_strikes` when provided, so the
+    line budget concentrates on the front expiry where walls/GEX live.
+    """
     contracts: list[OptionContractSpec] = []
-    for expiry in expiries:
+    for index, expiry in enumerate(expiries):
         for strike in strikes:
+            if index > 0 and next_expiry_strikes is not None and strike not in next_expiry_strikes:
+                continue
             for right in ("C", "P"):
                 contracts.append(
                     OptionContractSpec(
@@ -139,6 +148,12 @@ def build_sampling_plan(
     expiries = resolve_expiries(expiry, next_expiry, settings.include_next_expiry)
     hot_strikes = build_strikes(atm, settings.hot_window_points, settings.strike_step)
     rolling_strikes = build_strikes(atm, settings.window_points, settings.strike_step)
+    next_hot_strikes = set(
+        build_strikes(atm, settings.next_expiry_hot_window_points, settings.strike_step)
+    )
+    next_rolling_strikes = set(
+        build_strikes(atm, settings.next_expiry_window_points, settings.strike_step)
+    )
 
     if mode == "degraded":
         group_count = settings.degraded_group_count
@@ -152,7 +167,9 @@ def build_sampling_plan(
     else:
         hot_cadence = settings.hot_human_cadence_seconds
 
-    hot_lane = build_contracts(expiries, hot_strikes, lane="hot")
+    hot_lane = build_contracts(
+        expiries, hot_strikes, lane="hot", next_expiry_strikes=next_hot_strikes
+    )
     groups: list[SamplingGroup] = []
     for index, group_strikes in enumerate(
         split_groups(rolling_strikes, group_count, settings.group_strategy)
@@ -167,6 +184,7 @@ def build_sampling_plan(
                     group_strikes,
                     lane="rolling",
                     group_index=index,
+                    next_expiry_strikes=next_rolling_strikes,
                 ),
             )
         )

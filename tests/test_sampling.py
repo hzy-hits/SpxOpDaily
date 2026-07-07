@@ -52,8 +52,23 @@ def test_sampling_plan_counts_0dte_and_1dte():
     assert round_to_step(7501.2, 5) == 7500
     assert plan.atm_strike == 7500
     assert len(plan.expiries) == 2
-    assert plan.hot_contract_count == 84
-    assert plan.rolling_contract_count == 324
+    # 0DTE keeps the full windows; 1DTE is trimmed to the ATM vicinity
+    # (hot: ATM +/- 10 -> 5 strikes, rolling: ATM +/- 30 -> 13 strikes).
+    hot_0dte = [spec for spec in plan.hot_lane if spec.expiry == "20260706"]
+    hot_1dte = [spec for spec in plan.hot_lane if spec.expiry == "20260707"]
+    assert len(hot_0dte) == 42
+    assert len(hot_1dte) == 10
+    assert plan.hot_contract_count == 52
+    rolling_1dte = [
+        spec
+        for group in plan.rolling_groups
+        for spec in group.contracts
+        if spec.expiry == "20260707"
+    ]
+    assert len(rolling_1dte) == 26
+    assert plan.rolling_contract_count == 162 + 26
+    assert all(abs(spec.strike - 7500) <= 10 for spec in hot_1dte)
+    assert all(abs(spec.strike - 7500) <= 30 for spec in rolling_1dte)
     assert len(plan.rolling_groups) == 4
     assert plan.full_scan_seconds == 16
 

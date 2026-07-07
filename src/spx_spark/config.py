@@ -680,6 +680,10 @@ class SamplingSettings:
     hot_execution_cadence_seconds: int
     include_next_expiry: bool
     default_mode: str
+    # The next (1DTE) expiry only needs ATM-vicinity lines for term structure
+    # and next-day expected move; walls/GEX need the wide window on 0DTE only.
+    next_expiry_window_points: int = 30
+    next_expiry_hot_window_points: int = 10
 
     @classmethod
     def from_env(cls) -> "SamplingSettings":
@@ -697,4 +701,6 @@ class SamplingSettings:
             hot_execution_cadence_seconds=env_int("SAMPLING_HOT_EXECUTION_CADENCE_SECONDS", 2),
             include_next_expiry=env_bool("SAMPLING_INCLUDE_NEXT_EXPIRY", True),
             default_mode=env_str("SAMPLING_DEFAULT_MODE", "human_alert"),
+            next_expiry_window_points=env_int("SAMPLING_NEXT_EXPIRY_WINDOW_POINTS", 30),
+            next_expiry_hot_window_points=env_int("SAMPLING_NEXT_EXPIRY_HOT_WINDOW_POINTS", 10),
         )
