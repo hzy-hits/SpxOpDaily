@@ -77,9 +77,18 @@ EM_MOVE_FRACTIONS = {
     "high": 0.30,
     "elevated": 0.40,
     "normal": 0.50,
-    "low": 0.70,
+    "low": 0.60,
     "off": 9.0,
 }
+
+# In quiet (low-priority) windows the static 85 bps bar is unreachable in
+# low-vol regimes, so overnight dips never alert. When expected move is known,
+# scale the bar down to the EM fraction instead (floored to avoid tick noise).
+QUIET_EM_THRESHOLD_FLOOR_BPS = 20.0
+
+# A move consuming this fraction of the day's expected move is escalated to
+# high severity so it clears the notify gate even in low-priority windows.
+MOVE_HIGH_SEVERITY_EM_FRACTION_DEFAULT = 0.6
 
 BAD_QUALITIES = {
     MarketDataQuality.MISSING,
@@ -167,6 +176,8 @@ def effective_move_threshold_bps(
     em_bps = expected_move_pct * 10_000.0 * fraction
     if em_bps > static:
         return (em_bps, "em_normalized")
+    if priority == "low":
+        return (max(em_bps, QUIET_EM_THRESHOLD_FLOOR_BPS), "em_normalized_quiet")
     return (static, "static")
 
 
@@ -333,9 +344,22 @@ def movement_alerts(
                 f"threshold_source={threshold_source} "
                 f"expected_move_pct={expected_move_pct}"
             )
+        severity = severity_for_priority(window.priority)
+        if expected_move_pct is not None and expected_move_pct > 0:
+            escalation_fraction = env_float(
+                "ALERT_MOVE_HIGH_SEVERITY_EM_FRACTION",
+                MOVE_HIGH_SEVERITY_EM_FRACTION_DEFAULT,
+            )
+            em_day_bps = expected_move_pct * 10_000.0
+            if abs(move_bps) >= em_day_bps * escalation_fraction and severity in ("info", "low", "medium"):
+                severity = "high"
+                detail = (
+                    f"{detail} em_consumed={abs(move_bps) / em_day_bps:.0%}"
+                    " (escalated: move consumed most of the day's expected move)"
+                )
         alerts.append(
             Alert(
-                severity=severity_for_priority(window.priority),
+                severity=severity,
                 kind="price_move_from_close",
                 instrument_id=instrument_id,
                 title=f"{instrument_id} {direction} {move_bps:.1f} bps from close",
