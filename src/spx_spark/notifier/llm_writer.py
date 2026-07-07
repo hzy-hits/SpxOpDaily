@@ -47,8 +47,12 @@ class LlmWriterSettings:
                 "https://api.deepseek.com/v1/chat/completions",
             ).strip(),
             env_file=os.getenv("SPX_PUSH_LLM_ENV_FILE", "/home/ubuntu/.hermes/.env").strip(),
-            timeout_seconds=float(os.getenv("SPX_PUSH_LLM_TIMEOUT_SECONDS", "60")),
-            max_tokens=int(os.getenv("SPX_PUSH_LLM_MAX_TOKENS", "900")),
+            timeout_seconds=float(os.getenv("SPX_PUSH_LLM_TIMEOUT_SECONDS", "90")),
+            # deepseek-v4-pro is a reasoning model: the chain-of-thought also
+            # consumes completion tokens (observed ~2000 reasoning tokens per
+            # report), so leave generous headroom or the visible content comes
+            # back empty with finish_reason=length.
+            max_tokens=int(os.getenv("SPX_PUSH_LLM_MAX_TOKENS", "6400")),
         )
 
 

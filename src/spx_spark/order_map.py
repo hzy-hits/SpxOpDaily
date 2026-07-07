@@ -4,6 +4,7 @@ import argparse
 import json
 import math
 import os
+import time as time_module
 from dataclasses import asdict, dataclass
 from datetime import datetime, time, timezone
 from pathlib import Path
@@ -461,6 +462,38 @@ def build_order_payload(state: LatestState, *, now: datetime | None = None) -> d
     }
 
 
+def _payload_is_thin(payload: dict[str, Any]) -> bool:
+    """True when the snapshot caught a mid-rotation flush (missing spot/OI/plays)."""
+    underlier = payload.get("underlier") if isinstance(payload.get("underlier"), dict) else {}
+    if underlier.get("price") is None:
+        return True
+    if not payload.get("candidates"):
+        return True
+    warnings = payload.get("warnings")
+    if isinstance(warnings, list) and any("no open interest" in str(item) for item in warnings):
+        return True
+    return False
+
+
+def build_order_payload_with_retry(
+    storage_settings: StorageSettings,
+    *,
+    now: datetime,
+    attempts: int = 3,
+    delay_seconds: float = 6.0,
+) -> dict[str, Any]:
+    """Reload latest state a few times if the first snapshot looks thin."""
+    payload: dict[str, Any] = {}
+    for attempt in range(attempts):
+        state = LatestStateStore(storage_settings).load()
+        payload = build_order_payload(state, now=now)
+        if not _payload_is_thin(payload):
+            return payload
+        if attempt < attempts - 1:
+            time_module.sleep(delay_seconds)
+    return payload
+
+
 def _candidate_by_play(payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
     raw_candidates = payload.get("candidates")
     if not isinstance(raw_candidates, list):
@@ -844,8 +877,7 @@ def run_status(
         return 0
 
     previous = load_order_map_state(state_path)
-    state = LatestStateStore(StorageSettings.from_env()).load()
-    payload = build_order_payload(state, now=now)
+    payload = build_order_payload_with_retry(StorageSettings.from_env(), now=now)
     fingerprint = payload_fingerprint(payload)
     changes = material_changes(previous.get("fingerprint"), fingerprint)
     template = render_status_template(payload, changes, now)
@@ -920,8 +952,7 @@ def run_refresh(args: argparse.Namespace, *, now: datetime, state_path: str, tra
         print(json.dumps({"skipped": True, "reason": "refresh_cooldown"}))
         return 0
 
-    state = LatestStateStore(StorageSettings.from_env()).load()
-    payload = build_order_payload(state, now=now)
+    payload = build_order_payload_with_retry(StorageSettings.from_env(), now=now)
     fingerprint = payload_fingerprint(payload)
     changes = material_changes(previous.get("fingerprint"), fingerprint)
     if not changes and not args.force:
@@ -967,8 +998,7 @@ def run(argv: list[str] | None = None, *, now: datetime | None = None) -> int:
             print(json.dumps({"skipped": True, "reason": "already_sent"}))
             return 0
 
-    state = LatestStateStore(storage_settings).load()
-    payload = build_order_payload(state, now=now)
+    payload = build_order_payload_with_retry(storage_settings, now=now)
     template = render_template(payload)
 
     if args.dry_run:
