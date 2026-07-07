@@ -52,7 +52,7 @@ class LlmWriterSettings:
             # consumes completion tokens (observed ~2000 reasoning tokens per
             # report), so leave generous headroom or the visible content comes
             # back empty with finish_reason=length.
-            max_tokens=int(os.getenv("SPX_PUSH_LLM_MAX_TOKENS", "6400")),
+            max_tokens=int(os.getenv("SPX_PUSH_LLM_MAX_TOKENS", "12800")),
         )
 
 
