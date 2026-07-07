@@ -1,4 +1,4 @@
-from datetime import datetime, time
+from datetime import date, datetime, time
 from zoneinfo import ZoneInfo
 
 from spx_spark.config import (
@@ -12,6 +12,8 @@ from spx_spark.config import (
     parse_hhmm,
 )
 
+NY_TZ = ZoneInfo("America/New_York")
+
 
 def test_next_equity_futures_month_returns_yyyymm():
     value = next_equity_futures_month()
@@ -20,9 +22,26 @@ def test_next_equity_futures_month_returns_yyyymm():
 
 
 def test_default_spxw_expiry_returns_yyyymmdd():
-    value = default_spxw_expiry()
+    value = default_spxw_expiry(today=date(2026, 7, 9))
     assert len(value) == 8
     assert value.isdigit()
+    assert value == "20260709"
+
+
+def test_default_spxw_expiry_rolls_after_1615_et():
+    thursday_afternoon = datetime(2026, 7, 9, 15, 0, tzinfo=NY_TZ)
+    assert default_spxw_expiry(now=thursday_afternoon) == "20260709"
+
+    thursday_after_close = datetime(2026, 7, 9, 16, 20, tzinfo=NY_TZ)
+    assert default_spxw_expiry(now=thursday_after_close) == "20260710"
+
+    friday_after_close = datetime(2026, 7, 10, 16, 20, tzinfo=NY_TZ)
+    assert default_spxw_expiry(now=friday_after_close) == "20260713"
+
+
+def test_default_spxw_expiry_explicit_today_does_not_roll():
+    thursday = date(2026, 7, 9)
+    assert default_spxw_expiry(today=thursday) == "20260709"
 
 
 def test_parse_hhmm():

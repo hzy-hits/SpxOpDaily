@@ -57,6 +57,9 @@ def expiry_options_summary(expiry: ExpiryOptionsMap) -> dict[str, object]:
         "atm_iv": expiry.atm_iv,
         "put_skew_ratio": expiry.put_skew_ratio,
         "call_skew_ratio": expiry.call_skew_ratio,
+        "put_skew_25d": expiry.put_skew_25d,
+        "call_skew_25d": expiry.call_skew_25d,
+        "skew_method": expiry.skew_method,
         "gamma_state": expiry.gamma_state,
         "zero_gamma": expiry.zero_gamma,
         "zero_gamma_distance_points": expiry.zero_gamma_distance_points,
@@ -84,6 +87,8 @@ def expiry_options_summary(expiry: ExpiryOptionsMap) -> dict[str, object]:
             "zero_gamma": expiry.zero_gamma,
             "flip_zone": list(expiry.gamma_flip_zone) if expiry.gamma_flip_zone else None,
             "net_gamma_ratio": expiry.net_gamma_ratio,
+            "gex_weighting": expiry.gex_weighting,
+            "zero_gamma_method": expiry.zero_gamma_method,
             "top_strikes": [
                 {
                     "strike": row.strike,

@@ -4,7 +4,10 @@ from dataclasses import replace
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
+import pytest
+
 from spx_spark.alert_engine import (
+    effective_move_threshold_bps,
     evaluate_alerts,
     evaluate_payload,
     iv_surface_freshness_alert,
@@ -541,3 +544,21 @@ def test_run_persists_system_events_when_notifications_disabled(tmp_path, monkey
     run(["--no-notify"])
 
     assert len(persist_calls) == 1
+
+
+def test_effective_move_threshold_bps_em_normalized_when_em_above_static() -> None:
+    threshold, source = effective_move_threshold_bps("high", 0.015)
+    assert threshold == pytest.approx(45.0)
+    assert source == "em_normalized"
+
+
+def test_effective_move_threshold_bps_static_when_expected_move_missing() -> None:
+    threshold, source = effective_move_threshold_bps("high", None)
+    assert threshold == 30.0
+    assert source == "static"
+
+
+def test_effective_move_threshold_bps_static_floor_when_em_too_low() -> None:
+    threshold, source = effective_move_threshold_bps("high", 0.002)
+    assert threshold == 30.0
+    assert source == "static"

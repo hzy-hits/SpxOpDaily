@@ -13,6 +13,7 @@ from spx_spark.config import (
     IvSurfaceSettings,
     NotificationSettings,
     StorageSettings,
+    NY_TZ,
     env_bool,
     env_float,
 )
@@ -71,6 +72,15 @@ MOVE_THRESHOLDS_BPS = {
     "off": 99999.0,
 }
 
+EM_MOVE_FRACTIONS = {
+    "critical": 0.20,
+    "high": 0.30,
+    "elevated": 0.40,
+    "normal": 0.50,
+    "low": 0.70,
+    "off": 9.0,
+}
+
 BAD_QUALITIES = {
     MarketDataQuality.MISSING,
     MarketDataQuality.ERROR,
@@ -88,6 +98,7 @@ BLOCKING_SURFACE_QUALITIES = {"missing_options", "missing_atm_iv"}
 DEGRADED_SURFACE_QUALITIES = {"low_iv_coverage", "wide_quote_degraded"}
 ATM_IV_JUMP_THRESHOLD = 0.03
 SKEW_STEEPENING_THRESHOLD = 0.08
+SKEW_25D_STEEPENING_THRESHOLD = 0.02
 SURFACE_SHIFT_THRESHOLD = 0.03
 TERM_GAP_THRESHOLD = 0.05
 SURFACE_SHIFT_1H_THRESHOLD = 0.05
@@ -137,6 +148,49 @@ def move_from_close_bps(quote: Quote) -> float | None:
     if price is None or close is None or close <= 0:
         return None
     return (price / close - 1.0) * 10_000.0
+
+
+def effective_move_threshold_bps(
+    priority: str,
+    expected_move_pct: float | None,
+) -> tuple[float, str]:
+    """Return effective movement threshold in bps and its source label."""
+    static = MOVE_THRESHOLDS_BPS.get(priority, MOVE_THRESHOLDS_BPS["normal"])
+    if expected_move_pct is None or expected_move_pct <= 0:
+        return (static, "static")
+    fraction = EM_MOVE_FRACTIONS.get(priority, EM_MOVE_FRACTIONS["normal"])
+    em_bps = expected_move_pct * 10_000.0 * fraction
+    if em_bps > static:
+        return (em_bps, "em_normalized")
+    return (static, "static")
+
+
+def front_expected_move_pct(options_map: OptionsMap | None, *, as_of: datetime) -> float | None:
+    if options_map is None or not options_map.expiries:
+        return None
+    front = options_map.expiries[0]
+    try:
+        expiry_date = datetime.strptime(front.expiry, "%Y%m%d").date()
+    except ValueError:
+        return None
+    if expiry_date < as_of.astimezone(NY_TZ).date():
+        return None
+    return front.expected_move_pct
+
+
+def movement_threshold_for_window(
+    window: AlertWindow,
+    options_map: OptionsMap | None,
+    *,
+    as_of: datetime,
+) -> tuple[float, str | None, float | None]:
+    """Resolve movement threshold; when options_map is None match legacy static behavior."""
+    static = MOVE_THRESHOLDS_BPS.get(window.priority, MOVE_THRESHOLDS_BPS["normal"])
+    if options_map is None:
+        return (static, None, None)
+    expected_move_pct = front_expected_move_pct(options_map, as_of=as_of)
+    threshold, source = effective_move_threshold_bps(window.priority, expected_move_pct)
+    return (threshold, source, expected_move_pct)
 
 
 def movement_bucket_and_direction(move_bps: float, threshold_bps: float) -> tuple[int, str]:
@@ -228,8 +282,13 @@ def movement_alerts(
     window: AlertWindow,
     market_context: dict[str, object] | None,
     persist: bool = False,
+    options_map: OptionsMap | None = None,
 ) -> list[Alert]:
-    threshold = MOVE_THRESHOLDS_BPS.get(window.priority, MOVE_THRESHOLDS_BPS["normal"])
+    threshold, threshold_source, expected_move_pct = movement_threshold_for_window(
+        window,
+        options_map,
+        as_of=state.as_of,
+    )
     state_path = movement_state_path()
     previous_payload = load_movement_state(state_path)
     previous_instruments = previous_payload.get("instruments")
@@ -259,16 +318,23 @@ def movement_alerts(
         new_instruments[instrument_id] = {"bucket": bucket, "direction": direction}
         if not should_alert:
             continue
+        detail = (
+            f"{instrument_id} effective price moved {move_bps:.1f} bps from close "
+            f"during {window.name}."
+        )
+        if threshold_source is not None:
+            detail = (
+                f"{detail} threshold_bps={threshold:.1f} "
+                f"threshold_source={threshold_source} "
+                f"expected_move_pct={expected_move_pct}"
+            )
         alerts.append(
             Alert(
                 severity=severity_for_priority(window.priority),
                 kind="price_move_from_close",
                 instrument_id=instrument_id,
                 title=f"{instrument_id} {direction} {move_bps:.1f} bps from close",
-                detail=(
-                    f"{instrument_id} effective price moved {move_bps:.1f} bps from close "
-                    f"during {window.name}."
-                ),
+                detail=detail,
                 provider=quote.provider.value,
                 quality=quote.quality.value,
                 value=move_bps,
@@ -320,6 +386,7 @@ def evaluate_alerts(
             window=window,
             market_context=market_context,
             persist=persist_movement_state,
+            options_map=options_map,
         )
     )
 
@@ -335,7 +402,7 @@ def evaluate_alerts(
     alerts.extend(position_holdings_alerts(state, options_map=options_map, window=window))
     alerts.extend(market_context_alerts(market_context))
     alerts.extend(system_event_alerts(state, persist=persist_system_events))
-    alerts.extend(proxy_fallback_watch_alerts(state, window=window, market_context=market_context))
+    alerts.extend(proxy_fallback_watch_alerts(state, window=window, market_context=market_context, options_map=options_map))
     return alerts
 
 
@@ -673,6 +740,7 @@ def proxy_fallback_watch_alerts(
     *,
     window: AlertWindow,
     market_context: dict[str, object] | None,
+    options_map: OptionsMap | None = None,
 ) -> list[Alert]:
     if not env_bool("ALERT_ALLOW_BROKER_UNAVAILABLE_PROXY_WATCH", True):
         return []
@@ -688,25 +756,42 @@ def proxy_fallback_watch_alerts(
     if quote is None or quote.quality in BAD_QUALITIES:
         return []
     move_bps = move_from_close_bps(quote)
-    threshold = env_float(
-        "ALERT_PROXY_FALLBACK_MOVE_BPS",
-        MOVE_THRESHOLDS_BPS.get(window.priority, MOVE_THRESHOLDS_BPS["normal"]),
-    )
+    if options_map is None:
+        threshold = env_float(
+            "ALERT_PROXY_FALLBACK_MOVE_BPS",
+            MOVE_THRESHOLDS_BPS.get(window.priority, MOVE_THRESHOLDS_BPS["normal"]),
+        )
+        threshold_source = None
+        expected_move_pct = None
+    else:
+        threshold, threshold_source, expected_move_pct = movement_threshold_for_window(
+            window,
+            options_map,
+            as_of=state.as_of,
+        )
+        threshold = env_float("ALERT_PROXY_FALLBACK_MOVE_BPS", threshold)
     if move_bps is None or abs(move_bps) < threshold:
         return []
 
     direction = "up" if move_bps > 0 else "down"
+    detail = (
+        "Broker SPX/ES feed is unavailable, likely because the trading session is in use. "
+        "Proxy-only monitor moved enough to open the trading device and verify real SPX/SPXW "
+        "quotes before any decision."
+    )
+    if threshold_source is not None:
+        detail = (
+            f"{detail} threshold_bps={threshold:.1f} "
+            f"threshold_source={threshold_source} "
+            f"expected_move_pct={expected_move_pct}"
+        )
     return [
         Alert(
             severity=severity_for_priority(window.priority),
             kind="broker_unavailable_proxy_watch",
             instrument_id="index:SPX",
             title=f"SPX fallback monitor {direction} {move_bps:.1f} bps",
-            detail=(
-                "Broker SPX/ES feed is unavailable, likely because the trading session is in use. "
-                "Proxy-only monitor moved enough to open the trading device and verify real SPX/SPXW "
-                "quotes before any decision."
-            ),
+            detail=detail,
             provider=quote.provider.value,
             quality="degraded",
             value=move_bps,
@@ -817,7 +902,38 @@ def iv_surface_alerts(
                     dedup_group=magnitude_bucket(expiry.atm_iv_jump_5m, ATM_IV_JUMP_THRESHOLD),
                 )
             )
+        skew_25d_threshold = env_float("ALERT_SKEW_25D_THRESHOLD", SKEW_25D_STEEPENING_THRESHOLD)
         if (
+            expiry.put_skew_25d_change_5m is not None
+            and expiry.put_skew_25d_change_5m >= skew_25d_threshold
+        ):
+            alerts.append(
+                Alert(
+                    severity=iv_surface_movement_severity(
+                        window,
+                        value=expiry.put_skew_25d_change_5m,
+                        threshold=skew_25d_threshold,
+                        degraded=degraded,
+                    ),
+                    kind="put_skew_steepening_5m",
+                    instrument_id=instrument_id,
+                    title=(
+                        f"SPXW {expiry.expiry} put skew steepening "
+                        f"{expiry.put_skew_25d_change_5m:.3f}"
+                    ),
+                    detail=iv_surface_movement_detail(
+                        f"Put 25-delta skew widened {expiry.put_skew_25d_change_5m:.3f} vol points "
+                        "since the previous surface snapshot (skew_source=delta_25).",
+                        degraded=degraded,
+                    ),
+                    value=expiry.put_skew_25d_change_5m,
+                    threshold=skew_25d_threshold,
+                    quality=expiry.surface_fit_quality if degraded else None,
+                    source_gate="iv_surface",
+                    dedup_group=magnitude_bucket(expiry.put_skew_25d_change_5m, skew_25d_threshold),
+                )
+            )
+        elif (
             expiry.put_skew_steepening_5m is not None
             and expiry.put_skew_steepening_5m >= SKEW_STEEPENING_THRESHOLD
         ):
@@ -834,7 +950,7 @@ def iv_surface_alerts(
                     title=f"SPXW {expiry.expiry} put skew steepening {expiry.put_skew_steepening_5m:.3f}",
                     detail=iv_surface_movement_detail(
                         f"Put skew ratio increased {expiry.put_skew_steepening_5m:.3f} "
-                        "since the previous surface snapshot.",
+                        "since the previous surface snapshot (skew_source=ratio).",
                         degraded=degraded,
                     ),
                     value=expiry.put_skew_steepening_5m,

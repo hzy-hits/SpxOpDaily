@@ -40,6 +40,8 @@ class IvSurfaceExpiry:
     gamma_coverage_ratio: float
     avg_spread_bps: float | None
     warnings: tuple[str, ...]
+    put_skew_25d: float | None = None
+    put_skew_25d_change_5m: float | None = None
 
 
 @dataclass(frozen=True)
@@ -144,6 +146,11 @@ def build_expiry_surface(
         gamma_coverage_ratio=expiry_map.coverage.with_gamma / total,
         avg_spread_bps=expiry_map.coverage.avg_spread_bps,
         warnings=expiry_map.warnings,
+        put_skew_25d=expiry_map.put_skew_25d,
+        put_skew_25d_change_5m=subtract(
+            expiry_map.put_skew_25d,
+            previous.put_skew_25d if previous else None,
+        ),
     )
 
 
@@ -214,6 +221,8 @@ def snapshot_from_dict(payload: dict[str, Any]) -> IvSurfaceSnapshot:
             gamma_coverage_ratio=float(item.get("gamma_coverage_ratio") or 0.0),
             avg_spread_bps=item.get("avg_spread_bps"),
             warnings=tuple(item.get("warnings") or ()),
+            put_skew_25d=item.get("put_skew_25d"),
+            put_skew_25d_change_5m=item.get("put_skew_25d_change_5m"),
         )
         for item in payload.get("expiries", ())
         if isinstance(item, dict)

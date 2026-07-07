@@ -200,3 +200,47 @@ def test_iv_surface_skips_5m_diff_when_previous_snapshot_too_old() -> None:
     )
     fresh_front = fresh_gap_snapshot.expiries[0]
     assert fresh_front.atm_iv_jump_5m is not None
+
+
+def test_iv_surface_snapshot_round_trips_put_skew_25d_fields(tmp_path) -> None:
+    now = datetime(2026, 7, 6, 14, 0, tzinfo=timezone.utc)
+    settings = make_settings(tmp_path)
+    put_25d = replace(
+        make_option(expiry="20260706", strike=7400, right="P", mark=11, iv=0.24, now=now),
+        greeks=OptionGreeks(
+            implied_vol=0.24,
+            delta=-0.25,
+            gamma=0.003,
+            theta=-1.0,
+            vega=0.3,
+            model="test",
+        ),
+    )
+    call_25d = replace(
+        make_option(expiry="20260706", strike=7600, right="C", mark=10, iv=0.19, now=now),
+        greeks=OptionGreeks(
+            implied_vol=0.19,
+            delta=0.25,
+            gamma=0.003,
+            theta=-1.0,
+            vega=0.3,
+            model="test",
+        ),
+    )
+    state = make_state(
+        make_option(expiry="20260706", strike=7500, right="C", mark=10, iv=0.20, now=now),
+        make_option(expiry="20260706", strike=7500, right="P", mark=11, iv=0.22, now=now),
+        put_25d,
+        call_25d,
+        now=now,
+    )
+    snapshot = build_iv_surface_snapshot(state, settings=settings)
+    front = snapshot.expiries[0]
+    assert front.put_skew_25d is not None
+
+    write_snapshot(settings, snapshot)
+    loaded = load_latest_snapshot(settings.latest_surface_path)
+    assert loaded is not None
+    loaded_front = loaded.expiries[0]
+    assert loaded_front.put_skew_25d == front.put_skew_25d
+    assert loaded_front.put_skew_25d_change_5m == front.put_skew_25d_change_5m

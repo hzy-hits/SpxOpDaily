@@ -5,10 +5,10 @@ import json
 import math
 from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass
-from datetime import datetime
+from datetime import datetime, time as dt_time
 from typing import Any
 
-from spx_spark.config import StorageSettings
+from spx_spark.config import StorageSettings, default_spxw_expiry, NY_TZ
 from spx_spark.marketdata import InstrumentType, MarketDataQuality, OptionRight, Provider, ProviderStatus, Quote
 from spx_spark.storage import LatestState, LatestStateStore
 
@@ -135,6 +135,11 @@ class ExpiryOptionsMap:
     warnings: tuple[str, ...]
     level_probabilities: tuple[LevelProbability, ...] = ()
     gamma_flip_zone: tuple[float, float] | None = None
+    gex_weighting: str = "oi"
+    zero_gamma_method: str = "strike_profile_fallback_no_flip"
+    put_skew_25d: float | None = None
+    call_skew_25d: float | None = None
+    skew_method: str = "moneyness_fallback"
 
 
 @dataclass(frozen=True)
@@ -320,13 +325,18 @@ def build_gex_by_strike(
     pairs: dict[float, dict[OptionRight, Quote]],
     *,
     underlier: float,
+    intraday: bool = False,
 ) -> list[StrikeGex]:
     rows: list[StrikeGex] = []
     for strike, pair in sorted(pairs.items()):
         call = pair.get(OptionRight.CALL)
         put = pair.get(OptionRight.PUT)
-        call_gex = signed_gex(call, sign=1.0, underlier=underlier) if call is not None else None
-        put_gex = signed_gex(put, sign=-1.0, underlier=underlier) if put is not None else None
+        call_gex = (
+            signed_gex(call, sign=1.0, underlier=underlier, intraday=intraday) if call is not None else None
+        )
+        put_gex = (
+            signed_gex(put, sign=-1.0, underlier=underlier, intraday=intraday) if put is not None else None
+        )
         if call_gex is None and put_gex is None:
             continue
         call_value = call_gex or 0.0
@@ -345,12 +355,29 @@ def build_gex_by_strike(
     return rows
 
 
-def signed_gex(quote: Quote, *, sign: float, underlier: float) -> float | None:
-    gamma = option_gamma(quote)
-    open_interest = finite_float(quote.open_interest)
-    if gamma is None or open_interest is None or open_interest <= 0:
+def gex_weight(quote: Quote, *, intraday: bool) -> float | None:
+    """非 0DTE: OI(现行为)。0DTE(intraday=True): OI + volume。
+
+    OI/volume 缺失按 0;两者都缺或 <=0 返回 None。volume 近似当日新开仓
+    (也含平仓,是有意的粗近似)。
+    """
+    open_interest = finite_float(quote.open_interest) or 0.0
+    volume = finite_float(quote.volume) or 0.0
+    if intraday:
+        weight = open_interest + volume
+    else:
+        weight = open_interest
+    if weight <= 0:
         return None
-    return sign * gamma * open_interest * 100.0 * underlier * underlier * 0.01
+    return weight
+
+
+def signed_gex(quote: Quote, *, sign: float, underlier: float, intraday: bool = False) -> float | None:
+    gamma = option_gamma(quote)
+    weight = gex_weight(quote, intraday=intraday)
+    if gamma is None or weight is None:
+        return None
+    return sign * gamma * weight * 100.0 * underlier * underlier * 0.01
 
 
 def nearest_zero(gex_rows: list[StrikeGex], underlier: float) -> float | None:
@@ -389,6 +416,150 @@ def zero_gamma_bracket(gex_rows: list[StrikeGex], underlier: float) -> tuple[flo
         return None
     left_strike, right_strike, _distance = min(brackets, key=lambda item: item[2])
     return (left_strike, right_strike)
+
+
+def bs_gamma(spot: float, strike: float, iv: float, t_years: float) -> float | None:
+    """Black-Scholes gamma,r=q=0."""
+    if spot <= 0 or strike <= 0 or iv <= 0 or t_years <= 0:
+        return None
+    sqrt_t = math.sqrt(t_years)
+    d1 = (math.log(spot / strike) + 0.5 * iv * iv * t_years) / (iv * sqrt_t)
+    phi = math.exp(-0.5 * d1 * d1) / math.sqrt(2.0 * math.pi)
+    return phi / (spot * iv * sqrt_t)
+
+
+_MIN_TIME_TO_EXPIRY_YEARS = 15.0 / (60.0 * 24.0 * 365.0)
+
+
+def time_to_expiry_years(expiry: str, *, as_of: datetime) -> float:
+    """Years from as_of to expiry at 16:00 ET (365-day year), floored at 15 minutes."""
+    expiry_date = datetime.strptime(expiry, "%Y%m%d").date()
+    expiry_dt = datetime.combine(expiry_date, dt_time(16, 0), tzinfo=NY_TZ)
+    as_of_ny = as_of.astimezone(NY_TZ)
+    delta_seconds = (expiry_dt - as_of_ny).total_seconds()
+    if delta_seconds <= 0:
+        return _MIN_TIME_TO_EXPIRY_YEARS
+    years = delta_seconds / (365.0 * 24.0 * 3600.0)
+    return max(years, _MIN_TIME_TO_EXPIRY_YEARS)
+
+
+def zero_gamma_spot_scan(
+    pairs: dict[float, dict[OptionRight, Quote]],
+    *,
+    underlier: float,
+    expiry: str,
+    as_of: datetime,
+    intraday: bool,
+) -> tuple[float | None, tuple[float, float] | None, str]:
+    """Return (zero_gamma, flip_zone, method) via spot scan with BS gamma revaluation."""
+    contracts: list[tuple[float, float, float, float]] = []
+    total_legs = 0
+    for strike, pair in pairs.items():
+        for right, sign in ((OptionRight.CALL, 1.0), (OptionRight.PUT, -1.0)):
+            quote = pair.get(right)
+            if quote is None:
+                continue
+            total_legs += 1
+            iv = option_iv(quote)
+            weight = gex_weight(quote, intraday=intraday)
+            if iv is None or weight is None:
+                continue
+            contracts.append((strike, sign, iv, weight))
+
+    if total_legs == 0 or len(contracts) / total_legs < 0.6 or len(contracts) < 4:
+        return (None, None, "insufficient_iv")
+
+    strikes = sorted(pairs)
+    step = min(median_strike_step(strikes), 5.0)
+    t_years = time_to_expiry_years(expiry, as_of=as_of)
+
+    def net_gex_at(spot: float) -> float:
+        total = 0.0
+        for strike, sign, iv, weight in contracts:
+            gamma = bs_gamma(spot, strike, iv, t_years)
+            if gamma is None:
+                continue
+            total += sign * weight * gamma * 100.0 * spot * spot * 0.01
+        return total
+
+    grid: list[float] = []
+    spot = strikes[0]
+    while spot <= strikes[-1] + 1e-9:
+        grid.append(spot)
+        spot += step
+
+    values = [net_gex_at(s) for s in grid]
+    roots: list[tuple[float, tuple[float, float]]] = []
+    for index in range(len(grid) - 1):
+        left_s, right_s = grid[index], grid[index + 1]
+        left_v, right_v = values[index], values[index + 1]
+        if abs(left_v) <= 1e-12:
+            roots.append((left_s, (left_s, right_s)))
+        elif left_v * right_v < 0:
+            weight = -left_v / (right_v - left_v)
+            root = left_s + weight * (right_s - left_s)
+            roots.append((root, (left_s, right_s)))
+
+    if abs(values[-1]) <= 1e-12:
+        roots.append((grid[-1], (grid[-1], grid[-1])))
+
+    if not roots:
+        return (None, None, "no_flip")
+
+    zero_gamma, flip_zone = min(roots, key=lambda item: abs(item[0] - underlier))
+    return (zero_gamma, flip_zone, "spot_scan")
+
+
+def interpolated_atm_iv(
+    pairs: dict[float, dict[OptionRight, Quote]],
+    underlier: float | None,
+) -> float | None:
+    """Linearly interpolate ATM IV on each side; average call and put."""
+    if underlier is None:
+        return None
+
+    def side_iv(right: OptionRight) -> float | None:
+        strikes_with_iv: list[tuple[float, float]] = []
+        for strike, pair in pairs.items():
+            iv = option_iv(pair.get(right))
+            if iv is not None:
+                strikes_with_iv.append((strike, iv))
+        if not strikes_with_iv:
+            return None
+        below = [(strike, iv) for strike, iv in strikes_with_iv if strike <= underlier]
+        above = [(strike, iv) for strike, iv in strikes_with_iv if strike >= underlier]
+        if below and above:
+            strike_low, iv_low = max(below, key=lambda item: item[0])
+            strike_high, iv_high = min(above, key=lambda item: item[0])
+            if strike_high == strike_low:
+                return iv_low
+            weight = (underlier - strike_low) / (strike_high - strike_low)
+            return iv_low + weight * (iv_high - iv_low)
+        nearest_strike, nearest_iv = min(strikes_with_iv, key=lambda item: abs(item[0] - underlier))
+        return nearest_iv
+
+    ivs = [iv for iv in (side_iv(OptionRight.CALL), side_iv(OptionRight.PUT)) if iv is not None]
+    if not ivs:
+        return None
+    return sum(ivs) / len(ivs)
+
+
+def wing_iv_at_delta(quotes_one_side: list[Quote], target_abs_delta: float = 0.25) -> float | None:
+    """Return IV of the quote whose |delta| is closest to target, if within 0.15."""
+    candidates: list[tuple[float, float]] = []
+    for quote in quotes_one_side:
+        delta = usable_delta(quote)
+        iv = option_iv(quote)
+        if delta is None or iv is None:
+            continue
+        distance = abs(abs(delta) - target_abs_delta)
+        candidates.append((distance, iv))
+    if not candidates:
+        return None
+    distance, iv = min(candidates, key=lambda item: item[0])
+    if distance > 0.15:
+        return None
+    return iv
 
 
 def is_spy_option(quote: Quote) -> bool:
@@ -527,8 +698,7 @@ def build_expiry_map(
         if atm_call_mid is not None and atm_put_mid is not None
         else None
     )
-    atm_ivs = [iv for iv in (option_iv(atm_call), option_iv(atm_put)) if iv is not None]
-    atm_iv = sum(atm_ivs) / len(atm_ivs) if atm_ivs else None
+    atm_iv = interpolated_atm_iv(pairs, underlier)
 
     put_iv_items: list[tuple[float, float]] = []
     call_iv_items: list[tuple[float, float]] = []
@@ -548,11 +718,49 @@ def build_expiry_map(
     put_wing_iv = weighted_mean(put_iv_items)
     call_wing_iv = weighted_mean(call_iv_items)
 
-    gex_rows = build_gex_by_strike(pairs, underlier=underlier) if underlier else []
+    put_quotes = [quote for quote in quotes if quote.instrument.right == OptionRight.PUT]
+    call_quotes = [quote for quote in quotes if quote.instrument.right == OptionRight.CALL]
+    put_iv_25 = wing_iv_at_delta(put_quotes)
+    call_iv_25 = wing_iv_at_delta(call_quotes)
+    if put_iv_25 is not None and call_iv_25 is not None:
+        skew_method = "delta_25"
+        put_skew_25d = put_iv_25 - atm_iv if atm_iv is not None else None
+        call_skew_25d = call_iv_25 - atm_iv if atm_iv is not None else None
+    else:
+        skew_method = "moneyness_fallback"
+        put_skew_25d = put_wing_iv - atm_iv if put_wing_iv is not None and atm_iv is not None else None
+        call_skew_25d = call_wing_iv - atm_iv if call_wing_iv is not None and atm_iv is not None else None
+
+    intraday = expiry == default_spxw_expiry()
+    gex_weighting = "oi_plus_volume" if intraday else "oi"
+    gex_rows = (
+        build_gex_by_strike(pairs, underlier=underlier, intraday=intraday) if underlier else []
+    )
     net_gex = sum(row.net_gex for row in gex_rows) if gex_rows else None
     abs_gex = sum(row.abs_gex for row in gex_rows) if gex_rows else None
     net_gamma_ratio = net_gex / abs_gex if net_gex is not None and abs_gex and abs_gex > 0 else None
-    zero = nearest_zero(gex_rows, underlier) if underlier else None
+    zg_method = "strike_profile_fallback_no_flip"
+    zero = None
+    gamma_flip_zone = None
+    if underlier:
+        zg_scan, flip_scan, scan_method = zero_gamma_spot_scan(
+            pairs,
+            underlier=underlier,
+            expiry=expiry,
+            as_of=as_of,
+            intraday=intraday,
+        )
+        if zg_scan is not None:
+            zero = zg_scan
+            gamma_flip_zone = flip_scan
+            zg_method = scan_method
+        else:
+            zero = nearest_zero(gex_rows, underlier)
+            gamma_flip_zone = zero_gamma_bracket(gex_rows, underlier)
+            zg_method = f"strike_profile_fallback_{scan_method}"
+    else:
+        zero = None
+        gamma_flip_zone = None
     zero_distance = zero - underlier if zero is not None and underlier is not None else None
     call_wall_row = max(gex_rows, key=lambda row: row.call_gex) if gex_rows else None
     put_wall_row = min(gex_rows, key=lambda row: row.put_gex) if gex_rows else None
@@ -593,7 +801,6 @@ def build_expiry_map(
         nearest_wall_distance = None
 
     strike_step = median_strike_step(strikes)
-    gamma_flip_zone = zero_gamma_bracket(gex_rows, underlier) if underlier else None
     level_probabilities: list[LevelProbability] = []
     if underlier is not None:
         for level_name, level_value in (
@@ -651,6 +858,11 @@ def build_expiry_map(
         warnings=tuple(dict.fromkeys(warnings)),
         level_probabilities=tuple(level_probabilities),
         gamma_flip_zone=gamma_flip_zone,
+        gex_weighting=gex_weighting,
+        zero_gamma_method=zg_method,
+        put_skew_25d=put_skew_25d,
+        call_skew_25d=call_skew_25d,
+        skew_method=skew_method,
     )
 
 

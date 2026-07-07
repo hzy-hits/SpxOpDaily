@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 
 
 NY_TZ = ZoneInfo("America/New_York")
+SPXW_ROLL_AFTER_ET = time(16, 15)
 
 DEFAULT_SLOW_POLL_LABELS = (
     "index:VIX",
@@ -105,10 +106,17 @@ def next_equity_futures_month(today: date | None = None) -> str:
     return f"{expiry.year}{expiry.month:02d}"
 
 
-def default_spxw_expiry(today: date | None = None) -> str:
-    """Return today in NY time, or the next weekday when today is a weekend."""
+def default_spxw_expiry(today: date | None = None, *, now: datetime | None = None) -> str:
+    """Return the active SPXW expiry.
+
+    显式传 today 时行为不变(测试/CLI 用)。today 为 None 时取纽约当前时刻;
+    若已过 16:15 ET(当日 0DTE 已结算),滚动到下一天;周末照旧跳到下个工作日。
+    """
     if today is None:
-        today = datetime.now(tz=NY_TZ).date()
+        current = (now or datetime.now(tz=NY_TZ)).astimezone(NY_TZ)
+        today = current.date()
+        if current.time() >= SPXW_ROLL_AFTER_ET:
+            today += timedelta(days=1)
     while today.weekday() >= 5:
         today += timedelta(days=1)
     return today.strftime("%Y%m%d")
