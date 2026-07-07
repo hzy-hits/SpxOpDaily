@@ -1,0 +1,9 @@
+[Unit]
+Description=Check for material order-map level changes every 20 minutes (Beijing 13:30-23:30)
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 13..23:10,30,50:00 Asia/Shanghai
+Persistent=false
+
+[Install]
+WantedBy=timers.target

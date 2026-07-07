@@ -29,11 +29,14 @@ from spx_spark.order_map import (
     build_order_payload,
     chain_implied_spot,
     mark_sent,
+    material_changes,
     option_tick,
+    payload_fingerprint,
     project_option_price,
     render_template,
     round_to_tick,
     send_order_map,
+    within_refresh_window,
     within_send_window,
 )
 from spx_spark.storage import LatestState
@@ -467,6 +470,51 @@ def test_already_sent_roundtrip(tmp_path: Path) -> None:
     mark_sent(state_path, "2026-07-07")
     assert already_sent(state_path, "2026-07-07") is True
     assert already_sent(state_path, "2026-07-08") is False
+
+
+def test_payload_fingerprint_and_material_changes() -> None:
+    payload = {
+        "expiry": "20260707",
+        "expected_move_points": 44.0,
+        "flip_zone": [7500.0, 7505.0],
+        "candidates": [
+            {"play": "put_wall_bounce_call", "level": 7500.0},
+            {"play": "call_wall_fade_put", "level": 7550.0},
+        ],
+    }
+    fingerprint = payload_fingerprint(payload)
+    assert fingerprint["put_wall"] == 7500.0
+    assert fingerprint["call_wall"] == 7550.0
+    assert fingerprint["flip_low"] == 7500.0
+
+    # Identical fingerprint: no material change.
+    assert material_changes(fingerprint, dict(fingerprint)) == []
+    # No baseline: nothing to compare.
+    assert material_changes(None, fingerprint) == []
+
+    moved = dict(fingerprint, put_wall=7510.0)
+    changes = material_changes(fingerprint, moved)
+    assert changes and "put wall" in changes[0]
+
+    small_move = dict(fingerprint, call_wall=7552.0)
+    assert material_changes(fingerprint, small_move) == []
+
+    em_jump = dict(fingerprint, expected_move_points=60.0)
+    changes = material_changes(fingerprint, em_jump)
+    assert changes and "预期波幅" in changes[0]
+
+    rolled = dict(fingerprint, expiry="20260708")
+    changes = material_changes(fingerprint, rolled)
+    assert changes == ["到期日切换 20260707→20260708"]
+
+
+def test_within_refresh_window_beijing() -> None:
+    beijing_2230 = datetime(2026, 7, 7, 14, 30, tzinfo=timezone.utc)
+    assert within_refresh_window(beijing_2230) is True
+    beijing_2345 = datetime(2026, 7, 7, 15, 45, tzinfo=timezone.utc)
+    assert within_refresh_window(beijing_2345) is False
+    beijing_1300 = datetime(2026, 7, 7, 5, 0, tzinfo=timezone.utc)
+    assert within_refresh_window(beijing_1300) is False
 
 
 def test_send_order_map_queues_on_weixin_failure(tmp_path: Path) -> None:

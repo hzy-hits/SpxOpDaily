@@ -241,23 +241,50 @@ def _build_candidate(
     )
 
 
+HL_SP500_PROXY_ID = "crypto_perp:xyz:SP500"
+# Chain-implied vs Hyperliquid perp divergence beyond this suggests wide or
+# stale GTH option quotes; surface it instead of silently trusting either.
+HL_DIVERGENCE_WARN_BPS = 15.0
+
+
+def hyperliquid_sp500_price(state: LatestState) -> float | None:
+    quote = state.best_quote(HL_SP500_PROXY_ID)
+    if quote is None or quote.quality in BAD_QUALITIES:
+        return None
+    return finite_float(quote.mid or quote.mark or quote.effective_price)
+
+
 def resolve_spx_spot(
     state: LatestState,
     options_map: OptionsMap,
     *,
     warnings: list[str] | None = None,
 ) -> tuple[float | None, str]:
-    """Return (spot, source_label), preferring the chain-implied SPX spot.
+    """Return (spot, source_label) for projections.
 
-    The stream underlier reference can be ES with a large basis vs SPX;
-    option projections and touch directions must use a chain-consistent spot.
+    Priority: chain-implied put-call parity (the option market's own view)
+    with the Hyperliquid SP500 perp as a cross-check, then the perp itself,
+    then the stream underlier (ES carries basis vs SPX -> warned).
     """
+    hl_price = hyperliquid_sp500_price(state)
     if options_map.expiries:
         front = options_map.expiries[0]
         pairs = pair_by_strike(_front_expiry_quotes(state, front.expiry))
         implied = chain_implied_spot(pairs)
         if implied is not None:
+            if hl_price is not None and warnings is not None:
+                divergence_bps = abs(implied / hl_price - 1.0) * 10_000.0
+                if divergence_bps > HL_DIVERGENCE_WARN_BPS:
+                    warnings.append(
+                        f"chain-implied spot {implied:.1f} diverges from "
+                        f"hyperliquid SP500 perp {hl_price:.1f} "
+                        f"({divergence_bps:.0f} bps); GTH quotes may be wide"
+                    )
             return implied, "chain_implied"
+    if hl_price is not None:
+        if warnings is not None:
+            warnings.append("spot from hyperliquid SP500 perp (chain parity unavailable)")
+        return hl_price, "hl_perp"
     price = options_map.underlier.price
     source = options_map.underlier.source or "-"
     if price is not None and source.startswith("future:") and warnings is not None:
@@ -494,9 +521,12 @@ def send_order_map(
     *,
     runner: CommandRunner = default_runner,
     now: datetime | None = None,
+    extra_header: str | None = None,
 ) -> dict[str, Any]:
     now = now or datetime.now(tz=timezone.utc)
     template = render_template(payload)
+    if extra_header:
+        template = f"{extra_header}\n{template}"
     used_agent = False
     text = template
 
@@ -529,6 +559,87 @@ def default_state_path(settings: StorageSettings) -> str:
     )
 
 
+# --- event-driven refresh: re-push when key levels move materially ---
+
+REFRESH_WINDOW_START = time(13, 30)
+REFRESH_WINDOW_END = time(23, 30)
+REFRESH_COOLDOWN_SECONDS_DEFAULT = 3600.0
+MATERIAL_LEVEL_MOVE_POINTS = 5.0
+MATERIAL_EM_REL_CHANGE = 0.20
+
+
+def payload_fingerprint(payload: dict[str, Any]) -> dict[str, Any]:
+    """Key levels that define the order map; used to detect material changes."""
+    by_play = _candidate_by_play(payload)
+
+    def level_of(play: str) -> float | None:
+        candidate = by_play.get(play)
+        return finite_float(candidate.get("level")) if candidate else None
+
+    flip_zone = payload.get("flip_zone") if isinstance(payload.get("flip_zone"), list) else None
+    return {
+        "expiry": payload.get("expiry"),
+        "put_wall": level_of("put_wall_bounce_call"),
+        "flip_low": finite_float(flip_zone[0]) if flip_zone and len(flip_zone) >= 2 else None,
+        "flip_high": finite_float(flip_zone[1]) if flip_zone and len(flip_zone) >= 2 else None,
+        "call_wall": level_of("call_wall_fade_put"),
+        "expected_move_points": finite_float(payload.get("expected_move_points")),
+    }
+
+
+def material_changes(
+    previous: dict[str, Any] | None,
+    current: dict[str, Any],
+) -> list[str]:
+    """Human-readable list of material level changes since the last push."""
+    if not isinstance(previous, dict):
+        return []
+    changes: list[str] = []
+    if previous.get("expiry") != current.get("expiry"):
+        changes.append(f"到期日切换 {previous.get('expiry')}→{current.get('expiry')}")
+        return changes
+
+    labels = {
+        "put_wall": "put wall",
+        "flip_low": "flip zone 下界",
+        "flip_high": "flip zone 上界",
+        "call_wall": "call wall",
+    }
+    for key, label in labels.items():
+        prev_value = finite_float(previous.get(key))
+        cur_value = finite_float(current.get(key))
+        if prev_value is None and cur_value is None:
+            continue
+        if prev_value is None or cur_value is None:
+            changes.append(f"{label} {_dash(prev_value)}→{_dash(cur_value)}")
+            continue
+        if abs(cur_value - prev_value) >= MATERIAL_LEVEL_MOVE_POINTS:
+            changes.append(f"{label} {_dash(prev_value)}→{_dash(cur_value)}")
+
+    prev_em = finite_float(previous.get("expected_move_points"))
+    cur_em = finite_float(current.get("expected_move_points"))
+    if prev_em and cur_em and prev_em > 0:
+        if abs(cur_em / prev_em - 1.0) >= MATERIAL_EM_REL_CHANGE:
+            changes.append(f"预期波幅 ±{_dash(prev_em)}→±{_dash(cur_em)} 点")
+    return changes
+
+
+def within_refresh_window(now_utc: datetime) -> bool:
+    local = now_utc.astimezone(SHANGHAI_TZ)
+    if local.weekday() >= 5:
+        return False
+    current = local.time()
+    return REFRESH_WINDOW_START <= current < REFRESH_WINDOW_END
+
+
+def load_order_map_state(state_path: str) -> dict[str, Any]:
+    try:
+        payload = json.loads(Path(state_path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
 def within_send_window(now_utc: datetime) -> bool:
     local = now_utc.astimezone(SHANGHAI_TZ)
     if local.weekday() >= 5:
@@ -550,20 +661,77 @@ def already_sent(state_path: str, trading_date: str) -> bool:
     return payload.get("last_sent_date") == trading_date
 
 
-def mark_sent(state_path: str, trading_date: str) -> None:
+def mark_sent(
+    state_path: str,
+    trading_date: str,
+    *,
+    fingerprint: dict[str, Any] | None = None,
+    now: datetime | None = None,
+) -> None:
     path = Path(state_path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps({"last_sent_date": trading_date}, ensure_ascii=False),
-        encoding="utf-8",
-    )
+    payload: dict[str, Any] = {"last_sent_date": trading_date}
+    if fingerprint is not None:
+        payload["fingerprint"] = fingerprint
+    if now is not None:
+        payload["last_sent_at"] = now.timestamp()
+    path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Send SPX Spark order map push.")
     parser.add_argument("--dry-run", action="store_true", help="Print template only.")
     parser.add_argument("--force", action="store_true", help="Skip time window and idempotency gate.")
+    parser.add_argument(
+        "--refresh",
+        action="store_true",
+        help="Re-push only when key levels moved materially since the last push.",
+    )
     return parser.parse_args(argv)
+
+
+def run_refresh(args: argparse.Namespace, *, now: datetime, state_path: str, trading_date: str) -> int:
+    if not args.force and not within_refresh_window(now):
+        print(json.dumps({"skipped": True, "reason": "outside_refresh_window"}))
+        return 0
+
+    previous = load_order_map_state(state_path)
+    if previous.get("last_sent_date") != trading_date:
+        print(json.dumps({"skipped": True, "reason": "no_baseline_push_today"}))
+        return 0
+    last_sent_at = finite_float(previous.get("last_sent_at"))
+    cooldown = float(
+        os.getenv("SPX_ORDER_MAP_REFRESH_COOLDOWN_SECONDS", "")
+        or REFRESH_COOLDOWN_SECONDS_DEFAULT
+    )
+    if not args.force and last_sent_at is not None and now.timestamp() - last_sent_at < cooldown:
+        print(json.dumps({"skipped": True, "reason": "refresh_cooldown"}))
+        return 0
+
+    state = LatestStateStore(StorageSettings.from_env()).load()
+    payload = build_order_payload(state, now=now)
+    fingerprint = payload_fingerprint(payload)
+    changes = material_changes(previous.get("fingerprint"), fingerprint)
+    if not changes and not args.force:
+        print(json.dumps({"skipped": True, "reason": "no_material_change"}))
+        return 0
+
+    header = f"【挂单地图·更新】原因: {'; '.join(changes) if changes else 'forced'}"
+    if args.dry_run:
+        print(header)
+        print(render_template(payload))
+        print(json.dumps({"dry_run": True, "changes": changes}, ensure_ascii=False))
+        return 0
+
+    settings = NotificationSettings.from_env()
+    result = send_order_map(payload, settings, now=now, extra_header=header)
+    if result["weixin_ok"] or result["bark_ok"]:
+        mark_sent(state_path, trading_date, fingerprint=fingerprint, now=now)
+    result["changes"] = changes
+    print(json.dumps(result, ensure_ascii=False))
+    if not result["weixin_ok"] and not result["bark_ok"]:
+        return 1
+    return 0
 
 
 def run(argv: list[str] | None = None, *, now: datetime | None = None) -> int:
@@ -572,6 +740,9 @@ def run(argv: list[str] | None = None, *, now: datetime | None = None) -> int:
     storage_settings = StorageSettings.from_env()
     state_path = default_state_path(storage_settings)
     trading_date = now.astimezone(NY_TZ).date().isoformat()
+
+    if args.refresh:
+        return run_refresh(args, now=now, state_path=state_path, trading_date=trading_date)
 
     if not args.force and not args.dry_run:
         if not within_send_window(now):
@@ -593,7 +764,7 @@ def run(argv: list[str] | None = None, *, now: datetime | None = None) -> int:
     settings = NotificationSettings.from_env()
     result = send_order_map(payload, settings, now=now)
     if result["weixin_ok"] or result["bark_ok"]:
-        mark_sent(state_path, trading_date)
+        mark_sent(state_path, trading_date, fingerprint=payload_fingerprint(payload), now=now)
     print(json.dumps(result, ensure_ascii=False))
     if not result["weixin_ok"] and not result["bark_ok"]:
         return 1
