@@ -20,10 +20,19 @@ from spx_spark.config import NotificationSettings, env_bool, load_dotenv
 from spx_spark.notifier.model import CommandRunner, default_runner
 from spx_spark.notifier.sinks import run_openclaw_agent
 
-DEFAULT_SYSTEM_PROMPT = (
-    "你是一名资深的 SPX/SPXW 0DTE 期权量化交易员兼写手。"
-    "你只根据用户提供的 JSON 数据与模板事实写作，绝不编造数字、新闻或仓位。"
-    "用词专业但口语化，像交易台同事间的简报。"
+DEFAULT_SYSTEM_PROMPT = "\n".join(
+    (
+        "你是 SPX Spark 的驻场量化交易员，为唯一的一位读者写作。",
+        "读者画像：只交易 SPX/SPXW 0DTE/1DTE 期权，只做买 call/put 或垂直价差；"
+        "习惯在北京 14:00 到美股开盘之间研究并挂限价单，开盘后前两小时可能盯盘，之后靠挂单睡觉。",
+        "写作纪律：",
+        "1. 结论先行——第一时间回答读者此刻要做的那个决定，再给证据。",
+        "2. 只依据提供的 JSON 与模板事实，绝不编造数字、新闻或仓位；引用关键数字而非全部复述，模板里已有的数字不必逐条重列。",
+        "3. 讲赔率不讲指令——把概率、到位价、现价放在一起说这笔单在赌什么、划算不划算，但不下达买卖指令。",
+        "4. 用 if/then 说剧本——价格到哪个位置剧本成立/作废，而不是只描述当前状态。",
+        "5. 像交易台同事间的口头简报：专业但说人话，不堆术语，不写免责声明套话。",
+        "6. 数据 degraded 或缺失时如实说明，并拒绝给方向判断。",
+    )
 )
 
 
@@ -128,6 +137,47 @@ def call_llm_writer(
     if not content:
         return None, "empty response"
     return content, None
+
+
+# --- push continuity: remember the last push so the next writer can say
+# "剧本维持/剧本有变" instead of starting from amnesia ---
+
+PUSH_CONTEXT_MAX_CHARS = 1600
+
+
+def default_push_context_path() -> str:
+    data_root = os.getenv("MARKET_DATA_DATA_ROOT") or os.getenv("MAINTENANCE_DATA_ROOT") or "data"
+    return os.getenv("SPX_PUSH_CONTEXT_PATH") or str(
+        Path(data_root) / "latest" / "push_context.json"
+    )
+
+
+def load_previous_push(path: str | None = None) -> dict[str, Any] | None:
+    path = path or default_push_context_path()
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def record_push(kind: str, text: str, *, at: str, path: str | None = None) -> None:
+    path = path or default_push_context_path()
+    target = Path(path)
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        payload = {"kind": kind, "at": at, "text": text[:PUSH_CONTEXT_MAX_CHARS]}
+        tmp = target.with_suffix(".tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(target)
+    except OSError:
+        pass
+
+
+def previous_push_json(previous_push: dict[str, Any] | None) -> str:
+    if not previous_push:
+        return "null"
+    return json.dumps(previous_push, ensure_ascii=False, separators=(",", ":"))
 
 
 def generate_push_text(

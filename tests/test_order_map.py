@@ -453,6 +453,36 @@ def test_render_template_shows_frontrun_and_stop_trigger_notes() -> None:
     assert "挂单参考: 激进 15.90" not in text
 
 
+def test_push_context_roundtrip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from spx_spark.notifier.llm_writer import load_previous_push, record_push
+
+    context_path = str(tmp_path / "push_context.json")
+    monkeypatch.setenv("SPX_PUSH_CONTEXT_PATH", context_path)
+
+    assert load_previous_push(context_path) is None
+    record_push("order_map", "挂单参考: 测试" * 400, at="2026-07-07T06:00:00+00:00")
+    loaded = load_previous_push(context_path)
+    assert loaded is not None
+    assert loaded["kind"] == "order_map"
+    assert loaded["at"] == "2026-07-07T06:00:00+00:00"
+    assert len(loaded["text"]) <= 1600
+
+    record_push("market_status", "剧本维持", at="2026-07-07T06:30:00+00:00")
+    assert load_previous_push(context_path)["kind"] == "market_status"
+
+
+def test_prompts_include_previous_push() -> None:
+    from spx_spark.order_map import build_order_prompt, build_status_prompt
+
+    payload = {"expiry": "20260707", "candidates": [], "warnings": []}
+    previous = {"kind": "order_map", "at": "2026-07-07T06:00:00+00:00", "text": "上一条正文"}
+    order_prompt = build_order_prompt(payload, "模板行", previous)
+    assert "上一条正文" in order_prompt
+    assert "previous_push:" in order_prompt
+    status_prompt = build_status_prompt(payload, "模板行", None)
+    assert "previous_push:null" in status_prompt
+
+
 def test_chain_implied_spot_uses_put_call_parity() -> None:
     from spx_spark.marketdata import OptionRight
     from spx_spark.options_map import pair_by_strike

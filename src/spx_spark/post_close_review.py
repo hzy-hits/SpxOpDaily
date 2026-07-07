@@ -573,12 +573,15 @@ def build_llm_writer_prompt(payload: dict[str, Any], deterministic_markdown: str
     }
     return "\n".join(
         (
-            "你是 SPX Spark 的 SPX/SPXW 盘后复盘写手。",
+            "你是 SPX Spark 的 SPX/SPXW 盘后复盘写手，读者只交易 SPX/SPXW 0DTE/1DTE 期权(买 call/put 或垂直价差)。"
+            "这份复盘要回答他的一个问题：今天的地形(墙位/gamma/预期波幅)兑现了多少，对明天的剧本有什么修正。",
             "只允许使用给定 JSON 和模板报告里的事实；不要编造价格、新闻、仓位或交易建议。",
             "人类只交易 SPX/SPXW；正文只能提 SPX、SPXW、ES、IV surface、期权墙、gamma 和数据质量。",
             "输出一份中文 Markdown。第一行必须是：",
             f"# SPX/SPXW Post-Close Review - {payload.get('trading_date')}",
-            "结构要紧凑：摘要、价格路径、SPXW 报价覆盖、IV 曲面与期权墙、下一交易日检查点。",
+            "结构要紧凑：摘要(结论先行：一句话说今天价格路径相对墙位/预期波幅的表现)、价格路径、SPXW 报价覆盖、IV 曲面与期权墙、下一交易日检查点。",
+            "摘要里要有量化对照：实际波动占预期波幅的比例、收盘相对墙位/zero gamma 的位置(引用具体数字)。",
+            "下一交易日检查点写成 if/then：明早若价格在哪些位置之上/之下，分别先看什么。",
             "如果数据 degraded，只说明覆盖质量，不给方向性交易建议。",
             "",
             "JSON:",

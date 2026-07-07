@@ -10,7 +10,12 @@ from typing import Any
 from spx_spark.config import NY_TZ, NotificationSettings, StorageSettings
 from spx_spark.human_focus import build_human_focus_context
 from spx_spark.iv_surface import IvSurfaceSettings, load_latest_snapshot
-from spx_spark.notifier.llm_writer import generate_push_text
+from spx_spark.notifier.llm_writer import (
+    generate_push_text,
+    load_previous_push,
+    previous_push_json,
+    record_push,
+)
 from spx_spark.notifier.missed_queue import append_missed
 from spx_spark.notifier.model import CommandRunner, default_runner
 from spx_spark.notifier.sinks import send_bark_message, send_openclaw_message
@@ -226,15 +231,22 @@ def render_template(payload: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def build_map_prompt(payload: dict[str, Any], template: str) -> str:
+def build_map_prompt(
+    payload: dict[str, Any],
+    template: str,
+    previous_push: dict[str, Any] | None = None,
+) -> str:
     return "\n".join(
         (
-            "你是 SPX Spark 的盘前地图写手，为一个只交易 SPX/SPXW 0DTE/1DTE 期权(买 call/put 或垂直价差)的人写开盘前简报。",
-            "只依据下面 JSON 与模板事实，不得编造数字、新闻或仓位；不给下单指令。",
+            "本条推送是『盘前地图』，开盘前的最后一份简报，要回答读者的一个问题：开盘剧本是什么。",
             "输出中文，最多 14 行，第一行必须是模板的第一行。",
-            "必须覆盖：隔夜 gap、gamma 地形(墙位+OI+zero gamma+flip zone)、各关键位触及/收破概率、SPY 墙位对照、regime 与 dip_context、事件标签。",
-            "在数字之外，用 2-3 句交易员口吻解读：今天的地形偏 pin 还是易加速、急跌该当回调买点还是风险、开盘后两小时最该盯什么。",
+            "接着 2 行：隔夜 gap 结论(方向与幅度相对预期波幅算大还是小) + 今天地形一句话(pin/transition/negative，墙位与 flip zone 在哪)。",
+            "然后 3-4 行开盘剧本 if/then：开盘后 30-60 分钟内，若价格站上/跌破哪些具体点位(引用触及/收破概率)，分别意味着什么剧本，该重点盯哪张单；急跌时结合 dip_context 说清是回调买点还是加速风险。",
+            "1 行 vol 面：VIX1D/VIX 比值与 SKEW 说明今天 vol 定价贵还是便宜、事件标签有无。",
+            "1 行 SPY 墙位对照：共振则增强可信度，不共振要说墙位参考价值打折。",
+            "previous_push 是下午以来最近一条推送正文；若开盘剧本相对它有实质变化(墙位/flip 移位、gap 改变了优先 play)，开头明确说『剧本有变』并指出变化；无变化则说『剧本延续』。",
             "数据 degraded 时如实说明，不给方向判断。",
+            "previous_push:" + previous_push_json(previous_push),
             "JSON:" + json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
             "模板:" + template,
         )
@@ -247,12 +259,13 @@ def send_morning_map(
     *,
     runner: CommandRunner = default_runner,
     now: datetime | None = None,
+    previous_push: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     now = now or datetime.now(tz=timezone.utc)
     template = render_template(payload)
     text, writer = generate_push_text(
         template,
-        build_map_prompt(payload, template),
+        build_map_prompt(payload, template, previous_push),
         settings,
         runner=runner,
     )
@@ -348,8 +361,10 @@ def run(argv: list[str] | None = None, *, now: datetime | None = None) -> int:
         return 0
 
     settings = NotificationSettings.from_env()
-    result = send_morning_map(payload, settings, now=now)
+    result = send_morning_map(payload, settings, now=now, previous_push=load_previous_push())
     mark_sent(state_path, trading_date)
+    if result["weixin_ok"] or result["bark_ok"]:
+        record_push("morning_map", result["text"], at=now.isoformat())
     print(json.dumps(result, ensure_ascii=False))
     if not result["weixin_ok"] and not result["bark_ok"]:
         return 1

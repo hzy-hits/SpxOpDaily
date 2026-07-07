@@ -13,7 +13,12 @@ from zoneinfo import ZoneInfo
 
 from spx_spark.config import NY_TZ, NotificationSettings, StorageSettings
 from spx_spark.marketdata import OptionRight, Quote
-from spx_spark.notifier.llm_writer import generate_push_text
+from spx_spark.notifier.llm_writer import (
+    generate_push_text,
+    load_previous_push,
+    previous_push_json,
+    record_push,
+)
 from spx_spark.notifier.missed_queue import append_missed
 from spx_spark.notifier.model import CommandRunner, default_runner
 from spx_spark.notifier.sinks import send_bark_message, send_openclaw_message
@@ -588,17 +593,24 @@ def render_template(payload: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def build_order_prompt(payload: dict[str, Any], template: str) -> str:
+def build_order_prompt(
+    payload: dict[str, Any],
+    template: str,
+    previous_push: dict[str, Any] | None = None,
+) -> str:
     return "\n".join(
         (
-            "你是 SPX Spark 的挂单地图写手，为一个只交易 SPX/SPXW 0DTE/1DTE 期权(买 call/put 或垂直价差)的人写盘前挂单参考。",
-            "只依据下面 JSON 与模板事实，不得编造数字、新闻或仓位；不给下单指令。",
-            "输出中文，最多 16 行，第一行必须是『挂单参考:』开头，并复述模板第一行。",
-            "必须覆盖：参考价与预期波幅、gamma 地形、各 play 的触达概率与限价；数字必须与模板一致。",
-            "凡带『先手挡』的 play，必须同时给墙位价和先手挡价，并说明取舍：墙位价更便宜但价格常在墙前几点反转吃不到，先手挡成交率明显更高。",
-            "凡标注 order_style=stop_trigger 的 play，必须提醒：预估价高于现价，提前挂被动限价会立即按市价成交，应等破位确认后用条件单，不要提前挂。",
-            "在数字之外，用 2-3 句交易员口吻解读：今天更适合反弹买 call、跌破买 put 还是冲墙 fade。",
+            "本条推送是『挂单地图』，要回答读者的一个问题：现在挂什么单、挂什么价。",
+            "输出中文，最多 18 行。第一行必须以『挂单参考:』开头，并复述模板第一行（日期与时间）。",
+            "接着 1-2 行地形结论：今天是 pin 还是 transition，哪类 play 优先级最高，为什么。",
+            "然后逐条 play（最多 3 条，每条 2-3 行）：",
+            "- 给墙位价与先手挡价（数字取自模板），并说取舍：墙位价更便宜但常在墙前几点反转吃不到，先手挡成交率更高；",
+            "- 给赔率判断：把触达概率、到位预估价、现价放在一起，说这笔单在赌一次多大概率的什么事件、期权价从现价到预估价的变化幅度是否配得上这个概率；",
+            "- order_style=stop_trigger 的必须提醒：预估价高于现价，提前挂被动限价会立即按市价成交，应等破位确认后用条件单。",
+            "最后 2-3 行 if/then 剧本：开盘前参考价/ES 走到哪些具体位置时，哪张挂单的赔率变差该撤或改价，哪个剧本作废。",
+            "previous_push 是上一条推送的正文；若关键位相对上一条有实质变化，须在地形结论处明确说『剧本有变』并指出哪张单要改；无实质变化则不必提。",
             "数据 degraded 时如实说明，不给方向判断。",
+            "previous_push:" + previous_push_json(previous_push),
             "JSON:" + json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
             "模板:" + template,
         )
@@ -614,6 +626,7 @@ def send_order_map(
     runner: CommandRunner = default_runner,
     now: datetime | None = None,
     extra_header: str | None = None,
+    previous_push: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     now = now or datetime.now(tz=timezone.utc)
     template = render_template(payload)
@@ -621,7 +634,7 @@ def send_order_map(
         template = f"{extra_header}\n{template}"
     text, writer = generate_push_text(
         template,
-        build_order_prompt(payload, template),
+        build_order_prompt(payload, template, previous_push),
         settings,
         runner=runner,
     )
@@ -849,15 +862,21 @@ def render_status_template(
     return "\n".join(lines)
 
 
-def build_status_prompt(payload: dict[str, Any], template: str) -> str:
+def build_status_prompt(
+    payload: dict[str, Any],
+    template: str,
+    previous_push: dict[str, Any] | None = None,
+) -> str:
     return "\n".join(
         (
-            "你是 SPX Spark 的盘前市场状态播报员，读者只交易 SPX/SPXW 0DTE/1DTE 期权(买 call/put 或垂直价差)，正在开盘前决定限价挂单。",
-            "只依据下面 JSON 与模板事实，不得编造数字、新闻或仓位；不给下单指令。",
-            "输出中文，最多 12 行，第一行必须是『市场状态:』开头并保留模板第一行的时间与距开盘信息。",
-            "必须覆盖：参考价与 ES/HL perp 的相对位置、gamma 地形(zero gamma/flip zone/墙位触达概率)、预期波幅、vol 面(VIX/VIX1D/VVIX/SKEW)、较上次推送的变化。",
-            "然后用 2-3 句量化交易员口吻解读：当前 spot 相对 flip zone 与墙位的位置意味着开盘后偏 pin 还是易加速，隔夜 vol 定价贵还是便宜，现在更值得预挂哪一类单(反弹买 call/跌破买 put/冲墙 fade)以及为什么。",
-            "如果关键位无变化就明说『结构未变』，不要硬编故事；数据 degraded 时如实说明，不给方向判断。",
+            "本条推送是『市场状态』。读者已按之前的挂单地图挂好单，现在每 30 分钟只想知道一件事：剧本变了没有，挂的单要不要动。",
+            "输出中文，最多 10 行。第一行必须以『市场状态:』开头，保留模板第一行的时间与距开盘信息，并紧跟结论：『剧本维持』或『剧本有变: 一句话说变化』。",
+            "判断『变没变』的基准是 previous_push 字段里的上一条推送正文，以及模板里的『较上次推送』一行。",
+            "证据最多 3 行：只讲相对上一条的变化——参考价相对 flip zone/墙位的位置移动、触达概率漂移、vol 面(VIX1D 等)变化；没变的量不要复述。",
+            "然后 1-2 行 if/then：开盘前若参考价走到哪个具体位置，哪张挂单的赔率会变差，该撤还是改价。",
+            "若结构未变，全文 5 行以内收尾，明说『结构未变』，不要硬编故事。",
+            "数据 degraded 时如实说明，不给方向判断。",
+            "previous_push:" + previous_push_json(previous_push),
             "JSON:" + json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
             "模板:" + template,
         )
@@ -890,7 +909,7 @@ def run_status(
     settings = NotificationSettings.from_env()
     text, writer = generate_push_text(
         template,
-        build_status_prompt(payload, template),
+        build_status_prompt(payload, template, load_previous_push()),
         settings,
         runner=runner,
     )
@@ -904,6 +923,7 @@ def run_status(
 
     if weixin_result.ok or bark_ok:
         mark_sent(state_path, trading_date, fingerprint=fingerprint, now=now)
+        record_push("market_status", text, at=now.isoformat())
     result = {
         "text": text,
         "writer": writer,
@@ -967,9 +987,12 @@ def run_refresh(args: argparse.Namespace, *, now: datetime, state_path: str, tra
         return 0
 
     settings = NotificationSettings.from_env()
-    result = send_order_map(payload, settings, now=now, extra_header=header)
+    result = send_order_map(
+        payload, settings, now=now, extra_header=header, previous_push=load_previous_push()
+    )
     if result["weixin_ok"] or result["bark_ok"]:
         mark_sent(state_path, trading_date, fingerprint=fingerprint, now=now)
+        record_push("order_map_refresh", result["text"], at=now.isoformat())
     result["changes"] = changes
     print(json.dumps(result, ensure_ascii=False))
     if not result["weixin_ok"] and not result["bark_ok"]:
@@ -1007,9 +1030,10 @@ def run(argv: list[str] | None = None, *, now: datetime | None = None) -> int:
         return 0
 
     settings = NotificationSettings.from_env()
-    result = send_order_map(payload, settings, now=now)
+    result = send_order_map(payload, settings, now=now, previous_push=load_previous_push())
     if result["weixin_ok"] or result["bark_ok"]:
         mark_sent(state_path, trading_date, fingerprint=payload_fingerprint(payload), now=now)
+        record_push("order_map", result["text"], at=now.isoformat())
     print(json.dumps(result, ensure_ascii=False))
     if not result["weixin_ok"] and not result["bark_ok"]:
         return 1
