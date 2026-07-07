@@ -19,6 +19,7 @@ from spx_spark.options_map import (
     BAD_QUALITIES,
     OptionsMap,
     build_options_map,
+    chain_implied_spot,
     finite_float,
     is_spxw_option,
     median_strike_step,
@@ -64,30 +65,6 @@ def project_option_price(
     move = target - spot
     projected = mid + delta * move + 0.5 * gamma * move * move
     return max(0.05, projected)
-
-
-def chain_implied_spot(pairs: dict[float, dict[OptionRight, Quote]]) -> float | None:
-    """SPX spot implied by put-call parity at the synthetic ATM strike.
-
-    The stream's underlier reference can be ES/MES, which carries a large
-    basis vs SPX (~100 pts on a far contract). Options are priced off the
-    real SPX forward, so projections must use a chain-consistent spot:
-    S ~= K + C(K) - P(K) at the strike where |C - P| is smallest (r~=0 for
-    0DTE/1DTE).
-    """
-    best: tuple[float, float, float, float] | None = None
-    for strike, sides in pairs.items():
-        call_mid = option_mid(sides.get(OptionRight.CALL))
-        put_mid = option_mid(sides.get(OptionRight.PUT))
-        if call_mid is None or put_mid is None:
-            continue
-        diff = abs(call_mid - put_mid)
-        if best is None or diff < best[0]:
-            best = (diff, strike, call_mid, put_mid)
-    if best is None:
-        return None
-    _, strike, call_mid, put_mid = best
-    return strike + call_mid - put_mid
 
 
 @dataclass(frozen=True)

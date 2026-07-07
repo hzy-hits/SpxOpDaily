@@ -192,6 +192,29 @@ def select_underlier(state: LatestState) -> UnderlierReference:
     return UnderlierReference(price=None, source=None)
 
 
+def chain_implied_spot(pairs: dict[float, dict[OptionRight, Quote]]) -> float | None:
+    """SPX spot implied by put-call parity at the synthetic ATM strike.
+
+    S ~= K + C(K) - P(K) at the strike where |C - P| is smallest (r~=0 for
+    0DTE/1DTE). This is the option market's own SPX-scale reference, so it
+    avoids the ES/SPY basis that otherwise forces gamma/wall suppression
+    outside SPX cash hours.
+    """
+    best: tuple[float, float, float, float] | None = None
+    for strike, sides in pairs.items():
+        call_mid = option_mid(sides.get(OptionRight.CALL))
+        put_mid = option_mid(sides.get(OptionRight.PUT))
+        if call_mid is None or put_mid is None:
+            continue
+        diff = abs(call_mid - put_mid)
+        if best is None or diff < best[0]:
+            best = (diff, strike, call_mid, put_mid)
+    if best is None:
+        return None
+    _, strike, call_mid, put_mid = best
+    return strike + call_mid - put_mid
+
+
 def is_spxw_option(quote: Quote) -> bool:
     instrument = quote.instrument
     if instrument.instrument_type != InstrumentType.OPTION:
@@ -892,6 +915,19 @@ def build_options_map(state: LatestState) -> OptionsMap:
     underlier_mismatch = (
         underlier.source is not None and underlier.source in UNDERLIER_MISMATCH_SOURCES
     )
+    if (underlier.price is None or underlier_mismatch) and grouped:
+        # Outside SPX cash hours the reference degrades to ES/SPY, whose basis
+        # forced gamma/wall suppression. Put-call parity on the front expiry
+        # gives an SPX-consistent spot, so gamma/GEX stay live around the clock.
+        front_expiry = sorted(grouped)[0]
+        implied = chain_implied_spot(pair_by_strike(grouped[front_expiry]))
+        reference = underlier.price
+        implied_plausible = implied is not None and (
+            reference is None or abs(implied / reference - 1.0) <= 0.02
+        )
+        if implied_plausible:
+            underlier = UnderlierReference(price=implied, source="chain_implied")
+            underlier_mismatch = False
     if underlier.price is None:
         warnings.append("missing SPX underlier reference")
     elif underlier_mismatch:
