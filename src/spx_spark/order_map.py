@@ -501,6 +501,13 @@ def _payload_is_thin(payload: dict[str, Any]) -> bool:
     warnings = payload.get("warnings")
     if isinstance(warnings, list) and any("no open interest" in str(item) for item in warnings):
         return True
+    fingerprint = payload_fingerprint(payload)
+    if (
+        fingerprint.get("put_wall") is None
+        and fingerprint.get("call_wall") is None
+        and fingerprint.get("flip_low") is None
+    ):
+        return True
     return False
 
 
@@ -508,10 +515,15 @@ def build_order_payload_with_retry(
     storage_settings: StorageSettings,
     *,
     now: datetime,
-    attempts: int = 3,
-    delay_seconds: float = 6.0,
+    attempts: int = 6,
+    delay_seconds: float = 10.0,
 ) -> dict[str, Any]:
-    """Reload latest state a few times if the first snapshot looks thin."""
+    """Reload latest state a few times if the first snapshot looks thin.
+
+    Thin snapshots happen during slow-poll windows (the stream blocks ~30-50s
+    without flushing) and option line rotation gaps; the retry budget must
+    outlast those.
+    """
     payload: dict[str, Any] = {}
     for attempt in range(attempts):
         state = LatestStateStore(storage_settings).load()
@@ -924,6 +936,11 @@ def run_status(
 
     previous = load_order_map_state(state_path)
     payload = build_order_payload_with_retry(StorageSettings.from_env(), now=now)
+    if _payload_is_thin(payload) and not args.force:
+        # Normal sampling gap (slow poll / line rotation), not an outage:
+        # skip quietly, the next 30-minute run will have full data.
+        print(json.dumps({"skipped": True, "reason": "thin_snapshot_sampling_gap"}))
+        return 0
     fingerprint = payload_fingerprint(payload)
     changes = material_changes(previous.get("fingerprint"), fingerprint)
     template = render_status_template(payload, changes, now)
@@ -1000,6 +1017,9 @@ def run_refresh(args: argparse.Namespace, *, now: datetime, state_path: str, tra
         return 0
 
     payload = build_order_payload_with_retry(StorageSettings.from_env(), now=now)
+    if _payload_is_thin(payload) and not args.force:
+        print(json.dumps({"skipped": True, "reason": "thin_snapshot_sampling_gap"}))
+        return 0
     fingerprint = payload_fingerprint(payload)
     changes = material_changes(previous.get("fingerprint"), fingerprint)
     if not changes and not args.force:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import time as time_module
 from datetime import datetime, time, timezone
 from pathlib import Path
 from typing import Any
@@ -72,6 +73,35 @@ def build_morning_payload(state: LatestState, *, now: datetime | None = None) ->
         "overnight": overnight_gap(state),
         "human_focus_context": focus,
     }
+
+
+def _morning_payload_is_thin(payload: dict[str, Any]) -> bool:
+    """True when the snapshot caught a slow-poll/rotation gap (no walls at all)."""
+    focus = payload.get("human_focus_context")
+    if not isinstance(focus, dict):
+        return True
+    spxw = focus.get("spxw_options") if isinstance(focus.get("spxw_options"), dict) else {}
+    expiries = spxw.get("expiries") if isinstance(spxw.get("expiries"), list) else []
+    front = expiries[0] if expiries and isinstance(expiries[0], dict) else {}
+    return front.get("put_wall") is None and front.get("call_wall") is None
+
+
+def build_morning_payload_with_retry(
+    storage_settings: StorageSettings,
+    *,
+    now: datetime | None = None,
+    attempts: int = 6,
+    delay_seconds: float = 10.0,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    for attempt in range(attempts):
+        state = LatestStateStore(storage_settings).load()
+        payload = build_morning_payload(state, now=now)
+        if not _morning_payload_is_thin(payload):
+            return payload
+        if attempt < attempts - 1:
+            time_module.sleep(delay_seconds)
+    return payload
 
 
 def _dash(value: Any) -> str:
@@ -346,8 +376,7 @@ def run(argv: list[str] | None = None, *, now: datetime | None = None) -> int:
             print(json.dumps({"skipped": True, "reason": "already_sent"}))
             return 0
 
-    state = LatestStateStore(storage_settings).load()
-    payload = build_morning_payload(state, now=now)
+    payload = build_morning_payload_with_retry(storage_settings, now=now)
     template = render_template(payload)
 
     if args.dry_run:
