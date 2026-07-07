@@ -367,6 +367,56 @@ def test_ibkr_unknown_state_preserves_interrupted_status_for_restore(tmp_path, m
     assert [alert.kind for alert in restored_alerts] == ["ibkr_session_restored"]
 
 
+def test_ibkr_degraded_reconnect_state_does_not_swallow_restored_alert(
+    tmp_path, monkeypatch
+) -> None:
+    state_path = tmp_path / "system-event-state.json"
+    monkeypatch.setenv("ALERT_SYSTEM_EVENT_STATE_PATH", str(state_path))
+    now = datetime(2026, 7, 7, 11, 9, tzinfo=BJ_TZ)
+    interrupted = ProviderState(
+        provider=Provider.IBKR,
+        status=ProviderStatus.UNAVAILABLE,
+        checked_at=now,
+        reason="disconnected",
+        connected=False,
+        authenticated=None,
+        priority=0,
+    )
+    reconnecting = ProviderState(
+        provider=Provider.IBKR,
+        status=ProviderStatus.DEGRADED,
+        checked_at=now + timedelta(minutes=1),
+        reason="connected; awaiting first flush",
+        connected=True,
+        authenticated=True,
+        priority=0,
+    )
+    restored = replace(
+        interrupted,
+        status=ProviderStatus.AVAILABLE,
+        checked_at=now + timedelta(minutes=2),
+        reason=None,
+        connected=True,
+        authenticated=True,
+    )
+
+    assert [
+        alert.kind
+        for alert in system_event_alerts(make_state(now=now, provider_states=(interrupted,)))
+    ] == ["ibkr_session_interrupted"]
+    assert (
+        system_event_alerts(
+            make_state(now=now + timedelta(minutes=1), provider_states=(reconnecting,))
+        )
+        == []
+    )
+    restored_alerts = system_event_alerts(
+        make_state(now=now + timedelta(minutes=2), provider_states=(restored,))
+    )
+
+    assert [alert.kind for alert in restored_alerts] == ["ibkr_session_restored"]
+
+
 def test_evaluate_payload_can_detect_system_event_without_persisting(tmp_path, monkeypatch) -> None:
     state_path = tmp_path / "system-event-state.json"
     monkeypatch.setenv("ALERT_SYSTEM_EVENT_STATE_PATH", str(state_path))

@@ -104,6 +104,11 @@ TERM_GAP_THRESHOLD = 0.05
 SURFACE_SHIFT_1H_THRESHOLD = 0.05
 ATM_IV_CHANGE_1H_THRESHOLD = 0.04
 IBKR_INTERRUPTED_SESSION_STATUSES = {"competing_session", "unavailable"}
+# Transitional statuses must not overwrite the persisted session status:
+# "degraded" is what the stream collector reports between reconnect and the
+# first flush, so persisting it would break the interrupted -> available
+# transition and swallow the "restored" notification.
+IBKR_TRANSITIONAL_SESSION_STATUSES = {"unknown", "degraded"}
 
 
 def find_best(state: LatestState, instrument_id: str) -> Quote | None:
@@ -629,7 +634,7 @@ def build_system_event_state_payload(
     current_status: str,
     previous: dict[str, object],
 ) -> dict[str, object]:
-    if current_status == "unknown":
+    if current_status in IBKR_TRANSITIONAL_SESSION_STATUSES:
         payload = {
             **previous,
             "ibkr_last_observed_status": current_status,
@@ -714,7 +719,7 @@ def system_event_alerts(state: LatestState, *, persist: bool = True) -> list[Ale
     state_path = system_event_state_path()
     previous = load_system_event_state(state_path)
     previous_status = previous.get("ibkr_session_status")
-    if current_status == "unknown":
+    if current_status in IBKR_TRANSITIONAL_SESSION_STATUSES:
         if persist:
             save_system_event_state(
                 state_path,
