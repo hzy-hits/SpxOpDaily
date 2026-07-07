@@ -30,14 +30,17 @@ from spx_spark.order_map import (
     chain_implied_spot,
     mark_sent,
     material_changes,
+    minutes_to_open,
     option_tick,
     payload_fingerprint,
     project_option_price,
+    render_status_template,
     render_template,
     round_to_tick,
     send_order_map,
     within_refresh_window,
     within_send_window,
+    within_status_window,
 )
 from spx_spark.storage import LatestState
 
@@ -509,15 +512,70 @@ def test_payload_fingerprint_and_material_changes() -> None:
 
 
 def test_within_refresh_window_beijing() -> None:
+    # 22:30 Beijing = 10:30 ET (summer): after open, inside window.
     beijing_2230 = datetime(2026, 7, 7, 14, 30, tzinfo=timezone.utc)
     assert within_refresh_window(beijing_2230) is True
     beijing_2345 = datetime(2026, 7, 7, 15, 45, tzinfo=timezone.utc)
     assert within_refresh_window(beijing_2345) is False
+    # 13:00 Beijing = pre-open: refresh handed over to the status report.
     beijing_1300 = datetime(2026, 7, 7, 5, 0, tzinfo=timezone.utc)
     assert within_refresh_window(beijing_1300) is False
+    # 21:00 Beijing = 9:00 ET: still pre-open, refresh stays quiet.
+    beijing_2100 = datetime(2026, 7, 7, 13, 0, tzinfo=timezone.utc)
+    assert within_refresh_window(beijing_2100) is False
 
 
-def test_send_order_map_queues_on_weixin_failure(tmp_path: Path) -> None:
+def test_within_status_window_and_minutes_to_open() -> None:
+    # 14:30 Beijing = 2:30 ET: inside status window, 420 minutes to open.
+    beijing_1430 = datetime(2026, 7, 7, 6, 30, tzinfo=timezone.utc)
+    assert within_status_window(beijing_1430) is True
+    assert minutes_to_open(beijing_1430) == 420
+    # 14:00 Beijing: before the 14:15 start (baseline order map slot).
+    beijing_1400 = datetime(2026, 7, 7, 6, 0, tzinfo=timezone.utc)
+    assert within_status_window(beijing_1400) is False
+    # 21:30 Beijing = 9:30 ET: market open, status stops.
+    beijing_2130 = datetime(2026, 7, 7, 13, 30, tzinfo=timezone.utc)
+    assert within_status_window(beijing_2130) is False
+    assert minutes_to_open(beijing_2130) is None
+    saturday = datetime(2026, 7, 11, 6, 30, tzinfo=timezone.utc)
+    assert within_status_window(saturday) is False
+
+
+def test_render_status_template_contains_levels_and_changes() -> None:
+    payload = {
+        "expiry": "20260707",
+        "underlier": {"price": 7523.5, "source": "chain_implied"},
+        "es_last": 7530.2,
+        "hl_sp500_perp": 7522.8,
+        "gamma_state": "zero_gamma_transition",
+        "zero_gamma": 7507.4,
+        "flip_zone": [7505.0, 7510.0],
+        "expected_move_points": 25.8,
+        "vol_context": {"vix": 15.9, "vix1d": 7.1, "vvix": 95.0, "skew": 150.0},
+        "candidates": [
+            {
+                "play": "put_wall_bounce_call",
+                "level": 7500.0,
+                "level_label": "put wall 7500",
+                "prob_touch": 0.57,
+            },
+        ],
+        "warnings": [],
+    }
+    now = datetime(2026, 7, 7, 6, 30, tzinfo=timezone.utc)
+    text = render_status_template(payload, ["put wall 7495→7500"], now)
+    assert "【市场状态 14:30】" in text
+    assert "距开盘 420 分钟" in text
+    assert "put wall 7500 触达≈57%" in text
+    assert "VIX 15.9" in text
+    assert "较上次推送变化: put wall 7495→7500" in text
+
+    text_no_change = render_status_template(payload, [], now)
+    assert "关键位无实质变化" in text_no_change
+
+
+def test_send_order_map_queues_on_weixin_failure(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("SPX_PUSH_LLM_ENABLED", "false")
     payload = build_order_payload(
         make_state(
             Quote(

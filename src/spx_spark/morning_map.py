@@ -10,9 +10,10 @@ from typing import Any
 from spx_spark.config import NY_TZ, NotificationSettings, StorageSettings
 from spx_spark.human_focus import build_human_focus_context
 from spx_spark.iv_surface import IvSurfaceSettings, load_latest_snapshot
+from spx_spark.notifier.llm_writer import generate_push_text
 from spx_spark.notifier.missed_queue import append_missed
 from spx_spark.notifier.model import CommandRunner, default_runner
-from spx_spark.notifier.sinks import run_openclaw_agent, send_bark_message, send_openclaw_message
+from spx_spark.notifier.sinks import send_bark_message, send_openclaw_message
 from spx_spark.options_map import build_options_map
 from spx_spark.storage import LatestState, LatestStateStore
 
@@ -249,14 +250,12 @@ def send_morning_map(
 ) -> dict[str, Any]:
     now = now or datetime.now(tz=timezone.utc)
     template = render_template(payload)
-    used_agent = False
-    text = template
-
-    if settings.openclaw_agent_enabled:
-        sink, reply = run_openclaw_agent(settings, build_map_prompt(payload, template), runner=runner)
-        if reply and sink.ok:
-            text = reply
-            used_agent = True
+    text, writer = generate_push_text(
+        template,
+        build_map_prompt(payload, template),
+        settings,
+        runner=runner,
+    )
 
     weixin_result = send_openclaw_message(settings, text, runner=runner)
     if not weixin_result.ok:
@@ -269,7 +268,8 @@ def send_morning_map(
 
     return {
         "text": text,
-        "used_agent": used_agent,
+        "writer": writer,
+        "used_agent": writer != "template",
         "weixin_ok": weixin_result.ok,
         "bark_ok": bark_ok,
     }
@@ -340,11 +340,10 @@ def run(argv: list[str] | None = None, *, now: datetime | None = None) -> int:
     if args.dry_run:
         print(template)
         settings = NotificationSettings.from_env()
-        if settings.openclaw_agent_enabled:
-            _, reply = run_openclaw_agent(settings, build_map_prompt(payload, template))
-            if reply:
-                print("\n--- agent ---\n")
-                print(reply)
+        text, writer = generate_push_text(template, build_map_prompt(payload, template), settings)
+        if writer != "template":
+            print(f"\n--- {writer} ---\n")
+            print(text)
         print(json.dumps({"dry_run": True}))
         return 0
 

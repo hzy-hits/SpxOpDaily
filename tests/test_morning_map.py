@@ -150,7 +150,10 @@ def test_render_template_contains_walls_probs_regime() -> None:
     assert "不共振" in text
 
 
-def test_send_morning_map_falls_back_to_template_when_agent_fails(tmp_path: Path) -> None:
+def test_send_morning_map_falls_back_to_template_when_agent_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SPX_PUSH_LLM_ENABLED", "false")
     payload = sample_payload()
     template = render_template(payload)
     settings = make_settings(str(tmp_path / "notify-state.json"), agent_enabled=True)
@@ -166,7 +169,10 @@ def test_send_morning_map_falls_back_to_template_when_agent_fails(tmp_path: Path
     assert result["weixin_ok"] is True
 
 
-def test_send_morning_map_queues_on_weixin_failure(tmp_path: Path) -> None:
+def test_send_morning_map_queues_on_weixin_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SPX_PUSH_LLM_ENABLED", "false")
     payload = sample_payload()
     template = render_template(payload)
     missed_path = str(tmp_path / "missed.jsonl")

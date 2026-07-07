@@ -12,9 +12,10 @@ from zoneinfo import ZoneInfo
 
 from spx_spark.config import NY_TZ, NotificationSettings, StorageSettings
 from spx_spark.marketdata import OptionRight, Quote
+from spx_spark.notifier.llm_writer import generate_push_text
 from spx_spark.notifier.missed_queue import append_missed
 from spx_spark.notifier.model import CommandRunner, default_runner
-from spx_spark.notifier.sinks import run_openclaw_agent, send_bark_message, send_openclaw_message
+from spx_spark.notifier.sinks import send_bark_message, send_openclaw_message
 from spx_spark.options_map import (
     BAD_QUALITIES,
     OptionsMap,
@@ -356,6 +357,13 @@ def build_candidates(
     return candidates
 
 
+def _index_value(state: LatestState, canonical_id: str) -> float | None:
+    quote = state.best_quote(canonical_id)
+    if quote is None or quote.quality in BAD_QUALITIES:
+        return None
+    return finite_float(quote.effective_price)
+
+
 def build_order_payload(state: LatestState, *, now: datetime | None = None) -> dict[str, Any]:
     now = now or state.as_of
     options_map = build_options_map(state)
@@ -394,6 +402,14 @@ def build_order_payload(state: LatestState, *, now: datetime | None = None) -> d
         "gamma_state": gamma_state,
         "zero_gamma": zero_gamma,
         "flip_zone": flip_zone,
+        "vol_context": {
+            "vix": _index_value(state, "index:VIX"),
+            "vix1d": _index_value(state, "index:VIX1D"),
+            "vvix": _index_value(state, "index:VVIX"),
+            "skew": _index_value(state, "index:SKEW"),
+        },
+        "hl_sp500_perp": hyperliquid_sp500_price(state),
+        "es_last": _index_value(state, "future:ES"),
         "warnings": list(dict.fromkeys(warnings)),
     }
 
@@ -492,6 +508,8 @@ def build_order_prompt(payload: dict[str, Any], template: str) -> str:
     )
 
 
+
+
 def send_order_map(
     payload: dict[str, Any],
     settings: NotificationSettings,
@@ -504,14 +522,12 @@ def send_order_map(
     template = render_template(payload)
     if extra_header:
         template = f"{extra_header}\n{template}"
-    used_agent = False
-    text = template
-
-    if settings.openclaw_agent_enabled:
-        sink, reply = run_openclaw_agent(settings, build_order_prompt(payload, template), runner=runner)
-        if reply and sink.ok:
-            text = reply
-            used_agent = True
+    text, writer = generate_push_text(
+        template,
+        build_order_prompt(payload, template),
+        settings,
+        runner=runner,
+    )
 
     weixin_result = send_openclaw_message(settings, text, runner=runner)
     if not weixin_result.ok:
@@ -524,7 +540,8 @@ def send_order_map(
 
     return {
         "text": text,
-        "used_agent": used_agent,
+        "writer": writer,
+        "used_agent": writer != "template",
         "weixin_ok": weixin_result.ok,
         "bark_ok": bark_ok,
     }
@@ -538,11 +555,15 @@ def default_state_path(settings: StorageSettings) -> str:
 
 # --- event-driven refresh: re-push when key levels move materially ---
 
-REFRESH_WINDOW_START = time(13, 30)
 REFRESH_WINDOW_END = time(23, 30)
 REFRESH_COOLDOWN_SECONDS_DEFAULT = 3600.0
 MATERIAL_LEVEL_MOVE_POINTS = 5.0
 MATERIAL_EM_REL_CHANGE = 0.20
+
+# --- pre-open status report: fixed 30-minute cadence (Beijing 14:15 -> US open) ---
+
+STATUS_WINDOW_START = time(14, 15)
+US_OPEN_ET = time(9, 30)
 
 
 def payload_fingerprint(payload: dict[str, Any]) -> dict[str, Any]:
@@ -602,11 +623,31 @@ def material_changes(
 
 
 def within_refresh_window(now_utc: datetime) -> bool:
+    """Event-driven refresh only after US open; pre-open is covered by the 30m status report."""
     local = now_utc.astimezone(SHANGHAI_TZ)
     if local.weekday() >= 5:
         return False
-    current = local.time()
-    return REFRESH_WINDOW_START <= current < REFRESH_WINDOW_END
+    if now_utc.astimezone(NY_TZ).time() < US_OPEN_ET:
+        return False
+    return local.time() < REFRESH_WINDOW_END
+
+
+def within_status_window(now_utc: datetime) -> bool:
+    """Beijing 14:15 until US market open (9:30 ET)."""
+    local = now_utc.astimezone(SHANGHAI_TZ)
+    if local.weekday() >= 5:
+        return False
+    if local.time() < STATUS_WINDOW_START:
+        return False
+    return now_utc.astimezone(NY_TZ).time() < US_OPEN_ET
+
+
+def minutes_to_open(now_utc: datetime) -> int | None:
+    ny = now_utc.astimezone(NY_TZ)
+    open_dt = ny.replace(hour=US_OPEN_ET.hour, minute=US_OPEN_ET.minute, second=0, microsecond=0)
+    if ny >= open_dt:
+        return None
+    return int((open_dt - ny).total_seconds() // 60)
 
 
 def load_order_map_state(state_path: str) -> dict[str, Any]:
@@ -655,6 +696,131 @@ def mark_sent(
     path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
 
 
+def _level_probs_line(payload: dict[str, Any]) -> str:
+    by_play = _candidate_by_play(payload)
+    parts: list[str] = []
+    for play in PLAY_ORDER:
+        candidate = by_play.get(play)
+        if candidate is None:
+            continue
+        parts.append(
+            f"{candidate.get('level_label') or '-'} 触达≈{_fmt_prob(candidate.get('prob_touch'))}"
+        )
+    return "; ".join(parts) if parts else "-"
+
+
+def render_status_template(
+    payload: dict[str, Any],
+    changes: list[str],
+    now_utc: datetime,
+) -> str:
+    beijing = now_utc.astimezone(SHANGHAI_TZ)
+    to_open = minutes_to_open(now_utc)
+    open_text = f"距开盘 {to_open} 分钟" if to_open is not None else "已开盘"
+
+    underlier = payload.get("underlier") if isinstance(payload.get("underlier"), dict) else {}
+    vol = payload.get("vol_context") if isinstance(payload.get("vol_context"), dict) else {}
+    flip_zone = payload.get("flip_zone") if isinstance(payload.get("flip_zone"), list) else None
+    flip_lo = _dash(flip_zone[0]) if flip_zone and len(flip_zone) >= 2 else "-"
+    flip_hi = _dash(flip_zone[1]) if flip_zone and len(flip_zone) >= 2 else "-"
+
+    lines = [
+        f"【市场状态 {beijing.strftime('%H:%M')}】(0DTE={payload.get('expiry') or '-'}, {open_text})",
+        (
+            f"参考价: {_dash(underlier.get('price'))}({underlier.get('source') or '-'}); "
+            f"ES {_dash(payload.get('es_last'))}; HL perp {_dash(payload.get('hl_sp500_perp'))}"
+        ),
+        (
+            f"gamma: {payload.get('gamma_state') or '-'}, "
+            f"zero gamma {_dash(payload.get('zero_gamma'))}, flip zone {flip_lo}-{flip_hi}, "
+            f"预期波幅 ±{_dash(payload.get('expected_move_points'))} 点"
+        ),
+        f"关键位: {_level_probs_line(payload)}",
+        (
+            f"vol: VIX {_dash(vol.get('vix'))}, VIX1D {_dash(vol.get('vix1d'))}, "
+            f"VVIX {_dash(vol.get('vvix'))}, SKEW {_dash(vol.get('skew'))}"
+        ),
+    ]
+    if changes:
+        lines.append(f"较上次推送变化: {'; '.join(changes)}")
+    else:
+        lines.append("较上次推送: 关键位无实质变化")
+
+    warnings = payload.get("warnings")
+    if isinstance(warnings, list) and warnings:
+        lines.append(f"数据警告: {'; '.join(str(item) for item in warnings)}")
+    return "\n".join(lines)
+
+
+def build_status_prompt(payload: dict[str, Any], template: str) -> str:
+    return "\n".join(
+        (
+            "你是 SPX Spark 的盘前市场状态播报员，读者只交易 SPX/SPXW 0DTE/1DTE 期权(买 call/put 或垂直价差)，正在开盘前决定限价挂单。",
+            "只依据下面 JSON 与模板事实，不得编造数字、新闻或仓位；不给下单指令。",
+            "输出中文，最多 12 行，第一行必须是『市场状态:』开头并保留模板第一行的时间与距开盘信息。",
+            "必须覆盖：参考价与 ES/HL perp 的相对位置、gamma 地形(zero gamma/flip zone/墙位触达概率)、预期波幅、vol 面(VIX/VIX1D/VVIX/SKEW)、较上次推送的变化。",
+            "然后用 2-3 句量化交易员口吻解读：当前 spot 相对 flip zone 与墙位的位置意味着开盘后偏 pin 还是易加速，隔夜 vol 定价贵还是便宜，现在更值得预挂哪一类单(反弹买 call/跌破买 put/冲墙 fade)以及为什么。",
+            "如果关键位无变化就明说『结构未变』，不要硬编故事；数据 degraded 时如实说明，不给方向判断。",
+            "JSON:" + json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+            "模板:" + template,
+        )
+    )
+
+
+def run_status(
+    args: argparse.Namespace,
+    *,
+    now: datetime,
+    state_path: str,
+    trading_date: str,
+    runner: CommandRunner = default_runner,
+) -> int:
+    if not args.force and not within_status_window(now):
+        print(json.dumps({"skipped": True, "reason": "outside_status_window"}))
+        return 0
+
+    previous = load_order_map_state(state_path)
+    state = LatestStateStore(StorageSettings.from_env()).load()
+    payload = build_order_payload(state, now=now)
+    fingerprint = payload_fingerprint(payload)
+    changes = material_changes(previous.get("fingerprint"), fingerprint)
+    template = render_status_template(payload, changes, now)
+
+    if args.dry_run:
+        print(template)
+        print(json.dumps({"dry_run": True, "changes": changes}, ensure_ascii=False))
+        return 0
+
+    settings = NotificationSettings.from_env()
+    text, writer = generate_push_text(
+        template,
+        build_status_prompt(payload, template),
+        settings,
+        runner=runner,
+    )
+    weixin_result = send_openclaw_message(settings, text, runner=runner)
+    if not weixin_result.ok:
+        append_missed(settings.missed_queue_path, text, kind="order_map_status", at=now)
+    bark_ok = True
+    if settings.bark_enabled:
+        bark_result = send_bark_message(settings, "市场状态", text)
+        bark_ok = bark_result.ok
+
+    if weixin_result.ok or bark_ok:
+        mark_sent(state_path, trading_date, fingerprint=fingerprint, now=now)
+    result = {
+        "text": text,
+        "writer": writer,
+        "weixin_ok": weixin_result.ok,
+        "bark_ok": bark_ok,
+        "changes": changes,
+    }
+    print(json.dumps(result, ensure_ascii=False))
+    if not weixin_result.ok and not bark_ok:
+        return 1
+    return 0
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Send SPX Spark order map push.")
     parser.add_argument("--dry-run", action="store_true", help="Print template only.")
@@ -663,6 +829,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--refresh",
         action="store_true",
         help="Re-push only when key levels moved materially since the last push.",
+    )
+    parser.add_argument(
+        "--status",
+        action="store_true",
+        help="Push a market status report (fixed cadence, Beijing 14:15 -> US open).",
     )
     return parser.parse_args(argv)
 
@@ -717,6 +888,9 @@ def run(argv: list[str] | None = None, *, now: datetime | None = None) -> int:
     storage_settings = StorageSettings.from_env()
     state_path = default_state_path(storage_settings)
     trading_date = now.astimezone(NY_TZ).date().isoformat()
+
+    if args.status:
+        return run_status(args, now=now, state_path=state_path, trading_date=trading_date)
 
     if args.refresh:
         return run_refresh(args, now=now, state_path=state_path, trading_date=trading_date)

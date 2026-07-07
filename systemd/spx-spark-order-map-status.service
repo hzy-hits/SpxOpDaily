@@ -1,0 +1,11 @@
+[Unit]
+Description=SPX Spark pre-open market status report (Beijing 14:15 -> US open, every 30 minutes)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/ubuntu/spx-spark
+EnvironmentFile=-/home/ubuntu/spx-spark/.env
+Environment=PATH=/home/ubuntu/.local/bin:/home/ubuntu/.cargo/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/home/ubuntu/spx-spark/scripts/run-order-map.sh --status
