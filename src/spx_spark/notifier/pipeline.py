@@ -21,6 +21,46 @@ from spx_spark.notifier.sinks import (
 from spx_spark.notifier.state import mark_alerts_sent, select_alerts_for_notification
 
 
+def _failopen_critical_alerts(
+    payload: dict[str, object],
+    review_candidates: list[dict[str, object]],
+    *,
+    settings: NotificationSettings,
+    runner: CommandRunner,
+    now_utc: datetime,
+    alerts_marked_sent: list[dict[str, object]],
+    sinks: list[SinkResult],
+) -> None:
+    critical_alerts = [
+        alert
+        for alert in review_candidates
+        if str(alert.get("severity", "")).lower() == "critical"
+    ]
+    if not critical_alerts:
+        return
+    failopen_message = format_alert_message(payload, critical_alerts)
+    direct_result = send_openclaw_message(settings, failopen_message, runner=runner)
+    sinks.append(direct_result)
+    delivered_ok = direct_result.ok
+    if not direct_result.ok:
+        append_missed(
+            settings.missed_queue_path,
+            failopen_message,
+            kind="failopen",
+            at=now_utc,
+        )
+    if settings.bark_enabled:
+        bark_result = send_bark_message(
+            settings,
+            bark_title_for_alerts(critical_alerts),
+            failopen_message,
+        )
+        sinks.append(bark_result)
+        delivered_ok = delivered_ok or bark_result.ok
+    if delivered_ok:
+        alerts_marked_sent.extend(critical_alerts)
+
+
 def notify_payload(
     payload: dict[str, object],
     *,
@@ -164,6 +204,16 @@ def notify_payload(
                     )
                 )
                 alerts_marked_sent.extend(review_candidates)
+        else:
+            _failopen_critical_alerts(
+                payload,
+                review_candidates,
+                settings=settings,
+                runner=runner,
+                now_utc=now_utc,
+                alerts_marked_sent=alerts_marked_sent,
+                sinks=sinks,
+            )
     elif settings.codex_enabled and review_candidates:
         codex_result, codex_message = run_codex_exec(
             settings,
@@ -220,6 +270,16 @@ def notify_payload(
                     )
                 )
                 alerts_marked_sent.extend(review_candidates)
+        elif not codex_result.ok:
+            _failopen_critical_alerts(
+                payload,
+                review_candidates,
+                settings=settings,
+                runner=runner,
+                now_utc=now_utc,
+                alerts_marked_sent=alerts_marked_sent,
+                sinks=sinks,
+            )
 
     sent_count = sum(1 for sink in sinks if sink.sink in ("openclaw_message", "bark") and sink.ok)
     if alerts_marked_sent:

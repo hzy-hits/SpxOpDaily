@@ -8,6 +8,28 @@ from zoneinfo import ZoneInfo
 
 NY_TZ = ZoneInfo("America/New_York")
 
+DEFAULT_SLOW_POLL_LABELS = (
+    "index:VIX",
+    "index:VIX1D",
+    "index:VIX9D",
+    "index:VIX3M",
+    "index:VVIX",
+    "index:SKEW",
+    "stock:QQQ",
+    "stock:IWM",
+    "stock:DIA",
+    "stock:HYG",
+    "stock:LQD",
+    "stock:TLT",
+    "stock:IEF",
+    "stock:SHY",
+    "stock:UUP",
+    "stock:GLD",
+    "stock:USO",
+    "stock:RSP",
+    "stock:XLU",
+)
+
 
 def env_str(name: str, default: str = "") -> str:
     value = os.getenv(name)
@@ -175,8 +197,9 @@ class IbkrSettings:
             quote_wait_seconds=env_float("IBKR_QUOTE_WAIT_SECONDS", 8.0),
             stale_after_seconds=env_float("IBKR_STALE_AFTER_SECONDS", 10.0),
             slow_index_stale_after_seconds=env_float("IBKR_SLOW_INDEX_STALE_AFTER_SECONDS", 300.0),
+            # Preserve case: these must match row labels like "index:SKEW".
             slow_index_labels=frozenset(
-                env_csv("IBKR_SLOW_INDEX_LABELS", "index:SKEW,index:VVIX")
+                env_csv_preserve("IBKR_SLOW_INDEX_LABELS", "index:SKEW,index:VVIX")
             ),
             qualify_contracts=env_bool("IBKR_QUALIFY_CONTRACTS", True),
             request_timeout_seconds=env_float("IBKR_REQUEST_TIMEOUT_SECONDS", 30.0),
@@ -201,6 +224,10 @@ class IbkrStreamSettings:
     auto_restart_gateway_on_farm_broken: bool
     spy_option_lines: int = 16
     spy_strike_step: int = 2
+    slow_poll_labels: tuple[str, ...] = ()
+    slow_poll_interval_seconds: float = 300.0
+    slow_poll_hold_seconds: float = 10.0
+    slow_poll_chunk_size: int = 6
 
     @classmethod
     def from_env(cls) -> "IbkrStreamSettings":
@@ -226,6 +253,18 @@ class IbkrStreamSettings:
             ),
             spy_option_lines=env_int("IBKR_STREAM_SPY_OPTION_LINES", 16),
             spy_strike_step=env_int("IBKR_STREAM_SPY_STRIKE_STEP", 2),
+            slow_poll_labels=tuple(
+                env_csv_preserve(
+                    "IBKR_STREAM_SLOW_POLL_LABELS",
+                    ",".join(DEFAULT_SLOW_POLL_LABELS),
+                )
+            ),
+            slow_poll_interval_seconds=env_float(
+                "IBKR_STREAM_SLOW_POLL_INTERVAL_SECONDS",
+                300.0,
+            ),
+            slow_poll_hold_seconds=env_float("IBKR_STREAM_SLOW_POLL_HOLD_SECONDS", 10.0),
+            slow_poll_chunk_size=env_int("IBKR_STREAM_SLOW_POLL_CHUNK_SIZE", 6),
         )
 
 
@@ -494,8 +533,9 @@ class StorageSettings:
                 "MARKET_DATA_SLOW_INDEX_STALE_AFTER_SECONDS",
                 env_float("IBKR_SLOW_INDEX_STALE_AFTER_SECONDS", 300.0),
             ),
+            # Preserve case: these must match canonical ids like "index:SKEW".
             slow_index_labels=frozenset(
-                env_csv("MARKET_DATA_SLOW_INDEX_LABELS", "index:SKEW,index:VVIX")
+                env_csv_preserve("MARKET_DATA_SLOW_INDEX_LABELS", "index:SKEW,index:VVIX")
             ),
         )
 
@@ -506,6 +546,7 @@ class IvSurfaceSettings:
     latest_surface_path: str
     raw_file_name: str
     wide_quote_spread_bps: float
+    diff_max_gap_seconds: float
 
     @classmethod
     def from_env(cls) -> "IvSurfaceSettings":
@@ -519,6 +560,7 @@ class IvSurfaceSettings:
             ),
             raw_file_name=env_str("IV_SURFACE_RAW_FILE_NAME", "snapshots.jsonl"),
             wide_quote_spread_bps=env_float("IV_SURFACE_WIDE_QUOTE_SPREAD_BPS", 250.0),
+            diff_max_gap_seconds=env_float("IV_SURFACE_DIFF_MAX_GAP_SECONDS", 600.0),
         )
 
 

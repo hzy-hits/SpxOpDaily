@@ -153,6 +153,10 @@ def build_iv_surface_snapshot(
     settings: IvSurfaceSettings,
     previous: IvSurfaceSnapshot | None = None,
 ) -> IvSurfaceSnapshot:
+    if previous is not None:
+        gap_seconds = (state.as_of - previous.as_of).total_seconds()
+        if gap_seconds > settings.diff_max_gap_seconds:
+            previous = None
     options_map = build_options_map(state)
     previous_expiries = previous_by_expiry(previous)
     expiries = tuple(

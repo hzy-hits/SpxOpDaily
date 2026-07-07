@@ -6,11 +6,12 @@ from collections import defaultdict
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 
-from spx_spark.config import StorageSettings
+from spx_spark.config import NY_TZ, StorageSettings
 from spx_spark.marketdata import (
+    InstrumentType,
     MarketDataQuality,
     Provider,
     ProviderState,
@@ -144,6 +145,7 @@ class LatestStateStore:
         quotes = tuple(
             quote_from_dict(item) for item in quotes_payload if isinstance(item, dict)
         )
+        quotes = prune_expired_option_quotes(quotes, now=now)
         best_quotes = tuple(
             quote_from_dict(item) for item in best_payload if isinstance(item, dict)
         )
@@ -193,6 +195,7 @@ class LatestStateStore:
                 quote for quote in existing_state.quotes if quote.provider not in replacement_providers
             )
             provider_latest = latest_by_provider(existing_quotes + incoming)
+            provider_latest = prune_expired_option_quotes(provider_latest, now=now)
             provider_states_latest = latest_provider_states(
                 existing_state.provider_states + tuple(provider_states)
             )
@@ -291,6 +294,39 @@ def select_best_quotes(quotes: Iterable[Quote], *, as_of: datetime | None = None
         if quote is not None:
             best.append(quote)
     return tuple(best)
+
+
+def parse_option_expiry_date(expiry: str | None) -> date | None:
+    if not expiry:
+        return None
+    text = str(expiry).strip()
+    if not text:
+        return None
+    if len(text) >= 8 and text[:8].isdigit():
+        try:
+            return date(int(text[:4]), int(text[4:6]), int(text[6:8]))
+        except ValueError:
+            return None
+    if len(text) >= 10 and text[4] == "-" and text[7] == "-":
+        try:
+            return date.fromisoformat(text[:10])
+        except ValueError:
+            return None
+    return None
+
+
+def prune_expired_option_quotes(quotes: Iterable[Quote], *, now: datetime) -> tuple[Quote, ...]:
+    """Discard OPTION rows whose expiry is before the current NY trading date."""
+    ny_today = now.astimezone(NY_TZ).date()
+    kept: list[Quote] = []
+    for quote in quotes:
+        if quote.instrument.instrument_type != InstrumentType.OPTION:
+            kept.append(quote)
+            continue
+        expiry_date = parse_option_expiry_date(quote.instrument.expiry)
+        if expiry_date is None or expiry_date >= ny_today:
+            kept.append(quote)
+    return tuple(kept)
 
 
 def resolve_stale_after_seconds(

@@ -23,7 +23,7 @@ from spx_spark.marketdata import (
     classify_quote_quality,
     clean_float,
     elapsed_ms,
-    normalize_implied_vol,
+    normalize_implied_vol_percent,
     parse_timestamp,
 )
 from spx_spark.provider_adapter import ProviderSnapshot, provider_state_from_quote_health
@@ -178,7 +178,9 @@ def quote_from_schwab_option_contract(
         explicit_delayed=delayed,
     )
     greeks = OptionGreeks(
-        implied_vol=normalize_implied_vol(first_key(contract, "volatility", "impliedVolatility")),
+        implied_vol=normalize_implied_vol_percent(
+            first_key(contract, "volatility", "impliedVolatility")
+        ),
         delta=clean_float(first_key(contract, "delta")),
         gamma=clean_float(first_key(contract, "gamma")),
         theta=clean_float(first_key(contract, "theta")),

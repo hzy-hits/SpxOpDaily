@@ -265,7 +265,13 @@ class Quote:
     def mid(self) -> float | None:
         if self.bid is None or self.ask is None:
             return None
-        if self.bid <= 0 or self.ask <= 0 or self.ask < self.bid:
+        if self.ask <= 0 or self.ask < self.bid:
+            return None
+        if self.instrument.instrument_type == InstrumentType.OPTION:
+            if self.bid < 0:
+                return None
+            return (self.bid + self.ask) / 2
+        if self.bid <= 0:
             return None
         return (self.bid + self.ask) / 2
 
@@ -301,9 +307,7 @@ class Quote:
         }
 
     def quote_age_ms(self, as_of: datetime | None = None) -> float | None:
-        source_time = self.quote_time or self.trade_time
-        if source_time is None:
-            return None
+        source_time = self.quote_time or self.trade_time or self.received_at
         as_of = as_utc(as_of or self.received_at)
         return max((as_of - as_utc(source_time)).total_seconds() * 1000.0, 0.0)
 
@@ -585,13 +589,25 @@ def clean_float(value: Any) -> float | None:
     return result
 
 
-def normalize_implied_vol(value: Any) -> float | None:
-    result = clean_float(value)
-    if result is None:
+def implied_vol_in_valid_range(value: float | None) -> float | None:
+    if value is None:
         return None
-    if result > 3.0:
-        return result / 100.0
-    return result
+    if 0 < value <= 10:
+        return value
+    return None
+
+
+def normalize_implied_vol(value: Any) -> float | None:
+    """Decimal IV for persisted payloads and IBKR model IV (no unit guessing)."""
+    return implied_vol_in_valid_range(clean_float(value))
+
+
+def normalize_implied_vol_percent(value: Any) -> float | None:
+    """Schwab volatility field is a percentage; missing values may be negative."""
+    raw = clean_float(value)
+    if raw is None or raw <= 0:
+        return None
+    return implied_vol_in_valid_range(raw / 100.0)
 
 
 def parse_timestamp(value: Any) -> datetime | None:

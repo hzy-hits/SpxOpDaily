@@ -36,6 +36,7 @@ def iv_settings(tmp_path: Path) -> IvSurfaceSettings:
         latest_surface_path=str(tmp_path / "data" / "latest" / "iv_surface.json"),
         raw_file_name="snapshots.jsonl",
         wide_quote_spread_bps=250.0,
+        diff_max_gap_seconds=600.0,
     )
 
 

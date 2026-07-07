@@ -505,3 +505,39 @@ def test_iv_surface_history_emits_1h_shift_alert() -> None:
     kinds = {alert.kind for alert in alerts}
     assert "iv_surface_shift_1h" in kinds
     assert "atm_iv_change_1h" not in kinds
+
+
+def test_run_persists_system_events_when_notifications_disabled(tmp_path, monkeypatch) -> None:
+    from spx_spark.alert_engine import run
+
+    persist_calls: list[LatestState] = []
+    monkeypatch.setattr(
+        "spx_spark.alert_engine.persist_system_event_state",
+        lambda state: persist_calls.append(state),
+    )
+    monkeypatch.setenv("ALERT_NOTIFY_ENABLED", "false")
+    monkeypatch.setenv("ALERT_SYSTEM_EVENT_STATE_PATH", str(tmp_path / "system-event-state.json"))
+    now = datetime(2026, 7, 7, 3, 15, tzinfo=BJ_TZ)
+    interrupted = ProviderState(
+        provider=Provider.IBKR,
+        status=ProviderStatus.UNAVAILABLE,
+        checked_at=now,
+        reason="competing session blocks live market data (IBKR 10197)",
+        connected=False,
+        authenticated=False,
+        priority=0,
+    )
+    state = make_state(now=now, provider_states=(interrupted,))
+
+    class FakeStore:
+        def __init__(self, settings) -> None:
+            pass
+
+        def load(self, *, now=None, refresh_quality=True) -> LatestState:
+            return state
+
+    monkeypatch.setattr("spx_spark.alert_engine.LatestStateStore", FakeStore)
+
+    run(["--no-notify"])
+
+    assert len(persist_calls) == 1

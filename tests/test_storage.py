@@ -6,13 +6,19 @@ from datetime import datetime, timedelta, timezone
 from spx_spark.config import StorageSettings
 from spx_spark.marketdata import (
     InstrumentId,
+    InstrumentType,
     MarketDataQuality,
     Provider,
     ProviderState,
     ProviderStatus,
     Quote,
 )
-from spx_spark.storage import JsonlQuoteWriter, LatestStateStore
+from spx_spark.storage import (
+    JsonlQuoteWriter,
+    LatestStateStore,
+    degrade_stale_quote,
+    prune_expired_option_quotes,
+)
 
 
 def make_storage_settings(tmp_path) -> StorageSettings:
@@ -274,3 +280,85 @@ def test_latest_state_merges_provider_states_across_provider_updates(tmp_path):
     states_by_provider = {item.provider: item for item in state.provider_states}
     assert states_by_provider[Provider.IBKR].status == ProviderStatus.UNAVAILABLE
     assert states_by_provider[Provider.HYPERLIQUID].status == ProviderStatus.AVAILABLE
+
+
+def test_degrade_stale_quote_uses_received_at_when_source_timestamps_missing() -> None:
+    now = datetime(2026, 7, 7, 15, 0, tzinfo=timezone.utc)
+    received_at = now - timedelta(hours=2)
+    quote = Quote(
+        instrument=InstrumentId.index("SPX"),
+        provider=Provider.IBKR,
+        provider_symbol="index:SPX",
+        received_at=received_at,
+        quality=MarketDataQuality.LIVE,
+        mark=7500.0,
+        quote_time=None,
+        trade_time=None,
+    )
+
+    degraded = degrade_stale_quote(quote, as_of=now, stale_after_seconds=15.0)
+
+    assert degraded.quality == MarketDataQuality.STALE
+
+
+def make_option_quote(*, expiry: str, received_at: datetime) -> Quote:
+    return Quote(
+        instrument=InstrumentId.option(
+            "SPX",
+            expiry=expiry,
+            strike=7500.0,
+            right="C",
+            trading_class="SPXW",
+        ),
+        provider=Provider.IBKR,
+        provider_symbol=f"option:SPXW:{expiry}:7500:C",
+        received_at=received_at,
+        quality=MarketDataQuality.LIVE,
+        mark=10.0,
+        quote_time=received_at,
+    )
+
+
+def test_prune_expired_option_quotes_drops_yesterday_keeps_today_and_index() -> None:
+    now = datetime(2026, 7, 7, 14, 0, tzinfo=timezone.utc)
+    quotes = (
+        make_option_quote(expiry="20260706", received_at=now),
+        make_option_quote(expiry="20260707", received_at=now),
+        make_option_quote(expiry="20260708", received_at=now),
+        make_option_quote(expiry="BAD", received_at=now),
+        make_quote(
+            provider=Provider.IBKR,
+            quality=MarketDataQuality.LIVE,
+            mark=7500.0,
+            received_at=now,
+        ),
+    )
+
+    pruned = prune_expired_option_quotes(quotes, now=now)
+    expiries = {
+        quote.instrument.expiry
+        for quote in pruned
+        if quote.instrument.instrument_type == InstrumentType.OPTION
+    }
+
+    assert "20260706" not in expiries
+    assert expiries == {"20260707", "20260708", "BAD"}
+    assert any(quote.instrument.instrument_type == InstrumentType.INDEX for quote in pruned)
+
+
+def test_latest_state_update_prunes_expired_options(tmp_path) -> None:
+    settings = make_storage_settings(tmp_path)
+    store = LatestStateStore(settings)
+    now = datetime(2026, 7, 7, 14, 0, tzinfo=timezone.utc)
+    store.update(
+        [
+            make_option_quote(expiry="20260706", received_at=now),
+            make_option_quote(expiry="20260707", received_at=now),
+        ],
+        now=now,
+    )
+
+    state = store.load(now=now)
+
+    expiries = {quote.instrument.expiry for quote in state.quotes}
+    assert expiries == {"20260707"}

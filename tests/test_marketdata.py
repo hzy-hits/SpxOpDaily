@@ -12,6 +12,10 @@ from spx_spark.marketdata import (
     Provider,
     Quote,
     choose_best_quote,
+    greeks_from_dict,
+    normalize_implied_vol,
+    normalize_implied_vol_percent,
+    quote_from_dict,
 )
 from spx_spark.schwab.adapter import (
     quote_from_schwab_option_contract,
@@ -168,3 +172,99 @@ def test_choose_best_quote_uses_provider_priority_when_quality_matches():
     )
 
     assert choose_best_quote([schwab, ibkr], as_of=now) == ibkr
+
+
+def test_option_mid_allows_zero_bid_when_ask_positive() -> None:
+    quote = Quote(
+        instrument=InstrumentId.option(
+            "SPX",
+            expiry="20260707",
+            strike=7500,
+            right="C",
+            trading_class="SPXW",
+        ),
+        provider=Provider.IBKR,
+        received_at=datetime(2026, 7, 7, 14, 0, tzinfo=timezone.utc),
+        quality=MarketDataQuality.LIVE,
+        bid=0.0,
+        ask=0.1,
+    )
+
+    assert quote.mid == pytest.approx(0.05)
+
+
+def test_index_mid_rejects_zero_bid() -> None:
+    quote = Quote(
+        instrument=InstrumentId.index("SPX"),
+        provider=Provider.IBKR,
+        received_at=datetime(2026, 7, 7, 14, 0, tzinfo=timezone.utc),
+        quality=MarketDataQuality.LIVE,
+        bid=0.0,
+        ask=0.1,
+    )
+
+    assert quote.mid is None
+
+
+def test_ibkr_model_iv_keeps_decimal_values_above_three() -> None:
+    received_at = datetime(2026, 7, 6, 13, 30, 5, tzinfo=timezone.utc)
+    row = SimpleNamespace(
+        label="option:SPXW:20260706:7500:C",
+        kind="option",
+        symbol="SPX",
+        market_data_type=1,
+        bid=10.0,
+        ask=10.5,
+        last=10.2,
+        market_price=10.25,
+        close=None,
+        bid_size=3,
+        ask_size=4,
+        last_size=1,
+        ticker_time=received_at.isoformat(),
+        stale=False,
+        model_iv=3.5,
+        delta=0.51,
+        gamma=0.004,
+        theta=-1.2,
+        vega=0.4,
+        und_price=7501.0,
+        volume=1250,
+        open_interest=4321,
+        error=None,
+    )
+
+    quote = quote_from_ibkr_row(row, received_at=received_at)
+
+    assert quote.greeks is not None
+    assert quote.greeks.implied_vol == pytest.approx(3.5)
+
+
+def test_schwab_percent_iv_normalization_and_missing_sentinel() -> None:
+    assert normalize_implied_vol_percent(350) == pytest.approx(3.5)
+    assert normalize_implied_vol_percent(-999) is None
+
+
+def test_quote_from_dict_preserves_normalized_implied_vol() -> None:
+    payload = {
+        "instrument": {
+            "symbol": "SPX",
+            "instrument_type": "option",
+            "expiry": "20260707",
+            "strike": 7500,
+            "right": "C",
+            "trading_class": "SPXW",
+        },
+        "provider": "ibkr",
+        "received_at": "2026-07-07T14:00:00+00:00",
+        "quality": "live",
+        "greeks": {"implied_vol": 3.5},
+    }
+
+    quote = quote_from_dict(payload)
+
+    assert quote.greeks is not None
+    assert quote.greeks.implied_vol == pytest.approx(3.5)
+    assert normalize_implied_vol(3.5) == pytest.approx(3.5)
+    assert greeks_from_dict({"implied_vol": 3.5}) is not None
+    assert greeks_from_dict({"implied_vol": 3.5}).implied_vol == pytest.approx(3.5)

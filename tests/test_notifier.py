@@ -894,7 +894,7 @@ def test_notifier_routes_iv_surface_alerts_through_review(tmp_path) -> None:
     payload = make_payload()
     payload["alerts"] = [
         {
-            "severity": "critical",
+            "severity": "high",
             "kind": "iv_term_gap",
             "instrument_id": "iv_surface:SPXW",
             "title": "0DTE vs next ATM IV gap 0.051",
@@ -984,3 +984,101 @@ def test_notifier_cooldown_ignores_title_when_dedup_group_matches(tmp_path) -> N
     )
     assert selected == []
     assert len(calls) == 1
+
+
+def _agent_failopen_payload(*, critical_title: str, include_critical: bool) -> dict[str, object]:
+    alerts: list[dict[str, object]] = [
+        {
+            "severity": "high",
+            "kind": "price_move_from_close",
+            "instrument_id": "index:SPX",
+            "title": "SPX up 31 bps from close",
+            "detail": "SPX moved from close.",
+        }
+    ]
+    if include_critical:
+        alerts.insert(
+            0,
+            {
+                "severity": "critical",
+                "kind": "option_gamma_regime",
+                "instrument_id": "option_map:SPXW",
+                "title": critical_title,
+                "detail": "Gamma regime shifted.",
+            },
+        )
+    return {
+        "as_of": "2026-07-07T03:15:00+08:00",
+        "window": {"name": "close_one_hour", "priority": "high"},
+        "human_focus_context": {},
+        "alerts": alerts,
+    }
+
+
+def test_notifier_failopen_sends_critical_when_agent_fails(tmp_path) -> None:
+    calls: list[list[str]] = []
+
+    def runner(command: list[str], timeout_seconds: float) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        if command[:2] == ["openclaw", "agent"]:
+            raise TimeoutError("agent timed out")
+        return subprocess.CompletedProcess(command, 0, stdout="{}", stderr="")
+
+    settings = replace(
+        make_settings(str(tmp_path / "notify-state.json")),
+        openclaw_enabled=False,
+        openclaw_agent_enabled=True,
+        openclaw_agent_deliver=True,
+        codex_enabled=False,
+        min_severity="high",
+    )
+    critical_title = "SPXW gamma flip critical"
+    payload = _agent_failopen_payload(
+        critical_title=critical_title,
+        include_critical=True,
+    )
+
+    result = notify_payload(
+        payload,
+        settings=settings,
+        runner=runner,
+        now=datetime(2026, 7, 7, 0, 0, tzinfo=timezone.utc),
+    )
+
+    message_calls = [cmd for cmd in calls if cmd[:3] == ["openclaw", "message", "send"]]
+    assert len(message_calls) == 1
+    assert critical_title in message_calls[0][message_calls[0].index("--message") + 1]
+    assert result.sent_count == 1
+
+
+def test_notifier_failopen_skips_when_only_high_alerts_and_agent_fails(tmp_path) -> None:
+    calls: list[list[str]] = []
+
+    def runner(command: list[str], timeout_seconds: float) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        if command[:2] == ["openclaw", "agent"]:
+            raise TimeoutError("agent timed out")
+        return subprocess.CompletedProcess(command, 0, stdout="{}", stderr="")
+
+    settings = replace(
+        make_settings(str(tmp_path / "notify-state.json")),
+        openclaw_enabled=False,
+        openclaw_agent_enabled=True,
+        openclaw_agent_deliver=True,
+        codex_enabled=False,
+    )
+    payload = _agent_failopen_payload(
+        critical_title="unused",
+        include_critical=False,
+    )
+
+    result = notify_payload(
+        payload,
+        settings=settings,
+        runner=runner,
+        now=datetime(2026, 7, 7, 0, 0, tzinfo=timezone.utc),
+    )
+
+    message_calls = [cmd for cmd in calls if cmd[:3] == ["openclaw", "message", "send"]]
+    assert message_calls == []
+    assert result.sent_count == 0

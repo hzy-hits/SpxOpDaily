@@ -3,14 +3,17 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from spx_spark.marketdata import (
     InstrumentId,
     MarketDataQuality,
     OptionGreeks,
+    OptionRight,
     Provider,
     Quote,
 )
-from spx_spark.options_map import build_options_map
+from spx_spark.options_map import build_gex_by_strike, build_options_map
 from spx_spark.storage import LatestState
 
 
@@ -124,6 +127,7 @@ def test_options_map_builds_atm_straddle_iv_skew_and_walls() -> None:
     assert options_map.underlier.price == 7500.0
     assert expiry.atm_strike == 7500
     assert expiry.atm_straddle_mid == 21.0
+    assert expiry.expected_move_points == pytest.approx(21.0 * 0.85)
     assert round(expiry.atm_iv or 0.0, 2) == 0.21
     assert expiry.put_skew_ratio is not None
     assert expiry.call_skew_ratio is not None
@@ -327,3 +331,34 @@ def test_options_map_excludes_delayed_quotes_from_iv_and_gex() -> None:
     assert expiry.atm_iv == 0.22
     assert expiry.call_wall is None
     assert expiry.put_wall == 7500
+
+
+def test_strike_gex_open_interest_defaults_to_zero_when_missing() -> None:
+    now = datetime(2026, 7, 6, 14, 0, tzinfo=timezone.utc)
+    call = make_option(
+        expiry="20260706",
+        strike=7500,
+        right="C",
+        mark=10.0,
+        iv=0.20,
+        gamma=0.003,
+        open_interest=None,
+        now=now,
+    )
+    put = make_option(
+        expiry="20260706",
+        strike=7500,
+        right="P",
+        mark=11.0,
+        iv=0.22,
+        gamma=0.003,
+        open_interest=1000,
+        now=now,
+    )
+    pairs = {7500.0: {OptionRight.CALL: call, OptionRight.PUT: put}}
+
+    rows = build_gex_by_strike(pairs, underlier=7500.0)
+
+    assert len(rows) == 1
+    assert rows[0].call_open_interest == 0.0
+    assert rows[0].put_open_interest == 1000.0

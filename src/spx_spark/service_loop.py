@@ -4,7 +4,6 @@ import argparse
 import contextlib
 import io
 import json
-import os
 import signal
 import subprocess
 import sys
@@ -18,7 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from spx_spark import alert_engine, iv_surface
-from spx_spark.config import load_dotenv
+from spx_spark.config import env_bool, env_int, load_dotenv
 from spx_spark.hyperliquid import collector as hyperliquid_collector
 from spx_spark.ibkr import collector as ibkr_collector
 
@@ -84,20 +83,6 @@ class ServiceTask:
     failure_interval_seconds: int | None = None
     conflict_probe_seconds: int | None = None
     next_run_monotonic: float = 0.0
-
-
-def env_bool(name: str, default: bool) -> bool:
-    raw = os.getenv(name)
-    if raw is None or not raw.strip():
-        return default
-    return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
-
-
-def env_int(name: str, default: int) -> int:
-    raw = os.getenv(name)
-    if raw is None or not raw.strip():
-        return default
-    return int(raw)
 
 
 @contextmanager

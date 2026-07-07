@@ -1055,9 +1055,11 @@ def run(argv: list[str] | None = None) -> int:
     if notification_settings.enabled:
         notification_result = notify_payload(payload, settings=notification_settings)
         payload["notification"] = notification_result.to_dict()
-    if not system_event_pending or (notification_result is not None and notification_result.sent_count > 0):
+    notified = notification_result is not None and notification_result.sent_count > 0
+    settled = not notification_settings.enabled or notified
+    if not system_event_pending or settled:
         persist_system_event_state(state)
-    if not movement_pending or (notification_result is not None and notification_result.sent_count > 0):
+    if not movement_pending or settled:
         persist_movement_state_snapshot(state)
     if args.json:
         print(json.dumps(payload, indent=2, sort_keys=True))

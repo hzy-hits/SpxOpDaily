@@ -26,7 +26,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any
+from typing import Any, TypeVar
 
 from spx_spark.config import (
     IbkrSettings,
@@ -65,6 +65,8 @@ from spx_spark.storage import LatestStateStore
 from spx_spark.runtime_mode import ibkr_allowed, load_override
 from spx_spark.sampling import OptionContractSpec, build_sampling_plan
 
+
+T = TypeVar("T")
 
 MAX_TRACKED_ERRORS = 200
 
@@ -329,6 +331,37 @@ def log_event(event: dict[str, object]) -> None:
     print(json.dumps(event, sort_keys=True), flush=True)
 
 
+def split_base_contracts(
+    contracts: list[tuple[str, str, Any]],
+    slow_poll_labels: tuple[str, ...],
+) -> tuple[list[tuple[str, str, Any]], list[tuple[str, str, Any]]]:
+    """Split contracts into persistent vs slow-poll lanes by label."""
+    slow_set = set(slow_poll_labels)
+    persistent: list[tuple[str, str, Any]] = []
+    slow: list[tuple[str, str, Any]] = []
+    for contract in contracts:
+        label = contract[0]
+        if label in slow_set:
+            slow.append(contract)
+        else:
+            persistent.append(contract)
+    return persistent, slow
+
+
+def chunked(items: list[T], size: int) -> list[list[T]]:
+    chunk_size = size if size > 0 else 1
+    return [items[index : index + chunk_size] for index in range(0, len(items), chunk_size)]
+
+
+def merge_slow_rows(
+    rows: list[VerifyRow],
+    slow_cache: dict[str, VerifyRow],
+    subscribed_labels: set[str],
+) -> list[VerifyRow]:
+    rows.extend(row for label, row in slow_cache.items() if label not in subscribed_labels)
+    return rows
+
+
 class StreamCollector:
     """Owns the long-lived IB connection and subscription lifecycle."""
 
@@ -364,6 +397,9 @@ class StreamCollector:
         self.farm_health = FarmHealthTracker(
             broken_restart_seconds=stream_settings.farm_broken_restart_seconds,
         )
+        self.slow_cache: dict[str, VerifyRow] = {}
+        self.last_slow_poll = 0.0
+        self.slow_contracts: list[tuple[str, str, Any]] = []
 
         ib.errorEvent += self._on_error
 
@@ -397,6 +433,11 @@ class StreamCollector:
 
     def subscribe_base(self) -> None:
         contracts = build_base_contracts(self.ibkr_settings)
+        persistent, slow = split_base_contracts(
+            contracts,
+            self.stream_settings.slow_poll_labels,
+        )
+        self.slow_contracts = slow
         log_event(
             {
                 "task": "ibkr_stream",
@@ -410,7 +451,7 @@ class StreamCollector:
 
         self.base_subs = qualify_and_subscribe(
             self.ib,
-            contracts,
+            persistent,
             qualify=self.ibkr_settings.qualify_contracts,
             on_progress=on_progress,
         )
@@ -427,7 +468,40 @@ class StreamCollector:
         )
         if subscribed == 0:
             raise RuntimeError(f"no base contracts subscribed ({failed} failed)")
+        self.poll_slow_contracts()
         self.ib.sleep(self.ibkr_settings.quote_wait_seconds)
+
+    def poll_slow_contracts(self) -> None:
+        if not self.slow_contracts:
+            return
+        polled = 0
+        for chunk in chunked(self.slow_contracts, self.stream_settings.slow_poll_chunk_size):
+            subs = qualify_and_subscribe(
+                self.ib,
+                chunk,
+                qualify=self.ibkr_settings.qualify_contracts,
+            )
+            self.ib.sleep(self.stream_settings.slow_poll_hold_seconds)
+            rows = snapshot_rows(
+                subs,
+                self.ibkr_settings.stale_after_seconds,
+                slow_index_stale_after_seconds=self.ibkr_settings.slow_index_stale_after_seconds,
+                slow_index_labels=frozenset(self.stream_settings.slow_poll_labels)
+                | self.ibkr_settings.slow_index_labels,
+            )
+            for row in rows:
+                self.slow_cache[row.label] = row
+            polled += len(rows)
+            cancel_subscriptions(self.ib, subs)
+        self.last_slow_poll = time.monotonic()
+        log_event(
+            {
+                "task": "ibkr_stream",
+                "event": "slow_poll_done",
+                "labels": len(self.slow_contracts),
+                "rows": polled,
+            }
+        )
 
     def ensure_option_plan(self, rows: list[VerifyRow]) -> None:
         if self.skip_options:
@@ -522,6 +596,7 @@ class StreamCollector:
             slow_index_stale_after_seconds=self.ibkr_settings.slow_index_stale_after_seconds,
             slow_index_labels=self.ibkr_settings.slow_index_labels,
         )
+        merge_slow_rows(rows, self.slow_cache, set(subscriptions))
         snapshot = snapshot_from_rows(
             rows,
             received_at=received_at,
@@ -557,6 +632,7 @@ class StreamCollector:
         self.spy_subs = {}
         self.option_plan = None
         self.rotation_index = 0
+        self.slow_cache = {}
         if self.ib.isConnected():
             self.ib.disconnect()
 
@@ -650,6 +726,12 @@ class StreamRuntime:
     def session_loop(self) -> None:
         while not self.expired():
             self.collector.ib.sleep(self.stream_settings.flush_interval_seconds)
+            if (
+                self.collector.slow_contracts
+                and time.monotonic() - self.collector.last_slow_poll
+                >= self.stream_settings.slow_poll_interval_seconds
+            ):
+                self.collector.poll_slow_contracts()
             event = self.collector.flush()
             log_event(event)
 

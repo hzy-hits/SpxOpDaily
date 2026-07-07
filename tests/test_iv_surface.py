@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 from spx_spark.config import IvSurfaceSettings
@@ -20,6 +21,7 @@ def make_settings(tmp_path) -> IvSurfaceSettings:
         latest_surface_path=str(tmp_path / "data" / "latest" / "iv_surface.json"),
         raw_file_name="snapshots.jsonl",
         wide_quote_spread_bps=250.0,
+        diff_max_gap_seconds=600.0,
     )
 
 
@@ -154,3 +156,47 @@ def test_iv_surface_summarizes_one_hour_history(tmp_path) -> None:
     expiry = summary["expiries"][0]
     assert expiry["expiry"] == "20260706"
     assert round(expiry["atm_iv_change_1h"], 3) == 0.06
+
+
+def test_iv_surface_skips_5m_diff_when_previous_snapshot_too_old() -> None:
+    now = datetime(2026, 7, 6, 14, 0, tzinfo=timezone.utc)
+    settings = IvSurfaceSettings(
+        data_root="data",
+        latest_surface_path="data/latest/iv_surface.json",
+        raw_file_name="snapshots.jsonl",
+        wide_quote_spread_bps=250.0,
+        diff_max_gap_seconds=600.0,
+    )
+    old_state = make_state(
+        make_option(expiry="20260706", strike=7500, right="C", mark=10, iv=0.20, now=now),
+        make_option(expiry="20260706", strike=7500, right="P", mark=11, iv=0.22, now=now),
+        now=now,
+    )
+    previous = build_iv_surface_snapshot(old_state, settings=settings)
+    previous = replace(
+        previous,
+        as_of=now - timedelta(hours=2),
+    )
+    current_state = make_state(
+        make_option(expiry="20260706", strike=7500, right="C", mark=12, iv=0.25, now=now),
+        make_option(expiry="20260706", strike=7500, right="P", mark=13, iv=0.27, now=now),
+        now=now,
+    )
+
+    stale_gap_snapshot = build_iv_surface_snapshot(
+        current_state,
+        settings=settings,
+        previous=previous,
+    )
+    front = stale_gap_snapshot.expiries[0]
+    assert front.atm_iv_jump_5m is None
+    assert front.iv_surface_shift_5m is None
+
+    recent_previous = replace(previous, as_of=now - timedelta(minutes=5))
+    fresh_gap_snapshot = build_iv_surface_snapshot(
+        current_state,
+        settings=settings,
+        previous=recent_previous,
+    )
+    fresh_front = fresh_gap_snapshot.expiries[0]
+    assert fresh_front.atm_iv_jump_5m is not None

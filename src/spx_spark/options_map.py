@@ -338,8 +338,8 @@ def build_gex_by_strike(
                 put_gex=put_value,
                 net_gex=call_value + put_value,
                 abs_gex=abs(call_value) + abs(put_value),
-                call_open_interest=finite_float(call.open_interest) if call else 0.0,
-                put_open_interest=finite_float(put.open_interest) if put else 0.0,
+                call_open_interest=(finite_float(call.open_interest) or 0.0) if call else 0.0,
+                put_open_interest=(finite_float(put.open_interest) or 0.0) if put else 0.0,
             )
         )
     return rows
@@ -576,7 +576,11 @@ def build_expiry_map(
     if underlier_mismatch:
         warnings.append("underlier mismatch; wall distance and gamma alerts suppressed")
 
-    expected_move_pct = straddle / underlier if straddle is not None and underlier else None
+    # ATM straddle ≈ 1.25σ; industry 1σ approximation ≈ 0.85×straddle.
+    expected_move = straddle * 0.85 if straddle is not None else None
+    expected_move_pct = (
+        expected_move / underlier if expected_move is not None and underlier else None
+    )
     gamma_state = classify_gamma_state(
         net_gamma_ratio=net_gamma_ratio,
         zero_gamma_distance_points=zero_distance,
@@ -624,7 +628,7 @@ def build_expiry_map(
         atm_call_mid=atm_call_mid,
         atm_put_mid=atm_put_mid,
         atm_straddle_mid=straddle,
-        expected_move_points=straddle,
+        expected_move_points=expected_move,
         expected_move_pct=expected_move_pct,
         atm_iv=atm_iv,
         put_wing_iv=put_wing_iv,
