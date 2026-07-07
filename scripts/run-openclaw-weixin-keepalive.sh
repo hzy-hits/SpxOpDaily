@@ -18,6 +18,17 @@ if [[ "$enabled" == "false" || "$enabled" == "0" ]]; then
   exit 0
 fi
 
+# The OpenClaw agent stores a static copy of the OpenAI codex access token
+# that expires after ~10 days and cannot self-refresh (observed 401s on
+# 2026-07-07). Sync it from the codex CLI's refreshable copy; restart the
+# gateway on change to clear its provider auth circuit breaker.
+sync_out="$(python3 scripts/sync-openclaw-codex-token.py 2>/dev/null || true)"
+if echo "$sync_out" | jq -e '.updated == true' >/dev/null 2>&1; then
+  echo "OpenClaw codex token refreshed from ~/.codex/auth.json; restarting gateway" >&2
+  systemctl --user restart openclaw-gateway || true
+  sleep 5
+fi
+
 channel="${ALERT_NOTIFY_OPENCLAW_CHANNEL:-openclaw-weixin}"
 account="${ALERT_NOTIFY_OPENCLAW_ACCOUNT:-}"
 target="${ALERT_NOTIFY_OPENCLAW_TARGET:-}"
