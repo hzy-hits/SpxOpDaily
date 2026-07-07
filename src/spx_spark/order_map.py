@@ -533,6 +533,18 @@ def build_order_payload(state: LatestState, *, now: datetime | None = None) -> d
     candidates = build_candidates(state, options_map, warnings, now=now)
     beijing = now.astimezone(SHANGHAI_TZ)
 
+    # Day move vs expected move: the writer's anti-FOMO anchor. "The drop has
+    # already consumed 120% of today's EM" is the number that talks a reader
+    # out of shorting the bottom of a slide or panic-selling into a wall band.
+    spx_quote = state.best_quote("index:SPX")
+    prior_close = finite_float(spx_quote.close) if spx_quote is not None else None
+    day_move_points = (
+        round(spot - prior_close, 1) if spot is not None and prior_close else None
+    )
+    em_used_fraction = None
+    if day_move_points is not None and expected_move_points and expected_move_points > 0:
+        em_used_fraction = round(abs(day_move_points) / expected_move_points, 2)
+
     return {
         "kind": "order_map",
         "as_of": state.as_of.isoformat(),
@@ -550,6 +562,11 @@ def build_order_payload(state: LatestState, *, now: datetime | None = None) -> d
         "flip_zone": flip_zone,
         "wall_ladder": _wall_ladder_payload(state, options_map, spot),
         "wall_method": front.wall_method if front is not None else None,
+        "day_move": {
+            "prior_close": prior_close,
+            "points": day_move_points,
+            "em_used_fraction": em_used_fraction,
+        },
         "vol_context": {
             "vix": _index_value(state, "index:VIX"),
             "vix1d": _index_value(state, "index:VIX1D"),
@@ -604,6 +621,16 @@ def build_order_payload_with_retry(
         if attempt < attempts - 1:
             time_module.sleep(delay_seconds)
     return payload
+
+
+def _day_move_line(payload: dict[str, Any]) -> str | None:
+    day_move = payload.get("day_move") if isinstance(payload.get("day_move"), dict) else {}
+    points = day_move.get("points")
+    if points is None:
+        return None
+    em_used = day_move.get("em_used_fraction")
+    em_text = f",已用当日预期波幅的 {em_used:.0%}" if isinstance(em_used, (int, float)) else ""
+    return f"较昨收: {points:+.1f} 点{em_text}"
 
 
 def _wall_ladder_lines(payload: dict[str, Any]) -> list[str]:
@@ -674,6 +701,9 @@ def render_template(payload: dict[str, Any]) -> str:
             f"flip zone {flip_lo}-{flip_hi}"
         ),
     ]
+    day_move_line = _day_move_line(payload)
+    if day_move_line:
+        lines.append(day_move_line)
     ladder_lines = _wall_ladder_lines(payload)
     lines.extend(ladder_lines)
 
@@ -747,6 +777,7 @@ def build_order_prompt(
             "- 给赔率判断：把触达概率、到位预估价、现价放在一起，说这笔单在赌一次多大概率的什么事件、期权价从现价到预估价的变化幅度是否配得上这个概率；",
             "- order_style=stop_trigger 的必须提醒：预估价高于现价，提前挂被动限价会立即按市价成交，应等破位确认后用条件单。",
             "最后 2-3 行 if/then 剧本：开盘前参考价/ES 走到哪些具体位置时，哪张挂单的赔率变差该撤或改价，哪个剧本作废。",
+            "反 FOMO 提醒：若 day_move.em_used_fraction 已 ≥ 0.7，须点明日内已走完预期波幅的多少、顺方向追单赔率差；挂单纪律就是等价格来找你，不去半路追它。",
             "previous_push 是上一条推送的正文；若关键位相对上一条有实质变化，须在地形结论处明确说『剧本有变』并指出哪张单要改；无实质变化则不必提。",
             "数据 degraded 时如实说明，不给方向判断。",
             "previous_push:" + previous_push_json(previous_push),
@@ -809,9 +840,11 @@ REFRESH_COOLDOWN_SECONDS_DEFAULT = 3600.0
 MATERIAL_LEVEL_MOVE_POINTS = 5.0
 MATERIAL_EM_REL_CHANGE = 0.20
 
-# --- pre-open status report: fixed 30-minute cadence (Beijing 14:15 -> US open) ---
+# --- status report: fixed 30-minute cadence (Beijing 14:15 -> next-day 02:00,
+# i.e. through pre-open research and the first ~4.5 hours of the US session) ---
 
 STATUS_WINDOW_START = time(14, 15)
+STATUS_WINDOW_END_EARLY = time(2, 0)
 US_OPEN_ET = time(9, 30)
 
 
@@ -882,13 +915,17 @@ def within_refresh_window(now_utc: datetime) -> bool:
 
 
 def within_status_window(now_utc: datetime) -> bool:
-    """Beijing 14:15 until US market open (9:30 ET)."""
+    """Beijing 14:15 through next-day 02:00 (covers pre-open + early US session).
+
+    The after-midnight leg belongs to the previous day's session, so it runs
+    on Tue-Sat local mornings (Sat 00:xx = Friday's US session).
+    """
     local = now_utc.astimezone(SHANGHAI_TZ)
-    if local.weekday() >= 5:
-        return False
-    if local.time() < STATUS_WINDOW_START:
-        return False
-    return now_utc.astimezone(NY_TZ).time() < US_OPEN_ET
+    if local.time() >= STATUS_WINDOW_START:
+        return local.weekday() < 5
+    if local.time() < STATUS_WINDOW_END_EARLY:
+        return local.weekday() in (1, 2, 3, 4, 5)
+    return False
 
 
 def minutes_to_open(now_utc: datetime) -> int | None:
@@ -985,6 +1022,7 @@ def render_status_template(
             f"预期波幅 ±{_dash(payload.get('expected_move_points'))} 点"
         ),
         f"关键位: {_level_probs_line(payload)}",
+        *( [line] if (line := _day_move_line(payload)) else [] ),
         *_wall_ladder_lines(payload),
         (
             f"vol: VIX {_dash(vol.get('vix'))}, VIX1D {_dash(vol.get('vix1d'))}, "
@@ -1015,7 +1053,11 @@ def build_status_prompt(
             "第 2-4 行位置读数：参考价此刻在 flip zone/zero gamma/两侧墙位阶梯(wall_ladder,各 4 档)构成的地形里的具体位置(距各关键位多少点)，以及这个位置对开盘意味着什么(偏 pin 还是易加速)。相邻 put 墙 OI 接近时说成支撑带并给出第二、第三档位，不要只报一个点。",
             "第 5-6 行赔率读数：三张挂单此刻的触达概率各是多少、和上一条相比谁在改善谁在恶化(引用百分比变化)，现在哪张单性价比最高。",
             "1 行 vol 面：VIX1D/VIX 水平说明隔夜与今日 vol 定价贵还是便宜，SKEW 有无异常。",
-            "然后 2-3 行 if/then，必须覆盖上下两个方向：开盘前参考价若上行到哪个位置、下行到哪个位置，分别哪张挂单赔率变差该撤/改价、哪个剧本被激活。",
+            "然后 2-3 行 if/then，必须覆盖上下两个方向：参考价若上行到哪个位置、下行到哪个位置，分别哪张挂单赔率变差该撤/改价、哪个剧本被激活。",
+            "反 FOMO/反恐慌规则(开盘后尤其重要，违反即失职)：",
+            "(a) 参考价在两侧墙位中间地带、距任何计划位都远时，必须明确写『中间地带，此处不追单，计划位在 XX/XX』；",
+            "(b) day_move.em_used_fraction ≥ 0.7 时必须写『日内已走完预期波幅的 X%，此刻顺方向追单赔率差，离场/进场都等计划位』——下跌半山腰追 put、上涨半途追 call 都属于这条要拦的行为；",
+            "(c) 价格已进入 put 墙阶梯支撑带时必须写『这里是计划中的接多区不是恐慌区，防守动作只在跌破带下沿 XX 之后执行』；急拉进 call 墙带时对称：『阻力带内不追多，回落不破 XX 才算多头剧本』。",
             "最后 1 行：到下一条推送(30 分钟后)之间最值得盯的一个量。",
             "剧本维持时照样给完整读数，不要因为『没变』就缩成两三行；但不要硬编不存在的变化，没变就说数字平稳。",
             "数据 degraded 时如实说明，不给方向判断。",

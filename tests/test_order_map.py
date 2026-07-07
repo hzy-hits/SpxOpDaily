@@ -789,10 +789,22 @@ def test_within_status_window_and_minutes_to_open() -> None:
     # 14:00 Beijing: before the 14:15 start (baseline order map slot).
     beijing_1400 = datetime(2026, 7, 7, 6, 0, tzinfo=timezone.utc)
     assert within_status_window(beijing_1400) is False
-    # 21:30 Beijing = 9:30 ET: market open, status stops.
+    # 21:30 Beijing = 9:30 ET: market open, status keeps running.
     beijing_2130 = datetime(2026, 7, 7, 13, 30, tzinfo=timezone.utc)
-    assert within_status_window(beijing_2130) is False
+    assert within_status_window(beijing_2130) is True
     assert minutes_to_open(beijing_2130) is None
+    # 01:30 Beijing Wednesday = 13:30 ET Tuesday: still Tuesday's session.
+    beijing_0130 = datetime(2026, 7, 7, 17, 30, tzinfo=timezone.utc)
+    assert within_status_window(beijing_0130) is True
+    # 02:30 Beijing: past the 02:00 cutoff.
+    beijing_0230 = datetime(2026, 7, 7, 18, 30, tzinfo=timezone.utc)
+    assert within_status_window(beijing_0230) is False
+    # Saturday 01:30 Beijing = Friday 13:30 ET: Friday's session, allowed.
+    saturday_0130 = datetime(2026, 7, 10, 17, 30, tzinfo=timezone.utc)
+    assert within_status_window(saturday_0130) is True
+    # Monday 01:30 Beijing = Sunday ET: no session.
+    monday_0130 = datetime(2026, 7, 5, 17, 30, tzinfo=timezone.utc)
+    assert within_status_window(monday_0130) is False
     saturday = datetime(2026, 7, 11, 6, 30, tzinfo=timezone.utc)
     assert within_status_window(saturday) is False
 

@@ -1,8 +1,9 @@
 [Unit]
-Description=Pre-open market status report every 30 minutes (code gates to Beijing 14:15 -> US open)
+Description=Market status report every 30 minutes (code gates to Beijing 14:15 -> next-day 02:00)
 
 [Timer]
-OnCalendar=Mon..Fri *-*-* 14..22:00,30:00 Asia/Shanghai
+OnCalendar=Mon..Fri *-*-* 14..23:00,30:00 Asia/Shanghai
+OnCalendar=Tue..Sat *-*-* 00..01:00,30:00 Asia/Shanghai
 Persistent=false
 
 [Install]
