@@ -602,6 +602,16 @@ class NotificationSettings:
     codex_timeout_seconds: float
     codex_output_max_chars: int
     codex_require_delivery_cue: bool
+    deepseek_enabled: bool = False
+    deepseek_deliver: bool = True
+    deepseek_model: str = "deepseek-v4-flash"
+    deepseek_url: str = "https://api.deepseek.com/v1/chat/completions"
+    deepseek_env_file: str = "/home/ubuntu/.hermes/.env"
+    deepseek_timeout_seconds: float = 30.0
+    deepseek_max_tokens: int = 1800
+    deepseek_output_max_chars: int = 1800
+    deepseek_temperature: float = 0.1
+    review_min_time_sensitive_score: float = 30.0
     bark_enabled: bool = False
     bark_url: str = ""
     bark_group: str = "spx-spark"
@@ -658,6 +668,25 @@ class NotificationSettings:
             codex_timeout_seconds=env_float("ALERT_NOTIFY_CODEX_TIMEOUT_SECONDS", 90.0),
             codex_output_max_chars=env_int("ALERT_NOTIFY_CODEX_OUTPUT_MAX_CHARS", 1800),
             codex_require_delivery_cue=env_bool("ALERT_NOTIFY_CODEX_REQUIRE_DELIVERY_CUE", True),
+            deepseek_enabled=env_bool("ALERT_NOTIFY_DEEPSEEK_ENABLED", True),
+            deepseek_deliver=env_bool("ALERT_NOTIFY_DEEPSEEK_DELIVER", True),
+            deepseek_model=env_str("ALERT_NOTIFY_DEEPSEEK_MODEL", "deepseek-v4-flash"),
+            deepseek_url=env_str(
+                "ALERT_NOTIFY_DEEPSEEK_URL",
+                "https://api.deepseek.com/v1/chat/completions",
+            ),
+            deepseek_env_file=env_str(
+                "ALERT_NOTIFY_DEEPSEEK_ENV_FILE",
+                "/home/ubuntu/.hermes/.env",
+            ),
+            deepseek_timeout_seconds=env_float("ALERT_NOTIFY_DEEPSEEK_TIMEOUT_SECONDS", 30.0),
+            deepseek_max_tokens=env_int("ALERT_NOTIFY_DEEPSEEK_MAX_TOKENS", 1800),
+            deepseek_output_max_chars=env_int("ALERT_NOTIFY_DEEPSEEK_OUTPUT_MAX_CHARS", 1800),
+            deepseek_temperature=env_float("ALERT_NOTIFY_DEEPSEEK_TEMPERATURE", 0.1),
+            review_min_time_sensitive_score=env_float(
+                "ALERT_REVIEW_MIN_TIME_SENSITIVE_SCORE",
+                30.0,
+            ),
             bark_enabled=env_bool("ALERT_NOTIFY_BARK_ENABLED", False),
             bark_url=env_str("ALERT_NOTIFY_BARK_URL", "").rstrip("/"),
             bark_group=env_str("ALERT_NOTIFY_BARK_GROUP", "spx-spark"),

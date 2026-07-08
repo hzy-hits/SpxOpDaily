@@ -1,6 +1,7 @@
 """通知管道:选取→审阅→gate→双通道投递。"""
 
 from spx_spark.notifier.missed_queue import append_missed, flush_missed
+from spx_spark.notifier.deepseek import run_deepseek_reviewer
 from spx_spark.notifier.model import (
     CommandRunner,
     NotificationResult,
@@ -17,6 +18,8 @@ from spx_spark.notifier.policy import (
     is_human_visible_alert,
     is_market_signal_alert,
     severity_value,
+    split_time_sensitive_review_candidates,
+    strong_time_sensitive_score,
 )
 from spx_spark.notifier.prompts import build_codex_prompt, format_alert_message
 from spx_spark.notifier.sinks import (
@@ -52,10 +55,13 @@ __all__ = [
     "notify_payload",
     "openclaw_delivery_error",
     "run_codex_exec",
+    "run_deepseek_reviewer",
     "run_openclaw_agent",
     "select_alerts_for_notification",
     "send_bark_friend_message",
     "send_bark_message",
     "send_openclaw_message",
     "severity_value",
+    "split_time_sensitive_review_candidates",
+    "strong_time_sensitive_score",
 ]

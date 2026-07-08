@@ -16,6 +16,7 @@ from spx_spark.notifier import (
     run_openclaw_agent,
     select_alerts_for_notification,
     send_bark_message,
+    SinkResult,
 )
 
 
@@ -295,6 +296,143 @@ def test_notifier_uses_openclaw_agent_single_track_for_review_candidates(tmp_pat
     assert calls[0][calls[0].index("--session-key") + 1] == "spx-spark-alerts"
     assert calls[1][:3] == ["openclaw", "message", "send"]
     assert calls[1][calls[1].index("--message") + 1] == "需要看盘: SPX alert confirmed"
+
+
+def test_notifier_prefers_deepseek_before_openclaw_agent_or_codex(tmp_path, monkeypatch) -> None:
+    calls: list[list[str]] = []
+
+    def fake_deepseek(settings: NotificationSettings, prompt: str) -> tuple[SinkResult, str]:
+        assert "human_focus_context" in prompt
+        return (
+            SinkResult(sink="deepseek_reviewer", attempted=True, ok=True),
+            "需要看盘: SPX alert confirmed",
+        )
+
+    monkeypatch.setattr("spx_spark.notifier.pipeline.run_deepseek_reviewer", fake_deepseek)
+
+    def runner(command: list[str], timeout_seconds: float) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout="{}", stderr="")
+
+    settings = replace(
+        make_settings(str(tmp_path / "notify-state.json")),
+        openclaw_enabled=False,
+        deepseek_enabled=True,
+        deepseek_deliver=True,
+        openclaw_agent_enabled=True,
+        openclaw_agent_deliver=True,
+        codex_enabled=True,
+    )
+
+    result = notify_payload(
+        make_payload(),
+        settings=settings,
+        runner=runner,
+        now=datetime(2026, 7, 7, 0, 0, tzinfo=timezone.utc),
+    )
+
+    assert result.sent_count == 1
+    assert [sink.sink for sink in result.sinks] == ["deepseek_reviewer", "openclaw_message"]
+    assert calls and calls[0][:3] == ["openclaw", "message", "send"]
+    assert all(call[:2] != ["openclaw", "agent"] for call in calls)
+    assert all(call[:2] != ["codex", "exec"] for call in calls)
+
+
+def test_notifier_prefilter_marks_weak_review_alert_without_llm(tmp_path, monkeypatch) -> None:
+    def fail_deepseek(settings: NotificationSettings, prompt: str) -> tuple[SinkResult, str]:
+        raise AssertionError("weak alert should not enter LLM review")
+
+    monkeypatch.setattr("spx_spark.notifier.pipeline.run_deepseek_reviewer", fail_deepseek)
+
+    payload = make_payload()
+    payload["alerts"] = [
+        {
+            "severity": "high",
+            "kind": "required_data_degraded",
+            "instrument_id": "index:SPX",
+            "title": "SPX data degraded",
+            "detail": "Operational data issue.",
+        }
+    ]
+    settings = replace(
+        make_settings(str(tmp_path / "notify-state.json")),
+        openclaw_enabled=False,
+        deepseek_enabled=True,
+        openclaw_agent_enabled=False,
+        codex_enabled=False,
+    )
+    now = datetime(2026, 7, 7, 0, 0, tzinfo=timezone.utc)
+
+    first = notify_payload(payload, settings=settings, now=now)
+
+    assert first.selected_count == 1
+    assert first.sent_count == 0
+    assert [sink.sink for sink in first.sinks] == ["review_prefilter"]
+
+    second = notify_payload(
+        payload,
+        settings=settings,
+        now=now + timedelta(seconds=60),
+    )
+    assert second.selected_count == 0
+
+
+def test_notifier_deepseek_rate_limit_cooldowns_noncritical_without_fallback(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    def fake_deepseek(settings: NotificationSettings, prompt: str) -> tuple[SinkResult, str]:
+        return (
+            SinkResult(
+                sink="deepseek_reviewer",
+                attempted=True,
+                ok=False,
+                exit_code=429,
+                error="429 usage limit reached",
+            ),
+            "",
+        )
+
+    monkeypatch.setattr("spx_spark.notifier.pipeline.run_deepseek_reviewer", fake_deepseek)
+
+    def runner(command: list[str], timeout_seconds: float) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout="{}", stderr="")
+
+    settings = replace(
+        make_settings(str(tmp_path / "notify-state.json")),
+        openclaw_enabled=False,
+        deepseek_enabled=True,
+        openclaw_agent_enabled=True,
+        openclaw_agent_deliver=True,
+        codex_enabled=True,
+    )
+    now = datetime(2026, 7, 7, 0, 0, tzinfo=timezone.utc)
+
+    first = notify_payload(
+        make_payload(),
+        settings=settings,
+        runner=runner,
+        now=now,
+    )
+
+    assert first.selected_count == 1
+    assert first.sent_count == 0
+    assert [sink.sink for sink in first.sinks] == [
+        "deepseek_reviewer",
+        "deepseek_reviewer_rate_limit_cooldown",
+    ]
+    assert calls == []
+
+    second = notify_payload(
+        make_payload(),
+        settings=settings,
+        runner=runner,
+        now=now + timedelta(seconds=60),
+    )
+    assert second.selected_count == 0
 
 
 def test_send_bark_message_posts_title_body_and_group(tmp_path) -> None:

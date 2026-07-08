@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from spx_spark.config import NotificationSettings
+from spx_spark.notifier.deepseek import deepseek_usage_limited, run_deepseek_reviewer
 from spx_spark.notifier.llm_writer import load_previous_push, record_push
 from spx_spark.notifier.missed_queue import append_missed, flush_missed
 from spx_spark.notifier.model import CommandRunner, NotificationResult, SinkResult, default_runner
@@ -11,6 +12,7 @@ from spx_spark.notifier.policy import (
     codex_message_requests_delivery,
     codex_message_respects_human_scope,
     direct_push_alerts,
+    split_time_sensitive_review_candidates,
 )
 from spx_spark.notifier.prompts import build_codex_prompt, format_alert_message
 from spx_spark.notifier.sinks import (
@@ -64,6 +66,129 @@ def _failopen_critical_alerts(
         alerts_marked_sent.extend(critical_alerts)
 
 
+def _mark_noncritical_reviewed_after_model_limit(
+    review_candidates: list[dict[str, object]],
+    *,
+    alerts_marked_sent: list[dict[str, object]],
+    sinks: list[SinkResult],
+    sink_name: str,
+) -> None:
+    noncritical = [
+        alert
+        for alert in review_candidates
+        if str(alert.get("severity", "")).lower() != "critical"
+    ]
+    if not noncritical:
+        return
+    alerts_marked_sent.extend(noncritical)
+    sinks.append(
+        SinkResult(
+            sink=f"{sink_name}_rate_limit_cooldown",
+            attempted=True,
+            ok=True,
+            error="model rate/usage limit; non-critical alerts marked reviewed",
+        )
+    )
+
+
+def _deliver_review_message(
+    *,
+    message: str,
+    review_candidates: list[dict[str, object]],
+    settings: NotificationSettings,
+    runner: CommandRunner,
+    now_utc: datetime,
+    alerts_marked_sent: list[dict[str, object]],
+    sinks: list[SinkResult],
+    reviewer_name: str,
+    delivery_kind: str,
+    deliver: bool,
+) -> bool:
+    should_deliver = (
+        codex_message_requests_delivery(message) if settings.codex_require_delivery_cue else True
+    )
+    scope_ok = codex_message_respects_human_scope(message)
+    if should_deliver and scope_ok:
+        if deliver:
+            delivery = send_openclaw_message(settings, message, runner=runner)
+            sinks.append(delivery)
+            if not delivery.ok:
+                append_missed(
+                    settings.missed_queue_path,
+                    message,
+                    kind=delivery_kind,
+                    at=now_utc,
+                )
+            delivered_ok = delivery.ok
+            if settings.bark_enabled:
+                bark_result = send_bark_message(
+                    settings,
+                    bark_title_for_alerts(review_candidates),
+                    message,
+                )
+                sinks.append(bark_result)
+                delivered_ok = delivered_ok or bark_result.ok
+            if settings.bark_friend_enabled and alerts_are_market_signals(review_candidates):
+                sinks.append(
+                    send_bark_friend_message(
+                        settings,
+                        bark_title_for_alerts(review_candidates),
+                        message,
+                    )
+                )
+            if delivered_ok:
+                alerts_marked_sent.extend(review_candidates)
+                record_push("intraday_alert", message, at=now_utc.isoformat())
+        else:
+            alerts_marked_sent.extend(review_candidates)
+        return True
+
+    gate = "scope_gate" if should_deliver else "delivery_gate"
+    sinks.append(
+        SinkResult(
+            sink=f"{reviewer_name}_{gate}",
+            attempted=True,
+            ok=True,
+            error=(
+                f"{reviewer_name} output mentioned non-focus context"
+                if should_deliver
+                else f"{reviewer_name} output did not request delivery"
+            ),
+        )
+    )
+    alerts_marked_sent.extend(review_candidates)
+    return True
+
+
+def _handle_reviewer_failure(
+    *,
+    result: SinkResult,
+    payload: dict[str, object],
+    review_candidates: list[dict[str, object]],
+    settings: NotificationSettings,
+    runner: CommandRunner,
+    now_utc: datetime,
+    alerts_marked_sent: list[dict[str, object]],
+    sinks: list[SinkResult],
+) -> None:
+    if deepseek_usage_limited(result.error):
+        _mark_noncritical_reviewed_after_model_limit(
+            review_candidates,
+            alerts_marked_sent=alerts_marked_sent,
+            sinks=sinks,
+            sink_name=result.sink,
+        )
+    _failopen_critical_alerts(
+        payload,
+        review_candidates,
+        settings=settings,
+        runner=runner,
+        now_utc=now_utc,
+        alerts_marked_sent=alerts_marked_sent,
+        sinks=sinks,
+    )
+
+
 def notify_payload(
     payload: dict[str, object],
     *,
@@ -95,6 +220,7 @@ def notify_payload(
     now_utc = now or datetime.now(tz=timezone.utc)
     if (
         settings.openclaw_enabled
+        or settings.deepseek_enabled
         or settings.openclaw_agent_enabled
         or settings.codex_enabled
     ):
@@ -145,6 +271,59 @@ def notify_payload(
             delivered_ok = delivered_ok or bark_result.ok
         if delivered_ok:
             alerts_marked_sent = list(bypass_alerts)
+
+    if review_candidates:
+        strong_review_candidates, weak_review_candidates = split_time_sensitive_review_candidates(
+            payload,
+            review_candidates,
+            min_score=settings.review_min_time_sensitive_score,
+        )
+        if weak_review_candidates:
+            alerts_marked_sent.extend(weak_review_candidates)
+            sinks.append(
+                SinkResult(
+                    sink="review_prefilter",
+                    attempted=True,
+                    ok=True,
+                    error="weak/non-time-sensitive alerts marked reviewed without LLM",
+                )
+            )
+        review_candidates = strong_review_candidates
+
+    if settings.deepseek_enabled and review_candidates:
+        deepseek_result, deepseek_message = run_deepseek_reviewer(
+            settings,
+            build_codex_prompt(payload, review_candidates, previous_push=load_previous_push()),
+        )
+        sinks.append(deepseek_result)
+        if deepseek_result.ok:
+            _deliver_review_message(
+                message=deepseek_message,
+                review_candidates=review_candidates,
+                settings=settings,
+                runner=runner,
+                now_utc=now_utc,
+                alerts_marked_sent=alerts_marked_sent,
+                sinks=sinks,
+                reviewer_name="deepseek",
+                delivery_kind="deepseek",
+                deliver=settings.deepseek_deliver,
+            )
+            review_candidates = []
+        elif not deepseek_result.ok:
+            usage_limited = deepseek_usage_limited(deepseek_result.error)
+            _handle_reviewer_failure(
+                result=deepseek_result,
+                payload=payload,
+                review_candidates=review_candidates,
+                settings=settings,
+                runner=runner,
+                now_utc=now_utc,
+                alerts_marked_sent=alerts_marked_sent,
+                sinks=sinks,
+            )
+            if usage_limited:
+                review_candidates = []
     if settings.openclaw_agent_enabled and review_candidates:
         agent_result, agent_message = run_openclaw_agent(
             settings,
@@ -153,76 +332,23 @@ def notify_payload(
         )
         sinks.append(agent_result)
         if agent_result.ok:
-            should_deliver = (
-                codex_message_requests_delivery(agent_message)
-                if settings.codex_require_delivery_cue
-                else True
+            _deliver_review_message(
+                message=agent_message,
+                review_candidates=review_candidates,
+                settings=settings,
+                runner=runner,
+                now_utc=now_utc,
+                alerts_marked_sent=alerts_marked_sent,
+                sinks=sinks,
+                reviewer_name="openclaw_agent",
+                delivery_kind="agent",
+                deliver=settings.openclaw_agent_deliver,
             )
-            scope_ok = codex_message_respects_human_scope(agent_message)
-            if should_deliver and scope_ok:
-                if settings.openclaw_agent_deliver:
-                    agent_delivery = send_openclaw_message(settings, agent_message, runner=runner)
-                    sinks.append(agent_delivery)
-                    if not agent_delivery.ok:
-                        append_missed(
-                            settings.missed_queue_path,
-                            agent_message,
-                            kind="agent",
-                            at=now_utc,
-                        )
-                    delivered_ok = agent_delivery.ok
-                    if settings.bark_enabled:
-                        bark_result = send_bark_message(
-                            settings,
-                            bark_title_for_alerts(review_candidates),
-                            agent_message,
-                        )
-                        sinks.append(bark_result)
-                        delivered_ok = delivered_ok or bark_result.ok
-                    if settings.bark_friend_enabled and alerts_are_market_signals(review_candidates):
-                        sinks.append(
-                            send_bark_friend_message(
-                                settings,
-                                bark_title_for_alerts(review_candidates),
-                                agent_message,
-                            )
-                        )
-                    if delivered_ok:
-                        alerts_marked_sent.extend(review_candidates)
-                        # Feed continuity: the next writer (status report / next
-                        # intraday alert) sees this as previous_push, so it can
-                        # detect repetition and script flips.
-                        record_push("intraday_alert", agent_message, at=now_utc.isoformat())
-                else:
-                    # Analysis-only mode: still start the cooldown so the same
-                    # bucket is not re-reviewed every cycle.
-                    alerts_marked_sent.extend(review_candidates)
-            elif should_deliver and not scope_ok:
-                sinks.append(
-                    SinkResult(
-                        sink="openclaw_agent_scope_gate",
-                        attempted=True,
-                        ok=True,
-                        error="openclaw agent output mentioned non-focus context",
-                    )
-                )
-                # The review verdict stands for this bucket; don't re-run the
-                # agent every cycle for the same alerts.
-                alerts_marked_sent.extend(review_candidates)
-            elif not should_deliver:
-                sinks.append(
-                    SinkResult(
-                        sink="openclaw_agent_delivery_gate",
-                        attempted=True,
-                        ok=True,
-                        error="openclaw agent output did not request delivery",
-                    )
-                )
-                alerts_marked_sent.extend(review_candidates)
         else:
-            _failopen_critical_alerts(
-                payload,
-                review_candidates,
+            _handle_reviewer_failure(
+                result=agent_result,
+                payload=payload,
+                review_candidates=review_candidates,
                 settings=settings,
                 runner=runner,
                 now_utc=now_utc,
@@ -237,67 +363,38 @@ def notify_payload(
         )
         sinks.append(codex_result)
         if codex_result.ok and settings.codex_deliver:
-            should_deliver = (
-                codex_message_requests_delivery(codex_message)
-                if settings.codex_require_delivery_cue
-                else True
+            _deliver_review_message(
+                message=codex_message,
+                review_candidates=review_candidates,
+                settings=settings,
+                runner=runner,
+                now_utc=now_utc,
+                alerts_marked_sent=alerts_marked_sent,
+                sinks=sinks,
+                reviewer_name="codex",
+                delivery_kind="codex",
+                deliver=settings.codex_deliver,
             )
-            scope_ok = codex_message_respects_human_scope(codex_message)
-            if should_deliver:
-                if scope_ok:
-                    codex_delivery = send_openclaw_message(settings, codex_message, runner=runner)
-                    sinks.append(codex_delivery)
-                    if not codex_delivery.ok:
-                        append_missed(
-                            settings.missed_queue_path,
-                            codex_message,
-                            kind="codex",
-                            at=now_utc,
-                        )
-                    delivered_ok = codex_delivery.ok
-                    if settings.bark_enabled:
-                        bark_result = send_bark_message(
-                            settings,
-                            bark_title_for_alerts(review_candidates),
-                            codex_message,
-                        )
-                        sinks.append(bark_result)
-                        delivered_ok = delivered_ok or bark_result.ok
-                    if settings.bark_friend_enabled and alerts_are_market_signals(review_candidates):
-                        sinks.append(
-                            send_bark_friend_message(
-                                settings,
-                                bark_title_for_alerts(review_candidates),
-                                codex_message,
-                            )
-                        )
-                    if delivered_ok:
-                        alerts_marked_sent.extend(review_candidates)
-                        record_push("intraday_alert", codex_message, at=now_utc.isoformat())
-                else:
-                    sinks.append(
-                        SinkResult(
-                            sink="codex_scope_gate",
-                            attempted=True,
-                            ok=True,
-                            error="codex output mentioned non-focus context",
-                        )
-                    )
-                    alerts_marked_sent.extend(review_candidates)
-            else:
-                sinks.append(
-                    SinkResult(
-                        sink="codex_delivery_gate",
-                        attempted=True,
-                        ok=True,
-                        error="codex output did not request delivery",
-                    )
-                )
-                alerts_marked_sent.extend(review_candidates)
+            review_candidates = []
+        elif codex_result.ok:
+            _deliver_review_message(
+                message=codex_message,
+                review_candidates=review_candidates,
+                settings=settings,
+                runner=runner,
+                now_utc=now_utc,
+                alerts_marked_sent=alerts_marked_sent,
+                sinks=sinks,
+                reviewer_name="codex",
+                delivery_kind="codex",
+                deliver=settings.codex_deliver,
+            )
+            review_candidates = []
         elif not codex_result.ok:
-            _failopen_critical_alerts(
-                payload,
-                review_candidates,
+            _handle_reviewer_failure(
+                result=codex_result,
+                payload=payload,
+                review_candidates=review_candidates,
                 settings=settings,
                 runner=runner,
                 now_utc=now_utc,
