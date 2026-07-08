@@ -1,8 +1,9 @@
 [Unit]
-Description=Check for material order-map level changes every 20 minutes (code gates to US open -> Beijing 23:30)
+Description=Order map refresh every 30 minutes at :15/:45 (interleaved with status at :00/:30; code gates to Beijing 14:15 -> next-day 02:00)
 
 [Timer]
-OnCalendar=Mon..Fri *-*-* 21..23:10,30,50:00 Asia/Shanghai
+OnCalendar=Mon..Fri *-*-* 14..23:15,45:00 Asia/Shanghai
+OnCalendar=Tue..Sat *-*-* 00..01:15,45:00 Asia/Shanghai
 Persistent=false
 
 [Install]

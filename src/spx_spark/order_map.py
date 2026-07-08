@@ -865,10 +865,10 @@ def default_state_path(settings: StorageSettings) -> str:
     )
 
 
-# --- event-driven refresh: re-push when key levels move materially ---
+# --- fixed-cadence refresh: re-push the order map every 30 minutes (interleaved
+# with the status report), annotating material level changes in the header ---
 
-REFRESH_WINDOW_END = time(23, 30)
-REFRESH_COOLDOWN_SECONDS_DEFAULT = 3600.0
+REFRESH_COOLDOWN_SECONDS_DEFAULT = 1500.0
 MATERIAL_LEVEL_MOVE_POINTS = 5.0
 MATERIAL_EM_REL_CHANGE = 0.20
 
@@ -937,13 +937,10 @@ def material_changes(
 
 
 def within_refresh_window(now_utc: datetime) -> bool:
-    """Event-driven refresh only after US open; pre-open is covered by the 30m status report."""
-    local = now_utc.astimezone(SHANGHAI_TZ)
-    if local.weekday() >= 5:
-        return False
-    if now_utc.astimezone(NY_TZ).time() < US_OPEN_ET:
-        return False
-    return local.time() < REFRESH_WINDOW_END
+    """Same window as the status report: the map refresh runs on a fixed
+    30-minute cadence (offset by 15 minutes from status) instead of only
+    firing on material changes."""
+    return within_status_window(now_utc)
 
 
 def within_status_window(now_utc: datetime) -> bool:
@@ -994,7 +991,9 @@ def already_sent(state_path: str, trading_date: str) -> bool:
         return False
     if not isinstance(payload, dict):
         return False
-    return payload.get("last_sent_date") == trading_date
+    # Baseline idempotency tracks map pushes specifically; status reports also
+    # write last_sent_date and must not mask a failed baseline.
+    return payload.get("last_map_date") == trading_date
 
 
 def mark_sent(
@@ -1003,14 +1002,22 @@ def mark_sent(
     *,
     fingerprint: dict[str, Any] | None = None,
     now: datetime | None = None,
+    kind: str | None = None,
 ) -> None:
     path = Path(state_path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload: dict[str, Any] = {"last_sent_date": trading_date}
+    # Merge into existing state: map pushes and status reports interleave on
+    # separate cadences, so one must not wipe the other's timestamp.
+    payload = load_order_map_state(state_path)
+    payload["last_sent_date"] = trading_date
+    if kind:
+        payload[f"last_{kind}_date"] = trading_date
     if fingerprint is not None:
         payload["fingerprint"] = fingerprint
     if now is not None:
         payload["last_sent_at"] = now.timestamp()
+        if kind:
+            payload[f"last_{kind}_at"] = now.timestamp()
     path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
 
 
@@ -1148,7 +1155,7 @@ def run_status(
         send_bark_friend_message(settings, "市场状态", text)
 
     if weixin_result.ok or bark_ok:
-        mark_sent(state_path, trading_date, fingerprint=fingerprint, now=now)
+        mark_sent(state_path, trading_date, fingerprint=fingerprint, now=now, kind="status")
         record_push("market_status", text, at=now.isoformat())
     result = {
         "text": text,
@@ -1186,15 +1193,17 @@ def run_refresh(args: argparse.Namespace, *, now: datetime, state_path: str, tra
         return 0
 
     previous = load_order_map_state(state_path)
-    if previous.get("last_sent_date") != trading_date:
+    if not args.force and previous.get("last_map_date") != trading_date:
         print(json.dumps({"skipped": True, "reason": "no_baseline_push_today"}))
         return 0
-    last_sent_at = finite_float(previous.get("last_sent_at"))
+    # Cooldown is keyed on map pushes only (baseline + refreshes); the
+    # interleaved status reports must not reset it.
+    last_map_at = finite_float(previous.get("last_map_at"))
     cooldown = float(
         os.getenv("SPX_ORDER_MAP_REFRESH_COOLDOWN_SECONDS", "")
         or REFRESH_COOLDOWN_SECONDS_DEFAULT
     )
-    if not args.force and last_sent_at is not None and now.timestamp() - last_sent_at < cooldown:
+    if not args.force and last_map_at is not None and now.timestamp() - last_map_at < cooldown:
         print(json.dumps({"skipped": True, "reason": "refresh_cooldown"}))
         return 0
 
@@ -1204,11 +1213,11 @@ def run_refresh(args: argparse.Namespace, *, now: datetime, state_path: str, tra
         return 0
     fingerprint = payload_fingerprint(payload)
     changes = material_changes(previous.get("fingerprint"), fingerprint)
-    if not changes and not args.force:
-        print(json.dumps({"skipped": True, "reason": "no_material_change"}))
-        return 0
 
-    header = f"【挂单地图·更新】原因: {'; '.join(changes) if changes else 'forced'}"
+    if changes:
+        header = f"【挂单地图·更新】变化: {'; '.join(changes)}"
+    else:
+        header = "【挂单地图·更新】关键位无实质变化，限价随最新报价刷新"
     if args.dry_run:
         print(header)
         print(render_template(payload))
@@ -1220,7 +1229,7 @@ def run_refresh(args: argparse.Namespace, *, now: datetime, state_path: str, tra
         payload, settings, now=now, extra_header=header, previous_push=load_previous_push()
     )
     if result["weixin_ok"] or result["bark_ok"]:
-        mark_sent(state_path, trading_date, fingerprint=fingerprint, now=now)
+        mark_sent(state_path, trading_date, fingerprint=fingerprint, now=now, kind="map")
         record_push("order_map_refresh", result["text"], at=now.isoformat())
     result["changes"] = changes
     print(json.dumps(result, ensure_ascii=False))
@@ -1261,7 +1270,13 @@ def run(argv: list[str] | None = None, *, now: datetime | None = None) -> int:
     settings = NotificationSettings.from_env()
     result = send_order_map(payload, settings, now=now, previous_push=load_previous_push())
     if result["weixin_ok"] or result["bark_ok"]:
-        mark_sent(state_path, trading_date, fingerprint=payload_fingerprint(payload), now=now)
+        mark_sent(
+            state_path,
+            trading_date,
+            fingerprint=payload_fingerprint(payload),
+            now=now,
+            kind="map",
+        )
         record_push("order_map", result["text"], at=now.isoformat())
     print(json.dumps(result, ensure_ascii=False))
     if not result["weixin_ok"] and not result["bark_ok"]:

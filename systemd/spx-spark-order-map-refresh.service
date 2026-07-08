@@ -1,5 +1,5 @@
 [Unit]
-Description=SPX Spark order map refresh (push only on material level changes)
+Description=SPX Spark order map refresh (30-minute cadence, annotates material level changes)
 After=network-online.target
 Wants=network-online.target
 

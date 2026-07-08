@@ -723,10 +723,36 @@ def test_within_send_window_beijing_weekday() -> None:
     assert within_send_window(saturday_1400) is False
 
 
+def test_mark_sent_merges_kinds_without_clobbering(tmp_path: Path) -> None:
+    state_path = str(tmp_path / "state.json")
+    map_time = datetime(2026, 7, 8, 6, 0, tzinfo=timezone.utc)
+    status_time = datetime(2026, 7, 8, 6, 30, tzinfo=timezone.utc)
+    mark_sent(state_path, "2026-07-08", now=map_time, kind="map")
+    mark_sent(state_path, "2026-07-08", now=status_time, kind="status")
+    state = json.loads(Path(state_path).read_text(encoding="utf-8"))
+    # Status push must not reset the map cadence timestamp.
+    assert state["last_map_at"] == map_time.timestamp()
+    assert state["last_status_at"] == status_time.timestamp()
+    assert state["last_sent_at"] == status_time.timestamp()
+    assert already_sent(state_path, "2026-07-08") is True
+
+
+def test_status_push_does_not_mask_missing_baseline(tmp_path: Path) -> None:
+    state_path = str(tmp_path / "state.json")
+    # Only a status report went out today; the baseline map push failed.
+    mark_sent(
+        state_path,
+        "2026-07-08",
+        now=datetime(2026, 7, 8, 6, 30, tzinfo=timezone.utc),
+        kind="status",
+    )
+    assert already_sent(state_path, "2026-07-08") is False
+
+
 def test_already_sent_roundtrip(tmp_path: Path) -> None:
     state_path = str(tmp_path / "order_map_state.json")
     assert already_sent(state_path, "2026-07-07") is False
-    mark_sent(state_path, "2026-07-07")
+    mark_sent(state_path, "2026-07-07", kind="map")
     assert already_sent(state_path, "2026-07-07") is True
     assert already_sent(state_path, "2026-07-08") is False
 
@@ -768,17 +794,25 @@ def test_payload_fingerprint_and_material_changes() -> None:
 
 
 def test_within_refresh_window_beijing() -> None:
-    # 22:30 Beijing = 10:30 ET (summer): after open, inside window.
+    # Refresh follows the status window: Beijing 14:15 -> next-day 02:00.
+    # 14:45 Beijing: fixed cadence starts pre-open.
+    beijing_1445 = datetime(2026, 7, 7, 6, 45, tzinfo=timezone.utc)
+    assert within_refresh_window(beijing_1445) is True
+    # 22:30 Beijing = 10:30 ET (summer): US session, inside window.
     beijing_2230 = datetime(2026, 7, 7, 14, 30, tzinfo=timezone.utc)
     assert within_refresh_window(beijing_2230) is True
+    # 23:45 Beijing: late US session now covered too.
     beijing_2345 = datetime(2026, 7, 7, 15, 45, tzinfo=timezone.utc)
-    assert within_refresh_window(beijing_2345) is False
-    # 13:00 Beijing = pre-open: refresh handed over to the status report.
+    assert within_refresh_window(beijing_2345) is True
+    # 01:45 Beijing Wednesday = Tuesday's US session, still covered.
+    beijing_0145 = datetime(2026, 7, 7, 17, 45, tzinfo=timezone.utc)
+    assert within_refresh_window(beijing_0145) is True
+    # 13:00 Beijing: before the window starts.
     beijing_1300 = datetime(2026, 7, 7, 5, 0, tzinfo=timezone.utc)
     assert within_refresh_window(beijing_1300) is False
-    # 21:00 Beijing = 9:00 ET: still pre-open, refresh stays quiet.
-    beijing_2100 = datetime(2026, 7, 7, 13, 0, tzinfo=timezone.utc)
-    assert within_refresh_window(beijing_2100) is False
+    # 02:30 Beijing: past the cutoff.
+    beijing_0230 = datetime(2026, 7, 7, 18, 30, tzinfo=timezone.utc)
+    assert within_refresh_window(beijing_0230) is False
 
 
 def test_within_status_window_and_minutes_to_open() -> None:
