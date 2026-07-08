@@ -1264,8 +1264,8 @@ def build_status_prompt(
 ) -> str:
     return "\n".join(
         (
-            "本条推送是『市场状态』。读者已按之前的挂单地图挂好单，每 30 分钟想知道：剧本变了没有、挂的单要不要动、走进开盘的这段时间该注意什么。",
-            "输出中文，10-14 行。第一行必须以『市场状态:』开头，保留模板第一行的时间与距开盘信息，并紧跟结论：『剧本维持』或『剧本有变: 一句话说变化』。",
+            "本条推送是『市场状态+挂单参考』二合一(原来的两条已合并成这一条)。读者已按之前的挂单地图挂好单，每 30 分钟想知道：剧本变了没有、挂的单要不要动、限价该挂在哪。",
+            "输出中文，14-20 行。第一行必须以『市场状态:』开头，保留模板第一行的时间与距开盘信息，并紧跟结论：『剧本维持』或『剧本有变: 一句话说变化』。",
             "判断『变没变』的基准是 previous_push 字段里的上一条推送正文，以及模板里的『较上次推送』一行。",
             "第 2-4 行位置读数：参考价此刻在 flip zone/zero gamma/两侧墙位阶梯(wall_ladder,各 4 档)构成的地形里的具体位置(距各关键位多少点)，以及这个位置对开盘意味着什么(偏 pin 还是易加速)。相邻 put 墙 OI 接近时说成支撑带并给出第二、第三档位，不要只报一个点。",
             "第 5-6 行赔率读数：三张挂单此刻的触达概率各是多少、和上一条相比谁在改善谁在恶化(引用百分比变化)，现在哪张单性价比最高。",
@@ -1276,6 +1276,8 @@ def build_status_prompt(
             "(a) 参考价在两侧墙位中间地带、距任何计划位都远时，必须明确写『中间地带，此处不追单，计划位在 XX/XX』；",
             "(b) day_move.em_used_fraction ≥ 0.7 时必须写『日内已走完预期波幅的 X%，此刻顺方向追单赔率差，离场/进场都等计划位』——下跌半山腰追 put、上涨半途追 call 都属于这条要拦的行为；",
             "(c) 价格已进入 put 墙阶梯支撑带时必须写『这里是计划中的接多区不是恐慌区，防守动作只在跌破带下沿 XX 之后执行』；急拉进 call 墙带时对称：『阻力带内不追多，回落不破 XX 才算多头剧本』。",
+            "倒数第二段(收尾前)必须是『挂单参考』段，3-6 行：从模板的挂单地图部分逐字引用每张单的合约、墙位限价、先手挡价、触达概率；数字一律照抄不得改写或四舍五入；"
+            "标注为 stop_trigger 的 play 必须保留『勿预挂限价、用指数条件单』的提醒；限价与上一条相比有变化时点出变化方向。",
             "最后 1 行：到下一条推送(30 分钟后)之间最值得盯的一个量。",
             "剧本维持时照样给完整读数，不要因为『没变』就缩成两三行；但不要硬编不存在的变化，没变就说数字平稳。",
             "数据 degraded 时如实说明，不给方向判断。",
@@ -1307,7 +1309,12 @@ def run_status(
         return 0
     fingerprint = payload_fingerprint(payload)
     changes = material_changes(previous.get("fingerprint"), fingerprint)
-    template = render_status_template(payload, changes, now)
+    # Combined push: status narrative + the order-map limit table used to be
+    # two interleaved 30-minute pushes; the map template rides along so the
+    # writer (and the raw fallback) always carries concrete limit prices.
+    template = "\n".join(
+        (render_status_template(payload, changes, now), render_template(payload))
+    )
 
     if args.dry_run:
         print(template)

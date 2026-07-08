@@ -656,6 +656,10 @@ def test_prompts_include_previous_push() -> None:
     assert "previous_push:" in order_prompt
     status_prompt = build_status_prompt(payload, "模板行", None)
     assert "previous_push:null" in status_prompt
+    # Merged push: the status prompt must demand the verbatim limit-price
+    # section that used to live in the separate refresh push.
+    assert "挂单参考" in status_prompt
+    assert "市场状态+挂单参考" in status_prompt
 
 
 def test_chain_implied_spot_uses_put_call_parity() -> None:
