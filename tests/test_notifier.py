@@ -1369,7 +1369,7 @@ def test_direct_push_rewrites_event_with_llm_writer(tmp_path, monkeypatch) -> No
         return subprocess.CompletedProcess(command, 0, stdout="{}", stderr="")
 
     def fake_writer(prompt: str, **kwargs) -> tuple[str | None, str | None]:
-        assert "即时事件播报员" in prompt
+        assert "即时事件" in prompt
         assert "持仓事件" in prompt
         return "【持仓事件】开仓 7430C x1，现价贴近 flip zone 下沿。", None
 

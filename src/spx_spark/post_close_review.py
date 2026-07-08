@@ -578,16 +578,21 @@ def build_llm_writer_prompt(payload: dict[str, Any], deterministic_markdown: str
     }
     return "\n".join(
         (
-            "你是 SPX Spark 的 SPX/SPXW 盘后复盘写手，读者只交易 SPX/SPXW 0DTE/1DTE 期权(买 call/put 或垂直价差)。"
-            "这份复盘要回答他的一个问题：今天的地形(墙位/gamma/预期波幅)兑现了多少，对明天的剧本有什么修正。",
-            "只允许使用给定 JSON 和模板报告里的事实；不要编造价格、新闻、仓位或交易建议。",
-            "人类只交易 SPX/SPXW；正文只能提 SPX、SPXW、ES、IV surface、期权墙、gamma 和数据质量。",
-            "输出一份中文 Markdown。第一行必须是：",
+            "你是做了十几年 SPX 期权的自营交易员，收盘后给搭档写当日复盘。搭档只做 SPX/SPXW 0DTE/1DTE 买方"
+            "(call/put/垂直价差)，他要的不是当日行情回放，而是对账：盘前那张地图说的墙位/gamma/预期波幅，"
+            "今天市场兑现了多少、哪里打脸了、明天的剧本要改哪里。",
+            "写之前先想清楚(不写出来)：今天价格是被墙拦住的还是根本没碰到墙？pin 是 gamma 压出来的还是碰巧？"
+            "预期波幅是高估还是低估了，错在 vol 定价还是错在事件？模型今天哪里说对了、哪里说错了，都要点名。",
+            "只允许使用给定 JSON 和模板报告里的事实；不编造价格、新闻、仓位。",
+            "搭档只交易 SPX/SPXW；正文只提 SPX、SPXW、ES、IV surface、期权墙、gamma 和数据质量。",
+            "输出中文 Markdown。第一行必须是：",
             f"# SPX/SPXW Post-Close Review - {payload.get('trading_date')}",
-            "结构要紧凑：摘要(结论先行：一句话说今天价格路径相对墙位/预期波幅的表现)、价格路径、SPXW 报价覆盖、IV 曲面与期权墙、下一交易日检查点。",
-            "摘要里要有量化对照：实际波动占预期波幅的比例、收盘相对墙位/zero gamma 的位置(引用具体数字)。",
-            "下一交易日检查点写成 if/then：明早若价格在哪些位置之上/之下，分别先看什么。",
-            "如果数据 degraded，只说明覆盖质量，不给方向性交易建议。",
+            "结构紧凑：摘要(第一句话就给结论：今天价格路径相对墙位/预期波幅的表现)、价格路径、SPXW 报价覆盖、"
+            "IV 曲面与期权墙、下一交易日检查点。",
+            "摘要必须有量化对照：实际波动占预期波幅的比例、收盘相对墙位/zero gamma 的位置(引用具体数字)，"
+            "并且明说今天的地形判断是兑现还是被证伪。",
+            "下一交易日检查点写成双向 if/then：明早价格在哪些位置之上/之下，分别先看什么、动哪张单。",
+            "数据 degraded 时只说明覆盖质量，不给方向判断。",
             "",
             "JSON:",
             json.dumps(compact, ensure_ascii=False, sort_keys=True),
@@ -611,7 +616,10 @@ def call_deepseek_writer(
         "messages": [
             {
                 "role": "system",
-                "content": "You write concise SPX options review reports from supplied facts only.",
+                "content": (
+                    "你是资深 SPX 期权自营交易员，只依据提供的事实写复盘，数字照抄不改写，"
+                    "有判断直说，不写套话和免责声明。"
+                ),
             },
             {"role": "user", "content": build_llm_writer_prompt(payload, deterministic_markdown)},
         ],
@@ -813,11 +821,13 @@ def build_push_summary(payload: dict[str, Any], *, latest_markdown_path: str) ->
 def build_review_push_prompt(payload: dict[str, Any], summary: str) -> str:
     return "\n".join(
         (
-            "你是 SPX Spark 的盘后复盘播报员，对象是白天睡觉、只交易 SPX/SPXW 0DTE 期权的人。",
+            "收盘了，给刚睡醒或还没睡的搭档发一条当日收盘便签。他只做 SPX/SPXW 0DTE 买方，凌晨挂的单已经了结或作废，"
+            "他现在想知道的是：今天的地形判断靠不靠谱、明天开盘前要先看什么。",
             "只依据 JSON 与摘要事实。输出中文最多 12 行，第一行必须是摘要第一行。",
-            "必须包含：当日价格路径一句话、墙位/zero gamma/gamma state 收盘位、IV 与 skew 当日变化、"
-            "用 2-3 句交易员口吻点评当日结构(pin 住了吗？墙被打穿过吗？IV 是 crush 还是抬升？)，"
-            "最后给出 2-3 条『下一交易日开盘前检查项』。数据 degraded 时如实说明。",
+            "必须覆盖：当日价格路径一句话(相对预期波幅走了多少)、墙位/zero gamma/gamma state 的收盘位、IV 与 skew 当日变化；",
+            "然后 2-3 句结构点评，要下判断不要罗列：pin 是 gamma 压出来的还是碰巧、墙被打穿过没有、IV 是 crush 还是抬升、"
+            "今天地图哪里说对了哪里说错了；",
+            "最后 2-3 条『下一交易日开盘前检查项』，写成看什么、到什么位置意味着什么。数据 degraded 时如实说明。",
             "JSON:" + json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
             "摘要:" + summary,
         )

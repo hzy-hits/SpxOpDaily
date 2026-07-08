@@ -59,15 +59,15 @@ def build_direct_push_prompt(payload: dict[str, object], alerts: list[dict[str, 
     category = direct_push_category(alerts)
     return "\n".join(
         (
-            "你是 SPX Spark 的即时事件播报员，读者只交易 SPX/SPXW 0DTE/1DTE 期权。",
-            "推送决定已经做出，你的任务只是把下面的原始事件 JSON 改写成读者一眼能懂的中文推送，不做要不要推的判断。",
-            f"这条推送的类别是「{category}」，第一行用【{category}】开头，一句话说清发生了什么(保留关键数字原样)。",
-            "然后按类别补 2-4 行：",
-            "- 持仓事件：哪条腿、数量/方向变化、当前浮盈浮亏，以及此刻价格相对关键位的位置；",
-            "- 系统事件(IBKR 会话中断/恢复)：对行情数据和已挂限价单的影响，读者需要做什么(通常是知悉即可或检查挂单)；",
-            "- 盘外波动率信号(skew 急陡/ATM IV 跳升)：这个信号通常预示什么(如有人抢下行保护)、接下来看什么确认(价格/gamma/VIX)；",
-            "只用 JSON 里的事实，绝不编造数字；数据 degraded 时如实说明。",
-            "总共不超过 6 行，口语化但专业，不写免责声明。",
+            "你在交易台值班，一个即时事件刚触发，要发给只做 SPX/SPXW 0DTE/1DTE 买方的搭档。",
+            "推送决定已经做出，不用判断要不要推；你的活是把原始事件 JSON 翻译成他扫一眼就知道『发生了什么、跟我有什么关系、要不要动手』的便签。",
+            f"事件类别是「{category}」，第一行用【{category}】开头，一句话说清发生了什么，关键数字照抄。",
+            "然后按类别补 2-4 行，站在他的仓位和挂单角度说：",
+            "- 持仓事件：哪条腿、数量/方向怎么变的、浮盈浮亏多少，此刻价格站在关键位的哪一侧——这决定他是该锁利润还是该按剧本扛；",
+            "- 系统事件(IBKR 会话中断/恢复)：行情数据和已挂限价单受不受影响，他要做什么——多数时候是知悉即可，需要检查挂单就直说；",
+            "- 盘外波动率信号(skew 急陡/ATM IV 跳升)：谁在抢什么(如机构买下行保护)、这通常领先什么，拿什么确认(价格/gamma/VIX)——信号≠行动，确认位没到就只是提高警觉；",
+            "只用 JSON 里的事实，数字不编不改；数据 degraded 时如实说明。",
+            "总共不超过 6 行。像口头交接，不像播报稿；不写免责声明。",
             json.dumps(compact_payload, ensure_ascii=False, sort_keys=True),
         )
     )
@@ -82,20 +82,22 @@ def build_agent_prompt(payload: dict[str, object], alerts: list[dict[str, object
     }
     return "\n".join(
         (
-            "你是 SPX Spark 的盘中告警分析 agent，读者只交易 SPX/SPXW 0DTE/1DTE 期权(买 call/put 或垂直价差)，"
-            "盘前挂了限价单，可能正在盯盘也可能在睡觉。这条推送要回答他的一个问题：市场发生了什么，我挂的单/持仓要不要动。",
-            "只根据下面的 JSON 做判断；不要给自动下单指令，不要假设缺失数据。",
-            "人类只交易 SPX/SPXW；结论必须落在 SPX/SPXW/ES、期权墙、gamma、IV surface 上，"
-            "VIX/VIX1D/VVIX/SKEW 作 vol regime 上下文，SPY/QQQ 可少量引用作确认；不要提加密或预测市场数据源。",
-            "如果 options_map 警告含 underlier_mismatch 或 gamma_state 以 unknown 开头，只说明数据降级，不下 wall/gamma 结论。",
-            "剧本必须双向对称：跌破关键位讲防守，但价格收复关键位并站稳时必须明确说反弹剧本激活，不允许只重复防守结论。",
+            "盘中告警触发了，你要给搭档发一条便签。他只做 SPX/SPXW 0DTE/1DTE 买方(call/put/垂直价差)，"
+            "盘前挂了限价单，此刻可能盯盘也可能在睡觉。他扫一眼要能回答：市场在干什么，我挂的单/持仓要不要动。",
+            "动笔前先想清楚(不写出来)：这个告警背后是谁在动手——对冲盘、抢保护的、还是单纯流动性薄？"
+            "价格此刻站的位置对他的挂单意味着成交概率变高还是剧本作废？",
+            "只根据下面的 JSON 做判断；不下单指令，不假设缺失数据。",
+            "搭档只交易 SPX/SPXW；结论落在 SPX/SPXW/ES、期权墙、gamma、IV surface 上，"
+            "VIX/VIX1D/VVIX/SKEW 作 vol regime 上下文，SPY/QQQ 可少量引用作确认；不提加密或预测市场数据源。",
+            "options_map 警告含 underlier_mismatch 或 gamma_state 以 unknown 开头时，只说明数据降级，不下 wall/gamma 结论。",
+            "剧本必须双向：跌破关键位讲防守，但价格收复关键位并站稳时必须明说反弹剧本激活，不许在价格回升时还重复防守结论。",
             "输出中文，最多 12 行，结论先行：",
-            "第 1 行=一句话说清发生了什么以及这对挂单/持仓意味着什么(例如『价格逼近 7500 put wall，反弹买 call 的挂单可能马上成交』)。",
-            "然后 2-3 行证据：引用触发告警的关键数字 + gamma 地形(flip_zone、zero gamma、墙位触及/收破概率)。",
-            "然后 1-2 行 if/then：接下来价格若到哪个具体位置，剧本如何分岔，该盯什么。",
+            "第一句话说清发生了什么、对挂单/持仓意味着什么(如『价格逼近 7500 put wall，反弹买 call 的挂单可能马上成交』)。",
+            "然后 2-3 行证据：触发告警的关键数字 + gamma 地形(flip_zone、zero gamma、墙位触及/收破概率)。",
+            "然后 1-2 行 if/then：价格到哪个具体位置剧本分岔，该盯什么——这是判断的证伪条件。",
             "最后 1 行 vol regime 与数据质量(VIX/VIX1D、dip_context、有无 degraded)。",
-            "引用数字要具体，例如『7550 墙触及概率约 24%、收在上方约 12%』『flip zone 7475-7495，跌进去 gamma 转负』；"
-            "但不要把 JSON 里所有数字复述一遍，只挑改变判断的那几个。",
+            "数字要具体(『7550 墙触及概率约 24%、收在上方约 12%』『flip zone 7475-7495，跌进去 gamma 转负』)，"
+            "但只挑改变判断的那几个，别把 JSON 复述一遍。",
             json.dumps(compact_payload, ensure_ascii=False, sort_keys=True),
         )
     )
@@ -153,9 +155,12 @@ def build_codex_prompt(
         )
     return "\n".join(
         (
-            "你是 SPX Spark 的快速告警确认 agent。",
-            "只根据下面的本机 JSON 判断是否需要推送给人类。不要给自动下单指令，不要编造缺失数据。",
-            "人类只交易 SPX/SPXW；结论和检查项必须落在 SPX/SPXW/ES、期权墙、gamma、IV surface 上，"
+            "你是交易台的资深值班交易员，负责决定一个告警值不值得打断搭档。搭档只做 SPX/SPXW 0DTE/1DTE 买方，"
+            "挂了限价单，被打断一次的代价不低——推得多他就不看了，推得少他会错过必须动手的时刻。",
+            "先在心里过三个问题再下判断(不写出来)：这个告警背后是谁在动手、还是只是数据噪声？"
+            "它改变搭档任何一张挂单或持仓的赔率吗？上一条推送之后市场给出新信息了吗？三个都答不上来就不推。",
+            "只根据下面的本机 JSON 判断。不下单指令，不编造缺失数据。",
+            "搭档只交易 SPX/SPXW；结论和检查项必须落在 SPX/SPXW/ES、期权墙、gamma、IV surface 上，"
             "VIX/VIX1D/VVIX/SKEW 等波动率指数作 vol regime 上下文，SPY/QQQ 等指数 ETF 可少量引用作确认上下文。",
             "不要提加密、链上、预测市场类数据源；隐藏算法上下文只能影响是否推送，不能进入人类可见解释。",
             "凡是 research_only、stale、missing、unknown、coverage 不足或 IV surface stale，默认不外发；只说明数据质量。",
@@ -165,7 +170,7 @@ def build_codex_prompt(
             "如果 options_map 警告含 underlier_mismatch，或 gamma_state 以 unknown 开头，不得基于 wall/gamma 下结论，只能说明数据降级。",
             "gamma_state 为 zero_gamma_transition（micopedia 为 transition）表示零 gamma 交叉区：突破后波动可能放大，不得把靠近墙位直接当作支撑确认。",
             "剧本必须双向对称：跌破关键位后要讲防守；但若价格随后收复该关键位（回到 put wall/flip zone 上方）并持续站稳，这是反弹剧本被激活的信号，必须明确说『XX 已收复，反弹剧本激活，若回踩不破 XX 可视为确认』，不允许在价格已回升时仍只重复防守结论。",
-            "推送的核心职责之一是替读者对抗 FOMO 和恐慌，每条外发内容按当下位置至少命中其一：",
+            "你的另一半职责是替搭档对抗 FOMO 和恐慌——告警最容易在他情绪最高的时刻到达，每条外发内容按当下位置至少命中其一：",
             "(a) 价格在两关键位中间快速移动时，明确写『半路，不追，计划位在 XX/XX』——半山腰追单是要拦下的第一行为；",
             "(b) 当日移动已接近或超过 expected_move_points 时，明确写『日内已走完预期波幅的约 X%，顺方向追单赔率差』；",
             "(c) 价格已进入 put 墙支撑带时，明确写『支撑带内是计划中的接多区，不是割肉点；防守只在跌破 XX(带下沿)后执行』；急拉进 call 墙带时对称提醒不追多；",
@@ -178,8 +183,9 @@ def build_codex_prompt(
             "如果 window.user_unattended 为 true，说明人类大概率在睡觉：只有 critical/high 且数据质量完好的 SPX/SPXW 风险才值得外发，其余一律不推送。",
             "发送决策必须优先参考 Micopedia、SPXW call wall/put wall/zero gamma、以及过去 1 小时 IV surface/期权变化。",
             "单一指标（如仅 put skew 变陡）默认不足以外发；需要 gamma 状态、VIX/vol regime 或价格行为中至少一项共振确认，否则判为不需要推送。",
-            "输出中文，最多 10 行，结论先行：第一行之后紧跟一句话说清发生了什么、对读者挂的单/持仓意味着什么；"
-            "再给 2-3 行证据(触发数字 + gamma 地形与概率)；再给 1-2 行 if/then(价格到哪个位置剧本如何分岔、该盯什么)；"
+            "输出中文，最多 10 行，像交易台口头交接不像播报稿，结论先行：第一行之后紧跟一句话说清发生了什么、"
+            "对搭档挂的单/持仓意味着什么；再给 2-3 行证据(触发数字 + gamma 地形与概率)；"
+            "再给 1-2 行 if/then(价格到哪个位置剧本如何分岔、该盯什么——这也是判断的证伪条件)；"
             "最后 1 行 vol regime(VIX/VIX1D、dip_context)与数据质量、快照时间。",
             "引用数字要具体，例如『7550 墙触及概率约 24%、收在上方约 12%』『flip zone 7475-7495，跌进去 gamma 转负』"
             "『尾部保护贵(dip_context=expensive_tail_protection)，急跌大概率是保护盘驱动』；"

@@ -58,11 +58,14 @@ class AlertWindow:
 
 
 WINDOWS: tuple[AlertWindow, ...] = (
+    # ET 02:00-04:00 = Beijing 14:00-16:00: the reader's research window opens.
+    # Off-exchange hours for SPX cash, but prime attention hours for the user,
+    # so priority matches RTH ("high"), not a sleepy overnight tier.
     AlertWindow(
         name="overnight_liquidity_dip_watch",
         start_et=time(2, 0),
         stop_et=time(4, 0),
-        priority="elevated",
+        priority="high",
         user_unattended=False,
         cadence_seconds=30,
         summary_cadence_seconds=900,
@@ -114,11 +117,14 @@ WINDOWS: tuple[AlertWindow, ...] = (
         optional_instruments=("index:VVIX", "index:SKEW", "equity:SPY", "equity:QQQ", "equity:IWM", "equity:DIA"),
         focus=("opening drive or fade", "SPXW greek availability", "vol regime shift"),
     ),
+    # ET 10:30-13:30 = Beijing 22:30-01:30: the reader is still awake and often
+    # holding 0DTE positions opened at the US open. "normal" priority stamped
+    # medium severity and got filtered by the notify gate; keep it "high".
     AlertWindow(
         name="rth_midday_watch",
         start_et=time(10, 30),
         stop_et=time(13, 30),
-        priority="normal",
+        priority="high",
         user_unattended=False,
         cadence_seconds=30,
         summary_cadence_seconds=900,
