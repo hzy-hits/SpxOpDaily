@@ -474,6 +474,67 @@ def option_freshness_alert(expiry: object, *, window: AlertWindow) -> Alert:
     )
 
 
+# Walls recompute every cycle and drift a strike or two as OI updates; keying
+# the cooldown on the exact strike turned every 5-point wall move into a fresh
+# alert (2026-07-08: eight wall pushes in 24 minutes). Deduping by 25-point
+# band keeps re-alerts for genuinely new levels only.
+WALL_DEDUP_BAND_POINTS = 25.0
+
+
+def wall_dedup_band(wall: float, band_points: float = WALL_DEDUP_BAND_POINTS) -> str:
+    return f"band:{int(wall // band_points) * int(band_points)}"
+
+
+def gamma_regime_state_path() -> str:
+    data_root = os.getenv("MARKET_DATA_DATA_ROOT") or os.getenv("MAINTENANCE_DATA_ROOT") or "data"
+    return os.getenv(
+        "ALERT_GAMMA_REGIME_STATE_PATH",
+        f"{data_root.rstrip('/')}/latest/gamma_regime_state.json",
+    )
+
+
+def load_gamma_regime_state(path: str | Path) -> dict[str, object]:
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def gamma_regime_observation_stable(expiry: str, gamma_state: str, *, as_of: datetime) -> bool:
+    """True when the persisted observation shows this gamma state has held for
+    the hysteresis window. Read-only: observations are persisted separately so
+    dry runs and tests do not mutate state."""
+    hysteresis = env_float("ALERT_GAMMA_REGIME_HYSTERESIS_SECONDS", 600.0)
+    entry = load_gamma_regime_state(gamma_regime_state_path()).get(expiry)
+    if not isinstance(entry, dict) or entry.get("state") != gamma_state:
+        return False
+    since = entry.get("since")
+    if not isinstance(since, int | float):
+        return False
+    return as_of.timestamp() - float(since) >= hysteresis
+
+
+def persist_gamma_regime_observations(options_map: OptionsMap, *, as_of: datetime) -> None:
+    """Track when each expiry's gamma state was first observed; a state change
+    resets the clock so 4-minute flip-flops never clear the hysteresis."""
+    path = Path(gamma_regime_state_path())
+    payload = load_gamma_regime_state(path)
+    current_expiries = {expiry.expiry for expiry in options_map.expiries}
+    payload = {key: value for key, value in payload.items() if key in current_expiries}
+    for expiry in options_map.expiries:
+        entry = payload.get(expiry.expiry)
+        if not isinstance(entry, dict) or entry.get("state") != expiry.gamma_state:
+            payload[expiry.expiry] = {"state": expiry.gamma_state, "since": as_of.timestamp()}
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = path.with_suffix(f"{path.suffix}.tmp")
+        temp_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+        temp_path.replace(path)
+    except OSError:
+        pass
+
+
 def option_map_alerts(options_map: OptionsMap, *, window: AlertWindow) -> list[Alert]:
     alerts: list[Alert] = []
     underlier = options_map.underlier.price
@@ -482,7 +543,11 @@ def option_map_alerts(options_map: OptionsMap, *, window: AlertWindow) -> list[A
         if not option_coverage_is_fresh(expiry):
             alerts.append(option_freshness_alert(expiry, window=window))
             continue
-        if expiry.gamma_state in OPTION_GAMMA_ALERT_STATES:
+        if expiry.gamma_state in OPTION_GAMMA_ALERT_STATES and gamma_regime_observation_stable(
+            expiry.expiry,
+            expiry.gamma_state,
+            as_of=options_map.as_of,
+        ):
             gamma_detail = (
                 f"SPXW {expiry.expiry} gamma state is {expiry.gamma_state}; "
                 f"zero gamma={expiry.zero_gamma}, net_gamma_ratio={expiry.net_gamma_ratio}."
@@ -531,7 +596,7 @@ def option_map_alerts(options_map: OptionsMap, *, window: AlertWindow) -> list[A
                         detail=wall_detail,
                         value=expiry.nearest_wall_distance_points,
                         threshold=wall_threshold,
-                        dedup_group=f"{expiry.nearest_wall:.0f}",
+                        dedup_group=wall_dedup_band(expiry.nearest_wall),
                     )
                 )
     return alerts
@@ -1118,11 +1183,17 @@ def evaluate_payload(
     now: datetime | None = None,
     persist_system_events: bool = True,
     persist_movement_state: bool = False,
+    persist_gamma_regime: bool = False,
 ) -> dict[str, object]:
     now = now or state.as_of
     window = active_window(now)
     window_payload = window.to_dict(now=now)
     options_map = build_options_map(state)
+    if persist_gamma_regime:
+        # Record observations before alert evaluation: a state seen for the
+        # first time starts its hysteresis clock now and only alerts once it
+        # has held for the configured window.
+        persist_gamma_regime_observations(options_map, as_of=options_map.as_of)
     iv_settings = IvSurfaceSettings.from_env()
     iv_surface = load_current_iv_surface(iv_settings)
     iv_surface_history = load_recent_snapshots(iv_settings, as_of=state.as_of, lookback_minutes=60)
@@ -1201,6 +1272,7 @@ def run(argv: list[str] | None = None) -> int:
         now=now or state.as_of,
         persist_system_events=False,
         persist_movement_state=False,
+        persist_gamma_regime=True,
     )
     system_event_pending = any(
         isinstance(alert, dict) and alert.get("source_gate") == "ibkr_session_state"

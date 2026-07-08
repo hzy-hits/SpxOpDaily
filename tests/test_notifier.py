@@ -1248,6 +1248,119 @@ def test_rth_skew_steepening_still_goes_through_review(tmp_path) -> None:
     assert "--message" not in calls[0]
 
 
+def _skew_alert(dedup_group: str, severity: str = "high") -> dict[str, object]:
+    return {
+        "severity": severity,
+        "kind": "put_skew_steepening_5m",
+        "instrument_id": "iv_surface:SPXW:20260707",
+        "title": f"SPXW put skew steepening ({dedup_group})",
+        "detail": "Put skew widened.",
+        "source_gate": "iv_surface",
+        "dedup_group": dedup_group,
+    }
+
+
+def test_kind_rate_limit_caps_bucket_creep_but_allows_jumps_and_flips(tmp_path) -> None:
+    calls: list[list[str]] = []
+
+    def runner(command: list[str], timeout_seconds: float) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout="{}", stderr="")
+
+    settings = make_settings(str(tmp_path / "notify-state.json"))
+    base = datetime(2026, 7, 7, 0, 0, tzinfo=timezone.utc)
+
+    def send(dedup_group: str, minutes: int, severity: str = "high") -> int:
+        payload = make_payload()
+        payload["alerts"] = [_skew_alert(dedup_group, severity)]
+        result = notify_payload(
+            payload,
+            settings=settings,
+            runner=runner,
+            now=base + timedelta(minutes=minutes),
+        )
+        return result.selected_count
+
+    assert send("up:1", 0) == 1
+    # +10 min, bucket crept one step: rate limited.
+    assert send("up:2", 10) == 0
+    # +20 min, bucket jumped >= 2 steps from the last sent bucket: allowed.
+    assert send("up:3", 20) == 1
+    # +30 min, one more creep after the jump: limited again.
+    assert send("up:4", 30) == 0
+
+
+def test_kind_rate_limit_direction_flip_and_expiry(tmp_path) -> None:
+    calls: list[list[str]] = []
+
+    def runner(command: list[str], timeout_seconds: float) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout="{}", stderr="")
+
+    settings = make_settings(str(tmp_path / "notify-state.json"))
+    base = datetime(2026, 7, 7, 0, 0, tzinfo=timezone.utc)
+
+    def send(dedup_group: str, minutes: int, severity: str = "high") -> int:
+        payload = make_payload()
+        payload["alerts"] = [_skew_alert(dedup_group, severity)]
+        result = notify_payload(
+            payload,
+            settings=settings,
+            runner=runner,
+            now=base + timedelta(minutes=minutes),
+        )
+        return result.selected_count
+
+    assert send("up:1", 0) == 1
+    assert send("down:1", 10) == 1  # direction flip breaks through
+    assert send("down:2", 20) == 0  # creep after flip: limited
+    assert send("down:3", 75) == 1  # window expired (>1h since last sent)
+
+
+def test_kind_rate_limit_exempts_critical_and_other_kinds(tmp_path) -> None:
+    calls: list[list[str]] = []
+
+    def runner(command: list[str], timeout_seconds: float) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout="{}", stderr="")
+
+    settings = make_settings(str(tmp_path / "notify-state.json"))
+    base = datetime(2026, 7, 7, 0, 0, tzinfo=timezone.utc)
+
+    payload = make_payload()
+    payload["alerts"] = [_skew_alert("up:1")]
+    assert (
+        notify_payload(payload, settings=settings, runner=runner, now=base).selected_count == 1
+    )
+    # Critical severity bypasses the rate limit even on a one-step creep.
+    payload = make_payload()
+    payload["alerts"] = [_skew_alert("up:2", severity="critical")]
+    assert (
+        notify_payload(
+            payload, settings=settings, runner=runner, now=base + timedelta(minutes=10)
+        ).selected_count
+        == 1
+    )
+    # Non-bucketed kinds (wall proximity) are not touched by the rate limiter.
+    payload = make_payload()
+    payload["alerts"] = [
+        {
+            "severity": "high",
+            "kind": "option_wall_proximity",
+            "instrument_id": "option_map:SPXW:20260707",
+            "title": "SPX near SPXW wall 7450",
+            "detail": "wall proximity",
+            "dedup_group": "band:7450",
+        }
+    ]
+    assert (
+        notify_payload(
+            payload, settings=settings, runner=runner, now=base + timedelta(minutes=11)
+        ).selected_count
+        == 1
+    )
+
+
 def test_direct_push_rewrites_event_with_llm_writer(tmp_path, monkeypatch) -> None:
     calls: list[list[str]] = []
 

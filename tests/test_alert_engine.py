@@ -299,6 +299,60 @@ def test_hyperliquid_proxy_can_trigger_degraded_watch_when_ibkr_feed_is_unavaila
     assert fallback_alerts[0].research_only is False
 
 
+def test_wall_dedup_band_groups_nearby_walls() -> None:
+    from spx_spark.alert_engine import wall_dedup_band
+
+    # 7425-7449 share a band; 7450 starts the next one. A wall drifting a
+    # strike or two no longer opens a fresh cooldown slot.
+    assert wall_dedup_band(7425.0) == wall_dedup_band(7430.0) == wall_dedup_band(7435.0)
+    assert wall_dedup_band(7449.0) == "band:7425"
+    assert wall_dedup_band(7450.0) == "band:7450"
+    assert wall_dedup_band(7450.0) != wall_dedup_band(7425.0)
+
+
+def test_gamma_regime_hysteresis_requires_state_to_hold(tmp_path, monkeypatch) -> None:
+    from spx_spark.alert_engine import (
+        gamma_regime_observation_stable,
+        persist_gamma_regime_observations,
+    )
+
+    monkeypatch.setenv(
+        "ALERT_GAMMA_REGIME_STATE_PATH", str(tmp_path / "gamma-regime-state.json")
+    )
+    now = datetime(2026, 7, 8, 22, 17, tzinfo=BJ_TZ)
+
+    spx = make_quote(InstrumentId.index("SPX"), mark=7500.0, close=7490.0, now=now)
+    call = make_option(expiry="20260708", strike=7500, right="C", mark=10.0, now=now)
+    put = make_option(expiry="20260708", strike=7500, right="P", mark=11.0, now=now)
+    options_map = build_options_map(make_state(spx, call, put, now=now))
+    expiry_key = options_map.expiries[0].expiry
+    observed_state = options_map.expiries[0].gamma_state
+
+    # First observation starts the clock: not stable yet.
+    persist_gamma_regime_observations(options_map, as_of=now)
+    assert gamma_regime_observation_stable(expiry_key, observed_state, as_of=now) is False
+    assert (
+        gamma_regime_observation_stable(
+            expiry_key, observed_state, as_of=now + timedelta(minutes=5)
+        )
+        is False
+    )
+    # Same state still observed 10+ minutes later: stable.
+    assert (
+        gamma_regime_observation_stable(
+            expiry_key, observed_state, as_of=now + timedelta(minutes=10)
+        )
+        is True
+    )
+    # A different state resets the clock (flip-flop never clears hysteresis).
+    assert (
+        gamma_regime_observation_stable(
+            expiry_key, "some_other_state", as_of=now + timedelta(minutes=10)
+        )
+        is False
+    )
+
+
 def test_hyperliquid_proxy_watch_fires_when_anchor_closed_but_broker_healthy() -> None:
     """During the ES maintenance break (or any anchor-dead stretch) the SP500
     perp is the only live monitor; its moves must alert even when the broker

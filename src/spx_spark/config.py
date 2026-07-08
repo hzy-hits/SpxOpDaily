@@ -625,6 +625,12 @@ class NotificationSettings:
     # DeepSeek writer before sending; falls back to the raw template on any
     # writer failure so critical events are never lost.
     direct_push_llm_enabled: bool = False
+    # Kind-level rate limit for magnitude-bucketed alerts: the per-bucket
+    # dedup key lets a drifting value re-alert on every bucket step (observed
+    # put_skew up:1 -> up:28 = 19 pushes/day), so the same kind+instrument is
+    # capped to one push per this window unless the bucket jumps >= 2 steps,
+    # the direction flips, or severity is critical.
+    kind_rate_limit_seconds: float = 3600.0
     missed_queue_path: str = ""
 
     @classmethod
@@ -699,6 +705,7 @@ class NotificationSettings:
             bark_friend_enabled=env_bool("ALERT_NOTIFY_BARK_FRIEND_ENABLED", False),
             bark_friend_url=env_str("ALERT_NOTIFY_BARK_FRIEND_URL", "").rstrip("/"),
             direct_push_llm_enabled=env_bool("ALERT_NOTIFY_DIRECT_PUSH_LLM_ENABLED", True),
+            kind_rate_limit_seconds=env_float("ALERT_NOTIFY_KIND_RATE_LIMIT_SECONDS", 3600.0),
             missed_queue_path=env_str(
                 "ALERT_NOTIFY_MISSED_QUEUE_PATH",
                 f"{data_root.rstrip('/')}/latest/weixin_missed_queue.jsonl",
