@@ -72,10 +72,141 @@ def round_to_tick(premium: float) -> float:
 def project_option_price(
     mid: float, delta: float, gamma: float, spot: float, target: float
 ) -> float:
-    """Second-order Taylor projection, clamped to >= 0.05."""
+    """Second-order Taylor projection, clamped to >= 0.05.
+
+    Fallback only: ignores theta and vol dynamics, which for 0DTE makes buy
+    limits fill hours early on pure time decay (2026-07-07: projected 16.04
+    for 7500C at the wall, actual at touch 12.45). Prefer
+    project_option_price_bs when IV is available.
+    """
     move = target - spot
     projected = mid + delta * move + 0.5 * gamma * move * move
     return max(0.05, projected)
+
+
+# --- BS repricing at a target level, with time decay and vol-shift ---
+
+SESSION_CLOSE_ET = time(16, 0)
+YEAR_SECONDS = 365.0 * 24.0 * 3600.0
+# Fraction of remaining time expected to elapse before the touch, as a
+# multiple of the Brownian-scaling estimate (distance/EM)^2. Calibrated on
+# 2026-07-07: SPX covered 23.5pts (0.91 EM) in ~59% of the remaining session;
+# first passages concentrate earlier than the full scaling suggests.
+TOUCH_TIME_FRACTION_COEF = 0.6
+TOUCH_TIME_FRACTION_MAX = 0.90
+# "Sticky strike plus": on a move down, fixed-strike IV rises by roughly this
+# multiple of the local smile slope (and falls on the way up).
+VOL_SLOPE_BETA = 1.2
+MIN_TAU_AT_TOUCH_HOURS = 0.25
+
+
+def _norm_cdf(x: float) -> float:
+    return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+
+
+def _bs_price(spot: float, strike: float, iv: float, tau_years: float, right: str) -> float:
+    intrinsic = max(0.0, spot - strike) if right == "C" else max(0.0, strike - spot)
+    if tau_years <= 0 or iv <= 0:
+        return intrinsic
+    st = iv * math.sqrt(tau_years)
+    d1 = (math.log(spot / strike) + 0.5 * st * st) / st
+    d2 = d1 - st
+    if right == "C":
+        return spot * _norm_cdf(d1) - strike * _norm_cdf(d2)
+    return strike * _norm_cdf(-d2) - spot * _norm_cdf(-d1)
+
+
+def expiry_close_utc(expiry: str) -> datetime | None:
+    """SPXW dailies are PM-settled: last trade 16:00 ET on the expiry date."""
+    try:
+        day = datetime.strptime(expiry, "%Y%m%d").date()
+    except ValueError:
+        return None
+    return datetime.combine(day, SESSION_CLOSE_ET, tzinfo=NY_TZ).astimezone(timezone.utc)
+
+
+def smile_slope_per_point(
+    pairs: dict[float, dict[OptionRight, Quote]],
+    right: str,
+    strike: float,
+    strike_step: float,
+) -> float | None:
+    """Local dIV/dK (per index point) via least squares on nearby strikes."""
+    right_enum = OptionRight.CALL if right == "C" else OptionRight.PUT
+    points: list[tuple[float, float]] = []
+    for k in sorted(pairs):
+        if abs(k - strike) > 3.0 * strike_step:
+            continue
+        quote = (pairs.get(k) or {}).get(right_enum)
+        if quote is None or quote.greeks is None:
+            continue
+        iv = finite_float(quote.greeks.implied_vol)
+        if iv is not None and iv > 0:
+            points.append((k, iv))
+    if len(points) < 2:
+        return None
+    n = float(len(points))
+    sx = sum(k for k, _ in points)
+    sy = sum(v for _, v in points)
+    sxx = sum(k * k for k, _ in points)
+    sxy = sum(k * v for k, v in points)
+    denom = n * sxx - sx * sx
+    if abs(denom) < 1e-9:
+        return None
+    return (n * sxy - sx * sy) / denom
+
+
+def project_option_price_bs(
+    *,
+    mid: float,
+    iv: float | None,
+    strike: float,
+    right: str,
+    spot: float,
+    target: float,
+    tau_now_years: float | None,
+    em_points: float | None,
+    slope_per_point: float | None,
+) -> float | None:
+    """Reprice the option at the target level with Black-Scholes.
+
+    Unlike the Taylor projection this accounts for:
+    - time decay before the touch (touch time estimated by Brownian scaling
+      of distance vs remaining expected move);
+    - fixed-strike IV drift along the smile (down moves lift IV, up moves
+      compress it).
+    The result is ratio-anchored to the current market mid so provider IV or
+    model mismatch does not shift the base level.
+    """
+    if iv is None or iv <= 0 or mid <= 0:
+        return None
+    if tau_now_years is None or tau_now_years <= 0:
+        return None
+    anchor = _bs_price(spot, strike, iv, tau_now_years, right)
+    if anchor <= 0.01:
+        return None
+
+    distance = abs(target - spot)
+    fraction = 0.05
+    if em_points is not None and em_points > 0:
+        fraction = min(
+            max(TOUCH_TIME_FRACTION_COEF * (distance / em_points) ** 2, 0.05),
+            TOUCH_TIME_FRACTION_MAX,
+        )
+    tau_touch = max(
+        tau_now_years * (1.0 - fraction),
+        MIN_TAU_AT_TOUCH_HOURS * 3600.0 / YEAR_SECONDS,
+    )
+
+    iv_touch = iv
+    if slope_per_point is not None:
+        # slope is negative across the put skew; a down move (spot > target)
+        # then raises fixed-strike IV, an up move compresses it.
+        iv_touch = iv - VOL_SLOPE_BETA * slope_per_point * (spot - target)
+        iv_touch = min(max(iv_touch, 0.5 * iv), 2.5 * iv)
+
+    projected = _bs_price(target, strike, iv_touch, tau_touch, right)
+    return max(0.05, mid * projected / anchor)
 
 
 @dataclass(frozen=True)
@@ -105,6 +236,8 @@ class OrderCandidate:
     # the move happens. "stop_trigger": projected > current, a plain buy limit
     # would fill immediately at market -> needs a stop-limit trigger instead.
     order_style: str = "resting_limit"
+    # "bs_repricing" (theta + vol-shift aware) or "taylor_fallback".
+    projection_model: str = "taylor_fallback"
 
 
 FRONTRUN_FRACTION = 0.30
@@ -200,6 +333,8 @@ def _build_candidate(
     strike_step: float,
     pairs: dict[float, dict[OptionRight, Quote]],
     warnings: list[str],
+    tau_now_years: float | None = None,
+    em_points: float | None = None,
 ) -> OrderCandidate | None:
     quote = _find_option_quote(
         expiry_quotes,
@@ -228,7 +363,29 @@ def _build_candidate(
         warnings.append(f"missing_greeks_for_{target_strike}{right}")
         return None
 
-    projected = project_option_price(mid, delta, gamma, spot, level)
+    strike_float = finite_float(quote.instrument.strike) or float(target_strike)
+    iv = finite_float(quote.greeks.implied_vol) if quote.greeks is not None else None
+    slope = smile_slope_per_point(pairs, right, strike_float, strike_step)
+
+    def _project(target: float) -> tuple[float, str]:
+        bs_projected = project_option_price_bs(
+            mid=mid,
+            iv=iv,
+            strike=strike_float,
+            right=right,
+            spot=spot,
+            target=target,
+            tau_now_years=tau_now_years,
+            em_points=em_points,
+            slope_per_point=slope,
+        )
+        if bs_projected is not None:
+            return bs_projected, "bs_repricing"
+        return project_option_price(mid, delta, gamma, spot, target), "taylor_fallback"
+
+    projected, projection_model = _project(level)
+    if projection_model == "taylor_fallback":
+        warnings.append(f"taylor_fallback_for_{target_strike}{right}")
     prob_close, prob_touch, _source_strike, _source_delta = probability_for_level(
         level,
         underlier=spot,
@@ -241,7 +398,7 @@ def _build_candidate(
     frontrun_limit = None
     frontrun_prob_touch = None
     if frontrun_level is not None:
-        frontrun_projected = project_option_price(mid, delta, gamma, spot, frontrun_level)
+        frontrun_projected, _ = _project(frontrun_level)
         frontrun_limit = round_to_tick(frontrun_projected)
         _, frontrun_prob_touch, _, _ = probability_for_level(
             frontrun_level,
@@ -273,6 +430,7 @@ def _build_candidate(
         frontrun_limit=frontrun_limit,
         frontrun_prob_touch=frontrun_prob_touch,
         order_style=order_style,
+        projection_model=projection_model,
     )
 
 
@@ -373,6 +531,15 @@ def build_candidates(
         local_warnings.append("missing underlier price")
         return []
 
+    now_utc = now or datetime.now(tz=timezone.utc)
+    tau_now_years: float | None = None
+    close_utc = expiry_close_utc(front.expiry)
+    if close_utc is not None:
+        seconds_left = (close_utc - now_utc).total_seconds()
+        if seconds_left > 0:
+            tau_now_years = seconds_left / YEAR_SECONDS
+    em_points = finite_float(front.expected_move_points)
+
     candidates: list[OrderCandidate] = []
 
     # Side guards: options_map constrains walls against its own underlier, but
@@ -401,6 +568,8 @@ def build_candidates(
             strike_step=strike_step,
             pairs=pairs,
             warnings=local_warnings,
+            tau_now_years=tau_now_years,
+            em_points=em_points,
         )
         if candidate is not None:
             candidates.append(candidate)
@@ -434,6 +603,8 @@ def build_candidates(
             strike_step=strike_step,
             pairs=pairs,
             warnings=local_warnings,
+            tau_now_years=tau_now_years,
+            em_points=em_points,
         )
         if candidate is not None:
             candidates.append(candidate)
@@ -459,6 +630,8 @@ def build_candidates(
             strike_step=strike_step,
             pairs=pairs,
             warnings=local_warnings,
+            tau_now_years=tau_now_years,
+            em_points=em_points,
         )
         if candidate is not None:
             candidates.append(candidate)
@@ -780,7 +953,10 @@ def render_template(payload: dict[str, Any]) -> str:
     lines.append(
         "注: 墙位是 OI 真实聚集处(多在整数位),但价格常在墙前几点反转;"
         "先手挡=向现价方向让 30% 距离,成交率高、价格稍差。"
-        "预估价按 delta/gamma 外推,未计时间衰减;保守价≈预估×0.85。仅供参考,不是订单指令。"
+        "预估价按 BS 重定价,已计触达前的时间衰减与 vol 斜率(跌到位 IV 上抬/涨到位 IV 回落);"
+        "保守价≈预估×0.85。"
+        "提醒: 0DTE 权利金随时间单边衰减,纯权利金限价单可能在指数未到位时就被时间衰减打成;"
+        "要严格按点位入场,用指数条件单(SPX 到 XX 触发限价)更精确。仅供参考,不是订单指令。"
     )
 
     warnings = payload.get("warnings")
@@ -803,7 +979,8 @@ def build_order_prompt(
             "然后 1-2 行墙位阶梯解读（数据在 wall_ladder 字段，OI 定位）：不要只说单一墙位——若相邻几档 put 墙 OI 接近（差距在三成以内），要说成一条支撑带（如『7460-7500 是一条支撑带，7500 破了下一档在 7480/7460』）；反之若第一档独大，才说单点硬墙。call 侧同理。",
             "rn_density 是 B-L 风险中性收盘分布（市场用真金白银定价的收盘概率）：中位数是市场认为的收盘中枢，80% 区间(p10-p90)之外是市场只给 20% 的尾部；给垂直价差选腿时引用它——买腿放在赌的方向内、卖腿放在 80% 区间外沿附近最划算；quality 非 ok 时注明并降权。",
             "然后逐条 play（最多 3 条，每条 2-3 行）：",
-            "- 给墙位价与先手挡价（数字取自模板），并说取舍：墙位价更便宜但常在墙前几点反转吃不到，先手挡成交率更高；",
+            "- 给墙位价与先手挡价（数字取自模板），并说取舍：墙位价更便宜但常在墙前几点反转吃不到，先手挡成交率更高；预估价已含触达前的时间衰减与 vol 斜率(BS 重定价)，比现价低不代表便宜，是时间价值正常流失；",
+            "- 对 resting_limit 的 play 提醒一句：0DTE 纯权利金限价可能因时间衰减在指数未到位时提前成交，严格按点位入场应改用指数条件单(SPX 触及 XX 时下限价)；",
             "- 给赔率判断：把触达概率、到位预估价、现价放在一起，说这笔单在赌一次多大概率的什么事件、期权价从现价到预估价的变化幅度是否配得上这个概率；",
             "- order_style=stop_trigger 的必须提醒：预估价高于现价，提前挂被动限价会立即按市价成交，应等破位确认后用条件单。",
             "最后 2-3 行 if/then 剧本：开盘前参考价/ES 走到哪些具体位置时，哪张挂单的赔率变差该撤或改价，哪个剧本作废。",

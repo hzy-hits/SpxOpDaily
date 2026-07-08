@@ -32,9 +32,11 @@ from spx_spark.order_map import (
     mark_sent,
     material_changes,
     minutes_to_open,
+    expiry_close_utc,
     option_tick,
     payload_fingerprint,
     project_option_price,
+    project_option_price_bs,
     render_status_template,
     render_template,
     round_to_tick,
@@ -251,6 +253,69 @@ def test_project_option_price_call_and_put() -> None:
         target=7500.0,
     )
     assert clamped == 0.05
+
+
+def test_expiry_close_utc_is_4pm_et() -> None:
+    close = expiry_close_utc("20260707")
+    assert close is not None
+    assert close == datetime(2026, 7, 7, 20, 0, tzinfo=timezone.utc)
+    assert expiry_close_utc("garbage") is None
+
+
+def test_bs_projection_accounts_for_time_decay_and_vol_shift() -> None:
+    # Calibration case from the 2026-07-07 session: 14:00 BJT map, ITM 7500C,
+    # spot 7523.5, put wall 7500 touched ~8h later. Taylor said 16.04, the
+    # market printed 12.45 at the touch.
+    tau_now = 14.0 / (365.0 * 24.0)
+    bs_proj = project_option_price_bs(
+        mid=30.75,
+        iv=0.1346,
+        strike=7500.0,
+        right="C",
+        spot=7523.5,
+        target=7500.0,
+        tau_now_years=tau_now,
+        em_points=25.8,
+        slope_per_point=-0.00068,
+    )
+    taylor_proj = project_option_price(30.75, 0.718, 0.006, 7523.5, 7500.0)
+    assert bs_proj is not None
+    # Time decay must pull the BS estimate well below the Taylor one, close
+    # to the observed 12.45.
+    assert bs_proj < taylor_proj
+    assert 11.0 < bs_proj < 14.5
+
+    # Vol shift: with the put-skew slope, a down-move projection prices the
+    # option richer than a pure sticky-strike (no-slope) repricing.
+    no_slope = project_option_price_bs(
+        mid=30.75,
+        iv=0.1346,
+        strike=7500.0,
+        right="C",
+        spot=7523.5,
+        target=7500.0,
+        tau_now_years=tau_now,
+        em_points=25.8,
+        slope_per_point=None,
+    )
+    assert no_slope is not None
+    assert bs_proj > no_slope
+
+    # Missing IV -> caller must fall back to Taylor.
+    assert (
+        project_option_price_bs(
+            mid=30.75,
+            iv=None,
+            strike=7500.0,
+            right="C",
+            spot=7523.5,
+            target=7500.0,
+            tau_now_years=tau_now,
+            em_points=25.8,
+            slope_per_point=None,
+        )
+        is None
+    )
 
 
 def test_build_candidates_produces_three_plays_with_limits() -> None:
