@@ -299,6 +299,45 @@ def test_hyperliquid_proxy_can_trigger_degraded_watch_when_ibkr_feed_is_unavaila
     assert fallback_alerts[0].research_only is False
 
 
+def test_hyperliquid_proxy_watch_fires_when_anchor_closed_but_broker_healthy() -> None:
+    """During the ES maintenance break (or any anchor-dead stretch) the SP500
+    perp is the only live monitor; its moves must alert even when the broker
+    session itself is fine."""
+    now = datetime(2026, 7, 7, 5, 30, tzinfo=BJ_TZ)  # 17:30 ET: ES maintenance break
+    hl = Quote(
+        instrument=InstrumentId(
+            symbol="xyz:SP500",
+            instrument_type=InstrumentType.CRYPTO_PERP,
+        ),
+        provider=Provider.HYPERLIQUID,
+        provider_symbol="xyz:SP500",
+        received_at=now,
+        quality=MarketDataQuality.LIVE,
+        mark=7600.0,
+        close=7500.0,
+        quote_time=now,
+    )
+    healthy = ProviderState(
+        provider=Provider.IBKR,
+        status=ProviderStatus.AVAILABLE,
+        checked_at=now,
+        reason=None,
+        connected=True,
+        authenticated=True,
+        priority=0,
+    )
+    state = make_state(hl, now=now, provider_states=(healthy,))
+    context = build_market_context(state)
+
+    alerts = evaluate_alerts(state, window=active_window(now), market_context=context)
+    fallback_alerts = [alert for alert in alerts if alert.kind == "broker_unavailable_proxy_watch"]
+
+    assert fallback_alerts
+    assert fallback_alerts[0].instrument_id == "index:SPX"
+    assert fallback_alerts[0].research_only is False
+    assert "No live SPX/ES anchor" in fallback_alerts[0].detail
+
+
 def test_ibkr_session_transition_alerts_are_edge_triggered(tmp_path, monkeypatch) -> None:
     state_path = tmp_path / "system-event-state.json"
     monkeypatch.setenv("ALERT_SYSTEM_EVENT_STATE_PATH", str(state_path))

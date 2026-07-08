@@ -779,10 +779,14 @@ def proxy_fallback_watch_alerts(
     gate = hyperliquid_proxy_gate(market_context)
     if gate.get("usable_for_alert") is True:
         return []
+    # "unanchored_context_only" means no live SPX/ES/MES anchor exists. That
+    # happens either because the broker feed is down (session takeover) or
+    # because the anchor markets themselves are closed (e.g. the ES
+    # maintenance break 17:00-18:00 ET). In both cases the SP500 perp is the
+    # only live monitor, so surface its moves instead of going silent.
     if str(gate.get("state") or "") != "unanchored_context_only":
         return []
-    if not ibkr_feed_unavailable_for_fallback(state):
-        return []
+    broker_down = ibkr_feed_unavailable_for_fallback(state)
 
     quote = find_best(state, "crypto_perp:xyz:SP500")
     if quote is None or quote.quality in BAD_QUALITIES:
@@ -806,11 +810,18 @@ def proxy_fallback_watch_alerts(
         return []
 
     direction = "up" if move_bps > 0 else "down"
-    detail = (
-        "Broker SPX/ES feed is unavailable, likely because the trading session is in use. "
-        "Proxy-only monitor moved enough to open the trading device and verify real SPX/SPXW "
-        "quotes before any decision."
-    )
+    if broker_down:
+        detail = (
+            "Broker SPX/ES feed is unavailable, likely because the trading session is in use. "
+            "Proxy-only monitor moved enough to open the trading device and verify real SPX/SPXW "
+            "quotes before any decision."
+        )
+    else:
+        detail = (
+            "No live SPX/ES anchor quotes (session closed or ES maintenance break); "
+            "SP500 perp is the only live monitor and moved enough to notice. "
+            "Verify real SPX/SPXW quotes before any decision."
+        )
     if threshold_source is not None:
         detail = (
             f"{detail} threshold_bps={threshold:.1f} "

@@ -1158,6 +1158,96 @@ def test_notifier_routes_iv_surface_alerts_through_review(tmp_path) -> None:
     assert "--message" not in calls[0]
 
 
+def test_offhours_skew_steepening_bypasses_review_and_severity_floor(tmp_path) -> None:
+    """Off-hours (spxw_sampling_mode=off) sudden vol repricing alerts push
+    directly even when the quiet window stamps them below min_severity."""
+    calls: list[list[str]] = []
+
+    def runner(command: list[str], timeout_seconds: float) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout="{}", stderr="")
+
+    payload = make_payload()
+    payload["window"] = {
+        "name": "quiet_futures_context",
+        "priority": "low",
+        "spxw_sampling_mode": "off",
+    }
+    payload["alerts"] = [
+        {
+            "severity": "low",
+            "kind": "put_skew_steepening_5m",
+            "instrument_id": "iv_surface:SPXW:20260707",
+            "title": "SPXW 20260707 put skew steepening 0.031",
+            "detail": "Put 25-delta skew widened 0.031 vol points.",
+            "quality": "live",
+            "source_gate": "iv_surface",
+            "dedup_group": "up:1",
+        }
+    ]
+    settings = replace(
+        make_settings(str(tmp_path / "notify-state.json")),
+        openclaw_enabled=False,
+        codex_enabled=True,
+    )
+
+    result = notify_payload(
+        payload,
+        settings=settings,
+        runner=runner,
+        now=datetime(2026, 7, 7, 0, 0, tzinfo=timezone.utc),
+    )
+
+    assert result.selected_count == 1
+    assert result.sent_count == 1
+    assert len(calls) == 1
+    assert calls[0][0:3] == ["openclaw", "message", "send"]
+
+
+def test_rth_skew_steepening_still_goes_through_review(tmp_path) -> None:
+    calls: list[list[str]] = []
+
+    def runner(command: list[str], timeout_seconds: float) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout="{}", stderr="")
+
+    payload = make_payload()
+    payload["window"] = {
+        "name": "close_one_hour",
+        "priority": "critical",
+        "spxw_sampling_mode": "human_alert",
+    }
+    payload["alerts"] = [
+        {
+            "severity": "high",
+            "kind": "put_skew_steepening_5m",
+            "instrument_id": "iv_surface:SPXW:20260707",
+            "title": "SPXW 20260707 put skew steepening 0.031",
+            "detail": "Put 25-delta skew widened 0.031 vol points.",
+            "quality": "live",
+            "source_gate": "iv_surface",
+            "dedup_group": "up:1",
+        }
+    ]
+    settings = replace(
+        make_settings(str(tmp_path / "notify-state.json")),
+        openclaw_enabled=False,
+        codex_enabled=True,
+    )
+
+    result = notify_payload(
+        payload,
+        settings=settings,
+        runner=runner,
+        now=datetime(2026, 7, 7, 0, 0, tzinfo=timezone.utc),
+    )
+
+    assert result.selected_count == 1
+    assert len(calls) == 1
+    assert calls[0][1] == "exec"
+    assert "--message" not in calls[0]
+
+
 def test_codex_prompt_hides_non_focus_market_context() -> None:
     prompt = build_codex_prompt(make_payload(), [make_payload()["alerts"][0]])
 

@@ -66,10 +66,34 @@ POSITION_DIRECT_PUSH_KINDS = frozenset(
     }
 )
 
-# IV-surface movement alerts (put skew steepening, ATM IV jumps, surface
-# shifts) intentionally go through the agent review path instead of direct
-# push: raw single-metric pushes were too noisy and carried no gamma/VIX
-# context. Only position events and IBKR session events bypass review.
+# During RTH, IV-surface movement alerts (put skew steepening, ATM IV jumps,
+# surface shifts) go through the agent review path instead of direct push:
+# raw single-metric pushes were too noisy and carried no gamma/VIX context.
+# Off-hours (spxw_sampling_mode == "off") the review layer plus the low
+# window priority silently dropped these leading signals, so sudden vol
+# repricing kinds bypass review and push directly in those windows.
+OFFHOURS_DIRECT_PUSH_VOL_KINDS = frozenset(
+    {
+        "put_skew_steepening_5m",
+        "atm_iv_jump_5m",
+    }
+)
+
+
+def payload_spxw_sampling_off(payload: dict[str, object]) -> bool:
+    window = payload.get("window")
+    if not isinstance(window, dict):
+        return False
+    return str(window.get("spxw_sampling_mode") or "") == "off"
+
+
+def is_offhours_vol_signal_alert(
+    alert: dict[str, object], payload: dict[str, object]
+) -> bool:
+    return (
+        str(alert.get("kind") or "") in OFFHOURS_DIRECT_PUSH_VOL_KINDS
+        and payload_spxw_sampling_off(payload)
+    )
 
 
 def severity_value(value: object) -> int:
@@ -110,11 +134,17 @@ def is_position_holding_alert(alert: dict[str, object]) -> bool:
     return str(alert.get("source_gate") or "") == POSITION_HOLDING_SOURCE_GATE
 
 
-def direct_push_alerts(alerts: list[dict[str, object]]) -> list[dict[str, object]]:
+def direct_push_alerts(
+    alerts: list[dict[str, object]],
+    payload: dict[str, object] | None = None,
+) -> list[dict[str, object]]:
+    payload = payload or {}
     return [
         alert
         for alert in alerts
-        if is_system_event_alert(alert) or is_position_holding_alert(alert)
+        if is_system_event_alert(alert)
+        or is_position_holding_alert(alert)
+        or is_offhours_vol_signal_alert(alert, payload)
     ]
 
 

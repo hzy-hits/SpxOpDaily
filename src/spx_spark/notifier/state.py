@@ -5,7 +5,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from spx_spark.config import NotificationSettings
-from spx_spark.notifier.policy import alert_key, is_human_visible_alert, severity_value
+from spx_spark.notifier.policy import (
+    alert_key,
+    is_human_visible_alert,
+    is_offhours_vol_signal_alert,
+    severity_value,
+)
 
 
 def load_sent_state(path: str) -> dict[str, float]:
@@ -55,7 +60,12 @@ def select_alerts_for_notification(
             continue
         if not is_human_visible_alert(alert):
             continue
-        if severity_value(alert.get("severity")) < min_rank:
+        # Off-hours vol repricing signals bypass the severity floor: quiet
+        # windows stamp them low/medium, which used to filter them out here
+        # before the direct-push path could see them.
+        if severity_value(alert.get("severity")) < min_rank and not is_offhours_vol_signal_alert(
+            alert, payload
+        ):
             continue
         key = alert_key(alert)
         previous_ts = sent_at_by_key.get(key)

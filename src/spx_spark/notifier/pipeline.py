@@ -229,7 +229,7 @@ def notify_payload(
             sinks.append(digest_result)
 
     message = format_alert_message(payload, selected)
-    bypass_alerts = direct_push_alerts(selected)
+    bypass_alerts = direct_push_alerts(selected, payload)
     review_candidates = [alert for alert in selected if alert not in bypass_alerts]
     alerts_marked_sent: list[dict[str, object]] = []
     if settings.openclaw_enabled:
@@ -269,6 +269,14 @@ def notify_payload(
             )
             sinks.append(bark_result)
             delivered_ok = delivered_ok or bark_result.ok
+        if settings.bark_friend_enabled and alerts_are_market_signals(bypass_alerts):
+            sinks.append(
+                send_bark_friend_message(
+                    settings,
+                    bark_title_for_alerts(bypass_alerts),
+                    bypass_message,
+                )
+            )
         if delivered_ok:
             alerts_marked_sent = list(bypass_alerts)
 
