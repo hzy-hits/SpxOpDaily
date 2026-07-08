@@ -608,8 +608,8 @@ class NotificationSettings:
     deepseek_url: str = "https://api.deepseek.com/v1/chat/completions"
     deepseek_env_file: str = "/home/ubuntu/.hermes/.env"
     deepseek_timeout_seconds: float = 30.0
-    deepseek_max_tokens: int = 1800
-    deepseek_output_max_chars: int = 1800
+    deepseek_max_tokens: int = 6400
+    deepseek_output_max_chars: int = 6400
     deepseek_temperature: float = 0.1
     review_min_time_sensitive_score: float = 30.0
     bark_enabled: bool = False
@@ -680,8 +680,8 @@ class NotificationSettings:
                 "/home/ubuntu/.hermes/.env",
             ),
             deepseek_timeout_seconds=env_float("ALERT_NOTIFY_DEEPSEEK_TIMEOUT_SECONDS", 30.0),
-            deepseek_max_tokens=env_int("ALERT_NOTIFY_DEEPSEEK_MAX_TOKENS", 1800),
-            deepseek_output_max_chars=env_int("ALERT_NOTIFY_DEEPSEEK_OUTPUT_MAX_CHARS", 1800),
+            deepseek_max_tokens=env_int("ALERT_NOTIFY_DEEPSEEK_MAX_TOKENS", 6400),
+            deepseek_output_max_chars=env_int("ALERT_NOTIFY_DEEPSEEK_OUTPUT_MAX_CHARS", 6400),
             deepseek_temperature=env_float("ALERT_NOTIFY_DEEPSEEK_TEMPERATURE", 0.1),
             review_min_time_sensitive_score=env_float(
                 "ALERT_REVIEW_MIN_TIME_SENSITIVE_SCORE",
