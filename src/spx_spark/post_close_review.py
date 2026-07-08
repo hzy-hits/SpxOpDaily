@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from spx_spark.config import NY_TZ, NotificationSettings, StorageSettings, env_bool, load_dotenv
+from spx_spark.notifier.llm_writer import DEFAULT_SYSTEM_PROMPT
 from spx_spark.notifier.missed_queue import append_missed
 from spx_spark.notifier.model import CommandRunner, default_runner
 from spx_spark.notifier.sinks import (
@@ -616,10 +617,9 @@ def call_deepseek_writer(
         "messages": [
             {
                 "role": "system",
-                "content": (
-                    "你是资深 SPX 期权自营交易员，只依据提供的事实写复盘，数字照抄不改写，"
-                    "有判断直说，不写套话和免责声明。"
-                ),
+                # Same master-to-apprentice doctrine as the intraday writers so the
+                # review carries the identical trading philosophy and voice.
+                "content": DEFAULT_SYSTEM_PROMPT,
             },
             {"role": "user", "content": build_llm_writer_prompt(payload, deterministic_markdown)},
         ],
