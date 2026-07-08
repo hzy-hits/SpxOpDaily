@@ -188,6 +188,24 @@ def test_estimate_atm_reference_prefers_spx_over_cfd():
     assert source == "SPX"
 
 
+def test_estimate_atm_reference_skips_stale_spx_for_fresh_es():
+    # Off-hours SPX still carries yesterday's close but is flagged stale; the
+    # strike window must recenter on a live source instead.
+    spx_row = VerifyRow(label="index:SPX", kind="index", symbol="SPX", last=7505.0, stale=True)
+    es_row = VerifyRow(label="future:ES", kind="future", symbol="ES", last=7455.0, stale=False)
+
+    reference, source = estimate_atm_reference([spx_row, es_row])
+
+    assert reference == 7455.0
+    assert source == "ES"
+
+    # With every source stale, fall back to the priority order so a plan
+    # still exists at startup.
+    reference, source = estimate_atm_reference([spx_row])
+    assert reference == 7505.0
+    assert source == "SPX_stale"
+
+
 def test_provider_state_from_quotes_marks_available_without_errors():
     received_at = datetime(2026, 7, 6, 13, 30, tzinfo=timezone.utc)
     row = VerifyRow(

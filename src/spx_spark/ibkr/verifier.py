@@ -445,32 +445,34 @@ def midpoint(bid: float | None, ask: float | None) -> float | None:
 
 
 def estimate_atm_reference(rows: list[VerifyRow]) -> tuple[float | None, str]:
+    """SPX-scale reference for centering the option strike window.
+
+    Fresh rows win over the priority order: outside cash hours SPX still
+    carries yesterday's close, and centering on it left the 2026-07-08
+    overnight session subscribed 70 points above the market (put walls then
+    jumped between rotation slices). Stale rows are only a last resort so a
+    plan can exist right after startup.
+    """
     by_label = {row.label: row for row in rows}
-
-    spx = by_label.get("index:SPX")
-    if spx:
-        price = first_present(spx.market_price, spx.last, midpoint(spx.bid, spx.ask), spx.close)
-        if price:
-            return price, "SPX"
-
-    es = by_label.get("future:ES")
-    if es:
-        price = first_present(es.market_price, es.last, midpoint(es.bid, es.ask), es.close)
-        if price:
-            return price, "ES"
-
     # IBUS500 is IBKR's S&P 500 index CFD and quotes at the cash index level.
-    cfd = by_label.get("cfd:IBUS500")
-    if cfd:
-        price = first_present(cfd.market_price, cfd.last, midpoint(cfd.bid, cfd.ask), cfd.close)
-        if price:
-            return price, "IBUS500"
-
-    spy = by_label.get("stock:SPY")
-    if spy:
-        price = first_present(spy.market_price, spy.last, midpoint(spy.bid, spy.ask), spy.close)
-        if price:
-            return price * 10.0, "SPY*10"
+    candidates = (
+        ("index:SPX", 1.0, "SPX"),
+        ("future:ES", 1.0, "ES"),
+        ("cfd:IBUS500", 1.0, "IBUS500"),
+        ("stock:SPY", 10.0, "SPY*10"),
+    )
+    for require_fresh in (True, False):
+        for label, multiplier, name in candidates:
+            row = by_label.get(label)
+            if row is None:
+                continue
+            if require_fresh and row.stale is True:
+                continue
+            price = first_present(
+                row.market_price, row.last, midpoint(row.bid, row.ask), row.close
+            )
+            if price:
+                return price * multiplier, name if require_fresh else f"{name}_stale"
 
     return None, "none"
 

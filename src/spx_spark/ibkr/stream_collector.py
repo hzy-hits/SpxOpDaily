@@ -362,6 +362,41 @@ def merge_slow_rows(
     return rows
 
 
+OPTION_CACHE_TTL_SECONDS = 900.0
+
+
+def update_option_cache(
+    cache: dict[str, tuple[float, VerifyRow]],
+    rows: list[VerifyRow],
+    *,
+    now_monotonic: float,
+    expiry: str | None,
+    ttl_seconds: float = OPTION_CACHE_TTL_SECONDS,
+) -> None:
+    """Remember the latest row per rotated option; evict expired/rolled rows."""
+    for row in rows:
+        if row.kind != "option" or not row.subscribed:
+            continue
+        cache[row.label] = (now_monotonic, row)
+    expired = [
+        label
+        for label, (cached_at, row) in cache.items()
+        if now_monotonic - cached_at > ttl_seconds
+        or (expiry is not None and f":{expiry}:" not in label)
+    ]
+    for label in expired:
+        del cache[label]
+
+
+def merge_cached_option_rows(
+    rows: list[VerifyRow],
+    cache: dict[str, tuple[float, VerifyRow]],
+    subscribed_labels: set[str],
+) -> list[VerifyRow]:
+    rows.extend(row for label, (_, row) in cache.items() if label not in subscribed_labels)
+    return rows
+
+
 class StreamCollector:
     """Owns the long-lived IB connection and subscription lifecycle."""
 
@@ -400,6 +435,11 @@ class StreamCollector:
         self.slow_cache: dict[str, VerifyRow] = {}
         self.last_slow_poll = 0.0
         self.slow_contracts: list[tuple[str, str, Any]] = []
+        # Rotated option rows linger here between their subscription windows so
+        # every flush carries the full chain, not just the current slice.
+        # Without this, walls/GEX are computed on a shifting 1/N subset of
+        # strikes and jump from push to push.
+        self.option_cache: dict[str, tuple[float, VerifyRow]] = {}
 
         ib.errorEvent += self._on_error
 
@@ -597,6 +637,13 @@ class StreamCollector:
             slow_index_labels=self.ibkr_settings.slow_index_labels,
         )
         merge_slow_rows(rows, self.slow_cache, set(subscriptions))
+        update_option_cache(
+            self.option_cache,
+            rows,
+            now_monotonic=time.monotonic(),
+            expiry=self.option_plan.expiry if self.option_plan is not None else None,
+        )
+        merge_cached_option_rows(rows, self.option_cache, set(subscriptions))
         snapshot = snapshot_from_rows(
             rows,
             received_at=received_at,

@@ -9,8 +9,10 @@ from spx_spark.ibkr.stream_collector import (
     StreamAction,
     build_option_subscription_plan,
     decide_after_flush,
+    merge_cached_option_rows,
     option_spec_label,
     should_replan,
+    update_option_cache,
 )
 from spx_spark.sampling import OptionContractSpec
 
@@ -115,6 +117,59 @@ def test_option_plan_rotations_cover_full_window():
     all_strikes = rotation_strikes | hot_strikes
     assert min(all_strikes) == 7300
     assert max(all_strikes) == 7700
+
+
+def _option_row(label: str, *, subscribed: bool = True) -> VerifyRow:
+    return VerifyRow(label=label, kind="option", symbol="SPX", subscribed=subscribed)
+
+
+def test_option_cache_carries_rotated_strikes_across_flushes():
+    cache: dict[str, tuple[float, VerifyRow]] = {}
+    slice_a = [_option_row("option:SPXW:20260708:7350:P"), _option_row("option:SPXW:20260708:7350:C")]
+    update_option_cache(cache, slice_a, now_monotonic=100.0, expiry="20260708")
+
+    # Next flush: rotation moved on to another slice; 7350 must still be
+    # merged so walls see the whole chain, not the live slice only.
+    slice_b = [_option_row("option:SPXW:20260708:7550:P")]
+    update_option_cache(cache, slice_b, now_monotonic=105.0, expiry="20260708")
+    rows = merge_cached_option_rows(list(slice_b), cache, {"option:SPXW:20260708:7550:P"})
+    labels = {row.label for row in rows}
+    assert "option:SPXW:20260708:7350:P" in labels
+    assert "option:SPXW:20260708:7350:C" in labels
+    # No duplicate for the currently subscribed label.
+    assert sum(1 for row in rows if row.label == "option:SPXW:20260708:7550:P") == 1
+
+
+def test_option_cache_evicts_expired_and_rolled_expiry_rows():
+    cache: dict[str, tuple[float, VerifyRow]] = {}
+    update_option_cache(
+        cache,
+        [_option_row("option:SPXW:20260708:7350:P")],
+        now_monotonic=0.0,
+        expiry="20260708",
+    )
+    # Past TTL -> evicted.
+    update_option_cache(cache, [], now_monotonic=901.0, expiry="20260708")
+    assert not cache
+
+    update_option_cache(
+        cache,
+        [_option_row("option:SPXW:20260708:7350:P")],
+        now_monotonic=1000.0,
+        expiry="20260708",
+    )
+    # Expiry rollover -> old-expiry rows dropped.
+    update_option_cache(cache, [], now_monotonic=1001.0, expiry="20260709")
+    assert not cache
+
+    # Unsubscribed rows (failed subscriptions) never enter the cache.
+    update_option_cache(
+        cache,
+        [_option_row("option:SPXW:20260709:7400:P", subscribed=False)],
+        now_monotonic=1002.0,
+        expiry="20260709",
+    )
+    assert not cache
 
 
 def test_should_replan_triggers_on_drift_and_expiry_roll():

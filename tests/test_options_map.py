@@ -24,6 +24,7 @@ from spx_spark.options_map import (
     interpolated_atm_iv,
     pair_by_strike,
     signed_gex,
+    structure_quality_ok,
     wing_iv_at_delta,
     zero_gamma_spot_scan,
 )
@@ -167,6 +168,45 @@ def _gex_row(
         call_open_interest=call_oi,
         put_open_interest=put_oi,
     )
+
+
+def test_structure_quality_tolerates_recent_stale_but_not_hard_bad() -> None:
+    from dataclasses import replace as dc_replace
+
+    now = datetime(2026, 7, 8, 14, 0, tzinfo=timezone.utc)
+    quote = make_option(
+        expiry="20260708",
+        strike=7350.0,
+        right="P",
+        mark=5.0,
+        iv=0.2,
+        gamma=0.004,
+        open_interest=1200.0,
+        now=now,
+    )
+    # Rotated strike sampled 5 minutes ago and degraded to STALE: still fine
+    # for OI/gamma structure (walls), which do not move tick by tick.
+    recent_stale = dc_replace(
+        quote,
+        quality=MarketDataQuality.STALE,
+        quote_time=now - timedelta(minutes=5),
+        received_at=now - timedelta(minutes=5),
+    )
+    assert structure_quality_ok(recent_stale, as_of=now) is True
+    assert signed_gex(recent_stale, sign=-1.0, underlier=7438.0) is not None
+
+    # Too old: excluded.
+    old_stale = dc_replace(
+        quote,
+        quality=MarketDataQuality.STALE,
+        quote_time=now - timedelta(hours=1),
+        received_at=now - timedelta(hours=1),
+    )
+    assert structure_quality_ok(old_stale, as_of=now) is False
+
+    # Hard-bad qualities never pass regardless of age.
+    missing = dc_replace(quote, quality=MarketDataQuality.MISSING, quote_time=now)
+    assert structure_quality_ok(missing, as_of=now) is False
 
 
 def test_build_wall_ladder_is_side_constrained_and_ranked() -> None:

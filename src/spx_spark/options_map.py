@@ -5,7 +5,7 @@ import json
 import math
 from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass
-from datetime import datetime, time as dt_time
+from datetime import datetime, time as dt_time, timezone
 from typing import Any
 
 from spx_spark.config import StorageSettings, default_spxw_expiry, NY_TZ
@@ -298,6 +298,40 @@ def option_gamma(quote: Quote) -> float | None:
     return value if value is not None and value > 0 else None
 
 
+# Structural features (GEX walls, zero gamma) are built from OI and gamma,
+# which do not move tick by tick: OI is fixed intraday and gamma drifts slowly
+# for non-ATM strikes. The stream collector rotates far strikes through a
+# limited line budget, so their quotes are naturally 1-15 minutes old. Walls
+# must not jump around depending on which rotation slice happens to be live —
+# that is exactly the 2026-07-08 put-wall 7475→7325→7425 seesaw.
+STRUCTURE_MAX_AGE_SECONDS = 900.0
+
+_HARD_BAD_QUALITIES = {
+    MarketDataQuality.MISSING,
+    MarketDataQuality.ERROR,
+    MarketDataQuality.UNKNOWN,
+}
+
+
+def structure_quality_ok(quote: Quote, *, as_of: datetime | None = None) -> bool:
+    """Quality gate for structure features: stale-but-recent samples pass."""
+    if quote.quality not in BAD_QUALITIES:
+        return True
+    if quote.quality in _HARD_BAD_QUALITIES:
+        return False
+    age_ms = quote.quote_age_ms(as_of or datetime.now(tz=timezone.utc))
+    if age_ms is None:
+        return False
+    return age_ms <= STRUCTURE_MAX_AGE_SECONDS * 1000.0
+
+
+def option_gamma_structural(quote: Quote, *, as_of: datetime | None = None) -> float | None:
+    if quote.greeks is None or not structure_quality_ok(quote, as_of=as_of):
+        return None
+    value = finite_float(quote.greeks.gamma)
+    return value if value is not None and value > 0 else None
+
+
 def usable_delta(quote: Quote | None) -> float | None:
     if quote is None or quote.quality in BAD_QUALITIES or quote.greeks is None:
         return None
@@ -502,7 +536,7 @@ def gex_weight(quote: Quote, *, intraday: bool) -> float | None:
 
 
 def signed_gex(quote: Quote, *, sign: float, underlier: float, intraday: bool = False) -> float | None:
-    gamma = option_gamma(quote)
+    gamma = option_gamma_structural(quote)
     weight = gex_weight(quote, intraday=intraday)
     if gamma is None or weight is None:
         return None
