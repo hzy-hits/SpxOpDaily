@@ -6,7 +6,7 @@ import math
 import os
 import time as time_module
 from dataclasses import asdict, dataclass
-from datetime import datetime, time, timezone
+from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -687,6 +687,182 @@ def _index_value(state: LatestState, canonical_id: str) -> float | None:
     return finite_float(quote.effective_price)
 
 
+# --- ES volume pace: cumulative day volume differenced between order-map runs.
+# SPX itself never prints volume (it is an index), so ES is the volume proxy.
+# The signal compares the latest window's contracts/minute against the median
+# pace of the preceding sampled windows (adapts to overnight-vs-RTH regimes);
+# with too little history it falls back to the whole-session average pace. ---
+
+ES_VOLUME_SESSION_OPEN_ET = time(18, 0)
+ES_VOLUME_MIN_WINDOW_MINUTES = 3.0
+ES_VOLUME_MAX_WINDOW_MINUTES = 120.0
+ES_VOLUME_ELEVATED_RATIO = 1.5
+ES_VOLUME_QUIET_RATIO = 0.5
+ES_VOLUME_MAX_SAMPLES = 16
+ES_VOLUME_MAX_QUOTE_AGE_SECONDS = 900.0
+
+
+def default_es_volume_sample_path(settings: StorageSettings) -> str:
+    return os.getenv("SPX_ES_VOLUME_SAMPLE_PATH") or str(
+        Path(settings.data_root) / "latest" / "es_volume_samples.json"
+    )
+
+
+def load_es_volume_samples(path: str) -> list[dict[str, Any]]:
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    samples = payload.get("samples") if isinstance(payload, dict) else None
+    return [item for item in samples or [] if isinstance(item, dict)]
+
+
+def save_es_volume_samples(path: str, samples: list[dict[str, Any]]) -> None:
+    file_path = Path(path)
+    try:
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        file_path.write_text(
+            json.dumps({"samples": samples[-ES_VOLUME_MAX_SAMPLES:]}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
+
+
+def es_session_elapsed_minutes(now: datetime) -> float | None:
+    """Minutes since the current Globex session opened (18:00 ET)."""
+    local = now.astimezone(NY_TZ)
+    session_open = local.replace(hour=18, minute=0, second=0, microsecond=0)
+    if local.time() < ES_VOLUME_SESSION_OPEN_ET:
+        session_open -= timedelta(days=1)
+    elapsed = (local - session_open).total_seconds() / 60.0
+    return elapsed if elapsed > 1.0 else None
+
+
+def _parse_sample(sample: dict[str, Any]) -> tuple[datetime, float] | None:
+    volume = finite_float(sample.get("volume"))
+    at_raw = sample.get("at")
+    if volume is None or volume <= 0 or not isinstance(at_raw, str):
+        return None
+    try:
+        at = datetime.fromisoformat(at_raw)
+    except ValueError:
+        return None
+    if at.tzinfo is None:
+        at = at.replace(tzinfo=timezone.utc)
+    return at, volume
+
+
+def _window_paces(points: list[tuple[datetime, float]]) -> list[float]:
+    """Contracts/minute for each valid consecutive sample pair."""
+    paces: list[float] = []
+    for (prev_at, prev_volume), (cur_at, cur_volume) in zip(points, points[1:]):
+        minutes = (cur_at - prev_at).total_seconds() / 60.0
+        if not (ES_VOLUME_MIN_WINDOW_MINUTES <= minutes <= ES_VOLUME_MAX_WINDOW_MINUTES):
+            continue
+        if cur_volume < prev_volume:  # session rollover inside the pair
+            continue
+        paces.append((cur_volume - prev_volume) / minutes)
+    return paces
+
+
+def es_volume_signal(
+    cumulative: float | None,
+    samples: list[dict[str, Any]],
+    *,
+    now: datetime,
+) -> dict[str, Any] | None:
+    if cumulative is None or cumulative <= 0:
+        return None
+    signal: dict[str, Any] = {
+        "cumulative": cumulative,
+        "delta": None,
+        "window_minutes": None,
+        "recent_pace_per_min": None,
+        "baseline_pace_per_min": None,
+        "baseline": None,
+        "pace_ratio": None,
+        "label": "no_baseline",
+    }
+    points = [parsed for sample in samples if (parsed := _parse_sample(sample)) is not None]
+    points.sort(key=lambda item: item[0])
+    if not points:
+        return signal
+    last_at, last_volume = points[-1]
+    if cumulative < last_volume:
+        signal["label"] = "session_reset"
+        return signal
+    window_minutes = (now - last_at).total_seconds() / 60.0
+    if not (ES_VOLUME_MIN_WINDOW_MINUTES <= window_minutes <= ES_VOLUME_MAX_WINDOW_MINUTES):
+        return signal
+    delta = cumulative - last_volume
+    recent_pace = delta / window_minutes
+
+    history_paces = _window_paces(points)
+    if len(history_paces) >= 2:
+        ordered = sorted(history_paces)
+        mid = len(ordered) // 2
+        baseline = (
+            ordered[mid] if len(ordered) % 2 == 1 else (ordered[mid - 1] + ordered[mid]) / 2.0
+        )
+        baseline_name = "recent_windows"
+    else:
+        elapsed = es_session_elapsed_minutes(now)
+        if elapsed is None:
+            return signal
+        baseline = cumulative / elapsed
+        baseline_name = "session_average"
+    if baseline <= 0:
+        return signal
+
+    ratio = recent_pace / baseline
+    if ratio >= ES_VOLUME_ELEVATED_RATIO:
+        label = "elevated"
+    elif ratio <= ES_VOLUME_QUIET_RATIO:
+        label = "quiet"
+    else:
+        label = "normal"
+    signal.update(
+        {
+            "delta": round(delta),
+            "window_minutes": round(window_minutes, 1),
+            "recent_pace_per_min": round(recent_pace, 1),
+            "baseline_pace_per_min": round(baseline, 1),
+            "baseline": baseline_name,
+            "pace_ratio": round(ratio, 2),
+            "label": label,
+        }
+    )
+    return signal
+
+
+def attach_es_volume_signal(
+    payload: dict[str, Any],
+    state: LatestState,
+    *,
+    sample_path: str,
+    now: datetime,
+    persist: bool = True,
+) -> None:
+    """Compute the ES volume pace signal and append the new sample.
+
+    Side-effectful on purpose (appends to the sample file), so it runs once per
+    push at the call site instead of inside the pure payload builder that the
+    thin-snapshot retry loop may invoke several times.
+    """
+    quote = state.best_quote("future:ES")
+    cumulative = finite_float(quote.volume) if quote is not None else None
+    age_ms = quote.quote_age_ms(now) if quote is not None else None
+    if age_ms is not None and age_ms > ES_VOLUME_MAX_QUOTE_AGE_SECONDS * 1000.0:
+        # Frozen feed: a zero delta would read as "quiet" when it is just no data.
+        cumulative = None
+    samples = load_es_volume_samples(sample_path)
+    payload["es_volume"] = es_volume_signal(cumulative, samples, now=now)
+    if persist and cumulative is not None:
+        samples.append({"at": now.isoformat(), "volume": cumulative})
+        save_es_volume_samples(sample_path, samples)
+
+
 def build_order_payload(state: LatestState, *, now: datetime | None = None) -> dict[str, Any]:
     now = now or state.as_of
     options_map = build_options_map(state)
@@ -793,13 +969,21 @@ def build_order_payload_with_retry(
     outlast those.
     """
     payload: dict[str, Any] = {}
+    state: LatestState | None = None
     for attempt in range(attempts):
         state = LatestStateStore(storage_settings).load()
         payload = build_order_payload(state, now=now)
         if not _payload_is_thin(payload):
-            return payload
+            break
         if attempt < attempts - 1:
             time_module.sleep(delay_seconds)
+    if state is not None:
+        attach_es_volume_signal(
+            payload,
+            state,
+            sample_path=default_es_volume_sample_path(storage_settings),
+            now=now,
+        )
     return payload
 
 
@@ -811,6 +995,30 @@ def _day_move_line(payload: dict[str, Any]) -> str | None:
     em_used = day_move.get("em_used_fraction")
     em_text = f",已用当日预期波幅的 {em_used:.0%}" if isinstance(em_used, (int, float)) else ""
     return f"较昨收: {points:+.1f} 点{em_text}"
+
+
+ES_VOLUME_LABEL_TEXT = {
+    "elevated": "放量",
+    "quiet": "缩量",
+    "normal": "正常",
+}
+
+
+def _es_volume_line(payload: dict[str, Any]) -> str | None:
+    signal = payload.get("es_volume") if isinstance(payload.get("es_volume"), dict) else None
+    if not signal:
+        return None
+    ratio = signal.get("pace_ratio")
+    delta = signal.get("delta")
+    window = signal.get("window_minutes")
+    if ratio is None or delta is None or window is None:
+        return None
+    label = ES_VOLUME_LABEL_TEXT.get(str(signal.get("label")), "正常")
+    baseline_text = "近几窗" if signal.get("baseline") == "recent_windows" else "当日均值"
+    return (
+        f"ES 量能: 最近{window:.0f}分钟 {int(delta):,} 手, "
+        f"节奏为{baseline_text}的 {ratio:.1f} 倍({label})"
+    )
 
 
 def _rn_density_line(payload: dict[str, Any]) -> str | None:
@@ -903,6 +1111,9 @@ def render_template(payload: dict[str, Any]) -> str:
     day_move_line = _day_move_line(payload)
     if day_move_line:
         lines.append(day_move_line)
+    es_volume_line = _es_volume_line(payload)
+    if es_volume_line:
+        lines.append(es_volume_line)
     ladder_lines = _wall_ladder_lines(payload)
     lines.extend(ladder_lines)
     density_line = _rn_density_line(payload)
@@ -993,6 +1204,8 @@ def build_order_prompt(
             "- order_style=stop_trigger 必须提醒：预估价高于现价，预挂被动限价会立即成交，等破位确认后用条件单。",
             "",
             "最后 2-3 行 if/then：开盘前参考价/ES 走到哪些具体位置，哪张单赔率变差该撤或改价，哪个剧本作废——这就是这张图的证伪条件。",
+            "es_volume 可用且 label 非 no_baseline/session_reset 时，把量能节奏当确认维度：关键位的破位要配放量(节奏 ≥1.5 倍)才算数，"
+            "缩量磨过去的位置多半会收回来。",
             "day_move.em_used_fraction ≥ 0.7 时点明：日内已走完预期波幅的多少，顺方向追单赔率差；挂单纪律是等价格来找你，不去半路追它。",
             "previous_push 是上一条推送正文；关键位相对它有实质变化就在定调处说『剧本有变』并指出哪张单要改，没变化不必提。",
             "previous_push:" + previous_push_json(previous_push),
@@ -1247,6 +1460,7 @@ def render_status_template(
         ),
         f"关键位: {_level_probs_line(payload)}",
         *( [line] if (line := _day_move_line(payload)) else [] ),
+        *( [line] if (line := _es_volume_line(payload)) else [] ),
         *_wall_ladder_lines(payload),
         *( [line] if (line := _rn_density_line(payload)) else [] ),
         (
@@ -1288,6 +1502,8 @@ def build_status_prompt(
             "- 赔率：三张挂单的触达概率各多少、相对上一条谁在改善谁在恶化(引用具体百分比变化)，此刻哪张性价比最高、为什么；",
             "- 市场定价对照(rn_density quality=ok 时)：市场把收盘定价在哪个中位、80% 区间在哪，当前价格相对它偏回归还是已到尾部；",
             "- vol：VIX1D/VIX 说明今天的 vol 卖得贵还是便宜，SKEW 异常时说明谁在抢保护；",
+            "- 量能确认(es_volume 可用时)：ES 最近窗口的成交节奏是唯一的量能维度——破位/突破伴随节奏 ≥1.5 倍(放量)才可信，"
+            "缩量磨到关键位多半是假摔或流动性真空漂移，不值得当破位对待；label=no_baseline/session_reset 时不引用；",
             "- 双向 if/then：上行到哪个具体位置、下行到哪个具体位置，分别哪张单该撤/改价、哪个剧本激活——这也是你这个判断的证伪条件；",
             "- 情绪拦截(违反即失职)：价格在中间地带就写明『此处不追单，计划位在 XX/XX』；day_move.em_used_fraction ≥ 0.7 就写明"
             "『日内已走完预期波幅的 X%，顺方向追单赔率差』；价格进 put 墙支撑带就写明『计划中的接多区不是恐慌区，防守只在跌破 XX 后执行』，"
@@ -1296,8 +1512,8 @@ def build_status_prompt(
             "倒数第二段固定是『挂单参考』段，3-6 行：从模板的挂单地图部分逐字引用每张单的合约、墙位限价、先手挡价、触达概率，"
             "数字照抄不改写；stop_trigger 的 play 保留『勿预挂限价、用指数条件单』提醒；限价相对上一条有变化就点出方向。",
             "最后 1 行：到下条推送之间最值得盯的一个量，以及它变到什么程度你会改判断；"
-            "这个量必须是本系统数据里有的(参考价/触达概率/gamma 状态/墙位 OI/VIX/VIX1D)，"
-            "不要让搭档去盯我们不推送的量(如分时成交量、内盘外盘)。",
+            "这个量必须是本系统数据里有的(参考价/触达概率/gamma 状态/墙位 OI/VIX/VIX1D/ES 量能节奏)，"
+            "不要让搭档去盯我们不推送的量(如内盘外盘)。",
             "",
             "剧本维持时照样给完整读数，别因为『没变』缩成三行；也别硬编不存在的变化，数字平稳就说平稳。",
             "previous_push:" + previous_push_json(previous_push),

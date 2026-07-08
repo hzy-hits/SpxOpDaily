@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import math
 import subprocess
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -28,6 +28,8 @@ from spx_spark.order_map import (
     build_candidates,
     build_order_payload,
     chain_implied_spot,
+    es_session_elapsed_minutes,
+    es_volume_signal,
     frontrun_level_for,
     mark_sent,
     material_changes,
@@ -997,3 +999,103 @@ def test_build_order_payload_shape() -> None:
     assert "underlier" in payload
     assert "candidates" in payload
     assert "warnings" in payload
+
+
+def _volume_sample(at: datetime, volume: float) -> dict[str, object]:
+    return {"at": at.isoformat(), "volume": volume}
+
+
+def test_es_volume_signal_needs_history_for_a_label() -> None:
+    now = datetime(2026, 7, 8, 15, 0, tzinfo=timezone.utc)
+    signal = es_volume_signal(1_000_000.0, [], now=now)
+    assert signal is not None
+    assert signal["label"] == "no_baseline"
+    assert signal["delta"] is None
+    assert es_volume_signal(None, [], now=now) is None
+
+
+def test_es_volume_signal_session_average_fallback_flags_elevated() -> None:
+    # 15:00 UTC = 11:00 ET -> 17h since the 18:00 ET open, avg ~980/min.
+    now = datetime(2026, 7, 8, 15, 0, tzinfo=timezone.utc)
+    samples = [_volume_sample(now - timedelta(minutes=30), 940_000.0)]
+    signal = es_volume_signal(1_000_000.0, samples, now=now)
+    assert signal is not None
+    assert signal["baseline"] == "session_average"
+    assert signal["delta"] == 60_000
+    assert signal["pace_ratio"] >= 1.5
+    assert signal["label"] == "elevated"
+
+
+def test_es_volume_signal_median_window_baseline_flags_quiet() -> None:
+    now = datetime(2026, 7, 8, 15, 0, tzinfo=timezone.utc)
+    # Three prior windows at ~2000/min; the latest window collapses to 200/min.
+    samples = [
+        _volume_sample(now - timedelta(minutes=120), 700_000.0),
+        _volume_sample(now - timedelta(minutes=90), 760_000.0),
+        _volume_sample(now - timedelta(minutes=60), 820_000.0),
+        _volume_sample(now - timedelta(minutes=30), 880_000.0),
+    ]
+    signal = es_volume_signal(886_000.0, samples, now=now)
+    assert signal is not None
+    assert signal["baseline"] == "recent_windows"
+    assert signal["pace_ratio"] <= 0.5
+    assert signal["label"] == "quiet"
+
+
+def test_es_volume_signal_detects_session_reset_and_bad_windows() -> None:
+    now = datetime(2026, 7, 8, 23, 30, tzinfo=timezone.utc)
+    reset = es_volume_signal(
+        5_000.0, [_volume_sample(now - timedelta(minutes=30), 900_000.0)], now=now
+    )
+    assert reset is not None
+    assert reset["label"] == "session_reset"
+    too_short = es_volume_signal(
+        1_000_000.0, [_volume_sample(now - timedelta(seconds=60), 999_000.0)], now=now
+    )
+    assert too_short is not None
+    assert too_short["label"] == "no_baseline"
+
+
+def test_es_session_elapsed_minutes_wraps_at_globex_open() -> None:
+    # 22:05 UTC = 18:05 ET -> 5 minutes into the new session.
+    just_after_open = datetime(2026, 7, 8, 22, 5, tzinfo=timezone.utc)
+    elapsed = es_session_elapsed_minutes(just_after_open)
+    assert elapsed is not None and 4.0 <= elapsed <= 6.0
+    # 21:00 UTC = 17:00 ET -> 23 hours into the prior session.
+    before_open = datetime(2026, 7, 8, 21, 0, tzinfo=timezone.utc)
+    elapsed_prior = es_session_elapsed_minutes(before_open)
+    assert elapsed_prior is not None and elapsed_prior > 22 * 60
+
+
+def test_templates_render_es_volume_line() -> None:
+    payload = {
+        "kind": "order_map",
+        "trading_date": "2026-07-08",
+        "beijing_time": "22:00",
+        "expiry": "20260708",
+        "underlier": {"price": 7470.0, "source": "chain_implied"},
+        "expected_move_points": 20.0,
+        "gamma_state": "zero_gamma_transition",
+        "zero_gamma": 7455.0,
+        "flip_zone": [7455.0, 7460.0],
+        "candidates": [],
+        "warnings": [],
+        "es_volume": {
+            "cumulative": 1_000_000,
+            "delta": 60_000,
+            "window_minutes": 30.0,
+            "recent_pace_per_min": 2000.0,
+            "baseline_pace_per_min": 1000.0,
+            "baseline": "recent_windows",
+            "pace_ratio": 2.0,
+            "label": "elevated",
+        },
+    }
+    map_text = render_template(payload)
+    assert "ES 量能: 最近30分钟 60,000 手, 节奏为近几窗的 2.0 倍(放量)" in map_text
+    status_text = render_status_template(payload, [], datetime(2026, 7, 8, 14, 0, tzinfo=timezone.utc))
+    assert "ES 量能" in status_text
+    # Signals without a computable window stay silent instead of rendering "-".
+    payload["es_volume"] = {"cumulative": 1_000_000, "label": "no_baseline", "delta": None,
+                            "window_minutes": None, "pace_ratio": None}
+    assert "ES 量能" not in render_template(payload)
