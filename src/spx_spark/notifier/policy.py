@@ -118,6 +118,33 @@ def direct_push_alerts(alerts: list[dict[str, object]]) -> list[dict[str, object
     ]
 
 
+# Friend Bark channel: pure market signals only. Ops/engineering kinds (data
+# degradation, session drops, freshness gates) and the user's private position
+# alerts stay off this list on purpose.
+MARKET_SIGNAL_ALERT_KINDS = frozenset(
+    {
+        "price_move_from_close",
+        "option_gamma_regime",
+        "option_wall_proximity",
+        "iv_term_gap",
+        "atm_iv_jump_5m",
+        "put_skew_steepening_5m",
+        "iv_surface_shift_5m",
+        "iv_surface_shift_1h",
+        "atm_iv_change_1h",
+    }
+)
+
+
+def is_market_signal_alert(alert: dict[str, object]) -> bool:
+    return str(alert.get("kind") or "") in MARKET_SIGNAL_ALERT_KINDS
+
+
+def alerts_are_market_signals(alerts: list[dict[str, object]]) -> bool:
+    """True when every alert in the batch is a market signal (no ops noise)."""
+    return bool(alerts) and all(is_market_signal_alert(alert) for alert in alerts)
+
+
 def codex_message_requests_delivery(message: str) -> bool:
     normalized = message.strip().lower()
     if any(cue in normalized for cue in NEGATIVE_DELIVERY_CUES):

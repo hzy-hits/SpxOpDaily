@@ -14,7 +14,12 @@ from typing import Any
 from spx_spark.config import NY_TZ, NotificationSettings, StorageSettings, env_bool, load_dotenv
 from spx_spark.notifier.missed_queue import append_missed
 from spx_spark.notifier.model import CommandRunner, default_runner
-from spx_spark.notifier.sinks import run_openclaw_agent, send_bark_message, send_openclaw_message
+from spx_spark.notifier.sinks import (
+    run_openclaw_agent,
+    send_bark_friend_message,
+    send_bark_message,
+    send_openclaw_message,
+)
 from spx_spark.iv_surface import (
     IvSurfaceSnapshot,
     IvSurfaceExpiry,
@@ -853,6 +858,8 @@ def push_review(
     if settings.bark_enabled:
         bark_result = send_bark_message(settings, "盘后复盘", text)
         bark_ok = bark_result.ok
+    if settings.bark_friend_enabled:
+        send_bark_friend_message(settings, "盘后复盘", text)
 
     return {
         "text": text,

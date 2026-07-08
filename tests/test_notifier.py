@@ -385,6 +385,104 @@ def test_notifier_agent_approved_message_also_goes_to_bark(tmp_path, monkeypatch
     assert str(bark_posts[0]["title"]).startswith("SPX Spark HIGH")
 
 
+def test_alerts_are_market_signals_rejects_mixed_and_empty_batches() -> None:
+    from spx_spark.notifier import alerts_are_market_signals
+
+    market = {"kind": "option_gamma_regime"}
+    ops = {"kind": "required_data_degraded"}
+    assert alerts_are_market_signals([market]) is True
+    assert alerts_are_market_signals([market, ops]) is False
+    assert alerts_are_market_signals([]) is False
+
+
+def test_market_signal_agent_message_also_goes_to_friend_bark(tmp_path, monkeypatch) -> None:
+    posts: list[tuple[str, dict[str, object]]] = []
+
+    def fake_post_bark(url: str, payload: dict[str, object], timeout: float) -> dict[str, object]:
+        posts.append((url, payload))
+        return {"code": 200}
+
+    monkeypatch.setattr("spx_spark.notifier.sinks.post_bark", fake_post_bark)
+
+    def runner(command: list[str], timeout_seconds: float) -> subprocess.CompletedProcess[str]:
+        if command[:2] == ["openclaw", "agent"]:
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout='{"text":"需要看盘: SPX alert confirmed"}',
+                stderr="",
+            )
+        return subprocess.CompletedProcess(command, 0, stdout="{}", stderr="")
+
+    settings = replace(
+        make_settings(str(tmp_path / "notify-state.json")),
+        openclaw_enabled=False,
+        openclaw_agent_enabled=True,
+        openclaw_agent_deliver=True,
+        codex_enabled=False,
+        bark_enabled=True,
+        bark_url="https://api.day.app/user-key",
+        bark_friend_enabled=True,
+        bark_friend_url="https://api.day.app/friend-key",
+    )
+
+    result = notify_payload(
+        make_payload(),
+        settings=settings,
+        runner=runner,
+        now=datetime(2026, 7, 7, 0, 0, tzinfo=timezone.utc),
+    )
+
+    assert "bark_friend" in [sink.sink for sink in result.sinks]
+    urls = [url for url, _ in posts]
+    assert "https://api.day.app/user-key" in urls
+    assert "https://api.day.app/friend-key" in urls
+    friend_payload = next(payload for url, payload in posts if url.endswith("friend-key"))
+    assert friend_payload["body"] == "需要看盘: SPX alert confirmed"
+
+
+def test_system_event_alert_never_reaches_friend_bark(tmp_path, monkeypatch) -> None:
+    posts: list[tuple[str, dict[str, object]]] = []
+
+    def fake_post_bark(url: str, payload: dict[str, object], timeout: float) -> dict[str, object]:
+        posts.append((url, payload))
+        return {"code": 200}
+
+    monkeypatch.setattr("spx_spark.notifier.sinks.post_bark", fake_post_bark)
+
+    def runner(command: list[str], timeout_seconds: float) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(command, 0, stdout="{}", stderr="")
+
+    settings = replace(
+        make_settings(str(tmp_path / "notify-state.json")),
+        bark_enabled=True,
+        bark_url="https://api.day.app/user-key",
+        bark_friend_enabled=True,
+        bark_friend_url="https://api.day.app/friend-key",
+    )
+
+    payload = make_payload()
+    payload["alerts"] = [
+        {
+            "severity": "high",
+            "kind": "ibkr_session_interrupted",
+            "instrument_id": "index:SPX",
+            "title": "IBKR session interrupted",
+            "detail": "Session competing login detected.",
+        }
+    ]
+
+    result = notify_payload(
+        payload,
+        settings=settings,
+        runner=runner,
+        now=datetime(2026, 7, 7, 0, 0, tzinfo=timezone.utc),
+    )
+
+    assert result.sent_count >= 1
+    assert all(not url.endswith("friend-key") for url, _ in posts)
+
+
 def test_notifier_bark_delivery_alone_still_starts_cooldown(tmp_path, monkeypatch) -> None:
     """If the Weixin token is dead but Bark reaches the human, the alert
     counts as delivered and must enter cooldown."""

@@ -216,6 +216,48 @@ def send_bark_message(
     )
 
 
+def send_bark_friend_message(
+    settings: NotificationSettings,
+    title: str,
+    body: str,
+    *,
+    poster: Callable[[str, dict[str, object], float], dict[str, object]] | None = None,
+) -> SinkResult:
+    """Friend channel: same Bark protocol, separate key, trading content only.
+
+    Callers are responsible for only routing market-facing pushes here; this
+    sink never sees ops/engineering messages.
+    """
+    if poster is None:
+        poster = post_bark
+    if not settings.bark_friend_url:
+        return SinkResult(
+            sink="bark_friend",
+            attempted=False,
+            ok=False,
+            error="missing bark friend url",
+        )
+    payload: dict[str, object] = {
+        "title": title,
+        "body": body,
+        "group": settings.bark_group,
+    }
+    if settings.bark_level:
+        payload["level"] = settings.bark_level
+    try:
+        response = poster(settings.bark_friend_url, payload, settings.bark_timeout_seconds)
+    except Exception as exc:  # noqa: BLE001
+        return SinkResult(sink="bark_friend", attempted=True, ok=False, error=str(exc))
+    code = response.get("code")
+    ok = code in (200, "200")
+    return SinkResult(
+        sink="bark_friend",
+        attempted=True,
+        ok=ok,
+        error=None if ok else f"bark response code={code} message={response.get('message')}",
+    )
+
+
 def bark_title_for_alerts(alerts: list[dict[str, object]]) -> str:
     top = alerts[0] if alerts else {}
     severity = str(top.get("severity", "")).upper() or "ALERT"

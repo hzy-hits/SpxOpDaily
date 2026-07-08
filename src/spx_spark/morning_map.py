@@ -19,7 +19,11 @@ from spx_spark.notifier.llm_writer import (
 )
 from spx_spark.notifier.missed_queue import append_missed
 from spx_spark.notifier.model import CommandRunner, default_runner
-from spx_spark.notifier.sinks import send_bark_message, send_openclaw_message
+from spx_spark.notifier.sinks import (
+    send_bark_friend_message,
+    send_bark_message,
+    send_openclaw_message,
+)
 from spx_spark.options_map import build_options_map
 from spx_spark.storage import LatestState, LatestStateStore
 
@@ -308,6 +312,8 @@ def send_morning_map(
     if settings.bark_enabled:
         bark_result = send_bark_message(settings, "盘前地图", text)
         bark_ok = bark_result.ok
+    if settings.bark_friend_enabled:
+        send_bark_friend_message(settings, "盘前地图", text)
 
     return {
         "text": text,

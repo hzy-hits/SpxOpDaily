@@ -21,7 +21,11 @@ from spx_spark.notifier.llm_writer import (
 )
 from spx_spark.notifier.missed_queue import append_missed
 from spx_spark.notifier.model import CommandRunner, default_runner
-from spx_spark.notifier.sinks import send_bark_message, send_openclaw_message
+from spx_spark.notifier.sinks import (
+    send_bark_friend_message,
+    send_bark_message,
+    send_openclaw_message,
+)
 from spx_spark.options_map import (
     BAD_QUALITIES,
     OptionsMap,
@@ -843,6 +847,8 @@ def send_order_map(
     if settings.bark_enabled:
         bark_result = send_bark_message(settings, "挂单地图", text)
         bark_ok = bark_result.ok
+    if settings.bark_friend_enabled:
+        send_bark_friend_message(settings, "挂单地图", text)
 
     return {
         "text": text,
@@ -1138,6 +1144,8 @@ def run_status(
     if settings.bark_enabled:
         bark_result = send_bark_message(settings, "市场状态", text)
         bark_ok = bark_result.ok
+    if settings.bark_friend_enabled:
+        send_bark_friend_message(settings, "市场状态", text)
 
     if weixin_result.ok or bark_ok:
         mark_sent(state_path, trading_date, fingerprint=fingerprint, now=now)

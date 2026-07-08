@@ -7,6 +7,7 @@ from spx_spark.notifier.llm_writer import load_previous_push, record_push
 from spx_spark.notifier.missed_queue import append_missed, flush_missed
 from spx_spark.notifier.model import CommandRunner, NotificationResult, SinkResult, default_runner
 from spx_spark.notifier.policy import (
+    alerts_are_market_signals,
     codex_message_requests_delivery,
     codex_message_respects_human_scope,
     direct_push_alerts,
@@ -16,6 +17,7 @@ from spx_spark.notifier.sinks import (
     bark_title_for_alerts,
     run_codex_exec,
     run_openclaw_agent,
+    send_bark_friend_message,
     send_bark_message,
     send_openclaw_message,
 )
@@ -177,6 +179,14 @@ def notify_payload(
                         )
                         sinks.append(bark_result)
                         delivered_ok = delivered_ok or bark_result.ok
+                    if settings.bark_friend_enabled and alerts_are_market_signals(review_candidates):
+                        sinks.append(
+                            send_bark_friend_message(
+                                settings,
+                                bark_title_for_alerts(review_candidates),
+                                agent_message,
+                            )
+                        )
                     if delivered_ok:
                         alerts_marked_sent.extend(review_candidates)
                         # Feed continuity: the next writer (status report / next
@@ -253,6 +263,14 @@ def notify_payload(
                         )
                         sinks.append(bark_result)
                         delivered_ok = delivered_ok or bark_result.ok
+                    if settings.bark_friend_enabled and alerts_are_market_signals(review_candidates):
+                        sinks.append(
+                            send_bark_friend_message(
+                                settings,
+                                bark_title_for_alerts(review_candidates),
+                                codex_message,
+                            )
+                        )
                     if delivered_ok:
                         alerts_marked_sent.extend(review_candidates)
                         record_push("intraday_alert", codex_message, at=now_utc.isoformat())
