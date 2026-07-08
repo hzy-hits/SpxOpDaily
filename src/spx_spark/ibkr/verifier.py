@@ -461,20 +461,46 @@ def estimate_atm_reference(rows: list[VerifyRow]) -> tuple[float | None, str]:
         ("cfd:IBUS500", 1.0, "IBUS500"),
         ("stock:SPY", 10.0, "SPY*10"),
     )
+    spx_row = by_label.get("index:SPX")
     for require_fresh in (True, False):
         for label, multiplier, name in candidates:
             row = by_label.get(label)
             if row is None:
                 continue
-            if require_fresh and row.stale is True:
+            # stale is only False when a tick actually arrived recently
+            # (snapshot_rows sets it together with ticker_time). A closed
+            # market that never ticked since subscribe leaves stale=None and
+            # must not pass as fresh.
+            if require_fresh and row.stale is not False:
                 continue
             price = first_present(
                 row.market_price, row.last, midpoint(row.bid, row.ask), row.close
             )
-            if price:
-                return price * multiplier, name if require_fresh else f"{name}_stale"
+            if not price:
+                continue
+            value = price * multiplier
+            if label == "future:ES":
+                # The listed ES contract is the front quarterly (e.g. Sep) and
+                # carries tens of points of rate basis over cash. Estimate the
+                # basis from the two closes (both anchored at yesterday 16:00
+                # ET) so the strike window centers on the cash level.
+                basis = es_spx_close_basis(row, spx_row)
+                if basis is not None:
+                    return value - basis, ("ES_basis_adj" if require_fresh else "ES_basis_adj_stale")
+            return value, name if require_fresh else f"{name}_stale"
 
     return None, "none"
+
+
+def es_spx_close_basis(es_row: VerifyRow, spx_row: VerifyRow | None) -> float | None:
+    if spx_row is None or es_row.close is None or spx_row.close is None:
+        return None
+    basis = es_row.close - spx_row.close
+    # A sane quarterly carry is tens of points; anything larger means one of
+    # the closes is from a different session, so don't "correct" with it.
+    if abs(basis) > 120.0:
+        return None
+    return basis
 
 
 def cancel_subscriptions(ib: Any, subscriptions: dict[str, tuple[Any, VerifyRow]]) -> None:

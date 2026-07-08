@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+import pytest
+
 from spx_spark.ibkr.adapter import provider_state_from_quotes, quotes_from_rows, snapshot_from_rows
 from spx_spark.ibkr.collector import (
     collection_failure_reason,
@@ -170,6 +172,7 @@ def test_estimate_atm_reference_falls_back_to_ibus500_cfd():
         symbol="IBUS500",
         bid=7500.0,
         ask=7500.5,
+        stale=False,
     )
 
     reference, source = estimate_atm_reference([cfd_row])
@@ -179,8 +182,10 @@ def test_estimate_atm_reference_falls_back_to_ibus500_cfd():
 
 
 def test_estimate_atm_reference_prefers_spx_over_cfd():
-    spx_row = VerifyRow(label="index:SPX", kind="index", symbol="SPX", last=7490.0)
-    cfd_row = VerifyRow(label="cfd:IBUS500", kind="cfd", symbol="IBUS500", last=7500.0)
+    spx_row = VerifyRow(label="index:SPX", kind="index", symbol="SPX", last=7490.0, stale=False)
+    cfd_row = VerifyRow(
+        label="cfd:IBUS500", kind="cfd", symbol="IBUS500", last=7500.0, stale=False
+    )
 
     reference, source = estimate_atm_reference([spx_row, cfd_row])
 
@@ -199,11 +204,44 @@ def test_estimate_atm_reference_skips_stale_spx_for_fresh_es():
     assert reference == 7455.0
     assert source == "ES"
 
+    # A closed market that never ticked since subscribe has stale=None (no
+    # ticker_time); it must not pass as fresh either.
+    never_ticked_spx = VerifyRow(label="index:SPX", kind="index", symbol="SPX", last=7505.0)
+    reference, source = estimate_atm_reference([never_ticked_spx, es_row])
+    assert reference == 7455.0
+    assert source == "ES"
+
     # With every source stale, fall back to the priority order so a plan
     # still exists at startup.
     reference, source = estimate_atm_reference([spx_row])
     assert reference == 7505.0
     assert source == "SPX_stale"
+
+
+def test_estimate_atm_reference_adjusts_es_quarterly_basis():
+    # 2026-07-08 overnight: SPX stale at yesterday's close 7503.85, Sep ES
+    # live at 7497 with close 7551.25. Raw ES would center the window ~50
+    # points above the cash market; the close-vs-close basis fixes it.
+    spx_row = VerifyRow(
+        label="index:SPX", kind="index", symbol="SPX", close=7503.85, stale=True
+    )
+    es_row = VerifyRow(
+        label="future:ES", kind="future", symbol="ES",
+        last=7497.0, close=7551.25, stale=False,
+    )
+
+    reference, source = estimate_atm_reference([spx_row, es_row])
+
+    assert source == "ES_basis_adj"
+    assert reference == pytest.approx(7497.0 - (7551.25 - 7503.85))
+
+    # Implausible basis (mismatched sessions) is ignored rather than applied.
+    weird_spx = VerifyRow(
+        label="index:SPX", kind="index", symbol="SPX", close=7300.0, stale=True
+    )
+    reference, source = estimate_atm_reference([weird_spx, es_row])
+    assert source == "ES"
+    assert reference == 7497.0
 
 
 def test_provider_state_from_quotes_marks_available_without_errors():
