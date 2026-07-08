@@ -258,11 +258,45 @@ def send_bark_friend_message(
     )
 
 
+BARK_TITLE_CATEGORIES: tuple[tuple[str, frozenset[str]], ...] = (
+    ("持仓事件", frozenset({
+        "spxw_position_opened",
+        "spxw_position_closed",
+        "spxw_position_qty_changed",
+        "spxw_position_book_pnl",
+        "spxw_position_near_expiry",
+    })),
+    ("系统事件", frozenset({
+        "ibkr_session_interrupted",
+        "ibkr_session_restored",
+    })),
+    ("波动率信号", frozenset({
+        "put_skew_steepening_5m",
+        "atm_iv_jump_5m",
+        "iv_surface_shift_5m",
+        "iv_surface_shift_1h",
+        "atm_iv_change_1h",
+        "iv_term_gap",
+    })),
+    ("价格异动", frozenset({
+        "price_move_from_close",
+        "broker_unavailable_proxy_watch",
+    })),
+    ("结构信号", frozenset({
+        "option_gamma_regime",
+        "option_wall_proximity",
+    })),
+)
+
+
 def bark_title_for_alerts(alerts: list[dict[str, object]]) -> str:
     top = alerts[0] if alerts else {}
-    severity = str(top.get("severity", "")).upper() or "ALERT"
     kind = str(top.get("kind", "")) or "alert"
     extra = f" +{len(alerts) - 1}" if len(alerts) > 1 else ""
+    for label, kinds in BARK_TITLE_CATEGORIES:
+        if kind in kinds:
+            return f"SPX {label}{extra}"
+    severity = str(top.get("severity", "")).upper() or "ALERT"
     return f"SPX Spark {severity} {kind}{extra}"
 
 

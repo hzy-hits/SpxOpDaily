@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 
 from spx_spark.config import NotificationSettings
 from spx_spark.notifier.deepseek import deepseek_usage_limited, run_deepseek_reviewer
-from spx_spark.notifier.llm_writer import load_previous_push, record_push
+from spx_spark.notifier.llm_writer import call_llm_writer, load_previous_push, record_push
 from spx_spark.notifier.missed_queue import append_missed, flush_missed
 from spx_spark.notifier.model import CommandRunner, NotificationResult, SinkResult, default_runner
 from spx_spark.notifier.policy import (
@@ -14,7 +14,11 @@ from spx_spark.notifier.policy import (
     direct_push_alerts,
     split_time_sensitive_review_candidates,
 )
-from spx_spark.notifier.prompts import build_codex_prompt, format_alert_message
+from spx_spark.notifier.prompts import (
+    build_codex_prompt,
+    build_direct_push_prompt,
+    format_alert_message,
+)
 from spx_spark.notifier.sinks import (
     bark_title_for_alerts,
     run_codex_exec,
@@ -251,6 +255,14 @@ def notify_payload(
             alerts_marked_sent = list(selected)
     elif bypass_alerts:
         bypass_message = format_alert_message(payload, bypass_alerts)
+        if settings.direct_push_llm_enabled:
+            # Writer, not reviewer: the push decision is already made. Any
+            # failure falls back to the raw template so events are never lost.
+            written, _writer_error = call_llm_writer(
+                build_direct_push_prompt(payload, bypass_alerts)
+            )
+            if written:
+                bypass_message = written
         direct_result = send_openclaw_message(settings, bypass_message, runner=runner)
         sinks.append(direct_result)
         if not direct_result.ok:
@@ -279,6 +291,7 @@ def notify_payload(
             )
         if delivered_ok:
             alerts_marked_sent = list(bypass_alerts)
+            record_push("direct_event", bypass_message, at=now_utc.isoformat())
 
     if review_candidates:
         strong_review_candidates, weak_review_candidates = split_time_sensitive_review_candidates(

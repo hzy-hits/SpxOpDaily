@@ -621,6 +621,10 @@ class NotificationSettings:
     # never engineering noise (data degradation, session drops, token expiry).
     bark_friend_enabled: bool = False
     bark_friend_url: str = ""
+    # Rewrite direct-push events (position/system/off-hours vol) with the
+    # DeepSeek writer before sending; falls back to the raw template on any
+    # writer failure so critical events are never lost.
+    direct_push_llm_enabled: bool = False
     missed_queue_path: str = ""
 
     @classmethod
@@ -694,6 +698,7 @@ class NotificationSettings:
             bark_timeout_seconds=env_float("ALERT_NOTIFY_BARK_TIMEOUT_SECONDS", 10.0),
             bark_friend_enabled=env_bool("ALERT_NOTIFY_BARK_FRIEND_ENABLED", False),
             bark_friend_url=env_str("ALERT_NOTIFY_BARK_FRIEND_URL", "").rstrip("/"),
+            direct_push_llm_enabled=env_bool("ALERT_NOTIFY_DIRECT_PUSH_LLM_ENABLED", True),
             missed_queue_path=env_str(
                 "ALERT_NOTIFY_MISSED_QUEUE_PATH",
                 f"{data_root.rstrip('/')}/latest/weixin_missed_queue.jsonl",

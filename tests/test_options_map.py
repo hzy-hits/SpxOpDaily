@@ -173,7 +173,10 @@ def _gex_row(
 def test_structure_quality_tolerates_recent_stale_but_not_hard_bad() -> None:
     from dataclasses import replace as dc_replace
 
-    now = datetime(2026, 7, 8, 14, 0, tzinfo=timezone.utc)
+    # signed_gex/option_gamma_structural age quotes against the real clock
+    # (no as_of parameter in the production call chain), so the fixture must
+    # be anchored to now() or the test rots as wall time passes.
+    now = datetime.now(tz=timezone.utc)
     quote = make_option(
         expiry="20260708",
         strike=7350.0,

@@ -520,7 +520,7 @@ def test_notifier_agent_approved_message_also_goes_to_bark(tmp_path, monkeypatch
     ]
     assert result.sent_count == 2
     assert bark_posts[0]["body"] == "需要看盘: SPX alert confirmed"
-    assert str(bark_posts[0]["title"]).startswith("SPX Spark HIGH")
+    assert str(bark_posts[0]["title"]).startswith("SPX 价格异动")
 
 
 def test_alerts_are_market_signals_rejects_mixed_and_empty_batches() -> None:
@@ -1246,6 +1246,106 @@ def test_rth_skew_steepening_still_goes_through_review(tmp_path) -> None:
     assert len(calls) == 1
     assert calls[0][1] == "exec"
     assert "--message" not in calls[0]
+
+
+def test_direct_push_rewrites_event_with_llm_writer(tmp_path, monkeypatch) -> None:
+    calls: list[list[str]] = []
+
+    def runner(command: list[str], timeout_seconds: float) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout="{}", stderr="")
+
+    def fake_writer(prompt: str, **kwargs) -> tuple[str | None, str | None]:
+        assert "即时事件播报员" in prompt
+        assert "持仓事件" in prompt
+        return "【持仓事件】开仓 7430C x1，现价贴近 flip zone 下沿。", None
+
+    monkeypatch.setattr("spx_spark.notifier.pipeline.call_llm_writer", fake_writer)
+    payload = make_payload()
+    payload["alerts"] = [
+        {
+            "severity": "high",
+            "kind": "spxw_position_opened",
+            "instrument_id": "option:SPX:SPXW:20260707:7430:C",
+            "title": "开仓 SPXW 20260707 7430C",
+            "detail": "qty=1 avg=12.3",
+            "quality": "live",
+            "source_gate": "ibkr_positions",
+        }
+    ]
+    settings = replace(
+        make_settings(str(tmp_path / "notify-state.json")),
+        openclaw_enabled=False,
+        direct_push_llm_enabled=True,
+    )
+
+    result = notify_payload(
+        payload,
+        settings=settings,
+        runner=runner,
+        now=datetime(2026, 7, 7, 0, 0, tzinfo=timezone.utc),
+    )
+
+    assert result.sent_count == 1
+    message_index = calls[0].index("--message") + 1
+    assert calls[0][message_index].startswith("【持仓事件】")
+
+
+def test_direct_push_falls_back_to_template_when_writer_fails(tmp_path, monkeypatch) -> None:
+    calls: list[list[str]] = []
+
+    def runner(command: list[str], timeout_seconds: float) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout="{}", stderr="")
+
+    monkeypatch.setattr(
+        "spx_spark.notifier.pipeline.call_llm_writer",
+        lambda prompt, **kwargs: (None, "http=500: boom"),
+    )
+    payload = make_payload()
+    payload["alerts"] = [
+        {
+            "severity": "high",
+            "kind": "ibkr_session_restored",
+            "instrument_id": "index:SPX",
+            "title": "IBKR market-data session restored",
+            "detail": "IBKR data session is available again.",
+            "quality": "available",
+            "source_gate": "ibkr_session_state",
+        }
+    ]
+    settings = replace(
+        make_settings(str(tmp_path / "notify-state.json")),
+        openclaw_enabled=False,
+        direct_push_llm_enabled=True,
+    )
+
+    result = notify_payload(
+        payload,
+        settings=settings,
+        runner=runner,
+        now=datetime(2026, 7, 7, 0, 0, tzinfo=timezone.utc),
+    )
+
+    assert result.sent_count == 1
+    message_index = calls[0].index("--message") + 1
+    assert "SPX/SPXW alert" in calls[0][message_index]
+
+
+def test_bark_title_maps_kinds_to_chinese_categories() -> None:
+    from spx_spark.notifier.sinks import bark_title_for_alerts
+
+    assert bark_title_for_alerts([{"kind": "spxw_position_opened"}]) == "SPX 持仓事件"
+    assert bark_title_for_alerts([{"kind": "ibkr_session_restored"}]) == "SPX 系统事件"
+    assert (
+        bark_title_for_alerts([{"kind": "put_skew_steepening_5m"}, {"kind": "atm_iv_jump_5m"}])
+        == "SPX 波动率信号 +1"
+    )
+    assert bark_title_for_alerts([{"kind": "price_move_from_close"}]) == "SPX 价格异动"
+    assert bark_title_for_alerts([{"kind": "option_wall_proximity"}]) == "SPX 结构信号"
+    assert bark_title_for_alerts(
+        [{"kind": "unknown_kind", "severity": "high"}]
+    ) == "SPX Spark HIGH unknown_kind"
 
 
 def test_codex_prompt_hides_non_focus_market_context() -> None:

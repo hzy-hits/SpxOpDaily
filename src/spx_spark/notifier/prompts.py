@@ -29,6 +29,50 @@ def format_alert_message(payload: dict[str, object], alerts: list[dict[str, obje
     return "\n".join(lines)
 
 
+def direct_push_category(alerts: list[dict[str, object]]) -> str:
+    kinds = {str(alert.get("kind") or "") for alert in alerts}
+    if any(kind.startswith("spxw_position_") for kind in kinds):
+        return "持仓事件"
+    if kinds & {"ibkr_session_interrupted", "ibkr_session_restored"}:
+        return "系统事件"
+    if kinds & {"put_skew_steepening_5m", "atm_iv_jump_5m"}:
+        return "盘外波动率信号"
+    return "事件"
+
+
+def build_direct_push_prompt(payload: dict[str, object], alerts: list[dict[str, object]]) -> str:
+    """Writer prompt for bypass (direct-push) events: the decision to push is
+    already made, the LLM only rewrites the raw event into readable Chinese."""
+    focus = payload.get("human_focus_context")
+    compact_focus: dict[str, object] | None = None
+    if isinstance(focus, dict):
+        compact_focus = {
+            "prices": focus.get("prices"),
+            "spxw_options": focus.get("spxw_options"),
+        }
+    compact_payload = {
+        "as_of": payload.get("as_of"),
+        "window": compact_window(payload.get("window")),
+        "alerts": alerts[:6],
+        "human_focus_context": compact_focus,
+    }
+    category = direct_push_category(alerts)
+    return "\n".join(
+        (
+            "你是 SPX Spark 的即时事件播报员，读者只交易 SPX/SPXW 0DTE/1DTE 期权。",
+            "推送决定已经做出，你的任务只是把下面的原始事件 JSON 改写成读者一眼能懂的中文推送，不做要不要推的判断。",
+            f"这条推送的类别是「{category}」，第一行用【{category}】开头，一句话说清发生了什么(保留关键数字原样)。",
+            "然后按类别补 2-4 行：",
+            "- 持仓事件：哪条腿、数量/方向变化、当前浮盈浮亏，以及此刻价格相对关键位的位置；",
+            "- 系统事件(IBKR 会话中断/恢复)：对行情数据和已挂限价单的影响，读者需要做什么(通常是知悉即可或检查挂单)；",
+            "- 盘外波动率信号(skew 急陡/ATM IV 跳升)：这个信号通常预示什么(如有人抢下行保护)、接下来看什么确认(价格/gamma/VIX)；",
+            "只用 JSON 里的事实，绝不编造数字；数据 degraded 时如实说明。",
+            "总共不超过 6 行，口语化但专业，不写免责声明。",
+            json.dumps(compact_payload, ensure_ascii=False, sort_keys=True),
+        )
+    )
+
+
 def build_agent_prompt(payload: dict[str, object], alerts: list[dict[str, object]]) -> str:
     compact_payload = {
         "as_of": payload.get("as_of"),
