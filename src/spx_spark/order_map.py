@@ -2145,12 +2145,11 @@ MATERIAL_LEVEL_MOVE_POINTS = 5.0
 MATERIAL_EM_REL_CHANGE = 0.20
 
 # --- status report: fixed cadence across the partner's working day (Beijing
-# 07:30 -> next-day 02:00; every 15 minutes through the morning (07:30-13:30),
-# every 30 minutes from 14:00 -- density is set by the systemd timer, this
-# window only bounds it) ---
+# 07:30 -> next-day 01:30 every 15 minutes -- density is set by the systemd
+# timer, this window only bounds it) ---
 
 STATUS_WINDOW_START = time(7, 30)
-STATUS_WINDOW_END_EARLY = time(2, 0)
+STATUS_WINDOW_END_EARLY = time(1, 30)  # inclusive last fire
 US_OPEN_ET = time(9, 30)
 
 
@@ -2218,17 +2217,17 @@ def within_refresh_window(now_utc: datetime) -> bool:
 
 
 def within_status_window(now_utc: datetime) -> bool:
-    """Beijing 07:30 through next-day 02:00: the partner's full working day.
+    """Beijing 07:30 through next-day 01:30: the partner's full working day.
 
-    The timer controls density (every 15 minutes through the Beijing morning
-    07:30-13:30, every 30 minutes from 14:00); this gate only bounds the day.
+    The timer fires every 15 minutes; this gate only bounds the day.
     The after-midnight leg belongs to the previous day's session, so it runs
-    on Tue-Sat local mornings (Sat 00:xx = Friday's US session).
+    on Tue-Sat local mornings (Sat 00:xx = Friday's US session). Last fire at
+    01:30 is inclusive.
     """
     local = now_utc.astimezone(SHANGHAI_TZ)
     if local.time() >= STATUS_WINDOW_START:
         return local.weekday() < 5
-    if local.time() < STATUS_WINDOW_END_EARLY:
+    if local.time() <= STATUS_WINDOW_END_EARLY:
         return local.weekday() in (1, 2, 3, 4, 5)
     return False
 
@@ -2504,7 +2503,7 @@ def build_status_prompt(
 ) -> str:
     return "\n".join(
         (
-            "这条是『市场状态+挂单参考』二合一便签，上午每 15 分钟、下午起每 30 分钟一条。搭档已经按上一张地图挂好单了，"
+            "这条是『市场状态+挂单参考』二合一便签，北京 07:30 到次日 01:30 每 15 分钟一条。搭档已经按上一张地图挂好单了，"
             "他扫一眼要能决定：单动不动、价来了接不接。这不是行情播报，是接班交接——上一班的判断在 previous_push 里，"
             "你要么确认它还成立，要么指出哪里被市场证伪了。",
             "",
@@ -2571,7 +2570,7 @@ def run_status(
     payload = build_order_payload_with_retry(StorageSettings.from_env(), now=now)
     if _payload_is_thin(payload) and not args.force:
         # Normal sampling gap (slow poll / line rotation), not an outage:
-        # skip quietly, the next 30-minute run will have full data.
+        # skip quietly, the next 15-minute run will have full data.
         print(json.dumps({"skipped": True, "reason": "thin_snapshot_sampling_gap"}))
         return 0
     fingerprint = payload_fingerprint(payload)

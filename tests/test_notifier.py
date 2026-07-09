@@ -1188,7 +1188,7 @@ def test_offhours_skew_steepening_bypasses_review_and_severity_floor(tmp_path) -
     payload = make_payload()
     payload["window"] = {
         "name": "quiet_futures_context",
-        "priority": "low",
+        "priority": "high",
         "spxw_sampling_mode": "off",
     }
     payload["alerts"] = [

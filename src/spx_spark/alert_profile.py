@@ -180,7 +180,9 @@ WINDOWS: tuple[AlertWindow, ...] = (
         name="afterhours_second_hour",
         start_et=time(17, 0),
         stop_et=time(18, 0),
-        priority="elevated",
+        # Same notify weight as RTH/high off-hours: overnight handoff still
+        # needs parity with the regular session for price/vol pushes.
+        priority="high",
         user_unattended=True,
         cadence_seconds=30,
         summary_cadence_seconds=900,
@@ -213,10 +215,13 @@ QUIET_WINDOW = AlertWindow(
     name="quiet_futures_context",
     start_et=time(18, 0),
     stop_et=time(20, 30),
-    priority="low",
+    # ET 18:00-20:30 = Beijing ~06:00-08:30. Name stays "quiet" for the thin
+    # Globex tape, but notify priority matches RTH so off-hours moves are not
+    # filtered below the delivery floor.
+    priority="high",
     user_unattended=True,
-    cadence_seconds=60,
-    summary_cadence_seconds=1800,
+    cadence_seconds=30,
+    summary_cadence_seconds=900,
     spxw_sampling_mode="off",
     primary_sources=("hyperliquid", "polymarket", "ibkr_futures"),
     required_instruments=("crypto_perp:xyz:SP500",),

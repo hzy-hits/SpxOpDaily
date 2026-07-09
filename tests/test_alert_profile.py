@@ -57,7 +57,7 @@ def test_friday_evening_et_stays_quiet_for_weekend_beijing_morning() -> None:
     window = active_window(datetime(2026, 7, 11, 9, 30, tzinfo=BJ_TZ))
 
     assert window.name == "quiet_futures_context"
-    assert window.priority == "low"
+    assert window.priority == "high"
 
 
 def test_weekend_before_futures_reopen_is_maintenance() -> None:

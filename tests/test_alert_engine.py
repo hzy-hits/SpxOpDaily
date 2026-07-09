@@ -586,14 +586,15 @@ def test_overnight_dip_escalates_to_high_severity(tmp_path, monkeypatch) -> None
     monkeypatch.setenv("ALERT_MOVEMENT_STATE_PATH", str(tmp_path / "movement-state.json"))
     # Day EM = 41 bps (low-vol regime); quiet Asia-session window.
     monkeypatch.setattr(ae, "front_expected_move_pct", lambda *_args, **_kwargs: 0.0041)
-    # Beijing 07:00 = ET 19:00: before the reader's day starts, still the low
-    # quiet window (Beijing 08:30+ is now the high-priority Globex watch).
+    # Beijing 07:00 = ET 19:00: before the reader's day starts, still the
+    # quiet_futures_context window (now high priority for off-hours parity).
     now = datetime(2026, 7, 7, 7, 0, tzinfo=BJ_TZ)
     window = active_window(now)
-    assert window.priority == "low"
+    assert window.priority == "high"
 
+    # -40 bps clears the high-window 30 bps bar and consumes ~98% of the day EM.
     state = make_state(
-        make_quote(InstrumentId.equity("SPY"), mark=748.0, close=750.0, now=now),
+        make_quote(InstrumentId.equity("SPY"), mark=747.0, close=750.0, now=now),
         now=now,
     )
     alerts = movement_alerts(
@@ -606,11 +607,11 @@ def test_overnight_dip_escalates_to_high_severity(tmp_path, monkeypatch) -> None
 
     moves = [alert for alert in alerts if alert.kind == "price_move_from_close"]
     assert len(moves) == 1
-    # -26.7 bps in a 41 bps EM day: clears the 24.6 bps quiet bar and gets
-    # escalated to high so it passes the notify severity gate at night.
+    # Window priority is already high, so the alert clears the notify gate
+    # without needing the old low→high EM escalation path.
     assert moves[0].severity == "high"
     assert moves[0].dedup_group == "down:1"
-    assert "em_consumed" in moves[0].detail
+    assert moves[0].threshold == 30.0
 
 
 def test_iv_surface_degraded_expiry_still_emits_movement_alerts() -> None:

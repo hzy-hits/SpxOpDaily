@@ -1037,7 +1037,7 @@ def test_payload_fingerprint_and_material_changes() -> None:
 
 
 def test_within_refresh_window_beijing() -> None:
-    # Refresh follows the status window: Beijing 07:30 -> next-day 02:00.
+    # Refresh follows the status window: Beijing 07:30 -> next-day 01:30.
     # 14:45 Beijing: fixed cadence continues pre-open.
     beijing_1445 = datetime(2026, 7, 7, 6, 45, tzinfo=timezone.utc)
     assert within_refresh_window(beijing_1445) is True
@@ -1047,9 +1047,12 @@ def test_within_refresh_window_beijing() -> None:
     # 23:45 Beijing: late US session now covered too.
     beijing_2345 = datetime(2026, 7, 7, 15, 45, tzinfo=timezone.utc)
     assert within_refresh_window(beijing_2345) is True
-    # 01:45 Beijing Wednesday = Tuesday's US session, still covered.
+    # 01:30 Beijing Wednesday: last inclusive fire of Tuesday's session.
+    beijing_0130 = datetime(2026, 7, 7, 17, 30, tzinfo=timezone.utc)
+    assert within_refresh_window(beijing_0130) is True
+    # 01:45 Beijing: past the 01:30 cutoff.
     beijing_0145 = datetime(2026, 7, 7, 17, 45, tzinfo=timezone.utc)
-    assert within_refresh_window(beijing_0145) is True
+    assert within_refresh_window(beijing_0145) is False
     # 09:00 Beijing: the reader's working morning is now inside the window.
     beijing_0900 = datetime(2026, 7, 7, 1, 0, tzinfo=timezone.utc)
     assert within_refresh_window(beijing_0900) is True
@@ -1173,10 +1176,13 @@ def test_within_status_window_and_minutes_to_open() -> None:
     beijing_2130 = datetime(2026, 7, 7, 13, 30, tzinfo=timezone.utc)
     assert within_status_window(beijing_2130) is True
     assert minutes_to_open(beijing_2130) is None
-    # 01:30 Beijing Wednesday = 13:30 ET Tuesday: still Tuesday's session.
+    # 01:30 Beijing Wednesday = 13:30 ET Tuesday: still Tuesday's session (inclusive).
     beijing_0130 = datetime(2026, 7, 7, 17, 30, tzinfo=timezone.utc)
     assert within_status_window(beijing_0130) is True
-    # 02:30 Beijing: past the 02:00 cutoff.
+    # 01:45 Beijing: past the 01:30 cutoff.
+    beijing_0145 = datetime(2026, 7, 7, 17, 45, tzinfo=timezone.utc)
+    assert within_status_window(beijing_0145) is False
+    # 02:30 Beijing: well past cutoff.
     beijing_0230 = datetime(2026, 7, 7, 18, 30, tzinfo=timezone.utc)
     assert within_status_window(beijing_0230) is False
     # Saturday 01:30 Beijing = Friday 13:30 ET: Friday's session, allowed.
