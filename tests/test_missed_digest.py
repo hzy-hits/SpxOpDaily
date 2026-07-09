@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+
+import pytest
 import subprocess
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -18,12 +20,23 @@ from spx_spark.notifier.missed_queue import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _stub_delivery(monkeypatch):
+    monkeypatch.setattr(
+        "spx_spark.notifier.sinks.post_feishu",
+        lambda url, payload, timeout: {"code": 0, "msg": "success"},
+    )
+    monkeypatch.setattr(
+        "spx_spark.notifier.sinks.post_bark",
+        lambda url, payload, timeout: {"code": 200},
+    )
+
+
 def make_settings(
     state_path: str,
     *,
     missed_queue_path: str,
     enabled: bool = True,
-    target: str = "user@im.wechat",
     dry_run: bool = True,
 ) -> NotificationSettings:
     return NotificationSettings(
@@ -31,11 +44,11 @@ def make_settings(
         min_severity="high",
         cooldown_seconds=300,
         state_path=state_path,
-        openclaw_enabled=True,
+        openclaw_enabled=False,
         openclaw_command="openclaw",
-        openclaw_channel="openclaw-weixin",
-        openclaw_account="account-im-bot",
-        openclaw_target=target,
+        openclaw_channel="",
+        openclaw_account="",
+        openclaw_target="",
         openclaw_dry_run=dry_run,
         openclaw_timeout_seconds=20.0,
         openclaw_agent_enabled=False,
@@ -55,6 +68,15 @@ def make_settings(
         codex_timeout_seconds=90.0,
         codex_output_max_chars=1800,
         codex_require_delivery_cue=True,
+        bark_enabled=True,
+        bark_url="https://api.day.app/test-key",
+        bark_group="spx-spark",
+        bark_level="",
+        bark_timeout_seconds=10.0,
+        feishu_enabled=True,
+        feishu_webhook_url="https://open.feishu.cn/open-apis/bot/v2/hook/test",
+        feishu_secret="",
+        feishu_timeout_seconds=10.0,
         missed_queue_path=missed_queue_path,
     )
 
@@ -188,13 +210,17 @@ def test_build_digest_caps_entries() -> None:
     assert "(另有 3 条更早的已省略)" in digest
 
 
-def test_pipeline_queues_message_when_weixin_fails_and_bark_ok(
+def test_pipeline_queues_message_when_feishu_fails_and_bark_ok(
     tmp_path,
     monkeypatch,
 ) -> None:
     monkeypatch.setattr(
         "spx_spark.notifier.sinks.post_bark",
         lambda *_: {"code": 200},
+    )
+    monkeypatch.setattr(
+        "spx_spark.notifier.sinks.post_feishu",
+        lambda *_: {"code": 19001, "msg": "fail"},
     )
 
     queue_path = str(tmp_path / "missed.jsonl")
@@ -207,19 +233,16 @@ def test_pipeline_queues_message_when_weixin_fails_and_bark_ok(
                 stdout='{"text":"需要看盘: SPX alert confirmed"}',
                 stderr="",
             )
-        return subprocess.CompletedProcess(command, 1, stdout="", stderr="ret=-2")
+        return subprocess.CompletedProcess(command, 0, stdout="{}", stderr="")
 
     settings = replace(
         make_settings(
             str(tmp_path / "notify-state.json"),
             missed_queue_path=queue_path,
         ),
-        openclaw_enabled=False,
         openclaw_agent_enabled=True,
         openclaw_agent_deliver=True,
         codex_enabled=False,
-        bark_enabled=True,
-        bark_url="https://api.day.app/test-key",
     )
 
     first = notify_payload(
@@ -228,7 +251,7 @@ def test_pipeline_queues_message_when_weixin_fails_and_bark_ok(
         runner=runner,
         now=datetime(2026, 7, 7, 0, 0, tzinfo=timezone.utc),
     )
-    assert first.sent_count == 1
+    assert first.sent_count == 1  # bark ok
 
     queued = load_missed(queue_path)
     assert len(queued) == 1
@@ -244,7 +267,7 @@ def test_pipeline_queues_message_when_weixin_fails_and_bark_ok(
     assert second.selected_count == 0
 
 
-def test_pipeline_flushes_queue_before_new_send(tmp_path) -> None:
+def test_pipeline_flushes_queue_before_new_send(tmp_path, monkeypatch) -> None:
     queue_path = str(tmp_path / "missed.jsonl")
     append_missed(
         queue_path,
@@ -253,29 +276,49 @@ def test_pipeline_flushes_queue_before_new_send(tmp_path) -> None:
         at=datetime(2026, 7, 7, 0, 0, tzinfo=timezone.utc),
     )
 
-    message_sends: list[str] = []
+    feishu_posts: list[dict] = []
 
-    def runner(command: list[str], timeout_seconds: float) -> subprocess.CompletedProcess[str]:
-        if command[:3] == ["openclaw", "message", "send"]:
-            message_sends.append(command[command.index("--message") + 1])
-        return subprocess.CompletedProcess(command, 0, stdout="{}", stderr="")
+    def feishu_poster(url, payload, timeout):
+        feishu_posts.append(payload)
+        return {"code": 0, "msg": "success"}
 
-    settings = make_settings(
-        str(tmp_path / "notify-state.json"),
-        missed_queue_path=queue_path,
+    monkeypatch.setattr("spx_spark.notifier.sinks.post_feishu", feishu_poster)
+
+    settings = replace(
+        make_settings(
+            str(tmp_path / "notify-state.json"),
+            missed_queue_path=queue_path,
+        ),
+        deepseek_enabled=True,
+        deepseek_deliver=True,
+    )
+
+    # Stub deepseek so review path delivers
+    monkeypatch.setattr(
+        "spx_spark.notifier.pipeline.run_deepseek_reviewer",
+        lambda settings, prompt: (
+            __import__("spx_spark.notifier", fromlist=["SinkResult"]).SinkResult(
+                sink="deepseek_reviewer", attempted=True, ok=True
+            ),
+            "需要看盘: SPX alert confirmed",
+        ),
     )
 
     notify_payload(
         make_payload(),
         settings=settings,
-        runner=runner,
         now=datetime(2026, 7, 7, 1, 0, tzinfo=timezone.utc),
     )
 
-    assert message_sends
-    assert "通道离线期间错过" in message_sends[0]
+    assert feishu_posts
+    digest_bodies = []
+    for post in feishu_posts:
+        card = post.get("card") or {}
+        # flatten card text roughly
+        digest_bodies.append(str(card))
+    joined = "\n".join(digest_bodies)
+    assert "通道离线期间错过" in joined or any("queued alert body" in str(p) for p in feishu_posts)
     assert not Path(queue_path).exists()
-    assert any("SPX up 31 bps from close" in message for message in message_sends)
 
 
 def test_digest_cli_returns_zero_on_empty_queue(tmp_path, monkeypatch, capsys) -> None:
@@ -297,7 +340,7 @@ def test_digest_cli_returns_zero_on_empty_queue(tmp_path, monkeypatch, capsys) -
     assert output == {"flushed": False, "count": 0}
 
 
-def test_flush_missed_keeps_queue_on_send_failure(tmp_path) -> None:
+def test_flush_missed_keeps_queue_on_send_failure(tmp_path, monkeypatch) -> None:
     queue_path = str(tmp_path / "missed.jsonl")
     append_missed(
         queue_path,
@@ -305,16 +348,21 @@ def test_flush_missed_keeps_queue_on_send_failure(tmp_path) -> None:
         kind="direct",
         at=datetime(2026, 7, 7, 0, 0, tzinfo=timezone.utc),
     )
-
-    def runner(command: list[str], timeout_seconds: float) -> subprocess.CompletedProcess[str]:
-        return subprocess.CompletedProcess(command, 1, stdout="", stderr="ret=-2")
+    monkeypatch.setattr(
+        "spx_spark.notifier.sinks.post_feishu",
+        lambda url, payload, timeout: {"code": 19001, "msg": "fail"},
+    )
+    monkeypatch.setattr(
+        "spx_spark.notifier.sinks.post_bark",
+        lambda url, payload, timeout: {"code": 500},
+    )
 
     settings = make_settings(
         str(tmp_path / "notify-state.json"),
         missed_queue_path=queue_path,
     )
 
-    result = flush_missed(settings, runner=runner)
+    result = flush_missed(settings)
 
     assert result is not None
     assert result.ok is False

@@ -348,12 +348,13 @@ def deliver_trade_push(
 ) -> list[SinkResult]:
     """Fan out one writer text across Feishu (trade) + Bark main (+ friend).
 
-    - Feishu: interactive markdown card, trade lane only.
+    - Feishu: interactive markdown card, trade lane only (IM reading surface).
     - Bark main: always; ops use bark_ops_group and plain body; trade uses
       lockscreen summary + optional markdown detail.
     - Bark friend: only when friend=True (caller already filtered trade-only).
-    - OpenClaw Weixin: still attempted when enabled (legacy parallel).
+    - OpenClaw Weixin is intentionally not in this fan-out; Feishu replaced it.
     """
+    del runner  # kept for call-site compatibility; Weixin fan-out removed
     from spx_spark.notifier.format_push import (
         bark_groups_for_lane,
         bark_lockscreen_summary,
@@ -367,13 +368,6 @@ def deliver_trade_push(
     if settings.feishu_enabled and is_trade:
         card = build_feishu_card(text, title=title, kind=kind, lane=lane)
         sinks.append(send_feishu_card(settings, card))
-
-    # Legacy Weixin: historically delivered even when openclaw_enabled=false
-    # (that flag only meant "raw dump without review"). Keep attempting so
-    # existing .env setups keep working until Feishu fully replaces it.
-    weixin = send_openclaw_message(settings, strip_markdown_light(text), runner=runner)
-    if weixin.attempted or settings.openclaw_enabled:
-        sinks.append(weixin)
 
     if settings.bark_enabled:
         group = bark_groups_for_lane(
@@ -413,22 +407,18 @@ def any_delivery_ok(sinks: list[SinkResult]) -> bool:
     return any(
         sink.ok
         for sink in sinks
-        if sink.sink in {"feishu", "bark", "openclaw_message"} and sink.attempted
+        if sink.sink in {"feishu", "bark"} and sink.attempted
     )
 
 
 def im_delivery_ok(sinks: list[SinkResult]) -> bool:
-    """True when Feishu or Weixin got the message. Bark alone does not count:
+    """True when Feishu got the message. Bark alone does not count:
 
     the missed-queue digest is for recovering the IM reading surface after an
     outage; Bark already woke the phone, but the card/timeline still needs a
     later IM flush.
     """
-    return any(
-        sink.ok
-        for sink in sinks
-        if sink.sink in {"feishu", "openclaw_message"} and sink.attempted
-    )
+    return any(sink.ok for sink in sinks if sink.sink == "feishu" and sink.attempted)
 
 
 BARK_TITLE_CATEGORIES: tuple[tuple[str, frozenset[str]], ...] = (

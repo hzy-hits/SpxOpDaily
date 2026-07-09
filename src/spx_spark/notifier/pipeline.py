@@ -419,7 +419,7 @@ def notify_payload(
             )
 
     sent_count = sum(
-        1 for sink in sinks if sink.sink in ("openclaw_message", "bark", "feishu") and sink.ok
+        1 for sink in sinks if sink.sink in ("bark", "feishu") and sink.ok
     )
     if alerts_marked_sent:
         mark_alerts_sent(alerts_marked_sent, sent_at_by_key, settings, now=now)

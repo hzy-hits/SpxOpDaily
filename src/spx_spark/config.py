@@ -659,7 +659,7 @@ class NotificationSettings:
             ),
             openclaw_enabled=env_bool("ALERT_NOTIFY_OPENCLAW_ENABLED", False),
             openclaw_command=env_str("ALERT_NOTIFY_OPENCLAW_COMMAND", "openclaw"),
-            openclaw_channel=env_str("ALERT_NOTIFY_OPENCLAW_CHANNEL", "openclaw-weixin"),
+            openclaw_channel=env_str("ALERT_NOTIFY_OPENCLAW_CHANNEL", ""),
             openclaw_account=env_str("ALERT_NOTIFY_OPENCLAW_ACCOUNT"),
             openclaw_target=env_str("ALERT_NOTIFY_OPENCLAW_TARGET"),
             openclaw_dry_run=env_bool("ALERT_NOTIFY_OPENCLAW_DRY_RUN", True),

@@ -327,7 +327,7 @@ def send_morning_map(
         "text": text,
         "writer": writer,
         "used_agent": writer != "template",
-        "weixin_ok": any(s.sink == "openclaw_message" and s.ok for s in delivery_sinks),
+        "im_ok": any(s.sink == "feishu" and s.ok for s in delivery_sinks),
         "bark_ok": any(s.sink == "bark" and s.ok for s in delivery_sinks),
         "feishu_ok": any(s.sink == "feishu" and s.ok for s in delivery_sinks),
         "delivered_ok": delivered_ok,
@@ -408,10 +408,10 @@ def run(argv: list[str] | None = None, *, now: datetime | None = None) -> int:
     settings = NotificationSettings.from_env()
     result = send_morning_map(payload, settings, now=now, previous_push=load_previous_push())
     mark_sent(state_path, trading_date)
-    if result.get("delivered_ok") or result["weixin_ok"] or result["bark_ok"] or result.get("feishu_ok"):
+    if result.get("delivered_ok") or result["im_ok"] or result["bark_ok"] or result.get("feishu_ok"):
         record_push("morning_map", result["text"], at=now.isoformat())
     print(json.dumps(result, ensure_ascii=False))
-    if not (result.get("delivered_ok") or result["weixin_ok"] or result["bark_ok"] or result.get("feishu_ok")):
+    if not (result.get("delivered_ok") or result["im_ok"] or result["bark_ok"] or result.get("feishu_ok")):
         return 1
     return 0
 

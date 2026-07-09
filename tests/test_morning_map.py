@@ -20,23 +20,32 @@ from spx_spark.morning_map import (
 from spx_spark.storage import LatestState
 
 
+@pytest.fixture(autouse=True)
+def _stub_feishu(monkeypatch):
+    monkeypatch.setattr(
+        "spx_spark.notifier.sinks.post_feishu",
+        lambda url, payload, timeout: {"code": 0, "msg": "success"},
+    )
+
+
 def make_settings(
     state_path: str,
     *,
     missed_queue_path: str = "",
     agent_enabled: bool = False,
     bark_enabled: bool = False,
+    feishu_enabled: bool = True,
 ) -> NotificationSettings:
     return NotificationSettings(
         enabled=True,
         min_severity="high",
         cooldown_seconds=300,
         state_path=state_path,
-        openclaw_enabled=True,
+        openclaw_enabled=False,
         openclaw_command="openclaw",
-        openclaw_channel="openclaw-weixin",
-        openclaw_account="account-im-bot",
-        openclaw_target="user@im.wechat",
+        openclaw_channel="",
+        openclaw_account="",
+        openclaw_target="",
         openclaw_dry_run=True,
         openclaw_timeout_seconds=20.0,
         openclaw_agent_enabled=agent_enabled,
@@ -61,6 +70,10 @@ def make_settings(
         bark_group="spx-spark",
         bark_level="",
         bark_timeout_seconds=10.0,
+        feishu_enabled=feishu_enabled,
+        feishu_webhook_url="https://open.feishu.cn/open-apis/bot/v2/hook/test" if feishu_enabled else "",
+        feishu_secret="",
+        feishu_timeout_seconds=10.0,
         missed_queue_path=missed_queue_path,
     )
 
@@ -166,23 +179,24 @@ def test_send_morning_map_falls_back_to_template_when_agent_fails(
     result = send_morning_map(payload, settings, runner=runner)
     assert result["used_agent"] is False
     assert result["text"] == template
-    assert result["weixin_ok"] is True
+    assert result["im_ok"] is True
 
 
-def test_send_morning_map_queues_on_weixin_failure(
+def test_send_morning_map_queues_on_feishu_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("SPX_PUSH_LLM_ENABLED", "false")
+    monkeypatch.setattr(
+        "spx_spark.notifier.sinks.post_feishu",
+        lambda url, payload, timeout: {"code": 19001, "msg": "fail"},
+    )
     payload = sample_payload()
     template = render_template(payload)
     missed_path = str(tmp_path / "missed.jsonl")
     settings = make_settings(str(tmp_path / "notify-state.json"), missed_queue_path=missed_path)
 
-    def runner(command: list[str], timeout_seconds: float) -> subprocess.CompletedProcess[str]:
-        return subprocess.CompletedProcess(command, 1, stdout="", stderr="send failed")
-
-    result = send_morning_map(payload, settings, runner=runner)
-    assert result["weixin_ok"] is False
+    result = send_morning_map(payload, settings)
+    assert result["im_ok"] is False
     assert result["text"] == template
     lines = Path(missed_path).read_text(encoding="utf-8").splitlines()
     assert len(lines) == 1

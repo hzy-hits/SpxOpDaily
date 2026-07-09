@@ -167,6 +167,108 @@ def test_position_qty_change_alert(monkeypatch):
     assert any(alert.kind == "spxw_position_qty_changed" for alert in alerts)
 
 
+def test_full_flat_emits_close_alerts_and_clears_state(monkeypatch, tmp_path):
+    """Empty IB snapshot must still emit closes for previously held legs."""
+    monkeypatch.setenv("ALERT_POSITIONS_ENABLED", "true")
+    monkeypatch.setenv("ALERT_POSITION_STRUCTURAL_ENABLED", "true")
+    state_path = tmp_path / "ibkr_position_state.json"
+    monkeypatch.setenv("IBKR_POSITIONS_STATE_PATH", str(state_path))
+
+    long_key = "U1|option:SPX:SPXW:20260706:7480:C"
+    short_key = "U1|option:SPX:SPXW:20260706:7535:C"
+    empty = make_snapshot()
+    from spx_spark.storage import LatestState
+
+    state = LatestState(
+        created_at=datetime(2026, 7, 6, 12, tzinfo=timezone.utc),
+        as_of=datetime(2026, 7, 6, 12, tzinfo=timezone.utc),
+        quotes=(),
+        best_quotes=(),
+    )
+    window = active_window(datetime(2026, 7, 6, 14, tzinfo=timezone.utc))
+    alerts = evaluate_position_alerts(
+        empty,
+        previous=PositionAlertState(
+            positions={long_key: 2.0, short_key: -2.0},
+            leg_pnl={long_key: 100.0, short_key: 50.0},
+            book_pnl=150.0,
+        ),
+        state=state,
+        options_map=None,
+        window=window,
+        persist_state=True,
+    )
+    closed = [alert for alert in alerts if alert.kind == "spxw_position_closed"]
+    assert len(closed) == 2
+    titles = {alert.title for alert in closed}
+    assert any("7480C" in title for title in titles)
+    assert any("7535C" in title for title in titles)
+    assert not any(alert.kind == "spxw_position_book_pnl" for alert in alerts)
+
+    saved = state_path.read_text(encoding="utf-8")
+    assert '"previous_qty": {}' in saved or '"previous_qty":{}' in saved
+
+
+def test_missing_snapshot_does_not_invent_closes(monkeypatch):
+    monkeypatch.setenv("ALERT_POSITIONS_ENABLED", "true")
+    from spx_spark.storage import LatestState
+
+    state = LatestState(
+        created_at=datetime(2026, 7, 6, 12, tzinfo=timezone.utc),
+        as_of=datetime(2026, 7, 6, 12, tzinfo=timezone.utc),
+        quotes=(),
+        best_quotes=(),
+    )
+    window = active_window(datetime(2026, 7, 6, 14, tzinfo=timezone.utc))
+    alerts = evaluate_position_alerts(
+        None,
+        previous=PositionAlertState(
+            positions={"U1|option:SPX:SPXW:20260706:7480:C": 1.0},
+            leg_pnl={},
+            book_pnl=0.0,
+        ),
+        state=state,
+        options_map=None,
+        window=window,
+        persist_state=False,
+    )
+    assert alerts == []
+
+
+def test_partial_flat_emits_close_for_missing_leg(monkeypatch):
+    monkeypatch.setenv("ALERT_POSITIONS_ENABLED", "true")
+    remaining = make_position(qty=2.0)
+    snapshot = make_snapshot(remaining)
+    from spx_spark.storage import LatestState
+
+    state = LatestState(
+        created_at=datetime(2026, 7, 6, 12, tzinfo=timezone.utc),
+        as_of=datetime(2026, 7, 6, 12, tzinfo=timezone.utc),
+        quotes=(),
+        best_quotes=(),
+    )
+    window = active_window(datetime(2026, 7, 6, 14, tzinfo=timezone.utc))
+    closed_key = "U1|option:SPX:SPXW:20260706:7535:C"
+    alerts = evaluate_position_alerts(
+        snapshot,
+        previous=PositionAlertState(
+            positions={
+                f"{remaining.account}|{remaining.canonical_id}": 2.0,
+                closed_key: -2.0,
+            },
+            leg_pnl={},
+            book_pnl=100.0,
+        ),
+        state=state,
+        options_map=None,
+        window=window,
+        persist_state=False,
+    )
+    closed = [alert for alert in alerts if alert.kind == "spxw_position_closed"]
+    assert len(closed) == 1
+    assert "7535C" in closed[0].title
+
+
 def test_format_book_detail_includes_leg_pnl():
     snapshot = make_snapshot(
         make_position(unrealized_pnl=-620.0, unrealized_pnl_pct=-19.4),

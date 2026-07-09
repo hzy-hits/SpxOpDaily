@@ -53,8 +53,18 @@ from spx_spark.order_map import (
     within_refresh_window,
     within_send_window,
     within_status_window,
+    _wall_rung_option_ref,
 )
+from spx_spark.options_map import pair_by_strike
 from spx_spark.storage import LatestState
+
+
+@pytest.fixture(autouse=True)
+def _stub_feishu(monkeypatch):
+    monkeypatch.setattr(
+        "spx_spark.notifier.sinks.post_feishu",
+        lambda url, payload, timeout: {"code": 0, "msg": "success"},
+    )
 
 SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 
@@ -65,17 +75,18 @@ def make_settings(
     missed_queue_path: str = "",
     agent_enabled: bool = False,
     bark_enabled: bool = False,
+    feishu_enabled: bool = True,
 ) -> NotificationSettings:
     return NotificationSettings(
         enabled=True,
         min_severity="high",
         cooldown_seconds=300,
         state_path=state_path,
-        openclaw_enabled=True,
+        openclaw_enabled=False,
         openclaw_command="openclaw",
-        openclaw_channel="openclaw-weixin",
-        openclaw_account="account-im-bot",
-        openclaw_target="user@im.wechat",
+        openclaw_channel="",
+        openclaw_account="",
+        openclaw_target="",
         openclaw_dry_run=True,
         openclaw_timeout_seconds=20.0,
         openclaw_agent_enabled=agent_enabled,
@@ -100,6 +111,10 @@ def make_settings(
         bark_group="spx-spark",
         bark_level="",
         bark_timeout_seconds=10.0,
+        feishu_enabled=feishu_enabled,
+        feishu_webhook_url="https://open.feishu.cn/open-apis/bot/v2/hook/test" if feishu_enabled else "",
+        feishu_secret="",
+        feishu_timeout_seconds=10.0,
         missed_queue_path=missed_queue_path,
     )
 
@@ -518,20 +533,170 @@ def test_render_template_includes_wall_ladder_lines() -> None:
         "candidates": [],
         "wall_ladder": {
             "put_walls": [
-                {"strike": 7500.0, "open_interest": 3604, "prob_touch": 0.47},
-                {"strike": 7480.0, "open_interest": 1500, "prob_touch": 0.30},
-                {"strike": 7450.0, "open_interest": 2876, "prob_touch": 0.18},
+                {
+                    "strike": 7500.0,
+                    "open_interest": 3604,
+                    "prob_touch": 0.47,
+                    "option_right": "C",
+                    "option_strike": 7500,
+                    "current_mid": 31.05,
+                    "projected_mid": 14.2,
+                    "limit_aggressive": 14.2,
+                    "limit_conservative": 12.0,
+                },
+                {
+                    "strike": 7480.0,
+                    "open_interest": 1500,
+                    "prob_touch": 0.30,
+                    "option_right": "C",
+                    "option_strike": 7480,
+                    "current_mid": 40.0,
+                    "projected_mid": 9.5,
+                    "limit_aggressive": 9.5,
+                    "limit_conservative": 8.0,
+                    "degraded": True,
+                    "quote_quality": "stale",
+                },
+                {
+                    "strike": 7450.0,
+                    "open_interest": 2876,
+                    "prob_touch": 0.18,
+                    "option_right": "C",
+                    "option_strike": 7450,
+                    "current_mid": 55.0,
+                    "projected_mid": 5.1,
+                    "limit_aggressive": 5.1,
+                    "limit_conservative": 4.3,
+                },
             ],
             "call_walls": [
-                {"strike": 7550.0, "open_interest": 6555, "prob_touch": 0.51},
-                {"strike": 7600.0, "open_interest": 6533, "prob_touch": 0.12},
+                {
+                    "strike": 7550.0,
+                    "open_interest": 6555,
+                    "prob_touch": 0.51,
+                    "option_right": "P",
+                    "option_strike": 7550,
+                    "current_mid": 28.0,
+                    "projected_mid": 12.4,
+                    "limit_aggressive": 12.4,
+                    "limit_conservative": 10.5,
+                },
+                {
+                    "strike": 7600.0,
+                    "open_interest": 6533,
+                    "prob_touch": 0.12,
+                    "option_right": "P",
+                    "option_strike": 7600,
+                    "current_mid": 50.0,
+                    "projected_mid": 6.2,
+                    "limit_aggressive": 6.2,
+                    "limit_conservative": 5.2,
+                },
             ],
         },
         "warnings": [],
     }
     text = render_template(payload)
-    assert "put 墙阶梯(下方支撑): ★7500(OI 3604,触达47%) > 7480(OI 1500,触达30%) > 7450(OI 2876,触达18%) (★=主墙)" in text
-    assert "call 墙阶梯(上方阻力): ★7550(OI 6555,触达51%) > 7600(OI 6533,触达12%) (★=主墙)" in text
+    assert "put 墙阶梯(下方支撑→买 call) (★=主墙):" in text
+    assert "★7500 (OI 3604,触达47%) → 7500C 到位预估14.20(现31.05) 限价14.20/12.00" in text
+    assert " 7480 (OI 1500,触达30%) → 7480C 到位预估9.50(现40.00) 限价9.50/8.00 [stale]" in text
+    assert "call 墙阶梯(上方阻力→买 put) (★=主墙):" in text
+    assert "★7550 (OI 6555,触达51%) → 7550P 到位预估12.40(现28.00) 限价12.40/10.50" in text
+
+
+def test_wall_rung_option_ref_degrades_recent_stale_quote() -> None:
+    now = datetime(2026, 7, 9, 15, 0, tzinfo=timezone.utc)
+    live = make_option(
+        expiry="20260709",
+        strike=7500.0,
+        right="C",
+        mark=25.0,
+        delta=0.55,
+        gamma=0.01,
+        now=now,
+        quality=MarketDataQuality.LIVE,
+    )
+    # Cold-lane STALE but only 60s old — structure gate should still accept.
+    stale = make_option(
+        expiry="20260709",
+        strike=7480.0,
+        right="C",
+        mark=40.0,
+        delta=0.80,
+        gamma=0.006,
+        now=now,
+        quality=MarketDataQuality.STALE,
+    )
+    stale = Quote(
+        instrument=stale.instrument,
+        provider=stale.provider,
+        provider_symbol=stale.provider_symbol,
+        received_at=now,
+        quality=MarketDataQuality.STALE,
+        bid=stale.bid,
+        ask=stale.ask,
+        mark=stale.mark,
+        open_interest=stale.open_interest,
+        quote_time=now - timedelta(seconds=60),
+        greeks=stale.greeks,
+    )
+    quotes = [live, stale]
+    pairs = pair_by_strike(quotes)
+    live_ref = _wall_rung_option_ref(
+        wall_strike=7500.0,
+        right="C",
+        spot=7520.0,
+        expiry_quotes=quotes,
+        pairs=pairs,
+        strike_step=5.0,
+        tau_now_years=4.0 / (365.0 * 24.0),
+        em_points=20.0,
+        as_of=now,
+    )
+    stale_ref = _wall_rung_option_ref(
+        wall_strike=7480.0,
+        right="C",
+        spot=7520.0,
+        expiry_quotes=quotes,
+        pairs=pairs,
+        strike_step=5.0,
+        tau_now_years=4.0 / (365.0 * 24.0),
+        em_points=20.0,
+        as_of=now,
+    )
+    assert live_ref["projected_mid"] is not None
+    assert live_ref["degraded"] is False
+    assert stale_ref["projected_mid"] is not None
+    assert stale_ref["degraded"] is True
+    assert stale_ref["quote_quality"] == "stale"
+    assert str(stale_ref["projection_model"]).endswith("_stale")
+
+    # Too old (>15 min structure window) still rejected.
+    ancient = Quote(
+        instrument=stale.instrument,
+        provider=stale.provider,
+        provider_symbol=stale.provider_symbol,
+        received_at=now,
+        quality=MarketDataQuality.STALE,
+        bid=stale.bid,
+        ask=stale.ask,
+        mark=stale.mark,
+        open_interest=stale.open_interest,
+        quote_time=now - timedelta(seconds=1200),
+        greeks=stale.greeks,
+    )
+    ancient_ref = _wall_rung_option_ref(
+        wall_strike=7480.0,
+        right="C",
+        spot=7520.0,
+        expiry_quotes=[live, ancient],
+        pairs=pair_by_strike([live, ancient]),
+        strike_step=5.0,
+        tau_now_years=4.0 / (365.0 * 24.0),
+        em_points=20.0,
+        as_of=now,
+    )
+    assert ancient_ref["projected_mid"] is None
 
 
 def test_render_template_shows_frontrun_and_stop_trigger_notes() -> None:
@@ -872,7 +1037,7 @@ def test_payload_fingerprint_and_material_changes() -> None:
 
 
 def test_within_refresh_window_beijing() -> None:
-    # Refresh follows the status window: Beijing 08:30 -> next-day 02:00.
+    # Refresh follows the status window: Beijing 07:30 -> next-day 02:00.
     # 14:45 Beijing: fixed cadence continues pre-open.
     beijing_1445 = datetime(2026, 7, 7, 6, 45, tzinfo=timezone.utc)
     assert within_refresh_window(beijing_1445) is True
@@ -888,9 +1053,12 @@ def test_within_refresh_window_beijing() -> None:
     # 09:00 Beijing: the reader's working morning is now inside the window.
     beijing_0900 = datetime(2026, 7, 7, 1, 0, tzinfo=timezone.utc)
     assert within_refresh_window(beijing_0900) is True
-    # 08:00 Beijing: before the 08:30 start of the reader's day.
-    beijing_0800 = datetime(2026, 7, 7, 0, 0, tzinfo=timezone.utc)
-    assert within_refresh_window(beijing_0800) is False
+    # 07:30 Beijing: start of the reader's day.
+    beijing_0730 = datetime(2026, 7, 6, 23, 30, tzinfo=timezone.utc)
+    assert within_refresh_window(beijing_0730) is True
+    # 07:00 Beijing: before the 07:30 start of the reader's day.
+    beijing_0700 = datetime(2026, 7, 6, 23, 0, tzinfo=timezone.utc)
+    assert within_refresh_window(beijing_0700) is False
     # 02:30 Beijing: past the cutoff.
     beijing_0230 = datetime(2026, 7, 7, 18, 30, tzinfo=timezone.utc)
     assert within_refresh_window(beijing_0230) is False
@@ -992,12 +1160,15 @@ def test_within_status_window_and_minutes_to_open() -> None:
     beijing_1430 = datetime(2026, 7, 7, 6, 30, tzinfo=timezone.utc)
     assert within_status_window(beijing_1430) is True
     assert minutes_to_open(beijing_1430) == 420
-    # 14:00 Beijing: now inside the window (day starts 08:30).
+    # 14:00 Beijing: now inside the window (day starts 07:30).
     beijing_1400 = datetime(2026, 7, 7, 6, 0, tzinfo=timezone.utc)
     assert within_status_window(beijing_1400) is True
-    # 08:00 Beijing: before the reader's day starts.
-    beijing_0800 = datetime(2026, 7, 7, 0, 0, tzinfo=timezone.utc)
-    assert within_status_window(beijing_0800) is False
+    # 07:30 Beijing: start of the reader's day.
+    beijing_0730 = datetime(2026, 7, 6, 23, 30, tzinfo=timezone.utc)
+    assert within_status_window(beijing_0730) is True
+    # 07:00 Beijing: before the reader's day starts.
+    beijing_0700 = datetime(2026, 7, 6, 23, 0, tzinfo=timezone.utc)
+    assert within_status_window(beijing_0700) is False
     # 21:30 Beijing = 9:30 ET: market open, status keeps running.
     beijing_2130 = datetime(2026, 7, 7, 13, 30, tzinfo=timezone.utc)
     assert within_status_window(beijing_2130) is True
@@ -1051,8 +1222,12 @@ def test_render_status_template_contains_levels_and_changes() -> None:
     assert "关键位无实质变化" in text_no_change
 
 
-def test_send_order_map_queues_on_weixin_failure(tmp_path: Path, monkeypatch) -> None:
+def test_send_order_map_queues_on_feishu_failure(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("SPX_PUSH_LLM_ENABLED", "false")
+    monkeypatch.setattr(
+        "spx_spark.notifier.sinks.post_feishu",
+        lambda url, payload, timeout: {"code": 19001, "msg": "fail"},
+    )
     payload = build_order_payload(
         make_state(
             Quote(
@@ -1071,11 +1246,8 @@ def test_send_order_map_queues_on_weixin_failure(tmp_path: Path, monkeypatch) ->
     missed_path = str(tmp_path / "missed.jsonl")
     settings = make_settings(str(tmp_path / "notify-state.json"), missed_queue_path=missed_path)
 
-    def runner(command: list[str], timeout_seconds: float) -> subprocess.CompletedProcess[str]:
-        return subprocess.CompletedProcess(command, 1, stdout="", stderr="send failed")
-
-    result = send_order_map(payload, settings, runner=runner)
-    assert result["weixin_ok"] is False
+    result = send_order_map(payload, settings)
+    assert result["im_ok"] is False
     assert result["text"] == template
     lines = Path(missed_path).read_text(encoding="utf-8").splitlines()
     assert len(lines) == 1

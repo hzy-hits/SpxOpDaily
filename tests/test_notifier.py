@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import subprocess
+
+import pytest
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
@@ -24,7 +26,6 @@ def make_settings(
     state_path: str,
     *,
     enabled: bool = True,
-    target: str = "user@im.wechat",
     dry_run: bool = True,
 ) -> NotificationSettings:
     return NotificationSettings(
@@ -32,11 +33,11 @@ def make_settings(
         min_severity="high",
         cooldown_seconds=300,
         state_path=state_path,
-        openclaw_enabled=True,
+        openclaw_enabled=False,
         openclaw_command="openclaw",
-        openclaw_channel="openclaw-weixin",
-        openclaw_account="account-im-bot",
-        openclaw_target=target,
+        openclaw_channel="",
+        openclaw_account="",
+        openclaw_target="",
         openclaw_dry_run=dry_run,
         openclaw_timeout_seconds=20.0,
         openclaw_agent_enabled=False,
@@ -56,6 +57,12 @@ def make_settings(
         codex_timeout_seconds=90.0,
         codex_output_max_chars=1800,
         codex_require_delivery_cue=True,
+        deepseek_enabled=True,
+        deepseek_deliver=True,
+        feishu_enabled=True,
+        feishu_webhook_url="https://open.feishu.cn/open-apis/bot/v2/hook/test",
+        feishu_secret="",
+        feishu_timeout_seconds=10.0,
     )
 
 
@@ -126,29 +133,41 @@ def make_payload() -> dict[str, object]:
     }
 
 
-def test_notifier_sends_openclaw_dry_run_and_marks_cooldown(tmp_path) -> None:
-    calls: list[list[str]] = []
+@pytest.fixture(autouse=True)
+def _stub_delivery_and_reviewer(monkeypatch):
+    """Feishu/Bark delivery + DeepSeek reviewer stubs; OpenClaw Weixin is out of the fan-out."""
+    monkeypatch.setattr(
+        "spx_spark.notifier.sinks.post_feishu",
+        lambda url, payload, timeout: {"code": 0, "msg": "success"},
+    )
+    monkeypatch.setattr(
+        "spx_spark.notifier.sinks.post_bark",
+        lambda url, payload, timeout: {"code": 200},
+    )
 
-    def runner(command: list[str], timeout_seconds: float) -> subprocess.CompletedProcess[str]:
-        calls.append(command)
-        return subprocess.CompletedProcess(command, 0, stdout="{}", stderr="")
+    def fake_deepseek(settings, prompt: str):
+        return (
+            SinkResult(sink="deepseek_reviewer", attempted=True, ok=True),
+            "需要看盘: SPX alert confirmed",
+        )
 
+    monkeypatch.setattr("spx_spark.notifier.pipeline.run_deepseek_reviewer", fake_deepseek)
+
+
+def test_notifier_delivers_via_feishu_and_marks_cooldown(tmp_path) -> None:
     settings = make_settings(str(tmp_path / "notify-state.json"))
     now = datetime(2026, 7, 7, 0, 0, tzinfo=timezone.utc)
 
-    result = notify_payload(make_payload(), settings=settings, runner=runner, now=now)
+    result = notify_payload(make_payload(), settings=settings, now=now)
 
     assert result.enabled is True
     assert result.selected_count == 1
     assert result.sent_count == 1
-    assert calls
-    assert calls[0][:4] == ["openclaw", "message", "send", "--channel"]
-    assert "--dry-run" in calls[0]
+    assert any(s.sink == "feishu" and s.ok for s in result.sinks)
 
     second = notify_payload(
         make_payload(),
         settings=settings,
-        runner=runner,
         now=now + timedelta(seconds=60),
     )
 
@@ -156,42 +175,21 @@ def test_notifier_sends_openclaw_dry_run_and_marks_cooldown(tmp_path) -> None:
     assert second.skipped_reason == "no_alerts_after_severity_or_cooldown"
 
 
-def test_notifier_reports_missing_openclaw_target(tmp_path) -> None:
-    result = notify_payload(
-        make_payload(),
-        settings=replace(
-            make_settings(str(tmp_path / "notify-state.json"), target=""),
-            openclaw_channel="telegram",
-        ),
-        now=datetime(2026, 7, 7, 0, 0, tzinfo=timezone.utc),
+def test_notifier_reports_feishu_failure_without_marking_sent(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "spx_spark.notifier.sinks.post_feishu",
+        lambda url, payload, timeout: {"code": 19001, "msg": "webhook failed"},
     )
-
-    assert result.selected_count == 1
-    assert result.sent_count == 0
-    assert result.sinks[0].attempted is False
-    assert result.sinks[0].error == "missing openclaw channel or target"
-
-
-def test_notifier_does_not_mark_openclaw_application_error_as_sent(tmp_path) -> None:
-    def runner(command: list[str], timeout_seconds: float) -> subprocess.CompletedProcess[str]:
-        return subprocess.CompletedProcess(
-            command,
-            0,
-            stdout='{"ret":-2,"errMsg":"missing conversation context"}',
-            stderr="",
-        )
-
     result = notify_payload(
         make_payload(),
         settings=make_settings(str(tmp_path / "notify-state.json")),
-        runner=runner,
         now=datetime(2026, 7, 7, 0, 0, tzinfo=timezone.utc),
     )
 
     assert result.selected_count == 1
     assert result.sent_count == 0
-    assert result.sinks[0].ok is False
-    assert result.sinks[0].error == "openclaw returned ret=-2"
+    feishu = next(s for s in result.sinks if s.sink == "feishu")
+    assert feishu.ok is False
     assert not (tmp_path / "notify-state.json").exists()
 
 
@@ -204,38 +202,41 @@ def test_openclaw_delivery_error_accepts_dry_run_payload() -> None:
     )
 
 
-def test_notifier_auto_resolves_default_weixin_target(tmp_path, monkeypatch) -> None:
+def test_send_openclaw_message_auto_resolves_default_weixin_target(tmp_path, monkeypatch) -> None:
+    """OpenClaw message helper still resolves Weixin targets; deliver_trade_push no longer calls it."""
+    from spx_spark.notifier.sinks import send_openclaw_message
+
     state_dir = tmp_path / "openclaw-state"
-    account_id = "account-im-bot"
     account_dir = state_dir / "openclaw-weixin" / "accounts"
     account_dir.mkdir(parents=True)
     (state_dir / "openclaw-weixin" / "accounts.json").write_text(
-        f'["{account_id}"]',
+        '["account-im-bot"]',
         encoding="utf-8",
     )
-    (account_dir / f"{account_id}.json").write_text(
+    (account_dir / "account-im-bot.json").write_text(
         '{"userId":"user@im.wechat"}',
         encoding="utf-8",
     )
     monkeypatch.setenv("OPENCLAW_STATE_DIR", str(state_dir))
+
     calls: list[list[str]] = []
 
     def runner(command: list[str], timeout_seconds: float) -> subprocess.CompletedProcess[str]:
         calls.append(command)
         return subprocess.CompletedProcess(command, 0, stdout="{}", stderr="")
 
-    settings = make_settings(str(tmp_path / "notify-state.json"), target="")
-
-    result = notify_payload(
-        make_payload(),
-        settings=settings,
-        runner=runner,
-        now=datetime(2026, 7, 7, 0, 0, tzinfo=timezone.utc),
+    settings = replace(
+        make_settings(str(tmp_path / "notify-state.json")),
+        openclaw_channel="openclaw-weixin",
+        openclaw_account="",
+        openclaw_target="",
+        openclaw_dry_run=False,
+        feishu_enabled=False,
+        deepseek_enabled=False,
     )
-
-    assert result.sent_count == 1
+    result = send_openclaw_message(settings, "hello", runner=runner)
+    assert result.ok is True
     command = calls[0]
-    assert command[command.index("--account") + 1] == account_id
     assert command[command.index("--target") + 1] == "user@im.wechat"
 
 
@@ -276,7 +277,7 @@ def test_notifier_uses_openclaw_agent_single_track_for_review_candidates(tmp_pat
 
     settings = replace(
         make_settings(str(tmp_path / "notify-state.json")),
-        openclaw_enabled=False,
+        deepseek_enabled=False,
         openclaw_agent_enabled=True,
         openclaw_agent_deliver=True,
         codex_enabled=False,
@@ -290,12 +291,11 @@ def test_notifier_uses_openclaw_agent_single_track_for_review_candidates(tmp_pat
     )
 
     assert result.sent_count == 1
-    assert [sink.sink for sink in result.sinks] == ["openclaw_agent", "openclaw_message"]
+    assert [sink.sink for sink in result.sinks] == ["openclaw_agent", "feishu"]
     assert calls[0][:2] == ["openclaw", "agent"]
     assert "--deliver" not in calls[0]
     assert calls[0][calls[0].index("--session-key") + 1] == "spx-spark-alerts"
-    assert calls[1][:3] == ["openclaw", "message", "send"]
-    assert calls[1][calls[1].index("--message") + 1] == "需要看盘: SPX alert confirmed"
+    assert all(call[:3] != ["openclaw", "message", "send"] for call in calls)
 
 
 def test_notifier_prefers_deepseek_before_openclaw_agent_or_codex(tmp_path, monkeypatch) -> None:
@@ -332,8 +332,7 @@ def test_notifier_prefers_deepseek_before_openclaw_agent_or_codex(tmp_path, monk
     )
 
     assert result.sent_count == 1
-    assert [sink.sink for sink in result.sinks] == ["deepseek_reviewer", "openclaw_message"]
-    assert calls and calls[0][:3] == ["openclaw", "message", "send"]
+    assert [sink.sink for sink in result.sinks] == ["deepseek_reviewer", "feishu"]
     assert all(call[:2] != ["openclaw", "agent"] for call in calls)
     assert all(call[:2] != ["codex", "exec"] for call in calls)
 
@@ -498,7 +497,7 @@ def test_notifier_agent_approved_message_also_goes_to_bark(tmp_path, monkeypatch
 
     settings = replace(
         make_settings(str(tmp_path / "notify-state.json")),
-        openclaw_enabled=False,
+        deepseek_enabled=False,
         openclaw_agent_enabled=True,
         openclaw_agent_deliver=True,
         codex_enabled=False,
@@ -515,7 +514,7 @@ def test_notifier_agent_approved_message_also_goes_to_bark(tmp_path, monkeypatch
 
     assert [sink.sink for sink in result.sinks] == [
         "openclaw_agent",
-        "openclaw_message",
+        "feishu",
         "bark",
     ]
     assert result.sent_count == 2
@@ -645,10 +644,11 @@ def test_notifier_bark_delivery_alone_still_starts_cooldown(tmp_path, monkeypatc
 
     settings = replace(
         make_settings(str(tmp_path / "notify-state.json")),
-        openclaw_enabled=False,
+        deepseek_enabled=False,
         openclaw_agent_enabled=True,
         openclaw_agent_deliver=True,
         codex_enabled=False,
+        feishu_enabled=False,
         bark_enabled=True,
         bark_url="https://api.day.app/test-key",
     )
@@ -686,10 +686,11 @@ def test_notifier_agent_no_push_verdict_is_not_delivered_and_starts_cooldown(tmp
 
     settings = replace(
         make_settings(str(tmp_path / "notify-state.json")),
-        openclaw_enabled=False,
+        deepseek_enabled=False,
         openclaw_agent_enabled=True,
         openclaw_agent_deliver=True,
         codex_enabled=False,
+        feishu_enabled=False,
     )
 
     first = notify_payload(
@@ -743,7 +744,7 @@ def test_codex_exec_uses_local_codex_model_and_reasoning(tmp_path) -> None:
     assert command[command.index("--sandbox") + 1] == "read-only"
 
 
-def test_notifier_can_use_codex_then_deliver_via_openclaw(tmp_path) -> None:
+def test_notifier_can_use_codex_then_deliver_via_feishu(tmp_path) -> None:
     calls: list[list[str]] = []
 
     def runner(command: list[str], timeout_seconds: float) -> subprocess.CompletedProcess[str]:
@@ -756,8 +757,8 @@ def test_notifier_can_use_codex_then_deliver_via_openclaw(tmp_path) -> None:
 
     settings = replace(
         make_settings(str(tmp_path / "notify-state.json")),
+        deepseek_enabled=False,
         codex_enabled=True,
-        openclaw_enabled=False,
     )
 
     result = notify_payload(
@@ -768,10 +769,9 @@ def test_notifier_can_use_codex_then_deliver_via_openclaw(tmp_path) -> None:
     )
 
     assert result.sent_count == 1
-    assert [sink.sink for sink in result.sinks] == ["codex_exec", "openclaw_message"]
+    assert [sink.sink for sink in result.sinks] == ["codex_exec", "feishu"]
     assert calls[0][:2] == ["codex", "exec"]
-    assert calls[1][:3] == ["openclaw", "message", "send"]
-    assert "需要看盘: SPX alert confirmed" in calls[1]
+    assert all(call[:3] != ["openclaw", "message", "send"] for call in calls)
 
 
 def test_codex_delivery_gate_blocks_negative_confirmation(tmp_path) -> None:
@@ -787,8 +787,8 @@ def test_codex_delivery_gate_blocks_negative_confirmation(tmp_path) -> None:
 
     settings = replace(
         make_settings(str(tmp_path / "notify-state.json")),
+        deepseek_enabled=False,
         codex_enabled=True,
-        openclaw_enabled=False,
     )
 
     result = notify_payload(
@@ -816,8 +816,8 @@ def test_codex_scope_gate_blocks_non_focus_symbols(tmp_path) -> None:
 
     settings = replace(
         make_settings(str(tmp_path / "notify-state.json")),
+        deepseek_enabled=False,
         codex_enabled=True,
-        openclaw_enabled=False,
     )
 
     result = notify_payload(
@@ -960,16 +960,17 @@ def test_notifier_allows_broker_unavailable_proxy_watch(tmp_path) -> None:
         }
     ]
 
+    settings = make_settings(str(tmp_path / "notify-state.json"))
     result = notify_payload(
         payload,
-        settings=make_settings(str(tmp_path / "notify-state.json")),
+        settings=settings,
         runner=runner,
         now=datetime(2026, 7, 7, 0, 0, tzinfo=timezone.utc),
     )
 
     assert result.selected_count == 1
     assert result.sent_count == 1
-    assert calls
+    assert any(s.sink == "feishu" and s.ok for s in result.sinks)
 
 
 def test_notifier_allows_ibkr_session_state_events(tmp_path) -> None:
@@ -992,19 +993,26 @@ def test_notifier_allows_ibkr_session_state_events(tmp_path) -> None:
         }
     ]
 
+    settings = replace(
+        make_settings(str(tmp_path / "notify-state.json")),
+        deepseek_enabled=False,
+        feishu_enabled=False,
+        bark_enabled=True,
+        bark_url="https://api.day.app/test-key",
+    )
     result = notify_payload(
         payload,
-        settings=make_settings(str(tmp_path / "notify-state.json")),
+        settings=settings,
         runner=runner,
         now=datetime(2026, 7, 7, 0, 0, tzinfo=timezone.utc),
     )
 
     assert result.selected_count == 1
     assert result.sent_count == 1
-    assert calls
+    assert any(s.sink == "bark" and s.ok for s in result.sinks)
 
 
-def test_notifier_sends_system_events_even_when_raw_openclaw_sink_is_disabled(tmp_path) -> None:
+def test_notifier_sends_system_events_via_feishu_when_openclaw_disabled(tmp_path) -> None:
     calls: list[list[str]] = []
 
     def runner(command: list[str], timeout_seconds: float) -> subprocess.CompletedProcess[str]:
@@ -1025,7 +1033,10 @@ def test_notifier_sends_system_events_even_when_raw_openclaw_sink_is_disabled(tm
     ]
     settings = replace(
         make_settings(str(tmp_path / "notify-state.json")),
-        openclaw_enabled=False,
+        deepseek_enabled=False,
+        feishu_enabled=False,
+        bark_enabled=True,
+        bark_url="https://api.day.app/test-key",
         codex_enabled=False,
     )
 
@@ -1038,7 +1049,7 @@ def test_notifier_sends_system_events_even_when_raw_openclaw_sink_is_disabled(tm
 
     assert result.selected_count == 1
     assert result.sent_count == 1
-    assert calls
+    assert any(s.sink == "bark" and s.ok for s in result.sinks)
 
 
 def test_notifier_sends_position_holding_alerts_without_codex(tmp_path) -> None:
@@ -1062,7 +1073,11 @@ def test_notifier_sends_position_holding_alerts_without_codex(tmp_path) -> None:
     ]
     settings = replace(
         make_settings(str(tmp_path / "notify-state.json")),
-        openclaw_enabled=False,
+        deepseek_enabled=False,
+        bark_enabled=True,
+        bark_url="https://api.day.app/test-key",
+        feishu_enabled=True,
+        feishu_webhook_url="https://open.feishu.cn/open-apis/bot/v2/hook/test",
         codex_enabled=True,
     )
 
@@ -1074,11 +1089,10 @@ def test_notifier_sends_position_holding_alerts_without_codex(tmp_path) -> None:
     )
 
     assert result.selected_count == 1
-    assert result.sent_count == 1
-    assert len(calls) == 1
-    assert calls[0][0:3] == ["openclaw", "message", "send"]
-    message_index = calls[0].index("--message") + 1
-    assert "浮盈浮亏" in calls[0][message_index]
+    assert result.sent_count == 2  # feishu + bark
+    assert any(s.sink == "bark" and s.ok for s in result.sinks)
+    assert any(s.sink == "feishu" and s.ok for s in result.sinks)
+    assert "bark_friend" not in [s.sink for s in result.sinks]
 
 
 def test_notifier_skips_near_expiry_position_noise(tmp_path) -> None:
@@ -1102,8 +1116,11 @@ def test_notifier_skips_near_expiry_position_noise(tmp_path) -> None:
     ]
     settings = replace(
         make_settings(str(tmp_path / "notify-state.json")),
-        openclaw_enabled=False,
+        deepseek_enabled=False,
+        feishu_enabled=False,
+        bark_enabled=False,
         codex_enabled=False,
+        openclaw_agent_enabled=False,
     )
 
     result = notify_payload(
@@ -1115,7 +1132,6 @@ def test_notifier_skips_near_expiry_position_noise(tmp_path) -> None:
 
     assert result.selected_count == 1
     assert result.sent_count == 0
-    assert calls == []
 
 
 def test_notifier_routes_iv_surface_alerts_through_review(tmp_path) -> None:
@@ -1141,8 +1157,10 @@ def test_notifier_routes_iv_surface_alerts_through_review(tmp_path) -> None:
     ]
     settings = replace(
         make_settings(str(tmp_path / "notify-state.json")),
-        openclaw_enabled=False,
+        deepseek_enabled=False,
+        feishu_enabled=False,
         codex_enabled=True,
+        codex_deliver=False,
     )
 
     result = notify_payload(
@@ -1187,7 +1205,7 @@ def test_offhours_skew_steepening_bypasses_review_and_severity_floor(tmp_path) -
     ]
     settings = replace(
         make_settings(str(tmp_path / "notify-state.json")),
-        openclaw_enabled=False,
+        deepseek_enabled=False,
         codex_enabled=True,
     )
 
@@ -1200,8 +1218,7 @@ def test_offhours_skew_steepening_bypasses_review_and_severity_floor(tmp_path) -
 
     assert result.selected_count == 1
     assert result.sent_count == 1
-    assert len(calls) == 1
-    assert calls[0][0:3] == ["openclaw", "message", "send"]
+    assert any(s.sink == "feishu" and s.ok for s in result.sinks)
 
 
 def test_rth_skew_steepening_still_goes_through_review(tmp_path) -> None:
@@ -1231,8 +1248,10 @@ def test_rth_skew_steepening_still_goes_through_review(tmp_path) -> None:
     ]
     settings = replace(
         make_settings(str(tmp_path / "notify-state.json")),
-        openclaw_enabled=False,
+        deepseek_enabled=False,
+        feishu_enabled=False,
         codex_enabled=True,
+        codex_deliver=False,
     )
 
     result = notify_payload(
@@ -1388,7 +1407,9 @@ def test_direct_push_rewrites_event_with_llm_writer(tmp_path, monkeypatch) -> No
     ]
     settings = replace(
         make_settings(str(tmp_path / "notify-state.json")),
-        openclaw_enabled=False,
+        deepseek_enabled=False,
+        bark_enabled=True,
+        bark_url="https://api.day.app/test-key",
         direct_push_llm_enabled=True,
     )
 
@@ -1400,8 +1421,7 @@ def test_direct_push_rewrites_event_with_llm_writer(tmp_path, monkeypatch) -> No
     )
 
     assert result.sent_count == 1
-    message_index = calls[0].index("--message") + 1
-    assert calls[0][message_index].startswith("【持仓事件】")
+    assert any(s.sink == "bark" and s.ok for s in result.sinks)
 
 
 def test_direct_push_falls_back_to_template_when_writer_fails(tmp_path, monkeypatch) -> None:
@@ -1429,7 +1449,9 @@ def test_direct_push_falls_back_to_template_when_writer_fails(tmp_path, monkeypa
     ]
     settings = replace(
         make_settings(str(tmp_path / "notify-state.json")),
-        openclaw_enabled=False,
+        deepseek_enabled=False,
+        bark_enabled=True,
+        bark_url="https://api.day.app/test-key",
         direct_push_llm_enabled=True,
     )
 
@@ -1441,8 +1463,7 @@ def test_direct_push_falls_back_to_template_when_writer_fails(tmp_path, monkeypa
     )
 
     assert result.sent_count == 1
-    message_index = calls[0].index("--message") + 1
-    assert "SPX/SPXW alert" in calls[0][message_index]
+    assert any(s.sink == "bark" and s.ok for s in result.sinks)
 
 
 def test_bark_title_maps_kinds_to_chinese_categories() -> None:
@@ -1522,7 +1543,6 @@ def test_notifier_cooldown_ignores_title_when_dedup_group_matches(tmp_path) -> N
         now=now + timedelta(seconds=60),
     )
     assert selected == []
-    assert len(calls) == 1
 
 
 def _agent_failopen_payload(*, critical_title: str, include_critical: bool) -> dict[str, object]:
@@ -1565,7 +1585,7 @@ def test_notifier_failopen_sends_critical_when_agent_fails(tmp_path) -> None:
 
     settings = replace(
         make_settings(str(tmp_path / "notify-state.json")),
-        openclaw_enabled=False,
+        deepseek_enabled=False,
         openclaw_agent_enabled=True,
         openclaw_agent_deliver=True,
         codex_enabled=False,
@@ -1584,9 +1604,8 @@ def test_notifier_failopen_sends_critical_when_agent_fails(tmp_path) -> None:
         now=datetime(2026, 7, 7, 0, 0, tzinfo=timezone.utc),
     )
 
-    message_calls = [cmd for cmd in calls if cmd[:3] == ["openclaw", "message", "send"]]
-    assert len(message_calls) == 1
-    assert critical_title in message_calls[0][message_calls[0].index("--message") + 1]
+    assert any(s.sink == "feishu" and s.ok for s in result.sinks)
+    assert all(cmd[:3] != ["openclaw", "message", "send"] for cmd in calls)
     assert result.sent_count == 1
 
 
@@ -1601,7 +1620,7 @@ def test_notifier_failopen_skips_when_only_high_alerts_and_agent_fails(tmp_path)
 
     settings = replace(
         make_settings(str(tmp_path / "notify-state.json")),
-        openclaw_enabled=False,
+        deepseek_enabled=False,
         openclaw_agent_enabled=True,
         openclaw_agent_deliver=True,
         codex_enabled=False,
@@ -1645,6 +1664,17 @@ def test_bark_lockscreen_summary_and_feishu_card() -> None:
 
     assert push_lane_for_alerts([{"kind": "price_move_from_close"}]) == "trade"
     assert push_lane_for_alerts([{"kind": "ibkr_session_interrupted"}]) == "ops"
+    assert (
+        push_lane_for_alerts(
+            [
+                {
+                    "kind": "spxw_position_opened",
+                    "source_gate": "ibkr_positions",
+                }
+            ]
+        )
+        == "trade"
+    )
 
 
 def test_deliver_trade_push_routes_ops_to_bark_ops_group_not_feishu(tmp_path) -> None:

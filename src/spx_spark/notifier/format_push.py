@@ -1,10 +1,11 @@
 """Format a single writer markdown into Feishu cards and Bark payloads.
 
 Lane doctrine:
-- Feishu: trading reading surface (interactive markdown card). Ops stay out.
-- Bark main: everything — trading gets short lockscreen + optional markdown
-  detail; ops stay short plain text in a separate group.
-- Bark friend: trading only, short plain text.
+- Feishu: trading reading surface (interactive markdown card), including
+  position events. System/ops alerts stay out.
+- Bark main: everything — trading/position gets short lockscreen + optional
+  markdown detail; ops stay short plain text in a separate group.
+- Bark friend: market-signal trading only, short plain text.
 """
 
 from __future__ import annotations
@@ -74,10 +75,10 @@ def push_lane_for_alerts(alerts: list[dict[str, object]]) -> str:
         return "trade"
     if all(is_system_event_alert(alert) for alert in alerts):
         return "ops"
-    # Position events are private to the main user — Bark main, not Feishu,
-    # not friend (friend already filters them out).
+    # Position events go to Feishu + Bark main (trade lane). Friend Bark stays
+    # off because positions are not MARKET_SIGNAL kinds.
     if all(is_position_holding_alert(alert) for alert in alerts):
-        return "ops"
+        return "trade"
     if any(is_system_event_alert(alert) for alert in alerts):
         return "mixed"
     # Reviewed market narratives that may include non-MARKET_SIGNAL kinds

@@ -149,8 +149,8 @@ def direct_push_alerts(
 
 
 # Friend Bark channel: pure market signals only. Ops/engineering kinds (data
-# degradation, session drops, freshness gates) and the user's private position
-# alerts stay off this list on purpose.
+# degradation, session drops, freshness gates) stay off this list. Position
+# alerts go to Feishu + Bark main but not friend.
 MARKET_SIGNAL_ALERT_KINDS = frozenset(
     {
         "price_move_from_close",

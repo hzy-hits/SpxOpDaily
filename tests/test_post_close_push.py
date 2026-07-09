@@ -8,6 +8,14 @@ from spx_spark.config import NotificationSettings
 from spx_spark.post_close_review import build_push_summary, push_review
 
 
+@pytest.fixture(autouse=True)
+def _stub_feishu(monkeypatch):
+    monkeypatch.setattr(
+        "spx_spark.notifier.sinks.post_feishu",
+        lambda url, payload, timeout: {"code": 0, "msg": "success"},
+    )
+
+
 def make_settings(
     state_path: str,
     *,
@@ -18,11 +26,11 @@ def make_settings(
         min_severity="high",
         cooldown_seconds=300,
         state_path=state_path,
-        openclaw_enabled=True,
+        openclaw_enabled=False,
         openclaw_command="openclaw",
-        openclaw_channel="openclaw-weixin",
-        openclaw_account="account-im-bot",
-        openclaw_target="user@im.wechat",
+        openclaw_channel="",
+        openclaw_account="",
+        openclaw_target="",
         openclaw_dry_run=True,
         openclaw_timeout_seconds=20.0,
         openclaw_agent_enabled=agent_enabled,
@@ -47,6 +55,10 @@ def make_settings(
         bark_group="spx-spark",
         bark_level="",
         bark_timeout_seconds=10.0,
+        feishu_enabled=True,
+        feishu_webhook_url="https://open.feishu.cn/open-apis/bot/v2/hook/test",
+        feishu_secret="",
+        feishu_timeout_seconds=10.0,
         missed_queue_path="",
     )
 
@@ -123,4 +135,4 @@ def test_push_review_agent_fallback(tmp_path, monkeypatch: pytest.MonkeyPatch) -
     result = push_review(payload, latest_markdown_path="/tmp/review.md", runner=runner)
     assert result["used_agent"] is False
     assert result["text"] == summary
-    assert result["weixin_ok"] is True
+    assert result["im_ok"] is True

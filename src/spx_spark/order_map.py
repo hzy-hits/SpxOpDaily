@@ -37,6 +37,7 @@ from spx_spark.options_map import (
     option_mid,
     pair_by_strike,
     probability_for_level,
+    structure_quality_ok,
 )
 from spx_spark.sampling import round_to_step
 from spx_spark.storage import LatestState, LatestStateStore
@@ -314,6 +315,13 @@ def _quote_greeks_ok(quote: Quote) -> bool:
 
 def _quote_mid(quote: Quote) -> float | None:
     if quote.quality in BAD_QUALITIES:
+        return None
+    return option_mid(quote) or quote.effective_price
+
+
+def _quote_mid_structural(quote: Quote, *, as_of: datetime | None = None) -> float | None:
+    """Mid for structure/ladder refs: allow recent STALE quotes (cold-lane rotation)."""
+    if not structure_quality_ok(quote, as_of=as_of):
         return None
     return option_mid(quote) or quote.effective_price
 
@@ -670,33 +678,152 @@ def build_candidates(
     return candidates
 
 
+def _wall_rung_option_ref(
+    *,
+    wall_strike: float,
+    right: str,
+    spot: float,
+    expiry_quotes: list[Quote],
+    pairs: dict[float, dict[OptionRight, Quote]],
+    strike_step: float,
+    tau_now_years: float | None,
+    em_points: float | None,
+    as_of: datetime | None = None,
+) -> dict[str, Any]:
+    """BS (or Taylor fallback) reference premium for the option at a wall strike.
+
+    Put walls → Call (bounce); call walls → Put (fade). Same projection model
+    as the three primary plays so ladder rungs and hang-order limits agree.
+
+    Cold-lane STALE quotes still pass when recent enough (structure_quality_ok):
+    the ladder would otherwise blink blank every rotation cycle. Hard-bad
+    qualities (missing/error/unknown) stay empty.
+    """
+    strike_step_int = max(1, int(round(strike_step)))
+    target_strike = round_to_step(wall_strike, strike_step_int)
+    quote = _find_option_quote(
+        expiry_quotes,
+        target_strike=target_strike,
+        right=right,
+        strike_step=strike_step,
+    )
+    empty = {
+        "right": right,
+        "strike": target_strike,
+        "current_mid": None,
+        "projected_mid": None,
+        "limit_aggressive": None,
+        "limit_conservative": None,
+        "projection_model": None,
+        "quote_quality": None,
+        "degraded": False,
+    }
+    if quote is None or not structure_quality_ok(quote, as_of=as_of) or not _quote_greeks_ok(quote):
+        return empty
+    mid = _quote_mid_structural(quote, as_of=as_of)
+    delta = finite_float(quote.greeks.delta) if quote.greeks is not None else None  # type: ignore[union-attr]
+    gamma = finite_float(quote.greeks.gamma) if quote.greeks is not None else None  # type: ignore[union-attr]
+    if mid is None or delta is None or gamma is None:
+        return empty
+    strike_float = finite_float(quote.instrument.strike) or float(target_strike)
+    iv = finite_float(quote.greeks.implied_vol) if quote.greeks is not None else None
+    slope = smile_slope_per_point(pairs, right, strike_float, strike_step)
+    bs_projected = project_option_price_bs(
+        mid=mid,
+        iv=iv,
+        strike=strike_float,
+        right=right,
+        spot=spot,
+        target=wall_strike,
+        tau_now_years=tau_now_years,
+        em_points=em_points,
+        slope_per_point=slope,
+    )
+    if bs_projected is not None:
+        projected, model = bs_projected, "bs_repricing"
+    else:
+        projected, model = project_option_price(mid, delta, gamma, spot, wall_strike), "taylor_fallback"
+    quality = quote.quality.value if hasattr(quote.quality, "value") else str(quote.quality)
+    degraded = quote.quality in BAD_QUALITIES
+    if degraded:
+        model = f"{model}_stale"
+    return {
+        "right": right,
+        "strike": int(round(strike_float)),
+        "current_mid": mid,
+        "projected_mid": projected,
+        "limit_aggressive": round_to_tick(projected),
+        "limit_conservative": round_to_tick(projected * 0.85),
+        "projection_model": model,
+        "quote_quality": quality,
+        "degraded": degraded,
+    }
+
+
 def _wall_ladder_payload(
     state: LatestState,
     options_map: OptionsMap,
     spot: float | None,
+    *,
+    now: datetime | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
-    """Top-4 call/put walls with touch probabilities for the payload.
+    """Top-4 call/put walls with touch probs + BS option reference prices.
 
-    A single wall per side loses the structure: on 2026-07-07 the put side was
-    a near-flat band (7460-7500) and price ground to 7479, ten points past the
-    "the" put wall. The ladder lets the writer talk about bands and second
-    entries instead of one line in the sand.
+    Put-wall rungs carry the matching Call premium (bounce); call-wall rungs
+    carry the matching Put premium (fade). A single wall per side loses the
+    structure: on 2026-07-07 the put side was a near-flat band (7460-7500) and
+    price ground to 7479, ten points past the "the" put wall.
     """
     ladder: dict[str, list[dict[str, Any]]] = {"call_walls": [], "put_walls": []}
     if not options_map.expiries:
         return ladder
     front = options_map.expiries[0]
-    pairs = pair_by_strike(_front_expiry_quotes(state, front.expiry))
-    strike_step = median_strike_step(sorted(pairs))
-    for key, walls in (("call_walls", front.call_walls), ("put_walls", front.put_walls)):
+    expiry_quotes = _front_expiry_quotes(state, front.expiry)
+    pairs = pair_by_strike(expiry_quotes)
+    strike_step = median_strike_step(sorted(pairs)) if pairs else 5.0
+    now_utc = now or datetime.now(tz=timezone.utc)
+    tau_now_years: float | None = None
+    close_utc = expiry_close_utc(front.expiry)
+    if close_utc is not None:
+        seconds_left = (close_utc - now_utc).total_seconds()
+        if seconds_left > 0:
+            tau_now_years = seconds_left / YEAR_SECONDS
+    em_points = finite_float(front.expected_move_points)
+
+    for key, walls, right in (
+        ("call_walls", front.call_walls, "P"),
+        ("put_walls", front.put_walls, "C"),
+    ):
         for wall in walls:
             prob_touch = None
+            option_ref: dict[str, Any] = {
+                "right": right,
+                "strike": None,
+                "current_mid": None,
+                "projected_mid": None,
+                "limit_aggressive": None,
+                "limit_conservative": None,
+                "projection_model": None,
+                "quote_quality": None,
+                "degraded": False,
+            }
             if spot is not None:
                 _, prob_touch, _, _ = probability_for_level(
                     wall.strike,
                     underlier=spot,
                     pairs=pairs,
                     strike_step=strike_step,
+                )
+                option_ref = _wall_rung_option_ref(
+                    wall_strike=wall.strike,
+                    right=right,
+                    spot=spot,
+                    expiry_quotes=expiry_quotes,
+                    pairs=pairs,
+                    strike_step=strike_step,
+                    tau_now_years=tau_now_years,
+                    em_points=em_points,
+                    as_of=now_utc,
                 )
             ladder[key].append(
                 {
@@ -706,6 +833,15 @@ def _wall_ladder_payload(
                     "volume": wall.volume,
                     "distance_points": round(wall.strike - spot, 1) if spot is not None else None,
                     "prob_touch": prob_touch,
+                    "option_right": option_ref.get("right"),
+                    "option_strike": option_ref.get("strike"),
+                    "current_mid": option_ref.get("current_mid"),
+                    "projected_mid": option_ref.get("projected_mid"),
+                    "limit_aggressive": option_ref.get("limit_aggressive"),
+                    "limit_conservative": option_ref.get("limit_conservative"),
+                    "projection_model": option_ref.get("projection_model"),
+                    "quote_quality": option_ref.get("quote_quality"),
+                    "degraded": bool(option_ref.get("degraded")),
                 }
             )
     return ladder
@@ -1518,7 +1654,7 @@ def build_order_payload(state: LatestState, *, now: datetime | None = None) -> d
         "gamma_state": gamma_state,
         "zero_gamma": zero_gamma,
         "flip_zone": flip_zone,
-        "wall_ladder": _wall_ladder_payload(state, options_map, spot),
+        "wall_ladder": _wall_ladder_payload(state, options_map, spot, now=now),
         "wall_method": front.wall_method if front is not None else None,
         "day_move": {
             "prior_close": prior_close,
@@ -1734,7 +1870,10 @@ def _rn_density_line(payload: dict[str, Any]) -> str | None:
 def _wall_ladder_lines(payload: dict[str, Any]) -> list[str]:
     ladder = payload.get("wall_ladder") if isinstance(payload.get("wall_ladder"), dict) else {}
     lines: list[str] = []
-    for key, label in (("put_walls", "put 墙阶梯(下方支撑)"), ("call_walls", "call 墙阶梯(上方阻力)")):
+    for key, label, default_right in (
+        ("put_walls", "put 墙阶梯(下方支撑→买 call)", "C"),
+        ("call_walls", "call 墙阶梯(上方阻力→买 put)", "P"),
+    ):
         rungs = [rung for rung in (ladder.get(key) or []) if isinstance(rung, dict)]
         if not rungs:
             continue
@@ -1746,17 +1885,32 @@ def _wall_ladder_lines(payload: dict[str, Any]) -> list[str]:
             key=lambda rung: -(rung.get("strike") or 0.0),
             reverse=(key == "call_walls"),
         )
-        parts = []
+        lines.append(f"{label} (★=主墙):")
         for rung in spatial:
             strike = _dash(rung.get("strike"))
-            if rung.get("strike") == primary_strike:
-                strike = f"★{strike}"
+            star = "★" if rung.get("strike") == primary_strike else " "
             oi = rung.get("open_interest")
             oi_text = f"OI {int(oi)}" if isinstance(oi, (int, float)) and oi > 0 else "OI -"
             prob = rung.get("prob_touch")
             prob_text = f",触达{_fmt_prob(prob)}" if prob is not None else ""
-            parts.append(f"{strike}({oi_text}{prob_text})")
-        lines.append(f"{label}: " + " > ".join(parts) + " (★=主墙)")
+            right = str(rung.get("option_right") or default_right)
+            opt_strike = rung.get("option_strike")
+            opt_label = f"{_dash(opt_strike)}{right}" if opt_strike is not None else f"{strike}{right}"
+            projected = rung.get("projected_mid")
+            aggressive = rung.get("limit_aggressive")
+            conservative = rung.get("limit_conservative")
+            current = rung.get("current_mid")
+            if projected is not None:
+                stale_tag = " [stale]" if rung.get("degraded") else ""
+                price_text = (
+                    f"{opt_label} 到位预估{_fmt_premium(projected)}"
+                    f"(现{_fmt_premium(current)}) "
+                    f"限价{_fmt_premium(aggressive)}/{_fmt_premium(conservative)}"
+                    f"{stale_tag}"
+                )
+            else:
+                price_text = f"{opt_label} 参考价-"
+            lines.append(f"  {star}{strike} ({oi_text}{prob_text}) → {price_text}")
     return lines
 
 
@@ -1896,8 +2050,9 @@ def build_order_prompt(
             "",
             "输出中文，最多 18 行。第一行以『挂单参考:』开头，复述模板第一行的日期与时间。",
             "接着给地形定调：pin 还是 transition，为什么(gamma 状态+价格相对 flip 的位置)，今天哪类 play 优先。",
-            "墙位讲阶梯不讲孤点(数据在 wall_ladder，OI 定位)：相邻 put 墙 OI 接近(差三成以内)就说成一条支撑带并给出"
-            "破了之后的二、三档；第一档独大才说单点硬墙。call 侧同理。",
+            "墙位讲阶梯不讲孤点(数据在 wall_ladder，OI 定位 + 每档 BS 参考价)：相邻 put 墙 OI 接近(差三成以内)就说成一条支撑带并给出"
+            "破了之后的二、三档；第一档独大才说单点硬墙。call 侧同理。"
+            "每档 put 墙对应 Call 的到位预估/限价，每档 call 墙对应 Put 的到位预估/限价——写挂单时必须引用这些数字，不要自己估权利金。",
             "rn_density(B-L 风险中性分布)可用时引用：市场把收盘定价在哪个中位、80% 区间在哪；给垂直价差选腿时"
             "买腿放赌的方向内、卖腿放 80% 区间外沿附近最划算；quality 非 ok 时注明并降权。",
             "",
@@ -1969,7 +2124,7 @@ def send_order_map(
         "text": text,
         "writer": writer,
         "used_agent": writer != "template",
-        "weixin_ok": any(s.sink == "openclaw_message" and s.ok for s in delivery_sinks),
+        "im_ok": any(s.sink == "feishu" and s.ok for s in delivery_sinks),
         "bark_ok": any(s.sink == "bark" and s.ok for s in delivery_sinks),
         "feishu_ok": any(s.sink == "feishu" and s.ok for s in delivery_sinks),
         "delivered_ok": delivered_ok,
@@ -1990,10 +2145,11 @@ MATERIAL_LEVEL_MOVE_POINTS = 5.0
 MATERIAL_EM_REL_CHANGE = 0.20
 
 # --- status report: fixed cadence across the partner's working day (Beijing
-# 08:30 -> next-day 02:00; hourly through the morning, every 30 minutes from
-# 14:00 -- density is set by the systemd timer, this window only bounds it) ---
+# 07:30 -> next-day 02:00; every 15 minutes through the morning (07:30-13:30),
+# every 30 minutes from 14:00 -- density is set by the systemd timer, this
+# window only bounds it) ---
 
-STATUS_WINDOW_START = time(8, 30)
+STATUS_WINDOW_START = time(7, 30)
 STATUS_WINDOW_END_EARLY = time(2, 0)
 US_OPEN_ET = time(9, 30)
 
@@ -2062,12 +2218,12 @@ def within_refresh_window(now_utc: datetime) -> bool:
 
 
 def within_status_window(now_utc: datetime) -> bool:
-    """Beijing 08:30 through next-day 02:00: the partner's full working day.
+    """Beijing 07:30 through next-day 02:00: the partner's full working day.
 
-    The timer controls density (hourly through the Beijing morning, every 30
-    minutes from 14:00); this gate only bounds the day. The after-midnight leg
-    belongs to the previous day's session, so it runs on Tue-Sat local
-    mornings (Sat 00:xx = Friday's US session).
+    The timer controls density (every 15 minutes through the Beijing morning
+    07:30-13:30, every 30 minutes from 14:00); this gate only bounds the day.
+    The after-midnight leg belongs to the previous day's session, so it runs
+    on Tue-Sat local mornings (Sat 00:xx = Friday's US session).
     """
     local = now_utc.astimezone(SHANGHAI_TZ)
     if local.time() >= STATUS_WINDOW_START:
@@ -2086,13 +2242,13 @@ def minutes_to_open(now_utc: datetime) -> int | None:
 
 
 # --- session phase: the partner's clock, not the exchange's -----------------
-# The reader works Beijing 08:30 -> next-day 01:00 (ET ~20:30 -> ~13:00 in
+# The reader works Beijing 07:30 -> next-day 01:00 (ET ~19:30 -> ~13:00 in
 # summer). He sleeps through the entire US afternoon and close, and for most
 # of his waking day the market IS live (Globex futures + SPX GTH options).
 # Every push must speak to the phase of HIS day instead of defaulting to
 # "wait for the open".
 
-USER_DAY_START_BJ = time(8, 30)
+USER_DAY_START_BJ = time(7, 30)
 USER_DAY_END_BJ = time(1, 0)  # bedtime: positions after this are unattended
 US_CLOSE_ET = time(16, 0)
 
@@ -2178,7 +2334,7 @@ def session_phase(now_utc: datetime) -> dict[str, Any]:
     minutes_to_us_close = int((close_dt - ny).total_seconds() // 60) if ny < close_dt else None
 
     # Bedtime countdown: next Beijing 01:00. No countdown while asleep
-    # (Beijing 01:00-08:30).
+    # (Beijing 01:00-07:30).
     user_awake = not (USER_DAY_END_BJ <= bj.time() < USER_DAY_START_BJ)
     minutes_to_bedtime = None
     if user_awake:
@@ -2348,7 +2504,7 @@ def build_status_prompt(
 ) -> str:
     return "\n".join(
         (
-            "这条是『市场状态+挂单参考』二合一便签，每 30 分钟一条。搭档已经按上一张地图挂好单了，"
+            "这条是『市场状态+挂单参考』二合一便签，上午每 15 分钟、下午起每 30 分钟一条。搭档已经按上一张地图挂好单了，"
             "他扫一眼要能决定：单动不动、价来了接不接。这不是行情播报，是接班交接——上一班的判断在 previous_push 里，"
             "你要么确认它还成立，要么指出哪里被市场证伪了。",
             "",
@@ -2366,7 +2522,8 @@ def build_status_prompt(
             "",
             "正文必须覆盖(顺序自己组织，写成连贯的段落而不是清单)：",
             "- 位置：参考价在 flip zone/zero gamma/两侧墙位阶梯里站在哪，距各关键位几点，这个位置意味着 pin 还是易加速；"
-            "相邻 put 墙 OI 接近(差三成以内)就说成支撑带并报出二、三档，别只报一个点；",
+            "相邻 put 墙 OI 接近(差三成以内)就说成支撑带并报出二、三档，别只报一个点；"
+            "墙阶梯每一档都带对应期权的 BS 到位预估价与限价(put 墙→Call，call 墙→Put)，写支撑/阻力时顺手带上参考价，别只报 strike；",
             "- 赔率：三张挂单的触达概率各多少、相对上一条谁在改善谁在恶化(引用具体百分比变化)，此刻哪张性价比最高、为什么；",
             "- 市场定价对照(rn_density quality=ok 时)：市场把收盘定价在哪个中位、80% 区间在哪，当前价格相对它偏回归还是已到尾部；",
             "- vol：VIX1D/VIX 说明今天的 vol 卖得贵还是便宜，SKEW 异常时说明谁在抢保护；",
@@ -2450,7 +2607,7 @@ def run_status(
     delivered_ok = any_delivery_ok(delivery_sinks)
     if not im_delivery_ok(delivery_sinks):
         append_missed(settings.missed_queue_path, text, kind="order_map_status", at=now)
-    weixin_ok = any(s.sink == "openclaw_message" and s.ok for s in delivery_sinks)
+    im_ok = any(s.sink == "feishu" and s.ok for s in delivery_sinks)
     bark_ok = any(s.sink == "bark" and s.ok for s in delivery_sinks)
     feishu_ok = any(s.sink == "feishu" and s.ok for s in delivery_sinks)
 
@@ -2460,7 +2617,7 @@ def run_status(
     result = {
         "text": text,
         "writer": writer,
-        "weixin_ok": weixin_ok,
+        "im_ok": im_ok,
         "bark_ok": bark_ok,
         "feishu_ok": feishu_ok,
         "delivered_ok": delivered_ok,
@@ -2530,12 +2687,12 @@ def run_refresh(args: argparse.Namespace, *, now: datetime, state_path: str, tra
     result = send_order_map(
         payload, settings, now=now, extra_header=header, previous_push=load_previous_push()
     )
-    if result.get("delivered_ok") or result["weixin_ok"] or result["bark_ok"] or result.get("feishu_ok"):
+    if result.get("delivered_ok") or result["im_ok"] or result["bark_ok"] or result.get("feishu_ok"):
         mark_sent(state_path, trading_date, fingerprint=fingerprint, now=now, kind="map")
         record_push("order_map_refresh", result["text"], at=now.isoformat())
     result["changes"] = changes
     print(json.dumps(result, ensure_ascii=False))
-    if not (result.get("delivered_ok") or result["weixin_ok"] or result["bark_ok"] or result.get("feishu_ok")):
+    if not (result.get("delivered_ok") or result["im_ok"] or result["bark_ok"] or result.get("feishu_ok")):
         return 1
     return 0
 
@@ -2571,7 +2728,7 @@ def run(argv: list[str] | None = None, *, now: datetime | None = None) -> int:
 
     settings = NotificationSettings.from_env()
     result = send_order_map(payload, settings, now=now, previous_push=load_previous_push())
-    if result.get("delivered_ok") or result["weixin_ok"] or result["bark_ok"] or result.get("feishu_ok"):
+    if result.get("delivered_ok") or result["im_ok"] or result["bark_ok"] or result.get("feishu_ok"):
         mark_sent(
             state_path,
             trading_date,
@@ -2581,7 +2738,7 @@ def run(argv: list[str] | None = None, *, now: datetime | None = None) -> int:
         )
         record_push("order_map", result["text"], at=now.isoformat())
     print(json.dumps(result, ensure_ascii=False))
-    if not (result.get("delivered_ok") or result["weixin_ok"] or result["bark_ok"] or result.get("feishu_ok")):
+    if not (result.get("delivered_ok") or result["im_ok"] or result["bark_ok"] or result.get("feishu_ok")):
         return 1
     return 0
 

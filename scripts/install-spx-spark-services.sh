@@ -15,8 +15,6 @@ ln -sfn "$ROOT/systemd/spx-spark-maintenance-daily.service" "$USER_UNIT_DIR/spx-
 ln -sfn "$ROOT/systemd/spx-spark-maintenance-daily.timer" "$USER_UNIT_DIR/spx-spark-maintenance-daily.timer"
 ln -sfn "$ROOT/systemd/spx-spark-maintenance-weekly.service" "$USER_UNIT_DIR/spx-spark-maintenance-weekly.service"
 ln -sfn "$ROOT/systemd/spx-spark-maintenance-weekly.timer" "$USER_UNIT_DIR/spx-spark-maintenance-weekly.timer"
-ln -sfn "$ROOT/systemd/spx-spark-openclaw-weixin-keepalive.service" "$USER_UNIT_DIR/spx-spark-openclaw-weixin-keepalive.service"
-ln -sfn "$ROOT/systemd/spx-spark-openclaw-weixin-keepalive.timer" "$USER_UNIT_DIR/spx-spark-openclaw-weixin-keepalive.timer"
 
 systemctl --user daemon-reload
 systemctl --user enable spx-spark-24h.service
@@ -25,7 +23,6 @@ systemctl --user enable spx-spark-post-close-review.timer
 systemctl --user enable spx-spark-morning-map.timer
 systemctl --user enable --now spx-spark-maintenance-daily.timer
 systemctl --user enable --now spx-spark-maintenance-weekly.timer
-systemctl --user enable --now spx-spark-openclaw-weixin-keepalive.timer
 
 echo "Installed user services:"
 echo "  spx-spark-24h.service"
@@ -34,7 +31,6 @@ echo "  spx-spark-post-close-review.timer"
 echo "  spx-spark-morning-map.timer"
 echo "  spx-spark-maintenance-daily.timer (09:00 CST dry-run)"
 echo "  spx-spark-maintenance-weekly.timer (Sat 10:00 CST prune)"
-echo "  spx-spark-openclaw-weixin-keepalive.timer (every 90m Weixin context refresh)"
 
 if ! loginctl show-user "$USER" -p Linger 2>/dev/null | grep -q 'Linger=yes'; then
   echo "WARNING: user lingering is off; user services stop at logout and do not start at boot."

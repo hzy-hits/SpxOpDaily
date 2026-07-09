@@ -876,7 +876,7 @@ def push_review(
     return {
         "text": text,
         "used_agent": used_agent,
-        "weixin_ok": any(s.sink == "openclaw_message" and s.ok for s in delivery_sinks),
+        "im_ok": any(s.sink == "feishu" and s.ok for s in delivery_sinks),
         "bark_ok": any(s.sink == "bark" and s.ok for s in delivery_sinks),
         "feishu_ok": any(s.sink == "feishu" and s.ok for s in delivery_sinks),
         "delivered_ok": delivered_ok,
@@ -896,7 +896,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--llm", action="store_true", help="Force-enable the configured LLM writer.")
     parser.add_argument("--no-llm", action="store_true", help="Disable the LLM writer for this run.")
     parser.add_argument("--quiet-if-empty", action="store_true", help="Suppress stdout when there are no raw rows or snapshots.")
-    parser.add_argument("--no-push", action="store_true", help="Do not push review summary to WeChat/Bark.")
+    parser.add_argument("--no-push", action="store_true", help="Do not push review summary to Feishu/Bark.")
     return parser.parse_args(argv)
 
 

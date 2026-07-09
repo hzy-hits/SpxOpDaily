@@ -171,7 +171,8 @@ def evaluate_position_alerts(
     window: AlertWindow,
     persist_state: bool = False,
 ) -> list[Alert]:
-    if snapshot is None or not snapshot.positions:
+    # None = fetch failed / snapshot missing — do not invent closes or wipe state.
+    if snapshot is None:
         return []
     if not env_bool("ALERT_POSITIONS_ENABLED", True):
         return []
@@ -187,7 +188,8 @@ def evaluate_position_alerts(
     if structural_enabled:
         alerts.extend(_structural_alerts(snapshot, previous=previous, window=window))
 
-    if pnl_enabled:
+    # PnL alerts need live legs; empty book after a full flat is structural-only.
+    if pnl_enabled and snapshot.positions:
         book_alert = _book_pnl_alert(
             snapshot,
             previous=previous,
@@ -200,9 +202,51 @@ def evaluate_position_alerts(
         if book_alert is not None:
             alerts.append(book_alert)
 
-    if persist_state and snapshot is not None:
+    if persist_state:
         save_position_alert_state(snapshot)
     return alerts
+
+
+def _parse_position_key(position_key: str) -> tuple[str, str] | None:
+    account, sep, canonical_id = position_key.partition("|")
+    if not sep or not account or not canonical_id:
+        return None
+    return account, canonical_id
+
+
+def _stub_position_from_key(position_key: str, qty: float) -> SpxwPosition | None:
+    """Rebuild a minimal SpxwPosition for legs that disappeared from the snapshot.
+
+    The watcher drops qty==0 rows, so full/partial flats only show up as missing
+    keys versus previous state — we still need a label/instrument_id for alerts.
+    """
+    parsed = _parse_position_key(position_key)
+    if parsed is None:
+        return None
+    account, canonical_id = parsed
+    parts = canonical_id.split(":")
+    # option:SPX:SPXW:YYYYMMDD:strike:RIGHT
+    if len(parts) < 6 or parts[0] != "option":
+        return None
+    try:
+        strike = float(parts[4])
+    except ValueError:
+        return None
+    right = parts[5].upper()
+    expiry = parts[3]
+    return SpxwPosition(
+        account=account,
+        symbol=parts[1],
+        expiry=expiry,
+        strike=strike,
+        right=right,
+        qty=qty,
+        avg_cost=0.0,
+        con_id=0,
+        trading_class=parts[2],
+        local_symbol=None,
+        canonical_id=canonical_id,
+    )
 
 
 def _structural_alerts(
@@ -212,6 +256,7 @@ def _structural_alerts(
     window: AlertWindow,
 ) -> list[Alert]:
     alerts: list[Alert] = []
+    current_keys = {position.position_key for position in snapshot.positions}
     for position in snapshot.positions:
         prev_qty = previous.positions.get(position.position_key)
         if prev_qty is None and position.qty != 0:
@@ -247,6 +292,24 @@ def _structural_alerts(
                     dedup_group=f"{position.qty:g}",
                 )
             )
+
+    # Legs that vanished from the IB snapshot (qty filtered to 0) are closes.
+    for position_key, prev_qty in previous.positions.items():
+        if position_key in current_keys or prev_qty == 0:
+            continue
+        stub = _stub_position_from_key(position_key, 0.0)
+        if stub is None:
+            continue
+        alerts.append(
+            _position_alert(
+                stub,
+                kind="spxw_position_closed",
+                title=f"平仓 {stub.label}",
+                detail=f"SPXW 已平仓 {stub.label}（原数量 {prev_qty:g}）。",
+                severity=severity_for_priority(window.priority),
+                dedup_group="closed",
+            )
+        )
     return alerts
 
 
