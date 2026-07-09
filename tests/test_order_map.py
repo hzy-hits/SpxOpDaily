@@ -28,8 +28,12 @@ from spx_spark.order_map import (
     build_candidates,
     build_order_payload,
     chain_implied_spot,
+    classify_price_direction,
+    classify_spot_location,
+    classify_volume_price_event,
     es_session_elapsed_minutes,
     es_volume_signal,
+    update_break_watch,
     frontrun_level_for,
     mark_sent,
     material_changes,
@@ -1089,13 +1093,144 @@ def test_templates_render_es_volume_line() -> None:
             "baseline": "recent_windows",
             "pace_ratio": 2.0,
             "label": "elevated",
+            "direction": "down",
+            "price_delta": -12.0,
+            "location": "at_put_wall",
+            "event_id": "elevated_sell_into_support",
+            "break_outcome": None,
         },
     }
     map_text = render_template(payload)
-    assert "ES 量能: 最近30分钟 60,000 手, 节奏为近几窗的 2.0 倍(放量)" in map_text
+    assert "ES 量价: 最近30分钟 60,000 手, 节奏为近几窗的 2.0 倍(放量)" in map_text
+    assert "价-12.0(下跌)" in map_text
+    assert "贴put墙" in map_text
+    assert "放量砸支撑" in map_text
     status_text = render_status_template(payload, [], datetime(2026, 7, 8, 14, 0, tzinfo=timezone.utc))
-    assert "ES 量能" in status_text
+    assert "ES 量价" in status_text
     # Signals without a computable window stay silent instead of rendering "-".
     payload["es_volume"] = {"cumulative": 1_000_000, "label": "no_baseline", "delta": None,
                             "window_minutes": None, "pace_ratio": None}
-    assert "ES 量能" not in render_template(payload)
+    assert "ES 量价" not in render_template(payload)
+
+
+def test_classify_spot_location_and_volume_price_events() -> None:
+    loc = classify_spot_location(
+        7452.0,
+        put_wall=7450.0,
+        call_wall=7500.0,
+        flip_zone=[7455.0, 7460.0],
+    )
+    assert loc["location"] == "at_put_wall"
+
+    mid = classify_spot_location(
+        7475.0,
+        put_wall=7450.0,
+        call_wall=7500.0,
+        flip_zone=[7455.0, 7460.0],
+    )
+    assert mid["location"] == "mid_range"
+
+    assert classify_price_direction(-12.0) == "down"
+    assert classify_price_direction(1.0) == "flat"
+
+    event = classify_volume_price_event(
+        pace="elevated",
+        direction="down",
+        location="at_put_wall",
+    )
+    assert event["event_id"] == "elevated_sell_into_support"
+    assert event["play_hints"]
+
+    held = classify_volume_price_event(
+        pace="quiet",
+        direction="down",
+        location="below_put_wall",
+        break_outcome="holds",
+    )
+    assert held["event_id"] == "quiet_breakdown_holds"
+
+    reclaimed = classify_volume_price_event(
+        pace="elevated",
+        direction="up",
+        location="mid_range",
+        break_outcome="reclaimed",
+    )
+    assert reclaimed["event_id"] == "break_reclaimed"
+
+
+def test_update_break_watch_hold_and_reclaim() -> None:
+    now = datetime(2026, 7, 8, 15, 0, tzinfo=timezone.utc)
+    watch, outcome = update_break_watch(
+        None,
+        spot=7440.0,
+        put_wall=7450.0,
+        call_wall=7500.0,
+        flip_zone=[7455.0, 7460.0],
+        pace="elevated",
+        now=now,
+    )
+    assert watch is not None
+    assert watch["kind"] == "put_wall"
+    assert outcome == "pending"
+
+    # Too soon: still pending.
+    soon = now + timedelta(minutes=5)
+    watch2, outcome2 = update_break_watch(
+        watch,
+        spot=7435.0,
+        put_wall=7450.0,
+        call_wall=7500.0,
+        flip_zone=[7455.0, 7460.0],
+        pace="quiet",
+        now=soon,
+    )
+    assert outcome2 == "pending"
+    assert watch2 is not None
+
+    # After min window, still below -> holds.
+    later = now + timedelta(minutes=15)
+    watch3, outcome3 = update_break_watch(
+        watch2,
+        spot=7430.0,
+        put_wall=7450.0,
+        call_wall=7500.0,
+        flip_zone=[7455.0, 7460.0],
+        pace="quiet",
+        now=later,
+    )
+    assert outcome3 == "holds"
+
+    # Reclaim back above the wall.
+    reclaim_at = now + timedelta(minutes=20)
+    watch4, outcome4 = update_break_watch(
+        watch3,
+        spot=7460.0,
+        put_wall=7450.0,
+        call_wall=7500.0,
+        flip_zone=[7455.0, 7460.0],
+        pace="quiet",
+        now=reclaim_at,
+    )
+    assert outcome4 == "reclaimed"
+
+
+def test_es_volume_signal_binds_direction_location_event() -> None:
+    now = datetime(2026, 7, 8, 15, 0, tzinfo=timezone.utc)
+    samples = [
+        {"at": (now - timedelta(minutes=30)).isoformat(), "volume": 940_000.0, "price": 7480.0},
+    ]
+    signal = es_volume_signal(
+        1_000_000.0,
+        samples,
+        now=now,
+        spot=7452.0,
+        put_wall=7450.0,
+        call_wall=7500.0,
+        flip_zone=[7455.0, 7460.0],
+    )
+    assert signal is not None
+    assert signal["label"] == "elevated"
+    assert signal["direction"] == "down"
+    assert signal["price_delta"] == -28.0
+    assert signal["location"] == "at_put_wall"
+    assert signal["event_id"] == "elevated_sell_into_support"

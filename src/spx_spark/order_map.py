@@ -687,11 +687,15 @@ def _index_value(state: LatestState, canonical_id: str) -> float | None:
     return finite_float(quote.effective_price)
 
 
-# --- ES volume pace: cumulative day volume differenced between order-map runs.
-# SPX itself never prints volume (it is an index), so ES is the volume proxy.
-# The signal compares the latest window's contracts/minute against the median
-# pace of the preceding sampled windows (adapts to overnight-vs-RTH regimes);
-# with too little history it falls back to the whole-session average pace. ---
+# --- ES volume pace + volume-price events ---------------------------------
+# SPX prints no volume; ES cumulative day volume is the proxy. Each order-map
+# run diffs volume AND the spot reference vs the previous sample, then classifies
+# a volume-price event from four axes:
+#   1) pace (elevated / normal / quiet vs recent-window baseline)
+#   2) direction (up / down / flat from spot delta over the same window)
+#   3) location (at put wall / call wall / flip / mid / broken side)
+#   4) sequence (wall test → reclaim, break → hold / reclaim, vacuum drift)
+# The event_id is what prompts consume; pace alone is never a truth filter.
 
 ES_VOLUME_SESSION_OPEN_ET = time(18, 0)
 ES_VOLUME_MIN_WINDOW_MINUTES = 3.0
@@ -700,6 +704,14 @@ ES_VOLUME_ELEVATED_RATIO = 1.5
 ES_VOLUME_QUIET_RATIO = 0.5
 ES_VOLUME_MAX_SAMPLES = 16
 ES_VOLUME_MAX_QUOTE_AGE_SECONDS = 900.0
+# Direction flat band: moves smaller than this are noise for a 15-30m window.
+ES_VOLUME_FLAT_POINTS = 3.0
+# "Near a level" band for location classification.
+ES_VOLUME_LEVEL_BAND_POINTS = 8.0
+# Break watch: after a key level is crossed, wait at least this long before
+# calling hold vs reclaim (avoids labeling a one-tick pierce).
+ES_VOLUME_RECLAIM_MIN_MINUTES = 10.0
+ES_VOLUME_RECLAIM_MAX_MINUTES = 90.0
 
 
 def default_es_volume_sample_path(settings: StorageSettings) -> str:
@@ -717,16 +729,35 @@ def load_es_volume_samples(path: str) -> list[dict[str, Any]]:
     return [item for item in samples or [] if isinstance(item, dict)]
 
 
-def save_es_volume_samples(path: str, samples: list[dict[str, Any]]) -> None:
+def load_es_volume_break_watch(path: str) -> dict[str, Any] | None:
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    watch = payload.get("break_watch") if isinstance(payload, dict) else None
+    return watch if isinstance(watch, dict) else None
+
+
+def save_es_volume_state(
+    path: str,
+    samples: list[dict[str, Any]],
+    *,
+    break_watch: dict[str, Any] | None = None,
+) -> None:
     file_path = Path(path)
     try:
         file_path.parent.mkdir(parents=True, exist_ok=True)
-        file_path.write_text(
-            json.dumps({"samples": samples[-ES_VOLUME_MAX_SAMPLES:]}, ensure_ascii=False),
-            encoding="utf-8",
-        )
+        payload: dict[str, Any] = {"samples": samples[-ES_VOLUME_MAX_SAMPLES:]}
+        if break_watch is not None:
+            payload["break_watch"] = break_watch
+        file_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
     except OSError:
         pass
+
+
+def save_es_volume_samples(path: str, samples: list[dict[str, Any]]) -> None:
+    """Backward-compatible wrapper used by older tests."""
+    save_es_volume_state(path, samples, break_watch=load_es_volume_break_watch(path))
 
 
 def es_session_elapsed_minutes(now: datetime) -> float | None:
@@ -739,7 +770,7 @@ def es_session_elapsed_minutes(now: datetime) -> float | None:
     return elapsed if elapsed > 1.0 else None
 
 
-def _parse_sample(sample: dict[str, Any]) -> tuple[datetime, float] | None:
+def _parse_sample(sample: dict[str, Any]) -> tuple[datetime, float, float | None] | None:
     volume = finite_float(sample.get("volume"))
     at_raw = sample.get("at")
     if volume is None or volume <= 0 or not isinstance(at_raw, str):
@@ -750,13 +781,14 @@ def _parse_sample(sample: dict[str, Any]) -> tuple[datetime, float] | None:
         return None
     if at.tzinfo is None:
         at = at.replace(tzinfo=timezone.utc)
-    return at, volume
+    price = finite_float(sample.get("price"))
+    return at, volume, price
 
 
-def _window_paces(points: list[tuple[datetime, float]]) -> list[float]:
+def _window_paces(points: list[tuple[datetime, float, float | None]]) -> list[float]:
     """Contracts/minute for each valid consecutive sample pair."""
     paces: list[float] = []
-    for (prev_at, prev_volume), (cur_at, cur_volume) in zip(points, points[1:]):
+    for (prev_at, prev_volume, _), (cur_at, cur_volume, _) in zip(points, points[1:]):
         minutes = (cur_at - prev_at).total_seconds() / 60.0
         if not (ES_VOLUME_MIN_WINDOW_MINUTES <= minutes <= ES_VOLUME_MAX_WINDOW_MINUTES):
             continue
@@ -766,11 +798,289 @@ def _window_paces(points: list[tuple[datetime, float]]) -> list[float]:
     return paces
 
 
+def classify_price_direction(price_delta: float | None, *, flat_points: float = ES_VOLUME_FLAT_POINTS) -> str | None:
+    if price_delta is None:
+        return None
+    if price_delta >= flat_points:
+        return "up"
+    if price_delta <= -flat_points:
+        return "down"
+    return "flat"
+
+
+def _primary_wall_strike(ladder: dict[str, Any] | None, side: str) -> float | None:
+    if not isinstance(ladder, dict):
+        return None
+    walls = ladder.get("put_walls" if side == "put" else "call_walls")
+    if not isinstance(walls, list) or not walls:
+        return None
+    first = walls[0]
+    if isinstance(first, dict):
+        return finite_float(first.get("strike"))
+    return finite_float(first)
+
+
+def classify_spot_location(
+    spot: float | None,
+    *,
+    put_wall: float | None,
+    call_wall: float | None,
+    flip_zone: list[float] | None,
+    band: float = ES_VOLUME_LEVEL_BAND_POINTS,
+) -> dict[str, Any]:
+    """Where spot sits relative to the structural map."""
+    result: dict[str, Any] = {
+        "location": "unknown",
+        "nearest_level": None,
+        "distance_to_put_wall": None,
+        "distance_to_call_wall": None,
+        "distance_to_flip": None,
+    }
+    if spot is None:
+        return result
+
+    candidates: list[tuple[str, float, float]] = []  # kind, strike, signed distance
+    if put_wall is not None:
+        dist = spot - put_wall
+        result["distance_to_put_wall"] = round(dist, 1)
+        candidates.append(("put_wall", put_wall, dist))
+    if call_wall is not None:
+        dist = spot - call_wall
+        result["distance_to_call_wall"] = round(dist, 1)
+        candidates.append(("call_wall", call_wall, dist))
+
+    flip_mid = None
+    if isinstance(flip_zone, list) and len(flip_zone) >= 2:
+        lo, hi = finite_float(flip_zone[0]), finite_float(flip_zone[1])
+        if lo is not None and hi is not None:
+            if lo > hi:
+                lo, hi = hi, lo
+            flip_mid = (lo + hi) / 2.0
+            dist_flip = spot - flip_mid
+            result["distance_to_flip"] = round(dist_flip, 1)
+            # Strict inside the flip zone wins immediately; the band only
+            # participates later via nearest-level selection so a put wall
+            # sitting just under the flip is not swallowed by flip.
+            if lo <= spot <= hi:
+                result["location"] = "in_flip"
+                result["nearest_level"] = {
+                    "kind": "flip",
+                    "strike": round(flip_mid, 1),
+                    "distance": round(dist_flip, 1),
+                }
+                return result
+            candidates.append(("flip", flip_mid, dist_flip))
+
+    if put_wall is not None and spot < put_wall - band:
+        result["location"] = "below_put_wall"
+        result["nearest_level"] = {"kind": "put_wall", "strike": put_wall, "distance": round(spot - put_wall, 1)}
+        return result
+    if call_wall is not None and spot > call_wall + band:
+        result["location"] = "above_call_wall"
+        result["nearest_level"] = {"kind": "call_wall", "strike": call_wall, "distance": round(spot - call_wall, 1)}
+        return result
+
+    # Prefer the closest level within band.
+    near = [
+        (kind, strike, dist)
+        for kind, strike, dist in candidates
+        if abs(dist) <= band
+    ]
+    if near:
+        kind, strike, dist = min(near, key=lambda item: abs(item[2]))
+        if kind == "put_wall":
+            result["location"] = "at_put_wall"
+        elif kind == "call_wall":
+            result["location"] = "at_call_wall"
+        else:
+            result["location"] = "in_flip"
+        result["nearest_level"] = {"kind": kind if kind != "flip" else "flip", "strike": strike, "distance": round(dist, 1)}
+        return result
+
+    if put_wall is not None and call_wall is not None and put_wall < spot < call_wall:
+        result["location"] = "mid_range"
+        if candidates:
+            kind, strike, dist = min(candidates, key=lambda item: abs(item[2]))
+            result["nearest_level"] = {"kind": kind if kind != "flip" else "flip", "strike": strike, "distance": round(dist, 1)}
+        return result
+
+    result["location"] = "mid_range"
+    return result
+
+
+def classify_volume_price_event(
+    *,
+    pace: str,
+    direction: str | None,
+    location: str,
+    break_outcome: str | None = None,
+) -> dict[str, Any]:
+    """Map the four axes onto a single event_id + play hints."""
+    event_id = "unclassified"
+    sequence: str | None = None
+    hints: list[str] = []
+
+    if break_outcome == "reclaimed":
+        event_id = "break_reclaimed"
+        sequence = "break_reclaim"
+        hints.append("破位后已收回：假破概率高，破位追单剧本降权，等站稳再论")
+    elif break_outcome == "holds":
+        if pace == "elevated":
+            event_id = "elevated_break_holds"
+            sequence = "break_hold"
+            hints.append("放量破位后仍在破位侧：加速/弃守更可信，条件单可按剧本执行")
+        elif pace == "quiet":
+            event_id = "quiet_breakdown_holds"
+            sequence = "break_hold"
+            hints.append("缩量破位后仍在破位侧：共识一边倒，走得干净但回抽浅")
+        else:
+            event_id = "break_holds"
+            sequence = "break_hold"
+
+    elif pace == "elevated" and direction == "down" and location in {"at_put_wall", "in_flip"}:
+        event_id = "elevated_sell_into_support"
+        sequence = "wall_test"
+        hints.append("放量砸向支撑/flip：墙在接还是弃守未定；反弹单等缩量收回，破位单等站不稳确认")
+    elif pace == "elevated" and direction == "up" and location in {"at_call_wall", "in_flip"}:
+        event_id = "elevated_buy_into_resistance"
+        sequence = "wall_test"
+        hints.append("放量撞阻力/flip：常先假突再回抽；fade 等滞涨，突破单等站稳")
+    elif pace == "quiet" and direction == "down" and location in {"at_put_wall", "in_flip", "below_put_wall"}:
+        event_id = "quiet_sell_near_support"
+        sequence = "vacuum_or_abandon"
+        hints.append("缩量靠近/跌破支撑：可能是弃守阴跌，也可能是真空漂移；站不稳才当破位")
+    elif pace == "quiet" and direction == "up" and location in {"at_call_wall", "in_flip", "above_call_wall"}:
+        event_id = "quiet_buy_near_resistance"
+        sequence = "vacuum_or_abandon"
+        hints.append("缩量靠近/越过阻力：可能是共识上移，也可能是真空；站稳才升级突破")
+    elif pace == "quiet" and location == "mid_range":
+        event_id = "quiet_mid_range"
+        sequence = "vacuum_drift"
+        hints.append("中间地带缩量：流动性真空漂移，不是突破信号，不追单")
+    elif pace == "elevated" and location == "mid_range":
+        event_id = "elevated_mid_range"
+        sequence = "dispute"
+        hints.append("中间地带放量：分歧对打，半路不追，等墙/flip")
+    elif pace == "elevated":
+        event_id = "elevated_move"
+    elif pace == "quiet":
+        event_id = "quiet_move"
+    elif pace == "normal":
+        event_id = "normal_pace"
+
+    # Reclaim-after-test is layered on by the caller when previous sequence was wall_test.
+    return {
+        "event_id": event_id,
+        "sequence": sequence,
+        "play_hints": hints,
+    }
+
+
+def update_break_watch(
+    previous: dict[str, Any] | None,
+    *,
+    spot: float | None,
+    put_wall: float | None,
+    call_wall: float | None,
+    flip_zone: list[float] | None,
+    pace: str,
+    now: datetime,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Track whether a freshly broken key level holds or gets reclaimed.
+
+    Returns (new_watch_or_none, outcome) where outcome is holds/reclaimed/pending/None.
+    """
+    if spot is None:
+        return previous, None
+
+    def flip_bounds() -> tuple[float, float] | None:
+        if not isinstance(flip_zone, list) or len(flip_zone) < 2:
+            return None
+        lo, hi = finite_float(flip_zone[0]), finite_float(flip_zone[1])
+        if lo is None or hi is None:
+            return None
+        return (lo, hi) if lo <= hi else (hi, lo)
+
+    outcome: str | None = None
+    watch = dict(previous) if isinstance(previous, dict) else None
+
+    if watch is not None:
+        level = finite_float(watch.get("level"))
+        side = str(watch.get("broken_side") or "")
+        broken_at_raw = watch.get("broken_at")
+        if level is not None and isinstance(broken_at_raw, str):
+            try:
+                broken_at = datetime.fromisoformat(broken_at_raw)
+                if broken_at.tzinfo is None:
+                    broken_at = broken_at.replace(tzinfo=timezone.utc)
+                age_min = (now - broken_at).total_seconds() / 60.0
+            except ValueError:
+                age_min = None
+            if age_min is not None and age_min > ES_VOLUME_RECLAIM_MAX_MINUTES:
+                watch = None
+            elif age_min is not None and age_min >= ES_VOLUME_RECLAIM_MIN_MINUTES:
+                if side == "below":
+                    if spot >= level + ES_VOLUME_FLAT_POINTS:
+                        outcome = "reclaimed"
+                        watch = None
+                    elif spot <= level - ES_VOLUME_FLAT_POINTS:
+                        outcome = "holds"
+                        # Keep watch so later windows can still say holds, but
+                        # refresh timestamp so we don't spam forever.
+                        watch["confirmed_at"] = now.isoformat()
+                        watch["outcome"] = "holds"
+                    else:
+                        outcome = "pending"
+                elif side == "above":
+                    if spot <= level - ES_VOLUME_FLAT_POINTS:
+                        outcome = "reclaimed"
+                        watch = None
+                    elif spot >= level + ES_VOLUME_FLAT_POINTS:
+                        outcome = "holds"
+                        watch["confirmed_at"] = now.isoformat()
+                        watch["outcome"] = "holds"
+                    else:
+                        outcome = "pending"
+            else:
+                outcome = "pending"
+
+    # Arm a new watch only when none is active / just cleared by reclaim.
+    if watch is None or outcome == "reclaimed":
+        bounds = flip_bounds()
+        armed = None
+        if put_wall is not None and spot < put_wall - ES_VOLUME_FLAT_POINTS:
+            armed = {"level": put_wall, "kind": "put_wall", "broken_side": "below"}
+        elif call_wall is not None and spot > call_wall + ES_VOLUME_FLAT_POINTS:
+            armed = {"level": call_wall, "kind": "call_wall", "broken_side": "above"}
+        elif bounds is not None and spot < bounds[0] - ES_VOLUME_FLAT_POINTS:
+            armed = {"level": bounds[0], "kind": "flip_low", "broken_side": "below"}
+        elif bounds is not None and spot > bounds[1] + ES_VOLUME_FLAT_POINTS:
+            armed = {"level": bounds[1], "kind": "flip_high", "broken_side": "above"}
+        if armed is not None:
+            armed.update(
+                {
+                    "broken_at": now.isoformat(),
+                    "pace_at_break": pace,
+                    "spot_at_break": spot,
+                }
+            )
+            watch = armed
+            if outcome is None:
+                outcome = "pending"
+
+    return watch, outcome
+
+
 def es_volume_signal(
     cumulative: float | None,
     samples: list[dict[str, Any]],
     *,
     now: datetime,
+    spot: float | None = None,
+    put_wall: float | None = None,
+    call_wall: float | None = None,
+    flip_zone: list[float] | None = None,
+    break_watch: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     if cumulative is None or cumulative <= 0:
         return None
@@ -783,17 +1093,31 @@ def es_volume_signal(
         "baseline": None,
         "pace_ratio": None,
         "label": "no_baseline",
+        "price": spot,
+        "price_delta": None,
+        "direction": None,
+        "location": "unknown",
+        "nearest_level": None,
+        "break_outcome": None,
+        "break_watch": break_watch,
+        "event_id": None,
+        "sequence": None,
+        "play_hints": [],
     }
     points = [parsed for sample in samples if (parsed := _parse_sample(sample)) is not None]
     points.sort(key=lambda item: item[0])
     if not points:
+        loc = classify_spot_location(spot, put_wall=put_wall, call_wall=call_wall, flip_zone=flip_zone)
+        signal.update(loc)
         return signal
-    last_at, last_volume = points[-1]
+    last_at, last_volume, last_price = points[-1]
     if cumulative < last_volume:
         signal["label"] = "session_reset"
         return signal
     window_minutes = (now - last_at).total_seconds() / 60.0
     if not (ES_VOLUME_MIN_WINDOW_MINUTES <= window_minutes <= ES_VOLUME_MAX_WINDOW_MINUTES):
+        loc = classify_spot_location(spot, put_wall=put_wall, call_wall=call_wall, flip_zone=flip_zone)
+        signal.update(loc)
         return signal
     delta = cumulative - last_volume
     recent_pace = delta / window_minutes
@@ -822,6 +1146,47 @@ def es_volume_signal(
         label = "quiet"
     else:
         label = "normal"
+
+    price_delta = None
+    if spot is not None and last_price is not None:
+        price_delta = round(spot - last_price, 1)
+    direction = classify_price_direction(price_delta)
+    loc = classify_spot_location(spot, put_wall=put_wall, call_wall=call_wall, flip_zone=flip_zone)
+    new_watch, break_outcome = update_break_watch(
+        break_watch,
+        spot=spot,
+        put_wall=put_wall,
+        call_wall=call_wall,
+        flip_zone=flip_zone,
+        pace=label,
+        now=now,
+    )
+    event = classify_volume_price_event(
+        pace=label,
+        direction=direction,
+        location=str(loc.get("location") or "unknown"),
+        break_outcome=break_outcome,
+    )
+    # Sequence upgrade: quiet reclaim after an elevated wall test.
+    if (
+        label == "quiet"
+        and direction == "up"
+        and loc.get("location") in {"mid_range", "at_put_wall", "in_flip"}
+        and len(points) >= 2
+    ):
+        # Look at previous window direction via last two priced samples if present.
+        prev_priced = [p for p in points[-3:] if p[2] is not None]
+        if len(prev_priced) >= 2 and spot is not None:
+            prev_delta = prev_priced[-1][2] - prev_priced[-2][2]  # type: ignore[operator]
+            if prev_delta is not None and prev_delta <= -ES_VOLUME_FLAT_POINTS:
+                event = {
+                    "event_id": "quiet_reclaim_after_sell_test",
+                    "sequence": "reclaim",
+                    "play_hints": [
+                        "前窗下跌测试后本窗缩量收回：反弹剧本升温，破位追空降权"
+                    ],
+                }
+
     signal.update(
         {
             "delta": round(delta),
@@ -831,8 +1196,17 @@ def es_volume_signal(
             "baseline": baseline_name,
             "pace_ratio": round(ratio, 2),
             "label": label,
+            "price": spot,
+            "price_delta": price_delta,
+            "direction": direction,
+            "break_outcome": break_outcome,
+            "break_watch": new_watch,
+            "event_id": event["event_id"],
+            "sequence": event["sequence"],
+            "play_hints": event["play_hints"],
         }
     )
+    signal.update(loc)
     return signal
 
 
@@ -844,7 +1218,7 @@ def attach_es_volume_signal(
     now: datetime,
     persist: bool = True,
 ) -> None:
-    """Compute the ES volume pace signal and append the new sample.
+    """Compute the ES volume-price event and append the new sample.
 
     Side-effectful on purpose (appends to the sample file), so it runs once per
     push at the call site instead of inside the pure payload builder that the
@@ -856,11 +1230,47 @@ def attach_es_volume_signal(
     if age_ms is not None and age_ms > ES_VOLUME_MAX_QUOTE_AGE_SECONDS * 1000.0:
         # Frozen feed: a zero delta would read as "quiet" when it is just no data.
         cumulative = None
+
+    underlier = payload.get("underlier") if isinstance(payload.get("underlier"), dict) else {}
+    spot = finite_float(underlier.get("price"))
+    if spot is None:
+        spot = finite_float(payload.get("es_last"))
+
+    ladder = payload.get("wall_ladder") if isinstance(payload.get("wall_ladder"), dict) else {}
+    put_wall = _primary_wall_strike(ladder, "put")
+    call_wall = _primary_wall_strike(ladder, "call")
+    # Prefer candidate levels when ladder missing.
+    by_play = _candidate_by_play(payload)
+    if put_wall is None and "put_wall_bounce_call" in by_play:
+        put_wall = finite_float(by_play["put_wall_bounce_call"].get("level"))
+    if call_wall is None and "call_wall_fade_put" in by_play:
+        call_wall = finite_float(by_play["call_wall_fade_put"].get("level"))
+    flip_zone = payload.get("flip_zone") if isinstance(payload.get("flip_zone"), list) else None
+
     samples = load_es_volume_samples(sample_path)
-    payload["es_volume"] = es_volume_signal(cumulative, samples, now=now)
+    previous_watch = load_es_volume_break_watch(sample_path)
+    signal = es_volume_signal(
+        cumulative,
+        samples,
+        now=now,
+        spot=spot,
+        put_wall=put_wall,
+        call_wall=call_wall,
+        flip_zone=flip_zone,
+        break_watch=previous_watch,
+    )
+    payload["es_volume"] = signal
     if persist and cumulative is not None:
-        samples.append({"at": now.isoformat(), "volume": cumulative})
-        save_es_volume_samples(sample_path, samples)
+        sample: dict[str, Any] = {"at": now.isoformat(), "volume": cumulative}
+        if spot is not None:
+            sample["price"] = spot
+        samples.append(sample)
+        new_watch = signal.get("break_watch") if isinstance(signal, dict) else previous_watch
+        save_es_volume_state(
+            sample_path,
+            samples,
+            break_watch=new_watch if isinstance(new_watch, dict) else None,
+        )
 
 
 def build_order_payload(state: LatestState, *, now: datetime | None = None) -> dict[str, Any]:
@@ -1003,6 +1413,40 @@ ES_VOLUME_LABEL_TEXT = {
     "normal": "正常",
 }
 
+ES_VOLUME_DIRECTION_TEXT = {
+    "up": "上涨",
+    "down": "下跌",
+    "flat": "横盘",
+}
+
+ES_VOLUME_LOCATION_TEXT = {
+    "at_put_wall": "贴put墙",
+    "at_call_wall": "贴call墙",
+    "in_flip": "在flip区",
+    "below_put_wall": "破put墙下方",
+    "above_call_wall": "破call墙上方",
+    "mid_range": "中间地带",
+    "unknown": "位置未知",
+}
+
+ES_VOLUME_EVENT_TEXT = {
+    "elevated_sell_into_support": "放量砸支撑",
+    "elevated_buy_into_resistance": "放量撞阻力",
+    "quiet_sell_near_support": "缩量阴跌近支撑",
+    "quiet_buy_near_resistance": "缩量摸高近阻力",
+    "quiet_reclaim_after_sell_test": "缩量收回(测支撑后)",
+    "quiet_mid_range": "中间缩量漂移",
+    "elevated_mid_range": "中间放量对打",
+    "elevated_break_holds": "放量破位站稳",
+    "quiet_breakdown_holds": "缩量破位站稳",
+    "break_holds": "破位站稳",
+    "break_reclaimed": "破位后收回",
+    "elevated_move": "放量移动",
+    "quiet_move": "缩量移动",
+    "normal_pace": "节奏正常",
+    "unclassified": "未分类",
+}
+
 
 def _es_volume_line(payload: dict[str, Any]) -> str | None:
     signal = payload.get("es_volume") if isinstance(payload.get("es_volume"), dict) else None
@@ -1015,10 +1459,31 @@ def _es_volume_line(payload: dict[str, Any]) -> str | None:
         return None
     label = ES_VOLUME_LABEL_TEXT.get(str(signal.get("label")), "正常")
     baseline_text = "近几窗" if signal.get("baseline") == "recent_windows" else "当日均值"
-    return (
-        f"ES 量能: 最近{window:.0f}分钟 {int(delta):,} 手, "
+    parts = [
+        f"ES 量价: 最近{window:.0f}分钟 {int(delta):,} 手, "
         f"节奏为{baseline_text}的 {ratio:.1f} 倍({label})"
-    )
+    ]
+    direction = signal.get("direction")
+    price_delta = signal.get("price_delta")
+    if direction is not None:
+        dir_text = ES_VOLUME_DIRECTION_TEXT.get(str(direction), str(direction))
+        if isinstance(price_delta, (int, float)):
+            parts.append(f"价{price_delta:+.1f}({dir_text})")
+        else:
+            parts.append(dir_text)
+    location = signal.get("location")
+    if location and location != "unknown":
+        parts.append(ES_VOLUME_LOCATION_TEXT.get(str(location), str(location)))
+    event_id = signal.get("event_id")
+    if event_id:
+        parts.append(ES_VOLUME_EVENT_TEXT.get(str(event_id), str(event_id)))
+    break_outcome = signal.get("break_outcome")
+    if break_outcome in {"holds", "reclaimed", "pending"}:
+        outcome_text = {"holds": "破位确认中/站稳", "reclaimed": "已收回", "pending": "破位观察中"}[
+            str(break_outcome)
+        ]
+        parts.append(outcome_text)
+    return " · ".join(parts)
 
 
 def _rn_density_line(payload: dict[str, Any]) -> str | None:
@@ -1204,10 +1669,12 @@ def build_order_prompt(
             "- order_style=stop_trigger 必须提醒：预估价高于现价，预挂被动限价会立即成交，等破位确认后用条件单。",
             "",
             "最后 2-3 行 if/then：开盘前参考价/ES 走到哪些具体位置，哪张单赔率变差该撤或改价，哪个剧本作废——这就是这张图的证伪条件。",
-            "es_volume 可用且 label 非 no_baseline/session_reset 时，量能是破位的『性格』不是『真假』开关："
-            "放量(≥1.5 倍)破位=分歧大、双方在对打，容易假突破后回抽再走；缩量(≤0.5 倍)破位=一方弃守、共识一边倒，"
-            "往往走得更干净但回抽浅。两种都能是真突破，别用『没放量就假』这种一刀切；"
-            "真正要警惕的是缩量磨到关键位附近却站不稳——那是流动性真空漂移，不是突破。",
+            "es_volume 可用且 label 非 no_baseline/session_reset 时，读量价事件(event_id)而不是只读放量/缩量："
+            "字段含 direction(涨跌)、location(贴墙/flip/中间/破位侧)、sequence、break_outcome(holds/reclaimed/pending)、play_hints。"
+            "用法按 play 对号入座——put wall 反弹想看 elevated_sell_into_support 后出现 quiet_reclaim_after_sell_test；"
+            "flip 破位 put 想看 elevated_break_holds / quiet_breakdown_holds，最怕 break_reclaimed；"
+            "call wall fade 想看 elevated_buy_into_resistance 后滞涨，最怕 quiet 站稳在墙上方。"
+            "quiet_mid_range / elevated_mid_range 都是半路，不追单。",
             "day_move.em_used_fraction ≥ 0.7 时点明：日内已走完预期波幅的多少，顺方向追单赔率差；挂单纪律是等价格来找你，不去半路追它。",
             "previous_push 是上一条推送正文；关键位相对它有实质变化就在定调处说『剧本有变』并指出哪张单要改，没变化不必提。",
             "previous_push:" + previous_push_json(previous_push),
@@ -1508,10 +1975,10 @@ def build_status_prompt(
             "- 赔率：三张挂单的触达概率各多少、相对上一条谁在改善谁在恶化(引用具体百分比变化)，此刻哪张性价比最高、为什么；",
             "- 市场定价对照(rn_density quality=ok 时)：市场把收盘定价在哪个中位、80% 区间在哪，当前价格相对它偏回归还是已到尾部；",
             "- vol：VIX1D/VIX 说明今天的 vol 卖得贵还是便宜，SKEW 异常时说明谁在抢保护；",
-            "- 量能性格(es_volume 可用时)：ES 节奏是破位的性格不是真假开关——"
-            "放量(≥1.5 倍)=分歧大、双方对打，假突破后回抽再走的概率高；缩量(≤0.5 倍)=一方弃守、共识一边倒，"
-            "走得更干净但回抽浅。两种都能是真突破；真正要警惕的是缩量磨到关键位附近却站不稳(流动性真空漂移)。"
-            "label=no_baseline/session_reset 时不引用；",
+            "- 量价事件(es_volume 可用时)：不要只说放量/缩量。读 event_id + direction + location + break_outcome："
+            "放量砸支撑(elevated_sell_into_support)是墙测试不是自动破位；缩量收回(quiet_reclaim_after_sell_test)才升温反弹；"
+            "破位站稳(holds)才给破位单开灯，破位收回(reclaimed)则假破降权；中间地带(quiet/elevated_mid_range)半路不追。"
+            "play_hints 里有现成句子可直接引用。label=no_baseline/session_reset 时不引用；",
             "- 双向 if/then：上行到哪个具体位置、下行到哪个具体位置，分别哪张单该撤/改价、哪个剧本激活——这也是你这个判断的证伪条件；",
             "- 情绪拦截(违反即失职)：价格在中间地带就写明『此处不追单，计划位在 XX/XX』；day_move.em_used_fraction ≥ 0.7 就写明"
             "『日内已走完预期波幅的 X%，顺方向追单赔率差』；价格进 put 墙支撑带就写明『计划中的接多区不是恐慌区，防守只在跌破 XX 后执行』，"
