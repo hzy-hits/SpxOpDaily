@@ -586,7 +586,9 @@ def test_overnight_dip_escalates_to_high_severity(tmp_path, monkeypatch) -> None
     monkeypatch.setenv("ALERT_MOVEMENT_STATE_PATH", str(tmp_path / "movement-state.json"))
     # Day EM = 41 bps (low-vol regime); quiet Asia-session window.
     monkeypatch.setattr(ae, "front_expected_move_pct", lambda *_args, **_kwargs: 0.0041)
-    now = datetime(2026, 7, 7, 12, 30, tzinfo=BJ_TZ)
+    # Beijing 07:00 = ET 19:00: before the reader's day starts, still the low
+    # quiet window (Beijing 08:30+ is now the high-priority Globex watch).
+    now = datetime(2026, 7, 7, 7, 0, tzinfo=BJ_TZ)
     window = active_window(now)
     assert window.priority == "low"
 

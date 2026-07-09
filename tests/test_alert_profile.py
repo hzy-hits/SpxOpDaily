@@ -42,6 +42,24 @@ def test_close_hour_is_critical_and_unattended() -> None:
     assert window.user_unattended is True
 
 
+def test_beijing_morning_is_high_priority_globex_watch() -> None:
+    # Thursday 09:30 Beijing = Wednesday 21:30 ET: the reader is at his desk
+    # while Globex/GTH trade; this used to fall into the low quiet window.
+    window = active_window(datetime(2026, 7, 9, 9, 30, tzinfo=BJ_TZ))
+
+    assert window.name == "beijing_morning_globex_watch"
+    assert window.priority == "high"
+    assert window.user_unattended is False
+
+
+def test_friday_evening_et_stays_quiet_for_weekend_beijing_morning() -> None:
+    # Saturday 09:30 Beijing = Friday 21:30 ET: ES closed, reader off.
+    window = active_window(datetime(2026, 7, 11, 9, 30, tzinfo=BJ_TZ))
+
+    assert window.name == "quiet_futures_context"
+    assert window.priority == "low"
+
+
 def test_weekend_before_futures_reopen_is_maintenance() -> None:
     window = active_window(datetime(2026, 7, 5, 12, 0, tzinfo=BJ_TZ))
 

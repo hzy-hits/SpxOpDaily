@@ -190,12 +190,29 @@ WINDOWS: tuple[AlertWindow, ...] = (
         optional_instruments=("future:ES", "future:MES", "equity:SPY", "equity:QQQ"),
         focus=("post-close drift", "global risk handoff"),
     ),
+    # ET 20:30-02:00 = Beijing 08:30-14:00: the reader's working morning.
+    # Globex + SPX GTH are live and he is at the desk building the day's
+    # skeleton, so off-hours moves here deserve the same attention as RTH.
+    AlertWindow(
+        name="beijing_morning_globex_watch",
+        start_et=time(20, 30),
+        stop_et=time(2, 0),
+        priority="high",
+        user_unattended=False,
+        cadence_seconds=30,
+        summary_cadence_seconds=900,
+        spxw_sampling_mode="off",
+        primary_sources=("hyperliquid", "ibkr_futures", "polymarket"),
+        required_instruments=("crypto_perp:xyz:SP500",),
+        optional_instruments=("future:ES", "future:MES"),
+        focus=("overnight Globex dip or squeeze", "Asia-session risk lead", "gap risk building"),
+    ),
 )
 
 QUIET_WINDOW = AlertWindow(
     name="quiet_futures_context",
     start_et=time(18, 0),
-    stop_et=time(2, 0),
+    stop_et=time(20, 30),
     priority="low",
     user_unattended=True,
     cadence_seconds=60,
@@ -250,6 +267,10 @@ def active_window(now: datetime | None = None) -> AlertWindow:
         return WEEKEND_WINDOW
     if weekday == 6:
         return SUNDAY_FUTURES_REOPEN
+    # Friday evening ET is Saturday morning Beijing: ES is closed and the
+    # reader is off; keep it quiet instead of the Beijing-morning watch.
+    if weekday == 4 and current_time >= time(18, 0):
+        return QUIET_WINDOW
 
     for window in WINDOWS:
         if window.contains(current_time):

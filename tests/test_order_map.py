@@ -43,10 +43,13 @@ from spx_spark.order_map import (
     payload_fingerprint,
     project_option_price,
     project_option_price_bs,
+    hl_volume_signal,
     render_status_template,
     render_template,
     round_to_tick,
     send_order_map,
+    session_phase,
+    touch_eta_minutes,
     within_refresh_window,
     within_send_window,
     within_status_window,
@@ -869,8 +872,8 @@ def test_payload_fingerprint_and_material_changes() -> None:
 
 
 def test_within_refresh_window_beijing() -> None:
-    # Refresh follows the status window: Beijing 14:15 -> next-day 02:00.
-    # 14:45 Beijing: fixed cadence starts pre-open.
+    # Refresh follows the status window: Beijing 08:30 -> next-day 02:00.
+    # 14:45 Beijing: fixed cadence continues pre-open.
     beijing_1445 = datetime(2026, 7, 7, 6, 45, tzinfo=timezone.utc)
     assert within_refresh_window(beijing_1445) is True
     # 22:30 Beijing = 10:30 ET (summer): US session, inside window.
@@ -882,12 +885,106 @@ def test_within_refresh_window_beijing() -> None:
     # 01:45 Beijing Wednesday = Tuesday's US session, still covered.
     beijing_0145 = datetime(2026, 7, 7, 17, 45, tzinfo=timezone.utc)
     assert within_refresh_window(beijing_0145) is True
-    # 13:00 Beijing: before the window starts.
-    beijing_1300 = datetime(2026, 7, 7, 5, 0, tzinfo=timezone.utc)
-    assert within_refresh_window(beijing_1300) is False
+    # 09:00 Beijing: the reader's working morning is now inside the window.
+    beijing_0900 = datetime(2026, 7, 7, 1, 0, tzinfo=timezone.utc)
+    assert within_refresh_window(beijing_0900) is True
+    # 08:00 Beijing: before the 08:30 start of the reader's day.
+    beijing_0800 = datetime(2026, 7, 7, 0, 0, tzinfo=timezone.utc)
+    assert within_refresh_window(beijing_0800) is False
     # 02:30 Beijing: past the cutoff.
     beijing_0230 = datetime(2026, 7, 7, 18, 30, tzinfo=timezone.utc)
     assert within_refresh_window(beijing_0230) is False
+
+
+def test_session_phase_tracks_partner_clock() -> None:
+    # Beijing 09:00 Thursday = ET 21:00 Wednesday: Asia/Globex overnight.
+    asia = session_phase(datetime(2026, 7, 9, 1, 0, tzinfo=timezone.utc))
+    assert asia["name"] == "asia_globex"
+    assert asia["user_awake"] is True
+    assert asia["minutes_to_us_open"] == 750
+    assert asia["minutes_since_us_open"] is None
+    # Beijing 14:30 = ET 02:30: Europe session, research window.
+    europe = session_phase(datetime(2026, 7, 9, 6, 30, tzinfo=timezone.utc))
+    assert europe["name"] == "europe_session"
+    # Beijing 21:45 = ET 09:45: first hour after the open.
+    open_hour = session_phase(datetime(2026, 7, 9, 13, 45, tzinfo=timezone.utc))
+    assert open_hour["name"] == "us_open_hour"
+    assert open_hour["minutes_since_us_open"] == 15
+    # Beijing 00:45 = ET 12:45: main battle, 15 minutes to bedtime.
+    late = session_phase(datetime(2026, 7, 9, 16, 45, tzinfo=timezone.utc))
+    assert late["name"] == "us_morning_battle"
+    assert late["minutes_to_bedtime"] == 15
+    # Beijing 02:30 = ET 14:30: user asleep, unattended afternoon.
+    asleep = session_phase(datetime(2026, 7, 9, 18, 30, tzinfo=timezone.utc))
+    assert asleep["name"] == "us_afternoon_unattended"
+    assert asleep["user_awake"] is False
+    assert asleep["minutes_to_bedtime"] is None
+
+
+def test_touch_eta_minutes_brownian_scaling() -> None:
+    # 6 hours to expiry, EM 26 points, level 13 points away:
+    # fraction = 0.6 * (13/26)^2 = 0.15 -> 0.15 * 360min = 54min.
+    tau = 6.0 / (365.0 * 24.0)
+    eta = touch_eta_minutes(13.0, 26.0, tau)
+    assert eta is not None
+    assert eta == pytest.approx(54.0, abs=1.0)
+    # A level right at spot floors at 5% of remaining time.
+    near = touch_eta_minutes(0.5, 26.0, tau)
+    assert near == pytest.approx(18.0, abs=1.0)
+    # Missing EM or tau -> None.
+    assert touch_eta_minutes(13.0, None, tau) is None
+    assert touch_eta_minutes(13.0, 26.0, None) is None
+
+
+def test_hl_volume_signal_pace_and_rolling_caveat() -> None:
+    now = datetime(2026, 7, 9, 6, 0, tzinfo=timezone.utc)
+    # Three prior samples 15 minutes apart, ~200k notional per window
+    # (13.3k/min baseline); the current window prints 600k in 15 minutes.
+    samples = [
+        {"at": (now - timedelta(minutes=45)).isoformat(), "volume": 100_000_000.0},
+        {"at": (now - timedelta(minutes=30)).isoformat(), "volume": 100_200_000.0},
+        {"at": (now - timedelta(minutes=15)).isoformat(), "volume": 100_400_000.0},
+    ]
+    signal = hl_volume_signal(101_000_000.0, samples, now=now)
+    assert signal is not None
+    assert signal["label"] == "elevated"
+    assert signal["basis"] == "rolling_24h_notional"
+    assert signal["pace_ratio"] == pytest.approx(3.0, abs=0.1)
+    # Rolling 24h volume can decline; clamp reads as quiet, not negative.
+    quiet = hl_volume_signal(100_300_000.0, samples, now=now)
+    assert quiet is not None
+    assert quiet["delta_notional"] == 0
+    assert quiet["label"] == "quiet"
+    # Fewer than two history windows -> no baseline.
+    thin = hl_volume_signal(100_500_000.0, samples[-1:], now=now)
+    assert thin is not None
+    assert thin["label"] == "no_baseline"
+    assert hl_volume_signal(None, samples, now=now) is None
+
+
+def test_status_template_carries_session_phase() -> None:
+    payload = {
+        "expiry": "20260709",
+        "underlier": {"price": 7523.5, "source": "chain_implied"},
+        "gamma_state": "zero_gamma_transition",
+        "zero_gamma": 7507.4,
+        "flip_zone": [7505.0, 7510.0],
+        "expected_move_points": 25.8,
+        "vol_context": {},
+        "candidates": [],
+        "warnings": [],
+    }
+    # Beijing 09:00 = overnight Globex phase; header must not claim "已开盘".
+    now = datetime(2026, 7, 9, 1, 0, tzinfo=timezone.utc)
+    text = render_status_template(payload, [], now)
+    assert "亚盘夜盘" in text
+    assert "距开盘 750 分钟" in text
+    assert "已开盘" not in text
+    # Beijing 00:30 = US morning battle with the bedtime countdown showing.
+    late = datetime(2026, 7, 9, 16, 30, tzinfo=timezone.utc)
+    text_late = render_status_template(payload, [], late)
+    assert "美盘上午主战场" in text_late
+    assert "距收官 30 分钟" in text_late
 
 
 def test_within_status_window_and_minutes_to_open() -> None:
@@ -895,9 +992,12 @@ def test_within_status_window_and_minutes_to_open() -> None:
     beijing_1430 = datetime(2026, 7, 7, 6, 30, tzinfo=timezone.utc)
     assert within_status_window(beijing_1430) is True
     assert minutes_to_open(beijing_1430) == 420
-    # 14:00 Beijing: before the 14:15 start (baseline order map slot).
+    # 14:00 Beijing: now inside the window (day starts 08:30).
     beijing_1400 = datetime(2026, 7, 7, 6, 0, tzinfo=timezone.utc)
-    assert within_status_window(beijing_1400) is False
+    assert within_status_window(beijing_1400) is True
+    # 08:00 Beijing: before the reader's day starts.
+    beijing_0800 = datetime(2026, 7, 7, 0, 0, tzinfo=timezone.utc)
+    assert within_status_window(beijing_0800) is False
     # 21:30 Beijing = 9:30 ET: market open, status keeps running.
     beijing_2130 = datetime(2026, 7, 7, 13, 30, tzinfo=timezone.utc)
     assert within_status_window(beijing_2130) is True

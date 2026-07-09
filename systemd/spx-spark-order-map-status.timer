@@ -1,7 +1,8 @@
 [Unit]
-Description=Market status + order map combined push every 30 minutes (code gates to Beijing 14:15 -> next-day 02:00)
+Description=Market status + order map combined push (hourly Beijing 08:30-13:30, every 30 min 14:00 -> next-day 02:00)
 
 [Timer]
+OnCalendar=Mon..Fri *-*-* 08..13:30:00 Asia/Shanghai
 OnCalendar=Mon..Fri *-*-* 14..23:00,30:00 Asia/Shanghai
 OnCalendar=Tue..Sat *-*-* 00..01:00,30:00 Asia/Shanghai
 Persistent=false

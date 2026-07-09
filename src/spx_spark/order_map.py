@@ -209,6 +209,26 @@ def project_option_price_bs(
     return max(0.05, mid * projected / anchor)
 
 
+def touch_eta_minutes(
+    distance: float,
+    em_points: float | None,
+    tau_now_years: float | None,
+) -> float | None:
+    """Expected minutes until first touch, by the same Brownian scaling the BS
+    repricing uses. Discipline rule: if the level has not traded after ~2x
+    this estimate, the odds of the play have decayed and the order should be
+    pulled (theta has eaten the edge even if the level eventually prints)."""
+    if tau_now_years is None or tau_now_years <= 0:
+        return None
+    if em_points is None or em_points <= 0:
+        return None
+    fraction = min(
+        max(TOUCH_TIME_FRACTION_COEF * (distance / em_points) ** 2, 0.05),
+        TOUCH_TIME_FRACTION_MAX,
+    )
+    return fraction * tau_now_years * YEAR_SECONDS / 60.0
+
+
 @dataclass(frozen=True)
 class OrderCandidate:
     play: str
@@ -238,6 +258,9 @@ class OrderCandidate:
     order_style: str = "resting_limit"
     # "bs_repricing" (theta + vol-shift aware) or "taylor_fallback".
     projection_model: str = "taylor_fallback"
+    # Brownian-scaling estimate of minutes to first touch; ~2x without a touch
+    # means the odds have decayed and the resting order should be pulled.
+    touch_eta_minutes: float | None = None
 
 
 FRONTRUN_FRACTION = 0.30
@@ -273,6 +296,12 @@ def _fmt_prob(value: float | None) -> str:
     if value is None:
         return "-"
     return f"{value:.0%}"
+
+
+def _fmt_eta_minutes(minutes: float) -> str:
+    if minutes >= 90.0:
+        return f"{minutes / 60.0:.1f} 小时".replace(".0 ", " ")
+    return f"{minutes:.0f} 分钟"
 
 
 def _quote_greeks_ok(quote: Quote) -> bool:
@@ -408,6 +437,7 @@ def _build_candidate(
         )
 
     order_style = "stop_trigger" if projected > mid else "resting_limit"
+    eta_minutes = touch_eta_minutes(abs(level - spot), em_points, tau_now_years)
 
     strike_value = int(round(finite_float(quote.instrument.strike) or target_strike))
     return OrderCandidate(
@@ -431,6 +461,7 @@ def _build_candidate(
         frontrun_prob_touch=frontrun_prob_touch,
         order_style=order_style,
         projection_model=projection_model,
+        touch_eta_minutes=round(eta_minutes, 1) if eta_minutes is not None else None,
     )
 
 
@@ -1273,6 +1304,170 @@ def attach_es_volume_signal(
         )
 
 
+# --- Hyperliquid SP500 perp volume-price lane -------------------------------
+# The perp trades 24/7 (including weekends when ES is dark), and its trade
+# tape carries aggressor sides that ES cannot give us. Caveats: dayNtlVlm is a
+# ROLLING 24h notional, so short diffs mix fresh volume with the 24h-ago tail
+# dropping off -- bursts (elevated) are trustworthy, quiet readings are only
+# indicative. The venue is thin, so this is a secondary confirm for the ES
+# lane and the sole volume source on weekends, never a standalone break filter.
+
+HL_VOLUME_MAX_QUOTE_AGE_SECONDS = 900.0
+
+
+def default_hl_volume_sample_path(settings: StorageSettings) -> str:
+    return os.getenv("SPX_HL_VOLUME_SAMPLE_PATH") or str(
+        Path(settings.data_root) / "latest" / "hl_volume_samples.json"
+    )
+
+
+def _latest_hl_context(settings: StorageSettings, now: datetime) -> dict[str, Any] | None:
+    """Last Hyperliquid asset-context record; carries the aggressor buy/sell
+    split and book imbalance that the latest-state quote drops."""
+    base = (
+        Path(settings.data_root)
+        / "context"
+        / "provider=hyperliquid"
+        / "dex=xyz"
+        / "coin=xyz:SP500"
+    )
+    for offset_hours in (0, 1):
+        stamp = (now - timedelta(hours=offset_hours)).astimezone(timezone.utc)
+        path = (
+            base
+            / f"date={stamp.strftime('%Y-%m-%d')}"
+            / f"hour={stamp.strftime('%H')}"
+            / "asset-context.jsonl"
+        )
+        try:
+            last = ""
+            with path.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    if line.strip():
+                        last = line
+            if last:
+                record = json.loads(last)
+                if isinstance(record, dict):
+                    return record
+        except (OSError, json.JSONDecodeError):
+            continue
+    return None
+
+
+def hl_volume_signal(
+    cumulative: float | None,
+    samples: list[dict[str, Any]],
+    *,
+    now: datetime,
+) -> dict[str, Any] | None:
+    """Pace signal from the HL SP500 perp rolling-24h notional volume."""
+    if cumulative is None or cumulative <= 0:
+        return None
+    signal: dict[str, Any] = {
+        "cumulative_notional": round(cumulative),
+        "delta_notional": None,
+        "window_minutes": None,
+        "recent_pace_per_min": None,
+        "baseline_pace_per_min": None,
+        "pace_ratio": None,
+        "label": "no_baseline",
+        "basis": "rolling_24h_notional",
+    }
+    points = [parsed for sample in samples if (parsed := _parse_sample(sample)) is not None]
+    points.sort(key=lambda item: item[0])
+    if not points:
+        return signal
+    last_at, last_volume, _last_price = points[-1]
+    window_minutes = (now - last_at).total_seconds() / 60.0
+    if not (ES_VOLUME_MIN_WINDOW_MINUTES <= window_minutes <= ES_VOLUME_MAX_WINDOW_MINUTES):
+        return signal
+    # Rolling window: a decline means the 24h-ago tail outweighs fresh prints;
+    # clamp to zero, which honestly reads as "quiet now".
+    delta = max(0.0, cumulative - last_volume)
+    recent_pace = delta / window_minutes
+
+    history: list[float] = []
+    for (prev_at, prev_volume, _), (cur_at, cur_volume, _) in zip(points, points[1:]):
+        minutes = (cur_at - prev_at).total_seconds() / 60.0
+        if not (ES_VOLUME_MIN_WINDOW_MINUTES <= minutes <= ES_VOLUME_MAX_WINDOW_MINUTES):
+            continue
+        history.append(max(0.0, cur_volume - prev_volume) / minutes)
+    if len(history) < 2:
+        signal.update(
+            {"delta_notional": round(delta), "window_minutes": round(window_minutes, 1)}
+        )
+        return signal
+    ordered = sorted(history)
+    mid = len(ordered) // 2
+    baseline = (
+        ordered[mid] if len(ordered) % 2 == 1 else (ordered[mid - 1] + ordered[mid]) / 2.0
+    )
+    if baseline <= 0:
+        signal.update(
+            {"delta_notional": round(delta), "window_minutes": round(window_minutes, 1)}
+        )
+        return signal
+    ratio = recent_pace / baseline
+    if ratio >= ES_VOLUME_ELEVATED_RATIO:
+        label = "elevated"
+    elif ratio <= ES_VOLUME_QUIET_RATIO:
+        label = "quiet"
+    else:
+        label = "normal"
+    signal.update(
+        {
+            "delta_notional": round(delta),
+            "window_minutes": round(window_minutes, 1),
+            "recent_pace_per_min": round(recent_pace),
+            "baseline_pace_per_min": round(baseline),
+            "pace_ratio": round(ratio, 2),
+            "label": label,
+        }
+    )
+    return signal
+
+
+def attach_hl_volume_signal(
+    payload: dict[str, Any],
+    state: LatestState,
+    *,
+    storage_settings: StorageSettings,
+    sample_path: str,
+    now: datetime,
+    persist: bool = True,
+) -> None:
+    quote = state.best_quote(HL_SP500_PROXY_ID)
+    cumulative = finite_float(quote.volume) if quote is not None else None
+    age_ms = quote.quote_age_ms(now) if quote is not None else None
+    if age_ms is not None and age_ms > HL_VOLUME_MAX_QUOTE_AGE_SECONDS * 1000.0:
+        cumulative = None
+
+    samples = load_es_volume_samples(sample_path)  # same {at, volume, price} schema
+    signal = hl_volume_signal(cumulative, samples, now=now)
+    if signal is not None:
+        context = _latest_hl_context(storage_settings, now)
+        if context:
+            trade_stats = (
+                context.get("trade_stats") if isinstance(context.get("trade_stats"), dict) else {}
+            )
+            buy = finite_float(trade_stats.get("buy_notional")) or 0.0
+            sell = finite_float(trade_stats.get("sell_notional")) or 0.0
+            if buy + sell > 0:
+                signal["aggressor_buy_ratio"] = round(buy / (buy + sell), 2)
+            book_imbalance = finite_float(context.get("book_imbalance"))
+            if book_imbalance is not None:
+                signal["book_imbalance"] = round(book_imbalance, 2)
+    payload["hl_volume"] = signal
+
+    if persist and cumulative is not None:
+        sample: dict[str, Any] = {"at": now.isoformat(), "volume": cumulative}
+        price = hyperliquid_sp500_price(state)
+        if price is not None:
+            sample["price"] = price
+        samples.append(sample)
+        save_es_volume_state(sample_path, samples)
+
+
 def build_order_payload(state: LatestState, *, now: datetime | None = None) -> dict[str, Any]:
     now = now or state.as_of
     options_map = build_options_map(state)
@@ -1341,6 +1536,7 @@ def build_order_payload(state: LatestState, *, now: datetime | None = None) -> d
         },
         "hl_sp500_perp": hyperliquid_sp500_price(state),
         "es_last": _index_value(state, "future:ES"),
+        "session_phase": session_phase(now),
         "warnings": list(dict.fromkeys(warnings)),
     }
 
@@ -1392,6 +1588,13 @@ def build_order_payload_with_retry(
             payload,
             state,
             sample_path=default_es_volume_sample_path(storage_settings),
+            now=now,
+        )
+        attach_hl_volume_signal(
+            payload,
+            state,
+            storage_settings=storage_settings,
+            sample_path=default_hl_volume_sample_path(storage_settings),
             now=now,
         )
     return payload
@@ -1486,6 +1689,29 @@ def _es_volume_line(payload: dict[str, Any]) -> str | None:
     return " · ".join(parts)
 
 
+def _hl_volume_line(payload: dict[str, Any]) -> str | None:
+    signal = payload.get("hl_volume") if isinstance(payload.get("hl_volume"), dict) else None
+    if not signal:
+        return None
+    ratio = signal.get("pace_ratio")
+    window = signal.get("window_minutes")
+    delta = signal.get("delta_notional")
+    if ratio is None or window is None or delta is None:
+        return None
+    label = ES_VOLUME_LABEL_TEXT.get(str(signal.get("label")), "正常")
+    parts = [
+        f"HL永续量价(24/7薄代理): 最近{window:.0f}分钟名义 ${delta / 1e4:,.0f}万, "
+        f"节奏 {ratio:.1f} 倍({label})"
+    ]
+    aggressor = signal.get("aggressor_buy_ratio")
+    if isinstance(aggressor, (int, float)):
+        parts.append(f"主动买占比 {aggressor:.0%}")
+    imbalance = signal.get("book_imbalance")
+    if isinstance(imbalance, (int, float)):
+        parts.append(f"盘口失衡 {imbalance:+.2f}")
+    return " · ".join(parts)
+
+
 def _rn_density_line(payload: dict[str, Any]) -> str | None:
     density = payload.get("rn_density") if isinstance(payload.get("rn_density"), dict) else None
     if not density or density.get("median") is None:
@@ -1564,6 +1790,11 @@ def render_template(payload: dict[str, Any]) -> str:
 
     lines = [
         f"【挂单地图 {trading_date}】(北京 {beijing_time},0DTE={expiry})",
+        *(
+            [f"时段: {phase.get('name_cn')} — {phase.get('traits')}"]
+            if isinstance(phase := payload.get("session_phase"), dict) and phase.get("name_cn")
+            else []
+        ),
         (
             f"参考价: {_dash(underlier_price)}({underlier_source}), "
             f"预期波幅 ±{_dash(expected_move)} 点"
@@ -1579,6 +1810,9 @@ def render_template(payload: dict[str, Any]) -> str:
     es_volume_line = _es_volume_line(payload)
     if es_volume_line:
         lines.append(es_volume_line)
+    hl_volume_line = _hl_volume_line(payload)
+    if hl_volume_line:
+        lines.append(hl_volume_line)
     ladder_lines = _wall_ladder_lines(payload)
     lines.extend(ladder_lines)
     density_line = _rn_density_line(payload)
@@ -1617,6 +1851,12 @@ def render_template(payload: dict[str, Any]) -> str:
                 f"{_fmt_premium(candidate.get('limit_aggressive'))} / 保守 "
                 f"{_fmt_premium(candidate.get('limit_conservative'))}"
             )
+            eta = candidate.get("touch_eta_minutes")
+            if isinstance(eta, (int, float)) and eta > 0:
+                lines.append(
+                    f"   时效: 预计 ≈{_fmt_eta_minutes(float(eta))} 到位; "
+                    "超约 2 倍时间未到, 赔率已变质, 先撤"
+                )
             frontrun_level = candidate.get("frontrun_level")
             if frontrun_level is not None:
                 lines.append(
@@ -1675,6 +1915,12 @@ def build_order_prompt(
             "flip 破位 put 想看 elevated_break_holds / quiet_breakdown_holds，最怕 break_reclaimed；"
             "call wall fade 想看 elevated_buy_into_resistance 后滞涨，最怕 quiet 站稳在墙上方。"
             "quiet_mid_range / elevated_mid_range 都是半路，不追单。",
+            "hl_volume(HL SP500 永续，24/7 薄代理)只当次级证据：与 ES 同向加一分确认，分歧提示 crypto 侧先动或噪声；"
+            "aggressor_buy_ratio/book_imbalance 是 ES 没有的方向色彩；ES 停盘/周末时它是唯一量价源，但绝不单独确认破位。",
+            "每张单的 touch_eta_minutes 是按布朗缩放估的到位耗时：给出时效纪律——约 2 倍该时间价格还没来，"
+            "赔率已被 theta 吃掉，写明大约几点(北京)前不来就撤单。",
+            "session_phase 是搭档的时钟：这张图会跨欧盘、美盘数据小时和开盘使用，建议要写清哪些单是欧盘就能成交的埋伏、"
+            "哪些要等美盘数据落地校准后才算数；不许把『等开盘』当默认建议。",
             "day_move.em_used_fraction ≥ 0.7 时点明：日内已走完预期波幅的多少，顺方向追单赔率差；挂单纪律是等价格来找你，不去半路追它。",
             "previous_push 是上一条推送正文；关键位相对它有实质变化就在定调处说『剧本有变』并指出哪张单要改，没变化不必提。",
             "previous_push:" + previous_push_json(previous_push),
@@ -1743,10 +1989,11 @@ REFRESH_COOLDOWN_SECONDS_DEFAULT = 1500.0
 MATERIAL_LEVEL_MOVE_POINTS = 5.0
 MATERIAL_EM_REL_CHANGE = 0.20
 
-# --- status report: fixed 30-minute cadence (Beijing 14:15 -> next-day 02:00,
-# i.e. through pre-open research and the first ~4.5 hours of the US session) ---
+# --- status report: fixed cadence across the partner's working day (Beijing
+# 08:30 -> next-day 02:00; hourly through the morning, every 30 minutes from
+# 14:00 -- density is set by the systemd timer, this window only bounds it) ---
 
-STATUS_WINDOW_START = time(14, 15)
+STATUS_WINDOW_START = time(8, 30)
 STATUS_WINDOW_END_EARLY = time(2, 0)
 US_OPEN_ET = time(9, 30)
 
@@ -1815,10 +2062,12 @@ def within_refresh_window(now_utc: datetime) -> bool:
 
 
 def within_status_window(now_utc: datetime) -> bool:
-    """Beijing 14:15 through next-day 02:00 (covers pre-open + early US session).
+    """Beijing 08:30 through next-day 02:00: the partner's full working day.
 
-    The after-midnight leg belongs to the previous day's session, so it runs
-    on Tue-Sat local mornings (Sat 00:xx = Friday's US session).
+    The timer controls density (hourly through the Beijing morning, every 30
+    minutes from 14:00); this gate only bounds the day. The after-midnight leg
+    belongs to the previous day's session, so it runs on Tue-Sat local
+    mornings (Sat 00:xx = Friday's US session).
     """
     local = now_utc.astimezone(SHANGHAI_TZ)
     if local.time() >= STATUS_WINDOW_START:
@@ -1834,6 +2083,144 @@ def minutes_to_open(now_utc: datetime) -> int | None:
     if ny >= open_dt:
         return None
     return int((open_dt - ny).total_seconds() // 60)
+
+
+# --- session phase: the partner's clock, not the exchange's -----------------
+# The reader works Beijing 08:30 -> next-day 01:00 (ET ~20:30 -> ~13:00 in
+# summer). He sleeps through the entire US afternoon and close, and for most
+# of his waking day the market IS live (Globex futures + SPX GTH options).
+# Every push must speak to the phase of HIS day instead of defaulting to
+# "wait for the open".
+
+USER_DAY_START_BJ = time(8, 30)
+USER_DAY_END_BJ = time(1, 0)  # bedtime: positions after this are unattended
+US_CLOSE_ET = time(16, 0)
+
+SESSION_PHASES_ET: tuple[tuple[time, time, str, str, str], ...] = (
+    (
+        time(18, 0),
+        time(2, 0),
+        "asia_globex",
+        "亚盘夜盘",
+        "Globex+GTH 流动性薄、期权点差宽; 复盘昨日、搭今天骨架, 只挂远端埋伏单",
+    ),
+    (
+        time(2, 0),
+        time(8, 30),
+        "europe_session",
+        "欧盘时段",
+        "欧洲接力后 ES 开始有真方向尝试; 研究和布挂单的黄金窗",
+    ),
+    (
+        time(8, 30),
+        time(9, 30),
+        "us_data_hour",
+        "美盘数据前小时",
+        "ET 8:30 宏观数据落地、EM/IV 重定价; 挂单最后校准窗",
+    ),
+    (
+        time(9, 30),
+        time(10, 30),
+        "us_open_hour",
+        "开盘首小时",
+        "假突破多、OI 刷新后墙才作数; 等回踩确认再动手",
+    ),
+    (
+        time(10, 30),
+        time(13, 0),
+        "us_morning_battle",
+        "美盘上午主战场",
+        "趋势/区间定型, 搭档唯一在场的执行窗; 睡前必须处理完仓位",
+    ),
+    (
+        time(13, 0),
+        time(16, 0),
+        "us_afternoon_unattended",
+        "无人值守下午",
+        "搭档已睡; theta 磨损+尾盘对冲解锁, 留下的仓位必须已带 bracket",
+    ),
+    (
+        time(16, 0),
+        time(18, 0),
+        "post_close",
+        "盘后过渡",
+        "现金已收、期货重定价; 复盘与次日准备",
+    ),
+)
+
+
+def _phase_contains(start: time, stop: time, now_t: time) -> bool:
+    if start <= stop:
+        return start <= now_t < stop
+    return now_t >= start or now_t < stop
+
+
+def session_phase(now_utc: datetime) -> dict[str, Any]:
+    ny = now_utc.astimezone(NY_TZ)
+    bj = now_utc.astimezone(SHANGHAI_TZ)
+    name, name_cn, traits = "asia_globex", "亚盘夜盘", ""
+    for start, stop, phase_name, phase_cn, phase_traits in SESSION_PHASES_ET:
+        if _phase_contains(start, stop, ny.time()):
+            name, name_cn, traits = phase_name, phase_cn, phase_traits
+            break
+
+    open_dt = ny.replace(hour=US_OPEN_ET.hour, minute=US_OPEN_ET.minute, second=0, microsecond=0)
+    close_dt = ny.replace(hour=US_CLOSE_ET.hour, minute=US_CLOSE_ET.minute, second=0, microsecond=0)
+    if ny >= close_dt:
+        # Evening: count down to the NEXT session's open (skip weekends).
+        open_dt += timedelta(days=1)
+        while open_dt.weekday() >= 5:
+            open_dt += timedelta(days=1)
+    minutes_to_us_open = int((open_dt - ny).total_seconds() // 60) if ny < open_dt else None
+    minutes_since_us_open = (
+        int((ny - open_dt).total_seconds() // 60) if open_dt <= ny < close_dt else None
+    )
+    minutes_to_us_close = int((close_dt - ny).total_seconds() // 60) if ny < close_dt else None
+
+    # Bedtime countdown: next Beijing 01:00. No countdown while asleep
+    # (Beijing 01:00-08:30).
+    user_awake = not (USER_DAY_END_BJ <= bj.time() < USER_DAY_START_BJ)
+    minutes_to_bedtime = None
+    if user_awake:
+        bedtime = bj.replace(
+            hour=USER_DAY_END_BJ.hour, minute=USER_DAY_END_BJ.minute, second=0, microsecond=0
+        )
+        if bj.time() >= USER_DAY_END_BJ:
+            bedtime += timedelta(days=1)
+        minutes_to_bedtime = int((bedtime - bj).total_seconds() // 60)
+
+    return {
+        "name": name,
+        "name_cn": name_cn,
+        "traits": traits,
+        "beijing_now": bj.strftime("%H:%M"),
+        "minutes_to_us_open": minutes_to_us_open,
+        "minutes_since_us_open": minutes_since_us_open,
+        "minutes_to_us_close": minutes_to_us_close,
+        "minutes_to_bedtime": minutes_to_bedtime,
+        "user_awake": user_awake,
+    }
+
+
+def _phase_clock_text(phase: dict[str, Any]) -> str:
+    parts = [str(phase.get("name_cn") or "-")]
+    since_open = phase.get("minutes_since_us_open")
+    to_open = phase.get("minutes_to_us_open")
+    if since_open is not None:
+        parts.append(f"开盘后 {since_open} 分钟")
+    elif to_open is not None:
+        parts.append(f"距开盘 {to_open} 分钟")
+    to_bed = phase.get("minutes_to_bedtime")
+    if isinstance(to_bed, int) and to_bed <= 180:
+        parts.append(f"距收官 {to_bed} 分钟")
+    return ", ".join(parts)
+
+
+def _session_phase_of(payload: dict[str, Any], now_utc: datetime) -> dict[str, Any]:
+    phase = payload.get("session_phase")
+    if isinstance(phase, dict) and phase.get("name_cn"):
+        return phase
+    return session_phase(now_utc)
 
 
 def load_order_map_state(state_path: str) -> dict[str, Any]:
@@ -1911,8 +2298,8 @@ def render_status_template(
     now_utc: datetime,
 ) -> str:
     beijing = now_utc.astimezone(SHANGHAI_TZ)
-    to_open = minutes_to_open(now_utc)
-    open_text = f"距开盘 {to_open} 分钟" if to_open is not None else "已开盘"
+    phase = _session_phase_of(payload, now_utc)
+    open_text = _phase_clock_text(phase)
 
     underlier = payload.get("underlier") if isinstance(payload.get("underlier"), dict) else {}
     vol = payload.get("vol_context") if isinstance(payload.get("vol_context"), dict) else {}
@@ -1922,6 +2309,7 @@ def render_status_template(
 
     lines = [
         f"【市场状态 {beijing.strftime('%H:%M')}】(0DTE={payload.get('expiry') or '-'}, {open_text})",
+        f"时段: {phase.get('name_cn')} — {phase.get('traits')}",
         (
             f"参考价: {_dash(underlier.get('price'))}({underlier.get('source') or '-'}); "
             f"ES {_dash(payload.get('es_last'))}; HL perp {_dash(payload.get('hl_sp500_perp'))}"
@@ -1934,6 +2322,7 @@ def render_status_template(
         f"关键位: {_level_probs_line(payload)}",
         *( [line] if (line := _day_move_line(payload)) else [] ),
         *( [line] if (line := _es_volume_line(payload)) else [] ),
+        *( [line] if (line := _hl_volume_line(payload)) else [] ),
         *_wall_ladder_lines(payload),
         *( [line] if (line := _rn_density_line(payload)) else [] ),
         (
@@ -1966,8 +2355,14 @@ def build_status_prompt(
             "动笔前先在心里过一遍(不要写出来)：现在价格站的这个位置，是谁的地盘？下方 put 墙的 OI 是真金白银的防守还是昨天的尸体？"
             "dealer 在这个价位是被迫买还是被迫卖(gamma 正负)？时间衰减在帮谁？想清楚了再写结论。",
             "",
-            "输出中文，14-20 行。第一行以『市场状态:』开头，保留模板第一行的时间与距开盘信息，紧跟一句定调：",
+            "输出中文，14-20 行。第一行以『市场状态:』开头，保留模板第一行的时间与时段信息，紧跟一句定调：",
             "『剧本维持』或『剧本有变: 变在哪』——判断基准是 previous_push 正文和模板『较上次推送』行。",
+            "",
+            "session_phase 是搭档的时钟：便签必须落在当前时段的语境里(traits 字段是提示)。亚盘/欧盘时段市场在交易",
+            "(Globex+GTH)，不许写『等开盘再说』——该说的是这个时段的地形有多可信、埋伏单摆哪里；开盘首小时提防假突破；",
+            "主战场时段(北京 22:30-1:00)直接谈执行。minutes_to_bedtime ≤ 60 时这条是【睡前收官】便签：",
+            "正文以收官为主——逐张说未成交挂单撤/留、持仓带什么 bracket(止盈止损给具体价)、哪些单绝不能裸奔进无人值守的",
+            "美盘下午；证伪条件写给醒着的最后一小时，而不是写给睡着的他。",
             "",
             "正文必须覆盖(顺序自己组织，写成连贯的段落而不是清单)：",
             "- 位置：参考价在 flip zone/zero gamma/两侧墙位阶梯里站在哪，距各关键位几点，这个位置意味着 pin 还是易加速；"
@@ -1979,6 +2374,11 @@ def build_status_prompt(
             "放量砸支撑(elevated_sell_into_support)是墙测试不是自动破位；缩量收回(quiet_reclaim_after_sell_test)才升温反弹；"
             "破位站稳(holds)才给破位单开灯，破位收回(reclaimed)则假破降权；中间地带(quiet/elevated_mid_range)半路不追。"
             "play_hints 里有现成句子可直接引用。label=no_baseline/session_reset 时不引用；",
+            "- hl_volume 是 Hyperliquid SP500 永续的量价(24/7 薄流动性代理)，只当次级证据：与 ES 量价同向可加一分确认，"
+            "分歧时提示 crypto 侧资金先动或只是噪声；aggressor_buy_ratio(主动买占比)和 book_imbalance(盘口失衡)是"
+            "ES 给不了的方向色彩；周末与 ES 停盘时它是唯一量价源。绝不允许单独用它确认破位；",
+            "- 每张挂单的 touch_eta_minutes 是按布朗缩放估的到位耗时：写挂单参考时给出时效纪律——超过约 2 倍该时间"
+            "价格还没来，这单的赔率已被 theta 吃掉，写明大约几点(北京时间)前不来就撤；",
             "- 双向 if/then：上行到哪个具体位置、下行到哪个具体位置，分别哪张单该撤/改价、哪个剧本激活——这也是你这个判断的证伪条件；",
             "- 情绪拦截(违反即失职)：价格在中间地带就写明『此处不追单，计划位在 XX/XX』；day_move.em_used_fraction ≥ 0.7 就写明"
             "『日内已走完预期波幅的 X%，顺方向追单赔率差』；价格进 put 墙支撑带就写明『计划中的接多区不是恐慌区，防守只在跌破 XX 后执行』，"
