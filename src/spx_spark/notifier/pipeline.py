@@ -19,13 +19,14 @@ from spx_spark.notifier.prompts import (
     build_direct_push_prompt,
     format_alert_message,
 )
+from spx_spark.notifier.format_push import push_lane_for_alerts
 from spx_spark.notifier.sinks import (
+    any_delivery_ok,
     bark_title_for_alerts,
+    deliver_trade_push,
+    im_delivery_ok,
     run_codex_exec,
     run_openclaw_agent,
-    send_bark_friend_message,
-    send_bark_message,
-    send_openclaw_message,
 )
 from spx_spark.notifier.state import mark_alerts_sent, select_alerts_for_notification
 
@@ -48,25 +49,25 @@ def _failopen_critical_alerts(
     if not critical_alerts:
         return
     failopen_message = format_alert_message(payload, critical_alerts)
-    direct_result = send_openclaw_message(settings, failopen_message, runner=runner)
-    sinks.append(direct_result)
-    delivered_ok = direct_result.ok
-    if not direct_result.ok:
+    lane = push_lane_for_alerts(critical_alerts)
+    delivery_sinks = deliver_trade_push(
+        settings,
+        title=bark_title_for_alerts(critical_alerts),
+        text=failopen_message,
+        kind="direct_event",
+        lane=lane,
+        friend=False,
+        runner=runner,
+    )
+    sinks.extend(delivery_sinks)
+    if not im_delivery_ok(delivery_sinks):
         append_missed(
             settings.missed_queue_path,
             failopen_message,
             kind="failopen",
             at=now_utc,
         )
-    if settings.bark_enabled:
-        bark_result = send_bark_message(
-            settings,
-            bark_title_for_alerts(critical_alerts),
-            failopen_message,
-        )
-        sinks.append(bark_result)
-        delivered_ok = delivered_ok or bark_result.ok
-    if delivered_ok:
+    if any_delivery_ok(delivery_sinks):
         alerts_marked_sent.extend(critical_alerts)
 
 
@@ -114,33 +115,26 @@ def _deliver_review_message(
     scope_ok = codex_message_respects_human_scope(message)
     if should_deliver and scope_ok:
         if deliver:
-            delivery = send_openclaw_message(settings, message, runner=runner)
-            sinks.append(delivery)
-            if not delivery.ok:
+            lane = push_lane_for_alerts(review_candidates)
+            friend = lane == "trade" and alerts_are_market_signals(review_candidates)
+            delivery_sinks = deliver_trade_push(
+                settings,
+                title=bark_title_for_alerts(review_candidates),
+                text=message,
+                kind="intraday_alert",
+                lane=lane,
+                friend=friend,
+                runner=runner,
+            )
+            sinks.extend(delivery_sinks)
+            if not im_delivery_ok(delivery_sinks):
                 append_missed(
                     settings.missed_queue_path,
                     message,
                     kind=delivery_kind,
                     at=now_utc,
                 )
-            delivered_ok = delivery.ok
-            if settings.bark_enabled:
-                bark_result = send_bark_message(
-                    settings,
-                    bark_title_for_alerts(review_candidates),
-                    message,
-                )
-                sinks.append(bark_result)
-                delivered_ok = delivered_ok or bark_result.ok
-            if settings.bark_friend_enabled and alerts_are_market_signals(review_candidates):
-                sinks.append(
-                    send_bark_friend_message(
-                        settings,
-                        bark_title_for_alerts(review_candidates),
-                        message,
-                    )
-                )
-            if delivered_ok:
+            if any_delivery_ok(delivery_sinks):
                 alerts_marked_sent.extend(review_candidates)
                 record_push("intraday_alert", message, at=now_utc.isoformat())
         else:
@@ -224,6 +218,8 @@ def notify_payload(
     now_utc = now or datetime.now(tz=timezone.utc)
     if (
         settings.openclaw_enabled
+        or settings.feishu_enabled
+        or settings.bark_enabled
         or settings.deepseek_enabled
         or settings.openclaw_agent_enabled
         or settings.codex_enabled
@@ -236,22 +232,28 @@ def notify_payload(
     bypass_alerts = direct_push_alerts(selected, payload)
     review_candidates = [alert for alert in selected if alert not in bypass_alerts]
     alerts_marked_sent: list[dict[str, object]] = []
-    if settings.openclaw_enabled:
-        direct_result = send_openclaw_message(settings, message, runner=runner)
-        sinks.append(direct_result)
-        if not direct_result.ok:
+    if settings.openclaw_enabled and not (
+        settings.feishu_enabled or settings.bark_enabled or settings.deepseek_enabled
+    ):
+        # Legacy: OpenClaw-only mode still dumps the raw template without review.
+        delivery_sinks = deliver_trade_push(
+            settings,
+            title=bark_title_for_alerts(selected),
+            text=message,
+            kind="direct_event",
+            lane=push_lane_for_alerts(selected),
+            friend=False,
+            runner=runner,
+        )
+        sinks.extend(delivery_sinks)
+        if not im_delivery_ok(delivery_sinks):
             append_missed(
                 settings.missed_queue_path,
                 message,
                 kind="direct",
                 at=now_utc,
             )
-        delivered_ok = direct_result.ok
-        if settings.bark_enabled:
-            bark_result = send_bark_message(settings, bark_title_for_alerts(selected), message)
-            sinks.append(bark_result)
-            delivered_ok = delivered_ok or bark_result.ok
-        if delivered_ok:
+        if any_delivery_ok(delivery_sinks):
             alerts_marked_sent = list(selected)
     elif bypass_alerts:
         bypass_message = format_alert_message(payload, bypass_alerts)
@@ -263,33 +265,26 @@ def notify_payload(
             )
             if written:
                 bypass_message = written
-        direct_result = send_openclaw_message(settings, bypass_message, runner=runner)
-        sinks.append(direct_result)
-        if not direct_result.ok:
+        lane = push_lane_for_alerts(bypass_alerts)
+        friend = lane == "trade" and alerts_are_market_signals(bypass_alerts)
+        delivery_sinks = deliver_trade_push(
+            settings,
+            title=bark_title_for_alerts(bypass_alerts),
+            text=bypass_message,
+            kind="direct_event",
+            lane=lane,
+            friend=friend,
+            runner=runner,
+        )
+        sinks.extend(delivery_sinks)
+        if not im_delivery_ok(delivery_sinks):
             append_missed(
                 settings.missed_queue_path,
                 bypass_message,
                 kind="direct",
                 at=now_utc,
             )
-        delivered_ok = direct_result.ok
-        if settings.bark_enabled:
-            bark_result = send_bark_message(
-                settings,
-                bark_title_for_alerts(bypass_alerts),
-                bypass_message,
-            )
-            sinks.append(bark_result)
-            delivered_ok = delivered_ok or bark_result.ok
-        if settings.bark_friend_enabled and alerts_are_market_signals(bypass_alerts):
-            sinks.append(
-                send_bark_friend_message(
-                    settings,
-                    bark_title_for_alerts(bypass_alerts),
-                    bypass_message,
-                )
-            )
-        if delivered_ok:
+        if any_delivery_ok(delivery_sinks):
             alerts_marked_sent = list(bypass_alerts)
             record_push("direct_event", bypass_message, at=now_utc.isoformat())
 
@@ -423,7 +418,9 @@ def notify_payload(
                 sinks=sinks,
             )
 
-    sent_count = sum(1 for sink in sinks if sink.sink in ("openclaw_message", "bark") and sink.ok)
+    sent_count = sum(
+        1 for sink in sinks if sink.sink in ("openclaw_message", "bark", "feishu") and sink.ok
+    )
     if alerts_marked_sent:
         mark_alerts_sent(alerts_marked_sent, sent_at_by_key, settings, now=now)
     skipped_reason = None if sinks else "no_enabled_sinks"

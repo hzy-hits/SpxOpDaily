@@ -28,7 +28,11 @@ from spx_spark.notifier.sinks import (
     run_openclaw_agent,
     send_bark_friend_message,
     send_bark_message,
+    send_feishu_card,
     send_openclaw_message,
+    deliver_trade_push,
+    any_delivery_ok,
+    im_delivery_ok,
 )
 from spx_spark.notifier.state import (
     mark_alerts_sent,
@@ -60,7 +64,11 @@ __all__ = [
     "select_alerts_for_notification",
     "send_bark_friend_message",
     "send_bark_message",
+    "send_feishu_card",
     "send_openclaw_message",
+    "deliver_trade_push",
+    "any_delivery_ok",
+    "im_delivery_ok",
     "severity_value",
     "split_time_sensitive_review_candidates",
     "strong_time_sensitive_score",

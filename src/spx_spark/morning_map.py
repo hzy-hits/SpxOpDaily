@@ -20,9 +20,9 @@ from spx_spark.notifier.llm_writer import (
 from spx_spark.notifier.missed_queue import append_missed
 from spx_spark.notifier.model import CommandRunner, default_runner
 from spx_spark.notifier.sinks import (
-    send_bark_friend_message,
-    send_bark_message,
-    send_openclaw_message,
+    any_delivery_ok,
+    deliver_trade_push,
+    im_delivery_ok,
 )
 from spx_spark.options_map import build_options_map
 from spx_spark.storage import LatestState, LatestStateStore
@@ -310,23 +310,27 @@ def send_morning_map(
         runner=runner,
     )
 
-    weixin_result = send_openclaw_message(settings, text, runner=runner)
-    if not weixin_result.ok:
+    delivery_sinks = deliver_trade_push(
+        settings,
+        title="盘前地图",
+        text=text,
+        kind="morning_map",
+        lane="trade",
+        friend=True,
+        runner=runner,
+    )
+    delivered_ok = any_delivery_ok(delivery_sinks)
+    if not im_delivery_ok(delivery_sinks):
         append_missed(settings.missed_queue_path, text, kind="morning_map", at=now)
-
-    bark_ok = True
-    if settings.bark_enabled:
-        bark_result = send_bark_message(settings, "盘前地图", text)
-        bark_ok = bark_result.ok
-    if settings.bark_friend_enabled:
-        send_bark_friend_message(settings, "盘前地图", text)
 
     return {
         "text": text,
         "writer": writer,
         "used_agent": writer != "template",
-        "weixin_ok": weixin_result.ok,
-        "bark_ok": bark_ok,
+        "weixin_ok": any(s.sink == "openclaw_message" and s.ok for s in delivery_sinks),
+        "bark_ok": any(s.sink == "bark" and s.ok for s in delivery_sinks),
+        "feishu_ok": any(s.sink == "feishu" and s.ok for s in delivery_sinks),
+        "delivered_ok": delivered_ok,
     }
 
 
@@ -404,10 +408,10 @@ def run(argv: list[str] | None = None, *, now: datetime | None = None) -> int:
     settings = NotificationSettings.from_env()
     result = send_morning_map(payload, settings, now=now, previous_push=load_previous_push())
     mark_sent(state_path, trading_date)
-    if result["weixin_ok"] or result["bark_ok"]:
+    if result.get("delivered_ok") or result["weixin_ok"] or result["bark_ok"] or result.get("feishu_ok"):
         record_push("morning_map", result["text"], at=now.isoformat())
     print(json.dumps(result, ensure_ascii=False))
-    if not result["weixin_ok"] and not result["bark_ok"]:
+    if not (result.get("delivered_ok") or result["weixin_ok"] or result["bark_ok"] or result.get("feishu_ok")):
         return 1
     return 0
 

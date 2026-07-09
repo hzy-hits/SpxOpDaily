@@ -1621,3 +1621,120 @@ def test_notifier_failopen_skips_when_only_high_alerts_and_agent_fails(tmp_path)
     message_calls = [cmd for cmd in calls if cmd[:3] == ["openclaw", "message", "send"]]
     assert message_calls == []
     assert result.sent_count == 0
+
+
+def test_bark_lockscreen_summary_and_feishu_card() -> None:
+    from spx_spark.notifier.format_push import (
+        bark_lockscreen_summary,
+        build_feishu_card,
+        push_lane_for_alerts,
+        strip_markdown_light,
+    )
+
+    text = "## 结论\n**剧本有变**：flip 上移\n\n## 盯\n只盯 `7455`"
+    summary = bark_lockscreen_summary(text)
+    assert "剧本有变" in summary
+    assert "**" not in summary
+    assert "`" not in summary
+    assert strip_markdown_light("**7450C** 限价 `14.00`") == "7450C 限价 14.00"
+
+    card = build_feishu_card(text, title="市场状态 · 剧本有变", kind="status")
+    assert card["header"]["template"] == "orange"
+    assert card["body"]["elements"][0]["tag"] == "markdown"
+    assert "剧本有变" in card["body"]["elements"][0]["content"]
+
+    assert push_lane_for_alerts([{"kind": "price_move_from_close"}]) == "trade"
+    assert push_lane_for_alerts([{"kind": "ibkr_session_interrupted"}]) == "ops"
+
+
+def test_deliver_trade_push_routes_ops_to_bark_ops_group_not_feishu(tmp_path) -> None:
+    from spx_spark.notifier.sinks import deliver_trade_push
+
+    bark_posts: list[dict[str, object]] = []
+    feishu_posts: list[dict[str, object]] = []
+
+    def bark_poster(url: str, payload: dict[str, object], timeout: float) -> dict[str, object]:
+        bark_posts.append(payload)
+        return {"code": 200}
+
+    def feishu_poster(url: str, payload: dict[str, object], timeout: float) -> dict[str, object]:
+        feishu_posts.append(payload)
+        return {"code": 0}
+
+    settings = replace(
+        make_settings(str(tmp_path / "notify-state.json")),
+        openclaw_enabled=False,
+        openclaw_target="",
+        openclaw_channel="",
+        bark_enabled=True,
+        bark_url="https://api.day.app/test-key",
+        bark_ops_group="spx-ops",
+        bark_markdown_enabled=True,
+        feishu_enabled=True,
+        feishu_webhook_url="https://open.feishu.cn/open-apis/bot/v2/hook/test",
+    )
+
+    import spx_spark.notifier.sinks as sinks_mod
+
+    original_bark = sinks_mod.post_bark
+    original_feishu = sinks_mod.post_feishu
+    sinks_mod.post_bark = bark_poster
+    sinks_mod.post_feishu = feishu_poster
+    try:
+        ops_sinks = deliver_trade_push(
+            settings,
+            title="SPX 系统事件",
+            text="IBKR session interrupted",
+            kind="direct_event",
+            lane="ops",
+            friend=False,
+        )
+        trade_sinks = deliver_trade_push(
+            settings,
+            title="市场状态",
+            text="## 结论\n**剧本维持**\n\n## 盯\n7455",
+            kind="status",
+            lane="trade",
+            friend=False,
+        )
+    finally:
+        sinks_mod.post_bark = original_bark
+        sinks_mod.post_feishu = original_feishu
+
+    assert any(s.sink == "bark" and s.ok for s in ops_sinks)
+    assert not any(s.sink == "feishu" and s.attempted for s in ops_sinks)
+    assert bark_posts[0]["group"] == "spx-ops"
+    assert "markdown" not in bark_posts[0]
+
+    assert any(s.sink == "feishu" and s.ok for s in trade_sinks)
+    assert any(s.sink == "bark" and s.ok for s in trade_sinks)
+    assert bark_posts[1]["group"] == "spx-spark"
+    assert "markdown" in bark_posts[1]
+    assert feishu_posts[0]["msg_type"] == "interactive"
+    assert feishu_posts[0]["card"]["header"]["title"]["content"] == "市场状态"
+
+
+def test_send_bark_message_accepts_markdown_and_group_override(tmp_path) -> None:
+    posts: list[dict[str, object]] = []
+
+    def poster(url: str, payload: dict[str, object], timeout: float) -> dict[str, object]:
+        posts.append(payload)
+        return {"code": 200}
+
+    settings = replace(
+        make_settings(str(tmp_path / "notify-state.json")),
+        bark_enabled=True,
+        bark_url="https://api.day.app/test-key",
+        bark_markdown_enabled=True,
+    )
+    result = send_bark_message(
+        settings,
+        "SPX 系统事件",
+        "session down",
+        group="spx-ops",
+        markdown="**detail**",
+        poster=poster,
+    )
+    assert result.ok is True
+    assert posts[0]["group"] == "spx-ops"
+    assert posts[0]["markdown"] == "**detail**"

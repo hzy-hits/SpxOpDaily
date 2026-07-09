@@ -16,10 +16,10 @@ from spx_spark.notifier.llm_writer import DEFAULT_SYSTEM_PROMPT
 from spx_spark.notifier.missed_queue import append_missed
 from spx_spark.notifier.model import CommandRunner, default_runner
 from spx_spark.notifier.sinks import (
+    any_delivery_ok,
+    deliver_trade_push,
+    im_delivery_ok,
     run_openclaw_agent,
-    send_bark_friend_message,
-    send_bark_message,
-    send_openclaw_message,
 )
 from spx_spark.iv_surface import (
     IvSurfaceSnapshot,
@@ -860,22 +860,26 @@ def push_review(
             text = reply
             used_agent = True
 
-    weixin_result = send_openclaw_message(settings, text, runner=runner)
-    if not weixin_result.ok:
+    delivery_sinks = deliver_trade_push(
+        settings,
+        title="盘后复盘",
+        text=text,
+        kind="post_close_review",
+        lane="trade",
+        friend=True,
+        runner=runner,
+    )
+    delivered_ok = any_delivery_ok(delivery_sinks)
+    if not im_delivery_ok(delivery_sinks):
         append_missed(settings.missed_queue_path, text, kind="post_close_review", at=now)
-
-    bark_ok = True
-    if settings.bark_enabled:
-        bark_result = send_bark_message(settings, "盘后复盘", text)
-        bark_ok = bark_result.ok
-    if settings.bark_friend_enabled:
-        send_bark_friend_message(settings, "盘后复盘", text)
 
     return {
         "text": text,
         "used_agent": used_agent,
-        "weixin_ok": weixin_result.ok,
-        "bark_ok": bark_ok,
+        "weixin_ok": any(s.sink == "openclaw_message" and s.ok for s in delivery_sinks),
+        "bark_ok": any(s.sink == "bark" and s.ok for s in delivery_sinks),
+        "feishu_ok": any(s.sink == "feishu" and s.ok for s in delivery_sinks),
+        "delivered_ok": delivered_ok,
     }
 
 

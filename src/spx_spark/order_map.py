@@ -22,9 +22,9 @@ from spx_spark.notifier.llm_writer import (
 from spx_spark.notifier.missed_queue import append_missed
 from spx_spark.notifier.model import CommandRunner, default_runner
 from spx_spark.notifier.sinks import (
-    send_bark_friend_message,
-    send_bark_message,
-    send_openclaw_message,
+    any_delivery_ok,
+    deliver_trade_push,
+    im_delivery_ok,
 )
 from spx_spark.options_map import (
     BAD_QUALITIES,
@@ -1239,23 +1239,27 @@ def send_order_map(
         runner=runner,
     )
 
-    weixin_result = send_openclaw_message(settings, text, runner=runner)
-    if not weixin_result.ok:
+    delivery_sinks = deliver_trade_push(
+        settings,
+        title="挂单地图",
+        text=text,
+        kind="order_map",
+        lane="trade",
+        friend=True,
+        runner=runner,
+    )
+    delivered_ok = any_delivery_ok(delivery_sinks)
+    if not im_delivery_ok(delivery_sinks):
         append_missed(settings.missed_queue_path, text, kind="order_map", at=now)
-
-    bark_ok = True
-    if settings.bark_enabled:
-        bark_result = send_bark_message(settings, "挂单地图", text)
-        bark_ok = bark_result.ok
-    if settings.bark_friend_enabled:
-        send_bark_friend_message(settings, "挂单地图", text)
 
     return {
         "text": text,
         "writer": writer,
         "used_agent": writer != "template",
-        "weixin_ok": weixin_result.ok,
-        "bark_ok": bark_ok,
+        "weixin_ok": any(s.sink == "openclaw_message" and s.ok for s in delivery_sinks),
+        "bark_ok": any(s.sink == "bark" and s.ok for s in delivery_sinks),
+        "feishu_ok": any(s.sink == "feishu" and s.ok for s in delivery_sinks),
+        "delivered_ok": delivered_ok,
     }
 
 
@@ -1567,28 +1571,36 @@ def run_status(
         settings,
         runner=runner,
     )
-    weixin_result = send_openclaw_message(settings, text, runner=runner)
-    if not weixin_result.ok:
+    delivery_sinks = deliver_trade_push(
+        settings,
+        title="市场状态",
+        text=text,
+        kind="status",
+        lane="trade",
+        friend=True,
+        runner=runner,
+    )
+    delivered_ok = any_delivery_ok(delivery_sinks)
+    if not im_delivery_ok(delivery_sinks):
         append_missed(settings.missed_queue_path, text, kind="order_map_status", at=now)
-    bark_ok = True
-    if settings.bark_enabled:
-        bark_result = send_bark_message(settings, "市场状态", text)
-        bark_ok = bark_result.ok
-    if settings.bark_friend_enabled:
-        send_bark_friend_message(settings, "市场状态", text)
+    weixin_ok = any(s.sink == "openclaw_message" and s.ok for s in delivery_sinks)
+    bark_ok = any(s.sink == "bark" and s.ok for s in delivery_sinks)
+    feishu_ok = any(s.sink == "feishu" and s.ok for s in delivery_sinks)
 
-    if weixin_result.ok or bark_ok:
+    if delivered_ok:
         mark_sent(state_path, trading_date, fingerprint=fingerprint, now=now, kind="status")
         record_push("market_status", text, at=now.isoformat())
     result = {
         "text": text,
         "writer": writer,
-        "weixin_ok": weixin_result.ok,
+        "weixin_ok": weixin_ok,
         "bark_ok": bark_ok,
+        "feishu_ok": feishu_ok,
+        "delivered_ok": delivered_ok,
         "changes": changes,
     }
     print(json.dumps(result, ensure_ascii=False))
-    if not weixin_result.ok and not bark_ok:
+    if not delivered_ok:
         return 1
     return 0
 
@@ -1651,12 +1663,12 @@ def run_refresh(args: argparse.Namespace, *, now: datetime, state_path: str, tra
     result = send_order_map(
         payload, settings, now=now, extra_header=header, previous_push=load_previous_push()
     )
-    if result["weixin_ok"] or result["bark_ok"]:
+    if result.get("delivered_ok") or result["weixin_ok"] or result["bark_ok"] or result.get("feishu_ok"):
         mark_sent(state_path, trading_date, fingerprint=fingerprint, now=now, kind="map")
         record_push("order_map_refresh", result["text"], at=now.isoformat())
     result["changes"] = changes
     print(json.dumps(result, ensure_ascii=False))
-    if not result["weixin_ok"] and not result["bark_ok"]:
+    if not (result.get("delivered_ok") or result["weixin_ok"] or result["bark_ok"] or result.get("feishu_ok")):
         return 1
     return 0
 
@@ -1692,7 +1704,7 @@ def run(argv: list[str] | None = None, *, now: datetime | None = None) -> int:
 
     settings = NotificationSettings.from_env()
     result = send_order_map(payload, settings, now=now, previous_push=load_previous_push())
-    if result["weixin_ok"] or result["bark_ok"]:
+    if result.get("delivered_ok") or result["weixin_ok"] or result["bark_ok"] or result.get("feishu_ok"):
         mark_sent(
             state_path,
             trading_date,
@@ -1702,7 +1714,7 @@ def run(argv: list[str] | None = None, *, now: datetime | None = None) -> int:
         )
         record_push("order_map", result["text"], at=now.isoformat())
     print(json.dumps(result, ensure_ascii=False))
-    if not result["weixin_ok"] and not result["bark_ok"]:
+    if not (result.get("delivered_ok") or result["weixin_ok"] or result["bark_ok"] or result.get("feishu_ok")):
         return 1
     return 0
 

@@ -1,4 +1,4 @@
-"""Missed-message queue: park approved WeChat messages while the channel is
+"""Missed-message queue: park approved IM messages while the channel is
 dead, then flush them as a single timeline digest when it recovers."""
 
 from __future__ import annotations
@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 
 from spx_spark.config import NotificationSettings
 from spx_spark.notifier.model import CommandRunner, SinkResult, default_runner
-from spx_spark.notifier.sinks import send_openclaw_message
+from spx_spark.notifier.sinks import deliver_trade_push, im_delivery_ok
 
 BEIJING_TZ = ZoneInfo("Asia/Shanghai")
 
@@ -80,7 +80,7 @@ def build_digest(entries: list[dict[str, Any]], *, now: datetime | None = None) 
     else:
         display_entries = sorted_entries
 
-    lines = [f"微信离线期间错过 {len(entries)} 条提醒,时间线如下:"]
+    lines = [f"通道离线期间错过 {len(entries)} 条提醒,时间线如下:"]
     for entry in display_entries:
         at_raw = entry.get("at")
         time_label = "??:??"
@@ -116,7 +116,19 @@ def flush_missed(
     if not entries:
         return None
     digest = build_digest(entries)
-    result = send_openclaw_message(settings, digest, runner=runner)
-    if result.ok:
+    sinks = deliver_trade_push(
+        settings,
+        title="SPX 错过提醒",
+        text=digest,
+        kind="status",
+        lane="trade",
+        friend=False,
+        runner=runner,
+    )
+    if im_delivery_ok(sinks):
         clear_missed(settings.missed_queue_path)
-    return result
+        return SinkResult(sink="missed_digest", attempted=True, ok=True)
+    for sink in sinks:
+        if sink.attempted and not sink.ok:
+            return sink
+    return SinkResult(sink="missed_digest", attempted=False, ok=False, error="no delivery channel")

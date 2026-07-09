@@ -273,7 +273,7 @@ def test_pipeline_flushes_queue_before_new_send(tmp_path) -> None:
     )
 
     assert message_sends
-    assert "微信离线期间错过" in message_sends[0]
+    assert "通道离线期间错过" in message_sends[0]
     assert not Path(queue_path).exists()
     assert any("SPX up 31 bps from close" in message for message in message_sends)
 

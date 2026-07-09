@@ -184,6 +184,8 @@ def send_bark_message(
     title: str,
     body: str,
     *,
+    group: str | None = None,
+    markdown: str | None = None,
     poster: Callable[[str, dict[str, object], float], dict[str, object]] | None = None,
 ) -> SinkResult:
     if poster is None:
@@ -198,8 +200,12 @@ def send_bark_message(
     payload: dict[str, object] = {
         "title": title,
         "body": body,
-        "group": settings.bark_group,
+        "group": group or settings.bark_group,
     }
+    if markdown and settings.bark_markdown_enabled:
+        # Bark ignores body when markdown is set for the App detail view;
+        # lockscreen still uses body from the notification service strip.
+        payload["markdown"] = markdown
     if settings.bark_level:
         payload["level"] = settings.bark_level
     try:
@@ -255,6 +261,173 @@ def send_bark_friend_message(
         attempted=True,
         ok=ok,
         error=None if ok else f"bark response code={code} message={response.get('message')}",
+    )
+
+
+def feishu_sign(secret: str, timestamp: int) -> str:
+    """Feishu custom-bot signature: HMAC-SHA256 of timestamp + '\\n' + secret."""
+    import base64
+    import hashlib
+    import hmac
+
+    string_to_sign = f"{timestamp}\n{secret}"
+    digest = hmac.new(
+        string_to_sign.encode("utf-8"),
+        digestmod=hashlib.sha256,
+    ).digest()
+    return base64.b64encode(digest).decode("utf-8")
+
+
+def post_feishu(url: str, payload: dict[str, object], timeout_seconds: float) -> dict[str, object]:
+    import urllib.request
+
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json; charset=utf-8"},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+        body = response.read().decode("utf-8", errors="replace")
+    try:
+        parsed = json.loads(body)
+    except json.JSONDecodeError:
+        return {"code": response.status, "msg": body}
+    return parsed if isinstance(parsed, dict) else {"code": response.status}
+
+
+def send_feishu_card(
+    settings: NotificationSettings,
+    card: dict[str, object],
+    *,
+    poster: Callable[[str, dict[str, object], float], dict[str, object]] | None = None,
+) -> SinkResult:
+    """Send an interactive Feishu card via custom-bot webhook."""
+    if poster is None:
+        poster = post_feishu
+    if not settings.feishu_enabled:
+        return SinkResult(sink="feishu", attempted=False, ok=False, error="feishu disabled")
+    if not settings.feishu_webhook_url:
+        return SinkResult(
+            sink="feishu",
+            attempted=False,
+            ok=False,
+            error="missing feishu webhook url",
+        )
+    payload: dict[str, object] = {"msg_type": "interactive", "card": card}
+    if settings.feishu_secret:
+        import time
+
+        timestamp = int(time.time())
+        payload["timestamp"] = str(timestamp)
+        payload["sign"] = feishu_sign(settings.feishu_secret, timestamp)
+    try:
+        response = poster(settings.feishu_webhook_url, payload, settings.feishu_timeout_seconds)
+    except Exception as exc:  # noqa: BLE001
+        return SinkResult(sink="feishu", attempted=True, ok=False, error=str(exc))
+    # Feishu webhook success: {"code": 0, "msg": "success"} (also StatusCode=0 legacy).
+    code = response.get("code", response.get("StatusCode"))
+    ok = code in (0, "0")
+    return SinkResult(
+        sink="feishu",
+        attempted=True,
+        ok=ok,
+        error=None if ok else f"feishu response code={code} msg={response.get('msg') or response.get('StatusMessage')}",
+    )
+
+
+def deliver_trade_push(
+    settings: NotificationSettings,
+    *,
+    title: str,
+    text: str,
+    kind: str,
+    lane: str = "trade",
+    friend: bool = False,
+    runner: CommandRunner = default_runner,
+) -> list[SinkResult]:
+    """Fan out one writer text across Feishu (trade) + Bark main (+ friend).
+
+    - Feishu: interactive markdown card, trade lane only.
+    - Bark main: always; ops use bark_ops_group and plain body; trade uses
+      lockscreen summary + optional markdown detail.
+    - Bark friend: only when friend=True (caller already filtered trade-only).
+    - OpenClaw Weixin: still attempted when enabled (legacy parallel).
+    """
+    from spx_spark.notifier.format_push import (
+        bark_groups_for_lane,
+        bark_lockscreen_summary,
+        build_feishu_card,
+        strip_markdown_light,
+    )
+
+    sinks: list[SinkResult] = []
+    is_trade = lane == "trade"
+
+    if settings.feishu_enabled and is_trade:
+        card = build_feishu_card(text, title=title, kind=kind, lane=lane)
+        sinks.append(send_feishu_card(settings, card))
+
+    # Legacy Weixin: historically delivered even when openclaw_enabled=false
+    # (that flag only meant "raw dump without review"). Keep attempting so
+    # existing .env setups keep working until Feishu fully replaces it.
+    weixin = send_openclaw_message(settings, strip_markdown_light(text), runner=runner)
+    if weixin.attempted or settings.openclaw_enabled:
+        sinks.append(weixin)
+
+    if settings.bark_enabled:
+        group = bark_groups_for_lane(
+            lane,
+            trade_group=settings.bark_group,
+            ops_group=settings.bark_ops_group,
+        )
+        if is_trade:
+            body = bark_lockscreen_summary(text)
+            markdown = text if settings.bark_markdown_enabled else None
+        else:
+            body = strip_markdown_light(text)
+            markdown = None
+        sinks.append(
+            send_bark_message(
+                settings,
+                title,
+                body,
+                group=group,
+                markdown=markdown,
+            )
+        )
+
+    if friend and settings.bark_friend_enabled and is_trade:
+        sinks.append(
+            send_bark_friend_message(
+                settings,
+                title,
+                bark_lockscreen_summary(text),
+            )
+        )
+
+    return sinks
+
+
+def any_delivery_ok(sinks: list[SinkResult]) -> bool:
+    return any(
+        sink.ok
+        for sink in sinks
+        if sink.sink in {"feishu", "bark", "openclaw_message"} and sink.attempted
+    )
+
+
+def im_delivery_ok(sinks: list[SinkResult]) -> bool:
+    """True when Feishu or Weixin got the message. Bark alone does not count:
+
+    the missed-queue digest is for recovering the IM reading surface after an
+    outage; Bark already woke the phone, but the card/timeline still needs a
+    later IM flush.
+    """
+    return any(
+        sink.ok
+        for sink in sinks
+        if sink.sink in {"feishu", "openclaw_message"} and sink.attempted
     )
 
 

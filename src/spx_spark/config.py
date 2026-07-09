@@ -615,12 +615,24 @@ class NotificationSettings:
     bark_enabled: bool = False
     bark_url: str = ""
     bark_group: str = "spx-spark"
+    # Ops/engineering pushes (IBKR session, data degradation, channel failures)
+    # land in this Bark group so the trade group stays readable.
+    bark_ops_group: str = "spx-ops"
     bark_level: str = "timeSensitive"
     bark_timeout_seconds: float = 10.0
+    # When true, trading pushes also send the full markdown into Bark's App
+    # detail view (lockscreen still uses the short body summary).
+    bark_markdown_enabled: bool = True
     # Friend channel: trading content only (maps/status/review/market alerts),
     # never engineering noise (data degradation, session drops, token expiry).
     bark_friend_enabled: bool = False
     bark_friend_url: str = ""
+    # Feishu custom-bot webhook: trading reading surface (interactive cards).
+    # Ops stay on Bark main; leave disabled until webhook URL is configured.
+    feishu_enabled: bool = False
+    feishu_webhook_url: str = ""
+    feishu_secret: str = ""
+    feishu_timeout_seconds: float = 10.0
     # Rewrite direct-push events (position/system/off-hours vol) with the
     # DeepSeek writer before sending; falls back to the raw template on any
     # writer failure so critical events are never lost.
@@ -700,10 +712,16 @@ class NotificationSettings:
             bark_enabled=env_bool("ALERT_NOTIFY_BARK_ENABLED", False),
             bark_url=env_str("ALERT_NOTIFY_BARK_URL", "").rstrip("/"),
             bark_group=env_str("ALERT_NOTIFY_BARK_GROUP", "spx-spark"),
+            bark_ops_group=env_str("ALERT_NOTIFY_BARK_OPS_GROUP", "spx-ops"),
             bark_level=env_str("ALERT_NOTIFY_BARK_LEVEL", "timeSensitive"),
             bark_timeout_seconds=env_float("ALERT_NOTIFY_BARK_TIMEOUT_SECONDS", 10.0),
+            bark_markdown_enabled=env_bool("ALERT_NOTIFY_BARK_MARKDOWN_ENABLED", True),
             bark_friend_enabled=env_bool("ALERT_NOTIFY_BARK_FRIEND_ENABLED", False),
             bark_friend_url=env_str("ALERT_NOTIFY_BARK_FRIEND_URL", "").rstrip("/"),
+            feishu_enabled=env_bool("ALERT_NOTIFY_FEISHU_ENABLED", False),
+            feishu_webhook_url=env_str("ALERT_NOTIFY_FEISHU_WEBHOOK_URL", "").rstrip("/"),
+            feishu_secret=env_str("ALERT_NOTIFY_FEISHU_SECRET", ""),
+            feishu_timeout_seconds=env_float("ALERT_NOTIFY_FEISHU_TIMEOUT_SECONDS", 10.0),
             direct_push_llm_enabled=env_bool("ALERT_NOTIFY_DIRECT_PUSH_LLM_ENABLED", True),
             kind_rate_limit_seconds=env_float("ALERT_NOTIFY_KIND_RATE_LIMIT_SECONDS", 3600.0),
             missed_queue_path=env_str(
