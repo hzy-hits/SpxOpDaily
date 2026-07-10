@@ -268,8 +268,13 @@ def build_movement_state_payload(
     *,
     window: AlertWindow,
     market_context: dict[str, object] | None,
+    options_map: OptionsMap | None = None,
 ) -> dict[str, object]:
-    threshold = MOVE_THRESHOLDS_BPS.get(window.priority, MOVE_THRESHOLDS_BPS["normal"])
+    threshold, _threshold_source, _expected_move_pct = movement_threshold_for_window(
+        window,
+        options_map,
+        as_of=state.as_of,
+    )
     instruments: dict[str, object] = {}
     for instrument_id in BASELINE_INSTRUMENTS:
         if instrument_id.startswith("crypto_perp:") and not hyperliquid_proxy_usable(market_context):
@@ -296,13 +301,21 @@ def persist_movement_state_snapshot(
     *,
     window: AlertWindow | None = None,
     market_context: dict[str, object] | None = None,
+    options_map: OptionsMap | None = None,
 ) -> None:
     window = window or active_window(state.as_of)
     if market_context is None:
         market_context = build_market_context(state)
+    if options_map is None:
+        options_map = build_options_map(state)
     save_movement_state(
         movement_state_path(),
-        build_movement_state_payload(state, window=window, market_context=market_context),
+        build_movement_state_payload(
+            state,
+            window=window,
+            market_context=market_context,
+            options_map=options_map,
+        ),
     )
 
 

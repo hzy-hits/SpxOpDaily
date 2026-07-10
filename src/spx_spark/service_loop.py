@@ -16,7 +16,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from spx_spark import alert_engine, iv_surface
+from spx_spark import alert_engine, intraday_shock, iv_surface
 from spx_spark.config import env_bool, env_int, load_dotenv
 from spx_spark.hyperliquid import collector as hyperliquid_collector
 from spx_spark.ibkr import collector as ibkr_collector
@@ -32,11 +32,13 @@ class ServiceLoopSettings:
     polymarket_enabled: bool
     ibkr_enabled: bool
     iv_surface_enabled: bool
+    intraday_shock_enabled: bool
     alert_enabled: bool
     hyperliquid_interval_seconds: int
     polymarket_interval_seconds: int
     ibkr_interval_seconds: int
     iv_surface_interval_seconds: int
+    intraday_shock_interval_seconds: int
     alert_interval_seconds: int
     heartbeat_seconds: int
     ibkr_skip_options: bool
@@ -56,11 +58,15 @@ class ServiceLoopSettings:
             polymarket_enabled=env_bool("SPX_SERVICE_ENABLE_POLYMARKET", False),
             ibkr_enabled=env_bool("SPX_SERVICE_ENABLE_IBKR", False),
             iv_surface_enabled=env_bool("SPX_SERVICE_ENABLE_IV_SURFACE", True),
+            intraday_shock_enabled=env_bool("SPX_SERVICE_ENABLE_INTRADAY_SHOCK", False),
             alert_enabled=env_bool("SPX_SERVICE_ENABLE_ALERTS", True),
             hyperliquid_interval_seconds=env_int("SPX_SERVICE_HYPERLIQUID_INTERVAL_SECONDS", 30),
             polymarket_interval_seconds=env_int("SPX_SERVICE_POLYMARKET_INTERVAL_SECONDS", 60),
             ibkr_interval_seconds=env_int("SPX_SERVICE_IBKR_INTERVAL_SECONDS", 60),
             iv_surface_interval_seconds=env_int("SPX_SERVICE_IV_SURFACE_INTERVAL_SECONDS", 300),
+            intraday_shock_interval_seconds=env_int(
+                "SPX_SERVICE_INTRADAY_SHOCK_INTERVAL_SECONDS", 5
+            ),
             alert_interval_seconds=env_int("SPX_SERVICE_ALERT_INTERVAL_SECONDS", 30),
             heartbeat_seconds=env_int("SPX_SERVICE_HEARTBEAT_SECONDS", 60),
             ibkr_positions_enabled=env_bool("IBKR_POSITIONS_ENABLED", False),
@@ -135,6 +141,10 @@ def run_alert_engine() -> int:
     return alert_engine.run(["--json"])
 
 
+def run_intraday_shock() -> int:
+    return intraday_shock.run(["--json"])
+
+
 def run_ibkr_positions() -> int:
     from spx_spark.ibkr import position_watcher
 
@@ -153,6 +163,18 @@ def console_script(name: str) -> str:
 
 def build_tasks(settings: ServiceLoopSettings) -> list[ServiceTask]:
     tasks: list[ServiceTask] = []
+    # Keep the lightweight shock path first so it is not queued behind slow
+    # collectors or an LLM-backed full alert review when several tasks become
+    # due on the same tick.
+    if settings.intraday_shock_enabled:
+        tasks.append(
+            ServiceTask(
+                "intraday_shock",
+                settings.intraday_shock_interval_seconds,
+                run_intraday_shock,
+                command=(console_script("spx-spark-intraday-shock"), "--json"),
+            )
+        )
     if settings.hyperliquid_enabled:
         tasks.append(
             ServiceTask(
@@ -265,7 +287,7 @@ def run_task(task: ServiceTask) -> dict[str, object]:
             event["stderr_tail"] = stderr_text[-tail_chars:]
     if task.name == "ibkr":
         add_ibkr_summary_fields(event, stdout_text)
-    if task.name == "alert_engine":
+    if task.name in {"alert_engine", "intraday_shock"}:
         add_alert_summary_fields(event, stdout_text)
     return event
 

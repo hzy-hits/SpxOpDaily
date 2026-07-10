@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from datetime import datetime, timedelta
 from types import SimpleNamespace
@@ -580,6 +581,30 @@ def test_movement_alerts_are_edge_triggered(tmp_path, monkeypatch) -> None:
     recross = spy_alerts(752.25, persist=True)
     assert len(recross) == 1
     assert recross[0].dedup_group == "up:1"
+
+
+def test_movement_snapshot_uses_same_dynamic_threshold_as_evaluation(
+    tmp_path, monkeypatch
+) -> None:
+    import spx_spark.alert_engine as ae
+
+    state_path = tmp_path / "movement-state.json"
+    monkeypatch.setenv("ALERT_MOVEMENT_STATE_PATH", str(state_path))
+    monkeypatch.setattr(ae, "front_expected_move_pct", lambda *_args, **_kwargs: 0.015)
+    now = datetime(2026, 7, 7, 23, 0, tzinfo=BJ_TZ)
+    window = active_window(now)
+    assert window.priority == "high"
+    # Dynamic high-window threshold is 45 bps; the old static snapshot used
+    # 30 bps and prematurely occupied bucket 1 before evaluation could alert.
+    state = make_state(
+        make_quote(InstrumentId.index("SPX"), mark=7526.25, close=7500.0, now=now),
+        now=now,
+    )
+
+    ae.persist_movement_state_snapshot(state, window=window, options_map=object())
+
+    stored = json.loads(state_path.read_text(encoding="utf-8"))
+    assert stored["instruments"] == {}
 
 
 def test_delayed_quote_cannot_trigger_movement_alert(tmp_path, monkeypatch) -> None:

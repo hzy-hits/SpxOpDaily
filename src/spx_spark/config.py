@@ -652,6 +652,9 @@ class NotificationSettings:
     # the direction flips, or severity is critical.
     kind_rate_limit_seconds: float = 3600.0
     missed_queue_path: str = ""
+    # Append-only, owner-readable evidence for every LLM review decision. The
+    # audit contains allowlisted alert facts and redacted model output only.
+    review_audit_path: str = ""
 
     @classmethod
     def from_env(cls) -> "NotificationSettings":
@@ -735,6 +738,10 @@ class NotificationSettings:
             missed_queue_path=env_str(
                 "ALERT_NOTIFY_MISSED_QUEUE_PATH",
                 f"{data_root.rstrip('/')}/latest/weixin_missed_queue.jsonl",
+            ),
+            review_audit_path=env_str(
+                "ALERT_NOTIFY_REVIEW_AUDIT_PATH",
+                f"{data_root.rstrip('/')}/latest/alert_review_audit.jsonl",
             ),
         )
 

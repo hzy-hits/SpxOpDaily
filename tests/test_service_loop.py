@@ -24,11 +24,13 @@ def make_settings(**overrides) -> ServiceLoopSettings:
         "polymarket_enabled": False,
         "ibkr_enabled": False,
         "iv_surface_enabled": True,
+        "intraday_shock_enabled": True,
         "alert_enabled": True,
         "hyperliquid_interval_seconds": 30,
         "polymarket_interval_seconds": 60,
         "ibkr_interval_seconds": 60,
         "iv_surface_interval_seconds": 300,
+        "intraday_shock_interval_seconds": 5,
         "alert_interval_seconds": 30,
         "heartbeat_seconds": 60,
         "ibkr_skip_options": False,
@@ -43,7 +45,7 @@ def test_service_loop_defaults_do_not_enable_ibkr() -> None:
     tasks = build_tasks(make_settings())
 
     names = [task.name for task in tasks]
-    assert names == ["hyperliquid", "iv_surface", "alert_engine"]
+    assert names == ["intraday_shock", "hyperliquid", "iv_surface", "alert_engine"]
     assert all(task.command for task in tasks)
 
 
@@ -51,6 +53,7 @@ def test_service_loop_can_enable_ibkr_explicitly() -> None:
     tasks = build_tasks(make_settings(ibkr_enabled=True, ibkr_skip_options=True))
 
     assert [task.name for task in tasks] == [
+        "intraday_shock",
         "hyperliquid",
         "ibkr",
         "iv_surface",
@@ -62,6 +65,7 @@ def test_service_loop_can_enable_polymarket_explicitly() -> None:
     tasks = build_tasks(make_settings(polymarket_enabled=True))
 
     assert [task.name for task in tasks] == [
+        "intraday_shock",
         "hyperliquid",
         "polymarket",
         "iv_surface",
@@ -71,7 +75,14 @@ def test_service_loop_can_enable_polymarket_explicitly() -> None:
 
 def test_run_once_keeps_running_tasks_and_reports_failure() -> None:
     calls: list[str] = []
-    tasks = build_tasks(make_settings(hyperliquid_enabled=False, iv_surface_enabled=False, alert_enabled=False))
+    tasks = build_tasks(
+        make_settings(
+            hyperliquid_enabled=False,
+            iv_surface_enabled=False,
+            intraday_shock_enabled=False,
+            alert_enabled=False,
+        )
+    )
     tasks.append(ServiceTask("noop", 1, lambda: calls.append("ok") or 0))
     tasks.append(ServiceTask("fail", 1, lambda: 1))
 

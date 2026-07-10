@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 
 import pytest
@@ -20,7 +21,7 @@ from spx_spark.notifier import (
     send_bark_message,
     SinkResult,
 )
-from spx_spark.notifier.state import load_acknowledged_event_ids
+from spx_spark.notifier.state import load_acknowledged_event_ids, mark_alerts_sent
 
 
 def make_settings(
@@ -377,13 +378,15 @@ def test_notifier_prefilter_marks_weak_review_alert_without_llm(tmp_path, monkey
     assert second.selected_count == 0
 
 
-def test_notifier_deepseek_rate_limit_cooldowns_noncritical_without_fallback(
+def test_notifier_deepseek_rate_limit_keeps_high_iv_alert_pending_without_failopen(
     tmp_path,
     monkeypatch,
 ) -> None:
-    calls: list[list[str]] = []
+    attempts = 0
 
     def fake_deepseek(settings: NotificationSettings, prompt: str) -> tuple[SinkResult, str]:
+        nonlocal attempts
+        attempts += 1
         return (
             SinkResult(
                 sink="deepseek_reviewer",
@@ -396,43 +399,52 @@ def test_notifier_deepseek_rate_limit_cooldowns_noncritical_without_fallback(
         )
 
     monkeypatch.setattr("spx_spark.notifier.pipeline.run_deepseek_reviewer", fake_deepseek)
-
-    def runner(command: list[str], timeout_seconds: float) -> subprocess.CompletedProcess[str]:
-        calls.append(command)
-        return subprocess.CompletedProcess(command, 0, stdout="{}", stderr="")
-
+    audit_path = tmp_path / "review-audit.jsonl"
     settings = replace(
         make_settings(str(tmp_path / "notify-state.json")),
         openclaw_enabled=False,
         deepseek_enabled=True,
-        openclaw_agent_enabled=True,
-        openclaw_agent_deliver=True,
-        codex_enabled=True,
+        openclaw_agent_enabled=False,
+        codex_enabled=False,
+        review_audit_path=str(audit_path),
     )
+    payload = make_payload()
+    payload["alerts"] = [
+        {
+            "severity": "high",
+            "kind": "iv_term_gap",
+            "instrument_id": "iv_surface:SPXW",
+            "title": "0DTE vs next ATM IV gap 0.051",
+            "detail": "Front SPXW ATM IV differs from next expiry.",
+            "source_gate": "iv_surface",
+        }
+    ]
     now = datetime(2026, 7, 7, 0, 0, tzinfo=timezone.utc)
 
     first = notify_payload(
-        make_payload(),
+        payload,
         settings=settings,
-        runner=runner,
         now=now,
     )
 
     assert first.selected_count == 1
     assert first.sent_count == 0
-    assert [sink.sink for sink in first.sinks] == [
-        "deepseek_reviewer",
-        "deepseek_reviewer_rate_limit_cooldown",
-    ]
-    assert calls == []
+    assert [sink.sink for sink in first.sinks] == ["deepseek_reviewer"]
 
     second = notify_payload(
-        make_payload(),
+        payload,
         settings=settings,
-        runner=runner,
         now=now + timedelta(seconds=60),
     )
-    assert second.selected_count == 0
+    assert second.selected_count == 1
+    assert second.sent_count == 0
+    assert attempts == 2
+    entries = [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()]
+    assert [entry["outcome"] for entry in entries] == [
+        "review_failed_pending",
+        "review_failed_pending",
+    ]
+    assert all(entry["candidates"][0]["kind"] == "iv_term_gap" for entry in entries)
 
 
 def test_send_bark_message_posts_title_body_and_group(tmp_path) -> None:
@@ -820,9 +832,20 @@ def test_codex_scope_gate_blocks_non_focus_symbols(tmp_path) -> None:
         deepseek_enabled=False,
         codex_enabled=True,
     )
+    payload = make_payload()
+    payload["alerts"] = [
+        {
+            "severity": "high",
+            "kind": "iv_term_gap",
+            "instrument_id": "iv_surface:SPXW",
+            "title": "0DTE vs next ATM IV gap 0.051",
+            "detail": "Front SPXW ATM IV differs from next expiry.",
+            "source_gate": "iv_surface",
+        }
+    ]
 
     result = notify_payload(
-        make_payload(),
+        payload,
         settings=settings,
         runner=runner,
         now=datetime(2026, 7, 7, 0, 0, tzinfo=timezone.utc),
@@ -835,8 +858,116 @@ def test_codex_scope_gate_blocks_non_focus_symbols(tmp_path) -> None:
 
 def test_codex_message_requests_delivery_uses_explicit_cues() -> None:
     assert codex_message_requests_delivery("需要看盘: VIX and SPX alert confirmed")
+    assert codex_message_requests_delivery(
+        "需要看盘: SPX 已收复 flip\n若重新跌破，否则不需要推送。"
+    )
     assert not codex_message_requests_delivery("不需要推送: degraded smoke test")
+    assert not codex_message_requests_delivery("不需要推送: 当前没有增量\n需要看盘时再通知。")
     assert not codex_message_requests_delivery("结论: critical alert, but no explicit delivery cue")
+
+
+def test_review_audit_records_reply_verdict_and_delivery_without_secrets(
+    tmp_path, monkeypatch
+) -> None:
+    raw_reply = "需要看盘: SPX 已收复关键位\n若重新跌破，否则不需要推送。 token=super-secret-value"
+
+    def fake_deepseek(settings: NotificationSettings, prompt: str) -> tuple[SinkResult, str]:
+        return SinkResult(sink="deepseek_reviewer", attempted=True, ok=True), raw_reply
+
+    monkeypatch.setattr("spx_spark.notifier.pipeline.run_deepseek_reviewer", fake_deepseek)
+    audit_path = tmp_path / "review-audit.jsonl"
+    settings = replace(
+        make_settings(str(tmp_path / "notify-state.json")),
+        review_audit_path=str(audit_path),
+    )
+
+    result = notify_payload(
+        make_payload(),
+        settings=settings,
+        now=datetime(2026, 7, 7, 0, 0, tzinfo=timezone.utc),
+    )
+
+    assert result.sent_count == 1
+    entries = [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()]
+    assert len(entries) == 1
+    entry = entries[0]
+    assert entry["parser_verdict"] == "deliver"
+    assert entry["outcome"] == "delivered"
+    assert entry["candidate_count"] == 1
+    assert entry["candidates"][0]["kind"] == "price_move_from_close"
+    assert "否则不需要推送" in entry["raw_reply"]
+    assert "super-secret-value" not in audit_path.read_text(encoding="utf-8")
+    assert "<redacted>" in entry["raw_reply"]
+
+
+def test_invalid_reviewer_cue_keeps_high_iv_alert_pending(tmp_path, monkeypatch) -> None:
+    attempts = 0
+
+    def fake_deepseek(settings: NotificationSettings, prompt: str) -> tuple[SinkResult, str]:
+        nonlocal attempts
+        attempts += 1
+        return (
+            SinkResult(sink="deepseek_reviewer", attempted=True, ok=True),
+            "结论: IV term gap changed, but the delivery cue is missing.",
+        )
+
+    monkeypatch.setattr("spx_spark.notifier.pipeline.run_deepseek_reviewer", fake_deepseek)
+    audit_path = tmp_path / "review-audit.jsonl"
+    settings = replace(
+        make_settings(str(tmp_path / "notify-state.json")),
+        openclaw_agent_enabled=False,
+        codex_enabled=False,
+        review_audit_path=str(audit_path),
+    )
+    payload = make_payload()
+    payload["alerts"] = [
+        {
+            "severity": "high",
+            "kind": "iv_term_gap",
+            "instrument_id": "iv_surface:SPXW",
+            "title": "0DTE vs next ATM IV gap 0.051",
+            "detail": "Front SPXW ATM IV differs from next expiry.",
+            "source_gate": "iv_surface",
+        }
+    ]
+    now = datetime(2026, 7, 7, 0, 0, tzinfo=timezone.utc)
+
+    first = notify_payload(payload, settings=settings, now=now)
+    second = notify_payload(payload, settings=settings, now=now + timedelta(seconds=60))
+
+    assert first.sent_count == 0
+    assert second.selected_count == 1
+    assert attempts == 2
+    entries = [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()]
+    assert [entry["parser_verdict"] for entry in entries] == ["invalid", "invalid"]
+    assert all(entry["outcome"] == "invalid_parser_pending" for entry in entries)
+
+
+def test_invalid_reviewer_cue_failopens_high_price_alert(tmp_path, monkeypatch) -> None:
+    def fake_deepseek(settings: NotificationSettings, prompt: str) -> tuple[SinkResult, str]:
+        return (
+            SinkResult(sink="deepseek_reviewer", attempted=True, ok=True),
+            "结论: price shock confirmed, but the delivery cue is missing.",
+        )
+
+    monkeypatch.setattr("spx_spark.notifier.pipeline.run_deepseek_reviewer", fake_deepseek)
+    audit_path = tmp_path / "review-audit.jsonl"
+    settings = replace(
+        make_settings(str(tmp_path / "notify-state.json")),
+        openclaw_agent_enabled=False,
+        codex_enabled=False,
+        review_audit_path=str(audit_path),
+    )
+    now = datetime(2026, 7, 7, 0, 0, tzinfo=timezone.utc)
+
+    result = notify_payload(make_payload(), settings=settings, now=now)
+
+    assert result.sent_count == 1
+    assert any(sink.sink == "deepseek_parser_gate" for sink in result.sinks)
+    assert any(sink.sink == "feishu" and sink.ok for sink in result.sinks)
+    entry = json.loads(audit_path.read_text(encoding="utf-8").splitlines()[-1])
+    assert entry["parser_verdict"] == "invalid"
+    assert entry["outcome"] == "invalid_parser_failopen_delivered"
 
 
 def test_codex_message_respects_human_scope_blocks_non_focus_context() -> None:
@@ -1206,10 +1337,12 @@ def test_offhours_skew_steepening_bypasses_review_and_severity_floor(tmp_path) -
             "dedup_group": "up:1",
         }
     ]
+    audit_path = tmp_path / "review-audit.jsonl"
     settings = replace(
         make_settings(str(tmp_path / "notify-state.json")),
         deepseek_enabled=False,
         codex_enabled=True,
+        review_audit_path=str(audit_path),
     )
 
     result = notify_payload(
@@ -1222,6 +1355,144 @@ def test_offhours_skew_steepening_bypasses_review_and_severity_floor(tmp_path) -
     assert result.selected_count == 1
     assert result.sent_count == 1
     assert any(s.sink == "feishu" and s.ok for s in result.sinks)
+
+
+def test_confirmed_intraday_shock_bypasses_reviewer_and_pushes_directly(tmp_path) -> None:
+    payload = make_payload()
+    payload["alerts"] = [
+        {
+            "severity": "high",
+            "kind": "intraday_price_shock",
+            "instrument_id": "index:SPX",
+            "title": "SPX/ES confirmed 急跌 26.2 bps",
+            "detail": "SPX/ES live anchors confirmed the short-window shock.",
+            "quality": "live",
+            "source_gate": "spx_es_intraday_shock_confirmed",
+            "dedup_group": "spx_shock:20260710:down:1432:shock",
+            "event_id": "spx_shock:20260710:down:1432",
+        }
+    ]
+    audit_path = tmp_path / "shock-review-audit.jsonl"
+    settings = replace(
+        make_settings(str(tmp_path / "notify-state.json")),
+        deepseek_enabled=True,
+        direct_push_llm_enabled=False,
+        review_audit_path=str(audit_path),
+    )
+
+    result = notify_payload(
+        payload,
+        settings=settings,
+        now=datetime(2026, 7, 10, 14, 32, tzinfo=timezone.utc),
+    )
+
+    assert result.selected_count == 1
+    assert result.sent_count == 1
+    assert any(sink.sink == "feishu" and sink.ok for sink in result.sinks)
+    assert not any(sink.sink == "deepseek_reviewer" for sink in result.sinks)
+    assert result.acknowledged_event_ids == (
+        "spx_shock:20260710:down:1432",
+        "spx_shock:20260710:down:1432:shock",
+    )
+    assert load_acknowledged_event_ids(settings.state_path) == result.acknowledged_event_ids
+    entries = [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()]
+    assert entries[-1]["reviewer"] == "direct_policy"
+    assert entries[-1]["parser_verdict"] == "not_run"
+    assert entries[-1]["outcome"] == "delivered"
+    assert entries[-1]["delivery_sinks"][0]["sink"] == "feishu"
+
+
+def test_recent_shock_suppresses_same_direction_fixed_cycle_price_move(tmp_path) -> None:
+    settings = make_settings(str(tmp_path / "notify-state.json"))
+    shock_at = datetime(2026, 7, 10, 14, 32, tzinfo=timezone.utc)
+    shock = {
+        "severity": "high",
+        "kind": "intraday_price_shock",
+        "instrument_id": "index:SPX",
+        "dedup_group": "spx_shock:20260710:down:1432:shock",
+    }
+    mark_alerts_sent([shock], {}, settings, now=shock_at)
+    payload = make_payload()
+    payload["alerts"] = [
+        {
+            "severity": "high",
+            "kind": "price_move_from_close",
+            "instrument_id": "index:SPX",
+            "dedup_group": "down:3",
+        }
+    ]
+
+    selected, _ = select_alerts_for_notification(
+        payload,
+        settings,
+        now=shock_at + timedelta(minutes=10),
+    )
+    assert selected == []
+
+    selected, _ = select_alerts_for_notification(
+        payload,
+        settings,
+        now=shock_at + timedelta(minutes=16),
+    )
+    assert len(selected) == 1
+
+    payload["alerts"][0]["dedup_group"] = "up:3"  # type: ignore[index]
+    selected, _ = select_alerts_for_notification(
+        payload,
+        settings,
+        now=shock_at + timedelta(minutes=10),
+    )
+    assert len(selected) == 1
+
+
+def test_reviewer_delivery_rechecks_shock_correlation_after_model_wait(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    now = datetime(2026, 7, 10, 14, 32, tzinfo=timezone.utc)
+    audit_path = tmp_path / "review-audit.jsonl"
+    settings = replace(
+        make_settings(str(tmp_path / "notify-state.json")),
+        review_audit_path=str(audit_path),
+    )
+    shock = {
+        "severity": "high",
+        "kind": "intraday_price_shock",
+        "instrument_id": "index:SPX",
+        "dedup_group": "spx_shock:20260710:down:1432:shock",
+    }
+
+    def reviewer(review_settings, prompt):  # noqa: ARG001
+        # Simulate the fast path finishing while the fixed-cycle alert waits
+        # for its model review.
+        mark_alerts_sent([shock], {}, review_settings, now=now)
+        return (
+            SinkResult(sink="deepseek_reviewer", attempted=True, ok=True),
+            "需要看盘\nSPX move confirmed.",
+        )
+
+    monkeypatch.setattr("spx_spark.notifier.pipeline.run_deepseek_reviewer", reviewer)
+    payload = make_payload()
+    payload["alerts"] = [
+        {
+            "severity": "high",
+            "kind": "price_move_from_close",
+            "instrument_id": "index:SPX",
+            "title": "SPX down from close",
+            "detail": "same move already covered by realtime shock",
+            "quality": "live",
+            "dedup_group": "down:3",
+        }
+    ]
+
+    result = notify_payload(payload, settings=settings, now=now)
+
+    assert result.selected_count == 1
+    assert result.sent_count == 0
+    assert any(sink.sink == "intraday_shock_correlation_gate" for sink in result.sinks)
+    assert not any(sink.sink in {"feishu", "bark"} for sink in result.sinks)
+    entries = [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()]
+    assert entries[-1]["outcome"] == "correlated_shock_suppressed"
 
 
 def test_rth_skew_steepening_still_goes_through_review(tmp_path) -> None:
@@ -1723,7 +1994,7 @@ def test_notifier_failopen_sends_critical_when_agent_fails(tmp_path) -> None:
     assert result.sent_count == 1
 
 
-def test_notifier_failopen_skips_when_only_high_alerts_and_agent_fails(tmp_path) -> None:
+def test_notifier_failopen_sends_high_price_alert_when_agent_times_out(tmp_path) -> None:
     calls: list[list[str]] = []
 
     def runner(command: list[str], timeout_seconds: float) -> subprocess.CompletedProcess[str]:
@@ -1738,6 +2009,7 @@ def test_notifier_failopen_skips_when_only_high_alerts_and_agent_fails(tmp_path)
         openclaw_agent_enabled=True,
         openclaw_agent_deliver=True,
         codex_enabled=False,
+        review_audit_path=str(tmp_path / "review-audit.jsonl"),
     )
     payload = _agent_failopen_payload(
         critical_title="unused",
@@ -1751,9 +2023,14 @@ def test_notifier_failopen_skips_when_only_high_alerts_and_agent_fails(tmp_path)
         now=datetime(2026, 7, 7, 0, 0, tzinfo=timezone.utc),
     )
 
-    message_calls = [cmd for cmd in calls if cmd[:3] == ["openclaw", "message", "send"]]
-    assert message_calls == []
-    assert result.sent_count == 0
+    assert any(s.sink == "feishu" and s.ok for s in result.sinks)
+    assert result.sent_count == 1
+    entries = [
+        json.loads(line)
+        for line in (tmp_path / "review-audit.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert entries[-1]["outcome"] == "review_failed_failopen_delivered"
+    assert entries[-1]["details"]["failopen_delivered_count"] == 1
 
 
 def test_bark_lockscreen_summary_and_feishu_card() -> None:

@@ -33,6 +33,7 @@ BUCKET_RATE_LIMITED_KINDS = frozenset(
 )
 
 BUCKET_JUMP_OVERRIDE_STEPS = 2
+INTRADAY_SHOCK_CORRELATION_SECONDS = 15 * 60
 
 _DIRECTION_BUCKET_RE = re.compile(r"^(up|down):(\d+)$")
 
@@ -91,6 +92,35 @@ def mark_rate_limit_sent(
     bucket = signed_bucket(alert)
     if bucket is not None:
         sent_at_by_key[bucket_key] = bucket
+
+
+def recent_intraday_shock_blocks_price_move(
+    alert: dict[str, object],
+    sent_at_by_key: dict[str, float],
+    *,
+    now_ts: float,
+) -> bool:
+    """Avoid a second fixed-cycle push for a shock already sent in real time."""
+
+    if str(alert.get("kind") or "") != "price_move_from_close":
+        return False
+    if str(alert.get("instrument_id") or "") not in {"index:SPX", "future:ES"}:
+        return False
+    dedup_group = str(alert.get("dedup_group") or "")
+    direction = dedup_group.partition(":")[0]
+    if direction not in {"up", "down"}:
+        return False
+    prefix = "intraday_price_shock|index:SPX|spx_shock:"
+    direction_marker = f":{direction}:"
+    return any(
+        key.startswith(prefix)
+        and direction_marker in key
+        and key.endswith(":shock")
+        # A concurrent fast-path write may be a few seconds newer than the
+        # full alert payload's market timestamp.
+        and -60 <= now_ts - sent_at < INTRADAY_SHOCK_CORRELATION_SECONDS
+        for key, sent_at in sent_at_by_key.items()
+    )
 
 
 def _load_state_payload(path: str) -> dict[str, object]:
@@ -181,6 +211,12 @@ def select_alerts_for_notification(
         key = alert_key(alert)
         previous_ts = sent_at_by_key.get(key)
         if previous_ts is not None and now_ts - previous_ts < settings.cooldown_seconds:
+            continue
+        if recent_intraday_shock_blocks_price_move(
+            alert,
+            sent_at_by_key,
+            now_ts=now_ts,
+        ):
             continue
         if kind_rate_limit_blocks(
             alert,

@@ -80,6 +80,16 @@ OFFHOURS_DIRECT_PUSH_VOL_KINDS = frozenset(
     }
 )
 
+# Confirmed SPX+ES path events are deterministic 0DTE safety signals.  The LLM
+# may never veto or delay them; the lightweight producer already enforced live
+# anchors, cross-market confirmation, and a state transition.
+INTRADAY_DIRECT_PUSH_KINDS = frozenset(
+    {
+        "intraday_price_shock",
+        "intraday_price_reclaim",
+    }
+)
+
 
 def payload_spxw_sampling_off(payload: dict[str, object]) -> bool:
     window = payload.get("window")
@@ -145,6 +155,7 @@ def direct_push_alerts(
         for alert in alerts
         if is_system_event_alert(alert)
         or is_position_holding_alert(alert)
+        or str(alert.get("kind") or "") in INTRADAY_DIRECT_PUSH_KINDS
         or is_offhours_vol_signal_alert(alert, payload)
     ]
 
@@ -155,6 +166,8 @@ def direct_push_alerts(
 MARKET_SIGNAL_ALERT_KINDS = frozenset(
     {
         "price_move_from_close",
+        "intraday_price_shock",
+        "intraday_price_reclaim",
         "option_gamma_regime",
         "option_wall_proximity",
         "iv_term_gap",
@@ -273,11 +286,26 @@ def alerts_are_market_signals(alerts: list[dict[str, object]]) -> bool:
 
 
 def codex_message_requests_delivery(message: str) -> bool:
+    return codex_message_delivery_verdict(message) == "deliver"
+
+
+def codex_message_delivery_verdict(message: str) -> str:
+    """Parse only the reviewer's first line into a stable delivery verdict.
+
+    Review bodies legitimately contain phrases such as ``otherwise no push``
+    inside an if/then invalidation. Scanning the complete response for negative
+    cues turns those explanations into false vetoes. The first line is the
+    protocol boundary required by every reviewer prompt; later lines are human
+    explanation only.
+    """
+
     normalized = message.strip().lower()
-    if any(cue in normalized for cue in NEGATIVE_DELIVERY_CUES):
-        return False
-    first_line = normalized.splitlines()[0] if normalized else ""
-    return any(first_line.startswith(cue) for cue in POSITIVE_DELIVERY_CUES)
+    first_line = normalized.splitlines()[0].strip() if normalized else ""
+    if any(first_line.startswith(cue) for cue in NEGATIVE_DELIVERY_CUES):
+        return "veto"
+    if any(first_line.startswith(cue) for cue in POSITIVE_DELIVERY_CUES):
+        return "deliver"
+    return "invalid"
 
 
 def codex_message_respects_human_scope(message: str) -> bool:

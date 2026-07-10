@@ -3,6 +3,7 @@ from zoneinfo import ZoneInfo
 
 from spx_spark.config import (
     IbkrSettings,
+    NotificationSettings,
     PolymarketSettings,
     RuntimePolicySettings,
     StorageSettings,
@@ -13,6 +14,16 @@ from spx_spark.config import (
 )
 
 NY_TZ = ZoneInfo("America/New_York")
+
+
+def test_notification_settings_default_review_audit_path(monkeypatch, tmp_path) -> None:
+    data_root = tmp_path / "market-data"
+    monkeypatch.setenv("MARKET_DATA_DATA_ROOT", str(data_root))
+    monkeypatch.delenv("ALERT_NOTIFY_REVIEW_AUDIT_PATH", raising=False)
+
+    settings = NotificationSettings.from_env()
+
+    assert settings.review_audit_path == str(data_root / "latest" / "alert_review_audit.jsonl")
 
 
 def test_next_equity_futures_month_returns_yyyymm():
