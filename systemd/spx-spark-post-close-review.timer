@@ -2,7 +2,7 @@
 Description=Run SPX Spark post-close SPX/SPXW review after US close
 
 [Timer]
-OnCalendar=Tue..Sat *-*-* 07:15:00
+OnCalendar=Mon..Fri *-*-* 17:15:00 America/New_York
 Persistent=true
 
 [Install]

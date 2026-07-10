@@ -67,6 +67,23 @@ def test_weekend_before_futures_reopen_is_maintenance() -> None:
     assert window.priority == "off"
 
 
+def test_market_holiday_and_early_close_disable_spxw_action_windows() -> None:
+    holiday = active_window(datetime(2026, 7, 3, 10, 0, tzinfo=ZoneInfo("America/New_York")))
+    early_close = active_window(
+        datetime(2026, 11, 27, 14, 0, tzinfo=ZoneInfo("America/New_York"))
+    )
+    early_close_final_hour = active_window(
+        datetime(2026, 11, 27, 12, 30, tzinfo=ZoneInfo("America/New_York"))
+    )
+
+    assert holiday.name == "quiet_futures_context"
+    assert holiday.spxw_sampling_mode == "off"
+    assert early_close.name == "quiet_futures_context"
+    assert early_close.spxw_sampling_mode == "off"
+    assert early_close_final_hour.name == "close_one_hour"
+    assert early_close_final_hour.priority == "critical"
+
+
 def test_parse_at_treats_naive_timestamp_as_beijing_time() -> None:
     parsed = parse_at("2026-07-06T14:30:00")
 

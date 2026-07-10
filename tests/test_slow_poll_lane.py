@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 
 import spx_spark.ibkr.stream_collector as stream_collector_module
 from spx_spark.config import (
@@ -18,6 +19,7 @@ from spx_spark.ibkr.stream_collector import (
     merge_slow_rows,
     split_base_contracts,
 )
+from spx_spark.ibkr.slow_poll import SlowPollScheduler
 from spx_spark.ibkr.verifier import VerifyRow
 
 
@@ -177,7 +179,7 @@ def make_stream_collector(
     return collector
 
 
-def test_poll_slow_contracts_caches_and_cancels(monkeypatch) -> None:
+def test_slow_poll_is_cooperative_and_eventually_covers_all_chunks(monkeypatch) -> None:
     slow_contracts = [(f"index:VIX{index}", "index", object()) for index in range(7)]
     collector = make_stream_collector(slow_contracts=slow_contracts, slow_poll_chunk_size=3)
     cancel_calls: list[dict[str, tuple[object, VerifyRow]]] = []
@@ -192,7 +194,10 @@ def test_poll_slow_contracts_caches_and_cancels(monkeypatch) -> None:
     ) -> dict[str, tuple[object, VerifyRow]]:
         qualify_calls.append(contracts)
         return {
-            label: (object(), VerifyRow(label=label, kind=kind, symbol=label))
+            label: (
+                object(),
+                VerifyRow(label=label, kind=kind, symbol=label, subscribed=True),
+            )
             for label, kind, _ in contracts
         }
 
@@ -215,11 +220,253 @@ def test_poll_slow_contracts_caches_and_cancels(monkeypatch) -> None:
     monkeypatch.setattr(stream_collector_module, "snapshot_rows", fake_snapshot_rows)
     monkeypatch.setattr(stream_collector_module, "cancel_subscriptions", fake_cancel_subscriptions)
 
-    before = collector.last_slow_poll
-    collector.poll_slow_contracts()
+    collector.slow_chunks = chunked(slow_contracts, 3)
+    collector.slow_scheduler = SlowPollScheduler(
+        chunk_count=3,
+        cycle_seconds=300.0,
+        hold_seconds=10.0,
+    )
+    collector.slow_scheduler.reset(now=0.0)
+    collector.slow_qualified_contracts = {
+        label: (label, kind, contract)
+        for label, kind, contract in slow_contracts
+    }
+
+    for started_at in (0.0, 100.0, 200.0):
+        collector.advance_slow_poll(now_monotonic=started_at)
+        assert len(cancel_calls) == len(qualify_calls) - 1
+        collector.advance_slow_poll(now_monotonic=started_at + 5.0)
+        assert len(cancel_calls) == len(qualify_calls) - 1
+        collector.advance_slow_poll(now_monotonic=started_at + 10.0)
 
     assert len(collector.slow_cache) == 7
     assert len(qualify_calls) == 3
     assert len(cancel_calls) == 3
-    assert collector.last_slow_poll > before
-    assert collector.ib.sleep_calls == [10.0, 10.0, 10.0]
+    assert collector.ib.sleep_calls == []
+
+
+def test_slow_poll_hold_starts_after_qualification_completes(monkeypatch) -> None:
+    contract = SimpleNamespace(conId=0)
+    chunk = [("index:VIX", "index", contract)]
+    collector = make_stream_collector(slow_contracts=chunk, slow_poll_chunk_size=1)
+    collector.slow_chunks = [chunk]
+    collector.slow_scheduler = SlowPollScheduler(
+        chunk_count=1,
+        cycle_seconds=60.0,
+        hold_seconds=10.0,
+    )
+    collector.slow_scheduler.reset(now=0.0)
+    clock = {"now": 0.0}
+
+    def resolve_after_five_seconds(_chunk):
+        clock["now"] = 5.0
+        return [("index:VIX", "index", SimpleNamespace(conId=1001))]
+
+    collector._resolve_slow_definitions = resolve_after_five_seconds
+    monkeypatch.setattr(stream_collector_module.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(
+        stream_collector_module,
+        "qualify_and_subscribe",
+        lambda ib, contracts, **kwargs: {
+            "index:VIX": (
+                SimpleNamespace(contract=contracts[0][2]),
+                VerifyRow(
+                    label="index:VIX",
+                    kind="index",
+                    symbol="VIX",
+                    subscribed=True,
+                ),
+            )
+        },
+    )
+    monkeypatch.setattr(stream_collector_module, "log_event", lambda *args: None)
+
+    collector.advance_slow_poll()
+
+    assert collector.slow_scheduler.hold_deadline == 15.0
+
+
+def test_slow_contract_qualification_is_reused_within_session(monkeypatch) -> None:
+    original_contract = object()
+    resolved_contract = object()
+    slow_contracts = [("index:VIX", "index", original_contract)]
+    collector = make_stream_collector(slow_contracts=slow_contracts, slow_poll_chunk_size=1)
+    seen_contracts: list[object] = []
+
+    class FakeTicker:
+        contract = resolved_contract
+
+    def fake_qualify_and_subscribe(
+        ib: object,
+        contracts: list[tuple[str, str, object]],
+        *,
+        qualify: bool = False,
+        on_progress: object | None = None,
+    ) -> dict[str, tuple[object, VerifyRow]]:
+        label, kind, contract = contracts[0]
+        seen_contracts.append(contract)
+        return {
+            label: (
+                FakeTicker(),
+                VerifyRow(label=label, kind=kind, symbol=label, subscribed=True),
+            )
+        }
+
+    monkeypatch.setattr(stream_collector_module, "qualify_and_subscribe", fake_qualify_and_subscribe)
+    monkeypatch.setattr(
+        stream_collector_module,
+        "snapshot_rows",
+        lambda subscriptions, stale_after_seconds, **kwargs: [
+            row for _, row in subscriptions.values()
+        ],
+    )
+    monkeypatch.setattr(stream_collector_module, "cancel_subscriptions", lambda *args: None)
+    collector.slow_chunks = [slow_contracts]
+    collector.slow_scheduler = SlowPollScheduler(
+        chunk_count=1,
+        cycle_seconds=60.0,
+        hold_seconds=10.0,
+    )
+    collector.slow_scheduler.reset(now=0.0)
+    collector.slow_qualified_contracts = {
+        "index:VIX": ("index:VIX", "index", original_contract)
+    }
+
+    collector.advance_slow_poll(now_monotonic=0.0)
+    collector.advance_slow_poll(now_monotonic=10.0)
+    collector.advance_slow_poll(now_monotonic=60.0)
+
+    assert seen_contracts == [original_contract, resolved_contract]
+
+
+def test_slow_contracts_are_batch_qualified_before_scheduler() -> None:
+    collector = make_stream_collector(slow_contracts=[])
+    input_contracts = [
+        SimpleNamespace(
+            secType="STK",
+            symbol=symbol,
+            lastTradeDateOrContractMonth="",
+            strike=0.0,
+            right="",
+            multiplier="",
+            currency="USD",
+            conId=0,
+        )
+        for symbol in ("QQQ", "IWM")
+    ]
+    qualified_contracts = [
+        SimpleNamespace(**(vars(contract) | {"conId": 1000 + index}))
+        for index, contract in enumerate(input_contracts)
+    ]
+    calls: list[tuple[object, ...]] = []
+
+    def qualify_contracts(*contracts):
+        calls.append(contracts)
+        return qualified_contracts
+
+    collector.ib.qualifyContracts = qualify_contracts
+    collector.slow_contracts = [
+        (f"stock:{contract.symbol}", "stock", contract)
+        for contract in input_contracts
+    ]
+
+    collector._qualify_slow_contracts()
+
+    assert len(calls) == 1
+    assert len(calls[0]) == 2
+    assert [
+        collector.slow_qualified_contracts[label][2].conId
+        for label in ("stock:QQQ", "stock:IWM")
+    ] == [1000, 1001]
+    assert collector.slow_unresolved_contracts == set()
+
+
+def test_slow_async_rejection_retries_chunk_without_reconnecting_hot_lane(
+    monkeypatch,
+) -> None:
+    contract = SimpleNamespace(conId=1001)
+    slow_contracts = [("index:VIX", "index", contract)]
+    collector = make_stream_collector(slow_contracts=slow_contracts, slow_poll_chunk_size=1)
+    canceled: list[set[str]] = []
+
+    def fake_qualify(ib, contracts, *, qualify=False, on_progress=None):
+        return {
+            label: (
+                SimpleNamespace(contract=item),
+                VerifyRow(
+                    label=label,
+                    kind=kind,
+                    symbol="VIX",
+                    subscribed=True,
+                    request_id=77,
+                ),
+            )
+            for label, kind, item in contracts
+        }
+
+    def fake_cancel(ib, subscriptions):
+        canceled.append(set(subscriptions))
+
+    monkeypatch.setattr(stream_collector_module, "qualify_and_subscribe", fake_qualify)
+    monkeypatch.setattr(stream_collector_module, "cancel_subscriptions", fake_cancel)
+    collector.slow_chunks = [slow_contracts]
+    collector.slow_qualified_contracts = {
+        "index:VIX": ("index:VIX", "index", contract)
+    }
+    collector.slow_scheduler = SlowPollScheduler(
+        chunk_count=1,
+        cycle_seconds=60.0,
+        hold_seconds=10.0,
+    )
+    collector.slow_scheduler.reset(now=0.0)
+
+    collector.advance_slow_poll(now_monotonic=0.0)
+    collector._on_error(77, 354, "not subscribed", None)
+    collector.advance_slow_poll(now_monotonic=10.0)
+
+    assert collector.subscription_health_failed is False
+    assert collector.slow_active_subs == {}
+    assert canceled == [{"index:VIX"}]
+    assert collector.slow_scheduler.next_start_at == 70.0
+
+
+def test_unresolvable_slow_label_does_not_starve_later_chunks(monkeypatch) -> None:
+    bad = ("index:BAD", "index", object())
+    good_contract = SimpleNamespace(conId=2002)
+    good = ("index:VIX", "index", good_contract)
+    collector = make_stream_collector(slow_contracts=[bad, good], slow_poll_chunk_size=1)
+
+    monkeypatch.setattr(
+        stream_collector_module,
+        "qualify_and_subscribe",
+        lambda ib, contracts, qualify=False: {
+            label: (
+                SimpleNamespace(contract=contract),
+                VerifyRow(label=label, kind=kind, symbol=label, subscribed=True),
+            )
+            for label, kind, contract in contracts
+        },
+    )
+    monkeypatch.setattr(
+        stream_collector_module,
+        "snapshot_rows",
+        lambda subscriptions, stale_after_seconds, **kwargs: [
+            row for _, row in subscriptions.values()
+        ],
+    )
+    monkeypatch.setattr(stream_collector_module, "cancel_subscriptions", lambda *args: None)
+    collector.slow_chunks = [[bad], [good]]
+    collector.slow_qualified_contracts = {"index:VIX": good}
+    collector.slow_scheduler = SlowPollScheduler(
+        chunk_count=2,
+        cycle_seconds=100.0,
+        hold_seconds=10.0,
+    )
+    collector.slow_scheduler.reset(now=0.0)
+
+    collector.advance_slow_poll(now_monotonic=0.0)
+    collector.advance_slow_poll(now_monotonic=50.0)
+    collector.advance_slow_poll(now_monotonic=60.0)
+
+    assert "index:VIX" in collector.slow_cache
+    assert collector.slow_scheduler.next_chunk_index == 0

@@ -2,16 +2,31 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import urllib.error
 import urllib.request
 from collections import Counter
-from dataclasses import dataclass
-from datetime import date, datetime, time, timedelta, timezone
+from dataclasses import asdict, dataclass
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from spx_spark.config import NY_TZ, NotificationSettings, StorageSettings, env_bool, load_dotenv
+from spx_spark.config import NotificationSettings, StorageSettings, env_bool, load_dotenv
+from spx_spark.iv_surface import (
+    IvSurfaceExpiry,
+    IvSurfaceSnapshot,
+    raw_snapshot_paths_for_window,
+    snapshot_from_dict,
+)
+from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR, ET, MarketCalendar, MarketSession
+from spx_spark.marketdata import (
+    InstrumentType,
+    MarketDataQuality,
+    Quote,
+    as_utc,
+    quote_from_dict,
+)
 from spx_spark.notifier.llm_writer import DEFAULT_SYSTEM_PROMPT
 from spx_spark.notifier.missed_queue import append_missed
 from spx_spark.notifier.model import CommandRunner, default_runner
@@ -21,18 +36,9 @@ from spx_spark.notifier.sinks import (
     im_delivery_ok,
     run_openclaw_agent,
 )
-from spx_spark.iv_surface import (
-    IvSurfaceSnapshot,
-    IvSurfaceExpiry,
-    raw_snapshot_paths_for_window,
-    snapshot_from_dict,
-)
-from spx_spark.marketdata import InstrumentType, Quote, as_utc, quote_from_dict
 
 
-SESSION_START = time(9, 30)
-SESSION_END = time(16, 0)
-REVIEW_READY = time(18, 0)
+MetricValue = bool | int | float | str | tuple[str, ...] | None
 
 
 @dataclass(frozen=True)
@@ -73,6 +79,101 @@ class ReviewLlmSettings:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class ReviewCompletenessPolicy:
+    min_index_bucket_ratio: float = 0.90
+    max_edge_gap_minutes: float = 15.0
+    min_index_live_ratio: float = 0.95
+    min_front_option_contracts: int = 20
+    min_front_option_strikes: int = 10
+    min_front_option_strike_span: float = 50.0
+    min_option_usable_ratio: float = 0.90
+    min_option_iv_ratio: float = 0.80
+    min_surface_bucket_ratio: float = 0.60
+    min_surface_iv_ratio: float = 0.50
+    min_surface_gamma_ratio: float = 0.50
+
+    def __post_init__(self) -> None:
+        ratio_fields = (
+            "min_index_bucket_ratio",
+            "min_index_live_ratio",
+            "min_option_usable_ratio",
+            "min_option_iv_ratio",
+            "min_surface_bucket_ratio",
+            "min_surface_iv_ratio",
+            "min_surface_gamma_ratio",
+        )
+        for field_name in ratio_fields:
+            value = float(getattr(self, field_name))
+            if not 0.0 <= value <= 1.0:
+                raise ValueError(f"{field_name} must be between 0 and 1")
+        if self.max_edge_gap_minutes < 0:
+            raise ValueError("max_edge_gap_minutes must be non-negative")
+        if self.min_front_option_contracts < 1:
+            raise ValueError("min_front_option_contracts must be positive")
+        if self.min_front_option_strikes < 1:
+            raise ValueError("min_front_option_strikes must be positive")
+        if self.min_front_option_strike_span < 0:
+            raise ValueError("min_front_option_strike_span must be non-negative")
+
+    @classmethod
+    def from_env(cls) -> "ReviewCompletenessPolicy":
+        load_dotenv()
+        return cls(
+            min_index_bucket_ratio=float(
+                os.getenv("SPX_REVIEW_MIN_INDEX_BUCKET_RATIO", "0.90")
+            ),
+            max_edge_gap_minutes=float(
+                os.getenv("SPX_REVIEW_MAX_EDGE_GAP_MINUTES", "15")
+            ),
+            min_index_live_ratio=float(
+                os.getenv("SPX_REVIEW_MIN_INDEX_LIVE_RATIO", "0.95")
+            ),
+            min_front_option_contracts=int(
+                os.getenv("SPX_REVIEW_MIN_FRONT_OPTION_CONTRACTS", "20")
+            ),
+            min_front_option_strikes=int(
+                os.getenv("SPX_REVIEW_MIN_FRONT_OPTION_STRIKES", "10")
+            ),
+            min_front_option_strike_span=float(
+                os.getenv("SPX_REVIEW_MIN_FRONT_OPTION_STRIKE_SPAN", "50")
+            ),
+            min_option_usable_ratio=float(
+                os.getenv("SPX_REVIEW_MIN_OPTION_USABLE_RATIO", "0.90")
+            ),
+            min_option_iv_ratio=float(
+                os.getenv("SPX_REVIEW_MIN_OPTION_IV_RATIO", "0.80")
+            ),
+            min_surface_bucket_ratio=float(
+                os.getenv("SPX_REVIEW_MIN_SURFACE_BUCKET_RATIO", "0.60")
+            ),
+            min_surface_iv_ratio=float(
+                os.getenv("SPX_REVIEW_MIN_SURFACE_IV_RATIO", "0.50")
+            ),
+            min_surface_gamma_ratio=float(
+                os.getenv("SPX_REVIEW_MIN_SURFACE_GAMMA_RATIO", "0.50")
+            ),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ReviewCompletenessCheck:
+    name: str
+    measured: MetricValue
+    threshold: MetricValue
+    passed: bool
+    reason: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "measured": self.measured,
+            "threshold": self.threshold,
+            "passed": self.passed,
+            "reason": self.reason,
+        }
+
+
 def read_env_file_value(path: str, key: str) -> str:
     env_path = Path(path).expanduser()
     try:
@@ -98,89 +199,42 @@ def deepseek_api_key(settings: ReviewLlmSettings) -> str:
     )
 
 
-def observed_fixed_holiday(year: int, month: int, day: int) -> date:
-    holiday = date(year, month, day)
-    if holiday.weekday() == 5:
-        return holiday - timedelta(days=1)
-    if holiday.weekday() == 6:
-        return holiday + timedelta(days=1)
-    return holiday
-
-
-def nth_weekday(year: int, month: int, weekday: int, n: int) -> date:
-    current = date(year, month, 1)
-    offset = (weekday - current.weekday()) % 7
-    return current + timedelta(days=offset + 7 * (n - 1))
-
-
-def last_weekday(year: int, month: int, weekday: int) -> date:
-    current = date(year, month + 1, 1) - timedelta(days=1) if month < 12 else date(year, 12, 31)
-    offset = (current.weekday() - weekday) % 7
-    return current - timedelta(days=offset)
-
-
-def easter_date(year: int) -> date:
-    a = year % 19
-    b = year // 100
-    c = year % 100
-    d = b // 4
-    e = b % 4
-    f = (b + 8) // 25
-    g = (b - f + 1) // 3
-    h = (19 * a + b - d - g + 15) % 30
-    i = c // 4
-    k = c % 4
-    length = (32 + 2 * e + 2 * i - h - k) % 7
-    m = (a + 11 * h + 22 * length) // 451
-    month = (h + length - 7 * m + 114) // 31
-    day = ((h + length - 7 * m + 114) % 31) + 1
-    return date(year, month, day)
-
-
-def us_market_holidays(year: int) -> set[date]:
-    return {
-        observed_fixed_holiday(year, 1, 1),
-        nth_weekday(year, 1, 0, 3),
-        nth_weekday(year, 2, 0, 3),
-        easter_date(year) - timedelta(days=2),
-        last_weekday(year, 5, 0),
-        observed_fixed_holiday(year, 6, 19),
-        observed_fixed_holiday(year, 7, 4),
-        nth_weekday(year, 9, 0, 1),
-        nth_weekday(year, 11, 3, 4),
-        observed_fixed_holiday(year, 12, 25),
-    }
-
-
-def is_trading_day(value: date) -> bool:
-    return value.weekday() < 5 and value not in us_market_holidays(value.year)
-
-
-def previous_trading_day(value: date) -> date:
-    current = value - timedelta(days=1)
-    while not is_trading_day(current):
-        current -= timedelta(days=1)
-    return current
-
-
-def resolve_trading_date(raw: str | None, *, now: datetime | None = None) -> date:
+def resolve_trading_date(
+    raw: str | None,
+    *,
+    now: datetime | None = None,
+    calendar: MarketCalendar = DEFAULT_MARKET_CALENDAR,
+) -> date:
     if raw and raw.lower() != "auto":
         return date.fromisoformat(raw)
 
-    local_now = (now or datetime.now(tz=timezone.utc)).astimezone(NY_TZ)
-    candidate = local_now.date()
-    if local_now.time() < REVIEW_READY:
-        candidate = previous_trading_day(candidate)
-    while not is_trading_day(candidate):
-        candidate = previous_trading_day(candidate + timedelta(days=1))
-    return candidate
+    return calendar.completed_review_date(now or datetime.now(tz=timezone.utc))
 
 
-def session_window(trading_date: date) -> tuple[datetime, datetime, datetime]:
-    start = datetime.combine(trading_date, SESSION_START, tzinfo=NY_TZ)
-    end = datetime.combine(trading_date, SESSION_END, tzinfo=NY_TZ)
-    ready = datetime.combine(trading_date, REVIEW_READY, tzinfo=NY_TZ)
-    return start, end, ready
+def ready_auto_review_date(
+    *,
+    now: datetime,
+    calendar: MarketCalendar = DEFAULT_MARKET_CALENDAR,
+) -> date | None:
+    local_now = now.astimezone(ET)
+    session = calendar.session(local_now.date())
+    if session is None or local_now < session.review_ready_at:
+        return None
+    selected = calendar.completed_review_date(local_now)
+    if selected != local_now.date():
+        return None
+    return selected
+
+
+def session_window(
+    trading_date: date,
+    *,
+    calendar: MarketCalendar = DEFAULT_MARKET_CALENDAR,
+) -> tuple[datetime, datetime, datetime]:
+    session = calendar.session(trading_date)
+    if session is None:
+        raise ValueError(f"{trading_date.isoformat()} is not a trading day")
+    return session.open_at, session.close_at, session.review_ready_at
 
 
 def raw_quote_paths_for_window(
@@ -426,26 +480,417 @@ def surface_summary(snapshots: tuple[IvSurfaceSnapshot, ...]) -> dict[str, Any]:
     }
 
 
+def _inside_session(value: datetime, session: MarketSession) -> bool:
+    observed = value.astimezone(ET)
+    return session.open_at <= observed <= session.close_at
+
+
+def _usable_quote(quote: Quote) -> bool:
+    return (
+        quote.quality in {MarketDataQuality.LIVE, MarketDataQuality.FROZEN}
+        and finite_price(quote) is not None
+    )
+
+
+def _five_minute_bucket_count(values: list[datetime], session: MarketSession) -> int:
+    expected = session.expected_five_minute_buckets
+    if expected <= 0:
+        return 0
+    buckets: set[int] = set()
+    for value in values:
+        observed = value.astimezone(ET)
+        if not session.open_at <= observed <= session.close_at:
+            continue
+        offset = int((observed - session.open_at).total_seconds() // 300)
+        buckets.add(min(offset, expected - 1))
+    return len(buckets)
+
+
+def _ratio(numerator: int, denominator: int) -> float:
+    return numerator / denominator if denominator > 0 else 0.0
+
+
+def _gap_minutes(first: datetime | None, second: datetime | None) -> float | None:
+    if first is None or second is None:
+        return None
+    return max((second - first).total_seconds() / 60.0, 0.0)
+
+
+def _ratio_check(
+    *,
+    name: str,
+    numerator: int,
+    denominator: int,
+    threshold: float,
+    label: str,
+) -> ReviewCompletenessCheck:
+    measured = _ratio(numerator, denominator)
+    passed = denominator > 0 and measured >= threshold
+    return ReviewCompletenessCheck(
+        name=name,
+        measured=round(measured, 6),
+        threshold=threshold,
+        passed=passed,
+        reason=(
+            f"{label}: {numerator}/{denominator} ({measured:.1%}); "
+            f"required >= {threshold:.1%}"
+        ),
+    )
+
+
+def evaluate_review_completeness(
+    *,
+    session: MarketSession,
+    spx_quotes: list[Quote],
+    es_quotes: list[Quote],
+    quotes: tuple[Quote, ...],
+    snapshots: tuple[IvSurfaceSnapshot, ...],
+    policy: ReviewCompletenessPolicy,
+) -> tuple[ReviewCompletenessCheck, ...]:
+    checks: list[ReviewCompletenessCheck] = []
+    expected_buckets = session.expected_five_minute_buckets
+
+    for label, series in (("SPX", spx_quotes), ("ES", es_quotes)):
+        price_rows = [quote for quote in series if finite_price(quote) is not None]
+        usable = [quote for quote in price_rows if _usable_quote(quote)]
+        usable_times = sorted(quote.received_at for quote in usable)
+        bucket_count = _five_minute_bucket_count(usable_times, session)
+        checks.append(
+            _ratio_check(
+                name=f"{label.lower()}_five_minute_bucket_coverage",
+                numerator=bucket_count,
+                denominator=expected_buckets,
+                threshold=policy.min_index_bucket_ratio,
+                label=f"{label} five-minute buckets",
+            )
+        )
+
+        first_at = usable_times[0].astimezone(ET) if usable_times else None
+        first_gap = _gap_minutes(session.open_at, first_at)
+        first_passed = (
+            first_gap is not None and first_at is not None
+            and session.open_at <= first_at <= session.close_at
+            and first_gap <= policy.max_edge_gap_minutes
+        )
+        checks.append(
+            ReviewCompletenessCheck(
+                name=f"{label.lower()}_first_observation_gap_minutes",
+                measured=round(first_gap, 6) if first_gap is not None else None,
+                threshold=policy.max_edge_gap_minutes,
+                passed=first_passed,
+                reason=(
+                    f"{label} first usable observation gap: "
+                    f"{first_gap:.1f} minutes; required <= {policy.max_edge_gap_minutes:g}"
+                    if first_gap is not None
+                    else f"{label} has no usable live/frozen observation"
+                ),
+            )
+        )
+
+        last_at = usable_times[-1].astimezone(ET) if usable_times else None
+        last_gap = _gap_minutes(last_at, session.close_at)
+        last_passed = (
+            last_gap is not None and last_at is not None
+            and session.open_at <= last_at <= session.close_at
+            and last_gap <= policy.max_edge_gap_minutes
+        )
+        checks.append(
+            ReviewCompletenessCheck(
+                name=f"{label.lower()}_last_observation_gap_minutes",
+                measured=round(last_gap, 6) if last_gap is not None else None,
+                threshold=policy.max_edge_gap_minutes,
+                passed=last_passed,
+                reason=(
+                    f"{label} last usable observation gap: "
+                    f"{last_gap:.1f} minutes; required <= {policy.max_edge_gap_minutes:g}"
+                    if last_gap is not None
+                    else f"{label} has no usable live/frozen observation"
+                ),
+            )
+        )
+
+        live_rows = sum(
+            1
+            for quote in series
+            if quote.quality == MarketDataQuality.LIVE and finite_price(quote) is not None
+        )
+        checks.append(
+            _ratio_check(
+                name=f"{label.lower()}_live_ratio",
+                numerator=live_rows,
+                denominator=len(series),
+                threshold=policy.min_index_live_ratio,
+                label=f"{label} live observations",
+            )
+        )
+
+    front_expiry = session.trading_date.strftime("%Y%m%d")
+    front_rows = [
+        quote
+        for quote in quotes
+        if quote.instrument.instrument_type == InstrumentType.OPTION
+        and quote.instrument.expiry == front_expiry
+        and _inside_session(quote.received_at, session)
+    ]
+    usable_front_rows = [quote for quote in front_rows if _usable_quote(quote)]
+    contracts = {quote.instrument.canonical_id for quote in usable_front_rows}
+    strikes = {
+        float(quote.instrument.strike)
+        for quote in usable_front_rows
+        if quote.instrument.strike is not None
+    }
+    rights = {
+        quote.instrument.right.value
+        for quote in usable_front_rows
+        if quote.instrument.right is not None
+    }
+    strike_span = max(strikes) - min(strikes) if strikes else 0.0
+
+    option_count_metrics = (
+        (
+            "front_option_unique_contracts",
+            len(contracts),
+            policy.min_front_option_contracts,
+            "unique front-expiry contracts",
+        ),
+        (
+            "front_option_unique_strikes",
+            len(strikes),
+            policy.min_front_option_strikes,
+            "unique front-expiry strikes",
+        ),
+        (
+            "front_option_strike_span",
+            strike_span,
+            policy.min_front_option_strike_span,
+            "front-expiry strike span",
+        ),
+    )
+    for name, measured, threshold, label in option_count_metrics:
+        checks.append(
+            ReviewCompletenessCheck(
+                name=name,
+                measured=measured,
+                threshold=threshold,
+                passed=measured >= threshold,
+                reason=f"{label}: {measured:g}; required >= {threshold:g}",
+            )
+        )
+
+    both_rights = {"C", "P"}.issubset(rights)
+    checks.append(
+        ReviewCompletenessCheck(
+            name="front_option_call_put_coverage",
+            measured=tuple(sorted(rights)),
+            threshold=("C", "P"),
+            passed=both_rights,
+            reason=(
+                f"front-expiry rights present: {','.join(sorted(rights)) or 'none'}; "
+                "required C and P"
+            ),
+        )
+    )
+    checks.append(
+        _ratio_check(
+            name="front_option_usable_ratio",
+            numerator=len(usable_front_rows),
+            denominator=len(front_rows),
+            threshold=policy.min_option_usable_ratio,
+            label="usable live/frozen front-expiry option rows",
+        )
+    )
+    iv_rows = sum(
+        1
+        for quote in usable_front_rows
+        if quote.greeks is not None
+        and quote.greeks.implied_vol is not None
+        and math.isfinite(quote.greeks.implied_vol)
+        and quote.greeks.implied_vol > 0
+    )
+    checks.append(
+        _ratio_check(
+            name="front_option_iv_coverage_ratio",
+            numerator=iv_rows,
+            denominator=len(front_rows),
+            threshold=policy.min_option_iv_ratio,
+            label="front-expiry option rows with usable IV",
+        )
+    )
+    last_option_at = (
+        max(quote.received_at for quote in usable_front_rows).astimezone(ET)
+        if usable_front_rows
+        else None
+    )
+    last_option_gap = _gap_minutes(last_option_at, session.close_at)
+    checks.append(
+        ReviewCompletenessCheck(
+            name="front_option_last_observation_gap_minutes",
+            measured=round(last_option_gap, 6) if last_option_gap is not None else None,
+            threshold=policy.max_edge_gap_minutes,
+            passed=(
+                last_option_gap is not None
+                and last_option_at is not None
+                and session.open_at <= last_option_at <= session.close_at
+                and last_option_gap <= policy.max_edge_gap_minutes
+            ),
+            reason=(
+                f"front-expiry last usable option gap: {last_option_gap:.1f} minutes; "
+                f"required <= {policy.max_edge_gap_minutes:g}"
+                if last_option_gap is not None
+                else "front expiry has no usable option observation"
+            ),
+        )
+    )
+
+    front_surfaces: list[tuple[datetime, IvSurfaceExpiry]] = []
+    for snapshot in snapshots:
+        if not _inside_session(snapshot.as_of, session):
+            continue
+        expiry = next((item for item in snapshot.expiries if item.expiry == front_expiry), None)
+        if expiry is not None:
+            front_surfaces.append((snapshot.as_of, expiry))
+    front_surfaces.sort(key=lambda item: item[0])
+    surface_buckets = _five_minute_bucket_count(
+        [observed_at for observed_at, _expiry in front_surfaces],
+        session,
+    )
+    checks.append(
+        _ratio_check(
+            name="front_iv_surface_five_minute_bucket_coverage",
+            numerator=surface_buckets,
+            denominator=expected_buckets,
+            threshold=policy.min_surface_bucket_ratio,
+            label="front-expiry IV surface five-minute buckets",
+        )
+    )
+    last_surface_at = front_surfaces[-1][0].astimezone(ET) if front_surfaces else None
+    last_surface_gap = _gap_minutes(last_surface_at, session.close_at)
+    checks.append(
+        ReviewCompletenessCheck(
+            name="front_iv_surface_last_observation_gap_minutes",
+            measured=round(last_surface_gap, 6) if last_surface_gap is not None else None,
+            threshold=policy.max_edge_gap_minutes,
+            passed=(
+                last_surface_gap is not None
+                and last_surface_at is not None
+                and session.open_at <= last_surface_at <= session.close_at
+                and last_surface_gap <= policy.max_edge_gap_minutes
+            ),
+            reason=(
+                f"front-expiry IV surface last gap: {last_surface_gap:.1f} minutes; "
+                f"required <= {policy.max_edge_gap_minutes:g}"
+                if last_surface_gap is not None
+                else "front expiry has no IV surface observation"
+            ),
+        )
+    )
+
+    latest_surface = front_surfaces[-1][1] if front_surfaces else None
+    latest_ratios = (
+        (
+            "latest_front_iv_coverage_ratio",
+            latest_surface.iv_coverage_ratio if latest_surface else None,
+            policy.min_surface_iv_ratio,
+            "latest front-expiry surface IV coverage",
+        ),
+        (
+            "latest_front_gamma_coverage_ratio",
+            latest_surface.gamma_coverage_ratio if latest_surface else None,
+            policy.min_surface_gamma_ratio,
+            "latest front-expiry surface gamma coverage",
+        ),
+    )
+    for name, measured, threshold, label in latest_ratios:
+        passed = measured is not None and math.isfinite(measured) and measured >= threshold
+        checks.append(
+            ReviewCompletenessCheck(
+                name=name,
+                measured=round(measured, 6) if measured is not None else None,
+                threshold=threshold,
+                passed=passed,
+                reason=(
+                    f"{label}: {measured:.1%}; required >= {threshold:.1%}"
+                    if measured is not None
+                    else f"{label}: missing; required >= {threshold:.1%}"
+                ),
+            )
+        )
+
+    return tuple(checks)
+
+
 def build_review_payload(
     *,
     trading_date: date,
     settings: StorageSettings,
     now: datetime | None = None,
+    policy: ReviewCompletenessPolicy | None = None,
+    calendar: MarketCalendar = DEFAULT_MARKET_CALENDAR,
 ) -> dict[str, Any]:
-    start, end, ready = session_window(trading_date)
+    start, end, _ready = session_window(trading_date, calendar=calendar)
     quotes = load_raw_quotes(settings, start=start, end=end)
     snapshots = load_surface_snapshots(settings, start=start, end=end)
+    return build_review_payload_from_data(
+        trading_date=trading_date,
+        quotes=quotes,
+        snapshots=snapshots,
+        now=now,
+        policy=policy,
+        calendar=calendar,
+    )
+
+
+def build_review_payload_from_data(
+    *,
+    trading_date: date,
+    quotes: tuple[Quote, ...],
+    snapshots: tuple[IvSurfaceSnapshot, ...],
+    now: datetime | None = None,
+    policy: ReviewCompletenessPolicy | None = None,
+    calendar: MarketCalendar = DEFAULT_MARKET_CALENDAR,
+) -> dict[str, Any]:
+    session = calendar.session(trading_date)
+    if session is None:
+        raise ValueError(f"{trading_date.isoformat()} is not a trading day")
+    start, end, ready = session.open_at, session.close_at, session.review_ready_at
+    quotes = tuple(
+        sorted(
+            (
+                quote
+                for quote in quotes
+                if _inside_session(quote.received_at, session) and is_spx_focus_quote(quote)
+            ),
+            key=lambda item: item.received_at,
+        )
+    )
+    snapshots = tuple(
+        sorted(
+            (snapshot for snapshot in snapshots if _inside_session(snapshot.as_of, session)),
+            key=lambda item: item.as_of,
+        )
+    )
     spx_quotes = [quote for quote in quotes if quote.instrument.canonical_id == "index:SPX"]
     es_quotes = [quote for quote in quotes if quote.instrument.canonical_id.startswith("future:ES")]
     mes_quotes = [quote for quote in quotes if quote.instrument.canonical_id.startswith("future:MES")]
+    active_policy = policy or ReviewCompletenessPolicy.from_env()
+    checks = evaluate_review_completeness(
+        session=session,
+        spx_quotes=spx_quotes,
+        es_quotes=es_quotes,
+        quotes=quotes,
+        snapshots=snapshots,
+        policy=active_policy,
+    )
     payload = {
         "created_at": (now or datetime.now(tz=timezone.utc)).isoformat(),
         "trading_date": trading_date.isoformat(),
         "session": {
-            "timezone": str(NY_TZ),
+            "timezone": str(ET),
             "start": start.isoformat(),
             "end": end.isoformat(),
             "review_ready_after": ready.isoformat(),
+            "early_close": session.early_close,
+            "expected_five_minute_buckets": session.expected_five_minute_buckets,
         },
         "coverage": {
             "raw_quote_rows": len(quotes),
@@ -459,25 +904,36 @@ def build_review_payload(
         "mes": series_stats(mes_quotes),
         "spxw_options": option_quote_summary(list(quotes)),
         "iv_surface": surface_summary(snapshots),
+        "completeness": {
+            "policy": asdict(active_policy),
+            "checks": [check.to_dict() for check in checks],
+        },
     }
-    payload["verdict"] = review_verdict(payload)
+    payload["verdict"] = review_verdict(payload, checks=checks)
     return payload
 
 
-def review_verdict(payload: dict[str, Any]) -> dict[str, Any]:
-    warnings: list[str] = []
-    if payload["coverage"]["spx_rows"] == 0:
-        warnings.append("missing SPX raw quote rows")
-    if payload["coverage"]["es_rows"] == 0:
-        warnings.append("missing ES raw quote rows")
-    if payload["coverage"]["iv_surface_snapshots"] == 0:
-        warnings.append("missing SPXW IV surface snapshots")
-    if payload["spxw_options"]["unique_contracts"] == 0:
-        warnings.append("missing SPXW option quote rows")
-    degraded = bool(warnings)
+def review_verdict(
+    payload: dict[str, Any],
+    *,
+    checks: tuple[ReviewCompletenessCheck, ...] | None = None,
+) -> dict[str, Any]:
+    if checks is None:
+        raw_checks = payload.get("completeness", {}).get("checks", [])
+        failures = [item for item in raw_checks if not bool(item.get("passed"))]
+        warnings = [f"{item.get('name')}: {item.get('reason')}" for item in failures]
+        check_count = len(raw_checks)
+        passed_count = check_count - len(failures)
+    else:
+        failures = [check for check in checks if not check.passed]
+        warnings = [f"{check.name}: {check.reason}" for check in failures]
+        check_count = len(checks)
+        passed_count = check_count - len(failures)
     return {
-        "status": "degraded" if degraded else "complete",
+        "status": "complete" if check_count > 0 and not warnings else "degraded",
         "warnings": warnings,
+        "required_checks": check_count,
+        "passed_checks": passed_count,
     }
 
 
@@ -495,6 +951,16 @@ def fmt_bps(value: Any) -> str:
 
 def change_cell(metric: dict[str, Any], digits: int = 4) -> str:
     return f"{fmt(metric.get('first'), digits)} -> {fmt(metric.get('last'), digits)} ({fmt(metric.get('change'), digits)})"
+
+
+def completeness_value(value: Any) -> str:
+    if value is None:
+        return "-"
+    if isinstance(value, float):
+        return f"{value:.4f}"
+    if isinstance(value, (list, tuple)):
+        return ", ".join(str(item) for item in value) or "-"
+    return str(value)
 
 
 def render_markdown(payload: dict[str, Any]) -> str:
@@ -516,6 +982,24 @@ def render_markdown(payload: dict[str, Any]) -> str:
         lines.extend(["## Data Warnings", ""])
         lines.extend(f"- {warning}" for warning in warnings)
         lines.append("")
+
+    checks = payload.get("completeness", {}).get("checks", [])
+    lines.extend(
+        [
+            "## Data Completeness",
+            "",
+            "| Check | Measured | Threshold | Pass | Reason |",
+            "|---|---:|---:|:---:|---|",
+        ]
+    )
+    for check in checks:
+        reason = str(check.get("reason") or "-").replace("|", "\\|")
+        lines.append(
+            f"| {check.get('name', '-')} | {completeness_value(check.get('measured'))} | "
+            f"{completeness_value(check.get('threshold'))} | "
+            f"{'yes' if check.get('passed') else 'no'} | {reason} |"
+        )
+    lines.append("")
 
     lines.extend(
         [
@@ -576,6 +1060,7 @@ def build_llm_writer_prompt(payload: dict[str, Any], deterministic_markdown: str
         "es": payload.get("es"),
         "spxw_options": payload.get("spxw_options"),
         "iv_surface": payload.get("iv_surface"),
+        "completeness": payload.get("completeness"),
     }
     return "\n".join(
         (
@@ -680,7 +1165,16 @@ def maybe_write_llm_review(
         payload["llm_writer"]["error"] = error or "empty response"
         return deterministic_markdown
     payload["llm_writer"]["status"] = "ok"
-    return markdown
+    expected_title = f"# SPX/SPXW Post-Close Review - {payload.get('trading_date')}"
+    narrative = markdown.strip()
+    if narrative.startswith(expected_title):
+        narrative = narrative[len(expected_title) :].lstrip()
+    return (
+        deterministic_markdown.rstrip()
+        + "\n\n## LLM Commentary\n\n"
+        + narrative
+        + "\n"
+    )
 
 
 def price_row(label: str, stats: dict[str, Any]) -> str:
@@ -780,7 +1274,15 @@ def build_push_summary(payload: dict[str, Any], *, latest_markdown_path: str) ->
 
     iv_surface = payload.get("iv_surface") if isinstance(payload.get("iv_surface"), dict) else {}
     expiries = iv_surface.get("expiries") if isinstance(iv_surface.get("expiries"), list) else []
-    front = expiries[0] if expiries and isinstance(expiries[0], dict) else {}
+    expected_front_expiry = str(trading_date).replace("-", "")
+    front = next(
+        (
+            item
+            for item in expiries
+            if isinstance(item, dict) and item.get("expiry") == expected_front_expiry
+        ),
+        {},
+    )
 
     put_wall_last = front.get("put_wall_last")
     call_wall_last = front.get("call_wall_last")
@@ -903,8 +1405,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def run(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     settings = StorageSettings.from_env()
-    trading_date = resolve_trading_date(args.date)
-    payload = build_review_payload(trading_date=trading_date, settings=settings)
+    run_now = datetime.now(tz=timezone.utc)
+    if args.date.lower() == "auto":
+        selected_date = ready_auto_review_date(now=run_now)
+        if selected_date is None:
+            return 0
+        trading_date = selected_date
+    else:
+        trading_date = resolve_trading_date(args.date, now=run_now)
+    payload = build_review_payload(trading_date=trading_date, settings=settings, now=run_now)
     markdown = render_markdown(payload)
     llm_settings = ReviewLlmSettings.from_env()
     if args.llm:

@@ -28,15 +28,21 @@ def test_default_spxw_expiry_returns_yyyymmdd():
     assert value == "20260709"
 
 
-def test_default_spxw_expiry_rolls_after_1615_et():
+def test_default_spxw_expiry_rolls_at_1700_et():
     thursday_afternoon = datetime(2026, 7, 9, 15, 0, tzinfo=NY_TZ)
     assert default_spxw_expiry(now=thursday_afternoon) == "20260709"
 
     thursday_after_close = datetime(2026, 7, 9, 16, 20, tzinfo=NY_TZ)
-    assert default_spxw_expiry(now=thursday_after_close) == "20260710"
+    assert default_spxw_expiry(now=thursday_after_close) == "20260709"
 
-    friday_after_close = datetime(2026, 7, 10, 16, 20, tzinfo=NY_TZ)
+    thursday_rollover = datetime(2026, 7, 9, 17, 0, tzinfo=NY_TZ)
+    assert default_spxw_expiry(now=thursday_rollover) == "20260710"
+
+    friday_after_close = datetime(2026, 7, 10, 17, 0, tzinfo=NY_TZ)
     assert default_spxw_expiry(now=friday_after_close) == "20260713"
+
+    before_observed_holiday = datetime(2026, 7, 2, 17, 0, tzinfo=NY_TZ)
+    assert default_spxw_expiry(now=before_observed_holiday) == "20260706"
 
 
 def test_default_spxw_expiry_explicit_today_does_not_roll():
@@ -106,8 +112,21 @@ def test_runtime_policy_blocks_weekend_collection_in_auto_mode():
     timezone = ZoneInfo("Asia/Shanghai")
     saturday = datetime(2026, 7, 4, 14, 0, tzinfo=timezone)
     monday = datetime(2026, 7, 6, 14, 0, tzinfo=timezone)
+    friday_us_afternoon = datetime(2026, 7, 11, 1, 30, tzinfo=timezone)
+    observed_holiday = datetime(2026, 7, 3, 14, 0, tzinfo=timezone)
     assert not policy.market_data_collection_allowed(saturday)
     assert policy.market_data_collection_allowed(monday)
+    assert policy.market_data_collection_allowed(friday_us_afternoon)
+    assert not policy.market_data_collection_allowed(observed_holiday)
+
+    sunday_before_reopen = datetime(2026, 7, 12, 17, 59, tzinfo=NY_TZ)
+    sunday_reopen = datetime(2026, 7, 12, 18, 0, tzinfo=NY_TZ)
+    labor_day_reopen = datetime(2026, 9, 6, 18, 0, tzinfo=NY_TZ)
+    holiday_evening_reopen = datetime(2026, 9, 7, 18, 0, tzinfo=NY_TZ)
+    assert not policy.market_data_collection_allowed(sunday_before_reopen)
+    assert policy.market_data_collection_allowed(sunday_reopen)
+    assert not policy.market_data_collection_allowed(labor_day_reopen)
+    assert policy.market_data_collection_allowed(holiday_evening_reopen)
 
 
 def test_storage_settings_inherits_maintenance_root(monkeypatch, tmp_path):

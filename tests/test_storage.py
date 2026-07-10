@@ -346,6 +346,31 @@ def test_prune_expired_option_quotes_drops_yesterday_keeps_today_and_index() -> 
     assert any(quote.instrument.instrument_type == InstrumentType.INDEX for quote in pruned)
 
 
+def test_prune_expired_options_uses_1700_research_rollover() -> None:
+    before_roll = datetime(2026, 7, 9, 20, 59, tzinfo=timezone.utc)
+    at_roll = datetime(2026, 7, 9, 21, 0, tzinfo=timezone.utc)
+    rows = (
+        make_option_quote(expiry="20260709", received_at=before_roll),
+        make_option_quote(expiry="20260710", received_at=before_roll),
+    )
+
+    assert len(prune_expired_option_quotes(rows, now=before_roll)) == 2
+    assert [
+        quote.instrument.expiry
+        for quote in prune_expired_option_quotes(rows, now=at_roll)
+    ] == ["20260710"]
+
+    holiday_roll = datetime(2026, 7, 2, 21, 0, tzinfo=timezone.utc)
+    holiday_rows = (
+        make_option_quote(expiry="20260702", received_at=holiday_roll),
+        make_option_quote(expiry="20260706", received_at=holiday_roll),
+    )
+    assert [
+        quote.instrument.expiry
+        for quote in prune_expired_option_quotes(holiday_rows, now=holiday_roll)
+    ] == ["20260706"]
+
+
 def test_latest_state_update_prunes_expired_options(tmp_path) -> None:
     settings = make_storage_settings(tmp_path)
     store = LatestStateStore(settings)

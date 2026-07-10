@@ -4,6 +4,7 @@ import json
 import math
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -345,9 +346,9 @@ def test_bs_projection_accounts_for_time_decay_and_vol_shift() -> None:
 def test_build_candidates_produces_three_plays_with_limits() -> None:
     now = datetime(2026, 7, 7, 6, 0, tzinfo=timezone.utc)
     underlier = Quote(
-        instrument=InstrumentId.future("ES"),
+        instrument=InstrumentId.index("SPX"),
         provider=Provider.IBKR,
-        provider_symbol="future:ES",
+        provider_symbol="index:SPX",
         received_at=now,
         quality=MarketDataQuality.LIVE,
         mark=7569.0,
@@ -776,7 +777,7 @@ def test_render_template_shows_frontrun_and_stop_trigger_notes() -> None:
     assert "挂单参考: 激进 15.90" not in text
 
 
-def test_resolve_spx_spot_prefers_perp_when_cash_closed_and_diverged() -> None:
+def test_resolve_spx_spot_keeps_hl_research_separate_from_chain_pricing() -> None:
     from spx_spark.order_map import resolve_spx_spot
 
     from spx_spark.marketdata import InstrumentType
@@ -791,9 +792,19 @@ def test_resolve_spx_spot_prefers_perp_when_cash_closed_and_diverged() -> None:
         mark=7520.0,
         quote_time=now,
     )
-    # Parity pair implies 7533 (C-P=8 at 7525): 17bps above the perp.
+    es_anchor = Quote(
+        instrument=InstrumentId.future("ES"),
+        provider=Provider.IBKR,
+        provider_symbol="future:ES",
+        received_at=now,
+        quality=MarketDataQuality.LIVE,
+        mark=7520.0,
+        quote_time=now,
+    )
+    # Parity pair implies 7533 (C-P=8 at 7525): a small, accepted divergence.
     state = make_state(
         hl_quote,
+        es_anchor,
         make_option(expiry="20260707", strike=7525, right="C", mark=18.0, delta=0.55, gamma=0.008, now=now),
         make_option(expiry="20260707", strike=7525, right="P", mark=10.0, delta=-0.45, gamma=0.008, now=now),
         now=now,
@@ -801,18 +812,436 @@ def test_resolve_spx_spot_prefers_perp_when_cash_closed_and_diverged() -> None:
     options_map = make_options_map(make_front_expiry())
 
     warnings: list[str] = []
-    spot, source = resolve_spx_spot(state, options_map, warnings=warnings, now=now)
-    assert source == "hl_perp"
-    assert spot == pytest.approx(7520.0)
-    assert any("参考价采用 perp" in item for item in warnings)
+    resolution = resolve_spx_spot(state, options_map, warnings=warnings, now=now)
+    assert resolution.research_source == "hl_perp"
+    assert resolution.research_price == pytest.approx(7520.0)
+    assert resolution.pricing_source == "chain_implied"
+    assert resolution.pricing_price == pytest.approx(7533.0)
+    assert resolution.pricing_allowed is True
+    assert resolution.gate_state == "basis_ok"
 
-    # Same divergence during cash hours: the chain's own view wins.
+    # During cash hours the chain is both the research and pricing reference.
     rth = datetime(2026, 7, 7, 15, 0, tzinfo=timezone.utc)  # 11:00 ET
+    rth_state = make_state(
+        Quote(
+            instrument=hl_quote.instrument,
+            provider=Provider.HYPERLIQUID,
+            provider_symbol="xyz:SP500",
+            received_at=rth,
+            quality=MarketDataQuality.LIVE,
+            mark=7520.0,
+            quote_time=rth,
+        ),
+        Quote(
+            instrument=es_anchor.instrument,
+            provider=Provider.IBKR,
+            provider_symbol="future:ES",
+            received_at=rth,
+            quality=MarketDataQuality.LIVE,
+            mark=7520.0,
+            quote_time=rth,
+        ),
+        make_option(
+            expiry="20260707",
+            strike=7525,
+            right="C",
+            mark=18.0,
+            delta=0.55,
+            gamma=0.008,
+            now=rth,
+        ),
+        make_option(
+            expiry="20260707",
+            strike=7525,
+            right="P",
+            mark=10.0,
+            delta=-0.45,
+            gamma=0.008,
+            now=rth,
+        ),
+        now=rth,
+    )
     warnings_rth: list[str] = []
-    spot_rth, source_rth = resolve_spx_spot(state, options_map, warnings=warnings_rth, now=rth)
-    assert source_rth == "chain_implied"
-    assert spot_rth == pytest.approx(7533.0)
-    assert any("diverges" in item for item in warnings_rth)
+    rth_resolution = resolve_spx_spot(
+        rth_state,
+        options_map,
+        warnings=warnings_rth,
+        now=rth,
+    )
+    assert rth_resolution.research_source == "chain_implied"
+    assert rth_resolution.pricing_source == "chain_implied"
+
+
+def test_resolve_spx_spot_blocks_model_pricing_when_hl_basis_warns() -> None:
+    from spx_spark.marketdata import InstrumentType
+    from spx_spark.order_map import resolve_spx_spot
+
+    now = datetime(2026, 7, 7, 6, 0, tzinfo=timezone.utc)
+    hl_quote = Quote(
+        instrument=InstrumentId(
+            symbol="xyz:SP500",
+            instrument_type=InstrumentType.CRYPTO_PERP,
+        ),
+        provider=Provider.HYPERLIQUID,
+        provider_symbol="xyz:SP500",
+        received_at=now,
+        quality=MarketDataQuality.LIVE,
+        mark=7488.0,
+        quote_time=now,
+    )
+    spx_anchor = Quote(
+        instrument=InstrumentId.index("SPX"),
+        provider=Provider.IBKR,
+        provider_symbol="index:SPX",
+        received_at=now,
+        quality=MarketDataQuality.LIVE,
+        mark=7533.0,
+        quote_time=now,
+    )
+    state = make_state(
+        hl_quote,
+        spx_anchor,
+        make_option(
+            expiry="20260707",
+            strike=7525,
+            right="C",
+            mark=18.0,
+            delta=0.55,
+            gamma=0.008,
+            now=now,
+        ),
+        make_option(
+            expiry="20260707",
+            strike=7525,
+            right="P",
+            mark=10.0,
+            delta=-0.45,
+            gamma=0.008,
+            now=now,
+        ),
+        now=now,
+    )
+
+    resolution = resolve_spx_spot(
+        state,
+        make_options_map(make_front_expiry()),
+        now=now,
+    )
+
+    assert resolution.research_source == "hl_perp"
+    assert resolution.pricing_allowed is False
+    assert resolution.pricing_price is None
+    assert resolution.gate_state == "basis_warn"
+
+
+def test_market_context_anchor_gate_overrides_chain_hl_agreement() -> None:
+    from spx_spark.marketdata import InstrumentType
+    from spx_spark.order_map import resolve_spx_spot
+
+    now = datetime(2026, 7, 7, 15, 0, tzinfo=timezone.utc)
+    hl_quote = Quote(
+        instrument=InstrumentId(
+            symbol="xyz:SP500",
+            instrument_type=InstrumentType.CRYPTO_PERP,
+        ),
+        provider=Provider.HYPERLIQUID,
+        provider_symbol="xyz:SP500",
+        received_at=now,
+        quality=MarketDataQuality.LIVE,
+        mark=7500.0,
+        quote_time=now,
+    )
+    spx_anchor = Quote(
+        instrument=InstrumentId.index("SPX"),
+        provider=Provider.IBKR,
+        provider_symbol="index:SPX",
+        received_at=now,
+        quality=MarketDataQuality.LIVE,
+        mark=7400.0,
+        quote_time=now,
+    )
+    state = make_state(
+        hl_quote,
+        spx_anchor,
+        make_option(
+            expiry="20260707",
+            strike=7500,
+            right="C",
+            mark=10.0,
+            delta=0.5,
+            gamma=0.008,
+            now=now,
+        ),
+        make_option(
+            expiry="20260707",
+            strike=7500,
+            right="P",
+            mark=10.0,
+            delta=-0.5,
+            gamma=0.008,
+            now=now,
+        ),
+        now=now,
+    )
+
+    resolution = resolve_spx_spot(
+        state,
+        make_options_map(make_front_expiry()),
+        now=now,
+    )
+
+    assert resolution.gate_state == "basis_blocked"
+    assert resolution.pricing_allowed is False
+    assert resolution.pricing_price is None
+
+
+def test_spy_is_not_a_standalone_executable_pricing_anchor() -> None:
+    from spx_spark.marketdata import InstrumentType
+    from spx_spark.order_map import resolve_spx_spot
+
+    now = datetime(2026, 7, 7, 6, 0, tzinfo=timezone.utc)
+    state = make_state(
+        Quote(
+            instrument=InstrumentId(
+                symbol="xyz:SP500",
+                instrument_type=InstrumentType.CRYPTO_PERP,
+            ),
+            provider=Provider.HYPERLIQUID,
+            provider_symbol="xyz:SP500",
+            received_at=now,
+            quality=MarketDataQuality.LIVE,
+            mark=7500.0,
+            quote_time=now,
+        ),
+        Quote(
+            instrument=InstrumentId.equity("SPY"),
+            provider=Provider.IBKR,
+            provider_symbol="stock:SPY",
+            received_at=now,
+            quality=MarketDataQuality.LIVE,
+            mark=750.0,
+            quote_time=now,
+        ),
+        now=now,
+    )
+
+    resolution = resolve_spx_spot(
+        state,
+        make_options_map(make_front_expiry()),
+        now=now,
+    )
+
+    assert resolution.gate_state == "unanchored"
+    assert resolution.pricing_allowed is False
+    assert resolution.pricing_price is None
+
+
+def test_hl_only_order_payload_is_valid_research_without_executable_aliases(
+    monkeypatch,
+) -> None:
+    import spx_spark.order_map as order_map_module
+    from spx_spark.marketdata import InstrumentType
+
+    now = datetime(2026, 7, 7, 6, 0, tzinfo=timezone.utc)
+    hl_quote = Quote(
+        instrument=InstrumentId(
+            symbol="xyz:SP500",
+            instrument_type=InstrumentType.CRYPTO_PERP,
+        ),
+        provider=Provider.HYPERLIQUID,
+        provider_symbol="xyz:SP500",
+        received_at=now,
+        quality=MarketDataQuality.LIVE,
+        mark=7520.0,
+        quote_time=now,
+    )
+    options_map = make_options_map(make_front_expiry())
+    monkeypatch.setattr(order_map_module, "build_options_map", lambda state: options_map)
+
+    payload = build_order_payload(make_state(hl_quote, now=now), now=now)
+
+    assert payload["research_only"] is True
+    assert payload["pricing_allowed"] is False
+    assert payload["research_reference"] == {"price": 7520.0, "source": "hl_perp"}
+    assert payload["underlier"] == {"price": None, "source": None}
+    assert payload["candidates"] == []
+    assert payload["wall_ladder"] == {"call_walls": [], "put_walls": []}
+    assert len(payload["research_candidates"]) == 3
+    assert all("play" not in item and "right" not in item for item in payload["research_candidates"])
+    assert all(
+        {option["right"] for option in item["observed_options"]} == {"C", "P"}
+        for item in payload["research_candidates"]
+    )
+    assert payload["rn_density"] is None
+    rendered = render_template(payload)
+    assert "不可执行定价" in rendered
+    assert "挂单参考:" not in rendered
+    assert "触达≈" not in rendered
+
+
+def test_missing_all_references_still_fails_closed_as_research_only() -> None:
+    now = datetime(2026, 7, 7, 6, 0, tzinfo=timezone.utc)
+
+    payload = build_order_payload(make_state(now=now), now=now)
+
+    assert payload["pricing_allowed"] is False
+    assert payload["research_only"] is True
+    assert payload["research_reference"] == {"price": None, "source": None}
+    assert payload["underlier"] == {"price": None, "source": None}
+    assert payload["candidates"] == []
+    assert "不可执行定价" in render_template(payload)
+
+
+def test_research_observed_quotes_apply_freshness_and_label_stale_rows(
+    monkeypatch,
+) -> None:
+    import spx_spark.order_map as order_map_module
+    from spx_spark.marketdata import InstrumentType
+
+    now = datetime(2026, 7, 7, 6, 0, tzinfo=timezone.utc)
+    hl_quote = Quote(
+        instrument=InstrumentId(
+            symbol="xyz:SP500",
+            instrument_type=InstrumentType.CRYPTO_PERP,
+        ),
+        provider=Provider.HYPERLIQUID,
+        provider_symbol="xyz:SP500",
+        received_at=now,
+        quality=MarketDataQuality.LIVE,
+        mark=7520.0,
+        quote_time=now,
+    )
+    stale_call = make_option(
+        expiry="20260707",
+        strike=7500,
+        right="C",
+        mark=10.0,
+        delta=0.5,
+        gamma=0.008,
+        now=now - timedelta(minutes=10),
+        quality=MarketDataQuality.STALE,
+    )
+    monkeypatch.setattr(
+        order_map_module,
+        "build_options_map",
+        lambda state: make_options_map(make_front_expiry()),
+    )
+
+    payload = build_order_payload(make_state(hl_quote, stale_call, now=now), now=now)
+    put_wall = next(
+        item for item in payload["research_candidates"] if item["level_kind"] == "put_wall"
+    )
+    observed_call = next(
+        item for item in put_wall["observed_options"] if item["right"] == "C"
+    )
+
+    assert observed_call["observed_bid"] is None
+    assert observed_call["observed_ask"] is None
+    assert observed_call["quote_freshness"] == "stale"
+    assert "[stale/stale]" in render_template(payload)
+
+
+def test_research_status_uses_deterministic_ops_delivery(monkeypatch, tmp_path) -> None:
+    import spx_spark.order_map as order_map_module
+
+    payload = {
+        "research_only": True,
+        "research_reference": {"price": 7520.0, "source": "hl_perp"},
+    }
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(order_map_module, "load_order_map_state", lambda path: {})
+    monkeypatch.setattr(
+        order_map_module,
+        "build_order_payload_with_retry",
+        lambda *args, **kwargs: payload,
+    )
+    monkeypatch.setattr(order_map_module, "payload_fingerprint", lambda value: {})
+    monkeypatch.setattr(order_map_module, "material_changes", lambda *args: [])
+    monkeypatch.setattr(
+        order_map_module,
+        "render_status_template",
+        lambda *args: "deterministic research status",
+    )
+    monkeypatch.setattr(
+        order_map_module,
+        "generate_push_text",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("writer called")),
+    )
+    monkeypatch.setattr(
+        order_map_module.NotificationSettings,
+        "from_env",
+        classmethod(lambda cls: object()),
+    )
+
+    def deliver(settings, *, title, text, kind, lane, friend, runner):
+        captured.update(title=title, text=text, kind=kind, lane=lane, friend=friend)
+        return [SimpleNamespace(sink="bark", ok=True, attempted=True)]
+
+    monkeypatch.setattr(order_map_module, "deliver_trade_push", deliver)
+    monkeypatch.setattr(
+        order_map_module,
+        "append_missed",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("research queued")),
+    )
+    monkeypatch.setattr(order_map_module, "mark_sent", lambda *args, **kwargs: None)
+    monkeypatch.setattr(order_map_module, "record_push", lambda *args, **kwargs: None)
+
+    result = order_map_module.run_status(
+        SimpleNamespace(force=True, dry_run=False),
+        now=datetime(2026, 7, 7, 6, 0, tzinfo=timezone.utc),
+        state_path=str(tmp_path / "state.json"),
+        trading_date="2026-07-07",
+    )
+
+    assert result == 0
+    assert captured == {
+        "title": "研究状态",
+        "text": "deterministic research status",
+        "kind": "status",
+        "lane": "ops",
+        "friend": False,
+    }
+
+
+def test_force_cannot_bypass_research_only_direct_map_gate(
+    monkeypatch,
+    tmp_path,
+    capsys,
+) -> None:
+    import spx_spark.order_map as order_map_module
+
+    payload = {
+        "research_only": True,
+        "research_reference": {"price": 7520.0, "source": "hl_perp"},
+    }
+    monkeypatch.setenv("SPX_ORDER_MAP_STATE_PATH", str(tmp_path / "state.json"))
+    monkeypatch.setattr(
+        order_map_module.StorageSettings,
+        "from_env",
+        classmethod(lambda cls: object()),
+    )
+    monkeypatch.setattr(
+        order_map_module,
+        "build_order_payload_with_retry",
+        lambda *args, **kwargs: payload,
+    )
+    monkeypatch.setattr(order_map_module, "render_template", lambda value: "research")
+    monkeypatch.setattr(order_map_module, "load_order_map_state", lambda path: {})
+    monkeypatch.setattr(
+        order_map_module,
+        "send_order_map",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("direct map sent")),
+    )
+
+    now = datetime(2026, 7, 7, 6, 0, tzinfo=timezone.utc)
+    assert order_map_module.run(["--force"], now=now) == 0
+    assert order_map_module.run(["--refresh", "--force"], now=now) == 0
+
+    outputs = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert outputs == [
+        {"skipped": True, "reason": "research_only_no_direct_map"},
+        {"skipped": True, "reason": "research_only_no_direct_map"},
+    ]
 
 
 def test_push_context_roundtrip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -888,7 +1317,16 @@ def test_build_candidates_skips_missing_greeks_with_warning() -> None:
         quote_time=now,
         greeks=None,
     )
-    state = make_state(quote_no_greeks, now=now)
+    underlier = Quote(
+        instrument=InstrumentId.index("SPX"),
+        provider=Provider.IBKR,
+        provider_symbol="index:SPX",
+        received_at=now,
+        quality=MarketDataQuality.LIVE,
+        mark=7569.0,
+        quote_time=now,
+    )
+    state = make_state(underlier, quote_no_greeks, now=now)
     warnings: list[str] = []
     candidates = build_candidates(state, make_options_map(make_front_expiry()), warnings)
 
@@ -977,6 +1415,9 @@ def test_within_send_window_beijing_weekday() -> None:
 
     saturday_1400 = datetime(2026, 7, 11, 6, 0, tzinfo=timezone.utc)
     assert within_send_window(saturday_1400) is False
+
+    holiday_1400 = datetime(2026, 7, 3, 6, 0, tzinfo=timezone.utc)
+    assert within_send_window(holiday_1400) is False
 
 
 def test_mark_sent_merges_kinds_without_clobbering(tmp_path: Path) -> None:
@@ -1105,6 +1546,26 @@ def test_session_phase_tracks_partner_clock() -> None:
     assert asleep["minutes_to_bedtime"] is None
 
 
+def test_session_phase_marks_weekday_holiday_cash_hours_closed() -> None:
+    et = ZoneInfo("America/New_York")
+    holiday_cash_hours = session_phase(datetime(2026, 7, 3, 10, 0, tzinfo=et))
+    assert holiday_cash_hours["name"] == "market_closed"
+    assert holiday_cash_hours["name_cn"] == "休市"
+    assert holiday_cash_hours["minutes_since_us_open"] is None
+    assert holiday_cash_hours["minutes_to_us_close"] is None
+
+    # A holiday outside normal cash hours retains the ordinary phase clock.
+    holiday_off_hours = session_phase(datetime(2026, 7, 3, 7, 0, tzinfo=et))
+    assert holiday_off_hours["name"] == "europe_session"
+
+    weekend_cash_hours = session_phase(datetime(2026, 7, 11, 10, 0, tzinfo=et))
+    assert weekend_cash_hours["name"] == "market_closed"
+
+    # Early-close sessions retain their existing post-close transition.
+    early_close_afternoon = session_phase(datetime(2026, 11, 27, 14, 0, tzinfo=et))
+    assert early_close_afternoon["name"] == "post_close"
+
+
 def test_touch_eta_minutes_brownian_scaling() -> None:
     # 6 hours to expiry, EM 26 points, level 13 points away:
     # fraction = 0.6 * (13/26)^2 = 0.15 -> 0.15 * 360min = 54min.
@@ -1206,6 +1667,16 @@ def test_within_status_window_and_minutes_to_open() -> None:
     assert within_status_window(monday_0130) is False
     saturday = datetime(2026, 7, 11, 6, 30, tzinfo=timezone.utc)
     assert within_status_window(saturday) is False
+    holiday_morning = datetime(2026, 7, 2, 23, 30, tzinfo=timezone.utc)
+    assert within_status_window(holiday_morning) is False
+
+
+def test_minutes_to_open_after_close_targets_next_trading_session() -> None:
+    et = ZoneInfo("America/New_York")
+    assert minutes_to_open(datetime(2026, 7, 10, 8, 30, tzinfo=et)) == 60
+    assert minutes_to_open(datetime(2026, 7, 10, 10, 0, tzinfo=et)) is None
+    # Friday 16:30 ET to Monday 09:30 ET is 65 hours.
+    assert minutes_to_open(datetime(2026, 7, 10, 16, 30, tzinfo=et)) == 65 * 60
 
 
 def test_render_status_template_contains_levels_and_changes() -> None:
@@ -1250,9 +1721,9 @@ def test_send_order_map_queues_on_feishu_failure(tmp_path: Path, monkeypatch) ->
     payload = build_order_payload(
         make_state(
             Quote(
-                instrument=InstrumentId.future("ES"),
+                instrument=InstrumentId.index("SPX"),
                 provider=Provider.IBKR,
-                provider_symbol="future:ES",
+                provider_symbol="index:SPX",
                 received_at=datetime(2026, 7, 7, 6, 0, tzinfo=timezone.utc),
                 quality=MarketDataQuality.LIVE,
                 mark=7569.0,
@@ -1294,6 +1765,17 @@ def test_build_order_payload_shape() -> None:
     assert "underlier" in payload
     assert "candidates" in payload
     assert "warnings" in payload
+
+
+def test_order_payload_trading_date_uses_research_rollover() -> None:
+    monday_evening = datetime(2026, 7, 6, 23, 30, tzinfo=timezone.utc)
+    friday_rth = datetime(2026, 7, 10, 17, 30, tzinfo=timezone.utc)
+
+    evening_payload = build_order_payload(make_state(now=monday_evening), now=monday_evening)
+    friday_payload = build_order_payload(make_state(now=friday_rth), now=friday_rth)
+
+    assert evening_payload["trading_date"] == "2026-07-07"
+    assert friday_payload["trading_date"] == "2026-07-10"
 
 
 def _volume_sample(at: datetime, volume: float) -> dict[str, object]:

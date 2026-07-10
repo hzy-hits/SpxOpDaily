@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import time as time_module
+from dataclasses import replace
 from datetime import datetime, time, timezone
 from pathlib import Path
 from typing import Any
@@ -11,6 +12,7 @@ from typing import Any
 from spx_spark.config import NY_TZ, NotificationSettings, StorageSettings
 from spx_spark.human_focus import build_human_focus_context
 from spx_spark.iv_surface import IvSurfaceSettings, load_latest_snapshot
+from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 from spx_spark.notifier.llm_writer import (
     generate_push_text,
     load_previous_push,
@@ -31,12 +33,27 @@ ET_WINDOW_START = time(8, 30)
 ET_WINDOW_END = time(9, 30)
 
 
-def load_current_iv_surface(settings: IvSurfaceSettings | None = None):
+def load_current_iv_surface(
+    settings: IvSurfaceSettings | None = None,
+    *,
+    now: datetime | None = None,
+):
     settings = settings or IvSurfaceSettings.from_env()
     try:
-        return load_latest_snapshot(settings.latest_surface_path)
+        surface = load_latest_snapshot(settings.latest_surface_path)
     except (OSError, ValueError, json.JSONDecodeError, KeyError):
         return None
+    if surface is None:
+        return None
+    current = now or datetime.now(tz=timezone.utc)
+    age_seconds = (current - surface.as_of).total_seconds()
+    max_age_seconds = float(os.getenv("ALERT_MAX_IV_SURFACE_AGE_SECONDS", "420"))
+    active_expiry = DEFAULT_MARKET_CALENDAR.research_expiry(current).strftime("%Y%m%d")
+    if age_seconds < -5.0 or age_seconds > max_age_seconds:
+        return None
+    if surface.front_expiry != active_expiry:
+        return None
+    return surface
 
 
 def overnight_gap(state: LatestState) -> dict[str, Any]:
@@ -61,11 +78,12 @@ def overnight_gap(state: LatestState) -> dict[str, Any]:
 
 
 def build_morning_payload(state: LatestState, *, now: datetime | None = None) -> dict[str, Any]:
-    del now
-    options_map = build_options_map(state)
-    iv_surface = load_current_iv_surface()
+    evaluation_time = now or state.as_of
+    evaluation_state = replace(state, as_of=evaluation_time)
+    options_map = build_options_map(evaluation_state)
+    iv_surface = load_current_iv_surface(now=evaluation_time)
     focus = build_human_focus_context(
-        state,
+        evaluation_state,
         options_map=options_map,
         iv_surface=iv_surface,
         iv_surface_history_1h=None,
@@ -74,6 +92,9 @@ def build_morning_payload(state: LatestState, *, now: datetime | None = None) ->
     return {
         "kind": "morning_map",
         "as_of": state.as_of.isoformat(),
+        "trading_date": DEFAULT_MARKET_CALENDAR.research_expiry(
+            evaluation_time
+        ).isoformat(),
         "overnight": overnight_gap(state),
         "human_focus_context": focus,
     }
@@ -99,7 +120,7 @@ def build_morning_payload_with_retry(
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {}
     for attempt in range(attempts):
-        state = LatestStateStore(storage_settings).load()
+        state = LatestStateStore(storage_settings).load(now=now)
         payload = build_morning_payload(state, now=now)
         if not _morning_payload_is_thin(payload):
             return payload
@@ -161,8 +182,13 @@ def _strike_oi(top_strikes: list[dict[str, Any]] | None, strike: float | None, k
 
 def render_template(payload: dict[str, Any]) -> str:
     as_of_raw = payload.get("as_of")
-    trading_date = "-"
-    if isinstance(as_of_raw, str) and as_of_raw:
+    payload_trading_date = payload.get("trading_date")
+    trading_date = (
+        payload_trading_date
+        if isinstance(payload_trading_date, str) and payload_trading_date
+        else "-"
+    )
+    if trading_date == "-" and isinstance(as_of_raw, str) and as_of_raw:
         try:
             as_of = datetime.fromisoformat(as_of_raw.replace("Z", "+00:00"))
             if as_of.tzinfo is None:
@@ -342,7 +368,7 @@ def default_state_path(settings: StorageSettings) -> str:
 
 def within_send_window(now_utc: datetime) -> bool:
     local = now_utc.astimezone(NY_TZ)
-    if local.weekday() >= 5:
+    if not DEFAULT_MARKET_CALENDAR.is_trading_day(local.date()):
         return False
     current = local.time()
     return ET_WINDOW_START <= current < ET_WINDOW_END
@@ -382,7 +408,7 @@ def run(argv: list[str] | None = None, *, now: datetime | None = None) -> int:
     now = now or datetime.now(tz=timezone.utc)
     storage_settings = StorageSettings.from_env()
     state_path = default_state_path(storage_settings)
-    trading_date = now.astimezone(NY_TZ).date().isoformat()
+    trading_date = DEFAULT_MARKET_CALENDAR.research_expiry(now).isoformat()
 
     if not args.force and not args.dry_run:
         if not within_send_window(now):
@@ -393,6 +419,9 @@ def run(argv: list[str] | None = None, *, now: datetime | None = None) -> int:
             return 0
 
     payload = build_morning_payload_with_retry(storage_settings, now=now)
+    if _morning_payload_is_thin(payload) and not args.force and not args.dry_run:
+        print(json.dumps({"skipped": True, "reason": "thin_snapshot_sampling_gap"}))
+        return 0
     template = render_template(payload)
 
     if args.dry_run:
@@ -407,8 +436,8 @@ def run(argv: list[str] | None = None, *, now: datetime | None = None) -> int:
 
     settings = NotificationSettings.from_env()
     result = send_morning_map(payload, settings, now=now, previous_push=load_previous_push())
-    mark_sent(state_path, trading_date)
     if result.get("delivered_ok") or result["im_ok"] or result["bark_ok"] or result.get("feishu_ok"):
+        mark_sent(state_path, trading_date)
         record_push("morning_map", result["text"], at=now.isoformat())
     print(json.dumps(result, ensure_ascii=False))
     if not (result.get("delivered_ok") or result["im_ok"] or result["bark_ok"] or result.get("feishu_ok")):

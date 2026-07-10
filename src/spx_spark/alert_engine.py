@@ -13,10 +13,10 @@ from spx_spark.config import (
     IvSurfaceSettings,
     NotificationSettings,
     StorageSettings,
-    NY_TZ,
     env_bool,
     env_float,
 )
+from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 from spx_spark.human_focus import build_human_focus_context
 from spx_spark.iv_surface import (
     IvSurfaceSnapshot,
@@ -201,7 +201,7 @@ def front_expected_move_pct(options_map: OptionsMap | None, *, as_of: datetime) 
         expiry_date = datetime.strptime(front.expiry, "%Y%m%d").date()
     except ValueError:
         return None
-    if expiry_date < as_of.astimezone(NY_TZ).date():
+    if expiry_date < DEFAULT_MARKET_CALENDAR.research_expiry(as_of):
         return None
     return front.expected_move_pct
 
@@ -857,11 +857,9 @@ def proxy_fallback_watch_alerts(
     gate = hyperliquid_proxy_gate(market_context)
     if gate.get("usable_for_alert") is True:
         return []
-    # "unanchored_context_only" means no live SPX/ES/MES anchor exists. That
-    # happens either because the broker feed is down (session takeover) or
-    # because the anchor markets themselves are closed (e.g. the ES
-    # maintenance break 17:00-18:00 ET). In both cases the SP500 perp is the
-    # only live monitor, so surface its moves instead of going silent.
+    # Keep an unanchored proxy move in the algorithmic context, but never make
+    # it look like a directly actionable SPX alert.  Periodic research status
+    # is the only human-facing path allowed without a live TradFi anchor.
     if str(gate.get("state") or "") != "unanchored_context_only":
         return []
     broker_down = ibkr_feed_unavailable_for_fallback(state)
@@ -912,15 +910,15 @@ def proxy_fallback_watch_alerts(
         Alert(
             severity=severity_for_priority(window.priority),
             kind="broker_unavailable_proxy_watch",
-            instrument_id="index:SPX",
+            instrument_id=quote.instrument.canonical_id,
             title=f"SPX fallback monitor {direction} {move_bps:.1f} bps",
             detail=detail,
             provider=quote.provider.value,
             quality="degraded",
             value=move_bps,
             threshold=threshold,
-            research_only=False,
-            source_gate="broker_unavailable_fallback",
+            research_only=True,
+            source_gate="hyperliquid_proxy_unanchored",
         )
     ]
 

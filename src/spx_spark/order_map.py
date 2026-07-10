@@ -5,13 +5,15 @@ import json
 import math
 import os
 import time as time_module
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
 from spx_spark.config import NY_TZ, NotificationSettings, StorageSettings
+from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
+from spx_spark.market_context import build_market_context
 from spx_spark.marketdata import OptionRight, Quote
 from spx_spark.notifier.llm_writer import (
     generate_push_text,
@@ -90,7 +92,6 @@ def project_option_price(
 
 # --- BS repricing at a target level, with time decay and vol-shift ---
 
-SESSION_CLOSE_ET = time(16, 0)
 YEAR_SECONDS = 365.0 * 24.0 * 3600.0
 # Fraction of remaining time expected to elapse before the touch, as a
 # multiple of the Brownian-scaling estimate (distance/EM)^2. Calibrated on
@@ -121,12 +122,13 @@ def _bs_price(spot: float, strike: float, iv: float, tau_years: float, right: st
 
 
 def expiry_close_utc(expiry: str) -> datetime | None:
-    """SPXW dailies are PM-settled: last trade 16:00 ET on the expiry date."""
+    """SPXW PM-settled close, including calendar early-close sessions."""
     try:
         day = datetime.strptime(expiry, "%Y%m%d").date()
     except ValueError:
         return None
-    return datetime.combine(day, SESSION_CLOSE_ET, tzinfo=NY_TZ).astimezone(timezone.utc)
+    session = DEFAULT_MARKET_CALENDAR.session(day)
+    return session.close_at.astimezone(timezone.utc) if session is not None else None
 
 
 def smile_slope_per_point(
@@ -483,26 +485,92 @@ def _build_candidate(
 
 
 HL_SP500_PROXY_ID = "crypto_perp:xyz:SP500"
-# Chain-implied vs Hyperliquid perp divergence beyond this suggests wide or
-# stale GTH option quotes; surface it instead of silently trusting either.
-HL_DIVERGENCE_WARN_BPS = 15.0
 
-SPX_CASH_OPEN_ET = time(9, 30)
-SPX_CASH_CLOSE_ET = time(16, 0)
+@dataclass(frozen=True)
+class SpotResolution:
+    research_price: float | None
+    research_source: str | None
+    pricing_price: float | None
+    pricing_source: str | None
+    pricing_allowed: bool
+    gate_state: str
+    reason: str
+    divergence_bps: float | None = None
+
+    @property
+    def research_only(self) -> bool:
+        # Fail closed even when every reference is missing.  Otherwise a
+        # missing payload falls through to the executable renderer and send
+        # path merely because there is no research price to display.
+        return not self.pricing_allowed
 
 
 def spx_cash_session_open(now_utc: datetime) -> bool:
-    ny = now_utc.astimezone(NY_TZ)
-    if ny.weekday() >= 5:
-        return False
-    return SPX_CASH_OPEN_ET <= ny.time() < SPX_CASH_CLOSE_ET
+    return DEFAULT_MARKET_CALENDAR.is_rth_open(now_utc)
 
 
-def hyperliquid_sp500_price(state: LatestState) -> float | None:
+def hyperliquid_sp500_price(
+    state: LatestState,
+    *,
+    as_of: datetime | None = None,
+) -> float | None:
     quote = state.best_quote(HL_SP500_PROXY_ID)
-    if quote is None or quote.quality in BAD_QUALITIES:
+    if quote is None:
+        return None
+    decision = configured_quote_use_decision(quote, as_of=as_of or state.as_of)
+    if not decision.research_usable:
         return None
     return finite_float(quote.mid or quote.mark or quote.effective_price)
+
+
+def _actionable_chain_spot(
+    state: LatestState,
+    options_map: OptionsMap,
+    *,
+    as_of: datetime,
+) -> float | None:
+    if not options_map.expiries:
+        return None
+    front = options_map.expiries[0]
+    actionable_quotes = [
+        quote
+        for quote in _front_expiry_quotes(state, front.expiry)
+        if configured_quote_use_decision(quote, as_of=as_of).pricing_allowed
+    ]
+    return chain_implied_spot(pair_by_strike(actionable_quotes))
+
+
+def _actionable_tradfi_spot(
+    state: LatestState,
+    *,
+    as_of: datetime,
+) -> tuple[float | None, str | None]:
+    # Only cash SPX is level-compatible with SPXW option repricing. ES/MES
+    # remain independent liveness/basis anchors; SPY*10 is an ATM fallback.
+    for instrument_id, multiplier in (("index:SPX", 1.0),):
+        quote = state.best_quote(instrument_id)
+        if quote is None:
+            continue
+        decision = configured_quote_use_decision(quote, as_of=as_of)
+        price = finite_float(quote.effective_price)
+        if decision.pricing_allowed and price is not None and price > 0:
+            return price * multiplier, instrument_id
+    return None, None
+
+
+def _hl_basis_thresholds(pricing_source: str | None) -> tuple[float, float]:
+    if pricing_source and pricing_source.startswith("future:"):
+        warn_name = "HYPERLIQUID_PROXY_FUTURES_BASIS_WARN_BPS"
+        block_name = "HYPERLIQUID_PROXY_FUTURES_BASIS_BLOCK_BPS"
+        defaults = (80.0, 150.0)
+    else:
+        warn_name = "HYPERLIQUID_PROXY_BASIS_WARN_BPS"
+        block_name = "HYPERLIQUID_PROXY_BASIS_BLOCK_BPS"
+        defaults = (50.0, 100.0)
+    return (
+        float(os.getenv(warn_name, str(defaults[0]))),
+        float(os.getenv(block_name, str(defaults[1]))),
+    )
 
 
 def resolve_spx_spot(
@@ -511,48 +579,99 @@ def resolve_spx_spot(
     *,
     warnings: list[str] | None = None,
     now: datetime | None = None,
-) -> tuple[float | None, str]:
-    """Return (spot, source_label) for projections.
-
-    During SPX cash hours the chain-implied parity spot is the option
-    market's own view and wins. Outside cash hours SPXW GTH quotes go wide
-    and the parity spot drifts, so when it diverges from the Hyperliquid
-    SP500 perp (24/7 liquid) beyond the threshold, the perp wins.
-    """
+) -> SpotResolution:
+    """Separate research context from prices allowed to drive trade math."""
     now = now or datetime.now(tz=timezone.utc)
-    hl_price = hyperliquid_sp500_price(state)
-    if options_map.expiries:
-        front = options_map.expiries[0]
-        pairs = pair_by_strike(_front_expiry_quotes(state, front.expiry))
-        implied = chain_implied_spot(pairs)
-        if implied is not None:
-            if hl_price is not None:
-                divergence_bps = abs(implied / hl_price - 1.0) * 10_000.0
-                if divergence_bps > HL_DIVERGENCE_WARN_BPS:
-                    if not spx_cash_session_open(now):
-                        if warnings is not None:
-                            warnings.append(
-                                f"SPX 现货闭市: 链隐含 {implied:.1f} 与 HL perp "
-                                f"{hl_price:.1f} 分歧 {divergence_bps:.0f} bps,"
-                                "GTH 报价偏宽,参考价采用 perp"
-                            )
-                        return hl_price, "hl_perp"
-                    if warnings is not None:
-                        warnings.append(
-                            f"chain-implied spot {implied:.1f} diverges from "
-                            f"hyperliquid SP500 perp {hl_price:.1f} "
-                            f"({divergence_bps:.0f} bps); GTH quotes may be wide"
-                        )
-            return implied, "chain_implied"
+    hl_price = hyperliquid_sp500_price(state, as_of=now)
+    market_context = build_market_context(replace(state, as_of=now))
+    derived = market_context.get("derived")
+    market_gate = (
+        derived.get("hyperliquid_spx_proxy")
+        if isinstance(derived, dict)
+        and isinstance(derived.get("hyperliquid_spx_proxy"), dict)
+        else {}
+    )
+    chain_price = _actionable_chain_spot(state, options_map, as_of=now)
+    tradfi_price, tradfi_source = _actionable_tradfi_spot(state, as_of=now)
+    candidate_price = chain_price if chain_price is not None else tradfi_price
+    candidate_source = "chain_implied" if chain_price is not None else tradfi_source
+
+    divergence_bps = None
+    gate_state = "anchor_only"
+    pricing_allowed = candidate_price is not None
+    reason = "actionable chain or TradFi reference available"
     if hl_price is not None:
-        if warnings is not None:
-            warnings.append("spot from hyperliquid SP500 perp (chain parity unavailable)")
-        return hl_price, "hl_perp"
-    price = options_map.underlier.price
-    source = options_map.underlier.source or "-"
-    if price is not None and source.startswith("future:") and warnings is not None:
-        warnings.append("spot from futures reference; basis not adjusted")
-    return price, source
+        if candidate_price is None:
+            gate_state = "unanchored"
+            pricing_allowed = False
+            reason = "Hyperliquid is the only usable reference"
+        else:
+            divergence_bps = (hl_price / candidate_price - 1.0) * 10_000.0
+            warn_bps, block_bps = _hl_basis_thresholds(candidate_source)
+            if abs(divergence_bps) >= block_bps:
+                gate_state = "basis_blocked"
+                pricing_allowed = False
+                reason = "Hyperliquid divergence exceeds the basis block threshold"
+            elif abs(divergence_bps) >= warn_bps:
+                gate_state = "basis_warn"
+                pricing_allowed = False
+                reason = "Hyperliquid divergence exceeds the basis warning threshold"
+            else:
+                gate_state = "basis_ok"
+                pricing_allowed = True
+                reason = "Hyperliquid is anchored to actionable chain or TradFi evidence"
+        market_gate_state = str(market_gate.get("state") or "")
+        if market_gate_state in {
+            "unanchored_context_only",
+            "basis_warn",
+            "basis_blocked",
+        }:
+            gate_state = (
+                "unanchored"
+                if market_gate_state == "unanchored_context_only"
+                else market_gate_state
+            )
+            pricing_allowed = False
+            reason = str(market_gate.get("reason") or reason)
+            market_basis = market_gate.get("basis_bps")
+            if isinstance(market_basis, int | float):
+                divergence_bps = float(market_basis)
+    elif candidate_price is None:
+        gate_state = "missing"
+        pricing_allowed = False
+        reason = "No usable SPX research or pricing reference"
+
+    if not pricing_allowed and warnings is not None:
+        warnings.append(f"pricing blocked: {gate_state} ({reason})")
+
+    outside_cash = not spx_cash_session_open(now)
+    if hl_price is not None and (outside_cash or candidate_price is None):
+        research_price, research_source = hl_price, "hl_perp"
+    elif candidate_price is not None:
+        research_price, research_source = candidate_price, candidate_source
+    elif hl_price is not None:
+        research_price, research_source = hl_price, "hl_perp"
+    else:
+        research_price = None
+        research_source = None
+        fallback_source = options_map.underlier.source
+        fallback_quote = state.best_quote(fallback_source) if fallback_source else None
+        if fallback_quote is not None:
+            fallback_decision = configured_quote_use_decision(fallback_quote, as_of=now)
+            if fallback_decision.research_usable:
+                research_price = finite_float(options_map.underlier.price)
+                research_source = fallback_source
+
+    return SpotResolution(
+        research_price=research_price,
+        research_source=research_source,
+        pricing_price=candidate_price if pricing_allowed else None,
+        pricing_source=candidate_source if pricing_allowed else None,
+        pricing_allowed=pricing_allowed,
+        gate_state=gate_state,
+        reason=reason,
+        divergence_bps=divergence_bps,
+    )
 
 
 def build_candidates(
@@ -561,6 +680,7 @@ def build_candidates(
     warnings: list[str] | None = None,
     *,
     now: datetime | None = None,
+    resolution: SpotResolution | None = None,
 ) -> list[OrderCandidate]:
     local_warnings = warnings if warnings is not None else []
     if not options_map.expiries:
@@ -575,12 +695,10 @@ def build_candidates(
     strike_step_int = max(1, int(round(strike_step)))
 
     now_utc = now or state.as_of
-    spot, _spot_source = resolve_spx_spot(
-        state,
-        options_map,
-        warnings=local_warnings,
-        now=now_utc,
+    resolution = resolution or resolve_spx_spot(
+        state, options_map, warnings=local_warnings, now=now_utc
     )
+    spot = resolution.pricing_price if resolution.pricing_allowed else None
     if spot is None:
         local_warnings.append("missing underlier price")
         return []
@@ -693,6 +811,162 @@ def build_candidates(
             candidates.append(candidate)
 
     return candidates
+
+
+def _observed_option_reference(
+    quotes: list[Quote],
+    *,
+    target_strike: int,
+    right: str,
+    strike_step: float,
+    as_of: datetime,
+) -> dict[str, object]:
+    quote = _find_option_quote(
+        quotes,
+        target_strike=target_strike,
+        right=right,
+        strike_step=strike_step,
+    )
+    if quote is None:
+        return {
+            "contract_id": None,
+            "observed_bid": None,
+            "observed_ask": None,
+            "quote_quality": None,
+            "quote_freshness": None,
+            "quote_reason": "quote_missing",
+        }
+    decision = configured_quote_use_decision(quote, as_of=as_of)
+    research_usable = decision.research_usable
+    return {
+        "contract_id": quote.instrument.canonical_id,
+        "observed_bid": finite_float(quote.bid) if research_usable else None,
+        "observed_ask": finite_float(quote.ask) if research_usable else None,
+        "quote_quality": (
+            quote.quality.value if hasattr(quote.quality, "value") else str(quote.quality)
+        ),
+        "quote_freshness": decision.freshness.value,
+        "quote_reason": decision.reason,
+    }
+
+
+def _research_candidates(
+    state: LatestState,
+    options_map: OptionsMap,
+    *,
+    research_price: float | None,
+    as_of: datetime,
+) -> list[dict[str, object]]:
+    """Scenario locations with observed quotes, never executable math."""
+
+    if not options_map.expiries:
+        return []
+    front = options_map.expiries[0]
+    quotes = _front_expiry_quotes(state, front.expiry)
+    pairs = pair_by_strike(quotes)
+    strike_step = median_strike_step(sorted(pairs)) if pairs else 5.0
+    strike_step_int = max(1, int(round(strike_step)))
+    flip_level = (
+        front.gamma_flip_zone[0]
+        if front.gamma_flip_zone is not None
+        else front.zero_gamma
+    )
+    scenarios = (
+        (front.put_wall, "put_wall"),
+        (flip_level, "flip"),
+        (front.call_wall, "call_wall"),
+    )
+    payload: list[dict[str, object]] = []
+    for level, level_kind in scenarios:
+        if level is None:
+            continue
+        target_strike = round_to_step(level, strike_step_int)
+        payload.append(
+            {
+                "level": level,
+                "level_kind": level_kind,
+                "distance_points": (
+                    round(level - research_price, 1)
+                    if research_price is not None
+                    else None
+                ),
+                "strike": target_strike,
+                "observed_options": [
+                    {
+                        "right": right,
+                        **_observed_option_reference(
+                            quotes,
+                            target_strike=target_strike,
+                            right=right,
+                            strike_step=strike_step,
+                            as_of=as_of,
+                        ),
+                    }
+                    for right in ("C", "P")
+                ],
+            }
+        )
+    return payload
+
+
+def _research_wall_ladder(
+    state: LatestState,
+    options_map: OptionsMap,
+    *,
+    research_price: float | None,
+    as_of: datetime,
+) -> dict[str, list[dict[str, object]]]:
+    """Wall locations and observed markets with all model outputs omitted."""
+
+    ladder: dict[str, list[dict[str, object]]] = {"call_walls": [], "put_walls": []}
+    if not options_map.expiries:
+        return ladder
+    front = options_map.expiries[0]
+    quotes = _front_expiry_quotes(state, front.expiry)
+    pairs = pair_by_strike(quotes)
+    strike_step = median_strike_step(sorted(pairs)) if pairs else 5.0
+    strike_step_int = max(1, int(round(strike_step)))
+    wall_groups: tuple[tuple[str, tuple[object, ...], float | None], ...] = (
+        ("call_walls", tuple(front.call_walls), front.call_wall),
+        ("put_walls", tuple(front.put_walls), front.put_wall),
+    )
+    for key, configured_walls, primary in wall_groups:
+        walls = list(configured_walls)
+        if not walls and primary is not None:
+            walls = [None]
+        for wall in walls:
+            strike = finite_float(getattr(wall, "strike", primary))
+            if strike is None:
+                continue
+            target_strike = round_to_step(strike, strike_step_int)
+            ladder[key].append(
+                {
+                    "strike": strike,
+                    "gex": finite_float(getattr(wall, "gex", None)),
+                    "open_interest": finite_float(getattr(wall, "open_interest", None)),
+                    "volume": finite_float(getattr(wall, "volume", None)),
+                    "distance_points": (
+                        round(strike - research_price, 1)
+                        if research_price is not None
+                        else None
+                    ),
+                    "option_strike": target_strike,
+                    "observed_options": [
+                        {
+                            "right": right,
+                            **_observed_option_reference(
+                                quotes,
+                                target_strike=target_strike,
+                                right=right,
+                                strike_step=strike_step,
+                                as_of=as_of,
+                            ),
+                        }
+                        for right in ("C", "P")
+                    ],
+                }
+            )
+    return ladder
 
 
 def _wall_rung_option_ref(
@@ -1646,8 +1920,15 @@ def build_order_payload(state: LatestState, *, now: datetime | None = None) -> d
     if front is not None and front.gex_quality == "no_open_interest_gex":
         warnings.append("no open interest; walls unavailable")
 
-    spot, spot_source = resolve_spx_spot(state, options_map, now=now)
-    candidates = build_candidates(state, options_map, warnings, now=now)
+    resolution = resolve_spx_spot(state, options_map, warnings=warnings, now=now)
+    pricing_spot = resolution.pricing_price if resolution.pricing_allowed else None
+    candidates = build_candidates(
+        state,
+        options_map,
+        warnings,
+        now=now,
+        resolution=resolution,
+    )
     beijing = now.astimezone(SHANGHAI_TZ)
 
     # Day move vs expected move: the writer's anti-FOMO anchor. "The drop has
@@ -1656,7 +1937,9 @@ def build_order_payload(state: LatestState, *, now: datetime | None = None) -> d
     spx_quote = state.best_quote("index:SPX")
     prior_close = finite_float(spx_quote.close) if spx_quote is not None else None
     day_move_points = (
-        round(spot - prior_close, 1) if spot is not None and prior_close else None
+        round(pricing_spot - prior_close, 1)
+        if pricing_spot is not None and prior_close
+        else None
     )
     em_used_fraction = None
     if day_move_points is not None and expected_move_points and expected_move_points > 0:
@@ -1666,18 +1949,56 @@ def build_order_payload(state: LatestState, *, now: datetime | None = None) -> d
         "kind": "order_map",
         "as_of": state.as_of.isoformat(),
         "beijing_time": beijing.strftime("%H:%M"),
-        "trading_date": now.astimezone(NY_TZ).date().isoformat(),
+        "trading_date": DEFAULT_MARKET_CALENDAR.research_expiry(now).isoformat(),
         "underlier": {
-            "price": spot if spot is not None else options_map.underlier.price,
-            "source": spot_source,
+            "price": pricing_spot,
+            "source": resolution.pricing_source if resolution.pricing_allowed else None,
         },
+        "research_reference": {
+            "price": resolution.research_price,
+            "source": resolution.research_source,
+        },
+        "pricing_reference": {
+            "price": pricing_spot,
+            "source": resolution.pricing_source if resolution.pricing_allowed else None,
+            "pricing_allowed": resolution.pricing_allowed,
+            "gate_state": resolution.gate_state,
+            "reason": resolution.reason,
+            "divergence_bps": resolution.divergence_bps,
+        },
+        "pricing_allowed": resolution.pricing_allowed,
+        "research_only": resolution.research_only,
         "expiry": expiry,
         "expected_move_points": expected_move_points,
         "candidates": [asdict(candidate) for candidate in candidates],
+        "research_candidates": (
+            _research_candidates(
+                state,
+                options_map,
+                research_price=resolution.research_price,
+                as_of=now,
+            )
+            if resolution.research_only
+            else []
+        ),
         "gamma_state": gamma_state,
         "zero_gamma": zero_gamma,
         "flip_zone": flip_zone,
-        "wall_ladder": _wall_ladder_payload(state, options_map, spot, now=now),
+        "wall_ladder": (
+            _wall_ladder_payload(state, options_map, pricing_spot, now=now)
+            if resolution.pricing_allowed
+            else {"call_walls": [], "put_walls": []}
+        ),
+        "research_wall_ladder": (
+            _research_wall_ladder(
+                state,
+                options_map,
+                research_price=resolution.research_price,
+                as_of=now,
+            )
+            if resolution.research_only
+            else {"call_walls": [], "put_walls": []}
+        ),
         "wall_method": front.wall_method if front is not None else None,
         "day_move": {
             "prior_close": prior_close,
@@ -1685,7 +2006,9 @@ def build_order_payload(state: LatestState, *, now: datetime | None = None) -> d
             "em_used_fraction": em_used_fraction,
         },
         "rn_density": (
-            front.rn_density.to_dict() if front is not None and front.rn_density else None
+            front.rn_density.to_dict()
+            if resolution.pricing_allowed and front is not None and front.rn_density
+            else None
         ),
         "vol_context": {
             "vix": _index_value(state, "index:VIX"),
@@ -1693,7 +2016,7 @@ def build_order_payload(state: LatestState, *, now: datetime | None = None) -> d
             "vvix": _index_value(state, "index:VVIX"),
             "skew": _index_value(state, "index:SKEW"),
         },
-        "hl_sp500_perp": hyperliquid_sp500_price(state),
+        "hl_sp500_perp": hyperliquid_sp500_price(state, as_of=now),
         "es_last": _index_value(state, "future:ES"),
         "session_phase": session_phase(now),
         "warnings": list(dict.fromkeys(warnings)),
@@ -1702,6 +2025,13 @@ def build_order_payload(state: LatestState, *, now: datetime | None = None) -> d
 
 def _payload_is_thin(payload: dict[str, Any]) -> bool:
     """True when the snapshot caught a mid-rotation flush (missing spot/OI/plays)."""
+    research_reference = (
+        payload.get("research_reference")
+        if isinstance(payload.get("research_reference"), dict)
+        else {}
+    )
+    if payload.get("research_only") is True and research_reference.get("price") is not None:
+        return False
     underlier = payload.get("underlier") if isinstance(payload.get("underlier"), dict) else {}
     if underlier.get("price") is None:
         return True
@@ -1736,7 +2066,7 @@ def build_order_payload_with_retry(
     payload: dict[str, Any] = {}
     state: LatestState | None = None
     for attempt in range(attempts):
-        state = LatestStateStore(storage_settings).load()
+        state = LatestStateStore(storage_settings).load(now=now)
         payload = build_order_payload(state, now=now)
         if not _payload_is_thin(payload):
             break
@@ -1948,7 +2278,80 @@ def _candidate_by_play(payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return mapped
 
 
+def render_research_only_template(
+    payload: dict[str, Any],
+    *,
+    title: str = "研究地图",
+) -> str:
+    reference = (
+        payload.get("research_reference")
+        if isinstance(payload.get("research_reference"), dict)
+        else {}
+    )
+    pricing = (
+        payload.get("pricing_reference")
+        if isinstance(payload.get("pricing_reference"), dict)
+        else {}
+    )
+    lines = [
+        f"【{title} {payload.get('beijing_time') or '-'}】(0DTE={payload.get('expiry') or '-'})",
+        (
+            f"研究参考: {_dash(reference.get('price'))}"
+            f"({reference.get('source') or '-'}); 不可执行定价"
+        ),
+        (
+            f"定价闸门: {pricing.get('gate_state') or '-'} — "
+            f"{pricing.get('reason') or '缺少可执行锚点'}"
+        ),
+        (
+            f"gamma: {payload.get('gamma_state') or '-'}, "
+            f"zero gamma {_dash(payload.get('zero_gamma'))}, "
+            f"预期波幅 ±{_dash(payload.get('expected_move_points'))} 点"
+        ),
+    ]
+    candidates = payload.get("research_candidates")
+    if isinstance(candidates, list):
+        for item in candidates:
+            if not isinstance(item, dict):
+                continue
+            distance = item.get("distance_points")
+            distance_text = (
+                f"{float(distance):+.1f}点"
+                if isinstance(distance, (int, float))
+                else "距离未知"
+            )
+            observed_markets: list[str] = []
+            observed_options = item.get("observed_options")
+            if isinstance(observed_options, list):
+                for observed in observed_options:
+                    if not isinstance(observed, dict):
+                        continue
+                    quality = observed.get("quote_quality") or "unknown"
+                    freshness = observed.get("quote_freshness") or "unknown"
+                    observed_markets.append(
+                        f"{item.get('strike')}{observed.get('right') or ''} "
+                        f"{_fmt_premium(observed.get('observed_bid'))}/"
+                        f"{_fmt_premium(observed.get('observed_ask'))} "
+                        f"[{quality}/{freshness}]"
+                    )
+            lines.append(
+                f"研究情景: {item.get('level_kind') or '-'} {_dash(item.get('level'))} "
+                f"({distance_text}); 观察报价 "
+                f"{'; '.join(observed_markets) if observed_markets else '-'}"
+            )
+    divergence = pricing.get("divergence_bps")
+    if isinstance(divergence, (int, float)):
+        lines.append(f"HL 与定价候选分歧: {float(divergence):+.0f} bps")
+    lines.append("仅供研究观察：无模型重定价、触达概率、ETA、限价或下单建议。")
+    warnings = payload.get("warnings")
+    if isinstance(warnings, list) and warnings:
+        lines.append(f"数据警告: {'; '.join(str(item) for item in warnings)}")
+    return "\n".join(lines)
+
+
 def render_template(payload: dict[str, Any]) -> str:
+    if payload.get("research_only") is True:
+        return render_research_only_template(payload)
     trading_date = payload.get("trading_date") or "-"
     beijing_time = payload.get("beijing_time") or "14:00"
     expiry = payload.get("expiry") or "-"
@@ -2064,6 +2467,16 @@ def build_order_prompt(
     template: str,
     previous_push: dict[str, Any] | None = None,
 ) -> str:
+    if payload.get("research_only") is True:
+        return "\n".join(
+            (
+                "这是 research_only 市场观察。只复述研究参考、闸门原因、结构位距离和原始 bid/ask。",
+                "不得给挂单、限价、重定价、触达概率、ETA、买卖建议或可执行措辞。",
+                "首行写『研究状态:』，末行明确『不可执行定价』。",
+                "JSON:" + json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+                "模板:" + template,
+            )
+        )
     return "\n".join(
         (
             "这条是当天第一张『挂单地图』。搭档下午刚坐到屏幕前，要拿这张图定今天的埋伏方案：挂什么单、挂什么价、赌的是什么。",
@@ -2123,25 +2536,34 @@ def send_order_map(
     template = render_template(payload)
     if extra_header:
         template = f"{extra_header}\n{template}"
-    text, writer = generate_push_text(
-        template,
-        build_order_prompt(payload, template, previous_push),
-        settings,
-        runner=runner,
-    )
+    research_only = payload.get("research_only") is True
+    if research_only:
+        text, writer = template, "template"
+    else:
+        text, writer = generate_push_text(
+            template,
+            build_order_prompt(payload, template, previous_push),
+            settings,
+            runner=runner,
+        )
 
     delivery_sinks = deliver_trade_push(
         settings,
-        title="挂单地图",
+        title="研究状态" if research_only else "挂单地图",
         text=text,
-        kind="order_map",
-        lane="trade",
-        friend=True,
+        kind="status" if research_only else "order_map",
+        lane="ops" if research_only else "trade",
+        friend=not research_only,
         runner=runner,
     )
     delivered_ok = any_delivery_ok(delivery_sinks)
-    if not im_delivery_ok(delivery_sinks):
-        append_missed(settings.missed_queue_path, text, kind="order_map", at=now)
+    if not research_only and not im_delivery_ok(delivery_sinks):
+        append_missed(
+            settings.missed_queue_path,
+            text,
+            kind="order_map_research" if research_only else "order_map",
+            at=now,
+        )
 
     return {
         "text": text,
@@ -2173,7 +2595,6 @@ MATERIAL_EM_REL_CHANGE = 0.20
 
 STATUS_WINDOW_START = time(7, 30)
 STATUS_WINDOW_END_EARLY = time(1, 30)  # inclusive last fire
-US_OPEN_ET = time(9, 30)
 
 
 def payload_fingerprint(payload: dict[str, Any]) -> dict[str, Any]:
@@ -2248,6 +2669,8 @@ def within_status_window(now_utc: datetime) -> bool:
     01:30 is inclusive.
     """
     local = now_utc.astimezone(SHANGHAI_TZ)
+    if not exchange_session_relevant(now_utc):
+        return False
     if local.time() >= STATUS_WINDOW_START:
         return local.weekday() < 5
     if local.time() <= STATUS_WINDOW_END_EARLY:
@@ -2255,9 +2678,32 @@ def within_status_window(now_utc: datetime) -> bool:
     return False
 
 
+def exchange_session_relevant(now_utc: datetime) -> bool:
+    local = now_utc.astimezone(SHANGHAI_TZ)
+    associated_date = local.date()
+    if local.time() < STATUS_WINDOW_START:
+        associated_date -= timedelta(days=1)
+    return DEFAULT_MARKET_CALENDAR.is_trading_day(associated_date)
+
+
 def minutes_to_open(now_utc: datetime) -> int | None:
     ny = now_utc.astimezone(NY_TZ)
-    open_dt = ny.replace(hour=US_OPEN_ET.hour, minute=US_OPEN_ET.minute, second=0, microsecond=0)
+    current_session = DEFAULT_MARKET_CALENDAR.session(ny.date())
+    if current_session is not None:
+        if current_session.open_at <= ny < current_session.close_at:
+            return None
+        if ny < current_session.open_at:
+            open_dt = current_session.open_at
+        else:
+            next_day = DEFAULT_MARKET_CALENDAR.next_trading_day(ny.date())
+            next_session = DEFAULT_MARKET_CALENDAR.session(next_day)
+            assert next_session is not None
+            open_dt = next_session.open_at
+    else:
+        next_day = DEFAULT_MARKET_CALENDAR.next_trading_day(ny.date())
+        next_session = DEFAULT_MARKET_CALENDAR.session(next_day)
+        assert next_session is not None
+        open_dt = next_session.open_at
     if ny >= open_dt:
         return None
     return int((open_dt - ny).total_seconds() // 60)
@@ -2272,7 +2718,6 @@ def minutes_to_open(now_utc: datetime) -> int | None:
 
 USER_DAY_START_BJ = time(7, 30)
 USER_DAY_END_BJ = time(1, 0)  # bedtime: positions after this are unattended
-US_CLOSE_ET = time(16, 0)
 
 SESSION_PHASES_ET: tuple[tuple[time, time, str, str, str], ...] = (
     (
@@ -2342,18 +2787,46 @@ def session_phase(now_utc: datetime) -> dict[str, Any]:
             name, name_cn, traits = phase_name, phase_cn, phase_traits
             break
 
-    open_dt = ny.replace(hour=US_OPEN_ET.hour, minute=US_OPEN_ET.minute, second=0, microsecond=0)
-    close_dt = ny.replace(hour=US_CLOSE_ET.hour, minute=US_CLOSE_ET.minute, second=0, microsecond=0)
-    if ny >= close_dt:
-        # Evening: count down to the NEXT session's open (skip weekends).
-        open_dt += timedelta(days=1)
-        while open_dt.weekday() >= 5:
-            open_dt += timedelta(days=1)
+    current_session = DEFAULT_MARKET_CALENDAR.session(ny.date())
+    if (
+        current_session is None
+        and time(9, 30) <= ny.time() < time(16, 0)
+    ):
+        name, name_cn, traits = (
+            "market_closed",
+            "休市",
+            "美股现金市场休市; 仅保留研究上下文",
+        )
+    if current_session is not None and ny < current_session.close_at:
+        open_dt = current_session.open_at
+    else:
+        next_day = DEFAULT_MARKET_CALENDAR.next_trading_day(ny.date())
+        next_session = DEFAULT_MARKET_CALENDAR.session(next_day)
+        assert next_session is not None
+        open_dt = next_session.open_at
+        if (
+            current_session is not None
+            and current_session.early_close
+            and ny >= current_session.close_at
+            and ny.time() < time(18, 0)
+        ):
+            name, name_cn, traits = (
+                "post_close",
+                "盘后过渡",
+                "现金已收、期货重定价; 复盘与次日准备",
+            )
     minutes_to_us_open = int((open_dt - ny).total_seconds() // 60) if ny < open_dt else None
     minutes_since_us_open = (
-        int((ny - open_dt).total_seconds() // 60) if open_dt <= ny < close_dt else None
+        int((ny - current_session.open_at).total_seconds() // 60)
+        if current_session is not None
+        and current_session.open_at <= ny < current_session.close_at
+        else None
     )
-    minutes_to_us_close = int((close_dt - ny).total_seconds() // 60) if ny < close_dt else None
+    minutes_to_us_close = (
+        int((current_session.close_at - ny).total_seconds() // 60)
+        if current_session is not None and ny < current_session.close_at
+        else None
+    )
 
     # Bedtime countdown: next Beijing 01:00. No countdown while asleep
     # (Beijing 01:00-07:30).
@@ -2411,7 +2884,7 @@ def load_order_map_state(state_path: str) -> dict[str, Any]:
 
 def within_send_window(now_utc: datetime) -> bool:
     local = now_utc.astimezone(SHANGHAI_TZ)
-    if local.weekday() >= 5:
+    if local.weekday() >= 5 or not exchange_session_relevant(now_utc):
         return False
     current = local.time()
     return BJ_WINDOW_START <= current < BJ_WINDOW_END
@@ -2475,6 +2948,8 @@ def render_status_template(
     changes: list[str],
     now_utc: datetime,
 ) -> str:
+    if payload.get("research_only") is True:
+        return render_research_only_template(payload, title="市场研究状态")
     beijing = now_utc.astimezone(SHANGHAI_TZ)
     phase = _session_phase_of(payload, now_utc)
     open_text = _phase_clock_text(phase)
@@ -2524,6 +2999,16 @@ def build_status_prompt(
     template: str,
     previous_push: dict[str, Any] | None = None,
 ) -> str:
+    if payload.get("research_only") is True:
+        return "\n".join(
+            (
+                "这是周期性 research_only 市场状态，不是交易提醒。",
+                "只说明研究参考、定价闸门、结构位距离和观察到的 bid/ask。",
+                "不得产生限价、概率、ETA、模型价格、买卖或下单建议；明确写不可执行定价。",
+                "JSON:" + json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+                "模板:" + template,
+            )
+        )
     return "\n".join(
         (
             "这条是『市场状态+挂单参考』二合一便签，北京 07:30 到次日 01:30 每 15 分钟一条。搭档已经按上一张地图挂好单了，"
@@ -2601,9 +3086,9 @@ def run_status(
     # Combined push: status narrative + the order-map limit table used to be
     # two interleaved 30-minute pushes; the map template rides along so the
     # writer (and the raw fallback) always carries concrete limit prices.
-    template = "\n".join(
-        (render_status_template(payload, changes, now), render_template(payload))
-    )
+    template = render_status_template(payload, changes, now)
+    if payload.get("research_only") is not True:
+        template = "\n".join((template, render_template(payload)))
 
     if args.dry_run:
         print(template)
@@ -2611,24 +3096,35 @@ def run_status(
         return 0
 
     settings = NotificationSettings.from_env()
-    text, writer = generate_push_text(
-        template,
-        build_status_prompt(payload, template, load_previous_push()),
-        settings,
-        runner=runner,
-    )
+    research_only = payload.get("research_only") is True
+    if research_only:
+        # Research status is deliberately deterministic: an unconstrained
+        # writer response must never turn proxy context into trade language.
+        text, writer = template, "template"
+    else:
+        text, writer = generate_push_text(
+            template,
+            build_status_prompt(payload, template, load_previous_push()),
+            settings,
+            runner=runner,
+        )
     delivery_sinks = deliver_trade_push(
         settings,
-        title="市场状态",
+        title="研究状态" if research_only else "市场状态",
         text=text,
         kind="status",
-        lane="trade",
-        friend=True,
+        lane="ops" if research_only else "trade",
+        friend=not research_only,
         runner=runner,
     )
     delivered_ok = any_delivery_ok(delivery_sinks)
-    if not im_delivery_ok(delivery_sinks):
-        append_missed(settings.missed_queue_path, text, kind="order_map_status", at=now)
+    if not research_only and not im_delivery_ok(delivery_sinks):
+        append_missed(
+            settings.missed_queue_path,
+            text,
+            kind="order_map_research" if research_only else "order_map_status",
+            at=now,
+        )
     im_ok = any(s.sink == "feishu" and s.ok for s in delivery_sinks)
     bark_ok = any(s.sink == "bark" and s.ok for s in delivery_sinks)
     feishu_ok = any(s.sink == "feishu" and s.ok for s in delivery_sinks)
@@ -2689,6 +3185,9 @@ def run_refresh(args: argparse.Namespace, *, now: datetime, state_path: str, tra
         return 0
 
     payload = build_order_payload_with_retry(StorageSettings.from_env(), now=now)
+    if payload.get("research_only") is True and not args.dry_run:
+        print(json.dumps({"skipped": True, "reason": "research_only_no_direct_map"}))
+        return 0
     if _payload_is_thin(payload) and not args.force:
         print(json.dumps({"skipped": True, "reason": "thin_snapshot_sampling_gap"}))
         return 0
@@ -2724,7 +3223,7 @@ def run(argv: list[str] | None = None, *, now: datetime | None = None) -> int:
     now = now or datetime.now(tz=timezone.utc)
     storage_settings = StorageSettings.from_env()
     state_path = default_state_path(storage_settings)
-    trading_date = now.astimezone(NY_TZ).date().isoformat()
+    trading_date = DEFAULT_MARKET_CALENDAR.research_expiry(now).isoformat()
 
     if args.status:
         return run_status(args, now=now, state_path=state_path, trading_date=trading_date)
@@ -2746,6 +3245,9 @@ def run(argv: list[str] | None = None, *, now: datetime | None = None) -> int:
     if args.dry_run:
         print(template)
         print(json.dumps({"dry_run": True}))
+        return 0
+    if payload.get("research_only") is True:
+        print(json.dumps({"skipped": True, "reason": "research_only_no_direct_map"}))
         return 0
 
     settings = NotificationSettings.from_env()

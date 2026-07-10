@@ -279,9 +279,12 @@ local Hermes daily report. It writes:
 - `data/latest/spx_options_review.md`
 - `/home/ubuntu/research/finance/daily/spx-options-review/latest-spx-options-review.md`
 
-The systemd timer `spx-spark-post-close-review.timer` runs Tuesday through
-Saturday at 07:15 Asia/Shanghai, which is after the US close plus two hours in
-both US daylight and standard time.
+The systemd timer `spx-spark-post-close-review.timer` runs Monday through
+Friday at 17:15 America/New_York. The application calendar still suppresses
+holidays and verifies report identity before publishing.
+`complete` is emitted only when the structured SPX/ES bucket, edge-recency,
+live-ratio, SPXW breadth/IV, and IV-surface coverage checks all pass; otherwise
+the JSON and Markdown reports remain explicitly `degraded` with measured checks.
 
 Install the 24h user service:
 

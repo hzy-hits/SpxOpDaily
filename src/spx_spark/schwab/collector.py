@@ -3,21 +3,27 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Any
 from urllib.error import HTTPError, URLError
-from zoneinfo import ZoneInfo
 
 from spx_spark.config import SchwabSettings, StorageSettings, env_csv
+from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR, ET
 from spx_spark.provider_adapter import persist_provider_snapshot
 from spx_spark.schwab.adapter import snapshot_from_chain_payload
 from spx_spark.schwab.verifier import SchwabClient, load_access_token
 
 
-def fetch_chain(client: SchwabClient, symbol: str, settings: SchwabSettings) -> Any:
-    ny = ZoneInfo("America/New_York")
-    today = datetime.now(tz=ny).date()
-    tomorrow = today + timedelta(days=1)
+def fetch_chain(
+    client: SchwabClient,
+    symbol: str,
+    settings: SchwabSettings,
+    *,
+    now: datetime | None = None,
+) -> Any:
+    current_expiry, next_expiry = DEFAULT_MARKET_CALENDAR.research_expiries(
+        now or datetime.now(tz=ET)
+    )
     _status, payload = client.get_json(
         "/marketdata/v1/chains",
         {
@@ -26,8 +32,8 @@ def fetch_chain(client: SchwabClient, symbol: str, settings: SchwabSettings) -> 
             "strategy": "SINGLE",
             "strikeCount": settings.option_chain_strike_count,
             "includeUnderlyingQuote": "true",
-            "fromDate": today.isoformat(),
-            "toDate": tomorrow.isoformat(),
+            "fromDate": current_expiry.isoformat(),
+            "toDate": next_expiry.isoformat(),
         },
     )
     return payload

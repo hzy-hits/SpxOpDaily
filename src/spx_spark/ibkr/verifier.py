@@ -88,6 +88,7 @@ class VerifyRow:
     und_price: float | None = None
     ticker_time: str | None = None
     last_update_at: str | None = None
+    request_id: int | None = None
     stale: bool | None = None
     error: str | None = None
 
@@ -191,15 +192,8 @@ def build_spxw_option_contracts(
 
 
 def prepare_ib_client(ib: Any, *, request_timeout_seconds: float) -> None:
-    """Start ib_async's background loop and bound blocking API calls.
+    """Bound blocking API calls without installing a Jupyter nested loop."""
 
-    Without ``util.startLoop()``, ``reqMktData`` on contracts missing ``conId``
-    can block forever instead of raising. Without ``RequestTimeout``, a broken
-    Gateway data farm (sec-def / HMDS) leaves ``qualifyContracts`` hanging.
-    """
-    from ib_async import util
-
-    util.startLoop()
     ib.RequestTimeout = request_timeout_seconds
 
 
@@ -321,6 +315,7 @@ def subscribe_contract(
     try:
         ticker = ib.reqMktData(contract, generic_ticks_for_contract(contract), False, False)
         row.subscribed = True
+        row.request_id = ticker_request_id(ib, ticker)
         return ticker
     except Exception as exc:  # noqa: BLE001
         if not allow_qualify_fallback or not needs_contract_qualification(exc):
@@ -342,10 +337,24 @@ def subscribe_contract(
         try:
             ticker = ib.reqMktData(contract, generic_ticks_for_contract(contract), False, False)
             row.subscribed = True
+            row.request_id = ticker_request_id(ib, ticker)
             return ticker
         except Exception as retry_exc:  # noqa: BLE001
             row.error = f"subscribe failed after qualify fallback: {retry_exc}"
             return None
+
+
+def ticker_request_id(ib: Any, ticker: Any) -> int | None:
+    wrapper = getattr(ib, "wrapper", None)
+    ticker_to_req_id = getattr(wrapper, "ticker2ReqId", None)
+    if ticker_to_req_id is None:
+        return None
+    try:
+        market_data_ids = ticker_to_req_id.get("mktData", ticker_to_req_id)
+        request_id = market_data_ids.get(ticker)
+    except (AttributeError, TypeError):
+        return None
+    return int(request_id) if isinstance(request_id, int) else None
 
 
 def needs_contract_qualification(exc: Exception) -> bool:
@@ -481,72 +490,42 @@ def midpoint(bid: float | None, ask: float | None) -> float | None:
 
 
 def estimate_atm_reference(rows: list[VerifyRow]) -> tuple[float | None, str]:
-    """SPX-scale reference for centering the option strike window.
+    """Conservative stateless ATM reference for one-shot diagnostics.
 
-    Fresh rows win over the priority order: outside cash hours SPX still
-    carries yesterday's close, and centering on it left the 2026-07-08
-    overnight session subscribed 70 points above the market (put walls then
-    jumped between rotation slices). Stale rows are only a last resort so a
-    plan can exist right after startup.
+    Persistent streaming uses AtmReferenceController. This compatibility
+    helper intentionally excludes raw ES (which needs qualified RTH basis)
+    and all stale fallbacks.
     """
     by_label = {row.label: row for row in rows}
-    # IBUS500 is IBKR's S&P 500 index CFD and quotes at the cash index level.
     candidates = (
         ("index:SPX", 1.0, "SPX"),
-        ("future:ES", 1.0, "ES"),
         ("cfd:IBUS500", 1.0, "IBUS500"),
         ("stock:SPY", 10.0, "SPY*10"),
     )
-    spx_row = by_label.get("index:SPX")
-    for require_fresh in (True, False):
-        for label, multiplier, name in candidates:
-            row = by_label.get(label)
-            if row is None:
-                continue
-            # stale is only False when a tick actually arrived recently
-            # (snapshot_rows sets it together with ticker_time). A closed
-            # market that never ticked since subscribe leaves stale=None and
-            # must not pass as fresh.
-            if require_fresh and row.stale is not False:
-                continue
-            price = first_present(
-                row.market_price, row.last, midpoint(row.bid, row.ask), row.close
-            )
-            if not price:
-                continue
-            value = price * multiplier
-            if label == "future:ES":
-                # The listed ES contract is the front quarterly (e.g. Sep) and
-                # carries tens of points of rate basis over cash. Estimate the
-                # basis from the two closes (both anchored at yesterday 16:00
-                # ET) so the strike window centers on the cash level.
-                basis = es_spx_close_basis(row, spx_row)
-                if basis is not None:
-                    return value - basis, ("ES_basis_adj" if require_fresh else "ES_basis_adj_stale")
-            return value, name if require_fresh else f"{name}_stale"
+    for label, multiplier, name in candidates:
+        row = by_label.get(label)
+        if row is None or row.stale is not False or row.market_data_type in {3, 4}:
+            continue
+        price = first_present(
+            row.market_price, row.last, midpoint(row.bid, row.ask), row.close
+        )
+        if price:
+            return price * multiplier, name
 
     return None, "none"
 
 
-def es_spx_close_basis(es_row: VerifyRow, spx_row: VerifyRow | None) -> float | None:
-    if spx_row is None or es_row.close is None or spx_row.close is None:
-        return None
-    basis = es_row.close - spx_row.close
-    # A sane quarterly carry is tens of points; anything larger means one of
-    # the closes is from a different session, so don't "correct" with it.
-    if abs(basis) > 120.0:
-        return None
-    return basis
-
-
-def cancel_subscriptions(ib: Any, subscriptions: dict[str, tuple[Any, VerifyRow]]) -> None:
+def cancel_subscriptions(ib: Any, subscriptions: dict[str, tuple[Any, VerifyRow]]) -> bool:
+    success = True
     for ticker, _ in subscriptions.values():
         if ticker is None:
             continue
         try:
-            ib.cancelMktData(ticker.contract)
+            if ib.cancelMktData(ticker.contract) is False:
+                success = False
         except Exception:  # noqa: BLE001
-            pass
+            success = False
+    return success
 
 
 def print_rows(rows: list[VerifyRow]) -> None:

@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 
 from spx_spark.config import SamplingSettings, default_spxw_expiry
+from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 
 
 VALID_GROUP_STRATEGIES = {"contiguous", "interleaved"}
@@ -116,10 +117,7 @@ def build_contracts(
 
 def next_weekday_expiry(expiry: str) -> str:
     parsed = datetime.strptime(expiry, "%Y%m%d").date()
-    parsed = parsed.fromordinal(parsed.toordinal() + 1)
-    while parsed.weekday() >= 5:
-        parsed = parsed.fromordinal(parsed.toordinal() + 1)
-    return parsed.strftime("%Y%m%d")
+    return DEFAULT_MARKET_CALENDAR.next_trading_day(parsed).strftime("%Y%m%d")
 
 
 def resolve_expiries(

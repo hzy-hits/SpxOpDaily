@@ -5,10 +5,11 @@ import json
 import math
 from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass
-from datetime import datetime, time as dt_time, timezone
+from datetime import datetime, timezone
 from typing import Any
 
-from spx_spark.config import StorageSettings, default_spxw_expiry, NY_TZ
+from spx_spark.config import StorageSettings
+from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 from spx_spark.marketdata import InstrumentType, MarketDataQuality, OptionRight, Provider, ProviderStatus, Quote
 from spx_spark.storage import LatestState, LatestStateStore
 
@@ -595,11 +596,12 @@ _MIN_TIME_TO_EXPIRY_YEARS = 15.0 / (60.0 * 24.0 * 365.0)
 
 
 def time_to_expiry_years(expiry: str, *, as_of: datetime) -> float:
-    """Years from as_of to expiry at 16:00 ET (365-day year), floored at 15 minutes."""
+    """Years to the calendar session close, floored at fifteen minutes."""
     expiry_date = datetime.strptime(expiry, "%Y%m%d").date()
-    expiry_dt = datetime.combine(expiry_date, dt_time(16, 0), tzinfo=NY_TZ)
-    as_of_ny = as_of.astimezone(NY_TZ)
-    delta_seconds = (expiry_dt - as_of_ny).total_seconds()
+    session = DEFAULT_MARKET_CALENDAR.session(expiry_date)
+    if session is None:
+        return _MIN_TIME_TO_EXPIRY_YEARS
+    delta_seconds = (session.close_at - as_of.astimezone(session.close_at.tzinfo)).total_seconds()
     if delta_seconds <= 0:
         return _MIN_TIME_TO_EXPIRY_YEARS
     years = delta_seconds / (365.0 * 24.0 * 3600.0)
@@ -1015,7 +1017,7 @@ def build_expiry_map(
         put_skew_25d = put_wing_iv - atm_iv if put_wing_iv is not None and atm_iv is not None else None
         call_skew_25d = call_wing_iv - atm_iv if call_wing_iv is not None and atm_iv is not None else None
 
-    intraday = expiry == default_spxw_expiry()
+    intraday = expiry == DEFAULT_MARKET_CALENDAR.research_expiry(as_of).strftime("%Y%m%d")
     gex_weighting = "oi_plus_volume" if intraday else "oi"
     gex_rows = (
         build_gex_by_strike(pairs, underlier=underlier, intraday=intraday) if underlier else []
@@ -1207,9 +1209,20 @@ def group_spxw_option_quotes(state: LatestState) -> dict[str, list[Quote]]:
 
 def build_options_map(state: LatestState) -> OptionsMap:
     underlier = select_underlier(state)
-    grouped = group_spxw_option_quotes(state)
+    all_grouped = group_spxw_option_quotes(state)
+    active_expiries = {
+        expiry.strftime("%Y%m%d")
+        for expiry in DEFAULT_MARKET_CALENDAR.research_expiries(state.as_of)
+    }
+    grouped = {
+        expiry: quotes
+        for expiry, quotes in all_grouped.items()
+        if expiry in active_expiries
+    }
 
     warnings: list[str] = []
+    if set(all_grouped) - set(grouped):
+        warnings.append("expired SPXW option rows suppressed after research rollover")
     underlier_mismatch = (
         underlier.source is not None and underlier.source in UNDERLIER_MISMATCH_SOURCES
     )

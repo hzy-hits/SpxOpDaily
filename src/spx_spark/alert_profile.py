@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import argparse
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 from spx_spark.config import NY_TZ
+from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 
 
 BJ_TZ = ZoneInfo("Asia/Shanghai")
@@ -275,6 +276,23 @@ def active_window(now: datetime | None = None) -> AlertWindow:
     # Friday evening ET is Saturday morning Beijing: ES is closed and the
     # reader is off; keep it quiet instead of the Beijing-morning watch.
     if weekday == 4 and current_time >= time(18, 0):
+        return QUIET_WINDOW
+    session = DEFAULT_MARKET_CALENDAR.session(now_et.date())
+    if session is None:
+        return QUIET_WINDOW
+    if session.early_close and session.close_at - timedelta(hours=1) <= now_et < session.close_at:
+        close_window = next(window for window in WINDOWS if window.name == "close_one_hour")
+        return replace(
+            close_window,
+            start_et=(session.close_at - timedelta(hours=1)).time(),
+            stop_et=session.close_at.time(),
+        )
+    if session.early_close and session.close_at <= now_et < now_et.replace(
+        hour=16,
+        minute=0,
+        second=0,
+        microsecond=0,
+    ):
         return QUIET_WINDOW
 
     for window in WINDOWS:

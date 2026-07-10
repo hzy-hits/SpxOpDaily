@@ -6,7 +6,7 @@ import sys
 import time
 from collections import Counter
 from dataclasses import asdict, dataclass
-from datetime import datetime, time as datetime_time, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +24,7 @@ from spx_spark.ibkr.verifier import (
     qualify_and_subscribe,
     snapshot_rows,
 )
+from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 
 
 P0_INDEX_LABELS = (
@@ -208,18 +209,24 @@ def summarize_group(
 
 
 def is_regular_trading_hours(now: datetime) -> bool:
-    now_ny = now.astimezone(NY_TZ)
-    return now_ny.weekday() < 5 and datetime_time(9, 30) <= now_ny.time() < datetime_time(16, 0)
+    return DEFAULT_MARKET_CALENDAR.is_rth_open(now)
 
 
 def trading_window(now: datetime) -> dict[str, Any]:
     now_ny = now.astimezone(NY_TZ)
+    session = DEFAULT_MARKET_CALENDAR.session(now_ny.date())
     return {
         "timezone": str(NY_TZ),
         "now": now_ny.isoformat(),
         "weekday": now_ny.strftime("%A"),
         "regular_trading_hours": is_regular_trading_hours(now_ny),
-        "regular_session": "09:30-16:00 America/New_York",
+        "regular_session": (
+            f"{session.open_at.strftime('%H:%M')}-{session.close_at.strftime('%H:%M')} "
+            "America/New_York"
+            if session is not None
+            else "closed"
+        ),
+        "early_close": session.early_close if session is not None else False,
     }
 
 

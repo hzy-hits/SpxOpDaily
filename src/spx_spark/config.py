@@ -5,9 +5,8 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
-
-NY_TZ = ZoneInfo("America/New_York")
-SPXW_ROLL_AFTER_ET = time(16, 15)
+from spx_spark.market_calendar import ET as NY_TZ
+from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR, default_spxw_expiry
 
 DEFAULT_SLOW_POLL_LABELS = (
     "index:VIX",
@@ -104,22 +103,6 @@ def next_equity_futures_month(today: date | None = None) -> str:
                 candidates.append(third_friday)
     expiry = min(candidates)
     return f"{expiry.year}{expiry.month:02d}"
-
-
-def default_spxw_expiry(today: date | None = None, *, now: datetime | None = None) -> str:
-    """Return the active SPXW expiry.
-
-    显式传 today 时行为不变(测试/CLI 用)。today 为 None 时取纽约当前时刻;
-    若已过 16:15 ET(当日 0DTE 已结算),滚动到下一天;周末照旧跳到下个工作日。
-    """
-    if today is None:
-        current = (now or datetime.now(tz=NY_TZ)).astimezone(NY_TZ)
-        today = current.date()
-        if current.time() >= SPXW_ROLL_AFTER_ET:
-            today += timedelta(days=1)
-    while today.weekday() >= 5:
-        today += timedelta(days=1)
-    return today.strftime("%Y%m%d")
 
 
 def _third_friday(year: int, month: int) -> date:
@@ -236,6 +219,7 @@ class IbkrStreamSettings:
     slow_poll_interval_seconds: float = 300.0
     slow_poll_hold_seconds: float = 10.0
     slow_poll_chunk_size: int = 6
+    atm_state_path: str = ""
 
     @classmethod
     def from_env(cls) -> "IbkrStreamSettings":
@@ -246,7 +230,7 @@ class IbkrStreamSettings:
             client_id=env_int("IBKR_STREAM_CLIENT_ID", 172),
             flush_interval_seconds=env_float("IBKR_STREAM_FLUSH_SECONDS", 5.0),
             policy_check_seconds=env_float("IBKR_STREAM_POLICY_CHECK_SECONDS", 30.0),
-            replan_drift_points=env_float("IBKR_STREAM_REPLAN_DRIFT_POINTS", 10.0),
+            replan_drift_points=env_float("IBKR_STREAM_REPLAN_DRIFT_POINTS", 20.0),
             max_option_lines=env_int("IBKR_STREAM_MAX_OPTION_LINES", 60),
             hot_lane_share=env_float("IBKR_STREAM_HOT_LANE_SHARE", 0.7),
             reconnect_min_seconds=env_float("IBKR_STREAM_RECONNECT_MIN_SECONDS", 5.0),
@@ -273,6 +257,7 @@ class IbkrStreamSettings:
             ),
             slow_poll_hold_seconds=env_float("IBKR_STREAM_SLOW_POLL_HOLD_SECONDS", 10.0),
             slow_poll_chunk_size=env_int("IBKR_STREAM_SLOW_POLL_CHUNK_SIZE", 6),
+            atm_state_path=env_str("IBKR_ATM_STATE_PATH", ""),
         )
 
 
@@ -363,8 +348,17 @@ class RuntimePolicySettings:
             now = now.replace(tzinfo=timezone)
         else:
             now = now.astimezone(timezone)
-        if self.weekend_maintenance_mode and now.weekday() >= 5:
-            return False
+        if self.weekend_maintenance_mode:
+            now_et = now.astimezone(NY_TZ)
+            calendar_day = now_et.date()
+            if not DEFAULT_MARKET_CALENDAR.is_trading_day(calendar_day):
+                next_wall_day = calendar_day + timedelta(days=1)
+                futures_reopen = (
+                    now_et.time() >= time(18, 0)
+                    and DEFAULT_MARKET_CALENDAR.is_trading_day(next_wall_day)
+                )
+                if not futures_reopen:
+                    return False
         return self.ibkr_window_is_open(now)
 
     @property

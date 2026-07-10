@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
+import spx_spark.ibkr.stream_collector as stream_collector_module
 from spx_spark.config import IbkrStreamSettings
 from spx_spark.ibkr.stream_collector import (
+    StreamCollector,
     build_spy_option_strikes,
     estimate_spy_reference,
     spy_option_contracts,
@@ -70,3 +74,99 @@ def test_stream_settings_read_spy_lane_env(monkeypatch) -> None:
     monkeypatch.setenv("IBKR_STREAM_SPY_OPTION_LINES", "0")
     settings = IbkrStreamSettings.from_env()
     assert settings.spy_option_lines == 0
+
+
+def test_unchanged_spy_plan_is_not_requalified(monkeypatch) -> None:
+    collector = object.__new__(StreamCollector)
+    collector.skip_options = False
+    collector.stream_settings = SimpleNamespace(spy_option_lines=4, spy_strike_step=2)
+    collector.ibkr_settings = SimpleNamespace(qualify_contracts=False)
+    collector.ib = object()
+    collector.spy_subs = {}
+    collector.spy_plan_key = None
+    qualify_calls: list[list[tuple[str, str, object]]] = []
+
+    def fake_qualify(
+        ib,
+        contracts,
+        *,
+        qualify=False,
+    ):
+        qualify_calls.append(contracts)
+        return {
+            label: (
+                SimpleNamespace(contract=contract),
+                VerifyRow(label=label, kind=kind, symbol="SPY", subscribed=True),
+            )
+            for label, kind, contract in contracts
+        }
+
+    monkeypatch.setattr(stream_collector_module, "qualify_and_subscribe", fake_qualify)
+    monkeypatch.setattr(stream_collector_module, "cancel_subscriptions", lambda *args: None)
+    rows = [
+        VerifyRow(
+            label="stock:SPY",
+            kind="stock",
+            symbol="SPY",
+            market_price=628.3,
+        )
+    ]
+
+    collector.ensure_spy_option_plan(rows, expiry="20260707")
+    collector.ensure_spy_option_plan(rows, expiry="20260707")
+
+    assert len(qualify_calls) == 1
+    assert collector.spy_plan_key == ("20260707", 628)
+
+
+def test_changed_spy_plan_retains_overlap_and_qualifies_only_additions(monkeypatch) -> None:
+    collector = object.__new__(StreamCollector)
+    collector.skip_options = False
+    collector.stream_settings = SimpleNamespace(spy_option_lines=4, spy_strike_step=2)
+    collector.ibkr_settings = SimpleNamespace(qualify_contracts=False)
+    collector.ib = object()
+    collector.spy_subs = {}
+    collector.spy_plan_key = None
+    qualify_labels: list[list[str]] = []
+    canceled_labels: list[set[str]] = []
+
+    def fake_qualify(ib, contracts, *, qualify=False):
+        qualify_labels.append([label for label, _, _ in contracts])
+        return {
+            label: (
+                SimpleNamespace(contract=contract),
+                VerifyRow(label=label, kind=kind, symbol="SPY", subscribed=True),
+            )
+            for label, kind, contract in contracts
+        }
+
+    def fake_cancel(ib, subscriptions):
+        canceled_labels.append(set(subscriptions))
+
+    monkeypatch.setattr(stream_collector_module, "qualify_and_subscribe", fake_qualify)
+    monkeypatch.setattr(stream_collector_module, "cancel_subscriptions", fake_cancel)
+    first_rows = [
+        VerifyRow(label="stock:SPY", kind="stock", symbol="SPY", market_price=628.3)
+    ]
+    second_rows = [
+        VerifyRow(label="stock:SPY", kind="stock", symbol="SPY", market_price=630.3)
+    ]
+
+    collector.ensure_spy_option_plan(first_rows, expiry="20260707")
+    retained = {
+        label: subscription
+        for label, subscription in collector.spy_subs.items()
+        if ":628:" in label
+    }
+    collector.ensure_spy_option_plan(second_rows, expiry="20260707")
+
+    assert len(qualify_labels) == 2
+    assert set(qualify_labels[1]) == {
+        "option:SPY:20260707:630:C",
+        "option:SPY:20260707:630:P",
+    }
+    assert {label for labels in canceled_labels for label in labels} == {
+        "option:SPY:20260707:626:C",
+        "option:SPY:20260707:626:P",
+    }
+    assert all(collector.spy_subs[label] is subscription for label, subscription in retained.items())

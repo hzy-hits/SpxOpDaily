@@ -941,7 +941,7 @@ def test_notifier_filters_smart_wallet_alerts_from_human_push(tmp_path) -> None:
     assert calls == []
 
 
-def test_notifier_allows_broker_unavailable_proxy_watch(tmp_path) -> None:
+def test_notifier_filters_unanchored_proxy_watch(tmp_path) -> None:
     calls: list[list[str]] = []
 
     def runner(command: list[str], timeout_seconds: float) -> subprocess.CompletedProcess[str]:
@@ -957,7 +957,8 @@ def test_notifier_allows_broker_unavailable_proxy_watch(tmp_path) -> None:
             "title": "SPX fallback monitor down 35 bps",
             "detail": "Broker feed unavailable; open trading device and verify SPX/SPXW.",
             "quality": "degraded",
-            "source_gate": "broker_unavailable_fallback",
+            "research_only": True,
+            "source_gate": "hyperliquid_proxy_unanchored",
         }
     ]
 
@@ -969,9 +970,9 @@ def test_notifier_allows_broker_unavailable_proxy_watch(tmp_path) -> None:
         now=datetime(2026, 7, 7, 0, 0, tzinfo=timezone.utc),
     )
 
-    assert result.selected_count == 1
-    assert result.sent_count == 1
-    assert any(s.sink == "feishu" and s.ok for s in result.sinks)
+    assert result.selected_count == 0
+    assert result.sent_count == 0
+    assert calls == []
 
 
 def test_notifier_allows_ibkr_session_state_events(tmp_path) -> None:

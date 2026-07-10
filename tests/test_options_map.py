@@ -25,6 +25,7 @@ from spx_spark.options_map import (
     pair_by_strike,
     signed_gex,
     structure_quality_ok,
+    time_to_expiry_years,
     wing_iv_at_delta,
     zero_gamma_spot_scan,
 )
@@ -68,6 +69,14 @@ def make_option(
             model="test",
         ),
     )
+
+
+def test_time_to_expiry_uses_early_close_session() -> None:
+    as_of = datetime(2026, 11, 27, 17, 0, tzinfo=timezone.utc)  # 12:00 ET
+
+    years = time_to_expiry_years("20261127", as_of=as_of)
+
+    assert years == pytest.approx(1.0 / (365.0 * 24.0))
 
 
 def make_state(*quotes: Quote, now: datetime) -> LatestState:

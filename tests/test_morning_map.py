@@ -4,6 +4,7 @@ import json
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -11,6 +12,7 @@ from spx_spark.config import NotificationSettings
 from spx_spark.morning_map import (
     already_sent,
     build_morning_payload,
+    load_current_iv_surface,
     mark_sent,
     render_template,
     run,
@@ -140,6 +142,7 @@ def test_within_send_window_summer_et() -> None:
     assert within_send_window(datetime(2026, 7, 7, 13, 0, tzinfo=timezone.utc)) is True
     assert within_send_window(datetime(2026, 7, 7, 14, 0, tzinfo=timezone.utc)) is False
     assert within_send_window(datetime(2026, 7, 11, 13, 0, tzinfo=timezone.utc)) is False
+    assert within_send_window(datetime(2026, 7, 3, 13, 0, tzinfo=timezone.utc)) is False
 
 
 def test_already_sent_roundtrip(tmp_path: Path) -> None:
@@ -221,6 +224,81 @@ def test_run_skips_outside_window(monkeypatch: pytest.MonkeyPatch, capsys: pytes
     assert json.loads(captured.out.strip()) == {"skipped": True, "reason": "outside_send_window"}
 
 
+def test_failed_delivery_does_not_consume_morning_send_key(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    state_path = tmp_path / "morning-state.json"
+    monkeypatch.setenv("SPX_MORNING_MAP_STATE_PATH", str(state_path))
+    monkeypatch.setattr(
+        "spx_spark.morning_map.build_morning_payload_with_retry",
+        lambda *args, **kwargs: sample_payload() | {"trading_date": "2026-07-07"},
+    )
+    monkeypatch.setattr(
+        "spx_spark.morning_map.NotificationSettings.from_env",
+        lambda: object(),
+    )
+    monkeypatch.setattr(
+        "spx_spark.morning_map.send_morning_map",
+        lambda *args, **kwargs: {
+            "text": "failed",
+            "delivered_ok": False,
+            "im_ok": False,
+            "bark_ok": False,
+            "feishu_ok": False,
+        },
+    )
+    monkeypatch.setattr("spx_spark.morning_map.load_previous_push", lambda: None)
+
+    result = run([], now=datetime(2026, 7, 7, 13, 0, tzinfo=timezone.utc))
+
+    assert result == 1
+    assert not state_path.exists()
+
+
+def test_thin_morning_payload_is_not_sent_or_marked(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    state_path = tmp_path / "morning-state.json"
+    thin = sample_payload() | {"trading_date": "2026-07-07"}
+    thin["human_focus_context"]["spxw_options"]["expiries"] = []
+    monkeypatch.setenv("SPX_MORNING_MAP_STATE_PATH", str(state_path))
+    monkeypatch.setattr(
+        "spx_spark.morning_map.build_morning_payload_with_retry",
+        lambda *args, **kwargs: thin,
+    )
+    monkeypatch.setattr(
+        "spx_spark.morning_map.send_morning_map",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("send called")),
+    )
+
+    result = run([], now=datetime(2026, 7, 7, 13, 0, tzinfo=timezone.utc))
+
+    assert result == 0
+    assert not state_path.exists()
+    assert json.loads(capsys.readouterr().out) == {
+        "skipped": True,
+        "reason": "thin_snapshot_sampling_gap",
+    }
+
+
+def test_morning_surface_must_be_current_and_match_active_expiry(monkeypatch) -> None:
+    now = datetime(2026, 7, 7, 13, 0, tzinfo=timezone.utc)
+    settings = SimpleNamespace(latest_surface_path="/tmp/iv-surface.json")
+    current = SimpleNamespace(as_of=now, front_expiry="20260707")
+    stale = SimpleNamespace(as_of=datetime(2026, 7, 6, 20, 0, tzinfo=timezone.utc), front_expiry="20260707")
+    wrong_expiry = SimpleNamespace(as_of=now, front_expiry="20260706")
+
+    monkeypatch.setattr("spx_spark.morning_map.load_latest_snapshot", lambda path: current)
+    assert load_current_iv_surface(settings, now=now) is current
+    monkeypatch.setattr("spx_spark.morning_map.load_latest_snapshot", lambda path: stale)
+    assert load_current_iv_surface(settings, now=now) is None
+    monkeypatch.setattr("spx_spark.morning_map.load_latest_snapshot", lambda path: wrong_expiry)
+    assert load_current_iv_surface(settings, now=now) is None
+
+
 def test_build_morning_payload_shape() -> None:
     state = LatestState(
         created_at=datetime(2026, 7, 7, 13, 0, tzinfo=timezone.utc),
@@ -232,3 +310,21 @@ def test_build_morning_payload_shape() -> None:
     assert payload["kind"] == "morning_map"
     assert "overnight" in payload
     assert "human_focus_context" in payload
+
+
+def test_morning_payload_uses_run_date_not_stale_state_date() -> None:
+    state = LatestState(
+        created_at=datetime(2026, 7, 6, 13, 0, tzinfo=timezone.utc),
+        as_of=datetime(2026, 7, 6, 13, 0, tzinfo=timezone.utc),
+        quotes=(),
+        best_quotes=(),
+    )
+
+    payload = build_morning_payload(
+        state,
+        now=datetime(2026, 7, 7, 13, 0, tzinfo=timezone.utc),
+    )
+
+    assert payload["as_of"].startswith("2026-07-06")
+    assert payload["trading_date"] == "2026-07-07"
+    assert "【盘前地图 2026-07-07】" in render_template(payload)

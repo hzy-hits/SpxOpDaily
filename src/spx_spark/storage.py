@@ -9,7 +9,8 @@ from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
 from pathlib import Path
 
-from spx_spark.config import NY_TZ, StorageSettings
+from spx_spark.config import StorageSettings
+from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 from spx_spark.marketdata import (
     InstrumentType,
     MarketDataQuality,
@@ -321,15 +322,15 @@ def parse_option_expiry_date(expiry: str | None) -> date | None:
 
 
 def prune_expired_option_quotes(quotes: Iterable[Quote], *, now: datetime) -> tuple[Quote, ...]:
-    """Discard OPTION rows whose expiry is before the current NY trading date."""
-    ny_today = now.astimezone(NY_TZ).date()
+    """Discard option rows before the active 17:00 ET research expiry."""
+    active_expiry = DEFAULT_MARKET_CALENDAR.research_expiry(now)
     kept: list[Quote] = []
     for quote in quotes:
         if quote.instrument.instrument_type != InstrumentType.OPTION:
             kept.append(quote)
             continue
         expiry_date = parse_option_expiry_date(quote.instrument.expiry)
-        if expiry_date is None or expiry_date >= ny_today:
+        if expiry_date is None or expiry_date >= active_expiry:
             kept.append(quote)
     return tuple(kept)
 

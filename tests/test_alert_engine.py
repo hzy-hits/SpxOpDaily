@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -10,6 +11,7 @@ from spx_spark.alert_engine import (
     effective_move_threshold_bps,
     evaluate_alerts,
     evaluate_payload,
+    front_expected_move_pct,
     iv_surface_freshness_alert,
     iv_surface_alerts,
     movement_alerts,
@@ -263,7 +265,7 @@ def test_hyperliquid_proxy_is_context_only_without_tradfi_anchor() -> None:
     assert proxy_alerts[0].research_only is True
 
 
-def test_hyperliquid_proxy_can_trigger_degraded_watch_when_ibkr_feed_is_unavailable() -> None:
+def test_hyperliquid_proxy_watch_stays_research_only_when_ibkr_is_unavailable() -> None:
     now = datetime(2026, 7, 7, 3, 15, tzinfo=BJ_TZ)
     hl = Quote(
         instrument=InstrumentId(
@@ -294,9 +296,9 @@ def test_hyperliquid_proxy_can_trigger_degraded_watch_when_ibkr_feed_is_unavaila
     fallback_alerts = [alert for alert in alerts if alert.kind == "broker_unavailable_proxy_watch"]
 
     assert fallback_alerts
-    assert fallback_alerts[0].instrument_id == "index:SPX"
+    assert fallback_alerts[0].instrument_id == "crypto_perp:xyz:SP500"
     assert fallback_alerts[0].quality == "degraded"
-    assert fallback_alerts[0].research_only is False
+    assert fallback_alerts[0].research_only is True
 
 
 def test_wall_dedup_band_groups_nearby_walls() -> None:
@@ -353,7 +355,7 @@ def test_gamma_regime_hysteresis_requires_state_to_hold(tmp_path, monkeypatch) -
     )
 
 
-def test_hyperliquid_proxy_watch_fires_when_anchor_closed_but_broker_healthy() -> None:
+def test_hyperliquid_proxy_watch_is_research_only_when_anchor_is_closed() -> None:
     """During the ES maintenance break (or any anchor-dead stretch) the SP500
     perp is the only live monitor; its moves must alert even when the broker
     session itself is fine."""
@@ -387,8 +389,8 @@ def test_hyperliquid_proxy_watch_fires_when_anchor_closed_but_broker_healthy() -
     fallback_alerts = [alert for alert in alerts if alert.kind == "broker_unavailable_proxy_watch"]
 
     assert fallback_alerts
-    assert fallback_alerts[0].instrument_id == "index:SPX"
-    assert fallback_alerts[0].research_only is False
+    assert fallback_alerts[0].instrument_id == "crypto_perp:xyz:SP500"
+    assert fallback_alerts[0].research_only is True
     assert "No live SPX/ES anchor" in fallback_alerts[0].detail
 
 
@@ -807,6 +809,27 @@ def test_effective_move_threshold_bps_static_when_expected_move_missing() -> Non
     threshold, source = effective_move_threshold_bps("high", None)
     assert threshold == 30.0
     assert source == "static"
+
+
+def test_front_expected_move_expires_at_research_rollover() -> None:
+    options_map = SimpleNamespace(
+        expiries=[SimpleNamespace(expiry="20260709", expected_move_pct=0.01)]
+    )
+
+    assert (
+        front_expected_move_pct(
+            options_map,
+            as_of=datetime.fromisoformat("2026-07-09T20:59:00+00:00"),
+        )
+        == 0.01
+    )
+    assert (
+        front_expected_move_pct(
+            options_map,
+            as_of=datetime.fromisoformat("2026-07-09T21:00:00+00:00"),
+        )
+        is None
+    )
 
 
 def test_effective_move_threshold_bps_static_floor_when_em_too_low() -> None:

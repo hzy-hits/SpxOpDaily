@@ -1,12 +1,33 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from spx_spark.provider_adapter import ProviderSnapshot
 from spx_spark.schwab import collector as schwab_collector
+
+
+def test_fetch_chain_uses_calendar_research_expiries() -> None:
+    captured: dict[str, Any] = {}
+
+    class FakeClient:
+        def get_json(self, path: str, params: dict[str, Any]):
+            captured.update(params)
+            return 200, {}
+
+    schwab_collector.fetch_chain(
+        FakeClient(),
+        "SPY",
+        SimpleNamespace(option_chain_strike_count=20),
+        now=datetime(2026, 7, 2, 21, 0, tzinfo=timezone.utc),
+    )
+
+    assert captured["fromDate"] == "2026-07-06"
+    assert captured["toDate"] == "2026-07-07"
 
 
 def test_collector_skips_without_token(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:

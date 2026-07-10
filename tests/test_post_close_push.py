@@ -78,6 +78,7 @@ def sample_payload() -> dict:
         "iv_surface": {
             "expiries": [
                 {
+                    "expiry": "20260707",
                     "put_wall_last": 5950.0,
                     "call_wall_last": 6050.0,
                     "zero_gamma_last": 6000.0,

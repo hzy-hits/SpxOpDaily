@@ -54,6 +54,8 @@ def test_regular_trading_hours_uses_new_york_time() -> None:
     assert is_regular_trading_hours(datetime(2026, 7, 6, 10, 0, tzinfo=NY_TZ))
     assert not is_regular_trading_hours(datetime(2026, 7, 5, 10, 0, tzinfo=NY_TZ))
     assert not is_regular_trading_hours(datetime(2026, 7, 6, 16, 0, tzinfo=NY_TZ))
+    assert not is_regular_trading_hours(datetime(2026, 7, 3, 10, 0, tzinfo=NY_TZ))
+    assert not is_regular_trading_hours(datetime(2026, 11, 27, 13, 0, tzinfo=NY_TZ))
 
 
 def test_check_row_marks_live_index_ok() -> None:

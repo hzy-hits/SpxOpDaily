@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-import pytest
-
 from spx_spark.ibkr.adapter import provider_state_from_quotes, quotes_from_rows, snapshot_from_rows
 from spx_spark.ibkr.collector import (
     collection_failure_reason,
@@ -193,35 +191,28 @@ def test_estimate_atm_reference_prefers_spx_over_cfd():
     assert source == "SPX"
 
 
-def test_estimate_atm_reference_skips_stale_spx_for_fresh_es():
-    # Off-hours SPX still carries yesterday's close but is flagged stale; the
-    # strike window must recenter on a live source instead.
+def test_stateless_atm_reference_rejects_stale_spx_and_unadjusted_es():
     spx_row = VerifyRow(label="index:SPX", kind="index", symbol="SPX", last=7505.0, stale=True)
     es_row = VerifyRow(label="future:ES", kind="future", symbol="ES", last=7455.0, stale=False)
 
     reference, source = estimate_atm_reference([spx_row, es_row])
 
-    assert reference == 7455.0
-    assert source == "ES"
+    assert reference is None
+    assert source == "none"
 
     # A closed market that never ticked since subscribe has stale=None (no
     # ticker_time); it must not pass as fresh either.
     never_ticked_spx = VerifyRow(label="index:SPX", kind="index", symbol="SPX", last=7505.0)
     reference, source = estimate_atm_reference([never_ticked_spx, es_row])
-    assert reference == 7455.0
-    assert source == "ES"
+    assert reference is None
+    assert source == "none"
 
-    # With every source stale, fall back to the priority order so a plan
-    # still exists at startup.
     reference, source = estimate_atm_reference([spx_row])
-    assert reference == 7505.0
-    assert source == "SPX_stale"
+    assert reference is None
+    assert source == "none"
 
 
-def test_estimate_atm_reference_adjusts_es_quarterly_basis():
-    # 2026-07-08 overnight: SPX stale at yesterday's close 7503.85, Sep ES
-    # live at 7497 with close 7551.25. Raw ES would center the window ~50
-    # points above the cash market; the close-vs-close basis fixes it.
+def test_stateless_atm_reference_never_uses_mismatched_close_basis():
     spx_row = VerifyRow(
         label="index:SPX", kind="index", symbol="SPX", close=7503.85, stale=True
     )
@@ -232,16 +223,16 @@ def test_estimate_atm_reference_adjusts_es_quarterly_basis():
 
     reference, source = estimate_atm_reference([spx_row, es_row])
 
-    assert source == "ES_basis_adj"
-    assert reference == pytest.approx(7497.0 - (7551.25 - 7503.85))
+    assert source == "none"
+    assert reference is None
 
     # Implausible basis (mismatched sessions) is ignored rather than applied.
     weird_spx = VerifyRow(
         label="index:SPX", kind="index", symbol="SPX", close=7300.0, stale=True
     )
     reference, source = estimate_atm_reference([weird_spx, es_row])
-    assert source == "ES"
-    assert reference == 7497.0
+    assert source == "none"
+    assert reference is None
 
 
 def test_provider_state_from_quotes_marks_available_without_errors():

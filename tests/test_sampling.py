@@ -1,5 +1,11 @@
 from spx_spark.config import SamplingSettings
-from spx_spark.sampling import build_sampling_plan, build_strikes, round_to_step, split_groups
+from spx_spark.sampling import (
+    build_sampling_plan,
+    build_strikes,
+    next_weekday_expiry,
+    round_to_step,
+    split_groups,
+)
 
 
 def make_settings() -> SamplingSettings:
@@ -84,3 +90,7 @@ def test_degraded_sampling_plan_uses_twenty_groups():
 
     assert len(plan.rolling_groups) == 20
     assert plan.full_scan_seconds == 60
+
+
+def test_next_expiry_skips_observed_market_holiday() -> None:
+    assert next_weekday_expiry("20260702") == "20260706"

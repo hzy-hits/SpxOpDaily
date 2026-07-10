@@ -164,7 +164,7 @@ def build_codex_prompt(
             "VIX/VIX1D/VVIX/SKEW 等波动率指数作 vol regime 上下文，SPY/QQQ 等指数 ETF 可少量引用作确认上下文。",
             "不要提加密、链上、预测市场类数据源；隐藏算法上下文只能影响是否推送，不能进入人类可见解释。",
             "凡是 research_only、stale、missing、unknown、coverage 不足或 IV surface stale，默认不外发；只说明数据质量。",
-            "带 source_gate 的告警默认不外发，唯一例外是 broker_unavailable_fallback、ibkr_session_state、ibkr_positions、iv_surface；"
+            "带 source_gate 的告警默认不外发，唯一例外是 ibkr_session_state、ibkr_positions、iv_surface；"
             "ibkr_positions 表示 IBKR 实盘 SPXW 持仓变化或风险；iv_surface 表示 SPXW IV 曲面期限差或异动。",
             "如果 SPXW 期权 freshness gate 失败，不得基于 wall/gamma/IV 做看盘结论。",
             "如果 options_map 警告含 underlier_mismatch，或 gamma_state 以 unknown 开头，不得基于 wall/gamma 下结论，只能说明数据降级。",

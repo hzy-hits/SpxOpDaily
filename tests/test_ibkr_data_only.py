@@ -14,6 +14,7 @@ from spx_spark.ibkr.verifier import (
     qualify_and_subscribe,
     resolve_contract_for_market_data,
     snapshot_rows,
+    ticker_request_id,
 )
 
 
@@ -100,6 +101,19 @@ def test_ibkr_connect_calls_disable_startup_account_fetches() -> None:
     )
 
 
+def test_ibkr_cli_code_does_not_install_jupyter_nested_loop() -> None:
+    root = Path(__file__).resolve().parents[1] / "src" / "spx_spark" / "ibkr"
+    violations: list[str] = []
+
+    for path in iter_python_files(root):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Attribute) and node.attr == "startLoop":
+                violations.append(f"{path.name}:{node.lineno}")
+
+    assert not violations, "util.startLoop is only for nested notebook loops: " + ", ".join(violations)
+
+
 def test_ibkr_connect_overrides_library_startup_positions_fetch() -> None:
     class FakeIB:
         def __init__(self) -> None:
@@ -172,6 +186,17 @@ def test_ibkr_subscribe_can_skip_contract_qualification() -> None:
     assert ticker is not None
     assert row.subscribed is True
     assert row.qualified is False
+
+
+def test_ticker_request_id_uses_ib_async_market_data_bucket() -> None:
+    ticker = object()
+    ib = type(
+        "FakeIB",
+        (),
+        {"wrapper": type("Wrapper", (), {"ticker2ReqId": {"mktData": {ticker: 417}}})()},
+    )()
+
+    assert ticker_request_id(ib, ticker) == 417
 
 
 def test_ibkr_subscribe_qualifies_on_missing_conid_hash_error() -> None:

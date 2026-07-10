@@ -6,8 +6,9 @@ from pathlib import Path
 import pytest
 
 LAYERS = {
-    "config": 0,
+    "config": 1,
     "marketdata": 0,
+    "market_calendar": 0,
     "alert_model": 0,
     "storage": 1,
     "state_io": 1,
@@ -37,7 +38,7 @@ LAYERS = {
     "order_map": 5,
 }
 
-L0_MODULES = {"config", "marketdata", "alert_model"}
+L0_MODULES = {"marketdata", "market_calendar", "alert_model"}
 L2_PROVIDERS = {"ibkr", "schwab", "hyperliquid", "polymarket", "mock_collector"}
 L5_MODULES = {
     "service_loop",
