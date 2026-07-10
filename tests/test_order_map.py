@@ -240,6 +240,132 @@ def make_options_map(front: ExpiryOptionsMap, *, price: float = 7569.0) -> Optio
     )
 
 
+def make_candidate_retry_state(
+    *,
+    state_now: datetime,
+    candidate_quote_at: datetime,
+    vix: float,
+    extra_quotes: tuple[Quote, ...] = (),
+) -> LatestState:
+    return make_state(
+        Quote(
+            instrument=InstrumentId.index("SPX"),
+            provider=Provider.IBKR,
+            provider_symbol="index:SPX",
+            received_at=state_now,
+            quality=MarketDataQuality.LIVE,
+            mark=7569.0,
+            close=7570.0,
+            quote_time=state_now,
+        ),
+        Quote(
+            instrument=InstrumentId.index("VIX"),
+            provider=Provider.IBKR,
+            provider_symbol="index:VIX",
+            received_at=state_now,
+            quality=MarketDataQuality.LIVE,
+            mark=vix,
+            quote_time=state_now,
+        ),
+        make_option(
+            expiry="20260707",
+            strike=7500,
+            right="C",
+            mark=73.2,
+            delta=0.85,
+            gamma=0.008,
+            now=state_now,
+        ),
+        make_option(
+            expiry="20260707",
+            strike=7500,
+            right="P",
+            mark=4.2,
+            delta=-0.15,
+            gamma=0.006,
+            now=state_now,
+        ),
+        make_option(
+            expiry="20260707",
+            strike=7530,
+            right="P",
+            mark=9.1,
+            delta=-0.28,
+            gamma=0.007,
+            now=state_now,
+        ),
+        make_option(
+            expiry="20260707",
+            strike=7550,
+            right="C",
+            mark=30.0,
+            delta=0.45,
+            gamma=0.005,
+            now=state_now,
+        ),
+        make_option(
+            expiry="20260707",
+            strike=7550,
+            right="P",
+            mark=11.2,
+            delta=-0.22,
+            gamma=0.006,
+            now=candidate_quote_at,
+        ),
+        *extra_quotes,
+        now=state_now,
+    )
+
+
+def run_candidate_retry(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    states: list[LatestState],
+    *,
+    now: datetime,
+    attempts: int = 3,
+    delay_seconds: float = 10.0,
+) -> tuple[dict, list[datetime], list[float]]:
+    import spx_spark.order_map as order_map_module
+
+    loaded_at: list[datetime] = []
+    sleeps: list[float] = []
+    elapsed = [0.0]
+
+    class SequenceStore:
+        def __init__(self, settings) -> None:
+            pass
+
+        def load(self, *, now: datetime) -> LatestState:
+            index = len(loaded_at)
+            loaded_at.append(now)
+            return states[index]
+
+    monkeypatch.setattr(order_map_module, "LatestStateStore", SequenceStore)
+    monkeypatch.setattr(
+        order_map_module,
+        "build_options_map",
+        lambda state: make_options_map(make_front_expiry()),
+    )
+    monkeypatch.setattr(order_map_module.time_module, "monotonic", lambda: elapsed[0])
+
+    def sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        elapsed[0] += seconds
+
+    monkeypatch.setattr(order_map_module.time_module, "sleep", sleep)
+    monkeypatch.setattr(order_map_module, "attach_es_volume_signal", lambda *a, **k: None)
+    monkeypatch.setattr(order_map_module, "attach_hl_volume_signal", lambda *a, **k: None)
+
+    payload = order_map_module.build_order_payload_with_retry(
+        SimpleNamespace(data_root=str(tmp_path)),
+        now=now,
+        attempts=attempts,
+        delay_seconds=delay_seconds,
+    )
+    return payload, loaded_at, sleeps
+
+
 def test_option_tick_and_round_to_tick() -> None:
     assert option_tick(2.97) == 0.05
     assert round_to_tick(2.97) == pytest.approx(2.95)
@@ -429,6 +555,106 @@ def test_build_candidates_produces_three_plays_with_limits() -> None:
         assert candidate.limit_aggressive == round_to_tick(candidate.projected_mid)
         assert candidate.limit_conservative == round_to_tick(candidate.projected_mid * 0.85)
         assert math.isfinite(candidate.projected_mid)
+
+
+def test_order_payload_retry_rebuilds_after_stale_candidate_refresh(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 7, 7, 6, 0, tzinfo=timezone.utc)
+    states = [
+        make_candidate_retry_state(
+            state_now=now,
+            candidate_quote_at=now - timedelta(seconds=30),
+            vix=15.0,
+        ),
+        make_candidate_retry_state(
+            state_now=now + timedelta(seconds=10),
+            candidate_quote_at=now + timedelta(seconds=10),
+            vix=16.0,
+        ),
+    ]
+    payload, loaded_at, sleeps = run_candidate_retry(
+        monkeypatch,
+        tmp_path,
+        states,
+        now=now,
+    )
+
+    assert loaded_at == [now, now + timedelta(seconds=10)]
+    assert sleeps == [10.0]
+    assert {item["play"] for item in payload["candidates"]} == {
+        "put_wall_bounce_call",
+        "flip_breakdown_put",
+        "call_wall_fade_put",
+    }
+    assert not any("bad_quality_for_7550P" in item for item in payload["warnings"])
+    assert payload["vol_context"]["vix"] == 16.0
+
+
+def test_order_payload_retry_is_bounded_when_candidate_stays_stale(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 7, 7, 6, 0, tzinfo=timezone.utc)
+    states = [
+        make_candidate_retry_state(
+            state_now=now + timedelta(seconds=offset),
+            candidate_quote_at=now - timedelta(seconds=30),
+            vix=15.0 + offset,
+        )
+        for offset in (0, 10, 20)
+    ]
+    payload, loaded_at, sleeps = run_candidate_retry(
+        monkeypatch,
+        tmp_path,
+        states,
+        now=now,
+    )
+
+    assert loaded_at == [
+        now,
+        now + timedelta(seconds=10),
+        now + timedelta(seconds=20),
+    ]
+    assert sleeps == [10.0, 10.0]
+    assert len(payload["candidates"]) == 2
+    assert any(
+        item == "bad_quality_for_7550P:transport_stale_after_15s"
+        for item in payload["warnings"]
+    )
+
+
+def test_stale_non_candidate_does_not_trigger_order_payload_retry(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 7, 7, 6, 0, tzinfo=timezone.utc)
+    stale_non_candidate = make_option(
+        expiry="20260707",
+        strike=7700,
+        right="C",
+        mark=1.0,
+        delta=0.05,
+        gamma=0.001,
+        now=now - timedelta(seconds=30),
+    )
+    state = make_candidate_retry_state(
+        state_now=now,
+        candidate_quote_at=now,
+        vix=15.0,
+        extra_quotes=(stale_non_candidate,),
+    )
+    payload, loaded_at, sleeps = run_candidate_retry(
+        monkeypatch,
+        tmp_path,
+        [state],
+        now=now,
+    )
+
+    assert loaded_at == [now]
+    assert sleeps == []
+    assert len(payload["candidates"]) == 3
 
 
 def test_frontrun_level_shifts_toward_spot_with_caps() -> None:

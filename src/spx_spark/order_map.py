@@ -394,7 +394,9 @@ def _build_candidate(
         return None
     decision = configured_quote_use_decision(quote, as_of=as_of)
     if not decision.pricing_allowed:
-        warnings.append(f"bad_quality_for_{target_strike}{right}")
+        warnings.append(
+            f"bad_quality_for_{target_strike}{right}:{decision.reason}"
+        )
         return None
     if not _quote_greeks_ok(quote):
         warnings.append(f"missing_greeks_for_{target_strike}{right}")
@@ -2050,25 +2052,53 @@ def _payload_is_thin(payload: dict[str, Any]) -> bool:
     return False
 
 
+def _payload_has_retryable_candidate_gap(payload: dict[str, Any]) -> bool:
+    """True when an intended play is missing only because its quote is stale.
+
+    Keep this separate from ``_payload_is_thin``: if the retry budget expires,
+    the status push should still report the degraded candidate instead of
+    silently skipping the whole snapshot. Non-fresh feed modes and structural
+    play skips remain fail-closed without delaying the push.
+    """
+    warnings = payload.get("warnings")
+    if not isinstance(warnings, list):
+        return False
+    return any(
+        str(item).startswith("bad_quality_for_")
+        and ":transport_stale_after_" in str(item)
+        for item in warnings
+    )
+
+
 def build_order_payload_with_retry(
     storage_settings: StorageSettings,
     *,
     now: datetime,
-    attempts: int = 6,
+    attempts: int = 7,
     delay_seconds: float = 10.0,
 ) -> dict[str, Any]:
-    """Reload latest state a few times if the first snapshot looks thin.
+    """Reload latest state for thin snapshots or a stale action candidate.
 
     Thin snapshots happen during slow-poll windows (the stream blocks ~30-50s
-    without flushing) and option line rotation gaps; the retry budget must
-    outlast those.
+    without flushing) and option line rotation gaps. A single intended play can
+    also fall outside the 15-second actionability window while the other plays
+    remain present. The retry budget spans one full option rotation, and every
+    attempt rebuilds the whole payload against an advancing evaluation time.
     """
     payload: dict[str, Any] = {}
     state: LatestState | None = None
+    started_at = time_module.monotonic()
+    evaluation_now = now
     for attempt in range(attempts):
-        state = LatestStateStore(storage_settings).load(now=now)
-        payload = build_order_payload(state, now=now)
-        if not _payload_is_thin(payload):
+        if attempt:
+            elapsed_seconds = max(time_module.monotonic() - started_at, 0.0)
+            evaluation_now = now + timedelta(seconds=elapsed_seconds)
+        state = LatestStateStore(storage_settings).load(now=evaluation_now)
+        payload = build_order_payload(state, now=evaluation_now)
+        if not (
+            _payload_is_thin(payload)
+            or _payload_has_retryable_candidate_gap(payload)
+        ):
             break
         if attempt < attempts - 1:
             time_module.sleep(delay_seconds)
@@ -2077,14 +2107,14 @@ def build_order_payload_with_retry(
             payload,
             state,
             sample_path=default_es_volume_sample_path(storage_settings),
-            now=now,
+            now=evaluation_now,
         )
         attach_hl_volume_signal(
             payload,
             state,
             storage_settings=storage_settings,
             sample_path=default_hl_volume_sample_path(storage_settings),
-            now=now,
+            now=evaluation_now,
         )
     return payload
 
