@@ -50,6 +50,97 @@ def test_lifecycle_budget_reserves_one_bounded_qualification() -> None:
     assert not lifecycle_has_qualification_budget(100.0, now_monotonic=100.51)
 
 
+def test_subscription_lifecycle_gives_due_slow_poll_priority(monkeypatch) -> None:
+    collector = object.__new__(StreamCollector)
+    collector.option_plan = SimpleNamespace(expiry="20260710")
+    calls: list[tuple[str, object]] = []
+    collector.advance_slow_poll = lambda **kwargs: calls.append(
+        ("slow", kwargs["allow_start"])
+    )
+    collector.ensure_option_plan = lambda rows: calls.append(("option", rows))
+    collector.ensure_spy_option_plan = lambda rows, *, expiry: calls.append(
+        ("spy", expiry)
+    )
+    collector.slow_poll_start_due = lambda: True
+    collector.rotate_options = lambda: calls.append(("rotate", None))
+    monkeypatch.setattr(
+        stream_collector_module,
+        "lifecycle_has_qualification_budget",
+        lambda *_args, **_kwargs: True,
+    )
+
+    rows: list[VerifyRow] = []
+    collector._advance_subscription_lifecycle(rows, lifecycle_started=100.0)
+
+    assert calls == [
+        ("slow", False),
+        ("option", rows),
+        ("spy", "20260710"),
+        ("slow", True),
+        ("slow", False),
+    ]
+
+
+def test_subscription_lifecycle_rotates_when_slow_poll_is_not_due(monkeypatch) -> None:
+    collector = object.__new__(StreamCollector)
+    collector.option_plan = SimpleNamespace(expiry="20260710")
+    calls: list[tuple[str, object]] = []
+    collector.advance_slow_poll = lambda **kwargs: calls.append(
+        ("slow", kwargs["allow_start"])
+    )
+    collector.ensure_option_plan = lambda rows: calls.append(("option", rows))
+    collector.ensure_spy_option_plan = lambda rows, *, expiry: calls.append(
+        ("spy", expiry)
+    )
+    collector.slow_poll_start_due = lambda: False
+    collector.rotate_options = lambda: calls.append(("rotate", None))
+    monkeypatch.setattr(
+        stream_collector_module,
+        "lifecycle_has_qualification_budget",
+        lambda *_args, **_kwargs: True,
+    )
+
+    rows: list[VerifyRow] = []
+    collector._advance_subscription_lifecycle(rows, lifecycle_started=100.0)
+
+    assert calls == [
+        ("slow", False),
+        ("option", rows),
+        ("spy", "20260710"),
+        ("rotate", None),
+        ("slow", False),
+    ]
+
+
+def test_subscription_lifecycle_starts_no_new_work_without_budget(monkeypatch) -> None:
+    collector = object.__new__(StreamCollector)
+    collector.option_plan = SimpleNamespace(expiry="20260710")
+    calls: list[tuple[str, object]] = []
+    collector.advance_slow_poll = lambda **kwargs: calls.append(
+        ("slow", kwargs["allow_start"])
+    )
+    collector.ensure_option_plan = lambda rows: calls.append(("option", rows))
+    collector.ensure_spy_option_plan = lambda rows, *, expiry: calls.append(
+        ("spy", expiry)
+    )
+    collector.slow_poll_start_due = lambda: True
+    collector.rotate_options = lambda: calls.append(("rotate", None))
+    monkeypatch.setattr(
+        stream_collector_module,
+        "lifecycle_has_qualification_budget",
+        lambda *_args, **_kwargs: False,
+    )
+
+    rows: list[VerifyRow] = []
+    collector._advance_subscription_lifecycle(rows, lifecycle_started=100.0)
+
+    assert calls == [
+        ("slow", False),
+        ("option", rows),
+        ("slow", False),
+    ]
+
+
 def test_hot_flush_sleep_is_capped_for_twelve_second_reliability_budget() -> None:
     assert effective_hot_flush_sleep_seconds(2.0) == 2.0
     assert effective_hot_flush_sleep_seconds(5.0) == 5.0

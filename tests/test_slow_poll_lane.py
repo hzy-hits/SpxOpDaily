@@ -286,6 +286,40 @@ def test_slow_poll_hold_starts_after_qualification_completes(monkeypatch) -> Non
     assert collector.slow_scheduler.hold_deadline == 15.0
 
 
+def test_slow_poll_start_due_only_when_idle_and_ready() -> None:
+    contract = object()
+    collector = make_stream_collector(
+        slow_contracts=[("index:VIX", "index", contract)],
+        slow_poll_chunk_size=1,
+    )
+    collector.slow_chunks = [[("index:VIX", "index", contract)]]
+    collector.slow_scheduler = None
+    assert not collector.slow_poll_start_due(now_monotonic=10.0)
+
+    collector.slow_scheduler = SlowPollScheduler(
+        chunk_count=1,
+        cycle_seconds=60.0,
+        hold_seconds=10.0,
+    )
+    collector.slow_scheduler.reset(now=10.0)
+
+    assert collector.slow_poll_start_due(now_monotonic=10.0)
+
+    collector.slow_scheduler.next_start_at = None
+    assert collector.slow_poll_start_due(now_monotonic=10.0)
+
+    collector.slow_scheduler.next_start_at = 20.0
+    assert not collector.slow_poll_start_due(now_monotonic=19.99)
+    assert collector.slow_poll_start_due(now_monotonic=20.0)
+
+    collector.slow_scheduler.active_chunk_index = 0
+    assert not collector.slow_poll_start_due(now_monotonic=30.0)
+
+    collector.slow_scheduler.active_chunk_index = None
+    collector.slow_chunks = []
+    assert not collector.slow_poll_start_due(now_monotonic=30.0)
+
+
 def test_slow_contract_qualification_is_reused_within_session(monkeypatch) -> None:
     original_contract = object()
     resolved_contract = object()

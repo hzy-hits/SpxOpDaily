@@ -976,6 +976,19 @@ class StreamCollector:
                 }
             )
 
+    def slow_poll_start_due(self, *, now_monotonic: float | None = None) -> bool:
+        """Return whether an idle slow lane is ready to start its next chunk."""
+
+        scheduler = self.slow_scheduler
+        if (
+            scheduler is None
+            or not self.slow_chunks
+            or scheduler.active_chunk_index is not None
+        ):
+            return False
+        now = time.monotonic() if now_monotonic is None else now_monotonic
+        return scheduler.next_start_at is None or now >= scheduler.next_start_at
+
     def ensure_option_plan(self, rows: list[VerifyRow]) -> None:
         if self.skip_options:
             return
@@ -1575,6 +1588,29 @@ class StreamCollector:
         write_result = persist_provider_snapshot(snapshot, self.storage_settings)
         lifecycle_started = time.monotonic()
 
+        self._advance_subscription_lifecycle(
+            rows,
+            lifecycle_started=lifecycle_started,
+        )
+        return {
+            "task": "ibkr_stream",
+            "event": "flush",
+            "quotes": snapshot.quote_count,
+            "best_quotes": write_result.best_quote_count,
+            "provider_status": (
+                snapshot.provider_state.status.value if snapshot.provider_state else "unknown"
+            ),
+            "rotation_index": self.rotation_index,
+        }
+
+    def _advance_subscription_lifecycle(
+        self,
+        rows: list[VerifyRow],
+        *,
+        lifecycle_started: float,
+    ) -> None:
+        """Advance one bounded lifecycle slice after hot rows are persisted."""
+
         # Complete an already-held slow batch promptly, but never start a new
         # qualification before the hot-plan work has had its bounded turn.
         self.advance_slow_poll(allow_start=False)
@@ -1589,20 +1625,15 @@ class StreamCollector:
                 ),
             )
         if lifecycle_has_qualification_budget(lifecycle_started):
-            self.rotate_options()
-        self.advance_slow_poll(
-            allow_start=lifecycle_has_qualification_budget(lifecycle_started)
-        )
-        return {
-            "task": "ibkr_stream",
-            "event": "flush",
-            "quotes": snapshot.quote_count,
-            "best_quotes": write_result.best_quote_count,
-            "provider_status": (
-                snapshot.provider_state.status.value if snapshot.provider_state else "unknown"
-            ),
-            "rotation_index": self.rotation_index,
-        }
+            if self.slow_poll_start_due():
+                # A due slow chunk gets one lifecycle slice ahead of rotation;
+                # otherwise continuous rotation qualification can starve it.
+                self.advance_slow_poll(allow_start=True)
+            else:
+                self.rotate_options()
+        # A zero-hold batch, or one whose hold elapsed during other lifecycle
+        # work, can be completed without admitting another qualification.
+        self.advance_slow_poll(allow_start=False)
 
     def teardown(self) -> None:
         cancel_subscriptions(self.ib, self.rotation_subs)
