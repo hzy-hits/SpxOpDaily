@@ -42,6 +42,8 @@ class IvSurfaceExpiry:
     warnings: tuple[str, ...]
     put_skew_25d: float | None = None
     put_skew_25d_change_5m: float | None = None
+    call_skew_25d: float | None = None
+    call_skew_25d_change_5m: float | None = None
 
 
 @dataclass(frozen=True)
@@ -91,7 +93,10 @@ def surface_fit_quality(expiry_map: ExpiryOptionsMap, *, wide_quote: bool) -> st
         return "missing_options"
     if expiry_map.atm_iv is None:
         return "missing_atm_iv"
-    if expiry_map.coverage.total > 0 and expiry_map.coverage.with_iv / expiry_map.coverage.total < 0.5:
+    if (
+        expiry_map.coverage.total > 0
+        and expiry_map.coverage.with_iv / expiry_map.coverage.total < 0.5
+    ):
         return "low_iv_coverage"
     if wide_quote:
         return "wide_quote_degraded"
@@ -124,13 +129,17 @@ def build_expiry_surface(
         smile_slope=smile_slope,
         smile_curvature=smile_curvature,
         iv_surface_level=surface_level,
-        iv_surface_shift_5m=subtract(surface_level, previous.iv_surface_level if previous else None),
+        iv_surface_shift_5m=subtract(
+            surface_level, previous.iv_surface_level if previous else None
+        ),
         atm_iv_jump_5m=subtract(expiry_map.atm_iv, previous.atm_iv if previous else None),
         put_skew_steepening_5m=subtract(
             expiry_map.put_skew_ratio,
             previous.put_skew_ratio if previous else None,
         ),
-        call_wing_bid=bool(expiry_map.call_skew_ratio is not None and expiry_map.call_skew_ratio >= 1.05),
+        call_wing_bid=bool(
+            expiry_map.call_skew_ratio is not None and expiry_map.call_skew_ratio >= 1.05
+        ),
         smile_curvature_change_5m=subtract(
             smile_curvature,
             previous.smile_curvature if previous else None,
@@ -150,6 +159,11 @@ def build_expiry_surface(
         put_skew_25d_change_5m=subtract(
             expiry_map.put_skew_25d,
             previous.put_skew_25d if previous else None,
+        ),
+        call_skew_25d=expiry_map.call_skew_25d,
+        call_skew_25d_change_5m=subtract(
+            expiry_map.call_skew_25d,
+            previous.call_skew_25d if previous else None,
         ),
     )
 
@@ -223,6 +237,8 @@ def snapshot_from_dict(payload: dict[str, Any]) -> IvSurfaceSnapshot:
             warnings=tuple(item.get("warnings") or ()),
             put_skew_25d=item.get("put_skew_25d"),
             put_skew_25d_change_5m=item.get("put_skew_25d_change_5m"),
+            call_skew_25d=item.get("call_skew_25d"),
+            call_skew_25d_change_5m=item.get("call_skew_25d_change_5m"),
         )
         for item in payload.get("expiries", ())
         if isinstance(item, dict)
@@ -397,7 +413,9 @@ def print_snapshot(snapshot: IvSurfaceSnapshot, paths: dict[str, str] | None = N
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Build and persist a 5-minute IV surface snapshot.")
+    parser = argparse.ArgumentParser(
+        description="Build and persist a 5-minute IV surface snapshot."
+    )
     parser.add_argument("--json", action="store_true", help="Print JSON.")
     parser.add_argument("--no-write", action="store_true", help="Do not persist the snapshot.")
     return parser.parse_args(argv)

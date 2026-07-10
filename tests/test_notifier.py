@@ -973,7 +973,9 @@ def test_invalid_reviewer_cue_failopens_high_price_alert(tmp_path, monkeypatch) 
 def test_codex_message_respects_human_scope_blocks_non_focus_context() -> None:
     assert codex_message_respects_human_scope("需要看盘: SPX near SPXW call wall; ES confirms.")
     assert codex_message_respects_human_scope("需要看盘: SPX setup with VIX context.")
-    assert codex_message_respects_human_scope("需要看盘: gamma transition, VIX1D 18 -> 21, SKEW rising.")
+    assert codex_message_respects_human_scope(
+        "需要看盘: gamma transition, VIX1D 18 -> 21, SKEW rising."
+    )
     assert codex_message_respects_human_scope("需要看盘: SPX setup, SPY/QQQ confirm the move.")
     assert not codex_message_respects_human_scope("需要看盘: SPX setup with Hyperliquid context.")
     assert not codex_message_respects_human_scope("需要看盘: Polymarket odds shifted.")
@@ -1402,6 +1404,42 @@ def test_confirmed_intraday_shock_bypasses_reviewer_and_pushes_directly(tmp_path
     assert entries[-1]["delivery_sinks"][0]["sink"] == "feishu"
 
 
+def test_confirmed_call_path_bypasses_reviewer_and_records_strategy_ack(tmp_path) -> None:
+    payload = make_payload()
+    payload["alerts"] = [
+        {
+            "severity": "high",
+            "kind": "flip_reclaim_call",
+            "instrument_id": "index:SPX",
+            "title": "SPX 收复 flip 7500，Call 路径确认",
+            "detail": "SPX/ES 两组新鲜样本确认，回踩不破才看 call。",
+            "quality": "live",
+            "source_gate": "spx_es_flip_reclaim_call_confirmed",
+            "dedup_group": "spx_call:flip:7500:1432:strategy",
+            "event_id": "spx_call:flip:7500:1432",
+        }
+    ]
+    settings = replace(
+        make_settings(str(tmp_path / "notify-state.json")),
+        deepseek_enabled=True,
+        direct_push_llm_enabled=False,
+    )
+
+    result = notify_payload(
+        payload,
+        settings=settings,
+        now=datetime(2026, 7, 10, 14, 32, tzinfo=timezone.utc),
+    )
+
+    assert result.selected_count == 1
+    assert result.sent_count == 1
+    assert not any(sink.sink == "deepseek_reviewer" for sink in result.sinks)
+    assert result.acknowledged_event_ids == (
+        "spx_call:flip:7500:1432",
+        "spx_call:flip:7500:1432:strategy",
+    )
+
+
 def test_recent_shock_suppresses_same_direction_fixed_cycle_price_move(tmp_path) -> None:
     settings = make_settings(str(tmp_path / "notify-state.json"))
     shock_at = datetime(2026, 7, 10, 14, 32, tzinfo=timezone.utc)
@@ -1622,9 +1660,7 @@ def test_kind_rate_limit_exempts_critical_and_other_kinds(tmp_path) -> None:
 
     payload = make_payload()
     payload["alerts"] = [_skew_alert("up:1")]
-    assert (
-        notify_payload(payload, settings=settings, runner=runner, now=base).selected_count == 1
-    )
+    assert notify_payload(payload, settings=settings, runner=runner, now=base).selected_count == 1
     # Critical severity bypasses the rate limit even on a one-step creep.
     payload = make_payload()
     payload["alerts"] = [_skew_alert("up:2", severity="critical")]
@@ -1862,9 +1898,10 @@ def test_bark_title_maps_kinds_to_chinese_categories() -> None:
     )
     assert bark_title_for_alerts([{"kind": "price_move_from_close"}]) == "SPX 价格异动"
     assert bark_title_for_alerts([{"kind": "option_wall_proximity"}]) == "SPX 结构信号"
-    assert bark_title_for_alerts(
-        [{"kind": "unknown_kind", "severity": "high"}]
-    ) == "SPX Spark HIGH unknown_kind"
+    assert (
+        bark_title_for_alerts([{"kind": "unknown_kind", "severity": "high"}])
+        == "SPX Spark HIGH unknown_kind"
+    )
 
 
 def test_codex_prompt_hides_non_focus_market_context() -> None:
@@ -1877,6 +1914,7 @@ def test_codex_prompt_hides_non_focus_market_context() -> None:
     assert "SPXW" in prompt
     assert "future:ES" in prompt
     assert "ibkr_session_state" in prompt
+    assert "负 gamma 不等于看跌" in prompt
 
 
 def test_alert_key_uses_dedup_group_not_title() -> None:

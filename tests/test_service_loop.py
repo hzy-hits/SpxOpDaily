@@ -73,6 +73,21 @@ def test_service_loop_can_enable_polymarket_explicitly() -> None:
     ]
 
 
+def test_service_loop_can_enable_periodic_greek_shadow_explicitly() -> None:
+    tasks = build_tasks(make_settings(greek_shadow_enabled=True))
+
+    assert [task.name for task in tasks] == [
+        "intraday_shock",
+        "hyperliquid",
+        "iv_surface",
+        "alert_engine",
+        "greek_shadow",
+    ]
+    shadow = next(task for task in tasks if task.name == "greek_shadow")
+    assert shadow.interval_seconds == 60
+    assert shadow.command is not None
+
+
 def test_run_once_keeps_running_tasks_and_reports_failure() -> None:
     calls: list[str] = []
     tasks = build_tasks(
@@ -214,6 +229,60 @@ def test_alert_task_extracts_notification_summary_from_json_stdout() -> None:
             "error": "openclaw returned ret=-2",
         }
     ]
+
+
+def test_greek_shadow_and_intraday_telemetry_statuses_are_observable() -> None:
+    def shadow_task() -> int:
+        print(
+            json.dumps(
+                {
+                    "status": "blocked",
+                    "reference_status": "unavailable",
+                    "reason": "exact_same_day_quotes_stale_or_unusable",
+                    "expiry": "20260710",
+                }
+            )
+        )
+        return 0
+
+    shadow = run_task(ServiceTask("greek_shadow", 60, shadow_task))
+    assert shadow["shadow_status"] == "blocked"
+    assert shadow["shadow_reference_status"] == "unavailable"
+    assert shadow["shadow_reason"] == "exact_same_day_quotes_stale_or_unusable"
+
+    def shock_task() -> int:
+        print(
+            json.dumps(
+                {
+                    "alert_count": 0,
+                    "intraday_path": {
+                        "status": "neutral",
+                        "play": None,
+                        "blocks": ["key_structure_quotes_stale_or_unavailable"],
+                    },
+                    "outcome_tracking": {
+                        "status": "error",
+                        "error": "OSError:disk full",
+                    },
+                    "option_structure_error": "ValueError:bad map",
+                    "greek_shadow_events": [
+                        {
+                            "status": "blocked",
+                            "reference_status": "unavailable",
+                            "reason": "stale",
+                        }
+                    ],
+                }
+            )
+        )
+        return 0
+
+    shock = run_task(ServiceTask("intraday_shock", 5, shock_task))
+    assert shock["intraday_path_status"] == "neutral"
+    assert shock["outcome_tracking_status"] == "error"
+    assert shock["outcome_tracking_error"] == "OSError:disk full"
+    assert shock["option_structure_error"] == "ValueError:bad map"
+    assert shock["greek_shadow_event_statuses"][0]["status"] == "blocked"
 
 
 def test_submit_due_tasks_skips_in_flight_and_not_due_tasks() -> None:

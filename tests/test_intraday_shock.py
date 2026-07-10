@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from spx_spark.alert_model import Alert
 from spx_spark.intraday_shock import (
     RECLAIM_KIND,
     SHOCK_KIND,
@@ -13,7 +14,9 @@ from spx_spark.intraday_shock import (
     PriceSample,
     advance_monitor_state,
     empty_monitor_state,
+    event_greek_shadow_due,
     mark_alert_attempts,
+    mark_event_greek_shadow_sampled,
     reconcile_acknowledged_alerts,
     synchronized_live_sample,
 )
@@ -230,6 +233,70 @@ def test_failed_delivery_retries_only_after_backoff(tmp_path) -> None:
     assert [alert.kind for alert in retry] == [SHOCK_KIND]
 
 
+def test_strategy_delivery_state_never_marks_reclaim_delivered() -> None:
+    now = datetime(2026, 7, 10, 14, 30, tzinfo=UTC)
+    state = empty_monitor_state("2026-07-10")
+    state["active_event"] = {
+        "event_id": "spx_shock:20260710:down:1428",
+        "reclaim_delivered": False,
+    }
+    state["call_strategy"] = {
+        "schema_version": 1,
+        "last_signal": {
+            "event_id": "spx_call:flip_reclaim_call:7500:143000",
+            "delivered": False,
+        },
+    }
+    alert = Alert(
+        severity="high",
+        kind="flip_reclaim_call",
+        instrument_id="index:SPX",
+        title="flip reclaim",
+        detail="confirmed",
+        provider=Provider.IBKR.value,
+        quality=MarketDataQuality.LIVE.value,
+        dedup_group="spx_call:flip_reclaim_call:7500:143000:strategy",
+        event_id="spx_call:flip_reclaim_call:7500:143000",
+    )
+
+    marked = mark_alert_attempts(state, [alert], at=now, delivered=True)
+
+    assert marked["call_strategy"]["last_signal"]["delivered"] is True  # type: ignore[index]
+    assert marked["active_event"]["reclaim_delivered"] is False  # type: ignore[index]
+
+    recovered, pending = reconcile_acknowledged_alerts(
+        state,
+        [alert],
+        acknowledged_event_ids={str(alert.dedup_group)},
+        at=now,
+    )
+    assert pending == []
+    assert recovered["call_strategy"]["last_signal"]["delivered"] is True  # type: ignore[index]
+    assert recovered["active_event"]["reclaim_delivered"] is False  # type: ignore[index]
+
+
+def test_event_greek_shadow_is_sampled_once_per_phase(tmp_path) -> None:
+    cfg = settings(tmp_path)
+    start = datetime(2026, 7, 10, 14, 0, tzinfo=UTC)
+    state = empty_monitor_state("2026-07-10")
+    state, _ = advance_monitor_state(state, sample(start, 7500.0, 7550.0), cfg)
+    state, alerts = advance_monitor_state(
+        state,
+        sample(start + timedelta(seconds=30), 7480.0, 7528.0),
+        cfg,
+    )
+    assert event_greek_shadow_due(state, alerts[0]) is True
+
+    marked = mark_event_greek_shadow_sampled(
+        state,
+        alerts,
+        at=start + timedelta(seconds=30),
+    )
+
+    assert event_greek_shadow_due(marked, alerts[0]) is False
+    assert marked["active_event"]["shock_greeks_sampled_at"]  # type: ignore[index]
+
+
 def _quote(
     instrument: InstrumentId,
     *,
@@ -269,7 +336,9 @@ def test_synchronized_sample_rejects_stale_or_delayed_anchor(tmp_path) -> None:
     assert result is None
     assert reason == "non_live_or_stale_anchor"
 
-    stale_spx = replace(spx, received_at=now - timedelta(seconds=20), quote_time=now - timedelta(seconds=20))
+    stale_spx = replace(
+        spx, received_at=now - timedelta(seconds=20), quote_time=now - timedelta(seconds=20)
+    )
     live_es = _quote(InstrumentId.future("ES"), price=7550.0, at=now)
     stale_state = LatestState(
         created_at=now,

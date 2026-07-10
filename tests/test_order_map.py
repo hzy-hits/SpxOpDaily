@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -67,6 +68,7 @@ def _stub_feishu(monkeypatch):
         lambda url, payload, timeout: {"code": 0, "msg": "success"},
     )
 
+
 SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 
 
@@ -113,7 +115,9 @@ def make_settings(
         bark_level="",
         bark_timeout_seconds=10.0,
         feishu_enabled=feishu_enabled,
-        feishu_webhook_url="https://open.feishu.cn/open-apis/bot/v2/hook/test" if feishu_enabled else "",
+        feishu_webhook_url="https://open.feishu.cn/open-apis/bot/v2/hook/test"
+        if feishu_enabled
+        else "",
         feishu_secret="",
         feishu_timeout_seconds=10.0,
         missed_queue_path=missed_queue_path,
@@ -497,6 +501,15 @@ def test_build_candidates_produces_three_plays_with_limits() -> None:
         make_option(
             expiry="20260707",
             strike=7530,
+            right="C",
+            mark=43.0,
+            delta=0.72,
+            gamma=0.007,
+            now=now,
+        ),
+        make_option(
+            expiry="20260707",
+            strike=7530,
             right="P",
             mark=9.1,
             delta=-0.28,
@@ -532,7 +545,10 @@ def test_build_candidates_produces_three_plays_with_limits() -> None:
         ),
         now=now,
     )
-    options_map = make_options_map(make_front_expiry())
+    options_map = replace(
+        make_options_map(make_front_expiry()),
+        underlier=UnderlierReference(price=7569.0, source="index:SPX"),
+    )
     candidates = build_candidates(state, options_map)
 
     assert len(candidates) == 3
@@ -555,6 +571,64 @@ def test_build_candidates_produces_three_plays_with_limits() -> None:
         assert candidate.limit_aggressive == round_to_tick(candidate.projected_mid)
         assert candidate.limit_conservative == round_to_tick(candidate.projected_mid * 0.85)
         assert math.isfinite(candidate.projected_mid)
+
+    flip_bias = {
+        "status": "confirmed",
+        "play": "flip_reclaim_call",
+        "expiry": "20260707",
+        "level": 7530.0,
+        "invalidation_level": 7527.0,
+    }
+    with_flip = build_candidates(
+        state,
+        options_map,
+        conditional_call_bias=flip_bias,
+    )
+    assert with_flip[0].play == "flip_reclaim_call"
+    assert [row.play for row in with_flip].count("flip_reclaim_call") == 1
+    assert "flip_breakdown_put" not in {row.play for row in with_flip}
+    assert next(row for row in with_flip if row.play == "flip_reclaim_call").right == "C"
+
+    wall_bias = {
+        "status": "confirmed",
+        "play": "call_wall_breakout_call",
+        "expiry": "20260707",
+        "level": 7550.0,
+        "invalidation_level": 7547.0,
+    }
+    with_breakout = build_candidates(
+        state,
+        options_map,
+        conditional_call_bias=wall_bias,
+    )
+    assert with_breakout[0].play == "call_wall_breakout_call"
+    assert [row.play for row in with_breakout].count("call_wall_breakout_call") == 1
+    assert "call_wall_fade_put" not in {row.play for row in with_breakout}
+    assert next(row for row in with_breakout if row.play == "call_wall_breakout_call").right == "C"
+
+    invalidated = build_candidates(
+        state,
+        options_map,
+        conditional_call_bias={**wall_bias, "invalidation_level": 7600.0},
+    )
+    assert "call_wall_breakout_call" not in {row.play for row in invalidated}
+
+    wrong_expiry = build_candidates(
+        state,
+        options_map,
+        conditional_call_bias={**wall_bias, "expiry": "20260708"},
+    )
+    assert "call_wall_breakout_call" not in {row.play for row in wrong_expiry}
+
+    unanchored = build_candidates(
+        state,
+        replace(
+            options_map,
+            underlier=UnderlierReference(price=7569.0, source="future:ES"),
+        ),
+        conditional_call_bias=wall_bias,
+    )
+    assert "call_wall_breakout_call" not in {row.play for row in unanchored}
 
 
 def test_order_payload_retry_rebuilds_after_stale_candidate_refresh(
@@ -620,8 +694,7 @@ def test_order_payload_retry_is_bounded_when_candidate_stays_stale(
     assert sleeps == [10.0, 10.0]
     assert len(payload["candidates"]) == 2
     assert any(
-        item == "bad_quality_for_7550P:transport_stale_after_15s"
-        for item in payload["warnings"]
+        item == "bad_quality_for_7550P:transport_stale_after_15s" for item in payload["warnings"]
     )
 
 
@@ -685,11 +758,21 @@ def test_build_candidates_marks_stop_trigger_and_frontrun() -> None:
     # chain-implied spot matches the ES reference.
     state = make_state(
         underlier,
-        make_option(expiry="20260707", strike=7500, right="C", mark=73.2, delta=0.85, gamma=0.004, now=now),
-        make_option(expiry="20260707", strike=7500, right="P", mark=4.2, delta=-0.15, gamma=0.004, now=now),
-        make_option(expiry="20260707", strike=7530, right="P", mark=9.1, delta=-0.28, gamma=0.007, now=now),
-        make_option(expiry="20260707", strike=7550, right="P", mark=11.0, delta=-0.22, gamma=0.006, now=now),
-        make_option(expiry="20260707", strike=7550, right="C", mark=30.0, delta=0.45, gamma=0.006, now=now),
+        make_option(
+            expiry="20260707", strike=7500, right="C", mark=73.2, delta=0.85, gamma=0.004, now=now
+        ),
+        make_option(
+            expiry="20260707", strike=7500, right="P", mark=4.2, delta=-0.15, gamma=0.004, now=now
+        ),
+        make_option(
+            expiry="20260707", strike=7530, right="P", mark=9.1, delta=-0.28, gamma=0.007, now=now
+        ),
+        make_option(
+            expiry="20260707", strike=7550, right="P", mark=11.0, delta=-0.22, gamma=0.006, now=now
+        ),
+        make_option(
+            expiry="20260707", strike=7550, right="C", mark=30.0, delta=0.45, gamma=0.006, now=now
+        ),
         now=now,
     )
     candidates = build_candidates(state, make_options_map(make_front_expiry()))
@@ -724,10 +807,18 @@ def test_build_candidates_skips_stale_breakdown_and_reanchors_walls() -> None:
     # Parity-consistent with spot ~7490.
     state = make_state(
         underlier,
-        make_option(expiry="20260707", strike=7480, right="C", mark=18.0, delta=0.55, gamma=0.008, now=now),
-        make_option(expiry="20260707", strike=7480, right="P", mark=8.0, delta=-0.45, gamma=0.008, now=now),
-        make_option(expiry="20260707", strike=7550, right="P", mark=62.0, delta=-0.85, gamma=0.004, now=now),
-        make_option(expiry="20260707", strike=7550, right="C", mark=2.0, delta=0.10, gamma=0.004, now=now),
+        make_option(
+            expiry="20260707", strike=7480, right="C", mark=18.0, delta=0.55, gamma=0.008, now=now
+        ),
+        make_option(
+            expiry="20260707", strike=7480, right="P", mark=8.0, delta=-0.45, gamma=0.008, now=now
+        ),
+        make_option(
+            expiry="20260707", strike=7550, right="P", mark=62.0, delta=-0.85, gamma=0.004, now=now
+        ),
+        make_option(
+            expiry="20260707", strike=7550, right="C", mark=2.0, delta=0.10, gamma=0.004, now=now
+        ),
         now=now,
     )
     warnings: list[str] = []
@@ -994,6 +1085,18 @@ def test_render_template_shows_frontrun_and_stop_trigger_notes() -> None:
                 "order_style": "stop_trigger",
             },
         ],
+        "spxw_0dte_greeks_reference": {
+            "status": "ok",
+            "aggregate": {
+                "gross_gamma_abs": 1234.0,
+                "gross_charm_5m_abs": 56.0,
+                "gross_vanna_1vol_abs": 7.0,
+            },
+            "coverage": {
+                "usable_contract_count": 8,
+                "exact_expiry_contract_count": 10,
+            },
+        },
         "warnings": [],
     }
     text = render_template(payload)
@@ -1031,8 +1134,12 @@ def test_resolve_spx_spot_keeps_hl_research_separate_from_chain_pricing() -> Non
     state = make_state(
         hl_quote,
         es_anchor,
-        make_option(expiry="20260707", strike=7525, right="C", mark=18.0, delta=0.55, gamma=0.008, now=now),
-        make_option(expiry="20260707", strike=7525, right="P", mark=10.0, delta=-0.45, gamma=0.008, now=now),
+        make_option(
+            expiry="20260707", strike=7525, right="C", mark=18.0, delta=0.55, gamma=0.008, now=now
+        ),
+        make_option(
+            expiry="20260707", strike=7525, right="P", mark=10.0, delta=-0.45, gamma=0.008, now=now
+        ),
         now=now,
     )
     options_map = make_options_map(make_front_expiry())
@@ -1293,7 +1400,9 @@ def test_hl_only_order_payload_is_valid_research_without_executable_aliases(
     assert payload["candidates"] == []
     assert payload["wall_ladder"] == {"call_walls": [], "put_walls": []}
     assert len(payload["research_candidates"]) == 3
-    assert all("play" not in item and "right" not in item for item in payload["research_candidates"])
+    assert all(
+        "play" not in item and "right" not in item for item in payload["research_candidates"]
+    )
     assert all(
         {option["right"] for option in item["observed_options"]} == {"C", "P"}
         for item in payload["research_candidates"]
@@ -1357,9 +1466,7 @@ def test_research_observed_quotes_apply_freshness_and_label_stale_rows(
     put_wall = next(
         item for item in payload["research_candidates"] if item["level_kind"] == "put_wall"
     )
-    observed_call = next(
-        item for item in put_wall["observed_options"] if item["right"] == "C"
-    )
+    observed_call = next(item for item in put_wall["observed_options"] if item["right"] == "C")
 
     assert observed_call["observed_bid"] is None
     assert observed_call["observed_ask"] is None
@@ -1491,7 +1598,12 @@ def test_push_context_roundtrip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
 def test_prompts_include_previous_push() -> None:
     from spx_spark.order_map import build_order_prompt, build_status_prompt
 
-    payload = {"expiry": "20260707", "candidates": [], "warnings": []}
+    payload = {
+        "expiry": "20260707",
+        "candidates": [],
+        "warnings": [],
+        "_spxw_0dte_greeks_audit": {"secret_scenario_price": 123.45},
+    }
     previous = {"kind": "order_map", "at": "2026-07-07T06:00:00+00:00", "text": "上一条正文"}
     order_prompt = build_order_prompt(payload, "模板行", previous)
     assert "上一条正文" in order_prompt
@@ -1502,6 +1614,36 @@ def test_prompts_include_previous_push() -> None:
     # section that used to live in the separate refresh push.
     assert "挂单参考" in status_prompt
     assert "市场状态+挂单参考" in status_prompt
+    assert "负 gamma 不等于下跌" in order_prompt
+    assert "负 gamma 不等于下跌" in status_prompt
+    assert "secret_scenario_price" not in order_prompt
+    assert "secret_scenario_price" not in status_prompt
+
+
+def test_persistence_uses_private_audit_reference_not_writer_payload(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import spx_spark.order_map as order_map_module
+
+    captured: dict[str, object] = {}
+
+    def write(reference, *, data_root):
+        captured["reference"] = reference
+        captured["data_root"] = data_root
+        return None
+
+    monkeypatch.setattr(order_map_module, "write_zero_dte_greeks_snapshot", write)
+    payload = {
+        "spxw_0dte_greeks_reference": {"contracts": []},
+        "_spxw_0dte_greeks_audit": {"contracts": [{"scenario": "clock_plus_15m"}]},
+    }
+    settings = SimpleNamespace(data_root=str(tmp_path))
+
+    order_map_module.persist_zero_dte_greeks_reference(payload, settings)
+
+    assert captured["reference"] == payload["_spxw_0dte_greeks_audit"]
+    assert captured["data_root"] == str(tmp_path)
 
 
 def test_chain_implied_spot_uses_put_call_parity() -> None:
@@ -1512,10 +1654,18 @@ def test_chain_implied_spot_uses_put_call_parity() -> None:
     # True spot 7517: C(7515)=12.0, P(7515)=10.0 -> implied 7517;
     # the wing pair has a larger |C-P| so parity should pick 7515.
     quotes = [
-        make_option(expiry="20260707", strike=7515, right="C", mark=12.0, delta=0.52, gamma=0.008, now=now),
-        make_option(expiry="20260707", strike=7515, right="P", mark=10.0, delta=-0.48, gamma=0.008, now=now),
-        make_option(expiry="20260707", strike=7550, right="C", mark=2.0, delta=0.15, gamma=0.004, now=now),
-        make_option(expiry="20260707", strike=7550, right="P", mark=34.0, delta=-0.85, gamma=0.004, now=now),
+        make_option(
+            expiry="20260707", strike=7515, right="C", mark=12.0, delta=0.52, gamma=0.008, now=now
+        ),
+        make_option(
+            expiry="20260707", strike=7515, right="P", mark=10.0, delta=-0.48, gamma=0.008, now=now
+        ),
+        make_option(
+            expiry="20260707", strike=7550, right="C", mark=2.0, delta=0.15, gamma=0.004, now=now
+        ),
+        make_option(
+            expiry="20260707", strike=7550, right="P", mark=34.0, delta=-0.85, gamma=0.004, now=now
+        ),
     ]
     pairs = pair_by_strike(quotes)
     assert set(pairs[7515.0]) == {OptionRight.CALL, OptionRight.PUT}
@@ -1924,6 +2074,18 @@ def test_render_status_template_contains_levels_and_changes() -> None:
                 "prob_touch": 0.57,
             },
         ],
+        "spxw_0dte_greeks_reference": {
+            "status": "ok",
+            "aggregate": {
+                "gross_gamma_abs": 1234.0,
+                "gross_charm_5m_abs": 56.0,
+                "gross_vanna_1vol_abs": 7.0,
+            },
+            "coverage": {
+                "usable_contract_count": 8,
+                "exact_expiry_contract_count": 10,
+            },
+        },
         "warnings": [],
     }
     now = datetime(2026, 7, 7, 6, 30, tzinfo=timezone.utc)
@@ -1932,6 +2094,8 @@ def test_render_status_template_contains_levels_and_changes() -> None:
     assert "距开盘 420 分钟" in text
     assert "put wall 7500 触达≈57%" in text
     assert "VIX 15.9" in text
+    assert "0DTE Greeks(只读/仓位符号未知" in text
+    assert "覆盖 8/10" in text
     assert "较上次推送变化: put wall 7495→7500" in text
 
     text_no_change = render_status_template(payload, [], now)
@@ -1990,6 +2154,8 @@ def test_build_order_payload_shape() -> None:
     assert payload["kind"] == "order_map"
     assert "underlier" in payload
     assert "candidates" in payload
+    assert payload["spxw_0dte_greeks_reference"]["mode"] == "reference_only"
+    assert payload["spxw_0dte_greeks_reference"]["contracts"] == []
     assert "warnings" in payload
 
 
@@ -2104,11 +2270,18 @@ def test_templates_render_es_volume_line() -> None:
     assert "价-12.0(下跌)" in map_text
     assert "贴put墙" in map_text
     assert "放量砸支撑" in map_text
-    status_text = render_status_template(payload, [], datetime(2026, 7, 8, 14, 0, tzinfo=timezone.utc))
+    status_text = render_status_template(
+        payload, [], datetime(2026, 7, 8, 14, 0, tzinfo=timezone.utc)
+    )
     assert "ES 量价" in status_text
     # Signals without a computable window stay silent instead of rendering "-".
-    payload["es_volume"] = {"cumulative": 1_000_000, "label": "no_baseline", "delta": None,
-                            "window_minutes": None, "pace_ratio": None}
+    payload["es_volume"] = {
+        "cumulative": 1_000_000,
+        "label": "no_baseline",
+        "delta": None,
+        "window_minutes": None,
+        "pace_ratio": None,
+    }
     assert "ES 量价" not in render_template(payload)
 
 

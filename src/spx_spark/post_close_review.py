@@ -13,6 +13,10 @@ from pathlib import Path
 from typing import Any
 
 from spx_spark.config import NotificationSettings, StorageSettings, env_bool, load_dotenv
+from spx_spark.greek_reference import (
+    load_zero_dte_greeks_snapshots,
+    summarize_zero_dte_greeks_session,
+)
 from spx_spark.iv_surface import (
     IvSurfaceExpiry,
     IvSurfaceSnapshot,
@@ -120,39 +124,23 @@ class ReviewCompletenessPolicy:
     def from_env(cls) -> "ReviewCompletenessPolicy":
         load_dotenv()
         return cls(
-            min_index_bucket_ratio=float(
-                os.getenv("SPX_REVIEW_MIN_INDEX_BUCKET_RATIO", "0.90")
-            ),
-            max_edge_gap_minutes=float(
-                os.getenv("SPX_REVIEW_MAX_EDGE_GAP_MINUTES", "15")
-            ),
-            min_index_live_ratio=float(
-                os.getenv("SPX_REVIEW_MIN_INDEX_LIVE_RATIO", "0.95")
-            ),
+            min_index_bucket_ratio=float(os.getenv("SPX_REVIEW_MIN_INDEX_BUCKET_RATIO", "0.90")),
+            max_edge_gap_minutes=float(os.getenv("SPX_REVIEW_MAX_EDGE_GAP_MINUTES", "15")),
+            min_index_live_ratio=float(os.getenv("SPX_REVIEW_MIN_INDEX_LIVE_RATIO", "0.95")),
             min_front_option_contracts=int(
                 os.getenv("SPX_REVIEW_MIN_FRONT_OPTION_CONTRACTS", "20")
             ),
-            min_front_option_strikes=int(
-                os.getenv("SPX_REVIEW_MIN_FRONT_OPTION_STRIKES", "10")
-            ),
+            min_front_option_strikes=int(os.getenv("SPX_REVIEW_MIN_FRONT_OPTION_STRIKES", "10")),
             min_front_option_strike_span=float(
                 os.getenv("SPX_REVIEW_MIN_FRONT_OPTION_STRIKE_SPAN", "50")
             ),
-            min_option_usable_ratio=float(
-                os.getenv("SPX_REVIEW_MIN_OPTION_USABLE_RATIO", "0.90")
-            ),
-            min_option_iv_ratio=float(
-                os.getenv("SPX_REVIEW_MIN_OPTION_IV_RATIO", "0.80")
-            ),
+            min_option_usable_ratio=float(os.getenv("SPX_REVIEW_MIN_OPTION_USABLE_RATIO", "0.90")),
+            min_option_iv_ratio=float(os.getenv("SPX_REVIEW_MIN_OPTION_IV_RATIO", "0.80")),
             min_surface_bucket_ratio=float(
                 os.getenv("SPX_REVIEW_MIN_SURFACE_BUCKET_RATIO", "0.60")
             ),
-            min_surface_iv_ratio=float(
-                os.getenv("SPX_REVIEW_MIN_SURFACE_IV_RATIO", "0.50")
-            ),
-            min_surface_gamma_ratio=float(
-                os.getenv("SPX_REVIEW_MIN_SURFACE_GAMMA_RATIO", "0.50")
-            ),
+            min_surface_iv_ratio=float(os.getenv("SPX_REVIEW_MIN_SURFACE_IV_RATIO", "0.50")),
+            min_surface_gamma_ratio=float(os.getenv("SPX_REVIEW_MIN_SURFACE_GAMMA_RATIO", "0.50")),
         )
 
 
@@ -274,7 +262,9 @@ def is_spx_focus_quote(quote: Quote) -> bool:
         return True
     if instrument.instrument_type == InstrumentType.OPTION:
         trading_class = (instrument.trading_class or "").upper()
-        return (instrument.underlier or instrument.symbol).upper() == "SPX" and trading_class.startswith("SPXW")
+        return (
+            instrument.underlier or instrument.symbol
+        ).upper() == "SPX" and trading_class.startswith("SPXW")
     return canonical.startswith("option:SPX:SPXW:")
 
 
@@ -384,22 +374,32 @@ def series_stats(quotes: list[Quote]) -> dict[str, Any]:
 
 
 def option_quote_summary(quotes: list[Quote]) -> dict[str, Any]:
-    option_quotes = [quote for quote in quotes if quote.instrument.instrument_type == InstrumentType.OPTION]
+    option_quotes = [
+        quote for quote in quotes if quote.instrument.instrument_type == InstrumentType.OPTION
+    ]
     expiries = sorted({quote.instrument.expiry or "unknown" for quote in option_quotes})
     contracts = {quote.instrument.canonical_id for quote in option_quotes}
     spreads = [quote.spread_bps for quote in option_quotes if quote.spread_bps is not None]
-    strikes = [quote.instrument.strike for quote in option_quotes if quote.instrument.strike is not None]
+    strikes = [
+        quote.instrument.strike for quote in option_quotes if quote.instrument.strike is not None
+    ]
     return {
         "rows": len(option_quotes),
         "unique_contracts": len(contracts),
         "expiries": expiries,
         "min_strike": min(strikes) if strikes else None,
         "max_strike": max(strikes) if strikes else None,
-        "with_iv": sum(1 for quote in option_quotes if quote.greeks and quote.greeks.implied_vol is not None),
-        "with_gamma": sum(1 for quote in option_quotes if quote.greeks and quote.greeks.gamma is not None),
+        "with_iv": sum(
+            1 for quote in option_quotes if quote.greeks and quote.greeks.implied_vol is not None
+        ),
+        "with_gamma": sum(
+            1 for quote in option_quotes if quote.greeks and quote.greeks.gamma is not None
+        ),
         "with_open_interest": sum(1 for quote in option_quotes if quote.open_interest is not None),
         "avg_spread_bps": sum(spreads) / len(spreads) if spreads else None,
-        "quality_counts": dict(sorted(Counter(quote.quality.value for quote in option_quotes).items())),
+        "quality_counts": dict(
+            sorted(Counter(quote.quality.value for quote in option_quotes).items())
+        ),
     }
 
 
@@ -422,7 +422,9 @@ def expiry_surface_summary(expiry: str, rows: list[IvSurfaceExpiry]) -> dict[str
         "first_as_of": None,
         "last_as_of": None,
         "atm_iv": metric_change(first.atm_iv, last.atm_iv),
-        "expected_move_points": metric_change(first.expected_move_points, last.expected_move_points),
+        "expected_move_points": metric_change(
+            first.expected_move_points, last.expected_move_points
+        ),
         "put_skew_ratio": metric_change(first.put_skew_ratio, last.put_skew_ratio),
         "call_skew_ratio": metric_change(first.call_skew_ratio, last.call_skew_ratio),
         "iv_surface_level": metric_change(first.iv_surface_level, last.iv_surface_level),
@@ -485,6 +487,19 @@ def _inside_session(value: datetime, session: MarketSession) -> bool:
     return session.open_at <= observed <= session.close_at
 
 
+def _greek_snapshot_inside_session(row: dict[str, Any], session: MarketSession) -> bool:
+    raw = row.get("as_of")
+    if not isinstance(raw, str) or not raw:
+        return False
+    try:
+        observed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if observed.tzinfo is None:
+        observed = observed.replace(tzinfo=timezone.utc)
+    return _inside_session(observed, session)
+
+
 def _usable_quote(quote: Quote) -> bool:
     return (
         quote.quality in {MarketDataQuality.LIVE, MarketDataQuality.FROZEN}
@@ -532,8 +547,7 @@ def _ratio_check(
         threshold=threshold,
         passed=passed,
         reason=(
-            f"{label}: {numerator}/{denominator} ({measured:.1%}); "
-            f"required >= {threshold:.1%}"
+            f"{label}: {numerator}/{denominator} ({measured:.1%}); required >= {threshold:.1%}"
         ),
     )
 
@@ -568,7 +582,8 @@ def evaluate_review_completeness(
         first_at = usable_times[0].astimezone(ET) if usable_times else None
         first_gap = _gap_minutes(session.open_at, first_at)
         first_passed = (
-            first_gap is not None and first_at is not None
+            first_gap is not None
+            and first_at is not None
             and session.open_at <= first_at <= session.close_at
             and first_gap <= policy.max_edge_gap_minutes
         )
@@ -590,7 +605,8 @@ def evaluate_review_completeness(
         last_at = usable_times[-1].astimezone(ET) if usable_times else None
         last_gap = _gap_minutes(last_at, session.close_at)
         last_passed = (
-            last_gap is not None and last_at is not None
+            last_gap is not None
+            and last_at is not None
             and session.open_at <= last_at <= session.close_at
             and last_gap <= policy.max_edge_gap_minutes
         )
@@ -830,10 +846,15 @@ def build_review_payload(
     start, end, _ready = session_window(trading_date, calendar=calendar)
     quotes = load_raw_quotes(settings, start=start, end=end)
     snapshots = load_surface_snapshots(settings, start=start, end=end)
+    greek_snapshots = load_zero_dte_greeks_snapshots(
+        data_root=settings.data_root,
+        trading_date=trading_date.isoformat(),
+    )
     return build_review_payload_from_data(
         trading_date=trading_date,
         quotes=quotes,
         snapshots=snapshots,
+        greek_snapshots=greek_snapshots,
         now=now,
         policy=policy,
         calendar=calendar,
@@ -845,6 +866,7 @@ def build_review_payload_from_data(
     trading_date: date,
     quotes: tuple[Quote, ...],
     snapshots: tuple[IvSurfaceSnapshot, ...],
+    greek_snapshots: tuple[dict[str, Any], ...] = (),
     now: datetime | None = None,
     policy: ReviewCompletenessPolicy | None = None,
     calendar: MarketCalendar = DEFAULT_MARKET_CALENDAR,
@@ -869,9 +891,17 @@ def build_review_payload_from_data(
             key=lambda item: item.as_of,
         )
     )
+    exact_expiry = trading_date.strftime("%Y%m%d")
+    greek_snapshots = tuple(
+        row
+        for row in greek_snapshots
+        if row.get("expiry") == exact_expiry and _greek_snapshot_inside_session(row, session)
+    )
     spx_quotes = [quote for quote in quotes if quote.instrument.canonical_id == "index:SPX"]
     es_quotes = [quote for quote in quotes if quote.instrument.canonical_id.startswith("future:ES")]
-    mes_quotes = [quote for quote in quotes if quote.instrument.canonical_id.startswith("future:MES")]
+    mes_quotes = [
+        quote for quote in quotes if quote.instrument.canonical_id.startswith("future:MES")
+    ]
     active_policy = policy or ReviewCompletenessPolicy.from_env()
     checks = evaluate_review_completeness(
         session=session,
@@ -895,6 +925,7 @@ def build_review_payload_from_data(
         "coverage": {
             "raw_quote_rows": len(quotes),
             "iv_surface_snapshots": len(snapshots),
+            "zero_dte_greeks_snapshots": len(greek_snapshots),
             "spx_rows": len(spx_quotes),
             "es_rows": len(es_quotes),
             "mes_rows": len(mes_quotes),
@@ -904,6 +935,10 @@ def build_review_payload_from_data(
         "mes": series_stats(mes_quotes),
         "spxw_options": option_quote_summary(list(quotes)),
         "iv_surface": surface_summary(snapshots),
+        "spxw_0dte_greeks_reference": summarize_zero_dte_greeks_session(
+            greek_snapshots,
+            expiry=exact_expiry,
+        ),
         "completeness": {
             "policy": asdict(active_policy),
             "checks": [check.to_dict() for check in checks],
@@ -1040,6 +1075,39 @@ def render_markdown(payload: dict[str, Any]) -> str:
         for expiry in surface["expiries"][:4]:
             lines.append(surface_row(expiry))
         lines.append("")
+
+    greeks = payload.get("spxw_0dte_greeks_reference")
+    lines.extend(["## 0DTE Greeks Reference", ""])
+    if not isinstance(greeks, dict) or greeks.get("snapshot_count", 0) == 0:
+        lines.extend(
+            [
+                "- No persisted same-day SPXW Greeks reference snapshots were available.",
+                "- This optional shadow layer does not change the review completeness verdict.",
+                "",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                "- Mode: `reference_only`; position sign/direction: `unknown` / `unknown`.",
+                f"- Snapshots: {greeks['snapshot_count']} total; {greeks.get('comparison_snapshot_count', 0)} share the comparison universe ({greeks.get('first_as_of')} -> {greeks.get('last_as_of')}).",
+                "- Gross values are OI-only absolute sensitivities, not signed dealer exposure or directional signals.",
+                f"- Coverage usable ratio: {greeks.get('coverage', {}).get('usable_ratio')}; OI ratio: {greeks.get('coverage', {}).get('oi_ratio')}.",
+                "",
+                "| Metric | First | Last | Peak |",
+                "|---|---:|---:|---:|",
+            ]
+        )
+        for name, metric in (greeks.get("metrics") or {}).items():
+            if not isinstance(metric, dict):
+                continue
+            lines.append(
+                f"| {name} | {fmt(metric.get('first'), 6)} | "
+                f"{fmt(metric.get('last'), 6)} | {fmt(metric.get('peak'), 6)} |"
+            )
+        if not greeks.get("metrics"):
+            lines.append("| No comparable same-universe pair | - | - | - |")
+        lines.append("")
     lines.extend(
         [
             "## Hermes Attachment Note",
@@ -1060,6 +1128,7 @@ def build_llm_writer_prompt(payload: dict[str, Any], deterministic_markdown: str
         "es": payload.get("es"),
         "spxw_options": payload.get("spxw_options"),
         "iv_surface": payload.get("iv_surface"),
+        "spxw_0dte_greeks_reference": payload.get("spxw_0dte_greeks_reference"),
         "completeness": payload.get("completeness"),
     }
     return "\n".join(
@@ -1079,6 +1148,8 @@ def build_llm_writer_prompt(payload: dict[str, Any], deterministic_markdown: str
             "并且明说今天的地形判断是兑现还是被证伪。",
             "下一交易日检查点写成双向 if/then：明早价格在哪些位置之上/之下，分别先看什么、动哪张单。",
             "数据 degraded 时只说明覆盖质量，不给方向判断。",
+            "spxw_0dte_greeks_reference 是同日到期的 reference-only 影子层；position_sign/direction 永远 unknown。"
+            "负 gamma 不等于看跌，绝不能据此改写 Call/Put 方向；next expiry 只能用于已有 ATM IV gap 对照。",
             "",
             "JSON:",
             json.dumps(compact, ensure_ascii=False, sort_keys=True),
@@ -1169,12 +1240,7 @@ def maybe_write_llm_review(
     narrative = markdown.strip()
     if narrative.startswith(expected_title):
         narrative = narrative[len(expected_title) :].lstrip()
-    return (
-        deterministic_markdown.rstrip()
-        + "\n\n## LLM Commentary\n\n"
-        + narrative
-        + "\n"
-    )
+    return deterministic_markdown.rstrip() + "\n\n## LLM Commentary\n\n" + narrative + "\n"
 
 
 def price_row(label: str, stats: dict[str, Any]) -> str:
@@ -1201,15 +1267,24 @@ def surface_row(expiry: dict[str, Any]) -> str:
 
 
 def default_output_dir(settings: StorageSettings) -> Path:
-    return Path(os.getenv("SPX_REVIEW_OUTPUT_DIR") or Path(settings.data_root) / "reports" / "spx_options_review")
+    return Path(
+        os.getenv("SPX_REVIEW_OUTPUT_DIR")
+        or Path(settings.data_root) / "reports" / "spx_options_review"
+    )
 
 
 def default_latest_markdown_path(settings: StorageSettings) -> Path:
-    return Path(os.getenv("SPX_REVIEW_LATEST_MARKDOWN_PATH") or Path(settings.data_root) / "latest" / "spx_options_review.md")
+    return Path(
+        os.getenv("SPX_REVIEW_LATEST_MARKDOWN_PATH")
+        or Path(settings.data_root) / "latest" / "spx_options_review.md"
+    )
 
 
 def default_hermes_export_dir() -> Path:
-    return Path(os.getenv("SPX_REVIEW_HERMES_EXPORT_DIR") or "/home/ubuntu/research/finance/daily/spx-options-review")
+    return Path(
+        os.getenv("SPX_REVIEW_HERMES_EXPORT_DIR")
+        or "/home/ubuntu/research/finance/daily/spx-options-review"
+    )
 
 
 def review_paths(
@@ -1245,7 +1320,9 @@ def write_outputs(payload: dict[str, Any], markdown: str, paths: ReviewPaths) ->
     paths.json_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
     paths.latest_markdown_path.parent.mkdir(parents=True, exist_ok=True)
     paths.latest_markdown_path.write_text(markdown, encoding="utf-8")
-    paths.latest_json_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    paths.latest_json_path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8"
+    )
     result = {
         "markdown_path": str(paths.markdown_path),
         "json_path": str(paths.json_path),
@@ -1394,11 +1471,23 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--output-dir", help="Report output directory.")
     parser.add_argument("--latest-markdown-path", help="Latest Markdown path.")
     parser.add_argument("--hermes-export-dir", help="Hermes daily attachment export directory.")
-    parser.add_argument("--no-hermes-export", action="store_true", help="Do not write Hermes export files.")
-    parser.add_argument("--llm", action="store_true", help="Force-enable the configured LLM writer.")
-    parser.add_argument("--no-llm", action="store_true", help="Disable the LLM writer for this run.")
-    parser.add_argument("--quiet-if-empty", action="store_true", help="Suppress stdout when there are no raw rows or snapshots.")
-    parser.add_argument("--no-push", action="store_true", help="Do not push review summary to Feishu/Bark.")
+    parser.add_argument(
+        "--no-hermes-export", action="store_true", help="Do not write Hermes export files."
+    )
+    parser.add_argument(
+        "--llm", action="store_true", help="Force-enable the configured LLM writer."
+    )
+    parser.add_argument(
+        "--no-llm", action="store_true", help="Disable the LLM writer for this run."
+    )
+    parser.add_argument(
+        "--quiet-if-empty",
+        action="store_true",
+        help="Suppress stdout when there are no raw rows or snapshots.",
+    )
+    parser.add_argument(
+        "--no-push", action="store_true", help="Do not push review summary to Feishu/Bark."
+    )
     return parser.parse_args(argv)
 
 
@@ -1439,14 +1528,22 @@ def run(argv: list[str] | None = None) -> int:
     markdown = maybe_write_llm_review(payload, markdown, llm_settings)
     paths_payload = None
     if not args.no_write:
-        hermes_export_dir = None if args.no_hermes_export else (
-            Path(args.hermes_export_dir) if args.hermes_export_dir else default_hermes_export_dir()
+        hermes_export_dir = (
+            None
+            if args.no_hermes_export
+            else (
+                Path(args.hermes_export_dir)
+                if args.hermes_export_dir
+                else default_hermes_export_dir()
+            )
         )
         paths = review_paths(
             trading_date=trading_date,
             settings=settings,
             output_dir=Path(args.output_dir) if args.output_dir else None,
-            latest_markdown_path=Path(args.latest_markdown_path) if args.latest_markdown_path else None,
+            latest_markdown_path=Path(args.latest_markdown_path)
+            if args.latest_markdown_path
+            else None,
             hermes_export_dir=hermes_export_dir,
         )
         paths_payload = write_outputs(payload, markdown, paths)

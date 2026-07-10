@@ -137,6 +137,13 @@ def test_expiry_summary_includes_gamma_profile_and_level_probabilities() -> None
     assert "gamma_profile" in expiry
     assert expiry["gamma_profile"]["top_strikes"]
     assert "level_probabilities" in expiry
+    assert expiry["coverage"]["with_delta"] == 10
+    assert expiry["coverage"]["with_theta"] == 10
+    assert expiry["coverage"]["with_vega"] == 10
+    reference = context["spxw_options"]["greeks_reference_0dte"]
+    assert reference["mode"] == "reference_only"
+    assert reference["direction"] == "unknown"
+    assert reference["contracts"] == []
 
 
 def test_delayed_price_is_labeled_research_only_in_human_context() -> None:

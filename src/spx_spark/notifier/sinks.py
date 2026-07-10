@@ -450,6 +450,8 @@ BARK_TITLE_CATEGORIES: tuple[tuple[str, frozenset[str]], ...] = (
     ("结构信号", frozenset({
         "option_gamma_regime",
         "option_wall_proximity",
+        "flip_reclaim_call",
+        "call_wall_breakout_call",
     })),
 )
 

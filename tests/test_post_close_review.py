@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from spx_spark.config import IvSurfaceSettings, StorageSettings
+from spx_spark.greek_reference import SCHEMA_VERSION
 from spx_spark.iv_surface import (
     IvSurfaceExpiry,
     IvSurfaceSnapshot,
@@ -77,9 +78,13 @@ def future_quote(symbol: str, mark: float, now: datetime) -> Quote:
     )
 
 
-def option_quote(expiry: str, strike: float, right: str, mark: float, iv: float, now: datetime) -> Quote:
+def option_quote(
+    expiry: str, strike: float, right: str, mark: float, iv: float, now: datetime
+) -> Quote:
     return Quote(
-        instrument=InstrumentId.option("SPX", expiry=expiry, strike=strike, right=right, trading_class="SPXW"),
+        instrument=InstrumentId.option(
+            "SPX", expiry=expiry, strike=strike, right=right, trading_class="SPXW"
+        ),
         provider=Provider.IBKR,
         provider_symbol=f"SPXW:{expiry}:{strike}:{right}",
         received_at=now,
@@ -274,6 +279,61 @@ def test_one_row_payload_is_degraded_with_measured_checks() -> None:
     assert spx_coverage["passed"] is False
 
 
+def test_post_close_summarizes_optional_zero_dte_greeks_without_changing_verdict() -> None:
+    trading_date = date(2026, 7, 6)
+    first_at = datetime(2026, 7, 6, 10, 0, tzinfo=ET)
+    last_at = datetime(2026, 7, 6, 15, 30, tzinfo=ET)
+    base = {
+        "schema_version": SCHEMA_VERSION,
+        "kind": "snapshot",
+        "mode": "reference_only",
+        "status": "ok",
+        "expiry": "20260706",
+        "direction": "unknown",
+        "position_sign": "unknown",
+        "warnings": [],
+        "aggregate_universe": {"fingerprint": "same-hot-cohort", "contract_count": 8},
+        "coverage": {"usable_ratio": 0.8, "oi_ratio": 1.0},
+    }
+    first = {
+        **base,
+        "as_of": first_at.isoformat(),
+        "aggregate": {
+            "gross_gamma_abs": 100.0,
+            "gross_charm_5m_abs": 20.0,
+        },
+    }
+    last = {
+        **base,
+        "as_of": last_at.isoformat(),
+        "aggregate": {
+            "gross_gamma_abs": 150.0,
+            "gross_charm_5m_abs": 10.0,
+        },
+    }
+    payload = build_review_payload_from_data(
+        trading_date=trading_date,
+        quotes=(),
+        snapshots=(),
+        greek_snapshots=(first, last),
+        now=datetime(2026, 7, 6, 17, 15, tzinfo=ET),
+        policy=ReviewCompletenessPolicy(),
+    )
+
+    summary = payload["spxw_0dte_greeks_reference"]
+    markdown = render_markdown(payload)
+    assert payload["verdict"]["status"] == "degraded"
+    assert summary["snapshot_count"] == 2
+    assert summary["position_sign"] == "unknown"
+    assert summary["metrics"]["gross_gamma_abs"] == {
+        "first": 100.0,
+        "last": 150.0,
+        "peak": 150.0,
+    }
+    assert "## 0DTE Greeks Reference" in markdown
+    assert "not signed dealer exposure" in markdown
+
+
 def test_full_high_quality_pure_payload_is_complete() -> None:
     trading_date = date(2026, 7, 6)
     session_open = datetime(2026, 7, 6, 9, 30, tzinfo=ET)
@@ -351,11 +411,7 @@ def test_latest_low_iv_and_gamma_coverage_forces_degraded_verdict() -> None:
         policy=ReviewCompletenessPolicy(),
     )
 
-    failed = {
-        check["name"]
-        for check in payload["completeness"]["checks"]
-        if not check["passed"]
-    }
+    failed = {check["name"] for check in payload["completeness"]["checks"] if not check["passed"]}
     assert payload["verdict"]["status"] == "degraded"
     assert failed == {
         "latest_front_iv_coverage_ratio",

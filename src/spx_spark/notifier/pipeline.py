@@ -43,6 +43,8 @@ REVIEW_FAILURE_HIGH_FAILOPEN_KINDS = frozenset(
         "price_move_from_close",
         "intraday_price_shock",
         "intraday_price_reclaim",
+        "flip_reclaim_call",
+        "call_wall_breakout_call",
     }
 )
 
@@ -98,6 +100,8 @@ def _record_delivered_event_ids(
         if str(alert.get("kind") or "") in {
             "intraday_price_shock",
             "intraday_price_reclaim",
+            "flip_reclaim_call",
+            "call_wall_breakout_call",
         } and alert.get("dedup_group"):
             acknowledged_event_ids.add(str(alert["dedup_group"]))
 

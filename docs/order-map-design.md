@@ -46,7 +46,7 @@ def project_option_price(
 
 @dataclass(frozen=True)
 class OrderCandidate:
-    play: str              # "put_wall_bounce_call" | "flip_breakdown_put" | "call_wall_fade_put"
+    play: str              # legacy plays plus confirmed reclaim/breakout calls
     level: float           # 触发位(SPX 点)
     level_label: str       # "put wall 7500" 等
     contract_id: str       # option:SPX:SPXW:...:C 的 canonical id
@@ -138,7 +138,7 @@ cd 仓库根目录, `exec uv run spx-spark-order-map "$@"`。加可执行位。
 概率用现有 `probability_for_level`(options_map.py 已有,查它的真实签名和返回结构,
 拿 touch 概率与收盘越过概率)。
 
-三类 play(每类最多 1 条;对应位缺失/质量差则跳过并写入 warnings):
+三类常规 play(每类最多 1 条;对应位缺失/质量差则跳过并写入 warnings):
 
 1. **put_wall_bounce_call**: 触发位 L = put_wall。合约 = strike 为
    `round_to_step(L, strike_step)` 的 **call**(到位时的 ATM call,反弹做多)。
@@ -146,6 +146,27 @@ cd 仓库根目录, `exec uv run spx-spark-order-map "$@"`。加可执行位。
    合约 = strike 为 `round_to_step(L, strike_step)` 的 **put**(跌破进负 gamma 顺势)。
 3. **call_wall_fade_put**: 触发位 L = call_wall。合约 = strike 为
    `round_to_step(L, strike_step)` 的 **put**(冲墙回落)。
+
+两个 Call 延续 play 不按 15 分钟机械生成。5 秒 SPX/ES 通道先冻结结构位，
+再用两个新的同步样本确认:
+
+4. **flip_reclaim_call**: 急跌 V 反确认后,SPX 连续守住冲击前冻结的
+   `flip_high + 3pt`,ES 不背离。候选以冻结 flip 为回踩位,跌回
+   `flip_low - 3pt` 失效。
+5. **call_wall_breakout_call**: 冻结突破前的旧 call wall;SPX 跨越
+   `wall + 3pt` 后连续两组 SPX/ES 样本接受在墙上方。当前墙跳到下一档时
+   不追着重置,跌回 `old wall - 3pt` 失效。
+
+确认态形成 5 分钟 `conditional_call_bias`,优先显示对应 Call,并替换已经被
+确认路径证伪的同层 Put(收复 flip 后不再同时给 breakdown Put;接受旧 call
+wall 后不再同时给 fade Put)。另一侧风险剧本保留,不自动下单。Gamma 正负
+只描述波动环境。
+
+结构位只接受严格 SPXW 当日到期、IBKR live-feed、120 秒内且有 OI+Gamma
+的来源。flip 两个边界各要求同一 distinct strike 的 Call/Put 双边都新鲜;
+call wall 要求该 strike 的 Call OI+Gamma 新鲜。短暂轮换缺口有 30 秒 grace,
+超过后 bias/watch 失效。冷启动首个墙下样本可建立 provisional watch,但 crossing
+前若 live OI wall 改档必须跟随新墙;只有实际 crossing 后才冻结旧墙。
 
 合约查找: 在 `state.best_quotes` 里找该 expiry/strike/right 的 SPXW 期权 quote;
 需要 `mid`(或 effective_price)与 greeks 的 delta、gamma 都非空,quality 不在
@@ -192,7 +213,8 @@ gamma: positive_gamma_pin, zero gamma 7533.3, flip zone 7530-7535
    gamma=0.008, S=7569, L=7500 → 4.2 + 0.35*(-69) + 0.5*0.008*69^2 = 负值被
    clamp 到 0.05?换参数使结果为正,断言公式);put 案例 delta 为负。
 3. `build_candidates`: 构造带 put/call 墙与合约报价+greeks 的假 state,断言
-   产出 3 个 play、strike/right 正确、projected 与 limit 一致性
+   无确认态保持 3 个 play;确认态以 1 个 Call play 替换同层 Put,并验证
+   strike/right、projected 与 limit 一致性
    (limit_aggressive = round_to_tick(projected))。
 4. 缺 greeks 的合约被跳过并产生 warning。
 5. `render_template` 包含关键行(play 标签、触达概率、挂单参考)。

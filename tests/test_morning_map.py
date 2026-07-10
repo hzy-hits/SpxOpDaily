@@ -73,7 +73,9 @@ def make_settings(
         bark_level="",
         bark_timeout_seconds=10.0,
         feishu_enabled=feishu_enabled,
-        feishu_webhook_url="https://open.feishu.cn/open-apis/bot/v2/hook/test" if feishu_enabled else "",
+        feishu_webhook_url="https://open.feishu.cn/open-apis/bot/v2/hook/test"
+        if feishu_enabled
+        else "",
         feishu_secret="",
         feishu_timeout_seconds=10.0,
         missed_queue_path=missed_queue_path,
@@ -93,6 +95,18 @@ def sample_payload() -> dict:
         },
         "human_focus_context": {
             "spxw_options": {
+                "greeks_reference_0dte": {
+                    "status": "ok",
+                    "aggregate": {
+                        "gross_gamma_abs": 1234.0,
+                        "gross_charm_5m_abs": 56.0,
+                        "gross_vanna_1vol_abs": 7.0,
+                    },
+                    "coverage": {
+                        "usable_contract_count": 8,
+                        "exact_expiry_contract_count": 10,
+                    },
+                },
                 "expiries": [
                     {
                         "call_wall": 6050.0,
@@ -164,6 +178,8 @@ def test_render_template_contains_walls_probs_regime() -> None:
     assert "dip_context=expensive_tail_protection" in text
     assert "共振" in text
     assert "不共振" in text
+    assert "0DTE Greeks(只读/仓位符号未知" in text
+    assert "覆盖 8/10" in text
 
 
 def test_send_morning_map_falls_back_to_template_when_agent_fails(
@@ -208,7 +224,9 @@ def test_send_morning_map_queues_on_feishu_failure(
     assert entry["message"] == template
 
 
-def test_run_skips_outside_window(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+def test_run_skips_outside_window(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
     monkeypatch.setattr(
         "spx_spark.morning_map.LatestStateStore.load",
         lambda self, **kwargs: LatestState(
@@ -288,7 +306,9 @@ def test_morning_surface_must_be_current_and_match_active_expiry(monkeypatch) ->
     now = datetime(2026, 7, 7, 13, 0, tzinfo=timezone.utc)
     settings = SimpleNamespace(latest_surface_path="/tmp/iv-surface.json")
     current = SimpleNamespace(as_of=now, front_expiry="20260707")
-    stale = SimpleNamespace(as_of=datetime(2026, 7, 6, 20, 0, tzinfo=timezone.utc), front_expiry="20260707")
+    stale = SimpleNamespace(
+        as_of=datetime(2026, 7, 6, 20, 0, tzinfo=timezone.utc), front_expiry="20260707"
+    )
     wrong_expiry = SimpleNamespace(as_of=now, front_expiry="20260706")
 
     monkeypatch.setattr("spx_spark.morning_map.load_latest_snapshot", lambda path: current)

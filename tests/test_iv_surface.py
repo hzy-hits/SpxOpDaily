@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from spx_spark.config import IvSurfaceSettings
 from spx_spark.iv_surface import (
     build_iv_surface_snapshot,
@@ -202,7 +204,7 @@ def test_iv_surface_skips_5m_diff_when_previous_snapshot_too_old() -> None:
     assert fresh_front.atm_iv_jump_5m is not None
 
 
-def test_iv_surface_snapshot_round_trips_put_skew_25d_fields(tmp_path) -> None:
+def test_iv_surface_snapshot_round_trips_symmetric_25d_skew_fields(tmp_path) -> None:
     now = datetime(2026, 7, 6, 14, 0, tzinfo=timezone.utc)
     settings = make_settings(tmp_path)
     put_25d = replace(
@@ -237,6 +239,7 @@ def test_iv_surface_snapshot_round_trips_put_skew_25d_fields(tmp_path) -> None:
     snapshot = build_iv_surface_snapshot(state, settings=settings)
     front = snapshot.expiries[0]
     assert front.put_skew_25d is not None
+    assert front.call_skew_25d is not None
 
     write_snapshot(settings, snapshot)
     loaded = load_latest_snapshot(settings.latest_surface_path)
@@ -244,3 +247,22 @@ def test_iv_surface_snapshot_round_trips_put_skew_25d_fields(tmp_path) -> None:
     loaded_front = loaded.expiries[0]
     assert loaded_front.put_skew_25d == front.put_skew_25d
     assert loaded_front.put_skew_25d_change_5m == front.put_skew_25d_change_5m
+    assert loaded_front.call_skew_25d == front.call_skew_25d
+    assert loaded_front.call_skew_25d_change_5m == front.call_skew_25d_change_5m
+
+    bid_call_25d = replace(
+        call_25d,
+        greeks=replace(call_25d.greeks, implied_vol=0.23),
+    )
+    changed = build_iv_surface_snapshot(
+        make_state(
+            make_option(expiry="20260706", strike=7500, right="C", mark=10, iv=0.20, now=now),
+            make_option(expiry="20260706", strike=7500, right="P", mark=11, iv=0.22, now=now),
+            put_25d,
+            bid_call_25d,
+            now=now,
+        ),
+        settings=settings,
+        previous=snapshot,
+    )
+    assert changed.expiries[0].call_skew_25d_change_5m == pytest.approx(0.04)

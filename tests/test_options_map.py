@@ -697,6 +697,40 @@ def test_gex_weight_volume_only_nonzero_for_intraday() -> None:
     assert gex_weight(quote, intraday=True) == 50.0
 
 
+def test_volume_only_intraday_gex_is_not_labeled_open_interest() -> None:
+    now = datetime(2026, 7, 6, 14, 0, tzinfo=timezone.utc)
+    underlier = Quote(
+        instrument=InstrumentId.index("SPX"),
+        provider=Provider.IBKR,
+        received_at=now,
+        quote_time=now,
+        quality=MarketDataQuality.LIVE,
+        mark=7500.0,
+    )
+    rows = tuple(
+        replace(
+            make_option(
+                expiry="20260706",
+                strike=7500,
+                right=right,
+                mark=10.0,
+                iv=0.20,
+                gamma=0.003,
+                open_interest=None,
+                now=now,
+            ),
+            volume=100.0,
+        )
+        for right in ("C", "P")
+    )
+
+    expiry = build_options_map(make_state(underlier, *rows, now=now)).expiries[0]
+
+    assert expiry.net_gex is not None
+    assert expiry.gex_quality == "no_open_interest_gex"
+    assert expiry.wall_method == "volume_fallback"
+
+
 def test_bs_gamma_hand_computed_smoke_value() -> None:
     # S=K=6000, iv=0.2, t=1/365:
     # d1 = 0.5*iv*sqrt(t) = 0.1/sqrt(365) ~= 0.005234

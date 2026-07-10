@@ -19,10 +19,27 @@ from typing import Any
 from spx_spark.alert_model import Alert
 from spx_spark.alert_profile import active_window
 from spx_spark.config import NY_TZ, NotificationSettings, StorageSettings, env_float, env_int
+from spx_spark.greek_shadow import sample_zero_dte_greeks_shadow
+from spx_spark.intraday_event_outcomes import (
+    IntradayEventOutcomeSettings,
+    IntradayEventOutcomeTracker,
+    SynchronizedSPXSample,
+)
+from spx_spark.intraday_strategy import (
+    FLIP_RECLAIM_CALL_KIND,
+    STRATEGY_KINDS,
+    IntradayPathSignal,
+    IntradayStrategySettings,
+    advance_intraday_strategy,
+    mark_strategy_alert_attempts,
+    structure_from_options_map,
+    unavailable_structure,
+)
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 from spx_spark.marketdata import MarketDataQuality, Provider, Quote, as_utc
 from spx_spark.notifier import notify_payload
 from spx_spark.notifier.state import load_acknowledged_event_ids
+from spx_spark.options_map import build_options_map
 from spx_spark.state_io import atomic_write_json_secure, exclusive_state_lock
 from spx_spark.storage import LatestState, LatestStateStore, configured_quote_use_decision
 
@@ -57,12 +74,12 @@ class IntradayShockSettings:
 
     @classmethod
     def from_env(cls) -> "IntradayShockSettings":
-        data_root = os.getenv("MARKET_DATA_DATA_ROOT") or os.getenv("MAINTENANCE_DATA_ROOT") or "data"
+        data_root = (
+            os.getenv("MARKET_DATA_DATA_ROOT") or os.getenv("MAINTENANCE_DATA_ROOT") or "data"
+        )
         return cls(
-            state_path=os.getenv(
-                "ALERT_INTRADAY_SHOCK_STATE_PATH",
-                f"{data_root.rstrip('/')}/latest/intraday_shock_state.json",
-            ),
+            state_path=os.getenv("ALERT_INTRADAY_SHOCK_STATE_PATH")
+            or f"{data_root.rstrip('/')}/latest/intraday_shock_state.json",
             one_minute_seconds=env_int("ALERT_INTRADAY_SHOCK_1M_SECONDS", 60),
             three_minute_seconds=env_int("ALERT_INTRADAY_SHOCK_3M_SECONDS", 180),
             one_minute_threshold_bps=env_float("ALERT_INTRADAY_SHOCK_1M_BPS", 20.0),
@@ -70,22 +87,16 @@ class IntradayShockSettings:
             es_confirm_ratio=env_float("ALERT_INTRADAY_SHOCK_ES_CONFIRM_RATIO", 0.50),
             max_spx_age_seconds=env_float("ALERT_INTRADAY_SHOCK_SPX_MAX_AGE_SECONDS", 15.0),
             max_es_age_seconds=env_float("ALERT_INTRADAY_SHOCK_ES_MAX_AGE_SECONDS", 10.0),
-            max_anchor_skew_seconds=env_float(
-                "ALERT_INTRADAY_SHOCK_MAX_ANCHOR_SKEW_SECONDS", 5.0
-            ),
+            max_anchor_skew_seconds=env_float("ALERT_INTRADAY_SHOCK_MAX_ANCHOR_SKEW_SECONDS", 5.0),
             reclaim_window_seconds=env_int("ALERT_INTRADAY_RECLAIM_WINDOW_SECONDS", 300),
             event_expiry_seconds=env_int("ALERT_INTRADAY_EVENT_EXPIRY_SECONDS", 600),
             reclaim_fraction=env_float("ALERT_INTRADAY_RECLAIM_FRACTION", 0.60),
             es_reclaim_fraction=env_float("ALERT_INTRADAY_RECLAIM_ES_FRACTION", 0.40),
             reclaim_hold_fraction=env_float("ALERT_INTRADAY_RECLAIM_HOLD_FRACTION", 0.55),
-            es_reclaim_hold_fraction=env_float(
-                "ALERT_INTRADAY_RECLAIM_ES_HOLD_FRACTION", 0.35
-            ),
+            es_reclaim_hold_fraction=env_float("ALERT_INTRADAY_RECLAIM_ES_HOLD_FRACTION", 0.35),
             reclaim_confirm_samples=env_int("ALERT_INTRADAY_RECLAIM_CONFIRM_SAMPLES", 2),
             completion_hold_seconds=env_int("ALERT_INTRADAY_COMPLETION_HOLD_SECONDS", 60),
-            rearm_recovery_fraction=env_float(
-                "ALERT_INTRADAY_REARM_RECOVERY_FRACTION", 0.40
-            ),
+            rearm_recovery_fraction=env_float("ALERT_INTRADAY_REARM_RECOVERY_FRACTION", 0.40),
             rearm_neutral_seconds=env_int("ALERT_INTRADAY_REARM_NEUTRAL_SECONDS", 300),
             retry_seconds=env_int("ALERT_INTRADAY_DELIVERY_RETRY_SECONDS", 30),
         )
@@ -203,7 +214,9 @@ def _candidate_for_horizon(
     for direction, anchor in (("down", down_anchor), ("up", up_anchor)):
         spx_move = _bps(current.spx, anchor.spx)
         es_move = _bps(current.es, anchor.es)
-        direction_ok = spx_move <= -threshold_bps if direction == "down" else spx_move >= threshold_bps
+        direction_ok = (
+            spx_move <= -threshold_bps if direction == "down" else spx_move >= threshold_bps
+        )
         es_ok = (
             es_move < 0 and abs(es_move) >= abs(spx_move) * es_confirm_ratio
             if direction == "down"
@@ -329,6 +342,43 @@ def _reclaim_alert(event: dict[str, object]) -> Alert:
         dedup_group=f"{event_id}:reclaim",
         event_id=event_id,
     )
+
+
+def _strategy_alert(signal: IntradayPathSignal) -> Alert:
+    if signal.kind == FLIP_RECLAIM_CALL_KIND:
+        title = f"SPX 收复 flip {_dash_level(signal.level)}，Call 路径确认"
+        detail = (
+            f"急跌 V 反后，SPX/ES 两组新鲜样本守住冻结 flip {_dash_level(signal.level)}；"
+            f"只把回踩不破视为 0DTE call 延续入口，失效线 {_dash_level(signal.invalidation_level)}，"
+            "不追价、不自动下单。Gamma 只描述放大/钉住环境，不代表涨跌方向。"
+        )
+        gate = "spx_es_flip_reclaim_call_confirmed"
+    else:
+        title = f"SPX 突破旧 Call Wall {_dash_level(signal.level)}，延续确认"
+        detail = (
+            f"SPX/ES 两组新鲜样本接受在突破前冻结的 call wall {_dash_level(signal.level)} 上方；"
+            f"只在回踩不破时看 0DTE call，失效线 {_dash_level(signal.invalidation_level)}，"
+            "第一次刺穿不算突破，不追价、不自动下单。"
+        )
+        gate = "spx_es_call_wall_breakout_call_confirmed"
+    return Alert(
+        severity="high",
+        kind=signal.kind,
+        instrument_id="index:SPX",
+        title=title,
+        detail=detail,
+        provider=Provider.IBKR.value,
+        quality=MarketDataQuality.LIVE.value,
+        value=signal.level,
+        threshold=signal.invalidation_level,
+        source_gate=gate,
+        dedup_group=f"{signal.event_id}:strategy",
+        event_id=signal.event_id,
+    )
+
+
+def _dash_level(value: float) -> str:
+    return str(int(value)) if float(value).is_integer() else f"{value:.1f}"
 
 
 def advance_monitor_state(
@@ -552,6 +602,16 @@ def mark_alert_attempts(
     state: dict[str, object], alerts: list[Alert], *, at: datetime, delivered: bool
 ) -> dict[str, object]:
     state = dict(state)
+    strategy_event_ids = {
+        str(alert.event_id) for alert in alerts if alert.kind in STRATEGY_KINDS and alert.event_id
+    }
+    if strategy_event_ids:
+        state = mark_strategy_alert_attempts(
+            state,
+            event_ids=strategy_event_ids,
+            at=at,
+            delivered=delivered,
+        )
     active = state.get("active_event")
     if not isinstance(active, dict):
         return state
@@ -559,7 +619,12 @@ def mark_alert_attempts(
     for alert in alerts:
         if alert.event_id != event.get("event_id"):
             continue
-        phase = "shock" if alert.kind == SHOCK_KIND else "reclaim"
+        if alert.kind == SHOCK_KIND:
+            phase = "shock"
+        elif alert.kind == RECLAIM_KIND:
+            phase = "reclaim"
+        else:
+            continue
         event[f"{phase}_last_attempt_at"] = as_utc(at).isoformat()
         if delivered:
             event[f"{phase}_delivered"] = True
@@ -585,6 +650,43 @@ def reconcile_acknowledged_alerts(
     if recovered:
         state = mark_alert_attempts(state, recovered, at=at, delivered=True)
     return state, [alert for alert in alerts if alert not in recovered]
+
+
+def event_greek_shadow_due(state: dict[str, object], alert: Alert) -> bool:
+    if alert.kind not in {SHOCK_KIND, RECLAIM_KIND} or not alert.event_id:
+        return False
+    phase = "shock" if alert.kind == SHOCK_KIND else "reclaim"
+    for key in ("active_event", "last_event"):
+        event = state.get(key)
+        if isinstance(event, dict) and event.get("event_id") == alert.event_id:
+            return not bool(event.get(f"{phase}_greeks_sampled_at"))
+    return False
+
+
+def mark_event_greek_shadow_sampled(
+    state: dict[str, object],
+    alerts: list[Alert],
+    *,
+    at: datetime,
+) -> dict[str, object]:
+    state = dict(state)
+    for key in ("active_event", "last_event"):
+        raw = state.get(key)
+        if not isinstance(raw, dict):
+            continue
+        event = dict(raw)
+        for alert in alerts:
+            if event.get("event_id") != alert.event_id:
+                continue
+            if alert.kind == SHOCK_KIND:
+                phase = "shock"
+            elif alert.kind == RECLAIM_KIND:
+                phase = "reclaim"
+            else:
+                continue
+            event[f"{phase}_greeks_sampled_at"] = as_utc(at).isoformat()
+        state[key] = event
+    return state
 
 
 def _quote_source_at(quote: Quote) -> datetime:
@@ -661,6 +763,11 @@ def _notification_payload(
                 else None,
             },
             "intraday_shock": monitor_state.get("active_event"),
+            "conditional_call_bias": (
+                monitor_state.get("call_strategy", {}).get("active_bias")
+                if isinstance(monitor_state.get("call_strategy"), dict)
+                else None
+            ),
         },
         "alert_count": len(alerts),
         "alerts": [alert.to_dict() for alert in alerts],
@@ -677,7 +784,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def run(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     settings = IntradayShockSettings.from_env()
-    latest = LatestStateStore(StorageSettings.from_env()).load()
+    strategy_settings = IntradayStrategySettings.from_env()
+    storage_settings = StorageSettings.from_env()
+    latest = LatestStateStore(storage_settings).load()
     session_date = rth_session_date(latest.as_of)
     payload: dict[str, Any] = {
         "created_at": datetime.now(tz=timezone.utc).isoformat(),
@@ -692,6 +801,22 @@ def run(argv: list[str] | None = None) -> int:
         if sample is None:
             payload["skipped_reason"] = sample_error
         else:
+            options_map = None
+            option_structure_error: str | None = None
+            try:
+                options_map = build_options_map(latest)
+                structure = structure_from_options_map(
+                    options_map,
+                    session_date=session_date,
+                    observed_at=sample.at,
+                    state=latest,
+                )
+            except Exception as exc:  # Price alerts must survive option-map failures.
+                option_structure_error = f"{type(exc).__name__}:{exc}"
+                structure = unavailable_structure(
+                    observed_at=sample.at,
+                    reason="option_structure_build_error",
+                )
             state_path = Path(settings.state_path)
             notify_settings = replace(
                 NotificationSettings.from_env(),
@@ -699,7 +824,15 @@ def run(argv: list[str] | None = None) -> int:
             )
             with exclusive_state_lock(state_path):
                 monitor_state = load_monitor_state(settings.state_path, session_date=session_date)
-                monitor_state, alerts = advance_monitor_state(monitor_state, sample, settings)
+                monitor_state, price_alerts = advance_monitor_state(monitor_state, sample, settings)
+                monitor_state, path_decision, strategy_signals = advance_intraday_strategy(
+                    monitor_state,
+                    sample,
+                    structure,
+                    strategy_settings,
+                )
+                alerts = [*price_alerts, *(_strategy_alert(row) for row in strategy_signals)]
+                raw_price_alerts = tuple(price_alerts)
                 if alerts and not args.no_notify:
                     monitor_state, alerts = reconcile_acknowledged_alerts(
                         monitor_state,
@@ -719,10 +852,23 @@ def run(argv: list[str] | None = None) -> int:
                 atomic_write_json_secure(state_path, monitor_state)
 
             payload = _notification_payload(latest, monitor_state, alerts)
+            payload["intraday_path"] = path_decision.to_dict()
+            if option_structure_error is not None:
+                payload["option_structure_error"] = option_structure_error
+
+            # Delivery stays on the latency-critical path. Outcome and Greeks
+            # telemetry run only after the deterministic alert attempt.
             if alerts and not args.no_notify:
                 result = notify_payload(payload, settings=notify_settings, now=sample.at)
                 payload["notification"] = result.to_dict()
-                if result.sent_count > 0:
+                acknowledged = set(result.acknowledged_event_ids)
+                delivered_alerts = [
+                    alert
+                    for alert in alerts
+                    if alert.dedup_group is not None
+                    and str(alert.dedup_group) in acknowledged
+                ]
+                if delivered_alerts:
                     with exclusive_state_lock(state_path):
                         latest_monitor_state = load_monitor_state(
                             settings.state_path,
@@ -730,11 +876,84 @@ def run(argv: list[str] | None = None) -> int:
                         )
                         latest_monitor_state = mark_alert_attempts(
                             latest_monitor_state,
-                            alerts,
+                            delivered_alerts,
                             at=sample.at,
                             delivered=True,
                         )
                         atomic_write_json_secure(state_path, latest_monitor_state)
+
+            outcome_summary: dict[str, object] = {"status": "ok", "records_emitted": 0}
+            try:
+                tracker = IntradayEventOutcomeTracker(IntradayEventOutcomeSettings.from_env())
+                outcome_sample = SynchronizedSPXSample(
+                    spx=sample.spx,
+                    spx_source_at=sample.spx_source_at or sample.at,
+                    es_source_at=sample.es_source_at or sample.at,
+                )
+                for alert in raw_price_alerts:
+                    phase = "shock" if alert.kind == SHOCK_KIND else "reclaim"
+                    active_event = monitor_state.get("active_event")
+                    direction = (
+                        str(active_event.get("direction"))
+                        if isinstance(active_event, dict)
+                        else "down"
+                    )
+                    if phase in {"shock", "reclaim"} and direction in {"up", "down"}:
+                        tracker.observe_event(
+                            event_id=str(alert.event_id),
+                            phase=phase,
+                            direction=direction,
+                            sample=outcome_sample,
+                        )
+                emitted = tracker.observe_sample(outcome_sample)
+                outcome_summary["records_emitted"] = len(emitted)
+            except Exception as exc:  # Outcome telemetry must never suppress an alert.
+                outcome_summary = {
+                    "status": "error",
+                    "error": f"{type(exc).__name__}:{exc}",
+                }
+            payload["outcome_tracking"] = outcome_summary
+
+            greek_event_results: list[dict[str, object]] = []
+            sampled_alerts: list[Alert] = []
+            for alert in raw_price_alerts:
+                if not event_greek_shadow_due(monitor_state, alert):
+                    continue
+                trigger_kind = "shock" if alert.kind == SHOCK_KIND else "reclaim"
+                result = sample_zero_dte_greeks_shadow(
+                    latest,
+                    data_root=storage_settings.data_root,
+                    trigger_kind=trigger_kind,
+                    event_id=str(alert.event_id),
+                    event_at=sample.at,
+                    trigger_metadata={
+                        "direction": (
+                            str(monitor_state.get("active_event", {}).get("direction"))
+                            if isinstance(monitor_state.get("active_event"), dict)
+                            else None
+                        ),
+                        "spx": sample.spx,
+                        "es": sample.es,
+                    },
+                    options_map=options_map,
+                )
+                greek_event_results.append(result.to_dict())
+                if result.status != "error":
+                    sampled_alerts.append(alert)
+            if greek_event_results:
+                payload["greek_shadow_events"] = greek_event_results
+            if sampled_alerts:
+                with exclusive_state_lock(state_path):
+                    latest_monitor_state = load_monitor_state(
+                        settings.state_path,
+                        session_date=session_date,
+                    )
+                    latest_monitor_state = mark_event_greek_shadow_sampled(
+                        latest_monitor_state,
+                        sampled_alerts,
+                        at=sample.at,
+                    )
+                    atomic_write_json_secure(state_path, latest_monitor_state)
 
     if args.json:
         print(json.dumps(payload, ensure_ascii=False, sort_keys=True))

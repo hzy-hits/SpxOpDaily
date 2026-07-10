@@ -92,9 +92,7 @@ def build_morning_payload(state: LatestState, *, now: datetime | None = None) ->
     return {
         "kind": "morning_map",
         "as_of": state.as_of.isoformat(),
-        "trading_date": DEFAULT_MARKET_CALENDAR.research_expiry(
-            evaluation_time
-        ).isoformat(),
+        "trading_date": DEFAULT_MARKET_CALENDAR.research_expiry(evaluation_time).isoformat(),
         "overnight": overnight_gap(state),
         "human_focus_context": focus,
     }
@@ -161,6 +159,28 @@ def _fmt_oi(value: float | None) -> str:
     return f"(OI {value:.0f})"
 
 
+def _greeks_reference_line(reference: object) -> str | None:
+    if not isinstance(reference, dict) or reference.get("status") not in {"ok", "degraded"}:
+        return None
+    aggregate = reference.get("aggregate")
+    coverage = reference.get("coverage")
+    if not isinstance(aggregate, dict) or not isinstance(coverage, dict):
+        return None
+
+    def metric(name: str) -> str:
+        value = aggregate.get(name)
+        return f"{float(value):.2e}" if isinstance(value, int | float) else "-"
+
+    return (
+        "0DTE Greeks(只读/仓位符号未知, OI×100): "
+        f"Gamma {metric('gross_gamma_abs')}, "
+        f"Charm5m {metric('gross_charm_5m_abs')}, "
+        f"Vanna1vol {metric('gross_vanna_1vol_abs')}; "
+        f"覆盖 {coverage.get('usable_contract_count')}/"
+        f"{coverage.get('exact_expiry_contract_count')} [{reference.get('status')}]"
+    )
+
+
 def _confluence_label(value: bool | None) -> str:
     if value is True:
         return "共振"
@@ -169,7 +189,9 @@ def _confluence_label(value: bool | None) -> str:
     return "-"
 
 
-def _strike_oi(top_strikes: list[dict[str, Any]] | None, strike: float | None, kind: str) -> float | None:
+def _strike_oi(
+    top_strikes: list[dict[str, Any]] | None, strike: float | None, kind: str
+) -> float | None:
     if strike is None or not top_strikes:
         return None
     key = "call_oi" if kind == "call" else "put_oi"
@@ -203,17 +225,27 @@ def render_template(payload: dict[str, Any]) -> str:
     gap_pct = overnight.get("gap_pct")
     spx_prev_close = overnight.get("spx_prev_close")
 
-    focus = payload.get("human_focus_context") if isinstance(payload.get("human_focus_context"), dict) else {}
+    focus = (
+        payload.get("human_focus_context")
+        if isinstance(payload.get("human_focus_context"), dict)
+        else {}
+    )
     spxw = focus.get("spxw_options") if isinstance(focus.get("spxw_options"), dict) else {}
     expiries = spxw.get("expiries") if isinstance(spxw.get("expiries"), list) else []
     front = expiries[0] if expiries and isinstance(expiries[0], dict) else {}
 
     call_wall = front.get("call_wall")
     put_wall = front.get("put_wall")
-    gamma_profile = front.get("gamma_profile") if isinstance(front.get("gamma_profile"), dict) else {}
+    gamma_profile = (
+        front.get("gamma_profile") if isinstance(front.get("gamma_profile"), dict) else {}
+    )
     zero_gamma = gamma_profile.get("zero_gamma")
     flip_zone = gamma_profile.get("flip_zone")
-    top_strikes = gamma_profile.get("top_strikes") if isinstance(gamma_profile.get("top_strikes"), list) else []
+    top_strikes = (
+        gamma_profile.get("top_strikes")
+        if isinstance(gamma_profile.get("top_strikes"), list)
+        else []
+    )
 
     flip_lo = "-"
     flip_hi = "-"
@@ -224,7 +256,11 @@ def render_template(payload: dict[str, Any]) -> str:
     call_oi_suffix = _fmt_oi(_strike_oi(top_strikes, call_wall, "call"))
     put_oi_suffix = _fmt_oi(_strike_oi(top_strikes, put_wall, "put"))
 
-    level_probs = front.get("level_probabilities") if isinstance(front.get("level_probabilities"), list) else []
+    level_probs = (
+        front.get("level_probabilities")
+        if isinstance(front.get("level_probabilities"), list)
+        else []
+    )
     prob_parts: list[str] = []
     seen_levels: set[str] = set()
     for item in level_probs:
@@ -237,12 +273,12 @@ def render_template(payload: dict[str, Any]) -> str:
         seen_levels.add(level_key)
         prob_touch = item.get("prob_touch")
         prob_close = item.get("prob_close_beyond")
-        prob_parts.append(
-            f"触及 {level_key}≈{_fmt_prob(prob_touch)}/收破≈{_fmt_prob(prob_close)}"
-        )
+        prob_parts.append(f"触及 {level_key}≈{_fmt_prob(prob_touch)}/收破≈{_fmt_prob(prob_close)}")
     prob_line = "; ".join(prob_parts) if prob_parts else "-"
 
-    wall_confluence = spxw.get("wall_confluence") if isinstance(spxw.get("wall_confluence"), dict) else None
+    wall_confluence = (
+        spxw.get("wall_confluence") if isinstance(spxw.get("wall_confluence"), dict) else None
+    )
     if wall_confluence:
         spy_put = wall_confluence.get("spy_put_wall_spx")
         spy_call = wall_confluence.get("spy_call_wall_spx")
@@ -271,6 +307,8 @@ def render_template(payload: dict[str, Any]) -> str:
     else:
         watch_text = "-"
 
+    greeks_line = _greeks_reference_line(spxw.get("greeks_reference_0dte"))
+
     lines = [
         f"【盘前地图 {trading_date}】",
         (
@@ -283,6 +321,7 @@ def render_template(payload: dict[str, Any]) -> str:
             f"zero gamma {_dash(zero_gamma)}, flip zone {flip_lo}-{flip_hi}"
         ),
         f"概率锥: {prob_line}",
+        *([greeks_line] if greeks_line else []),
         f"SPY 对照: {spy_line}",
         f"regime: {regime}, VIX1D/VIX={vix_ratio_text}, dip_context={dip_context}",
         f"事件: {events}",
@@ -311,6 +350,8 @@ def build_map_prompt(
             "开盘剧本写成双向 if/then(3-4 行)：开盘后 30-60 分钟，站上/跌破哪些具体点位(引用触及/收破概率)分别激活什么剧本、"
             "盯哪张单；急跌时结合 dip_context 说清是回调买点还是加速风险——这是搭档最容易在开盘慌手的地方，话要说死：到什么位置之前不动作。",
             "1 行 vol：VIX1D/VIX 比值与 SKEW，今天 vol 卖得贵还是便宜、有无事件定价。",
+            "human_focus_context.spxw_options.greeks_reference_0dte 只覆盖严格 SPXW 当日到期，是价格/时间/IV 情景参考；"
+            "position_sign/direction=unknown 时负 gamma 不等于下跌，不得改变原候选方向、排序或限价。",
             "1 行 SPY 墙位对照：共振增强可信度，不共振就明说墙位参考价值打折。",
             "previous_push:" + previous_push_json(previous_push),
             "JSON:" + json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
@@ -399,7 +440,9 @@ def mark_sent(state_path: str, trading_date: str) -> None:
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Send SPX Spark pre-market map push.")
     parser.add_argument("--dry-run", action="store_true", help="Print template/agent text only.")
-    parser.add_argument("--force", action="store_true", help="Skip time window and idempotency gate.")
+    parser.add_argument(
+        "--force", action="store_true", help="Skip time window and idempotency gate."
+    )
     return parser.parse_args(argv)
 
 
@@ -436,11 +479,21 @@ def run(argv: list[str] | None = None, *, now: datetime | None = None) -> int:
 
     settings = NotificationSettings.from_env()
     result = send_morning_map(payload, settings, now=now, previous_push=load_previous_push())
-    if result.get("delivered_ok") or result["im_ok"] or result["bark_ok"] or result.get("feishu_ok"):
+    if (
+        result.get("delivered_ok")
+        or result["im_ok"]
+        or result["bark_ok"]
+        or result.get("feishu_ok")
+    ):
         mark_sent(state_path, trading_date)
         record_push("morning_map", result["text"], at=now.isoformat())
     print(json.dumps(result, ensure_ascii=False))
-    if not (result.get("delivered_ok") or result["im_ok"] or result["bark_ok"] or result.get("feishu_ok")):
+    if not (
+        result.get("delivered_ok")
+        or result["im_ok"]
+        or result["bark_ok"]
+        or result.get("feishu_ok")
+    ):
         return 1
     return 0
 

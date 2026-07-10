@@ -37,6 +37,8 @@ def direct_push_category(alerts: list[dict[str, object]]) -> str:
         return "系统事件"
     if kinds & {"put_skew_steepening_5m", "atm_iv_jump_5m"}:
         return "盘外波动率信号"
+    if kinds & {"flip_reclaim_call", "call_wall_breakout_call"}:
+        return "0DTE Call 结构确认"
     return "事件"
 
 
@@ -66,7 +68,9 @@ def build_direct_push_prompt(payload: dict[str, object], alerts: list[dict[str, 
             "- 持仓事件：哪条腿、数量/方向怎么变的、浮盈浮亏多少，此刻价格站在关键位的哪一侧——这决定他是该锁利润还是该按剧本扛；",
             "- 系统事件(IBKR 会话中断/恢复)：行情数据和已挂限价单受不受影响，他要做什么——多数时候是知悉即可，需要检查挂单就直说；",
             "- 盘外波动率信号(skew 急陡/ATM IV 跳升)：谁在抢什么(如机构买下行保护)、这通常领先什么，拿什么确认(价格/gamma/VIX)——信号≠行动，确认位没到就只是提高警觉；",
+            "- 0DTE Call 结构确认：写清是收复冻结 flip 还是突破旧 call wall、回踩观察位和失效线；强调已由 SPX/ES 新鲜样本确认，但不追价、不自动下单；",
             "只用 JSON 里的事实，数字不编不改；数据 degraded 时如实说明。",
+            "greeks_reference_0dte 是严格 SPXW 当日到期的只读情景层；position_sign/direction 为 unknown 时，负 gamma 只表示潜在放大，绝不等于看跌或自动买 put。",
             "总共不超过 6 行。像口头交接，不像播报稿；不写免责声明。",
             json.dumps(compact_payload, ensure_ascii=False, sort_keys=True),
         )
@@ -90,6 +94,7 @@ def build_agent_prompt(payload: dict[str, object], alerts: list[dict[str, object
             "搭档只交易 SPX/SPXW；结论落在 SPX/SPXW/ES、期权墙、gamma、IV surface 上，"
             "VIX/VIX1D/VVIX/SKEW 作 vol regime 上下文，SPY/QQQ 可少量引用作确认；不提加密或预测市场数据源。",
             "options_map 警告含 underlier_mismatch 或 gamma_state 以 unknown 开头时，只说明数据降级，不下 wall/gamma 结论。",
+            "greeks_reference_0dte 只解释严格 SPXW 当日到期合约对价格、时间和 IV 的敏感度；它不改变候选方向、排序或限价，position_sign unknown 时负 gamma 不等于下跌。",
             "剧本必须双向：跌破关键位讲防守，但价格收复关键位并站稳时必须明说反弹剧本激活，不许在价格回升时还重复防守结论。",
             "输出中文，最多 12 行，结论先行：",
             "第一句话说清发生了什么、对挂单/持仓意味着什么(如『价格逼近 7500 put wall，反弹买 call 的挂单可能马上成交』)。",
@@ -150,7 +155,11 @@ def build_codex_prompt(
     previous_text = ""
     if isinstance(previous_push, dict) and previous_push.get("text"):
         previous_text = json.dumps(
-            {"at": previous_push.get("at"), "kind": previous_push.get("kind"), "text": previous_push.get("text")},
+            {
+                "at": previous_push.get("at"),
+                "kind": previous_push.get("kind"),
+                "text": previous_push.get("text"),
+            },
             ensure_ascii=False,
         )
     return "\n".join(
@@ -169,6 +178,7 @@ def build_codex_prompt(
             "如果 SPXW 期权 freshness gate 失败，不得基于 wall/gamma/IV 做看盘结论。",
             "如果 options_map 警告含 underlier_mismatch，或 gamma_state 以 unknown 开头，不得基于 wall/gamma 下结论，只能说明数据降级。",
             "gamma_state 为 zero_gamma_transition（micopedia 为 transition）表示零 gamma 交叉区：突破后波动可能放大，不得把靠近墙位直接当作支撑确认。",
+            "greeks_reference_0dte 是严格 SPXW 当日到期的 reference-only 情景层；只用于解释价格/时间/IV 冲击。position_sign/direction unknown 时不得推导 dealer 净方向，负 gamma 不等于看跌，也不能单独触发推送。",
             "剧本必须双向对称：跌破关键位后要讲防守；但若价格随后收复该关键位（回到 put wall/flip zone 上方）并持续站稳，这是反弹剧本被激活的信号，必须明确说『XX 已收复，反弹剧本激活，若回踩不破 XX 可视为确认』，不允许在价格已回升时仍只重复防守结论。",
             "你的另一半职责是替搭档对抗 FOMO 和恐慌——告警最容易在他情绪最高的时刻到达，每条外发内容按当下位置至少命中其一：",
             "(a) 价格在两关键位中间快速移动时，明确写『半路，不追，计划位在 XX/XX』——半山腰追单是要拦下的第一行为；",

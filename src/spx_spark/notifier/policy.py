@@ -87,6 +87,8 @@ INTRADAY_DIRECT_PUSH_KINDS = frozenset(
     {
         "intraday_price_shock",
         "intraday_price_reclaim",
+        "flip_reclaim_call",
+        "call_wall_breakout_call",
     }
 )
 
@@ -168,6 +170,8 @@ MARKET_SIGNAL_ALERT_KINDS = frozenset(
         "price_move_from_close",
         "intraday_price_shock",
         "intraday_price_reclaim",
+        "flip_reclaim_call",
+        "call_wall_breakout_call",
         "option_gamma_regime",
         "option_wall_proximity",
         "iv_term_gap",

@@ -10,8 +10,15 @@ from typing import Any
 
 from spx_spark.config import StorageSettings
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
-from spx_spark.marketdata import InstrumentType, MarketDataQuality, OptionRight, Provider, ProviderStatus, Quote
-from spx_spark.storage import LatestState, LatestStateStore
+from spx_spark.marketdata import (
+    InstrumentType,
+    MarketDataQuality,
+    OptionRight,
+    Provider,
+    ProviderStatus,
+    Quote,
+)
+from spx_spark.storage import LatestState, LatestStateStore, configured_quote_use_decision
 
 
 UNDERLIER_CANDIDATES = (
@@ -230,7 +237,10 @@ def ibkr_provider_unavailable(state: LatestState) -> bool:
             continue
         if provider_state.status == ProviderStatus.UNAVAILABLE:
             return True
-        if provider_state.status == ProviderStatus.DEGRADED and provider_state.connected is not True:
+        if (
+            provider_state.status == ProviderStatus.DEGRADED
+            and provider_state.connected is not True
+        ):
             return True
     return False
 
@@ -276,7 +286,40 @@ def is_spxw_option(quote: Quote) -> bool:
     if (instrument.underlier or instrument.symbol).upper() != "SPX":
         return False
     trading_class = (instrument.trading_class or instrument.provider_symbol or "").upper()
-    return trading_class.startswith("SPXW") or quote.instrument.canonical_id.startswith("option:SPX:SPXW:")
+    return trading_class.startswith("SPXW") or quote.instrument.canonical_id.startswith(
+        "option:SPX:SPXW:"
+    )
+
+
+def actionable_chain_implied_spot(
+    state: LatestState,
+    *,
+    expiry: str,
+    as_of: datetime,
+    max_leg_skew_seconds: float | None = None,
+) -> float | None:
+    """SPX spot from fresh, pricing-allowed SPXW call/put parity pairs."""
+
+    quotes = [
+        quote
+        for quote in state.best_quotes
+        if is_spxw_option(quote)
+        and (quote.instrument.expiry or "") == expiry
+        and configured_quote_use_decision(quote, as_of=as_of).pricing_allowed
+    ]
+    cofresh_pairs: dict[float, dict[OptionRight, Quote]] = {}
+    for strike, sides in pair_by_strike(quotes).items():
+        call = sides.get(OptionRight.CALL)
+        put = sides.get(OptionRight.PUT)
+        if call is None or put is None:
+            continue
+        call_time = call.quote_time or call.trade_time or call.received_at
+        put_time = put.quote_time or put.trade_time or put.received_at
+        if max_leg_skew_seconds is None or (
+            abs((call_time - put_time).total_seconds()) <= max_leg_skew_seconds
+        ):
+            cofresh_pairs[strike] = sides
+    return chain_implied_spot(cofresh_pairs)
 
 
 def option_mid(quote: Quote | None) -> float | None:
@@ -372,7 +415,9 @@ def probability_for_level(
     source_strike, distance, source_delta = min(candidates, key=lambda item: item[1])
     if distance > 2 * strike_step:
         return (None, None, None, None)
-    prob_close_beyond = max(0.0, min(1.0, source_delta if right == OptionRight.CALL else abs(source_delta)))
+    prob_close_beyond = max(
+        0.0, min(1.0, source_delta if right == OptionRight.CALL else abs(source_delta))
+    )
     prob_touch = min(1.0, 2 * prob_close_beyond)
     return (prob_close_beyond, prob_touch, source_strike, source_delta)
 
@@ -405,16 +450,23 @@ def build_coverage(quotes: list[Quote], *, as_of: datetime) -> OptionCoverage:
         total=len(quotes),
         live=quality_counts[MarketDataQuality.LIVE],
         stale=quality_counts[MarketDataQuality.STALE],
-        delayed=quality_counts[MarketDataQuality.DELAYED] + quality_counts[MarketDataQuality.DELAYED_FROZEN],
+        delayed=quality_counts[MarketDataQuality.DELAYED]
+        + quality_counts[MarketDataQuality.DELAYED_FROZEN],
         unknown_age=sum(1 for age in ages if age is None),
         max_age_ms=max(known_ages) if known_ages else None,
         with_bid_ask=sum(1 for quote in quotes if quote.mid is not None),
         with_mid=sum(1 for quote in quotes if option_mid(quote) is not None),
         with_iv=sum(1 for quote in quotes if option_iv(quote) is not None),
-        with_delta=sum(1 for quote in quotes if quote.greeks is not None and quote.greeks.delta is not None),
+        with_delta=sum(
+            1 for quote in quotes if quote.greeks is not None and quote.greeks.delta is not None
+        ),
         with_gamma=sum(1 for quote in quotes if option_gamma(quote) is not None),
-        with_theta=sum(1 for quote in quotes if quote.greeks is not None and quote.greeks.theta is not None),
-        with_vega=sum(1 for quote in quotes if quote.greeks is not None and quote.greeks.vega is not None),
+        with_theta=sum(
+            1 for quote in quotes if quote.greeks is not None and quote.greeks.theta is not None
+        ),
+        with_vega=sum(
+            1 for quote in quotes if quote.greeks is not None and quote.greeks.vega is not None
+        ),
         with_open_interest=sum(
             1 for quote in quotes if quote.open_interest is not None and quote.open_interest > 0
         ),
@@ -443,10 +495,14 @@ def build_gex_by_strike(
         call = pair.get(OptionRight.CALL)
         put = pair.get(OptionRight.PUT)
         call_gex = (
-            signed_gex(call, sign=1.0, underlier=underlier, intraday=intraday) if call is not None else None
+            signed_gex(call, sign=1.0, underlier=underlier, intraday=intraday)
+            if call is not None
+            else None
         )
         put_gex = (
-            signed_gex(put, sign=-1.0, underlier=underlier, intraday=intraday) if put is not None else None
+            signed_gex(put, sign=-1.0, underlier=underlier, intraday=intraday)
+            if put is not None
+            else None
         )
         if call_gex is None and put_gex is None:
             continue
@@ -489,9 +545,7 @@ def build_wall_ladder(
     call_rows = [
         row for row in gex_rows if row.call_gex > 0 and row.strike >= underlier - tolerance
     ]
-    put_rows = [
-        row for row in gex_rows if row.put_gex < 0 and row.strike <= underlier + tolerance
-    ]
+    put_rows = [row for row in gex_rows if row.put_gex < 0 and row.strike <= underlier + tolerance]
     call_rows.sort(key=lambda row: -row.call_gex)
     put_rows.sort(key=lambda row: row.put_gex)
     call_walls = tuple(
@@ -536,7 +590,9 @@ def gex_weight(quote: Quote, *, intraday: bool) -> float | None:
     return weight
 
 
-def signed_gex(quote: Quote, *, sign: float, underlier: float, intraday: bool = False) -> float | None:
+def signed_gex(
+    quote: Quote, *, sign: float, underlier: float, intraday: bool = False
+) -> float | None:
     gamma = option_gamma_structural(quote)
     weight = gex_weight(quote, intraday=intraday)
     if gamma is None or weight is None:
@@ -693,8 +749,10 @@ def _synthetic_call_curve(
         if strike < underlier:
             synth = put_mid + underlier - strike if put_mid is not None else call_mid
         else:
-            synth = call_mid if call_mid is not None else (
-                put_mid + underlier - strike if put_mid is not None else None
+            synth = (
+                call_mid
+                if call_mid is not None
+                else (put_mid + underlier - strike if put_mid is not None else None)
             )
         if synth is not None and synth > 0:
             points.append((strike, synth))
@@ -739,8 +797,16 @@ def build_rn_density(
     clipped_mass = 0.0
     cells: list[tuple[float, float, float, float]] = []  # (low, high, strike, mass)
     for index, (strike, density) in enumerate(raw):
-        low = (raw[index - 1][0] + strike) / 2.0 if index > 0 else strike - (raw[index + 1][0] - strike) / 2.0
-        high = (strike + raw[index + 1][0]) / 2.0 if index < len(raw) - 1 else strike + (strike - raw[index - 1][0]) / 2.0
+        low = (
+            (raw[index - 1][0] + strike) / 2.0
+            if index > 0
+            else strike - (raw[index + 1][0] - strike) / 2.0
+        )
+        high = (
+            (strike + raw[index + 1][0]) / 2.0
+            if index < len(raw) - 1
+            else strike + (strike - raw[index - 1][0]) / 2.0
+        )
         width = max(high - low, 0.0)
         mass = density * width
         if mass >= 0:
@@ -778,7 +844,10 @@ def build_rn_density(
     if clipped_fraction > RN_DENSITY_NOISY_CLIP_FRACTION:
         quality = "noisy_quotes"
     elif expected_move_points and expected_move_points > 0:
-        if strike_lo > underlier - expected_move_points or strike_hi < underlier + expected_move_points:
+        if (
+            strike_lo > underlier - expected_move_points
+            or strike_hi < underlier + expected_move_points
+        ):
             quality = "narrow_range"
 
     round1 = lambda value: round(value, 1) if value is not None else None  # noqa: E731
@@ -874,11 +943,7 @@ def build_spy_confluence(
         )
 
     spy_underlier_quote = state.best_quote("equity:SPY")
-    spy_underlier = (
-        spy_underlier_quote.effective_price
-        if spy_underlier_quote is not None
-        else None
-    )
+    spy_underlier = spy_underlier_quote.effective_price if spy_underlier_quote is not None else None
     if spy_underlier is None or spy_underlier <= 0:
         return WallConfluence(
             spy_underlier=None,
@@ -897,17 +962,13 @@ def build_spy_confluence(
         default=None,
     )
     front_quotes = [
-        quote
-        for quote in spy_quotes
-        if (quote.instrument.expiry or "unknown") == front_expiry
+        quote for quote in spy_quotes if (quote.instrument.expiry or "unknown") == front_expiry
     ]
     pairs = pair_by_strike(front_quotes)
     gex_rows = build_gex_by_strike(pairs, underlier=spy_underlier)
     call_wall_row = max(gex_rows, key=lambda row: row.call_gex) if gex_rows else None
     put_wall_row = min(gex_rows, key=lambda row: row.put_gex) if gex_rows else None
-    spy_call_wall = (
-        call_wall_row.strike if call_wall_row and call_wall_row.call_gex > 0 else None
-    )
+    spy_call_wall = call_wall_row.strike if call_wall_row and call_wall_row.call_gex > 0 else None
     spy_put_wall = put_wall_row.strike if put_wall_row and put_wall_row.put_gex < 0 else None
     spy_call_wall_spx = spy_call_wall * 10.0 if spy_call_wall is not None else None
     spy_put_wall_spx = spy_put_wall * 10.0 if spy_put_wall is not None else None
@@ -974,15 +1035,15 @@ def build_expiry_map(
     pairs = pair_by_strike(quotes)
     strikes = sorted(pairs)
     warnings: list[str] = []
-    atm_strike = min(strikes, key=lambda strike: abs(strike - underlier)) if strikes and underlier else None
+    atm_strike = (
+        min(strikes, key=lambda strike: abs(strike - underlier)) if strikes and underlier else None
+    )
     atm_call = pairs.get(atm_strike, {}).get(OptionRight.CALL) if atm_strike is not None else None
     atm_put = pairs.get(atm_strike, {}).get(OptionRight.PUT) if atm_strike is not None else None
     atm_call_mid = option_mid(atm_call)
     atm_put_mid = option_mid(atm_put)
     straddle = (
-        atm_call_mid + atm_put_mid
-        if atm_call_mid is not None and atm_put_mid is not None
-        else None
+        atm_call_mid + atm_put_mid if atm_call_mid is not None and atm_put_mid is not None else None
     )
     atm_iv = interpolated_atm_iv(pairs, underlier)
 
@@ -995,7 +1056,9 @@ def build_expiry_map(
             iv = option_iv(quote)
             if strike is None or right is None or iv is None:
                 continue
-            weight = max(finite_float(quote.open_interest) or finite_float(quote.volume) or 1.0, 1.0)
+            weight = max(
+                finite_float(quote.open_interest) or finite_float(quote.volume) or 1.0, 1.0
+            )
             moneyness = strike / underlier
             if right == OptionRight.PUT and 0.97 <= moneyness <= 0.995:
                 put_iv_items.append((iv, weight))
@@ -1014,8 +1077,12 @@ def build_expiry_map(
         call_skew_25d = call_iv_25 - atm_iv if atm_iv is not None else None
     else:
         skew_method = "moneyness_fallback"
-        put_skew_25d = put_wing_iv - atm_iv if put_wing_iv is not None and atm_iv is not None else None
-        call_skew_25d = call_wing_iv - atm_iv if call_wing_iv is not None and atm_iv is not None else None
+        put_skew_25d = (
+            put_wing_iv - atm_iv if put_wing_iv is not None and atm_iv is not None else None
+        )
+        call_skew_25d = (
+            call_wing_iv - atm_iv if call_wing_iv is not None and atm_iv is not None else None
+        )
 
     intraday = expiry == DEFAULT_MARKET_CALENDAR.research_expiry(as_of).strftime("%Y%m%d")
     gex_weighting = "oi_plus_volume" if intraday else "oi"
@@ -1057,8 +1124,12 @@ def build_expiry_map(
     strike_step = median_strike_step(strikes)
     wall_rows = gex_rows
     wall_method = "oi_plus_volume_gex" if intraday else "oi_gex"
+    oi_rows = (
+        build_gex_by_strike(pairs, underlier=underlier, intraday=False)
+        if underlier
+        else []
+    )
     if intraday:
-        oi_rows = build_gex_by_strike(pairs, underlier=underlier, intraday=False) if underlier else []
         if oi_rows:
             wall_rows = oi_rows
             wall_method = "oi_gex"
@@ -1075,9 +1146,13 @@ def build_expiry_map(
     call_wall = call_walls[0].strike if call_walls else None
     put_wall = put_walls[0].strike if put_walls else None
     walls = [wall for wall in (call_wall, put_wall) if wall is not None]
-    nearest_wall_value = min(walls, key=lambda wall: abs(wall - underlier)) if walls and underlier else None
-    nearest_wall_distance = nearest_wall_value - underlier if nearest_wall_value is not None and underlier else None
-    gex_quality = "open_interest_gex" if gex_rows else "no_open_interest_gex"
+    nearest_wall_value = (
+        min(walls, key=lambda wall: abs(wall - underlier)) if walls and underlier else None
+    )
+    nearest_wall_distance = (
+        nearest_wall_value - underlier if nearest_wall_value is not None and underlier else None
+    )
+    gex_quality = "open_interest_gex" if oi_rows else "no_open_interest_gex"
 
     if underlier is None:
         warnings.append("missing underlier reference; ATM, surface, and GEX map are degraded")
@@ -1215,9 +1290,7 @@ def build_options_map(state: LatestState) -> OptionsMap:
         for expiry in DEFAULT_MARKET_CALENDAR.research_expiries(state.as_of)
     }
     grouped = {
-        expiry: quotes
-        for expiry, quotes in all_grouped.items()
-        if expiry in active_expiries
+        expiry: quotes for expiry, quotes in all_grouped.items() if expiry in active_expiries
     }
 
     warnings: list[str] = []
@@ -1280,7 +1353,9 @@ def format_number(value: float | None, digits: int = 2) -> str:
 
 def print_options_map(options_map: OptionsMap) -> None:
     print(f"Options map as of: {options_map.as_of.isoformat()}")
-    print(f"Underlier: {format_number(options_map.underlier.price)} source={options_map.underlier.source or '-'}")
+    print(
+        f"Underlier: {format_number(options_map.underlier.price)} source={options_map.underlier.source or '-'}"
+    )
     if options_map.warnings:
         print("Warnings:")
         for warning in options_map.warnings:
@@ -1319,7 +1394,8 @@ def print_options_map(options_map: OptionsMap) -> None:
             ]
         )
     widths = [
-        max(len(headers[index]), *(len(row[index]) for row in rows)) for index in range(len(headers))
+        max(len(headers[index]), *(len(row[index]) for row in rows))
+        for index in range(len(headers))
     ]
     print(" | ".join(header.ljust(widths[index]) for index, header in enumerate(headers)))
     print("-+-".join("-" * width for width in widths))

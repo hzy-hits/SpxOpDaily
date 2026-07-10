@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from spx_spark.config import env_csv
+from spx_spark.greek_reference import build_zero_dte_greeks_reference
 from spx_spark.iv_surface import IvSurfaceSnapshot
 from spx_spark.marketdata import MarketDataQuality, Quote
 from spx_spark.options_map import ExpiryOptionsMap, OptionsMap
@@ -92,7 +93,10 @@ def expiry_options_summary(expiry: ExpiryOptionsMap) -> dict[str, object]:
             "unknown_age": expiry.coverage.unknown_age,
             "max_age_ms": expiry.coverage.max_age_ms,
             "with_iv": expiry.coverage.with_iv,
+            "with_delta": expiry.coverage.with_delta,
             "with_gamma": expiry.coverage.with_gamma,
+            "with_theta": expiry.coverage.with_theta,
+            "with_vega": expiry.coverage.with_vega,
             "with_open_interest": expiry.coverage.with_open_interest,
             "avg_spread_bps": expiry.coverage.avg_spread_bps,
         },
@@ -117,7 +121,9 @@ def expiry_options_summary(expiry: ExpiryOptionsMap) -> dict[str, object]:
     }
 
 
-def surface_expiry_summary(expiry: dict[str, Any], history_by_expiry: dict[str, dict[str, Any]]) -> dict[str, object]:
+def surface_expiry_summary(
+    expiry: dict[str, Any], history_by_expiry: dict[str, dict[str, Any]]
+) -> dict[str, object]:
     expiry_id = str(expiry.get("expiry") or "")
     return {
         "expiry": expiry_id,
@@ -127,6 +133,10 @@ def surface_expiry_summary(expiry: dict[str, Any], history_by_expiry: dict[str, 
         "expected_move_pct": expiry.get("expected_move_pct"),
         "put_skew_ratio": expiry.get("put_skew_ratio"),
         "call_skew_ratio": expiry.get("call_skew_ratio"),
+        "put_skew_25d": expiry.get("put_skew_25d"),
+        "put_skew_25d_change_5m": expiry.get("put_skew_25d_change_5m"),
+        "call_skew_25d": expiry.get("call_skew_25d"),
+        "call_skew_25d_change_5m": expiry.get("call_skew_25d_change_5m"),
         "surface_fit_quality": expiry.get("surface_fit_quality"),
         "gamma_state": expiry.get("gamma_state"),
         "zero_gamma": expiry.get("zero_gamma"),
@@ -255,15 +265,21 @@ def human_data_warnings(
     warnings: list[str] = []
     spx = state.best_quote("index:SPX")
     es = state.best_quote("future:ES")
-    if spx is None or not configured_quote_use_decision(
-        spx,
-        as_of=state.as_of,
-    ).alert_allowed:
+    if (
+        spx is None
+        or not configured_quote_use_decision(
+            spx,
+            as_of=state.as_of,
+        ).alert_allowed
+    ):
         warnings.append("SPX quote is missing or degraded.")
-    if es is None or not configured_quote_use_decision(
-        es,
-        as_of=state.as_of,
-    ).alert_allowed:
+    if (
+        es is None
+        or not configured_quote_use_decision(
+            es,
+            as_of=state.as_of,
+        ).alert_allowed
+    ):
         warnings.append("ES quote is missing or degraded.")
     if not options_map.expiries:
         warnings.append("SPXW option map is missing.")
@@ -288,7 +304,9 @@ def build_human_focus_context(
         if isinstance(item, dict)
     }
     surface_payload = iv_surface.to_dict() if iv_surface is not None else None
-    surface_expiries = surface_payload.get("expiries", []) if isinstance(surface_payload, dict) else []
+    surface_expiries = (
+        surface_payload.get("expiries", []) if isinstance(surface_payload, dict) else []
+    )
     return {
         "visible_scope": ("SPX", "SPXW", "ES", "VIX", "VIX1D", "VIX9D", "VIX3M", "VVIX", "SKEW"),
         "prices": {
@@ -306,6 +324,11 @@ def build_human_focus_context(
         "spxw_options": {
             "underlier_price": options_map.underlier.price,
             "expiries": [expiry_options_summary(expiry) for expiry in options_map.expiries[:2]],
+            "greeks_reference_0dte": build_zero_dte_greeks_reference(
+                state,
+                options_map=options_map,
+                max_serialized_contracts=0,
+            ),
             "warnings": options_map.warnings,
             "wall_confluence": (
                 options_map.spy_confluence.to_dict() if options_map.spy_confluence else None

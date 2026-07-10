@@ -4,6 +4,7 @@ import argparse
 import json
 import math
 import os
+import sys
 import time as time_module
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, time, timedelta, timezone
@@ -12,6 +13,21 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from spx_spark.config import NY_TZ, NotificationSettings, StorageSettings
+from spx_spark.greek_reference import (
+    build_zero_dte_greeks_reference,
+    write_zero_dte_greeks_snapshot,
+)
+from spx_spark.intraday_shock import (
+    IntradayShockSettings,
+    load_monitor_state,
+    rth_session_date,
+)
+from spx_spark.intraday_strategy import (
+    CALL_WALL_BREAKOUT_CALL_KIND,
+    FLIP_RECLAIM_CALL_KIND,
+    confirmed_call_bias,
+    signed_gex_sign_method,
+)
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 from spx_spark.market_context import build_market_context
 from spx_spark.marketdata import OptionRight, Quote
@@ -31,8 +47,9 @@ from spx_spark.notifier.sinks import (
 from spx_spark.options_map import (
     BAD_QUALITIES,
     OptionsMap,
+    actionable_chain_implied_spot,
     build_options_map,
-    chain_implied_spot,
+    chain_implied_spot,  # noqa: F401 - compatibility re-export for existing callers/tests
     finite_float,
     is_spxw_option,
     median_strike_step,
@@ -53,13 +70,17 @@ BJ_WINDOW_END = time(21, 25)
 
 PLAY_ORDER = (
     "put_wall_bounce_call",
+    FLIP_RECLAIM_CALL_KIND,
     "flip_breakdown_put",
+    CALL_WALL_BREAKOUT_CALL_KIND,
     "call_wall_fade_put",
 )
 
 PLAY_TEMPLATE_LINES = {
     "put_wall_bounce_call": "{level_label} 反弹买 call → SPXW {strike}{right}",
+    FLIP_RECLAIM_CALL_KIND: "{level_label} 收复回踩买 call → SPXW {strike}{right}",
     "flip_breakdown_put": "{level_label} 跌破买 put → SPXW {strike}{right}",
+    CALL_WALL_BREAKOUT_CALL_KIND: "{level_label} 突破回踩买 call → SPXW {strike}{right}",
     "call_wall_fade_put": "{level_label} 冲墙买 put → SPXW {strike}{right}",
 }
 
@@ -394,9 +415,7 @@ def _build_candidate(
         return None
     decision = configured_quote_use_decision(quote, as_of=as_of)
     if not decision.pricing_allowed:
-        warnings.append(
-            f"bad_quality_for_{target_strike}{right}:{decision.reason}"
-        )
+        warnings.append(f"bad_quality_for_{target_strike}{right}:{decision.reason}")
         return None
     if not _quote_greeks_ok(quote):
         warnings.append(f"missing_greeks_for_{target_strike}{right}")
@@ -488,6 +507,7 @@ def _build_candidate(
 
 HL_SP500_PROXY_ID = "crypto_perp:xyz:SP500"
 
+
 @dataclass(frozen=True)
 class SpotResolution:
     research_price: float | None
@@ -534,12 +554,11 @@ def _actionable_chain_spot(
     if not options_map.expiries:
         return None
     front = options_map.expiries[0]
-    actionable_quotes = [
-        quote
-        for quote in _front_expiry_quotes(state, front.expiry)
-        if configured_quote_use_decision(quote, as_of=as_of).pricing_allowed
-    ]
-    return chain_implied_spot(pair_by_strike(actionable_quotes))
+    return actionable_chain_implied_spot(
+        state,
+        expiry=front.expiry,
+        as_of=as_of,
+    )
 
 
 def _actionable_tradfi_spot(
@@ -589,8 +608,7 @@ def resolve_spx_spot(
     derived = market_context.get("derived")
     market_gate = (
         derived.get("hyperliquid_spx_proxy")
-        if isinstance(derived, dict)
-        and isinstance(derived.get("hyperliquid_spx_proxy"), dict)
+        if isinstance(derived, dict) and isinstance(derived.get("hyperliquid_spx_proxy"), dict)
         else {}
     )
     chain_price = _actionable_chain_spot(state, options_map, as_of=now)
@@ -683,6 +701,7 @@ def build_candidates(
     *,
     now: datetime | None = None,
     resolution: SpotResolution | None = None,
+    conditional_call_bias: dict[str, object] | None = None,
 ) -> list[OrderCandidate]:
     local_warnings = warnings if warnings is not None else []
     if not options_map.expiries:
@@ -748,6 +767,44 @@ def build_candidates(
         if candidate is not None:
             candidates.append(candidate)
 
+    bias_play = str((conditional_call_bias or {}).get("play") or "")
+    bias_level = finite_float((conditional_call_bias or {}).get("level"))
+    bias_expiry = str((conditional_call_bias or {}).get("expiry") or "")
+    bias_invalidation = finite_float((conditional_call_bias or {}).get("invalidation_level"))
+    bias_valid = bool(
+        (conditional_call_bias or {}).get("status") == "confirmed"
+        and bias_play in {FLIP_RECLAIM_CALL_KIND, CALL_WALL_BREAKOUT_CALL_KIND}
+        and bias_level is not None
+        and bias_invalidation is not None
+        and spot >= bias_invalidation
+        and bias_expiry == front.expiry
+        and front.expiry == now_utc.astimezone(NY_TZ).strftime("%Y%m%d")
+        and front.gex_quality == "open_interest_gex"
+        and options_map.underlier.source == "index:SPX"
+        and (
+            bias_play != CALL_WALL_BREAKOUT_CALL_KIND
+            or front.wall_method == "oi_gex"
+        )
+    )
+    if bias_valid and bias_play == FLIP_RECLAIM_CALL_KIND and bias_level is not None:
+        candidate = _build_candidate(
+            play=FLIP_RECLAIM_CALL_KIND,
+            level=bias_level,
+            level_label=f"frozen flip {_dash(bias_level)}",
+            target_strike=round_to_step(bias_level, strike_step_int),
+            right="C",
+            spot=spot,
+            expiry_quotes=expiry_quotes,
+            strike_step=strike_step,
+            pairs=pairs,
+            warnings=local_warnings,
+            as_of=now_utc,
+            tau_now_years=tau_now_years,
+            em_points=em_points,
+        )
+        if candidate is not None:
+            candidates.append(candidate)
+
     flip_level = None
     flip_label = None
     if front.gamma_flip_zone is not None:
@@ -764,7 +821,11 @@ def build_candidates(
         flip_level = None
         flip_label = None
 
-    if flip_level is not None and flip_label is not None:
+    if (
+        flip_level is not None
+        and flip_label is not None
+        and not (bias_valid and bias_play == FLIP_RECLAIM_CALL_KIND)
+    ):
         target_strike = round_to_step(flip_level, strike_step_int)
         candidate = _build_candidate(
             play="flip_breakdown_put",
@@ -772,6 +833,25 @@ def build_candidates(
             level_label=flip_label,
             target_strike=target_strike,
             right="P",
+            spot=spot,
+            expiry_quotes=expiry_quotes,
+            strike_step=strike_step,
+            pairs=pairs,
+            warnings=local_warnings,
+            as_of=now_utc,
+            tau_now_years=tau_now_years,
+            em_points=em_points,
+        )
+        if candidate is not None:
+            candidates.append(candidate)
+
+    if bias_valid and bias_play == CALL_WALL_BREAKOUT_CALL_KIND and bias_level is not None:
+        candidate = _build_candidate(
+            play=CALL_WALL_BREAKOUT_CALL_KIND,
+            level=bias_level,
+            level_label=f"frozen call wall {_dash(bias_level)}",
+            target_strike=round_to_step(bias_level, strike_step_int),
+            right="C",
             spot=spot,
             expiry_quotes=expiry_quotes,
             strike_step=strike_step,
@@ -792,7 +872,10 @@ def build_candidates(
             None,
         )
 
-    if call_wall_level is not None:
+    if (
+        call_wall_level is not None
+        and not (bias_valid and bias_play == CALL_WALL_BREAKOUT_CALL_KIND)
+    ):
         target_strike = round_to_step(call_wall_level, strike_step_int)
         candidate = _build_candidate(
             play="call_wall_fade_put",
@@ -812,6 +895,14 @@ def build_candidates(
         if candidate is not None:
             candidates.append(candidate)
 
+    if bias_valid:
+        canonical_rank = {play: index for index, play in enumerate(PLAY_ORDER)}
+        candidates.sort(
+            key=lambda row: (
+                0 if row.play == bias_play else 1,
+                canonical_rank.get(row.play, len(canonical_rank)),
+            )
+        )
     return candidates
 
 
@@ -868,11 +959,7 @@ def _research_candidates(
     pairs = pair_by_strike(quotes)
     strike_step = median_strike_step(sorted(pairs)) if pairs else 5.0
     strike_step_int = max(1, int(round(strike_step)))
-    flip_level = (
-        front.gamma_flip_zone[0]
-        if front.gamma_flip_zone is not None
-        else front.zero_gamma
-    )
+    flip_level = front.gamma_flip_zone[0] if front.gamma_flip_zone is not None else front.zero_gamma
     scenarios = (
         (front.put_wall, "put_wall"),
         (flip_level, "flip"),
@@ -888,9 +975,7 @@ def _research_candidates(
                 "level": level,
                 "level_kind": level_kind,
                 "distance_points": (
-                    round(level - research_price, 1)
-                    if research_price is not None
-                    else None
+                    round(level - research_price, 1) if research_price is not None else None
                 ),
                 "strike": target_strike,
                 "observed_options": [
@@ -948,9 +1033,7 @@ def _research_wall_ladder(
                     "open_interest": finite_float(getattr(wall, "open_interest", None)),
                     "volume": finite_float(getattr(wall, "volume", None)),
                     "distance_points": (
-                        round(strike - research_price, 1)
-                        if research_price is not None
-                        else None
+                        round(strike - research_price, 1) if research_price is not None else None
                     ),
                     "option_strike": target_strike,
                     "observed_options": [
@@ -1041,7 +1124,10 @@ def _wall_rung_option_ref(
     if bs_projected is not None:
         projected, model = bs_projected, "bs_repricing"
     else:
-        projected, model = project_option_price(mid, delta, gamma, spot, wall_strike), "taylor_fallback"
+        projected, model = (
+            project_option_price(mid, delta, gamma, spot, wall_strike),
+            "taylor_fallback",
+        )
     quality = quote.quality.value if hasattr(quote.quality, "value") else str(quote.quality)
     degraded = quote.quality in BAD_QUALITIES
     if degraded:
@@ -1264,7 +1350,9 @@ def _window_paces(points: list[tuple[datetime, float, float | None]]) -> list[fl
     return paces
 
 
-def classify_price_direction(price_delta: float | None, *, flat_points: float = ES_VOLUME_FLAT_POINTS) -> str | None:
+def classify_price_direction(
+    price_delta: float | None, *, flat_points: float = ES_VOLUME_FLAT_POINTS
+) -> str | None:
     if price_delta is None:
         return None
     if price_delta >= flat_points:
@@ -1339,19 +1427,23 @@ def classify_spot_location(
 
     if put_wall is not None and spot < put_wall - band:
         result["location"] = "below_put_wall"
-        result["nearest_level"] = {"kind": "put_wall", "strike": put_wall, "distance": round(spot - put_wall, 1)}
+        result["nearest_level"] = {
+            "kind": "put_wall",
+            "strike": put_wall,
+            "distance": round(spot - put_wall, 1),
+        }
         return result
     if call_wall is not None and spot > call_wall + band:
         result["location"] = "above_call_wall"
-        result["nearest_level"] = {"kind": "call_wall", "strike": call_wall, "distance": round(spot - call_wall, 1)}
+        result["nearest_level"] = {
+            "kind": "call_wall",
+            "strike": call_wall,
+            "distance": round(spot - call_wall, 1),
+        }
         return result
 
     # Prefer the closest level within band.
-    near = [
-        (kind, strike, dist)
-        for kind, strike, dist in candidates
-        if abs(dist) <= band
-    ]
+    near = [(kind, strike, dist) for kind, strike, dist in candidates if abs(dist) <= band]
     if near:
         kind, strike, dist = min(near, key=lambda item: abs(item[2]))
         if kind == "put_wall":
@@ -1360,14 +1452,22 @@ def classify_spot_location(
             result["location"] = "at_call_wall"
         else:
             result["location"] = "in_flip"
-        result["nearest_level"] = {"kind": kind if kind != "flip" else "flip", "strike": strike, "distance": round(dist, 1)}
+        result["nearest_level"] = {
+            "kind": kind if kind != "flip" else "flip",
+            "strike": strike,
+            "distance": round(dist, 1),
+        }
         return result
 
     if put_wall is not None and call_wall is not None and put_wall < spot < call_wall:
         result["location"] = "mid_range"
         if candidates:
             kind, strike, dist = min(candidates, key=lambda item: abs(item[2]))
-            result["nearest_level"] = {"kind": kind if kind != "flip" else "flip", "strike": strike, "distance": round(dist, 1)}
+            result["nearest_level"] = {
+                "kind": kind if kind != "flip" else "flip",
+                "strike": strike,
+                "distance": round(dist, 1),
+            }
         return result
 
     result["location"] = "mid_range"
@@ -1411,11 +1511,19 @@ def classify_volume_price_event(
         event_id = "elevated_buy_into_resistance"
         sequence = "wall_test"
         hints.append("放量撞阻力/flip：常先假突再回抽；fade 等滞涨，突破单等站稳")
-    elif pace == "quiet" and direction == "down" and location in {"at_put_wall", "in_flip", "below_put_wall"}:
+    elif (
+        pace == "quiet"
+        and direction == "down"
+        and location in {"at_put_wall", "in_flip", "below_put_wall"}
+    ):
         event_id = "quiet_sell_near_support"
         sequence = "vacuum_or_abandon"
         hints.append("缩量靠近/跌破支撑：可能是弃守阴跌，也可能是真空漂移；站不稳才当破位")
-    elif pace == "quiet" and direction == "up" and location in {"at_call_wall", "in_flip", "above_call_wall"}:
+    elif (
+        pace == "quiet"
+        and direction == "up"
+        and location in {"at_call_wall", "in_flip", "above_call_wall"}
+    ):
         event_id = "quiet_buy_near_resistance"
         sequence = "vacuum_or_abandon"
         hints.append("缩量靠近/越过阻力：可能是共识上移，也可能是真空；站稳才升级突破")
@@ -1573,7 +1681,9 @@ def es_volume_signal(
     points = [parsed for sample in samples if (parsed := _parse_sample(sample)) is not None]
     points.sort(key=lambda item: item[0])
     if not points:
-        loc = classify_spot_location(spot, put_wall=put_wall, call_wall=call_wall, flip_zone=flip_zone)
+        loc = classify_spot_location(
+            spot, put_wall=put_wall, call_wall=call_wall, flip_zone=flip_zone
+        )
         signal.update(loc)
         return signal
     last_at, last_volume, last_price = points[-1]
@@ -1582,7 +1692,9 @@ def es_volume_signal(
         return signal
     window_minutes = (now - last_at).total_seconds() / 60.0
     if not (ES_VOLUME_MIN_WINDOW_MINUTES <= window_minutes <= ES_VOLUME_MAX_WINDOW_MINUTES):
-        loc = classify_spot_location(spot, put_wall=put_wall, call_wall=call_wall, flip_zone=flip_zone)
+        loc = classify_spot_location(
+            spot, put_wall=put_wall, call_wall=call_wall, flip_zone=flip_zone
+        )
         signal.update(loc)
         return signal
     delta = cumulative - last_volume
@@ -1648,9 +1760,7 @@ def es_volume_signal(
                 event = {
                     "event_id": "quiet_reclaim_after_sell_test",
                     "sequence": "reclaim",
-                    "play_hints": [
-                        "前窗下跌测试后本窗缩量收回：反弹剧本升温，破位追空降权"
-                    ],
+                    "play_hints": ["前窗下跌测试后本窗缩量收回：反弹剧本升温，破位追空降权"],
                 }
 
     signal.update(
@@ -1760,11 +1870,7 @@ def _latest_hl_context(settings: StorageSettings, now: datetime) -> dict[str, An
     """Last Hyperliquid asset-context record; carries the aggressor buy/sell
     split and book imbalance that the latest-state quote drops."""
     base = (
-        Path(settings.data_root)
-        / "context"
-        / "provider=hyperliquid"
-        / "dex=xyz"
-        / "coin=xyz:SP500"
+        Path(settings.data_root) / "context" / "provider=hyperliquid" / "dex=xyz" / "coin=xyz:SP500"
     )
     for offset_hours in (0, 1):
         stamp = (now - timedelta(hours=offset_hours)).astimezone(timezone.utc)
@@ -1828,19 +1934,13 @@ def hl_volume_signal(
             continue
         history.append(max(0.0, cur_volume - prev_volume) / minutes)
     if len(history) < 2:
-        signal.update(
-            {"delta_notional": round(delta), "window_minutes": round(window_minutes, 1)}
-        )
+        signal.update({"delta_notional": round(delta), "window_minutes": round(window_minutes, 1)})
         return signal
     ordered = sorted(history)
     mid = len(ordered) // 2
-    baseline = (
-        ordered[mid] if len(ordered) % 2 == 1 else (ordered[mid - 1] + ordered[mid]) / 2.0
-    )
+    baseline = ordered[mid] if len(ordered) % 2 == 1 else (ordered[mid - 1] + ordered[mid]) / 2.0
     if baseline <= 0:
-        signal.update(
-            {"delta_notional": round(delta), "window_minutes": round(window_minutes, 1)}
-        )
+        signal.update({"delta_notional": round(delta), "window_minutes": round(window_minutes, 1)})
         return signal
     ratio = recent_pace / baseline
     if ratio >= ES_VOLUME_ELEVATED_RATIO:
@@ -1903,6 +2003,17 @@ def attach_hl_volume_signal(
         save_es_volume_state(sample_path, samples)
 
 
+def load_intraday_call_bias(*, now: datetime) -> dict[str, object] | None:
+    """Read the short-lived 5-second path confirmation without mutating it."""
+
+    session_date = rth_session_date(now)
+    if session_date is None:
+        return None
+    settings = IntradayShockSettings.from_env()
+    monitor_state = load_monitor_state(settings.state_path, session_date=session_date)
+    return confirmed_call_bias(monitor_state, now=now)
+
+
 def build_order_payload(state: LatestState, *, now: datetime | None = None) -> dict[str, Any]:
     now = now or state.as_of
     options_map = build_options_map(state)
@@ -1924,13 +2035,26 @@ def build_order_payload(state: LatestState, *, now: datetime | None = None) -> d
 
     resolution = resolve_spx_spot(state, options_map, warnings=warnings, now=now)
     pricing_spot = resolution.pricing_price if resolution.pricing_allowed else None
+    conditional_call_bias = load_intraday_call_bias(now=now)
     candidates = build_candidates(
         state,
         options_map,
         warnings,
         now=now,
         resolution=resolution,
+        conditional_call_bias=conditional_call_bias,
     )
+    greeks_audit_reference = build_zero_dte_greeks_reference(
+        replace(state, as_of=now),
+        options_map=options_map,
+        focus_contract_ids=(candidate.contract_id for candidate in candidates),
+        max_serialized_contracts=2,
+    )
+    greeks_reference = {
+        **greeks_audit_reference,
+        "serialized_contract_count": 0,
+        "contracts": [],
+    }
     beijing = now.astimezone(SHANGHAI_TZ)
 
     # Day move vs expected move: the writer's anti-FOMO anchor. "The drop has
@@ -1939,9 +2063,7 @@ def build_order_payload(state: LatestState, *, now: datetime | None = None) -> d
     spx_quote = state.best_quote("index:SPX")
     prior_close = finite_float(spx_quote.close) if spx_quote is not None else None
     day_move_points = (
-        round(pricing_spot - prior_close, 1)
-        if pricing_spot is not None and prior_close
-        else None
+        round(pricing_spot - prior_close, 1) if pricing_spot is not None and prior_close else None
     )
     em_used_fraction = None
     if day_move_points is not None and expected_move_points and expected_move_points > 0:
@@ -1973,6 +2095,29 @@ def build_order_payload(state: LatestState, *, now: datetime | None = None) -> d
         "expiry": expiry,
         "expected_move_points": expected_move_points,
         "candidates": [asdict(candidate) for candidate in candidates],
+        "conditional_call_bias": conditional_call_bias
+        or {
+            "status": "neutral",
+            "play": None,
+            "signed_gex_sign_method": signed_gex_sign_method(
+                front.gex_weighting if front is not None else None
+            ),
+            "dealer_position_sign": "unknown",
+        },
+        "signed_gex_proxy": {
+            "net_gex": front.net_gex if front is not None else None,
+            "abs_gex": front.abs_gex if front is not None else None,
+            "net_gamma_ratio": front.net_gamma_ratio if front is not None else None,
+            "gamma_state": front.gamma_state if front is not None else "unknown",
+            "weighting": front.gex_weighting if front is not None else None,
+            "sign_method": signed_gex_sign_method(
+                front.gex_weighting if front is not None else None
+            ),
+            "dealer_position_sign": "unknown",
+            "direction": "unknown",
+        },
+        "spxw_0dte_greeks_reference": greeks_reference,
+        "_spxw_0dte_greeks_audit": greeks_audit_reference,
         "research_candidates": (
             _research_candidates(
                 state,
@@ -2025,6 +2170,22 @@ def build_order_payload(state: LatestState, *, now: datetime | None = None) -> d
     }
 
 
+def persist_zero_dte_greeks_reference(
+    payload: dict[str, Any],
+    storage_settings: StorageSettings,
+) -> None:
+    reference = payload.get("_spxw_0dte_greeks_audit")
+    if not isinstance(reference, dict):
+        reference = payload.get("spxw_0dte_greeks_reference")
+    data_root = getattr(storage_settings, "data_root", None)
+    if not isinstance(reference, dict) or not isinstance(data_root, str) or not data_root:
+        return
+    try:
+        write_zero_dte_greeks_snapshot(reference, data_root=data_root)
+    except OSError as exc:
+        print(f"0DTE Greeks snapshot write failed: {exc}", file=sys.stderr)
+
+
 def _payload_is_thin(payload: dict[str, Any]) -> bool:
     """True when the snapshot caught a mid-rotation flush (missing spot/OI/plays)."""
     research_reference = (
@@ -2064,8 +2225,7 @@ def _payload_has_retryable_candidate_gap(payload: dict[str, Any]) -> bool:
     if not isinstance(warnings, list):
         return False
     return any(
-        str(item).startswith("bad_quality_for_")
-        and ":transport_stale_after_" in str(item)
+        str(item).startswith("bad_quality_for_") and ":transport_stale_after_" in str(item)
         for item in warnings
     )
 
@@ -2095,10 +2255,7 @@ def build_order_payload_with_retry(
             evaluation_now = now + timedelta(seconds=elapsed_seconds)
         state = LatestStateStore(storage_settings).load(now=evaluation_now)
         payload = build_order_payload(state, now=evaluation_now)
-        if not (
-            _payload_is_thin(payload)
-            or _payload_has_retryable_candidate_gap(payload)
-        ):
+        if not (_payload_is_thin(payload) or _payload_has_retryable_candidate_gap(payload)):
             break
         if attempt < attempts - 1:
             time_module.sleep(delay_seconds)
@@ -2250,6 +2407,30 @@ def _rn_density_line(payload: dict[str, Any]) -> str | None:
     return "收盘分布(B-L市场定价): " + ", ".join(parts) + suffix
 
 
+def _greeks_reference_line(payload: dict[str, Any]) -> str | None:
+    reference = payload.get("spxw_0dte_greeks_reference")
+    if not isinstance(reference, dict) or reference.get("status") not in {"ok", "degraded"}:
+        return None
+    aggregate = reference.get("aggregate")
+    coverage = reference.get("coverage")
+    if not isinstance(aggregate, dict) or not isinstance(coverage, dict):
+        return None
+
+    def metric(name: str) -> str:
+        value = finite_float(aggregate.get(name))
+        return f"{value:.2e}" if value is not None else "-"
+
+    usable = coverage.get("usable_contract_count")
+    total = coverage.get("exact_expiry_contract_count")
+    return (
+        "0DTE Greeks(只读/仓位符号未知, OI×100): "
+        f"Gamma {metric('gross_gamma_abs')}, "
+        f"Charm5m {metric('gross_charm_5m_abs')}, "
+        f"Vanna1vol {metric('gross_vanna_1vol_abs')}; "
+        f"覆盖 {usable}/{total} [{reference.get('status')}]"
+    )
+
+
 def _wall_ladder_lines(payload: dict[str, Any]) -> list[str]:
     ladder = payload.get("wall_ladder") if isinstance(payload.get("wall_ladder"), dict) else {}
     lines: list[str] = []
@@ -2278,7 +2459,9 @@ def _wall_ladder_lines(payload: dict[str, Any]) -> list[str]:
             prob_text = f",触达{_fmt_prob(prob)}" if prob is not None else ""
             right = str(rung.get("option_right") or default_right)
             opt_strike = rung.get("option_strike")
-            opt_label = f"{_dash(opt_strike)}{right}" if opt_strike is not None else f"{strike}{right}"
+            opt_label = (
+                f"{_dash(opt_strike)}{right}" if opt_strike is not None else f"{strike}{right}"
+            )
             projected = rung.get("projected_mid")
             aggressive = rung.get("limit_aggressive")
             conservative = rung.get("limit_conservative")
@@ -2346,9 +2529,7 @@ def render_research_only_template(
                 continue
             distance = item.get("distance_points")
             distance_text = (
-                f"{float(distance):+.1f}点"
-                if isinstance(distance, (int, float))
-                else "距离未知"
+                f"{float(distance):+.1f}点" if isinstance(distance, (int, float)) else "距离未知"
             )
             observed_markets: list[str] = []
             observed_options = item.get("observed_options")
@@ -2409,11 +2590,11 @@ def render_template(payload: dict[str, Any]) -> str:
             f"参考价: {_dash(underlier_price)}({underlier_source}), "
             f"预期波幅 ±{_dash(expected_move)} 点"
         ),
-        (
-            f"gamma: {gamma_state}, zero gamma {_dash(zero_gamma)}, "
-            f"flip zone {flip_lo}-{flip_hi}"
-        ),
+        (f"gamma: {gamma_state}, zero gamma {_dash(zero_gamma)}, flip zone {flip_lo}-{flip_hi}"),
     ]
+    greeks_line = _greeks_reference_line(payload)
+    if greeks_line:
+        lines.append(greeks_line)
     day_move_line = _day_move_line(payload)
     if day_move_line:
         lines.append(day_move_line)
@@ -2430,11 +2611,23 @@ def render_template(payload: dict[str, Any]) -> str:
         lines.append(density_line)
 
     by_play = _candidate_by_play(payload)
-    for index, play in enumerate(PLAY_ORDER, start=1):
+    bias = payload.get("conditional_call_bias")
+    preferred_play = (
+        str(bias.get("play") or "")
+        if isinstance(bias, dict) and bias.get("status") == "confirmed"
+        else ""
+    )
+    render_order = (
+        (preferred_play, *(play for play in PLAY_ORDER if play != preferred_play))
+        if preferred_play in PLAY_ORDER
+        else PLAY_ORDER
+    )
+    index = 0
+    for play in render_order:
         candidate = by_play.get(play)
         if candidate is None:
-            lines.append(f"{index}) -")
             continue
+        index += 1
         level_label = candidate.get("level_label") or "-"
         strike = candidate.get("strike")
         right = candidate.get("right") or ""
@@ -2497,13 +2690,14 @@ def build_order_prompt(
     template: str,
     previous_push: dict[str, Any] | None = None,
 ) -> str:
+    writer_payload = {key: value for key, value in payload.items() if not key.startswith("_")}
     if payload.get("research_only") is True:
         return "\n".join(
             (
                 "这是 research_only 市场观察。只复述研究参考、闸门原因、结构位距离和原始 bid/ask。",
                 "不得给挂单、限价、重定价、触达概率、ETA、买卖建议或可执行措辞。",
                 "首行写『研究状态:』，末行明确『不可执行定价』。",
-                "JSON:" + json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+                "JSON:" + json.dumps(writer_payload, ensure_ascii=False, separators=(",", ":")),
                 "模板:" + template,
             )
         )
@@ -2512,7 +2706,7 @@ def build_order_prompt(
             "这条是当天第一张『挂单地图』。搭档下午刚坐到屏幕前，要拿这张图定今天的埋伏方案：挂什么单、挂什么价、赌的是什么。",
             "动笔前先在心里过一遍(不写出来)：今天的 OI 是怎么摆的——put 侧是密集防线还是孤零零一档？dealer 在现价附近是"
             "正 gamma 压波动还是负 gamma 放大波动？今天的 play 里哪张是真机会、哪张只是模板凑数？想清楚再落笔，观点要有取舍，"
-            "三张单同等推荐等于没推荐。",
+            "所有候选同等推荐等于没推荐。",
             "",
             "输出中文，最多 18 行。第一行以『挂单参考:』开头，复述模板第一行的日期与时间。",
             "接着给地形定调：pin 还是 transition，为什么(gamma 状态+价格相对 flip 的位置)，今天哪类 play 优先。",
@@ -2521,8 +2715,12 @@ def build_order_prompt(
             "每档 put 墙对应 Call 的到位预估/限价，每档 call 墙对应 Put 的到位预估/限价——写挂单时必须引用这些数字，不要自己估权利金。",
             "rn_density(B-L 风险中性分布)可用时引用：市场把收盘定价在哪个中位、80% 区间在哪；给垂直价差选腿时"
             "买腿放赌的方向内、卖腿放 80% 区间外沿附近最划算；quality 非 ok 时注明并降权。",
+            "spxw_0dte_greeks_reference 是严格当日到期、只读的情景参考层，只解释价格/时间/IV 冲击。"
+            "position_sign/direction=unknown 时负 gamma 不等于下跌；不得据此改变候选方向、排序、限价或新增下单动作。",
+            "conditional_call_bias 只有 status=confirmed 才有效，它来自 5 秒 SPX/ES 价格路径对冻结 flip/旧 call wall 的确认，"
+            "不是 Gamma 猜方向；confirmed 时优先讲对应 call 的回踩位与失效线，watch/neutral 不新增动作。",
             "",
-            "然后逐条 play(最多 3 条，每条 2-3 行)，每条都要把账算给他看：",
+            "然后逐条 play(最多 3 条；conditional_call_bias confirmed 时用对应 Call 替换已被证伪的同层 Put；每条 2-3 行)，每条都要把账算给他看：",
             "- 墙位价 vs 先手挡价的取舍：墙位价便宜但常在墙前几点反转吃不到，先手挡成交率高；预估价已含触达前的"
             "时间衰减与 vol 斜率(BS 重定价)，比现价低不是便宜，是时间价值正常流失；",
             "- 赔率账：触达概率、到位预估价、现价放一起，这笔单赌的是一次多大概率的什么事，赔付幅度配不配得上这个概率；",
@@ -2545,12 +2743,10 @@ def build_order_prompt(
             "day_move.em_used_fraction ≥ 0.7 时点明：日内已走完预期波幅的多少，顺方向追单赔率差；挂单纪律是等价格来找你，不去半路追它。",
             "previous_push 是上一条推送正文；关键位相对它有实质变化就在定调处说『剧本有变』并指出哪张单要改，没变化不必提。",
             "previous_push:" + previous_push_json(previous_push),
-            "JSON:" + json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+            "JSON:" + json.dumps(writer_payload, ensure_ascii=False, separators=(",", ":")),
             "模板:" + template,
         )
     )
-
-
 
 
 def send_order_map(
@@ -2818,10 +3014,7 @@ def session_phase(now_utc: datetime) -> dict[str, Any]:
             break
 
     current_session = DEFAULT_MARKET_CALENDAR.session(ny.date())
-    if (
-        current_session is None
-        and time(9, 30) <= ny.time() < time(16, 0)
-    ):
+    if current_session is None and time(9, 30) <= ny.time() < time(16, 0):
         name, name_cn, traits = (
             "market_closed",
             "休市",
@@ -2848,8 +3041,7 @@ def session_phase(now_utc: datetime) -> dict[str, Any]:
     minutes_to_us_open = int((open_dt - ny).total_seconds() // 60) if ny < open_dt else None
     minutes_since_us_open = (
         int((ny - current_session.open_at).total_seconds() // 60)
-        if current_session is not None
-        and current_session.open_at <= ny < current_session.close_at
+        if current_session is not None and current_session.open_at <= ny < current_session.close_at
         else None
     )
     minutes_to_us_close = (
@@ -3002,12 +3194,13 @@ def render_status_template(
             f"zero gamma {_dash(payload.get('zero_gamma'))}, flip zone {flip_lo}-{flip_hi}, "
             f"预期波幅 ±{_dash(payload.get('expected_move_points'))} 点"
         ),
+        *([line] if (line := _greeks_reference_line(payload)) else []),
         f"关键位: {_level_probs_line(payload)}",
-        *( [line] if (line := _day_move_line(payload)) else [] ),
-        *( [line] if (line := _es_volume_line(payload)) else [] ),
-        *( [line] if (line := _hl_volume_line(payload)) else [] ),
+        *([line] if (line := _day_move_line(payload)) else []),
+        *([line] if (line := _es_volume_line(payload)) else []),
+        *([line] if (line := _hl_volume_line(payload)) else []),
         *_wall_ladder_lines(payload),
-        *( [line] if (line := _rn_density_line(payload)) else [] ),
+        *([line] if (line := _rn_density_line(payload)) else []),
         (
             f"vol: VIX {_dash(vol.get('vix'))}, VIX1D {_dash(vol.get('vix1d'))}, "
             f"VVIX {_dash(vol.get('vvix'))}, SKEW {_dash(vol.get('skew'))}"
@@ -3029,13 +3222,14 @@ def build_status_prompt(
     template: str,
     previous_push: dict[str, Any] | None = None,
 ) -> str:
+    writer_payload = {key: value for key, value in payload.items() if not key.startswith("_")}
     if payload.get("research_only") is True:
         return "\n".join(
             (
                 "这是周期性 research_only 市场状态，不是交易提醒。",
                 "只说明研究参考、定价闸门、结构位距离和观察到的 bid/ask。",
                 "不得产生限价、概率、ETA、模型价格、买卖或下单建议；明确写不可执行定价。",
-                "JSON:" + json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+                "JSON:" + json.dumps(writer_payload, ensure_ascii=False, separators=(",", ":")),
                 "模板:" + template,
             )
         )
@@ -3061,9 +3255,14 @@ def build_status_prompt(
             "- 位置：参考价在 flip zone/zero gamma/两侧墙位阶梯里站在哪，距各关键位几点，这个位置意味着 pin 还是易加速；"
             "相邻 put 墙 OI 接近(差三成以内)就说成支撑带并报出二、三档，别只报一个点；"
             "墙阶梯每一档都带对应期权的 BS 到位预估价与限价(put 墙→Call，call 墙→Put)，写支撑/阻力时顺手带上参考价，别只报 strike；",
-            "- 赔率：三张挂单的触达概率各多少、相对上一条谁在改善谁在恶化(引用具体百分比变化)，此刻哪张性价比最高、为什么；",
+            "- 赔率：当前候选的触达概率各多少、相对上一条谁在改善谁在恶化(引用具体百分比变化)，此刻哪张性价比最高、为什么；",
             "- 市场定价对照(rn_density quality=ok 时)：市场把收盘定价在哪个中位、80% 区间在哪，当前价格相对它偏回归还是已到尾部；",
             "- vol：VIX1D/VIX 说明今天的 vol 卖得贵还是便宜，SKEW 异常时说明谁在抢保护；",
+            "- 0DTE Greeks：只把 spxw_0dte_greeks_reference 当价格/时间/IV 冲击参考。position_sign/direction=unknown 时"
+            "负 gamma 不等于下跌，不得用它改变候选方向、排序或限价；",
+            "- conditional_call_bias：只有 confirmed 才用 flip_reclaim_call 替换同层 flip_breakdown_put，或用"
+            " call_wall_breakout_call 替换同层 call_wall_fade_put；它来自 5 秒 SPX/ES 对冻结关键位的确认，"
+            "不是 Gamma 方向票。watch/neutral 不改变候选；",
             "- 量价事件(es_volume 可用时)：不要只说放量/缩量。读 event_id + direction + location + break_outcome："
             "放量砸支撑(elevated_sell_into_support)是墙测试不是自动破位；缩量收回(quiet_reclaim_after_sell_test)才升温反弹；"
             "破位站稳(holds)才给破位单开灯，破位收回(reclaimed)则假破降权；中间地带(quiet/elevated_mid_range)半路不追。"
@@ -3078,7 +3277,7 @@ def build_status_prompt(
             "『日内已走完预期波幅的 X%，顺方向追单赔率差』；价格进 put 墙支撑带就写明『计划中的接多区不是恐慌区，防守只在跌破 XX 后执行』，"
             "进 call 墙带对称处理。哪条情况成立写哪条，都不成立就不硬写。",
             "",
-            "倒数第二段固定是『挂单参考』段，3-6 行：从模板的挂单地图部分逐字引用每张单的合约、墙位限价、先手挡价、触达概率，"
+            "倒数第二段固定是『挂单参考』段，3-8 行：从模板的挂单地图部分逐字引用每张单的合约、墙位限价、先手挡价、触达概率，"
             "数字照抄不改写；stop_trigger 的 play 保留『勿预挂限价、用指数条件单』提醒；限价相对上一条有变化就点出方向。",
             "最后 1 行：到下条推送之间最值得盯的一个量，以及它变到什么程度你会改判断；"
             "这个量必须是本系统数据里有的(参考价/触达概率/gamma 状态/墙位 OI/VIX/VIX1D/ES 量能节奏)，"
@@ -3086,7 +3285,7 @@ def build_status_prompt(
             "",
             "剧本维持时照样给完整读数，别因为『没变』缩成三行；也别硬编不存在的变化，数字平稳就说平稳。",
             "previous_push:" + previous_push_json(previous_push),
-            "JSON:" + json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+            "JSON:" + json.dumps(writer_payload, ensure_ascii=False, separators=(",", ":")),
             "模板:" + template,
         )
     )
@@ -3105,7 +3304,8 @@ def run_status(
         return 0
 
     previous = load_order_map_state(state_path)
-    payload = build_order_payload_with_retry(StorageSettings.from_env(), now=now)
+    storage_settings = StorageSettings.from_env()
+    payload = build_order_payload_with_retry(storage_settings, now=now)
     if _payload_is_thin(payload) and not args.force:
         # Normal sampling gap (slow poll / line rotation), not an outage:
         # skip quietly, the next 15-minute run will have full data.
@@ -3160,6 +3360,7 @@ def run_status(
     feishu_ok = any(s.sink == "feishu" and s.ok for s in delivery_sinks)
 
     if delivered_ok:
+        persist_zero_dte_greeks_reference(payload, storage_settings)
         mark_sent(state_path, trading_date, fingerprint=fingerprint, now=now, kind="status")
         record_push("market_status", text, at=now.isoformat())
     result = {
@@ -3180,7 +3381,9 @@ def run_status(
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Send SPX Spark order map push.")
     parser.add_argument("--dry-run", action="store_true", help="Print template only.")
-    parser.add_argument("--force", action="store_true", help="Skip time window and idempotency gate.")
+    parser.add_argument(
+        "--force", action="store_true", help="Skip time window and idempotency gate."
+    )
     parser.add_argument(
         "--refresh",
         action="store_true",
@@ -3194,7 +3397,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def run_refresh(args: argparse.Namespace, *, now: datetime, state_path: str, trading_date: str) -> int:
+def run_refresh(
+    args: argparse.Namespace, *, now: datetime, state_path: str, trading_date: str
+) -> int:
     if not args.force and not within_refresh_window(now):
         print(json.dumps({"skipped": True, "reason": "outside_refresh_window"}))
         return 0
@@ -3207,14 +3412,14 @@ def run_refresh(args: argparse.Namespace, *, now: datetime, state_path: str, tra
     # interleaved status reports must not reset it.
     last_map_at = finite_float(previous.get("last_map_at"))
     cooldown = float(
-        os.getenv("SPX_ORDER_MAP_REFRESH_COOLDOWN_SECONDS", "")
-        or REFRESH_COOLDOWN_SECONDS_DEFAULT
+        os.getenv("SPX_ORDER_MAP_REFRESH_COOLDOWN_SECONDS", "") or REFRESH_COOLDOWN_SECONDS_DEFAULT
     )
     if not args.force and last_map_at is not None and now.timestamp() - last_map_at < cooldown:
         print(json.dumps({"skipped": True, "reason": "refresh_cooldown"}))
         return 0
 
-    payload = build_order_payload_with_retry(StorageSettings.from_env(), now=now)
+    storage_settings = StorageSettings.from_env()
+    payload = build_order_payload_with_retry(storage_settings, now=now)
     if payload.get("research_only") is True and not args.dry_run:
         print(json.dumps({"skipped": True, "reason": "research_only_no_direct_map"}))
         return 0
@@ -3238,12 +3443,23 @@ def run_refresh(args: argparse.Namespace, *, now: datetime, state_path: str, tra
     result = send_order_map(
         payload, settings, now=now, extra_header=header, previous_push=load_previous_push()
     )
-    if result.get("delivered_ok") or result["im_ok"] or result["bark_ok"] or result.get("feishu_ok"):
+    if (
+        result.get("delivered_ok")
+        or result["im_ok"]
+        or result["bark_ok"]
+        or result.get("feishu_ok")
+    ):
+        persist_zero_dte_greeks_reference(payload, storage_settings)
         mark_sent(state_path, trading_date, fingerprint=fingerprint, now=now, kind="map")
         record_push("order_map_refresh", result["text"], at=now.isoformat())
     result["changes"] = changes
     print(json.dumps(result, ensure_ascii=False))
-    if not (result.get("delivered_ok") or result["im_ok"] or result["bark_ok"] or result.get("feishu_ok")):
+    if not (
+        result.get("delivered_ok")
+        or result["im_ok"]
+        or result["bark_ok"]
+        or result.get("feishu_ok")
+    ):
         return 1
     return 0
 
@@ -3282,7 +3498,13 @@ def run(argv: list[str] | None = None, *, now: datetime | None = None) -> int:
 
     settings = NotificationSettings.from_env()
     result = send_order_map(payload, settings, now=now, previous_push=load_previous_push())
-    if result.get("delivered_ok") or result["im_ok"] or result["bark_ok"] or result.get("feishu_ok"):
+    if (
+        result.get("delivered_ok")
+        or result["im_ok"]
+        or result["bark_ok"]
+        or result.get("feishu_ok")
+    ):
+        persist_zero_dte_greeks_reference(payload, storage_settings)
         mark_sent(
             state_path,
             trading_date,
@@ -3292,7 +3514,12 @@ def run(argv: list[str] | None = None, *, now: datetime | None = None) -> int:
         )
         record_push("order_map", result["text"], at=now.isoformat())
     print(json.dumps(result, ensure_ascii=False))
-    if not (result.get("delivered_ok") or result["im_ok"] or result["bark_ok"] or result.get("feishu_ok")):
+    if not (
+        result.get("delivered_ok")
+        or result["im_ok"]
+        or result["bark_ok"]
+        or result.get("feishu_ok")
+    ):
         return 1
     return 0
 

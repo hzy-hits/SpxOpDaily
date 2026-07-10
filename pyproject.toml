@@ -11,6 +11,7 @@ dependencies = [
 spx-spark-alert-profile = "spx_spark.alert_profile:main"
 spx-spark-alert-engine = "spx_spark.alert_engine:main"
 spx-spark-intraday-shock = "spx_spark.intraday_shock:main"
+spx-spark-greek-shadow = "spx_spark.greek_shadow:main"
 spx-spark-ibkr-verifier = "spx_spark.ibkr.verifier:main"
 spx-spark-ibkr-collector = "spx_spark.ibkr.collector:main"
 spx-spark-ibkr-stream = "spx_spark.ibkr.stream_collector:main"

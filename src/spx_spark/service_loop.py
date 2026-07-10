@@ -16,7 +16,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from spx_spark import alert_engine, intraday_shock, iv_surface
+from spx_spark import alert_engine, greek_shadow, intraday_shock, iv_surface
 from spx_spark.config import env_bool, env_int, load_dotenv
 from spx_spark.hyperliquid import collector as hyperliquid_collector
 from spx_spark.ibkr import collector as ibkr_collector
@@ -49,6 +49,8 @@ class ServiceLoopSettings:
     schwab_chains_enabled: bool = False
     schwab_chains_interval_seconds: int = 300
     max_concurrent_tasks: int = 4
+    greek_shadow_enabled: bool = False
+    greek_shadow_interval_seconds: int = 60
 
     @classmethod
     def from_env(cls) -> "ServiceLoopSettings":
@@ -77,6 +79,10 @@ class ServiceLoopSettings:
             ibkr_connect_retry_seconds=env_int("IBKR_CONNECT_RETRY_SECONDS", 60),
             ibkr_conflict_probe_seconds=env_int("IBKR_CONFLICT_PROBE_SECONDS", 60),
             max_concurrent_tasks=env_int("SPX_SERVICE_MAX_CONCURRENT_TASKS", 4),
+            greek_shadow_enabled=env_bool("SPX_SERVICE_ENABLE_GREEK_SHADOW", False),
+            greek_shadow_interval_seconds=env_int(
+                "SPX_SERVICE_GREEK_SHADOW_INTERVAL_SECONDS", 60
+            ),
         )
 
 
@@ -143,6 +149,10 @@ def run_alert_engine() -> int:
 
 def run_intraday_shock() -> int:
     return intraday_shock.run(["--json"])
+
+
+def run_greek_shadow() -> int:
+    return greek_shadow.run(["--json"])
 
 
 def run_ibkr_positions() -> int:
@@ -225,6 +235,17 @@ def build_tasks(settings: ServiceLoopSettings) -> list[ServiceTask]:
                 command=(console_script("spx-spark-alert-engine"), "--json"),
             )
         )
+    # Shadow telemetry is intentionally last so the 4-worker scheduler never
+    # queues live alerts behind higher-Greeks calculation at a shared tick.
+    if settings.greek_shadow_enabled:
+        tasks.append(
+            ServiceTask(
+                "greek_shadow",
+                settings.greek_shadow_interval_seconds,
+                run_greek_shadow,
+                command=(console_script("spx-spark-greek-shadow"), "--json"),
+            )
+        )
     if settings.ibkr_positions_enabled:
         tasks.append(
             ServiceTask(
@@ -289,6 +310,8 @@ def run_task(task: ServiceTask) -> dict[str, object]:
         add_ibkr_summary_fields(event, stdout_text)
     if task.name in {"alert_engine", "intraday_shock"}:
         add_alert_summary_fields(event, stdout_text)
+    if task.name == "greek_shadow":
+        add_greek_shadow_summary_fields(event, stdout_text)
     return event
 
 
@@ -347,6 +370,29 @@ def add_alert_summary_fields(event: dict[str, object], stdout_text: str) -> None
         return
     if isinstance(summary.get("alert_count"), int):
         event["alert_count"] = summary["alert_count"]
+    intraday_path = summary.get("intraday_path")
+    if isinstance(intraday_path, dict):
+        event["intraday_path_status"] = intraday_path.get("status")
+        event["intraday_path_play"] = intraday_path.get("play")
+        event["intraday_path_blocks"] = intraday_path.get("blocks")
+    outcome = summary.get("outcome_tracking")
+    if isinstance(outcome, dict):
+        event["outcome_tracking_status"] = outcome.get("status")
+        event["outcome_records_emitted"] = outcome.get("records_emitted")
+        event["outcome_tracking_error"] = outcome.get("error")
+    if summary.get("option_structure_error"):
+        event["option_structure_error"] = summary.get("option_structure_error")
+    greek_events = summary.get("greek_shadow_events")
+    if isinstance(greek_events, list):
+        event["greek_shadow_event_statuses"] = [
+            {
+                "status": row.get("status"),
+                "reference_status": row.get("reference_status"),
+                "reason": row.get("reason"),
+            }
+            for row in greek_events
+            if isinstance(row, dict)
+        ]
     notification = summary.get("notification")
     if not isinstance(notification, dict):
         return
@@ -368,6 +414,19 @@ def add_alert_summary_fields(event: dict[str, object], stdout_text: str) -> None
             for sink in sinks
             if isinstance(sink, dict)
         ]
+
+
+def add_greek_shadow_summary_fields(event: dict[str, object], stdout_text: str) -> None:
+    try:
+        summary = json.loads(stdout_text)
+    except json.JSONDecodeError:
+        return
+    if not isinstance(summary, dict):
+        return
+    event["shadow_status"] = summary.get("status")
+    event["shadow_reference_status"] = summary.get("reference_status")
+    event["shadow_reason"] = summary.get("reason")
+    event["shadow_expiry"] = summary.get("expiry")
 
 
 def next_delay_seconds(task: ServiceTask, result: dict[str, object]) -> int:

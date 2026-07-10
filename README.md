@@ -264,6 +264,24 @@ the modular long-running loop. It runs
 Hyperliquid, IV surface, and alert tasks by default; IBKR is disabled unless
 `SPX_SERVICE_ENABLE_IBKR=true` is set in `.env`.
 
+Order-map and human-focus payloads also include a strict same-day SPXW
+`spxw_0dte_greeks_reference.v1` shadow layer. It derives Delta, Gamma, Theta,
+Vega, Charm, Color, Speed, Vanna, Vomma, and Zomma plus bounded spot/time/IV
+scenarios. Aggregates are OI-only gross magnitudes with position sign and
+direction explicitly `unknown`; they cannot change candidate direction,
+ranking, or limits. Delivered snapshots are persisted under
+`data/features/spxw_0dte_greeks_reference/` and summarized in the post-close
+review. See [docs/zero-dte-greeks-reference.md](docs/zero-dte-greeks-reference.md).
+
+The same 5-second SPX/ES path monitor now freezes the pre-move flip band and
+call wall. Two fresh synchronized confirmations can produce a short-lived
+`flip_reclaim_call` or `call_wall_breakout_call` bias and direct alert; the
+15-minute order map then replaces the invalidated same-level Put with that Call
+while retaining the other risk play. Shock/reclaim events are scored after 5/15/30
+minutes with directional MFE/MAE in daily
+`data/features/intraday_event_outcomes/date=YYYY-MM-DD/` partitions, while the higher-Greeks shadow can sample
+every 60 seconds during RTH with `SPX_SERVICE_ENABLE_GREEK_SHADOW=true`.
+
 Post-close SPX/SPXW review:
 
 ```bash
