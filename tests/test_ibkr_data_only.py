@@ -4,10 +4,12 @@ import ast
 import asyncio
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 from spx_spark.config import IbkrSettings
 from spx_spark.ibkr.verifier import (
     VerifyRow,
+    cancel_subscriptions,
     connect_market_data_only,
     generic_ticks_for_contract,
     option_open_interest_from_ticker,
@@ -385,3 +387,40 @@ def test_resolve_contract_uses_known_index_conid_when_qualify_fails() -> None:
     assert resolved.conId == 416904
     assert row.qualified is True
     assert row.error is None
+
+
+def test_cancel_subscriptions_skips_asynchronously_rejected_rows() -> None:
+    class FakeWrapper:
+        def __init__(self) -> None:
+            self.ended: list[tuple[object, str]] = []
+
+        def endTicker(self, ticker: object, tick_type: str) -> None:
+            self.ended.append((ticker, tick_type))
+
+    class FakeIB:
+        def __init__(self) -> None:
+            self.canceled: list[object] = []
+            self.wrapper = FakeWrapper()
+
+        def cancelMktData(self, contract: object) -> None:
+            self.canceled.append(contract)
+
+    active_contract = object()
+    rejected_contract = object()
+    ib = FakeIB()
+    active_ticker = SimpleNamespace(contract=active_contract)
+    rejected_ticker = SimpleNamespace(contract=rejected_contract)
+    subscriptions = {
+        "active": (
+            active_ticker,
+            VerifyRow(label="active", kind="index", symbol="SPX", subscribed=True),
+        ),
+        "rejected": (
+            rejected_ticker,
+            VerifyRow(label="rejected", kind="index", symbol="VIX", subscribed=False),
+        ),
+    }
+
+    assert cancel_subscriptions(ib, subscriptions)
+    assert ib.canceled == [active_contract]
+    assert ib.wrapper.ended == [(rejected_ticker, "mktData")]

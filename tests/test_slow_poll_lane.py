@@ -415,6 +415,56 @@ def test_slow_contracts_are_batch_qualified_before_scheduler() -> None:
     assert collector.slow_unresolved_contracts == set()
 
 
+def test_slow_index_qualification_precedes_static_conid_fallback() -> None:
+    collector = make_stream_collector(slow_contracts=[])
+    original = SimpleNamespace(
+        secType="IND",
+        symbol="VIX",
+        lastTradeDateOrContractMonth="",
+        strike=0.0,
+        right="",
+        multiplier="",
+        currency="USD",
+        conId=0,
+    )
+    qualified = SimpleNamespace(**(vars(original) | {"conId": 999001}))
+    calls: list[tuple[object, ...]] = []
+
+    def qualify_contracts(*contracts):
+        calls.append(contracts)
+        return [qualified]
+
+    collector.ib.qualifyContracts = qualify_contracts
+    collector.slow_contracts = [("index:VIX", "index", original)]
+
+    collector._qualify_slow_contracts()
+
+    assert calls == [(original,)]
+    assert collector.slow_qualified_contracts["index:VIX"][2].conId == 999001
+
+
+def test_slow_index_uses_static_conid_only_after_qualification_miss() -> None:
+    collector = make_stream_collector(slow_contracts=[])
+    original = SimpleNamespace(
+        secType="IND",
+        symbol="VIX",
+        lastTradeDateOrContractMonth="",
+        strike=0.0,
+        right="",
+        multiplier="",
+        currency="USD",
+        conId=0,
+    )
+    collector.ib.qualifyContracts = lambda *contracts: []
+    collector.slow_contracts = [("index:VIX", "index", original)]
+
+    collector._qualify_slow_contracts()
+
+    assert collector.slow_qualified_contracts["index:VIX"][2].conId == 13455763
+    assert original.conId == 0
+    assert collector.slow_unresolved_contracts == set()
+
+
 def test_slow_async_rejection_retries_chunk_without_reconnecting_hot_lane(
     monkeypatch,
 ) -> None:
@@ -455,13 +505,63 @@ def test_slow_async_rejection_retries_chunk_without_reconnecting_hot_lane(
     collector.slow_scheduler.reset(now=0.0)
 
     collector.advance_slow_poll(now_monotonic=0.0)
-    collector._on_error(77, 354, "not subscribed", None)
+    collector._on_error(77, 200, "No security definition has been found", None)
     collector.advance_slow_poll(now_monotonic=10.0)
 
     assert collector.subscription_health_failed is False
     assert collector.slow_active_subs == {}
+    assert "index:VIX" not in collector.slow_cache
+    assert "index:VIX" not in collector.slow_qualified_contracts
+    assert collector.slow_unresolved_contracts == {"index:VIX"}
     assert canceled == [{"index:VIX"}]
     assert collector.slow_scheduler.next_start_at == 70.0
+
+
+def test_slow_early_security_definition_rejection_invalidates_contract(
+    monkeypatch,
+) -> None:
+    contract = SimpleNamespace(conId=1001)
+    slow_contracts = [("index:VIX", "index", contract)]
+    collector = make_stream_collector(slow_contracts=slow_contracts, slow_poll_chunk_size=1)
+
+    def reject_during_subscribe(ib, contracts, *, qualify=False, on_progress=None):
+        collector._on_error(77, 200, "No security definition has been found", None)
+        return {
+            "index:VIX": (
+                SimpleNamespace(contract=contract),
+                VerifyRow(
+                    label="index:VIX",
+                    kind="index",
+                    symbol="VIX",
+                    subscribed=True,
+                    request_id=77,
+                ),
+            )
+        }
+
+    monkeypatch.setattr(
+        stream_collector_module,
+        "qualify_and_subscribe",
+        reject_during_subscribe,
+    )
+    monkeypatch.setattr(stream_collector_module, "cancel_subscriptions", lambda *args: True)
+    collector.slow_chunks = [slow_contracts]
+    collector.slow_qualified_contracts = {
+        "index:VIX": ("index:VIX", "index", contract)
+    }
+    collector.slow_scheduler = SlowPollScheduler(
+        chunk_count=1,
+        cycle_seconds=60.0,
+        hold_seconds=10.0,
+    )
+    collector.slow_scheduler.reset(now=0.0)
+
+    collector.advance_slow_poll(now_monotonic=0.0)
+
+    assert collector.slow_active_subs == {}
+    assert "index:VIX" not in collector.slow_qualified_contracts
+    assert collector.slow_unresolved_contracts == {"index:VIX"}
+    assert collector.slow_scheduler.next_start_at == 60.0
 
 
 def test_unresolvable_slow_label_does_not_starve_later_chunks(monkeypatch) -> None:

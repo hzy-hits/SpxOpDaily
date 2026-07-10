@@ -79,7 +79,7 @@ T = TypeVar("T")
 
 MAX_TRACKED_ERRORS = 200
 SUBSCRIPTION_CONFIRM_SECONDS = 0.5
-SUBSCRIPTION_REJECTION_CODES = frozenset({100, 101, 354, 420})
+SUBSCRIPTION_REJECTION_CODES = frozenset({100, 101, 200, 354, 420})
 OPTION_ROTATION_RETRY_SECONDS = 30.0
 QUALIFICATION_TIMEOUT_SECONDS = 5.0
 HOT_FLUSH_LIFECYCLE_BUDGET_SECONDS = 6.0
@@ -707,9 +707,8 @@ class StreamCollector:
         resolved_by_label: dict[str, tuple[str, str, Any]] = {}
         unresolved: list[tuple[str, str, Any]] = []
         for label, kind, contract in self.slow_contracts:
-            known = contract if contract_has_con_id(contract) else apply_known_index_conid(contract)
-            if known is not None:
-                resolved_by_label[label] = (label, kind, known)
+            if contract_has_con_id(contract):
+                resolved_by_label[label] = (label, kind, contract)
             else:
                 unresolved.append((label, kind, contract))
 
@@ -735,7 +734,14 @@ class StreamCollector:
                 )
             for label, kind, contract in unresolved:
                 matches = qualified_by_key.get(contract_qualification_key(contract), [])
-                if not matches:
+                if matches:
+                    resolved = matches.pop(0)
+                    resolved_by_label[label] = (label, kind, resolved)
+                    continue
+                # Static conIds are a last-resort path when the sec-def farm
+                # times out, not a substitute for a fresh session qualification.
+                fallback = apply_known_index_conid(contract)
+                if fallback is None:
                     log_event(
                         {
                             "task": "ibkr_stream",
@@ -744,8 +750,14 @@ class StreamCollector:
                         }
                     )
                     continue
-                resolved = matches.pop(0)
-                resolved_by_label[label] = (label, kind, resolved)
+                resolved_by_label[label] = (label, kind, fallback)
+                log_event(
+                    {
+                        "task": "ibkr_stream",
+                        "event": "slow_poll_qualification_fallback",
+                        "label": label,
+                    }
+                )
 
         self.slow_qualified_contracts = resolved_by_label
         self.slow_unresolved_contracts = {
@@ -876,6 +888,7 @@ class StreamCollector:
                     confirm_seconds=0.0,
                     lane="slow",
                 ):
+                    self._invalidate_rejected_slow_definitions(self.slow_active_subs)
                     self._cancel_batch(self.slow_active_subs)
                     self.slow_active_subs = {}
                     scheduler.next_chunk_index = step.chunk_index
@@ -919,6 +932,7 @@ class StreamCollector:
                 not row.subscribed or row.error
                 for _, row in self.slow_active_subs.values()
             ):
+                self._invalidate_rejected_slow_definitions(self.slow_active_subs)
                 self._cancel_batch(self.slow_active_subs)
                 self.slow_active_subs = {}
                 scheduler.next_chunk_index = step.chunk_index
@@ -975,6 +989,18 @@ class StreamCollector:
                     "error": str(exc),
                 }
             )
+
+    def _invalidate_rejected_slow_definitions(
+        self,
+        subscriptions: dict[str, tuple[Any, VerifyRow]],
+    ) -> None:
+        """Force fresh qualification after IBKR rejects a slow contract."""
+
+        for label, (_ticker, row) in subscriptions.items():
+            if not (row.error or "").startswith("IBKR 200:"):
+                continue
+            self.slow_qualified_contracts.pop(label, None)
+            self.slow_unresolved_contracts.add(label)
 
     def slow_poll_start_due(self, *, now_monotonic: float | None = None) -> bool:
         """Return whether an idle slow lane is ready to start its next chunk."""

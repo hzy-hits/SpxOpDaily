@@ -4,6 +4,7 @@ import argparse
 import json
 import math
 import sys
+from copy import copy
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -31,11 +32,11 @@ DEFAULT_INDEX_EXCHANGES: dict[str, str] = {
 # but Gateway still accepts streaming subscriptions for the resolved symbol.
 KNOWN_INDEX_CONIDS: dict[str, int] = {
     "SPX": 416904,
-    "VIX": 13455774,
-    "VIX1D": 761320230,
-    "VIX9D": 755117926,
-    "VIX3M": 196544,
-    "VVIX": 105068632,
+    "VIX": 13455763,
+    "VIX1D": 627990891,
+    "VIX9D": 322592334,
+    "VIX3M": 47511905,
+    "VVIX": 105068053,
     "SKEW": 84597750,
     "NDX": 416843,
 }
@@ -210,8 +211,9 @@ def apply_known_index_conid(contract: Any) -> Any | None:
     con_id = KNOWN_INDEX_CONIDS.get(symbol)
     if con_id is None:
         return None
-    contract.conId = con_id
-    return contract
+    fallback = copy(contract)
+    fallback.conId = con_id
+    return fallback
 
 
 def resolve_contract_for_market_data(ib: Any, contract: Any, row: VerifyRow) -> Any | None:
@@ -517,8 +519,20 @@ def estimate_atm_reference(rows: list[VerifyRow]) -> tuple[float | None, str]:
 
 def cancel_subscriptions(ib: Any, subscriptions: dict[str, tuple[Any, VerifyRow]]) -> bool:
     success = True
-    for ticker, _ in subscriptions.values():
+    for ticker, row in subscriptions.values():
+        # An asynchronous IBKR rejection means there is no live ticker to
+        # cancel. Sending cancelMktData anyway produces a misleading code 300.
         if ticker is None:
+            continue
+        if not row.subscribed:
+            # IBKR already rejected the server-side request. Remove only the
+            # local ib_async ticker registration to avoid a bogus code 300.
+            end_ticker = getattr(getattr(ib, "wrapper", None), "endTicker", None)
+            if callable(end_ticker):
+                try:
+                    end_ticker(ticker, "mktData")
+                except Exception:  # noqa: BLE001
+                    success = False
             continue
         try:
             if ib.cancelMktData(ticker.contract) is False:
