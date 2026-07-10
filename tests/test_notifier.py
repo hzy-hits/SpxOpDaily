@@ -20,6 +20,7 @@ from spx_spark.notifier import (
     send_bark_message,
     SinkResult,
 )
+from spx_spark.notifier.state import load_acknowledged_event_ids
 
 
 def make_settings(
@@ -1069,6 +1070,7 @@ def test_notifier_sends_position_holding_alerts_without_codex(tmp_path) -> None:
             "detail": "book loss beyond $-400\nSPX 7483",
             "quality": "live",
             "source_gate": "ibkr_positions",
+            "event_id": "position-event-1",
         }
     ]
     settings = replace(
@@ -1403,6 +1405,7 @@ def test_direct_push_rewrites_event_with_llm_writer(tmp_path, monkeypatch) -> No
             "detail": "qty=1 avg=12.3",
             "quality": "live",
             "source_gate": "ibkr_positions",
+            "event_id": "position-event-1",
         }
     ]
     settings = replace(
@@ -1420,8 +1423,118 @@ def test_direct_push_rewrites_event_with_llm_writer(tmp_path, monkeypatch) -> No
         now=datetime(2026, 7, 7, 0, 0, tzinfo=timezone.utc),
     )
 
-    assert result.sent_count == 1
+    assert result.sent_count == 2
     assert any(s.sink == "bark" and s.ok for s in result.sinks)
+    assert result.acknowledged_event_ids == ("position-event-1",)
+    assert result.to_dict()["acknowledged_event_ids"] == ["position-event-1"]
+    assert load_acknowledged_event_ids(settings.state_path) == ("position-event-1",)
+
+
+def test_position_event_is_not_acknowledged_when_all_human_sinks_fail(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "spx_spark.notifier.sinks.post_feishu",
+        lambda url, payload, timeout: {"code": 19001, "msg": "webhook failed"},
+    )
+    payload = make_payload()
+    payload["alerts"] = [
+        {
+            "severity": "high",
+            "kind": "spxw_position_closed",
+            "instrument_id": "option:SPX:SPXW:20260707:7430:C",
+            "title": "平仓 SPXW 20260707 7430C",
+            "detail": "qty 1 -> 0",
+            "quality": "live",
+            "source_gate": "ibkr_positions",
+            "event_id": "position-event-failed",
+        }
+    ]
+    settings = replace(
+        make_settings(str(tmp_path / "notify-state.json")),
+        deepseek_enabled=False,
+        bark_enabled=False,
+    )
+
+    result = notify_payload(
+        payload,
+        settings=settings,
+        now=datetime(2026, 7, 7, 0, 0, tzinfo=timezone.utc),
+    )
+
+    assert result.sent_count == 0
+    assert result.acknowledged_event_ids == ()
+    assert load_acknowledged_event_ids(settings.state_path) == ()
+
+
+def test_position_event_store_corruption_is_sent_as_direct_ops_alert(tmp_path) -> None:
+    payload = make_payload()
+    payload["alerts"] = [
+        {
+            "severity": "critical",
+            "kind": "spxw_position_event_store_corrupt",
+            "instrument_id": "option_map:SPXW",
+            "title": "SPXW 持仓事件状态损坏",
+            "detail": "state unreadable",
+            "quality": "error",
+            "source_gate": "ibkr_positions",
+        }
+    ]
+    settings = replace(
+        make_settings(str(tmp_path / "notify-state.json")),
+        deepseek_enabled=False,
+        bark_enabled=True,
+        bark_url="https://api.day.app/test-key",
+    )
+
+    result = notify_payload(
+        payload,
+        settings=settings,
+        now=datetime(2026, 7, 7, 0, 0, tzinfo=timezone.utc),
+    )
+
+    assert result.selected_count == 1
+    assert result.sent_count == 1
+
+
+def test_only_selected_delivered_position_event_ids_are_acknowledged(tmp_path) -> None:
+    payload = make_payload()
+    payload["alerts"] = [
+        {
+            "severity": "high",
+            "kind": "spxw_position_opened",
+            "instrument_id": "option:SPX:SPXW:20260707:7430:C",
+            "title": "开仓 7430C",
+            "detail": "qty=1",
+            "quality": "live",
+            "source_gate": "ibkr_positions",
+            "event_id": "selected-event",
+        },
+        {
+            "severity": "medium",
+            "kind": "spxw_position_opened",
+            "instrument_id": "option:SPX:SPXW:20260707:7440:C",
+            "title": "开仓 7440C",
+            "detail": "qty=1",
+            "quality": "live",
+            "source_gate": "ibkr_positions",
+            "event_id": "filtered-event",
+        },
+    ]
+    settings = replace(
+        make_settings(str(tmp_path / "notify-state.json")),
+        deepseek_enabled=False,
+    )
+
+    result = notify_payload(
+        payload,
+        settings=settings,
+        now=datetime(2026, 7, 7, 0, 0, tzinfo=timezone.utc),
+    )
+
+    assert result.selected_count == 1
+    assert result.acknowledged_event_ids == ("selected-event",)
 
 
 def test_direct_push_falls_back_to_template_when_writer_fails(tmp_path, monkeypatch) -> None:

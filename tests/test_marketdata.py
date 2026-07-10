@@ -11,11 +11,13 @@ from spx_spark.marketdata import (
     MarketDataQuality,
     Provider,
     Quote,
+    QuoteFreshness,
     choose_best_quote,
     greeks_from_dict,
     normalize_implied_vol,
     normalize_implied_vol_percent,
     quote_from_dict,
+    quote_use_decision,
 )
 from spx_spark.schwab.adapter import (
     quote_from_schwab_option_contract,
@@ -268,3 +270,195 @@ def test_quote_from_dict_preserves_normalized_implied_vol() -> None:
     assert normalize_implied_vol(3.5) == pytest.approx(3.5)
     assert greeks_from_dict({"implied_vol": 3.5}) is not None
     assert greeks_from_dict({"implied_vol": 3.5}).implied_vol == pytest.approx(3.5)
+
+
+def test_delayed_quote_uses_transport_update_age_for_research_freshness() -> None:
+    now = datetime(2026, 7, 7, 14, 0, tzinfo=timezone.utc)
+    quote = Quote(
+        instrument=InstrumentId.index("SPX"),
+        provider=Provider.IBKR,
+        received_at=now,
+        quality=MarketDataQuality.DELAYED,
+        market_data_type=3,
+        mark=7500.0,
+        quote_time=now - timedelta(minutes=15),
+        last_update_at=now - timedelta(seconds=2),
+    )
+
+    decision = quote_use_decision(quote, as_of=now)
+
+    assert decision.freshness == QuoteFreshness.FRESH
+    assert decision.research_usable is True
+    assert decision.alert_allowed is False
+    assert decision.pricing_allowed is False
+
+
+def test_fresh_live_quote_is_actionable() -> None:
+    now = datetime(2026, 7, 7, 14, 0, tzinfo=timezone.utc)
+    quote = Quote(
+        instrument=InstrumentId.index("SPX"),
+        provider=Provider.IBKR,
+        received_at=now,
+        quality=MarketDataQuality.LIVE,
+        mark=7500.0,
+        last_update_at=now - timedelta(seconds=1),
+    )
+
+    decision = quote_use_decision(quote, as_of=now)
+
+    assert decision.freshness == QuoteFreshness.FRESH
+    assert decision.research_usable is True
+    assert decision.alert_allowed is True
+    assert decision.pricing_allowed is True
+
+
+def test_frozen_quote_requires_explicit_actionability_permission() -> None:
+    now = datetime(2026, 7, 7, 14, 0, tzinfo=timezone.utc)
+    quote = Quote(
+        instrument=InstrumentId.index("SPX"),
+        provider=Provider.IBKR,
+        received_at=now,
+        quality=MarketDataQuality.FROZEN,
+        mark=7500.0,
+        last_update_at=now,
+    )
+
+    blocked = quote_use_decision(quote, as_of=now)
+    allowed = quote_use_decision(quote, as_of=now, allow_frozen=True)
+
+    assert blocked.research_usable is True
+    assert blocked.pricing_allowed is False
+    assert allowed.alert_allowed is True
+    assert allowed.pricing_allowed is True
+
+
+def test_delayed_quote_becomes_stale_when_transport_stops_advancing() -> None:
+    now = datetime(2026, 7, 7, 14, 0, tzinfo=timezone.utc)
+    quote = Quote(
+        instrument=InstrumentId.index("SPX"),
+        provider=Provider.IBKR,
+        received_at=now,
+        quality=MarketDataQuality.DELAYED,
+        market_data_type=3,
+        mark=7500.0,
+        last_update_at=now - timedelta(seconds=61),
+    )
+
+    decision = quote_use_decision(quote, as_of=now)
+
+    assert decision.freshness == QuoteFreshness.STALE
+    assert decision.research_usable is False
+    assert decision.alert_allowed is False
+
+
+def test_transport_freshness_threshold_is_inclusive() -> None:
+    now = datetime(2026, 7, 7, 14, 0, tzinfo=timezone.utc)
+    at_boundary = Quote(
+        instrument=InstrumentId.index("SPX"),
+        provider=Provider.IBKR,
+        received_at=now,
+        quality=MarketDataQuality.LIVE,
+        mark=7500.0,
+        last_update_at=now - timedelta(seconds=15),
+    )
+    over_boundary = Quote(
+        instrument=InstrumentId.index("SPX"),
+        provider=Provider.IBKR,
+        received_at=now,
+        quality=MarketDataQuality.LIVE,
+        mark=7500.0,
+        last_update_at=now - timedelta(seconds=15, microseconds=1),
+    )
+
+    assert quote_use_decision(at_boundary, as_of=now).freshness == QuoteFreshness.FRESH
+    assert quote_use_decision(over_boundary, as_of=now).freshness == QuoteFreshness.STALE
+
+
+def test_legacy_delayed_quote_is_unknown_research_only() -> None:
+    now = datetime(2026, 7, 7, 14, 0, tzinfo=timezone.utc)
+    quote = Quote(
+        instrument=InstrumentId.index("SPX"),
+        provider=Provider.IBKR,
+        received_at=now,
+        quality=MarketDataQuality.DELAYED,
+        market_data_type=3,
+        mark=7500.0,
+        quote_time=now - timedelta(minutes=15),
+    )
+
+    decision = quote_use_decision(quote, as_of=now)
+
+    assert decision.freshness == QuoteFreshness.UNKNOWN
+    assert decision.research_usable is True
+    assert decision.pricing_allowed is False
+
+
+def test_future_transport_timestamp_fails_closed() -> None:
+    now = datetime(2026, 7, 7, 14, 0, tzinfo=timezone.utc)
+    quote = Quote(
+        instrument=InstrumentId.index("SPX"),
+        provider=Provider.IBKR,
+        received_at=now,
+        quality=MarketDataQuality.LIVE,
+        mark=7500.0,
+        last_update_at=now + timedelta(seconds=6),
+    )
+
+    decision = quote_use_decision(quote, as_of=now)
+
+    assert decision.freshness == QuoteFreshness.UNKNOWN
+    assert decision.research_usable is False
+    assert decision.alert_allowed is False
+    assert decision.pricing_allowed is False
+
+
+def test_synthetic_quote_is_fresh_research_only() -> None:
+    now = datetime(2026, 7, 7, 14, 0, tzinfo=timezone.utc)
+    quote = Quote(
+        instrument=InstrumentId.index("SPX"),
+        provider=Provider.INTERNAL,
+        received_at=now,
+        quality=MarketDataQuality.SYNTHETIC,
+        mark=7500.0,
+        quote_time=now - timedelta(seconds=1),
+    )
+
+    decision = quote_use_decision(quote, as_of=now)
+
+    assert decision.freshness == QuoteFreshness.FRESH
+    assert decision.research_usable is True
+    assert decision.alert_allowed is False
+    assert decision.pricing_allowed is False
+
+
+def test_legacy_stale_quality_reports_stale_freshness() -> None:
+    now = datetime(2026, 7, 7, 14, 0, tzinfo=timezone.utc)
+    quote = Quote(
+        instrument=InstrumentId.index("SPX"),
+        provider=Provider.SCHWAB,
+        received_at=now,
+        quality=MarketDataQuality.STALE,
+        mark=7500.0,
+    )
+
+    decision = quote_use_decision(quote, as_of=now)
+
+    assert decision.freshness == QuoteFreshness.STALE
+    assert decision.research_usable is False
+    assert decision.alert_allowed is False
+
+
+def test_quote_last_update_at_round_trips_through_json_payload() -> None:
+    last_update_at = datetime(2026, 7, 7, 14, 0, tzinfo=timezone.utc)
+    quote = Quote(
+        instrument=InstrumentId.index("SPX"),
+        provider=Provider.IBKR,
+        received_at=last_update_at,
+        quality=MarketDataQuality.LIVE,
+        mark=7500.0,
+        last_update_at=last_update_at,
+    )
+
+    restored = quote_from_dict(quote.to_dict())
+
+    assert restored.last_update_at == last_update_at

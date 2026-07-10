@@ -580,6 +580,32 @@ def test_movement_alerts_are_edge_triggered(tmp_path, monkeypatch) -> None:
     assert recross[0].dedup_group == "up:1"
 
 
+def test_delayed_quote_cannot_trigger_movement_alert(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("ALERT_MOVEMENT_STATE_PATH", str(tmp_path / "movement.json"))
+    now = datetime(2026, 7, 7, 3, 15, tzinfo=BJ_TZ)
+    delayed = replace(
+        make_quote(
+            InstrumentId.equity("SPY"),
+            mark=760.0,
+            close=750.0,
+            quality=MarketDataQuality.DELAYED,
+            now=now,
+        ),
+        market_data_type=3,
+        last_update_at=now,
+    )
+    state = make_state(delayed, now=now)
+
+    alerts = movement_alerts(
+        state,
+        window=active_window(now),
+        market_context=build_market_context(state),
+        persist=False,
+    )
+
+    assert not any(alert.kind == "price_move_from_close" for alert in alerts)
+
+
 def test_overnight_dip_escalates_to_high_severity(tmp_path, monkeypatch) -> None:
     import spx_spark.alert_engine as ae
 
@@ -721,6 +747,54 @@ def test_run_persists_system_events_when_notifications_disabled(tmp_path, monkey
     run(["--no-notify"])
 
     assert len(persist_calls) == 1
+
+
+def test_run_reconciles_exact_position_event_acknowledgements(monkeypatch) -> None:
+    from spx_spark.alert_engine import run
+    from spx_spark.notifier import NotificationResult
+
+    now = datetime(2026, 7, 7, 3, 15, tzinfo=BJ_TZ)
+    state = make_state(now=now)
+    reconciled: list[tuple[str, ...]] = []
+
+    class FakeStore:
+        def __init__(self, settings) -> None:
+            pass
+
+        def load(self, *, now=None, refresh_quality=True) -> LatestState:
+            return state
+
+    monkeypatch.setattr("spx_spark.alert_engine.LatestStateStore", FakeStore)
+    monkeypatch.setattr(
+        "spx_spark.alert_engine.evaluate_payload",
+        lambda *args, **kwargs: {
+            "alerts": [],
+            "window": {"name": "test", "priority": "high"},
+            "as_of": now.isoformat(),
+            "alert_count": 0,
+        },
+    )
+    monkeypatch.setattr(
+        "spx_spark.alert_engine.notify_payload",
+        lambda *args, **kwargs: NotificationResult(
+            enabled=True,
+            selected_count=1,
+            sent_count=1,
+            skipped_reason=None,
+            sinks=(),
+            acknowledged_event_ids=("event-1", "event-2"),
+        ),
+    )
+    monkeypatch.setattr(
+        "spx_spark.alert_engine.reconcile_position_event_acknowledgements",
+        lambda event_ids: reconciled.append(event_ids) or True,
+    )
+    monkeypatch.setattr("spx_spark.alert_engine.persist_system_event_state", lambda state: None)
+    monkeypatch.setattr("spx_spark.alert_engine.persist_movement_state_snapshot", lambda state: None)
+
+    run(["--notify", "--json"])
+
+    assert reconciled == [("event-1", "event-2")]
 
 
 def test_effective_move_threshold_bps_em_normalized_when_em_above_static() -> None:

@@ -53,6 +53,7 @@ BLOCKED_HUMAN_MESSAGE_PHRASES = (
 SYSTEM_EVENT_ALERT_KINDS = {
     "ibkr_session_interrupted",
     "ibkr_session_restored",
+    "spxw_position_event_store_corrupt",
 }
 
 POSITION_HOLDING_ALERT_KIND_PREFIX = "spxw_position_"

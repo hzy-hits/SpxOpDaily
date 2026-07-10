@@ -16,11 +16,14 @@ from spx_spark.marketdata import (
     Provider,
     ProviderState,
     Quote,
+    QuoteFreshness,
+    QuoteUseDecision,
     as_utc,
     choose_best_quote,
     parse_timestamp,
     provider_state_from_dict,
     quote_from_dict,
+    quote_use_decision,
 )
 
 
@@ -164,6 +167,7 @@ class LatestStateStore:
                     quote,
                     as_of=as_of,
                     stale_after_seconds=self.settings.latest_stale_after_seconds,
+                    delayed_stale_after_seconds=self.settings.delayed_stale_after_seconds,
                     slow_stale_after_seconds=self.settings.slow_index_stale_after_seconds,
                     slow_labels=self.settings.slow_index_labels,
                 )
@@ -204,6 +208,7 @@ class LatestStateStore:
                     quote,
                     as_of=now,
                     stale_after_seconds=self.settings.latest_stale_after_seconds,
+                    delayed_stale_after_seconds=self.settings.delayed_stale_after_seconds,
                     slow_stale_after_seconds=self.settings.slow_index_stale_after_seconds,
                     slow_labels=self.settings.slow_index_labels,
                 )
@@ -344,14 +349,10 @@ def degrade_stale_quote(
     *,
     as_of: datetime,
     stale_after_seconds: float,
+    delayed_stale_after_seconds: float = 60.0,
     slow_stale_after_seconds: float | None = None,
     slow_labels: frozenset[str] | None = None,
 ) -> Quote:
-    if quote.quality not in {MarketDataQuality.LIVE, MarketDataQuality.FROZEN}:
-        return quote
-    age_ms = quote.quote_age_ms(as_of)
-    if age_ms is None:
-        return quote
     threshold = stale_after_seconds
     if slow_stale_after_seconds is not None and slow_labels:
         threshold = resolve_stale_after_seconds(
@@ -360,9 +361,50 @@ def degrade_stale_quote(
             slow_seconds=slow_stale_after_seconds,
             slow_labels=slow_labels,
         )
-    if age_ms <= threshold * 1000.0:
+    decision = quote_use_decision(
+        quote,
+        as_of=as_of,
+        stale_after_seconds=threshold,
+        delayed_stale_after_seconds=threshold
+        if slow_labels and quote.instrument.canonical_id in slow_labels
+        else delayed_stale_after_seconds,
+    )
+    if decision.freshness != QuoteFreshness.STALE:
+        if decision.freshness == QuoteFreshness.UNKNOWN and quote.quality in {
+            MarketDataQuality.LIVE,
+            MarketDataQuality.FROZEN,
+        }:
+            return replace(quote, quality=MarketDataQuality.UNKNOWN)
         return quote
     return replace(quote, quality=MarketDataQuality.STALE)
+
+
+def configured_quote_use_decision(
+    quote: Quote,
+    *,
+    as_of: datetime,
+    settings: StorageSettings | None = None,
+    allow_frozen: bool = False,
+) -> QuoteUseDecision:
+    settings = settings or StorageSettings.from_env()
+    is_slow = quote.instrument.canonical_id in settings.slow_index_labels
+    stale_after_seconds = (
+        settings.slow_index_stale_after_seconds
+        if is_slow
+        else settings.latest_stale_after_seconds
+    )
+    delayed_stale_after_seconds = (
+        settings.slow_index_stale_after_seconds
+        if is_slow
+        else settings.delayed_stale_after_seconds
+    )
+    return quote_use_decision(
+        quote,
+        as_of=as_of,
+        stale_after_seconds=stale_after_seconds,
+        delayed_stale_after_seconds=delayed_stale_after_seconds,
+        allow_frozen=allow_frozen,
+    )
 
 
 def quote_sort_key(quote: Quote) -> tuple[str, str]:

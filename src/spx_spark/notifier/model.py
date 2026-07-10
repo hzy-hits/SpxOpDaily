@@ -28,6 +28,7 @@ class NotificationResult:
     sent_count: int
     skipped_reason: str | None
     sinks: tuple[SinkResult, ...]
+    acknowledged_event_ids: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -36,6 +37,7 @@ class NotificationResult:
             "sent_count": self.sent_count,
             "skipped_reason": self.skipped_reason,
             "sinks": [sink.to_dict() for sink in self.sinks],
+            "acknowledged_event_ids": list(self.acknowledged_event_ids),
         }
 
 

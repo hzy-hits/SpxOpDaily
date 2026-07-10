@@ -282,18 +282,28 @@ class IbkrPositionSettings:
     client_id: int
     poll_interval_seconds: int
     snapshot_path: str | None
+    state_path: str
+    max_snapshot_age_seconds: float
 
     @classmethod
     def from_env(cls) -> "IbkrPositionSettings":
         load_dotenv()
         data_root = env_str("MARKET_DATA_DATA_ROOT", env_str("MAINTENANCE_DATA_ROOT", "data"))
         default_snapshot = f"{data_root.rstrip('/')}/latest/ibkr_positions.json"
+        default_state = f"{data_root.rstrip('/')}/latest/ibkr_position_state.json"
         snapshot_path = env_str("IBKR_POSITIONS_SNAPSHOT_PATH", default_snapshot) or default_snapshot
+        state_path = env_str("IBKR_POSITIONS_STATE_PATH", default_state) or default_state
+        poll_interval_seconds = env_int("IBKR_POSITIONS_POLL_SECONDS", 60)
         return cls(
             enabled=env_bool("IBKR_POSITIONS_ENABLED", False),
             client_id=env_int("IBKR_POSITIONS_CLIENT_ID", 174),
-            poll_interval_seconds=env_int("IBKR_POSITIONS_POLL_SECONDS", 60),
+            poll_interval_seconds=poll_interval_seconds,
             snapshot_path=snapshot_path,
+            state_path=state_path,
+            max_snapshot_age_seconds=env_float(
+                "IBKR_POSITIONS_MAX_SNAPSHOT_AGE_SECONDS",
+                float(max(3 * poll_interval_seconds, 180)),
+            ),
         )
 
 
@@ -523,6 +533,7 @@ class StorageSettings:
     latest_stale_after_seconds: float
     slow_index_stale_after_seconds: float
     slow_index_labels: frozenset[str]
+    delayed_stale_after_seconds: float = 60.0
 
     @classmethod
     def from_env(cls) -> "StorageSettings":
@@ -544,6 +555,9 @@ class StorageSettings:
             # Preserve case: these must match canonical ids like "index:SKEW".
             slow_index_labels=frozenset(
                 env_csv_preserve("MARKET_DATA_SLOW_INDEX_LABELS", "index:SKEW,index:VVIX")
+            ),
+            delayed_stale_after_seconds=env_float(
+                "MARKET_DATA_DELAYED_STALE_AFTER_SECONDS", 60.0
             ),
         )
 

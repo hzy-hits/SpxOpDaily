@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import math
-import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -53,6 +52,7 @@ from spx_spark.order_map import (
     within_refresh_window,
     within_send_window,
     within_status_window,
+    _quote_mid,
     _wall_rung_option_ref,
 )
 from spx_spark.options_map import pair_by_strike
@@ -604,7 +604,7 @@ def test_render_template_includes_wall_ladder_lines() -> None:
     assert "★7550 (OI 6555,触达51%) → 7550P 到位预估12.40(现28.00) 限价12.40/10.50" in text
 
 
-def test_wall_rung_option_ref_degrades_recent_stale_quote() -> None:
+def test_actionable_pricing_rejects_stale_and_frozen_quotes() -> None:
     now = datetime(2026, 7, 9, 15, 0, tzinfo=timezone.utc)
     live = make_option(
         expiry="20260709",
@@ -616,7 +616,7 @@ def test_wall_rung_option_ref_degrades_recent_stale_quote() -> None:
         now=now,
         quality=MarketDataQuality.LIVE,
     )
-    # Cold-lane STALE but only 60s old — structure gate should still accept.
+    # Cold-lane STALE may remain research-visible but cannot produce limits.
     stale = make_option(
         expiry="20260709",
         strike=7480.0,
@@ -666,10 +666,23 @@ def test_wall_rung_option_ref_degrades_recent_stale_quote() -> None:
     )
     assert live_ref["projected_mid"] is not None
     assert live_ref["degraded"] is False
-    assert stale_ref["projected_mid"] is not None
-    assert stale_ref["degraded"] is True
-    assert stale_ref["quote_quality"] == "stale"
-    assert str(stale_ref["projection_model"]).endswith("_stale")
+    assert stale_ref["projected_mid"] is None
+    assert stale_ref["limit_aggressive"] is None
+
+    frozen = Quote(
+        instrument=live.instrument,
+        provider=live.provider,
+        provider_symbol=live.provider_symbol,
+        received_at=now,
+        quality=MarketDataQuality.FROZEN,
+        bid=live.bid,
+        ask=live.ask,
+        mark=live.mark,
+        quote_time=now,
+        last_update_at=now,
+        greeks=live.greeks,
+    )
+    assert _quote_mid(frozen, as_of=now) is None
 
     # Too old (>15 min structure window) still rejected.
     ancient = Quote(

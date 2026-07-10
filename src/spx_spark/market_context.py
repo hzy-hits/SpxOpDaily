@@ -6,7 +6,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from spx_spark.marketdata import MarketDataQuality, Quote
-from spx_spark.storage import LatestState
+from spx_spark.storage import LatestState, configured_quote_use_decision
 
 
 DEFAULT_MARKET_CONTEXT_INSTRUMENTS = (
@@ -71,6 +71,11 @@ class MarketContextEntry:
     ask: float | None
     spread_bps: float | None
     age_ms: float | None
+    freshness: str
+    research_usable: bool
+    alert_allowed: bool
+    pricing_allowed: bool
+    use_reason: str
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -87,12 +92,7 @@ def build_market_context(
     usable_count = sum(
         1
         for entry in entries
-        if entry.price is not None
-        and entry.quality
-        not in {
-            MarketDataQuality.MISSING.value,
-            MarketDataQuality.ERROR.value,
-        }
+        if entry.price is not None and entry.research_usable
     )
     return {
         "as_of": state.as_of.isoformat(),
@@ -133,6 +133,11 @@ def context_entry(state: LatestState, instrument_id: str) -> MarketContextEntry:
             ask=None,
             spread_bps=None,
             age_ms=None,
+            freshness="unknown",
+            research_usable=False,
+            alert_allowed=False,
+            pricing_allowed=False,
+            use_reason="quote_missing",
         )
     return entry_from_quote(quote, state=state)
 
@@ -143,6 +148,7 @@ def entry_from_quote(quote: Quote, *, state: LatestState) -> MarketContextEntry:
     move_bps = None
     if price is not None and close is not None and close > 0:
         move_bps = (price / close - 1.0) * 10_000.0
+    decision = configured_quote_use_decision(quote, as_of=state.as_of)
     return MarketContextEntry(
         instrument_id=quote.instrument.canonical_id,
         provider=quote.provider.value,
@@ -154,6 +160,11 @@ def entry_from_quote(quote: Quote, *, state: LatestState) -> MarketContextEntry:
         ask=quote.ask,
         spread_bps=quote.spread_bps,
         age_ms=quote.quote_age_ms(state.as_of),
+        freshness=decision.freshness.value,
+        research_usable=decision.research_usable,
+        alert_allowed=decision.alert_allowed,
+        pricing_allowed=decision.pricing_allowed,
+        use_reason=decision.reason,
     )
 
 
@@ -165,6 +176,8 @@ def ratio(
     numerator = entries.get(numerator_id)
     denominator = entries.get(denominator_id)
     if numerator is None or denominator is None:
+        return None
+    if not numerator.research_usable or not denominator.research_usable:
         return None
     if numerator.price is None or denominator.price is None or denominator.price <= 0:
         return None
@@ -205,7 +218,11 @@ def load_latest_polymarket_context() -> dict[str, object]:
 
 
 def usable_entry(entry: MarketContextEntry | None) -> bool:
-    return bool(entry and entry.price is not None and entry.quality not in BAD_CONTEXT_QUALITIES)
+    return bool(entry and entry.price is not None and entry.research_usable)
+
+
+def actionable_entry(entry: MarketContextEntry | None) -> bool:
+    return bool(entry and entry.price is not None and entry.alert_allowed)
 
 
 def first_usable_entry(
@@ -215,6 +232,17 @@ def first_usable_entry(
     for instrument_id in instrument_ids:
         entry = entries.get(instrument_id)
         if usable_entry(entry):
+            return entry
+    return None
+
+
+def first_actionable_entry(
+    entries: dict[str, MarketContextEntry],
+    instrument_ids: tuple[str, ...],
+) -> MarketContextEntry | None:
+    for instrument_id in instrument_ids:
+        entry = entries.get(instrument_id)
+        if actionable_entry(entry):
             return entry
     return None
 
@@ -236,7 +264,7 @@ def hyperliquid_spx_proxy_gate(entries: dict[str, MarketContextEntry]) -> dict[s
             "block_bps": default_block_bps,
         }
 
-    anchor = first_usable_entry(entries, TRADFI_ANCHOR_IDS)
+    anchor = first_actionable_entry(entries, TRADFI_ANCHOR_IDS)
     if anchor is None:
         return {
             "state": "unanchored_context_only",

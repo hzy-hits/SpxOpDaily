@@ -87,6 +87,7 @@ class VerifyRow:
     vega: float | None = None
     und_price: float | None = None
     ticker_time: str | None = None
+    last_update_at: str | None = None
     stale: bool | None = None
     error: str | None = None
 
@@ -379,8 +380,13 @@ def snapshot_rows(
     *,
     slow_index_stale_after_seconds: float | None = None,
     slow_index_labels: frozenset[str] | None = None,
+    now: datetime | None = None,
 ) -> list[VerifyRow]:
-    now = datetime.now(tz=timezone.utc)
+    now = now or datetime.now(tz=timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    else:
+        now = now.astimezone(timezone.utc)
     rows: list[VerifyRow] = []
     slow_labels = slow_index_labels or frozenset()
     for label, (ticker, row) in subscriptions.items():
@@ -393,6 +399,8 @@ def snapshot_rows(
         if ticker is None:
             rows.append(row)
             continue
+
+        previous_fingerprint = normalized_row_fingerprint(row)
 
         row.market_data_type = getattr(ticker, "marketDataType", None)
         row.bid = clean_float(getattr(ticker, "bid", None))
@@ -427,8 +435,36 @@ def snapshot_rows(
             row.vega = clean_float(getattr(greeks, "vega", None))
             row.und_price = clean_float(getattr(greeks, "undPrice", None))
 
+        current_fingerprint = normalized_row_fingerprint(row)
+        if (
+            row.last_update_at is None or current_fingerprint != previous_fingerprint
+        ) and any(value is not None for value in current_fingerprint):
+            row.last_update_at = now.isoformat()
+
         rows.append(row)
     return rows
+
+
+def normalized_row_fingerprint(row: VerifyRow) -> tuple[object, ...]:
+    """Fields whose advancement proves that the persistent ticker changed."""
+
+    return (
+        row.ticker_time,
+        row.bid,
+        row.ask,
+        row.last,
+        row.market_price,
+        row.close,
+        row.bid_size,
+        row.ask_size,
+        row.last_size,
+        row.volume,
+        row.open_interest,
+        row.model_iv,
+        row.delta,
+        row.gamma,
+        row.und_price,
+    )
 
 
 def first_present(*values: float | None) -> float | None:

@@ -31,6 +31,17 @@ from spx_spark.notifier.sinks import (
 from spx_spark.notifier.state import mark_alerts_sent, select_alerts_for_notification
 
 
+def _record_delivered_event_ids(
+    alerts: list[dict[str, object]],
+    acknowledged_event_ids: set[str],
+) -> None:
+    acknowledged_event_ids.update(
+        str(alert["event_id"])
+        for alert in alerts
+        if alert.get("event_id")
+    )
+
+
 def _failopen_critical_alerts(
     payload: dict[str, object],
     review_candidates: list[dict[str, object]],
@@ -39,6 +50,7 @@ def _failopen_critical_alerts(
     runner: CommandRunner,
     now_utc: datetime,
     alerts_marked_sent: list[dict[str, object]],
+    acknowledged_event_ids: set[str],
     sinks: list[SinkResult],
 ) -> None:
     critical_alerts = [
@@ -69,6 +81,7 @@ def _failopen_critical_alerts(
         )
     if any_delivery_ok(delivery_sinks):
         alerts_marked_sent.extend(critical_alerts)
+        _record_delivered_event_ids(critical_alerts, acknowledged_event_ids)
 
 
 def _mark_noncritical_reviewed_after_model_limit(
@@ -104,6 +117,7 @@ def _deliver_review_message(
     runner: CommandRunner,
     now_utc: datetime,
     alerts_marked_sent: list[dict[str, object]],
+    acknowledged_event_ids: set[str],
     sinks: list[SinkResult],
     reviewer_name: str,
     delivery_kind: str,
@@ -136,6 +150,7 @@ def _deliver_review_message(
                 )
             if any_delivery_ok(delivery_sinks):
                 alerts_marked_sent.extend(review_candidates)
+                _record_delivered_event_ids(review_candidates, acknowledged_event_ids)
                 record_push("intraday_alert", message, at=now_utc.isoformat())
         else:
             alerts_marked_sent.extend(review_candidates)
@@ -167,6 +182,7 @@ def _handle_reviewer_failure(
     runner: CommandRunner,
     now_utc: datetime,
     alerts_marked_sent: list[dict[str, object]],
+    acknowledged_event_ids: set[str],
     sinks: list[SinkResult],
 ) -> None:
     if deepseek_usage_limited(result.error):
@@ -183,6 +199,7 @@ def _handle_reviewer_failure(
         runner=runner,
         now_utc=now_utc,
         alerts_marked_sent=alerts_marked_sent,
+        acknowledged_event_ids=acknowledged_event_ids,
         sinks=sinks,
     )
 
@@ -232,6 +249,7 @@ def notify_payload(
     bypass_alerts = direct_push_alerts(selected, payload)
     review_candidates = [alert for alert in selected if alert not in bypass_alerts]
     alerts_marked_sent: list[dict[str, object]] = []
+    acknowledged_event_ids: set[str] = set()
     if settings.openclaw_enabled and not (
         settings.feishu_enabled or settings.bark_enabled or settings.deepseek_enabled
     ):
@@ -255,6 +273,7 @@ def notify_payload(
             )
         if any_delivery_ok(delivery_sinks):
             alerts_marked_sent = list(selected)
+            _record_delivered_event_ids(selected, acknowledged_event_ids)
     elif bypass_alerts:
         bypass_message = format_alert_message(payload, bypass_alerts)
         if settings.direct_push_llm_enabled:
@@ -286,6 +305,7 @@ def notify_payload(
             )
         if any_delivery_ok(delivery_sinks):
             alerts_marked_sent = list(bypass_alerts)
+            _record_delivered_event_ids(bypass_alerts, acknowledged_event_ids)
             record_push("direct_event", bypass_message, at=now_utc.isoformat())
 
     if review_candidates:
@@ -320,6 +340,7 @@ def notify_payload(
                 runner=runner,
                 now_utc=now_utc,
                 alerts_marked_sent=alerts_marked_sent,
+                acknowledged_event_ids=acknowledged_event_ids,
                 sinks=sinks,
                 reviewer_name="deepseek",
                 delivery_kind="deepseek",
@@ -336,6 +357,7 @@ def notify_payload(
                 runner=runner,
                 now_utc=now_utc,
                 alerts_marked_sent=alerts_marked_sent,
+                acknowledged_event_ids=acknowledged_event_ids,
                 sinks=sinks,
             )
             if usage_limited:
@@ -355,6 +377,7 @@ def notify_payload(
                 runner=runner,
                 now_utc=now_utc,
                 alerts_marked_sent=alerts_marked_sent,
+                acknowledged_event_ids=acknowledged_event_ids,
                 sinks=sinks,
                 reviewer_name="openclaw_agent",
                 delivery_kind="agent",
@@ -369,6 +392,7 @@ def notify_payload(
                 runner=runner,
                 now_utc=now_utc,
                 alerts_marked_sent=alerts_marked_sent,
+                acknowledged_event_ids=acknowledged_event_ids,
                 sinks=sinks,
             )
     elif settings.codex_enabled and review_candidates:
@@ -386,6 +410,7 @@ def notify_payload(
                 runner=runner,
                 now_utc=now_utc,
                 alerts_marked_sent=alerts_marked_sent,
+                acknowledged_event_ids=acknowledged_event_ids,
                 sinks=sinks,
                 reviewer_name="codex",
                 delivery_kind="codex",
@@ -400,6 +425,7 @@ def notify_payload(
                 runner=runner,
                 now_utc=now_utc,
                 alerts_marked_sent=alerts_marked_sent,
+                acknowledged_event_ids=acknowledged_event_ids,
                 sinks=sinks,
                 reviewer_name="codex",
                 delivery_kind="codex",
@@ -415,14 +441,21 @@ def notify_payload(
                 runner=runner,
                 now_utc=now_utc,
                 alerts_marked_sent=alerts_marked_sent,
+                acknowledged_event_ids=acknowledged_event_ids,
                 sinks=sinks,
             )
 
     sent_count = sum(
         1 for sink in sinks if sink.sink in ("bark", "feishu") and sink.ok
     )
-    if alerts_marked_sent:
-        mark_alerts_sent(alerts_marked_sent, sent_at_by_key, settings, now=now)
+    if alerts_marked_sent or acknowledged_event_ids:
+        mark_alerts_sent(
+            alerts_marked_sent,
+            sent_at_by_key,
+            settings,
+            now=now,
+            acknowledged_event_ids=tuple(sorted(acknowledged_event_ids)),
+        )
     skipped_reason = None if sinks else "no_enabled_sinks"
     return NotificationResult(
         enabled=True,
@@ -430,4 +463,5 @@ def notify_payload(
         sent_count=sent_count,
         skipped_reason=skipped_reason,
         sinks=tuple(sinks),
+        acknowledged_event_ids=tuple(sorted(acknowledged_event_ids)),
     )

@@ -23,6 +23,7 @@ class Alert:
     research_only: bool = False
     source_gate: str | None = None
     dedup_group: str | None = None
+    event_id: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)

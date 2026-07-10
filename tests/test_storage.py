@@ -282,7 +282,7 @@ def test_latest_state_merges_provider_states_across_provider_updates(tmp_path):
     assert states_by_provider[Provider.HYPERLIQUID].status == ProviderStatus.AVAILABLE
 
 
-def test_degrade_stale_quote_uses_received_at_when_source_timestamps_missing() -> None:
+def test_degrade_stale_quote_does_not_treat_flush_time_as_source_update() -> None:
     now = datetime(2026, 7, 7, 15, 0, tzinfo=timezone.utc)
     received_at = now - timedelta(hours=2)
     quote = Quote(
@@ -298,7 +298,7 @@ def test_degrade_stale_quote_uses_received_at_when_source_timestamps_missing() -
 
     degraded = degrade_stale_quote(quote, as_of=now, stale_after_seconds=15.0)
 
-    assert degraded.quality == MarketDataQuality.STALE
+    assert degraded.quality == MarketDataQuality.UNKNOWN
 
 
 def make_option_quote(*, expiry: str, received_at: datetime) -> Quote:

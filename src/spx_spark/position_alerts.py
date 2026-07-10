@@ -5,14 +5,25 @@ from datetime import datetime, timezone
 
 from spx_spark.alert_model import Alert, severity_for_priority
 from spx_spark.alert_profile import AlertWindow
-from spx_spark.config import IbkrPositionSettings, env_bool, env_float
+from spx_spark.config import IbkrPositionSettings, NotificationSettings, env_bool, env_float
 from spx_spark.ibkr.position_watcher import (
     PositionSnapshot,
     SpxwPosition,
     load_snapshot,
     position_state_path,
+    snapshot_book_metrics,
 )
 from spx_spark.options_map import OptionsMap
+from spx_spark.notifier.state import load_acknowledged_event_ids
+from spx_spark.position_events import (
+    BOOK_PNL_EVENT_KIND,
+    ObservedPosition,
+    PendingPositionEvent,
+    PositionEventStore,
+    PositionEventStoreCorrupt,
+    PositionObservation,
+)
+from spx_spark.state_io import atomic_write_json_secure
 from spx_spark.storage import LatestState
 
 
@@ -25,16 +36,136 @@ def position_holdings_alerts(
     position_settings = IbkrPositionSettings.from_env()
     if not position_settings.enabled or not position_settings.snapshot_path:
         return []
+    if not env_bool("ALERT_POSITIONS_ENABLED", True):
+        return []
     snapshot = load_snapshot(position_settings.snapshot_path)
-    previous = load_position_alert_state()
-    return evaluate_position_alerts(
+    notification_settings = NotificationSettings.from_env()
+    acknowledged_event_ids = load_acknowledged_event_ids(notification_settings.state_path)
+    store = PositionEventStore(position_settings.state_path)
+    try:
+        batch = store.prepare(
+            snapshot_to_observation(snapshot),
+            acknowledged_event_ids=acknowledged_event_ids,
+            as_of=state.as_of,
+            max_snapshot_age_seconds=position_settings.max_snapshot_age_seconds,
+            pnl_change_usd=env_float("ALERT_POSITION_PNL_CHANGE_USD", 200.0),
+            pnl_loss_usd=env_float("ALERT_POSITION_PNL_LOSS_USD", 400.0),
+            pnl_critical_loss_usd=env_float(
+                "ALERT_POSITION_PNL_CRITICAL_LOSS_USD", 1000.0
+            ),
+            pnl_bucket_usd=env_float("ALERT_POSITION_PNL_DEDUP_BUCKET_USD", 100.0),
+            structural_enabled=env_bool("ALERT_POSITION_STRUCTURAL_ENABLED", True),
+            pnl_enabled=env_bool("ALERT_POSITION_PNL_ENABLED", True),
+        )
+    except PositionEventStoreCorrupt as exc:
+        return [
+            Alert(
+                severity="critical",
+                kind="spxw_position_event_store_corrupt",
+                instrument_id="option_map:SPXW",
+                title="SPXW 持仓事件状态损坏",
+                detail=str(exc),
+                provider="internal",
+                quality="error",
+                research_only=False,
+                source_gate="ibkr_positions",
+                dedup_group="position_event_store_corrupt",
+            )
+        ]
+    return [render_position_event(event, window=window) for event in batch.pending_events]
+
+
+def snapshot_to_observation(snapshot: PositionSnapshot | None) -> PositionObservation | None:
+    if snapshot is None:
+        return None
+    book_detail = format_book_detail(
         snapshot,
-        previous=previous,
-        state=state,
-        options_map=options_map,
-        window=window,
-        persist_state=True,
+        book_pnl_pct=snapshot.book_unrealized_pnl_pct,
     )
+    return PositionObservation(
+        snapshot_id=snapshot.snapshot_id,
+        observed_at=snapshot.fetched_at,
+        fetch_complete=snapshot.fetch_complete,
+        positions=tuple(
+            ObservedPosition(
+                key=position.position_key,
+                instrument_id=position.canonical_id,
+                label=position.label,
+                qty=position.qty,
+            )
+            for position in snapshot.positions
+            if position.qty != 0
+        ),
+        book_pnl=snapshot.book_unrealized_pnl,
+        book_pnl_pct=snapshot.book_unrealized_pnl_pct,
+        book_pnl_complete=snapshot.book_pnl_complete,
+        book_detail=book_detail,
+    )
+
+
+def render_position_event(
+    event: PendingPositionEvent,
+    *,
+    window: AlertWindow,
+) -> Alert:
+    if event.kind == BOOK_PNL_EVENT_KIND:
+        book_pnl = event.book_pnl or 0.0
+        pct_text = (
+            f" ({event.book_pnl_pct:+.1f}%)" if event.book_pnl_pct is not None else ""
+        )
+        return Alert(
+            severity=event.severity or "high",
+            kind=event.kind,
+            instrument_id=event.instrument_id,
+            title=f"SPXW 浮盈浮亏 {format_usd(book_pnl)}{pct_text}",
+            detail=event.book_detail or "SPXW book detail unavailable",
+            provider="ibkr",
+            quality="live",
+            value=book_pnl,
+            threshold=event.threshold,
+            research_only=False,
+            source_gate="ibkr_positions",
+            dedup_group=event.pnl_bucket,
+            event_id=event.event_id,
+        )
+
+    severity = severity_for_priority(window.priority)
+    old_qty = event.old_qty or 0.0
+    new_qty = event.new_qty or 0.0
+    if event.kind == "spxw_position_opened":
+        title = f"新开 {event.label}"
+        detail = f"SPXW 新开仓 {event.label}，数量 {new_qty:g}。"
+    elif event.kind == "spxw_position_closed":
+        title = f"平仓 {event.label}"
+        detail = f"SPXW 已平仓 {event.label}（原数量 {old_qty:g}）。"
+    else:
+        title = f"调仓 {event.label}"
+        detail = f"SPXW {event.label} 数量 {old_qty:g} → {new_qty:g}。"
+    return Alert(
+        severity=severity,
+        kind=event.kind,
+        instrument_id=event.instrument_id,
+        title=title,
+        detail=detail,
+        provider="ibkr",
+        quality="live",
+        value=new_qty,
+        research_only=False,
+        source_gate="ibkr_positions",
+        dedup_group=event.event_id,
+        event_id=event.event_id,
+    )
+
+
+def reconcile_position_event_acknowledgements(event_ids: tuple[str, ...]) -> bool:
+    if not event_ids:
+        return True
+    position_settings = IbkrPositionSettings.from_env()
+    try:
+        PositionEventStore(position_settings.state_path).acknowledge(event_ids)
+    except PositionEventStoreCorrupt:
+        return False
+    return True
 
 
 @dataclass(frozen=True)
@@ -84,11 +215,9 @@ def save_position_alert_state(
     path: str | None = None,
     leg_pnl: dict[str, float] | None = None,
 ) -> None:
-    import json
     from pathlib import Path
 
     state_path = Path(path or position_state_path())
-    state_path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "fetched_at": snapshot.fetched_at,
         "previous_qty": {item.position_key: item.qty for item in snapshot.positions},
@@ -102,19 +231,13 @@ def save_position_alert_state(
     }
     if leg_pnl is not None:
         payload["previous_leg_pnl"] = leg_pnl
-    temp_path = state_path.with_suffix(f"{state_path.suffix}.tmp")
-    temp_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-    temp_path.replace(state_path)
+    atomic_write_json_secure(state_path, payload)
 
 
 def book_pnl_metrics(snapshot: PositionSnapshot) -> tuple[float | None, float | None, float | None]:
-    pnls = [item.unrealized_pnl for item in snapshot.positions if item.unrealized_pnl is not None]
-    if not pnls:
+    if not snapshot.book_pnl_complete:
         return None, None, None
-    book_pnl = sum(pnls)
-    book_cost = sum(abs(item.avg_cost) for item in snapshot.positions if item.unrealized_pnl is not None)
-    book_pnl_pct = (book_pnl / book_cost * 100.0) if book_cost else None
-    return book_pnl, book_cost, book_pnl_pct
+    return snapshot_book_metrics(snapshot.positions)
 
 
 def format_usd(value: float) -> str:
@@ -173,6 +296,8 @@ def evaluate_position_alerts(
 ) -> list[Alert]:
     # None = fetch failed / snapshot missing — do not invent closes or wipe state.
     if snapshot is None:
+        return []
+    if not snapshot.fetch_complete:
         return []
     if not env_bool("ALERT_POSITIONS_ENABLED", True):
         return []

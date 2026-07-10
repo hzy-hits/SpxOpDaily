@@ -28,8 +28,15 @@ from spx_spark.market_context import build_market_context
 from spx_spark.marketdata import MarketDataQuality, Provider, ProviderState, ProviderStatus, Quote
 from spx_spark.notifier import notify_payload
 from spx_spark.options_map import OptionsMap, build_options_map
-from spx_spark.position_alerts import position_holdings_alerts
-from spx_spark.storage import LatestState, LatestStateStore
+from spx_spark.position_alerts import (
+    position_holdings_alerts,
+    reconcile_position_event_acknowledgements,
+)
+from spx_spark.storage import (
+    LatestState,
+    LatestStateStore,
+    configured_quote_use_decision,
+)
 
 
 BASELINE_INSTRUMENTS = (
@@ -97,6 +104,8 @@ BAD_QUALITIES = {
     MarketDataQuality.ERROR,
     MarketDataQuality.STALE,
     MarketDataQuality.UNKNOWN,
+    MarketDataQuality.DELAYED,
+    MarketDataQuality.DELAYED_FROZEN,
 }
 
 OPTION_GAMMA_ALERT_STATES = {
@@ -266,7 +275,9 @@ def build_movement_state_payload(
         if instrument_id.startswith("crypto_perp:") and not hyperliquid_proxy_usable(market_context):
             continue
         quote = find_best(state, instrument_id)
-        if quote is None or quote.quality in BAD_QUALITIES:
+        if quote is None or not configured_quote_use_decision(
+            quote, as_of=state.as_of
+        ).alert_allowed:
             continue
         move_bps = move_from_close_bps(quote)
         if move_bps is None:
@@ -320,7 +331,9 @@ def movement_alerts(
         if instrument_id.startswith("crypto_perp:") and not hyperliquid_proxy_usable(market_context):
             continue
         quote = find_best(state, instrument_id)
-        if quote is None or quote.quality in BAD_QUALITIES:
+        if quote is None or not configured_quote_use_decision(
+            quote, as_of=state.as_of
+        ).alert_allowed:
             continue
         move_bps = move_from_close_bps(quote)
         if move_bps is None:
@@ -854,7 +867,9 @@ def proxy_fallback_watch_alerts(
     broker_down = ibkr_feed_unavailable_for_fallback(state)
 
     quote = find_best(state, "crypto_perp:xyz:SP500")
-    if quote is None or quote.quality in BAD_QUALITIES:
+    if quote is None or not configured_quote_use_decision(
+        quote, as_of=state.as_of
+    ).alert_allowed:
         return []
     move_bps = move_from_close_bps(quote)
     if options_map is None:
@@ -1285,6 +1300,9 @@ def run(argv: list[str] | None = None) -> int:
     notification_result = None
     if notification_settings.enabled:
         notification_result = notify_payload(payload, settings=notification_settings)
+        reconcile_position_event_acknowledgements(
+            notification_result.acknowledged_event_ids
+        )
         payload["notification"] = notification_result.to_dict()
     notified = notification_result is not None and notification_result.sent_count > 0
     settled = not notification_settings.enabled or notified

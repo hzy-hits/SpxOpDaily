@@ -37,10 +37,13 @@ from spx_spark.options_map import (
     option_mid,
     pair_by_strike,
     probability_for_level,
-    structure_quality_ok,
 )
 from spx_spark.sampling import round_to_step
-from spx_spark.storage import LatestState, LatestStateStore
+from spx_spark.storage import (
+    LatestState,
+    LatestStateStore,
+    configured_quote_use_decision,
+)
 
 SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 BJ_WINDOW_START = time(13, 30)
@@ -313,15 +316,19 @@ def _quote_greeks_ok(quote: Quote) -> bool:
     return delta is not None and gamma is not None
 
 
-def _quote_mid(quote: Quote) -> float | None:
-    if quote.quality in BAD_QUALITIES:
+def _quote_mid(quote: Quote, *, as_of: datetime) -> float | None:
+    if not configured_quote_use_decision(quote, as_of=as_of).pricing_allowed:
         return None
     return option_mid(quote) or quote.effective_price
 
 
 def _quote_mid_structural(quote: Quote, *, as_of: datetime | None = None) -> float | None:
-    """Mid for structure/ladder refs: allow recent STALE quotes (cold-lane rotation)."""
-    if not structure_quality_ok(quote, as_of=as_of):
+    """Actionable mid for ladder repricing; research-only quotes stay unpriced."""
+    decision = configured_quote_use_decision(
+        quote,
+        as_of=as_of or datetime.now(tz=timezone.utc),
+    )
+    if not decision.pricing_allowed:
         return None
     return option_mid(quote) or quote.effective_price
 
@@ -370,6 +377,7 @@ def _build_candidate(
     strike_step: float,
     pairs: dict[float, dict[OptionRight, Quote]],
     warnings: list[str],
+    as_of: datetime,
     tau_now_years: float | None = None,
     em_points: float | None = None,
 ) -> OrderCandidate | None:
@@ -382,14 +390,15 @@ def _build_candidate(
     if quote is None:
         warnings.append(f"no_quote_for_{target_strike}{right}")
         return None
-    if quote.quality in BAD_QUALITIES:
+    decision = configured_quote_use_decision(quote, as_of=as_of)
+    if not decision.pricing_allowed:
         warnings.append(f"bad_quality_for_{target_strike}{right}")
         return None
     if not _quote_greeks_ok(quote):
         warnings.append(f"missing_greeks_for_{target_strike}{right}")
         return None
 
-    mid = _quote_mid(quote)
+    mid = _quote_mid(quote, as_of=as_of)
     if mid is None:
         warnings.append(f"no_mid_for_{target_strike}{right}")
         return None
@@ -565,12 +574,17 @@ def build_candidates(
     strike_step = median_strike_step(strikes)
     strike_step_int = max(1, int(round(strike_step)))
 
-    spot, _spot_source = resolve_spx_spot(state, options_map, warnings=local_warnings, now=now)
+    now_utc = now or state.as_of
+    spot, _spot_source = resolve_spx_spot(
+        state,
+        options_map,
+        warnings=local_warnings,
+        now=now_utc,
+    )
     if spot is None:
         local_warnings.append("missing underlier price")
         return []
 
-    now_utc = now or datetime.now(tz=timezone.utc)
     tau_now_years: float | None = None
     close_utc = expiry_close_utc(front.expiry)
     if close_utc is not None:
@@ -607,6 +621,7 @@ def build_candidates(
             strike_step=strike_step,
             pairs=pairs,
             warnings=local_warnings,
+            as_of=now_utc,
             tau_now_years=tau_now_years,
             em_points=em_points,
         )
@@ -642,6 +657,7 @@ def build_candidates(
             strike_step=strike_step,
             pairs=pairs,
             warnings=local_warnings,
+            as_of=now_utc,
             tau_now_years=tau_now_years,
             em_points=em_points,
         )
@@ -669,6 +685,7 @@ def build_candidates(
             strike_step=strike_step,
             pairs=pairs,
             warnings=local_warnings,
+            as_of=now_utc,
             tau_now_years=tau_now_years,
             em_points=em_points,
         )
@@ -695,9 +712,8 @@ def _wall_rung_option_ref(
     Put walls → Call (bounce); call walls → Put (fade). Same projection model
     as the three primary plays so ladder rungs and hang-order limits agree.
 
-    Cold-lane STALE quotes still pass when recent enough (structure_quality_ok):
-    the ladder would otherwise blink blank every rotation cycle. Hard-bad
-    qualities (missing/error/unknown) stay empty.
+    Only quotes allowed by the central pricing policy can produce projected
+    premiums or executable limits. Research-only rows stay empty here.
     """
     strike_step_int = max(1, int(round(strike_step)))
     target_strike = round_to_step(wall_strike, strike_step_int)
@@ -718,7 +734,14 @@ def _wall_rung_option_ref(
         "quote_quality": None,
         "degraded": False,
     }
-    if quote is None or not structure_quality_ok(quote, as_of=as_of) or not _quote_greeks_ok(quote):
+    if (
+        quote is None
+        or not configured_quote_use_decision(
+            quote,
+            as_of=as_of or datetime.now(tz=timezone.utc),
+        ).pricing_allowed
+        or not _quote_greeks_ok(quote)
+    ):
         return empty
     mid = _quote_mid_structural(quote, as_of=as_of)
     delta = finite_float(quote.greeks.delta) if quote.greeks is not None else None  # type: ignore[union-attr]

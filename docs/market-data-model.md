@@ -45,7 +45,7 @@ Important fields:
 - `provider`
 - `bid`, `ask`, `last`, `mark`, `close`
 - `bid_size`, `ask_size`, `volume`, `open_interest`
-- `quote_time`, `trade_time`, `received_at`
+- `quote_time`, `trade_time`, `received_at`, `last_update_at`
 - `source_latency_ms`
 - `quality`
 - `greeks`
@@ -62,6 +62,27 @@ Computed fields:
 - `spread_bps`
 - `effective_price`
 - `quote_age_ms`
+
+`quote_time` is source-market time. `last_update_at` is transport-observation
+time: IBKR advances it only when ticker time or the normalized ticker
+fingerprint changes. Rewriting the same cached row does not make it fresh.
+
+### Quote use policy
+
+`quote_use_decision()` keeps feed mode and transport freshness independent and
+returns separate permissions for research, alerts, and pricing:
+
+- fresh live: research, alert, and pricing;
+- fresh frozen: research only unless the caller explicitly allows the relevant
+  closed-session use;
+- fresh delayed/delayed-frozen: labeled research only;
+- delayed legacy rows without `last_update_at`: unknown freshness, research only;
+- transport-stale, future-dated, missing, error, or unknown rows: never alert or
+  price.
+
+Hot rows default to a 15-second transport threshold, delayed rows to 60 seconds,
+and configured slow labels pass 300 seconds from the caller. A timestamp more
+than five seconds in the future fails closed.
 
 ### `MarketDataQuality`
 
@@ -176,9 +197,9 @@ quotes. It is not just a single best quote per instrument, because fallback
 needs the current Schwab quote to remain available when IBKR becomes stale or
 unavailable.
 
-When latest state is read, live/frozen quotes older than
-`MARKET_DATA_LATEST_STALE_AFTER_SECONDS` are marked stale and best quotes are
-recomputed.
+When latest state is read, transport freshness is reevaluated and best quotes
+are recomputed. Source quote age remains available separately through
+`quote_age_ms`; it is not used as delayed-feed transport age.
 
 Useful commands:
 

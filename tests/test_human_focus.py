@@ -139,6 +139,39 @@ def test_expiry_summary_includes_gamma_profile_and_level_probabilities() -> None
     assert "level_probabilities" in expiry
 
 
+def test_delayed_price_is_labeled_research_only_in_human_context() -> None:
+    now = datetime(2026, 7, 6, 14, 0, tzinfo=timezone.utc)
+    delayed_spx = Quote(
+        instrument=InstrumentId.index("SPX"),
+        provider=Provider.IBKR,
+        received_at=now,
+        quality=MarketDataQuality.DELAYED,
+        market_data_type=3,
+        mark=7500.0,
+        quote_time=now,
+        last_update_at=now,
+    )
+    state = LatestState(
+        created_at=now,
+        as_of=now,
+        quotes=(delayed_spx,),
+        best_quotes=(delayed_spx,),
+    )
+
+    context = build_human_focus_context(
+        state,
+        options_map=make_options_map(gamma_state="positive_gamma_pin"),
+        iv_surface=None,
+        iv_surface_history_1h=None,
+        window={"name": "rth"},
+    )
+
+    summary = context["prices"]["spx"]
+    assert summary["research_usable"] is True
+    assert summary["alert_allowed"] is False
+    assert "SPX quote is missing or degraded." in context["data_warnings"]
+
+
 def test_micopedia_context_includes_dip_context_vix_ratio_and_event_tags(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

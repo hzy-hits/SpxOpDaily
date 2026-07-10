@@ -6,16 +6,8 @@ from spx_spark.config import env_csv
 from spx_spark.iv_surface import IvSurfaceSnapshot
 from spx_spark.marketdata import MarketDataQuality, Quote
 from spx_spark.options_map import ExpiryOptionsMap, OptionsMap
-from spx_spark.storage import LatestState
+from spx_spark.storage import LatestState, configured_quote_use_decision
 from spx_spark.strategy.micopedia import MicopediaInputs, build_micopedia_signal
-
-
-BAD_QUALITIES = {
-    MarketDataQuality.MISSING,
-    MarketDataQuality.ERROR,
-    MarketDataQuality.STALE,
-    MarketDataQuality.UNKNOWN,
-}
 
 
 def quote_summary(state: LatestState, instrument_id: str) -> dict[str, object]:
@@ -27,14 +19,25 @@ def quote_summary(state: LatestState, instrument_id: str) -> dict[str, object]:
             "price": None,
             "move_bps": None,
             "age_ms": None,
+            "freshness": "unknown",
+            "research_usable": False,
+            "alert_allowed": False,
+            "pricing_allowed": False,
+            "use_reason": "quote_missing",
         }
     price = quote.effective_price
+    decision = configured_quote_use_decision(quote, as_of=state.as_of)
     return {
         "instrument_id": instrument_id,
         "quality": quote.quality.value,
         "price": price,
         "move_bps": move_bps(quote),
         "age_ms": quote.quote_age_ms(state.as_of),
+        "freshness": decision.freshness.value,
+        "research_usable": decision.research_usable,
+        "alert_allowed": decision.alert_allowed,
+        "pricing_allowed": decision.pricing_allowed,
+        "use_reason": decision.reason,
     }
 
 
@@ -181,7 +184,13 @@ def micopedia_context(
         if value is not None
     ]
     es_quote = state.best_quote("future:ES")
-    has_es_data = es_quote is not None and es_quote.quality not in BAD_QUALITIES
+    has_es_data = bool(
+        es_quote
+        and configured_quote_use_decision(
+            es_quote,
+            as_of=state.as_of,
+        ).research_usable
+    )
     inputs = MicopediaInputs(
         created_at=state.as_of,
         underlier_price=options_map.underlier.price,
@@ -231,7 +240,10 @@ def micopedia_context(
 
 def effective_price(state: LatestState, instrument_id: str) -> float | None:
     quote = state.best_quote(instrument_id)
-    return quote.effective_price if quote else None
+    if quote is None:
+        return None
+    decision = configured_quote_use_decision(quote, as_of=state.as_of)
+    return quote.effective_price if decision.research_usable else None
 
 
 def human_data_warnings(
@@ -243,9 +255,15 @@ def human_data_warnings(
     warnings: list[str] = []
     spx = state.best_quote("index:SPX")
     es = state.best_quote("future:ES")
-    if spx is None or spx.quality in BAD_QUALITIES:
+    if spx is None or not configured_quote_use_decision(
+        spx,
+        as_of=state.as_of,
+    ).alert_allowed:
         warnings.append("SPX quote is missing or degraded.")
-    if es is None or es.quality in BAD_QUALITIES:
+    if es is None or not configured_quote_use_decision(
+        es,
+        as_of=state.as_of,
+    ).alert_allowed:
         warnings.append("ES quote is missing or degraded.")
     if not options_map.expiries:
         warnings.append("SPXW option map is missing.")

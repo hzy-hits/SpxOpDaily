@@ -157,6 +157,7 @@ def quote_from_ibkr_row(
         volume=clean_float(get_value(row, "volume")),
         open_interest=clean_float(get_value(row, "open_interest")),
         quote_time=quote_time,
+        last_update_at=parse_timestamp(get_value(row, "last_update_at")),
         source_latency_ms=elapsed_ms(quote_time, received_at),
         market_data_type=market_data_type,
         greeks=greeks,

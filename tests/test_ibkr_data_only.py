@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from spx_spark.config import IbkrSettings
@@ -296,6 +297,42 @@ def test_snapshot_rows_collects_option_open_interest_by_right() -> None:
     assert by_label["option:SPXW:20260706:7500:C"].open_interest == 4321.0
     assert by_label["option:SPXW:20260706:7500:P"].open_interest == 1234.0
     assert by_label["option:SPXW:20260706:7500:C"].volume == 1500.0
+
+
+def test_snapshot_rows_advances_last_update_only_when_ticker_changes() -> None:
+    from types import SimpleNamespace
+
+    ticker = SimpleNamespace(
+        contract=SimpleNamespace(right=""),
+        marketDataType=3,
+        bid=7500.0,
+        ask=7501.0,
+        last=7500.5,
+        close=7490.0,
+        bidSize=1,
+        askSize=2,
+        lastSize=1,
+        volume=100.0,
+        time=datetime(2026, 7, 7, 13, 45, tzinfo=timezone.utc),
+        modelGreeks=None,
+        marketPrice=lambda: 7500.5,
+    )
+    row = VerifyRow(label="index:SPX", kind="index", symbol="SPX")
+    subscriptions = {"index:SPX": (ticker, row)}
+
+    now = datetime(2026, 7, 7, 14, 0, tzinfo=timezone.utc)
+    snapshot_rows(subscriptions, 15.0, now=now)
+    first_update = row.last_update_at
+    snapshot_rows(subscriptions, 15.0, now=now + timedelta(seconds=10))
+
+    assert first_update is not None
+    assert row.last_update_at == first_update
+
+    ticker.last = 7500.75
+    snapshot_rows(subscriptions, 15.0, now=now + timedelta(seconds=20))
+
+    assert row.last_update_at is not None
+    assert row.last_update_at == (now + timedelta(seconds=20)).isoformat()
 
 
 def test_option_open_interest_ignores_missing_right() -> None:

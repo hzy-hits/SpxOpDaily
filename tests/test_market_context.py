@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -136,6 +137,47 @@ def test_hyperliquid_proxy_gate_is_unanchored_without_es_or_spx() -> None:
 
     assert gate["state"] == "unanchored_context_only"
     assert gate["usable_for_alert"] is False
+
+
+def test_delayed_tradfi_quote_is_research_context_not_actionable_anchor() -> None:
+    now = datetime(2026, 7, 7, 3, 15, tzinfo=BJ_TZ)
+    delayed_spx = replace(
+        make_provider_quote(
+            InstrumentId.index("SPX"),
+            7500.0,
+            7480.0,
+            now,
+            provider=Provider.IBKR,
+        ),
+        quality=MarketDataQuality.DELAYED,
+        market_data_type=3,
+        last_update_at=now,
+    )
+    proxy = make_provider_quote(
+        InstrumentId(
+            symbol="xyz:SP500",
+            instrument_type=InstrumentType.CRYPTO_PERP,
+        ),
+        7501.0,
+        7480.0,
+        now,
+        provider=Provider.HYPERLIQUID,
+    )
+    state = LatestState(
+        created_at=now,
+        as_of=now,
+        quotes=(),
+        best_quotes=(delayed_spx, proxy),
+    )
+
+    context = build_market_context(state)
+    entries = {entry["instrument_id"]: entry for entry in context["entries"]}
+    gate = context["derived"]["hyperliquid_spx_proxy"]
+
+    assert entries["index:SPX"]["research_usable"] is True
+    assert entries["index:SPX"]["alert_allowed"] is False
+    assert gate["state"] == "unanchored_context_only"
+    assert gate["anchor"] is None
 
 
 def test_hyperliquid_proxy_gate_blocks_wide_basis() -> None:

@@ -12,6 +12,7 @@ from spx_spark.notifier.policy import (
     is_offhours_vol_signal_alert,
     severity_value,
 )
+from spx_spark.state_io import atomic_write_json_secure, exclusive_state_lock
 
 
 # Magnitude-bucketed kinds: their dedup_group encodes direction + bucket
@@ -92,7 +93,7 @@ def mark_rate_limit_sent(
         sent_at_by_key[bucket_key] = bucket
 
 
-def load_sent_state(path: str) -> dict[str, float]:
+def _load_state_payload(path: str) -> dict[str, object]:
     state_path = Path(path)
     if not state_path.exists():
         return {}
@@ -100,22 +101,53 @@ def load_sent_state(path: str) -> dict[str, float]:
         payload = json.loads(state_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
-    sent = payload.get("sent_at_by_key") if isinstance(payload, dict) else None
+    return payload if isinstance(payload, dict) else {}
+
+
+def load_sent_state(path: str) -> dict[str, float]:
+    payload = _load_state_payload(path)
+    sent = payload.get("sent_at_by_key")
     if not isinstance(sent, dict):
         return {}
     return {str(key): float(value) for key, value in sent.items() if isinstance(value, int | float)}
 
 
-def save_sent_state(path: str, sent_at_by_key: dict[str, float]) -> None:
+def load_acknowledged_event_ids(path: str) -> tuple[str, ...]:
+    payload = _load_state_payload(path)
+    event_ids = payload.get("acknowledged_event_ids")
+    if not isinstance(event_ids, list):
+        return ()
+    return tuple(sorted({str(event_id) for event_id in event_ids if event_id}))
+
+
+def _write_sent_state_unlocked(
+    path: str,
+    sent_at_by_key: dict[str, float],
+    acknowledged_event_ids: set[str],
+) -> None:
     state_path = Path(path)
-    state_path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = state_path.with_suffix(f"{state_path.suffix}.tmp")
     payload = {
         "updated_at": datetime.now(tz=timezone.utc).isoformat(),
         "sent_at_by_key": dict(sorted(sent_at_by_key.items())),
+        "acknowledged_event_ids": sorted(acknowledged_event_ids),
     }
-    temp_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-    temp_path.replace(state_path)
+    atomic_write_json_secure(state_path, payload)
+
+
+def save_sent_state(
+    path: str,
+    sent_at_by_key: dict[str, float],
+    *,
+    acknowledged_event_ids: tuple[str, ...] = (),
+) -> None:
+    state_path = Path(path)
+    with exclusive_state_lock(state_path):
+        merged_sent_at = load_sent_state(path)
+        for key, value in sent_at_by_key.items():
+            merged_sent_at[key] = max(value, merged_sent_at.get(key, value))
+        existing_event_ids = set(load_acknowledged_event_ids(path))
+        existing_event_ids.update(acknowledged_event_ids)
+        _write_sent_state_unlocked(path, merged_sent_at, existing_event_ids)
 
 
 def select_alerts_for_notification(
@@ -167,10 +199,22 @@ def mark_alerts_sent(
     settings: NotificationSettings,
     *,
     now: datetime | None = None,
+    acknowledged_event_ids: tuple[str, ...] = (),
 ) -> None:
     now = now or datetime.now(tz=timezone.utc)
     now_ts = now.timestamp()
-    for alert in alerts:
-        sent_at_by_key[alert_key(alert)] = now_ts
-        mark_rate_limit_sent(alert, sent_at_by_key, now_ts=now_ts)
-    save_sent_state(settings.state_path, sent_at_by_key)
+    state_path = Path(settings.state_path)
+    with exclusive_state_lock(state_path):
+        merged_sent_at = load_sent_state(settings.state_path)
+        for key, value in sent_at_by_key.items():
+            merged_sent_at[key] = max(value, merged_sent_at.get(key, value))
+        for alert in alerts:
+            merged_sent_at[alert_key(alert)] = now_ts
+            mark_rate_limit_sent(alert, merged_sent_at, now_ts=now_ts)
+        merged_event_ids = set(load_acknowledged_event_ids(settings.state_path))
+        merged_event_ids.update(acknowledged_event_ids)
+        _write_sent_state_unlocked(
+            settings.state_path,
+            merged_sent_at,
+            merged_event_ids,
+        )
