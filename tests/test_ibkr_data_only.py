@@ -11,6 +11,7 @@ from spx_spark.ibkr.verifier import (
     VerifyRow,
     cancel_subscriptions,
     connect_market_data_only,
+    discard_subscriptions,
     generic_ticks_for_contract,
     option_open_interest_from_ticker,
     qualify_and_subscribe,
@@ -424,3 +425,56 @@ def test_cancel_subscriptions_skips_asynchronously_rejected_rows() -> None:
     assert cancel_subscriptions(ib, subscriptions)
     assert ib.canceled == [active_contract]
     assert ib.wrapper.ended == [(rejected_ticker, "mktData")]
+
+
+def test_discard_subscriptions_only_clears_local_ticker_registrations() -> None:
+    class FakeWrapper:
+        def __init__(self) -> None:
+            self.ended: list[tuple[object, str]] = []
+
+        def endTicker(self, ticker: object, tick_type: str) -> None:
+            self.ended.append((ticker, tick_type))
+
+    class FakeIB:
+        def __init__(self) -> None:
+            self.wrapper = FakeWrapper()
+
+        def cancelMktData(self, contract: object) -> None:
+            raise AssertionError(f"unexpected server cancel for {contract!r}")
+
+    ib = FakeIB()
+    tickers = [SimpleNamespace(contract=object()) for _ in range(2)]
+    subscriptions = {
+        str(index): (
+            ticker,
+            VerifyRow(label=str(index), kind="index", symbol="SPX", subscribed=True),
+        )
+        for index, ticker in enumerate(tickers)
+    }
+
+    assert discard_subscriptions(ib, subscriptions)
+    assert ib.wrapper.ended == [(ticker, "mktData") for ticker in tickers]
+
+
+def test_discard_subscriptions_attempts_every_ticker_after_one_failure() -> None:
+    class FakeWrapper:
+        def __init__(self) -> None:
+            self.calls: list[object] = []
+
+        def endTicker(self, ticker: object, tick_type: str) -> None:
+            self.calls.append(ticker)
+            if len(self.calls) == 1:
+                raise RuntimeError("first local cleanup failed")
+
+    ib = SimpleNamespace(wrapper=FakeWrapper())
+    tickers = [SimpleNamespace(contract=object()) for _ in range(2)]
+    subscriptions = {
+        str(index): (
+            ticker,
+            VerifyRow(label=str(index), kind="index", symbol="SPX", subscribed=True),
+        )
+        for index, ticker in enumerate(tickers)
+    }
+
+    assert not discard_subscriptions(ib, subscriptions)
+    assert ib.wrapper.calls == tickers

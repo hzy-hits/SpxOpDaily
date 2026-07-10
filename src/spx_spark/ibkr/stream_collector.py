@@ -42,6 +42,8 @@ from spx_spark.ibkr.collector import has_competing_session_error
 from spx_spark.ibkr.farm_health import (
     FarmHealthTracker,
     NON_DEGRADING_ERROR_CODES,
+    TWS_CONNECTIVITY_LOST_CODES,
+    TWS_CONNECTIVITY_RESTORED_CODES,
     probe_data_plane,
     request_gateway_restart,
     runtime_blocks_gateway_restart,
@@ -61,6 +63,7 @@ from spx_spark.ibkr.verifier import (
     cancel_subscriptions,
     connect_market_data_only,
     contract_has_con_id,
+    discard_subscriptions,
     first_present,
     midpoint,
     prepare_ib_client,
@@ -376,6 +379,18 @@ def provider_error_count(errors: list[IbkrError]) -> int:
     return sum(1 for error in errors if error.error_code not in NON_DEGRADING_ERROR_CODES)
 
 
+def subscription_outage_reason(
+    *,
+    tws_connectivity_lost: bool,
+    subscriptions_lost: bool,
+) -> str | None:
+    if subscriptions_lost:
+        return "TWS restored without market-data subscriptions; rebuilding"
+    if tws_connectivity_lost:
+        return "TWS upstream connectivity lost; subscription lifecycle paused"
+    return None
+
+
 def connected_state() -> ProviderState:
     return ProviderState(
         provider=Provider.IBKR,
@@ -571,6 +586,8 @@ class StreamCollector:
         self.subscription_rows_by_req_id: dict[int, VerifyRow] = {}
         self.subscription_lane_by_req_id: dict[int, str] = {}
         self.subscription_health_failed = False
+        self.tws_connectivity_lost = False
+        self.subscriptions_lost = False
         self.last_policy_check = 0.0
         self.farm_health = FarmHealthTracker(
             broken_restart_seconds=stream_settings.farm_broken_restart_seconds,
@@ -601,6 +618,15 @@ class StreamCollector:
         )
         self.errors.append(error)
         del self.errors[:-MAX_TRACKED_ERRORS]
+
+        if error_code in TWS_CONNECTIVITY_LOST_CODES:
+            self.tws_connectivity_lost = True
+        elif error_code in TWS_CONNECTIVITY_RESTORED_CODES:
+            self.tws_connectivity_lost = False
+            if error_code == 1101:
+                # TWS explicitly says market-data subscriptions were lost.
+                self.subscriptions_lost = True
+                self.subscription_health_failed = True
 
         if error_code in SUBSCRIPTION_REJECTION_CODES:
             self.subscription_rejection_sequence += 1
@@ -1300,6 +1326,8 @@ class StreamCollector:
             sleep = getattr(self.ib, "sleep", None)
             if callable(sleep):
                 sleep(confirm_seconds)
+        if self._subscription_lifecycle_blocked():
+            return False
         if self._apply_subscription_rejections(
             subscriptions,
             rejection_sequence=rejection_sequence,
@@ -1354,6 +1382,21 @@ class StreamCollector:
                     contract_cache[label] = (label, row.kind, contract)
 
     def _cancel_batch(self, subscriptions: dict[str, tuple[Any, VerifyRow]]) -> bool:
+        local_only = self._subscription_lifecycle_blocked()
+        if local_only:
+            result = discard_subscriptions(self.ib, subscriptions)
+            self._unregister_subscription_rows(subscriptions)
+            self.subscriptions_lost = True
+            self.subscription_health_failed = True
+            log_event(
+                {
+                    "task": "ibkr_stream",
+                    "event": "subscription_lifecycle_interrupted",
+                    "contracts": len(subscriptions),
+                    "local_cleanup_ok": result,
+                }
+            )
+            return False
         result = cancel_subscriptions(self.ib, subscriptions)
         if result is False:
             self.subscription_health_failed = True
@@ -1365,6 +1408,13 @@ class StreamCollector:
                 }
             )
             return False
+        self._unregister_subscription_rows(subscriptions)
+        return True
+
+    def _unregister_subscription_rows(
+        self,
+        subscriptions: dict[str, tuple[Any, VerifyRow]],
+    ) -> None:
         tracked = getattr(self, "subscription_rows_by_req_id", None)
         lanes = getattr(self, "subscription_lane_by_req_id", None)
         if tracked is not None:
@@ -1373,7 +1423,17 @@ class StreamCollector:
                     tracked.pop(row.request_id, None)
                     if lanes is not None:
                         lanes.pop(row.request_id, None)
-        return True
+
+    def _subscription_lifecycle_blocked(self) -> bool:
+        ib = getattr(self, "ib", None)
+        is_connected = getattr(ib, "isConnected", None)
+        disconnected = callable(is_connected) and not is_connected()
+        return bool(
+            getattr(self, "tws_connectivity_lost", False)
+            or getattr(self, "subscriptions_lost", False)
+            or getattr(self, "subscription_health_failed", False)
+            or disconnected
+        )
 
     def _restore_subscriptions(
         self,
@@ -1381,6 +1441,8 @@ class StreamCollector:
         *,
         lane: str,
     ) -> dict[str, tuple[Any, VerifyRow]]:
+        if self._subscription_lifecycle_blocked():
+            return {}
         definitions: list[tuple[str, str, Any]] = []
         for label, (ticker, row) in released.items():
             contract = getattr(ticker, "contract", None)
@@ -1601,6 +1663,13 @@ class StreamCollector:
             else None,
         )
         merge_cached_option_rows(rows, self.option_cache, set(subscriptions))
+        outage_reason = subscription_outage_reason(
+            tws_connectivity_lost=self.tws_connectivity_lost,
+            subscriptions_lost=self.subscriptions_lost,
+        )
+        error_count = provider_error_count(self.errors)
+        if outage_reason is not None:
+            error_count = max(error_count, 1)
         snapshot = snapshot_from_rows(
             rows,
             received_at=received_at,
@@ -1608,7 +1677,8 @@ class StreamCollector:
             connected=self.ib.isConnected(),
             authenticated=True,
             latency_ms=None,
-            error_count=provider_error_count(self.errors),
+            error_count=error_count,
+            reason=outage_reason,
             replace_provider_quotes=True,
         )
         write_result = persist_provider_snapshot(snapshot, self.storage_settings)
@@ -1627,6 +1697,7 @@ class StreamCollector:
                 snapshot.provider_state.status.value if snapshot.provider_state else "unknown"
             ),
             "rotation_index": self.rotation_index,
+            "tws_connectivity_lost": self.tws_connectivity_lost,
         }
 
     def _advance_subscription_lifecycle(
@@ -1637,10 +1708,17 @@ class StreamCollector:
     ) -> None:
         """Advance one bounded lifecycle slice after hot rows are persisted."""
 
+        if self._subscription_lifecycle_blocked():
+            return
+
         # Complete an already-held slow batch promptly, but never start a new
         # qualification before the hot-plan work has had its bounded turn.
         self.advance_slow_poll(allow_start=False)
+        if self._subscription_lifecycle_blocked():
+            return
         self.ensure_option_plan(rows)
+        if self._subscription_lifecycle_blocked():
+            return
         if lifecycle_has_qualification_budget(lifecycle_started):
             self.ensure_spy_option_plan(
                 rows,
@@ -1650,6 +1728,8 @@ class StreamCollector:
                     else default_spxw_expiry()
                 ),
             )
+        if self._subscription_lifecycle_blocked():
+            return
         if lifecycle_has_qualification_budget(lifecycle_started):
             if self.slow_poll_start_due():
                 # A due slow chunk gets one lifecycle slice ahead of rotation;
@@ -1657,16 +1737,25 @@ class StreamCollector:
                 self.advance_slow_poll(allow_start=True)
             else:
                 self.rotate_options()
+        if self._subscription_lifecycle_blocked():
+            return
         # A zero-hold batch, or one whose hold elapsed during other lifecycle
         # work, can be completed without admitting another qualification.
         self.advance_slow_poll(allow_start=False)
 
     def teardown(self) -> None:
-        cancel_subscriptions(self.ib, self.rotation_subs)
-        cancel_subscriptions(self.ib, self.hot_subs)
-        cancel_subscriptions(self.ib, self.spy_subs)
-        cancel_subscriptions(self.ib, self.slow_active_subs)
-        cancel_subscriptions(self.ib, self.base_subs)
+        release = (
+            discard_subscriptions
+            if getattr(self, "tws_connectivity_lost", False)
+            or getattr(self, "subscriptions_lost", False)
+            or not self.ib.isConnected()
+            else cancel_subscriptions
+        )
+        release(self.ib, self.rotation_subs)
+        release(self.ib, self.hot_subs)
+        release(self.ib, self.spy_subs)
+        release(self.ib, self.slow_active_subs)
+        release(self.ib, self.base_subs)
         self.base_subs = {}
         self.hot_subs = {}
         self.rotation_subs = {}
@@ -1694,6 +1783,8 @@ class StreamCollector:
         self.subscription_rows_by_req_id = {}
         self.subscription_lane_by_req_id = {}
         self.subscription_health_failed = False
+        self.tws_connectivity_lost = False
+        self.subscriptions_lost = False
         if self.ib.isConnected():
             self.ib.disconnect()
 

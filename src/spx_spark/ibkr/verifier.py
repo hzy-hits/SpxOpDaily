@@ -527,17 +527,39 @@ def cancel_subscriptions(ib: Any, subscriptions: dict[str, tuple[Any, VerifyRow]
         if not row.subscribed:
             # IBKR already rejected the server-side request. Remove only the
             # local ib_async ticker registration to avoid a bogus code 300.
-            end_ticker = getattr(getattr(ib, "wrapper", None), "endTicker", None)
-            if callable(end_ticker):
-                try:
-                    end_ticker(ticker, "mktData")
-                except Exception:  # noqa: BLE001
-                    success = False
+            if not discard_ticker_registration(ib, ticker):
+                success = False
             continue
         try:
             if ib.cancelMktData(ticker.contract) is False:
                 success = False
         except Exception:  # noqa: BLE001
+            success = False
+    return success
+
+
+def discard_ticker_registration(ib: Any, ticker: Any) -> bool:
+    """Forget a local ib_async ticker without sending a server cancellation."""
+
+    end_ticker = getattr(getattr(ib, "wrapper", None), "endTicker", None)
+    if not callable(end_ticker):
+        return True
+    try:
+        end_ticker(ticker, "mktData")
+    except Exception:  # noqa: BLE001
+        return False
+    return True
+
+
+def discard_subscriptions(
+    ib: Any,
+    subscriptions: dict[str, tuple[Any, VerifyRow]],
+) -> bool:
+    """Clear local ticker mappings after IBKR reports that server state is gone."""
+
+    success = True
+    for ticker, _row in subscriptions.values():
+        if ticker is not None and not discard_ticker_registration(ib, ticker):
             success = False
     return success
 

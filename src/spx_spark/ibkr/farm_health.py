@@ -27,8 +27,12 @@ from spx_spark.runtime_mode import load_override
 FARM_OK_CODES = frozenset({2104, 2106, 2158})
 FARM_CONNECTING_CODES = frozenset({2119})
 FARM_BROKEN_CODES = frozenset({2103, 2110, 2157})
+TWS_CONNECTIVITY_LOST_CODES = frozenset({1100, 2110})
+TWS_CONNECTIVITY_RESTORED_CODES = frozenset({1101, 1102})
 
-NON_DEGRADING_ERROR_CODES = FARM_OK_CODES | FARM_CONNECTING_CODES
+NON_DEGRADING_ERROR_CODES = (
+    FARM_OK_CODES | FARM_CONNECTING_CODES | TWS_CONNECTIVITY_RESTORED_CODES
+)
 
 _FARM_NAME_RE = re.compile(
     r"(?:market data farm connection is|hmds data farm connection is|sec-def data farm connection is)"
@@ -94,6 +98,10 @@ class DataPlaneProbeResult:
 
 
 def classify_farm_error(error_code: int, message: str) -> tuple[FarmLinkStatus, str | None]:
+    if error_code in TWS_CONNECTIVITY_LOST_CODES:
+        return FarmLinkStatus.BROKEN, "tws-server"
+    if error_code in TWS_CONNECTIVITY_RESTORED_CODES:
+        return FarmLinkStatus.OK, "tws-server"
     if error_code in FARM_OK_CODES or "connection is ok" in message.lower():
         farm = parse_farm_name(message)
         return FarmLinkStatus.OK, farm

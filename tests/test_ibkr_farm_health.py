@@ -27,6 +27,14 @@ def test_classify_farm_error_detects_broken_and_ok_messages():
         FarmLinkStatus.BROKEN,
         "tws-server",
     )
+    assert classify_farm_error(1100, "Connectivity between IBKR and TWS has been lost") == (
+        FarmLinkStatus.BROKEN,
+        "tws-server",
+    )
+    assert classify_farm_error(1102, "Connectivity restored; data maintained") == (
+        FarmLinkStatus.OK,
+        "tws-server",
+    )
 
 
 def test_parse_farm_name_handles_tws_connectivity_message():
@@ -59,6 +67,24 @@ def test_farm_health_tracker_restarts_after_sustained_broken_state():
     tracker.observe(2110, "Connectivity between Trader Workstation and server is broken.", now=t0)
     assert not tracker.should_restart_gateway(now=t0 + 10)
     assert tracker.should_restart_gateway(now=t0 + 31)
+
+
+def test_tws_1100_outage_starts_recovery_timer_until_1102() -> None:
+    tracker = FarmHealthTracker(broken_restart_seconds=30.0)
+    t0 = 2000.0
+
+    lost = tracker.observe(1100, "Connectivity between IBKR and TWS has been lost", now=t0)
+
+    assert lost is not None
+    assert lost.status is FarmLinkStatus.BROKEN
+    assert not tracker.should_restart_gateway(now=t0 + 29.0)
+    assert tracker.should_restart_gateway(now=t0 + 31.0)
+
+    restored = tracker.observe(1102, "Connectivity restored; data maintained", now=t0 + 32.0)
+
+    assert restored is not None
+    assert restored.status is FarmLinkStatus.OK
+    assert tracker.broken_since is None
 
 
 def test_mark_probe_failed_starts_broken_timer():

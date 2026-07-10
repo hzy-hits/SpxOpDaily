@@ -19,6 +19,7 @@ from spx_spark.ibkr.stream_collector import (
     option_spec_label,
     reference_quote_from_row,
     sleep_until_reconnect,
+    subscription_outage_reason,
     should_replan,
     update_option_cache,
 )
@@ -141,10 +142,46 @@ def test_subscription_lifecycle_starts_no_new_work_without_budget(monkeypatch) -
     ]
 
 
+def test_subscription_lifecycle_pauses_during_tws_connectivity_loss() -> None:
+    collector = object.__new__(StreamCollector)
+    collector.tws_connectivity_lost = True
+    collector.subscriptions_lost = False
+    calls: list[str] = []
+    collector.advance_slow_poll = lambda **kwargs: calls.append("slow")
+    collector.ensure_option_plan = lambda rows: calls.append("option")
+    collector.ensure_spy_option_plan = lambda rows, *, expiry: calls.append("spy")
+    collector.rotate_options = lambda: calls.append("rotate")
+
+    collector._advance_subscription_lifecycle([], lifecycle_started=100.0)
+
+    assert calls == []
+
+    collector.tws_connectivity_lost = False
+    collector.subscriptions_lost = True
+    collector._advance_subscription_lifecycle([], lifecycle_started=100.0)
+
+    assert calls == []
+
+
 def test_hot_flush_sleep_is_capped_for_twelve_second_reliability_budget() -> None:
     assert effective_hot_flush_sleep_seconds(2.0) == 2.0
     assert effective_hot_flush_sleep_seconds(5.0) == 5.0
     assert effective_hot_flush_sleep_seconds(30.0) == 5.0
+
+
+def test_subscription_outage_reason_prioritizes_lost_subscription_state() -> None:
+    assert subscription_outage_reason(
+        tws_connectivity_lost=True,
+        subscriptions_lost=False,
+    ) == "TWS upstream connectivity lost; subscription lifecycle paused"
+    assert subscription_outage_reason(
+        tws_connectivity_lost=False,
+        subscriptions_lost=True,
+    ) == "TWS restored without market-data subscriptions; rebuilding"
+    assert subscription_outage_reason(
+        tws_connectivity_lost=False,
+        subscriptions_lost=False,
+    ) is None
 
 
 def test_snapshot_from_rows_can_request_provider_replace():
@@ -707,6 +744,77 @@ def test_option_reconcile_correlates_async_rejection_to_added_request(monkeypatc
     assert set(collector.hot_subs) == {"option:SPXW:20260708:7500:C"}
 
 
+def test_confirmation_outage_aborts_batch_and_discards_only_local_state(
+    monkeypatch,
+) -> None:
+    collector = object.__new__(StreamCollector)
+    collector.errors = []
+    collector.subscription_rejection_sequence = 0
+    collector.subscription_rejection_log = []
+    collector.subscription_health_failed = False
+    collector.tws_connectivity_lost = False
+    collector.subscriptions_lost = False
+    collector.farm_health = SimpleNamespace(observe=lambda *args: None)
+
+    row = VerifyRow(
+        label="option:SPXW:20260710:7510:C",
+        kind="option",
+        symbol="SPX",
+        subscribed=True,
+        request_id=501,
+    )
+    ticker = SimpleNamespace(contract=object())
+    subscriptions = {row.label: (ticker, row)}
+    collector.subscription_rows_by_req_id = {501: row}
+    collector.subscription_lane_by_req_id = {501: "rotation"}
+
+    class FakeWrapper:
+        def __init__(self) -> None:
+            self.ended: list[tuple[object, str]] = []
+
+        def endTicker(self, item: object, tick_type: str) -> None:
+            self.ended.append((item, tick_type))
+
+    class FakeIB:
+        def __init__(self) -> None:
+            self.wrapper = FakeWrapper()
+            self.server_cancels: list[object] = []
+
+        def isConnected(self) -> bool:  # noqa: N802 - mirrors ib_async
+            return True
+
+        def sleep(self, _seconds: float) -> None:
+            collector._on_error(-1, 1100, "Connectivity between IBKR and TWS has been lost", None)
+
+        def cancelMktData(self, contract: object) -> None:
+            self.server_cancels.append(contract)
+
+    collector.ib = FakeIB()
+    monkeypatch.setattr(stream_collector_module, "log_event", lambda *args: None)
+
+    assert not collector._subscription_batch_succeeded(
+        subscriptions,
+        expected_count=1,
+        rejection_sequence=0,
+        confirm_seconds=0.5,
+        lane="rotation",
+    )
+    assert not collector._cancel_batch(subscriptions)
+
+    assert collector.ib.server_cancels == []
+    assert collector.ib.wrapper.ended == [(ticker, "mktData")]
+    assert collector.subscription_rows_by_req_id == {}
+    assert collector.subscription_lane_by_req_id == {}
+    assert collector.subscriptions_lost is True
+    assert collector.subscription_health_failed is True
+
+    def unexpected_restore(*args, **kwargs):
+        raise AssertionError("restore attempted during connectivity outage")
+
+    monkeypatch.setattr(stream_collector_module, "qualify_and_subscribe", unexpected_restore)
+    assert collector._restore_subscriptions(subscriptions, lane="rotation") == {}
+
+
 def test_option_reconcile_restores_released_coverage_after_sync_failure(monkeypatch) -> None:
     collector = object.__new__(StreamCollector)
     collector.ib = object()
@@ -857,11 +965,21 @@ def test_teardown_clears_prior_session_errors(monkeypatch) -> None:
             ts="2026-07-10T00:00:00+00:00",
         )
     ]
-    monkeypatch.setattr(stream_collector_module, "cancel_subscriptions", lambda *args: True)
+    discard_calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        stream_collector_module,
+        "discard_subscriptions",
+        lambda _ib, subscriptions: discard_calls.append(subscriptions) or True,
+    )
+    def unexpected_cancel(*args) -> bool:
+        raise AssertionError("server cancel while disconnected")
+
+    monkeypatch.setattr(stream_collector_module, "cancel_subscriptions", unexpected_cancel)
 
     collector.teardown()
 
     assert collector.errors == []
+    assert len(discard_calls) == 5
 
 
 def test_base_rejection_during_subscription_is_reconciled_after_registration(
@@ -937,6 +1055,47 @@ def test_base_rejection_during_subscription_is_reconciled_after_registration(
     row = collector.base_subs["index:SPX"][1]
     assert row.subscribed is False
     assert "354" in (row.error or "")
+    assert collector.subscription_health_failed is True
+
+
+def test_tws_connectivity_error_state_pauses_resumes_or_rebuilds() -> None:
+    collector = object.__new__(StreamCollector)
+    collector.errors = []
+    collector.subscription_rejection_sequence = 0
+    collector.subscription_rejection_log = []
+    collector.subscription_rows_by_req_id = {}
+    collector.subscription_lane_by_req_id = {}
+    collector.subscription_health_failed = False
+    collector.tws_connectivity_lost = False
+    collector.subscriptions_lost = False
+    collector.farm_health = SimpleNamespace(observe=lambda *args: None)
+
+    collector._on_error(-1, 1100, "Connectivity between IBKR and TWS has been lost", None)
+
+    assert collector.tws_connectivity_lost is True
+    assert collector.subscriptions_lost is False
+    assert collector.subscription_health_failed is False
+
+    collector._on_error(-1, 1102, "Connectivity restored; data maintained", None)
+
+    assert collector.tws_connectivity_lost is False
+    assert collector.subscriptions_lost is False
+    assert collector.subscription_health_failed is False
+
+    collector._on_error(-1, 2110, "TWS connectivity to server is broken", None)
+
+    assert collector.tws_connectivity_lost is True
+
+    collector._on_error(-1, 1102, "Connectivity restored; data maintained", None)
+    collector._on_error(-1, 1101, "Connectivity restored; data lost", None)
+
+    assert collector.tws_connectivity_lost is False
+    assert collector.subscriptions_lost is True
+    assert collector.subscription_health_failed is True
+
+    collector._on_error(-1, 1102, "Connectivity restored; data maintained", None)
+
+    assert collector.subscriptions_lost is True
     assert collector.subscription_health_failed is True
 
 
