@@ -588,6 +588,7 @@ class StreamCollector:
         self.subscription_health_failed = False
         self.tws_connectivity_lost = False
         self.subscriptions_lost = False
+        self.tws_connectivity_loss_sequence = 0
         self.last_policy_check = 0.0
         self.farm_health = FarmHealthTracker(
             broken_restart_seconds=stream_settings.farm_broken_restart_seconds,
@@ -621,6 +622,9 @@ class StreamCollector:
 
         if error_code in TWS_CONNECTIVITY_LOST_CODES:
             self.tws_connectivity_lost = True
+            self.tws_connectivity_loss_sequence = (
+                getattr(self, "tws_connectivity_loss_sequence", 0) + 1
+            )
         elif error_code in TWS_CONNECTIVITY_RESTORED_CODES:
             self.tws_connectivity_lost = False
             if error_code == 1101:
@@ -664,6 +668,7 @@ class StreamCollector:
         self.ib.reqMarketDataType(self.ibkr_settings.market_data_type)
 
     def subscribe_base(self) -> None:
+        setup_connectivity_sequence = getattr(self, "tws_connectivity_loss_sequence", 0)
         contracts = build_base_contracts(self.ibkr_settings)
         persistent, slow = split_base_contracts(
             contracts,
@@ -687,6 +692,10 @@ class StreamCollector:
             persistent,
             qualify=self.ibkr_settings.qualify_contracts,
             on_progress=on_progress,
+        )
+        self._raise_if_subscription_setup_interrupted(
+            setup_connectivity_sequence,
+            phase="base_subscribe",
         )
         self._register_subscription_rows(
             {
@@ -715,6 +724,10 @@ class StreamCollector:
         if subscribed == 0:
             raise RuntimeError(f"no base contracts subscribed ({failed} failed)")
         self._qualify_slow_contracts()
+        self._raise_if_subscription_setup_interrupted(
+            setup_connectivity_sequence,
+            phase="slow_qualification",
+        )
         self.slow_chunks = chunked(
             self.slow_contracts,
             self.stream_settings.slow_poll_chunk_size,
@@ -726,6 +739,29 @@ class StreamCollector:
         )
         self.slow_scheduler.reset(now=time.monotonic())
         self.ib.sleep(self.ibkr_settings.quote_wait_seconds)
+        self._raise_if_subscription_setup_interrupted(
+            setup_connectivity_sequence,
+            phase="base_quote_wait",
+        )
+
+    def _raise_if_subscription_setup_interrupted(
+        self,
+        connectivity_sequence: int,
+        *,
+        phase: str,
+    ) -> None:
+        if not self._connectivity_changed_since(connectivity_sequence):
+            return
+        self.subscriptions_lost = True
+        self.subscription_health_failed = True
+        log_event(
+            {
+                "task": "ibkr_stream",
+                "event": "subscription_setup_interrupted",
+                "phase": phase,
+            }
+        )
+        raise RuntimeError(f"TWS connectivity changed during {phase}")
 
     def _qualify_slow_contracts(self) -> None:
         """Batch-resolve slow contracts once, outside the hot flush loop."""
@@ -873,6 +909,7 @@ class StreamCollector:
         try:
             if step.action is SlowPollAction.START:
                 chunk = self.slow_chunks[step.chunk_index]
+                connectivity_sequence = getattr(self, "tws_connectivity_loss_sequence", 0)
                 contracts = self._resolve_slow_definitions(chunk)
                 unresolved_count = len(chunk) - len(contracts)
                 if not contracts:
@@ -911,6 +948,7 @@ class StreamCollector:
                     self.slow_active_subs,
                     expected_count=len(contracts),
                     rejection_sequence=rejection_sequence,
+                    connectivity_sequence=connectivity_sequence,
                     confirm_seconds=0.0,
                     lane="slow",
                 ):
@@ -1199,6 +1237,7 @@ class StreamCollector:
             if label not in release_labels
         }
         rejection_sequence = getattr(self, "subscription_rejection_sequence", 0)
+        connectivity_sequence = getattr(self, "tws_connectivity_loss_sequence", 0)
         addition_definitions = self._resolve_option_definitions(
             [desired_by_label[label] for label in sorted(added_labels)]
         )
@@ -1211,6 +1250,7 @@ class StreamCollector:
             additions,
             expected_count=len(added_labels),
             rejection_sequence=rejection_sequence,
+            connectivity_sequence=connectivity_sequence,
             lane="hot",
         )
         if not additions_ok:
@@ -1314,6 +1354,7 @@ class StreamCollector:
         *,
         expected_count: int,
         rejection_sequence: int,
+        connectivity_sequence: int | None = None,
         confirm_seconds: float = SUBSCRIPTION_CONFIRM_SECONDS,
         lane: str = "hot",
     ) -> bool:
@@ -1326,7 +1367,14 @@ class StreamCollector:
             sleep = getattr(self.ib, "sleep", None)
             if callable(sleep):
                 sleep(confirm_seconds)
-        if self._subscription_lifecycle_blocked():
+        connectivity_changed = (
+            connectivity_sequence is not None
+            and self._connectivity_changed_since(connectivity_sequence)
+        )
+        if connectivity_changed:
+            self.subscriptions_lost = True
+            self.subscription_health_failed = True
+        if connectivity_changed or self._subscription_lifecycle_blocked():
             return False
         if self._apply_subscription_rejections(
             subscriptions,
@@ -1397,7 +1445,20 @@ class StreamCollector:
                 }
             )
             return False
+        connectivity_sequence = getattr(self, "tws_connectivity_loss_sequence", 0)
         result = cancel_subscriptions(self.ib, subscriptions)
+        if self._connectivity_changed_since(connectivity_sequence):
+            self._unregister_subscription_rows(subscriptions)
+            self.subscriptions_lost = True
+            self.subscription_health_failed = True
+            log_event(
+                {
+                    "task": "ibkr_stream",
+                    "event": "subscription_cancel_interrupted",
+                    "contracts": len(subscriptions),
+                }
+            )
+            return False
         if result is False:
             self.subscription_health_failed = True
             log_event(
@@ -1435,6 +1496,17 @@ class StreamCollector:
             or disconnected
         )
 
+    def _connectivity_changed_since(self, sequence: int) -> bool:
+        ib = getattr(self, "ib", None)
+        is_connected = getattr(ib, "isConnected", None)
+        disconnected = callable(is_connected) and not is_connected()
+        return bool(
+            getattr(self, "tws_connectivity_loss_sequence", 0) != sequence
+            or getattr(self, "tws_connectivity_lost", False)
+            or getattr(self, "subscriptions_lost", False)
+            or disconnected
+        )
+
     def _restore_subscriptions(
         self,
         released: dict[str, tuple[Any, VerifyRow]],
@@ -1451,11 +1523,13 @@ class StreamCollector:
         if not definitions:
             return {}
         rejection_sequence = getattr(self, "subscription_rejection_sequence", 0)
+        connectivity_sequence = getattr(self, "tws_connectivity_loss_sequence", 0)
         restored = qualify_and_subscribe(self.ib, definitions, qualify=False)
         if not self._subscription_batch_succeeded(
             restored,
             expected_count=len(definitions),
             rejection_sequence=rejection_sequence,
+            connectivity_sequence=connectivity_sequence,
             lane=lane,
         ):
             self._cancel_batch(restored)
@@ -1523,6 +1597,7 @@ class StreamCollector:
             if label not in release_labels
         }
         rejection_sequence = getattr(self, "subscription_rejection_sequence", 0)
+        connectivity_sequence = getattr(self, "tws_connectivity_loss_sequence", 0)
         addition_definitions = self._resolve_option_definitions(
             [desired_by_label[label] for label in sorted(added_labels)]
         )
@@ -1535,6 +1610,7 @@ class StreamCollector:
             additions,
             expected_count=len(added_labels),
             rejection_sequence=rejection_sequence,
+            connectivity_sequence=connectivity_sequence,
             lane="spy",
         ):
             self._cancel_batch(additions)
@@ -1599,6 +1675,7 @@ class StreamCollector:
         slice_index = self.rotation_index % plan.rotation_count
         slice_specs = plan.rotations[slice_index]
         rejection_sequence = self.subscription_rejection_sequence
+        connectivity_sequence = getattr(self, "tws_connectivity_loss_sequence", 0)
         definitions = self._resolve_option_definitions(
             option_contracts_from_specs(slice_specs)
         )
@@ -1611,6 +1688,7 @@ class StreamCollector:
             replacement,
             expected_count=len(slice_specs),
             rejection_sequence=rejection_sequence,
+            connectivity_sequence=connectivity_sequence,
             lane="rotation",
         ):
             self._cancel_batch(replacement)

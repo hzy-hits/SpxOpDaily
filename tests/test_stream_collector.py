@@ -1,6 +1,8 @@
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
+import pytest
+
 import spx_spark.ibkr.stream_collector as stream_collector_module
 from spx_spark.config import SamplingSettings
 from spx_spark.ibkr.adapter import snapshot_from_rows
@@ -754,6 +756,7 @@ def test_confirmation_outage_aborts_batch_and_discards_only_local_state(
     collector.subscription_health_failed = False
     collector.tws_connectivity_lost = False
     collector.subscriptions_lost = False
+    collector.tws_connectivity_loss_sequence = 0
     collector.farm_health = SimpleNamespace(observe=lambda *args: None)
 
     row = VerifyRow(
@@ -785,6 +788,7 @@ def test_confirmation_outage_aborts_batch_and_discards_only_local_state(
 
         def sleep(self, _seconds: float) -> None:
             collector._on_error(-1, 1100, "Connectivity between IBKR and TWS has been lost", None)
+            collector._on_error(-1, 1102, "Connectivity restored; data maintained", None)
 
         def cancelMktData(self, contract: object) -> None:
             self.server_cancels.append(contract)
@@ -796,6 +800,7 @@ def test_confirmation_outage_aborts_batch_and_discards_only_local_state(
         subscriptions,
         expected_count=1,
         rejection_sequence=0,
+        connectivity_sequence=0,
         confirm_seconds=0.5,
         lane="rotation",
     )
@@ -971,6 +976,7 @@ def test_teardown_clears_prior_session_errors(monkeypatch) -> None:
         "discard_subscriptions",
         lambda _ib, subscriptions: discard_calls.append(subscriptions) or True,
     )
+
     def unexpected_cancel(*args) -> bool:
         raise AssertionError("server cancel while disconnected")
 
@@ -1055,6 +1061,76 @@ def test_base_rejection_during_subscription_is_reconciled_after_registration(
     row = collector.base_subs["index:SPX"][1]
     assert row.subscribed is False
     assert "354" in (row.error or "")
+    assert collector.subscription_health_failed is True
+
+
+def test_base_subscription_rebuilds_if_connectivity_changes_during_setup(
+    monkeypatch,
+) -> None:
+    collector = object.__new__(StreamCollector)
+    collector.ib = SimpleNamespace(
+        isConnected=lambda: True,
+        sleep=lambda _seconds: None,
+    )
+    collector.ibkr_settings = SimpleNamespace(
+        qualify_contracts=False,
+        quote_wait_seconds=0.0,
+    )
+    collector.stream_settings = SimpleNamespace(
+        slow_poll_labels=(),
+        slow_poll_chunk_size=6,
+        slow_poll_interval_seconds=300.0,
+        slow_poll_hold_seconds=10.0,
+    )
+    collector.errors = []
+    collector.subscription_rejection_sequence = 0
+    collector.subscription_rejection_log = []
+    collector.subscription_rows_by_req_id = {}
+    collector.subscription_lane_by_req_id = {}
+    collector.subscription_health_failed = False
+    collector.tws_connectivity_lost = False
+    collector.subscriptions_lost = False
+    collector.tws_connectivity_loss_sequence = 0
+    collector.qualified_option_contracts = {}
+    collector.farm_health = SimpleNamespace(observe=lambda *args: None)
+    collector.slow_cache = {}
+    collector.slow_qualified_contracts = {}
+    collector.slow_unresolved_contracts = set()
+
+    monkeypatch.setattr(
+        stream_collector_module,
+        "build_base_contracts",
+        lambda _settings: [("index:SPX", "index", object())],
+    )
+
+    def subscribe_across_outage(*args, **kwargs):
+        collector._on_error(-1, 1100, "Connectivity between IBKR and TWS has been lost", None)
+        collector._on_error(-1, 1102, "Connectivity restored; data maintained", None)
+        return {
+            "index:SPX": (
+                SimpleNamespace(contract=object()),
+                VerifyRow(
+                    label="index:SPX",
+                    kind="index",
+                    symbol="SPX",
+                    subscribed=True,
+                    request_id=77,
+                ),
+            )
+        }
+
+    monkeypatch.setattr(
+        stream_collector_module,
+        "qualify_and_subscribe",
+        subscribe_across_outage,
+    )
+    monkeypatch.setattr(stream_collector_module, "log_event", lambda *args: None)
+
+    with pytest.raises(RuntimeError, match="base_subscribe"):
+        collector.subscribe_base()
+
+    assert collector.subscription_rows_by_req_id == {}
+    assert collector.subscriptions_lost is True
     assert collector.subscription_health_failed is True
 
 
