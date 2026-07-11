@@ -1,0 +1,25 @@
+[Unit]
+Description=SPX Spark Schwab OAuth callback and localhost data gateway
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+WorkingDirectory=/home/ubuntu/spx-spark
+EnvironmentFile=-/home/ubuntu/spx-spark/.env
+Environment=PATH=/home/ubuntu/.local/bin:/home/ubuntu/.cargo/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/home/ubuntu/spx-spark/scripts/run-schwab-oauth.sh serve
+Restart=always
+RestartSec=10
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+TasksMax=32
+MemoryMax=512M
+LimitNOFILE=256
+LimitCORE=0
+
+[Install]
+WantedBy=default.target

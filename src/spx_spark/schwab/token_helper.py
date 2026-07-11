@@ -6,6 +6,12 @@ from getpass import getpass
 from pathlib import Path
 
 from spx_spark.config import SchwabSettings, load_dotenv
+from spx_spark.schwab.auth_storage import (
+    AtomicJsonFile,
+    ExclusiveFileLock,
+    ExclusiveLockUnavailable,
+    token_owner_lock_path,
+)
 
 
 def env_or_prompt(name: str, prompt: str, *, secret: bool = False) -> str:
@@ -86,32 +92,41 @@ def run(argv: list[str] | None = None) -> int:
     if not api_key or not app_secret:
         raise SystemExit("Missing Schwab App Key or App Secret.")
 
-    confirm_overwrite(token_path)
-
-    print()
-    print("Schwab manual OAuth flow")
-    print(f"- Callback URL: {callback_url}")
-    print(f"- Token path:   {token_path}")
-    print()
-    print("Next steps:")
-    print("1. Copy the login URL printed below into your local browser.")
-    print("2. Log in to Schwab and approve access.")
-    print("3. Your browser may fail to connect to 127.0.0.1. That is OK.")
-    print("4. Copy the full final browser address back into this SSH terminal.")
-    print()
-
     try:
         from schwab.auth import client_from_manual_flow
     except ImportError as exc:
-        raise SystemExit("Missing dependency: schwab-py. Run through scripts/create-schwab-token.sh.") from exc
+        raise SystemExit("Missing dependency: schwab-py. Run uv sync --frozen.") from exc
 
-    client_from_manual_flow(
-        api_key=api_key,
-        app_secret=app_secret,
-        callback_url=callback_url,
-        token_path=str(token_path),
-        enforce_enums=False,
-    )
+    owner_lock = ExclusiveFileLock(token_owner_lock_path(token_path))
+    try:
+        with owner_lock.held():
+            confirm_overwrite(token_path)
+
+            print()
+            print("Schwab manual OAuth flow")
+            print(f"- Callback URL: {callback_url}")
+            print(f"- Token path:   {token_path}")
+            print()
+            print("Next steps:")
+            print("1. Copy the login URL printed below into your local browser.")
+            print("2. Log in to Schwab and approve access.")
+            print("3. Your browser may fail to connect to 127.0.0.1. That is OK.")
+            print("4. Copy the full final browser address back into this SSH terminal.")
+            print()
+
+            client_from_manual_flow(
+                api_key=api_key,
+                app_secret=app_secret,
+                callback_url=callback_url,
+                token_path=str(token_path),
+                token_write_func=AtomicJsonFile(token_path).write,
+                enforce_enums=False,
+            )
+    except ExclusiveLockUnavailable as exc:
+        raise SystemExit(
+            "Schwab gateway owns this token file. Use spx-spark-schwab-oauth authorize, "
+            "or stop the gateway before using the manual fallback."
+        ) from exc
     token_path.chmod(0o600)
     print()
     print(f"Wrote {token_path}")

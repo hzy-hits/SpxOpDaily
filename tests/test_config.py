@@ -7,6 +7,7 @@ from spx_spark.config import (
     PolymarketSettings,
     RuntimePolicySettings,
     StorageSettings,
+    SchwabSettings,
     default_spxw_expiry,
     is_time_in_window,
     next_equity_futures_month,
@@ -191,3 +192,20 @@ def test_polymarket_settings_defaults_are_research_context(monkeypatch, tmp_path
     assert settings.min_relevance_score == 0.35
     assert settings.include_closed is False
     assert settings.user_agent
+
+
+def test_schwab_cloudflare_gateway_settings(monkeypatch, tmp_path) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("SCHWAB_CALLBACK_URL", "https://schwab-auth.example.com/oauth/callback")
+    monkeypatch.setenv("SCHWAB_OAUTH_BIND_PORT", "8183")
+    monkeypatch.setenv("SCHWAB_GATEWAY_BIND_PORT", "8184")
+    monkeypatch.setenv("SCHWAB_GATEWAY_URL", "http://127.0.0.1:8184")
+
+    settings = SchwabSettings.from_env()
+
+    assert settings.callback_url == "https://schwab-auth.example.com/oauth/callback"
+    assert settings.oauth_bind_host == "127.0.0.1"
+    assert settings.oauth_bind_port == 8183
+    assert settings.gateway_bind_host == "127.0.0.1"
+    assert settings.gateway_bind_port == 8184
+    assert settings.gateway_url == "http://127.0.0.1:8184"

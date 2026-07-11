@@ -48,3 +48,23 @@ def test_compaction_runner_has_a_non_blocking_whole_run_lock() -> None:
     assert "spx-spark-data-compact.lock" in runner
     assert "flock -n 9" in runner
     assert "compaction_already_running" in runner
+
+
+def test_schwab_oauth_service_is_loopback_only_and_private_by_default() -> None:
+    service = read("systemd/spx-spark-schwab-oauth.service")
+    runner = read("scripts/run-schwab-oauth.sh")
+    installer = read("scripts/install-schwab-oauth-service.sh")
+    env_writer = read("scripts/set-schwab-env.sh")
+
+    assert "scripts/run-schwab-oauth.sh serve" in service
+    assert "UMask=0077" in service
+    assert "NoNewPrivileges=true" in service
+    assert "TasksMax=32" in service
+    assert "MemoryMax=512M" in service
+    assert "LimitCORE=0" in service
+    assert "uv run --frozen" in runner
+    assert "spx-spark-schwab-oauth status" in installer
+    assert "enable --now spx-spark-schwab-oauth.service" in installer
+    assert "Unsupported Schwab environment key" in env_writer
+    assert "umask 077" in env_writer
+    assert "chmod 600" in env_writer

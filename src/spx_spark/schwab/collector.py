@@ -11,7 +11,7 @@ from spx_spark.config import SchwabSettings, StorageSettings, env_csv
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR, ET
 from spx_spark.provider_adapter import persist_provider_snapshot
 from spx_spark.schwab.adapter import snapshot_from_chain_payload
-from spx_spark.schwab.verifier import SchwabClient, load_access_token
+from spx_spark.schwab.verifier import SchwabClient, build_schwab_client
 
 
 def fetch_chain(
@@ -43,12 +43,11 @@ def run(argv: list[str] | None = None) -> int:
     del argv
     settings = SchwabSettings.from_env()
     storage_settings = StorageSettings.from_env()
-    token = load_access_token(settings)
-    if not token:
-        print(json.dumps({"ok": False, "skipped": True, "reason": "missing_schwab_token"}))
+    client = build_schwab_client(settings)
+    if client is None:
+        print(json.dumps({"ok": False, "skipped": True, "reason": "missing_schwab_auth"}))
         return 0
 
-    client = SchwabClient(settings, token)
     symbols = env_csv("SCHWAB_COLLECT_CHAINS", "SPY")
     quote_counts: dict[str, int] = {}
     errors: list[str] = []

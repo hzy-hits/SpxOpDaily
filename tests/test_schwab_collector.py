@@ -31,10 +31,10 @@ def test_fetch_chain_uses_calendar_research_expiries() -> None:
 
 
 def test_collector_skips_without_token(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
-    monkeypatch.setattr(schwab_collector, "load_access_token", lambda _settings: "")
+    monkeypatch.setattr(schwab_collector, "build_schwab_client", lambda _settings: None)
     assert schwab_collector.run() == 0
     output = capsys.readouterr().out
-    assert "missing_schwab_token" in output
+    assert "missing_schwab_auth" in output
 
 
 def test_collector_persists_chain_quotes(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
@@ -63,8 +63,7 @@ def test_collector_persists_chain_quotes(monkeypatch: pytest.MonkeyPatch, capsys
 
     persisted: list[ProviderSnapshot] = []
 
-    monkeypatch.setattr(schwab_collector, "load_access_token", lambda _settings: "token")
-    monkeypatch.setattr(schwab_collector, "SchwabClient", lambda _settings, _token: FakeClient())
+    monkeypatch.setattr(schwab_collector, "build_schwab_client", lambda _settings: FakeClient())
     monkeypatch.setattr(
         schwab_collector,
         "persist_provider_snapshot",

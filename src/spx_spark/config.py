@@ -382,6 +382,16 @@ class SchwabSettings:
     option_chain_strike_count: int
     quote_fields: str
     request_timeout_seconds: float
+    app_key: str = ""
+    app_secret: str = ""
+    callback_url: str = "https://127.0.0.1:8182"
+    oauth_bind_host: str = "127.0.0.1"
+    oauth_bind_port: int = 8183
+    oauth_state_file: str = "runtime/schwab-oauth-state.json"
+    oauth_state_ttl_seconds: int = 900
+    gateway_bind_host: str = "127.0.0.1"
+    gateway_bind_port: int = 8184
+    gateway_url: str = ""
 
     @classmethod
     def from_env(cls) -> "SchwabSettings":
@@ -406,6 +416,19 @@ class SchwabSettings:
                 "quote,reference,extended,regular",
             ),
             request_timeout_seconds=env_float("SCHWAB_REQUEST_TIMEOUT_SECONDS", 12.0),
+            app_key=env_str("SCHWAB_APP_KEY"),
+            app_secret=env_str("SCHWAB_APP_SECRET"),
+            callback_url=env_str("SCHWAB_CALLBACK_URL", "https://127.0.0.1:8182"),
+            oauth_bind_host=env_str("SCHWAB_OAUTH_BIND_HOST", "127.0.0.1"),
+            oauth_bind_port=env_int("SCHWAB_OAUTH_BIND_PORT", 8183),
+            oauth_state_file=env_str(
+                "SCHWAB_OAUTH_STATE_FILE",
+                "runtime/schwab-oauth-state.json",
+            ),
+            oauth_state_ttl_seconds=env_int("SCHWAB_OAUTH_STATE_TTL_SECONDS", 900),
+            gateway_bind_host=env_str("SCHWAB_GATEWAY_BIND_HOST", "127.0.0.1"),
+            gateway_bind_port=env_int("SCHWAB_GATEWAY_BIND_PORT", 8184),
+            gateway_url=env_str("SCHWAB_GATEWAY_URL"),
         )
 
 

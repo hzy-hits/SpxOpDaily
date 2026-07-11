@@ -380,3 +380,7 @@ SCHWAB_TOKEN_FILE=/srv/data/spx-spark/runtime/schwab-token.json
 ```
 
 Keep the repository, virtual environment, and source files under `/home/ubuntu/spx-spark`; keep raw data and runtime tokens under `/srv/data/spx-spark`.
+
+For the production Schwab callback, single-owner refresh client, Cloudflare Tunnel route,
+and localhost gateway deployment, follow
+[schwab-cloudflare-oauth.md](schwab-cloudflare-oauth.md).

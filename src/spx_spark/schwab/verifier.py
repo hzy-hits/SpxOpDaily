@@ -5,11 +5,12 @@ import json
 import sys
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
+from ipaddress import ip_address
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode, urljoin
-from urllib.request import Request, urlopen
+from urllib.parse import urlencode, urljoin, urlsplit
+from urllib.request import ProxyHandler, Request, build_opener, urlopen
 
 from spx_spark.config import SchwabSettings
 from spx_spark.schwab.adapter import quotes_from_quote_payload
@@ -52,23 +53,52 @@ class SchwabClient:
     def __init__(self, settings: SchwabSettings, access_token: str) -> None:
         self.settings = settings
         self.access_token = access_token
+        self.api_base_url = settings.gateway_url or settings.api_base_url
 
     def get_json(self, path: str, params: dict[str, Any]) -> tuple[int, Any]:
-        base = self.settings.api_base_url.rstrip("/") + "/"
+        base = self.api_base_url.rstrip("/") + "/"
         url = urljoin(base, path.lstrip("/"))
         if params:
             url = f"{url}?{urlencode(params)}"
+        headers = {"Accept": "application/json"}
+        if self.access_token:
+            headers["Authorization"] = f"Bearer {self.access_token}"
         request = Request(
             url,
-            headers={
-                "Authorization": f"Bearer {self.access_token}",
-                "Accept": "application/json",
-            },
+            headers=headers,
             method="GET",
         )
-        with urlopen(request, timeout=self.settings.request_timeout_seconds) as response:
+        opener = build_opener(ProxyHandler({})) if self.settings.gateway_url else None
+        open_request = opener.open if opener is not None else urlopen
+        with open_request(request, timeout=self.settings.request_timeout_seconds) as response:
             body = response.read().decode("utf-8")
             return response.status, json.loads(body) if body else None
+
+
+def build_schwab_client(settings: SchwabSettings) -> SchwabClient | None:
+    if settings.gateway_url:
+        validate_gateway_url(settings.gateway_url)
+        return SchwabClient(settings, "")
+    token = load_access_token(settings)
+    if not token:
+        return None
+    return SchwabClient(settings, token)
+
+
+def validate_gateway_url(value: str) -> None:
+    parsed = urlsplit(value)
+    if parsed.scheme != "http" or not parsed.hostname or parsed.username or parsed.password:
+        raise ValueError("SCHWAB_GATEWAY_URL must be an unauthenticated localhost HTTP URL")
+    if parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
+        raise ValueError("SCHWAB_GATEWAY_URL cannot contain a path, query, or fragment")
+    if parsed.hostname.lower() == "localhost":
+        return
+    try:
+        address = ip_address(parsed.hostname)
+    except ValueError as exc:
+        raise ValueError("SCHWAB_GATEWAY_URL must use an IPv4 loopback host") from exc
+    if address.version != 4 or not address.is_loopback:
+        raise ValueError("SCHWAB_GATEWAY_URL must use an IPv4 loopback host")
 
 
 def chunked(values: list[str], size: int) -> list[list[str]]:
@@ -259,7 +289,7 @@ def write_snapshot(settings: SchwabSettings, results: list[SchwabCheckResult]) -
     output_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now(tz=timezone.utc).strftime("%Y%m%d-%H%M%S")
     output_path = output_dir / f"schwab-verifier-{timestamp}.json"
-    safe_settings = asdict(settings) | {"access_token": "***" if settings.access_token else ""}
+    safe_settings = safe_settings_dict(settings)
     payload = {
         "created_at": datetime.now(tz=timezone.utc).isoformat(),
         "settings": safe_settings,
@@ -280,6 +310,13 @@ def print_offline_plan(settings: SchwabSettings) -> None:
     print(json.dumps(plan, indent=2, sort_keys=True))
 
 
+def safe_settings_dict(settings: SchwabSettings) -> dict[str, Any]:
+    safe = asdict(settings)
+    for key in ("access_token", "app_key", "app_secret"):
+        safe[key] = "***" if safe.get(key) else ""
+    return safe
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Verify Schwab market data availability.")
     parser.add_argument("--print-config", action="store_true")
@@ -292,7 +329,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def run(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     settings = SchwabSettings.from_env()
-    safe_settings = asdict(settings) | {"access_token": "***" if settings.access_token else ""}
+    safe_settings = safe_settings_dict(settings)
 
     if args.print_config:
         print(json.dumps(safe_settings, indent=2, sort_keys=True))
@@ -301,16 +338,15 @@ def run(argv: list[str] | None = None) -> int:
         print_offline_plan(settings)
         return 0
 
-    token = load_access_token(settings)
-    if not token:
+    client = build_schwab_client(settings)
+    if client is None:
         print(
-            "Missing Schwab access token. Set SCHWAB_ACCESS_TOKEN or SCHWAB_TOKEN_FILE, "
-            "or run with --offline to inspect the verification universe.",
+            "Schwab is not configured. Set SCHWAB_GATEWAY_URL, or provide a legacy "
+            "SCHWAB_ACCESS_TOKEN/SCHWAB_TOKEN_FILE, or run with --offline.",
             file=sys.stderr,
         )
         return 2
 
-    client = SchwabClient(settings, token)
     results: list[SchwabCheckResult] = []
     if not args.skip_quotes:
         results.extend(verify_quotes(client, settings))

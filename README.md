@@ -155,15 +155,20 @@ that layer instead of being silently replaced.
 ## Schwab Verifier
 
 ```bash
-scripts/create-schwab-token.sh
+scripts/run-schwab-oauth.sh status
+scripts/run-schwab-oauth.sh authorize
 scripts/run-schwab-verifier.sh --offline
 scripts/run-schwab-verifier.sh --print-config
 scripts/run-schwab-verifier.sh
 ```
 
-The token helper runs Schwab's manual OAuth flow for SSH/headless hosts. The verifier reads
-`SCHWAB_ACCESS_TOKEN` or `SCHWAB_TOKEN_FILE`. It checks candidate index quotes, ETF/futures
-quotes, and option chains without placing orders.
+The verifier checks candidate index quotes, ETF/futures quotes, and option chains without
+placing orders. `scripts/create-schwab-token.sh` remains a manual fallback only: stop the
+gateway before using it. A process owner lock prevents both flows from touching one token file.
+
+For production, use the dedicated Cloudflare callback plus localhost data gateway. One
+long-running process owns the refresh-capable Schwab client; collectors never race on the token
+file. See [docs/schwab-cloudflare-oauth.md](docs/schwab-cloudflare-oauth.md).
 
 ## Maintenance Dry Run
 

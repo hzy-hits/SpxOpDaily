@@ -7,6 +7,7 @@ dependencies = [
   "duckdb>=1.4,<2",
   "ib-async>=2.0.0",
   "pytz>=2025.2",
+  "schwab-py==1.5.1",
 ]
 
 [project.scripts]
@@ -38,6 +39,7 @@ spx-spark-service-loop = "spx_spark.service_loop:main"
 spx-spark-sampling-plan = "spx_spark.sampling:main"
 spx-spark-schwab-verifier = "spx_spark.schwab.verifier:main"
 spx-spark-schwab-collector = "spx_spark.schwab.collector:main"
+spx-spark-schwab-oauth = "spx_spark.schwab.oauth_service:main"
 spx-spark-weixin-digest = "spx_spark.notifier.digest_cli:main"
 
 [dependency-groups]
