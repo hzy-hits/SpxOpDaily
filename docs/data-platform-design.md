@@ -37,6 +37,12 @@ spool. The hourly batch automatically replays the spool, and a 64 MiB default
 ceiling prevents an outage from consuming the filesystem indefinitely.
 Compaction and DuckDB queries run out of process.
 
+Fallback notification events include the attempt time and immutable event
+content in their deterministic identity. Delivery identities include the full
+immutable delivery result. Repeating the same fact remains idempotent, while a
+later status or error-code observation is stored as a new fact instead of
+conflicting with an earlier immutable row.
+
 The operational ledger is event-driven: it records actual alert candidates,
 delivery/reviewer outcomes and fixed-horizon results, not every neutral 5-second
 evaluation. Continuous quote history belongs in compressed Parquet.

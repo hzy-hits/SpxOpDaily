@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from spx_spark.data_platform.adapters.memory import InMemoryDecisionLedger
 from spx_spark.data_platform.adapters.sqlite_ledger import SQLiteDecisionLedger
+from spx_spark.data_platform.contracts import DecisionRecord, EventRecord
 from spx_spark.data_platform.integration import (
     record_intraday_evaluation,
     record_notification_result,
@@ -121,6 +122,124 @@ def test_intraday_decision_delivery_and_outcome_share_stable_links(tmp_path) -> 
     assert len(ledger.outcomes) == 1
     combined = " ".join(str(row) for row in ledger.events.values())
     assert "raw-event-never-persist" not in combined
+
+
+def test_fallback_notification_events_are_scoped_to_attempt_and_content(tmp_path) -> None:
+    ledger = InMemoryDecisionLedger()
+    spool = FallbackSpool(tmp_path / "fallback.jsonl")
+    telemetry = OperationalTelemetry(ledger, spool)
+    settings = disabled_settings(tmp_path)
+    alert = {
+        "kind": "price_move_from_close",
+        "dedup_group": "price_move_from_close:SPX",
+        "severity": "high",
+        "quality": "live",
+        "source_at": NOW.isoformat(),
+        "title": "SPX move",
+        "detail": "first observation",
+    }
+
+    first = record_notification_result(
+        payload={"as_of": NOW.isoformat()},
+        selected_alerts=(alert,),
+        notification={"sinks": [{"sink": "feishu", "attempted": True, "ok": False}]},
+        attempted_at=NOW + timedelta(seconds=1),
+        settings=settings,
+        telemetry=telemetry,
+    )
+    second = record_notification_result(
+        payload={"as_of": NOW.isoformat()},
+        selected_alerts=({**alert, "quality": "degraded"},),
+        notification={"sinks": [{"sink": "feishu", "attempted": True, "ok": True}]},
+        attempted_at=NOW + timedelta(seconds=1),
+        settings=settings,
+        telemetry=telemetry,
+    )
+    third = record_notification_result(
+        payload={"as_of": NOW.isoformat()},
+        selected_alerts=(alert,),
+        notification={"sinks": [{"sink": "feishu", "attempted": True, "ok": False}]},
+        attempted_at=NOW + timedelta(seconds=2),
+        settings=settings,
+        telemetry=telemetry,
+    )
+
+    assert len(first) == len(second) == len(third) == 1
+    assert len({first[0], second[0], third[0]}) == 3
+    assert len(ledger.events) == 3
+    assert len(ledger.decisions) == 3
+    assert not spool.path.exists()
+
+
+def test_delivery_content_change_gets_new_immutable_delivery_id(tmp_path) -> None:
+    ledger = InMemoryDecisionLedger()
+    spool = FallbackSpool(tmp_path / "fallback.jsonl")
+    telemetry = OperationalTelemetry(ledger, spool)
+    settings = disabled_settings(tmp_path)
+    event_record = EventRecord(
+        event_key="evt_test",
+        event_type="flip_reclaim_call",
+        session_date=date(2026, 7, 10),
+        source_at=NOW,
+        available_at=NOW,
+        data_quality="live",
+    )
+    decision_record = DecisionRecord(
+        decision_id="dec_test",
+        event_key="evt_test",
+        strategy_name="intraday",
+        strategy_version="v1",
+        decision_at=NOW,
+        available_at=NOW,
+        status="selected",
+        action="notify",
+        side="call",
+    )
+    assert (
+        telemetry.record_decision_bundle(event=event_record, decision=decision_record).status
+        == "recorded"
+    )
+    alert = {
+        "kind": "flip_reclaim_call",
+        "event_key": "evt_test",
+        "decision_id": "dec_test",
+        "severity": "high",
+        "source_at": NOW.isoformat(),
+        "title": "call confirmed",
+        "detail": "confirmed",
+    }
+    attempted_at = NOW + timedelta(seconds=1)
+
+    failed = record_notification_result(
+        payload={"as_of": NOW.isoformat()},
+        selected_alerts=(alert,),
+        notification={
+            "sinks": [
+                {
+                    "sink": "feishu",
+                    "attempted": True,
+                    "ok": False,
+                    "error": "temporary failure",
+                }
+            ]
+        },
+        attempted_at=attempted_at,
+        settings=settings,
+        telemetry=telemetry,
+    )
+    sent = record_notification_result(
+        payload={"as_of": NOW.isoformat()},
+        selected_alerts=(alert,),
+        notification={"sinks": [{"sink": "feishu", "attempted": True, "ok": True}]},
+        attempted_at=attempted_at,
+        settings=settings,
+        telemetry=telemetry,
+    )
+
+    assert len(failed) == len(sent) == 1
+    assert failed != sent
+    assert {row.status for row in ledger.list_deliveries("dec_test")} == {"failed", "sent"}
+    assert not spool.path.exists()
 
 
 def test_disabled_integration_is_noop(tmp_path) -> None:

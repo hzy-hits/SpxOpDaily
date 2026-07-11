@@ -373,7 +373,27 @@ def record_notification_result(
                 alert.get("detail"),
             )
         )
-        event_key = str(alert.get("event_key") or make_event_key(kind, source_at, source_identity))
+        phase = _phase_for_kind(kind)
+        direction = _direction_from_alert(alert)
+        data_quality = str(alert.get("quality") or "unknown")
+        severity = str(alert.get("severity") or "")
+        event_revision = deterministic_id(
+            "event_revision",
+            attempted_at,
+            phase,
+            direction,
+            data_quality,
+            severity,
+        )
+        event_key = str(
+            alert.get("event_key")
+            or make_event_key(
+                kind,
+                source_at,
+                source_identity,
+                event_revision,
+            )
+        )
         decision_id = str(
             alert.get("decision_id")
             or make_decision_id(
@@ -392,10 +412,10 @@ def record_notification_result(
                 source_at=source_at,
                 received_at=attempted_at,
                 available_at=attempted_at,
-                phase=_phase_for_kind(kind),
-                direction=_direction_from_alert(alert),
-                data_quality=str(alert.get("quality") or "unknown"),
-                attributes={"severity": str(alert.get("severity") or "")},
+                phase=phase,
+                direction=direction,
+                data_quality=data_quality,
+                attributes={"severity": severity},
             )
             decision = DecisionRecord(
                 decision_id=decision_id,
@@ -408,7 +428,7 @@ def record_notification_result(
                 action="notify",
                 side=_side_for(kind),
                 reason=str(alert.get("source_gate") or "") or None,
-                attributes={"severity": str(alert.get("severity") or "")},
+                attributes={"severity": severity},
             )
             target.record_decision_bundle(event=event, decision=decision)
 
@@ -438,6 +458,28 @@ def record_notification_result(
                 ok=ok,
                 verdict=verdict,
             )
+            provider = _delivery_provider(channel)
+            sent_at = attempted_at if status == "sent" else None
+            veto_reason = (
+                str(sink.get("error"))
+                if sink.get("error") is not None
+                and status in {"vetoed", "blocked", "suppressed"}
+                else None
+            )
+            error_code = (
+                str(sink.get("error")) if sink.get("error") is not None else None
+            )
+            attributes = {
+                "attempted": attempted,
+                "ok": ok,
+                "verdict": verdict,
+                "dry_run": bool(sink.get("dry_run")),
+                "exit_code": (
+                    sink.get("exit_code")
+                    if isinstance(sink.get("exit_code"), int)
+                    else None
+                ),
+            }
             delivery = DeliveryRecord(
                 delivery_id=deterministic_id(
                     "delivery",
@@ -445,32 +487,24 @@ def record_notification_result(
                     channel,
                     attempted_at,
                     sink_index,
+                    provider,
+                    status,
+                    sent_at,
+                    veto_reason,
+                    error_code,
+                    fingerprint,
+                    attributes,
                 ),
                 decision_id=decision_id,
                 channel=channel,
-                provider=_delivery_provider(channel),
+                provider=provider,
                 status=status,
                 attempted_at=attempted_at,
-                sent_at=attempted_at if status == "sent" else None,
-                veto_reason=(
-                    str(sink.get("error"))
-                    if sink.get("error") is not None
-                    and status in {"vetoed", "blocked", "suppressed"}
-                    else None
-                ),
-                error_code=(
-                    str(sink.get("error")) if sink.get("error") is not None else None
-                ),
+                sent_at=sent_at,
+                veto_reason=veto_reason,
+                error_code=error_code,
                 message_fingerprint=fingerprint,
-                attributes={
-                    "attempted": attempted,
-                    "ok": ok,
-                    "verdict": verdict,
-                    "dry_run": bool(sink.get("dry_run")),
-                    "exit_code": sink.get("exit_code")
-                    if isinstance(sink.get("exit_code"), int)
-                    else None,
-                },
+                attributes=attributes,
             )
             result = target.record_delivery(delivery)
             if result.status in {"recorded", "spooled"}:
