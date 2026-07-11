@@ -62,6 +62,21 @@ WebSocket shadow acceptance is complete. This preserves the existing five-second
 IBKR fast lane while the new control state and transition notifications run in
 observation mode.
 
+### Current entitlement: Market Data only, no Trader API
+
+The deployed Schwab developer app currently has **Market Data product access
+only**; it is **not** authorized for the Trader API (`/trader/v1/*`). The
+WebSocket streamer login requires `/trader/v1/userPreference` to fetch
+`streamerInfo`, so that call returns `401` even while Market Data REST quote
+requests (`/marketdata/v1/quotes`, `/marketdata/v1/chains`) return `200`. This
+is an account/app entitlement gap, not a token or code bug.
+
+Consequently `schwab.streaming.mode` must stay `off` until Trader API access is
+granted on the Schwab developer app and an RTH shadow-mode acceptance pass is
+completed. Do not switch it to `shadow` or `live` before that, or the OAuth/
+gateway process will loop on 401 streamer-login retries. REST quote and
+option-chain collection are unaffected by this restriction.
+
 The OAuth/gateway process now owns the optional Schwab WebSocket as well as the
 refreshable token. Its default `shadow` mode subscribes the configured SPX,
 SPY, RSP, ES, and MES Level-One universe, writes normal raw rows tagged

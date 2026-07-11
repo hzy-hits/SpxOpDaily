@@ -147,8 +147,8 @@ schwab:
       description: Collection cadence balancing 0DTE responsiveness against the 120-request-per-minute budget.
   streaming:
     mode:
-      value: shadow
-      description: Schwab WebSocket activation mode; off disables it, shadow persists a separate latest state, and live may update production latest state after RTH acceptance.
+      value: "off"
+      description: Schwab WebSocket activation mode; off disables it, shadow persists a separate latest state, and live may update production latest state after RTH acceptance. Must stay off while the Schwab developer app only has Market Data product access (no Trader API/streamerInfo entitlement); see docs/schwab-primary-ibkr-fallback.md.
     canonical_symbols:
       value: [SPX, SPY, RSP, ES, MES]
       description: Small direct-anchor and breadth universe subscribed through Schwab Level-One streaming; futures roots resolve to concrete active contracts.

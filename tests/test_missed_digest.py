@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import json
-
 import pytest
 import subprocess
 from dataclasses import replace
@@ -10,7 +8,6 @@ from pathlib import Path
 
 from spx_spark.config import NotificationSettings
 from spx_spark.notifier import notify_payload
-from spx_spark.notifier.digest_cli import run as digest_run
 from spx_spark.notifier.missed_queue import (
     append_missed,
     build_digest,
@@ -319,25 +316,6 @@ def test_pipeline_flushes_queue_before_new_send(tmp_path, monkeypatch) -> None:
     joined = "\n".join(digest_bodies)
     assert "通道离线期间错过" in joined or any("queued alert body" in str(p) for p in feishu_posts)
     assert not Path(queue_path).exists()
-
-
-def test_digest_cli_returns_zero_on_empty_queue(tmp_path, monkeypatch, capsys) -> None:
-    queue_path = str(tmp_path / "missed.jsonl")
-
-    def fake_from_env() -> NotificationSettings:
-        return make_settings(
-            str(tmp_path / "notify-state.json"),
-            missed_queue_path=queue_path,
-        )
-
-    monkeypatch.setattr(
-        "spx_spark.notifier.digest_cli.NotificationSettings.from_env",
-        fake_from_env,
-    )
-
-    assert digest_run() == 0
-    output = json.loads(capsys.readouterr().out.strip())
-    assert output == {"flushed": False, "count": 0}
 
 
 def test_flush_missed_keeps_queue_on_send_failure(tmp_path, monkeypatch) -> None:

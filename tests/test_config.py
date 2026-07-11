@@ -243,7 +243,7 @@ def test_schwab_cloudflare_gateway_settings(monkeypatch, tmp_path) -> None:
     assert settings.gateway_url == "http://127.0.0.1:8184"
 
 
-def test_schwab_stream_defaults_to_shadow_with_separate_latest_state(
+def test_schwab_stream_defaults_to_off_with_separate_latest_state_path(
     monkeypatch,
     tmp_path,
 ) -> None:
@@ -251,7 +251,10 @@ def test_schwab_stream_defaults_to_shadow_with_separate_latest_state(
 
     settings = SchwabStreamSettings.from_env()
 
-    assert settings.mode == "shadow"
+    # Default is off: the deployed Schwab app has Market Data access only, no
+    # Trader API entitlement, so the streamer login 401s. See
+    # docs/schwab-primary-ibkr-fallback.md.
+    assert settings.mode == "off"
     assert settings.canonical_symbols == ("SPX", "SPY", "RSP", "ES", "MES")
     assert settings.symbol_refresh_interval_seconds == 300.0
     assert settings.shadow_latest_path == str(tmp_path / "latest" / "schwab_stream_shadow.json")
