@@ -4,6 +4,7 @@ import json
 import os
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from statistics import median
 
 from spx_spark.marketdata import MarketDataQuality, Quote
 from spx_spark.runtime_config import runtime_value
@@ -20,7 +21,7 @@ DEFAULT_MARKET_CONTEXT_INSTRUMENTS = (
     "index:SKEW",
     "index:NDX",
     "index:RUT",
-    "index:DJX",
+    "index:DJI",
     "index:DJU",
     "equity:SPY",
     "equity:QQQ",
@@ -46,6 +47,12 @@ BAD_CONTEXT_QUALITIES = {
     MarketDataQuality.ERROR.value,
     MarketDataQuality.STALE.value,
     MarketDataQuality.UNKNOWN.value,
+}
+
+SECTOR_BREADTH_QUALITIES = {
+    MarketDataQuality.LIVE,
+    MarketDataQuality.FROZEN,
+    MarketDataQuality.STALE,
 }
 
 HYPERLIQUID_PROXY_IDS = (
@@ -90,11 +97,7 @@ def build_market_context(
     entries = [context_entry(state, instrument_id) for instrument_id in instrument_ids]
     by_id = {entry.instrument_id: entry for entry in entries}
     live_count = sum(1 for entry in entries if entry.quality == MarketDataQuality.LIVE.value)
-    usable_count = sum(
-        1
-        for entry in entries
-        if entry.price is not None and entry.research_usable
-    )
+    usable_count = sum(1 for entry in entries if entry.price is not None and entry.research_usable)
     return {
         "as_of": state.as_of.isoformat(),
         "entries": [entry.to_dict() for entry in entries],
@@ -114,6 +117,7 @@ def build_market_context(
             "xlu_spy": ratio(by_id, "equity:XLU", "equity:SPY"),
             "hyg_lqd": ratio(by_id, "equity:HYG", "equity:LQD"),
             "tlt_ief": ratio(by_id, "equity:TLT", "equity:IEF"),
+            "spx_sector_breadth": spx_sector_breadth(state),
             "hyperliquid_spx_proxy": hyperliquid_spx_proxy_gate(by_id),
             "polymarket_context": load_latest_polymarket_context(),
         },
@@ -183,6 +187,110 @@ def ratio(
     if numerator.price is None or denominator.price is None or denominator.price <= 0:
         return None
     return numerator.price / denominator.price
+
+
+def spx_sector_breadth(state: LatestState) -> dict[str, object]:
+    raw_instrument_ids = runtime_value("market_context.spx_sector_instrument_ids")
+    if not isinstance(raw_instrument_ids, list):
+        raise TypeError("market_context.spx_sector_instrument_ids must be a list")
+    instrument_ids = tuple(str(value) for value in raw_instrument_ids)
+    min_usable = int(runtime_value("market_context.sector_breadth_min_usable"))
+    max_age_ms = float(runtime_value("market_context.sector_quote_max_age_seconds")) * 1_000.0
+    unchanged_band = float(runtime_value("market_context.sector_unchanged_band_bps"))
+    directional_score = float(runtime_value("market_context.sector_directional_bias_score"))
+    confirmation_move = float(runtime_value("market_context.direction_confirmation_move_bps"))
+
+    usable_moves: list[float] = []
+    for instrument_id in instrument_ids:
+        move = fresh_move_from_close_bps(
+            state,
+            instrument_id,
+            max_age_ms=max_age_ms,
+        )
+        if move is not None:
+            usable_moves.append(move)
+
+    advancing = sum(move > unchanged_band for move in usable_moves)
+    declining = sum(move < -unchanged_band for move in usable_moves)
+    unchanged = len(usable_moves) - advancing - declining
+    breadth_score = (advancing - declining) / len(usable_moves) if usable_moves else None
+    sufficient = len(usable_moves) >= min_usable
+
+    spy_move = fresh_move_from_close_bps(
+        state,
+        "equity:SPY",
+        max_age_ms=max_age_ms,
+    )
+    rsp_move = fresh_move_from_close_bps(
+        state,
+        "equity:RSP",
+        max_age_ms=max_age_ms,
+    )
+    confirmations_available = spy_move is not None and rsp_move is not None
+    directional_bias = "neutral_unclear"
+    if sufficient and breadth_score is not None and confirmations_available:
+        assert spy_move is not None
+        assert rsp_move is not None
+        if (
+            breadth_score >= directional_score
+            and spy_move >= confirmation_move
+            and rsp_move >= confirmation_move
+        ):
+            directional_bias = "bullish"
+        elif (
+            breadth_score <= -directional_score
+            and spy_move <= -confirmation_move
+            and rsp_move <= -confirmation_move
+        ):
+            directional_bias = "bearish"
+        else:
+            directional_bias = "mixed_tactical"
+
+    if not sufficient:
+        state_label = "insufficient_fresh_sectors"
+    elif confirmations_available:
+        state_label = "usable_confirmed"
+    else:
+        state_label = "usable_unconfirmed"
+
+    return {
+        "state": state_label,
+        "confirmation_state": (
+            "spy_rsp_confirmed" if confirmations_available else "spy_rsp_missing_or_stale"
+        ),
+        "directional_bias": directional_bias,
+        "usable_sector_count": len(usable_moves),
+        "configured_sector_count": len(instrument_ids),
+        "advancing_sector_count": advancing,
+        "declining_sector_count": declining,
+        "unchanged_sector_count": unchanged,
+        "breadth_score": breadth_score,
+        "median_sector_move_bps": median(usable_moves) if usable_moves else None,
+        "spy_move_bps": spy_move,
+        "rsp_move_bps": rsp_move,
+        "minimum_usable_sectors": min_usable,
+        "directional_score_threshold": directional_score,
+        "confirmation_move_bps": confirmation_move,
+    }
+
+
+def fresh_move_from_close_bps(
+    state: LatestState,
+    instrument_id: str,
+    *,
+    max_age_ms: float,
+) -> float | None:
+    quote = state.best_quote(instrument_id)
+    if quote is None or quote.quality not in SECTOR_BREADTH_QUALITIES:
+        return None
+    age_ms = quote.quote_age_ms(state.as_of)
+    if age_ms is None or age_ms > max_age_ms:
+        return None
+    price = quote.effective_price
+    close = quote.close
+    if price is None or close is None or close <= 0:
+        return None
+    return (price / close - 1.0) * 10_000.0
 
 
 def env_float(name: str, default: float) -> float:

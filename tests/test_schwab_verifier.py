@@ -1,5 +1,6 @@
 import json
 from dataclasses import replace
+from datetime import date
 
 import pytest
 
@@ -150,3 +151,32 @@ def test_option_chain_verifier_maps_spx_to_provider_index_symbol(tmp_path):
     assert client.symbols == ["$SPX", "$SPX", "$XSP", "SPY"]
     assert [result.label for result in results] == ["SPX", "SPXW", "XSP", "SPY"]
     assert all(result.ok for result in results)
+
+
+def test_quote_verifier_resolves_logical_future_root(tmp_path):
+    settings = replace(
+        make_settings(str(tmp_path / "token.json")),
+        verify_indexes=[],
+        verify_equities=[],
+        verify_futures=["/ES", "/MES"],
+    )
+
+    class RecordingClient:
+        def __init__(self) -> None:
+            self.symbols = ""
+
+        def get_json(self, path: str, params: dict[str, object]) -> tuple[int, object]:
+            assert path == "/marketdata/v1/quotes"
+            self.symbols = str(params["symbols"])
+            return 200, {}
+
+    client = RecordingClient()
+    results = verify_quotes(  # type: ignore[arg-type]
+        client,
+        settings,
+        now=date(2026, 7, 11),
+    )
+
+    assert client.symbols == "/ESU26,/MESU26"
+    assert len(results) == 1
+    assert results[0].ok is True

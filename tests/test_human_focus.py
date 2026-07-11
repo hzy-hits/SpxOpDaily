@@ -209,3 +209,57 @@ def test_micopedia_context_includes_dip_context_vix_ratio_and_event_tags(
     assert context["dip_context"]
     assert context["vix_ratio"] == 0.95
     assert context["regime"] == "high_vol_event"
+
+
+def test_micopedia_context_consumes_confirmed_sector_breadth_bias() -> None:
+    now = datetime(2026, 7, 6, 14, 0, tzinfo=timezone.utc)
+    state = LatestState(created_at=now, as_of=now, quotes=(), best_quotes=())
+
+    context = micopedia_context(
+        state,
+        options_map=make_options_map(gamma_state="mixed_gamma"),
+        window={"name": "rth"},
+        spx_sector_breadth={
+            "state": "usable_confirmed",
+            "directional_bias": "bullish",
+        },
+    )
+
+    assert context["directional_bias"] == "bullish"
+    assert "call spread" in context["candidate_expression"]
+
+    unconfirmed = micopedia_context(
+        state,
+        options_map=make_options_map(gamma_state="mixed_gamma"),
+        window={"name": "rth"},
+        spx_sector_breadth={
+            "state": "usable_unconfirmed",
+            "directional_bias": "bullish",
+        },
+    )
+    assert unconfirmed["directional_bias"] == "neutral_unclear"
+    assert (
+        unconfirmed["directional_bias_source"]
+        == "fresh_spx_sector_breadth_without_spy_rsp_confirmation"
+    )
+
+
+def test_human_context_marks_disabled_position_tracking_as_no_account_visibility(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("IBKR_POSITIONS_ENABLED", "false")
+    now = datetime(2026, 7, 6, 14, 0, tzinfo=timezone.utc)
+    state = LatestState(created_at=now, as_of=now, quotes=(), best_quotes=())
+
+    context = build_human_focus_context(
+        state,
+        options_map=make_options_map(gamma_state="mixed_gamma"),
+        iv_surface=None,
+        iv_surface_history_1h=None,
+        window={"name": "rth"},
+    )
+
+    awareness = context["position_awareness"]
+    assert awareness["enabled"] is False
+    assert awareness["state"] == "disabled_no_account_visibility"
+    assert "must not assume the account is flat" in awareness["risk_boundary"]

@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from spx_spark.config import env_csv
+from spx_spark.config import IbkrPositionSettings, env_csv
 from spx_spark.greek_reference import build_zero_dte_greeks_reference
 from spx_spark.iv_surface import IvSurfaceSnapshot
+from spx_spark.market_context import build_market_context
 from spx_spark.marketdata import MarketDataQuality, Quote
 from spx_spark.options_map import ExpiryOptionsMap, OptionsMap
 from spx_spark.runtime_config import runtime_csv
@@ -182,6 +183,7 @@ def micopedia_context(
     *,
     options_map: OptionsMap,
     window: dict[str, object],
+    spx_sector_breadth: dict[str, object] | None = None,
 ) -> dict[str, object]:
     front = options_map.expiries[0] if options_map.expiries else None
     key_levels = [
@@ -202,6 +204,14 @@ def micopedia_context(
             as_of=state.as_of,
         ).research_usable
     )
+    breadth_state = str((spx_sector_breadth or {}).get("state") or "")
+    breadth_bias = str((spx_sector_breadth or {}).get("directional_bias") or "")
+    directional_bias = (
+        breadth_bias
+        if breadth_state == "usable_confirmed"
+        and breadth_bias in {"bullish", "bearish", "mixed_tactical", "neutral_unclear"}
+        else "neutral_unclear"
+    )
     inputs = MicopediaInputs(
         created_at=state.as_of,
         underlier_price=options_map.underlier.price,
@@ -210,7 +220,7 @@ def micopedia_context(
         skew_index=effective_price(state, "index:SKEW"),
         put_skew_ratio=(front.put_skew_ratio if front else None),
         gamma_state=gamma_state_for_micopedia(options_map),
-        directional_bias="neutral_unclear",
+        directional_bias=directional_bias,
         time_phase=time_phase_from_window(window),
         event_tags=tuple(env_csv("MICOPEDIA_EVENT_TAGS", runtime_csv("human_focus.event_tags"))),
         key_levels=tuple(key_levels),
@@ -218,10 +228,17 @@ def micopedia_context(
         has_es_data=has_es_data,
     )
     signal = build_micopedia_signal(inputs)
+    if breadth_state == "usable_confirmed":
+        directional_bias_source = "fresh_spx_sector_breadth_spy_rsp"
+    elif breadth_state == "usable_unconfirmed":
+        directional_bias_source = "fresh_spx_sector_breadth_without_spy_rsp_confirmation"
+    else:
+        directional_bias_source = "none_insufficient_fresh_breadth"
     return {
         "source": signal.source,
         "regime": signal.regime,
         "directional_bias": signal.directional_bias,
+        "directional_bias_source": directional_bias_source,
         "confidence": signal.confidence,
         "dip_context": signal.dip_context,
         "vix_ratio": inputs.vix_ratio,
@@ -308,8 +325,28 @@ def build_human_focus_context(
     surface_expiries = (
         surface_payload.get("expiries", []) if isinstance(surface_payload, dict) else []
     )
+    market_context = build_market_context(state)
+    market_derived = market_context.get("derived")
+    spx_sector_breadth = (
+        market_derived.get("spx_sector_breadth")
+        if isinstance(market_derived, dict)
+        and isinstance(market_derived.get("spx_sector_breadth"), dict)
+        else {}
+    )
+    position_settings = IbkrPositionSettings.from_env()
     return {
-        "visible_scope": ("SPX", "SPXW", "ES", "VIX", "VIX1D", "VIX9D", "VIX3M", "VVIX", "SKEW"),
+        "visible_scope": (
+            "SPX",
+            "SPXW",
+            "ES",
+            "SPX breadth",
+            "VIX",
+            "VIX1D",
+            "VIX9D",
+            "VIX3M",
+            "VVIX",
+            "SKEW",
+        ),
         "prices": {
             "spx": quote_summary(state, "index:SPX"),
             "es": quote_summary(state, "future:ES"),
@@ -321,6 +358,21 @@ def build_human_focus_context(
             "vix3m": quote_summary(state, "index:VIX3M"),
             "vvix": quote_summary(state, "index:VVIX"),
             "skew": quote_summary(state, "index:SKEW"),
+        },
+        "spx_breadth": spx_sector_breadth,
+        "position_awareness": {
+            "enabled": position_settings.enabled,
+            "state": (
+                "enabled_snapshot_required"
+                if position_settings.enabled
+                else "disabled_no_account_visibility"
+            ),
+            "scope": "IBKR SPXW positions only",
+            "risk_boundary": (
+                "When disabled, the system must not assume the account is flat and cannot emit "
+                "position open, close, quantity-change, or book-PnL alerts. Automated stop and "
+                "time-exit handling is not implemented even when tracking is enabled."
+            ),
         },
         "spxw_options": {
             "underlier_price": options_map.underlier.price,
@@ -347,6 +399,11 @@ def build_human_focus_context(
             ],
             "warnings": iv_surface.warnings if iv_surface else (),
         },
-        "micopedia": micopedia_context(state, options_map=options_map, window=window),
+        "micopedia": micopedia_context(
+            state,
+            options_map=options_map,
+            window=window,
+            spx_sector_breadth=spx_sector_breadth,
+        ),
         "data_warnings": human_data_warnings(state, options_map=options_map, iv_surface=iv_surface),
     }

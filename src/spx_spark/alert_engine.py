@@ -50,7 +50,7 @@ BASELINE_INSTRUMENTS = (
     "index:SKEW",
     "index:NDX",
     "index:RUT",
-    "index:DJX",
+    "index:DJI",
     "index:DJU",
     "equity:SPY",
     "equity:QQQ",
@@ -114,7 +114,12 @@ OPTION_GAMMA_ALERT_STATES = {
     "zero_gamma_transition",
 }
 
-BAD_SURFACE_QUALITIES = {"missing_options", "missing_atm_iv", "low_iv_coverage", "wide_quote_degraded"}
+BAD_SURFACE_QUALITIES = {
+    "missing_options",
+    "missing_atm_iv",
+    "low_iv_coverage",
+    "wide_quote_degraded",
+}
 BLOCKING_SURFACE_QUALITIES = {"missing_options", "missing_atm_iv"}
 DEGRADED_SURFACE_QUALITIES = {"low_iv_coverage", "wide_quote_degraded"}
 # Algorithm thresholds in absolute IV / skew units (not env-tunable identities).
@@ -282,12 +287,15 @@ def build_movement_state_payload(
     )
     instruments: dict[str, object] = {}
     for instrument_id in BASELINE_INSTRUMENTS:
-        if instrument_id.startswith("crypto_perp:") and not hyperliquid_proxy_usable(market_context):
+        if instrument_id.startswith("crypto_perp:") and not hyperliquid_proxy_usable(
+            market_context
+        ):
             continue
         quote = find_best(state, instrument_id)
-        if quote is None or not configured_quote_use_decision(
-            quote, as_of=state.as_of
-        ).alert_allowed:
+        if (
+            quote is None
+            or not configured_quote_use_decision(quote, as_of=state.as_of).alert_allowed
+        ):
             continue
         move_bps = move_from_close_bps(quote)
         if move_bps is None:
@@ -346,12 +354,15 @@ def movement_alerts(
     alerts: list[Alert] = []
     new_instruments: dict[str, object] = {}
     for instrument_id in BASELINE_INSTRUMENTS:
-        if instrument_id.startswith("crypto_perp:") and not hyperliquid_proxy_usable(market_context):
+        if instrument_id.startswith("crypto_perp:") and not hyperliquid_proxy_usable(
+            market_context
+        ):
             continue
         quote = find_best(state, instrument_id)
-        if quote is None or not configured_quote_use_decision(
-            quote, as_of=state.as_of
-        ).alert_allowed:
+        if (
+            quote is None
+            or not configured_quote_use_decision(quote, as_of=state.as_of).alert_allowed
+        ):
             continue
         move_bps = move_from_close_bps(quote)
         if move_bps is None:
@@ -385,7 +396,11 @@ def movement_alerts(
                 float(runtime_value("alerts.move_high_severity_em_fraction")),
             )
             em_day_bps = expected_move_pct * 10_000.0
-            if abs(move_bps) >= em_day_bps * escalation_fraction and severity in ("info", "low", "medium"):
+            if abs(move_bps) >= em_day_bps * escalation_fraction and severity in (
+                "info",
+                "low",
+                "medium",
+            ):
                 severity = "high"
                 detail = (
                     f"{detail} em_consumed={abs(move_bps) / em_day_bps:.0%}"
@@ -465,7 +480,11 @@ def evaluate_alerts(
     alerts.extend(position_holdings_alerts(state, options_map=options_map, window=window))
     alerts.extend(market_context_alerts(market_context))
     alerts.extend(system_event_alerts(state, persist=persist_system_events))
-    alerts.extend(proxy_fallback_watch_alerts(state, window=window, market_context=market_context, options_map=options_map))
+    alerts.extend(
+        proxy_fallback_watch_alerts(
+            state, window=window, market_context=market_context, options_map=options_map
+        )
+    )
     return alerts
 
 
@@ -699,8 +718,12 @@ def market_context_alerts(market_context: dict[str, object] | None) -> list[Aler
             title=f"Hyperliquid SPX proxy {state}",
             detail=str(gate.get("reason") or "Hyperliquid proxy is not usable for alert scoring."),
             quality=state,
-            value=gate.get("basis_bps") if isinstance(gate.get("basis_bps"), (int, float)) else None,
-            threshold=gate.get("block_bps") if isinstance(gate.get("block_bps"), (int, float)) else None,
+            value=gate.get("basis_bps")
+            if isinstance(gate.get("basis_bps"), (int, float))
+            else None,
+            threshold=gate.get("block_bps")
+            if isinstance(gate.get("block_bps"), (int, float))
+            else None,
             research_only=True,
             source_gate="hyperliquid_spx_proxy",
         )
@@ -910,9 +933,7 @@ def proxy_fallback_watch_alerts(
     broker_down = ibkr_feed_unavailable_for_fallback(state)
 
     quote = find_best(state, "crypto_perp:xyz:SP500")
-    if quote is None or not configured_quote_use_decision(
-        quote, as_of=state.as_of
-    ).alert_allowed:
+    if quote is None or not configured_quote_use_decision(quote, as_of=state.as_of).alert_allowed:
         return []
     move_bps = move_from_close_bps(quote)
     if options_map is None:
@@ -1051,7 +1072,10 @@ def iv_surface_alerts(
             )
         if blocked:
             continue
-        if expiry.atm_iv_jump_5m is not None and abs(expiry.atm_iv_jump_5m) >= ATM_IV_JUMP_THRESHOLD:
+        if (
+            expiry.atm_iv_jump_5m is not None
+            and abs(expiry.atm_iv_jump_5m) >= ATM_IV_JUMP_THRESHOLD
+        ):
             alerts.append(
                 Alert(
                     severity=iv_surface_movement_severity(
@@ -1132,7 +1156,9 @@ def iv_surface_alerts(
                     threshold=SKEW_STEEPENING_THRESHOLD,
                     quality=expiry.surface_fit_quality if degraded else None,
                     source_gate="iv_surface",
-                    dedup_group=magnitude_bucket(expiry.put_skew_steepening_5m, SKEW_STEEPENING_THRESHOLD),
+                    dedup_group=magnitude_bucket(
+                        expiry.put_skew_steepening_5m, SKEW_STEEPENING_THRESHOLD
+                    ),
                 )
             )
         if (
@@ -1159,7 +1185,9 @@ def iv_surface_alerts(
                     threshold=SURFACE_SHIFT_THRESHOLD,
                     quality=expiry.surface_fit_quality if degraded else None,
                     source_gate="iv_surface",
-                    dedup_group=magnitude_bucket(expiry.iv_surface_shift_5m, SURFACE_SHIFT_THRESHOLD),
+                    dedup_group=magnitude_bucket(
+                        expiry.iv_surface_shift_5m, SURFACE_SHIFT_THRESHOLD
+                    ),
                 )
             )
     if isinstance(history_1h, dict):
@@ -1318,10 +1346,14 @@ def print_alerts(payload: dict[str, object]) -> None:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate current SPX alert conditions.")
-    parser.add_argument("--at", help="ISO timestamp. Naive timestamps are treated as Asia/Shanghai.")
+    parser.add_argument(
+        "--at", help="ISO timestamp. Naive timestamps are treated as Asia/Shanghai."
+    )
     parser.add_argument("--json", action="store_true", help="Print JSON.")
     parser.add_argument("--notify", action="store_true", help="Send configured notifications.")
-    parser.add_argument("--no-notify", action="store_true", help="Disable notifications for this run.")
+    parser.add_argument(
+        "--no-notify", action="store_true", help="Disable notifications for this run."
+    )
     return parser.parse_args(argv)
 
 
@@ -1352,9 +1384,7 @@ def run(argv: list[str] | None = None) -> int:
     notification_result = None
     if notification_settings.enabled:
         notification_result = notify_payload(payload, settings=notification_settings)
-        reconcile_position_event_acknowledgements(
-            notification_result.acknowledged_event_ids
-        )
+        reconcile_position_event_acknowledgements(notification_result.acknowledged_event_ids)
         payload["notification"] = notification_result.to_dict()
     notified = notification_result is not None and notification_result.sent_count > 0
     settled = not notification_settings.enabled or notified

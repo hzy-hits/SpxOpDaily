@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from spx_spark.market_context import build_market_context
@@ -11,6 +11,7 @@ from spx_spark.storage import LatestState
 
 
 BJ_TZ = ZoneInfo("Asia/Shanghai")
+SPX_SECTOR_SYMBOLS = ("XLB", "XLC", "XLE", "XLF", "XLI", "XLK", "XLP", "XLRE", "XLU", "XLV", "XLY")
 
 
 def make_quote(instrument_id: InstrumentId, price: float, close: float, now: datetime) -> Quote:
@@ -74,6 +75,117 @@ def test_market_context_includes_vol_and_cross_asset_ratios() -> None:
     assert context["derived"]["vix_vix3m"] == 18.0 / 20.0
     assert context["derived"]["qqq_spy"] == 725.0 / 750.0
     assert context["derived"]["hyg_lqd"] == 80.0 / 108.0
+
+
+def test_spx_sector_breadth_creates_symmetric_confirmed_bias() -> None:
+    now = datetime(2026, 7, 7, 3, 15, tzinfo=BJ_TZ)
+
+    def context_for(price: float, spy: float, rsp: float) -> dict[str, object]:
+        quotes = [
+            make_quote(InstrumentId.equity(symbol), price, 100.0, now)
+            for symbol in SPX_SECTOR_SYMBOLS
+        ]
+        quotes.extend(
+            (
+                make_quote(InstrumentId.equity("SPY"), spy, 750.0, now),
+                make_quote(InstrumentId.equity("RSP"), rsp, 200.0, now),
+            )
+        )
+        state = LatestState(
+            created_at=now,
+            as_of=now,
+            quotes=tuple(quotes),
+            best_quotes=tuple(quotes),
+        )
+        return build_market_context(state)["derived"]["spx_sector_breadth"]
+
+    bullish = context_for(101.0, 751.0, 201.0)
+    bearish = context_for(99.0, 749.0, 199.0)
+
+    assert bullish["state"] == "usable_confirmed"
+    assert bullish["directional_bias"] == "bullish"
+    assert bullish["advancing_sector_count"] == 11
+    assert bearish["directional_bias"] == "bearish"
+    assert bearish["declining_sector_count"] == 11
+
+
+def test_spx_sector_breadth_fails_closed_without_enough_fresh_sectors() -> None:
+    now = datetime(2026, 7, 7, 3, 15, tzinfo=BJ_TZ)
+    quotes = []
+    for index, symbol in enumerate(SPX_SECTOR_SYMBOLS):
+        quote = make_quote(InstrumentId.equity(symbol), 101.0, 100.0, now)
+        if index >= 7:
+            quote = replace(
+                quote,
+                quality=MarketDataQuality.STALE,
+                quote_time=now - timedelta(seconds=46),
+            )
+        quotes.append(quote)
+    quotes.extend(
+        (
+            make_quote(InstrumentId.equity("SPY"), 751.0, 750.0, now),
+            make_quote(InstrumentId.equity("RSP"), 201.0, 200.0, now),
+        )
+    )
+    state = LatestState(
+        created_at=now,
+        as_of=now,
+        quotes=tuple(quotes),
+        best_quotes=tuple(quotes),
+    )
+
+    breadth = build_market_context(state)["derived"]["spx_sector_breadth"]
+
+    assert breadth["state"] == "insufficient_fresh_sectors"
+    assert breadth["usable_sector_count"] == 7
+    assert breadth["directional_bias"] == "neutral_unclear"
+
+
+def test_spx_sector_breadth_uses_its_configured_forty_five_second_window() -> None:
+    now = datetime(2026, 7, 7, 3, 15, tzinfo=BJ_TZ)
+
+    def breadth_at_age(age_seconds: int) -> dict[str, object]:
+        quotes = []
+        for symbol in (*SPX_SECTOR_SYMBOLS, "SPY", "RSP"):
+            close = 750.0 if symbol == "SPY" else 200.0 if symbol == "RSP" else 100.0
+            price = close * 1.01
+            quote = make_quote(InstrumentId.equity(symbol), price, close, now)
+            quotes.append(
+                replace(
+                    quote,
+                    quality=MarketDataQuality.STALE,
+                    quote_time=now - timedelta(seconds=age_seconds),
+                )
+            )
+        state = LatestState(
+            created_at=now,
+            as_of=now,
+            quotes=tuple(quotes),
+            best_quotes=tuple(quotes),
+        )
+        return build_market_context(state)["derived"]["spx_sector_breadth"]
+
+    assert breadth_at_age(16)["state"] == "usable_confirmed"
+    assert breadth_at_age(46)["state"] == "insufficient_fresh_sectors"
+
+
+def test_spx_sector_breadth_does_not_claim_spy_rsp_confirmation_when_missing() -> None:
+    now = datetime(2026, 7, 7, 3, 15, tzinfo=BJ_TZ)
+    quotes = tuple(
+        make_quote(InstrumentId.equity(symbol), 101.0, 100.0, now) for symbol in SPX_SECTOR_SYMBOLS
+    )
+    state = LatestState(
+        created_at=now,
+        as_of=now,
+        quotes=quotes,
+        best_quotes=quotes,
+    )
+
+    breadth = build_market_context(state)["derived"]["spx_sector_breadth"]
+
+    assert breadth["state"] == "usable_unconfirmed"
+    assert breadth["confirmation_state"] == "spy_rsp_missing_or_stale"
+    assert breadth["directional_bias"] == "neutral_unclear"
 
 
 def test_market_context_missing_polymarket_is_research_only(monkeypatch, tmp_path) -> None:

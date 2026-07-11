@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
+from datetime import date, datetime, time, timedelta
 from functools import lru_cache
+from zoneinfo import ZoneInfo
 
-from spx_spark.runtime_config import runtime_instrument_rows
+from spx_spark.runtime_config import runtime_instrument_rows, runtime_value
 
 
 @dataclass(frozen=True)
@@ -15,6 +18,7 @@ class SchwabInstrumentConfig:
     quote_symbol: str
     option_chain_symbol: str | None
     option_trading_classes: tuple[str, ...]
+    quote_symbol_mode: str
     collect_quote: bool
     collect_option_chain: bool
     description: str
@@ -40,6 +44,7 @@ def schwab_instruments() -> tuple[SchwabInstrumentConfig, ...]:
                 option_trading_classes=tuple(
                     str(item).strip().upper() for item in trading_classes_raw if str(item).strip()
                 ),
+                quote_symbol_mode=str(row.get("quote_symbol_mode", "static")).strip().lower(),
                 collect_quote=bool(row.get("collect_quote", False)),
                 collect_option_chain=bool(row.get("collect_option_chain", False)),
                 description=str(row["description"]).strip(),
@@ -60,7 +65,113 @@ def find_schwab_instrument(symbol: str) -> SchwabInstrumentConfig | None:
             aliases.add(instrument.option_chain_symbol)
         if normalized in aliases:
             return instrument
+        if _is_concrete_future_symbol(normalized, instrument):
+            return instrument
     return None
+
+
+def _quarterly_month_codes() -> dict[int, str]:
+    raw = runtime_value("schwab.future_contract_resolution.quarterly_month_codes")
+    if not isinstance(raw, dict) or not raw:
+        raise TypeError("Schwab quarterly month codes must be a non-empty mapping")
+    resolved: dict[int, str] = {}
+    for month, code in raw.items():
+        numeric_month = int(month)
+        normalized_code = str(code).strip().upper()
+        if numeric_month < 1 or numeric_month > 12 or len(normalized_code) != 1:
+            raise ValueError("Invalid Schwab quarterly month-code mapping")
+        resolved[numeric_month] = normalized_code
+    return dict(sorted(resolved.items()))
+
+
+def _is_concrete_future_symbol(
+    symbol: str,
+    instrument: SchwabInstrumentConfig,
+) -> bool:
+    if instrument.instrument_type != "future" or instrument.quote_symbol_mode != "front_quarterly":
+        return False
+    month_codes = "".join(re.escape(code) for code in _quarterly_month_codes().values())
+    pattern = rf"^{re.escape(instrument.quote_symbol)}[{month_codes}]\d{{2}}$"
+    return re.fullmatch(pattern, symbol) is not None
+
+
+def _third_friday(year: int, month: int) -> date:
+    first = date(year, month, 1)
+    first_friday = first + timedelta(days=(4 - first.weekday()) % 7)
+    return first_friday + timedelta(days=14)
+
+
+def _exchange_datetime(now: datetime | date | None) -> datetime:
+    timezone = ZoneInfo(str(runtime_value("schwab.future_contract_resolution.calendar_timezone")))
+    if isinstance(now, date) and not isinstance(now, datetime):
+        return datetime.combine(now, time.min, tzinfo=timezone)
+    value = now or datetime.now(tz=timezone)
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone)
+    return value.astimezone(timezone)
+
+
+def active_quarterly_contract_month(now: datetime | date | None = None) -> tuple[int, int]:
+    """Return the active CME equity-index futures contract as ``(year, month)``."""
+
+    exchange_now = _exchange_datetime(now)
+    roll_days = int(
+        runtime_value("schwab.future_contract_resolution.roll_calendar_days_before_expiry")
+    )
+    if roll_days < 0:
+        raise ValueError("Schwab futures roll days cannot be negative")
+    try:
+        roll_session_start = time.fromisoformat(
+            str(runtime_value("schwab.future_contract_resolution.roll_session_start_time"))
+        )
+    except ValueError as exc:
+        raise ValueError("Invalid Schwab futures roll session start time") from exc
+    for year in (exchange_now.year, exchange_now.year + 1):
+        for month in _quarterly_month_codes():
+            expiry = _third_friday(year, month)
+            roll_date = expiry - timedelta(days=roll_days)
+            roll_session_at = datetime.combine(
+                roll_date - timedelta(days=1),
+                roll_session_start,
+                tzinfo=exchange_now.tzinfo,
+            )
+            if exchange_now < roll_session_at:
+                return year, month
+    raise RuntimeError("Unable to resolve a Schwab quarterly futures contract")
+
+
+def resolved_schwab_quote_symbol(
+    symbol: str,
+    *,
+    now: datetime | date | None = None,
+) -> str:
+    """Expand configured logical futures roots while preserving explicit contracts."""
+
+    normalized = symbol.strip().upper()
+    instrument = find_schwab_instrument(normalized)
+    if instrument is None or instrument.quote_symbol_mode != "front_quarterly":
+        return normalized
+    if _is_concrete_future_symbol(normalized, instrument):
+        return normalized
+    year, month = active_quarterly_contract_month(now)
+    month_code = _quarterly_month_codes()[month]
+    return f"{instrument.quote_symbol}{month_code}{year % 100:02d}"
+
+
+def resolved_schwab_quote_symbols(
+    symbols: list[str],
+    *,
+    now: datetime | date | None = None,
+) -> list[str]:
+    resolved: list[str] = []
+    seen: set[str] = set()
+    for symbol in symbols:
+        provider_symbol = resolved_schwab_quote_symbol(symbol, now=now)
+        if provider_symbol in seen:
+            continue
+        seen.add(provider_symbol)
+        resolved.append(provider_symbol)
+    return resolved
 
 
 def option_chain_symbol_for_schwab(symbol: str) -> str:
@@ -72,7 +183,11 @@ def option_chain_symbol_for_schwab(symbol: str) -> str:
 
 def canonical_underlier_for_schwab(symbol: str) -> str:
     instrument = find_schwab_instrument(symbol)
-    return instrument.canonical_symbol if instrument is not None else symbol.strip().lstrip("$").upper()
+    return (
+        instrument.canonical_symbol
+        if instrument is not None
+        else symbol.strip().lstrip("$").upper()
+    )
 
 
 def schwab_quote_symbols() -> list[str]:

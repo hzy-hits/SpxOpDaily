@@ -15,6 +15,7 @@ from spx_spark.schwab.adapter import snapshot_from_chain_payload, snapshot_from_
 from spx_spark.schwab.symbols import (
     canonical_underlier_for_schwab,
     option_chain_symbol_for_schwab,
+    resolved_schwab_quote_symbols,
     schwab_option_chain_underliers,
     schwab_quote_symbols,
 )
@@ -63,8 +64,9 @@ def fetch_chain(
     return payload
 
 
-def run(argv: list[str] | None = None) -> int:
+def run(argv: list[str] | None = None, *, now: datetime | None = None) -> int:
     del argv
+    evaluation_now = now or datetime.now(tz=ET)
     settings = SchwabSettings.from_env()
     storage_settings = StorageSettings.from_env()
     client = build_schwab_client(settings)
@@ -72,7 +74,14 @@ def run(argv: list[str] | None = None) -> int:
         print(json.dumps({"ok": False, "skipped": True, "reason": "missing_schwab_auth"}))
         return 0
 
-    quote_symbols = env_csv("SCHWAB_COLLECT_QUOTES", ",".join(schwab_quote_symbols()))
+    configured_quote_symbols = env_csv(
+        "SCHWAB_COLLECT_QUOTES",
+        ",".join(schwab_quote_symbols()),
+    )
+    quote_symbols = resolved_schwab_quote_symbols(
+        configured_quote_symbols,
+        now=evaluation_now,
+    )
     chain_symbols = env_csv(
         "SCHWAB_COLLECT_CHAINS",
         ",".join(schwab_option_chain_underliers()),
@@ -91,7 +100,7 @@ def run(argv: list[str] | None = None) -> int:
 
     for symbol in chain_symbols:
         try:
-            payload = fetch_chain(client, symbol, settings)
+            payload = fetch_chain(client, symbol, settings, now=evaluation_now)
             snapshot = snapshot_from_chain_payload(
                 payload,
                 underlier=canonical_underlier_for_schwab(symbol),

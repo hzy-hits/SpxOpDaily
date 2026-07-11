@@ -39,6 +39,42 @@ Schwab exposes SPX and SPXW contracts through the `$SPX` chain. XSP uses
 `$XSP`. Collectors and verifiers resolve these values through the table; they
 do not carry their own provider aliases.
 
+Configured ETF symbols retain the repository's stable `equity:*` namespace
+even when Schwab labels the provider payload as subtype `ETF`. This keeps
+Schwab `SPY`, `RSP`, and the eleven sector ETFs compatible with the existing
+market-context and alert consumers.
+
+`ES` and `MES` are logical roots. Before each quote batch, the resolver expands
+them to a concrete quarterly Schwab symbol such as `/ESU26` or `/MESU26` using
+the documented CME Monday-before-expiration roll boundary. The resolver changes
+contracts at 18:00 New York time on the preceding Sunday, when that Monday's
+Globex trading session begins. Storage preserves the concrete provider symbol
+while publishing the stable canonical identities `future:ES` and `future:MES`,
+so consumers do not change at rollover.
+
+The hot SPX reference universe includes `SPY`, `RSP`, the VIX-family indexes,
+and eleven sector ETFs. Sector rows feed one aggregate breadth feature; they do
+not create individual human alerts. Redundant S&P 500 ETFs and leveraged or
+inverse products are present as on-demand mappings with `collect_quote: false`
+to avoid unnecessary 15-second raw-data growth. The current State Street ticker
+is `SPYM`; obsolete `SPLG` is intentionally absent.
+
+## Position-awareness boundary
+
+Schwab market data and the SPX breadth/option analysis do not require IBKR
+account polling. IBKR position polling remains disabled by default and isolated
+from the market-data collectors. When it is disabled, the system explicitly
+reports `disabled_no_account_visibility`: it must not infer that the account is
+flat and cannot provide position-open/close, quantity-change, or book-PnL
+alerts. Automated stops and time exits are not implemented even when polling is
+enabled. This is safe for the current observation-only system, but the human or
+broker UI remains responsible for live-position risk management.
+
+Before re-enabling polling after a blind interval, reconcile the persisted
+position-event state with the broker snapshot. Otherwise the first complete
+snapshot can correctly report the net difference but make changes from the
+whole blind interval look newly observed.
+
 ## Override order
 
 1. Environment variables and `.env` values override a runtime default.

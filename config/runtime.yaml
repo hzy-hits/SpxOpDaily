@@ -104,6 +104,19 @@ schwab:
     interval_seconds:
       value: 15
       description: Collection cadence balancing 0DTE responsiveness against the 120-request-per-minute budget.
+  future_contract_resolution:
+    calendar_timezone:
+      value: America/New_York
+      description: Exchange-local timezone used to choose the active quarterly equity-index futures contract.
+    quarterly_month_codes:
+      value: {3: H, 6: M, 9: U, 12: Z}
+      description: CME quarterly expiration month to provider symbol code mapping for ES and MES.
+    roll_calendar_days_before_expiry:
+      value: 4
+      description: Switches to the next quarterly contract on the Monday four calendar days before the standard third-Friday expiration.
+    roll_session_start_time:
+      value: "18:00"
+      description: New York time when the Monday roll trading session begins on the preceding Sunday evening.
   instruments:
     - canonical_symbol: SPX
       instrument_type: index
@@ -189,6 +202,48 @@ schwab:
       collect_quote: true
       collect_option_chain: true
       description: S&P 500 ETF and liquid options proxy.
+    - canonical_symbol: VOO
+      instrument_type: equity
+      quote_symbol: VOO
+      collect_quote: false
+      collect_option_chain: false
+      description: Vanguard S&P 500 ETF available for on-demand comparison but excluded from the hot loop because it duplicates SPY.
+    - canonical_symbol: IVV
+      instrument_type: equity
+      quote_symbol: IVV
+      collect_quote: false
+      collect_option_chain: false
+      description: iShares Core S&P 500 ETF available for on-demand comparison but excluded from the hot loop because it duplicates SPY.
+    - canonical_symbol: SPYM
+      instrument_type: equity
+      quote_symbol: SPYM
+      collect_quote: false
+      collect_option_chain: false
+      description: Current State Street Portfolio S&P 500 ETF ticker, retained for on-demand comparison rather than hot-loop polling.
+    - canonical_symbol: SSO
+      instrument_type: equity
+      quote_symbol: SSO
+      collect_quote: false
+      collect_option_chain: false
+      description: Two-times long S&P 500 ETF available for optional risk-appetite research only.
+    - canonical_symbol: UPRO
+      instrument_type: equity
+      quote_symbol: UPRO
+      collect_quote: false
+      collect_option_chain: false
+      description: Three-times long S&P 500 ETF available for optional risk-appetite research only.
+    - canonical_symbol: SDS
+      instrument_type: equity
+      quote_symbol: SDS
+      collect_quote: false
+      collect_option_chain: false
+      description: Two-times inverse S&P 500 ETF available for optional downside-demand research only.
+    - canonical_symbol: SPXU
+      instrument_type: equity
+      quote_symbol: SPXU
+      collect_quote: false
+      collect_option_chain: false
+      description: Three-times inverse S&P 500 ETF available for optional downside-demand research only.
     - canonical_symbol: QQQ
       instrument_type: equity
       quote_symbol: QQQ
@@ -265,24 +320,106 @@ schwab:
       collect_quote: true
       collect_option_chain: false
       description: Equal-weight S&P 500 breadth proxy.
+    - canonical_symbol: XLB
+      instrument_type: equity
+      quote_symbol: XLB
+      collect_quote: true
+      collect_option_chain: false
+      description: S&P 500 materials-sector ETF used only in aggregate sector-breadth calculations.
+    - canonical_symbol: XLC
+      instrument_type: equity
+      quote_symbol: XLC
+      collect_quote: true
+      collect_option_chain: false
+      description: S&P 500 communication-services ETF used only in aggregate sector-breadth calculations.
+    - canonical_symbol: XLE
+      instrument_type: equity
+      quote_symbol: XLE
+      collect_quote: true
+      collect_option_chain: false
+      description: S&P 500 energy-sector ETF used only in aggregate sector-breadth calculations.
+    - canonical_symbol: XLF
+      instrument_type: equity
+      quote_symbol: XLF
+      collect_quote: true
+      collect_option_chain: false
+      description: S&P 500 financial-sector ETF used only in aggregate sector-breadth calculations.
+    - canonical_symbol: XLI
+      instrument_type: equity
+      quote_symbol: XLI
+      collect_quote: true
+      collect_option_chain: false
+      description: S&P 500 industrial-sector ETF used only in aggregate sector-breadth calculations.
+    - canonical_symbol: XLK
+      instrument_type: equity
+      quote_symbol: XLK
+      collect_quote: true
+      collect_option_chain: false
+      description: S&P 500 technology-sector ETF used only in aggregate sector-breadth calculations.
+    - canonical_symbol: XLP
+      instrument_type: equity
+      quote_symbol: XLP
+      collect_quote: true
+      collect_option_chain: false
+      description: S&P 500 consumer-staples ETF used only in aggregate sector-breadth calculations.
+    - canonical_symbol: XLRE
+      instrument_type: equity
+      quote_symbol: XLRE
+      collect_quote: true
+      collect_option_chain: false
+      description: S&P 500 real-estate-sector ETF used only in aggregate sector-breadth calculations.
     - canonical_symbol: XLU
       instrument_type: equity
       quote_symbol: XLU
       collect_quote: true
       collect_option_chain: false
       description: Utilities-sector defensive proxy.
+    - canonical_symbol: XLV
+      instrument_type: equity
+      quote_symbol: XLV
+      collect_quote: true
+      collect_option_chain: false
+      description: S&P 500 health-care-sector ETF used only in aggregate sector-breadth calculations.
+    - canonical_symbol: XLY
+      instrument_type: equity
+      quote_symbol: XLY
+      collect_quote: true
+      collect_option_chain: false
+      description: S&P 500 consumer-discretionary ETF used only in aggregate sector-breadth calculations.
     - canonical_symbol: ES
       instrument_type: future
       quote_symbol: /ES
+      quote_symbol_mode: front_quarterly
       collect_quote: true
       collect_option_chain: false
-      description: E-mini S&P 500 future used as the live futures anchor.
+      description: E-mini S&P 500 logical root resolved to the active concrete quarterly contract and stored as stable future:ES.
     - canonical_symbol: MES
       instrument_type: future
       quote_symbol: /MES
+      quote_symbol_mode: front_quarterly
       collect_quote: true
       collect_option_chain: false
-      description: Micro E-mini S&P 500 future used as a secondary futures anchor.
+      description: Micro E-mini S&P 500 logical root resolved to the active concrete quarterly contract and stored as stable future:MES.
+
+market_context:
+  spx_sector_instrument_ids:
+    value: [equity:XLB, equity:XLC, equity:XLE, equity:XLF, equity:XLI, equity:XLK, equity:XLP, equity:XLRE, equity:XLU, equity:XLV, equity:XLY]
+    description: Eleven S&P 500 sector ETFs combined into one hidden breadth feature rather than individual human alerts.
+  sector_breadth_min_usable:
+    value: 8
+    description: Minimum fresh sector quotes required before sector breadth can influence the observational directional bias.
+  sector_quote_max_age_seconds:
+    value: 45
+    description: Maximum source-quote age accepted by the fast sector-breadth feature.
+  sector_unchanged_band_bps:
+    value: 2
+    description: Absolute move from prior close treated as unchanged when counting sector breadth.
+  sector_directional_bias_score:
+    value: 0.55
+    description: Absolute advancing-minus-declining sector breadth score required for a bullish or bearish observational bias.
+  direction_confirmation_move_bps:
+    value: 5
+    description: Minimum same-direction SPY and RSP moves required to confirm a sector-breadth directional bias.
 
 service_loop:
   hyperliquid_enabled:

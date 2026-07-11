@@ -29,6 +29,7 @@ from spx_spark.marketdata import (
 )
 from spx_spark.provider_adapter import ProviderSnapshot, provider_state_from_quote_health
 from spx_spark.runtime_config import runtime_value
+from spx_spark.schwab.symbols import find_schwab_instrument
 
 
 SCHWAB_OCC_OPTION_PATTERN = re.compile(
@@ -37,9 +38,7 @@ SCHWAB_OCC_OPTION_PATTERN = re.compile(
 )
 
 # Shared quote-freshness policy comes from the documented runtime table.
-DEFAULT_SCHWAB_STALE_SECONDS = float(
-    runtime_value("market_data.latest_stale_after_seconds")
-)
+DEFAULT_SCHWAB_STALE_SECONDS = float(runtime_value("market_data.latest_stale_after_seconds"))
 
 
 def first_key(mapping: Mapping[str, Any], *keys: str) -> Any:
@@ -103,7 +102,26 @@ def instrument_from_schwab_symbol(
     option_instrument = option_instrument_from_schwab_symbol(raw_symbol)
     if option_instrument is not None:
         return option_instrument
-    clean_symbol = symbol[1:] if symbol.startswith("$") else symbol
+    configured = find_schwab_instrument(raw_symbol)
+    if configured is not None:
+        if configured.instrument_type == "index":
+            return InstrumentId.index(
+                configured.canonical_symbol,
+                provider_symbol=raw_symbol,
+            )
+        if configured.instrument_type == "equity":
+            return InstrumentId.equity(
+                configured.canonical_symbol,
+                provider_symbol=raw_symbol,
+            )
+        if configured.instrument_type == "future":
+            return InstrumentId.future(
+                configured.canonical_symbol,
+                provider_symbol=raw_symbol,
+                exchange="CME",
+            )
+
+    clean_symbol = symbol.lstrip("$/")
     if symbol.startswith("$"):
         return InstrumentId.index(clean_symbol, provider_symbol=raw_symbol)
     if symbol.startswith("/"):

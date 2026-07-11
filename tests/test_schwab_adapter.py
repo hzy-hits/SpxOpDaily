@@ -130,3 +130,40 @@ def test_schwab_sparse_quote_without_source_timestamp_is_not_actionable() -> Non
 
     assert quote.quality is MarketDataQuality.UNKNOWN
     assert quote.last_update_at == received_at
+
+
+def test_configured_schwab_etf_uses_stable_equity_namespace() -> None:
+    received_at = datetime(2026, 7, 10, 14, 0, 1, tzinfo=timezone.utc)
+    quote = quote_from_schwab_payload(
+        "SPY",
+        {
+            "assetMainType": "EQUITY",
+            "assetSubType": "ETF",
+            "quote": {
+                "lastPrice": 750.0,
+                "quoteTime": int((received_at - timedelta(seconds=1)).timestamp() * 1000),
+            },
+        },
+        received_at=received_at,
+    )
+
+    assert quote.instrument.canonical_id == "equity:SPY"
+    assert quote.instrument.provider_symbol == "SPY"
+
+
+def test_concrete_schwab_future_uses_stable_logical_namespace() -> None:
+    received_at = datetime(2026, 7, 10, 14, 0, 1, tzinfo=timezone.utc)
+    quote = quote_from_schwab_payload(
+        "/ESU26",
+        {
+            "assetMainType": "FUTURE",
+            "quote": {
+                "lastPrice": 7525.0,
+                "quoteTime": int((received_at - timedelta(seconds=1)).timestamp() * 1000),
+            },
+        },
+        received_at=received_at,
+    )
+
+    assert quote.instrument.canonical_id == "future:ES"
+    assert quote.instrument.provider_symbol == "/ESU26"

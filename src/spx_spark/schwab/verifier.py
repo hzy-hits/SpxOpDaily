@@ -14,16 +14,17 @@ from urllib.request import ProxyHandler, Request, build_opener, urlopen
 
 from spx_spark.config import SchwabSettings
 from spx_spark.runtime_config import runtime_value
-from spx_spark.schwab.symbols import option_chain_symbol_for_schwab
+from spx_spark.schwab.symbols import (
+    option_chain_symbol_for_schwab,
+    resolved_schwab_quote_symbols,
+)
 from spx_spark.schwab.adapter import quotes_from_quote_payload
 
 
 MAX_QUOTE_BATCH_SIZE = int(runtime_value("schwab.quote_batch_size"))
 SCHWAB_QUOTE_PATH = str(runtime_value("schwab.quote_path"))
 SCHWAB_OPTION_CHAIN_PATH = str(runtime_value("schwab.option_chain_path"))
-MAX_ERROR_BODY_CHARACTERS = int(
-    runtime_value("schwab.diagnostics.max_error_body_characters")
-)
+MAX_ERROR_BODY_CHARACTERS = int(runtime_value("schwab.diagnostics.max_error_body_characters"))
 
 
 @dataclass(frozen=True)
@@ -179,7 +180,9 @@ def summarize_chain_payload(payload: Any) -> dict[str, Any]:
     if not isinstance(payload, dict):
         return {"payload_type": type(payload).__name__}
 
-    call_map = payload.get("callExpDateMap") if isinstance(payload.get("callExpDateMap"), dict) else {}
+    call_map = (
+        payload.get("callExpDateMap") if isinstance(payload.get("callExpDateMap"), dict) else {}
+    )
     put_map = payload.get("putExpDateMap") if isinstance(payload.get("putExpDateMap"), dict) else {}
     call_contracts = count_chain_contracts(call_map)
     put_contracts = count_chain_contracts(put_map)
@@ -208,8 +211,16 @@ def count_chain_contracts(expiration_map: dict[str, Any]) -> int:
     return count
 
 
-def verify_quotes(client: SchwabClient, settings: SchwabSettings) -> list[SchwabCheckResult]:
-    symbols = settings.verify_indexes + settings.verify_equities + settings.verify_futures
+def verify_quotes(
+    client: SchwabClient,
+    settings: SchwabSettings,
+    *,
+    now: datetime | None = None,
+) -> list[SchwabCheckResult]:
+    symbols = resolved_schwab_quote_symbols(
+        settings.verify_indexes + settings.verify_equities + settings.verify_futures,
+        now=now,
+    )
     results: list[SchwabCheckResult] = []
     for batch in quote_batches(symbols):
         label = ",".join(batch)
@@ -285,7 +296,9 @@ def print_results(results: list[SchwabCheckResult]) -> None:
     headers = ["kind", "label", "ok", "status", "summary/error"]
     rows: list[list[str]] = []
     for result in results:
-        detail = json.dumps(result.summary, sort_keys=True) if result.summary else result.error or ""
+        detail = (
+            json.dumps(result.summary, sort_keys=True) if result.summary else result.error or ""
+        )
         rows.append(
             [
                 result.kind,
@@ -296,7 +309,8 @@ def print_results(results: list[SchwabCheckResult]) -> None:
             ]
         )
     widths = [
-        max(len(headers[index]), *(len(row[index]) for row in rows)) for index in range(len(headers))
+        max(len(headers[index]), *(len(row[index]) for row in rows))
+        for index in range(len(headers))
     ]
     print(" | ".join(header.ljust(widths[index]) for index, header in enumerate(headers)))
     print("-+-".join("-" * width for width in widths))
