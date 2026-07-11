@@ -13,8 +13,18 @@ The YAML file is the documented source for mutable, non-secret defaults across
 market data and operations: Schwab, IBKR snapshot/stream/positions, runtime
 policy, Hyperliquid, Polymarket, maintenance, storage, IV surface generation,
 notification delivery policy, SPXW sampling, alert thresholds, intraday
-shock/strategy windows, post-close review, scheduled push LLM writing and the
+shock/strategy windows, post-close review, scheduled push LLM writing, the
+Steven observe-only guidance block (`steven.*`, default disabled), and the
 research data platform.
+
+Phase 1 data-budget defaults currently include IBKR stream
+`max_option_lines=68` with `sampling.hot_window_points=55`, Schwab REST
+`collection.interval_seconds=5` with per-instrument chain tiers (A: `$SPX` at
+5s/`strikeCount=40`; B: SPY/QQQ/IWM/XSP at 15s), and IBKR session-hardening
+keys `ibkr_stream.freeze_quotes_on_connectivity_loss` plus
+`provider_failover.ibkr_recovery_observations`. Environment variables still
+override YAML (notably a local `IBKR_STREAM_MAX_OPTION_LINES` may pin the stream
+below the YAML default until removed).
 
 Secrets and operator-private endpoints stay out of YAML. API keys, app secrets,
 device-specific Bark URLs, Feishu webhook URLs/secrets and other credentials

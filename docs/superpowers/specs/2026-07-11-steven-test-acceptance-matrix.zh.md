@@ -1,8 +1,9 @@
 # Steven 框架 Phase 2/3/4 测试用例矩阵与验收标准
 
 日期：2026-07-11
-状态：规格文档（细化总规划文档第 5 节；实现者照此直接写测试）
+状态：验收矩阵（对应测试文件已合入 `51aefde`；盘中/多日 episode 验收仍待交易日）
 前置阅读：`docs/greeks-definitions.md`（公式与 golden 数值）、`docs/steven-framework-integration.md`（schema 与状态机）
+已落地测试路径：`tests/test_exposure_map.py`、`tests/test_bar_builder.py`、`tests/test_steven_strategy.py`、`tests/test_steven_episodes.py`、`tests/test_steven_forward_metrics.py`。
 
 通用约定：
 

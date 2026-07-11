@@ -1,7 +1,7 @@
 # Steven SPX Options Framework 集成规格（exposure_map + strategy/steven）
 
 日期：2026-07-11
-状态：规格文档（Phase 2/3 实现依据；细化总规划文档第 3 节）
+状态：规格文档（Phase 2/3 代码已合入；运行默认 `steven.enabled=false`，盘中验收前保持关闭）
 前置阅读：`docs/superpowers/specs/2026-07-11-steven-framework-data-budget-plan.zh.md`、`docs/greeks-definitions.md`
 风格约束：与 `strategy/micopedia.py` 一致——frozen dataclass 输入/输出、纯函数分类、
 `runtime_value("steven.<key>")` 读配置、`to_dict()` 序列化、observe_only、绝不下单、绝不抬 severity。

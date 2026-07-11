@@ -99,6 +99,24 @@ scripts/run-micopedia-guidance.sh --from-latest-state --time-phase open --event 
   "knife" setups remain hypotheses until validated with SPX/ES 1-minute data and
   option-chain history.
 
+## Coexistence with Steven
+
+Steven (`docs/steven-framework-integration.md`, `strategy/steven.py`) is a parallel
+observe-only guidance stack: regime → map → flow → trigger → expression → exit.
+It must not contradict this Micopedia decision stack.
+
+Shared hard rules for agents and LLM writers:
+
+- Both layers are observational checklists, never execution authority.
+- House exposure metrics that need dealer-sign or unpublished vendor formulas use
+  `_proxy` names (`net_dex_proxy`, `dagex_proxy`, …); never treat them as vendor
+  Net DEX / DAGEX.
+- Confidence from proxy-driven regime/map is capped at medium.
+- Hyperliquid SP500 is research context only; it is not the SPX/ES cash anchor
+  and cannot alone confirm a wall break or setup.
+- Steven defaults stay off (`steven.enabled=false`,
+  `alert_context_enabled=false`) until RTH acceptance.
+
 ## Next Work
 
 - Feed current option-chain gamma/OI into `MicopediaInputs.has_option_chain` and a

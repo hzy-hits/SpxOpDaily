@@ -1,8 +1,8 @@
 # SPX Spark 希腊字母与曝露代理指标定义（exposure_map 规范）
 
 日期：2026-07-11
-状态：规格文档（Phase 2 实现前必读；实现必须与本文档公式一一对应）
-适用模块：`src/spx_spark/features/exposure_map.py`（新增）、`src/spx_spark/options_map.py`（抽取后消费方）、`src/spx_spark/greek_shadow.py`（符号约定基准）
+状态：规格文档（Phase 2 已实现；`exposure_map` / 单测 golden 必须与本文档公式一一对应）
+适用模块：`src/spx_spark/features/exposure_map.py`、`src/spx_spark/options_map.py`（抽取后消费方）、`src/spx_spark/greek_shadow.py`（符号约定基准）
 
 本文档定义 exposure_map 输出的全部指标：`gex`（现有）、`net_dex_proxy`、`dagex_proxy`、`vanna`、`charm`、`vex_proxy`、`cex_proxy`。
 每个指标一节，固定小节结构：公式与输入字段 / dealer 符号约定 / 单位与 scaling / 按 expiry 聚合 / 更新频率 / 数据质量位影响 / 与 vendor 指标差异声明。

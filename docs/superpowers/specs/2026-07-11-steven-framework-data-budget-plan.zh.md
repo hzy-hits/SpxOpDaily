@@ -1,8 +1,19 @@
 # SPX Spark 规划：数据预算分配 + Steven 框架 / 高阶希腊落地
 
 日期：2026-07-11
-状态：规划文档（未实施）
-范围：只写计划与架构，不含代码改动。
+状态：规划文档（部分已落地；见下方「实施快照」）
+范围：原为计划与架构；代码落地后本文保留为预算/阶段依据，以 `config/runtime.yaml` 与实现模块为准。
+
+### 实施快照（2026-07-11，commit `51aefde`）
+
+| 阶段 | 状态 | 证据 |
+| --- | --- | --- |
+| Phase 1 数据预算 | 配置已写入 YAML | `ibkr_stream.max_option_lines=68`、`sampling.hot_window_points=55`；Schwab A/B 档 `chain_interval_seconds` + `$SPX` `option_chain_strike_count=40` |
+| Phase 2 exposure_map / bars | 代码已合入 | `src/spx_spark/features/exposure_map.py`、`bar_builder.py`；golden/单测已有 |
+| Phase 3 Steven observe_only | 代码已合入，默认关 | `src/spx_spark/strategy/steven.py`；`steven.enabled=false`、`alert_context_enabled=false` |
+| Phase 0/4 盘中验收与 forward 审计 | 仍待交易日 | 周末不可验收 OI；forward metrics 模块已有但需盘中样本 |
+
+下文 §1「现状基线」仍描述 Phase 1 **改配前**的 60 行 / ±50 点 / 全链同频基线，便于对照；落地目标以 §2 建议值与当前 `runtime.yaml` 为准。
 
 ---
 

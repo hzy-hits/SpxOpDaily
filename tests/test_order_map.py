@@ -1616,6 +1616,8 @@ def test_prompts_include_previous_push() -> None:
     assert "市场状态+挂单参考" in status_prompt
     assert "负 gamma 不等于下跌" in order_prompt
     assert "负 gamma 不等于下跌" in status_prompt
+    assert "observe_only" in order_prompt
+    assert "observe_only" in status_prompt
     assert "secret_scenario_price" not in order_prompt
     assert "secret_scenario_price" not in status_prompt
 

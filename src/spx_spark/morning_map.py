@@ -341,6 +341,8 @@ def build_map_prompt(
             "以及第一根急拉/急跌出现时他该做什么、不该做什么。",
             "动笔前先想清楚(不写出来)：隔夜 gap 是谁推的、开盘后大概率被回补还是被延续？做市商今天开在正 gamma 还是负 gamma，"
             "开盘的波动会被吸收还是被放大？昨天的墙隔夜有没有被 OI 变化掏空？",
+            "框架口径：Micopedia/Steven 都是 observe_only（regime→map→flow→trigger→expression→exit）；"
+            "GEX 与 *_proxy 曝露是结构代理不是 vendor DEX；不下单授权；Hyperliquid 不作 SPX 锚。",
             "",
             "输出中文，最多 14 行，第一行必须是模板的第一行。",
             "开头定调：相对 previous_push(下午以来最近一条)剧本有变还是延续——墙位/flip 移位、gap 改变优先 play 才算有变，"

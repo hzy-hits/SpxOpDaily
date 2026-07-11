@@ -2,6 +2,18 @@ from __future__ import annotations
 
 import json
 
+# Shared Micopedia + Steven observe-only doctrine for every human-facing prompt.
+# Keep wording short: writers must not invent execution authority or vendor DEX.
+FRAMEWORK_GUARDRAILS = (
+    "框架口径（Micopedia + Steven，observe_only）：先 regime，再 map，再 flow，再 trigger，"
+    "再 expression，最后 exit；输出是检查清单与解释，不是下单授权、不是可执行交易信号。",
+    "GEX/gamma_state 与任何 net_dex_proxy/dagex_proxy/vex_proxy/cex_proxy 都是自家结构代理；"
+    "不得写成 vendor Net DEX/DAGEX，不得把代理指标置信度说成 high。",
+    "锚只能是 SPX/ES（或明确的 chain_implied）；Hyperliquid SP500 只是弱研究代理，"
+    "绝不能单独确认破位、墙失效或 SETUP。",
+    "若 JSON 含 steven / steven_context：只作 observe_only 附注，不得抬 severity、不得改成买卖指令。",
+)
+
 
 def format_alert_message(payload: dict[str, object], alerts: list[dict[str, object]]) -> str:
     window = payload.get("window")
@@ -67,6 +79,7 @@ def build_direct_push_prompt(payload: dict[str, object], alerts: list[dict[str, 
         (
             "你在交易台值班，一个即时事件刚触发，要发给只做 SPX/SPXW 0DTE/1DTE 买方的搭档。",
             "推送决定已经做出，不用判断要不要推；你的活是把原始事件 JSON 翻译成他扫一眼就知道『发生了什么、跟我有什么关系、要不要动手』的便签。",
+            *FRAMEWORK_GUARDRAILS,
             f"事件类别是「{category}」，第一行用【{category}】开头，一句话说清发生了什么，关键数字照抄。",
             "然后按类别补 2-4 行，站在他的仓位和挂单角度说：",
             "- 持仓事件：哪条腿、数量/方向怎么变的、浮盈浮亏多少，此刻价格站在关键位的哪一侧——这决定他是该锁利润还是该按剧本扛；",
@@ -95,6 +108,7 @@ def build_agent_prompt(payload: dict[str, object], alerts: list[dict[str, object
             "动笔前先想清楚(不写出来)：这个告警背后是谁在动手——对冲盘、抢保护的、还是单纯流动性薄？"
             "价格此刻站的位置对他的挂单意味着成交概率变高还是剧本作废？",
             "只根据下面的 JSON 做判断；不下单指令，不假设缺失数据。",
+            *FRAMEWORK_GUARDRAILS,
             "搭档只交易 SPX/SPXW；结论落在 SPX/SPXW/ES、期权墙、gamma、IV surface 上，"
             "VIX/VIX1D/VVIX/SKEW 作 vol regime 上下文，SPY/QQQ 可少量引用作确认；不提加密或预测市场数据源。",
             "options_map 警告含 underlier_mismatch 或 gamma_state 以 unknown 开头时，只说明数据降级，不下 wall/gamma 结论。",
@@ -173,6 +187,7 @@ def build_codex_prompt(
             "先在心里过三个问题再下判断(不写出来)：这个告警背后是谁在动手、还是只是数据噪声？"
             "它改变搭档任何一张挂单或持仓的赔率吗？上一条推送之后市场给出新信息了吗？三个都答不上来就不推。",
             "只根据下面的本机 JSON 判断。不下单指令，不编造缺失数据。",
+            *FRAMEWORK_GUARDRAILS,
             "搭档只交易 SPX/SPXW；结论和检查项必须落在 SPX/SPXW/ES、期权墙、gamma、IV surface 上，"
             "VIX/VIX1D/VVIX/SKEW 等波动率指数作 vol regime 上下文，SPY/QQQ 等指数 ETF 可少量引用作确认上下文。",
             "不要提加密、链上、预测市场类数据源；隐藏算法上下文只能影响是否推送，不能进入人类可见解释。",
@@ -195,7 +210,8 @@ def build_codex_prompt(
             ("previous_push: " + previous_text) if previous_text else "previous_push: null",
             "如果 ES/SPX anchor 缺失，不得把任何链上或 proxy 数据当作交易确认。",
             "如果 window.user_unattended 为 true，说明人类大概率在睡觉：只有 critical/high 且数据质量完好的 SPX/SPXW 风险才值得外发，其余一律不推送。",
-            "发送决策必须优先参考 Micopedia、SPXW call wall/put wall/zero gamma、以及过去 1 小时 IV surface/期权变化。",
+            "发送决策必须优先参考 Micopedia decision stack、Steven observe_only 附注（若有）、"
+            "SPXW call wall/put wall/zero gamma、以及过去 1 小时 IV surface/期权变化。",
             "单一指标（如仅 put skew 变陡）默认不足以外发；需要 gamma 状态、VIX/vol regime 或价格行为中至少一项共振确认，否则判为不需要推送。",
             "输出中文，最多 10 行，像交易台口头交接不像播报稿，结论先行：第一行之后紧跟一句话说清发生了什么、"
             "对搭档挂的单/持仓意味着什么；再给 2-3 行证据(触发数字 + gamma 地形与概率)；"

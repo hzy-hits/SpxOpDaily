@@ -2707,6 +2707,8 @@ def build_order_prompt(
             "动笔前先在心里过一遍(不写出来)：今天的 OI 是怎么摆的——put 侧是密集防线还是孤零零一档？dealer 在现价附近是"
             "正 gamma 压波动还是负 gamma 放大波动？今天的 play 里哪张是真机会、哪张只是模板凑数？想清楚再落笔，观点要有取舍，"
             "所有候选同等推荐等于没推荐。",
+            "框架口径：Micopedia/Steven observe_only（regime→map→flow→trigger→expression→exit）；"
+            "挂单地图是计划参考不是自动下单；GEX/*_proxy 是结构代理；Hyperliquid 只作弱次级证据，不作 SPX 锚。",
             "",
             "输出中文，最多 18 行。第一行以『挂单参考:』开头，复述模板第一行的日期与时间。",
             "接着给地形定调：pin 还是 transition，为什么(gamma 状态+价格相对 flip 的位置)，今天哪类 play 优先。",
@@ -3241,6 +3243,7 @@ def build_status_prompt(
             "",
             "动笔前先在心里过一遍(不要写出来)：现在价格站的这个位置，是谁的地盘？下方 put 墙的 OI 是真金白银的防守还是昨天的尸体？"
             "dealer 在这个价位是被迫买还是被迫卖(gamma 正负)？时间衰减在帮谁？想清楚了再写结论。",
+            "框架口径：Micopedia/Steven observe_only；*_proxy 曝露不是 vendor DEX；Hyperliquid 不作 SPX 锚；不下单授权。",
             "",
             "输出中文，14-20 行。第一行以『市场状态:』开头，保留模板第一行的时间与时段信息，紧跟一句定调：",
             "『剧本维持』或『剧本有变: 变在哪』——判断基准是 previous_push 正文和模板『较上次推送』行。",

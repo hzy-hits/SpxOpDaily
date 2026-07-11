@@ -1253,6 +1253,8 @@ def build_llm_writer_prompt(payload: dict[str, Any], deterministic_markdown: str
             "写之前先想清楚(不写出来)：今天价格是被墙拦住的还是根本没碰到墙？pin 是 gamma 压出来的还是碰巧？"
             "预期波幅是高估还是低估了，错在 vol 定价还是错在事件？模型今天哪里说对了、哪里说错了，都要点名。",
             "只允许使用给定 JSON 和模板报告里的事实；不编造价格、新闻、仓位。",
+            "框架口径：复盘对照 Micopedia/Steven observe_only 剧本（regime→map→trigger→exit）；"
+            "Steven episode 若存在只作审计附注；*_proxy 曝露不是 vendor DEX；不下单授权。",
             "搭档只交易 SPX/SPXW；正文只提 SPX、SPXW、ES、IV surface、期权墙、gamma 和数据质量。",
             "输出中文 Markdown。第一行必须是：",
             f"# SPX/SPXW Post-Close Review - {payload.get('trading_date')}",

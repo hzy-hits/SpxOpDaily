@@ -78,16 +78,24 @@ gateway process will loop on 401 streamer-login retries. REST quote and
 option-chain collection are unaffected by this restriction.
 
 The OAuth/gateway process now owns the optional Schwab WebSocket as well as the
-refreshable token. Its default `shadow` mode subscribes the configured SPX,
-SPY, RSP, ES, and MES Level-One universe, writes normal raw rows tagged
-`sampling_mode=schwab_stream`, and keeps its latest state separate from the
-production selector. A streaming failure therefore cannot take down the local
-REST gateway or silently switch production quotes.
+refreshable token. The deployed default is `schwab.streaming.mode=off` (no
+WebSocket thread) until Trader API entitlement exists. When switched to
+`shadow`, it subscribes the configured SPX, SPY, RSP, ES, and MES Level-One
+universe, writes normal raw rows tagged `sampling_mode=schwab_stream`, and keeps
+its latest state separate from the production selector. A streaming failure
+therefore cannot take down the local REST gateway or silently switch production
+quotes.
 
 In `live` mode the REST collector excludes the WebSocket-owned symbols, so the
 slower REST rows cannot overwrite the fast stream lane under the same canonical
 provider key. Logical ES/MES roots are re-resolved on a configured cadence; a
 quarterly contract change closes and reconnects the stream with the new symbols.
+
+Failover recovery into `ibkr_fallback` requires consecutive healthy IBKR
+observations (`provider_failover.ibkr_recovery_observations`, default `2`) so a
+half-recovered farm cannot flap the system early. IBKR stream quote freeze on
+connectivity loss is controlled by
+`ibkr_stream.freeze_quotes_on_connectivity_loss` (default `true`).
 
 Persistent IBKR client `172` also has an isolated position-shadow lane. When
 connected, it performs the complete startup position fetch and writes

@@ -1950,6 +1950,25 @@ def test_codex_prompt_hides_non_focus_market_context() -> None:
     assert "future:ES" in prompt
     assert "ibkr_session_state" in prompt
     assert "负 gamma 不等于看跌" in prompt
+    assert "observe_only" in prompt
+    assert "regime" in prompt and "trigger" in prompt and "expression" in prompt
+    assert "net_dex_proxy" in prompt
+    assert "Hyperliquid" in prompt
+    assert "不下单授权" in prompt or "不是下单授权" in prompt
+
+
+def test_direct_push_and_agent_prompts_carry_steven_micopedia_guardrails() -> None:
+    from spx_spark.notifier.prompts import build_agent_prompt, build_direct_push_prompt
+
+    payload = make_payload()
+    alerts = [payload["alerts"][0]]
+    direct = build_direct_push_prompt(payload, alerts)
+    agent = build_agent_prompt(payload, alerts)
+    for prompt in (direct, agent):
+        assert "observe_only" in prompt
+        assert "net_dex_proxy" in prompt
+        assert "Hyperliquid" in prompt
+        assert "不是下单授权" in prompt or "不下单指令" in prompt
 
 
 def test_alert_key_uses_dedup_group_not_title() -> None:
