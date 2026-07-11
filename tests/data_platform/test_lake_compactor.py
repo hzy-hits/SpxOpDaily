@@ -7,7 +7,7 @@ from pathlib import Path
 
 import duckdb
 
-from spx_spark.data_platform.lake.compact import QuoteLakeCompactor
+from spx_spark.data_platform.lake.compact import QuoteLakeCompactor, main
 from spx_spark.data_platform.lake.layout import discover_raw_quote_partitions
 from spx_spark.data_platform.lake.manifest import load_manifest
 
@@ -378,3 +378,32 @@ def test_empty_truncation_preserves_previous_verified_partition(tmp_path: Path) 
     assert "preserved previous verified" in (summary.results[0].detail or "")
     assert partition.parquet_path.read_bytes() == original_parquet
     assert partition.manifest_path.read_bytes() == original_manifest
+
+
+def test_summary_only_json_omits_per_partition_success_rows(
+    tmp_path: Path,
+    capsys: object,
+) -> None:
+    write_source(source_path(tmp_path), [quote_payload()])
+
+    assert (
+        main(
+            [
+                "--data-root",
+                str(tmp_path),
+                "--settle-seconds",
+                "0",
+                "--json",
+                "--summary-only",
+            ]
+        )
+        == 0
+    )
+
+    output = capsys.readouterr().out  # type: ignore[attr-defined]
+    payload = json.loads(output)
+    assert payload["result_count"] == 1
+    assert payload["status_counts"] == {"compacted": 1}
+    assert payload["failed"] is False
+    assert payload["failures"] == []
+    assert "results" not in payload

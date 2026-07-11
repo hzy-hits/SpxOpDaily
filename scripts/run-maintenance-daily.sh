@@ -4,4 +4,5 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-exec uv run spx-spark-maintenance dry-run --json
+# Keep journald bounded; the command writes the detailed JSON report to logs/.
+exec uv run spx-spark-maintenance dry-run

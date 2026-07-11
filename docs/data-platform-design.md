@@ -2,6 +2,8 @@
 
 Date: 2026-07-11
 
+Storage-topology decision: [ADR-0001: Oracle-first market-data storage](adr/0001-oracle-first-market-data-storage.md).
+
 ## Decision
 
 Keep the data platform in the `spx-spark` repository as an isolated package.

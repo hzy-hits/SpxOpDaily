@@ -488,6 +488,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--limit", type=int)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--json", action="store_true", dest="as_json")
+    parser.add_argument(
+        "--summary-only",
+        action="store_true",
+        help="Print aggregate counts and failures without one row per partition.",
+    )
     return parser
 
 
@@ -510,7 +515,32 @@ def main(argv: Sequence[str] | None = None) -> int:
         limit=args.limit,
         provider=args.provider,
     )
-    if args.as_json:
+    if args.summary_only:
+        failures = [asdict(result) for result in summary.results if result.status == "failed"]
+        payload = {
+            "dry_run": summary.dry_run,
+            "data_root": summary.data_root,
+            "started_at": summary.started_at,
+            "finished_at": summary.finished_at,
+            "result_count": len(summary.results),
+            "status_counts": summary.status_counts,
+            "failed": summary.failed,
+            "failures": failures,
+        }
+        if args.as_json:
+            print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+        else:
+            print(
+                "quote compaction "
+                f"dry_run={summary.dry_run} results={len(summary.results)} "
+                f"counts={json.dumps(summary.status_counts, sort_keys=True)}"
+            )
+            for failure in failures:
+                print(
+                    f"failed: {failure['source_path']} "
+                    f"detail={failure.get('detail') or 'unknown'}"
+                )
+    elif args.as_json:
         print(json.dumps(summary.to_dict(), sort_keys=True, separators=(",", ":")))
     else:
         print(

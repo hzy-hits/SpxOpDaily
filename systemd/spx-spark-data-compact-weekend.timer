@@ -1,0 +1,11 @@
+[Unit]
+Description=Bulk compact SPX Spark closed quote partitions on weekends
+
+[Timer]
+OnCalendar=Sat,Sun *-*-* 08:30:00 Asia/Shanghai
+RandomizedDelaySec=300
+Persistent=true
+Unit=spx-spark-data-compact-weekend.service
+
+[Install]
+WantedBy=timers.target

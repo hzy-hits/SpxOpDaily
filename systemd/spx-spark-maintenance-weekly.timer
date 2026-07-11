@@ -1,9 +1,9 @@
 [Unit]
-Description=Run SPX Spark weekly maintenance prune
+Description=Run SPX Spark weekly non-destructive retention audit
 
 [Timer]
-OnCalendar=Sat *-*-* 02:00:00
-Persistent=true
+OnCalendar=Sun *-*-* 13:00:00 Asia/Shanghai
+RandomizedDelaySec=300
 
 [Install]
 WantedBy=timers.target

@@ -1,5 +1,5 @@
 [Unit]
-Description=SPX Spark weekly non-destructive retention audit
+Description=SPX Spark weekend bulk JSONL to Parquet compaction
 After=network-online.target
 Wants=network-online.target
 
@@ -8,8 +8,10 @@ Type=oneshot
 WorkingDirectory=/home/ubuntu/spx-spark
 EnvironmentFile=-/home/ubuntu/spx-spark/.env
 Environment=PATH=/home/ubuntu/.local/bin:/home/ubuntu/.cargo/bin:/usr/local/bin:/usr/bin:/bin
-ExecStart=/home/ubuntu/spx-spark/scripts/run-maintenance-weekly.sh
+ExecStart=/home/ubuntu/spx-spark/scripts/run-data-compact.sh --json --summary-only --settle-seconds 300 --limit 512
 UMask=0077
 Nice=15
 IOSchedulingClass=idle
-TimeoutStartSec=30min
+CPUQuota=150%
+MemoryMax=4G
+TimeoutStartSec=4h

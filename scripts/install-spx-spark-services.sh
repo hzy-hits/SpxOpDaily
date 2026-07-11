@@ -17,6 +17,8 @@ ln -sfn "$ROOT/systemd/spx-spark-maintenance-weekly.service" "$USER_UNIT_DIR/spx
 ln -sfn "$ROOT/systemd/spx-spark-maintenance-weekly.timer" "$USER_UNIT_DIR/spx-spark-maintenance-weekly.timer"
 ln -sfn "$ROOT/systemd/spx-spark-data-compact.service" "$USER_UNIT_DIR/spx-spark-data-compact.service"
 ln -sfn "$ROOT/systemd/spx-spark-data-compact.timer" "$USER_UNIT_DIR/spx-spark-data-compact.timer"
+ln -sfn "$ROOT/systemd/spx-spark-data-compact-weekend.service" "$USER_UNIT_DIR/spx-spark-data-compact-weekend.service"
+ln -sfn "$ROOT/systemd/spx-spark-data-compact-weekend.timer" "$USER_UNIT_DIR/spx-spark-data-compact-weekend.timer"
 
 systemctl --user daemon-reload
 systemctl --user enable spx-spark-24h.service
@@ -26,15 +28,17 @@ systemctl --user enable spx-spark-morning-map.timer
 systemctl --user enable --now spx-spark-maintenance-daily.timer
 systemctl --user enable --now spx-spark-maintenance-weekly.timer
 systemctl --user enable --now spx-spark-data-compact.timer
+systemctl --user enable --now spx-spark-data-compact-weekend.timer
 
 echo "Installed user services:"
 echo "  spx-spark-24h.service"
 echo "  spx-spark-ibkr-stream.service"
 echo "  spx-spark-post-close-review.timer"
 echo "  spx-spark-morning-map.timer"
-echo "  spx-spark-maintenance-daily.timer (09:00 CST dry-run)"
-echo "  spx-spark-maintenance-weekly.timer (Sat 10:00 CST prune)"
+echo "  spx-spark-maintenance-daily.timer (07:30 CST dry-run)"
+echo "  spx-spark-maintenance-weekly.timer (Sun 13:00 CST non-destructive audit)"
 echo "  spx-spark-data-compact.timer (hourly at :08 + jitter; never deletes raw)"
+echo "  spx-spark-data-compact-weekend.timer (Sat/Sun 08:30 CST bulk catch-up)"
 
 if ! loginctl show-user "$USER" -p Linger 2>/dev/null | grep -q 'Linger=yes'; then
   echo "WARNING: user lingering is off; user services stop at logout and do not start at boot."
