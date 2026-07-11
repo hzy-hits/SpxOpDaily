@@ -13,6 +13,7 @@ from urllib.parse import urlencode, urljoin, urlsplit
 from urllib.request import ProxyHandler, Request, build_opener, urlopen
 
 from spx_spark.config import SchwabSettings
+from spx_spark.schwab.adapter import option_chain_symbol_for_schwab
 from spx_spark.schwab.adapter import quotes_from_quote_payload
 
 
@@ -230,11 +231,12 @@ def verify_quotes(client: SchwabClient, settings: SchwabSettings) -> list[Schwab
 def verify_option_chains(client: SchwabClient, settings: SchwabSettings) -> list[SchwabCheckResult]:
     results: list[SchwabCheckResult] = []
     for symbol in settings.verify_option_chains:
+        provider_symbol = option_chain_symbol_for_schwab(symbol)
         try:
             status, payload = client.get_json(
                 "/marketdata/v1/chains",
                 {
-                    "symbol": symbol,
+                    "symbol": provider_symbol,
                     "contractType": "ALL",
                     "strategy": "SINGLE",
                     "strikeCount": settings.option_chain_strike_count,

@@ -12,6 +12,7 @@ from spx_spark.schwab.verifier import (
     quote_batches,
     safe_settings_dict,
     validate_gateway_url,
+    verify_option_chains,
     verify_quotes,
 )
 
@@ -124,4 +125,28 @@ def test_quote_verifier_uses_500_symbol_batches(tmp_path):
 
     assert client.batch_sizes == [500, 500, 1]
     assert len(results) == 3
+    assert all(result.ok for result in results)
+
+
+def test_option_chain_verifier_maps_spx_to_provider_index_symbol(tmp_path):
+    settings = replace(
+        make_settings(str(tmp_path / "token.json")),
+        verify_option_chains=["SPX", "SPXW", "XSP", "SPY"],
+    )
+
+    class RecordingClient:
+        def __init__(self) -> None:
+            self.symbols: list[str] = []
+
+        def get_json(self, path: str, params: dict[str, object]) -> tuple[int, object]:
+            assert path == "/marketdata/v1/chains"
+            self.symbols.append(str(params["symbol"]))
+            return 200, {"status": "SUCCESS"}
+
+    client = RecordingClient()
+
+    results = verify_option_chains(client, settings)  # type: ignore[arg-type]
+
+    assert client.symbols == ["$SPX", "$SPX", "$XSP", "SPY"]
+    assert [result.label for result in results] == ["SPX", "SPXW", "XSP", "SPY"]
     assert all(result.ok for result in results)

@@ -36,6 +36,22 @@ SCHWAB_OCC_OPTION_PATTERN = re.compile(
 )
 
 
+def option_chain_symbol_for_schwab(symbol: str) -> str:
+    """Return the provider symbol accepted by Schwab's option-chain endpoint.
+
+    Schwab quotes accept ``$SPX``/``$XSP`` while the option-chain endpoint
+    rejects their unprefixed forms. ``SPXW`` contracts are returned through
+    the ``$SPX`` underlier chain rather than through a separate SPXW chain.
+    """
+
+    normalized = symbol.strip().upper()
+    if normalized in {"SPX", "SPXW", "$SPX"}:
+        return "$SPX"
+    if normalized in {"XSP", "$XSP"}:
+        return "$XSP"
+    return normalized
+
+
 def first_key(mapping: Mapping[str, Any], *keys: str) -> Any:
     for key in keys:
         if key in mapping and mapping[key] is not None:
