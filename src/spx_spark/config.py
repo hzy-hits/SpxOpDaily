@@ -551,6 +551,36 @@ class StorageSettings:
     slow_index_stale_after_seconds: float
     slow_index_labels: frozenset[str]
     delayed_stale_after_seconds: float = 60.0
+    provider_priority: tuple[str, ...] = (
+        "ibkr",
+        "schwab",
+        "hyperliquid",
+        "polymarket",
+        "internal",
+        "mock",
+        "unknown",
+    )
+
+    def __post_init__(self) -> None:
+        if not self.provider_priority:
+            raise ValueError("MARKET_DATA_PROVIDER_PRIORITY cannot be empty")
+        if len(set(self.provider_priority)) != len(self.provider_priority):
+            raise ValueError("MARKET_DATA_PROVIDER_PRIORITY cannot contain duplicates")
+        known = {
+            "ibkr",
+            "schwab",
+            "hyperliquid",
+            "polymarket",
+            "internal",
+            "mock",
+            "unknown",
+        }
+        invalid = sorted(set(self.provider_priority) - known)
+        if invalid:
+            raise ValueError(
+                "MARKET_DATA_PROVIDER_PRIORITY contains unsupported providers: "
+                + ",".join(invalid)
+            )
 
     @classmethod
     def from_env(cls) -> "StorageSettings":
@@ -575,6 +605,13 @@ class StorageSettings:
             ),
             delayed_stale_after_seconds=env_float(
                 "MARKET_DATA_DELAYED_STALE_AFTER_SECONDS", 60.0
+            ),
+            provider_priority=tuple(
+                provider.lower()
+                for provider in env_csv_preserve(
+                    "MARKET_DATA_PROVIDER_PRIORITY",
+                    "ibkr,schwab,hyperliquid,polymarket,internal,mock,unknown",
+                )
             ),
         )
 

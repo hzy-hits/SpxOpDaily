@@ -5,11 +5,14 @@ import pytest
 
 from spx_spark.config import SchwabSettings
 from spx_spark.schwab.verifier import (
+    MAX_QUOTE_BATCH_SIZE,
     build_schwab_client,
     count_chain_contracts,
     load_access_token,
+    quote_batches,
     safe_settings_dict,
     validate_gateway_url,
+    verify_quotes,
 )
 
 
@@ -84,3 +87,41 @@ def test_gateway_url_must_remain_loopback_only():
         validate_gateway_url("http://gateway.example.com")
     with pytest.raises(ValueError, match="IPv4 loopback"):
         validate_gateway_url("http://[::1]:8184")
+
+
+def test_quote_batches_default_to_500_symbols():
+    symbols = [f"SYMBOL{index}" for index in range(1_001)]
+
+    batches = quote_batches(symbols)
+
+    assert MAX_QUOTE_BATCH_SIZE == 500
+    assert [len(batch) for batch in batches] == [500, 500, 1]
+    assert [symbol for batch in batches for symbol in batch] == symbols
+    with pytest.raises(ValueError, match="between 1 and 500"):
+        quote_batches(symbols, 501)
+
+
+def test_quote_verifier_uses_500_symbol_batches(tmp_path):
+    settings = replace(
+        make_settings(str(tmp_path / "token.json")),
+        verify_indexes=[f"SYMBOL{index}" for index in range(1_001)],
+        verify_equities=[],
+        verify_futures=[],
+    )
+
+    class RecordingClient:
+        def __init__(self) -> None:
+            self.batch_sizes: list[int] = []
+
+        def get_json(self, path: str, params: dict[str, object]) -> tuple[int, object]:
+            assert path == "/marketdata/v1/quotes"
+            self.batch_sizes.append(len(str(params["symbols"]).split(",")))
+            return 200, {}
+
+    client = RecordingClient()
+
+    results = verify_quotes(client, settings)  # type: ignore[arg-type]
+
+    assert client.batch_sizes == [500, 500, 1]
+    assert len(results) == 3
+    assert all(result.ok for result in results)

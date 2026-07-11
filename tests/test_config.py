@@ -1,6 +1,8 @@
 from datetime import date, datetime, time
 from zoneinfo import ZoneInfo
 
+import pytest
+
 from spx_spark.config import (
     IbkrSettings,
     NotificationSettings,
@@ -151,6 +153,34 @@ def test_storage_settings_inherits_maintenance_root(monkeypatch, tmp_path):
 
     assert settings.data_root == "/tmp/spx-data"
     assert settings.latest_state_path == "/tmp/spx-data/latest/state.json"
+
+
+def test_storage_provider_priority_is_configurable_without_changing_default(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("MARKET_DATA_PROVIDER_PRIORITY", "schwab,ibkr,hyperliquid")
+
+    settings = StorageSettings.from_env()
+
+    assert settings.provider_priority == ("schwab", "ibkr", "hyperliquid")
+
+
+@pytest.mark.parametrize(
+    "priority",
+    ["", "schwab,ibkr,schwab", "schawb,ibkr"],
+)
+def test_storage_provider_priority_rejects_empty_duplicate_or_unknown_values(
+    monkeypatch,
+    tmp_path,
+    priority,
+):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("MARKET_DATA_PROVIDER_PRIORITY", priority)
+
+    with pytest.raises(ValueError, match="MARKET_DATA_PROVIDER_PRIORITY"):
+        StorageSettings.from_env()
 
 
 def test_ibkr_default_verifier_uses_dia_as_dow_proxy(monkeypatch, tmp_path):

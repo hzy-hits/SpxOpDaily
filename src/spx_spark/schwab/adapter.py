@@ -6,6 +6,7 @@ that ``spx_spark.marketdata`` stays provider-agnostic.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from datetime import datetime, timezone
 from typing import Any
@@ -27,6 +28,12 @@ from spx_spark.marketdata import (
     parse_timestamp,
 )
 from spx_spark.provider_adapter import ProviderSnapshot, provider_state_from_quote_health
+
+
+SCHWAB_OCC_OPTION_PATTERN = re.compile(
+    r"^(?P<trading_class>[A-Z0-9]{1,6})\s+"
+    r"(?P<expiry>\d{6})(?P<right>[CP])(?P<strike>\d{8})$"
+)
 
 
 def first_key(mapping: Mapping[str, Any], *keys: str) -> Any:
@@ -57,11 +64,39 @@ def parse_expiry(value: Any) -> str | None:
         return None
 
 
+def option_instrument_from_schwab_symbol(symbol: str) -> InstrumentId | None:
+    """Parse the padded OCC symbol returned by Schwab's quote endpoint."""
+
+    match = SCHWAB_OCC_OPTION_PATTERN.fullmatch(symbol.strip().upper())
+    if match is None:
+        return None
+    compact_expiry = match.group("expiry")
+    expiry = f"20{compact_expiry}"
+    try:
+        datetime.strptime(expiry, "%Y%m%d")
+    except ValueError:
+        return None
+    trading_class = match.group("trading_class")
+    underlier = "SPX" if trading_class == "SPXW" else trading_class
+    strike = int(match.group("strike")) / 1_000.0
+    return InstrumentId.option(
+        underlier,
+        expiry=expiry,
+        strike=strike,
+        right=match.group("right"),
+        trading_class=trading_class,
+        provider_symbol=symbol,
+    )
+
+
 def instrument_from_schwab_symbol(
     symbol: str,
     payload: Mapping[str, Any] | None = None,
 ) -> InstrumentId:
     raw_symbol = symbol
+    option_instrument = option_instrument_from_schwab_symbol(raw_symbol)
+    if option_instrument is not None:
+        return option_instrument
     clean_symbol = symbol[1:] if symbol.startswith("$") else symbol
     if symbol.startswith("$"):
         return InstrumentId.index(clean_symbol, provider_symbol=raw_symbol)
@@ -140,6 +175,7 @@ def quote_from_schwab_payload(
         open_interest=clean_float(first_key(quote_section, "openInterest")),
         quote_time=quote_time,
         trade_time=trade_time,
+        last_update_at=received_at,
         source_latency_ms=elapsed_ms(quote_time or trade_time, received_at),
         market_data_type="delayed" if delayed is True else None,
         raw=payload,
@@ -206,6 +242,7 @@ def quote_from_schwab_option_contract(
         open_interest=clean_float(first_key(contract, "openInterest")),
         quote_time=quote_time,
         trade_time=trade_time,
+        last_update_at=received_at,
         source_latency_ms=elapsed_ms(quote_time or trade_time, received_at),
         market_data_type="delayed" if delayed is True else None,
         greeks=greeks,

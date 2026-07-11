@@ -12,6 +12,7 @@ from pathlib import Path
 from spx_spark.config import StorageSettings
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 from spx_spark.marketdata import (
+    DEFAULT_PROVIDER_PRIORITY,
     InstrumentType,
     MarketDataQuality,
     Provider,
@@ -174,7 +175,11 @@ class LatestStateStore:
                 )
                 for quote in quotes
             )
-            best_quotes = select_best_quotes(quotes, as_of=as_of)
+            best_quotes = select_best_quotes(
+                quotes,
+                as_of=as_of,
+                provider_priority=self.settings.provider_priority,
+            )
         return LatestState(
             created_at=created_at,
             as_of=as_of,
@@ -215,7 +220,11 @@ class LatestStateStore:
                 )
                 for quote in provider_latest
             )
-            best_quotes = select_best_quotes(aged_quotes, as_of=now)
+            best_quotes = select_best_quotes(
+                aged_quotes,
+                as_of=now,
+                provider_priority=self.settings.provider_priority,
+            )
             state = LatestState(
                 created_at=datetime.now(tz=timezone.utc),
                 as_of=now,
@@ -245,7 +254,11 @@ class LatestStateStore:
             remaining_quotes = tuple(
                 quote for quote in existing_state.quotes if quote.provider != provider
             )
-            best_quotes = select_best_quotes(remaining_quotes, as_of=now)
+            best_quotes = select_best_quotes(
+                remaining_quotes,
+                as_of=now,
+                provider_priority=self.settings.provider_priority,
+            )
             state = LatestState(
                 created_at=datetime.now(tz=timezone.utc),
                 as_of=now,
@@ -289,14 +302,23 @@ def latest_provider_states(states: Iterable[ProviderState]) -> tuple[ProviderSta
     return tuple(sorted(result.values(), key=lambda item: item.provider.value))
 
 
-def select_best_quotes(quotes: Iterable[Quote], *, as_of: datetime | None = None) -> tuple[Quote, ...]:
+def select_best_quotes(
+    quotes: Iterable[Quote],
+    *,
+    as_of: datetime | None = None,
+    provider_priority: Iterable[Provider | str] = DEFAULT_PROVIDER_PRIORITY,
+) -> tuple[Quote, ...]:
     grouped: dict[str, list[Quote]] = defaultdict(list)
     for quote in quotes:
         grouped[quote.instrument.canonical_id].append(quote)
 
     best: list[Quote] = []
     for instrument_id in sorted(grouped):
-        quote = choose_best_quote(grouped[instrument_id], as_of=as_of)
+        quote = choose_best_quote(
+            grouped[instrument_id],
+            as_of=as_of,
+            provider_priority=provider_priority,
+        )
         if quote is not None:
             best.append(quote)
     return tuple(best)

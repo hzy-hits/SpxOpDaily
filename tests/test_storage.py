@@ -21,7 +21,11 @@ from spx_spark.storage import (
 )
 
 
-def make_storage_settings(tmp_path) -> StorageSettings:
+def make_storage_settings(
+    tmp_path,
+    *,
+    provider_priority: tuple[str, ...] = ("ibkr", "schwab"),
+) -> StorageSettings:
     return StorageSettings(
         data_root=str(tmp_path / "data"),
         latest_state_path=str(tmp_path / "data" / "latest" / "state.json"),
@@ -30,6 +34,7 @@ def make_storage_settings(tmp_path) -> StorageSettings:
         latest_stale_after_seconds=15.0,
         slow_index_stale_after_seconds=300.0,
         slow_index_labels=frozenset({"index:SKEW", "index:VVIX"}),
+        provider_priority=provider_priority,
     )
 
 
@@ -109,6 +114,65 @@ def test_latest_state_falls_back_from_stale_ibkr_to_live_schwab(tmp_path):
     assert best.effective_price == 7501
     ibkr_state = [quote for quote in state.quotes if quote.provider == Provider.IBKR][0]
     assert ibkr_state.quality == MarketDataQuality.STALE
+
+
+def test_latest_state_supports_schwab_primary_with_ibkr_quality_fallback(tmp_path):
+    settings = make_storage_settings(
+        tmp_path,
+        provider_priority=("schwab", "ibkr"),
+    )
+    store = LatestStateStore(settings)
+    now = datetime(2026, 7, 10, 14, 0, tzinfo=timezone.utc)
+    schwab = make_quote(
+        provider=Provider.SCHWAB,
+        quality=MarketDataQuality.LIVE,
+        mark=6301.0,
+        received_at=now,
+        quote_time=now,
+    )
+    ibkr = make_quote(
+        provider=Provider.IBKR,
+        quality=MarketDataQuality.LIVE,
+        mark=6300.0,
+        received_at=now,
+        quote_time=now,
+    )
+
+    store.update([ibkr, schwab], now=now)
+    assert store.load(now=now).best_quote("index:SPX").provider is Provider.SCHWAB
+
+    stale_schwab = make_quote(
+        provider=Provider.SCHWAB,
+        quality=MarketDataQuality.LIVE,
+        mark=6299.0,
+        received_at=now + timedelta(seconds=20),
+        quote_time=now - timedelta(minutes=2),
+    )
+    fresh_ibkr = make_quote(
+        provider=Provider.IBKR,
+        quality=MarketDataQuality.LIVE,
+        mark=6302.0,
+        received_at=now + timedelta(seconds=20),
+        quote_time=now + timedelta(seconds=20),
+    )
+
+    store.update([stale_schwab, fresh_ibkr], now=now + timedelta(seconds=20))
+    fallback = store.load(now=now + timedelta(seconds=20)).best_quote("index:SPX")
+    assert fallback is not None
+    assert fallback.provider is Provider.IBKR
+
+    missing_schwab = Quote(
+        instrument=InstrumentId.index("SPX"),
+        provider=Provider.SCHWAB,
+        provider_symbol="$SPX",
+        received_at=now + timedelta(seconds=30),
+        quality=MarketDataQuality.MISSING,
+        error="symbol missing from Schwab payload",
+    )
+    store.update([missing_schwab], now=now + timedelta(seconds=30))
+    missing_fallback = store.load(now=now + timedelta(seconds=30)).best_quote("index:SPX")
+    assert missing_fallback is not None
+    assert missing_fallback.provider is Provider.IBKR
 
 
 def test_latest_state_keeps_provider_latest_across_updates(tmp_path):

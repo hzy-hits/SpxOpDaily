@@ -202,6 +202,34 @@ scripts/run-schwab-verifier.sh --skip-chains
 scripts/run-schwab-verifier.sh
 ```
 
+## Offline acceptance while the app is pending
+
+The deterministic acceptance suite does not require a Schwab token:
+
+```bash
+scripts/run-schwab-offline-acceptance.sh
+```
+
+It verifies 500-symbol quote batching, global request pacing, bounded transient
+retries, immediate 401 reauthorization latching, sparse quote/option-chain
+normalization, SPX/SPXW identity, provider fallback, JSONL landing, SQLite
+research linkage, ZSTD Parquet compaction, schema evolution, deduplication, and
+DuckDB reads. It deliberately does not claim live entitlement, payload-field,
+or production-rate-limit validation; those remain the two verifier commands
+above after the portal reports `Ready for Use`.
+
+The single gateway owner applies the outbound request policy. Defaults are 120
+requests per minute, three retries, exponential backoff from 0.5 to 8 seconds,
+and a 30-second maximum retry wait. A longer provider `Retry-After` is returned
+to the caller without retrying early. Override the `SCHWAB_HTTP_*` values only
+when Schwab's active limits require it.
+
+Provider preference is independently configurable with
+`MARKET_DATA_PROVIDER_PRIORITY`. Keep the production default beginning with
+`ibkr,schwab` until the live Schwab acceptance succeeds. A later cutover can
+begin with `schwab,ibkr`; quality and freshness still outrank preference, so a
+stale or missing Schwab quote falls back to a fresh IBKR quote.
+
 ## Security and failure behavior
 
 - `/oauth/start` does not exist. Only the SSH command can create authorization

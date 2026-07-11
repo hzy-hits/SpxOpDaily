@@ -16,6 +16,9 @@ from spx_spark.config import SchwabSettings
 from spx_spark.schwab.adapter import quotes_from_quote_payload
 
 
+MAX_QUOTE_BATCH_SIZE = 500
+
+
 @dataclass(frozen=True)
 class SchwabCheckResult:
     label: str
@@ -105,6 +108,15 @@ def chunked(values: list[str], size: int) -> list[list[str]]:
     return [values[index : index + size] for index in range(0, len(values), size)]
 
 
+def quote_batches(
+    symbols: list[str],
+    batch_size: int = MAX_QUOTE_BATCH_SIZE,
+) -> list[list[str]]:
+    if batch_size < 1 or batch_size > MAX_QUOTE_BATCH_SIZE:
+        raise ValueError(f"Schwab quote batch size must be between 1 and {MAX_QUOTE_BATCH_SIZE}")
+    return chunked(symbols, batch_size)
+
+
 def summarize_quote_payload(payload: Any, symbols: list[str]) -> dict[str, Any]:
     if not isinstance(payload, dict):
         return {"symbols_requested": symbols, "payload_type": type(payload).__name__}
@@ -192,7 +204,7 @@ def count_chain_contracts(expiration_map: dict[str, Any]) -> int:
 def verify_quotes(client: SchwabClient, settings: SchwabSettings) -> list[SchwabCheckResult]:
     symbols = settings.verify_indexes + settings.verify_equities + settings.verify_futures
     results: list[SchwabCheckResult] = []
-    for batch in chunked(symbols, 40):
+    for batch in quote_batches(symbols):
         label = ",".join(batch)
         try:
             status, payload = client.get_json(
