@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Any
 from urllib.error import HTTPError, URLError
 
-from spx_spark.config import SchwabSettings, StorageSettings, env_csv
+from spx_spark.config import SchwabSettings, SchwabStreamSettings, StorageSettings, env_csv
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR, ET
 from spx_spark.provider_adapter import persist_provider_snapshot
 from spx_spark.runtime_config import runtime_value
@@ -15,6 +15,7 @@ from spx_spark.schwab.adapter import snapshot_from_chain_payload, snapshot_from_
 from spx_spark.schwab.symbols import (
     canonical_underlier_for_schwab,
     option_chain_symbol_for_schwab,
+    resolved_schwab_canonical_quote_symbols,
     resolved_schwab_quote_symbols,
     schwab_option_chain_underliers,
     schwab_quote_symbols,
@@ -69,6 +70,7 @@ def run(argv: list[str] | None = None, *, now: datetime | None = None) -> int:
     evaluation_now = now or datetime.now(tz=ET)
     settings = SchwabSettings.from_env()
     storage_settings = StorageSettings.from_env()
+    stream_settings = SchwabStreamSettings.from_env(data_root=storage_settings.data_root)
     client = build_schwab_client(settings)
     if client is None:
         print(json.dumps({"ok": False, "skipped": True, "reason": "missing_schwab_auth"}))
@@ -82,6 +84,14 @@ def run(argv: list[str] | None = None, *, now: datetime | None = None) -> int:
         configured_quote_symbols,
         now=evaluation_now,
     )
+    if stream_settings.mode == "live":
+        streaming_symbols = set(
+            resolved_schwab_canonical_quote_symbols(
+                stream_settings.canonical_symbols,
+                now=evaluation_now,
+            )
+        )
+        quote_symbols = [symbol for symbol in quote_symbols if symbol not in streaming_symbols]
     chain_symbols = env_csv(
         "SCHWAB_COLLECT_CHAINS",
         ",".join(schwab_option_chain_underliers()),

@@ -374,9 +374,7 @@ class IbkrPositionSettings:
             int(runtime_value("ibkr_positions.poll_interval_seconds")),
         )
         return cls(
-            enabled=env_bool(
-                "IBKR_POSITIONS_ENABLED", bool(runtime_value("ibkr_positions.enabled"))
-            ),
+            enabled=ibkr_account_read_enabled(),
             client_id=env_int(
                 "IBKR_POSITIONS_CLIENT_ID", int(runtime_value("ibkr_positions.client_id"))
             ),
@@ -388,6 +386,78 @@ class IbkrPositionSettings:
                 float(max(3 * poll_interval_seconds, 180)),
             ),
         )
+
+
+@dataclass(frozen=True)
+class IbkrBrokerSettings:
+    account_read_enabled: bool
+    position_shadow_enabled: bool
+    position_shadow_interval_seconds: int
+    position_shadow_path: str
+    execution_mode: str
+
+    def __post_init__(self) -> None:
+        if self.position_shadow_interval_seconds <= 0:
+            raise ValueError("IBKR_BROKER_POSITION_SHADOW_SECONDS must be positive")
+        if self.execution_mode not in {"manual", "shadow", "live"}:
+            raise ValueError("IBKR_EXECUTION_MODE must be manual, shadow, or live")
+        if self.execution_mode == "live" and not self.account_read_enabled:
+            raise ValueError(
+                "IBKR_EXECUTION_MODE=live requires IBKR_BROKER_ACCOUNT_READ_ENABLED=true"
+            )
+
+    @property
+    def position_shadow_active(self) -> bool:
+        return self.account_read_enabled and self.position_shadow_enabled
+
+    @classmethod
+    def from_env(cls) -> "IbkrBrokerSettings":
+        load_dotenv()
+        data_root = env_str(
+            "MARKET_DATA_DATA_ROOT",
+            env_str("MAINTENANCE_DATA_ROOT", str(runtime_value("maintenance.data_root"))),
+        )
+        configured_path = str(runtime_value("ibkr_broker.position_shadow_path")).strip()
+        return cls(
+            account_read_enabled=ibkr_account_read_enabled(),
+            position_shadow_enabled=env_bool(
+                "IBKR_BROKER_POSITION_SHADOW_ENABLED",
+                bool(runtime_value("ibkr_broker.position_shadow_enabled")),
+            ),
+            position_shadow_interval_seconds=env_int(
+                "IBKR_BROKER_POSITION_SHADOW_SECONDS",
+                int(runtime_value("ibkr_broker.position_shadow_interval_seconds")),
+            ),
+            position_shadow_path=os.getenv("IBKR_BROKER_POSITION_SHADOW_PATH")
+            or configured_path
+            or f"{data_root.rstrip('/')}/latest/ibkr_positions_shadow.json",
+            execution_mode=env_str(
+                "IBKR_EXECUTION_MODE",
+                str(runtime_value("ibkr_broker.execution_mode")),
+            ).lower(),
+        )
+
+
+def ibkr_account_read_enabled() -> bool:
+    load_dotenv()
+    return env_bool(
+        "IBKR_BROKER_ACCOUNT_READ_ENABLED",
+        env_bool(
+            "IBKR_POSITIONS_ENABLED",
+            bool(runtime_value("ibkr_broker.account_read_enabled")),
+        ),
+    )
+
+
+def ibkr_legacy_position_poller_enabled() -> bool:
+    load_dotenv()
+    return env_bool(
+        "IBKR_LEGACY_POSITION_POLLER_ENABLED",
+        env_bool(
+            "IBKR_POSITIONS_ENABLED",
+            bool(runtime_value("ibkr_broker.legacy_position_poller_enabled")),
+        ),
+    )
 
 
 @dataclass(frozen=True)
@@ -590,6 +660,83 @@ class SchwabSettings:
                 "SCHWAB_GATEWAY_BIND_PORT", int(runtime_value("schwab.gateway_bind_port"))
             ),
             gateway_url=env_str("SCHWAB_GATEWAY_URL"),
+        )
+
+
+@dataclass(frozen=True)
+class SchwabStreamSettings:
+    mode: str
+    canonical_symbols: tuple[str, ...]
+    flush_interval_seconds: float
+    symbol_refresh_interval_seconds: float
+    reconnect_min_seconds: float
+    reconnect_max_seconds: float
+    websocket_open_timeout_seconds: float
+    shadow_latest_path: str
+
+    def __post_init__(self) -> None:
+        if self.mode not in {"off", "shadow", "live"}:
+            raise ValueError("SCHWAB_STREAM_MODE must be off, shadow, or live")
+        if not self.canonical_symbols:
+            raise ValueError("SCHWAB_STREAM_SYMBOLS cannot be empty")
+        if len(set(self.canonical_symbols)) != len(self.canonical_symbols):
+            raise ValueError("SCHWAB_STREAM_SYMBOLS cannot contain duplicates")
+        if self.flush_interval_seconds <= 0:
+            raise ValueError("SCHWAB_STREAM_FLUSH_SECONDS must be positive")
+        if self.symbol_refresh_interval_seconds <= 0:
+            raise ValueError("SCHWAB_STREAM_SYMBOL_REFRESH_SECONDS must be positive")
+        if self.reconnect_min_seconds <= 0:
+            raise ValueError("SCHWAB_STREAM_RECONNECT_MIN_SECONDS must be positive")
+        if self.reconnect_max_seconds < self.reconnect_min_seconds:
+            raise ValueError("SCHWAB_STREAM_RECONNECT_MAX_SECONDS cannot be below minimum")
+        if self.websocket_open_timeout_seconds <= 0:
+            raise ValueError("SCHWAB_STREAM_OPEN_TIMEOUT_SECONDS must be positive")
+
+    @classmethod
+    def from_env(cls, *, data_root: str | None = None) -> "SchwabStreamSettings":
+        load_dotenv()
+        root = data_root or env_str(
+            "MARKET_DATA_DATA_ROOT",
+            env_str("MAINTENANCE_DATA_ROOT", str(runtime_value("maintenance.data_root"))),
+        )
+        configured_shadow_path = str(
+            runtime_value("schwab.streaming.shadow_latest_path")
+        ).strip()
+        return cls(
+            mode=env_str(
+                "SCHWAB_STREAM_MODE",
+                str(runtime_value("schwab.streaming.mode")),
+            ).lower(),
+            canonical_symbols=tuple(
+                symbol.upper()
+                for symbol in env_csv_preserve(
+                    "SCHWAB_STREAM_SYMBOLS",
+                    runtime_csv("schwab.streaming.canonical_symbols"),
+                )
+            ),
+            flush_interval_seconds=env_float(
+                "SCHWAB_STREAM_FLUSH_SECONDS",
+                float(runtime_value("schwab.streaming.flush_interval_seconds")),
+            ),
+            symbol_refresh_interval_seconds=env_float(
+                "SCHWAB_STREAM_SYMBOL_REFRESH_SECONDS",
+                float(runtime_value("schwab.streaming.symbol_refresh_interval_seconds")),
+            ),
+            reconnect_min_seconds=env_float(
+                "SCHWAB_STREAM_RECONNECT_MIN_SECONDS",
+                float(runtime_value("schwab.streaming.reconnect_min_seconds")),
+            ),
+            reconnect_max_seconds=env_float(
+                "SCHWAB_STREAM_RECONNECT_MAX_SECONDS",
+                float(runtime_value("schwab.streaming.reconnect_max_seconds")),
+            ),
+            websocket_open_timeout_seconds=env_float(
+                "SCHWAB_STREAM_OPEN_TIMEOUT_SECONDS",
+                float(runtime_value("schwab.streaming.websocket_open_timeout_seconds")),
+            ),
+            shadow_latest_path=os.getenv("SCHWAB_STREAM_SHADOW_LATEST_PATH")
+            or configured_shadow_path
+            or f"{root.rstrip('/')}/latest/schwab_stream_shadow.json",
         )
 
 

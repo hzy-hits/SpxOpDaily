@@ -4,12 +4,14 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from spx_spark.config import (
+    IbkrBrokerSettings,
     IbkrSettings,
     NotificationSettings,
     PolymarketSettings,
     RuntimePolicySettings,
     StorageSettings,
     SchwabSettings,
+    SchwabStreamSettings,
     default_spxw_expiry,
     is_time_in_window,
     next_equity_futures_month,
@@ -239,3 +241,34 @@ def test_schwab_cloudflare_gateway_settings(monkeypatch, tmp_path) -> None:
     assert settings.gateway_bind_host == "127.0.0.1"
     assert settings.gateway_bind_port == 8184
     assert settings.gateway_url == "http://127.0.0.1:8184"
+
+
+def test_schwab_stream_defaults_to_shadow_with_separate_latest_state(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("MARKET_DATA_DATA_ROOT", str(tmp_path))
+
+    settings = SchwabStreamSettings.from_env()
+
+    assert settings.mode == "shadow"
+    assert settings.canonical_symbols == ("SPX", "SPY", "RSP", "ES", "MES")
+    assert settings.symbol_refresh_interval_seconds == 300.0
+    assert settings.shadow_latest_path == str(tmp_path / "latest" / "schwab_stream_shadow.json")
+
+
+def test_schwab_stream_rejects_nonpositive_symbol_refresh_interval(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("SCHWAB_STREAM_SYMBOL_REFRESH_SECONDS", "0")
+
+    with pytest.raises(ValueError, match="SCHWAB_STREAM_SYMBOL_REFRESH_SECONDS"):
+        SchwabStreamSettings.from_env()
+
+
+def test_live_ibkr_execution_requires_account_visibility(monkeypatch) -> None:
+    monkeypatch.setenv("IBKR_EXECUTION_MODE", "live")
+    monkeypatch.setenv("IBKR_BROKER_ACCOUNT_READ_ENABLED", "false")
+
+    with pytest.raises(ValueError, match="requires IBKR_BROKER_ACCOUNT_READ_ENABLED"):
+        IbkrBrokerSettings.from_env()

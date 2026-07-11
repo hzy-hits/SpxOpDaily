@@ -14,6 +14,7 @@ dependencies = [
 [project.scripts]
 spx-spark-alert-profile = "spx_spark.alert_profile:main"
 spx-spark-alert-engine = "spx_spark.alert_engine:main"
+spx-spark-provider-failover = "spx_spark.provider_failover_controller:main"
 spx-spark-data-platform = "spx_spark.data_platform.cli:main"
 spx-spark-data-compact = "spx_spark.data_platform.lake.compact:main"
 spx-spark-intraday-shock = "spx_spark.intraday_shock:main"

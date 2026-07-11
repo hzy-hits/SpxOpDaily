@@ -1,7 +1,12 @@
-from datetime import UTC, datetime, time
+from datetime import UTC, datetime, time, timedelta
 
 from spx_spark.config import RuntimePolicySettings
-from spx_spark.runtime_mode import ibkr_allowed, load_override, write_override
+from spx_spark.runtime_mode import (
+    ibkr_allowed,
+    ibkr_market_data_allowed,
+    load_override,
+    write_override,
+)
 
 
 def make_policy() -> RuntimePolicySettings:
@@ -69,3 +74,44 @@ def test_ibkr_on_override_can_allow_weekend(tmp_path):
 
     assert ibkr_allowed(make_weekend_policy(), now=now, override=None) is False
     assert ibkr_allowed(make_weekend_policy(), now=now, override=override)
+
+
+def test_automatic_failover_gate_requires_fresh_control_state() -> None:
+    now = datetime(2026, 7, 3, 18, 0, tzinfo=UTC)
+    control = {
+        "monitoring_active": True,
+        "ibkr_market_data_required": True,
+        "updated_at": now.isoformat(),
+    }
+
+    assert ibkr_market_data_allowed(
+        make_policy(),
+        failover_control=control,
+        failover_enabled=True,
+        control_enabled=True,
+        control_max_age_seconds=60.0,
+        now=now,
+    )
+    assert not ibkr_market_data_allowed(
+        make_policy(),
+        failover_control={**control, "updated_at": (now - timedelta(minutes=5)).isoformat()},
+        failover_enabled=True,
+        control_enabled=True,
+        control_max_age_seconds=60.0,
+        now=now,
+    )
+
+
+def test_manual_ibkr_on_override_wins_over_automatic_control(tmp_path) -> None:
+    now = datetime(2026, 7, 3, 18, 0, tzinfo=UTC)
+    override = write_override(tmp_path / "mode.json", "ibkr-on", ttl_minutes=60, reason="test", now=now)
+
+    assert ibkr_market_data_allowed(
+        make_policy(),
+        failover_control={},
+        failover_enabled=True,
+        control_enabled=True,
+        control_max_age_seconds=60.0,
+        now=now,
+        override=override,
+    )

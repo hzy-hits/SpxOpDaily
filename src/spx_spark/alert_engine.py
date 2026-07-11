@@ -25,12 +25,26 @@ from spx_spark.iv_surface import (
     summarize_surface_history,
 )
 from spx_spark.market_context import build_market_context
-from spx_spark.marketdata import MarketDataQuality, Provider, ProviderState, ProviderStatus, Quote
+from spx_spark.marketdata import (
+    MarketDataQuality,
+    Provider,
+    ProviderState,
+    ProviderStatus,
+    Quote,
+    as_utc,
+    parse_timestamp,
+)
 from spx_spark.notifier import notify_payload
 from spx_spark.options_map import OptionsMap, build_options_map
 from spx_spark.position_alerts import (
+    has_open_spxw_positions,
     position_holdings_alerts,
     reconcile_position_event_acknowledgements,
+)
+from spx_spark.provider_failover import FailoverMode, FailoverState
+from spx_spark.provider_failover_controller import (
+    ProviderFailoverSettings,
+    load_failover_control,
 )
 from spx_spark.runtime_config import runtime_value
 from spx_spark.storage import (
@@ -761,6 +775,8 @@ def ibkr_session_status(provider_state: ProviderState | None, *, now: datetime) 
     reason = (provider_state.reason or "").lower()
     if provider_state.status == ProviderStatus.AVAILABLE:
         return "available"
+    if "account standby connected" in reason:
+        return "available"
     if "competing session" in reason or "10197" in reason:
         return "competing_session"
     if provider_state.status == ProviderStatus.UNAVAILABLE:
@@ -812,6 +828,7 @@ def build_system_event_state_payload(
             payload["ibkr_session_status"] = current_status
         return payload
     return {
+        **previous,
         "ibkr_session_status": current_status,
         "ibkr_last_observed_status": current_status,
         "ibkr_checked_at": provider_state.checked_at.isoformat(),
@@ -820,16 +837,24 @@ def build_system_event_state_payload(
 
 
 def persist_system_event_state(state: LatestState) -> None:
-    provider_state = provider_state_for(state, Provider.IBKR)
-    if provider_state is None:
-        return
-    current_status = ibkr_session_status(provider_state, now=state.as_of)
     state_path = system_event_state_path()
     previous = load_system_event_state(state_path)
-    save_system_event_state(
-        state_path,
-        build_system_event_state_payload(state, provider_state, current_status, previous),
-    )
+    payload = dict(previous)
+    provider_state = provider_state_for(state, Provider.IBKR)
+    if provider_state is not None and ibkr_session_is_position_critical():
+        current_status = ibkr_session_status(provider_state, now=state.as_of)
+        payload = build_system_event_state_payload(
+            state,
+            provider_state,
+            current_status,
+            payload,
+        )
+    failover_state = load_provider_failover_state(now=state.as_of)
+    if failover_state is not None and failover_state.transition is not None:
+        payload["provider_failover_transition_id"] = failover_state.transition.transition_id
+        payload["provider_failover_mode"] = failover_state.mode.value
+    if payload != previous:
+        save_system_event_state(state_path, payload)
 
 
 def ibkr_session_event_alert(
@@ -846,15 +871,15 @@ def ibkr_session_event_alert(
             severity="high",
             kind="ibkr_session_interrupted",
             instrument_id="index:SPX",
-            title="IBKR market-data session interrupted",
+            title="IBKR broker session interrupted",
             detail=(
-                "IBKR data session is unavailable"
+                "IBKR broker session is unavailable while positions or live execution require it"
                 + (
                     " because another IBKR session appears to own market data."
                     if current_status == "competing_session"
                     else "."
                 )
-                + " Collector will keep fallback feeds running and probe again on the configured interval."
+                + " Market-data fallback remains independent; account and execution safety require attention."
             ),
             provider=Provider.IBKR.value,
             quality=current_status,
@@ -866,8 +891,8 @@ def ibkr_session_event_alert(
             severity="high",
             kind="ibkr_session_restored",
             instrument_id="index:SPX",
-            title="IBKR market-data session restored",
-            detail="IBKR data session is available again; SPX/SPXW/ES collection can resume.",
+            title="IBKR broker session restored",
+            detail="IBKR broker connectivity is available again for position or execution safety.",
             provider=Provider.IBKR.value,
             quality=current_status,
             research_only=False,
@@ -876,38 +901,139 @@ def ibkr_session_event_alert(
     return None
 
 
+def load_provider_failover_state(*, now: datetime) -> FailoverState | None:
+    settings = ProviderFailoverSettings.from_env()
+    raw = load_failover_control(settings.state_path)
+    if not raw or raw.get("monitoring_active") is not True:
+        return None
+    updated_at = parse_timestamp(raw.get("updated_at"))
+    if updated_at is None:
+        return None
+    state_age_seconds = (as_utc(now) - updated_at).total_seconds()
+    if not 0 <= state_age_seconds <= settings.control_state_max_age_seconds:
+        return None
+    try:
+        failover_state = FailoverState.from_dict(raw)
+    except (KeyError, TypeError, ValueError):
+        return None
+    transition = failover_state.transition
+    if transition is not None:
+        transition_age_seconds = (as_utc(now) - transition.occurred_at).total_seconds()
+        if not 0 <= transition_age_seconds <= settings.transition_alert_max_age_seconds:
+            failover_state = replace(failover_state, transition=None)
+    return failover_state
+
+
+def provider_failover_event_alert(
+    failover_state: FailoverState,
+    *,
+    previous_transition_id: str | None,
+) -> Alert | None:
+    transition = failover_state.transition
+    if transition is None or transition.transition_id == previous_transition_id:
+        return None
+    if transition.mode == FailoverMode.IBKR_FALLBACK:
+        return Alert(
+            severity="high",
+            kind="market_data_ibkr_fallback_activated",
+            instrument_id="index:SPX",
+            title="Schwab 异常，IBKR 备用行情已接管",
+            detail=(
+                "SPX/ES 直接行情已切换到 IBKR L1 备用通道；"
+                "系统保持风控，但不会因为切换本身反复推送离线消息。"
+            ),
+            provider=Provider.IBKR.value,
+            quality=failover_state.mode.value,
+            research_only=False,
+            source_gate="provider_failover_state",
+            dedup_group=transition.transition_id,
+        )
+    if transition.mode == FailoverMode.BOTH_UNAVAILABLE:
+        return Alert(
+            severity="critical",
+            kind="market_data_all_providers_unavailable",
+            instrument_id="index:SPX",
+            title="Schwab 与 IBKR 直接行情均不可用",
+            detail="两个直接行情源均未通过健康门；禁止新开仓，只允许人工核对和已有仓位处置。",
+            provider=Provider.INTERNAL.value,
+            quality=failover_state.mode.value,
+            research_only=False,
+            source_gate="provider_failover_state",
+            dedup_group=transition.transition_id,
+        )
+    if transition.mode == FailoverMode.SCHWAB_PRIMARY:
+        if transition.previous_mode == FailoverMode.RECOVERY_PENDING:
+            title = "Schwab 连续稳定，备用接管已取消"
+            detail = "Schwab 在 IBKR 接管前恢复并连续通过健康门；系统继续使用主行情。"
+        elif transition.previous_mode == FailoverMode.BOTH_UNAVAILABLE:
+            title = "Schwab 连续稳定，主行情已恢复"
+            detail = "Schwab 锚点连续通过健康门，双源不可用状态已解除。"
+        else:
+            title = "Schwab 连续稳定，主行情已恢复"
+            detail = "Schwab SPX/ES 锚点连续通过健康门，系统已退出 IBKR 备用行情状态。"
+        return Alert(
+            severity="high",
+            kind="market_data_schwab_restored",
+            instrument_id="index:SPX",
+            title=title,
+            detail=detail,
+            provider=Provider.SCHWAB.value,
+            quality=failover_state.mode.value,
+            research_only=False,
+            source_gate="provider_failover_state",
+            dedup_group=transition.transition_id,
+        )
+    return None
+
+
+def ibkr_session_is_position_critical() -> bool:
+    execution_mode = os.getenv(
+        "IBKR_EXECUTION_MODE",
+        str(runtime_value("ibkr_broker.execution_mode")),
+    ).strip().lower()
+    if execution_mode == "live":
+        return True
+    return has_open_spxw_positions()
+
+
 def system_event_alerts(state: LatestState, *, persist: bool = True) -> list[Alert]:
     if not env_bool(
         "ALERT_SYSTEM_EVENTS_ENABLED",
         bool(runtime_value("alerts.system_events_enabled")),
     ):
         return []
-    provider_state = provider_state_for(state, Provider.IBKR)
-    if provider_state is None:
-        return []
-    current_status = ibkr_session_status(provider_state, now=state.as_of)
     state_path = system_event_state_path()
     previous = load_system_event_state(state_path)
-    previous_status = previous.get("ibkr_session_status")
-    if current_status in IBKR_TRANSITIONAL_SESSION_STATUSES:
-        if persist:
-            save_system_event_state(
-                state_path,
-                build_system_event_state_payload(state, provider_state, current_status, previous),
+    alerts: list[Alert] = []
+    failover_state = load_provider_failover_state(now=state.as_of)
+    if failover_state is not None:
+        failover_alert = provider_failover_event_alert(
+            failover_state,
+            previous_transition_id=(
+                str(previous.get("provider_failover_transition_id"))
+                if previous.get("provider_failover_transition_id")
+                else None
+            ),
+        )
+        if failover_alert is not None:
+            alerts.append(failover_alert)
+
+    provider_state = provider_state_for(state, Provider.IBKR)
+    if provider_state is not None and ibkr_session_is_position_critical():
+        current_status = ibkr_session_status(provider_state, now=state.as_of)
+        previous_status = previous.get("ibkr_session_status")
+        if current_status not in IBKR_TRANSITIONAL_SESSION_STATUSES:
+            alert = ibkr_session_event_alert(
+                provider_state,
+                previous_status=str(previous_status) if previous_status else None,
+                current_status=current_status,
             )
-        return []
+            if alert is not None:
+                alerts.append(alert)
 
     if persist:
-        save_system_event_state(
-            state_path,
-            build_system_event_state_payload(state, provider_state, current_status, previous),
-        )
-    alert = ibkr_session_event_alert(
-        provider_state,
-        previous_status=str(previous_status) if previous_status else None,
-        current_status=current_status,
-    )
-    return [alert] if alert is not None else []
+        persist_system_event_state(state)
+    return alerts
 
 
 def proxy_fallback_watch_alerts(
@@ -1374,7 +1500,8 @@ def run(argv: list[str] | None = None) -> int:
         persist_gamma_regime=True,
     )
     system_event_pending = any(
-        isinstance(alert, dict) and alert.get("source_gate") == "ibkr_session_state"
+        isinstance(alert, dict)
+        and alert.get("source_gate") in {"ibkr_session_state", "provider_failover_state"}
         for alert in payload.get("alerts", [])
     )
     movement_pending = any(

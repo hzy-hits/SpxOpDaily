@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import stat
+import threading
 from dataclasses import replace
 from http.client import HTTPConnection
 from pathlib import Path
@@ -12,13 +13,14 @@ from urllib.request import urlopen
 import pytest
 from schwab.auth import AuthContext
 
-from spx_spark.config import SchwabSettings
+from spx_spark.config import SchwabSettings, SchwabStreamSettings
 from spx_spark.schwab.auth_storage import AtomicJsonFile
 from spx_spark.schwab.gateway import GatewayHealth
 from spx_spark.schwab.oauth_service import (
     OAuthCallbackError,
     OAuthCoordinator,
     OAuthServers,
+    initialize_optional_stream_runtime,
     validate_oauth_settings,
 )
 
@@ -311,3 +313,75 @@ def test_servers_keep_gateway_local_and_never_log_callback_query(
     output = capsys.readouterr()
     assert "sensitive-code" not in output.out
     assert "sensitive-code" not in output.err
+
+
+def test_servers_start_and_close_optional_stream_supervisor(tmp_path: Path) -> None:
+    settings = replace(make_settings(tmp_path), oauth_bind_port=0, gateway_bind_port=0)
+    manager = FakeManager(settings.token_file)
+    coordinator = OAuthCoordinator(
+        settings,
+        manager,  # type: ignore[arg-type]
+        auth_context_factory=auth_factory,
+    )
+    started = threading.Event()
+    stopped = threading.Event()
+
+    def auxiliary_runner() -> None:
+        started.set()
+        stopped.wait(timeout=5)
+
+    with OAuthServers(
+        settings,
+        coordinator,
+        auxiliary_runner=auxiliary_runner,
+        auxiliary_close=stopped.set,
+    ):
+        assert started.wait(timeout=2)
+
+    assert stopped.is_set()
+
+
+def test_stream_config_failure_is_redacted_and_does_not_block_servers(
+    monkeypatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    settings = replace(make_settings(tmp_path), oauth_bind_port=0, gateway_bind_port=0)
+    manager = FakeManager(settings.token_file)
+    coordinator = OAuthCoordinator(
+        settings,
+        manager,  # type: ignore[arg-type]
+        auth_context_factory=auth_factory,
+    )
+
+    def fail_stream_config(cls, *, data_root):
+        del cls, data_root
+        raise ValueError("invalid stream config contains SENSITIVE-VALUE")
+
+    monkeypatch.setattr(
+        SchwabStreamSettings,
+        "from_env",
+        classmethod(fail_stream_config),
+    )
+
+    stream_runtime, stream_mode = initialize_optional_stream_runtime(
+        manager  # type: ignore[arg-type]
+    )
+
+    assert stream_runtime is None
+    assert stream_mode == "disabled_error"
+    with OAuthServers(settings, coordinator) as servers:
+        callback_port = servers.callback_server.server_address[1]
+        gateway_port = servers.gateway_server.server_address[1]
+        with urlopen(f"http://127.0.0.1:{callback_port}/healthz") as response:
+            assert json.load(response) == {"ok": True}
+        with urlopen(f"http://127.0.0.1:{gateway_port}/livez") as response:
+            assert json.load(response) == {"ok": True}
+
+    output = capsys.readouterr()
+    assert "SENSITIVE-VALUE" not in output.err
+    assert json.loads(output.err) == {
+        "error_type": "ValueError",
+        "event": "schwab_stream_initialization_failed",
+        "ok": False,
+    }

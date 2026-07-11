@@ -325,6 +325,23 @@ class SchwabSessionManager:
 
             raise AssertionError("Schwab retry loop exhausted without a response")
 
+    def client_for_streaming(self) -> Any:
+        """Return the process-owned refresh-capable client without exposing its token."""
+
+        with self._request_lock:
+            with self._lock:
+                if self._reauth_required:
+                    raise SchwabGatewayUnavailable("Schwab reauthorization is required")
+                client = self._client
+            if client is None:
+                if not self.load():
+                    raise SchwabGatewayUnavailable("Schwab authorization is not ready")
+                with self._lock:
+                    client = self._client
+            if client is None:  # pragma: no cover - load guarantees the invariant
+                raise SchwabGatewayUnavailable("Schwab authorization client is unavailable")
+            return client
+
     def _can_load_client(self) -> bool:
         return bool(
             self.settings.app_key

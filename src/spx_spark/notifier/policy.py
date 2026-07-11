@@ -53,6 +53,9 @@ BLOCKED_HUMAN_MESSAGE_PHRASES = (
 SYSTEM_EVENT_ALERT_KINDS = {
     "ibkr_session_interrupted",
     "ibkr_session_restored",
+    "market_data_ibkr_fallback_activated",
+    "market_data_all_providers_unavailable",
+    "market_data_schwab_restored",
     "spxw_position_event_store_corrupt",
 }
 

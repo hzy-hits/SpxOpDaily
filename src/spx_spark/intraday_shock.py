@@ -18,7 +18,15 @@ from typing import Any
 
 from spx_spark.alert_model import Alert
 from spx_spark.alert_profile import active_window
-from spx_spark.config import NY_TZ, NotificationSettings, StorageSettings, env_float, env_int
+from spx_spark.config import (
+    NY_TZ,
+    NotificationSettings,
+    StorageSettings,
+    env_bool,
+    env_csv_preserve,
+    env_float,
+    env_int,
+)
 from spx_spark.data_platform.integration import (
     IntradayResearchResult,
     persist_intraday_evaluation,
@@ -63,6 +71,15 @@ RECLAIM_KIND = "intraday_price_reclaim"
 @dataclass(frozen=True)
 class IntradayShockSettings:
     state_path: str
+    anchor_provider_priority: tuple[str, ...] = tuple(
+        str(item).lower() for item in runtime_value("intraday_shock.anchor_provider_priority")
+    )
+    require_schwab_streaming_anchors: bool = bool(
+        runtime_value("intraday_shock.require_schwab_streaming_anchors")
+    )
+    provider_switch_reset_seconds: int = int(
+        runtime_value("intraday_shock.provider_switch_reset_seconds")
+    )
     one_minute_seconds: int = 60
     three_minute_seconds: int = 180
     one_minute_threshold_bps: float = 20.0
@@ -83,6 +100,19 @@ class IntradayShockSettings:
     rearm_neutral_seconds: int = 300
     retry_seconds: int = 30
 
+    def __post_init__(self) -> None:
+        if not self.anchor_provider_priority:
+            raise ValueError("intraday shock anchor provider priority cannot be empty")
+        supported = {Provider.SCHWAB.value, Provider.IBKR.value}
+        invalid = sorted(set(self.anchor_provider_priority) - supported)
+        if invalid:
+            raise ValueError(
+                "intraday shock anchors must be direct Schwab or IBKR providers: "
+                + ",".join(invalid)
+            )
+        if self.provider_switch_reset_seconds <= 0:
+            raise ValueError("intraday shock provider switch reset seconds must be positive")
+
     @classmethod
     def from_env(cls) -> "IntradayShockSettings":
         data_root = (
@@ -93,6 +123,24 @@ class IntradayShockSettings:
         return cls(
             state_path=os.getenv("ALERT_INTRADAY_SHOCK_STATE_PATH")
             or f"{data_root.rstrip('/')}/latest/intraday_shock_state.json",
+            anchor_provider_priority=tuple(
+                provider.lower()
+                for provider in env_csv_preserve(
+                    "ALERT_INTRADAY_ANCHOR_PROVIDER_PRIORITY",
+                    ",".join(
+                        str(item)
+                        for item in runtime_value("intraday_shock.anchor_provider_priority")
+                    ),
+                )
+            ),
+            require_schwab_streaming_anchors=env_bool(
+                "ALERT_INTRADAY_REQUIRE_SCHWAB_STREAMING_ANCHORS",
+                bool(runtime_value("intraday_shock.require_schwab_streaming_anchors")),
+            ),
+            provider_switch_reset_seconds=env_int(
+                "ALERT_INTRADAY_PROVIDER_SWITCH_RESET_SECONDS",
+                int(runtime_value("intraday_shock.provider_switch_reset_seconds")),
+            ),
             one_minute_seconds=env_int(
                 "ALERT_INTRADAY_SHOCK_1M_SECONDS",
                 int(runtime_value("intraday_shock.one_minute_seconds")),
@@ -179,6 +227,7 @@ class PriceSample:
     es: float
     spx_source_at: datetime | None = None
     es_source_at: datetime | None = None
+    provider: str = Provider.UNKNOWN.value
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -191,6 +240,7 @@ class PriceSample:
             "es_source_at": as_utc(self.es_source_at).isoformat()
             if self.es_source_at is not None
             else None,
+            "provider": self.provider,
         }
 
 
@@ -222,6 +272,7 @@ def _sample_from_dict(value: object) -> PriceSample | None:
         es=float(es),
         spx_source_at=_parse_datetime(value.get("spx_source_at")),
         es_source_at=_parse_datetime(value.get("es_source_at")),
+        provider=str(value.get("provider") or Provider.UNKNOWN.value),
     )
 
 
@@ -257,9 +308,16 @@ def _bps(current: float, anchor: float) -> float:
     return (current / anchor - 1.0) * 10_000.0
 
 
-def _event_id(session_date: str, direction: str, anchor_at: datetime) -> str:
+def _event_id(
+    session_date: str,
+    direction: str,
+    anchor_at: datetime,
+    *,
+    provider: str = Provider.UNKNOWN.value,
+) -> str:
     minute = as_utc(anchor_at).strftime("%H%M")
-    return f"spx_shock:{session_date.replace('-', '')}:{direction}:{minute}"
+    base = f"spx_shock:{session_date.replace('-', '')}:{direction}:{minute}"
+    return base if provider == Provider.UNKNOWN.value else f"{base}:{provider}"
 
 
 def _candidate_for_horizon(
@@ -273,7 +331,8 @@ def _candidate_for_horizon(
     eligible = [
         sample
         for sample in history
-        if 0 < (current.at - sample.at).total_seconds() <= horizon_seconds
+        if sample.provider == current.provider
+        and 0 < (current.at - sample.at).total_seconds() <= horizon_seconds
     ]
     if not eligible:
         return None
@@ -354,6 +413,27 @@ def _pending_due(event: dict[str, object], phase: str, now: datetime, retry_seco
     return attempted_at is None or (now - attempted_at).total_seconds() >= retry_seconds
 
 
+def _provider_switch_reset_due(
+    container: dict[str, object],
+    sample: PriceSample,
+    *,
+    reset_seconds: int,
+) -> bool:
+    expected = str(container.get("provider") or Provider.UNKNOWN.value)
+    if expected == Provider.UNKNOWN.value:
+        container["provider"] = sample.provider
+        container.pop("provider_mismatch_since", None)
+        return False
+    if expected == sample.provider:
+        container.pop("provider_mismatch_since", None)
+        return False
+    mismatch_since = _event_datetime(container, "provider_mismatch_since")
+    if mismatch_since is None:
+        container["provider_mismatch_since"] = as_utc(sample.at).isoformat()
+        return False
+    return (sample.at - mismatch_since).total_seconds() >= reset_seconds
+
+
 def _shock_alert(event: dict[str, object]) -> Alert:
     direction = str(event["direction"])
     spx_move = float(event["shock_spx_bps"])
@@ -371,7 +451,7 @@ def _shock_alert(event: dict[str, object]) -> Alert:
             f"ES 同向 {abs(es_move):.1f} bps；这是 0DTE 波动冲击提醒，不等于自动买 "
             f"{'put' if direction == 'down' else 'call'}，等待局部极值后的结构确认。"
         ),
-        provider=Provider.IBKR.value,
+        provider=str(event.get("provider") or Provider.UNKNOWN.value),
         quality=MarketDataQuality.LIVE.value,
         value=spx_move,
         threshold=float(event["shock_threshold_bps"]),
@@ -405,7 +485,7 @@ def _reclaim_alert(event: dict[str, object]) -> Alert:
             f"短时反转已成立，但这只是 {expression} 剧本升温，仍需结合 flip/zero gamma/墙位，"
             "不自动生成入场。"
         ),
-        provider=Provider.IBKR.value,
+        provider=str(event.get("provider") or Provider.UNKNOWN.value),
         quality=MarketDataQuality.LIVE.value,
         value=spx_recovery,
         threshold=float(event["reclaim_threshold"]),
@@ -417,7 +497,7 @@ def _reclaim_alert(event: dict[str, object]) -> Alert:
     )
 
 
-def _strategy_alert(signal: IntradayPathSignal) -> Alert:
+def _strategy_alert(signal: IntradayPathSignal, *, provider: str) -> Alert:
     if signal.kind == FLIP_RECLAIM_CALL_KIND:
         title = f"SPX 收复 flip {_dash_level(signal.level)}，Call 路径确认"
         detail = (
@@ -440,7 +520,7 @@ def _strategy_alert(signal: IntradayPathSignal) -> Alert:
         instrument_id="index:SPX",
         title=title,
         detail=detail,
-        provider=Provider.IBKR.value,
+        provider=provider,
         quality=MarketDataQuality.LIVE.value,
         value=signal.level,
         threshold=signal.invalidation_level,
@@ -497,6 +577,25 @@ def advance_monitor_state(
     rearm_raw = state.get("rearm")
     rearm = dict(rearm_raw) if isinstance(rearm_raw, dict) else None
 
+    if event is not None and _provider_switch_reset_due(
+        event,
+        sample,
+        reset_seconds=settings.provider_switch_reset_seconds,
+    ):
+        event["status"] = "provider_switched"
+        event["provider_switched_at"] = as_utc(sample.at).isoformat()
+        state["last_event"] = event
+        event = None
+        rearm = None
+        parsed_history = [prior for prior in parsed_history if prior.provider == sample.provider]
+    elif event is None and rearm is not None and _provider_switch_reset_due(
+        rearm,
+        sample,
+        reset_seconds=settings.provider_switch_reset_seconds,
+    ):
+        rearm = None
+        parsed_history = [prior for prior in parsed_history if prior.provider == sample.provider]
+
     if event is not None:
         delivered_at = _event_datetime(event, "reclaim_delivered_at")
         if (
@@ -536,24 +635,29 @@ def advance_monitor_state(
                 "direction": event.get("direction"),
                 "anchor_spx": event.get("anchor_spx"),
                 "extreme_spx": event.get("extreme_spx"),
+                "provider": event.get("provider"),
                 "neutral_since": None,
             }
             event = None
 
     if event is None and rearm is not None:
-        direction = str(rearm.get("direction"))
-        anchor_spx = float(rearm.get("anchor_spx") or sample.spx)
-        extreme_spx = float(rearm.get("extreme_spx") or sample.spx)
-        recovery = _recovery_fraction(direction, sample.spx, anchor_spx, extreme_spx)
-        neutral_since = _event_datetime(rearm, "neutral_since")
-        if recovery >= settings.rearm_recovery_fraction:
-            if neutral_since is None:
-                rearm["neutral_since"] = as_utc(sample.at).isoformat()
-            elif (sample.at - neutral_since).total_seconds() >= settings.rearm_neutral_seconds:
-                parsed_history = [prior for prior in parsed_history if prior.at >= neutral_since]
-                rearm = None
-        else:
-            rearm["neutral_since"] = None
+        rearm_provider = str(rearm.get("provider") or Provider.UNKNOWN.value)
+        if rearm_provider in {Provider.UNKNOWN.value, sample.provider}:
+            direction = str(rearm.get("direction"))
+            anchor_spx = float(rearm.get("anchor_spx") or sample.spx)
+            extreme_spx = float(rearm.get("extreme_spx") or sample.spx)
+            recovery = _recovery_fraction(direction, sample.spx, anchor_spx, extreme_spx)
+            neutral_since = _event_datetime(rearm, "neutral_since")
+            if recovery >= settings.rearm_recovery_fraction:
+                if neutral_since is None:
+                    rearm["neutral_since"] = as_utc(sample.at).isoformat()
+                elif (
+                    sample.at - neutral_since
+                ).total_seconds() >= settings.rearm_neutral_seconds:
+                    parsed_history = [prior for prior in parsed_history if prior.at >= neutral_since]
+                    rearm = None
+            else:
+                rearm["neutral_since"] = None
 
     if event is None and rearm is None:
         candidate = _find_shock_candidate(parsed_history, sample, settings)
@@ -562,7 +666,12 @@ def advance_monitor_state(
             assert isinstance(anchor, PriceSample)
             direction = str(candidate["direction"])
             event = {
-                "event_id": _event_id(str(state["session_date"]), direction, anchor.at),
+                "event_id": _event_id(
+                    str(state["session_date"]),
+                    direction,
+                    anchor.at,
+                    provider=sample.provider,
+                ),
                 "direction": direction,
                 "status": "shock_confirmed",
                 "anchor_at": as_utc(anchor.at).isoformat(),
@@ -576,6 +685,7 @@ def advance_monitor_state(
                 "shock_es_bps": float(candidate["es_move_bps"]),
                 "shock_threshold_bps": float(candidate["threshold_bps"]),
                 "shock_duration_seconds": (sample.at - anchor.at).total_seconds(),
+                "provider": sample.provider,
                 "shock_delivered": False,
                 "shock_last_attempt_at": None,
                 "reclaim_streak": 0,
@@ -592,7 +702,12 @@ def advance_monitor_state(
                 "spx_recovery_fraction": 0.0,
                 "es_recovery_fraction": 0.0,
             }
-    if event is not None:
+    event_provider = (
+        str(event.get("provider") or Provider.UNKNOWN.value)
+        if event is not None
+        else Provider.UNKNOWN.value
+    )
+    if event is not None and event_provider in {Provider.UNKNOWN.value, sample.provider}:
         direction = str(event.get("direction"))
         extreme_spx = float(event["extreme_spx"])
         extreme_es = float(event["extreme_es"])
@@ -776,12 +891,58 @@ def synchronized_live_sample(
     state: LatestState,
     settings: IntradayShockSettings,
 ) -> tuple[PriceSample | None, str | None]:
-    spx = state.best_quote("index:SPX")
-    es = state.best_quote("future:ES")
-    if spx is None or es is None:
-        return None, "missing_spx_or_es"
-    if spx.provider != Provider.IBKR or es.provider != Provider.IBKR:
-        return None, "non_ibkr_anchor"
+    first_rejection: str | None = None
+    found_pair = False
+    for provider_name in settings.anchor_provider_priority:
+        provider = Provider(provider_name)
+        spx = _latest_provider_quote(state, "index:SPX", provider)
+        es = _latest_provider_quote(state, "future:ES", provider)
+        if spx is None or es is None:
+            continue
+        found_pair = True
+        if (
+            provider == Provider.SCHWAB
+            and settings.require_schwab_streaming_anchors
+            and (
+                spx.sampling_mode != "schwab_stream"
+                or es.sampling_mode != "schwab_stream"
+            )
+        ):
+            if first_rejection is None:
+                first_rejection = "schwab_anchor_not_streaming"
+            continue
+        sample, rejection = _validated_anchor_pair(state, settings, spx=spx, es=es)
+        if sample is not None:
+            return sample, None
+        if first_rejection is None:
+            first_rejection = rejection
+    if found_pair:
+        return None, first_rejection or "non_live_or_stale_anchor"
+    return None, "missing_spx_or_es"
+
+
+def _latest_provider_quote(
+    state: LatestState,
+    instrument_id: str,
+    provider: Provider,
+) -> Quote | None:
+    matches = [
+        quote
+        for quote in state.quotes
+        if quote.instrument.canonical_id == instrument_id and quote.provider == provider
+    ]
+    if not matches:
+        return None
+    return max(matches, key=lambda quote: as_utc(quote.received_at))
+
+
+def _validated_anchor_pair(
+    state: LatestState,
+    settings: IntradayShockSettings,
+    *,
+    spx: Quote,
+    es: Quote,
+) -> tuple[PriceSample | None, str | None]:
     spx_decision = configured_quote_use_decision(spx, as_of=state.as_of)
     es_decision = configured_quote_use_decision(es, as_of=state.as_of)
     if (
@@ -810,6 +971,7 @@ def synchronized_live_sample(
             es=float(es_price),
             spx_source_at=spx_at,
             es_source_at=es_at,
+            provider=spx.provider.value,
         ),
         None,
     )
@@ -916,7 +1078,13 @@ def run(argv: list[str] | None = None) -> int:
                     structure,
                     strategy_settings,
                 )
-                alerts = [*price_alerts, *(_strategy_alert(row) for row in strategy_signals)]
+                alerts = [
+                    *price_alerts,
+                    *(
+                        _strategy_alert(row, provider=sample.provider)
+                        for row in strategy_signals
+                    ),
+                ]
                 raw_price_alerts = tuple(price_alerts)
                 if alerts and not args.no_notify:
                     monitor_state, alerts = reconcile_acknowledged_alerts(

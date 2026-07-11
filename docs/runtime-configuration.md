@@ -85,6 +85,18 @@ Production uses `schwab,ibkr,...` provider priority. Freshness and quality are
 still evaluated before provider preference, so missing or stale Schwab data
 falls back to usable IBKR data.
 
+Automatic transitions are configured under `provider_failover`. Health
+observation is enabled independently from the final IBKR stream-control switch,
+which remains off during Schwab WebSocket shadow acceptance. See
+[schwab-primary-ibkr-fallback.md](schwab-primary-ibkr-fallback.md).
+
+`schwab.streaming.mode` controls the WebSocket owned by the OAuth/gateway
+process. `shadow` writes a separate latest-state file for RTH comparison,
+`live` feeds the production latest-state selector, and `off` creates no
+WebSocket thread. Live-owned symbols are removed from the slower REST quote
+batch, and `symbol_refresh_interval_seconds` controls active ES/MES contract
+re-resolution for quarterly rollover.
+
 Every setting consumed with `runtime_value("path.to.setting")` must have both
 `value` and `description`. The architecture tests reject new literal defaults
 passed directly to `env_bool`, `env_int`, `env_float`, `env_str`, `env_csv` or

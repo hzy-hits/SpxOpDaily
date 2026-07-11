@@ -172,6 +172,8 @@ def test_gateway_loads_one_refreshing_client_and_proxies_only_market_data(
     with pytest.raises(ValueError, match="Unsupported"):
         manager.request("/trader/v1/accounts", [])
 
+    assert manager.client_for_streaming() is fake_client
+
 
 def test_callback_exchange_discards_first_client_and_loads_gateway_client(
     monkeypatch: pytest.MonkeyPatch,

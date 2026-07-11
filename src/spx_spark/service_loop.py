@@ -16,8 +16,20 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from spx_spark import alert_engine, greek_shadow, intraday_shock, iv_surface
-from spx_spark.config import env_bool, env_int, load_dotenv
+from spx_spark import (
+    alert_engine,
+    greek_shadow,
+    intraday_shock,
+    iv_surface,
+    provider_failover_controller,
+)
+from spx_spark.config import (
+    env_bool,
+    env_int,
+    ibkr_account_read_enabled,
+    ibkr_legacy_position_poller_enabled,
+    load_dotenv,
+)
 from spx_spark.hyperliquid import collector as hyperliquid_collector
 from spx_spark.ibkr import collector as ibkr_collector
 from spx_spark.runtime_config import runtime_value
@@ -47,9 +59,15 @@ class ServiceLoopSettings:
     ibkr_skip_options: bool
     ibkr_connect_retry_seconds: int
     ibkr_conflict_probe_seconds: int
-    ibkr_positions_enabled: bool = bool(runtime_value("service_loop.ibkr_positions_enabled"))
+    provider_failover_enabled: bool = bool(runtime_value("provider_failover.enabled"))
+    provider_failover_interval_seconds: int = int(
+        runtime_value("provider_failover.interval_seconds")
+    )
+    ibkr_positions_enabled: bool = bool(
+        runtime_value("ibkr_broker.legacy_position_poller_enabled")
+    )
     ibkr_positions_interval_seconds: int = int(
-        runtime_value("service_loop.ibkr_positions_interval_seconds")
+        runtime_value("ibkr_positions.poll_interval_seconds")
     )
     schwab_chains_enabled: bool = bool(runtime_value("schwab.collection.enabled"))
     schwab_chains_interval_seconds: int = int(
@@ -116,13 +134,13 @@ class ServiceLoopSettings:
                 "SPX_SERVICE_HEARTBEAT_SECONDS",
                 int(runtime_value("service_loop.heartbeat_seconds")),
             ),
-            ibkr_positions_enabled=env_bool(
-                "IBKR_POSITIONS_ENABLED",
-                bool(runtime_value("service_loop.ibkr_positions_enabled")),
+            ibkr_positions_enabled=(
+                ibkr_account_read_enabled()
+                and ibkr_legacy_position_poller_enabled()
             ),
             ibkr_positions_interval_seconds=env_int(
                 "IBKR_POSITIONS_POLL_SECONDS",
-                int(runtime_value("service_loop.ibkr_positions_interval_seconds")),
+                int(runtime_value("ibkr_positions.poll_interval_seconds")),
             ),
             schwab_chains_enabled=env_bool(
                 "SPX_SERVICE_SCHWAB_CHAINS_ENABLED",
@@ -143,6 +161,14 @@ class ServiceLoopSettings:
             ibkr_conflict_probe_seconds=env_int(
                 "IBKR_CONFLICT_PROBE_SECONDS",
                 int(runtime_value("service_loop.ibkr_conflict_probe_seconds")),
+            ),
+            provider_failover_enabled=env_bool(
+                "PROVIDER_FAILOVER_ENABLED",
+                bool(runtime_value("provider_failover.enabled")),
+            ),
+            provider_failover_interval_seconds=env_int(
+                "PROVIDER_FAILOVER_INTERVAL_SECONDS",
+                int(runtime_value("provider_failover.interval_seconds")),
             ),
             max_concurrent_tasks=env_int(
                 "SPX_SERVICE_MAX_CONCURRENT_TASKS",
@@ -240,12 +266,25 @@ def run_schwab_collector() -> int:
     return schwab_collector.run()
 
 
+def run_provider_failover() -> int:
+    return provider_failover_controller.run(["--json"])
+
+
 def console_script(name: str) -> str:
     return str(Path(sys.executable).with_name(name))
 
 
 def build_tasks(settings: ServiceLoopSettings) -> list[ServiceTask]:
     tasks: list[ServiceTask] = []
+    if settings.provider_failover_enabled:
+        tasks.append(
+            ServiceTask(
+                "provider_failover",
+                settings.provider_failover_interval_seconds,
+                run_provider_failover,
+                command=(console_script("spx-spark-provider-failover"), "--json"),
+            )
+        )
     # Keep the lightweight shock path first so it is not queued behind slow
     # collectors or an LLM-backed full alert review when several tasks become
     # due on the same tick.

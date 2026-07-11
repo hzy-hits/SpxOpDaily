@@ -174,6 +174,21 @@ def resolved_schwab_quote_symbols(
     return resolved
 
 
+def resolved_schwab_canonical_quote_symbols(
+    canonical_symbols: list[str] | tuple[str, ...],
+    *,
+    now: datetime | date | None = None,
+) -> list[str]:
+    """Map canonical config labels to provider quote symbols, then resolve futures."""
+
+    configured_symbols = [
+        instrument.quote_symbol
+        for symbol in canonical_symbols
+        if (instrument := find_schwab_instrument(symbol)) is not None
+    ]
+    return resolved_schwab_quote_symbols(configured_symbols, now=now)
+
+
 def option_chain_symbol_for_schwab(symbol: str) -> str:
     instrument = find_schwab_instrument(symbol)
     if instrument is None:

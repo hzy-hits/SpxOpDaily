@@ -38,13 +38,20 @@ def settings(tmp_path) -> IntradayShockSettings:
     )
 
 
-def sample(at: datetime, spx: float, es: float) -> PriceSample:
+def sample(
+    at: datetime,
+    spx: float,
+    es: float,
+    *,
+    provider: str = Provider.UNKNOWN.value,
+) -> PriceSample:
     return PriceSample(
         at=at,
         spx=spx,
         es=es,
         spx_source_at=at,
         es_source_at=at,
+        provider=provider,
     )
 
 
@@ -90,6 +97,90 @@ def test_trump_style_down_shock_then_v_reclaim_is_two_phases(tmp_path) -> None:
     assert alerts[0].event_id == shock.event_id
     assert "V 反" in alerts[0].title
     assert "不自动生成入场" in alerts[0].detail
+
+
+def test_provider_switch_cannot_create_a_cross_provider_shock(tmp_path) -> None:
+    cfg = settings(tmp_path)
+    start = datetime(2026, 7, 10, 14, 32, 26, tzinfo=UTC)
+    state = empty_monitor_state("2026-07-10")
+
+    state, _ = advance_monitor_state(
+        state,
+        sample(start, 7556.30, 7602.75, provider=Provider.IBKR.value),
+        cfg,
+    )
+    state, alerts = advance_monitor_state(
+        state,
+        sample(
+            start + timedelta(seconds=22),
+            7536.53,
+            7582.00,
+            provider=Provider.SCHWAB.value,
+        ),
+        cfg,
+    )
+
+    assert alerts == []
+    assert state["active_event"] is None
+
+
+def test_provider_switch_cannot_confirm_reclaim_for_an_existing_event(tmp_path) -> None:
+    cfg = settings(tmp_path)
+    start = datetime(2026, 7, 10, 14, 32, 26, tzinfo=UTC)
+    state = empty_monitor_state("2026-07-10")
+    state, _ = advance_monitor_state(
+        state,
+        sample(start, 7556.30, 7602.75, provider=Provider.IBKR.value),
+        cfg,
+    )
+    state, alerts = advance_monitor_state(
+        state,
+        sample(
+            start + timedelta(seconds=22),
+            7536.53,
+            7582.00,
+            provider=Provider.IBKR.value,
+        ),
+        cfg,
+    )
+    assert [alert.kind for alert in alerts] == [SHOCK_KIND]
+    state = mark_alert_attempts(
+        state,
+        alerts,
+        at=start + timedelta(seconds=22),
+        delivered=True,
+    )
+
+    for seconds in (30, 35):
+        state, alerts = advance_monitor_state(
+            state,
+            sample(
+                start + timedelta(seconds=seconds),
+                7550.0,
+                7595.0,
+                provider=Provider.SCHWAB.value,
+            ),
+            cfg,
+        )
+        assert alerts == []
+
+    assert state["active_event"]["reclaim_streak"] == 0  # type: ignore[index]
+
+    state, alerts = advance_monitor_state(
+        state,
+        sample(
+            start + timedelta(seconds=61),
+            7520.0,
+            7565.0,
+            provider=Provider.SCHWAB.value,
+        ),
+        cfg,
+    )
+
+    assert [alert.kind for alert in alerts] == [SHOCK_KIND]
+    assert alerts[0].provider == Provider.SCHWAB.value
+    assert alerts[0].event_id is not None
+    assert alerts[0].event_id.endswith(":schwab")
 
 
 def test_up_shock_and_down_reversal_are_symmetric(tmp_path) -> None:
@@ -303,16 +394,19 @@ def _quote(
     price: float,
     at: datetime,
     quality: MarketDataQuality = MarketDataQuality.LIVE,
+    provider: Provider = Provider.IBKR,
+    sampling_mode: str | None = None,
 ) -> Quote:
     return Quote(
         instrument=instrument,
-        provider=Provider.IBKR,
+        provider=provider,
         provider_symbol=instrument.canonical_id,
         received_at=at,
         quote_time=at,
         quality=quality,
         mark=price,
         market_data_type=1 if quality == MarketDataQuality.LIVE else 3,
+        sampling_mode=sampling_mode,
     )
 
 
@@ -349,6 +443,108 @@ def test_synchronized_sample_rejects_stale_or_delayed_anchor(tmp_path) -> None:
     result, reason = synchronized_live_sample(stale_state, cfg)
     assert result is None
     assert reason in {"non_live_or_stale_anchor", "stale_spx_anchor"}
+
+
+def test_synchronized_sample_prefers_schwab_same_provider_pair(tmp_path) -> None:
+    cfg = settings(tmp_path)
+    now = datetime(2026, 7, 10, 14, 0, tzinfo=UTC)
+    ibkr_spx = _quote(InstrumentId.index("SPX"), price=7499.0, at=now)
+    ibkr_es = _quote(InstrumentId.future("ES"), price=7549.0, at=now)
+    schwab_spx = _quote(
+        InstrumentId.index("SPX"),
+        price=7500.0,
+        at=now,
+        provider=Provider.SCHWAB,
+        sampling_mode="schwab_stream",
+    )
+    schwab_es = _quote(
+        InstrumentId.future("ES"),
+        price=7550.0,
+        at=now,
+        provider=Provider.SCHWAB,
+        sampling_mode="schwab_stream",
+    )
+    state = LatestState(
+        created_at=now,
+        as_of=now,
+        quotes=(ibkr_spx, ibkr_es, schwab_spx, schwab_es),
+        best_quotes=(schwab_spx, schwab_es),
+    )
+
+    result, reason = synchronized_live_sample(state, cfg)
+
+    assert reason is None
+    assert result is not None
+    assert result.provider == Provider.SCHWAB.value
+    assert result.spx == 7500.0
+    assert result.es == 7550.0
+
+
+def test_synchronized_sample_falls_back_to_ibkr_when_schwab_pair_is_stale(tmp_path) -> None:
+    cfg = settings(tmp_path)
+    now = datetime(2026, 7, 10, 14, 0, tzinfo=UTC)
+    stale_at = now - timedelta(seconds=20)
+    schwab_spx = _quote(
+        InstrumentId.index("SPX"),
+        price=7500.0,
+        at=stale_at,
+        provider=Provider.SCHWAB,
+    )
+    schwab_es = _quote(
+        InstrumentId.future("ES"),
+        price=7550.0,
+        at=stale_at,
+        provider=Provider.SCHWAB,
+    )
+    ibkr_spx = _quote(InstrumentId.index("SPX"), price=7501.0, at=now)
+    ibkr_es = _quote(InstrumentId.future("ES"), price=7551.0, at=now)
+    state = LatestState(
+        created_at=now,
+        as_of=now,
+        quotes=(schwab_spx, schwab_es, ibkr_spx, ibkr_es),
+        best_quotes=(ibkr_spx, ibkr_es),
+    )
+
+    result, reason = synchronized_live_sample(state, cfg)
+
+    assert reason is None
+    assert result is not None
+    assert result.provider == Provider.IBKR.value
+    assert result.spx == 7501.0
+    assert result.es == 7551.0
+
+
+def test_synchronized_sample_does_not_promote_fresh_schwab_rest_into_fast_lane(
+    tmp_path,
+) -> None:
+    cfg = settings(tmp_path)
+    now = datetime(2026, 7, 10, 14, 0, tzinfo=UTC)
+    schwab_spx = _quote(
+        InstrumentId.index("SPX"),
+        price=7500.0,
+        at=now,
+        provider=Provider.SCHWAB,
+    )
+    schwab_es = _quote(
+        InstrumentId.future("ES"),
+        price=7550.0,
+        at=now,
+        provider=Provider.SCHWAB,
+    )
+    ibkr_spx = _quote(InstrumentId.index("SPX"), price=7501.0, at=now)
+    ibkr_es = _quote(InstrumentId.future("ES"), price=7551.0, at=now)
+    state = LatestState(
+        created_at=now,
+        as_of=now,
+        quotes=(schwab_spx, schwab_es, ibkr_spx, ibkr_es),
+        best_quotes=(schwab_spx, schwab_es),
+    )
+
+    result, reason = synchronized_live_sample(state, cfg)
+
+    assert reason is None
+    assert result is not None
+    assert result.provider == Provider.IBKR.value
 
 
 def test_es_extreme_is_tracked_independently_from_spx(tmp_path) -> None:

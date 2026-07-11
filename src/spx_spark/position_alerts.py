@@ -13,6 +13,7 @@ from spx_spark.ibkr.position_watcher import (
     position_state_path,
     snapshot_book_metrics,
 )
+from spx_spark.marketdata import as_utc, parse_timestamp
 from spx_spark.options_map import OptionsMap
 from spx_spark.notifier.state import load_acknowledged_event_ids
 from spx_spark.position_events import (
@@ -35,7 +36,7 @@ def position_holdings_alerts(
     window: AlertWindow,
 ) -> list[Alert]:
     position_settings = IbkrPositionSettings.from_env()
-    if not position_settings.enabled or not position_settings.snapshot_path:
+    if not position_settings.snapshot_path:
         return []
     if not env_bool("ALERT_POSITIONS_ENABLED", bool(runtime_value("position_alerts.enabled"))):
         return []
@@ -90,6 +91,40 @@ def position_holdings_alerts(
             )
         ]
     return [render_position_event(event, window=window) for event in batch.pending_events]
+
+
+def has_open_spxw_positions() -> bool:
+    """Return only aggregate exposure state; never expose account identifiers."""
+
+    position_settings = IbkrPositionSettings.from_env()
+    if not position_settings.snapshot_path:
+        return False
+    snapshot = load_snapshot(position_settings.snapshot_path)
+    if snapshot is not None:
+        if any(position.qty != 0 for position in snapshot.positions):
+            return True
+        fetched_at = parse_timestamp(snapshot.fetched_at)
+        snapshot_age_seconds = (
+            (datetime.now(tz=timezone.utc) - as_utc(fetched_at)).total_seconds()
+            if fetched_at is not None
+            else None
+        )
+        if (
+            snapshot.fetch_complete
+            and snapshot_age_seconds is not None
+            and 0 <= snapshot_age_seconds <= position_settings.max_snapshot_age_seconds
+        ):
+            return False
+    try:
+        durable = PositionEventStore(position_settings.state_path).load()
+    except PositionEventStoreCorrupt:
+        # Unknown exposure must remain conservative until the durable state is repaired.
+        return True
+    if any(position.qty != 0 for position in durable.observed_positions):
+        return True
+    # When account tracking is expected, missing/incomplete/stale evidence is
+    # unknown exposure, not proof of a flat book. Treat it as position-critical.
+    return position_settings.enabled
 
 
 def snapshot_to_observation(snapshot: PositionSnapshot | None) -> PositionObservation | None:

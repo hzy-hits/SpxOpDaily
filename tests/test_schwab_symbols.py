@@ -8,6 +8,7 @@ from spx_spark.schwab.symbols import (
     find_schwab_instrument,
     resolved_schwab_quote_symbol,
     resolved_schwab_quote_symbols,
+    resolved_schwab_canonical_quote_symbols,
 )
 
 
@@ -15,6 +16,13 @@ def test_front_quarterly_future_resolves_to_concrete_schwab_symbol() -> None:
     assert active_quarterly_contract_month(date(2026, 7, 11)) == (2026, 9)
     assert resolved_schwab_quote_symbol("/ES", now=date(2026, 7, 11)) == "/ESU26"
     assert resolved_schwab_quote_symbol("MES", now=date(2026, 7, 11)) == "/MESU26"
+
+
+def test_canonical_stream_universe_maps_provider_symbols_before_future_resolution() -> None:
+    assert resolved_schwab_canonical_quote_symbols(
+        ("SPX", "SPY", "ES"),
+        now=date(2026, 7, 11),
+    ) == ["$SPX", "SPY", "/ESU26"]
 
 
 def test_front_future_rolls_on_monday_before_third_friday() -> None:

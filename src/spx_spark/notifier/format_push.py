@@ -84,7 +84,13 @@ def push_lane_for_alerts(alerts: list[dict[str, object]]) -> str:
     # Reviewed market narratives that may include non-MARKET_SIGNAL kinds
     # (e.g. wall proximity already filtered) still count as trade if no ops.
     kinds = {str(alert.get("kind") or "") for alert in alerts}
-    ops_prefixes = ("ibkr_session_", "required_data_", "optional_data_", "option_quote_freshness")
+    ops_prefixes = (
+        "ibkr_session_",
+        "market_data_",
+        "required_data_",
+        "optional_data_",
+        "option_quote_freshness",
+    )
     if any(kind.startswith(ops_prefixes) or kind in {"iv_surface_stale"} for kind in kinds):
         return "ops"
     return "trade"

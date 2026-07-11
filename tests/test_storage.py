@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import multiprocessing
 from datetime import datetime, timedelta, timezone
 
 from spx_spark.config import StorageSettings
@@ -61,6 +62,38 @@ def make_quote(
     )
 
 
+def _concurrent_raw_writer(data_root: str, worker_id: int, row_count: int) -> None:
+    settings = StorageSettings(
+        data_root=data_root,
+        latest_state_path=f"{data_root}/latest/state.json",
+        raw_file_name="quotes.jsonl",
+        include_raw_payload=True,
+        latest_stale_after_seconds=15.0,
+        slow_index_stale_after_seconds=300.0,
+        slow_index_labels=frozenset(),
+        provider_priority=("schwab", "ibkr"),
+    )
+    received_at = datetime(2026, 7, 6, 13, 30, tzinfo=timezone.utc)
+    rows = [
+        Quote(
+            instrument=InstrumentId.index("SPX"),
+            provider=Provider.SCHWAB,
+            provider_symbol="$SPX",
+            received_at=received_at,
+            quality=MarketDataQuality.LIVE,
+            mark=7500.0 + row_index / 1000,
+            quote_time=received_at,
+            raw={
+                "worker_id": worker_id,
+                "row_index": row_index,
+                "padding": "x" * 8192,
+            },
+        )
+        for row_index in range(row_count)
+    ]
+    JsonlQuoteWriter(settings).write_quotes(rows)
+
+
 def test_jsonl_writer_partitions_by_provider_date_and_hour(tmp_path):
     settings = make_storage_settings(tmp_path)
     writer = JsonlQuoteWriter(settings)
@@ -82,6 +115,46 @@ def test_jsonl_writer_partitions_by_provider_date_and_hour(tmp_path):
     record = json.loads(path.read_text(encoding="utf-8").strip())
     assert record["instrument_id"] == "index:SPX"
     assert record["provider"] == "schwab"
+
+
+def test_jsonl_writer_serializes_concurrent_process_appends(tmp_path) -> None:
+    worker_count = 4
+    rows_per_worker = 200
+    context = multiprocessing.get_context("spawn")
+    processes = [
+        context.Process(
+            target=_concurrent_raw_writer,
+            args=(str(tmp_path / "data"), worker_id, rows_per_worker),
+        )
+        for worker_id in range(worker_count)
+    ]
+    for process in processes:
+        process.start()
+    for process in processes:
+        process.join(timeout=30)
+        assert process.exitcode == 0
+
+    path = (
+        tmp_path
+        / "data"
+        / "raw"
+        / "provider=schwab"
+        / "date=2026-07-06"
+        / "hour=13"
+        / "quotes.jsonl"
+    )
+    lines = path.read_text(encoding="utf-8").splitlines()
+    records = [json.loads(line) for line in lines]
+
+    assert len(records) == worker_count * rows_per_worker
+    assert {
+        (record["raw"]["worker_id"], record["raw"]["row_index"])
+        for record in records
+    } == {
+        (worker_id, row_index)
+        for worker_id in range(worker_count)
+        for row_index in range(rows_per_worker)
+    }
 
 
 def test_latest_state_falls_back_from_stale_ibkr_to_live_schwab(tmp_path):

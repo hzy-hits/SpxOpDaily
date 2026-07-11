@@ -47,6 +47,7 @@ def test_service_loop_defaults_do_not_enable_ibkr() -> None:
 
     names = [task.name for task in tasks]
     assert names == [
+        "provider_failover",
         "intraday_shock",
         "hyperliquid",
         "iv_surface",
@@ -56,10 +57,22 @@ def test_service_loop_defaults_do_not_enable_ibkr() -> None:
     assert all(task.command for task in tasks)
 
 
+def test_legacy_position_poller_requires_both_account_authorization_and_lane_gate(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("IBKR_LEGACY_POSITION_POLLER_ENABLED", "true")
+    monkeypatch.setenv("IBKR_BROKER_ACCOUNT_READ_ENABLED", "false")
+    assert ServiceLoopSettings.from_env().ibkr_positions_enabled is False
+
+    monkeypatch.setenv("IBKR_BROKER_ACCOUNT_READ_ENABLED", "true")
+    assert ServiceLoopSettings.from_env().ibkr_positions_enabled is True
+
+
 def test_service_loop_can_enable_ibkr_explicitly() -> None:
     tasks = build_tasks(make_settings(ibkr_enabled=True, ibkr_skip_options=True))
 
     assert [task.name for task in tasks] == [
+        "provider_failover",
         "intraday_shock",
         "hyperliquid",
         "ibkr",
@@ -73,6 +86,7 @@ def test_service_loop_can_enable_polymarket_explicitly() -> None:
     tasks = build_tasks(make_settings(polymarket_enabled=True))
 
     assert [task.name for task in tasks] == [
+        "provider_failover",
         "intraday_shock",
         "hyperliquid",
         "polymarket",
@@ -86,6 +100,7 @@ def test_service_loop_can_enable_periodic_greek_shadow_explicitly() -> None:
     tasks = build_tasks(make_settings(greek_shadow_enabled=True))
 
     assert [task.name for task in tasks] == [
+        "provider_failover",
         "intraday_shock",
         "hyperliquid",
         "iv_surface",

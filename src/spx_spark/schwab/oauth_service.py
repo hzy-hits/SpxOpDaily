@@ -18,7 +18,7 @@ from urllib.request import ProxyHandler, build_opener
 
 from schwab.auth import AuthContext, get_auth_context
 
-from spx_spark.config import SchwabSettings
+from spx_spark.config import SchwabSettings, SchwabStreamSettings, StorageSettings
 from spx_spark.schwab.auth_storage import (
     AtomicJsonFile,
     ExclusiveLockUnavailable,
@@ -479,7 +479,14 @@ class RedactedThreadingHTTPServer(ThreadingHTTPServer):
 
 
 class OAuthServers:
-    def __init__(self, settings: SchwabSettings, coordinator: OAuthCoordinator) -> None:
+    def __init__(
+        self,
+        settings: SchwabSettings,
+        coordinator: OAuthCoordinator,
+        *,
+        auxiliary_runner: Callable[[], None] | None = None,
+        auxiliary_close: Callable[[], None] | None = None,
+    ) -> None:
         self.callback_server = RedactedHTTPServer(
             (settings.oauth_bind_host, settings.oauth_bind_port),
             callback_handler_factory(coordinator),
@@ -488,7 +495,7 @@ class OAuthServers:
             (settings.gateway_bind_host, settings.gateway_bind_port),
             gateway_handler_factory(coordinator.manager),
         )
-        self.threads = [
+        self.critical_threads = [
             threading.Thread(
                 target=self.callback_server.serve_forever,
                 name="schwab-oauth-callback",
@@ -500,6 +507,16 @@ class OAuthServers:
                 daemon=True,
             ),
         ]
+        self.auxiliary_close = auxiliary_close
+        self.threads = list(self.critical_threads)
+        if auxiliary_runner is not None:
+            self.threads.append(
+                threading.Thread(
+                    target=auxiliary_runner,
+                    name="schwab-stream-supervisor",
+                    daemon=True,
+                )
+            )
 
     def __enter__(self) -> "OAuthServers":
         for thread in self.threads:
@@ -516,11 +533,13 @@ class OAuthServers:
         self.close()
 
     def serve_forever(self) -> None:
-        while all(thread.is_alive() for thread in self.threads):
-            for thread in self.threads:
+        while all(thread.is_alive() for thread in self.critical_threads):
+            for thread in self.critical_threads:
                 thread.join(timeout=1)
 
     def close(self) -> None:
+        if self.auxiliary_close is not None:
+            self.auxiliary_close()
         self.callback_server.shutdown()
         self.gateway_server.shutdown()
         self.callback_server.server_close()
@@ -580,6 +599,42 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def initialize_optional_stream_runtime(
+    manager: SchwabSessionManager,
+) -> tuple[Any | None, str]:
+    try:
+        storage_settings = StorageSettings.from_env()
+        stream_settings = SchwabStreamSettings.from_env(
+            data_root=storage_settings.data_root
+        )
+        if stream_settings.mode == "off":
+            return None, stream_settings.mode
+        from spx_spark.schwab.stream_runtime import SchwabStreamRuntime
+
+        return (
+            SchwabStreamRuntime(
+                manager,
+                stream_settings,
+                storage_settings,
+            ),
+            stream_settings.mode,
+        )
+    except Exception as exc:  # noqa: BLE001 - auxiliary failure cannot stop OAuth/gateway
+        print(
+            json.dumps(
+                {
+                    "event": "schwab_stream_initialization_failed",
+                    "ok": False,
+                    "error_type": type(exc).__name__,
+                },
+                sort_keys=True,
+            ),
+            file=sys.stderr,
+            flush=True,
+        )
+        return None, "disabled_error"
+
+
 def run(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     settings = SchwabSettings.from_env()
@@ -603,6 +658,7 @@ def run(argv: list[str] | None = None) -> int:
     try:
         with manager.owner_lock.held():
             manager.load()
+            stream_runtime, stream_mode = initialize_optional_stream_runtime(manager)
             print(
                 json.dumps(
                     {
@@ -610,12 +666,20 @@ def run(argv: list[str] | None = None) -> int:
                         "callback": f"{settings.oauth_bind_host}:{settings.oauth_bind_port}",
                         "gateway": f"{settings.gateway_bind_host}:{settings.gateway_bind_port}",
                         "token_present": manager.token_store.exists,
+                        "stream_mode": stream_mode,
                     },
                     sort_keys=True,
                 ),
                 flush=True,
             )
-            with OAuthServers(settings, coordinator) as servers:
+            with OAuthServers(
+                settings,
+                coordinator,
+                auxiliary_runner=(
+                    stream_runtime.run_forever if stream_runtime is not None else None
+                ),
+                auxiliary_close=(stream_runtime.close if stream_runtime is not None else None),
+            ) as servers:
                 try:
                     servers.serve_forever()
                 except KeyboardInterrupt:

@@ -28,6 +28,47 @@ market_data:
     value: [index:VIX, index:VIX1D, index:VIX9D, index:VIX3M, index:VVIX, index:SKEW, equity:QQQ, equity:IWM, equity:DIA, equity:HYG, equity:LQD, equity:TLT, equity:IEF, equity:SHY, equity:UUP, equity:GLD, equity:USO, equity:RSP, equity:XLU]
     description: Canonical instruments that use the longer slow-index freshness window.
 
+provider_failover:
+  enabled:
+    value: true
+    description: Enables automatic Schwab-primary health evaluation and IBKR market-data fallback control.
+  control_ibkr_stream_enabled:
+    value: false
+    description: Lets automatic failover start and stop IBKR market-data subscriptions; kept false until Schwab WebSocket shadow acceptance is complete.
+  state_path:
+    value: ""
+    description: Optional failover control-state path; empty stores provider_failover_state.json under the configured data latest directory.
+  required_instruments:
+    value: [index:SPX, future:ES]
+    description: Direct live anchors that must both be usable before a provider is considered healthy for 0DTE alerts.
+  provider_state_max_age_seconds:
+    value: 45.0
+    description: Maximum recent provider-state age used to honor an explicit unavailable or disconnected status.
+  quote_max_age_seconds:
+    value: 30.0
+    description: Maximum direct-anchor source age used for provider health; this exceeds the 15-second REST cadence to avoid scheduler-order false failovers.
+  monitor_rth_only:
+    value: true
+    description: Restricts automatic failover transitions to the SPX regular trading session so weekends and market closure do not page or activate IBKR.
+  schwab_unhealthy_observations:
+    value: 2
+    description: Consecutive unhealthy Schwab observations required before requesting IBKR fallback.
+  schwab_recovery_observations:
+    value: 3
+    description: Consecutive healthy Schwab observations required before returning from IBKR fallback.
+  ibkr_unhealthy_observations:
+    value: 2
+    description: Consecutive unhealthy IBKR observations required before declaring both direct providers unavailable.
+  control_state_max_age_seconds:
+    value: 60.0
+    description: Maximum failover control-state age accepted by the IBKR stream before it fails closed to standby.
+  transition_alert_max_age_seconds:
+    value: 300.0
+    description: Maximum age of a provider transition that may create a human notification after a process restart.
+  interval_seconds:
+    value: 15
+    description: Cadence for provider-health observations and failover state persistence.
+
 schwab:
   api_base_url:
     value: https://api.schwabapi.com
@@ -104,6 +145,31 @@ schwab:
     interval_seconds:
       value: 15
       description: Collection cadence balancing 0DTE responsiveness against the 120-request-per-minute budget.
+  streaming:
+    mode:
+      value: shadow
+      description: Schwab WebSocket activation mode; off disables it, shadow persists a separate latest state, and live may update production latest state after RTH acceptance.
+    canonical_symbols:
+      value: [SPX, SPY, RSP, ES, MES]
+      description: Small direct-anchor and breadth universe subscribed through Schwab Level-One streaming; futures roots resolve to concrete active contracts.
+    flush_interval_seconds:
+      value: 1.0
+      description: Cadence for flushing changed Schwab streaming symbols to durable storage.
+    symbol_refresh_interval_seconds:
+      value: 300.0
+      description: Cadence for re-resolving logical ES and MES roots; a changed active contract closes the current WebSocket so the supervisor reconnects and subscribes to the new contract.
+    reconnect_min_seconds:
+      value: 2.0
+      description: Initial reconnect delay after a Schwab WebSocket failure.
+    reconnect_max_seconds:
+      value: 60.0
+      description: Maximum exponential reconnect delay for Schwab WebSocket failures.
+    websocket_open_timeout_seconds:
+      value: 10.0
+      description: Timeout passed to the WebSocket connection handshake.
+    shadow_latest_path:
+      value: ""
+      description: Optional shadow latest-state path; empty uses schwab_stream_shadow.json under the configured data latest directory.
   future_contract_resolution:
     calendar_timezone:
       value: America/New_York
@@ -461,12 +527,6 @@ service_loop:
   heartbeat_seconds:
     value: 60
     description: Cadence for service-loop health telemetry.
-  ibkr_positions_enabled:
-    value: false
-    description: Enables account position polling only when explicitly configured.
-  ibkr_positions_interval_seconds:
-    value: 60
-    description: Cadence for optional IBKR position snapshots.
   ibkr_skip_options:
     value: false
     description: Skips IBKR option snapshots while retaining non-option references when enabled.
@@ -605,9 +665,6 @@ ibkr_stream:
     description: Optional path for persisting ATM stream planning state; empty uses in-memory behavior.
 
 ibkr_positions:
-  enabled:
-    value: false
-    description: Enables optional IBKR account-position polling.
   client_id:
     value: 174
     description: Client id for the position watcher so it does not collide with market-data clients.
@@ -1036,7 +1093,7 @@ alerts:
     description: Maximum broker provider-state age in seconds for session alerts.
   system_events_enabled:
     value: true
-    description: Enables IBKR session interruption/restoration system alerts.
+    description: Enables provider failover transitions and position-critical IBKR session system alerts.
   allow_broker_unavailable_proxy_watch:
     value: true
     description: Allows research-only proxy watch alerts when broker anchors are unavailable.
@@ -1073,7 +1130,36 @@ position_alerts:
     value: 100.0
     description: USD bucket size used for PnL alert deduplication.
 
+ibkr_broker:
+  account_read_enabled:
+    value: false
+    description: Enables read-only IBKR account visibility independently from the legacy minute position poller.
+  position_shadow_enabled:
+    value: true
+    description: Lets persistent client 172 write a separate read-only position snapshot when account_read_enabled is also true, without changing production position alerts.
+  position_shadow_interval_seconds:
+    value: 60
+    description: Cadence for client-172 shadow position snapshots while its persistent IBKR session is connected.
+  position_shadow_path:
+    value: ""
+    description: Optional client-172 shadow position path; empty uses ibkr_positions_shadow.json under the configured data latest directory.
+  legacy_position_poller_enabled:
+    value: false
+    description: Enables the temporary client-174 connect-read-disconnect lane when account_read_enabled is also true, until client 172 shadow account snapshots are accepted.
+  execution_mode:
+    value: manual
+    description: IBKR execution safety mode; manual and shadow never permit programmatic order writes, while live is reserved for a separately approved deployment.
+
 intraday_shock:
+  anchor_provider_priority:
+    value: [schwab, ibkr]
+    description: Direct TradFi provider order used to select a same-provider SPX and ES pair for fast shock detection; Schwab is primary and IBKR is fallback.
+  require_schwab_streaming_anchors:
+    value: true
+    description: Prevents the 15-second Schwab REST collector from replacing the five-second fast lane; Schwab anchors become eligible only when tagged by the accepted WebSocket stream.
+  provider_switch_reset_seconds:
+    value: 30
+    description: Seconds a different direct provider must remain selected before abandoning an event or rearm state tied to the prior provider, preventing cross-provider price comparisons without freezing the detector.
   one_minute_seconds:
     value: 60
     description: Short shock horizon in seconds.

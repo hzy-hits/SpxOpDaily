@@ -391,6 +391,25 @@ def connect_positions_client(ib: Any, settings: IbkrSettings, position_settings:
     )
 
 
+def connect_broker_readonly_with_positions(
+    ib: Any,
+    settings: IbkrSettings,
+    *,
+    client_id: int,
+) -> None:
+    """Open one read-only broker socket with a complete startup position snapshot."""
+
+    from ib_async.ib import StartupFetch
+
+    ib.connect(
+        settings.host,
+        settings.port,
+        clientId=client_id,
+        readonly=True,
+        fetchFields=StartupFetch.POSITIONS,
+    )
+
+
 def write_snapshot(snapshot: PositionSnapshot, path: str) -> Path:
     output_path = Path(path)
     atomic_write_json_secure(output_path, asdict(snapshot))
@@ -527,7 +546,10 @@ def run(argv: list[str] | None = None) -> int:
         return 0
 
     if not position_settings.enabled:
-        print("IBKR positions polling disabled (IBKR_POSITIONS_ENABLED=false).", file=sys.stderr)
+        print(
+            "IBKR account reads disabled (IBKR_BROKER_ACCOUNT_READ_ENABLED=false).",
+            file=sys.stderr,
+        )
         return 0
 
     try:

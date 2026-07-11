@@ -1,0 +1,150 @@
+"""Pure Schwab Level-One streaming message assembly and normalization."""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from datetime import datetime, timezone
+from threading import Lock
+from typing import Any
+
+from spx_spark.marketdata import (
+    Provider,
+    Quote,
+    as_utc,
+    classify_quote_quality,
+    clean_float,
+    elapsed_ms,
+    parse_timestamp,
+)
+from spx_spark.provider_adapter import ProviderSnapshot
+from spx_spark.runtime_config import runtime_value
+from spx_spark.schwab.adapter import instrument_from_schwab_symbol
+
+
+SUPPORTED_LEVEL_ONE_SERVICES = frozenset({"LEVELONE_EQUITIES", "LEVELONE_FUTURES"})
+DEFAULT_STREAM_STALE_SECONDS = float(runtime_value("market_data.latest_stale_after_seconds"))
+
+
+class SchwabStreamQuoteAssembler:
+    """Merge sparse WebSocket deltas and drain only symbols changed since the last flush."""
+
+    def __init__(self, *, stale_after_seconds: float = DEFAULT_STREAM_STALE_SECONDS) -> None:
+        if stale_after_seconds <= 0:
+            raise ValueError("stale_after_seconds must be positive")
+        self.stale_after_seconds = stale_after_seconds
+        self._rows: dict[tuple[str, str], dict[str, Any]] = {}
+        self._received_at: dict[tuple[str, str], datetime] = {}
+        self._dirty: set[tuple[str, str]] = set()
+        self._lock = Lock()
+
+    def ingest(
+        self,
+        message: Mapping[str, Any],
+        *,
+        received_at: datetime | None = None,
+    ) -> int:
+        service = str(message.get("service") or "").upper()
+        if service not in SUPPORTED_LEVEL_ONE_SERVICES:
+            return 0
+        content = message.get("content")
+        if not isinstance(content, list):
+            return 0
+        observed_at = as_utc(received_at or datetime.now(tz=timezone.utc))
+        accepted = 0
+        with self._lock:
+            for item in content:
+                if not isinstance(item, Mapping):
+                    continue
+                symbol = str(item.get("SYMBOL") or item.get("key") or "").strip().upper()
+                if not symbol:
+                    continue
+                key = (service, symbol)
+                merged = dict(self._rows.get(key, {}))
+                for field_name, value in item.items():
+                    if field_name == "key" or value is None:
+                        continue
+                    merged[str(field_name)] = value
+                merged["SYMBOL"] = symbol
+                self._rows[key] = merged
+                self._received_at[key] = observed_at
+                self._dirty.add(key)
+                accepted += 1
+        return accepted
+
+    def drain_snapshot(self) -> ProviderSnapshot | None:
+        with self._lock:
+            dirty = sorted(self._dirty)
+            self._dirty.clear()
+            rows = [
+                (service, dict(self._rows[(service, symbol)]), self._received_at[(service, symbol)])
+                for service, symbol in dirty
+            ]
+        quotes = tuple(
+            quote
+            for service, fields, received_at in rows
+            if (
+                quote := quote_from_stream_fields(
+                    service,
+                    fields,
+                    received_at=received_at,
+                    stale_after_seconds=self.stale_after_seconds,
+                )
+            ).effective_price
+            is not None
+        )
+        if not quotes:
+            return None
+        return ProviderSnapshot(
+            provider=Provider.SCHWAB,
+            received_at=max(quote.received_at for quote in quotes),
+            quotes=quotes,
+            metadata={"sampling_mode": "schwab_stream"},
+        )
+
+
+def quote_from_stream_fields(
+    service: str,
+    fields: Mapping[str, Any],
+    *,
+    received_at: datetime,
+    stale_after_seconds: float = DEFAULT_STREAM_STALE_SECONDS,
+) -> Quote:
+    normalized_service = service.strip().upper()
+    if normalized_service not in SUPPORTED_LEVEL_ONE_SERVICES:
+        raise ValueError(f"Unsupported Schwab streaming service: {service}")
+    symbol = str(fields.get("SYMBOL") or fields.get("key") or "").strip().upper()
+    if not symbol:
+        raise ValueError("Schwab streaming content has no symbol")
+    received_at = as_utc(received_at)
+    quote_time = parse_timestamp(fields.get("QUOTE_TIME_MILLIS"))
+    trade_time = parse_timestamp(fields.get("TRADE_TIME_MILLIS"))
+    quality = classify_quote_quality(
+        quote_time=quote_time or trade_time,
+        received_at=received_at,
+        stale_after_seconds=stale_after_seconds,
+        explicit_delayed=False,
+    )
+    return Quote(
+        instrument=instrument_from_schwab_symbol(symbol),
+        provider=Provider.SCHWAB,
+        provider_symbol=symbol,
+        received_at=received_at,
+        quality=quality,
+        bid=clean_float(fields.get("BID_PRICE")),
+        ask=clean_float(fields.get("ASK_PRICE")),
+        last=clean_float(fields.get("LAST_PRICE")),
+        mark=clean_float(fields.get("MARK")),
+        close=clean_float(fields.get("CLOSE_PRICE")),
+        bid_size=clean_float(fields.get("BID_SIZE")),
+        ask_size=clean_float(fields.get("ASK_SIZE")),
+        last_size=clean_float(fields.get("LAST_SIZE")),
+        volume=clean_float(fields.get("TOTAL_VOLUME")),
+        open_interest=clean_float(fields.get("OPEN_INTEREST")),
+        quote_time=quote_time,
+        trade_time=trade_time,
+        last_update_at=received_at,
+        source_latency_ms=elapsed_ms(quote_time or trade_time, received_at),
+        market_data_type="schwab_stream",
+        sampling_mode="schwab_stream",
+        raw={"service": normalized_service, "fields": dict(fields)},
+    )

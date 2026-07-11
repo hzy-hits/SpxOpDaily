@@ -11,21 +11,28 @@ from spx_spark.marketdata import (
     ProviderStatus,
     Quote,
 )
-from spx_spark.options_map import build_options_map, select_underlier
+from spx_spark.options_map import build_options_map, group_spxw_option_quotes, select_underlier
 from spx_spark.storage import LatestState, LatestStateStore
 
 
-def make_spxw_option(*, now: datetime, quality: MarketDataQuality = MarketDataQuality.LIVE) -> Quote:
+def make_spxw_option(
+    *,
+    now: datetime,
+    quality: MarketDataQuality = MarketDataQuality.LIVE,
+    provider: Provider = Provider.IBKR,
+    strike: float = 7500.0,
+    right: str = "C",
+) -> Quote:
     return Quote(
         instrument=InstrumentId.option(
             "SPX",
             expiry="20260706",
-            strike=7500.0,
-            right="C",
+            strike=strike,
+            right=right,
             trading_class="SPXW",
         ),
-        provider=Provider.IBKR,
-        provider_symbol="SPXW",
+        provider=provider,
+        provider_symbol=f"{provider.value}:SPXW:{strike:g}:{right}",
         received_at=now,
         quality=quality,
         mark=10.0,
@@ -116,8 +123,8 @@ def test_build_options_map_prefers_ibkr_spxw_over_mock_when_feed_available() -> 
         instrument=InstrumentId.option(
             "SPX",
             expiry="20260706",
-            strike=7300.0,
-            right="P",
+            strike=7500.0,
+            right="C",
             trading_class="SPXW",
         ),
         provider=Provider.MOCK,
@@ -149,6 +156,90 @@ def test_build_options_map_prefers_ibkr_spxw_over_mock_when_feed_available() -> 
     assert options_map.expiries[0].option_count == 1
     assert options_map.expiries[0].coverage.live == 1
     assert options_map.expiries[0].coverage.stale == 0
+
+
+def test_group_spxw_selects_each_contract_by_quality_then_configured_provider(
+    monkeypatch,
+) -> None:
+    now = datetime(2026, 7, 6, 14, 0, tzinfo=timezone.utc)
+    monkeypatch.setenv(
+        "MARKET_DATA_PROVIDER_PRIORITY",
+        "schwab,ibkr,hyperliquid,polymarket,internal,mock,unknown",
+    )
+    same_contract_ibkr = make_spxw_option(now=now, provider=Provider.IBKR)
+    same_contract_schwab = make_spxw_option(now=now, provider=Provider.SCHWAB)
+    stale_schwab_put = make_spxw_option(
+        now=now - timedelta(seconds=30),
+        provider=Provider.SCHWAB,
+        strike=7495.0,
+        right="P",
+    )
+    live_ibkr_put = make_spxw_option(
+        now=now,
+        provider=Provider.IBKR,
+        strike=7495.0,
+        right="P",
+    )
+    state = LatestState(
+        created_at=now,
+        as_of=now,
+        quotes=(same_contract_ibkr, same_contract_schwab, stale_schwab_put, live_ibkr_put),
+        best_quotes=(same_contract_ibkr, same_contract_schwab, stale_schwab_put, live_ibkr_put),
+    )
+
+    grouped = group_spxw_option_quotes(state)
+    selected = {
+        (quote.instrument.strike, quote.instrument.right.value): quote.provider
+        for quote in grouped["20260706"]
+    }
+
+    assert selected[(7500.0, "C")] == Provider.SCHWAB
+    assert selected[(7495.0, "P")] == Provider.IBKR
+
+
+def test_stale_ibkr_residue_does_not_exclude_live_schwab_contracts(monkeypatch) -> None:
+    now = datetime(2026, 7, 6, 14, 0, tzinfo=timezone.utc)
+    monkeypatch.setenv(
+        "MARKET_DATA_PROVIDER_PRIORITY",
+        "schwab,ibkr,hyperliquid,polymarket,internal,mock,unknown",
+    )
+    stale_ibkr = make_spxw_option(
+        now=now - timedelta(minutes=5),
+        provider=Provider.IBKR,
+    )
+    live_schwab = make_spxw_option(
+        now=now,
+        provider=Provider.SCHWAB,
+        strike=7495.0,
+        right="P",
+    )
+    state = LatestState(
+        created_at=now,
+        as_of=now,
+        quotes=(stale_ibkr, live_schwab),
+        best_quotes=(stale_ibkr, live_schwab),
+        provider_states=(
+            ProviderState(
+                provider=Provider.IBKR,
+                status=ProviderStatus.AVAILABLE,
+                checked_at=now - timedelta(minutes=5),
+                connected=True,
+            ),
+        ),
+    )
+
+    grouped = group_spxw_option_quotes(state)
+    selected = grouped["20260706"]
+
+    assert {quote.provider for quote in selected} == {Provider.IBKR, Provider.SCHWAB}
+    assert any(
+        quote.provider == Provider.IBKR and quote.quality == MarketDataQuality.STALE
+        for quote in selected
+    )
+    assert any(
+        quote.provider == Provider.SCHWAB and quote.quality == MarketDataQuality.LIVE
+        for quote in selected
+    )
 
 
 def test_purge_provider_quotes_removes_ibkr_rows(tmp_path) -> None:

@@ -170,3 +170,44 @@ def test_collector_resolves_logical_es_root_and_persists_stable_identity(
     assert output["quote_counts"]["quotes:/ESU26"] == 1
     assert persisted[0].quotes[0].instrument.canonical_id == "future:ES"
     assert persisted[0].quotes[0].provider_symbol == "/ESU26"
+
+
+def test_live_stream_symbols_are_not_polled_by_rest_collector(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("SCHWAB_STREAM_MODE", "live")
+    monkeypatch.setenv("SCHWAB_STREAM_SYMBOLS", "SPX,SPY,RSP,ES,MES")
+    monkeypatch.setenv(
+        "SCHWAB_COLLECT_QUOTES",
+        "$SPX,SPY,RSP,/ES,/MES,$XSP,$VIX",
+    )
+    monkeypatch.setenv("SCHWAB_COLLECT_CHAINS", "")
+    now = datetime(2026, 7, 11, 12, 0, tzinfo=timezone.utc)
+    requested: list[str] = []
+
+    class FakeClient:
+        def get_json(self, path: str, params: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+            assert path == "/marketdata/v1/quotes"
+            requested.append(params["symbols"])
+            return 200, {
+                "$XSP": {
+                    "assetMainType": "INDEX",
+                    "quote": {"lastPrice": 750.0},
+                },
+                "$VIX": {
+                    "assetMainType": "INDEX",
+                    "quote": {"lastPrice": 18.0},
+                },
+            }
+
+    monkeypatch.setattr(schwab_collector, "build_schwab_client", lambda _settings: FakeClient())
+    monkeypatch.setattr(
+        schwab_collector,
+        "persist_provider_snapshot",
+        lambda _snapshot, _storage: None,
+    )
+
+    assert schwab_collector.run(now=now) == 0
+    capsys.readouterr()
+    assert requested == ["$XSP,$VIX"]

@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 import spx_spark.ibkr.stream_collector as stream_collector_module
-from spx_spark.config import SamplingSettings
+from spx_spark.config import IbkrBrokerSettings, SamplingSettings
 from spx_spark.ibkr.adapter import snapshot_from_rows
 from spx_spark.ibkr.verifier import VerifyRow
 from spx_spark.ibkr.stream_collector import (
@@ -51,6 +51,152 @@ def test_lifecycle_budget_reserves_one_bounded_qualification() -> None:
     assert lifecycle_has_qualification_budget(100.0, now_monotonic=100.49)
     assert lifecycle_has_qualification_budget(100.0, now_monotonic=100.5)
     assert not lifecycle_has_qualification_budget(100.0, now_monotonic=100.51)
+
+
+def test_position_shadow_failure_never_breaks_market_data_or_overwrites_snapshot(
+    monkeypatch,
+) -> None:
+    collector = object.__new__(StreamCollector)
+    collector.broker_settings = IbkrBrokerSettings(
+        account_read_enabled=True,
+        position_shadow_enabled=True,
+        position_shadow_interval_seconds=60,
+        position_shadow_path="shadow.json",
+        execution_mode="manual",
+    )
+    collector.last_position_shadow_at = None
+    collector.ib = object()
+    collector.storage_settings = object()
+    writes: list[object] = []
+    monkeypatch.setattr(
+        stream_collector_module,
+        "fetch_positions",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("shadow failed")),
+    )
+    monkeypatch.setattr(
+        stream_collector_module,
+        "write_snapshot",
+        lambda *args, **kwargs: writes.append(args),
+    )
+
+    event = collector.flush_position_shadow_if_due(now_monotonic=100.0)
+
+    assert event == {
+        "task": "ibkr_stream",
+        "event": "position_shadow_failed",
+        "ok": False,
+        "error_type": "RuntimeError",
+    }
+    assert writes == []
+    assert collector.flush_position_shadow_if_due(now_monotonic=120.0) is None
+
+
+def test_account_visibility_keeps_connection_without_enabling_market_data() -> None:
+    collector = object.__new__(StreamCollector)
+    collector.broker_settings = SimpleNamespace(
+        account_read_enabled=True,
+        execution_mode="manual",
+    )
+    collector.market_data_allowed = lambda: False
+
+    assert collector.connection_required() is True
+
+    collector.broker_settings = SimpleNamespace(
+        account_read_enabled=False,
+        execution_mode="manual",
+    )
+    assert collector.connection_required() is False
+
+
+def test_account_read_uses_position_capable_socket_even_when_shadow_write_is_off(
+    monkeypatch,
+) -> None:
+    collector = object.__new__(StreamCollector)
+    collector.ib = object()
+    collector.ibkr_settings = object()
+    collector.stream_settings = SimpleNamespace(client_id=172)
+    collector.broker_settings = SimpleNamespace(
+        account_read_enabled=True,
+        position_shadow_enabled=False,
+    )
+    collector.market_data_allowed = lambda: False
+    calls: list[int] = []
+    monkeypatch.setattr(
+        stream_collector_module,
+        "connect_broker_readonly_with_positions",
+        lambda _ib, _settings, *, client_id: calls.append(client_id),
+    )
+
+    collector.open_session()
+
+    assert calls == [172]
+    assert collector.last_position_shadow_at is None
+
+
+def test_competing_session_cooldown_suppresses_only_market_data(
+    monkeypatch,
+) -> None:
+    now = 100.0
+    collector = object.__new__(StreamCollector)
+    collector.force = True
+    collector.market_data_retry_not_before = 0.0
+    collector.broker_settings = SimpleNamespace(
+        account_read_enabled=True,
+        execution_mode="manual",
+    )
+    monkeypatch.setattr(stream_collector_module.time, "monotonic", lambda: now)
+
+    collector.defer_market_data_after_conflict(seconds=30.0)
+
+    assert collector.market_data_allowed() is False
+    assert collector.connection_required() is True
+    now = 131.0
+    assert collector.market_data_allowed() is True
+
+
+def test_account_standby_reconnects_into_market_mode_without_subscribing_in_place(
+    monkeypatch,
+) -> None:
+    position_flushes: list[float] = []
+
+    class FakeIb:
+        def sleep(self, _seconds: float) -> None:
+            return None
+
+        def isConnected(self) -> bool:  # noqa: N802 - mirrors ib_async
+            return True
+
+    class FakeCollector:
+        ib = FakeIb()
+        tws_connectivity_lost = False
+
+        def flush_position_shadow_if_due(self, *, now_monotonic: float):
+            position_flushes.append(now_monotonic)
+            return {"event": "position_shadow_written"}
+
+        def connection_required(self) -> bool:
+            return True
+
+        def market_data_allowed(self) -> bool:
+            return True
+
+    runtime = StreamRuntime(
+        collector=FakeCollector(),  # type: ignore[arg-type]
+        stream_settings=SimpleNamespace(
+            reconnect_min_seconds=1.0,
+            reconnect_max_seconds=2.0,
+            policy_check_seconds=0.1,
+        ),
+        storage_settings=object(),
+        runtime_policy=object(),
+    )
+    events: list[dict[str, object]] = []
+    monkeypatch.setattr(stream_collector_module, "log_event", events.append)
+
+    assert runtime.account_standby_loop() is False
+    assert len(position_flushes) == 1
+    assert runtime.session_had_healthy_flush is True
+    assert any(event.get("event") == "market_data_activation_requested" for event in events)
 
 
 def test_subscription_lifecycle_gives_due_slow_poll_priority(monkeypatch) -> None:
@@ -1251,6 +1397,12 @@ def test_established_but_unhealthy_sessions_keep_reconnect_backoff(monkeypatch) 
         def allowed(self) -> bool:
             return True
 
+        def market_data_allowed(self) -> bool:
+            return True
+
+        def connection_required(self) -> bool:
+            return True
+
         def open_session(self) -> None:
             self.opens += 1
 
@@ -1259,6 +1411,10 @@ def test_established_but_unhealthy_sessions_keep_reconnect_backoff(monkeypatch) 
 
         def flush(self) -> dict[str, object]:
             return {"event": "flush"}
+
+        def flush_position_shadow_if_due(self, *, now_monotonic: float):
+            del now_monotonic
+            return None
 
         def drain_new_errors(self) -> list[object]:
             return []

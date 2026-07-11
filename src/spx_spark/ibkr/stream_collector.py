@@ -2,20 +2,21 @@
 
 The snapshot collector (`spx_spark.ibkr.collector`) connects, waits ~8 seconds,
 snapshots, and disconnects once per service interval, which leaves most of each
-minute blind. This module keeps one long-lived, market-data-only connection and
+minute blind. This module keeps one long-lived, read-only broker connection and
 persistent subscriptions instead:
 
 - base contracts (indexes/ETFs/futures/CFDs) stay subscribed permanently;
 - SPXW options use the sampling planner: a hot lane near ATM stays subscribed,
   while the remaining line budget rotates through the plan's rolling groups;
 - ticker state is flushed to raw storage + latest state every few seconds;
+- an optional position shadow is written from the same client without driving alerts;
 - the ATM window is re-planned when SPX drifts;
 - disconnects trigger exponential-backoff reconnects, a competing session
   (IBKR 10197) triggers a non-invasive probe wait, and runtime policy is
   re-checked periodically so `protected` mode still wins.
 
-All connection handling stays read-only and market-data-only, same as the
-snapshot collector.
+All connection handling stays read-only. Account data is limited to the
+explicit shadow snapshot lane; order writes remain prohibited.
 """
 
 from __future__ import annotations
@@ -30,12 +31,14 @@ from pathlib import Path
 from typing import Any, TypeVar
 
 from spx_spark.config import (
+    IbkrBrokerSettings,
     IbkrSettings,
     IbkrStreamSettings,
     RuntimePolicySettings,
     SamplingSettings,
     StorageSettings,
     default_spxw_expiry,
+    env_bool,
 )
 from spx_spark.ibkr.adapter import snapshot_from_rows
 from spx_spark.ibkr.collector import has_competing_session_error
@@ -54,6 +57,11 @@ from spx_spark.ibkr.atm_reference import (
     ReferenceQuote,
 )
 from spx_spark.ibkr.option_replan import OptionReplanController
+from spx_spark.ibkr.position_watcher import (
+    connect_broker_readonly_with_positions,
+    fetch_positions,
+    write_snapshot,
+)
 from spx_spark.ibkr.slow_poll import SlowPollAction, SlowPollScheduler
 from spx_spark.ibkr.verifier import (
     IbkrError,
@@ -73,8 +81,13 @@ from spx_spark.ibkr.verifier import (
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR, ET, MarketCalendar
 from spx_spark.marketdata import Provider, ProviderState, ProviderStatus, parse_timestamp
 from spx_spark.provider_adapter import ProviderSnapshot, persist_provider_snapshot
+from spx_spark.provider_failover_controller import (
+    ProviderFailoverSettings,
+    load_failover_control,
+)
+from spx_spark.runtime_config import runtime_value
 from spx_spark.storage import LatestStateStore
-from spx_spark.runtime_mode import ibkr_allowed, load_override
+from spx_spark.runtime_mode import ibkr_market_data_allowed, load_override
 from spx_spark.sampling import OptionContractSpec, build_sampling_plan
 
 
@@ -403,6 +416,18 @@ def connected_state() -> ProviderState:
     )
 
 
+def account_standby_state() -> ProviderState:
+    return ProviderState(
+        provider=Provider.IBKR,
+        status=ProviderStatus.DEGRADED,
+        checked_at=datetime.now(tz=timezone.utc),
+        reason="account standby connected; market data inactive",
+        connected=True,
+        authenticated=True,
+        priority=0,
+    )
+
+
 def unavailable_state(reason: str, *, connected: bool = False) -> ProviderState:
     return ProviderState(
         provider=Provider.IBKR,
@@ -422,6 +447,11 @@ def persist_state_only(state: ProviderState, storage_settings: StorageSettings) 
     )
     if state.status == ProviderStatus.UNAVAILABLE:
         LatestStateStore(storage_settings).purge_provider_quotes(Provider.IBKR)
+
+
+def persist_account_standby_state(storage_settings: StorageSettings) -> None:
+    persist_state_only(account_standby_state(), storage_settings)
+    LatestStateStore(storage_settings).purge_provider_quotes(Provider.IBKR)
 
 
 def sleep_until_reconnect(
@@ -550,6 +580,7 @@ class StreamCollector:
         sampling_settings: SamplingSettings,
         storage_settings: StorageSettings,
         runtime_policy: RuntimePolicySettings,
+        broker_settings: IbkrBrokerSettings | None = None,
         force: bool = False,
         skip_options: bool = False,
     ) -> None:
@@ -559,8 +590,10 @@ class StreamCollector:
         self.sampling_settings = sampling_settings
         self.storage_settings = storage_settings
         self.runtime_policy = runtime_policy
+        self.broker_settings = broker_settings or IbkrBrokerSettings.from_env()
         self.force = force
         self.skip_options = skip_options or stream_settings.skip_options
+        self.provider_failover_settings = ProviderFailoverSettings.from_env()
 
         self.base_subs: dict[str, tuple[Any, VerifyRow]] = {}
         self.hot_subs: dict[str, tuple[Any, VerifyRow]] = {}
@@ -590,6 +623,8 @@ class StreamCollector:
         self.subscriptions_lost = False
         self.tws_connectivity_loss_sequence = 0
         self.last_policy_check = 0.0
+        self.last_position_shadow_at: float | None = None
+        self.market_data_retry_not_before = 0.0
         self.farm_health = FarmHealthTracker(
             broken_restart_seconds=stream_settings.farm_broken_restart_seconds,
         )
@@ -654,18 +689,94 @@ class StreamCollector:
         if event is not None:
             log_event(event.to_log_event(task="ibkr_stream"))
 
-    def allowed(self) -> bool:
+    def market_data_allowed(self) -> bool:
+        if time.monotonic() < self.market_data_retry_not_before:
+            return False
         if self.force:
             return True
         override = load_override(self.runtime_policy.runtime_mode_path)
-        return ibkr_allowed(self.runtime_policy, override=override)
+        control = load_failover_control(self.provider_failover_settings.state_path)
+        return ibkr_market_data_allowed(
+            self.runtime_policy,
+            failover_control=control,
+            failover_enabled=self.provider_failover_settings.enabled,
+            control_enabled=env_bool(
+                "PROVIDER_FAILOVER_CONTROL_IBKR_STREAM_ENABLED",
+                bool(runtime_value("provider_failover.control_ibkr_stream_enabled")),
+            ),
+            control_max_age_seconds=(
+                self.provider_failover_settings.control_state_max_age_seconds
+            ),
+            override=override,
+        )
+
+    def allowed(self) -> bool:
+        """Backward-compatible alias for the market-data subscription gate."""
+
+        return self.market_data_allowed()
+
+    def connection_required(self) -> bool:
+        """Keep the broker socket when account reads, execution, or fallback need it."""
+
+        return bool(
+            self.broker_settings.account_read_enabled
+            or self.broker_settings.execution_mode == "live"
+            or self.market_data_allowed()
+        )
+
+    def defer_market_data_after_conflict(self, *, seconds: float) -> None:
+        self.market_data_retry_not_before = max(
+            self.market_data_retry_not_before,
+            time.monotonic() + max(seconds, 0.0),
+        )
 
     def open_session(self) -> None:
-        connect_market_data_only(
-            self.ib,
-            replace_client_id(self.ibkr_settings, self.stream_settings.client_id),
-        )
-        self.ib.reqMarketDataType(self.ibkr_settings.market_data_type)
+        if self.broker_settings.account_read_enabled:
+            connect_broker_readonly_with_positions(
+                self.ib,
+                self.ibkr_settings,
+                client_id=self.stream_settings.client_id,
+            )
+        else:
+            connect_market_data_only(
+                self.ib,
+                replace_client_id(self.ibkr_settings, self.stream_settings.client_id),
+            )
+        self.last_position_shadow_at = None
+        if self.market_data_allowed():
+            self.ib.reqMarketDataType(self.ibkr_settings.market_data_type)
+
+    def flush_position_shadow_if_due(
+        self,
+        *,
+        now_monotonic: float,
+    ) -> dict[str, object] | None:
+        if not self.broker_settings.position_shadow_active:
+            return None
+        if self.last_position_shadow_at is not None and (
+            now_monotonic - self.last_position_shadow_at
+            < self.broker_settings.position_shadow_interval_seconds
+        ):
+            return None
+        self.last_position_shadow_at = now_monotonic
+        try:
+            snapshot = fetch_positions(self.ib, storage_settings=self.storage_settings)
+            write_snapshot(snapshot, self.broker_settings.position_shadow_path)
+        except Exception as exc:  # noqa: BLE001 - shadow failure cannot break market data
+            return {
+                "task": "ibkr_stream",
+                "event": "position_shadow_failed",
+                "ok": False,
+                "error_type": type(exc).__name__,
+            }
+        return {
+            "task": "ibkr_stream",
+            "event": "position_shadow_written",
+            "ok": True,
+            "fetch_complete": snapshot.fetch_complete,
+            "spxw_contracts": snapshot.total_contracts,
+            "raw_position_count": snapshot.raw_position_count,
+        }
 
     def subscribe_base(self) -> None:
         setup_connectivity_sequence = getattr(self, "tws_connectivity_loss_sequence", 0)
@@ -1899,7 +2010,7 @@ class StreamRuntime:
 
     def run(self) -> int:
         while not self.expired():
-            if not self.collector.allowed():
+            if not self.collector.connection_required():
                 persist_state_only(
                     unavailable_state("runtime policy blocks IBKR collection"),
                     self.storage_settings,
@@ -1932,19 +2043,30 @@ class StreamRuntime:
                 continue
 
             log_event({"task": "ibkr_stream", "event": "connected"})
-            persist_state_only(connected_state(), self.storage_settings)
-
-            probe = probe_data_plane(self.collector.ib, self.collector.ibkr_settings)
-            log_event(probe.to_log_event())
-            if not probe.ok:
-                event = self.collector.farm_health.mark_probe_failed(probe)
-                log_event(event.to_log_event(task="ibkr_stream"))
-
             needs_reconnect_backoff = False
             self.session_had_healthy_flush = False
             try:
-                self.collector.subscribe_base()
-                needs_reconnect_backoff = self.session_loop()
+                if self.collector.market_data_allowed():
+                    persist_state_only(connected_state(), self.storage_settings)
+                    probe = probe_data_plane(
+                        self.collector.ib,
+                        self.collector.ibkr_settings,
+                    )
+                    log_event(probe.to_log_event())
+                    if not probe.ok:
+                        event = self.collector.farm_health.mark_probe_failed(probe)
+                        log_event(event.to_log_event(task="ibkr_stream"))
+                    self.collector.subscribe_base()
+                    needs_reconnect_backoff = self.session_loop()
+                else:
+                    persist_account_standby_state(self.storage_settings)
+                    log_event(
+                        {
+                            "task": "ibkr_stream",
+                            "event": "account_standby_connected",
+                        }
+                    )
+                    needs_reconnect_backoff = self.account_standby_loop()
             except Exception as exc:  # noqa: BLE001
                 needs_reconnect_backoff = True
                 persist_state_only(
@@ -1968,6 +2090,50 @@ class StreamRuntime:
                 self.sleep(delay)
         return 0
 
+    def account_standby_loop(self) -> bool:
+        """Maintain positions/account visibility without market subscriptions."""
+
+        while not self.expired():
+            self.collector.ib.sleep(self.stream_settings.policy_check_seconds)
+            position_event = self.collector.flush_position_shadow_if_due(
+                now_monotonic=time.monotonic()
+            )
+            if position_event is not None:
+                log_event(position_event)
+            if (
+                not self.collector.ib.isConnected()
+                or self.collector.tws_connectivity_lost
+            ):
+                persist_state_only(
+                    unavailable_state("IBKR account standby disconnected"),
+                    self.storage_settings,
+                )
+                log_event(
+                    {
+                        "task": "ibkr_stream",
+                        "event": "account_standby_disconnected",
+                    }
+                )
+                return True
+            self.session_had_healthy_flush = True
+            if not self.collector.connection_required():
+                log_event(
+                    {
+                        "task": "ibkr_stream",
+                        "event": "account_standby_not_required",
+                    }
+                )
+                return False
+            if self.collector.market_data_allowed():
+                log_event(
+                    {
+                        "task": "ibkr_stream",
+                        "event": "market_data_activation_requested",
+                    }
+                )
+                return False
+        return False
+
     def session_loop(self) -> bool:
         while not self.expired():
             self.collector.ib.sleep(
@@ -1977,6 +2143,11 @@ class StreamRuntime:
             )
             event = self.collector.flush()
             log_event(event)
+            position_event = self.collector.flush_position_shadow_if_due(
+                now_monotonic=time.monotonic()
+            )
+            if position_event is not None:
+                log_event(position_event)
             if self.collector.subscription_health_failed:
                 persist_state_only(
                     unavailable_state(
@@ -1998,7 +2169,7 @@ class StreamRuntime:
             gateway_restart = self._should_restart_gateway()
             action = decide_after_flush(
                 connected=self.collector.ib.isConnected(),
-                allowed=self.collector.allowed(),
+                allowed=self.collector.market_data_allowed(),
                 competing_session=competing,
                 gateway_restart=gateway_restart,
             )
@@ -2018,15 +2189,19 @@ class StreamRuntime:
                     ),
                     self.storage_settings,
                 )
+                self.collector.defer_market_data_after_conflict(
+                    seconds=self.runtime_policy.ibkr_conflict_probe_seconds
+                )
                 log_event(
                     {
                         "task": "ibkr_stream",
                         "event": "competing_session",
                         "probe_in_seconds": self.runtime_policy.ibkr_conflict_probe_seconds,
+                        "account_standby_eligible": (
+                            self.collector.broker_settings.account_read_enabled
+                        ),
                     }
                 )
-                self.collector.teardown()
-                self.sleep(self.runtime_policy.ibkr_conflict_probe_seconds)
                 return False
 
             if action is StreamAction.POLICY_BLOCKED:
@@ -2111,6 +2286,7 @@ def run(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     ibkr_settings = IbkrSettings.from_env()
     stream_settings = IbkrStreamSettings.from_env()
+    broker_settings = IbkrBrokerSettings.from_env()
     sampling_settings = SamplingSettings.from_env()
     storage_settings = StorageSettings.from_env()
     runtime_policy = RuntimePolicySettings.from_env()
@@ -2121,6 +2297,7 @@ def run(argv: list[str] | None = None) -> int:
                 {
                     "ibkr": asdict(ibkr_settings),
                     "stream": asdict(stream_settings),
+                    "broker": asdict(broker_settings),
                     "sampling": asdict(sampling_settings),
                     "storage": asdict(storage_settings),
                 },
@@ -2143,6 +2320,7 @@ def run(argv: list[str] | None = None) -> int:
         sampling_settings=sampling_settings,
         storage_settings=storage_settings,
         runtime_policy=runtime_policy,
+        broker_settings=broker_settings,
         force=args.force,
         skip_options=args.skip_options,
     )

@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from spx_spark.config import RuntimePolicySettings
+from spx_spark.provider_failover import control_requires_ibkr_market_data
 
 
 VALID_MODES = {"auto", "protected", "ibkr_on", "ibkr_off"}
@@ -118,6 +119,32 @@ def ibkr_allowed(
     if override.mode == "ibkr_on":
         return True
     return False
+
+
+def ibkr_market_data_allowed(
+    policy: RuntimePolicySettings,
+    *,
+    failover_control: dict[str, Any],
+    failover_enabled: bool,
+    control_enabled: bool,
+    control_max_age_seconds: float,
+    now: datetime | None = None,
+    override: RuntimeModeOverride | None = None,
+) -> bool:
+    """Resolve manual runtime overrides before the optional automatic fallback gate."""
+
+    if override is not None and override.mode != "auto":
+        return ibkr_allowed(policy, now=now, override=override)
+    if not failover_enabled or not control_enabled:
+        return ibkr_allowed(policy, now=now, override=override)
+    evaluation_now = now or datetime.now(tz=UTC)
+    if not policy.market_data_collection_allowed(evaluation_now):
+        return False
+    return control_requires_ibkr_market_data(
+        failover_control,
+        now=evaluation_now,
+        max_age_seconds=control_max_age_seconds,
+    )
 
 
 def describe_policy(policy: RuntimePolicySettings, override: RuntimeModeOverride | None) -> str:

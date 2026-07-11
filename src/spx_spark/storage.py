@@ -85,6 +85,11 @@ class JsonlQuoteWriter:
         for path, rows in path_rows.items():
             path.parent.mkdir(parents=True, exist_ok=True)
             with path.open("a", encoding="utf-8") as handle:
+                # Schwab REST, WebSocket, and other collectors are separate
+                # processes that can target the same provider/hour file.
+                # Hold one advisory lock through buffered flush/close so their
+                # multi-write JSONL records cannot interleave.
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
                 for quote in rows:
                     handle.write(
                         json.dumps(

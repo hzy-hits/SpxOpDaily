@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from spx_spark.position_alerts import has_open_spxw_positions
 from spx_spark.position_events import (
     BOOK_PNL_EVENT_KIND,
     ObservedPosition,
@@ -290,3 +291,79 @@ def test_stale_snapshot_retries_existing_pending_without_new_derivation(tmp_path
 
     assert stale.rejection_reason == "snapshot_stale"
     assert stale.pending_events == first.pending_events
+
+
+def test_incomplete_empty_snapshot_uses_durable_position_exposure(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    snapshot_path = tmp_path / "positions.json"
+    state_path = tmp_path / "position-events.json"
+    monkeypatch.setenv("IBKR_POSITIONS_SNAPSHOT_PATH", str(snapshot_path))
+    monkeypatch.setenv("IBKR_POSITIONS_STATE_PATH", str(state_path))
+    PositionEventStore(state_path).prepare(
+        observation("snapshot-1", positions=(position(7500),)),
+        as_of=NOW,
+    )
+    snapshot_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "snapshot_id": "snapshot-incomplete",
+                "fetched_at": (NOW + timedelta(seconds=10)).isoformat(),
+                "fetch_complete": False,
+                "positions": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert has_open_spxw_positions() is True
+
+    snapshot_path.write_text(
+        json.dumps(
+                {
+                    "schema_version": 2,
+                    "snapshot_id": "snapshot-flat",
+                    "fetched_at": datetime.now(tz=timezone.utc).isoformat(),
+                "fetch_complete": True,
+                "positions": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert has_open_spxw_positions() is False
+
+
+def test_stale_flat_snapshot_is_unknown_when_account_tracking_is_expected(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    snapshot_path = tmp_path / "positions.json"
+    state_path = tmp_path / "position-events.json"
+    monkeypatch.setenv("IBKR_POSITIONS_SNAPSHOT_PATH", str(snapshot_path))
+    monkeypatch.setenv("IBKR_POSITIONS_STATE_PATH", str(state_path))
+    monkeypatch.setenv("IBKR_BROKER_ACCOUNT_READ_ENABLED", "true")
+    monkeypatch.setenv("IBKR_POSITIONS_MAX_SNAPSHOT_AGE_SECONDS", "180")
+    PositionEventStore(state_path).prepare(
+        observation("snapshot-flat", positions=()),
+        as_of=NOW,
+    )
+    snapshot_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "snapshot_id": "snapshot-flat",
+                "fetched_at": NOW.isoformat(),
+                "fetch_complete": True,
+                "positions": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert has_open_spxw_positions() is True
+
+    monkeypatch.setenv("IBKR_BROKER_ACCOUNT_READ_ENABLED", "false")
+    assert has_open_spxw_positions() is False

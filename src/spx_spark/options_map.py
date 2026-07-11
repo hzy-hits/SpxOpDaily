@@ -18,7 +18,13 @@ from spx_spark.marketdata import (
     ProviderStatus,
     Quote,
 )
-from spx_spark.storage import LatestState, LatestStateStore, configured_quote_use_decision
+from spx_spark.storage import (
+    LatestState,
+    LatestStateStore,
+    configured_quote_use_decision,
+    degrade_stale_quote,
+    select_best_quotes,
+)
 
 
 UNDERLIER_CANDIDATES = (
@@ -1266,17 +1272,26 @@ def build_expiry_map(
 
 def group_spxw_option_quotes(state: LatestState) -> dict[str, list[Quote]]:
     ibkr_down = ibkr_provider_unavailable(state)
-    use_ibkr_only = not ibkr_down and any(
-        is_spxw_option(quote) and quote.provider == Provider.IBKR for quote in state.best_quotes
+    storage_settings = StorageSettings.from_env()
+    candidates = tuple(
+        degrade_stale_quote(
+            quote,
+            as_of=state.as_of,
+            stale_after_seconds=storage_settings.latest_stale_after_seconds,
+            delayed_stale_after_seconds=storage_settings.delayed_stale_after_seconds,
+            slow_stale_after_seconds=storage_settings.slow_index_stale_after_seconds,
+            slow_labels=storage_settings.slow_index_labels,
+        )
+        for quote in state.quotes
+        if is_spxw_option(quote) and not (quote.provider == Provider.IBKR and ibkr_down)
+    )
+    selected = select_best_quotes(
+        candidates,
+        as_of=state.as_of,
+        provider_priority=storage_settings.provider_priority,
     )
     grouped: dict[str, list[Quote]] = defaultdict(list)
-    for quote in state.best_quotes:
-        if not is_spxw_option(quote):
-            continue
-        if quote.provider == Provider.IBKR and ibkr_down:
-            continue
-        if use_ibkr_only and quote.provider != Provider.IBKR:
-            continue
+    for quote in selected:
         expiry = quote.instrument.expiry or "unknown"
         grouped[expiry].append(quote)
     return grouped

@@ -13,6 +13,7 @@ from spx_spark.alert_engine import (
     evaluate_alerts,
     evaluate_payload,
     front_expected_move_pct,
+    ibkr_session_status,
     iv_surface_freshness_alert,
     iv_surface_alerts,
     movement_alerts,
@@ -36,6 +37,19 @@ from spx_spark.storage import LatestState
 
 
 BJ_TZ = ZoneInfo("Asia/Shanghai")
+
+
+def test_account_standby_connected_counts_as_broker_session_available() -> None:
+    now = datetime(2026, 7, 13, 22, 0, tzinfo=BJ_TZ)
+    state = ProviderState(
+        provider=Provider.IBKR,
+        status=ProviderStatus.DEGRADED,
+        checked_at=now,
+        reason="account standby connected; market data inactive",
+        connected=True,
+    )
+
+    assert ibkr_session_status(state, now=now) == "available"
 
 
 def make_quote(
@@ -398,6 +412,7 @@ def test_hyperliquid_proxy_watch_is_research_only_when_anchor_is_closed() -> Non
 def test_ibkr_session_transition_alerts_are_edge_triggered(tmp_path, monkeypatch) -> None:
     state_path = tmp_path / "system-event-state.json"
     monkeypatch.setenv("ALERT_SYSTEM_EVENT_STATE_PATH", str(state_path))
+    monkeypatch.setenv("IBKR_EXECUTION_MODE", "live")
     now = datetime(2026, 7, 7, 3, 15, tzinfo=BJ_TZ)
     interrupted = ProviderState(
         provider=Provider.IBKR,
@@ -434,6 +449,7 @@ def test_ibkr_session_transition_alerts_are_edge_triggered(tmp_path, monkeypatch
 def test_ibkr_unknown_state_preserves_interrupted_status_for_restore(tmp_path, monkeypatch) -> None:
     state_path = tmp_path / "system-event-state.json"
     monkeypatch.setenv("ALERT_SYSTEM_EVENT_STATE_PATH", str(state_path))
+    monkeypatch.setenv("IBKR_EXECUTION_MODE", "live")
     now = datetime(2026, 7, 7, 3, 15, tzinfo=BJ_TZ)
     interrupted = ProviderState(
         provider=Provider.IBKR,
@@ -468,6 +484,7 @@ def test_ibkr_degraded_reconnect_state_does_not_swallow_restored_alert(
 ) -> None:
     state_path = tmp_path / "system-event-state.json"
     monkeypatch.setenv("ALERT_SYSTEM_EVENT_STATE_PATH", str(state_path))
+    monkeypatch.setenv("IBKR_EXECUTION_MODE", "live")
     now = datetime(2026, 7, 7, 11, 9, tzinfo=BJ_TZ)
     interrupted = ProviderState(
         provider=Provider.IBKR,
@@ -516,6 +533,7 @@ def test_ibkr_degraded_reconnect_state_does_not_swallow_restored_alert(
 def test_evaluate_payload_can_detect_system_event_without_persisting(tmp_path, monkeypatch) -> None:
     state_path = tmp_path / "system-event-state.json"
     monkeypatch.setenv("ALERT_SYSTEM_EVENT_STATE_PATH", str(state_path))
+    monkeypatch.setenv("IBKR_EXECUTION_MODE", "live")
     now = datetime(2026, 7, 7, 3, 15, tzinfo=BJ_TZ)
     interrupted = ProviderState(
         provider=Provider.IBKR,
@@ -539,6 +557,165 @@ def test_evaluate_payload_can_detect_system_event_without_persisting(tmp_path, m
         if isinstance(alert, dict)
     )
     assert not state_path.exists()
+
+
+def _write_failover_transition(
+    path,
+    *,
+    now: datetime,
+    sequence: int,
+    previous_mode: str,
+    mode: str,
+) -> None:
+    path.write_text(
+        json.dumps(
+            {
+                "mode": mode,
+                "updated_at": now.isoformat(),
+                "sequence": sequence,
+                "schwab_unhealthy_streak": 0,
+                "schwab_recovery_streak": 0,
+                "ibkr_unhealthy_streak": 0,
+                "monitoring_active": True,
+                "ibkr_market_data_required": mode != "schwab_primary",
+                "transition": {
+                    "transition_id": f"provider-failover:{sequence}:{mode}",
+                    "sequence": sequence,
+                    "previous_mode": previous_mode,
+                    "mode": mode,
+                    "occurred_at": now.isoformat(),
+                    "reason": "test transition",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_provider_failover_transitions_are_edge_triggered(tmp_path, monkeypatch) -> None:
+    event_path = tmp_path / "system-event-state.json"
+    failover_path = tmp_path / "provider-failover.json"
+    monkeypatch.setenv("ALERT_SYSTEM_EVENT_STATE_PATH", str(event_path))
+    monkeypatch.setenv("PROVIDER_FAILOVER_STATE_PATH", str(failover_path))
+    now = datetime(2026, 7, 13, 22, 0, tzinfo=BJ_TZ)
+    _write_failover_transition(
+        failover_path,
+        now=now,
+        sequence=2,
+        previous_mode="recovery_pending",
+        mode="ibkr_fallback",
+    )
+
+    first = system_event_alerts(make_state(now=now))
+    repeated = system_event_alerts(make_state(now=now))
+
+    assert [alert.kind for alert in first] == ["market_data_ibkr_fallback_activated"]
+    assert first[0].source_gate == "provider_failover_state"
+    assert repeated == []
+
+    restored_at = now + timedelta(minutes=5)
+    _write_failover_transition(
+        failover_path,
+        now=restored_at,
+        sequence=3,
+        previous_mode="ibkr_fallback",
+        mode="schwab_primary",
+    )
+    restored = system_event_alerts(make_state(now=restored_at))
+
+    assert [alert.kind for alert in restored] == ["market_data_schwab_restored"]
+
+
+def test_both_direct_providers_unavailable_is_critical(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("ALERT_SYSTEM_EVENT_STATE_PATH", str(tmp_path / "events.json"))
+    failover_path = tmp_path / "provider-failover.json"
+    monkeypatch.setenv("PROVIDER_FAILOVER_STATE_PATH", str(failover_path))
+    now = datetime(2026, 7, 13, 22, 0, tzinfo=BJ_TZ)
+    _write_failover_transition(
+        failover_path,
+        now=now,
+        sequence=2,
+        previous_mode="recovery_pending",
+        mode="both_unavailable",
+    )
+
+    alerts = system_event_alerts(make_state(now=now))
+
+    assert [alert.kind for alert in alerts] == ["market_data_all_providers_unavailable"]
+    assert alerts[0].severity == "critical"
+    assert "禁止新开仓" in alerts[0].detail
+
+
+def test_schwab_recovery_before_takeover_does_not_claim_ibkr_was_active(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("ALERT_SYSTEM_EVENT_STATE_PATH", str(tmp_path / "events.json"))
+    failover_path = tmp_path / "provider-failover.json"
+    monkeypatch.setenv("PROVIDER_FAILOVER_STATE_PATH", str(failover_path))
+    now = datetime(2026, 7, 13, 22, 0, tzinfo=BJ_TZ)
+    _write_failover_transition(
+        failover_path,
+        now=now,
+        sequence=2,
+        previous_mode="recovery_pending",
+        mode="schwab_primary",
+    )
+
+    alerts = system_event_alerts(make_state(now=now))
+
+    assert [alert.kind for alert in alerts] == ["market_data_schwab_restored"]
+    assert "备用接管已取消" in alerts[0].title
+    assert "退出 IBKR" not in alerts[0].detail
+
+
+def test_ibkr_standby_disconnect_is_silent_without_position_or_live_execution(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("ALERT_SYSTEM_EVENT_STATE_PATH", str(tmp_path / "events.json"))
+    monkeypatch.setenv("IBKR_EXECUTION_MODE", "manual")
+    monkeypatch.setenv("IBKR_BROKER_ACCOUNT_READ_ENABLED", "false")
+    monkeypatch.setenv("IBKR_POSITIONS_SNAPSHOT_PATH", str(tmp_path / "missing-positions.json"))
+    now = datetime(2026, 7, 13, 22, 0, tzinfo=BJ_TZ)
+    interrupted = ProviderState(
+        provider=Provider.IBKR,
+        status=ProviderStatus.UNAVAILABLE,
+        checked_at=now,
+        reason="standby disconnected",
+        connected=False,
+    )
+
+    assert system_event_alerts(make_state(now=now, provider_states=(interrupted,))) == []
+
+
+def test_old_or_inactive_failover_transition_never_pages_after_restart(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("ALERT_SYSTEM_EVENT_STATE_PATH", str(tmp_path / "events.json"))
+    failover_path = tmp_path / "provider-failover.json"
+    monkeypatch.setenv("PROVIDER_FAILOVER_STATE_PATH", str(failover_path))
+    now = datetime(2026, 7, 13, 22, 0, tzinfo=BJ_TZ)
+    old = now - timedelta(minutes=10)
+    _write_failover_transition(
+        failover_path,
+        now=old,
+        sequence=2,
+        previous_mode="recovery_pending",
+        mode="ibkr_fallback",
+    )
+    raw = json.loads(failover_path.read_text(encoding="utf-8"))
+    raw["updated_at"] = now.isoformat()
+    failover_path.write_text(json.dumps(raw), encoding="utf-8")
+
+    assert system_event_alerts(make_state(now=now)) == []
+
+    raw["transition"]["occurred_at"] = now.isoformat()
+    raw["monitoring_active"] = False
+    failover_path.write_text(json.dumps(raw), encoding="utf-8")
+
+    assert system_event_alerts(make_state(now=now)) == []
 
 
 def test_movement_alerts_are_edge_triggered(tmp_path, monkeypatch) -> None:
