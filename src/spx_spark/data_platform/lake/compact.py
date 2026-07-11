@@ -115,6 +115,7 @@ class QuoteLakeCompactor:
         now: datetime | None = None,
         dry_run: bool = False,
         limit: int | None = None,
+        provider: str | None = None,
     ) -> CompactionSummary:
         if limit is not None and limit <= 0:
             raise ValueError("limit must be positive")
@@ -125,6 +126,12 @@ class QuoteLakeCompactor:
             self.data_root,
             raw_file_name=self.raw_file_name,
         )
+        if provider is not None:
+            partitions = tuple(row for row in partitions if row.provider == provider)
+        if limit is not None:
+            # Keep current research fresh while a bounded initial backfill
+            # drains older history in the remaining slots.
+            partitions = tuple(reversed(partitions))
         for partition in partitions:
             if limit is not None and work_count >= limit:
                 break
@@ -471,6 +478,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Compact closed-hour SPX Spark JSONL into Parquet")
     parser.add_argument("--data-root", help="Data root; defaults to MARKET_DATA_DATA_ROOT")
     parser.add_argument("--raw-file-name", help="Collector JSONL file name")
+    parser.add_argument("--provider", help="Only compact one provider (for validation/backfill)")
     parser.add_argument(
         "--settle-seconds",
         type=float,
@@ -497,7 +505,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         ),
         compression_level=args.compression_level,
     )
-    summary = compactor.run(dry_run=args.dry_run, limit=args.limit)
+    summary = compactor.run(
+        dry_run=args.dry_run,
+        limit=args.limit,
+        provider=args.provider,
+    )
     if args.as_json:
         print(json.dumps(summary.to_dict(), sort_keys=True, separators=(",", ":")))
     else:

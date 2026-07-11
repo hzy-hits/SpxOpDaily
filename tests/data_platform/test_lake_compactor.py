@@ -244,20 +244,36 @@ def test_limit_counts_work_not_old_up_to_date_partitions(tmp_path: Path) -> None
 
 
 def test_failed_partition_does_not_starve_later_valid_work(tmp_path: Path) -> None:
-    malformed = source_path(tmp_path, hour=9)
+    malformed = source_path(tmp_path, hour=10)
     malformed.parent.mkdir(parents=True, exist_ok=True)
     malformed.write_text('{"not": "closed"\n', encoding="utf-8")
     settled = (NOW - timedelta(minutes=10)).timestamp()
     os.utime(malformed, (settled, settled))
     write_source(
-        source_path(tmp_path, hour=10),
-        [quote_payload(received_at="2026-07-10T10:05:00+00:00")],
+        source_path(tmp_path, hour=9),
+        [quote_payload(received_at="2026-07-10T09:05:00+00:00")],
     )
 
     summary = QuoteLakeCompactor(tmp_path).run(now=NOW, limit=1)
 
     assert summary.status_counts == {"compacted": 1, "failed": 1}
     assert len(tuple((tmp_path / "lake").glob("**/*.parquet"))) == 1
+
+
+def test_provider_filter_is_bounded_to_requested_landing_source(tmp_path: Path) -> None:
+    write_source(source_path(tmp_path), [quote_payload()])
+    other = (
+        tmp_path
+        / "raw/provider=hyperliquid/date=2026-07-10/hour=10/quotes.jsonl"
+    )
+    write_source(other, [quote_payload(provider="hyperliquid")])
+
+    summary = QuoteLakeCompactor(tmp_path).run(now=NOW, provider="ibkr")
+
+    assert summary.status_counts == {"compacted": 1}
+    outputs = tuple((tmp_path / "lake").glob("**/*.parquet"))
+    assert len(outputs) == 1
+    assert "provider=ibkr" in outputs[0].as_posix()
 
 
 def test_changed_closed_source_atomically_replaces_one_partition_file(tmp_path: Path) -> None:
