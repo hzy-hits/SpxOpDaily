@@ -24,10 +24,17 @@ realtime behavior during rollout.
 ## Failure boundary
 
 Research persistence must not delay or suppress a market alert. Realtime
-ledger writes use short transactions and a bounded SQLite busy timeout. If a
-write fails, the operation is appended to a mode-`0600` fallback spool for
-later replay. The hourly batch automatically replays that spool, and a 64 MiB
-default ceiling prevents an outage from consuming the filesystem indefinitely.
+ledger writes use short transactions and a bounded SQLite busy timeout. A
+transient storage failure is appended to a mode-`0600` fallback spool for later
+replay. Immutable-record conflicts, lookahead violations, and malformed
+payloads are terminal: they are reported immediately instead of growing the
+retry spool. A missing reference is retried after the rest of the spool so a
+later parent record can heal ordering; it becomes terminal only when the parent
+is still absent and no transient storage failure occurred in that batch. During
+replay, legacy terminal records are preserved verbatim in a deduplicated,
+fsynced mode-`0600` dead-letter JSONL before they are removed from the active
+spool. The hourly batch automatically replays the spool, and a 64 MiB default
+ceiling prevents an outage from consuming the filesystem indefinitely.
 Compaction and DuckDB queries run out of process.
 
 The operational ledger is event-driven: it records actual alert candidates,

@@ -135,7 +135,10 @@ JSONL 不能仅凭年龄删除。只有同时满足以下条件，closed-hour so
 ## 故障边界
 
 - NAS、树莓派、家庭宽带或 Tailscale 不可用时，Oracle 实时服务必须无感继续。
-- SQLite 忙或研究写入失败时，允许写入有大小上限的本地 fallback spool；不得阻塞告警。
+- SQLite 忙或暂时不可写时，允许写入有大小上限的本地 fallback spool；不得阻塞告警。
+- 不可重试的冲突和无效 payload 不进入重试队列；缺失引用要在同一批次的父记录
+  之后再重试一次。确认仍无法解析且不存在临时存储故障后，历史终止错误必须先以
+  `0600` 权限、fsync 的 dead-letter JSONL 完整保留，再从活动 spool 移除。
 - DuckDB 查询、Parquet compaction 和未来 NAS export 必须运行在实时进程之外。
 - compaction 失败时保留 JSONL，不得为了释放空间删除唯一副本。
 - Oracle 数据盘不可写时，系统降级为 latest/alert 最小写入并发出高优先级运维告警。

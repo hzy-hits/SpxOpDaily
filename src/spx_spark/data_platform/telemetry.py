@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import json
 import os
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -23,12 +24,26 @@ from spx_spark.data_platform.contracts import (
     OutcomeRecord,
     StrategyVersionRecord,
 )
-from spx_spark.data_platform.ports import DecisionLedger
+from spx_spark.data_platform.ports import (
+    DecisionLedger,
+    LedgerConflictError,
+    LedgerReferenceError,
+    LookaheadViolationError,
+)
 from spx_spark.data_platform.settings import DataPlatformSettings
 
 
 SPOOL_SCHEMA_VERSION = 1
+DEAD_LETTER_SCHEMA_VERSION = 1
 DEFAULT_SPOOL_MAX_BYTES = 67_108_864
+
+PERMANENT_TELEMETRY_ERRORS = (
+    LedgerConflictError,
+    LookaheadViolationError,
+    TypeError,
+    ValueError,
+    KeyError,
+)
 
 
 class FallbackSpoolCapacityError(RuntimeError):
@@ -47,6 +62,25 @@ class SpoolReplayResult:
     replayed: int
     retained: int
     invalid: int
+    quarantined: int
+    failures: int = 0
+
+
+@dataclass(frozen=True)
+class _DeadLetterRecord:
+    index: int
+    raw_line: str
+    reason_type: str
+    reason: str
+
+    @property
+    def line_sha256(self) -> str:
+        return hashlib.sha256(self.raw_line.encode("utf-8")).hexdigest()
+
+    @property
+    def record_id(self) -> str:
+        value = f"{self.index}:{self.line_sha256}".encode("utf-8")
+        return hashlib.sha256(value).hexdigest()
 
 
 class FallbackSpool:
@@ -62,6 +96,13 @@ class FallbackSpool:
             raise ValueError("fallback spool maximum must be positive")
         self.path = Path(path)
         self.lock_path = self.path.with_name(f"{self.path.name}.lock")
+        suffix = self.path.suffix or ".jsonl"
+        stem = (
+            self.path.name[: -len(self.path.suffix)]
+            if self.path.suffix
+            else self.path.name
+        )
+        self.dead_letter_path = self.path.with_name(f"{stem}.dead-letter{suffix}")
         self.max_bytes = max_bytes
 
     def append(self, operation: str, payload: Mapping[str, object]) -> None:
@@ -96,16 +137,30 @@ class FallbackSpool:
 
     def replay(self, ledger: DecisionLedger) -> SpoolReplayResult:
         if not self.path.exists():
-            return SpoolReplayResult(replayed=0, retained=0, invalid=0)
+            return SpoolReplayResult(
+                replayed=0,
+                retained=0,
+                invalid=0,
+                quarantined=0,
+            )
         replayed = 0
-        invalid = 0
-        retained: list[str] = []
+        retained: list[tuple[int, str]] = []
+        terminal: list[_DeadLetterRecord] = []
+        deferred_references: list[tuple[int, str, Mapping[str, object]]] = []
+        transient_seen = False
         with self._lock():
             try:
                 lines = self.path.read_text(encoding="utf-8").splitlines()
             except OSError:
-                return SpoolReplayResult(replayed=0, retained=0, invalid=1)
-            for line in lines:
+                return SpoolReplayResult(
+                    replayed=0,
+                    retained=0,
+                    invalid=0,
+                    quarantined=0,
+                    failures=1,
+                )
+            nonblank_lines = [(index, line) for index, line in enumerate(lines) if line.strip()]
+            for index, line in nonblank_lines:
                 if not line.strip():
                     continue
                 try:
@@ -123,15 +178,146 @@ class FallbackSpool:
                         envelope["payload"],
                     )
                     replayed += 1
-                except (TypeError, ValueError, KeyError, RuntimeError):
-                    retained.append(line)
-                    invalid += 1
-            self._replace_lines(retained)
+                except LedgerReferenceError:
+                    deferred_references.append((index, line, envelope))
+                except PERMANENT_TELEMETRY_ERRORS as exc:
+                    terminal.append(
+                        _DeadLetterRecord(
+                            index=index,
+                            raw_line=line,
+                            reason_type=type(exc).__name__,
+                            reason=str(exc),
+                        )
+                    )
+                except Exception:
+                    # Unknown/storage failures may recover; keep the exact line for retry.
+                    retained.append((index, line))
+                    transient_seen = True
+
+            unresolved_references: list[_DeadLetterRecord] = []
+            for index, line, envelope in deferred_references:
+                try:
+                    _apply_operation(
+                        ledger,
+                        str(envelope["operation"]),
+                        envelope["payload"],
+                    )
+                    replayed += 1
+                except LedgerReferenceError as exc:
+                    unresolved_references.append(
+                        _DeadLetterRecord(
+                            index=index,
+                            raw_line=line,
+                            reason_type=type(exc).__name__,
+                            reason=str(exc),
+                        )
+                    )
+                except PERMANENT_TELEMETRY_ERRORS as exc:
+                    terminal.append(
+                        _DeadLetterRecord(
+                            index=index,
+                            raw_line=line,
+                            reason_type=type(exc).__name__,
+                            reason=str(exc),
+                        )
+                    )
+                except Exception:
+                    retained.append((index, line))
+                    transient_seen = True
+
+            if transient_seen:
+                retained.extend(
+                    (record.index, record.raw_line) for record in unresolved_references
+                )
+            else:
+                terminal.extend(unresolved_references)
+
+            quarantined = 0
+            failures = 0
+            if terminal:
+                try:
+                    self._append_dead_letters(terminal)
+                    quarantined = len(terminal)
+                except (OSError, TypeError, ValueError):
+                    # Never remove a terminal record unless its dead-letter copy was fsynced.
+                    retained.extend((record.index, record.raw_line) for record in terminal)
+                    failures += 1
+
+            retained_lines = [line for _, line in sorted(retained)]
+            try:
+                self._replace_lines(retained_lines)
+            except OSError:
+                # The original spool is still authoritative when atomic replacement fails.
+                return SpoolReplayResult(
+                    replayed=replayed,
+                    retained=len(nonblank_lines),
+                    invalid=len(terminal),
+                    quarantined=quarantined,
+                    failures=failures + 1,
+                )
         return SpoolReplayResult(
             replayed=replayed,
-            retained=len(retained),
-            invalid=invalid,
+            retained=len(retained_lines),
+            invalid=len(terminal),
+            quarantined=quarantined,
+            failures=failures,
         )
+
+    def _append_dead_letters(self, records: Sequence[_DeadLetterRecord]) -> None:
+        """Durably preserve terminal records before removing them from the retry spool."""
+
+        self.dead_letter_path.parent.mkdir(parents=True, exist_ok=True)
+        existing_record_ids: set[str] = set()
+        if self.dead_letter_path.exists():
+            for line in self.dead_letter_path.read_text(encoding="utf-8").splitlines():
+                try:
+                    entry = json.loads(line)
+                except (TypeError, ValueError):
+                    continue
+                if isinstance(entry, dict) and isinstance(entry.get("record_id"), str):
+                    existing_record_ids.add(str(entry["record_id"]))
+
+        now = datetime.now(timezone.utc).isoformat()
+        encoded_rows: list[bytes] = []
+        for record in records:
+            if record.record_id in existing_record_ids:
+                continue
+            encoded_rows.append(
+                (
+                    json.dumps(
+                        {
+                            "dead_letter_schema_version": DEAD_LETTER_SCHEMA_VERSION,
+                            "quarantined_at": now,
+                            "record_id": record.record_id,
+                            "line_sha256": record.line_sha256,
+                            "reason_type": record.reason_type,
+                            "reason": record.reason,
+                            "raw_line": record.raw_line,
+                        },
+                        allow_nan=False,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    )
+                    + "\n"
+                ).encode("utf-8")
+            )
+        if not encoded_rows:
+            return
+
+        descriptor = os.open(
+            self.dead_letter_path,
+            os.O_WRONLY | os.O_APPEND | os.O_CREAT,
+            0o600,
+        )
+        try:
+            os.fchmod(descriptor, 0o600)
+            for encoded in encoded_rows:
+                _write_all(descriptor, encoded)
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        _fsync_directory(self.dead_letter_path.parent)
 
     def _replace_lines(self, lines: Sequence[str]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -145,6 +331,7 @@ class FallbackSpool:
                 os.fsync(handle.fileno())
             os.chmod(temporary, 0o600)
             os.replace(temporary, self.path)
+            _fsync_directory(self.path.parent)
         finally:
             temporary.unlink(missing_ok=True)
 
@@ -210,6 +397,13 @@ class OperationalTelemetry:
         try:
             _apply_operation(self.ledger, operation, payload)
             return TelemetryWriteResult(status="recorded", operation=operation)
+        except PERMANENT_TELEMETRY_ERRORS as exc:
+            # Retrying immutable conflicts or invalid payloads cannot heal.
+            return TelemetryWriteResult(
+                status="error",
+                operation=operation,
+                error=f"{type(exc).__name__}:{exc}",
+            )
         except Exception as exc:  # Telemetry must not suppress a realtime alert.
             error = f"{type(exc).__name__}:{exc}"
             try:
@@ -492,3 +686,11 @@ def _write_all(descriptor: int, payload: bytes) -> None:
         if written <= 0:
             raise OSError("short write to telemetry fallback spool")
         offset += written
+
+
+def _fsync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)

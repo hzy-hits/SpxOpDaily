@@ -318,6 +318,12 @@ scripts/run-data-platform.sh query strategy --start 2026-07-10 --limit 100
 scripts/run-data-platform.sh query bias --start 2026-07-10
 ```
 
+`replay-spool` only retains transient storage failures and references that may
+still be waiting on a parent record. Legacy conflicts, unresolved references,
+and malformed records are durably moved to the adjacent owner-only
+`*.dead-letter.jsonl`; the command reports `status=quarantined` and exits
+successfully once no retryable records remain.
+
 `spx-spark-data-compact.timer` runs at minute `:08` with jitter, a five-minute
 source settle gate, and an eight-partition cap per run so the initial backfill
 cannot monopolize disk I/O. The same run replays transient SQLite fallback

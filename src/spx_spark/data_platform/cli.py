@@ -14,7 +14,11 @@ from spx_spark.data_platform.contracts import CompactionManifestRecord
 from spx_spark.data_platform.lake.manifest import load_manifest
 from spx_spark.data_platform.research import build_research_catalog
 from spx_spark.data_platform.settings import DataPlatformSettings
-from spx_spark.data_platform.telemetry import FallbackSpool, OperationalTelemetry
+from spx_spark.data_platform.telemetry import (
+    FallbackSpool,
+    OperationalTelemetry,
+    SpoolReplayResult,
+)
 
 
 LEDGER_TABLES = (
@@ -73,22 +77,26 @@ def run(argv: list[str] | None = None) -> int:
         _print_json(_status(settings))
         return 0
     if args.command == "replay-spool":
+        spool = FallbackSpool(
+            settings.fallback_spool_path,
+            max_bytes=settings.fallback_spool_max_bytes,
+        )
         result = OperationalTelemetry(
             ledger,
-            FallbackSpool(
-                settings.fallback_spool_path,
-                max_bytes=settings.fallback_spool_max_bytes,
-            ),
+            spool,
         ).replay_fallback()
         _print_json(
             {
-                "status": "ok" if result.retained == 0 else "partial",
+                "status": _spool_replay_status(result),
                 "replayed": result.replayed,
                 "retained": result.retained,
                 "invalid": result.invalid,
+                "quarantined": result.quarantined,
+                "failures": result.failures,
+                "dead_letter_path": str(spool.dead_letter_path),
             }
         )
-        return 0 if result.retained == 0 else 1
+        return _spool_replay_exit_code(result)
     if args.command == "sync-manifests":
         result = _sync_manifests(settings, ledger)
         _print_json(result)
@@ -114,6 +122,7 @@ def _status(settings: DataPlatformSettings) -> dict[str, object]:
     parquet_files = tuple((data_root / "lake").glob("**/*.parquet"))
     manifest_files = tuple((data_root / "manifests").glob("**/*.json"))
     spool_path = Path(settings.fallback_spool_path)
+    dead_letter_path = FallbackSpool(spool_path).dead_letter_path
     return {
         "enabled": settings.enabled,
         "raw_delete_enabled": settings.raw_delete_enabled,
@@ -126,6 +135,10 @@ def _status(settings: DataPlatformSettings) -> dict[str, object]:
             "path": str(spool_path),
             "size_bytes": spool_path.stat().st_size if spool_path.exists() else 0,
             "max_bytes": settings.fallback_spool_max_bytes,
+            "dead_letter_path": str(dead_letter_path),
+            "dead_letter_size_bytes": (
+                dead_letter_path.stat().st_size if dead_letter_path.exists() else 0
+            ),
         },
         "lake": {
             "parquet_files": len(parquet_files),
@@ -133,6 +146,18 @@ def _status(settings: DataPlatformSettings) -> dict[str, object]:
             "manifest_files": len(manifest_files),
         },
     }
+
+
+def _spool_replay_status(result: SpoolReplayResult) -> str:
+    if result.failures or result.retained:
+        return "partial"
+    if result.quarantined:
+        return "quarantined"
+    return "ok"
+
+
+def _spool_replay_exit_code(result: SpoolReplayResult) -> int:
+    return 1 if result.failures or result.retained else 0
 
 
 def _sync_manifests(
