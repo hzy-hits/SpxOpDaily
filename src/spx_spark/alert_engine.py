@@ -52,6 +52,10 @@ from spx_spark.storage import (
     LatestStateStore,
     configured_quote_use_decision,
 )
+from spx_spark.strategy.steven import (
+    annotate_alerts_with_steven_context,
+    load_steven_state_for_alerts,
+)
 
 
 BASELINE_INSTRUMENTS = (
@@ -1479,6 +1483,17 @@ def evaluate_payload(
     )
     if iv_stale_alert is not None:
         alerts.append(iv_stale_alert)
+    # Steven observe-only context: read-only note on selected alert kinds.
+    if bool(runtime_value("steven.alert_context_enabled")):
+        try:
+            steven_state = load_steven_state_for_alerts(StorageSettings.from_env().data_root)
+            alerts = annotate_alerts_with_steven_context(
+                alerts,
+                steven_state,
+                as_of=state.as_of,
+            )
+        except Exception:  # noqa: BLE001 — never block alerts on context failure
+            pass
     return {
         "created_at": datetime.now(tz=now.tzinfo).isoformat(),
         "as_of": state.as_of.isoformat(),

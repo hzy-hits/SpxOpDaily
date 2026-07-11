@@ -50,13 +50,35 @@ def test_schwab_failure_requests_then_activates_ibkr_once() -> None:
     request_transition = state.transition
 
     state = observe(state, now + timedelta(seconds=30), schwab=False, ibkr=True)
+    assert state.mode == FailoverMode.RECOVERY_PENDING
+    assert state.ibkr_recovery_streak == 1
+    state = observe(state, now + timedelta(seconds=45), schwab=False, ibkr=True)
     assert state.mode == FailoverMode.IBKR_FALLBACK
     assert state.sequence == 2
     fallback_transition = state.transition
-    state = observe(state, now + timedelta(seconds=45), schwab=False, ibkr=True)
+    state = observe(state, now + timedelta(seconds=60), schwab=False, ibkr=True)
     assert state.transition == fallback_transition
     assert state.sequence == 2
     assert request_transition is not None
+
+
+def test_failover_requires_consecutive_ibkr_recovery_observations() -> None:
+    now = datetime(2026, 7, 13, 13, 30, tzinfo=UTC)
+    state = FailoverState(
+        mode=FailoverMode.BOTH_UNAVAILABLE,
+        updated_at=now,
+        sequence=3,
+    )
+
+    state = observe(state, now + timedelta(seconds=15), schwab=False, ibkr=True)
+    assert state.mode == FailoverMode.BOTH_UNAVAILABLE
+    assert state.ibkr_recovery_streak == 1
+
+    state = observe(state, now + timedelta(seconds=30), schwab=False, ibkr=True)
+    assert state.mode == FailoverMode.IBKR_FALLBACK
+    assert state.ibkr_recovery_streak == 2
+    assert state.transition is not None
+    assert state.transition.previous_mode == FailoverMode.BOTH_UNAVAILABLE
 
 
 def test_both_unavailable_and_hysteretic_schwab_recovery() -> None:

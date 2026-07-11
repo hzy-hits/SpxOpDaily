@@ -1455,3 +1455,437 @@ def test_established_but_unhealthy_sessions_keep_reconnect_backoff(monkeypatch) 
     assert delays == [5.0, 10.0]
     assert collector.opens == 2
     assert collector.teardowns == 2
+
+
+def _flush_test_collector(*, connected: bool = True) -> StreamCollector:
+    collector = object.__new__(StreamCollector)
+    collector.ib = SimpleNamespace(isConnected=lambda: connected, sleep=lambda _s: None)
+    collector.ibkr_settings = SimpleNamespace(
+        stale_after_seconds=10.0,
+        slow_index_stale_after_seconds=60.0,
+        slow_index_labels=(),
+    )
+    collector.stream_settings = SimpleNamespace(
+        freeze_quotes_on_connectivity_loss=True,
+        replan_drift_points=20.0,
+    )
+    collector.storage_settings = object()
+    collector.base_subs = {}
+    collector.hot_subs = {}
+    collector.rotation_subs = {}
+    collector.spy_subs = {}
+    collector.slow_cache = {}
+    collector.option_cache = {}
+    collector.option_plan = None
+    collector.errors = []
+    collector.tws_connectivity_lost = False
+    collector.subscriptions_lost = False
+    collector.subscription_health_failed = False
+    collector.rotation_index = 0
+    collector.connection_generation = 1
+    collector.farm_health = stream_collector_module.FarmHealthTracker()
+    collector._advance_subscription_lifecycle = lambda *_args, **_kwargs: None
+    return collector
+
+
+def test_teardown_clears_option_cache(monkeypatch) -> None:
+    collector = object.__new__(StreamCollector)
+    collector.ib = SimpleNamespace(isConnected=lambda: False)
+    collector.stream_settings = SimpleNamespace(replan_drift_points=20.0)
+    collector.base_subs = {}
+    collector.hot_subs = {}
+    collector.rotation_subs = {}
+    collector.spy_subs = {}
+    collector.slow_active_subs = {}
+    collector.errors = []
+    collector.subscription_rejection_sequence = 0
+    collector.subscription_rejection_log = []
+    collector.subscription_rows_by_req_id = {}
+    collector.subscription_lane_by_req_id = {}
+    collector.subscription_health_failed = False
+    collector.tws_connectivity_lost = False
+    collector.subscriptions_lost = False
+    collector.slow_cache = {}
+    collector.slow_contracts = []
+    collector.slow_chunks = []
+    collector.slow_scheduler = None
+    collector.slow_qualified_contracts = {}
+    collector.slow_unresolved_contracts = set()
+    collector.qualified_option_contracts = {}
+    collector.option_plan = None
+    collector.spy_plan_key = None
+    collector.spy_retry_at = 0.0
+    collector.rotation_index = 0
+    collector.rotation_retry_at = 0.0
+    old = VerifyRow(
+        label="option:SPXW:20260711:6900:C",
+        kind="option",
+        symbol="SPXW",
+        subscribed=True,
+        last=12.0,
+    )
+    collector.option_cache = {
+        old.label: (100.0, old),
+        "option:SPXW:20260711:6900:P": (100.0, replace_row(old, "option:SPXW:20260711:6900:P")),
+    }
+    monkeypatch.setattr(
+        stream_collector_module,
+        "discard_subscriptions",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        stream_collector_module,
+        "cancel_subscriptions",
+        lambda *_args, **_kwargs: True,
+    )
+
+    collector.teardown()
+
+    assert collector.option_cache == {}
+
+
+def replace_row(row: VerifyRow, label: str) -> VerifyRow:
+    return VerifyRow(
+        label=label,
+        kind=row.kind,
+        symbol=row.symbol,
+        subscribed=row.subscribed,
+        last=row.last,
+    )
+
+
+def test_first_flush_after_reconnect_excludes_pre_disconnect_option_rows(monkeypatch) -> None:
+    collector = _flush_test_collector()
+    old_label = "option:SPXW:20260711:6900:C"
+    collector.option_cache = {
+        old_label: (
+            0.0,
+            VerifyRow(
+                label=old_label,
+                kind="option",
+                symbol="SPXW",
+                subscribed=True,
+                market_data_type=1,
+                last=11.5,
+                ticker_time="2026-07-11T10:00:00+00:00",
+                stale=False,
+            ),
+        )
+    }
+    # Simulate teardown clearing the pre-disconnect cache before the next session.
+    collector.option_cache = {}
+    collector.base_subs = {
+        "index:SPX": (
+            object(),
+            VerifyRow(
+                label="index:SPX",
+                kind="index",
+                symbol="SPX",
+                subscribed=True,
+                market_data_type=1,
+                last=6901.0,
+                ticker_time="2026-07-11T14:00:00+00:00",
+            ),
+        )
+    }
+    snapshots: list[object] = []
+
+    def capture_snapshot(snapshot, _storage):
+        snapshots.append(snapshot)
+        return SimpleNamespace(best_quote_count=len(snapshot.quotes))
+
+    monkeypatch.setattr(stream_collector_module, "persist_provider_snapshot", capture_snapshot)
+    monkeypatch.setattr(
+        stream_collector_module,
+        "snapshot_rows",
+        lambda subscriptions, *_args, **_kwargs: [row for _, row in subscriptions.values()],
+    )
+
+    collector.flush()
+
+    assert snapshots
+    labels = {quote.provider_symbol for quote in snapshots[0].quotes}
+    assert old_label not in labels
+    assert "index:SPX" in labels
+
+
+def test_flush_skips_quote_persistence_when_socket_disconnected(monkeypatch) -> None:
+    collector = _flush_test_collector(connected=False)
+    state_calls: list[object] = []
+    snapshot_calls: list[object] = []
+
+    def capture_state(state, _storage):
+        state_calls.append(state)
+
+    def capture_snapshot(snapshot, _storage):
+        snapshot_calls.append(snapshot)
+        return SimpleNamespace(best_quote_count=0)
+
+    monkeypatch.setattr(stream_collector_module, "persist_state_only", capture_state)
+    monkeypatch.setattr(stream_collector_module, "persist_provider_snapshot", capture_snapshot)
+
+    event = collector.flush()
+
+    assert event["quotes"] == 0
+    assert len(state_calls) == 1
+    assert state_calls[0].status.value == "unavailable"
+    assert "disconnected" in (state_calls[0].reason or "").lower()
+    assert snapshot_calls == []
+
+
+def test_flush_marks_all_rows_stale_during_tws_connectivity_loss(monkeypatch) -> None:
+    collector = _flush_test_collector()
+    collector.errors = []
+    collector.farm_health = stream_collector_module.FarmHealthTracker()
+    collector.subscription_rows_by_req_id = {}
+    collector.subscription_lane_by_req_id = {}
+    collector.subscription_rejection_sequence = 0
+    collector.subscription_rejection_log = []
+    collector._on_error = StreamCollector._on_error.__get__(collector, StreamCollector)
+    collector._on_error(-1, 1100, "Connectivity between IB and TWS has been lost", None)
+    assert collector.tws_connectivity_lost is True
+
+    collector.base_subs = {
+        "index:SPX": (
+            object(),
+            VerifyRow(
+                label="index:SPX",
+                kind="index",
+                symbol="SPX",
+                subscribed=True,
+                market_data_type=1,
+                last=6900.0,
+                ticker_time="2026-07-11T14:00:00+00:00",
+                stale=False,
+            ),
+        )
+    }
+    snapshots: list[object] = []
+
+    def capture_snapshot(snapshot, _storage):
+        snapshots.append(snapshot)
+        return SimpleNamespace(best_quote_count=len(snapshot.quotes))
+
+    monkeypatch.setattr(stream_collector_module, "persist_provider_snapshot", capture_snapshot)
+    monkeypatch.setattr(
+        stream_collector_module,
+        "snapshot_rows",
+        lambda subscriptions, *_args, **_kwargs: [row for _, row in subscriptions.values()],
+    )
+
+    collector.flush()
+
+    assert snapshots
+    assert all(quote.quality.value == "stale" for quote in snapshots[0].quotes)
+
+
+def test_session_loop_reconnect_path_persists_unavailable(monkeypatch) -> None:
+    class FakeIb:
+        def sleep(self, _seconds: float) -> None:
+            return None
+
+        def isConnected(self) -> bool:  # noqa: N802
+            return False
+
+    class FakeCollector:
+        def __init__(self) -> None:
+            self.ib = FakeIb()
+            self.subscription_health_failed = False
+            self.tws_connectivity_lost = False
+
+        def flush(self) -> dict[str, object]:
+            return {"event": "flush", "quotes": 0}
+
+        def flush_position_shadow_if_due(self, *, now_monotonic: float):
+            del now_monotonic
+            return None
+
+        def drain_new_errors(self) -> list[object]:
+            return []
+
+        def market_data_allowed(self) -> bool:
+            return True
+
+    persisted: list[object] = []
+    monkeypatch.setattr(
+        stream_collector_module,
+        "persist_state_only",
+        lambda state, _storage: persisted.append(state),
+    )
+    monkeypatch.setattr(stream_collector_module, "log_event", lambda _event: None)
+    monkeypatch.setattr(
+        stream_collector_module,
+        "has_competing_session_error",
+        lambda _errors: False,
+    )
+
+    runtime = StreamRuntime(
+        collector=FakeCollector(),  # type: ignore[arg-type]
+        stream_settings=SimpleNamespace(
+            reconnect_min_seconds=1.0,
+            reconnect_max_seconds=2.0,
+            flush_interval_seconds=0.0,
+            auto_restart_gateway_on_farm_broken=False,
+        ),
+        storage_settings=object(),
+        runtime_policy=object(),
+    )
+
+    assert runtime.session_loop() is True
+    assert len(persisted) == 1
+    assert "disconnected" in (persisted[0].reason or "").lower()
+
+
+def test_quote_to_dict_round_trips_source_session() -> None:
+    from spx_spark.marketdata import InstrumentId, MarketDataQuality, Provider, Quote, quote_from_dict
+
+    now = datetime(2026, 7, 11, 14, 0, tzinfo=timezone.utc)
+    with_session = Quote(
+        instrument=InstrumentId.index("SPX"),
+        provider=Provider.IBKR,
+        received_at=now,
+        quality=MarketDataQuality.LIVE,
+        last=6900.0,
+        source_session="ibkr-stream:3",
+    )
+    without_session = Quote(
+        instrument=InstrumentId.index("SPX"),
+        provider=Provider.IBKR,
+        received_at=now,
+        quality=MarketDataQuality.LIVE,
+        last=6900.0,
+    )
+
+    round_trip = quote_from_dict(with_session.to_dict())
+    legacy = quote_from_dict(without_session.to_dict())
+
+    assert "source_session" in with_session.to_dict()
+    assert "source_session" not in without_session.to_dict()
+    assert round_trip.source_session == "ibkr-stream:3"
+    assert legacy.source_session is None
+
+
+def test_flush_stamps_connection_generation_on_quotes(monkeypatch) -> None:
+    collector = _flush_test_collector()
+    collector.connection_generation = 4
+    collector.base_subs = {
+        "index:SPX": (
+            object(),
+            VerifyRow(
+                label="index:SPX",
+                kind="index",
+                symbol="SPX",
+                subscribed=True,
+                market_data_type=1,
+                last=6900.0,
+                ticker_time="2026-07-11T14:00:00+00:00",
+            ),
+        )
+    }
+    snapshots: list[object] = []
+
+    def capture_snapshot(snapshot, _storage):
+        snapshots.append(snapshot)
+        return SimpleNamespace(best_quote_count=len(snapshot.quotes))
+
+    monkeypatch.setattr(stream_collector_module, "persist_provider_snapshot", capture_snapshot)
+    monkeypatch.setattr(
+        stream_collector_module,
+        "snapshot_rows",
+        lambda subscriptions, *_args, **_kwargs: [row for _, row in subscriptions.values()],
+    )
+
+    collector.flush()
+    assert snapshots
+    assert all(quote.source_session == "ibkr-stream:4" for quote in snapshots[0].quotes)
+
+    opens = 0
+
+    def fake_connect(*_args, **_kwargs):
+        nonlocal opens
+        opens += 1
+
+    collector.broker_settings = SimpleNamespace(account_read_enabled=False)
+    collector.ibkr_settings = SimpleNamespace(market_data_type=1)
+    collector.stream_settings = SimpleNamespace(
+        client_id=172,
+        freeze_quotes_on_connectivity_loss=True,
+    )
+    collector.ib = SimpleNamespace(
+        isConnected=lambda: True,
+        reqMarketDataType=lambda *_args: None,
+    )
+    monkeypatch.setattr(stream_collector_module, "connect_market_data_only", fake_connect)
+    monkeypatch.setattr(stream_collector_module, "log_event", lambda _event: None)
+    monkeypatch.setattr(
+        stream_collector_module,
+        "replace_client_id",
+        lambda settings, client_id: settings,
+    )
+    collector.market_data_allowed = lambda: True
+    before = collector.connection_generation
+    collector.open_session()
+    collector.open_session()
+    assert collector.connection_generation == before + 2
+    assert opens == 2
+
+
+def test_close_only_live_row_downgrades_to_unknown_quality() -> None:
+    from spx_spark.ibkr.adapter import quote_from_ibkr_row
+    from spx_spark.marketdata import MarketDataQuality
+
+    row = VerifyRow(
+        label="index:SPX",
+        kind="index",
+        symbol="SPX",
+        subscribed=True,
+        market_data_type=1,
+        close=6900.0,
+        last=None,
+        bid=None,
+        ask=None,
+        ticker_time=None,
+    )
+    quote = quote_from_ibkr_row(row, received_at=datetime(2026, 7, 11, 14, 0, tzinfo=timezone.utc))
+    assert quote.quality is MarketDataQuality.UNKNOWN
+
+
+def test_flush_reports_outage_while_farm_not_ready(monkeypatch) -> None:
+    collector = _flush_test_collector()
+    collector.farm_health.observe(2119, "Market data farm is connecting:usfarm.nj", now=1.0)
+    collector.base_subs = {
+        "index:SPX": (
+            object(),
+            VerifyRow(
+                label="index:SPX",
+                kind="index",
+                symbol="SPX",
+                subscribed=True,
+                market_data_type=1,
+                last=6900.0,
+                ticker_time="2026-07-11T14:00:00+00:00",
+            ),
+        )
+    }
+    snapshots: list[object] = []
+
+    def capture_snapshot(snapshot, _storage):
+        snapshots.append(snapshot)
+        return SimpleNamespace(best_quote_count=len(snapshot.quotes))
+
+    monkeypatch.setattr(stream_collector_module, "persist_provider_snapshot", capture_snapshot)
+    monkeypatch.setattr(
+        stream_collector_module,
+        "snapshot_rows",
+        lambda subscriptions, *_args, **_kwargs: [row for _, row in subscriptions.values()],
+    )
+    monkeypatch.setattr(stream_collector_module, "log_event", lambda _event: None)
+
+    event = collector.flush()
+
+    assert snapshots
+    state = snapshots[0].provider_state
+    assert state is not None
+    assert state.status.value == "degraded"
+    assert "farm" in (state.reason or "").lower()
+    assert event["provider_status"] == "degraded"

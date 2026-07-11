@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from spx_spark.config import NotificationSettings, StorageSettings, env_bool, load_dotenv
+from spx_spark.features.bar_builder import SpxBar
 from spx_spark.greek_reference import (
     load_zero_dte_greeks_snapshots,
     summarize_zero_dte_greeks_session,
@@ -41,6 +42,13 @@ from spx_spark.notifier.sinks import (
     run_openclaw_agent,
 )
 from spx_spark.runtime_config import runtime_value
+from spx_spark.steven_validation import (
+    FORWARD_METRICS_DISCLAIMER,
+    build_steven_episode_audit,
+    episode_paths,
+    load_bars_jsonl,
+    load_episode_events_jsonl,
+)
 
 
 MetricValue = bool | int | float | str | tuple[str, ...] | None
@@ -913,11 +921,16 @@ def build_review_payload(
         data_root=settings.data_root,
         trading_date=trading_date.isoformat(),
     )
+    paths = episode_paths(settings.data_root, trading_date.isoformat())
+    steven_events = load_episode_events_jsonl(paths["episodes"])
+    steven_bars = load_bars_jsonl(paths["bars_1m"])
     return build_review_payload_from_data(
         trading_date=trading_date,
         quotes=quotes,
         snapshots=snapshots,
         greek_snapshots=greek_snapshots,
+        steven_episode_events=steven_events or None,
+        steven_bars_1m=steven_bars or None,
         now=now,
         policy=policy,
         calendar=calendar,
@@ -930,6 +943,8 @@ def build_review_payload_from_data(
     quotes: tuple[Quote, ...],
     snapshots: tuple[IvSurfaceSnapshot, ...],
     greek_snapshots: tuple[dict[str, Any], ...] = (),
+    steven_episode_events: tuple[dict[str, Any], ...] | None = None,
+    steven_bars_1m: tuple[SpxBar, ...] | None = None,
     now: datetime | None = None,
     policy: ReviewCompletenessPolicy | None = None,
     calendar: MarketCalendar = DEFAULT_MARKET_CALENDAR,
@@ -1007,6 +1022,24 @@ def build_review_payload_from_data(
             "checks": [check.to_dict() for check in checks],
         },
     }
+    if steven_episode_events:
+        audit = build_steven_episode_audit(
+            steven_episode_events,
+            steven_bars_1m or (),
+            calendar=calendar,
+            computed_at=end,
+        )
+        if audit is not None:
+            payload["steven_episode"] = {
+                "episode_id": audit.get("episode_id"),
+                "trading_date": audit.get("trading_date"),
+                "pre_market_map": audit.get("pre_market_map"),
+                "triggers": audit.get("triggers"),
+                "revisions": audit.get("revisions"),
+                "final_state": audit.get("final_state"),
+                "setup_count": audit.get("setup_count"),
+                "forward_metrics": audit.get("forward_metrics"),
+            }
     payload["verdict"] = review_verdict(payload, checks=checks)
     return payload
 
@@ -1171,6 +1204,24 @@ def render_markdown(payload: dict[str, Any]) -> str:
         if not greeks.get("metrics"):
             lines.append("| No comparable same-universe pair | - | - | - |")
         lines.append("")
+
+    steven = payload.get("steven_episode")
+    if isinstance(steven, dict):
+        metrics = steven.get("forward_metrics") if isinstance(steven.get("forward_metrics"), dict) else {}
+        lines.extend(
+            [
+                "## Steven Episode (observe_only audit)",
+                "",
+                f"- Episode: `{steven.get('episode_id')}`; setups: {steven.get('setup_count')}; "
+                f"final_state: `{steven.get('final_state') or '-'}`.",
+                f"- Forward quality: `{metrics.get('quality')}`; direction hypothesis: "
+                f"`{metrics.get('direction_hypothesis')}`; reference: {fmt(metrics.get('reference_price'))}.",
+                f"- MFE/MAE (bps): {fmt_bps(metrics.get('mfe_bps'))} / {fmt_bps(metrics.get('mae_bps'))}.",
+                f"- {FORWARD_METRICS_DISCLAIMER}",
+                "",
+            ]
+        )
+
     lines.extend(
         [
             "## Hermes Attachment Note",

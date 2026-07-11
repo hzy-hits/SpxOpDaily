@@ -204,3 +204,30 @@ def test_provider_health_tolerates_scheduler_jitter_but_rejects_delayed_feed() -
     )
 
     assert delayed.healthy is False
+
+
+def test_provider_health_rejects_close_only_anchor() -> None:
+    now = datetime(2026, 7, 13, 14, 0, tzinfo=UTC)
+    close_only_spx = Quote(
+        instrument=InstrumentId.index("SPX"),
+        provider=Provider.IBKR,
+        provider_symbol="index:SPX",
+        received_at=now,
+        quality=MarketDataQuality.UNKNOWN,
+        close=6900.0,
+        market_data_type=1,
+        last_update_at=now,
+        quote_time=None,
+    )
+    es = quote(InstrumentId.future("ES"), Provider.IBKR, now)
+
+    health = provider_health(
+        latest(now, close_only_spx, es),
+        Provider.IBKR,
+        required_instruments=("index:SPX", "future:ES"),
+        provider_state_max_age_seconds=45.0,
+        quote_max_age_seconds=30.0,
+    )
+
+    assert health.healthy is False
+    assert "index:SPX" in health.reason

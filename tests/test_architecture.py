@@ -21,6 +21,7 @@ LAYERS = {
     "polymarket": 2,
     "mock_collector": 2,
     "options_map": 3,
+    "features": 3,
     "iv_surface": 3,
     "market_context": 3,
     "position_events": 3,

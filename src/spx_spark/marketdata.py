@@ -261,6 +261,7 @@ class Quote:
     greeks: OptionGreeks | None = None
     sampling_mode: str | None = None
     sampling_group: int | None = None
+    source_session: str | None = None
     error: str | None = None
     raw: Mapping[str, Any] | None = None
 
@@ -346,6 +347,8 @@ class Quote:
             "effective_price": self.effective_price,
             "error": self.error,
         }
+        if self.source_session is not None:
+            payload["source_session"] = self.source_session
         if include_raw:
             payload["raw"] = self.raw
         return payload
@@ -593,6 +596,11 @@ def quote_from_dict(payload: Mapping[str, Any]) -> Quote:
         sampling_group=int(payload["sampling_group"])
         if payload.get("sampling_group") is not None
         else None,
+        source_session=(
+            str(payload["source_session"])
+            if payload.get("source_session") is not None
+            else None
+        ),
         error=payload.get("error"),
         raw=payload.get("raw") if isinstance(payload.get("raw"), Mapping) else None,
     )

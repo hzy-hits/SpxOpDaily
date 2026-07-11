@@ -41,6 +41,14 @@ def test_schwab_instrument_table_owns_index_and_trading_class_aliases() -> None:
     assert option_chain_symbol_for_schwab("XSP") == "$XSP"
     assert canonical_underlier_for_schwab("SPXW") == "SPX"
     assert schwab_option_chain_underliers() == ["SPX", "XSP", "SPY", "QQQ", "IWM"]
+    by_symbol = {str(row["canonical_symbol"]): row for row in rows}
+    assert by_symbol["SPX"]["chain_interval_seconds"] == 5
+    assert by_symbol["SPX"]["option_chain_strike_count"] == 40
+    assert by_symbol["SPY"]["chain_interval_seconds"] == 15
+    assert "option_chain_strike_count" not in by_symbol["SPY"]
+    assert runtime_value("ibkr_stream.max_option_lines") == 68
+    assert runtime_value("sampling.hot_window_points") == 55
+    assert runtime_value("schwab.collection.request_budget_warning_per_minute") == 100
 
 
 def test_runtime_provider_priority_makes_schwab_primary_with_ibkr_fallback() -> None:

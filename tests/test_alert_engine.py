@@ -1096,3 +1096,54 @@ def test_effective_move_threshold_quiet_window_high_vol_scales_up() -> None:
     threshold, source = effective_move_threshold_bps("low", 0.03)
     assert threshold == pytest.approx(105.0)
     assert source == "em_normalized"
+
+
+def test_preemption_session_alert_sequence(tmp_path, monkeypatch) -> None:
+    state_path = tmp_path / "system-event-state.json"
+    monkeypatch.setenv("ALERT_SYSTEM_EVENT_STATE_PATH", str(state_path))
+    monkeypatch.setenv("IBKR_EXECUTION_MODE", "live")
+    now = datetime(2026, 7, 11, 11, 0, tzinfo=BJ_TZ)
+
+    unavailable = ProviderState(
+        provider=Provider.IBKR,
+        status=ProviderStatus.UNAVAILABLE,
+        checked_at=now,
+        reason="IBKR disconnected mid-session",
+        connected=False,
+        authenticated=None,
+        priority=0,
+    )
+    degraded = ProviderState(
+        provider=Provider.IBKR,
+        status=ProviderStatus.DEGRADED,
+        checked_at=now + timedelta(minutes=1),
+        reason="connected; awaiting first flush",
+        connected=True,
+        authenticated=True,
+        priority=0,
+    )
+    available = ProviderState(
+        provider=Provider.IBKR,
+        status=ProviderStatus.AVAILABLE,
+        checked_at=now + timedelta(minutes=2),
+        reason=None,
+        connected=True,
+        authenticated=True,
+        priority=0,
+    )
+
+    interrupted = system_event_alerts(make_state(now=now, provider_states=(unavailable,)))
+    transitional = system_event_alerts(
+        make_state(now=now + timedelta(minutes=1), provider_states=(degraded,))
+    )
+    restored = system_event_alerts(
+        make_state(now=now + timedelta(minutes=2), provider_states=(available,))
+    )
+    repeated = system_event_alerts(
+        make_state(now=now + timedelta(minutes=3), provider_states=(available,))
+    )
+
+    assert [alert.kind for alert in interrupted] == ["ibkr_session_interrupted"]
+    assert transitional == []
+    assert [alert.kind for alert in restored] == ["ibkr_session_restored"]
+    assert repeated == []

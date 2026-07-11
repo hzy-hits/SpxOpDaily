@@ -6,6 +6,7 @@ import re
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from functools import lru_cache
+from typing import Any
 from zoneinfo import ZoneInfo
 
 from spx_spark.runtime_config import runtime_instrument_rows, runtime_value
@@ -22,6 +23,17 @@ class SchwabInstrumentConfig:
     collect_quote: bool
     collect_option_chain: bool
     description: str
+    chain_interval_seconds: int | None = None
+    option_chain_strike_count: int | None = None
+
+
+def _optional_positive_int(raw: Any, *, field_name: str) -> int | None:
+    if raw is None:
+        return None
+    value = int(raw)
+    if value <= 0:
+        raise ValueError(f"{field_name} must be positive when set")
+    return value
 
 
 @lru_cache(maxsize=1)
@@ -48,6 +60,14 @@ def schwab_instruments() -> tuple[SchwabInstrumentConfig, ...]:
                 collect_quote=bool(row.get("collect_quote", False)),
                 collect_option_chain=bool(row.get("collect_option_chain", False)),
                 description=str(row["description"]).strip(),
+                chain_interval_seconds=_optional_positive_int(
+                    row.get("chain_interval_seconds"),
+                    field_name="chain_interval_seconds",
+                ),
+                option_chain_strike_count=_optional_positive_int(
+                    row.get("option_chain_strike_count"),
+                    field_name="option_chain_strike_count",
+                ),
             )
         )
     return tuple(instruments)
@@ -211,6 +231,24 @@ def schwab_quote_symbols() -> list[str]:
 
 def schwab_option_chain_underliers() -> list[str]:
     return [item.canonical_symbol for item in schwab_instruments() if item.collect_option_chain]
+
+
+def chain_interval_seconds_for(symbol: str) -> int:
+    """Per-instrument chain cadence; falls back to the service-loop collection tick."""
+
+    instrument = find_schwab_instrument(symbol)
+    if instrument is not None and instrument.chain_interval_seconds is not None:
+        return instrument.chain_interval_seconds
+    return int(runtime_value("schwab.collection.interval_seconds"))
+
+
+def option_chain_strike_count_for(symbol: str, default_strike_count: int) -> int:
+    """Per-instrument strikeCount override; falls back to the global Schwab default."""
+
+    instrument = find_schwab_instrument(symbol)
+    if instrument is not None and instrument.option_chain_strike_count is not None:
+        return instrument.option_chain_strike_count
+    return int(default_strike_count)
 
 
 def schwab_symbols_by_type(instrument_type: str) -> list[str]:

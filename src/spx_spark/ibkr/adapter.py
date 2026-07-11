@@ -93,11 +93,28 @@ def instrument_from_ibkr_label(
     )
 
 
+def is_close_only_live_row(row: Any, quote_time: datetime | None) -> bool:
+    """Detect farm half-recovery rows that only carry a prior close under mdt=1."""
+
+    try:
+        market_data_type = int(get_value(row, "market_data_type"))
+    except (TypeError, ValueError):
+        return False
+    if market_data_type != 1 or quote_time is not None:
+        return False
+    bid = clean_float(get_value(row, "bid"))
+    ask = clean_float(get_value(row, "ask"))
+    last = clean_float(get_value(row, "last"))
+    close = clean_float(get_value(row, "close"))
+    return close is not None and bid is None and ask is None and last is None
+
+
 def quote_from_ibkr_row(
     row: Any,
     *,
     received_at: datetime | None = None,
     stale_after_seconds: float = 15.0,
+    source_session: str | None = None,
 ) -> Quote:
     received_at = as_utc(received_at or datetime.now(tz=timezone.utc))
     label = str(get_value(row, "label", "") or "")
@@ -122,7 +139,9 @@ def quote_from_ibkr_row(
         stale_after_seconds=stale_after_seconds,
         error=str(error) if error else None,
     )
-    if row_stale is True and quality == MarketDataQuality.LIVE:
+    if is_close_only_live_row(row, quote_time):
+        quality = MarketDataQuality.UNKNOWN
+    elif row_stale is True and quality == MarketDataQuality.LIVE:
         quality = MarketDataQuality.STALE
 
     greeks = None
@@ -161,6 +180,7 @@ def quote_from_ibkr_row(
         source_latency_ms=elapsed_ms(quote_time, received_at),
         market_data_type=market_data_type,
         greeks=greeks,
+        source_session=source_session,
         error=str(error) if error else None,
     )
 
@@ -170,12 +190,14 @@ def quotes_from_rows(
     *,
     received_at: datetime,
     stale_after_seconds: float,
+    source_session: str | None = None,
 ) -> tuple[Quote, ...]:
     return tuple(
         quote_from_ibkr_row(
             row,
             received_at=received_at,
             stale_after_seconds=stale_after_seconds,
+            source_session=source_session,
         )
         for row in rows
     )
@@ -217,11 +239,13 @@ def snapshot_from_rows(
     error_count: int = 0,
     reason: str | None = None,
     replace_provider_quotes: bool = False,
+    source_session: str | None = None,
 ) -> ProviderSnapshot:
     quotes = quotes_from_rows(
         rows,
         received_at=received_at,
         stale_after_seconds=stale_after_seconds,
+        source_session=source_session,
     )
     state = provider_state_from_quotes(
         quotes,

@@ -1,0 +1,156 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "steven_guidance_contract",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "source",
+    "created_at",
+    "as_of",
+    "status",
+    "machine_state",
+    "regime",
+    "regime_breadth",
+    "map",
+    "trigger",
+    "invalidation",
+    "expression_family",
+    "confidence",
+    "flow_confirmation",
+    "data_quality",
+    "warnings"
+  ],
+  "properties": {
+    "schema_version": { "const": "steven_guidance_contract.v0.1" },
+    "source": { "const": "steven_spx_options_framework_house_proxy" },
+    "created_at": { "type": "string", "format": "date-time" },
+    "as_of": { "type": "string", "format": "date-time" },
+    "status": {
+      "enum": ["observe_only", "watch", "confirmed_for_review", "invalid"]
+    },
+    "machine_state": {
+      "enum": [
+        "DATA_INVALID",
+        "OBSERVE_ONLY",
+        "REGIME_UNKNOWN",
+        "BULLISH_DIP_WATCH",
+        "BEARISH_BREAK_WATCH",
+        "RANGE_PIN_WATCH",
+        "EVENT_WAIT",
+        "SETUP_CONFIRMED",
+        "EXIT_REVIEW",
+        "LOCKOUT_OR_REMAP"
+      ]
+    },
+    "regime": { "enum": ["bullish", "bearish", "mixed", "unknown"] },
+    "regime_breadth": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "expiries_total",
+        "expiries_bullish",
+        "expiries_bearish",
+        "agreement_ratio",
+        "weighting"
+      ],
+      "properties": {
+        "expiries_total": { "type": "integer", "minimum": 0 },
+        "expiries_bullish": { "type": "integer", "minimum": 0 },
+        "expiries_bearish": { "type": "integer", "minimum": 0 },
+        "agreement_ratio": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
+        "weighting": { "enum": ["oi_weighted", "volume_weighted"] }
+      }
+    },
+    "map": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["support", "resistance", "pin", "acceleration"],
+      "properties": {
+        "support": { "type": "array", "items": { "type": "number" }, "maxItems": 4 },
+        "resistance": { "type": "array", "items": { "type": "number" }, "maxItems": 4 },
+        "pin": { "type": ["number", "null"] },
+        "acceleration": { "type": "array", "items": { "type": "number" }, "maxItems": 2 }
+      }
+    },
+    "trigger": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "level",
+        "direction",
+        "confirmed",
+        "confirmed_at",
+        "source_event_id"
+      ],
+      "properties": {
+        "kind": {
+          "enum": ["none", "dip_hold", "reclaim", "break_hold", "range_reject"]
+        },
+        "level": { "type": ["number", "null"] },
+        "direction": { "enum": ["up", "down", "none"] },
+        "confirmed": { "type": "boolean" },
+        "confirmed_at": { "type": ["string", "null"], "format": "date-time" },
+        "source_event_id": { "type": ["string", "null"] }
+      }
+    },
+    "invalidation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["level", "side", "reason"],
+      "properties": {
+        "level": { "type": ["number", "null"] },
+        "side": { "enum": ["below", "above", "none"] },
+        "reason": { "type": "string" }
+      }
+    },
+    "expression_family": {
+      "enum": [
+        "none",
+        "bullish_defined_risk",
+        "bearish_defined_risk",
+        "range_defined_risk"
+      ]
+    },
+    "confidence": { "enum": ["low", "medium", "high"] },
+    "flow_confirmation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "sources", "quality"],
+      "properties": {
+        "status": { "enum": ["none", "weak", "aligned", "opposed"] },
+        "sources": {
+          "type": "array",
+          "items": { "enum": ["es_volume", "hl_volume", "option_volume_delta"] }
+        },
+        "quality": { "const": "weak_proxy" }
+      }
+    },
+    "data_quality": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "anchor_ok",
+        "exposure_quality",
+        "oi_quality",
+        "iv_source",
+        "snapshot_age_seconds"
+      ],
+      "properties": {
+        "anchor_ok": { "type": "boolean" },
+        "exposure_quality": {
+          "enum": ["ok", "degraded", "no_open_interest", "unavailable"]
+        },
+        "oi_quality": {
+          "enum": ["ibkr_ok", "schwab_unverified", "stale_or_zero", "missing"]
+        },
+        "iv_source": {
+          "enum": ["vendor_ibkr", "vendor_schwab", "mixed", "missing"]
+        },
+        "snapshot_age_seconds": { "type": ["number", "null"] }
+      }
+    },
+    "warnings": { "type": "array", "items": { "type": "string" } }
+  }
+}

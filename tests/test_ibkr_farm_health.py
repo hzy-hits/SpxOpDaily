@@ -100,4 +100,18 @@ def test_mark_probe_failed_starts_broken_timer():
     )
     event = tracker.mark_probe_failed(probe, now=t0)
     assert event.status is FarmLinkStatus.BROKEN
-    assert tracker.should_restart_gateway(now=t0 + 11)
+    assert tracker.should_restart_gateway(now=t0 + 10)
+
+
+def test_farm_tracker_market_data_ready_transitions() -> None:
+    tracker = FarmHealthTracker(broken_restart_seconds=60.0)
+    assert tracker.market_data_ready() is True
+
+    tracker.observe(2119, "Market data farm is connecting:usfarm.nj", now=1000.0)
+    assert tracker.market_data_ready() is False
+
+    tracker.observe(2104, "Market data farm connection is OK:usfarm", now=1001.0)
+    assert tracker.market_data_ready() is True
+
+    tracker.observe(1100, "Connectivity between IB and TWS has been lost", now=1002.0)
+    assert tracker.market_data_ready() is False

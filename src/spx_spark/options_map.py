@@ -78,39 +78,6 @@ class OptionCoverage:
 
 
 @dataclass(frozen=True)
-class StrikeGex:
-    strike: float
-    call_gex: float
-    put_gex: float
-    net_gex: float
-    abs_gex: float
-    call_open_interest: float
-    put_open_interest: float
-    call_volume: float = 0.0
-    put_volume: float = 0.0
-
-
-@dataclass(frozen=True)
-class WallLevel:
-    """One rung of the wall ladder: a strike with concentrated dealer gamma.
-
-    Side-constrained (put walls at/below spot, call walls at/above spot) and
-    weighted by OI-based GEX so the ladder reflects positioning instead of
-    chasing wherever intraday volume happens to print.
-    """
-
-    strike: float
-    side: str  # "call" | "put"
-    gex: float
-    open_interest: float
-    volume: float
-    distance_points: float
-
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
-
-
-@dataclass(frozen=True)
 class LevelProbability:
     level_name: str
     level: float
@@ -478,170 +445,6 @@ def build_coverage(quotes: list[Quote], *, as_of: datetime) -> OptionCoverage:
         ),
         avg_spread_bps=sum(spreads) / len(spreads) if spreads else None,
     )
-
-
-def interpolate_zero(left: StrikeGex, right: StrikeGex) -> float | None:
-    denom = right.net_gex - left.net_gex
-    if abs(denom) <= 1e-12:
-        return None
-    weight = -left.net_gex / denom
-    if weight < 0 or weight > 1:
-        return None
-    return left.strike + weight * (right.strike - left.strike)
-
-
-def build_gex_by_strike(
-    pairs: dict[float, dict[OptionRight, Quote]],
-    *,
-    underlier: float,
-    intraday: bool = False,
-) -> list[StrikeGex]:
-    rows: list[StrikeGex] = []
-    for strike, pair in sorted(pairs.items()):
-        call = pair.get(OptionRight.CALL)
-        put = pair.get(OptionRight.PUT)
-        call_gex = (
-            signed_gex(call, sign=1.0, underlier=underlier, intraday=intraday)
-            if call is not None
-            else None
-        )
-        put_gex = (
-            signed_gex(put, sign=-1.0, underlier=underlier, intraday=intraday)
-            if put is not None
-            else None
-        )
-        if call_gex is None and put_gex is None:
-            continue
-        call_value = call_gex or 0.0
-        put_value = put_gex or 0.0
-        rows.append(
-            StrikeGex(
-                strike=strike,
-                call_gex=call_value,
-                put_gex=put_value,
-                net_gex=call_value + put_value,
-                abs_gex=abs(call_value) + abs(put_value),
-                call_open_interest=(finite_float(call.open_interest) or 0.0) if call else 0.0,
-                put_open_interest=(finite_float(put.open_interest) or 0.0) if put else 0.0,
-                call_volume=(finite_float(call.volume) or 0.0) if call else 0.0,
-                put_volume=(finite_float(put.volume) or 0.0) if put else 0.0,
-            )
-        )
-    return rows
-
-
-WALL_LADDER_DEPTH = 4
-
-
-def build_wall_ladder(
-    gex_rows: list[StrikeGex],
-    *,
-    underlier: float,
-    strike_step: float,
-    depth: int = WALL_LADDER_DEPTH,
-) -> tuple[tuple[WallLevel, ...], tuple[WallLevel, ...]]:
-    """Top-N call walls at/above spot and put walls at/below spot by |GEX|.
-
-    Side constraint matters: without it a broken put wall keeps being quoted
-    as "support" from above, and heavy 2-way ATM volume gets mislabeled as a
-    call wall below spot. Half a strike step of tolerance keeps the ATM strike
-    eligible on both sides.
-    """
-    tolerance = strike_step / 2.0
-    call_rows = [
-        row for row in gex_rows if row.call_gex > 0 and row.strike >= underlier - tolerance
-    ]
-    put_rows = [row for row in gex_rows if row.put_gex < 0 and row.strike <= underlier + tolerance]
-    call_rows.sort(key=lambda row: -row.call_gex)
-    put_rows.sort(key=lambda row: row.put_gex)
-    call_walls = tuple(
-        WallLevel(
-            strike=row.strike,
-            side="call",
-            gex=row.call_gex,
-            open_interest=row.call_open_interest,
-            volume=row.call_volume,
-            distance_points=row.strike - underlier,
-        )
-        for row in call_rows[:depth]
-    )
-    put_walls = tuple(
-        WallLevel(
-            strike=row.strike,
-            side="put",
-            gex=row.put_gex,
-            open_interest=row.put_open_interest,
-            volume=row.put_volume,
-            distance_points=row.strike - underlier,
-        )
-        for row in put_rows[:depth]
-    )
-    return call_walls, put_walls
-
-
-def gex_weight(quote: Quote, *, intraday: bool) -> float | None:
-    """非 0DTE: OI(现行为)。0DTE(intraday=True): OI + volume。
-
-    OI/volume 缺失按 0;两者都缺或 <=0 返回 None。volume 近似当日新开仓
-    (也含平仓,是有意的粗近似)。
-    """
-    open_interest = finite_float(quote.open_interest) or 0.0
-    volume = finite_float(quote.volume) or 0.0
-    if intraday:
-        weight = open_interest + volume
-    else:
-        weight = open_interest
-    if weight <= 0:
-        return None
-    return weight
-
-
-def signed_gex(
-    quote: Quote, *, sign: float, underlier: float, intraday: bool = False
-) -> float | None:
-    gamma = option_gamma_structural(quote)
-    weight = gex_weight(quote, intraday=intraday)
-    if gamma is None or weight is None:
-        return None
-    return sign * gamma * weight * 100.0 * underlier * underlier * 0.01
-
-
-def nearest_zero(gex_rows: list[StrikeGex], underlier: float) -> float | None:
-    if not gex_rows:
-        return None
-    zeros: list[float] = []
-    for left, right in zip(gex_rows, gex_rows[1:]):
-        if abs(left.net_gex) <= 1e-12:
-            zeros.append(left.strike)
-        elif left.net_gex * right.net_gex < 0:
-            zero = interpolate_zero(left, right)
-            if zero is not None:
-                zeros.append(zero)
-    if abs(gex_rows[-1].net_gex) <= 1e-12:
-        zeros.append(gex_rows[-1].strike)
-    if not zeros:
-        return None
-    return min(zeros, key=lambda value: abs(value - underlier))
-
-
-def zero_gamma_bracket(gex_rows: list[StrikeGex], underlier: float) -> tuple[float, float] | None:
-    if not gex_rows:
-        return None
-    brackets: list[tuple[float, float, float]] = []
-    for left, right in zip(gex_rows, gex_rows[1:]):
-        if abs(left.net_gex) <= 1e-12:
-            brackets.append((left.strike, left.strike, abs(left.strike - underlier)))
-        elif left.net_gex * right.net_gex < 0:
-            zero = interpolate_zero(left, right)
-            if zero is not None:
-                brackets.append((left.strike, right.strike, abs(zero - underlier)))
-    if abs(gex_rows[-1].net_gex) <= 1e-12:
-        last = gex_rows[-1].strike
-        brackets.append((last, last, abs(last - underlier)))
-    if not brackets:
-        return None
-    left_strike, right_strike, _distance = min(brackets, key=lambda item: item[2])
-    return (left_strike, right_strike)
 
 
 def bs_gamma(spot: float, strike: float, iv: float, t_years: float) -> float | None:
@@ -1437,6 +1240,19 @@ def run(argv: list[str] | None = None) -> int:
 
 def main() -> None:
     raise SystemExit(run())
+
+
+from spx_spark.features.exposure_map import (  # noqa: E402, F401
+    StrikeGex,
+    WallLevel,
+    build_gex_by_strike,
+    build_wall_ladder,
+    gex_weight,
+    interpolate_zero,
+    nearest_zero,
+    signed_gex,
+    zero_gamma_bracket,
+)
 
 
 if __name__ == "__main__":

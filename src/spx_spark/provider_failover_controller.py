@@ -102,6 +102,10 @@ class ProviderFailoverSettings:
                     "PROVIDER_FAILOVER_IBKR_UNHEALTHY_OBSERVATIONS",
                     int(runtime_value("provider_failover.ibkr_unhealthy_observations")),
                 ),
+                ibkr_recovery_observations=env_int(
+                    "PROVIDER_FAILOVER_IBKR_RECOVERY_OBSERVATIONS",
+                    int(runtime_value("provider_failover.ibkr_recovery_observations")),
+                ),
             ),
         )
 

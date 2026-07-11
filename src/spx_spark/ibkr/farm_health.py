@@ -275,6 +275,18 @@ class FarmHealthTracker:
             return False
         return duration >= self.broken_restart_seconds
 
+    def market_data_ready(self) -> bool:
+        """True when no tracked farm is broken/connecting; cold start is ready."""
+
+        if not self.farms and self.status is FarmLinkStatus.UNKNOWN:
+            return True
+        if self.status in {FarmLinkStatus.BROKEN, FarmLinkStatus.CONNECTING}:
+            return False
+        return not any(
+            status in {FarmLinkStatus.BROKEN, FarmLinkStatus.CONNECTING}
+            for status in self.farms.values()
+        )
+
     def reset(self) -> None:
         self.status = FarmLinkStatus.UNKNOWN
         self.broken_since = None

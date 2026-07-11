@@ -61,6 +61,10 @@ from spx_spark.options_map import build_options_map
 from spx_spark.state_io import atomic_write_json_secure, exclusive_state_lock
 from spx_spark.runtime_config import runtime_value
 from spx_spark.storage import LatestState, LatestStateStore, configured_quote_use_decision
+from spx_spark.strategy.steven import (
+    annotate_alerts_with_steven_context,
+    load_steven_state_for_alerts,
+)
 
 
 STATE_SCHEMA_VERSION = 1
@@ -1103,6 +1107,19 @@ def run(argv: list[str] | None = None) -> int:
                         delivered=False,
                     )
                 atomic_write_json_secure(state_path, monitor_state)
+
+            if alerts and bool(runtime_value("steven.alert_context_enabled")):
+                try:
+                    steven_state = load_steven_state_for_alerts(
+                        StorageSettings.from_env().data_root
+                    )
+                    alerts = annotate_alerts_with_steven_context(
+                        alerts,
+                        steven_state,
+                        as_of=sample.at,
+                    )
+                except Exception:  # noqa: BLE001 — never block shock alerts
+                    pass
 
             prepared_research = None
             research_result = None

@@ -1,0 +1,166 @@
+{
+  "as_of": "2026-07-13T14:00:00+00:00",
+  "expiries": [
+    {
+      "abs_gex": 984145862.0426304,
+      "atm_call_mid": 10.0,
+      "atm_iv": 0.2,
+      "atm_put_mid": 11.0,
+      "atm_straddle_mid": 21.0,
+      "atm_strike": 7500.0,
+      "call_skew_25d": 0.0,
+      "call_skew_ratio": 1.0,
+      "call_wall": 7500.0,
+      "call_walls": [
+        {
+          "distance_points": 0.0,
+          "gex": 149595875.16978082,
+          "open_interest": 1000.0,
+          "side": "call",
+          "strike": 7500.0,
+          "volume": 500.0
+        },
+        {
+          "distance_points": 50.0,
+          "gex": 85220899.70314321,
+          "open_interest": 600.0,
+          "side": "call",
+          "strike": 7550.0,
+          "volume": 1500.0
+        }
+      ],
+      "call_wing_iv": 0.2,
+      "coverage": {
+        "avg_spread_bps": 224.62121212121133,
+        "delayed": 0,
+        "live": 4,
+        "max_age_ms": 0.0,
+        "stale": 0,
+        "total": 4,
+        "unknown_age": 0,
+        "with_bid_ask": 4,
+        "with_delta": 4,
+        "with_gamma": 4,
+        "with_iv": 4,
+        "with_mid": 4,
+        "with_open_interest": 4,
+        "with_theta": 4,
+        "with_vega": 4
+      },
+      "expected_move_pct": 0.0023799999999999997,
+      "expected_move_points": 17.849999999999998,
+      "expiry": "20260713",
+      "gamma_flip_zone": [
+        7510.0,
+        7515.0
+      ],
+      "gamma_state": "zero_gamma_transition",
+      "gex_quality": "open_interest_gex",
+      "gex_weighting": "oi_plus_volume",
+      "level_probabilities": [
+        {
+          "level": 7500.0,
+          "level_name": "put_wall",
+          "prob_close_beyond": 0.5039893563146316,
+          "prob_touch": 1.0,
+          "source_delta": 0.5039893563146316,
+          "source_strike": 7500.0
+        },
+        {
+          "level": 7514.756328151529,
+          "level_name": "zero_gamma",
+          "prob_close_beyond": 0.5039893563146316,
+          "prob_touch": 1.0,
+          "source_delta": 0.5039893563146316,
+          "source_strike": 7500.0
+        },
+        {
+          "level": 7500.0,
+          "level_name": "call_wall",
+          "prob_close_beyond": 0.5039893563146316,
+          "prob_touch": 1.0,
+          "source_delta": 0.5039893563146316,
+          "source_strike": 7500.0
+        }
+      ],
+      "nearest_wall": 7500.0,
+      "nearest_wall_distance_points": 0.0,
+      "net_gamma_ratio": 0.06217377296259384,
+      "net_gex": 61188061.3887147,
+      "option_count": 4,
+      "put_skew_25d": null,
+      "put_skew_ratio": null,
+      "put_wall": 7500.0,
+      "put_walls": [
+        {
+          "distance_points": 0.0,
+          "gex": -119676700.13582467,
+          "open_interest": 800.0,
+          "side": "put",
+          "strike": 7500.0,
+          "volume": 2000.0
+        }
+      ],
+      "put_wing_iv": null,
+      "rn_density": {
+        "clipped_mass_fraction": null,
+        "median": null,
+        "p10": null,
+        "p25": null,
+        "p75": null,
+        "p90": null,
+        "prob_above_call_wall": null,
+        "prob_below_put_wall": null,
+        "quality": "insufficient_strikes",
+        "strike_range": null
+      },
+      "skew_method": "moneyness_fallback",
+      "strike_count": 2,
+      "top_gex_strikes": [
+        {
+          "abs_gex": 643262263.2300575,
+          "call_gex": 224393812.75467125,
+          "call_open_interest": 1000.0,
+          "call_volume": 500.0,
+          "net_gex": -194474637.72071496,
+          "put_gex": -418868450.4753862,
+          "put_open_interest": 800.0,
+          "put_volume": 2000.0,
+          "strike": 7500.0
+        },
+        {
+          "abs_gex": 340883598.8125729,
+          "call_gex": 298273148.9610013,
+          "call_open_interest": 600.0,
+          "call_volume": 1500.0,
+          "net_gex": 255662699.10942966,
+          "put_gex": -42610449.851571605,
+          "put_open_interest": 200.0,
+          "put_volume": 100.0,
+          "strike": 7550.0
+        }
+      ],
+      "wall_method": "oi_gex",
+      "warnings": [],
+      "zero_gamma": 7514.756328151529,
+      "zero_gamma_distance_points": 14.756328151528578,
+      "zero_gamma_method": "spot_scan"
+    }
+  ],
+  "spy_confluence": {
+    "call_wall_confluent": null,
+    "put_wall_confluent": null,
+    "quality": "missing_spy_chain",
+    "spy_call_wall_spx": null,
+    "spy_front_expiry": null,
+    "spy_option_count": 0,
+    "spy_put_wall_spx": null,
+    "spy_underlier": null,
+    "tolerance_points": 10.0
+  },
+  "underlier": {
+    "price": 7500.0,
+    "source": "index:SPX"
+  },
+  "warnings": []
+}

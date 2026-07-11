@@ -78,6 +78,8 @@ class ServiceLoopSettings:
     greek_shadow_interval_seconds: int = int(
         runtime_value("service_loop.greek_shadow_interval_seconds")
     )
+    steven_enabled: bool = bool(runtime_value("steven.enabled"))
+    steven_interval_seconds: int = int(runtime_value("service_loop.alert_interval_seconds"))
 
     @classmethod
     def from_env(cls) -> "ServiceLoopSettings":
@@ -182,6 +184,14 @@ class ServiceLoopSettings:
                 "SPX_SERVICE_GREEK_SHADOW_INTERVAL_SECONDS",
                 int(runtime_value("service_loop.greek_shadow_interval_seconds")),
             ),
+            steven_enabled=env_bool(
+                "SPX_SERVICE_ENABLE_STEVEN",
+                bool(runtime_value("steven.enabled")),
+            ),
+            steven_interval_seconds=env_int(
+                "SPX_SERVICE_STEVEN_INTERVAL_SECONDS",
+                int(runtime_value("service_loop.alert_interval_seconds")),
+            ),
         )
 
 
@@ -252,6 +262,12 @@ def run_intraday_shock() -> int:
 
 def run_greek_shadow() -> int:
     return greek_shadow.run(["--json"])
+
+
+def run_steven() -> int:
+    from spx_spark.strategy import steven as steven_strategy
+
+    return steven_strategy.run(["--json"])
 
 
 def run_ibkr_positions() -> int:
@@ -345,6 +361,16 @@ def build_tasks(settings: ServiceLoopSettings) -> list[ServiceTask]:
                 settings.alert_interval_seconds,
                 run_alert_engine,
                 command=(console_script("spx-spark-alert-engine"), "--json"),
+            )
+        )
+    # Steven observe-only guidance (default disabled via steven.enabled=false).
+    if settings.steven_enabled:
+        tasks.append(
+            ServiceTask(
+                "steven",
+                settings.steven_interval_seconds,
+                run_steven,
+                command=(console_script("spx-spark-steven"), "--json"),
             )
         )
     # Shadow telemetry is intentionally last so the 4-worker scheduler never

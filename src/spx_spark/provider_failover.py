@@ -54,6 +54,7 @@ class FailoverState:
     schwab_unhealthy_streak: int = 0
     schwab_recovery_streak: int = 0
     ibkr_unhealthy_streak: int = 0
+    ibkr_recovery_streak: int = 0
     last_schwab_reason: str | None = None
     last_ibkr_reason: str | None = None
     transition: FailoverTransition | None = None
@@ -90,6 +91,7 @@ class FailoverState:
             schwab_unhealthy_streak=int(raw.get("schwab_unhealthy_streak") or 0),
             schwab_recovery_streak=int(raw.get("schwab_recovery_streak") or 0),
             ibkr_unhealthy_streak=int(raw.get("ibkr_unhealthy_streak") or 0),
+            ibkr_recovery_streak=int(raw.get("ibkr_recovery_streak") or 0),
             last_schwab_reason=_optional_text(raw.get("last_schwab_reason")),
             last_ibkr_reason=_optional_text(raw.get("last_ibkr_reason")),
             transition=transition,
@@ -117,6 +119,7 @@ class FailoverThresholds:
     schwab_unhealthy_observations: int
     schwab_recovery_observations: int
     ibkr_unhealthy_observations: int
+    ibkr_recovery_observations: int = 2
 
     def __post_init__(self) -> None:
         for name, value in asdict(self).items():
@@ -137,6 +140,7 @@ def advance_failover(
         if state.mode == FailoverMode.SCHWAB_PRIMARY or observation.ibkr_healthy
         else state.ibkr_unhealthy_streak + 1
     )
+    ibkr_recovery = state.ibkr_recovery_streak + 1 if observation.ibkr_healthy else 0
     next_mode = state.mode
     reason = "health observation"
 
@@ -148,9 +152,14 @@ def advance_failover(
             else:
                 next_mode = FailoverMode.RECOVERY_PENDING
                 ibkr_unhealthy = 0
+                ibkr_recovery = 0
                 reason = "Schwab unhealthy; requesting IBKR fallback"
     elif state.mode == FailoverMode.RECOVERY_PENDING:
-        if observation.ibkr_healthy and not observation.schwab_healthy:
+        if (
+            observation.ibkr_healthy
+            and not observation.schwab_healthy
+            and ibkr_recovery >= thresholds.ibkr_recovery_observations
+        ):
             next_mode = FailoverMode.IBKR_FALLBACK
             reason = "IBKR fallback became ready"
         elif observation.schwab_healthy and (
@@ -182,7 +191,11 @@ def advance_failover(
         ):
             next_mode = FailoverMode.SCHWAB_PRIMARY
             reason = "Schwab recovery confirmed"
-        elif observation.ibkr_healthy and not observation.schwab_healthy:
+        elif (
+            observation.ibkr_healthy
+            and not observation.schwab_healthy
+            and ibkr_recovery >= thresholds.ibkr_recovery_observations
+        ):
             next_mode = FailoverMode.IBKR_FALLBACK
             reason = "IBKR fallback recovered"
 
@@ -205,6 +218,7 @@ def advance_failover(
         )
         if next_mode == FailoverMode.SCHWAB_PRIMARY:
             ibkr_unhealthy = 0
+            ibkr_recovery = 0
 
     return FailoverState(
         mode=next_mode,
@@ -213,6 +227,7 @@ def advance_failover(
         schwab_unhealthy_streak=schwab_unhealthy,
         schwab_recovery_streak=schwab_recovery,
         ibkr_unhealthy_streak=ibkr_unhealthy,
+        ibkr_recovery_streak=ibkr_recovery,
         last_schwab_reason=observation.schwab_reason,
         last_ibkr_reason=observation.ibkr_reason,
         transition=transition,

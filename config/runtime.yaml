@@ -59,6 +59,9 @@ provider_failover:
   ibkr_unhealthy_observations:
     value: 2
     description: Consecutive unhealthy IBKR observations required before declaring both direct providers unavailable.
+  ibkr_recovery_observations:
+    value: 2
+    description: Consecutive healthy IBKR observations required before entering IBKR fallback, to avoid farm half-recovery false switches.
   control_state_max_age_seconds:
     value: 60.0
     description: Maximum failover control-state age accepted by the IBKR stream before it fails closed to standby.
@@ -105,7 +108,7 @@ schwab:
     description: Quote payload sections requested from Schwab.
   option_chain_strike_count:
     value: 10
-    description: Number of strikes around the underlying requested per chain expiration.
+    description: Default strikeCount around ATM per chain expiration; per-instrument option_chain_strike_count overrides this ($SPX uses 40 for wider GEX/DEX walls).
   quote_batch_size:
     value: 500
     description: Maximum symbols placed in one Schwab quote request.
@@ -144,7 +147,10 @@ schwab:
       description: Enables periodic Schwab quote and option-chain collection in the 24-hour service.
     interval_seconds:
       value: 5
-      description: Full quote+chain collection cadence; ~6 HTTP requests/cycle stays near 72/min under the 120/min budget with headroom (measured wall ~3s).
+      description: "Service-loop tick for quotes + due chains. Tier budget (theoretical): A-tier quotes+$SPX chain = 2 req/5s = 24/min; B-tier SPY/QQQ/IWM/XSP chains = 4 req/15s = 16/min; total ~40/min under the 120/min gateway budget (target ≤60/min with headroom)."
+    request_budget_warning_per_minute:
+      value: 100
+      description: Collector logs a warning when measured outbound requests in the trailing 60s exceed this soft guardrail (below the hard 120/min gateway cap).
   streaming:
     mode:
       value: "off"
@@ -191,7 +197,9 @@ schwab:
       option_trading_classes: [SPX, SPXW]
       collect_quote: true
       collect_option_chain: true
-      description: S&P 500 index; Schwab returns both monthly SPX and daily SPXW contracts from the $SPX chain.
+      chain_interval_seconds: 5
+      option_chain_strike_count: 40
+      description: S&P 500 index; Schwab returns both monthly SPX and daily SPXW contracts from the $SPX chain. A-tier chain at 5s with strikeCount=40 for ±~100 point GEX/DEX walls.
     - canonical_symbol: XSP
       instrument_type: index
       quote_symbol: $XSP
@@ -199,7 +207,8 @@ schwab:
       option_trading_classes: [XSP]
       collect_quote: true
       collect_option_chain: true
-      description: Mini-SPX index and its option chain.
+      chain_interval_seconds: 15
+      description: Mini-SPX index and its option chain. B-tier chain at 15s (default strikeCount=10).
     - canonical_symbol: VIX
       instrument_type: index
       quote_symbol: $VIX
@@ -267,7 +276,8 @@ schwab:
       option_trading_classes: [SPY]
       collect_quote: true
       collect_option_chain: true
-      description: S&P 500 ETF and liquid options proxy.
+      chain_interval_seconds: 15
+      description: S&P 500 ETF and liquid options proxy. B-tier chain at 15s (default strikeCount=10).
     - canonical_symbol: VOO
       instrument_type: equity
       quote_symbol: VOO
@@ -317,7 +327,8 @@ schwab:
       option_trading_classes: [QQQ]
       collect_quote: true
       collect_option_chain: true
-      description: Nasdaq-100 ETF and options confirmation proxy.
+      chain_interval_seconds: 15
+      description: Nasdaq-100 ETF and options confirmation proxy. B-tier chain at 15s (default strikeCount=10).
     - canonical_symbol: IWM
       instrument_type: equity
       quote_symbol: IWM
@@ -325,7 +336,8 @@ schwab:
       option_trading_classes: [IWM]
       collect_quote: true
       collect_option_chain: true
-      description: Russell 2000 ETF and options breadth proxy.
+      chain_interval_seconds: 15
+      description: Russell 2000 ETF and options breadth proxy. B-tier chain at 15s (default strikeCount=10).
     - canonical_symbol: DIA
       instrument_type: equity
       quote_symbol: DIA
@@ -619,11 +631,11 @@ ibkr_stream:
     value: 20.0
     description: SPX point drift that triggers option subscription replanning.
   max_option_lines:
-    value: 60
-    description: Maximum SPXW option lines reserved for the streaming collector.
+    value: 68
+    description: Maximum SPXW option lines for the streaming collector (of ~100-line IBKR cap). With base anchors (2) + SPY options (16) + slow-poll peak (~5) leaves ≥9 lines for replan overlap headroom.
   hot_lane_share:
     value: 0.7
-    description: Fraction of option-line budget reserved for hot ATM contracts.
+    description: Fraction of option-line budget reserved for hot ATM contracts (~48 of 68 lines ≈ ±55 pt @5-pt step × call/put).
   reconnect_min_seconds:
     value: 5.0
     description: Minimum reconnect backoff in seconds after stream disconnect.
@@ -663,6 +675,9 @@ ibkr_stream:
   atm_state_path:
     value: ""
     description: Optional path for persisting ATM stream planning state; empty uses in-memory behavior.
+  freeze_quotes_on_connectivity_loss:
+    value: true
+    description: Freezes IBKR-derived fields as stale and stops quote persistence when the socket disconnects or upstream connectivity is lost.
 
 ibkr_positions:
   client_id:
@@ -1007,8 +1022,8 @@ sampling:
     value: 200
     description: Wide 0DTE strike window in index points around the reference.
   hot_window_points:
-    value: 50
-    description: Hot-lane 0DTE strike window in index points around the reference.
+    value: 55
+    description: Hot-lane 0DTE strike window in index points around ATM; used by the sampling planner and IBKR stream option subscriptions (via SamplingSettings). Expanded from 50 to 55 with max_option_lines=68 so hot_lane_share 0.7 covers ~±55 pt at 5-pt spacing.
   group_count:
     value: 4
     description: Number of rotating sampling groups in normal mode.
@@ -1347,3 +1362,86 @@ human_focus:
   event_tags:
     value: []
     description: Optional manually maintained intraday event tags such as fomc, cpi, nfp, or opex.
+
+steven:
+  enabled:
+    value: false
+    description: Enables Steven framework observe-only guidance in the service loop.
+  regime_weighting:
+    value: oi_weighted
+    description: Weighting used for cross-expiry regime classification from net_dex_proxy.
+  regime_dex_neutral_band:
+    value: 100000.0
+    description: USD neutral band for classifying per-expiry net_dex_proxy as bullish or bearish.
+  regime_min_expiries:
+    value: 2
+    description: Minimum non-null expiries required before regime can leave unknown.
+  regime_agreement_min_ratio:
+    value: 0.67
+    description: Minimum agreement ratio among classified expiries for directional regime.
+  pin_max_distance_points:
+    value: 25.0
+    description: Maximum |strike-spot| distance for pin_candidate selection.
+  wall_confluence_points:
+    value: 10.0
+    description: Maximum distance for multi-expiry wall confluence warnings.
+  max_snapshot_age_seconds:
+    value: 900.0
+    description: Maximum exposure snapshot age before Steven marks data invalid.
+  data_recovery_hold_seconds:
+    value: 60.0
+    description: Seconds data must remain healthy before leaving DATA_INVALID.
+  event_wait_cooldown_seconds:
+    value: 900.0
+    description: Cooldown after macro or shock events before leaving EVENT_WAIT.
+  event_stabilize_bars:
+    value: 5
+    description: Number of 1m bars used to confirm post-event stabilization.
+  event_stabilize_range_points:
+    value: 10.0
+    description: Maximum high-low range per bar to count as stabilized.
+  dip_watch_max_distance_points:
+    value: 30.0
+    description: Maximum spot distance above support to enter BULLISH_DIP_WATCH.
+  break_watch_max_distance_points:
+    value: 30.0
+    description: Maximum spot distance above support to enter BEARISH_BREAK_WATCH.
+  pin_watch_max_distance_points:
+    value: 20.0
+    description: Maximum |spot-pin| distance to enter RANGE_PIN_WATCH.
+  pin_min_net_gamma_ratio:
+    value: 0.15
+    description: Minimum oi_weighted net_gamma_ratio required for RANGE_PIN_WATCH.
+  trigger_level_tolerance_points:
+    value: 5.0
+    description: Touch tolerance around trigger levels.
+  trigger_hold_bars:
+    value: 2
+    description: Number of closed 1m bars required to confirm a trigger hold.
+  watch_exit_hold_seconds:
+    value: 120.0
+    description: Seconds a failed watch condition must persist before exiting.
+  invalidation_hold_bars:
+    value: 2
+    description: Number of closed 1m bars required to confirm invalidation.
+  lockout_minutes:
+    value: 30.0
+    description: Minimum lockout minutes after EXIT_REVIEW before remapping.
+  max_daily_setups:
+    value: 2
+    description: Maximum SETUP_CONFIRMED episodes allowed per trading day.
+  episode_revision_min_level_move_points:
+    value: 10.0
+    description: Minimum map level move before appending a map_revision episode row.
+  alert_context_enabled:
+    value: false
+    description: Enables Steven observe-only context injection into selected alerts.
+  alert_context_max_age_seconds:
+    value: 120.0
+    description: Maximum steven_state age for alert context injection.
+  bars_source_max_age_seconds:
+    value: 90.0
+    description: Maximum latest bar file age before Steven treats bars as missing.
+  forward_max_horizon_sample_distance_seconds:
+    value: 30.0
+    description: "Max |bar_start - horizon target| seconds when resolving Steven forward metrics."

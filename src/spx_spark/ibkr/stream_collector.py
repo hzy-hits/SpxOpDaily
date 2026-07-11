@@ -404,6 +404,21 @@ def subscription_outage_reason(
     return None
 
 
+def mark_rows_stale(rows: list[VerifyRow]) -> list[VerifyRow]:
+    for row in rows:
+        row.stale = True
+    return rows
+
+
+def classify_connect_failure(error: BaseException | str) -> str | None:
+    text = str(error).lower()
+    if "10182" in text:
+        return "market_data_rerequest"
+    if "326" in text or "client id" in text:
+        return "client_id_conflict"
+    return None
+
+
 def connected_state() -> ProviderState:
     return ProviderState(
         provider=Provider.IBKR,
@@ -641,6 +656,7 @@ class StreamCollector:
         # strikes and jump from push to push.
         self.option_cache: dict[str, tuple[float, VerifyRow]] = {}
         self.qualified_option_contracts: dict[str, tuple[str, str, Any]] = {}
+        self.connection_generation = 0
 
         ib.errorEvent += self._on_error
 
@@ -745,6 +761,14 @@ class StreamCollector:
         self.last_position_shadow_at = None
         if self.market_data_allowed():
             self.ib.reqMarketDataType(self.ibkr_settings.market_data_type)
+        self.connection_generation = getattr(self, "connection_generation", 0) + 1
+        log_event(
+            {
+                "task": "ibkr_stream",
+                "event": "session_generation",
+                "generation": self.connection_generation,
+            }
+        )
 
     def flush_position_shadow_if_due(
         self,
@@ -1819,6 +1843,24 @@ class StreamCollector:
 
     def flush(self) -> dict[str, object]:
         received_at = datetime.now(tz=timezone.utc)
+        freeze_on_loss = bool(
+            getattr(self.stream_settings, "freeze_quotes_on_connectivity_loss", True)
+        )
+        if freeze_on_loss and not self.ib.isConnected():
+            persist_state_only(
+                unavailable_state("IBKR disconnected mid-session", connected=False),
+                self.storage_settings,
+            )
+            return {
+                "task": "ibkr_stream",
+                "event": "flush",
+                "quotes": 0,
+                "best_quotes": 0,
+                "provider_status": ProviderStatus.UNAVAILABLE.value,
+                "rotation_index": self.rotation_index,
+                "tws_connectivity_lost": self.tws_connectivity_lost,
+            }
+
         subscriptions = {
             **self.base_subs,
             **self.hot_subs,
@@ -1852,13 +1894,21 @@ class StreamCollector:
             else None,
         )
         merge_cached_option_rows(rows, self.option_cache, set(subscriptions))
+        if freeze_on_loss and self.tws_connectivity_lost:
+            mark_rows_stale(rows)
         outage_reason = subscription_outage_reason(
             tws_connectivity_lost=self.tws_connectivity_lost,
             subscriptions_lost=self.subscriptions_lost,
         )
+        if not self.farm_health.market_data_ready():
+            farm_reason = "IBKR market data farms not ready"
+            outage_reason = (
+                f"{outage_reason}; {farm_reason}" if outage_reason else farm_reason
+            )
         error_count = provider_error_count(self.errors)
         if outage_reason is not None:
             error_count = max(error_count, 1)
+        source_session = f"ibkr-stream:{self.connection_generation}"
         snapshot = snapshot_from_rows(
             rows,
             received_at=received_at,
@@ -1869,6 +1919,7 @@ class StreamCollector:
             error_count=error_count,
             reason=outage_reason,
             replace_provider_quotes=True,
+            source_session=source_session,
         )
         write_result = persist_provider_snapshot(snapshot, self.storage_settings)
         lifecycle_started = time.monotonic()
@@ -1887,6 +1938,7 @@ class StreamCollector:
             ),
             "rotation_index": self.rotation_index,
             "tws_connectivity_lost": self.tws_connectivity_lost,
+            "source_session": source_session,
         }
 
     def _advance_subscription_lifecycle(
@@ -1965,6 +2017,7 @@ class StreamCollector:
         self.slow_scheduler = None
         self.slow_qualified_contracts = {}
         self.slow_unresolved_contracts = set()
+        self.option_cache = {}
         self.qualified_option_contracts = {}
         self.subscription_rejection_sequence = 0
         self.subscription_rejection_log = []
@@ -2027,14 +2080,16 @@ class StreamRuntime:
                     unavailable_state(f"connect failed: {exc}"),
                     self.storage_settings,
                 )
-                log_event(
-                    {
-                        "task": "ibkr_stream",
-                        "event": "connect_failed",
-                        "error": str(exc),
-                        "retry_in_seconds": delay,
-                    }
-                )
+                connect_event: dict[str, object] = {
+                    "task": "ibkr_stream",
+                    "event": "connect_failed",
+                    "error": str(exc),
+                    "retry_in_seconds": delay,
+                }
+                error_class = classify_connect_failure(exc)
+                if error_class is not None:
+                    connect_event["error_class"] = error_class
+                log_event(connect_event)
                 sleep_until_reconnect(
                     host=self.collector.ibkr_settings.host,
                     port=self.collector.ibkr_settings.port,
@@ -2209,6 +2264,10 @@ class StreamRuntime:
                 return False
 
             # RECONNECT: fall back to the outer loop's backoff.
+            persist_state_only(
+                unavailable_state("IBKR disconnected mid-session", connected=False),
+                self.storage_settings,
+            )
             log_event({"task": "ibkr_stream", "event": "disconnected"})
             return True
         return False

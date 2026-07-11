@@ -269,6 +269,11 @@ class IbkrStreamSettings:
     atm_state_path: str = field(
         default_factory=lambda: str(runtime_value("ibkr_stream.atm_state_path"))
     )
+    freeze_quotes_on_connectivity_loss: bool = field(
+        default_factory=lambda: bool(
+            runtime_value("ibkr_stream.freeze_quotes_on_connectivity_loss")
+        )
+    )
 
     @classmethod
     def from_env(cls) -> "IbkrStreamSettings":
@@ -346,6 +351,10 @@ class IbkrStreamSettings:
                 int(runtime_value("ibkr_stream.slow_poll_chunk_size")),
             ),
             atm_state_path=env_str("IBKR_ATM_STATE_PATH", str(runtime_value("ibkr_stream.atm_state_path"))),
+            freeze_quotes_on_connectivity_loss=env_bool(
+                "IBKR_STREAM_FREEZE_QUOTES_ON_CONNECTIVITY_LOSS",
+                bool(runtime_value("ibkr_stream.freeze_quotes_on_connectivity_loss")),
+            ),
         )
 
 
