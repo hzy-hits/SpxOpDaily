@@ -13,11 +13,17 @@ from urllib.parse import urlencode, urljoin, urlsplit
 from urllib.request import ProxyHandler, Request, build_opener, urlopen
 
 from spx_spark.config import SchwabSettings
-from spx_spark.schwab.adapter import option_chain_symbol_for_schwab
+from spx_spark.runtime_config import runtime_value
+from spx_spark.schwab.symbols import option_chain_symbol_for_schwab
 from spx_spark.schwab.adapter import quotes_from_quote_payload
 
 
-MAX_QUOTE_BATCH_SIZE = 500
+MAX_QUOTE_BATCH_SIZE = int(runtime_value("schwab.quote_batch_size"))
+SCHWAB_QUOTE_PATH = str(runtime_value("schwab.quote_path"))
+SCHWAB_OPTION_CHAIN_PATH = str(runtime_value("schwab.option_chain_path"))
+MAX_ERROR_BODY_CHARACTERS = int(
+    runtime_value("schwab.diagnostics.max_error_body_characters")
+)
 
 
 @dataclass(frozen=True)
@@ -209,7 +215,7 @@ def verify_quotes(client: SchwabClient, settings: SchwabSettings) -> list[Schwab
         label = ",".join(batch)
         try:
             status, payload = client.get_json(
-                "/marketdata/v1/quotes",
+                SCHWAB_QUOTE_PATH,
                 {"symbols": ",".join(batch), "fields": settings.quote_fields},
             )
             results.append(
@@ -234,7 +240,7 @@ def verify_option_chains(client: SchwabClient, settings: SchwabSettings) -> list
         provider_symbol = option_chain_symbol_for_schwab(symbol)
         try:
             status, payload = client.get_json(
-                "/marketdata/v1/chains",
+                SCHWAB_OPTION_CHAIN_PATH,
                 {
                     "symbol": provider_symbol,
                     "contractType": "ALL",
@@ -268,7 +274,7 @@ def verify_option_chains(client: SchwabClient, settings: SchwabSettings) -> list
 def format_error(exc: BaseException) -> str:
     if isinstance(exc, HTTPError):
         try:
-            body = exc.read().decode("utf-8")[:500]
+            body = exc.read().decode("utf-8")[:MAX_ERROR_BODY_CHARACTERS]
         except Exception:  # noqa: BLE001
             body = ""
         return f"HTTP {exc.code}: {exc.reason}; {body}".strip()

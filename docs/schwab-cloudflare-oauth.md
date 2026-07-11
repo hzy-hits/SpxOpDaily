@@ -225,10 +225,11 @@ to the caller without retrying early. Override the `SCHWAB_HTTP_*` values only
 when Schwab's active limits require it.
 
 Provider preference is independently configurable with
-`MARKET_DATA_PROVIDER_PRIORITY`. Keep the production default beginning with
-`ibkr,schwab` until the live Schwab acceptance succeeds. A later cutover can
-begin with `schwab,ibkr`; quality and freshness still outrank preference, so a
-stale or missing Schwab quote falls back to a fresh IBKR quote.
+`MARKET_DATA_PROVIDER_PRIORITY`. Live Schwab acceptance is complete, so the
+runtime default begins with `schwab,ibkr`. Quality and freshness still outrank
+preference, so a stale or missing Schwab quote falls back to a fresh IBKR
+quote. Provider symbols, collection lists, and numeric request policy live in
+`config/runtime.yaml` with descriptions.
 
 ## Security and failure behavior
 

@@ -4,11 +4,11 @@ from datetime import datetime, timedelta, timezone
 
 from spx_spark.marketdata import MarketDataQuality, Provider, ProviderStatus
 from spx_spark.schwab.adapter import (
-    option_chain_symbol_for_schwab,
     option_quotes_from_chain_payload,
     quote_from_schwab_payload,
     snapshot_from_quote_payload,
 )
+from spx_spark.schwab.symbols import option_chain_symbol_for_schwab
 
 
 def test_option_chain_symbol_uses_schwab_index_format():

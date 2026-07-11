@@ -19,6 +19,7 @@ from schwab.auth import (
 )
 
 from spx_spark.config import SchwabSettings
+from spx_spark.runtime_config import runtime_value
 from spx_spark.schwab.auth_storage import (
     AtomicJsonFile,
     ExclusiveFileLock,
@@ -27,11 +28,14 @@ from spx_spark.schwab.auth_storage import (
 
 
 ALLOWED_MARKET_DATA_PATHS = frozenset(
-    {
-        "/marketdata/v1/chains",
-        "/marketdata/v1/quotes",
-    }
+    str(path) for path in runtime_value("schwab.allowed_market_data_paths")
 )
+
+# HTTP protocol status boundaries are named here because they are standards,
+# not mutable runtime policy.
+HTTP_TOO_MANY_REQUESTS = 429
+HTTP_SERVER_ERROR_START = 500
+HTTP_SERVER_ERROR_END = 600
 
 
 class SchwabGatewayUnavailable(RuntimeError):
@@ -44,11 +48,19 @@ class SchwabGatewayRequestError(RuntimeError):
 
 @dataclass(frozen=True)
 class SchwabRequestPolicy:
-    requests_per_minute: int = 120
-    max_retries: int = 3
-    retry_base_seconds: float = 0.5
-    retry_max_seconds: float = 8.0
-    retry_after_max_seconds: float = 30.0
+    requests_per_minute: int = int(
+        runtime_value("schwab.request_policy.requests_per_minute")
+    )
+    max_retries: int = int(runtime_value("schwab.request_policy.max_retries"))
+    retry_base_seconds: float = float(
+        runtime_value("schwab.request_policy.retry_base_seconds")
+    )
+    retry_max_seconds: float = float(
+        runtime_value("schwab.request_policy.retry_max_seconds")
+    )
+    retry_after_max_seconds: float = float(
+        runtime_value("schwab.request_policy.retry_after_max_seconds")
+    )
 
     def __post_init__(self) -> None:
         if self.requests_per_minute <= 0:
@@ -67,13 +79,25 @@ class SchwabRequestPolicy:
     @classmethod
     def from_env(cls) -> "SchwabRequestPolicy":
         return cls(
-            requests_per_minute=_env_int("SCHWAB_HTTP_REQUESTS_PER_MINUTE", 120),
-            max_retries=_env_int("SCHWAB_HTTP_MAX_RETRIES", 3),
-            retry_base_seconds=_env_float("SCHWAB_HTTP_RETRY_BASE_SECONDS", 0.5),
-            retry_max_seconds=_env_float("SCHWAB_HTTP_RETRY_MAX_SECONDS", 8.0),
+            requests_per_minute=_env_int(
+                "SCHWAB_HTTP_REQUESTS_PER_MINUTE",
+                int(runtime_value("schwab.request_policy.requests_per_minute")),
+            ),
+            max_retries=_env_int(
+                "SCHWAB_HTTP_MAX_RETRIES",
+                int(runtime_value("schwab.request_policy.max_retries")),
+            ),
+            retry_base_seconds=_env_float(
+                "SCHWAB_HTTP_RETRY_BASE_SECONDS",
+                float(runtime_value("schwab.request_policy.retry_base_seconds")),
+            ),
+            retry_max_seconds=_env_float(
+                "SCHWAB_HTTP_RETRY_MAX_SECONDS",
+                float(runtime_value("schwab.request_policy.retry_max_seconds")),
+            ),
             retry_after_max_seconds=_env_float(
                 "SCHWAB_HTTP_RETRY_AFTER_MAX_SECONDS",
-                30.0,
+                float(runtime_value("schwab.request_policy.retry_after_max_seconds")),
             ),
         )
 
@@ -347,7 +371,7 @@ def is_transient_network_failure(exc: BaseException) -> bool:
 
 
 def is_retryable_status(status: int) -> bool:
-    return status == 429 or 500 <= status < 600
+    return status == HTTP_TOO_MANY_REQUESTS or HTTP_SERVER_ERROR_START <= status < HTTP_SERVER_ERROR_END
 
 
 def gateway_response(response: Any) -> GatewayResponse:

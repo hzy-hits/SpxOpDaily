@@ -28,6 +28,7 @@ from spx_spark.marketdata import (
     parse_timestamp,
 )
 from spx_spark.provider_adapter import ProviderSnapshot, provider_state_from_quote_health
+from spx_spark.runtime_config import runtime_value
 
 
 SCHWAB_OCC_OPTION_PATTERN = re.compile(
@@ -35,21 +36,10 @@ SCHWAB_OCC_OPTION_PATTERN = re.compile(
     r"(?P<expiry>\d{6})(?P<right>[CP])(?P<strike>\d{8})$"
 )
 
-
-def option_chain_symbol_for_schwab(symbol: str) -> str:
-    """Return the provider symbol accepted by Schwab's option-chain endpoint.
-
-    Schwab quotes accept ``$SPX``/``$XSP`` while the option-chain endpoint
-    rejects their unprefixed forms. ``SPXW`` contracts are returned through
-    the ``$SPX`` underlier chain rather than through a separate SPXW chain.
-    """
-
-    normalized = symbol.strip().upper()
-    if normalized in {"SPX", "SPXW", "$SPX"}:
-        return "$SPX"
-    if normalized in {"XSP", "$XSP"}:
-        return "$XSP"
-    return normalized
+# Shared quote-freshness policy comes from the documented runtime table.
+DEFAULT_SCHWAB_STALE_SECONDS = float(
+    runtime_value("market_data.latest_stale_after_seconds")
+)
 
 
 def first_key(mapping: Mapping[str, Any], *keys: str) -> Any:
@@ -141,7 +131,7 @@ def quote_from_schwab_payload(
     payload: Mapping[str, Any] | None,
     *,
     received_at: datetime | None = None,
-    stale_after_seconds: float = 15.0,
+    stale_after_seconds: float = DEFAULT_SCHWAB_STALE_SECONDS,
 ) -> Quote:
     received_at = as_utc(received_at or datetime.now(tz=timezone.utc))
     instrument = instrument_from_schwab_symbol(symbol, payload)
@@ -203,7 +193,7 @@ def quote_from_schwab_option_contract(
     contract: Mapping[str, Any],
     *,
     received_at: datetime | None = None,
-    stale_after_seconds: float = 15.0,
+    stale_after_seconds: float = DEFAULT_SCHWAB_STALE_SECONDS,
 ) -> Quote:
     received_at = as_utc(received_at or datetime.now(tz=timezone.utc))
     provider_symbol = str(first_key(contract, "symbol", "optionSymbol") or "")
@@ -271,7 +261,7 @@ def quotes_from_quote_payload(
     symbols: list[str],
     *,
     received_at: datetime | None = None,
-    stale_after_seconds: float = 15.0,
+    stale_after_seconds: float = DEFAULT_SCHWAB_STALE_SECONDS,
 ) -> tuple[Quote, ...]:
     received_at = received_at or datetime.now(tz=timezone.utc)
     payload = payload or {}
@@ -291,7 +281,7 @@ def option_quotes_from_chain_payload(
     *,
     underlier: str,
     received_at: datetime | None = None,
-    stale_after_seconds: float = 15.0,
+    stale_after_seconds: float = DEFAULT_SCHWAB_STALE_SECONDS,
 ) -> tuple[Quote, ...]:
     if not isinstance(payload, Mapping):
         return ()
@@ -326,7 +316,7 @@ def snapshot_from_quote_payload(
     symbols: list[str],
     *,
     received_at: datetime | None = None,
-    stale_after_seconds: float = 15.0,
+    stale_after_seconds: float = DEFAULT_SCHWAB_STALE_SECONDS,
     connected: bool = True,
     authenticated: bool | None = True,
     latency_ms: float | None = None,
@@ -366,7 +356,7 @@ def snapshot_from_chain_payload(
     *,
     underlier: str,
     received_at: datetime | None = None,
-    stale_after_seconds: float = 15.0,
+    stale_after_seconds: float = DEFAULT_SCHWAB_STALE_SECONDS,
     connected: bool = True,
     authenticated: bool | None = True,
     latency_ms: float | None = None,

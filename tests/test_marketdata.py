@@ -173,7 +173,7 @@ def test_choose_best_quote_uses_provider_priority_when_quality_matches():
         quote_time=now - timedelta(seconds=1),
     )
 
-    assert choose_best_quote([schwab, ibkr], as_of=now) == ibkr
+    assert choose_best_quote([schwab, ibkr], as_of=now) == schwab
 
 
 def test_option_mid_allows_zero_bid_when_ask_positive() -> None:

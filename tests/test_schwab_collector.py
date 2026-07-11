@@ -38,6 +38,9 @@ def test_collector_skips_without_token(monkeypatch: pytest.MonkeyPatch, capsys: 
 
 
 def test_collector_persists_chain_quotes(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    monkeypatch.setenv("SCHWAB_COLLECT_QUOTES", "")
+    monkeypatch.setenv("SCHWAB_COLLECT_CHAINS", "SPY")
+
     class FakeClient:
         def get_json(self, path: str, params: dict[str, Any]) -> tuple[int, dict[str, Any]]:
             assert path == "/marketdata/v1/chains"
@@ -86,3 +89,40 @@ def test_collector_persists_chain_quotes(monkeypatch: pytest.MonkeyPatch, capsys
     assert output["quote_counts"]["SPY"] == 1
     assert len(persisted) == 1
     assert persisted[0].quote_count == 1
+
+
+def test_collector_persists_batched_underlying_quotes(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("SCHWAB_COLLECT_QUOTES", "$SPX,SPY")
+    monkeypatch.setenv("SCHWAB_COLLECT_CHAINS", "")
+
+    class FakeClient:
+        def get_json(self, path: str, params: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+            assert path == "/marketdata/v1/quotes"
+            assert params["symbols"] == "$SPX,SPY"
+            return 200, {
+                "$SPX": {
+                    "assetMainType": "INDEX",
+                    "quote": {"lastPrice": 7500.0},
+                },
+                "SPY": {
+                    "assetMainType": "EQUITY",
+                    "quote": {"lastPrice": 750.0},
+                },
+            }
+
+    persisted: list[ProviderSnapshot] = []
+    monkeypatch.setattr(schwab_collector, "build_schwab_client", lambda _settings: FakeClient())
+    monkeypatch.setattr(
+        schwab_collector,
+        "persist_provider_snapshot",
+        lambda snapshot, _storage: persisted.append(snapshot),
+    )
+
+    assert schwab_collector.run() == 0
+    output = json.loads(capsys.readouterr().out)
+    assert output["quote_counts"]["quotes:$SPX,SPY"] == 2
+    assert len(persisted) == 1
+    assert persisted[0].quote_count == 2

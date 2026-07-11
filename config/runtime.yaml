@@ -1,0 +1,356 @@
+# SPX Spark runtime configuration.
+#
+# Every mutable value lives beside a human-readable description. Environment
+# variables may override these defaults; secrets remain in .env and never live
+# in this file.
+
+schema_version:
+  value: 1
+  description: Version of this runtime configuration schema.
+
+market_data:
+  known_providers:
+    value: [schwab, ibkr, hyperliquid, polymarket, internal, mock, unknown]
+    description: Provider names accepted by storage and quote selection.
+  provider_priority:
+    value: [schwab, ibkr, hyperliquid, polymarket, internal, mock, unknown]
+    description: Preferred provider order after freshness and quality checks; Schwab is primary and IBKR is fallback.
+  latest_stale_after_seconds:
+    value: 15
+    description: Maximum age of a normal live quote before storage marks it stale.
+  delayed_stale_after_seconds:
+    value: 60
+    description: Maximum age allowed for a quote explicitly labelled delayed.
+  slow_index_stale_after_seconds:
+    value: 900
+    description: Longer freshness window for slow-moving index and macro reference quotes.
+  slow_index_labels:
+    value: [index:VIX, index:VIX1D, index:VIX9D, index:VIX3M, index:VVIX, index:SKEW, equity:QQQ, equity:IWM, equity:DIA, equity:HYG, equity:LQD, equity:TLT, equity:IEF, equity:SHY, equity:UUP, equity:GLD, equity:USO, equity:RSP, equity:XLU]
+    description: Canonical instruments that use the longer slow-index freshness window.
+
+schwab:
+  api_base_url:
+    value: https://api.schwabapi.com
+    description: Official Schwab Trader API base URL.
+  token_file:
+    value: runtime/schwab-token.json
+    description: Owner-readable OAuth token file managed by the Oracle gateway.
+  callback_url:
+    value: https://127.0.0.1:8182
+    description: Safe local development callback; production overrides this with the approved Cloudflare URL.
+  oauth_bind_host:
+    value: 127.0.0.1
+    description: Loopback interface for the callback listener behind Cloudflare Tunnel.
+  oauth_bind_port:
+    value: 8183
+    description: Local callback listener port routed by Cloudflare Tunnel.
+  oauth_state_file:
+    value: runtime/schwab-oauth-state.json
+    description: Single-use OAuth authorization state file.
+  oauth_state_ttl_seconds:
+    value: 900
+    description: Lifetime of one generated OAuth authorization request.
+  gateway_bind_host:
+    value: 127.0.0.1
+    description: Loopback-only bind address for the internal market-data gateway.
+  gateway_bind_port:
+    value: 8184
+    description: Internal localhost market-data gateway port.
+  request_timeout_seconds:
+    value: 12
+    description: Network timeout for a Schwab market-data request.
+  quote_fields:
+    value: quote,reference,extended,regular
+    description: Quote payload sections requested from Schwab.
+  option_chain_strike_count:
+    value: 10
+    description: Number of strikes around the underlying requested per chain expiration.
+  quote_batch_size:
+    value: 500
+    description: Maximum symbols placed in one Schwab quote request.
+  allowed_market_data_paths:
+    value: [/marketdata/v1/quotes, /marketdata/v1/chains]
+    description: Read-only API paths exposed by the localhost gateway; account and trading paths are intentionally excluded.
+  quote_path:
+    value: /marketdata/v1/quotes
+    description: Schwab endpoint used for batched underlying and context quotes.
+  option_chain_path:
+    value: /marketdata/v1/chains
+    description: Schwab endpoint used for option-chain snapshots.
+  diagnostics:
+    max_error_body_characters:
+      value: 500
+      description: Maximum provider error-body characters retained in verifier output.
+  request_policy:
+    requests_per_minute:
+      value: 120
+      description: Global outbound Schwab request budget enforced by the single gateway owner.
+    max_retries:
+      value: 3
+      description: Maximum retries for retryable transport or provider failures.
+    retry_base_seconds:
+      value: 0.5
+      description: Initial exponential-backoff delay for a retryable request.
+    retry_max_seconds:
+      value: 8
+      description: Maximum exponential-backoff delay between retries.
+    retry_after_max_seconds:
+      value: 30
+      description: Longest provider Retry-After delay the gateway will wait inline.
+  collection:
+    enabled:
+      value: true
+      description: Enables periodic Schwab quote and option-chain collection in the 24-hour service.
+    interval_seconds:
+      value: 15
+      description: Collection cadence balancing 0DTE responsiveness against the 120-request-per-minute budget.
+  instruments:
+    - canonical_symbol: SPX
+      instrument_type: index
+      quote_symbol: $SPX
+      option_chain_symbol: $SPX
+      option_trading_classes: [SPX, SPXW]
+      collect_quote: true
+      collect_option_chain: true
+      description: S&P 500 index; Schwab returns both monthly SPX and daily SPXW contracts from the $SPX chain.
+    - canonical_symbol: XSP
+      instrument_type: index
+      quote_symbol: $XSP
+      option_chain_symbol: $XSP
+      option_trading_classes: [XSP]
+      collect_quote: true
+      collect_option_chain: true
+      description: Mini-SPX index and its option chain.
+    - canonical_symbol: VIX
+      instrument_type: index
+      quote_symbol: $VIX
+      collect_quote: true
+      collect_option_chain: false
+      description: Cboe Volatility Index used as an intraday volatility anchor.
+    - canonical_symbol: VIX1D
+      instrument_type: index
+      quote_symbol: $VIX1D
+      collect_quote: true
+      collect_option_chain: false
+      description: Cboe one-day volatility index for 0DTE conditions.
+    - canonical_symbol: VIX9D
+      instrument_type: index
+      quote_symbol: $VIX9D
+      collect_quote: true
+      collect_option_chain: false
+      description: Cboe nine-day volatility index for near-term term structure.
+    - canonical_symbol: VIX3M
+      instrument_type: index
+      quote_symbol: $VIX3M
+      collect_quote: true
+      collect_option_chain: false
+      description: Three-month volatility index for term-structure context.
+    - canonical_symbol: VVIX
+      instrument_type: index
+      quote_symbol: $VVIX
+      collect_quote: true
+      collect_option_chain: false
+      description: Volatility-of-volatility reference index.
+    - canonical_symbol: SKEW
+      instrument_type: index
+      quote_symbol: $SKEW
+      collect_quote: true
+      collect_option_chain: false
+      description: Cboe tail-risk skew reference index.
+    - canonical_symbol: NDX
+      instrument_type: index
+      quote_symbol: $NDX
+      collect_quote: true
+      collect_option_chain: false
+      description: Nasdaq-100 cash index used for cross-index confirmation.
+    - canonical_symbol: RUT
+      instrument_type: index
+      quote_symbol: $RUT
+      collect_quote: true
+      collect_option_chain: false
+      description: Russell 2000 cash index used for breadth context.
+    - canonical_symbol: DJI
+      instrument_type: index
+      quote_symbol: $DJI
+      collect_quote: true
+      collect_option_chain: false
+      description: Dow Jones Industrial Average cash index.
+    - canonical_symbol: DJU
+      instrument_type: index
+      quote_symbol: $DJU
+      collect_quote: true
+      collect_option_chain: false
+      description: Dow Jones Utility Average used as a defensive-sector reference.
+    - canonical_symbol: SPY
+      instrument_type: equity
+      quote_symbol: SPY
+      option_chain_symbol: SPY
+      option_trading_classes: [SPY]
+      collect_quote: true
+      collect_option_chain: true
+      description: S&P 500 ETF and liquid options proxy.
+    - canonical_symbol: QQQ
+      instrument_type: equity
+      quote_symbol: QQQ
+      option_chain_symbol: QQQ
+      option_trading_classes: [QQQ]
+      collect_quote: true
+      collect_option_chain: true
+      description: Nasdaq-100 ETF and options confirmation proxy.
+    - canonical_symbol: IWM
+      instrument_type: equity
+      quote_symbol: IWM
+      option_chain_symbol: IWM
+      option_trading_classes: [IWM]
+      collect_quote: true
+      collect_option_chain: true
+      description: Russell 2000 ETF and options breadth proxy.
+    - canonical_symbol: DIA
+      instrument_type: equity
+      quote_symbol: DIA
+      collect_quote: true
+      collect_option_chain: false
+      description: Dow Jones ETF reference quote.
+    - canonical_symbol: HYG
+      instrument_type: equity
+      quote_symbol: HYG
+      collect_quote: true
+      collect_option_chain: false
+      description: High-yield credit risk proxy.
+    - canonical_symbol: LQD
+      instrument_type: equity
+      quote_symbol: LQD
+      collect_quote: true
+      collect_option_chain: false
+      description: Investment-grade credit proxy.
+    - canonical_symbol: TLT
+      instrument_type: equity
+      quote_symbol: TLT
+      collect_quote: true
+      collect_option_chain: false
+      description: Long-duration Treasury proxy.
+    - canonical_symbol: IEF
+      instrument_type: equity
+      quote_symbol: IEF
+      collect_quote: true
+      collect_option_chain: false
+      description: Intermediate-duration Treasury proxy.
+    - canonical_symbol: SHY
+      instrument_type: equity
+      quote_symbol: SHY
+      collect_quote: true
+      collect_option_chain: false
+      description: Short-duration Treasury proxy.
+    - canonical_symbol: UUP
+      instrument_type: equity
+      quote_symbol: UUP
+      collect_quote: true
+      collect_option_chain: false
+      description: US dollar strength proxy.
+    - canonical_symbol: GLD
+      instrument_type: equity
+      quote_symbol: GLD
+      collect_quote: true
+      collect_option_chain: false
+      description: Gold risk and inflation proxy.
+    - canonical_symbol: USO
+      instrument_type: equity
+      quote_symbol: USO
+      collect_quote: true
+      collect_option_chain: false
+      description: Crude-oil risk proxy.
+    - canonical_symbol: RSP
+      instrument_type: equity
+      quote_symbol: RSP
+      collect_quote: true
+      collect_option_chain: false
+      description: Equal-weight S&P 500 breadth proxy.
+    - canonical_symbol: XLU
+      instrument_type: equity
+      quote_symbol: XLU
+      collect_quote: true
+      collect_option_chain: false
+      description: Utilities-sector defensive proxy.
+    - canonical_symbol: ES
+      instrument_type: future
+      quote_symbol: /ES
+      collect_quote: true
+      collect_option_chain: false
+      description: E-mini S&P 500 future used as the live futures anchor.
+    - canonical_symbol: MES
+      instrument_type: future
+      quote_symbol: /MES
+      collect_quote: true
+      collect_option_chain: false
+      description: Micro E-mini S&P 500 future used as a secondary futures anchor.
+
+service_loop:
+  hyperliquid_enabled:
+    value: true
+    description: Enables the lightweight overnight SPX proxy context collector.
+  polymarket_enabled:
+    value: false
+    description: Enables event-probability context collection when explicitly requested.
+  ibkr_enabled:
+    value: false
+    description: Enables the snapshot IBKR collector inside the shared loop; the dedicated stream service remains separate.
+  iv_surface_enabled:
+    value: true
+    description: Enables periodic implied-volatility surface snapshots.
+  intraday_shock_enabled:
+    value: false
+    description: Enables the fast intraday shock detector in the shared loop when operationally selected.
+  alerts_enabled:
+    value: true
+    description: Enables the alert engine task in the shared service loop.
+  hyperliquid_interval_seconds:
+    value: 30
+    description: Cadence for lightweight overnight proxy context collection.
+  polymarket_interval_seconds:
+    value: 60
+    description: Cadence for event-probability context collection.
+  ibkr_interval_seconds:
+    value: 60
+    description: Cadence for the optional IBKR snapshot collector.
+  iv_surface_interval_seconds:
+    value: 300
+    description: Cadence for recalculating and persisting the IV surface.
+  intraday_shock_interval_seconds:
+    value: 5
+    description: Cadence for evaluating fast SPX shock and reclaim conditions.
+  alert_interval_seconds:
+    value: 30
+    description: Cadence for running the full alert engine.
+  heartbeat_seconds:
+    value: 60
+    description: Cadence for service-loop health telemetry.
+  ibkr_positions_enabled:
+    value: false
+    description: Enables account position polling only when explicitly configured.
+  ibkr_positions_interval_seconds:
+    value: 60
+    description: Cadence for optional IBKR position snapshots.
+  ibkr_skip_options:
+    value: false
+    description: Skips IBKR option snapshots while retaining non-option references when enabled.
+  ibkr_connect_retry_seconds:
+    value: 60
+    description: Delay before retrying an unavailable IBKR snapshot connection.
+  ibkr_conflict_probe_seconds:
+    value: 60
+    description: Delay before a read-only probe after an IBKR session conflict.
+  max_concurrent_tasks:
+    value: 4
+    description: Maximum child tasks executed concurrently by the service loop.
+  greek_shadow_enabled:
+    value: false
+    description: Enables high-order Greeks shadow telemetry without affecting live decisions.
+  greek_shadow_interval_seconds:
+    value: 60
+    description: Cadence for high-order Greeks shadow telemetry.
+  task_timeout_seconds:
+    value: 120
+    description: Hard timeout for a child-process task launched by the 24-hour service loop.
+  output_tail_characters:
+    value: 1200
+    description: Maximum failed-task stdout or stderr characters retained in service telemetry.

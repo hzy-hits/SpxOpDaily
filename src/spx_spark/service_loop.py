@@ -20,10 +20,13 @@ from spx_spark import alert_engine, greek_shadow, intraday_shock, iv_surface
 from spx_spark.config import env_bool, env_int, load_dotenv
 from spx_spark.hyperliquid import collector as hyperliquid_collector
 from spx_spark.ibkr import collector as ibkr_collector
+from spx_spark.runtime_config import runtime_value
 
 
 TaskFn = Callable[[], int]
-DEFAULT_TASK_TIMEOUT_SECONDS = 120
+DEFAULT_TASK_TIMEOUT_SECONDS = int(runtime_value("service_loop.task_timeout_seconds"))
+DEFAULT_OUTPUT_TAIL_CHARACTERS = int(runtime_value("service_loop.output_tail_characters"))
+DEFAULT_MAX_CONCURRENT_TASKS = int(runtime_value("service_loop.max_concurrent_tasks"))
 
 
 @dataclass(frozen=True)
@@ -44,44 +47,114 @@ class ServiceLoopSettings:
     ibkr_skip_options: bool
     ibkr_connect_retry_seconds: int
     ibkr_conflict_probe_seconds: int
-    ibkr_positions_enabled: bool = False
-    ibkr_positions_interval_seconds: int = 60
-    schwab_chains_enabled: bool = False
-    schwab_chains_interval_seconds: int = 300
-    max_concurrent_tasks: int = 4
-    greek_shadow_enabled: bool = False
-    greek_shadow_interval_seconds: int = 60
+    ibkr_positions_enabled: bool = bool(runtime_value("service_loop.ibkr_positions_enabled"))
+    ibkr_positions_interval_seconds: int = int(
+        runtime_value("service_loop.ibkr_positions_interval_seconds")
+    )
+    schwab_chains_enabled: bool = bool(runtime_value("schwab.collection.enabled"))
+    schwab_chains_interval_seconds: int = int(
+        runtime_value("schwab.collection.interval_seconds")
+    )
+    max_concurrent_tasks: int = int(runtime_value("service_loop.max_concurrent_tasks"))
+    greek_shadow_enabled: bool = bool(runtime_value("service_loop.greek_shadow_enabled"))
+    greek_shadow_interval_seconds: int = int(
+        runtime_value("service_loop.greek_shadow_interval_seconds")
+    )
 
     @classmethod
     def from_env(cls) -> "ServiceLoopSettings":
         load_dotenv()
         return cls(
-            hyperliquid_enabled=env_bool("SPX_SERVICE_ENABLE_HYPERLIQUID", True),
-            polymarket_enabled=env_bool("SPX_SERVICE_ENABLE_POLYMARKET", False),
-            ibkr_enabled=env_bool("SPX_SERVICE_ENABLE_IBKR", False),
-            iv_surface_enabled=env_bool("SPX_SERVICE_ENABLE_IV_SURFACE", True),
-            intraday_shock_enabled=env_bool("SPX_SERVICE_ENABLE_INTRADAY_SHOCK", False),
-            alert_enabled=env_bool("SPX_SERVICE_ENABLE_ALERTS", True),
-            hyperliquid_interval_seconds=env_int("SPX_SERVICE_HYPERLIQUID_INTERVAL_SECONDS", 30),
-            polymarket_interval_seconds=env_int("SPX_SERVICE_POLYMARKET_INTERVAL_SECONDS", 60),
-            ibkr_interval_seconds=env_int("SPX_SERVICE_IBKR_INTERVAL_SECONDS", 60),
-            iv_surface_interval_seconds=env_int("SPX_SERVICE_IV_SURFACE_INTERVAL_SECONDS", 300),
-            intraday_shock_interval_seconds=env_int(
-                "SPX_SERVICE_INTRADAY_SHOCK_INTERVAL_SECONDS", 5
+            hyperliquid_enabled=env_bool(
+                "SPX_SERVICE_ENABLE_HYPERLIQUID",
+                bool(runtime_value("service_loop.hyperliquid_enabled")),
             ),
-            alert_interval_seconds=env_int("SPX_SERVICE_ALERT_INTERVAL_SECONDS", 30),
-            heartbeat_seconds=env_int("SPX_SERVICE_HEARTBEAT_SECONDS", 60),
-            ibkr_positions_enabled=env_bool("IBKR_POSITIONS_ENABLED", False),
-            ibkr_positions_interval_seconds=env_int("IBKR_POSITIONS_POLL_SECONDS", 60),
-            schwab_chains_enabled=env_bool("SPX_SERVICE_SCHWAB_CHAINS_ENABLED", False),
-            schwab_chains_interval_seconds=env_int("SPX_SERVICE_SCHWAB_CHAINS_INTERVAL_SECONDS", 300),
-            ibkr_skip_options=env_bool("SPX_SERVICE_IBKR_SKIP_OPTIONS", False),
-            ibkr_connect_retry_seconds=env_int("IBKR_CONNECT_RETRY_SECONDS", 60),
-            ibkr_conflict_probe_seconds=env_int("IBKR_CONFLICT_PROBE_SECONDS", 60),
-            max_concurrent_tasks=env_int("SPX_SERVICE_MAX_CONCURRENT_TASKS", 4),
-            greek_shadow_enabled=env_bool("SPX_SERVICE_ENABLE_GREEK_SHADOW", False),
+            polymarket_enabled=env_bool(
+                "SPX_SERVICE_ENABLE_POLYMARKET",
+                bool(runtime_value("service_loop.polymarket_enabled")),
+            ),
+            ibkr_enabled=env_bool(
+                "SPX_SERVICE_ENABLE_IBKR", bool(runtime_value("service_loop.ibkr_enabled"))
+            ),
+            iv_surface_enabled=env_bool(
+                "SPX_SERVICE_ENABLE_IV_SURFACE",
+                bool(runtime_value("service_loop.iv_surface_enabled")),
+            ),
+            intraday_shock_enabled=env_bool(
+                "SPX_SERVICE_ENABLE_INTRADAY_SHOCK",
+                bool(runtime_value("service_loop.intraday_shock_enabled")),
+            ),
+            alert_enabled=env_bool(
+                "SPX_SERVICE_ENABLE_ALERTS",
+                bool(runtime_value("service_loop.alerts_enabled")),
+            ),
+            hyperliquid_interval_seconds=env_int(
+                "SPX_SERVICE_HYPERLIQUID_INTERVAL_SECONDS",
+                int(runtime_value("service_loop.hyperliquid_interval_seconds")),
+            ),
+            polymarket_interval_seconds=env_int(
+                "SPX_SERVICE_POLYMARKET_INTERVAL_SECONDS",
+                int(runtime_value("service_loop.polymarket_interval_seconds")),
+            ),
+            ibkr_interval_seconds=env_int(
+                "SPX_SERVICE_IBKR_INTERVAL_SECONDS",
+                int(runtime_value("service_loop.ibkr_interval_seconds")),
+            ),
+            iv_surface_interval_seconds=env_int(
+                "SPX_SERVICE_IV_SURFACE_INTERVAL_SECONDS",
+                int(runtime_value("service_loop.iv_surface_interval_seconds")),
+            ),
+            intraday_shock_interval_seconds=env_int(
+                "SPX_SERVICE_INTRADAY_SHOCK_INTERVAL_SECONDS",
+                int(runtime_value("service_loop.intraday_shock_interval_seconds")),
+            ),
+            alert_interval_seconds=env_int(
+                "SPX_SERVICE_ALERT_INTERVAL_SECONDS",
+                int(runtime_value("service_loop.alert_interval_seconds")),
+            ),
+            heartbeat_seconds=env_int(
+                "SPX_SERVICE_HEARTBEAT_SECONDS",
+                int(runtime_value("service_loop.heartbeat_seconds")),
+            ),
+            ibkr_positions_enabled=env_bool(
+                "IBKR_POSITIONS_ENABLED",
+                bool(runtime_value("service_loop.ibkr_positions_enabled")),
+            ),
+            ibkr_positions_interval_seconds=env_int(
+                "IBKR_POSITIONS_POLL_SECONDS",
+                int(runtime_value("service_loop.ibkr_positions_interval_seconds")),
+            ),
+            schwab_chains_enabled=env_bool(
+                "SPX_SERVICE_SCHWAB_CHAINS_ENABLED",
+                bool(runtime_value("schwab.collection.enabled")),
+            ),
+            schwab_chains_interval_seconds=env_int(
+                "SPX_SERVICE_SCHWAB_CHAINS_INTERVAL_SECONDS",
+                int(runtime_value("schwab.collection.interval_seconds")),
+            ),
+            ibkr_skip_options=env_bool(
+                "SPX_SERVICE_IBKR_SKIP_OPTIONS",
+                bool(runtime_value("service_loop.ibkr_skip_options")),
+            ),
+            ibkr_connect_retry_seconds=env_int(
+                "IBKR_CONNECT_RETRY_SECONDS",
+                int(runtime_value("service_loop.ibkr_connect_retry_seconds")),
+            ),
+            ibkr_conflict_probe_seconds=env_int(
+                "IBKR_CONFLICT_PROBE_SECONDS",
+                int(runtime_value("service_loop.ibkr_conflict_probe_seconds")),
+            ),
+            max_concurrent_tasks=env_int(
+                "SPX_SERVICE_MAX_CONCURRENT_TASKS",
+                int(runtime_value("service_loop.max_concurrent_tasks")),
+            ),
+            greek_shadow_enabled=env_bool(
+                "SPX_SERVICE_ENABLE_GREEK_SHADOW",
+                bool(runtime_value("service_loop.greek_shadow_enabled")),
+            ),
             greek_shadow_interval_seconds=env_int(
-                "SPX_SERVICE_GREEK_SHADOW_INTERVAL_SECONDS", 60
+                "SPX_SERVICE_GREEK_SHADOW_INTERVAL_SECONDS",
+                int(runtime_value("service_loop.greek_shadow_interval_seconds")),
             ),
         )
 
@@ -301,7 +374,7 @@ def run_task(task: ServiceTask) -> dict[str, object]:
         "stderr_chars": len(stderr_text),
     }
     if not ok:
-        tail_chars = env_int("SPX_SERVICE_OUTPUT_TAIL_CHARS", 1200)
+        tail_chars = env_int("SPX_SERVICE_OUTPUT_TAIL_CHARS", DEFAULT_OUTPUT_TAIL_CHARACTERS)
         if stdout_text:
             event["stdout_tail"] = stdout_text[-tail_chars:]
         if stderr_text:
@@ -504,7 +577,7 @@ def run_loop(
     tasks: list[ServiceTask],
     *,
     heartbeat_seconds: int,
-    max_concurrent_tasks: int = 4,
+    max_concurrent_tasks: int = DEFAULT_MAX_CONCURRENT_TASKS,
 ) -> int:
     """Concurrent scheduler: one slow task no longer delays every other task.
 

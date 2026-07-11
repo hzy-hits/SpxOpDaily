@@ -7,6 +7,12 @@ from zoneinfo import ZoneInfo
 
 from spx_spark.market_calendar import ET as NY_TZ
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR, default_spxw_expiry
+from spx_spark.runtime_config import (
+    runtime_csv,
+    runtime_schwab_option_chain_underliers,
+    runtime_schwab_symbols_by_type,
+    runtime_value,
+)
 
 DEFAULT_SLOW_POLL_LABELS = (
     "index:VIX",
@@ -384,50 +390,87 @@ class SchwabSettings:
     request_timeout_seconds: float
     app_key: str = ""
     app_secret: str = ""
-    callback_url: str = "https://127.0.0.1:8182"
-    oauth_bind_host: str = "127.0.0.1"
-    oauth_bind_port: int = 8183
-    oauth_state_file: str = "runtime/schwab-oauth-state.json"
-    oauth_state_ttl_seconds: int = 900
-    gateway_bind_host: str = "127.0.0.1"
-    gateway_bind_port: int = 8184
+    callback_url: str = field(
+        default_factory=lambda: str(runtime_value("schwab.callback_url"))
+    )
+    oauth_bind_host: str = field(
+        default_factory=lambda: str(runtime_value("schwab.oauth_bind_host"))
+    )
+    oauth_bind_port: int = field(
+        default_factory=lambda: int(runtime_value("schwab.oauth_bind_port"))
+    )
+    oauth_state_file: str = field(
+        default_factory=lambda: str(runtime_value("schwab.oauth_state_file"))
+    )
+    oauth_state_ttl_seconds: int = field(
+        default_factory=lambda: int(runtime_value("schwab.oauth_state_ttl_seconds"))
+    )
+    gateway_bind_host: str = field(
+        default_factory=lambda: str(runtime_value("schwab.gateway_bind_host"))
+    )
+    gateway_bind_port: int = field(
+        default_factory=lambda: int(runtime_value("schwab.gateway_bind_port"))
+    )
     gateway_url: str = ""
 
     @classmethod
     def from_env(cls) -> "SchwabSettings":
         load_dotenv()
         return cls(
-            api_base_url=env_str("SCHWAB_API_BASE_URL", "https://api.schwabapi.com"),
+            api_base_url=env_str("SCHWAB_API_BASE_URL", str(runtime_value("schwab.api_base_url"))),
             access_token=env_str("SCHWAB_ACCESS_TOKEN"),
-            token_file=env_str("SCHWAB_TOKEN_FILE", "runtime/schwab-token.json"),
+            token_file=env_str("SCHWAB_TOKEN_FILE", str(runtime_value("schwab.token_file"))),
             verify_indexes=env_csv(
                 "SCHWAB_VERIFY_INDEXES",
-                "$SPX,$VIX,$VIX1D,$VIX9D,$VIX3M,$VVIX,$SKEW,$NDX,$RUT,$DJI,$DJU",
+                ",".join(runtime_schwab_symbols_by_type("index")),
             ),
             verify_equities=env_csv(
                 "SCHWAB_VERIFY_EQUITIES",
-                "SPY,QQQ,IWM,DIA,HYG,LQD,TLT,IEF,SHY,UUP,GLD,USO,RSP,XLU",
+                ",".join(runtime_schwab_symbols_by_type("equity")),
             ),
-            verify_futures=env_csv("SCHWAB_VERIFY_FUTURES", "/ES,/MES"),
-            verify_option_chains=env_csv("SCHWAB_VERIFY_OPTION_CHAINS", "SPX,XSP,SPY,QQQ,IWM"),
-            option_chain_strike_count=env_int("SCHWAB_OPTION_CHAIN_STRIKE_COUNT", 10),
+            verify_futures=env_csv(
+                "SCHWAB_VERIFY_FUTURES",
+                ",".join(runtime_schwab_symbols_by_type("future")),
+            ),
+            verify_option_chains=env_csv(
+                "SCHWAB_VERIFY_OPTION_CHAINS",
+                ",".join(runtime_schwab_option_chain_underliers()),
+            ),
+            option_chain_strike_count=env_int(
+                "SCHWAB_OPTION_CHAIN_STRIKE_COUNT",
+                int(runtime_value("schwab.option_chain_strike_count")),
+            ),
             quote_fields=env_str(
                 "SCHWAB_QUOTE_FIELDS",
-                "quote,reference,extended,regular",
+                str(runtime_value("schwab.quote_fields")),
             ),
-            request_timeout_seconds=env_float("SCHWAB_REQUEST_TIMEOUT_SECONDS", 12.0),
+            request_timeout_seconds=env_float(
+                "SCHWAB_REQUEST_TIMEOUT_SECONDS",
+                float(runtime_value("schwab.request_timeout_seconds")),
+            ),
             app_key=env_str("SCHWAB_APP_KEY"),
             app_secret=env_str("SCHWAB_APP_SECRET"),
-            callback_url=env_str("SCHWAB_CALLBACK_URL", "https://127.0.0.1:8182"),
-            oauth_bind_host=env_str("SCHWAB_OAUTH_BIND_HOST", "127.0.0.1"),
-            oauth_bind_port=env_int("SCHWAB_OAUTH_BIND_PORT", 8183),
+            callback_url=env_str("SCHWAB_CALLBACK_URL", str(runtime_value("schwab.callback_url"))),
+            oauth_bind_host=env_str(
+                "SCHWAB_OAUTH_BIND_HOST", str(runtime_value("schwab.oauth_bind_host"))
+            ),
+            oauth_bind_port=env_int(
+                "SCHWAB_OAUTH_BIND_PORT", int(runtime_value("schwab.oauth_bind_port"))
+            ),
             oauth_state_file=env_str(
                 "SCHWAB_OAUTH_STATE_FILE",
-                "runtime/schwab-oauth-state.json",
+                str(runtime_value("schwab.oauth_state_file")),
             ),
-            oauth_state_ttl_seconds=env_int("SCHWAB_OAUTH_STATE_TTL_SECONDS", 900),
-            gateway_bind_host=env_str("SCHWAB_GATEWAY_BIND_HOST", "127.0.0.1"),
-            gateway_bind_port=env_int("SCHWAB_GATEWAY_BIND_PORT", 8184),
+            oauth_state_ttl_seconds=env_int(
+                "SCHWAB_OAUTH_STATE_TTL_SECONDS",
+                int(runtime_value("schwab.oauth_state_ttl_seconds")),
+            ),
+            gateway_bind_host=env_str(
+                "SCHWAB_GATEWAY_BIND_HOST", str(runtime_value("schwab.gateway_bind_host"))
+            ),
+            gateway_bind_port=env_int(
+                "SCHWAB_GATEWAY_BIND_PORT", int(runtime_value("schwab.gateway_bind_port"))
+            ),
             gateway_url=env_str("SCHWAB_GATEWAY_URL"),
         )
 
@@ -550,15 +593,13 @@ class StorageSettings:
     latest_stale_after_seconds: float
     slow_index_stale_after_seconds: float
     slow_index_labels: frozenset[str]
-    delayed_stale_after_seconds: float = 60.0
-    provider_priority: tuple[str, ...] = (
-        "ibkr",
-        "schwab",
-        "hyperliquid",
-        "polymarket",
-        "internal",
-        "mock",
-        "unknown",
+    delayed_stale_after_seconds: float = field(
+        default_factory=lambda: float(runtime_value("market_data.delayed_stale_after_seconds"))
+    )
+    provider_priority: tuple[str, ...] = field(
+        default_factory=lambda: tuple(
+            str(item).lower() for item in runtime_value("market_data.provider_priority")
+        )
     )
 
     def __post_init__(self) -> None:
@@ -566,15 +607,7 @@ class StorageSettings:
             raise ValueError("MARKET_DATA_PROVIDER_PRIORITY cannot be empty")
         if len(set(self.provider_priority)) != len(self.provider_priority):
             raise ValueError("MARKET_DATA_PROVIDER_PRIORITY cannot contain duplicates")
-        known = {
-            "ibkr",
-            "schwab",
-            "hyperliquid",
-            "polymarket",
-            "internal",
-            "mock",
-            "unknown",
-        }
+        known = {str(item).lower() for item in runtime_value("market_data.known_providers")}
         invalid = sorted(set(self.provider_priority) - known)
         if invalid:
             raise ValueError(
@@ -594,23 +627,33 @@ class StorageSettings:
             ),
             raw_file_name=env_str("MARKET_DATA_RAW_FILE_NAME", "quotes.jsonl"),
             include_raw_payload=env_bool("MARKET_DATA_INCLUDE_RAW_PAYLOAD", False),
-            latest_stale_after_seconds=env_float("MARKET_DATA_LATEST_STALE_AFTER_SECONDS", 15.0),
+            latest_stale_after_seconds=env_float(
+                "MARKET_DATA_LATEST_STALE_AFTER_SECONDS",
+                float(runtime_value("market_data.latest_stale_after_seconds")),
+            ),
             slow_index_stale_after_seconds=env_float(
                 "MARKET_DATA_SLOW_INDEX_STALE_AFTER_SECONDS",
-                env_float("IBKR_SLOW_INDEX_STALE_AFTER_SECONDS", 300.0),
+                env_float(
+                    "IBKR_SLOW_INDEX_STALE_AFTER_SECONDS",
+                    float(runtime_value("market_data.slow_index_stale_after_seconds")),
+                ),
             ),
             # Preserve case: these must match canonical ids like "index:SKEW".
             slow_index_labels=frozenset(
-                env_csv_preserve("MARKET_DATA_SLOW_INDEX_LABELS", "index:SKEW,index:VVIX")
+                env_csv_preserve(
+                    "MARKET_DATA_SLOW_INDEX_LABELS",
+                    runtime_csv("market_data.slow_index_labels"),
+                )
             ),
             delayed_stale_after_seconds=env_float(
-                "MARKET_DATA_DELAYED_STALE_AFTER_SECONDS", 60.0
+                "MARKET_DATA_DELAYED_STALE_AFTER_SECONDS",
+                float(runtime_value("market_data.delayed_stale_after_seconds")),
             ),
             provider_priority=tuple(
                 provider.lower()
                 for provider in env_csv_preserve(
                     "MARKET_DATA_PROVIDER_PRIORITY",
-                    "ibkr,schwab,hyperliquid,polymarket,internal,mock,unknown",
+                    runtime_csv("market_data.provider_priority"),
                 )
             ),
         )
