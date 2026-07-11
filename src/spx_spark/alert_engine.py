@@ -841,7 +841,9 @@ def persist_system_event_state(state: LatestState) -> None:
     previous = load_system_event_state(state_path)
     payload = dict(previous)
     provider_state = provider_state_for(state, Provider.IBKR)
-    if provider_state is not None and ibkr_session_is_position_critical():
+    # Always track IBKR session edges so reconnect ops notices work even in
+    # account-standby / no-position mode. Interrupt paging stays gated separately.
+    if provider_state is not None:
         current_status = ibkr_session_status(provider_state, now=state.as_of)
         payload = build_system_event_state_payload(
             state,
@@ -899,6 +901,38 @@ def ibkr_session_event_alert(
             source_gate="ibkr_session_state",
         )
     return None
+
+
+def ibkr_gateway_login_alert(
+    provider_state: ProviderState,
+    *,
+    previous_status: str | None,
+    current_status: str,
+) -> Alert | None:
+    """Ops-visible reconnect notice when positions/live execution are not critical.
+
+    Interruptions stay silent in standby; only Gateway/API coming back online pages.
+    """
+    if current_status != "available":
+        return None
+    if previous_status not in IBKR_INTERRUPTED_SESSION_STATUSES:
+        return None
+    standby = "account standby connected" in (provider_state.reason or "").lower()
+    mode = "account standby (market data inactive)" if standby else "market-data session"
+    return Alert(
+        severity="high",
+        kind="ibkr_session_login",
+        instrument_id="index:SPX",
+        title="IBKR Gateway/API reconnected",
+        detail=(
+            f"IBKR API connected again in {mode}. "
+            "This is an ops notice for login/session visibility; it is not a trade signal."
+        ),
+        provider=Provider.IBKR.value,
+        quality=current_status,
+        research_only=False,
+        source_gate="ibkr_session_state",
+    )
 
 
 def load_provider_failover_state(*, now: datetime) -> FailoverState | None:
@@ -1019,15 +1053,24 @@ def system_event_alerts(state: LatestState, *, persist: bool = True) -> list[Ale
             alerts.append(failover_alert)
 
     provider_state = provider_state_for(state, Provider.IBKR)
-    if provider_state is not None and ibkr_session_is_position_critical():
+    if provider_state is not None:
         current_status = ibkr_session_status(provider_state, now=state.as_of)
         previous_status = previous.get("ibkr_session_status")
+        previous_status_s = str(previous_status) if previous_status else None
         if current_status not in IBKR_TRANSITIONAL_SESSION_STATUSES:
-            alert = ibkr_session_event_alert(
-                provider_state,
-                previous_status=str(previous_status) if previous_status else None,
-                current_status=current_status,
-            )
+            if ibkr_session_is_position_critical():
+                alert = ibkr_session_event_alert(
+                    provider_state,
+                    previous_status=previous_status_s,
+                    current_status=current_status,
+                )
+            else:
+                # Standby disconnect stays silent; reconnect/login becomes visible.
+                alert = ibkr_gateway_login_alert(
+                    provider_state,
+                    previous_status=previous_status_s,
+                    current_status=current_status,
+                )
             if alert is not None:
                 alerts.append(alert)
 

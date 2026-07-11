@@ -46,7 +46,7 @@ provider_failover:
     description: Maximum recent provider-state age used to honor an explicit unavailable or disconnected status.
   quote_max_age_seconds:
     value: 30.0
-    description: Maximum direct-anchor source age used for provider health; this exceeds the 15-second REST cadence to avoid scheduler-order false failovers.
+    description: Maximum direct-anchor source age used for provider health; this exceeds the Schwab REST collection cadence to avoid scheduler-order false failovers.
   monitor_rth_only:
     value: true
     description: Restricts automatic failover transitions to the SPX regular trading session so weekends and market closure do not page or activate IBKR.
@@ -143,8 +143,8 @@ schwab:
       value: true
       description: Enables periodic Schwab quote and option-chain collection in the 24-hour service.
     interval_seconds:
-      value: 15
-      description: Collection cadence balancing 0DTE responsiveness against the 120-request-per-minute budget.
+      value: 5
+      description: Full quote+chain collection cadence; ~6 HTTP requests/cycle stays near 72/min under the 120/min budget with headroom (measured wall ~3s).
   streaming:
     mode:
       value: "off"
@@ -1093,7 +1093,7 @@ alerts:
     description: Maximum broker provider-state age in seconds for session alerts.
   system_events_enabled:
     value: true
-    description: Enables provider failover transitions and position-critical IBKR session system alerts.
+    description: Enables provider failover transitions, position-critical IBKR session alerts, and ops-visible IBKR Gateway/API reconnect notices.
   allow_broker_unavailable_proxy_watch:
     value: true
     description: Allows research-only proxy watch alerts when broker anchors are unavailable.
@@ -1156,7 +1156,7 @@ intraday_shock:
     description: Direct TradFi provider order used to select a same-provider SPX and ES pair for fast shock detection; Schwab is primary and IBKR is fallback.
   require_schwab_streaming_anchors:
     value: true
-    description: Prevents the 15-second Schwab REST collector from replacing the five-second fast lane; Schwab anchors become eligible only when tagged by the accepted WebSocket stream.
+    description: Prevents the periodic Schwab REST collector from replacing the five-second fast lane; Schwab anchors become eligible only when tagged by the accepted WebSocket stream.
   provider_switch_reset_seconds:
     value: 30
     description: Seconds a different direct provider must remain selected before abandoning an event or rearm state tied to the prior provider, preventing cross-provider price comparisons without freezing the detector.

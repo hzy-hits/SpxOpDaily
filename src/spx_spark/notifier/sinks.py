@@ -432,6 +432,7 @@ BARK_TITLE_CATEGORIES: tuple[tuple[str, frozenset[str]], ...] = (
     ("系统事件", frozenset({
         "ibkr_session_interrupted",
         "ibkr_session_restored",
+        "ibkr_session_login",
     })),
     ("波动率信号", frozenset({
         "put_skew_steepening_5m",

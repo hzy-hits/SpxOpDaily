@@ -689,6 +689,43 @@ def test_ibkr_standby_disconnect_is_silent_without_position_or_live_execution(
     assert system_event_alerts(make_state(now=now, provider_states=(interrupted,))) == []
 
 
+def test_ibkr_standby_reconnect_pages_ops_login_without_position(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("ALERT_SYSTEM_EVENT_STATE_PATH", str(tmp_path / "events.json"))
+    monkeypatch.setenv("IBKR_EXECUTION_MODE", "manual")
+    monkeypatch.setenv("IBKR_BROKER_ACCOUNT_READ_ENABLED", "false")
+    monkeypatch.setenv("IBKR_POSITIONS_SNAPSHOT_PATH", str(tmp_path / "missing-positions.json"))
+    now = datetime(2026, 7, 13, 22, 0, tzinfo=BJ_TZ)
+    interrupted = ProviderState(
+        provider=Provider.IBKR,
+        status=ProviderStatus.UNAVAILABLE,
+        checked_at=now,
+        reason="IBKR account standby disconnected",
+        connected=False,
+    )
+    standby = ProviderState(
+        provider=Provider.IBKR,
+        status=ProviderStatus.DEGRADED,
+        checked_at=now + timedelta(minutes=1),
+        reason="account standby connected; market data inactive",
+        connected=True,
+        authenticated=True,
+    )
+
+    assert system_event_alerts(make_state(now=now, provider_states=(interrupted,))) == []
+    login_alerts = system_event_alerts(
+        make_state(now=now + timedelta(minutes=1), provider_states=(standby,))
+    )
+    assert [alert.kind for alert in login_alerts] == ["ibkr_session_login"]
+    assert login_alerts[0].severity == "high"
+    assert "account standby" in login_alerts[0].detail
+    assert system_event_alerts(
+        make_state(now=now + timedelta(minutes=2), provider_states=(standby,))
+    ) == []
+
+
 def test_old_or_inactive_failover_transition_never_pages_after_restart(
     tmp_path,
     monkeypatch,

@@ -33,7 +33,11 @@ def direct_push_category(alerts: list[dict[str, object]]) -> str:
     kinds = {str(alert.get("kind") or "") for alert in alerts}
     if any(kind.startswith("spxw_position_") for kind in kinds):
         return "持仓事件"
-    if kinds & {"ibkr_session_interrupted", "ibkr_session_restored"}:
+    if kinds & {
+        "ibkr_session_interrupted",
+        "ibkr_session_restored",
+        "ibkr_session_login",
+    }:
         return "系统事件"
     if kinds & {"put_skew_steepening_5m", "atm_iv_jump_5m"}:
         return "盘外波动率信号"
