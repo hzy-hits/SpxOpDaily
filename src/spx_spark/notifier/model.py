@@ -16,6 +16,8 @@ class SinkResult:
     dry_run: bool = False
     exit_code: int | None = None
     error: str | None = None
+    alert_keys: tuple[str, ...] = ()
+    verdict: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -29,6 +31,7 @@ class NotificationResult:
     skipped_reason: str | None
     sinks: tuple[SinkResult, ...]
     acknowledged_event_ids: tuple[str, ...] = ()
+    selected_alert_keys: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -38,6 +41,7 @@ class NotificationResult:
             "skipped_reason": self.skipped_reason,
             "sinks": [sink.to_dict() for sink in self.sinks],
             "acknowledged_event_ids": list(self.acknowledged_event_ids),
+            "selected_alert_keys": list(self.selected_alert_keys),
         }
 
 

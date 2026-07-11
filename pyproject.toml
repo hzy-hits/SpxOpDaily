@@ -4,12 +4,16 @@ version = "0.1.0"
 description = "Near-real-time SPX/SPXW data verifier and alert research system"
 requires-python = ">=3.12"
 dependencies = [
+  "duckdb>=1.4,<2",
   "ib-async>=2.0.0",
+  "pytz>=2025.2",
 ]
 
 [project.scripts]
 spx-spark-alert-profile = "spx_spark.alert_profile:main"
 spx-spark-alert-engine = "spx_spark.alert_engine:main"
+spx-spark-data-platform = "spx_spark.data_platform.cli:main"
+spx-spark-data-compact = "spx_spark.data_platform.lake.compact:main"
 spx-spark-intraday-shock = "spx_spark.intraday_shock:main"
 spx-spark-greek-shadow = "spx_spark.greek_shadow:main"
 spx-spark-ibkr-verifier = "spx_spark.ibkr.verifier:main"

@@ -133,6 +133,27 @@ def test_state_survives_restart_and_duplicate_inputs_are_idempotent(tmp_path) ->
     assert records[0]["sample_count"] == 2
 
 
+def test_strategy_event_preserves_opaque_decision_link_and_call_direction(tmp_path) -> None:
+    tracker = IntradayEventOutcomeTracker(settings(tmp_path))
+    start = datetime(2026, 7, 10, 14, 0, tzinfo=UTC)
+    tracker.observe_event(
+        event_id="raw-strategy-event",
+        phase="strategy",
+        direction="up",
+        sample=sample(start, 7500.0),
+        event_key="evt_opaque",
+        decision_id="dec_opaque",
+    )
+
+    records = tracker.observe_sample(sample(start + timedelta(minutes=5), 7515.0))
+
+    assert len(records) == 1
+    assert records[0]["event_key"] == "evt_opaque"
+    assert records[0]["decision_id"] == "dec_opaque"
+    assert records[0]["hypothesis_direction"] == "up"
+    assert records[0]["return_bps"] == pytest.approx(20.0)
+
+
 def test_journal_dedupes_crash_window_before_state_marks_emitted(tmp_path) -> None:
     cfg = settings(tmp_path)
     tracker = IntradayEventOutcomeTracker(cfg)

@@ -282,6 +282,44 @@ minutes with directional MFE/MAE in daily
 `data/features/intraday_event_outcomes/date=YYYY-MM-DD/` partitions, while the higher-Greeks shadow can sample
 every 60 seconds during RTH with `SPX_SERVICE_ENABLE_GREEK_SHADOW=true`.
 
+## Research Data Platform
+
+The optional data platform keeps realtime storage and research workloads
+separate:
+
+- SQLite WAL records low-volume event, decision, delivery, outcome, and
+  compaction-lineage facts only when an alert candidate exists.
+- closed-hour raw quote JSONL is normalized into verified ZSTD Parquet without
+  deleting the source;
+- a rebuildable DuckDB catalog exposes versioned strategy-outcome, Put/Call
+  bias, data-quality, and quote views.
+
+Enable only the fail-open shadow ledger and keep deletion disabled:
+
+```bash
+DATA_PLATFORM_ENABLED=true
+DATA_PLATFORM_RAW_DELETE_ENABLED=false
+```
+
+Operational commands:
+
+```bash
+scripts/run-data-platform.sh init
+scripts/run-data-platform.sh status
+scripts/run-data-platform.sh replay-spool
+scripts/run-data-compact.sh --dry-run --limit 1 --json
+scripts/run-data-compact.sh --limit 1 --json
+scripts/run-data-platform.sh query strategy --start 2026-07-10 --limit 100
+scripts/run-data-platform.sh query bias --start 2026-07-10
+```
+
+`spx-spark-data-compact.timer` runs at minute `:08` with jitter, a five-minute
+source settle gate, and an eight-partition cap per run so the initial backfill
+cannot monopolize disk I/O. The same run replays transient SQLite fallback
+records and syncs compaction lineage. It never removes raw JSONL. See
+[docs/data-platform-design.md](docs/data-platform-design.md) for contracts,
+failure boundaries, schema evolution, and the production rollout rule.
+
 Post-close SPX/SPXW review:
 
 ```bash

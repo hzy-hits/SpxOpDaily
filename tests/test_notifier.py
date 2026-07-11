@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import subprocess
 
 import pytest
@@ -8,6 +9,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 from spx_spark.config import NotificationSettings
+from spx_spark.data_platform.telemetry import clear_telemetry_cache
 from spx_spark.notifier import (
     alert_key,
     build_codex_prompt,
@@ -175,6 +177,36 @@ def test_notifier_delivers_via_feishu_and_marks_cooldown(tmp_path) -> None:
 
     assert second.selected_count == 0
     assert second.skipped_reason == "no_alerts_after_severity_or_cooldown"
+
+
+def test_notifier_shadow_records_selected_alert_and_delivery(tmp_path, monkeypatch) -> None:
+    data_root = tmp_path / "market-data"
+    ledger_path = data_root / "runtime" / "research-ledger.sqlite3"
+    monkeypatch.setenv("DATA_PLATFORM_ENABLED", "true")
+    monkeypatch.setenv("MARKET_DATA_DATA_ROOT", str(data_root))
+    monkeypatch.setenv("DATA_PLATFORM_LEDGER_PATH", str(ledger_path))
+    clear_telemetry_cache()
+    try:
+        result = notify_payload(
+            make_payload(),
+            settings=make_settings(str(tmp_path / "notify-state.json")),
+            now=datetime(2026, 7, 7, 0, 0, tzinfo=timezone.utc),
+        )
+    finally:
+        clear_telemetry_cache()
+
+    assert result.sent_count == 1
+    connection = sqlite3.connect(ledger_path)
+    try:
+        assert connection.execute("SELECT count(*) FROM events").fetchone()[0] == 1
+        assert connection.execute("SELECT count(*) FROM decisions").fetchone()[0] == 1
+        assert connection.execute("SELECT count(*) FROM alert_deliveries").fetchone()[0] >= 1
+        sent = connection.execute(
+            "SELECT count(*) FROM alert_deliveries WHERE status='sent'"
+        ).fetchone()[0]
+        assert sent == 1
+    finally:
+        connection.close()
 
 
 def test_notifier_reports_feishu_failure_without_marking_sent(tmp_path, monkeypatch) -> None:
@@ -813,6 +845,9 @@ def test_codex_delivery_gate_blocks_negative_confirmation(tmp_path) -> None:
 
     assert result.sent_count == 0
     assert [sink.sink for sink in result.sinks] == ["codex_exec", "codex_delivery_gate"]
+    gate = result.sinks[-1]
+    assert gate.verdict == "vetoed"
+    assert gate.alert_keys == result.selected_alert_keys
     assert len(calls) == 1
 
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timezone
 
 from spx_spark.config import NotificationSettings
@@ -49,6 +50,32 @@ REVIEW_FAILURE_HIGH_FAILOPEN_KINDS = frozenset(
 )
 
 
+def _telemetry_alert_key(alert: dict[str, object]) -> str:
+    return str(alert.get("decision_id") or alert_key(alert))
+
+
+def _scope_sink(
+    sink: SinkResult,
+    alerts: list[dict[str, object]],
+    *,
+    verdict: str | None = None,
+) -> SinkResult:
+    return replace(
+        sink,
+        alert_keys=tuple(dict.fromkeys(_telemetry_alert_key(alert) for alert in alerts)),
+        verdict=verdict or sink.verdict,
+    )
+
+
+def _scope_sinks(
+    sinks: list[SinkResult],
+    alerts: list[dict[str, object]],
+    *,
+    verdict: str | None = None,
+) -> list[SinkResult]:
+    return [_scope_sink(sink, alerts, verdict=verdict) for sink in sinks]
+
+
 def _filter_recent_shock_correlations(
     alerts: list[dict[str, object]],
     *,
@@ -77,11 +104,15 @@ def _filter_recent_shock_correlations(
     if suppressed:
         alerts_marked_sent.extend(suppressed)
         sinks.append(
-            SinkResult(
+            _scope_sink(
+                SinkResult(
                 sink="intraday_shock_correlation_gate",
                 attempted=True,
                 ok=True,
                 error="fixed-cycle price move suppressed after same-direction realtime shock",
+                ),
+                suppressed,
+                verdict="suppressed",
             )
         )
     return kept, suppressed
@@ -138,14 +169,17 @@ def _failopen_time_sensitive_alerts(
     handled_alerts = [*suppressed, *failopen_alerts]
     failopen_message = format_alert_message(payload, failopen_alerts)
     lane = push_lane_for_alerts(failopen_alerts)
-    delivery_sinks = deliver_trade_push(
-        settings,
-        title=bark_title_for_alerts(failopen_alerts),
-        text=failopen_message,
-        kind="direct_event",
-        lane=lane,
-        friend=False,
-        runner=runner,
+    delivery_sinks = _scope_sinks(
+        deliver_trade_push(
+            settings,
+            title=bark_title_for_alerts(failopen_alerts),
+            text=failopen_message,
+            kind="direct_event",
+            lane=lane,
+            friend=False,
+            runner=runner,
+        ),
+        failopen_alerts,
     )
     sinks.extend(delivery_sinks)
     if not im_delivery_ok(delivery_sinks):
@@ -178,11 +212,15 @@ def _mark_noncritical_reviewed_after_model_limit(
         return
     alerts_marked_sent.extend(noncritical)
     sinks.append(
-        SinkResult(
+        _scope_sink(
+            SinkResult(
             sink=f"{sink_name}_rate_limit_cooldown",
             attempted=True,
             ok=True,
             error="model rate/usage limit; low-priority alerts marked reviewed",
+            ),
+            noncritical,
+            verdict="reviewed",
         )
     )
 
@@ -215,6 +253,7 @@ def _deliver_review_message(
             ok=False,
             error=f"{reviewer_name} output has no explicit first-line delivery cue",
         )
+        parser_sink = _scope_sink(parser_sink, review_candidates, verdict="blocked")
         sinks.append(parser_sink)
         delivered_failopen, delivery_sinks, suppressed = _failopen_time_sensitive_alerts(
             payload,
@@ -277,14 +316,17 @@ def _deliver_review_message(
                 message = format_alert_message(payload, delivery_candidates)
             lane = push_lane_for_alerts(delivery_candidates)
             friend = lane == "trade" and alerts_are_market_signals(delivery_candidates)
-            delivery_sinks = deliver_trade_push(
-                settings,
-                title=bark_title_for_alerts(delivery_candidates),
-                text=message,
-                kind="intraday_alert",
-                lane=lane,
-                friend=friend,
-                runner=runner,
+            delivery_sinks = _scope_sinks(
+                deliver_trade_push(
+                    settings,
+                    title=bark_title_for_alerts(delivery_candidates),
+                    text=message,
+                    kind="intraday_alert",
+                    lane=lane,
+                    friend=friend,
+                    runner=runner,
+                ),
+                delivery_candidates,
             )
             sinks.extend(delivery_sinks)
             if not im_delivery_ok(delivery_sinks):
@@ -329,6 +371,7 @@ def _deliver_review_message(
             ok=False,
             error=f"{reviewer_name} output mentioned non-focus context",
         )
+        scope_sink = _scope_sink(scope_sink, review_candidates, verdict="blocked")
         sinks.append(scope_sink)
         delivered_failopen, delivery_sinks, suppressed = _failopen_time_sensitive_alerts(
             payload,
@@ -369,6 +412,7 @@ def _deliver_review_message(
         ok=True,
         error=f"{reviewer_name} output explicitly vetoed delivery",
     )
+    veto_sink = _scope_sink(veto_sink, review_candidates, verdict="vetoed")
     sinks.append(veto_sink)
     alerts_marked_sent.extend(review_candidates)
     append_review_audit(
@@ -459,6 +503,7 @@ def notify_payload(
     settings: NotificationSettings | None = None,
     runner: CommandRunner = default_runner,
     now: datetime | None = None,
+    record_telemetry: bool = True,
 ) -> NotificationResult:
     settings = settings or NotificationSettings.from_env()
     if not settings.enabled:
@@ -492,7 +537,7 @@ def notify_payload(
     ):
         digest_result = flush_missed(settings, runner=runner)
         if digest_result is not None:
-            sinks.append(digest_result)
+            sinks.append(replace(digest_result, alert_keys=("__missed_digest__",)))
 
     message = format_alert_message(payload, selected)
     bypass_alerts = direct_push_alerts(selected, payload)
@@ -504,14 +549,17 @@ def notify_payload(
         settings.feishu_enabled or settings.bark_enabled or settings.deepseek_enabled
     ):
         # Legacy: OpenClaw-only mode still dumps the raw template without review.
-        delivery_sinks = deliver_trade_push(
-            settings,
-            title=bark_title_for_alerts(selected),
-            text=message,
-            kind="direct_event",
-            lane=push_lane_for_alerts(selected),
-            friend=False,
-            runner=runner,
+        delivery_sinks = _scope_sinks(
+            deliver_trade_push(
+                settings,
+                title=bark_title_for_alerts(selected),
+                text=message,
+                kind="direct_event",
+                lane=push_lane_for_alerts(selected),
+                friend=False,
+                runner=runner,
+            ),
+            selected,
         )
         sinks.extend(delivery_sinks)
         if not im_delivery_ok(delivery_sinks):
@@ -548,14 +596,17 @@ def notify_payload(
                 bypass_message = written
         lane = push_lane_for_alerts(bypass_alerts)
         friend = lane == "trade" and alerts_are_market_signals(bypass_alerts)
-        delivery_sinks = deliver_trade_push(
-            settings,
-            title=bark_title_for_alerts(bypass_alerts),
-            text=bypass_message,
-            kind="direct_event",
-            lane=lane,
-            friend=friend,
-            runner=runner,
+        delivery_sinks = _scope_sinks(
+            deliver_trade_push(
+                settings,
+                title=bark_title_for_alerts(bypass_alerts),
+                text=bypass_message,
+                kind="direct_event",
+                lane=lane,
+                friend=friend,
+                runner=runner,
+            ),
+            bypass_alerts,
         )
         sinks.extend(delivery_sinks)
         if not im_delivery_ok(delivery_sinks):
@@ -595,6 +646,11 @@ def notify_payload(
                 ok=True,
                 error="weak/non-time-sensitive alerts marked reviewed without LLM",
             )
+            prefilter_sink = _scope_sink(
+                prefilter_sink,
+                weak_review_candidates,
+                verdict="reviewed",
+            )
             sinks.append(prefilter_sink)
             append_review_audit(
                 settings,
@@ -614,6 +670,11 @@ def notify_payload(
         deepseek_result, deepseek_message = run_deepseek_reviewer(
             settings,
             build_codex_prompt(payload, review_candidates, previous_push=load_previous_push()),
+        )
+        deepseek_result = _scope_sink(
+            deepseek_result,
+            review_candidates,
+            verdict="reviewed" if deepseek_result.ok else "failed",
         )
         sinks.append(deepseek_result)
         if deepseek_result.ok:
@@ -651,6 +712,11 @@ def notify_payload(
             build_codex_prompt(payload, review_candidates, previous_push=load_previous_push()),
             runner=runner,
         )
+        agent_result = _scope_sink(
+            agent_result,
+            review_candidates,
+            verdict="reviewed" if agent_result.ok else "failed",
+        )
         sinks.append(agent_result)
         if agent_result.ok:
             review_candidates = _deliver_review_message(
@@ -686,6 +752,11 @@ def notify_payload(
             settings,
             build_codex_prompt(payload, review_candidates, previous_push=load_previous_push()),
             runner=runner,
+        )
+        codex_result = _scope_sink(
+            codex_result,
+            review_candidates,
+            verdict="reviewed" if codex_result.ok else "failed",
         )
         sinks.append(codex_result)
         if codex_result.ok and settings.codex_deliver:
@@ -758,11 +829,29 @@ def notify_payload(
             acknowledged_event_ids=tuple(sorted(acknowledged_event_ids)),
         )
     skipped_reason = None if sinks else "no_enabled_sinks"
-    return NotificationResult(
+    result = NotificationResult(
         enabled=True,
         selected_count=len(selected),
         sent_count=sent_count,
         skipped_reason=skipped_reason,
         sinks=tuple(sinks),
         acknowledged_event_ids=tuple(sorted(acknowledged_event_ids)),
+        selected_alert_keys=tuple(_telemetry_alert_key(alert) for alert in selected),
     )
+    try:
+        # Import lazily so the realtime notifier never initializes storage or
+        # analytical dependencies when the data platform is disabled.
+        from spx_spark.data_platform.integration import record_notification_result
+
+        if record_telemetry:
+            record_notification_result(
+                payload=payload,
+                selected_alerts=selected,
+                notification=result.to_dict(),
+                attempted_at=now_utc,
+            )
+    except Exception:
+        # Notification success is authoritative; research telemetry is
+        # explicitly fail-open and must not change delivery behavior.
+        pass
+    return result

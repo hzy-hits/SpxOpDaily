@@ -11,7 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -19,6 +19,15 @@ from typing import Any
 from spx_spark.alert_model import Alert
 from spx_spark.alert_profile import active_window
 from spx_spark.config import NY_TZ, NotificationSettings, StorageSettings, env_float, env_int
+from spx_spark.data_platform.integration import (
+    IntradayResearchResult,
+    persist_intraday_evaluation,
+    prepare_intraday_evaluation,
+    record_notification_result,
+    record_outcome_rows,
+)
+from spx_spark.data_platform.ids import deterministic_id
+from spx_spark.data_platform.settings import DataPlatformSettings
 from spx_spark.greek_shadow import sample_zero_dte_greeks_shadow
 from spx_spark.intraday_event_outcomes import (
     IntradayEventOutcomeSettings,
@@ -38,6 +47,7 @@ from spx_spark.intraday_strategy import (
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 from spx_spark.marketdata import MarketDataQuality, Provider, Quote, as_utc
 from spx_spark.notifier import notify_payload
+from spx_spark.notifier.policy import alert_key
 from spx_spark.notifier.state import load_acknowledged_event_ids
 from spx_spark.options_map import build_options_map
 from spx_spark.state_io import atomic_write_json_secure, exclusive_state_lock
@@ -308,6 +318,7 @@ def _shock_alert(event: dict[str, object]) -> Alert:
         source_gate="spx_es_intraday_shock_confirmed",
         dedup_group=f"{event_id}:shock",
         event_id=event_id,
+        source_at=str(event.get("extreme_at") or event.get("anchor_at") or "") or None,
     )
 
 
@@ -341,6 +352,8 @@ def _reclaim_alert(event: dict[str, object]) -> Alert:
         source_gate="spx_es_intraday_reclaim_confirmed",
         dedup_group=f"{event_id}:reclaim",
         event_id=event_id,
+        source_at=str(event.get("reclaim_confirmed_at") or event.get("extreme_at") or "")
+        or None,
     )
 
 
@@ -374,6 +387,12 @@ def _strategy_alert(signal: IntradayPathSignal) -> Alert:
         source_gate=gate,
         dedup_group=f"{signal.event_id}:strategy",
         event_id=signal.event_id,
+        source_at=signal.confirmed_at.isoformat(),
+        source_event_key=(
+            deterministic_id("source_event", signal.source_event_id)
+            if signal.source_event_id
+            else None
+        ),
     )
 
 
@@ -786,6 +805,12 @@ def run(argv: list[str] | None = None) -> int:
     settings = IntradayShockSettings.from_env()
     strategy_settings = IntradayStrategySettings.from_env()
     storage_settings = StorageSettings.from_env()
+    data_platform_settings: DataPlatformSettings | None = None
+    data_platform_config_error: str | None = None
+    try:
+        data_platform_settings = DataPlatformSettings.from_env()
+    except Exception as exc:  # Optional research configuration is always fail-open.
+        data_platform_config_error = f"{type(exc).__name__}:{exc}"
     latest = LatestStateStore(storage_settings).load()
     session_date = rth_session_date(latest.as_of)
     payload: dict[str, Any] = {
@@ -851,15 +876,73 @@ def run(argv: list[str] | None = None) -> int:
                     )
                 atomic_write_json_secure(state_path, monitor_state)
 
+            prepared_research = None
+            research_result = None
+            research_error = data_platform_config_error
+            if data_platform_settings is not None and data_platform_settings.enabled:
+                try:
+                    # Pure ID/record preparation only. No research I/O occurs
+                    # before the latency-critical notification attempt.
+                    prepared_research = prepare_intraday_evaluation(
+                        session_date=session_date,
+                        source_at=sample.at,
+                        available_at=latest.as_of,
+                        spx=sample.spx,
+                        es=sample.es,
+                        spx_source_at=sample.spx_source_at or sample.at,
+                        es_source_at=sample.es_source_at or sample.at,
+                        structure=asdict(structure),
+                        path_decision=path_decision.to_dict(),
+                        alerts=tuple(alert.to_dict() for alert in alerts),
+                        strategy_config=asdict(strategy_settings),
+                        settings=data_platform_settings,
+                    )
+                    research_result = prepared_research.result
+                except Exception as exc:  # Research preparation must never suppress an alert.
+                    research_error = f"{type(exc).__name__}:{exc}"
+            elif data_platform_settings is not None:
+                research_result = IntradayResearchResult(status="disabled")
+
             payload = _notification_payload(latest, monitor_state, alerts)
             payload["intraday_path"] = path_decision.to_dict()
+            research_link_by_alert: dict[tuple[str, str], object] = {}
+            if research_result is not None:
+                alert_rows = payload.get("alerts")
+                if isinstance(alert_rows, list):
+                    for alert, row, link in zip(
+                        alerts,
+                        alert_rows,
+                        research_result.alert_links,
+                        strict=False,
+                    ):
+                        if isinstance(row, dict):
+                            row["source_at"] = link.source_at.isoformat()
+                            row["event_key"] = link.event_key
+                            row["decision_id"] = link.decision_id
+                        research_link_by_alert[(alert.kind, str(alert.event_id or ""))] = link
+                payload["data_platform"] = {
+                    "status": research_result.status,
+                    "evaluation_event_key": research_result.evaluation_event_key,
+                    "evaluation_decision_id": research_result.evaluation_decision_id,
+                    "alert_link_count": len(research_result.alert_links),
+                    "errors": list(research_result.errors),
+                }
+            elif research_error is not None:
+                payload["data_platform"] = {"status": "error", "error": research_error}
             if option_structure_error is not None:
                 payload["option_structure_error"] = option_structure_error
 
             # Delivery stays on the latency-critical path. Outcome and Greeks
             # telemetry run only after the deterministic alert attempt.
+            notification_result = None
             if alerts and not args.no_notify:
-                result = notify_payload(payload, settings=notify_settings, now=sample.at)
+                result = notify_payload(
+                    payload,
+                    settings=notify_settings,
+                    now=sample.at,
+                    record_telemetry=False,
+                )
+                notification_result = result
                 payload["notification"] = result.to_dict()
                 acknowledged = set(result.acknowledged_event_ids)
                 delivered_alerts = [
@@ -882,6 +965,44 @@ def run(argv: list[str] | None = None) -> int:
                         )
                         atomic_write_json_secure(state_path, latest_monitor_state)
 
+            # Research persistence is deliberately after notification and its
+            # durable delivery acknowledgement. It may spool, but cannot add
+            # latency to the user-visible alert.
+            if prepared_research is not None and data_platform_settings is not None:
+                try:
+                    research_result = persist_intraday_evaluation(
+                        prepared_research,
+                        settings=data_platform_settings,
+                    )
+                    payload["data_platform"] = {
+                        "status": research_result.status,
+                        "evaluation_event_key": research_result.evaluation_event_key,
+                        "evaluation_decision_id": research_result.evaluation_decision_id,
+                        "alert_link_count": len(research_result.alert_links),
+                        "errors": list(research_result.errors),
+                    }
+                    if notification_result is not None:
+                        selected_keys = set(notification_result.selected_alert_keys)
+                        alert_rows = payload.get("alerts")
+                        selected_rows = tuple(
+                            row
+                            for row in alert_rows
+                            if isinstance(row, dict)
+                            and str(row.get("decision_id") or alert_key(row)) in selected_keys
+                        ) if isinstance(alert_rows, list) else ()
+                        record_notification_result(
+                            payload=payload,
+                            selected_alerts=selected_rows,
+                            notification=notification_result.to_dict(),
+                            attempted_at=sample.at,
+                            settings=data_platform_settings,
+                        )
+                except Exception as exc:  # Research storage must never suppress an alert.
+                    payload["data_platform"] = {
+                        "status": "error",
+                        "error": f"{type(exc).__name__}:{exc}",
+                    }
+
             outcome_summary: dict[str, object] = {"status": "ok", "records_emitted": 0}
             try:
                 tracker = IntradayEventOutcomeTracker(IntradayEventOutcomeSettings.from_env())
@@ -890,23 +1011,49 @@ def run(argv: list[str] | None = None) -> int:
                     spx_source_at=sample.spx_source_at or sample.at,
                     es_source_at=sample.es_source_at or sample.at,
                 )
-                for alert in raw_price_alerts:
-                    phase = "shock" if alert.kind == SHOCK_KIND else "reclaim"
-                    active_event = monitor_state.get("active_event")
-                    direction = (
-                        str(active_event.get("direction"))
-                        if isinstance(active_event, dict)
-                        else "down"
+                outcome_alerts = (
+                    *raw_price_alerts,
+                    *(alert for alert in alerts if alert.kind in STRATEGY_KINDS),
+                )
+                active_event = monitor_state.get("active_event")
+                market_direction = (
+                    str(active_event.get("direction"))
+                    if isinstance(active_event, dict)
+                    else "down"
+                )
+                for alert in outcome_alerts:
+                    if not alert.event_id:
+                        continue
+                    if alert.kind == SHOCK_KIND:
+                        phase = "shock"
+                        direction = market_direction
+                    elif alert.kind == RECLAIM_KIND:
+                        phase = "reclaim"
+                        direction = market_direction
+                    else:
+                        phase = "strategy"
+                        direction = "up"
+                    research_link = research_link_by_alert.get(
+                        (alert.kind, str(alert.event_id))
                     )
-                    if phase in {"shock", "reclaim"} and direction in {"up", "down"}:
+                    if direction in {"up", "down"}:
                         tracker.observe_event(
                             event_id=str(alert.event_id),
                             phase=phase,
                             direction=direction,
                             sample=outcome_sample,
+                            event_key=getattr(research_link, "event_key", None),
+                            decision_id=getattr(research_link, "decision_id", None),
                         )
                 emitted = tracker.observe_sample(outcome_sample)
                 outcome_summary["records_emitted"] = len(emitted)
+                if data_platform_settings is not None:
+                    outcome_summary["ledger_records"] = len(
+                        record_outcome_rows(
+                            emitted,
+                            settings=data_platform_settings,
+                        )
+                    )
             except Exception as exc:  # Outcome telemetry must never suppress an alert.
                 outcome_summary = {
                     "status": "error",
@@ -920,6 +1067,9 @@ def run(argv: list[str] | None = None) -> int:
                 if not event_greek_shadow_due(monitor_state, alert):
                     continue
                 trigger_kind = "shock" if alert.kind == SHOCK_KIND else "reclaim"
+                research_link = research_link_by_alert.get(
+                    (alert.kind, str(alert.event_id or ""))
+                )
                 result = sample_zero_dte_greeks_shadow(
                     latest,
                     data_root=storage_settings.data_root,
@@ -934,6 +1084,7 @@ def run(argv: list[str] | None = None) -> int:
                         ),
                         "spx": sample.spx,
                         "es": sample.es,
+                        "event_key": getattr(research_link, "event_key", None),
                     },
                     options_map=options_map,
                 )

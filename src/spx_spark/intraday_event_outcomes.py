@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Literal
 from zoneinfo import ZoneInfo
 
+from spx_spark.data_platform.ids import make_event_key
 from spx_spark.state_io import atomic_write_json_secure, exclusive_state_lock
 
 
@@ -33,7 +34,7 @@ RESULT_SCHEMA_VERSION = 1
 DEFAULT_HORIZONS_MINUTES = (5, 15, 30)
 ET = ZoneInfo("America/New_York")
 
-EventPhase = Literal["shock", "reclaim"]
+EventPhase = Literal["shock", "reclaim", "strategy"]
 EventDirection = Literal["up", "down"]
 
 
@@ -170,6 +171,8 @@ def _result_key(observation_id: str, minutes: int) -> str:
 def _new_observation(
     *,
     observation_id: str,
+    event_key: str,
+    decision_id: str | None,
     phase: EventPhase,
     direction: EventDirection,
     sample: SynchronizedSPXSample,
@@ -188,6 +191,8 @@ def _new_observation(
     }
     return {
         "observation_id": observation_id,
+        "event_key": event_key,
+        "decision_id": decision_id,
         "phase": phase,
         "direction": direction,
         "observed_at": at.isoformat(),
@@ -250,7 +255,11 @@ def _finish_due_horizons(
     phase = str(observation.get("phase") or "")
     shock_direction = str(observation.get("direction") or "")
     hypothesis_direction = (
-        shock_direction if phase == "shock" else "up" if shock_direction == "down" else "down"
+        shock_direction
+        if phase in {"shock", "strategy"}
+        else "up"
+        if shock_direction == "down"
+        else "down"
     )
 
     parsed_samples = [(_parse_datetime(item["at"]), float(item["spx"])) for item in samples]
@@ -344,10 +353,23 @@ def _result_record(
     observation: dict[str, object],
     metric: dict[str, object],
 ) -> dict[str, object]:
+    event_key = observation.get("event_key")
+    if not isinstance(event_key, str) or not event_key:
+        # Backward-compatible recovery for an observation written before the
+        # shared data-platform key existed. The legacy observation id is
+        # already opaque and therefore safe to use as identity material.
+        phase = str(observation.get("phase") or "event")
+        event_key = make_event_key(
+            f"intraday_price_{phase}",
+            _parse_datetime(observation.get("observed_at")),
+            str(observation.get("observation_id") or "legacy"),
+        )
     return {
         "schema_version": RESULT_SCHEMA_VERSION,
         "record_key": metric["record_key"],
         "observation_id": observation["observation_id"],
+        "event_key": event_key,
+        "decision_id": observation.get("decision_id"),
         "phase": observation["phase"],
         "direction": observation["direction"],
         "observed_at": observation["observed_at"],
@@ -473,14 +495,24 @@ class IntradayEventOutcomeTracker:
         phase: EventPhase,
         direction: EventDirection,
         sample: SynchronizedSPXSample,
+        event_key: str | None = None,
+        decision_id: str | None = None,
     ) -> str:
-        if phase not in {"shock", "reclaim"}:
+        if phase not in {"shock", "reclaim", "strategy"}:
             raise ValueError("unsupported intraday outcome event phase")
         if direction not in {"up", "down"}:
             raise ValueError("unsupported intraday outcome direction")
         observation_id = _observation_id(event_id, phase)
+        provided_event_key = event_key is not None
+        resolved_event_key = event_key or make_event_key(
+            f"intraday_price_{phase}" if phase != "strategy" else "intraday_strategy_signal",
+            sample.at,
+            event_id,
+        )
         observation = _new_observation(
             observation_id=observation_id,
+            event_key=resolved_event_key,
+            decision_id=decision_id,
             phase=phase,
             direction=direction,
             sample=sample,
@@ -493,6 +525,18 @@ class IntradayEventOutcomeTracker:
             if existing is not None:
                 if existing.get("phase") != phase or existing.get("direction") != direction:
                     raise IntradayOutcomeStoreError("conflicting intraday outcome observation")
+                existing_event_key = existing.get("event_key")
+                if provided_event_key and existing_event_key not in {None, resolved_event_key}:
+                    raise IntradayOutcomeStoreError("conflicting intraday outcome event key")
+                existing_decision_id = existing.get("decision_id")
+                if existing_event_key is None or (
+                    existing_decision_id is None and decision_id is not None
+                ):
+                    existing["event_key"] = resolved_event_key
+                    existing["decision_id"] = decision_id
+                    state["observations"] = observations
+                    state["updated_at"] = sample.at.isoformat()
+                    atomic_write_json_secure(self.state_path, state)
                 return observation_id
             observations[observation_id] = observation
             state["observations"] = observations

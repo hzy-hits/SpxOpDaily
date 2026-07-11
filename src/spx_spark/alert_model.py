@@ -24,6 +24,8 @@ class Alert:
     source_gate: str | None = None
     dedup_group: str | None = None
     event_id: str | None = None
+    source_at: str | None = None
+    source_event_key: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)

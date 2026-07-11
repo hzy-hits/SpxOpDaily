@@ -1,0 +1,11 @@
+[Unit]
+Description=Compact each closed SPX Spark quote hour
+
+[Timer]
+OnCalendar=*-*-* *:08:00
+RandomizedDelaySec=120
+Persistent=true
+Unit=spx-spark-data-compact.service
+
+[Install]
+WantedBy=timers.target

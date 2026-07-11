@@ -1,0 +1,267 @@
+"""Canonical research schemas used to normalize evolving storage partitions.
+
+The Parquet lake is append-only and old partitions are expected to outlive the
+writer that produced them.  Research views therefore select a stable set of
+columns and fill newly introduced fields with typed ``NULL`` values.  Aliases
+cover the first-generation JSONL/SQLite names without baking those physical
+schemas into the public research API.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class Column:
+    name: str
+    sql_type: str
+    aliases: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class DatasetSchema:
+    name: str
+    columns: tuple[Column, ...]
+    primary_key: str | tuple[str, ...] | None = None
+    sqlite_tables: tuple[str, ...] = ()
+    parquet_patterns: tuple[str, ...] = ()
+
+
+def c(name: str, sql_type: str, *aliases: str) -> Column:
+    return Column(name, sql_type, aliases)
+
+
+DATASET_SCHEMAS: tuple[DatasetSchema, ...] = (
+    DatasetSchema(
+        "decisions",
+        (
+            c("decision_id", "VARCHAR", "id"),
+            c("event_key", "VARCHAR", "event_id", "observation_id"),
+            c("feature_snapshot_id", "VARCHAR", "snapshot_id"),
+            c("session_date", "DATE", "trading_date", "date"),
+            c("strategy_name", "VARCHAR", "strategy", "playbook", "candidate_type"),
+            c("strategy_version", "VARCHAR", "version"),
+            c("side", "VARCHAR", "option_side", "right"),
+            c("action", "VARCHAR", "decision_action"),
+            c("status", "VARCHAR", "decision_status"),
+            c("reason_code", "VARCHAR", "reason", "veto_reason", "block_reason"),
+            c("gamma_regime", "VARCHAR"),
+            c("llm_provider", "VARCHAR", "review_provider"),
+            c("llm_decision", "VARCHAR", "review_decision"),
+            c("source_at", "TIMESTAMPTZ", "observed_at", "event_at"),
+            c("received_at", "TIMESTAMPTZ"),
+            c("available_at", "TIMESTAMPTZ"),
+            c("decision_at", "TIMESTAMPTZ", "created_at"),
+            c("updated_at", "TIMESTAMPTZ"),
+            c("schema_version", "INTEGER"),
+            c("writer_version", "VARCHAR"),
+            c("git_commit", "VARCHAR"),
+            c("payload_json", "VARCHAR", "payload", "details_json", "attributes_json"),
+            c("source_file", "VARCHAR", "filename"),
+        ),
+        primary_key="decision_id",
+        sqlite_tables=("decisions",),
+    ),
+    DatasetSchema(
+        "events",
+        (
+            c("event_key", "VARCHAR", "event_id", "observation_id", "record_key"),
+            c("session_date", "DATE", "trading_date", "date"),
+            c("event_type", "VARCHAR", "type", "candidate_type"),
+            c("phase", "VARCHAR"),
+            c("direction", "VARCHAR"),
+            c("source_at", "TIMESTAMPTZ", "observed_at", "event_at"),
+            c("received_at", "TIMESTAMPTZ"),
+            c("available_at", "TIMESTAMPTZ"),
+            c("spx", "DOUBLE", "start_spx", "spx_price"),
+            c("es", "DOUBLE", "es_price"),
+            c("schema_version", "INTEGER"),
+            c("writer_version", "VARCHAR"),
+            c("payload_json", "VARCHAR", "payload", "details_json", "attributes_json"),
+            c("source_file", "VARCHAR", "filename"),
+        ),
+        primary_key="event_key",
+        sqlite_tables=("events",),
+    ),
+    DatasetSchema(
+        "feature_snapshots",
+        (
+            c("feature_snapshot_id", "VARCHAR", "snapshot_id", "id"),
+            c("decision_id", "VARCHAR"),
+            c("event_key", "VARCHAR", "event_id", "observation_id"),
+            c("session_date", "DATE", "trading_date", "date"),
+            c("source_at", "TIMESTAMPTZ", "observed_at", "captured_at"),
+            c("received_at", "TIMESTAMPTZ"),
+            c("available_at", "TIMESTAMPTZ", "calculated_at"),
+            c("spx", "DOUBLE", "spx_price"),
+            c("es", "DOUBLE", "es_price"),
+            c("net_gamma", "DOUBLE", "signed_gex", "net_gex"),
+            c("gamma_regime", "VARCHAR"),
+            c("charm", "DOUBLE", "net_charm"),
+            c("vanna", "DOUBLE", "net_vanna"),
+            c("color", "DOUBLE", "net_color"),
+            c("speed", "DOUBLE", "net_speed"),
+            c("call_wall", "DOUBLE", "call_wall_strike"),
+            c("put_wall", "DOUBLE", "put_wall_strike"),
+            c("gamma_flip", "DOUBLE", "flip", "zero_gamma"),
+            c("iv", "DOUBLE", "implied_vol"),
+            c("skew", "DOUBLE", "iv_skew"),
+            c("schema_version", "INTEGER"),
+            c("calculation_version", "VARCHAR", "model_version"),
+            c("payload_json", "VARCHAR", "payload", "details_json", "attributes_json"),
+            c("source_file", "VARCHAR", "filename"),
+        ),
+        primary_key="feature_snapshot_id",
+        sqlite_tables=("feature_snapshots",),
+    ),
+    DatasetSchema(
+        "decision_legs",
+        (
+            c("leg_id", "VARCHAR", "id"),
+            c("decision_id", "VARCHAR"),
+            c("session_date", "DATE", "trading_date", "date"),
+            c("leg_index", "INTEGER", "position"),
+            c("side", "VARCHAR", "option_side", "right", "right_code"),
+            c("instrument_id", "VARCHAR", "contract_id"),
+            c("symbol", "VARCHAR", "local_symbol"),
+            c("expiry", "DATE", "expiration"),
+            c("strike", "DOUBLE"),
+            c("quantity", "DOUBLE", "qty"),
+            c("bid", "DOUBLE"),
+            c("ask", "DOUBLE"),
+            c("mark", "DOUBLE", "mid"),
+            c("delta", "DOUBLE"),
+            c("gamma", "DOUBLE"),
+            c("theta", "DOUBLE"),
+            c("vega", "DOUBLE"),
+            c("source_at", "TIMESTAMPTZ", "quote_at", "quote_source_at"),
+            c("available_at", "TIMESTAMPTZ", "quote_available_at"),
+            c("schema_version", "INTEGER"),
+            c("payload_json", "VARCHAR", "payload", "details_json", "attributes_json"),
+            c("source_file", "VARCHAR", "filename"),
+        ),
+        primary_key=("decision_id", "leg_index"),
+        sqlite_tables=("decision_legs",),
+    ),
+    DatasetSchema(
+        "alert_deliveries",
+        (
+            c("delivery_id", "VARCHAR", "id"),
+            c("decision_id", "VARCHAR"),
+            c("session_date", "DATE", "trading_date", "date"),
+            c("channel", "VARCHAR"),
+            c("provider", "VARCHAR"),
+            c("status", "VARCHAR", "delivery_status"),
+            c("reason_code", "VARCHAR", "reason", "error_code", "veto_reason"),
+            c("attempted_at", "TIMESTAMPTZ", "created_at"),
+            c("sent_at", "TIMESTAMPTZ", "delivered_at"),
+            c("updated_at", "TIMESTAMPTZ"),
+            c("schema_version", "INTEGER"),
+            c("payload_json", "VARCHAR", "payload", "details_json", "attributes_json"),
+            c("source_file", "VARCHAR", "filename"),
+        ),
+        primary_key="delivery_id",
+        sqlite_tables=("alert_deliveries", "deliveries"),
+    ),
+    DatasetSchema(
+        "outcomes",
+        (
+            c("outcome_id", "VARCHAR", "record_key", "id"),
+            c("decision_id", "VARCHAR"),
+            c("event_key", "VARCHAR", "event_id", "observation_id"),
+            c("session_date", "DATE", "trading_date", "date"),
+            c("horizon_minutes", "INTEGER", "horizon"),
+            c("status", "VARCHAR", "outcome_status"),
+            c("reason_code", "VARCHAR", "reason"),
+            c("target_at", "TIMESTAMPTZ"),
+            c("sample_at", "TIMESTAMPTZ", "sampled_at", "completed_at"),
+            c("available_at", "TIMESTAMPTZ", "sample_at", "sampled_at", "completed_at"),
+            c("start_spx", "DOUBLE"),
+            c("end_spx", "DOUBLE"),
+            c("return_bps", "DOUBLE", "spx_return_bps"),
+            c("mfe_bps", "DOUBLE", "spx_mfe_bps"),
+            c("mae_bps", "DOUBLE", "spx_mae_bps"),
+            c("path_high_return_bps", "DOUBLE"),
+            c("path_low_return_bps", "DOUBLE"),
+            c("hypothesis_direction", "VARCHAR"),
+            c("entry_price", "DOUBLE"),
+            c("exit_price", "DOUBLE"),
+            c("option_pnl", "DOUBLE", "pnl"),
+            c("option_return_bps", "DOUBLE"),
+            c("option_return_pct", "DOUBLE", "return_pct"),
+            c("schema_version", "INTEGER"),
+            c("payload_json", "VARCHAR", "payload", "details_json", "attributes_json"),
+            c("source_file", "VARCHAR", "filename"),
+        ),
+        primary_key="outcome_id",
+        sqlite_tables=("outcomes",),
+    ),
+    DatasetSchema(
+        "session_manifests",
+        (
+            c("manifest_id", "VARCHAR", "id", "compaction_run_id"),
+            c("session_date", "DATE", "trading_date", "date"),
+            c("provider", "VARCHAR"),
+            c("dataset", "VARCHAR", "data_type", "table_name"),
+            c("partition", "VARCHAR", "partition_key"),
+            c("status", "VARCHAR", "verification_status"),
+            c("source_file", "VARCHAR", "output_path", "source_path", "filename"),
+            c("source_checksum", "VARCHAR", "source_sha256", "checksum"),
+            c("row_count", "BIGINT"),
+            c("min_source_at", "TIMESTAMPTZ", "min_received_at"),
+            c("max_source_at", "TIMESTAMPTZ", "max_received_at"),
+            c("max_gap_seconds", "DOUBLE"),
+            c("stale_ratio", "DOUBLE"),
+            c("missing_ratio", "DOUBLE", "null_ratio"),
+            c("verified_at", "TIMESTAMPTZ", "completed_at"),
+            c("schema_version", "VARCHAR"),
+            c("details_json", "VARCHAR", "payload", "payload_json"),
+        ),
+        primary_key=("source_file", "source_checksum"),
+        sqlite_tables=(
+            "session_data_manifest",
+            "session_manifests",
+            "compaction_manifests",
+            "source_files",
+        ),
+        parquet_patterns=("manifests/**/*.parquet",),
+    ),
+    DatasetSchema(
+        "quotes",
+        (
+            c("schema_version", "VARCHAR"),
+            c("writer_version", "VARCHAR"),
+            c("provider", "VARCHAR"),
+            c("session_date", "DATE", "date"),
+            c("received_at", "TIMESTAMPTZ"),
+            c("source_at", "TIMESTAMPTZ"),
+            c("available_at", "TIMESTAMPTZ", "received_at"),
+            c("instrument_id", "VARCHAR"),
+            c("symbol", "VARCHAR"),
+            c("instrument_type", "VARCHAR"),
+            c("expiry", "DATE"),
+            c("strike", "DOUBLE"),
+            c("right", "VARCHAR", "side"),
+            c("bid", "DOUBLE"),
+            c("ask", "DOUBLE"),
+            c("last", "DOUBLE"),
+            c("mark", "DOUBLE"),
+            c("quality", "VARCHAR"),
+            c("source_latency_ms", "DOUBLE"),
+            c("implied_vol", "DOUBLE", "iv"),
+            c("delta", "DOUBLE"),
+            c("gamma", "DOUBLE"),
+            c("theta", "DOUBLE"),
+            c("vega", "DOUBLE"),
+            c("rho", "DOUBLE"),
+            c("source_file", "VARCHAR", "filename"),
+            c("source_sha256", "VARCHAR", "source_checksum"),
+            c("compacted_at", "TIMESTAMPTZ"),
+        ),
+        parquet_patterns=("quotes/**/*.parquet",),
+    ),
+)
+
+
+SCHEMAS_BY_NAME = {schema.name: schema for schema in DATASET_SCHEMAS}
