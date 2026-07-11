@@ -354,3 +354,773 @@ service_loop:
   output_tail_characters:
     value: 1200
     description: Maximum failed-task stdout or stderr characters retained in service telemetry.
+
+ibkr:
+  host:
+    value: 127.0.0.1
+    description: IB Gateway host used by the snapshot collector.
+  port:
+    value: 4002
+    description: IB Gateway API port; 4002 is the default paper-trading port.
+  client_id:
+    value: 171
+    description: Client id for the snapshot collector so it does not collide with stream or position clients.
+  market_data_type:
+    value: 1
+    description: IBKR market data type requested by the collector; 1 means live data.
+  verify_indexes:
+    value: [SPX, VIX, VIX1D, VIX9D, VIX3M, VVIX, SKEW]
+    description: Index symbols verified and collected from IBKR.
+  verify_stocks:
+    value: [SPY, QQQ, IWM, DIA, HYG, LQD, TLT, IEF, SHY, UUP, GLD, USO, RSP, XLU]
+    description: ETF and equity context symbols verified and collected from IBKR.
+  verify_futures:
+    value: [ES, MES]
+    description: Equity-index futures verified and collected from IBKR.
+  verify_cfds:
+    value: [IBUS500]
+    description: Optional IBKR index CFD symbols used as near-24h SPX cash proxies when entitled.
+  option_strike_window_points:
+    value: 50
+    description: SPXW option strikes within this many index points of the reference are requested by the verifier.
+  option_strike_step:
+    value: 5
+    description: Strike spacing in index points used when planning SPXW verifier requests.
+  max_option_lines:
+    value: 40
+    description: Maximum SPXW option market-data lines requested by the snapshot collector.
+  quote_wait_seconds:
+    value: 8.0
+    description: Seconds to wait for snapshot quote fields before evaluating IBKR results.
+  stale_after_seconds:
+    value: 10.0
+    description: Maximum quote age in seconds for normal IBKR live symbols before marking them stale.
+  slow_index_stale_after_seconds:
+    value: 300.0
+    description: Longer stale threshold in seconds for slow-updating IBKR index labels.
+  slow_index_labels:
+    value: [index:SKEW, index:VVIX]
+    description: IBKR canonical labels allowed to use the slow-index stale threshold.
+  qualify_contracts:
+    value: true
+    description: Whether IBKR contracts are qualified before market-data requests.
+  request_timeout_seconds:
+    value: 30.0
+    description: Network timeout in seconds for IBKR request operations.
+
+ibkr_stream:
+  client_id:
+    value: 172
+    description: Client id for the persistent streaming collector.
+  flush_interval_seconds:
+    value: 5.0
+    description: Maximum seconds between stream flushes to latest-state storage.
+  policy_check_seconds:
+    value: 30.0
+    description: Seconds between runtime-policy checks in the stream collector.
+  replan_drift_points:
+    value: 20.0
+    description: SPX point drift that triggers option subscription replanning.
+  max_option_lines:
+    value: 60
+    description: Maximum SPXW option lines reserved for the streaming collector.
+  hot_lane_share:
+    value: 0.7
+    description: Fraction of option-line budget reserved for hot ATM contracts.
+  reconnect_min_seconds:
+    value: 5.0
+    description: Minimum reconnect backoff in seconds after stream disconnect.
+  reconnect_max_seconds:
+    value: 300.0
+    description: Maximum reconnect backoff in seconds after repeated stream failures.
+  skip_options:
+    value: false
+    description: Disables option subscriptions while keeping underlying stream data.
+  farm_broken_restart_seconds:
+    value: 180.0
+    description: Seconds IBKR farms may remain broken before gateway restart automation is considered.
+  gateway_restart_cooldown_seconds:
+    value: 120.0
+    description: Minimum seconds between automated IB Gateway restart attempts.
+  auto_restart_gateway_on_farm_broken:
+    value: true
+    description: Enables automated gateway restart when farm-broken conditions persist.
+  spy_option_lines:
+    value: 16
+    description: Maximum SPY option lines used for wall-comparison context.
+  spy_strike_step:
+    value: 2
+    description: SPY strike spacing in dollars used for stream subscription planning.
+  slow_poll_labels:
+    value: [index:VIX, index:VIX1D, index:VIX9D, index:VIX3M, index:VVIX, index:SKEW, stock:QQQ, stock:IWM, stock:DIA, stock:HYG, stock:LQD, stock:TLT, stock:IEF, stock:SHY, stock:UUP, stock:GLD, stock:USO, stock:RSP, stock:XLU]
+    description: Stream labels polled periodically instead of held as persistent subscriptions.
+  slow_poll_interval_seconds:
+    value: 300.0
+    description: Seconds between slow-poll batches for context indexes and ETFs.
+  slow_poll_hold_seconds:
+    value: 10.0
+    description: Seconds to hold each slow-poll subscription chunk before releasing it.
+  slow_poll_chunk_size:
+    value: 6
+    description: Number of slow-poll labels requested in each chunk.
+  atm_state_path:
+    value: ""
+    description: Optional path for persisting ATM stream planning state; empty uses in-memory behavior.
+
+ibkr_positions:
+  enabled:
+    value: false
+    description: Enables optional IBKR account-position polling.
+  client_id:
+    value: 174
+    description: Client id for the position watcher so it does not collide with market-data clients.
+  poll_interval_seconds:
+    value: 60
+    description: Seconds between position snapshot polls.
+
+runtime_policy:
+  ibkr_schedule_enabled:
+    value: true
+    description: Enables the runtime schedule gate for IBKR market-data collection.
+  ibkr_schedule_timezone:
+    value: Asia/Shanghai
+    description: Time zone used to interpret IBKR schedule start and stop times.
+  ibkr_schedule_start:
+    value: "00:00"
+    description: Daily local start time for the IBKR collection window.
+  ibkr_schedule_stop:
+    value: "00:00"
+    description: Daily local stop time for the IBKR collection window; matching start means always open.
+  ibkr_connect_retry_seconds:
+    value: 60
+    description: Seconds to wait before retrying an unavailable IBKR connection.
+  ibkr_conflict_retry_minutes:
+    value: 0
+    description: Minutes before trying to reclaim a competing IBKR session; zero disables fighting.
+  ibkr_conflict_probe_seconds:
+    value: 60
+    description: Seconds between non-invasive probes after an IBKR session conflict.
+  ibkr_fallback_provider:
+    value: schwab
+    description: Provider name used when IBKR is unavailable or intentionally disabled.
+  strict_no_session_fight:
+    value: true
+    description: Prevents collectors from competing with a phone or desktop IBKR session.
+  weekend_maintenance_mode:
+    value: true
+    description: Reserves non-trading weekends for maintenance unless futures have reopened.
+  runtime_mode_path:
+    value: runtime/mode.json
+    description: Path to the short-lived runtime mode override file.
+  agent_override_default_ttl_minutes:
+    value: 120
+    description: Default lifetime in minutes for agent-created runtime overrides.
+
+hyperliquid:
+  api_base_url:
+    value: https://api.hyperliquid.xyz
+    description: Public Hyperliquid info API base URL.
+  dex:
+    value: xyz
+    description: Hyperliquid perp DEX namespace for the SPX proxy.
+  coin:
+    value: "xyz:SP500"
+    description: Hyperliquid coin id used as the S&P 500-like proxy.
+  request_timeout_seconds:
+    value: 10.0
+    description: Network timeout in seconds for Hyperliquid API requests.
+  include_book:
+    value: true
+    description: Includes order-book snapshots in Hyperliquid context collection.
+  include_trades:
+    value: true
+    description: Includes recent trades in Hyperliquid context collection.
+  book_depth_levels:
+    value: 5
+    description: Number of book levels retained on each side for Hyperliquid context.
+  large_trade_notional_threshold:
+    value: 100000.0
+    description: USD notional threshold for flagging large Hyperliquid proxy trades.
+  proxy_basis_warn_bps:
+    value: 50.0
+    description: Basis warning threshold in basis points versus a live cash/index anchor.
+  proxy_basis_block_bps:
+    value: 100.0
+    description: Basis block threshold in basis points versus a live cash/index anchor.
+  proxy_futures_basis_warn_bps:
+    value: 80.0
+    description: Wider warning threshold in basis points when the anchor is ES or MES futures.
+  proxy_futures_basis_block_bps:
+    value: 150.0
+    description: Wider block threshold in basis points when the anchor is ES or MES futures.
+
+polymarket:
+  gamma_api_base_url:
+    value: https://gamma-api.polymarket.com
+    description: Public Polymarket Gamma API base URL used for research-only context.
+  request_timeout_seconds:
+    value: 12.0
+    description: Network timeout in seconds for Polymarket API requests.
+  search_terms:
+    value: [SPY, Fed decision, CPI, FOMC, Powell, NFP]
+    description: Search terms used to discover macro and SPX-relevant Polymarket markets.
+  event_slugs:
+    value: []
+    description: Explicit Polymarket event slugs to include; empty means discovery only.
+  market_slugs:
+    value: []
+    description: Explicit Polymarket market slugs to include; empty means discovery only.
+  max_results_per_query:
+    value: 5
+    description: Maximum Polymarket search results inspected for each query term.
+  max_markets_per_run:
+    value: 80
+    description: Maximum Polymarket markets retained in one collector run.
+  min_liquidity:
+    value: 0.0
+    description: Minimum market liquidity in USD required for Polymarket context inclusion.
+  min_volume_24h:
+    value: 0.0
+    description: Minimum 24-hour volume in USD required for Polymarket context inclusion.
+  min_relevance_score:
+    value: 0.35
+    description: Minimum heuristic relevance score required for discovered markets.
+  include_closed:
+    value: false
+    description: Includes closed Polymarket markets in research context when enabled.
+  user_agent:
+    value: Mozilla/5.0 spx-spark research collector
+    description: User-Agent sent to Polymarket public API requests.
+
+maintenance:
+  data_root:
+    value: data
+    description: Root directory for market data, latest state, reports, and research artifacts.
+  logs_root:
+    value: logs
+    description: Root directory for maintenance and service logs.
+  output_root:
+    value: logs
+    description: Root directory for maintenance command output.
+  data_budget_gb:
+    value: 80.0
+    description: Filesystem budget in GiB before maintenance escalates pruning actions.
+  raw_retention_days:
+    value: 10
+    description: Retention period in days for raw market-data JSONL files.
+  alert_window_retention_days:
+    value: 60
+    description: Retention period in days for preserved alert-window evidence.
+  feature_1s_retention_days:
+    value: 30
+    description: Retention period in days for one-second feature files.
+  feature_5s_retention_days:
+    value: 90
+    description: Retention period in days for five-second feature files.
+  log_retention_days:
+    value: 14
+    description: Retention period in days for service and maintenance logs.
+  trash_retention_days:
+    value: 7
+    description: Retention period in days for trash/quarantine files before deletion.
+  warn_pct:
+    value: 70.0
+    description: Disk budget usage percent where maintenance emits warnings.
+  compact_pct:
+    value: 80.0
+    description: Disk budget usage percent where compaction becomes recommended.
+  degraded_pct:
+    value: 85.0
+    description: Disk budget usage percent where service state is considered degraded.
+  prune_pct:
+    value: 90.0
+    description: Disk budget usage percent where pruning is allowed by policy.
+  critical_pct:
+    value: 95.0
+    description: Disk budget usage percent where storage pressure is critical.
+
+storage:
+  raw_file_name:
+    value: quotes.jsonl
+    description: File name used for raw normalized quote landing files.
+  include_raw_payload:
+    value: false
+    description: Stores provider raw payloads beside normalized quotes when enabled.
+
+iv_surface:
+  raw_file_name:
+    value: snapshots.jsonl
+    description: File name used for raw IV surface snapshot landing files.
+  wide_quote_spread_bps:
+    value: 250.0
+    description: Option quote spread threshold in basis points that marks IV surface rows degraded.
+  diff_max_gap_seconds:
+    value: 600.0
+    description: Maximum seconds between snapshots used for surface-difference comparisons.
+
+notification:
+  enabled:
+    value: false
+    description: Enables outbound alert notification delivery.
+  min_severity:
+    value: high
+    description: Minimum alert severity eligible for delivery.
+  cooldown_seconds:
+    value: 300
+    description: Default per-alert cooldown in seconds.
+  openclaw_enabled:
+    value: false
+    description: Enables legacy OpenClaw command delivery path.
+  openclaw_command:
+    value: openclaw
+    description: Command name or path used for OpenClaw invocations.
+  openclaw_channel:
+    value: ""
+    description: Optional OpenClaw channel name; empty leaves channel selection to the command.
+  openclaw_dry_run:
+    value: true
+    description: Runs OpenClaw without delivery side effects when enabled.
+  openclaw_timeout_seconds:
+    value: 20.0
+    description: Timeout in seconds for OpenClaw command delivery.
+  openclaw_agent_enabled:
+    value: false
+    description: Enables OpenClaw agent analysis fallback.
+  openclaw_agent_deliver:
+    value: false
+    description: Allows OpenClaw agent replies that pass gates to be forwarded.
+  openclaw_agent_name:
+    value: main
+    description: OpenClaw agent profile name.
+  openclaw_agent_model:
+    value: gpt-5.3-codex-spark
+    description: Model name passed to the OpenClaw agent fallback.
+  openclaw_agent_session_key:
+    value: spx-spark-alerts
+    description: Stable session key for OpenClaw alert analysis continuity.
+  openclaw_agent_thinking:
+    value: high
+    description: Reasoning effort setting for OpenClaw agent fallback.
+  openclaw_agent_timeout_seconds:
+    value: 180.0
+    description: Timeout in seconds for OpenClaw agent analysis.
+  codex_enabled:
+    value: false
+    description: Enables Codex CLI fallback for notification analysis.
+  codex_deliver:
+    value: true
+    description: Allows accepted Codex output to be delivered when the fallback is enabled.
+  codex_command:
+    value: codex
+    description: Command name or path for Codex CLI fallback.
+  codex_model:
+    value: gpt-5.3-codex-spark
+    description: Model name passed to Codex CLI fallback.
+  codex_reasoning_effort:
+    value: high
+    description: Reasoning effort setting passed to Codex CLI fallback.
+  codex_cwd:
+    value: "."
+    description: Working directory for Codex CLI fallback.
+  codex_sandbox:
+    value: read-only
+    description: Sandbox mode for Codex CLI fallback.
+  codex_timeout_seconds:
+    value: 90.0
+    description: Timeout in seconds for Codex CLI fallback.
+  codex_output_max_chars:
+    value: 1800
+    description: Maximum Codex output characters retained for notification text.
+  codex_require_delivery_cue:
+    value: true
+    description: Requires an explicit delivery cue before Codex output can be forwarded.
+  deepseek_enabled:
+    value: true
+    description: Enables DeepSeek fast reviewer before heavier agent fallbacks.
+  deepseek_deliver:
+    value: true
+    description: Allows DeepSeek-approved review output to be delivered.
+  deepseek_model:
+    value: deepseek-v4-flash
+    description: DeepSeek reviewer model name.
+  deepseek_url:
+    value: https://api.deepseek.com/v1/chat/completions
+    description: DeepSeek-compatible chat completions endpoint URL.
+  deepseek_env_file:
+    value: /home/ubuntu/.hermes/.env
+    description: Local env file path used to read the DeepSeek API key.
+  deepseek_timeout_seconds:
+    value: 30.0
+    description: Timeout in seconds for DeepSeek reviewer requests.
+  deepseek_max_tokens:
+    value: 6400
+    description: Maximum completion tokens requested from the DeepSeek reviewer.
+  deepseek_output_max_chars:
+    value: 6400
+    description: Maximum DeepSeek reviewer output characters retained.
+  deepseek_temperature:
+    value: 0.1
+    description: Sampling temperature for deterministic reviewer output.
+  review_min_time_sensitive_score:
+    value: 30.0
+    description: Minimum reviewer time-sensitivity score required for push delivery.
+  bark_enabled:
+    value: false
+    description: Enables Bark push delivery when a device URL is provided in env.
+  bark_group:
+    value: spx-spark
+    description: Bark group name for trading alerts.
+  bark_ops_group:
+    value: spx-ops
+    description: Bark group name for ops and engineering alerts.
+  bark_level:
+    value: timeSensitive
+    description: Bark interruption level used for delivered alerts.
+  bark_timeout_seconds:
+    value: 10.0
+    description: Timeout in seconds for Bark HTTP delivery.
+  bark_markdown_enabled:
+    value: true
+    description: Sends full markdown detail to Bark when enabled.
+  bark_friend_enabled:
+    value: false
+    description: Enables the friend Bark trading-only channel when its URL is provided in env.
+  feishu_enabled:
+    value: false
+    description: Enables Feishu webhook delivery when webhook URL and optional secret are in env.
+  feishu_timeout_seconds:
+    value: 10.0
+    description: Timeout in seconds for Feishu webhook delivery.
+  direct_push_llm_enabled:
+    value: true
+    description: Rewrites direct-push events with the configured LLM writer before delivery.
+  kind_rate_limit_seconds:
+    value: 3600.0
+    description: Per-kind alert rate limit window in seconds for magnitude-bucketed alerts.
+  dataclass_defaults:
+    deepseek_enabled:
+      value: false
+      description: Direct-construction default for DeepSeek reviewer when from_env is not used.
+    direct_push_llm_enabled:
+      value: false
+      description: Direct-construction default for direct-push LLM rewriting when from_env is not used.
+
+sampling:
+  strike_step:
+    value: 5
+    description: SPXW strike spacing in index points used by sampling planner.
+  window_points:
+    value: 200
+    description: Wide 0DTE strike window in index points around the reference.
+  hot_window_points:
+    value: 50
+    description: Hot-lane 0DTE strike window in index points around the reference.
+  group_count:
+    value: 4
+    description: Number of rotating sampling groups in normal mode.
+  group_interval_seconds:
+    value: 4
+    description: Seconds between normal-mode sampling group rotations.
+  degraded_group_count:
+    value: 20
+    description: Number of rotating sampling groups used when market-data capacity is degraded.
+  degraded_group_interval_seconds:
+    value: 3
+    description: Seconds between degraded-mode sampling group rotations.
+  group_strategy:
+    value: interleaved
+    description: Strike grouping strategy used by the sampling planner.
+  hot_human_cadence_seconds:
+    value: 8
+    description: Seconds between hot-lane samples for human-alert mode.
+  hot_execution_cadence_seconds:
+    value: 2
+    description: Seconds between hot-lane samples for execution-sensitive mode.
+  include_next_expiry:
+    value: true
+    description: Includes the next expiry for term-structure context.
+  default_mode:
+    value: human_alert
+    description: Default sampling mode when no explicit mode is provided.
+  next_expiry_window_points:
+    value: 30
+    description: Next-expiry strike window in index points around ATM.
+  next_expiry_hot_window_points:
+    value: 10
+    description: Next-expiry hot-lane strike window in index points around ATM.
+
+data_platform:
+  enabled:
+    value: false
+    description: Enables optional research-data platform writes.
+  fallback_spool_max_bytes:
+    value: 67108864
+    description: Maximum fallback spool size in bytes before research writes stop accumulating.
+  sqlite_busy_timeout_ms:
+    value: 250
+    description: SQLite busy timeout in milliseconds for local ledger writes.
+  compaction_min_age_seconds:
+    value: 300
+    description: Minimum source-file age in seconds before compaction can consider it closed.
+  raw_delete_enabled:
+    value: false
+    description: Enables deletion of verified raw JSONL sources after grace; disabled by default.
+  raw_delete_grace_hours:
+    value: 72
+    description: Rollback grace period in hours after verified compaction before raw deletion.
+  writer_version:
+    value: spx-spark-v1
+    description: Writer version stamped onto research-platform records.
+
+alerts:
+  move_quiet_floor_bps:
+    value: 15.0
+    description: Minimum quiet-window movement threshold in basis points after expected-move scaling.
+  move_high_severity_em_fraction:
+    value: 0.35
+    description: Fraction of daily expected move that escalates a movement alert to high severity.
+  min_option_live_ratio:
+    value: 0.5
+    description: Minimum live option quote ratio required for option-map freshness.
+  max_option_quote_age_ms:
+    value: 20000.0
+    description: Maximum option quote age in milliseconds allowed for option-map freshness.
+  require_option_quote_timestamps:
+    value: false
+    description: Requires known option quote timestamps when evaluating freshness.
+  gamma_regime_hysteresis_seconds:
+    value: 600.0
+    description: Seconds a gamma regime must persist before alerting.
+  max_iv_surface_age_seconds:
+    value: 420.0
+    description: Maximum IV surface age in seconds before IV alerts are suppressed.
+  broker_state_max_age_seconds:
+    value: 900.0
+    description: Maximum broker provider-state age in seconds for session alerts.
+  system_events_enabled:
+    value: true
+    description: Enables IBKR session interruption/restoration system alerts.
+  allow_broker_unavailable_proxy_watch:
+    value: true
+    description: Allows research-only proxy watch alerts when broker anchors are unavailable.
+  iv_surface_shift_1h_threshold:
+    value: 0.05
+    description: One-hour IV surface level-change threshold in volatility points.
+  iv_atm_change_1h_threshold:
+    value: 0.04
+    description: One-hour ATM IV change threshold in volatility points.
+  skew_25d_threshold:
+    value: 0.02
+    description: Five-minute 25-delta put-skew steepening threshold in volatility points.
+
+position_alerts:
+  enabled:
+    value: true
+    description: Enables SPXW position event and PnL alerts.
+  structural_enabled:
+    value: true
+    description: Enables open/close/quantity-change position alerts.
+  pnl_enabled:
+    value: true
+    description: Enables position book PnL movement alerts.
+  pnl_change_usd:
+    value: 200.0
+    description: Absolute book PnL change in USD needed to alert between observations.
+  pnl_loss_usd:
+    value: 400.0
+    description: Book loss in USD that raises a high-severity position alert.
+  pnl_critical_loss_usd:
+    value: 1000.0
+    description: Book loss in USD that raises a critical position alert.
+  pnl_bucket_usd:
+    value: 100.0
+    description: USD bucket size used for PnL alert deduplication.
+
+intraday_shock:
+  one_minute_seconds:
+    value: 60
+    description: Short shock horizon in seconds.
+  three_minute_seconds:
+    value: 180
+    description: Longer shock horizon in seconds.
+  one_minute_threshold_bps:
+    value: 20.0
+    description: SPX move threshold in basis points for the short shock horizon.
+  three_minute_threshold_bps:
+    value: 35.0
+    description: SPX move threshold in basis points for the longer shock horizon.
+  es_confirm_ratio:
+    value: 0.5
+    description: Minimum ES same-direction move fraction required to confirm an SPX shock.
+  max_spx_age_seconds:
+    value: 15.0
+    description: Maximum SPX quote age in seconds for shock-monitor samples.
+  max_es_age_seconds:
+    value: 10.0
+    description: Maximum ES quote age in seconds for shock-monitor samples.
+  max_anchor_skew_seconds:
+    value: 5.0
+    description: Maximum timestamp skew in seconds between SPX and ES anchors.
+  reclaim_window_seconds:
+    value: 300
+    description: Seconds after the latest extreme during which reclaim can confirm.
+  event_expiry_seconds:
+    value: 600
+    description: Seconds after the shock anchor before an event expires absent reclaim.
+  reclaim_fraction:
+    value: 0.6
+    description: SPX recovery fraction required for first reclaim confirmation.
+  es_reclaim_fraction:
+    value: 0.4
+    description: ES recovery fraction required for first reclaim confirmation.
+  reclaim_hold_fraction:
+    value: 0.55
+    description: SPX recovery fraction allowed on follow-up reclaim hold samples.
+  es_reclaim_hold_fraction:
+    value: 0.35
+    description: ES recovery fraction allowed on follow-up reclaim hold samples.
+  reclaim_confirm_samples:
+    value: 2
+    description: Number of fresh SPX/ES sample pairs required to confirm reclaim.
+  completion_hold_seconds:
+    value: 60
+    description: Seconds to retain a delivered reclaim event before marking complete.
+  rearm_recovery_fraction:
+    value: 0.4
+    description: Recovery fraction required before an expired event can begin rearming.
+  rearm_neutral_seconds:
+    value: 300
+    description: Neutral hold time in seconds required before a fresh shock can arm.
+  retry_seconds:
+    value: 30
+    description: Seconds between retry attempts for undelivered intraday alerts.
+
+intraday_strategy:
+  level_buffer_points:
+    value: 3.0
+    description: SPX point buffer around frozen option levels for call-path confirmation.
+  confirm_samples:
+    value: 2
+    description: Number of fresh SPX/ES sample pairs required to confirm a call-path signal.
+  confirm_window_seconds:
+    value: 60
+    description: Seconds allowed after crossing a frozen level to complete confirmation.
+  source_event_ttl_seconds:
+    value: 300
+    description: Seconds a source shock/reclaim event remains usable for strategy confirmation.
+  bias_ttl_seconds:
+    value: 300
+    description: Seconds a confirmed conditional call bias remains active.
+  cooldown_seconds:
+    value: 900
+    description: Seconds before another same-class intraday strategy alert can deliver.
+  structure_grace_seconds:
+    value: 30
+    description: Seconds of invalid option structure tolerated before clearing watches.
+  retry_seconds:
+    value: 30
+    description: Seconds between retry attempts for undelivered strategy alerts.
+  level_drift_tolerance_points:
+    value: 5.0
+    description: SPX point tolerance for considering frozen option levels unchanged.
+  es_confirm_ratio:
+    value: 0.5
+    description: Minimum ES same-direction move fraction required for call-wall breakout confirmation.
+  es_hold_tolerance_bps:
+    value: 1.0
+    description: ES hold tolerance in basis points for reclaim-call confirmation.
+
+intraday_outcomes:
+  completed_retention_seconds:
+    value: 7200
+    description: Seconds completed intraday outcome observations are retained in state.
+
+review:
+  llm_enabled:
+    value: false
+    description: Enables LLM narrative generation for post-close review.
+  llm_provider:
+    value: deepseek
+    description: Provider label for post-close review LLM calls.
+  llm_model:
+    value: deepseek-v4-pro
+    description: Model name for post-close review LLM calls.
+  llm_url:
+    value: https://api.deepseek.com/v1/chat/completions
+    description: DeepSeek-compatible chat completions endpoint for review generation.
+  llm_env_file:
+    value: /home/ubuntu/.hermes/.env
+    description: Local env file path used to read the review LLM API key.
+  llm_timeout_seconds:
+    value: 120
+    description: Timeout in seconds for post-close review LLM calls.
+  llm_max_tokens:
+    value: 2200
+    description: Maximum completion tokens for post-close review LLM output.
+  min_index_bucket_ratio:
+    value: 0.9
+    description: Minimum fraction of expected index time buckets required for complete review.
+  max_edge_gap_minutes:
+    value: 15
+    description: Maximum allowed data gap in minutes at session edges.
+  min_index_live_ratio:
+    value: 0.95
+    description: Minimum live-quality ratio required for index quotes in review.
+  min_front_option_contracts:
+    value: 20
+    description: Minimum same-day option contracts required for complete review.
+  min_front_option_strikes:
+    value: 10
+    description: Minimum same-day option strikes required for complete review.
+  min_front_option_strike_span:
+    value: 50
+    description: Minimum same-day option strike span in index points required for complete review.
+  min_option_usable_ratio:
+    value: 0.9
+    description: Minimum usable option quote ratio required for complete review.
+  min_option_iv_ratio:
+    value: 0.8
+    description: Minimum option IV availability ratio required for complete review.
+  min_surface_bucket_ratio:
+    value: 0.6
+    description: Minimum IV surface bucket coverage ratio required for complete review.
+  min_surface_iv_ratio:
+    value: 0.5
+    description: Minimum IV surface IV coverage ratio required for complete review.
+  min_surface_gamma_ratio:
+    value: 0.5
+    description: Minimum IV surface gamma coverage ratio required for complete review.
+  output_dir_name:
+    value: reports/spx_options_review
+    description: Relative report directory under data root for post-close review artifacts.
+  hermes_export_dir:
+    value: /home/ubuntu/research/finance/daily/spx-options-review
+    description: Optional local Hermes export directory for review markdown copies.
+  push_enabled:
+    value: true
+    description: Enables post-close review push delivery after report generation.
+
+push_llm:
+  enabled:
+    value: true
+    description: Enables LLM rewriting for scheduled push text.
+  model:
+    value: deepseek-v4-pro
+    description: Model name for scheduled push LLM writer.
+  url:
+    value: https://api.deepseek.com/v1/chat/completions
+    description: DeepSeek-compatible chat completions endpoint for scheduled push writing.
+  env_file:
+    value: /home/ubuntu/.hermes/.env
+    description: Local env file path used to read the scheduled push LLM API key.
+  timeout_seconds:
+    value: 90
+    description: Timeout in seconds for scheduled push LLM calls.
+  max_tokens:
+    value: 12800
+    description: Maximum completion tokens for scheduled push LLM output.
+
+human_focus:
+  event_tags:
+    value: []
+    description: Optional manually maintained intraday event tags such as fomc, cpi, nfp, or opex.

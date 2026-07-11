@@ -5,6 +5,7 @@ import fcntl
 import hashlib
 import json
 import os
+import stat
 import sys
 from collections import Counter
 from contextlib import contextmanager, nullcontext
@@ -12,6 +13,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterator, Sequence
+from uuid import uuid4
 
 import duckdb
 
@@ -22,6 +24,7 @@ from spx_spark.data_platform.lake.layout import (
     QUOTE_WRITER_VERSION,
     RawQuotePartition,
     discover_raw_quote_partitions,
+    parse_raw_quote_partition,
 )
 from spx_spark.data_platform.lake.manifest import (
     MANIFEST_VERSION,
@@ -36,6 +39,16 @@ from spx_spark.data_platform.lake.normalize import (
     write_normalized_parquet,
 )
 
+RAW_DELETE_FAILURE_STATUSES = frozenset(
+    {
+        "raw_delete_blocked",
+        "raw_delete_failed",
+        "raw_delete_audit_failed",
+    }
+)
+SUMMARY_FAILURE_STATUSES = frozenset({"failed"}) | RAW_DELETE_FAILURE_STATUSES
+RAW_DELETION_AUDIT_NAME = "raw_deletion_audit.jsonl"
+
 
 LIMITED_WORK_STATUSES = frozenset(
     {
@@ -43,6 +56,8 @@ LIMITED_WORK_STATUSES = frozenset(
         "empty",
         "would_compact",
         "would_mark_empty",
+        "raw_deleted",
+        "would_delete_raw",
     }
 )
 
@@ -78,7 +93,7 @@ class CompactionSummary:
 
     @property
     def failed(self) -> bool:
-        return any(result.status == "failed" for result in self.results)
+        return any(result.status in SUMMARY_FAILURE_STATUSES for result in self.results)
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -99,15 +114,21 @@ class QuoteLakeCompactor:
         raw_file_name: str = "quotes.jsonl",
         settle_seconds: float = 120.0,
         compression_level: int = 3,
+        raw_delete_enabled: bool = False,
+        raw_delete_grace_hours: int = 72,
     ) -> None:
         if settle_seconds < 0:
             raise ValueError("settle_seconds must be >= 0")
         if not 1 <= compression_level <= 22:
             raise ValueError("compression_level must be between 1 and 22")
+        if raw_delete_grace_hours < 24:
+            raise ValueError("raw_delete_grace_hours must be at least 24")
         self.data_root = Path(data_root)
         self.raw_file_name = raw_file_name
         self.settle_seconds = settle_seconds
         self.compression_level = compression_level
+        self.raw_delete_enabled = raw_delete_enabled
+        self.raw_delete_grace_hours = raw_delete_grace_hours
 
     def run(
         self,
@@ -189,12 +210,19 @@ class QuoteLakeCompactor:
         if self._manifest_matches_metadata(partition, existing, stat):
             assert existing is not None
             status = "empty_up_to_date" if existing.status == "empty" else "up_to_date"
-            return CompactionResult(
+            result = CompactionResult(
                 source_label,
                 existing.output_path,
                 status,
                 row_count=existing.row_count,
                 source_sha256=existing.source_sha256,
+            )
+            return self._maybe_delete_raw(
+                partition,
+                result,
+                manifest=existing,
+                now=now,
+                dry_run=dry_run,
             )
 
         try:
@@ -255,12 +283,20 @@ class QuoteLakeCompactor:
             )
 
         if self._verified_manifest_matches(partition, existing, snapshot):
-            return CompactionResult(
+            assert existing is not None
+            result = CompactionResult(
                 source_label,
                 output_label,
                 "up_to_date",
-                row_count=existing.row_count if existing else 0,
+                row_count=existing.row_count,
                 source_sha256=snapshot.sha256,
+            )
+            return self._maybe_delete_raw(
+                partition,
+                result,
+                manifest=existing,
+                now=now,
+                dry_run=dry_run,
             )
         if dry_run:
             return CompactionResult(
@@ -324,13 +360,425 @@ class QuoteLakeCompactor:
             except OSError:
                 pass
 
-        return CompactionResult(
+        result = CompactionResult(
             source_label,
             output_label,
             "compacted",
             row_count=stats.row_count,
             source_sha256=snapshot.sha256,
         )
+        return self._maybe_delete_raw(
+            partition,
+            result,
+            manifest=manifest,
+            now=now,
+            dry_run=False,
+        )
+
+    def _maybe_delete_raw(
+        self,
+        partition: RawQuotePartition,
+        result: CompactionResult,
+        *,
+        manifest: CompactionManifest,
+        now: datetime,
+        dry_run: bool,
+    ) -> CompactionResult:
+        """Delete a verified closed-hour JSONL only when every safety gate passes."""
+
+        if not self.raw_delete_enabled:
+            return result
+        if result.status not in {"compacted", "up_to_date"}:
+            return result
+        if manifest.status != "verified":
+            return result
+        if partition.end_at > now:
+            return result
+        try:
+            completed_at = datetime.fromisoformat(manifest.completed_at)
+        except ValueError:
+            return self._raw_delete_blocked(
+                result,
+                "manifest completed_at is invalid",
+            )
+        if completed_at.tzinfo is None:
+            return self._raw_delete_blocked(
+                result,
+                "manifest completed_at must be timezone-aware",
+            )
+        grace_deadline = completed_at.astimezone(timezone.utc) + timedelta(
+            hours=self.raw_delete_grace_hours
+        )
+        if now < grace_deadline:
+            return result
+
+        unsafe_reason = self._unsafe_raw_delete_target_reason(partition)
+        if unsafe_reason is not None:
+            return self._raw_delete_blocked(result, unsafe_reason)
+        if manifest.source_path != partition.source_relative_path:
+            return self._raw_delete_blocked(
+                result,
+                "manifest source_path does not match partition source path",
+            )
+        if not manifest.output_path or not manifest.output_sha256 or manifest.output_size is None:
+            return self._raw_delete_blocked(
+                result,
+                "verified manifest is missing parquet output metadata",
+            )
+        expected_output = partition.parquet_path.relative_to(self.data_root).as_posix()
+        if manifest.output_path != expected_output:
+            return self._raw_delete_blocked(
+                result,
+                "manifest output_path does not match partition parquet path",
+            )
+        if partition.parquet_path.is_symlink() or not partition.parquet_path.is_file():
+            return self._raw_delete_blocked(result, "parquet output is missing")
+        try:
+            output = snapshot_source(partition.parquet_path)
+        except (OSError, RuntimeError) as exc:
+            return self._raw_delete_blocked(
+                result,
+                f"parquet verification failed: {type(exc).__name__}: {exc}",
+            )
+        if output.sha256 != manifest.output_sha256 or output.size != manifest.output_size:
+            return self._raw_delete_blocked(
+                result,
+                "parquet checksum or size does not match manifest",
+            )
+        try:
+            source = snapshot_source(partition.source_path)
+        except (OSError, RuntimeError) as exc:
+            return self._raw_delete_blocked(
+                result,
+                f"source verification failed: {type(exc).__name__}: {exc}",
+            )
+        if source.sha256 != manifest.source_sha256 or source.size != manifest.source_size:
+            return self._raw_delete_blocked(
+                result,
+                "source checksum or size no longer matches manifest",
+                source_sha256=source.sha256,
+            )
+        try:
+            source_rows = count_jsonl_rows(partition.source_path)
+            parquet_rows = count_parquet_rows(partition.parquet_path)
+        except (OSError, RuntimeError) as exc:
+            return self._raw_delete_blocked(
+                result,
+                f"row count verification failed: {type(exc).__name__}: {exc}",
+                source_sha256=source.sha256,
+            )
+        if (
+            source_rows != manifest.row_count
+            or parquet_rows != manifest.row_count
+            or source_rows != parquet_rows
+        ):
+            return self._raw_delete_blocked(
+                result,
+                (
+                    "row count mismatch "
+                    f"(source={source_rows} parquet={parquet_rows} "
+                    f"manifest={manifest.row_count})"
+                ),
+                source_sha256=source.sha256,
+            )
+        if dry_run:
+            return CompactionResult(
+                result.source_path,
+                result.output_path,
+                "would_delete_raw",
+                row_count=result.row_count,
+                source_sha256=source.sha256,
+                detail="raw JSONL eligible for verified deletion",
+            )
+
+        audit_base = {
+            "source_path": partition.source_relative_path,
+            "output_path": manifest.output_path,
+            "source_sha256": source.sha256,
+            "output_sha256": output.sha256,
+            "source_size": source.size,
+            "output_size": output.size,
+            "row_count": manifest.row_count,
+        }
+        try:
+            self._append_raw_deletion_audit(
+                {
+                    **audit_base,
+                    "event": "authorize",
+                    "status": "authorized",
+                    "detail": "pre-delete verification passed; quarantine unlink authorized",
+                },
+                now=now,
+            )
+        except OSError as exc:
+            return CompactionResult(
+                result.source_path,
+                result.output_path,
+                "raw_delete_audit_failed",
+                row_count=result.row_count,
+                source_sha256=source.sha256,
+                detail=f"pre-delete audit fsync failed: {type(exc).__name__}: {exc}",
+            )
+
+        quarantine_path = partition.source_path.with_name(
+            f".{partition.source_path.name}.raw-delete-quarantine.{uuid4().hex}"
+        )
+        try:
+            os.rename(partition.source_path, quarantine_path)
+        except OSError as exc:
+            failure = CompactionResult(
+                result.source_path,
+                result.output_path,
+                "raw_delete_failed",
+                row_count=result.row_count,
+                source_sha256=source.sha256,
+                detail=f"quarantine rename failed: {type(exc).__name__}: {exc}",
+            )
+            return self._finalize_raw_deletion_audit(
+                failure,
+                audit_base=audit_base,
+                now=now,
+                quarantine_path=None,
+            )
+
+        try:
+            quarantined = snapshot_source(quarantine_path)
+            quarantined_rows = count_jsonl_rows(quarantine_path)
+        except (OSError, RuntimeError) as exc:
+            failure = CompactionResult(
+                result.source_path,
+                result.output_path,
+                "raw_delete_failed",
+                row_count=result.row_count,
+                source_sha256=source.sha256,
+                detail=(
+                    "quarantined raw preserved after re-verification error: "
+                    f"{type(exc).__name__}: {exc}; "
+                    f"quarantine_path={quarantine_path.relative_to(self.data_root).as_posix()}"
+                ),
+            )
+            return self._finalize_raw_deletion_audit(
+                failure,
+                audit_base=audit_base,
+                now=now,
+                quarantine_path=quarantine_path,
+            )
+        if (
+            quarantined.sha256 != manifest.source_sha256
+            or quarantined.size != manifest.source_size
+            or quarantined_rows != manifest.row_count
+        ):
+            failure = CompactionResult(
+                result.source_path,
+                result.output_path,
+                "raw_delete_failed",
+                row_count=result.row_count,
+                source_sha256=quarantined.sha256,
+                detail=(
+                    "quarantined raw preserved after post-rename mismatch "
+                    f"(sha256/size/rows); "
+                    f"quarantine_path={quarantine_path.relative_to(self.data_root).as_posix()}"
+                ),
+            )
+            return self._finalize_raw_deletion_audit(
+                failure,
+                audit_base={
+                    **audit_base,
+                    "source_sha256": quarantined.sha256,
+                    "source_size": quarantined.size,
+                    "row_count": quarantined_rows,
+                },
+                now=now,
+                quarantine_path=quarantine_path,
+            )
+
+        try:
+            quarantine_path.unlink()
+        except OSError as exc:
+            failure = CompactionResult(
+                result.source_path,
+                result.output_path,
+                "raw_delete_failed",
+                row_count=result.row_count,
+                source_sha256=source.sha256,
+                detail=(
+                    "quarantined raw preserved after unlink failure: "
+                    f"{type(exc).__name__}: {exc}; "
+                    f"quarantine_path={quarantine_path.relative_to(self.data_root).as_posix()}"
+                ),
+            )
+            return self._finalize_raw_deletion_audit(
+                failure,
+                audit_base=audit_base,
+                now=now,
+                quarantine_path=quarantine_path,
+            )
+
+        success = CompactionResult(
+            result.source_path,
+            result.output_path,
+            "raw_deleted",
+            row_count=result.row_count,
+            source_sha256=source.sha256,
+            detail="deleted verified closed-hour raw JSONL after grace period",
+        )
+        return self._finalize_raw_deletion_audit(
+            success,
+            audit_base=audit_base,
+            now=now,
+            quarantine_path=None,
+        )
+
+    def _raw_delete_blocked(
+        self,
+        result: CompactionResult,
+        detail: str,
+        *,
+        source_sha256: str | None = None,
+    ) -> CompactionResult:
+        return CompactionResult(
+            result.source_path,
+            result.output_path,
+            "raw_delete_blocked",
+            row_count=result.row_count,
+            source_sha256=source_sha256 if source_sha256 is not None else result.source_sha256,
+            detail=detail,
+        )
+
+    def _raw_deletion_audit_path(self) -> Path:
+        return self.data_root / "manifests" / "compaction" / RAW_DELETION_AUDIT_NAME
+
+    def _append_raw_deletion_audit(
+        self,
+        entry: dict[str, object],
+        *,
+        now: datetime,
+    ) -> None:
+        """Append one owner-readable audit line; raises if durable write/fsync fails."""
+
+        payload = {
+            "at": _as_utc(now).isoformat(),
+            **entry,
+        }
+        # Never persist secrets or raw quote payloads — only paths/hashes/metadata.
+        encoded = (
+            json.dumps(
+                payload,
+                allow_nan=False,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n"
+        ).encode("utf-8")
+        audit_path = self._raw_deletion_audit_path()
+        audit_path.parent.mkdir(parents=True, exist_ok=True)
+        descriptor = os.open(audit_path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        try:
+            os.fchmod(descriptor, 0o600)
+            written = 0
+            while written < len(encoded):
+                written += os.write(descriptor, encoded[written:])
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+    def _finalize_raw_deletion_audit(
+        self,
+        result: CompactionResult,
+        *,
+        audit_base: dict[str, object],
+        now: datetime,
+        quarantine_path: Path | None,
+    ) -> CompactionResult:
+        quarantine_label = None
+        if quarantine_path is not None:
+            try:
+                quarantine_label = quarantine_path.relative_to(self.data_root).as_posix()
+            except ValueError:
+                quarantine_label = str(quarantine_path)
+        try:
+            self._append_raw_deletion_audit(
+                {
+                    **audit_base,
+                    "event": "final",
+                    "status": result.status,
+                    "detail": result.detail,
+                    "quarantine_path": quarantine_label,
+                },
+                now=now,
+            )
+        except OSError as exc:
+            return CompactionResult(
+                result.source_path,
+                result.output_path,
+                "raw_delete_audit_failed",
+                row_count=result.row_count,
+                source_sha256=result.source_sha256,
+                detail=(
+                    f"final audit fsync failed after status={result.status}: "
+                    f"{type(exc).__name__}: {exc}"
+                    + (f"; prior_detail={result.detail}" if result.detail else "")
+                ),
+            )
+        return result
+
+    def _unsafe_raw_delete_target_reason(self, partition: RawQuotePartition) -> str | None:
+        """Reject anything outside a closed-hour raw landing file."""
+
+        source = partition.source_path
+        try:
+            if source.is_symlink():
+                return "refusing to delete via symlink"
+        except OSError as exc:
+            return f"source path lstat failed: {type(exc).__name__}: {exc}"
+
+        try:
+            root = self.data_root.resolve(strict=True)
+        except OSError:
+            return "data root is not resolvable"
+
+        relative = Path(partition.source_relative_path)
+        parts = relative.parts
+        # raw / provider=... / date=... / hour=... / quotes.jsonl
+        if len(parts) != 5 or parts[0] != "raw":
+            return "source path is not a raw hourly landing file"
+        if not parts[1].startswith("provider="):
+            return "malformed provider path segment"
+        if not parts[2].startswith("date="):
+            return "malformed date path segment"
+        if not parts[3].startswith("hour="):
+            return "malformed hour path segment"
+        if any(part in {"latest", "runtime", "manifests", "lake", "analytics"} for part in parts):
+            return "refusing to touch latest/runtime/manifest/lake paths"
+        if source.name.startswith(".") or source.name.endswith(".lock"):
+            return "refusing to delete lock or hidden runtime files"
+        if source.name != self.raw_file_name or parts[4] != self.raw_file_name:
+            return "source file name does not match configured raw landing name"
+
+        # Reject symlinks in any path component under data_root.
+        cursor = self.data_root
+        for part in parts:
+            cursor = cursor / part
+            try:
+                if cursor.is_symlink():
+                    return "refusing to delete via symlink"
+            except OSError as exc:
+                return f"source path lstat failed: {type(exc).__name__}: {exc}"
+        try:
+            resolved = source.resolve(strict=True)
+            resolved.relative_to(root)
+        except (OSError, ValueError):
+            return "source path is outside the data root"
+        try:
+            mode = source.lstat().st_mode
+        except OSError as exc:
+            return f"source path lstat failed: {type(exc).__name__}: {exc}"
+        if not stat.S_ISREG(mode):
+            return "source path is not a regular file"
+        if parse_raw_quote_partition(self.data_root, source) is None:
+            return "source path failed strict raw partition parse"
+        return None
 
     def _manifest_matches_metadata(
         self,
@@ -474,6 +922,29 @@ def snapshot_source(path: str | Path) -> SourceSnapshot:
     return SourceSnapshot(size=after.st_size, mtime_ns=after.st_mtime_ns, sha256=digest.hexdigest())
 
 
+def count_jsonl_rows(path: str | Path) -> int:
+    count = 0
+    with Path(path).open("rb") as handle:
+        for line in handle:
+            if line.strip():
+                count += 1
+    return count
+
+
+def count_parquet_rows(path: str | Path) -> int:
+    connection = duckdb.connect()
+    try:
+        row = connection.execute(
+            "SELECT count(*)::BIGINT FROM read_parquet(?)",
+            [str(path)],
+        ).fetchone()
+    finally:
+        connection.close()
+    if row is None:
+        raise RuntimeError(f"unable to count parquet rows: {path}")
+    return int(row[0])
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Compact closed-hour SPX Spark JSONL into Parquet")
     parser.add_argument("--data-root", help="Data root; defaults to MARKET_DATA_DATA_ROOT")
@@ -509,6 +980,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             else platform_settings.compaction_min_age_seconds
         ),
         compression_level=args.compression_level,
+        raw_delete_enabled=platform_settings.raw_delete_enabled,
+        raw_delete_grace_hours=platform_settings.raw_delete_grace_hours,
     )
     summary = compactor.run(
         dry_run=args.dry_run,
@@ -516,7 +989,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         provider=args.provider,
     )
     if args.summary_only:
-        failures = [asdict(result) for result in summary.results if result.status == "failed"]
+        failures = [
+            asdict(result)
+            for result in summary.results
+            if result.status in SUMMARY_FAILURE_STATUSES
+        ]
+        deletions = [
+            asdict(result)
+            for result in summary.results
+            if result.status in {"raw_deleted", "would_delete_raw"}
+        ]
         payload = {
             "dry_run": summary.dry_run,
             "data_root": summary.data_root,
@@ -526,6 +1008,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             "status_counts": summary.status_counts,
             "failed": summary.failed,
             "failures": failures,
+            "raw_delete_enabled": platform_settings.raw_delete_enabled,
+            "deletions": deletions,
         }
         if args.as_json:
             print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
@@ -537,8 +1021,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             for failure in failures:
                 print(
-                    f"failed: {failure['source_path']} "
+                    f"{failure['status']}: {failure['source_path']} "
                     f"detail={failure.get('detail') or 'unknown'}"
+                )
+            for deletion in deletions:
+                print(
+                    f"{deletion['status']}: {deletion['source_path']} "
+                    f"detail={deletion.get('detail') or ''}"
                 )
     elif args.as_json:
         print(json.dumps(summary.to_dict(), sort_keys=True, separators=(",", ":")))

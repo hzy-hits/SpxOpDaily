@@ -51,6 +51,7 @@ from spx_spark.notifier.policy import alert_key
 from spx_spark.notifier.state import load_acknowledged_event_ids
 from spx_spark.options_map import build_options_map
 from spx_spark.state_io import atomic_write_json_secure, exclusive_state_lock
+from spx_spark.runtime_config import runtime_value
 from spx_spark.storage import LatestState, LatestStateStore, configured_quote_use_decision
 
 
@@ -85,30 +86,89 @@ class IntradayShockSettings:
     @classmethod
     def from_env(cls) -> "IntradayShockSettings":
         data_root = (
-            os.getenv("MARKET_DATA_DATA_ROOT") or os.getenv("MAINTENANCE_DATA_ROOT") or "data"
+            os.getenv("MARKET_DATA_DATA_ROOT")
+            or os.getenv("MAINTENANCE_DATA_ROOT")
+            or str(runtime_value("maintenance.data_root"))
         )
         return cls(
             state_path=os.getenv("ALERT_INTRADAY_SHOCK_STATE_PATH")
             or f"{data_root.rstrip('/')}/latest/intraday_shock_state.json",
-            one_minute_seconds=env_int("ALERT_INTRADAY_SHOCK_1M_SECONDS", 60),
-            three_minute_seconds=env_int("ALERT_INTRADAY_SHOCK_3M_SECONDS", 180),
-            one_minute_threshold_bps=env_float("ALERT_INTRADAY_SHOCK_1M_BPS", 20.0),
-            three_minute_threshold_bps=env_float("ALERT_INTRADAY_SHOCK_3M_BPS", 35.0),
-            es_confirm_ratio=env_float("ALERT_INTRADAY_SHOCK_ES_CONFIRM_RATIO", 0.50),
-            max_spx_age_seconds=env_float("ALERT_INTRADAY_SHOCK_SPX_MAX_AGE_SECONDS", 15.0),
-            max_es_age_seconds=env_float("ALERT_INTRADAY_SHOCK_ES_MAX_AGE_SECONDS", 10.0),
-            max_anchor_skew_seconds=env_float("ALERT_INTRADAY_SHOCK_MAX_ANCHOR_SKEW_SECONDS", 5.0),
-            reclaim_window_seconds=env_int("ALERT_INTRADAY_RECLAIM_WINDOW_SECONDS", 300),
-            event_expiry_seconds=env_int("ALERT_INTRADAY_EVENT_EXPIRY_SECONDS", 600),
-            reclaim_fraction=env_float("ALERT_INTRADAY_RECLAIM_FRACTION", 0.60),
-            es_reclaim_fraction=env_float("ALERT_INTRADAY_RECLAIM_ES_FRACTION", 0.40),
-            reclaim_hold_fraction=env_float("ALERT_INTRADAY_RECLAIM_HOLD_FRACTION", 0.55),
-            es_reclaim_hold_fraction=env_float("ALERT_INTRADAY_RECLAIM_ES_HOLD_FRACTION", 0.35),
-            reclaim_confirm_samples=env_int("ALERT_INTRADAY_RECLAIM_CONFIRM_SAMPLES", 2),
-            completion_hold_seconds=env_int("ALERT_INTRADAY_COMPLETION_HOLD_SECONDS", 60),
-            rearm_recovery_fraction=env_float("ALERT_INTRADAY_REARM_RECOVERY_FRACTION", 0.40),
-            rearm_neutral_seconds=env_int("ALERT_INTRADAY_REARM_NEUTRAL_SECONDS", 300),
-            retry_seconds=env_int("ALERT_INTRADAY_DELIVERY_RETRY_SECONDS", 30),
+            one_minute_seconds=env_int(
+                "ALERT_INTRADAY_SHOCK_1M_SECONDS",
+                int(runtime_value("intraday_shock.one_minute_seconds")),
+            ),
+            three_minute_seconds=env_int(
+                "ALERT_INTRADAY_SHOCK_3M_SECONDS",
+                int(runtime_value("intraday_shock.three_minute_seconds")),
+            ),
+            one_minute_threshold_bps=env_float(
+                "ALERT_INTRADAY_SHOCK_1M_BPS",
+                float(runtime_value("intraday_shock.one_minute_threshold_bps")),
+            ),
+            three_minute_threshold_bps=env_float(
+                "ALERT_INTRADAY_SHOCK_3M_BPS",
+                float(runtime_value("intraday_shock.three_minute_threshold_bps")),
+            ),
+            es_confirm_ratio=env_float(
+                "ALERT_INTRADAY_SHOCK_ES_CONFIRM_RATIO",
+                float(runtime_value("intraday_shock.es_confirm_ratio")),
+            ),
+            max_spx_age_seconds=env_float(
+                "ALERT_INTRADAY_SHOCK_SPX_MAX_AGE_SECONDS",
+                float(runtime_value("intraday_shock.max_spx_age_seconds")),
+            ),
+            max_es_age_seconds=env_float(
+                "ALERT_INTRADAY_SHOCK_ES_MAX_AGE_SECONDS",
+                float(runtime_value("intraday_shock.max_es_age_seconds")),
+            ),
+            max_anchor_skew_seconds=env_float(
+                "ALERT_INTRADAY_SHOCK_MAX_ANCHOR_SKEW_SECONDS",
+                float(runtime_value("intraday_shock.max_anchor_skew_seconds")),
+            ),
+            reclaim_window_seconds=env_int(
+                "ALERT_INTRADAY_RECLAIM_WINDOW_SECONDS",
+                int(runtime_value("intraday_shock.reclaim_window_seconds")),
+            ),
+            event_expiry_seconds=env_int(
+                "ALERT_INTRADAY_EVENT_EXPIRY_SECONDS",
+                int(runtime_value("intraday_shock.event_expiry_seconds")),
+            ),
+            reclaim_fraction=env_float(
+                "ALERT_INTRADAY_RECLAIM_FRACTION",
+                float(runtime_value("intraday_shock.reclaim_fraction")),
+            ),
+            es_reclaim_fraction=env_float(
+                "ALERT_INTRADAY_RECLAIM_ES_FRACTION",
+                float(runtime_value("intraday_shock.es_reclaim_fraction")),
+            ),
+            reclaim_hold_fraction=env_float(
+                "ALERT_INTRADAY_RECLAIM_HOLD_FRACTION",
+                float(runtime_value("intraday_shock.reclaim_hold_fraction")),
+            ),
+            es_reclaim_hold_fraction=env_float(
+                "ALERT_INTRADAY_RECLAIM_ES_HOLD_FRACTION",
+                float(runtime_value("intraday_shock.es_reclaim_hold_fraction")),
+            ),
+            reclaim_confirm_samples=env_int(
+                "ALERT_INTRADAY_RECLAIM_CONFIRM_SAMPLES",
+                int(runtime_value("intraday_shock.reclaim_confirm_samples")),
+            ),
+            completion_hold_seconds=env_int(
+                "ALERT_INTRADAY_COMPLETION_HOLD_SECONDS",
+                int(runtime_value("intraday_shock.completion_hold_seconds")),
+            ),
+            rearm_recovery_fraction=env_float(
+                "ALERT_INTRADAY_REARM_RECOVERY_FRACTION",
+                float(runtime_value("intraday_shock.rearm_recovery_fraction")),
+            ),
+            rearm_neutral_seconds=env_int(
+                "ALERT_INTRADAY_REARM_NEUTRAL_SECONDS",
+                int(runtime_value("intraday_shock.rearm_neutral_seconds")),
+            ),
+            retry_seconds=env_int(
+                "ALERT_INTRADAY_DELIVERY_RETRY_SECONDS",
+                int(runtime_value("intraday_shock.retry_seconds")),
+            ),
         )
 
 

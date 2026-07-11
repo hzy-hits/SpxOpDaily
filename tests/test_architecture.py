@@ -52,6 +52,14 @@ L5_MODULES = {
 POSITION_ALERTS_ALLOWED_L2_IMPORT = "ibkr.position_watcher"
 
 SRC_ROOT = Path(__file__).resolve().parent.parent / "src" / "spx_spark"
+ENV_HELPERS = {
+    "env_bool",
+    "env_int",
+    "env_float",
+    "env_str",
+    "env_csv",
+    "env_csv_preserve",
+}
 
 
 def _module_name_from_path(path: Path) -> str:
@@ -154,3 +162,46 @@ def test_layer_import_rules() -> None:
 
     if messages:
         pytest.fail("\n\n".join(messages))
+
+
+def _call_name(node: ast.Call) -> str | None:
+    if isinstance(node.func, ast.Name):
+        return node.func.id
+    if isinstance(node.func, ast.Attribute):
+        return node.func.attr
+    return None
+
+
+def _literal_default(node: ast.AST) -> bool:
+    if isinstance(node, ast.Constant | ast.List | ast.Tuple | ast.Dict | ast.Set):
+        return True
+    if (
+        isinstance(node, ast.UnaryOp)
+        and isinstance(node.op, ast.USub)
+        and isinstance(node.operand, ast.Constant)
+    ):
+        return True
+    return False
+
+
+def test_env_helper_defaults_are_not_literals() -> None:
+    violations: list[str] = []
+
+    for path in sorted(SRC_ROOT.rglob("*.py")):
+        source = path.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            if _call_name(node) not in ENV_HELPERS or len(node.args) < 2:
+                continue
+            default_arg = node.args[1]
+            if _literal_default(default_arg):
+                rel_path = path.relative_to(SRC_ROOT.parent.parent)
+                violations.append(f"{rel_path}:{node.lineno}")
+
+    if violations:
+        pytest.fail(
+            "env_* defaults must come from runtime_value/runtime_csv or another non-literal source:\n"
+            + "\n".join(violations)
+        )

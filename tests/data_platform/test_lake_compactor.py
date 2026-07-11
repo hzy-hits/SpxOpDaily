@@ -407,3 +407,560 @@ def test_summary_only_json_omits_per_partition_success_rows(
     assert payload["failed"] is False
     assert payload["failures"] == []
     assert "results" not in payload
+
+
+def test_raw_delete_disabled_by_default_keeps_verified_source(tmp_path: Path) -> None:
+    raw = source_path(tmp_path)
+    write_source(raw, [quote_payload()])
+    compactor = QuoteLakeCompactor(tmp_path, settle_seconds=0)
+    assert compactor.run(now=NOW).status_counts == {"compacted": 1}
+    later = NOW + timedelta(hours=100)
+    summary = compactor.run(now=later)
+    assert summary.status_counts == {"up_to_date": 1}
+    assert raw.exists()
+
+
+def test_raw_delete_after_grace_removes_only_verified_source(tmp_path: Path) -> None:
+    raw = source_path(tmp_path)
+    write_source(raw, [quote_payload(), quote_payload(instrument_id="index:SPX")])
+    latest = tmp_path / "latest" / "state.json"
+    latest.parent.mkdir(parents=True)
+    latest.write_text("{}", encoding="utf-8")
+    runtime = tmp_path / "runtime" / "mode.json"
+    runtime.parent.mkdir(parents=True)
+    runtime.write_text("{}", encoding="utf-8")
+    lock = tmp_path / "manifests" / "compaction" / ".compact.lock"
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text("lock", encoding="utf-8")
+
+    compactor = QuoteLakeCompactor(
+        tmp_path,
+        settle_seconds=0,
+        raw_delete_enabled=True,
+        raw_delete_grace_hours=24,
+    )
+    partition = discover_raw_quote_partitions(tmp_path)[0]
+    assert compactor.run(now=NOW).status_counts == {"compacted": 1}
+    assert raw.exists()
+
+    before_grace = NOW + timedelta(hours=23)
+    waiting = compactor.run(now=before_grace)
+    assert waiting.status_counts == {"up_to_date": 1}
+    assert raw.exists()
+
+    after_grace = NOW + timedelta(hours=25)
+    deleted = compactor.run(now=after_grace)
+    assert deleted.status_counts == {"raw_deleted": 1}
+    assert deleted.failed is False
+    assert deleted.results[0].detail
+    assert "deleted verified" in deleted.results[0].detail
+    assert not raw.exists()
+    assert partition.parquet_path.exists()
+    assert partition.manifest_path.exists()
+    assert latest.exists()
+    assert runtime.exists()
+    assert lock.exists()
+
+    audit_path = tmp_path / "manifests" / "compaction" / "raw_deletion_audit.jsonl"
+    assert audit_path.exists()
+    assert audit_path.stat().st_mode & 0o777 == 0o600
+    entries = [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()]
+    assert [entry["event"] for entry in entries] == ["authorize", "final"]
+    assert entries[0]["status"] == "authorized"
+    assert entries[1]["status"] == "raw_deleted"
+    for entry in entries:
+        assert entry["source_path"] == partition.source_relative_path
+        assert entry["output_path"] == partition.parquet_path.relative_to(tmp_path).as_posix()
+        assert entry["source_sha256"]
+        assert entry["output_sha256"]
+        assert entry["row_count"] == 2
+        assert "payload" not in entry
+        assert "secret" not in entry
+        assert "bid" not in entry
+        assert "ask" not in entry
+
+
+def test_raw_delete_blocked_when_source_checksum_mismatches(tmp_path: Path) -> None:
+    from spx_spark.data_platform.lake.compact import CompactionResult
+
+    raw = source_path(tmp_path)
+    write_source(raw, [quote_payload()])
+    compactor = QuoteLakeCompactor(
+        tmp_path,
+        settle_seconds=0,
+        raw_delete_enabled=True,
+        raw_delete_grace_hours=24,
+    )
+    partition = discover_raw_quote_partitions(tmp_path)[0]
+    assert compactor.run(now=NOW).status_counts == {"compacted": 1}
+    manifest = load_manifest(partition.manifest_path)
+    assert manifest is not None
+    raw.write_bytes(raw.read_bytes() + b"\n")
+    settled = (NOW - timedelta(minutes=10)).timestamp()
+    os.utime(raw, (settled, settled))
+
+    result = compactor._maybe_delete_raw(
+        partition,
+        CompactionResult(
+            partition.source_relative_path,
+            manifest.output_path,
+            "up_to_date",
+            row_count=manifest.row_count,
+            source_sha256=manifest.source_sha256,
+        ),
+        manifest=manifest,
+        now=NOW + timedelta(hours=30),
+        dry_run=False,
+    )
+    assert result.status == "raw_delete_blocked"
+    assert "source checksum or size no longer matches" in (result.detail or "")
+    assert raw.exists()
+
+
+def test_raw_delete_blocked_when_parquet_checksum_mismatches(tmp_path: Path) -> None:
+    from spx_spark.data_platform.lake.compact import CompactionResult
+
+    raw = source_path(tmp_path)
+    write_source(raw, [quote_payload()])
+    compactor = QuoteLakeCompactor(
+        tmp_path,
+        settle_seconds=0,
+        raw_delete_enabled=True,
+        raw_delete_grace_hours=24,
+    )
+    partition = discover_raw_quote_partitions(tmp_path)[0]
+    assert compactor.run(now=NOW).status_counts == {"compacted": 1}
+    manifest = load_manifest(partition.manifest_path)
+    assert manifest is not None
+    corrupted = bytearray(partition.parquet_path.read_bytes())
+    corrupted[len(corrupted) // 2] ^= 0x01
+    partition.parquet_path.write_bytes(corrupted)
+
+    result = compactor._maybe_delete_raw(
+        partition,
+        CompactionResult(
+            partition.source_relative_path,
+            manifest.output_path,
+            "up_to_date",
+            row_count=manifest.row_count,
+            source_sha256=manifest.source_sha256,
+        ),
+        manifest=manifest,
+        now=NOW + timedelta(hours=30),
+        dry_run=False,
+    )
+    assert result.status == "raw_delete_blocked"
+    assert "parquet checksum or size does not match" in (result.detail or "")
+    assert raw.exists()
+
+
+def test_raw_delete_blocked_when_manifest_incomplete(tmp_path: Path) -> None:
+    from spx_spark.data_platform.lake.compact import CompactionResult
+    from spx_spark.data_platform.lake.manifest import CompactionManifest
+
+    raw = source_path(tmp_path)
+    write_source(raw, [quote_payload()])
+    compactor = QuoteLakeCompactor(
+        tmp_path,
+        settle_seconds=0,
+        raw_delete_enabled=True,
+        raw_delete_grace_hours=24,
+    )
+    partition = discover_raw_quote_partitions(tmp_path)[0]
+    assert compactor.run(now=NOW).status_counts == {"compacted": 1}
+    manifest = load_manifest(partition.manifest_path)
+    assert manifest is not None
+    incomplete = CompactionManifest(
+        manifest_version=manifest.manifest_version,
+        dataset=manifest.dataset,
+        schema_version=manifest.schema_version,
+        writer_version=manifest.writer_version,
+        status="verified",
+        source_path=manifest.source_path,
+        source_size=manifest.source_size,
+        source_mtime_ns=manifest.source_mtime_ns,
+        source_sha256=manifest.source_sha256,
+        output_path=manifest.output_path,
+        output_size=None,
+        output_sha256=None,
+        row_count=manifest.row_count,
+        min_received_at=manifest.min_received_at,
+        max_received_at=manifest.max_received_at,
+        min_source_at=manifest.min_source_at,
+        max_source_at=manifest.max_source_at,
+        completed_at=manifest.completed_at,
+    )
+
+    result = compactor._maybe_delete_raw(
+        partition,
+        CompactionResult(
+            partition.source_relative_path,
+            incomplete.output_path,
+            "up_to_date",
+            row_count=incomplete.row_count,
+            source_sha256=incomplete.source_sha256,
+        ),
+        manifest=incomplete,
+        now=NOW + timedelta(hours=30),
+        dry_run=False,
+    )
+    assert result.status == "raw_delete_blocked"
+    assert "missing parquet output metadata" in (result.detail or "")
+    assert raw.exists()
+
+
+def test_raw_delete_blocked_when_row_counts_diverge(tmp_path: Path) -> None:
+    from spx_spark.data_platform.lake.compact import CompactionResult
+    from spx_spark.data_platform.lake.manifest import CompactionManifest
+
+    raw = source_path(tmp_path)
+    write_source(raw, [quote_payload()])
+    compactor = QuoteLakeCompactor(
+        tmp_path,
+        settle_seconds=0,
+        raw_delete_enabled=True,
+        raw_delete_grace_hours=24,
+    )
+    partition = discover_raw_quote_partitions(tmp_path)[0]
+    assert compactor.run(now=NOW).status_counts == {"compacted": 1}
+    manifest = load_manifest(partition.manifest_path)
+    assert manifest is not None
+    mismatched = CompactionManifest(
+        manifest_version=manifest.manifest_version,
+        dataset=manifest.dataset,
+        schema_version=manifest.schema_version,
+        writer_version=manifest.writer_version,
+        status=manifest.status,
+        source_path=manifest.source_path,
+        source_size=manifest.source_size,
+        source_mtime_ns=manifest.source_mtime_ns,
+        source_sha256=manifest.source_sha256,
+        output_path=manifest.output_path,
+        output_size=manifest.output_size,
+        output_sha256=manifest.output_sha256,
+        row_count=manifest.row_count + 1,
+        min_received_at=manifest.min_received_at,
+        max_received_at=manifest.max_received_at,
+        min_source_at=manifest.min_source_at,
+        max_source_at=manifest.max_source_at,
+        completed_at=manifest.completed_at,
+    )
+
+    result = compactor._maybe_delete_raw(
+        partition,
+        CompactionResult(
+            partition.source_relative_path,
+            mismatched.output_path,
+            "up_to_date",
+            row_count=mismatched.row_count,
+            source_sha256=mismatched.source_sha256,
+        ),
+        manifest=mismatched,
+        now=NOW + timedelta(hours=30),
+        dry_run=False,
+    )
+    assert result.status == "raw_delete_blocked"
+    assert "row count mismatch" in (result.detail or "")
+    assert raw.exists()
+
+
+def test_raw_delete_dry_run_reports_without_removing_source(tmp_path: Path) -> None:
+    raw = source_path(tmp_path)
+    write_source(raw, [quote_payload()])
+    compactor = QuoteLakeCompactor(
+        tmp_path,
+        settle_seconds=0,
+        raw_delete_enabled=True,
+        raw_delete_grace_hours=24,
+    )
+    assert compactor.run(now=NOW).status_counts == {"compacted": 1}
+    summary = compactor.run(now=NOW + timedelta(hours=30), dry_run=True)
+    assert summary.status_counts == {"would_delete_raw": 1}
+    assert raw.exists()
+    assert not (tmp_path / "manifests" / "compaction" / "raw_deletion_audit.jsonl").exists()
+
+
+def test_raw_delete_toctou_swap_preserves_quarantine(tmp_path: Path, monkeypatch) -> None:
+    from spx_spark.data_platform.lake.compact import CompactionResult
+
+    raw = source_path(tmp_path)
+    write_source(raw, [quote_payload()])
+    compactor = QuoteLakeCompactor(
+        tmp_path,
+        settle_seconds=0,
+        raw_delete_enabled=True,
+        raw_delete_grace_hours=24,
+    )
+    partition = discover_raw_quote_partitions(tmp_path)[0]
+    assert compactor.run(now=NOW).status_counts == {"compacted": 1}
+    manifest = load_manifest(partition.manifest_path)
+    assert manifest is not None
+    original_bytes = raw.read_bytes()
+
+    real_rename = os.rename
+
+    def swap_then_rename(src: str | os.PathLike[str], dst: str | os.PathLike[str]) -> None:
+        src_path = Path(src)
+        if src_path.name == "quotes.jsonl":
+            attacker = src_path.with_name("attacker-swap.jsonl")
+            attacker.write_bytes(b'{"evil":true}\n')
+            real_rename(attacker, src_path)
+        real_rename(src, dst)
+
+    monkeypatch.setattr(os, "rename", swap_then_rename)
+
+    result = compactor._maybe_delete_raw(
+        partition,
+        CompactionResult(
+            partition.source_relative_path,
+            manifest.output_path,
+            "up_to_date",
+            row_count=manifest.row_count,
+            source_sha256=manifest.source_sha256,
+        ),
+        manifest=manifest,
+        now=NOW + timedelta(hours=30),
+        dry_run=False,
+    )
+    assert result.status == "raw_delete_failed"
+    assert "quarantined raw preserved" in (result.detail or "")
+    assert "post-rename mismatch" in (result.detail or "")
+    assert not raw.exists()
+    quarantines = list((raw.parent).glob(".quotes.jsonl.raw-delete-quarantine.*"))
+    assert len(quarantines) == 1
+    assert quarantines[0].read_bytes() == b'{"evil":true}\n'
+    assert quarantines[0].read_bytes() != original_bytes
+
+
+def test_raw_delete_rejects_symlink_source(tmp_path: Path) -> None:
+    from spx_spark.data_platform.lake.compact import CompactionResult
+    from spx_spark.data_platform.lake.layout import RawQuotePartition
+    from spx_spark.data_platform.lake.manifest import CompactionManifest
+
+    raw = source_path(tmp_path)
+    write_source(raw, [quote_payload()])
+    compactor = QuoteLakeCompactor(
+        tmp_path,
+        settle_seconds=0,
+        raw_delete_enabled=True,
+        raw_delete_grace_hours=24,
+    )
+    partition = discover_raw_quote_partitions(tmp_path)[0]
+    assert compactor.run(now=NOW).status_counts == {"compacted": 1}
+    manifest = load_manifest(partition.manifest_path)
+    assert manifest is not None
+
+    outside = tmp_path / "outside" / "quotes.jsonl"
+    outside.parent.mkdir(parents=True)
+    outside.write_bytes(raw.read_bytes())
+    raw.unlink()
+    raw.symlink_to(outside)
+
+    symlink_partition = RawQuotePartition(
+        data_root=tmp_path,
+        source_path=raw,
+        provider="ibkr",
+        session_date="2026-07-10",
+        hour=10,
+    )
+    result = compactor._maybe_delete_raw(
+        symlink_partition,
+        CompactionResult(
+            symlink_partition.source_relative_path,
+            manifest.output_path,
+            "up_to_date",
+            row_count=manifest.row_count,
+            source_sha256=manifest.source_sha256,
+        ),
+        manifest=CompactionManifest(
+            manifest_version=manifest.manifest_version,
+            dataset=manifest.dataset,
+            schema_version=manifest.schema_version,
+            writer_version=manifest.writer_version,
+            status="verified",
+            source_path=symlink_partition.source_relative_path,
+            source_size=manifest.source_size,
+            source_mtime_ns=manifest.source_mtime_ns,
+            source_sha256=manifest.source_sha256,
+            output_path=manifest.output_path,
+            output_size=manifest.output_size,
+            output_sha256=manifest.output_sha256,
+            row_count=manifest.row_count,
+            min_received_at=manifest.min_received_at,
+            max_received_at=manifest.max_received_at,
+            min_source_at=manifest.min_source_at,
+            max_source_at=manifest.max_source_at,
+            completed_at=manifest.completed_at,
+        ),
+        now=NOW + timedelta(hours=30),
+        dry_run=False,
+    )
+    assert result.status == "raw_delete_blocked"
+    assert "symlink" in (result.detail or "")
+    assert raw.is_symlink()
+    assert outside.exists()
+
+
+def test_raw_delete_rejects_malformed_provider_date_hour_path(tmp_path: Path) -> None:
+    from spx_spark.data_platform.lake.layout import RawQuotePartition
+
+    bad = tmp_path / "raw" / "ibkr" / "2026-07-10" / "10" / "quotes.jsonl"
+    write_source(bad, [quote_payload()])
+    partition = RawQuotePartition(
+        data_root=tmp_path,
+        source_path=bad,
+        provider="ibkr",
+        session_date="2026-07-10",
+        hour=10,
+    )
+    compactor = QuoteLakeCompactor(
+        tmp_path,
+        settle_seconds=0,
+        raw_delete_enabled=True,
+        raw_delete_grace_hours=24,
+    )
+    reason = compactor._unsafe_raw_delete_target_reason(partition)
+    assert reason is not None
+    assert "malformed provider" in reason
+
+
+def test_raw_delete_blocked_when_manifest_source_path_mismatches(tmp_path: Path) -> None:
+    from spx_spark.data_platform.lake.compact import CompactionResult
+    from spx_spark.data_platform.lake.manifest import CompactionManifest
+
+    raw = source_path(tmp_path)
+    write_source(raw, [quote_payload()])
+    compactor = QuoteLakeCompactor(
+        tmp_path,
+        settle_seconds=0,
+        raw_delete_enabled=True,
+        raw_delete_grace_hours=24,
+    )
+    partition = discover_raw_quote_partitions(tmp_path)[0]
+    assert compactor.run(now=NOW).status_counts == {"compacted": 1}
+    manifest = load_manifest(partition.manifest_path)
+    assert manifest is not None
+    mismatched = CompactionManifest(
+        manifest_version=manifest.manifest_version,
+        dataset=manifest.dataset,
+        schema_version=manifest.schema_version,
+        writer_version=manifest.writer_version,
+        status=manifest.status,
+        source_path="raw/provider=other/date=2026-07-10/hour=10/quotes.jsonl",
+        source_size=manifest.source_size,
+        source_mtime_ns=manifest.source_mtime_ns,
+        source_sha256=manifest.source_sha256,
+        output_path=manifest.output_path,
+        output_size=manifest.output_size,
+        output_sha256=manifest.output_sha256,
+        row_count=manifest.row_count,
+        min_received_at=manifest.min_received_at,
+        max_received_at=manifest.max_received_at,
+        min_source_at=manifest.min_source_at,
+        max_source_at=manifest.max_source_at,
+        completed_at=manifest.completed_at,
+    )
+    result = compactor._maybe_delete_raw(
+        partition,
+        CompactionResult(
+            partition.source_relative_path,
+            mismatched.output_path,
+            "up_to_date",
+            row_count=mismatched.row_count,
+            source_sha256=mismatched.source_sha256,
+        ),
+        manifest=mismatched,
+        now=NOW + timedelta(hours=30),
+        dry_run=False,
+    )
+    assert result.status == "raw_delete_blocked"
+    assert "manifest source_path does not match" in (result.detail or "")
+    assert raw.exists()
+
+
+def test_raw_delete_audit_write_failure_blocks_deletion(tmp_path: Path, monkeypatch) -> None:
+    from spx_spark.data_platform.lake.compact import CompactionResult
+
+    raw = source_path(tmp_path)
+    write_source(raw, [quote_payload()])
+    compactor = QuoteLakeCompactor(
+        tmp_path,
+        settle_seconds=0,
+        raw_delete_enabled=True,
+        raw_delete_grace_hours=24,
+    )
+    partition = discover_raw_quote_partitions(tmp_path)[0]
+    assert compactor.run(now=NOW).status_counts == {"compacted": 1}
+    manifest = load_manifest(partition.manifest_path)
+    assert manifest is not None
+
+    def boom(*_args, **_kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(compactor, "_append_raw_deletion_audit", boom)
+
+    result = compactor._maybe_delete_raw(
+        partition,
+        CompactionResult(
+            partition.source_relative_path,
+            manifest.output_path,
+            "up_to_date",
+            row_count=manifest.row_count,
+            source_sha256=manifest.source_sha256,
+        ),
+        manifest=manifest,
+        now=NOW + timedelta(hours=30),
+        dry_run=False,
+    )
+    assert result.status == "raw_delete_audit_failed"
+    assert "pre-delete audit" in (result.detail or "")
+    assert raw.exists()
+
+
+def test_raw_delete_blocked_is_summary_failure(tmp_path: Path, capsys, monkeypatch) -> None:
+    from spx_spark.data_platform.lake.compact import CompactionResult, CompactionSummary
+
+    summary = CompactionSummary(
+        dry_run=False,
+        data_root=str(tmp_path),
+        started_at=NOW.isoformat(),
+        finished_at=NOW.isoformat(),
+        results=(
+            CompactionResult(
+                "raw/provider=ibkr/date=2026-07-10/hour=10/quotes.jsonl",
+                "lake/quotes/schema=v1/date=2026-07-10/provider=ibkr/hour=10/quotes.parquet",
+                "raw_delete_blocked",
+                row_count=1,
+                detail="source checksum or size no longer matches manifest",
+            ),
+        ),
+    )
+    assert summary.failed is True
+
+    monkeypatch.setattr(
+        "spx_spark.data_platform.lake.compact.QuoteLakeCompactor.run",
+        lambda self, **_kwargs: summary,
+    )
+    monkeypatch.setattr(
+        "spx_spark.data_platform.lake.compact.StorageSettings.from_env",
+        lambda: type("S", (), {"raw_file_name": "quotes.jsonl"})(),
+    )
+    monkeypatch.setattr(
+        "spx_spark.data_platform.lake.compact.DataPlatformSettings.from_env",
+        lambda: type(
+            "P",
+            (),
+            {
+                "data_root": str(tmp_path),
+                "compaction_min_age_seconds": 0,
+                "raw_delete_enabled": True,
+                "raw_delete_grace_hours": 24,
+            },
+        )(),
+    )
+    code = main(["--data-root", str(tmp_path), "--summary-only", "--json"])
+    assert code == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["failed"] is True
+    assert len(payload["failures"]) == 1
+    assert payload["failures"][0]["status"] == "raw_delete_blocked"

@@ -40,6 +40,7 @@ from spx_spark.notifier.sinks import (
     im_delivery_ok,
     run_openclaw_agent,
 )
+from spx_spark.runtime_config import runtime_value
 
 
 MetricValue = bool | int | float | str | tuple[str, ...] | None
@@ -70,16 +71,26 @@ class ReviewLlmSettings:
     def from_env(cls) -> "ReviewLlmSettings":
         load_dotenv()
         return cls(
-            enabled=env_bool("SPX_REVIEW_LLM_ENABLED", False),
-            provider=os.getenv("SPX_REVIEW_LLM_PROVIDER", "deepseek").strip(),
-            model=os.getenv("SPX_REVIEW_LLM_MODEL", "deepseek-v4-pro").strip(),
+            enabled=env_bool("SPX_REVIEW_LLM_ENABLED", bool(runtime_value("review.llm_enabled"))),
+            provider=os.getenv("SPX_REVIEW_LLM_PROVIDER", str(runtime_value("review.llm_provider"))).strip(),
+            model=os.getenv("SPX_REVIEW_LLM_MODEL", str(runtime_value("review.llm_model"))).strip(),
             url=os.getenv(
                 "SPX_REVIEW_LLM_URL",
-                "https://api.deepseek.com/v1/chat/completions",
+                str(runtime_value("review.llm_url")),
             ).strip(),
-            env_file=os.getenv("SPX_REVIEW_LLM_ENV_FILE", "/home/ubuntu/.hermes/.env").strip(),
-            timeout_seconds=float(os.getenv("SPX_REVIEW_LLM_TIMEOUT_SECONDS", "120")),
-            max_tokens=int(os.getenv("SPX_REVIEW_LLM_MAX_TOKENS", "2200")),
+            env_file=os.getenv(
+                "SPX_REVIEW_LLM_ENV_FILE",
+                str(runtime_value("review.llm_env_file")),
+            ).strip(),
+            timeout_seconds=float(
+                os.getenv(
+                    "SPX_REVIEW_LLM_TIMEOUT_SECONDS",
+                    str(runtime_value("review.llm_timeout_seconds")),
+                )
+            ),
+            max_tokens=int(
+                os.getenv("SPX_REVIEW_LLM_MAX_TOKENS", str(runtime_value("review.llm_max_tokens")))
+            ),
         )
 
 
@@ -124,23 +135,72 @@ class ReviewCompletenessPolicy:
     def from_env(cls) -> "ReviewCompletenessPolicy":
         load_dotenv()
         return cls(
-            min_index_bucket_ratio=float(os.getenv("SPX_REVIEW_MIN_INDEX_BUCKET_RATIO", "0.90")),
-            max_edge_gap_minutes=float(os.getenv("SPX_REVIEW_MAX_EDGE_GAP_MINUTES", "15")),
-            min_index_live_ratio=float(os.getenv("SPX_REVIEW_MIN_INDEX_LIVE_RATIO", "0.95")),
+            min_index_bucket_ratio=float(
+                os.getenv(
+                    "SPX_REVIEW_MIN_INDEX_BUCKET_RATIO",
+                    str(runtime_value("review.min_index_bucket_ratio")),
+                )
+            ),
+            max_edge_gap_minutes=float(
+                os.getenv(
+                    "SPX_REVIEW_MAX_EDGE_GAP_MINUTES",
+                    str(runtime_value("review.max_edge_gap_minutes")),
+                )
+            ),
+            min_index_live_ratio=float(
+                os.getenv(
+                    "SPX_REVIEW_MIN_INDEX_LIVE_RATIO",
+                    str(runtime_value("review.min_index_live_ratio")),
+                )
+            ),
             min_front_option_contracts=int(
-                os.getenv("SPX_REVIEW_MIN_FRONT_OPTION_CONTRACTS", "20")
+                os.getenv(
+                    "SPX_REVIEW_MIN_FRONT_OPTION_CONTRACTS",
+                    str(runtime_value("review.min_front_option_contracts")),
+                )
             ),
-            min_front_option_strikes=int(os.getenv("SPX_REVIEW_MIN_FRONT_OPTION_STRIKES", "10")),
+            min_front_option_strikes=int(
+                os.getenv(
+                    "SPX_REVIEW_MIN_FRONT_OPTION_STRIKES",
+                    str(runtime_value("review.min_front_option_strikes")),
+                )
+            ),
             min_front_option_strike_span=float(
-                os.getenv("SPX_REVIEW_MIN_FRONT_OPTION_STRIKE_SPAN", "50")
+                os.getenv(
+                    "SPX_REVIEW_MIN_FRONT_OPTION_STRIKE_SPAN",
+                    str(runtime_value("review.min_front_option_strike_span")),
+                )
             ),
-            min_option_usable_ratio=float(os.getenv("SPX_REVIEW_MIN_OPTION_USABLE_RATIO", "0.90")),
-            min_option_iv_ratio=float(os.getenv("SPX_REVIEW_MIN_OPTION_IV_RATIO", "0.80")),
+            min_option_usable_ratio=float(
+                os.getenv(
+                    "SPX_REVIEW_MIN_OPTION_USABLE_RATIO",
+                    str(runtime_value("review.min_option_usable_ratio")),
+                )
+            ),
+            min_option_iv_ratio=float(
+                os.getenv(
+                    "SPX_REVIEW_MIN_OPTION_IV_RATIO",
+                    str(runtime_value("review.min_option_iv_ratio")),
+                )
+            ),
             min_surface_bucket_ratio=float(
-                os.getenv("SPX_REVIEW_MIN_SURFACE_BUCKET_RATIO", "0.60")
+                os.getenv(
+                    "SPX_REVIEW_MIN_SURFACE_BUCKET_RATIO",
+                    str(runtime_value("review.min_surface_bucket_ratio")),
+                )
             ),
-            min_surface_iv_ratio=float(os.getenv("SPX_REVIEW_MIN_SURFACE_IV_RATIO", "0.50")),
-            min_surface_gamma_ratio=float(os.getenv("SPX_REVIEW_MIN_SURFACE_GAMMA_RATIO", "0.50")),
+            min_surface_iv_ratio=float(
+                os.getenv(
+                    "SPX_REVIEW_MIN_SURFACE_IV_RATIO",
+                    str(runtime_value("review.min_surface_iv_ratio")),
+                )
+            ),
+            min_surface_gamma_ratio=float(
+                os.getenv(
+                    "SPX_REVIEW_MIN_SURFACE_GAMMA_RATIO",
+                    str(runtime_value("review.min_surface_gamma_ratio")),
+                )
+            ),
         )
 
 
@@ -303,7 +363,10 @@ def load_surface_snapshots(
 ) -> tuple[IvSurfaceSnapshot, ...]:
     class SurfaceSettings:
         data_root = settings.data_root
-        raw_file_name = os.getenv("IV_SURFACE_RAW_FILE_NAME", "snapshots.jsonl")
+        raw_file_name = os.getenv(
+            "IV_SURFACE_RAW_FILE_NAME",
+            str(runtime_value("iv_surface.raw_file_name")),
+        )
 
     snapshots: list[IvSurfaceSnapshot] = []
     start_utc = start.astimezone(timezone.utc)
@@ -1269,7 +1332,7 @@ def surface_row(expiry: dict[str, Any]) -> str:
 def default_output_dir(settings: StorageSettings) -> Path:
     return Path(
         os.getenv("SPX_REVIEW_OUTPUT_DIR")
-        or Path(settings.data_root) / "reports" / "spx_options_review"
+        or Path(settings.data_root) / str(runtime_value("review.output_dir_name"))
     )
 
 
@@ -1283,7 +1346,7 @@ def default_latest_markdown_path(settings: StorageSettings) -> Path:
 def default_hermes_export_dir() -> Path:
     return Path(
         os.getenv("SPX_REVIEW_HERMES_EXPORT_DIR")
-        or "/home/ubuntu/research/finance/daily/spx-options-review"
+        or str(runtime_value("review.hermes_export_dir"))
     )
 
 
@@ -1421,7 +1484,7 @@ def push_review(
     now: datetime | None = None,
 ) -> dict[str, Any]:
     now = now or datetime.now(tz=timezone.utc)
-    if not env_bool("SPX_REVIEW_PUSH_ENABLED", True):
+    if not env_bool("SPX_REVIEW_PUSH_ENABLED", bool(runtime_value("review.push_enabled"))):
         return {"skipped": True, "reason": "push_disabled"}
 
     settings = NotificationSettings.from_env()

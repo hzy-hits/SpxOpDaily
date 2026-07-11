@@ -108,7 +108,8 @@ JSONL 不能仅凭年龄删除。只有同时满足以下条件，closed-hour so
 6. 已经过至少 24 小时 rollback grace；
 7. 删除动作留有审计记录。
 
-在 verified deletion 接线并完成至少一个完整交易日验证前，`DATA_PLATFORM_RAW_DELETE_ENABLED` 保持关闭。
+在 verified deletion 已接线后，仍须完成至少一个完整交易日验证，且
+`DATA_PLATFORM_RAW_DELETE_ENABLED` 默认保持关闭。
 
 ## 80 GB 项目预算
 
@@ -200,5 +201,5 @@ JSONL 不能仅凭年龄删除。只有同时满足以下条件，closed-hour so
 3. 保持每小时小批 ZSTD Parquet compaction；周六和周日 08:30 CST 运行低优先级 bulk catch-up。
 4. 增加事件前后 ring-buffer preservation。
 5. 运行至少一个完整交易日，核对 row count、覆盖率、压缩率和磁盘增长。
-6. 在 verified raw deletion 接线前，周日 13:00 CST 的 retention job 只做非破坏性审计；接线后的初始 grace 为 24 小时。
+6. verified raw deletion 已接线但默认关闭；启用前周日 13:00 CST retention 仍以非破坏性审计为主，初始 grace 至少 24 小时（生产默认 72 小时）。
 7. 只有在重新评估条件触发后，才设计 NAS 异步冷归档；树莓派仍不自动成为关键控制面。

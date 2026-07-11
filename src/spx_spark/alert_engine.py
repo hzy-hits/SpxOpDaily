@@ -32,6 +32,7 @@ from spx_spark.position_alerts import (
     position_holdings_alerts,
     reconcile_position_event_acknowledgements,
 )
+from spx_spark.runtime_config import runtime_value
 from spx_spark.storage import (
     LatestState,
     LatestStateStore,
@@ -116,13 +117,14 @@ OPTION_GAMMA_ALERT_STATES = {
 BAD_SURFACE_QUALITIES = {"missing_options", "missing_atm_iv", "low_iv_coverage", "wide_quote_degraded"}
 BLOCKING_SURFACE_QUALITIES = {"missing_options", "missing_atm_iv"}
 DEGRADED_SURFACE_QUALITIES = {"low_iv_coverage", "wide_quote_degraded"}
-ATM_IV_JUMP_THRESHOLD = 0.03
-SKEW_STEEPENING_THRESHOLD = 0.08
-SKEW_25D_STEEPENING_THRESHOLD = 0.02
-SURFACE_SHIFT_THRESHOLD = 0.03
-TERM_GAP_THRESHOLD = 0.05
-SURFACE_SHIFT_1H_THRESHOLD = 0.05
-ATM_IV_CHANGE_1H_THRESHOLD = 0.04
+# Algorithm thresholds in absolute IV / skew units (not env-tunable identities).
+ATM_IV_JUMP_THRESHOLD = 0.03  # 5-minute ATM IV jump that opens an IV-jump alert
+SKEW_STEEPENING_THRESHOLD = 0.08  # 5-minute put-skew steepening alert floor
+SKEW_25D_STEEPENING_THRESHOLD = 0.02  # default 25-delta skew steepening floor
+SURFACE_SHIFT_THRESHOLD = 0.03  # 5-minute whole-surface level shift floor
+TERM_GAP_THRESHOLD = 0.05  # front-vs-next ATM IV term-structure gap floor
+SURFACE_SHIFT_1H_THRESHOLD = 0.05  # default 1-hour surface shift floor (env-overridable)
+ATM_IV_CHANGE_1H_THRESHOLD = 0.04  # default 1-hour ATM IV change floor (env-overridable)
 IBKR_INTERRUPTED_SESSION_STATUSES = {"competing_session", "unavailable"}
 # Transitional statuses must not overwrite the persisted session status:
 # "degraded" is what the stream collector reports between reconnect and the
@@ -188,7 +190,10 @@ def effective_move_threshold_bps(
     if em_bps > static:
         return (em_bps, "em_normalized")
     if priority == "low":
-        floor = env_float("ALERT_MOVE_QUIET_FLOOR_BPS", QUIET_EM_THRESHOLD_FLOOR_BPS_DEFAULT)
+        floor = env_float(
+            "ALERT_MOVE_QUIET_FLOOR_BPS",
+            float(runtime_value("alerts.move_quiet_floor_bps")),
+        )
         return (max(em_bps, floor), "em_normalized_quiet")
     return (static, "static")
 
@@ -377,7 +382,7 @@ def movement_alerts(
         if expected_move_pct is not None and expected_move_pct > 0:
             escalation_fraction = env_float(
                 "ALERT_MOVE_HIGH_SEVERITY_EM_FRACTION",
-                MOVE_HIGH_SEVERITY_EM_FRACTION_DEFAULT,
+                float(runtime_value("alerts.move_high_severity_em_fraction")),
             )
             em_day_bps = expected_move_pct * 10_000.0
             if abs(move_bps) >= em_day_bps * escalation_fraction and severity in ("info", "low", "medium"):
@@ -468,13 +473,22 @@ def option_coverage_is_fresh(expiry: object) -> bool:
     coverage = getattr(expiry, "coverage", None)
     if coverage is None or coverage.total <= 0:
         return False
-    min_live_ratio = env_float("ALERT_MIN_OPTION_LIVE_RATIO", 0.5)
+    min_live_ratio = env_float(
+        "ALERT_MIN_OPTION_LIVE_RATIO",
+        float(runtime_value("alerts.min_option_live_ratio")),
+    )
     if coverage.live / coverage.total < min_live_ratio:
         return False
     max_age_ms = coverage.max_age_ms
-    if max_age_ms is not None and max_age_ms > env_float("ALERT_MAX_OPTION_QUOTE_AGE_MS", 20_000.0):
+    if max_age_ms is not None and max_age_ms > env_float(
+        "ALERT_MAX_OPTION_QUOTE_AGE_MS",
+        float(runtime_value("alerts.max_option_quote_age_ms")),
+    ):
         return False
-    if env_bool("ALERT_REQUIRE_OPTION_QUOTE_TIMESTAMPS", False):
+    if env_bool(
+        "ALERT_REQUIRE_OPTION_QUOTE_TIMESTAMPS",
+        bool(runtime_value("alerts.require_option_quote_timestamps")),
+    ):
         known_ratio = (coverage.total - coverage.unknown_age) / coverage.total
         if known_ratio < 0.75:
             return False
@@ -496,7 +510,10 @@ def option_freshness_alert(expiry: object, *, window: AlertWindow) -> Alert:
         ),
         quality="degraded",
         value=live_ratio,
-        threshold=env_float("ALERT_MIN_OPTION_LIVE_RATIO", 0.5),
+        threshold=env_float(
+            "ALERT_MIN_OPTION_LIVE_RATIO",
+            float(runtime_value("alerts.min_option_live_ratio")),
+        ),
     )
 
 
@@ -531,7 +548,10 @@ def gamma_regime_observation_stable(expiry: str, gamma_state: str, *, as_of: dat
     """True when the persisted observation shows this gamma state has held for
     the hysteresis window. Read-only: observations are persisted separately so
     dry runs and tests do not mutate state."""
-    hysteresis = env_float("ALERT_GAMMA_REGIME_HYSTERESIS_SECONDS", 600.0)
+    hysteresis = env_float(
+        "ALERT_GAMMA_REGIME_HYSTERESIS_SECONDS",
+        float(runtime_value("alerts.gamma_regime_hysteresis_seconds")),
+    )
     entry = load_gamma_regime_state(gamma_regime_state_path()).get(expiry)
     if not isinstance(entry, dict) or entry.get("state") != gamma_state:
         return False
@@ -629,7 +649,10 @@ def option_map_alerts(options_map: OptionsMap, *, window: AlertWindow) -> list[A
 
 
 def iv_surface_freshness_alert(surface: IvSurfaceSnapshot, *, now: datetime) -> Alert | None:
-    max_age_seconds = env_float("ALERT_MAX_IV_SURFACE_AGE_SECONDS", 420.0)
+    max_age_seconds = env_float(
+        "ALERT_MAX_IV_SURFACE_AGE_SECONDS",
+        float(runtime_value("alerts.max_iv_surface_age_seconds")),
+    )
     age_seconds = (now - surface.as_of).total_seconds()
     if age_seconds <= max_age_seconds:
         return None
@@ -692,7 +715,10 @@ def provider_state_for(state: LatestState, provider: Provider) -> ProviderState 
 
 
 def provider_state_is_recent(provider_state: ProviderState, *, now: datetime) -> bool:
-    max_age_seconds = env_float("ALERT_BROKER_STATE_MAX_AGE_SECONDS", 900.0)
+    max_age_seconds = env_float(
+        "ALERT_BROKER_STATE_MAX_AGE_SECONDS",
+        float(runtime_value("alerts.broker_state_max_age_seconds")),
+    )
     age_seconds = (now - provider_state.checked_at).total_seconds()
     return 0 <= age_seconds <= max_age_seconds
 
@@ -828,7 +854,10 @@ def ibkr_session_event_alert(
 
 
 def system_event_alerts(state: LatestState, *, persist: bool = True) -> list[Alert]:
-    if not env_bool("ALERT_SYSTEM_EVENTS_ENABLED", True):
+    if not env_bool(
+        "ALERT_SYSTEM_EVENTS_ENABLED",
+        bool(runtime_value("alerts.system_events_enabled")),
+    ):
         return []
     provider_state = provider_state_for(state, Provider.IBKR)
     if provider_state is None:
@@ -865,7 +894,10 @@ def proxy_fallback_watch_alerts(
     market_context: dict[str, object] | None,
     options_map: OptionsMap | None = None,
 ) -> list[Alert]:
-    if not env_bool("ALERT_ALLOW_BROKER_UNAVAILABLE_PROXY_WATCH", True):
+    if not env_bool(
+        "ALERT_ALLOW_BROKER_UNAVAILABLE_PROXY_WATCH",
+        bool(runtime_value("alerts.allow_broker_unavailable_proxy_watch")),
+    ):
         return []
     gate = hyperliquid_proxy_gate(market_context)
     if gate.get("usable_for_alert") is True:
@@ -971,8 +1003,14 @@ def iv_surface_alerts(
     history_1h: dict[str, object] | None = None,
 ) -> list[Alert]:
     alerts: list[Alert] = []
-    shift_1h_threshold = env_float("ALERT_IV_SURFACE_SHIFT_1H_THRESHOLD", SURFACE_SHIFT_1H_THRESHOLD)
-    atm_change_1h_threshold = env_float("ALERT_IV_ATM_CHANGE_1H_THRESHOLD", ATM_IV_CHANGE_1H_THRESHOLD)
+    shift_1h_threshold = env_float(
+        "ALERT_IV_SURFACE_SHIFT_1H_THRESHOLD",
+        float(runtime_value("alerts.iv_surface_shift_1h_threshold")),
+    )
+    atm_change_1h_threshold = env_float(
+        "ALERT_IV_ATM_CHANGE_1H_THRESHOLD",
+        float(runtime_value("alerts.iv_atm_change_1h_threshold")),
+    )
     if (
         surface.front_vs_next_atm_iv_gap is not None
         and abs(surface.front_vs_next_atm_iv_gap) >= TERM_GAP_THRESHOLD
@@ -1036,7 +1074,10 @@ def iv_surface_alerts(
                     dedup_group=magnitude_bucket(expiry.atm_iv_jump_5m, ATM_IV_JUMP_THRESHOLD),
                 )
             )
-        skew_25d_threshold = env_float("ALERT_SKEW_25D_THRESHOLD", SKEW_25D_STEEPENING_THRESHOLD)
+        skew_25d_threshold = env_float(
+            "ALERT_SKEW_25D_THRESHOLD",
+            float(runtime_value("alerts.skew_25d_threshold")),
+        )
         if (
             expiry.put_skew_25d_change_5m is not None
             and expiry.put_skew_25d_change_5m >= skew_25d_threshold

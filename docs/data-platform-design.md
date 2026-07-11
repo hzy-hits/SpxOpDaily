@@ -34,7 +34,7 @@ The operational ledger is event-driven: it records actual alert candidates,
 delivery/reviewer outcomes and fixed-horizon results, not every neutral 5-second
 evaluation. Continuous quote history belongs in compressed Parquet.
 
-Raw deletion is disabled by default. A source JSONL file can become eligible
+Raw deletion is wired into the compaction path but disabled by default. A source JSONL file can become eligible
 for deletion only after all of the following are true:
 
 1. the file is closed and older than the configured minimum age;
@@ -44,7 +44,9 @@ for deletion only after all of the following are true:
 5. the final Parquet checksum is recorded in the SQLite manifest;
 6. the configured 24-hour-or-longer rollback grace has elapsed.
 
-The initial production rollout does not execute step 6.
+The initial production rollout keeps deletion disabled. Operators may enable it
+only after verified Parquet output and manifest checks pass, and the configured
+rollback grace has elapsed.
 
 ## Storage ports
 

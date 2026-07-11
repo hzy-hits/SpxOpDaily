@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from spx_spark.marketdata import MarketDataQuality, Quote
+from spx_spark.runtime_config import runtime_value
 from spx_spark.storage import LatestState, configured_quote_use_decision
 
 
@@ -195,7 +196,11 @@ def latest_polymarket_context_path() -> Path:
     explicit = os.getenv("POLYMARKET_LATEST_CONTEXT_PATH")
     if explicit:
         return Path(explicit)
-    data_root = os.getenv("MARKET_DATA_DATA_ROOT") or os.getenv("MAINTENANCE_DATA_ROOT") or "data"
+    data_root = (
+        os.getenv("MARKET_DATA_DATA_ROOT")
+        or os.getenv("MAINTENANCE_DATA_ROOT")
+        or str(runtime_value("maintenance.data_root"))
+    )
     return Path(data_root) / "latest" / "polymarket_context.json"
 
 
@@ -248,8 +253,14 @@ def first_actionable_entry(
 
 
 def hyperliquid_spx_proxy_gate(entries: dict[str, MarketContextEntry]) -> dict[str, object]:
-    default_warn_bps = env_float("HYPERLIQUID_PROXY_BASIS_WARN_BPS", 50.0)
-    default_block_bps = env_float("HYPERLIQUID_PROXY_BASIS_BLOCK_BPS", 100.0)
+    default_warn_bps = env_float(
+        "HYPERLIQUID_PROXY_BASIS_WARN_BPS",
+        float(runtime_value("hyperliquid.proxy_basis_warn_bps")),
+    )
+    default_block_bps = env_float(
+        "HYPERLIQUID_PROXY_BASIS_BLOCK_BPS",
+        float(runtime_value("hyperliquid.proxy_basis_block_bps")),
+    )
     proxy = first_usable_entry(entries, HYPERLIQUID_PROXY_IDS)
     if proxy is None:
         return {
@@ -281,8 +292,14 @@ def hyperliquid_spx_proxy_gate(entries: dict[str, MarketContextEntry]) -> dict[s
 
     anchor_is_future = anchor.instrument_id.startswith("future:")
     if anchor_is_future:
-        warn_bps = env_float("HYPERLIQUID_PROXY_FUTURES_BASIS_WARN_BPS", 80.0)
-        block_bps = env_float("HYPERLIQUID_PROXY_FUTURES_BASIS_BLOCK_BPS", 150.0)
+        warn_bps = env_float(
+            "HYPERLIQUID_PROXY_FUTURES_BASIS_WARN_BPS",
+            float(runtime_value("hyperliquid.proxy_futures_basis_warn_bps")),
+        )
+        block_bps = env_float(
+            "HYPERLIQUID_PROXY_FUTURES_BASIS_BLOCK_BPS",
+            float(runtime_value("hyperliquid.proxy_futures_basis_block_bps")),
+        )
     else:
         warn_bps = default_warn_bps
         block_bps = default_block_bps
