@@ -1,0 +1,38 @@
+{
+  "phase": "phase7",
+  "generated_at": "2026-07-11T15:16:24.045973+00:00",
+  "git_commit": "fb3b50961a1ce33ef996e6b1765d783823b828e3",
+  "python": "3.12.3 (main, Jun 19 2026, 12:46:00) [GCC 13.3.0]",
+  "decision": "NO-GO",
+  "decision_reason": "IPC/UDS thresholds in plan \u00a710.2 are not evidenced by continuous RTH session metrics in this environment. Correct outcome remains deferral, not implementing unix_stream for architectural completeness. Reconfirmed 2026-07-11T15:46:00.698459Z.",
+  "thresholds_evaluated": {
+    "provider_to_engine_p95_gt_750ms_from_polling": "NOT_MEASURED",
+    "latest_projection_gt_5_mib": "NOT_MEASURED",
+    "projection_parse_p95_gt_100ms": "NOT_MEASURED",
+    "file_lock_wait_p95_gt_100ms": "NOT_MEASURED",
+    "need_sub_second_engine_tick": "NOT_EVIDENCED",
+    "continuous_5_rth_sessions": false
+  },
+  "retained_path": "provider -> raw/latest projection -> realtime engine via ports; SQLite outbox remains the durable low-frequency event path",
+  "checks": {
+    "note": "Phase 7 is a decision gate; full pytest not re-required beyond Phase 6 GO baseline",
+    "phase6_decision": "GO",
+    "phase6_pytest_passed": 1012,
+    "backlog_pytest_passed": 1027
+  },
+  "landed": [
+    "Explicit NO-GO / deferral recorded for Unix stream socket IPC",
+    "No unix_stream.py introduced"
+  ],
+  "remaining": [
+    "Instrument production metrics for \u00a710.2 thresholds across 5 RTH sessions",
+    "Re-open Phase 7 only if any threshold is met continuously"
+  ],
+  "open_risks": [
+    "Without production telemetry, false-positive UDS adoption risk remains controlled by NO-GO"
+  ],
+  "gates_unmet": [
+    "No continuous RTH metric evidence for any \u00a710.2 enablement threshold"
+  ],
+  "updated_at": "2026-07-11T15:46:00.698459Z"
+}

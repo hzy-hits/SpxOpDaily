@@ -13,7 +13,7 @@ import os
 from datetime import date
 from pathlib import Path
 
-from spx_spark.runtime_config import runtime_value
+from spx_spark.settings import settings_value
 from spx_spark.steven_validation import build_replay_payload
 
 
@@ -21,7 +21,7 @@ def _default_data_root() -> str:
     return (
         os.getenv("MARKET_DATA_DATA_ROOT")
         or os.getenv("MAINTENANCE_DATA_ROOT")
-        or str(runtime_value("maintenance.data_root"))
+        or str(settings_value("maintenance.data_root"))
     )
 
 

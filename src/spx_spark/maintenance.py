@@ -9,7 +9,7 @@ from pathlib import Path
 
 from spx_spark.config import MaintenanceSettings, StorageSettings
 from spx_spark.marketdata import Provider
-from spx_spark.storage import LatestStateStore
+from spx_spark.storage import LatestMarketProjectionStore
 
 
 PROTECTED_DATA_SEGMENTS = frozenset({"latest", "runtime"})
@@ -396,7 +396,7 @@ def purge_latest_provider(provider_name: str, *, settings: MaintenanceSettings) 
         slow_index_stale_after_seconds=300.0,
         slow_index_labels=frozenset({"index:SKEW", "index:VVIX"}),
     )
-    result = LatestStateStore(storage_settings).purge_provider_quotes(provider)
+    result = LatestMarketProjectionStore(storage_settings).purge_provider_quotes(provider)
     return {
         "provider": provider.value,
         "latest_state": result.path,

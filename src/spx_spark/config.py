@@ -7,11 +7,10 @@ from zoneinfo import ZoneInfo
 
 from spx_spark.market_calendar import ET as NY_TZ
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR, default_spxw_expiry
+from spx_spark.settings import settings_csv, settings_value
 from spx_spark.runtime_config import (
-    runtime_csv,
     runtime_schwab_option_chain_underliers,
     runtime_schwab_symbols_by_type,
-    runtime_value,
 )
 
 DEFAULT_SLOW_POLL_LABELS = (
@@ -82,6 +81,11 @@ def env_csv_preserve(name: str, default: str) -> list[str]:
 
 def load_dotenv(path: str = ".env") -> None:
     """Load a small .env file without requiring python-dotenv."""
+    # Unit tests pin SPX_SPARK_DISABLE_DOTENV so workspace deployment .env
+    # values cannot change Settings.from_env() behavior.
+    disabled = os.getenv("SPX_SPARK_DISABLE_DOTENV", "").strip().lower()
+    if disabled in {"1", "true", "yes", "y", "on"}:
+        return
     if not os.path.exists(path):
         return
     with open(path, encoding="utf-8") as handle:
@@ -160,11 +164,11 @@ class IbkrSettings:
     # Slow-updating indices (SKEW/VVIX tick every few minutes) use a longer
     # stale threshold so they do not flap between live and stale.
     slow_index_stale_after_seconds: float = field(
-        default_factory=lambda: float(runtime_value("ibkr.slow_index_stale_after_seconds"))
+        default_factory=lambda: 300.0
     )
     slow_index_labels: frozenset[str] = field(
         default_factory=lambda: frozenset(
-            str(item) for item in runtime_value("ibkr.slow_index_labels")
+            str(item) for item in ['index:SKEW', 'index:VVIX']
         )
     )
     # IBKR index CFDs such as IBUS500 (S&P 500 CFD). Defaults empty in code so
@@ -176,56 +180,54 @@ class IbkrSettings:
         load_dotenv()
         auto_futures_expiry = next_equity_futures_month()
         return cls(
-            host=env_str("IBKR_HOST", str(runtime_value("ibkr.host"))),
-            port=env_int("IBKR_PORT", int(runtime_value("ibkr.port"))),
-            client_id=env_int("IBKR_CLIENT_ID", int(runtime_value("ibkr.client_id"))),
+            host=env_str("IBKR_HOST", str(settings_value("ibkr.host"))),
+            port=env_int("IBKR_PORT", int(settings_value("ibkr.port"))),
+            client_id=env_int("IBKR_CLIENT_ID", int(settings_value("ibkr.client_id"))),
             market_data_type=env_int(
-                "IBKR_MARKET_DATA_TYPE", int(runtime_value("ibkr.market_data_type"))
+                "IBKR_MARKET_DATA_TYPE", int(settings_value("ibkr.market_data_type"))
             ),
             es_expiry=env_str("IBKR_ES_EXPIRY", auto_futures_expiry) or auto_futures_expiry,
             mes_expiry=env_str("IBKR_MES_EXPIRY", auto_futures_expiry) or auto_futures_expiry,
             verify_indexes=env_csv(
-                "IBKR_VERIFY_INDEXES",
-                runtime_csv("ibkr.verify_indexes"),
+                "IBKR_VERIFY_INDEXES", settings_csv("ibkr.verify_indexes"),
             ),
             verify_stocks=env_csv(
-                "IBKR_VERIFY_STOCKS",
-                runtime_csv("ibkr.verify_stocks"),
+                "IBKR_VERIFY_STOCKS", settings_csv("ibkr.verify_stocks"),
             ),
-            verify_futures=env_csv("IBKR_VERIFY_FUTURES", runtime_csv("ibkr.verify_futures")),
-            verify_cfds=env_csv("IBKR_VERIFY_CFDS", runtime_csv("ibkr.verify_cfds")),
+            verify_futures=env_csv("IBKR_VERIFY_FUTURES", settings_csv("ibkr.verify_futures")),
+            verify_cfds=env_csv("IBKR_VERIFY_CFDS", settings_csv("ibkr.verify_cfds")),
             option_expiry=env_str("IBKR_OPTION_EXPIRY", default_spxw_expiry())
             or default_spxw_expiry(),
             option_strike_window_points=env_int(
                 "IBKR_OPTION_STRIKE_WINDOW_POINTS",
-                int(runtime_value("ibkr.option_strike_window_points")),
+                int(settings_value("ibkr.option_strike_window_points")),
             ),
             option_strike_step=env_int(
-                "IBKR_OPTION_STRIKE_STEP", int(runtime_value("ibkr.option_strike_step"))
+                "IBKR_OPTION_STRIKE_STEP", int(settings_value("ibkr.option_strike_step"))
             ),
             max_option_lines=env_int(
-                "IBKR_MAX_OPTION_LINES", int(runtime_value("ibkr.max_option_lines"))
+                "IBKR_MAX_OPTION_LINES", int(settings_value("ibkr.max_option_lines"))
             ),
             quote_wait_seconds=env_float(
-                "IBKR_QUOTE_WAIT_SECONDS", float(runtime_value("ibkr.quote_wait_seconds"))
+                "IBKR_QUOTE_WAIT_SECONDS", float(settings_value("ibkr.quote_wait_seconds"))
             ),
             stale_after_seconds=env_float(
-                "IBKR_STALE_AFTER_SECONDS", float(runtime_value("ibkr.stale_after_seconds"))
+                "IBKR_STALE_AFTER_SECONDS", float(settings_value("ibkr.stale_after_seconds"))
             ),
             slow_index_stale_after_seconds=env_float(
                 "IBKR_SLOW_INDEX_STALE_AFTER_SECONDS",
-                float(runtime_value("ibkr.slow_index_stale_after_seconds")),
+                float(settings_value("ibkr.slow_index_stale_after_seconds")),
             ),
             # Preserve case: these must match row labels like "index:SKEW".
             slow_index_labels=frozenset(
-                env_csv_preserve("IBKR_SLOW_INDEX_LABELS", runtime_csv("ibkr.slow_index_labels"))
+                env_csv_preserve("IBKR_SLOW_INDEX_LABELS", settings_csv("ibkr.slow_index_labels"))
             ),
             qualify_contracts=env_bool(
-                "IBKR_QUALIFY_CONTRACTS", bool(runtime_value("ibkr.qualify_contracts"))
+                "IBKR_QUALIFY_CONTRACTS", bool(settings_value("ibkr.qualify_contracts"))
             ),
             request_timeout_seconds=env_float(
                 "IBKR_REQUEST_TIMEOUT_SECONDS",
-                float(runtime_value("ibkr.request_timeout_seconds")),
+                float(settings_value("ibkr.request_timeout_seconds")),
             ),
         )
 
@@ -247,31 +249,31 @@ class IbkrStreamSettings:
     gateway_restart_cooldown_seconds: float
     auto_restart_gateway_on_farm_broken: bool
     spy_option_lines: int = field(
-        default_factory=lambda: int(runtime_value("ibkr_stream.spy_option_lines"))
+        default_factory=lambda: 16
     )
     spy_strike_step: int = field(
-        default_factory=lambda: int(runtime_value("ibkr_stream.spy_strike_step"))
+        default_factory=lambda: 2
     )
     slow_poll_labels: tuple[str, ...] = field(
         default_factory=lambda: tuple(
-            str(item) for item in runtime_value("ibkr_stream.slow_poll_labels")
+            str(item) for item in ['index:VIX', 'index:VIX1D', 'index:VIX9D', 'index:VIX3M', 'index:VVIX', 'index:SKEW', 'stock:QQQ', 'stock:IWM', 'stock:DIA', 'stock:HYG', 'stock:LQD', 'stock:TLT', 'stock:IEF', 'stock:SHY', 'stock:UUP', 'stock:GLD', 'stock:USO', 'stock:RSP', 'stock:XLU']
         )
     )
     slow_poll_interval_seconds: float = field(
-        default_factory=lambda: float(runtime_value("ibkr_stream.slow_poll_interval_seconds"))
+        default_factory=lambda: 300.0
     )
     slow_poll_hold_seconds: float = field(
-        default_factory=lambda: float(runtime_value("ibkr_stream.slow_poll_hold_seconds"))
+        default_factory=lambda: 10.0
     )
     slow_poll_chunk_size: int = field(
-        default_factory=lambda: int(runtime_value("ibkr_stream.slow_poll_chunk_size"))
+        default_factory=lambda: 6
     )
     atm_state_path: str = field(
-        default_factory=lambda: str(runtime_value("ibkr_stream.atm_state_path"))
+        default_factory=lambda: ''
     )
     freeze_quotes_on_connectivity_loss: bool = field(
         default_factory=lambda: bool(
-            runtime_value("ibkr_stream.freeze_quotes_on_connectivity_loss")
+            True
         )
     )
 
@@ -281,79 +283,78 @@ class IbkrStreamSettings:
         return cls(
             # Distinct from the snapshot collector's client id so an accidental
             # overlap does not kick the other API session.
-            client_id=env_int("IBKR_STREAM_CLIENT_ID", int(runtime_value("ibkr_stream.client_id"))),
+            client_id=env_int("IBKR_STREAM_CLIENT_ID", int(settings_value("ibkr_stream.client_id"))),
             flush_interval_seconds=env_float(
                 "IBKR_STREAM_FLUSH_SECONDS",
-                float(runtime_value("ibkr_stream.flush_interval_seconds")),
+                float(settings_value("ibkr_stream.flush_interval_seconds")),
             ),
             policy_check_seconds=env_float(
                 "IBKR_STREAM_POLICY_CHECK_SECONDS",
-                float(runtime_value("ibkr_stream.policy_check_seconds")),
+                float(settings_value("ibkr_stream.policy_check_seconds")),
             ),
             replan_drift_points=env_float(
                 "IBKR_STREAM_REPLAN_DRIFT_POINTS",
-                float(runtime_value("ibkr_stream.replan_drift_points")),
+                float(settings_value("ibkr_stream.replan_drift_points")),
             ),
             max_option_lines=env_int(
                 "IBKR_STREAM_MAX_OPTION_LINES",
-                int(runtime_value("ibkr_stream.max_option_lines")),
+                int(settings_value("ibkr_stream.max_option_lines")),
             ),
             hot_lane_share=env_float(
-                "IBKR_STREAM_HOT_LANE_SHARE", float(runtime_value("ibkr_stream.hot_lane_share"))
+                "IBKR_STREAM_HOT_LANE_SHARE", float(settings_value("ibkr_stream.hot_lane_share"))
             ),
             reconnect_min_seconds=env_float(
                 "IBKR_STREAM_RECONNECT_MIN_SECONDS",
-                float(runtime_value("ibkr_stream.reconnect_min_seconds")),
+                float(settings_value("ibkr_stream.reconnect_min_seconds")),
             ),
             reconnect_max_seconds=env_float(
                 "IBKR_STREAM_RECONNECT_MAX_SECONDS",
-                float(runtime_value("ibkr_stream.reconnect_max_seconds")),
+                float(settings_value("ibkr_stream.reconnect_max_seconds")),
             ),
             skip_options=env_bool(
-                "IBKR_STREAM_SKIP_OPTIONS", bool(runtime_value("ibkr_stream.skip_options"))
+                "IBKR_STREAM_SKIP_OPTIONS", bool(settings_value("ibkr_stream.skip_options"))
             ),
             farm_broken_restart_seconds=env_float(
                 "IBKR_FARM_BROKEN_RESTART_SECONDS",
-                float(runtime_value("ibkr_stream.farm_broken_restart_seconds")),
+                float(settings_value("ibkr_stream.farm_broken_restart_seconds")),
             ),
             gateway_restart_cooldown_seconds=env_float(
                 "IBKR_GATEWAY_RESTART_COOLDOWN_SECONDS",
-                float(runtime_value("ibkr_stream.gateway_restart_cooldown_seconds")),
+                float(settings_value("ibkr_stream.gateway_restart_cooldown_seconds")),
             ),
             auto_restart_gateway_on_farm_broken=env_bool(
                 "IBKR_AUTO_RESTART_GATEWAY_ON_FARM_BROKEN",
-                bool(runtime_value("ibkr_stream.auto_restart_gateway_on_farm_broken")),
+                bool(settings_value("ibkr_stream.auto_restart_gateway_on_farm_broken")),
             ),
             spy_option_lines=env_int(
                 "IBKR_STREAM_SPY_OPTION_LINES",
-                int(runtime_value("ibkr_stream.spy_option_lines")),
+                int(settings_value("ibkr_stream.spy_option_lines")),
             ),
             spy_strike_step=env_int(
                 "IBKR_STREAM_SPY_STRIKE_STEP",
-                int(runtime_value("ibkr_stream.spy_strike_step")),
+                int(settings_value("ibkr_stream.spy_strike_step")),
             ),
             slow_poll_labels=tuple(
                 env_csv_preserve(
-                    "IBKR_STREAM_SLOW_POLL_LABELS",
-                    runtime_csv("ibkr_stream.slow_poll_labels"),
+                    "IBKR_STREAM_SLOW_POLL_LABELS", settings_csv("ibkr_stream.slow_poll_labels"),
                 )
             ),
             slow_poll_interval_seconds=env_float(
                 "IBKR_STREAM_SLOW_POLL_INTERVAL_SECONDS",
-                float(runtime_value("ibkr_stream.slow_poll_interval_seconds")),
+                float(settings_value("ibkr_stream.slow_poll_interval_seconds")),
             ),
             slow_poll_hold_seconds=env_float(
                 "IBKR_STREAM_SLOW_POLL_HOLD_SECONDS",
-                float(runtime_value("ibkr_stream.slow_poll_hold_seconds")),
+                float(settings_value("ibkr_stream.slow_poll_hold_seconds")),
             ),
             slow_poll_chunk_size=env_int(
                 "IBKR_STREAM_SLOW_POLL_CHUNK_SIZE",
-                int(runtime_value("ibkr_stream.slow_poll_chunk_size")),
+                int(settings_value("ibkr_stream.slow_poll_chunk_size")),
             ),
-            atm_state_path=env_str("IBKR_ATM_STATE_PATH", str(runtime_value("ibkr_stream.atm_state_path"))),
+            atm_state_path=env_str("IBKR_ATM_STATE_PATH", str(settings_value("ibkr_stream.atm_state_path"))),
             freeze_quotes_on_connectivity_loss=env_bool(
                 "IBKR_STREAM_FREEZE_QUOTES_ON_CONNECTIVITY_LOSS",
-                bool(runtime_value("ibkr_stream.freeze_quotes_on_connectivity_loss")),
+                bool(settings_value("ibkr_stream.freeze_quotes_on_connectivity_loss")),
             ),
         )
 
@@ -372,7 +373,7 @@ class IbkrPositionSettings:
         load_dotenv()
         data_root = env_str(
             "MARKET_DATA_DATA_ROOT",
-            env_str("MAINTENANCE_DATA_ROOT", str(runtime_value("maintenance.data_root"))),
+            env_str("MAINTENANCE_DATA_ROOT", str(settings_value("maintenance.data_root"))),
         )
         default_snapshot = f"{data_root.rstrip('/')}/latest/ibkr_positions.json"
         default_state = f"{data_root.rstrip('/')}/latest/ibkr_position_state.json"
@@ -380,12 +381,12 @@ class IbkrPositionSettings:
         state_path = env_str("IBKR_POSITIONS_STATE_PATH", default_state) or default_state
         poll_interval_seconds = env_int(
             "IBKR_POSITIONS_POLL_SECONDS",
-            int(runtime_value("ibkr_positions.poll_interval_seconds")),
+            int(settings_value("ibkr_positions.poll_interval_seconds")),
         )
         return cls(
             enabled=ibkr_account_read_enabled(),
             client_id=env_int(
-                "IBKR_POSITIONS_CLIENT_ID", int(runtime_value("ibkr_positions.client_id"))
+                "IBKR_POSITIONS_CLIENT_ID", int(settings_value("ibkr_positions.client_id"))
             ),
             poll_interval_seconds=poll_interval_seconds,
             snapshot_path=snapshot_path,
@@ -424,25 +425,25 @@ class IbkrBrokerSettings:
         load_dotenv()
         data_root = env_str(
             "MARKET_DATA_DATA_ROOT",
-            env_str("MAINTENANCE_DATA_ROOT", str(runtime_value("maintenance.data_root"))),
+            env_str("MAINTENANCE_DATA_ROOT", str(settings_value("maintenance.data_root"))),
         )
-        configured_path = str(runtime_value("ibkr_broker.position_shadow_path")).strip()
+        configured_path = str(settings_value("ibkr_broker.position_shadow_path")).strip()
         return cls(
             account_read_enabled=ibkr_account_read_enabled(),
             position_shadow_enabled=env_bool(
                 "IBKR_BROKER_POSITION_SHADOW_ENABLED",
-                bool(runtime_value("ibkr_broker.position_shadow_enabled")),
+                bool(settings_value("ibkr_broker.position_shadow_enabled")),
             ),
             position_shadow_interval_seconds=env_int(
                 "IBKR_BROKER_POSITION_SHADOW_SECONDS",
-                int(runtime_value("ibkr_broker.position_shadow_interval_seconds")),
+                int(settings_value("ibkr_broker.position_shadow_interval_seconds")),
             ),
             position_shadow_path=os.getenv("IBKR_BROKER_POSITION_SHADOW_PATH")
             or configured_path
             or f"{data_root.rstrip('/')}/latest/ibkr_positions_shadow.json",
             execution_mode=env_str(
                 "IBKR_EXECUTION_MODE",
-                str(runtime_value("ibkr_broker.execution_mode")),
+                str(settings_value("ibkr_broker.execution_mode")),
             ).lower(),
         )
 
@@ -453,7 +454,7 @@ def ibkr_account_read_enabled() -> bool:
         "IBKR_BROKER_ACCOUNT_READ_ENABLED",
         env_bool(
             "IBKR_POSITIONS_ENABLED",
-            bool(runtime_value("ibkr_broker.account_read_enabled")),
+            bool(settings_value("ibkr_broker.account_read_enabled")),
         ),
     )
 
@@ -464,7 +465,7 @@ def ibkr_legacy_position_poller_enabled() -> bool:
         "IBKR_LEGACY_POSITION_POLLER_ENABLED",
         env_bool(
             "IBKR_POSITIONS_ENABLED",
-            bool(runtime_value("ibkr_broker.legacy_position_poller_enabled")),
+            bool(settings_value("ibkr_broker.legacy_position_poller_enabled")),
         ),
     )
 
@@ -489,45 +490,45 @@ class RuntimePolicySettings:
         load_dotenv()
         return cls(
             ibkr_schedule_enabled=env_bool(
-                "IBKR_SCHEDULE_ENABLED", bool(runtime_value("runtime_policy.ibkr_schedule_enabled"))
+                "IBKR_SCHEDULE_ENABLED", bool(settings_value("runtime_policy.ibkr_schedule_enabled"))
             ),
             ibkr_schedule_timezone=env_str(
-                "IBKR_SCHEDULE_TZ", str(runtime_value("runtime_policy.ibkr_schedule_timezone"))
+                "IBKR_SCHEDULE_TZ", str(settings_value("runtime_policy.ibkr_schedule_timezone"))
             ),
             ibkr_schedule_start=parse_hhmm(
-                env_str("IBKR_SCHEDULE_START", str(runtime_value("runtime_policy.ibkr_schedule_start")))
+                env_str("IBKR_SCHEDULE_START", str(settings_value("runtime_policy.ibkr_schedule_start")))
             ),
             ibkr_schedule_stop=parse_hhmm(
-                env_str("IBKR_SCHEDULE_STOP", str(runtime_value("runtime_policy.ibkr_schedule_stop")))
+                env_str("IBKR_SCHEDULE_STOP", str(settings_value("runtime_policy.ibkr_schedule_stop")))
             ),
             ibkr_connect_retry_seconds=env_int(
                 "IBKR_CONNECT_RETRY_SECONDS",
-                int(runtime_value("runtime_policy.ibkr_connect_retry_seconds")),
+                int(settings_value("runtime_policy.ibkr_connect_retry_seconds")),
             ),
             ibkr_conflict_retry_minutes=env_int(
                 "IBKR_CONFLICT_RETRY_MINUTES",
-                int(runtime_value("runtime_policy.ibkr_conflict_retry_minutes")),
+                int(settings_value("runtime_policy.ibkr_conflict_retry_minutes")),
             ),
             ibkr_conflict_probe_seconds=env_int(
                 "IBKR_CONFLICT_PROBE_SECONDS",
-                int(runtime_value("runtime_policy.ibkr_conflict_probe_seconds")),
+                int(settings_value("runtime_policy.ibkr_conflict_probe_seconds")),
             ),
             ibkr_fallback_provider=env_str(
-                "IBKR_FALLBACK_PROVIDER", str(runtime_value("runtime_policy.ibkr_fallback_provider"))
+                "IBKR_FALLBACK_PROVIDER", str(settings_value("runtime_policy.ibkr_fallback_provider"))
             ).lower(),
             strict_no_session_fight=env_bool(
-                "STRICT_NO_SESSION_FIGHT", bool(runtime_value("runtime_policy.strict_no_session_fight"))
+                "STRICT_NO_SESSION_FIGHT", bool(settings_value("runtime_policy.strict_no_session_fight"))
             ),
             weekend_maintenance_mode=env_bool(
                 "WEEKEND_MAINTENANCE_MODE",
-                bool(runtime_value("runtime_policy.weekend_maintenance_mode")),
+                bool(settings_value("runtime_policy.weekend_maintenance_mode")),
             ),
             runtime_mode_path=env_str(
-                "RUNTIME_MODE_PATH", str(runtime_value("runtime_policy.runtime_mode_path"))
+                "RUNTIME_MODE_PATH", str(settings_value("runtime_policy.runtime_mode_path"))
             ),
             agent_override_default_ttl_minutes=env_int(
                 "AGENT_OVERRIDE_DEFAULT_TTL_MINUTES",
-                int(runtime_value("runtime_policy.agent_override_default_ttl_minutes")),
+                int(settings_value("runtime_policy.agent_override_default_ttl_minutes")),
             ),
         )
 
@@ -588,25 +589,25 @@ class SchwabSettings:
     app_key: str = ""
     app_secret: str = ""
     callback_url: str = field(
-        default_factory=lambda: str(runtime_value("schwab.callback_url"))
+        default_factory=lambda: 'https://127.0.0.1:8182'
     )
     oauth_bind_host: str = field(
-        default_factory=lambda: str(runtime_value("schwab.oauth_bind_host"))
+        default_factory=lambda: '127.0.0.1'
     )
     oauth_bind_port: int = field(
-        default_factory=lambda: int(runtime_value("schwab.oauth_bind_port"))
+        default_factory=lambda: 8183
     )
     oauth_state_file: str = field(
-        default_factory=lambda: str(runtime_value("schwab.oauth_state_file"))
+        default_factory=lambda: 'runtime/schwab-oauth-state.json'
     )
     oauth_state_ttl_seconds: int = field(
-        default_factory=lambda: int(runtime_value("schwab.oauth_state_ttl_seconds"))
+        default_factory=lambda: 900
     )
     gateway_bind_host: str = field(
-        default_factory=lambda: str(runtime_value("schwab.gateway_bind_host"))
+        default_factory=lambda: '127.0.0.1'
     )
     gateway_bind_port: int = field(
-        default_factory=lambda: int(runtime_value("schwab.gateway_bind_port"))
+        default_factory=lambda: 8184
     )
     gateway_url: str = ""
 
@@ -614,9 +615,9 @@ class SchwabSettings:
     def from_env(cls) -> "SchwabSettings":
         load_dotenv()
         return cls(
-            api_base_url=env_str("SCHWAB_API_BASE_URL", str(runtime_value("schwab.api_base_url"))),
+            api_base_url=env_str("SCHWAB_API_BASE_URL", str(settings_value("schwab.api_base_url"))),
             access_token=env_str("SCHWAB_ACCESS_TOKEN"),
-            token_file=env_str("SCHWAB_TOKEN_FILE", str(runtime_value("schwab.token_file"))),
+            token_file=env_str("SCHWAB_TOKEN_FILE", str(settings_value("schwab.token_file"))),
             verify_indexes=env_csv(
                 "SCHWAB_VERIFY_INDEXES",
                 ",".join(runtime_schwab_symbols_by_type("index")),
@@ -635,38 +636,38 @@ class SchwabSettings:
             ),
             option_chain_strike_count=env_int(
                 "SCHWAB_OPTION_CHAIN_STRIKE_COUNT",
-                int(runtime_value("schwab.option_chain_strike_count")),
+                int(settings_value("schwab.option_chain_strike_count")),
             ),
             quote_fields=env_str(
                 "SCHWAB_QUOTE_FIELDS",
-                str(runtime_value("schwab.quote_fields")),
+                str(settings_value("schwab.quote_fields")),
             ),
             request_timeout_seconds=env_float(
                 "SCHWAB_REQUEST_TIMEOUT_SECONDS",
-                float(runtime_value("schwab.request_timeout_seconds")),
+                float(settings_value("schwab.request_timeout_seconds")),
             ),
             app_key=env_str("SCHWAB_APP_KEY"),
             app_secret=env_str("SCHWAB_APP_SECRET"),
-            callback_url=env_str("SCHWAB_CALLBACK_URL", str(runtime_value("schwab.callback_url"))),
+            callback_url=env_str("SCHWAB_CALLBACK_URL", str(settings_value("schwab.callback_url"))),
             oauth_bind_host=env_str(
-                "SCHWAB_OAUTH_BIND_HOST", str(runtime_value("schwab.oauth_bind_host"))
+                "SCHWAB_OAUTH_BIND_HOST", str(settings_value("schwab.oauth_bind_host"))
             ),
             oauth_bind_port=env_int(
-                "SCHWAB_OAUTH_BIND_PORT", int(runtime_value("schwab.oauth_bind_port"))
+                "SCHWAB_OAUTH_BIND_PORT", int(settings_value("schwab.oauth_bind_port"))
             ),
             oauth_state_file=env_str(
                 "SCHWAB_OAUTH_STATE_FILE",
-                str(runtime_value("schwab.oauth_state_file")),
+                str(settings_value("schwab.oauth_state_file")),
             ),
             oauth_state_ttl_seconds=env_int(
                 "SCHWAB_OAUTH_STATE_TTL_SECONDS",
-                int(runtime_value("schwab.oauth_state_ttl_seconds")),
+                int(settings_value("schwab.oauth_state_ttl_seconds")),
             ),
             gateway_bind_host=env_str(
-                "SCHWAB_GATEWAY_BIND_HOST", str(runtime_value("schwab.gateway_bind_host"))
+                "SCHWAB_GATEWAY_BIND_HOST", str(settings_value("schwab.gateway_bind_host"))
             ),
             gateway_bind_port=env_int(
-                "SCHWAB_GATEWAY_BIND_PORT", int(runtime_value("schwab.gateway_bind_port"))
+                "SCHWAB_GATEWAY_BIND_PORT", int(settings_value("schwab.gateway_bind_port"))
             ),
             gateway_url=env_str("SCHWAB_GATEWAY_URL"),
         )
@@ -706,42 +707,41 @@ class SchwabStreamSettings:
         load_dotenv()
         root = data_root or env_str(
             "MARKET_DATA_DATA_ROOT",
-            env_str("MAINTENANCE_DATA_ROOT", str(runtime_value("maintenance.data_root"))),
+            env_str("MAINTENANCE_DATA_ROOT", str(settings_value("maintenance.data_root"))),
         )
         configured_shadow_path = str(
-            runtime_value("schwab.streaming.shadow_latest_path")
+            settings_value("schwab.streaming.shadow_latest_path")
         ).strip()
         return cls(
             mode=env_str(
                 "SCHWAB_STREAM_MODE",
-                str(runtime_value("schwab.streaming.mode")),
+                str(settings_value("schwab.streaming.mode")),
             ).lower(),
             canonical_symbols=tuple(
                 symbol.upper()
                 for symbol in env_csv_preserve(
-                    "SCHWAB_STREAM_SYMBOLS",
-                    runtime_csv("schwab.streaming.canonical_symbols"),
+                    "SCHWAB_STREAM_SYMBOLS", settings_csv("schwab.streaming.canonical_symbols"),
                 )
             ),
             flush_interval_seconds=env_float(
                 "SCHWAB_STREAM_FLUSH_SECONDS",
-                float(runtime_value("schwab.streaming.flush_interval_seconds")),
+                float(settings_value("schwab.streaming.flush_interval_seconds")),
             ),
             symbol_refresh_interval_seconds=env_float(
                 "SCHWAB_STREAM_SYMBOL_REFRESH_SECONDS",
-                float(runtime_value("schwab.streaming.symbol_refresh_interval_seconds")),
+                float(settings_value("schwab.streaming.symbol_refresh_interval_seconds")),
             ),
             reconnect_min_seconds=env_float(
                 "SCHWAB_STREAM_RECONNECT_MIN_SECONDS",
-                float(runtime_value("schwab.streaming.reconnect_min_seconds")),
+                float(settings_value("schwab.streaming.reconnect_min_seconds")),
             ),
             reconnect_max_seconds=env_float(
                 "SCHWAB_STREAM_RECONNECT_MAX_SECONDS",
-                float(runtime_value("schwab.streaming.reconnect_max_seconds")),
+                float(settings_value("schwab.streaming.reconnect_max_seconds")),
             ),
             websocket_open_timeout_seconds=env_float(
                 "SCHWAB_STREAM_OPEN_TIMEOUT_SECONDS",
-                float(runtime_value("schwab.streaming.websocket_open_timeout_seconds")),
+                float(settings_value("schwab.streaming.websocket_open_timeout_seconds")),
             ),
             shadow_latest_path=os.getenv("SCHWAB_STREAM_SHADOW_LATEST_PATH")
             or configured_shadow_path
@@ -765,27 +765,27 @@ class HyperliquidSettings:
         load_dotenv()
         return cls(
             api_base_url=env_str(
-                "HYPERLIQUID_API_BASE_URL", str(runtime_value("hyperliquid.api_base_url"))
+                "HYPERLIQUID_API_BASE_URL", str(settings_value("hyperliquid.api_base_url"))
             ),
-            dex=env_str("HYPERLIQUID_DEX", str(runtime_value("hyperliquid.dex"))),
-            coin=env_str("HYPERLIQUID_COIN", str(runtime_value("hyperliquid.coin"))),
+            dex=env_str("HYPERLIQUID_DEX", str(settings_value("hyperliquid.dex"))),
+            coin=env_str("HYPERLIQUID_COIN", str(settings_value("hyperliquid.coin"))),
             request_timeout_seconds=env_float(
                 "HYPERLIQUID_REQUEST_TIMEOUT_SECONDS",
-                float(runtime_value("hyperliquid.request_timeout_seconds")),
+                float(settings_value("hyperliquid.request_timeout_seconds")),
             ),
             include_book=env_bool(
-                "HYPERLIQUID_INCLUDE_BOOK", bool(runtime_value("hyperliquid.include_book"))
+                "HYPERLIQUID_INCLUDE_BOOK", bool(settings_value("hyperliquid.include_book"))
             ),
             include_trades=env_bool(
-                "HYPERLIQUID_INCLUDE_TRADES", bool(runtime_value("hyperliquid.include_trades"))
+                "HYPERLIQUID_INCLUDE_TRADES", bool(settings_value("hyperliquid.include_trades"))
             ),
             book_depth_levels=env_int(
                 "HYPERLIQUID_BOOK_DEPTH_LEVELS",
-                int(runtime_value("hyperliquid.book_depth_levels")),
+                int(settings_value("hyperliquid.book_depth_levels")),
             ),
             large_trade_notional_threshold=env_float(
                 "HYPERLIQUID_LARGE_TRADE_NOTIONAL_THRESHOLD",
-                float(runtime_value("hyperliquid.large_trade_notional_threshold")),
+                float(settings_value("hyperliquid.large_trade_notional_threshold")),
             ),
         )
 
@@ -811,42 +811,41 @@ class PolymarketSettings:
         return cls(
             gamma_api_base_url=env_str(
                 "POLYMARKET_GAMMA_API_BASE_URL",
-                str(runtime_value("polymarket.gamma_api_base_url")),
+                str(settings_value("polymarket.gamma_api_base_url")),
             ),
             request_timeout_seconds=env_float(
                 "POLYMARKET_REQUEST_TIMEOUT_SECONDS",
-                float(runtime_value("polymarket.request_timeout_seconds")),
+                float(settings_value("polymarket.request_timeout_seconds")),
             ),
             search_terms=env_csv_preserve(
-                "POLYMARKET_SEARCH_TERMS",
-                runtime_csv("polymarket.search_terms"),
+                "POLYMARKET_SEARCH_TERMS", settings_csv("polymarket.search_terms"),
             ),
-            event_slugs=env_csv_preserve("POLYMARKET_EVENT_SLUGS", runtime_csv("polymarket.event_slugs")),
-            market_slugs=env_csv_preserve("POLYMARKET_MARKET_SLUGS", runtime_csv("polymarket.market_slugs")),
+            event_slugs=env_csv_preserve("POLYMARKET_EVENT_SLUGS", settings_csv("polymarket.event_slugs")),
+            market_slugs=env_csv_preserve("POLYMARKET_MARKET_SLUGS", settings_csv("polymarket.market_slugs")),
             max_results_per_query=env_int(
                 "POLYMARKET_MAX_RESULTS_PER_QUERY",
-                int(runtime_value("polymarket.max_results_per_query")),
+                int(settings_value("polymarket.max_results_per_query")),
             ),
             max_markets_per_run=env_int(
                 "POLYMARKET_MAX_MARKETS_PER_RUN",
-                int(runtime_value("polymarket.max_markets_per_run")),
+                int(settings_value("polymarket.max_markets_per_run")),
             ),
             min_liquidity=env_float(
-                "POLYMARKET_MIN_LIQUIDITY", float(runtime_value("polymarket.min_liquidity"))
+                "POLYMARKET_MIN_LIQUIDITY", float(settings_value("polymarket.min_liquidity"))
             ),
             min_volume_24h=env_float(
-                "POLYMARKET_MIN_VOLUME_24H", float(runtime_value("polymarket.min_volume_24h"))
+                "POLYMARKET_MIN_VOLUME_24H", float(settings_value("polymarket.min_volume_24h"))
             ),
             min_relevance_score=env_float(
                 "POLYMARKET_MIN_RELEVANCE_SCORE",
-                float(runtime_value("polymarket.min_relevance_score")),
+                float(settings_value("polymarket.min_relevance_score")),
             ),
             include_closed=env_bool(
-                "POLYMARKET_INCLUDE_CLOSED", bool(runtime_value("polymarket.include_closed"))
+                "POLYMARKET_INCLUDE_CLOSED", bool(settings_value("polymarket.include_closed"))
             ),
             user_agent=env_str(
                 "POLYMARKET_USER_AGENT",
-                str(runtime_value("polymarket.user_agent")),
+                str(settings_value("polymarket.user_agent")),
             ),
         )
 
@@ -873,46 +872,46 @@ class MaintenanceSettings:
     def from_env(cls) -> "MaintenanceSettings":
         load_dotenv()
         return cls(
-            data_root=env_str("MAINTENANCE_DATA_ROOT", str(runtime_value("maintenance.data_root"))),
-            logs_root=env_str("MAINTENANCE_LOGS_ROOT", str(runtime_value("maintenance.logs_root"))),
-            output_root=env_str("MAINTENANCE_OUTPUT_ROOT", str(runtime_value("maintenance.output_root"))),
+            data_root=env_str("MAINTENANCE_DATA_ROOT", str(settings_value("maintenance.data_root"))),
+            logs_root=env_str("MAINTENANCE_LOGS_ROOT", str(settings_value("maintenance.logs_root"))),
+            output_root=env_str("MAINTENANCE_OUTPUT_ROOT", str(settings_value("maintenance.output_root"))),
             data_budget_gb=env_float(
-                "MAINTENANCE_DATA_BUDGET_GB", float(runtime_value("maintenance.data_budget_gb"))
+                "MAINTENANCE_DATA_BUDGET_GB", float(settings_value("maintenance.data_budget_gb"))
             ),
             raw_retention_days=env_int(
                 "MAINTENANCE_RAW_RETENTION_DAYS",
-                int(runtime_value("maintenance.raw_retention_days")),
+                int(settings_value("maintenance.raw_retention_days")),
             ),
             alert_window_retention_days=env_int(
                 "MAINTENANCE_ALERT_WINDOW_RETENTION_DAYS",
-                int(runtime_value("maintenance.alert_window_retention_days")),
+                int(settings_value("maintenance.alert_window_retention_days")),
             ),
             feature_1s_retention_days=env_int(
                 "MAINTENANCE_FEATURE_1S_RETENTION_DAYS",
-                int(runtime_value("maintenance.feature_1s_retention_days")),
+                int(settings_value("maintenance.feature_1s_retention_days")),
             ),
             feature_5s_retention_days=env_int(
                 "MAINTENANCE_FEATURE_5S_RETENTION_DAYS",
-                int(runtime_value("maintenance.feature_5s_retention_days")),
+                int(settings_value("maintenance.feature_5s_retention_days")),
             ),
             log_retention_days=env_int(
                 "MAINTENANCE_LOG_RETENTION_DAYS",
-                int(runtime_value("maintenance.log_retention_days")),
+                int(settings_value("maintenance.log_retention_days")),
             ),
             trash_retention_days=env_int(
                 "MAINTENANCE_TRASH_RETENTION_DAYS",
-                int(runtime_value("maintenance.trash_retention_days")),
+                int(settings_value("maintenance.trash_retention_days")),
             ),
-            warn_pct=env_float("MAINTENANCE_WARN_PCT", float(runtime_value("maintenance.warn_pct"))),
+            warn_pct=env_float("MAINTENANCE_WARN_PCT", float(settings_value("maintenance.warn_pct"))),
             compact_pct=env_float(
-                "MAINTENANCE_COMPACT_PCT", float(runtime_value("maintenance.compact_pct"))
+                "MAINTENANCE_COMPACT_PCT", float(settings_value("maintenance.compact_pct"))
             ),
             degraded_pct=env_float(
-                "MAINTENANCE_DEGRADED_PCT", float(runtime_value("maintenance.degraded_pct"))
+                "MAINTENANCE_DEGRADED_PCT", float(settings_value("maintenance.degraded_pct"))
             ),
-            prune_pct=env_float("MAINTENANCE_PRUNE_PCT", float(runtime_value("maintenance.prune_pct"))),
+            prune_pct=env_float("MAINTENANCE_PRUNE_PCT", float(settings_value("maintenance.prune_pct"))),
             critical_pct=env_float(
-                "MAINTENANCE_CRITICAL_PCT", float(runtime_value("maintenance.critical_pct"))
+                "MAINTENANCE_CRITICAL_PCT", float(settings_value("maintenance.critical_pct"))
             ),
         )
 
@@ -927,11 +926,11 @@ class StorageSettings:
     slow_index_stale_after_seconds: float
     slow_index_labels: frozenset[str]
     delayed_stale_after_seconds: float = field(
-        default_factory=lambda: float(runtime_value("market_data.delayed_stale_after_seconds"))
+        default_factory=lambda: 60
     )
     provider_priority: tuple[str, ...] = field(
         default_factory=lambda: tuple(
-            str(item).lower() for item in runtime_value("market_data.provider_priority")
+            str(item).lower() for item in ['schwab', 'ibkr', 'hyperliquid', 'polymarket', 'internal', 'mock', 'unknown']
         )
     )
 
@@ -940,7 +939,7 @@ class StorageSettings:
             raise ValueError("MARKET_DATA_PROVIDER_PRIORITY cannot be empty")
         if len(set(self.provider_priority)) != len(self.provider_priority):
             raise ValueError("MARKET_DATA_PROVIDER_PRIORITY cannot contain duplicates")
-        known = {str(item).lower() for item in runtime_value("market_data.known_providers")}
+        known = {str(item).lower() for item in settings_value("market_data.known_providers")}
         invalid = sorted(set(self.provider_priority) - known)
         if invalid:
             raise ValueError(
@@ -953,7 +952,7 @@ class StorageSettings:
         load_dotenv()
         data_root = env_str(
             "MARKET_DATA_DATA_ROOT",
-            env_str("MAINTENANCE_DATA_ROOT", str(runtime_value("maintenance.data_root"))),
+            env_str("MAINTENANCE_DATA_ROOT", str(settings_value("maintenance.data_root"))),
         )
         return cls(
             data_root=data_root,
@@ -962,39 +961,37 @@ class StorageSettings:
                 f"{data_root.rstrip('/')}/latest/state.json",
             ),
             raw_file_name=env_str(
-                "MARKET_DATA_RAW_FILE_NAME", str(runtime_value("storage.raw_file_name"))
+                "MARKET_DATA_RAW_FILE_NAME", str(settings_value("storage.raw_file_name"))
             ),
             include_raw_payload=env_bool(
                 "MARKET_DATA_INCLUDE_RAW_PAYLOAD",
-                bool(runtime_value("storage.include_raw_payload")),
+                bool(settings_value("storage.include_raw_payload")),
             ),
             latest_stale_after_seconds=env_float(
                 "MARKET_DATA_LATEST_STALE_AFTER_SECONDS",
-                float(runtime_value("market_data.latest_stale_after_seconds")),
+                float(settings_value("market_data.latest_stale_after_seconds")),
             ),
             slow_index_stale_after_seconds=env_float(
                 "MARKET_DATA_SLOW_INDEX_STALE_AFTER_SECONDS",
                 env_float(
                     "IBKR_SLOW_INDEX_STALE_AFTER_SECONDS",
-                    float(runtime_value("market_data.slow_index_stale_after_seconds")),
+                    float(settings_value("market_data.slow_index_stale_after_seconds")),
                 ),
             ),
             # Preserve case: these must match canonical ids like "index:SKEW".
             slow_index_labels=frozenset(
                 env_csv_preserve(
-                    "MARKET_DATA_SLOW_INDEX_LABELS",
-                    runtime_csv("market_data.slow_index_labels"),
+                    "MARKET_DATA_SLOW_INDEX_LABELS", settings_csv("market_data.slow_index_labels"),
                 )
             ),
             delayed_stale_after_seconds=env_float(
                 "MARKET_DATA_DELAYED_STALE_AFTER_SECONDS",
-                float(runtime_value("market_data.delayed_stale_after_seconds")),
+                float(settings_value("market_data.delayed_stale_after_seconds")),
             ),
             provider_priority=tuple(
                 provider.lower()
                 for provider in env_csv_preserve(
-                    "MARKET_DATA_PROVIDER_PRIORITY",
-                    runtime_csv("market_data.provider_priority"),
+                    "MARKET_DATA_PROVIDER_PRIORITY", settings_csv("market_data.provider_priority"),
                 )
             ),
         )
@@ -1013,7 +1010,7 @@ class IvSurfaceSettings:
         load_dotenv()
         data_root = env_str(
             "MARKET_DATA_DATA_ROOT",
-            env_str("MAINTENANCE_DATA_ROOT", str(runtime_value("maintenance.data_root"))),
+            env_str("MAINTENANCE_DATA_ROOT", str(settings_value("maintenance.data_root"))),
         )
         return cls(
             data_root=data_root,
@@ -1022,17 +1019,55 @@ class IvSurfaceSettings:
                 f"{data_root.rstrip('/')}/latest/iv_surface.json",
             ),
             raw_file_name=env_str(
-                "IV_SURFACE_RAW_FILE_NAME", str(runtime_value("iv_surface.raw_file_name"))
+                "IV_SURFACE_RAW_FILE_NAME", str(settings_value("iv_surface.raw_file_name"))
             ),
             wide_quote_spread_bps=env_float(
                 "IV_SURFACE_WIDE_QUOTE_SPREAD_BPS",
-                float(runtime_value("iv_surface.wide_quote_spread_bps")),
+                float(settings_value("iv_surface.wide_quote_spread_bps")),
             ),
             diff_max_gap_seconds=env_float(
                 "IV_SURFACE_DIFF_MAX_GAP_SECONDS",
-                float(runtime_value("iv_surface.diff_max_gap_seconds")),
+                float(settings_value("iv_surface.diff_max_gap_seconds")),
             ),
         )
+
+
+def outbox_alert_evaluation_enabled() -> bool:
+    return env_bool(
+        "SPX_OUTBOX_ALERT_EVALUATION_ENABLED",
+        bool(settings_value("notification.outbox_alert_evaluation_enabled")),
+    )
+
+
+def outbox_delivery_enabled() -> bool:
+    return env_bool(
+        "SPX_OUTBOX_DELIVERY_ENABLED",
+        bool(settings_value("notification.outbox_delivery_enabled")),
+    )
+
+
+def direct_alert_delivery_enabled() -> bool:
+    """When false, alert_engine skips direct notify so the outbox owns delivery."""
+
+    return env_bool(
+        "SPX_DIRECT_ALERT_DELIVERY_ENABLED",
+        bool(settings_value("notification.direct_delivery_enabled")),
+    )
+
+
+def shock_direct_delivery_enabled() -> bool:
+    """When true, intraday_shock may notify_payload on the latency-critical path.
+
+    Shock events are not yet outbox ``ALERT_CANDIDATE`` rows. Keep this true so
+    the fast path stays live while ``direct_delivery_enabled`` is false and the
+    outbox owns periodic alert_engine delivery. Flip false only after shock is
+    migrated onto the outbox path.
+    """
+
+    return env_bool(
+        "SPX_SHOCK_DIRECT_DELIVERY_ENABLED",
+        bool(settings_value("notification.shock_direct_delivery_enabled")),
+    )
 
 
 @dataclass(frozen=True)
@@ -1067,77 +1102,77 @@ class NotificationSettings:
     codex_require_delivery_cue: bool
     deepseek_enabled: bool = field(
         default_factory=lambda: bool(
-            runtime_value("notification.dataclass_defaults.deepseek_enabled")
+            False
         )
     )
     deepseek_deliver: bool = field(
-        default_factory=lambda: bool(runtime_value("notification.deepseek_deliver"))
+        default_factory=lambda: True
     )
     deepseek_model: str = field(
-        default_factory=lambda: str(runtime_value("notification.deepseek_model"))
+        default_factory=lambda: 'deepseek-v4-flash'
     )
     deepseek_url: str = field(
-        default_factory=lambda: str(runtime_value("notification.deepseek_url"))
+        default_factory=lambda: 'https://api.deepseek.com/v1/chat/completions'
     )
     deepseek_env_file: str = field(
-        default_factory=lambda: str(runtime_value("notification.deepseek_env_file"))
+        default_factory=lambda: '/home/ubuntu/.hermes/.env'
     )
     deepseek_timeout_seconds: float = field(
-        default_factory=lambda: float(runtime_value("notification.deepseek_timeout_seconds"))
+        default_factory=lambda: 30.0
     )
     deepseek_max_tokens: int = field(
-        default_factory=lambda: int(runtime_value("notification.deepseek_max_tokens"))
+        default_factory=lambda: 6400
     )
     deepseek_output_max_chars: int = field(
-        default_factory=lambda: int(runtime_value("notification.deepseek_output_max_chars"))
+        default_factory=lambda: 6400
     )
     deepseek_temperature: float = field(
-        default_factory=lambda: float(runtime_value("notification.deepseek_temperature"))
+        default_factory=lambda: 0.1
     )
     review_min_time_sensitive_score: float = field(
-        default_factory=lambda: float(runtime_value("notification.review_min_time_sensitive_score"))
+        default_factory=lambda: 30.0
     )
     bark_enabled: bool = field(
-        default_factory=lambda: bool(runtime_value("notification.bark_enabled"))
+        default_factory=lambda: False
     )
     bark_url: str = ""
-    bark_group: str = field(default_factory=lambda: str(runtime_value("notification.bark_group")))
+    bark_group: str = field(default_factory=lambda: 'spx-spark')
     # Ops/engineering pushes (IBKR session, data degradation, channel failures)
     # land in this Bark group so the trade group stays readable.
     bark_ops_group: str = field(
-        default_factory=lambda: str(runtime_value("notification.bark_ops_group"))
+        default_factory=lambda: 'spx-ops'
     )
-    bark_level: str = field(default_factory=lambda: str(runtime_value("notification.bark_level")))
+    bark_level: str = field(default_factory=lambda: 'timeSensitive')
     bark_timeout_seconds: float = field(
-        default_factory=lambda: float(runtime_value("notification.bark_timeout_seconds"))
+        default_factory=lambda: 10.0
     )
     # When true, trading pushes also send the full markdown into Bark's App
     # detail view (lockscreen still uses the short body summary).
     bark_markdown_enabled: bool = field(
-        default_factory=lambda: bool(runtime_value("notification.bark_markdown_enabled"))
+        default_factory=lambda: True
     )
     # Friend channel: trading content only (maps/status/review/market alerts),
     # never engineering noise (data degradation, session drops, token expiry).
     bark_friend_enabled: bool = field(
-        default_factory=lambda: bool(runtime_value("notification.bark_friend_enabled"))
+        default_factory=lambda: False
     )
     bark_friend_url: str = ""
     # Feishu custom-bot webhook: trading reading surface (interactive cards).
     # Ops stay on Bark main; leave disabled until webhook URL is configured.
     feishu_enabled: bool = field(
-        default_factory=lambda: bool(runtime_value("notification.feishu_enabled"))
+        default_factory=lambda: False
     )
     feishu_webhook_url: str = ""
     feishu_secret: str = ""
     feishu_timeout_seconds: float = field(
-        default_factory=lambda: float(runtime_value("notification.feishu_timeout_seconds"))
+        default_factory=lambda: 10.0
     )
     # Rewrite direct-push events (position/system/off-hours vol) with the
     # DeepSeek writer before sending; falls back to the raw template on any
     # writer failure so critical events are never lost.
     direct_push_llm_enabled: bool = field(
         default_factory=lambda: bool(
-            runtime_value("notification.dataclass_defaults.direct_push_llm_enabled")
+            False
         )
     )
     # Kind-level rate limit for magnitude-bucketed alerts: the per-bucket
@@ -1146,7 +1181,7 @@ class NotificationSettings:
     # capped to one push per this window unless the bucket jumps >= 2 steps,
     # the direction flips, or severity is critical.
     kind_rate_limit_seconds: float = field(
-        default_factory=lambda: float(runtime_value("notification.kind_rate_limit_seconds"))
+        default_factory=lambda: 3600.0
     )
     missed_queue_path: str = ""
     # Append-only, owner-readable evidence for every LLM review decision. The
@@ -1158,16 +1193,16 @@ class NotificationSettings:
         load_dotenv()
         data_root = env_str(
             "MARKET_DATA_DATA_ROOT",
-            env_str("MAINTENANCE_DATA_ROOT", str(runtime_value("maintenance.data_root"))),
+            env_str("MAINTENANCE_DATA_ROOT", str(settings_value("maintenance.data_root"))),
         )
         return cls(
-            enabled=env_bool("ALERT_NOTIFY_ENABLED", bool(runtime_value("notification.enabled"))),
+            enabled=env_bool("ALERT_NOTIFY_ENABLED", bool(settings_value("notification.enabled"))),
             min_severity=env_str(
-                "ALERT_NOTIFY_MIN_SEVERITY", str(runtime_value("notification.min_severity"))
+                "ALERT_NOTIFY_MIN_SEVERITY", str(settings_value("notification.min_severity"))
             ).lower(),
             cooldown_seconds=env_int(
                 "ALERT_NOTIFY_COOLDOWN_SECONDS",
-                int(runtime_value("notification.cooldown_seconds")),
+                int(settings_value("notification.cooldown_seconds")),
             ),
             state_path=env_str(
                 "ALERT_NOTIFY_STATE_PATH",
@@ -1175,173 +1210,173 @@ class NotificationSettings:
             ),
             openclaw_enabled=env_bool(
                 "ALERT_NOTIFY_OPENCLAW_ENABLED",
-                bool(runtime_value("notification.openclaw_enabled")),
+                bool(settings_value("notification.openclaw_enabled")),
             ),
             openclaw_command=env_str(
                 "ALERT_NOTIFY_OPENCLAW_COMMAND",
-                str(runtime_value("notification.openclaw_command")),
+                str(settings_value("notification.openclaw_command")),
             ),
             openclaw_channel=env_str(
                 "ALERT_NOTIFY_OPENCLAW_CHANNEL",
-                str(runtime_value("notification.openclaw_channel")),
+                str(settings_value("notification.openclaw_channel")),
             ),
             openclaw_account=env_str("ALERT_NOTIFY_OPENCLAW_ACCOUNT"),
             openclaw_target=env_str("ALERT_NOTIFY_OPENCLAW_TARGET"),
             openclaw_dry_run=env_bool(
                 "ALERT_NOTIFY_OPENCLAW_DRY_RUN",
-                bool(runtime_value("notification.openclaw_dry_run")),
+                bool(settings_value("notification.openclaw_dry_run")),
             ),
             openclaw_timeout_seconds=env_float(
                 "ALERT_NOTIFY_OPENCLAW_TIMEOUT_SECONDS",
-                float(runtime_value("notification.openclaw_timeout_seconds")),
+                float(settings_value("notification.openclaw_timeout_seconds")),
             ),
             openclaw_agent_enabled=env_bool(
                 "ALERT_NOTIFY_OPENCLAW_AGENT_ENABLED",
-                bool(runtime_value("notification.openclaw_agent_enabled")),
+                bool(settings_value("notification.openclaw_agent_enabled")),
             ),
             openclaw_agent_deliver=env_bool(
                 "ALERT_NOTIFY_OPENCLAW_AGENT_DELIVER",
-                bool(runtime_value("notification.openclaw_agent_deliver")),
+                bool(settings_value("notification.openclaw_agent_deliver")),
             ),
             openclaw_agent_name=env_str(
                 "ALERT_NOTIFY_OPENCLAW_AGENT_NAME",
-                str(runtime_value("notification.openclaw_agent_name")),
+                str(settings_value("notification.openclaw_agent_name")),
             ),
             openclaw_agent_model=env_str(
                 "ALERT_NOTIFY_OPENCLAW_AGENT_MODEL",
-                str(runtime_value("notification.openclaw_agent_model")),
+                str(settings_value("notification.openclaw_agent_model")),
             ),
             openclaw_agent_session_key=env_str(
                 "ALERT_NOTIFY_OPENCLAW_AGENT_SESSION_KEY",
-                str(runtime_value("notification.openclaw_agent_session_key")),
+                str(settings_value("notification.openclaw_agent_session_key")),
             ),
             openclaw_agent_thinking=env_str(
                 "ALERT_NOTIFY_OPENCLAW_AGENT_THINKING",
-                str(runtime_value("notification.openclaw_agent_thinking")),
+                str(settings_value("notification.openclaw_agent_thinking")),
             ),
             openclaw_agent_timeout_seconds=env_float(
                 "ALERT_NOTIFY_OPENCLAW_AGENT_TIMEOUT_SECONDS",
-                float(runtime_value("notification.openclaw_agent_timeout_seconds")),
+                float(settings_value("notification.openclaw_agent_timeout_seconds")),
             ),
             codex_enabled=env_bool(
                 "ALERT_NOTIFY_CODEX_ENABLED",
-                bool(runtime_value("notification.codex_enabled")),
+                bool(settings_value("notification.codex_enabled")),
             ),
             codex_deliver=env_bool(
                 "ALERT_NOTIFY_CODEX_DELIVER",
-                bool(runtime_value("notification.codex_deliver")),
+                bool(settings_value("notification.codex_deliver")),
             ),
             codex_command=env_str(
                 "ALERT_NOTIFY_CODEX_COMMAND",
-                str(runtime_value("notification.codex_command")),
+                str(settings_value("notification.codex_command")),
             ),
             codex_model=env_str(
-                "ALERT_NOTIFY_CODEX_MODEL", str(runtime_value("notification.codex_model"))
+                "ALERT_NOTIFY_CODEX_MODEL", str(settings_value("notification.codex_model"))
             ),
             codex_reasoning_effort=env_str(
                 "ALERT_NOTIFY_CODEX_REASONING_EFFORT",
-                str(runtime_value("notification.codex_reasoning_effort")),
+                str(settings_value("notification.codex_reasoning_effort")),
             ),
-            codex_cwd=env_str("ALERT_NOTIFY_CODEX_CWD", str(runtime_value("notification.codex_cwd"))),
+            codex_cwd=env_str("ALERT_NOTIFY_CODEX_CWD", str(settings_value("notification.codex_cwd"))),
             codex_sandbox=env_str(
-                "ALERT_NOTIFY_CODEX_SANDBOX", str(runtime_value("notification.codex_sandbox"))
+                "ALERT_NOTIFY_CODEX_SANDBOX", str(settings_value("notification.codex_sandbox"))
             ),
             codex_timeout_seconds=env_float(
                 "ALERT_NOTIFY_CODEX_TIMEOUT_SECONDS",
-                float(runtime_value("notification.codex_timeout_seconds")),
+                float(settings_value("notification.codex_timeout_seconds")),
             ),
             codex_output_max_chars=env_int(
                 "ALERT_NOTIFY_CODEX_OUTPUT_MAX_CHARS",
-                int(runtime_value("notification.codex_output_max_chars")),
+                int(settings_value("notification.codex_output_max_chars")),
             ),
             codex_require_delivery_cue=env_bool(
                 "ALERT_NOTIFY_CODEX_REQUIRE_DELIVERY_CUE",
-                bool(runtime_value("notification.codex_require_delivery_cue")),
+                bool(settings_value("notification.codex_require_delivery_cue")),
             ),
             deepseek_enabled=env_bool(
                 "ALERT_NOTIFY_DEEPSEEK_ENABLED",
-                bool(runtime_value("notification.deepseek_enabled")),
+                bool(settings_value("notification.deepseek_enabled")),
             ),
             deepseek_deliver=env_bool(
                 "ALERT_NOTIFY_DEEPSEEK_DELIVER",
-                bool(runtime_value("notification.deepseek_deliver")),
+                bool(settings_value("notification.deepseek_deliver")),
             ),
             deepseek_model=env_str(
                 "ALERT_NOTIFY_DEEPSEEK_MODEL",
-                str(runtime_value("notification.deepseek_model")),
+                str(settings_value("notification.deepseek_model")),
             ),
             deepseek_url=env_str(
                 "ALERT_NOTIFY_DEEPSEEK_URL",
-                str(runtime_value("notification.deepseek_url")),
+                str(settings_value("notification.deepseek_url")),
             ),
             deepseek_env_file=env_str(
                 "ALERT_NOTIFY_DEEPSEEK_ENV_FILE",
-                str(runtime_value("notification.deepseek_env_file")),
+                str(settings_value("notification.deepseek_env_file")),
             ),
             deepseek_timeout_seconds=env_float(
                 "ALERT_NOTIFY_DEEPSEEK_TIMEOUT_SECONDS",
-                float(runtime_value("notification.deepseek_timeout_seconds")),
+                float(settings_value("notification.deepseek_timeout_seconds")),
             ),
             deepseek_max_tokens=env_int(
                 "ALERT_NOTIFY_DEEPSEEK_MAX_TOKENS",
-                int(runtime_value("notification.deepseek_max_tokens")),
+                int(settings_value("notification.deepseek_max_tokens")),
             ),
             deepseek_output_max_chars=env_int(
                 "ALERT_NOTIFY_DEEPSEEK_OUTPUT_MAX_CHARS",
-                int(runtime_value("notification.deepseek_output_max_chars")),
+                int(settings_value("notification.deepseek_output_max_chars")),
             ),
             deepseek_temperature=env_float(
                 "ALERT_NOTIFY_DEEPSEEK_TEMPERATURE",
-                float(runtime_value("notification.deepseek_temperature")),
+                float(settings_value("notification.deepseek_temperature")),
             ),
             review_min_time_sensitive_score=env_float(
                 "ALERT_REVIEW_MIN_TIME_SENSITIVE_SCORE",
-                float(runtime_value("notification.review_min_time_sensitive_score")),
+                float(settings_value("notification.review_min_time_sensitive_score")),
             ),
             bark_enabled=env_bool(
                 "ALERT_NOTIFY_BARK_ENABLED",
-                bool(runtime_value("notification.bark_enabled")),
+                bool(settings_value("notification.bark_enabled")),
             ),
             bark_url=env_str("ALERT_NOTIFY_BARK_URL").rstrip("/"),
             bark_group=env_str(
-                "ALERT_NOTIFY_BARK_GROUP", str(runtime_value("notification.bark_group"))
+                "ALERT_NOTIFY_BARK_GROUP", str(settings_value("notification.bark_group"))
             ),
             bark_ops_group=env_str(
-                "ALERT_NOTIFY_BARK_OPS_GROUP", str(runtime_value("notification.bark_ops_group"))
+                "ALERT_NOTIFY_BARK_OPS_GROUP", str(settings_value("notification.bark_ops_group"))
             ),
             bark_level=env_str(
-                "ALERT_NOTIFY_BARK_LEVEL", str(runtime_value("notification.bark_level"))
+                "ALERT_NOTIFY_BARK_LEVEL", str(settings_value("notification.bark_level"))
             ),
             bark_timeout_seconds=env_float(
                 "ALERT_NOTIFY_BARK_TIMEOUT_SECONDS",
-                float(runtime_value("notification.bark_timeout_seconds")),
+                float(settings_value("notification.bark_timeout_seconds")),
             ),
             bark_markdown_enabled=env_bool(
                 "ALERT_NOTIFY_BARK_MARKDOWN_ENABLED",
-                bool(runtime_value("notification.bark_markdown_enabled")),
+                bool(settings_value("notification.bark_markdown_enabled")),
             ),
             bark_friend_enabled=env_bool(
                 "ALERT_NOTIFY_BARK_FRIEND_ENABLED",
-                bool(runtime_value("notification.bark_friend_enabled")),
+                bool(settings_value("notification.bark_friend_enabled")),
             ),
             bark_friend_url=env_str("ALERT_NOTIFY_BARK_FRIEND_URL").rstrip("/"),
             feishu_enabled=env_bool(
                 "ALERT_NOTIFY_FEISHU_ENABLED",
-                bool(runtime_value("notification.feishu_enabled")),
+                bool(settings_value("notification.feishu_enabled")),
             ),
             feishu_webhook_url=env_str("ALERT_NOTIFY_FEISHU_WEBHOOK_URL").rstrip("/"),
             feishu_secret=env_str("ALERT_NOTIFY_FEISHU_SECRET"),
             feishu_timeout_seconds=env_float(
                 "ALERT_NOTIFY_FEISHU_TIMEOUT_SECONDS",
-                float(runtime_value("notification.feishu_timeout_seconds")),
+                float(settings_value("notification.feishu_timeout_seconds")),
             ),
             direct_push_llm_enabled=env_bool(
                 "ALERT_NOTIFY_DIRECT_PUSH_LLM_ENABLED",
-                bool(runtime_value("notification.direct_push_llm_enabled")),
+                bool(settings_value("notification.direct_push_llm_enabled")),
             ),
             kind_rate_limit_seconds=env_float(
                 "ALERT_NOTIFY_KIND_RATE_LIMIT_SECONDS",
-                float(runtime_value("notification.kind_rate_limit_seconds")),
+                float(settings_value("notification.kind_rate_limit_seconds")),
             ),
             missed_queue_path=env_str(
                 "ALERT_NOTIFY_MISSED_QUEUE_PATH",
@@ -1352,6 +1387,28 @@ class NotificationSettings:
                 f"{data_root.rstrip('/')}/latest/alert_review_audit.jsonl",
             ),
         )
+
+
+def resolve_shock_notify_enabled(
+    *,
+    no_notify: bool = False,
+    settings: NotificationSettings | None = None,
+) -> bool:
+    """Whether intraday_shock should call ``notify_payload`` on this cycle.
+
+    Shock stays on the latency-critical direct path by default
+    (``shock_direct_delivery_enabled``). That flag is independent of
+    ``direct_delivery_enabled`` / outbox ownership for periodic alert_engine
+    candidates, so cutting over alert_engine to outbox does not silence shock
+    or create a second owner for the same shock events.
+    """
+
+    if no_notify:
+        return False
+    notification_settings = settings or NotificationSettings.from_env()
+    if not notification_settings.enabled:
+        return False
+    return shock_direct_delivery_enabled()
 
 
 @dataclass(frozen=True)
@@ -1371,60 +1428,60 @@ class SamplingSettings:
     # The next (1DTE) expiry only needs ATM-vicinity lines for term structure
     # and next-day expected move; walls/GEX need the wide window on 0DTE only.
     next_expiry_window_points: int = field(
-        default_factory=lambda: int(runtime_value("sampling.next_expiry_window_points"))
+        default_factory=lambda: 30
     )
     next_expiry_hot_window_points: int = field(
-        default_factory=lambda: int(runtime_value("sampling.next_expiry_hot_window_points"))
+        default_factory=lambda: 10
     )
 
     @classmethod
     def from_env(cls) -> "SamplingSettings":
         load_dotenv()
         return cls(
-            strike_step=env_int("SAMPLING_STRIKE_STEP", int(runtime_value("sampling.strike_step"))),
+            strike_step=env_int("SAMPLING_STRIKE_STEP", int(settings_value("sampling.strike_step"))),
             window_points=env_int(
-                "SAMPLING_WINDOW_POINTS", int(runtime_value("sampling.window_points"))
+                "SAMPLING_WINDOW_POINTS", int(settings_value("sampling.window_points"))
             ),
             hot_window_points=env_int(
-                "SAMPLING_HOT_WINDOW_POINTS", int(runtime_value("sampling.hot_window_points"))
+                "SAMPLING_HOT_WINDOW_POINTS", int(settings_value("sampling.hot_window_points"))
             ),
-            group_count=env_int("SAMPLING_GROUP_COUNT", int(runtime_value("sampling.group_count"))),
+            group_count=env_int("SAMPLING_GROUP_COUNT", int(settings_value("sampling.group_count"))),
             group_interval_seconds=env_int(
                 "SAMPLING_GROUP_INTERVAL_SECONDS",
-                int(runtime_value("sampling.group_interval_seconds")),
+                int(settings_value("sampling.group_interval_seconds")),
             ),
             degraded_group_count=env_int(
                 "SAMPLING_DEGRADED_GROUP_COUNT",
-                int(runtime_value("sampling.degraded_group_count")),
+                int(settings_value("sampling.degraded_group_count")),
             ),
             degraded_group_interval_seconds=env_int(
                 "SAMPLING_DEGRADED_GROUP_INTERVAL_SECONDS",
-                int(runtime_value("sampling.degraded_group_interval_seconds")),
+                int(settings_value("sampling.degraded_group_interval_seconds")),
             ),
             group_strategy=env_str(
-                "SAMPLING_GROUP_STRATEGY", str(runtime_value("sampling.group_strategy"))
+                "SAMPLING_GROUP_STRATEGY", str(settings_value("sampling.group_strategy"))
             ).lower(),
             hot_human_cadence_seconds=env_int(
                 "SAMPLING_HOT_HUMAN_CADENCE_SECONDS",
-                int(runtime_value("sampling.hot_human_cadence_seconds")),
+                int(settings_value("sampling.hot_human_cadence_seconds")),
             ),
             hot_execution_cadence_seconds=env_int(
                 "SAMPLING_HOT_EXECUTION_CADENCE_SECONDS",
-                int(runtime_value("sampling.hot_execution_cadence_seconds")),
+                int(settings_value("sampling.hot_execution_cadence_seconds")),
             ),
             include_next_expiry=env_bool(
                 "SAMPLING_INCLUDE_NEXT_EXPIRY",
-                bool(runtime_value("sampling.include_next_expiry")),
+                bool(settings_value("sampling.include_next_expiry")),
             ),
             default_mode=env_str(
-                "SAMPLING_DEFAULT_MODE", str(runtime_value("sampling.default_mode"))
+                "SAMPLING_DEFAULT_MODE", str(settings_value("sampling.default_mode"))
             ),
             next_expiry_window_points=env_int(
                 "SAMPLING_NEXT_EXPIRY_WINDOW_POINTS",
-                int(runtime_value("sampling.next_expiry_window_points")),
+                int(settings_value("sampling.next_expiry_window_points")),
             ),
             next_expiry_hot_window_points=env_int(
                 "SAMPLING_NEXT_EXPIRY_HOT_WINDOW_POINTS",
-                int(runtime_value("sampling.next_expiry_hot_window_points")),
+                int(settings_value("sampling.next_expiry_hot_window_points")),
             ),
         )

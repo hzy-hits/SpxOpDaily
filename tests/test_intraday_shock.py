@@ -30,6 +30,7 @@ UTC = timezone.utc
 def settings(tmp_path) -> IntradayShockSettings:
     return IntradayShockSettings(
         state_path=str(tmp_path / "shock.json"),
+        require_schwab_streaming_anchors=True,
         one_minute_threshold_bps=20.0,
         three_minute_threshold_bps=35.0,
         reclaim_fraction=0.60,

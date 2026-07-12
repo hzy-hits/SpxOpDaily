@@ -11,6 +11,9 @@ Environment=PATH=/home/ubuntu/.local/bin:/home/ubuntu/.cargo/bin:/usr/local/bin:
 ExecStart=/home/ubuntu/spx-spark/scripts/run-24h-service.sh
 Restart=always
 RestartSec=10
+# Critical unrecoverable task failure exits with code 75 (see
+# application.runtime.health.CRITICAL_FAILURE_EXIT_CODE); Restart=always
+# picks the unit back up so readiness can recover after a clean restart.
 
 [Install]
 WantedBy=default.target

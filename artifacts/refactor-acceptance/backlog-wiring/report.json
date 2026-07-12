@@ -1,0 +1,19 @@
+{
+  "artifact": "backlog-wiring",
+  "generated_at": "2026-07-11T15:52:50.828405Z",
+  "decision": "LANDED",
+  "summary": "Clean stop for non-gated work: morning_map packaged; module-architecture.md synced; inventory is definitive DONE vs BLOCKED. Phase 7/8/RTH remain NO-GO.",
+  "landed_this_session": [
+    "application/morning_map/{constants,build,render,delivery,state,service,exports}",
+    "morning_map.py facade 14 lines",
+    "module-architecture.md rewritten to current package layout",
+    "facade budget includes morning_map.py ≤50"
+  ],
+  "verify": {
+    "pytest_passed": 1027,
+    "ruff": "pass",
+    "architecture": "pass"
+  },
+  "updated_at": "2026-07-11T15:52:50.828405Z",
+  "see_also": "artifacts/refactor-acceptance/inventory/report.json"
+}

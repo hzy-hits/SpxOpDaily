@@ -288,6 +288,14 @@ class LatestStateStore:
         temp_path.replace(self.path)
 
 
+class LatestMarketProjectionStore(LatestStateStore):
+    """Canonical write/read port for the rebuildable latest JSON projection.
+
+    Prefer this name at collector and composition-root call sites. The JSON
+    file is a compatibility projection, not a reliable event queue.
+    """
+
+
 def latest_by_provider(quotes: Iterable[Quote]) -> tuple[Quote, ...]:
     result: dict[tuple[str, str], Quote] = {}
     for quote in quotes:

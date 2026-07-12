@@ -1,0 +1,94 @@
+{
+  "phase": "phase3",
+  "generated_at": "2026-07-11T14:58:03.722370+00:00",
+  "git_commit": "fb3b50961a1ce33ef996e6b1765d783823b828e3",
+  "python": "3.12.3 (main, Jun 19 2026, 12:46:00) [GCC 13.3.0]",
+  "checks": {
+    "pytest": {
+      "command": [
+        "uv",
+        "run",
+        "pytest",
+        "-q"
+      ],
+      "returncode": 0,
+      "stdout_tail": "........................................................................ [  7%]\n........................................................................ [ 14%]\n........................................................................ [ 22%]\n........................................................................ [ 29%]\n........................................................................ [ 37%]\n........................................................................ [ 44%]\n........................................................................ [ 52%]\n........................................................................ [ 59%]\n........................................................................ [ 67%]\n........................................................................ [ 74%]\n........................................................................ [ 81%]\n........................................................................ [ 89%]\n........................................................................ [ 96%]\n...............................                                          [100%]\n=============================== warnings summary ===============================\n.venv/lib/python3.12/site-packages/websockets/legacy/__init__.py:6\n  /home/ubuntu/spx-spark/.venv/lib/python3.12/site-packages/websockets/legacy/__init__.py:6: DeprecationWarning: websockets.legacy is deprecated; see https://websockets.readthedocs.io/en/stable/howto/upgrade.html for upgrade instructions\n    warnings.warn(  # deprecated in 14.0 - 2024-11-09\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n967 passed, 1 warning in 18.75s\n",
+      "stderr_tail": ""
+    },
+    "ruff": {
+      "command": [
+        "uv",
+        "run",
+        "ruff",
+        "check",
+        "src",
+        "tests"
+      ],
+      "returncode": 0,
+      "stdout_tail": "\u001b[1;32mAll checks passed!\u001b[0m\n",
+      "stderr_tail": ""
+    },
+    "architecture": {
+      "command": [
+        "uv",
+        "run",
+        "pytest",
+        "-q",
+        "tests/architecture"
+      ],
+      "returncode": 0,
+      "stdout_tail": "...................                                                      [100%]\n19 passed in 2.98s\n",
+      "stderr_tail": ""
+    }
+  },
+  "decision": "GO",
+  "open_risks": [],
+  "landed": [
+    "application/order_map split: models/pricing/spot/candidates/research/render/prompts/state/delivery/service",
+    "state machines: bias_machine, volume_machine(+es_volume_attach), hl_volume, signal_machine",
+    "order_map.py compatibility facade = 14 lines (target <=100)",
+    "largest implementation module = service.py (563 lines, target <600)",
+    "illegal SignalMode transitions rejected (tests/state_machines/test_signal_machine.py)",
+    "pytest 967 passed; ruff green; architecture 19 passed"
+  ],
+  "module_line_counts": {
+    "order_map.py": 14,
+    "__init__.py": 5,
+    "bias_machine.py": 19,
+    "candidates.py": 462,
+    "delivery.py": 69,
+    "es_volume_attach.py": 93,
+    "exports.py": 141,
+    "hl_volume.py": 169,
+    "models.py": 91,
+    "pricing.py": 163,
+    "prompts.py": 230,
+    "render.py": 443,
+    "research.py": 366,
+    "service.py": 563,
+    "signal_machine.py": 38,
+    "spot.py": 181,
+    "state.py": 369,
+    "volume_machine.py": 537
+  },
+  "gates": {
+    "order_map_facade_le_100": true,
+    "implementation_modules_lt_600": true,
+    "illegal_signal_transitions_rejected": true,
+    "full_pytest_green": true,
+    "ruff_green": true,
+    "architecture_green": true
+  },
+  "remaining": [
+    "no RTH golden / differential runner yet (blocked on live session data)",
+    "DensityQuality wire labels still historical (ok/\u2026) until RTH \u00a79.2 calibration"
+  ],
+  "gates_unmet": [],
+  "updated_at": "2026-07-11T15:46:00.698459Z",
+  "follow_up_closed_this_session": [
+    "levels.build_spy_confluence no longer depends on LatestState/storage",
+    "RnDensity.quality is DensityQuality Enum with \u00a79.1 aliases",
+    "conditional_call_bias drives SignalMode via advance_signal_mode at payload build",
+    "options_map facade already \u2264150 (36 lines) from prior backlog work"
+  ]
+}

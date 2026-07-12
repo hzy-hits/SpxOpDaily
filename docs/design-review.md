@@ -1,5 +1,10 @@
 # 设计缺陷 Review 与改进计划
 
+> 文档状态：2026-07-06 历史审阅与实施记录。2026-07-12 的 realtime analytics、
+> readiness、typed settings、RTH shadow 和大文件审计结论已经进入
+> `docs/pre-rth-refactor-implementation-plan.md`。两者冲突时以新计划、
+> `module-architecture.md` 和 `docs/refactor-architecture-acceptance-plan.md` 为准。
+
 日期：2026-07-06（同日第二轮更新：流式采集、文件锁、并发调度已落地）。范围：整个 spx-spark 项目，重点是 IBKR 数据链路的可用性（登录被抢占后的自动恢复能力）。
 
 结论先行：项目的分层（provider adapter → 归一化 Quote → storage/latest state → features → alerts）是清晰的，测试面也不错；真正的短板集中在**运行时韧性**（会话恢复链条有断点）、**采集架构**（快照轮询而非常驻订阅）和**工程卫生**（无版本控制、重复样板、过宽的异常吞噬）。

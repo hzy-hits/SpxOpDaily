@@ -1,0 +1,86 @@
+{
+  "phase": "phase6",
+  "generated_at": "2026-07-11T15:15:49.783400+00:00",
+  "git_commit": "fb3b50961a1ce33ef996e6b1765d783823b828e3",
+  "python": "3.12.3 (main, Jun 19 2026, 12:46:00) [GCC 13.3.0]",
+  "checks": {
+    "pytest": {
+      "command": [
+        "uv",
+        "run",
+        "pytest",
+        "-q"
+      ],
+      "returncode": 0,
+      "stdout_tail": "........................................................................ [  7%]\n........................................................................ [ 14%]\n........................................................................ [ 21%]\n........................................................................ [ 28%]\n........................................................................ [ 35%]\n........................................................................ [ 42%]\n........................................................................ [ 49%]\n........................................................................ [ 56%]\n........................................................................ [ 64%]\n........................................................................ [ 71%]\n........................................................................ [ 78%]\n........................................................................ [ 85%]\n........................................................................ [ 92%]\n........................................................................ [ 99%]\n....                                                                     [100%]\n=============================== warnings summary ===============================\n.venv/lib/python3.12/site-packages/websockets/legacy/__init__.py:6\n  /home/ubuntu/spx-spark/.venv/lib/python3.12/site-packages/websockets/legacy/__init__.py:6: DeprecationWarning: websockets.legacy is deprecated; see https://websockets.readthedocs.io/en/stable/howto/upgrade.html for upgrade instructions\n    warnings.warn(  # deprecated in 14.0 - 2024-11-09\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n1012 passed, 1 warning in 20.62s\n",
+      "stderr_tail": ""
+    },
+    "ruff": {
+      "command": [
+        "uv",
+        "run",
+        "ruff",
+        "check",
+        "src",
+        "tests"
+      ],
+      "returncode": 0,
+      "stdout_tail": "\u001b[1;32mAll checks passed!\u001b[0m\n",
+      "stderr_tail": ""
+    },
+    "architecture": {
+      "command": [
+        "uv",
+        "run",
+        "pytest",
+        "-q",
+        "tests/architecture"
+      ],
+      "returncode": 0,
+      "stdout_tail": ".....................                                                    [100%]\n21 passed in 3.74s\n",
+      "stderr_tail": ""
+    }
+  },
+  "decision": "GO",
+  "open_risks": [
+    "RealtimeEngine alerts path is passthrough-silent until alert_engine emits DomainEvents",
+    "Outbox consumer uses log_only_deliver by default (no WeChat/Bark yet)"
+  ],
+  "gates": {
+    "domain_event_outbox": true,
+    "notifier_idempotent_consume": true,
+    "latest_projection_repository": true,
+    "architecture_no_direct_canonical_writes": true,
+    "kill_restart_no_loss_no_double_send": true,
+    "neutral_tick_does_not_grow_outbox": true,
+    "outbox_replay_dead_letter": true,
+    "full_pytest_green": true,
+    "ruff_green": true,
+    "architecture_green": true
+  },
+  "deliverables": [
+    "src/spx_spark/infrastructure/ledger/outbox.py (SqliteEventOutbox)",
+    "src/spx_spark/application/notifications/outbox_consumer.py (IdempotentOutboxConsumer)",
+    "src/spx_spark/infrastructure/market_data/latest_projection.py (LatestMarketProjectionStore)",
+    "tests/infrastructure/test_outbox_repository.py",
+    "tests/e2e/test_restart_idempotency.py",
+    "tests/application/test_engine_outbox.py",
+    "tests/architecture/test_projection_writes.py"
+  ],
+  "landed": [
+    "infrastructure/ledger/outbox.py: SqliteEventOutbox append/claim/ack/fail/DLQ/replay",
+    "application/notifications/outbox_consumer.py: IdempotentOutboxConsumer",
+    "infrastructure/market_data/latest_projection.py: LatestMarketProjectionStore",
+    "domain.events.AppendResult moved to L0 (infra no longer imports application)",
+    "architecture: test_no_direct_canonical_projection_writes",
+    "tests: outbox repository, restart idempotency, engine+outbox neutral tick, projection store"
+  ],
+  "remaining": [
+    "alert_engine \u2192 DomainEvent outbox emission (SilentAlertEvaluator is placeholder)",
+    "Wire real notification sinks into IdempotentOutboxConsumer deliver()",
+    "Optional: options_map facade \u2264150; service_loop scheduler split"
+  ],
+  "gates_unmet": [],
+  "updated_at": "2026-07-11T15:21:43.448830+00:00",
+  "follow_up": "artifacts/refactor-acceptance/backlog-wiring/report.json"
+}

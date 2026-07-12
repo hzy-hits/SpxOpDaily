@@ -32,7 +32,7 @@ from spx_spark.features.exposure_map import (
 )
 from spx_spark.intraday_strategy import STRATEGY_KINDS
 from spx_spark.market_calendar import ET
-from spx_spark.runtime_config import runtime_value
+from spx_spark.settings import settings_value
 from spx_spark.state_io import atomic_write_json_secure
 from spx_spark.storage import LatestState, LatestStateStore, configured_quote_use_decision
 from spx_spark.strategy.micopedia import VALID_TIME_PHASES, normalize_tags
@@ -101,106 +101,106 @@ class StevenSettings:
     @classmethod
     def from_env(cls) -> StevenSettings:
         return cls(
-            enabled=env_bool("SPX_STEVEN_ENABLED", bool(runtime_value("steven.enabled"))),
+            enabled=env_bool("SPX_STEVEN_ENABLED", bool(settings_value("steven.enabled"))),
             regime_weighting=env_str(
                 "SPX_STEVEN_REGIME_WEIGHTING",
-                str(runtime_value("steven.regime_weighting")),
+                str(settings_value("steven.regime_weighting")),
             ),
             regime_dex_neutral_band=env_float(
                 "SPX_STEVEN_REGIME_DEX_NEUTRAL_BAND",
-                float(runtime_value("steven.regime_dex_neutral_band")),
+                float(settings_value("steven.regime_dex_neutral_band")),
             ),
             regime_min_expiries=env_int(
                 "SPX_STEVEN_REGIME_MIN_EXPIRIES",
-                int(runtime_value("steven.regime_min_expiries")),
+                int(settings_value("steven.regime_min_expiries")),
             ),
             regime_agreement_min_ratio=env_float(
                 "SPX_STEVEN_REGIME_AGREEMENT_MIN_RATIO",
-                float(runtime_value("steven.regime_agreement_min_ratio")),
+                float(settings_value("steven.regime_agreement_min_ratio")),
             ),
             pin_max_distance_points=env_float(
                 "SPX_STEVEN_PIN_MAX_DISTANCE_POINTS",
-                float(runtime_value("steven.pin_max_distance_points")),
+                float(settings_value("steven.pin_max_distance_points")),
             ),
             wall_confluence_points=env_float(
                 "SPX_STEVEN_WALL_CONFLUENCE_POINTS",
-                float(runtime_value("steven.wall_confluence_points")),
+                float(settings_value("steven.wall_confluence_points")),
             ),
             max_snapshot_age_seconds=env_float(
                 "SPX_STEVEN_MAX_SNAPSHOT_AGE_SECONDS",
-                float(runtime_value("steven.max_snapshot_age_seconds")),
+                float(settings_value("steven.max_snapshot_age_seconds")),
             ),
             data_recovery_hold_seconds=env_float(
                 "SPX_STEVEN_DATA_RECOVERY_HOLD_SECONDS",
-                float(runtime_value("steven.data_recovery_hold_seconds")),
+                float(settings_value("steven.data_recovery_hold_seconds")),
             ),
             event_wait_cooldown_seconds=env_float(
                 "SPX_STEVEN_EVENT_WAIT_COOLDOWN_SECONDS",
-                float(runtime_value("steven.event_wait_cooldown_seconds")),
+                float(settings_value("steven.event_wait_cooldown_seconds")),
             ),
             event_stabilize_bars=env_int(
                 "SPX_STEVEN_EVENT_STABILIZE_BARS",
-                int(runtime_value("steven.event_stabilize_bars")),
+                int(settings_value("steven.event_stabilize_bars")),
             ),
             event_stabilize_range_points=env_float(
                 "SPX_STEVEN_EVENT_STABILIZE_RANGE_POINTS",
-                float(runtime_value("steven.event_stabilize_range_points")),
+                float(settings_value("steven.event_stabilize_range_points")),
             ),
             dip_watch_max_distance_points=env_float(
                 "SPX_STEVEN_DIP_WATCH_MAX_DISTANCE_POINTS",
-                float(runtime_value("steven.dip_watch_max_distance_points")),
+                float(settings_value("steven.dip_watch_max_distance_points")),
             ),
             break_watch_max_distance_points=env_float(
                 "SPX_STEVEN_BREAK_WATCH_MAX_DISTANCE_POINTS",
-                float(runtime_value("steven.break_watch_max_distance_points")),
+                float(settings_value("steven.break_watch_max_distance_points")),
             ),
             pin_watch_max_distance_points=env_float(
                 "SPX_STEVEN_PIN_WATCH_MAX_DISTANCE_POINTS",
-                float(runtime_value("steven.pin_watch_max_distance_points")),
+                float(settings_value("steven.pin_watch_max_distance_points")),
             ),
             pin_min_net_gamma_ratio=env_float(
                 "SPX_STEVEN_PIN_MIN_NET_GAMMA_RATIO",
-                float(runtime_value("steven.pin_min_net_gamma_ratio")),
+                float(settings_value("steven.pin_min_net_gamma_ratio")),
             ),
             trigger_level_tolerance_points=env_float(
                 "SPX_STEVEN_TRIGGER_LEVEL_TOLERANCE_POINTS",
-                float(runtime_value("steven.trigger_level_tolerance_points")),
+                float(settings_value("steven.trigger_level_tolerance_points")),
             ),
             trigger_hold_bars=env_int(
                 "SPX_STEVEN_TRIGGER_HOLD_BARS",
-                int(runtime_value("steven.trigger_hold_bars")),
+                int(settings_value("steven.trigger_hold_bars")),
             ),
             watch_exit_hold_seconds=env_float(
                 "SPX_STEVEN_WATCH_EXIT_HOLD_SECONDS",
-                float(runtime_value("steven.watch_exit_hold_seconds")),
+                float(settings_value("steven.watch_exit_hold_seconds")),
             ),
             invalidation_hold_bars=env_int(
                 "SPX_STEVEN_INVALIDATION_HOLD_BARS",
-                int(runtime_value("steven.invalidation_hold_bars")),
+                int(settings_value("steven.invalidation_hold_bars")),
             ),
             lockout_minutes=env_float(
                 "SPX_STEVEN_LOCKOUT_MINUTES",
-                float(runtime_value("steven.lockout_minutes")),
+                float(settings_value("steven.lockout_minutes")),
             ),
             max_daily_setups=env_int(
                 "SPX_STEVEN_MAX_DAILY_SETUPS",
-                int(runtime_value("steven.max_daily_setups")),
+                int(settings_value("steven.max_daily_setups")),
             ),
             episode_revision_min_level_move_points=env_float(
                 "SPX_STEVEN_EPISODE_REVISION_MIN_LEVEL_MOVE_POINTS",
-                float(runtime_value("steven.episode_revision_min_level_move_points")),
+                float(settings_value("steven.episode_revision_min_level_move_points")),
             ),
             alert_context_enabled=env_bool(
                 "SPX_STEVEN_ALERT_CONTEXT_ENABLED",
-                bool(runtime_value("steven.alert_context_enabled")),
+                bool(settings_value("steven.alert_context_enabled")),
             ),
             alert_context_max_age_seconds=env_float(
                 "SPX_STEVEN_ALERT_CONTEXT_MAX_AGE_SECONDS",
-                float(runtime_value("steven.alert_context_max_age_seconds")),
+                float(settings_value("steven.alert_context_max_age_seconds")),
             ),
             bars_source_max_age_seconds=env_float(
                 "SPX_STEVEN_BARS_SOURCE_MAX_AGE_SECONDS",
-                float(runtime_value("steven.bars_source_max_age_seconds")),
+                float(settings_value("steven.bars_source_max_age_seconds")),
             ),
         )
 
@@ -1538,7 +1538,7 @@ def inputs_from_latest_state(
                 hl_volume = hl_payload if isinstance(hl_payload, dict) else None
     tags = tuple(event_tags)
     if not tags:
-        raw_tags = runtime_value("human_focus.event_tags")
+        raw_tags = settings_value("human_focus.event_tags")
         if isinstance(raw_tags, list):
             tags = tuple(str(item) for item in raw_tags)
 

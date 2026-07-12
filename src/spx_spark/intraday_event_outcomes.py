@@ -26,7 +26,7 @@ from typing import Literal
 from zoneinfo import ZoneInfo
 
 from spx_spark.data_platform.ids import make_event_key
-from spx_spark.runtime_config import runtime_value
+from spx_spark.settings import settings_value
 from spx_spark.state_io import atomic_write_json_secure, exclusive_state_lock
 
 
@@ -71,7 +71,7 @@ class IntradayEventOutcomeSettings:
         data_root = (
             os.getenv("MARKET_DATA_DATA_ROOT")
             or os.getenv("MAINTENANCE_DATA_ROOT")
-            or str(runtime_value("maintenance.data_root"))
+            or str(settings_value("maintenance.data_root"))
         )
         root = data_root.rstrip("/")
         return cls(
@@ -82,7 +82,7 @@ class IntradayEventOutcomeSettings:
             completed_retention_seconds=int(
                 os.getenv(
                     "ALERT_INTRADAY_OUTCOME_RETENTION_SECONDS",
-                    str(runtime_value("intraday_outcomes.completed_retention_seconds")),
+                    str(settings_value("intraday_outcomes.completed_retention_seconds")),
                 )
             ),
         )

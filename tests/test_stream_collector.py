@@ -3,7 +3,10 @@ from types import SimpleNamespace
 
 import pytest
 
-import spx_spark.ibkr.stream_collector as stream_collector_module
+from stream_test_helpers import patch_stream
+
+
+import spx_spark.ibkr.stream.deps as stream_collector_module
 from spx_spark.config import IbkrBrokerSettings, SamplingSettings
 from spx_spark.ibkr.adapter import snapshot_from_rows
 from spx_spark.ibkr.verifier import VerifyRow
@@ -68,15 +71,9 @@ def test_position_shadow_failure_never_breaks_market_data_or_overwrites_snapshot
     collector.ib = object()
     collector.storage_settings = object()
     writes: list[object] = []
-    monkeypatch.setattr(
-        stream_collector_module,
-        "fetch_positions",
-        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("shadow failed")),
+    patch_stream(monkeypatch, "fetch_positions", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("shadow failed")),
     )
-    monkeypatch.setattr(
-        stream_collector_module,
-        "write_snapshot",
-        lambda *args, **kwargs: writes.append(args),
+    patch_stream(monkeypatch, "write_snapshot", lambda *args, **kwargs: writes.append(args),
     )
 
     event = collector.flush_position_shadow_if_due(now_monotonic=100.0)
@@ -121,10 +118,7 @@ def test_account_read_uses_position_capable_socket_even_when_shadow_write_is_off
     )
     collector.market_data_allowed = lambda: False
     calls: list[int] = []
-    monkeypatch.setattr(
-        stream_collector_module,
-        "connect_broker_readonly_with_positions",
-        lambda _ib, _settings, *, client_id: calls.append(client_id),
+    patch_stream(monkeypatch, "connect_broker_readonly_with_positions", lambda _ib, _settings, *, client_id: calls.append(client_id),
     )
 
     collector.open_session()
@@ -191,7 +185,7 @@ def test_account_standby_reconnects_into_market_mode_without_subscribing_in_plac
         runtime_policy=object(),
     )
     events: list[dict[str, object]] = []
-    monkeypatch.setattr(stream_collector_module, "log_event", events.append)
+    patch_stream(monkeypatch, "log_event", events.append)
 
     assert runtime.account_standby_loop() is False
     assert len(position_flushes) == 1
@@ -212,10 +206,7 @@ def test_subscription_lifecycle_gives_due_slow_poll_priority(monkeypatch) -> Non
     )
     collector.slow_poll_start_due = lambda: True
     collector.rotate_options = lambda: calls.append(("rotate", None))
-    monkeypatch.setattr(
-        stream_collector_module,
-        "lifecycle_has_qualification_budget",
-        lambda *_args, **_kwargs: True,
+    patch_stream(monkeypatch, "lifecycle_has_qualification_budget", lambda *_args, **_kwargs: True,
     )
 
     rows: list[VerifyRow] = []
@@ -243,10 +234,7 @@ def test_subscription_lifecycle_rotates_when_slow_poll_is_not_due(monkeypatch) -
     )
     collector.slow_poll_start_due = lambda: False
     collector.rotate_options = lambda: calls.append(("rotate", None))
-    monkeypatch.setattr(
-        stream_collector_module,
-        "lifecycle_has_qualification_budget",
-        lambda *_args, **_kwargs: True,
+    patch_stream(monkeypatch, "lifecycle_has_qualification_budget", lambda *_args, **_kwargs: True,
     )
 
     rows: list[VerifyRow] = []
@@ -274,10 +262,7 @@ def test_subscription_lifecycle_starts_no_new_work_without_budget(monkeypatch) -
     )
     collector.slow_poll_start_due = lambda: True
     collector.rotate_options = lambda: calls.append(("rotate", None))
-    monkeypatch.setattr(
-        stream_collector_module,
-        "lifecycle_has_qualification_budget",
-        lambda *_args, **_kwargs: False,
+    patch_stream(monkeypatch, "lifecycle_has_qualification_budget", lambda *_args, **_kwargs: False,
     )
 
     rows: list[VerifyRow] = []
@@ -682,9 +667,9 @@ def test_option_reconcile_adds_replacements_before_removing_obsolete(monkeypatch
         if subscriptions:
             call_order.append(("cancel", set(subscriptions)))
 
-    monkeypatch.setattr(stream_collector_module, "option_contracts_from_specs", fake_contracts)
-    monkeypatch.setattr(stream_collector_module, "qualify_and_subscribe", fake_qualify)
-    monkeypatch.setattr(stream_collector_module, "cancel_subscriptions", fake_cancel)
+    patch_stream(monkeypatch, "option_contracts_from_specs", fake_contracts)
+    patch_stream(monkeypatch, "qualify_and_subscribe", fake_qualify)
+    patch_stream(monkeypatch, "cancel_subscriptions", fake_cancel)
     plan = OptionSubscriptionPlan(
         atm_strike=7505,
         expiry="20260708",
@@ -728,15 +713,9 @@ def test_option_reconcile_partial_failure_keeps_accepted_hot_plan(monkeypatch) -
     collector.hot_subs = old_subs.copy()
     collector.option_plan = old_plan
     collector.rotation_index = 0
-    monkeypatch.setattr(
-        stream_collector_module,
-        "option_contracts_from_specs",
-        lambda specs: [(option_spec_label(spec), "option", object()) for spec in specs],
+    patch_stream(monkeypatch, "option_contracts_from_specs", lambda specs: [(option_spec_label(spec), "option", object()) for spec in specs],
     )
-    monkeypatch.setattr(
-        stream_collector_module,
-        "qualify_and_subscribe",
-        lambda ib, contracts, qualify=False: {
+    patch_stream(monkeypatch, "qualify_and_subscribe", lambda ib, contracts, qualify=False: {
             label: (
                 None,
                 VerifyRow(label=label, kind=kind, symbol="SPX", subscribed=False),
@@ -744,7 +723,7 @@ def test_option_reconcile_partial_failure_keeps_accepted_hot_plan(monkeypatch) -
             for label, kind, _ in contracts
         },
     )
-    monkeypatch.setattr(stream_collector_module, "cancel_subscriptions", lambda *args: None)
+    patch_stream(monkeypatch, "cancel_subscriptions", lambda *args: None)
     new_plan = OptionSubscriptionPlan(
         atm_strike=7520,
         expiry="20260708",
@@ -797,9 +776,9 @@ def test_option_reconcile_releases_capacity_before_zero_overlap_cutover(monkeypa
             for label, kind, contract in contracts
         }
 
-    monkeypatch.setattr(stream_collector_module, "option_contracts_from_specs", fake_contracts)
-    monkeypatch.setattr(stream_collector_module, "cancel_subscriptions", fake_cancel)
-    monkeypatch.setattr(stream_collector_module, "qualify_and_subscribe", fake_qualify)
+    patch_stream(monkeypatch, "option_contracts_from_specs", fake_contracts)
+    patch_stream(monkeypatch, "cancel_subscriptions", fake_cancel)
+    patch_stream(monkeypatch, "qualify_and_subscribe", fake_qualify)
     new_plan = OptionSubscriptionPlan(
         atm_strike=7520,
         expiry="20260709",
@@ -854,15 +833,9 @@ def test_option_reconcile_correlates_async_rejection_to_added_request(monkeypatc
             collector._on_error(501, 101, "max tickers", None)
 
     collector.ib = FakeIB()
-    monkeypatch.setattr(
-        stream_collector_module,
-        "option_contracts_from_specs",
-        lambda specs: [(option_spec_label(spec), "option", object()) for spec in specs],
+    patch_stream(monkeypatch, "option_contracts_from_specs", lambda specs: [(option_spec_label(spec), "option", object()) for spec in specs],
     )
-    monkeypatch.setattr(
-        stream_collector_module,
-        "qualify_and_subscribe",
-        lambda ib, contracts, qualify=False: {
+    patch_stream(monkeypatch, "qualify_and_subscribe", lambda ib, contracts, qualify=False: {
             label: (
                 SimpleNamespace(contract=contract),
                 VerifyRow(
@@ -876,7 +849,7 @@ def test_option_reconcile_correlates_async_rejection_to_added_request(monkeypatc
             for label, kind, contract in contracts
         },
     )
-    monkeypatch.setattr(stream_collector_module, "cancel_subscriptions", lambda *args: None)
+    patch_stream(monkeypatch, "cancel_subscriptions", lambda *args: None)
     new_plan = OptionSubscriptionPlan(
         atm_strike=7505,
         expiry="20260708",
@@ -940,7 +913,7 @@ def test_confirmation_outage_aborts_batch_and_discards_only_local_state(
             self.server_cancels.append(contract)
 
     collector.ib = FakeIB()
-    monkeypatch.setattr(stream_collector_module, "log_event", lambda *args: None)
+    patch_stream(monkeypatch, "log_event", lambda *args: None)
 
     assert not collector._subscription_batch_succeeded(
         subscriptions,
@@ -962,7 +935,7 @@ def test_confirmation_outage_aborts_batch_and_discards_only_local_state(
     def unexpected_restore(*args, **kwargs):
         raise AssertionError("restore attempted during connectivity outage")
 
-    monkeypatch.setattr(stream_collector_module, "qualify_and_subscribe", unexpected_restore)
+    patch_stream(monkeypatch, "qualify_and_subscribe", unexpected_restore)
     assert collector._restore_subscriptions(subscriptions, lane="rotation") == {}
 
 
@@ -1009,13 +982,10 @@ def test_option_reconcile_restores_released_coverage_after_sync_failure(monkeypa
             for label, kind, contract in contracts
         }
 
-    monkeypatch.setattr(
-        stream_collector_module,
-        "option_contracts_from_specs",
-        lambda specs: [(option_spec_label(spec), "option", object()) for spec in specs],
+    patch_stream(monkeypatch, "option_contracts_from_specs", lambda specs: [(option_spec_label(spec), "option", object()) for spec in specs],
     )
-    monkeypatch.setattr(stream_collector_module, "qualify_and_subscribe", fake_qualify)
-    monkeypatch.setattr(stream_collector_module, "cancel_subscriptions", lambda *args: None)
+    patch_stream(monkeypatch, "qualify_and_subscribe", fake_qualify)
+    patch_stream(monkeypatch, "cancel_subscriptions", lambda *args: None)
     new_plan = OptionSubscriptionPlan(
         atm_strike=7520,
         expiry="20260709",
@@ -1117,16 +1087,13 @@ def test_teardown_clears_prior_session_errors(monkeypatch) -> None:
         )
     ]
     discard_calls: list[dict[str, object]] = []
-    monkeypatch.setattr(
-        stream_collector_module,
-        "discard_subscriptions",
-        lambda _ib, subscriptions: discard_calls.append(subscriptions) or True,
+    patch_stream(monkeypatch, "discard_subscriptions", lambda _ib, subscriptions: discard_calls.append(subscriptions) or True,
     )
 
     def unexpected_cancel(*args) -> bool:
         raise AssertionError("server cancel while disconnected")
 
-    monkeypatch.setattr(stream_collector_module, "cancel_subscriptions", unexpected_cancel)
+    patch_stream(monkeypatch, "cancel_subscriptions", unexpected_cancel)
 
     collector.teardown()
 
@@ -1161,10 +1128,7 @@ def test_base_rejection_during_subscription_is_reconciled_after_registration(
     collector.slow_qualified_contracts = {}
     collector.slow_unresolved_contracts = set()
 
-    monkeypatch.setattr(
-        stream_collector_module,
-        "build_base_contracts",
-        lambda _settings: [
+    patch_stream(monkeypatch, "build_base_contracts", lambda _settings: [
             ("index:SPX", "index", object()),
             ("stock:SPY", "stock", object()),
         ],
@@ -1195,12 +1159,9 @@ def test_base_rejection_during_subscription_is_reconciled_after_registration(
             ),
         }
 
-    monkeypatch.setattr(
-        stream_collector_module,
-        "qualify_and_subscribe",
-        subscribe_with_early_rejection,
+    patch_stream(monkeypatch, "qualify_and_subscribe", subscribe_with_early_rejection,
     )
-    monkeypatch.setattr(stream_collector_module, "log_event", lambda *args: None)
+    patch_stream(monkeypatch, "log_event", lambda *args: None)
 
     collector.subscribe_base()
 
@@ -1243,10 +1204,7 @@ def test_base_subscription_rebuilds_if_connectivity_changes_during_setup(
     collector.slow_qualified_contracts = {}
     collector.slow_unresolved_contracts = set()
 
-    monkeypatch.setattr(
-        stream_collector_module,
-        "build_base_contracts",
-        lambda _settings: [("index:SPX", "index", object())],
+    patch_stream(monkeypatch, "build_base_contracts", lambda _settings: [("index:SPX", "index", object())],
     )
 
     def subscribe_across_outage(*args, **kwargs):
@@ -1265,12 +1223,9 @@ def test_base_subscription_rebuilds_if_connectivity_changes_during_setup(
             )
         }
 
-    monkeypatch.setattr(
-        stream_collector_module,
-        "qualify_and_subscribe",
-        subscribe_across_outage,
+    patch_stream(monkeypatch, "qualify_and_subscribe", subscribe_across_outage,
     )
-    monkeypatch.setattr(stream_collector_module, "log_event", lambda *args: None)
+    patch_stream(monkeypatch, "log_event", lambda *args: None)
 
     with pytest.raises(RuntimeError, match="base_subscribe"):
         collector.subscribe_base()
@@ -1370,7 +1325,7 @@ def test_reconnect_policy_backs_off_exponentially_and_resets():
 
 def test_connect_backoff_is_honored_when_tcp_port_is_already_open(monkeypatch) -> None:
     sleeps: list[float] = []
-    monkeypatch.setattr(stream_collector_module, "api_port_open", lambda *args: True)
+    patch_stream(monkeypatch, "api_port_open", lambda *args: True)
     monkeypatch.setattr(stream_collector_module.time, "sleep", sleeps.append)
 
     sleep_until_reconnect(host="127.0.0.1", port=4002, delay_seconds=7.0)
@@ -1443,12 +1398,9 @@ def test_established_but_unhealthy_sessions_keep_reconnect_backoff(monkeypatch) 
             runtime.deadline = 0.0
 
     runtime.sleep = stop_after_two_delays
-    monkeypatch.setattr(stream_collector_module, "persist_state_only", lambda *args: None)
-    monkeypatch.setattr(stream_collector_module, "log_event", lambda *args: None)
-    monkeypatch.setattr(
-        stream_collector_module,
-        "probe_data_plane",
-        lambda *args: SimpleNamespace(ok=True, to_log_event=lambda: {}),
+    patch_stream(monkeypatch, "persist_state_only", lambda *args: None)
+    patch_stream(monkeypatch, "log_event", lambda *args: None)
+    patch_stream(monkeypatch, "probe_data_plane", lambda *args: SimpleNamespace(ok=True, to_log_event=lambda: {}),
     )
 
     assert runtime.run() == 0
@@ -1528,15 +1480,9 @@ def test_teardown_clears_option_cache(monkeypatch) -> None:
         old.label: (100.0, old),
         "option:SPXW:20260711:6900:P": (100.0, replace_row(old, "option:SPXW:20260711:6900:P")),
     }
-    monkeypatch.setattr(
-        stream_collector_module,
-        "discard_subscriptions",
-        lambda *_args, **_kwargs: True,
+    patch_stream(monkeypatch, "discard_subscriptions", lambda *_args, **_kwargs: True,
     )
-    monkeypatch.setattr(
-        stream_collector_module,
-        "cancel_subscriptions",
-        lambda *_args, **_kwargs: True,
+    patch_stream(monkeypatch, "cancel_subscriptions", lambda *_args, **_kwargs: True,
     )
 
     collector.teardown()
@@ -1594,11 +1540,8 @@ def test_first_flush_after_reconnect_excludes_pre_disconnect_option_rows(monkeyp
         snapshots.append(snapshot)
         return SimpleNamespace(best_quote_count=len(snapshot.quotes))
 
-    monkeypatch.setattr(stream_collector_module, "persist_provider_snapshot", capture_snapshot)
-    monkeypatch.setattr(
-        stream_collector_module,
-        "snapshot_rows",
-        lambda subscriptions, *_args, **_kwargs: [row for _, row in subscriptions.values()],
+    patch_stream(monkeypatch, "persist_provider_snapshot", capture_snapshot)
+    patch_stream(monkeypatch, "snapshot_rows", lambda subscriptions, *_args, **_kwargs: [row for _, row in subscriptions.values()],
     )
 
     collector.flush()
@@ -1621,8 +1564,8 @@ def test_flush_skips_quote_persistence_when_socket_disconnected(monkeypatch) -> 
         snapshot_calls.append(snapshot)
         return SimpleNamespace(best_quote_count=0)
 
-    monkeypatch.setattr(stream_collector_module, "persist_state_only", capture_state)
-    monkeypatch.setattr(stream_collector_module, "persist_provider_snapshot", capture_snapshot)
+    patch_stream(monkeypatch, "persist_state_only", capture_state)
+    patch_stream(monkeypatch, "persist_provider_snapshot", capture_snapshot)
 
     event = collector.flush()
 
@@ -1666,11 +1609,8 @@ def test_flush_marks_all_rows_stale_during_tws_connectivity_loss(monkeypatch) ->
         snapshots.append(snapshot)
         return SimpleNamespace(best_quote_count=len(snapshot.quotes))
 
-    monkeypatch.setattr(stream_collector_module, "persist_provider_snapshot", capture_snapshot)
-    monkeypatch.setattr(
-        stream_collector_module,
-        "snapshot_rows",
-        lambda subscriptions, *_args, **_kwargs: [row for _, row in subscriptions.values()],
+    patch_stream(monkeypatch, "persist_provider_snapshot", capture_snapshot)
+    patch_stream(monkeypatch, "snapshot_rows", lambda subscriptions, *_args, **_kwargs: [row for _, row in subscriptions.values()],
     )
 
     collector.flush()
@@ -1707,16 +1647,10 @@ def test_session_loop_reconnect_path_persists_unavailable(monkeypatch) -> None:
             return True
 
     persisted: list[object] = []
-    monkeypatch.setattr(
-        stream_collector_module,
-        "persist_state_only",
-        lambda state, _storage: persisted.append(state),
+    patch_stream(monkeypatch, "persist_state_only", lambda state, _storage: persisted.append(state),
     )
-    monkeypatch.setattr(stream_collector_module, "log_event", lambda _event: None)
-    monkeypatch.setattr(
-        stream_collector_module,
-        "has_competing_session_error",
-        lambda _errors: False,
+    patch_stream(monkeypatch, "log_event", lambda _event: None)
+    patch_stream(monkeypatch, "has_competing_session_error", lambda _errors: False,
     )
 
     runtime = StreamRuntime(
@@ -1788,11 +1722,8 @@ def test_flush_stamps_connection_generation_on_quotes(monkeypatch) -> None:
         snapshots.append(snapshot)
         return SimpleNamespace(best_quote_count=len(snapshot.quotes))
 
-    monkeypatch.setattr(stream_collector_module, "persist_provider_snapshot", capture_snapshot)
-    monkeypatch.setattr(
-        stream_collector_module,
-        "snapshot_rows",
-        lambda subscriptions, *_args, **_kwargs: [row for _, row in subscriptions.values()],
+    patch_stream(monkeypatch, "persist_provider_snapshot", capture_snapshot)
+    patch_stream(monkeypatch, "snapshot_rows", lambda subscriptions, *_args, **_kwargs: [row for _, row in subscriptions.values()],
     )
 
     collector.flush()
@@ -1815,12 +1746,9 @@ def test_flush_stamps_connection_generation_on_quotes(monkeypatch) -> None:
         isConnected=lambda: True,
         reqMarketDataType=lambda *_args: None,
     )
-    monkeypatch.setattr(stream_collector_module, "connect_market_data_only", fake_connect)
-    monkeypatch.setattr(stream_collector_module, "log_event", lambda _event: None)
-    monkeypatch.setattr(
-        stream_collector_module,
-        "replace_client_id",
-        lambda settings, client_id: settings,
+    patch_stream(monkeypatch, "connect_market_data_only", fake_connect)
+    patch_stream(monkeypatch, "log_event", lambda _event: None)
+    patch_stream(monkeypatch, "replace_client_id", lambda settings, client_id: settings,
     )
     collector.market_data_allowed = lambda: True
     before = collector.connection_generation
@@ -1873,13 +1801,10 @@ def test_flush_reports_outage_while_farm_not_ready(monkeypatch) -> None:
         snapshots.append(snapshot)
         return SimpleNamespace(best_quote_count=len(snapshot.quotes))
 
-    monkeypatch.setattr(stream_collector_module, "persist_provider_snapshot", capture_snapshot)
-    monkeypatch.setattr(
-        stream_collector_module,
-        "snapshot_rows",
-        lambda subscriptions, *_args, **_kwargs: [row for _, row in subscriptions.values()],
+    patch_stream(monkeypatch, "persist_provider_snapshot", capture_snapshot)
+    patch_stream(monkeypatch, "snapshot_rows", lambda subscriptions, *_args, **_kwargs: [row for _, row in subscriptions.values()],
     )
-    monkeypatch.setattr(stream_collector_module, "log_event", lambda _event: None)
+    patch_stream(monkeypatch, "log_event", lambda _event: None)
 
     event = collector.flush()
 

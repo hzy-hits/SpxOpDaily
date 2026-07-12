@@ -9,6 +9,13 @@ Current scope:
 - Keep the project isolated from the machine's default Codex setup.
 - Market-data only: no order placement, account polling, position polling, or credential storage.
 
+Current architecture and refactor execution documents:
+
+- `module-architecture.md` - enforced module layers and dependency rules.
+- `docs/refactor-architecture-acceptance-plan.md` - complete target and acceptance specification.
+- `docs/pre-rth-refactor-implementation-plan.md` - implementation order before the first RTH session.
+- `docs/schwab-wide-chain-hot-lane-design.md` - Schwab wide-chain, 500-symbol hot lane, and IBKR validation design.
+
 ## Quick Start
 
 ```bash

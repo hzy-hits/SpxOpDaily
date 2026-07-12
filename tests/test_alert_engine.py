@@ -804,7 +804,10 @@ def test_movement_snapshot_uses_same_dynamic_threshold_as_evaluation(
 
     state_path = tmp_path / "movement-state.json"
     monkeypatch.setenv("ALERT_MOVEMENT_STATE_PATH", str(state_path))
-    monkeypatch.setattr(ae, "front_expected_move_pct", lambda *_args, **_kwargs: 0.015)
+    monkeypatch.setattr(
+        "spx_spark.alert_engine.rules_price.front_expected_move_pct",
+        lambda *_args, **_kwargs: 0.015,
+    )
     now = datetime(2026, 7, 7, 23, 0, tzinfo=BJ_TZ)
     window = active_window(now)
     assert window.priority == "high"
@@ -848,11 +851,13 @@ def test_delayed_quote_cannot_trigger_movement_alert(tmp_path, monkeypatch) -> N
 
 
 def test_overnight_dip_escalates_to_high_severity(tmp_path, monkeypatch) -> None:
-    import spx_spark.alert_engine as ae
 
     monkeypatch.setenv("ALERT_MOVEMENT_STATE_PATH", str(tmp_path / "movement-state.json"))
     # Day EM = 41 bps (low-vol regime); quiet Asia-session window.
-    monkeypatch.setattr(ae, "front_expected_move_pct", lambda *_args, **_kwargs: 0.0041)
+    monkeypatch.setattr(
+        "spx_spark.alert_engine.rules_price.front_expected_move_pct",
+        lambda *_args, **_kwargs: 0.0041,
+    )
     # Beijing 07:00 = ET 19:00: before the reader's day starts, still the
     # quiet_futures_context window (now high priority for off-hours parity).
     now = datetime(2026, 7, 7, 7, 0, tzinfo=BJ_TZ)

@@ -104,6 +104,17 @@
       "put_wing_iv": null,
       "rn_density": {
         "clipped_mass_fraction": null,
+        "diagnostics": {
+          "clipped_mass_fraction": null,
+          "lower_width_points": null,
+          "max_gap_multiple": null,
+          "monotonic_violation_fraction": null,
+          "negative_mass_fraction": null,
+          "normalized_mass": null,
+          "two_sided_ratio": null,
+          "upper_width_points": null,
+          "usable_strikes": 2
+        },
         "median": null,
         "p10": null,
         "p25": null,

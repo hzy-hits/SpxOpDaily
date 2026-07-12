@@ -19,7 +19,7 @@ from schwab.auth import (
 )
 
 from spx_spark.config import SchwabSettings
-from spx_spark.runtime_config import runtime_value
+from spx_spark.settings import settings_value
 from spx_spark.schwab.auth_storage import (
     AtomicJsonFile,
     ExclusiveFileLock,
@@ -28,7 +28,7 @@ from spx_spark.schwab.auth_storage import (
 
 
 ALLOWED_MARKET_DATA_PATHS = frozenset(
-    str(path) for path in runtime_value("schwab.allowed_market_data_paths")
+    {"/marketdata/v1/quotes", "/marketdata/v1/chains"}
 )
 
 # HTTP protocol status boundaries are named here because they are standards,
@@ -48,19 +48,11 @@ class SchwabGatewayRequestError(RuntimeError):
 
 @dataclass(frozen=True)
 class SchwabRequestPolicy:
-    requests_per_minute: int = int(
-        runtime_value("schwab.request_policy.requests_per_minute")
-    )
-    max_retries: int = int(runtime_value("schwab.request_policy.max_retries"))
-    retry_base_seconds: float = float(
-        runtime_value("schwab.request_policy.retry_base_seconds")
-    )
-    retry_max_seconds: float = float(
-        runtime_value("schwab.request_policy.retry_max_seconds")
-    )
-    retry_after_max_seconds: float = float(
-        runtime_value("schwab.request_policy.retry_after_max_seconds")
-    )
+    requests_per_minute: int = 120
+    max_retries: int = 3
+    retry_base_seconds: float = 0.5
+    retry_max_seconds: float = 8.0
+    retry_after_max_seconds: float = 30.0
 
     def __post_init__(self) -> None:
         if self.requests_per_minute <= 0:
@@ -81,23 +73,23 @@ class SchwabRequestPolicy:
         return cls(
             requests_per_minute=_env_int(
                 "SCHWAB_HTTP_REQUESTS_PER_MINUTE",
-                int(runtime_value("schwab.request_policy.requests_per_minute")),
+                int(settings_value("schwab.request_policy.requests_per_minute")),
             ),
             max_retries=_env_int(
                 "SCHWAB_HTTP_MAX_RETRIES",
-                int(runtime_value("schwab.request_policy.max_retries")),
+                int(settings_value("schwab.request_policy.max_retries")),
             ),
             retry_base_seconds=_env_float(
                 "SCHWAB_HTTP_RETRY_BASE_SECONDS",
-                float(runtime_value("schwab.request_policy.retry_base_seconds")),
+                float(settings_value("schwab.request_policy.retry_base_seconds")),
             ),
             retry_max_seconds=_env_float(
                 "SCHWAB_HTTP_RETRY_MAX_SECONDS",
-                float(runtime_value("schwab.request_policy.retry_max_seconds")),
+                float(settings_value("schwab.request_policy.retry_max_seconds")),
             ),
             retry_after_max_seconds=_env_float(
                 "SCHWAB_HTTP_RETRY_AFTER_MAX_SECONDS",
-                float(runtime_value("schwab.request_policy.retry_after_max_seconds")),
+                float(settings_value("schwab.request_policy.retry_after_max_seconds")),
             ),
         )
 

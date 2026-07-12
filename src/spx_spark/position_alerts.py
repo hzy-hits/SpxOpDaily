@@ -24,7 +24,7 @@ from spx_spark.position_events import (
     PositionEventStoreCorrupt,
     PositionObservation,
 )
-from spx_spark.runtime_config import runtime_value
+from spx_spark.settings import settings_value
 from spx_spark.state_io import atomic_write_json_secure
 from spx_spark.storage import LatestState
 
@@ -38,7 +38,7 @@ def position_holdings_alerts(
     position_settings = IbkrPositionSettings.from_env()
     if not position_settings.snapshot_path:
         return []
-    if not env_bool("ALERT_POSITIONS_ENABLED", bool(runtime_value("position_alerts.enabled"))):
+    if not env_bool("ALERT_POSITIONS_ENABLED", bool(settings_value("position_alerts.enabled"))):
         return []
     snapshot = load_snapshot(position_settings.snapshot_path)
     notification_settings = NotificationSettings.from_env()
@@ -52,27 +52,27 @@ def position_holdings_alerts(
             max_snapshot_age_seconds=position_settings.max_snapshot_age_seconds,
             pnl_change_usd=env_float(
                 "ALERT_POSITION_PNL_CHANGE_USD",
-                float(runtime_value("position_alerts.pnl_change_usd")),
+                float(settings_value("position_alerts.pnl_change_usd")),
             ),
             pnl_loss_usd=env_float(
                 "ALERT_POSITION_PNL_LOSS_USD",
-                float(runtime_value("position_alerts.pnl_loss_usd")),
+                float(settings_value("position_alerts.pnl_loss_usd")),
             ),
             pnl_critical_loss_usd=env_float(
                 "ALERT_POSITION_PNL_CRITICAL_LOSS_USD",
-                float(runtime_value("position_alerts.pnl_critical_loss_usd")),
+                float(settings_value("position_alerts.pnl_critical_loss_usd")),
             ),
             pnl_bucket_usd=env_float(
                 "ALERT_POSITION_PNL_DEDUP_BUCKET_USD",
-                float(runtime_value("position_alerts.pnl_bucket_usd")),
+                float(settings_value("position_alerts.pnl_bucket_usd")),
             ),
             structural_enabled=env_bool(
                 "ALERT_POSITION_STRUCTURAL_ENABLED",
-                bool(runtime_value("position_alerts.structural_enabled")),
+                bool(settings_value("position_alerts.structural_enabled")),
             ),
             pnl_enabled=env_bool(
                 "ALERT_POSITION_PNL_ENABLED",
-                bool(runtime_value("position_alerts.pnl_enabled")),
+                bool(settings_value("position_alerts.pnl_enabled")),
             ),
         )
     except PositionEventStoreCorrupt as exc:
@@ -351,32 +351,32 @@ def evaluate_position_alerts(
         return []
     if not snapshot.fetch_complete:
         return []
-    if not env_bool("ALERT_POSITIONS_ENABLED", bool(runtime_value("position_alerts.enabled"))):
+    if not env_bool("ALERT_POSITIONS_ENABLED", bool(settings_value("position_alerts.enabled"))):
         return []
 
     alerts: list[Alert] = []
     structural_enabled = env_bool(
         "ALERT_POSITION_STRUCTURAL_ENABLED",
-        bool(runtime_value("position_alerts.structural_enabled")),
+        bool(settings_value("position_alerts.structural_enabled")),
     )
     pnl_enabled = env_bool(
-        "ALERT_POSITION_PNL_ENABLED", bool(runtime_value("position_alerts.pnl_enabled"))
+        "ALERT_POSITION_PNL_ENABLED", bool(settings_value("position_alerts.pnl_enabled"))
     )
     pnl_change_usd = env_float(
         "ALERT_POSITION_PNL_CHANGE_USD",
-        float(runtime_value("position_alerts.pnl_change_usd")),
+        float(settings_value("position_alerts.pnl_change_usd")),
     )
     pnl_loss_usd = env_float(
         "ALERT_POSITION_PNL_LOSS_USD",
-        float(runtime_value("position_alerts.pnl_loss_usd")),
+        float(settings_value("position_alerts.pnl_loss_usd")),
     )
     pnl_critical_loss_usd = env_float(
         "ALERT_POSITION_PNL_CRITICAL_LOSS_USD",
-        float(runtime_value("position_alerts.pnl_critical_loss_usd")),
+        float(settings_value("position_alerts.pnl_critical_loss_usd")),
     )
     pnl_bucket_usd = env_float(
         "ALERT_POSITION_PNL_DEDUP_BUCKET_USD",
-        float(runtime_value("position_alerts.pnl_bucket_usd")),
+        float(settings_value("position_alerts.pnl_bucket_usd")),
     )
 
     if structural_enabled:

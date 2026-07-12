@@ -1,15 +1,44 @@
 from __future__ import annotations
 
-import math
 from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from spx_spark.analytics.greeks.higher_order import (
+    bs_charm_per_minute,
+    bs_vanna_per_vol_point,
+)
+from spx_spark.analytics.options.chain import (
+    chain_implied_spot,
+    is_spxw_option,
+    median_strike_step,
+    pair_by_strike,
+)
+from spx_spark.analytics.options.constants import UNDERLIER_MISMATCH_SOURCES
+from spx_spark.analytics.options.exposure import (
+    build_gex_by_strike,
+    build_wall_ladder,
+    gex_weight,
+    interpolate_zero,
+    nearest_zero,
+    signed_gex,
+    zero_gamma_bracket,
+    zero_gamma_spot_scan,
+)
+from spx_spark.analytics.options.exposure_types import StrikeGex, WallLevel
+from spx_spark.analytics.options.models import UnderlierReference
+from spx_spark.analytics.options.pricing import (
+    finite_float,
+    option_iv,
+    time_to_expiry_years,
+    usable_delta,
+)
+from spx_spark.analytics.options.quality import option_gamma_structural
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR, ET
 from spx_spark.marketdata import Quote
-from spx_spark.runtime_config import runtime_value
+from spx_spark.settings import settings_value
 from spx_spark.state_io import atomic_write_json_secure
 from spx_spark.storage import LatestState, configured_quote_use_decision
 
@@ -21,39 +50,21 @@ METHOD = "call_positive_put_negative_oi_proxy_not_dealer_position"
 PROXY_DISCLAIMER = (
     "all *_proxy metrics are house-defined; not comparable to any vendor metric of similar name"
 )
-MINUTES_PER_YEAR = 525600
 
 _MIN_TIME_TO_EXPIRY_YEARS = 15.0 / (60.0 * 24.0 * 365.0)
-WALL_LADDER_DEPTH = 4
 
-
-@dataclass(frozen=True)
-class StrikeGex:
-    strike: float
-    call_gex: float
-    put_gex: float
-    net_gex: float
-    abs_gex: float
-    call_open_interest: float
-    put_open_interest: float
-    call_volume: float = 0.0
-    put_volume: float = 0.0
-
-
-@dataclass(frozen=True)
-class WallLevel:
-    """One rung of the wall ladder: a strike with concentrated dealer gamma."""
-
-    strike: float
-    side: str  # "call" | "put"
-    gex: float
-    open_interest: float
-    volume: float
-    distance_points: float
-
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
-
+# Re-export shared GEX types/helpers for existing import paths.
+__all__ = (
+    "StrikeGex",
+    "WallLevel",
+    "build_gex_by_strike",
+    "build_wall_ladder",
+    "gex_weight",
+    "interpolate_zero",
+    "nearest_zero",
+    "signed_gex",
+    "zero_gamma_bracket",
+)
 
 @dataclass(frozen=True)
 class ExposureInputRow:
@@ -163,186 +174,6 @@ class ExposureMap:
 
     def to_dict(self) -> dict[str, Any]:
         return exposure_map_to_dict(self)
-
-
-def bs_vanna_per_vol_point(
-    spot: float, strike: float, iv: float, tau_years: float
-) -> float | None:
-    if spot <= 0 or strike <= 0 or iv <= 0 or tau_years <= 0:
-        return None
-    sqrt_t = math.sqrt(tau_years)
-    d1 = (math.log(spot / strike) + 0.5 * iv * iv * tau_years) / (iv * sqrt_t)
-    d2 = d1 - iv * sqrt_t
-    phi = math.exp(-0.5 * d1 * d1) / math.sqrt(2.0 * math.pi)
-    return (-phi * d2 / iv) * 0.01
-
-
-def bs_charm_per_minute(
-    spot: float, strike: float, iv: float, tau_years: float
-) -> float | None:
-    if spot <= 0 or strike <= 0 or iv <= 0 or tau_years <= 0:
-        return None
-    sqrt_t = math.sqrt(tau_years)
-    d1 = (math.log(spot / strike) + 0.5 * iv * iv * tau_years) / (iv * sqrt_t)
-    d2 = d1 - iv * sqrt_t
-    phi = math.exp(-0.5 * d1 * d1) / math.sqrt(2.0 * math.pi)
-    return (phi * d2 / (2.0 * tau_years)) / MINUTES_PER_YEAR
-
-
-def interpolate_zero(left: StrikeGex, right: StrikeGex) -> float | None:
-    denom = right.net_gex - left.net_gex
-    if abs(denom) <= 1e-12:
-        return None
-    weight = -left.net_gex / denom
-    if weight < 0 or weight > 1:
-        return None
-    return left.strike + weight * (right.strike - left.strike)
-
-
-def gex_weight(quote: Quote, *, intraday: bool) -> float | None:
-    from spx_spark.options_map import finite_float
-
-    open_interest = finite_float(quote.open_interest) or 0.0
-    volume = finite_float(quote.volume) or 0.0
-    if intraday:
-        weight = open_interest + volume
-    else:
-        weight = open_interest
-    if weight <= 0:
-        return None
-    return weight
-
-
-def signed_gex(
-    quote: Quote, *, sign: float, underlier: float, intraday: bool = False
-) -> float | None:
-    from spx_spark.options_map import option_gamma_structural
-
-    gamma = option_gamma_structural(quote)
-    weight = gex_weight(quote, intraday=intraday)
-    if gamma is None or weight is None:
-        return None
-    return sign * gamma * weight * 100.0 * underlier * underlier * 0.01
-
-
-def build_gex_by_strike(
-    pairs: dict[float, dict[Any, Quote]],
-    *,
-    underlier: float,
-    intraday: bool = False,
-) -> list[StrikeGex]:
-    from spx_spark.marketdata import OptionRight
-    from spx_spark.options_map import finite_float
-
-    rows: list[StrikeGex] = []
-    for strike, pair in sorted(pairs.items()):
-        call = pair.get(OptionRight.CALL)
-        put = pair.get(OptionRight.PUT)
-        call_gex = (
-            signed_gex(call, sign=1.0, underlier=underlier, intraday=intraday)
-            if call is not None
-            else None
-        )
-        put_gex = (
-            signed_gex(put, sign=-1.0, underlier=underlier, intraday=intraday)
-            if put is not None
-            else None
-        )
-        if call_gex is None and put_gex is None:
-            continue
-        call_value = call_gex or 0.0
-        put_value = put_gex or 0.0
-        rows.append(
-            StrikeGex(
-                strike=strike,
-                call_gex=call_value,
-                put_gex=put_value,
-                net_gex=call_value + put_value,
-                abs_gex=abs(call_value) + abs(put_value),
-                call_open_interest=(finite_float(call.open_interest) or 0.0) if call else 0.0,
-                put_open_interest=(finite_float(put.open_interest) or 0.0) if put else 0.0,
-                call_volume=(finite_float(call.volume) or 0.0) if call else 0.0,
-                put_volume=(finite_float(put.volume) or 0.0) if put else 0.0,
-            )
-        )
-    return rows
-
-
-def build_wall_ladder(
-    gex_rows: list[StrikeGex],
-    *,
-    underlier: float,
-    strike_step: float,
-    depth: int = WALL_LADDER_DEPTH,
-) -> tuple[tuple[WallLevel, ...], tuple[WallLevel, ...]]:
-    tolerance = strike_step / 2.0
-    call_rows = [
-        row for row in gex_rows if row.call_gex > 0 and row.strike >= underlier - tolerance
-    ]
-    put_rows = [row for row in gex_rows if row.put_gex < 0 and row.strike <= underlier + tolerance]
-    call_rows.sort(key=lambda row: -row.call_gex)
-    put_rows.sort(key=lambda row: row.put_gex)
-    call_walls = tuple(
-        WallLevel(
-            strike=row.strike,
-            side="call",
-            gex=row.call_gex,
-            open_interest=row.call_open_interest,
-            volume=row.call_volume,
-            distance_points=row.strike - underlier,
-        )
-        for row in call_rows[:depth]
-    )
-    put_walls = tuple(
-        WallLevel(
-            strike=row.strike,
-            side="put",
-            gex=row.put_gex,
-            open_interest=row.put_open_interest,
-            volume=row.put_volume,
-            distance_points=row.strike - underlier,
-        )
-        for row in put_rows[:depth]
-    )
-    return call_walls, put_walls
-
-
-def nearest_zero(gex_rows: list[StrikeGex], underlier: float) -> float | None:
-    if not gex_rows:
-        return None
-    zeros: list[float] = []
-    for left, right in zip(gex_rows, gex_rows[1:]):
-        if abs(left.net_gex) <= 1e-12:
-            zeros.append(left.strike)
-        elif left.net_gex * right.net_gex < 0:
-            zero = interpolate_zero(left, right)
-            if zero is not None:
-                zeros.append(zero)
-    if abs(gex_rows[-1].net_gex) <= 1e-12:
-        zeros.append(gex_rows[-1].strike)
-    if not zeros:
-        return None
-    return min(zeros, key=lambda value: abs(value - underlier))
-
-
-def zero_gamma_bracket(gex_rows: list[StrikeGex], underlier: float) -> tuple[float, float] | None:
-    if not gex_rows:
-        return None
-    brackets: list[tuple[float, float, float]] = []
-    for left, right in zip(gex_rows, gex_rows[1:]):
-        if abs(left.net_gex) <= 1e-12:
-            brackets.append((left.strike, left.strike, abs(left.strike - underlier)))
-        elif left.net_gex * right.net_gex < 0:
-            zero = interpolate_zero(left, right)
-            if zero is not None:
-                brackets.append((left.strike, right.strike, abs(zero - underlier)))
-    if abs(gex_rows[-1].net_gex) <= 1e-12:
-        last = gex_rows[-1].strike
-        brackets.append((last, last, abs(last - underlier)))
-    if not brackets:
-        return None
-    left_strike, right_strike, _distance = min(brackets, key=lambda item: item[2])
-    return (left_strike, right_strike)
 
 
 def _leg_weight(row: ExposureInputRow, weighting: str) -> float | None:
@@ -460,14 +291,6 @@ def strike_exposure_values(
 
 
 def exposure_input_row_from_quote(quote: Quote, *, as_of: datetime) -> ExposureInputRow | None:
-    from spx_spark.options_map import (
-        finite_float,
-        is_spxw_option,
-        option_gamma_structural,
-        option_iv,
-        usable_delta,
-    )
-
     if not is_spxw_option(quote):
         return None
     instrument = quote.instrument
@@ -757,13 +580,6 @@ def _build_expiry_exposure(
     spot: float | None,
     as_of: datetime,
 ) -> ExpiryExposure:
-    from spx_spark.options_map import (
-        median_strike_step,
-        pair_by_strike,
-        time_to_expiry_years,
-        zero_gamma_spot_scan,
-    )
-
     rows = tuple(
         row
         for quote in quotes
@@ -943,7 +759,7 @@ def _build_expiry_exposure(
             call_walls, put_walls = build_wall_ladder(
                 gex_rows, underlier=spot, strike_step=strike_step
             )
-            pin_max = float(runtime_value("steven.pin_max_distance_points"))
+            pin_max = float(settings_value("steven.pin_max_distance_points"))
             candidates = [
                 strike
                 for strike in strike_rows
@@ -1007,14 +823,7 @@ def _build_expiry_exposure(
 
 
 def build_exposure_map(state: LatestState) -> ExposureMap:
-    from spx_spark.options_map import (
-        UNDERLIER_MISMATCH_SOURCES,
-        UnderlierReference,
-        chain_implied_spot,
-        group_spxw_option_quotes,
-        pair_by_strike,
-        select_underlier,
-    )
+    from spx_spark.options_map import group_spxw_option_quotes, select_underlier
 
     underlier = select_underlier(state)
     all_grouped = group_spxw_option_quotes(state)

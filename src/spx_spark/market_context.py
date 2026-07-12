@@ -7,7 +7,7 @@ from pathlib import Path
 from statistics import median
 
 from spx_spark.marketdata import MarketDataQuality, Quote
-from spx_spark.runtime_config import runtime_value
+from spx_spark.settings import settings_value
 from spx_spark.storage import LatestState, configured_quote_use_decision
 
 
@@ -190,15 +190,15 @@ def ratio(
 
 
 def spx_sector_breadth(state: LatestState) -> dict[str, object]:
-    raw_instrument_ids = runtime_value("market_context.spx_sector_instrument_ids")
+    raw_instrument_ids = settings_value("market_context.spx_sector_instrument_ids")
     if not isinstance(raw_instrument_ids, list):
         raise TypeError("market_context.spx_sector_instrument_ids must be a list")
     instrument_ids = tuple(str(value) for value in raw_instrument_ids)
-    min_usable = int(runtime_value("market_context.sector_breadth_min_usable"))
-    max_age_ms = float(runtime_value("market_context.sector_quote_max_age_seconds")) * 1_000.0
-    unchanged_band = float(runtime_value("market_context.sector_unchanged_band_bps"))
-    directional_score = float(runtime_value("market_context.sector_directional_bias_score"))
-    confirmation_move = float(runtime_value("market_context.direction_confirmation_move_bps"))
+    min_usable = int(settings_value("market_context.sector_breadth_min_usable"))
+    max_age_ms = float(settings_value("market_context.sector_quote_max_age_seconds")) * 1_000.0
+    unchanged_band = float(settings_value("market_context.sector_unchanged_band_bps"))
+    directional_score = float(settings_value("market_context.sector_directional_bias_score"))
+    confirmation_move = float(settings_value("market_context.direction_confirmation_move_bps"))
 
     usable_moves: list[float] = []
     for instrument_id in instrument_ids:
@@ -307,7 +307,7 @@ def latest_polymarket_context_path() -> Path:
     data_root = (
         os.getenv("MARKET_DATA_DATA_ROOT")
         or os.getenv("MAINTENANCE_DATA_ROOT")
-        or str(runtime_value("maintenance.data_root"))
+        or str(settings_value("maintenance.data_root"))
     )
     return Path(data_root) / "latest" / "polymarket_context.json"
 
@@ -363,11 +363,11 @@ def first_actionable_entry(
 def hyperliquid_spx_proxy_gate(entries: dict[str, MarketContextEntry]) -> dict[str, object]:
     default_warn_bps = env_float(
         "HYPERLIQUID_PROXY_BASIS_WARN_BPS",
-        float(runtime_value("hyperliquid.proxy_basis_warn_bps")),
+        float(settings_value("hyperliquid.proxy_basis_warn_bps")),
     )
     default_block_bps = env_float(
         "HYPERLIQUID_PROXY_BASIS_BLOCK_BPS",
-        float(runtime_value("hyperliquid.proxy_basis_block_bps")),
+        float(settings_value("hyperliquid.proxy_basis_block_bps")),
     )
     proxy = first_usable_entry(entries, HYPERLIQUID_PROXY_IDS)
     if proxy is None:
@@ -402,11 +402,11 @@ def hyperliquid_spx_proxy_gate(entries: dict[str, MarketContextEntry]) -> dict[s
     if anchor_is_future:
         warn_bps = env_float(
             "HYPERLIQUID_PROXY_FUTURES_BASIS_WARN_BPS",
-            float(runtime_value("hyperliquid.proxy_futures_basis_warn_bps")),
+            float(settings_value("hyperliquid.proxy_futures_basis_warn_bps")),
         )
         block_bps = env_float(
             "HYPERLIQUID_PROXY_FUTURES_BASIS_BLOCK_BPS",
-            float(runtime_value("hyperliquid.proxy_futures_basis_block_bps")),
+            float(settings_value("hyperliquid.proxy_futures_basis_block_bps")),
         )
     else:
         warn_bps = default_warn_bps

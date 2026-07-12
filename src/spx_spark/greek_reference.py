@@ -12,6 +12,13 @@ from pathlib import Path
 from statistics import median
 from typing import TYPE_CHECKING, Any
 
+from spx_spark.analytics.greeks.black_scholes import (
+    bs_delta,
+    bs_gamma,
+    bs_price,
+    bs_vega,
+    intrinsic_value as _intrinsic,
+)
 from spx_spark.config import StorageSettings
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR, ET
 from spx_spark.marketdata import InstrumentType, Quote
@@ -190,63 +197,6 @@ class ExpiryGreekReference:
         payload = asdict(self)
         payload["as_of"] = self.as_of.isoformat()
         return payload
-
-
-def _normal_cdf(value: float) -> float:
-    return 0.5 * (1.0 + math.erf(value / math.sqrt(2.0)))
-
-
-def _normal_pdf(value: float) -> float:
-    return math.exp(-0.5 * value * value) / math.sqrt(2.0 * math.pi)
-
-
-def _intrinsic(spot: float, strike: float, right: str) -> float:
-    if right == "C":
-        return max(0.0, spot - strike)
-    return max(0.0, strike - spot)
-
-
-def _d1(spot: float, strike: float, iv: float, tau_years: float) -> float:
-    root_t = math.sqrt(tau_years)
-    return (math.log(spot / strike) + 0.5 * iv * iv * tau_years) / (iv * root_t)
-
-
-def bs_price(spot: float, strike: float, iv: float, tau_years: float, right: str) -> float:
-    """Black-Scholes price with r=q=0, matching the existing order-map kernel."""
-
-    intrinsic = _intrinsic(spot, strike, right)
-    if spot <= 0 or strike <= 0 or tau_years <= 0 or iv <= 0:
-        return intrinsic
-    d1 = _d1(spot, strike, iv, tau_years)
-    d2 = d1 - iv * math.sqrt(tau_years)
-    if right == "C":
-        return max(intrinsic, spot * _normal_cdf(d1) - strike * _normal_cdf(d2))
-    return max(intrinsic, strike * _normal_cdf(-d2) - spot * _normal_cdf(-d1))
-
-
-def bs_delta(spot: float, strike: float, iv: float, tau_years: float, right: str) -> float:
-    if tau_years <= 0 or iv <= 0:
-        if spot > strike:
-            return 1.0 if right == "C" else 0.0
-        if spot < strike:
-            return 0.0 if right == "C" else -1.0
-        return 0.5 if right == "C" else -0.5
-    call_delta = _normal_cdf(_d1(spot, strike, iv, tau_years))
-    return call_delta if right == "C" else call_delta - 1.0
-
-
-def bs_gamma(spot: float, strike: float, iv: float, tau_years: float) -> float:
-    if spot <= 0 or strike <= 0 or iv <= 0 or tau_years <= 0:
-        return 0.0
-    return _normal_pdf(_d1(spot, strike, iv, tau_years)) / (spot * iv * math.sqrt(tau_years))
-
-
-def bs_vega(spot: float, strike: float, iv: float, tau_years: float) -> float:
-    """Return price change per 1.00 absolute volatility, before unit scaling."""
-
-    if spot <= 0 or strike <= 0 or iv <= 0 or tau_years <= 0:
-        return 0.0
-    return spot * _normal_pdf(_d1(spot, strike, iv, tau_years)) * math.sqrt(tau_years)
 
 
 def difference_steps(inputs: GreekInputs) -> DifferenceSteps:

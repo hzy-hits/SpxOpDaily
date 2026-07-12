@@ -1,8 +1,10 @@
+
 from __future__ import annotations
+
+from stream_test_helpers import patch_stream
 
 from types import SimpleNamespace
 
-import spx_spark.ibkr.stream_collector as stream_collector_module
 from spx_spark.config import IbkrStreamSettings
 from spx_spark.ibkr.stream_collector import (
     StreamCollector,
@@ -101,8 +103,8 @@ def test_unchanged_spy_plan_is_not_requalified(monkeypatch) -> None:
             for label, kind, contract in contracts
         }
 
-    monkeypatch.setattr(stream_collector_module, "qualify_and_subscribe", fake_qualify)
-    monkeypatch.setattr(stream_collector_module, "cancel_subscriptions", lambda *args: None)
+    patch_stream(monkeypatch, "qualify_and_subscribe", fake_qualify)
+    patch_stream(monkeypatch, "cancel_subscriptions", lambda *args: None)
     rows = [
         VerifyRow(
             label="stock:SPY",
@@ -143,8 +145,8 @@ def test_changed_spy_plan_retains_overlap_and_qualifies_only_additions(monkeypat
     def fake_cancel(ib, subscriptions):
         canceled_labels.append(set(subscriptions))
 
-    monkeypatch.setattr(stream_collector_module, "qualify_and_subscribe", fake_qualify)
-    monkeypatch.setattr(stream_collector_module, "cancel_subscriptions", fake_cancel)
+    patch_stream(monkeypatch, "qualify_and_subscribe", fake_qualify)
+    patch_stream(monkeypatch, "cancel_subscriptions", fake_cancel)
     first_rows = [
         VerifyRow(label="stock:SPY", kind="stock", symbol="SPY", market_price=628.3)
     ]

@@ -1,0 +1,23 @@
+# Optional machine-local overrides for config/runtime.yaml.
+#
+# Copy this file to config/runtime.local.yaml. The local file is ignored by
+# git. Override leaves must contain only `value`; descriptions remain owned by
+# the tracked base configuration. Unknown paths fail at startup.
+
+provider_failover:
+  control_ibkr_stream_enabled:
+    value: false
+
+ibkr_broker:
+  account_read_enabled:
+    value: false
+
+intraday_shock:
+  require_schwab_streaming_anchors:
+    value: true
+
+steven:
+  enabled:
+    value: false
+  alert_context_enabled:
+    value: false

@@ -9,7 +9,8 @@ from functools import lru_cache
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from spx_spark.runtime_config import runtime_instrument_rows, runtime_value
+from spx_spark.settings import settings_value
+from spx_spark.runtime_config import runtime_instrument_rows
 
 
 @dataclass(frozen=True)
@@ -91,7 +92,7 @@ def find_schwab_instrument(symbol: str) -> SchwabInstrumentConfig | None:
 
 
 def _quarterly_month_codes() -> dict[int, str]:
-    raw = runtime_value("schwab.future_contract_resolution.quarterly_month_codes")
+    raw = settings_value("schwab.future_contract_resolution.quarterly_month_codes")
     if not isinstance(raw, dict) or not raw:
         raise TypeError("Schwab quarterly month codes must be a non-empty mapping")
     resolved: dict[int, str] = {}
@@ -122,7 +123,7 @@ def _third_friday(year: int, month: int) -> date:
 
 
 def _exchange_datetime(now: datetime | date | None) -> datetime:
-    timezone = ZoneInfo(str(runtime_value("schwab.future_contract_resolution.calendar_timezone")))
+    timezone = ZoneInfo(str(settings_value("schwab.future_contract_resolution.calendar_timezone")))
     if isinstance(now, date) and not isinstance(now, datetime):
         return datetime.combine(now, time.min, tzinfo=timezone)
     value = now or datetime.now(tz=timezone)
@@ -136,13 +137,13 @@ def active_quarterly_contract_month(now: datetime | date | None = None) -> tuple
 
     exchange_now = _exchange_datetime(now)
     roll_days = int(
-        runtime_value("schwab.future_contract_resolution.roll_calendar_days_before_expiry")
+        settings_value("schwab.future_contract_resolution.roll_calendar_days_before_expiry")
     )
     if roll_days < 0:
         raise ValueError("Schwab futures roll days cannot be negative")
     try:
         roll_session_start = time.fromisoformat(
-            str(runtime_value("schwab.future_contract_resolution.roll_session_start_time"))
+            str(settings_value("schwab.future_contract_resolution.roll_session_start_time"))
         )
     except ValueError as exc:
         raise ValueError("Invalid Schwab futures roll session start time") from exc
@@ -239,7 +240,7 @@ def chain_interval_seconds_for(symbol: str) -> int:
     instrument = find_schwab_instrument(symbol)
     if instrument is not None and instrument.chain_interval_seconds is not None:
         return instrument.chain_interval_seconds
-    return int(runtime_value("schwab.collection.interval_seconds"))
+    return int(settings_value("schwab.collection.interval_seconds"))
 
 
 def option_chain_strike_count_for(symbol: str, default_strike_count: int) -> int:

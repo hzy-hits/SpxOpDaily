@@ -19,7 +19,7 @@ from typing import Any
 from spx_spark.config import NotificationSettings, env_bool, load_dotenv
 from spx_spark.notifier.model import CommandRunner, default_runner
 from spx_spark.notifier.sinks import run_openclaw_agent
-from spx_spark.runtime_config import runtime_value
+from spx_spark.settings import settings_value
 
 # Master-to-apprentice doctrine: this system prompt is written as a veteran SPX
 # 0DTE trader teaching a capable but green apprentice (the writer model) how to
@@ -113,20 +113,20 @@ class LlmWriterSettings:
     def from_env(cls) -> "LlmWriterSettings":
         load_dotenv()
         return cls(
-            enabled=env_bool("SPX_PUSH_LLM_ENABLED", bool(runtime_value("push_llm.enabled"))),
-            model=os.getenv("SPX_PUSH_LLM_MODEL", str(runtime_value("push_llm.model"))).strip(),
+            enabled=env_bool("SPX_PUSH_LLM_ENABLED", bool(settings_value("push_llm.enabled"))),
+            model=os.getenv("SPX_PUSH_LLM_MODEL", str(settings_value("push_llm.model"))).strip(),
             url=os.getenv(
                 "SPX_PUSH_LLM_URL",
-                str(runtime_value("push_llm.url")),
+                str(settings_value("push_llm.url")),
             ).strip(),
             env_file=os.getenv(
                 "SPX_PUSH_LLM_ENV_FILE",
-                str(runtime_value("push_llm.env_file")),
+                str(settings_value("push_llm.env_file")),
             ).strip(),
             timeout_seconds=float(
                 os.getenv(
                     "SPX_PUSH_LLM_TIMEOUT_SECONDS",
-                    str(runtime_value("push_llm.timeout_seconds")),
+                    str(settings_value("push_llm.timeout_seconds")),
                 )
             ),
             # deepseek-v4-pro is a reasoning model: the chain-of-thought also
@@ -134,7 +134,7 @@ class LlmWriterSettings:
             # report), so leave generous headroom or the visible content comes
             # back empty with finish_reason=length.
             max_tokens=int(
-                os.getenv("SPX_PUSH_LLM_MAX_TOKENS", str(runtime_value("push_llm.max_tokens")))
+                os.getenv("SPX_PUSH_LLM_MAX_TOKENS", str(settings_value("push_llm.max_tokens")))
             ),
         )
 
@@ -223,7 +223,7 @@ def default_push_context_path() -> str:
     data_root = (
         os.getenv("MARKET_DATA_DATA_ROOT")
         or os.getenv("MAINTENANCE_DATA_ROOT")
-        or str(runtime_value("maintenance.data_root"))
+        or str(settings_value("maintenance.data_root"))
     )
     return os.getenv("SPX_PUSH_CONTEXT_PATH") or str(
         Path(data_root) / "latest" / "push_context.json"

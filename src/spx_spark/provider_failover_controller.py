@@ -19,7 +19,7 @@ from spx_spark.provider_failover import (
     FailoverThresholds,
     advance_failover,
 )
-from spx_spark.runtime_config import runtime_value
+from spx_spark.settings import settings_value
 from spx_spark.state_io import atomic_write_json_secure
 from spx_spark.storage import LatestState, LatestStateStore
 
@@ -55,56 +55,56 @@ class ProviderFailoverSettings:
         data_root = (
             os.getenv("MARKET_DATA_DATA_ROOT")
             or os.getenv("MAINTENANCE_DATA_ROOT")
-            or str(runtime_value("maintenance.data_root"))
+            or str(settings_value("maintenance.data_root"))
         )
-        configured_path = str(runtime_value("provider_failover.state_path")).strip()
+        configured_path = str(settings_value("provider_failover.state_path")).strip()
         return cls(
             enabled=env_bool(
                 "PROVIDER_FAILOVER_ENABLED",
-                bool(runtime_value("provider_failover.enabled")),
+                bool(settings_value("provider_failover.enabled")),
             ),
             state_path=os.getenv("PROVIDER_FAILOVER_STATE_PATH")
             or configured_path
             or f"{data_root.rstrip('/')}/latest/provider_failover_state.json",
             required_instruments=tuple(
-                str(item) for item in runtime_value("provider_failover.required_instruments")
+                str(item) for item in settings_value("provider_failover.required_instruments")
             ),
             provider_state_max_age_seconds=env_float(
                 "PROVIDER_FAILOVER_STATE_MAX_AGE_SECONDS",
-                float(runtime_value("provider_failover.provider_state_max_age_seconds")),
+                float(settings_value("provider_failover.provider_state_max_age_seconds")),
             ),
             quote_max_age_seconds=env_float(
                 "PROVIDER_FAILOVER_QUOTE_MAX_AGE_SECONDS",
-                float(runtime_value("provider_failover.quote_max_age_seconds")),
+                float(settings_value("provider_failover.quote_max_age_seconds")),
             ),
             control_state_max_age_seconds=env_float(
                 "PROVIDER_FAILOVER_CONTROL_STATE_MAX_AGE_SECONDS",
-                float(runtime_value("provider_failover.control_state_max_age_seconds")),
+                float(settings_value("provider_failover.control_state_max_age_seconds")),
             ),
             transition_alert_max_age_seconds=env_float(
                 "PROVIDER_FAILOVER_TRANSITION_ALERT_MAX_AGE_SECONDS",
-                float(runtime_value("provider_failover.transition_alert_max_age_seconds")),
+                float(settings_value("provider_failover.transition_alert_max_age_seconds")),
             ),
             monitor_rth_only=env_bool(
                 "PROVIDER_FAILOVER_RTH_ONLY",
-                bool(runtime_value("provider_failover.monitor_rth_only")),
+                bool(settings_value("provider_failover.monitor_rth_only")),
             ),
             thresholds=FailoverThresholds(
                 schwab_unhealthy_observations=env_int(
                     "PROVIDER_FAILOVER_SCHWAB_UNHEALTHY_OBSERVATIONS",
-                    int(runtime_value("provider_failover.schwab_unhealthy_observations")),
+                    int(settings_value("provider_failover.schwab_unhealthy_observations")),
                 ),
                 schwab_recovery_observations=env_int(
                     "PROVIDER_FAILOVER_SCHWAB_RECOVERY_OBSERVATIONS",
-                    int(runtime_value("provider_failover.schwab_recovery_observations")),
+                    int(settings_value("provider_failover.schwab_recovery_observations")),
                 ),
                 ibkr_unhealthy_observations=env_int(
                     "PROVIDER_FAILOVER_IBKR_UNHEALTHY_OBSERVATIONS",
-                    int(runtime_value("provider_failover.ibkr_unhealthy_observations")),
+                    int(settings_value("provider_failover.ibkr_unhealthy_observations")),
                 ),
                 ibkr_recovery_observations=env_int(
                     "PROVIDER_FAILOVER_IBKR_RECOVERY_OBSERVATIONS",
-                    int(runtime_value("provider_failover.ibkr_recovery_observations")),
+                    int(settings_value("provider_failover.ibkr_recovery_observations")),
                 ),
             ),
         )

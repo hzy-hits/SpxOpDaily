@@ -7,8 +7,6 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
-from spx_spark.runtime_config import runtime_value
-
 
 class Provider(str, Enum):
     IBKR = "ibkr"
@@ -75,8 +73,16 @@ QUALITY_RANK: dict[MarketDataQuality, int] = {
 }
 
 
+# Structural default kept in L0 so marketdata stays stdlib-only. Runtime
+# overrides flow through StorageSettings.provider_priority / choose_best_quote.
 DEFAULT_PROVIDER_PRIORITY: tuple[Provider, ...] = (
-    *(Provider(str(name).lower()) for name in runtime_value("market_data.provider_priority")),
+    Provider.SCHWAB,
+    Provider.IBKR,
+    Provider.HYPERLIQUID,
+    Provider.POLYMARKET,
+    Provider.INTERNAL,
+    Provider.MOCK,
+    Provider.UNKNOWN,
 )
 
 

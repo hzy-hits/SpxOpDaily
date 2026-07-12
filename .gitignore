@@ -3,6 +3,7 @@
 .codex-log/
 .firecrawl/
 .env
+config/runtime.local.yaml
 logs/
 runtime/
 data/raw/

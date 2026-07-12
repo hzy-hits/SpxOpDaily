@@ -13,7 +13,6 @@ from urllib.parse import urlencode, urljoin, urlsplit
 from urllib.request import ProxyHandler, Request, build_opener, urlopen
 
 from spx_spark.config import SchwabSettings
-from spx_spark.runtime_config import runtime_value
 from spx_spark.schwab.symbols import (
     option_chain_symbol_for_schwab,
     resolved_schwab_quote_symbols,
@@ -21,10 +20,10 @@ from spx_spark.schwab.symbols import (
 from spx_spark.schwab.adapter import quotes_from_quote_payload
 
 
-MAX_QUOTE_BATCH_SIZE = int(runtime_value("schwab.quote_batch_size"))
-SCHWAB_QUOTE_PATH = str(runtime_value("schwab.quote_path"))
-SCHWAB_OPTION_CHAIN_PATH = str(runtime_value("schwab.option_chain_path"))
-MAX_ERROR_BODY_CHARACTERS = int(runtime_value("schwab.diagnostics.max_error_body_characters"))
+MAX_QUOTE_BATCH_SIZE = 500
+SCHWAB_QUOTE_PATH = '/marketdata/v1/quotes'
+SCHWAB_OPTION_CHAIN_PATH = '/marketdata/v1/chains'
+MAX_ERROR_BODY_CHARACTERS = 500
 
 
 @dataclass(frozen=True)

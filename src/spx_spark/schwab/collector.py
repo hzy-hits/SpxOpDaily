@@ -15,7 +15,6 @@ from spx_spark.config import SchwabSettings, SchwabStreamSettings, StorageSettin
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR, ET
 from spx_spark.marketdata import as_utc
 from spx_spark.provider_adapter import persist_provider_snapshot
-from spx_spark.runtime_config import runtime_value
 from spx_spark.schwab.adapter import snapshot_from_chain_payload, snapshot_from_quote_payload
 from spx_spark.schwab.symbols import (
     canonical_underlier_for_schwab,
@@ -30,11 +29,11 @@ from spx_spark.schwab.symbols import (
 from spx_spark.schwab.verifier import SchwabClient, build_schwab_client, quote_batches
 
 
-SCHWAB_QUOTE_PATH = str(runtime_value("schwab.quote_path"))
-SCHWAB_OPTION_CHAIN_PATH = str(runtime_value("schwab.option_chain_path"))
+SCHWAB_QUOTE_PATH = '/marketdata/v1/quotes'
+SCHWAB_OPTION_CHAIN_PATH = '/marketdata/v1/chains'
 COLLECTOR_STATE_FILE_NAME = "schwab_collector_state.json"
 REQUEST_BUDGET_WARNING_PER_MINUTE = int(
-    runtime_value("schwab.collection.request_budget_warning_per_minute")
+    100
 )
 LOGGER = logging.getLogger(__name__)
 

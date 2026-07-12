@@ -11,7 +11,9 @@ import yaml
 
 
 CONFIG_ENV_VAR = "SPX_SPARK_RUNTIME_CONFIG"
+OVERRIDES_ENV_VAR = "SPX_SPARK_RUNTIME_OVERRIDES"
 DEFAULT_CONFIG_RELATIVE_PATH = Path("config/runtime.yaml")
+DEFAULT_OVERRIDES_RELATIVE_PATH = Path("config/runtime.local.yaml")
 
 
 def runtime_config_path() -> Path:
@@ -25,21 +27,103 @@ def runtime_config_path() -> Path:
     return repository_candidate.resolve()
 
 
-@lru_cache(maxsize=4)
-def _load_runtime_config(path_text: str) -> dict[str, Any]:
-    path = Path(path_text)
+def runtime_overrides_path() -> Path | None:
+    explicit = os.getenv(OVERRIDES_ENV_VAR, "").strip()
+    if explicit:
+        path = Path(explicit).expanduser().resolve()
+        if not path.is_file():
+            raise FileNotFoundError(f"Runtime overrides not found at {path}")
+        return path
+    disabled = os.getenv("SPX_SPARK_DISABLE_RUNTIME_OVERRIDES", "").strip().lower()
+    if disabled in {"1", "true", "yes", "y", "on"}:
+        return None
+    cwd_candidate = (Path.cwd() / DEFAULT_OVERRIDES_RELATIVE_PATH).resolve()
+    if cwd_candidate.is_file():
+        return cwd_candidate
+    repository_candidate = Path(__file__).resolve().parents[2] / DEFAULT_OVERRIDES_RELATIVE_PATH
+    if repository_candidate.is_file():
+        return repository_candidate.resolve()
+    return None
+
+
+def _read_mapping(path: Path, *, label: str) -> dict[str, Any]:
     if not path.is_file():
-        raise FileNotFoundError(
-            f"Runtime configuration not found at {path}; set {CONFIG_ENV_VAR} explicitly"
-        )
+        raise FileNotFoundError(f"{label} not found at {path}")
     payload = yaml.safe_load(path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
-        raise ValueError(f"Runtime configuration root must be a mapping: {path}")
+        raise ValueError(f"{label} root must be a mapping: {path}")
     return payload
 
 
+def _merge_runtime_overrides(
+    base: Any,
+    overrides: Any,
+    *,
+    dotted_path: str = "",
+) -> Any:
+    if isinstance(base, dict) and "value" in base:
+        if not isinstance(overrides, dict) or set(overrides) != {"value"}:
+            raise ValueError(
+                f"Runtime override for {dotted_path} must contain only a value field"
+            )
+        base_value = base["value"]
+        override_value = overrides["value"]
+        _validate_override_value(base_value, override_value, dotted_path=dotted_path)
+        return {**base, "value": override_value}
+    if isinstance(base, dict):
+        if not isinstance(overrides, dict):
+            raise TypeError(f"Runtime override for {dotted_path or '<root>'} must be a mapping")
+        unknown = sorted(set(overrides) - set(base))
+        if unknown:
+            location = dotted_path or "<root>"
+            raise KeyError(f"Unknown runtime override keys at {location}: {unknown}")
+        merged = dict(base)
+        for key, value in overrides.items():
+            child_path = f"{dotted_path}.{key}" if dotted_path else str(key)
+            merged[key] = _merge_runtime_overrides(base[key], value, dotted_path=child_path)
+        return merged
+    if isinstance(base, list):
+        if not isinstance(overrides, list):
+            raise TypeError(f"Runtime override for {dotted_path} must be a list")
+        return list(overrides)
+    raise ValueError(
+        f"Runtime override for undocumented scalar {dotted_path} is not supported"
+    )
+
+
+def _validate_override_value(base: Any, override: Any, *, dotted_path: str) -> None:
+    if isinstance(base, bool):
+        valid = isinstance(override, bool)
+    elif isinstance(base, int):
+        valid = isinstance(override, int) and not isinstance(override, bool)
+    elif isinstance(base, float):
+        valid = isinstance(override, int | float) and not isinstance(override, bool)
+    else:
+        valid = isinstance(override, type(base))
+    if not valid:
+        raise TypeError(
+            f"Runtime override for {dotted_path} must match {type(base).__name__}, "
+            f"got {type(override).__name__}"
+        )
+
+
+@lru_cache(maxsize=8)
+def _load_runtime_config(path_text: str, overrides_path_text: str = "") -> dict[str, Any]:
+    path = Path(path_text)
+    payload = _read_mapping(path, label="Runtime configuration")
+    if not overrides_path_text:
+        return payload
+    overrides_path = Path(overrides_path_text)
+    overrides = _read_mapping(overrides_path, label="Runtime overrides")
+    return _merge_runtime_overrides(payload, overrides)
+
+
 def runtime_config() -> dict[str, Any]:
-    return _load_runtime_config(str(runtime_config_path()))
+    overrides_path = runtime_overrides_path()
+    return _load_runtime_config(
+        str(runtime_config_path()),
+        str(overrides_path) if overrides_path is not None else "",
+    )
 
 
 def runtime_value(dotted_path: str) -> Any:

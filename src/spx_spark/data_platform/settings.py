@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from spx_spark.config import env_bool, env_int, env_str, load_dotenv
-from spx_spark.runtime_config import runtime_value
+from spx_spark.settings import settings_value
 
 
 @dataclass(frozen=True)
@@ -35,11 +35,11 @@ class DataPlatformSettings:
         data_root = (
             env_str("MARKET_DATA_DATA_ROOT")
             or env_str("MAINTENANCE_DATA_ROOT")
-            or str(runtime_value("maintenance.data_root"))
+            or str(settings_value("maintenance.data_root"))
         ).rstrip("/")
         return cls(
             enabled=env_bool(
-                "DATA_PLATFORM_ENABLED", bool(runtime_value("data_platform.enabled"))
+                "DATA_PLATFORM_ENABLED", bool(settings_value("data_platform.enabled"))
             ),
             data_root=data_root,
             ledger_path=(
@@ -52,32 +52,32 @@ class DataPlatformSettings:
             ),
             fallback_spool_max_bytes=env_int(
                 "DATA_PLATFORM_FALLBACK_SPOOL_MAX_BYTES",
-                int(runtime_value("data_platform.fallback_spool_max_bytes")),
+                int(settings_value("data_platform.fallback_spool_max_bytes")),
             ),
             lake_root=f"{data_root}/lake",
             manifest_root=f"{data_root}/manifests",
             research_catalog_path=f"{data_root}/analytics/research.duckdb",
             sqlite_busy_timeout_ms=env_int(
                 "DATA_PLATFORM_SQLITE_BUSY_TIMEOUT_MS",
-                int(runtime_value("data_platform.sqlite_busy_timeout_ms")),
+                int(settings_value("data_platform.sqlite_busy_timeout_ms")),
             ),
             compaction_min_age_seconds=env_int(
                 "DATA_PLATFORM_COMPACTION_MIN_AGE_SECONDS",
-                int(runtime_value("data_platform.compaction_min_age_seconds")),
+                int(settings_value("data_platform.compaction_min_age_seconds")),
             ),
             raw_delete_enabled=env_bool(
                 "DATA_PLATFORM_RAW_DELETE_ENABLED",
-                bool(runtime_value("data_platform.raw_delete_enabled")),
+                bool(settings_value("data_platform.raw_delete_enabled")),
             ),
             raw_delete_grace_hours=env_int(
                 "DATA_PLATFORM_RAW_DELETE_GRACE_HOURS",
-                int(runtime_value("data_platform.raw_delete_grace_hours")),
+                int(settings_value("data_platform.raw_delete_grace_hours")),
             ),
             writer_version=env_str(
                 "DATA_PLATFORM_WRITER_VERSION",
-                str(runtime_value("data_platform.writer_version")),
+                str(settings_value("data_platform.writer_version")),
             )
-            or str(runtime_value("data_platform.writer_version")),
+            or str(settings_value("data_platform.writer_version")),
         )
 
     def __post_init__(self) -> None:

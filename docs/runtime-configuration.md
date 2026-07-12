@@ -1,11 +1,26 @@
 # Runtime configuration
 
 Operational runtime defaults live in `config/runtime.yaml`; Python code loads
-them through `spx_spark.runtime_config`. Secrets remain in `.env`.
+them through `spx_spark.runtime_config` and, for new composition roots, through
+typed `spx_spark.settings.load_settings()` (`AppSettings`). Secrets remain in
+`.env` and are never loaded during unit tests (`SPX_SPARK_DISABLE_DOTENV=1` plus
+`tests/fixtures/runtime.defaults.yaml`).
 
 Each mutable value is represented as a `value` plus a human-readable
 `description`. Numeric settings therefore carry their unit and purpose beside
 the number instead of appearing as unexplained literals in collector code.
+
+## Test isolation
+
+Unit tests pin `SPX_SPARK_RUNTIME_CONFIG` to `tests/fixtures/runtime.defaults.yaml`
+and disable `.env` loading plus `config/runtime.local.yaml` overlays
+(`SPX_SPARK_DISABLE_DOTENV=1`, `SPX_SPARK_DISABLE_RUNTIME_OVERRIDES=1`). Deployment
+edits to the workspace `.env`, local overrides, or live `config/runtime.yaml` must
+not change unit-test outcomes. When product defaults change intentionally, update
+both `config/runtime.yaml` and the frozen fixture.
+
+Machine-local deployment values belong in `config/runtime.local.yaml` (gitignored;
+see `config/runtime.local.yaml.example`), not in the tracked defaults file.
 
 ## Scope
 
@@ -87,10 +102,22 @@ whole blind interval look newly observed.
 
 ## Override order
 
-1. Environment variables and `.env` values override a runtime default.
-2. `SPX_SPARK_RUNTIME_CONFIG` may point to another YAML file.
-3. Otherwise the repository `config/runtime.yaml` is loaded.
+1. The repository `config/runtime.yaml` supplies tracked defaults.
+2. `SPX_SPARK_RUNTIME_CONFIG` may select another complete base YAML file.
+3. An optional `config/runtime.local.yaml` overlays machine-specific values.
+   The file is ignored by git. `SPX_SPARK_RUNTIME_OVERRIDES` may point to a
+   different override file.
+4. Environment variables and `.env` values override the merged YAML values.
 
+Override files contain only existing paths and `value` leaves; descriptions
+remain in the tracked base file. Unknown paths, missing explicit files, and
+attempts to replace descriptions fail at startup. Example:
+
+```yaml
+steven:
+  enabled:
+    value: true
+```
 Production uses `schwab,ibkr,...` provider priority. Freshness and quality are
 still evaluated before provider preference, so missing or stale Schwab data
 falls back to usable IBKR data.

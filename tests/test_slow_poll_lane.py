@@ -1,9 +1,12 @@
+
 from __future__ import annotations
+
+from stream_test_helpers import patch_stream
 
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 
-import spx_spark.ibkr.stream_collector as stream_collector_module
+import spx_spark.ibkr.stream.deps as stream_collector_module
 from spx_spark.config import (
     DEFAULT_SLOW_POLL_LABELS,
     IbkrSettings,
@@ -216,9 +219,9 @@ def test_slow_poll_is_cooperative_and_eventually_covers_all_chunks(monkeypatch) 
     ) -> None:
         cancel_calls.append(subscriptions)
 
-    monkeypatch.setattr(stream_collector_module, "qualify_and_subscribe", fake_qualify_and_subscribe)
-    monkeypatch.setattr(stream_collector_module, "snapshot_rows", fake_snapshot_rows)
-    monkeypatch.setattr(stream_collector_module, "cancel_subscriptions", fake_cancel_subscriptions)
+    patch_stream(monkeypatch, "qualify_and_subscribe", fake_qualify_and_subscribe)
+    patch_stream(monkeypatch, "snapshot_rows", fake_snapshot_rows)
+    patch_stream(monkeypatch, "cancel_subscriptions", fake_cancel_subscriptions)
 
     collector.slow_chunks = chunked(slow_contracts, 3)
     collector.slow_scheduler = SlowPollScheduler(
@@ -264,10 +267,7 @@ def test_slow_poll_hold_starts_after_qualification_completes(monkeypatch) -> Non
 
     collector._resolve_slow_definitions = resolve_after_five_seconds
     monkeypatch.setattr(stream_collector_module.time, "monotonic", lambda: clock["now"])
-    monkeypatch.setattr(
-        stream_collector_module,
-        "qualify_and_subscribe",
-        lambda ib, contracts, **kwargs: {
+    patch_stream(monkeypatch, "qualify_and_subscribe", lambda ib, contracts, **kwargs: {
             "index:VIX": (
                 SimpleNamespace(contract=contracts[0][2]),
                 VerifyRow(
@@ -279,7 +279,7 @@ def test_slow_poll_hold_starts_after_qualification_completes(monkeypatch) -> Non
             )
         },
     )
-    monkeypatch.setattr(stream_collector_module, "log_event", lambda *args: None)
+    patch_stream(monkeypatch, "log_event", lambda *args: None)
 
     collector.advance_slow_poll()
 
@@ -346,15 +346,12 @@ def test_slow_contract_qualification_is_reused_within_session(monkeypatch) -> No
             )
         }
 
-    monkeypatch.setattr(stream_collector_module, "qualify_and_subscribe", fake_qualify_and_subscribe)
-    monkeypatch.setattr(
-        stream_collector_module,
-        "snapshot_rows",
-        lambda subscriptions, stale_after_seconds, **kwargs: [
+    patch_stream(monkeypatch, "qualify_and_subscribe", fake_qualify_and_subscribe)
+    patch_stream(monkeypatch, "snapshot_rows", lambda subscriptions, stale_after_seconds, **kwargs: [
             row for _, row in subscriptions.values()
         ],
     )
-    monkeypatch.setattr(stream_collector_module, "cancel_subscriptions", lambda *args: None)
+    patch_stream(monkeypatch, "cancel_subscriptions", lambda *args: None)
     collector.slow_chunks = [slow_contracts]
     collector.slow_scheduler = SlowPollScheduler(
         chunk_count=1,
@@ -491,8 +488,8 @@ def test_slow_async_rejection_retries_chunk_without_reconnecting_hot_lane(
     def fake_cancel(ib, subscriptions):
         canceled.append(set(subscriptions))
 
-    monkeypatch.setattr(stream_collector_module, "qualify_and_subscribe", fake_qualify)
-    monkeypatch.setattr(stream_collector_module, "cancel_subscriptions", fake_cancel)
+    patch_stream(monkeypatch, "qualify_and_subscribe", fake_qualify)
+    patch_stream(monkeypatch, "cancel_subscriptions", fake_cancel)
     collector.slow_chunks = [slow_contracts]
     collector.slow_qualified_contracts = {
         "index:VIX": ("index:VIX", "index", contract)
@@ -539,12 +536,9 @@ def test_slow_early_security_definition_rejection_invalidates_contract(
             )
         }
 
-    monkeypatch.setattr(
-        stream_collector_module,
-        "qualify_and_subscribe",
-        reject_during_subscribe,
+    patch_stream(monkeypatch, "qualify_and_subscribe", reject_during_subscribe,
     )
-    monkeypatch.setattr(stream_collector_module, "cancel_subscriptions", lambda *args: True)
+    patch_stream(monkeypatch, "cancel_subscriptions", lambda *args: True)
     collector.slow_chunks = [slow_contracts]
     collector.slow_qualified_contracts = {
         "index:VIX": ("index:VIX", "index", contract)
@@ -570,10 +564,7 @@ def test_unresolvable_slow_label_does_not_starve_later_chunks(monkeypatch) -> No
     good = ("index:VIX", "index", good_contract)
     collector = make_stream_collector(slow_contracts=[bad, good], slow_poll_chunk_size=1)
 
-    monkeypatch.setattr(
-        stream_collector_module,
-        "qualify_and_subscribe",
-        lambda ib, contracts, qualify=False: {
+    patch_stream(monkeypatch, "qualify_and_subscribe", lambda ib, contracts, qualify=False: {
             label: (
                 SimpleNamespace(contract=contract),
                 VerifyRow(label=label, kind=kind, symbol=label, subscribed=True),
@@ -581,14 +572,11 @@ def test_unresolvable_slow_label_does_not_starve_later_chunks(monkeypatch) -> No
             for label, kind, contract in contracts
         },
     )
-    monkeypatch.setattr(
-        stream_collector_module,
-        "snapshot_rows",
-        lambda subscriptions, stale_after_seconds, **kwargs: [
+    patch_stream(monkeypatch, "snapshot_rows", lambda subscriptions, stale_after_seconds, **kwargs: [
             row for _, row in subscriptions.values()
         ],
     )
-    monkeypatch.setattr(stream_collector_module, "cancel_subscriptions", lambda *args: None)
+    patch_stream(monkeypatch, "cancel_subscriptions", lambda *args: None)
     collector.slow_chunks = [[bad], [good]]
     collector.slow_qualified_contracts = {"index:VIX": good}
     collector.slow_scheduler = SlowPollScheduler(

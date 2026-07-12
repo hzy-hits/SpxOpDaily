@@ -18,7 +18,7 @@ from typing import Any
 
 from spx_spark.features.bar_builder import SpxBar, bar_hold, bar_to_dict
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR, ET, MarketCalendar
-from spx_spark.runtime_config import runtime_value
+from spx_spark.settings import settings_value
 
 FORWARD_METRICS_DISCLAIMER = (
     "Results validate only house _proxy metrics / observe_only guidance; "
@@ -43,7 +43,7 @@ class StevenValidationSettings:
     def from_env(cls) -> StevenValidationSettings:
         try:
             distance = float(
-                runtime_value("steven.forward_max_horizon_sample_distance_seconds")
+                settings_value("steven.forward_max_horizon_sample_distance_seconds")
             )
         except Exception:
             distance = _DEFAULT_MAX_SAMPLE_DISTANCE_SECONDS

@@ -37,6 +37,9 @@ def make_settings(**overrides) -> ServiceLoopSettings:
         "ibkr_connect_retry_seconds": 300,
         "ibkr_conflict_probe_seconds": 300,
         "schwab_chains_enabled": True,
+        "steven_enabled": False,
+        "realtime_engine_enabled": True,
+        "realtime_engine_interval_seconds": 15,
     }
     values.update(overrides)
     return ServiceLoopSettings(**values)
@@ -49,6 +52,7 @@ def test_service_loop_defaults_do_not_enable_ibkr() -> None:
     assert names == [
         "provider_failover",
         "intraday_shock",
+        "realtime_engine",
         "hyperliquid",
         "iv_surface",
         "alert_engine",
@@ -74,6 +78,7 @@ def test_service_loop_can_enable_ibkr_explicitly() -> None:
     assert [task.name for task in tasks] == [
         "provider_failover",
         "intraday_shock",
+        "realtime_engine",
         "hyperliquid",
         "ibkr",
         "iv_surface",
@@ -88,6 +93,7 @@ def test_service_loop_can_enable_polymarket_explicitly() -> None:
     assert [task.name for task in tasks] == [
         "provider_failover",
         "intraday_shock",
+        "realtime_engine",
         "hyperliquid",
         "polymarket",
         "iv_surface",
@@ -102,6 +108,7 @@ def test_service_loop_can_enable_periodic_greek_shadow_explicitly() -> None:
     assert [task.name for task in tasks] == [
         "provider_failover",
         "intraday_shock",
+        "realtime_engine",
         "hyperliquid",
         "iv_surface",
         "alert_engine",
@@ -122,6 +129,7 @@ def test_run_once_keeps_running_tasks_and_reports_failure() -> None:
             intraday_shock_enabled=False,
             alert_enabled=False,
             schwab_chains_enabled=False,
+            realtime_engine_enabled=False,
         )
     )
     tasks.append(ServiceTask("noop", 1, lambda: calls.append("ok") or 0))

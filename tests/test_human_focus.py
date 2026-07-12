@@ -248,6 +248,7 @@ def test_human_context_marks_disabled_position_tracking_as_no_account_visibility
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("IBKR_POSITIONS_ENABLED", "false")
+    monkeypatch.setenv("IBKR_BROKER_ACCOUNT_READ_ENABLED", "false")
     now = datetime(2026, 7, 6, 14, 0, tzinfo=timezone.utc)
     state = LatestState(created_at=now, as_of=now, quotes=(), best_quotes=())
 

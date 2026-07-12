@@ -1,0 +1,121 @@
+{
+  "artifact": "long-term-goal-inventory",
+  "generated_at": "2026-07-11T15:52:50.828405Z",
+  "summary": "Non-gated architecture cleanup reached a clean stop. Phases 0–6 and structural package splits are DONE. Remaining work is gated on live RTH evidence or explicit product decisions (shock outbox).",
+  "phases": {
+    "0": "GO",
+    "1": "PARTIAL",
+    "2": "GO",
+    "3": "GO",
+    "4": "GO",
+    "5": "GO",
+    "6": "GO",
+    "7_uds": "NO-GO",
+    "8_rust": "NO-GO",
+    "p1_consistency": {
+      "P1-A": "GO",
+      "P1-B": "GO",
+      "P1-C": "PARTIAL"
+    }
+  },
+  "p1_consistency_note": "Phase 5 inventory GO previously assumed PassthroughAnalytics wiring was acceptable; P1-A/B override that. See artifacts/refactor-acceptance/p1-consistency/report.json.",
+  "done": [
+    {
+      "item": "Phases 0–6 acceptance gates",
+      "notes": "RealtimeEngine, outbox, projection boundary, alert wiring, structural extractions"
+    },
+    {
+      "item": "options_map package + facade ≤150",
+      "notes": "analytics.options kernels + options_map orchestration/CLI"
+    },
+    {
+      "item": "order_map → application/order_map",
+      "notes": "facade 14 lines; SignalMode unified with domain + call_bias annotation"
+    },
+    {
+      "item": "alert_engine package",
+      "notes": "constants/rules_*/evaluator/cli; public imports stable"
+    },
+    {
+      "item": "service_loop → application/runtime",
+      "notes": "settings/registry/runner/scheduler + facade"
+    },
+    {
+      "item": "intraday_shock → application/shock (§8.12)",
+      "notes": "models/machine/evaluator/delivery/service; facade 14 lines; shock_direct_delivery_enabled retained"
+    },
+    {
+      "item": "morning_map → application/morning_map",
+      "notes": "build/render/delivery/state/service; facade 14 lines"
+    },
+    {
+      "item": "DensityQuality Enum + partial DensityDiagnostics (§9.1)",
+      "notes": "Wire labels preserved (ok/…); READY/BLOCKED_* aliases; full §9.2 thresholds deferred"
+    },
+    {
+      "item": "build_spy_confluence storage decoupling",
+      "notes": "analytics levels take Quote sequences; no storage import"
+    },
+    {
+      "item": "module-architecture.md + LAYERS sync",
+      "notes": "Root module-architecture.md rewritten to match application/analytics/ibkr/stream layout"
+    },
+    {
+      "item": "Notification dual-path flags",
+      "notes": "outbox evaluation/delivery on; alert_engine direct off; shock direct on"
+    }
+  ],
+  "blocked": [
+    {
+      "item": "Phase 7 Unix stream socket (§10.2)",
+      "decision": "NO-GO",
+      "blocker": "No continuous RTH metrics for provider→engine p95 / projection size / parse/lock waits",
+      "next": "Instrument production telemetry across ≥5 RTH sessions; re-open only if a threshold is met"
+    },
+    {
+      "item": "Phase 8 Rust analytics kernel (§11)",
+      "decision": "NO-GO",
+      "blocker": "No production-scale p50/p95/p99 benchmarks or profiler evidence of numeric deadline miss",
+      "next": "Establish analytics benchmarks; consider NumPy first; Rust only if §11.2 simultaneous"
+    },
+    {
+      "item": "RTH density golden / 5-day shadow (§9.2)",
+      "decision": "NO-GO",
+      "blocker": "No live RTH session corpus in this environment",
+      "next": "Collect shadow sessions; calibrate usable-strikes/coverage/gap/age thresholds; then migrate wire vocabulary if desired"
+    },
+    {
+      "item": "shock → outbox ALERT_CANDIDATE",
+      "decision": "DEFERRED",
+      "blocker": "Intentional latency fast path via shock_direct_delivery_enabled",
+      "next": "Product decision only after shock events are durable outbox candidates without adding notify latency"
+    }
+  ],
+  "next_real": [
+    "GATED: gather RTH telemetry for Phase 7 §10.2",
+    "GATED: gather analytics benchmarks for Phase 8 §11",
+    "GATED: RTH §9.2 density shadow calibration",
+    "OPTIONAL PRODUCT: migrate shock delivery onto outbox once durable candidates exist"
+  ],
+  "verify": {
+    "pytest_passed": 1027,
+    "ruff": "pass",
+    "architecture": "pass"
+  },
+  "facade_sizes": {
+    "options_map/__init__.py": 36,
+    "order_map.py": 14,
+    "intraday_shock.py": 14,
+    "morning_map.py": 14,
+    "ibkr/stream_collector.py": 18,
+    "service_loop.py": 134,
+    "alert_engine/__init__.py": 171
+  },
+  "flags": {
+    "outbox_alert_evaluation_enabled": true,
+    "outbox_delivery_enabled": true,
+    "direct_delivery_enabled": false,
+    "shock_direct_delivery_enabled": true,
+    "notification.enabled": false
+  }
+}

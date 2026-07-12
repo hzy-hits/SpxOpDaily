@@ -14,7 +14,6 @@ from spx_spark.options_map import (
     OptionCoverage,
     build_spy_confluence,
 )
-from spx_spark.storage import LatestState
 
 
 def default_coverage(*, total: int = 4) -> OptionCoverage:
@@ -68,9 +67,7 @@ def make_spy_option(
 
 
 def test_confluence_missing_spy_chain() -> None:
-    now = datetime(2026, 7, 6, 14, 0, tzinfo=timezone.utc)
-    state = LatestState(created_at=now, as_of=now, quotes=(), best_quotes=())
-    result = build_spy_confluence(state, None)
+    result = build_spy_confluence((), None)
     assert result.quality == "missing_spy_chain"
 
 
@@ -104,7 +101,6 @@ def test_confluence_detects_confluent_call_wall() -> None:
         make_spy_option(strike=748, right="P", gamma=0.004, open_interest=2000, now=now),
         make_spy_option(strike=748, right="C", gamma=0.002, open_interest=500, now=now),
     )
-    state = LatestState(created_at=now, as_of=now, quotes=quotes, best_quotes=quotes)
     front_spxw = ExpiryOptionsMap(
         expiry="20260706",
         option_count=10,
@@ -135,7 +131,12 @@ def test_confluence_detects_confluent_call_wall() -> None:
         top_gex_strikes=(),
         warnings=(),
     )
-    result = build_spy_confluence(state, front_spxw)
+    result = build_spy_confluence(
+        quotes,
+        front_spxw,
+        spy_underlier=750.0,
+        spx_underlier=7500.0,
+    )
     assert result.spy_call_wall_spx == 7550.0
     assert result.call_wall_confluent is True
 
@@ -158,6 +159,5 @@ def test_confluence_maps_strikes_times_ten() -> None:
         make_spy_option(strike=748, right="P", gamma=0.004, open_interest=5000, now=now),
         make_spy_option(strike=748, right="C", gamma=0.002, open_interest=500, now=now),
     )
-    state = LatestState(created_at=now, as_of=now, quotes=quotes, best_quotes=quotes)
-    result = build_spy_confluence(state, None)
+    result = build_spy_confluence(quotes, None, spy_underlier=750.0)
     assert result.spy_put_wall_spx == 7480.0

@@ -1,0 +1,90 @@
+{
+  "phase": "phase4",
+  "generated_at": "2026-07-11T15:07:11.482356+00:00",
+  "git_commit": "fb3b50961a1ce33ef996e6b1765d783823b828e3",
+  "python": "3.12.3 (main, Jun 19 2026, 12:46:00) [GCC 13.3.0]",
+  "checks": {
+    "pytest": {
+      "command": [
+        "uv",
+        "run",
+        "pytest",
+        "-q"
+      ],
+      "returncode": 0,
+      "stdout_tail": "........................................................................ [  7%]\n........................................................................ [ 14%]\n........................................................................ [ 21%]\n........................................................................ [ 29%]\n........................................................................ [ 36%]\n........................................................................ [ 43%]\n........................................................................ [ 51%]\n........................................................................ [ 58%]\n........................................................................ [ 65%]\n........................................................................ [ 73%]\n........................................................................ [ 80%]\n........................................................................ [ 87%]\n........................................................................ [ 95%]\n...............................................                          [100%]\n=============================== warnings summary ===============================\n.venv/lib/python3.12/site-packages/websockets/legacy/__init__.py:6\n  /home/ubuntu/spx-spark/.venv/lib/python3.12/site-packages/websockets/legacy/__init__.py:6: DeprecationWarning: websockets.legacy is deprecated; see https://websockets.readthedocs.io/en/stable/howto/upgrade.html for upgrade instructions\n    warnings.warn(  # deprecated in 14.0 - 2024-11-09\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n983 passed, 1 warning in 18.74s\n",
+      "stderr_tail": ""
+    },
+    "ruff": {
+      "command": [
+        "uv",
+        "run",
+        "ruff",
+        "check",
+        "src",
+        "tests"
+      ],
+      "returncode": 0,
+      "stdout_tail": "\u001b[1;32mAll checks passed!\u001b[0m\n",
+      "stderr_tail": ""
+    },
+    "architecture": {
+      "command": [
+        "uv",
+        "run",
+        "pytest",
+        "-q",
+        "tests/architecture"
+      ],
+      "returncode": 0,
+      "stdout_tail": "...................                                                      [100%]\n19 passed in 3.03s\n",
+      "stderr_tail": ""
+    }
+  },
+  "decision": "GO",
+  "open_risks": [],
+  "landed": [
+    "ibkr/stream package: models/runtime_machine/replan_machine/contracts/cache/flush/session/subscriptions ops/collector/supervisor/cli/deps",
+    "stream_collector.py facade = 18 lines (target <=100)",
+    "largest stream module = option_subscription_ops.py (593 lines)",
+    "table-driven decide_after_flush / reconnect backoff / connect failure classification",
+    "100 reconnect cycles single-owner + no subscription leak test",
+    "pytest green; ruff green; architecture green"
+  ],
+  "module_line_counts": {
+    "stream_collector.py": 18,
+    "option_subscription_ops.py": 593,
+    "subscriptions.py": 9,
+    "runtime_machine.py": 90,
+    "contracts.py": 200,
+    "replan_machine.py": 84,
+    "flush.py": 24,
+    "session.py": 39,
+    "spy_rotation_ops.py": 189,
+    "models.py": 89,
+    "session_ops.py": 224,
+    "flush_ops.py": 172,
+    "supervisor.py": 305,
+    "__init__.py": 109,
+    "slow_poll_ops.py": 340,
+    "cache.py": 59,
+    "cli.py": 110,
+    "collector.py": 115,
+    "deps.py": 122
+  },
+  "gates": {
+    "stream_collector_facade_le_100": true,
+    "reconnect_conflict_policy_backoff_table_tests": true,
+    "hundred_reconnect_no_leak_single_owner": true,
+    "full_pytest_green": true,
+    "ruff_green": true,
+    "architecture_green": true
+  },
+  "remaining": [
+    "Schwab single token owner contract already exists; keep monitoring",
+    "Phase 5 RealtimeEngine not started",
+    "optional backlog: options_map facade, SignalMode play wiring, RTH golden"
+  ],
+  "updated_at": "2026-07-11T15:07:11.519145+00:00",
+  "gates_unmet": []
+}

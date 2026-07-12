@@ -21,7 +21,7 @@ from spx_spark.sampling import (
     build_sampling_plan,
     plan_summary,
 )
-from spx_spark.storage import JsonlQuoteWriter, LatestStateStore
+from spx_spark.storage import JsonlQuoteWriter, LatestMarketProjectionStore
 
 
 def make_two_sided_quote(
@@ -233,7 +233,7 @@ def run(argv: list[str] | None = None) -> int:
     storage_settings = StorageSettings.from_env()
     mode = args.mode or sampling_settings.default_mode
     writer = JsonlQuoteWriter(storage_settings)
-    latest_store = LatestStateStore(storage_settings)
+    latest_store = LatestMarketProjectionStore(storage_settings)
 
     raw_path_counts: dict[str, int] = {}
     latest_result = None

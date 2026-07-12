@@ -1,0 +1,76 @@
+{
+  "artifact": "p1-consistency",
+  "generated_at": "2026-07-12T02:25:21Z",
+  "decision": {
+    "P1-A": "GO",
+    "P1-B": "GO",
+    "P1-C": "PARTIAL"
+  },
+  "summary": "P1-C folded config.py factories and remaining high-debt modules onto settings_value/settings_csv (AppSettings.raw via current_app_settings). Residual runtime_value budget cut 312 → 1 (only runtime_config.runtime_csv → runtime_value).",
+  "landed": {
+    "P1-A": [
+      "domain.AnalyticsStatus + AnalyticsResult.status / analytics_ok",
+      "OptionsAnalyticsKernel production default",
+      "PassthroughAnalytics shadow-only"
+    ],
+    "P1-B": [
+      "STARTING/WARMING + fail-closed readiness",
+      "critical-task warm gate before READY",
+      "front-chain structural freshness"
+    ],
+    "P1-C": [
+      "import-time runtime_value: 0",
+      "settings_value / settings_csv / current_app_settings / clear_settings_cache",
+      "config.py from_env factories — 181→0 runtime_value (via settings_value)",
+      "strategy/steven.py — 27→0",
+      "post_close_review.py — 22→0",
+      "position_alerts.py — 14→0",
+      "provider_failover_controller.py — 13→0",
+      "intraday_strategy.py / market_context.py — 11→0 each",
+      "data_platform/settings.py, notifier/llm_writer.py, schwab/*, remaining 1-call sites — 0",
+      "L0 isolation: settings/loader mirrors runtime path discovery (no runtime_config import)"
+    ]
+  },
+  "verify": {
+    "pytest_passed": 1041,
+    "ruff": "pass",
+    "architecture": "23 passed"
+  },
+  "runtime_value_budget_total": 1,
+  "runtime_value_budget_delta": -311,
+  "runtime_value_budget_previous": 312,
+  "runtime_value_budget_by_file": {
+    "runtime_config.py": 1
+  },
+  "zeroed_this_round": [
+    "config.py",
+    "strategy/steven.py",
+    "post_close_review.py",
+    "position_alerts.py",
+    "provider_failover_controller.py",
+    "intraday_strategy.py",
+    "market_context.py",
+    "data_platform/settings.py",
+    "notifier/llm_writer.py",
+    "schwab/gateway.py",
+    "schwab/symbols.py",
+    "intraday_event_outcomes.py",
+    "features/exposure_map.py",
+    "ibkr/stream/session_ops.py",
+    "steven_validation.py",
+    "strategy/steven_replay.py"
+  ],
+  "injected": {
+    "RuntimePolicy": "settings.runtime.RuntimeSettingsSlice → ServiceLoopSettings.from_app_settings",
+    "AlertPolicy": "settings.alerts.AlertSettings → alert_engine CLI/evaluator + rules defaults",
+    "ShockPolicy": "settings.shock.ShockSettings → IntradayShockSettings.from_policy",
+    "ProviderPolicy": "SchwabSettingsSlice.collection_* + IbkrSettingsSlice.execution_mode via AppSettings",
+    "FactoryDefaults": "settings_value/settings_csv ← AppSettings.raw (cached current_app_settings)"
+  },
+  "next_debt": [
+    "Replace settings_value reads with typed AppSettings slices on composition roots (config.from_env still env+YAML hybrid)",
+    "Optional: retire runtime_value public API once callers are gone (runtime_csv still uses it)",
+    "Expand typed policies for Steven / review / position alerts / failover"
+  ],
+  "reconcile_note": "P1-A/B remain GO. P1-C still PARTIAL: call-site debt cleared except runtime_config internals; typed policy injection for remaining domains is next."
+}

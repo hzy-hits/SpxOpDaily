@@ -330,7 +330,7 @@ def run_candidate_retry(
     attempts: int = 3,
     delay_seconds: float = 10.0,
 ) -> tuple[dict, list[datetime], list[float]]:
-    import spx_spark.order_map as order_map_module
+    import spx_spark.application.order_map.service as order_map_module
 
     loaded_at: list[datetime] = []
     sleeps: list[float] = []
@@ -1372,7 +1372,7 @@ def test_spy_is_not_a_standalone_executable_pricing_anchor() -> None:
 def test_hl_only_order_payload_is_valid_research_without_executable_aliases(
     monkeypatch,
 ) -> None:
-    import spx_spark.order_map as order_map_module
+    import spx_spark.application.order_map.service as order_map_module
     from spx_spark.marketdata import InstrumentType
 
     now = datetime(2026, 7, 7, 6, 0, tzinfo=timezone.utc)
@@ -1430,7 +1430,7 @@ def test_missing_all_references_still_fails_closed_as_research_only() -> None:
 def test_research_observed_quotes_apply_freshness_and_label_stale_rows(
     monkeypatch,
 ) -> None:
-    import spx_spark.order_map as order_map_module
+    import spx_spark.application.order_map.service as order_map_module
     from spx_spark.marketdata import InstrumentType
 
     now = datetime(2026, 7, 7, 6, 0, tzinfo=timezone.utc)
@@ -1475,7 +1475,7 @@ def test_research_observed_quotes_apply_freshness_and_label_stale_rows(
 
 
 def test_research_status_uses_deterministic_ops_delivery(monkeypatch, tmp_path) -> None:
-    import spx_spark.order_map as order_map_module
+    import spx_spark.application.order_map.service as order_map_module
 
     payload = {
         "research_only": True,
@@ -1541,7 +1541,7 @@ def test_force_cannot_bypass_research_only_direct_map_gate(
     tmp_path,
     capsys,
 ) -> None:
-    import spx_spark.order_map as order_map_module
+    import spx_spark.application.order_map.service as order_map_module
 
     payload = {
         "research_only": True,
@@ -1626,7 +1626,7 @@ def test_persistence_uses_private_audit_reference_not_writer_payload(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    import spx_spark.order_map as order_map_module
+    import spx_spark.application.order_map.service as order_map_module
 
     captured: dict[str, object] = {}
 

@@ -14,7 +14,7 @@ from spx_spark.marketdata import (
     Quote,
     as_utc,
 )
-from spx_spark.storage import JsonlQuoteWriter, LatestStateStore
+from spx_spark.storage import JsonlQuoteWriter, LatestMarketProjectionStore
 
 
 class MarketDataAdapter(Protocol):
@@ -186,7 +186,7 @@ def persist_provider_snapshot(
     replace_providers = (
         (snapshot.provider,) if snapshot.metadata.get("replace_provider_quotes") is True else ()
     )
-    latest_result = LatestStateStore(storage_settings).update(
+    latest_result = LatestMarketProjectionStore(storage_settings).update(
         snapshot.quotes,
         now=snapshot.received_at,
         provider_states=snapshot.provider_states,

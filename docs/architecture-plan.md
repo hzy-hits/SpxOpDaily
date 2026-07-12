@@ -1,5 +1,11 @@
 # SPX Spark Architecture Plan
 
+> 文档状态：历史产品/数据源规划。当前强制分层以 `module-architecture.md` 为准，
+> 首个 RTH 前的重构执行顺序以
+> `docs/pre-rth-refactor-implementation-plan.md` 为准，完整验收以
+> `docs/refactor-architecture-acceptance-plan.md` 为准。本文未同步的模块名或运行判断
+> 不得覆盖上述三份文档。
+
 ## Goal
 
 Build a near-real-time SPX/SPXW 0DTE dashboard and alert system. The first version is observational only: no automatic order placement and no direct trade recommendations.

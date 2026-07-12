@@ -17,12 +17,11 @@ from spx_spark.marketdata import (
     parse_timestamp,
 )
 from spx_spark.provider_adapter import ProviderSnapshot
-from spx_spark.runtime_config import runtime_value
 from spx_spark.schwab.adapter import instrument_from_schwab_symbol
 
 
 SUPPORTED_LEVEL_ONE_SERVICES = frozenset({"LEVELONE_EQUITIES", "LEVELONE_FUTURES"})
-DEFAULT_STREAM_STALE_SECONDS = float(runtime_value("market_data.latest_stale_after_seconds"))
+DEFAULT_STREAM_STALE_SECONDS = 15
 
 
 class SchwabStreamQuoteAssembler:

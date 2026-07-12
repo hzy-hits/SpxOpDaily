@@ -15,7 +15,7 @@ from typing import Mapping, Protocol
 from spx_spark.config import env_float, env_int
 from spx_spark.marketdata import MarketDataQuality, OptionRight, Provider, as_utc
 from spx_spark.options_map import OptionsMap, is_spxw_option
-from spx_spark.runtime_config import runtime_value
+from spx_spark.settings import settings_value
 from spx_spark.storage import LatestState
 
 
@@ -62,47 +62,47 @@ class IntradayStrategySettings:
         return cls(
             level_buffer_points=env_float(
                 "ALERT_INTRADAY_CALL_LEVEL_BUFFER_POINTS",
-                float(runtime_value("intraday_strategy.level_buffer_points")),
+                float(settings_value("intraday_strategy.level_buffer_points")),
             ),
             confirm_samples=env_int(
                 "ALERT_INTRADAY_CALL_CONFIRM_SAMPLES",
-                int(runtime_value("intraday_strategy.confirm_samples")),
+                int(settings_value("intraday_strategy.confirm_samples")),
             ),
             confirm_window_seconds=env_int(
                 "ALERT_INTRADAY_CALL_CONFIRM_WINDOW_SECONDS",
-                int(runtime_value("intraday_strategy.confirm_window_seconds")),
+                int(settings_value("intraday_strategy.confirm_window_seconds")),
             ),
             source_event_ttl_seconds=env_int(
                 "ALERT_INTRADAY_CALL_SOURCE_TTL_SECONDS",
-                int(runtime_value("intraday_strategy.source_event_ttl_seconds")),
+                int(settings_value("intraday_strategy.source_event_ttl_seconds")),
             ),
             bias_ttl_seconds=env_int(
                 "ALERT_INTRADAY_CALL_BIAS_TTL_SECONDS",
-                int(runtime_value("intraday_strategy.bias_ttl_seconds")),
+                int(settings_value("intraday_strategy.bias_ttl_seconds")),
             ),
             cooldown_seconds=env_int(
                 "ALERT_INTRADAY_CALL_COOLDOWN_SECONDS",
-                int(runtime_value("intraday_strategy.cooldown_seconds")),
+                int(settings_value("intraday_strategy.cooldown_seconds")),
             ),
             structure_grace_seconds=env_int(
                 "ALERT_INTRADAY_CALL_STRUCTURE_GRACE_SECONDS",
-                int(runtime_value("intraday_strategy.structure_grace_seconds")),
+                int(settings_value("intraday_strategy.structure_grace_seconds")),
             ),
             retry_seconds=env_int(
                 "ALERT_INTRADAY_CALL_RETRY_SECONDS",
-                int(runtime_value("intraday_strategy.retry_seconds")),
+                int(settings_value("intraday_strategy.retry_seconds")),
             ),
             level_drift_tolerance_points=env_float(
                 "ALERT_INTRADAY_CALL_LEVEL_DRIFT_TOLERANCE_POINTS",
-                float(runtime_value("intraday_strategy.level_drift_tolerance_points")),
+                float(settings_value("intraday_strategy.level_drift_tolerance_points")),
             ),
             es_confirm_ratio=env_float(
                 "ALERT_INTRADAY_CALL_ES_CONFIRM_RATIO",
-                float(runtime_value("intraday_strategy.es_confirm_ratio")),
+                float(settings_value("intraday_strategy.es_confirm_ratio")),
             ),
             es_hold_tolerance_bps=env_float(
                 "ALERT_INTRADAY_CALL_ES_HOLD_TOLERANCE_BPS",
-                float(runtime_value("intraday_strategy.es_hold_tolerance_bps")),
+                float(settings_value("intraday_strategy.es_hold_tolerance_bps")),
             ),
         )
 
