@@ -1,14 +1,9 @@
 from __future__ import annotations
 
-import fcntl
-import hashlib
-import json
 import math
-import os
 from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass
 from datetime import datetime
-from pathlib import Path
 from statistics import median
 from typing import TYPE_CHECKING, Any
 
@@ -474,114 +469,129 @@ def _build_scenarios(inputs: GreekInputs) -> tuple[RepricingScenario, ...]:
     return tuple(scenarios)
 
 
-def calculate_contract_reference(
-    inputs: GreekInputs,
-    *,
-    steps: DifferenceSteps | None = None,
-) -> ContractGreekReference:
+def _validate_calculation_inputs(inputs: GreekInputs, steps: DifferenceSteps) -> None:
     if inputs.spot <= 0 or inputs.strike <= 0 or inputs.iv <= 0:
         raise ValueError("spot, strike, and iv must be positive")
     if inputs.tau_seconds <= MIN_TAU_SECONDS:
         raise ValueError("tau_seconds must be greater than five minutes")
     if inputs.right not in {"C", "P"}:
         raise ValueError("right must be C or P")
-
-    resolved_steps = steps or difference_steps(inputs)
-    if inputs.iv - resolved_steps.vol_decimal <= 0:
+    if inputs.iv - steps.vol_decimal <= 0:
         raise ValueError("volatility finite-difference step crosses zero")
-    values = _higher_order_values(inputs, resolved_steps)
+
+
+def _step_stability(
+    inputs: GreekInputs,
+    steps: DifferenceSteps,
+    values: Mapping[str, float],
+) -> float:
     half_steps = DifferenceSteps(
-        spot_points=resolved_steps.spot_points / 2.0,
-        vol_decimal=resolved_steps.vol_decimal / 2.0,
-        time_seconds=resolved_steps.time_seconds / 2.0,
+        spot_points=steps.spot_points / 2.0,
+        vol_decimal=steps.vol_decimal / 2.0,
+        time_seconds=steps.time_seconds / 2.0,
     )
     half_values = _higher_order_values(inputs, half_steps)
-    stability = max(
-        _relative_step_error(values[name], half_values[name])
-        for name in (
-            "charm_delta_per_minute",
-            "color_gamma_per_minute",
-            "speed_gamma_per_point",
-            "vanna_delta_per_vol_point",
-            "vomma_price_per_vol_point2",
-            "zomma_gamma_per_vol_point",
-        )
+    names = (
+        "charm_delta_per_minute",
+        "color_gamma_per_minute",
+        "speed_gamma_per_point",
+        "vanna_delta_per_vol_point",
+        "vomma_price_per_vol_point2",
+        "zomma_gamma_per_vol_point",
     )
+    return max(_relative_step_error(values[name], half_values[name]) for name in names)
 
-    tau_years = inputs.tau_seconds / YEAR_SECONDS
-    delta = bs_delta(inputs.spot, inputs.strike, inputs.iv, tau_years, inputs.right)
-    gamma = bs_gamma(inputs.spot, inputs.strike, inputs.iv, tau_years)
-    vega_per_vol_point = bs_vega(inputs.spot, inputs.strike, inputs.iv, tau_years) * 0.01
 
+def _relative_vendor_error(vendor: float | None, model: float) -> tuple[float | None, float]:
+    if vendor is None:
+        return None, 0.0
+    absolute = abs(vendor - model)
+    return absolute / max(abs(vendor), 1e-6), absolute
+
+
+def _contract_quality(
+    inputs: GreekInputs,
+    *,
+    delta: float,
+    gamma: float,
+    theta_per_minute: float,
+    vega_per_vol_point: float,
+    stability: float,
+) -> GreekQuality:
     reasons: list[str] = []
     if inputs.spread_bps is not None and inputs.spread_bps > MAX_SPREAD_BPS:
         reasons.append("wide_quote_over_250bps")
     if abs(delta) < 0.05 or abs(delta) > 0.95:
         reasons.append("deep_wing_delta")
-    base_model = bs_price(
-        inputs.spot,
-        inputs.strike,
-        inputs.iv,
-        tau_years,
-        inputs.right,
-    )
+
+    tau_years = inputs.tau_seconds / YEAR_SECONDS
+    base_model = bs_price(inputs.spot, inputs.strike, inputs.iv, tau_years, inputs.right)
     if inputs.mid is not None and inputs.mid > 0:
         intrinsic = _intrinsic(inputs.spot, inputs.strike, inputs.right)
         upper_bound = inputs.spot if inputs.right == "C" else inputs.strike
         if inputs.mid < intrinsic - 0.05 or inputs.mid > upper_bound + 0.05:
             reasons.append("market_mid_no_arbitrage_violation")
-        if base_model >= 0.05:
-            anchor_ratio = inputs.mid / base_model
-            if anchor_ratio < 0.25 or anchor_ratio > 4.0:
-                reasons.append("market_mid_model_ratio_extreme")
-    if inputs.vendor_underlier is not None:
-        mismatch = abs(inputs.vendor_underlier / inputs.spot - 1.0)
-        if mismatch > 0.002:
-            reasons.append("vendor_underlier_mismatch_over_20bps")
+        if base_model >= 0.05 and not 0.25 <= inputs.mid / base_model <= 4.0:
+            reasons.append("market_mid_model_ratio_extreme")
+    if (
+        inputs.vendor_underlier is not None
+        and abs(inputs.vendor_underlier / inputs.spot - 1.0) > 0.002
+    ):
+        reasons.append("vendor_underlier_mismatch_over_20bps")
 
-    vendor_delta_error = None
-    if inputs.vendor_delta is not None:
-        vendor_delta_error = abs(inputs.vendor_delta - delta)
-        if vendor_delta_error > 0.05:
-            reasons.append("vendor_delta_mismatch_over_0_05")
-
-    vendor_gamma_rel_error = None
-    if inputs.vendor_gamma is not None:
-        gamma_error = abs(inputs.vendor_gamma - gamma)
-        vendor_gamma_rel_error = gamma_error / max(abs(inputs.vendor_gamma), 1e-6)
-        if (
-            abs(inputs.vendor_gamma) <= 1e-6
-            and gamma_error > 1e-6
-            or abs(inputs.vendor_gamma) > 1e-6
-            and vendor_gamma_rel_error > 0.25
-        ):
-            reasons.append("vendor_gamma_mismatch")
-
-    vendor_theta_rel_error = None
-    if inputs.vendor_theta is not None:
-        model_theta_per_day = values["theta_per_minute"] * 1440.0
-        theta_error = abs(inputs.vendor_theta - model_theta_per_day)
-        vendor_theta_rel_error = theta_error / max(abs(inputs.vendor_theta), 1e-6)
-        if theta_error > 0.25 and vendor_theta_rel_error > 0.50:
-            reasons.append("vendor_theta_mismatch")
-
-    vendor_vega_rel_error = None
-    if inputs.vendor_vega is not None:
-        vega_error = abs(inputs.vendor_vega - vega_per_vol_point)
-        vendor_vega_rel_error = vega_error / max(abs(inputs.vendor_vega), 1e-6)
-        if vega_error > 0.05 and vendor_vega_rel_error > 0.50:
-            reasons.append("vendor_vega_mismatch")
+    delta_error = abs(inputs.vendor_delta - delta) if inputs.vendor_delta is not None else None
+    if delta_error is not None and delta_error > 0.05:
+        reasons.append("vendor_delta_mismatch_over_0_05")
+    gamma_relative, gamma_absolute = _relative_vendor_error(inputs.vendor_gamma, gamma)
+    if inputs.vendor_gamma is not None and (
+        (abs(inputs.vendor_gamma) <= 1e-6 and gamma_absolute > 1e-6)
+        or (
+            abs(inputs.vendor_gamma) > 1e-6 and gamma_relative is not None and gamma_relative > 0.25
+        )
+    ):
+        reasons.append("vendor_gamma_mismatch")
+    theta_relative, theta_absolute = _relative_vendor_error(
+        inputs.vendor_theta,
+        theta_per_minute * 1440.0,
+    )
+    if theta_relative is not None and theta_absolute > 0.25 and theta_relative > 0.50:
+        reasons.append("vendor_theta_mismatch")
+    vega_relative, vega_absolute = _relative_vendor_error(inputs.vendor_vega, vega_per_vol_point)
+    if vega_relative is not None and vega_absolute > 0.05 and vega_relative > 0.50:
+        reasons.append("vendor_vega_mismatch")
     if stability > 0.20:
         reasons.append("finite_difference_unstable")
-
-    quality = GreekQuality(
+    return GreekQuality(
         status="degraded" if reasons else "ok",
         reasons=tuple(dict.fromkeys(reasons)),
-        vendor_delta_error=vendor_delta_error,
-        vendor_gamma_rel_error=vendor_gamma_rel_error,
-        vendor_theta_rel_error=vendor_theta_rel_error,
-        vendor_vega_rel_error=vendor_vega_rel_error,
+        vendor_delta_error=delta_error,
+        vendor_gamma_rel_error=gamma_relative,
+        vendor_theta_rel_error=theta_relative,
+        vendor_vega_rel_error=vega_relative,
         step_stability_max_rel_error=stability,
+    )
+
+
+def calculate_contract_reference(
+    inputs: GreekInputs,
+    *,
+    steps: DifferenceSteps | None = None,
+) -> ContractGreekReference:
+    resolved_steps = steps or difference_steps(inputs)
+    _validate_calculation_inputs(inputs, resolved_steps)
+    values = _higher_order_values(inputs, resolved_steps)
+    stability = _step_stability(inputs, resolved_steps, values)
+    tau_years = inputs.tau_seconds / YEAR_SECONDS
+    delta = bs_delta(inputs.spot, inputs.strike, inputs.iv, tau_years, inputs.right)
+    gamma = bs_gamma(inputs.spot, inputs.strike, inputs.iv, tau_years)
+    vega_per_vol_point = bs_vega(inputs.spot, inputs.strike, inputs.iv, tau_years) * 0.01
+    quality = _contract_quality(
+        inputs,
+        delta=delta,
+        gamma=gamma,
+        theta_per_minute=values["theta_per_minute"],
+        vega_per_vol_point=vega_per_vol_point,
+        stability=stability,
     )
     return ContractGreekReference(
         contract_id=inputs.contract_id,
@@ -778,6 +788,32 @@ def _reference_spot(
     return None, None, ("live_spx_underlier_unavailable",)
 
 
+def _calculate_reference_universe(
+    quotes: Iterable[Quote],
+    *,
+    as_of: datetime,
+    spot: float,
+    storage_settings: StorageSettings,
+) -> tuple[dict[str, GreekInputs], list[ContractGreekReference], dict[str, int]]:
+    inputs_by_contract: dict[str, GreekInputs] = {}
+    references: list[ContractGreekReference] = []
+    blocked_counts: dict[str, int] = {}
+    for quote in quotes:
+        inputs, quality = inputs_from_quote(
+            quote,
+            as_of=as_of,
+            spot=spot,
+            storage_settings=storage_settings,
+        )
+        if inputs is None:
+            for reason in quality.reasons:
+                blocked_counts[reason] = blocked_counts.get(reason, 0) + 1
+            continue
+        inputs_by_contract[inputs.contract_id] = inputs
+        references.append(calculate_contract_reference(inputs))
+    return inputs_by_contract, references, blocked_counts
+
+
 def build_zero_dte_greeks_reference(
     state: LatestState,
     *,
@@ -819,22 +855,12 @@ def build_zero_dte_greeks_reference(
         payload["warnings"] = list(spot_warnings)
         return payload
 
-    inputs_by_contract: dict[str, GreekInputs] = {}
-    blocked_counts: dict[str, int] = {}
-    references: list[ContractGreekReference] = []
-    for quote in exact_quotes:
-        inputs, quality = inputs_from_quote(
-            quote,
-            as_of=as_of,
-            spot=spot,
-            storage_settings=storage_settings,
-        )
-        if inputs is None:
-            for reason in quality.reasons:
-                blocked_counts[reason] = blocked_counts.get(reason, 0) + 1
-            continue
-        inputs_by_contract[inputs.contract_id] = inputs
-        references.append(calculate_contract_reference(inputs))
+    inputs_by_contract, references, blocked_counts = _calculate_reference_universe(
+        exact_quotes,
+        as_of=as_of,
+        spot=spot,
+        storage_settings=storage_settings,
+    )
     if not references:
         payload = _unavailable_payload(as_of, exact_expiry, "no_usable_exact_expiry_references")
         payload["blocked_counts"] = blocked_counts
@@ -845,330 +871,40 @@ def build_zero_dte_greeks_reference(
         inputs_by_contract=inputs_by_contract,
         total_contract_count=len(exact_quotes),
     )
-    focus_rank = {contract_id: index for index, contract_id in enumerate(focus_contract_ids)}
-    ordered = sorted(
-        references,
-        key=lambda row: (
-            0 if row.contract_id in focus_rank else 1,
-            focus_rank.get(row.contract_id, 0),
-            abs(row.strike - spot),
-            row.right,
-        ),
-    )
-    displayed = ordered[: max(max_serialized_contracts, 0)]
-    selected_scenarios = tuple(serialized_scenario_names)
-    quality_counts = {
-        status: sum(1 for row in references if row.quality.status == status)
-        for status in ("ok", "degraded")
-    }
-    quality_reason_counts: dict[str, int] = {}
-    for row in references:
-        for reason in row.quality.reasons:
-            quality_reason_counts[reason] = quality_reason_counts.get(reason, 0) + 1
-    universe_ids = sorted(inputs_by_contract)
-    universe_tokens = [
-        f"{contract_id}:{inputs_by_contract[contract_id].open_interest or 0.0:.6f}"
-        for contract_id in universe_ids
-    ]
-    universe_fingerprint = hashlib.sha256("\n".join(universe_tokens).encode()).hexdigest()[:16]
-    ok_ratio = quality_counts["ok"] / len(references)
-    degraded = aggregate.quality != "ok" or ok_ratio < 0.60 or bool(spot_warnings)
     front = next(
         (row for row in options_map.expiries if str(getattr(row, "expiry", "")) == exact_expiry),
         None,
     )
-    return {
-        "schema_version": SCHEMA_VERSION,
-        "kind": "snapshot",
-        "mode": "reference_only",
-        "status": "degraded" if degraded else "ok",
-        "as_of": as_of.isoformat(),
-        "expiry": exact_expiry,
-        "scope": {
-            "underlier": "SPX",
-            "trading_class": "SPXW",
-            "expiry": exact_expiry,
-            "dte": 0,
-        },
-        "model": {
-            "name": MODEL_NAME,
-            "spot": spot,
-            "spot_source": spot_source,
-            "minutes_to_expiry": round(
-                inputs_by_contract[next(iter(inputs_by_contract))].tau_seconds / 60.0, 2
-            ),
-            "time_derivative_convention": "calendar_time_forward",
-            "vol_point_decimal": 0.01,
-        },
-        "direction": "unknown",
-        "position_sign": "unknown",
-        "signed_gex_proxy": {
-            "net_gex": getattr(front, "net_gex", None),
-            "abs_gex": getattr(front, "abs_gex", None),
-            "net_gamma_ratio": getattr(front, "net_gamma_ratio", None),
-            "gamma_state": getattr(front, "gamma_state", "unknown"),
-            "weighting": getattr(front, "gex_weighting", "unknown"),
-            "sign_method": (
-                "call_positive_put_negative_oi_plus_volume_proxy_not_dealer_position"
-                if getattr(front, "gex_weighting", None) == "oi_plus_volume"
-                else "call_positive_put_negative_oi_proxy_not_dealer_position"
-            ),
-            "dealer_position_sign": "unknown",
-            "direction": "unknown",
-        },
-        "weighting": {
-            "aggregate": "open_interest_only",
-            "intraday_volume": "context_only_not_used",
-        },
-        "units": {
-            "delta": "delta_per_option",
-            "gamma": "delta_change_per_spx_point",
-            "theta": "option_points_per_calendar_minute",
-            "vega": "option_points_per_1_vol_point",
-            "charm": "delta_change_per_calendar_minute",
-            "color": "gamma_change_per_calendar_minute",
-            "speed": "gamma_change_per_spx_point",
-            "vanna": "delta_change_per_1_vol_point",
-            "vomma": "option_points_per_1_vol_point_squared",
-            "zomma": "gamma_change_per_1_vol_point",
-            "gross_multiplier": "open_interest_x_100_contract_multiplier",
-        },
-        "aggregate_scope": "currently_actionable_exact_expiry_contracts_oi_only",
-        "aggregate_universe": {
-            "fingerprint": universe_fingerprint,
-            "contract_count": len(universe_ids),
-        },
-        "aggregate": aggregate.to_dict(),
-        "coverage": {
-            "exact_expiry_contract_count": len(exact_quotes),
-            "usable_contract_count": len(references),
-            "usable_ratio": len(references) / len(exact_quotes),
-            "oi_ratio": aggregate.oi_coverage_ratio,
-        },
-        "quality_counts": quality_counts,
-        "quality_reason_counts": quality_reason_counts,
-        "usable_contract_count": len(references),
-        "serialized_contract_count": len(displayed),
-        "blocked_counts": blocked_counts,
-        "warnings": list(spot_warnings),
-        "contracts": [row.to_dict(scenario_names=selected_scenarios) for row in displayed],
-    }
+    from spx_spark.greek_reference_payload import build_greek_reference_payload
 
-
-def write_zero_dte_greeks_snapshot(
-    payload: Mapping[str, Any],
-    *,
-    data_root: str | Path,
-) -> dict[str, str] | None:
-    """Persist a versioned snapshot under a cross-process lock."""
-
-    if payload.get("schema_version") != SCHEMA_VERSION:
-        return None
-    if payload.get("status") not in {"ok", "degraded", "unavailable"}:
-        return None
-    expiry = str(payload.get("expiry") or "")
-    if _expiry_date(expiry) is None:
-        return None
-
-    root = Path(data_root)
-    raw_path = (
-        root
-        / "features"
-        / "spxw_0dte_greeks_reference"
-        / f"date={expiry[:4]}-{expiry[4:6]}-{expiry[6:8]}"
-        / "snapshots.jsonl"
+    return build_greek_reference_payload(
+        schema_version=SCHEMA_VERSION,
+        model_name=MODEL_NAME,
+        as_of=as_of,
+        expiry=exact_expiry,
+        spot=spot,
+        spot_source=spot_source,
+        spot_warnings=spot_warnings,
+        exact_quote_count=len(exact_quotes),
+        inputs_by_contract=inputs_by_contract,
+        references=references,
+        aggregate=aggregate,
+        front=front,
+        blocked_counts=blocked_counts,
+        focus_contract_ids=focus_contract_ids,
+        max_serialized_contracts=max_serialized_contracts,
+        serialized_scenario_names=serialized_scenario_names,
     )
-    latest_path = root / "latest" / "spxw_0dte_greeks_reference.json"
-    lock_path = root / "latest" / "spxw_0dte_greeks_reference.lock"
-    serialized = json.dumps(dict(payload), sort_keys=True, separators=(",", ":"))
-    raw_path.parent.mkdir(parents=True, exist_ok=True)
-    latest_path.parent.mkdir(parents=True, exist_ok=True)
-    with lock_path.open("a+", encoding="utf-8") as lock:
-        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-        try:
-            with raw_path.open("a", encoding="utf-8") as handle:
-                handle.write(serialized)
-                handle.write("\n")
-
-            current_as_of = ""
-            try:
-                current = json.loads(latest_path.read_text(encoding="utf-8"))
-                if isinstance(current, dict) and isinstance(current.get("as_of"), str):
-                    current_as_of = str(current["as_of"])
-            except (OSError, json.JSONDecodeError):
-                pass
-            incoming_as_of = str(payload.get("as_of") or "")
-            if not current_as_of or incoming_as_of >= current_as_of:
-                temporary = latest_path.with_name(f".{latest_path.name}.{os.getpid()}.tmp")
-                temporary.write_text(serialized, encoding="utf-8")
-                temporary.replace(latest_path)
-        finally:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
-    return {"raw_path": str(raw_path), "latest_path": str(latest_path)}
 
 
-def load_zero_dte_greeks_snapshots(
-    *,
-    data_root: str | Path,
-    trading_date: str,
-) -> tuple[dict[str, Any], ...]:
-    expiry = trading_date.replace("-", "")
-    path = (
-        Path(data_root)
-        / "features"
-        / "spxw_0dte_greeks_reference"
-        / f"date={trading_date}"
-        / "snapshots.jsonl"
-    )
-    if not path.exists():
-        return ()
-    by_as_of: dict[str, dict[str, Any]] = {}
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return ()
-    for line in lines:
-        try:
-            row = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(row, dict):
-            continue
-        if row.get("schema_version") != SCHEMA_VERSION or row.get("expiry") != expiry:
-            continue
-        as_of = row.get("as_of")
-        if isinstance(as_of, str) and as_of:
-            by_as_of[as_of] = row
-    return tuple(by_as_of[key] for key in sorted(by_as_of))
+from spx_spark.greek_reference_io import (  # noqa: E402
+    load_zero_dte_greeks_snapshots,
+    summarize_zero_dte_greeks_session,
+    write_zero_dte_greeks_snapshot,
+)
 
-
-def summarize_zero_dte_greeks_session(
-    snapshots: Iterable[Mapping[str, Any]],
-    *,
-    expiry: str,
-) -> dict[str, Any]:
-    rows = sorted(
-        (
-            dict(row)
-            for row in snapshots
-            if row.get("schema_version") == SCHEMA_VERSION
-            and row.get("expiry") == expiry
-            and row.get("status") in {"ok", "degraded", "unavailable"}
-            and isinstance(row.get("as_of"), str)
-        ),
-        key=lambda row: str(row["as_of"]),
-    )
-    if not rows:
-        return {
-            "schema_version": SCHEMA_VERSION,
-            "kind": "session_summary",
-            "mode": "reference_only",
-            "status": "unavailable",
-            "expiry": expiry,
-            "direction": "unknown",
-            "position_sign": "unknown",
-            "snapshot_count": 0,
-            "metrics": {},
-            "warnings": [],
-        }
-
-    usable_rows = [row for row in rows if row.get("status") in {"ok", "degraded"}]
-    by_universe: dict[str, list[dict[str, Any]]] = {}
-    for row in usable_rows:
-        universe = row.get("aggregate_universe")
-        fingerprint = (
-            str(universe.get("fingerprint"))
-            if isinstance(universe, Mapping) and universe.get("fingerprint")
-            else f"missing:{row['as_of']}"
-        )
-        by_universe.setdefault(fingerprint, []).append(row)
-    comparison_fingerprint = None
-    comparison_rows: list[dict[str, Any]] = []
-    if by_universe:
-        comparison_fingerprint, comparison_rows = max(
-            by_universe.items(),
-            key=lambda item: (len(item[1]), str(item[1][-1]["as_of"])),
-        )
-
-    metric_rows: dict[str, dict[str, float]] = {}
-    if len(comparison_rows) >= 2:
-        for name in AGGREGATE_METRICS:
-            values = [
-                float(aggregate[name])
-                for row in comparison_rows
-                if isinstance(aggregate := row.get("aggregate"), Mapping)
-                and isinstance(aggregate.get(name), int | float)
-            ]
-            if values:
-                metric_rows[name] = {
-                    "first": values[0],
-                    "last": values[-1],
-                    "peak": max(values),
-                }
-    quality_counts = {
-        status: sum(1 for row in rows if row.get("status") == status)
-        for status in ("ok", "degraded", "unavailable")
-    }
-    usable_ratios = [
-        float(coverage["usable_ratio"])
-        for row in usable_rows
-        if isinstance(coverage := row.get("coverage"), Mapping)
-        and isinstance(coverage.get("usable_ratio"), int | float)
-    ]
-    oi_ratios = [
-        float(coverage["oi_ratio"])
-        for row in usable_rows
-        if isinstance(coverage := row.get("coverage"), Mapping)
-        and isinstance(coverage.get("oi_ratio"), int | float)
-    ]
-
-    def coverage_change(values: list[float]) -> dict[str, float] | None:
-        if not values:
-            return None
-        return {"first": values[0], "last": values[-1], "min": min(values)}
-
-    blocked_counts: dict[str, int] = {}
-    quality_reason_counts: dict[str, int] = {}
-    for row in usable_rows:
-        for target, source_name in (
-            (blocked_counts, "blocked_counts"),
-            (quality_reason_counts, "quality_reason_counts"),
-        ):
-            source = row.get(source_name)
-            if not isinstance(source, Mapping):
-                continue
-            for reason, count in source.items():
-                if isinstance(count, int | float):
-                    target[str(reason)] = target.get(str(reason), 0) + int(count)
-    summary_degraded = (
-        quality_counts["degraded"] > 0
-        or quality_counts["unavailable"] > 0
-        or len(comparison_rows) < 2
-    )
-    return {
-        "schema_version": SCHEMA_VERSION,
-        "kind": "session_summary",
-        "mode": "reference_only",
-        "status": "degraded" if summary_degraded else "ok",
-        "expiry": expiry,
-        "direction": "unknown",
-        "position_sign": "unknown",
-        "snapshot_count": len(rows),
-        "usable_snapshot_count": len(usable_rows),
-        "comparison_snapshot_count": len(comparison_rows),
-        "comparison_universe_fingerprint": comparison_fingerprint,
-        "aggregate_universe_count": len(by_universe),
-        "first_as_of": rows[0]["as_of"],
-        "last_as_of": rows[-1]["as_of"],
-        "quality_counts": quality_counts,
-        "coverage": {
-            "usable_ratio": coverage_change(usable_ratios),
-            "oi_ratio": coverage_change(oi_ratios),
-        },
-        "blocked_counts": blocked_counts,
-        "quality_reason_counts": quality_reason_counts,
-        "metrics": metric_rows,
-        "warnings": sorted(
-            {str(warning) for row in rows for warning in (row.get("warnings") or ())}
-        ),
-    }
+__all__ = [
+    "load_zero_dte_greeks_snapshots",
+    "summarize_zero_dte_greeks_session",
+    "write_zero_dte_greeks_snapshot",
+]

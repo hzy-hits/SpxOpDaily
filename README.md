@@ -177,6 +177,22 @@ For production, use the dedicated Cloudflare callback plus localhost data gatewa
 long-running process owns the refresh-capable Schwab client; collectors never race on the token
 file. See [docs/schwab-cloudflare-oauth.md](docs/schwab-cloudflare-oauth.md).
 
+### Schwab Wide-Chain Market Data Service
+
+The dedicated collector owns the 80/100/120-strike SPXW discovery plan, separate front/next
+cadences, the concrete option hot quote batch, and the 70% request plan ceiling. Keep the legacy
+24h-loop collector disabled (`schwab.collection.service_loop_enabled=false`) so there is one
+market-data scheduler.
+
+```bash
+systemctl --user enable --now spx-spark-schwab-marketdata.service
+systemctl --user status spx-spark-schwab-marketdata.service
+curl -fsS http://127.0.0.1:8184/healthz | jq .request_window
+```
+
+Runtime and acceptance details are in
+[docs/schwab-wide-chain-hot-lane-design.md](docs/schwab-wide-chain-hot-lane-design.md).
+
 ## Maintenance Dry Run
 
 ```bash

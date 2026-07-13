@@ -84,6 +84,12 @@ class SchwabClient:
             body = response.read().decode("utf-8")
             return response.status, json.loads(body) if body else None
 
+    def get_gateway_health(self) -> dict[str, Any] | None:
+        if not self.settings.gateway_url:
+            return None
+        _status, payload = self.get_json("/healthz", {})
+        return payload if isinstance(payload, dict) else None
+
 
 def build_schwab_client(settings: SchwabSettings) -> SchwabClient | None:
     if settings.gateway_url:

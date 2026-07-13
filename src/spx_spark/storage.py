@@ -301,9 +301,65 @@ def latest_by_provider(quotes: Iterable[Quote]) -> tuple[Quote, ...]:
     for quote in quotes:
         key = (quote.instrument.canonical_id, quote.provider.value)
         previous = result.get(key)
-        if previous is None or as_utc(quote.received_at) >= as_utc(previous.received_at):
+        if (
+            previous is not None
+            and quote.instrument.instrument_type is InstrumentType.OPTION
+            and previous.instrument.instrument_type is InstrumentType.OPTION
+        ):
+            result[key] = merge_option_observations(previous, quote)
+        elif previous is None or as_utc(quote.received_at) >= as_utc(previous.received_at):
             result[key] = quote
     return tuple(result.values())
+
+
+def merge_option_observations(left: Quote, right: Quote) -> Quote:
+    """Merge independent pricing and structure clocks for one provider option."""
+
+    if left.instrument.canonical_id != right.instrument.canonical_id:
+        raise ValueError("cannot merge different option instruments")
+    if left.provider is not right.provider:
+        raise ValueError("cannot merge option observations from different providers")
+
+    def pricing_time(quote: Quote) -> datetime:
+        return as_utc(quote.quote_time or quote.trade_time or quote.received_at)
+
+    def structure_time(quote: Quote) -> datetime:
+        return as_utc(quote.structure_time or quote.received_at)
+
+    pricing = max(
+        (left, right),
+        key=lambda quote: (
+            pricing_time(quote),
+            quote.mid is not None,
+            quote.has_price,
+        ),
+    )
+    greek_candidates = [quote for quote in (left, right) if quote.greeks is not None]
+    oi_candidates = [quote for quote in (left, right) if quote.open_interest is not None]
+    greek_source = max(greek_candidates, key=structure_time) if greek_candidates else None
+    oi_source = max(oi_candidates, key=structure_time) if oi_candidates else None
+    latest_received = max(as_utc(left.received_at), as_utc(right.received_at))
+    if greek_source is None and oi_source is None:
+        return replace(pricing, received_at=latest_received)
+    structure_times = [
+        structure_time(source)
+        for source in (greek_source, oi_source)
+        if source is not None
+    ]
+    return replace(
+        pricing,
+        received_at=latest_received,
+        open_interest=oi_source.open_interest if oi_source is not None else None,
+        greeks=greek_source.greeks if greek_source is not None else None,
+        structure_time=max(structure_times),
+        volume=(
+            pricing.volume
+            if pricing.volume is not None
+            else oi_source.volume
+            if oi_source is not None
+            else None
+        ),
+    )
 
 
 def latest_provider_states(states: Iterable[ProviderState]) -> tuple[ProviderState, ...]:

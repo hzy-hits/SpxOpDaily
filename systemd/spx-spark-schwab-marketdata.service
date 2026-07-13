@@ -1,0 +1,18 @@
+[Unit]
+Description=SPX Spark Schwab wide-chain and option hot-lane collector
+After=network-online.target spx-spark-schwab-oauth.service
+Wants=network-online.target
+Requires=spx-spark-schwab-oauth.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/ubuntu/spx-spark
+EnvironmentFile=-/home/ubuntu/spx-spark/.env
+Environment=PATH=/home/ubuntu/.local/bin:/home/ubuntu/.cargo/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/home/ubuntu/spx-spark/scripts/run-schwab-marketdata.sh
+Restart=always
+RestartSec=5
+TimeoutStopSec=15
+
+[Install]
+WantedBy=default.target

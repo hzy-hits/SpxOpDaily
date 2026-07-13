@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from spx_spark.ibkr.stream import deps as stream_deps
+from spx_spark.ibkr.stream.capacity_tracker import active_market_data_lines
 from spx_spark.ibkr.stream.contracts import (
     chunked,
     contract_qualification_key,
@@ -15,9 +16,12 @@ from spx_spark.ibkr.stream.models import (
     OptionSubscriptionPlan,
     SUBSCRIPTION_CONFIRM_SECONDS,
 )
+from spx_spark.ibkr.stream.quota_plan import plan_ibkr_option_allocation
 from spx_spark.ibkr.slow_poll import SlowPollScheduler
 from spx_spark.ibkr.verifier import VerifyRow
 from spx_spark.market_calendar import ET
+from spx_spark.provider_failover import FailoverMode
+from spx_spark.provider_failover_controller import load_failover_control
 
 build_base_contracts = stream_deps.build_base_contracts
 build_option_subscription_plan = stream_deps.build_option_subscription_plan
@@ -219,14 +223,34 @@ class OptionSubscriptionOps:
         if proposal is None:
             return
 
+        control = load_failover_control(self.provider_failover_settings.state_path)
+        fallback = isinstance(control, dict) and control.get("mode") in {
+            FailoverMode.RECOVERY_PENDING.value,
+            FailoverMode.IBKR_FALLBACK.value,
+            FailoverMode.BOTH_UNAVAILABLE.value,
+        }
+        capacity_tracker = getattr(self, "capacity_tracker", None)
+        discovered_capacity = (
+            capacity_tracker.effective_capacity
+            if capacity_tracker is not None
+            else int(getattr(self.stream_settings, "market_data_line_capacity", 100))
+        )
+        allocation = plan_ibkr_option_allocation(
+            discovered_capacity=discovered_capacity,
+            fallback=fallback,
+        )
+        configured_option_ceiling = max(int(self.stream_settings.max_option_lines), 0)
+        option_lines = min(allocation.option_lines, configured_option_ceiling)
+        hot_lines = min(allocation.hot_option_lines, option_lines)
+        hot_share = hot_lines / option_lines if option_lines else 0.0
         plan = build_option_subscription_plan(
             atm_reference=float(proposal.atm_strike),
             expiry=proposal.expiry,
             next_expiry=next_expiry_text,
             mode=self.sampling_settings.default_mode,
             sampling_settings=self.sampling_settings,
-            max_option_lines=self.stream_settings.max_option_lines,
-            hot_lane_share=self.stream_settings.hot_lane_share,
+            max_option_lines=option_lines,
+            hot_lane_share=hot_share,
         )
         success = self.reconcile_option_plan(plan)
         completed_at = datetime.now(tz=timezone.utc)
@@ -250,6 +274,10 @@ class OptionSubscriptionOps:
                 "expiry": plan.expiry,
                 "hot_contracts": len(plan.hot),
                 "rotation_slices": plan.rotation_count,
+                "quota_mode": allocation.mode.value,
+                "discovered_capacity": allocation.discovered_capacity,
+                "option_line_budget": option_lines,
+                "line_reserve": allocation.reserve_lines,
                 "reason": proposal.reason,
                 "source": proposal.source,
                 "confirmations": proposal.confirmation_count,
@@ -433,6 +461,9 @@ class OptionSubscriptionOps:
         ):
             return False
         self._register_subscription_rows(subscriptions, lane=lane)
+        capacity_tracker = getattr(self, "capacity_tracker", None)
+        if capacity_tracker is not None:
+            capacity_tracker.observe_success(active_lines=active_market_data_lines(self))
         return True
 
     def _apply_subscription_rejections(

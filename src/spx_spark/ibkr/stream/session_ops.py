@@ -11,6 +11,7 @@ from spx_spark.ibkr.farm_health import (
 )
 from spx_spark.ibkr.option_replan import OptionReplanController
 from spx_spark.ibkr.stream import deps as stream_deps
+from spx_spark.ibkr.stream.capacity_tracker import active_market_data_lines
 from spx_spark.ibkr.stream.models import MAX_TRACKED_ERRORS, SUBSCRIPTION_REJECTION_CODES
 from spx_spark.ibkr.stream.models import replace_client_id
 from spx_spark.ibkr.verifier import IbkrError
@@ -40,6 +41,13 @@ class SessionOps:
         )
         self.errors.append(error)
         del self.errors[:-MAX_TRACKED_ERRORS]
+        tracker = getattr(self, "capacity_tracker", None)
+        if tracker is not None:
+            tracker.observe_error(
+                error_code=error_code,
+                message=message,
+                active_lines=active_market_data_lines(self),
+            )
 
         if error_code in TWS_CONNECTIVITY_LOST_CODES:
             self.tws_connectivity_lost = True
@@ -221,4 +229,3 @@ class SessionOps:
     def drain_new_errors(self) -> list[IbkrError]:
         errors, self.errors = self.errors, []
         return errors
-

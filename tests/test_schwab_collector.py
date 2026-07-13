@@ -48,6 +48,41 @@ def _chain_payload(symbol: str, *, strike: float = 750.0) -> dict[str, Any]:
     }
 
 
+def _paired_chain_payload(*, spot: float = 7500.0) -> dict[str, Any]:
+    calls: dict[str, list[dict[str, Any]]] = {}
+    puts: dict[str, list[dict[str, Any]]] = {}
+    for strike in (7495.0, 7500.0, 7505.0):
+        calls[f"{strike:.1f}"] = [
+            {
+                "symbol": f"{'SPXW':<6}260706C{int(strike * 1000):08d}",
+                "putCall": "CALL",
+                "expirationDate": "2026-07-06T20:00:00+00:00",
+                "strikePrice": strike,
+                "bid": 1.0,
+                "ask": 1.2,
+                "openInterest": 100,
+                "delta": 0.5,
+            }
+        ]
+        puts[f"{strike:.1f}"] = [
+            {
+                "symbol": f"{'SPXW':<6}260706P{int(strike * 1000):08d}",
+                "putCall": "PUT",
+                "expirationDate": "2026-07-06T20:00:00+00:00",
+                "strikePrice": strike,
+                "bid": 1.1,
+                "ask": 1.3,
+                "openInterest": 110,
+                "delta": -0.5,
+            }
+        ]
+    return {
+        "underlyingPrice": spot,
+        "callExpDateMap": {"2026-07-06:0": calls},
+        "putExpDateMap": {"2026-07-06:0": puts},
+    }
+
+
 def test_fetch_chain_uses_calendar_research_expiries() -> None:
     captured: dict[str, Any] = {}
 
@@ -84,20 +119,93 @@ def test_fetch_chain_uses_per_instrument_strike_count_for_spx() -> None:
     )
 
     assert captured["symbol"] == "$SPX"
-    assert captured["strikeCount"] == 40
+    assert captured["strikeCount"] == 80
+
+
+def test_fetch_chain_can_pin_one_expiry() -> None:
+    captured: dict[str, Any] = {}
+
+    class FakeClient:
+        def get_json(self, path: str, params: dict[str, Any]):
+            captured.update(params)
+            return 200, {}
+
+    expiry = datetime(2026, 7, 6, tzinfo=timezone.utc).date()
+    schwab_collector.fetch_chain(
+        FakeClient(),
+        "SPX",
+        SimpleNamespace(option_chain_strike_count=80),
+        expiry=expiry,
+        strike_count=100,
+    )
+
+    assert captured["fromDate"] == captured["toDate"] == "2026-07-06"
+    assert captured["strikeCount"] == 100
+
+
+def test_collector_discovers_front_pairs_before_hot_quote_batch(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    _isolate_collector_storage(monkeypatch, tmp_path)
+    monkeypatch.setenv("SCHWAB_COLLECT_QUOTES", "$SPX")
+    monkeypatch.setenv("SCHWAB_COLLECT_CHAINS", "SPX")
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    class FakeClient:
+        def get_json(self, path: str, params: dict[str, Any]):
+            calls.append((path, dict(params)))
+            if path == "/marketdata/v1/chains":
+                return 200, _paired_chain_payload()
+            symbols = str(params["symbols"]).split(",")
+            return 200, {
+                symbol: {
+                    "assetMainType": "OPTION" if symbol.startswith("SPXW") else "INDEX",
+                    "quote": {"bidPrice": 1.0, "askPrice": 1.2, "lastPrice": 1.1},
+                }
+                for symbol in symbols
+            }
+
+    persisted: list[ProviderSnapshot] = []
+    monkeypatch.setattr(schwab_collector, "build_schwab_client", lambda _settings: FakeClient())
+    monkeypatch.setattr(
+        schwab_collector,
+        "persist_provider_snapshot",
+        lambda snapshot, _storage: persisted.append(snapshot),
+    )
+    now = datetime(2026, 7, 6, 14, 0, tzinfo=timezone.utc)
+
+    assert schwab_collector.run(now=now) == 0
+    output = json.loads(capsys.readouterr().out)
+
+    assert [path for path, _params in calls] == [
+        "/marketdata/v1/chains",
+        "/marketdata/v1/chains",
+        "/marketdata/v1/quotes",
+    ]
+    assert calls[0][1]["fromDate"] == calls[0][1]["toDate"] == "2026-07-06"
+    assert calls[1][1]["fromDate"] == calls[1][1]["toDate"] == "2026-07-07"
+    requested = str(calls[2][1]["symbols"]).split(",")
+    assert requested[0] == "$SPX"
+    assert len([symbol for symbol in requested if symbol.startswith("SPXW")]) == 6
+    assert output["hot_symbol_count"] == 6
+    assert output["coverage"]["SPX:front"]["two_sided_ratio"] == 1.0
+    assert output["coverage"]["SPX:front"]["next_strike_count"] == 100
+    assert len(persisted) == 3
 
 
 def test_runtime_chain_cadence_and_strike_overrides() -> None:
     assert chain_interval_seconds_for("SPX") == 5
     assert chain_interval_seconds_for("SPY") == 15
     assert chain_interval_seconds_for("XSP") == 15
-    assert chain_interval_seconds_for("QQQ") == 15
-    assert chain_interval_seconds_for("IWM") == 15
-    assert option_chain_strike_count_for("SPX", 10) == 40
+    assert chain_interval_seconds_for("QQQ") == 30
+    assert chain_interval_seconds_for("IWM") == 30
+    assert option_chain_strike_count_for("SPX", 10) == 80
     assert option_chain_strike_count_for("SPY", 10) == 10
     spx = find_schwab_instrument("SPX")
     assert spx is not None
-    assert spx.option_chain_strike_count == 40
+    assert spx.option_chain_strike_count == 80
     assert spx.chain_interval_seconds == 5
 
 
@@ -330,11 +438,12 @@ def test_collector_tiered_chain_cadence_and_request_counts(
     t0 = datetime(2026, 7, 11, 14, 30, 0, tzinfo=timezone.utc)
     assert schwab_collector.run(now=t0) == 0
     first = json.loads(capsys.readouterr().out)
-    assert first["request_count"] == 6  # 1 quotes + 5 chains
+    assert first["request_count"] == 7  # quotes + 5 front chains + SPX next expiry
     assert sorted(first["chains_fetched"]) == ["IWM", "QQQ", "SPX", "SPY", "XSP"]
     assert first["chains_skipped"] == []
     assert {symbol for symbol, _, _ in chain_calls} == {"$SPX", "$XSP", "SPY", "QQQ", "IWM"}
-    assert ("$SPX", 40) in {(symbol, strike) for symbol, strike, _ in chain_calls}
+    assert ("$SPX", 80) in {(symbol, strike) for symbol, strike, _ in chain_calls}
+    assert ("$SPX", 60) in {(symbol, strike) for symbol, strike, _ in chain_calls}
     assert all(strike == 10 for symbol, strike, _ in chain_calls if symbol != "$SPX")
     first_chain_as_of = dict(first["chain_as_of"])
     assert all(first_chain_as_of[symbol] == t0.isoformat() for symbol in first_chain_as_of)
@@ -349,31 +458,38 @@ def test_collector_tiered_chain_cadence_and_request_counts(
     t1 = t0 + timedelta(seconds=5)
     assert schwab_collector.run(now=t1) == 0
     second = json.loads(capsys.readouterr().out)
-    assert second["request_count"] == 2  # quotes + $SPX only
-    assert second["chains_fetched"] == ["SPX"]
-    assert sorted(second["chains_skipped"]) == ["IWM", "QQQ", "SPY", "XSP"]
-    assert [symbol for symbol, _, _ in chain_calls] == ["$SPX"]
-    assert second["chain_as_of"]["SPX"] == t1.isoformat()
+    assert second["request_count"] == 0  # off-hours data is deliberately sparse
+    assert second["chains_fetched"] == []
+    assert sorted(second["chains_skipped"]) == ["IWM", "QQQ", "SPX", "SPY", "XSP"]
+    assert chain_calls == []
+    assert second["chain_as_of"]["SPX"] == t0.isoformat()
     assert second["chain_as_of"]["SPY"] == t0.isoformat()
-    assert second["requests_last_minute"] == 8
+    assert second["requests_last_minute"] == 7
     # Skipped B-tier chains must not re-persist / forge freshness.
-    assert len(persisted) == first_persisted_count + 2  # quotes + SPX chain
+    assert len(persisted) == first_persisted_count
     latest_spx = next(
         snapshot
         for snapshot in reversed(persisted)
         if snapshot.quotes and snapshot.quotes[0].instrument.underlier == "SPX"
     )
-    assert latest_spx.received_at == t1
+    assert latest_spx.received_at == t0
     assert first_spx_received_at == t0
 
     chain_calls.clear()
     t2 = t0 + timedelta(seconds=15)
     assert schwab_collector.run(now=t2) == 0
     third = json.loads(capsys.readouterr().out)
-    assert third["request_count"] == 6
-    assert sorted(third["chains_fetched"]) == ["IWM", "QQQ", "SPX", "SPY", "XSP"]
-    assert third["chains_skipped"] == []
-    assert third["requests_last_minute"] == 14
+    assert third["request_count"] == 1  # quote lane only
+    assert third["chains_fetched"] == []
+    assert sorted(third["chains_skipped"]) == ["IWM", "QQQ", "SPX", "SPY", "XSP"]
+    assert third["requests_last_minute"] == 8
+
+    chain_calls.clear()
+    t3 = t0 + timedelta(seconds=60)
+    assert schwab_collector.run(now=t3) == 0
+    fourth = json.loads(capsys.readouterr().out)
+    assert fourth["request_count"] == 2  # quote + SPX front chain
+    assert fourth["chains_fetched"] == ["SPX"]
 
 
 def test_skipped_chain_does_not_forge_received_at(
@@ -450,5 +566,40 @@ def test_collector_warns_when_request_budget_exceeded(
     with caplog.at_level(logging.WARNING, logger=schwab_collector.LOGGER.name):
         assert schwab_collector.run(now=now) == 0
     output = json.loads(capsys.readouterr().out)
-    assert output["requests_last_minute"] == 101
+    assert output["requests_last_minute"] == 100
+    assert output["request_count"] == 0
+    assert "planned_request_ceiling" in output["errors"][0]
     assert any("request budget soft guardrail exceeded" in message for message in caplog.messages)
+
+
+def test_gateway_429_window_throttles_all_upstream_lanes(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    _isolate_collector_storage(monkeypatch, tmp_path)
+    monkeypatch.setenv("SCHWAB_COLLECT_QUOTES", "$SPX")
+    monkeypatch.setenv("SCHWAB_COLLECT_CHAINS", "SPX")
+
+    class FakeClient:
+        def get_gateway_health(self) -> dict[str, Any]:
+            return {
+                "request_window": {
+                    "attempts": 20,
+                    "retries": 1,
+                    "throttled": 1,
+                    "failures": 1,
+                    "response_bytes": 100,
+                }
+            }
+
+        def get_json(self, path: str, params: dict[str, Any]):
+            raise AssertionError(f"upstream request should be blocked: {path} {params}")
+
+    monkeypatch.setattr(schwab_collector, "build_schwab_client", lambda _settings: FakeClient())
+
+    assert schwab_collector.run(now=datetime(2026, 7, 6, 14, 0, tzinfo=timezone.utc)) == 0
+    output = json.loads(capsys.readouterr().out)
+    assert output["quota_mode"] == "throttled"
+    assert output["request_count"] == 0
+    assert output["gateway_request_window"]["throttled"] == 1

@@ -263,6 +263,7 @@ def quote_from_schwab_option_contract(
         ask_size=clean_float(first_key(contract, "askSize")),
         volume=clean_float(first_key(contract, "totalVolume", "volume")),
         open_interest=clean_float(first_key(contract, "openInterest")),
+        structure_time=received_at,
         quote_time=quote_time,
         trade_time=trade_time,
         last_update_at=received_at,

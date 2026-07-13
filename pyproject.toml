@@ -43,6 +43,7 @@ spx-spark-service-loop = "spx_spark.service_loop:main"
 spx-spark-sampling-plan = "spx_spark.sampling:main"
 spx-spark-schwab-verifier = "spx_spark.schwab.verifier:main"
 spx-spark-schwab-collector = "spx_spark.schwab.collector:main"
+spx-spark-schwab-marketdata = "spx_spark.schwab.collector:loop_main"
 spx-spark-schwab-oauth = "spx_spark.schwab.oauth_service:main"
 
 [dependency-groups]

@@ -9,7 +9,7 @@
 
 ## Verification Evidence
 
-- `uv run pytest -q`: `1032 passed`, one upstream `websockets.legacy`
+- `uv run pytest -q`: `1057 passed`, one upstream `websockets.legacy`
   deprecation warning.
 - `uv run ruff check .`: passed.
 - `uv build`: source distribution and wheel built successfully.
@@ -26,12 +26,14 @@ The following user services were reloaded/restarted from the current worktree
 and remained `active/running` with zero systemd restarts:
 
 - `spx-spark-schwab-oauth.service`
+- `spx-spark-schwab-marketdata.service`
 - `spx-spark-ibkr-stream.service`
 - `spx-spark-24h.service`
 - `ibc-gateway.service`
 
-Latest state contained 457 normalized rows from Schwab, Polymarket, and
-Hyperliquid. Schwab was available; IBKR was intentionally connected in account
+Latest state contained 617 normalized rows, including 480 Schwab option rows
+with two-sided prices, OI, Greeks, and independent structure timestamps.
+Schwab was available; IBKR was intentionally connected in account
 standby with market data inactive because weekend maintenance mode blocks the
 IBKR market-data session.
 
@@ -70,13 +72,29 @@ used the `spx-ops` group and did not fan out to the friend Bark or Feishu.
 
 ## Remaining Refactor Gates
 
-- `runtime_value()` still appears 414 times under `src/spx_spark`; explicit
-  settings injection is not complete.
-- Several non-facade modules remain above the planned 600-line ceiling,
-  including `strategy/steven.py` (1774), `post_close_review.py` (1698),
-  `config.py` (1495), and `greek_reference.py` (1174).
+- `runtime_value()` has fallen from 414 business-path references to 5 textual
+  references under `src`, all inside runtime/settings infrastructure (15 when
+  tests are included); production business modules consume typed settings slices.
+- All production Python modules are now below the enforced 1000-line ceiling.
+  The largest remaining modules are `intraday_strategy.py` (989),
+  `data_platform/lake/compact.py` (972), `features/exposure_map.py` (970),
+  `greek_reference.py` (910), and `config.py` (861). The ceiling is only a
+  backstop; critical orchestrators also have AST-enforced line/control-flow
+  budgets in `tests/architecture/test_complexity_budget.py`.
 - The five complete RTH-session density/data-quality shadow acceptance has not
   been performed.
+- The dedicated collector is 371 lines. Chain planning/execution, front
+  discovery, quote-lane execution, transport, batching, and gateway telemetry
+  are separate modules. `run()` remains a 241-line composition boundary but
+  contains only five control-flow nodes; its budget is enforced by CI.
+- Steven transitions are dispatched through an explicit state-handler table;
+  `advance_state()` is 40 lines. Post-close completeness is decomposed by index,
+  option, surface, and shared quality checks. Raw deletion uses explicit
+  eligibility/content/authorization/quarantine phases. Greeks calculation and
+  payload rendering are separate boundaries.
+- IBKR concurrent-line capacity now uses a persisted runtime estimate. Explicit
+  ticker-limit evidence lowers the estimate; repeated full-capacity successes
+  recover it one line at a time up to the configured account ceiling.
 - RTH-only SPX anchor, SPXW freshness, Greeks/density, and alert-delivery
   readiness cannot be proven from a Sunday run.
 
@@ -94,3 +112,11 @@ used the `spx-ops` group and did not fan out to the friend Bark or Feishu.
 `docs/pre-rth-refactor-implementation-plan.md`。完成这些项目只产生
 `PRE-RTH-CODE-READY`，五个完整 RTH session 后才可能产生
 `RTH-SHADOW-ACCEPTED`。
+
+## Schwab Collector Resource Check
+
+The planner tick is derived from the shortest active lane: 5 seconds off-hours,
+about 0.67 seconds in normal RTH, and 0.5 seconds in active/burst RTH. After
+reducing static off-hours collection from 30 to 10 planned requests/minute, a
+measured 30-second Sunday window used 1.088 CPU seconds (about 3.6% of one
+core), 29 MiB RSS, and retained all 160 hot symbols.

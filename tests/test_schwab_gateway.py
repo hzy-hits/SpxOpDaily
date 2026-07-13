@@ -433,6 +433,11 @@ def test_network_failures_retry_exponentially_without_real_sleep(
     assert response.status == 200
     assert len(fake_client.requests) == 3
     assert clock.sleeps == [1.0, 2.0]
+    window = manager.health().request_window
+    assert window.attempts == 3
+    assert window.retries == 2
+    assert window.failures == 2
+    assert window.response_bytes == len(fake_client.next_response.content)
 
 
 @pytest.mark.parametrize("status", [429, 500, 502, 503, 504])

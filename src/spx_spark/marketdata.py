@@ -259,6 +259,7 @@ class Quote:
     last_size: float | None = None
     volume: float | None = None
     open_interest: float | None = None
+    structure_time: datetime | None = None
     quote_time: datetime | None = None
     trade_time: datetime | None = None
     last_update_at: datetime | None = None
@@ -339,6 +340,7 @@ class Quote:
             "last_size": self.last_size,
             "volume": self.volume,
             "open_interest": self.open_interest,
+            "structure_time": self.structure_time.isoformat() if self.structure_time else None,
             "quote_time": self.quote_time.isoformat() if self.quote_time else None,
             "trade_time": self.trade_time.isoformat() if self.trade_time else None,
             "last_update_at": self.last_update_at.isoformat() if self.last_update_at else None,
@@ -590,6 +592,7 @@ def quote_from_dict(payload: Mapping[str, Any]) -> Quote:
         last_size=clean_float(payload.get("last_size")),
         volume=clean_float(payload.get("volume")),
         open_interest=clean_float(payload.get("open_interest")),
+        structure_time=parse_timestamp(payload.get("structure_time")),
         quote_time=parse_timestamp(payload.get("quote_time")),
         trade_time=parse_timestamp(payload.get("trade_time")),
         last_update_at=parse_timestamp(payload.get("last_update_at")),

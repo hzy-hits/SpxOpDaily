@@ -384,3 +384,16 @@ Keep the repository, virtual environment, and source files under `/home/ubuntu/s
 For the production Schwab callback, single-owner refresh client, Cloudflare Tunnel route,
 and localhost gateway deployment, follow
 [schwab-cloudflare-oauth.md](schwab-cloudflare-oauth.md).
+
+The REST market-data scheduler is a separate long-running process. It uses the loopback OAuth
+gateway and never reads or refreshes the token itself:
+
+```bash
+ln -sfn /home/ubuntu/spx-spark/systemd/spx-spark-schwab-marketdata.service \
+  ~/.config/systemd/user/spx-spark-schwab-marketdata.service
+systemctl --user daemon-reload
+systemctl --user enable --now spx-spark-schwab-marketdata.service
+```
+
+Keep `schwab.collection.service_loop_enabled=false`; otherwise the 24h loop and the dedicated
+service would both schedule the same REST lanes.

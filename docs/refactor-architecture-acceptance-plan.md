@@ -1470,7 +1470,9 @@ developer app 只有 Market Data product，缺少 Trader API `/trader/v1/userPre
 实际 response、429、`Retry-After` 和 operator override 降低 effective capacity。
 
 IBKR 官方默认提供至少 100 条 concurrent market-data lines；实际账户上限可能因账户条件、
-佣金或 quote booster 改变，并且 TWS 和 API clients 共享。当前配置的 worst-case 约为:
+佣金或 quote booster 改变，并且 TWS 和 API clients 共享。实现以 100 为 configured ceiling，
+并通过成功订阅 high-watermark 与明确 ticker-limit rejection 维护持久化 effective estimate。
+当前配置的 worst-case 约为:
 
 ```text
 68 SPXW option lines

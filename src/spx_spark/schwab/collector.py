@@ -4,207 +4,85 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Mapping
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from pathlib import Path
+import time
+from contextlib import redirect_stdout
+from io import StringIO
+from datetime import datetime
 from typing import Any
-from urllib.error import HTTPError, URLError
 
 from spx_spark.config import SchwabSettings, SchwabStreamSettings, StorageSettings, env_csv
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR, ET
 from spx_spark.marketdata import as_utc
 from spx_spark.provider_adapter import persist_provider_snapshot
-from spx_spark.schwab.adapter import snapshot_from_chain_payload, snapshot_from_quote_payload
+from spx_spark.settings import load_app_settings
+from spx_spark.settings.schwab import SchwabSettingsSlice
+from spx_spark.schwab.chain_cycle import collect_chain_cycle
+from spx_spark.schwab.collector_io import (
+    collect_quote_batches as _collect_quote_batches,
+    fetch_chain,
+    gateway_request_window as _gateway_request_window,
+)
+from spx_spark.schwab.collector_state import (
+    COLLECTOR_STATE_FILE_NAME,
+    CollectorBudgetState,
+    chain_is_due,
+    collector_state_path,
+    load_collector_budget_state,
+    prune_request_timestamps,
+    record_requests,
+    save_collector_budget_state,
+)
+from spx_spark.schwab.hot_lane import hot_plan_is_fresh
+from spx_spark.schwab.market_data_plan import (
+    cadence_seconds,
+    collection_profile,
+    effective_profile,
+    planner_tick_seconds as profile_planner_tick_seconds,
+    planned_requests_per_minute,
+)
+from spx_spark.schwab.quota_machine import (
+    QuotaPolicy,
+    QuotaState,
+    advance_quota_state,
+)
+from spx_spark.schwab.quote_lane import collect_quote_lane
+from spx_spark.schwab.request_models import (
+    CollectionProfile,
+    QuotaMode,
+    SchwabLane,
+)
 from spx_spark.schwab.symbols import (
     canonical_underlier_for_schwab,
-    chain_interval_seconds_for,
-    option_chain_strike_count_for,
-    option_chain_symbol_for_schwab,
     resolved_schwab_canonical_quote_symbols,
     resolved_schwab_quote_symbols,
     schwab_option_chain_underliers,
     schwab_quote_symbols,
 )
-from spx_spark.schwab.verifier import SchwabClient, build_schwab_client, quote_batches
+from spx_spark.schwab.verifier import build_schwab_client
 
 
-SCHWAB_QUOTE_PATH = '/marketdata/v1/quotes'
-SCHWAB_OPTION_CHAIN_PATH = '/marketdata/v1/chains'
-COLLECTOR_STATE_FILE_NAME = "schwab_collector_state.json"
-REQUEST_BUDGET_WARNING_PER_MINUTE = int(
-    100
-)
 LOGGER = logging.getLogger(__name__)
 
-
-@dataclass
-class CollectorBudgetState:
-    """Disk-backed cadence and rolling request timestamps across collector subprocesses."""
-
-    chain_last_fetched_at: dict[str, datetime] = field(default_factory=dict)
-    request_timestamps: list[float] = field(default_factory=list)
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "chain_last_fetched_at": {
-                symbol: stamp.isoformat()
-                for symbol, stamp in sorted(self.chain_last_fetched_at.items())
-            },
-            "request_timestamps": list(self.request_timestamps),
-        }
-
-    @classmethod
-    def from_dict(cls, payload: Mapping[str, Any]) -> "CollectorBudgetState":
-        chain_raw = payload.get("chain_last_fetched_at", {})
-        timestamps_raw = payload.get("request_timestamps", [])
-        chain_last: dict[str, datetime] = {}
-        if isinstance(chain_raw, dict):
-            for symbol, value in chain_raw.items():
-                stamp = _parse_iso_datetime(value)
-                if stamp is not None:
-                    chain_last[str(symbol).strip().upper()] = stamp
-        timestamps: list[float] = []
-        if isinstance(timestamps_raw, list):
-            for item in timestamps_raw:
-                try:
-                    timestamps.append(float(item))
-                except (TypeError, ValueError):
-                    continue
-        return cls(chain_last_fetched_at=chain_last, request_timestamps=timestamps)
+__all__ = [
+    "COLLECTOR_STATE_FILE_NAME",
+    "CollectorBudgetState",
+    "chain_is_due",
+    "prune_request_timestamps",
+]
 
 
-def collector_state_path(storage_settings: StorageSettings) -> Path:
-    return Path(storage_settings.data_root).expanduser() / "latest" / COLLECTOR_STATE_FILE_NAME
-
-
-def load_collector_budget_state(path: Path) -> CollectorBudgetState:
-    if not path.is_file():
-        return CollectorBudgetState()
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return CollectorBudgetState()
-    if not isinstance(payload, dict):
-        return CollectorBudgetState()
-    return CollectorBudgetState.from_dict(payload)
-
-
-def save_collector_budget_state(path: Path, state: CollectorBudgetState) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(state.to_dict(), sort_keys=True, indent=2) + "\n", encoding="utf-8")
-
-
-def _parse_iso_datetime(value: Any) -> datetime | None:
-    if not isinstance(value, str) or not value.strip():
-        return None
-    try:
-        stamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if stamp.tzinfo is None:
-        stamp = stamp.replace(tzinfo=timezone.utc)
-    return as_utc(stamp)
-
-
-def chain_is_due(
-    *,
-    last_fetched_at: datetime | None,
-    now: datetime,
-    interval_seconds: int,
-) -> bool:
-    if interval_seconds <= 0:
-        raise ValueError("interval_seconds must be positive")
-    if last_fetched_at is None:
-        return True
-    elapsed = (as_utc(now) - as_utc(last_fetched_at)).total_seconds()
-    return elapsed >= float(interval_seconds)
-
-
-def prune_request_timestamps(
-    timestamps: list[float],
-    *,
-    now_epoch: float,
-    window_seconds: float = 60.0,
-) -> list[float]:
-    cutoff = now_epoch - window_seconds
-    return [stamp for stamp in timestamps if stamp >= cutoff]
-
-
-def record_requests(
-    state: CollectorBudgetState,
-    *,
-    count: int,
-    now: datetime,
-) -> int:
-    """Append ``count`` request markers and return the trailing-60s total."""
-
-    if count < 0:
-        raise ValueError("request count cannot be negative")
-    now_epoch = as_utc(now).timestamp()
-    state.request_timestamps = prune_request_timestamps(
-        state.request_timestamps,
-        now_epoch=now_epoch,
-    )
-    if count:
-        state.request_timestamps.extend([now_epoch] * count)
-    state.request_timestamps = prune_request_timestamps(
-        state.request_timestamps,
-        now_epoch=now_epoch,
-    )
-    return len(state.request_timestamps)
-
-
-def fetch_quotes(client: SchwabClient, symbols: list[str], settings: SchwabSettings) -> Any:
-    _status, payload = client.get_json(
-        SCHWAB_QUOTE_PATH,
-        {
-            "symbols": ",".join(symbols),
-            "fields": settings.quote_fields,
-            "indicative": "false",
-        },
-    )
-    return payload
-
-
-def fetch_chain(
-    client: SchwabClient,
-    symbol: str,
-    settings: SchwabSettings,
+def run(
+    argv: list[str] | None = None,
     *,
     now: datetime | None = None,
-    strike_count: int | None = None,
-) -> Any:
-    current_expiry, next_expiry = DEFAULT_MARKET_CALENDAR.research_expiries(
-        now or datetime.now(tz=ET)
-    )
-    provider_symbol = option_chain_symbol_for_schwab(symbol)
-    resolved_strike_count = (
-        int(strike_count)
-        if strike_count is not None
-        else option_chain_strike_count_for(symbol, settings.option_chain_strike_count)
-    )
-    _status, payload = client.get_json(
-        SCHWAB_OPTION_CHAIN_PATH,
-        {
-            "symbol": provider_symbol,
-            "contractType": "ALL",
-            "strategy": "SINGLE",
-            "strikeCount": resolved_strike_count,
-            "includeUnderlyingQuote": "true",
-            "fromDate": current_expiry.isoformat(),
-            "toDate": next_expiry.isoformat(),
-        },
-    )
-    return payload
-
-
-def run(argv: list[str] | None = None, *, now: datetime | None = None) -> int:
+    typed_settings: SchwabSettingsSlice | None = None,
+) -> int:
     del argv
     evaluation_now = as_utc(now or datetime.now(tz=ET))
     settings = SchwabSettings.from_env()
     storage_settings = StorageSettings.from_env()
     stream_settings = SchwabStreamSettings.from_env(data_root=storage_settings.data_root)
+    typed_settings = typed_settings or load_app_settings().schwab
     client = build_schwab_client(settings)
     if client is None:
         print(json.dumps({"ok": False, "skipped": True, "reason": "missing_schwab_auth"}))
@@ -234,12 +112,64 @@ def run(argv: list[str] | None = None, *, now: datetime | None = None) -> int:
 
     state_path = collector_state_path(storage_settings)
     budget_state = load_collector_budget_state(state_path)
+    original_state = budget_state.to_dict()
+    quota_policy = QuotaPolicy(
+        nominal_requests_per_minute=typed_settings.capacity.nominal_requests_per_minute,
+        planned_requests_per_minute=typed_settings.capacity.planned_requests_per_minute,
+    )
+    quota_state = QuotaState(
+        mode=QuotaMode(budget_state.quota_mode),
+        consecutive_successes=budget_state.quota_consecutive_successes,
+        stable_windows=budget_state.quota_stable_windows,
+    )
+    gateway_window = _gateway_request_window(client)
+    quota_state = advance_quota_state(
+        quota_state,
+        gateway_window,
+        policy=quota_policy,
+        retry_after_elapsed=(
+            quota_state.mode is QuotaMode.THROTTLED
+            and gateway_window.throttled == 0
+            and gateway_window.failures == 0
+        ),
+    )
+    current_expiry, next_expiry = DEFAULT_MARKET_CALENDAR.research_expiries(evaluation_now)
+    current_expiry_text = current_expiry.strftime("%Y%m%d")
+    burst = bool(budget_state.burst_until and evaluation_now < budget_state.burst_until)
+    profile = effective_profile(
+        collection_profile(evaluation_now, burst=burst),
+        quota_state.mode,
+    )
+    front_plan_cadence = cadence_seconds(
+        SchwabLane.FRONT_CHAIN,
+        profile=profile,
+        policy=typed_settings.cadence,
+        underlier="SPX",
+    )
+    if not hot_plan_is_fresh(
+        hot_expiry=budget_state.hot_expiry,
+        expected_expiry=current_expiry_text,
+        planned_at=budget_state.chain_last_fetched_at.get("SPX:front"),
+        now=evaluation_now,
+        max_age_seconds=max(
+            typed_settings.hot_lane.max_plan_age_seconds,
+            2 * front_plan_cadence,
+        ),
+    ):
+        budget_state.hot_symbols = []
+        budget_state.hot_expiry = None
+        budget_state.hot_reference_spot = None
+    request_ceiling = typed_settings.capacity.planned_requests_per_minute
+    requests_before = record_requests(budget_state, count=0, now=evaluation_now)
 
     quote_counts: dict[str, int] = {}
     errors: list[str] = []
     request_count = 0
     chains_fetched: list[str] = []
     chains_skipped: list[str] = []
+    chain_lanes_fetched: list[str] = []
+    chain_lanes_skipped: list[str] = []
+    coverage_summary: dict[str, dict[str, Any]] = {}
     chain_as_of: dict[str, str | None] = {
         canonical: (
             budget_state.chain_last_fetched_at[canonical].isoformat()
@@ -249,71 +179,107 @@ def run(argv: list[str] | None = None, *, now: datetime | None = None) -> int:
         for canonical in chain_canonicals
     }
 
-    for batch in quote_batches(quote_symbols):
-        label = ",".join(batch)
-        try:
-            payload = fetch_quotes(client, batch, settings)
-            request_count += 1
-            snapshot = snapshot_from_quote_payload(payload, batch, received_at=evaluation_now)
-            persist_provider_snapshot(snapshot, storage_settings)
-            quote_counts[f"quotes:{label}"] = snapshot.quote_count
-        except (HTTPError, URLError, TimeoutError, json.JSONDecodeError, ValueError) as exc:
-            errors.append(f"quotes:{label}: {exc}")
+    quote_result = collect_quote_lane(
+        client=client,
+        quote_symbols=quote_symbols,
+        budget_state=budget_state,
+        profile=profile,
+        quota_mode=quota_state.mode,
+        now=evaluation_now,
+        request_ceiling=request_ceiling,
+        requests_used=requests_before + request_count,
+        settings=settings,
+        typed_settings=typed_settings,
+        storage_settings=storage_settings,
+        require_hot_plan=True,
+        already_attempted=False,
+        collect_batches=_collect_quote_batches,
+        persist=persist_provider_snapshot,
+    )
+    request_count += quote_result.request_count
+    quote_counts.update(quote_result.quote_counts)
+    errors.extend(quote_result.errors)
 
-    for symbol in chain_symbols:
-        canonical = canonical_underlier_for_schwab(symbol)
-        interval_seconds = chain_interval_seconds_for(canonical)
-        last_fetched = budget_state.chain_last_fetched_at.get(canonical)
-        if not chain_is_due(
-            last_fetched_at=last_fetched,
-            now=evaluation_now,
-            interval_seconds=interval_seconds,
-        ):
-            chains_skipped.append(canonical)
-            chain_as_of[canonical] = last_fetched.isoformat() if last_fetched is not None else None
-            continue
-        try:
-            strike_count = option_chain_strike_count_for(
-                canonical,
-                settings.option_chain_strike_count,
-            )
-            payload = fetch_chain(
-                client,
-                symbol,
-                settings,
-                now=evaluation_now,
-                strike_count=strike_count,
-            )
-            request_count += 1
-            snapshot = snapshot_from_chain_payload(
-                payload,
-                underlier=canonical,
-                received_at=evaluation_now,
-            )
-            persist_provider_snapshot(snapshot, storage_settings)
-            quote_counts[canonical] = snapshot.quote_count
-            budget_state.chain_last_fetched_at[canonical] = evaluation_now
-            chains_fetched.append(canonical)
-            chain_as_of[canonical] = evaluation_now.isoformat()
-        except (HTTPError, URLError, TimeoutError, json.JSONDecodeError, ValueError) as exc:
-            errors.append(f"{canonical}: {exc}")
+    chain_cycle = collect_chain_cycle(
+        client=client,
+        chain_symbols=chain_symbols,
+        quote_symbols=quote_symbols,
+        current_expiry=current_expiry,
+        next_expiry=next_expiry,
+        now=evaluation_now,
+        profile=profile,
+        quota_mode=quota_state.mode,
+        budget_state=budget_state,
+        settings=settings,
+        typed_settings=typed_settings,
+        storage_settings=storage_settings,
+        available_requests=max(request_ceiling - requests_before - request_count, 0),
+        fetch=fetch_chain,
+        persist=persist_provider_snapshot,
+    )
+    request_count += chain_cycle.request_count
+    quote_counts.update(chain_cycle.quote_counts)
+    errors.extend(chain_cycle.errors)
+    chains_fetched.extend(chain_cycle.chains_fetched)
+    chains_skipped.extend(chain_cycle.chains_skipped)
+    chain_lanes_fetched.extend(chain_cycle.lanes_fetched)
+    chain_lanes_skipped.extend(chain_cycle.lanes_skipped)
+    chain_as_of.update(chain_cycle.chain_as_of)
+    coverage_summary.update(chain_cycle.coverage)
+
+    quote_result = collect_quote_lane(
+        client=client,
+        quote_symbols=quote_symbols,
+        budget_state=budget_state,
+        profile=profile,
+        quota_mode=quota_state.mode,
+        now=evaluation_now,
+        request_ceiling=request_ceiling,
+        requests_used=requests_before + request_count,
+        settings=settings,
+        typed_settings=typed_settings,
+        storage_settings=storage_settings,
+        require_hot_plan=False,
+        already_attempted=quote_result.attempted,
+        collect_batches=_collect_quote_batches,
+        persist=persist_provider_snapshot,
+    )
+    request_count += quote_result.request_count
+    quote_counts.update(quote_result.quote_counts)
+    errors.extend(quote_result.errors)
 
     requests_last_minute = record_requests(
         budget_state,
         count=request_count,
         now=evaluation_now,
     )
-    save_collector_budget_state(state_path, budget_state)
+    gateway_window = _gateway_request_window(client)
+    quota_state = advance_quota_state(
+        quota_state,
+        gateway_window,
+        policy=quota_policy,
+        retry_after_elapsed=(
+            quota_state.mode is QuotaMode.THROTTLED
+            and gateway_window.throttled == 0
+            and gateway_window.failures == 0
+        ),
+    )
+    budget_state.quota_mode = quota_state.mode.value
+    budget_state.quota_consecutive_successes = quota_state.consecutive_successes
+    budget_state.quota_stable_windows = quota_state.stable_windows
+    if budget_state.to_dict() != original_state:
+        save_collector_budget_state(state_path, budget_state)
 
-    if requests_last_minute > REQUEST_BUDGET_WARNING_PER_MINUTE:
+    if requests_last_minute > request_ceiling:
         LOGGER.warning(
             "Schwab collector request budget soft guardrail exceeded: "
             "%s requests in trailing 60s (warning threshold %s/min, gateway cap 120/min)",
             requests_last_minute,
-            REQUEST_BUDGET_WARNING_PER_MINUTE,
+            request_ceiling,
         )
 
-    ok = bool(quote_counts) or bool(chains_skipped)
+    quota_deferred = any("planned_request_ceiling" in error for error in errors)
+    ok = bool(quote_counts) or bool(chains_skipped) or quota_deferred
     summary = {
         "ok": ok,
         "symbols": list(quote_counts.keys()),
@@ -321,9 +287,28 @@ def run(argv: list[str] | None = None, *, now: datetime | None = None) -> int:
         "errors": errors,
         "request_count": request_count,
         "requests_last_minute": requests_last_minute,
+        "scheduled_successes_last_minute": requests_last_minute,
         "chains_fetched": chains_fetched,
         "chains_skipped": chains_skipped,
         "chain_as_of": chain_as_of,
+        "chain_lanes_fetched": chain_lanes_fetched,
+        "chain_lanes_skipped": chain_lanes_skipped,
+        "coverage": coverage_summary,
+        "profile": profile.value,
+        "planned_requests_per_minute": planned_requests_per_minute(
+            profile,
+            typed_settings.cadence,
+        ),
+        "request_ceiling": request_ceiling,
+        "quota_mode": quota_state.mode.value,
+        "gateway_request_window": {
+            "attempts": gateway_window.attempts,
+            "retries": gateway_window.retries,
+            "throttled": gateway_window.throttled,
+            "failures": gateway_window.failures,
+            "response_bytes": gateway_window.response_bytes,
+        },
+        "hot_symbol_count": len(budget_state.hot_symbols),
     }
     print(json.dumps(summary, sort_keys=True))
     return 0 if ok or not quote_symbols and not chain_symbols else 1
@@ -331,6 +316,55 @@ def run(argv: list[str] | None = None, *, now: datetime | None = None) -> int:
 
 def main() -> None:
     raise SystemExit(run())
+
+
+def run_loop(*, planner_tick_seconds: float | None = None) -> int:
+    """Long-running single owner; cadence remains lane-driven inside each cycle."""
+
+    typed_settings = load_app_settings().schwab
+    if planner_tick_seconds is not None and planner_tick_seconds <= 0:
+        raise ValueError("planner tick must be positive")
+    last_emit = 0.0
+    while True:
+        started = time.monotonic()
+        output = StringIO()
+        with redirect_stdout(output):
+            exit_code = run(typed_settings=typed_settings)
+        text = output.getvalue().strip()
+        payload: dict[str, Any] = {}
+        if text:
+            try:
+                parsed = json.loads(text.splitlines()[-1])
+                payload = parsed if isinstance(parsed, dict) else {}
+            except json.JSONDecodeError:
+                payload = {"ok": False, "error": "invalid_collector_output"}
+        now_monotonic = time.monotonic()
+        should_emit = bool(
+            exit_code
+            or payload.get("request_count")
+            or payload.get("errors")
+            or now_monotonic - last_emit >= 30.0
+        )
+        if should_emit:
+            print(text or json.dumps(payload, sort_keys=True), flush=True)
+            last_emit = now_monotonic
+        elapsed = time.monotonic() - started
+        try:
+            profile = CollectionProfile(str(payload.get("profile")))
+        except ValueError:
+            profile = CollectionProfile.OFF_HOURS
+        resolved_tick_seconds = planner_tick_seconds or profile_planner_tick_seconds(
+            profile,
+            typed_settings.cadence,
+        )
+        time.sleep(max(resolved_tick_seconds - elapsed, 0.05))
+
+
+def loop_main() -> None:
+    try:
+        raise SystemExit(run_loop())
+    except KeyboardInterrupt:
+        raise SystemExit(0) from None
 
 
 if __name__ == "__main__":

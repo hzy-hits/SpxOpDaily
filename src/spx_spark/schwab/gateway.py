@@ -25,6 +25,7 @@ from spx_spark.schwab.auth_storage import (
     ExclusiveFileLock,
     token_owner_lock_path,
 )
+from spx_spark.schwab.request_models import RequestWindow, SchwabRequestObservation
 
 
 ALLOWED_MARKET_DATA_PATHS = frozenset(
@@ -141,6 +142,7 @@ class GatewayHealth:
     reauth_required: bool
     last_success_at: float | None
     last_error: str | None
+    request_window: RequestWindow = RequestWindow()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -149,6 +151,13 @@ class GatewayHealth:
             "reauth_required": self.reauth_required,
             "last_success_at": self.last_success_at,
             "last_error": self.last_error,
+            "request_window": {
+                "attempts": self.request_window.attempts,
+                "retries": self.request_window.retries,
+                "throttled": self.request_window.throttled,
+                "failures": self.request_window.failures,
+                "response_bytes": self.request_window.response_bytes,
+            },
         }
 
 
@@ -168,6 +177,7 @@ class SchwabSessionManager:
         self.token_store = AtomicJsonFile(settings.token_file)
         self.owner_lock = ExclusiveFileLock(token_owner_lock_path(settings.token_file))
         self.request_policy = request_policy or SchwabRequestPolicy.from_env()
+        self._monotonic = monotonic
         self._wall_clock = wall_clock
         self._sleep = sleep
         self._rate_limiter = EvenIntervalRateLimiter(
@@ -181,6 +191,7 @@ class SchwabSessionManager:
         self._reauth_required = False
         self._last_success_at: float | None = None
         self._last_error: str | None = None
+        self._observations: list[SchwabRequestObservation] = []
 
     @property
     def ready(self) -> bool:
@@ -194,6 +205,7 @@ class SchwabSessionManager:
                 reauth_required=self._reauth_required,
                 last_success_at=self._last_success_at,
                 last_error=self._last_error,
+                request_window=self._request_window(),
             )
 
     def load(self) -> bool:
@@ -275,9 +287,24 @@ class SchwabSessionManager:
             url = urljoin(self.settings.api_base_url.rstrip("/") + "/", path.lstrip("/"))
             for retry_index in range(self.request_policy.max_retries + 1):
                 self._rate_limiter.acquire()
+                attempted_at = float(self._wall_clock())
+                started = float(self._monotonic())
                 try:
                     response = client.session.get(url, params=params)
                 except Exception as exc:  # noqa: BLE001 - classify without provider details
+                    self._record_observation(
+                        SchwabRequestObservation(
+                            path=path,
+                            attempted_at_epoch=attempted_at,
+                            completed_at_epoch=float(self._wall_clock()),
+                            retry_index=retry_index,
+                            status_code=None,
+                            response_bytes=0,
+                            latency_ms=max((float(self._monotonic()) - started) * 1000.0, 0.0),
+                            retry_after_seconds=None,
+                            outcome=type(exc).__name__,
+                        )
+                    )
                     error_kind = type(exc).__name__
                     with self._lock:
                         self._last_error = error_kind
@@ -293,6 +320,23 @@ class SchwabSessionManager:
                     raise SchwabGatewayRequestError(error_kind) from None
 
                 status = int(response.status_code)
+                retry_after = parse_retry_after_seconds(
+                    response.headers.get("retry-after"),
+                    now=float(self._wall_clock()),
+                )
+                self._record_observation(
+                    SchwabRequestObservation(
+                        path=path,
+                        attempted_at_epoch=attempted_at,
+                        completed_at_epoch=float(self._wall_clock()),
+                        retry_index=retry_index,
+                        status_code=status,
+                        response_bytes=len(response.content),
+                        latency_ms=max((float(self._monotonic()) - started) * 1000.0, 0.0),
+                        retry_after_seconds=retry_after,
+                        outcome="ok" if 200 <= status < 300 else f"http_{status}",
+                    )
+                )
                 if status == 401:
                     with self._lock:
                         if self._client is client:
@@ -355,6 +399,32 @@ class SchwabSessionManager:
 
     def _can_retry(self, retry_index: int) -> bool:
         return retry_index < self.request_policy.max_retries
+
+    def _record_observation(self, observation: SchwabRequestObservation) -> None:
+        with self._lock:
+            self._observations.append(observation)
+            cutoff = float(self._wall_clock()) - 60.0
+            self._observations = [
+                item for item in self._observations if item.attempted_at_epoch >= cutoff
+            ]
+
+    def _request_window(self) -> RequestWindow:
+        cutoff = float(self._wall_clock()) - 60.0
+        observations = [
+            item for item in self._observations if item.attempted_at_epoch >= cutoff
+        ]
+        return RequestWindow(
+            attempts=len(observations),
+            retries=sum(item.retry_index > 0 for item in observations),
+            throttled=sum(item.status_code == HTTP_TOO_MANY_REQUESTS for item in observations),
+            failures=sum(
+                item.status_code is None
+                or item.status_code < 200
+                or item.status_code >= 300
+                for item in observations
+            ),
+            response_bytes=sum(item.response_bytes for item in observations),
+        )
 
     def _retry_delay(self, response: Any, retry_index: int) -> float | None:
         backoff = self.request_policy.backoff_seconds(retry_index)

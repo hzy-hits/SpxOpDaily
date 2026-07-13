@@ -19,7 +19,13 @@ from spx_spark.settings.ibkr import IbkrSettingsSlice
 from spx_spark.settings.market_data import MarketDataSettings
 from spx_spark.settings.runtime import RuntimeSettingsSlice
 from spx_spark.settings.schema import AppSettings, SettingSource
-from spx_spark.settings.schwab import SchwabSettingsSlice
+from spx_spark.settings.schwab import (
+    SchwabCadenceSettings,
+    SchwabCapacitySettings,
+    SchwabHotLaneSettings,
+    SchwabSettingsSlice,
+    SchwabWideChainSettings,
+)
 from spx_spark.settings.shock import ShockSettings
 from spx_spark.settings.storage import StorageSettingsSlice
 
@@ -262,7 +268,73 @@ def load_settings(
             get("schwab.collection.request_budget_warning_per_minute")
         ),
         collection_enabled=bool(get("schwab.collection.enabled")),
+        service_loop_enabled=bool(get("schwab.collection.service_loop_enabled")),
         collection_interval_seconds=int(get("schwab.collection.interval_seconds")),
+        capacity=SchwabCapacitySettings(
+            nominal_requests_per_minute=int(
+                get("schwab.request_policy.requests_per_minute")
+            ),
+            planned_requests_per_minute=int(
+                get("schwab.collection.planned_requests_per_minute")
+            ),
+            max_symbols_per_quote_request=int(get("schwab.quote_batch_size")),
+        ),
+        cadence=SchwabCadenceSettings(
+            off_hours_quote_seconds=float(
+                get("schwab.collection.cadence.off_hours_quote_seconds")
+            ),
+            off_hours_front_chain_seconds=float(
+                get("schwab.collection.cadence.off_hours_front_chain_seconds")
+            ),
+            off_hours_next_chain_seconds=float(
+                get("schwab.collection.cadence.off_hours_next_chain_seconds")
+            ),
+            off_hours_confirmation_chain_seconds=float(
+                get("schwab.collection.cadence.off_hours_confirmation_chain_seconds")
+            ),
+            normal_quote_seconds=float(get("schwab.collection.cadence.normal_quote_seconds")),
+            normal_front_chain_seconds=float(
+                get("schwab.collection.cadence.normal_front_chain_seconds")
+            ),
+            active_quote_seconds=float(get("schwab.collection.cadence.active_quote_seconds")),
+            active_front_chain_seconds=float(
+                get("schwab.collection.cadence.active_front_chain_seconds")
+            ),
+            burst_quote_seconds=float(get("schwab.collection.cadence.burst_quote_seconds")),
+            burst_front_chain_seconds=float(
+                get("schwab.collection.cadence.burst_front_chain_seconds")
+            ),
+            next_chain_seconds=float(get("schwab.collection.cadence.next_chain_seconds")),
+            spy_xsp_chain_seconds=float(
+                get("schwab.collection.cadence.spy_xsp_chain_seconds")
+            ),
+            qqq_iwm_chain_seconds=float(
+                get("schwab.collection.cadence.qqq_iwm_chain_seconds")
+            ),
+        ),
+        wide_chain=SchwabWideChainSettings(
+            strike_count_candidates=tuple(
+                int(item) for item in get("schwab.collection.wide_chain.strike_count_candidates")
+            ),
+            min_usable_strikes=int(get("schwab.collection.wide_chain.min_usable_strikes")),
+            min_two_sided_ratio=float(
+                get("schwab.collection.wide_chain.min_two_sided_ratio")
+            ),
+            expected_move_multiple=float(
+                get("schwab.collection.wide_chain.expected_move_multiple")
+            ),
+            min_width_points=float(get("schwab.collection.wide_chain.min_width_points")),
+            max_gap_multiple=float(get("schwab.collection.wide_chain.max_gap_multiple")),
+        ),
+        hot_lane=SchwabHotLaneSettings(
+            minimum_dynamic_symbol_reserve=int(
+                get("schwab.collection.hot_lane.dynamic_symbol_reserve")
+            ),
+            max_plan_age_seconds=float(get("schwab.collection.hot_lane.max_plan_age_seconds")),
+            recenter_drift_points=float(
+                get("schwab.collection.hot_lane.recenter_drift_points")
+            ),
+        ),
     )
     alerts = AlertSettings(
         steven_enabled=bool(get("steven.enabled")),

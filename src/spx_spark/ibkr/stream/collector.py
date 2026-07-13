@@ -17,6 +17,10 @@ from spx_spark.ibkr.atm_reference import AtmReferenceController
 from spx_spark.ibkr.option_replan import OptionReplanController
 from spx_spark.ibkr.slow_poll import SlowPollScheduler
 from spx_spark.ibkr.stream import deps as stream_deps
+from spx_spark.ibkr.stream.capacity_tracker import (
+    CAPACITY_STATE_NAME,
+    MarketDataCapacityTracker,
+)
 from spx_spark.ibkr.stream.flush_ops import FlushOps
 from spx_spark.ibkr.stream.models import OptionSubscriptionPlan
 from spx_spark.ibkr.stream.option_subscription_ops import OptionSubscriptionOps
@@ -62,6 +66,10 @@ class StreamCollector(
         self.force = force
         self.skip_options = skip_options or stream_settings.skip_options
         self.provider_failover_settings = ProviderFailoverSettings.from_env()
+        self.capacity_tracker = MarketDataCapacityTracker(
+            Path(storage_settings.data_root) / "state" / CAPACITY_STATE_NAME,
+            configured_capacity=stream_settings.market_data_line_capacity,
+        )
 
         self.base_subs: dict[str, tuple[Any, VerifyRow]] = {}
         self.hot_subs: dict[str, tuple[Any, VerifyRow]] = {}
@@ -112,4 +120,3 @@ class StreamCollector(
         self.connection_generation = 0
 
         ib.errorEvent += self._on_error
-

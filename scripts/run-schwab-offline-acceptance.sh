@@ -20,6 +20,8 @@ fi
   tests/test_schwab_collector.py \
   tests/test_schwab_gateway.py \
   tests/test_schwab_verifier.py \
+  tests/schwab \
+  tests/test_ibkr_quota_plan.py \
   tests/test_provider_adapter.py \
   tests/test_marketdata.py \
   tests/test_storage.py \
@@ -32,4 +34,6 @@ fi
   tests/test_schwab_collector.py \
   tests/test_schwab_gateway.py \
   tests/test_schwab_verifier.py \
+  tests/schwab \
+  tests/test_ibkr_quota_plan.py \
   tests/data_platform/test_storage_research_e2e.py
