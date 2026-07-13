@@ -2248,7 +2248,8 @@ def test_deliver_trade_push_routes_ops_to_bark_ops_group_not_feishu(tmp_path) ->
         trade_sinks = deliver_trade_push(
             settings,
             title="市场状态",
-            text="## 结论\n**剧本维持**\n\n## 盯\n7455",
+            text="摘要正文",
+            feishu_text="## 完整报告\n**Greeks、墙位和条件计划**",
             kind="status",
             lane="trade",
             friend=False,
@@ -2266,8 +2267,10 @@ def test_deliver_trade_push_routes_ops_to_bark_ops_group_not_feishu(tmp_path) ->
     assert any(s.sink == "bark" and s.ok for s in trade_sinks)
     assert bark_posts[1]["group"] == "spx-spark"
     assert "markdown" in bark_posts[1]
+    assert bark_posts[1]["markdown"] == "摘要正文"
     assert feishu_posts[0]["msg_type"] == "interactive"
     assert feishu_posts[0]["card"]["header"]["title"]["content"] == "市场状态"
+    assert "完整报告" in feishu_posts[0]["card"]["body"]["elements"][0]["content"]
 
 
 def test_send_bark_message_accepts_markdown_and_group_override(tmp_path) -> None:

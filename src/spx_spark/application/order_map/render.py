@@ -80,6 +80,16 @@ def _market_feature_lines(payload: dict[str, Any]) -> list[str]:
     es = market.get("es") if isinstance(market.get("es"), dict) else {}
     volume = market.get("volume") if isinstance(market.get("volume"), dict) else {}
     cross = market.get("cross_asset") if isinstance(market.get("cross_asset"), dict) else {}
+    alignment = {
+        "price_volume_aligned": "量价同向",
+        "price_without_volume_confirmation": "价格缺少成交量确认",
+        "volume_without_price_progress": "放量但价格未推进",
+        "flat": "价量平稳",
+        "unavailable": "窗口不足",
+    }.get(str(volume.get("price_volume_alignment_5m") or ""), "窗口不足")
+    volume_provider = volume.get("recent_volume_provider") or cross.get(
+        "selected_es_provider"
+    )
     lines = [
         (
             "ES统一帧: "
@@ -90,9 +100,9 @@ def _market_feature_lines(payload: dict[str, Any]) -> list[str]:
         ),
         (
             f"量价帧: 5m增量 {_dash(volume.get('volume_delta_5m'))}; "
-            f"{volume.get('price_volume_alignment_5m') or 'unavailable'}; "
+            f"{alignment}; "
             f"ES/SPY {cross.get('es_spy_direction_confirmation_15m') or 'unavailable'}; "
-            f"源 {cross.get('selected_es_provider') or '-'}"
+            f"源 {volume_provider or '-'}"
         ),
     ]
     if isinstance(options, dict):
@@ -101,16 +111,25 @@ def _market_feature_lines(payload: dict[str, Any]) -> list[str]:
             options.get("volatility") if isinstance(options.get("volatility"), dict) else {}
         )
         l1 = options.get("l1") if isinstance(options.get("l1"), dict) else {}
-        l1_metrics = l1.get("metrics") if isinstance(l1.get("metrics"), dict) else {}
         lines.append(
             f"期权统一帧: wall迁移 P{_dash(structure.get('put_wall_migration_points'))}/"
             f"C{_dash(structure.get('call_wall_migration_points'))}; "
             f"ATM IV 5/15/60m {_dash(option_vol.get('atm_iv_change_5m'))}/"
             f"{_dash(option_vol.get('atm_iv_change_15m'))}/"
             f"{_dash(option_vol.get('atm_iv_change_60m'))}; "
-            f"L1流动性 {l1_metrics.get('liquidity_score') or '-'}"
+            f"L1流动性 {_l1_liquidity_text(l1)}"
         )
     return lines
+
+
+def _l1_liquidity_text(l1: dict[str, Any]) -> str:
+    quality = str(l1.get("quality") or "unavailable")
+    metrics = l1.get("metrics") if isinstance(l1.get("metrics"), dict) else {}
+    score = metrics.get("liquidity_score")
+    if not isinstance(score, int | float):
+        return "不可用"
+    suffix = "（降级）" if quality == "degraded" else ""
+    return f"{_dash(score)}{suffix}"
 
 
 def _max_pain_line(payload: dict[str, Any]) -> str | None:

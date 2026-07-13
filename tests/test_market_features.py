@@ -114,6 +114,37 @@ def test_volume_reset_and_insufficient_history_do_not_publish_percentile() -> No
     assert frame.volume["pace_baseline_ready"] is False
 
 
+def test_volume_alignment_does_not_mix_incomplete_price_and_volume_windows() -> None:
+    now = datetime(2026, 7, 13, 15, 0, tzinfo=UTC)
+    session_id = globex_session_id(now)
+    samples = [
+        _market_sample(
+            now - timedelta(minutes=7),
+            session_id=session_id,
+            es=7590.0,
+            volume=100_000.0,
+        ),
+        _market_sample(now, session_id=session_id, es=7600.0, volume=110_000.0),
+    ]
+
+    frame = build_minute_market_frame(
+        samples,
+        now=now,
+        expected_move_points=None,
+        atm_iv=None,
+        structural_levels={},
+        volume_baselines={},
+        policy=MarketFeatureSettings(),
+    )
+
+    assert frame.volume["volume_delta_5m"] is None
+    assert frame.volume["price_volume_alignment_5m"] == "unavailable"
+    assert (
+        frame.volume["price_volume_alignment_reason_5m"]
+        == "insufficient_synchronized_window"
+    )
+
+
 def test_l1_helpers_measure_imbalance_and_only_compare_synchronized_providers() -> None:
     now = datetime(2026, 7, 13, 12, 0, tzinfo=UTC)
     instrument = InstrumentId.option(

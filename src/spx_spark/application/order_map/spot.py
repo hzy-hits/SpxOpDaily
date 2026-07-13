@@ -100,8 +100,13 @@ def resolve_spx_spot(
     )
     chain_price = _actionable_chain_spot(state, options_map, as_of=now)
     tradfi_price, tradfi_source = _actionable_tradfi_spot(state, as_of=now)
-    candidate_price = chain_price if chain_price is not None else tradfi_price
-    candidate_source = "chain_implied" if chain_price is not None else tradfi_source
+    outside_cash = not spx_cash_session_open(now)
+    if not outside_cash and tradfi_price is not None:
+        candidate_price, candidate_source = tradfi_price, tradfi_source
+    elif chain_price is not None:
+        candidate_price, candidate_source = chain_price, "chain_implied"
+    else:
+        candidate_price, candidate_source = tradfi_price, tradfi_source
 
     divergence_bps = None
     gate_state = "anchor_only"
@@ -151,7 +156,6 @@ def resolve_spx_spot(
     if not pricing_allowed and warnings is not None:
         warnings.append(f"pricing blocked: {gate_state} ({reason})")
 
-    outside_cash = not spx_cash_session_open(now)
     if hl_price is not None and (outside_cash or candidate_price is None):
         research_price, research_source = hl_price, "hl_perp"
     elif candidate_price is not None:

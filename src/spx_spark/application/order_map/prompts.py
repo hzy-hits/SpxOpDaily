@@ -15,7 +15,14 @@ from spx_spark.application.order_map.render import (
     _es_volume_line,
     _fmt_prob,
     _globex_trend_line,
+    _greeks_reference_line,
+    _hl_volume_line,
+    _market_feature_lines,
+    _l1_liquidity_text,
+    _rn_density_line,
+    _wall_ladder_lines,
     render_research_only_template,
+    render_template,
 )
 from spx_spark.application.order_map.state import _session_phase_of
 from spx_spark.notifier.llm_writer import previous_push_json
@@ -297,8 +304,7 @@ def _compact_option_line(payload: dict[str, Any]) -> str | None:
     ]
     if isinstance(options, dict):
         l1 = options.get("l1") if isinstance(options.get("l1"), dict) else {}
-        metrics = l1.get("metrics") if isinstance(l1.get("metrics"), dict) else {}
-        parts.append(f"L1流动性 {_dash(metrics.get('liquidity_score'))}")
+        parts.append(f"L1流动性 {_l1_liquidity_text(l1)}")
     return "波动  " + "｜".join(parts)
 
 
@@ -424,6 +430,134 @@ def render_status_template(
     if isinstance(warnings, list) and warnings:
         lines.append(f"数据  {'；'.join(str(item) for item in warnings)}")
     return "\n".join(lines)
+
+
+def _detail_candidate_lines(payload: dict[str, Any]) -> list[str]:
+    full_lines = render_template(payload).splitlines()
+    start = next(
+        (index for index, line in enumerate(full_lines) if re.match(r"^1\) \[地图候选\]", line)),
+        None,
+    )
+    if start is None:
+        return []
+    rendered: list[str] = []
+    detail_labels = {
+        "触达概率": "触达与定价",
+        "BS审计": "BS 审计",
+        "条件执行": "条件执行",
+        "时效": "时效",
+        "先手挡": "先手挡",
+    }
+    for raw in full_lines[start:]:
+        line = raw.strip()
+        candidate = re.match(r"^(\d+)\) \[地图候选\] (.+)$", line)
+        if candidate:
+            rendered.append(f"### 计划 {candidate.group(1)}")
+            rendered.append(f"**{candidate.group(2)}**")
+            continue
+        if line.startswith("注:"):
+            rendered.append(f"> **说明**　{line.removeprefix('注:').strip()}")
+            continue
+        label = next((key for key in detail_labels if line.startswith(key)), None)
+        if label is not None:
+            content = line.removeprefix(label).removeprefix(":").strip()
+            rendered.append(f"- **{detail_labels[label]}**　{content}")
+        elif line:
+            rendered.append(line)
+    return rendered
+
+
+def _detail_ladder_lines(payload: dict[str, Any]) -> list[str]:
+    rendered: list[str] = []
+    for raw in _wall_ladder_lines(payload):
+        line = raw.strip()
+        if line.endswith(":"):
+            rendered.append(f"**{line.removesuffix(':')}**")
+        elif line:
+            rendered.append(f"- {line}")
+    return rendered
+
+
+def render_feishu_status_detail_template(
+    payload: dict[str, Any],
+    changes: list[str],
+    now_utc: datetime,
+) -> str:
+    """Full-fidelity status report arranged as Feishu-readable sections."""
+    if payload.get("research_only") is True:
+        return render_status_template(payload, changes, now_utc)
+
+    compact_blocks = render_status_template(payload, changes, now_utc).split("\n\n")
+    overview = compact_blocks[0].splitlines()
+    header = overview.pop(0)
+    phase = _session_phase_of(payload, now_utc)
+    if traits := str(phase.get("traits") or "").strip():
+        overview.append(f"**时段提示**　{traits}")
+    change_line = next(
+        (
+            line
+            for block in compact_blocks
+            for line in block.splitlines()
+            if line.startswith("变化  ")
+        ),
+        None,
+    )
+    if change_line:
+        overview.append(change_line)
+
+    greek_and_vol = [
+        line
+        for line in (
+            _greeks_reference_line(payload),
+            _compact_option_line(payload),
+        )
+        if line
+    ]
+    vol = payload.get("vol_context") if isinstance(payload.get("vol_context"), dict) else {}
+    greek_and_vol.append(
+        f"Vol全景: VIX {_dash(vol.get('vix'))}｜VIX1D {_dash(vol.get('vix1d'))}｜"
+        f"VVIX {_dash(vol.get('vvix'))}｜SKEW {_dash(vol.get('skew'))}"
+    )
+
+    market_confirmation = [
+        line
+        for line in (
+            _globex_trend_line(payload),
+            *_market_feature_lines(payload),
+            _es_volume_line(payload),
+            _hl_volume_line(payload),
+        )
+        if line
+    ]
+
+    full_lines = render_template(payload).splitlines()
+    context_prefixes = (
+        "SPX 代理:",
+        "SPX 结构:",
+        "ES 等价值位:",
+        "位置判断:",
+        "关键位决策:",
+        "结构口径:",
+    )
+    key_level_context = [line for line in full_lines if line.startswith(context_prefixes)]
+    density = _rn_density_line(payload)
+
+    sections: list[tuple[str, list[str]]] = [
+        ("市场概览", overview),
+        ("Greeks 与波动", greek_and_vol),
+        ("ES 与跨资产确认", market_confirmation),
+        ("关键位状态", key_level_context),
+        ("墙位阶梯", _detail_ladder_lines(payload)),
+        ("风险中性分布", [density] if density else []),
+        ("条件计划与 BS 审计", _detail_candidate_lines(payload)),
+    ]
+    blocks = [header]
+    blocks.extend(
+        f"## {title}\n" + "\n".join(lines)
+        for title, lines in sections
+        if lines
+    )
+    return "\n\n".join(blocks)
 
 
 def build_status_prompt(

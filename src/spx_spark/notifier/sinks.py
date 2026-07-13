@@ -344,6 +344,7 @@ def deliver_trade_push(
     kind: str,
     lane: str = "trade",
     friend: bool = False,
+    feishu_text: str | None = None,
     runner: CommandRunner = default_runner,
 ) -> list[SinkResult]:
     """Fan out one writer text across Feishu (trade) + Bark main (+ friend).
@@ -366,7 +367,7 @@ def deliver_trade_push(
     is_trade = lane == "trade"
 
     if settings.feishu_enabled and is_trade:
-        card = build_feishu_card(text, title=title, kind=kind, lane=lane)
+        card = build_feishu_card(feishu_text or text, title=title, kind=kind, lane=lane)
         sinks.append(send_feishu_card(settings, card))
 
     if settings.bark_enabled:

@@ -1246,7 +1246,7 @@ def test_resolve_spx_spot_keeps_hl_research_separate_from_chain_pricing() -> Non
     assert resolution.pricing_allowed is True
     assert resolution.gate_state == "basis_ok"
 
-    # During cash hours the chain is both the research and pricing reference.
+    # During cash hours the live SPX index is the level and pricing coordinate.
     rth = datetime(2026, 7, 7, 15, 0, tzinfo=timezone.utc)  # 11:00 ET
     rth_state = make_state(
         Quote(
@@ -1265,6 +1265,15 @@ def test_resolve_spx_spot_keeps_hl_research_separate_from_chain_pricing() -> Non
             received_at=rth,
             quality=MarketDataQuality.LIVE,
             mark=7520.0,
+            quote_time=rth,
+        ),
+        Quote(
+            instrument=InstrumentId.index("SPX"),
+            provider=Provider.IBKR,
+            provider_symbol="index:SPX",
+            received_at=rth,
+            quality=MarketDataQuality.LIVE,
+            mark=7532.0,
             quote_time=rth,
         ),
         make_option(
@@ -1294,8 +1303,10 @@ def test_resolve_spx_spot_keeps_hl_research_separate_from_chain_pricing() -> Non
         warnings=warnings_rth,
         now=rth,
     )
-    assert rth_resolution.research_source == "chain_implied"
-    assert rth_resolution.pricing_source == "chain_implied"
+    assert rth_resolution.research_source == "index:SPX"
+    assert rth_resolution.research_price == pytest.approx(7532.0)
+    assert rth_resolution.pricing_source == "index:SPX"
+    assert rth_resolution.pricing_price == pytest.approx(7532.0)
 
 
 def test_resolve_spx_spot_blocks_model_pricing_when_hl_basis_warns() -> None:
@@ -1673,6 +1684,11 @@ def test_globex_status_uses_writer_and_trade_delivery(monkeypatch, tmp_path) -> 
     )
     monkeypatch.setattr(
         order_map_module,
+        "render_feishu_status_detail_template",
+        lambda *args: "deterministic research status",
+    )
+    monkeypatch.setattr(
+        order_map_module,
         "generate_push_text",
         lambda *args, **kwargs: ("written globex context", "deepseek"),
     )
@@ -1682,8 +1698,15 @@ def test_globex_status_uses_writer_and_trade_delivery(monkeypatch, tmp_path) -> 
         classmethod(lambda cls: object()),
     )
 
-    def deliver(settings, *, title, text, kind, lane, friend, runner):
-        captured.update(title=title, text=text, kind=kind, lane=lane, friend=friend)
+    def deliver(settings, *, title, text, kind, lane, friend, feishu_text, runner):
+        captured.update(
+            title=title,
+            text=text,
+            kind=kind,
+            lane=lane,
+            friend=friend,
+            feishu_text=feishu_text,
+        )
         return [
             SimpleNamespace(sink="bark", ok=True, attempted=True),
             SimpleNamespace(sink="feishu", ok=True, attempted=True),
@@ -1712,6 +1735,7 @@ def test_globex_status_uses_writer_and_trade_delivery(monkeypatch, tmp_path) -> 
         "kind": "status",
         "lane": "trade",
         "friend": True,
+        "feishu_text": "deterministic research status",
     }
 
 
@@ -2407,6 +2431,7 @@ def test_render_status_template_limits_candidates_to_nearest_two() -> None:
         "vol_context": {},
         "candidates": [
             {
+                "play": "put_wall_bounce_call",
                 "level": 7550.0,
                 "strike": 7550.0,
                 "right": "C",
@@ -2416,6 +2441,7 @@ def test_render_status_template_limits_candidates_to_nearest_two() -> None:
                 "execution_quote_status": "executable",
             },
             {
+                "play": "call_wall_fade_put",
                 "level": 7575.0,
                 "strike": 7575.0,
                 "right": "P",
@@ -2425,6 +2451,7 @@ def test_render_status_template_limits_candidates_to_nearest_two() -> None:
                 "execution_quote_status": "executable",
             },
             {
+                "play": "flip_reclaim_call",
                 "level": 7525.0,
                 "strike": 7525.0,
                 "right": "C",
@@ -2448,8 +2475,75 @@ def test_render_status_template_limits_candidates_to_nearest_two() -> None:
     assert "SPXW 7525C" not in text
     assert text.count("当前不可预挂") == 1
     assert "【条件计划｜标的触发后执行】" in text
-    assert "计划1·Call候选" in text
-    assert "计划2·Put候选" in text
+    assert "计划1·支撑反弹" in text
+    assert "计划2·冲墙回落" in text
+
+    from spx_spark.application.order_map.prompts import (
+        render_feishu_status_detail_template,
+    )
+
+    detail = render_feishu_status_detail_template(
+        payload,
+        [],
+        datetime(2026, 7, 13, 14, 0, tzinfo=timezone.utc),
+    )
+    assert "## 市场概览" in detail
+    assert "## ES 与跨资产确认" not in detail  # unavailable inputs are not invented
+    assert "## 条件计划与 BS 审计" in detail
+    assert "### 计划 1" in detail
+    assert "**条件执行**" in detail
+
+
+def test_market_feature_report_uses_consistent_quality_and_volume_source() -> None:
+    from spx_spark.application.order_map.render import _market_feature_lines
+
+    payload = {
+        "minute_market_frame": {
+            "es": {},
+            "volume": {
+                "volume_delta_5m": 9676,
+                "price_volume_alignment_5m": "unavailable",
+                "recent_volume_provider": "ibkr",
+            },
+            "cross_asset": {
+                "es_spy_direction_confirmation_15m": "confirmed",
+            },
+        },
+        "option_structure_frame": {
+            "structure": {},
+            "volatility": {},
+            "l1": {
+                "quality": "unavailable",
+                "contract_count": 0,
+                "metrics": {"liquidity_score": None},
+            },
+        },
+    }
+
+    lines = _market_feature_lines(payload)
+
+    assert "窗口不足" in lines[1]
+    assert "源 ibkr" in lines[1]
+    assert "L1流动性 不可用" in lines[2]
+
+
+def test_recent_market_frame_es_fills_short_quote_rotation_gap() -> None:
+    from spx_spark.application.order_map.service import _recent_market_frame_es
+
+    now = datetime(2026, 7, 13, 15, 6, tzinfo=timezone.utc)
+    frame = {
+        "as_of": (now - timedelta(seconds=61)).isoformat(),
+        "quality": "ready",
+        "es": {"price": 7594.25, "provider": "ibkr"},
+    }
+
+    assert _recent_market_frame_es(frame, now=now, max_age_seconds=120) == (
+        7594.25,
+        "ibkr",
+    )
+    assert _recent_market_frame_es(
+        frame, now=now + timedelta(minutes=3), max_age_seconds=120
+    ) == (None, None)
 
 
 def test_send_order_map_queues_on_feishu_failure(tmp_path: Path, monkeypatch) -> None:

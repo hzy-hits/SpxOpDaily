@@ -298,9 +298,11 @@ def volume_features(
     points = by_provider.get(recent_provider, _volume_points(samples))
     session_points = by_provider.get(session_provider, points)
     deltas: dict[str, float | None] = {}
+    window_points: dict[int, tuple[Any, Any] | None] = {}
     for minutes in (1, 5, 15):
-        reference = _point_before(points, as_utc(now) - timedelta(minutes=minutes))
-        current = points[-1] if points else None
+        pair = _complete_volume_window(points, minutes=minutes)
+        window_points[minutes] = pair
+        reference, current = pair if pair is not None else (None, None)
         delta = None
         if reference and current and current[1] >= reference[1]:
             delta = current[1] - reference[1]
@@ -333,7 +335,13 @@ def volume_features(
     percentile = None
     if pace is not None and len(history_values) >= required_sessions:
         percentile = sum(value <= pace for value in history_values) / len(history_values)
-    price_delta = _return([(at, price, {}) for at, _, price in points], as_utc(now), 5)
+    five_minute_window = window_points[5]
+    price_delta = (
+        five_minute_window[1][2] - five_minute_window[0][2]
+        if five_minute_window is not None
+        else None
+    )
+    alignment = _alignment(price_delta, deltas["volume_delta_5m"])
     return {
         **deltas,
         "pace_5m_per_minute": pace,
@@ -347,7 +355,10 @@ def volume_features(
             if recent_vwap is not None and earlier_vwap is not None
             else None
         ),
-        "price_volume_alignment_5m": _alignment(price_delta, deltas["volume_delta_5m"]),
+        "price_volume_alignment_5m": alignment,
+        "price_volume_alignment_reason_5m": (
+            None if alignment != "unavailable" else "insufficient_synchronized_window"
+        ),
         "session_reset_detected": any(cur[1] < prev[1] for prev, cur in zip(points, points[1:])),
         "recent_volume_provider": recent_provider,
         "session_vwap_provider": session_provider,
@@ -678,6 +689,23 @@ def _volume_points(
         if at is not None and volume is not None and price is not None:
             points.append((at, volume, price))
     return points
+
+
+def _complete_volume_window(
+    points: list[tuple[datetime, float, float]], *, minutes: int
+) -> tuple[tuple[datetime, float, float], tuple[datetime, float, float]] | None:
+    """Return synchronized cumulative-volume and price endpoints for one window."""
+    if not points:
+        return None
+    current = points[-1]
+    target = current[0] - timedelta(minutes=minutes)
+    reference = _point_before(points, target)
+    if reference is None:
+        return None
+    tolerance = max(90.0, minutes * 12.0)
+    if (target - reference[0]).total_seconds() > tolerance:
+        return None
+    return reference, current
 
 
 def _range_payload(

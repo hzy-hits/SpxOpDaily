@@ -31,6 +31,7 @@ from spx_spark.application.order_map.prompts import (
     actionable_writer_output_valid,
     build_status_prompt,
     globex_writer_output_valid,
+    render_feishu_status_detail_template,
     render_status_template,
 )
 from spx_spark.application.order_map.pricing_audit import (
@@ -381,6 +382,21 @@ def _payload_has_retryable_candidate_gap(payload: dict[str, Any]) -> bool:
     )
 
 
+def _recent_market_frame_es(
+    frame: dict[str, Any], *, now: datetime, max_age_seconds: float
+) -> tuple[float | None, str | None]:
+    if frame.get("quality") == "unavailable":
+        return None, None
+    try:
+        as_of = datetime.fromisoformat(str(frame.get("as_of")))
+    except ValueError:
+        return None, None
+    if abs((now - as_of).total_seconds()) > max_age_seconds:
+        return None, None
+    es = frame.get("es") if isinstance(frame.get("es"), dict) else {}
+    return finite_float(es.get("price")), str(es.get("provider") or "") or None
+
+
 def build_order_payload_with_retry(
     storage_settings: StorageSettings,
     *,
@@ -397,7 +413,8 @@ def build_order_payload_with_retry(
     attempt rebuilds the whole payload against an advancing evaluation time.
     """
     payload: dict[str, Any] = {}
-    policy = load_app_settings().order_map
+    app = load_app_settings()
+    policy = app.order_map
     state: LatestState | None = None
     started_at = time_module.monotonic()
     evaluation_now = now
@@ -423,15 +440,28 @@ def build_order_payload_with_retry(
                     "source": context_source,
                     "executable": False,
                 }
+        payload["globex_trend"] = load_trend_state(trend_state_path(storage_settings.data_root))
+        feature_paths = projection_paths(storage_settings.data_root)
+        market_frame = load_json(feature_paths["market"])
+        payload["minute_market_frame"] = market_frame
+        payload["option_structure_frame"] = load_json(feature_paths["option"])
+        payload["decision_context"] = load_json(feature_paths["decision"])
+        if payload.get("es_last") is None:
+            es_price, es_provider = _recent_market_frame_es(
+                market_frame,
+                now=evaluation_now,
+                max_age_seconds=max(
+                    app.market_features.interval_seconds * 2,
+                    app.market_features.max_quote_age_seconds,
+                ),
+            )
+            if es_price is not None:
+                payload["es_last"] = es_price
+                payload["es_last_source"] = f"minute_frame:{es_provider or 'unknown'}"
         payload["context_cross_checks"] = {
             "es": payload.get("es_last"),
             "hyperliquid": payload.get("hl_sp500_perp"),
         }
-        payload["globex_trend"] = load_trend_state(trend_state_path(storage_settings.data_root))
-        feature_paths = projection_paths(storage_settings.data_root)
-        payload["minute_market_frame"] = load_json(feature_paths["market"])
-        payload["option_structure_frame"] = load_json(feature_paths["option"])
-        payload["decision_context"] = load_json(feature_paths["decision"])
         attach_es_volume_signal(
             payload,
             state,
@@ -472,6 +502,7 @@ def run_status(
     fingerprint = payload_fingerprint(payload)
     changes = material_changes(previous.get("fingerprint"), fingerprint)
     template = render_status_template(payload, changes, now)
+    feishu_template = render_feishu_status_detail_template(payload, changes, now)
 
     if args.dry_run:
         print(template)
@@ -502,6 +533,7 @@ def run_status(
         kind="status",
         lane="trade",
         friend=True,
+        feishu_text=feishu_template,
         runner=runner,
     )
     delivered_ok = any_delivery_ok(delivery_sinks)

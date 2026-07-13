@@ -287,9 +287,14 @@ def build_l1_microstructure(
     )
     two_sided_ratio = len(two_sided) / len(selected) if selected else 0.0
     spread_component = max(0.0, 1.0 - (spread_p90 or 10_000.0) / 10_000.0)
-    liquidity_score = round(
-        100 * (0.45 * two_sided_ratio + 0.25 * fresh_ratio + 0.30 * spread_component),
-        1,
+    liquidity_score = (
+        round(
+            100
+            * (0.45 * two_sided_ratio + 0.25 * fresh_ratio + 0.30 * spread_component),
+            1,
+        )
+        if selected
+        else None
     )
     quality = FrameQuality.READY if selected and two_sided_ratio >= 0.75 else (
         FrameQuality.DEGRADED if selected else FrameQuality.UNAVAILABLE
@@ -318,6 +323,7 @@ def build_l1_microstructure(
             "fresh_candidate_count": len(candidates),
             "common_contract_count": common,
             "provider_pair_count": len(divergences),
+            "reason": None if selected else "no_fresh_option_quotes",
         },
     )
     return frame, current_contracts
