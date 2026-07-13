@@ -93,8 +93,15 @@ def alert_from_event(event: dict[str, Any]) -> Alert:
     target = str(event["to_regime"])
     prior = str(event["from_regime"])
     direction = "偏空" if target == "bearish" else "偏多"
+    observed_at = as_utc(datetime.fromisoformat(str(event["at"])))
+    session_label = "RTH" if DEFAULT_MARKET_CALENDAR.is_rth_open(observed_at) else "Globex"
+    session_context = (
+        "当前处于 SPX 现金交易时段，ES 是连续领先确认源；不得按夜盘薄流动性解释。"
+        if session_label == "RTH"
+        else "当前处于现金盘外，ES 路径用于 Globex 连续价格发现。"
+    )
     detail = (
-        f"ES Globex 趋势确认切换：{REGIME_LABELS_CN.get(prior, prior)} → "
+        f"ES {session_label} 趋势确认切换：{REGIME_LABELS_CN.get(prior, prior)} → "
         f"{REGIME_LABELS_CN.get(target, target)}，当前 {float(event['price']):.2f}。"
         f"15m {format_points(metrics.get('return_15m_points'))}，"
         f"60m {format_points(metrics.get('return_60m_points'))}，"
@@ -103,13 +110,13 @@ def alert_from_event(event: dict[str, Any]) -> Alert:
         f"{format_points(metrics.get('drawdown_from_regime_high_points'))}，"
         f"距当前趋势腿低点 "
         f"{format_points(metrics.get('rebound_from_regime_low_points'))}。"
-        f"当前路径判断：{direction}；这是趋势状态切换，不是自动下单。"
+        f"当前路径判断：{direction}；{session_context}这是趋势状态切换，不是自动下单。"
     )
     return Alert(
         severity="high",
         kind="globex_trend_transition",
         instrument_id="future:ES",
-        title=f"ES Globex {REGIME_LABELS_CN.get(target, target)}确认",
+        title=f"ES {session_label} {REGIME_LABELS_CN.get(target, target)}确认",
         detail=detail,
         provider=str(event.get("provider") or ""),
         quality="live",

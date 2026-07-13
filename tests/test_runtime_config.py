@@ -58,6 +58,8 @@ def test_schwab_instrument_table_owns_index_and_trading_class_aliases() -> None:
     assert runtime_value("ibkr_stream.max_option_lines") == 78
     assert runtime_value("sampling.hot_window_points") == 55
     assert runtime_value("schwab.collection.request_budget_warning_per_minute") == 84
+    assert runtime_value("schwab.quote_symbol_capacity") == 500
+    assert runtime_value("schwab.quote_batch_size") == 80
 
 
 def test_runtime_provider_priority_makes_schwab_primary_with_ibkr_fallback() -> None:

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from enum import Enum
 from typing import Any
@@ -79,6 +79,7 @@ class OptionStructureFrame:
     density: dict[str, Any]
     l1: L1MicrostructureFrame
     diagnostics: dict[str, Any]
+    exposure: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
@@ -101,6 +102,8 @@ class DecisionContext:
     confirmations: dict[str, Any]
     invalidations: tuple[str, ...]
     data_quality: dict[str, Any]
+    regime_decision: dict[str, Any] = field(default_factory=dict)
+    breakout_filter: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)

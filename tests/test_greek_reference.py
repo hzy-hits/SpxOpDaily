@@ -139,15 +139,15 @@ def test_exact_same_day_filter_and_configured_freshness() -> None:
     assert "transport_stale_after_15s" in blocked.reasons[0]
 
 
-def test_zero_dte_boundary_is_literal_new_york_date_and_early_close() -> None:
+def test_zero_dte_boundary_includes_preceding_gth_and_early_close() -> None:
     previous_evening = datetime(2026, 7, 9, 23, 0, tzinfo=ET)
     midnight = datetime(2026, 7, 10, 0, 0, tzinfo=ET)
     july_quote = make_quote(
         now=previous_evening.astimezone(timezone.utc),
         expiry="20260710",
     )
-    assert is_spxw_zero_dte(july_quote, as_of=previous_evening) is False
-    assert is_spxw_zero_dte(july_quote, as_of=midnight) is False
+    assert is_spxw_zero_dte(july_quote, as_of=previous_evening) is True
+    assert is_spxw_zero_dte(july_quote, as_of=midnight) is True
     assert (
         is_spxw_zero_dte(
             july_quote,

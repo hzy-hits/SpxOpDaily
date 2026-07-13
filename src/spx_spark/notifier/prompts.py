@@ -12,6 +12,10 @@ FRAMEWORK_GUARDRAILS = (
     "锚只能是 SPX/ES（或明确的 chain_implied）；Hyperliquid SP500 只是弱研究代理，"
     "绝不能单独确认破位、墙失效或 SETUP。",
     "若 JSON 含 steven / steven_context：只作 observe_only 附注，不得抬 severity、不得改成买卖指令。",
+    "严格按 as_of 判断会话：09:30-16:00 ET 是 SPX RTH，此时 ES 只能称 RTH/日内路径，"
+    "不得称 GTH 或用夜盘薄流动性解释；GTH 是 SPX 期权的现金盘外时段，ES 自身是 Globex。",
+    "12:00-13:00 ET 是搭档睡前的午盘趋势确认窗：用完整上午的 ES/SPX 路径、VWAP、量价、墙位和 vol regime"
+    "决定平仓、减仓或带保护持有。原则上不因午前噪音过早平仓，但硬止损、结构失效和风险上限始终优先。",
 )
 
 
@@ -73,6 +77,8 @@ def build_direct_push_prompt(payload: dict[str, object], alerts: list[dict[str, 
         "window": compact_window(payload.get("window")),
         "alerts": alerts[:6],
         "human_focus_context": compact_focus,
+        "regime_decision": payload.get("regime_decision"),
+        "breakout_filter": payload.get("breakout_filter"),
     }
     category = direct_push_category(alerts)
     return "\n".join(
@@ -88,6 +94,7 @@ def build_direct_push_prompt(payload: dict[str, object], alerts: list[dict[str, 
             "- 0DTE Call 结构确认：写清是收复冻结 flip 还是突破旧 call wall、回踩观察位和失效线；强调已由 SPX/ES 新鲜样本确认，但不追价、不自动下单；",
             "只用 JSON 里的事实，数字不编不改；数据 degraded 时如实说明。",
             "greeks_reference_0dte 是严格 SPXW 当日到期的只读情景层；position_sign/direction 为 unknown 时，负 gamma 只表示潜在放大，绝不等于看跌或自动买 put。",
+            "breakout_filter 是代码裁决：blocked/pending 不得写成突破成立；只有 supported 且 actionable=true 才能称为通过假突破过滤。",
             "总共不超过 6 行。像口头交接，不像播报稿；不写免责声明。",
             json.dumps(compact_payload, ensure_ascii=False, sort_keys=True),
         )
@@ -100,6 +107,8 @@ def build_agent_prompt(payload: dict[str, object], alerts: list[dict[str, object
         "window": compact_window(payload.get("window")),
         "alerts": alerts[:12],
         "human_focus_context": payload.get("human_focus_context"),
+        "regime_decision": payload.get("regime_decision"),
+        "breakout_filter": payload.get("breakout_filter"),
     }
     return "\n".join(
         (
@@ -113,6 +122,7 @@ def build_agent_prompt(payload: dict[str, object], alerts: list[dict[str, object
             "VIX/VIX1D/VVIX/SKEW 作 vol regime 上下文，SPY/QQQ 可少量引用作确认；不提加密或预测市场数据源。",
             "options_map 警告含 underlier_mismatch 或 gamma_state 以 unknown 开头时，只说明数据降级，不下 wall/gamma 结论。",
             "greeks_reference_0dte 只解释严格 SPXW 当日到期合约对价格、时间和 IV 的敏感度；它不改变候选方向、排序或限价，position_sign unknown 时负 gamma 不等于下跌。",
+            "regime_decision 与 breakout_filter 是代码生成的确定性结论；不得自行翻案。blocked/pending 不得描述成有效突破，supported 且 actionable=true 才可称为突破过滤通过。",
             "剧本必须双向：跌破关键位讲防守，但价格收复关键位并站稳时必须明说反弹剧本激活，不许在价格回升时还重复防守结论。",
             "输出中文，最多 12 行，结论先行：",
             "第一句话说清发生了什么、对挂单/持仓意味着什么(如『价格逼近 7500 put wall，反弹买 call 的挂单可能马上成交』)。",
@@ -159,6 +169,8 @@ def compact_analysis_payload(
         "window": compact_window(payload.get("window")),
         "visible_scope": ("SPX", "SPXW", "ES"),
         "human_focus_context": payload.get("human_focus_context"),
+        "regime_decision": payload.get("regime_decision"),
+        "breakout_filter": payload.get("breakout_filter"),
         "algorithm_quality": algorithm_quality,
         "alerts": alerts[:8],
     }
@@ -198,6 +210,7 @@ def build_codex_prompt(
             "如果 options_map 警告含 underlier_mismatch，或 gamma_state 以 unknown 开头，不得基于 wall/gamma 下结论，只能说明数据降级。",
             "gamma_state 为 zero_gamma_transition（micopedia 为 transition）表示零 gamma 交叉区：突破后波动可能放大，不得把靠近墙位直接当作支撑确认。",
             "greeks_reference_0dte 是严格 SPXW 当日到期的 reference-only 情景层；只用于解释价格/时间/IV 冲击。position_sign/direction unknown 时不得推导 dealer 净方向，负 gamma 不等于看跌，也不能单独触发推送。",
+            "regime_decision 与 breakout_filter 是代码裁决，不是让你二次猜测的原始指标；blocked/pending 不得写成突破确认，supported 且 actionable=true 才能升级 breakout。",
             "剧本必须双向对称：跌破关键位后要讲防守；但若价格随后收复该关键位（回到 put wall/flip zone 上方）并持续站稳，这是反弹剧本被激活的信号，必须明确说『XX 已收复，反弹剧本激活，若回踩不破 XX 可视为确认』，不允许在价格已回升时仍只重复防守结论。",
             "你的另一半职责是替搭档对抗 FOMO 和恐慌——告警最容易在他情绪最高的时刻到达，每条外发内容按当下位置至少命中其一：",
             "(a) 价格在两关键位中间快速移动时，明确写『半路，不追，计划位在 XX/XX』——半山腰追单是要拦下的第一行为；",

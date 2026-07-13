@@ -18,6 +18,7 @@ from spx_spark.notifier import (
     notify_payload,
     openclaw_delivery_error,
     run_codex_exec,
+    run_grok_agent,
     run_openclaw_agent,
     select_alerts_for_notification,
     send_bark_message,
@@ -293,6 +294,33 @@ def test_openclaw_agent_uses_configured_model_and_thinking(tmp_path) -> None:
     assert "--thinking" in command
     assert command[command.index("--thinking") + 1] == "high"
     assert "--deliver" not in command
+
+
+def test_grok_agent_uses_configured_model_and_read_only_mode(tmp_path) -> None:
+    calls: list[list[str]] = []
+
+    def runner(command: list[str], timeout_seconds: float) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout="需要看盘: 突破确认", stderr="")
+
+    settings = replace(
+        make_settings(str(tmp_path / "notify-state.json")),
+        grok_enabled=True,
+        grok_model="grok-4.5",
+        grok_reasoning_effort="high",
+        grok_cwd="/home/ubuntu/spx-spark",
+    )
+
+    result, message = run_grok_agent(settings, "analyze this alert", runner=runner)
+
+    assert result.ok is True
+    assert message == "需要看盘: 突破确认"
+    command = calls[0]
+    assert command[command.index("--model") + 1] == "grok-4.5"
+    assert command[command.index("--reasoning-effort") + 1] == "high"
+    assert command[command.index("--permission-mode") + 1] == "plan"
+    assert "--no-subagents" in command
+    assert "--disable-web-search" in command
 
 
 def test_notifier_uses_openclaw_agent_single_track_for_review_candidates(tmp_path) -> None:
@@ -1732,12 +1760,17 @@ def test_direct_push_rewrites_event_with_llm_writer(tmp_path, monkeypatch) -> No
         calls.append(command)
         return subprocess.CompletedProcess(command, 0, stdout="{}", stderr="")
 
-    def fake_writer(prompt: str, **kwargs) -> tuple[str | None, str | None]:
+    def fake_writer(
+        template: str,
+        prompt: str,
+        settings: NotificationSettings,
+        **kwargs,
+    ) -> tuple[str, str]:
         assert "即时事件" in prompt
         assert "持仓事件" in prompt
-        return "【持仓事件】开仓 7430C x1，现价贴近 flip zone 下沿。", None
+        return "【持仓事件】开仓 7430C x1，现价贴近 flip zone 下沿。", "grok_cli"
 
-    monkeypatch.setattr("spx_spark.notifier.pipeline.call_llm_writer", fake_writer)
+    monkeypatch.setattr("spx_spark.notifier.pipeline.generate_push_text", fake_writer)
     payload = make_payload()
     payload["alerts"] = [
         {
@@ -1888,8 +1921,8 @@ def test_direct_push_falls_back_to_template_when_writer_fails(tmp_path, monkeypa
         return subprocess.CompletedProcess(command, 0, stdout="{}", stderr="")
 
     monkeypatch.setattr(
-        "spx_spark.notifier.pipeline.call_llm_writer",
-        lambda prompt, **kwargs: (None, "http=500: boom"),
+        "spx_spark.notifier.pipeline.generate_push_text",
+        lambda template, prompt, settings, **kwargs: (template, "template"),
     )
     payload = make_payload()
     payload["alerts"] = [
@@ -1955,6 +1988,8 @@ def test_codex_prompt_hides_non_focus_market_context() -> None:
     assert "regime" in prompt and "trigger" in prompt and "expression" in prompt
     assert "net_dex_proxy" in prompt
     assert "Hyperliquid" in prompt
+    assert "09:30-16:00 ET 是 SPX RTH" in prompt
+    assert "12:00-13:00 ET" in prompt
     assert "不下单授权" in prompt or "不是下单授权" in prompt
 
 
@@ -2271,6 +2306,21 @@ def test_deliver_trade_push_routes_ops_to_bark_ops_group_not_feishu(tmp_path) ->
     assert feishu_posts[0]["msg_type"] == "interactive"
     assert feishu_posts[0]["card"]["header"]["title"]["content"] == "市场状态"
     assert "完整报告" in feishu_posts[0]["card"]["body"]["elements"][0]["content"]
+
+
+def test_im_delivery_failed_ignores_intentional_ops_only_delivery() -> None:
+    from spx_spark.notifier.model import SinkResult
+    from spx_spark.notifier.sinks import im_delivery_failed
+
+    assert not im_delivery_failed(
+        [SinkResult(sink="bark", attempted=True, ok=True)]
+    )
+    assert im_delivery_failed(
+        [SinkResult(sink="feishu", attempted=True, ok=False, error="timeout")]
+    )
+    assert not im_delivery_failed(
+        [SinkResult(sink="feishu", attempted=True, ok=True)]
+    )
 
 
 def test_send_bark_message_accepts_markdown_and_group_override(tmp_path) -> None:

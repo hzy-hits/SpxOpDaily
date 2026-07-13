@@ -1820,6 +1820,8 @@ def test_prompts_include_previous_push() -> None:
     assert "负 gamma 不等于下跌" in status_prompt
     assert "observe_only" in order_prompt
     assert "observe_only" in status_prompt
+    assert "breakout_filter.verdict=blocked" in order_prompt
+    assert "supported 且 actionable=true" in status_prompt
     assert "secret_scenario_price" not in order_prompt
     assert "secret_scenario_price" not in status_prompt
 
@@ -2208,9 +2210,9 @@ def test_session_phase_tracks_partner_clock() -> None:
     open_hour = session_phase(datetime(2026, 7, 9, 13, 45, tzinfo=timezone.utc))
     assert open_hour["name"] == "us_open_hour"
     assert open_hour["minutes_since_us_open"] == 15
-    # Beijing 00:45 = ET 12:45: main battle, 15 minutes to bedtime.
+    # Beijing 00:45 = ET 12:45: midday confirmation, 15 minutes to bedtime.
     late = session_phase(datetime(2026, 7, 9, 16, 45, tzinfo=timezone.utc))
-    assert late["name"] == "us_morning_battle"
+    assert late["name"] == "us_midday_confirmation"
     assert late["minutes_to_bedtime"] == 15
     # Beijing 02:30 = ET 14:30: user asleep, unattended afternoon.
     asleep = session_phase(datetime(2026, 7, 9, 18, 30, tzinfo=timezone.utc))
@@ -2307,10 +2309,10 @@ def test_status_template_carries_session_phase() -> None:
     assert "亚盘夜盘" in text
     assert "距开盘 750 分钟" in text
     assert "已开盘" not in text
-    # Beijing 00:30 = US morning battle with the bedtime countdown showing.
+    # Beijing 00:30 = ET 12:30 midday confirmation window.
     late = datetime(2026, 7, 9, 16, 30, tzinfo=timezone.utc)
     text_late = render_status_template(payload, [], late)
-    assert "美盘上午主战场" in text_late
+    assert "午盘趋势确认窗" in text_late
     assert "距收官 30 分钟" in text_late
 
 

@@ -174,7 +174,7 @@ def quote_from_stream_fields(
         trade_time=trade_time,
         last_update_at=received_at,
         source_latency_ms=elapsed_ms(quote_time or trade_time, received_at),
-        market_data_type="schwab_stream",
+        market_data_type="live",
         greeks=greeks,
         sampling_mode="schwab_stream",
         raw={"service": normalized_service, "fields": dict(fields)},

@@ -218,7 +218,10 @@ def sample_zero_dte_greeks_shadow(
     """
 
     expiry = (
-        state.as_of.astimezone(ET).strftime("%Y%m%d")
+        DEFAULT_MARKET_CALENDAR.research_expiry(state.as_of).strftime("%Y%m%d")
+        if state.as_of.tzinfo is not None
+        and DEFAULT_MARKET_CALENDAR.is_spx_gth_open(state.as_of)
+        else state.as_of.astimezone(ET).strftime("%Y%m%d")
         if state.as_of.tzinfo is not None
         else state.as_of.strftime("%Y%m%d")
     )
@@ -250,9 +253,10 @@ def sample_zero_dte_greeks_shadow(
         options = options_map
     else:
         at_et = state.as_of.astimezone(ET)
-        session = DEFAULT_MARKET_CALENDAR.session(at_et.date())
-        if session is None or not (session.open_at <= at_et < session.close_at):
-            hard_block_reason = "outside_spx_rth"
+        if not DEFAULT_MARKET_CALENDAR.is_rth_open(
+            at_et
+        ) and not DEFAULT_MARKET_CALENDAR.is_spx_gth_open(at_et):
+            hard_block_reason = "outside_spx_trading_session"
             payload = _unavailable_reference(
                 state,
                 expiry=expiry,
@@ -302,7 +306,6 @@ def sample_zero_dte_greeks_shadow(
             reason="exact_same_day_quotes_stale_or_unusable",
         )
     elif len(fresh_quotes) < len(zero_dte_quotes):
-        payload["status"] = "degraded"
         warnings = list(payload.get("warnings") or ())
         if "partial_exact_expiry_stale_or_unusable" not in warnings:
             warnings.append("partial_exact_expiry_stale_or_unusable")
@@ -384,18 +387,20 @@ def run(argv: list[str] | None = None) -> int:
     latest = LatestStateStore(storage).load()
     if latest.as_of.tzinfo is not None:
         at_et = latest.as_of.astimezone(ET)
-        session = DEFAULT_MARKET_CALENDAR.session(at_et.date())
+        session_open = DEFAULT_MARKET_CALENDAR.is_rth_open(
+            at_et
+        ) or DEFAULT_MARKET_CALENDAR.is_spx_gth_open(at_et)
     else:
-        session = None
+        session_open = False
     if latest.as_of.tzinfo is not None and (
-        session is None or not (session.open_at <= at_et < session.close_at)
+        not session_open
     ):
         result = GreekShadowResult(
             status="skipped",
             reference_status="unavailable",
-            reason="outside_spx_rth",
+            reason="outside_spx_trading_session",
             as_of=latest.as_of.isoformat(),
-            expiry=latest.as_of.astimezone(ET).strftime("%Y%m%d"),
+            expiry=DEFAULT_MARKET_CALENDAR.research_expiry(latest.as_of).strftime("%Y%m%d"),
             trigger={"kind": "periodic"},
         )
     else:

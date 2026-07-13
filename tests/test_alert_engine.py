@@ -646,7 +646,7 @@ def test_both_direct_providers_unavailable_is_critical(tmp_path, monkeypatch) ->
     assert "禁止新开仓" in alerts[0].detail
 
 
-def test_schwab_recovery_before_takeover_does_not_claim_ibkr_was_active(
+def test_schwab_recovery_before_takeover_is_audit_only(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -664,9 +664,7 @@ def test_schwab_recovery_before_takeover_does_not_claim_ibkr_was_active(
 
     alerts = system_event_alerts(make_state(now=now))
 
-    assert [alert.kind for alert in alerts] == ["market_data_schwab_restored"]
-    assert "备用接管已取消" in alerts[0].title
-    assert "退出 IBKR" not in alerts[0].detail
+    assert alerts == []
 
 
 def test_ibkr_standby_disconnect_is_silent_without_position_or_live_execution(

@@ -17,6 +17,10 @@ class CadencePolicy:
     off_hours_front_chain_seconds: float = 60.0
     off_hours_next_chain_seconds: float = 300.0
     off_hours_confirmation_chain_seconds: float = 300.0
+    gth_quote_seconds: float = 15.0
+    gth_front_chain_seconds: float = 15.0
+    gth_next_chain_seconds: float = 60.0
+    gth_confirmation_chain_seconds: float = 300.0
     normal_quote_seconds: float = 2.0
     normal_front_chain_seconds: float = 3.0
     active_quote_seconds: float = 1.5
@@ -33,6 +37,10 @@ class CadenceConfig(Protocol):
     off_hours_front_chain_seconds: float
     off_hours_next_chain_seconds: float
     off_hours_confirmation_chain_seconds: float
+    gth_quote_seconds: float
+    gth_front_chain_seconds: float
+    gth_next_chain_seconds: float
+    gth_confirmation_chain_seconds: float
     normal_quote_seconds: float
     normal_front_chain_seconds: float
     active_quote_seconds: float
@@ -50,6 +58,8 @@ def collection_profile(
     burst: bool = False,
     active_window_minutes: int = 30,
 ) -> CollectionProfile:
+    if DEFAULT_MARKET_CALENDAR.is_spx_gth_open(now):
+        return CollectionProfile.GTH
     if not DEFAULT_MARKET_CALENDAR.is_rth_open(now):
         return CollectionProfile.OFF_HOURS
     if burst:
@@ -74,6 +84,7 @@ def cadence_seconds(
     if lane is SchwabLane.HOT_AND_CONTEXT_QUOTES:
         return {
             CollectionProfile.OFF_HOURS: policy.off_hours_quote_seconds,
+            CollectionProfile.GTH: policy.gth_quote_seconds,
             CollectionProfile.NORMAL: policy.normal_quote_seconds,
             CollectionProfile.ACTIVE: policy.active_quote_seconds,
             CollectionProfile.BURST: policy.burst_quote_seconds,
@@ -81,28 +92,37 @@ def cadence_seconds(
     if lane is SchwabLane.FRONT_CHAIN and underlier == "SPX":
         return {
             CollectionProfile.OFF_HOURS: policy.off_hours_front_chain_seconds,
+            CollectionProfile.GTH: policy.gth_front_chain_seconds,
             CollectionProfile.NORMAL: policy.normal_front_chain_seconds,
             CollectionProfile.ACTIVE: policy.active_front_chain_seconds,
             CollectionProfile.BURST: policy.burst_front_chain_seconds,
         }[profile]
     if lane is SchwabLane.NEXT_CHAIN:
+        if profile is CollectionProfile.GTH:
+            return policy.gth_next_chain_seconds
         return (
             policy.off_hours_next_chain_seconds
             if profile is CollectionProfile.OFF_HOURS
             else policy.next_chain_seconds
         )
     if underlier in {"SPY", "XSP"}:
+        if profile is CollectionProfile.GTH:
+            return policy.gth_confirmation_chain_seconds
         return (
             policy.off_hours_confirmation_chain_seconds
             if profile is CollectionProfile.OFF_HOURS
             else policy.spy_xsp_chain_seconds
         )
     if underlier in {"QQQ", "IWM"}:
+        if profile is CollectionProfile.GTH:
+            return policy.gth_confirmation_chain_seconds
         return (
             policy.off_hours_confirmation_chain_seconds
             if profile is CollectionProfile.OFF_HOURS
             else policy.qqq_iwm_chain_seconds
         )
+    if profile is CollectionProfile.GTH:
+        return policy.gth_confirmation_chain_seconds
     return (
         policy.off_hours_confirmation_chain_seconds
         if profile is CollectionProfile.OFF_HOURS

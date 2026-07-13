@@ -58,13 +58,16 @@ def _globex_trend_line(payload: dict[str, Any]) -> str | None:
         return "-" if value is None else f"{value:+.1f}"
 
     regime = str(trend.get("regime") or "neutral")
+    phase = payload.get("session_phase")
+    phase_name = str(phase.get("name") or "") if isinstance(phase, dict) else ""
+    path_label = "ES RTH路径" if phase_name.startswith("us_") else "ES Globex路径"
     candidate = trend.get("candidate_regime")
     candidate_text = ""
     if isinstance(candidate, str):
         count = int(trend.get("candidate_observations") or 0)
         candidate_text = f"; 候选{labels.get(candidate, candidate)}({count})"
     return (
-        f"ES Globex路径: {labels.get(regime, regime)}{candidate_text}; "
+        f"{path_label}: {labels.get(regime, regime)}{candidate_text}; "
         f"15m {points('return_15m_points')}, 60m {points('return_60m_points')}, "
         f"180m {points('return_180m_points')}; "
         f"趋势腿回撤 {points('drawdown_from_regime_high_points')}, "
@@ -287,18 +290,46 @@ def _greeks_reference_line(payload: dict[str, Any]) -> str | None:
     if not isinstance(aggregate, dict) or not isinstance(coverage, dict):
         return None
 
-    def metric(name: str) -> str:
+    def metric(name: str) -> str | None:
         value = finite_float(aggregate.get(name))
-        return f"{value:.2e}" if value is not None else "-"
+        if value is None:
+            return None
+        if abs(value) >= 1_000:
+            return f"{value / 1_000:.1f}k"
+        return f"{value:.1f}"
 
     usable = coverage.get("usable_contract_count")
     total = coverage.get("exact_expiry_contract_count")
+    ratio = (
+        usable / total
+        if isinstance(usable, int | float)
+        and isinstance(total, int | float)
+        and total > 0
+        else None
+    )
+    coverage_text = f"有效 {usable}/{total}"
+    if ratio is not None:
+        coverage_text += f"（{ratio:.0%}）"
+    gamma = metric("gross_gamma_abs")
+    charm = metric("gross_charm_5m_abs")
+    vanna = metric("gross_vanna_1vol_abs")
+    if None in {gamma, charm, vanna}:
+        return f"0DTE 全链敏感度暂不可用｜{coverage_text}，新鲜报价/IV/OI不足"
+    excluded = (
+        max(int(total - usable), 0)
+        if isinstance(usable, int | float) and isinstance(total, int | float)
+        else None
+    )
+    if reference.get("status") != "ok":
+        quality = "覆盖或模型质量不足"
+    elif excluded:
+        quality = f"{excluded}条未纳入"
+    else:
+        quality = "完整"
     return (
-        "0DTE Greeks(只读/仓位符号未知, OI×100): "
-        f"Gamma {metric('gross_gamma_abs')}, "
-        f"Charm5m {metric('gross_charm_5m_abs')}, "
-        f"Vanna1vol {metric('gross_vanna_1vol_abs')}; "
-        f"覆盖 {usable}/{total} [{reference.get('status')}]"
+        "0DTE 全链敏感度（OI加权绝对值，非持仓/非方向）: "
+        f"Gamma/标的1点 {gamma}｜Charm/5分钟 {charm}｜"
+        f"Vanna/IV变动1个百分点 {vanna}｜{coverage_text}，{quality}"
     )
 
 

@@ -17,6 +17,7 @@ class SchwabLane(str, Enum):
 
 class CollectionProfile(str, Enum):
     OFF_HOURS = "off_hours"
+    GTH = "gth"
     NORMAL = "normal"
     ACTIVE = "active"
     BURST = "burst"

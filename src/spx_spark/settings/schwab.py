@@ -10,6 +10,7 @@ class SchwabCapacitySettings:
     nominal_requests_per_minute: int
     planned_requests_per_minute: int
     max_symbols_per_quote_request: int
+    operational_quote_batch_size: int = 80
 
     def __post_init__(self) -> None:
         if self.nominal_requests_per_minute <= 0:
@@ -18,6 +19,8 @@ class SchwabCapacitySettings:
             raise ValueError("Schwab planned capacity must preserve a request reserve")
         if not 1 <= self.max_symbols_per_quote_request <= 500:
             raise ValueError("Schwab quote batch capacity must be between 1 and 500")
+        if not 1 <= self.operational_quote_batch_size <= self.max_symbols_per_quote_request:
+            raise ValueError("Schwab operational quote batch size exceeds symbol capacity")
 
 
 @dataclass(frozen=True)
@@ -26,6 +29,10 @@ class SchwabCadenceSettings:
     off_hours_front_chain_seconds: float
     off_hours_next_chain_seconds: float
     off_hours_confirmation_chain_seconds: float
+    gth_quote_seconds: float
+    gth_front_chain_seconds: float
+    gth_next_chain_seconds: float
+    gth_confirmation_chain_seconds: float
     normal_quote_seconds: float
     normal_front_chain_seconds: float
     active_quote_seconds: float
@@ -94,11 +101,11 @@ class SchwabSettingsSlice:
     service_loop_enabled: bool = False
     collection_interval_seconds: int = 1
     capacity: SchwabCapacitySettings = field(
-        default_factory=lambda: SchwabCapacitySettings(120, 84, 500)
+        default_factory=lambda: SchwabCapacitySettings(120, 84, 500, 80)
     )
     cadence: SchwabCadenceSettings = field(
         default_factory=lambda: SchwabCadenceSettings(
-            15, 60, 300, 300, 2, 3, 1.5, 2.5, 1.5, 2, 30, 15, 30
+            15, 60, 300, 300, 15, 15, 60, 300, 2, 3, 1.5, 2.5, 1.5, 2, 30, 15, 30
         )
     )
     wide_chain: SchwabWideChainSettings = field(

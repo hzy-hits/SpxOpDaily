@@ -20,6 +20,7 @@ def evaluate_engine_health(
     any_critical_success: bool = True,
     cash_session_open: bool = True,
     globex_context_usable: bool = False,
+    gth_option_session_open: bool = False,
 ) -> EngineHealth:
     """Map observation flags to EngineMode per acceptance plan §7.3.
 
@@ -80,7 +81,11 @@ def evaluate_engine_health(
             checked_at=checked_at,
         )
 
-    if not cash_session_open and all(readiness_factors.values()):
+    if (
+        not cash_session_open
+        and gth_option_session_open
+        and all(readiness_factors.values())
+    ):
         return EngineHealth(
             mode=EngineMode.READY,
             factors=factors,

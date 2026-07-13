@@ -530,6 +530,14 @@ class NotificationSettings:
     deepseek_max_tokens: int = field(default_factory=lambda: 6400)
     deepseek_output_max_chars: int = field(default_factory=lambda: 6400)
     deepseek_temperature: float = field(default_factory=lambda: 0.1)
+    grok_enabled: bool = field(default_factory=lambda: False)
+    grok_deliver: bool = field(default_factory=lambda: True)
+    grok_command: str = field(default_factory=lambda: "agent")
+    grok_model: str = field(default_factory=lambda: "grok-4.5")
+    grok_reasoning_effort: str = field(default_factory=lambda: "high")
+    grok_cwd: str = field(default_factory=lambda: ".")
+    grok_timeout_seconds: float = field(default_factory=lambda: 120.0)
+    grok_output_max_chars: int = field(default_factory=lambda: 6400)
     review_min_time_sensitive_score: float = field(default_factory=lambda: 30.0)
     bark_enabled: bool = field(default_factory=lambda: False)
     bark_url: str = ""
@@ -553,7 +561,7 @@ class NotificationSettings:
     feishu_secret: str = ""
     feishu_timeout_seconds: float = field(default_factory=lambda: 10.0)
     # Rewrite direct-push events (position/system/off-hours vol) with the
-    # DeepSeek writer before sending; falls back to the raw template on any
+    # configured writer before sending; falls back to the raw template on any
     # writer failure so critical events are never lost.
     direct_push_llm_enabled: bool = field(default_factory=lambda: bool(False))
     # Kind-level rate limit for magnitude-bucketed alerts: the per-bucket
@@ -709,6 +717,38 @@ class NotificationSettings:
             deepseek_temperature=env_float(
                 "ALERT_NOTIFY_DEEPSEEK_TEMPERATURE",
                 float(settings_value("notification.deepseek_temperature")),
+            ),
+            grok_enabled=env_bool(
+                "ALERT_NOTIFY_GROK_ENABLED",
+                bool(settings_value("notification.grok_enabled")),
+            ),
+            grok_deliver=env_bool(
+                "ALERT_NOTIFY_GROK_DELIVER",
+                bool(settings_value("notification.grok_deliver")),
+            ),
+            grok_command=env_str(
+                "ALERT_NOTIFY_GROK_COMMAND",
+                str(settings_value("notification.grok_command")),
+            ),
+            grok_model=env_str(
+                "ALERT_NOTIFY_GROK_MODEL",
+                str(settings_value("notification.grok_model")),
+            ),
+            grok_reasoning_effort=env_str(
+                "ALERT_NOTIFY_GROK_REASONING_EFFORT",
+                str(settings_value("notification.grok_reasoning_effort")),
+            ),
+            grok_cwd=env_str(
+                "ALERT_NOTIFY_GROK_CWD",
+                str(settings_value("notification.grok_cwd")),
+            ),
+            grok_timeout_seconds=env_float(
+                "ALERT_NOTIFY_GROK_TIMEOUT_SECONDS",
+                float(settings_value("notification.grok_timeout_seconds")),
+            ),
+            grok_output_max_chars=env_int(
+                "ALERT_NOTIFY_GROK_OUTPUT_MAX_CHARS",
+                int(settings_value("notification.grok_output_max_chars")),
             ),
             review_min_time_sensitive_score=env_float(
                 "ALERT_REVIEW_MIN_TIME_SENSITIVE_SCORE",

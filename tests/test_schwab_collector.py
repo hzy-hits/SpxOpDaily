@@ -183,16 +183,17 @@ def test_collector_discovers_front_pairs_before_hot_quote_batch(
         "/marketdata/v1/chains",
         "/marketdata/v1/chains",
         "/marketdata/v1/quotes",
+        "/marketdata/v1/quotes",
     ]
     assert calls[0][1]["fromDate"] == calls[0][1]["toDate"] == "2026-07-06"
     assert calls[1][1]["fromDate"] == calls[1][1]["toDate"] == "2026-07-07"
-    requested = str(calls[2][1]["symbols"]).split(",")
-    assert requested[0] == "$SPX"
+    assert calls[2][1]["symbols"] == "$SPX"
+    requested = str(calls[3][1]["symbols"]).split(",")
     assert len([symbol for symbol in requested if symbol.startswith("SPXW")]) == 6
     assert output["hot_symbol_count"] == 6
     assert output["coverage"]["SPX:front"]["two_sided_ratio"] == 1.0
     assert output["coverage"]["SPX:front"]["next_strike_count"] == 100
-    assert len(persisted) == 3
+    assert len(persisted) == 4
 
 
 def test_runtime_chain_cadence_and_strike_overrides() -> None:

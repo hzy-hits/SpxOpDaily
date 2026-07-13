@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
+from pathlib import Path
 
 from spx_spark.alert_engine.rules_data import find_best, quote_health_alert
 from spx_spark.alert_engine.rules_options import (
@@ -30,6 +31,7 @@ from spx_spark.market_context import build_market_context
 from spx_spark.options_map import OptionsMap, build_options_map
 from spx_spark.position_alerts import position_holdings_alerts
 from spx_spark.settings import DEFAULT_ALERT_SETTINGS, AlertSettings
+from spx_spark.state_io import read_json_object
 from spx_spark.storage import LatestState
 from spx_spark.strategy.steven import (
     annotate_alerts_with_steven_context,
@@ -162,6 +164,10 @@ def evaluate_payload(
             )
         except Exception:  # noqa: BLE001 — never block alerts on context failure
             pass
+    storage = StorageSettings.from_env()
+    decision_context = read_json_object(
+        Path(storage.data_root).expanduser() / "latest" / "decision_context.json"
+    )
     return {
         "created_at": datetime.now(tz=now.tzinfo).isoformat(),
         "as_of": state.as_of.isoformat(),
@@ -174,10 +180,12 @@ def evaluate_payload(
             iv_surface_history_1h=iv_surface_history_1h,
             window=window_payload,
         ),
+        "decision_context": decision_context,
+        "regime_decision": decision_context.get("regime_decision", {}),
+        "breakout_filter": decision_context.get("breakout_filter", {}),
         "options_map": options_map.to_dict(),
         "iv_surface": iv_surface.to_dict() if iv_surface is not None else None,
         "iv_surface_history_1h": iv_surface_history_1h,
         "alert_count": len(alerts),
         "alerts": [alert.to_dict() for alert in alerts],
     }
-

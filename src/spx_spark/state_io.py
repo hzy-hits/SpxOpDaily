@@ -9,6 +9,16 @@ from contextlib import contextmanager
 from pathlib import Path
 
 
+def read_json_object(path: Path) -> dict[str, object]:
+    """Read a JSON object, returning an empty projection for absent or invalid state."""
+
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return dict(payload) if isinstance(payload, dict) else {}
+
+
 def _fsync_directory(path: Path) -> None:
     flags = os.O_RDONLY
     if hasattr(os, "O_DIRECTORY"):

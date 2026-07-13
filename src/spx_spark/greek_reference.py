@@ -224,7 +224,7 @@ def _expiry_date(expiry: str) -> datetime | None:
 
 
 def is_spxw_zero_dte(quote: Quote, *, as_of: datetime) -> bool:
-    """Require the literal New York calendar date, never a research-expiry fallback."""
+    """Require the active SPX trading date during RTH or its preceding GTH."""
 
     if as_of.tzinfo is None or not _is_spxw_option(quote):
         return False
@@ -233,10 +233,16 @@ def is_spxw_zero_dte(quote: Quote, *, as_of: datetime) -> bool:
     if parsed is None:
         return False
     current_et = as_of.astimezone(ET)
-    if parsed.date() != current_et.date():
+    session_open = DEFAULT_MARKET_CALENDAR.is_rth_open(current_et)
+    gth_open = DEFAULT_MARKET_CALENDAR.is_spx_gth_open(current_et)
+    if not session_open and not gth_open:
         return False
-    session = DEFAULT_MARKET_CALENDAR.session(parsed.date())
-    return session is not None and session.open_at <= current_et < session.close_at
+    active_expiry = (
+        DEFAULT_MARKET_CALENDAR.research_expiry(current_et)
+        if gth_open
+        else current_et.date()
+    )
+    return parsed.date() == active_expiry
 
 
 def _blocked(*reasons: str) -> GreekQuality:
@@ -825,7 +831,11 @@ def build_zero_dte_greeks_reference(
     """Build a bounded, reference-only payload without expiry or dealer-sign fallback."""
 
     as_of = state.as_of
-    exact_expiry = as_of.astimezone(ET).strftime("%Y%m%d")
+    exact_expiry = (
+        DEFAULT_MARKET_CALENDAR.research_expiry(as_of)
+        if DEFAULT_MARKET_CALENDAR.is_spx_gth_open(as_of)
+        else as_of.astimezone(ET).date()
+    ).strftime("%Y%m%d")
     available_expiries = {
         str(getattr(expiry, "expiry", "")) for expiry in getattr(options_map, "expiries", ())
     }

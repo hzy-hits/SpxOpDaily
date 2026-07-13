@@ -324,7 +324,8 @@ def load_settings(
         capacity=SchwabCapacitySettings(
             nominal_requests_per_minute=int(get("schwab.request_policy.requests_per_minute")),
             planned_requests_per_minute=int(get("schwab.collection.planned_requests_per_minute")),
-            max_symbols_per_quote_request=int(get("schwab.quote_batch_size")),
+            max_symbols_per_quote_request=int(get("schwab.quote_symbol_capacity")),
+            operational_quote_batch_size=int(get("schwab.quote_batch_size")),
         ),
         cadence=SchwabCadenceSettings(
             off_hours_quote_seconds=float(get("schwab.collection.cadence.off_hours_quote_seconds")),
@@ -336,6 +337,16 @@ def load_settings(
             ),
             off_hours_confirmation_chain_seconds=float(
                 get("schwab.collection.cadence.off_hours_confirmation_chain_seconds")
+            ),
+            gth_quote_seconds=float(get("schwab.collection.cadence.gth_quote_seconds")),
+            gth_front_chain_seconds=float(
+                get("schwab.collection.cadence.gth_front_chain_seconds")
+            ),
+            gth_next_chain_seconds=float(
+                get("schwab.collection.cadence.gth_next_chain_seconds")
+            ),
+            gth_confirmation_chain_seconds=float(
+                get("schwab.collection.cadence.gth_confirmation_chain_seconds")
             ),
             normal_quote_seconds=float(get("schwab.collection.cadence.normal_quote_seconds")),
             normal_front_chain_seconds=float(

@@ -264,6 +264,36 @@ def test_pipeline_queues_message_when_feishu_fails_and_bark_ok(
     assert second.selected_count == 0
 
 
+def test_ops_only_delivery_does_not_enter_feishu_missed_queue(tmp_path) -> None:
+    queue_path = str(tmp_path / "missed.jsonl")
+    settings = make_settings(
+        str(tmp_path / "notify-state.json"),
+        missed_queue_path=queue_path,
+    )
+    payload = make_payload()
+    payload["alerts"] = [
+        {
+            "severity": "high",
+            "kind": "market_data_schwab_restored",
+            "instrument_id": "index:SPX",
+            "title": "Schwab 连续稳定，备用接管已取消",
+            "detail": "系统继续使用主行情。",
+            "dedup_group": "provider-transition:test",
+        }
+    ]
+
+    result = notify_payload(
+        payload,
+        settings=settings,
+        now=datetime(2026, 7, 13, 15, 4, tzinfo=timezone.utc),
+    )
+
+    assert result.sent_count == 1
+    assert any(sink.sink == "bark" and sink.ok for sink in result.sinks)
+    assert not any(sink.sink == "feishu" for sink in result.sinks)
+    assert load_missed(queue_path) == []
+
+
 def test_pipeline_flushes_queue_before_new_send(tmp_path, monkeypatch) -> None:
     queue_path = str(tmp_path / "missed.jsonl")
     append_missed(

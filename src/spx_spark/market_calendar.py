@@ -14,6 +14,8 @@ _EARLY_CLOSE = time(13, 0)
 _REVIEW_READY = time(17, 0)
 _GLOBEX_OPEN = time(18, 0)
 _GLOBEX_MAINTENANCE = time(17, 0)
+_SPX_GTH_OPEN = time(20, 15)
+_SPX_GTH_CLOSE = time(9, 25)
 _FIVE_MINUTES = 5 * 60
 
 
@@ -122,6 +124,21 @@ class MarketCalendar:
         if weekday == 4:
             return current_time < _GLOBEX_MAINTENANCE
         return current_time < _GLOBEX_MAINTENANCE or current_time >= _GLOBEX_OPEN
+
+    def is_spx_gth_open(self, now: datetime) -> bool:
+        """Return the SPX global trading-hours session state.
+
+        Each trading day's GTH session runs 20:15 ET on the preceding
+        calendar day through 09:25 ET on the trading day. Using the equity
+        calendar here prevents Friday-night and holiday-eve false sessions.
+        """
+
+        current = _as_et(now)
+        if current.time() < _SPX_GTH_CLOSE:
+            return self.is_trading_day(current.date())
+        if current.time() >= _SPX_GTH_OPEN:
+            return self.is_trading_day(current.date() + timedelta(days=1))
+        return False
 
     def research_expiry(self, now: datetime) -> date:
         current = _as_et(now)

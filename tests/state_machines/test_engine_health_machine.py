@@ -194,6 +194,7 @@ def test_live_gth_option_chain_is_actionable_outside_cash_session() -> None:
         checked_at=NOW,
         cash_session_open=False,
         globex_context_usable=True,
+        gth_option_session_open=True,
     )
 
     assert health.mode is EngineMode.READY

@@ -66,14 +66,22 @@ def collect_quote_lane(
     if not ready:
         return QuoteLaneResult(QuoteLaneOutcome.NOT_READY)
 
-    symbols = list(dict.fromkeys(quote_symbols + budget_state.hot_symbols))
+    priority_symbols = list(dict.fromkeys(quote_symbols))
+    priority_set = set(priority_symbols)
+    hot_symbols = [
+        symbol
+        for symbol in dict.fromkeys(budget_state.hot_symbols)
+        if symbol not in priority_set
+    ]
+    symbols = priority_symbols + hot_symbols
     count, counts, errors, complete = collect_batches(
         client,
         symbols,
         settings=settings,
         storage_settings=storage_settings,
         received_at=now,
-        batch_size=typed_settings.capacity.max_symbols_per_quote_request,
+        batch_size=typed_settings.capacity.operational_quote_batch_size,
+        priority_symbol_count=len(priority_symbols),
         available_requests=max(request_ceiling - requests_used, 0),
         hot_lane=bool(budget_state.hot_symbols),
         persist_snapshot=persist,

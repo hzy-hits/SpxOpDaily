@@ -18,7 +18,11 @@ from spx_spark.notifier.llm_writer import (
 )
 from spx_spark.notifier.missed_queue import append_missed
 from spx_spark.notifier.model import CommandRunner, default_runner
-from spx_spark.notifier.sinks import any_delivery_ok, deliver_trade_push, im_delivery_ok
+from spx_spark.notifier.sinks import (
+    any_delivery_ok,
+    deliver_trade_push,
+    im_delivery_failed,
+)
 
 
 def send_order_map(
@@ -61,7 +65,7 @@ def send_order_map(
         runner=runner,
     )
     delivered_ok = any_delivery_ok(delivery_sinks)
-    if not im_delivery_ok(delivery_sinks):
+    if im_delivery_failed(delivery_sinks):
         append_missed(
             settings.missed_queue_path,
             text,

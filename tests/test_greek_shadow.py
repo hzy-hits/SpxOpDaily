@@ -198,6 +198,37 @@ def test_partial_stale_chain_is_degraded_and_proxy_uses_only_fresh_contracts(tmp
     assert payload["shadow_sample"]["freshness"]["stale_or_unusable_contract_count"] == 3
 
 
+def test_high_coverage_partial_chain_remains_usable_with_warning(tmp_path) -> None:
+    now = datetime(2026, 7, 10, 19, 0, tzinfo=timezone.utc)
+    rows = tuple(
+        make_quote(
+            now=now,
+            strike=strike,
+            right=right,
+            updated_at=(
+                now - timedelta(seconds=30)
+                if strike == 5980.0 and right == "P"
+                else now
+            ),
+        )
+        for strike in (5980.0, 5990.0, 6000.0, 6010.0, 6020.0)
+        for right in ("C", "P")
+    )
+    state = LatestState(created_at=now, as_of=now, quotes=rows, best_quotes=rows)
+
+    result = sample_zero_dte_greeks_shadow(
+        state,
+        data_root=tmp_path,
+        options_map=options_map(),
+    )
+
+    assert result.status == "written"
+    assert result.reference_status == "ok"
+    payload = latest_payload(tmp_path)
+    assert payload["coverage"]["usable_contract_count"] == 9
+    assert "partial_exact_expiry_stale_or_unusable" in payload["warnings"]
+
+
 def test_underlier_mismatch_fails_closed_even_when_vendor_spot_exists(tmp_path) -> None:
     now = datetime(2026, 7, 10, 19, 0, tzinfo=timezone.utc)
 
@@ -268,5 +299,19 @@ def test_periodic_shadow_outside_rth_records_blocked_health_snapshot(tmp_path) -
     )
 
     assert result.status == "blocked"
-    assert result.reason == "outside_spx_rth"
+    assert result.reason == "outside_spx_trading_session"
     assert latest_payload(tmp_path)["status"] == "unavailable"
+
+
+def test_periodic_shadow_accepts_active_monday_expiry_during_sunday_gth(tmp_path) -> None:
+    now = datetime(2026, 7, 13, 1, 30, tzinfo=timezone.utc)
+
+    result = sample_zero_dte_greeks_shadow(
+        make_state(now, expiry="20260713"),
+        data_root=tmp_path,
+        options_map=options_map(expiry="20260713"),
+    )
+
+    assert result.status == "written_degraded"
+    assert result.expiry == "20260713"
+    assert latest_payload(tmp_path)["status"] == "degraded"

@@ -95,6 +95,7 @@ class StrikeExposureValues:
     net_dex_proxy: float | None
     vex_proxy: float | None
     cex_proxy: float | None
+    abs_dex_proxy: float | None = None
 
 
 @dataclass(frozen=True)
@@ -128,6 +129,7 @@ class ExposureAggregates:
     dagex_proxy: float | None
     vex_proxy: float | None
     cex_proxy: float | None
+    abs_dex_proxy: float | None = None
 
 
 @dataclass(frozen=True)
@@ -191,6 +193,8 @@ def _leg_weight(row: ExposureInputRow, weighting: str) -> float | None:
 
 
 def _leg_gex(row: ExposureInputRow, *, spot: float, weighting: str) -> float | None:
+    if not row.pricing_allowed:
+        return None
     weight = _leg_weight(row, weighting)
     if weight is None or row.gamma is None:
         return None
@@ -199,6 +203,8 @@ def _leg_gex(row: ExposureInputRow, *, spot: float, weighting: str) -> float | N
 
 
 def _leg_dex(row: ExposureInputRow, *, spot: float, weighting: str) -> float | None:
+    if not row.pricing_allowed:
+        return None
     weight = _leg_weight(row, weighting)
     if weight is None or row.delta is None:
         return None
@@ -208,6 +214,8 @@ def _leg_dex(row: ExposureInputRow, *, spot: float, weighting: str) -> float | N
 def _leg_vex(
     row: ExposureInputRow, *, spot: float, weighting: str, tau_years: float
 ) -> float | None:
+    if not row.pricing_allowed:
+        return None
     weight = _leg_weight(row, weighting)
     if weight is None or row.iv is None:
         return None
@@ -226,6 +234,8 @@ def _leg_cex(
     tau_years: float,
     tau_floored: bool,
 ) -> float | None:
+    if not row.pricing_allowed:
+        return None
     if tau_floored:
         return None
     weight = _leg_weight(row, weighting)
@@ -287,6 +297,7 @@ def strike_exposure_values(
         net_dex_proxy=sum(dex_values) if dex_values else None,
         vex_proxy=vex_total if vex_count else None,
         cex_proxy=cex_total if cex_count else None,
+        abs_dex_proxy=sum(abs(value) for value in dex_values) if dex_values else None,
     )
 
 
@@ -370,6 +381,7 @@ def _aggregate_exposure(
         dagex_proxy=net_gex if include_dagex else None,
         vex_proxy=_sum_optional([row.vex_proxy for row in strike_values]),
         cex_proxy=_sum_optional([row.cex_proxy for row in strike_values]),
+        abs_dex_proxy=dex_denominator,
     )
 
 
@@ -402,7 +414,11 @@ def _determine_iv_source(rows: tuple[ExposureInputRow, ...]) -> str:
 
 
 def _snapshot_age_seconds(rows: tuple[ExposureInputRow, ...]) -> float | None:
-    ages = [row.quote_age_seconds for row in rows if row.quote_age_seconds is not None]
+    ages = [
+        row.quote_age_seconds
+        for row in rows
+        if row.pricing_allowed and row.quote_age_seconds is not None
+    ]
     if not ages:
         return None
     return max(ages)
@@ -519,6 +535,7 @@ def _nullify_vanna_family(strike: StrikeExposure) -> StrikeExposure:
             net_dex_proxy=values.net_dex_proxy,
             vex_proxy=None,
             cex_proxy=None,
+            abs_dex_proxy=values.abs_dex_proxy,
         )
 
     return StrikeExposure(
@@ -590,9 +607,15 @@ def _build_expiry_exposure(
     iv_source = _determine_iv_source(rows)
     snapshot_age = _snapshot_age_seconds(rows)
     delta_coverage = (
-        sum(1 for row in rows if row.delta is not None) / len(rows) if rows else 0.0
+        sum(1 for row in rows if row.pricing_allowed and row.delta is not None) / len(rows)
+        if rows
+        else 0.0
     )
-    iv_coverage = sum(1 for row in rows if row.iv is not None) / len(rows) if rows else 0.0
+    iv_coverage = (
+        sum(1 for row in rows if row.pricing_allowed and row.iv is not None) / len(rows)
+        if rows
+        else 0.0
+    )
     tau_years = time_to_expiry_years(expiry, as_of=as_of)
     tau_floored = _tau_is_floored(expiry, as_of)
     if tau_floored:
@@ -606,7 +629,7 @@ def _build_expiry_exposure(
         warnings.append("schwab_oi_unverified")
 
     quality = "ok"
-    unavailable = snapshot_age is not None and snapshot_age > 900
+    unavailable = not any(row.pricing_allowed for row in rows)
     if unavailable:
         quality = "unavailable"
     elif oi_quality in {"stale_or_zero", "missing"}:

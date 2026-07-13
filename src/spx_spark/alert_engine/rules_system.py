@@ -319,9 +319,10 @@ def provider_failover_event_alert(
         )
     if transition.mode == FailoverMode.SCHWAB_PRIMARY:
         if transition.previous_mode == FailoverMode.RECOVERY_PENDING:
-            title = "Schwab 连续稳定，备用接管已取消"
-            detail = "Schwab 在 IBKR 接管前恢复并连续通过健康门；系统继续使用主行情。"
-        elif transition.previous_mode == FailoverMode.BOTH_UNAVAILABLE:
+            # No provider switch or user-visible outage occurred. Persist the
+            # transition for audit, but do not page a self-healed health probe.
+            return None
+        if transition.previous_mode == FailoverMode.BOTH_UNAVAILABLE:
             title = "Schwab 连续稳定，主行情已恢复"
             detail = "Schwab 锚点连续通过健康门，双源不可用状态已解除。"
         else:
@@ -484,5 +485,4 @@ def proxy_fallback_watch_alerts(
             source_gate="hyperliquid_proxy_unanchored",
         )
     ]
-
 

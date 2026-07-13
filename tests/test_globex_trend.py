@@ -6,7 +6,7 @@ from spx_spark.application.globex_trend.machine import (
     advance_trend_state,
     initial_state,
 )
-from spx_spark.application.globex_trend.service import select_live_es
+from spx_spark.application.globex_trend.service import alert_from_event, select_live_es
 from spx_spark.marketdata import InstrumentId, MarketDataQuality, Provider, Quote
 from spx_spark.notifier import direct_push_alerts
 from spx_spark.settings.globex_trend import GlobexTrendSettings
@@ -106,6 +106,43 @@ def test_confirmed_globex_transition_is_a_direct_market_push() -> None:
     }
 
     assert direct_push_alerts([alert]) == [alert]
+
+
+def test_es_transition_uses_rth_semantics_during_cash_session() -> None:
+    event = {
+        "event_id": "globex-trend:2026-07-13:1:bullish",
+        "at": "2026-07-13T14:00:00+00:00",
+        "source_at": "2026-07-13T14:00:00+00:00",
+        "from_regime": "bearish",
+        "to_regime": "bullish",
+        "price": 7577.0,
+        "provider": "ibkr",
+        "metrics": {},
+    }
+
+    alert = alert_from_event(event)
+
+    assert alert.title == "ES RTH 多头趋势确认"
+    assert "ES RTH 趋势确认切换" in alert.detail
+    assert "不得按夜盘薄流动性解释" in alert.detail
+
+
+def test_es_transition_keeps_globex_semantics_outside_cash_session() -> None:
+    event = {
+        "event_id": "globex-trend:2026-07-13:1:bullish",
+        "at": "2026-07-13T12:00:00+00:00",
+        "source_at": "2026-07-13T12:00:00+00:00",
+        "from_regime": "bearish",
+        "to_regime": "bullish",
+        "price": 7577.0,
+        "provider": "ibkr",
+        "metrics": {},
+    }
+
+    alert = alert_from_event(event)
+
+    assert alert.title == "ES Globex 多头趋势确认"
+    assert "现金盘外" in alert.detail
 
 
 def _minute_path(

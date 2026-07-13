@@ -103,6 +103,7 @@ def collect_quote_batches(
     storage_settings: StorageSettings,
     received_at: datetime,
     batch_size: int,
+    priority_symbol_count: int,
     available_requests: int,
     hot_lane: bool,
     persist_snapshot: Any = persist_provider_snapshot,
@@ -111,7 +112,12 @@ def collect_quote_batches(
     quote_counts: dict[str, int] = {}
     errors: list[str] = []
     complete = True
-    for batch in quote_batches(symbols, batch_size=batch_size):
+    priority_end = min(max(priority_symbol_count, 0), len(symbols))
+    batches = [
+        *quote_batches(symbols[:priority_end], batch_size=batch_size),
+        *quote_batches(symbols[priority_end:], batch_size=batch_size),
+    ]
+    for batch in batches:
         if request_count >= available_requests:
             errors.append("quotes:hot_context: planned_request_ceiling")
             complete = False

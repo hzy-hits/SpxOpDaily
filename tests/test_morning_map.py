@@ -178,8 +178,8 @@ def test_render_template_contains_walls_probs_regime() -> None:
     assert "dip_context=expensive_tail_protection" in text
     assert "共振" in text
     assert "不共振" in text
-    assert "0DTE Greeks(只读/仓位符号未知" in text
-    assert "覆盖 8/10" in text
+    assert "0DTE 全链敏感度（OI加权绝对值，非持仓/非方向）" in text
+    assert "有效 8/10（80%）" in text
 
 
 def test_send_morning_map_falls_back_to_template_when_agent_fails(

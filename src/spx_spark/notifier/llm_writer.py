@@ -1,4 +1,4 @@
-"""Generic DeepSeek writer for scheduled report pushes (order map / morning map / status).
+"""Configurable writer for scheduled report pushes (order map / morning map / status).
 
 Distinct from the OpenClaw agent gate in the alert pipeline: this is a pure
 "writer" — the decision to push has already been made, the LLM only turns the
@@ -18,7 +18,7 @@ from typing import Any
 
 from spx_spark.config import NotificationSettings, env_bool, load_dotenv
 from spx_spark.notifier.model import CommandRunner, default_runner
-from spx_spark.notifier.sinks import run_openclaw_agent
+from spx_spark.notifier.sinks import run_grok_agent, run_openclaw_agent
 from spx_spark.settings import settings_value
 
 # Master-to-apprentice doctrine: this system prompt is written as a veteran SPX
@@ -40,6 +40,8 @@ DEFAULT_SYSTEM_PROMPT = "\n".join(
         "但系统里的 GEX/gamma_state 只是 OI 与报价构成的结构代理；只要 position_sign=unknown，就不知道客户/做市商净仓方向。",
         "此时只能把 gamma 当潜在放大或钉住风险，不能把负 gamma 直接翻译成下跌，更不能因此天然偏爱 put。",
         "net_dex_proxy / dagex_proxy / vex_proxy / cex_proxy 同理：全是 house proxy，不是 vendor Net DEX；",
+        "regime_decision 与 breakout_filter 是代码根据 ES 路径、量价、墙位 GEX 集中度和 DEX 代理生成的确定性裁决。",
+        "blocked/pending 不得写成突破成立；只有 supported 且 actionable=true 才表示假突破过滤通过，不得自行翻案。",
         "regime→map→flow→trigger→expression→exit 是 Micopedia/Steven 的 observe_only 决策栈，便签是检查清单，",
         "不是下单授权。Hyperliquid SP500 永续只是弱研究代理，绝不能当 SPX 现金锚或单独确认破位。",
         "二、墙是仓位不是魔法。put wall 挡得住的前提是 OI 背后的卖方还在防守。价格第一次到墙，",
@@ -57,8 +59,11 @@ DEFAULT_SYSTEM_PROMPT = "\n".join(
         "七、按搭档的钟表说话，不按纽约的。他的一天：北京 8:30-14:00 是亚盘夜盘(Globex+GTH，流动性薄，",
         "复盘+搭骨架+挂远端埋伏单)；14:00-20:30 是欧盘(ES 开始有真方向尝试，研究和布挂单的黄金窗)；",
         "20:30 美国宏观数据落地，EM/IV 重定价，挂单最后校准；21:30 美股开盘，首小时假突破多，等回踩；",
-        "22:30-次日 1:00 是他唯一在场的主战场。这些时段里市场一直在交易——『等开盘再说』在他的日程里",
+        "22:30-次日 0:00 是上午主战场；次日 0:00-1:00（ET 12:00-13:00）是午盘趋势确认窗。"
+        "这时已有完整上午路径，通常最适合决定平仓、减仓还是带保护继续持有。这些时段里市场一直在交易——『等开盘再说』在他的日程里",
         "几乎全天都是废话，每个时段都有该干的活，便签要落在当前时段的语境里。",
+        "任何 RTH 内的 ES 数据都属于日内路径确认，不得称为 GTH/夜盘，也不得套用薄流动性解释。"
+        "午盘确认原则不覆盖硬止损、结构失效和仓位风险上限；这些条件触发就立即按纪律处理。",
         "八、睡前收官是铁律。他凌晨 1 点睡，0DTE 在他睡着后 16:00 ET 才到期——留给市场的是无人值守的",
         "下午和尾盘。临睡前的便签必须回答三件事：未成交的挂单撤不撤、持仓带什么 bracket(止盈+止损给具体价)、",
         "哪些单绝不能裸奔过夜。裸持 0DTE 睡觉等于把方向盘交给 theta 和尾盘对冲盘。",
@@ -108,6 +113,7 @@ class LlmWriterSettings:
     env_file: str
     timeout_seconds: float
     max_tokens: int
+    provider_order: tuple[str, ...]
 
     @classmethod
     def from_env(cls) -> "LlmWriterSettings":
@@ -136,7 +142,20 @@ class LlmWriterSettings:
             max_tokens=int(
                 os.getenv("SPX_PUSH_LLM_MAX_TOKENS", str(settings_value("push_llm.max_tokens")))
             ),
+            provider_order=_provider_order(),
         )
+
+
+def _provider_order() -> tuple[str, ...]:
+    configured = os.getenv("SPX_PUSH_LLM_PROVIDER_ORDER", "").strip()
+    raw: object = configured.split(",") if configured else settings_value("push_llm.provider_order")
+    if not isinstance(raw, list | tuple):
+        return ("grok_cli", "deepseek", "openclaw")
+    allowed = {"grok_cli", "deepseek", "openclaw"}
+    providers = tuple(
+        dict.fromkeys(str(provider).strip().lower() for provider in raw if str(provider).strip())
+    )
+    return tuple(provider for provider in providers if provider in allowed)
 
 
 def read_env_file_value(path: str, key: str) -> str:
@@ -266,17 +285,31 @@ def generate_push_text(
     runner: CommandRunner = default_runner,
     system: str | None = None,
 ) -> tuple[str, str]:
-    """Return (text, writer). DeepSeek first, OpenClaw agent as fallback, then the template."""
-    reply, error = call_llm_writer(
-        prompt,
-        **({"system": system} if system is not None else {}),
-    )
-    if reply:
-        return reply, "deepseek"
-    if error and error != "disabled":
-        print(f"llm_writer: deepseek failed ({error}); falling back", file=sys.stderr)
-    if settings.openclaw_agent_enabled:
-        sink, agent_reply = run_openclaw_agent(settings, prompt, runner=runner)
-        if agent_reply and sink.ok:
-            return agent_reply, "openclaw_agent"
+    """Return generated text and provider, with deterministic template fallback."""
+    writer_settings = LlmWriterSettings.from_env()
+    for provider in writer_settings.provider_order:
+        if provider == "grok_cli" and settings.grok_enabled:
+            sink, reply = run_grok_agent(
+                settings,
+                prompt,
+                system=system or DEFAULT_SYSTEM_PROMPT,
+                runner=runner,
+            )
+            if sink.ok and reply:
+                return reply, "grok_cli"
+            print(f"llm_writer: grok_cli failed ({sink.error}); falling back", file=sys.stderr)
+        elif provider == "deepseek":
+            reply, error = call_llm_writer(
+                prompt,
+                system=system or DEFAULT_SYSTEM_PROMPT,
+                settings=writer_settings,
+            )
+            if reply:
+                return reply, "deepseek"
+            if error and error != "disabled":
+                print(f"llm_writer: deepseek failed ({error}); falling back", file=sys.stderr)
+        elif provider == "openclaw" and settings.openclaw_agent_enabled:
+            sink, reply = run_openclaw_agent(settings, prompt, runner=runner)
+            if sink.ok and reply:
+                return reply, "openclaw_agent"
     return template, "template"

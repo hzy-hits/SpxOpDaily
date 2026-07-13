@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import statistics
 from collections import defaultdict
+from dataclasses import asdict
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -15,6 +16,7 @@ from spx_spark.application.market_features.models import (
     L1MicrostructureFrame,
     OptionStructureFrame,
 )
+from spx_spark.features.exposure_map import ExposureMap, ExpiryExposure
 from spx_spark.marketdata import InstrumentType, MarketDataQuality, OptionRight, Provider, Quote, as_utc
 from spx_spark.settings.market_features import MarketFeatureSettings
 from spx_spark.storage import LatestState
@@ -28,6 +30,7 @@ def build_option_structure_frame(
     history: list[dict[str, Any]],
     previous_contracts: dict[str, Any],
     policy: MarketFeatureSettings,
+    exposure_map: ExposureMap | None = None,
 ) -> tuple[OptionStructureFrame, dict[str, Any]]:
     now = as_utc(now)
     front = options_map.expiries[0] if options_map.expiries else None
@@ -47,6 +50,9 @@ def build_option_structure_frame(
     volatility = option_volatility_features(front, next_expiry, history=history, now=now)
     concentration = concentration_features(state, front)
     density = density_features(front, history=history, now=now)
+    exposure = exposure_features(
+        _expiry_exposure(exposure_map, front.expiry if front else None)
+    )
     frame_id = f"options:{front.expiry if front else 'none'}:{now.strftime('%Y%m%dT%H%M')}"
     frame = OptionStructureFrame(
         schema_version=1,
@@ -65,8 +71,42 @@ def build_option_structure_frame(
             "underlier": options_map.underlier.price,
             "underlier_source": options_map.underlier.source,
         },
+        exposure=exposure,
     )
     return frame, current_contracts
+
+
+def _expiry_exposure(
+    exposure_map: ExposureMap | None,
+    expiry: str | None,
+) -> ExpiryExposure | None:
+    if exposure_map is None or expiry is None:
+        return None
+    return next((item for item in exposure_map.expiries if item.expiry == expiry), None)
+
+
+def exposure_features(exposure: ExpiryExposure | None) -> dict[str, Any]:
+    if exposure is None:
+        return {
+            "quality": "unavailable",
+            "oi_quality": "missing",
+            "oi_weighted": {},
+            "volume_weighted": {},
+            "warnings": ["exposure_map_unavailable"],
+        }
+    return {
+        "quality": exposure.quality,
+        "oi_quality": exposure.oi_quality,
+        "snapshot_age_seconds": exposure.snapshot_age_seconds,
+        "delta_coverage_ratio": exposure.delta_coverage_ratio,
+        "iv_coverage_ratio": exposure.iv_coverage_ratio,
+        "oi_weighted": asdict(exposure.oi_weighted),
+        "volume_weighted": asdict(exposure.volume_weighted),
+        "gex_weighting_divergence": exposure.gex_weighting_divergence,
+        "sign_convention": exposure.sign_convention,
+        "dealer_position_sign": exposure.dealer_position_sign,
+        "warnings": list(exposure.warnings),
+    }
 
 
 def structure_features(
@@ -99,6 +139,9 @@ def structure_features(
         ),
         "gamma_state": front.gamma_state,
         "gex_quality": front.gex_quality,
+        "net_gex": front.net_gex,
+        "abs_gex": front.abs_gex,
+        "net_gamma_ratio": front.net_gamma_ratio,
         "max_pain": max_pain,
         "call_walls": [wall.to_dict() for wall in front.call_walls],
         "put_walls": [wall.to_dict() for wall in front.put_walls],
@@ -455,6 +498,9 @@ def _empty_structure() -> dict[str, Any]:
         "distance_to_call_wall": None,
         "distance_to_zero_gamma": None,
         "max_pain": None,
+        "net_gex": None,
+        "abs_gex": None,
+        "net_gamma_ratio": None,
     }
 
 

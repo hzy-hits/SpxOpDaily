@@ -37,7 +37,7 @@ analytics:
   underlier_reference_tolerance_fraction: {value: 0.02, description: Maximum chain-implied versus proxy underlier divergence.}
 
 globex_trend:
-  enabled: {value: true, description: Runs the confirmed ES Globex trend and reversal state machine outside and through SPX RTH.}
+  enabled: {value: true, description: Runs the continuous ES session trend and reversal state machine, rendering Globex or RTH semantics from the event timestamp.}
   interval_seconds: {value: 30, description: Evaluation cadence in the 24h runtime.}
   sample_interval_seconds: {value: 60, description: Minimum spacing between durable ES path samples.}
   short_horizon_minutes: {value: 15, description: Short impulse horizon.}
@@ -86,14 +86,17 @@ provider_failover:
     value: 45.0
     description: Maximum recent provider-state age used to honor an explicit unavailable or disconnected status.
   quote_max_age_seconds:
-    value: 30.0
-    description: Maximum direct-anchor source age used for provider health; this exceeds the Schwab REST collection cadence to avoid scheduler-order false failovers.
+    value: 45.0
+    description: Maximum direct-anchor source age used for provider health; covers the observed 33-35 second Schwab REST cycle plus scheduler jitter without masking a sustained outage.
   monitor_rth_only:
     value: false
     description: When false, monitors both SPX RTH and regular ES Globex sessions while excluding the daily maintenance break and weekend closure.
   globex_required_instruments:
     value: [future:ES]
     description: Direct live anchors required outside cash RTH while ES Globex is open.
+  gth_min_live_option_contracts:
+    value: 20
+    description: Minimum fresh same-expiry SPXW contracts required with ES during GTH; equivalent to at least 10 complete call/put strike pairs.
   schwab_unhealthy_observations:
     value: 2
     description: Consecutive unhealthy Schwab observations required before requesting IBKR fallback.
@@ -153,9 +156,12 @@ schwab:
   option_chain_strike_count:
     value: 10
     description: Default strikeCount around ATM per chain expiration; per-instrument option_chain_strike_count overrides this ($SPX uses 40 for wider GEX/DEX walls).
-  quote_batch_size:
+  quote_symbol_capacity:
     value: 500
-    description: Maximum symbols placed in one Schwab quote request.
+    description: Total Schwab quote-lane symbol capacity used to plan context and dynamic SPXW coverage.
+  quote_batch_size:
+    value: 80
+    description: Operational quote-batch ceiling; context anchors are isolated first and option hot-lane symbols are split into bounded requests below Schwab's documented 500-symbol limit.
   allowed_market_data_paths:
     value: [/marketdata/v1/quotes, /marketdata/v1/chains]
     description: Read-only API paths exposed by the localhost gateway; account and trading paths are intentionally excluded.
@@ -214,6 +220,18 @@ schwab:
       off_hours_confirmation_chain_seconds:
         value: 300.0
         description: SPY, XSP, QQQ, and IWM chain cadence outside regular trading hours.
+      gth_quote_seconds:
+        value: 15.0
+        description: REST backup quote cadence while SPX GTH is open; WebSocket remains the primary tick source.
+      gth_front_chain_seconds:
+        value: 15.0
+        description: SPX front-chain structure cadence during the 20:15-09:25 ET GTH session.
+      gth_next_chain_seconds:
+        value: 60.0
+        description: Next-expiry SPXW structure cadence during GTH.
+      gth_confirmation_chain_seconds:
+        value: 300.0
+        description: Slow confirmation-chain cadence during GTH because cash ETF option markets are closed.
       normal_quote_seconds:
         value: 2.0
         description: Combined SPXW hot-option and context quote cadence during normal RTH.
@@ -299,8 +317,8 @@ schwab:
       value: ""
       description: Optional shadow latest-state path; empty uses schwab_stream_shadow.json under the configured data latest directory.
     option_hot_symbol_limit:
-      value: 64
-      description: Maximum current-expiry SPXW hot-lane contracts subscribed through Level-One option streaming.
+      value: 160
+      description: Maximum current-expiry SPXW hot-lane contracts subscribed through Level-One option streaming; covers the full 80-strike 0DTE call/put window.
     option_symbol_refresh_seconds:
       value: 5.0
       description: Cadence for applying changed hot-lane option subscriptions without reconnecting the WebSocket.
@@ -1097,7 +1115,7 @@ notification:
     description: Requires an explicit delivery cue before Codex output can be forwarded.
   deepseek_enabled:
     value: true
-    description: Enables DeepSeek fast reviewer before heavier agent fallbacks.
+    description: Enables DeepSeek reviewer as fallback when the primary Grok CLI reviewer is unavailable or fails.
   deepseek_deliver:
     value: true
     description: Allows DeepSeek-approved review output to be delivered.
@@ -1122,6 +1140,30 @@ notification:
   deepseek_temperature:
     value: 0.1
     description: Sampling temperature for deterministic reviewer output.
+  grok_enabled:
+    value: true
+    description: Enables the local Grok CLI reviewer and writer provider after CLI authentication.
+  grok_deliver:
+    value: true
+    description: Allows Grok-reviewed output that passes delivery gates to be forwarded.
+  grok_command:
+    value: agent
+    description: Command name or path for the local Grok agent CLI.
+  grok_model:
+    value: grok-4.5
+    description: Model passed to the local Grok agent CLI.
+  grok_reasoning_effort:
+    value: high
+    description: Reasoning effort passed to the local Grok agent CLI.
+  grok_cwd:
+    value: "."
+    description: Working directory for local Grok CLI invocations.
+  grok_timeout_seconds:
+    value: 120.0
+    description: Timeout in seconds for local Grok CLI invocations.
+  grok_output_max_chars:
+    value: 6400
+    description: Maximum Grok CLI output characters retained for notification text.
   review_min_time_sensitive_score:
     value: 30.0
     description: Minimum reviewer time-sensitivity score required for push delivery.
@@ -1162,6 +1204,9 @@ notification:
     deepseek_enabled:
       value: false
       description: Direct-construction default for DeepSeek reviewer when from_env is not used.
+    grok_enabled:
+      value: false
+      description: Direct-construction default for the local Grok provider when from_env is not used.
     direct_push_llm_enabled:
       value: false
       description: Direct-construction default for direct-push LLM rewriting when from_env is not used.
@@ -1617,7 +1662,7 @@ review:
 push_llm:
   enabled:
     value: true
-    description: Enables LLM rewriting for scheduled push text.
+    description: Enables the DeepSeek API provider as a scheduled-writer fallback; Grok CLI is controlled by notification.grok_enabled.
   model:
     value: deepseek-v4-pro
     description: Model name for scheduled push LLM writer.
@@ -1633,6 +1678,9 @@ push_llm:
   max_tokens:
     value: 12800
     description: Maximum completion tokens for scheduled push LLM output.
+  provider_order:
+    value: [grok_cli, deepseek, openclaw]
+    description: Ordered writer providers; disabled or failed providers fall through to the next provider and deterministic template.
 
 human_focus:
   event_tags:

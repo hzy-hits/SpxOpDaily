@@ -225,6 +225,13 @@ def test_exposure_map_oi_and_volume_weighted_coexist() -> None:
     assert expiry.volume_weighted.net_gamma_ratio == pytest.approx(-0.042486887902, rel=1e-9)
     assert expiry.oi_weighted.net_dex_proxy == pytest.approx(1545698.195477, rel=1e-9)
     assert expiry.volume_weighted.net_dex_proxy == pytest.approx(-1816515.798643, rel=1e-9)
+    assert expiry.oi_weighted.abs_dex_proxy is not None
+    assert expiry.volume_weighted.abs_dex_proxy is not None
+    assert expiry.oi_weighted.abs_dex_proxy >= abs(expiry.oi_weighted.net_dex_proxy)
+    assert expiry.volume_weighted.abs_dex_proxy >= abs(expiry.volume_weighted.net_dex_proxy)
+    assert expiry.oi_weighted.net_dex_ratio_proxy == pytest.approx(
+        expiry.oi_weighted.net_dex_proxy / expiry.oi_weighted.abs_dex_proxy
+    )
     assert expiry.volume_weighted.dagex_proxy == pytest.approx(-25545046.780670, rel=1e-9)
 
 
@@ -552,6 +559,43 @@ def test_stale_snapshot_marks_expiry_unavailable() -> None:
     assert expiry.quality == "unavailable"
     assert expiry.oi_weighted.net_gex is None
     assert expiry.volume_weighted.net_gex is None
+
+
+def test_single_stale_wing_does_not_invalidate_fresh_chain() -> None:
+    state = make_golden_state()
+    quotes = list(state.quotes)
+    option_indexes = [
+        index
+        for index, quote in enumerate(quotes)
+        if quote.instrument.instrument_type.value == "option"
+    ]
+    stale_index = option_indexes[-1]
+    quote = quotes[stale_index]
+    quotes[stale_index] = make_option(
+        expiry=quote.instrument.expiry or "20260713",
+        strike=float(quote.instrument.strike or 0),
+        right=quote.instrument.right.value if quote.instrument.right else "C",
+        mark=quote.mark or 10.0,
+        iv=IV,
+        gamma=quote.greeks.gamma if quote.greeks else 0.003,
+        delta=quote.greeks.delta if quote.greeks else 0.5,
+        open_interest=quote.open_interest,
+        volume=quote.volume,
+        quote_time=AS_OF - timedelta(minutes=20),
+    )
+    exposure = build_exposure_map(
+        LatestState(
+            created_at=AS_OF,
+            as_of=AS_OF,
+            quotes=tuple(quotes),
+            best_quotes=tuple(quotes),
+        )
+    )
+    expiry = exposure.expiries[0]
+
+    assert expiry.quality == "ok"
+    assert expiry.delta_coverage_ratio == pytest.approx(0.75)
+    assert expiry.oi_weighted.net_dex_proxy is not None
 
 
 def test_low_delta_coverage_nulls_net_dex_proxy() -> None:

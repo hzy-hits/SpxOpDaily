@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -9,6 +10,10 @@ from spx_spark.application.market_features.composition import (
     build_decision_audit,
     build_decision_context,
 )
+from spx_spark.application.market_features.decision_filters import (
+    build_breakout_filter,
+    build_regime_decision,
+)
 from spx_spark.application.market_features.market import (
     build_minute_market_frame,
     session_segment,
@@ -16,6 +21,7 @@ from spx_spark.application.market_features.market import (
 from spx_spark.application.market_features.models import (
     FrameQuality,
     L1MicrostructureFrame,
+    MinuteMarketFrame,
     OptionStructureFrame,
 )
 from spx_spark.application.market_features.options import (
@@ -219,6 +225,264 @@ def test_decision_context_audit_only_changes_on_meaningful_state() -> None:
     assert first is not None
     assert first.outcome_reference == "level:1"
     assert duplicate is None
+
+
+def test_dense_gex_and_dex_divergence_block_weak_breakout() -> None:
+    market = _decision_market_frame(
+        return_15=2.0,
+        return_60=-3.0,
+        efficiency=0.12,
+        vwap_distance=-2.0,
+        vwap_slope=-1.0,
+        volume_alignment="price_volume_divergent",
+        cross_confirmation="divergent",
+    )
+    options = _decision_option_frame(
+        abs_gex=100.0,
+        wall_gex=35.0,
+        next_wall_distance=5.0,
+        gamma_top_share=0.80,
+        oi_dex_ratio=0.35,
+        volume_dex_ratio=-0.40,
+    )
+    level = {
+        "event_id": "level:blocked",
+        "phase": "confirmed",
+        "thesis": "breakout",
+        "direction": "up",
+        "level_kind": "call_wall",
+        "level": 7550.0,
+    }
+    policy = MarketFeatureSettings()
+    regime = build_regime_decision(
+        market,
+        options,
+        trend={"regime": "neutral"},
+        level_decision=level,
+        policy=policy,
+    )
+    result = build_breakout_filter(
+        market,
+        options,
+        level_decision=level,
+        regime_decision=regime,
+        policy=policy,
+    )
+
+    assert result["verdict"] == "blocked"
+    assert result["actionable"] is False
+    assert result["barrier_score"] > result["impulse_score"]
+    assert result["oi_volume_dex_divergent"] is True
+    assert "dense_local_gex_ahead" in result["evidence"]
+
+
+def test_aligned_path_and_dex_allow_confirmed_breakout() -> None:
+    market = _decision_market_frame(
+        return_15=12.0,
+        return_60=28.0,
+        efficiency=0.80,
+        vwap_distance=8.0,
+        vwap_slope=3.0,
+        volume_alignment="price_volume_aligned",
+        cross_confirmation="confirmed",
+    )
+    options = _decision_option_frame(
+        abs_gex=1000.0,
+        wall_gex=10.0,
+        next_wall_distance=30.0,
+        gamma_top_share=0.10,
+        oi_dex_ratio=0.30,
+        volume_dex_ratio=0.45,
+    )
+    level = {
+        "event_id": "level:supported",
+        "phase": "confirmed",
+        "thesis": "breakout",
+        "direction": "up",
+        "level_kind": "call_wall",
+        "level": 7550.0,
+    }
+    policy = MarketFeatureSettings()
+    regime = build_regime_decision(
+        market,
+        options,
+        trend={"regime": "bullish"},
+        level_decision=level,
+        policy=policy,
+    )
+    result = build_breakout_filter(
+        market,
+        options,
+        level_decision=level,
+        regime_decision=regime,
+        policy=policy,
+    )
+
+    assert regime["mode"] == "trending"
+    assert result["verdict"] == "supported"
+    assert result["actionable"] is True
+    assert result["impulse_score"] > result["barrier_score"]
+
+
+def test_vix_confirmation_strengthens_trend_and_breakout() -> None:
+    confirming = _decision_market_frame(
+        return_15=12.0,
+        return_60=28.0,
+        efficiency=0.35,
+        vwap_distance=8.0,
+        vwap_slope=3.0,
+        volume_alignment="price_volume_aligned",
+        cross_confirmation="confirmed",
+        volatility={
+            "vix1d_vix_ratio": 1.05,
+            "vix_return_15m_pct": -2.0,
+            "vix_vvix_direction_confirmation_15m": "confirmed",
+        },
+    )
+    opposing = replace(
+        confirming,
+        volatility={
+            "vix1d_vix_ratio": 1.05,
+            "vix_return_15m_pct": 2.0,
+            "vix_vvix_direction_confirmation_15m": "confirmed",
+        },
+    )
+    options = _decision_option_frame(
+        abs_gex=1000.0,
+        wall_gex=10.0,
+        next_wall_distance=30.0,
+        gamma_top_share=0.10,
+        oi_dex_ratio=0.30,
+        volume_dex_ratio=0.45,
+    )
+    level = {
+        "event_id": "level:vix",
+        "phase": "confirmed",
+        "thesis": "breakout",
+        "direction": "up",
+        "level_kind": "call_wall",
+        "level": 7550.0,
+    }
+    policy = MarketFeatureSettings()
+
+    confirming_regime = build_regime_decision(
+        confirming,
+        options,
+        trend={"regime": "bullish"},
+        level_decision=level,
+        policy=policy,
+    )
+    opposing_regime = build_regime_decision(
+        opposing,
+        options,
+        trend={"regime": "bullish"},
+        level_decision=level,
+        policy=policy,
+    )
+    confirming_filter = build_breakout_filter(
+        confirming,
+        options,
+        level_decision=level,
+        regime_decision=confirming_regime,
+        policy=policy,
+    )
+    opposing_filter = build_breakout_filter(
+        opposing,
+        options,
+        level_decision=level,
+        regime_decision=opposing_regime,
+        policy=policy,
+    )
+
+    assert confirming_regime["volatility_regime"] == "stressed"
+    assert confirming_regime["trend_score"] > opposing_regime["trend_score"]
+    assert confirming_filter["impulse_score"] > opposing_filter["impulse_score"]
+    assert confirming_filter["barrier_score"] < opposing_filter["barrier_score"]
+    assert "vix_vvix_support_breakout" in confirming_filter["evidence"]
+    assert "vix_vvix_oppose_breakout" in opposing_filter["evidence"]
+
+
+def _decision_market_frame(
+    *,
+    return_15: float,
+    return_60: float,
+    efficiency: float,
+    vwap_distance: float,
+    vwap_slope: float,
+    volume_alignment: str,
+    cross_confirmation: str,
+    volatility: dict[str, object] | None = None,
+) -> MinuteMarketFrame:
+    now = datetime(2026, 7, 13, 15, 0, tzinfo=UTC)
+    return MinuteMarketFrame(
+        schema_version=1,
+        frame_id="market:decision",
+        session_id="2026-07-13",
+        as_of=now,
+        quality=FrameQuality.READY,
+        es={
+            "return_15m_points": return_15,
+            "return_60m_points": return_60,
+            "trend_efficiency_60m": efficiency,
+            "vwap_distance_points": vwap_distance,
+            "vwap_slope_15m_points": vwap_slope,
+            "higher_low_60m": return_60 > 0,
+            "lower_high_60m": return_60 < 0,
+        },
+        session_ranges={},
+        volume={"price_volume_alignment_5m": volume_alignment},
+        cross_asset={"es_spy_direction_confirmation_15m": cross_confirmation},
+        volatility=volatility or {},
+        diagnostics={},
+    )
+
+
+def _decision_option_frame(
+    *,
+    abs_gex: float,
+    wall_gex: float,
+    next_wall_distance: float,
+    gamma_top_share: float,
+    oi_dex_ratio: float,
+    volume_dex_ratio: float,
+) -> OptionStructureFrame:
+    now = datetime(2026, 7, 13, 15, 0, tzinfo=UTC)
+    return OptionStructureFrame(
+        schema_version=1,
+        frame_id="options:decision",
+        as_of=now,
+        quality=FrameQuality.READY,
+        front_expiry="20260713",
+        next_expiry="20260714",
+        structure={
+            "underlier": 7555.0,
+            "put_wall": 7500.0,
+            "call_wall": 7550.0,
+            "abs_gex": abs_gex,
+            "call_walls": [
+                {"strike": 7550.0, "gex": wall_gex},
+                {"strike": 7550.0 + next_wall_distance, "gex": wall_gex},
+            ],
+            "put_walls": [],
+        },
+        volatility={},
+        concentration={"gamma_top_share": gamma_top_share},
+        density={},
+        l1=L1MicrostructureFrame(
+            quality=FrameQuality.READY,
+            expiry="20260713",
+            contract_count=10,
+            metrics={"liquidity_score": 90.0},
+            diagnostics={},
+        ),
+        diagnostics={},
+        exposure={
+            "quality": "ok",
+            "oi_weighted": {"net_dex_ratio_proxy": oi_dex_ratio},
+            "volume_weighted": {"net_dex_ratio_proxy": volume_dex_ratio},
+            "gex_weighting_divergence": 0.0,
+        },
+    )
 
 
 def _market_sample(

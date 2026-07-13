@@ -47,6 +47,7 @@ def test_stream_assembler_merges_sparse_equity_deltas() -> None:
     assert quote.ask == 7500.5
     assert quote.mark == 7500.25
     assert quote.quality == MarketDataQuality.LIVE
+    assert quote.market_data_type == "live"
     assert quote.sampling_mode == "schwab_stream"
     assert assembler.drain_snapshot() is None
 

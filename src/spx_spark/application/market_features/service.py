@@ -34,6 +34,7 @@ from spx_spark.application.order_map.level_decision_shadow import (
     load_level_decision_shadow,
 )
 from spx_spark.config import StorageSettings
+from spx_spark.features.exposure_map import build_exposure_map
 from spx_spark.marketdata import as_utc
 from spx_spark.options_map import build_options_map
 from spx_spark.settings import load_app_settings
@@ -65,6 +66,7 @@ def run(argv: list[str] | None = None, *, now: datetime | None = None) -> int:
     trend = load_trend_state(trend_state_path(storage.data_root))
     latest = LatestStateStore(storage).load(now=evaluation_now)
     options_map = build_options_map(latest, storage_settings=storage)
+    exposure_map = build_exposure_map(latest)
     option_history = _dict_list(persisted.get("option_history"))
     option_frame, contracts = build_option_structure_frame(
         latest,
@@ -73,6 +75,7 @@ def run(argv: list[str] | None = None, *, now: datetime | None = None) -> int:
         history=option_history,
         previous_contracts=_dict(persisted.get("option_contracts")),
         policy=policy,
+        exposure_map=exposure_map,
     )
     sample = normalized_market_sample(latest, now=evaluation_now, policy=policy)
     existing_samples = _dict_list(persisted.get("market_samples"))

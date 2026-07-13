@@ -75,7 +75,11 @@ from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 from spx_spark.notifier.llm_writer import generate_push_text, load_previous_push, record_push
 from spx_spark.notifier.missed_queue import append_missed
 from spx_spark.notifier.model import CommandRunner, default_runner
-from spx_spark.notifier.sinks import any_delivery_ok, deliver_trade_push, im_delivery_ok
+from spx_spark.notifier.sinks import (
+    any_delivery_ok,
+    deliver_trade_push,
+    im_delivery_failed,
+)
 from spx_spark.options_map import build_options_map
 from spx_spark.storage import LatestState, LatestStateStore, configured_quote_use_decision
 from spx_spark.settings import load_app_settings
@@ -445,7 +449,10 @@ def build_order_payload_with_retry(
         market_frame = load_json(feature_paths["market"])
         payload["minute_market_frame"] = market_frame
         payload["option_structure_frame"] = load_json(feature_paths["option"])
-        payload["decision_context"] = load_json(feature_paths["decision"])
+        decision_context = load_json(feature_paths["decision"])
+        payload["decision_context"] = decision_context
+        payload["regime_decision"] = decision_context.get("regime_decision", {})
+        payload["breakout_filter"] = decision_context.get("breakout_filter", {})
         if payload.get("es_last") is None:
             es_price, es_provider = _recent_market_frame_es(
                 market_frame,
@@ -537,7 +544,7 @@ def run_status(
         runner=runner,
     )
     delivered_ok = any_delivery_ok(delivery_sinks)
-    if not im_delivery_ok(delivery_sinks):
+    if im_delivery_failed(delivery_sinks):
         append_missed(
             settings.missed_queue_path,
             text,

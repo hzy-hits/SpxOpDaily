@@ -100,9 +100,9 @@ def test_controller_never_activates_ibkr_outside_rth(tmp_path) -> None:
     assert raw["new_entries_allowed"] is False
 
 
-def test_controller_monitors_live_es_during_globex_without_requiring_spx(tmp_path) -> None:
+def test_controller_monitors_live_es_before_gth_without_requiring_spx(tmp_path) -> None:
     cfg = replace(settings(tmp_path), monitor_rth_only=False)
-    sunday_reopen = datetime(2026, 7, 13, 1, 30, tzinfo=UTC)
+    sunday_reopen = datetime(2026, 7, 12, 22, 30, tzinfo=UTC)
     schwab_es = quote(InstrumentId.future("ES"), Provider.SCHWAB, sunday_reopen)
 
     state = evaluate_and_persist(latest(sunday_reopen, schwab_es), cfg)
@@ -112,6 +112,53 @@ def test_controller_monitors_live_es_during_globex_without_requiring_spx(tmp_pat
     assert raw["monitoring_active"] is True
     assert raw["monitoring_context"] == "globex"
     assert state.schwab_unhealthy_streak == 0
+
+
+def test_controller_requires_live_es_and_spxw_pairs_during_gth(tmp_path) -> None:
+    cfg = replace(
+        settings(tmp_path),
+        monitor_rth_only=False,
+        gth_min_live_option_contracts=2,
+    )
+    gth = datetime(2026, 7, 13, 1, 30, tzinfo=UTC)
+    rows = [quote(InstrumentId.future("ES"), Provider.SCHWAB, gth)]
+    for right in ("C", "P"):
+        rows.append(
+            quote(
+                InstrumentId.option(
+                    "SPX",
+                    expiry="20260713",
+                    strike=7500,
+                    right=right,
+                    trading_class="SPXW",
+                ),
+                Provider.SCHWAB,
+                gth,
+            )
+        )
+
+    state = evaluate_and_persist(latest(gth, *rows), cfg)
+    raw = json.loads((tmp_path / "failover.json").read_text(encoding="utf-8"))
+
+    assert state.mode == FailoverMode.SCHWAB_PRIMARY
+    assert raw["monitoring_context"] == "gth"
+    assert state.schwab_unhealthy_streak == 0
+    assert "2 SPXW contracts/1 pairs" in state.last_schwab_reason
+
+
+def test_controller_rejects_es_only_during_gth(tmp_path) -> None:
+    cfg = replace(
+        settings(tmp_path),
+        monitor_rth_only=False,
+        gth_min_live_option_contracts=2,
+    )
+    gth = datetime(2026, 7, 13, 1, 30, tzinfo=UTC)
+    schwab_es = quote(InstrumentId.future("ES"), Provider.SCHWAB, gth)
+
+    state = evaluate_and_persist(latest(gth, schwab_es), cfg)
+
+    assert state.schwab_unhealthy_streak == 1
+    assert "GTH SPXW coverage 0/2" in state.last_schwab_reason
 
 
 def test_outside_rth_resets_prior_mode_streaks_and_transition(tmp_path) -> None:

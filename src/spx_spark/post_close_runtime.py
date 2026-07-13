@@ -19,7 +19,7 @@ from spx_spark.notifier.model import CommandRunner, default_runner
 from spx_spark.notifier.sinks import (
     any_delivery_ok,
     deliver_trade_push,
-    im_delivery_ok,
+    im_delivery_failed,
     run_openclaw_agent,
 )
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR, ET, MarketCalendar
@@ -443,7 +443,7 @@ def push_review(
         runner=runner,
     )
     delivered_ok = any_delivery_ok(delivery_sinks)
-    if not im_delivery_ok(delivery_sinks):
+    if im_delivery_failed(delivery_sinks):
         append_missed(settings.missed_queue_path, text, kind="post_close_review", at=now)
 
     return {

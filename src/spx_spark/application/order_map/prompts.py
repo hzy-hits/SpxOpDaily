@@ -114,6 +114,10 @@ def build_order_prompt(
             "所有候选同等推荐等于没推荐。",
             "框架口径：Micopedia/Steven observe_only（regime→map→flow→trigger→expression→exit）；"
             "条件交易地图是计划参考不是自动下单；GEX/*_proxy 是结构代理；Hyperliquid 只作弱次级证据，不作 SPX 锚。",
+            "regime_decision 与 breakout_filter 是代码生成的确定性决策层，不得自行改判。"
+            "breakout_filter.verdict=blocked 时删除/降级同事件 breakout 候选并优先说明假突破风险；pending 时不得写突破成立；"
+            "supported 且 actionable=true 才能把 CONFIRMED breakout 写成可执行候选。"
+            "说明时引用 impulse_score、barrier_score、local_abs_gex_share、next_wall_distance_points 和 OI/Volume DEX 分歧中真正改变判断的字段。",
             "",
             "输出中文，最多 18 行。第一行以『条件执行参考:』开头，复述模板第一行的日期与时间。",
             "接着给地形定调：pin 还是 transition，为什么(gamma 状态+价格相对 flip 的位置)，今天哪类 play 优先。",
@@ -218,6 +222,28 @@ def _compact_decision_line(payload: dict[str, Any]) -> str | None:
         "call_wall": "Call Wall",
     }.get(str(decision.get("level_kind") or ""), str(decision.get("level_kind") or "-"))
     return f"状态  {phase}（{phase_label}）｜{kind} {_dash(level)}{distance}｜{guidance}"
+
+
+def _compact_breakout_filter_line(payload: dict[str, Any]) -> str | None:
+    value = payload.get("breakout_filter")
+    if not isinstance(value, dict):
+        return None
+    verdict = str(value.get("verdict") or "not_applicable")
+    if verdict == "not_applicable":
+        return None
+    label = {
+        "blocked": "拦截",
+        "pending": "待确认",
+        "supported": "通过",
+        "unavailable": "不可用",
+    }.get(verdict, verdict)
+    local_share = finite_float(value.get("local_abs_gex_share"))
+    local_text = f"｜附近GEX {local_share:.0%}" if local_share is not None else ""
+    dex_text = "｜OI/成交DEX背离" if value.get("oi_volume_dex_divergent") is True else ""
+    return (
+        f"突破过滤  {label}｜动能 {_dash(value.get('impulse_score'))} / "
+        f"阻力 {_dash(value.get('barrier_score'))}{local_text}{dex_text}"
+    )
 
 
 def _compact_price_line(payload: dict[str, Any]) -> str:
@@ -408,6 +434,7 @@ def render_status_template(
         ),
         *([line] if (line := _compact_oi_line(payload)) else []),
         *([line] if (line := _compact_decision_line(payload)) else []),
+        *([line] if (line := _compact_breakout_filter_line(payload)) else []),
         "",
         *([line] if (line := _compact_flow_line(payload)) else []),
         *(
@@ -584,6 +611,8 @@ def build_status_prompt(
     return "\n".join(
         (
             "这是每 15 分钟一次的 SPX 决策摘要，不是完整研究报告。",
+            "先读取 regime_decision 与 breakout_filter：blocked=突破被结构阻力拦截，pending=证据不足，"
+            "supported 且 actionable=true=突破过滤通过。不得绕过代码 verdict，也不得把 DEX proxy 写成 dealer 实仓。",
             "输出中文，第一行逐字保留模板标题；先给剧本维持/有变，再给当前位置和状态机结论。",
             "只保留会改变当前决策的内容：时段、SPX/ES、wall/flip、状态机、ES 路径与量价、"
             "Max Pain/OI 或波动率中最重要的一项、最多两个条件候选、相对上次变化和下一确认/证伪阈值。",

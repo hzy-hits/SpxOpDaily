@@ -103,6 +103,23 @@ def test_globex_schedule_includes_sunday_reopen_and_daily_break() -> None:
     assert CALENDAR.is_globex_open(et_datetime(saturday, 12)) is False
 
 
+def test_spx_gth_tracks_trading_date_weekends_and_holidays() -> None:
+    sunday = date(2026, 7, 12)
+    monday = date(2026, 7, 13)
+    friday = date(2026, 7, 17)
+
+    assert CALENDAR.is_spx_gth_open(et_datetime(sunday, 20, 14)) is False
+    assert CALENDAR.is_spx_gth_open(et_datetime(sunday, 20, 15)) is True
+    assert CALENDAR.is_spx_gth_open(et_datetime(monday, 9, 24)) is True
+    assert CALENDAR.is_spx_gth_open(et_datetime(monday, 9, 25)) is False
+    assert CALENDAR.is_spx_gth_open(et_datetime(friday, 20, 15)) is False
+
+    labor_day_eve = date(2026, 9, 6)
+    labor_day = date(2026, 9, 7)
+    assert CALENDAR.is_spx_gth_open(et_datetime(labor_day_eve, 20, 15)) is False
+    assert CALENDAR.is_spx_gth_open(et_datetime(labor_day, 20, 15)) is True
+
+
 def test_utc_rollover_tracks_et_across_daylight_saving_change() -> None:
     before_dst = date(2026, 3, 6)
     after_dst = date(2026, 3, 9)

@@ -10,7 +10,11 @@ from spx_spark.config import NotificationSettings
 from spx_spark.notifier.llm_writer import generate_push_text
 from spx_spark.notifier.missed_queue import append_missed
 from spx_spark.notifier.model import CommandRunner, default_runner
-from spx_spark.notifier.sinks import any_delivery_ok, deliver_trade_push, im_delivery_ok
+from spx_spark.notifier.sinks import (
+    any_delivery_ok,
+    deliver_trade_push,
+    im_delivery_failed,
+)
 
 def send_morning_map(
     payload: dict[str, Any],
@@ -39,7 +43,7 @@ def send_morning_map(
         runner=runner,
     )
     delivered_ok = any_delivery_ok(delivery_sinks)
-    if not im_delivery_ok(delivery_sinks):
+    if im_delivery_failed(delivery_sinks):
         append_missed(settings.missed_queue_path, text, kind="morning_map", at=now)
 
     return {

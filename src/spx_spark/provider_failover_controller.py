@@ -36,6 +36,7 @@ class ProviderFailoverSettings:
     transition_alert_max_age_seconds: float
     monitor_rth_only: bool
     thresholds: FailoverThresholds
+    gth_min_live_option_contracts: int = 20
 
     def __post_init__(self) -> None:
         if not self.required_instruments:
@@ -52,6 +53,8 @@ class ProviderFailoverSettings:
             raise ValueError("provider failover control state max age must be positive")
         if self.transition_alert_max_age_seconds <= 0:
             raise ValueError("provider failover transition alert max age must be positive")
+        if self.gth_min_live_option_contracts < 2:
+            raise ValueError("GTH option health requires at least one call/put pair")
 
     @classmethod
     def from_env(cls) -> "ProviderFailoverSettings":
@@ -95,6 +98,10 @@ class ProviderFailoverSettings:
             monitor_rth_only=env_bool(
                 "PROVIDER_FAILOVER_RTH_ONLY",
                 bool(settings_value("provider_failover.monitor_rth_only")),
+            ),
+            gth_min_live_option_contracts=env_int(
+                "PROVIDER_FAILOVER_GTH_MIN_LIVE_OPTION_CONTRACTS",
+                int(settings_value("provider_failover.gth_min_live_option_contracts")),
             ),
             thresholds=FailoverThresholds(
                 schwab_unhealthy_observations=env_int(
@@ -171,6 +178,8 @@ def monitoring_active_at(now: datetime, *, rth_only: bool) -> bool:
 def monitoring_context_at(now: datetime, *, rth_only: bool) -> str:
     if DEFAULT_MARKET_CALENDAR.is_rth_open(now):
         return "rth"
+    if not rth_only and DEFAULT_MARKET_CALENDAR.is_spx_gth_open(now):
+        return "gth"
     if not rth_only and DEFAULT_MARKET_CALENDAR.is_globex_open(now):
         return "globex"
     return "closed"
@@ -248,6 +257,59 @@ def latest_quote_for_provider(
     return max(matches, key=lambda quote: as_utc(quote.received_at))
 
 
+def gth_option_health(
+    state: LatestState,
+    provider: Provider,
+    *,
+    min_contracts: int,
+    quote_max_age_seconds: float,
+) -> ProviderHealth:
+    """Require a fresh same-session SPXW surface, not merely a live ES anchor."""
+
+    expiry = DEFAULT_MARKET_CALENDAR.research_expiry(state.as_of).strftime("%Y%m%d")
+    pairs: dict[float, set[str]] = {}
+    contracts: set[str] = set()
+    for quote in state.quotes:
+        instrument = quote.instrument
+        if (
+            quote.provider is not provider
+            or (instrument.trading_class or "").upper() != "SPXW"
+            or instrument.expiry != expiry
+            or instrument.strike is None
+            or instrument.right is None
+            or quote.effective_price is None
+        ):
+            continue
+        source_at = quote.quote_time or quote.trade_time or quote.last_update_at or quote.received_at
+        age_seconds = (as_utc(state.as_of) - as_utc(source_at)).total_seconds()
+        if quote.quality in {
+            MarketDataQuality.FROZEN,
+            MarketDataQuality.DELAYED,
+            MarketDataQuality.DELAYED_FROZEN,
+            MarketDataQuality.MISSING,
+            MarketDataQuality.ERROR,
+            MarketDataQuality.UNKNOWN,
+            MarketDataQuality.SYNTHETIC,
+        } or not 0 <= age_seconds <= quote_max_age_seconds:
+            continue
+        right = str(getattr(instrument.right, "value", instrument.right)).upper()
+        pairs.setdefault(float(instrument.strike), set()).add(right)
+        contracts.add(instrument.canonical_id)
+
+    complete_pairs = sum(1 for sides in pairs.values() if sides == {"C", "P"})
+    required_pairs = max(min_contracts // 2, 1)
+    if len(contracts) < min_contracts or complete_pairs < required_pairs:
+        return ProviderHealth(
+            False,
+            f"GTH SPXW coverage {len(contracts)}/{min_contracts} contracts, "
+            f"{complete_pairs}/{required_pairs} complete pairs",
+        )
+    return ProviderHealth(
+        True,
+        f"GTH live ES plus {len(contracts)} SPXW contracts/{complete_pairs} pairs",
+    )
+
+
 def evaluate_and_persist(
     latest: LatestState,
     settings: ProviderFailoverSettings,
@@ -288,6 +350,21 @@ def evaluate_and_persist(
         provider_state_max_age_seconds=settings.provider_state_max_age_seconds,
         quote_max_age_seconds=settings.quote_max_age_seconds,
     )
+    if context == "gth":
+        if schwab.healthy:
+            schwab = gth_option_health(
+                latest,
+                Provider.SCHWAB,
+                min_contracts=settings.gth_min_live_option_contracts,
+                quote_max_age_seconds=settings.quote_max_age_seconds,
+            )
+        if ibkr.healthy:
+            ibkr = gth_option_health(
+                latest,
+                Provider.IBKR,
+                min_contracts=settings.gth_min_live_option_contracts,
+                quote_max_age_seconds=settings.quote_max_age_seconds,
+            )
     updated = advance_failover(
         current,
         FailoverObservation(

@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 
 from spx_spark.config import NotificationSettings
 from spx_spark.notifier.deepseek import deepseek_usage_limited, run_deepseek_reviewer
-from spx_spark.notifier.llm_writer import call_llm_writer, load_previous_push, record_push
+from spx_spark.notifier.llm_writer import generate_push_text, load_previous_push, record_push
 from spx_spark.notifier.missed_queue import append_missed, flush_missed
 from spx_spark.notifier.model import CommandRunner, NotificationResult, SinkResult, default_runner
 from spx_spark.notifier.policy import (
@@ -27,8 +27,9 @@ from spx_spark.notifier.sinks import (
     any_delivery_ok,
     bark_title_for_alerts,
     deliver_trade_push,
-    im_delivery_ok,
+    im_delivery_failed,
     run_codex_exec,
+    run_grok_agent,
     run_openclaw_agent,
 )
 from spx_spark.notifier.state import (
@@ -182,7 +183,7 @@ def _failopen_time_sensitive_alerts(
         failopen_alerts,
     )
     sinks.extend(delivery_sinks)
-    if not im_delivery_ok(delivery_sinks):
+    if im_delivery_failed(delivery_sinks):
         append_missed(
             settings.missed_queue_path,
             failopen_message,
@@ -329,7 +330,7 @@ def _deliver_review_message(
                 delivery_candidates,
             )
             sinks.extend(delivery_sinks)
-            if not im_delivery_ok(delivery_sinks):
+            if im_delivery_failed(delivery_sinks):
                 append_missed(
                     settings.missed_queue_path,
                     message,
@@ -532,6 +533,7 @@ def notify_payload(
         or settings.feishu_enabled
         or settings.bark_enabled
         or settings.deepseek_enabled
+        or settings.grok_enabled
         or settings.openclaw_agent_enabled
         or settings.codex_enabled
     ):
@@ -546,7 +548,10 @@ def notify_payload(
     alerts_marked_sent: list[dict[str, object]] = []
     acknowledged_event_ids: set[str] = set()
     if settings.openclaw_enabled and not (
-        settings.feishu_enabled or settings.bark_enabled or settings.deepseek_enabled
+        settings.feishu_enabled
+        or settings.bark_enabled
+        or settings.deepseek_enabled
+        or settings.grok_enabled
     ):
         # Legacy: OpenClaw-only mode still dumps the raw template without review.
         delivery_sinks = _scope_sinks(
@@ -562,7 +567,7 @@ def notify_payload(
             selected,
         )
         sinks.extend(delivery_sinks)
-        if not im_delivery_ok(delivery_sinks):
+        if im_delivery_failed(delivery_sinks):
             append_missed(
                 settings.missed_queue_path,
                 message,
@@ -589,11 +594,12 @@ def notify_payload(
         if settings.direct_push_llm_enabled:
             # Writer, not reviewer: the push decision is already made. Any
             # failure falls back to the raw template so events are never lost.
-            written, _writer_error = call_llm_writer(
-                build_direct_push_prompt(payload, bypass_alerts)
+            bypass_message, _writer = generate_push_text(
+                bypass_message,
+                build_direct_push_prompt(payload, bypass_alerts),
+                settings,
+                runner=runner,
             )
-            if written:
-                bypass_message = written
         lane = push_lane_for_alerts(bypass_alerts)
         friend = lane == "trade" and alerts_are_market_signals(bypass_alerts)
         delivery_sinks = _scope_sinks(
@@ -609,7 +615,7 @@ def notify_payload(
             bypass_alerts,
         )
         sinks.extend(delivery_sinks)
-        if not im_delivery_ok(delivery_sinks):
+        if im_delivery_failed(delivery_sinks):
             append_missed(
                 settings.missed_queue_path,
                 bypass_message,
@@ -665,6 +671,47 @@ def notify_payload(
             )
         review_candidates = strong_review_candidates
 
+    if settings.grok_enabled and review_candidates:
+        review_attempted = True
+        grok_result, grok_message = run_grok_agent(
+            settings,
+            build_codex_prompt(payload, review_candidates, previous_push=load_previous_push()),
+            runner=runner,
+        )
+        grok_result = _scope_sink(
+            grok_result,
+            review_candidates,
+            verdict="reviewed" if grok_result.ok else "failed",
+        )
+        sinks.append(grok_result)
+        if grok_result.ok:
+            review_candidates = _deliver_review_message(
+                payload=payload,
+                message=grok_message,
+                review_candidates=review_candidates,
+                settings=settings,
+                runner=runner,
+                now_utc=now_utc,
+                alerts_marked_sent=alerts_marked_sent,
+                acknowledged_event_ids=acknowledged_event_ids,
+                sinks=sinks,
+                reviewer_sink=grok_result,
+                reviewer_name="grok_cli",
+                delivery_kind="grok_cli",
+                deliver=settings.grok_deliver,
+            )
+        else:
+            review_candidates = _handle_reviewer_failure(
+                result=grok_result,
+                payload=payload,
+                review_candidates=review_candidates,
+                settings=settings,
+                runner=runner,
+                now_utc=now_utc,
+                alerts_marked_sent=alerts_marked_sent,
+                acknowledged_event_ids=acknowledged_event_ids,
+                sinks=sinks,
+            )
     if settings.deepseek_enabled and review_candidates:
         review_attempted = True
         deepseek_result, deepseek_message = run_deepseek_reviewer(

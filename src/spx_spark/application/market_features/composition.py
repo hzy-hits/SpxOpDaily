@@ -7,6 +7,10 @@ import json
 from datetime import datetime
 from typing import Any
 
+from spx_spark.application.market_features.decision_filters import (
+    build_breakout_filter,
+    build_regime_decision,
+)
 from spx_spark.application.market_features.models import (
     DecisionAudit,
     DecisionContext,
@@ -32,6 +36,20 @@ def build_decision_context(
     )
     price_volume = str(market.volume.get("price_volume_alignment_5m") or "unavailable")
     liquidity = options.l1.metrics.get("liquidity_score")
+    regime_decision = build_regime_decision(
+        market,
+        options,
+        trend=trend,
+        level_decision=level_decision,
+        policy=policy,
+    )
+    breakout_filter = build_breakout_filter(
+        market,
+        options,
+        level_decision=level_decision,
+        regime_decision=regime_decision,
+        policy=policy,
+    )
     invalidations: list[str] = []
     if market.quality.value == "unavailable":
         invalidations.append("es_path_unavailable")
@@ -57,6 +75,8 @@ def build_decision_context(
         "option_liquidity_score": liquidity,
         "level_phase": level_decision.get("phase"),
         "formal_level_signal": level_decision.get("formal_signal") is True,
+        "regime_mode": regime_decision.get("mode"),
+        "breakout_verdict": breakout_filter.get("verdict"),
     }
     context_key = {
         "market": market.frame_id,
@@ -84,6 +104,8 @@ def build_decision_context(
             "options": options.quality.value,
             "option_l1": options.l1.quality.value,
         },
+        regime_decision=regime_decision,
+        breakout_filter=breakout_filter,
     )
 
 
@@ -106,6 +128,8 @@ def decision_signature(context: dict[str, Any]) -> tuple[object, ...]:
         level.get("formal_signal"),
         confirmations.get("es_spy_direction"),
         confirmations.get("price_volume_alignment"),
+        confirmations.get("regime_mode"),
+        confirmations.get("breakout_verdict"),
     )
 
 

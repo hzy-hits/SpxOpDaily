@@ -206,6 +206,7 @@ class RealtimeEngine:
             warmed_up=self.warmed_up,
             any_critical_success=self.warmed_up,
             cash_session_open=DEFAULT_MARKET_CALENDAR.is_rth_open(now),
+            gth_option_session_open=DEFAULT_MARKET_CALENDAR.is_spx_gth_open(now),
             globex_context_usable=(
                 DEFAULT_MARKET_CALENDAR.is_globex_open(now)
                 and snapshot_has_live_es(snapshot)
