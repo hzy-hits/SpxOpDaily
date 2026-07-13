@@ -8,7 +8,7 @@ from contextlib import contextmanager, nullcontext
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Iterator
+from typing import Iterator, Sequence
 from uuid import uuid4
 
 import duckdb
@@ -952,7 +952,16 @@ def _as_utc(value: datetime) -> datetime:
     return value.astimezone(timezone.utc)
 
 
-from spx_spark.data_platform.lake.compact_cli import build_parser, main  # noqa: E402
+def build_parser():
+    from spx_spark.data_platform.lake.compact_cli import build_parser as cli_build_parser
+
+    return cli_build_parser()
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    from spx_spark.data_platform.lake.compact_cli import main as cli_main
+
+    return cli_main(argv)
 
 __all__ = [
     "CompactionResult",
