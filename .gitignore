@@ -5,7 +5,7 @@
 .env
 config/runtime.local.yaml
 logs/
-runtime/
+/runtime/
 data/raw/
 data/processed/
 data/latest/
