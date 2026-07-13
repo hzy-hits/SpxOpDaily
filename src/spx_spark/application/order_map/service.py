@@ -12,6 +12,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from spx_spark.analytics.options.pricing import finite_float
+from spx_spark.application.globex_trend.state import load_trend_state, trend_state_path
+from spx_spark.application.market_features.state import load_json, projection_paths
 from spx_spark.application.order_map.bias_machine import load_intraday_call_bias
 from spx_spark.application.order_map.candidates import build_candidates
 from spx_spark.application.order_map.delivery import send_order_map
@@ -20,8 +22,21 @@ from spx_spark.application.order_map.hl_volume import (
     attach_hl_volume_signal,
     default_hl_volume_sample_path,
 )
+from spx_spark.application.order_map.level_decision_shadow import (
+    load_level_decision_shadow,
+)
 from spx_spark.application.order_map.models import SHANGHAI_TZ
-from spx_spark.application.order_map.prompts import build_status_prompt, render_status_template
+from spx_spark.application.order_map.prompts import (
+    GLOBEX_CONTEXT_SYSTEM_PROMPT,
+    actionable_writer_output_valid,
+    build_status_prompt,
+    globex_writer_output_valid,
+    render_status_template,
+)
+from spx_spark.application.order_map.pricing_audit import (
+    append_pricing_audit,
+    build_pricing_audit_record,
+)
 from spx_spark.application.order_map.render import (
     render_template,
 )
@@ -61,10 +76,17 @@ from spx_spark.notifier.missed_queue import append_missed
 from spx_spark.notifier.model import CommandRunner, default_runner
 from spx_spark.notifier.sinks import any_delivery_ok, deliver_trade_push, im_delivery_ok
 from spx_spark.options_map import build_options_map
-from spx_spark.storage import LatestState, LatestStateStore
+from spx_spark.storage import LatestState, LatestStateStore, configured_quote_use_decision
+from spx_spark.settings import load_app_settings
+from spx_spark.settings.order_map import DEFAULT_ORDER_MAP_POLICY, OrderMapPolicy
 
 
-def build_order_payload(state: LatestState, *, now: datetime | None = None) -> dict[str, Any]:
+def build_order_payload(
+    state: LatestState,
+    *,
+    now: datetime | None = None,
+    policy: OrderMapPolicy = DEFAULT_ORDER_MAP_POLICY,
+) -> dict[str, Any]:
     now = now or state.as_of
     options_map = build_options_map(state)
     warnings = list(options_map.warnings)
@@ -93,6 +115,7 @@ def build_order_payload(state: LatestState, *, now: datetime | None = None) -> d
         now=now,
         resolution=resolution,
         conditional_call_bias=conditional_call_bias,
+        policy=policy,
     )
     greeks_audit_reference = build_zero_dte_greeks_reference(
         replace(state, as_of=now),
@@ -106,6 +129,7 @@ def build_order_payload(state: LatestState, *, now: datetime | None = None) -> d
         "contracts": [],
     }
     beijing = now.astimezone(SHANGHAI_TZ)
+    trigger_coordinate = _report_trigger_coordinate(state, resolution, now=now)
 
     # Day move vs expected move: the writer's anti-FOMO anchor. "The drop has
     # already consumed 120% of today's EM" is the number that talks a reader
@@ -140,8 +164,10 @@ def build_order_payload(state: LatestState, *, now: datetime | None = None) -> d
             "reason": resolution.reason,
             "divergence_bps": resolution.divergence_bps,
         },
+        "trigger_coordinate": trigger_coordinate,
         "pricing_allowed": resolution.pricing_allowed,
         "research_only": resolution.research_only,
+        "analysis_mode": "globex_context" if resolution.research_only else "executable",
         "expiry": expiry,
         "expected_move_points": expected_move_points,
         "candidates": [asdict(candidate) for candidate in candidates],
@@ -184,7 +210,13 @@ def build_order_payload(state: LatestState, *, now: datetime | None = None) -> d
         "zero_gamma": zero_gamma,
         "flip_zone": flip_zone,
         "wall_ladder": (
-            _wall_ladder_payload(state, options_map, pricing_spot, now=now)
+            _wall_ladder_payload(
+                state,
+                options_map,
+                pricing_spot,
+                now=now,
+                policy=policy,
+            )
             if resolution.pricing_allowed
             else {"call_walls": [], "put_walls": []}
         ),
@@ -209,6 +241,11 @@ def build_order_payload(state: LatestState, *, now: datetime | None = None) -> d
             if resolution.pricing_allowed and front is not None and front.rn_density
             else None
         ),
+        "max_pain": (
+            front.max_pain.to_dict()
+            if resolution.pricing_allowed and front is not None and front.max_pain
+            else None
+        ),
         "vol_context": {
             "vix": _index_value(state, "index:VIX"),
             "vix1d": _index_value(state, "index:VIX1D"),
@@ -219,6 +256,42 @@ def build_order_payload(state: LatestState, *, now: datetime | None = None) -> d
         "es_last": _index_value(state, "future:ES"),
         "session_phase": session_phase(now),
         "warnings": list(dict.fromkeys(warnings)),
+    }
+
+
+def _report_trigger_coordinate(
+    state: LatestState,
+    resolution,
+    *,
+    now: datetime,
+) -> dict[str, object]:
+    if DEFAULT_MARKET_CALENDAR.is_rth_open(now):
+        quote = state.best_quote("index:SPX")
+        if quote is not None and configured_quote_use_decision(quote, as_of=now).pricing_allowed:
+            return {
+                "kind": "official_spx",
+                "instrument_id": "index:SPX",
+                "observed_value": quote.effective_price,
+                "source": "index:SPX",
+            }
+        return {
+            "kind": "unavailable",
+            "instrument_id": None,
+            "observed_value": None,
+            "source": "official_spx_unavailable_use_realtime_es_equivalent",
+        }
+    if resolution.pricing_source == "chain_implied":
+        return {
+            "kind": "chain_implied_spx",
+            "instrument_id": "synthetic:SPXW_PARITY",
+            "observed_value": resolution.pricing_price,
+            "source": "chain_implied",
+        }
+    return {
+        "kind": "unavailable",
+        "instrument_id": None,
+        "observed_value": None,
+        "source": "chain_implied_unavailable_use_realtime_es_equivalent",
     }
 
 
@@ -236,6 +309,32 @@ def persist_zero_dte_greeks_reference(
         write_zero_dte_greeks_snapshot(reference, data_root=data_root)
     except OSError as exc:
         print(f"0DTE Greeks snapshot write failed: {exc}", file=sys.stderr)
+
+
+def persist_order_map_pricing_audit(
+    payload: dict[str, Any],
+    storage_settings: StorageSettings,
+    *,
+    now: datetime,
+    report_kind: str,
+    template: str,
+    result: dict[str, Any],
+) -> None:
+    try:
+        append_pricing_audit(
+            storage_settings.data_root,
+            build_pricing_audit_record(
+                payload,
+                generated_at=now,
+                report_kind=report_kind,
+                template=template,
+                delivered_text=str(result.get("text") or ""),
+                writer=str(result.get("writer") or "unknown"),
+                delivered_ok=result.get("delivered_ok") is True,
+            ),
+        )
+    except OSError as exc:
+        print(f"Order-map pricing audit write failed: {exc}", file=sys.stderr)
 
 
 def _payload_is_thin(payload: dict[str, Any]) -> bool:
@@ -298,6 +397,7 @@ def build_order_payload_with_retry(
     attempt rebuilds the whole payload against an advancing evaluation time.
     """
     payload: dict[str, Any] = {}
+    policy = load_app_settings().order_map
     state: LatestState | None = None
     started_at = time_module.monotonic()
     evaluation_now = now
@@ -306,17 +406,38 @@ def build_order_payload_with_retry(
             elapsed_seconds = max(time_module.monotonic() - started_at, 0.0)
             evaluation_now = now + timedelta(seconds=elapsed_seconds)
         state = LatestStateStore(storage_settings).load(now=evaluation_now)
-        payload = build_order_payload(state, now=evaluation_now)
+        payload = build_order_payload(state, now=evaluation_now, policy=policy)
         if not (_payload_is_thin(payload) or _payload_has_retryable_candidate_gap(payload)):
             break
         if attempt < attempts - 1:
             time_module.sleep(delay_seconds)
     if state is not None:
+        level_decision = load_level_decision_shadow(storage_settings)
+        payload["level_decision"] = level_decision
+        if payload.get("research_only") is True and isinstance(level_decision, dict):
+            context_spot = finite_float(level_decision.get("spot"))
+            context_source = level_decision.get("spot_source")
+            if context_spot is not None and isinstance(context_source, str):
+                payload["context_reference"] = {
+                    "price": context_spot,
+                    "source": context_source,
+                    "executable": False,
+                }
+        payload["context_cross_checks"] = {
+            "es": payload.get("es_last"),
+            "hyperliquid": payload.get("hl_sp500_perp"),
+        }
+        payload["globex_trend"] = load_trend_state(trend_state_path(storage_settings.data_root))
+        feature_paths = projection_paths(storage_settings.data_root)
+        payload["minute_market_frame"] = load_json(feature_paths["market"])
+        payload["option_structure_frame"] = load_json(feature_paths["option"])
+        payload["decision_context"] = load_json(feature_paths["decision"])
         attach_es_volume_signal(
             payload,
             state,
             sample_path=default_es_volume_sample_path(storage_settings),
             now=evaluation_now,
+            policy=policy,
         )
         attach_hl_volume_signal(
             payload,
@@ -326,7 +447,6 @@ def build_order_payload_with_retry(
             now=evaluation_now,
         )
     return payload
-
 
 
 def run_status(
@@ -351,12 +471,7 @@ def run_status(
         return 0
     fingerprint = payload_fingerprint(payload)
     changes = material_changes(previous.get("fingerprint"), fingerprint)
-    # Combined push: status narrative + the order-map limit table used to be
-    # two interleaved 30-minute pushes; the map template rides along so the
-    # writer (and the raw fallback) always carries concrete limit prices.
     template = render_status_template(payload, changes, now)
-    if payload.get("research_only") is not True:
-        template = "\n".join((template, render_template(payload)))
 
     if args.dry_run:
         print(template)
@@ -365,32 +480,36 @@ def run_status(
 
     settings = NotificationSettings.from_env()
     research_only = payload.get("research_only") is True
-    if research_only:
-        # Research status is deliberately deterministic: an unconstrained
-        # writer response must never turn proxy context into trade language.
-        text, writer = template, "template"
-    else:
-        text, writer = generate_push_text(
-            template,
-            build_status_prompt(payload, template, load_previous_push()),
-            settings,
-            runner=runner,
+    text, writer = generate_push_text(
+        template,
+        build_status_prompt(payload, template, load_previous_push()),
+        settings,
+        runner=runner,
+        system=GLOBEX_CONTEXT_SYSTEM_PROMPT if research_only else None,
+    )
+    if writer != "template":
+        valid = (
+            globex_writer_output_valid(text, template)
+            if research_only
+            else actionable_writer_output_valid(text, template)
         )
+        if not valid:
+            text, writer = template, "template_validation_fallback"
     delivery_sinks = deliver_trade_push(
         settings,
-        title="研究状态" if research_only else "市场状态",
+        title="SPX 15分钟市场状态",
         text=text,
         kind="status",
-        lane="ops" if research_only else "trade",
-        friend=not research_only,
+        lane="trade",
+        friend=True,
         runner=runner,
     )
     delivered_ok = any_delivery_ok(delivery_sinks)
-    if not research_only and not im_delivery_ok(delivery_sinks):
+    if not im_delivery_ok(delivery_sinks):
         append_missed(
             settings.missed_queue_path,
             text,
-            kind="order_map_research" if research_only else "order_map_status",
+            kind="order_map_status",
             at=now,
         )
     im_ok = any(s.sink == "feishu" and s.ok for s in delivery_sinks)
@@ -410,6 +529,14 @@ def run_status(
         "delivered_ok": delivered_ok,
         "changes": changes,
     }
+    persist_order_map_pricing_audit(
+        payload,
+        storage_settings,
+        now=now,
+        report_kind="status",
+        template=template,
+        result=result,
+    )
     print(json.dumps(result, ensure_ascii=False))
     if not delivered_ok:
         return 1
@@ -468,9 +595,9 @@ def run_refresh(
     changes = material_changes(previous.get("fingerprint"), fingerprint)
 
     if changes:
-        header = f"【挂单地图·更新】变化: {'; '.join(changes)}"
+        header = f"【条件交易地图·更新】变化: {'; '.join(changes)}"
     else:
-        header = "【挂单地图·更新】关键位无实质变化，限价随最新报价刷新"
+        header = "【条件交易地图·更新】关键位无实质变化，情景价随最新报价刷新"
     if args.dry_run:
         print(header)
         print(render_template(payload))
@@ -480,6 +607,14 @@ def run_refresh(
     settings = NotificationSettings.from_env()
     result = send_order_map(
         payload, settings, now=now, extra_header=header, previous_push=load_previous_push()
+    )
+    persist_order_map_pricing_audit(
+        payload,
+        storage_settings,
+        now=now,
+        report_kind="refresh",
+        template="\n".join((header, render_template(payload))),
+        result=result,
     )
     if (
         result.get("delivered_ok")
@@ -536,6 +671,14 @@ def run(argv: list[str] | None = None, *, now: datetime | None = None) -> int:
 
     settings = NotificationSettings.from_env()
     result = send_order_map(payload, settings, now=now, previous_push=load_previous_push())
+    persist_order_map_pricing_audit(
+        payload,
+        storage_settings,
+        now=now,
+        report_kind="baseline",
+        template=template,
+        result=result,
+    )
     if (
         result.get("delivered_ok")
         or result["im_ok"]

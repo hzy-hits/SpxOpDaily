@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from spx_spark.config import NY_TZ, StorageSettings, env_bool, env_float, env_int
+from spx_spark.config import StorageSettings, env_bool, env_float, env_int
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 from spx_spark.marketdata import MarketDataQuality, Provider, ProviderStatus, Quote, as_utc
 from spx_spark.provider_failover import (
@@ -29,6 +29,7 @@ class ProviderFailoverSettings:
     enabled: bool
     state_path: str
     required_instruments: tuple[str, ...]
+    globex_required_instruments: tuple[str, ...]
     provider_state_max_age_seconds: float
     quote_max_age_seconds: float
     control_state_max_age_seconds: float
@@ -39,6 +40,8 @@ class ProviderFailoverSettings:
     def __post_init__(self) -> None:
         if not self.required_instruments:
             raise ValueError("provider failover requires at least one direct anchor")
+        if not self.globex_required_instruments:
+            raise ValueError("provider failover requires at least one Globex anchor")
         if len(set(self.required_instruments)) != len(self.required_instruments):
             raise ValueError("provider failover required instruments cannot contain duplicates")
         if self.provider_state_max_age_seconds <= 0:
@@ -68,6 +71,10 @@ class ProviderFailoverSettings:
             or f"{data_root.rstrip('/')}/latest/provider_failover_state.json",
             required_instruments=tuple(
                 str(item) for item in settings_value("provider_failover.required_instruments")
+            ),
+            globex_required_instruments=tuple(
+                str(item)
+                for item in settings_value("provider_failover.globex_required_instruments")
             ),
             provider_state_max_age_seconds=env_float(
                 "PROVIDER_FAILOVER_STATE_MAX_AGE_SECONDS",
@@ -140,9 +147,11 @@ def save_failover_state(
     state: FailoverState,
     *,
     monitoring_active: bool,
+    monitoring_context: str = "closed",
 ) -> None:
     payload = state.to_dict()
     payload["monitoring_active"] = monitoring_active
+    payload["monitoring_context"] = monitoring_context
     payload["ibkr_market_data_required"] = bool(
         monitoring_active and state.ibkr_market_data_required
     )
@@ -154,11 +163,17 @@ def save_failover_state(
 
 
 def monitoring_active_at(now: datetime, *, rth_only: bool) -> bool:
-    if not rth_only:
+    if DEFAULT_MARKET_CALENDAR.is_rth_open(now):
         return True
-    now_et = as_utc(now).astimezone(NY_TZ)
-    session = DEFAULT_MARKET_CALENDAR.session(now_et.date())
-    return bool(session is not None and session.open_at <= now_et < session.close_at)
+    return not rth_only and DEFAULT_MARKET_CALENDAR.is_globex_open(now)
+
+
+def monitoring_context_at(now: datetime, *, rth_only: bool) -> str:
+    if DEFAULT_MARKET_CALENDAR.is_rth_open(now):
+        return "rth"
+    if not rth_only and DEFAULT_MARKET_CALENDAR.is_globex_open(now):
+        return "globex"
+    return "closed"
 
 
 def provider_health(
@@ -244,20 +259,32 @@ def evaluate_and_persist(
     )
     if not active:
         inactive = FailoverState.initial(now=latest.as_of)
-        save_failover_state(settings.state_path, inactive, monitoring_active=False)
+        save_failover_state(
+            settings.state_path,
+            inactive,
+            monitoring_active=False,
+            monitoring_context="closed",
+        )
         return inactive
+
+    context = monitoring_context_at(latest.as_of, rth_only=settings.monitor_rth_only)
+    required_instruments = (
+        settings.required_instruments
+        if context == "rth"
+        else settings.globex_required_instruments
+    )
 
     schwab = provider_health(
         latest,
         Provider.SCHWAB,
-        required_instruments=settings.required_instruments,
+        required_instruments=required_instruments,
         provider_state_max_age_seconds=settings.provider_state_max_age_seconds,
         quote_max_age_seconds=settings.quote_max_age_seconds,
     )
     ibkr = provider_health(
         latest,
         Provider.IBKR,
-        required_instruments=settings.required_instruments,
+        required_instruments=required_instruments,
         provider_state_max_age_seconds=settings.provider_state_max_age_seconds,
         quote_max_age_seconds=settings.quote_max_age_seconds,
     )
@@ -272,7 +299,12 @@ def evaluate_and_persist(
         ),
         settings.thresholds,
     )
-    save_failover_state(settings.state_path, updated, monitoring_active=True)
+    save_failover_state(
+        settings.state_path,
+        updated,
+        monitoring_active=True,
+        monitoring_context=context,
+    )
     return updated
 
 
@@ -297,6 +329,10 @@ def run(argv: list[str] | None = None) -> int:
             )
         )
         payload["monitoring_active"] = monitoring_active
+        payload["monitoring_context"] = monitoring_context_at(
+            latest.as_of,
+            rth_only=settings.monitor_rth_only,
+        )
         payload["ibkr_market_data_required"] = bool(
             monitoring_active and state.ibkr_market_data_required
         )

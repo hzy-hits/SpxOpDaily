@@ -446,6 +446,7 @@ BARK_TITLE_CATEGORIES: tuple[tuple[str, frozenset[str]], ...] = (
         "price_move_from_close",
         "intraday_price_shock",
         "intraday_price_reclaim",
+        "globex_trend_transition",
         "broker_unavailable_proxy_watch",
     })),
     ("结构信号", frozenset({

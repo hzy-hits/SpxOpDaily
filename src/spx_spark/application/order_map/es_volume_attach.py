@@ -7,12 +7,12 @@ from typing import Any
 
 from spx_spark.analytics.options.pricing import finite_float
 from spx_spark.application.order_map.volume_machine import (
-    ES_VOLUME_MAX_QUOTE_AGE_SECONDS,
     es_volume_signal,
     load_es_volume_break_watch,
     load_es_volume_samples,
     save_es_volume_state,
 )
+from spx_spark.settings.order_map import DEFAULT_ORDER_MAP_POLICY, OrderMapPolicy
 from spx_spark.storage import LatestState
 
 
@@ -36,6 +36,7 @@ def attach_es_volume_signal(
     sample_path: str,
     now: datetime,
     persist: bool = True,
+    policy: OrderMapPolicy = DEFAULT_ORDER_MAP_POLICY,
 ) -> None:
     """Compute the ES volume-price event and append the new sample.
 
@@ -48,7 +49,10 @@ def attach_es_volume_signal(
     quote = state.best_quote("future:ES")
     cumulative = finite_float(quote.volume) if quote is not None else None
     age_ms = quote.quote_age_ms(now) if quote is not None else None
-    if age_ms is not None and age_ms > ES_VOLUME_MAX_QUOTE_AGE_SECONDS * 1000.0:
+    if (
+        age_ms is not None
+        and age_ms > policy.es_volume_max_quote_age_seconds * 1000.0
+    ):
         cumulative = None
 
     underlier = payload.get("underlier") if isinstance(payload.get("underlier"), dict) else {}
@@ -77,6 +81,7 @@ def attach_es_volume_signal(
         call_wall=call_wall,
         flip_zone=flip_zone,
         break_watch=previous_watch,
+        policy=policy,
     )
     payload["es_volume"] = signal
     if persist and cumulative is not None:
@@ -89,5 +94,5 @@ def attach_es_volume_signal(
             sample_path,
             samples,
             break_watch=new_watch if isinstance(new_watch, dict) else None,
+            max_samples=policy.es_volume_max_samples,
         )
-

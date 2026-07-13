@@ -8,19 +8,23 @@ from threading import Lock
 from typing import Any
 
 from spx_spark.marketdata import (
+    OptionGreeks,
     Provider,
     Quote,
     as_utc,
     classify_quote_quality,
     clean_float,
     elapsed_ms,
+    normalize_implied_vol_percent,
     parse_timestamp,
 )
 from spx_spark.provider_adapter import ProviderSnapshot
-from spx_spark.schwab.adapter import instrument_from_schwab_symbol
+from spx_spark.schwab.adapter import instrument_from_schwab_symbol, schwab_model_float
 
 
-SUPPORTED_LEVEL_ONE_SERVICES = frozenset({"LEVELONE_EQUITIES", "LEVELONE_FUTURES"})
+SUPPORTED_LEVEL_ONE_SERVICES = frozenset(
+    {"LEVELONE_EQUITIES", "LEVELONE_FUTURES", "LEVELONE_OPTIONS"}
+)
 DEFAULT_STREAM_STALE_SECONDS = 15
 
 
@@ -123,6 +127,32 @@ def quote_from_stream_fields(
         stale_after_seconds=stale_after_seconds,
         explicit_delayed=False,
     )
+    open_interest = clean_float(fields.get("OPEN_INTEREST"))
+    greeks = None
+    structure_time = None
+    if normalized_service == "LEVELONE_OPTIONS":
+        greeks = OptionGreeks(
+            implied_vol=normalize_implied_vol_percent(fields.get("VOLATILITY")),
+            delta=schwab_model_float(fields.get("DELTA")),
+            gamma=schwab_model_float(fields.get("GAMMA")),
+            theta=schwab_model_float(fields.get("THETA")),
+            vega=schwab_model_float(fields.get("VEGA")),
+            rho=schwab_model_float(fields.get("RHO")),
+            underlier_price=schwab_model_float(fields.get("UNDERLYING_PRICE")),
+            model="schwab_stream",
+        )
+        if (open_interest or 0.0) > 0 or any(
+            value is not None
+            for value in (
+                greeks.implied_vol,
+                greeks.delta,
+                greeks.gamma,
+                greeks.theta,
+                greeks.vega,
+                greeks.rho,
+            )
+        ):
+            structure_time = received_at
     return Quote(
         instrument=instrument_from_schwab_symbol(symbol),
         provider=Provider.SCHWAB,
@@ -138,12 +168,14 @@ def quote_from_stream_fields(
         ask_size=clean_float(fields.get("ASK_SIZE")),
         last_size=clean_float(fields.get("LAST_SIZE")),
         volume=clean_float(fields.get("TOTAL_VOLUME")),
-        open_interest=clean_float(fields.get("OPEN_INTEREST")),
+        open_interest=open_interest,
+        structure_time=structure_time,
         quote_time=quote_time,
         trade_time=trade_time,
         last_update_at=received_at,
         source_latency_ms=elapsed_ms(quote_time or trade_time, received_at),
         market_data_type="schwab_stream",
+        greeks=greeks,
         sampling_mode="schwab_stream",
         raw={"service": normalized_service, "fields": dict(fields)},
     )

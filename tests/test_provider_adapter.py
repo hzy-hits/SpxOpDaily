@@ -19,6 +19,7 @@ from spx_spark.provider_adapter import (
     ProviderSnapshot,
     merge_provider_snapshots,
     persist_provider_snapshot,
+    provider_state_from_quote_health,
 )
 from spx_spark.storage import LatestStateStore
 
@@ -76,6 +77,30 @@ def test_provider_snapshot_rejects_mismatched_provider_quote():
 
     with pytest.raises(ValueError, match="mismatched provider"):
         ProviderSnapshot(provider=Provider.IBKR, received_at=now, quotes=(quote,))
+
+
+def test_provider_state_is_degraded_when_all_priced_quotes_are_stale() -> None:
+    now = datetime(2026, 7, 13, 5, 30, tzinfo=timezone.utc)
+    quote = make_quote(
+        provider=Provider.SCHWAB,
+        quality=MarketDataQuality.STALE,
+        mark=7500,
+        received_at=now,
+        quote_time=now - timedelta(days=3),
+    )
+
+    state = provider_state_from_quote_health(
+        Provider.SCHWAB,
+        (quote,),
+        checked_at=now,
+        connected=True,
+        authenticated=True,
+        latency_ms=None,
+        priority=1,
+    )
+
+    assert state.status is ProviderStatus.DEGRADED
+    assert state.reason == "connected but all priced quotes are stale"
 
 
 def test_merge_provider_snapshots_feeds_normalized_fallback():

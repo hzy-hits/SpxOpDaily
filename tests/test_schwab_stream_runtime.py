@@ -5,8 +5,14 @@ from pathlib import Path
 from spx_spark.config import SchwabStreamSettings, StorageSettings
 from spx_spark.schwab.stream_runtime import (
     SchwabStreamRuntime,
+    stream_option_symbols,
     stream_storage_settings,
     stream_symbols,
+)
+from spx_spark.schwab.collector_state import (
+    CollectorBudgetState,
+    collector_state_path,
+    save_collector_budget_state,
 )
 
 
@@ -34,6 +40,9 @@ def stream_settings(tmp_path: Path, *, mode: str) -> SchwabStreamSettings:
         reconnect_max_seconds=60.0,
         websocket_open_timeout_seconds=10.0,
         shadow_latest_path=str(tmp_path / "latest" / "schwab-stream-shadow.json"),
+        option_hot_symbol_limit=64,
+        option_symbol_refresh_seconds=5.0,
+        option_plan_max_age_seconds=120.0,
     )
 
 
@@ -62,6 +71,7 @@ def test_stream_symbols_split_equity_and_concrete_futures() -> None:
 
 def test_runtime_flushes_stream_message_to_shadow_storage(tmp_path: Path) -> None:
     persisted = []
+    subscribed_options: list[list[str]] = []
 
     class FakeManager:
         def client_for_streaming(self):
@@ -72,6 +82,7 @@ def test_runtime_flushes_stream_message_to_shadow_storage(tmp_path: Path) -> Non
             del client, enforce_enums
             self.equity_handler = None
             self.future_handler = None
+            self.option_handler = None
             self.equities = []
             self.futures = []
             self.emitted = False
@@ -82,6 +93,9 @@ def test_runtime_flushes_stream_message_to_shadow_storage(tmp_path: Path) -> Non
         def add_level_one_futures_handler(self, handler):
             self.future_handler = handler
 
+        def add_level_one_option_handler(self, handler):
+            self.option_handler = handler
+
         async def login(self, args):
             assert args["open_timeout"] > 0
 
@@ -90,6 +104,12 @@ def test_runtime_flushes_stream_message_to_shadow_storage(tmp_path: Path) -> Non
 
         async def level_one_futures_subs(self, symbols):
             self.futures = symbols
+
+        async def level_one_option_subs(self, symbols):
+            subscribed_options.append(list(symbols))
+
+        async def level_one_option_unsubs(self, symbols):
+            del symbols
 
         async def handle_message(self):
             if not self.emitted:
@@ -121,6 +141,9 @@ def test_runtime_flushes_stream_message_to_shadow_storage(tmp_path: Path) -> Non
         reconnect_max_seconds=0.02,
         websocket_open_timeout_seconds=1.0,
         shadow_latest_path=str(tmp_path / "latest" / "shadow.json"),
+        option_hot_symbol_limit=64,
+        option_symbol_refresh_seconds=5.0,
+        option_plan_max_age_seconds=120.0,
     )
     runtime = None
 
@@ -135,6 +158,7 @@ def test_runtime_flushes_stream_message_to_shadow_storage(tmp_path: Path) -> Non
         storage(tmp_path),
         stream_client_factory=FakeStream,
         persist_snapshot=persist,
+        option_symbol_resolver=lambda: ["SPXW  260713C07500000"],
     )
 
     asyncio.run(runtime._run_session())
@@ -143,6 +167,7 @@ def test_runtime_flushes_stream_message_to_shadow_storage(tmp_path: Path) -> Non
     snapshot, resolved_storage = persisted[0]
     assert snapshot.quotes[0].instrument.canonical_id == "index:SPX"
     assert resolved_storage.latest_state_path.endswith("shadow.json")
+    assert subscribed_options == [["SPXW  260713C07500000"]]
 
 
 def test_runtime_reconnects_and_resubscribes_when_future_contract_changes(
@@ -170,6 +195,9 @@ def test_runtime_reconnects_and_resubscribes_when_future_contract_changes(
         def add_level_one_futures_handler(self, handler):
             del handler
 
+        def add_level_one_option_handler(self, handler):
+            del handler
+
         async def login(self, args):
             assert args["open_timeout"] > 0
 
@@ -180,6 +208,12 @@ def test_runtime_reconnects_and_resubscribes_when_future_contract_changes(
             subscribed_futures.append(list(symbols))
             if symbols == ["/ESZ26"]:
                 runtime.close()
+
+        async def level_one_option_subs(self, symbols):
+            del symbols
+
+        async def level_one_option_unsubs(self, symbols):
+            del symbols
 
         async def handle_message(self):
             await asyncio.sleep(10)
@@ -204,6 +238,9 @@ def test_runtime_reconnects_and_resubscribes_when_future_contract_changes(
         reconnect_max_seconds=0.02,
         websocket_open_timeout_seconds=1.0,
         shadow_latest_path=str(tmp_path / "latest" / "shadow.json"),
+        option_hot_symbol_limit=64,
+        option_symbol_refresh_seconds=5.0,
+        option_plan_max_age_seconds=120.0,
     )
     runtime = SchwabStreamRuntime(
         FakeManager(),  # type: ignore[arg-type]
@@ -221,3 +258,34 @@ def test_runtime_reconnects_and_resubscribes_when_future_contract_changes(
     assert len(streams) == 2
     assert all(stream.logged_out for stream in streams)
     assert '"event": "schwab_stream_symbols_changed"' in capsys.readouterr().out
+
+
+def test_stream_option_symbols_uses_only_fresh_matching_hot_plan(tmp_path: Path) -> None:
+    cfg = storage(tmp_path)
+    now = datetime(2026, 7, 13, 5, 0, tzinfo=timezone.utc)
+    state = CollectorBudgetState(
+        chain_last_fetched_at={"SPX:front": now},
+        hot_symbols=[
+            "SPXW  260713C07500000",
+            "SPXW  260713P07500000",
+            "SPXW  260714C07500000",
+            "SPY",
+        ],
+        hot_expiry="20260713",
+    )
+    save_collector_budget_state(collector_state_path(cfg), state)
+
+    symbols = stream_option_symbols(
+        cfg,
+        limit=1,
+        max_plan_age_seconds=120.0,
+        now=now,
+    )
+
+    assert symbols == ["SPXW  260713C07500000"]
+    assert stream_option_symbols(
+        cfg,
+        limit=64,
+        max_plan_age_seconds=120.0,
+        now=now.replace(minute=3),
+    ) == []

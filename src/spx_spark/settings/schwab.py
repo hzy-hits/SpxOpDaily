@@ -44,6 +44,7 @@ class SchwabCadenceSettings:
 @dataclass(frozen=True)
 class SchwabWideChainSettings:
     strike_count_candidates: tuple[int, ...]
+    next_expiry_strike_count: int
     min_usable_strikes: int
     min_two_sided_ratio: float
     expected_move_multiple: float
@@ -53,7 +54,11 @@ class SchwabWideChainSettings:
     def __post_init__(self) -> None:
         if tuple(sorted(set(self.strike_count_candidates))) != self.strike_count_candidates:
             raise ValueError("Schwab strike-count candidates must be unique and ascending")
-        if not self.strike_count_candidates or self.min_usable_strikes <= 0:
+        if (
+            not self.strike_count_candidates
+            or self.next_expiry_strike_count <= 0
+            or self.min_usable_strikes <= 0
+        ):
             raise ValueError("Schwab wide-chain counts must be positive")
         if not 0 < self.min_two_sided_ratio <= 1:
             raise ValueError("Schwab two-sided ratio must be in (0, 1]")
@@ -98,7 +103,7 @@ class SchwabSettingsSlice:
     )
     wide_chain: SchwabWideChainSettings = field(
         default_factory=lambda: SchwabWideChainSettings(
-            (80, 100, 120), 40, 0.8, 2.5, 150, 2.0
+            (80, 100, 120), 40, 40, 0.8, 2.5, 150, 2.0
         )
     )
     hot_lane: SchwabHotLaneSettings = field(

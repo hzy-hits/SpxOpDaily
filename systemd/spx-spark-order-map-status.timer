@@ -1,5 +1,5 @@
 [Unit]
-Description=Market status + order map combined push (every 15 min Beijing 07:30 -> next-day 01:30)
+Description=Compact market decision summary (every 15 min Beijing 07:30 -> next-day 01:30)
 
 [Timer]
 # Full working day: Beijing 07:30 -> next-day 01:30 every 15 minutes

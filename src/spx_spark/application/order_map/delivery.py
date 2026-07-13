@@ -5,7 +5,12 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
-from spx_spark.application.order_map.prompts import build_order_prompt
+from spx_spark.application.order_map.prompts import (
+    GLOBEX_CONTEXT_SYSTEM_PROMPT,
+    actionable_writer_output_valid,
+    build_order_prompt,
+    globex_writer_output_valid,
+)
 from spx_spark.application.order_map.render import render_template
 from spx_spark.config import NotificationSettings
 from spx_spark.notifier.llm_writer import (
@@ -30,38 +35,44 @@ def send_order_map(
     if extra_header:
         template = f"{extra_header}\n{template}"
     research_only = payload.get("research_only") is True
-    if research_only:
-        text, writer = template, "template"
-    else:
-        text, writer = generate_push_text(
-            template,
-            build_order_prompt(payload, template, previous_push),
-            settings,
-            runner=runner,
+    text, writer = generate_push_text(
+        template,
+        build_order_prompt(payload, template, previous_push),
+        settings,
+        runner=runner,
+        system=GLOBEX_CONTEXT_SYSTEM_PROMPT if research_only else None,
+    )
+    if writer != "template":
+        valid = (
+            globex_writer_output_valid(text, template)
+            if research_only
+            else actionable_writer_output_valid(text, template)
         )
+        if not valid:
+            text, writer = template, "template_validation_fallback"
 
     delivery_sinks = deliver_trade_push(
         settings,
-        title="研究状态" if research_only else "挂单地图",
+        title="市场状态" if research_only else "条件交易地图",
         text=text,
         kind="status" if research_only else "order_map",
-        lane="ops" if research_only else "trade",
-        friend=not research_only,
+        lane="trade",
+        friend=True,
         runner=runner,
     )
     delivered_ok = any_delivery_ok(delivery_sinks)
-    if not research_only and not im_delivery_ok(delivery_sinks):
+    if not im_delivery_ok(delivery_sinks):
         append_missed(
             settings.missed_queue_path,
             text,
-            kind="order_map_research" if research_only else "order_map",
+            kind="order_map",
             at=now,
         )
 
     return {
         "text": text,
         "writer": writer,
-        "used_agent": writer != "template",
+        "used_agent": writer in {"deepseek", "openclaw_agent"},
         "im_ok": any(s.sink == "feishu" and s.ok for s in delivery_sinks),
         "bark_ok": any(s.sink == "bark" and s.ok for s in delivery_sinks),
         "feishu_ok": any(s.sink == "feishu" and s.ok for s in delivery_sinks),

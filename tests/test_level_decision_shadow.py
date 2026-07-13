@@ -1,0 +1,267 @@
+from __future__ import annotations
+
+import json
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+from dataclasses import replace
+
+import pytest
+
+from spx_spark.application.order_map.level_decision_machine import LevelObservation
+from spx_spark.application.order_map.level_decision_shadow import (
+    _structure_session_age,
+    load_level_decision_shadow,
+    run_level_decision_shadow,
+)
+from spx_spark.notifier.model import SinkResult
+from spx_spark.settings.level_decision import LevelDecisionPolicy
+
+
+NOW = datetime(2026, 7, 13, 14, 30, tzinfo=timezone.utc)
+
+
+@pytest.fixture(autouse=True)
+def _stub_level_decision_writer(monkeypatch):
+    monkeypatch.setattr(
+        "spx_spark.application.order_map.level_decision_shadow.generate_push_text",
+        lambda template, *_args, **_kwargs: (template, "template"),
+    )
+
+
+def test_frozen_structure_ttl_counts_trading_sessions() -> None:
+    structure = {
+        "session_date": "2026-07-10",
+        "observed_at": "2026-07-10T19:00:00+00:00",
+    }
+
+    assert _structure_session_age(structure, now=NOW) == 1
+    assert _structure_session_age(
+        structure,
+        now=datetime(2026, 7, 14, 14, 30, tzinfo=timezone.utc),
+    ) == 2
+
+
+def test_shadow_persists_mutually_exclusive_state_and_transition_audit(
+    tmp_path, monkeypatch
+) -> None:
+    storage = SimpleNamespace(data_root=str(tmp_path))
+    current = {
+        "observation": LevelObservation(
+            at=NOW,
+            spot=95.0,
+            es=5000.0,
+            levels={"put_wall": 100.0, "call_wall": 120.0},
+            quality_ok=True,
+            session_date="2026-07-13",
+        )
+    }
+    monkeypatch.setattr(
+        "spx_spark.application.order_map.level_decision_shadow._observation",
+        lambda *_args, **_kwargs: current["observation"],
+    )
+
+    result = run_level_decision_shadow(storage, SimpleNamespace(), now=NOW)
+    assert result["phase"] == "approaching"
+    assert result["level_kind"] == "put_wall"
+    assert result["actionable"] is False
+
+    current["observation"] = LevelObservation(
+        at=NOW + timedelta(seconds=5),
+        spot=99.0,
+        es=5000.0,
+        levels={"put_wall": 100.0, "call_wall": 120.0},
+        quality_ok=True,
+        session_date="2026-07-13",
+    )
+    result = run_level_decision_shadow(
+        storage, SimpleNamespace(), now=NOW + timedelta(seconds=5)
+    )
+    assert result["phase"] == "testing"
+    persisted = load_level_decision_shadow(storage)
+    assert persisted["phase"] == "testing"
+
+    audit = (
+        tmp_path
+        / "features"
+        / "level_decision_audit"
+        / "date=2026-07-13"
+        / "transitions.jsonl"
+    )
+    rows = [json.loads(line) for line in audit.read_text().splitlines()]
+    assert [row["current_phase"] for row in rows] == ["approaching", "testing"]
+    assert len({row["record_key"] for row in rows}) == 2
+
+
+def test_outside_rth_advances_when_es_globex_observation_is_usable(
+    tmp_path, monkeypatch
+) -> None:
+    storage = SimpleNamespace(data_root=str(tmp_path))
+    at = datetime(2026, 7, 13, 8, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(
+        "spx_spark.application.order_map.level_decision_shadow._observation",
+        lambda *_args, **_kwargs: LevelObservation(
+            at=at,
+            spot=99.0,
+            es=145.0,
+            levels={"put_wall": 100.0},
+            quality_ok=True,
+            session_date="2026-07-13",
+            spot_source="es_basis_adjusted:46.0",
+            level_source="frozen_oi_gex",
+        ),
+    )
+    result = run_level_decision_shadow(
+        storage,
+        SimpleNamespace(),
+        now=at,
+    )
+    assert result["status"] == "updated"
+    assert result["phase"] == "testing"
+    assert result["spot_source"] == "es_basis_adjusted:46.0"
+    assert (tmp_path / "latest" / "level_decision_shadow_state.json").exists()
+
+
+def test_transition_bark_contains_event_and_proxy_provenance(
+    tmp_path, monkeypatch
+) -> None:
+    storage = SimpleNamespace(data_root=str(tmp_path))
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        "spx_spark.application.order_map.level_decision_shadow._observation",
+        lambda *_args, **_kwargs: LevelObservation(
+            at=NOW,
+            spot=99.0,
+            es=145.0,
+            levels={"put_wall": 100.0},
+            quality_ok=True,
+            session_date="2026-07-13",
+            spot_source="es_basis_adjusted:46.0000",
+            level_source="frozen_last_rth_oi_gex",
+        ),
+    )
+
+    def fake_deliver(_settings, **kwargs):
+        captured.update(kwargs)
+        return [SinkResult(sink="bark", attempted=True, ok=True)]
+
+    monkeypatch.setattr(
+        "spx_spark.application.order_map.level_decision_shadow.deliver_trade_push",
+        fake_deliver,
+    )
+    result = run_level_decision_shadow(storage, SimpleNamespace(), now=NOW)
+
+    assert result["delivery"]["delivered"] is True
+    assert "FAR → TESTING" in str(captured["text"])
+    assert "es_basis_adjusted:46.0000" in str(captured["text"])
+    assert "shadow 审计，不是下单信号" in str(captured["text"])
+
+
+def test_confirmed_shadow_emits_deduplicated_30_second_outcome(
+    tmp_path, monkeypatch
+) -> None:
+    storage = SimpleNamespace(data_root=str(tmp_path))
+    current: dict[str, LevelObservation] = {}
+    monkeypatch.setattr(
+        "spx_spark.application.order_map.level_decision_shadow._observation",
+        lambda *_args, **_kwargs: current["value"],
+    )
+    path = (
+        (0, 95.0, 5000.0),
+        (5, 99.0, 5000.0),
+        (10, 96.0, 4999.0),
+        (31, 95.0, 4997.0),
+        (40, 99.0, 4998.0),
+        (45, 95.0, 4996.0),
+        (56, 94.0, 4994.0),
+        (86, 91.0, 4990.0),
+    )
+    result = None
+    for seconds, spot, es in path:
+        at = NOW + timedelta(seconds=seconds)
+        current["value"] = LevelObservation(
+            at=at,
+            spot=spot,
+            es=es,
+            levels={"put_wall": 100.0, "call_wall": 120.0},
+            quality_ok=True,
+            session_date="2026-07-13",
+        )
+        result = run_level_decision_shadow(storage, SimpleNamespace(), now=at)
+    assert result is not None
+    assert result["completed_outcomes"] == 1
+
+    outcomes = (
+        tmp_path
+        / "features"
+        / "level_decision_outcomes"
+        / "date=2026-07-13"
+        / "outcomes.jsonl"
+    )
+    rows = [json.loads(line) for line in outcomes.read_text().splitlines()]
+    assert len(rows) == 1
+    assert rows[0]["horizon_seconds"] == 30
+    assert rows[0]["attribution"] == "follow_through"
+
+
+def test_operator_override_emits_formal_confirmed_signal(
+    tmp_path, monkeypatch
+) -> None:
+    storage = SimpleNamespace(data_root=str(tmp_path))
+    current: dict[str, LevelObservation] = {}
+    captured: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        "spx_spark.application.order_map.level_decision_shadow._observation",
+        lambda *_args, **_kwargs: current["value"],
+    )
+
+    def fake_deliver(_settings, **kwargs):
+        captured.append(kwargs)
+        return [SinkResult(sink="bark", attempted=True, ok=True)]
+
+    monkeypatch.setattr(
+        "spx_spark.application.order_map.level_decision_shadow.deliver_trade_push",
+        fake_deliver,
+    )
+    policy = replace(
+        LevelDecisionPolicy(),
+        formal_signal_enabled=True,
+        notify_transitions=False,
+    )
+    result = None
+    for seconds, spot, es in (
+        (0, 95.0, 5000.0),
+        (5, 99.0, 5000.0),
+        (10, 96.0, 4999.0),
+        (31, 95.0, 4997.0),
+        (40, 99.0, 4998.0),
+        (45, 95.0, 4996.0),
+        (56, 94.0, 4994.0),
+    ):
+        at = NOW + timedelta(seconds=seconds)
+        current["value"] = LevelObservation(
+            at=at,
+            spot=spot,
+            es=es,
+            levels={"put_wall": 100.0, "call_wall": 120.0},
+            quality_ok=True,
+            session_date="2026-07-13",
+        )
+        result = run_level_decision_shadow(
+            storage,
+            SimpleNamespace(),
+            now=at,
+            policy=policy,
+        )
+
+    assert result is not None
+    assert result["phase"] == "confirmed"
+    assert result["formal_signal"] is True
+    assert result["actionable"] is True
+    assert len(captured) == 1
+    formal = captured[-1]
+    assert formal["kind"] == "level_decision_formal_signal"
+    assert "正式信号" in str(formal["text"])
+    assert "Put Wall 100.00" in str(formal["text"])
+    assert "Call Wall 120.00" in str(formal["text"])
+    assert "本次触发 Put Wall 100.00" in str(formal["text"])
+    assert "不自动下单" in str(formal["text"])

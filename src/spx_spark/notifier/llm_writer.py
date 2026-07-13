@@ -264,9 +264,13 @@ def generate_push_text(
     settings: NotificationSettings,
     *,
     runner: CommandRunner = default_runner,
+    system: str | None = None,
 ) -> tuple[str, str]:
     """Return (text, writer). DeepSeek first, OpenClaw agent as fallback, then the template."""
-    reply, error = call_llm_writer(prompt)
+    reply, error = call_llm_writer(
+        prompt,
+        **({"system": system} if system is not None else {}),
+    )
     if reply:
         return reply, "deepseek"
     if error and error != "disabled":

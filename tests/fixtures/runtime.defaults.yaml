@@ -28,6 +28,47 @@ market_data:
     value: [index:VIX, index:VIX1D, index:VIX9D, index:VIX3M, index:VVIX, index:SKEW, equity:QQQ, equity:IWM, equity:DIA, equity:HYG, equity:LQD, equity:TLT, equity:IEF, equity:SHY, equity:UUP, equity:GLD, equity:USO, equity:RSP, equity:XLU]
     description: Canonical instruments that use the longer slow-index freshness window.
 
+analytics:
+  max_chain_age_seconds: {value: 15.0, description: Maximum chain age.}
+  min_usable_strikes: {value: 21, description: Minimum usable strikes.}
+  min_two_sided_ratio: {value: 0.80, description: Minimum two-sided ratio.}
+  min_wing_strikes_each_side: {value: 8, description: Minimum wing strikes.}
+  provider_priority: {value: [schwab, ibkr], description: Option provider priority.}
+  underlier_reference_tolerance_fraction: {value: 0.02, description: Underlier tolerance.}
+
+globex_trend:
+  enabled: {value: true, description: Runs the confirmed ES Globex trend and reversal state machine outside and through SPX RTH.}
+  interval_seconds: {value: 30, description: Evaluation cadence in the 24h runtime.}
+  sample_interval_seconds: {value: 60, description: Minimum spacing between durable ES path samples.}
+  short_horizon_minutes: {value: 15, description: Short impulse horizon.}
+  medium_horizon_minutes: {value: 60, description: Primary trend horizon.}
+  long_horizon_minutes: {value: 180, description: Persistent session trend horizon.}
+  short_move_points: {value: 3.5, description: Minimum short-horizon ES impulse used for reversal confirmation.}
+  medium_move_points: {value: 8.0, description: Minimum 60-minute ES move used to establish direction.}
+  long_move_points: {value: 15.0, description: Minimum 180-minute ES move used to establish persistent direction.}
+  reversal_points: {value: 10.0, description: Minimum recovery from the active bearish-leg low or drawdown from the active bullish-leg high required for reversal.}
+  confirmation_observations: {value: 2, description: Consecutive observations required before changing the formal trend regime.}
+  max_quote_age_seconds: {value: 90.0, description: Maximum ES transport age accepted by the trend machine.}
+  retention_hours: {value: 18, description: Rolling ES path retained for indicators and audit.}
+  pending_event_ttl_seconds: {value: 300, description: Retry lifetime for an unacknowledged confirmed transition notification.}
+
+market_features:
+  enabled: {value: true, description: Builds unified feature frames.}
+  interval_seconds: {value: 60, description: Runtime cadence.}
+  sample_interval_seconds: {value: 60, description: Durable sample cadence.}
+  max_quote_age_seconds: {value: 90.0, description: Maximum source age.}
+  retention_hours: {value: 18, description: Market sample retention.}
+  option_history_minutes: {value: 180, description: Option aggregate history.}
+  volume_baseline_sessions: {value: 20, description: Same-clock volume baseline sessions.}
+  hot_option_limit: {value: 64, description: Hot option contract limit.}
+  provider_sync_tolerance_seconds: {value: 5.0, description: Cross-provider synchronization tolerance.}
+  asia_end_et: {value: "03:00", description: Asia segment end.}
+  europe_end_et: {value: "08:00", description: Europe segment end.}
+  premarket_end_et: {value: "09:30", description: US premarket end.}
+  rth_end_et: {value: "16:00", description: Cash RTH end.}
+  curb_end_et: {value: "17:00", description: Curb segment end.}
+  min_l1_liquidity_score: {value: 40.0, description: Minimum L1 liquidity score.}
+
 provider_failover:
   enabled:
     value: true
@@ -48,8 +89,9 @@ provider_failover:
     value: 30.0
     description: Maximum direct-anchor source age used for provider health; this exceeds the Schwab REST collection cadence to avoid scheduler-order false failovers.
   monitor_rth_only:
-    value: true
-    description: Restricts automatic failover transitions to the SPX regular trading session so weekends and market closure do not page or activate IBKR.
+    value: false
+    description: Monitors RTH plus regular ES Globex sessions.
+  globex_required_instruments: {value: [future:ES], description: Required Globex anchors.}
   schwab_unhealthy_observations:
     value: 2
     description: Consecutive unhealthy Schwab observations required before requesting IBKR fallback.
@@ -173,6 +215,7 @@ schwab:
       qqq_iwm_chain_seconds: {value: 30.0, description: QQQ and IWM chain cadence.}
     wide_chain:
       strike_count_candidates: {value: [80, 100, 120], description: Adaptive SPX strike counts.}
+      next_expiry_strike_count: {value: 40, description: Fixed half-width next-expiry SPX chain.}
       min_usable_strikes: {value: 40, description: Minimum usable strikes.}
       min_two_sided_ratio: {value: 0.80, description: Minimum two-sided ratio.}
       expected_move_multiple: {value: 2.5, description: Acquisition expected-move multiple.}
@@ -207,6 +250,15 @@ schwab:
     shadow_latest_path:
       value: ""
       description: Optional shadow latest-state path; empty uses schwab_stream_shadow.json under the configured data latest directory.
+    option_hot_symbol_limit:
+      value: 64
+      description: Maximum current-expiry SPXW hot-lane contracts subscribed through Level-One option streaming.
+    option_symbol_refresh_seconds:
+      value: 5.0
+      description: Cadence for applying changed hot-lane option subscriptions without reconnecting the WebSocket.
+    option_plan_max_age_seconds:
+      value: 120.0
+      description: Maximum age of the collector hot-option plan accepted by the streaming runtime.
   future_contract_resolution:
     calendar_timezone:
       value: America/New_York
@@ -1173,6 +1225,15 @@ alerts:
   skew_25d_threshold:
     value: 0.02
     description: Five-minute 25-delta put-skew steepening threshold in volatility points.
+  min_known_option_timestamp_ratio: {value: 0.75, description: Known timestamp coverage.}
+  wall_proximity_min_points: {value: 10.0, description: Minimum wall proximity.}
+  wall_proximity_underlier_fraction: {value: 0.002, description: Relative wall proximity.}
+  degraded_threshold_multiplier: {value: 1.5, description: Degraded threshold multiplier.}
+  atm_iv_jump_threshold: {value: 0.03, description: ATM IV jump threshold.}
+  skew_steepening_threshold: {value: 0.08, description: Skew steepening threshold.}
+  surface_shift_threshold: {value: 0.03, description: Surface shift threshold.}
+  term_gap_threshold: {value: 0.05, description: Term gap threshold.}
+  wall_dedup_band_points: {value: 25.0, description: Wall dedup band.}
 
 position_alerts:
   enabled:
@@ -1320,10 +1381,103 @@ intraday_strategy:
     value: 1.0
     description: ES hold tolerance in basis points for reclaim-call confirmation.
 
+level_decision_shadow:
+  enabled:
+    value: true
+    description: Runs the mutually-exclusive wall/flip decision machine in audit-only shadow mode.
+  notify_transitions:
+    value: true
+    description: Delivers every mutually-exclusive state transition to Bark with source and shadow-mode disclosure.
+  formal_signal_enabled:
+    value: false
+    description: Keeps test defaults in shadow mode unless explicitly promoted.
+  approach_points:
+    value: 12.0
+    description: Distance from the nearest frozen wall or flip boundary that arms an approach.
+  test_points:
+    value: 4.0
+    description: Distance treated as an active test of the frozen level.
+  break_buffer_points:
+    value: 3.0
+    description: Minimum move through the level required to start breakout acceptance.
+  reject_points:
+    value: 6.0
+    description: Minimum move back into the prior range required to start fade acceptance.
+  accept_hold_seconds:
+    value: 20.0
+    description: Continuous hold required before a break or rejection is accepted.
+  retest_points:
+    value: 4.0
+    description: Distance from the frozen level treated as a retest.
+  confirm_move_points:
+    value: 4.0
+    description: Move away from the retest required to begin final confirmation.
+  confirm_hold_seconds:
+    value: 10.0
+    description: Hold after a successful retest required for shadow confirmation.
+  phase_timeout_seconds:
+    value: 90.0
+    description: Maximum time allowed in a pending acceptance or retest phase.
+  event_ttl_seconds:
+    value: 300.0
+    description: Maximum lifetime of one frozen-level decision event.
+  data_grace_seconds:
+    value: 30.0
+    description: Short data-quality grace before an active decision is invalidated.
+  structure_drift_points:
+    value: 5.0
+    description: Maximum allowed drift between the live structure and frozen level.
+  es_confirm_ratio:
+    value: 0.25
+    description: Minimum same-direction ES move relative to the observed SPX move.
+  terminal_rearm_seconds: {value: 30.0, description: Terminal event rearm delay.}
+  max_frozen_structure_age_sessions: {value: 1, description: Frozen structure session TTL.}
+  outcome_horizons_seconds: {value: [30, 60, 180, 300], description: Outcome horizons.}
+  outcome_sample_tolerance_seconds: {value: 20.0, description: Outcome sample tolerance.}
+  outcome_no_follow_through_mfe_bps: {value: 2.0, description: No-follow-through MFE threshold.}
+  outcome_false_confirmation_mae_bps: {value: -5.0, description: False-confirmation MAE threshold.}
+  outcome_follow_through_end_bps: {value: 3.0, description: Follow-through end-return threshold.}
+  outcome_retention_seconds: {value: 3600.0, description: Completed outcome retention.}
+  acceptance_min_events: {value: 100, description: Minimum confirmed events.}
+  acceptance_min_sessions: {value: 20, description: Minimum distinct sessions.}
+  acceptance_min_complete_rth_sessions: {value: 5, description: Minimum complete RTH sessions.}
+  acceptance_min_rth_sample_ratio: {value: 0.95, description: Minimum RTH health-sample coverage.}
+  acceptance_max_rth_gap_seconds: {value: 45.0, description: Maximum RTH health-sample gap.}
+  acceptance_expected_sample_seconds: {value: 15.0, description: Expected decision-health sample cadence.}
+
 intraday_outcomes:
   completed_retention_seconds:
     value: 7200
     description: Seconds completed intraday outcome observations are retained in state.
+
+order_map_policy:
+  touch_time_fraction_coefficient: {value: 0.6, description: Touch-time coefficient.}
+  touch_time_fraction_maximum: {value: 0.90, description: Touch-time maximum.}
+  vol_slope_beta: {value: 1.2, description: Vol slope beta.}
+  minimum_tau_at_touch_hours: {value: 0.25, description: Minimum touch tau.}
+  conservative_limit_multiplier: {value: 0.85, description: Conservative limit multiplier.}
+  risk_free_rate: {value: 0.05, description: Forward discount rate.}
+  early_touch_fraction_multiplier: {value: 0.50, description: Early touch multiplier.}
+  late_touch_fraction_multiplier: {value: 1.50, description: Late touch multiplier.}
+  execution_max_spread_points: {value: 3.0, description: Maximum execution spread points.}
+  execution_max_spread_bps: {value: 3000.0, description: Maximum execution spread bps.}
+  execution_max_spread_percentile: {value: 0.90, description: Maximum spread percentile.}
+  execution_max_quote_age_seconds: {value: 15.0, description: Maximum transport quote age.}
+  execution_max_source_age_seconds: {value: 15.0, description: Maximum source quote age.}
+  execution_max_provider_mid_divergence_bps: {value: 800.0, description: Maximum provider mid divergence.}
+  frontrun_fraction: {value: 0.30, description: Frontrun fraction.}
+  frontrun_min_points: {value: 2.0, description: Minimum frontrun.}
+  frontrun_max_points: {value: 8.0, description: Maximum frontrun.}
+  es_volume_min_window_minutes: {value: 3.0, description: Minimum volume window.}
+  es_volume_max_window_minutes: {value: 120.0, description: Maximum volume window.}
+  es_volume_elevated_ratio: {value: 1.5, description: Elevated volume ratio.}
+  es_volume_quiet_ratio: {value: 0.5, description: Quiet volume ratio.}
+  es_volume_max_samples: {value: 16, description: Maximum volume samples.}
+  es_volume_max_quote_age_seconds: {value: 900.0, description: Maximum volume quote age.}
+  es_volume_flat_points: {value: 3.0, description: Volume direction noise band.}
+  es_volume_level_band_points: {value: 8.0, description: Volume level band.}
+  es_volume_reclaim_min_minutes: {value: 10.0, description: Minimum reclaim time.}
+  es_volume_reclaim_max_minutes: {value: 90.0, description: Maximum reclaim time.}
 
 review:
   llm_enabled:

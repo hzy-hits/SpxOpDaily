@@ -6,51 +6,55 @@ from datetime import datetime
 from pathlib import Path
 
 from spx_spark.alert_engine.constants import (
-    ATM_IV_JUMP_THRESHOLD,
     BAD_SURFACE_QUALITIES,
     BLOCKING_SURFACE_QUALITIES,
     DEGRADED_SURFACE_QUALITIES,
     OPTION_GAMMA_ALERT_STATES,
-    SKEW_STEEPENING_THRESHOLD,
-    SURFACE_SHIFT_THRESHOLD,
-    TERM_GAP_THRESHOLD,
-    WALL_DEDUP_BAND_POINTS,
 )
 from spx_spark.alert_model import Alert, severity_for_priority
 from spx_spark.alert_profile import AlertWindow
 from spx_spark.config import env_bool, env_float
 from spx_spark.iv_surface import IvSurfaceSnapshot
 from spx_spark.options_map import OptionsMap
-from spx_spark.settings import DEFAULT_ALERT_SETTINGS
+from spx_spark.settings import DEFAULT_ALERT_SETTINGS, AlertSettings
 
 
-def option_coverage_is_fresh(expiry: object) -> bool:
+def option_coverage_is_fresh(
+    expiry: object,
+    *,
+    settings: AlertSettings = DEFAULT_ALERT_SETTINGS,
+) -> bool:
     coverage = getattr(expiry, "coverage", None)
     if coverage is None or coverage.total <= 0:
         return False
     min_live_ratio = env_float(
         "ALERT_MIN_OPTION_LIVE_RATIO",
-        DEFAULT_ALERT_SETTINGS.min_option_live_ratio,
+        settings.min_option_live_ratio,
     )
     if coverage.live / coverage.total < min_live_ratio:
         return False
     max_age_ms = coverage.max_age_ms
     if max_age_ms is not None and max_age_ms > env_float(
         "ALERT_MAX_OPTION_QUOTE_AGE_MS",
-        DEFAULT_ALERT_SETTINGS.max_option_quote_age_ms,
+        settings.max_option_quote_age_ms,
     ):
         return False
     if env_bool(
         "ALERT_REQUIRE_OPTION_QUOTE_TIMESTAMPS",
-        DEFAULT_ALERT_SETTINGS.require_option_quote_timestamps,
+        settings.require_option_quote_timestamps,
     ):
         known_ratio = (coverage.total - coverage.unknown_age) / coverage.total
-        if known_ratio < 0.75:
+        if known_ratio < settings.min_known_option_timestamp_ratio:
             return False
     return True
 
 
-def option_freshness_alert(expiry: object, *, window: AlertWindow) -> Alert:
+def option_freshness_alert(
+    expiry: object,
+    *,
+    window: AlertWindow,
+    settings: AlertSettings = DEFAULT_ALERT_SETTINGS,
+) -> Alert:
     coverage = getattr(expiry, "coverage")
     expiry_id = getattr(expiry, "expiry")
     live_ratio = coverage.live / max(coverage.total, 1)
@@ -67,7 +71,7 @@ def option_freshness_alert(expiry: object, *, window: AlertWindow) -> Alert:
         value=live_ratio,
         threshold=env_float(
             "ALERT_MIN_OPTION_LIVE_RATIO",
-            DEFAULT_ALERT_SETTINGS.min_option_live_ratio,
+            settings.min_option_live_ratio,
         ),
     )
 
@@ -75,7 +79,7 @@ def option_freshness_alert(expiry: object, *, window: AlertWindow) -> Alert:
 # Walls recompute every cycle; cooldown keys use WALL_DEDUP_BAND_POINTS from constants.
 
 
-def wall_dedup_band(wall: float, band_points: float = WALL_DEDUP_BAND_POINTS) -> str:
+def wall_dedup_band(wall: float, band_points: float = 25.0) -> str:
     return f"band:{int(wall // band_points) * int(band_points)}"
 
 
@@ -132,13 +136,25 @@ def persist_gamma_regime_observations(options_map: OptionsMap, *, as_of: datetim
         pass
 
 
-def option_map_alerts(options_map: OptionsMap, *, window: AlertWindow) -> list[Alert]:
+def option_map_alerts(
+    options_map: OptionsMap,
+    *,
+    window: AlertWindow,
+    settings: AlertSettings = DEFAULT_ALERT_SETTINGS,
+) -> list[Alert]:
     alerts: list[Alert] = []
     underlier = options_map.underlier.price
-    wall_threshold = max(10.0, underlier * 0.002 if underlier else 10.0)
+    wall_threshold = max(
+        settings.wall_proximity_min_points,
+        (
+            underlier * settings.wall_proximity_underlier_fraction
+            if underlier
+            else settings.wall_proximity_min_points
+        ),
+    )
     for expiry in options_map.expiries:
-        if not option_coverage_is_fresh(expiry):
-            alerts.append(option_freshness_alert(expiry, window=window))
+        if not option_coverage_is_fresh(expiry, settings=settings):
+            alerts.append(option_freshness_alert(expiry, window=window, settings=settings))
             continue
         if expiry.gamma_state in OPTION_GAMMA_ALERT_STATES and gamma_regime_observation_stable(
             expiry.expiry,
@@ -193,7 +209,10 @@ def option_map_alerts(options_map: OptionsMap, *, window: AlertWindow) -> list[A
                         detail=wall_detail,
                         value=expiry.nearest_wall_distance_points,
                         threshold=wall_threshold,
-                        dedup_group=wall_dedup_band(expiry.nearest_wall),
+                        dedup_group=wall_dedup_band(
+                            expiry.nearest_wall,
+                            settings.wall_dedup_band_points,
+                        ),
                     )
                 )
     return alerts
@@ -244,9 +263,10 @@ def iv_surface_movement_severity(
     value: float,
     threshold: float,
     degraded: bool,
+    degraded_threshold_multiplier: float = 1.5,
 ) -> str:
     base = severity_for_priority(window.priority)
-    if degraded and abs(value) >= threshold * 1.5:
+    if degraded and abs(value) >= threshold * degraded_threshold_multiplier:
         return "high" if base in {"medium", "low", "info"} else base
     return base
 
@@ -256,19 +276,20 @@ def iv_surface_alerts(
     *,
     window: AlertWindow,
     history_1h: dict[str, object] | None = None,
+    settings: AlertSettings = DEFAULT_ALERT_SETTINGS,
 ) -> list[Alert]:
     alerts: list[Alert] = []
     shift_1h_threshold = env_float(
         "ALERT_IV_SURFACE_SHIFT_1H_THRESHOLD",
-        DEFAULT_ALERT_SETTINGS.iv_surface_shift_1h_threshold,
+        settings.iv_surface_shift_1h_threshold,
     )
     atm_change_1h_threshold = env_float(
         "ALERT_IV_ATM_CHANGE_1H_THRESHOLD",
-        DEFAULT_ALERT_SETTINGS.iv_atm_change_1h_threshold,
+        settings.iv_atm_change_1h_threshold,
     )
     if (
         surface.front_vs_next_atm_iv_gap is not None
-        and abs(surface.front_vs_next_atm_iv_gap) >= TERM_GAP_THRESHOLD
+        and abs(surface.front_vs_next_atm_iv_gap) >= settings.term_gap_threshold
     ):
         alerts.append(
             Alert(
@@ -281,7 +302,7 @@ def iv_surface_alerts(
                     f"{surface.front_vs_next_atm_iv_gap:.3f}."
                 ),
                 value=surface.front_vs_next_atm_iv_gap,
-                threshold=TERM_GAP_THRESHOLD,
+                threshold=settings.term_gap_threshold,
                 source_gate="iv_surface",
             )
         )
@@ -308,15 +329,16 @@ def iv_surface_alerts(
             continue
         if (
             expiry.atm_iv_jump_5m is not None
-            and abs(expiry.atm_iv_jump_5m) >= ATM_IV_JUMP_THRESHOLD
+            and abs(expiry.atm_iv_jump_5m) >= settings.atm_iv_jump_threshold
         ):
             alerts.append(
                 Alert(
                     severity=iv_surface_movement_severity(
                         window,
                         value=expiry.atm_iv_jump_5m,
-                        threshold=ATM_IV_JUMP_THRESHOLD,
+                        threshold=settings.atm_iv_jump_threshold,
                         degraded=degraded,
+                        degraded_threshold_multiplier=settings.degraded_threshold_multiplier,
                     ),
                     kind="atm_iv_jump_5m",
                     instrument_id=instrument_id,
@@ -326,15 +348,18 @@ def iv_surface_alerts(
                         degraded=degraded,
                     ),
                     value=expiry.atm_iv_jump_5m,
-                    threshold=ATM_IV_JUMP_THRESHOLD,
+                    threshold=settings.atm_iv_jump_threshold,
                     quality=expiry.surface_fit_quality if degraded else None,
                     source_gate="iv_surface",
-                    dedup_group=magnitude_bucket(expiry.atm_iv_jump_5m, ATM_IV_JUMP_THRESHOLD),
+                    dedup_group=magnitude_bucket(
+                        expiry.atm_iv_jump_5m,
+                        settings.atm_iv_jump_threshold,
+                    ),
                 )
             )
         skew_25d_threshold = env_float(
             "ALERT_SKEW_25D_THRESHOLD",
-            DEFAULT_ALERT_SETTINGS.skew_25d_threshold,
+            settings.skew_25d_threshold,
         )
         if (
             expiry.put_skew_25d_change_5m is not None
@@ -347,6 +372,7 @@ def iv_surface_alerts(
                         value=expiry.put_skew_25d_change_5m,
                         threshold=skew_25d_threshold,
                         degraded=degraded,
+                        degraded_threshold_multiplier=settings.degraded_threshold_multiplier,
                     ),
                     kind="put_skew_steepening_5m",
                     instrument_id=instrument_id,
@@ -368,15 +394,16 @@ def iv_surface_alerts(
             )
         elif (
             expiry.put_skew_steepening_5m is not None
-            and expiry.put_skew_steepening_5m >= SKEW_STEEPENING_THRESHOLD
+            and expiry.put_skew_steepening_5m >= settings.skew_steepening_threshold
         ):
             alerts.append(
                 Alert(
                     severity=iv_surface_movement_severity(
                         window,
                         value=expiry.put_skew_steepening_5m,
-                        threshold=SKEW_STEEPENING_THRESHOLD,
+                        threshold=settings.skew_steepening_threshold,
                         degraded=degraded,
+                        degraded_threshold_multiplier=settings.degraded_threshold_multiplier,
                     ),
                     kind="put_skew_steepening_5m",
                     instrument_id=instrument_id,
@@ -387,25 +414,27 @@ def iv_surface_alerts(
                         degraded=degraded,
                     ),
                     value=expiry.put_skew_steepening_5m,
-                    threshold=SKEW_STEEPENING_THRESHOLD,
+                    threshold=settings.skew_steepening_threshold,
                     quality=expiry.surface_fit_quality if degraded else None,
                     source_gate="iv_surface",
                     dedup_group=magnitude_bucket(
-                        expiry.put_skew_steepening_5m, SKEW_STEEPENING_THRESHOLD
+                        expiry.put_skew_steepening_5m,
+                        settings.skew_steepening_threshold,
                     ),
                 )
             )
         if (
             expiry.iv_surface_shift_5m is not None
-            and abs(expiry.iv_surface_shift_5m) >= SURFACE_SHIFT_THRESHOLD
+            and abs(expiry.iv_surface_shift_5m) >= settings.surface_shift_threshold
         ):
             alerts.append(
                 Alert(
                     severity=iv_surface_movement_severity(
                         window,
                         value=expiry.iv_surface_shift_5m,
-                        threshold=SURFACE_SHIFT_THRESHOLD,
+                        threshold=settings.surface_shift_threshold,
                         degraded=degraded,
+                        degraded_threshold_multiplier=settings.degraded_threshold_multiplier,
                     ),
                     kind="iv_surface_shift_5m",
                     instrument_id=instrument_id,
@@ -416,11 +445,12 @@ def iv_surface_alerts(
                         degraded=degraded,
                     ),
                     value=expiry.iv_surface_shift_5m,
-                    threshold=SURFACE_SHIFT_THRESHOLD,
+                    threshold=settings.surface_shift_threshold,
                     quality=expiry.surface_fit_quality if degraded else None,
                     source_gate="iv_surface",
                     dedup_group=magnitude_bucket(
-                        expiry.iv_surface_shift_5m, SURFACE_SHIFT_THRESHOLD
+                        expiry.iv_surface_shift_5m,
+                        settings.surface_shift_threshold,
                     ),
                 )
             )
@@ -496,5 +526,4 @@ def iv_surface_alerts(
                         )
                     )
     return alerts
-
 

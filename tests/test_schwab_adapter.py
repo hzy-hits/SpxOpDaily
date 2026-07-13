@@ -81,6 +81,46 @@ def test_schwab_option_chain_payload_flattens_contracts():
     assert quotes[0].last_update_at == received_at
 
 
+def test_schwab_chain_rejects_missing_model_sentinels_and_empty_structure() -> None:
+    received_at = datetime(2026, 7, 13, 5, 30, tzinfo=timezone.utc)
+    quote_time = int((received_at - timedelta(days=3)).timestamp() * 1000)
+    payload = {
+        "callExpDateMap": {
+            "2026-07-13:0": {
+                "7500.0": [
+                    {
+                        "symbol": "SPXW  260713C07500000",
+                        "putCall": "CALL",
+                        "expirationDate": "2026-07-13T20:00:00+00:00",
+                        "strikePrice": 7500.0,
+                        "bid": 20.0,
+                        "ask": 21.0,
+                        "quoteTimeInLong": quote_time,
+                        "openInterest": 0,
+                        "volatility": -999,
+                        "delta": -999,
+                        "gamma": -999,
+                    }
+                ]
+            }
+        },
+        "putExpDateMap": {},
+    }
+
+    quote = option_quotes_from_chain_payload(
+        payload,
+        underlier="SPX",
+        received_at=received_at,
+    )[0]
+
+    assert quote.quality is MarketDataQuality.STALE
+    assert quote.structure_time is None
+    assert quote.greeks is not None
+    assert quote.greeks.implied_vol is None
+    assert quote.greeks.delta is None
+    assert quote.greeks.gamma is None
+
+
 def test_schwab_quote_endpoint_parses_spxw_occ_identity() -> None:
     received_at = datetime(2026, 7, 10, 14, 0, 1, tzinfo=timezone.utc)
     quote = quote_from_schwab_payload(

@@ -38,6 +38,73 @@ _MD_HEADING_RE = re.compile(r"^#{1,3}\s+")
 _MD_BOLD_RE = re.compile(r"\*\*(.+?)\*\*")
 _MD_CODE_RE = re.compile(r"`([^`]+)`")
 _MD_BULLET_RE = re.compile(r"^[-*]\s+")
+_SPX_STATUS_HEADER_RE = re.compile(r"^【(SPX 15m｜.+)】$")
+_STATUS_PLAN_RE = re.compile(r"^(计划\d+·\S+)\s{2}(.*)$")
+
+
+def _status_card_template(text: str) -> str:
+    if "CONFIRMED" in text:
+        return "green"
+    if any(
+        phase in text
+        for phase in (
+            "APPROACHING",
+            "TESTING",
+            "BREAK_PENDING",
+            "REJECT_PENDING",
+            "RETEST",
+        )
+    ):
+        return "orange"
+    if "INVALIDATED" in text or "EXPIRED" in text:
+        return "grey"
+    return "blue"
+
+
+def _format_status_line(line: str) -> str:
+    plan = _STATUS_PLAN_RE.match(line)
+    if plan:
+        return f"- **{plan.group(1).replace('·', ' · ')}**　{plan.group(2)}"
+    for label in ("时钟", "价格", "结构", "OI", "状态", "ES确认", "波动", "执行", "变化", "数据"):
+        prefix = f"{label}  "
+        if line.startswith(prefix):
+            content = line.removeprefix(prefix)
+            if label == "执行":
+                return f"> **{label}**　{content}"
+            return f"**{label}**　{content}"
+    return line
+
+
+def _status_card_parts(markdown: str) -> tuple[str, list[dict[str, Any]], str] | None:
+    """Convert the compact SPX status text into a scannable Feishu card body."""
+    lines = markdown.strip().splitlines()
+    if not lines or (header := _SPX_STATUS_HEADER_RE.match(lines[0])) is None:
+        return None
+
+    blocks: list[list[str]] = [[]]
+    for raw in lines[1:]:
+        line = raw.strip()
+        if not line:
+            if blocks[-1]:
+                blocks.append([])
+            continue
+        if line.startswith("【条件计划｜"):
+            line = "**条件计划**　标的触发后执行"
+        blocks[-1].append(_format_status_line(line))
+    blocks = [block for block in blocks if block]
+
+    elements: list[dict[str, Any]] = []
+    for index, block in enumerate(blocks):
+        if index:
+            elements.append({"tag": "hr"})
+        elements.append(
+            {
+                "tag": "markdown",
+                "content": "\n".join(block),
+                "text_align": "left",
+            }
+        )
+    return header.group(1), elements, _status_card_template(markdown)
 
 
 def strip_markdown_light(text: str) -> str:
@@ -122,8 +189,18 @@ def build_feishu_card(
     # Soft length guard: webhook cards get awkward past ~30KB; truncate body.
     if len(content) > 28000:
         content = content[:27900].rstrip() + "\n\n…（已截断）"
+    status_parts = _status_card_parts(content) if kind == "status" else None
     template = feishu_header_template(kind, lane=lane, text=content)
     header_title = title.strip() or "SPX Spark"
+    body_elements: list[dict[str, Any]] = [
+        {
+            "tag": "markdown",
+            "content": content,
+            "text_align": "left",
+        }
+    ]
+    if status_parts is not None:
+        header_title, body_elements, template = status_parts
     if len(header_title) > 50:
         header_title = header_title[:49] + "…"
     return {
@@ -135,14 +212,8 @@ def build_feishu_card(
         },
         "body": {
             "direction": "vertical",
-            "padding": "12px 12px 12px 12px",
-            "elements": [
-                {
-                    "tag": "markdown",
-                    "content": content,
-                    "text_align": "left",
-                }
-            ],
+            "padding": "16px 16px 16px 16px",
+            "elements": body_elements,
         },
     }
 

@@ -2,18 +2,68 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 
-from spx_spark.intraday_shock import IntradayShockSettings, load_monitor_state, rth_session_date
-from spx_spark.intraday_strategy import confirmed_call_bias
+from spx_spark.application.order_map.level_decision_shadow import load_level_decision_shadow
+from spx_spark.application.order_map.models import level_decision_play
+from spx_spark.config import StorageSettings
+from spx_spark.settings import load_app_settings
 
 
 def load_intraday_call_bias(*, now: datetime) -> dict[str, object] | None:
-    """Read the short-lived 5-second path confirmation without mutating it."""
+    """Adapt an explicitly promoted level decision into an order-map bias."""
 
-    session_date = rth_session_date(now)
-    if session_date is None:
+    decision = load_level_decision_shadow(StorageSettings.from_env())
+    if decision.get("phase") != "confirmed" or decision.get("actionable") is not True:
         return None
-    settings = IntradayShockSettings.from_env()
-    monitor_state = load_monitor_state(settings.state_path, session_date=session_date)
-    return confirmed_call_bias(monitor_state, now=now)
+    thesis = str(decision.get("thesis") or "")
+    direction = str(decision.get("direction") or "")
+    play = level_decision_play(thesis, direction)
+    level = _finite(decision.get("level"))
+    expiry = str(decision.get("expiry") or "")
+    expires_at = _parse_datetime(decision.get("expires_at"))
+    if play is None or level is None or not expiry or expires_at is None:
+        return None
+    now_utc = _utc(now)
+    if now_utc > expires_at:
+        return None
+    buffer_points = load_app_settings().level_decision.break_buffer_points
+    invalidation = level - buffer_points if direction == "up" else level + buffer_points
+    return {
+        "status": "confirmed",
+        "formal_signal": True,
+        "actionable": True,
+        "play": play,
+        "thesis": thesis,
+        "direction": direction,
+        "level_kind": decision.get("level_kind"),
+        "level": level,
+        "invalidation_level": invalidation,
+        "expiry": expiry,
+        "event_id": decision.get("event_id"),
+        "confirmed_at": decision.get("phase_at"),
+        "expires_at": expires_at.isoformat(),
+    }
+
+
+def _finite(value: object) -> float | None:
+    if not isinstance(value, int | float):
+        return None
+    parsed = float(value)
+    return parsed if parsed == parsed else None
+
+
+def _parse_datetime(value: object) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return _utc(parsed.replace(tzinfo=parsed.tzinfo or timezone.utc))
+
+
+def _utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        raise ValueError("bias timestamp must be timezone-aware")
+    return value.astimezone(timezone.utc)

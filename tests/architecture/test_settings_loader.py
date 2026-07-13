@@ -27,6 +27,9 @@ def test_load_settings_from_fixture_is_stable(tmp_path: Path, monkeypatch: pytes
     assert settings.schwab.service_loop_enabled is False
     assert settings.schwab.capacity.planned_requests_per_minute == 84
     assert settings.schwab.wide_chain.strike_count_candidates == (80, 100, 120)
+    assert settings.schwab.wide_chain.next_expiry_strike_count == 40
+    assert settings.market_features.enabled is True
+    assert settings.market_features.volume_baseline_sessions == 20
     assert settings.sources["market_data.provider_priority"].origin == "defaults"
 
 

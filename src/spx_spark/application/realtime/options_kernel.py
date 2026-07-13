@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 
 from spx_spark.analytics.options.chain import (
     chain_implied_spot,
+    enrich_open_interest,
     is_spxw_option,
     pair_by_strike,
 )
@@ -48,11 +49,22 @@ def _as_quotes(snapshot: MarketSnapshot) -> tuple[Quote, ...]:
     return tuple(item for item in snapshot.quotes if isinstance(item, Quote))
 
 
-def snapshot_to_latest_state(snapshot: MarketSnapshot) -> LatestState:
+def snapshot_to_latest_state(
+    snapshot: MarketSnapshot,
+    *,
+    policy: AnalyticsSettings | None = None,
+) -> LatestState:
     """Project a domain MarketSnapshot into LatestState for options orchestration."""
 
     quotes = _as_quotes(snapshot)
-    provider_priority = ("schwab", "ibkr", "hyperliquid", "polymarket", "internal", "mock")
+    configured = (policy or AnalyticsSettings()).provider_priority
+    provider_priority = (
+        *configured,
+        "hyperliquid",
+        "polymarket",
+        "internal",
+        "mock",
+    )
     best = select_best_quotes(quotes, as_of=snapshot.as_of, provider_priority=provider_priority)
     return LatestState(
         created_at=snapshot.received_at,
@@ -77,21 +89,32 @@ def _ibkr_down(state: LatestState) -> bool:
     return False
 
 
-def build_options_map_from_snapshot(snapshot: MarketSnapshot) -> OptionsMap:
+def build_options_map_from_snapshot(
+    snapshot: MarketSnapshot,
+    *,
+    policy: AnalyticsSettings | None = None,
+) -> OptionsMap:
     """Compose OptionsMap from snapshot quotes via analytics/options service."""
 
-    state = snapshot_to_latest_state(snapshot)
+    policy = policy or AnalyticsSettings()
+    state = snapshot_to_latest_state(snapshot, policy=policy)
     underlier = select_underlier(state)
     ibkr_down = _ibkr_down(state)
+    structural_candidates = [
+        quote for quote in state.quotes if is_spxw_option(quote)
+    ]
     candidates = [
         quote
-        for quote in state.quotes
-        if is_spxw_option(quote) and not (quote.provider == Provider.IBKR and ibkr_down)
+        for quote in structural_candidates
+        if not (quote.provider == Provider.IBKR and ibkr_down)
     ]
-    selected = select_best_quotes(
-        candidates,
-        as_of=state.as_of,
-        provider_priority=("schwab", "ibkr"),
+    selected = enrich_open_interest(
+        select_best_quotes(
+            candidates,
+            as_of=state.as_of,
+            provider_priority=policy.provider_priority,
+        ),
+        structural_candidates,
     )
     all_grouped: dict[str, list[Quote]] = defaultdict(list)
     for quote in selected:
@@ -117,7 +140,9 @@ def build_options_map_from_snapshot(snapshot: MarketSnapshot) -> OptionsMap:
         implied = chain_implied_spot(pair_by_strike(grouped[front_expiry]))
         reference = underlier.price
         implied_plausible = implied is not None and (
-            reference is None or abs(implied / reference - 1.0) <= 0.02
+            reference is None
+            or abs(implied / reference - 1.0)
+            <= policy.underlier_reference_tolerance_fraction
         )
         if implied_plausible:
             underlier = UnderlierReference(price=implied, source="chain_implied")
@@ -249,17 +274,17 @@ def evaluate_front_chain_fresh(
     if not by_expiry:
         return False
     front_expiry = sorted(by_expiry)[0]
-    front_quotes = by_expiry[front_expiry]
-
-    ages: list[float] = []
-    for quote in front_quotes:
+    fresh_quotes: list[Quote] = []
+    for quote in by_expiry[front_expiry]:
+        if quote.quality in BAD_QUALITIES:
+            continue
         age_ms = quote.quote_age_ms(now)
-        if age_ms is not None:
-            ages.append(age_ms / 1000.0)
-    if not ages or max(ages) > thresholds.max_age_seconds:
+        if age_ms is None or age_ms / 1000.0 > thresholds.max_age_seconds:
+            continue
+        fresh_quotes.append(quote)
+    if not fresh_quotes:
         return False
-
-    liveish = [quote for quote in front_quotes if quote.quality not in BAD_QUALITIES]
+    liveish = list(select_best_quotes(fresh_quotes, as_of=now))
     underlier_price = None
     for instrument_id, multiplier in UNDERLIER_CANDIDATES:
         for quote in _as_quotes(snapshot):
@@ -299,7 +324,7 @@ class OptionsAnalyticsKernel:
         started = time.perf_counter()
         warnings: list[str] = []
         try:
-            options_map = build_options_map_from_snapshot(snapshot)
+            options_map = build_options_map_from_snapshot(snapshot, policy=self.policy)
             status = front_month_status(options_map)
             warnings.extend(options_map.warnings)
             if status is not AnalyticsStatus.SUCCESS:

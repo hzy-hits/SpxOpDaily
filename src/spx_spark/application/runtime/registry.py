@@ -89,6 +89,18 @@ def run_intraday_shock() -> int:
     return intraday_shock.run(["--json"])
 
 
+def run_globex_trend() -> int:
+    from spx_spark.application.globex_trend import service
+
+    return service.run(["--json"])
+
+
+def run_market_features() -> int:
+    from spx_spark.application.market_features import service
+
+    return service.run(["--json"])
+
+
 def run_greek_shadow() -> int:
     return greek_shadow.run(["--json"])
 
@@ -128,6 +140,34 @@ def build_tasks(settings: ServiceLoopSettings) -> list[ServiceTask]:
                 settings.provider_failover_interval_seconds,
                 run_provider_failover,
                 command=(console_script("spx-spark-provider-failover"), "--json"),
+            )
+        )
+    if settings.globex_trend_enabled:
+        tasks.append(
+            ServiceTask(
+                "globex_trend",
+                settings.globex_trend_interval_seconds,
+                run_globex_trend,
+                command=(
+                    sys.executable,
+                    "-m",
+                    "spx_spark.application.globex_trend.service",
+                    "--json",
+                ),
+            )
+        )
+    if settings.market_features_enabled:
+        tasks.append(
+            ServiceTask(
+                "market_features",
+                settings.market_features_interval_seconds,
+                run_market_features,
+                command=(
+                    sys.executable,
+                    "-m",
+                    "spx_spark.application.market_features.service",
+                    "--json",
+                ),
             )
         )
     # Keep the lightweight shock path first so it is not queued behind slow

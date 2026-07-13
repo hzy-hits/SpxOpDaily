@@ -238,10 +238,13 @@ class SchwabStreamSettings:
     reconnect_max_seconds: float
     websocket_open_timeout_seconds: float
     shadow_latest_path: str
+    option_hot_symbol_limit: int
+    option_symbol_refresh_seconds: float
+    option_plan_max_age_seconds: float
 
     def __post_init__(self) -> None:
         if self.mode not in {"off", "shadow", "live"}:
-            raise ValueError("SCHWAB_STREAM_MODE must be off, shadow, or live")
+            raise ValueError("SCHWAB_STREAMING_MODE must be off, shadow, or live")
         if not self.canonical_symbols:
             raise ValueError("SCHWAB_STREAM_SYMBOLS cannot be empty")
         if len(set(self.canonical_symbols)) != len(self.canonical_symbols):
@@ -256,6 +259,12 @@ class SchwabStreamSettings:
             raise ValueError("SCHWAB_STREAM_RECONNECT_MAX_SECONDS cannot be below minimum")
         if self.websocket_open_timeout_seconds <= 0:
             raise ValueError("SCHWAB_STREAM_OPEN_TIMEOUT_SECONDS must be positive")
+        if self.option_hot_symbol_limit <= 0:
+            raise ValueError("SCHWAB_STREAM_OPTION_HOT_SYMBOL_LIMIT must be positive")
+        if self.option_symbol_refresh_seconds <= 0:
+            raise ValueError("SCHWAB_STREAM_OPTION_REFRESH_SECONDS must be positive")
+        if self.option_plan_max_age_seconds <= 0:
+            raise ValueError("SCHWAB_STREAM_OPTION_PLAN_MAX_AGE_SECONDS must be positive")
 
     @classmethod
     def from_env(cls, *, data_root: str | None = None) -> "SchwabStreamSettings":
@@ -267,8 +276,11 @@ class SchwabStreamSettings:
         configured_shadow_path = str(settings_value("schwab.streaming.shadow_latest_path")).strip()
         return cls(
             mode=env_str(
-                "SCHWAB_STREAM_MODE",
-                str(settings_value("schwab.streaming.mode")),
+                "SCHWAB_STREAMING_MODE",
+                env_str(
+                    "SCHWAB_STREAM_MODE",
+                    str(settings_value("schwab.streaming.mode")),
+                ),
             ).lower(),
             canonical_symbols=tuple(
                 symbol.upper()
@@ -300,6 +312,18 @@ class SchwabStreamSettings:
             shadow_latest_path=os.getenv("SCHWAB_STREAM_SHADOW_LATEST_PATH")
             or configured_shadow_path
             or f"{root.rstrip('/')}/latest/schwab_stream_shadow.json",
+            option_hot_symbol_limit=env_int(
+                "SCHWAB_STREAM_OPTION_HOT_SYMBOL_LIMIT",
+                int(settings_value("schwab.streaming.option_hot_symbol_limit")),
+            ),
+            option_symbol_refresh_seconds=env_float(
+                "SCHWAB_STREAM_OPTION_REFRESH_SECONDS",
+                float(settings_value("schwab.streaming.option_symbol_refresh_seconds")),
+            ),
+            option_plan_max_age_seconds=env_float(
+                "SCHWAB_STREAM_OPTION_PLAN_MAX_AGE_SECONDS",
+                float(settings_value("schwab.streaming.option_plan_max_age_seconds")),
+            ),
         )
 
 

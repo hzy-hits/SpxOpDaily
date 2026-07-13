@@ -21,3 +21,5 @@ class AnalyticsSettings:
     min_usable_strikes: int = 21
     min_two_sided_ratio: float = 0.80
     min_wing_strikes_each_side: int = 8
+    provider_priority: tuple[str, ...] = ("schwab", "ibkr")
+    underlier_reference_tolerance_fraction: float = 0.02

@@ -78,9 +78,15 @@ def test_production_composition_uses_options_analytics_kernel() -> None:
     assert isinstance(shadow, PassthroughAnalytics)
 
 
-def test_build_realtime_runtime_tick_and_persist_processed_ids(tmp_path) -> None:
+def test_build_realtime_runtime_tick_and_persist_processed_ids(
+    tmp_path, monkeypatch
+) -> None:
     storage = _storage(tmp_path)
     now = datetime.now(tz=timezone.utc)
+    monkeypatch.setattr(
+        "spx_spark.application.realtime.engine.DEFAULT_MARKET_CALENDAR.is_rth_open",
+        lambda _now: True,
+    )
     _seed_spx(storage, now=now)
     sent: list[str] = []
 

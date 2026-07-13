@@ -170,6 +170,7 @@ def run(
     chain_lanes_fetched: list[str] = []
     chain_lanes_skipped: list[str] = []
     coverage_summary: dict[str, dict[str, Any]] = {}
+    chain_market_as_of: dict[str, str | None] = {}
     chain_as_of: dict[str, str | None] = {
         canonical: (
             budget_state.chain_last_fetched_at[canonical].isoformat()
@@ -225,6 +226,7 @@ def run(
     chain_lanes_fetched.extend(chain_cycle.lanes_fetched)
     chain_lanes_skipped.extend(chain_cycle.lanes_skipped)
     chain_as_of.update(chain_cycle.chain_as_of)
+    chain_market_as_of.update(chain_cycle.chain_market_as_of)
     coverage_summary.update(chain_cycle.coverage)
 
     quote_result = collect_quote_lane(
@@ -291,6 +293,7 @@ def run(
         "chains_fetched": chains_fetched,
         "chains_skipped": chains_skipped,
         "chain_as_of": chain_as_of,
+        "chain_market_as_of": chain_market_as_of,
         "chain_lanes_fetched": chain_lanes_fetched,
         "chain_lanes_skipped": chain_lanes_skipped,
         "coverage": coverage_summary,

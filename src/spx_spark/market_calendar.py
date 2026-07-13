@@ -12,6 +12,8 @@ _RTH_OPEN = time(9, 30)
 _RTH_CLOSE = time(16, 0)
 _EARLY_CLOSE = time(13, 0)
 _REVIEW_READY = time(17, 0)
+_GLOBEX_OPEN = time(18, 0)
+_GLOBEX_MAINTENANCE = time(17, 0)
 _FIVE_MINUTES = 5 * 60
 
 
@@ -100,6 +102,26 @@ class MarketCalendar:
         if current_session is None:
             return False
         return current_session.open_at <= current < current_session.close_at
+
+    def is_globex_open(self, now: datetime) -> bool:
+        """Return the regular CME equity-index futures session state.
+
+        ES trades Sunday 18:00 ET through Friday 17:00 ET with a daily
+        17:00-18:00 maintenance break. Exchange holiday exceptions remain a
+        provider-health concern: a missing live ES quote fails the caller's
+        data gate even when this regular schedule says the session is open.
+        """
+
+        current = _as_et(now)
+        weekday = current.weekday()
+        current_time = current.time()
+        if weekday == 5:
+            return False
+        if weekday == 6:
+            return current_time >= _GLOBEX_OPEN
+        if weekday == 4:
+            return current_time < _GLOBEX_MAINTENANCE
+        return current_time < _GLOBEX_MAINTENANCE or current_time >= _GLOBEX_OPEN
 
     def research_expiry(self, now: datetime) -> date:
         current = _as_et(now)

@@ -7,6 +7,7 @@ from typing import Any, Protocol
 
 from spx_spark.config import StorageSettings
 from spx_spark.marketdata import (
+    MarketDataQuality,
     NormalizedSnapshot,
     Provider,
     ProviderState,
@@ -152,6 +153,16 @@ def provider_state_from_quote_health(
 ) -> ProviderState:
     quotes = tuple(quotes)
     usable_count = sum(1 for quote in quotes if quote.is_usable)
+    current_count = sum(
+        1
+        for quote in quotes
+        if quote.is_usable
+        and quote.quality
+        not in {
+            MarketDataQuality.STALE,
+            MarketDataQuality.UNKNOWN,
+        }
+    )
     error_quote_count = sum(1 for quote in quotes if quote.error)
     if not connected:
         status = ProviderStatus.UNAVAILABLE
@@ -159,6 +170,9 @@ def provider_state_from_quote_health(
     elif usable_count == 0:
         status = ProviderStatus.DEGRADED
         final_reason = reason or degraded_reason or "connected but no usable quotes"
+    elif current_count == 0:
+        status = ProviderStatus.DEGRADED
+        final_reason = reason or "connected but all priced quotes are stale"
     elif error_count or error_quote_count:
         status = ProviderStatus.DEGRADED
         final_reason = reason or f"{error_count + error_quote_count} quote/API errors"

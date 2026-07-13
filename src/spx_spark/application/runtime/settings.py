@@ -51,6 +51,10 @@ class ServiceLoopSettings:
     steven_interval_seconds: int = 30
     realtime_engine_enabled: bool = True
     realtime_engine_interval_seconds: int = 15
+    globex_trend_enabled: bool = False
+    globex_trend_interval_seconds: int = 30
+    market_features_enabled: bool = False
+    market_features_interval_seconds: int = 60
 
     @classmethod
     def from_app_settings(cls, app: AppSettings) -> "ServiceLoopSettings":
@@ -169,6 +173,22 @@ class ServiceLoopSettings:
             realtime_engine_interval_seconds=env_int(
                 "SPX_SERVICE_REALTIME_ENGINE_INTERVAL_SECONDS",
                 runtime.realtime_engine_interval_seconds,
+            ),
+            globex_trend_enabled=env_bool(
+                "SPX_SERVICE_ENABLE_GLOBEX_TREND",
+                app.globex_trend.enabled,
+            ),
+            globex_trend_interval_seconds=env_int(
+                "SPX_SERVICE_GLOBEX_TREND_INTERVAL_SECONDS",
+                app.globex_trend.interval_seconds,
+            ),
+            market_features_enabled=env_bool(
+                "SPX_SERVICE_ENABLE_MARKET_FEATURES",
+                app.market_features.enabled,
+            ),
+            market_features_interval_seconds=env_int(
+                "SPX_SERVICE_MARKET_FEATURES_INTERVAL_SECONDS",
+                app.market_features.interval_seconds,
             ),
         )
 

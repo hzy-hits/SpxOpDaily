@@ -14,6 +14,13 @@ from spx_spark.application.notifications.outbox_consumer import (
     ConsumeResult,
     IdempotentOutboxConsumer,
 )
+from spx_spark.application.order_map.level_decision_shadow import (
+    run_level_decision_shadow,
+)
+from spx_spark.application.order_map.level_trigger_repricing import (
+    run_level_trigger_repricing,
+)
+from spx_spark.application.order_map.pricing_outcomes import advance_pricing_outcomes
 from spx_spark.application.realtime.alert_evaluator import AlertEngineEvaluator
 from spx_spark.application.realtime.contracts import AnalyticsKernel, EngineTick
 from spx_spark.application.realtime.engine import RealtimeEngine
@@ -285,14 +292,10 @@ def build_realtime_runtime(
         analytics_policy = app_settings.analytics
     if analytics_policy is None:
         analytics_policy = AnalyticsSettings()
-    alert_policy: AlertSettings | None = (
-        app_settings.alerts if app_settings is not None else None
-    )
+    alert_policy: AlertSettings | None = app_settings.alerts if app_settings is not None else None
     projection = LatestMarketProjectionStore(storage)
     outbox = SqliteEventOutbox(outbox_path or default_outbox_path(storage))
-    processed = DurableProcessedIdSet(
-        processed_ids_path or default_processed_ids_path(storage)
-    )
+    processed = DurableProcessedIdSet(processed_ids_path or default_processed_ids_path(storage))
     sink = TickProjectionSink()
     engine = RealtimeEngine(
         snapshots=ProjectionSnapshotSource(projection),
@@ -338,8 +341,50 @@ def run_realtime_engine_cycle(
     settings = app_settings or load_production_settings()
     storage = StorageSettings.from_env()
     runtime = build_realtime_runtime(storage, app_settings=settings)
-    result = runtime.run_cycle()
-    print(json.dumps(result.to_dict(), sort_keys=True))
+    now = datetime.now(tz=timezone.utc)
+    result = runtime.run_cycle(now=now)
+    try:
+        level_shadow = run_level_decision_shadow(
+            storage,
+            result.tick,
+            now=now,
+            policy=settings.level_decision,
+        )
+    except Exception as exc:  # noqa: BLE001 - shadow audit must not break realtime
+        level_shadow = {
+            "status": "failed",
+            "actionable": False,
+            "error_type": type(exc).__name__,
+        }
+    try:
+        level_repricing = run_level_trigger_repricing(
+            storage,
+            level_shadow,
+            now=now,
+            policy=settings.order_map,
+        )
+    except Exception as exc:  # noqa: BLE001 - expose failure without stopping collection
+        level_repricing = {
+            "status": "failed",
+            "error_type": type(exc).__name__,
+        }
+    try:
+        pricing_outcomes = advance_pricing_outcomes(
+            storage,
+            level_repricing,
+            level_shadow,
+            now=now,
+        )
+    except Exception as exc:  # noqa: BLE001 - outcome audit is non-critical IO
+        pricing_outcomes = {
+            "status": "failed",
+            "error_type": type(exc).__name__,
+        }
+    payload = result.to_dict()
+    payload["level_decision_shadow"] = level_shadow
+    payload["level_trigger_repricing"] = level_repricing
+    payload["pricing_outcomes"] = pricing_outcomes
+    print(json.dumps(payload, sort_keys=True))
     return 0 if result.ok else 1
 
 

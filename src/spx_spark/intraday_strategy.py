@@ -171,7 +171,10 @@ class IntradayPathDecision:
 
     @property
     def conditional_call_bias(self) -> bool:
-        return self.status == "confirmed"
+        return self.status == "confirmed" and bool(
+            self.play in STRATEGY_KINDS
+            or (self.play or "").startswith("level_decision:")
+        )
 
     @property
     def flip_reclaim_call(self) -> bool:

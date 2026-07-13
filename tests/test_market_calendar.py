@@ -88,6 +88,21 @@ def test_trading_days_elapsed_skips_holidays_and_weekends() -> None:
     assert CALENDAR.trading_days_elapsed(date(2026, 7, 2), date(2026, 7, 5)) == 0
 
 
+def test_globex_schedule_includes_sunday_reopen_and_daily_break() -> None:
+    sunday = date(2026, 7, 12)
+    monday = date(2026, 7, 13)
+    friday = date(2026, 7, 17)
+    saturday = date(2026, 7, 18)
+
+    assert CALENDAR.is_globex_open(et_datetime(sunday, 17, 59)) is False
+    assert CALENDAR.is_globex_open(et_datetime(sunday, 18)) is True
+    assert CALENDAR.is_globex_open(et_datetime(monday, 16, 59)) is True
+    assert CALENDAR.is_globex_open(et_datetime(monday, 17, 30)) is False
+    assert CALENDAR.is_globex_open(et_datetime(monday, 18)) is True
+    assert CALENDAR.is_globex_open(et_datetime(friday, 17)) is False
+    assert CALENDAR.is_globex_open(et_datetime(saturday, 12)) is False
+
+
 def test_utc_rollover_tracks_et_across_daylight_saving_change() -> None:
     before_dst = date(2026, 3, 6)
     after_dst = date(2026, 3, 9)

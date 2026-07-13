@@ -185,7 +185,7 @@ def _strike_count(
     typed_settings: Any,
 ) -> int:
     if lane is SchwabLane.NEXT_CHAIN:
-        return 60
+        return int(typed_settings.wide_chain.next_expiry_strike_count)
     if canonical == "SPX":
         return budget_state.strike_counts.get(
             lane_key,

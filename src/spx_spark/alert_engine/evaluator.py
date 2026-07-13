@@ -47,6 +47,7 @@ def evaluate_alerts(
     market_context: dict[str, object] | None = None,
     persist_system_events: bool = False,
     persist_movement_state: bool = False,
+    alert_settings: AlertSettings = DEFAULT_ALERT_SETTINGS,
 ) -> list[Alert]:
     alerts: list[Alert] = []
     required = set(window.required_instruments)
@@ -73,13 +74,20 @@ def evaluate_alerts(
         )
     )
 
-    alerts.extend(option_map_alerts(options_map or build_options_map(state), window=window))
+    alerts.extend(
+        option_map_alerts(
+            options_map or build_options_map(state),
+            window=window,
+            settings=alert_settings,
+        )
+    )
     if iv_surface is not None:
         alerts.extend(
             iv_surface_alerts(
                 iv_surface,
                 window=window,
                 history_1h=iv_surface_history_1h,
+                settings=alert_settings,
             )
         )
     alerts.extend(position_holdings_alerts(state, options_map=options_map, window=window))
@@ -139,6 +147,7 @@ def evaluate_payload(
         market_context=market_context,
         persist_system_events=persist_system_events,
         persist_movement_state=persist_movement_state,
+        alert_settings=policy,
     )
     if iv_stale_alert is not None:
         alerts.append(iv_stale_alert)
@@ -171,5 +180,4 @@ def evaluate_payload(
         "alert_count": len(alerts),
         "alerts": [alert.to_dict() for alert in alerts],
     }
-
 

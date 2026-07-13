@@ -13,6 +13,7 @@ class EngineMode(str, Enum):
     WARMING = "warming"
     READY = "ready"
     DEGRADED = "degraded"
+    GLOBEX_CONTEXT = "globex_context"
     BLOCKED = "blocked"
     STOPPING = "stopping"
     FAILED = "failed"
@@ -52,6 +53,8 @@ class HealthFactor(str, Enum):
     ANALYTICS_OK = "analytics_ok"
     OUTBOX_WRITABLE = "outbox_writable"
     CRITICAL_TASKS_OK = "critical_tasks_ok"
+    CASH_SESSION_OPEN = "cash_session_open"
+    GLOBEX_CONTEXT_USABLE = "globex_context_usable"
 
 
 @dataclass(frozen=True)
@@ -63,13 +66,23 @@ class EngineHealth:
 
     @property
     def ok(self) -> bool:
-        """True only when the engine can produce pricing/executable output."""
+        """True when the engine is operational in its declared session mode."""
+        return self.mode in {
+            EngineMode.READY,
+            EngineMode.DEGRADED,
+            EngineMode.GLOBEX_CONTEXT,
+        }
+
+    @property
+    def actionable(self) -> bool:
+        """True only when authoritative pricing/executable output is allowed."""
         return self.mode is EngineMode.READY
 
     def to_dict(self) -> dict[str, object]:
         return {
             "mode": self.mode.value,
             "ok": self.ok,
+            "actionable": self.actionable,
             "factors": dict(self.factors),
             "reasons": list(self.reasons),
             "checked_at": self.checked_at.isoformat(),

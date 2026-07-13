@@ -5,7 +5,12 @@ from __future__ import annotations
 from collections import defaultdict
 from datetime import datetime
 
-from spx_spark.analytics.options.chain import chain_implied_spot, is_spxw_option, pair_by_strike
+from spx_spark.analytics.options.chain import (
+    chain_implied_spot,
+    enrich_open_interest,
+    is_spxw_option,
+    pair_by_strike,
+)
 from spx_spark.analytics.options.constants import BAD_QUALITIES, UNDERLIER_CANDIDATES, UNDERLIER_MISMATCH_SOURCES
 from spx_spark.analytics.options.levels import build_spy_confluence
 from spx_spark.analytics.options.models import OptionsMap, UnderlierReference
@@ -84,7 +89,7 @@ def group_spxw_option_quotes(
 ) -> dict[str, list[Quote]]:
     ibkr_down = ibkr_provider_unavailable(state)
     settings = storage_settings or StorageSettings.from_env()
-    candidates = tuple(
+    structural_candidates = tuple(
         degrade_stale_quote(
             quote,
             as_of=state.as_of,
@@ -94,12 +99,20 @@ def group_spxw_option_quotes(
             slow_labels=settings.slow_index_labels,
         )
         for quote in state.quotes
-        if is_spxw_option(quote) and not (quote.provider == Provider.IBKR and ibkr_down)
+        if is_spxw_option(quote)
     )
-    selected = select_best_quotes(
-        candidates,
-        as_of=state.as_of,
-        provider_priority=settings.provider_priority,
+    candidates = tuple(
+        quote
+        for quote in structural_candidates
+        if not (quote.provider == Provider.IBKR and ibkr_down)
+    )
+    selected = enrich_open_interest(
+        select_best_quotes(
+            candidates,
+            as_of=state.as_of,
+            provider_priority=settings.provider_priority,
+        ),
+        structural_candidates,
     )
     grouped: dict[str, list[Quote]] = defaultdict(list)
     for quote in selected:

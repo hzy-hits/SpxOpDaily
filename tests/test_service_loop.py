@@ -87,6 +87,26 @@ def test_service_loop_can_enable_ibkr_explicitly() -> None:
     ]
 
 
+def test_service_loop_can_enable_globex_trend_explicitly() -> None:
+    tasks = build_tasks(make_settings(globex_trend_enabled=True))
+
+    names = [task.name for task in tasks]
+    assert names[:3] == ["provider_failover", "globex_trend", "intraday_shock"]
+    trend = next(task for task in tasks if task.name == "globex_trend")
+    assert trend.interval_seconds == 30
+    assert trend.command is not None
+
+
+def test_service_loop_can_enable_market_features_explicitly() -> None:
+    tasks = build_tasks(make_settings(market_features_enabled=True))
+
+    names = [task.name for task in tasks]
+    assert names[:3] == ["provider_failover", "market_features", "intraday_shock"]
+    features = next(task for task in tasks if task.name == "market_features")
+    assert features.interval_seconds == 60
+    assert features.command is not None
+
+
 def test_service_loop_can_enable_polymarket_explicitly() -> None:
     tasks = build_tasks(make_settings(polymarket_enabled=True))
 

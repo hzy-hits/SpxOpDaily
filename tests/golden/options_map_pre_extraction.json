@@ -83,6 +83,22 @@
           "source_strike": 7500.0
         }
       ],
+      "max_pain": {
+        "call_oi_peak": 1000.0,
+        "call_oi_peak_strike": 7500.0,
+        "call_open_interest": 1600.0,
+        "oi_strike_count": 2,
+        "payout_points": 10000.0,
+        "put_oi_peak": 800.0,
+        "put_oi_peak_strike": 7500.0,
+        "put_open_interest": 1000.0,
+        "quality": "partial_window",
+        "settlement_strike": 7500.0,
+        "strike_range": [
+          7500.0,
+          7550.0
+        ]
+      },
       "nearest_wall": 7500.0,
       "nearest_wall_distance_points": 0.0,
       "net_gamma_ratio": 0.06217377296259384,

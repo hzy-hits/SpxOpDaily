@@ -46,6 +46,7 @@ def settings(tmp_path) -> ProviderFailoverSettings:
         enabled=True,
         state_path=str(tmp_path / "failover.json"),
         required_instruments=("index:SPX", "future:ES"),
+        globex_required_instruments=("future:ES",),
         provider_state_max_age_seconds=45.0,
         quote_max_age_seconds=30.0,
         control_state_max_age_seconds=60.0,
@@ -97,6 +98,20 @@ def test_controller_never_activates_ibkr_outside_rth(tmp_path) -> None:
     assert raw["monitoring_active"] is False
     assert raw["ibkr_market_data_required"] is False
     assert raw["new_entries_allowed"] is False
+
+
+def test_controller_monitors_live_es_during_globex_without_requiring_spx(tmp_path) -> None:
+    cfg = replace(settings(tmp_path), monitor_rth_only=False)
+    sunday_reopen = datetime(2026, 7, 13, 1, 30, tzinfo=UTC)
+    schwab_es = quote(InstrumentId.future("ES"), Provider.SCHWAB, sunday_reopen)
+
+    state = evaluate_and_persist(latest(sunday_reopen, schwab_es), cfg)
+    raw = json.loads((tmp_path / "failover.json").read_text(encoding="utf-8"))
+
+    assert state.mode == FailoverMode.SCHWAB_PRIMARY
+    assert raw["monitoring_active"] is True
+    assert raw["monitoring_context"] == "globex"
+    assert state.schwab_unhealthy_streak == 0
 
 
 def test_outside_rth_resets_prior_mode_streaks_and_transition(tmp_path) -> None:

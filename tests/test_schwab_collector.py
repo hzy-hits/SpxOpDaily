@@ -443,7 +443,7 @@ def test_collector_tiered_chain_cadence_and_request_counts(
     assert first["chains_skipped"] == []
     assert {symbol for symbol, _, _ in chain_calls} == {"$SPX", "$XSP", "SPY", "QQQ", "IWM"}
     assert ("$SPX", 80) in {(symbol, strike) for symbol, strike, _ in chain_calls}
-    assert ("$SPX", 60) in {(symbol, strike) for symbol, strike, _ in chain_calls}
+    assert ("$SPX", 40) in {(symbol, strike) for symbol, strike, _ in chain_calls}
     assert all(strike == 10 for symbol, strike, _ in chain_calls if symbol != "$SPX")
     first_chain_as_of = dict(first["chain_as_of"])
     assert all(first_chain_as_of[symbol] == t0.isoformat() for symbol in first_chain_as_of)

@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from dataclasses import replace
 
 from spx_spark.analytics.options.pricing import finite_float, option_mid
-from spx_spark.marketdata import InstrumentType, OptionRight, Quote
+from spx_spark.marketdata import InstrumentType, OptionRight, Provider, Quote
 
 
 def chain_implied_spot(pairs: dict[float, dict[OptionRight, Quote]]) -> float | None:
@@ -64,6 +65,57 @@ def pair_by_strike(quotes: list[Quote]) -> dict[float, dict[OptionRight, Quote]]
             continue
         pairs[strike][right] = quote
     return pairs
+
+
+def enrich_open_interest(
+    selected_quotes: list[Quote] | tuple[Quote, ...],
+    structural_quotes: list[Quote] | tuple[Quote, ...],
+) -> tuple[Quote, ...]:
+    """Attach OI independently of the provider chosen for current pricing.
+
+    SPX option OI is a session-level structural field, while bid/ask is a
+    rapidly expiring field. IBKR's rotating hot lane can therefore retain
+    valid OI after its quote leaves the live window, and a fresh Schwab quote
+    can safely carry that OI without inheriting IBKR's stale price.
+    """
+
+    sources: dict[str, list[Quote]] = defaultdict(list)
+    for quote in structural_quotes:
+        if quote.open_interest is not None:
+            sources[quote.instrument.canonical_id].append(quote)
+
+    def source_key(quote: Quote) -> tuple[bool, bool, float]:
+        observed_at = quote.structure_time or quote.received_at
+        return (
+            bool((finite_float(quote.open_interest) or 0.0) > 0),
+            quote.provider is Provider.IBKR,
+            observed_at.timestamp(),
+        )
+
+    enriched: list[Quote] = []
+    for quote in selected_quotes:
+        candidates = sources.get(quote.instrument.canonical_id)
+        if not candidates:
+            enriched.append(quote)
+            continue
+        source = max(candidates, key=source_key)
+        structure_time = source.structure_time or source.received_at
+        raw = dict(quote.raw or {})
+        raw.update(
+            {
+                "open_interest_provider": source.provider.value,
+                "open_interest_observed_at": structure_time.isoformat(),
+            }
+        )
+        enriched.append(
+            replace(
+                quote,
+                open_interest=source.open_interest,
+                structure_time=structure_time,
+                raw=raw,
+            )
+        )
+    return tuple(enriched)
 
 
 def is_spy_option(quote: Quote) -> bool:

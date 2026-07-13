@@ -3,24 +3,82 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime
 from typing import Any
 
+from spx_spark.analytics.options.pricing import finite_float
 from spx_spark.application.order_map.models import PLAY_ORDER, SHANGHAI_TZ
 from spx_spark.application.order_map.render import (
     _candidate_by_play,
     _dash,
-    _day_move_line,
     _es_volume_line,
     _fmt_prob,
-    _greeks_reference_line,
-    _hl_volume_line,
-    _rn_density_line,
-    _wall_ladder_lines,
+    _globex_trend_line,
     render_research_only_template,
 )
-from spx_spark.application.order_map.state import _phase_clock_text, _session_phase_of
+from spx_spark.application.order_map.state import _session_phase_of
 from spx_spark.notifier.llm_writer import previous_push_json
+
+
+GLOBEX_CONTEXT_SYSTEM_PROMPT = "\n".join(
+    (
+        "你是 SPX 夜盘状态便签的事实编辑器，不是预测模型。只允许使用输入 JSON 和模板中明确提供的事实。",
+        "ES-basis SPX 是非 RTH 的结构分析代理；SPX levels 和 es_equivalent_levels 是不同坐标系，禁止自行换算或混用。",
+        "上一 RTH 的冻结 OI/GEX 只能称为旧结构参考，不能据此断言 dealer 仓位、墙已守住/弃守、历史触碰次数或 gamma 方向。",
+        "允许给条件式主情景、确认阈值和证伪阈值，但每个判断必须能指向输入中的价格、状态机阶段或量价标签。",
+        "ES 阈值只能使用 es_equivalent_levels 明列的值；没有下方结构位就明确写没有，不得为了双向表达自造整数关口。",
+        "禁止比喻、拟人、夸张修辞和隐藏因果；禁止使用『无引力』『气垫』『燃料』『卖方收工』『真金白银』等措辞。",
+        "现金 SPX 或新期权链缺失时，不生成期权价格、Greeks、概率、限价或下单指令。不得写『等开盘再说』。",
+        "输出简洁中文，先结论，再位置，再双向条件，最后写数据限制。数字逐字引用，不改写。",
+    )
+)
+
+_NUMBER_PATTERN = re.compile(r"(?<![A-Za-z_])[-+]?\d+(?:\.\d+)?")
+_TEMPLATE_CANDIDATE_PATTERN = re.compile(
+    r"(?:\[地图候选\]|计划\d+·).*?SPXW\s+(\d{4}[CP])"
+)
+_GLOBEX_FORBIDDEN_PHRASES = (
+    "无引力",
+    "气垫",
+    "gamma 燃料",
+    "卖方收工",
+    "真金白银",
+)
+
+
+def globex_writer_output_valid(text: str, template: str) -> bool:
+    """Reject invented prices and causal decoration in an off-hours brief."""
+    if any(phrase in text for phrase in _GLOBEX_FORBIDDEN_PHRASES):
+        return False
+    allowed = [float(value) for value in _NUMBER_PATTERN.findall(template)]
+    for raw in _NUMBER_PATTERN.findall(text):
+        value = float(raw)
+        if value in {0.0, 1.0}:
+            continue
+        tolerance = 0.11 if abs(value) < 100_000 else 0.0
+        if not any(abs(value - candidate) <= tolerance for candidate in allowed):
+            return False
+    return True
+
+
+def actionable_writer_output_valid(text: str, template: str) -> bool:
+    """Require numeric fidelity and conditional-execution semantics."""
+
+    if not globex_writer_output_valid(text, template):
+        return False
+    contracts = tuple(dict.fromkeys(_TEMPLATE_CANDIDATE_PATTERN.findall(template)))
+    if contracts and any(contract not in text for contract in contracts):
+        return False
+    if contracts and "当前不可预挂" not in text:
+        return False
+    if "【条件计划｜" in template:
+        return (
+            text.startswith("【SPX 15m｜")
+            and "\n\n" in text
+            and "【条件计划｜" in text
+        )
+    return True
 
 
 def build_order_prompt(
@@ -32,29 +90,33 @@ def build_order_prompt(
     if payload.get("research_only") is True:
         return "\n".join(
             (
-                "这是 research_only 市场观察。只复述研究参考、闸门原因、结构位距离和原始 bid/ask。",
-                "不得给挂单、限价、重定价、触达概率、ETA、买卖建议或可执行措辞。",
-                "首行写『研究状态:』，末行明确『不可执行定价』。",
+                "这是 SPX 市场状态，不是系统停摆。ES-basis SPX 代理驱动关键位状态机，ES 是连续价格发现锚，Hyperliquid 只作交叉验证。",
+                "给出主情景、当前关键位阶段、确认条件和证伪条件；不要只罗列数据，也不要写『等开盘』。",
+                "可以给 breakout/fade 的条件判断，但不得编造期权模型价、限价、触达概率、ETA 或直接下单指令。",
+                "首行写『市场状态:』，末行用一句话说明当前缺失的数据及其对不可执行定价的具体影响。",
+                "previous_push:" + previous_push_json(previous_push),
                 "JSON:" + json.dumps(writer_payload, ensure_ascii=False, separators=(",", ":")),
                 "模板:" + template,
             )
         )
     return "\n".join(
         (
-            "这条是当天第一张『挂单地图』。搭档下午刚坐到屏幕前，要拿这张图定今天的埋伏方案：挂什么单、挂什么价、赌的是什么。",
+            "这条是当天第一张『条件交易地图』。搭档下午刚坐到屏幕前，要用它确定触发位、候选合约和触发后的价格参考。",
             "动笔前先在心里过一遍(不写出来)：今天的 OI 是怎么摆的——put 侧是密集防线还是孤零零一档？dealer 在现价附近是"
             "正 gamma 压波动还是负 gamma 放大波动？今天的 play 里哪张是真机会、哪张只是模板凑数？想清楚再落笔，观点要有取舍，"
             "所有候选同等推荐等于没推荐。",
             "框架口径：Micopedia/Steven observe_only（regime→map→flow→trigger→expression→exit）；"
-            "挂单地图是计划参考不是自动下单；GEX/*_proxy 是结构代理；Hyperliquid 只作弱次级证据，不作 SPX 锚。",
+            "条件交易地图是计划参考不是自动下单；GEX/*_proxy 是结构代理；Hyperliquid 只作弱次级证据，不作 SPX 锚。",
             "",
-            "输出中文，最多 18 行。第一行以『挂单参考:』开头，复述模板第一行的日期与时间。",
+            "输出中文，最多 18 行。第一行以『条件执行参考:』开头，复述模板第一行的日期与时间。",
             "接着给地形定调：pin 还是 transition，为什么(gamma 状态+价格相对 flip 的位置)，今天哪类 play 优先。",
-            "墙位讲阶梯不讲孤点(数据在 wall_ladder，OI 定位 + 每档 BS 参考价)：相邻 put 墙 OI 接近(差三成以内)就说成一条支撑带并给出"
+            "墙位讲阶梯不讲孤点(数据在 wall_ladder，OI 定位 + 每档 BS 情景价)：相邻 put 墙 OI 接近(差三成以内)就说成一条支撑带并给出"
             "破了之后的二、三档；第一档独大才说单点硬墙。call 侧同理。"
-            "每档 put 墙对应 Call 的到位预估/限价，每档 call 墙对应 Put 的到位预估/限价——写挂单时必须引用这些数字，不要自己估权利金。",
+            "每档 put 墙对应 Call、每档 call 墙对应 Put 的触位情景价只能作为标的触发后的价格参考，不得写成现在可预挂的期权订单。",
             "rn_density(B-L 风险中性分布)可用时引用：市场把收盘定价在哪个中位、80% 区间在哪；给垂直价差选腿时"
             "买腿放赌的方向内、卖腿放 80% 区间外沿附近最划算；quality 非 ok 时注明并降权。",
+            "max_pain 可用时必须同时报告合并 OI 的 settlement_strike、Call OI峰和 Put OI峰。Max Pain 只表示当前"
+            "采样窗口内的到期赔付最小点，OI峰只表示持仓集中，不得单独解释为支撑、阻力或方向预测；quality 非 ok 时降权。",
             "spxw_0dte_greeks_reference 是严格当日到期、只读的情景参考层，只解释价格/时间/IV 冲击。"
             "position_sign/direction=unknown 时负 gamma 不等于下跌；不得据此改变候选方向、排序、限价或新增下单动作。",
             "conditional_call_bias 只有 status=confirmed 才有效，它来自 5 秒 SPX/ES 价格路径对冻结 flip/旧 call wall 的确认，"
@@ -64,8 +126,9 @@ def build_order_prompt(
             "- 墙位价 vs 先手挡价的取舍：墙位价便宜但常在墙前几点反转吃不到，先手挡成交率高；预估价已含触达前的"
             "时间衰减与 vol 斜率(BS 重定价)，比现价低不是便宜，是时间价值正常流失；",
             "- 赔率账：触达概率、到位预估价、现价放一起，这笔单赌的是一次多大概率的什么事，赔付幅度配不配得上这个概率；",
-            "- resting_limit 提醒：0DTE 纯权利金限价可能因时间衰减在指数未到位时提前成交，严格按点位入场改用指数条件单(SPX 触及 XX 时下限价)；",
-            "- order_style=stop_trigger 必须提醒：预估价高于现价，预挂被动限价会立即成交，等破位确认后用条件单。",
+            "- execution_quote_status=executable 时才可给条件价；range_only 只能报告早/基准/晚触的范围和门控原因，不得给限价；",
+            "- underlier_triggered_limit 必须先由 trigger_coordinate 指定的同坐标价格触及 target，再用届时实时 mid/IV 重算并提交限价；",
+            "- 禁止把 limit_aggressive/limit_conservative 写成现在可预挂。预估高于现价会立即成交，预估低于现价也可能被 theta 提前打成。",
             "",
             "最后 2-3 行 if/then：开盘前参考价/ES 走到哪些具体位置，哪张单赔率变差该撤或改价，哪个剧本作废——这就是这张图的证伪条件。",
             "es_volume 可用且 label 非 no_baseline/session_reset 时，读量价事件(event_id)而不是只读放量/缩量："
@@ -89,7 +152,6 @@ def build_order_prompt(
     )
 
 
-
 def _level_probs_line(payload: dict[str, Any]) -> str:
     by_play = _candidate_by_play(payload)
     parts: list[str] = []
@@ -103,55 +165,264 @@ def _level_probs_line(payload: dict[str, Any]) -> str:
     return "; ".join(parts) if parts else "-"
 
 
+def _compact_level_line(payload: dict[str, Any]) -> str:
+    decision = payload.get("level_decision")
+    if not isinstance(decision, dict):
+        return f"候选 {_level_probs_line(payload)}"
+    levels = decision.get("levels") if isinstance(decision.get("levels"), dict) else {}
+    return (
+        f"Put {_dash(levels.get('put_wall'))}｜"
+        f"Flip {_dash(levels.get('flip_low'))}–{_dash(levels.get('flip_high'))}｜"
+        f"Call {_dash(levels.get('call_wall'))}"
+    )
+
+
+def _compact_decision_line(payload: dict[str, Any]) -> str | None:
+    decision = payload.get("level_decision")
+    if not isinstance(decision, dict):
+        return None
+    phase = str(decision.get("phase") or "far").upper()
+    level = finite_float(decision.get("level"))
+    spot = finite_float(decision.get("spot"))
+    if spot is None and isinstance(payload.get("underlier"), dict):
+        spot = finite_float(payload["underlier"].get("price"))
+    if spot is not None and level is not None:
+        side = "高" if spot >= level else "低"
+        distance = f"｜现价{side}{abs(spot - level):.1f}点"
+    else:
+        distance = ""
+    phase_label, guidance = {
+        "FAR": ("远离", "未进入触发区"),
+        "APPROACHING": ("接近", "等待测试"),
+        "TESTING": ("测试", "等待突破或拒绝"),
+        "BREAK_PENDING": ("待确认突破", "等待持续确认"),
+        "REJECT_PENDING": ("待确认拒绝", "等待持续确认"),
+        "ACCEPTED": ("突破接受", "等待回踩"),
+        "REJECTED": ("拒绝接受", "等待回踩"),
+        "RETEST": ("回踩", "等待最终确认"),
+        "CONFIRMED": ("已确认", "路径有效"),
+        "INVALIDATED": ("已失效", "等待重置"),
+        "EXPIRED": ("已过期", "系统自动重建事件"),
+    }.get(phase, ("观察", "继续监控"))
+    kind = {
+        "put_wall": "Put Wall",
+        "flip_low": "Flip下沿",
+        "flip_high": "Flip上沿",
+        "call_wall": "Call Wall",
+    }.get(str(decision.get("level_kind") or ""), str(decision.get("level_kind") or "-"))
+    return f"状态  {phase}（{phase_label}）｜{kind} {_dash(level)}{distance}｜{guidance}"
+
+
+def _compact_price_line(payload: dict[str, Any]) -> str:
+    underlier = payload.get("underlier") if isinstance(payload.get("underlier"), dict) else {}
+    day_move = payload.get("day_move") if isinstance(payload.get("day_move"), dict) else {}
+    points = finite_float(day_move.get("points"))
+    em_used = finite_float(day_move.get("em_used_fraction"))
+    change = f"{points:+.1f}" if points is not None else "-"
+    used = f"{em_used:.0%}" if em_used is not None else "-"
+    return (
+        f"价格  SPX {_dash(underlier.get('price'))}｜ES {_dash(payload.get('es_last'))}｜"
+        f"昨收 {change}｜EM已用 {used}"
+    )
+
+
+def _compact_clock_line(phase: dict[str, Any]) -> str | None:
+    parts: list[str] = []
+    since_open = phase.get("minutes_since_us_open")
+    to_open = phase.get("minutes_to_us_open")
+    to_bed = phase.get("minutes_to_bedtime")
+    if isinstance(since_open, int):
+        parts.append(f"开盘后 {since_open} 分钟")
+    elif isinstance(to_open, int):
+        parts.append(f"距开盘 {to_open} 分钟")
+    if isinstance(to_bed, int) and to_bed <= 180:
+        parts.append(f"距收官 {to_bed} 分钟")
+    return "时钟  " + "｜".join(parts) if parts else None
+
+
+def _gamma_label(value: Any) -> str:
+    return {
+        "positive_gamma_pin": "正Gamma",
+        "negative_gamma_expansion": "负Gamma",
+        "zero_gamma_transition": "ZeroGamma过渡",
+    }.get(str(value or ""), str(value or "-"))
+
+
+def _compact_oi_line(payload: dict[str, Any]) -> str | None:
+    value = payload.get("max_pain")
+    if not isinstance(value, dict):
+        return None
+    quality = {"ok": "正常", "degraded": "降级", "failed": "不可用"}.get(
+        str(value.get("quality") or ""),
+        str(value.get("quality") or "-"),
+    )
+    return (
+        f"OI    Max Pain {_dash(value.get('settlement_strike'))}｜"
+        f"Call峰 {_dash(value.get('call_oi_peak_strike'))}"
+        f"（{int(value.get('call_oi_peak') or 0):,}）｜"
+        f"Put峰 {_dash(value.get('put_oi_peak_strike'))}"
+        f"（{int(value.get('put_oi_peak') or 0):,}）｜"
+        f"{int(value.get('oi_strike_count') or 0)}档 {quality}"
+    )
+
+
+def _compact_flow_line(payload: dict[str, Any]) -> str | None:
+    market = payload.get("minute_market_frame")
+    if not isinstance(market, dict):
+        return _globex_trend_line(payload)
+    es = market.get("es") if isinstance(market.get("es"), dict) else {}
+    volume = market.get("volume") if isinstance(market.get("volume"), dict) else {}
+    cross = market.get("cross_asset") if isinstance(market.get("cross_asset"), dict) else {}
+    alignment = {
+        "price_volume_aligned": "量价同向",
+        "price_volume_divergent": "量价背离",
+    }.get(str(volume.get("price_volume_alignment_5m") or ""), "量价-")
+    confirmation = {
+        "confirmed": "同向",
+        "divergent": "背离",
+    }.get(str(cross.get("es_spy_direction_confirmation_15m") or ""), "-")
+    return (
+        f"ES确认  15m {_dash(es.get('return_15m_points'))}｜"
+        f"60m {_dash(es.get('return_60m_points'))}｜"
+        f"VWAP {_dash(es.get('vwap_distance_points'))}｜{alignment}｜ES/SPY {confirmation}"
+    )
+
+
+def _compact_option_line(payload: dict[str, Any]) -> str | None:
+    options = payload.get("option_structure_frame")
+    vol = payload.get("vol_context") if isinstance(payload.get("vol_context"), dict) else {}
+    parts = [
+        f"VIX1D/VIX {_ratio(vol.get('vix1d'), vol.get('vix'))}",
+        f"SKEW {_dash(vol.get('skew'))}",
+    ]
+    if isinstance(options, dict):
+        l1 = options.get("l1") if isinstance(options.get("l1"), dict) else {}
+        metrics = l1.get("metrics") if isinstance(l1.get("metrics"), dict) else {}
+        parts.append(f"L1流动性 {_dash(metrics.get('liquidity_score'))}")
+    return "波动  " + "｜".join(parts)
+
+
+def _ratio(numerator: Any, denominator: Any) -> str:
+    top = finite_float(numerator)
+    bottom = finite_float(denominator)
+    return f"{top / bottom:.2f}" if top is not None and bottom else "-"
+
+
+def _compact_candidate_lines(payload: dict[str, Any], *, limit: int = 2) -> list[str]:
+    candidates = [
+        item for item in payload.get("candidates") or [] if isinstance(item, dict)
+    ]
+    spot = finite_float(
+        (payload.get("underlier") or {}).get("price")
+        if isinstance(payload.get("underlier"), dict)
+        else None
+    )
+    if spot is None:
+        return []
+
+    support_calls = [
+        item
+        for item in candidates
+        if item.get("right") == "C" and (finite_float(item.get("level")) or spot + 1) <= spot
+    ]
+    resistance_puts = [
+        item
+        for item in candidates
+        if item.get("right") == "P" and (finite_float(item.get("level")) or spot - 1) >= spot
+    ]
+    selected: list[dict[str, Any]] = []
+    for group in (support_calls, resistance_puts):
+        if group:
+            selected.append(
+                min(group, key=lambda item: abs((finite_float(item.get("level")) or spot) - spot))
+            )
+    if len(selected) < limit:
+        for item in sorted(
+            candidates,
+            key=lambda row: abs((finite_float(row.get("level")) or spot) - spot),
+        ):
+            if item not in selected:
+                selected.append(item)
+            if len(selected) >= limit:
+                break
+
+    labels = {
+        "put_wall_bounce_call": "支撑反弹",
+        "flip_breakdown_put": "Flip跌破",
+        "call_wall_fade_put": "冲墙回落",
+        "flip_reclaim_call": "Flip收复",
+        "call_wall_breakout_call": "Call墙突破",
+    }
+    lines: list[str] = []
+    for index, item in enumerate(selected[:limit], start=1):
+        if item.get("strike") is None or item.get("right") not in {"C", "P"}:
+            continue
+        low = item.get("projection_range_low")
+        high = item.get("projection_range_high")
+        if low is None:
+            low = item.get("projected_mid")
+        if high is None:
+            high = item.get("projected_mid")
+        contract = f"{_dash(item.get('strike'))}{item.get('right') or ''}"
+        if item.get("execution_quote_status") == "range_only":
+            price_text = f"仅情景 {_dash(low)}–{_dash(high)}"
+        else:
+            price_text = f"参考 {_dash(low)}–{_dash(high)}"
+        play_label = labels.get(
+            str(item.get("play") or ""),
+            "Call候选" if item.get("right") == "C" else "Put候选",
+        )
+        lines.append(
+            f"计划{index}·{play_label}  SPX {_dash(item.get('level'))}触发｜"
+            f"SPXW {contract}｜触达 {_fmt_prob(item.get('prob_touch'))}｜{price_text}"
+        )
+    return lines
+
+
 def render_status_template(
     payload: dict[str, Any],
     changes: list[str],
     now_utc: datetime,
 ) -> str:
     if payload.get("research_only") is True:
-        return render_research_only_template(payload, title="市场研究状态")
+        return render_research_only_template(payload, title="市场状态")
     beijing = now_utc.astimezone(SHANGHAI_TZ)
     phase = _session_phase_of(payload, now_utc)
-    open_text = _phase_clock_text(phase)
 
-    underlier = payload.get("underlier") if isinstance(payload.get("underlier"), dict) else {}
-    vol = payload.get("vol_context") if isinstance(payload.get("vol_context"), dict) else {}
-    flip_zone = payload.get("flip_zone") if isinstance(payload.get("flip_zone"), list) else None
-    flip_lo = _dash(flip_zone[0]) if flip_zone and len(flip_zone) >= 2 else "-"
-    flip_hi = _dash(flip_zone[1]) if flip_zone and len(flip_zone) >= 2 else "-"
-
+    expiry = str(payload.get("expiry") or "-")
+    expiry_text = f"{expiry[4:6]}-{expiry[6:8]}" if len(expiry) == 8 else expiry
     lines = [
-        f"【市场状态 {beijing.strftime('%H:%M')}】(0DTE={payload.get('expiry') or '-'}, {open_text})",
-        f"时段: {phase.get('name_cn')} — {phase.get('traits')}",
+        f"【SPX 15m｜{beijing.strftime('%H:%M')}｜0DTE {expiry_text}｜{phase.get('name_cn')}】",
+        *([line] if (line := _compact_clock_line(phase)) else []),
+        _compact_price_line(payload),
         (
-            f"参考价: {_dash(underlier.get('price'))}({underlier.get('source') or '-'}); "
-            f"ES {_dash(payload.get('es_last'))}; HL perp {_dash(payload.get('hl_sp500_perp'))}"
+            f"结构  {_gamma_label(payload.get('gamma_state'))}｜"
+            f"{_compact_level_line(payload)}｜ZG {_dash(payload.get('zero_gamma'))}｜"
+            f"EM ±{_dash(payload.get('expected_move_points'))}"
         ),
-        (
-            f"gamma: {payload.get('gamma_state') or '-'}, "
-            f"zero gamma {_dash(payload.get('zero_gamma'))}, flip zone {flip_lo}-{flip_hi}, "
-            f"预期波幅 ±{_dash(payload.get('expected_move_points'))} 点"
+        *([line] if (line := _compact_oi_line(payload)) else []),
+        *([line] if (line := _compact_decision_line(payload)) else []),
+        "",
+        *([line] if (line := _compact_flow_line(payload)) else []),
+        *(
+            [line]
+            if (line := _es_volume_line(payload)) and _compact_flow_line(payload) is None
+            else []
         ),
-        *([line] if (line := _greeks_reference_line(payload)) else []),
-        f"关键位: {_level_probs_line(payload)}",
-        *([line] if (line := _day_move_line(payload)) else []),
-        *([line] if (line := _es_volume_line(payload)) else []),
-        *([line] if (line := _hl_volume_line(payload)) else []),
-        *_wall_ladder_lines(payload),
-        *([line] if (line := _rn_density_line(payload)) else []),
-        (
-            f"vol: VIX {_dash(vol.get('vix'))}, VIX1D {_dash(vol.get('vix1d'))}, "
-            f"VVIX {_dash(vol.get('vvix'))}, SKEW {_dash(vol.get('skew'))}"
-        ),
+        *([line] if (line := _compact_option_line(payload)) else []),
+        "",
+        "【条件计划｜标的触发后执行】",
+        *_compact_candidate_lines(payload),
+        "执行  触位后按实时 mid/IV 重算｜当前不可预挂",
     ]
     if changes:
-        lines.append(f"较上次推送变化: {'; '.join(changes)}")
+        lines.append(f"变化  {'；'.join(changes)}")
     else:
-        lines.append("较上次推送: 关键位无实质变化")
+        lines.append("变化  关键位无实质变化")
 
     warnings = payload.get("warnings")
     if isinstance(warnings, list) and warnings:
-        lines.append(f"数据警告: {'; '.join(str(item) for item in warnings)}")
+        lines.append(f"数据  {'；'.join(str(item) for item in warnings)}")
     return "\n".join(lines)
 
 
@@ -164,65 +435,31 @@ def build_status_prompt(
     if payload.get("research_only") is True:
         return "\n".join(
             (
-                "这是周期性 research_only 市场状态，不是交易提醒。",
-                "只说明研究参考、定价闸门、结构位距离和观察到的 bid/ask。",
-                "不得产生限价、概率、ETA、模型价格、买卖或下单建议；明确写不可执行定价。",
+                "这是每 15 分钟一次的 SPX 市场状态。非 RTH 并非无行情：ES-basis SPX 代理是关键位状态机的主参考，ES 是连续锚，Hyperliquid 是次级交叉验证。",
+                "请像交易接班便签一样写，不要复述 JSON。先用 globex_trend 和 minute_market_frame 的路径、VWAP、量价与联动定义当前偏多/偏空/中性，再结合 option_structure_frame 判断代理 SPX 在 Put Wall、Flip、Call Wall 的位置与 FAR/APPROACHING/TESTING/CONFIRMED 阶段。",
+                "必须给一个主情景，以及升级到 breakout/fade 所需的具体确认条件和证伪条件。结构若来自上一 RTH，要明确结构日期与质量，不得把旧 OI 当成今天新链。",
+                "夜盘可做方向与关键位准备，不许写『等开盘再说』。但现金 SPX 与新 0DTE 链不可用时，不得编造 Greeks、期权模型价、限价、触达概率、ETA 或直接下单指令。",
+                "SPX levels 与 es_equivalent_levels 是两个坐标系。谈 ES 阈值只能逐字引用 es_equivalent_levels，严禁把 SPX strike 当 ES 价格，也不得自行换算。",
+                "不得推断输入中没有的历史触碰次数、墙是否弃守、dealer 行为或 gamma 燃料。避免比喻，用结构、价格和条件直接表达。",
+                "输出中文并清晰分段，首行以『市场状态:』开头；只保留改变决策的数字。末行说明下一条最值得盯的代理价格及改变判断的阈值。",
+                "previous_push:" + previous_push_json(previous_push),
                 "JSON:" + json.dumps(writer_payload, ensure_ascii=False, separators=(",", ":")),
                 "模板:" + template,
             )
         )
     return "\n".join(
         (
-            "这条是『市场状态+挂单参考』二合一便签，北京 07:30 到次日 01:30 每 15 分钟一条。搭档已经按上一张地图挂好单了，"
-            "他扫一眼要能决定：单动不动、价来了接不接。这不是行情播报，是接班交接——上一班的判断在 previous_push 里，"
-            "你要么确认它还成立，要么指出哪里被市场证伪了。",
-            "",
-            "动笔前先在心里过一遍(不要写出来)：现在价格站的这个位置，是谁的地盘？下方 put 墙的 OI 是真金白银的防守还是昨天的尸体？"
-            "dealer 在这个价位是被迫买还是被迫卖(gamma 正负)？时间衰减在帮谁？想清楚了再写结论。",
-            "框架口径：Micopedia/Steven observe_only；*_proxy 曝露不是 vendor DEX；Hyperliquid 不作 SPX 锚；不下单授权。",
-            "",
-            "输出中文，14-20 行。第一行以『市场状态:』开头，保留模板第一行的时间与时段信息，紧跟一句定调：",
-            "『剧本维持』或『剧本有变: 变在哪』——判断基准是 previous_push 正文和模板『较上次推送』行。",
-            "",
-            "session_phase 是搭档的时钟：便签必须落在当前时段的语境里(traits 字段是提示)。亚盘/欧盘时段市场在交易",
-            "(Globex+GTH)，不许写『等开盘再说』——该说的是这个时段的地形有多可信、埋伏单摆哪里；开盘首小时提防假突破；",
-            "主战场时段(北京 22:30-1:00)直接谈执行。minutes_to_bedtime ≤ 60 时这条是【睡前收官】便签：",
-            "正文以收官为主——逐张说未成交挂单撤/留、持仓带什么 bracket(止盈止损给具体价)、哪些单绝不能裸奔进无人值守的",
-            "美盘下午；证伪条件写给醒着的最后一小时，而不是写给睡着的他。",
-            "",
-            "正文必须覆盖(顺序自己组织，写成连贯的段落而不是清单)：",
-            "- 位置：参考价在 flip zone/zero gamma/两侧墙位阶梯里站在哪，距各关键位几点，这个位置意味着 pin 还是易加速；"
-            "相邻 put 墙 OI 接近(差三成以内)就说成支撑带并报出二、三档，别只报一个点；"
-            "墙阶梯每一档都带对应期权的 BS 到位预估价与限价(put 墙→Call，call 墙→Put)，写支撑/阻力时顺手带上参考价，别只报 strike；",
-            "- 赔率：当前候选的触达概率各多少、相对上一条谁在改善谁在恶化(引用具体百分比变化)，此刻哪张性价比最高、为什么；",
-            "- 市场定价对照(rn_density quality=ok 时)：市场把收盘定价在哪个中位、80% 区间在哪，当前价格相对它偏回归还是已到尾部；",
-            "- vol：VIX1D/VIX 说明今天的 vol 卖得贵还是便宜，SKEW 异常时说明谁在抢保护；",
-            "- 0DTE Greeks：只把 spxw_0dte_greeks_reference 当价格/时间/IV 冲击参考。position_sign/direction=unknown 时"
-            "负 gamma 不等于下跌，不得用它改变候选方向、排序或限价；",
-            "- conditional_call_bias：只有 confirmed 才用 flip_reclaim_call 替换同层 flip_breakdown_put，或用"
-            " call_wall_breakout_call 替换同层 call_wall_fade_put；它来自 5 秒 SPX/ES 对冻结关键位的确认，"
-            "不是 Gamma 方向票。watch/neutral 不改变候选；",
-            "- 量价事件(es_volume 可用时)：不要只说放量/缩量。读 event_id + direction + location + break_outcome："
-            "放量砸支撑(elevated_sell_into_support)是墙测试不是自动破位；缩量收回(quiet_reclaim_after_sell_test)才升温反弹；"
-            "破位站稳(holds)才给破位单开灯，破位收回(reclaimed)则假破降权；中间地带(quiet/elevated_mid_range)半路不追。"
-            "play_hints 里有现成句子可直接引用。label=no_baseline/session_reset 时不引用；",
-            "- hl_volume 是 Hyperliquid SP500 永续的量价(24/7 薄流动性代理)，只当次级证据：与 ES 量价同向可加一分确认，"
-            "分歧时提示 crypto 侧资金先动或只是噪声；aggressor_buy_ratio(主动买占比)和 book_imbalance(盘口失衡)是"
-            "ES 给不了的方向色彩；周末与 ES 停盘时它是唯一量价源。绝不允许单独用它确认破位；",
-            "- 每张挂单的 touch_eta_minutes 是按布朗缩放估的到位耗时：写挂单参考时给出时效纪律——超过约 2 倍该时间"
-            "价格还没来，这单的赔率已被 theta 吃掉，写明大约几点(北京时间)前不来就撤；",
-            "- 双向 if/then：上行到哪个具体位置、下行到哪个具体位置，分别哪张单该撤/改价、哪个剧本激活——这也是你这个判断的证伪条件；",
-            "- 情绪拦截(违反即失职)：价格在中间地带就写明『此处不追单，计划位在 XX/XX』；day_move.em_used_fraction ≥ 0.7 就写明"
-            "『日内已走完预期波幅的 X%，顺方向追单赔率差』；价格进 put 墙支撑带就写明『计划中的接多区不是恐慌区，防守只在跌破 XX 后执行』，"
-            "进 call 墙带对称处理。哪条情况成立写哪条，都不成立就不硬写。",
-            "",
-            "倒数第二段固定是『挂单参考』段，3-8 行：从模板的挂单地图部分逐字引用每张单的合约、墙位限价、先手挡价、触达概率，"
-            "数字照抄不改写；stop_trigger 的 play 保留『勿预挂限价、用指数条件单』提醒；限价相对上一条有变化就点出方向。",
-            "最后 1 行：到下条推送之间最值得盯的一个量，以及它变到什么程度你会改判断；"
-            "这个量必须是本系统数据里有的(参考价/触达概率/gamma 状态/墙位 OI/VIX/VIX1D/ES 量能节奏)，"
-            "不要让搭档去盯我们不推送的量(如内盘外盘)。",
-            "",
-            "剧本维持时照样给完整读数，别因为『没变』缩成三行；也别硬编不存在的变化，数字平稳就说平稳。",
+            "这是每 15 分钟一次的 SPX 决策摘要，不是完整研究报告。",
+            "输出中文，第一行逐字保留模板标题；先给剧本维持/有变，再给当前位置和状态机结论。",
+            "只保留会改变当前决策的内容：时段、SPX/ES、wall/flip、状态机、ES 路径与量价、"
+            "Max Pain/OI 或波动率中最重要的一项、最多两个条件候选、相对上次变化和下一确认/证伪阈值。",
+            "禁止复述完整 Greeks、完整墙位阶梯、B-L 全分布、HL 全指标或 JSON 字段；它们留在后台审计。",
+            "保持模板的分段、空行和字段顺序。每个候选只占一行，逐字保留合约、SPX 触发位、触达概率和触位区间；"
+            "统一执行行必须保留『当前不可预挂』。",
+            "候选必须先由 SPX 点位触发，再按实时 mid/IV 重算；不得把情景价写成当前挂单价。",
+            "框架仍是 observe_only；仓位方向未知时，负 gamma 不等于下跌，不得据此改变候选方向。",
+            "EXPIRED 表示系统自动重建事件，不得写成等待价格离开或停止监控。",
+            "没有实质变化时直接写『剧本维持』，不要为了填满行数重复指标。",
             "previous_push:" + previous_push_json(previous_push),
             "JSON:" + json.dumps(writer_payload, ensure_ascii=False, separators=(",", ":")),
             "模板:" + template,

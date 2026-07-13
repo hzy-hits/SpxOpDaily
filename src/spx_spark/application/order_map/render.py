@@ -44,6 +44,100 @@ def _day_move_line(payload: dict[str, Any]) -> str | None:
     return f"较昨收: {points:+.1f} 点{em_text}"
 
 
+def _globex_trend_line(payload: dict[str, Any]) -> str | None:
+    trend = payload.get("globex_trend")
+    if not isinstance(trend, dict):
+        return None
+    metrics = trend.get("metrics")
+    if not isinstance(metrics, dict) or metrics.get("price") is None:
+        return None
+    labels = {"neutral": "中性", "bearish": "偏空", "bullish": "偏多"}
+
+    def points(key: str) -> str:
+        value = finite_float(metrics.get(key))
+        return "-" if value is None else f"{value:+.1f}"
+
+    regime = str(trend.get("regime") or "neutral")
+    candidate = trend.get("candidate_regime")
+    candidate_text = ""
+    if isinstance(candidate, str):
+        count = int(trend.get("candidate_observations") or 0)
+        candidate_text = f"; 候选{labels.get(candidate, candidate)}({count})"
+    return (
+        f"ES Globex路径: {labels.get(regime, regime)}{candidate_text}; "
+        f"15m {points('return_15m_points')}, 60m {points('return_60m_points')}, "
+        f"180m {points('return_180m_points')}; "
+        f"趋势腿回撤 {points('drawdown_from_regime_high_points')}, "
+        f"趋势腿反弹 {points('rebound_from_regime_low_points')} 点"
+    )
+
+
+def _market_feature_lines(payload: dict[str, Any]) -> list[str]:
+    market = payload.get("minute_market_frame")
+    options = payload.get("option_structure_frame")
+    if not isinstance(market, dict):
+        return []
+    es = market.get("es") if isinstance(market.get("es"), dict) else {}
+    volume = market.get("volume") if isinstance(market.get("volume"), dict) else {}
+    cross = market.get("cross_asset") if isinstance(market.get("cross_asset"), dict) else {}
+    lines = [
+        (
+            "ES统一帧: "
+            f"1/5/15/60/180m {_dash(es.get('return_1m_points'))}/"
+            f"{_dash(es.get('return_5m_points'))}/{_dash(es.get('return_15m_points'))}/"
+            f"{_dash(es.get('return_60m_points'))}/{_dash(es.get('return_180m_points'))}; "
+            f"VWAP {_dash(es.get('vwap'))}(偏离{_dash(es.get('vwap_distance_points'))})"
+        ),
+        (
+            f"量价帧: 5m增量 {_dash(volume.get('volume_delta_5m'))}; "
+            f"{volume.get('price_volume_alignment_5m') or 'unavailable'}; "
+            f"ES/SPY {cross.get('es_spy_direction_confirmation_15m') or 'unavailable'}; "
+            f"源 {cross.get('selected_es_provider') or '-'}"
+        ),
+    ]
+    if isinstance(options, dict):
+        structure = options.get("structure") if isinstance(options.get("structure"), dict) else {}
+        option_vol = (
+            options.get("volatility") if isinstance(options.get("volatility"), dict) else {}
+        )
+        l1 = options.get("l1") if isinstance(options.get("l1"), dict) else {}
+        l1_metrics = l1.get("metrics") if isinstance(l1.get("metrics"), dict) else {}
+        lines.append(
+            f"期权统一帧: wall迁移 P{_dash(structure.get('put_wall_migration_points'))}/"
+            f"C{_dash(structure.get('call_wall_migration_points'))}; "
+            f"ATM IV 5/15/60m {_dash(option_vol.get('atm_iv_change_5m'))}/"
+            f"{_dash(option_vol.get('atm_iv_change_15m'))}/"
+            f"{_dash(option_vol.get('atm_iv_change_60m'))}; "
+            f"L1流动性 {l1_metrics.get('liquidity_score') or '-'}"
+        )
+    return lines
+
+
+def _max_pain_line(payload: dict[str, Any]) -> str | None:
+    value = payload.get("max_pain")
+    if not isinstance(value, dict):
+        return None
+    settlement = finite_float(value.get("settlement_strike"))
+    call_strike = finite_float(value.get("call_oi_peak_strike"))
+    put_strike = finite_float(value.get("put_oi_peak_strike"))
+    if settlement is None or call_strike is None or put_strike is None:
+        return None
+
+    def count(raw: Any) -> str:
+        parsed = finite_float(raw)
+        return f"{parsed:,.0f}" if parsed is not None else "-"
+
+    quality = str(value.get("quality") or "unknown")
+    strike_count = value.get("oi_strike_count")
+    coverage = f", {strike_count} strikes" if isinstance(strike_count, int) else ""
+    return (
+        f"OI结构: Max Pain {_dash(settlement)}; "
+        f"Call OI峰 {_dash(call_strike)}({count(value.get('call_oi_peak'))}); "
+        f"Put OI峰 {_dash(put_strike)}({count(value.get('put_oi_peak'))}) "
+        f"[{quality}{coverage}]"
+    )
+
+
 ES_VOLUME_LABEL_TEXT = {
     "elevated": "放量",
     "quiet": "缩量",
@@ -227,9 +321,9 @@ def _wall_ladder_lines(payload: dict[str, Any]) -> list[str]:
             if projected is not None:
                 stale_tag = " [stale]" if rung.get("degraded") else ""
                 price_text = (
-                    f"{opt_label} 到位预估{_fmt_premium(projected)}"
+                    f"{opt_label} BS触位情景{_fmt_premium(projected)}"
                     f"(现{_fmt_premium(current)}) "
-                    f"限价{_fmt_premium(aggressive)}/{_fmt_premium(conservative)}"
+                    f"触发后参考{_fmt_premium(aggressive)}/{_fmt_premium(conservative)}"
                     f"{stale_tag}"
                 )
             else:
@@ -252,7 +346,7 @@ def _candidate_by_play(payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
 def render_research_only_template(
     payload: dict[str, Any],
     *,
-    title: str = "研究地图",
+    title: str = "市场状态",
 ) -> str:
     reference = (
         payload.get("research_reference")
@@ -266,20 +360,19 @@ def render_research_only_template(
     )
     lines = [
         f"【{title} {payload.get('beijing_time') or '-'}】(0DTE={payload.get('expiry') or '-'})",
-        (
-            f"研究参考: {_dash(reference.get('price'))}"
-            f"({reference.get('source') or '-'}); 不可执行定价"
-        ),
-        (
-            f"定价闸门: {pricing.get('gate_state') or '-'} — "
-            f"{pricing.get('reason') or '缺少可执行锚点'}"
-        ),
-        (
-            f"gamma: {payload.get('gamma_state') or '-'}, "
-            f"zero gamma {_dash(payload.get('zero_gamma'))}, "
-            f"预期波幅 ±{_dash(payload.get('expected_move_points'))} 点"
-        ),
+        (f"跨市场参考: {_dash(reference.get('price'))}({reference.get('source') or '-'})"),
     ]
+    if line := _globex_trend_line(payload):
+        lines.append(line)
+    lines.extend(_market_feature_lines(payload))
+    lines.extend(_level_decision_lines(payload))
+    gamma_state = str(payload.get("gamma_state") or "")
+    if gamma_state and not gamma_state.startswith("unknown"):
+        lines.append(
+            f"期权结构: gamma={gamma_state}, zero gamma "
+            f"{_dash(payload.get('zero_gamma'))}, "
+            f"预期波幅 ±{_dash(payload.get('expected_move_points'))} 点"
+        )
     candidates = payload.get("research_candidates")
     if isinstance(candidates, list):
         for item in candidates:
@@ -304,17 +397,15 @@ def render_research_only_template(
                         f"[{quality}/{freshness}]"
                     )
             lines.append(
-                f"研究情景: {item.get('level_kind') or '-'} {_dash(item.get('level'))} "
+                f"关键位情景: {item.get('level_kind') or '-'} {_dash(item.get('level'))} "
                 f"({distance_text}); 观察报价 "
                 f"{'; '.join(observed_markets) if observed_markets else '-'}"
             )
     divergence = pricing.get("divergence_bps")
     if isinstance(divergence, (int, float)):
         lines.append(f"HL 与定价候选分歧: {float(divergence):+.0f} bps")
-    lines.append("仅供研究观察：无模型重定价、触达概率、ETA、限价或下单建议。")
-    warnings = payload.get("warnings")
-    if isinstance(warnings, list) and warnings:
-        lines.append(f"数据警告: {'; '.join(str(item) for item in warnings)}")
+    gate = str(pricing.get("gate_state") or "missing")
+    lines.append(f"执行限制: {gate}；当前为不可执行定价，不生成期权模型价、概率、限价或下单建议。")
     return "\n".join(lines)
 
 
@@ -338,7 +429,7 @@ def render_template(payload: dict[str, Any]) -> str:
     flip_hi = _dash(flip_zone[1]) if flip_zone and len(flip_zone) >= 2 else "-"
 
     lines = [
-        f"【挂单地图 {trading_date}】(北京 {beijing_time},0DTE={expiry})",
+        f"【条件交易地图 {trading_date}】(北京 {beijing_time},0DTE={expiry})",
         *(
             [f"时段: {phase.get('name_cn')} — {phase.get('traits')}"]
             if isinstance(phase := payload.get("session_phase"), dict) and phase.get("name_cn")
@@ -350,6 +441,9 @@ def render_template(payload: dict[str, Any]) -> str:
         ),
         (f"gamma: {gamma_state}, zero gamma {_dash(zero_gamma)}, flip zone {flip_lo}-{flip_hi}"),
     ]
+    max_pain_line = _max_pain_line(payload)
+    if max_pain_line:
+        lines.append(max_pain_line)
     greeks_line = _greeks_reference_line(payload)
     if greeks_line:
         lines.append(greeks_line)
@@ -362,6 +456,7 @@ def render_template(payload: dict[str, Any]) -> str:
     hl_volume_line = _hl_volume_line(payload)
     if hl_volume_line:
         lines.append(hl_volume_line)
+    lines.extend(_level_decision_lines(payload))
     ladder_lines = _wall_ladder_lines(payload)
     lines.extend(ladder_lines)
     density_line = _rn_density_line(payload)
@@ -394,46 +489,66 @@ def render_template(payload: dict[str, Any]) -> str:
             strike=strike,
             right=right,
         )
-        lines.append(f"{index}) {headline}")
-        lines.append(
-            "   触达概率≈"
-            f"{_fmt_prob(candidate.get('prob_touch'))}, "
-            f"到位时预估价≈{_fmt_premium(candidate.get('projected_mid'))}"
-            f"(现价 {_fmt_premium(candidate.get('current_mid'))})"
-        )
-        if candidate.get("order_style") == "stop_trigger":
+        lines.append(f"{index}) [地图候选] {headline}")
+        range_low = candidate.get("projection_range_low")
+        range_high = candidate.get("projection_range_high")
+        quote_executable = candidate.get("execution_quote_status") != "range_only"
+        if range_low is None:
+            range_low = candidate.get("projected_mid")
+        if range_high is None:
+            range_high = candidate.get("projected_mid")
+        if quote_executable:
             lines.append(
-                "   注意: 预估价高于现价,被动限价会立即成交;"
-                "此单需破位确认后下条件单/市价,不适合提前挂"
+                "   触达概率≈"
+                f"{_fmt_prob(candidate.get('prob_touch'))}, "
+                f"触位基准价≈{_fmt_premium(candidate.get('projected_mid'))}, "
+                f"早/晚触区间 {_fmt_premium(range_low)}–{_fmt_premium(range_high)}"
+                f"(现价 {_fmt_premium(candidate.get('current_mid'))})"
             )
         else:
+            reasons = ",".join(str(item) for item in candidate.get("execution_quote_reasons") or ())
             lines.append(
-                "   挂单参考: 激进 "
-                f"{_fmt_premium(candidate.get('limit_aggressive'))} / 保守 "
-                f"{_fmt_premium(candidate.get('limit_conservative'))}"
+                "   报价门控未通过：只保留早/晚触情景区间 "
+                f"{_fmt_premium(range_low)}–{_fmt_premium(range_high)}；"
+                f"不给条件价（{reasons or 'quote_quality'}）"
             )
-            eta = candidate.get("touch_eta_minutes")
-            if isinstance(eta, (int, float)) and eta > 0:
-                lines.append(
-                    f"   时效: 预计 ≈{_fmt_eta_minutes(float(eta))} 到位; "
-                    "超约 2 倍时间未到, 赔率已变质, 先撤"
-                )
-            frontrun_level = candidate.get("frontrun_level")
-            if frontrun_level is not None:
-                lines.append(
-                    f"   先手挡 {_dash(frontrun_level)}: 限价 "
-                    f"{_fmt_premium(candidate.get('frontrun_limit'))}, "
-                    f"触达≈{_fmt_prob(candidate.get('frontrun_prob_touch'))}"
-                    "(墙前反转也能吃到)"
-                )
+        iv_now = finite_float(candidate.get("projection_iv_now"))
+        iv_touch = finite_float(candidate.get("projection_iv_at_touch"))
+        tau_touch = finite_float(candidate.get("projection_tau_at_touch_minutes"))
+        touch_fraction = finite_float(candidate.get("projection_touch_time_fraction"))
+        if iv_now is not None and iv_touch is not None and tau_touch is not None:
+            lines.append(
+                f"   BS审计: IV {iv_now:.1%}→{iv_touch:.1%}, "
+                f"触位时剩余≈{_fmt_eta_minutes(tau_touch)}"
+                + (f",耗时假设占当前剩余{touch_fraction:.0%}" if touch_fraction is not None else "")
+            )
+        if quote_executable:
+            lines.append(
+                f"   条件执行: SPX 触及 {_dash(candidate.get('level'))} 后再提交; "
+                f"触发后限价参考 {_fmt_premium(candidate.get('limit_aggressive'))} / "
+                f"{_fmt_premium(candidate.get('limit_conservative'))}; 当前不可预挂"
+            )
+        eta = candidate.get("touch_eta_minutes")
+        if isinstance(eta, (int, float)) and eta > 0:
+            lines.append(
+                f"   时效: 预计 ≈{_fmt_eta_minutes(float(eta))} 到位; "
+                "该 ETA 仅是情景输入, 到时必须用实时 mid/IV 重算"
+            )
+        frontrun_level = candidate.get("frontrun_level")
+        if frontrun_level is not None:
+            lines.append(
+                f"   先手挡 {_dash(frontrun_level)}: 触发后参考 "
+                f"{_fmt_premium(candidate.get('frontrun_limit'))}, "
+                f"触达≈{_fmt_prob(candidate.get('frontrun_prob_touch'))}"
+                "(同样不可提前挂期权价)"
+            )
 
     lines.append(
         "注: 墙位是 OI 真实聚集处(多在整数位),但价格常在墙前几点反转;"
         "先手挡=向现价方向让 30% 距离,成交率高、价格稍差。"
-        "预估价按 BS 重定价,已计触达前的时间衰减与 vol 斜率(跌到位 IV 上抬/涨到位 IV 回落);"
-        "保守价≈预估×0.85。"
-        "提醒: 0DTE 权利金随时间单边衰减,纯权利金限价单可能在指数未到位时就被时间衰减打成;"
-        "要严格按点位入场,用指数条件单(SPX 到 XX 触发限价)更精确。仅供参考,不是订单指令。"
+        "BS情景价已计触达前的时间衰减与 vol 斜率(跌到位 IV 上抬/涨到位 IV 回落);"
+        "保守参考≈情景价×0.85。所有价格都依赖未来触达时间,不是当前可预挂的期权订单;"
+        "必须由 SPX 点位触发后用实时 mid/IV 重算。仅供参考,不是订单指令。"
     )
 
     warnings = payload.get("warnings")
@@ -441,3 +556,108 @@ def render_template(payload: dict[str, Any]) -> str:
         lines.append(f"数据警告: {'; '.join(str(item) for item in warnings)}")
 
     return "\n".join(lines)
+
+
+def _level_decision_lines(payload: dict[str, Any]) -> list[str]:
+    decision = payload.get("level_decision")
+    if not isinstance(decision, dict):
+        return []
+    phase = str(decision.get("phase") or "far")
+    kind = str(decision.get("level_kind") or "-")
+    level_value = finite_float(decision.get("level"))
+    level = _dash(level_value)
+    thesis = str(decision.get("thesis") or "none")
+    direction = str(decision.get("direction") or "-")
+    spot = finite_float(decision.get("spot"))
+    es = finite_float(decision.get("es"))
+    levels = decision.get("levels") if isinstance(decision.get("levels"), dict) else {}
+    es_levels = (
+        decision.get("es_equivalent_levels")
+        if isinstance(decision.get("es_equivalent_levels"), dict)
+        else {}
+    )
+    put_wall = _dash(levels.get("put_wall"))
+    flip_low = _dash(levels.get("flip_low"))
+    flip_high = _dash(levels.get("flip_high"))
+    call_wall = _dash(levels.get("call_wall"))
+    distance = (
+        f"，距触发位 {spot - level_value:+.1f} 点"
+        if spot is not None and level_value is not None
+        else ""
+    )
+    status = _level_phase_guidance(
+        phase,
+        thesis=thesis,
+        direction=direction,
+        formal_signal=decision.get("formal_signal") is True,
+    )
+    source = str(decision.get("spot_source") or "-")
+    lines = [
+        f"SPX 代理: {_dash(spot)}({source})；ES {_dash(es)}",
+        (f"SPX 结构: Put Wall {put_wall} | Flip {flip_low}–{flip_high} | Call Wall {call_wall}"),
+        *(
+            [
+                "ES 等价值位: Put Wall "
+                f"{_dash(es_levels.get('put_wall'))} | Flip "
+                f"{_dash(es_levels.get('flip_low'))}–{_dash(es_levels.get('flip_high'))} | "
+                f"Call Wall {_dash(es_levels.get('call_wall'))}"
+            ]
+            if es_levels
+            else []
+        ),
+        _level_position_line(spot, levels),
+        f"关键位决策: {phase.upper()}，{kind} {level}{distance}；{status}",
+    ]
+    expiry = str(decision.get("expiry") or "-")
+    level_source = str(decision.get("level_source") or "-")
+    if level_source != "-":
+        source_label = (
+            "上一有效 RTH 冻结 OI/GEX"
+            if "frozen" in level_source
+            else "实时 OI/GEX"
+            if "live" in level_source
+            else level_source
+        )
+        lines.append(f"结构口径: {source_label}（expiry={expiry}）")
+    return lines
+
+
+def _level_position_line(spot: float | None, levels: dict[str, Any]) -> str:
+    if spot is None:
+        return "位置判断: SPX 代理不可用"
+    parts: list[str] = []
+    for key, label in (
+        ("put_wall", "Put Wall"),
+        ("flip_low", "Flip Low"),
+        ("call_wall", "Call Wall"),
+    ):
+        level = finite_float(levels.get(key))
+        if level is None:
+            continue
+        delta = spot - level
+        relation = "高于" if delta >= 0 else "低于"
+        parts.append(f"{relation}{label} {abs(delta):.1f}点")
+    return "位置判断: " + ("；".join(parts) if parts else "关键位不可用")
+
+
+def _level_phase_guidance(
+    phase: str,
+    *,
+    thesis: str,
+    direction: str,
+    formal_signal: bool,
+) -> str:
+    if formal_signal:
+        return f"正式信号 {thesis}/{direction} 已确认"
+    return {
+        "far": "远离触发区，不追单",
+        "approaching": "正在接近，尚未完成关键位测试",
+        "testing": "正在测试，等待突破或拒绝路径互斥",
+        "break_pending": "突破候选，等待持续时间与 ES 同向确认",
+        "reject_pending": "拒绝候选，等待持续时间与 ES 同向确认",
+        "accepted": "方向已接受，等待回踩",
+        "rejected": "拒绝已成立，等待回踩",
+        "retest": "正在回踩，等待最终确认",
+        "invalidated": "本轮已失效，等待价格离开后重新测试",
+        "expired": "本轮已过期，等待价格离开后重新测试，不追单",
+    }.get(phase, "观察中，尚未形成正式信号")

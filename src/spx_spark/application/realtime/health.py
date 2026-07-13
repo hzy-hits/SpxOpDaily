@@ -18,6 +18,8 @@ def evaluate_engine_health(
     engine_failed: bool = False,
     warmed_up: bool = True,
     any_critical_success: bool = True,
+    cash_session_open: bool = True,
+    globex_context_usable: bool = False,
 ) -> EngineHealth:
     """Map observation flags to EngineMode per acceptance plan §7.3.
 
@@ -39,8 +41,22 @@ def evaluate_engine_health(
         HealthFactor.ANALYTICS_OK.value: analytics_succeeded,
         HealthFactor.OUTBOX_WRITABLE.value: outbox_writable,
         HealthFactor.CRITICAL_TASKS_OK.value: critical_tasks_healthy,
+        HealthFactor.CASH_SESSION_OPEN.value: cash_session_open,
+        HealthFactor.GLOBEX_CONTEXT_USABLE.value: globex_context_usable,
     }
-    reasons: list[str] = [f"{name}_failed" for name, ok in factors.items() if not ok]
+    readiness_factors = {
+        name: factors[name]
+        for name in (
+            HealthFactor.TRADFI_ANCHOR.value,
+            HealthFactor.FRONT_CHAIN_FRESH.value,
+            HealthFactor.ANALYTICS_OK.value,
+            HealthFactor.OUTBOX_WRITABLE.value,
+            HealthFactor.CRITICAL_TASKS_OK.value,
+        )
+    }
+    reasons: list[str] = [
+        f"{name}_failed" for name, ok in readiness_factors.items() if not ok
+    ]
 
     if engine_failed:
         return EngineHealth(
@@ -64,7 +80,42 @@ def evaluate_engine_health(
             checked_at=checked_at,
         )
 
-    if all(factors.values()):
+    if not cash_session_open and all(readiness_factors.values()):
+        return EngineHealth(
+            mode=EngineMode.READY,
+            factors=factors,
+            reasons=("cash_session_closed_live_option_chain",),
+            checked_at=checked_at,
+        )
+
+    if not cash_session_open:
+        context_blocked = (
+            not globex_context_usable
+            or not outbox_writable
+            or not critical_tasks_healthy
+        )
+        if context_blocked:
+            context_reasons = ["cash_session_closed"]
+            if not globex_context_usable:
+                context_reasons.append("globex_context_unusable")
+            if not outbox_writable:
+                context_reasons.append("outbox_writable_failed")
+            if not critical_tasks_healthy:
+                context_reasons.append("critical_tasks_ok_failed")
+            return EngineHealth(
+                mode=EngineMode.BLOCKED,
+                factors=factors,
+                reasons=tuple(context_reasons),
+                checked_at=checked_at,
+            )
+        return EngineHealth(
+            mode=EngineMode.GLOBEX_CONTEXT,
+            factors=factors,
+            reasons=("cash_session_closed", "options_analytics_non_authoritative"),
+            checked_at=checked_at,
+        )
+
+    if all(readiness_factors.values()):
         return EngineHealth(
             mode=EngineMode.READY,
             factors=factors,

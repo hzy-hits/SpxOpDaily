@@ -10,6 +10,7 @@ from typing import Any
 
 from spx_spark.analytics.options.pricing import finite_float
 from spx_spark.config import NY_TZ, StorageSettings
+from spx_spark.settings.order_map import DEFAULT_ORDER_MAP_POLICY, OrderMapPolicy
 
 
 ES_VOLUME_SESSION_OPEN_ET = time(18, 0)
@@ -58,11 +59,12 @@ def save_es_volume_state(
     samples: list[dict[str, Any]],
     *,
     break_watch: dict[str, Any] | None = None,
+    max_samples: int = ES_VOLUME_MAX_SAMPLES,
 ) -> None:
     file_path = Path(path)
     try:
         file_path.parent.mkdir(parents=True, exist_ok=True)
-        payload: dict[str, Any] = {"samples": samples[-ES_VOLUME_MAX_SAMPLES:]}
+        payload: dict[str, Any] = {"samples": samples[-max_samples:]}
         if break_watch is not None:
             payload["break_watch"] = break_watch
         file_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
@@ -100,12 +102,20 @@ def _parse_sample(sample: dict[str, Any]) -> tuple[datetime, float, float | None
     return at, volume, price
 
 
-def _window_paces(points: list[tuple[datetime, float, float | None]]) -> list[float]:
+def _window_paces(
+    points: list[tuple[datetime, float, float | None]],
+    *,
+    policy: OrderMapPolicy = DEFAULT_ORDER_MAP_POLICY,
+) -> list[float]:
     """Contracts/minute for each valid consecutive sample pair."""
     paces: list[float] = []
     for (prev_at, prev_volume, _), (cur_at, cur_volume, _) in zip(points, points[1:]):
         minutes = (cur_at - prev_at).total_seconds() / 60.0
-        if not (ES_VOLUME_MIN_WINDOW_MINUTES <= minutes <= ES_VOLUME_MAX_WINDOW_MINUTES):
+        if not (
+            policy.es_volume_min_window_minutes
+            <= minutes
+            <= policy.es_volume_max_window_minutes
+        ):
             continue
         if cur_volume < prev_volume:  # session rollover inside the pair
             continue
@@ -310,6 +320,7 @@ def update_break_watch(
     flip_zone: list[float] | None,
     pace: str,
     now: datetime,
+    policy: OrderMapPolicy = DEFAULT_ORDER_MAP_POLICY,
 ) -> tuple[dict[str, Any] | None, str | None]:
     """Track whether a freshly broken key level holds or gets reclaimed.
 
@@ -341,14 +352,14 @@ def update_break_watch(
                 age_min = (now - broken_at).total_seconds() / 60.0
             except ValueError:
                 age_min = None
-            if age_min is not None and age_min > ES_VOLUME_RECLAIM_MAX_MINUTES:
+            if age_min is not None and age_min > policy.es_volume_reclaim_max_minutes:
                 watch = None
-            elif age_min is not None and age_min >= ES_VOLUME_RECLAIM_MIN_MINUTES:
+            elif age_min is not None and age_min >= policy.es_volume_reclaim_min_minutes:
                 if side == "below":
-                    if spot >= level + ES_VOLUME_FLAT_POINTS:
+                    if spot >= level + policy.es_volume_flat_points:
                         outcome = "reclaimed"
                         watch = None
-                    elif spot <= level - ES_VOLUME_FLAT_POINTS:
+                    elif spot <= level - policy.es_volume_flat_points:
                         outcome = "holds"
                         # Keep watch so later windows can still say holds, but
                         # refresh timestamp so we don't spam forever.
@@ -357,10 +368,10 @@ def update_break_watch(
                     else:
                         outcome = "pending"
                 elif side == "above":
-                    if spot <= level - ES_VOLUME_FLAT_POINTS:
+                    if spot <= level - policy.es_volume_flat_points:
                         outcome = "reclaimed"
                         watch = None
-                    elif spot >= level + ES_VOLUME_FLAT_POINTS:
+                    elif spot >= level + policy.es_volume_flat_points:
                         outcome = "holds"
                         watch["confirmed_at"] = now.isoformat()
                         watch["outcome"] = "holds"
@@ -373,13 +384,13 @@ def update_break_watch(
     if watch is None or outcome == "reclaimed":
         bounds = flip_bounds()
         armed = None
-        if put_wall is not None and spot < put_wall - ES_VOLUME_FLAT_POINTS:
+        if put_wall is not None and spot < put_wall - policy.es_volume_flat_points:
             armed = {"level": put_wall, "kind": "put_wall", "broken_side": "below"}
-        elif call_wall is not None and spot > call_wall + ES_VOLUME_FLAT_POINTS:
+        elif call_wall is not None and spot > call_wall + policy.es_volume_flat_points:
             armed = {"level": call_wall, "kind": "call_wall", "broken_side": "above"}
-        elif bounds is not None and spot < bounds[0] - ES_VOLUME_FLAT_POINTS:
+        elif bounds is not None and spot < bounds[0] - policy.es_volume_flat_points:
             armed = {"level": bounds[0], "kind": "flip_low", "broken_side": "below"}
-        elif bounds is not None and spot > bounds[1] + ES_VOLUME_FLAT_POINTS:
+        elif bounds is not None and spot > bounds[1] + policy.es_volume_flat_points:
             armed = {"level": bounds[1], "kind": "flip_high", "broken_side": "above"}
         if armed is not None:
             armed.update(
@@ -406,6 +417,7 @@ def es_volume_signal(
     call_wall: float | None = None,
     flip_zone: list[float] | None = None,
     break_watch: dict[str, Any] | None = None,
+    policy: OrderMapPolicy = DEFAULT_ORDER_MAP_POLICY,
 ) -> dict[str, Any] | None:
     if cumulative is None or cumulative <= 0:
         return None
@@ -433,7 +445,11 @@ def es_volume_signal(
     points.sort(key=lambda item: item[0])
     if not points:
         loc = classify_spot_location(
-            spot, put_wall=put_wall, call_wall=call_wall, flip_zone=flip_zone
+            spot,
+            put_wall=put_wall,
+            call_wall=call_wall,
+            flip_zone=flip_zone,
+            band=policy.es_volume_level_band_points,
         )
         signal.update(loc)
         return signal
@@ -442,16 +458,24 @@ def es_volume_signal(
         signal["label"] = "session_reset"
         return signal
     window_minutes = (now - last_at).total_seconds() / 60.0
-    if not (ES_VOLUME_MIN_WINDOW_MINUTES <= window_minutes <= ES_VOLUME_MAX_WINDOW_MINUTES):
+    if not (
+        policy.es_volume_min_window_minutes
+        <= window_minutes
+        <= policy.es_volume_max_window_minutes
+    ):
         loc = classify_spot_location(
-            spot, put_wall=put_wall, call_wall=call_wall, flip_zone=flip_zone
+            spot,
+            put_wall=put_wall,
+            call_wall=call_wall,
+            flip_zone=flip_zone,
+            band=policy.es_volume_level_band_points,
         )
         signal.update(loc)
         return signal
     delta = cumulative - last_volume
     recent_pace = delta / window_minutes
 
-    history_paces = _window_paces(points)
+    history_paces = _window_paces(points, policy=policy)
     if len(history_paces) >= 2:
         ordered = sorted(history_paces)
         mid = len(ordered) // 2
@@ -469,9 +493,9 @@ def es_volume_signal(
         return signal
 
     ratio = recent_pace / baseline
-    if ratio >= ES_VOLUME_ELEVATED_RATIO:
+    if ratio >= policy.es_volume_elevated_ratio:
         label = "elevated"
-    elif ratio <= ES_VOLUME_QUIET_RATIO:
+    elif ratio <= policy.es_volume_quiet_ratio:
         label = "quiet"
     else:
         label = "normal"
@@ -479,8 +503,14 @@ def es_volume_signal(
     price_delta = None
     if spot is not None and last_price is not None:
         price_delta = round(spot - last_price, 1)
-    direction = classify_price_direction(price_delta)
-    loc = classify_spot_location(spot, put_wall=put_wall, call_wall=call_wall, flip_zone=flip_zone)
+    direction = classify_price_direction(price_delta, flat_points=policy.es_volume_flat_points)
+    loc = classify_spot_location(
+        spot,
+        put_wall=put_wall,
+        call_wall=call_wall,
+        flip_zone=flip_zone,
+        band=policy.es_volume_level_band_points,
+    )
     new_watch, break_outcome = update_break_watch(
         break_watch,
         spot=spot,
@@ -489,6 +519,7 @@ def es_volume_signal(
         flip_zone=flip_zone,
         pace=label,
         now=now,
+        policy=policy,
     )
     event = classify_volume_price_event(
         pace=label,
@@ -507,7 +538,7 @@ def es_volume_signal(
         prev_priced = [p for p in points[-3:] if p[2] is not None]
         if len(prev_priced) >= 2 and spot is not None:
             prev_delta = prev_priced[-1][2] - prev_priced[-2][2]  # type: ignore[operator]
-            if prev_delta is not None and prev_delta <= -ES_VOLUME_FLAT_POINTS:
+            if prev_delta is not None and prev_delta <= -policy.es_volume_flat_points:
                 event = {
                     "event_id": "quiet_reclaim_after_sell_test",
                     "sequence": "reclaim",

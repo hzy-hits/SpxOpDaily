@@ -45,6 +45,30 @@ def bs_price(spot: float, strike: float, iv: float, tau_years: float, right: str
     )
 
 
+def black76_price(
+    forward: float,
+    strike: float,
+    iv: float,
+    tau_years: float,
+    right: str,
+    *,
+    discount_factor: float = 1.0,
+) -> float:
+    """European option price on a forward under the Black-76 convention."""
+
+    intrinsic = discount_factor * intrinsic_value(forward, strike, right)
+    if forward <= 0 or strike <= 0 or tau_years <= 0 or iv <= 0 or not 0 < discount_factor <= 1:
+        return intrinsic
+    root_t = math.sqrt(tau_years)
+    d1_value = (math.log(forward / strike) + 0.5 * iv * iv * tau_years) / (iv * root_t)
+    d2_value = d1_value - iv * root_t
+    if right == "C":
+        value = forward * normal_cdf(d1_value) - strike * normal_cdf(d2_value)
+    else:
+        value = strike * normal_cdf(-d2_value) - forward * normal_cdf(-d1_value)
+    return max(intrinsic, discount_factor * value)
+
+
 def bs_delta(spot: float, strike: float, iv: float, tau_years: float, right: str) -> float:
     if tau_years <= 0 or iv <= 0:
         if spot > strike:
@@ -59,9 +83,7 @@ def bs_delta(spot: float, strike: float, iv: float, tau_years: float, right: str
 def bs_gamma(spot: float, strike: float, iv: float, tau_years: float) -> float:
     if spot <= 0 or strike <= 0 or iv <= 0 or tau_years <= 0:
         return 0.0
-    return normal_pdf(d1(spot, strike, iv, tau_years)) / (
-        spot * iv * math.sqrt(tau_years)
-    )
+    return normal_pdf(d1(spot, strike, iv, tau_years)) / (spot * iv * math.sqrt(tau_years))
 
 
 def bs_vega(spot: float, strike: float, iv: float, tau_years: float) -> float:

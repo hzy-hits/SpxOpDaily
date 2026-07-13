@@ -64,3 +64,24 @@ def test_large_grid_gap_blocks_otherwise_wide_chain() -> None:
     assert observation.max_gap == 125.0
     assert observation.median_step == 5.0
     assert not coverage_sufficient(observation, policy)
+
+
+def test_stale_chain_preserves_geometry_but_reports_no_fresh_coverage() -> None:
+    stale = tuple(
+        Quote(
+            **{
+                **option(float(strike), right).__dict__,
+                "quality": MarketDataQuality.STALE,
+                "quote_time": NOW.replace(day=10),
+            }
+        )
+        for strike in range(7450, 7555, 5)
+        for right in OptionRight
+    )
+
+    observation = measure_chain_coverage(stale, spot=7500.0)
+
+    assert observation.usable_strikes == 21
+    assert observation.fresh_usable_strikes == 0
+    assert observation.fresh_two_sided_ratio == 0.0
+    assert observation.latest_quote_age_seconds == 3 * 24 * 60 * 60

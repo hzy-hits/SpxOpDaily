@@ -89,6 +89,8 @@ class TaskRuntimeState:
 # Default criticality by known service task name.
 DEFAULT_TASK_CRITICALITY: dict[str, TaskCriticality] = {
     "provider_failover": TaskCriticality.IMPORTANT,
+    "globex_trend": TaskCriticality.IMPORTANT,
+    "market_features": TaskCriticality.IMPORTANT,
     "intraday_shock": TaskCriticality.IMPORTANT,
     "hyperliquid": TaskCriticality.OPTIONAL,
     "polymarket": TaskCriticality.OPTIONAL,

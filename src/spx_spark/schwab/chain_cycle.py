@@ -29,6 +29,7 @@ class ChainCycleResult:
     lanes_fetched: list[str] = field(default_factory=list)
     lanes_skipped: list[str] = field(default_factory=list)
     chain_as_of: dict[str, str | None] = field(default_factory=dict)
+    chain_market_as_of: dict[str, str | None] = field(default_factory=dict)
     coverage: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
@@ -155,3 +156,6 @@ def _apply_front_discovery(
     budget_state.hot_expiry = discovery.hot_plan.expiry
     budget_state.hot_reference_spot = discovery.hot_plan.reference_spot
     result.coverage[plan.lane_key] = discovery.coverage_summary
+    result.chain_market_as_of[plan.canonical] = discovery.coverage_summary[
+        "market_quote_as_of"
+    ]

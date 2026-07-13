@@ -23,6 +23,7 @@ from spx_spark.domain.analytics import AnalyticsResult, AnalyticsStatus
 from spx_spark.domain.events import DomainEvent
 from spx_spark.domain.health import EngineHealth, EngineMode
 from spx_spark.domain.market import MarketSnapshot
+from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 
 
 def _default_tick_id(now: datetime) -> str:
@@ -65,6 +66,17 @@ def analytics_result_ok(result: AnalyticsResult | None) -> bool:
     """Require explicit SUCCESS status — non-None / non-throwing is not enough."""
 
     return result is not None and result.status is AnalyticsStatus.SUCCESS
+
+
+def snapshot_has_live_es(snapshot: MarketSnapshot) -> bool:
+    for quote in snapshot.quotes:
+        if quote.instrument.canonical_id != "future:ES":
+            continue
+        quality = str(getattr(quote.quality, "value", quote.quality)).lower()
+        price = getattr(quote, "effective_price", None)
+        if quality == "live" and price is not None and price > 0:
+            return True
+    return False
 
 
 class RealtimeEngine:
@@ -193,4 +205,9 @@ class RealtimeEngine:
             engine_failed=engine_failed,
             warmed_up=self.warmed_up,
             any_critical_success=self.warmed_up,
+            cash_session_open=DEFAULT_MARKET_CALENDAR.is_rth_open(now),
+            globex_context_usable=(
+                DEFAULT_MARKET_CALENDAR.is_globex_open(now)
+                and snapshot_has_live_es(snapshot)
+            ),
         )

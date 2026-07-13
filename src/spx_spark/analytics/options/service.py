@@ -15,6 +15,7 @@ from spx_spark.analytics.options.exposure import (
 )
 from spx_spark.analytics.options.exposure_types import WallLevel
 from spx_spark.analytics.options.levels import classify_gamma_state
+from spx_spark.analytics.options.max_pain import build_max_pain
 from spx_spark.analytics.options.models import (
     ExpiryOptionsMap,
     LevelProbability,
@@ -204,6 +205,7 @@ def build_expiry_map(
         if underlier
         else None
     )
+    max_pain = build_max_pain(pairs, underlier=underlier)
 
     level_probabilities: list[LevelProbability] = []
     if underlier is not None:
@@ -271,4 +273,5 @@ def build_expiry_map(
         put_walls=put_walls,
         wall_method=wall_method,
         rn_density=rn_density,
+        max_pain=max_pain,
     )

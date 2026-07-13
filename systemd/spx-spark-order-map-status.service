@@ -1,5 +1,5 @@
 [Unit]
-Description=SPX Spark market status + order map combined push (every 15 min Beijing 07:30 -> next-day 01:30)
+Description=SPX Spark compact market decision summary (every 15 min Beijing 07:30 -> next-day 01:30)
 After=network-online.target
 Wants=network-online.target
 

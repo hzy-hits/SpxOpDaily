@@ -1932,6 +1932,7 @@ def test_bark_title_maps_kinds_to_chinese_categories() -> None:
         == "SPX 波动率信号 +1"
     )
     assert bark_title_for_alerts([{"kind": "price_move_from_close"}]) == "SPX 价格异动"
+    assert bark_title_for_alerts([{"kind": "globex_trend_transition"}]) == "SPX 价格异动"
     assert bark_title_for_alerts([{"kind": "option_wall_proximity"}]) == "SPX 结构信号"
     assert (
         bark_title_for_alerts([{"kind": "unknown_kind", "severity": "high"}])
@@ -2158,6 +2159,48 @@ def test_bark_lockscreen_summary_and_feishu_card() -> None:
         )
         == "trade"
     )
+
+
+def test_feishu_status_card_uses_sections_and_state_color() -> None:
+    from spx_spark.notifier.format_push import build_feishu_card
+
+    text = "\n".join(
+        (
+            "【SPX 15m｜22:39｜0DTE 07-13｜美盘上午主战场】",
+            "时钟  开盘后 69 分钟｜距收官 140 分钟",
+            "价格  SPX 7547.7｜ES 7592.2｜昨收 -27.7｜EM已用 146%",
+            "结构  ZeroGamma过渡｜Put 7550｜Flip 7545–7550｜Call 7550",
+            "状态  INVALIDATED（已失效）｜Call Wall 7550｜等待重置",
+            "",
+            "ES确认  15m 5.2｜60m -8.5｜量价同向",
+            "波动  VIX1D/VIX 0.52｜SKEW 144.3",
+            "",
+            "【条件计划｜标的触发后执行】",
+            "计划1·冲墙回落  SPX 7550触发｜SPXW 7550P｜触达 95%｜参考 10.5–10.8",
+            "执行  触位后按实时 mid/IV 重算｜当前不可预挂",
+            "变化  call wall 7575→7550",
+        )
+    )
+
+    card = build_feishu_card(text, title="SPX 15分钟市场状态", kind="status")
+
+    assert card["header"]["title"]["content"] == (
+        "SPX 15m｜22:39｜0DTE 07-13｜美盘上午主战场"
+    )
+    assert card["header"]["template"] == "grey"
+    elements = card["body"]["elements"]
+    assert [element["tag"] for element in elements] == [
+        "markdown",
+        "hr",
+        "markdown",
+        "hr",
+        "markdown",
+    ]
+    assert "**价格**" in elements[0]["content"]
+    assert "**ES确认**" in elements[2]["content"]
+    assert "**条件计划**" in elements[4]["content"]
+    assert "- **计划1 · 冲墙回落**" in elements[4]["content"]
+    assert "> **执行**" in elements[4]["content"]
 
 
 def test_deliver_trade_push_routes_ops_to_bark_ops_group_not_feishu(tmp_path) -> None:

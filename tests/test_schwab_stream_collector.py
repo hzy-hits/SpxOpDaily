@@ -81,6 +81,41 @@ def test_stream_assembler_normalizes_concrete_es_future() -> None:
     assert quote.open_interest == 234567
 
 
+def test_stream_assembler_normalizes_spxw_option_and_model_fields() -> None:
+    now = datetime(2026, 7, 13, 14, 0, tzinfo=UTC)
+    assembler = SchwabStreamQuoteAssembler(stale_after_seconds=15.0)
+    assembler.ingest(
+        {
+            "service": "LEVELONE_OPTIONS",
+            "content": [
+                {
+                    "key": "SPXW  260713C07500000",
+                    "BID_PRICE": 20.0,
+                    "ASK_PRICE": 21.0,
+                    "OPEN_INTEREST": 123,
+                    "VOLATILITY": 18.5,
+                    "DELTA": 0.51,
+                    "GAMMA": -999,
+                    "QUOTE_TIME_MILLIS": millis(now),
+                }
+            ],
+        },
+        received_at=now,
+    )
+
+    snapshot = assembler.drain_snapshot()
+
+    assert snapshot is not None
+    quote = snapshot.quotes[0]
+    assert quote.instrument.canonical_id == "option:SPX:SPXW:20260713:7500:C"
+    assert quote.open_interest == 123
+    assert quote.structure_time == now
+    assert quote.greeks is not None
+    assert quote.greeks.implied_vol == 0.185
+    assert quote.greeks.delta == 0.51
+    assert quote.greeks.gamma is None
+
+
 def test_stream_assembler_ignores_unknown_services_and_price_less_rows() -> None:
     now = datetime(2026, 7, 13, 14, 0, tzinfo=UTC)
     assembler = SchwabStreamQuoteAssembler(stale_after_seconds=15.0)

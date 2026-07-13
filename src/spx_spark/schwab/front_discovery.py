@@ -78,6 +78,22 @@ def build_front_discovery(
             "distinct_strikes": coverage.distinct_strikes,
             "usable_strikes": coverage.usable_strikes,
             "two_sided_ratio": coverage.two_sided_ratio,
+            "fresh_usable_strikes": coverage.fresh_usable_strikes,
+            "fresh_two_sided_ratio": coverage.fresh_two_sided_ratio,
+            "positive_oi_strikes": coverage.positive_oi_strikes,
+            "market_quote_as_of": (
+                coverage.market_quote_as_of.isoformat()
+                if coverage.market_quote_as_of is not None
+                else None
+            ),
+            "latest_quote_age_seconds": coverage.latest_quote_age_seconds,
+            "market_status": (
+                "current"
+                if coverage.fresh_usable_strikes > 0
+                else "stale"
+                if coverage.usable_strikes > 0
+                else "missing"
+            ),
             "lower_width_points": coverage.lower_width_points,
             "upper_width_points": coverage.upper_width_points,
             "median_step": coverage.median_step,

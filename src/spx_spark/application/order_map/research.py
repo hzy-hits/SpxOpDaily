@@ -30,6 +30,7 @@ from spx_spark.options_map import (
 )
 from spx_spark.sampling import round_to_step
 from spx_spark.storage import LatestState, configured_quote_use_decision
+from spx_spark.settings.order_map import DEFAULT_ORDER_MAP_POLICY, OrderMapPolicy
 
 
 def _observed_option_reference(
@@ -191,11 +192,12 @@ def _wall_rung_option_ref(
     tau_now_years: float | None,
     em_points: float | None,
     as_of: datetime | None = None,
+    policy: OrderMapPolicy = DEFAULT_ORDER_MAP_POLICY,
 ) -> dict[str, Any]:
     """BS (or Taylor fallback) reference premium for the option at a wall strike.
 
     Put walls → Call (bounce); call walls → Put (fade). Same projection model
-    as the three primary plays so ladder rungs and hang-order limits agree.
+    as the primary plays so ladder rungs and conditional references agree.
 
     Only quotes allowed by the central pricing policy can produce projected
     premiums or executable limits. Research-only rows stay empty here.
@@ -246,6 +248,7 @@ def _wall_rung_option_ref(
         tau_now_years=tau_now_years,
         em_points=em_points,
         slope_per_point=slope,
+        policy=policy,
     )
     if bs_projected is not None:
         projected, model = bs_projected, "bs_repricing"
@@ -264,7 +267,9 @@ def _wall_rung_option_ref(
         "current_mid": mid,
         "projected_mid": projected,
         "limit_aggressive": round_to_tick(projected),
-        "limit_conservative": round_to_tick(projected * 0.85),
+        "limit_conservative": round_to_tick(
+            projected * policy.conservative_limit_multiplier
+        ),
         "projection_model": model,
         "quote_quality": quality,
         "degraded": degraded,
@@ -277,6 +282,7 @@ def _wall_ladder_payload(
     spot: float | None,
     *,
     now: datetime | None = None,
+    policy: OrderMapPolicy = DEFAULT_ORDER_MAP_POLICY,
 ) -> dict[str, list[dict[str, Any]]]:
     """Top-4 call/put walls with touch probs + BS option reference prices.
 
@@ -335,6 +341,7 @@ def _wall_ladder_payload(
                     tau_now_years=tau_now_years,
                     em_points=em_points,
                     as_of=now_utc,
+                    policy=policy,
                 )
             ladder[key].append(
                 {
@@ -363,4 +370,3 @@ def _index_value(state: LatestState, canonical_id: str) -> float | None:
     if quote is None or quote.quality in BAD_QUALITIES:
         return None
     return finite_float(quote.effective_price)
-

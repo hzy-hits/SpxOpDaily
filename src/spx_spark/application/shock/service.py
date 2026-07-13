@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from spx_spark.alert_model import Alert
+from spx_spark.application.order_map.level_decision_shadow import load_level_decision_shadow
 from spx_spark.application.shock.delivery import (
     _notification_payload,
     event_greek_shadow_due,
@@ -18,6 +19,7 @@ from spx_spark.application.shock.delivery import (
     reconcile_acknowledged_alerts,
 )
 from spx_spark.application.shock.evaluator import rth_session_date, synchronized_live_sample
+from spx_spark.application.shock.level_projection import project_level_decision_machine
 from spx_spark.application.shock.machine import (
     _strategy_alert,
     advance_monitor_state,
@@ -49,8 +51,6 @@ from spx_spark.intraday_event_outcomes import (
 )
 from spx_spark.intraday_strategy import (
     STRATEGY_KINDS,
-    IntradayStrategySettings,
-    advance_intraday_strategy,
     structure_from_options_map,
     unavailable_structure,
 )
@@ -58,7 +58,7 @@ from spx_spark.notifier import notify_payload
 from spx_spark.notifier.policy import alert_key
 from spx_spark.notifier.state import load_acknowledged_event_ids
 from spx_spark.options_map import build_options_map
-from spx_spark.settings import DEFAULT_ALERT_SETTINGS
+from spx_spark.settings import DEFAULT_ALERT_SETTINGS, load_app_settings
 from spx_spark.state_io import atomic_write_json_secure, exclusive_state_lock
 from spx_spark.storage import LatestStateStore
 from spx_spark.strategy.steven import (
@@ -76,7 +76,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def run(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     settings = IntradayShockSettings.from_env()
-    strategy_settings = IntradayStrategySettings.from_env()
+    level_policy = load_app_settings().level_decision
     storage_settings = StorageSettings.from_env()
     data_platform_settings: DataPlatformSettings | None = None
     data_platform_config_error: str | None = None
@@ -131,11 +131,12 @@ def run(argv: list[str] | None = None) -> int:
             with exclusive_state_lock(state_path):
                 monitor_state = load_monitor_state(settings.state_path, session_date=session_date)
                 monitor_state, price_alerts = advance_monitor_state(monitor_state, sample, settings)
-                monitor_state, path_decision, strategy_signals = advance_intraday_strategy(
+                monitor_state, path_decision, strategy_signals = project_level_decision_machine(
                     monitor_state,
-                    sample,
+                    load_level_decision_shadow(storage_settings),
                     structure,
-                    strategy_settings,
+                    now=sample.at,
+                    level_buffer_points=level_policy.break_buffer_points,
                 )
                 alerts = [
                     *price_alerts,
@@ -194,7 +195,7 @@ def run(argv: list[str] | None = None) -> int:
                         structure=asdict(structure),
                         path_decision=path_decision.to_dict(),
                         alerts=tuple(alert.to_dict() for alert in alerts),
-                        strategy_config=asdict(strategy_settings),
+                        strategy_config=asdict(level_policy),
                         settings=data_platform_settings,
                     )
                     research_result = prepared_research.result

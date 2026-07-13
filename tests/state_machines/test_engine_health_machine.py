@@ -81,7 +81,8 @@ NOW = datetime(2026, 7, 11, 15, 0, tzinfo=timezone.utc)
 def test_evaluate_engine_health_table(flags: dict, expected: EngineMode) -> None:
     health = evaluate_engine_health(checked_at=NOW, **flags)
     assert health.mode is expected
-    assert health.ok is (expected is EngineMode.READY)
+    assert health.ok is (expected in {EngineMode.READY, EngineMode.DEGRADED})
+    assert health.actionable is (expected is EngineMode.READY)
     assert HealthFactor.TRADFI_ANCHOR.value in health.factors
 
 
@@ -162,3 +163,40 @@ def test_engine_failed_overrides_other_factors() -> None:
     )
     assert health.mode is EngineMode.FAILED
     assert health.ok is False
+
+
+def test_globex_context_is_formal_non_actionable_engine_mode() -> None:
+    health = evaluate_engine_health(
+        tradfi_anchor_usable=True,
+        front_chain_fresh=False,
+        analytics_succeeded=False,
+        outbox_writable=True,
+        critical_tasks_healthy=True,
+        checked_at=NOW,
+        cash_session_open=False,
+        globex_context_usable=True,
+    )
+
+    assert health.mode is EngineMode.GLOBEX_CONTEXT
+    assert health.ok is True
+    assert health.actionable is False
+    assert health.factors[HealthFactor.GLOBEX_CONTEXT_USABLE.value] is True
+    assert health.reasons == ("cash_session_closed", "options_analytics_non_authoritative")
+
+
+def test_live_gth_option_chain_is_actionable_outside_cash_session() -> None:
+    health = evaluate_engine_health(
+        tradfi_anchor_usable=True,
+        front_chain_fresh=True,
+        analytics_succeeded=True,
+        outbox_writable=True,
+        critical_tasks_healthy=True,
+        checked_at=NOW,
+        cash_session_open=False,
+        globex_context_usable=True,
+    )
+
+    assert health.mode is EngineMode.READY
+    assert health.ok is True
+    assert health.actionable is True
+    assert health.reasons == ("cash_session_closed_live_option_chain",)

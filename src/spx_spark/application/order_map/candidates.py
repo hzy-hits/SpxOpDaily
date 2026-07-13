@@ -1,22 +1,25 @@
 from __future__ import annotations
 
+import math
 from datetime import datetime, timezone
 from typing import Any
 
 from spx_spark.analytics.options.pricing import finite_float
 from spx_spark.application.order_map.models import (
-    FRONTRUN_FRACTION,
-    FRONTRUN_MAX_POINTS,
-    FRONTRUN_MIN_POINTS,
+    LEVEL_DECISION_PLAYS,
     PLAY_ORDER,
     OrderCandidate,
     SpotResolution,
 )
+from spx_spark.application.order_map.execution_quote import evaluate_execution_quote
 from spx_spark.application.order_map.pricing import (
+    BSProjection,
     YEAR_SECONDS,
+    build_option_price_bs_projection,
     expiry_close_utc,
+    fit_iv_surface,
+    parity_forward,
     project_option_price,
-    project_option_price_bs,
     round_to_tick,
     smile_slope_per_point,
     touch_eta_minutes,
@@ -37,15 +40,24 @@ from spx_spark.options_map import (
     probability_for_level,
 )
 from spx_spark.sampling import round_to_step
+from spx_spark.settings.order_map import DEFAULT_ORDER_MAP_POLICY, OrderMapPolicy
 from spx_spark.storage import LatestState, configured_quote_use_decision
 
 
-def frontrun_level_for(spot: float, level: float) -> float | None:
+def frontrun_level_for(
+    spot: float,
+    level: float,
+    *,
+    policy: OrderMapPolicy = DEFAULT_ORDER_MAP_POLICY,
+) -> float | None:
     """Level shifted from the target back toward spot by a capped fraction."""
     distance = abs(spot - level)
-    if distance <= FRONTRUN_MIN_POINTS:
+    if distance <= policy.frontrun_min_points:
         return None
-    offset = min(max(FRONTRUN_FRACTION * distance, FRONTRUN_MIN_POINTS), FRONTRUN_MAX_POINTS)
+    offset = min(
+        max(policy.frontrun_fraction * distance, policy.frontrun_min_points),
+        policy.frontrun_max_points,
+    )
     direction = 1.0 if spot > level else -1.0
     return round(level + direction * offset, 1)
 
@@ -142,12 +154,16 @@ def _build_candidate(
     right: str,
     spot: float,
     expiry_quotes: list[Quote],
+    all_quotes: tuple[Quote, ...],
     strike_step: float,
     pairs: dict[float, dict[OptionRight, Quote]],
     warnings: list[str],
     as_of: datetime,
     tau_now_years: float | None = None,
     em_points: float | None = None,
+    policy: OrderMapPolicy = DEFAULT_ORDER_MAP_POLICY,
+    empirical_touch_fractions: tuple[float, float, float] | None = None,
+    touch_time_model_source: str = "brownian_heuristic",
 ) -> OrderCandidate | None:
     quote = _find_option_quote(
         expiry_quotes,
@@ -178,11 +194,27 @@ def _build_candidate(
         return None
 
     strike_float = finite_float(quote.instrument.strike) or float(target_strike)
-    iv = finite_float(quote.greeks.implied_vol) if quote.greeks is not None else None
+    vendor_iv = finite_float(quote.greeks.implied_vol) if quote.greeks is not None else None
+    surface = fit_iv_surface(pairs, right, strike_float, strike_step)
+    smoothed_iv = surface.value_at(strike_float) if surface is not None else None
+    iv = smoothed_iv if smoothed_iv is not None and smoothed_iv > 0 else vendor_iv
     slope = smile_slope_per_point(pairs, right, strike_float, strike_step)
+    discount_factor = (
+        math.exp(-policy.risk_free_rate * tau_now_years)
+        if tau_now_years is not None and tau_now_years > 0
+        else 1.0
+    )
+    forward_now = parity_forward(pairs, discount_factor=discount_factor)
+    quote_gate = evaluate_execution_quote(quote, all_quotes, as_of=as_of, policy=policy)
 
-    def _project(target: float) -> tuple[float, str]:
-        bs_projected = project_option_price_bs(
+    def _project(target: float) -> tuple[float, str, BSProjection | None]:
+        surface_iv_at_touch = None
+        if surface is not None and iv is not None:
+            surface_iv_at_touch = surface.value_at(
+                strike_float - policy.vol_slope_beta * (spot - target)
+            )
+            surface_iv_at_touch = min(max(surface_iv_at_touch, 0.5 * iv), 2.5 * iv)
+        bs_projection = build_option_price_bs_projection(
             mid=mid,
             iv=iv,
             strike=strike_float,
@@ -192,12 +224,20 @@ def _build_candidate(
             tau_now_years=tau_now_years,
             em_points=em_points,
             slope_per_point=slope,
+            forward_now=forward_now,
+            surface_iv_at_touch=surface_iv_at_touch,
+            empirical_touch_fractions=empirical_touch_fractions,
+            policy=policy,
         )
-        if bs_projected is not None:
-            return bs_projected, "bs_repricing"
-        return project_option_price(mid, delta, gamma, spot, target), "taylor_fallback"
+        if bs_projection is not None:
+            return bs_projection.projected_mid, "bs_repricing", bs_projection
+        return (
+            project_option_price(mid, delta, gamma, spot, target),
+            "taylor_fallback",
+            None,
+        )
 
-    projected, projection_model = _project(level)
+    model_projected, projection_model, bs_projection = _project(level)
     if projection_model == "taylor_fallback":
         warnings.append(f"taylor_fallback_for_{target_strike}{right}")
     prob_close, prob_touch, _source_strike, _source_delta = probability_for_level(
@@ -207,12 +247,12 @@ def _build_candidate(
         strike_step=strike_step,
     )
 
-    frontrun_level = frontrun_level_for(spot, level)
+    frontrun_level = frontrun_level_for(spot, level, policy=policy)
     frontrun_projected = None
     frontrun_limit = None
     frontrun_prob_touch = None
     if frontrun_level is not None:
-        frontrun_projected, _ = _project(frontrun_level)
+        frontrun_projected, _, _ = _project(frontrun_level)
         frontrun_limit = round_to_tick(frontrun_projected)
         _, frontrun_prob_touch, _, _ = probability_for_level(
             frontrun_level,
@@ -221,8 +261,11 @@ def _build_candidate(
             strike_step=strike_step,
         )
 
-    order_style = "stop_trigger" if projected > mid else "resting_limit"
-    eta_minutes = touch_eta_minutes(abs(level - spot), em_points, tau_now_years)
+    # Every price here is conditional on the underlier reaching ``level`` at
+    # an estimated future time. A naked option limit can fill on theta or IV
+    # before that happens, even when the projected premium is below spot-mid.
+    order_style = "underlier_triggered_limit" if quote_gate.executable else "range_only"
+    eta_minutes = touch_eta_minutes(abs(level - spot), em_points, tau_now_years, policy=policy)
 
     strike_value = int(round(finite_float(quote.instrument.strike) or target_strike))
     return OrderCandidate(
@@ -233,9 +276,13 @@ def _build_candidate(
         strike=strike_value,
         right=right,
         current_mid=mid,
-        projected_mid=projected,
-        limit_aggressive=round_to_tick(projected),
-        limit_conservative=round_to_tick(projected * 0.85),
+        projected_mid=model_projected if quote_gate.executable else None,
+        limit_aggressive=round_to_tick(model_projected) if quote_gate.executable else None,
+        limit_conservative=(
+            round_to_tick(model_projected * policy.conservative_limit_multiplier)
+            if quote_gate.executable
+            else None
+        ),
         prob_touch=prob_touch,
         prob_close_beyond=prob_close,
         delta=delta,
@@ -247,6 +294,53 @@ def _build_candidate(
         order_style=order_style,
         projection_model=projection_model,
         touch_eta_minutes=round(eta_minutes, 1) if eta_minutes is not None else None,
+        projection_iv_now=(bs_projection.iv_now if bs_projection is not None else None),
+        projection_iv_at_touch=(bs_projection.iv_at_touch if bs_projection is not None else None),
+        projection_tau_now_minutes=(
+            bs_projection.tau_now_minutes if bs_projection is not None else None
+        ),
+        projection_tau_at_touch_minutes=(
+            bs_projection.tau_at_touch_minutes if bs_projection is not None else None
+        ),
+        projection_touch_time_fraction=(
+            bs_projection.touch_time_fraction if bs_projection is not None else None
+        ),
+        projection_model_anchor_price=(
+            bs_projection.model_anchor_price if bs_projection is not None else None
+        ),
+        projection_model_target_price=(
+            bs_projection.model_target_price if bs_projection is not None else None
+        ),
+        projection_early_mid=(
+            bs_projection.early_projected_mid
+            if bs_projection is not None and quote_gate.executable
+            else None
+        ),
+        projection_late_mid=(
+            bs_projection.late_projected_mid
+            if bs_projection is not None and quote_gate.executable
+            else None
+        ),
+        projection_range_low=(
+            bs_projection.price_range_low if bs_projection is not None else model_projected
+        ),
+        projection_range_high=(
+            bs_projection.price_range_high if bs_projection is not None else model_projected
+        ),
+        projection_forward_now=(bs_projection.forward_now if bs_projection is not None else None),
+        projection_forward_at_touch=(
+            bs_projection.forward_at_touch if bs_projection is not None else None
+        ),
+        projection_pricing_kernel=(
+            bs_projection.pricing_kernel if bs_projection is not None else projection_model
+        ),
+        execution_quote_status=quote_gate.status.value,
+        execution_quote_reasons=quote_gate.reasons,
+        execution_quote_spread_bps=quote_gate.spread_bps,
+        execution_quote_spread_percentile=quote_gate.spread_percentile,
+        execution_quote_source_age_seconds=quote_gate.source_age_seconds,
+        execution_quote_provider_divergence_bps=quote_gate.provider_mid_divergence_bps,
+        touch_time_model_source=touch_time_model_source,
     )
 
 
@@ -258,6 +352,7 @@ def build_candidates(
     now: datetime | None = None,
     resolution: SpotResolution | None = None,
     conditional_call_bias: dict[str, object] | None = None,
+    policy: OrderMapPolicy = DEFAULT_ORDER_MAP_POLICY,
 ) -> list[OrderCandidate]:
     local_warnings = warnings if warnings is not None else []
     if not options_map.expiries:
@@ -313,12 +408,14 @@ def build_candidates(
             right="C",
             spot=spot,
             expiry_quotes=expiry_quotes,
+            all_quotes=state.quotes,
             strike_step=strike_step,
             pairs=pairs,
             warnings=local_warnings,
             as_of=now_utc,
             tau_now_years=tau_now_years,
             em_points=em_points,
+            policy=policy,
         )
         if candidate is not None:
             candidates.append(candidate)
@@ -327,21 +424,58 @@ def build_candidates(
     bias_level = finite_float((conditional_call_bias or {}).get("level"))
     bias_expiry = str((conditional_call_bias or {}).get("expiry") or "")
     bias_invalidation = finite_float((conditional_call_bias or {}).get("invalidation_level"))
+    bias_direction = str((conditional_call_bias or {}).get("direction") or "")
+    level_bias = bias_play in LEVEL_DECISION_PLAYS
+    invalidation_holds = (
+        spot >= bias_invalidation
+        if bias_direction == "up" and bias_invalidation is not None
+        else spot <= bias_invalidation
+        if bias_direction == "down" and bias_invalidation is not None
+        else spot >= bias_invalidation
+        if bias_invalidation is not None
+        else False
+    )
     bias_valid = bool(
         (conditional_call_bias or {}).get("status") == "confirmed"
-        and bias_play in {FLIP_RECLAIM_CALL_KIND, CALL_WALL_BREAKOUT_CALL_KIND}
+        and bias_play
+        in {
+            FLIP_RECLAIM_CALL_KIND,
+            CALL_WALL_BREAKOUT_CALL_KIND,
+            *LEVEL_DECISION_PLAYS,
+        }
         and bias_level is not None
         and bias_invalidation is not None
-        and spot >= bias_invalidation
+        and invalidation_holds
         and bias_expiry == front.expiry
         and front.expiry == now_utc.astimezone(NY_TZ).strftime("%Y%m%d")
         and front.gex_quality == "open_interest_gex"
         and options_map.underlier.source == "index:SPX"
-        and (
-            bias_play != CALL_WALL_BREAKOUT_CALL_KIND
-            or front.wall_method == "oi_gex"
-        )
+        and (bias_play != CALL_WALL_BREAKOUT_CALL_KIND or front.wall_method == "oi_gex")
     )
+    if bias_valid and level_bias and bias_level is not None:
+        right = "C" if bias_direction == "up" else "P"
+        candidate = _build_candidate(
+            play=bias_play,
+            level=bias_level,
+            level_label=(
+                f"frozen {(conditional_call_bias or {}).get('level_kind') or 'level'} "
+                f"{_dash(bias_level)}"
+            ),
+            target_strike=round_to_step(bias_level, strike_step_int),
+            right=right,
+            spot=spot,
+            expiry_quotes=expiry_quotes,
+            all_quotes=state.quotes,
+            strike_step=strike_step,
+            pairs=pairs,
+            warnings=local_warnings,
+            as_of=now_utc,
+            tau_now_years=tau_now_years,
+            em_points=em_points,
+            policy=policy,
+        )
+        if candidate is not None:
+            candidates.append(candidate)
     if bias_valid and bias_play == FLIP_RECLAIM_CALL_KIND and bias_level is not None:
         candidate = _build_candidate(
             play=FLIP_RECLAIM_CALL_KIND,
@@ -351,12 +485,14 @@ def build_candidates(
             right="C",
             spot=spot,
             expiry_quotes=expiry_quotes,
+            all_quotes=state.quotes,
             strike_step=strike_step,
             pairs=pairs,
             warnings=local_warnings,
             as_of=now_utc,
             tau_now_years=tau_now_years,
             em_points=em_points,
+            policy=policy,
         )
         if candidate is not None:
             candidates.append(candidate)
@@ -391,12 +527,14 @@ def build_candidates(
             right="P",
             spot=spot,
             expiry_quotes=expiry_quotes,
+            all_quotes=state.quotes,
             strike_step=strike_step,
             pairs=pairs,
             warnings=local_warnings,
             as_of=now_utc,
             tau_now_years=tau_now_years,
             em_points=em_points,
+            policy=policy,
         )
         if candidate is not None:
             candidates.append(candidate)
@@ -410,12 +548,14 @@ def build_candidates(
             right="C",
             spot=spot,
             expiry_quotes=expiry_quotes,
+            all_quotes=state.quotes,
             strike_step=strike_step,
             pairs=pairs,
             warnings=local_warnings,
             as_of=now_utc,
             tau_now_years=tau_now_years,
             em_points=em_points,
+            policy=policy,
         )
         if candidate is not None:
             candidates.append(candidate)
@@ -428,9 +568,8 @@ def build_candidates(
             None,
         )
 
-    if (
-        call_wall_level is not None
-        and not (bias_valid and bias_play == CALL_WALL_BREAKOUT_CALL_KIND)
+    if call_wall_level is not None and not (
+        bias_valid and bias_play == CALL_WALL_BREAKOUT_CALL_KIND
     ):
         target_strike = round_to_step(call_wall_level, strike_step_int)
         candidate = _build_candidate(
@@ -441,12 +580,14 @@ def build_candidates(
             right="P",
             spot=spot,
             expiry_quotes=expiry_quotes,
+            all_quotes=state.quotes,
             strike_step=strike_step,
             pairs=pairs,
             warnings=local_warnings,
             as_of=now_utc,
             tau_now_years=tau_now_years,
             em_points=em_points,
+            policy=policy,
         )
         if candidate is not None:
             candidates.append(candidate)
@@ -460,3 +601,83 @@ def build_candidates(
             )
         )
     return candidates
+
+
+def build_level_trigger_candidates(
+    state: LatestState,
+    options_map: OptionsMap,
+    *,
+    level: float,
+    level_kind: str,
+    phase: str,
+    thesis: str,
+    direction: str | None,
+    now: datetime,
+    policy: OrderMapPolicy = DEFAULT_ORDER_MAP_POLICY,
+    empirical_touch_fractions: tuple[float, float, float] | None = None,
+    touch_time_model_source: str = "brownian_heuristic",
+) -> tuple[list[OrderCandidate], list[str]]:
+    """Reprice the one or two paths that remain possible for an active level event."""
+
+    warnings: list[str] = []
+    if not options_map.expiries:
+        return [], ["missing_expiries"]
+    resolution = resolve_spx_spot(state, options_map, warnings=warnings, now=now)
+    spot = resolution.pricing_price if resolution.pricing_allowed else None
+    if spot is None:
+        return [], [*warnings, "missing_pricing_spot"]
+    front = options_map.expiries[0]
+    expiry_quotes = _front_expiry_quotes(state, front.expiry)
+    pairs = pair_by_strike(expiry_quotes)
+    strike_step = median_strike_step(sorted(pairs))
+    strike_step_int = max(1, int(round(strike_step)))
+    close_utc = expiry_close_utc(front.expiry)
+    tau_now_years = (
+        max((close_utc - now).total_seconds(), 0.0) / YEAR_SECONDS
+        if close_utc is not None
+        else None
+    )
+    outside = -1 if level_kind in {"put_wall", "flip_low"} else 1
+    path_directions: list[tuple[str, int]]
+    if direction in {"up", "down"}:
+        path_directions = [(thesis, 1 if direction == "up" else -1)]
+    elif thesis == "breakout":
+        path_directions = [("breakout", outside)]
+    elif thesis == "fade":
+        path_directions = [("fade", -outside)]
+    elif phase == "testing":
+        path_directions = [("breakout", outside), ("fade", -outside)]
+    else:
+        return [], [*warnings, "phase_has_no_pricing_path"]
+
+    results: list[OrderCandidate] = []
+    for path_thesis, path_direction in path_directions:
+        right = "C" if path_direction > 0 else "P"
+        play = {
+            ("breakout", 1): "level_breakout_call",
+            ("breakout", -1): "level_breakout_put",
+            ("fade", 1): "level_fade_call",
+            ("fade", -1): "level_fade_put",
+        }[(path_thesis, path_direction)]
+        candidate = _build_candidate(
+            play=play,
+            level=level,
+            level_label=f"{level_kind} {_dash(level)}",
+            target_strike=round_to_step(level, strike_step_int),
+            right=right,
+            spot=spot,
+            expiry_quotes=expiry_quotes,
+            all_quotes=state.quotes,
+            strike_step=strike_step,
+            pairs=pairs,
+            warnings=warnings,
+            as_of=now,
+            tau_now_years=tau_now_years,
+            em_points=finite_float(front.expected_move_points),
+            policy=policy,
+            empirical_touch_fractions=empirical_touch_fractions,
+            touch_time_model_source=touch_time_model_source,
+        )
+        if candidate is not None:
+            results.append(candidate)
+    return results, list(dict.fromkeys(warnings))

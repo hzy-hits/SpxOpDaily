@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from statistics import median
 
-from spx_spark.marketdata import OptionRight, Quote
+from spx_spark.marketdata import MarketDataQuality, OptionRight, Quote, as_utc
 
 
 @dataclass(frozen=True)
@@ -33,10 +33,23 @@ class ChainCoverageObservation:
     expected_move_points: float | None
     median_step: float | None
     max_gap: float | None
+    fresh_usable_strikes: int
+    fresh_two_sided_strikes: int
+    positive_oi_strikes: int
+    market_quote_as_of: datetime | None
+    latest_quote_age_seconds: float | None
 
     @property
     def two_sided_ratio(self) -> float:
         return self.two_sided_strikes / self.usable_strikes if self.usable_strikes else 0.0
+
+    @property
+    def fresh_two_sided_ratio(self) -> float:
+        return (
+            self.fresh_two_sided_strikes / self.fresh_usable_strikes
+            if self.fresh_usable_strikes
+            else 0.0
+        )
 
 
 def chain_params(*, symbol: str, expiry: date, strike_count: int) -> dict[str, str | int]:
@@ -64,6 +77,20 @@ def measure_chain_coverage(quotes: tuple[Quote, ...], *, spot: float | None) -> 
         for strike, sides in pairs.items()
         if any(quote.mid is not None for quote in sides.values())
     }
+    current_qualities = {
+        MarketDataQuality.LIVE,
+        MarketDataQuality.FROZEN,
+        MarketDataQuality.DELAYED,
+        MarketDataQuality.DELAYED_FROZEN,
+    }
+    fresh_usable = {
+        strike: sides
+        for strike, sides in usable.items()
+        if any(
+            quote.mid is not None and quote.quality in current_qualities
+            for quote in sides.values()
+        )
+    }
     two_sided = sum(
         1
         for sides in usable.values()
@@ -71,6 +98,33 @@ def measure_chain_coverage(quotes: tuple[Quote, ...], *, spot: float | None) -> 
         and sides[OptionRight.CALL].mid is not None
         and sides.get(OptionRight.PUT) is not None
         and sides[OptionRight.PUT].mid is not None
+    )
+    fresh_two_sided = sum(
+        1
+        for sides in fresh_usable.values()
+        if sides.get(OptionRight.CALL) is not None
+        and sides[OptionRight.CALL].mid is not None
+        and sides[OptionRight.CALL].quality in current_qualities
+        and sides.get(OptionRight.PUT) is not None
+        and sides[OptionRight.PUT].mid is not None
+        and sides[OptionRight.PUT].quality in current_qualities
+    )
+    positive_oi = sum(
+        1
+        for sides in pairs.values()
+        if any((quote.open_interest or 0.0) > 0 for quote in sides.values())
+    )
+    quote_times = [
+        as_utc(quote.quote_time or quote.trade_time)
+        for quote in quotes
+        if quote.quote_time is not None or quote.trade_time is not None
+    ]
+    market_quote_as_of = max(quote_times, default=None)
+    received_as_of = max((as_utc(quote.received_at) for quote in quotes), default=None)
+    latest_quote_age_seconds = (
+        max((received_as_of - market_quote_as_of).total_seconds(), 0.0)
+        if received_as_of is not None and market_quote_as_of is not None
+        else None
     )
     strikes = sorted(usable)
     steps = [right - left for left, right in zip(strikes, strikes[1:], strict=False)]
@@ -92,6 +146,11 @@ def measure_chain_coverage(quotes: tuple[Quote, ...], *, spot: float | None) -> 
         expected_move_points=expected_move,
         median_step=median(steps) if steps else None,
         max_gap=max(steps) if steps else None,
+        fresh_usable_strikes=len(fresh_usable),
+        fresh_two_sided_strikes=fresh_two_sided,
+        positive_oi_strikes=positive_oi,
+        market_quote_as_of=market_quote_as_of,
+        latest_quote_age_seconds=latest_quote_age_seconds,
     )
 
 

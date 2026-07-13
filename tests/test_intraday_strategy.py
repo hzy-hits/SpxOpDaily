@@ -4,6 +4,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
+from spx_spark.application.shock.level_projection import project_level_decision_machine
 from spx_spark.intraday_shock import PriceSample, empty_monitor_state
 from spx_spark.intraday_strategy import (
     CALL_WALL_BREAKOUT_CALL_KIND,
@@ -137,6 +138,38 @@ def test_gamma_sign_alone_never_creates_directional_bias() -> None:
         )
         assert decision.conditional_call_bias is False
         assert not signals
+
+
+def test_production_projection_uses_mutually_exclusive_machine_and_retires_legacy() -> None:
+    now = datetime(2026, 7, 13, 14, 30, tzinfo=UTC)
+    monitor = empty_monitor_state("2026-07-13")
+    monitor["call_strategy"] = {"active_bias": {"status": "confirmed"}}
+
+    state, decision, signals = project_level_decision_machine(
+        monitor,
+        {
+            "phase": "confirmed",
+            "actionable": True,
+            "thesis": "breakout",
+            "direction": "down",
+            "level_kind": "flip_low",
+            "level": 7500.0,
+            "event_id": "level:one",
+            "phase_at": now.isoformat(),
+            "expires_at": (now + timedelta(minutes=5)).isoformat(),
+            "reason": "retest_confirmed",
+        },
+        structure(now),
+        now=now,
+        level_buffer_points=3.0,
+    )
+
+    assert "call_strategy" not in state
+    assert state["level_strategy"]["event_id"] == "level:one"
+    assert decision.status == "confirmed"
+    assert decision.play == "level_decision:breakout:flip_low:down"
+    assert decision.conditional_call_bias is True
+    assert signals == ()
 
 
 def test_v_reclaim_that_never_broke_frozen_flip_does_not_become_flip_reclaim() -> None:

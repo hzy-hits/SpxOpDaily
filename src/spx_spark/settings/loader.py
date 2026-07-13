@@ -15,8 +15,12 @@ import yaml
 
 from spx_spark.settings.alerts import AlertSettings
 from spx_spark.settings.analytics import AnalyticsSettings
+from spx_spark.settings.globex_trend import GlobexTrendSettings
+from spx_spark.settings.market_features import MarketFeatureSettings
 from spx_spark.settings.ibkr import IbkrSettingsSlice
+from spx_spark.settings.level_decision import LevelDecisionPolicy
 from spx_spark.settings.market_data import MarketDataSettings
+from spx_spark.settings.order_map import OrderMapPolicy
 from spx_spark.settings.runtime import RuntimeSettingsSlice
 from spx_spark.settings.schema import AppSettings, SettingSource
 from spx_spark.settings.schwab import (
@@ -79,9 +83,7 @@ def _runtime_overrides_path() -> Path | None:
     cwd_candidate = (Path.cwd() / _DEFAULT_OVERRIDES_RELATIVE_PATH).resolve()
     if cwd_candidate.is_file():
         return cwd_candidate
-    repository_candidate = (
-        Path(__file__).resolve().parents[3] / _DEFAULT_OVERRIDES_RELATIVE_PATH
-    )
+    repository_candidate = Path(__file__).resolve().parents[3] / _DEFAULT_OVERRIDES_RELATIVE_PATH
     if repository_candidate.is_file():
         return repository_candidate.resolve()
     return None
@@ -204,7 +206,11 @@ def _resolve(
 ) -> Any:
     _setting_value(defaults, dotted_path)
     value = _setting_value(merged, dotted_path)
-    origin = "deployment" if deployment is not None and _has_path(deployment, dotted_path) else "defaults"
+    origin = (
+        "deployment"
+        if deployment is not None and _has_path(deployment, dotted_path)
+        else "defaults"
+    )
     env_value = _env_override(dotted_path, environ)
     if env_value is not None:
         value = env_value
@@ -254,6 +260,51 @@ def load_settings(
         raise ValueError("market_data.provider_priority cannot be empty")
     if len(set(market_data.provider_priority)) != len(market_data.provider_priority):
         raise ValueError("market_data.provider_priority cannot contain duplicates")
+    analytics = AnalyticsSettings(
+        max_chain_age_seconds=float(get("analytics.max_chain_age_seconds")),
+        min_usable_strikes=int(get("analytics.min_usable_strikes")),
+        min_two_sided_ratio=float(get("analytics.min_two_sided_ratio")),
+        min_wing_strikes_each_side=int(get("analytics.min_wing_strikes_each_side")),
+        provider_priority=_as_str_tuple(get("analytics.provider_priority")),
+        underlier_reference_tolerance_fraction=float(
+            get("analytics.underlier_reference_tolerance_fraction")
+        ),
+    )
+    globex_trend = GlobexTrendSettings(
+        enabled=bool(get("globex_trend.enabled")),
+        interval_seconds=int(get("globex_trend.interval_seconds")),
+        sample_interval_seconds=int(get("globex_trend.sample_interval_seconds")),
+        short_horizon_minutes=int(get("globex_trend.short_horizon_minutes")),
+        medium_horizon_minutes=int(get("globex_trend.medium_horizon_minutes")),
+        long_horizon_minutes=int(get("globex_trend.long_horizon_minutes")),
+        short_move_points=float(get("globex_trend.short_move_points")),
+        medium_move_points=float(get("globex_trend.medium_move_points")),
+        long_move_points=float(get("globex_trend.long_move_points")),
+        reversal_points=float(get("globex_trend.reversal_points")),
+        confirmation_observations=int(get("globex_trend.confirmation_observations")),
+        max_quote_age_seconds=float(get("globex_trend.max_quote_age_seconds")),
+        retention_hours=int(get("globex_trend.retention_hours")),
+        pending_event_ttl_seconds=int(get("globex_trend.pending_event_ttl_seconds")),
+    )
+    market_features = MarketFeatureSettings(
+        enabled=bool(get("market_features.enabled")),
+        interval_seconds=int(get("market_features.interval_seconds")),
+        sample_interval_seconds=int(get("market_features.sample_interval_seconds")),
+        max_quote_age_seconds=float(get("market_features.max_quote_age_seconds")),
+        retention_hours=int(get("market_features.retention_hours")),
+        option_history_minutes=int(get("market_features.option_history_minutes")),
+        volume_baseline_sessions=int(get("market_features.volume_baseline_sessions")),
+        hot_option_limit=int(get("market_features.hot_option_limit")),
+        provider_sync_tolerance_seconds=float(
+            get("market_features.provider_sync_tolerance_seconds")
+        ),
+        asia_end_et=str(get("market_features.asia_end_et")),
+        europe_end_et=str(get("market_features.europe_end_et")),
+        premarket_end_et=str(get("market_features.premarket_end_et")),
+        rth_end_et=str(get("market_features.rth_end_et")),
+        curb_end_et=str(get("market_features.curb_end_et")),
+        min_l1_liquidity_score=float(get("market_features.min_l1_liquidity_score")),
+    )
 
     ibkr = IbkrSettingsSlice(
         max_option_lines=int(get("ibkr_stream.max_option_lines")),
@@ -271,18 +322,12 @@ def load_settings(
         service_loop_enabled=bool(get("schwab.collection.service_loop_enabled")),
         collection_interval_seconds=int(get("schwab.collection.interval_seconds")),
         capacity=SchwabCapacitySettings(
-            nominal_requests_per_minute=int(
-                get("schwab.request_policy.requests_per_minute")
-            ),
-            planned_requests_per_minute=int(
-                get("schwab.collection.planned_requests_per_minute")
-            ),
+            nominal_requests_per_minute=int(get("schwab.request_policy.requests_per_minute")),
+            planned_requests_per_minute=int(get("schwab.collection.planned_requests_per_minute")),
             max_symbols_per_quote_request=int(get("schwab.quote_batch_size")),
         ),
         cadence=SchwabCadenceSettings(
-            off_hours_quote_seconds=float(
-                get("schwab.collection.cadence.off_hours_quote_seconds")
-            ),
+            off_hours_quote_seconds=float(get("schwab.collection.cadence.off_hours_quote_seconds")),
             off_hours_front_chain_seconds=float(
                 get("schwab.collection.cadence.off_hours_front_chain_seconds")
             ),
@@ -305,21 +350,18 @@ def load_settings(
                 get("schwab.collection.cadence.burst_front_chain_seconds")
             ),
             next_chain_seconds=float(get("schwab.collection.cadence.next_chain_seconds")),
-            spy_xsp_chain_seconds=float(
-                get("schwab.collection.cadence.spy_xsp_chain_seconds")
-            ),
-            qqq_iwm_chain_seconds=float(
-                get("schwab.collection.cadence.qqq_iwm_chain_seconds")
-            ),
+            spy_xsp_chain_seconds=float(get("schwab.collection.cadence.spy_xsp_chain_seconds")),
+            qqq_iwm_chain_seconds=float(get("schwab.collection.cadence.qqq_iwm_chain_seconds")),
         ),
         wide_chain=SchwabWideChainSettings(
             strike_count_candidates=tuple(
                 int(item) for item in get("schwab.collection.wide_chain.strike_count_candidates")
             ),
-            min_usable_strikes=int(get("schwab.collection.wide_chain.min_usable_strikes")),
-            min_two_sided_ratio=float(
-                get("schwab.collection.wide_chain.min_two_sided_ratio")
+            next_expiry_strike_count=int(
+                get("schwab.collection.wide_chain.next_expiry_strike_count")
             ),
+            min_usable_strikes=int(get("schwab.collection.wide_chain.min_usable_strikes")),
+            min_two_sided_ratio=float(get("schwab.collection.wide_chain.min_two_sided_ratio")),
             expected_move_multiple=float(
                 get("schwab.collection.wide_chain.expected_move_multiple")
             ),
@@ -331,9 +373,7 @@ def load_settings(
                 get("schwab.collection.hot_lane.dynamic_symbol_reserve")
             ),
             max_plan_age_seconds=float(get("schwab.collection.hot_lane.max_plan_age_seconds")),
-            recenter_drift_points=float(
-                get("schwab.collection.hot_lane.recenter_drift_points")
-            ),
+            recenter_drift_points=float(get("schwab.collection.hot_lane.recenter_drift_points")),
         ),
     )
     alerts = AlertSettings(
@@ -357,12 +397,19 @@ def load_settings(
         iv_surface_shift_1h_threshold=float(get("alerts.iv_surface_shift_1h_threshold")),
         iv_atm_change_1h_threshold=float(get("alerts.iv_atm_change_1h_threshold")),
         skew_25d_threshold=float(get("alerts.skew_25d_threshold")),
+        min_known_option_timestamp_ratio=float(get("alerts.min_known_option_timestamp_ratio")),
+        wall_proximity_min_points=float(get("alerts.wall_proximity_min_points")),
+        wall_proximity_underlier_fraction=float(get("alerts.wall_proximity_underlier_fraction")),
+        degraded_threshold_multiplier=float(get("alerts.degraded_threshold_multiplier")),
+        atm_iv_jump_threshold=float(get("alerts.atm_iv_jump_threshold")),
+        skew_steepening_threshold=float(get("alerts.skew_steepening_threshold")),
+        surface_shift_threshold=float(get("alerts.surface_shift_threshold")),
+        term_gap_threshold=float(get("alerts.term_gap_threshold")),
+        wall_dedup_band_points=float(get("alerts.wall_dedup_band_points")),
         ibkr_execution_mode=str(get("ibkr_broker.execution_mode")).lower(),
     )
     runtime = RuntimeSettingsSlice(
-        control_ibkr_stream_enabled=bool(
-            get("provider_failover.control_ibkr_stream_enabled")
-        ),
+        control_ibkr_stream_enabled=bool(get("provider_failover.control_ibkr_stream_enabled")),
         provider_failover_enabled=bool(get("provider_failover.enabled")),
         provider_failover_interval_seconds=int(get("provider_failover.interval_seconds")),
         hyperliquid_enabled=bool(get("service_loop.hyperliquid_enabled")),
@@ -372,16 +419,12 @@ def load_settings(
         intraday_shock_enabled=bool(get("service_loop.intraday_shock_enabled")),
         alerts_enabled=bool(get("service_loop.alerts_enabled")),
         realtime_engine_enabled=bool(get("service_loop.realtime_engine_enabled")),
-        realtime_engine_interval_seconds=int(
-            get("service_loop.realtime_engine_interval_seconds")
-        ),
+        realtime_engine_interval_seconds=int(get("service_loop.realtime_engine_interval_seconds")),
         hyperliquid_interval_seconds=int(get("service_loop.hyperliquid_interval_seconds")),
         polymarket_interval_seconds=int(get("service_loop.polymarket_interval_seconds")),
         ibkr_interval_seconds=int(get("service_loop.ibkr_interval_seconds")),
         iv_surface_interval_seconds=int(get("service_loop.iv_surface_interval_seconds")),
-        intraday_shock_interval_seconds=int(
-            get("service_loop.intraday_shock_interval_seconds")
-        ),
+        intraday_shock_interval_seconds=int(get("service_loop.intraday_shock_interval_seconds")),
         alert_interval_seconds=int(get("service_loop.alert_interval_seconds")),
         heartbeat_seconds=int(get("service_loop.heartbeat_seconds")),
         ibkr_skip_options=bool(get("service_loop.ibkr_skip_options")),
@@ -400,9 +443,7 @@ def load_settings(
         or get("maintenance.data_root")
     )
     shock = ShockSettings(
-        anchor_provider_priority=_as_str_tuple(
-            get("intraday_shock.anchor_provider_priority")
-        ),
+        anchor_provider_priority=_as_str_tuple(get("intraday_shock.anchor_provider_priority")),
         require_schwab_streaming_anchors=bool(
             get("intraday_shock.require_schwab_streaming_anchors")
         ),
@@ -428,9 +469,106 @@ def load_settings(
         retry_seconds=int(get("intraday_shock.retry_seconds")),
         data_root=data_root,
     )
+    level_decision = LevelDecisionPolicy(
+        enabled=bool(get("level_decision_shadow.enabled")),
+        notify_transitions=bool(get("level_decision_shadow.notify_transitions")),
+        formal_signal_enabled=bool(get("level_decision_shadow.formal_signal_enabled")),
+        approach_points=float(get("level_decision_shadow.approach_points")),
+        test_points=float(get("level_decision_shadow.test_points")),
+        break_buffer_points=float(get("level_decision_shadow.break_buffer_points")),
+        reject_points=float(get("level_decision_shadow.reject_points")),
+        accept_hold_seconds=float(get("level_decision_shadow.accept_hold_seconds")),
+        retest_points=float(get("level_decision_shadow.retest_points")),
+        confirm_move_points=float(get("level_decision_shadow.confirm_move_points")),
+        confirm_hold_seconds=float(get("level_decision_shadow.confirm_hold_seconds")),
+        phase_timeout_seconds=float(get("level_decision_shadow.phase_timeout_seconds")),
+        event_ttl_seconds=float(get("level_decision_shadow.event_ttl_seconds")),
+        data_grace_seconds=float(get("level_decision_shadow.data_grace_seconds")),
+        structure_drift_points=float(get("level_decision_shadow.structure_drift_points")),
+        es_confirm_ratio=float(get("level_decision_shadow.es_confirm_ratio")),
+        terminal_rearm_seconds=float(get("level_decision_shadow.terminal_rearm_seconds")),
+        max_frozen_structure_age_sessions=int(
+            get("level_decision_shadow.max_frozen_structure_age_sessions")
+        ),
+        outcome_horizons_seconds=tuple(
+            int(item) for item in get("level_decision_shadow.outcome_horizons_seconds")
+        ),
+        outcome_sample_tolerance_seconds=float(
+            get("level_decision_shadow.outcome_sample_tolerance_seconds")
+        ),
+        outcome_no_follow_through_mfe_bps=float(
+            get("level_decision_shadow.outcome_no_follow_through_mfe_bps")
+        ),
+        outcome_false_confirmation_mae_bps=float(
+            get("level_decision_shadow.outcome_false_confirmation_mae_bps")
+        ),
+        outcome_follow_through_end_bps=float(
+            get("level_decision_shadow.outcome_follow_through_end_bps")
+        ),
+        outcome_retention_seconds=float(get("level_decision_shadow.outcome_retention_seconds")),
+        acceptance_min_events=int(get("level_decision_shadow.acceptance_min_events")),
+        acceptance_min_sessions=int(get("level_decision_shadow.acceptance_min_sessions")),
+        acceptance_min_complete_rth_sessions=int(
+            get("level_decision_shadow.acceptance_min_complete_rth_sessions")
+        ),
+        acceptance_min_rth_sample_ratio=float(
+            get("level_decision_shadow.acceptance_min_rth_sample_ratio")
+        ),
+        acceptance_max_rth_gap_seconds=float(
+            get("level_decision_shadow.acceptance_max_rth_gap_seconds")
+        ),
+        acceptance_expected_sample_seconds=float(
+            get("level_decision_shadow.acceptance_expected_sample_seconds")
+        ),
+    )
     storage = StorageSettingsSlice(
         data_root=data_root,
         latest_stale_after_seconds=market_data.latest_stale_after_seconds,
+    )
+    order_map = OrderMapPolicy(
+        touch_time_fraction_coefficient=float(
+            get("order_map_policy.touch_time_fraction_coefficient")
+        ),
+        touch_time_fraction_maximum=float(get("order_map_policy.touch_time_fraction_maximum")),
+        vol_slope_beta=float(get("order_map_policy.vol_slope_beta")),
+        minimum_tau_at_touch_hours=float(get("order_map_policy.minimum_tau_at_touch_hours")),
+        conservative_limit_multiplier=float(get("order_map_policy.conservative_limit_multiplier")),
+        risk_free_rate=float(get("order_map_policy.risk_free_rate")),
+        early_touch_fraction_multiplier=float(
+            get("order_map_policy.early_touch_fraction_multiplier")
+        ),
+        late_touch_fraction_multiplier=float(
+            get("order_map_policy.late_touch_fraction_multiplier")
+        ),
+        execution_max_spread_points=float(get("order_map_policy.execution_max_spread_points")),
+        execution_max_spread_bps=float(get("order_map_policy.execution_max_spread_bps")),
+        execution_max_spread_percentile=float(
+            get("order_map_policy.execution_max_spread_percentile")
+        ),
+        execution_max_quote_age_seconds=float(
+            get("order_map_policy.execution_max_quote_age_seconds")
+        ),
+        execution_max_source_age_seconds=float(
+            get("order_map_policy.execution_max_source_age_seconds")
+        ),
+        execution_max_provider_mid_divergence_bps=float(
+            get("order_map_policy.execution_max_provider_mid_divergence_bps")
+        ),
+        frontrun_fraction=float(get("order_map_policy.frontrun_fraction")),
+        frontrun_min_points=float(get("order_map_policy.frontrun_min_points")),
+        frontrun_max_points=float(get("order_map_policy.frontrun_max_points")),
+        es_volume_min_window_minutes=float(get("order_map_policy.es_volume_min_window_minutes")),
+        es_volume_max_window_minutes=float(get("order_map_policy.es_volume_max_window_minutes")),
+        es_volume_elevated_ratio=float(get("order_map_policy.es_volume_elevated_ratio")),
+        es_volume_quiet_ratio=float(get("order_map_policy.es_volume_quiet_ratio")),
+        es_volume_max_samples=int(get("order_map_policy.es_volume_max_samples")),
+        es_volume_max_quote_age_seconds=float(
+            get("order_map_policy.es_volume_max_quote_age_seconds")
+        ),
+        es_volume_flat_points=float(get("order_map_policy.es_volume_flat_points")),
+        es_volume_level_band_points=float(get("order_map_policy.es_volume_level_band_points")),
+        es_volume_reclaim_min_minutes=float(get("order_map_policy.es_volume_reclaim_min_minutes")),
+        es_volume_reclaim_max_minutes=float(get("order_map_policy.es_volume_reclaim_max_minutes")),
     )
     if env.get("MARKET_DATA_DATA_ROOT") or env.get("MAINTENANCE_DATA_ROOT"):
         sources["storage.data_root"] = SettingSource(
@@ -442,10 +580,14 @@ def load_settings(
         market_data=market_data,
         ibkr=ibkr,
         schwab=schwab,
-        analytics=AnalyticsSettings(),
+        analytics=analytics,
+        globex_trend=globex_trend,
+        market_features=market_features,
         alerts=alerts,
         runtime=runtime,
         shock=shock,
+        level_decision=level_decision,
+        order_map=order_map,
         storage=storage,
         defaults_path=defaults_path.resolve(),
         deployment_path=deployment_path.resolve() if deployment_path is not None else None,

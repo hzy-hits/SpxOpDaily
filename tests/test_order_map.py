@@ -10,6 +10,11 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+from spx_spark.application.order_map.pricing import build_option_price_bs_projection
+from spx_spark.application.order_map.pricing_audit import (
+    append_pricing_audit,
+    build_pricing_audit_record,
+)
 from spx_spark.config import NotificationSettings
 from spx_spark.marketdata import (
     InstrumentId,
@@ -473,6 +478,60 @@ def test_bs_projection_accounts_for_time_decay_and_vol_shift() -> None:
     )
 
 
+def test_bs_projection_exposes_replay_inputs() -> None:
+    projection = build_option_price_bs_projection(
+        mid=45.85,
+        iv=0.1668,
+        strike=7500.0,
+        right="C",
+        spot=7539.2,
+        target=7500.0,
+        tau_now_years=14.75 / (365.0 * 24.0),
+        em_points=32.0,
+        slope_per_point=-0.00062,
+    )
+    assert projection is not None
+    assert projection.projected_mid > 0
+    assert projection.iv_at_touch > projection.iv_now
+    assert projection.touch_time_fraction == pytest.approx(0.9)
+    assert projection.tau_at_touch_minutes == pytest.approx(88.5)
+
+
+def test_pricing_audit_persists_model_payload_separately_from_prose(tmp_path: Path) -> None:
+    now = datetime(2026, 7, 13, 5, 0, tzinfo=timezone.utc)
+    payload = {
+        "as_of": now.isoformat(),
+        "trading_date": "2026-07-13",
+        "expiry": "20260713",
+        "underlier": {"price": 7533.2, "source": "chain_implied"},
+        "pricing_reference": {"pricing_allowed": True},
+        "expected_move_points": 32.0,
+        "candidates": [
+            {
+                "contract_id": "option:SPX:SPXW:20260713:7500:C",
+                "projection_model": "bs_repricing",
+                "projected_mid": 9.12,
+                "projection_touch_time_fraction": 0.6,
+            }
+        ],
+        "warnings": [],
+    }
+    record = build_pricing_audit_record(
+        payload,
+        generated_at=now,
+        report_kind="status",
+        template="raw 9.12",
+        delivered_text="writer 9.12",
+        writer="deepseek",
+        delivered_ok=True,
+    )
+    path = append_pricing_audit(str(tmp_path), record)
+    loaded = json.loads(path.read_text(encoding="utf-8"))
+    assert loaded["candidates"][0]["projection_model"] == "bs_repricing"
+    assert loaded["template"] == "raw 9.12"
+    assert loaded["delivered_text"] == "writer 9.12"
+
+
 def test_build_candidates_produces_three_plays_with_limits() -> None:
     now = datetime(2026, 7, 7, 6, 0, tzinfo=timezone.utc)
     underlier = Quote(
@@ -605,6 +664,40 @@ def test_build_candidates_produces_three_plays_with_limits() -> None:
     assert [row.play for row in with_breakout].count("call_wall_breakout_call") == 1
     assert "call_wall_fade_put" not in {row.play for row in with_breakout}
     assert next(row for row in with_breakout if row.play == "call_wall_breakout_call").right == "C"
+
+    formal_up = {
+        "status": "confirmed",
+        "formal_signal": True,
+        "actionable": True,
+        "play": "level_breakout_call",
+        "direction": "up",
+        "level_kind": "call_wall",
+        "expiry": "20260707",
+        "level": 7550.0,
+        "invalidation_level": 7547.0,
+    }
+    with_formal_up = build_candidates(
+        state,
+        options_map,
+        conditional_call_bias=formal_up,
+    )
+    assert with_formal_up[0].play == "level_breakout_call"
+    assert with_formal_up[0].right == "C"
+
+    formal_down = {
+        **formal_up,
+        "play": "level_breakout_put",
+        "direction": "down",
+        "level_kind": "flip_low",
+        "invalidation_level": 7573.0,
+    }
+    with_formal_down = build_candidates(
+        state,
+        options_map,
+        conditional_call_bias=formal_down,
+    )
+    assert with_formal_down[0].play == "level_breakout_put"
+    assert with_formal_down[0].right == "P"
 
     invalidated = build_candidates(
         state,
@@ -743,7 +836,7 @@ def test_frontrun_level_shifts_toward_spot_with_caps() -> None:
     assert frontrun_level_for(7600.0, 7500.0) == pytest.approx(7508.0)
 
 
-def test_build_candidates_marks_stop_trigger_and_frontrun() -> None:
+def test_build_candidates_require_underlier_trigger_and_frontrun() -> None:
     now = datetime(2026, 7, 7, 6, 0, tzinfo=timezone.utc)
     underlier = Quote(
         instrument=InstrumentId.future("ES"),
@@ -778,17 +871,17 @@ def test_build_candidates_marks_stop_trigger_and_frontrun() -> None:
     candidates = build_candidates(state, make_options_map(make_front_expiry()))
     by_play = {candidate.play: candidate for candidate in candidates}
 
-    # Spot 7569 dropping to put wall 7500: the call gets cheaper -> resting limit.
+    # A future target-level price cannot be a naked resting option limit.
     bounce = by_play["put_wall_bounce_call"]
-    assert bounce.order_style == "resting_limit"
+    assert bounce.order_style == "underlier_triggered_limit"
     # 30% of the 69pt distance exceeds the 8pt cap -> rung at wall + 8.
     assert bounce.frontrun_level == pytest.approx(7508.0)
     assert bounce.frontrun_projected_mid is not None
     assert bounce.frontrun_projected_mid > bounce.projected_mid
 
-    # Spot 7569 breaking below flip 7530: the put gets dearer -> stop trigger.
+    # Dearer-at-touch options use the same underlier-triggered contract.
     breakdown = by_play["flip_breakdown_put"]
-    assert breakdown.order_style == "stop_trigger"
+    assert breakdown.order_style == "underlier_triggered_limit"
 
 
 def test_build_candidates_skips_stale_breakdown_and_reanchors_walls() -> None:
@@ -916,10 +1009,10 @@ def test_render_template_includes_wall_ladder_lines() -> None:
     }
     text = render_template(payload)
     assert "put 墙阶梯(下方支撑→买 call) (★=主墙):" in text
-    assert "★7500 (OI 3604,触达47%) → 7500C 到位预估14.20(现31.05) 限价14.20/12.00" in text
-    assert " 7480 (OI 1500,触达30%) → 7480C 到位预估9.50(现40.00) 限价9.50/8.00 [stale]" in text
+    assert "★7500 (OI 3604,触达47%) → 7500C BS触位情景14.20(现31.05) 触发后参考14.20/12.00" in text
+    assert " 7480 (OI 1500,触达30%) → 7480C BS触位情景9.50(现40.00) 触发后参考9.50/8.00 [stale]" in text
     assert "call 墙阶梯(上方阻力→买 put) (★=主墙):" in text
-    assert "★7550 (OI 6555,触达51%) → 7550P 到位预估12.40(现28.00) 限价12.40/10.50" in text
+    assert "★7550 (OI 6555,触达51%) → 7550P BS触位情景12.40(现28.00) 触发后参考12.40/10.50" in text
 
 
 def test_actionable_pricing_rejects_stale_and_frozen_quotes() -> None:
@@ -1030,7 +1123,7 @@ def test_actionable_pricing_rejects_stale_and_frozen_quotes() -> None:
     assert ancient_ref["projected_mid"] is None
 
 
-def test_render_template_shows_frontrun_and_stop_trigger_notes() -> None:
+def test_render_template_shows_underlier_trigger_and_frontrun_notes() -> None:
     payload = {
         "kind": "order_map",
         "trading_date": "2026-07-07",
@@ -1061,7 +1154,7 @@ def test_render_template_shows_frontrun_and_stop_trigger_notes() -> None:
                 "frontrun_projected_mid": 19.85,
                 "frontrun_limit": 19.8,
                 "frontrun_prob_touch": 0.62,
-                "order_style": "resting_limit",
+                "order_style": "underlier_triggered_limit",
             },
             {
                 "play": "flip_breakdown_put",
@@ -1082,7 +1175,7 @@ def test_render_template_shows_frontrun_and_stop_trigger_notes() -> None:
                 "frontrun_projected_mid": None,
                 "frontrun_limit": None,
                 "frontrun_prob_touch": None,
-                "order_style": "stop_trigger",
+                "order_style": "underlier_triggered_limit",
             },
         ],
         "spxw_0dte_greeks_reference": {
@@ -1100,10 +1193,10 @@ def test_render_template_shows_frontrun_and_stop_trigger_notes() -> None:
         "warnings": [],
     }
     text = render_template(payload)
-    assert "先手挡 7507.2: 限价 19.80" in text
+    assert "先手挡 7507.2: 触发后参考 19.80" in text
     assert "触达≈62%" in text
-    assert "被动限价会立即成交" in text
-    assert "挂单参考: 激进 15.90" not in text
+    assert "SPX 触及 7515 后再提交" in text
+    assert text.count("当前不可预挂") == 2
 
 
 def test_resolve_spx_spot_keeps_hl_research_separate_from_chain_pricing() -> None:
@@ -1414,6 +1507,55 @@ def test_hl_only_order_payload_is_valid_research_without_executable_aliases(
     assert "触达≈" not in rendered
 
 
+def test_globex_payload_promotes_level_machine_spx_proxy_to_context_reference(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    import spx_spark.application.order_map.service as order_map_module
+    from spx_spark.marketdata import InstrumentType
+
+    now = datetime(2026, 7, 13, 4, 30, tzinfo=timezone.utc)
+    hl_quote = Quote(
+        instrument=InstrumentId(
+            symbol="xyz:SP500",
+            instrument_type=InstrumentType.CRYPTO_PERP,
+        ),
+        provider=Provider.HYPERLIQUID,
+        provider_symbol="xyz:SP500",
+        received_at=now,
+        quality=MarketDataQuality.LIVE,
+        mark=7530.0,
+        quote_time=now,
+    )
+    monkeypatch.setattr(
+        order_map_module,
+        "load_level_decision_shadow",
+        lambda settings: {
+            "spot": 7533.5,
+            "spot_source": "es_basis_adjusted:46.2150",
+            "es": 7579.75,
+            "phase": "approaching",
+        },
+    )
+
+    payload, _, _ = run_candidate_retry(
+        monkeypatch,
+        tmp_path,
+        [make_state(hl_quote, now=now)],
+        now=now,
+        attempts=1,
+    )
+
+    assert payload["analysis_mode"] == "globex_context"
+    assert payload["context_reference"] == {
+        "price": 7533.5,
+        "source": "es_basis_adjusted:46.2150",
+        "executable": False,
+    }
+    assert payload["pricing_allowed"] is False
+    assert payload["underlier"] == {"price": None, "source": None}
+
+
 def test_missing_all_references_still_fails_closed_as_research_only() -> None:
     now = datetime(2026, 7, 7, 6, 0, tzinfo=timezone.utc)
 
@@ -1425,6 +1567,40 @@ def test_missing_all_references_still_fails_closed_as_research_only() -> None:
     assert payload["underlier"] == {"price": None, "source": None}
     assert payload["candidates"] == []
     assert "不可执行定价" in render_template(payload)
+
+
+def test_research_status_includes_basis_spx_and_frozen_key_level_context() -> None:
+    payload = {
+        "research_only": True,
+        "beijing_time": "12:30",
+        "expiry": "20260713",
+        "research_reference": {"price": 7582.25, "source": "future:ES"},
+        "pricing_reference": {"gate_state": "missing", "reason": "cash SPX unavailable"},
+        "level_decision": {
+            "phase": "approaching",
+            "formal_signal": False,
+            "level_kind": "flip_low",
+            "level": 7545.0,
+            "spot": 7536.03,
+            "es": 7582.25,
+            "spot_source": "es_basis_adjusted:46.2150",
+            "levels": {
+                "put_wall": 7550.0,
+                "flip_low": 7545.0,
+                "flip_high": 7550.0,
+                "call_wall": 7575.0,
+            },
+        },
+        "warnings": [],
+    }
+
+    rendered = render_template(payload)
+
+    assert "SPX 代理: 7536(es_basis_adjusted:46.2150)" in rendered
+    assert "Put Wall 7550 | Flip 7545–7550 | Call Wall 7575" in rendered
+    assert "距触发位 -9.0 点" in rendered
+    assert "正在接近，尚未完成关键位测试" in rendered
+    assert "低于Put Wall 14.0点" in rendered
 
 
 def test_research_observed_quotes_apply_freshness_and_label_stale_rows(
@@ -1474,7 +1650,7 @@ def test_research_observed_quotes_apply_freshness_and_label_stale_rows(
     assert "[stale/stale]" in render_template(payload)
 
 
-def test_research_status_uses_deterministic_ops_delivery(monkeypatch, tmp_path) -> None:
+def test_globex_status_uses_writer_and_trade_delivery(monkeypatch, tmp_path) -> None:
     import spx_spark.application.order_map.service as order_map_module
 
     payload = {
@@ -1498,7 +1674,7 @@ def test_research_status_uses_deterministic_ops_delivery(monkeypatch, tmp_path) 
     monkeypatch.setattr(
         order_map_module,
         "generate_push_text",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("writer called")),
+        lambda *args, **kwargs: ("written globex context", "deepseek"),
     )
     monkeypatch.setattr(
         order_map_module.NotificationSettings,
@@ -1508,7 +1684,10 @@ def test_research_status_uses_deterministic_ops_delivery(monkeypatch, tmp_path) 
 
     def deliver(settings, *, title, text, kind, lane, friend, runner):
         captured.update(title=title, text=text, kind=kind, lane=lane, friend=friend)
-        return [SimpleNamespace(sink="bark", ok=True, attempted=True)]
+        return [
+            SimpleNamespace(sink="bark", ok=True, attempted=True),
+            SimpleNamespace(sink="feishu", ok=True, attempted=True),
+        ]
 
     monkeypatch.setattr(order_map_module, "deliver_trade_push", deliver)
     monkeypatch.setattr(
@@ -1528,11 +1707,11 @@ def test_research_status_uses_deterministic_ops_delivery(monkeypatch, tmp_path) 
 
     assert result == 0
     assert captured == {
-        "title": "研究状态",
-        "text": "deterministic research status",
+            "title": "SPX 15分钟市场状态",
+        "text": "written globex context",
         "kind": "status",
-        "lane": "ops",
-        "friend": False,
+        "lane": "trade",
+        "friend": True,
     }
 
 
@@ -1610,16 +1789,108 @@ def test_prompts_include_previous_push() -> None:
     assert "previous_push:" in order_prompt
     status_prompt = build_status_prompt(payload, "模板行", None)
     assert "previous_push:null" in status_prompt
-    # Merged push: the status prompt must demand the verbatim limit-price
-    # section that used to live in the separate refresh push.
-    assert "挂单参考" in status_prompt
-    assert "市场状态+挂单参考" in status_prompt
+    assert "SPX 决策摘要" in status_prompt
+    assert "第一行逐字保留模板标题" in status_prompt
+    assert "最多两个条件候选" in status_prompt
     assert "负 gamma 不等于下跌" in order_prompt
     assert "负 gamma 不等于下跌" in status_prompt
     assert "observe_only" in order_prompt
     assert "observe_only" in status_prompt
     assert "secret_scenario_price" not in order_prompt
     assert "secret_scenario_price" not in status_prompt
+
+
+def test_globex_prompts_require_proxy_analysis_without_executable_pricing() -> None:
+    from spx_spark.application.order_map.prompts import globex_writer_output_valid
+    from spx_spark.order_map import build_order_prompt, build_status_prompt
+
+    payload = {
+        "research_only": True,
+        "analysis_mode": "globex_context",
+        "context_reference": {
+            "price": 7533.5,
+            "source": "es_basis_adjusted:46.2150",
+            "executable": False,
+        },
+        "level_decision": {
+            "phase": "testing",
+            "levels": {"put_wall": 7550, "flip_low": 7545, "call_wall": 7575},
+        },
+    }
+    previous = {"kind": "market_status", "text": "上一条夜盘上下文"}
+
+    status_prompt = build_status_prompt(payload, "模板", previous)
+    order_prompt = build_order_prompt(payload, "模板", previous)
+
+    assert "ES-basis SPX 代理" in status_prompt
+    assert "主情景" in status_prompt
+    assert "确认条件和证伪条件" in status_prompt
+    assert "不许写『等开盘再说』" in status_prompt
+    assert "不可执行定价" in order_prompt
+    assert "上一条夜盘上下文" in status_prompt
+    assert "上一条夜盘上下文" in order_prompt
+    template = "SPX 代理 7531.0；Flip 7545.0；ES 等效 7591.2"
+    assert globex_writer_output_valid(
+        "SPX 代理 7531，站回 7545 时看 ES 7591.2",
+        template,
+    )
+    assert not globex_writer_output_valid(
+        "跌破 ES 7560 才确认",
+        template,
+    )
+    assert not globex_writer_output_valid(
+        "当前是无引力气垫区",
+        template,
+    )
+
+
+def test_actionable_writer_requires_exact_numbers_contracts_and_no_prehang() -> None:
+    from spx_spark.application.order_map.prompts import actionable_writer_output_valid
+
+    template = "\n".join(
+        (
+            "1) [地图候选] put wall 7550 → SPXW 7550C",
+            "BS触位情景价 13.39，现价 18.60",
+            "2) [地图候选] flip 7550 → SPXW 7550P",
+            "BS触位情景价 13.47，现价 9.35",
+            "当前不可预挂",
+        )
+    )
+    assert actionable_writer_output_valid(
+        "条件执行参考：7550C 13.39；7550P 13.47；当前不可预挂",
+        template,
+    )
+    assert not actionable_writer_output_valid(
+        "条件执行参考：7550C 14.00；7550P 13.47；当前不可预挂",
+        template,
+    )
+    assert not actionable_writer_output_valid(
+        "条件执行参考：7550C 13.39；当前不可预挂",
+        template,
+    )
+    assert not actionable_writer_output_valid(
+        "条件执行参考：7550C 13.39；7550P 13.47",
+        template,
+    )
+
+
+def test_actionable_writer_preserves_compact_status_layout() -> None:
+    from spx_spark.application.order_map.prompts import actionable_writer_output_valid
+
+    template = "\n".join(
+        (
+            "【SPX 15m｜22:30｜0DTE 07-13｜开盘首小时】",
+            "价格  SPX 7550｜ES 7595",
+            "",
+            "【条件计划｜标的触发后执行】",
+            "计划1·支撑反弹  SPX 7545触发｜SPXW 7545C｜触达 60%｜参考 9–11",
+            "执行  触位后按实时 mid/IV 重算｜当前不可预挂",
+        )
+    )
+    assert actionable_writer_output_valid(template, template)
+    extended = template + "\n" + "\n".join("补充  数据正常" for _ in range(20))
+    assert actionable_writer_output_valid(extended, template)
+    assert not actionable_writer_output_valid(template.replace("\n\n", "\n"), template)
 
 
 def test_persistence_uses_private_audit_reference_not_writer_payload(
@@ -1776,10 +2047,10 @@ def test_render_template_contains_play_lines_and_limits() -> None:
         "warnings": [],
     }
     text = render_template(payload)
-    assert "【挂单地图 2026-07-07】" in text
+    assert "【条件交易地图 2026-07-07】" in text
     assert "put wall 7500 反弹买 call" in text
     assert "触达概率≈24%" in text
-    assert "挂单参考: 激进 12.30 / 保守 10.40" in text
+    assert "触发后限价参考 12.30 / 10.40; 当前不可预挂" in text
     assert "flip zone 7530 跌破买 put" in text
     assert "call wall 7550 冲墙买 put" in text
 
@@ -1993,6 +2264,15 @@ def test_status_template_carries_session_phase() -> None:
         "zero_gamma": 7507.4,
         "flip_zone": [7505.0, 7510.0],
         "expected_move_points": 25.8,
+        "max_pain": {
+            "settlement_strike": 7510.0,
+            "call_oi_peak_strike": 7550.0,
+            "call_oi_peak": 6555,
+            "put_oi_peak_strike": 7500.0,
+            "put_oi_peak": 3604,
+            "oi_strike_count": 61,
+            "quality": "ok",
+        },
         "vol_context": {},
         "candidates": [],
         "warnings": [],
@@ -2067,6 +2347,15 @@ def test_render_status_template_contains_levels_and_changes() -> None:
         "zero_gamma": 7507.4,
         "flip_zone": [7505.0, 7510.0],
         "expected_move_points": 25.8,
+        "max_pain": {
+            "settlement_strike": 7510.0,
+            "call_oi_peak_strike": 7550.0,
+            "call_oi_peak": 6555,
+            "put_oi_peak_strike": 7500.0,
+            "put_oi_peak": 3604,
+            "oi_strike_count": 61,
+            "quality": "ok",
+        },
         "vol_context": {"vix": 15.9, "vix1d": 7.1, "vvix": 95.0, "skew": 150.0},
         "candidates": [
             {
@@ -2092,16 +2381,75 @@ def test_render_status_template_contains_levels_and_changes() -> None:
     }
     now = datetime(2026, 7, 7, 6, 30, tzinfo=timezone.utc)
     text = render_status_template(payload, ["put wall 7495→7500"], now)
-    assert "【市场状态 14:30】" in text
+    assert "【SPX 15m｜14:30｜0DTE 07-07｜欧盘时段】" in text
     assert "距开盘 420 分钟" in text
     assert "put wall 7500 触达≈57%" in text
-    assert "VIX 15.9" in text
-    assert "0DTE Greeks(只读/仓位符号未知" in text
-    assert "覆盖 8/10" in text
-    assert "较上次推送变化: put wall 7495→7500" in text
+    assert "VIX1D/VIX 0.45" in text
+    assert "Max Pain 7510" in text
+    assert "Call峰 7550（6,555）" in text
+    assert "Put峰 7500（3,604）" in text
+    assert "0DTE Greeks" not in text
+    assert "墙阶梯" not in text
+    assert "收盘分布" not in text
+    assert "变化  put wall 7495→7500" in text
 
     text_no_change = render_status_template(payload, [], now)
     assert "关键位无实质变化" in text_no_change
+
+
+def test_render_status_template_limits_candidates_to_nearest_two() -> None:
+    payload = {
+        "expiry": "20260713",
+        "underlier": {"price": 7562.6, "source": "chain_implied"},
+        "es_last": 7607.5,
+        "gamma_state": "zero_gamma_transition",
+        "flip_zone": [7550.0, 7555.0],
+        "vol_context": {},
+        "candidates": [
+            {
+                "level": 7550.0,
+                "strike": 7550.0,
+                "right": "C",
+                "prob_touch": 0.71,
+                "projection_range_low": 9.8,
+                "projection_range_high": 11.5,
+                "execution_quote_status": "executable",
+            },
+            {
+                "level": 7575.0,
+                "strike": 7575.0,
+                "right": "P",
+                "prob_touch": 0.61,
+                "projection_range_low": 7.4,
+                "projection_range_high": 8.7,
+                "execution_quote_status": "executable",
+            },
+            {
+                "level": 7525.0,
+                "strike": 7525.0,
+                "right": "C",
+                "prob_touch": 0.31,
+                "projected_mid": 5.7,
+                "execution_quote_status": "executable",
+            },
+        ],
+        "warnings": [],
+    }
+
+    text = render_status_template(
+        payload,
+        [],
+        datetime(2026, 7, 13, 14, 0, tzinfo=timezone.utc),
+    )
+
+    assert text.count("计划") == 3  # section header plus two candidates
+    assert "SPXW 7550C" in text
+    assert "SPXW 7575P" in text
+    assert "SPXW 7525C" not in text
+    assert text.count("当前不可预挂") == 1
+    assert "【条件计划｜标的触发后执行】" in text
+    assert "计划1·Call候选" in text
+    assert "计划2·Put候选" in text
 
 
 def test_send_order_map_queues_on_feishu_failure(tmp_path: Path, monkeypatch) -> None:

@@ -47,6 +47,13 @@ def first_key(mapping: Mapping[str, Any], *keys: str) -> Any:
     return None
 
 
+def schwab_model_float(value: Any) -> float | None:
+    """Normalize Schwab's -999 sentinel used for unavailable model fields."""
+
+    parsed = clean_float(value)
+    return None if parsed is None or parsed <= -998.0 else parsed
+
+
 def nested_mapping(mapping: Mapping[str, Any], key: str) -> Mapping[str, Any]:
     value = mapping.get(key)
     return value if isinstance(value, Mapping) else {}
@@ -240,13 +247,30 @@ def quote_from_schwab_option_contract(
         implied_vol=normalize_implied_vol_percent(
             first_key(contract, "volatility", "impliedVolatility")
         ),
-        delta=clean_float(first_key(contract, "delta")),
-        gamma=clean_float(first_key(contract, "gamma")),
-        theta=clean_float(first_key(contract, "theta")),
-        vega=clean_float(first_key(contract, "vega")),
-        rho=clean_float(first_key(contract, "rho")),
-        underlier_price=clean_float(first_key(contract, "underlyingPrice", "underlierPrice")),
+        delta=schwab_model_float(first_key(contract, "delta")),
+        gamma=schwab_model_float(first_key(contract, "gamma")),
+        theta=schwab_model_float(first_key(contract, "theta")),
+        vega=schwab_model_float(first_key(contract, "vega")),
+        rho=schwab_model_float(first_key(contract, "rho")),
+        underlier_price=schwab_model_float(
+            first_key(contract, "underlyingPrice", "underlierPrice")
+        ),
         model="schwab_chain",
+    )
+    open_interest = clean_float(first_key(contract, "openInterest"))
+    has_structure = bool(
+        (open_interest is not None and open_interest > 0)
+        or any(
+            value is not None
+            for value in (
+                greeks.implied_vol,
+                greeks.delta,
+                greeks.gamma,
+                greeks.theta,
+                greeks.vega,
+                greeks.rho,
+            )
+        )
     )
 
     return Quote(
@@ -262,8 +286,8 @@ def quote_from_schwab_option_contract(
         bid_size=clean_float(first_key(contract, "bidSize")),
         ask_size=clean_float(first_key(contract, "askSize")),
         volume=clean_float(first_key(contract, "totalVolume", "volume")),
-        open_interest=clean_float(first_key(contract, "openInterest")),
-        structure_time=received_at,
+        open_interest=open_interest,
+        structure_time=received_at if has_structure else None,
         quote_time=quote_time,
         trade_time=trade_time,
         last_update_at=received_at,

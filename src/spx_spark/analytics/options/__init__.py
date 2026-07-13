@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from spx_spark.analytics.options.chain import (
     chain_implied_spot,
+    enrich_open_interest,
     is_spy_option,
     is_spxw_option,
     median_strike_step,
@@ -22,11 +23,13 @@ from spx_spark.analytics.options.exposure import (
 )
 from spx_spark.analytics.options.exposure_types import StrikeGex, WallLevel
 from spx_spark.analytics.options.levels import build_spy_confluence, classify_gamma_state
+from spx_spark.analytics.options.max_pain import build_max_pain
 from spx_spark.analytics.options.models import (
     DensityDiagnostics,
     DensityQuality,
     ExpiryOptionsMap,
     LevelProbability,
+    MaxPain,
     OptionCoverage,
     OptionsMap,
     RnDensity,
@@ -68,6 +71,7 @@ __all__ = [
     "DensityQuality",
     "ExpiryOptionsMap",
     "LevelProbability",
+    "MaxPain",
     "OptionCoverage",
     "OptionsMap",
     "RnDensity",
@@ -79,10 +83,12 @@ __all__ = [
     "build_coverage",
     "build_expiry_map",
     "build_gex_by_strike",
+    "build_max_pain",
     "build_rn_density",
     "build_spy_confluence",
     "build_wall_ladder",
     "chain_implied_spot",
+    "enrich_open_interest",
     "classify_gamma_state",
     "finite_float",
     "gex_weight",

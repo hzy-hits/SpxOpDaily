@@ -131,6 +131,26 @@ class WallConfluence:
 
 
 @dataclass(frozen=True)
+class MaxPain:
+    """OI-derived settlement pain and the strongest call/put concentrations."""
+
+    settlement_strike: float
+    payout_points: float
+    call_oi_peak_strike: float
+    call_oi_peak: float
+    put_oi_peak_strike: float
+    put_oi_peak: float
+    call_open_interest: float
+    put_open_interest: float
+    oi_strike_count: int
+    strike_range: tuple[float, float]
+    quality: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
 class ExpiryOptionsMap:
     expiry: str
     option_count: int
@@ -173,6 +193,7 @@ class ExpiryOptionsMap:
     put_walls: tuple[WallLevel, ...] = ()
     wall_method: str = "oi_gex"
     rn_density: RnDensity | None = None
+    max_pain: MaxPain | None = None
 
 
 @dataclass(frozen=True)
