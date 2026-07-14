@@ -8,11 +8,29 @@ SPXW pricing source unless fresh Schwab option coverage is proven by source
 timestamps. IBKR is retained for three bounded responsibilities:
 
 1. L1 market-data fallback when Schwab direct anchors fail health checks.
-2. Read-only positions, orders, and fills required by a future broker adapter.
-3. Programmatic execution only after a separately approved `live` rollout.
+2. The production SPXW pricing feed during GTH, when Schwab SPXW source
+   timestamps are frozen.
+3. Paper-order and execution-algorithm validation for a future broker adapter.
 
 IBKR is not treated as a depth, tick, or full-chain advantage in the current
 system because the deployed collector only consumes L1 data.
+
+## Oracle broker-session decision
+
+The normal Oracle deployment uses the dedicated IBKR Paper username and
+`127.0.0.1:4002`. This changes the broker session, not the market-data matrix:
+
+- Schwab remains the normal RTH SPX/SPXW provider.
+- IBKR Paper remains the RTH fallback and the production SPXW GTH provider.
+- The feed is usable only after live market-data type, advancing provider
+  timestamps, two-sided prices, and configured SPXW coverage are verified.
+- If the Paper feed is delayed, frozen, unsubscribed, or blocked by a competing
+  market-data session, failover is unavailable and new entries fail closed.
+
+The Live username is intentionally not kept logged in on Oracle. Live-account
+positions, orders, fills, and PnL therefore remain outside this deployment's
+authoritative state. IBKR Mobile or another explicitly approved live-account
+surface remains the source of truth for real exposure.
 
 ## Market-data state machine
 
@@ -43,8 +61,11 @@ Human notifications are edge-triggered:
 - one critical notification when both direct providers are unavailable;
 - one notification after Schwab recovery is confirmed;
 - no routine IBKR standby disconnect/reconnect notification;
-- IBKR disconnect remains critical when an SPXW position exists or execution
-  mode is explicitly `live`.
+- IBKR disconnect remains critical during GTH or active fallback because it
+  removes the only accepted SPXW pricing lane.
+
+Paper positions must not upgrade or suppress live-account risk alerts. They are
+simulation state and are relevant only to paper execution tests.
 
 ## Source selection
 
@@ -189,32 +210,33 @@ half-recovered farm cannot flap the system early. IBKR stream quote freeze on
 connectivity loss is controlled by
 `ibkr_stream.freeze_quotes_on_connectivity_loss` (default `true`).
 
-Persistent IBKR client `172` also has an isolated position-shadow lane. When
-connected, it performs the complete startup position fetch and writes
-`ibkr_positions_shadow.json` on the configured cadence. Shadow failures are
-reported without replacing the last complete snapshot or reconnecting the
-market-data lane. Client `174` remains the production position source until an
-RTH comparison proves contract, quantity, cost, and completeness parity.
+Persistent IBKR client `172` retains an isolated position-shadow implementation
+for paper execution tests and a future approved Live deployment. In the normal
+Paper market-data deployment, account reads, position shadowing, and the legacy
+client `174` position poller are disabled. This prevents simulated Paper
+positions from being mistaken for real exposure and removes a minute polling
+task that cannot observe the Live account.
 
-The broker socket and the market-data subscriptions have separate gates.
-Account visibility or `live` execution can keep client `172` connected in
-account-only standby while IBKR L1 subscriptions are off. A competing-market-
-data session starts the configured retry cooldown but leaves account standby
-eligible, avoiding a blind position interval merely to probe L1 again.
+The position code is retained rather than deleted because a future execution
+service needs the same contract, quantity, order, fill, and reconciliation
+boundaries. Re-enabling it requires an explicit broker mode that labels every
+snapshot as `paper` or `live`; only `live` may become authoritative for real
+position alerts.
 
 The remaining rollout order is:
 
-1. Complete five-session Schwab WebSocket source-timestamp, gap, reconnect, and
+1. Authenticate the dedicated Paper username on port `4002`.
+2. Prove live SPXW GTH source timestamps, two-sided coverage, IV/Greeks fields,
+   gaps, and reconnect behavior across a complete session.
+3. Keep account reads and both position lanes disabled in the Paper
+   market-data deployment.
+4. Complete five-session Schwab WebSocket source-timestamp, gap, reconnect, and
    field-coverage measurement during GTH and RTH.
-2. Reconcile client `172` position shadowing against the temporary client `174`
-   poller for one trading day.
-3. Disable the legacy poller while keeping account visibility and alerts enabled.
-4. Enable automatic IBKR stream control and keep its subscriptions to the
-   configured minimal fallback universe.
-5. Add read-only open-order/fill state; order writes remain prohibited until a
-   separate live-execution approval.
+5. Add paper order/fill state only inside an explicitly labelled simulation
+   mode; live order writes remain prohibited until a separate approval.
 
 The temporary compatibility variable `IBKR_POSITIONS_ENABLED` remains accepted
 during migration. New deployments should set
 `IBKR_BROKER_ACCOUNT_READ_ENABLED` and
-`IBKR_LEGACY_POSITION_POLLER_ENABLED` explicitly.
+`IBKR_LEGACY_POSITION_POLLER_ENABLED` explicitly. The normal Paper deployment
+sets all three position/account-read gates to `false`.

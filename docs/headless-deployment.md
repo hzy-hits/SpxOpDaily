@@ -206,11 +206,11 @@ scripts/run-ibkr-verifier.sh
 
 The verifier writes JSON snapshots to `logs/`.
 
-For a trading-hours entitlement report, run Gateway in live mode and then:
+For a trading-hours entitlement report in the normal Oracle Paper deployment:
 
 ```bash
-IBKR_PORT=4001 scripts/run-ibkr-trading-hours-report.sh --skip-options
-IBKR_PORT=4001 IBKR_MAX_OPTION_LINES=40 scripts/run-ibkr-trading-hours-report.sh --strict
+IBKR_PORT=4002 scripts/run-ibkr-trading-hours-report.sh --skip-options
+IBKR_PORT=4002 IBKR_MAX_OPTION_LINES=40 scripts/run-ibkr-trading-hours-report.sh --strict
 ```
 
 The report uses the same market-data-only connection path as the verifier:
@@ -353,7 +353,10 @@ Hermes can append this file to the local daily report:
 - Store IBKR credentials only in `/srv/data/spx-spark/runtime/ibc/config.ini` after explicit approval.
 - Keep IB Gateway API access on localhost.
 - Keep IB Gateway Read-Only API enabled for this project.
-- Keep IBKR code market-data only: no orders, account polling, position polling, or execution polling.
+- Keep the normal Paper market-data deployment free of account and position
+  polling. Paper positions are simulation data, not Live-account exposure.
+- Keep live order placement disabled. Paper execution tests require an
+  explicitly labelled simulation mode.
 - Use SSH tunnels for remote dashboard access.
 - Keep automatic order placement out of the MVP.
 

@@ -4,10 +4,13 @@ Near-real-time SPX/SPXW 0DTE dashboard and alert research system.
 
 Current scope:
 
-- Verify IBKR market data permissions.
-- Record the boundary between live, delayed, and missing feeds.
+- Use Schwab as the normal RTH provider and IBKR Paper as the SPXW GTH and
+  Schwab-outage fallback provider.
+- Record the boundary between live, delayed, frozen, and missing feeds from
+  provider source timestamps.
 - Keep the project isolated from the machine's default Codex setup.
-- Market-data only: no order placement, account polling, position polling, or credential storage.
+- No live order placement. Paper positions and fills are simulation data and
+  must never be presented as the user's live-account exposure.
 
 Current architecture and refactor execution documents:
 
@@ -29,8 +32,12 @@ IBKR requirements:
 
 - TWS or IB Gateway must be running.
 - API socket must be enabled.
-- Use paper first: IB Gateway paper usually listens on `127.0.0.1:4002`.
+- Production market-data collection uses the dedicated Paper username and IB
+  Gateway Paper port `127.0.0.1:4002`; the Live username remains available to
+  IBKR Mobile without sharing its brokerage session with Oracle.
 - Keep IBKR Gateway's Read-Only API setting enabled for this project.
+- The Paper feed is accepted only when source timestamps advance, market data
+  type is live, and the configured SPXW GTH coverage gate passes.
 
 ## Isolated Codex Wrapper
 

@@ -87,13 +87,21 @@ is `SPYM`; obsolete `SPLG` is intentionally absent.
 ## Position-awareness boundary
 
 Schwab market data and the SPX breadth/option analysis do not require IBKR
-account polling. IBKR position polling remains disabled by default and isolated
-from the market-data collectors. When it is disabled, the system explicitly
-reports `disabled_no_account_visibility`: it must not infer that the account is
+account polling. The normal Oracle deployment connects the IBKR Paper username
+on port `4002` for GTH and fallback market data, so Paper account positions are
+not evidence about the user's Live account. Account reads, client-172 position
+shadowing, and the legacy client-174 poller remain disabled in this mode.
+
+When position visibility is disabled, the system explicitly reports
+`disabled_no_account_visibility`: it must not infer that the Live account is
 flat and cannot provide position-open/close, quantity-change, or book-PnL
-alerts. Automated stops and time exits are not implemented even when polling is
-enabled. This is safe for the current observation-only system, but the human or
+alerts. Automated stops and time exits are not implemented. IBKR Mobile or the
 broker UI remains responsible for live-position risk management.
+
+The position implementation remains in the repository for paper execution
+testing and a future approved Live executor. Any reactivation must persist an
+explicit `paper` or `live` broker-environment label; simulated positions must
+never enter real-position alerts or risk gates.
 
 Before re-enabling polling after a blind interval, reconcile the persisted
 position-event state with the broker snapshot. Otherwise the first complete
