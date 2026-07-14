@@ -566,6 +566,8 @@ def _write_failover_transition(
     sequence: int,
     previous_mode: str,
     mode: str,
+    schwab_reason: str | None = None,
+    ibkr_reason: str | None = None,
 ) -> None:
     path.write_text(
         json.dumps(
@@ -576,6 +578,8 @@ def _write_failover_transition(
                 "schwab_unhealthy_streak": 0,
                 "schwab_recovery_streak": 0,
                 "ibkr_unhealthy_streak": 0,
+                "last_schwab_reason": schwab_reason,
+                "last_ibkr_reason": ibkr_reason,
                 "monitoring_active": True,
                 "ibkr_market_data_required": mode != "schwab_primary",
                 "transition": {
@@ -644,6 +648,29 @@ def test_both_direct_providers_unavailable_is_critical(tmp_path, monkeypatch) ->
     assert [alert.kind for alert in alerts] == ["market_data_all_providers_unavailable"]
     assert alerts[0].severity == "critical"
     assert "禁止新开仓" in alerts[0].detail
+
+
+def test_gth_option_gap_does_not_claim_whole_provider_outage(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("ALERT_SYSTEM_EVENT_STATE_PATH", str(tmp_path / "events.json"))
+    failover_path = tmp_path / "provider-failover.json"
+    monkeypatch.setenv("PROVIDER_FAILOVER_STATE_PATH", str(failover_path))
+    now = datetime(2026, 7, 13, 22, 0, tzinfo=BJ_TZ)
+    reason = "GTH SPXW coverage 0/20 contracts, 0/10 complete pairs"
+    _write_failover_transition(
+        failover_path,
+        now=now,
+        sequence=2,
+        previous_mode="recovery_pending",
+        mode="both_unavailable",
+        schwab_reason=reason,
+        ibkr_reason=reason,
+    )
+
+    alerts = system_event_alerts(make_state(now=now))
+
+    assert alerts[0].title == "Schwab/IBKR 的 GTH SPXW 报价均不可用"
+    assert "ES 连续行情可能仍正常" in alerts[0].detail
+    assert "期权定价和新开仓闸门关闭" in alerts[0].detail
 
 
 def test_schwab_recovery_before_takeover_is_audit_only(

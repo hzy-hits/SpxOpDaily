@@ -12,6 +12,7 @@ Environment=PATH=/home/ubuntu/.local/bin:/home/ubuntu/.cargo/bin:/usr/local/bin:
 ExecStart=/home/ubuntu/spx-spark/scripts/run-schwab-marketdata.sh
 Restart=always
 RestartSec=5
+SuccessExitStatus=143 SIGTERM
 TimeoutStopSec=15
 
 [Install]

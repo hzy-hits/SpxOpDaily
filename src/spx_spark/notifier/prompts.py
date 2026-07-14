@@ -93,6 +93,7 @@ def build_direct_push_prompt(payload: dict[str, object], alerts: list[dict[str, 
             "- 盘外波动率信号(skew 急陡/ATM IV 跳升)：谁在抢什么(如机构买下行保护)、这通常领先什么，拿什么确认(价格/gamma/VIX)——信号≠行动，确认位没到就只是提高警觉；",
             "- 0DTE Call 结构确认：写清是收复冻结 flip 还是突破旧 call wall、回踩观察位和失效线；强调已由 SPX/ES 新鲜样本确认，但不追价、不自动下单；",
             "只用 JSON 里的事实，数字不编不改；数据 degraded 时如实说明。",
+            "排版统一：第一行事件结论，其后使用 `## 影响` 和 `## 条件` 两个短段；不要输出 JSON、系统思考或索取更多数据。",
             "greeks_reference_0dte 是严格 SPXW 当日到期的只读情景层；position_sign/direction 为 unknown 时，负 gamma 只表示潜在放大，绝不等于看跌或自动买 put。",
             "breakout_filter 是代码裁决：blocked/pending 不得写成突破成立；只有 supported 且 actionable=true 才能称为通过假突破过滤。",
             "总共不超过 6 行。像口头交接，不像播报稿；不写免责声明。",
@@ -226,7 +227,7 @@ def build_codex_prompt(
             "发送决策必须优先参考 Micopedia decision stack、Steven observe_only 附注（若有）、"
             "SPXW call wall/put wall/zero gamma、以及过去 1 小时 IV surface/期权变化。",
             "单一指标（如仅 put skew 变陡）默认不足以外发；需要 gamma 状态、VIX/vol regime 或价格行为中至少一项共振确认，否则判为不需要推送。",
-            "输出中文，最多 10 行，像交易台口头交接不像播报稿，结论先行：第一行之后紧跟一句话说清发生了什么、"
+            "输出中文，最多 10 行，像交易台口头交接不像播报稿，结论先行；正文使用 `## 证据`、`## 条件`、`## 数据` 短段：第一行之后紧跟一句话说清发生了什么、"
             "对搭档挂的单/持仓意味着什么；再给 2-3 行证据(触发数字 + gamma 地形与概率)；"
             "再给 1-2 行 if/then(价格到哪个位置剧本如何分岔、该盯什么——这也是判断的证伪条件)；"
             "最后 1 行 vol regime(VIX/VIX1D、dip_context)与数据质量、快照时间。",

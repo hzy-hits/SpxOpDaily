@@ -23,6 +23,7 @@ def _isolate_collector_storage(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) 
     data_root.mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("MARKET_DATA_DATA_ROOT", str(data_root))
     monkeypatch.setenv("MAINTENANCE_DATA_ROOT", str(data_root))
+    monkeypatch.setenv("SCHWAB_STREAMING_MODE", "off")
     return data_root
 
 
@@ -365,7 +366,7 @@ def test_live_stream_symbols_are_not_polled_by_rest_collector(
     tmp_path: Path,
 ) -> None:
     _isolate_collector_storage(monkeypatch, tmp_path)
-    monkeypatch.setenv("SCHWAB_STREAM_MODE", "live")
+    monkeypatch.setenv("SCHWAB_STREAMING_MODE", "live")
     monkeypatch.setenv("SCHWAB_STREAM_SYMBOLS", "SPX,SPY,RSP,ES,MES")
     monkeypatch.setenv(
         "SCHWAB_COLLECT_QUOTES",

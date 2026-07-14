@@ -336,6 +336,7 @@ def callback_handler_factory(
 
 def gateway_handler_factory(
     manager: SchwabSessionManager,
+    stream_health: Callable[[], dict[str, Any]] | None = None,
 ) -> type[BaseHTTPRequestHandler]:
     class GatewayHandler(BaseHTTPRequestHandler):
         server_version = "SPXSparkSchwabGateway/1"
@@ -354,7 +355,10 @@ def gateway_handler_factory(
                 return
             if target.path == "/healthz":
                 health = manager.health()
-                self._send_json(200 if health.ready else 503, health.to_dict())
+                payload = health.to_dict()
+                if stream_health is not None:
+                    payload["stream"] = stream_health()
+                self._send_json(200 if health.ready else 503, payload)
                 return
             if target.path not in ALLOWED_MARKET_DATA_PATHS:
                 self._send_json(404, {"ok": False, "error": "not_found"})
@@ -486,6 +490,7 @@ class OAuthServers:
         *,
         auxiliary_runner: Callable[[], None] | None = None,
         auxiliary_close: Callable[[], None] | None = None,
+        stream_health: Callable[[], dict[str, Any]] | None = None,
     ) -> None:
         self.callback_server = RedactedHTTPServer(
             (settings.oauth_bind_host, settings.oauth_bind_port),
@@ -493,7 +498,7 @@ class OAuthServers:
         )
         self.gateway_server = RedactedThreadingHTTPServer(
             (settings.gateway_bind_host, settings.gateway_bind_port),
-            gateway_handler_factory(coordinator.manager),
+            gateway_handler_factory(coordinator.manager, stream_health),
         )
         self.critical_threads = [
             threading.Thread(
@@ -679,6 +684,7 @@ def run(argv: list[str] | None = None) -> int:
                     stream_runtime.run_forever if stream_runtime is not None else None
                 ),
                 auxiliary_close=(stream_runtime.close if stream_runtime is not None else None),
+                stream_health=(stream_runtime.health if stream_runtime is not None else None),
             ) as servers:
                 try:
                     servers.serve_forever()

@@ -2,8 +2,10 @@
 
 ## Decision
 
-SPX Spark uses Schwab as the normal SPX/SPXW/ES market-data provider. IBKR is
-retained for three bounded responsibilities:
+SPX Spark uses Schwab as the normal RTH SPX/SPXW provider and as a continuous
+ES/MES provider. During SPX Global Trading Hours (GTH), IBKR is the production
+SPXW pricing source unless fresh Schwab option coverage is proven by source
+timestamps. IBKR is retained for three bounded responsibilities:
 
 1. L1 market-data fallback when Schwab direct anchors fail health checks.
 2. Read-only positions, orders, and fills required by a future broker adapter.
@@ -59,25 +61,20 @@ event state after the configured reset interval so the detector does not freeze.
 
 ## Staged activation
 
-`provider_failover.control_ibkr_stream_enabled` remains `false` until Schwab
-WebSocket shadow acceptance is complete. This preserves the existing five-second
-IBKR fast lane while the new control state and transition notifications run in
-observation mode.
+`provider_failover.control_ibkr_stream_enabled` remains `false` until automatic
+IBKR subscription-control acceptance is complete. This preserves the existing
+five-second IBKR fast lane while the control state and transition notifications
+run in production without dynamically stopping the required GTH fallback.
 
-### Current entitlement: Market Data only, no Trader API
+### Current entitlement: Trader API approved
 
-The deployed Schwab developer app currently has **Market Data product access
-only**; it is **not** authorized for the Trader API (`/trader/v1/*`). The
-WebSocket streamer login requires `/trader/v1/userPreference` to fetch
-`streamerInfo`, so that call returns `401` even while Market Data REST quote
-requests (`/marketdata/v1/quotes`, `/marketdata/v1/chains`) return `200`. This
-is an account/app entitlement gap, not a token or code bug.
-
-Consequently `schwab.streaming.mode` must stay `off` until Trader API access is
-granted on the Schwab developer app and GTH/RTH shadow-mode acceptance passes are
-completed. Do not switch it to `shadow` or `live` before that, or the OAuth/
-gateway process will loop on 401 streamer-login retries. REST quote and
-option-chain collection are unaffected by this restriction.
+The deployed Schwab developer app now has Trader API access. Streamer login
+returns `streamerInfo`, the WebSocket subscription is accepted, and ES/MES
+Level-One messages are live. An accepted 160-symbol SPXW subscription produces
+the initial cached option snapshot, but no fresh option update during early
+GTH. This must be reported as an option-coverage gap, not as an OAuth, gateway,
+or whole-provider outage. RTH option streaming remains a separate capability
+and is not disabled by the GTH result.
 
 ### SPXW GTH feed diagnosis
 
@@ -89,6 +86,42 @@ every SPXW `quoteTimeInLong` still ended at 2026-07-10 20:59:59 UTC. The same
 session returned a current `/ESU26` quote. This isolates the failure to Schwab's
 REST SPXW GTH delivery rather than exchange closure, OAuth expiry, HTTP quota,
 or the entire Schwab provider.
+
+The 2026-07-14 GTH session ruled out an application trade-date rollover defect:
+
+- at 20:55 ET on 2026-07-13, `hot_expiry` was `20260714` and all 160 hot symbols
+  used OCC expiry `260714`;
+- the REST request explicitly used `fromDate=2026-07-14` and
+  `toDate=2026-07-14`, and Schwab returned map key `2026-07-14:1` plus
+  `SPXW  260714...` contracts;
+- `:1` is Schwab's calendar-day DTE while the ET wall clock is still July 13.
+  SPX Spark keys the instrument by the explicit expiry date, not this suffix;
+- two 80-contract chain reads 15 seconds apart had zero price changes, zero
+  timestamp changes, and the same `underlyingPrice=7515.34`;
+- the newest Schwab option source time remained 17:00 ET, while IBKR delivered
+  current July 14 SPXW quotes during the same observation.
+
+No documented request variant exposed a hidden GTH quote. Tests of
+`fields=all/quote/extended/regular`, `indicative=true/false`, and chain
+`entitlement=NP/PN/PP` all returned the same frozen pricing. The REST quote
+`extended` section was empty for the SPXW contract. The Schwab Market Hours API
+also described index options only with a `regularMarket` session from 09:30 to
+16:15 ET, while its futures products explicitly included overnight sessions.
+Taken together, the evidence indicates that the Trader API does not distribute
+the complete OPRA GTH index-option session to this retail token. It does not
+show an application symbol, expiry, parser, subscription, or transport failure.
+
+Historical data contains Schwab SPXW updates beginning near 08:00 ET, so the
+last portion of GTH must continue to be measured rather than assumed absent.
+Until five sessions establish a repeatable start time, the supported production
+contract is:
+
+- Schwab ES/MES: live throughout Globex and used as an independent anchor;
+- IBKR SPXW: live GTH bid/ask, mid, IV inputs, and trigger repricing;
+- Schwab SPXW during GTH: frozen structure only, never an executable price;
+- Schwab wide chain during RTH: primary breadth, OI, Greeks, and structure;
+- provider mode: `ibkr_fallback` during GTH when IBKR option coverage passes,
+  with `new_entries_allowed=true`; otherwise fail closed.
 
 The collector reports request receipt time and vendor market time separately:
 
@@ -105,30 +138,26 @@ is explicitly degraded because all priced quotes are stale.
 
 There is no GTH/session request parameter on `/marketdata/v1/chains` or
 `/marketdata/v1/quotes`; increasing REST cadence cannot repair a frozen upstream
-snapshot. The repair path is:
+snapshot. Trader API approval, reauthorization, non-empty `streamerInfo`, and
+live streaming activation are complete. The remaining acceptance path is:
 
-1. Add the Trader API product to the Schwab developer app and reauthorize the
-   account after approval.
-2. Verify `/trader/v1/userPreference` returns non-empty `streamerInfo` through
-   the process-owned client.
-3. Set `schwab.streaming.mode=shadow`. The runtime subscribes
-   `LEVELONE_OPTIONS` for up to 64 current SPXW hot-lane contracts in addition
-   to SPX/ES anchors, and applies hot-plan changes without reconnecting.
-4. During five GTH sessions, require current option source timestamps, nonzero
-   quote updates, bounded gaps/reconnects, and compare prices with IBKR.
-5. Promote to `live` only if the Schwab option stream actually carries GTH. If
-   it is also frozen, retain IBKR as the GTH SPXW source; this is then a Schwab
-   entitlement/product limitation, not an application defect.
+1. Keep the bounded 160-contract SPXW hot lane subscribed through complete GTH
+   sessions without reconnecting when only membership order changes.
+2. During five GTH sessions, measure the first current Schwab option source
+   timestamp, nonzero quote updates, gaps/reconnects, and price parity with IBKR.
+3. Treat Schwab as GTH-price capable only inside empirically current intervals;
+   never infer freshness from HTTP 200, `realtime=true`, or subscription ACK.
+4. Retain IBKR as the GTH SPXW source wherever Schwab remains frozen; this is a
+   Schwab entitlement/product boundary, not an application defect.
 
-The OAuth/gateway process now owns the optional Schwab WebSocket as well as the
-refreshable token. The deployed default is `schwab.streaming.mode=off` (no
-WebSocket thread) until Trader API entitlement exists. When switched to
-`shadow`, it subscribes the configured SPX, SPY, RSP, ES, and MES Level-One
-universe plus the bounded current SPXW hot lane, writes normal raw rows tagged
-`sampling_mode=schwab_stream`, and keeps
-its latest state separate from the production selector. A streaming failure
-therefore cannot take down the local REST gateway or silently switch production
-quotes.
+The OAuth/gateway process now owns the Schwab WebSocket as well as the
+refreshable token. Trader API access is approved and the deployed default is
+`schwab.streaming.mode=live`. It subscribes the configured SPX, SPY, RSP, ES,
+and MES Level-One universe plus the bounded current SPXW hot lane. Gateway
+`/healthz` reports subscription acceptance, per-service message counts, and
+last-message timestamps so transport, ES anchors, and GTH option coverage are
+audited independently. A streaming failure cannot take down the local REST
+gateway.
 
 In `live` mode the REST collector excludes the WebSocket-owned symbols, so the
 slower REST rows cannot overwrite the fast stream lane under the same canonical
@@ -156,15 +185,14 @@ eligible, avoiding a blind position interval merely to probe L1 again.
 
 The remaining rollout order is:
 
-1. Compare Schwab WebSocket source timestamps, gaps, reconnect behavior, and
-   field coverage during both GTH and RTH.
-2. Promote accepted Schwab streaming anchors from `shadow` to `live`.
-3. Reconcile client `172` position shadowing against the temporary client `174`
+1. Complete five-session Schwab WebSocket source-timestamp, gap, reconnect, and
+   field-coverage measurement during GTH and RTH.
+2. Reconcile client `172` position shadowing against the temporary client `174`
    poller for one trading day.
-4. Disable the legacy poller while keeping account visibility and alerts enabled.
-5. Enable automatic IBKR stream control and keep its subscriptions to the
+3. Disable the legacy poller while keeping account visibility and alerts enabled.
+4. Enable automatic IBKR stream control and keep its subscriptions to the
    configured minimal fallback universe.
-6. Add read-only open-order/fill state; order writes remain prohibited until a
+5. Add read-only open-order/fill state; order writes remain prohibited until a
    separate live-execution approval.
 
 The temporary compatibility variable `IBKR_POSITIONS_ENABLED` remains accepted

@@ -5,6 +5,7 @@ from pathlib import Path
 from spx_spark.config import SchwabStreamSettings, StorageSettings
 from spx_spark.schwab.stream_runtime import (
     SchwabStreamRuntime,
+    option_subscription_changed,
     stream_option_symbols,
     stream_storage_settings,
     stream_symbols,
@@ -58,6 +59,13 @@ def test_live_mode_uses_production_latest_state(tmp_path: Path) -> None:
     base = storage(tmp_path)
 
     assert stream_storage_settings(base, stream_settings(tmp_path, mode="live")) is base
+
+
+def test_option_subscription_membership_ignores_order() -> None:
+    current = ["SPXW  260713C07500000", "SPXW  260713P07500000"]
+
+    assert not option_subscription_changed(current, list(reversed(current)))
+    assert option_subscription_changed(current, [current[0]])
 
 
 def test_stream_symbols_split_equity_and_concrete_futures() -> None:
@@ -168,6 +176,14 @@ def test_runtime_flushes_stream_message_to_shadow_storage(tmp_path: Path) -> Non
     assert snapshot.quotes[0].instrument.canonical_id == "index:SPX"
     assert resolved_storage.latest_state_path.endswith("shadow.json")
     assert subscribed_options == [["SPXW  260713C07500000"]]
+    health = runtime.health()
+    assert health["subscribed_option_count"] == 1
+    assert health["option_subscription_accepted_at"] is not None
+    assert health["message_counts"] == {"LEVELONE_EQUITIES": 1}
+    assert health["row_counts"] == {"LEVELONE_EQUITIES": 1}
+    assert health["normalized_quote_counts"] == {"LEVELONE_EQUITIES": 1}
+    assert health["live_quote_counts"] == {"LEVELONE_EQUITIES": 1}
+    assert health["last_source_at"]["LEVELONE_EQUITIES"] is not None
 
 
 def test_runtime_reconnects_and_resubscribes_when_future_contract_changes(

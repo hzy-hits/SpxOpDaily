@@ -1684,11 +1684,6 @@ def test_globex_status_uses_writer_and_trade_delivery(monkeypatch, tmp_path) -> 
     )
     monkeypatch.setattr(
         order_map_module,
-        "render_feishu_status_detail_template",
-        lambda *args: "deterministic research status",
-    )
-    monkeypatch.setattr(
-        order_map_module,
         "generate_push_text",
         lambda *args, **kwargs: ("written globex context", "deepseek"),
     )
@@ -1730,12 +1725,12 @@ def test_globex_status_uses_writer_and_trade_delivery(monkeypatch, tmp_path) -> 
 
     assert result == 0
     assert captured == {
-            "title": "SPX 15分钟市场状态",
+        "title": "SPX 15分钟市场状态",
         "text": "written globex context",
         "kind": "status",
         "lane": "trade",
         "friend": True,
-        "feishu_text": "deterministic research status",
+        "feishu_text": "written globex context",
     }
 
 

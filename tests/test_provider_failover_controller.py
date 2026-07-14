@@ -2,7 +2,14 @@ import json
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
-from spx_spark.marketdata import InstrumentId, MarketDataQuality, Provider, Quote
+from spx_spark.marketdata import (
+    InstrumentId,
+    MarketDataQuality,
+    Provider,
+    ProviderState,
+    ProviderStatus,
+    Quote,
+)
 from spx_spark.provider_failover import (
     FailoverMode,
     FailoverThresholds,
@@ -13,6 +20,7 @@ from spx_spark.provider_failover_controller import (
     ProviderFailoverSettings,
     evaluate_and_persist,
     provider_health,
+    transport_health,
 )
 from spx_spark.storage import LatestState
 
@@ -58,6 +66,32 @@ def settings(tmp_path) -> ProviderFailoverSettings:
             ibkr_unhealthy_observations=2,
         ),
     )
+
+
+def test_transport_health_does_not_reuse_quote_quality_reason() -> None:
+    now = datetime(2026, 7, 13, 14, 0, tzinfo=UTC)
+    state = replace(
+        latest(now),
+        provider_states=(
+            ProviderState(
+                provider=Provider.SCHWAB,
+                status=ProviderStatus.DEGRADED,
+                checked_at=now,
+                reason="connected but all priced quotes are stale",
+                connected=True,
+                authenticated=True,
+            ),
+        ),
+    )
+
+    health = transport_health(
+        state,
+        Provider.SCHWAB,
+        provider_state_max_age_seconds=45.0,
+    )
+
+    assert health.healthy is True
+    assert health.reason == "transport connected and authenticated (degraded)"
 
 
 def test_controller_activates_ibkr_after_confirmed_schwab_failure(tmp_path) -> None:
@@ -156,9 +190,16 @@ def test_controller_rejects_es_only_during_gth(tmp_path) -> None:
     schwab_es = quote(InstrumentId.future("ES"), Provider.SCHWAB, gth)
 
     state = evaluate_and_persist(latest(gth, schwab_es), cfg)
+    raw = json.loads((tmp_path / "failover.json").read_text(encoding="utf-8"))
 
     assert state.schwab_unhealthy_streak == 1
     assert "GTH SPXW coverage 0/2" in state.last_schwab_reason
+    assert raw["health_dimensions"]["schwab"]["anchors"]["healthy"] is True
+    assert raw["health_dimensions"]["schwab"]["gth_options"] == {
+        "healthy": False,
+        "required": True,
+        "reason": "GTH SPXW coverage 0/2 contracts, 0/1 complete pairs",
+    }
 
 
 def test_outside_rth_resets_prior_mode_streaks_and_transition(tmp_path) -> None:

@@ -288,16 +288,31 @@ def provider_failover_event_alert(
     transition = failover_state.transition
     if transition is None or transition.transition_id == previous_transition_id:
         return None
+    gth_option_gap = any(
+        "GTH " in str(reason or "")
+        for reason in (failover_state.last_schwab_reason, failover_state.last_ibkr_reason)
+    )
     if transition.mode == FailoverMode.IBKR_FALLBACK:
+        title = (
+            "Schwab GTH SPXW 报价不足，IBKR 期权备用已接管"
+            if gth_option_gap
+            else "Schwab 异常，IBKR 备用行情已接管"
+        )
+        detail = (
+            "Schwab 连接和 ES 锚可能仍正常，但 GTH SPXW 覆盖未通过定价门；"
+            "系统已改用 IBKR 期权报价，交易闸门继续按期权覆盖判断。"
+            if gth_option_gap
+            else (
+                "SPX/ES 直接行情已切换到 IBKR L1 备用通道；"
+                "系统保持风控，但不会因为切换本身反复推送离线消息。"
+            )
+        )
         return Alert(
             severity="high",
             kind="market_data_ibkr_fallback_activated",
             instrument_id="index:SPX",
-            title="Schwab 异常，IBKR 备用行情已接管",
-            detail=(
-                "SPX/ES 直接行情已切换到 IBKR L1 备用通道；"
-                "系统保持风控，但不会因为切换本身反复推送离线消息。"
-            ),
+            title=title,
+            detail=detail,
             provider=Provider.IBKR.value,
             quality=failover_state.mode.value,
             research_only=False,
@@ -305,12 +320,23 @@ def provider_failover_event_alert(
             dedup_group=transition.transition_id,
         )
     if transition.mode == FailoverMode.BOTH_UNAVAILABLE:
+        title = (
+            "Schwab/IBKR 的 GTH SPXW 报价均不可用"
+            if gth_option_gap
+            else "Schwab 与 IBKR 直接行情均不可用"
+        )
+        detail = (
+            "ES 连续行情可能仍正常，但两个来源都未提供足够的新鲜 SPXW call/put 对；"
+            "期权定价和新开仓闸门关闭，只允许核对已有仓位。"
+            if gth_option_gap
+            else "两个直接行情源均未通过健康门；禁止新开仓，只允许人工核对和已有仓位处置。"
+        )
         return Alert(
             severity="critical",
             kind="market_data_all_providers_unavailable",
             instrument_id="index:SPX",
-            title="Schwab 与 IBKR 直接行情均不可用",
-            detail="两个直接行情源均未通过健康门；禁止新开仓，只允许人工核对和已有仓位处置。",
+            title=title,
+            detail=detail,
             provider=Provider.INTERNAL.value,
             quality=failover_state.mode.value,
             research_only=False,
@@ -323,8 +349,16 @@ def provider_failover_event_alert(
             # transition for audit, but do not page a self-healed health probe.
             return None
         if transition.previous_mode == FailoverMode.BOTH_UNAVAILABLE:
-            title = "Schwab 连续稳定，主行情已恢复"
-            detail = "Schwab 锚点连续通过健康门，双源不可用状态已解除。"
+            title = (
+                "Schwab GTH SPXW 报价恢复"
+                if gth_option_gap
+                else "Schwab 连续稳定，主行情已恢复"
+            )
+            detail = (
+                "Schwab SPXW call/put 覆盖连续通过定价门，新开仓闸门已恢复。"
+                if gth_option_gap
+                else "Schwab 锚点连续通过健康门，双源不可用状态已解除。"
+            )
         else:
             title = "Schwab 连续稳定，主行情已恢复"
             detail = "Schwab SPX/ES 锚点连续通过健康门，系统已退出 IBKR 备用行情状态。"
@@ -485,4 +519,3 @@ def proxy_fallback_watch_alerts(
             source_gate="hyperliquid_proxy_unanchored",
         )
     ]
-

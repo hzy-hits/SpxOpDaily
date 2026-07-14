@@ -408,8 +408,17 @@ def render_research_only_template(
         if isinstance(payload.get("pricing_reference"), dict)
         else {}
     )
+    expiry = str(payload.get("expiry") or "-")
+    expiry_text = f"{expiry[4:6]}-{expiry[6:8]}" if len(expiry) == 8 else expiry
+    phase = payload.get("session_phase")
+    phase_name = str(phase.get("name_cn") or "盘外") if isinstance(phase, dict) else "盘外"
+    header = (
+        f"【SPX 15m｜{payload.get('beijing_time') or '-'}｜0DTE {expiry_text}｜{phase_name}】"
+        if title == "市场状态"
+        else f"【{title} {payload.get('beijing_time') or '-'}】(0DTE={expiry})"
+    )
     lines = [
-        f"【{title} {payload.get('beijing_time') or '-'}】(0DTE={payload.get('expiry') or '-'})",
+        header,
         (f"跨市场参考: {_dash(reference.get('price'))}({reference.get('source') or '-'})"),
     ]
     if line := _globex_trend_line(payload):

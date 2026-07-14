@@ -92,13 +92,19 @@ def sample_payload() -> dict:
     }
 
 
+def test_post_close_runtime_imports_independently() -> None:
+    from spx_spark.post_close_runtime import ReviewLlmSettings
+
+    assert ReviewLlmSettings.__name__ == "ReviewLlmSettings"
+
+
 def test_build_push_summary_format() -> None:
     summary = build_push_summary(sample_payload(), latest_markdown_path="/tmp/review.md")
     first_line = summary.splitlines()[0]
     assert "【盘后复盘 2026-07-07】" in first_line
     assert "5950" in summary
     assert "6050" in summary
-    assert "完整报告: /tmp/review.md" in summary
+    assert "完整报告已附在飞书卡片下方" in summary
 
 
 def test_push_review_respects_disabled_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -124,16 +130,56 @@ def test_push_review_agent_fallback(tmp_path, monkeypatch: pytest.MonkeyPatch) -
     summary = build_push_summary(payload, latest_markdown_path="/tmp/review.md")
     settings = make_settings(str(tmp_path / "notify-state.json"), agent_enabled=True)
 
-    def runner(command: list[str], timeout_seconds: float) -> subprocess.CompletedProcess[str]:
-        if command[:2] == ["openclaw", "agent"]:
-            return subprocess.CompletedProcess(command, 1, stdout="", stderr="agent failed")
-        return subprocess.CompletedProcess(command, 0, stdout='{"ok":true}', stderr="")
-
     monkeypatch.setattr(
         "spx_spark.post_close_review.NotificationSettings.from_env",
         lambda: settings,
     )
-    result = push_review(payload, latest_markdown_path="/tmp/review.md", runner=runner)
+    monkeypatch.setattr(
+        "spx_spark.post_close_runtime.generate_push_text",
+        lambda template, prompt, settings, **kwargs: (template, "template"),
+    )
+    result = push_review(payload, latest_markdown_path="/tmp/review.md")
     assert result["used_agent"] is False
+    assert result["writer"] == "template"
     assert result["text"] == summary
     assert result["im_ok"] is True
+
+
+def test_push_review_uses_writer_and_attaches_full_report(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("SPX_REVIEW_PUSH_ENABLED", raising=False)
+    settings = make_settings(str(tmp_path / "notify-state.json"))
+    cards: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        "spx_spark.post_close_review.NotificationSettings.from_env",
+        lambda: settings,
+    )
+    monkeypatch.setattr(
+        "spx_spark.post_close_runtime.generate_push_text",
+        lambda template, prompt, settings, **kwargs: (
+            "【盘后复盘 2026-07-07】\n\n## 今日结论\n墙位失效，IV 回落。",
+            "grok_cli",
+        ),
+    )
+    monkeypatch.setattr(
+        "spx_spark.notifier.sinks.post_feishu",
+        lambda url, payload, timeout: cards.append(payload) or {"code": 0, "msg": "success"},
+    )
+
+    result = push_review(
+        sample_payload(),
+        latest_markdown_path="/tmp/review.md",
+        full_markdown="# Full Review\n\n## Price Path\n完整价格路径",
+    )
+
+    assert result["writer"] == "grok_cli"
+    assert result["used_agent"] is True
+    card_text = "\n".join(
+        str(item.get("content") or "")
+        for item in cards[0]["card"]["body"]["elements"]
+        if isinstance(item, dict)
+    )
+    assert "墙位失效" in card_text
+    assert "完整价格路径" in card_text

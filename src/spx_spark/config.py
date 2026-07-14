@@ -277,10 +277,7 @@ class SchwabStreamSettings:
         return cls(
             mode=env_str(
                 "SCHWAB_STREAMING_MODE",
-                env_str(
-                    "SCHWAB_STREAM_MODE",
-                    str(settings_value("schwab.streaming.mode")),
-                ),
+                str(settings_value("schwab.streaming.mode")),
             ).lower(),
             canonical_symbols=tuple(
                 symbol.upper()
@@ -534,7 +531,7 @@ class NotificationSettings:
     grok_deliver: bool = field(default_factory=lambda: True)
     grok_command: str = field(default_factory=lambda: "agent")
     grok_model: str = field(default_factory=lambda: "grok-4.5")
-    grok_reasoning_effort: str = field(default_factory=lambda: "high")
+    grok_reasoning_effort: str = field(default_factory=lambda: "medium")
     grok_cwd: str = field(default_factory=lambda: ".")
     grok_timeout_seconds: float = field(default_factory=lambda: 120.0)
     grok_output_max_chars: int = field(default_factory=lambda: 6400)

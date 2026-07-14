@@ -12,6 +12,7 @@ Environment=PATH=/home/ubuntu/.local/bin:/home/ubuntu/.cargo/bin:/usr/local/bin:
 ExecStart=/home/ubuntu/spx-spark/scripts/run-schwab-oauth.sh serve
 Restart=always
 RestartSec=10
+SuccessExitStatus=143 SIGTERM
 UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true

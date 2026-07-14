@@ -31,7 +31,6 @@ from spx_spark.application.order_map.prompts import (
     actionable_writer_output_valid,
     build_status_prompt,
     globex_writer_output_valid,
-    render_feishu_status_detail_template,
     render_status_template,
 )
 from spx_spark.application.order_map.pricing_audit import (
@@ -509,7 +508,6 @@ def run_status(
     fingerprint = payload_fingerprint(payload)
     changes = material_changes(previous.get("fingerprint"), fingerprint)
     template = render_status_template(payload, changes, now)
-    feishu_template = render_feishu_status_detail_template(payload, changes, now)
 
     if args.dry_run:
         print(template)
@@ -540,7 +538,7 @@ def run_status(
         kind="status",
         lane="trade",
         friend=True,
-        feishu_text=feishu_template,
+        feishu_text=text,
         runner=runner,
     )
     delivered_ok = any_delivery_ok(delivery_sinks)

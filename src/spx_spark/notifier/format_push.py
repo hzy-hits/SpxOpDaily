@@ -107,6 +107,49 @@ def _status_card_parts(markdown: str) -> tuple[str, list[dict[str, Any]], str] |
     return header.group(1), elements, _status_card_template(markdown)
 
 
+def _sectioned_card_parts(
+    markdown: str,
+    *,
+    fallback_title: str,
+    template: str,
+) -> tuple[str, list[dict[str, Any]], str] | None:
+    """Split writer Markdown into consistent, scannable Feishu sections."""
+
+    lines = markdown.strip().splitlines()
+    if not lines or not any(line.startswith("## ") for line in lines):
+        return None
+    header_title = fallback_title
+    first = lines[0].strip()
+    if first.startswith("【") and first.endswith("】"):
+        header_title = first.removeprefix("【").removesuffix("】")
+        lines = lines[1:]
+    elif first.startswith("# "):
+        header_title = first.removeprefix("# ").strip()
+        lines = lines[1:]
+
+    blocks: list[list[str]] = []
+    current: list[str] = []
+    for raw in lines:
+        line = raw.rstrip()
+        if line.startswith("## ") and current:
+            blocks.append(current)
+            current = []
+        if line or current:
+            current.append(line)
+    if current:
+        blocks.append(current)
+
+    elements: list[dict[str, Any]] = []
+    for index, block in enumerate(blocks):
+        content = "\n".join(block).strip()
+        if not content:
+            continue
+        if index:
+            elements.append({"tag": "hr"})
+        elements.append({"tag": "markdown", "content": content, "text_align": "left"})
+    return header_title, elements, template
+
+
 def strip_markdown_light(text: str) -> str:
     """Enough to make a lockscreen line readable without raw ** markers."""
     lines: list[str] = []
@@ -201,6 +244,12 @@ def build_feishu_card(
     ]
     if status_parts is not None:
         header_title, body_elements, template = status_parts
+    elif sectioned := _sectioned_card_parts(
+        content,
+        fallback_title=header_title,
+        template=template,
+    ):
+        header_title, body_elements, template = sectioned
     if len(header_title) > 50:
         header_title = header_title[:49] + "…"
     return {

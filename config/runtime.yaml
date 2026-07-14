@@ -75,7 +75,7 @@ provider_failover:
     description: Enables automatic Schwab-primary health evaluation and IBKR market-data fallback control.
   control_ibkr_stream_enabled:
     value: false
-    description: Lets automatic failover start and stop IBKR market-data subscriptions; kept false until Schwab WebSocket shadow acceptance is complete.
+    description: Lets automatic failover start and stop IBKR market-data subscriptions; kept false until IBKR subscription-control acceptance is complete.
   state_path:
     value: ""
     description: Optional failover control-state path; empty stores provider_failover_state.json under the configured data latest directory.
@@ -293,8 +293,8 @@ schwab:
         description: Spot drift that invalidates the current SPXW option-symbol plan.
   streaming:
     mode:
-      value: "off"
-      description: Schwab WebSocket activation mode; off disables it, shadow persists a separate latest state, and live may update production latest state after RTH acceptance. Must stay off while the Schwab developer app only has Market Data product access (no Trader API/streamerInfo entitlement); see docs/schwab-primary-ibkr-fallback.md.
+      value: live
+      description: Schwab WebSocket activation mode; the approved Trader API app now runs live for ES/MES anchors and bounded SPXW subscription verification.
     canonical_symbols:
       value: [SPX, SPY, RSP, ES, MES]
       description: Small direct-anchor and breadth universe subscribed through Schwab Level-One streaming; futures roots resolve to concrete active contracts.
@@ -1153,7 +1153,7 @@ notification:
     value: grok-4.5
     description: Model passed to the local Grok agent CLI.
   grok_reasoning_effort:
-    value: high
+    value: medium
     description: Reasoning effort passed to the local Grok agent CLI.
   grok_cwd:
     value: "."
@@ -1596,13 +1596,13 @@ order_map_policy:
 
 review:
   llm_enabled:
-    value: false
+    value: true
     description: Enables LLM narrative generation for post-close review.
   llm_provider:
-    value: deepseek
+    value: grok_cli
     description: Provider label for post-close review LLM calls.
   llm_model:
-    value: deepseek-v4-pro
+    value: grok-4.5
     description: Model name for post-close review LLM calls.
   llm_url:
     value: https://api.deepseek.com/v1/chat/completions

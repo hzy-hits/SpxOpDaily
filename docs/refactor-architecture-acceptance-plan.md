@@ -1453,10 +1453,10 @@ Schwab 的可实施详细设计已经独立为
 
 ### 18.1 当前能力边界
 
-Schwab 当前已验证 Market Data REST endpoints 可访问，`/marketdata/v1/quotes` 和
-`/marketdata/v1/chains` 返回成功。当前部署没有 Schwab WebSocket live stream:
-developer app 只有 Market Data product，缺少 Trader API `/trader/v1/userPreference`
-中的 `streamerInfo` entitlement，因此 `schwab.streaming.mode` 必须保持 `off`。
+Schwab 的 Market Data REST endpoints 和 Trader API streamer login 均已验证。
+当前部署运行 WebSocket live stream，ES/MES 已收到连续 Level-One 消息；SPXW
+订阅虽然被接受，但 RTH/GTH option message 仍为零，因此单独标记为期权覆盖缺口，
+不得扩大解释成 OAuth、gateway 或整个 Schwab provider 故障。
 
 项目目前把 Schwab operational ceiling 配置为:
 

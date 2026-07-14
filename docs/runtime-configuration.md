@@ -132,12 +132,11 @@ process. `shadow` writes a separate latest-state file for RTH comparison,
 `live` feeds the production latest-state selector, and `off` creates no
 WebSocket thread. Live-owned symbols are removed from the slower REST quote
 batch, and `symbol_refresh_interval_seconds` controls active ES/MES contract
-re-resolution for quarterly rollover. The default is `off`: the deployed
-Schwab developer app currently has Market Data product access only, without
-Trader API entitlement, so the streamer login (`/trader/v1/userPreference`)
-returns `401` even though REST quotes succeed. See
-[schwab-primary-ibkr-fallback.md](schwab-primary-ibkr-fallback.md) before
-changing this to `shadow` or `live`.
+re-resolution for quarterly rollover. The deployed default is `live`: Trader
+API streamer login is approved and ES/MES messages are production inputs.
+SPXW option coverage remains an independent health dimension; a connected
+WebSocket does not imply that GTH option quotes are available. See
+[schwab-primary-ibkr-fallback.md](schwab-primary-ibkr-fallback.md).
 
 Every setting consumed with `runtime_value("path.to.setting")` must have both
 `value` and `description`. The architecture tests reject new literal defaults

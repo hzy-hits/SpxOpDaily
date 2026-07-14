@@ -131,3 +131,37 @@ def test_stream_assembler_ignores_unknown_services_and_price_less_rows() -> None
     )
 
     assert assembler.drain_snapshot() is None
+
+
+def test_stream_assembler_evicts_options_outside_current_hot_window() -> None:
+    now = datetime(2026, 7, 13, 14, 0, tzinfo=UTC)
+    assembler = SchwabStreamQuoteAssembler(stale_after_seconds=15.0)
+    retained = "SPXW  260713C07500000"
+    expired = "SPXW  260713P07500000"
+    assembler.ingest(
+        {
+            "service": "LEVELONE_OPTIONS",
+            "content": [
+                {"key": retained, "MARK": 10.0},
+                {"key": expired, "MARK": 11.0},
+            ],
+        },
+        received_at=now,
+    )
+
+    assert assembler.retained_symbol_counts() == {"LEVELONE_OPTIONS": 2}
+    assert assembler.retain_option_symbols([retained]) == 1
+    assert assembler.retained_symbol_counts() == {"LEVELONE_OPTIONS": 1}
+
+    assert assembler.ingest(
+        {
+            "service": "LEVELONE_OPTIONS",
+            "content": [{"key": expired, "MARK": 12.0}],
+        },
+        received_at=now + timedelta(seconds=1),
+    ) == 0
+    assert assembler.retained_symbol_counts() == {"LEVELONE_OPTIONS": 1}
+
+    snapshot = assembler.drain_snapshot()
+    assert snapshot is not None
+    assert [quote.provider_symbol for quote in snapshot.quotes] == [retained]

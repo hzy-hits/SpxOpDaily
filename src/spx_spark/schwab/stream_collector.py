@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Mapping
 from datetime import datetime, timezone
 from threading import Lock
@@ -38,7 +39,31 @@ class SchwabStreamQuoteAssembler:
         self._rows: dict[tuple[str, str], dict[str, Any]] = {}
         self._received_at: dict[tuple[str, str], datetime] = {}
         self._dirty: set[tuple[str, str]] = set()
+        self._option_symbols: set[str] | None = None
         self._lock = Lock()
+
+    def retain_option_symbols(self, symbols: list[str]) -> int:
+        """Evict option deltas after the hot subscription window rotates."""
+
+        retained = {symbol.strip().upper() for symbol in symbols if symbol.strip()}
+        with self._lock:
+            self._option_symbols = retained
+            expired = [
+                key
+                for key in self._rows
+                if key[0] == "LEVELONE_OPTIONS" and key[1] not in retained
+            ]
+            for key in expired:
+                self._rows.pop(key, None)
+                self._received_at.pop(key, None)
+                self._dirty.discard(key)
+            return len(expired)
+
+    def retained_symbol_counts(self) -> dict[str, int]:
+        """Expose bounded cache size for health checks without leaking symbols."""
+
+        with self._lock:
+            return dict(Counter(service for service, _symbol in self._rows))
 
     def ingest(
         self,
@@ -60,6 +85,12 @@ class SchwabStreamQuoteAssembler:
                     continue
                 symbol = str(item.get("SYMBOL") or item.get("key") or "").strip().upper()
                 if not symbol:
+                    continue
+                if (
+                    service == "LEVELONE_OPTIONS"
+                    and self._option_symbols is not None
+                    and symbol not in self._option_symbols
+                ):
                     continue
                 key = (service, symbol)
                 merged = dict(self._rows.get(key, {}))

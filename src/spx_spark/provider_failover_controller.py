@@ -130,6 +130,37 @@ class ProviderHealth:
     reason: str
 
 
+def transport_health(
+    state: LatestState,
+    provider: Provider,
+    *,
+    provider_state_max_age_seconds: float,
+) -> ProviderHealth:
+    provider_states = [item for item in state.provider_states if item.provider == provider]
+    if not provider_states:
+        return ProviderHealth(False, "provider state missing")
+    latest = max(provider_states, key=lambda item: item.checked_at)
+    age_seconds = (as_utc(state.as_of) - as_utc(latest.checked_at)).total_seconds()
+    if not 0 <= age_seconds <= provider_state_max_age_seconds:
+        return ProviderHealth(False, f"provider state age {age_seconds:.1f}s")
+    if latest.connected is False:
+        return ProviderHealth(False, latest.reason or "transport disconnected")
+    if latest.authenticated is False:
+        return ProviderHealth(False, latest.reason or "provider authentication failed")
+    return ProviderHealth(
+        True,
+        f"transport connected and authenticated ({latest.status.value})",
+    )
+
+
+def health_payload(health: ProviderHealth, *, required: bool = True) -> dict[str, object]:
+    return {
+        "healthy": health.healthy,
+        "required": required,
+        "reason": health.reason,
+    }
+
+
 def load_failover_state(path: str | Path, *, now: datetime) -> FailoverState:
     state_path = Path(path)
     try:
@@ -155,6 +186,7 @@ def save_failover_state(
     *,
     monitoring_active: bool,
     monitoring_context: str = "closed",
+    health_dimensions: dict[str, object] | None = None,
 ) -> None:
     payload = state.to_dict()
     payload["monitoring_active"] = monitoring_active
@@ -166,6 +198,8 @@ def save_failover_state(
         monitoring_active
         and state.mode in {FailoverMode.SCHWAB_PRIMARY, FailoverMode.IBKR_FALLBACK}
     )
+    if health_dimensions is not None:
+        payload["health_dimensions"] = health_dimensions
     atomic_write_json_secure(Path(path), payload)
 
 
@@ -336,35 +370,51 @@ def evaluate_and_persist(
         else settings.globex_required_instruments
     )
 
-    schwab = provider_health(
+    schwab_transport = transport_health(
+        latest,
+        Provider.SCHWAB,
+        provider_state_max_age_seconds=settings.provider_state_max_age_seconds,
+    )
+    ibkr_transport = transport_health(
+        latest,
+        Provider.IBKR,
+        provider_state_max_age_seconds=settings.provider_state_max_age_seconds,
+    )
+    schwab_anchors = provider_health(
         latest,
         Provider.SCHWAB,
         required_instruments=required_instruments,
         provider_state_max_age_seconds=settings.provider_state_max_age_seconds,
         quote_max_age_seconds=settings.quote_max_age_seconds,
     )
-    ibkr = provider_health(
+    ibkr_anchors = provider_health(
         latest,
         Provider.IBKR,
         required_instruments=required_instruments,
         provider_state_max_age_seconds=settings.provider_state_max_age_seconds,
         quote_max_age_seconds=settings.quote_max_age_seconds,
     )
+    schwab_options = ProviderHealth(True, "not required outside GTH")
+    ibkr_options = ProviderHealth(True, "not required outside GTH")
     if context == "gth":
-        if schwab.healthy:
-            schwab = gth_option_health(
-                latest,
-                Provider.SCHWAB,
-                min_contracts=settings.gth_min_live_option_contracts,
-                quote_max_age_seconds=settings.quote_max_age_seconds,
-            )
-        if ibkr.healthy:
-            ibkr = gth_option_health(
-                latest,
-                Provider.IBKR,
-                min_contracts=settings.gth_min_live_option_contracts,
-                quote_max_age_seconds=settings.quote_max_age_seconds,
-            )
+        schwab_options = gth_option_health(
+            latest,
+            Provider.SCHWAB,
+            min_contracts=settings.gth_min_live_option_contracts,
+            quote_max_age_seconds=settings.quote_max_age_seconds,
+        )
+        ibkr_options = gth_option_health(
+            latest,
+            Provider.IBKR,
+            min_contracts=settings.gth_min_live_option_contracts,
+            quote_max_age_seconds=settings.quote_max_age_seconds,
+        )
+    schwab = (
+        schwab_options
+        if context == "gth" and schwab_anchors.healthy
+        else schwab_anchors
+    )
+    ibkr = ibkr_options if context == "gth" and ibkr_anchors.healthy else ibkr_anchors
     updated = advance_failover(
         current,
         FailoverObservation(
@@ -381,6 +431,24 @@ def evaluate_and_persist(
         updated,
         monitoring_active=True,
         monitoring_context=context,
+        health_dimensions={
+            "schwab": {
+                "transport": health_payload(schwab_transport),
+                "anchors": health_payload(schwab_anchors),
+                "gth_options": health_payload(
+                    schwab_options,
+                    required=context == "gth",
+                ),
+            },
+            "ibkr": {
+                "transport": health_payload(ibkr_transport),
+                "anchors": health_payload(ibkr_anchors),
+                "gth_options": health_payload(
+                    ibkr_options,
+                    required=context == "gth",
+                ),
+            },
+        },
     )
     return updated
 
@@ -397,7 +465,7 @@ def run(argv: list[str] | None = None) -> int:
     latest = LatestStateStore(StorageSettings.from_env()).load()
     state = evaluate_and_persist(latest, settings)
     if args.json:
-        payload = state.to_dict()
+        payload = load_failover_control(settings.state_path) or state.to_dict()
         monitoring_active = bool(
             settings.enabled
             and monitoring_active_at(
@@ -405,17 +473,21 @@ def run(argv: list[str] | None = None) -> int:
                 rth_only=settings.monitor_rth_only,
             )
         )
-        payload["monitoring_active"] = monitoring_active
-        payload["monitoring_context"] = monitoring_context_at(
-            latest.as_of,
-            rth_only=settings.monitor_rth_only,
+        payload.setdefault("monitoring_active", monitoring_active)
+        payload.setdefault(
+            "monitoring_context",
+            monitoring_context_at(latest.as_of, rth_only=settings.monitor_rth_only),
         )
-        payload["ibkr_market_data_required"] = bool(
-            monitoring_active and state.ibkr_market_data_required
+        payload.setdefault(
+            "ibkr_market_data_required",
+            bool(monitoring_active and state.ibkr_market_data_required),
         )
-        payload["new_entries_allowed"] = bool(
-            monitoring_active
-            and state.mode in {FailoverMode.SCHWAB_PRIMARY, FailoverMode.IBKR_FALLBACK}
+        payload.setdefault(
+            "new_entries_allowed",
+            bool(
+                monitoring_active
+                and state.mode in {FailoverMode.SCHWAB_PRIMARY, FailoverMode.IBKR_FALLBACK}
+            ),
         )
         print(json.dumps(payload, sort_keys=True))
     return 0

@@ -51,12 +51,20 @@ _GLOBEX_FORBIDDEN_PHRASES = (
     "gamma 燃料",
     "卖方收工",
     "真金白银",
+    "JSON 中部被截断",
+    "补齐 JSON",
+    "完整 JSON",
+    "I need the full JSON",
+    "I'll pull",
 )
 
 
 def globex_writer_output_valid(text: str, template: str) -> bool:
     """Reject invented prices and causal decoration in an off-hours brief."""
     if any(phrase in text for phrase in _GLOBEX_FORBIDDEN_PHRASES):
+        return False
+    template_header = template.splitlines()[0].strip() if template.strip() else ""
+    if template_header.startswith("【SPX 15m｜") and not text.startswith(template_header):
         return False
     allowed = [float(value) for value in _NUMBER_PATTERN.findall(template)]
     for raw in _NUMBER_PATTERN.findall(text):
@@ -592,17 +600,20 @@ def build_status_prompt(
     template: str,
     previous_push: dict[str, Any] | None = None,
 ) -> str:
-    writer_payload = {key: value for key, value in payload.items() if not key.startswith("_")}
+    writer_payload = _status_writer_payload(payload)
     if payload.get("research_only") is True:
         return "\n".join(
             (
                 "这是每 15 分钟一次的 SPX 市场状态。非 RTH 并非无行情：ES-basis SPX 代理是关键位状态机的主参考，ES 是连续锚，Hyperliquid 是次级交叉验证。",
-                "请像交易接班便签一样写，不要复述 JSON。先用 globex_trend 和 minute_market_frame 的路径、VWAP、量价与联动定义当前偏多/偏空/中性，再结合 option_structure_frame 判断代理 SPX 在 Put Wall、Flip、Call Wall 的位置与 FAR/APPROACHING/TESTING/CONFIRMED 阶段。",
+                "请像交易接班便签一样写，不要复述 JSON。模板已经包含经过舍入的 ES 路径、VWAP、量价、联动和墙位；"
+                "用这些可见事实定义当前偏多/偏空/中性，并判断代理 SPX 在 Put Wall、Flip、Call Wall 的阶段。",
                 "必须给一个主情景，以及升级到 breakout/fade 所需的具体确认条件和证伪条件。结构若来自上一 RTH，要明确结构日期与质量，不得把旧 OI 当成今天新链。",
                 "夜盘可做方向与关键位准备，不许写『等开盘再说』。但现金 SPX 与新 0DTE 链不可用时，不得编造 Greeks、期权模型价、限价、触达概率、ETA 或直接下单指令。",
                 "SPX levels 与 es_equivalent_levels 是两个坐标系。谈 ES 阈值只能逐字引用 es_equivalent_levels，严禁把 SPX strike 当 ES 价格，也不得自行换算。",
                 "不得推断输入中没有的历史触碰次数、墙是否弃守、dealer 行为或 gamma 燃料。避免比喻，用结构、价格和条件直接表达。",
-                "输出中文并清晰分段，首行以『市场状态:』开头；只保留改变决策的数字。末行说明下一条最值得盯的代理价格及改变判断的阈值。",
+                "输出中文且总共不超过 16 行，首行逐字保留模板标题；使用 ## 结论、## 位置与路径、## 双向条件、## 数据限制四段，"
+                "每段最多 3 条短句。只允许引用模板中已经出现的数字，禁止输出 JSON 字段名、高精度小数或补算新数字。"
+                "末行说明下一条最值得盯的代理价格及改变判断的阈值。",
                 "previous_push:" + previous_push_json(previous_push),
                 "JSON:" + json.dumps(writer_payload, ensure_ascii=False, separators=(",", ":")),
                 "模板:" + template,
@@ -628,3 +639,40 @@ def build_status_prompt(
             "模板:" + template,
         )
     )
+
+
+def _status_writer_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Keep status prompts bounded so the CLI behaves like a one-shot LLM API."""
+
+    keys = (
+        "beijing_time",
+        "expiry",
+        "session_phase",
+        "research_only",
+        "analysis_mode",
+        "pricing_reference",
+        "level_decision",
+        "regime_decision",
+        "breakout_filter",
+        "warnings",
+    )
+    compact = {key: payload.get(key) for key in keys if key in payload}
+    candidates = payload.get("candidates")
+    if isinstance(candidates, list):
+        candidate_keys = (
+            "play",
+            "level_label",
+            "level",
+            "strike",
+            "right",
+            "prob_touch",
+            "projection_range_low",
+            "projection_range_high",
+            "execution_quote_status",
+        )
+        compact["candidates"] = [
+            {key: item.get(key) for key in candidate_keys if key in item}
+            for item in candidates[:2]
+            if isinstance(item, dict)
+        ]
+    return compact

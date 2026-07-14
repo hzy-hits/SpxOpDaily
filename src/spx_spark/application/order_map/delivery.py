@@ -76,7 +76,7 @@ def send_order_map(
     return {
         "text": text,
         "writer": writer,
-        "used_agent": writer in {"deepseek", "openclaw_agent"},
+        "used_agent": writer in {"grok_cli", "deepseek", "openclaw_agent"},
         "im_ok": any(s.sink == "feishu" and s.ok for s in delivery_sinks),
         "bark_ok": any(s.sink == "bark" and s.ok for s in delivery_sinks),
         "feishu_ok": any(s.sink == "feishu" and s.ok for s in delivery_sinks),

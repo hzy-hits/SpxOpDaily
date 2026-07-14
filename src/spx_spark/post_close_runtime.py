@@ -13,23 +13,17 @@ from pathlib import Path
 from typing import Any
 
 from spx_spark.config import NotificationSettings, StorageSettings, env_bool, load_dotenv
-from spx_spark.notifier.llm_writer import DEFAULT_SYSTEM_PROMPT
+from spx_spark.notifier.llm_writer import DEFAULT_SYSTEM_PROMPT, generate_push_text
 from spx_spark.notifier.missed_queue import append_missed
 from spx_spark.notifier.model import CommandRunner, default_runner
 from spx_spark.notifier.sinks import (
     any_delivery_ok,
     deliver_trade_push,
     im_delivery_failed,
-    run_openclaw_agent,
 )
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR, ET, MarketCalendar
 from spx_spark.post_close_render import fmt, render_markdown
 from spx_spark.settings import settings_value
-from spx_spark.post_close_review import (
-    build_review_payload,
-)
-
-
 @dataclass(frozen=True)
 class ReviewPaths:
     report_dir: Path
@@ -240,20 +234,44 @@ def maybe_write_llm_review(
     }
     if not settings.enabled:
         return deterministic_markdown
-    if settings.provider.lower() != "deepseek":
+    if settings.provider.lower() in {"grok", "grok_cli"}:
+        notification_settings = NotificationSettings.from_env()
+        markdown, writer = generate_push_text(
+            deterministic_markdown,
+            build_llm_writer_prompt(payload, deterministic_markdown),
+            notification_settings,
+            system=DEFAULT_SYSTEM_PROMPT,
+        )
+        payload["llm_writer"].update(
+            {
+                "provider": writer,
+                "model": (
+                    notification_settings.grok_model
+                    if writer == "grok_cli"
+                    else settings.model
+                ),
+            }
+        )
+        if writer == "template" or not markdown:
+            payload["llm_writer"]["status"] = "fallback_template"
+            payload["llm_writer"]["error"] = "all configured writers failed"
+            return deterministic_markdown
+        payload["llm_writer"]["status"] = "ok"
+    elif settings.provider.lower() == "deepseek":
+        # Resolve through the compatibility facade so existing integrations can
+        # replace the writer without importing this runtime module directly.
+        from spx_spark import post_close_review as facade
+
+        markdown, error = facade.call_deepseek_writer(payload, deterministic_markdown, settings)
+        if error or not markdown:
+            payload["llm_writer"]["status"] = "fallback_template"
+            payload["llm_writer"]["error"] = error or "empty response"
+            return deterministic_markdown
+        payload["llm_writer"]["status"] = "ok"
+    else:
         payload["llm_writer"]["status"] = "fallback_template"
         payload["llm_writer"]["error"] = f"unsupported provider: {settings.provider}"
         return deterministic_markdown
-    # Resolve through the compatibility facade so existing integrations can
-    # replace the writer without importing this runtime module directly.
-    from spx_spark import post_close_review as facade
-
-    markdown, error = facade.call_deepseek_writer(payload, deterministic_markdown, settings)
-    if error or not markdown:
-        payload["llm_writer"]["status"] = "fallback_template"
-        payload["llm_writer"]["error"] = error or "empty response"
-        return deterministic_markdown
-    payload["llm_writer"]["status"] = "ok"
     expected_title = f"# SPX/SPXW Post-Close Review - {payload.get('trading_date')}"
     narrative = markdown.strip()
     if narrative.startswith(expected_title):
@@ -386,22 +404,33 @@ def build_push_summary(payload: dict[str, Any], *, latest_markdown_path: str) ->
         ),
         f"ATM IV: {atm_iv_text}, put skew: {put_skew_text}",
         f"数据: {status}{warning_text}",
-        f"完整报告: {latest_markdown_path}",
+        "完整报告已附在飞书卡片下方",
     ]
     return "\n".join(lines)
 
 
 def build_review_push_prompt(payload: dict[str, Any], summary: str) -> str:
+    compact = {
+        "trading_date": payload.get("trading_date"),
+        "coverage": payload.get("coverage"),
+        "verdict": payload.get("verdict"),
+        "spx": payload.get("spx"),
+        "es": payload.get("es"),
+        "iv_surface": payload.get("iv_surface"),
+        "spxw_0dte_greeks_reference": payload.get("spxw_0dte_greeks_reference"),
+        "llm_writer": payload.get("llm_writer"),
+    }
     return "\n".join(
         (
             "收盘了，给刚睡醒或还没睡的搭档发一条当日收盘便签。他只做 SPX/SPXW 0DTE 买方，凌晨挂的单已经了结或作废，"
             "他现在想知道的是：今天的地形判断靠不靠谱、明天开盘前要先看什么。",
-            "只依据 JSON 与摘要事实。输出中文最多 12 行，第一行必须是摘要第一行。",
+            "只依据 JSON 与摘要事实。输出中文，第一行必须是摘要第一行；正文使用 ## 今日结论、## 结构复盘、"
+            "## 明日检查、## 数据质量四段。不要输出本机路径，也不要索取更多数据。",
             "必须覆盖：当日价格路径一句话(相对预期波幅走了多少)、墙位/zero gamma/gamma state 的收盘位、IV 与 skew 当日变化；",
             "然后 2-3 句结构点评，要下判断不要罗列：pin 是 gamma 压出来的还是碰巧、墙被打穿过没有、IV 是 crush 还是抬升、"
             "今天地图哪里说对了哪里说错了；",
             "最后 2-3 条『下一交易日开盘前检查项』，写成看什么、到什么位置意味着什么。数据 degraded 时如实说明。",
-            "JSON:" + json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+            "JSON:" + json.dumps(compact, ensure_ascii=False, separators=(",", ":")),
             "摘要:" + summary,
         )
     )
@@ -411,6 +440,7 @@ def push_review(
     payload: dict[str, Any],
     *,
     latest_markdown_path: str,
+    full_markdown: str | None = None,
     runner: CommandRunner = default_runner,
     now: datetime | None = None,
 ) -> dict[str, Any]:
@@ -420,18 +450,20 @@ def push_review(
 
     settings = NotificationSettings.from_env()
     summary = build_push_summary(payload, latest_markdown_path=latest_markdown_path)
-    used_agent = False
-    text = summary
-
-    if settings.openclaw_agent_enabled:
-        sink, reply = run_openclaw_agent(
-            settings,
-            build_review_push_prompt(payload, summary),
-            runner=runner,
-        )
-        if reply and sink.ok:
-            text = reply
-            used_agent = True
+    text, writer = generate_push_text(
+        summary,
+        build_review_push_prompt(payload, summary),
+        settings,
+        runner=runner,
+        system=DEFAULT_SYSTEM_PROMPT,
+    )
+    used_agent = writer != "template"
+    feishu_text = text
+    if full_markdown:
+        report = full_markdown.strip()
+        if report.startswith("# "):
+            report = report.split("\n", 1)[1].lstrip() if "\n" in report else ""
+        feishu_text = text.rstrip() + "\n\n## 完整报告\n\n" + report
 
     delivery_sinks = deliver_trade_push(
         settings,
@@ -440,6 +472,7 @@ def push_review(
         kind="post_close_review",
         lane="trade",
         friend=True,
+        feishu_text=feishu_text,
         runner=runner,
     )
     delivered_ok = any_delivery_ok(delivery_sinks)
@@ -449,6 +482,7 @@ def push_review(
     return {
         "text": text,
         "used_agent": used_agent,
+        "writer": writer,
         "im_ok": any(s.sink == "feishu" and s.ok for s in delivery_sinks),
         "bark_ok": any(s.sink == "bark" and s.ok for s in delivery_sinks),
         "feishu_ok": any(s.sink == "feishu" and s.ok for s in delivery_sinks),
@@ -486,6 +520,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def run(argv: list[str] | None = None) -> int:
+    # Imported here because post_close_review is also the public compatibility
+    # facade for this runtime module.
+    from spx_spark.post_close_review import build_review_payload
+
     args = parse_args(argv)
     settings = StorageSettings.from_env()
     run_now = datetime.now(tz=timezone.utc)
@@ -551,7 +589,11 @@ def run(argv: list[str] | None = None) -> int:
     if not args.no_push:
         coverage = payload["coverage"]
         if not (coverage["raw_quote_rows"] == 0 and coverage["iv_surface_snapshots"] == 0):
-            payload["push"] = push_review(payload, latest_markdown_path=latest_markdown_path)
+            payload["push"] = push_review(
+                payload,
+                latest_markdown_path=latest_markdown_path,
+                full_markdown=markdown,
+            )
 
     if (
         args.quiet_if_empty

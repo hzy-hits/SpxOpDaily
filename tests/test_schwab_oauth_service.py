@@ -288,7 +288,15 @@ def test_servers_keep_gateway_local_and_never_log_callback_query(
     settings = replace(settings, oauth_bind_port=0, gateway_bind_port=0)
     coordinator.settings = settings
 
-    with OAuthServers(settings, coordinator) as servers:
+    with OAuthServers(
+        settings,
+        coordinator,
+        stream_health=lambda: {
+            "connected": True,
+            "subscribed_option_count": 160,
+            "message_counts": {"LEVELONE_OPTIONS": 0},
+        },
+    ) as servers:
         callback_port = servers.callback_server.server_address[1]
         gateway_port = servers.gateway_server.server_address[1]
         with urlopen(f"http://127.0.0.1:{callback_port}/healthz") as response:
@@ -303,6 +311,8 @@ def test_servers_keep_gateway_local_and_never_log_callback_query(
             assert health["ok"] is True
             assert health["ready"] is True
             assert health["reauth_required"] is False
+            assert health["stream"]["connected"] is True
+            assert health["stream"]["subscribed_option_count"] == 160
         with urlopen(f"http://127.0.0.1:{gateway_port}/livez") as response:
             assert json.load(response) == {"ok": True}
         connection = HTTPConnection("127.0.0.1", gateway_port)

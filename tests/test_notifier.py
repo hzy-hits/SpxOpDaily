@@ -321,6 +321,8 @@ def test_grok_agent_uses_configured_model_and_read_only_mode(tmp_path) -> None:
     assert command[command.index("--permission-mode") + 1] == "plan"
     assert "--no-subagents" in command
     assert "--disable-web-search" in command
+    assert "--verbatim" in command
+    assert command[command.index("--max-turns") + 1] == "1"
 
 
 def test_notifier_uses_openclaw_agent_single_track_for_review_candidates(tmp_path) -> None:

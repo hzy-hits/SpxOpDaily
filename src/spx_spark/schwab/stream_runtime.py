@@ -6,6 +6,7 @@ import asyncio
 import json
 import threading
 import time
+from collections import Counter
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -30,6 +31,104 @@ PersistSnapshot = Callable[[ProviderSnapshot, StorageSettings], object]
 StreamClientFactory = Callable[..., Any]
 SymbolResolver = Callable[[tuple[str, ...]], tuple[list[str], list[str]]]
 OptionSymbolResolver = Callable[[], list[str]]
+
+
+class SchwabStreamTelemetry:
+    """Thread-safe, redacted evidence that accepted subscriptions produce data."""
+
+    def __init__(self, *, mode: str) -> None:
+        self.mode = mode
+        self._lock = threading.Lock()
+        self._connected = False
+        self._connected_at: datetime | None = None
+        self._option_subscription_accepted_at: datetime | None = None
+        self._subscribed_option_count = 0
+        self._message_counts: Counter[str] = Counter()
+        self._row_counts: Counter[str] = Counter()
+        self._last_message_at: dict[str, datetime] = {}
+        self._normalized_quote_counts: Counter[str] = Counter()
+        self._live_quote_counts: Counter[str] = Counter()
+        self._last_source_at: dict[str, datetime] = {}
+        self._retained_symbol_counts: dict[str, int] = {}
+        self._evicted_option_symbol_count = 0
+        self._reconnect_count = 0
+        self._last_error_type: str | None = None
+
+    def connected(self) -> None:
+        now = datetime.now(tz=timezone.utc)
+        with self._lock:
+            self._connected = True
+            self._connected_at = now
+            self._last_error_type = None
+
+    def disconnected(self) -> None:
+        with self._lock:
+            self._connected = False
+
+    def option_subscription_accepted(self, count: int) -> None:
+        now = datetime.now(tz=timezone.utc)
+        with self._lock:
+            self._subscribed_option_count = count
+            self._option_subscription_accepted_at = now
+
+    def message(self, service: str, rows: int) -> None:
+        now = datetime.now(tz=timezone.utc)
+        with self._lock:
+            self._message_counts[service] += 1
+            self._row_counts[service] += rows
+            self._last_message_at[service] = now
+
+    def reconnect(self, error_type: str) -> None:
+        with self._lock:
+            self._connected = False
+            self._reconnect_count += 1
+            self._last_error_type = error_type
+
+    def snapshot(self, snapshot: ProviderSnapshot) -> None:
+        with self._lock:
+            for quote in snapshot.quotes:
+                service = str(quote.raw.get("service") or "UNKNOWN").upper()
+                self._normalized_quote_counts[service] += 1
+                if quote.quality.value == "live":
+                    self._live_quote_counts[service] += 1
+                source_at = quote.quote_time or quote.trade_time
+                if source_at is not None:
+                    previous = self._last_source_at.get(service)
+                    if previous is None or source_at > previous:
+                        self._last_source_at[service] = source_at
+
+    def cache(self, counts: dict[str, int], *, evicted_options: int = 0) -> None:
+        with self._lock:
+            self._retained_symbol_counts = dict(counts)
+            self._evicted_option_symbol_count += evicted_options
+
+    def to_dict(self) -> dict[str, Any]:
+        with self._lock:
+            return {
+                "mode": self.mode,
+                "connected": self._connected,
+                "connected_at": _iso(self._connected_at),
+                "subscribed_option_count": self._subscribed_option_count,
+                "option_subscription_accepted_at": _iso(
+                    self._option_subscription_accepted_at
+                ),
+                "message_counts": dict(self._message_counts),
+                "row_counts": dict(self._row_counts),
+                "normalized_quote_counts": dict(self._normalized_quote_counts),
+                "live_quote_counts": dict(self._live_quote_counts),
+                "last_message_at": {
+                    service: observed_at.isoformat()
+                    for service, observed_at in self._last_message_at.items()
+                },
+                "last_source_at": {
+                    service: observed_at.isoformat()
+                    for service, observed_at in self._last_source_at.items()
+                },
+                "retained_symbol_counts": dict(self._retained_symbol_counts),
+                "evicted_option_symbol_count": self._evicted_option_symbol_count,
+                "reconnect_count": self._reconnect_count,
+                "last_error_type": self._last_error_type,
+            }
 
 
 class SchwabStreamRuntime:
@@ -60,6 +159,10 @@ class SchwabStreamRuntime:
         )
         self.monotonic = monotonic
         self._stop = threading.Event()
+        self.telemetry = SchwabStreamTelemetry(mode=settings.mode)
+
+    def health(self) -> dict[str, Any]:
+        return self.telemetry.to_dict()
 
     def run_forever(self) -> None:
         if self.settings.mode == "off":
@@ -76,6 +179,7 @@ class SchwabStreamRuntime:
                 await self._run_session()
                 delay = self.settings.reconnect_min_seconds
             except Exception as exc:  # noqa: BLE001 - never log provider/token details
+                self.telemetry.reconnect(type(exc).__name__)
                 print(
                     json.dumps(
                         {
@@ -97,9 +201,12 @@ class SchwabStreamRuntime:
         assembler = SchwabStreamQuoteAssembler()
         listener: asyncio.Task[None] | None = None
         try:
-            stream.add_level_one_equity_handler(assembler.ingest)
-            stream.add_level_one_futures_handler(assembler.ingest)
-            stream.add_level_one_option_handler(assembler.ingest)
+            def handler(message: dict[str, Any]) -> int:
+                return self._ingest(assembler, message)
+
+            stream.add_level_one_equity_handler(handler)
+            stream.add_level_one_futures_handler(handler)
+            stream.add_level_one_option_handler(handler)
             await stream.login(
                 {"open_timeout": self.settings.websocket_open_timeout_seconds}
             )
@@ -111,10 +218,14 @@ class SchwabStreamRuntime:
                 await stream.level_one_futures_subs(futures)
             if options:
                 await stream.level_one_option_subs(options)
+                self.telemetry.option_subscription_accepted(len(options))
+            assembler.retain_option_symbols(options)
+            self.telemetry.cache(assembler.retained_symbol_counts())
             if not equities and not futures and not options:
                 raise ValueError(
                     "Schwab streaming symbol list resolved to no supported instruments"
                 )
+            self.telemetry.connected()
             print(
                 json.dumps(
                     {
@@ -166,11 +277,19 @@ class SchwabStreamRuntime:
                     )
                 if clock_now >= next_option_refresh_at:
                     refreshed_options = self.option_symbol_resolver()
-                    if refreshed_options != options:
+                    if option_subscription_changed(options, refreshed_options):
+                        old_set = set(options)
+                        refreshed_set = set(refreshed_options)
                         if refreshed_options:
                             await stream.level_one_option_subs(refreshed_options)
                         elif options:
                             await stream.level_one_option_unsubs(options)
+                        self.telemetry.option_subscription_accepted(len(refreshed_options))
+                        evicted = assembler.retain_option_symbols(refreshed_options)
+                        self.telemetry.cache(
+                            assembler.retained_symbol_counts(),
+                            evicted_options=evicted,
+                        )
                         print(
                             json.dumps(
                                 {
@@ -178,6 +297,8 @@ class SchwabStreamRuntime:
                                     "ok": True,
                                     "old_option_symbols": len(options),
                                     "new_option_symbols": len(refreshed_options),
+                                    "added_option_symbols": len(refreshed_set - old_set),
+                                    "removed_option_symbols": len(old_set - refreshed_set),
                                 },
                                 sort_keys=True,
                             ),
@@ -189,8 +310,11 @@ class SchwabStreamRuntime:
                     )
                 snapshot = assembler.drain_snapshot()
                 if snapshot is not None:
+                    self.telemetry.snapshot(snapshot)
+                    self.telemetry.cache(assembler.retained_symbol_counts())
                     self.persist_snapshot(snapshot, self.storage_settings)
         finally:
+            self.telemetry.disconnected()
             if listener is not None:
                 listener.cancel()
                 try:
@@ -203,6 +327,16 @@ class SchwabStreamRuntime:
                 stream,
                 timeout_seconds=self.settings.websocket_open_timeout_seconds,
             )
+
+    def _ingest(
+        self,
+        assembler: SchwabStreamQuoteAssembler,
+        message: dict[str, Any],
+    ) -> int:
+        accepted = assembler.ingest(message)
+        service = str(message.get("service") or "UNKNOWN").upper()
+        self.telemetry.message(service, accepted)
+        return accepted
 
     async def _listen(self, stream: Any) -> None:
         while not self._stop.is_set():
@@ -223,6 +357,12 @@ def stream_storage_settings(
     if stream_settings.mode == "live":
         return storage_settings
     return replace(storage_settings, latest_state_path=stream_settings.shadow_latest_path)
+
+
+def option_subscription_changed(current: list[str], refreshed: list[str]) -> bool:
+    """Subscription order is irrelevant; only membership changes require SUBS."""
+
+    return set(current) != set(refreshed)
 
 
 def stream_symbols(canonical_symbols: tuple[str, ...]) -> tuple[list[str], list[str]]:
@@ -284,3 +424,7 @@ async def close_stream_client(stream: Any, *, timeout_seconds: float) -> None:
                     await asyncio.wait_for(result, timeout=timeout_seconds)
             except Exception:  # noqa: BLE001 - process shutdown is the final boundary
                 pass
+
+
+def _iso(value: datetime | None) -> str | None:
+    return value.isoformat() if value is not None else None
