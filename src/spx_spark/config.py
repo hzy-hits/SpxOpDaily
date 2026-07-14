@@ -7,6 +7,7 @@ from datetime import date, datetime, time, timedelta
 from spx_spark.market_calendar import ET as NY_TZ
 from spx_spark.market_calendar import default_spxw_expiry as _default_spxw_expiry
 from spx_spark.settings import settings_csv, settings_value
+from spx_spark.settings.notification_delivery import notification_delivery_settings
 from spx_spark.runtime_config import (
     runtime_schwab_option_chain_underliers,
     runtime_schwab_symbols_by_type,
@@ -590,6 +591,18 @@ class NotificationSettings:
     # SQLite ledger for every human-delivery attempt, including direct report
     # paths that do not pass through the domain-event outbox.
     delivery_receipt_path: str = ""
+    # All human-facing messages are durably enqueued here before network I/O.
+    # The production default is enabled from runtime.yaml; the dataclass
+    # default remains off so explicitly constructed legacy/test settings keep
+    # their old in-memory behavior unless they opt in with a concrete path.
+    delivery_outbox_enabled: bool = False
+    delivery_outbox_path: str = ""
+    delivery_outbox_max_attempts: int = 8
+    delivery_outbox_retry_schedule_seconds: tuple[float, ...] = (15.0, 60.0, 300.0, 900.0)
+    delivery_outbox_dead_letter_after_seconds: float = 86400.0
+    delivery_outbox_claim_stale_after_seconds: float = 180.0
+    delivery_outbox_recovery_batch_size: int = 50
+    delivery_outbox_legacy_shadow_enabled: bool = True
     # Retry policy for non-terminal outbox outcomes such as reviewer timeouts.
     outbox_max_attempts: int = 5
     outbox_retry_base_seconds: float = 60.0
@@ -831,6 +844,7 @@ class NotificationSettings:
                 "ALERT_NOTIFY_DELIVERY_RECEIPT_PATH",
                 f"{data_root.rstrip('/')}/ledger/notification_delivery.sqlite",
             ),
+            **notification_delivery_settings(data_root),
             outbox_max_attempts=env_int(
                 "ALERT_NOTIFY_OUTBOX_MAX_ATTEMPTS",
                 int(settings_value("notification.outbox_max_attempts")),

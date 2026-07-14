@@ -145,6 +145,27 @@ def _ack_missed(path: str, delivered: list[dict[str, Any]]) -> None:
             queue_path.unlink(missing_ok=True)
 
 
+def ack_missed_event_ids(path: str, event_ids: set[str] | frozenset[str]) -> None:
+    """Remove rollback-shadow entries after the SQLite outbox fully delivers."""
+
+    if not path or not event_ids:
+        return
+    queue_path = Path(path)
+    try:
+        with exclusive_state_lock(queue_path):
+            remaining = [
+                entry
+                for entry in _load_missed_unlocked(queue_path)
+                if str(entry.get("entry_id") or "") not in event_ids
+            ]
+            if remaining:
+                _write_missed_unlocked(queue_path, remaining)
+            else:
+                queue_path.unlink(missing_ok=True)
+    except OSError:
+        return
+
+
 def build_digest(entries: list[dict[str, Any]], *, now: datetime | None = None) -> str:
     del now
     sorted_entries = sorted(entries, key=lambda entry: str(entry.get("at", "")))
@@ -216,6 +237,14 @@ def run() -> int:
     if not settings.enabled:
         print(json.dumps({"ok": True, "skipped": "notification_disabled"}))
         return 0
+    if settings.delivery_outbox_enabled:
+        # Import lazily to avoid a module cycle: dispatcher keeps the legacy
+        # JSONL helpers only for rollback shadowing and disabled-outbox fallback.
+        from spx_spark.notifier.dispatcher import recover_pending_notifications
+
+        summary = recover_pending_notifications(settings)
+        print(json.dumps(summary, sort_keys=True))
+        return 1 if int(summary.get("dead_letter_total", 0)) else 0
     pending_before = len(load_missed(settings.missed_queue_path))
     result = flush_missed(settings)
     pending_after = len(load_missed(settings.missed_queue_path))

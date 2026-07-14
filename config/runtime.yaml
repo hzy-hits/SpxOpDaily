@@ -1104,6 +1104,27 @@ notification:
   outbox_claim_stale_after_seconds:
     value: 180.0
     description: Age after which an abandoned outbox claim may be recovered following process failure.
+  delivery_outbox_enabled:
+    value: true
+    description: Durably enqueues every human-facing notification before network delivery.
+  delivery_outbox_max_attempts:
+    value: 8
+    description: Maximum attempts for each individual Bark or Feishu target before dead-lettering.
+  delivery_outbox_retry_schedule_seconds:
+    value: [15.0, 60.0, 300.0, 900.0]
+    description: Per-target retry delays; the final delay repeats until attempts or age are exhausted.
+  delivery_outbox_dead_letter_after_seconds:
+    value: 86400.0
+    description: Maximum age of an undelivered sink target before it becomes a dead letter.
+  delivery_outbox_claim_stale_after_seconds:
+    value: 180.0
+    description: Age after which an abandoned sink claim is recovered following process failure.
+  delivery_outbox_recovery_batch_size:
+    value: 50
+    description: Maximum number of due sink targets processed by each 60-second recovery cycle.
+  delivery_outbox_legacy_shadow_enabled:
+    value: true
+    description: Mirrors pending delivery event IDs to the legacy JSONL queue during the rollout window for rollback safety.
   openclaw_enabled:
     value: false
     description: Enables legacy OpenClaw command delivery path.

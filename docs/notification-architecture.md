@@ -20,14 +20,23 @@ allowlists; their union must never consume the reviewer lane.
 
 All human-facing paths call `dispatch_notification()`. It owns:
 
-1. missed-message recovery before the current send;
-2. Feishu/Bark fan-out;
-3. durable queueing when the intended Feishu delivery fails;
+1. a durable SQLite enqueue before any network I/O;
+2. immediate Feishu/Bark fan-out for the newly enqueued event;
+3. independent acknowledgement and retry state for every sink, so a delivered
+   Bark target is never resent while Feishu is recovering;
 4. a content-free SQLite receipt containing semantic event ID, source, lane,
    outcome and per-sink status.
 
-The 24-hour loop also runs `notification_recovery` every 60 seconds, so queue
-recovery does not depend on a later market alert.
+The delivery state machine is `pending -> claimed -> delivered`; failures use
+the configured 15/60/300/900-second schedule and become `dead_letter` after
+attempt or age exhaustion. The 24-hour loop runs `notification_recovery` every
+60 seconds, so recovery does not depend on a later market alert. Shock events
+still enqueue and attempt delivery inline, keeping the fast path synchronous.
+
+During rollout, failed event IDs are mirrored into the old JSONL missed queue.
+The SQLite worker imports any pre-existing JSONL entries and removes the shadow
+only after the corresponding event is fully delivered. The JSONL flusher is
+used only when the delivery outbox feature flag is disabled for rollback.
 
 Periodic alert candidates retain the SQLite domain-event outbox. `acked` means
 the candidate reached a terminal policy outcome. The outbox additionally stores

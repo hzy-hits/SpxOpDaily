@@ -346,6 +346,7 @@ def deliver_trade_push(
     friend: bool = False,
     feishu_text: str | None = None,
     runner: CommandRunner = default_runner,
+    targets: frozenset[str] | set[str] | None = None,
 ) -> list[SinkResult]:
     """Fan out one writer text across Feishu (trade) + Bark main (+ friend).
 
@@ -365,12 +366,16 @@ def deliver_trade_push(
 
     sinks: list[SinkResult] = []
     is_trade = lane == "trade"
+    allowed = None if targets is None else frozenset(targets)
 
-    if settings.feishu_enabled and is_trade:
+    def target_enabled(name: str) -> bool:
+        return allowed is None or name in allowed
+
+    if settings.feishu_enabled and is_trade and target_enabled("feishu"):
         card = build_feishu_card(feishu_text or text, title=title, kind=kind, lane=lane)
         sinks.append(send_feishu_card(settings, card))
 
-    if settings.bark_enabled:
+    if settings.bark_enabled and target_enabled("bark"):
         group = bark_groups_for_lane(
             lane,
             trade_group=settings.bark_group,
@@ -392,7 +397,12 @@ def deliver_trade_push(
             )
         )
 
-    if friend and settings.bark_friend_enabled and is_trade:
+    if (
+        friend
+        and settings.bark_friend_enabled
+        and is_trade
+        and target_enabled("bark_friend")
+    ):
         sinks.append(
             send_bark_friend_message(
                 settings,
@@ -402,6 +412,30 @@ def deliver_trade_push(
         )
 
     return sinks
+
+
+def delivery_target_names(
+    settings: NotificationSettings,
+    *,
+    lane: str,
+    friend: bool,
+) -> tuple[str, ...]:
+    """Return concrete sinks intended for one durable delivery event."""
+
+    is_trade = lane == "trade"
+    targets: list[str] = []
+    if settings.feishu_enabled and settings.feishu_webhook_url and is_trade:
+        targets.append("feishu")
+    if settings.bark_enabled and settings.bark_url:
+        targets.append("bark")
+    if (
+        friend
+        and settings.bark_friend_enabled
+        and settings.bark_friend_url
+        and is_trade
+    ):
+        targets.append("bark_friend")
+    return tuple(targets)
 
 
 def any_delivery_ok(sinks: list[SinkResult]) -> bool:
