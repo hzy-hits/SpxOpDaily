@@ -13,7 +13,7 @@ from spx_spark.alert_engine.constants import (
 from spx_spark.alert_engine.rules_data import find_best
 from spx_spark.alert_model import Alert, severity_for_priority
 from spx_spark.alert_profile import AlertWindow
-from spx_spark.config import env_bool, env_float
+from spx_spark.config import env_bool, env_float, ibkr_account_read_enabled
 from spx_spark.marketdata import Provider, ProviderState, ProviderStatus, as_utc, parse_timestamp
 from spx_spark.options_map import OptionsMap
 from spx_spark.position_alerts import has_open_spxw_positions
@@ -163,16 +163,25 @@ def persist_system_event_state(state: LatestState) -> None:
     previous = load_system_event_state(state_path)
     payload = dict(previous)
     provider_state = provider_state_for(state, Provider.IBKR)
-    # Always track IBKR session edges so reconnect ops notices work even in
-    # account-standby / no-position mode. Interrupt paging stays gated separately.
-    if provider_state is not None:
-        current_status = ibkr_session_status(provider_state, now=state.as_of)
-        payload = build_system_event_state_payload(
-            state,
-            provider_state,
-            current_status,
-            payload,
-        )
+    # Broker-session edges are meaningful only while this process is responsible
+    # for account visibility or live execution. Paper market-data standby has its
+    # own provider-failover state and must not inherit stale account state.
+    if ibkr_broker_session_supervision_enabled():
+        if provider_state is not None:
+            current_status = ibkr_session_status(provider_state, now=state.as_of)
+            payload = build_system_event_state_payload(
+                state,
+                provider_state,
+                current_status,
+                payload,
+            )
+    else:
+        for key in (
+            "ibkr_session_status",
+            "ibkr_last_observed_status",
+            "ibkr_checked_at",
+        ):
+            payload.pop(key, None)
     failover_state = load_provider_failover_state(now=state.as_of)
     if failover_state is not None and failover_state.transition is not None:
         payload["provider_failover_transition_id"] = failover_state.transition.transition_id
@@ -377,14 +386,22 @@ def provider_failover_event_alert(
     return None
 
 
+def ibkr_broker_session_supervision_enabled() -> bool:
+    execution_mode = os.getenv(
+        "IBKR_EXECUTION_MODE",
+        DEFAULT_ALERT_SETTINGS.ibkr_execution_mode,
+    ).strip().lower()
+    return execution_mode == "live" or ibkr_account_read_enabled()
+
+
 def ibkr_session_is_position_critical() -> bool:
     execution_mode = os.getenv(
         "IBKR_EXECUTION_MODE",
         DEFAULT_ALERT_SETTINGS.ibkr_execution_mode,
     ).strip().lower()
-    if execution_mode == "live":
-        return True
-    return has_open_spxw_positions()
+    return execution_mode == "live" or (
+        ibkr_account_read_enabled() and has_open_spxw_positions()
+    )
 
 
 def system_event_alerts(state: LatestState, *, persist: bool = True) -> list[Alert]:
@@ -410,7 +427,7 @@ def system_event_alerts(state: LatestState, *, persist: bool = True) -> list[Ale
             alerts.append(failover_alert)
 
     provider_state = provider_state_for(state, Provider.IBKR)
-    if provider_state is not None:
+    if provider_state is not None and ibkr_broker_session_supervision_enabled():
         current_status = ibkr_session_status(provider_state, now=state.as_of)
         previous_status = previous.get("ibkr_session_status")
         previous_status_s = str(previous_status) if previous_status else None

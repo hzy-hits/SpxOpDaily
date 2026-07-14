@@ -702,6 +702,12 @@ def test_ibkr_standby_disconnect_is_silent_without_position_or_live_execution(
     monkeypatch.setenv("IBKR_EXECUTION_MODE", "manual")
     monkeypatch.setenv("IBKR_BROKER_ACCOUNT_READ_ENABLED", "false")
     monkeypatch.setenv("IBKR_POSITIONS_SNAPSHOT_PATH", str(tmp_path / "missing-positions.json"))
+    # A disabled Paper account must not be made critical by stale durable
+    # position state left behind by the former Live account.
+    monkeypatch.setattr(
+        "spx_spark.alert_engine.rules_system.has_open_spxw_positions",
+        lambda: True,
+    )
     now = datetime(2026, 7, 13, 22, 0, tzinfo=BJ_TZ)
     interrupted = ProviderState(
         provider=Provider.IBKR,
@@ -714,7 +720,7 @@ def test_ibkr_standby_disconnect_is_silent_without_position_or_live_execution(
     assert system_event_alerts(make_state(now=now, provider_states=(interrupted,))) == []
 
 
-def test_ibkr_standby_reconnect_pages_ops_login_without_position(
+def test_ibkr_standby_reconnect_is_silent_without_account_supervision(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -743,9 +749,7 @@ def test_ibkr_standby_reconnect_pages_ops_login_without_position(
     login_alerts = system_event_alerts(
         make_state(now=now + timedelta(minutes=1), provider_states=(standby,))
     )
-    assert [alert.kind for alert in login_alerts] == ["ibkr_session_login"]
-    assert login_alerts[0].severity == "high"
-    assert "account standby" in login_alerts[0].detail
+    assert login_alerts == []
     assert system_event_alerts(
         make_state(now=now + timedelta(minutes=2), provider_states=(standby,))
     ) == []
