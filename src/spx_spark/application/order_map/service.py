@@ -9,10 +9,12 @@ import sys
 import time as time_module
 from dataclasses import asdict, replace
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 from spx_spark.analytics.options.pricing import finite_float
 from spx_spark.application.globex_trend.state import load_trend_state, trend_state_path
+from spx_spark.application.market_features.greek_decision import build_greek_decision
 from spx_spark.application.market_features.state import load_json, projection_paths
 from spx_spark.application.order_map.bias_machine import load_intraday_call_bias
 from spx_spark.application.order_map.candidate_presentation import (
@@ -77,6 +79,7 @@ from spx_spark.greek_reference import (
 )
 from spx_spark.intraday_strategy import signed_gex_sign_method
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
+from spx_spark.macro_event_clock import macro_event_state
 from spx_spark.notifier.dispatcher import dispatch_notification
 from spx_spark.notifier.llm_writer import generate_push_text, load_previous_push, record_push
 from spx_spark.notifier.model import CommandRunner, default_runner
@@ -133,11 +136,28 @@ def build_order_payload(
         conditional_call_bias=conditional_call_bias,
         policy=policy,
     )
+    candidate_rows = [asdict(candidate) for candidate in candidates]
+    macro_event = macro_event_state(now)
     greeks_audit_reference = build_zero_dte_greeks_reference(
         replace(state, as_of=now),
         options_map=options_map,
         focus_contract_ids=(candidate.contract_id for candidate in candidates),
-        max_serialized_contracts=2,
+        max_serialized_contracts=max(len(candidates), 1),
+        serialized_scenario_names=(
+            "spot_down_0_25pct",
+            "spot_up_0_25pct",
+            "clock_plus_5m",
+            "clock_plus_15m",
+            "clock_plus_30m",
+            "iv_down_1vol",
+            "iv_down_3vol",
+        ),
+    )
+    greek_decision = build_greek_decision(
+        greeks_audit_reference,
+        candidate_rows,
+        macro_event=macro_event,
+        policy=load_app_settings().market_features,
     )
     greeks_reference = {
         **greeks_audit_reference,
@@ -182,7 +202,7 @@ def build_order_payload(
         "analysis_mode": "globex_context" if resolution.research_only else "executable",
         "expiry": expiry,
         "expected_move_points": expected_move_points,
-        "candidates": [asdict(candidate) for candidate in candidates],
+        "candidates": candidate_rows,
         "conditional_call_bias": annotate_call_bias_with_signal_mode(
             conditional_call_bias
             or {
@@ -208,6 +228,8 @@ def build_order_payload(
         },
         "spxw_0dte_greeks_reference": greeks_reference,
         "_spxw_0dte_greeks_audit": greeks_audit_reference,
+        "greek_decision": greek_decision,
+        "macro_event": macro_event,
         "research_candidates": (
             _research_candidates(
                 state,
@@ -456,6 +478,9 @@ def build_order_payload_with_retry(
                     "executable": False,
                 }
         payload["globex_trend"] = load_trend_state(trend_state_path(storage_settings.data_root))
+        payload["gth_dip_reclaim_signal"] = load_json(
+            Path(storage_settings.data_root) / "latest" / "gth_dip_reclaim_signal.json"
+        )
         feature_paths = projection_paths(storage_settings.data_root)
         market_frame = load_json(feature_paths["market"])
         payload["minute_market_frame"] = market_frame

@@ -84,6 +84,7 @@ INTRADAY_DIRECT_PUSH_KINDS = frozenset(
         "globex_trend_transition",
         "flip_reclaim_call",
         "call_wall_breakout_call",
+        "gth_dip_reclaim_call",
     }
 )
 

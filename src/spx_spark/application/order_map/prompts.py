@@ -145,14 +145,16 @@ def build_order_prompt(
             "买腿放赌的方向内、卖腿放 80% 区间外沿附近最划算；quality 非 ok 时注明并降权。",
             "max_pain 可用时必须同时报告合并 OI 的 settlement_strike、Call OI峰和 Put OI峰。Max Pain 只表示当前"
             "采样窗口内的到期赔付最小点，OI峰只表示持仓集中，不得单独解释为支撑、阻力或方向预测；quality 非 ok 时降权。",
-            "spxw_0dte_greeks_reference 是严格当日到期、只读的情景参考层，只解释价格/时间/IV 冲击。"
-            "position_sign/direction=unknown 时负 gamma 不等于下跌；不得据此改变候选方向、排序、限价或新增下单动作。",
+            "spxw_0dte_greeks_reference 是严格当日到期的情景层；position_sign/direction=unknown 时负 gamma 不等于下跌。"
+            "greek_decision.direction_authority=none，永远不得用 Greeks 新造多空方向；mode=decision_grade 时只允许按代码结果解释同方向合约置信度、"
+            "等待成本和退出，mode=explanation_only 时不得改变排序、限价或动作。",
             "conditional_call_bias 只有 status=confirmed 才有效，它来自 5 秒 SPX/ES 价格路径对冻结 flip/旧 call wall 的确认，"
             "不是 Gamma 猜方向；confirmed 时优先讲对应 call 的回踩位与失效线，watch/neutral 不新增动作。",
             "",
             "然后逐条处理 plan_candidates（最多 1 条）；只有这里的条目可称为计划。"
             "order_style=live_nbbo_limit 表示 TradeReady：必须逐字保留 NBBO、买入上限、失效位、目标和意图到期时间，"
-            "不得写『当前不可预挂』。observation_candidates 只能称观察情景，不得补写执行或挂单动作。",
+            "不得写『当前不可预挂』。observation_candidates 最多 1 条且是唯一主观察策略，不得补写执行或挂单动作；"
+            "opposing_invalidation 只写成主策略失效条件，禁止平铺成第二套反向计划。",
             "- 墙位价 vs 先手挡价的取舍：墙位价便宜但常在墙前几点反转吃不到，先手挡成交率高；预估价已含触达前的"
             "时间衰减与 vol 斜率(BS 重定价)，比现价低不是便宜，是时间价值正常流失；",
             "- 赔率账：触达概率、到位预估价、现价放一起，这笔单赌的是一次多大概率的什么事，赔付幅度配不配得上这个概率；",

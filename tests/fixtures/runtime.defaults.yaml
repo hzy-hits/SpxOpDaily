@@ -80,6 +80,18 @@ market_features:
   trade_invalidation_buffer_points: {value: 3.0, description: SPX invalidation buffer.}
   trade_target_em_fraction: {value: 0.15, description: Fallback target EM fraction.}
   trade_time_stop_minutes: {value: 15, description: Default time stop.}
+  greek_decision_min_coverage: {value: 0.60, description: Greek decision coverage gate.}
+  greek_target_delta_min: {value: 0.35, description: Preferred minimum absolute Delta.}
+  greek_target_delta_max: {value: 0.70, description: Preferred maximum absolute Delta.}
+  greek_max_theta_15m_loss_fraction: {value: 0.35, description: Maximum modeled fifteen-minute Theta loss.}
+  greek_max_iv_crush_loss_fraction: {value: 0.45, description: Maximum modeled three-vol IV crush loss.}
+  greek_delta_saturation: {value: 0.85, description: Delta saturation exit threshold.}
+  virtual_strategy_enabled: {value: true, description: Enables broker-independent virtual strategy tracking.}
+  virtual_profit_take_fraction: {value: 0.30, description: Virtual take-profit premium fraction.}
+  virtual_gamma_retention_fraction: {value: 0.60, description: Virtual Gamma retention exit fraction.}
+  virtual_iv_drop_vol_points: {value: 1.0, description: Post-event IV decline threshold.}
+  virtual_wall_touch_points: {value: 5.0, description: Call Wall take-profit distance.}
+  virtual_gth_time_stop_minutes: {value: 360, description: GTH virtual strategy time stop.}
 
 provider_failover:
   enabled:
@@ -1458,6 +1470,21 @@ intraday_shock:
   retry_seconds:
     value: 30
     description: Seconds between retry attempts for undelivered intraday alerts.
+  gth_dip_reclaim_enabled: {value: true, description: Enables ES-led GTH dip reclaim.}
+  gth_short_horizon_seconds: {value: 900, description: Fifteen-minute GTH lookback.}
+  gth_long_horizon_seconds: {value: 3600, description: Sixty-minute GTH lookback.}
+  gth_short_min_drawdown_points: {value: 10.0, description: Short GTH drawdown floor.}
+  gth_long_min_drawdown_points: {value: 14.0, description: Long GTH drawdown floor.}
+  gth_short_min_descent_seconds: {value: 300, description: Minimum short-channel descent duration.}
+  gth_long_min_descent_seconds: {value: 1200, description: Minimum long-channel descent duration.}
+  gth_expected_move_fraction: {value: 0.10, description: Expected-move adaptive drawdown fraction.}
+  gth_reclaim_fraction: {value: 0.40, description: Required GTH recovery fraction.}
+  gth_min_reclaim_points: {value: 5.0, description: Required GTH absolute rebound.}
+  gth_confirm_samples: {value: 2, description: GTH reclaim confirmation samples.}
+  gth_confirm_hold_seconds: {value: 60, description: GTH reclaim confirmation hold.}
+  gth_session_warmup_seconds: {value: 3600, description: Initial GTH history warmup.}
+  gth_max_signals_per_session: {value: 3, description: Maximum GTH signals per session.}
+  gth_cooldown_seconds: {value: 3600, description: GTH signal cooldown seconds.}
 
 intraday_strategy:
   level_buffer_points:
@@ -1544,6 +1571,10 @@ level_decision_shadow:
     value: 0.25
     description: Minimum same-direction ES move relative to the observed SPX move.
   terminal_rearm_seconds: {value: 30.0, description: Terminal event rearm delay.}
+  structure_interval_seconds: {value: 900, description: Stable structure observation bucket seconds.}
+  structure_required_confirmations: {value: 3, description: Distinct buckets required for wall replacement.}
+  structure_band_half_width_points: {value: 5.0, description: Published wall range half width.}
+  structure_switch_min_points: {value: 10.0, description: Material wall-center displacement.}
   max_frozen_structure_age_sessions: {value: 1, description: Frozen structure session TTL.}
   outcome_horizons_seconds: {value: [30, 60, 180, 300], description: Outcome horizons.}
   outcome_sample_tolerance_seconds: {value: 20.0, description: Outcome sample tolerance.}

@@ -131,6 +131,8 @@ def evaluate_trade_intent(
     reasons.extend(
         item for item in context.invalidations if item in HARD_CONTEXT_INVALIDATIONS
     )
+    if context.macro_event.get("mode") == "pre_event":
+        reasons.append("macro_event_pre_release_entry_block")
     reasons.extend(_direction_blockers(context, market, thesis=thesis, direction=direction))
 
     candidate = _matching_candidate(

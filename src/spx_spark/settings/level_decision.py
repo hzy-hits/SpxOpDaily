@@ -24,6 +24,10 @@ class LevelDecisionPolicy:
     structure_drift_points: float = 5.0
     es_confirm_ratio: float = 0.25
     terminal_rearm_seconds: float = 30.0
+    structure_interval_seconds: int = 900
+    structure_required_confirmations: int = 3
+    structure_band_half_width_points: float = 5.0
+    structure_switch_min_points: float = 10.0
     max_frozen_structure_age_sessions: int = 1
     outcome_horizons_seconds: tuple[int, ...] = (30, 60, 180, 300)
     outcome_sample_tolerance_seconds: float = 20.0
@@ -54,6 +58,10 @@ class LevelDecisionPolicy:
             self.structure_drift_points,
             self.es_confirm_ratio,
             self.terminal_rearm_seconds,
+            self.structure_interval_seconds,
+            self.structure_required_confirmations,
+            self.structure_band_half_width_points,
+            self.structure_switch_min_points,
             self.outcome_sample_tolerance_seconds,
             self.outcome_no_follow_through_mfe_bps,
             self.outcome_follow_through_end_bps,

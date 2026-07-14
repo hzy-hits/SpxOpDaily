@@ -44,6 +44,21 @@ class IntradayShockSettings:
     rearm_recovery_fraction: float = 0.40
     rearm_neutral_seconds: int = 300
     retry_seconds: int = 30
+    gth_dip_reclaim_enabled: bool = True
+    gth_short_horizon_seconds: int = 900
+    gth_long_horizon_seconds: int = 3600
+    gth_short_min_drawdown_points: float = 10.0
+    gth_long_min_drawdown_points: float = 14.0
+    gth_short_min_descent_seconds: int = 300
+    gth_long_min_descent_seconds: int = 1200
+    gth_expected_move_fraction: float = 0.10
+    gth_reclaim_fraction: float = 0.40
+    gth_min_reclaim_points: float = 5.0
+    gth_confirm_samples: int = 2
+    gth_confirm_hold_seconds: int = 60
+    gth_session_warmup_seconds: int = 3600
+    gth_max_signals_per_session: int = 3
+    gth_cooldown_seconds: int = 3600
 
     def __post_init__(self) -> None:
         if not self.anchor_provider_priority:
@@ -165,6 +180,21 @@ class IntradayShockSettings:
                 "ALERT_INTRADAY_DELIVERY_RETRY_SECONDS",
                 policy.retry_seconds,
             ),
+            gth_dip_reclaim_enabled=policy.gth_dip_reclaim_enabled,
+            gth_short_horizon_seconds=policy.gth_short_horizon_seconds,
+            gth_long_horizon_seconds=policy.gth_long_horizon_seconds,
+            gth_short_min_drawdown_points=policy.gth_short_min_drawdown_points,
+            gth_long_min_drawdown_points=policy.gth_long_min_drawdown_points,
+            gth_short_min_descent_seconds=policy.gth_short_min_descent_seconds,
+            gth_long_min_descent_seconds=policy.gth_long_min_descent_seconds,
+            gth_expected_move_fraction=policy.gth_expected_move_fraction,
+            gth_reclaim_fraction=policy.gth_reclaim_fraction,
+            gth_min_reclaim_points=policy.gth_min_reclaim_points,
+            gth_confirm_samples=policy.gth_confirm_samples,
+            gth_confirm_hold_seconds=policy.gth_confirm_hold_seconds,
+            gth_session_warmup_seconds=policy.gth_session_warmup_seconds,
+            gth_max_signals_per_session=policy.gth_max_signals_per_session,
+            gth_cooldown_seconds=policy.gth_cooldown_seconds,
         )
 
     @classmethod

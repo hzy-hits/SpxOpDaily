@@ -48,6 +48,43 @@ def synchronized_live_sample(
     return None, "missing_spx_or_es"
 
 
+def live_es_sample(
+    state: LatestState,
+    settings: IntradayShockSettings,
+) -> tuple[tuple[datetime, float, str] | None, str | None]:
+    """Resolve one fresh live ES quote without requiring overnight SPX."""
+
+    first_rejection: str | None = None
+    for provider_name in settings.anchor_provider_priority:
+        provider = Provider(provider_name)
+        es = _latest_provider_quote(state, "future:ES", provider)
+        if es is None:
+            continue
+        if (
+            provider == Provider.SCHWAB
+            and settings.require_schwab_streaming_anchors
+            and es.sampling_mode != "schwab_stream"
+        ):
+            first_rejection = first_rejection or "schwab_es_not_streaming"
+            continue
+        decision = configured_quote_use_decision(es, as_of=state.as_of)
+        source_at = _quote_source_at(es)
+        price = es.effective_price
+        if (
+            not decision.alert_allowed
+            or decision.feed_mode != MarketDataQuality.LIVE
+            or price is None
+            or price <= 0
+        ):
+            first_rejection = first_rejection or "non_live_or_stale_es"
+            continue
+        if (as_utc(state.as_of) - source_at).total_seconds() > settings.max_es_age_seconds:
+            first_rejection = first_rejection or "stale_es_anchor"
+            continue
+        return (source_at, float(price), provider.value), None
+    return None, first_rejection or "missing_es"
+
+
 def _latest_provider_quote(
     state: LatestState,
     instrument_id: str,
@@ -110,3 +147,9 @@ def rth_session_date(at: datetime) -> str | None:
     if session is None or not (session.open_at <= at_et < session.close_at):
         return None
     return session.trading_date.isoformat()
+
+
+def gth_session_date(at: datetime) -> str | None:
+    if not DEFAULT_MARKET_CALENDAR.is_spx_gth_open(at):
+        return None
+    return DEFAULT_MARKET_CALENDAR.research_expiry(at).isoformat()

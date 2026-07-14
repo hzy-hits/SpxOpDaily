@@ -27,7 +27,9 @@ from spx_spark.options_map import (
 from spx_spark.storage import LatestState, LatestStateStore, configured_quote_use_decision
 
 
-ALLOWED_TRIGGER_KINDS = frozenset({"periodic", "shock", "reclaim"})
+ALLOWED_TRIGGER_KINDS = frozenset(
+    {"periodic", "shock", "reclaim", "gth_dip_reclaim_call"}
+)
 SIGNED_GEX_METHOD = "call_positive_put_negative_oi_proxy_not_dealer_position"
 SHADOW_MODE = "research_shadow_only"
 
@@ -58,7 +60,7 @@ def _trigger_payload(
     normalized_kind = kind.strip().lower()
     if normalized_kind not in ALLOWED_TRIGGER_KINDS:
         raise ValueError(
-            f"unsupported Greek shadow trigger {kind!r}; expected periodic, shock, or reclaim"
+            f"unsupported Greek shadow trigger {kind!r}; expected periodic, shock, reclaim, or gth_dip_reclaim_call"
         )
     if normalized_kind == "periodic" and (event_id is not None or event_at is not None):
         raise ValueError("periodic Greek shadow trigger cannot carry event identity")

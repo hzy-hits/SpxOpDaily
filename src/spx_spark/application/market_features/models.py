@@ -104,6 +104,9 @@ class DecisionContext:
     data_quality: dict[str, Any]
     regime_decision: dict[str, Any] = field(default_factory=dict)
     breakout_filter: dict[str, Any] = field(default_factory=dict)
+    macro_event: dict[str, Any] = field(default_factory=dict)
+    greek_decision: dict[str, Any] = field(default_factory=dict)
+    virtual_strategy: dict[str, Any] = field(default_factory=dict)
     trade_intent: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:

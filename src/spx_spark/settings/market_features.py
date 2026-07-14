@@ -45,6 +45,18 @@ class MarketFeatureSettings:
     trade_invalidation_buffer_points: float = 3.0
     trade_target_em_fraction: float = 0.15
     trade_time_stop_minutes: int = 15
+    greek_decision_min_coverage: float = 0.60
+    greek_target_delta_min: float = 0.35
+    greek_target_delta_max: float = 0.70
+    greek_max_theta_15m_loss_fraction: float = 0.35
+    greek_max_iv_crush_loss_fraction: float = 0.45
+    greek_delta_saturation: float = 0.85
+    virtual_strategy_enabled: bool = True
+    virtual_profit_take_fraction: float = 0.30
+    virtual_gamma_retention_fraction: float = 0.60
+    virtual_iv_drop_vol_points: float = 1.0
+    virtual_wall_touch_points: float = 5.0
+    virtual_gth_time_stop_minutes: int = 360
 
     def __post_init__(self) -> None:
         positive = (
@@ -79,6 +91,17 @@ class MarketFeatureSettings:
             self.trade_invalidation_buffer_points,
             self.trade_target_em_fraction,
             self.trade_time_stop_minutes,
+            self.greek_decision_min_coverage,
+            self.greek_target_delta_min,
+            self.greek_target_delta_max,
+            self.greek_max_theta_15m_loss_fraction,
+            self.greek_max_iv_crush_loss_fraction,
+            self.greek_delta_saturation,
+            self.virtual_profit_take_fraction,
+            self.virtual_gamma_retention_fraction,
+            self.virtual_iv_drop_vol_points,
+            self.virtual_wall_touch_points,
+            self.virtual_gth_time_stop_minutes,
         )
         if any(value <= 0 for value in positive):
             raise ValueError("market feature settings must be positive")
@@ -109,9 +132,17 @@ class MarketFeatureSettings:
             self.trade_follow_through_em_fraction,
             self.trade_entry_spread_fraction,
             self.trade_target_em_fraction,
+            self.greek_decision_min_coverage,
+            self.greek_max_theta_15m_loss_fraction,
+            self.greek_max_iv_crush_loss_fraction,
+            self.greek_delta_saturation,
+            self.virtual_profit_take_fraction,
+            self.virtual_gamma_retention_fraction,
         )
         if any(value > 1 for value in fractions):
             raise ValueError("market feature trade fractions cannot exceed 1")
+        if not 0 < self.greek_target_delta_min < self.greek_target_delta_max < 1:
+            raise ValueError("Greek target delta band must be ordered within (0, 1)")
 
 
 def _parse_clock(value: str) -> time:

@@ -54,9 +54,9 @@ def apply_candidate_presentation(payload: dict[str, Any], *, now: datetime) -> N
             "decision_executable": True,
         }
         payload["plan_candidates"] = [plan]
-        payload["observation_candidates"] = [
-            _as_observation(item) for item in candidates if not _same_candidate(item, plan)
-        ]
+        opposing = _opposing_invalidation(candidates, primary_direction=str(intent.get("direction") or ""))
+        payload["observation_candidates"] = []
+        payload["opposing_invalidation"] = opposing
         payload["candidate_presentation"] = {
             "mode": "single_plan",
             "reason": reason,
@@ -66,13 +66,100 @@ def apply_candidate_presentation(payload: dict[str, Any], *, now: datetime) -> N
         return
 
     payload["plan_candidates"] = []
-    payload["observation_candidates"] = [_as_observation(item) for item in candidates]
+    direction, direction_source = _primary_direction(payload)
+    primary = _choose_primary(candidates, payload=payload, direction=direction)
+    payload["observation_candidates"] = [_as_observation(primary)] if primary else []
+    payload["opposing_invalidation"] = _opposing_invalidation(
+        candidates,
+        primary_direction=_candidate_direction(primary) if primary else direction,
+    )
     payload["candidate_presentation"] = {
         "mode": "observation_only",
         "reason": "unique_trade_ready_candidate_unavailable" if play else reason,
-        "play": None,
+        "play": primary.get("play") if primary else None,
+        "primary_direction": _candidate_direction(primary) if primary else direction or None,
+        "direction_source": direction_source,
         "intent_id": intent.get("intent_id"),
     }
+
+
+def _primary_direction(payload: dict[str, Any]) -> tuple[str, str]:
+    for source, value in (
+        ("trade_intent", payload.get("trade_intent")),
+        ("level_decision", payload.get("level_decision")),
+        ("regime_decision", payload.get("regime_decision")),
+    ):
+        if isinstance(value, dict) and str(value.get("direction") or "") in {"up", "down"}:
+            return str(value["direction"]), source
+    gth = payload.get("gth_dip_reclaim_signal")
+    if isinstance(gth, dict) and gth.get("kind") == "gth_dip_reclaim_call":
+        return "up", "gth_dip_reclaim"
+    trend = payload.get("globex_trend")
+    regime = str(trend.get("regime") or "") if isinstance(trend, dict) else ""
+    if regime in {"bullish", "up"}:
+        return "up", "globex_trend"
+    if regime in {"bearish", "down"}:
+        return "down", "globex_trend"
+    return "", "nearest_level_no_direction_guess"
+
+
+def _choose_primary(
+    candidates: list[dict[str, Any]],
+    *,
+    payload: dict[str, Any],
+    direction: str,
+) -> dict[str, Any] | None:
+    if not candidates:
+        return None
+    directional = [row for row in candidates if _candidate_direction(row) == direction]
+    pool = directional or candidates
+    spot = None
+    underlier = payload.get("underlier")
+    if isinstance(underlier, dict) and isinstance(underlier.get("price"), int | float):
+        spot = float(underlier["price"])
+    greek = payload.get("greek_decision")
+    scores = greek.get("contract_scores") if isinstance(greek, dict) else {}
+    scores = scores if isinstance(scores, dict) else {}
+
+    def rank(row: dict[str, Any]) -> tuple[float, float, str]:
+        adjustment = scores.get(str(row.get("contract_id") or ""))
+        confidence = (
+            float(adjustment.get("confidence_adjustment") or 0.0)
+            if isinstance(adjustment, dict)
+            else 0.0
+        )
+        level = row.get("level")
+        distance = abs(float(level) - spot) if spot is not None and isinstance(level, int | float) else 1e9
+        return (-confidence, distance, str(row.get("play") or ""))
+
+    return min(pool, key=rank)
+
+
+def _opposing_invalidation(
+    candidates: list[dict[str, Any]], *, primary_direction: str
+) -> dict[str, Any] | None:
+    if primary_direction not in {"up", "down"}:
+        return None
+    opposite = "down" if primary_direction == "up" else "up"
+    rows = [row for row in candidates if _candidate_direction(row) == opposite]
+    if not rows:
+        return None
+    row = rows[0]
+    return {
+        "direction": opposite,
+        "play": row.get("play"),
+        "level": row.get("level"),
+        "level_label": row.get("level_label"),
+        "role": "primary_strategy_invalidation_only",
+        "decision_executable": False,
+    }
+
+
+def _candidate_direction(candidate: dict[str, Any] | None) -> str:
+    if not candidate:
+        return ""
+    right = str(candidate.get("right") or "").upper()
+    return "up" if right == "C" else "down" if right == "P" else ""
 
 
 def _supported_plan_play(

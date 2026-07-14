@@ -19,6 +19,7 @@ from spx_spark.application.order_map.level_decision_machine import (
 from spx_spark.application.order_map.level_decision_outcomes import advance_level_outcomes
 from spx_spark.application.order_map.level_decision_outcomes import LevelOutcomeSettings
 from spx_spark.application.order_map.trigger_coordinates import resolve_trigger_coordinate
+from spx_spark.application.order_map.stable_structure import advance_stable_structure
 from spx_spark.config import StorageSettings
 from spx_spark.domain.analytics import AnalyticsStatus
 from spx_spark.ibkr.atm_reference import (
@@ -82,9 +83,19 @@ def run_level_decision_shadow(
     with exclusive_state_lock(state_path):
         persisted = _load_state(state_path)
         live_structure = _live_structure(tick, now=now)
-        frozen_structure = (
-            live_structure if live_structure is not None else persisted.get("structure")
+        stability_state, promoted_structure = advance_stable_structure(
+            persisted.get("structure_stability")
+            if isinstance(persisted.get("structure_stability"), Mapping)
+            else {"stable": persisted.get("structure")},
+            live_structure,
+            now=now,
+            interval_seconds=policy.structure_interval_seconds,
+            required_confirmations=policy.structure_required_confirmations,
+            band_half_width_points=policy.structure_band_half_width_points,
+            switch_min_points=policy.structure_switch_min_points,
         )
+        frozen_structure = promoted_structure or persisted.get("structure")
+        previous = persisted.get("decision")
         observation = _observation(
             storage,
             tick,
@@ -92,8 +103,8 @@ def run_level_decision_shadow(
             session_date=session or _research_session_date(now),
             frozen_structure=(frozen_structure if isinstance(frozen_structure, Mapping) else None),
             max_frozen_structure_age_sessions=policy.max_frozen_structure_age_sessions,
+            active_decision=previous if isinstance(previous, Mapping) else None,
         )
-        previous = persisted.get("decision")
         transition = advance_level_decision(
             previous if isinstance(previous, Mapping) else None,
             observation,
@@ -115,6 +126,7 @@ def run_level_decision_shadow(
             "decision": transition.state,
             "outcomes": outcome_state,
             "structure": frozen_structure,
+            "structure_stability": stability_state,
             "latest_observation": {
                 "spot": observation.spot,
                 "es": observation.es,
@@ -233,6 +245,7 @@ def _observation(
     session_date: str,
     frozen_structure: Mapping[str, object] | None = None,
     max_frozen_structure_age_sessions: int = 1,
+    active_decision: Mapping[str, object] | None = None,
 ) -> LevelObservation:
     structure_age = _structure_session_age(frozen_structure, now=now)
     structure_usable = (
@@ -265,7 +278,38 @@ def _observation(
     )
     levels = coordinate.transform_levels(spx_levels)
     spot = coordinate.observed_value
+    spx_spot = coordinate.spx_observed_value
     spot_source = coordinate.source
+    coordinate_kind = coordinate.kind.value
+    coordinate_instrument = coordinate.instrument_id
+    coordinate_basis = coordinate.basis_points
+    active_kind = str((active_decision or {}).get("trigger_coordinate_kind") or "")
+    active_phase = str((active_decision or {}).get("phase") or "far")
+    active_basis = _positive_or_negative_float(
+        (active_decision or {}).get("trigger_basis_points")
+    )
+    if active_phase not in {"far", "invalidated", "expired"} and es is not None:
+        if active_kind == "es_equivalent" and active_basis is not None:
+            levels = {name: value + active_basis for name, value in spx_levels.items()}
+            spot = es
+            spx_spot = es - active_basis
+            spot_source = f"latched_future:ES+basis:{active_basis:.4f}"
+            coordinate_kind = active_kind
+            coordinate_instrument = "future:ES"
+            coordinate_basis = active_basis
+        elif active_kind in {"official_spx", "chain_implied_spx"} and coordinate_kind != active_kind:
+            if active_basis is not None:
+                levels = dict(spx_levels)
+                spot = es - active_basis
+                spx_spot = spot
+                spot_source = f"latched_spx_coordinate_from_es_basis:{active_basis:.4f}"
+                coordinate_kind = active_kind
+                coordinate_instrument = str(
+                    (active_decision or {}).get("trigger_instrument_id") or "index:SPX"
+                )
+                coordinate_basis = active_basis
+    if coordinate_basis is None and es is not None and spx_spot is not None:
+        coordinate_basis = es - spx_spot
     if not coordinate.usable:
         quality_reasons.append("spx_price_unavailable")
     if not levels:
@@ -281,10 +325,10 @@ def _observation(
         spot_source=spot_source,
         level_source=level_source,
         spx_levels=spx_levels,
-        trigger_coordinate_kind=coordinate.kind.value,
-        trigger_instrument_id=coordinate.instrument_id,
-        trigger_basis_points=coordinate.basis_points,
-        spx_spot=coordinate.spx_observed_value,
+        trigger_coordinate_kind=coordinate_kind,
+        trigger_instrument_id=coordinate_instrument,
+        trigger_basis_points=coordinate_basis,
+        spx_spot=spx_spot,
     )
 
 
@@ -428,6 +472,9 @@ def _public_state(
         "expires_at": state.get("expires_at"),
         "expiry": (structure or {}).get("expiry"),
         "levels": levels,
+        "level_bands": dict((structure or {}).get("level_bands") or {}),
+        "structure_promoted_at": (structure or {}).get("promoted_at"),
+        "structure_duration_seconds": (structure or {}).get("duration_seconds"),
         "spot": spot,
         "es": es,
         "spot_source": spot_source,

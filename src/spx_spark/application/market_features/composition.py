@@ -27,6 +27,7 @@ def build_decision_context(
     now: datetime,
     trend: dict[str, Any],
     level_decision: dict[str, Any],
+    macro_event: dict[str, Any] | None = None,
     policy: MarketFeatureSettings | None = None,
 ) -> DecisionContext:
     policy = policy or MarketFeatureSettings()
@@ -106,6 +107,7 @@ def build_decision_context(
         },
         regime_decision=regime_decision,
         breakout_filter=breakout_filter,
+        macro_event=dict(macro_event or {}),
     )
 
 

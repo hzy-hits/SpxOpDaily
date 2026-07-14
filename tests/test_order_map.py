@@ -2324,11 +2324,8 @@ def test_candidate_presentation_requires_one_directionally_supported_plan() -> N
 
     assert [item["play"] for item in payload["plan_candidates"]] == ["level_breakout_put"]
     assert payload["plan_candidates"][0]["decision_executable"] is True
-    assert [item["play"] for item in payload["observation_candidates"]] == [
-        "level_breakout_put",
-        "put_wall_bounce_call",
-    ]
-    assert all(item["decision_executable"] is False for item in payload["observation_candidates"])
+    assert payload["observation_candidates"] == []
+    assert payload["opposing_invalidation"]["play"] == "put_wall_bounce_call"
     presented = payload["plan_candidates"] + payload["observation_candidates"]
     assert (
         sum(item.get("contract_id") == payload["trade_intent"]["contract_id"] for item in presented)
@@ -2355,7 +2352,8 @@ def test_candidate_presentation_requires_one_directionally_supported_plan() -> N
     payload["trade_intent"]["status"] = "blocked"
     _apply_candidate_presentation(payload, now=evaluation_now)
     assert payload["plan_candidates"] == []
-    assert len(payload["observation_candidates"]) == 3
+    assert len(payload["observation_candidates"]) == 1
+    assert payload["observation_candidates"][0]["right"] == "P"
     assert payload["candidate_presentation"]["reason"] == "trade_intent_blocked"
 
     payload["trade_intent"]["status"] = "trade_ready"
@@ -2368,7 +2366,7 @@ def test_candidate_presentation_requires_one_directionally_supported_plan() -> N
     payload["level_trigger_repricing"]["event_id"] = "event-2"
     _apply_candidate_presentation(payload, now=evaluation_now)
     assert payload["plan_candidates"] == []
-    assert len(payload["observation_candidates"]) == 3
+    assert len(payload["observation_candidates"]) == 1
     assert payload["candidate_presentation"]["reason"] == "unique_trade_ready_candidate_unavailable"
 
     payload["level_trigger_repricing"]["event_id"] = "event-1"

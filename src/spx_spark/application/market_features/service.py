@@ -6,6 +6,7 @@ import argparse
 import json
 from dataclasses import replace
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from spx_spark.application.globex_trend.state import load_trend_state, trend_state_path
@@ -13,6 +14,7 @@ from spx_spark.application.market_features.composition import (
     build_decision_audit,
     build_decision_context,
 )
+from spx_spark.application.market_features.greek_decision import build_greek_decision
 from spx_spark.application.market_features.market import (
     build_minute_market_frame,
     merge_minute_sample,
@@ -33,6 +35,7 @@ from spx_spark.application.market_features.state import (
 )
 from spx_spark.application.market_features.trade_intent import evaluate_trade_intent
 from spx_spark.application.market_features.trade_intent_runtime import process_trade_intent
+from spx_spark.application.market_features.virtual_strategy import process_virtual_strategy
 from spx_spark.application.order_map.level_decision_shadow import (
     load_level_decision_shadow,
 )
@@ -41,6 +44,8 @@ from spx_spark.application.order_map.level_trigger_repricing import (
 )
 from spx_spark.config import StorageSettings
 from spx_spark.features.exposure_map import build_exposure_map
+from spx_spark.greek_reference import build_zero_dte_greeks_reference
+from spx_spark.macro_event_clock import macro_event_state
 from spx_spark.marketdata import as_utc
 from spx_spark.options_map import build_options_map
 from spx_spark.settings import load_app_settings
@@ -119,12 +124,14 @@ def run(argv: list[str] | None = None, *, now: datetime | None = None) -> int:
         max_sessions=policy.volume_baseline_sessions,
     )
     level_decision = dict(load_level_decision_shadow(storage))
+    macro_event = macro_event_state(evaluation_now)
     context = build_decision_context(
         market_frame,
         option_frame,
         now=evaluation_now,
         trend=trend,
         level_decision=level_decision,
+        macro_event=macro_event,
         policy=policy,
     )
     repricing = load_json(default_level_trigger_repricing_path(storage))
@@ -138,12 +145,55 @@ def run(argv: list[str] | None = None, *, now: datetime | None = None) -> int:
         feature_policy=policy,
         order_policy=app.order_map,
     )
-    context = replace(context, trade_intent=trade_intent)
+    contract_id = str(trade_intent.get("contract_id") or "")
+    focused = build_zero_dte_greeks_reference(
+        latest,
+        options_map=options_map,
+        focus_contract_ids=(contract_id,) if contract_id else (),
+        max_serialized_contracts=1 if contract_id else 0,
+        serialized_scenario_names=(
+            "clock_plus_5m",
+            "clock_plus_15m",
+            "clock_plus_30m",
+            "iv_down_1vol",
+            "iv_down_3vol",
+        ),
+    )
+    greek_decision = build_greek_decision(
+        focused,
+        [trade_intent] if contract_id else [],
+        macro_event=macro_event,
+        policy=policy,
+    )
+    if contract_id:
+        score = greek_decision.get("contract_scores", {}).get(contract_id)
+        if isinstance(score, dict):
+            trade_intent = {**trade_intent, "greek_confidence": score}
+    context = replace(
+        context,
+        trade_intent=trade_intent,
+        greek_decision=greek_decision,
+    )
     intent_delivery = process_trade_intent(
         storage,
         trade_intent,
         now=evaluation_now,
     )
+    gth_signal = load_json(
+        Path(storage.data_root) / "latest" / "gth_dip_reclaim_signal.json"
+    )
+    virtual_strategy = process_virtual_strategy(
+        storage,
+        latest,
+        trade_intent=trade_intent,
+        gth_signal=gth_signal,
+        option_structure=option_frame.structure,
+        macro_event=macro_event,
+        greek_decision=greek_decision,
+        now=evaluation_now,
+        policy=policy,
+    )
+    context = replace(context, virtual_strategy=virtual_strategy)
     previous_context = _dict(persisted.get("last_decision_context"))
     audit = build_decision_audit(context, previous=previous_context or None)
     projections = projection_paths(storage.data_root)
@@ -179,6 +229,7 @@ def run(argv: list[str] | None = None, *, now: datetime | None = None) -> int:
             "audit_appended": audit is not None,
             "trade_intent_status": trade_intent.get("status"),
             "trade_intent_delivery": intent_delivery,
+            "virtual_strategy": virtual_strategy,
         }
     )
     if args.json:

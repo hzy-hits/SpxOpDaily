@@ -382,6 +382,24 @@ def _handle_terminal_rearm(
     now = _utc(observation.at)
     if _phase_age(state, now) < settings.terminal_rearm_seconds:
         return _unchanged(state, phase, now, "terminal_hold")
+    kind = str(state.get("level_kind") or "")
+    current_level = observation.levels.get(kind)
+    old_level = state.get("level")
+    if (
+        current_level is not None
+        and isinstance(old_level, int | float)
+        and abs(float(current_level) - float(old_level)) > settings.structure_drift_points
+    ):
+        armed = _arm_nearest_level(observation, settings=settings)
+        if armed.current_phase is not LevelPhase.FAR:
+            return LevelTransition(
+                phase,
+                armed.current_phase,
+                armed.state,
+                True,
+                "stable_structure_promoted_rearm",
+            )
+        return _to_far(state, phase, now, "stable_structure_promoted")
     if phase is LevelPhase.EXPIRED:
         armed = _arm_nearest_level(observation, settings=settings)
         if armed.current_phase is not LevelPhase.FAR:

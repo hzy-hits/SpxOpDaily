@@ -31,6 +31,21 @@ class ShockSettings:
     rearm_recovery_fraction: float = 0.4
     rearm_neutral_seconds: int = 300
     retry_seconds: int = 30
+    gth_dip_reclaim_enabled: bool = True
+    gth_short_horizon_seconds: int = 900
+    gth_long_horizon_seconds: int = 3600
+    gth_short_min_drawdown_points: float = 10.0
+    gth_long_min_drawdown_points: float = 14.0
+    gth_short_min_descent_seconds: int = 300
+    gth_long_min_descent_seconds: int = 1200
+    gth_expected_move_fraction: float = 0.10
+    gth_reclaim_fraction: float = 0.40
+    gth_min_reclaim_points: float = 5.0
+    gth_confirm_samples: int = 2
+    gth_confirm_hold_seconds: int = 60
+    gth_session_warmup_seconds: int = 3600
+    gth_max_signals_per_session: int = 3
+    gth_cooldown_seconds: int = 3600
     data_root: str = "data"
 
 

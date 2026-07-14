@@ -1,0 +1,13 @@
+schema_version: 1
+timezone: America/New_York
+defaults:
+  pre_window_minutes: 30
+  post_window_minutes: 90
+events:
+  - id: us-cpi-2026-07-14
+    name: US CPI
+    release_at: "2026-07-14T08:30:00-04:00"
+    impact: high
+    pre_window_minutes: 30
+    post_window_minutes: 90
+    description: Scheduled US CPI release; the explicit timestamp is authoritative and must be updated from a trusted calendar before future sessions.

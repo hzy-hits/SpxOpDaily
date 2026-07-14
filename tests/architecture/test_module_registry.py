@@ -15,6 +15,7 @@ LAYERS = {
     "runtime_config": 0,
     "marketdata": 0,
     "market_calendar": 0,
+    "macro_event_clock": 0,
     "alert_model": 0,
     "config": 1,
     "config_ibkr": 1,
@@ -74,6 +75,7 @@ L0_MODULES = {
     "runtime_config",
     "marketdata",
     "market_calendar",
+    "macro_event_clock",
     "alert_model",
 }
 L2_PROVIDERS = {"ibkr", "schwab", "hyperliquid", "polymarket", "mock_collector"}

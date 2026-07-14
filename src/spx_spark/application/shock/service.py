@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from dataclasses import asdict, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,7 +19,13 @@ from spx_spark.application.shock.delivery import (
     mark_event_greek_shadow_sampled,
     reconcile_acknowledged_alerts,
 )
-from spx_spark.application.shock.evaluator import rth_session_date, synchronized_live_sample
+from spx_spark.application.shock.evaluator import (
+    gth_session_date,
+    live_es_sample,
+    rth_session_date,
+    synchronized_live_sample,
+)
+from spx_spark.application.shock.gth_dip import advance_gth_dip, mark_gth_delivery
 from spx_spark.application.shock.level_projection import project_level_decision_machine
 from spx_spark.application.shock.machine import (
     _strategy_alert,
@@ -44,6 +51,7 @@ from spx_spark.data_platform.integration import (
 )
 from spx_spark.data_platform.settings import DataPlatformSettings
 from spx_spark.greek_shadow import sample_zero_dte_greeks_shadow
+from spx_spark.macro_event_clock import macro_event_state
 from spx_spark.intraday_event_outcomes import (
     IntradayEventOutcomeSettings,
     IntradayEventOutcomeTracker,
@@ -59,7 +67,11 @@ from spx_spark.notifier.policy import alert_key
 from spx_spark.notifier.state import load_acknowledged_event_ids
 from spx_spark.options_map import build_options_map
 from spx_spark.settings import DEFAULT_ALERT_SETTINGS, load_app_settings
-from spx_spark.state_io import atomic_write_json_secure, exclusive_state_lock
+from spx_spark.state_io import (
+    atomic_write_json_secure,
+    exclusive_state_lock,
+    read_json_object,
+)
 from spx_spark.storage import LatestStateStore
 from spx_spark.strategy.steven import (
     annotate_alerts_with_steven_context,
@@ -93,7 +105,17 @@ def run(argv: list[str] | None = None) -> int:
         "alerts": [],
     }
     if session_date is None:
-        payload["skipped_reason"] = "outside_spx_rth"
+        gth_date = gth_session_date(latest.as_of)
+        if gth_date is None or not settings.gth_dip_reclaim_enabled:
+            payload["skipped_reason"] = "outside_spx_rth_or_gth"
+        else:
+            payload = _run_gth_dip_reclaim(
+                latest,
+                settings=settings,
+                storage_settings=storage_settings,
+                session_date=gth_date,
+                no_notify=args.no_notify,
+            )
     else:
         sample, sample_error = synchronized_live_sample(latest, settings)
         if sample is None:
@@ -416,6 +438,182 @@ def run(argv: list[str] | None = None) -> int:
     else:
         print(f"Intraday shock alerts: {payload['alert_count']}")
     return 0
+
+
+def _run_gth_dip_reclaim(
+    latest,
+    *,
+    settings: IntradayShockSettings,
+    storage_settings: StorageSettings,
+    session_date: str,
+    no_notify: bool,
+) -> dict[str, Any]:
+    sample, sample_error = live_es_sample(latest, settings)
+    payload: dict[str, Any] = {
+        "created_at": datetime.now(tz=timezone.utc).isoformat(),
+        "as_of": latest.as_of.isoformat(),
+        "session_mode": "spx_gth_es_led",
+        "alert_count": 0,
+        "alerts": [],
+    }
+    if sample is None:
+        payload["skipped_reason"] = sample_error
+        return payload
+    sample_at, es, provider = sample
+    expected_move: float | None = None
+    try:
+        options_map = build_options_map(latest)
+        if options_map.expiries:
+            raw_expected_move = options_map.expiries[0].expected_move_points
+            if isinstance(raw_expected_move, int | float) and raw_expected_move > 0:
+                expected_move = float(raw_expected_move)
+    except Exception:  # ES-led detection must survive a missing GTH chain.
+        options_map = None
+    macro = macro_event_state(sample_at)
+    virtual_state = read_json_object(
+        Path(storage_settings.data_root) / "latest" / "virtual_strategy_state.json"
+    )
+    virtual_strategy_active = isinstance(virtual_state.get("active"), dict)
+    state_path = Path(settings.state_path)
+    with exclusive_state_lock(state_path):
+        monitor_state = load_monitor_state(settings.state_path, session_date=session_date)
+        gth_state, alert, signal = advance_gth_dip(
+            monitor_state.get("gth_dip")
+            if isinstance(monitor_state.get("gth_dip"), dict)
+            else None,
+            session_date=session_date,
+            at=sample_at,
+            es=es,
+            provider=provider,
+            expected_move_points=expected_move,
+            short_horizon_seconds=settings.gth_short_horizon_seconds,
+            long_horizon_seconds=settings.gth_long_horizon_seconds,
+            short_min_drawdown_points=settings.gth_short_min_drawdown_points,
+            long_min_drawdown_points=settings.gth_long_min_drawdown_points,
+            short_min_descent_seconds=settings.gth_short_min_descent_seconds,
+            long_min_descent_seconds=settings.gth_long_min_descent_seconds,
+            expected_move_fraction=settings.gth_expected_move_fraction,
+            reclaim_fraction=settings.gth_reclaim_fraction,
+            min_reclaim_points=settings.gth_min_reclaim_points,
+            confirm_samples=settings.gth_confirm_samples,
+            confirm_hold_seconds=settings.gth_confirm_hold_seconds,
+            session_warmup_seconds=settings.gth_session_warmup_seconds,
+            max_signals_per_session=settings.gth_max_signals_per_session,
+            cooldown_seconds=settings.gth_cooldown_seconds,
+            entry_allowed=(
+                macro.get("entry_allowed") is True and not virtual_strategy_active
+            ),
+        )
+        monitor_state["gth_dip"] = gth_state
+        monitor_state["updated_at"] = sample_at.isoformat()
+        atomic_write_json_secure(state_path, monitor_state)
+        if signal is not None:
+            atomic_write_json_secure(
+                Path(storage_settings.data_root) / "latest" / "gth_dip_reclaim_signal.json",
+                {**signal, "macro_event": macro},
+            )
+            _append_gth_signal_audit(
+                storage_settings,
+                sample_at,
+                {**signal, "macro_event": macro},
+            )
+
+    notify_settings = replace(
+        NotificationSettings.from_env(),
+        direct_push_llm_enabled=False,
+    )
+    notify_enabled = resolve_shock_notify_enabled(
+        no_notify=no_notify,
+        settings=notify_settings,
+    )
+    alerts = [alert] if alert is not None else []
+    acknowledged_ids = set(load_acknowledged_event_ids(notify_settings.state_path))
+    if alert is not None and alert.dedup_group in acknowledged_ids:
+        alerts = []
+        with exclusive_state_lock(state_path):
+            monitor_state = load_monitor_state(settings.state_path, session_date=session_date)
+            gth = mark_gth_delivery(
+                monitor_state.get("gth_dip") if isinstance(monitor_state.get("gth_dip"), dict) else {},
+                event_id=str(alert.event_id),
+                at=sample_at,
+            )
+            monitor_state["gth_dip"] = gth
+            atomic_write_json_secure(state_path, monitor_state)
+    payload = _notification_payload(latest, {"gth_dip": gth_state}, alerts)
+    payload.update(
+        {
+            "session_mode": "spx_gth_es_led",
+            "macro_event": macro,
+            "expected_move_points": expected_move,
+            "gth_dip": gth_state,
+            "entry_suppressed_by_active_virtual_strategy": virtual_strategy_active,
+        }
+    )
+    if signal is not None:
+        try:
+            greek_result = sample_zero_dte_greeks_shadow(
+                latest,
+                data_root=storage_settings.data_root,
+                trigger_kind="gth_dip_reclaim_call",
+                event_id=str(signal["event_id"]),
+                event_at=sample_at,
+                trigger_metadata={
+                    "direction": "up",
+                    "es": es,
+                    "drawdown_points": signal.get("drawdown_points"),
+                    "recovery_fraction": signal.get("recovery_fraction"),
+                    "spx_required": False,
+                },
+                options_map=options_map,
+            )
+            payload["greek_shadow_event"] = greek_result.to_dict()
+        except Exception as exc:
+            payload["greek_shadow_event"] = {
+                "status": "error",
+                "error": f"{type(exc).__name__}:{exc}",
+            }
+    if alerts and notify_enabled:
+        result = notify_payload(
+            payload,
+            settings=notify_settings,
+            now=sample_at,
+            record_telemetry=False,
+        )
+        payload["notification"] = result.to_dict()
+        if alert is not None and alert.dedup_group in set(result.acknowledged_event_ids):
+            with exclusive_state_lock(state_path):
+                monitor_state = load_monitor_state(settings.state_path, session_date=session_date)
+                monitor_state["gth_dip"] = mark_gth_delivery(
+                    monitor_state.get("gth_dip") if isinstance(monitor_state.get("gth_dip"), dict) else {},
+                    event_id=str(alert.event_id),
+                    at=sample_at,
+                )
+                atomic_write_json_secure(state_path, monitor_state)
+    return payload
+
+
+def _append_gth_signal_audit(
+    storage: StorageSettings,
+    at: datetime,
+    payload: dict[str, object],
+) -> None:
+    path = (
+        Path(storage.data_root)
+        / "features"
+        / "gth_dip_reclaim"
+        / f"date={at.date().isoformat()}"
+        / "events.jsonl"
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(path, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600)
+    try:
+        os.write(
+            descriptor,
+            (json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n").encode(),
+        )
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def main() -> None:

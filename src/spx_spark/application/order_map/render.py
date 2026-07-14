@@ -120,6 +120,35 @@ def _market_feature_lines(payload: dict[str, Any]) -> list[str]:
             f"{_dash(option_vol.get('atm_iv_change_60m'))}; "
             f"L1流动性 {_l1_liquidity_text(l1)}"
         )
+    macro = payload.get("macro_event")
+    if isinstance(macro, dict) and macro.get("mode") != "normal":
+        event = macro.get("active_event") if isinstance(macro.get("active_event"), dict) else {}
+        lines.append(
+            f"宏观事件时钟: {macro.get('mode')}，{event.get('name') or '-'} "
+            f"{event.get('release_at') or '-'}；新入场={'允许' if macro.get('entry_allowed') else '禁止'}"
+        )
+    greek = payload.get("greek_decision")
+    presentation = payload.get("candidate_presentation")
+    primary_play = presentation.get("play") if isinstance(presentation, dict) else None
+    if isinstance(greek, dict):
+        score_rows = greek.get("contract_scores") if isinstance(greek.get("contract_scores"), dict) else {}
+        selected = next(
+            (
+                row
+                for candidate in payload.get("candidates") or []
+                if isinstance(candidate, dict)
+                and candidate.get("play") == primary_play
+                and isinstance((row := score_rows.get(str(candidate.get("contract_id") or ""))), dict)
+            ),
+            None,
+        )
+        if selected:
+            lines.append(
+                f"Greeks决策层: {greek.get('mode')}，同方向合约置信调整 "
+                f"{float(selected.get('confidence_adjustment') or 0):+.0f}；"
+                f"Theta15m损耗 {_fmt_prob(selected.get('theta_15m_loss_fraction'))}，"
+                f"IV-3vol损耗 {_fmt_prob(selected.get('iv_down_3vol_loss_fraction'))}"
+            )
     return lines
 
 
@@ -637,6 +666,13 @@ def render_template(payload: dict[str, Any]) -> str:
                 "(同样不可提前挂期权价)"
             )
 
+    opposing = payload.get("opposing_invalidation")
+    if isinstance(opposing, dict):
+        lines.append(
+            f"主策略失效条件: 若价格确认走向 {opposing.get('level_label') or opposing.get('level')}，"
+            f"则当前主策略失效；`{opposing.get('play')}` 不作为并列反向计划。"
+        )
+
     lines.append(
         "注: 墙位是 OI 真实聚集处(多在整数位),但价格常在墙前几点反转;"
         "先手挡=向现价方向让 30% 距离,成交率高、价格稍差。"
@@ -665,6 +701,7 @@ def _level_decision_lines(payload: dict[str, Any]) -> list[str]:
     spot = finite_float(decision.get("spot"))
     es = finite_float(decision.get("es"))
     levels = decision.get("levels") if isinstance(decision.get("levels"), dict) else {}
+    bands = decision.get("level_bands") if isinstance(decision.get("level_bands"), dict) else {}
     es_levels = (
         decision.get("es_equivalent_levels")
         if isinstance(decision.get("es_equivalent_levels"), dict)
@@ -688,7 +725,12 @@ def _level_decision_lines(payload: dict[str, Any]) -> list[str]:
     source = str(decision.get("spot_source") or "-")
     lines = [
         f"SPX 代理: {_dash(spot)}({source})；ES {_dash(es)}",
-        (f"SPX 结构: Put Wall {put_wall} | Flip {flip_low}–{flip_high} | Call Wall {call_wall}"),
+        (
+            "SPX 稳定结构: Put Wall "
+            f"{_band(bands.get('put_wall'), put_wall)} | Flip "
+            f"{_band(bands.get('flip_low'), flip_low)}–{_band(bands.get('flip_high'), flip_high)} | "
+            f"Call Wall {_band(bands.get('call_wall'), call_wall)}"
+        ),
         *(
             [
                 "ES 等价值位: Put Wall "
@@ -714,6 +756,12 @@ def _level_decision_lines(payload: dict[str, Any]) -> list[str]:
         )
         lines.append(f"结构口径: {source_label}（expiry={expiry}）")
     return lines
+
+
+def _band(value: object, fallback: str) -> str:
+    if not isinstance(value, dict):
+        return fallback
+    return f"{_dash(value.get('low'))}–{_dash(value.get('high'))}"
 
 
 def _level_position_line(spot: float | None, levels: dict[str, Any]) -> str:
