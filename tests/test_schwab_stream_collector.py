@@ -82,6 +82,40 @@ def test_stream_assembler_normalizes_concrete_es_future() -> None:
     assert quote.open_interest == 234567
 
 
+def test_stream_assembler_normalizes_single_es_futures_option_probe() -> None:
+    now = datetime(2026, 7, 14, 2, 0, tzinfo=UTC)
+    assembler = SchwabStreamQuoteAssembler(stale_after_seconds=15.0)
+    assembler.ingest(
+        {
+            "service": "LEVELONE_FUTURES_OPTIONS",
+            "content": [
+                {
+                    "key": "./ESU26C7600",
+                    "BID_PRICE": 31.0,
+                    "ASK_PRICE": 31.5,
+                    "OPEN_INTEREST": 1234,
+                    "UNDERLYING_SYMBOL": "/ESU26",
+                    "STRIKE_PRICE": 7600.0,
+                    "FUTURE_EXPIRATION_DATE": millis(datetime(2026, 9, 18, tzinfo=UTC)),
+                    "CONTRACT_TYPE": "C",
+                    "FUTURE_MULTIPLIER": 50,
+                    "QUOTE_TIME_MILLIS": millis(now),
+                }
+            ],
+        },
+        received_at=now,
+    )
+
+    snapshot = assembler.drain_snapshot()
+
+    assert snapshot is not None
+    quote = snapshot.quotes[0]
+    assert quote.instrument.canonical_id == "option:ES:ES_FOP:20260918:7600:C"
+    assert quote.instrument.multiplier == "50"
+    assert quote.sampling_mode == "schwab_stream_futures_option_probe"
+    assert quote.market_session.value == "globex"
+
+
 def test_stream_assembler_normalizes_spxw_option_and_model_fields() -> None:
     now = datetime(2026, 7, 13, 14, 0, tzinfo=UTC)
     assembler = SchwabStreamQuoteAssembler(stale_after_seconds=15.0)

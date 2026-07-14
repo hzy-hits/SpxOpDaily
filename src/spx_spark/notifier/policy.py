@@ -60,6 +60,61 @@ SYSTEM_EVENT_ALERT_KINDS = {
     "spxw_position_event_store_corrupt",
 }
 
+# State-transition events are decisions, not raw observations. They bypass the
+# LLM reviewer so provider takeover/restoration and broker safety cannot be
+# silently vetoed. Standby-only IBKR login remains audit context.
+DIRECT_PUSH_SYSTEM_EVENT_KINDS = frozenset(
+    {
+        "ibkr_session_interrupted",
+        "ibkr_session_restored",
+        "market_data_ibkr_fallback_activated",
+        "market_data_all_providers_unavailable",
+        "market_data_schwab_restored",
+        "spxw_position_event_store_corrupt",
+    }
+)
+
+# Deterministic, cross-market-confirmed fast events are warning notifications.
+# TradeReady remains the sole owner of executable contract/entry instructions,
+# but it must not replace a market-warning channel.
+INTRADAY_DIRECT_PUSH_KINDS = frozenset(
+    {
+        "intraday_price_shock",
+        "intraday_price_reclaim",
+        "globex_trend_transition",
+        "flip_reclaim_call",
+        "call_wall_breakout_call",
+    }
+)
+
+# These are health/context observations, not human notifications. Everything
+# else that is human-visible and not a deterministic direct event enters the
+# reviewer lane; this keeps IV/Gamma/structure review reachable.
+CONTEXT_ONLY_ALERT_KINDS = frozenset(
+    {
+        "ibkr_session_login",
+        "broker_unavailable_proxy_watch",
+        "required_data_missing",
+        "optional_data_missing",
+        "required_data_degraded",
+        "optional_data_degraded",
+        "option_quote_freshness_degraded",
+        "iv_surface_degraded",
+        "iv_surface_stale",
+    }
+)
+
+# Reviewer/parser failures may only fail open for alerts whose loss could hide
+# position or execution risk. Market observations remain pending for a valid
+# review instead of being promoted merely because their severity is critical.
+REVIEW_FAILURE_FAILOPEN_KINDS = frozenset(
+    {
+        "ibkr_session_interrupted",
+        "market_data_all_providers_unavailable",
+        "spxw_position_event_store_corrupt",
+    }
+)
+
 POSITION_HOLDING_ALERT_KIND_PREFIX = "spxw_position_"
 POSITION_HOLDING_SOURCE_GATE = "ibkr_positions"
 POSITION_DIRECT_PUSH_KINDS = frozenset(
@@ -71,32 +126,15 @@ POSITION_DIRECT_PUSH_KINDS = frozenset(
     }
 )
 
-# During RTH, IV-surface movement alerts (put skew steepening, ATM IV jumps,
-# surface shifts) go through the agent review path instead of direct push:
-# raw single-metric pushes were too noisy and carried no gamma/VIX context.
-# Off-hours (spxw_sampling_mode == "off") the review layer plus the low
-# window priority silently dropped these leading signals, so sudden vol
-# repricing kinds bypass review and push directly in those windows.
-OFFHOURS_DIRECT_PUSH_VOL_KINDS = frozenset(
+# Off-hours IV observations are retained below the normal severity floor so
+# they remain available to the review/audit pipeline. They are never direct
+# pushes: a single raw volatility metric is context, not a trade decision.
+OFFHOURS_CAPTURE_VOL_KINDS = frozenset(
     {
         "put_skew_steepening_5m",
         "atm_iv_jump_5m",
     }
 )
-
-# Confirmed SPX+ES path events are deterministic 0DTE safety signals.  The LLM
-# may never veto or delay them; the lightweight producer already enforced live
-# anchors, cross-market confirmation, and a state transition.
-INTRADAY_DIRECT_PUSH_KINDS = frozenset(
-    {
-        "intraday_price_shock",
-        "intraday_price_reclaim",
-        "globex_trend_transition",
-        "flip_reclaim_call",
-        "call_wall_breakout_call",
-    }
-)
-
 
 def payload_spxw_sampling_off(payload: dict[str, object]) -> bool:
     window = payload.get("window")
@@ -109,7 +147,7 @@ def is_offhours_vol_signal_alert(
     alert: dict[str, object], payload: dict[str, object]
 ) -> bool:
     return (
-        str(alert.get("kind") or "") in OFFHOURS_DIRECT_PUSH_VOL_KINDS
+        str(alert.get("kind") or "") in OFFHOURS_CAPTURE_VOL_KINDS
         and payload_spxw_sampling_off(payload)
     )
 
@@ -152,19 +190,56 @@ def is_position_holding_alert(alert: dict[str, object]) -> bool:
     return str(alert.get("source_gate") or "") == POSITION_HOLDING_SOURCE_GATE
 
 
+def is_review_failure_failopen_alert(alert: dict[str, object]) -> bool:
+    """Whether losing this alert could hide position or execution risk."""
+
+    return is_position_holding_alert(alert) or str(alert.get("kind") or "") in (
+        REVIEW_FAILURE_FAILOPEN_KINDS
+    )
+
+
 def direct_push_alerts(
     alerts: list[dict[str, object]],
     payload: dict[str, object] | None = None,
 ) -> list[dict[str, object]]:
-    payload = payload or {}
+    return [alert for alert in alerts if _is_direct_push_alert(alert)]
+
+
+def context_only_alerts(
+    alerts: list[dict[str, object]],
+    payload: dict[str, object] | None = None,
+) -> list[dict[str, object]]:
+    """Return explicit audit-only observations.
+
+    This is intentionally an allowlist rather than the complement of direct
+    alerts. Otherwise the direct and context partitions consume every selected
+    alert and make the reviewer branch unreachable.
+    """
+
+    _ = payload
     return [
         alert
         for alert in alerts
-        if is_system_event_alert(alert)
-        or is_position_holding_alert(alert)
-        or str(alert.get("kind") or "") in INTRADAY_DIRECT_PUSH_KINDS
-        or is_offhours_vol_signal_alert(alert, payload)
+        if str(alert.get("kind") or "") in CONTEXT_ONLY_ALERT_KINDS
+        or alert.get("research_only") is True
     ]
+
+
+def _is_direct_push_alert(alert: dict[str, object]) -> bool:
+    kind = str(alert.get("kind") or "")
+    return (
+        kind in DIRECT_PUSH_SYSTEM_EVENT_KINDS
+        or kind in INTRADAY_DIRECT_PUSH_KINDS
+        or is_position_holding_alert(alert)
+    )
+
+
+def alerts_are_latency_critical(alerts: list[dict[str, object]]) -> bool:
+    """Whether a direct batch must avoid all LLM latency."""
+
+    return bool(alerts) and all(
+        str(alert.get("kind") or "") in INTRADAY_DIRECT_PUSH_KINDS for alert in alerts
+    )
 
 
 # Friend Bark channel: pure market signals only. Ops/engineering kinds (data

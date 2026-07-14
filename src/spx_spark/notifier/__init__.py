@@ -2,6 +2,7 @@
 
 from spx_spark.notifier.missed_queue import append_missed, flush_missed
 from spx_spark.notifier.deepseek import run_deepseek_reviewer
+from spx_spark.notifier.dispatcher import DispatchResult, dispatch_notification
 from spx_spark.notifier.model import (
     CommandRunner,
     NotificationResult,
@@ -9,11 +10,14 @@ from spx_spark.notifier.model import (
     default_runner,
 )
 from spx_spark.notifier.pipeline import notify_payload
+from spx_spark.notifier.receipts import NotificationEnvelope, notification_event_id
 from spx_spark.notifier.policy import (
     alert_key,
+    alerts_are_latency_critical,
     alerts_are_market_signals,
     codex_message_requests_delivery,
     codex_message_respects_human_scope,
+    context_only_alerts,
     direct_push_alerts,
     is_human_visible_alert,
     is_market_signal_alert,
@@ -43,21 +47,27 @@ from spx_spark.notifier.state import (
 __all__ = [
     "append_missed",
     "CommandRunner",
+    "DispatchResult",
     "flush_missed",
     "NotificationResult",
+    "NotificationEnvelope",
     "SinkResult",
     "alert_key",
+    "alerts_are_latency_critical",
     "alerts_are_market_signals",
     "build_codex_prompt",
     "codex_message_requests_delivery",
     "codex_message_respects_human_scope",
+    "context_only_alerts",
     "default_runner",
+    "dispatch_notification",
     "direct_push_alerts",
     "format_alert_message",
     "is_human_visible_alert",
     "is_market_signal_alert",
     "mark_alerts_sent",
     "notify_payload",
+    "notification_event_id",
     "openclaw_delivery_error",
     "run_codex_exec",
     "run_deepseek_reviewer",

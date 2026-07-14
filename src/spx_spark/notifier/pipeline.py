@@ -2,18 +2,22 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import datetime, timezone
+import hashlib
 
 from spx_spark.config import NotificationSettings
 from spx_spark.notifier.deepseek import deepseek_usage_limited, run_deepseek_reviewer
+from spx_spark.notifier.dispatcher import dispatch_notification
 from spx_spark.notifier.llm_writer import generate_push_text, load_previous_push, record_push
-from spx_spark.notifier.missed_queue import append_missed, flush_missed
 from spx_spark.notifier.model import CommandRunner, NotificationResult, SinkResult, default_runner
 from spx_spark.notifier.policy import (
     alert_key,
+    alerts_are_latency_critical,
     alerts_are_market_signals,
     codex_message_delivery_verdict,
     codex_message_respects_human_scope,
+    context_only_alerts,
     direct_push_alerts,
+    is_review_failure_failopen_alert,
     split_time_sensitive_review_candidates,
 )
 from spx_spark.notifier.prompts import (
@@ -21,13 +25,12 @@ from spx_spark.notifier.prompts import (
     build_direct_push_prompt,
     format_alert_message,
 )
+from spx_spark.notifier.receipts import NotificationEnvelope, notification_event_id
 from spx_spark.notifier.format_push import push_lane_for_alerts
 from spx_spark.notifier.review_audit import append_review_audit
 from spx_spark.notifier.sinks import (
     any_delivery_ok,
     bark_title_for_alerts,
-    deliver_trade_push,
-    im_delivery_failed,
     run_codex_exec,
     run_grok_agent,
     run_openclaw_agent,
@@ -37,17 +40,6 @@ from spx_spark.notifier.state import (
     mark_alerts_sent,
     recent_intraday_shock_blocks_price_move,
     select_alerts_for_notification,
-)
-
-
-REVIEW_FAILURE_HIGH_FAILOPEN_KINDS = frozenset(
-    {
-        "price_move_from_close",
-        "intraday_price_shock",
-        "intraday_price_reclaim",
-        "flip_reclaim_call",
-        "call_wall_breakout_call",
-    }
 )
 
 
@@ -75,6 +67,55 @@ def _scope_sinks(
     verdict: str | None = None,
 ) -> list[SinkResult]:
     return [_scope_sink(sink, alerts, verdict=verdict) for sink in sinks]
+
+
+def _dispatch_alerts(
+    *,
+    payload: dict[str, object],
+    alerts: list[dict[str, object]],
+    settings: NotificationSettings,
+    title: str,
+    text: str,
+    kind: str,
+    lane: str,
+    friend: bool,
+    runner: CommandRunner,
+    now: datetime,
+) -> list[SinkResult]:
+    identity = "\n".join(sorted(_telemetry_alert_key(alert) for alert in alerts))
+    source_event_id = str(payload.get("_notification_event_id") or "").strip()
+    if source_event_id:
+        suffix = hashlib.sha256(f"{kind}|{identity}".encode("utf-8")).hexdigest()[:16]
+        event_id = f"{source_event_id}:{suffix}"
+    else:
+        event_id = notification_event_id(
+            kind,
+            source="alert_pipeline",
+            occurred_at=now,
+            identity=identity,
+        )
+    if lane in {"ops", "mixed"}:
+        receipt_lane = "ops_transition"
+    elif all(str(alert.get("source_gate") or "") == "ibkr_positions" for alert in alerts):
+        receipt_lane = "position_safety"
+    else:
+        receipt_lane = "market_warning"
+    dispatched = dispatch_notification(
+        settings,
+        NotificationEnvelope(
+            event_id=event_id,
+            source="alert_pipeline",
+            kind=kind,
+            lane=receipt_lane,
+            occurred_at=now,
+        ),
+        title=title,
+        text=text,
+        friend=friend,
+        runner=runner,
+        attempted_at=now,
+    )
+    return list(dispatched.sinks)
 
 
 def _filter_recent_shock_correlations(
@@ -138,7 +179,7 @@ def _record_delivered_event_ids(
             acknowledged_event_ids.add(str(alert["dedup_group"]))
 
 
-def _failopen_time_sensitive_alerts(
+def _failopen_safety_alerts(
     payload: dict[str, object],
     review_candidates: list[dict[str, object]],
     *,
@@ -150,13 +191,7 @@ def _failopen_time_sensitive_alerts(
     sinks: list[SinkResult],
 ) -> tuple[list[dict[str, object]], list[SinkResult], list[dict[str, object]]]:
     failopen_alerts = [
-        alert
-        for alert in review_candidates
-        if str(alert.get("severity", "")).lower() == "critical"
-        or (
-            str(alert.get("severity", "")).lower() == "high"
-            and str(alert.get("kind") or "") in REVIEW_FAILURE_HIGH_FAILOPEN_KINDS
-        )
+        alert for alert in review_candidates if is_review_failure_failopen_alert(alert)
     ]
     failopen_alerts, suppressed = _filter_recent_shock_correlations(
         failopen_alerts,
@@ -171,25 +206,21 @@ def _failopen_time_sensitive_alerts(
     failopen_message = format_alert_message(payload, failopen_alerts)
     lane = push_lane_for_alerts(failopen_alerts)
     delivery_sinks = _scope_sinks(
-        deliver_trade_push(
-            settings,
+        _dispatch_alerts(
+            payload=payload,
+            alerts=failopen_alerts,
+            settings=settings,
             title=bark_title_for_alerts(failopen_alerts),
             text=failopen_message,
             kind="direct_event",
             lane=lane,
             friend=False,
             runner=runner,
+            now=now_utc,
         ),
         failopen_alerts,
     )
     sinks.extend(delivery_sinks)
-    if im_delivery_failed(delivery_sinks):
-        append_missed(
-            settings.missed_queue_path,
-            failopen_message,
-            kind="failopen",
-            at=now_utc,
-        )
     if any_delivery_ok(delivery_sinks):
         alerts_marked_sent.extend(failopen_alerts)
         _record_delivered_event_ids(failopen_alerts, acknowledged_event_ids)
@@ -239,7 +270,6 @@ def _deliver_review_message(
     sinks: list[SinkResult],
     reviewer_sink: SinkResult,
     reviewer_name: str,
-    delivery_kind: str,
     deliver: bool,
 ) -> list[dict[str, object]]:
     parser_verdict = codex_message_delivery_verdict(message)
@@ -256,7 +286,7 @@ def _deliver_review_message(
         )
         parser_sink = _scope_sink(parser_sink, review_candidates, verdict="blocked")
         sinks.append(parser_sink)
-        delivered_failopen, delivery_sinks, suppressed = _failopen_time_sensitive_alerts(
+        delivered_failopen, delivery_sinks, suppressed = _failopen_safety_alerts(
             payload,
             review_candidates,
             settings=settings,
@@ -318,25 +348,21 @@ def _deliver_review_message(
             lane = push_lane_for_alerts(delivery_candidates)
             friend = lane == "trade" and alerts_are_market_signals(delivery_candidates)
             delivery_sinks = _scope_sinks(
-                deliver_trade_push(
-                    settings,
+                _dispatch_alerts(
+                    payload=payload,
+                    alerts=delivery_candidates,
+                    settings=settings,
                     title=bark_title_for_alerts(delivery_candidates),
                     text=message,
                     kind="intraday_alert",
                     lane=lane,
                     friend=friend,
                     runner=runner,
+                    now=now_utc,
                 ),
                 delivery_candidates,
             )
             sinks.extend(delivery_sinks)
-            if im_delivery_failed(delivery_sinks):
-                append_missed(
-                    settings.missed_queue_path,
-                    message,
-                    kind=delivery_kind,
-                    at=now_utc,
-                )
             if any_delivery_ok(delivery_sinks):
                 alerts_marked_sent.extend(delivery_candidates)
                 _record_delivered_event_ids(delivery_candidates, acknowledged_event_ids)
@@ -374,7 +400,7 @@ def _deliver_review_message(
         )
         scope_sink = _scope_sink(scope_sink, review_candidates, verdict="blocked")
         sinks.append(scope_sink)
-        delivered_failopen, delivery_sinks, suppressed = _failopen_time_sensitive_alerts(
+        delivered_failopen, delivery_sinks, suppressed = _failopen_safety_alerts(
             payload,
             review_candidates,
             settings=settings,
@@ -450,7 +476,7 @@ def _handle_reviewer_failure(
             sinks=sinks,
             sink_name=result.sink,
         )
-    delivered_failopen, failopen_sinks, suppressed = _failopen_time_sensitive_alerts(
+    delivered_failopen, failopen_sinks, suppressed = _failopen_safety_alerts(
         payload,
         review_candidates,
         settings=settings,
@@ -514,6 +540,7 @@ def notify_payload(
             sent_count=0,
             skipped_reason="disabled",
             sinks=(),
+            outcome="disabled",
         )
 
     selected, sent_at_by_key = select_alerts_for_notification(payload, settings, now=now)
@@ -524,30 +551,49 @@ def notify_payload(
             sent_count=0,
             skipped_reason="no_alerts_after_severity_or_cooldown",
             sinks=(),
+            outcome="filtered",
         )
 
     sinks: list[SinkResult] = []
     now_utc = now or datetime.now(tz=timezone.utc)
-    if (
-        settings.openclaw_enabled
-        or settings.feishu_enabled
-        or settings.bark_enabled
-        or settings.deepseek_enabled
-        or settings.grok_enabled
-        or settings.openclaw_agent_enabled
-        or settings.codex_enabled
-    ):
-        digest_result = flush_missed(settings, runner=runner)
-        if digest_result is not None:
-            sinks.append(replace(digest_result, alert_keys=("__missed_digest__",)))
-
-    message = format_alert_message(payload, selected)
     bypass_alerts = direct_push_alerts(selected, payload)
-    review_candidates = [alert for alert in selected if alert not in bypass_alerts]
+    context_alerts = context_only_alerts(selected, payload)
+    review_candidates = [
+        alert
+        for alert in selected
+        if alert not in bypass_alerts and alert not in context_alerts
+    ]
     review_attempted = False
     alerts_marked_sent: list[dict[str, object]] = []
     acknowledged_event_ids: set[str] = set()
-    if settings.openclaw_enabled and not (
+
+    if context_alerts:
+        alerts_marked_sent.extend(context_alerts)
+        _record_delivered_event_ids(context_alerts, acknowledged_event_ids)
+        context_sink = _scope_sink(
+            SinkResult(
+                sink="context_policy",
+                attempted=True,
+                ok=True,
+                error="explicit health/context observation retained for audit only",
+            ),
+            context_alerts,
+            verdict="consumed",
+        )
+        sinks.append(context_sink)
+        append_review_audit(
+            settings,
+            at=now_utc,
+            reviewer="context_policy",
+            candidates=context_alerts,
+            raw_reply="",
+            parser_verdict="not_run",
+            scope_ok=None,
+            outcome="context_only_consumed",
+            reviewer_sink=context_sink,
+        )
+
+    if bypass_alerts and settings.openclaw_enabled and not (
         settings.feishu_enabled
         or settings.bark_enabled
         or settings.deepseek_enabled
@@ -555,43 +601,38 @@ def notify_payload(
     ):
         # Legacy: OpenClaw-only mode still dumps the raw template without review.
         delivery_sinks = _scope_sinks(
-            deliver_trade_push(
-                settings,
-                title=bark_title_for_alerts(selected),
-                text=message,
+            _dispatch_alerts(
+                payload=payload,
+                alerts=bypass_alerts,
+                settings=settings,
+                title=bark_title_for_alerts(bypass_alerts),
+                text=format_alert_message(payload, bypass_alerts),
                 kind="direct_event",
-                lane=push_lane_for_alerts(selected),
+                lane=push_lane_for_alerts(bypass_alerts),
                 friend=False,
                 runner=runner,
+                now=now_utc,
             ),
-            selected,
+            bypass_alerts,
         )
         sinks.extend(delivery_sinks)
-        if im_delivery_failed(delivery_sinks):
-            append_missed(
-                settings.missed_queue_path,
-                message,
-                kind="direct",
-                at=now_utc,
-            )
         if any_delivery_ok(delivery_sinks):
-            alerts_marked_sent = list(selected)
-            _record_delivered_event_ids(selected, acknowledged_event_ids)
+            alerts_marked_sent.extend(bypass_alerts)
+            _record_delivered_event_ids(bypass_alerts, acknowledged_event_ids)
         append_review_audit(
             settings,
             at=now_utc,
             reviewer="direct_policy",
-            candidates=selected,
-            raw_reply=message,
+            candidates=bypass_alerts,
+            raw_reply=format_alert_message(payload, bypass_alerts),
             parser_verdict="not_run",
             scope_ok=None,
             outcome="delivered" if any_delivery_ok(delivery_sinks) else "delivery_failed_pending",
             delivery_sinks=delivery_sinks,
         )
-        review_candidates = []
     elif bypass_alerts:
         bypass_message = format_alert_message(payload, bypass_alerts)
-        if settings.direct_push_llm_enabled:
+        if settings.direct_push_llm_enabled and not alerts_are_latency_critical(bypass_alerts):
             # Writer, not reviewer: the push decision is already made. Any
             # failure falls back to the raw template so events are never lost.
             bypass_message, _writer = generate_push_text(
@@ -603,27 +644,23 @@ def notify_payload(
         lane = push_lane_for_alerts(bypass_alerts)
         friend = lane == "trade" and alerts_are_market_signals(bypass_alerts)
         delivery_sinks = _scope_sinks(
-            deliver_trade_push(
-                settings,
+            _dispatch_alerts(
+                payload=payload,
+                alerts=bypass_alerts,
+                settings=settings,
                 title=bark_title_for_alerts(bypass_alerts),
                 text=bypass_message,
                 kind="direct_event",
                 lane=lane,
                 friend=friend,
                 runner=runner,
+                now=now_utc,
             ),
             bypass_alerts,
         )
         sinks.extend(delivery_sinks)
-        if im_delivery_failed(delivery_sinks):
-            append_missed(
-                settings.missed_queue_path,
-                bypass_message,
-                kind="direct",
-                at=now_utc,
-            )
         if any_delivery_ok(delivery_sinks):
-            alerts_marked_sent = list(bypass_alerts)
+            alerts_marked_sent.extend(bypass_alerts)
             _record_delivered_event_ids(bypass_alerts, acknowledged_event_ids)
             record_push("direct_event", bypass_message, at=now_utc.isoformat())
         append_review_audit(
@@ -697,7 +734,6 @@ def notify_payload(
                 sinks=sinks,
                 reviewer_sink=grok_result,
                 reviewer_name="grok_cli",
-                delivery_kind="grok_cli",
                 deliver=settings.grok_deliver,
             )
         else:
@@ -737,7 +773,6 @@ def notify_payload(
                 sinks=sinks,
                 reviewer_sink=deepseek_result,
                 reviewer_name="deepseek",
-                delivery_kind="deepseek",
                 deliver=settings.deepseek_deliver,
             )
         elif not deepseek_result.ok:
@@ -778,7 +813,6 @@ def notify_payload(
                 sinks=sinks,
                 reviewer_sink=agent_result,
                 reviewer_name="openclaw_agent",
-                delivery_kind="agent",
                 deliver=settings.openclaw_agent_deliver,
             )
         else:
@@ -819,7 +853,6 @@ def notify_payload(
                 sinks=sinks,
                 reviewer_sink=codex_result,
                 reviewer_name="codex",
-                delivery_kind="codex",
                 deliver=settings.codex_deliver,
             )
         elif codex_result.ok:
@@ -835,7 +868,6 @@ def notify_payload(
                 sinks=sinks,
                 reviewer_sink=codex_result,
                 reviewer_name="codex",
-                delivery_kind="codex",
                 deliver=settings.codex_deliver,
             )
         elif not codex_result.ok:
@@ -876,6 +908,16 @@ def notify_payload(
             acknowledged_event_ids=tuple(sorted(acknowledged_event_ids)),
         )
     skipped_reason = None if sinks else "no_enabled_sinks"
+    if sent_count > 0:
+        outcome = "delivered"
+    elif review_candidates:
+        outcome = "pending"
+    elif alerts_marked_sent or acknowledged_event_ids:
+        outcome = "consumed"
+    elif sinks:
+        outcome = "failed"
+    else:
+        outcome = "no_sink"
     result = NotificationResult(
         enabled=True,
         selected_count=len(selected),
@@ -884,6 +926,7 @@ def notify_payload(
         sinks=tuple(sinks),
         acknowledged_event_ids=tuple(sorted(acknowledged_event_ids)),
         selected_alert_keys=tuple(_telemetry_alert_key(alert) for alert in selected),
+        outcome=outcome,
     )
     try:
         # Import lazily so the realtime notifier never initializes storage or

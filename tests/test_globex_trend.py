@@ -98,7 +98,7 @@ def test_live_es_selection_uses_freshest_vendor_quote_and_falls_back() -> None:
     assert selected is schwab
 
 
-def test_confirmed_globex_transition_is_a_direct_market_push() -> None:
+def test_confirmed_globex_transition_is_direct() -> None:
     alert = {
         "kind": "globex_trend_transition",
         "instrument_id": "future:ES",
@@ -122,6 +122,8 @@ def test_es_transition_uses_rth_semantics_during_cash_session() -> None:
 
     alert = alert_from_event(event)
 
+    assert alert.severity == "info"
+    assert alert.research_only is True
     assert alert.title == "ES RTH 多头趋势确认"
     assert "ES RTH 趋势确认切换" in alert.detail
     assert "不得按夜盘薄流动性解释" in alert.detail

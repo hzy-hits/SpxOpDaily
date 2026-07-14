@@ -122,10 +122,10 @@ def make_payload() -> dict[str, object]:
         "alerts": [
             {
                 "severity": "high",
-                "kind": "price_move_from_close",
+                "kind": "required_data_degraded",
                 "instrument_id": "index:SPX",
-                "title": "SPX up 31 bps from close",
-                "detail": "SPX moved from close.",
+                "title": "SPX required data degraded",
+                "detail": "Required context is degraded and retained for audit.",
             },
             {
                 "severity": "medium",
@@ -159,7 +159,7 @@ def _stub_delivery_and_reviewer(monkeypatch):
     monkeypatch.setattr("spx_spark.notifier.pipeline.run_deepseek_reviewer", fake_deepseek)
 
 
-def test_notifier_delivers_via_feishu_and_marks_cooldown(tmp_path) -> None:
+def test_notifier_consumes_raw_observation_without_delivery_and_marks_cooldown(tmp_path) -> None:
     settings = make_settings(str(tmp_path / "notify-state.json"))
     now = datetime(2026, 7, 7, 0, 0, tzinfo=timezone.utc)
 
@@ -167,8 +167,9 @@ def test_notifier_delivers_via_feishu_and_marks_cooldown(tmp_path) -> None:
 
     assert result.enabled is True
     assert result.selected_count == 1
-    assert result.sent_count == 1
-    assert any(s.sink == "feishu" and s.ok for s in result.sinks)
+    assert result.sent_count == 0
+    assert [sink.sink for sink in result.sinks] == ["context_policy"]
+    assert result.sinks[0].verdict == "consumed"
 
     second = notify_payload(
         make_payload(),
@@ -180,7 +181,7 @@ def test_notifier_delivers_via_feishu_and_marks_cooldown(tmp_path) -> None:
     assert second.skipped_reason == "no_alerts_after_severity_or_cooldown"
 
 
-def test_notifier_shadow_records_selected_alert_and_delivery(tmp_path, monkeypatch) -> None:
+def test_notifier_shadow_records_context_consumption(tmp_path, monkeypatch) -> None:
     data_root = tmp_path / "market-data"
     ledger_path = data_root / "runtime" / "research-ledger.sqlite3"
     monkeypatch.setenv("DATA_PLATFORM_ENABLED", "true")
@@ -196,21 +197,29 @@ def test_notifier_shadow_records_selected_alert_and_delivery(tmp_path, monkeypat
     finally:
         clear_telemetry_cache()
 
-    assert result.sent_count == 1
+    assert result.sent_count == 0
     connection = sqlite3.connect(ledger_path)
     try:
         assert connection.execute("SELECT count(*) FROM events").fetchone()[0] == 1
         assert connection.execute("SELECT count(*) FROM decisions").fetchone()[0] == 1
         assert connection.execute("SELECT count(*) FROM alert_deliveries").fetchone()[0] >= 1
-        sent = connection.execute(
+        assert connection.execute(
             "SELECT count(*) FROM alert_deliveries WHERE status='sent'"
-        ).fetchone()[0]
-        assert sent == 1
+        ).fetchone()[0] == 0
+        assert connection.execute(
+            "SELECT count(*) FROM alert_deliveries WHERE channel='context_policy'"
+        ).fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT status, action, side FROM decisions"
+        ).fetchone() == ("context", "observe", "none")
+        assert connection.execute(
+            "SELECT status FROM alert_deliveries WHERE channel='context_policy'"
+        ).fetchone()[0] == "consumed"
     finally:
         connection.close()
 
 
-def test_notifier_reports_feishu_failure_without_marking_sent(tmp_path, monkeypatch) -> None:
+def test_context_observation_never_attempts_feishu_and_is_consumed(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(
         "spx_spark.notifier.sinks.post_feishu",
         lambda url, payload, timeout: {"code": 19001, "msg": "webhook failed"},
@@ -223,9 +232,8 @@ def test_notifier_reports_feishu_failure_without_marking_sent(tmp_path, monkeypa
 
     assert result.selected_count == 1
     assert result.sent_count == 0
-    feishu = next(s for s in result.sinks if s.sink == "feishu")
-    assert feishu.ok is False
-    assert not (tmp_path / "notify-state.json").exists()
+    assert [sink.sink for sink in result.sinks] == ["context_policy"]
+    assert (tmp_path / "notify-state.json").exists()
 
 
 def test_openclaw_delivery_error_accepts_dry_run_payload() -> None:
@@ -325,7 +333,7 @@ def test_grok_agent_uses_configured_model_and_read_only_mode(tmp_path) -> None:
     assert command[command.index("--max-turns") + 1] == "1"
 
 
-def test_notifier_uses_openclaw_agent_single_track_for_review_candidates(tmp_path) -> None:
+def test_raw_observation_does_not_run_openclaw_agent(tmp_path) -> None:
     calls: list[list[str]] = []
 
     def runner(command: list[str], timeout_seconds: float) -> subprocess.CompletedProcess[str]:
@@ -354,15 +362,13 @@ def test_notifier_uses_openclaw_agent_single_track_for_review_candidates(tmp_pat
         now=datetime(2026, 7, 7, 0, 0, tzinfo=timezone.utc),
     )
 
-    assert result.sent_count == 1
-    assert [sink.sink for sink in result.sinks] == ["openclaw_agent", "feishu"]
-    assert calls[0][:2] == ["openclaw", "agent"]
-    assert "--deliver" not in calls[0]
-    assert calls[0][calls[0].index("--session-key") + 1] == "spx-spark-alerts"
-    assert all(call[:3] != ["openclaw", "message", "send"] for call in calls)
+    assert result.sent_count == 0
+    assert [sink.sink for sink in result.sinks] == ["context_policy"]
+    assert result.outcome == "consumed"
+    assert calls == []
 
 
-def test_notifier_prefers_deepseek_before_openclaw_agent_or_codex(tmp_path, monkeypatch) -> None:
+def test_raw_observation_bypasses_all_llm_reviewers(tmp_path, monkeypatch) -> None:
     calls: list[list[str]] = []
 
     def fake_deepseek(settings: NotificationSettings, prompt: str) -> tuple[SinkResult, str]:
@@ -395,13 +401,12 @@ def test_notifier_prefers_deepseek_before_openclaw_agent_or_codex(tmp_path, monk
         now=datetime(2026, 7, 7, 0, 0, tzinfo=timezone.utc),
     )
 
-    assert result.sent_count == 1
-    assert [sink.sink for sink in result.sinks] == ["deepseek_reviewer", "feishu"]
-    assert all(call[:2] != ["openclaw", "agent"] for call in calls)
-    assert all(call[:2] != ["codex", "exec"] for call in calls)
+    assert result.sent_count == 0
+    assert [sink.sink for sink in result.sinks] == ["context_policy"]
+    assert calls == []
 
 
-def test_notifier_prefilter_marks_weak_review_alert_without_llm(tmp_path, monkeypatch) -> None:
+def test_notifier_consumes_data_quality_alert_without_llm(tmp_path, monkeypatch) -> None:
     def fail_deepseek(settings: NotificationSettings, prompt: str) -> tuple[SinkResult, str]:
         raise AssertionError("weak alert should not enter LLM review")
 
@@ -430,7 +435,7 @@ def test_notifier_prefilter_marks_weak_review_alert_without_llm(tmp_path, monkey
 
     assert first.selected_count == 1
     assert first.sent_count == 0
-    assert [sink.sink for sink in first.sinks] == ["review_prefilter"]
+    assert [sink.sink for sink in first.sinks] == ["context_policy"]
 
     second = notify_payload(
         payload,
@@ -440,7 +445,7 @@ def test_notifier_prefilter_marks_weak_review_alert_without_llm(tmp_path, monkey
     assert second.selected_count == 0
 
 
-def test_notifier_deepseek_rate_limit_keeps_high_iv_alert_pending_without_failopen(
+def test_notifier_keeps_high_iv_pending_when_reviewer_is_rate_limited(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -551,7 +556,7 @@ def test_send_bark_message_reports_non_200_as_error(tmp_path) -> None:
     assert "400" in (result.error or "")
 
 
-def test_notifier_agent_approved_message_also_goes_to_bark(tmp_path, monkeypatch) -> None:
+def test_raw_observation_never_reaches_bark(tmp_path, monkeypatch) -> None:
     bark_posts: list[dict[str, object]] = []
 
     def fake_post_bark(url: str, payload: dict[str, object], timeout: float) -> dict[str, object]:
@@ -587,14 +592,10 @@ def test_notifier_agent_approved_message_also_goes_to_bark(tmp_path, monkeypatch
         now=datetime(2026, 7, 7, 0, 0, tzinfo=timezone.utc),
     )
 
-    assert [sink.sink for sink in result.sinks] == [
-        "openclaw_agent",
-        "feishu",
-        "bark",
-    ]
-    assert result.sent_count == 2
-    assert bark_posts[0]["body"] == "需要看盘: SPX alert confirmed"
-    assert str(bark_posts[0]["title"]).startswith("SPX 价格异动")
+    assert [sink.sink for sink in result.sinks] == ["context_policy"]
+    assert result.outcome == "consumed"
+    assert result.sent_count == 0
+    assert bark_posts == []
 
 
 def test_alerts_are_market_signals_rejects_mixed_and_empty_batches() -> None:
@@ -607,7 +608,7 @@ def test_alerts_are_market_signals_rejects_mixed_and_empty_batches() -> None:
     assert alerts_are_market_signals([]) is False
 
 
-def test_market_signal_agent_message_also_goes_to_friend_bark(tmp_path, monkeypatch) -> None:
+def test_raw_market_signal_never_reaches_friend_bark(tmp_path, monkeypatch) -> None:
     posts: list[tuple[str, dict[str, object]]] = []
 
     def fake_post_bark(url: str, payload: dict[str, object], timeout: float) -> dict[str, object]:
@@ -645,12 +646,8 @@ def test_market_signal_agent_message_also_goes_to_friend_bark(tmp_path, monkeypa
         now=datetime(2026, 7, 7, 0, 0, tzinfo=timezone.utc),
     )
 
-    assert "bark_friend" in [sink.sink for sink in result.sinks]
-    urls = [url for url, _ in posts]
-    assert "https://api.day.app/user-key" in urls
-    assert "https://api.day.app/friend-key" in urls
-    friend_payload = next(payload for url, payload in posts if url.endswith("friend-key"))
-    assert friend_payload["body"] == "需要看盘: SPX alert confirmed"
+    assert [sink.sink for sink in result.sinks] == ["context_policy"]
+    assert posts == []
 
 
 def test_system_event_alert_never_reaches_friend_bark(tmp_path, monkeypatch) -> None:
@@ -695,9 +692,7 @@ def test_system_event_alert_never_reaches_friend_bark(tmp_path, monkeypatch) -> 
     assert all(not url.endswith("friend-key") for url, _ in posts)
 
 
-def test_notifier_bark_delivery_alone_still_starts_cooldown(tmp_path, monkeypatch) -> None:
-    """If the Weixin token is dead but Bark reaches the human, the alert
-    counts as delivered and must enter cooldown."""
+def test_context_consumption_starts_cooldown_without_bark(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(
         "spx_spark.notifier.sinks.post_bark",
         lambda *_: {"code": 200},
@@ -734,7 +729,9 @@ def test_notifier_bark_delivery_alone_still_starts_cooldown(tmp_path, monkeypatc
         runner=runner,
         now=datetime(2026, 7, 7, 0, 0, tzinfo=timezone.utc),
     )
-    assert first.sent_count == 1
+    assert first.sent_count == 0
+    assert [sink.sink for sink in first.sinks] == ["context_policy"]
+    assert calls == []
 
     second = notify_payload(
         make_payload(),
@@ -745,7 +742,7 @@ def test_notifier_bark_delivery_alone_still_starts_cooldown(tmp_path, monkeypatc
     assert second.selected_count == 0
 
 
-def test_notifier_agent_no_push_verdict_is_not_delivered_and_starts_cooldown(tmp_path) -> None:
+def test_context_policy_does_not_need_agent_verdict_and_starts_cooldown(tmp_path) -> None:
     calls: list[list[str]] = []
 
     def runner(command: list[str], timeout_seconds: float) -> subprocess.CompletedProcess[str]:
@@ -776,11 +773,8 @@ def test_notifier_agent_no_push_verdict_is_not_delivered_and_starts_cooldown(tmp
     )
 
     assert first.sent_count == 0
-    assert [sink.sink for sink in first.sinks] == [
-        "openclaw_agent",
-        "openclaw_agent_delivery_gate",
-    ]
-    assert all(call[:3] != ["openclaw", "message", "send"] for call in calls)
+    assert [sink.sink for sink in first.sinks] == ["context_policy"]
+    assert calls == []
 
     # Same alerts again shortly after: the rejected bucket is in cooldown, so
     # the agent must not be re-run.
@@ -792,7 +786,7 @@ def test_notifier_agent_no_push_verdict_is_not_delivered_and_starts_cooldown(tmp
     )
 
     assert second.selected_count == 0
-    assert len(calls) == 1
+    assert calls == []
 
 
 def test_codex_exec_uses_local_codex_model_and_reasoning(tmp_path) -> None:
@@ -819,7 +813,7 @@ def test_codex_exec_uses_local_codex_model_and_reasoning(tmp_path) -> None:
     assert command[command.index("--sandbox") + 1] == "read-only"
 
 
-def test_notifier_can_use_codex_then_deliver_via_feishu(tmp_path) -> None:
+def test_raw_observation_does_not_use_codex_or_feishu(tmp_path) -> None:
     calls: list[list[str]] = []
 
     def runner(command: list[str], timeout_seconds: float) -> subprocess.CompletedProcess[str]:
@@ -843,13 +837,12 @@ def test_notifier_can_use_codex_then_deliver_via_feishu(tmp_path) -> None:
         now=datetime(2026, 7, 7, 0, 0, tzinfo=timezone.utc),
     )
 
-    assert result.sent_count == 1
-    assert [sink.sink for sink in result.sinks] == ["codex_exec", "feishu"]
-    assert calls[0][:2] == ["codex", "exec"]
-    assert all(call[:3] != ["openclaw", "message", "send"] for call in calls)
+    assert result.sent_count == 0
+    assert [sink.sink for sink in result.sinks] == ["context_policy"]
+    assert calls == []
 
 
-def test_codex_delivery_gate_blocks_negative_confirmation(tmp_path) -> None:
+def test_context_policy_precedes_codex_delivery_gate(tmp_path) -> None:
     calls: list[list[str]] = []
 
     def runner(command: list[str], timeout_seconds: float) -> subprocess.CompletedProcess[str]:
@@ -874,14 +867,14 @@ def test_codex_delivery_gate_blocks_negative_confirmation(tmp_path) -> None:
     )
 
     assert result.sent_count == 0
-    assert [sink.sink for sink in result.sinks] == ["codex_exec", "codex_delivery_gate"]
+    assert [sink.sink for sink in result.sinks] == ["context_policy"]
     gate = result.sinks[-1]
-    assert gate.verdict == "vetoed"
+    assert gate.verdict == "consumed"
     assert gate.alert_keys == result.selected_alert_keys
-    assert len(calls) == 1
+    assert calls == []
 
 
-def test_codex_scope_gate_blocks_non_focus_symbols(tmp_path) -> None:
+def test_context_policy_precedes_codex_scope_gate(tmp_path) -> None:
     calls: list[list[str]] = []
 
     def runner(command: list[str], timeout_seconds: float) -> subprocess.CompletedProcess[str]:
@@ -918,7 +911,8 @@ def test_codex_scope_gate_blocks_non_focus_symbols(tmp_path) -> None:
 
     assert result.sent_count == 0
     assert [sink.sink for sink in result.sinks] == ["codex_exec", "codex_scope_gate"]
-    assert len(calls) == 1
+    assert result.outcome == "pending"
+    assert calls and calls[0][:2] == ["codex", "exec"]
 
 
 def test_codex_message_requests_delivery_uses_explicit_cues() -> None:
@@ -931,7 +925,7 @@ def test_codex_message_requests_delivery_uses_explicit_cues() -> None:
     assert not codex_message_requests_delivery("结论: critical alert, but no explicit delivery cue")
 
 
-def test_review_audit_records_reply_verdict_and_delivery_without_secrets(
+def test_review_audit_records_context_consumption_without_calling_reviewer(
     tmp_path, monkeypatch
 ) -> None:
     raw_reply = "需要看盘: SPX 已收复关键位\n若重新跌破，否则不需要推送。 token=super-secret-value"
@@ -952,20 +946,19 @@ def test_review_audit_records_reply_verdict_and_delivery_without_secrets(
         now=datetime(2026, 7, 7, 0, 0, tzinfo=timezone.utc),
     )
 
-    assert result.sent_count == 1
+    assert result.sent_count == 0
     entries = [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()]
     assert len(entries) == 1
     entry = entries[0]
-    assert entry["parser_verdict"] == "deliver"
-    assert entry["outcome"] == "delivered"
+    assert entry["parser_verdict"] == "not_run"
+    assert entry["outcome"] == "context_only_consumed"
     assert entry["candidate_count"] == 1
-    assert entry["candidates"][0]["kind"] == "price_move_from_close"
-    assert "否则不需要推送" in entry["raw_reply"]
+    assert entry["candidates"][0]["kind"] == "required_data_degraded"
+    assert entry["raw_reply"] == ""
     assert "super-secret-value" not in audit_path.read_text(encoding="utf-8")
-    assert "<redacted>" in entry["raw_reply"]
 
 
-def test_invalid_reviewer_cue_keeps_high_iv_alert_pending(tmp_path, monkeypatch) -> None:
+def test_high_iv_alert_remains_pending_after_invalid_reviewer_output(tmp_path, monkeypatch) -> None:
     attempts = 0
 
     def fake_deepseek(settings: NotificationSettings, prompt: str) -> tuple[SinkResult, str]:
@@ -1008,7 +1001,7 @@ def test_invalid_reviewer_cue_keeps_high_iv_alert_pending(tmp_path, monkeypatch)
     assert all(entry["outcome"] == "invalid_parser_pending" for entry in entries)
 
 
-def test_invalid_reviewer_cue_failopens_high_price_alert(tmp_path, monkeypatch) -> None:
+def test_high_price_alert_is_consumed_before_reviewer_parser(tmp_path, monkeypatch) -> None:
     def fake_deepseek(settings: NotificationSettings, prompt: str) -> tuple[SinkResult, str]:
         return (
             SinkResult(sink="deepseek_reviewer", attempted=True, ok=True),
@@ -1027,12 +1020,12 @@ def test_invalid_reviewer_cue_failopens_high_price_alert(tmp_path, monkeypatch) 
 
     result = notify_payload(make_payload(), settings=settings, now=now)
 
-    assert result.sent_count == 1
-    assert any(sink.sink == "deepseek_parser_gate" for sink in result.sinks)
-    assert any(sink.sink == "feishu" and sink.ok for sink in result.sinks)
+    assert result.sent_count == 0
+    assert [sink.sink for sink in result.sinks] == ["context_policy"]
+    assert not any(sink.sink == "feishu" and sink.ok for sink in result.sinks)
     entry = json.loads(audit_path.read_text(encoding="utf-8").splitlines()[-1])
-    assert entry["parser_verdict"] == "invalid"
-    assert entry["outcome"] == "invalid_parser_failopen_delivered"
+    assert entry["parser_verdict"] == "not_run"
+    assert entry["outcome"] == "context_only_consumed"
 
 
 def test_codex_message_respects_human_scope_blocks_non_focus_context() -> None:
@@ -1212,7 +1205,178 @@ def test_notifier_allows_ibkr_session_state_events(tmp_path) -> None:
     assert any(s.sink == "bark" and s.ok for s in result.sinks)
 
 
-def test_notifier_sends_system_events_via_feishu_when_openclaw_disabled(tmp_path) -> None:
+def test_provider_source_switches_are_direct_state_transition_pushes() -> None:
+    from spx_spark.notifier import context_only_alerts, direct_push_alerts
+
+    fallback = {
+        "severity": "high",
+        "kind": "market_data_ibkr_fallback_activated",
+        "instrument_id": "index:SPX",
+    }
+    restored = {
+        "severity": "high",
+        "kind": "market_data_schwab_restored",
+        "instrument_id": "index:SPX",
+    }
+    unavailable = {
+        "severity": "critical",
+        "kind": "market_data_all_providers_unavailable",
+        "instrument_id": "index:SPX",
+    }
+
+    assert direct_push_alerts([fallback, restored]) == [fallback, restored]
+    assert context_only_alerts([fallback, restored]) == []
+    assert direct_push_alerts([unavailable]) == [unavailable]
+
+
+@pytest.mark.parametrize(
+    "kind",
+    (
+        "ibkr_session_login",
+        "broker_unavailable_proxy_watch",
+        "required_data_missing",
+        "required_data_degraded",
+        "optional_data_missing",
+        "optional_data_degraded",
+        "option_quote_freshness_degraded",
+        "iv_surface_degraded",
+        "iv_surface_stale",
+    ),
+)
+def test_raw_observation_kinds_are_consumed_without_llm_or_delivery(
+    kind: str,
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "spx_spark.notifier.pipeline.run_deepseek_reviewer",
+        lambda *_: (_ for _ in ()).throw(AssertionError("context must not reach LLM")),
+    )
+    payload = make_payload()
+    payload["alerts"] = [
+        {
+            "severity": "critical",
+            "kind": kind,
+            "instrument_id": "index:SPX",
+            "title": f"raw {kind}",
+            "detail": "context only",
+            "dedup_group": "raw:1",
+        }
+    ]
+    settings = replace(
+        make_settings(str(tmp_path / "notify-state.json")),
+        bark_enabled=True,
+        bark_url="https://api.day.app/test-key",
+    )
+    now = datetime(2026, 7, 7, 0, 0, tzinfo=timezone.utc)
+
+    first = notify_payload(payload, settings=settings, now=now)
+    second = notify_payload(payload, settings=settings, now=now + timedelta(seconds=60))
+
+    assert first.sent_count == 0
+    assert [sink.sink for sink in first.sinks] == ["context_policy"]
+    assert first.sinks[0].verdict == "consumed"
+    assert second.selected_count == 0
+
+
+@pytest.mark.parametrize(
+    "kind",
+    (
+        "intraday_price_shock",
+        "intraday_price_reclaim",
+        "globex_trend_transition",
+        "flip_reclaim_call",
+        "call_wall_breakout_call",
+        "market_data_ibkr_fallback_activated",
+        "market_data_all_providers_unavailable",
+        "market_data_schwab_restored",
+        "ibkr_session_interrupted",
+        "ibkr_session_restored",
+    ),
+)
+def test_deterministic_transition_kinds_deliver_without_reviewer(
+    kind: str,
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "spx_spark.notifier.pipeline.run_deepseek_reviewer",
+        lambda *_: (_ for _ in ()).throw(AssertionError("direct event must not reach reviewer")),
+    )
+    payload = make_payload()
+    payload["alerts"] = [
+        {
+            "severity": "critical",
+            "kind": kind,
+            "instrument_id": "index:SPX",
+            "title": kind,
+            "detail": "deterministic transition",
+            "dedup_group": f"{kind}:1",
+        }
+    ]
+    settings = replace(
+        make_settings(str(tmp_path / "notify-state.json")),
+        direct_push_llm_enabled=False,
+        bark_enabled=True,
+        bark_url="https://api.day.app/test-key",
+    )
+
+    result = notify_payload(
+        payload,
+        settings=settings,
+        now=datetime(2026, 7, 7, 0, 0, tzinfo=timezone.utc),
+    )
+
+    assert result.sent_count >= 1
+    assert result.outcome == "delivered"
+    assert not any(sink.sink == "deepseek_reviewer" for sink in result.sinks)
+
+
+@pytest.mark.parametrize(
+    "kind",
+    (
+        "price_move_from_close",
+        "option_gamma_regime",
+        "option_wall_proximity",
+        "iv_term_gap",
+        "atm_iv_jump_5m",
+        "put_skew_steepening_5m",
+        "iv_surface_shift_5m",
+        "iv_surface_shift_1h",
+        "atm_iv_change_1h",
+    ),
+)
+def test_market_observations_reach_reviewer_lane(kind: str, tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "spx_spark.notifier.pipeline.run_deepseek_reviewer",
+        lambda *_: (
+            SinkResult(sink="deepseek_reviewer", attempted=True, ok=True),
+            "需要看盘\n结构变化需要关注。",
+        ),
+    )
+    payload = make_payload()
+    payload["alerts"] = [
+        {
+            "severity": "high",
+            "kind": kind,
+            "instrument_id": "index:SPX",
+            "title": kind,
+            "detail": "review candidate",
+            "dedup_group": f"{kind}:1",
+        }
+    ]
+    result = notify_payload(
+        payload,
+        settings=make_settings(str(tmp_path / "notify-state.json")),
+        now=datetime(2026, 7, 7, 0, 0, tzinfo=timezone.utc),
+    )
+
+    assert result.sent_count >= 1
+    assert result.outcome == "delivered"
+    assert any(sink.sink == "deepseek_reviewer" for sink in result.sinks)
+
+
+def test_notifier_delivers_session_restore_without_reviewer(tmp_path) -> None:
     calls: list[list[str]] = []
 
     def runner(command: list[str], timeout_seconds: float) -> subprocess.CompletedProcess[str]:
@@ -1249,7 +1413,7 @@ def test_notifier_sends_system_events_via_feishu_when_openclaw_disabled(tmp_path
 
     assert result.selected_count == 1
     assert result.sent_count == 1
-    assert any(s.sink == "bark" and s.ok for s in result.sinks)
+    assert [sink.sink for sink in result.sinks] == ["bark"]
 
 
 def test_notifier_sends_position_holding_alerts_without_codex(tmp_path) -> None:
@@ -1335,9 +1499,7 @@ def test_notifier_skips_near_expiry_position_noise(tmp_path) -> None:
     assert result.sent_count == 0
 
 
-def test_notifier_routes_iv_surface_alerts_through_review(tmp_path) -> None:
-    """IV-surface movement alerts must not bypass review with a raw push; they
-    go to the codex/agent review path so the human gets gamma/VIX context."""
+def test_notifier_routes_iv_surface_alert_to_reviewer(tmp_path) -> None:
     calls: list[list[str]] = []
 
     def runner(command: list[str], timeout_seconds: float) -> subprocess.CompletedProcess[str]:
@@ -1372,14 +1534,13 @@ def test_notifier_routes_iv_surface_alerts_through_review(tmp_path) -> None:
     )
 
     assert result.selected_count == 1
-    assert len(calls) == 1
-    assert calls[0][1] == "exec"
-    assert "--message" not in calls[0]
+    assert result.sent_count == 0
+    assert [sink.sink for sink in result.sinks] == ["codex_exec"]
+    assert result.outcome == "pending"
+    assert calls and calls[0][:2] == ["codex", "exec"]
 
 
-def test_offhours_skew_steepening_bypasses_review_and_severity_floor(tmp_path) -> None:
-    """Off-hours (spxw_sampling_mode=off) sudden vol repricing alerts push
-    directly even when the quiet window stamps them below min_severity."""
+def test_offhours_skew_is_captured_below_floor_and_reaches_reviewer(tmp_path) -> None:
     calls: list[list[str]] = []
 
     def runner(command: list[str], timeout_seconds: float) -> subprocess.CompletedProcess[str]:
@@ -1420,11 +1581,12 @@ def test_offhours_skew_steepening_bypasses_review_and_severity_floor(tmp_path) -
     )
 
     assert result.selected_count == 1
-    assert result.sent_count == 1
-    assert any(s.sink == "feishu" and s.ok for s in result.sinks)
+    assert result.sent_count == 0
+    assert [sink.sink for sink in result.sinks] == ["codex_exec"]
+    assert calls and calls[0][:2] == ["codex", "exec"]
 
 
-def test_confirmed_intraday_shock_bypasses_reviewer_and_pushes_directly(tmp_path) -> None:
+def test_intraday_shock_delivers_without_reviewer_and_records_ack(tmp_path) -> None:
     payload = make_payload()
     payload["alerts"] = [
         {
@@ -1455,8 +1617,7 @@ def test_confirmed_intraday_shock_bypasses_reviewer_and_pushes_directly(tmp_path
 
     assert result.selected_count == 1
     assert result.sent_count == 1
-    assert any(sink.sink == "feishu" and sink.ok for sink in result.sinks)
-    assert not any(sink.sink == "deepseek_reviewer" for sink in result.sinks)
+    assert [sink.sink for sink in result.sinks] == ["feishu"]
     assert result.acknowledged_event_ids == (
         "spx_shock:20260710:down:1432",
         "spx_shock:20260710:down:1432:shock",
@@ -1466,10 +1627,9 @@ def test_confirmed_intraday_shock_bypasses_reviewer_and_pushes_directly(tmp_path
     assert entries[-1]["reviewer"] == "direct_policy"
     assert entries[-1]["parser_verdict"] == "not_run"
     assert entries[-1]["outcome"] == "delivered"
-    assert entries[-1]["delivery_sinks"][0]["sink"] == "feishu"
 
 
-def test_confirmed_call_path_bypasses_reviewer_and_records_strategy_ack(tmp_path) -> None:
+def test_call_path_delivers_without_reviewer_and_records_strategy_ack(tmp_path) -> None:
     payload = make_payload()
     payload["alerts"] = [
         {
@@ -1498,6 +1658,7 @@ def test_confirmed_call_path_bypasses_reviewer_and_records_strategy_ack(tmp_path
 
     assert result.selected_count == 1
     assert result.sent_count == 1
+    assert [sink.sink for sink in result.sinks] == ["feishu"]
     assert not any(sink.sink == "deepseek_reviewer" for sink in result.sinks)
     assert result.acknowledged_event_ids == (
         "spx_call:flip:7500:1432",
@@ -1548,7 +1709,7 @@ def test_recent_shock_suppresses_same_direction_fixed_cycle_price_move(tmp_path)
     assert len(selected) == 1
 
 
-def test_reviewer_delivery_rechecks_shock_correlation_after_model_wait(
+def test_reviewed_price_move_is_suppressed_after_realtime_shock(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -1592,13 +1753,16 @@ def test_reviewer_delivery_rechecks_shock_correlation_after_model_wait(
 
     assert result.selected_count == 1
     assert result.sent_count == 0
-    assert any(sink.sink == "intraday_shock_correlation_gate" for sink in result.sinks)
+    assert [sink.sink for sink in result.sinks] == [
+        "deepseek_reviewer",
+        "intraday_shock_correlation_gate",
+    ]
     assert not any(sink.sink in {"feishu", "bark"} for sink in result.sinks)
     entries = [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()]
     assert entries[-1]["outcome"] == "correlated_shock_suppressed"
 
 
-def test_rth_skew_steepening_still_goes_through_review(tmp_path) -> None:
+def test_rth_skew_steepening_reaches_reviewer(tmp_path) -> None:
     calls: list[list[str]] = []
 
     def runner(command: list[str], timeout_seconds: float) -> subprocess.CompletedProcess[str]:
@@ -1639,9 +1803,9 @@ def test_rth_skew_steepening_still_goes_through_review(tmp_path) -> None:
     )
 
     assert result.selected_count == 1
-    assert len(calls) == 1
-    assert calls[0][1] == "exec"
-    assert "--message" not in calls[0]
+    assert result.sent_count == 0
+    assert [sink.sink for sink in result.sinks] == ["codex_exec"]
+    assert calls and calls[0][:2] == ["codex", "exec"]
 
 
 def _skew_alert(dedup_group: str, severity: str = "high") -> dict[str, object]:
@@ -1915,7 +2079,7 @@ def test_only_selected_delivered_position_event_ids_are_acknowledged(tmp_path) -
     assert result.acknowledged_event_ids == ("selected-event",)
 
 
-def test_direct_push_falls_back_to_template_when_writer_fails(tmp_path, monkeypatch) -> None:
+def test_session_restore_is_direct_ops_push(tmp_path, monkeypatch) -> None:
     calls: list[list[str]] = []
 
     def runner(command: list[str], timeout_seconds: float) -> subprocess.CompletedProcess[str]:
@@ -1954,7 +2118,8 @@ def test_direct_push_falls_back_to_template_when_writer_fails(tmp_path, monkeypa
     )
 
     assert result.sent_count == 1
-    assert any(s.sink == "bark" and s.ok for s in result.sinks)
+    assert [sink.sink for sink in result.sinks] == ["bark"]
+    assert calls == []
 
 
 def test_bark_title_maps_kinds_to_chinese_categories() -> None:
@@ -2089,7 +2254,7 @@ def _agent_failopen_payload(*, critical_title: str, include_critical: bool) -> d
     }
 
 
-def test_notifier_failopen_sends_critical_when_agent_fails(tmp_path) -> None:
+def test_notifier_fails_closed_for_critical_market_observation(tmp_path) -> None:
     calls: list[list[str]] = []
 
     def runner(command: list[str], timeout_seconds: float) -> subprocess.CompletedProcess[str]:
@@ -2105,6 +2270,7 @@ def test_notifier_failopen_sends_critical_when_agent_fails(tmp_path) -> None:
         openclaw_agent_deliver=True,
         codex_enabled=False,
         min_severity="high",
+        review_audit_path=str(tmp_path / "review-audit.jsonl"),
     )
     critical_title = "SPXW gamma flip critical"
     payload = _agent_failopen_payload(
@@ -2119,12 +2285,18 @@ def test_notifier_failopen_sends_critical_when_agent_fails(tmp_path) -> None:
         now=datetime(2026, 7, 7, 0, 0, tzinfo=timezone.utc),
     )
 
-    assert any(s.sink == "feishu" and s.ok for s in result.sinks)
+    assert result.sent_count == 0
+    assert not any(s.sink == "feishu" and s.ok for s in result.sinks)
     assert all(cmd[:3] != ["openclaw", "message", "send"] for cmd in calls)
-    assert result.sent_count == 1
+    entries = [
+        json.loads(line)
+        for line in (tmp_path / "review-audit.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert entries[-1]["outcome"] == "review_failed_pending"
+    assert calls and calls[0][:2] == ["openclaw", "agent"]
 
 
-def test_notifier_failopen_sends_high_price_alert_when_agent_times_out(tmp_path) -> None:
+def test_notifier_fails_closed_for_high_price_alert_when_agent_times_out(tmp_path) -> None:
     calls: list[list[str]] = []
 
     def runner(command: list[str], timeout_seconds: float) -> subprocess.CompletedProcess[str]:
@@ -2153,14 +2325,14 @@ def test_notifier_failopen_sends_high_price_alert_when_agent_times_out(tmp_path)
         now=datetime(2026, 7, 7, 0, 0, tzinfo=timezone.utc),
     )
 
-    assert any(s.sink == "feishu" and s.ok for s in result.sinks)
-    assert result.sent_count == 1
+    assert not any(s.sink == "feishu" and s.ok for s in result.sinks)
+    assert result.sent_count == 0
     entries = [
         json.loads(line)
         for line in (tmp_path / "review-audit.jsonl").read_text(encoding="utf-8").splitlines()
     ]
-    assert entries[-1]["outcome"] == "review_failed_failopen_delivered"
-    assert entries[-1]["details"]["failopen_delivered_count"] == 1
+    assert entries[-1]["outcome"] == "review_failed_pending"
+    assert calls and calls[0][:2] == ["openclaw", "agent"]
 
 
 def test_bark_lockscreen_summary_and_feishu_card() -> None:
@@ -2203,27 +2375,25 @@ def test_feishu_status_card_uses_sections_and_state_color() -> None:
 
     text = "\n".join(
         (
-            "【SPX 15m｜22:39｜0DTE 07-13｜美盘上午主战场】",
-            "时钟  开盘后 69 分钟｜距收官 140 分钟",
-            "价格  SPX 7547.7｜ES 7592.2｜昨收 -27.7｜EM已用 146%",
-            "结构  ZeroGamma过渡｜Put 7550｜Flip 7545–7550｜Call 7550",
-            "状态  INVALIDATED（已失效）｜Call Wall 7550｜等待重置",
+            "【SPX 15m · 22:39 · 0DTE 07-13 · 美盘上午主战场】",
+            "时钟  开盘后 69 分钟　距收官 140 分钟",
+            "价格  SPX 7547.7　ES 7592.2　较昨收 -27.7　GTH EM已用 46%",
+            "结构  ZeroGamma过渡　Put 7550　Flip 7545–7550　Call 7550",
+            "状态  INVALIDATED（已失效）　Call Wall 7550　等待重置",
             "",
-            "ES确认  15m 5.2｜60m -8.5｜量价同向",
-            "波动  VIX1D/VIX 0.52｜SKEW 144.3",
+            "ES确认  15m 5.2　60m -8.5　量价同向",
+            "波动  VIX1D/VIX 0.52　SKEW 144.3",
             "",
-            "【条件计划｜标的触发后执行】",
-            "计划1·冲墙回落  SPX 7550触发｜SPXW 7550P｜触达 95%｜参考 10.5–10.8",
-            "执行  触位后按实时 mid/IV 重算｜当前不可预挂",
+            "【条件计划】标的触发后执行",
+            "计划1 · 冲墙回落  SPX 7550触发 → SPXW 7550P　触达 95%　参考 10.5–10.8",
+            "执行  触位后按实时 mid/IV 重算；当前不可预挂",
             "变化  call wall 7575→7550",
         )
     )
 
     card = build_feishu_card(text, title="SPX 15分钟市场状态", kind="status")
 
-    assert card["header"]["title"]["content"] == (
-        "SPX 15m｜22:39｜0DTE 07-13｜美盘上午主战场"
-    )
+    assert card["header"]["title"]["content"] == ("SPX 15m · 22:39 · 0DTE 07-13 · 美盘上午主战场")
     assert card["header"]["template"] == "grey"
     elements = card["body"]["elements"]
     assert [element["tag"] for element in elements] == [
@@ -2314,15 +2484,11 @@ def test_im_delivery_failed_ignores_intentional_ops_only_delivery() -> None:
     from spx_spark.notifier.model import SinkResult
     from spx_spark.notifier.sinks import im_delivery_failed
 
-    assert not im_delivery_failed(
-        [SinkResult(sink="bark", attempted=True, ok=True)]
-    )
+    assert not im_delivery_failed([SinkResult(sink="bark", attempted=True, ok=True)])
     assert im_delivery_failed(
         [SinkResult(sink="feishu", attempted=True, ok=False, error="timeout")]
     )
-    assert not im_delivery_failed(
-        [SinkResult(sink="feishu", attempted=True, ok=True)]
-    )
+    assert not im_delivery_failed([SinkResult(sink="feishu", attempted=True, ok=True)])
 
 
 def test_send_bark_message_accepts_markdown_and_group_override(tmp_path) -> None:

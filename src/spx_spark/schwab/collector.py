@@ -53,6 +53,7 @@ from spx_spark.schwab.request_models import (
 )
 from spx_spark.schwab.symbols import (
     canonical_underlier_for_schwab,
+    find_schwab_instrument,
     resolved_schwab_canonical_quote_symbols,
     resolved_schwab_quote_symbols,
     schwab_option_chain_underliers,
@@ -103,7 +104,11 @@ def run(
                 now=evaluation_now,
             )
         )
-        quote_symbols = [symbol for symbol in quote_symbols if symbol not in streaming_symbols]
+        quote_symbols = rest_quote_symbols(
+            quote_symbols,
+            streaming_symbols=streaming_symbols,
+            now=evaluation_now,
+        )
     chain_symbols = env_csv(
         "SCHWAB_COLLECT_CHAINS",
         ",".join(schwab_option_chain_underliers()),
@@ -319,6 +324,30 @@ def run(
 
 def main() -> None:
     raise SystemExit(run())
+
+
+def rest_quote_symbols(
+    quote_symbols: list[str],
+    *,
+    streaming_symbols: set[str],
+    now: datetime,
+) -> list[str]:
+    """Keep REST equity/index coverage when their WebSocket lane is session-frozen."""
+
+    rth_open = DEFAULT_MARKET_CALENDAR.is_rth_open(now)
+    selected: list[str] = []
+    for symbol in quote_symbols:
+        if symbol not in streaming_symbols:
+            selected.append(symbol)
+            continue
+        instrument = find_schwab_instrument(symbol)
+        stream_covers_session = bool(
+            instrument is not None
+            and (instrument.instrument_type == "future" or rth_open)
+        )
+        if not stream_covers_session:
+            selected.append(symbol)
+    return selected
 
 
 def run_loop(*, planner_tick_seconds: float | None = None) -> int:

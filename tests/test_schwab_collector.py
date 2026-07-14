@@ -18,6 +18,32 @@ from spx_spark.schwab.symbols import (
 )
 
 
+def test_rest_quote_lane_keeps_equities_when_stream_is_frozen_outside_rth() -> None:
+    symbols = ["$SPX", "SPY", "/ESU26", "QQQ"]
+    streamed = {"$SPX", "SPY", "/ESU26"}
+
+    selected = schwab_collector.rest_quote_symbols(
+        symbols,
+        streaming_symbols=streamed,
+        now=datetime(2026, 7, 14, 2, 0, tzinfo=timezone.utc),
+    )
+
+    assert selected == ["$SPX", "SPY", "QQQ"]
+
+
+def test_rest_quote_lane_avoids_live_stream_duplicates_during_rth() -> None:
+    symbols = ["$SPX", "SPY", "/ESU26", "QQQ"]
+    streamed = {"$SPX", "SPY", "/ESU26"}
+
+    selected = schwab_collector.rest_quote_symbols(
+        symbols,
+        streaming_symbols=streamed,
+        now=datetime(2026, 7, 14, 14, 0, tzinfo=timezone.utc),
+    )
+
+    assert selected == ["QQQ"]
+
+
 def _isolate_collector_storage(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     data_root = tmp_path / "data"
     data_root.mkdir(parents=True, exist_ok=True)
@@ -373,7 +399,7 @@ def test_live_stream_symbols_are_not_polled_by_rest_collector(
         "$SPX,SPY,RSP,/ES,/MES,$XSP,$VIX",
     )
     monkeypatch.setenv("SCHWAB_COLLECT_CHAINS", "")
-    now = datetime(2026, 7, 11, 12, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 13, 14, 0, tzinfo=timezone.utc)
     requested: list[str] = []
 
     class FakeClient:

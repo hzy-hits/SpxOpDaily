@@ -10,7 +10,7 @@ from spx_spark.domain.events import DomainEvent, EventKind
 from spx_spark.infrastructure.ledger.outbox import OutboxStatus, SqliteEventOutbox
 
 
-DeliverFn = Callable[[DomainEvent], bool]
+DeliverFn = Callable[[DomainEvent], object]
 
 
 class ProcessedIdSet(Protocol):
@@ -75,12 +75,16 @@ class IdempotentOutboxConsumer:
         result = ConsumeResult(claimed=len(claimed))
         for event in claimed:
             if event.event_id in self.processed_ids:
-                self.outbox.ack([event.event_id], consumer_id=self.consumer_id)
+                self.outbox.ack(
+                    [event.event_id],
+                    consumer_id=self.consumer_id,
+                    outcome="duplicate",
+                )
                 result.duplicate_skipped += 1
                 result.acked_ids.append(event.event_id)
                 continue
             try:
-                ok = self.deliver(event)
+                delivery = self.deliver(event)
             except Exception as exc:  # noqa: BLE001
                 status = self.outbox.fail(
                     event.event_id,
@@ -92,7 +96,15 @@ class IdempotentOutboxConsumer:
                 if status is OutboxStatus.DEAD_LETTER:
                     result.dead_lettered += 1
                 continue
-            if not ok:
+            if isinstance(delivery, bool):
+                settled = delivery
+                outcome = "settled" if delivery else "failed"
+                delivered_count = int(delivery)
+            else:
+                settled = bool(getattr(delivery, "settled", False))
+                outcome = str(getattr(delivery, "outcome", "unknown"))
+                delivered_count = int(getattr(delivery, "delivered_count", 0))
+            if not settled:
                 status = self.outbox.fail(
                     event.event_id,
                     error="deliver_returned_false",
@@ -104,7 +116,12 @@ class IdempotentOutboxConsumer:
                     result.dead_lettered += 1
                 continue
             self.processed_ids.add(event.event_id)
-            self.outbox.ack([event.event_id], consumer_id=self.consumer_id)
+            self.outbox.ack(
+                [event.event_id],
+                consumer_id=self.consumer_id,
+                outcome=outcome,
+                delivered_count=delivered_count,
+            )
             result.delivered += 1
             result.acked_ids.append(event.event_id)
         return result

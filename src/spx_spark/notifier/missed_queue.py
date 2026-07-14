@@ -4,13 +4,18 @@ dead, then flush them as a single timeline digest when it recovers."""
 from __future__ import annotations
 
 import json
+import hashlib
+import os
+import tempfile
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
 from spx_spark.config import NotificationSettings
 from spx_spark.notifier.model import CommandRunner, SinkResult, default_runner
 from spx_spark.notifier.sinks import deliver_trade_push, im_delivery_ok
+from spx_spark.state_io import exclusive_state_lock
 
 BEIJING_TZ = ZoneInfo("Asia/Shanghai")
 
@@ -18,20 +23,36 @@ DIGEST_MAX_ENTRIES = 12
 DIGEST_MAX_CHARS = 1800
 
 
-def append_missed(path: str, message: str, *, kind: str, at: datetime) -> None:
+def _entry_id(*, at: str, kind: str, message: str, event_id: str | None = None) -> str:
+    if event_id:
+        return event_id
+    return hashlib.sha256(f"{at}|{kind}|{message}".encode("utf-8")).hexdigest()
+
+
+def append_missed(
+    path: str,
+    message: str,
+    *,
+    kind: str,
+    at: datetime,
+    event_id: str | None = None,
+) -> None:
     if not path:
         return
+    at_text = at.astimezone(timezone.utc).isoformat()
     entry = {
-        "at": at.astimezone(timezone.utc).isoformat(),
+        "entry_id": _entry_id(at=at_text, kind=kind, message=message, event_id=event_id),
+        "at": at_text,
         "kind": kind,
         "message": message,
     }
     try:
-        from pathlib import Path
-
-        Path(path).parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "a", encoding="utf-8") as handle:
-            handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        queue_path = Path(path)
+        with exclusive_state_lock(queue_path):
+            entries = _load_missed_unlocked(queue_path)
+            if any(item.get("entry_id") == entry["entry_id"] for item in entries):
+                return
+            _write_missed_unlocked(queue_path, [*entries, entry])
     except OSError:
         return
 
@@ -40,11 +61,18 @@ def load_missed(path: str) -> list[dict[str, Any]]:
     if not path:
         return []
     try:
-        with open(path, encoding="utf-8") as handle:
-            lines = handle.readlines()
+        queue_path = Path(path)
+        with exclusive_state_lock(queue_path):
+            return _load_missed_unlocked(queue_path)
     except OSError:
         return []
 
+
+def _load_missed_unlocked(path: Path) -> list[dict[str, Any]]:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
     entries: list[dict[str, Any]] = []
     for line in lines:
         stripped = line.strip()
@@ -55,19 +83,66 @@ def load_missed(path: str) -> list[dict[str, Any]]:
         except json.JSONDecodeError:
             continue
         if isinstance(payload, dict):
+            if not payload.get("entry_id"):
+                payload["entry_id"] = _entry_id(
+                    at=str(payload.get("at") or ""),
+                    kind=str(payload.get("kind") or ""),
+                    message=str(payload.get("message") or ""),
+                )
             entries.append(payload)
     return entries
+
+
+def _write_missed_unlocked(path: Path, entries: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=path.parent,
+    )
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            descriptor = -1
+            for entry in entries:
+                handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_name, path)
+        os.chmod(path, 0o600)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        try:
+            os.unlink(temp_name)
+        except OSError:
+            pass
 
 
 def clear_missed(path: str) -> None:
     if not path:
         return
     try:
-        import os
-
-        os.remove(path)
+        queue_path = Path(path)
+        with exclusive_state_lock(queue_path):
+            queue_path.unlink(missing_ok=True)
     except OSError:
         return
+
+
+def _ack_missed(path: str, delivered: list[dict[str, Any]]) -> None:
+    delivered_ids = {str(entry.get("entry_id") or "") for entry in delivered}
+    queue_path = Path(path)
+    with exclusive_state_lock(queue_path):
+        remaining = [
+            entry
+            for entry in _load_missed_unlocked(queue_path)
+            if str(entry.get("entry_id") or "") not in delivered_ids
+        ]
+        if remaining:
+            _write_missed_unlocked(queue_path, remaining)
+        else:
+            queue_path.unlink(missing_ok=True)
 
 
 def build_digest(entries: list[dict[str, Any]], *, now: datetime | None = None) -> str:
@@ -126,9 +201,37 @@ def flush_missed(
         runner=runner,
     )
     if im_delivery_ok(sinks):
-        clear_missed(settings.missed_queue_path)
+        _ack_missed(settings.missed_queue_path, entries)
         return SinkResult(sink="missed_digest", attempted=True, ok=True)
     for sink in sinks:
         if sink.attempted and not sink.ok:
             return sink
     return SinkResult(sink="missed_digest", attempted=False, ok=False, error="no delivery channel")
+
+
+def run() -> int:
+    """One-shot recovery entrypoint for the 24h service loop."""
+
+    settings = NotificationSettings.from_env()
+    if not settings.enabled:
+        print(json.dumps({"ok": True, "skipped": "notification_disabled"}))
+        return 0
+    pending_before = len(load_missed(settings.missed_queue_path))
+    result = flush_missed(settings)
+    pending_after = len(load_missed(settings.missed_queue_path))
+    print(
+        json.dumps(
+            {
+                "ok": result is None or result.ok,
+                "pending_before": pending_before,
+                "pending_after": pending_after,
+                "attempted": bool(result and result.attempted),
+            },
+            sort_keys=True,
+        )
+    )
+    return 0 if result is None or result.ok or not result.attempted else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(run())

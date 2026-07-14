@@ -80,7 +80,7 @@ LEVEL_OUTSIDE_DIRECTION = {
     "flip_high": 1,
     "call_wall": 1,
 }
-TERMINAL_PHASES = frozenset({LevelPhase.CONFIRMED, LevelPhase.INVALIDATED, LevelPhase.EXPIRED})
+TERMINAL_PHASES = frozenset({LevelPhase.INVALIDATED, LevelPhase.EXPIRED})
 
 
 def empty_level_state(now: datetime) -> dict[str, object]:
@@ -117,6 +117,8 @@ def advance_level_decision(
             settings=settings,
         )
     if _expired(state, now):
+        if phase is LevelPhase.CONFIRMED:
+            return _transition(state, phase, LevelPhase.EXPIRED, now, "confirmed_ttl_elapsed")
         level = state.get("level")
         if (
             isinstance(level, int | float)

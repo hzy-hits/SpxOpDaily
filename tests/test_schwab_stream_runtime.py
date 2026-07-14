@@ -186,6 +186,153 @@ def test_runtime_flushes_stream_message_to_shadow_storage(tmp_path: Path) -> Non
     assert health["last_source_at"]["LEVELONE_EQUITIES"] is not None
 
 
+def test_runtime_tracks_controlled_futures_and_single_option_probe(tmp_path: Path) -> None:
+    persisted = []
+    future_subscriptions: list[list[str]] = []
+    futures_option_subscriptions: list[list[str]] = []
+
+    class FakeManager:
+        def client_for_streaming(self):
+            return object()
+
+    class FakeStream:
+        def __init__(self, client, *, enforce_enums):
+            del client, enforce_enums
+            self.future_handler = None
+            self.futures_option_handler = None
+            self.emitted = False
+
+        def add_level_one_equity_handler(self, handler):
+            del handler
+
+        def add_level_one_futures_handler(self, handler):
+            self.future_handler = handler
+
+        def add_level_one_option_handler(self, handler):
+            del handler
+
+        def add_level_one_futures_options_handler(self, handler):
+            self.futures_option_handler = handler
+
+        async def login(self, args):
+            assert args["open_timeout"] > 0
+
+        async def level_one_equity_subs(self, symbols):
+            assert symbols == ["$SPX"]
+
+        async def level_one_futures_subs(self, symbols):
+            future_subscriptions.append(list(symbols))
+
+        async def level_one_option_subs(self, symbols):
+            del symbols
+
+        async def level_one_option_unsubs(self, symbols):
+            del symbols
+
+        async def level_one_futures_options_subs(self, symbols):
+            futures_option_subscriptions.append(list(symbols))
+
+        async def handle_message(self):
+            if not self.emitted:
+                self.emitted = True
+                now = datetime.now(tz=timezone.utc)
+                rows = [
+                    {
+                        "key": symbol,
+                        "BID_PRICE": 100.0,
+                        "ASK_PRICE": 100.25,
+                        "QUOTE_TIME_MILLIS": int(now.timestamp() * 1000),
+                    }
+                    for symbol in ("/NQU26", "/RTYU26", "/YMU26")
+                ]
+                self.future_handler({"service": "LEVELONE_FUTURES", "content": rows})
+                self.futures_option_handler(
+                    {
+                        "service": "LEVELONE_FUTURES_OPTIONS",
+                        "content": [
+                            {
+                                "key": "./ESU26C7600",
+                                "BID_PRICE": 31.0,
+                                "ASK_PRICE": 31.5,
+                                "UNDERLYING_SYMBOL": "/ESU26",
+                                "STRIKE_PRICE": 7600.0,
+                                "FUTURE_EXPIRATION_DATE": int(
+                                    datetime(2026, 9, 18, tzinfo=timezone.utc).timestamp()
+                                    * 1000
+                                ),
+                                "CONTRACT_TYPE": "C",
+                                "QUOTE_TIME_MILLIS": int(now.timestamp() * 1000),
+                            }
+                        ],
+                    }
+                )
+            await asyncio.sleep(10)
+
+        async def logout(self):
+            return None
+
+    def resolve(symbols):
+        if symbols == ("NQ", "RTY", "YM"):
+            return [], ["/NQU26", "/RTYU26", "/YMU26"]
+        return ["$SPX"], ["/ESU26", "/NQU26", "/RTYU26", "/YMU26"]
+
+    cfg = SchwabStreamSettings(
+        mode="shadow",
+        canonical_symbols=("SPX", "ES"),
+        flush_interval_seconds=0.01,
+        symbol_refresh_interval_seconds=300.0,
+        reconnect_min_seconds=0.01,
+        reconnect_max_seconds=0.02,
+        websocket_open_timeout_seconds=1.0,
+        shadow_latest_path=str(tmp_path / "latest" / "shadow.json"),
+        option_hot_symbol_limit=64,
+        option_symbol_refresh_seconds=5.0,
+        option_plan_max_age_seconds=120.0,
+        validation_future_symbols=("NQ", "RTY", "YM"),
+        futures_option_probe_symbol="./ESU26C7600",
+    )
+    runtime = None
+
+    def persist(snapshot, storage_settings):
+        del storage_settings
+        persisted.append(snapshot)
+        assert runtime is not None
+        runtime.close()
+
+    runtime = SchwabStreamRuntime(
+        FakeManager(),  # type: ignore[arg-type]
+        cfg,
+        storage(tmp_path),
+        stream_client_factory=FakeStream,
+        persist_snapshot=persist,
+        symbol_resolver=resolve,
+        option_symbol_resolver=lambda: [],
+    )
+
+    asyncio.run(runtime._run_session())
+
+    assert future_subscriptions == [["/ESU26", "/NQU26", "/RTYU26", "/YMU26"]]
+    assert futures_option_subscriptions == [["./ESU26C7600"]]
+    assert len(persisted) == 1
+    health = runtime.health()
+    assert health["subscribed_futures_option_count"] == 1
+    assert set(health["validation"]) == {
+        "/NQU26",
+        "/RTYU26",
+        "/YMU26",
+        "./ESU26C7600",
+    }
+    assert all(item["status"] == "live" for item in health["validation"].values())
+    by_symbol = {
+        quote.provider_symbol: quote for quote in persisted[0].quotes
+    }
+    assert by_symbol["/NQU26"].sampling_mode == "schwab_stream_validation"
+    assert (
+        by_symbol["./ESU26C7600"].sampling_mode
+        == "schwab_stream_futures_option_probe"
+    )
+
+
 def test_runtime_reconnects_and_resubscribes_when_future_contract_changes(
     tmp_path: Path,
     capsys,

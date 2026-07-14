@@ -368,7 +368,14 @@ def mark_sent(
     if kind:
         payload[f"last_{kind}_date"] = trading_date
     if fingerprint is not None:
-        payload["fingerprint"] = fingerprint
+        if kind:
+            payload[f"{kind}_fingerprint"] = fingerprint
+            # Preserve the first legacy fingerprint for old readers. New
+            # runners use kind-specific keys, so interleaved sends cannot
+            # replace one another's dedupe baseline.
+            payload.setdefault("fingerprint", fingerprint)
+        else:
+            payload["fingerprint"] = fingerprint
     if now is not None:
         payload["last_sent_at"] = now.timestamp()
         if kind:

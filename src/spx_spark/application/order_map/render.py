@@ -40,7 +40,7 @@ def _day_move_line(payload: dict[str, Any]) -> str | None:
     if points is None:
         return None
     em_used = day_move.get("em_used_fraction")
-    em_text = f",已用当日预期波幅的 {em_used:.0%}" if isinstance(em_used, (int, float)) else ""
+    em_text = f"，GTH 以来已用预期波幅的 {em_used:.0%}" if isinstance(em_used, (int, float)) else ""
     return f"较昨收: {points:+.1f} 点{em_text}"
 
 
@@ -90,9 +90,7 @@ def _market_feature_lines(payload: dict[str, Any]) -> list[str]:
         "flat": "价量平稳",
         "unavailable": "窗口不足",
     }.get(str(volume.get("price_volume_alignment_5m") or ""), "窗口不足")
-    volume_provider = volume.get("recent_volume_provider") or cross.get(
-        "selected_es_provider"
-    )
+    volume_provider = volume.get("recent_volume_provider") or cross.get("selected_es_provider")
     lines = [
         (
             "ES统一帧: "
@@ -302,9 +300,7 @@ def _greeks_reference_line(payload: dict[str, Any]) -> str | None:
     total = coverage.get("exact_expiry_contract_count")
     ratio = (
         usable / total
-        if isinstance(usable, int | float)
-        and isinstance(total, int | float)
-        and total > 0
+        if isinstance(usable, int | float) and isinstance(total, int | float) and total > 0
         else None
     )
     coverage_text = f"有效 {usable}/{total}"
@@ -314,7 +310,7 @@ def _greeks_reference_line(payload: dict[str, Any]) -> str | None:
     charm = metric("gross_charm_5m_abs")
     vanna = metric("gross_vanna_1vol_abs")
     if None in {gamma, charm, vanna}:
-        return f"0DTE 全链敏感度暂不可用｜{coverage_text}，新鲜报价/IV/OI不足"
+        return f"0DTE 全链敏感度暂不可用　{coverage_text}，新鲜报价/IV/OI不足"
     excluded = (
         max(int(total - usable), 0)
         if isinstance(usable, int | float) and isinstance(total, int | float)
@@ -328,8 +324,8 @@ def _greeks_reference_line(payload: dict[str, Any]) -> str | None:
         quality = "完整"
     return (
         "0DTE 全链敏感度（OI加权绝对值，非持仓/非方向）: "
-        f"Gamma/标的1点 {gamma}｜Charm/5分钟 {charm}｜"
-        f"Vanna/IV变动1个百分点 {vanna}｜{coverage_text}，{quality}"
+        f"Gamma/标的1点 {gamma}　Charm/5分钟 {charm}　"
+        f"Vanna/IV变动1个百分点 {vanna}　{coverage_text}，{quality}"
     )
 
 
@@ -393,6 +389,19 @@ def _candidate_by_play(payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return mapped
 
 
+def _presented_candidates(payload: dict[str, Any]) -> tuple[list[dict[str, Any]], str]:
+    if "plan_candidates" not in payload:
+        rows = [item for item in payload.get("candidates") or [] if isinstance(item, dict)]
+        return rows, "legacy"
+    plans = [item for item in payload.get("plan_candidates") or [] if isinstance(item, dict)]
+    if plans:
+        return plans, "plan"
+    observations = [
+        item for item in payload.get("observation_candidates") or [] if isinstance(item, dict)
+    ]
+    return observations, "observation"
+
+
 def render_research_only_template(
     payload: dict[str, Any],
     *,
@@ -413,7 +422,7 @@ def render_research_only_template(
     phase = payload.get("session_phase")
     phase_name = str(phase.get("name_cn") or "盘外") if isinstance(phase, dict) else "盘外"
     header = (
-        f"【SPX 15m｜{payload.get('beijing_time') or '-'}｜0DTE {expiry_text}｜{phase_name}】"
+        f"【SPX 15m · {payload.get('beijing_time') or '-'} · 0DTE {expiry_text} · {phase_name}】"
         if title == "市场状态"
         else f"【{title} {payload.get('beijing_time') or '-'}】(0DTE={expiry})"
     )
@@ -522,7 +531,8 @@ def render_template(payload: dict[str, Any]) -> str:
     if density_line:
         lines.append(density_line)
 
-    by_play = _candidate_by_play(payload)
+    presented_candidates, presentation_role = _presented_candidates(payload)
+    by_play = _candidate_by_play({"candidates": presented_candidates})
     bias = payload.get("conditional_call_bias")
     preferred_play = (
         str(bias.get("play") or "")
@@ -548,7 +558,28 @@ def render_template(payload: dict[str, Any]) -> str:
             strike=strike,
             right=right,
         )
-        lines.append(f"{index}) [地图候选] {headline}")
+        if presentation_role == "observation":
+            headline = headline.replace("买 call", "call 报价观察").replace(
+                "买 put", "put 报价观察"
+            )
+        role_label = {
+            "plan": "条件计划",
+            "observation": "观察情景",
+        }.get(presentation_role, "地图候选")
+        lines.append(f"{index}) [{role_label}] {headline}")
+        if presentation_role == "plan" and candidate.get("order_style") == "live_nbbo_limit":
+            lines.append(
+                "   实时执行: NBBO "
+                f"{_fmt_premium(candidate.get('decision_bid'))}/"
+                f"{_fmt_premium(candidate.get('decision_ask'))}; "
+                f"买入上限 {_fmt_premium(candidate.get('limit_aggressive'))}"
+            )
+            lines.append(
+                f"   风险: SPX {_dash(candidate.get('invalidation_spx'))} 失效; "
+                f"目标 {_dash(candidate.get('target_spx'))}; "
+                f"意图至 {candidate.get('intent_expires_at') or '-'}"
+            )
+            continue
         range_low = candidate.get("projection_range_low")
         range_high = candidate.get("projection_range_high")
         quote_executable = candidate.get("execution_quote_status") != "range_only"
@@ -556,13 +587,17 @@ def render_template(payload: dict[str, Any]) -> str:
             range_low = candidate.get("projected_mid")
         if range_high is None:
             range_high = candidate.get("projected_mid")
-        if quote_executable:
+        if quote_executable and presentation_role != "observation":
             lines.append(
                 "   触达概率≈"
                 f"{_fmt_prob(candidate.get('prob_touch'))}, "
                 f"触位基准价≈{_fmt_premium(candidate.get('projected_mid'))}, "
                 f"早/晚触区间 {_fmt_premium(range_low)}–{_fmt_premium(range_high)}"
                 f"(现价 {_fmt_premium(candidate.get('current_mid'))})"
+            )
+        elif presentation_role == "observation":
+            lines.append(
+                "   观察用途：保留触位后的报价情景与方向验证；当前未通过决策门控，不生成下单计划"
             )
         else:
             reasons = ",".join(str(item) for item in candidate.get("execution_quote_reasons") or ())
@@ -581,7 +616,7 @@ def render_template(payload: dict[str, Any]) -> str:
                 f"触位时剩余≈{_fmt_eta_minutes(tau_touch)}"
                 + (f",耗时假设占当前剩余{touch_fraction:.0%}" if touch_fraction is not None else "")
             )
-        if quote_executable:
+        if quote_executable and presentation_role != "observation":
             lines.append(
                 f"   条件执行: SPX 触及 {_dash(candidate.get('level'))} 后再提交; "
                 f"触发后限价参考 {_fmt_premium(candidate.get('limit_aggressive'))} / "

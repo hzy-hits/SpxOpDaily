@@ -33,6 +33,18 @@ class MarketFeatureSettings:
     breakout_score_margin: float = 12.0
     breakout_local_gex_band_points: float = 10.0
     breakout_near_wall_points: float = 10.0
+    trade_follow_through_seconds: float = 30.0
+    trade_follow_through_min_points: float = 2.0
+    trade_follow_through_em_fraction: float = 0.05
+    trade_repricing_max_age_seconds: float = 90.0
+    trade_quote_max_age_seconds: float = 5.0
+    trade_market_anchor_max_age_seconds: float = 20.0
+    trade_structure_drift_points: float = 2.5
+    trade_entry_spread_fraction: float = 0.35
+    trade_intent_ttl_seconds: float = 90.0
+    trade_invalidation_buffer_points: float = 3.0
+    trade_target_em_fraction: float = 0.15
+    trade_time_stop_minutes: int = 15
 
     def __post_init__(self) -> None:
         positive = (
@@ -55,6 +67,18 @@ class MarketFeatureSettings:
             self.breakout_score_margin,
             self.breakout_local_gex_band_points,
             self.breakout_near_wall_points,
+            self.trade_follow_through_seconds,
+            self.trade_follow_through_min_points,
+            self.trade_follow_through_em_fraction,
+            self.trade_repricing_max_age_seconds,
+            self.trade_quote_max_age_seconds,
+            self.trade_market_anchor_max_age_seconds,
+            self.trade_structure_drift_points,
+            self.trade_entry_spread_fraction,
+            self.trade_intent_ttl_seconds,
+            self.trade_invalidation_buffer_points,
+            self.trade_target_em_fraction,
+            self.trade_time_stop_minutes,
         )
         if any(value <= 0 for value in positive):
             raise ValueError("market feature settings must be positive")
@@ -81,6 +105,13 @@ class MarketFeatureSettings:
         )
         if any(value > 100 for value in score_fields):
             raise ValueError("market feature score thresholds cannot exceed 100")
+        fractions = (
+            self.trade_follow_through_em_fraction,
+            self.trade_entry_spread_fraction,
+            self.trade_target_em_fraction,
+        )
+        if any(value > 1 for value in fractions):
+            raise ValueError("market feature trade fractions cannot exceed 1")
 
 
 def _parse_clock(value: str) -> time:

@@ -7,14 +7,10 @@ from typing import Any
 
 from spx_spark.application.morning_map.render import build_map_prompt, render_template
 from spx_spark.config import NotificationSettings
+from spx_spark.notifier.dispatcher import dispatch_notification
 from spx_spark.notifier.llm_writer import generate_push_text
-from spx_spark.notifier.missed_queue import append_missed
 from spx_spark.notifier.model import CommandRunner, default_runner
-from spx_spark.notifier.sinks import (
-    any_delivery_ok,
-    deliver_trade_push,
-    im_delivery_failed,
-)
+from spx_spark.notifier.receipts import NotificationEnvelope, notification_event_id
 
 def send_morning_map(
     payload: dict[str, Any],
@@ -33,18 +29,29 @@ def send_morning_map(
         runner=runner,
     )
 
-    delivery_sinks = deliver_trade_push(
+    event_id = notification_event_id(
+        "morning_map",
+        source="morning_map",
+        occurred_at=now,
+        identity=str(payload.get("trading_date") or payload.get("as_of") or now.date()),
+    )
+    dispatch = dispatch_notification(
         settings,
+        NotificationEnvelope(
+            event_id=event_id,
+            source="morning_map",
+            kind="morning_map",
+            lane="scheduled_report",
+            occurred_at=now,
+        ),
         title="盘前地图",
         text=text,
-        kind="morning_map",
-        lane="trade",
         friend=True,
         runner=runner,
+        attempted_at=now,
     )
-    delivered_ok = any_delivery_ok(delivery_sinks)
-    if im_delivery_failed(delivery_sinks):
-        append_missed(settings.missed_queue_path, text, kind="morning_map", at=now)
+    delivery_sinks = list(dispatch.sinks)
+    delivered_ok = dispatch.delivered
 
     return {
         "text": text,

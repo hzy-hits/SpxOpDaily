@@ -43,7 +43,7 @@ GLOBEX_CONTEXT_SYSTEM_PROMPT = "\n".join(
 
 _NUMBER_PATTERN = re.compile(r"(?<![A-Za-z_])[-+]?\d+(?:\.\d+)?")
 _TEMPLATE_CANDIDATE_PATTERN = re.compile(
-    r"(?:\[地图候选\]|计划\d+·).*?SPXW\s+(\d{4}[CP])"
+    r"(?:\[(?:地图候选|条件计划)\]|计划\d+\s*·).*?SPXW\s+(\d{4}[CP])"
 )
 _GLOBEX_FORBIDDEN_PHRASES = (
     "无引力",
@@ -64,7 +64,7 @@ def globex_writer_output_valid(text: str, template: str) -> bool:
     if any(phrase in text for phrase in _GLOBEX_FORBIDDEN_PHRASES):
         return False
     template_header = template.splitlines()[0].strip() if template.strip() else ""
-    if template_header.startswith("【SPX 15m｜") and not text.startswith(template_header):
+    if template_header.startswith("【SPX 15m ·") and not text.startswith(template_header):
         return False
     allowed = [float(value) for value in _NUMBER_PATTERN.findall(template)]
     for raw in _NUMBER_PATTERN.findall(text):
@@ -85,14 +85,17 @@ def actionable_writer_output_valid(text: str, template: str) -> bool:
     contracts = tuple(dict.fromkeys(_TEMPLATE_CANDIDATE_PATTERN.findall(template)))
     if contracts and any(contract not in text for contract in contracts):
         return False
-    if contracts and "当前不可预挂" not in text:
-        return False
-    if "【条件计划｜" in template:
-        return (
-            text.startswith("【SPX 15m｜")
-            and "\n\n" in text
-            and "【条件计划｜" in text
-        )
+    live_plan = "入场≤" in template or "实时执行: NBBO" in template
+    if contracts:
+        if live_plan:
+            if not any(marker in text for marker in ("入场≤", "买入上限")):
+                return False
+            if "当前不可预挂" in text:
+                return False
+        elif "当前不可预挂" not in text:
+            return False
+    if "【条件计划】" in template:
+        return text.startswith("【SPX 15m ·") and "\n\n" in text and "【条件计划】" in text
     return True
 
 
@@ -102,6 +105,8 @@ def build_order_prompt(
     previous_push: dict[str, Any] | None = None,
 ) -> str:
     writer_payload = {key: value for key, value in payload.items() if not key.startswith("_")}
+    if "plan_candidates" in writer_payload:
+        writer_payload.pop("candidates", None)
     if payload.get("research_only") is True:
         return "\n".join(
             (
@@ -120,8 +125,9 @@ def build_order_prompt(
             "动笔前先在心里过一遍(不写出来)：今天的 OI 是怎么摆的——put 侧是密集防线还是孤零零一档？dealer 在现价附近是"
             "正 gamma 压波动还是负 gamma 放大波动？今天的 play 里哪张是真机会、哪张只是模板凑数？想清楚再落笔，观点要有取舍，"
             "所有候选同等推荐等于没推荐。",
-            "框架口径：Micopedia/Steven observe_only（regime→map→flow→trigger→expression→exit）；"
-            "条件交易地图是计划参考不是自动下单；GEX/*_proxy 是结构代理；Hyperliquid 只作弱次级证据，不作 SPX 锚。",
+            "框架口径：Micopedia/Steven（regime→map→flow→trigger→expression→exit）；"
+            "TradeReady 仅表示已通过代码决策门控、可供操作员执行，自动下单仍关闭；"
+            "GEX/*_proxy 是结构代理；Hyperliquid 只作弱次级证据，不作 SPX 锚。",
             "signed_gex_proxy 与 option_structure_frame.exposure 来自 SPXW 0DTE 期权链，不是 ES 期货自身的 GEX/DEX。"
             "读取 net/abs GEX、OI/成交量加权 net/abs DEX proxy 及 coverage/warnings；只在非 null 且质量足够时用于确认或反驳突破，"
             "OI 与成交量口径方向背离时必须优先考虑假突破，不得把 proxy 写成 dealer 实仓。",
@@ -144,13 +150,16 @@ def build_order_prompt(
             "conditional_call_bias 只有 status=confirmed 才有效，它来自 5 秒 SPX/ES 价格路径对冻结 flip/旧 call wall 的确认，"
             "不是 Gamma 猜方向；confirmed 时优先讲对应 call 的回踩位与失效线，watch/neutral 不新增动作。",
             "",
-            "然后逐条 play(最多 3 条；conditional_call_bias confirmed 时用对应 Call 替换已被证伪的同层 Put；每条 2-3 行)，每条都要把账算给他看：",
+            "然后逐条处理 plan_candidates（最多 1 条）；只有这里的条目可称为计划。"
+            "order_style=live_nbbo_limit 表示 TradeReady：必须逐字保留 NBBO、买入上限、失效位、目标和意图到期时间，"
+            "不得写『当前不可预挂』。observation_candidates 只能称观察情景，不得补写执行或挂单动作。",
             "- 墙位价 vs 先手挡价的取舍：墙位价便宜但常在墙前几点反转吃不到，先手挡成交率高；预估价已含触达前的"
             "时间衰减与 vol 斜率(BS 重定价)，比现价低不是便宜，是时间价值正常流失；",
             "- 赔率账：触达概率、到位预估价、现价放一起，这笔单赌的是一次多大概率的什么事，赔付幅度配不配得上这个概率；",
             "- execution_quote_status=executable 时才可给条件价；range_only 只能报告早/基准/晚触的范围和门控原因，不得给限价；",
             "- underlier_triggered_limit 必须先由 trigger_coordinate 指定的同坐标价格触及 target，再用届时实时 mid/IV 重算并提交限价；",
-            "- 禁止把 limit_aggressive/limit_conservative 写成现在可预挂。预估高于现价会立即成交，预估低于现价也可能被 theta 提前打成。",
+            "- 仅对 underlier_triggered_limit，禁止把 limit_aggressive/limit_conservative 写成现在可预挂。"
+            "live_nbbo_limit 是触发已确认后冻结的实时限价意图，不得改写成未触发情景价；",
             "",
             "最后 2-3 行 if/then：开盘前参考价/ES 走到哪些具体位置，哪张单赔率变差该撤或改价，哪个剧本作废——这就是这张图的证伪条件。",
             "es_volume 可用且 label 非 no_baseline/session_reset 时，读量价事件(event_id)而不是只读放量/缩量："
@@ -165,7 +174,7 @@ def build_order_prompt(
             "赔率已被 theta 吃掉，写明大约几点(北京)前不来就撤单。",
             "session_phase 是搭档的时钟：这张图会跨欧盘、美盘数据小时和开盘使用，建议要写清哪些单是欧盘就能成交的埋伏、"
             "哪些要等美盘数据落地校准后才算数；不许把『等开盘』当默认建议。",
-            "day_move.em_used_fraction ≥ 0.7 时点明：日内已走完预期波幅的多少，顺方向追单赔率差；挂单纪律是等价格来找你，不去半路追它。",
+            "day_move.em_used_fraction ≥ 0.7 时点明：从当日 GTH 开始已走完预期波幅的多少，顺方向追单赔率差；挂单纪律是等价格来找你，不去半路追它。",
             "previous_push 是上一条推送正文；关键位相对它有实质变化就在定调处说『剧本有变』并指出哪张单要改，没变化不必提。",
             "previous_push:" + previous_push_json(previous_push),
             "JSON:" + json.dumps(writer_payload, ensure_ascii=False, separators=(",", ":")),
@@ -188,14 +197,34 @@ def _level_probs_line(payload: dict[str, Any]) -> str:
 
 
 def _compact_level_line(payload: dict[str, Any]) -> str:
+    by_play = _candidate_by_play(payload)
     decision = payload.get("level_decision")
     if not isinstance(decision, dict):
         return f"候选 {_level_probs_line(payload)}"
-    levels = decision.get("levels") if isinstance(decision.get("levels"), dict) else {}
+    frozen_levels = (
+        decision.get("levels")
+        if isinstance(decision.get("levels"), dict)
+        else {}
+    )
+    flip_zone = payload.get("flip_zone")
+    live_flip = flip_zone if isinstance(flip_zone, list) and len(flip_zone) >= 2 else None
+
+    def candidate_level(play: str, fallback: str) -> object:
+        candidate = by_play.get(play)
+        if isinstance(candidate, dict) and candidate.get("level") is not None:
+            return candidate.get("level")
+        return frozen_levels.get(fallback)
+
+    put_wall = candidate_level("put_wall_bounce_call", "put_wall")
+    call_wall = candidate_level("call_wall_fade_put", "call_wall")
+    flip_low = live_flip[0] if live_flip is not None else frozen_levels.get("flip_low")
+    flip_high = live_flip[1] if live_flip is not None else frozen_levels.get("flip_high")
+    if all(value is None for value in (put_wall, flip_low, flip_high, call_wall)):
+        return f"候选 {_level_probs_line(payload)}"
     return (
-        f"Put {_dash(levels.get('put_wall'))}｜"
-        f"Flip {_dash(levels.get('flip_low'))}–{_dash(levels.get('flip_high'))}｜"
-        f"Call {_dash(levels.get('call_wall'))}"
+        f"Put {_dash(put_wall)}　"
+        f"Flip {_dash(flip_low)}–{_dash(flip_high)}　"
+        f"Call {_dash(call_wall)}"
     )
 
 
@@ -210,7 +239,7 @@ def _compact_decision_line(payload: dict[str, Any]) -> str | None:
         spot = finite_float(payload["underlier"].get("price"))
     if spot is not None and level is not None:
         side = "高" if spot >= level else "低"
-        distance = f"｜现价{side}{abs(spot - level):.1f}点"
+        distance = f"　现价{side}{abs(spot - level):.1f}点"
     else:
         distance = ""
     phase_label, guidance = {
@@ -232,7 +261,10 @@ def _compact_decision_line(payload: dict[str, Any]) -> str | None:
         "flip_high": "Flip上沿",
         "call_wall": "Call Wall",
     }.get(str(decision.get("level_kind") or ""), str(decision.get("level_kind") or "-"))
-    return f"状态  {phase}（{phase_label}）｜{kind} {_dash(level)}{distance}｜{guidance}"
+    return (
+        f"状态  {phase}（{phase_label}）　事件位 {kind} {_dash(level)}"
+        f"{distance}　{guidance}"
+    )
 
 
 def _compact_breakout_filter_line(payload: dict[str, Any]) -> str | None:
@@ -249,10 +281,10 @@ def _compact_breakout_filter_line(payload: dict[str, Any]) -> str | None:
         "unavailable": "不可用",
     }.get(verdict, verdict)
     local_share = finite_float(value.get("local_abs_gex_share"))
-    local_text = f"｜附近GEX {local_share:.0%}" if local_share is not None else ""
-    dex_text = "｜OI/成交DEX背离" if value.get("oi_volume_dex_divergent") is True else ""
+    local_text = f"　附近GEX {local_share:.0%}" if local_share is not None else ""
+    dex_text = "　OI/成交DEX背离" if value.get("oi_volume_dex_divergent") is True else ""
     return (
-        f"突破过滤  {label}｜动能 {_dash(value.get('impulse_score'))} / "
+        f"突破过滤  {label}　动能 {_dash(value.get('impulse_score'))} / "
         f"阻力 {_dash(value.get('barrier_score'))}{local_text}{dex_text}"
     )
 
@@ -265,8 +297,8 @@ def _compact_price_line(payload: dict[str, Any]) -> str:
     change = f"{points:+.1f}" if points is not None else "-"
     used = f"{em_used:.0%}" if em_used is not None else "-"
     return (
-        f"价格  SPX {_dash(underlier.get('price'))}｜ES {_dash(payload.get('es_last'))}｜"
-        f"昨收 {change}｜EM已用 {used}"
+        f"价格  SPX {_dash(underlier.get('price'))}　ES {_dash(payload.get('es_last'))}　"
+        f"较昨收 {change}　GTH EM已用 {used}"
     )
 
 
@@ -281,7 +313,7 @@ def _compact_clock_line(phase: dict[str, Any]) -> str | None:
         parts.append(f"距开盘 {to_open} 分钟")
     if isinstance(to_bed, int) and to_bed <= 180:
         parts.append(f"距收官 {to_bed} 分钟")
-    return "时钟  " + "｜".join(parts) if parts else None
+    return "时钟  " + "　".join(parts) if parts else None
 
 
 def _gamma_label(value: Any) -> str:
@@ -301,11 +333,11 @@ def _compact_oi_line(payload: dict[str, Any]) -> str | None:
         str(value.get("quality") or "-"),
     )
     return (
-        f"OI    Max Pain {_dash(value.get('settlement_strike'))}｜"
+        f"OI    Max Pain {_dash(value.get('settlement_strike'))}　"
         f"Call峰 {_dash(value.get('call_oi_peak_strike'))}"
-        f"（{int(value.get('call_oi_peak') or 0):,}）｜"
+        f"（{int(value.get('call_oi_peak') or 0):,}）　"
         f"Put峰 {_dash(value.get('put_oi_peak_strike'))}"
-        f"（{int(value.get('put_oi_peak') or 0):,}）｜"
+        f"（{int(value.get('put_oi_peak') or 0):,}）　"
         f"{int(value.get('oi_strike_count') or 0)}档 {quality}"
     )
 
@@ -326,9 +358,9 @@ def _compact_flow_line(payload: dict[str, Any]) -> str | None:
         "divergent": "背离",
     }.get(str(cross.get("es_spy_direction_confirmation_15m") or ""), "-")
     return (
-        f"ES确认  15m {_dash(es.get('return_15m_points'))}｜"
-        f"60m {_dash(es.get('return_60m_points'))}｜"
-        f"VWAP {_dash(es.get('vwap_distance_points'))}｜{alignment}｜ES/SPY {confirmation}"
+        f"ES确认  15m {_dash(es.get('return_15m_points'))}　"
+        f"60m {_dash(es.get('return_60m_points'))}　"
+        f"VWAP {_dash(es.get('vwap_distance_points'))}　{alignment}　ES/SPY {confirmation}"
     )
 
 
@@ -342,7 +374,7 @@ def _compact_option_line(payload: dict[str, Any]) -> str | None:
     if isinstance(options, dict):
         l1 = options.get("l1") if isinstance(options.get("l1"), dict) else {}
         parts.append(f"L1流动性 {_l1_liquidity_text(l1)}")
-    return "波动  " + "｜".join(parts)
+    return "波动  " + "　".join(parts)
 
 
 def _ratio(numerator: Any, denominator: Any) -> str:
@@ -352,9 +384,17 @@ def _ratio(numerator: Any, denominator: Any) -> str:
 
 
 def _compact_candidate_lines(payload: dict[str, Any], *, limit: int = 2) -> list[str]:
-    candidates = [
-        item for item in payload.get("candidates") or [] if isinstance(item, dict)
+    classified = "plan_candidates" in payload
+    plans = [item for item in payload.get("plan_candidates") or [] if isinstance(item, dict)]
+    candidates = plans or [
+        item
+        for item in (
+            payload.get("observation_candidates") if classified else payload.get("candidates")
+        )
+        or []
+        if isinstance(item, dict)
     ]
+    is_plan = bool(plans) or not classified
     spot = finite_float(
         (payload.get("underlier") or {}).get("price")
         if isinstance(payload.get("underlier"), dict)
@@ -390,6 +430,10 @@ def _compact_candidate_lines(payload: dict[str, Any], *, limit: int = 2) -> list
                 break
 
     labels = {
+        "level_breakout_call": "突破确认",
+        "level_breakout_put": "跌破确认",
+        "level_fade_call": "下破拒绝",
+        "level_fade_put": "上破拒绝",
         "put_wall_bounce_call": "支撑反弹",
         "flip_breakdown_put": "Flip跌破",
         "call_wall_fade_put": "冲墙回落",
@@ -407,7 +451,15 @@ def _compact_candidate_lines(payload: dict[str, Any], *, limit: int = 2) -> list
         if high is None:
             high = item.get("projected_mid")
         contract = f"{_dash(item.get('strike'))}{item.get('right') or ''}"
-        if item.get("execution_quote_status") == "range_only":
+        live_intent = is_plan and item.get("order_style") == "live_nbbo_limit"
+        if live_intent:
+            price_text = (
+                f"实时 {_dash(item.get('decision_bid'))}/{_dash(item.get('decision_ask'))}　"
+                f"入场≤{_dash(item.get('limit_aggressive'))}"
+            )
+        elif not is_plan:
+            price_text = f"情景 {_dash(low)}–{_dash(high)}"
+        elif item.get("execution_quote_status") == "range_only":
             price_text = f"仅情景 {_dash(low)}–{_dash(high)}"
         else:
             price_text = f"参考 {_dash(low)}–{_dash(high)}"
@@ -415,9 +467,12 @@ def _compact_candidate_lines(payload: dict[str, Any], *, limit: int = 2) -> list
             str(item.get("play") or ""),
             "Call候选" if item.get("right") == "C" else "Put候选",
         )
+        prefix = "计划" if is_plan else "观察"
+        trigger_text = "已确认" if live_intent else "触发"
+        probability_text = "" if live_intent else f"　触达 {_fmt_prob(item.get('prob_touch'))}"
         lines.append(
-            f"计划{index}·{play_label}  SPX {_dash(item.get('level'))}触发｜"
-            f"SPXW {contract}｜触达 {_fmt_prob(item.get('prob_touch'))}｜{price_text}"
+            f"{prefix}{index} · {play_label}  SPX {_dash(item.get('level'))}{trigger_text} → "
+            f"SPXW {contract}{probability_text}　{price_text}"
         )
     return lines
 
@@ -434,13 +489,46 @@ def render_status_template(
 
     expiry = str(payload.get("expiry") or "-")
     expiry_text = f"{expiry[4:6]}-{expiry[6:8]}" if len(expiry) == 8 else expiry
+    classified_candidates = "plan_candidates" in payload
+    has_plan = bool(payload.get("plan_candidates")) if classified_candidates else True
+    candidate_lines = _compact_candidate_lines(payload)
+    if has_plan and candidate_lines:
+        plans = [item for item in payload.get("plan_candidates") or [] if isinstance(item, dict)]
+        live_plan = (
+            plans[0]
+            if len(plans) == 1 and plans[0].get("order_style") == "live_nbbo_limit"
+            else None
+        )
+        candidate_section = [
+            (
+                "【条件计划】决策门控已通过，标的触发后执行"
+                if classified_candidates
+                else "【条件计划】标的触发后执行"
+            ),
+            *candidate_lines,
+            (
+                f"风险  SPX {_dash(live_plan.get('invalidation_spx'))}失效　"
+                f"目标 {_dash(live_plan.get('target_spx'))}　"
+                f"意图至 {live_plan.get('intent_expires_at') or '-'}"
+                if live_plan is not None
+                else "执行  触位后按实时 mid/IV 重算；当前不可预挂"
+            ),
+        ]
+    elif candidate_lines:
+        candidate_section = [
+            "【观察情景】尚未通过决策门控",
+            *candidate_lines,
+            "说明  仅观察触位后的报价与方向确认；当前不是下单计划",
+        ]
+    else:
+        candidate_section = []
     lines = [
-        f"【SPX 15m｜{beijing.strftime('%H:%M')}｜0DTE {expiry_text}｜{phase.get('name_cn')}】",
+        f"【SPX 15m · {beijing.strftime('%H:%M')} · 0DTE {expiry_text} · {phase.get('name_cn')}】",
         *([line] if (line := _compact_clock_line(phase)) else []),
         _compact_price_line(payload),
         (
-            f"结构  {_gamma_label(payload.get('gamma_state'))}｜"
-            f"{_compact_level_line(payload)}｜ZG {_dash(payload.get('zero_gamma'))}｜"
+            f"结构  {_gamma_label(payload.get('gamma_state'))}　"
+            f"{_compact_level_line(payload)}　ZG {_dash(payload.get('zero_gamma'))}　"
             f"EM ±{_dash(payload.get('expected_move_points'))}"
         ),
         *([line] if (line := _compact_oi_line(payload)) else []),
@@ -454,10 +542,7 @@ def render_status_template(
             else []
         ),
         *([line] if (line := _compact_option_line(payload)) else []),
-        "",
-        "【条件计划｜标的触发后执行】",
-        *_compact_candidate_lines(payload),
-        "执行  触位后按实时 mid/IV 重算｜当前不可预挂",
+        *(["", *candidate_section] if candidate_section else []),
     ]
     if changes:
         lines.append(f"变化  {'；'.join(changes)}")
@@ -473,7 +558,11 @@ def render_status_template(
 def _detail_candidate_lines(payload: dict[str, Any]) -> list[str]:
     full_lines = render_template(payload).splitlines()
     start = next(
-        (index for index, line in enumerate(full_lines) if re.match(r"^1\) \[地图候选\]", line)),
+        (
+            index
+            for index, line in enumerate(full_lines)
+            if re.match(r"^1\) \[(?:地图候选|条件计划|观察情景)\]", line)
+        ),
         None,
     )
     if start is None:
@@ -488,10 +577,11 @@ def _detail_candidate_lines(payload: dict[str, Any]) -> list[str]:
     }
     for raw in full_lines[start:]:
         line = raw.strip()
-        candidate = re.match(r"^(\d+)\) \[地图候选\] (.+)$", line)
+        candidate = re.match(r"^(\d+)\) \[(地图候选|条件计划|观察情景)\] (.+)$", line)
         if candidate:
-            rendered.append(f"### 计划 {candidate.group(1)}")
-            rendered.append(f"**{candidate.group(2)}**")
+            heading = "观察" if candidate.group(2) == "观察情景" else "计划"
+            rendered.append(f"### {heading} {candidate.group(1)}")
+            rendered.append(f"**{candidate.group(3)}**")
             continue
         if line.startswith("注:"):
             rendered.append(f"> **说明**　{line.removeprefix('注:').strip()}")
@@ -553,8 +643,8 @@ def render_feishu_status_detail_template(
     ]
     vol = payload.get("vol_context") if isinstance(payload.get("vol_context"), dict) else {}
     greek_and_vol.append(
-        f"Vol全景: VIX {_dash(vol.get('vix'))}｜VIX1D {_dash(vol.get('vix1d'))}｜"
-        f"VVIX {_dash(vol.get('vvix'))}｜SKEW {_dash(vol.get('skew'))}"
+        f"Vol全景: VIX {_dash(vol.get('vix'))}　VIX1D {_dash(vol.get('vix1d'))}　"
+        f"VVIX {_dash(vol.get('vvix'))}　SKEW {_dash(vol.get('skew'))}"
     )
 
     market_confirmation = [
@@ -587,14 +677,15 @@ def render_feishu_status_detail_template(
         ("关键位状态", key_level_context),
         ("墙位阶梯", _detail_ladder_lines(payload)),
         ("风险中性分布", [density] if density else []),
-        ("条件计划与 BS 审计", _detail_candidate_lines(payload)),
+        (
+            "条件计划与 BS 审计"
+            if payload.get("plan_candidates") or "plan_candidates" not in payload
+            else "观察情景与 BS 审计",
+            _detail_candidate_lines(payload),
+        ),
     ]
     blocks = [header]
-    blocks.extend(
-        f"## {title}\n" + "\n".join(lines)
-        for title, lines in sections
-        if lines
-    )
+    blocks.extend(f"## {title}\n" + "\n".join(lines) for title, lines in sections if lines)
     return "\n\n".join(blocks)
 
 
@@ -632,12 +723,14 @@ def build_status_prompt(
             "两者背离时优先提示假突破风险。字段为 null、coverage 不足或 warnings 非空时必须明确降权，禁止补算或猜测。",
             "输出中文，第一行逐字保留模板标题；先给剧本维持/有变，再给当前位置和状态机结论。",
             "只保留会改变当前决策的内容：时段、SPX/ES、wall/flip、状态机、ES 路径与量价、"
-            "Max Pain/OI 或波动率中最重要的一项、最多两个条件候选、相对上次变化和下一确认/证伪阈值。",
+            "Max Pain/OI 或波动率中最重要的一项、最多两个情景、相对上次变化和下一确认/证伪阈值。",
             "禁止复述完整 Greeks、完整墙位阶梯、B-L 全分布、HL 全指标或 JSON 字段；它们留在后台审计。",
-            "保持模板的分段、空行和字段顺序。每个候选只占一行，逐字保留合约、SPX 触发位、触达概率和触位区间；"
-            "统一执行行必须保留『当前不可预挂』。",
-            "候选必须先由 SPX 点位触发，再按实时 mid/IV 重算；不得把情景价写成当前挂单价。",
-            "框架仍是 observe_only；仓位方向未知时，负 gamma 不等于下跌，不得据此改变候选方向。",
+            "保持模板的分段、空行和字段顺序。只有 plan_candidates 才能称为计划；"
+            "observation_candidates 必须称为观察情景，禁止补写执行、开仓、挂单或追价动作。"
+            "每个条目只占一行，并逐字保留模板中的执行字段。",
+            "order_style=live_nbbo_limit 时，必须保留实时 NBBO、入场上限、失效位、目标和意图到期时间，"
+            "不得写『当前不可预挂』；非实时条件情景才保留『当前不可预挂』并等 SPX 触发后重算。",
+            "TradeReady 可供操作员执行，但自动下单仍关闭；仓位方向未知时，负 gamma 不等于下跌，不得据此改变候选方向。",
             "EXPIRED 表示系统自动重建事件，不得写成等待价格离开或停止监控。",
             "没有实质变化时直接写『剧本维持』，不要为了填满行数重复指标。",
             "previous_push:" + previous_push_json(previous_push),
@@ -680,9 +773,20 @@ def _status_writer_payload(payload: dict[str, Any]) -> dict[str, Any]:
     exposure_context = _status_exposure_context(payload)
     if exposure_context:
         compact["exposure_context"] = exposure_context
-    candidates = payload.get("candidates")
+    classified = "plan_candidates" in payload
+    plans = payload.get("plan_candidates")
+    observations = payload.get("observation_candidates")
+    candidates = (
+        plans
+        if isinstance(plans, list) and plans
+        else observations
+        if classified and isinstance(observations, list)
+        else payload.get("candidates")
+    )
     if isinstance(candidates, list):
         candidate_keys = (
+            "intent_id",
+            "contract_id",
             "play",
             "level_label",
             "level",
@@ -692,12 +796,27 @@ def _status_writer_payload(payload: dict[str, Any]) -> dict[str, Any]:
             "projection_range_low",
             "projection_range_high",
             "execution_quote_status",
+            "order_style",
+            "decision_bid",
+            "decision_ask",
+            "limit_aggressive",
+            "invalidation_spx",
+            "target_spx",
+            "intent_expires_at",
+            "automatic_ordering",
         )
-        compact["candidates"] = [
+        key = (
+            "plan_candidates"
+            if isinstance(plans, list) and plans
+            else ("observation_candidates" if classified else "candidates")
+        )
+        compact[key] = [
             {key: item.get(key) for key in candidate_keys if key in item}
             for item in candidates[:2]
             if isinstance(item, dict)
         ]
+    if classified:
+        compact["candidate_presentation"] = payload.get("candidate_presentation")
     return compact
 
 

@@ -68,6 +68,18 @@ market_features:
   rth_end_et: {value: "16:00", description: End of the cash RTH segment in America/New_York time.}
   curb_end_et: {value: "17:00", description: End of the curb segment in America/New_York time.}
   min_l1_liquidity_score: {value: 40.0, description: Minimum hot-option L1 liquidity score before decision context marks it usable.}
+  trade_follow_through_seconds: {value: 30.0, description: Minimum time a confirmed path must remain outside its level before becoming trade-ready.}
+  trade_follow_through_min_points: {value: 2.0, description: Minimum additional movement beyond the confirmed level required for trade readiness.}
+  trade_follow_through_em_fraction: {value: 0.05, description: Expected-move fraction used when it exceeds the fixed follow-through threshold.}
+  trade_repricing_max_age_seconds: {value: 90.0, description: Maximum age of the matching realtime option repricing record.}
+  trade_quote_max_age_seconds: {value: 5.0, description: Maximum transport and source age for an option quote used in a trade-ready intent.}
+  trade_market_anchor_max_age_seconds: {value: 20.0, description: Maximum observation, source and transport age for the ES anchor and level observation used by a trade-ready intent.}
+  trade_structure_drift_points: {value: 2.5, description: Maximum difference between the frozen decision level and the current option structure before trade readiness is blocked.}
+  trade_entry_spread_fraction: {value: 0.35, description: Fraction of the live bid-ask spread used for the initial buy limit, capped at mid.}
+  trade_intent_ttl_seconds: {value: 90.0, description: Lifetime of a newly emitted trade intent before it must be recalculated.}
+  trade_invalidation_buffer_points: {value: 3.0, description: SPX reclaim distance beyond the trigger level that invalidates a trade intent.}
+  trade_target_em_fraction: {value: 0.15, description: Expected-move fraction used for a fallback SPX target when no outward structure exists.}
+  trade_time_stop_minutes: {value: 15, description: Default maximum holding time for an unextended 0DTE trade intent.}
 
 provider_failover:
   enabled:
@@ -325,6 +337,12 @@ schwab:
     option_plan_max_age_seconds:
       value: 120.0
       description: Maximum age of the collector hot-option plan accepted by the streaming runtime.
+    validation_future_symbols:
+      value: [NQ, RTY, YM]
+      description: Futures subscribed on the token-owner connection for bounded source-time acceptance only; they are persisted but excluded from production decision inputs until promoted.
+    futures_option_probe_symbol:
+      value: ""
+      description: Exact thinkorswim provider symbol for one ES futures option; empty disables the single-contract probe and comma-separated or multi-contract values are rejected.
   future_contract_resolution:
     calendar_timezone:
       value: America/New_York
@@ -627,6 +645,27 @@ schwab:
       collect_quote: true
       collect_option_chain: false
       description: Micro E-mini S&P 500 logical root resolved to the active concrete quarterly contract and stored as stable future:MES.
+    - canonical_symbol: NQ
+      instrument_type: future
+      quote_symbol: /NQ
+      quote_symbol_mode: front_quarterly
+      collect_quote: true
+      collect_option_chain: false
+      description: E-mini Nasdaq-100 validation root; REST is collected and WebSocket data remains acceptance-only until promoted.
+    - canonical_symbol: RTY
+      instrument_type: future
+      quote_symbol: /RTY
+      quote_symbol_mode: front_quarterly
+      collect_quote: true
+      collect_option_chain: false
+      description: E-mini Russell 2000 validation root; REST is collected and WebSocket data remains acceptance-only until promoted.
+    - canonical_symbol: YM
+      instrument_type: future
+      quote_symbol: /YM
+      quote_symbol_mode: front_quarterly
+      collect_quote: true
+      collect_option_chain: false
+      description: E-mini Dow validation root; REST is collected and WebSocket data remains acceptance-only until promoted.
 
 market_context:
   spx_sector_instrument_ids:
@@ -673,6 +712,12 @@ service_loop:
   realtime_engine_interval_seconds:
     value: 15
     description: Cadence for RealtimeEngine tick and outbox drain.
+  notification_recovery_enabled:
+    value: true
+    description: Enables an independent missed-message recovery task so queued Feishu notifications do not depend on a later direct alert.
+  notification_recovery_interval_seconds:
+    value: 60
+    description: Cadence in seconds for retrying the durable missed-message queue.
   hyperliquid_interval_seconds:
     value: 30
     description: Cadence for lightweight overnight proxy context collection.
@@ -1045,8 +1090,20 @@ notification:
     value: high
     description: Minimum alert severity eligible for delivery.
   cooldown_seconds:
-    value: 300
-    description: Default per-alert cooldown in seconds.
+    value: 900
+    description: Per-alert cooldown in seconds; the RealtimeEngine outbox event bucket is injected from this same value.
+  outbox_max_attempts:
+    value: 5
+    description: Maximum attempts for a non-terminal notification candidate before dead-lettering.
+  outbox_retry_base_seconds:
+    value: 60.0
+    description: Initial retry delay for reviewer timeouts, invalid output, or failed human delivery.
+  outbox_retry_max_seconds:
+    value: 900.0
+    description: Maximum exponential retry delay for a notification candidate.
+  outbox_claim_stale_after_seconds:
+    value: 180.0
+    description: Age after which an abandoned outbox claim may be recovered following process failure.
   openclaw_enabled:
     value: false
     description: Enables legacy OpenClaw command delivery path.
@@ -1330,13 +1387,13 @@ alerts:
 
 position_alerts:
   enabled:
-    value: true
-    description: Enables SPXW position event and PnL alerts.
+    value: false
+    description: Enables SPXW position alerts only when an approved account-read or execution lane is active; Paper market-data standby keeps this disabled.
   structural_enabled:
-    value: true
+    value: false
     description: Enables open/close/quantity-change position alerts.
   pnl_enabled:
-    value: true
+    value: false
     description: Enables position book PnL movement alerts.
   pnl_change_usd:
     value: 200.0
@@ -1477,13 +1534,13 @@ intraday_strategy:
 level_decision_shadow:
   enabled:
     value: true
-    description: Runs the mutually-exclusive wall/flip decision machine in audit-only shadow mode.
+    description: Runs the mutually-exclusive wall/flip decision state machine as an input to the deterministic TradeReady gate.
   notify_transitions:
     value: false
-    description: Optional low-level transition pushes; false keeps state telemetry in audit files while CONFIRMED formal signals still deliver.
+    description: Retained for compatibility; level transitions are audit-only and never bypass the TradeReady gate.
   formal_signal_enabled:
     value: true
-    description: Explicit operator override promoting CONFIRMED into an actionable decision signal and order-map bias; it never submits an order.
+    description: Allows CONFIRMED to enter deterministic TradeReady evaluation; it does not make the state directly actionable or submit an order.
   approach_points:
     value: 12.0
     description: Distance from the nearest frozen wall or flip boundary that arms an approach.

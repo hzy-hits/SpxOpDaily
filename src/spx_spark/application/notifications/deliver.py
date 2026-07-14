@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import timezone
+from dataclasses import dataclass
 from typing import Mapping
 
 from spx_spark.config import NotificationSettings
@@ -24,24 +25,21 @@ def _payload_dict(event: DomainEvent) -> dict[str, object]:
 
 
 def notification_settled(result: NotificationResult) -> bool:
-    """True when the outbox may ack (terminal success, skip, or disabled).
+    """True when the outbox may ack a terminal policy or delivery outcome."""
 
-    Matches alert_engine.run() settlement: a cooldown/policy skip is a final
-    outcome, not a retryable failure. Only hard delivery attempts that send
-    nothing while selecting alerts should retry — but notify_payload already
-    marks skipped_reason in those cases; treat skipped_reason as settled.
-    """
+    if result.outcome in {"disabled", "filtered", "delivered", "consumed"}:
+        return True
+    if result.outcome in {"pending", "failed", "no_sink"}:
+        return False
+    # Compatibility for older/custom NotificationResult constructors.
+    return not result.enabled or result.sent_count > 0 or result.selected_count == 0
 
-    if not result.enabled:
-        return True
-    if result.sent_count > 0:
-        return True
-    if result.selected_count == 0:
-        return True
-    if result.skipped_reason:
-        return True
-    # Selected alerts but zero successful sinks and no skip reason → retry.
-    return False
+
+@dataclass(frozen=True)
+class DeliveryDisposition:
+    settled: bool
+    outcome: str
+    delivered_count: int
 
 
 def deliver_alert_candidate(
@@ -57,6 +55,7 @@ def deliver_alert_candidate(
     if event.kind is not EventKind.ALERT_CANDIDATE:
         return True
     payload = _payload_dict(event)
+    payload["_notification_event_id"] = event.event_id
     if not payload.get("alerts"):
         return True
     notification_settings = settings or NotificationSettings.from_env()
@@ -69,12 +68,37 @@ def deliver_alert_candidate(
     return notification_settled(result)
 
 
+def deliver_alert_candidate_disposition(
+    event: DomainEvent,
+    *,
+    settings: NotificationSettings | None = None,
+) -> DeliveryDisposition:
+    if event.kind is not EventKind.ALERT_CANDIDATE:
+        return DeliveryDisposition(settled=True, outcome="ignored", delivered_count=0)
+    payload = _payload_dict(event)
+    if not payload.get("alerts"):
+        return DeliveryDisposition(settled=True, outcome="empty", delivered_count=0)
+    payload["_notification_event_id"] = event.event_id
+    notification_settings = settings or NotificationSettings.from_env()
+    now = event.source_at
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    result = notify_payload(payload, settings=notification_settings, now=now)
+    if result.acknowledged_event_ids:
+        reconcile_position_event_acknowledgements(result.acknowledged_event_ids)
+    return DeliveryDisposition(
+        settled=notification_settled(result),
+        outcome=result.outcome,
+        delivered_count=result.sent_count,
+    )
+
+
 def make_deliver_alert_candidate(
     settings: NotificationSettings | None = None,
 ):
     """Bind NotificationSettings into a DeliverFn-compatible callable."""
 
-    def _deliver(event: DomainEvent) -> bool:
-        return deliver_alert_candidate(event, settings=settings)
+    def _deliver(event: DomainEvent) -> DeliveryDisposition:
+        return deliver_alert_candidate_disposition(event, settings=settings)
 
     return _deliver

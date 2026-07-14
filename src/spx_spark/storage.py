@@ -11,6 +11,7 @@ from pathlib import Path
 
 from spx_spark.config import StorageSettings
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
+from spx_spark.market_data_policy import pricing_candidates, pricing_provider_priority
 from spx_spark.marketdata import (
     DEFAULT_PROVIDER_PRIORITY,
     InstrumentType,
@@ -381,12 +382,21 @@ def select_best_quotes(
     for quote in quotes:
         grouped[quote.instrument.canonical_id].append(quote)
 
+    selection_time = as_utc(as_of or datetime.now(tz=timezone.utc))
+    configured_priority = tuple(provider_priority)
     best: list[Quote] = []
     for instrument_id in sorted(grouped):
+        candidates = pricing_candidates(grouped[instrument_id], as_of=selection_time)
+        if not candidates:
+            continue
         quote = choose_best_quote(
-            grouped[instrument_id],
-            as_of=as_of,
-            provider_priority=provider_priority,
+            candidates,
+            as_of=selection_time,
+            provider_priority=pricing_provider_priority(
+                candidates[0].instrument,
+                as_of=selection_time,
+                configured=configured_priority,
+            ),
         )
         if quote is not None:
             best.append(quote)

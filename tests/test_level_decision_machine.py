@@ -64,6 +64,38 @@ def test_breakout_requires_acceptance_retest_and_confirmation_hold() -> None:
     assert confirmed.state["direction"] == "down"
 
 
+def test_confirmed_path_invalidates_when_price_reclaims_the_level() -> None:
+    armed = advance(None, 0, spot=95.0, es=5000.0)
+    testing = advance(armed.state, 5, spot=99.0, es=5000.0)
+    pending = advance(testing.state, 10, spot=96.0, es=4999.0)
+    accepted = advance(pending.state, 31, spot=95.0, es=4997.0)
+    retest = advance(accepted.state, 40, spot=99.0, es=4998.0)
+    holding = advance(retest.state, 45, spot=95.0, es=4996.0)
+    confirmed = advance(holding.state, 56, spot=94.0, es=4994.0)
+
+    invalidated = advance(confirmed.state, 65, spot=104.0, es=5004.0)
+
+    assert invalidated.previous_phase is LevelPhase.CONFIRMED
+    assert invalidated.current_phase is LevelPhase.INVALIDATED
+    assert invalidated.reason == "crossed_invalidation"
+
+
+def test_confirmed_path_expires_instead_of_remaining_valid_indefinitely() -> None:
+    armed = advance(None, 0, spot=95.0, es=5000.0)
+    testing = advance(armed.state, 5, spot=99.0, es=5000.0)
+    pending = advance(testing.state, 10, spot=96.0, es=4999.0)
+    accepted = advance(pending.state, 31, spot=95.0, es=4997.0)
+    retest = advance(accepted.state, 40, spot=99.0, es=4998.0)
+    holding = advance(retest.state, 45, spot=95.0, es=4996.0)
+    confirmed = advance(holding.state, 56, spot=94.0, es=4994.0)
+
+    expired = advance(confirmed.state, 147, spot=94.0, es=4994.0)
+
+    assert expired.previous_phase is LevelPhase.CONFIRMED
+    assert expired.current_phase is LevelPhase.EXPIRED
+    assert expired.reason == "phase_timeout"
+
+
 def test_fade_and_breakout_are_mutually_exclusive_for_one_frozen_level() -> None:
     levels = {"put_wall": 90.0, "flip_low": 100.0, "flip_high": 105.0, "call_wall": 110.0}
     armed = advance(None, 0, spot=108.0, es=5000.0, levels=levels)

@@ -13,16 +13,12 @@ from spx_spark.application.order_map.prompts import (
 )
 from spx_spark.application.order_map.render import render_template
 from spx_spark.config import NotificationSettings
+from spx_spark.notifier.dispatcher import dispatch_notification
 from spx_spark.notifier.llm_writer import (
     generate_push_text,
 )
-from spx_spark.notifier.missed_queue import append_missed
 from spx_spark.notifier.model import CommandRunner, default_runner
-from spx_spark.notifier.sinks import (
-    any_delivery_ok,
-    deliver_trade_push,
-    im_delivery_failed,
-)
+from spx_spark.notifier.receipts import NotificationEnvelope, notification_event_id
 
 
 def send_order_map(
@@ -55,23 +51,30 @@ def send_order_map(
         if not valid:
             text, writer = template, "template_validation_fallback"
 
-    delivery_sinks = deliver_trade_push(
+    kind = "status" if research_only else "order_map"
+    event_id = notification_event_id(
+        kind,
+        source="order_map",
+        occurred_at=now,
+        identity=str(payload.get("trading_date") or payload.get("as_of") or now.date()),
+    )
+    dispatch = dispatch_notification(
         settings,
+        NotificationEnvelope(
+            event_id=event_id,
+            source="order_map",
+            kind=kind,
+            lane="scheduled_report",
+            occurred_at=now,
+        ),
         title="市场状态" if research_only else "条件交易地图",
         text=text,
-        kind="status" if research_only else "order_map",
-        lane="trade",
         friend=True,
         runner=runner,
+        attempted_at=now,
     )
-    delivered_ok = any_delivery_ok(delivery_sinks)
-    if im_delivery_failed(delivery_sinks):
-        append_missed(
-            settings.missed_queue_path,
-            text,
-            kind="order_map",
-            at=now,
-        )
+    delivery_sinks = list(dispatch.sinks)
+    delivered_ok = dispatch.delivered
 
     return {
         "text": text,

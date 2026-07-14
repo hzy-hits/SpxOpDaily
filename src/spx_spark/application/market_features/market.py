@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 import statistics
-from datetime import datetime, time, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
 
 from spx_spark.application.globex_trend.service import globex_session_id
@@ -84,10 +84,13 @@ def freshest_quote(
             continue
         source_at = quote_source_at(quote)
         transport_at = as_utc(quote.last_update_at or quote.received_at)
-        if max(
-            (as_utc(now) - source_at).total_seconds(),
-            (as_utc(now) - transport_at).total_seconds(),
-        ) > policy.max_quote_age_seconds:
+        if (
+            max(
+                (as_utc(now) - source_at).total_seconds(),
+                (as_utc(now) - transport_at).total_seconds(),
+            )
+            > policy.max_quote_age_seconds
+        ):
             continue
         eligible.append(quote)
     if not eligible:
@@ -100,12 +103,7 @@ def freshest_quote(
 
 
 def quote_source_at(quote: Quote) -> datetime:
-    return as_utc(
-        quote.quote_time
-        or quote.trade_time
-        or quote.last_update_at
-        or quote.received_at
-    )
+    return as_utc(quote.quote_time or quote.trade_time or quote.last_update_at or quote.received_at)
 
 
 def normalized_quote(quote: Quote) -> dict[str, Any]:
@@ -113,6 +111,7 @@ def normalized_quote(quote: Quote) -> dict[str, Any]:
         "price": quote.effective_price,
         "provider": quote.provider.value,
         "source_at": quote_source_at(quote).isoformat(),
+        "transport_at": as_utc(quote.last_update_at or quote.received_at).isoformat(),
         "bid": quote.bid,
         "ask": quote.ask,
         "bid_size": quote.bid_size,
@@ -135,9 +134,10 @@ def merge_minute_sample(
         last_at = _parse_at(retained[-1].get("at"))
         if last_at is not None and last_at.replace(second=0, microsecond=0) == current_minute:
             retained[-1] = sample
-        elif last_at is None or (
-            as_utc(now) - last_at
-        ).total_seconds() >= policy.sample_interval_seconds:
+        elif (
+            last_at is None
+            or (as_utc(now) - last_at).total_seconds() >= policy.sample_interval_seconds
+        ):
             retained.append(sample)
     else:
         retained.append(sample)
@@ -161,7 +161,17 @@ def build_minute_market_frame(
     es_points = _instrument_points(session_samples, "future:ES")
     latest = es_points[-1] if es_points else None
     price = latest[1] if latest else None
-    returns = {f"return_{minutes}m_points": _return(es_points, now, minutes) for minutes in (1, 5, 15, 60, 180)}
+    gth_open_at = _spx_gth_open_at(session_id)
+    gth_points = [point for point in es_points if point[0] >= gth_open_at]
+    gth_open = gth_points[0] if gth_points else None
+    gth_open_price = gth_open[1] if gth_open else None
+    gth_move_points = (
+        price - gth_open_price if price is not None and gth_open_price is not None else None
+    )
+    returns = {
+        f"return_{minutes}m_points": _return(es_points, now, minutes)
+        for minutes in (1, 5, 15, 60, 180)
+    }
     prices = [point[1] for point in es_points]
     high = max(prices) if prices else None
     low = min(prices) if prices else None
@@ -197,22 +207,37 @@ def build_minute_market_frame(
     )
     cross_asset = cross_asset_features(session_samples, now=now, policy=policy)
     volatility = volatility_features(session_samples, now=now, atm_iv=atm_iv)
-    quality = FrameQuality.READY if price is not None and len(es_points) >= 5 else (
-        FrameQuality.DEGRADED if price is not None else FrameQuality.UNAVAILABLE
+    quality = (
+        FrameQuality.READY
+        if price is not None and len(es_points) >= 5
+        else (FrameQuality.DEGRADED if price is not None else FrameQuality.UNAVAILABLE)
     )
     es = {
         "price": price,
         "provider": latest[2].get("provider") if latest else None,
+        "observed_at": latest[0].isoformat() if latest else None,
+        "source_at": latest[2].get("source_at") if latest else None,
+        "transport_at": latest[2].get("transport_at") if latest else None,
         **returns,
         "session_high": high,
         "session_low": low,
-        "distance_from_high_points": price - high if price is not None and high is not None else None,
+        "distance_from_high_points": price - high
+        if price is not None and high is not None
+        else None,
         "distance_from_low_points": price - low if price is not None and low is not None else None,
         "trend_efficiency_60m": trend_efficiency(es_points, now=now, minutes=60),
         "trend_efficiency_180m": trend_efficiency(es_points, now=now, minutes=180),
         **swing_structure(es_points, now=now),
         "overnight_range_points": overnight_range,
         "overnight_expected_move_used": expected_move_used,
+        "gth_open_at": gth_open[0].isoformat() if gth_open else None,
+        "gth_open_price": gth_open_price,
+        "gth_move_points": gth_move_points,
+        "gth_expected_move_used": (
+            abs(gth_move_points) / expected_move_points
+            if gth_move_points is not None and expected_move_points and expected_move_points > 0
+            else None
+        ),
         "vwap": volume.get("session_vwap"),
         "vwap_distance_points": (
             price - volume["session_vwap"]
@@ -245,9 +270,18 @@ def build_minute_market_frame(
     )
 
 
-def session_segment(
-    at: datetime, *, policy: MarketFeatureSettings | None = None
-) -> str:
+def _spx_gth_open_at(session_id: str) -> datetime:
+    """Return the 20:15 ET SPX GTH open for a Globex business-date id."""
+
+    business_date = date.fromisoformat(session_id)
+    return datetime.combine(
+        business_date - timedelta(days=1),
+        time(20, 15),
+        tzinfo=NY_TZ,
+    ).astimezone(timezone.utc)
+
+
+def session_segment(at: datetime, *, policy: MarketFeatureSettings | None = None) -> str:
     policy = policy or MarketFeatureSettings()
     local = as_utc(at).astimezone(NY_TZ)
     clock = local.time().replace(tzinfo=None)
@@ -280,13 +314,9 @@ def volume_features(
             else ()
         )
     }
-    by_provider = {
-        provider: _volume_points(samples, provider=provider) for provider in providers
-    }
+    by_provider = {provider: _volume_points(samples, provider=provider) for provider in providers}
     session_provider = (
-        max(by_provider, key=lambda provider: len(by_provider[provider]))
-        if by_provider
-        else None
+        max(by_provider, key=lambda provider: len(by_provider[provider])) if by_provider else None
     )
     current_quote = _instrument(samples[-1], "future:ES") if samples else None
     current_provider = str(current_quote.get("provider")) if current_quote else None
@@ -309,11 +339,7 @@ def volume_features(
         deltas[f"volume_delta_{minutes}m"] = delta
     vwap = _volume_weighted_price(session_points)
     overnight_points = _volume_points(
-        [
-            row
-            for row in samples
-            if row.get("segment") in {"asia", "europe", "us_premarket"}
-        ],
+        [row for row in samples if row.get("segment") in {"asia", "europe", "us_premarket"}],
         provider=session_provider,
     )
     overnight_vwap = _volume_weighted_price(overnight_points)
@@ -407,7 +433,9 @@ def cross_asset_features(
             and abs((es_at - spx_at).total_seconds()) <= policy.provider_sync_tolerance_seconds
         ):
             basis_history.append(es_price - spx_price)
-    providers = latest.get("es_by_provider") if isinstance(latest.get("es_by_provider"), dict) else {}
+    providers = (
+        latest.get("es_by_provider") if isinstance(latest.get("es_by_provider"), dict) else {}
+    )
     schwab, ibkr = providers.get("schwab"), providers.get("ibkr")
     divergence = _provider_divergence(schwab, ibkr, policy=policy)
     previous_provider = None
@@ -429,12 +457,8 @@ def cross_asset_features(
         "basis_source_skew_seconds": basis_source_skew,
         "es_spy_direction_confirmation_15m": confirmation,
         "relative_strength_15m": {
-            "qqq_minus_spy_pct": _difference(
-                returns["equity:QQQ"]["return_15m_pct"], spy_15
-            ),
-            "rsp_minus_spy_pct": _difference(
-                returns["equity:RSP"]["return_15m_pct"], spy_15
-            ),
+            "qqq_minus_spy_pct": _difference(returns["equity:QQQ"]["return_15m_pct"], spy_15),
+            "rsp_minus_spy_pct": _difference(returns["equity:RSP"]["return_15m_pct"], spy_15),
         },
         "es_provider_divergence": divergence,
         "selected_es_provider": current_provider,
@@ -457,24 +481,18 @@ def volatility_features(
     vix, vix1d, vix3m = values.get("vix"), values.get("vix1d"), values.get("vix3m")
     vix_return = _percent_return(_instrument_points(samples, "index:VIX"), now, 15)
     vvix_return = _percent_return(_instrument_points(samples, "index:VVIX"), now, 15)
-    es_realized = realized_volatility(
-        _instrument_points(samples, "future:ES"), now=now, minutes=60
-    )
+    es_realized = realized_volatility(_instrument_points(samples, "future:ES"), now=now, minutes=60)
     return {
         **values,
         "vix1d_vix_ratio": vix1d / vix if vix1d and vix else None,
         "vix_vix3m_ratio": vix / vix3m if vix and vix3m else None,
-        "vix_vvix_direction_confirmation_15m": _direction_confirmation(
-            vix_return, vvix_return
-        ),
+        "vix_vvix_direction_confirmation_15m": _direction_confirmation(vix_return, vvix_return),
         "vix_return_15m_pct": vix_return,
         "vvix_return_15m_pct": vvix_return,
         "skew_change_60m": _return(_instrument_points(samples, "index:SKEW"), now, 60),
         "es_realized_vol_60m_annualized": es_realized,
         "atm_iv_minus_es_realized_vol": (
-            atm_iv - es_realized
-            if atm_iv is not None and es_realized is not None
-            else None
+            atm_iv - es_realized if atm_iv is not None and es_realized is not None else None
         ),
     }
 
@@ -516,9 +534,7 @@ def key_level_holds(
         row: dict[str, Any] = {"level": level, "side": side}
         for minutes in (1, 3, 5):
             window = [
-                point[1]
-                for point in points
-                if point[0] >= as_utc(now) - timedelta(minutes=minutes)
+                point[1] for point in points if point[0] >= as_utc(now) - timedelta(minutes=minutes)
             ]
             row[f"holds_{minutes}m"] = (
                 all(price >= level for price in window)
@@ -671,11 +687,7 @@ def _volume_points(
         quote = None
         if provider is not None:
             provider_quotes = row.get("es_by_provider")
-            candidate = (
-                provider_quotes.get(provider)
-                if isinstance(provider_quotes, dict)
-                else None
-            )
+            candidate = provider_quotes.get(provider) if isinstance(provider_quotes, dict) else None
             if isinstance(candidate, dict):
                 quote = candidate
             else:
@@ -717,7 +729,9 @@ def _range_payload(
         "high": high,
         "low": low,
         "range_points": high - low if high is not None and low is not None else None,
-        "distance_from_high_points": price - high if price is not None and high is not None else None,
+        "distance_from_high_points": price - high
+        if price is not None and high is not None
+        else None,
         "distance_from_low_points": price - low if price is not None and low is not None else None,
         "sample_count": len(points),
     }
@@ -746,7 +760,9 @@ def _provider_divergence(
     skew = abs((schwab_at - ibkr_at).total_seconds())  # type: ignore[operator]
     return {
         "available": skew <= policy.provider_sync_tolerance_seconds,
-        "price_points": schwab_price - ibkr_price if skew <= policy.provider_sync_tolerance_seconds else None,  # type: ignore[operator]
+        "price_points": schwab_price - ibkr_price
+        if skew <= policy.provider_sync_tolerance_seconds
+        else None,  # type: ignore[operator]
         "source_skew_seconds": skew,
     }
 

@@ -32,6 +32,7 @@ class NotificationResult:
     sinks: tuple[SinkResult, ...]
     acknowledged_event_ids: tuple[str, ...] = ()
     selected_alert_keys: tuple[str, ...] = ()
+    outcome: str = "unknown"
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -42,6 +43,7 @@ class NotificationResult:
             "sinks": [sink.to_dict() for sink in self.sinks],
             "acknowledged_event_ids": list(self.acknowledged_event_ids),
             "selected_alert_keys": list(self.selected_alert_keys),
+            "outcome": self.outcome,
         }
 
 

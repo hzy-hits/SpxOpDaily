@@ -304,6 +304,34 @@ def load_settings(
         rth_end_et=str(get("market_features.rth_end_et")),
         curb_end_et=str(get("market_features.curb_end_et")),
         min_l1_liquidity_score=float(get("market_features.min_l1_liquidity_score")),
+        trade_follow_through_seconds=float(
+            get("market_features.trade_follow_through_seconds")
+        ),
+        trade_follow_through_min_points=float(
+            get("market_features.trade_follow_through_min_points")
+        ),
+        trade_follow_through_em_fraction=float(
+            get("market_features.trade_follow_through_em_fraction")
+        ),
+        trade_repricing_max_age_seconds=float(
+            get("market_features.trade_repricing_max_age_seconds")
+        ),
+        trade_quote_max_age_seconds=float(get("market_features.trade_quote_max_age_seconds")),
+        trade_market_anchor_max_age_seconds=float(
+            get("market_features.trade_market_anchor_max_age_seconds")
+        ),
+        trade_structure_drift_points=float(
+            get("market_features.trade_structure_drift_points")
+        ),
+        trade_entry_spread_fraction=float(
+            get("market_features.trade_entry_spread_fraction")
+        ),
+        trade_intent_ttl_seconds=float(get("market_features.trade_intent_ttl_seconds")),
+        trade_invalidation_buffer_points=float(
+            get("market_features.trade_invalidation_buffer_points")
+        ),
+        trade_target_em_fraction=float(get("market_features.trade_target_em_fraction")),
+        trade_time_stop_minutes=int(get("market_features.trade_time_stop_minutes")),
     )
 
     ibkr = IbkrSettingsSlice(
@@ -431,6 +459,10 @@ def load_settings(
         alerts_enabled=bool(get("service_loop.alerts_enabled")),
         realtime_engine_enabled=bool(get("service_loop.realtime_engine_enabled")),
         realtime_engine_interval_seconds=int(get("service_loop.realtime_engine_interval_seconds")),
+        notification_recovery_enabled=bool(get("service_loop.notification_recovery_enabled")),
+        notification_recovery_interval_seconds=int(
+            get("service_loop.notification_recovery_interval_seconds")
+        ),
         hyperliquid_interval_seconds=int(get("service_loop.hyperliquid_interval_seconds")),
         polymarket_interval_seconds=int(get("service_loop.polymarket_interval_seconds")),
         ibkr_interval_seconds=int(get("service_loop.ibkr_interval_seconds")),

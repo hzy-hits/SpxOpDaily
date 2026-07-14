@@ -38,8 +38,8 @@ _MD_HEADING_RE = re.compile(r"^#{1,3}\s+")
 _MD_BOLD_RE = re.compile(r"\*\*(.+?)\*\*")
 _MD_CODE_RE = re.compile(r"`([^`]+)`")
 _MD_BULLET_RE = re.compile(r"^[-*]\s+")
-_SPX_STATUS_HEADER_RE = re.compile(r"^【(SPX 15m｜.+)】$")
-_STATUS_PLAN_RE = re.compile(r"^(计划\d+·\S+)\s{2}(.*)$")
+_SPX_STATUS_HEADER_RE = re.compile(r"^【(SPX 15m · .+)】$")
+_STATUS_PLAN_RE = re.compile(r"^(计划\d+\s*·\s*\S+)\s{2}(.*)$")
 
 
 def _status_card_template(text: str) -> str:
@@ -64,8 +64,20 @@ def _status_card_template(text: str) -> str:
 def _format_status_line(line: str) -> str:
     plan = _STATUS_PLAN_RE.match(line)
     if plan:
-        return f"- **{plan.group(1).replace('·', ' · ')}**　{plan.group(2)}"
-    for label in ("时钟", "价格", "结构", "OI", "状态", "ES确认", "波动", "执行", "变化", "数据"):
+        return f"- **{plan.group(1)}**　{plan.group(2)}"
+    for label in (
+        "时钟",
+        "价格",
+        "结构",
+        "OI",
+        "状态",
+        "突破过滤",
+        "ES确认",
+        "波动",
+        "执行",
+        "变化",
+        "数据",
+    ):
         prefix = f"{label}  "
         if line.startswith(prefix):
             content = line.removeprefix(prefix)
@@ -88,7 +100,7 @@ def _status_card_parts(markdown: str) -> tuple[str, list[dict[str, Any]], str] |
             if blocks[-1]:
                 blocks.append([])
             continue
-        if line.startswith("【条件计划｜"):
+        if line.startswith("【条件计划】"):
             line = "**条件计划**　标的触发后执行"
         blocks[-1].append(_format_status_line(line))
     blocks = [block for block in blocks if block]

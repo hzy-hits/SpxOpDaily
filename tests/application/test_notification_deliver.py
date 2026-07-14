@@ -63,6 +63,24 @@ def test_domain_events_from_payload_deterministic_id() -> None:
     assert alert_batch_event_id(payload, now=NOW) == first[0].event_id
 
 
+def test_alert_batch_event_id_uses_injected_cooldown_bucket() -> None:
+    start = datetime(2026, 7, 11, 0, 0, tzinfo=timezone.utc)
+    payload = _payload("price_move_from_close")
+    first = alert_batch_event_id(payload, now=start, bucket_seconds=900)
+    same = alert_batch_event_id(
+        payload,
+        now=start.replace(minute=14, second=59),
+        bucket_seconds=900,
+    )
+    next_bucket = alert_batch_event_id(
+        payload,
+        now=start.replace(minute=15),
+        bucket_seconds=900,
+    )
+    assert first == same
+    assert next_bucket != first
+
+
 def test_notification_settled_semantics() -> None:
     disabled = NotificationResult(
         enabled=False, selected_count=0, sent_count=0, skipped_reason="disabled", sinks=()
@@ -81,9 +99,32 @@ def test_notification_settled_semantics() -> None:
     )
     assert notification_settled(sent) is True
     retry = NotificationResult(
-        enabled=True, selected_count=2, sent_count=0, skipped_reason=None, sinks=()
+        enabled=True,
+        selected_count=2,
+        sent_count=0,
+        skipped_reason=None,
+        sinks=(),
+        outcome="pending",
     )
     assert notification_settled(retry) is False
+    consumed = NotificationResult(
+        enabled=True,
+        selected_count=1,
+        sent_count=0,
+        skipped_reason=None,
+        sinks=(),
+        outcome="consumed",
+    )
+    assert notification_settled(consumed) is True
+    no_sink = NotificationResult(
+        enabled=True,
+        selected_count=1,
+        sent_count=0,
+        skipped_reason="no_enabled_sinks",
+        sinks=(),
+        outcome="no_sink",
+    )
+    assert notification_settled(no_sink) is False
 
 
 def test_deliver_alert_candidate_calls_notify_payload(monkeypatch) -> None:

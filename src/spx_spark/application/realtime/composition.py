@@ -187,11 +187,16 @@ def resolve_alert_evaluator(
     *,
     evaluation_enabled: bool | None = None,
     alert_settings: AlertSettings | None = None,
+    event_bucket_seconds: int = 300,
 ):
     if evaluation_enabled is None:
         evaluation_enabled = outbox_alert_evaluation_enabled()
     if evaluation_enabled:
-        return AlertEngineEvaluator(store, alert_settings=alert_settings)
+        return AlertEngineEvaluator(
+            store,
+            alert_settings=alert_settings,
+            event_bucket_seconds=event_bucket_seconds,
+        )
     return SilentAlertEvaluator()
 
 
@@ -293,8 +298,14 @@ def build_realtime_runtime(
     if analytics_policy is None:
         analytics_policy = AnalyticsSettings()
     alert_policy: AlertSettings | None = app_settings.alerts if app_settings is not None else None
+    notification_settings = notification_settings or NotificationSettings.from_env()
     projection = LatestMarketProjectionStore(storage)
-    outbox = SqliteEventOutbox(outbox_path or default_outbox_path(storage))
+    outbox = SqliteEventOutbox(
+        outbox_path or default_outbox_path(storage),
+        max_attempts=notification_settings.outbox_max_attempts,
+        retry_base_seconds=notification_settings.outbox_retry_base_seconds,
+        retry_max_seconds=notification_settings.outbox_retry_max_seconds,
+    )
     processed = DurableProcessedIdSet(processed_ids_path or default_processed_ids_path(storage))
     sink = TickProjectionSink()
     engine = RealtimeEngine(
@@ -304,6 +315,7 @@ def build_realtime_runtime(
             projection,
             evaluation_enabled=evaluation_enabled,
             alert_settings=alert_policy,
+            event_bucket_seconds=notification_settings.cooldown_seconds,
         ),
         projections=sink,
         outbox=outbox,
@@ -321,6 +333,7 @@ def build_realtime_runtime(
             deliver=deliver,
         ),
         processed_ids=processed,
+        claim_stale_after_seconds=notification_settings.outbox_claim_stale_after_seconds,
     )
     return RealtimeRuntime(
         engine=engine,

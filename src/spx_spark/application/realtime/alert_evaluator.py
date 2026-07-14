@@ -11,7 +11,7 @@ from spx_spark.alert_engine import evaluate_payload
 from spx_spark.domain.analytics import AnalyticsResult
 from spx_spark.domain.events import DomainEvent, EventKind
 from spx_spark.domain.market import MarketSnapshot
-from spx_spark.notifier.policy import alert_key
+from spx_spark.notifier.policy import alert_key, context_only_alerts, is_human_visible_alert
 from spx_spark.settings import AlertSettings, DEFAULT_ALERT_SETTINGS
 from spx_spark.storage import LatestMarketProjectionStore, LatestState
 
@@ -22,7 +22,12 @@ def _utc(now: datetime) -> datetime:
     return now.astimezone(timezone.utc)
 
 
-def alert_batch_event_id(payload: Mapping[str, object], *, now: datetime) -> str:
+def alert_batch_event_id(
+    payload: Mapping[str, object],
+    *,
+    now: datetime,
+    bucket_seconds: int = 300,
+) -> str:
     """Deterministic id: content hash + cooldown-sized time bucket.
 
     The time bucket allows the same alert set to re-enter the outbox after the
@@ -37,9 +42,9 @@ def alert_batch_event_id(payload: Mapping[str, object], *, now: datetime) -> str
         if isinstance(item, dict)
     )
     digest = hashlib.sha256("\n".join(keys).encode("utf-8")).hexdigest()[:16]
-    # Align with default notification.cooldown_seconds (300) without reading env
-    # in the pure id helper — callers pass already-evaluated payload/now.
-    bucket = int(_utc(now).timestamp()) // 300
+    if bucket_seconds < 1:
+        raise ValueError("bucket_seconds must be >= 1")
+    bucket = int(_utc(now).timestamp()) // bucket_seconds
     return f"alert_candidate:{bucket}:{digest}"
 
 
@@ -47,6 +52,7 @@ def domain_events_from_payload(
     payload: Mapping[str, object],
     *,
     now: datetime,
+    event_bucket_seconds: int = 300,
 ) -> tuple[DomainEvent, ...]:
     alerts = payload.get("alerts")
     if not isinstance(alerts, list) or not alerts:
@@ -58,7 +64,11 @@ def domain_events_from_payload(
             source_at = source_at.replace(tzinfo=timezone.utc)
     else:
         source_at = _utc(now)
-    event_id = alert_batch_event_id(payload, now=source_at)
+    event_id = alert_batch_event_id(
+        payload,
+        now=source_at,
+        bucket_seconds=event_bucket_seconds,
+    )
     return (
         DomainEvent(
             schema_version=1,
@@ -88,6 +98,7 @@ class AlertEngineEvaluator:
     persist_movement_state: bool = False
     persist_gamma_regime: bool = False
     alert_settings: AlertSettings | None = None
+    event_bucket_seconds: int = 300
 
     def evaluate(
         self,
@@ -108,7 +119,23 @@ class AlertEngineEvaluator:
             persist_gamma_regime=self.persist_gamma_regime,
             alert_settings=self.alert_settings or DEFAULT_ALERT_SETTINGS,
         )
-        return domain_events_from_payload(payload, now=now)
+        alerts = payload.get("alerts")
+        if isinstance(alerts, list):
+            visible = [alert for alert in alerts if isinstance(alert, dict) and is_human_visible_alert(alert)]
+            context = context_only_alerts(visible, payload)
+            candidates = [alert for alert in visible if alert not in context]
+            if not candidates:
+                return ()
+            payload = {
+                **payload,
+                "alerts": candidates,
+                "alert_count": len(candidates),
+            }
+        return domain_events_from_payload(
+            payload,
+            now=now,
+            event_bucket_seconds=self.event_bucket_seconds,
+        )
 
 
 def evaluate_state_to_events(
@@ -119,6 +146,7 @@ def evaluate_state_to_events(
     persist_movement_state: bool = False,
     persist_gamma_regime: bool = False,
     alert_settings: AlertSettings | None = None,
+    event_bucket_seconds: int = 300,
 ) -> tuple[DomainEvent, ...]:
     """Test/helper entry that skips the projection store."""
 
@@ -131,4 +159,8 @@ def evaluate_state_to_events(
         persist_gamma_regime=persist_gamma_regime,
         alert_settings=alert_settings or DEFAULT_ALERT_SETTINGS,
     )
-    return domain_events_from_payload(payload, now=now)
+    return domain_events_from_payload(
+        payload,
+        now=now,
+        event_bucket_seconds=event_bucket_seconds,
+    )

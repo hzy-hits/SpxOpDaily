@@ -241,6 +241,8 @@ class SchwabStreamSettings:
     option_hot_symbol_limit: int
     option_symbol_refresh_seconds: float
     option_plan_max_age_seconds: float
+    validation_future_symbols: tuple[str, ...] = ()
+    futures_option_probe_symbol: str = ""
 
     def __post_init__(self) -> None:
         if self.mode not in {"off", "shadow", "live"}:
@@ -265,6 +267,12 @@ class SchwabStreamSettings:
             raise ValueError("SCHWAB_STREAM_OPTION_REFRESH_SECONDS must be positive")
         if self.option_plan_max_age_seconds <= 0:
             raise ValueError("SCHWAB_STREAM_OPTION_PLAN_MAX_AGE_SECONDS must be positive")
+        if len(set(self.validation_future_symbols)) != len(self.validation_future_symbols):
+            raise ValueError("SCHWAB_STREAM_VALIDATION_FUTURES cannot contain duplicates")
+        if set(self.validation_future_symbols) & set(self.canonical_symbols):
+            raise ValueError("validation futures must remain outside the production universe")
+        if "," in self.futures_option_probe_symbol:
+            raise ValueError("SCHWAB_STREAM_FUTURES_OPTION_PROBE must contain one symbol")
 
     @classmethod
     def from_env(cls, *, data_root: str | None = None) -> "SchwabStreamSettings":
@@ -321,6 +329,17 @@ class SchwabStreamSettings:
                 "SCHWAB_STREAM_OPTION_PLAN_MAX_AGE_SECONDS",
                 float(settings_value("schwab.streaming.option_plan_max_age_seconds")),
             ),
+            validation_future_symbols=tuple(
+                symbol.upper()
+                for symbol in env_csv_preserve(
+                    "SCHWAB_STREAM_VALIDATION_FUTURES",
+                    settings_csv("schwab.streaming.validation_future_symbols"),
+                )
+            ),
+            futures_option_probe_symbol=env_str(
+                "SCHWAB_STREAM_FUTURES_OPTION_PROBE",
+                str(settings_value("schwab.streaming.futures_option_probe_symbol")),
+            ).strip().upper(),
         )
 
 
@@ -568,6 +587,14 @@ class NotificationSettings:
     # the direction flips, or severity is critical.
     kind_rate_limit_seconds: float = field(default_factory=lambda: 3600.0)
     missed_queue_path: str = ""
+    # SQLite ledger for every human-delivery attempt, including direct report
+    # paths that do not pass through the domain-event outbox.
+    delivery_receipt_path: str = ""
+    # Retry policy for non-terminal outbox outcomes such as reviewer timeouts.
+    outbox_max_attempts: int = 5
+    outbox_retry_base_seconds: float = 60.0
+    outbox_retry_max_seconds: float = 900.0
+    outbox_claim_stale_after_seconds: float = 180.0
     # Append-only, owner-readable evidence for every LLM review decision. The
     # audit contains allowlisted alert facts and redacted model output only.
     review_audit_path: str = ""
@@ -799,6 +826,26 @@ class NotificationSettings:
             missed_queue_path=env_str(
                 "ALERT_NOTIFY_MISSED_QUEUE_PATH",
                 f"{data_root.rstrip('/')}/latest/weixin_missed_queue.jsonl",
+            ),
+            delivery_receipt_path=env_str(
+                "ALERT_NOTIFY_DELIVERY_RECEIPT_PATH",
+                f"{data_root.rstrip('/')}/ledger/notification_delivery.sqlite",
+            ),
+            outbox_max_attempts=env_int(
+                "ALERT_NOTIFY_OUTBOX_MAX_ATTEMPTS",
+                int(settings_value("notification.outbox_max_attempts")),
+            ),
+            outbox_retry_base_seconds=env_float(
+                "ALERT_NOTIFY_OUTBOX_RETRY_BASE_SECONDS",
+                float(settings_value("notification.outbox_retry_base_seconds")),
+            ),
+            outbox_retry_max_seconds=env_float(
+                "ALERT_NOTIFY_OUTBOX_RETRY_MAX_SECONDS",
+                float(settings_value("notification.outbox_retry_max_seconds")),
+            ),
+            outbox_claim_stale_after_seconds=env_float(
+                "ALERT_NOTIFY_OUTBOX_CLAIM_STALE_AFTER_SECONDS",
+                float(settings_value("notification.outbox_claim_stale_after_seconds")),
             ),
             review_audit_path=env_str(
                 "ALERT_NOTIFY_REVIEW_AUDIT_PATH",

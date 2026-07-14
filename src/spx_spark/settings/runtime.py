@@ -20,6 +20,8 @@ class RuntimeSettingsSlice:
     alerts_enabled: bool = True
     realtime_engine_enabled: bool = True
     realtime_engine_interval_seconds: int = 15
+    notification_recovery_enabled: bool = True
+    notification_recovery_interval_seconds: int = 60
     hyperliquid_interval_seconds: int = 30
     polymarket_interval_seconds: int = 60
     ibkr_interval_seconds: int = 60

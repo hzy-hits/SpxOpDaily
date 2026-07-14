@@ -43,12 +43,19 @@ class SchwabStreamTelemetry:
         self._connected_at: datetime | None = None
         self._option_subscription_accepted_at: datetime | None = None
         self._subscribed_option_count = 0
+        self._futures_option_subscription_accepted_at: datetime | None = None
+        self._subscribed_futures_option_count = 0
+        self._validation_symbols: dict[str, str] = {}
         self._message_counts: Counter[str] = Counter()
         self._row_counts: Counter[str] = Counter()
+        self._symbol_message_counts: Counter[str] = Counter()
         self._last_message_at: dict[str, datetime] = {}
         self._normalized_quote_counts: Counter[str] = Counter()
         self._live_quote_counts: Counter[str] = Counter()
+        self._normalized_symbol_counts: Counter[str] = Counter()
+        self._live_symbol_counts: Counter[str] = Counter()
         self._last_source_at: dict[str, datetime] = {}
+        self._last_symbol_source_at: dict[str, datetime] = {}
         self._retained_symbol_counts: dict[str, int] = {}
         self._evicted_option_symbol_count = 0
         self._reconnect_count = 0
@@ -71,12 +78,23 @@ class SchwabStreamTelemetry:
             self._subscribed_option_count = count
             self._option_subscription_accepted_at = now
 
-    def message(self, service: str, rows: int) -> None:
+    def futures_option_subscription_accepted(self, count: int) -> None:
+        now = datetime.now(tz=timezone.utc)
+        with self._lock:
+            self._subscribed_futures_option_count = count
+            self._futures_option_subscription_accepted_at = now
+
+    def validation_symbols(self, symbols: dict[str, str]) -> None:
+        with self._lock:
+            self._validation_symbols = dict(symbols)
+
+    def message(self, service: str, rows: int, symbols: tuple[str, ...] = ()) -> None:
         now = datetime.now(tz=timezone.utc)
         with self._lock:
             self._message_counts[service] += 1
             self._row_counts[service] += rows
             self._last_message_at[service] = now
+            self._symbol_message_counts.update(symbols)
 
     def reconnect(self, error_type: str) -> None:
         with self._lock:
@@ -87,15 +105,22 @@ class SchwabStreamTelemetry:
     def snapshot(self, snapshot: ProviderSnapshot) -> None:
         with self._lock:
             for quote in snapshot.quotes:
-                service = str(quote.raw.get("service") or "UNKNOWN").upper()
+                raw = quote.raw or {}
+                service = str(raw.get("service") or "UNKNOWN").upper()
+                symbol = str(quote.provider_symbol or "UNKNOWN").upper()
                 self._normalized_quote_counts[service] += 1
+                self._normalized_symbol_counts[symbol] += 1
                 if quote.quality.value == "live":
                     self._live_quote_counts[service] += 1
+                    self._live_symbol_counts[symbol] += 1
                 source_at = quote.quote_time or quote.trade_time
                 if source_at is not None:
                     previous = self._last_source_at.get(service)
                     if previous is None or source_at > previous:
                         self._last_source_at[service] = source_at
+                    previous_symbol = self._last_symbol_source_at.get(symbol)
+                    if previous_symbol is None or source_at > previous_symbol:
+                        self._last_symbol_source_at[symbol] = source_at
 
     def cache(self, counts: dict[str, int], *, evicted_options: int = 0) -> None:
         with self._lock:
@@ -112,6 +137,10 @@ class SchwabStreamTelemetry:
                 "option_subscription_accepted_at": _iso(
                     self._option_subscription_accepted_at
                 ),
+                "subscribed_futures_option_count": self._subscribed_futures_option_count,
+                "futures_option_subscription_accepted_at": _iso(
+                    self._futures_option_subscription_accepted_at
+                ),
                 "message_counts": dict(self._message_counts),
                 "row_counts": dict(self._row_counts),
                 "normalized_quote_counts": dict(self._normalized_quote_counts),
@@ -123,6 +152,23 @@ class SchwabStreamTelemetry:
                 "last_source_at": {
                     service: observed_at.isoformat()
                     for service, observed_at in self._last_source_at.items()
+                },
+                "validation": {
+                    symbol: {
+                        "service": service,
+                        "status": (
+                            "live"
+                            if self._live_symbol_counts[symbol] > 0
+                            else "observed"
+                            if self._normalized_symbol_counts[symbol] > 0
+                            else "pending"
+                        ),
+                        "message_rows": self._symbol_message_counts[symbol],
+                        "normalized_quotes": self._normalized_symbol_counts[symbol],
+                        "live_quotes": self._live_symbol_counts[symbol],
+                        "last_source_at": _iso(self._last_symbol_source_at.get(symbol)),
+                    }
+                    for symbol, service in self._validation_symbols.items()
                 },
                 "retained_symbol_counts": dict(self._retained_symbol_counts),
                 "evicted_option_symbol_count": self._evicted_option_symbol_count,
@@ -207,11 +253,34 @@ class SchwabStreamRuntime:
             stream.add_level_one_equity_handler(handler)
             stream.add_level_one_futures_handler(handler)
             stream.add_level_one_option_handler(handler)
+            futures_option_probe = self.settings.futures_option_probe_symbol
+            if futures_option_probe:
+                add_futures_option_handler = getattr(
+                    stream, "add_level_one_futures_options_handler", None
+                )
+                if not callable(add_futures_option_handler):
+                    raise RuntimeError("Schwab client lacks futures-option streaming support")
+                add_futures_option_handler(handler)
             await stream.login(
                 {"open_timeout": self.settings.websocket_open_timeout_seconds}
             )
-            equities, futures = self.symbol_resolver(self.settings.canonical_symbols)
+            configured_symbols = (
+                *self.settings.canonical_symbols,
+                *self.settings.validation_future_symbols,
+            )
+            equities, futures = self.symbol_resolver(configured_symbols)
+            validation_futures: list[str] = []
+            if self.settings.validation_future_symbols:
+                _validation_equities, validation_futures = self.symbol_resolver(
+                    self.settings.validation_future_symbols
+                )
             options = self.option_symbol_resolver()
+            validation_services = {
+                symbol: "LEVELONE_FUTURES" for symbol in validation_futures
+            }
+            if futures_option_probe:
+                validation_services[futures_option_probe] = "LEVELONE_FUTURES_OPTIONS"
+            self.telemetry.validation_symbols(validation_services)
             if equities:
                 await stream.level_one_equity_subs(equities)
             if futures:
@@ -219,9 +288,17 @@ class SchwabStreamRuntime:
             if options:
                 await stream.level_one_option_subs(options)
                 self.telemetry.option_subscription_accepted(len(options))
+            if futures_option_probe:
+                subscribe_futures_option = getattr(
+                    stream, "level_one_futures_options_subs", None
+                )
+                if not callable(subscribe_futures_option):
+                    raise RuntimeError("Schwab client cannot subscribe futures options")
+                await subscribe_futures_option([futures_option_probe])
+                self.telemetry.futures_option_subscription_accepted(1)
             assembler.retain_option_symbols(options)
             self.telemetry.cache(assembler.retained_symbol_counts())
-            if not equities and not futures and not options:
+            if not equities and not futures and not options and not futures_option_probe:
                 raise ValueError(
                     "Schwab streaming symbol list resolved to no supported instruments"
                 )
@@ -235,6 +312,8 @@ class SchwabStreamRuntime:
                         "equity_symbols": len(equities),
                         "future_symbols": len(futures),
                         "option_symbols": len(options),
+                        "validation_future_symbols": len(validation_futures),
+                        "futures_option_probe_symbols": int(bool(futures_option_probe)),
                     },
                     sort_keys=True,
                 ),
@@ -253,7 +332,7 @@ class SchwabStreamRuntime:
                 clock_now = self.monotonic()
                 if clock_now >= next_symbol_refresh_at:
                     refreshed_equities, refreshed_futures = self.symbol_resolver(
-                        self.settings.canonical_symbols
+                        configured_symbols
                     )
                     if (refreshed_equities, refreshed_futures) != (equities, futures):
                         print(
@@ -310,6 +389,10 @@ class SchwabStreamRuntime:
                     )
                 snapshot = assembler.drain_snapshot()
                 if snapshot is not None:
+                    snapshot = stamp_validation_quotes(
+                        snapshot,
+                        symbols=set(validation_futures),
+                    )
                     self.telemetry.snapshot(snapshot)
                     self.telemetry.cache(assembler.retained_symbol_counts())
                     self.persist_snapshot(snapshot, self.storage_settings)
@@ -335,7 +418,13 @@ class SchwabStreamRuntime:
     ) -> int:
         accepted = assembler.ingest(message)
         service = str(message.get("service") or "UNKNOWN").upper()
-        self.telemetry.message(service, accepted)
+        content = message.get("content")
+        symbols = tuple(
+            str(item.get("SYMBOL") or item.get("key") or "").strip().upper()
+            for item in content
+            if isinstance(item, dict) and (item.get("SYMBOL") or item.get("key"))
+        ) if isinstance(content, list) else ()
+        self.telemetry.message(service, accepted, symbols)
         return accepted
 
     async def _listen(self, stream: Any) -> None:
@@ -363,6 +452,28 @@ def option_subscription_changed(current: list[str], refreshed: list[str]) -> boo
     """Subscription order is irrelevant; only membership changes require SUBS."""
 
     return set(current) != set(refreshed)
+
+
+def stamp_validation_quotes(
+    snapshot: ProviderSnapshot,
+    *,
+    symbols: set[str],
+) -> ProviderSnapshot:
+    """Make acceptance-only futures explicit in durable rows."""
+
+    if not symbols:
+        return snapshot
+    quotes = tuple(
+        replace(quote, sampling_mode="schwab_stream_validation")
+        if str(quote.provider_symbol or "").upper() in symbols
+        else quote
+        for quote in snapshot.quotes
+    )
+    return replace(
+        snapshot,
+        quotes=quotes,
+        metadata={**snapshot.metadata, "validation_symbol_count": len(symbols)},
+    )
 
 
 def stream_symbols(canonical_symbols: tuple[str, ...]) -> tuple[list[str], list[str]]:

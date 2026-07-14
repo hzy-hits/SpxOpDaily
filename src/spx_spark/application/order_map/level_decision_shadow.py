@@ -18,12 +18,8 @@ from spx_spark.application.order_map.level_decision_machine import (
 )
 from spx_spark.application.order_map.level_decision_outcomes import advance_level_outcomes
 from spx_spark.application.order_map.level_decision_outcomes import LevelOutcomeSettings
-from spx_spark.application.order_map.prompts import (
-    GLOBEX_CONTEXT_SYSTEM_PROMPT,
-    globex_writer_output_valid,
-)
 from spx_spark.application.order_map.trigger_coordinates import resolve_trigger_coordinate
-from spx_spark.config import NotificationSettings, StorageSettings
+from spx_spark.config import StorageSettings
 from spx_spark.domain.analytics import AnalyticsStatus
 from spx_spark.ibkr.atm_reference import (
     BASIS_MAX_ABS_POINTS,
@@ -33,8 +29,6 @@ from spx_spark.ibkr.atm_reference import (
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR, ET
 from spx_spark.marketdata import MarketDataQuality
 from spx_spark.options_map import build_options_map
-from spx_spark.notifier.llm_writer import generate_push_text
-from spx_spark.notifier.sinks import deliver_trade_push
 from spx_spark.schwab.symbols import active_quarterly_contract_month
 from spx_spark.settings.level_decision import LevelDecisionPolicy
 from spx_spark.state_io import atomic_write_json_secure, exclusive_state_lock
@@ -411,9 +405,11 @@ def _public_state(
         "mode": "live" if formal_signal_enabled else "shadow",
         "formal_signal_enabled": formal_signal_enabled,
         "formal_signal": formal_signal,
-        "actionable": formal_signal,
+        "level_path_confirmed": formal_signal,
+        "actionable": False,
+        "action_gate": "trade_intent_required",
         "signal_mode": (
-            "confirmed"
+            "direction_confirmed"
             if formal_signal
             else "confirmed_shadow"
             if phase == LevelPhase.CONFIRMED.value
@@ -493,7 +489,9 @@ def _transition_record(
         "level_source": observation.level_source,
         "reason": transition.reason,
         "formal_signal": formal_signal,
-        "actionable": formal_signal,
+        "level_path_confirmed": formal_signal,
+        "actionable": False,
+        "action_gate": "trade_intent_required",
         "attribution": _transition_attribution(
             transition.current_phase,
             transition.reason,
@@ -521,7 +519,9 @@ def _health_record(
         "level_source": observation.level_source,
         "phase": transition.current_phase.value,
         "formal_signal": formal_signal,
-        "actionable": formal_signal,
+        "level_path_confirmed": formal_signal,
+        "actionable": False,
+        "action_gate": "trade_intent_required",
     }
 
 
@@ -535,105 +535,11 @@ def _deliver_transition(
     formal_signal_enabled: bool,
     invalidation_buffer_points: float,
 ) -> dict[str, object] | None:
+    del observation, invalidation_buffer_points
     if not transition.changed:
         return None
     state = transition.state
-    formal_signal = formal_signal_enabled and transition.current_phase is LevelPhase.CONFIRMED
-    if not notify_transitions and not formal_signal:
-        return None
-    phase = transition.current_phase.value.upper()
-    trigger_level = _positive_float(state.get("level"))
-    trigger_value = observation.spot
-    level = _positive_float(state.get("spx_level", state.get("level")))
-    spot = observation.spx_spot
-    if spot is None and observation.spot_source.startswith("es_basis_adjusted:"):
-        spot = observation.spot
-    distance = (
-        None if trigger_level is None or trigger_value is None else trigger_value - trigger_level
-    )
-    direction = str(state.get("direction") or "")
-    invalidation = None
-    if level is not None and direction == "up":
-        invalidation = level - invalidation_buffer_points
-    elif level is not None and direction == "down":
-        invalidation = level + invalidation_buffer_points
-    structure_summary = _level_structure_summary(observation.spx_levels or observation.levels)
-    es_structure_summary = _es_level_structure_summary(observation)
-    if formal_signal:
-        text = "\n".join(
-            (
-                f"【SPX 关键位正式信号】{str(state.get('thesis') or '-').upper()} CONFIRMED",
-                structure_summary,
-                es_structure_summary,
-                (
-                    f"本次触发 {_level_kind_label(state.get('level_kind'))} "
-                    f"{level:.2f}；方向 {direction.upper()}"
-                ),
-                (
-                    f"确认 SPX {spot:.2f}（{observation.spot_source}），ES {observation.es:.2f}"
-                    if spot is not None and observation.es is not None
-                    else f"参考不可用：{observation.quality_reason or 'unknown'}"
-                ),
-                f"失效位 {invalidation:.2f}；有效至 {state.get('expires_at') or '-'}",
-                f"结构来源 {observation.level_source}；正式决策信号，不自动下单。",
-            )
-        )
-    else:
-        text = "\n".join(
-            (
-                f"【Wall/Flip 状态事件】{transition.previous_phase.value.upper()} → {phase}",
-                structure_summary,
-                es_structure_summary,
-                (
-                    f"参考 SPX {spot:.2f}（{observation.spot_source}），ES {observation.es:.2f}"
-                    if spot is not None and observation.es is not None
-                    else f"参考不可用：{observation.quality_reason or 'unknown'}"
-                ),
-                (
-                    f"关键位 {state.get('level_kind') or '-'} {level:.2f}，距离 {distance:+.2f} 点"
-                    if level is not None and distance is not None
-                    else "关键位尚未建立"
-                ),
-                (
-                    f"路径 {state.get('thesis') or 'none'} / "
-                    f"{state.get('direction') or '-'}；原因 {transition.reason}"
-                ),
-                f"结构来源 {observation.level_source}；当前为 shadow 审计，不是下单信号。",
-            )
-        )
-    template_text = text
-    notification = NotificationSettings.from_env()
-    writer_prompt = "\n".join(
-        (
-            "把下面的 SPX 关键位状态机事件改写成简短、可扫读的中文交易便签。",
-            "所有价格、方向、阶段、失效位、有效期和数据来源必须原样保留，不得编造、换算或修正数字。",
-            "先写当前 SPX 代理相对 Put Wall、Flip、Call Wall 的位置，再写这次状态变化意味着什么。",
-            "CONFIRMED 必须给主情景、证伪位和下一步观察条件；非 CONFIRMED 只说明观察条件，不得写成下单信号。",
-            "ES-basis 是夜盘 SPX 代理，Hyperliquid 只能交叉验证；不得写『等开盘再说』。",
-            "SPX 结构位与 ES 等价值位是两个坐标系，只能引用事实模板给出的对应值，严禁把 SPX strike 直接当 ES 价格。",
-            "不得推断输入里没有的历史触碰次数、墙是否弃守、dealer 行为或 gamma 燃料；不用比喻。",
-            "不自动下单，不得编造期权合约、权利金、Greeks 或限价。输出 6-10 行。",
-            "事实模板:" + text,
-        )
-    )
-    text, writer = generate_push_text(
-        text,
-        writer_prompt,
-        notification,
-        system=GLOBEX_CONTEXT_SYSTEM_PROMPT,
-    )
-    if writer != "template" and not globex_writer_output_valid(text, template_text):
-        text, writer = template_text, "template_validation_fallback"
-    sinks = deliver_trade_push(
-        notification,
-        title=(
-            f"SPX 关键位正式信号 {direction.upper()}" if formal_signal else f"SPX Wall/Flip {phase}"
-        ),
-        text=text,
-        kind=("level_decision_formal_signal" if formal_signal else "level_decision_transition"),
-        lane="trade",
-        friend=False,
-    )
+    level_confirmed = formal_signal_enabled and transition.current_phase is LevelPhase.CONFIRMED
     result = {
         "record_key": (
             f"{state.get('event_id') or 'far'}:"
@@ -642,12 +548,13 @@ def _deliver_transition(
         "at": _utc(now).isoformat(),
         "event_id": state.get("event_id"),
         "phase": transition.current_phase.value,
-        "formal_signal": formal_signal,
-        "actionable": formal_signal,
-        "text": text,
-        "writer": writer,
-        "sinks": [sink.to_dict() for sink in sinks],
-        "delivered": any(sink.sink == "bark" and sink.ok for sink in sinks),
+        "formal_signal": level_confirmed,
+        "actionable": False,
+        "notify_transitions_configured": notify_transitions,
+        "delivery_gate": "trade_intent_required",
+        "reason": "observation_only",
+        "sinks": [],
+        "delivered": False,
     }
     _append_unique(_delivery_audit_path(storage, now), result)
     return result

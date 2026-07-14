@@ -24,6 +24,7 @@ LAYERS = {
     "sampling": 1,
     "runtime_mode": 1,
     "provider_adapter": 1,
+    "market_data_policy": 1,
     "provider_failover": 1,
     "position_events": 1,
     "ibkr": 2,

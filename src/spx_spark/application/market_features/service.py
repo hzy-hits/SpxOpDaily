@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any
 
@@ -30,8 +31,13 @@ from spx_spark.application.market_features.state import (
     projection_paths,
     save_json,
 )
+from spx_spark.application.market_features.trade_intent import evaluate_trade_intent
+from spx_spark.application.market_features.trade_intent_runtime import process_trade_intent
 from spx_spark.application.order_map.level_decision_shadow import (
     load_level_decision_shadow,
+)
+from spx_spark.application.order_map.level_trigger_repricing import (
+    default_level_trigger_repricing_path,
 )
 from spx_spark.config import StorageSettings
 from spx_spark.features.exposure_map import build_exposure_map
@@ -87,11 +93,16 @@ def run(argv: list[str] | None = None, *, now: datetime | None = None) -> int:
         now=evaluation_now,
         policy=policy,
     )
+    frame_samples = (
+        samples
+        if samples and samples[-1].get("at") == sample.get("at")
+        else [*samples, sample]
+    )
     volume_baselines = _dict(persisted.get("volume_baselines"))
     expected_move = option_frame.volatility.get("expected_move_points_0dte")
     atm_iv = option_frame.volatility.get("atm_iv_0dte")
     market_frame = build_minute_market_frame(
-        samples,
+        frame_samples,
         now=evaluation_now,
         expected_move_points=(
             float(expected_move) if isinstance(expected_move, int | float) else None
@@ -115,6 +126,23 @@ def run(argv: list[str] | None = None, *, now: datetime | None = None) -> int:
         trend=trend,
         level_decision=level_decision,
         policy=policy,
+    )
+    repricing = load_json(default_level_trigger_repricing_path(storage))
+    trade_intent = evaluate_trade_intent(
+        context,
+        market_frame,
+        option_frame,
+        latest,
+        repricing,
+        now=evaluation_now,
+        feature_policy=policy,
+        order_policy=app.order_map,
+    )
+    context = replace(context, trade_intent=trade_intent)
+    intent_delivery = process_trade_intent(
+        storage,
+        trade_intent,
+        now=evaluation_now,
     )
     previous_context = _dict(persisted.get("last_decision_context"))
     audit = build_decision_audit(context, previous=previous_context or None)
@@ -149,6 +177,8 @@ def run(argv: list[str] | None = None, *, now: datetime | None = None) -> int:
             "l1_quality": option_frame.l1.quality.value,
             "decision_context_id": context.context_id,
             "audit_appended": audit is not None,
+            "trade_intent_status": trade_intent.get("status"),
+            "trade_intent_delivery": intent_delivery,
         }
     )
     if args.json:

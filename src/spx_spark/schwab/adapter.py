@@ -19,6 +19,8 @@ from spx_spark.marketdata import (
     OptionRight,
     Provider,
     Quote,
+    QuoteMarketSession,
+    SessionQuoteObservation,
     as_utc,
     bool_or_none,
     classify_quote_quality,
@@ -57,6 +59,80 @@ def schwab_model_float(value: Any) -> float | None:
 def nested_mapping(mapping: Mapping[str, Any], key: str) -> Mapping[str, Any]:
     value = mapping.get(key)
     return value if isinstance(value, Mapping) else {}
+
+
+def _first_from_sections(
+    primary: Mapping[str, Any],
+    fallback: Mapping[str, Any],
+    *keys: str,
+) -> Any:
+    value = first_key(primary, *keys)
+    return value if value is not None else first_key(fallback, *keys)
+
+
+def _session_observation(
+    session: QuoteMarketSession,
+    section: Mapping[str, Any],
+    *,
+    fallback: Mapping[str, Any] | None = None,
+) -> SessionQuoteObservation | None:
+    fallback = fallback or {}
+    quote_time = parse_timestamp(
+        _first_from_sections(
+            section,
+            fallback,
+            "quoteTime",
+            "quoteTimeInLong",
+            "regularMarketQuoteTime",
+        )
+    )
+    trade_time = parse_timestamp(
+        _first_from_sections(
+            section,
+            fallback,
+            "tradeTime",
+            "tradeTimeInLong",
+            "regularMarketTradeTime",
+        )
+    )
+    observation = SessionQuoteObservation(
+        session=session,
+        quote_time=quote_time,
+        trade_time=trade_time,
+        bid=clean_float(_first_from_sections(section, fallback, "bidPrice", "bid")),
+        ask=clean_float(_first_from_sections(section, fallback, "askPrice", "ask")),
+        last=clean_float(
+            _first_from_sections(
+                section,
+                fallback,
+                "lastPrice",
+                "last",
+                "regularMarketLastPrice",
+            )
+        ),
+        mark=clean_float(_first_from_sections(section, fallback, "mark", "markPrice")),
+    )
+    if observation.source_time is None and observation.effective_price is None:
+        return None
+    return observation
+
+
+def _select_equity_session(
+    instrument_type: InstrumentType,
+    regular: SessionQuoteObservation | None,
+    extended: SessionQuoteObservation | None,
+) -> SessionQuoteObservation | None:
+    if instrument_type not in {InstrumentType.EQUITY, InstrumentType.ETF}:
+        return regular
+    if extended is None or extended.effective_price is None:
+        return regular
+    if regular is None or regular.effective_price is None:
+        return extended
+    extended_time = extended.source_time
+    regular_time = regular.source_time
+    if extended_time is not None and (regular_time is None or extended_time > regular_time):
+        return extended
+    return regular
 
 
 def parse_expiry(value: Any) -> str | None:
@@ -172,8 +248,24 @@ def quote_from_schwab_payload(
 
     quote_section = nested_mapping(payload, "quote")
     reference_section = nested_mapping(payload, "reference")
-    quote_time = parse_timestamp(first_key(quote_section, "quoteTime", "quoteTimeInLong"))
-    trade_time = parse_timestamp(first_key(quote_section, "tradeTime", "tradeTimeInLong"))
+    regular_section = nested_mapping(payload, "regular")
+    extended_section = nested_mapping(payload, "extended")
+    regular_observation = _session_observation(
+        QuoteMarketSession.REGULAR,
+        regular_section,
+        fallback=quote_section,
+    )
+    extended_observation = _session_observation(
+        QuoteMarketSession.EXTENDED,
+        extended_section,
+    )
+    selected_observation = _select_equity_session(
+        instrument.instrument_type,
+        regular_observation,
+        extended_observation,
+    )
+    quote_time = selected_observation.quote_time if selected_observation else None
+    trade_time = selected_observation.trade_time if selected_observation else None
     delayed = bool_or_none(
         first_key(payload, "isDelayed", "delayed"),
         first_key(quote_section, "isDelayed", "delayed"),
@@ -193,10 +285,10 @@ def quote_from_schwab_payload(
         provider_symbol=symbol,
         received_at=received_at,
         quality=quality,
-        bid=clean_float(first_key(quote_section, "bidPrice", "bid")),
-        ask=clean_float(first_key(quote_section, "askPrice", "ask")),
-        last=clean_float(first_key(quote_section, "lastPrice", "last")),
-        mark=clean_float(first_key(quote_section, "mark", "markPrice")),
+        bid=selected_observation.bid if selected_observation else None,
+        ask=selected_observation.ask if selected_observation else None,
+        last=selected_observation.last if selected_observation else None,
+        mark=selected_observation.mark if selected_observation else None,
         close=clean_float(first_key(quote_section, "closePrice", "close")),
         bid_size=clean_float(first_key(quote_section, "bidSize")),
         ask_size=clean_float(first_key(quote_section, "askSize")),
@@ -208,6 +300,12 @@ def quote_from_schwab_payload(
         last_update_at=received_at,
         source_latency_ms=elapsed_ms(quote_time or trade_time, received_at),
         market_data_type="delayed" if delayed is True else None,
+        market_session=selected_observation.session if selected_observation else None,
+        session_observations=tuple(
+            observation
+            for observation in (regular_observation, extended_observation)
+            if observation is not None
+        ),
         raw=payload,
     )
 
@@ -390,6 +488,17 @@ def snapshot_from_quote_payload(
         received_at=received_at,
         quotes=quotes,
         provider_states=(state,),
+        metadata={
+            "sampling_mode": "schwab_rest",
+            "selected_market_sessions": {
+                session: sum(
+                    1
+                    for quote in quotes
+                    if quote.market_session is not None and quote.market_session.value == session
+                )
+                for session in ("regular", "extended")
+            },
+        },
     )
 
 

@@ -135,6 +135,7 @@ def build_breakout_filter(
         options,
         level_decision,
         direction_sign,
+        regime_decision,
         policy,
     )
     barrier, barrier_metrics, barrier_evidence = _breakout_barrier(
@@ -146,7 +147,10 @@ def build_breakout_filter(
         policy,
     )
     margin = impulse - barrier
-    if (
+    opposite_regime = _regime_direction_relation(regime_decision, direction_sign) < 0
+    if opposite_regime:
+        verdict = BreakoutVerdict.BLOCKED
+    elif (
         barrier - impulse >= policy.breakout_score_margin
         or (barrier >= 60 and impulse < policy.breakout_min_impulse_score)
     ):
@@ -162,6 +166,8 @@ def build_breakout_filter(
 
     exposure_quality = str(options.exposure.get("quality") or "unavailable")
     invalidations = [] if exposure_quality == "ok" else ["dex_exposure_degraded"]
+    if opposite_regime:
+        invalidations.append("regime_direction_opposes_breakout")
     return {
         **base,
         "verdict": verdict.value,
@@ -182,8 +188,6 @@ def _trend_score(
     policy: MarketFeatureSettings,
 ) -> tuple[float, list[str]]:
     es = market.es
-    volume = market.volume
-    cross = market.cross_asset
     score = 0.0
     evidence: list[str] = []
     return_15 = _number(es.get("return_15m_points"))
@@ -192,7 +196,12 @@ def _trend_score(
         score += 25
         evidence.append("es_15m_60m_aligned")
     efficiency = _number(es.get("trend_efficiency_60m"))
-    if efficiency is not None and efficiency >= policy.trend_efficiency_high:
+    if (
+        direction
+        and efficiency is not None
+        and efficiency >= policy.trend_efficiency_high
+        and _aligned(return_60, direction)
+    ):
         score += 20
         evidence.append("trend_efficiency_high")
     if direction and _aligned(es.get("vwap_distance_points"), direction):
@@ -201,10 +210,10 @@ def _trend_score(
     if direction and _aligned(es.get("vwap_slope_15m_points"), direction):
         score += 10
         evidence.append("vwap_slope_aligned")
-    if volume.get("price_volume_alignment_5m") == "price_volume_aligned":
+    if _price_volume_direction_relation(market, direction) > 0:
         score += 15
         evidence.append("price_volume_aligned")
-    if cross.get("es_spy_direction_confirmation_15m") == "confirmed":
+    if _cross_asset_direction_relation(market, direction) > 0:
         score += 10
         evidence.append("es_spy_confirmed")
     if direction and _volatility_confirms(market, direction):
@@ -271,11 +280,10 @@ def _breakout_impulse(
     options: OptionStructureFrame,
     level_decision: dict[str, Any],
     direction: int,
+    regime_decision: dict[str, Any],
     policy: MarketFeatureSettings,
 ) -> tuple[float, list[str]]:
     es = market.es
-    volume = market.volume
-    cross = market.cross_asset
     score = 0.0
     evidence: list[str] = []
     returns = (
@@ -287,7 +295,11 @@ def _breakout_impulse(
     if aligned_count:
         evidence.append(f"es_horizons_aligned_{aligned_count}")
     efficiency = _number(es.get("trend_efficiency_60m"))
-    if efficiency is not None and efficiency >= policy.trend_efficiency_high:
+    if (
+        efficiency is not None
+        and efficiency >= policy.trend_efficiency_high
+        and _aligned(es.get("return_60m_points"), direction)
+    ):
         score += 15
         evidence.append("trend_efficiency_supports_breakout")
     if _aligned(es.get("vwap_distance_points"), direction):
@@ -296,12 +308,15 @@ def _breakout_impulse(
     if _aligned(es.get("vwap_slope_15m_points"), direction):
         score += 10
         evidence.append("vwap_slope_supports_breakout")
-    if volume.get("price_volume_alignment_5m") == "price_volume_aligned":
+    if _price_volume_direction_relation(market, direction) > 0:
         score += 15
         evidence.append("price_volume_supports_breakout")
-    if cross.get("es_spy_direction_confirmation_15m") == "confirmed":
+    if _cross_asset_direction_relation(market, direction) > 0:
         score += 10
         evidence.append("es_spy_supports_breakout")
+    if _regime_direction_relation(regime_decision, direction) > 0:
+        score += 10
+        evidence.append("trending_regime_supports_breakout")
     if _volatility_confirms(market, direction):
         score += 10
         evidence.append("vix_vvix_support_breakout")
@@ -385,6 +400,24 @@ def _breakout_barrier(
     if regime_decision.get("mode") == RegimeMode.MEAN_REVERTING.value:
         score += 10
         evidence.append("mean_reversion_regime")
+    regime_relation = _regime_direction_relation(regime_decision, direction)
+    if regime_relation < 0:
+        score += 25
+        evidence.append("trending_regime_opposes_breakout")
+    efficiency = _number(market.es.get("trend_efficiency_60m"))
+    if (
+        efficiency is not None
+        and efficiency >= policy.trend_efficiency_high
+        and _aligned(market.es.get("return_60m_points"), -direction)
+    ):
+        score += 15
+        evidence.append("trend_efficiency_opposes_breakout")
+    if _price_volume_direction_relation(market, direction) < 0:
+        score += 15
+        evidence.append("price_volume_opposes_breakout")
+    if _cross_asset_direction_relation(market, direction) < 0:
+        score += 10
+        evidence.append("es_spy_opposes_breakout")
     if _volatility_opposes(market, direction):
         score += 10
         evidence.append("vix_vvix_oppose_breakout")
@@ -458,6 +491,35 @@ def _breakout_direction(level_decision: dict[str, Any]) -> int:
         return 1 if outside > 0 else -1
     kind = str(level_decision.get("level_kind") or "")
     return -1 if kind in {"put_wall", "flip_low"} else 1 if kind in {"flip_high", "call_wall"} else 0
+
+
+def _price_volume_direction_relation(market: MinuteMarketFrame, direction: int) -> int:
+    if market.volume.get("price_volume_alignment_5m") != "price_volume_aligned":
+        return 0
+    return _direction_relation(market.es.get("return_5m_points"), direction)
+
+
+def _cross_asset_direction_relation(market: MinuteMarketFrame, direction: int) -> int:
+    if market.cross_asset.get("es_spy_direction_confirmation_15m") != "confirmed":
+        return 0
+    return _direction_relation(market.es.get("return_15m_points"), direction)
+
+
+def _regime_direction_relation(regime: dict[str, Any], direction: int) -> int:
+    if regime.get("mode") != RegimeMode.TRENDING.value:
+        return 0
+    regime_direction = str(regime.get("direction") or "none")
+    regime_sign = (
+        1 if regime_direction == "up" else -1 if regime_direction == "down" else 0
+    )
+    return regime_sign * direction
+
+
+def _direction_relation(value: object, direction: int) -> int:
+    parsed = _number(value)
+    if parsed is None or math.isclose(parsed, 0.0) or direction == 0:
+        return 0
+    return 1 if parsed * direction > 0 else -1
 
 
 def _aligned(value: object, direction: int) -> bool:

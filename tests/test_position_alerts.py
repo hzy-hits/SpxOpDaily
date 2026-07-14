@@ -76,6 +76,7 @@ def make_snapshot(*positions: SpxwPosition) -> PositionSnapshot:
 
 def test_book_pnl_alert_on_material_loss(monkeypatch):
     monkeypatch.setenv("ALERT_POSITIONS_ENABLED", "true")
+    monkeypatch.setenv("ALERT_POSITION_PNL_ENABLED", "true")
     monkeypatch.setenv("ALERT_POSITION_PNL_LOSS_USD", "400")
     long_leg = make_position(unrealized_pnl=-620.0, unrealized_pnl_pct=-19.4)
     short_leg = make_position(
@@ -115,6 +116,7 @@ def test_book_pnl_alert_on_material_loss(monkeypatch):
 
 def test_book_pnl_alert_waits_for_meaningful_change(monkeypatch):
     monkeypatch.setenv("ALERT_POSITIONS_ENABLED", "true")
+    monkeypatch.setenv("ALERT_POSITION_PNL_ENABLED", "true")
     monkeypatch.setenv("ALERT_POSITION_PNL_CHANGE_USD", "200")
     position = make_position(unrealized_pnl=-100.0, unrealized_pnl_pct=-3.1)
     snapshot = make_snapshot(position)
@@ -141,6 +143,7 @@ def test_book_pnl_alert_waits_for_meaningful_change(monkeypatch):
 
 def test_position_qty_change_alert(monkeypatch):
     monkeypatch.setenv("ALERT_POSITIONS_ENABLED", "true")
+    monkeypatch.setenv("ALERT_POSITION_STRUCTURAL_ENABLED", "true")
     position = make_position(qty=2.0)
     snapshot = make_snapshot(position)
     from spx_spark.storage import LatestState
@@ -237,6 +240,7 @@ def test_missing_snapshot_does_not_invent_closes(monkeypatch):
 
 def test_partial_flat_emits_close_for_missing_leg(monkeypatch):
     monkeypatch.setenv("ALERT_POSITIONS_ENABLED", "true")
+    monkeypatch.setenv("ALERT_POSITION_STRUCTURAL_ENABLED", "true")
     remaining = make_position(qty=2.0)
     snapshot = make_snapshot(remaining)
     from spx_spark.storage import LatestState

@@ -1010,7 +1010,10 @@ def test_render_template_includes_wall_ladder_lines() -> None:
     text = render_template(payload)
     assert "put 墙阶梯(下方支撑→买 call) (★=主墙):" in text
     assert "★7500 (OI 3604,触达47%) → 7500C BS触位情景14.20(现31.05) 触发后参考14.20/12.00" in text
-    assert " 7480 (OI 1500,触达30%) → 7480C BS触位情景9.50(现40.00) 触发后参考9.50/8.00 [stale]" in text
+    assert (
+        " 7480 (OI 1500,触达30%) → 7480C BS触位情景9.50(现40.00) 触发后参考9.50/8.00 [stale]"
+        in text
+    )
     assert "call 墙阶梯(上方阻力→买 put) (★=主墙):" in text
     assert "★7550 (OI 6555,触达51%) → 7550P BS触位情景12.40(现28.00) 触发后参考12.40/10.50" in text
 
@@ -1693,26 +1696,24 @@ def test_globex_status_uses_writer_and_trade_delivery(monkeypatch, tmp_path) -> 
         classmethod(lambda cls: object()),
     )
 
-    def deliver(settings, *, title, text, kind, lane, friend, feishu_text, runner):
+    def deliver(settings, envelope, *, title, text, friend, feishu_text, runner, **kwargs):
         captured.update(
             title=title,
             text=text,
-            kind=kind,
-            lane=lane,
+            kind=envelope.kind,
+            lane=envelope.lane,
             friend=friend,
             feishu_text=feishu_text,
         )
-        return [
-            SimpleNamespace(sink="bark", ok=True, attempted=True),
-            SimpleNamespace(sink="feishu", ok=True, attempted=True),
-        ]
+        return SimpleNamespace(
+            sinks=(
+                SimpleNamespace(sink="bark", ok=True, attempted=True),
+                SimpleNamespace(sink="feishu", ok=True, attempted=True),
+            ),
+            delivered=True,
+        )
 
-    monkeypatch.setattr(order_map_module, "deliver_trade_push", deliver)
-    monkeypatch.setattr(
-        order_map_module,
-        "append_missed",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("research queued")),
-    )
+    monkeypatch.setattr(order_map_module, "dispatch_notification", deliver)
     monkeypatch.setattr(order_map_module, "mark_sent", lambda *args, **kwargs: None)
     monkeypatch.setattr(order_map_module, "record_push", lambda *args, **kwargs: None)
 
@@ -1728,7 +1729,7 @@ def test_globex_status_uses_writer_and_trade_delivery(monkeypatch, tmp_path) -> 
         "title": "SPX 15分钟市场状态",
         "text": "written globex context",
         "kind": "status",
-        "lane": "trade",
+        "lane": "scheduled_report",
         "friend": True,
         "feishu_text": "written globex context",
     }
@@ -1849,11 +1850,14 @@ def test_prompts_include_previous_push() -> None:
     assert "previous_push:null" in status_prompt
     assert "SPX 决策摘要" in status_prompt
     assert "第一行逐字保留模板标题" in status_prompt
-    assert "最多两个条件候选" in status_prompt
+    assert "最多两个情景" in status_prompt
+    assert "observation_candidates 必须称为观察情景" in status_prompt
     assert "负 gamma 不等于下跌" in order_prompt
     assert "负 gamma 不等于下跌" in status_prompt
-    assert "observe_only" in order_prompt
-    assert "observe_only" in status_prompt
+    assert "TradeReady" in order_prompt
+    assert "自动下单仍关闭" in order_prompt
+    assert "TradeReady" in status_prompt
+    assert "自动下单仍关闭" in status_prompt
     assert "breakout_filter.verdict=blocked" in order_prompt
     assert "supported 且 actionable=true" in status_prompt
     assert "SPXW_0DTE_options_not_ES_options" in status_prompt
@@ -1944,12 +1948,12 @@ def test_actionable_writer_preserves_compact_status_layout() -> None:
 
     template = "\n".join(
         (
-            "【SPX 15m｜22:30｜0DTE 07-13｜开盘首小时】",
-            "价格  SPX 7550｜ES 7595",
+            "【SPX 15m · 22:30 · 0DTE 07-13 · 开盘首小时】",
+            "价格  SPX 7550　ES 7595",
             "",
-            "【条件计划｜标的触发后执行】",
-            "计划1·支撑反弹  SPX 7545触发｜SPXW 7545C｜触达 60%｜参考 9–11",
-            "执行  触位后按实时 mid/IV 重算｜当前不可预挂",
+            "【条件计划】标的触发后执行",
+            "计划1 · 支撑反弹  SPX 7545触发 → SPXW 7545C　触达 60%　参考 9–11",
+            "执行  触位后按实时 mid/IV 重算；当前不可预挂",
         )
     )
     assert actionable_writer_output_valid(template, template)
@@ -2138,14 +2142,42 @@ def test_mark_sent_merges_kinds_without_clobbering(tmp_path: Path) -> None:
     state_path = str(tmp_path / "state.json")
     map_time = datetime(2026, 7, 8, 6, 0, tzinfo=timezone.utc)
     status_time = datetime(2026, 7, 8, 6, 30, tzinfo=timezone.utc)
-    mark_sent(state_path, "2026-07-08", now=map_time, kind="map")
-    mark_sent(state_path, "2026-07-08", now=status_time, kind="status")
+    mark_sent(
+        state_path,
+        "2026-07-08",
+        fingerprint={"put_wall": 7500},
+        now=map_time,
+        kind="map",
+    )
+    mark_sent(
+        state_path,
+        "2026-07-08",
+        fingerprint={"status_phase": "rth_open"},
+        now=status_time,
+        kind="status",
+    )
     state = json.loads(Path(state_path).read_text(encoding="utf-8"))
     # Status push must not reset the map cadence timestamp.
     assert state["last_map_at"] == map_time.timestamp()
     assert state["last_status_at"] == status_time.timestamp()
+    assert state["map_fingerprint"] == {"put_wall": 7500}
+    assert state["status_fingerprint"] == {"status_phase": "rth_open"}
+    assert state["fingerprint"] == {"put_wall": 7500}
     assert state["last_sent_at"] == status_time.timestamp()
     assert already_sent(state_path, "2026-07-08") is True
+
+    next_map_time = datetime(2026, 7, 8, 7, 0, tzinfo=timezone.utc)
+    mark_sent(
+        state_path,
+        "2026-07-08",
+        fingerprint={"put_wall": 7510},
+        now=next_map_time,
+        kind="map",
+    )
+    state = json.loads(Path(state_path).read_text(encoding="utf-8"))
+    assert state["map_fingerprint"] == {"put_wall": 7510}
+    assert state["status_fingerprint"] == {"status_phase": "rth_open"}
+    assert state["fingerprint"] == {"put_wall": 7500}
 
 
 def test_status_push_does_not_mask_missing_baseline(tmp_path: Path) -> None:
@@ -2202,6 +2234,376 @@ def test_payload_fingerprint_and_material_changes() -> None:
     rolled = dict(fingerprint, expiry="20260708")
     changes = material_changes(fingerprint, rolled)
     assert changes == ["到期日切换 20260707→20260708"]
+
+
+def test_candidate_presentation_requires_one_directionally_supported_plan() -> None:
+    from spx_spark.application.order_map.service import _apply_candidate_presentation
+
+    payload = {
+        "expiry": "20260714",
+        "underlier": {"price": 7495.0, "source": "chain_implied"},
+        "es_last": 7540.0,
+        "vol_context": {},
+        "trade_intent": {
+            "status": "trade_ready",
+            "intent_id": "intent-1",
+            "context_id": "context-1",
+            "contract_id": "option:SPX:SPXW:20260714:7500:P",
+            "play": "level_breakout_put",
+            "event_id": "event-1",
+            "thesis": "breakout",
+            "direction": "down",
+            "decision_bid": 10.0,
+            "decision_ask": 10.4,
+            "decision_mid": 10.2,
+            "entry_limit": 10.1,
+            "invalidation_spx": 7503.0,
+            "target_spx": 7475.0,
+            "expires_at": "2026-07-14T04:16:30+00:00",
+        },
+        "level_decision": {
+            "phase": "confirmed",
+            "formal_signal": True,
+            "actionable": False,
+            "play": "level_breakout_put",
+            "event_id": "event-1",
+            "thesis": "breakout",
+            "direction": "down",
+        },
+        "decision_context": {
+            "trade_intent": {"status": "trade_ready"},
+            "breakout_filter": {
+                "event_id": "event-1",
+                "direction": "down",
+                "verdict": "supported",
+                "actionable": True,
+            },
+            "regime_decision": {"mode": "trending", "direction": "down"},
+        },
+        "level_trigger_repricing": {
+            "event_id": "event-1",
+            "candidates": [
+                {
+                    "play": "level_breakout_put",
+                    "level": 7500.0,
+                    "strike": 7500,
+                    "right": "P",
+                    "contract_id": "option:SPX:SPXW:20260714:7500:P",
+                    "execution_quote_status": "executable",
+                }
+            ],
+        },
+        "candidates": [
+            {
+                "play": "level_breakout_put",
+                "level": 7500.0,
+                "strike": 7500,
+                "right": "P",
+                "execution_quote_status": "executable",
+            },
+            {
+                "play": "level_breakout_put",
+                "level": 7495.0,
+                "strike": 7495,
+                "right": "P",
+                "contract_id": "option:SPX:SPXW:20260714:7495:P",
+                "execution_quote_status": "executable",
+            },
+            {
+                "play": "put_wall_bounce_call",
+                "level": 7500.0,
+                "strike": 7500,
+                "right": "C",
+                "execution_quote_status": "executable",
+            },
+        ],
+    }
+
+    evaluation_now = datetime(2026, 7, 14, 4, 15, tzinfo=timezone.utc)
+    _apply_candidate_presentation(payload, now=evaluation_now)
+
+    assert [item["play"] for item in payload["plan_candidates"]] == ["level_breakout_put"]
+    assert payload["plan_candidates"][0]["decision_executable"] is True
+    assert [item["play"] for item in payload["observation_candidates"]] == [
+        "level_breakout_put",
+        "put_wall_bounce_call",
+    ]
+    assert all(item["decision_executable"] is False for item in payload["observation_candidates"])
+    presented = payload["plan_candidates"] + payload["observation_candidates"]
+    assert (
+        sum(item.get("contract_id") == payload["trade_intent"]["contract_id"] for item in presented)
+        == 1
+    )
+    rendered = render_status_template(
+        payload,
+        [],
+        datetime(2026, 7, 14, 4, 15, tzinfo=timezone.utc),
+    )
+    assert "【条件计划】决策门控已通过" in rendered
+    assert "SPXW 7500P" in rendered
+    assert "实时 10/10.4" in rendered
+    assert "入场≤10.1" in rendered
+    assert "SPXW 7500C" not in rendered
+    from spx_spark.application.order_map.prompts import actionable_writer_output_valid
+
+    assert actionable_writer_output_valid(rendered, rendered)
+    assert not actionable_writer_output_valid(
+        rendered.replace("入场≤10.1", "参考10.1"),
+        rendered,
+    )
+
+    payload["trade_intent"]["status"] = "blocked"
+    _apply_candidate_presentation(payload, now=evaluation_now)
+    assert payload["plan_candidates"] == []
+    assert len(payload["observation_candidates"]) == 3
+    assert payload["candidate_presentation"]["reason"] == "trade_intent_blocked"
+
+    payload["trade_intent"]["status"] = "trade_ready"
+    payload["trade_intent"]["expires_at"] = evaluation_now.isoformat()
+    _apply_candidate_presentation(payload, now=evaluation_now)
+    assert payload["plan_candidates"] == []
+    assert payload["candidate_presentation"]["reason"] == "trade_intent_expired"
+
+    payload["trade_intent"]["expires_at"] = "2026-07-14T04:16:30+00:00"
+    payload["level_trigger_repricing"]["event_id"] = "event-2"
+    _apply_candidate_presentation(payload, now=evaluation_now)
+    assert payload["plan_candidates"] == []
+    assert len(payload["observation_candidates"]) == 3
+    assert payload["candidate_presentation"]["reason"] == "unique_trade_ready_candidate_unavailable"
+
+    payload["level_trigger_repricing"]["event_id"] = "event-1"
+    payload["level_trigger_repricing"]["candidates"][0]["contract_id"] = (
+        "option:SPX:SPXW:20260714:7495:P"
+    )
+    _apply_candidate_presentation(payload, now=evaluation_now)
+    assert payload["plan_candidates"] == []
+    assert payload["candidate_presentation"]["reason"] == "unique_trade_ready_candidate_unavailable"
+
+
+def test_status_fingerprint_tracks_trade_intent_identity() -> None:
+    from spx_spark.application.order_map.service import (
+        _status_fingerprint,
+        _status_material_changes,
+    )
+
+    payload = {
+        "expiry": "20260714",
+        "expected_move_points": 40.0,
+        "flip_zone": [7500.0, 7505.0],
+        "candidates": [
+            {"play": "put_wall_bounce_call", "level": 7490.0},
+            {"play": "call_wall_fade_put", "level": 7520.0},
+        ],
+        "plan_candidates": [
+            {
+                "intent_id": "intent-1",
+                "play": "level_breakout_put",
+                "level": 7500.0,
+                "strike": 7500,
+                "right": "P",
+            }
+        ],
+        "session_phase": {"name": "europe_session"},
+    }
+    baseline = _status_fingerprint(payload)
+    assert _status_material_changes(baseline, dict(baseline)) == []
+
+    payload["plan_candidates"][0].update(intent_id="intent-2", strike=7495)
+    changed = _status_fingerprint(payload)
+    assert changed["decision_thesis"] == baseline["decision_thesis"]
+    assert _status_material_changes(baseline, changed) == ["执行意图更新 7500P→7495P"]
+
+
+def test_status_candidate_presentation_labels_unapproved_sides_as_observation() -> None:
+    payload = {
+        "expiry": "20260714",
+        "underlier": {"price": 7510.0, "source": "chain_implied"},
+        "es_last": 7554.0,
+        "vol_context": {},
+        "plan_candidates": [],
+        "observation_candidates": [
+            {
+                "play": "put_wall_bounce_call",
+                "level": 7500.0,
+                "strike": 7500,
+                "right": "C",
+                "prob_touch": 0.5,
+                "projection_range_low": 10.0,
+                "projection_range_high": 12.0,
+                "execution_quote_status": "executable",
+            },
+            {
+                "play": "flip_breakdown_put",
+                "level": 7515.0,
+                "strike": 7515,
+                "right": "P",
+                "prob_touch": 0.6,
+                "projection_range_low": 11.0,
+                "projection_range_high": 13.0,
+                "execution_quote_status": "executable",
+            },
+        ],
+        "candidate_presentation": {
+            "mode": "observation_only",
+            "reason": "decision_not_actionable",
+        },
+        "warnings": [],
+    }
+
+    text = render_status_template(
+        payload,
+        [],
+        datetime(2026, 7, 14, 2, 0, tzinfo=timezone.utc),
+    )
+    assert "【观察情景】尚未通过决策门控" in text
+    assert "观察1" in text and "观察2" in text
+    assert "【条件计划】" not in text
+    assert "当前不可预挂" not in text
+
+    detail = render_template(payload)
+    assert "[观察情景]" in detail
+    assert "当前未通过决策门控，不生成下单计划" in detail
+    assert "条件执行:" not in detail
+
+
+def test_status_delivery_gate_suppresses_unchanged_scheduled_report(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    import spx_spark.application.order_map.service as order_map_module
+
+    now = datetime(2026, 7, 7, 6, 0, tzinfo=timezone.utc)
+    payload = {
+        "research_only": True,
+        "research_reference": {"price": 7520.0, "source": "hl_perp"},
+        "session_phase": {"name": "europe_session", "name_cn": "欧盘时段"},
+        "regime_decision": {"mode": "trending", "direction": "down"},
+        "plan_candidates": [],
+        "observation_candidates": [],
+        "candidates": [],
+    }
+    fingerprint = order_map_module._status_fingerprint(payload)
+    monkeypatch.setattr(
+        order_map_module,
+        "load_order_map_state",
+        lambda path: {
+            "last_status_date": "2026-07-07",
+            "fingerprint": fingerprint,
+        },
+    )
+    monkeypatch.setattr(
+        order_map_module,
+        "build_order_payload_with_retry",
+        lambda *args, **kwargs: payload,
+    )
+    monkeypatch.setattr(order_map_module, "_has_open_position_risk", lambda settings: False)
+    monkeypatch.setattr(
+        order_map_module,
+        "generate_push_text",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("writer called")),
+    )
+
+    result = order_map_module.run_status(
+        SimpleNamespace(force=False, dry_run=False),
+        now=now,
+        state_path=str(tmp_path / "state.json"),
+        trading_date="2026-07-07",
+    )
+
+    assert result == 0
+    assert json.loads(capsys.readouterr().out)["reason"] == "no_material_changes"
+
+
+def test_map_refresh_suppresses_unchanged_fingerprint(monkeypatch, tmp_path, capsys) -> None:
+    import spx_spark.application.order_map.service as order_map_module
+
+    now = datetime(2026, 7, 14, 6, 0, tzinfo=timezone.utc)
+    payload = {
+        "research_only": False,
+        "expiry": "20260714",
+        "expected_move_points": 40.0,
+        "flip_zone": [7500.0, 7505.0],
+        "underlier": {"price": 7510.0, "source": "index:SPX"},
+        "candidates": [
+            {"play": "put_wall_bounce_call", "level": 7490.0},
+            {"play": "call_wall_fade_put", "level": 7520.0},
+        ],
+        "plan_candidates": [],
+        "observation_candidates": [],
+        "session_phase": {"name": "europe_session"},
+    }
+    fingerprint = order_map_module._status_fingerprint(payload)
+    monkeypatch.setattr(
+        order_map_module,
+        "load_order_map_state",
+        lambda path: {
+            "last_map_date": "2026-07-14",
+            "last_map_at": now.timestamp() - 2_000,
+            "map_fingerprint": fingerprint,
+            "status_fingerprint": {"status_phase": "different"},
+        },
+    )
+    monkeypatch.setattr(
+        order_map_module,
+        "build_order_payload_with_retry",
+        lambda *args, **kwargs: payload,
+    )
+    monkeypatch.setattr(
+        order_map_module,
+        "send_order_map",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("map sent")),
+    )
+
+    result = order_map_module.run_refresh(
+        SimpleNamespace(force=False, dry_run=False),
+        now=now,
+        state_path=str(tmp_path / "state.json"),
+        trading_date="2026-07-14",
+    )
+
+    assert result == 0
+    assert json.loads(capsys.readouterr().out)["reason"] == "no_material_changes"
+
+
+def test_status_delivery_gate_allows_material_and_one_shot_key_windows() -> None:
+    from spx_spark.application.order_map.service import _status_delivery_reason
+
+    previous = {
+        "last_status_date": "2026-07-14",
+        "fingerprint": {"status_phase": "europe_session"},
+    }
+    current = {"status_phase": "europe_session"}
+    assert (
+        _status_delivery_reason(
+            previous,
+            current,
+            ["决策剧本 bullish→bearish"],
+            trading_date="2026-07-14",
+            position_risk=False,
+        )
+        == "material_changes"
+    )
+    current["status_phase"] = "us_open_hour"
+    assert (
+        _status_delivery_reason(
+            previous,
+            current,
+            [],
+            trading_date="2026-07-14",
+            position_risk=False,
+        )
+        == "key_window:us_open_hour"
+    )
+    previous["fingerprint"]["status_phase"] = "us_open_hour"
+    assert (
+        _status_delivery_reason(
+            previous,
+            current,
+            [],
+            trading_date="2026-07-14",
+            position_risk=False,
+        )
+        is None
+    )
 
 
 def test_within_refresh_window_beijing() -> None:
@@ -2446,7 +2848,7 @@ def test_render_status_template_contains_levels_and_changes() -> None:
     }
     now = datetime(2026, 7, 7, 6, 30, tzinfo=timezone.utc)
     text = render_status_template(payload, ["put wall 7495→7500"], now)
-    assert "【SPX 15m｜14:30｜0DTE 07-07｜欧盘时段】" in text
+    assert "【SPX 15m · 14:30 · 0DTE 07-07 · 欧盘时段】" in text
     assert "距开盘 420 分钟" in text
     assert "put wall 7500 触达≈57%" in text
     assert "VIX1D/VIX 0.45" in text
@@ -2457,9 +2859,47 @@ def test_render_status_template_contains_levels_and_changes() -> None:
     assert "墙阶梯" not in text
     assert "收盘分布" not in text
     assert "变化  put wall 7495→7500" in text
+    assert "｜" not in text
 
     text_no_change = render_status_template(payload, [], now)
     assert "关键位无实质变化" in text_no_change
+
+
+def test_render_status_separates_live_structure_from_frozen_event_level() -> None:
+    payload = {
+        "expiry": "20260714",
+        "underlier": {"price": 7521.8, "source": "chain_implied"},
+        "es_last": 7565.0,
+        "gamma_state": "zero_gamma_transition",
+        "flip_zone": [7520.0, 7525.0],
+        "vol_context": {},
+        "candidates": [
+            {"play": "put_wall_bounce_call", "level": 7500.0},
+            {"play": "call_wall_fade_put", "level": 7550.0},
+        ],
+        "level_decision": {
+            "phase": "testing",
+            "level_kind": "flip_high",
+            "level": 7515.0,
+            "spot": 7521.8,
+            "levels": {
+                "put_wall": 7500.0,
+                "flip_low": 7510.0,
+                "flip_high": 7515.0,
+                "call_wall": 7550.0,
+            },
+        },
+        "warnings": [],
+    }
+
+    text = render_status_template(
+        payload,
+        ["flip zone 下界 7510→7520", "flip zone 上界 7515→7525"],
+        datetime(2026, 7, 14, 5, 20, tzinfo=timezone.utc),
+    )
+
+    assert "结构  ZeroGamma过渡　Put 7500　Flip 7520–7525　Call 7550" in text
+    assert "状态  TESTING（测试）　事件位 Flip上沿 7515" in text
 
 
 def test_render_status_template_limits_candidates_to_nearest_two() -> None:
@@ -2515,9 +2955,9 @@ def test_render_status_template_limits_candidates_to_nearest_two() -> None:
     assert "SPXW 7575P" in text
     assert "SPXW 7525C" not in text
     assert text.count("当前不可预挂") == 1
-    assert "【条件计划｜标的触发后执行】" in text
-    assert "计划1·支撑反弹" in text
-    assert "计划2·冲墙回落" in text
+    assert "【条件计划】标的触发后执行" in text
+    assert "计划1 · 支撑反弹" in text
+    assert "计划2 · 冲墙回落" in text
 
     from spx_spark.application.order_map.prompts import (
         render_feishu_status_detail_template,
@@ -2582,9 +3022,41 @@ def test_recent_market_frame_es_fills_short_quote_rotation_gap() -> None:
         7594.25,
         "ibkr",
     )
-    assert _recent_market_frame_es(
-        frame, now=now + timedelta(minutes=3), max_age_seconds=120
-    ) == (None, None)
+    assert _recent_market_frame_es(frame, now=now + timedelta(minutes=3), max_age_seconds=120) == (
+        None,
+        None,
+    )
+
+
+def test_gth_em_usage_uses_session_open_instead_of_prior_close() -> None:
+    from spx_spark.application.order_map.service import _apply_gth_em_usage
+
+    payload = {
+        "trading_date": "2026-07-14",
+        "es_last": 7555.0,
+        "expected_move_points": 50.0,
+        "day_move": {
+            "prior_close": 7575.0,
+            "points": -63.0,
+            "em_used_fraction": None,
+        },
+    }
+    frame = {
+        "session_id": "2026-07-14",
+        "es": {"price": 7554.0, "gth_open_price": 7550.0},
+    }
+
+    _apply_gth_em_usage(payload, frame)
+
+    assert payload["day_move"]["points"] == -63.0
+    assert payload["day_move"]["em_move_points"] == 5.0
+    assert payload["day_move"]["em_used_fraction"] == 0.10
+    assert payload["day_move"]["em_session_id"] == "2026-07-14"
+
+    payload["trading_date"] = "2026-07-15"
+    payload["day_move"]["em_used_fraction"] = None
+    _apply_gth_em_usage(payload, frame)
+    assert payload["day_move"]["em_used_fraction"] is None
 
 
 def test_send_order_map_queues_on_feishu_failure(tmp_path: Path, monkeypatch) -> None:

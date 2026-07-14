@@ -53,6 +53,16 @@ class QuoteFreshness(str, Enum):
     UNKNOWN = "unknown"
 
 
+class QuoteMarketSession(str, Enum):
+    """Provider market session attached to one selected quote lane."""
+
+    REGULAR = "regular"
+    EXTENDED = "extended"
+    GTH = "gth"
+    GLOBEX = "globex"
+    UNKNOWN = "unknown"
+
+
 class ProviderStatus(str, Enum):
     AVAILABLE = "available"
     DEGRADED = "degraded"
@@ -243,6 +253,38 @@ class OptionGreeks:
 
 
 @dataclass(frozen=True)
+class SessionQuoteObservation:
+    """One provider session block retained alongside the selected quote."""
+
+    session: QuoteMarketSession
+    quote_time: datetime | None = None
+    trade_time: datetime | None = None
+    bid: float | None = None
+    ask: float | None = None
+    last: float | None = None
+    mark: float | None = None
+
+    @property
+    def source_time(self) -> datetime | None:
+        return self.quote_time or self.trade_time
+
+    @property
+    def effective_price(self) -> float | None:
+        return first_present(self.mark, self.last, self.bid, self.ask)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "session": self.session.value,
+            "quote_time": self.quote_time.isoformat() if self.quote_time else None,
+            "trade_time": self.trade_time.isoformat() if self.trade_time else None,
+            "bid": self.bid,
+            "ask": self.ask,
+            "last": self.last,
+            "mark": self.mark,
+        }
+
+
+@dataclass(frozen=True)
 class Quote:
     instrument: InstrumentId
     provider: Provider
@@ -269,6 +311,8 @@ class Quote:
     sampling_mode: str | None = None
     sampling_group: int | None = None
     source_session: str | None = None
+    market_session: QuoteMarketSession | None = None
+    session_observations: tuple[SessionQuoteObservation, ...] = ()
     error: str | None = None
     raw: Mapping[str, Any] | None = None
 
@@ -322,6 +366,12 @@ class Quote:
         as_of = as_utc(as_of or self.received_at)
         return max((as_of - as_utc(source_time)).total_seconds() * 1000.0, 0.0)
 
+    def session_source_time(self, session: QuoteMarketSession) -> datetime | None:
+        for observation in self.session_observations:
+            if observation.session is session:
+                return observation.source_time
+        return None
+
     def to_dict(self, *, include_raw: bool = False) -> dict[str, Any]:
         payload = {
             "instrument": self.instrument.to_dict(),
@@ -357,6 +407,20 @@ class Quote:
         }
         if self.source_session is not None:
             payload["source_session"] = self.source_session
+        if self.market_session is not None:
+            payload["market_session"] = self.market_session.value
+        if self.session_observations:
+            regular_source_at = self.session_source_time(QuoteMarketSession.REGULAR)
+            extended_source_at = self.session_source_time(QuoteMarketSession.EXTENDED)
+            payload["regular_source_at"] = (
+                regular_source_at.isoformat() if regular_source_at else None
+            )
+            payload["extended_source_at"] = (
+                extended_source_at.isoformat() if extended_source_at else None
+            )
+            payload["session_observations"] = [
+                observation.to_dict() for observation in self.session_observations
+            ]
         if include_raw:
             payload["raw"] = self.raw
         return payload
@@ -576,6 +640,34 @@ def quote_from_dict(payload: Mapping[str, Any]) -> Quote:
     except ValueError:
         quality = MarketDataQuality.UNKNOWN
 
+    market_session = None
+    if payload.get("market_session") is not None:
+        try:
+            market_session = QuoteMarketSession(str(payload["market_session"]))
+        except ValueError:
+            market_session = QuoteMarketSession.UNKNOWN
+    observations: list[SessionQuoteObservation] = []
+    raw_observations = payload.get("session_observations")
+    if isinstance(raw_observations, list):
+        for raw_observation in raw_observations:
+            if not isinstance(raw_observation, Mapping):
+                continue
+            try:
+                session = QuoteMarketSession(str(raw_observation.get("session") or "unknown"))
+            except ValueError:
+                session = QuoteMarketSession.UNKNOWN
+            observations.append(
+                SessionQuoteObservation(
+                    session=session,
+                    quote_time=parse_timestamp(raw_observation.get("quote_time")),
+                    trade_time=parse_timestamp(raw_observation.get("trade_time")),
+                    bid=clean_float(raw_observation.get("bid")),
+                    ask=clean_float(raw_observation.get("ask")),
+                    last=clean_float(raw_observation.get("last")),
+                    mark=clean_float(raw_observation.get("mark")),
+                )
+            )
+
     return Quote(
         instrument=instrument,
         provider=provider,
@@ -610,6 +702,8 @@ def quote_from_dict(payload: Mapping[str, Any]) -> Quote:
             if payload.get("source_session") is not None
             else None
         ),
+        market_session=market_session,
+        session_observations=tuple(observations),
         error=payload.get("error"),
         raw=payload.get("raw") if isinstance(payload.get("raw"), Mapping) else None,
     )

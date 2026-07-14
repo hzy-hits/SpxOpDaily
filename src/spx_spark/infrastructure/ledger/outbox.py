@@ -6,7 +6,7 @@ import json
 import os
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Sequence
@@ -32,6 +32,8 @@ class OutboxRecord:
     last_error: str | None = None
     claimed_by: str | None = None
     claimed_at: datetime | None = None
+    settlement_outcome: str | None = None
+    delivered_count: int = 0
 
 
 _SCHEMA = """
@@ -50,6 +52,8 @@ CREATE TABLE IF NOT EXISTS domain_event_outbox (
     claimed_by TEXT,
     claimed_at TEXT,
     last_error TEXT,
+    settlement_outcome TEXT,
+    delivered_count INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -113,12 +117,16 @@ class SqliteEventOutbox:
         *,
         max_attempts: int = 5,
         busy_timeout_ms: int = 250,
+        retry_base_seconds: float = 0.0,
+        retry_max_seconds: float = 0.0,
     ) -> None:
         if max_attempts < 1:
             raise ValueError("max_attempts must be >= 1")
         self.path = Path(path)
         self.max_attempts = max_attempts
         self.busy_timeout_ms = busy_timeout_ms
+        self.retry_base_seconds = max(retry_base_seconds, 0.0)
+        self.retry_max_seconds = max(retry_max_seconds, self.retry_base_seconds)
         self._prepare()
         self._initialize()
 
@@ -143,6 +151,29 @@ class SqliteEventOutbox:
     def _initialize(self) -> None:
         with self._connect() as connection:
             connection.executescript(_SCHEMA)
+            columns = {
+                str(row[1])
+                for row in connection.execute("PRAGMA table_info(domain_event_outbox)")
+            }
+            if "settlement_outcome" not in columns:
+                connection.execute(
+                    "ALTER TABLE domain_event_outbox ADD COLUMN settlement_outcome TEXT"
+                )
+            if "delivered_count" not in columns:
+                connection.execute(
+                    "ALTER TABLE domain_event_outbox ADD COLUMN delivered_count INTEGER NOT NULL DEFAULT 0"
+                )
+            # Rows settled by the pre-outcome consumer cannot be reconstructed
+            # as delivered or silently consumed. Label that ambiguity once so
+            # ``acked`` never masquerades as proof of human delivery.
+            connection.execute(
+                """
+                UPDATE domain_event_outbox
+                SET settlement_outcome = 'legacy_unknown'
+                WHERE status = ? AND settlement_outcome IS NULL
+                """,
+                (OutboxStatus.ACKED.value,),
+            )
 
     def writable(self) -> bool:
         try:
@@ -265,7 +296,14 @@ class SqliteEventOutbox:
                 raise
         return claimed
 
-    def ack(self, event_ids: Sequence[str], *, consumer_id: str | None = None) -> int:
+    def ack(
+        self,
+        event_ids: Sequence[str],
+        *,
+        consumer_id: str | None = None,
+        outcome: str | None = None,
+        delivered_count: int = 0,
+    ) -> int:
         if not event_ids:
             return 0
         now_text = _iso(_utc_now())
@@ -278,12 +316,15 @@ class SqliteEventOutbox:
                         cursor = connection.execute(
                             """
                             UPDATE domain_event_outbox
-                            SET status = ?, updated_at = ?, claimed_by = NULL, claimed_at = NULL
+                            SET status = ?, updated_at = ?, claimed_by = NULL, claimed_at = NULL,
+                                settlement_outcome = ?, delivered_count = ?
                             WHERE event_id = ? AND status = ?
                             """,
                             (
                                 OutboxStatus.ACKED.value,
                                 now_text,
+                                outcome,
+                                delivered_count,
                                 event_id,
                                 OutboxStatus.CLAIMED.value,
                             ),
@@ -292,12 +333,15 @@ class SqliteEventOutbox:
                         cursor = connection.execute(
                             """
                             UPDATE domain_event_outbox
-                            SET status = ?, updated_at = ?, claimed_by = NULL, claimed_at = NULL
+                            SET status = ?, updated_at = ?, claimed_by = NULL, claimed_at = NULL,
+                                settlement_outcome = ?, delivered_count = ?
                             WHERE event_id = ? AND status = ? AND claimed_by = ?
                             """,
                             (
                                 OutboxStatus.ACKED.value,
                                 now_text,
+                                outcome,
+                                delivered_count,
                                 event_id,
                                 OutboxStatus.CLAIMED.value,
                                 consumer_id,
@@ -340,16 +384,23 @@ class SqliteEventOutbox:
                     return OutboxStatus.CLAIMED
                 if int(row["attempts"]) >= int(row["max_attempts"]):
                     status = OutboxStatus.DEAD_LETTER
+                    available_at = now_text
                 else:
                     status = OutboxStatus.PENDING
+                    exponent = max(int(row["attempts"]) - 1, 0)
+                    delay = min(
+                        self.retry_base_seconds * (2**exponent),
+                        self.retry_max_seconds,
+                    )
+                    available_at = _iso(now + timedelta(seconds=delay))
                 connection.execute(
                     """
                     UPDATE domain_event_outbox
                     SET status = ?, last_error = ?, claimed_by = NULL, claimed_at = NULL,
-                        updated_at = ?
+                        available_at = ?, updated_at = ?
                     WHERE event_id = ?
                     """,
-                    (status.value, error[:500], now_text, event_id),
+                    (status.value, error[:500], available_at, now_text, event_id),
                 )
                 connection.execute("COMMIT")
                 return status
@@ -428,7 +479,8 @@ class SqliteEventOutbox:
                 """
                 UPDATE domain_event_outbox
                 SET status = ?, attempts = 0, last_error = NULL,
-                    claimed_by = NULL, claimed_at = NULL, updated_at = ?
+                    claimed_by = NULL, claimed_at = NULL, settlement_outcome = NULL,
+                    delivered_count = 0, updated_at = ?
                 WHERE event_id = ? AND status = ?
                 """,
                 (

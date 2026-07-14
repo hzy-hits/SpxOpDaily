@@ -74,6 +74,9 @@ def test_minute_frame_calculates_path_volume_cross_asset_and_volatility() -> Non
     )
 
     assert frame.quality is FrameQuality.READY
+    assert frame.es["observed_at"] == now.isoformat()
+    assert frame.es["source_at"] == now.isoformat()
+    assert frame.es["transport_at"] == now.isoformat()
     assert frame.es["return_1m_points"] == pytest.approx(1.0)
     assert frame.es["return_15m_points"] == pytest.approx(15.0)
     assert frame.es["return_60m_points"] == pytest.approx(60.0)
@@ -89,6 +92,69 @@ def test_minute_frame_calculates_path_volume_cross_asset_and_volatility() -> Non
     assert frame.volatility["vix1d_vix_ratio"] is None
     assert frame.volatility["es_realized_vol_60m_annualized"] is not None
     assert frame.volatility["atm_iv_minus_es_realized_vol"] is not None
+
+
+def test_gth_expected_move_starts_at_2015_et_and_resets_with_session() -> None:
+    gth_open = datetime(2026, 7, 14, 0, 15, tzinfo=UTC)
+    session_id = globex_session_id(gth_open)
+    samples = [
+        _market_sample(
+            gth_open - timedelta(minutes=1),
+            session_id=session_id,
+            es=7495.0,
+            volume=1_000.0,
+        ),
+        _market_sample(
+            gth_open,
+            session_id=session_id,
+            es=7500.0,
+            volume=1_100.0,
+        ),
+        _market_sample(
+            gth_open + timedelta(minutes=15),
+            session_id=session_id,
+            es=7510.0,
+            volume=1_200.0,
+        ),
+    ]
+
+    frame = build_minute_market_frame(
+        samples,
+        now=gth_open + timedelta(minutes=15),
+        expected_move_points=50.0,
+        atm_iv=None,
+        structural_levels={},
+        volume_baselines={},
+        policy=MarketFeatureSettings(),
+    )
+
+    assert frame.es["gth_open_price"] == 7500.0
+    assert frame.es["gth_move_points"] == 10.0
+    assert frame.es["gth_expected_move_used"] == pytest.approx(0.20)
+
+    next_open = gth_open + timedelta(days=1)
+    next_session = globex_session_id(next_open)
+    reset = build_minute_market_frame(
+        [
+            *samples,
+            _market_sample(
+                next_open,
+                session_id=next_session,
+                es=7480.0,
+                volume=100.0,
+            ),
+        ],
+        now=next_open,
+        expected_move_points=40.0,
+        atm_iv=None,
+        structural_levels={},
+        volume_baselines={},
+        policy=MarketFeatureSettings(),
+    )
+
+    assert reset.es["gth_open_price"] == 7480.0
+    assert reset.es["gth_move_points"] == 0.0
+    assert reset.es["gth_expected_move_used"] == 0.0
 
 
 def test_volume_reset_and_insufficient_history_do_not_publish_percentile() -> None:
@@ -145,10 +211,7 @@ def test_volume_alignment_does_not_mix_incomplete_price_and_volume_windows() -> 
 
     assert frame.volume["volume_delta_5m"] is None
     assert frame.volume["price_volume_alignment_5m"] == "unavailable"
-    assert (
-        frame.volume["price_volume_alignment_reason_5m"]
-        == "insufficient_synchronized_window"
-    )
+    assert frame.volume["price_volume_alignment_reason_5m"] == "insufficient_synchronized_window"
 
 
 def test_l1_helpers_measure_imbalance_and_only_compare_synchronized_providers() -> None:
@@ -175,9 +238,7 @@ def test_l1_helpers_measure_imbalance_and_only_compare_synchronized_providers() 
         bid=10.2,
         ask=10.4,
     )
-    assert provider_mid_divergences(
-        [schwab, stale_ibkr], policy=MarketFeatureSettings()
-    ) == []
+    assert provider_mid_divergences([schwab, stale_ibkr], policy=MarketFeatureSettings()) == []
 
 
 def test_decision_context_audit_only_changes_on_meaningful_state() -> None:
@@ -324,6 +385,109 @@ def test_aligned_path_and_dex_allow_confirmed_breakout() -> None:
     assert result["impulse_score"] > result["barrier_score"]
 
 
+def test_opposite_signed_confirmation_cannot_support_upward_breakout() -> None:
+    market = _decision_market_frame(
+        return_15=-12.0,
+        return_60=-28.0,
+        efficiency=0.80,
+        vwap_distance=-8.0,
+        vwap_slope=-3.0,
+        volume_alignment="price_volume_aligned",
+        cross_confirmation="confirmed",
+    )
+    options = _decision_option_frame(
+        abs_gex=1000.0,
+        wall_gex=10.0,
+        next_wall_distance=30.0,
+        gamma_top_share=0.10,
+        oi_dex_ratio=0.30,
+        volume_dex_ratio=0.45,
+    )
+    level = {
+        "event_id": "level:opposed",
+        "phase": "confirmed",
+        "thesis": "breakout",
+        "direction": "up",
+        "level_kind": "call_wall",
+        "level": 7550.0,
+    }
+    policy = MarketFeatureSettings()
+    regime = build_regime_decision(
+        market,
+        options,
+        trend={"regime": "bearish"},
+        level_decision=level,
+        policy=policy,
+    )
+    result = build_breakout_filter(
+        market,
+        options,
+        level_decision=level,
+        regime_decision=regime,
+        policy=policy,
+    )
+
+    assert regime["mode"] == "trending"
+    assert regime["direction"] == "down"
+    assert result["verdict"] == "blocked"
+    assert result["actionable"] is False
+    assert "price_volume_supports_breakout" not in result["evidence"]
+    assert "es_spy_supports_breakout" not in result["evidence"]
+    assert "price_volume_opposes_breakout" in result["evidence"]
+    assert "es_spy_opposes_breakout" in result["evidence"]
+    assert "trend_efficiency_opposes_breakout" in result["evidence"]
+    assert "trending_regime_opposes_breakout" in result["evidence"]
+    assert "regime_direction_opposes_breakout" in result["invalidations"]
+
+
+def test_recent_volume_opposition_is_barrier_not_breakout_support() -> None:
+    market = _decision_market_frame(
+        return_15=12.0,
+        return_60=28.0,
+        efficiency=0.80,
+        vwap_distance=8.0,
+        vwap_slope=3.0,
+        volume_alignment="price_volume_aligned",
+        cross_confirmation="confirmed",
+        return_5=-4.0,
+    )
+    options = _decision_option_frame(
+        abs_gex=1000.0,
+        wall_gex=10.0,
+        next_wall_distance=30.0,
+        gamma_top_share=0.10,
+        oi_dex_ratio=0.30,
+        volume_dex_ratio=0.45,
+    )
+    level = {
+        "event_id": "level:volume-opposed",
+        "phase": "confirmed",
+        "thesis": "breakout",
+        "direction": "up",
+        "level_kind": "call_wall",
+        "level": 7550.0,
+    }
+    policy = MarketFeatureSettings()
+    regime = build_regime_decision(
+        market,
+        options,
+        trend={"regime": "bullish"},
+        level_decision=level,
+        policy=policy,
+    )
+    result = build_breakout_filter(
+        market,
+        options,
+        level_decision=level,
+        regime_decision=regime,
+        policy=policy,
+    )
+
+    assert "price_volume_supports_breakout" not in result["evidence"]
+    assert "price_volume_opposes_breakout" in result["evidence"]
+    assert "es_spy_supports_breakout" in result["evidence"]
+
+
 def test_vix_confirmation_strengthens_trend_and_breakout() -> None:
     confirming = _decision_market_frame(
         return_15=12.0,
@@ -412,6 +576,7 @@ def _decision_market_frame(
     volume_alignment: str,
     cross_confirmation: str,
     volatility: dict[str, object] | None = None,
+    return_5: float | None = None,
 ) -> MinuteMarketFrame:
     now = datetime(2026, 7, 13, 15, 0, tzinfo=UTC)
     return MinuteMarketFrame(
@@ -421,6 +586,7 @@ def _decision_market_frame(
         as_of=now,
         quality=FrameQuality.READY,
         es={
+            "return_5m_points": return_15 if return_5 is None else return_5,
             "return_15m_points": return_15,
             "return_60m_points": return_60,
             "trend_efficiency_60m": efficiency,
@@ -525,6 +691,7 @@ def _sample_quote(price: float, volume: float | None, at: datetime) -> dict[str,
         "price": price,
         "provider": "schwab",
         "source_at": at.isoformat(),
+        "transport_at": at.isoformat(),
         "volume": volume,
         "quality": "live",
     }

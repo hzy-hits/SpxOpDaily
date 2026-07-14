@@ -9,9 +9,12 @@ from threading import Lock
 from typing import Any
 
 from spx_spark.marketdata import (
+    InstrumentId,
+    InstrumentType,
     OptionGreeks,
     Provider,
     Quote,
+    QuoteMarketSession,
     as_utc,
     classify_quote_quality,
     clean_float,
@@ -20,11 +23,20 @@ from spx_spark.marketdata import (
     parse_timestamp,
 )
 from spx_spark.provider_adapter import ProviderSnapshot
-from spx_spark.schwab.adapter import instrument_from_schwab_symbol, schwab_model_float
+from spx_spark.schwab.adapter import (
+    instrument_from_schwab_symbol,
+    parse_expiry,
+    schwab_model_float,
+)
 
 
 SUPPORTED_LEVEL_ONE_SERVICES = frozenset(
-    {"LEVELONE_EQUITIES", "LEVELONE_FUTURES", "LEVELONE_OPTIONS"}
+    {
+        "LEVELONE_EQUITIES",
+        "LEVELONE_FUTURES",
+        "LEVELONE_FUTURES_OPTIONS",
+        "LEVELONE_OPTIONS",
+    }
 )
 DEFAULT_STREAM_STALE_SECONDS = 15
 
@@ -184,8 +196,18 @@ def quote_from_stream_fields(
             )
         ):
             structure_time = received_at
+    instrument = (
+        _futures_option_instrument(symbol, fields)
+        if normalized_service == "LEVELONE_FUTURES_OPTIONS"
+        else instrument_from_schwab_symbol(symbol)
+    )
+    market_session = (
+        QuoteMarketSession.GLOBEX
+        if normalized_service in {"LEVELONE_FUTURES", "LEVELONE_FUTURES_OPTIONS"}
+        else None
+    )
     return Quote(
-        instrument=instrument_from_schwab_symbol(symbol),
+        instrument=instrument,
         provider=Provider.SCHWAB,
         provider_symbol=symbol,
         received_at=received_at,
@@ -207,6 +229,45 @@ def quote_from_stream_fields(
         source_latency_ms=elapsed_ms(quote_time or trade_time, received_at),
         market_data_type="live",
         greeks=greeks,
-        sampling_mode="schwab_stream",
+        sampling_mode=(
+            "schwab_stream_futures_option_probe"
+            if normalized_service == "LEVELONE_FUTURES_OPTIONS"
+            else "schwab_stream"
+        ),
+        market_session=market_session,
         raw={"service": normalized_service, "fields": dict(fields)},
+    )
+
+
+def _futures_option_instrument(
+    symbol: str,
+    fields: Mapping[str, Any],
+) -> InstrumentId:
+    underlier_symbol = str(fields.get("UNDERLYING_SYMBOL") or "").strip().upper()
+    configured = instrument_from_schwab_symbol(underlier_symbol) if underlier_symbol else None
+    underlier = configured.symbol if configured is not None else underlier_symbol.lstrip("$/")
+    if not underlier:
+        underlier = "ES"
+    expiry_value = fields.get("FUTURE_EXPIRATION_DATE")
+    expiry_at = parse_timestamp(expiry_value)
+    expiry = expiry_at.strftime("%Y%m%d") if expiry_at else parse_expiry(expiry_value)
+    right = str(fields.get("CONTRACT_TYPE") or "").strip().upper()
+    strike = clean_float(fields.get("STRIKE_PRICE"))
+    if not expiry or right not in {"C", "CALL", "P", "PUT"} or strike is None:
+        return InstrumentId(
+            symbol=underlier or symbol,
+            instrument_type=InstrumentType.OPTION,
+            provider_symbol=symbol,
+            exchange="CME",
+        )
+    multiplier = clean_float(fields.get("FUTURE_MULTIPLIER"))
+    return InstrumentId.option(
+        underlier,
+        expiry=expiry,
+        strike=strike,
+        right=right,
+        trading_class=f"{underlier}_FOP",
+        provider_symbol=symbol,
+        exchange="CME",
+        multiplier=f"{multiplier:g}" if multiplier is not None else None,
     )

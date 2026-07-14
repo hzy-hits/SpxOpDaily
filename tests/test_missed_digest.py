@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import pytest
-import subprocess
-from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -145,6 +143,22 @@ def make_payload() -> dict[str, object]:
     }
 
 
+def make_position_payload() -> dict[str, object]:
+    payload = make_payload()
+    payload["alerts"] = [
+        {
+            "severity": "critical",
+            "kind": "spxw_position_opened",
+            "instrument_id": "option:SPX:SPXW:20260707:7500:C",
+            "title": "SPXW 7500C 持仓已建立",
+            "detail": "IBKR 持仓数量 1。",
+            "source_gate": "ibkr_positions",
+            "dedup_group": "position:7500C:opened",
+        }
+    ]
+    return payload
+
+
 def test_append_load_clear_roundtrip(tmp_path) -> None:
     queue_path = str(tmp_path / "missed.jsonl")
     at = datetime(2026, 7, 7, 1, 0, tzinfo=timezone.utc)
@@ -222,49 +236,32 @@ def test_pipeline_queues_message_when_feishu_fails_and_bark_ok(
 
     queue_path = str(tmp_path / "missed.jsonl")
 
-    def runner(command: list[str], timeout_seconds: float) -> subprocess.CompletedProcess[str]:
-        if command[:2] == ["openclaw", "agent"]:
-            return subprocess.CompletedProcess(
-                command,
-                0,
-                stdout='{"text":"需要看盘: SPX alert confirmed"}',
-                stderr="",
-            )
-        return subprocess.CompletedProcess(command, 0, stdout="{}", stderr="")
-
-    settings = replace(
-        make_settings(
-            str(tmp_path / "notify-state.json"),
-            missed_queue_path=queue_path,
-        ),
-        openclaw_agent_enabled=True,
-        openclaw_agent_deliver=True,
-        codex_enabled=False,
+    settings = make_settings(
+        str(tmp_path / "notify-state.json"),
+        missed_queue_path=queue_path,
     )
 
     first = notify_payload(
-        make_payload(),
+        make_position_payload(),
         settings=settings,
-        runner=runner,
         now=datetime(2026, 7, 7, 0, 0, tzinfo=timezone.utc),
     )
     assert first.sent_count == 1  # bark ok
 
     queued = load_missed(queue_path)
     assert len(queued) == 1
-    assert queued[0]["kind"] == "agent"
-    assert queued[0]["message"] == "需要看盘: SPX alert confirmed"
+    assert queued[0]["kind"] == "direct_event"
+    assert "SPXW 7500C 持仓已建立" in queued[0]["message"]
 
     second = notify_payload(
-        make_payload(),
+        make_position_payload(),
         settings=settings,
-        runner=runner,
         now=datetime(2026, 7, 7, 0, 2, tzinfo=timezone.utc),
     )
     assert second.selected_count == 0
 
 
-def test_ops_only_delivery_does_not_enter_feishu_missed_queue(tmp_path) -> None:
+def test_source_recovery_is_direct_ops_transition_and_does_not_enter_missed_queue(tmp_path) -> None:
     queue_path = str(tmp_path / "missed.jsonl")
     settings = make_settings(
         str(tmp_path / "notify-state.json"),
@@ -289,8 +286,8 @@ def test_ops_only_delivery_does_not_enter_feishu_missed_queue(tmp_path) -> None:
     )
 
     assert result.sent_count == 1
-    assert any(sink.sink == "bark" and sink.ok for sink in result.sinks)
-    assert not any(sink.sink == "feishu" for sink in result.sinks)
+    assert [sink.sink for sink in result.sinks] == ["bark"]
+    assert result.outcome == "delivered"
     assert load_missed(queue_path) == []
 
 
@@ -311,28 +308,13 @@ def test_pipeline_flushes_queue_before_new_send(tmp_path, monkeypatch) -> None:
 
     monkeypatch.setattr("spx_spark.notifier.sinks.post_feishu", feishu_poster)
 
-    settings = replace(
-        make_settings(
-            str(tmp_path / "notify-state.json"),
-            missed_queue_path=queue_path,
-        ),
-        deepseek_enabled=True,
-        deepseek_deliver=True,
-    )
-
-    # Stub deepseek so review path delivers
-    monkeypatch.setattr(
-        "spx_spark.notifier.pipeline.run_deepseek_reviewer",
-        lambda settings, prompt: (
-            __import__("spx_spark.notifier", fromlist=["SinkResult"]).SinkResult(
-                sink="deepseek_reviewer", attempted=True, ok=True
-            ),
-            "需要看盘: SPX alert confirmed",
-        ),
+    settings = make_settings(
+        str(tmp_path / "notify-state.json"),
+        missed_queue_path=queue_path,
     )
 
     notify_payload(
-        make_payload(),
+        make_position_payload(),
         settings=settings,
         now=datetime(2026, 7, 7, 1, 0, tzinfo=timezone.utc),
     )

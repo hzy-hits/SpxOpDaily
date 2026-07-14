@@ -15,6 +15,9 @@ from spx_spark.analytics.options.pricing import finite_float
 from spx_spark.application.globex_trend.state import load_trend_state, trend_state_path
 from spx_spark.application.market_features.state import load_json, projection_paths
 from spx_spark.application.order_map.bias_machine import load_intraday_call_bias
+from spx_spark.application.order_map.candidate_presentation import (
+    apply_candidate_presentation as _apply_candidate_presentation,
+)
 from spx_spark.application.order_map.candidates import build_candidates
 from spx_spark.application.order_map.delivery import send_order_map
 from spx_spark.application.order_map.es_volume_attach import attach_es_volume_signal
@@ -24,6 +27,9 @@ from spx_spark.application.order_map.hl_volume import (
 )
 from spx_spark.application.order_map.level_decision_shadow import (
     load_level_decision_shadow,
+)
+from spx_spark.application.order_map.level_trigger_repricing import (
+    default_level_trigger_repricing_path,
 )
 from spx_spark.application.order_map.models import SHANGHAI_TZ
 from spx_spark.application.order_map.prompts import (
@@ -71,18 +77,24 @@ from spx_spark.greek_reference import (
 )
 from spx_spark.intraday_strategy import signed_gex_sign_method
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
+from spx_spark.notifier.dispatcher import dispatch_notification
 from spx_spark.notifier.llm_writer import generate_push_text, load_previous_push, record_push
-from spx_spark.notifier.missed_queue import append_missed
 from spx_spark.notifier.model import CommandRunner, default_runner
-from spx_spark.notifier.sinks import (
-    any_delivery_ok,
-    deliver_trade_push,
-    im_delivery_failed,
-)
+from spx_spark.notifier.receipts import NotificationEnvelope, notification_event_id
 from spx_spark.options_map import build_options_map
+from spx_spark.ibkr.position_watcher import default_positions_path, load_snapshot
 from spx_spark.storage import LatestState, LatestStateStore, configured_quote_use_decision
 from spx_spark.settings import load_app_settings
 from spx_spark.settings.order_map import DEFAULT_ORDER_MAP_POLICY, OrderMapPolicy
+
+
+STATUS_KEY_WINDOW_PHASES = frozenset(
+    {
+        "us_data_hour",
+        "us_open_hour",
+        "us_midday_confirmation",
+    }
+)
 
 
 def build_order_payload(
@@ -135,17 +147,13 @@ def build_order_payload(
     beijing = now.astimezone(SHANGHAI_TZ)
     trigger_coordinate = _report_trigger_coordinate(state, resolution, now=now)
 
-    # Day move vs expected move: the writer's anti-FOMO anchor. "The drop has
-    # already consumed 120% of today's EM" is the number that talks a reader
-    # out of shorting the bottom of a slide or panic-selling into a wall band.
+    # Keep prior-close change as context. Expected-move consumption is attached
+    # later from the current GTH session so yesterday's move cannot leak into it.
     spx_quote = state.best_quote("index:SPX")
     prior_close = finite_float(spx_quote.close) if spx_quote is not None else None
     day_move_points = (
         round(pricing_spot - prior_close, 1) if pricing_spot is not None and prior_close else None
     )
-    em_used_fraction = None
-    if day_move_points is not None and expected_move_points and expected_move_points > 0:
-        em_used_fraction = round(abs(day_move_points) / expected_move_points, 2)
 
     return {
         "kind": "order_map",
@@ -238,7 +246,11 @@ def build_order_payload(
         "day_move": {
             "prior_close": prior_close,
             "points": day_move_points,
-            "em_used_fraction": em_used_fraction,
+            "em_used_fraction": None,
+            "em_move_points": None,
+            "em_baseline": None,
+            "em_baseline_source": "es_gth_open",
+            "em_session_id": None,
         },
         "rn_density": (
             front.rn_density.to_dict()
@@ -447,11 +459,16 @@ def build_order_payload_with_retry(
         feature_paths = projection_paths(storage_settings.data_root)
         market_frame = load_json(feature_paths["market"])
         payload["minute_market_frame"] = market_frame
+        _apply_gth_em_usage(payload, market_frame)
         payload["option_structure_frame"] = load_json(feature_paths["option"])
         decision_context = load_json(feature_paths["decision"])
         payload["decision_context"] = decision_context
         payload["regime_decision"] = decision_context.get("regime_decision", {})
         payload["breakout_filter"] = decision_context.get("breakout_filter", {})
+        payload["trade_intent"] = decision_context.get("trade_intent", {})
+        payload["level_trigger_repricing"] = load_json(
+            default_level_trigger_repricing_path(storage_settings)
+        )
         if payload.get("es_last") is None:
             es_price, es_provider = _recent_market_frame_es(
                 market_frame,
@@ -482,7 +499,161 @@ def build_order_payload_with_retry(
             sample_path=default_hl_volume_sample_path(storage_settings),
             now=evaluation_now,
         )
+        _apply_candidate_presentation(payload, now=evaluation_now)
     return payload
+
+
+def _apply_gth_em_usage(
+    payload: dict[str, Any],
+    market_frame: dict[str, Any],
+) -> None:
+    """Anchor EM usage to the current session's 20:15 ET SPX GTH open."""
+
+    day_move = payload.get("day_move")
+    es = market_frame.get("es")
+    if not isinstance(day_move, dict) or not isinstance(es, dict):
+        return
+    frame_session = str(market_frame.get("session_id") or "")
+    payload_session = str(payload.get("trading_date") or "")
+    if not frame_session or frame_session != payload_session:
+        return
+    gth_open = finite_float(es.get("gth_open_price"))
+    current_es = finite_float(payload.get("es_last"))
+    if current_es is None:
+        current_es = finite_float(es.get("price"))
+    expected_move = finite_float(payload.get("expected_move_points"))
+    if gth_open is None or current_es is None or expected_move is None or expected_move <= 0:
+        return
+    em_move = current_es - gth_open
+    day_move.update(
+        {
+            "em_used_fraction": round(abs(em_move) / expected_move, 2),
+            "em_move_points": round(em_move, 1),
+            "em_baseline": gth_open,
+            "em_baseline_source": "es_gth_open",
+            "em_session_id": frame_session,
+        }
+    )
+
+
+def _status_fingerprint(payload: dict[str, Any]) -> dict[str, Any]:
+    fingerprint = payload_fingerprint(payload)
+    phase = payload.get("session_phase")
+    fingerprint["status_phase"] = str(phase.get("name") or "") if isinstance(phase, dict) else ""
+    fingerprint["decision_thesis"] = _decision_thesis(payload)
+    plans = payload.get("plan_candidates")
+    plan = plans[0] if isinstance(plans, list) and len(plans) == 1 else None
+    if isinstance(plan, dict):
+        fingerprint["trade_intent_id"] = str(plan.get("intent_id") or "")
+        strike = finite_float(plan.get("strike"))
+        right = str(plan.get("right") or "")
+        fingerprint["trade_contract"] = f"{strike:g}{right}" if strike is not None else ""
+    else:
+        fingerprint["trade_intent_id"] = ""
+        fingerprint["trade_contract"] = ""
+    return fingerprint
+
+
+def _decision_thesis(payload: dict[str, Any]) -> str:
+    plans = payload.get("plan_candidates")
+    if isinstance(plans, list) and len(plans) == 1 and isinstance(plans[0], dict):
+        plan = plans[0]
+        return f"plan:{plan.get('play') or '-'}@{finite_float(plan.get('level'))}"
+    regime = payload.get("regime_decision")
+    if isinstance(regime, dict):
+        mode = str(regime.get("mode") or "unknown")
+        direction = str(regime.get("direction") or "unknown")
+        if mode != "unknown" or direction != "unknown":
+            return f"regime:{mode}:{direction}"
+    return ""
+
+
+def _status_material_changes(
+    previous: dict[str, Any] | None,
+    current: dict[str, Any],
+) -> list[str]:
+    changes = material_changes(previous, current)
+    if not isinstance(previous, dict):
+        return changes
+    prior_thesis = str(previous.get("decision_thesis") or "")
+    current_thesis = str(current.get("decision_thesis") or "")
+    if prior_thesis != current_thesis and (prior_thesis or current_thesis):
+        if prior_thesis and current_thesis:
+            changes.append(
+                f"决策剧本 {_thesis_label(prior_thesis)}→{_thesis_label(current_thesis)}"
+            )
+        elif current_thesis:
+            changes.append(f"决策剧本建立 {_thesis_label(current_thesis)}")
+        else:
+            changes.append(f"决策剧本失效 {_thesis_label(prior_thesis)}")
+    prior_intent = str(previous.get("trade_intent_id") or "")
+    current_intent = str(current.get("trade_intent_id") or "")
+    if prior_thesis == current_thesis and prior_intent != current_intent:
+        prior_contract = str(previous.get("trade_contract") or "-")
+        current_contract = str(current.get("trade_contract") or "-")
+        if prior_intent and current_intent:
+            changes.append(f"执行意图更新 {prior_contract}→{current_contract}")
+        elif current_intent:
+            changes.append(f"执行意图建立 {current_contract}")
+        elif prior_intent:
+            changes.append(f"执行意图失效 {prior_contract}")
+    return changes
+
+
+def _thesis_label(value: str) -> str:
+    if value.startswith("plan:"):
+        play_and_level = value.removeprefix("plan:")
+        play, _, level = play_and_level.partition("@")
+        label = {
+            "level_breakout_call": "向上突破",
+            "level_breakout_put": "向下突破",
+            "level_fade_call": "下破拒绝",
+            "level_fade_put": "上破拒绝",
+        }.get(play, play)
+        return f"{label}@{level}" if level else label
+    if value.startswith("regime:"):
+        _, mode, direction = (value.split(":", 2) + ["unknown", "unknown"])[:3]
+        mode_label = {
+            "trending": "趋势",
+            "mean_reverting": "均值回归",
+            "transition": "过渡",
+        }.get(mode, mode)
+        direction_label = {"up": "偏多", "down": "偏空", "neutral": "中性"}.get(
+            direction, direction
+        )
+        return f"{mode_label}{direction_label}"
+    return value
+
+
+def _has_open_position_risk(storage_settings: StorageSettings) -> bool:
+    snapshot = load_snapshot(default_positions_path(storage_settings))
+    return bool(snapshot and any(position.qty != 0 for position in snapshot.positions))
+
+
+def _status_delivery_reason(
+    previous: dict[str, Any],
+    fingerprint: dict[str, Any],
+    changes: list[str],
+    *,
+    trading_date: str,
+    position_risk: bool,
+) -> str | None:
+    if previous.get("last_status_date") != trading_date:
+        return "initial_status"
+    if changes:
+        return "material_changes"
+    phase = str(fingerprint.get("status_phase") or "")
+    previous_fingerprint = previous.get("status_fingerprint") or previous.get("fingerprint")
+    previous_phase = (
+        str(previous_fingerprint.get("status_phase") or "")
+        if isinstance(previous_fingerprint, dict)
+        else ""
+    )
+    if phase in STATUS_KEY_WINDOW_PHASES and previous_phase != phase:
+        return f"key_window:{phase}"
+    if position_risk:
+        return "open_position_risk"
+    return None
 
 
 def run_status(
@@ -505,13 +676,31 @@ def run_status(
         # skip quietly, the next 15-minute run will have full data.
         print(json.dumps({"skipped": True, "reason": "thin_snapshot_sampling_gap"}))
         return 0
-    fingerprint = payload_fingerprint(payload)
-    changes = material_changes(previous.get("fingerprint"), fingerprint)
+    fingerprint = _status_fingerprint(payload)
+    changes = _status_material_changes(
+        previous.get("status_fingerprint") or previous.get("fingerprint"),
+        fingerprint,
+    )
     template = render_status_template(payload, changes, now)
 
     if args.dry_run:
         print(template)
         print(json.dumps({"dry_run": True, "changes": changes}, ensure_ascii=False))
+        return 0
+
+    delivery_reason = (
+        "forced"
+        if args.force
+        else _status_delivery_reason(
+            previous,
+            fingerprint,
+            changes,
+            trading_date=trading_date,
+            position_risk=_has_open_position_risk(storage_settings),
+        )
+    )
+    if delivery_reason is None:
+        print(json.dumps({"skipped": True, "reason": "no_material_changes"}))
         return 0
 
     settings = NotificationSettings.from_env()
@@ -531,24 +720,30 @@ def run_status(
         )
         if not valid:
             text, writer = template, "template_validation_fallback"
-    delivery_sinks = deliver_trade_push(
+    event_id = notification_event_id(
+        "status",
+        source="order_map_status",
+        occurred_at=now,
+        identity=json.dumps(fingerprint, sort_keys=True, separators=(",", ":")),
+    )
+    dispatch = dispatch_notification(
         settings,
+        NotificationEnvelope(
+            event_id=event_id,
+            source="order_map_status",
+            kind="status",
+            lane="scheduled_report",
+            occurred_at=now,
+        ),
         title="SPX 15分钟市场状态",
         text=text,
-        kind="status",
-        lane="trade",
         friend=True,
         feishu_text=text,
         runner=runner,
+        attempted_at=now,
     )
-    delivered_ok = any_delivery_ok(delivery_sinks)
-    if im_delivery_failed(delivery_sinks):
-        append_missed(
-            settings.missed_queue_path,
-            text,
-            kind="order_map_status",
-            at=now,
-        )
+    delivery_sinks = list(dispatch.sinks)
+    delivered_ok = dispatch.delivered
     im_ok = any(s.sink == "feishu" and s.ok for s in delivery_sinks)
     bark_ok = any(s.sink == "bark" and s.ok for s in delivery_sinks)
     feishu_ok = any(s.sink == "feishu" and s.ok for s in delivery_sinks)
@@ -565,6 +760,7 @@ def run_status(
         "feishu_ok": feishu_ok,
         "delivered_ok": delivered_ok,
         "changes": changes,
+        "delivery_reason": delivery_reason,
     }
     persist_order_map_pricing_audit(
         payload,
@@ -628,8 +824,11 @@ def run_refresh(
     if _payload_is_thin(payload) and not args.force:
         print(json.dumps({"skipped": True, "reason": "thin_snapshot_sampling_gap"}))
         return 0
-    fingerprint = payload_fingerprint(payload)
-    changes = material_changes(previous.get("fingerprint"), fingerprint)
+    fingerprint = _status_fingerprint(payload)
+    changes = _status_material_changes(
+        previous.get("map_fingerprint") or previous.get("fingerprint"),
+        fingerprint,
+    )
 
     if changes:
         header = f"【条件交易地图·更新】变化: {'; '.join(changes)}"
@@ -639,6 +838,9 @@ def run_refresh(
         print(header)
         print(render_template(payload))
         print(json.dumps({"dry_run": True, "changes": changes}, ensure_ascii=False))
+        return 0
+    if not changes and not args.force:
+        print(json.dumps({"skipped": True, "reason": "no_material_changes"}))
         return 0
 
     settings = NotificationSettings.from_env()
@@ -726,7 +928,7 @@ def run(argv: list[str] | None = None, *, now: datetime | None = None) -> int:
         mark_sent(
             state_path,
             trading_date,
-            fingerprint=payload_fingerprint(payload),
+            fingerprint=_status_fingerprint(payload),
             now=now,
             kind="map",
         )

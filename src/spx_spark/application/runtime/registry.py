@@ -89,6 +89,12 @@ def run_intraday_shock() -> int:
     return intraday_shock.run(["--json"])
 
 
+def run_notification_recovery() -> int:
+    from spx_spark.notifier import missed_queue
+
+    return missed_queue.run()
+
+
 def run_globex_trend() -> int:
     from spx_spark.application.globex_trend import service
 
@@ -189,6 +195,19 @@ def build_tasks(settings: ServiceLoopSettings) -> list[ServiceTask]:
                 settings.realtime_engine_interval_seconds,
                 run_realtime_engine,
                 command=(sys.executable, "-m", "spx_spark.application.realtime.composition"),
+            )
+        )
+    if settings.notification_recovery_enabled:
+        tasks.append(
+            ServiceTask(
+                "notification_recovery",
+                settings.notification_recovery_interval_seconds,
+                run_notification_recovery,
+                command=(
+                    sys.executable,
+                    "-c",
+                    "from spx_spark.notifier.missed_queue import run; raise SystemExit(run())",
+                ),
             )
         )
     if settings.hyperliquid_enabled:

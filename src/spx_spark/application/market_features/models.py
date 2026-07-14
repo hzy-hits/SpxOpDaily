@@ -104,6 +104,7 @@ class DecisionContext:
     data_quality: dict[str, Any]
     regime_decision: dict[str, Any] = field(default_factory=dict)
     breakout_filter: dict[str, Any] = field(default_factory=dict)
+    trade_intent: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
@@ -124,6 +125,12 @@ class DecisionAudit:
     slippage: float | None
     outcome_status: str
     outcome_reference: str | None
+    trade_status: str = "observing"
+    contract_id: str | None = None
+    decision_bid: float | None = None
+    decision_ask: float | None = None
+    quote_source_at: str | None = None
+    block_reasons: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)

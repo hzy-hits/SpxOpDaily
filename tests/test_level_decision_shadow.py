@@ -5,27 +5,16 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from dataclasses import replace
 
-import pytest
-
 from spx_spark.application.order_map.level_decision_machine import LevelObservation
 from spx_spark.application.order_map.level_decision_shadow import (
     _structure_session_age,
     load_level_decision_shadow,
     run_level_decision_shadow,
 )
-from spx_spark.notifier.model import SinkResult
 from spx_spark.settings.level_decision import LevelDecisionPolicy
 
 
 NOW = datetime(2026, 7, 13, 14, 30, tzinfo=timezone.utc)
-
-
-@pytest.fixture(autouse=True)
-def _stub_level_decision_writer(monkeypatch):
-    monkeypatch.setattr(
-        "spx_spark.application.order_map.level_decision_shadow.generate_push_text",
-        lambda template, *_args, **_kwargs: (template, "template"),
-    )
 
 
 def test_frozen_structure_ttl_counts_trading_sessions() -> None:
@@ -121,11 +110,10 @@ def test_outside_rth_advances_when_es_globex_observation_is_usable(
     assert (tmp_path / "latest" / "level_decision_shadow_state.json").exists()
 
 
-def test_transition_bark_contains_event_and_proxy_provenance(
+def test_transition_is_audited_without_human_delivery(
     tmp_path, monkeypatch
 ) -> None:
     storage = SimpleNamespace(data_root=str(tmp_path))
-    captured: dict[str, object] = {}
     monkeypatch.setattr(
         "spx_spark.application.order_map.level_decision_shadow._observation",
         lambda *_args, **_kwargs: LevelObservation(
@@ -140,20 +128,11 @@ def test_transition_bark_contains_event_and_proxy_provenance(
         ),
     )
 
-    def fake_deliver(_settings, **kwargs):
-        captured.update(kwargs)
-        return [SinkResult(sink="bark", attempted=True, ok=True)]
-
-    monkeypatch.setattr(
-        "spx_spark.application.order_map.level_decision_shadow.deliver_trade_push",
-        fake_deliver,
-    )
     result = run_level_decision_shadow(storage, SimpleNamespace(), now=NOW)
 
-    assert result["delivery"]["delivered"] is True
-    assert "FAR → TESTING" in str(captured["text"])
-    assert "es_basis_adjusted:46.0000" in str(captured["text"])
-    assert "shadow 审计，不是下单信号" in str(captured["text"])
+    assert result["delivery"]["delivered"] is False
+    assert result["delivery"]["delivery_gate"] == "trade_intent_required"
+    assert result["spot_source"] == "es_basis_adjusted:46.0000"
 
 
 def test_confirmed_shadow_emits_deduplicated_30_second_outcome(
@@ -203,25 +182,16 @@ def test_confirmed_shadow_emits_deduplicated_30_second_outcome(
     assert rows[0]["attribution"] == "follow_through"
 
 
-def test_operator_override_emits_formal_confirmed_signal(
+def test_operator_override_confirms_level_but_still_requires_trade_intent(
     tmp_path, monkeypatch
 ) -> None:
     storage = SimpleNamespace(data_root=str(tmp_path))
     current: dict[str, LevelObservation] = {}
-    captured: list[dict[str, object]] = []
     monkeypatch.setattr(
         "spx_spark.application.order_map.level_decision_shadow._observation",
         lambda *_args, **_kwargs: current["value"],
     )
 
-    def fake_deliver(_settings, **kwargs):
-        captured.append(kwargs)
-        return [SinkResult(sink="bark", attempted=True, ok=True)]
-
-    monkeypatch.setattr(
-        "spx_spark.application.order_map.level_decision_shadow.deliver_trade_push",
-        fake_deliver,
-    )
     policy = replace(
         LevelDecisionPolicy(),
         formal_signal_enabled=True,
@@ -256,12 +226,7 @@ def test_operator_override_emits_formal_confirmed_signal(
     assert result is not None
     assert result["phase"] == "confirmed"
     assert result["formal_signal"] is True
-    assert result["actionable"] is True
-    assert len(captured) == 1
-    formal = captured[-1]
-    assert formal["kind"] == "level_decision_formal_signal"
-    assert "正式信号" in str(formal["text"])
-    assert "Put Wall 100.00" in str(formal["text"])
-    assert "Call Wall 120.00" in str(formal["text"])
-    assert "本次触发 Put Wall 100.00" in str(formal["text"])
-    assert "不自动下单" in str(formal["text"])
+    assert result["level_path_confirmed"] is True
+    assert result["actionable"] is False
+    assert result["delivery"]["delivered"] is False
+    assert result["delivery"]["delivery_gate"] == "trade_intent_required"

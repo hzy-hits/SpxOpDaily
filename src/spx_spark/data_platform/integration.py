@@ -403,6 +403,17 @@ def record_notification_result(
                 attempted_at,
             )
         )
+        scoped_key = str(alert.get("decision_id") or alert_key(dict(alert)))
+        context_consumed = any(
+            _sink_applies_to_alert(
+                sink,
+                scoped_key=scoped_key,
+                selected_count=len(selected_alerts),
+            )
+            and str(sink.get("sink") or "") == "context_policy"
+            and str(sink.get("verdict") or "") == "consumed"
+            for sink in sinks
+        )
         has_prepared_link = bool(alert.get("decision_id") and alert.get("event_key"))
         if not has_prepared_link:
             event = EventRecord(
@@ -424,29 +435,30 @@ def record_notification_result(
                 strategy_version=writer_settings.writer_version,
                 decision_at=attempted_at,
                 available_at=attempted_at,
-                status="selected",
-                action="notify",
-                side=_side_for(kind),
-                reason=str(alert.get("source_gate") or "") or None,
-                attributes={"severity": severity},
+                status="context" if context_consumed else "selected",
+                action="observe" if context_consumed else "notify",
+                side="none" if context_consumed else _side_for(kind),
+                reason=(
+                    "context_only_consumed"
+                    if context_consumed
+                    else str(alert.get("source_gate") or "") or None
+                ),
+                attributes={
+                    "severity": severity,
+                    "delivery_policy": "context_only" if context_consumed else "notify",
+                },
             )
             target.record_decision_bundle(event=event, decision=decision)
 
-        scoped_key = str(alert.get("decision_id") or alert_key(dict(alert)))
         fingerprint = hashlib.sha256(
             f"{alert.get('title') or ''}\0{alert.get('detail') or ''}".encode("utf-8")
         ).hexdigest()[:32]
         for sink_index, sink in enumerate(sinks):
-            raw_scope = sink.get("alert_keys")
-            scope = {
-                str(value)
-                for value in raw_scope
-                if isinstance(value, str) and value
-            } if isinstance(raw_scope, (list, tuple)) else set()
-            if scope and scoped_key not in scope:
-                continue
-            if not scope and len(selected_alerts) > 1:
-                # A legacy batch-level sink cannot be attributed safely.
+            if not _sink_applies_to_alert(
+                sink,
+                scoped_key=scoped_key,
+                selected_count=len(selected_alerts),
+            ):
                 continue
             channel = str(sink.get("sink") or "unknown")
             ok = bool(sink.get("ok"))
@@ -669,7 +681,14 @@ def _delivery_status(
     verdict: str | None,
 ) -> str:
     normalized_verdict = (verdict or "").lower()
-    if normalized_verdict in {"vetoed", "blocked", "suppressed", "reviewed", "skipped"}:
+    if normalized_verdict in {
+        "vetoed",
+        "blocked",
+        "suppressed",
+        "reviewed",
+        "skipped",
+        "consumed",
+    }:
         return normalized_verdict
     if channel in DELIVERY_CHANNELS and attempted and ok:
         return "sent"
@@ -678,6 +697,23 @@ def _delivery_status(
     if not attempted:
         return "skipped"
     return "ok" if ok else "failed"
+
+
+def _sink_applies_to_alert(
+    sink: Mapping[str, object],
+    *,
+    scoped_key: str,
+    selected_count: int,
+) -> bool:
+    raw_scope = sink.get("alert_keys")
+    scope = (
+        {str(value) for value in raw_scope if isinstance(value, str) and value}
+        if isinstance(raw_scope, (list, tuple))
+        else set()
+    )
+    if scope:
+        return scoped_key in scope
+    return selected_count == 1
 
 
 def _delivery_provider(channel: str) -> str:

@@ -13,14 +13,10 @@ from pathlib import Path
 from typing import Any
 
 from spx_spark.config import NotificationSettings, StorageSettings, env_bool, load_dotenv
+from spx_spark.notifier.dispatcher import dispatch_notification
 from spx_spark.notifier.llm_writer import DEFAULT_SYSTEM_PROMPT, generate_push_text
-from spx_spark.notifier.missed_queue import append_missed
 from spx_spark.notifier.model import CommandRunner, default_runner
-from spx_spark.notifier.sinks import (
-    any_delivery_ok,
-    deliver_trade_push,
-    im_delivery_failed,
-)
+from spx_spark.notifier.receipts import NotificationEnvelope, notification_event_id
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR, ET, MarketCalendar
 from spx_spark.post_close_render import fmt, render_markdown
 from spx_spark.settings import settings_value
@@ -465,19 +461,30 @@ def push_review(
             report = report.split("\n", 1)[1].lstrip() if "\n" in report else ""
         feishu_text = text.rstrip() + "\n\n## 完整报告\n\n" + report
 
-    delivery_sinks = deliver_trade_push(
+    event_id = notification_event_id(
+        "post_close_review",
+        source="post_close_review",
+        occurred_at=now,
+        identity=str(payload.get("trading_date") or payload.get("date") or now.date()),
+    )
+    dispatch = dispatch_notification(
         settings,
+        NotificationEnvelope(
+            event_id=event_id,
+            source="post_close_review",
+            kind="post_close_review",
+            lane="scheduled_report",
+            occurred_at=now,
+        ),
         title="盘后复盘",
         text=text,
-        kind="post_close_review",
-        lane="trade",
         friend=True,
         feishu_text=feishu_text,
         runner=runner,
+        attempted_at=now,
     )
-    delivered_ok = any_delivery_ok(delivery_sinks)
-    if im_delivery_failed(delivery_sinks):
-        append_missed(settings.missed_queue_path, text, kind="post_close_review", at=now)
+    delivery_sinks = list(dispatch.sinks)
+    delivered_ok = dispatch.delivered
 
     return {
         "text": text,

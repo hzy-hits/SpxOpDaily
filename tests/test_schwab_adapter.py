@@ -2,7 +2,13 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from spx_spark.marketdata import MarketDataQuality, Provider, ProviderStatus
+from spx_spark.marketdata import (
+    MarketDataQuality,
+    Provider,
+    ProviderStatus,
+    QuoteMarketSession,
+    quote_from_dict,
+)
 from spx_spark.schwab.adapter import (
     option_quotes_from_chain_payload,
     quote_from_schwab_payload,
@@ -189,6 +195,82 @@ def test_configured_schwab_etf_uses_stable_equity_namespace() -> None:
 
     assert quote.instrument.canonical_id == "equity:SPY"
     assert quote.instrument.provider_symbol == "SPY"
+
+
+def test_schwab_equity_selects_fresh_extended_lane_and_retains_both_clocks() -> None:
+    received_at = datetime(2026, 7, 14, 2, 0, 5, tzinfo=timezone.utc)
+    regular_time = int((received_at - timedelta(hours=2)).timestamp() * 1000)
+    extended_time = int((received_at - timedelta(seconds=1)).timestamp() * 1000)
+
+    quote = quote_from_schwab_payload(
+        "SPY",
+        {
+            "assetMainType": "EQUITY",
+            "quote": {
+                "bidPrice": 650.0,
+                "askPrice": 650.1,
+                "lastPrice": 650.05,
+                "quoteTime": regular_time,
+            },
+            "regular": {
+                "regularMarketLastPrice": 650.05,
+                "regularMarketTradeTime": regular_time,
+            },
+            "extended": {
+                "bidPrice": 648.8,
+                "askPrice": 648.9,
+                "lastPrice": 648.85,
+                "mark": 648.85,
+                "quoteTime": extended_time,
+                "tradeTime": extended_time,
+            },
+        },
+        received_at=received_at,
+    )
+
+    assert quote.market_session is QuoteMarketSession.EXTENDED
+    assert quote.bid == 648.8
+    assert quote.ask == 648.9
+    assert quote.quality is MarketDataQuality.LIVE
+    assert [item.session for item in quote.session_observations] == [
+        QuoteMarketSession.REGULAR,
+        QuoteMarketSession.EXTENDED,
+    ]
+    payload = quote.to_dict()
+    assert payload["regular_source_at"] == datetime.fromtimestamp(
+        regular_time / 1000, tz=timezone.utc
+    ).isoformat()
+    assert payload["extended_source_at"] == datetime.fromtimestamp(
+        extended_time / 1000, tz=timezone.utc
+    ).isoformat()
+    assert quote_from_dict(payload).session_observations == quote.session_observations
+
+
+def test_schwab_equity_keeps_regular_lane_when_it_is_newer() -> None:
+    received_at = datetime(2026, 7, 14, 14, 0, 5, tzinfo=timezone.utc)
+    regular_time = int((received_at - timedelta(seconds=1)).timestamp() * 1000)
+    extended_time = int((received_at - timedelta(hours=10)).timestamp() * 1000)
+
+    quote = quote_from_schwab_payload(
+        "SPY",
+        {
+            "assetMainType": "EQUITY",
+            "quote": {
+                "bidPrice": 652.0,
+                "askPrice": 652.1,
+                "quoteTime": regular_time,
+            },
+            "extended": {
+                "bidPrice": 648.8,
+                "askPrice": 648.9,
+                "quoteTime": extended_time,
+            },
+        },
+        received_at=received_at,
+    )
+
+    assert quote.market_session is QuoteMarketSession.REGULAR
+    assert quote.bid == 652.0
 
 
 def test_concrete_schwab_future_uses_stable_logical_namespace() -> None:

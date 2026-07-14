@@ -121,6 +121,11 @@ def decision_signature(context: dict[str, Any]) -> tuple[object, ...]:
         if isinstance(context.get("confirmations"), dict)
         else {}
     )
+    trade_intent = (
+        context.get("trade_intent")
+        if isinstance(context.get("trade_intent"), dict)
+        else {}
+    )
     return (
         trend.get("regime"),
         level.get("event_id"),
@@ -130,6 +135,9 @@ def decision_signature(context: dict[str, Any]) -> tuple[object, ...]:
         confirmations.get("price_volume_alignment"),
         confirmations.get("regime_mode"),
         confirmations.get("breakout_verdict"),
+        trade_intent.get("status"),
+        trade_intent.get("intent_id"),
+        tuple(trade_intent.get("block_reasons") or ()),
     )
 
 
@@ -142,21 +150,34 @@ def build_decision_audit(
     if previous and decision_signature(previous) == decision_signature(current):
         return None
     level = context.level_decision
+    trade = context.trade_intent
     trigger = "context_initialized" if not previous else "decision_context_changed"
     outcome_reference = str(level.get("event_id")) if level.get("event_id") else None
     digest = hashlib.sha256(
         f"{context.context_id}:{trigger}".encode("utf-8")
     ).hexdigest()[:16]
     return DecisionAudit(
-        schema_version=1,
+        schema_version=2,
         audit_id=f"audit:{digest}",
         context_id=context.context_id,
         observed_at=context.as_of,
         trigger=trigger,
-        decision_mid=None,
-        order_limit=None,
+        decision_mid=_optional_number(trade.get("decision_mid")),
+        order_limit=_optional_number(trade.get("entry_limit")),
         fill_price=None,
         slippage=None,
         outcome_status="linked" if outcome_reference else "context_only",
         outcome_reference=outcome_reference,
+        trade_status=str(trade.get("status") or "observing"),
+        contract_id=(str(trade["contract_id"]) if trade.get("contract_id") else None),
+        decision_bid=_optional_number(trade.get("decision_bid")),
+        decision_ask=_optional_number(trade.get("decision_ask")),
+        quote_source_at=(
+            str(trade["quote_source_at"]) if trade.get("quote_source_at") else None
+        ),
+        block_reasons=tuple(str(item) for item in trade.get("block_reasons") or ()),
     )
+
+
+def _optional_number(value: object) -> float | None:
+    return float(value) if isinstance(value, int | float) else None
