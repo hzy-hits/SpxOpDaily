@@ -1800,6 +1800,45 @@ def test_prompts_include_previous_push() -> None:
         "expiry": "20260707",
         "candidates": [],
         "warnings": [],
+        "signed_gex_proxy": {
+            "net_gex": -2_500_000_000.0,
+            "abs_gex": 12_000_000_000.0,
+            "net_gamma_ratio": -0.2083,
+            "gamma_state": "zero_gamma_transition",
+            "weighting": "open_interest",
+            "sign_method": "calls_positive_puts_negative",
+            "dealer_position_sign": "unknown",
+        },
+        "option_structure_frame": {
+            "as_of": "2026-07-07T06:00:00+00:00",
+            "exposure": {
+                "quality": "ok",
+                "snapshot_age_seconds": 4.2,
+                "delta_coverage_ratio": 0.8,
+                "iv_coverage_ratio": 0.9,
+                "oi_quality": "ibkr_ok",
+                "dealer_position_sign": "unknown",
+                "sign_convention": "calls_positive_puts_negative",
+                "gex_weighting_divergence": 0.31,
+                "oi_weighted": {
+                    "net_gex": -2_500_000_000.0,
+                    "abs_gex": 12_000_000_000.0,
+                    "net_gamma_ratio": -0.2083,
+                    "net_dex_proxy": -900_000.0,
+                    "abs_dex_proxy": 4_500_000.0,
+                    "net_dex_ratio_proxy": -0.2,
+                },
+                "volume_weighted": {
+                    "net_gex": 300_000_000.0,
+                    "abs_gex": 3_000_000_000.0,
+                    "net_gamma_ratio": 0.1,
+                    "net_dex_proxy": 700_000.0,
+                    "abs_dex_proxy": 2_800_000.0,
+                    "net_dex_ratio_proxy": 0.25,
+                },
+                "warnings": ["oi_volume_gex_divergent"],
+            },
+        },
         "_spxw_0dte_greeks_audit": {"secret_scenario_price": 123.45},
     }
     previous = {"kind": "order_map", "at": "2026-07-07T06:00:00+00:00", "text": "上一条正文"}
@@ -1817,6 +1856,11 @@ def test_prompts_include_previous_push() -> None:
     assert "observe_only" in status_prompt
     assert "breakout_filter.verdict=blocked" in order_prompt
     assert "supported 且 actionable=true" in status_prompt
+    assert "SPXW_0DTE_options_not_ES_options" in status_prompt
+    assert '"net_dex_proxy":-900000.0' in status_prompt
+    assert '"abs_dex_proxy":4500000.0' in status_prompt
+    assert "两者背离时优先提示假突破风险" in status_prompt
+    assert "不是 ES 期货自身的 GEX/DEX" in order_prompt
     assert "secret_scenario_price" not in order_prompt
     assert "secret_scenario_price" not in status_prompt
 

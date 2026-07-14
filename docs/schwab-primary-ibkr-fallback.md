@@ -107,9 +107,28 @@ No documented request variant exposed a hidden GTH quote. Tests of
 `extended` section was empty for the SPXW contract. The Schwab Market Hours API
 also described index options only with a `regularMarket` session from 09:30 to
 16:15 ET, while its futures products explicitly included overnight sessions.
-Taken together, the evidence indicates that the Trader API does not distribute
-the complete OPRA GTH index-option session to this retail token. It does not
-show an application symbol, expiry, parser, subscription, or transport failure.
+Taken together, the evidence indicates that the Trader API path used by this
+retail token does not currently distribute the complete OPRA GTH index-option
+session. It does not show an application symbol, expiry, parser, subscription,
+or transport failure.
+
+This finding must not be generalized into an undocumented claim about Schwab's
+internal feed topology. Cboe states that SPX/SPXW quotes and trades are carried
+on OPRA GTH, and the same account can observe current SPXW GTH quotes in
+thinkorswim. The deployed Trader API WebSocket nevertheless accepts the
+160-contract `LEVELONE_OPTIONS` subscription, sends one 160-row initial image
+whose newest source time is 17:00 ET, and then sends no further option message;
+ES/MES messages continue normally on the same connection. The defensible
+conclusion is therefore narrower: thinkorswim and Trader API expose different
+GTH capabilities for this account/app today. We cannot infer whether the cause
+is an entitlement route, product policy, or a Schwab-side implementation gap.
+
+Primary exchange references:
+
+- [Cboe C1 trading hours](https://www.cboe.com/about/hours/us-options) list SPX
+  GTH from 20:15 to 09:25 ET;
+- [Cboe's extended-hours FAQ](https://www.cboe.com/document/tech-spec/document/technical-specifications/equity-options-extended-trading-hours-faq/)
+  states that proprietary index options quote and trade on the OPRA GTH system.
 
 Historical data contains Schwab SPXW updates beginning near 08:00 ET, so the
 last portion of GTH must continue to be measured rather than assumed absent.

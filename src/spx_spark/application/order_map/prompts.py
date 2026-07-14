@@ -122,6 +122,9 @@ def build_order_prompt(
             "所有候选同等推荐等于没推荐。",
             "框架口径：Micopedia/Steven observe_only（regime→map→flow→trigger→expression→exit）；"
             "条件交易地图是计划参考不是自动下单；GEX/*_proxy 是结构代理；Hyperliquid 只作弱次级证据，不作 SPX 锚。",
+            "signed_gex_proxy 与 option_structure_frame.exposure 来自 SPXW 0DTE 期权链，不是 ES 期货自身的 GEX/DEX。"
+            "读取 net/abs GEX、OI/成交量加权 net/abs DEX proxy 及 coverage/warnings；只在非 null 且质量足够时用于确认或反驳突破，"
+            "OI 与成交量口径方向背离时必须优先考虑假突破，不得把 proxy 写成 dealer 实仓。",
             "regime_decision 与 breakout_filter 是代码生成的确定性决策层，不得自行改判。"
             "breakout_filter.verdict=blocked 时删除/降级同事件 breakout 候选并优先说明假突破风险；pending 时不得写突破成立；"
             "supported 且 actionable=true 才能把 CONFIRMED breakout 写成可执行候选。"
@@ -624,6 +627,9 @@ def build_status_prompt(
             "这是每 15 分钟一次的 SPX 决策摘要，不是完整研究报告。",
             "先读取 regime_decision 与 breakout_filter：blocked=突破被结构阻力拦截，pending=证据不足，"
             "supported 且 actionable=true=突破过滤通过。不得绕过代码 verdict，也不得把 DEX proxy 写成 dealer 实仓。",
+            "exposure_context 是 SPXW 0DTE 期权链推导的实时结构，不是 ES 期货自身的 GEX/DEX。"
+            "net/abs GEX 用于判断结构净方向与集中度，OI/成交量加权 DEX proxy 用于检查突破方向是否得到 delta 暴露共振；"
+            "两者背离时优先提示假突破风险。字段为 null、coverage 不足或 warnings 非空时必须明确降权，禁止补算或猜测。",
             "输出中文，第一行逐字保留模板标题；先给剧本维持/有变，再给当前位置和状态机结论。",
             "只保留会改变当前决策的内容：时段、SPX/ES、wall/flip、状态机、ES 路径与量价、"
             "Max Pain/OI 或波动率中最重要的一项、最多两个条件候选、相对上次变化和下一确认/证伪阈值。",
@@ -657,6 +663,23 @@ def _status_writer_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "warnings",
     )
     compact = {key: payload.get(key) for key in keys if key in payload}
+    signed_gex = payload.get("signed_gex_proxy")
+    if isinstance(signed_gex, dict):
+        compact["signed_gex_proxy"] = {
+            key: signed_gex.get(key)
+            for key in (
+                "net_gex",
+                "abs_gex",
+                "net_gamma_ratio",
+                "gamma_state",
+                "weighting",
+                "sign_method",
+                "dealer_position_sign",
+            )
+        }
+    exposure_context = _status_exposure_context(payload)
+    if exposure_context:
+        compact["exposure_context"] = exposure_context
     candidates = payload.get("candidates")
     if isinstance(candidates, list):
         candidate_keys = (
@@ -676,3 +699,44 @@ def _status_writer_payload(payload: dict[str, Any]) -> dict[str, Any]:
             if isinstance(item, dict)
         ]
     return compact
+
+
+def _status_exposure_context(payload: dict[str, Any]) -> dict[str, Any]:
+    """Expose bounded SPXW-derived exposure facts to the 15-minute writer."""
+
+    frame = payload.get("option_structure_frame")
+    if not isinstance(frame, dict):
+        return {}
+    exposure = frame.get("exposure")
+    if not isinstance(exposure, dict):
+        return {}
+
+    def aggregate(name: str) -> dict[str, Any] | None:
+        value = exposure.get(name)
+        if not isinstance(value, dict):
+            return None
+        keys = (
+            "net_gex",
+            "abs_gex",
+            "net_gamma_ratio",
+            "net_dex_proxy",
+            "abs_dex_proxy",
+            "net_dex_ratio_proxy",
+        )
+        return {key: value.get(key) for key in keys}
+
+    return {
+        "instrument_scope": "SPXW_0DTE_options_not_ES_options",
+        "as_of": frame.get("as_of"),
+        "quality": exposure.get("quality"),
+        "snapshot_age_seconds": exposure.get("snapshot_age_seconds"),
+        "delta_coverage_ratio": exposure.get("delta_coverage_ratio"),
+        "iv_coverage_ratio": exposure.get("iv_coverage_ratio"),
+        "oi_quality": exposure.get("oi_quality"),
+        "dealer_position_sign": exposure.get("dealer_position_sign"),
+        "sign_convention": exposure.get("sign_convention"),
+        "gex_weighting_divergence": exposure.get("gex_weighting_divergence"),
+        "oi_weighted": aggregate("oi_weighted"),
+        "volume_weighted": aggregate("volume_weighted"),
+        "warnings": exposure.get("warnings"),
+    }

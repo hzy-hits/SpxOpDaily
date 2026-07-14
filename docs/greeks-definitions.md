@@ -232,6 +232,19 @@ delta 天然符号（call 正、put 负）等价于家族约定。含义：**假
 **这不是任何 vendor（含 Steven 引用的）Net DEX**。vendor 公式未知，可能含 dealer 库存估计、
 成交方向推断（signed flow）或不同权重。本代理只用 OI/volume 无方向权重，任何回测结论只对本代理成立。
 
+### Agent 决策接入
+
+这些暴露均由 **SPXW 0DTE 期权链** 推导，不是 ES 期货或 ES 期权的原生 GEX/DEX。ES 只提供连续价格路径、
+量价和 SPX 等价值位，用来检查 SPXW 暴露地形附近的价格行为。
+
+- 完整条件地图 Agent 读取 `signed_gex_proxy` 和 `option_structure_frame.exposure`；
+- 15 分钟状态 Agent 读取压缩后的 `signed_gex_proxy` 和 `exposure_context`；
+- `exposure_context` 同时包含 OI/volume 加权的 `net_gex`、`abs_gex`、`net_dex_proxy`、
+  `abs_dex_proxy`、ratio、coverage、warnings 和数据时间；
+- OI/volume DEX 同向只作为突破共振，方向背离作为假突破风险；代码生成的 `breakout_filter` 仍是最终门；
+- 任一值为 null、`delta_coverage_ratio < 0.5` 或存在质量 warning 时，Agent 必须降权且不得补算；
+- `dealer_position_sign=unknown` 时不得把这些 proxy 写成 dealer 实仓或直接方向信号。
+
 ### golden（strike 级）
 
 | K | 权重 | net_dex_proxy |
