@@ -77,6 +77,22 @@ DATA_SOURCE_CAPABILITIES: tuple[DataSourceCapability, ...] = (
         CapabilityStatus.UNAVAILABLE,
         "frozen structure may be retained; never used for GTH pricing",
     ),
+    DataSourceCapability(
+        "schwab_spxw_rth",
+        Provider.SCHWAB,
+        "SPXW current expiry",
+        "Cboe RTH",
+        CapabilityStatus.PRODUCTION,
+        "primary RTH option pricing and structure source",
+    ),
+    DataSourceCapability(
+        "ibkr_spxw_rth",
+        Provider.IBKR,
+        "SPXW current expiry",
+        "Cboe RTH",
+        CapabilityStatus.FALLBACK,
+        "RTH cross-check and failover when Schwab is not usable",
+    ),
 )
 
 
@@ -86,16 +102,14 @@ def pricing_provider_priority(
     as_of: datetime,
     configured: Iterable[Provider | str],
 ) -> tuple[Provider | str, ...]:
-    """Pin SPXW GTH pricing to IBKR while preserving configured order elsewhere."""
+    """Apply the SPXW session provider policy before configured fallback order."""
 
     priority = tuple(configured)
     is_spxw = (instrument.trading_class or "").upper() == "SPXW"
-    is_gth_only = DEFAULT_MARKET_CALENDAR.is_spx_gth_open(
-        as_of
-    ) and not DEFAULT_MARKET_CALENDAR.is_rth_open(as_of)
-    if not is_spxw or not is_gth_only:
+    if not is_spxw:
         return priority
-    return _provider_first(Provider.IBKR, priority)
+    preferred = _preferred_spxw_provider(as_of)
+    return _provider_first(preferred, priority) if preferred is not None else priority
 
 
 def pricing_candidates(quotes: Iterable[Quote], *, as_of: datetime) -> tuple[Quote, ...]:
@@ -106,12 +120,18 @@ def pricing_candidates(quotes: Iterable[Quote], *, as_of: datetime) -> tuple[Quo
         return ()
     instrument = candidates[0].instrument
     is_spxw = (instrument.trading_class or "").upper() == "SPXW"
-    is_gth_only = DEFAULT_MARKET_CALENDAR.is_spx_gth_open(
-        as_of
-    ) and not DEFAULT_MARKET_CALENDAR.is_rth_open(as_of)
+    is_gth_only = _preferred_spxw_provider(as_of) is Provider.IBKR
     if not is_spxw or not is_gth_only:
         return candidates
     return tuple(quote for quote in candidates if quote.provider is Provider.IBKR)
+
+
+def _preferred_spxw_provider(as_of: datetime) -> Provider | None:
+    if DEFAULT_MARKET_CALENDAR.is_rth_open(as_of):
+        return Provider.SCHWAB
+    if DEFAULT_MARKET_CALENDAR.is_spx_gth_open(as_of):
+        return Provider.IBKR
+    return None
 
 
 def _provider_first(

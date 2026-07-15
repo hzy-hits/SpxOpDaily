@@ -764,8 +764,8 @@ service_loop:
     value: 60
     description: Delay before retrying an unavailable IBKR snapshot connection.
   ibkr_conflict_probe_seconds:
-    value: 60
-    description: Delay before a read-only probe after an IBKR session conflict.
+    value: 15
+    description: Delay before a read-only probe after an IBKR live/paper market-data conflict; short enough to recover promptly after the live user logs out.
   max_concurrent_tasks:
     value: 4
     description: Maximum child tasks executed concurrently by the service loop.
@@ -843,8 +843,8 @@ ibkr_stream:
     value: 172
     description: Client id for the persistent streaming collector.
   flush_interval_seconds:
-    value: 5.0
-    description: Maximum seconds between stream flushes to latest-state storage.
+    value: 2.0
+    description: Maximum seconds between hot-lane flushes and SPXW rotation slices; completes the aggressive 56-hot/28-rotating Paper plan while remaining below IBKR message pacing.
   policy_check_seconds:
     value: 30.0
     description: Seconds between runtime-policy checks in the stream collector.
@@ -852,8 +852,8 @@ ibkr_stream:
     value: 20.0
     description: SPX point drift that triggers option subscription replanning.
   max_option_lines:
-    value: 78
-    description: Maximum fallback SPXW option lines; the adaptive allocator uses 64 while Schwab is healthy and 78 in fallback.
+    value: 84
+    description: Maximum production SPXW option lines; the adaptive allocator uses 64 for RTH validation and 84 during GTH or next-session prefetch.
   hot_lane_share:
     value: 0.6875
     description: Legacy fallback value; the adaptive allocator explicitly assigns 44/20 validation and 54/24 fallback hot/rotation lines.
@@ -928,8 +928,8 @@ runtime_policy:
     value: 0
     description: Minutes before trying to reclaim a competing IBKR session; zero disables fighting.
   ibkr_conflict_probe_seconds:
-    value: 60
-    description: Seconds between non-invasive probes after an IBKR session conflict.
+    value: 15
+    description: Seconds between non-invasive probes after an IBKR live/paper market-data conflict.
   ibkr_fallback_provider:
     value: schwab
     description: Provider name used when IBKR is unavailable or intentionally disabled.

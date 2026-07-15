@@ -51,12 +51,31 @@ class StreamRuntime:
     def run(self) -> int:
         while not self.expired():
             if not self.collector.connection_required():
+                block_reason = getattr(self.collector, "market_data_block_reason", None)
+                reason = block_reason() if callable(block_reason) else None
+                reason = reason or "runtime policy blocks IBKR collection"
+                retry_delay = getattr(
+                    self.collector,
+                    "market_data_retry_delay_seconds",
+                    None,
+                )
+                retry_seconds = retry_delay() if callable(retry_delay) else None
+                sleep_seconds = self.stream_settings.policy_check_seconds
+                if retry_seconds is not None:
+                    sleep_seconds = min(sleep_seconds, max(retry_seconds, 0.1))
                 persist_state_only(
-                    unavailable_state("runtime policy blocks IBKR collection"),
+                    unavailable_state(reason),
                     self.storage_settings,
                 )
-                log_event({"task": "ibkr_stream", "event": "policy_blocked"})
-                self.sleep(self.stream_settings.policy_check_seconds)
+                log_event(
+                    {
+                        "task": "ibkr_stream",
+                        "event": "policy_blocked",
+                        "reason": reason,
+                        "retry_in_seconds": sleep_seconds,
+                    }
+                )
+                self.sleep(sleep_seconds)
                 continue
 
             try:
@@ -302,4 +321,3 @@ class StreamRuntime:
         while remaining > 0 and not self.expired():
             time.sleep(min(remaining, 1.0))
             remaining -= 1.0
-

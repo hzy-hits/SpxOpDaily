@@ -46,6 +46,37 @@ def test_level_decision_fails_closed_when_promoted_wall_moves() -> None:
     assert result["quality_reason"] == "decision_snapshot_level_drift"
 
 
+def test_level_decision_retains_frozen_context_when_current_structure_is_missing() -> None:
+    levels = {
+        "put_wall": 7550.0,
+        "flip_low": 7545.0,
+        "flip_high": 7550.0,
+        "call_wall": 7600.0,
+    }
+    result = coherent_level_decision(
+        {
+            "expiry": "20260715",
+            "phase": "testing",
+            "level_kind": "put_wall",
+            "level": 7550.0,
+            "levels": levels,
+            "level_bands": {"put_wall": {"low": 7547.5, "high": 7552.5}},
+            "formal_signal": True,
+        },
+        expiry="20260715",
+        structure={},
+        max_level_drift_points=2.5,
+    )
+
+    assert result["phase"] == "far"
+    assert result["formal_signal"] is False
+    assert result["levels"] == levels
+    assert result["expiry"] == "20260715"
+    assert result["level_source"] == "frozen_last_usable_structure"
+    assert result["quality_reason"] == "decision_snapshot_structure_unavailable"
+    assert result["snapshot_consistent"] is False
+
+
 def test_decision_context_must_reference_rendered_frames() -> None:
     market = {"frame_id": "market:1"}
     option = {"frame_id": "options:1"}

@@ -101,6 +101,7 @@ class StreamCollector(
         self.last_policy_check = 0.0
         self.last_position_shadow_at: float | None = None
         self.market_data_retry_not_before = 0.0
+        self.market_data_retry_reason: str | None = None
         self.farm_health = FarmHealthTracker(
             broken_restart_seconds=stream_settings.farm_broken_restart_seconds,
         )

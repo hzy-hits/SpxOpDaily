@@ -8,6 +8,7 @@ from datetime import datetime
 from typing import Any
 
 from spx_spark.analytics.options.pricing import finite_float
+from spx_spark.application.order_map.guidance import build_decision_guidance
 from spx_spark.application.order_map.models import PLAY_ORDER, SHANGHAI_TZ
 from spx_spark.application.order_map.render import (
     _candidate_by_play,
@@ -24,6 +25,10 @@ from spx_spark.application.order_map.render import (
     render_template,
 )
 from spx_spark.application.order_map.state import _session_phase_of
+from spx_spark.application.order_map.writer_validation import (
+    actionable_writer_output_valid as actionable_writer_output_valid,
+    globex_writer_output_valid as globex_writer_output_valid,
+)
 from spx_spark.notifier.llm_writer import previous_push_json
 
 
@@ -40,63 +45,15 @@ GLOBEX_CONTEXT_SYSTEM_PROMPT = "\n".join(
     )
 )
 
-_NUMBER_PATTERN = re.compile(r"(?<![A-Za-z_])[-+]?\d+(?:\.\d+)?")
-_TEMPLATE_CANDIDATE_PATTERN = re.compile(
-    r"(?:\[(?:地图候选|条件计划)\]|计划\d+\s*·).*?SPXW\s+(\d{4}[CP])"
+STATUS_BRIEF_SYSTEM_PROMPT = "\n".join(
+    (
+        "你是 SPX 盘中决策便签的事实编辑器。代码已经完成方向、状态机和执行门控裁决，你只负责压缩表达。",
+        "第一屏必须依次回答：当前偏向、现在是否进场、唯一确认条件、明确证伪条件。不得用指标罗列代替结论。",
+        "只能使用模板中已经出现的数字；previous_push 只用于判断剧本维持或有变，禁止引用上一条的价格或自行计算新数字。",
+        "TradeReady 之外不得写买入、开仓、挂单或追价；PAUSED 必须明确说明门控失败原因，不能伪装成普通观望。",
+        "不要复述完整 Greeks、墙位阶梯、风险中性分布或内部 JSON 字段。输出简洁中文，保留模板首行。",
+    )
 )
-_GLOBEX_FORBIDDEN_PHRASES = (
-    "无引力",
-    "气垫",
-    "gamma 燃料",
-    "卖方收工",
-    "真金白银",
-    "JSON 中部被截断",
-    "补齐 JSON",
-    "完整 JSON",
-    "I need the full JSON",
-    "I'll pull",
-)
-
-
-def globex_writer_output_valid(text: str, template: str) -> bool:
-    """Reject invented prices and causal decoration in an off-hours brief."""
-    if any(phrase in text for phrase in _GLOBEX_FORBIDDEN_PHRASES):
-        return False
-    template_header = template.splitlines()[0].strip() if template.strip() else ""
-    if template_header.startswith("【SPX 15m ·") and not text.startswith(template_header):
-        return False
-    allowed = [float(value) for value in _NUMBER_PATTERN.findall(template)]
-    for raw in _NUMBER_PATTERN.findall(text):
-        value = float(raw)
-        if value in {0.0, 1.0}:
-            continue
-        tolerance = 0.11 if abs(value) < 100_000 else 0.0
-        if not any(abs(value - candidate) <= tolerance for candidate in allowed):
-            return False
-    return True
-
-
-def actionable_writer_output_valid(text: str, template: str) -> bool:
-    """Require numeric fidelity and conditional-execution semantics."""
-
-    if not globex_writer_output_valid(text, template):
-        return False
-    contracts = tuple(dict.fromkeys(_TEMPLATE_CANDIDATE_PATTERN.findall(template)))
-    if contracts and any(contract not in text for contract in contracts):
-        return False
-    live_plan = "入场≤" in template or "实时执行: NBBO" in template
-    if contracts:
-        if live_plan:
-            if not any(marker in text for marker in ("入场≤", "买入上限")):
-                return False
-            if "当前不可预挂" in text:
-                return False
-        elif "当前不可预挂" not in text:
-            return False
-    if "【条件计划】" in template:
-        return text.startswith("【SPX 15m ·") and "\n\n" in text and "【条件计划】" in text
-    return True
-
 
 def build_order_prompt(
     payload: dict[str, Any],
@@ -391,6 +348,20 @@ def _compact_option_line(payload: dict[str, Any]) -> str | None:
     return "波动  " + "　".join(parts)
 
 
+def _compact_guidance_lines(payload: dict[str, Any]) -> list[str]:
+    guidance = build_decision_guidance(payload)
+    scores = ""
+    if guidance.trend_score is not None and guidance.mean_reversion_score is not None:
+        scores = f"（趋势 {guidance.trend_score:g} / 回归 {guidance.mean_reversion_score:g}）"
+    gate = "可执行" if guidance.action.value == "trade_ready" else "未通过执行门控"
+    return [
+        f"判断  {guidance.bias}{scores}　{gate}",
+        f"动作  {guidance.action_text}",
+        f"确认  {guidance.trigger_text}",
+        f"证伪  {guidance.invalidation_text}",
+    ]
+
+
 def _ratio(numerator: Any, denominator: Any) -> str:
     top = finite_float(numerator)
     bottom = finite_float(denominator)
@@ -538,6 +509,8 @@ def render_status_template(
         candidate_section = []
     lines = [
         f"【SPX 15m · {beijing.strftime('%H:%M')} · 0DTE {expiry_text} · {phase.get('name_cn')}】",
+        *_compact_guidance_lines(payload),
+        "",
         *([line] if (line := _compact_clock_line(phase)) else []),
         _compact_price_line(payload),
         (
@@ -822,7 +795,31 @@ def render_feishu_delivery_text(
         return summary
     if separator and body:
         blocks = [block for block in body.split("\n\n") if block]
-        detail_blocks = [block for block in blocks if not block.startswith("## 市场概览\n")]
+        decision = payload.get("level_decision")
+        phase = str(decision.get("phase") or "far") if isinstance(decision, dict) else "far"
+        has_plan = bool(payload.get("plan_candidates"))
+        active = phase in {
+            "approaching",
+            "testing",
+            "break_pending",
+            "reject_pending",
+            "accepted",
+            "rejected",
+            "retest",
+            "confirmed",
+        }
+        allowed_titles = (
+            ("## 关键位状态\n", "## 当前布局参考\n", "## 条件计划与 BS 审计\n")
+            if has_plan
+            else ("## 关键位状态\n", "## 当前布局参考\n")
+            if active
+            else ()
+        )
+        detail_blocks = [
+            block for block in blocks if any(block.startswith(title) for title in allowed_titles)
+        ]
+        if not detail_blocks:
+            return summary
         return f"{summary}\n\n" + "\n\n".join(detail_blocks)
     return detail or summary
 
@@ -854,6 +851,7 @@ def build_status_prompt(
     return "\n".join(
         (
             "这是每 15 分钟一次的 SPX 决策摘要，不是完整研究报告。",
+            "模板开头的判断/动作/确认/证伪是代码生成的当前操作结论，必须保留其语义，不能降级成指标罗列。",
             "先读取 regime_decision 与 breakout_filter：blocked=突破被结构阻力拦截，pending=证据不足，"
             "supported 且 actionable=true=突破过滤通过。不得绕过代码 verdict，也不得把 DEX proxy 写成 dealer 实仓。",
             "exposure_context 是 SPXW 0DTE 期权链推导的实时结构，不是 ES 期货自身的 GEX/DEX。"
@@ -894,6 +892,7 @@ def _status_writer_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "warnings",
     )
     compact = {key: payload.get(key) for key in keys if key in payload}
+    compact["decision_guidance"] = build_decision_guidance(payload).to_dict()
     signed_gex = payload.get("signed_gex_proxy")
     if isinstance(signed_gex, dict):
         compact["signed_gex_proxy"] = {

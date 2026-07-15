@@ -20,6 +20,7 @@ def coherent_level_decision(
 
     row = dict(decision or {})
     current_levels = _structure_levels(structure)
+    previous_levels = _decision_levels(row)
     reason = _inconsistency_reason(
         row,
         expiry=expiry,
@@ -30,6 +31,9 @@ def coherent_level_decision(
         row["snapshot_consistent"] = True
         return row
 
+    retain_frozen_context = not current_levels and bool(previous_levels)
+    contextual_levels = previous_levels if retain_frozen_context else current_levels
+    contextual_expiry = str(expiry or row.get("expiry") or "") or None
     return {
         **row,
         "phase": "far",
@@ -45,9 +49,14 @@ def coherent_level_decision(
         "quality_ok": False,
         "quality_reason": reason,
         "reason": reason,
-        "expiry": expiry,
-        "levels": current_levels,
-        "level_bands": {},
+        "expiry": contextual_expiry,
+        "levels": contextual_levels,
+        "level_bands": dict(row.get("level_bands") or {}) if retain_frozen_context else {},
+        "level_source": (
+            "frozen_last_usable_structure"
+            if retain_frozen_context
+            else row.get("level_source")
+        ),
         "snapshot_consistent": False,
     }
 
@@ -163,6 +172,8 @@ def _inconsistency_reason(
     current_expiry = str(expiry or "")
     if current_expiry and decision_expiry != current_expiry:
         return "decision_snapshot_expiry_mismatch"
+    if not current_levels and _decision_levels(decision):
+        return "decision_snapshot_structure_unavailable"
 
     phase = str(decision.get("phase") or "far")
     if phase == "far":
@@ -197,6 +208,17 @@ def _structure_levels(structure: Mapping[str, object] | None) -> dict[str, float
         if value is not None:
             result[key] = value
     return result
+
+
+def _decision_levels(decision: Mapping[str, object]) -> dict[str, float]:
+    levels = decision.get("levels")
+    if not isinstance(levels, Mapping):
+        return {}
+    return {
+        key: float(value)
+        for key in LEVEL_KEYS
+        if isinstance((value := levels.get(key)), int | float)
+    }
 
 
 def _number(value: object) -> float | None:

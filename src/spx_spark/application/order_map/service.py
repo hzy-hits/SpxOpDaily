@@ -39,6 +39,7 @@ from spx_spark.application.order_map.level_trigger_repricing import (
 from spx_spark.application.order_map.models import SHANGHAI_TZ
 from spx_spark.application.order_map.prompts import (
     GLOBEX_CONTEXT_SYSTEM_PROMPT,
+    STATUS_BRIEF_SYSTEM_PROMPT,
     actionable_writer_output_valid,
     build_status_prompt,
     globex_writer_output_valid,
@@ -118,7 +119,11 @@ def build_order_payload(
     warnings = list(options_map.warnings)
 
     front = options_map.expiries[0] if options_map.expiries else None
-    expiry = front.expiry if front is not None else None
+    expiry = (
+        front.expiry
+        if front is not None
+        else DEFAULT_MARKET_CALENDAR.research_expiry(now).strftime("%Y%m%d")
+    )
     expected_move_points = front.expected_move_points if front is not None else None
     gamma_state = front.gamma_state if front is not None else "unknown"
     zero_gamma = front.zero_gamma if front is not None else None
@@ -577,10 +582,8 @@ def _decision_thesis(payload: dict[str, Any]) -> str:
     if isinstance(plans, list) and len(plans) == 1 and isinstance(plans[0], dict):
         plan = plans[0]
         return f"plan:{plan.get('play') or '-'}@{finite_float(plan.get('level'))}"
-    intent = payload.get("trade_intent")
-    intent_status = str(intent.get("status") or "") if isinstance(intent, dict) else ""
     regime = payload.get("regime_decision")
-    if intent_status in {"blocked", "trade_ready"} and isinstance(regime, dict):
+    if isinstance(regime, dict):
         mode = str(regime.get("mode") or "unknown")
         direction = str(regime.get("direction") or "unknown")
         if mode != "unknown" or direction != "unknown":
@@ -752,7 +755,7 @@ def run_status(
         build_status_prompt(payload, template, load_previous_push()),
         settings,
         runner=runner,
-        system=GLOBEX_CONTEXT_SYSTEM_PROMPT if research_only else None,
+        system=GLOBEX_CONTEXT_SYSTEM_PROMPT if research_only else STATUS_BRIEF_SYSTEM_PROMPT,
     )
     if writer != "template":
         valid = (

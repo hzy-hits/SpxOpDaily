@@ -46,7 +46,7 @@ def fetch_chain(
     strike_count: int | None = None,
     expiry: Any | None = None,
 ) -> Any:
-    current_expiry, next_expiry = DEFAULT_MARKET_CALENDAR.research_expiries(
+    current_expiry, next_expiry = DEFAULT_MARKET_CALENDAR.option_collection_expiries(
         now or datetime.now(tz=ET)
     )
     provider_symbol = option_chain_symbol_for_schwab(symbol)

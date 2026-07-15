@@ -22,10 +22,20 @@ The normal Oracle deployment uses the dedicated IBKR Paper username and
 
 - Schwab remains the normal RTH SPX/SPXW provider.
 - IBKR Paper remains the RTH fallback and the production SPXW GTH provider.
+- From 30 minutes before the actual RTH close (15:30 ET on normal sessions,
+  12:30 ET on scheduled early closes) through 17:00 ET, both collectors make the next trading day's
+  SPXW expiry their acquisition front. The completed session remains the
+  analytics/review date until the independent 17:00 ET research rollover.
 - The feed is usable only after live market-data type, advancing provider
   timestamps, two-sided prices, and configured SPXW coverage are verified.
 - If the Paper feed is delayed, frozen, unsubscribed, or blocked by a competing
   market-data session, failover is unavailable and new entries fail closed.
+
+The GTH Paper plan uses 56 continuously subscribed SPXW contracts and a
+28-contract rotating slice. The slice advances every two seconds. Together
+with four base lines and a six-line slow-poll batch, the expected peak is 94
+of the initial 100-line entitlement; runtime ticker-limit evidence reduces the
+effective capacity automatically.
 
 The Live username is intentionally not kept logged in on Oracle. Live-account
 positions, orders, fills, and PnL therefore remain outside this deployment's

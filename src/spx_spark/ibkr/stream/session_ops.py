@@ -86,6 +86,7 @@ class SessionOps:
     def market_data_allowed(self) -> bool:
         if time.monotonic() < self.market_data_retry_not_before:
             return False
+        self.market_data_retry_reason = None
         if self.force:
             return True
         override = load_override(self.runtime_policy.runtime_mode_path)
@@ -119,10 +120,23 @@ class SessionOps:
         )
 
     def defer_market_data_after_conflict(self, *, seconds: float) -> None:
+        self.market_data_retry_reason = (
+            "competing live session owns shared market data (IBKR 10197)"
+        )
         self.market_data_retry_not_before = max(
             self.market_data_retry_not_before,
             time.monotonic() + max(seconds, 0.0),
         )
+
+    def market_data_block_reason(self) -> str | None:
+        if time.monotonic() < self.market_data_retry_not_before:
+            return self.market_data_retry_reason
+        return None
+
+    def market_data_retry_delay_seconds(self) -> float | None:
+        if self.market_data_retry_reason is None:
+            return None
+        return max(self.market_data_retry_not_before - time.monotonic(), 0.0)
 
     def open_session(self) -> None:
         if self.broker_settings.account_read_enabled:

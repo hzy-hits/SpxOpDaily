@@ -12,6 +12,7 @@ _RTH_OPEN = time(9, 30)
 _RTH_CLOSE = time(16, 0)
 _EARLY_CLOSE = time(13, 0)
 _REVIEW_READY = time(17, 0)
+_NEXT_EXPIRY_PREFETCH_BEFORE_CLOSE = timedelta(minutes=30)
 _GLOBEX_OPEN = time(18, 0)
 _GLOBEX_MAINTENANCE = time(17, 0)
 _SPX_GTH_OPEN = time(20, 15)
@@ -156,6 +157,32 @@ class MarketCalendar:
     def research_expiries(self, now: datetime) -> tuple[date, date]:
         current = self.research_expiry(now)
         return current, self.next_trading_day(current)
+
+    def option_collection_expiry(self, now: datetime) -> date:
+        """Roll acquisition to the next expiry 30 minutes before the RTH close."""
+
+        current = _as_et(now)
+        session = self.session(current.date())
+        if session is not None:
+            prefetch_at = session.close_at - _NEXT_EXPIRY_PREFETCH_BEFORE_CLOSE
+            if prefetch_at <= current < session.review_ready_at:
+                return self.next_trading_day(session.trading_date)
+        return self.research_expiry(current)
+
+    def option_collection_expiries(self, now: datetime) -> tuple[date, date]:
+        current = self.option_collection_expiry(now)
+        return current, self.next_trading_day(current)
+
+    def is_next_expiry_prefetch_window(self, now: datetime) -> bool:
+        current = _as_et(now)
+        session = self.session(current.date())
+        if session is None:
+            return False
+        return (
+            session.close_at - _NEXT_EXPIRY_PREFETCH_BEFORE_CLOSE
+            <= current
+            < session.review_ready_at
+        )
 
     def completed_review_date(self, now: datetime) -> date:
         current = _as_et(now)

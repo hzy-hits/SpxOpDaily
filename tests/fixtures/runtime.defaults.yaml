@@ -704,7 +704,7 @@ service_loop:
     value: 60
     description: Delay before retrying an unavailable IBKR snapshot connection.
   ibkr_conflict_probe_seconds:
-    value: 60
+    value: 15
     description: Delay before a read-only probe after an IBKR session conflict.
   max_concurrent_tasks:
     value: 4
@@ -783,8 +783,8 @@ ibkr_stream:
     value: 172
     description: Client id for the persistent streaming collector.
   flush_interval_seconds:
-    value: 5.0
-    description: Maximum seconds between stream flushes to latest-state storage.
+    value: 2.0
+    description: Maximum seconds between hot-lane flushes and SPXW rotation slices.
   policy_check_seconds:
     value: 30.0
     description: Seconds between runtime-policy checks in the stream collector.
@@ -792,7 +792,7 @@ ibkr_stream:
     value: 20.0
     description: SPX point drift that triggers option subscription replanning.
   max_option_lines:
-    value: 78
+    value: 84
     description: Maximum fallback SPXW option lines; validation mode uses 64.
   hot_lane_share:
     value: 0.6875
@@ -868,7 +868,7 @@ runtime_policy:
     value: 0
     description: Minutes before trying to reclaim a competing IBKR session; zero disables fighting.
   ibkr_conflict_probe_seconds:
-    value: 60
+    value: 15
     description: Seconds between non-invasive probes after an IBKR session conflict.
   ibkr_fallback_provider:
     value: schwab

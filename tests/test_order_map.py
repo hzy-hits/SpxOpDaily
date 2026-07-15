@@ -1661,6 +1661,7 @@ def test_missing_all_references_still_fails_closed_as_research_only() -> None:
     assert payload["research_reference"] == {"price": None, "source": None}
     assert payload["underlier"] == {"price": None, "source": None}
     assert payload["candidates"] == []
+    assert payload["expiry"] == "20260707"
     assert "不可执行定价" in render_template(payload)
 
 
@@ -1696,6 +1697,35 @@ def test_research_status_includes_basis_spx_and_frozen_key_level_context() -> No
     assert "距触发位 -9.0 点" in rendered
     assert "正在接近，尚未完成关键位测试" in rendered
     assert "低于Put Wall 14.0点" in rendered
+
+
+def test_us_data_hour_still_labels_es_path_as_globex_before_cash_open() -> None:
+    payload = {
+        "research_only": True,
+        "beijing_time": "21:00",
+        "expiry": "20260715",
+        "research_reference": {"price": 7566.0, "source": "future:ES"},
+        "pricing_reference": {"gate_state": "missing"},
+        "session_phase": {
+            "name": "us_data_hour",
+            "name_cn": "美盘数据前小时",
+            "minutes_since_us_open": None,
+        },
+        "globex_trend": {
+            "regime": "bullish",
+            "metrics": {
+                "price": 7611.5,
+                "return_15m_points": 1.0,
+                "return_60m_points": 11.0,
+                "return_180m_points": 7.5,
+            },
+        },
+    }
+
+    rendered = render_template(payload)
+
+    assert "ES Globex路径" in rendered
+    assert "ES RTH路径" not in rendered
 
 
 def test_research_observed_quotes_apply_freshness_and_label_stale_rows(
@@ -1802,6 +1832,11 @@ def test_globex_status_uses_writer_and_trade_delivery(monkeypatch, tmp_path) -> 
     monkeypatch.setattr(order_map_module, "dispatch_notification", deliver)
     monkeypatch.setattr(order_map_module, "mark_sent", lambda *args, **kwargs: None)
     monkeypatch.setattr(order_map_module, "record_push", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        order_map_module,
+        "persist_order_map_pricing_audit",
+        lambda *args, **kwargs: None,
+    )
 
     result = order_map_module.run_status(
         SimpleNamespace(force=True, dry_run=False),

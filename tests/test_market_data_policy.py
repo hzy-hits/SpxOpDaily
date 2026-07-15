@@ -56,3 +56,27 @@ def test_spxw_rth_keeps_configured_provider_priority() -> None:
     )
 
     assert selected[0].provider is Provider.SCHWAB
+
+
+def test_spxw_rth_pins_schwab_ahead_of_misconfigured_priority() -> None:
+    observed_at = datetime(2026, 7, 14, 14, 0, tzinfo=timezone.utc)
+
+    selected = select_best_quotes(
+        (_spxw(Provider.SCHWAB, observed_at), _spxw(Provider.IBKR, observed_at)),
+        as_of=observed_at,
+        provider_priority=(Provider.IBKR, Provider.SCHWAB),
+    )
+
+    assert selected[0].provider is Provider.SCHWAB
+
+
+def test_spxw_rth_uses_ibkr_when_schwab_is_absent() -> None:
+    observed_at = datetime(2026, 7, 14, 14, 0, tzinfo=timezone.utc)
+
+    selected = select_best_quotes(
+        (_spxw(Provider.IBKR, observed_at),),
+        as_of=observed_at,
+        provider_priority=(Provider.SCHWAB, Provider.IBKR),
+    )
+
+    assert selected[0].provider is Provider.IBKR

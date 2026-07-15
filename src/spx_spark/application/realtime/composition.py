@@ -354,13 +354,17 @@ def run_realtime_engine_cycle(
     settings = app_settings or load_production_settings()
     storage = StorageSettings.from_env()
     runtime = build_realtime_runtime(storage, app_settings=settings)
-    now = datetime.now(tz=timezone.utc)
-    result = runtime.run_cycle(now=now)
+    tick_started_at = datetime.now(tz=timezone.utc)
+    result = runtime.run_cycle(now=tick_started_at)
+    # Analytics can exceed the quote freshness threshold. Projection-side
+    # health checks must use wall-clock time after the tick, not the timestamp
+    # captured before the analytics work started.
+    projection_now = datetime.now(tz=timezone.utc)
     try:
         level_shadow = run_level_decision_shadow(
             storage,
             result.tick,
-            now=now,
+            now=projection_now,
             policy=settings.level_decision,
         )
     except Exception as exc:  # noqa: BLE001 - shadow audit must not break realtime
@@ -373,7 +377,7 @@ def run_realtime_engine_cycle(
         level_repricing = run_level_trigger_repricing(
             storage,
             level_shadow,
-            now=now,
+            now=projection_now,
             policy=settings.order_map,
         )
     except Exception as exc:  # noqa: BLE001 - expose failure without stopping collection
@@ -386,7 +390,7 @@ def run_realtime_engine_cycle(
             storage,
             level_repricing,
             level_shadow,
-            now=now,
+            now=projection_now,
         )
     except Exception as exc:  # noqa: BLE001 - outcome audit is non-critical IO
         pricing_outcomes = {

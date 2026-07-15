@@ -134,6 +134,7 @@ def test_competing_session_cooldown_suppresses_only_market_data(
     collector = object.__new__(StreamCollector)
     collector.force = True
     collector.market_data_retry_not_before = 0.0
+    collector.market_data_retry_reason = None
     collector.broker_settings = SimpleNamespace(
         account_read_enabled=True,
         execution_mode="manual",
@@ -144,8 +145,56 @@ def test_competing_session_cooldown_suppresses_only_market_data(
 
     assert collector.market_data_allowed() is False
     assert collector.connection_required() is True
+    assert collector.market_data_block_reason() == (
+        "competing live session owns shared market data (IBKR 10197)"
+    )
+    assert collector.market_data_retry_delay_seconds() == pytest.approx(30.0)
     now = 131.0
     assert collector.market_data_allowed() is True
+    assert collector.market_data_block_reason() is None
+    assert collector.market_data_retry_delay_seconds() is None
+
+
+def test_runtime_preserves_competing_session_reason_during_cooldown(monkeypatch) -> None:
+    class BlockedCollector:
+        def connection_required(self) -> bool:
+            return False
+
+        def market_data_block_reason(self) -> str:
+            return "competing live session owns shared market data (IBKR 10197)"
+
+        def market_data_retry_delay_seconds(self) -> float:
+            return 15.0
+
+    runtime = StreamRuntime(
+        collector=BlockedCollector(),  # type: ignore[arg-type]
+        stream_settings=SimpleNamespace(
+            reconnect_min_seconds=1.0,
+            reconnect_max_seconds=2.0,
+            policy_check_seconds=30.0,
+        ),
+        storage_settings=object(),
+        runtime_policy=object(),
+    )
+    persisted: list[object] = []
+    events: list[dict[str, object]] = []
+    sleeps: list[float] = []
+    patch_stream(monkeypatch, "persist_state_only", lambda state, _storage: persisted.append(state),
+    )
+    patch_stream(monkeypatch, "log_event", events.append)
+    def stop_after_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        runtime.deadline = 0.0
+
+    runtime.sleep = stop_after_sleep
+
+    assert runtime.run() == 0
+    assert persisted[0].reason == (
+        "competing live session owns shared market data (IBKR 10197)"
+    )
+    assert events[0]["reason"] == persisted[0].reason
+    assert events[0]["retry_in_seconds"] == 15.0
+    assert sleeps == [15.0]
 
 
 def test_account_standby_reconnects_into_market_mode_without_subscribing_in_place(

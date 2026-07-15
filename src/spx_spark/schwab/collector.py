@@ -138,7 +138,9 @@ def run(
             and gateway_window.failures == 0
         ),
     )
-    current_expiry, next_expiry = DEFAULT_MARKET_CALENDAR.research_expiries(evaluation_now)
+    current_expiry, next_expiry = DEFAULT_MARKET_CALENDAR.option_collection_expiries(
+        evaluation_now
+    )
     current_expiry_text = current_expiry.strftime("%Y%m%d")
     burst = bool(budget_state.burst_until and evaluation_now < budget_state.burst_until)
     profile = effective_profile(
@@ -303,6 +305,11 @@ def run(
         "chain_lanes_skipped": chain_lanes_skipped,
         "coverage": coverage_summary,
         "profile": profile.value,
+        "collection_expiry": current_expiry.strftime("%Y%m%d"),
+        "next_collection_expiry": next_expiry.strftime("%Y%m%d"),
+        "next_session_prefetch": (
+            DEFAULT_MARKET_CALENDAR.is_next_expiry_prefetch_window(evaluation_now)
+        ),
         "planned_requests_per_minute": planned_requests_per_minute(
             profile,
             typed_settings.cadence,

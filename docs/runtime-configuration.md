@@ -32,14 +32,30 @@ shock/strategy windows, post-close review, scheduled push LLM writing, the
 Steven observe-only guidance block (`steven.*`, default disabled), and the
 research data platform.
 
-Phase 1 data-budget defaults currently include IBKR stream
-`max_option_lines=68` with `sampling.hot_window_points=55`, Schwab REST
+The production GTH data budget gives IBKR `84` SPXW lines (`56` persistent hot
+contracts plus `28` rotating contracts) and `0` SPY option lines; Schwab owns
+the SPY option lane. This prevents a stale local environment override from
+silently spending scarce IBKR lines on the wrong product. A two-second
+flush cadence advances one 28-contract rotation slice while the 56-contract
+hot lane remains continuously subscribed. The adaptive capacity tracker lowers
+the plan after ticker-limit evidence. From 30 minutes before the actual RTH close
+(15:30 ET on normal sessions, 12:30 ET on scheduled early closes) to 17:00 ET, acquisition
+rolls its front contract to the next trading day's SPXW while analytics retains
+the completed session until the normal 17:00 research rollover. The remaining
+Phase 1 defaults include `sampling.hot_window_points=55`, Schwab REST
 `collection.interval_seconds=5` with per-instrument chain tiers (A: `$SPX` at
 5s/`strikeCount=40`; B: SPY/QQQ/IWM/XSP at 15s), and IBKR session-hardening
 keys `ibkr_stream.freeze_quotes_on_connectivity_loss` plus
 `provider_failover.ibkr_recovery_observations`. Environment variables still
 override YAML (notably a local `IBKR_STREAM_MAX_OPTION_LINES` may pin the stream
 below the YAML default until removed).
+
+The Paper username receives shared Live subscriptions only while the sharing
+Live username is not consuming them in TWS, Mobile, or Client Portal. IBKR
+error `10197` is therefore an entitlement-owner conflict, not a line-capacity
+or rotation failure. The collector preserves that reason through its cooldown
+and probes every 15 seconds so it rebuilds the `54 + 24` SPXW plan promptly
+after the Live session releases the data.
 
 Secrets and operator-private endpoints stay out of YAML. API keys, app secrets,
 device-specific Bark URLs, Feishu webhook URLs/secrets and other credentials

@@ -59,8 +59,8 @@ def _globex_trend_line(payload: dict[str, Any]) -> str | None:
 
     regime = str(trend.get("regime") or "neutral")
     phase = payload.get("session_phase")
-    phase_name = str(phase.get("name") or "") if isinstance(phase, dict) else ""
-    path_label = "ES RTH路径" if phase_name.startswith("us_") else "ES Globex路径"
+    cash_open = isinstance(phase, dict) and phase.get("minutes_since_us_open") is not None
+    path_label = "ES RTH路径" if cash_open else "ES Globex路径"
     candidate = trend.get("candidate_regime")
     candidate_text = ""
     if isinstance(candidate, str):
@@ -103,7 +103,7 @@ def _market_feature_lines(payload: dict[str, Any]) -> list[str]:
             f"量价帧: 5m增量 {_dash(volume.get('volume_delta_5m'))}; "
             f"{alignment}; "
             f"ES/SPY {cross.get('es_spy_direction_confirmation_15m') or 'unavailable'}; "
-            f"源 {volume_provider or '-'}"
+            f"ES源 {volume_provider or '-'}"
         ),
     ]
     if isinstance(options, dict):
@@ -719,7 +719,6 @@ def _level_decision_lines(payload: dict[str, Any]) -> list[str]:
     spot = finite_float(decision.get("spot"))
     es = finite_float(decision.get("es"))
     levels = decision.get("levels") if isinstance(decision.get("levels"), dict) else {}
-    bands = decision.get("level_bands") if isinstance(decision.get("level_bands"), dict) else {}
     es_levels = (
         decision.get("es_equivalent_levels")
         if isinstance(decision.get("es_equivalent_levels"), dict)
@@ -745,9 +744,7 @@ def _level_decision_lines(payload: dict[str, Any]) -> list[str]:
         f"SPX 代理: {_dash(spot)}({source})；ES {_dash(es)}",
         (
             "SPX 稳定结构: Put Wall "
-            f"{_band(bands.get('put_wall'), put_wall)} | Flip "
-            f"{_band(bands.get('flip_low'), flip_low)}–{_band(bands.get('flip_high'), flip_high)} | "
-            f"Call Wall {_band(bands.get('call_wall'), call_wall)}"
+            f"{put_wall} | Flip {flip_low}–{flip_high} | Call Wall {call_wall}"
         ),
         *(
             [
@@ -774,12 +771,6 @@ def _level_decision_lines(payload: dict[str, Any]) -> list[str]:
         )
         lines.append(f"结构口径: {source_label}（expiry={expiry}）")
     return lines
-
-
-def _band(value: object, fallback: str) -> str:
-    if not isinstance(value, dict):
-        return fallback
-    return f"{_dash(value.get('low'))}–{_dash(value.get('high'))}"
 
 
 def _level_position_line(spot: float | None, levels: dict[str, Any]) -> str:

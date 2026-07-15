@@ -138,7 +138,12 @@ class OptionSubscriptionOps:
         if self.skip_options:
             return
         decision_at = datetime.now(tz=timezone.utc)
-        current_expiry, next_expiry = self.market_calendar.research_expiries(decision_at)
+        current_expiry, next_expiry = self.market_calendar.option_collection_expiries(
+            decision_at
+        )
+        next_session_prefetch = self.market_calendar.is_next_expiry_prefetch_window(
+            decision_at
+        )
         today = current_expiry.strftime("%Y%m%d")
         next_expiry_text = next_expiry.strftime("%Y%m%d")
         by_label = {row.label: row for row in rows}
@@ -207,6 +212,8 @@ class OptionSubscriptionOps:
                 "accepted_atm": self.option_replan_controller.accepted_atm,
                 "accepted_source": self.option_replan_controller.accepted_source,
                 "accepted_expiry": self.option_replan_controller.accepted_expiry,
+                "collection_expiry": today,
+                "next_session_prefetch": next_session_prefetch,
                 "state": decision.state,
                 "reason": decision.reason,
                 "confirmations": decision.confirmation_count,
@@ -224,11 +231,19 @@ class OptionSubscriptionOps:
             return
 
         control = load_failover_control(self.provider_failover_settings.state_path)
-        fallback = isinstance(control, dict) and control.get("mode") in {
-            FailoverMode.RECOVERY_PENDING.value,
-            FailoverMode.IBKR_FALLBACK.value,
-            FailoverMode.BOTH_UNAVAILABLE.value,
-        }
+        fallback = (
+            self.market_calendar.is_spx_gth_open(decision_at)
+            or next_session_prefetch
+            or (
+                isinstance(control, dict)
+                and control.get("mode")
+                in {
+                    FailoverMode.RECOVERY_PENDING.value,
+                    FailoverMode.IBKR_FALLBACK.value,
+                    FailoverMode.BOTH_UNAVAILABLE.value,
+                }
+            )
+        )
         capacity_tracker = getattr(self, "capacity_tracker", None)
         discovered_capacity = (
             capacity_tracker.effective_capacity
@@ -238,6 +253,8 @@ class OptionSubscriptionOps:
         allocation = plan_ibkr_option_allocation(
             discovered_capacity=discovered_capacity,
             fallback=fallback,
+            base_lines=max(len(self.base_subs), 4),
+            temporary_lines=max(int(self.stream_settings.slow_poll_chunk_size), 0),
         )
         configured_option_ceiling = max(int(self.stream_settings.max_option_lines), 0)
         option_lines = min(allocation.option_lines, configured_option_ceiling)
@@ -272,6 +289,7 @@ class OptionSubscriptionOps:
                 "event": "option_replan",
                 "atm_strike": plan.atm_strike,
                 "expiry": plan.expiry,
+                "next_session_prefetch": next_session_prefetch,
                 "hot_contracts": len(plan.hot),
                 "rotation_slices": plan.rotation_count,
                 "quota_mode": allocation.mode.value,

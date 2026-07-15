@@ -130,6 +130,25 @@ def test_fetch_chain_uses_calendar_research_expiries() -> None:
     assert captured["strikeCount"] == 20
 
 
+def test_fetch_chain_prefetches_next_session_during_final_rth_half_hour() -> None:
+    captured: dict[str, Any] = {}
+
+    class FakeClient:
+        def get_json(self, path: str, params: dict[str, Any]):
+            captured.update(params)
+            return 200, {}
+
+    schwab_collector.fetch_chain(
+        FakeClient(),
+        "SPX",
+        SimpleNamespace(option_chain_strike_count=80),
+        now=datetime(2026, 7, 9, 19, 30, tzinfo=timezone.utc),
+    )
+
+    assert captured["fromDate"] == "2026-07-10"
+    assert captured["toDate"] == "2026-07-13"
+
+
 def test_fetch_chain_uses_per_instrument_strike_count_for_spx() -> None:
     captured: dict[str, Any] = {}
 
