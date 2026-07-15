@@ -50,6 +50,19 @@ def advance_stable_structure(
         }
         return _public_state(state, stable, now=now, band=band_half_width_points), stable
 
+    stable_expiry = str(stable.get("expiry") or "")
+    live_expiry = str(live_row.get("expiry") or "")
+    if live_expiry and stable_expiry and live_expiry != stable_expiry:
+        stable = _promoted(live_row, now=now, band=band_half_width_points)
+        state = {
+            "schema_version": 1,
+            "stable": stable,
+            "candidate": None,
+            "last_bucket": bucket,
+            "promotion_reason": "expiry_rollover",
+        }
+        return _public_state(state, stable, now=now, band=band_half_width_points), stable
+
     stable_levels = _levels(stable)
     if not _materially_different(stable_levels, live_levels, threshold=switch_min_points):
         stable["last_confirmed_at"] = now.isoformat()

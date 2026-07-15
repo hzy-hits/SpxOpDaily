@@ -6,7 +6,11 @@ from spx_spark.application.globex_trend.machine import (
     advance_trend_state,
     initial_state,
 )
-from spx_spark.application.globex_trend.service import alert_from_event, select_live_es
+from spx_spark.application.globex_trend.service import (
+    alert_from_event,
+    select_live_es,
+    trend_context_id,
+)
 from spx_spark.marketdata import InstrumentId, MarketDataQuality, Provider, Quote
 from spx_spark.notifier import direct_push_alerts
 from spx_spark.settings.globex_trend import GlobexTrendSettings
@@ -14,6 +18,36 @@ from spx_spark.storage import LatestState
 
 
 UTC = timezone.utc
+
+
+def test_trend_context_resets_at_gth_and_rth_boundaries() -> None:
+    assert trend_context_id(datetime(2026, 7, 13, 23, 0, tzinfo=UTC)).endswith(
+        ":globex"
+    )
+    assert trend_context_id(datetime(2026, 7, 14, 0, 30, tzinfo=UTC)).endswith(":gth")
+    assert trend_context_id(datetime(2026, 7, 14, 13, 30, tzinfo=UTC)).endswith(":rth")
+
+
+def test_new_gth_context_can_confirm_a_short_impulse_before_sixty_minutes() -> None:
+    policy = GlobexTrendSettings()
+    start = datetime(2026, 7, 14, 0, 15, tzinfo=UTC)
+    state = initial_state("2026-07-14:gth")
+    transition = None
+    for minute, price in ((0, 7600.0), (15, 7590.0), (16, 7589.0)):
+        observed_at = start + timedelta(minutes=minute)
+        state, transition = advance_trend_state(
+            state,
+            session_id="2026-07-14:gth",
+            at=observed_at,
+            price=price,
+            provider="ibkr",
+            source_at=observed_at,
+            policy=policy,
+        )
+
+    assert transition is not None
+    assert transition["to_regime"] == "bearish"
+    assert transition["reason"] == "initial_short_impulse"
 
 
 def test_globex_replay_detects_down_up_down_without_churn() -> None:

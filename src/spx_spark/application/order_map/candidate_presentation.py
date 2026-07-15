@@ -66,6 +66,18 @@ def apply_candidate_presentation(payload: dict[str, Any], *, now: datetime) -> N
         return
 
     payload["plan_candidates"] = []
+    if not _directional_setup_active(payload):
+        payload["observation_candidates"] = []
+        payload["opposing_invalidation"] = None
+        payload["candidate_presentation"] = {
+            "mode": "observation_only",
+            "reason": "no_directional_setup",
+            "play": None,
+            "primary_direction": None,
+            "direction_source": "level_decision",
+            "intent_id": intent.get("intent_id"),
+        }
+        return
     direction, direction_source = _primary_direction(payload)
     primary = _choose_primary(candidates, payload=payload, direction=direction)
     payload["observation_candidates"] = [_as_observation(primary)] if primary else []
@@ -81,6 +93,18 @@ def apply_candidate_presentation(payload: dict[str, Any], *, now: datetime) -> N
         "direction_source": direction_source,
         "intent_id": intent.get("intent_id"),
     }
+
+
+def _directional_setup_active(payload: dict[str, Any]) -> bool:
+    decision = payload.get("level_decision")
+    if not isinstance(decision, dict):
+        return False
+    return bool(
+        str(decision.get("phase") or "").lower()
+        in {"accepted", "retest", "confirmed"}
+        and str(decision.get("thesis") or "") in {"breakout", "fade"}
+        and str(decision.get("direction") or "") in {"up", "down"}
+    )
 
 
 def _primary_direction(payload: dict[str, Any]) -> tuple[str, str]:

@@ -24,6 +24,7 @@ from spx_spark.analytics.options.models import (
     UnderlierReference,
 )
 from spx_spark.analytics.options.pricing import option_mid
+from spx_spark.analytics.options.quote_policy import gth_analytical_quote
 from spx_spark.analytics.options.service import build_expiry_map
 from spx_spark.domain.analytics import (
     AnalyticsDiagnostics,
@@ -236,6 +237,7 @@ def _usable_strike_metrics(
 @dataclass(frozen=True)
 class ChainFreshnessThresholds:
     max_age_seconds: float = 15.0
+    gth_max_age_seconds: float = 90.0
     min_usable_strikes: int = 21
     min_two_sided_ratio: float = 0.80
     min_wing_strikes_each_side: int = 8
@@ -246,6 +248,7 @@ class ChainFreshnessThresholds:
             return cls()
         return cls(
             max_age_seconds=settings.max_chain_age_seconds,
+            gth_max_age_seconds=settings.gth_max_chain_age_seconds,
             min_usable_strikes=settings.min_usable_strikes,
             min_two_sided_ratio=settings.min_two_sided_ratio,
             min_wing_strikes_each_side=settings.min_wing_strikes_each_side,
@@ -274,14 +277,23 @@ def evaluate_front_chain_fresh(
     if not by_expiry:
         return False
     front_expiry = sorted(by_expiry)[0]
+    in_gth = DEFAULT_MARKET_CALENDAR.is_spx_gth_open(now)
+    max_age_seconds = (
+        thresholds.gth_max_age_seconds if in_gth else thresholds.max_age_seconds
+    )
     fresh_quotes: list[Quote] = []
     for quote in by_expiry[front_expiry]:
-        if quote.quality in BAD_QUALITIES:
+        analytical_quote = gth_analytical_quote(
+            quote,
+            as_of=now,
+            max_age_seconds=max_age_seconds,
+        )
+        if analytical_quote.quality in BAD_QUALITIES:
             continue
         age_ms = quote.quote_age_ms(now)
-        if age_ms is None or age_ms / 1000.0 > thresholds.max_age_seconds:
+        if age_ms is None or age_ms / 1000.0 > max_age_seconds:
             continue
-        fresh_quotes.append(quote)
+        fresh_quotes.append(analytical_quote)
     if not fresh_quotes:
         return False
     liveish = list(select_best_quotes(fresh_quotes, as_of=now))

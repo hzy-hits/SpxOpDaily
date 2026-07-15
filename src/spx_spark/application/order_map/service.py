@@ -21,6 +21,9 @@ from spx_spark.application.order_map.candidate_presentation import (
     apply_candidate_presentation as _apply_candidate_presentation,
 )
 from spx_spark.application.order_map.candidates import build_candidates
+from spx_spark.application.order_map.decision_consistency import (
+    apply_decision_projections,
+)
 from spx_spark.application.order_map.delivery import send_order_map
 from spx_spark.application.order_map.es_volume_attach import attach_es_volume_signal
 from spx_spark.application.order_map.hl_volume import (
@@ -39,6 +42,7 @@ from spx_spark.application.order_map.prompts import (
     actionable_writer_output_valid,
     build_status_prompt,
     globex_writer_output_valid,
+    render_feishu_delivery_text,
     render_status_template,
 )
 from spx_spark.application.order_map.pricing_audit import (
@@ -93,11 +97,14 @@ from spx_spark.settings.order_map import DEFAULT_ORDER_MAP_POLICY, OrderMapPolic
 
 STATUS_KEY_WINDOW_PHASES = frozenset(
     {
+        "europe_session",
         "us_data_hour",
         "us_open_hour",
         "us_midday_confirmation",
     }
 )
+GTH_STATUS_PHASES = frozenset({"asia_globex", "europe_session", "us_data_hour"})
+GTH_STATUS_CADENCE_SECONDS = 15.0 * 60.0
 
 
 def build_order_payload(
@@ -441,14 +448,7 @@ def build_order_payload_with_retry(
     attempts: int = 7,
     delay_seconds: float = 10.0,
 ) -> dict[str, Any]:
-    """Reload latest state for thin snapshots or a stale action candidate.
-
-    Thin snapshots happen during slow-poll windows (the stream blocks ~30-50s
-    without flushing) and option line rotation gaps. A single intended play can
-    also fall outside the 15-second actionability window while the other plays
-    remain present. The retry budget spans one full option rotation, and every
-    attempt rebuilds the whole payload against an advancing evaluation time.
-    """
+    """Rebuild thin/stale payloads across one option-rotation retry budget."""
     payload: dict[str, Any] = {}
     app = load_app_settings()
     policy = app.order_map
@@ -466,31 +466,24 @@ def build_order_payload_with_retry(
         if attempt < attempts - 1:
             time_module.sleep(delay_seconds)
     if state is not None:
-        level_decision = load_level_decision_shadow(storage_settings)
-        payload["level_decision"] = level_decision
-        if payload.get("research_only") is True and isinstance(level_decision, dict):
-            context_spot = finite_float(level_decision.get("spot"))
-            context_source = level_decision.get("spot_source")
-            if context_spot is not None and isinstance(context_source, str):
-                payload["context_reference"] = {
-                    "price": context_spot,
-                    "source": context_source,
-                    "executable": False,
-                }
+        feature_paths = projection_paths(storage_settings.data_root)
+        market_frame = load_json(feature_paths["market"])
+        option_frame = load_json(feature_paths["option"])
         payload["globex_trend"] = load_trend_state(trend_state_path(storage_settings.data_root))
         payload["gth_dip_reclaim_signal"] = load_json(
             Path(storage_settings.data_root) / "latest" / "gth_dip_reclaim_signal.json"
         )
-        feature_paths = projection_paths(storage_settings.data_root)
-        market_frame = load_json(feature_paths["market"])
         payload["minute_market_frame"] = market_frame
         _apply_gth_em_usage(payload, market_frame)
-        payload["option_structure_frame"] = load_json(feature_paths["option"])
-        decision_context = load_json(feature_paths["decision"])
-        payload["decision_context"] = decision_context
-        payload["regime_decision"] = decision_context.get("regime_decision", {})
-        payload["breakout_filter"] = decision_context.get("breakout_filter", {})
-        payload["trade_intent"] = decision_context.get("trade_intent", {})
+        payload["option_structure_frame"] = option_frame
+        apply_decision_projections(
+            payload,
+            level_decision=load_level_decision_shadow(storage_settings),
+            market_frame=market_frame,
+            option_frame=option_frame,
+            decision_context=load_json(feature_paths["decision"]),
+            max_level_drift_points=app.market_features.trade_structure_drift_points,
+        )
         payload["level_trigger_repricing"] = load_json(
             default_level_trigger_repricing_path(storage_settings)
         )
@@ -584,8 +577,10 @@ def _decision_thesis(payload: dict[str, Any]) -> str:
     if isinstance(plans, list) and len(plans) == 1 and isinstance(plans[0], dict):
         plan = plans[0]
         return f"plan:{plan.get('play') or '-'}@{finite_float(plan.get('level'))}"
+    intent = payload.get("trade_intent")
+    intent_status = str(intent.get("status") or "") if isinstance(intent, dict) else ""
     regime = payload.get("regime_decision")
-    if isinstance(regime, dict):
+    if intent_status in {"blocked", "trade_ready"} and isinstance(regime, dict):
         mode = str(regime.get("mode") or "unknown")
         direction = str(regime.get("direction") or "unknown")
         if mode != "unknown" or direction != "unknown":
@@ -660,13 +655,12 @@ def _status_delivery_reason(
     fingerprint: dict[str, Any],
     changes: list[str],
     *,
+    now: datetime,
     trading_date: str,
     position_risk: bool,
 ) -> str | None:
     if previous.get("last_status_date") != trading_date:
         return "initial_status"
-    if changes:
-        return "material_changes"
     phase = str(fingerprint.get("status_phase") or "")
     previous_fingerprint = previous.get("status_fingerprint") or previous.get("fingerprint")
     previous_phase = (
@@ -678,6 +672,29 @@ def _status_delivery_reason(
         return f"key_window:{phase}"
     if position_risk:
         return "open_position_risk"
+    if phase in GTH_STATUS_PHASES:
+        prior_intent = (
+            str(previous_fingerprint.get("trade_intent_id") or "")
+            if isinstance(previous_fingerprint, dict)
+            else ""
+        )
+        current_intent = str(fingerprint.get("trade_intent_id") or "")
+        if not prior_intent and not current_intent:
+            structural_changes = [
+                change for change in changes if not change.startswith("决策剧本")
+            ]
+            if structural_changes:
+                return "material_changes"
+            last_status_at = finite_float(previous.get("last_status_at"))
+            if (
+                last_status_at is None
+                or int(now.timestamp() // GTH_STATUS_CADENCE_SECONDS)
+                > int(last_status_at // GTH_STATUS_CADENCE_SECONDS)
+            ):
+                return f"gth_quarter_hour_heartbeat:{phase}"
+            return None
+    if changes:
+        return "material_changes"
     return None
 
 
@@ -697,8 +714,7 @@ def run_status(
     storage_settings = StorageSettings.from_env()
     payload = build_order_payload_with_retry(storage_settings, now=now)
     if _payload_is_thin(payload) and not args.force:
-        # Normal sampling gap (slow poll / line rotation), not an outage:
-        # skip quietly, the next 15-minute run will have full data.
+        # A normal slow-poll/rotation gap; the next run gets the full snapshot.
         print(json.dumps({"skipped": True, "reason": "thin_snapshot_sampling_gap"}))
         return 0
     fingerprint = _status_fingerprint(payload)
@@ -720,6 +736,7 @@ def run_status(
             previous,
             fingerprint,
             changes,
+            now=now,
             trading_date=trading_date,
             position_risk=_has_open_position_risk(storage_settings),
         )
@@ -745,6 +762,7 @@ def run_status(
         )
         if not valid:
             text, writer = template, "template_validation_fallback"
+    feishu_text = render_feishu_delivery_text(payload, changes, now, text)
     event_id = notification_event_id(
         "status",
         source="order_map_status",
@@ -763,7 +781,7 @@ def run_status(
         title="SPX 15分钟市场状态",
         text=text,
         friend=True,
-        feishu_text=text,
+        feishu_text=feishu_text,
         runner=runner,
         attempted_at=now,
     )

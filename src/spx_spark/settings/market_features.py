@@ -23,6 +23,8 @@ class MarketFeatureSettings:
     rth_end_et: str = "16:00"
     curb_end_et: str = "17:00"
     min_l1_liquidity_score: float = 40.0
+    l1_spread_p50_limit_bps: float = 500.0
+    l1_spread_p90_limit_bps: float = 1500.0
     trend_efficiency_high: float = 0.45
     trend_efficiency_low: float = 0.25
     flat_vwap_slope_points: float = 1.0
@@ -69,6 +71,8 @@ class MarketFeatureSettings:
             self.hot_option_limit,
             self.provider_sync_tolerance_seconds,
             self.min_l1_liquidity_score,
+            self.l1_spread_p50_limit_bps,
+            self.l1_spread_p90_limit_bps,
             self.trend_efficiency_high,
             self.trend_efficiency_low,
             self.flat_vwap_slope_points,

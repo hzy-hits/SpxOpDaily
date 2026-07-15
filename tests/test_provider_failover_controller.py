@@ -155,7 +155,10 @@ def test_controller_requires_live_es_and_spxw_pairs_during_gth(tmp_path) -> None
         gth_min_live_option_contracts=2,
     )
     gth = datetime(2026, 7, 13, 1, 30, tzinfo=UTC)
-    rows = [quote(InstrumentId.future("ES"), Provider.SCHWAB, gth)]
+    rows = [
+        quote(InstrumentId.future("ES"), Provider.SCHWAB, gth),
+        quote(InstrumentId.future("ES"), Provider.IBKR, gth),
+    ]
     for right in ("C", "P"):
         rows.append(
             quote(
@@ -166,7 +169,7 @@ def test_controller_requires_live_es_and_spxw_pairs_during_gth(tmp_path) -> None
                     right=right,
                     trading_class="SPXW",
                 ),
-                Provider.SCHWAB,
+                Provider.IBKR,
                 gth,
             )
         )
@@ -174,10 +177,12 @@ def test_controller_requires_live_es_and_spxw_pairs_during_gth(tmp_path) -> None
     state = evaluate_and_persist(latest(gth, *rows), cfg)
     raw = json.loads((tmp_path / "failover.json").read_text(encoding="utf-8"))
 
-    assert state.mode == FailoverMode.SCHWAB_PRIMARY
+    assert state.mode == FailoverMode.IBKR_FALLBACK
     assert raw["monitoring_context"] == "gth"
-    assert state.schwab_unhealthy_streak == 0
-    assert "2 SPXW contracts/1 pairs" in state.last_schwab_reason
+    assert raw["preferred_option_provider"] == "ibkr"
+    assert raw["selection_policy"] == "ibkr_gth_primary"
+    assert raw["new_entries_allowed"] is True
+    assert "2 SPXW contracts/1 pairs" in state.last_ibkr_reason
 
 
 def test_controller_rejects_es_only_during_gth(tmp_path) -> None:
@@ -187,15 +192,15 @@ def test_controller_rejects_es_only_during_gth(tmp_path) -> None:
         gth_min_live_option_contracts=2,
     )
     gth = datetime(2026, 7, 13, 1, 30, tzinfo=UTC)
-    schwab_es = quote(InstrumentId.future("ES"), Provider.SCHWAB, gth)
+    ibkr_es = quote(InstrumentId.future("ES"), Provider.IBKR, gth)
 
-    state = evaluate_and_persist(latest(gth, schwab_es), cfg)
+    state = evaluate_and_persist(latest(gth, ibkr_es), cfg)
     raw = json.loads((tmp_path / "failover.json").read_text(encoding="utf-8"))
 
-    assert state.schwab_unhealthy_streak == 1
-    assert "GTH SPXW coverage 0/2" in state.last_schwab_reason
-    assert raw["health_dimensions"]["schwab"]["anchors"]["healthy"] is True
-    assert raw["health_dimensions"]["schwab"]["gth_options"] == {
+    assert state.mode == FailoverMode.RECOVERY_PENDING
+    assert "GTH SPXW coverage 0/2" in state.last_ibkr_reason
+    assert raw["health_dimensions"]["ibkr"]["anchors"]["healthy"] is True
+    assert raw["health_dimensions"]["ibkr"]["gth_options"] == {
         "healthy": False,
         "required": True,
         "reason": "GTH SPXW coverage 0/2 contracts, 0/1 complete pairs",

@@ -20,7 +20,6 @@ from spx_spark.application.order_map.render import (
     _market_feature_lines,
     _l1_liquidity_text,
     _rn_density_line,
-    _wall_ladder_lines,
     render_research_only_template,
     render_template,
 )
@@ -375,7 +374,20 @@ def _compact_option_line(payload: dict[str, Any]) -> str | None:
     ]
     if isinstance(options, dict):
         l1 = options.get("l1") if isinstance(options.get("l1"), dict) else {}
-        parts.append(f"L1流动性 {_l1_liquidity_text(l1)}")
+        diagnostics = (
+            l1.get("diagnostics") if isinstance(l1.get("diagnostics"), dict) else {}
+        )
+        provider_counts = diagnostics.get("selected_provider_counts")
+        provider_text = ""
+        if isinstance(provider_counts, dict):
+            providers = [
+                f"{str(provider).upper()} {int(count)}"
+                for provider, count in sorted(provider_counts.items())
+                if isinstance(count, (int, float)) and count > 0
+            ]
+            if providers:
+                provider_text = f"（{' + '.join(providers)}）"
+        parts.append(f"L1流动性 {_l1_liquidity_text(l1)}{provider_text}")
     return "波动  " + "　".join(parts)
 
 
@@ -598,13 +610,59 @@ def _detail_candidate_lines(payload: dict[str, Any]) -> list[str]:
 
 
 def _detail_ladder_lines(payload: dict[str, Any]) -> list[str]:
+    ladder = payload.get("wall_ladder") if isinstance(payload.get("wall_ladder"), dict) else {}
     rendered: list[str] = []
-    for raw in _wall_ladder_lines(payload):
-        line = raw.strip()
-        if line.endswith(":"):
-            rendered.append(f"**{line.removesuffix(':')}**")
-        elif line:
-            rendered.append(f"- {line}")
+    for key, title, default_right in (
+        ("put_walls", "Put 墙（支撑 → Call）", "C"),
+        ("call_walls", "Call 墙（阻力 → Put）", "P"),
+    ):
+        rungs = [rung for rung in ladder.get(key) or [] if isinstance(rung, dict)]
+        if not rungs:
+            continue
+        primary_strike = rungs[0].get("strike")
+        spatial = sorted(
+            rungs,
+            key=lambda rung: -(rung.get("strike") or 0.0),
+            reverse=(key == "call_walls"),
+        )
+        rendered.extend(
+            (
+                f"**{title}**",
+                "| 墙位 | OI | 触达 | 合约 | 现价 | BS / 触发参考 |",
+                "| --- | ---: | ---: | --- | ---: | --- |",
+            )
+        )
+        for rung in spatial:
+            strike = rung.get("strike")
+            star = "★" if strike == primary_strike else ""
+            oi = finite_float(rung.get("open_interest"))
+            oi_text = f"{int(oi):,}" if oi is not None and oi > 0 else "-"
+            probability = finite_float(rung.get("prob_touch"))
+            probability_text = f"{probability:.0%}" if probability is not None else "-"
+            right = str(rung.get("option_right") or default_right)
+            option_strike = rung.get("option_strike")
+            contract = f"{_dash(option_strike if option_strike is not None else strike)}{right}"
+            current = finite_float(rung.get("current_mid"))
+            projected = finite_float(rung.get("projected_mid"))
+            aggressive = finite_float(rung.get("limit_aggressive"))
+            conservative = finite_float(rung.get("limit_conservative"))
+            reference_values = [value for value in (aggressive, conservative) if value is not None]
+            reference = (
+                f"{min(reference_values):.2f}–{max(reference_values):.2f}"
+                if reference_values
+                else "-"
+            )
+            projected_text = f"{projected:.2f} / {reference}" if projected is not None else "-"
+            rendered.append(
+                f"| {star}{_dash(strike)} | {oi_text} | {probability_text} | {contract} | "
+                f"{current:.2f} | {projected_text} |"
+                if current is not None
+                else (
+                    f"| {star}{_dash(strike)} | {oi_text} | {probability_text} | {contract} | "
+                    f"- | {projected_text} |"
+                )
+            )
+        rendered.append("")
     return rendered
 
 
@@ -689,6 +747,23 @@ def render_feishu_status_detail_template(
     blocks = [header]
     blocks.extend(f"## {title}\n" + "\n".join(lines) for title, lines in sections if lines)
     return "\n\n".join(blocks)
+
+
+def render_feishu_delivery_text(
+    payload: dict[str, Any],
+    changes: list[str],
+    now_utc: datetime,
+    summary: str,
+) -> str:
+    """Place the LLM summary above deterministic full-fidelity Feishu sections."""
+
+    detail = render_feishu_status_detail_template(payload, changes, now_utc)
+    _header, separator, body = detail.partition("\n\n")
+    if detail == summary:
+        return summary
+    if separator and body:
+        return f"{summary}\n\n{body}"
+    return detail or summary
 
 
 def build_status_prompt(

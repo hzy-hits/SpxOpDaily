@@ -69,3 +69,33 @@ def test_small_wall_motion_extends_existing_structure() -> None:
     )
     assert stable["levels"] == {"put_wall": 7500.0, "call_wall": 7600.0}
     assert state["candidate"] is None
+
+
+def test_expiry_rollover_promotes_new_structure_immediately() -> None:
+    state, _stable = advance_stable_structure(
+        None,
+        structure(7500, 7600),
+        now=NOW,
+        interval_seconds=900,
+        required_confirmations=3,
+        band_half_width_points=5,
+        switch_min_points=10,
+    )
+    next_expiry = {
+        "levels": {"put_wall": 7525, "call_wall": 7625},
+        "expiry": "20260715",
+    }
+
+    state, stable = advance_stable_structure(
+        state,
+        next_expiry,
+        now=NOW + timedelta(minutes=15),
+        interval_seconds=900,
+        required_confirmations=3,
+        band_half_width_points=5,
+        switch_min_points=10,
+    )
+
+    assert stable["expiry"] == "20260715"
+    assert stable["levels"]["put_wall"] == 7525
+    assert state["promotion_reason"] == "expiry_rollover"

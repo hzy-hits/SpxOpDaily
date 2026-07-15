@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 import statistics
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import asdict
 from datetime import datetime, timedelta
 from typing import Any
@@ -19,7 +19,7 @@ from spx_spark.application.market_features.models import (
 from spx_spark.features.exposure_map import ExposureMap, ExpiryExposure
 from spx_spark.marketdata import InstrumentType, MarketDataQuality, OptionRight, Provider, Quote, as_utc
 from spx_spark.settings.market_features import MarketFeatureSettings
-from spx_spark.storage import LatestState
+from spx_spark.storage import LatestState, select_best_quotes
 
 
 def build_option_structure_frame(
@@ -196,7 +196,7 @@ def concentration_features(
             "gamma_top_share": None,
         }
     contract_volume: dict[str, tuple[float, float]] = {}
-    for quote in state.quotes:
+    for quote in state.best_quotes:
         if (
             quote.instrument.instrument_type is InstrumentType.OPTION
             and quote.instrument.expiry == front.expiry
@@ -329,19 +329,32 @@ def build_l1_microstructure(
         else None
     )
     two_sided_ratio = len(two_sided) / len(selected) if selected else 0.0
-    spread_component = max(0.0, 1.0 - (spread_p90 or 10_000.0) / 10_000.0)
+    coverage_score = 100.0 * (0.65 * two_sided_ratio + 0.35 * fresh_ratio)
+    p50_component = max(
+        0.0,
+        1.0 - (spread_p50 or 10_000.0) / policy.l1_spread_p50_limit_bps,
+    )
+    p90_component = max(
+        0.0,
+        1.0 - (spread_p90 or 10_000.0) / policy.l1_spread_p90_limit_bps,
+    )
+    execution_score = 100.0 * (0.60 * p50_component + 0.40 * p90_component)
     liquidity_score = (
-        round(
-            100
-            * (0.45 * two_sided_ratio + 0.25 * fresh_ratio + 0.30 * spread_component),
-            1,
-        )
+        round(0.45 * coverage_score + 0.55 * execution_score, 1)
         if selected
         else None
     )
-    quality = FrameQuality.READY if selected and two_sided_ratio >= 0.75 else (
-        FrameQuality.DEGRADED if selected else FrameQuality.UNAVAILABLE
+    quality = (
+        FrameQuality.READY
+        if selected
+        and two_sided_ratio >= 0.75
+        and liquidity_score is not None
+        and liquidity_score >= policy.min_l1_liquidity_score
+        else FrameQuality.DEGRADED
+        if selected
+        else FrameQuality.UNAVAILABLE
     )
+    provider_counts = Counter(quote.provider.value for quote in selected)
     frame = L1MicrostructureFrame(
         quality=quality,
         expiry=front.expiry,
@@ -360,12 +373,15 @@ def build_l1_microstructure(
             "cross_provider_mid_difference_p50": _percentile(divergences, 0.50),
             "cross_provider_mid_difference_max": max(divergences) if divergences else None,
             "two_sided_ratio": two_sided_ratio,
+            "coverage_score": round(coverage_score, 1) if selected else None,
+            "execution_score": round(execution_score, 1) if selected else None,
             "liquidity_score": liquidity_score,
         },
         diagnostics={
             "fresh_candidate_count": len(candidates),
             "common_contract_count": common,
             "provider_pair_count": len(divergences),
+            "selected_provider_counts": dict(sorted(provider_counts.items())),
             "reason": None if selected else "no_fresh_option_quotes",
         },
     )
@@ -417,12 +433,16 @@ def _fresh_front_quotes(
     now: datetime,
     policy: MarketFeatureSettings,
 ) -> list[Quote]:
-    return [
+    candidates = [
         quote
         for quote in state.quotes
         if quote.instrument.instrument_type is InstrumentType.OPTION
         and quote.instrument.expiry == expiry
-        and quote.quality is MarketDataQuality.LIVE
+    ]
+    return [
+        quote
+        for quote in select_best_quotes(candidates, as_of=now)
+        if quote.quality is MarketDataQuality.LIVE
         and quote.mid is not None
         and (now - quote_source_at(quote)).total_seconds() <= policy.max_quote_age_seconds
     ]

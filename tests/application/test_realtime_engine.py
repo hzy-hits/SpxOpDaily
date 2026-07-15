@@ -301,6 +301,47 @@ def test_front_chain_freshness_ignores_stale_provider_rows_when_live_fallback_ex
     assert snapshot_has_fresh_spxw_chain(_snapshot(quotes=quotes), now=NOW) is True
 
 
+def test_gth_front_chain_accepts_live_ibkr_rotation_rows_within_analytical_age() -> None:
+    gth = datetime(2026, 7, 14, 0, 30, tzinfo=timezone.utc)
+    quotes: list[Quote] = [
+        Quote(
+            instrument=InstrumentId.future("ES"),
+            provider=Provider.IBKR,
+            received_at=gth,
+            quality=MarketDataQuality.LIVE,
+            bid=7549.75,
+            ask=7550.25,
+            quote_time=gth,
+        )
+    ]
+    for strike in range(7440, 7665, 5):
+        for right in ("C", "P"):
+            quotes.append(
+                Quote(
+                    instrument=InstrumentId.option(
+                        "SPX",
+                        expiry="20260714",
+                        strike=strike,
+                        right=right,
+                        trading_class="SPXW",
+                    ),
+                    provider=Provider.IBKR,
+                    received_at=gth,
+                    quality=MarketDataQuality.STALE,
+                    market_data_type=1,
+                    bid=1.0,
+                    ask=1.2,
+                    quote_time=gth - timedelta(seconds=60),
+                )
+            )
+
+    assert snapshot_has_fresh_spxw_chain(_snapshot(quotes=quotes), now=gth) is True
+    assert snapshot_has_fresh_spxw_chain(
+        _snapshot(quotes=quotes),
+        now=datetime(2026, 7, 14, 14, 0, tzinfo=timezone.utc),
+    ) is False
+
+
 def test_analytics_ok_requires_explicit_success_status() -> None:
     engine = RealtimeEngine(
         snapshots=FakeSnapshotSource(_snapshot(quotes=[_quote()])),

@@ -925,6 +925,35 @@ def test_codex_message_requests_delivery_uses_explicit_cues() -> None:
     assert not codex_message_requests_delivery("结论: critical alert, but no explicit delivery cue")
 
 
+def test_delivery_protocol_cue_is_removed_from_human_message() -> None:
+    from spx_spark.notifier.policy import (
+        codex_message_respects_desk_style,
+        strip_delivery_protocol_cue,
+    )
+
+    assert (
+        strip_delivery_protocol_cue(
+            "需要看盘:\n**SPX 0DTE | TACTICAL UPDATE**\n## Desk View\nCall bias."
+        )
+        == "**SPX 0DTE | TACTICAL UPDATE**\n## Desk View\nCall bias."
+    )
+    assert strip_delivery_protocol_cue("需要看盘: SPX reclaimed 7535") == "SPX reclaimed 7535"
+    valid = "\n".join(
+        (
+            "需要看盘:",
+            "**SPX 0DTE | TACTICAL UPDATE**",
+            "## Desk View",
+            "Call bias restored.",
+            "## Execution",
+            "7533-7535.",
+            "## Risk",
+            "Below 7530.",
+        )
+    )
+    assert codex_message_respects_desk_style(valid)
+    assert not codex_message_respects_desk_style("需要看盘: 半路不追")
+
+
 def test_review_audit_records_context_consumption_without_calling_reviewer(
     tmp_path, monkeypatch
 ) -> None:
@@ -2133,6 +2162,10 @@ def test_bark_title_maps_kinds_to_chinese_categories() -> None:
     )
     assert bark_title_for_alerts([{"kind": "price_move_from_close"}]) == "SPX 价格异动"
     assert bark_title_for_alerts([{"kind": "globex_trend_transition"}]) == "SPX 价格异动"
+    assert (
+        bark_title_for_alerts([{"kind": "gth_dip_reclaim_call"}])
+        == "SPX 0DTE | CALL RECLAIM"
+    )
     assert bark_title_for_alerts([{"kind": "option_wall_proximity"}]) == "SPX 结构信号"
     assert (
         bark_title_for_alerts([{"kind": "unknown_kind", "severity": "high"}])
@@ -2158,10 +2191,19 @@ def test_codex_prompt_hides_non_focus_market_context() -> None:
     assert "09:30-16:00 ET 是 SPX RTH" in prompt
     assert "12:00-13:00 ET" in prompt
     assert "不下单授权" in prompt or "不是下单授权" in prompt
+    assert "机构自营台" in prompt
+    assert "## Desk View" in prompt
+    assert "## Execution" in prompt
+    assert "## Risk" in prompt
+    assert "第一行必须且只能写 `需要看盘:`" in prompt
 
 
 def test_direct_push_and_agent_prompts_carry_steven_micopedia_guardrails() -> None:
-    from spx_spark.notifier.prompts import build_agent_prompt, build_direct_push_prompt
+    from spx_spark.notifier.prompts import (
+        build_agent_prompt,
+        build_direct_push_prompt,
+        direct_push_header,
+    )
 
     payload = make_payload()
     alerts = [payload["alerts"][0]]
@@ -2172,6 +2214,12 @@ def test_direct_push_and_agent_prompts_carry_steven_micopedia_guardrails() -> No
         assert "net_dex_proxy" in prompt
         assert "Hyperliquid" in prompt
         assert "不是下单授权" in prompt or "不下单指令" in prompt
+    assert direct_push_header([{"kind": "gth_dip_reclaim_call"}]) == (
+        "SPX 0DTE | CALL RECLAIM"
+    )
+    assert direct_push_header([{"kind": "ibkr_session_restored"}]) == (
+        "SPX | SYSTEM STATUS"
+    )
 
 
 def test_alert_key_uses_dedup_group_not_title() -> None:
@@ -2408,6 +2456,47 @@ def test_feishu_status_card_uses_sections_and_state_color() -> None:
     assert "**条件计划**" in elements[4]["content"]
     assert "- **计划1 · 冲墙回落**" in elements[4]["content"]
     assert "> **执行**" in elements[4]["content"]
+
+
+def test_feishu_sectioned_card_converts_markdown_tables_to_native_tables() -> None:
+    from spx_spark.notifier.format_push import build_feishu_card
+
+    text = "\n".join(
+        (
+            "【SPX 15m · 12:45 · 0DTE 07-15 · 亚盘夜盘】",
+            "状态  APPROACHING（接近）",
+            "",
+            "## 墙位阶梯",
+            "**Put 墙（支撑 → Call）**",
+            "| 墙位 | OI | 触达 | 合约 | 现价 | BS / 触发参考 |",
+            "| --- | ---: | ---: | --- | ---: | --- |",
+            "| ★7550 | 2,010 | 80% | 7550C | 23.75 | 18.22 / 15.40–18.20 |",
+            "| 7535 | 996 | 58% | 7535C | 34.65 | 15.92 / 13.50–15.90 |",
+        )
+    )
+
+    card = build_feishu_card(text, title="SPX 15分钟市场状态", kind="status")
+
+    elements = card["body"]["elements"]
+    table = next(element for element in elements if element["tag"] == "table")
+    assert table["element_id"] == "table_1"
+    assert [column["display_name"] for column in table["columns"]] == [
+        "墙位",
+        "OI",
+        "触达",
+        "合约",
+        "现价",
+        "BS / 触发参考",
+    ]
+    assert table["rows"][0] == {
+        "c0": "★7550",
+        "c1": "2,010",
+        "c2": "80%",
+        "c3": "7550C",
+        "c4": "23.75",
+        "c5": "18.22 / 15.40–18.20",
+    }
+    assert card["header"]["template"] == "orange"
 
 
 def test_deliver_trade_push_routes_ops_to_bark_ops_group_not_feishu(tmp_path) -> None:

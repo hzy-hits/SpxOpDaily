@@ -39,6 +39,7 @@ from spx_spark.application.market_features.virtual_strategy import process_virtu
 from spx_spark.application.order_map.level_decision_shadow import (
     load_level_decision_shadow,
 )
+from spx_spark.application.order_map.decision_consistency import coherent_level_decision
 from spx_spark.application.order_map.level_trigger_repricing import (
     default_level_trigger_repricing_path,
 )
@@ -123,7 +124,12 @@ def run(argv: list[str] | None = None, *, now: datetime | None = None) -> int:
         market_frame,
         max_sessions=policy.volume_baseline_sessions,
     )
-    level_decision = dict(load_level_decision_shadow(storage))
+    level_decision = coherent_level_decision(
+        load_level_decision_shadow(storage),
+        expiry=option_frame.front_expiry,
+        structure=option_frame.structure,
+        max_level_drift_points=policy.trade_structure_drift_points,
+    )
     macro_event = macro_event_state(evaluation_now)
     context = build_decision_context(
         market_frame,
@@ -249,7 +255,7 @@ def _seed_samples_from_trend(
     trend: dict[str, Any],
     policy: MarketFeatureSettings,
 ) -> list[dict[str, Any]]:
-    session_id = str(trend.get("session_id") or "")
+    session_id = str(trend.get("session_id") or "").split(":", 1)[0]
     rows: list[dict[str, Any]] = []
     for item in trend.get("samples") or []:
         if not isinstance(item, dict):

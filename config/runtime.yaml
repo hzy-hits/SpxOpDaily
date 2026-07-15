@@ -29,7 +29,8 @@ market_data:
     description: Canonical instruments that use the longer slow-index freshness window.
 
 analytics:
-  max_chain_age_seconds: {value: 15.0, description: Maximum front-chain quote age.}
+  max_chain_age_seconds: {value: 15.0, description: Maximum RTH front-chain quote age used by analytical readiness.}
+  gth_max_chain_age_seconds: {value: 90.0, description: Maximum IBKR rotation age used for GTH analytical readiness; execution quotes remain capped at five seconds.}
   min_usable_strikes: {value: 21, description: Minimum usable front strikes.}
   min_two_sided_ratio: {value: 0.80, description: Minimum two-sided front-chain ratio.}
   min_wing_strikes_each_side: {value: 8, description: Minimum usable strikes on each side of spot.}
@@ -68,6 +69,8 @@ market_features:
   rth_end_et: {value: "16:00", description: End of the cash RTH segment in America/New_York time.}
   curb_end_et: {value: "17:00", description: End of the curb segment in America/New_York time.}
   min_l1_liquidity_score: {value: 40.0, description: Minimum hot-option L1 liquidity score before decision context marks it usable.}
+  l1_spread_p50_limit_bps: {value: 500.0, description: Median spread ceiling used to score whether hot-option L1 quotes are executable.}
+  l1_spread_p90_limit_bps: {value: 1500.0, description: Tail spread ceiling used to score whether hot-option L1 quotes are executable.}
   trade_follow_through_seconds: {value: 30.0, description: Minimum time a confirmed path must remain outside its level before becoming trade-ready.}
   trade_follow_through_min_points: {value: 2.0, description: Minimum additional movement beyond the confirmed level required for trade readiness.}
   trade_follow_through_em_fraction: {value: 0.05, description: Expected-move fraction used when it exceeds the fixed follow-through threshold.}
@@ -121,6 +124,9 @@ provider_failover:
   gth_min_live_option_contracts:
     value: 20
     description: Minimum fresh same-expiry SPXW contracts required with ES during GTH; equivalent to at least 10 complete call/put strike pairs.
+  gth_option_quote_max_age_seconds:
+    value: 90.0
+    description: Maximum source age for rotating IBKR SPXW quotes during GTH health evaluation; execution still requires five-second quotes.
   schwab_unhealthy_observations:
     value: 2
     description: Consecutive unhealthy Schwab observations required before requesting IBKR fallback.
@@ -128,10 +134,10 @@ provider_failover:
     value: 3
     description: Consecutive healthy Schwab observations required before returning from IBKR fallback.
   ibkr_unhealthy_observations:
-    value: 2
-    description: Consecutive unhealthy IBKR observations required before declaring both direct providers unavailable.
+    value: 4
+    description: Consecutive unhealthy IBKR observations required after the GTH quote-age window before declaring the option lane unavailable.
   ibkr_recovery_observations:
-    value: 2
+    value: 3
     description: Consecutive healthy IBKR observations required before entering IBKR fallback, to avoid farm half-recovery false switches.
   control_state_max_age_seconds:
     value: 60.0

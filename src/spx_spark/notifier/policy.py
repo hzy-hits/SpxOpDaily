@@ -50,6 +50,19 @@ BLOCKED_HUMAN_MESSAGE_PHRASES = (
     "prediction market",
 )
 
+BLOCKED_DESK_STYLE_PHRASES = (
+    "需要看盘",
+    "半路",
+    "不追",
+    "剧本",
+    "墙内",
+    "接多区",
+    "割肉",
+    "反手砸",
+    "扛单",
+    "顶上",
+)
+
 SYSTEM_EVENT_ALERT_KINDS = {
     "ibkr_session_interrupted",
     "ibkr_session_restored",
@@ -392,6 +405,40 @@ def codex_message_delivery_verdict(message: str) -> str:
     if any(first_line.startswith(cue) for cue in POSITIVE_DELIVERY_CUES):
         return "deliver"
     return "invalid"
+
+
+def strip_delivery_protocol_cue(message: str) -> str:
+    """Remove the reviewer-only delivery cue from human-facing text.
+
+    Older reviewers sometimes put the first sentence after the cue on the same
+    line, while the desk prompt emits a cue-only line.  Preserve either form.
+    """
+
+    lines = message.strip().splitlines()
+    if not lines:
+        return ""
+    first_line = lines[0].strip()
+    lowered = first_line.lower()
+    for cue in POSITIVE_DELIVERY_CUES:
+        if not lowered.startswith(cue):
+            continue
+        remainder = first_line[len(cue) :].lstrip("：: -—\t")
+        body = ([remainder] if remainder else []) + lines[1:]
+        return "\n".join(body).strip()
+    return message.strip()
+
+
+def codex_message_respects_desk_style(message: str) -> bool:
+    """Validate the visible reviewer body against the institutional schema."""
+
+    body = strip_delivery_protocol_cue(message)
+    return bool(
+        body.startswith("**SPX 0DTE |")
+        and "## Desk View" in body
+        and "## Execution" in body
+        and "## Risk" in body
+        and not any(phrase in body for phrase in BLOCKED_DESK_STYLE_PHRASES)
+    )
 
 
 def codex_message_respects_human_scope(message: str) -> bool:

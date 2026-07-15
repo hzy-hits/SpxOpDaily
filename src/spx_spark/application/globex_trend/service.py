@@ -46,6 +46,17 @@ def globex_session_id(now: datetime) -> str:
     return business_date.isoformat()
 
 
+def trend_context_id(now: datetime) -> str:
+    """Reset formal trend confirmation at SPX GTH and cash-session boundaries."""
+
+    session_id = globex_session_id(now)
+    if DEFAULT_MARKET_CALENDAR.is_rth_open(now):
+        return f"{session_id}:rth"
+    if DEFAULT_MARKET_CALENDAR.is_spx_gth_open(now):
+        return f"{session_id}:gth"
+    return f"{session_id}:globex"
+
+
 def select_live_es(
     state: LatestState,
     *,
@@ -170,7 +181,7 @@ def run(
                 state = load_trend_state(path)
                 state, transition = advance_trend_state(
                     state,
-                    session_id=globex_session_id(evaluation_now),
+                    session_id=trend_context_id(evaluation_now),
                     at=evaluation_now,
                     price=float(quote.effective_price),
                     provider=quote.provider.value,

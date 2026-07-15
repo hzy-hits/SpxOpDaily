@@ -1,10 +1,10 @@
 [Unit]
-Description=Compact market decision summary (every 15 min Beijing 07:30 -> next-day 01:30)
+Description=Compact market decision summary (every 15 min Beijing 08:15 -> next-day 01:30)
 
 [Timer]
-# Full working day: Beijing 07:30 -> next-day 01:30 every 15 minutes
-OnCalendar=Mon..Fri *-*-* 07:30,45:00 Asia/Shanghai
-OnCalendar=Mon..Fri *-*-* 08..23:00,15,30,45:00 Asia/Shanghai
+# SPX GTH open through the US session: Beijing 08:15 -> next-day 01:30
+OnCalendar=Mon..Fri *-*-* 08:15,30,45:00 Asia/Shanghai
+OnCalendar=Mon..Fri *-*-* 09..23:00,15,30,45:00 Asia/Shanghai
 OnCalendar=Tue..Sat *-*-* 00:00,15,30,45:00 Asia/Shanghai
 OnCalendar=Tue..Sat *-*-* 01:00,15,30:00 Asia/Shanghai
 Persistent=false

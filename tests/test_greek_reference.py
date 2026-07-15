@@ -432,6 +432,37 @@ def test_normal_slow_rotation_reports_partial_coverage_without_using_stale_greek
     assert sum(payload["blocked_counts"].values()) == 14
 
 
+def test_gth_greeks_use_recent_ibkr_rotation_rows_for_analytics() -> None:
+    now = datetime(2026, 7, 9, 23, 0, tzinfo=ET).astimezone(timezone.utc)
+    quotes = tuple(
+        replace(
+            make_quote(now=now, strike=strike, right=right),
+            quality=MarketDataQuality.STALE,
+            quote_time=now - timedelta(seconds=60),
+            last_update_at=now - timedelta(seconds=60),
+        )
+        for strike in (5995.0, 6000.0, 6005.0)
+        for right in ("C", "P")
+    )
+    state = LatestState(
+        created_at=now,
+        as_of=now,
+        quotes=quotes,
+        best_quotes=quotes,
+    )
+    options_map = SimpleNamespace(
+        underlier=SimpleNamespace(price=6000.0, source="future:ES"),
+        expiries=(SimpleNamespace(expiry="20260710"),),
+    )
+
+    payload = build_zero_dte_greeks_reference(state, options_map=options_map)
+
+    assert payload["coverage"]["usable_contract_count"] == 6
+    assert payload["coverage"]["usable_ratio"] == 1.0
+    assert payload["blocked_counts"] == {}
+    assert payload["model"]["spot_source"] == "spxw_model_underlier_median"
+
+
 def test_aggregate_uses_open_interest_only_and_never_infers_direction_from_volume() -> None:
     now = datetime(2026, 7, 10, 19, 0, tzinfo=timezone.utc)
     quotes = tuple(

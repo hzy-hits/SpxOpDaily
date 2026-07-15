@@ -40,6 +40,7 @@ _MD_CODE_RE = re.compile(r"`([^`]+)`")
 _MD_BULLET_RE = re.compile(r"^[-*]\s+")
 _SPX_STATUS_HEADER_RE = re.compile(r"^【(SPX 15m · .+)】$")
 _STATUS_PLAN_RE = re.compile(r"^(计划\d+\s*·\s*\S+)\s{2}(.*)$")
+_TABLE_SEPARATOR_CELL_RE = re.compile(r"^:?-{3,}:?$")
 
 
 def _status_card_template(text: str) -> str:
@@ -152,14 +153,114 @@ def _sectioned_card_parts(
         blocks.append(current)
 
     elements: list[dict[str, Any]] = []
+    table_index = 0
     for index, block in enumerate(blocks):
         content = "\n".join(block).strip()
         if not content:
             continue
         if index:
             elements.append({"tag": "hr"})
-        elements.append({"tag": "markdown", "content": content, "text_align": "left"})
+        block_elements, table_index = _markdown_and_table_elements(
+            content,
+            table_index=table_index,
+        )
+        elements.extend(block_elements)
     return header_title, elements, template
+
+
+def _table_cells(line: str) -> list[str] | None:
+    stripped = line.strip()
+    if not stripped.startswith("|") or not stripped.endswith("|"):
+        return None
+    return [cell.strip() for cell in stripped[1:-1].split("|")]
+
+
+def _is_table_separator(cells: list[str] | None) -> bool:
+    return bool(cells) and all(_TABLE_SEPARATOR_CELL_RE.fullmatch(cell) for cell in cells)
+
+
+def _native_table_element(
+    headers: list[str],
+    rows: list[list[str]],
+    *,
+    table_index: int,
+) -> dict[str, Any]:
+    column_names = [f"c{index}" for index in range(len(headers))]
+    return {
+        "tag": "table",
+        "element_id": f"table_{table_index + 1}",
+        "page_size": min(max(len(rows), 1), 10),
+        "row_height": "auto",
+        "freeze_first_column": True,
+        "header_style": {
+            "text_align": "left",
+            "text_size": "normal",
+            "background_style": "grey",
+            "text_color": "default",
+            "bold": True,
+            "lines": 1,
+        },
+        "columns": [
+            {
+                "name": name,
+                "display_name": header,
+                "data_type": "text",
+                "width": "auto",
+                "horizontal_align": "left" if index in {0, 3, 5} else "right",
+            }
+            for index, (name, header) in enumerate(zip(column_names, headers, strict=True))
+        ],
+        "rows": [
+            {
+                name: row[index] if index < len(row) else ""
+                for index, name in enumerate(column_names)
+            }
+            for row in rows
+        ],
+    }
+
+
+def _markdown_and_table_elements(
+    content: str,
+    *,
+    table_index: int,
+) -> tuple[list[dict[str, Any]], int]:
+    """Convert GFM-style tables into native Feishu JSON 2.0 tables."""
+
+    lines = content.splitlines()
+    elements: list[dict[str, Any]] = []
+    markdown_lines: list[str] = []
+
+    def flush_markdown() -> None:
+        markdown = "\n".join(markdown_lines).strip()
+        if markdown:
+            elements.append({"tag": "markdown", "content": markdown, "text_align": "left"})
+        markdown_lines.clear()
+
+    index = 0
+    while index < len(lines):
+        headers = _table_cells(lines[index])
+        separator = _table_cells(lines[index + 1]) if index + 1 < len(lines) else None
+        if headers and len(headers) >= 2 and _is_table_separator(separator):
+            flush_markdown()
+            index += 2
+            rows: list[list[str]] = []
+            while index < len(lines):
+                row = _table_cells(lines[index])
+                if row is None:
+                    break
+                rows.append(row)
+                index += 1
+            if rows:
+                elements.append(
+                    _native_table_element(headers, rows, table_index=table_index)
+                )
+                table_index += 1
+            continue
+        markdown_lines.append(lines[index])
+        index += 1
+    flush_markdown()
+    return elements, table_index
 
 
 def strip_markdown_light(text: str) -> str:
@@ -244,8 +345,12 @@ def build_feishu_card(
     # Soft length guard: webhook cards get awkward past ~30KB; truncate body.
     if len(content) > 28000:
         content = content[:27900].rstrip() + "\n\n…（已截断）"
-    status_parts = _status_card_parts(content) if kind == "status" else None
     template = feishu_header_template(kind, lane=lane, text=content)
+    if kind == "status":
+        state_template = _status_card_template(content)
+        if state_template != "blue":
+            template = state_template
+    status_parts = _status_card_parts(content) if kind == "status" else None
     header_title = title.strip() or "SPX Spark"
     body_elements: list[dict[str, Any]] = [
         {
@@ -254,7 +359,18 @@ def build_feishu_card(
             "text_align": "left",
         }
     ]
-    if status_parts is not None:
+    sectioned = (
+        _sectioned_card_parts(
+            content,
+            fallback_title=header_title,
+            template=template,
+        )
+        if any(line.startswith("## ") for line in content.splitlines())
+        else None
+    )
+    if sectioned is not None:
+        header_title, body_elements, template = sectioned
+    elif status_parts is not None:
         header_title, body_elements, template = status_parts
     elif sectioned := _sectioned_card_parts(
         content,

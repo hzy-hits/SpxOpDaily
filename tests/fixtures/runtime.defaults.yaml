@@ -30,6 +30,7 @@ market_data:
 
 analytics:
   max_chain_age_seconds: {value: 15.0, description: Maximum chain age.}
+  gth_max_chain_age_seconds: {value: 90.0, description: Maximum GTH analytical chain age.}
   min_usable_strikes: {value: 21, description: Minimum usable strikes.}
   min_two_sided_ratio: {value: 0.80, description: Minimum two-sided ratio.}
   min_wing_strikes_each_side: {value: 8, description: Minimum wing strikes.}
@@ -68,6 +69,8 @@ market_features:
   rth_end_et: {value: "16:00", description: Cash RTH end.}
   curb_end_et: {value: "17:00", description: Curb segment end.}
   min_l1_liquidity_score: {value: 40.0, description: Minimum L1 liquidity score.}
+  l1_spread_p50_limit_bps: {value: 500.0, description: Median L1 spread score ceiling.}
+  l1_spread_p90_limit_bps: {value: 1500.0, description: Tail L1 spread score ceiling.}
   trade_follow_through_seconds: {value: 30.0, description: Follow-through hold.}
   trade_follow_through_min_points: {value: 2.0, description: Fixed follow-through distance.}
   trade_follow_through_em_fraction: {value: 0.05, description: EM follow-through fraction.}
@@ -117,6 +120,7 @@ provider_failover:
     description: Monitors RTH plus regular ES Globex sessions.
   globex_required_instruments: {value: [future:ES], description: Required Globex anchors.}
   gth_min_live_option_contracts: {value: 20, description: Minimum fresh SPXW contracts required during GTH.}
+  gth_option_quote_max_age_seconds: {value: 90.0, description: Maximum GTH option source age.}
   schwab_unhealthy_observations:
     value: 2
     description: Consecutive unhealthy Schwab observations required before requesting IBKR fallback.
@@ -124,10 +128,10 @@ provider_failover:
     value: 3
     description: Consecutive healthy Schwab observations required before returning from IBKR fallback.
   ibkr_unhealthy_observations:
-    value: 2
+    value: 4
     description: Consecutive unhealthy IBKR observations required before declaring both direct providers unavailable.
   ibkr_recovery_observations:
-    value: 2
+    value: 3
     description: Consecutive healthy IBKR observations required before entering IBKR fallback, to avoid farm half-recovery false switches.
   control_state_max_age_seconds:
     value: 60.0

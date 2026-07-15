@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Iterable, Mapping
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime
 from statistics import median
 from typing import TYPE_CHECKING, Any
@@ -14,11 +14,13 @@ from spx_spark.analytics.greeks.black_scholes import (
     bs_vega,
     intrinsic_value as _intrinsic,
 )
+from spx_spark.analytics.options.quote_policy import gth_analytical_quote
 from spx_spark.config import StorageSettings
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR, ET
 from spx_spark.marketdata import InstrumentType, Quote
 from spx_spark.options_map import actionable_chain_implied_spot
 from spx_spark.storage import configured_quote_use_decision
+from spx_spark.settings import load_app_settings
 
 if TYPE_CHECKING:
     from spx_spark.options_map import OptionsMap
@@ -820,6 +822,30 @@ def _calculate_reference_universe(
     return inputs_by_contract, references, blocked_counts
 
 
+def _exact_analytical_quotes(
+    state: LatestState,
+    *,
+    expiry: str,
+) -> tuple[list[Quote], StorageSettings]:
+    as_of = state.as_of
+    gth_open = DEFAULT_MARKET_CALENDAR.is_spx_gth_open(as_of)
+    gth_max_age = load_app_settings().analytics.gth_max_chain_age_seconds
+    quotes = [
+        gth_analytical_quote(
+            quote,
+            as_of=as_of,
+            max_age_seconds=gth_max_age,
+        )
+        for quote in state.best_quotes
+        if is_spxw_zero_dte(quote, as_of=as_of)
+        and (quote.instrument.expiry or "") == expiry
+    ]
+    settings = StorageSettings.from_env()
+    if gth_open:
+        settings = replace(settings, latest_stale_after_seconds=gth_max_age)
+    return quotes, settings
+
+
 def build_zero_dte_greeks_reference(
     state: LatestState,
     *,
@@ -842,15 +868,13 @@ def build_zero_dte_greeks_reference(
     if exact_expiry not in available_expiries:
         return _unavailable_payload(as_of, exact_expiry, "exact_same_day_expiry_unavailable")
 
-    exact_quotes = [
-        quote
-        for quote in state.best_quotes
-        if is_spxw_zero_dte(quote, as_of=as_of) and (quote.instrument.expiry or "") == exact_expiry
-    ]
+    exact_quotes, storage_settings = _exact_analytical_quotes(
+        state,
+        expiry=exact_expiry,
+    )
     if not exact_quotes:
         return _unavailable_payload(as_of, exact_expiry, "exact_same_day_quotes_unavailable")
 
-    storage_settings = StorageSettings.from_env()
     spot, spot_source, spot_warnings = _reference_spot(
         state,
         quotes=exact_quotes,

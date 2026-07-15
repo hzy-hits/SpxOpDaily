@@ -33,10 +33,10 @@ MATERIAL_LEVEL_MOVE_POINTS = 5.0
 MATERIAL_EM_REL_CHANGE = 0.20
 
 # --- status report: fixed cadence across the partner's working day (Beijing
-# 07:30 -> next-day 01:30 every 15 minutes -- density is set by the systemd
+# 08:15 -> next-day 01:30 every 15 minutes -- density is set by the systemd
 # timer, this window only bounds it) ---
 
-STATUS_WINDOW_START = time(7, 30)
+STATUS_WINDOW_START = time(8, 15)
 STATUS_WINDOW_END_EARLY = time(1, 30)  # inclusive last fire
 
 
@@ -104,7 +104,7 @@ def within_refresh_window(now_utc: datetime) -> bool:
 
 
 def within_status_window(now_utc: datetime) -> bool:
-    """Beijing 07:30 through next-day 01:30: the partner's full working day.
+    """Beijing 08:15 through next-day 01:30: SPX GTH through the US session.
 
     The timer fires every 15 minutes; this gate only bounds the day.
     The after-midnight leg belongs to the previous day's session, so it runs

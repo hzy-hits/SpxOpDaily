@@ -40,6 +40,10 @@ def test_slow_es_dip_reclaim_confirms_without_spx() -> None:
     state, alert, signal = advance(state, 13, 7552)
     assert alert is not None
     assert alert.kind == "gth_dip_reclaim_call"
+    assert alert.title == "SPX 0DTE | CALL RECLAIM (60m)"
+    assert "Desk View" in alert.detail
+    assert "Execution" in alert.detail
+    assert "Risk" in alert.detail
     assert signal["direction"] == "up"
     assert signal["drawdown_points"] == 14
 

@@ -1687,6 +1687,11 @@ def test_globex_status_uses_writer_and_trade_delivery(monkeypatch, tmp_path) -> 
     )
     monkeypatch.setattr(
         order_map_module,
+        "render_feishu_delivery_text",
+        lambda *args: "detailed feishu status",
+    )
+    monkeypatch.setattr(
+        order_map_module,
         "generate_push_text",
         lambda *args, **kwargs: ("written globex context", "deepseek"),
     )
@@ -1731,7 +1736,7 @@ def test_globex_status_uses_writer_and_trade_delivery(monkeypatch, tmp_path) -> 
         "kind": "status",
         "lane": "scheduled_report",
         "friend": True,
-        "feishu_text": "written globex context",
+        "feishu_text": "detailed feishu status",
     }
 
 
@@ -2485,6 +2490,7 @@ def test_status_delivery_gate_suppresses_unchanged_scheduled_report(
         "load_order_map_state",
         lambda path: {
             "last_status_date": "2026-07-07",
+            "last_status_at": now.timestamp(),
             "fingerprint": fingerprint,
         },
     )
@@ -2567,14 +2573,18 @@ def test_status_delivery_gate_allows_material_and_one_shot_key_windows() -> None
 
     previous = {
         "last_status_date": "2026-07-14",
-        "fingerprint": {"status_phase": "europe_session"},
+        "fingerprint": {
+            "status_phase": "europe_session",
+            "trade_intent_id": "intent-1",
+        },
     }
-    current = {"status_phase": "europe_session"}
+    current = {"status_phase": "europe_session", "trade_intent_id": "intent-1"}
     assert (
         _status_delivery_reason(
             previous,
             current,
             ["决策剧本 bullish→bearish"],
+            now=datetime(2026, 7, 14, 6, 0, tzinfo=timezone.utc),
             trading_date="2026-07-14",
             position_risk=False,
         )
@@ -2586,6 +2596,7 @@ def test_status_delivery_gate_allows_material_and_one_shot_key_windows() -> None
             previous,
             current,
             [],
+            now=datetime(2026, 7, 14, 6, 0, tzinfo=timezone.utc),
             trading_date="2026-07-14",
             position_risk=False,
         )
@@ -2597,6 +2608,7 @@ def test_status_delivery_gate_allows_material_and_one_shot_key_windows() -> None
             previous,
             current,
             [],
+            now=datetime(2026, 7, 14, 6, 0, tzinfo=timezone.utc),
             trading_date="2026-07-14",
             position_risk=False,
         )
@@ -2604,8 +2616,44 @@ def test_status_delivery_gate_allows_material_and_one_shot_key_windows() -> None
     )
 
 
+def test_status_delivery_gate_sends_quarter_hour_gth_heartbeat_without_trade_intent() -> None:
+    from spx_spark.application.order_map.service import _status_delivery_reason
+
+    now = datetime(2026, 7, 15, 4, 14, tzinfo=timezone.utc)
+    fingerprint = {"status_phase": "asia_globex", "trade_intent_id": ""}
+    recent = {
+        "last_status_date": "2026-07-15",
+        "last_status_at": now.timestamp() - 13 * 60,
+        "status_fingerprint": fingerprint,
+    }
+    due = {**recent, "last_status_at": now.timestamp() - 15 * 60}
+
+    assert (
+        _status_delivery_reason(
+            recent,
+            fingerprint,
+            ["决策剧本 过渡偏多→过渡偏空"],
+            now=now,
+            trading_date="2026-07-15",
+            position_risk=False,
+        )
+        is None
+    )
+    assert (
+        _status_delivery_reason(
+            due,
+            fingerprint,
+            [],
+            now=now,
+            trading_date="2026-07-15",
+            position_risk=False,
+        )
+        == "gth_quarter_hour_heartbeat:asia_globex"
+    )
+
+
 def test_within_refresh_window_beijing() -> None:
-    # Refresh follows the status window: Beijing 07:30 -> next-day 01:30.
+    # Refresh follows the status window: Beijing 08:15 -> next-day 01:30.
     # 14:45 Beijing: fixed cadence continues pre-open.
     beijing_1445 = datetime(2026, 7, 7, 6, 45, tzinfo=timezone.utc)
     assert within_refresh_window(beijing_1445) is True
@@ -2624,9 +2672,12 @@ def test_within_refresh_window_beijing() -> None:
     # 09:00 Beijing: the reader's working morning is now inside the window.
     beijing_0900 = datetime(2026, 7, 7, 1, 0, tzinfo=timezone.utc)
     assert within_refresh_window(beijing_0900) is True
-    # 07:30 Beijing: start of the reader's day.
+    # 07:30 Beijing: before SPX GTH starts.
     beijing_0730 = datetime(2026, 7, 6, 23, 30, tzinfo=timezone.utc)
-    assert within_refresh_window(beijing_0730) is True
+    assert within_refresh_window(beijing_0730) is False
+    # 08:15 Beijing: SPX GTH start.
+    beijing_0815 = datetime(2026, 7, 7, 0, 15, tzinfo=timezone.utc)
+    assert within_refresh_window(beijing_0815) is True
     # 07:00 Beijing: before the 07:30 start of the reader's day.
     beijing_0700 = datetime(2026, 7, 6, 23, 0, tzinfo=timezone.utc)
     assert within_refresh_window(beijing_0700) is False
@@ -2760,12 +2811,15 @@ def test_within_status_window_and_minutes_to_open() -> None:
     beijing_1430 = datetime(2026, 7, 7, 6, 30, tzinfo=timezone.utc)
     assert within_status_window(beijing_1430) is True
     assert minutes_to_open(beijing_1430) == 420
-    # 14:00 Beijing: now inside the window (day starts 07:30).
+    # 14:00 Beijing: inside the GTH-to-RTH window.
     beijing_1400 = datetime(2026, 7, 7, 6, 0, tzinfo=timezone.utc)
     assert within_status_window(beijing_1400) is True
-    # 07:30 Beijing: start of the reader's day.
+    # 07:30 Beijing: before SPX GTH starts.
     beijing_0730 = datetime(2026, 7, 6, 23, 30, tzinfo=timezone.utc)
-    assert within_status_window(beijing_0730) is True
+    assert within_status_window(beijing_0730) is False
+    # 08:15 Beijing: SPX GTH starts.
+    beijing_0815 = datetime(2026, 7, 7, 0, 15, tzinfo=timezone.utc)
+    assert within_status_window(beijing_0815) is True
     # 07:00 Beijing: before the reader's day starts.
     beijing_0700 = datetime(2026, 7, 6, 23, 0, tzinfo=timezone.utc)
     assert within_status_window(beijing_0700) is False
@@ -3004,6 +3058,25 @@ def test_market_feature_report_uses_consistent_quality_and_volume_source() -> No
     assert "窗口不足" in lines[1]
     assert "源 ibkr" in lines[1]
     assert "L1流动性 不可用" in lines[2]
+
+
+def test_compact_option_line_identifies_selected_quote_provider() -> None:
+    from spx_spark.application.order_map.prompts import _compact_option_line
+
+    line = _compact_option_line(
+        {
+            "vol_context": {"vix1d": 14.0, "vix": 16.0, "skew": 145.7},
+            "option_structure_frame": {
+                "l1": {
+                    "metrics": {"liquidity_score": 70.6},
+                    "diagnostics": {"selected_provider_counts": {"ibkr": 52}},
+                }
+            },
+        }
+    )
+
+    assert line is not None
+    assert "L1流动性 70.6（IBKR 52）" in line
 
 
 def test_recent_market_frame_es_fills_short_quote_rotation_gap() -> None:

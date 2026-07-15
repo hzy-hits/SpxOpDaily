@@ -13,12 +13,14 @@ from spx_spark.notifier.policy import (
     alert_key,
     alerts_are_latency_critical,
     alerts_are_market_signals,
+    codex_message_respects_desk_style,
     codex_message_delivery_verdict,
     codex_message_respects_human_scope,
     context_only_alerts,
     direct_push_alerts,
     is_review_failure_failopen_alert,
     split_time_sensitive_review_candidates,
+    strip_delivery_protocol_cue,
 )
 from spx_spark.notifier.prompts import (
     build_codex_prompt,
@@ -345,6 +347,9 @@ def _deliver_review_message(
                 return []
             if suppressed:
                 message = format_alert_message(payload, delivery_candidates)
+            human_message = strip_delivery_protocol_cue(message)
+            if not codex_message_respects_desk_style(message):
+                human_message = format_alert_message(payload, delivery_candidates)
             lane = push_lane_for_alerts(delivery_candidates)
             friend = lane == "trade" and alerts_are_market_signals(delivery_candidates)
             delivery_sinks = _scope_sinks(
@@ -353,7 +358,7 @@ def _deliver_review_message(
                     alerts=delivery_candidates,
                     settings=settings,
                     title=bark_title_for_alerts(delivery_candidates),
-                    text=message,
+                    text=human_message,
                     kind="intraday_alert",
                     lane=lane,
                     friend=friend,
@@ -366,7 +371,7 @@ def _deliver_review_message(
             if any_delivery_ok(delivery_sinks):
                 alerts_marked_sent.extend(delivery_candidates)
                 _record_delivered_event_ids(delivery_candidates, acknowledged_event_ids)
-                record_push("intraday_alert", message, at=now_utc.isoformat())
+                record_push("intraday_alert", human_message, at=now_utc.isoformat())
                 outcome = "delivered"
                 remaining: list[dict[str, object]] = []
             else:

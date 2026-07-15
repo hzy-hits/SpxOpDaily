@@ -150,12 +150,13 @@ def advance_gth_dip(
         severity="high",
         kind=GTH_DIP_RECLAIM_CALL_KIND,
         instrument_id="future:ES",
-        title=f"ES GTH dip reclaim confirmed ({int(chosen['horizon_seconds']) // 60}m)",
+        title=f"SPX 0DTE | CALL RECLAIM ({int(chosen['horizon_seconds']) // 60}m)",
         detail=(
-            f"ES 从 {float(chosen['peak']):.2f} 缓跌至 {float(chosen['trough']):.2f}，"
-            f"回升至 {float(es):.2f}；回撤 {float(chosen['drawdown_points']):.2f} 点、"
-            f"已收复 {float(chosen['recovery_fraction']):.0%}。这是 0DTE Call 主策略候选，"
-            "不要求夜盘直接 SPX；等待可执行 SPXW 报价，反向跌破低点即失效，不自动下单。"
+            f"Desk View：ES 自 {float(chosen['peak']):.2f} 回落至 {float(chosen['trough']):.2f} 后"
+            f"回升至 {float(es):.2f}，回撤 {float(chosen['drawdown_points']):.2f} 点并收复"
+            f" {float(chosen['recovery_fraction']):.0%}；Call 方向进入执行评估。"
+            "Execution：仅在新鲜 SPXW NBBO 通过门控后建立 TradeReady。"
+            "Risk：ES 跌破本次低点即撤销 Call 判断；自动下单关闭。"
         ),
         provider=provider,
         quality=MarketDataQuality.LIVE.value,

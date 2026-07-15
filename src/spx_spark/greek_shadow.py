@@ -8,14 +8,16 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from spx_spark.analytics.options.quote_policy import gth_analytical_quote
+from spx_spark.config import StorageSettings
 from spx_spark.greek_reference import (
     SCHEMA_VERSION,
     build_zero_dte_greeks_reference,
     is_spxw_zero_dte,
     write_zero_dte_greeks_snapshot,
 )
-from spx_spark.config import StorageSettings
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR, ET
+from spx_spark.marketdata import Quote, quote_use_decision
 from spx_spark.options_map import (
     UNDERLIER_MISMATCH_SOURCES,
     OptionsMap,
@@ -24,6 +26,7 @@ from spx_spark.options_map import (
     is_spxw_option,
     pair_by_strike,
 )
+from spx_spark.settings import load_app_settings
 from spx_spark.storage import LatestState, LatestStateStore, configured_quote_use_decision
 
 
@@ -32,6 +35,31 @@ ALLOWED_TRIGGER_KINDS = frozenset(
 )
 SIGNED_GEX_METHOD = "call_positive_put_negative_oi_proxy_not_dealer_position"
 SHADOW_MODE = "research_shadow_only"
+
+
+def _analytically_fresh_quotes(
+    quotes: tuple[Quote, ...],
+    *,
+    as_of: datetime,
+) -> tuple[Quote, ...]:
+    if as_of.tzinfo is None or as_of.utcoffset() is None:
+        return ()
+    if not DEFAULT_MARKET_CALENDAR.is_spx_gth_open(as_of):
+        return tuple(
+            quote
+            for quote in quotes
+            if configured_quote_use_decision(quote, as_of=as_of).pricing_allowed
+        )
+    max_age = load_app_settings().analytics.gth_max_chain_age_seconds
+    return tuple(
+        quote
+        for quote in quotes
+        if quote_use_decision(
+            gth_analytical_quote(quote, as_of=as_of, max_age_seconds=max_age),
+            as_of=as_of,
+            stale_after_seconds=max_age,
+        ).pricing_allowed
+    )
 
 
 @dataclass(frozen=True)
@@ -283,10 +311,9 @@ def sample_zero_dte_greeks_shadow(
     zero_dte_quotes = tuple(
         quote for quote in same_day_quotes if is_spxw_zero_dte(quote, as_of=state.as_of)
     )
-    fresh_quotes = tuple(
-        quote
-        for quote in zero_dte_quotes
-        if configured_quote_use_decision(quote, as_of=state.as_of).pricing_allowed
+    fresh_quotes = _analytically_fresh_quotes(
+        zero_dte_quotes,
+        as_of=state.as_of,
     )
 
     underlier_source = getattr(getattr(options, "underlier", None), "source", None)

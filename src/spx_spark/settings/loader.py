@@ -262,6 +262,7 @@ def load_settings(
         raise ValueError("market_data.provider_priority cannot contain duplicates")
     analytics = AnalyticsSettings(
         max_chain_age_seconds=float(get("analytics.max_chain_age_seconds")),
+        gth_max_chain_age_seconds=float(get("analytics.gth_max_chain_age_seconds")),
         min_usable_strikes=int(get("analytics.min_usable_strikes")),
         min_two_sided_ratio=float(get("analytics.min_two_sided_ratio")),
         min_wing_strikes_each_side=int(get("analytics.min_wing_strikes_each_side")),
@@ -304,6 +305,12 @@ def load_settings(
         rth_end_et=str(get("market_features.rth_end_et")),
         curb_end_et=str(get("market_features.curb_end_et")),
         min_l1_liquidity_score=float(get("market_features.min_l1_liquidity_score")),
+        l1_spread_p50_limit_bps=float(
+            get("market_features.l1_spread_p50_limit_bps")
+        ),
+        l1_spread_p90_limit_bps=float(
+            get("market_features.l1_spread_p90_limit_bps")
+        ),
         trade_follow_through_seconds=float(
             get("market_features.trade_follow_through_seconds")
         ),

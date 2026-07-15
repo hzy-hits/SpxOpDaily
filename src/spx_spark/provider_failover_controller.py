@@ -37,6 +37,7 @@ class ProviderFailoverSettings:
     monitor_rth_only: bool
     thresholds: FailoverThresholds
     gth_min_live_option_contracts: int = 20
+    gth_option_quote_max_age_seconds: float = 90.0
 
     def __post_init__(self) -> None:
         if not self.required_instruments:
@@ -49,6 +50,8 @@ class ProviderFailoverSettings:
             raise ValueError("provider failover state max age must be positive")
         if self.quote_max_age_seconds <= 0:
             raise ValueError("provider failover quote max age must be positive")
+        if self.gth_option_quote_max_age_seconds <= 0:
+            raise ValueError("GTH option quote max age must be positive")
         if self.control_state_max_age_seconds <= 0:
             raise ValueError("provider failover control state max age must be positive")
         if self.transition_alert_max_age_seconds <= 0:
@@ -102,6 +105,14 @@ class ProviderFailoverSettings:
             gth_min_live_option_contracts=env_int(
                 "PROVIDER_FAILOVER_GTH_MIN_LIVE_OPTION_CONTRACTS",
                 int(settings_value("provider_failover.gth_min_live_option_contracts")),
+            ),
+            gth_option_quote_max_age_seconds=env_float(
+                "PROVIDER_FAILOVER_GTH_OPTION_QUOTE_MAX_AGE_SECONDS",
+                float(
+                    settings_value(
+                        "provider_failover.gth_option_quote_max_age_seconds"
+                    )
+                ),
             ),
             thresholds=FailoverThresholds(
                 schwab_unhealthy_observations=env_int(
@@ -197,6 +208,14 @@ def save_failover_state(
     payload["new_entries_allowed"] = bool(
         monitoring_active
         and state.mode in {FailoverMode.SCHWAB_PRIMARY, FailoverMode.IBKR_FALLBACK}
+    )
+    payload["preferred_option_provider"] = (
+        "ibkr" if monitoring_context == "gth" else "schwab"
+    )
+    payload["selection_policy"] = (
+        "ibkr_gth_primary"
+        if monitoring_context == "gth"
+        else "schwab_primary_with_ibkr_fallback"
     )
     if health_dimensions is not None:
         payload["health_dimensions"] = health_dimensions
@@ -348,6 +367,7 @@ def evaluate_and_persist(
     latest: LatestState,
     settings: ProviderFailoverSettings,
 ) -> FailoverState:
+    persisted_control = load_failover_control(settings.state_path)
     current = load_failover_state(settings.state_path, now=latest.as_of)
     active = settings.enabled and monitoring_active_at(
         latest.as_of,
@@ -401,20 +421,33 @@ def evaluate_and_persist(
             latest,
             Provider.SCHWAB,
             min_contracts=settings.gth_min_live_option_contracts,
-            quote_max_age_seconds=settings.quote_max_age_seconds,
+            quote_max_age_seconds=settings.gth_option_quote_max_age_seconds,
         )
         ibkr_options = gth_option_health(
             latest,
             Provider.IBKR,
             min_contracts=settings.gth_min_live_option_contracts,
-            quote_max_age_seconds=settings.quote_max_age_seconds,
+            quote_max_age_seconds=settings.gth_option_quote_max_age_seconds,
         )
-    schwab = (
-        schwab_options
-        if context == "gth" and schwab_anchors.healthy
-        else schwab_anchors
-    )
+    schwab = schwab_anchors
     ibkr = ibkr_options if context == "gth" and ibkr_anchors.healthy else ibkr_anchors
+    if context == "gth":
+        schwab = ProviderHealth(False, "IBKR is the configured GTH SPXW primary")
+    previous_context = str(persisted_control.get("monitoring_context") or "")
+    if previous_context != context or (
+        context == "gth" and current.mode is FailoverMode.SCHWAB_PRIMARY
+    ):
+        current = FailoverState(
+            mode=(
+                FailoverMode.IBKR_FALLBACK
+                if context == "gth" and ibkr.healthy
+                else FailoverMode.RECOVERY_PENDING
+                if context == "gth"
+                else FailoverMode.SCHWAB_PRIMARY
+            ),
+            updated_at=latest.as_of,
+            sequence=current.sequence,
+        )
     updated = advance_failover(
         current,
         FailoverObservation(

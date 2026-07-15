@@ -25,6 +25,7 @@ from spx_spark.application.market_features.models import (
     OptionStructureFrame,
 )
 from spx_spark.application.market_features.options import (
+    _fresh_front_quotes,
     imbalance,
     provider_mid_divergences,
 )
@@ -35,6 +36,7 @@ from spx_spark.marketdata import (
     Quote,
 )
 from spx_spark.settings.market_features import MarketFeatureSettings
+from spx_spark.storage import LatestState
 
 
 UTC = timezone.utc
@@ -239,6 +241,41 @@ def test_l1_helpers_measure_imbalance_and_only_compare_synchronized_providers() 
         ask=10.4,
     )
     assert provider_mid_divergences([schwab, stale_ibkr], policy=MarketFeatureSettings()) == []
+
+
+def test_gth_hot_option_quotes_use_ibkr_even_when_schwab_is_newer() -> None:
+    now = datetime(2026, 7, 14, 0, 30, tzinfo=UTC)
+    instrument = InstrumentId.option(
+        "SPX",
+        expiry="20260714",
+        strike=7550,
+        right="C",
+        trading_class="SPXW",
+    )
+    schwab = _option_quote(instrument, Provider.SCHWAB, now, bid=10.0, ask=10.2)
+    ibkr = _option_quote(
+        instrument,
+        Provider.IBKR,
+        now - timedelta(seconds=2),
+        bid=10.1,
+        ask=10.3,
+    )
+    state = LatestState(
+        created_at=now,
+        as_of=now,
+        quotes=(schwab, ibkr),
+        best_quotes=(schwab,),
+    )
+
+    selected = _fresh_front_quotes(
+        state,
+        expiry="20260714",
+        now=now,
+        policy=MarketFeatureSettings(),
+    )
+
+    assert len(selected) == 1
+    assert selected[0].provider is Provider.IBKR
 
 
 def test_decision_context_audit_only_changes_on_meaningful_state() -> None:

@@ -177,6 +177,12 @@ def target_regime(
     if regime is not GlobexTrendRegime.NEUTRAL:
         return None, None
 
+    if medium is None and long is None and short is not None:
+        if short <= -policy.short_move_points:
+            return GlobexTrendRegime.BEARISH, "initial_short_impulse"
+        if short >= policy.short_move_points:
+            return GlobexTrendRegime.BULLISH, "initial_short_impulse"
+
     bearish = bool(
         (medium is not None and medium <= -policy.medium_move_points)
         or (long is not None and long <= -policy.long_move_points)
