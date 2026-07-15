@@ -251,7 +251,7 @@ def _native_table_element(
 
 
 def _wall_layout_elements(rows: list[list[str]]) -> list[dict[str, Any]]:
-    """Render a six-column wall table as mobile-friendly three-column rows."""
+    """Render each wall as a two-line mobile quote strip."""
 
     elements: list[dict[str, Any]] = []
     for index, row in enumerate(rows):
@@ -260,48 +260,12 @@ def _wall_layout_elements(rows: list[list[str]]) -> list[dict[str, Any]]:
             elements.append({"tag": "hr", "margin": "2px 0"})
         elements.append(
             {
-                "tag": "column_set",
-                "flex_mode": "stretch",
-                "horizontal_spacing": "8px",
-                "vertical_align": "top",
-                "columns": [
-                    {
-                        "tag": "column",
-                        "width": "weighted",
-                        "weight": 4,
-                        "elements": [
-                            {
-                                "tag": "markdown",
-                                "content": f"**{cells[0]}**\n{cells[1]}",
-                                "text_align": "left",
-                            }
-                        ],
-                    },
-                    {
-                        "tag": "column",
-                        "width": "weighted",
-                        "weight": 4,
-                        "elements": [
-                            {
-                                "tag": "markdown",
-                                "content": f"**{cells[2]}**\n现 {cells[3]}",
-                                "text_align": "left",
-                            }
-                        ],
-                    },
-                    {
-                        "tag": "column",
-                        "width": "weighted",
-                        "weight": 6,
-                        "elements": [
-                            {
-                                "tag": "markdown",
-                                "content": f"**BS {cells[4]}**\n参考 {cells[5]}",
-                                "text_align": "left",
-                            }
-                        ],
-                    },
-                ],
+                "tag": "markdown",
+                "content": (
+                    f"**{cells[0]} · {cells[1]}**　{cells[2]}\n"
+                    f"现 `{cells[3]}`　→　BS `{cells[4]}`　参考 `{cells[5]}`"
+                ),
+                "text_align": "left",
             }
         )
     return elements

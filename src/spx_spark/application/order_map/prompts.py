@@ -615,9 +615,22 @@ def _detail_ladder_lines(payload: dict[str, Any]) -> list[str]:
     call_rungs = [rung for rung in ladder.get("call_walls") or [] if isinstance(rung, dict)]
     selected: list[tuple[dict[str, Any], str, str]] = []
 
+    def has_pricing(rung: dict[str, Any]) -> bool:
+        return (
+            finite_float(rung.get("current_mid")) is not None
+            and finite_float(rung.get("projected_mid")) is not None
+            and any(
+                finite_float(rung.get(key)) is not None
+                for key in ("limit_aggressive", "limit_conservative")
+            )
+        )
+
     if put_rungs:
         primary = put_rungs[0]
-        support_rungs = sorted(put_rungs[:3], key=lambda rung: -(rung.get("strike") or 0.0))
+        support_rungs = sorted(
+            [rung for rung in put_rungs if has_pricing(rung)][:3],
+            key=lambda rung: -(rung.get("strike") or 0.0),
+        )
         secondary_index = 0
         for rung in support_rungs:
             if rung is primary:
@@ -629,6 +642,9 @@ def _detail_ladder_lines(payload: dict[str, Any]) -> list[str]:
 
     if call_rungs:
         primary = call_rungs[0]
+        priced_call_rungs = [rung for rung in call_rungs if has_pricing(rung)]
+        if not priced_call_rungs:
+            call_rungs = []
         underlier = payload.get("underlier") if isinstance(payload.get("underlier"), dict) else {}
         spot = finite_float(underlier.get("price"))
 
@@ -641,17 +657,22 @@ def _detail_ladder_lines(payload: dict[str, Any]) -> list[str]:
                 return abs(strike - spot)
             return float("inf")
 
-        nearest = min(
-            call_rungs,
-            key=call_distance,
-        )
-        call_selection = sorted(
-            {id(rung): rung for rung in (nearest, primary)}.values(),
-            key=lambda rung: rung.get("strike") or 0.0,
-        )
-        for rung in call_selection:
-            label = "主 Call Wall" if rung is primary else "近端 Call GEX"
-            selected.append((rung, label, "P"))
+        if priced_call_rungs:
+            nearest = min(priced_call_rungs, key=call_distance)
+            ranked = primary if has_pricing(primary) else priced_call_rungs[0]
+            call_selection = sorted(
+                {id(rung): rung for rung in (nearest, ranked)}.values(),
+                key=lambda rung: rung.get("strike") or 0.0,
+            )
+            for rung in call_selection:
+                label = (
+                    "主 Call Wall"
+                    if rung is primary
+                    else "近端 Call GEX"
+                    if rung is nearest
+                    else "重点 Call GEX"
+                )
+                selected.append((rung, label, "P"))
 
     if not selected:
         return []

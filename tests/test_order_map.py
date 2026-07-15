@@ -1040,7 +1040,7 @@ def test_feishu_wall_layout_matches_compact_trading_table() -> None:
                 "put_walls": [
                     rung(7550, "C", 23.75, 18.22),
                     rung(7535, "C", 34.65, 15.92),
-                    rung(7500, "C", 64.40, 8.97),
+                    {"strike": 7500, "distance_points": -61},
                     rung(7525, "C", 42.65, 7.67),
                 ],
                 "call_walls": [
@@ -1056,7 +1056,7 @@ def test_feishu_wall_layout_matches_compact_trading_table() -> None:
     assert lines[2:7] == [
         "| 7550 | 主 Put Wall | 7550C | 23.75 | 18.22 | 15.49–18.22 |",
         "| 7535 | 次级支撑 | 7535C | 34.65 | 15.92 | 13.53–15.92 |",
-        "| 7500 | 外侧支撑 | 7500C | 64.40 | 8.97 | 7.62–8.97 |",
+        "| 7525 | 外侧支撑 | 7525C | 42.65 | 7.67 | 6.52–7.67 |",
         "| 7570 | 近端 Call GEX | 7570P | 21.35 | 14.79 | 12.57–14.79 |",
         "| 7600 | 主 Call Wall | 7600P | 41.95 | 3.71 | 3.15–3.71 |",
     ]
