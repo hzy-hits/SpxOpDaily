@@ -395,10 +395,27 @@ def _wall_ladder_lines(payload: dict[str, Any]) -> list[str]:
             current = rung.get("current_mid")
             if projected is not None:
                 stale_tag = " [stale]" if rung.get("degraded") else ""
+                range_low = rung.get("projection_range_low")
+                range_high = rung.get("projection_range_high")
+                if range_low is None:
+                    range_low = projected
+                if range_high is None:
+                    range_high = projected
+                low, high = min(range_low, range_high), max(range_low, range_high)
+                range_text = (
+                    _fmt_premium(low)
+                    if abs(high - low) < 0.005
+                    else f"{_fmt_premium(low)}-{_fmt_premium(high)}"
+                )
+                reference_text = (
+                    "触位重算"
+                    if rung.get("projection_timing_capped") is True
+                    else f"{_fmt_premium(aggressive)}/{_fmt_premium(conservative)}"
+                )
                 price_text = (
-                    f"{opt_label} BS触位情景{_fmt_premium(projected)}"
+                    f"{opt_label} BS触位区间{range_text}"
                     f"(现{_fmt_premium(current)}) "
-                    f"触发后参考{_fmt_premium(aggressive)}/{_fmt_premium(conservative)}"
+                    f"触发后参考{reference_text}"
                     f"{stale_tag}"
                 )
             else:
@@ -676,8 +693,9 @@ def render_template(payload: dict[str, Any]) -> str:
     lines.append(
         "注: 墙位是 OI 真实聚集处(多在整数位),但价格常在墙前几点反转;"
         "先手挡=向现价方向让 30% 距离,成交率高、价格稍差。"
-        "BS情景价已计触达前的时间衰减与 vol 斜率(跌到位 IV 上抬/涨到位 IV 回落);"
-        "保守参考≈情景价×0.85。所有价格都依赖未来触达时间,不是当前可预挂的期权订单;"
+        "BS触位区间已计早/基准/晚触达的时间衰减与 vol 斜率;"
+        "时间估计触及上限时只显示“触位重算”。所有价格都依赖未来触达时间,"
+        "不是当前可预挂的期权订单;"
         "必须由 SPX 点位触发后用实时 mid/IV 重算。仅供参考,不是订单指令。"
     )
 

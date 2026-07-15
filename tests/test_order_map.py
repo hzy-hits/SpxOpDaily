@@ -1009,25 +1009,36 @@ def test_render_template_includes_wall_ladder_lines() -> None:
     }
     text = render_template(payload)
     assert "put 墙阶梯(下方支撑→买 call) (★=主墙):" in text
-    assert "★7500 (OI 3604,触达47%) → 7500C BS触位情景14.20(现31.05) 触发后参考14.20/12.00" in text
+    assert "★7500 (OI 3604,触达47%) → 7500C BS触位区间14.20(现31.05) 触发后参考14.20/12.00" in text
     assert (
-        " 7480 (OI 1500,触达30%) → 7480C BS触位情景9.50(现40.00) 触发后参考9.50/8.00 [stale]"
+        " 7480 (OI 1500,触达30%) → 7480C BS触位区间9.50(现40.00) 触发后参考9.50/8.00 [stale]"
         in text
     )
     assert "call 墙阶梯(上方阻力→买 put) (★=主墙):" in text
-    assert "★7550 (OI 6555,触达51%) → 7550P BS触位情景12.40(现28.00) 触发后参考12.40/10.50" in text
+    assert "★7550 (OI 6555,触达51%) → 7550P BS触位区间12.40(现28.00) 触发后参考12.40/10.50" in text
 
 
 def test_feishu_wall_layout_matches_compact_trading_table() -> None:
     from spx_spark.application.order_map.prompts import _detail_ladder_lines
 
-    def rung(strike: int, right: str, current: float, projected: float) -> dict[str, object]:
+    def rung(
+        strike: int,
+        right: str,
+        current: float,
+        projected: float,
+        *,
+        range_high: float | None = None,
+        timing_capped: bool = False,
+    ) -> dict[str, object]:
         return {
             "strike": strike,
             "option_strike": strike,
             "option_right": right,
             "current_mid": current,
             "projected_mid": projected,
+            "projection_range_low": projected,
+            "projection_range_high": range_high if range_high is not None else projected,
+            "projection_timing_capped": timing_capped,
             "limit_aggressive": projected,
             "limit_conservative": round(projected * 0.85, 2),
             "distance_points": strike - 7561,
@@ -1044,7 +1055,7 @@ def test_feishu_wall_layout_matches_compact_trading_table() -> None:
                     rung(7525, "C", 42.65, 7.67),
                 ],
                 "call_walls": [
-                    rung(7600, "P", 41.95, 3.71),
+                    rung(7600, "P", 41.95, 3.71, range_high=9.80, timing_capped=True),
                     rung(7610, "P", 50.85, 3.82),
                     rung(7570, "P", 21.35, 14.79),
                     rung(7580, "P", 27.00, 11.56),
@@ -1058,9 +1069,9 @@ def test_feishu_wall_layout_matches_compact_trading_table() -> None:
         "| 7535 | 次级支撑 | 7535C | 34.65 | 15.92 | 13.53–15.92 |",
         "| 7525 | 外侧支撑 | 7525C | 42.65 | 7.67 | 6.52–7.67 |",
         "| 7570 | 近端 Call GEX | 7570P | 21.35 | 14.79 | 12.57–14.79 |",
-        "| 7600 | 主 Call Wall | 7600P | 41.95 | 3.71 | 3.15–3.71 |",
+        "| 7600 | 主 Call Wall | 7600P | 41.95 | 3.71–9.80 | 触位重算 |",
     ]
-    assert lines[7].startswith("> BS 为标的触位估值")
+    assert lines[7].startswith("> BS 区间覆盖早/基准/晚触位时间")
 
 
 def test_actionable_pricing_rejects_stale_and_frozen_quotes() -> None:
@@ -1127,6 +1138,31 @@ def test_actionable_pricing_rejects_stale_and_frozen_quotes() -> None:
     assert live_ref["degraded"] is False
     assert stale_ref["projected_mid"] is None
     assert stale_ref["limit_aggressive"] is None
+
+    far_put = make_option(
+        expiry="20260709",
+        strike=7600.0,
+        right="P",
+        mark=40.0,
+        delta=-0.85,
+        gamma=0.006,
+        now=now,
+    )
+    far_ref = _wall_rung_option_ref(
+        wall_strike=7600.0,
+        right="P",
+        spot=7564.0,
+        expiry_quotes=[far_put],
+        pairs=pair_by_strike([far_put]),
+        strike_step=5.0,
+        tau_now_years=15.0 / (365.0 * 24.0),
+        em_points=28.0,
+        as_of=now,
+    )
+    assert far_ref["projection_timing_capped"] is True
+    assert far_ref["projection_touch_time_fraction"] == pytest.approx(0.9)
+    assert far_ref["projection_tau_at_touch_minutes"] == pytest.approx(90.0)
+    assert far_ref["projection_range_high"] > far_ref["projected_mid"]
 
     frozen = Quote(
         instrument=live.instrument,

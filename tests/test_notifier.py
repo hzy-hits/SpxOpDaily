@@ -2481,12 +2481,12 @@ def test_feishu_sectioned_card_converts_wall_table_to_compact_layout() -> None:
     assert [column["display_name"] for column in table["columns"]] == [
         "结构",
         "合约 / 现价",
-        "BS / 触发参考",
+        "BS区间 / 触发参考",
     ]
     assert table["rows"][0] == {
         "c0": "7550\n主 Put Wall",
         "c1": "7550C\n现 23.75",
-        "c2": "BS 18.22\n参考 15.40–18.20",
+        "c2": "BS区间 18.22\n参考 15.40–18.20",
     }
     assert card["header"]["template"] == "orange"
 

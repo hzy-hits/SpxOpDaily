@@ -14,9 +14,9 @@ from spx_spark.application.order_map.candidates import (
 )
 from spx_spark.application.order_map.pricing import (
     YEAR_SECONDS,
+    build_option_price_bs_projection,
     expiry_close_utc,
     project_option_price,
-    project_option_price_bs,
     round_to_tick,
     smile_slope_per_point,
 )
@@ -218,6 +218,12 @@ def _wall_rung_option_ref(
         "limit_aggressive": None,
         "limit_conservative": None,
         "projection_model": None,
+        "projection_range_low": None,
+        "projection_range_high": None,
+        "projection_tau_now_minutes": None,
+        "projection_tau_at_touch_minutes": None,
+        "projection_touch_time_fraction": None,
+        "projection_timing_capped": False,
         "quote_quality": None,
         "degraded": False,
     }
@@ -238,7 +244,7 @@ def _wall_rung_option_ref(
     strike_float = finite_float(quote.instrument.strike) or float(target_strike)
     iv = finite_float(quote.greeks.implied_vol) if quote.greeks is not None else None
     slope = smile_slope_per_point(pairs, right, strike_float, strike_step)
-    bs_projected = project_option_price_bs(
+    bs_projection = build_option_price_bs_projection(
         mid=mid,
         iv=iv,
         strike=strike_float,
@@ -250,8 +256,8 @@ def _wall_rung_option_ref(
         slope_per_point=slope,
         policy=policy,
     )
-    if bs_projected is not None:
-        projected, model = bs_projected, "bs_repricing"
+    if bs_projection is not None:
+        projected, model = bs_projection.projected_mid, "bs_repricing"
     else:
         projected, model = (
             project_option_price(mid, delta, gamma, spot, wall_strike),
@@ -271,6 +277,26 @@ def _wall_rung_option_ref(
             projected * policy.conservative_limit_multiplier
         ),
         "projection_model": model,
+        "projection_range_low": (
+            bs_projection.price_range_low if bs_projection is not None else projected
+        ),
+        "projection_range_high": (
+            bs_projection.price_range_high if bs_projection is not None else projected
+        ),
+        "projection_tau_now_minutes": (
+            bs_projection.tau_now_minutes if bs_projection is not None else None
+        ),
+        "projection_tau_at_touch_minutes": (
+            bs_projection.tau_at_touch_minutes if bs_projection is not None else None
+        ),
+        "projection_touch_time_fraction": (
+            bs_projection.touch_time_fraction if bs_projection is not None else None
+        ),
+        "projection_timing_capped": bool(
+            bs_projection is not None
+            and bs_projection.touch_time_fraction
+            >= policy.touch_time_fraction_maximum - 1e-9
+        ),
         "quote_quality": quality,
         "degraded": degraded,
     }
@@ -321,6 +347,12 @@ def _wall_ladder_payload(
                 "limit_aggressive": None,
                 "limit_conservative": None,
                 "projection_model": None,
+                "projection_range_low": None,
+                "projection_range_high": None,
+                "projection_tau_now_minutes": None,
+                "projection_tau_at_touch_minutes": None,
+                "projection_touch_time_fraction": None,
+                "projection_timing_capped": False,
                 "quote_quality": None,
                 "degraded": False,
             }
@@ -358,6 +390,20 @@ def _wall_ladder_payload(
                     "limit_aggressive": option_ref.get("limit_aggressive"),
                     "limit_conservative": option_ref.get("limit_conservative"),
                     "projection_model": option_ref.get("projection_model"),
+                    "projection_range_low": option_ref.get("projection_range_low"),
+                    "projection_range_high": option_ref.get("projection_range_high"),
+                    "projection_tau_now_minutes": option_ref.get(
+                        "projection_tau_now_minutes"
+                    ),
+                    "projection_tau_at_touch_minutes": option_ref.get(
+                        "projection_tau_at_touch_minutes"
+                    ),
+                    "projection_touch_time_fraction": option_ref.get(
+                        "projection_touch_time_fraction"
+                    ),
+                    "projection_timing_capped": bool(
+                        option_ref.get("projection_timing_capped")
+                    ),
                     "quote_quality": option_ref.get("quote_quality"),
                     "degraded": bool(option_ref.get("degraded")),
                 }

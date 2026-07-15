@@ -677,7 +677,7 @@ def _detail_ladder_lines(payload: dict[str, Any]) -> list[str]:
     if not selected:
         return []
     rendered = [
-        "| SPX 墙位 | 结构 | 合约 | 当前 mid | BS 触位价 | 触发后参考 |",
+        "| SPX 墙位 | 结构 | 合约 | 当前 mid | BS 触位区间 | 触发后参考 |",
         "| ---: | --- | --- | ---: | ---: | ---: |",
     ]
     for rung, label, default_right in selected:
@@ -687,6 +687,17 @@ def _detail_ladder_lines(payload: dict[str, Any]) -> list[str]:
         contract = f"{_dash(option_strike if option_strike is not None else strike)}{right}"
         current = finite_float(rung.get("current_mid"))
         projected = finite_float(rung.get("projected_mid"))
+        range_low = finite_float(rung.get("projection_range_low"))
+        range_high = finite_float(rung.get("projection_range_high"))
+        if range_low is None:
+            range_low = projected
+        if range_high is None:
+            range_high = projected
+        if range_low is not None and range_high is not None:
+            low, high = min(range_low, range_high), max(range_low, range_high)
+            bs_range = f"{low:.2f}" if abs(high - low) < 0.005 else f"{low:.2f}–{high:.2f}"
+        else:
+            bs_range = "-"
         limits = [
             value
             for value in (
@@ -695,14 +706,22 @@ def _detail_ladder_lines(payload: dict[str, Any]) -> list[str]:
             )
             if value is not None
         ]
-        reference = f"{min(limits):.2f}–{max(limits):.2f}" if limits else "-"
+        reference = (
+            "触位重算"
+            if rung.get("projection_timing_capped") is True
+            else f"{min(limits):.2f}–{max(limits):.2f}"
+            if limits
+            else "-"
+        )
         rendered.append(
             f"| {_dash(strike)} | {label} | {contract} | "
-            f"{current:.2f} | {projected:.2f} | {reference} |"
+            f"{current:.2f} | {bs_range} | {reference} |"
             if current is not None and projected is not None
             else f"| {_dash(strike)} | {label} | {contract} | - | - | {reference} |"
         )
-    rendered.append("> BS 为标的触位估值；参考区间仅在触发后使用，不是当前可直接预挂的期权价格。")
+    rendered.append(
+        "> BS 区间覆盖早/基准/晚触位时间；出现“触位重算”表示时间估计已触及上限，不得按静态期权价预挂。"
+    )
     return rendered
 
 
