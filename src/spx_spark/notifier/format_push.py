@@ -41,6 +41,10 @@ _MD_BULLET_RE = re.compile(r"^[-*]\s+")
 _SPX_STATUS_HEADER_RE = re.compile(r"^【(SPX 15m · .+)】$")
 _STATUS_PLAN_RE = re.compile(r"^(计划\d+\s*·\s*\S+)\s{2}(.*)$")
 _TABLE_SEPARATOR_CELL_RE = re.compile(r"^:?-{3,}:?$")
+_WALL_LAYOUT_HEADERS = ["SPX 墙位", "结构", "合约", "当前 mid", "BS 触位价", "触发后参考"]
+_COLLAPSED_STATUS_SECTIONS = frozenset(
+    {"Greeks 与波动", "ES 与跨资产确认", "风险中性分布", "观察情景与 BS 审计"}
+)
 
 
 def _status_card_template(text: str) -> str:
@@ -158,13 +162,39 @@ def _sectioned_card_parts(
         content = "\n".join(block).strip()
         if not content:
             continue
+        section_title = (
+            content.splitlines()[0].removeprefix("## ").strip()
+            if content.startswith("## ")
+            else ""
+        )
+        collapsed = section_title in _COLLAPSED_STATUS_SECTIONS
+        render_content = (
+            "\n".join(content.splitlines()[1:]).strip() if collapsed else content
+        )
         if index:
             elements.append({"tag": "hr"})
         block_elements, table_index = _markdown_and_table_elements(
-            content,
+            render_content,
             table_index=table_index,
         )
-        elements.extend(block_elements)
+        if collapsed and block_elements:
+            elements.append(
+                {
+                    "tag": "collapsible_panel",
+                    "expanded": False,
+                    "header": {
+                        "title": {"tag": "plain_text", "content": section_title},
+                        "background_color": "grey",
+                        "vertical_align": "center",
+                        "padding": "8px",
+                    },
+                    "border": {"color": "grey", "corner_radius": "6px"},
+                    "padding": "8px",
+                    "elements": block_elements,
+                }
+            )
+        else:
+            elements.extend(block_elements)
     return header_title, elements, template
 
 
@@ -220,6 +250,63 @@ def _native_table_element(
     }
 
 
+def _wall_layout_elements(rows: list[list[str]]) -> list[dict[str, Any]]:
+    """Render a six-column wall table as mobile-friendly three-column rows."""
+
+    elements: list[dict[str, Any]] = []
+    for index, row in enumerate(rows):
+        cells = [*row, *([""] * max(0, 6 - len(row)))]
+        if index:
+            elements.append({"tag": "hr", "margin": "2px 0"})
+        elements.append(
+            {
+                "tag": "column_set",
+                "flex_mode": "stretch",
+                "horizontal_spacing": "8px",
+                "vertical_align": "top",
+                "columns": [
+                    {
+                        "tag": "column",
+                        "width": "weighted",
+                        "weight": 4,
+                        "elements": [
+                            {
+                                "tag": "markdown",
+                                "content": f"**{cells[0]}**\n{cells[1]}",
+                                "text_align": "left",
+                            }
+                        ],
+                    },
+                    {
+                        "tag": "column",
+                        "width": "weighted",
+                        "weight": 4,
+                        "elements": [
+                            {
+                                "tag": "markdown",
+                                "content": f"**{cells[2]}**\n现 {cells[3]}",
+                                "text_align": "left",
+                            }
+                        ],
+                    },
+                    {
+                        "tag": "column",
+                        "width": "weighted",
+                        "weight": 6,
+                        "elements": [
+                            {
+                                "tag": "markdown",
+                                "content": f"**BS {cells[4]}**\n参考 {cells[5]}",
+                                "text_align": "left",
+                            }
+                        ],
+                    },
+                ],
+            }
+        )
+    return elements
+
+
 def _markdown_and_table_elements(
     content: str,
     *,
@@ -252,10 +339,13 @@ def _markdown_and_table_elements(
                 rows.append(row)
                 index += 1
             if rows:
-                elements.append(
-                    _native_table_element(headers, rows, table_index=table_index)
-                )
-                table_index += 1
+                if headers == _WALL_LAYOUT_HEADERS:
+                    elements.extend(_wall_layout_elements(rows))
+                else:
+                    elements.append(
+                        _native_table_element(headers, rows, table_index=table_index)
+                    )
+                    table_index += 1
             continue
         markdown_lines.append(lines[index])
         index += 1

@@ -2458,7 +2458,7 @@ def test_feishu_status_card_uses_sections_and_state_color() -> None:
     assert "> **执行**" in elements[4]["content"]
 
 
-def test_feishu_sectioned_card_converts_markdown_tables_to_native_tables() -> None:
+def test_feishu_sectioned_card_converts_wall_table_to_compact_layout() -> None:
     from spx_spark.notifier.format_push import build_feishu_card
 
     text = "\n".join(
@@ -2477,25 +2477,46 @@ def test_feishu_sectioned_card_converts_markdown_tables_to_native_tables() -> No
     card = build_feishu_card(text, title="SPX 15分钟市场状态", kind="status")
 
     elements = card["body"]["elements"]
-    table = next(element for element in elements if element["tag"] == "table")
-    assert table["element_id"] == "table_1"
-    assert [column["display_name"] for column in table["columns"]] == [
-        "SPX 墙位",
-        "结构",
-        "合约",
-        "当前 mid",
-        "BS 触位价",
-        "触发后参考",
-    ]
-    assert table["rows"][0] == {
-        "c0": "7550",
-        "c1": "主 Put Wall",
-        "c2": "7550C",
-        "c3": "23.75",
-        "c4": "18.22",
-        "c5": "15.40–18.20",
-    }
+    layouts = [element for element in elements if element["tag"] == "column_set"]
+    assert len(layouts) == 2
+    first_columns = layouts[0]["columns"]
+    assert [column["weight"] for column in first_columns] == [4, 4, 6]
+    assert first_columns[0]["elements"][0]["content"] == "**7550**\n主 Put Wall"
+    assert first_columns[1]["elements"][0]["content"] == "**7550C**\n现 23.75"
+    assert first_columns[2]["elements"][0]["content"] == (
+        "**BS 18.22**\n参考 15.40–18.20"
+    )
     assert card["header"]["template"] == "orange"
+
+
+def test_feishu_sectioned_card_collapses_secondary_evidence() -> None:
+    from spx_spark.notifier.format_push import build_feishu_card
+
+    text = "\n".join(
+        (
+            "【SPX 15m · 12:45 · 0DTE 07-15 · 亚盘夜盘】",
+            "状态  APPROACHING（接近）",
+            "",
+            "## Greeks 与波动",
+            "Gamma 24.6k　VIX 16.1",
+            "",
+            "## 关键位状态",
+            "Flip 7550–7555",
+        )
+    )
+
+    card = build_feishu_card(text, title="SPX 15分钟市场状态", kind="status")
+
+    panels = [
+        element for element in card["body"]["elements"] if element["tag"] == "collapsible_panel"
+    ]
+    assert len(panels) == 1
+    assert panels[0]["expanded"] is False
+    assert panels[0]["header"]["title"]["content"] == "Greeks 与波动"
+    assert any(
+        element["tag"] == "markdown" and "## 关键位状态" in element["content"]
+        for element in card["body"]["elements"]
+    )
 
 
 def test_deliver_trade_push_routes_ops_to_bark_ops_group_not_feishu(tmp_path) -> None:

@@ -1053,13 +1053,14 @@ def test_feishu_wall_layout_matches_compact_trading_table() -> None:
         }
     )
 
-    assert lines[2:] == [
+    assert lines[2:7] == [
         "| 7550 | 主 Put Wall | 7550C | 23.75 | 18.22 | 15.49–18.22 |",
         "| 7535 | 次级支撑 | 7535C | 34.65 | 15.92 | 13.53–15.92 |",
         "| 7500 | 外侧支撑 | 7500C | 64.40 | 8.97 | 7.62–8.97 |",
         "| 7570 | 近端 Call GEX | 7570P | 21.35 | 14.79 | 12.57–14.79 |",
         "| 7600 | 主 Call Wall | 7600P | 41.95 | 3.71 | 3.15–3.71 |",
     ]
+    assert lines[7].startswith("> BS 为标的触位估值")
 
 
 def test_actionable_pricing_rejects_stale_and_frozen_quotes() -> None:

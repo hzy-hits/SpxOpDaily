@@ -681,6 +681,7 @@ def _detail_ladder_lines(payload: dict[str, Any]) -> list[str]:
             if current is not None and projected is not None
             else f"| {_dash(strike)} | {label} | {contract} | - | - | {reference} |"
         )
+    rendered.append("> BS 为标的触位估值；参考区间仅在触发后使用，不是当前可直接预挂的期权价格。")
     return rendered
 
 
@@ -753,7 +754,7 @@ def render_feishu_status_detail_template(
         ("Greeks 与波动", greek_and_vol),
         ("ES 与跨资产确认", market_confirmation),
         ("关键位状态", key_level_context),
-        ("墙位阶梯", _detail_ladder_lines(payload)),
+        ("当前布局参考", _detail_ladder_lines(payload)),
         ("风险中性分布", [density] if density else []),
         (
             "条件计划与 BS 审计"
@@ -780,7 +781,9 @@ def render_feishu_delivery_text(
     if detail == summary:
         return summary
     if separator and body:
-        return f"{summary}\n\n{body}"
+        blocks = [block for block in body.split("\n\n") if block]
+        detail_blocks = [block for block in blocks if not block.startswith("## 市场概览\n")]
+        return f"{summary}\n\n" + "\n\n".join(detail_blocks)
     return detail or summary
 
 
