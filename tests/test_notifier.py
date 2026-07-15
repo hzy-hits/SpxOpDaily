@@ -2477,16 +2477,17 @@ def test_feishu_sectioned_card_converts_wall_table_to_compact_layout() -> None:
     card = build_feishu_card(text, title="SPX 15分钟市场状态", kind="status")
 
     elements = card["body"]["elements"]
-    quote_rows = [
-        element
-        for element in elements
-        if element["tag"] == "markdown" and "→　BS" in element["content"]
+    table = next(element for element in elements if element["tag"] == "table")
+    assert [column["display_name"] for column in table["columns"]] == [
+        "结构",
+        "合约 / 现价",
+        "BS / 触发参考",
     ]
-    assert len(quote_rows) == 2
-    assert quote_rows[0]["content"] == (
-        "**7550 · 主 Put Wall**　7550C\n"
-        "现 `23.75`　→　BS `18.22`　参考 `15.40–18.20`"
-    )
+    assert table["rows"][0] == {
+        "c0": "7550\n主 Put Wall",
+        "c1": "7550C\n现 23.75",
+        "c2": "BS 18.22\n参考 15.40–18.20",
+    }
     assert card["header"]["template"] == "orange"
 
 

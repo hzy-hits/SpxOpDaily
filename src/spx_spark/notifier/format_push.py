@@ -236,7 +236,9 @@ def _native_table_element(
                 "display_name": header,
                 "data_type": "text",
                 "width": "auto",
-                "horizontal_align": "left" if header in {"结构", "合约"} else "right",
+                "horizontal_align": (
+                    "left" if header == "结构" or header.startswith("合约") else "right"
+                ),
             }
             for index, (name, header) in enumerate(zip(column_names, headers, strict=True))
         ],
@@ -250,25 +252,24 @@ def _native_table_element(
     }
 
 
-def _wall_layout_elements(rows: list[list[str]]) -> list[dict[str, Any]]:
-    """Render each wall as a two-line mobile quote strip."""
+def _wall_layout_element(rows: list[list[str]], *, table_index: int) -> dict[str, Any]:
+    """Merge six analytical fields into a mobile-safe native three-column table."""
 
-    elements: list[dict[str, Any]] = []
-    for index, row in enumerate(rows):
+    compact_rows: list[list[str]] = []
+    for row in rows:
         cells = [*row, *([""] * max(0, 6 - len(row)))]
-        if index:
-            elements.append({"tag": "hr", "margin": "2px 0"})
-        elements.append(
-            {
-                "tag": "markdown",
-                "content": (
-                    f"**{cells[0]} · {cells[1]}**　{cells[2]}\n"
-                    f"现 `{cells[3]}`　→　BS `{cells[4]}`　参考 `{cells[5]}`"
-                ),
-                "text_align": "left",
-            }
+        compact_rows.append(
+            [
+                f"{cells[0]}\n{cells[1]}",
+                f"{cells[2]}\n现 {cells[3]}",
+                f"BS {cells[4]}\n参考 {cells[5]}",
+            ]
         )
-    return elements
+    return _native_table_element(
+        ["结构", "合约 / 现价", "BS / 触发参考"],
+        compact_rows,
+        table_index=table_index,
+    )
 
 
 def _markdown_and_table_elements(
@@ -304,7 +305,8 @@ def _markdown_and_table_elements(
                 index += 1
             if rows:
                 if headers == _WALL_LAYOUT_HEADERS:
-                    elements.extend(_wall_layout_elements(rows))
+                    elements.append(_wall_layout_element(rows, table_index=table_index))
+                    table_index += 1
                 else:
                     elements.append(
                         _native_table_element(headers, rows, table_index=table_index)
