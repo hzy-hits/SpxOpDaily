@@ -611,58 +611,76 @@ def _detail_candidate_lines(payload: dict[str, Any]) -> list[str]:
 
 def _detail_ladder_lines(payload: dict[str, Any]) -> list[str]:
     ladder = payload.get("wall_ladder") if isinstance(payload.get("wall_ladder"), dict) else {}
-    rendered: list[str] = []
-    for key, title, default_right in (
-        ("put_walls", "Put 墙（支撑 → Call）", "C"),
-        ("call_walls", "Call 墙（阻力 → Put）", "P"),
-    ):
-        rungs = [rung for rung in ladder.get(key) or [] if isinstance(rung, dict)]
-        if not rungs:
-            continue
-        primary_strike = rungs[0].get("strike")
-        spatial = sorted(
-            rungs,
-            key=lambda rung: -(rung.get("strike") or 0.0),
-            reverse=(key == "call_walls"),
+    put_rungs = [rung for rung in ladder.get("put_walls") or [] if isinstance(rung, dict)]
+    call_rungs = [rung for rung in ladder.get("call_walls") or [] if isinstance(rung, dict)]
+    selected: list[tuple[dict[str, Any], str, str]] = []
+
+    if put_rungs:
+        primary = put_rungs[0]
+        support_rungs = sorted(put_rungs[:3], key=lambda rung: -(rung.get("strike") or 0.0))
+        secondary_index = 0
+        for rung in support_rungs:
+            if rung is primary:
+                label = "主 Put Wall"
+            else:
+                label = "次级支撑" if secondary_index == 0 else "外侧支撑"
+                secondary_index += 1
+            selected.append((rung, label, "C"))
+
+    if call_rungs:
+        primary = call_rungs[0]
+        underlier = payload.get("underlier") if isinstance(payload.get("underlier"), dict) else {}
+        spot = finite_float(underlier.get("price"))
+
+        def call_distance(rung: dict[str, Any]) -> float:
+            distance = finite_float(rung.get("distance_points"))
+            strike = finite_float(rung.get("strike"))
+            if distance is not None:
+                return abs(distance)
+            if strike is not None and spot is not None:
+                return abs(strike - spot)
+            return float("inf")
+
+        nearest = min(
+            call_rungs,
+            key=call_distance,
         )
-        rendered.extend(
-            (
-                f"**{title}**",
-                "| 墙位 | OI | 触达 | 合约 | 现价 | BS / 触发参考 |",
-                "| --- | ---: | ---: | --- | ---: | --- |",
-            )
+        call_selection = sorted(
+            {id(rung): rung for rung in (nearest, primary)}.values(),
+            key=lambda rung: rung.get("strike") or 0.0,
         )
-        for rung in spatial:
-            strike = rung.get("strike")
-            star = "★" if strike == primary_strike else ""
-            oi = finite_float(rung.get("open_interest"))
-            oi_text = f"{int(oi):,}" if oi is not None and oi > 0 else "-"
-            probability = finite_float(rung.get("prob_touch"))
-            probability_text = f"{probability:.0%}" if probability is not None else "-"
-            right = str(rung.get("option_right") or default_right)
-            option_strike = rung.get("option_strike")
-            contract = f"{_dash(option_strike if option_strike is not None else strike)}{right}"
-            current = finite_float(rung.get("current_mid"))
-            projected = finite_float(rung.get("projected_mid"))
-            aggressive = finite_float(rung.get("limit_aggressive"))
-            conservative = finite_float(rung.get("limit_conservative"))
-            reference_values = [value for value in (aggressive, conservative) if value is not None]
-            reference = (
-                f"{min(reference_values):.2f}–{max(reference_values):.2f}"
-                if reference_values
-                else "-"
+        for rung in call_selection:
+            label = "主 Call Wall" if rung is primary else "近端 Call GEX"
+            selected.append((rung, label, "P"))
+
+    if not selected:
+        return []
+    rendered = [
+        "| SPX 墙位 | 结构 | 合约 | 当前 mid | BS 触位价 | 触发后参考 |",
+        "| ---: | --- | --- | ---: | ---: | ---: |",
+    ]
+    for rung, label, default_right in selected:
+        strike = rung.get("strike")
+        right = str(rung.get("option_right") or default_right)
+        option_strike = rung.get("option_strike")
+        contract = f"{_dash(option_strike if option_strike is not None else strike)}{right}"
+        current = finite_float(rung.get("current_mid"))
+        projected = finite_float(rung.get("projected_mid"))
+        limits = [
+            value
+            for value in (
+                finite_float(rung.get("limit_aggressive")),
+                finite_float(rung.get("limit_conservative")),
             )
-            projected_text = f"{projected:.2f} / {reference}" if projected is not None else "-"
-            rendered.append(
-                f"| {star}{_dash(strike)} | {oi_text} | {probability_text} | {contract} | "
-                f"{current:.2f} | {projected_text} |"
-                if current is not None
-                else (
-                    f"| {star}{_dash(strike)} | {oi_text} | {probability_text} | {contract} | "
-                    f"- | {projected_text} |"
-                )
-            )
-        rendered.append("")
+            if value is not None
+        ]
+        reference = f"{min(limits):.2f}–{max(limits):.2f}" if limits else "-"
+        rendered.append(
+            f"| {_dash(strike)} | {label} | {contract} | "
+            f"{current:.2f} | {projected:.2f} | {reference} |"
+            if current is not None and projected is not None
+            else f"| {_dash(strike)} | {label} | {contract} | - | - | {reference} |"
+        )
     return rendered
 
 

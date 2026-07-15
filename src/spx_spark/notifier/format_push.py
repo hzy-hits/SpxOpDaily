@@ -206,7 +206,7 @@ def _native_table_element(
                 "display_name": header,
                 "data_type": "text",
                 "width": "auto",
-                "horizontal_align": "left" if index in {0, 3, 5} else "right",
+                "horizontal_align": "left" if header in {"结构", "合约"} else "right",
             }
             for index, (name, header) in enumerate(zip(column_names, headers, strict=True))
         ],

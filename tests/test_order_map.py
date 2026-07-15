@@ -1018,6 +1018,50 @@ def test_render_template_includes_wall_ladder_lines() -> None:
     assert "★7550 (OI 6555,触达51%) → 7550P BS触位情景12.40(现28.00) 触发后参考12.40/10.50" in text
 
 
+def test_feishu_wall_layout_matches_compact_trading_table() -> None:
+    from spx_spark.application.order_map.prompts import _detail_ladder_lines
+
+    def rung(strike: int, right: str, current: float, projected: float) -> dict[str, object]:
+        return {
+            "strike": strike,
+            "option_strike": strike,
+            "option_right": right,
+            "current_mid": current,
+            "projected_mid": projected,
+            "limit_aggressive": projected,
+            "limit_conservative": round(projected * 0.85, 2),
+            "distance_points": strike - 7561,
+        }
+
+    lines = _detail_ladder_lines(
+        {
+            "underlier": {"price": 7561.0},
+            "wall_ladder": {
+                "put_walls": [
+                    rung(7550, "C", 23.75, 18.22),
+                    rung(7535, "C", 34.65, 15.92),
+                    rung(7500, "C", 64.40, 8.97),
+                    rung(7525, "C", 42.65, 7.67),
+                ],
+                "call_walls": [
+                    rung(7600, "P", 41.95, 3.71),
+                    rung(7610, "P", 50.85, 3.82),
+                    rung(7570, "P", 21.35, 14.79),
+                    rung(7580, "P", 27.00, 11.56),
+                ],
+            },
+        }
+    )
+
+    assert lines[2:] == [
+        "| 7550 | 主 Put Wall | 7550C | 23.75 | 18.22 | 15.49–18.22 |",
+        "| 7535 | 次级支撑 | 7535C | 34.65 | 15.92 | 13.53–15.92 |",
+        "| 7500 | 外侧支撑 | 7500C | 64.40 | 8.97 | 7.62–8.97 |",
+        "| 7570 | 近端 Call GEX | 7570P | 21.35 | 14.79 | 12.57–14.79 |",
+        "| 7600 | 主 Call Wall | 7600P | 41.95 | 3.71 | 3.15–3.71 |",
+    ]
+
+
 def test_actionable_pricing_rejects_stale_and_frozen_quotes() -> None:
     now = datetime(2026, 7, 9, 15, 0, tzinfo=timezone.utc)
     live = make_option(

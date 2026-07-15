@@ -2467,11 +2467,10 @@ def test_feishu_sectioned_card_converts_markdown_tables_to_native_tables() -> No
             "状态  APPROACHING（接近）",
             "",
             "## 墙位阶梯",
-            "**Put 墙（支撑 → Call）**",
-            "| 墙位 | OI | 触达 | 合约 | 现价 | BS / 触发参考 |",
-            "| --- | ---: | ---: | --- | ---: | --- |",
-            "| ★7550 | 2,010 | 80% | 7550C | 23.75 | 18.22 / 15.40–18.20 |",
-            "| 7535 | 996 | 58% | 7535C | 34.65 | 15.92 / 13.50–15.90 |",
+            "| SPX 墙位 | 结构 | 合约 | 当前 mid | BS 触位价 | 触发后参考 |",
+            "| ---: | --- | --- | ---: | ---: | ---: |",
+            "| 7550 | 主 Put Wall | 7550C | 23.75 | 18.22 | 15.40–18.20 |",
+            "| 7535 | 次级支撑 | 7535C | 34.65 | 15.92 | 13.50–15.90 |",
         )
     )
 
@@ -2481,20 +2480,20 @@ def test_feishu_sectioned_card_converts_markdown_tables_to_native_tables() -> No
     table = next(element for element in elements if element["tag"] == "table")
     assert table["element_id"] == "table_1"
     assert [column["display_name"] for column in table["columns"]] == [
-        "墙位",
-        "OI",
-        "触达",
+        "SPX 墙位",
+        "结构",
         "合约",
-        "现价",
-        "BS / 触发参考",
+        "当前 mid",
+        "BS 触位价",
+        "触发后参考",
     ]
     assert table["rows"][0] == {
-        "c0": "★7550",
-        "c1": "2,010",
-        "c2": "80%",
-        "c3": "7550C",
-        "c4": "23.75",
-        "c5": "18.22 / 15.40–18.20",
+        "c0": "7550",
+        "c1": "主 Put Wall",
+        "c2": "7550C",
+        "c3": "23.75",
+        "c4": "18.22",
+        "c5": "15.40–18.20",
     }
     assert card["header"]["template"] == "orange"
 
