@@ -30,12 +30,10 @@ FARM_BROKEN_CODES = frozenset({2103, 2110, 2157})
 TWS_CONNECTIVITY_LOST_CODES = frozenset({1100, 2110})
 TWS_CONNECTIVITY_RESTORED_CODES = frozenset({1101, 1102})
 
-NON_DEGRADING_ERROR_CODES = (
-    FARM_OK_CODES | FARM_CONNECTING_CODES | TWS_CONNECTIVITY_RESTORED_CODES
-)
+NON_DEGRADING_ERROR_CODES = FARM_OK_CODES | FARM_CONNECTING_CODES | TWS_CONNECTIVITY_RESTORED_CODES
 
 _FARM_NAME_RE = re.compile(
-    r"(?:market data farm connection is|hmds data farm connection is|sec-def data farm connection is)"
+    r"(?:market data farm(?: connection)? is|hmds data farm connection is|sec-def data farm connection is)"
     r" ([^:]+):(\S+)",
     re.IGNORECASE,
 )
@@ -117,7 +115,7 @@ def classify_farm_error(error_code: int, message: str) -> tuple[FarmLinkStatus, 
 def parse_farm_name(message: str) -> str | None:
     match = _FARM_NAME_RE.search(message)
     if match:
-        return match.group(2)
+        return match.group(2).split(".", maxsplit=1)[0]
     lowered = message.lower()
     if "between trader workstation and server is broken" in lowered:
         return "tws-server"
@@ -198,6 +196,28 @@ class FarmHealthTracker:
     last_error_message: str | None = None
     last_farm: str | None = None
     farms: dict[str, FarmLinkStatus] = field(default_factory=dict)
+    broken_since_by_farm: dict[str, float] = field(default_factory=dict)
+
+    def _refresh_aggregate_status(self) -> None:
+        broken_farms = {
+            farm for farm, status in self.farms.items() if status is FarmLinkStatus.BROKEN
+        }
+        for farm in tuple(self.broken_since_by_farm):
+            if farm not in broken_farms:
+                self.broken_since_by_farm.pop(farm, None)
+
+        if broken_farms:
+            self.status = FarmLinkStatus.BROKEN
+            self.broken_since = min(self.broken_since_by_farm[farm] for farm in broken_farms)
+            return
+
+        self.broken_since = None
+        if any(status is FarmLinkStatus.CONNECTING for status in self.farms.values()):
+            self.status = FarmLinkStatus.CONNECTING
+        elif self.farms:
+            self.status = FarmLinkStatus.OK
+        else:
+            self.status = FarmLinkStatus.UNKNOWN
 
     def observe(
         self,
@@ -212,24 +232,25 @@ class FarmHealthTracker:
         if link_status is FarmLinkStatus.UNKNOWN:
             return None
 
-        if farm:
-            self.farms[farm] = link_status
-
         previous = self.status
         self.last_error_code = error_code
         self.last_error_message = message
         self.last_farm = farm
 
-        if link_status is FarmLinkStatus.BROKEN:
-            if self.broken_since is None:
-                self.broken_since = now
-            self.status = FarmLinkStatus.BROKEN
-        elif link_status is FarmLinkStatus.OK:
-            self.broken_since = None
-            self.status = FarmLinkStatus.OK
-        elif link_status is FarmLinkStatus.CONNECTING:
-            if self.status is not FarmLinkStatus.BROKEN:
-                self.status = FarmLinkStatus.CONNECTING
+        if farm:
+            self.farms[farm] = link_status
+            if link_status is FarmLinkStatus.BROKEN:
+                self.broken_since_by_farm.setdefault(farm, now)
+            elif link_status is FarmLinkStatus.OK:
+                self.broken_since_by_farm.pop(farm, None)
+        elif link_status is FarmLinkStatus.BROKEN:
+            # Unknown broken events must remain active until the session resets;
+            # an unrelated farm recovery cannot safely identify what recovered.
+            farm = "unknown-farm"
+            self.farms[farm] = link_status
+            self.broken_since_by_farm.setdefault(farm, now)
+
+        self._refresh_aggregate_status()
 
         if self.status == previous:
             return None
@@ -245,22 +266,32 @@ class FarmHealthTracker:
             broken_seconds=broken_seconds,
         )
 
-    def mark_probe_failed(self, probe: DataPlaneProbeResult, *, now: float | None = None) -> FarmStatusEvent:
+    def mark_probe_failed(
+        self, probe: DataPlaneProbeResult, *, now: float | None = None
+    ) -> FarmStatusEvent:
         if now is None:
             now = time.monotonic()
-        if self.broken_since is None:
-            self.broken_since = now
-        self.status = FarmLinkStatus.BROKEN
         self.last_error_code = None
         self.last_error_message = probe.error
         self.last_farm = "data-plane-probe"
         self.farms["data-plane-probe"] = FarmLinkStatus.BROKEN
+        self.broken_since_by_farm.setdefault("data-plane-probe", now)
+        self._refresh_aggregate_status()
         return FarmStatusEvent(
             status=self.status,
             message=probe.error,
             farm="data-plane-probe",
             broken_seconds=0.0,
         )
+
+    def mark_probe_succeeded(self) -> None:
+        """Clear only a prior data-plane probe failure."""
+
+        if "data-plane-probe" not in self.farms:
+            return
+        self.farms["data-plane-probe"] = FarmLinkStatus.OK
+        self.broken_since_by_farm.pop("data-plane-probe", None)
+        self._refresh_aggregate_status()
 
     def broken_duration(self, *, now: float | None = None) -> float | None:
         if self.broken_since is None:
@@ -274,6 +305,14 @@ class FarmHealthTracker:
         if duration is None:
             return False
         return duration >= self.broken_restart_seconds
+
+    def oldest_broken_farm(self) -> str | None:
+        if not self.broken_since_by_farm:
+            return None
+        return min(
+            self.broken_since_by_farm,
+            key=self.broken_since_by_farm.__getitem__,
+        )
 
     def market_data_ready(self) -> bool:
         """True when no tracked farm is broken/connecting; cold start is ready."""
@@ -294,6 +333,7 @@ class FarmHealthTracker:
         self.last_error_message = None
         self.last_farm = None
         self.farms.clear()
+        self.broken_since_by_farm.clear()
 
 
 def request_gateway_restart(

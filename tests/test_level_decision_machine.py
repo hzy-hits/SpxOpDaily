@@ -143,6 +143,24 @@ def test_sustained_bad_quality_invalidates_active_decision() -> None:
     assert invalid.reason == "stale_chain"
 
 
+def test_pending_structure_change_immediately_invalidates_active_decision() -> None:
+    armed = advance(None, 0, spot=95.0, es=5000.0)
+    pending_structure = LevelObservation(
+        at=NOW + timedelta(seconds=5),
+        spot=95.0,
+        es=5000.0,
+        levels={"put_wall": 100.0, "call_wall": 120.0},
+        quality_ok=False,
+        quality_reason="structure_change_pending",
+        session_date="2026-07-13",
+    )
+
+    invalid = advance_level_decision(armed.state, pending_structure, settings=SETTINGS)
+
+    assert invalid.current_phase is LevelPhase.INVALIDATED
+    assert invalid.reason == "structure_change_pending"
+
+
 def test_structure_drift_invalidates_frozen_level() -> None:
     armed = advance(None, 0, spot=95.0, es=5000.0)
     result = advance(

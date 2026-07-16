@@ -15,6 +15,7 @@ from spx_spark.application.order_map.pricing_audit import (
     append_pricing_audit,
     build_pricing_audit_record,
 )
+from spx_spark.application.order_map.frozen_structure import attach_frozen_option_structure
 from spx_spark.config import NotificationSettings
 from spx_spark.marketdata import (
     InstrumentId,
@@ -176,6 +177,84 @@ def make_state(*quotes: Quote, now: datetime) -> LatestState:
         quotes=tuple(quotes),
         best_quotes=tuple(quotes),
     )
+
+
+def test_frozen_option_structure_renders_walls_but_never_bs_or_limits() -> None:
+    payload = {
+        "research_only": True,
+        "research_reference": {"price": 7550.0, "source": "future:ES"},
+        "pricing_reference": {"gate_state": "missing"},
+        "beijing_time": "09:30",
+        "expiry": "20260716",
+        "session_phase": {"name_cn": "GTH"},
+        "gamma_state": "unknown",
+        "wall_ladder": {"put_walls": [], "call_walls": []},
+    }
+    attach_frozen_option_structure(
+        payload,
+        {
+            "front_expiry": "20260716",
+            "structure": {
+                "frozen": True,
+                "source": "frozen_last_usable_option_frame",
+                "frozen_as_of": "2026-07-16T01:00:00+00:00",
+                "gamma_state": "zero_gamma_transition",
+                "put_walls": [{"strike": 7525.0, "open_interest": 3622.0, "gex": -1.3e9}],
+                "call_walls": [{"strike": 7625.0, "open_interest": 1562.0, "gex": 9.3e8}],
+            },
+        },
+    )
+
+    text = render_template(payload)
+
+    assert "7525" in text
+    assert "7625" in text
+    assert "冻结" in text or "最后有效" in text
+    assert "BS触位" not in text
+    assert "限价" in text
+    assert payload["wall_ladder"]["put_walls"][0]["projected_mid"] is None
+
+
+def test_feishu_keeps_priced_wall_layout_when_level_state_is_far() -> None:
+    from spx_spark.application.order_map.prompts import render_feishu_delivery_text
+
+    payload = {
+        "research_only": False,
+        "expiry": "20260716",
+        "session_phase": {"name_cn": "美盘数据前小时"},
+        "underlier": {"price": 7552.0, "source": "chain_implied"},
+        "gamma_state": "zero_gamma_transition",
+        "level_decision": {"phase": "far"},
+        "plan_candidates": [],
+        "wall_ladder": {
+            "put_walls": [
+                {
+                    "strike": 7525.0,
+                    "option_strike": 7525,
+                    "option_right": "C",
+                    "current_mid": 32.0,
+                    "projected_mid": 14.0,
+                    "projection_range_low": 13.0,
+                    "projection_range_high": 15.0,
+                    "limit_aggressive": 14.0,
+                    "limit_conservative": 12.0,
+                }
+            ],
+            "call_walls": [],
+        },
+        "warnings": [],
+    }
+
+    text = render_feishu_delivery_text(
+        payload,
+        [],
+        datetime(2026, 7, 16, 13, 20, tzinfo=timezone.utc),
+        "决策摘要",
+    )
+
+    assert "决策摘要" in text
+    assert "## 当前布局参考" in text
+    assert "| 7525 | 主 Put Wall | 7525C | 32.00 | 13.00–15.00 | 12.00–14.00 |" in text
 
 
 def make_coverage(*, total: int = 4) -> OptionCoverage:
@@ -1075,6 +1154,133 @@ def test_feishu_wall_layout_matches_compact_trading_table() -> None:
     assert lines[8].startswith("> 触位情景是标的到墙时的早/基准/晚到达估值")
 
 
+def test_feishu_wall_layout_suppresses_limits_when_quote_is_range_only() -> None:
+    from spx_spark.application.order_map.prompts import _detail_ladder_lines
+
+    lines = _detail_ladder_lines(
+        {
+            "underlier": {"price": 7561.0},
+            "wall_ladder": {
+                "put_walls": [
+                    {
+                        "strike": 7550,
+                        "option_strike": 7550,
+                        "option_right": "C",
+                        "current_mid": 23.75,
+                        "projected_mid": 18.22,
+                        "projection_range_low": 17.80,
+                        "projection_range_high": 18.60,
+                        "limit_aggressive": None,
+                        "limit_conservative": None,
+                        "execution_quote_status": "range_only",
+                        "execution_quote_reasons": [
+                            "provider_mid_divergence_exceeded"
+                        ],
+                    }
+                ],
+                "call_walls": [],
+            },
+        }
+    )
+
+    assert "| 7550 | 主 Put Wall | 7550C | 23.75（源分歧） | 暂不估值 | 触位重算 |" in lines
+
+
+def test_feishu_wall_layout_labels_the_stable_structure_as_primary() -> None:
+    from spx_spark.application.order_map.prompts import _detail_ladder_lines
+
+    def rung(strike: int, right: str) -> dict[str, object]:
+        return {
+            "strike": strike,
+            "option_strike": strike,
+            "option_right": right,
+            "current_mid": 10.0,
+            "projected_mid": 8.0,
+            "projection_range_low": 7.0,
+            "projection_range_high": 9.0,
+            "limit_aggressive": 8.0,
+            "limit_conservative": 7.0,
+            "execution_quote_status": "executable",
+        }
+
+    lines = _detail_ladder_lines(
+        {
+            "underlier": {"price": 7561.0},
+            "level_decision": {
+                "levels": {"put_wall": 7550.0, "call_wall": 7600.0}
+            },
+            "wall_ladder": {
+                "put_walls": [rung(7525, "C"), rung(7550, "C"), rung(7500, "C")],
+                "call_walls": [rung(7575, "P"), rung(7555, "P")],
+            },
+        }
+    )
+
+    assert any("| 7550 | 主 Put Wall |" in line for line in lines)
+    assert any("| 7525 | 次级支撑 |" in line for line in lines)
+    assert any("| 7575 | Call GEX 主峰候选 |" in line for line in lines)
+
+
+def test_candidate_and_wall_ladder_share_the_same_bs_projection() -> None:
+    from spx_spark.application.order_map.candidates import _build_candidate
+
+    now = datetime(2026, 7, 16, 15, 30, tzinfo=timezone.utc)
+    quotes = [
+        make_option(
+            expiry="20260716",
+            strike=strike,
+            right=right,
+            mark=mid,
+            delta=delta,
+            gamma=0.01,
+            now=now,
+        )
+        for strike, right, mid, delta in (
+            (7545, "C", 18.0, 0.70),
+            (7545, "P", 8.0, -0.30),
+            (7550, "C", 15.0, 0.62),
+            (7550, "P", 10.0, -0.38),
+            (7555, "C", 12.0, 0.54),
+            (7555, "P", 12.0, -0.46),
+        )
+    ]
+    pairs = pair_by_strike(quotes)
+    tau_now_years = 4.5 / (365.0 * 24.0)
+    candidate = _build_candidate(
+        play="put_wall_bounce_call",
+        level=7550.0,
+        level_label="put wall 7550",
+        target_strike=7550,
+        right="C",
+        spot=7561.0,
+        expiry_quotes=quotes,
+        all_quotes=tuple(quotes),
+        strike_step=5.0,
+        pairs=pairs,
+        warnings=[],
+        as_of=now,
+        tau_now_years=tau_now_years,
+        em_points=23.0,
+    )
+    wall = _wall_rung_option_ref(
+        wall_strike=7550.0,
+        right="C",
+        spot=7561.0,
+        expiry_quotes=quotes,
+        all_quotes=quotes,
+        pairs=pairs,
+        strike_step=5.0,
+        tau_now_years=tau_now_years,
+        em_points=23.0,
+        as_of=now,
+    )
+
+    assert candidate is not None
+    assert wall["projected_mid"] == pytest.approx(candidate.projected_mid)
+    assert wall["projection_range_low"] == pytest.approx(candidate.projection_range_low)
+    assert wall["projection_range_high"] == pytest.approx(candidate.projection_range_high)
+
+
 def test_actionable_pricing_rejects_stale_and_frozen_quotes() -> None:
     now = datetime(2026, 7, 9, 15, 0, tzinfo=timezone.utc)
     live = make_option(
@@ -1139,6 +1345,32 @@ def test_actionable_pricing_rejects_stale_and_frozen_quotes() -> None:
     assert live_ref["degraded"] is False
     assert stale_ref["projected_mid"] is None
     assert stale_ref["limit_aggressive"] is None
+
+    divergent_schwab = replace(
+        live,
+        provider=Provider.SCHWAB,
+        provider_symbol="SPXW:SCHWAB:7500:C",
+        bid=34.9,
+        ask=35.1,
+        mark=35.0,
+    )
+    range_only_ref = _wall_rung_option_ref(
+        wall_strike=7500.0,
+        right="C",
+        spot=7520.0,
+        expiry_quotes=[live],
+        all_quotes=[live, divergent_schwab],
+        pairs=pair_by_strike([live]),
+        strike_step=5.0,
+        tau_now_years=4.0 / (365.0 * 24.0),
+        em_points=20.0,
+        as_of=now,
+    )
+    assert range_only_ref["execution_quote_status"] == "range_only"
+    assert "provider_mid_divergence_exceeded" in range_only_ref["execution_quote_reasons"]
+    assert range_only_ref["projected_mid"] is not None
+    assert range_only_ref["limit_aggressive"] is None
+    assert range_only_ref["limit_conservative"] is None
 
     far_put = make_option(
         expiry="20260709",
@@ -3034,7 +3266,7 @@ def test_render_status_template_contains_levels_and_changes() -> None:
     assert "关键位无实质变化" in text_no_change
 
 
-def test_render_status_separates_live_structure_from_frozen_event_level() -> None:
+def test_render_status_keeps_stable_and_candidate_structures_explicit() -> None:
     payload = {
         "expiry": "20260714",
         "underlier": {"price": 7521.8, "source": "chain_implied"},
@@ -3047,10 +3279,23 @@ def test_render_status_separates_live_structure_from_frozen_event_level() -> Non
             {"play": "call_wall_fade_put", "level": 7550.0},
         ],
         "level_decision": {
-            "phase": "testing",
+            "phase": "invalidated",
             "level_kind": "flip_high",
             "level": 7515.0,
             "spot": 7521.8,
+            "quality_ok": False,
+            "quality_reason": "structure_change_pending",
+            "structure_change_pending": True,
+            "structure_candidate": {
+                "confirmation_count": 2,
+                "required_confirmations": 3,
+                "levels": {
+                    "put_wall": 7500.0,
+                    "flip_low": 7520.0,
+                    "flip_high": 7525.0,
+                    "call_wall": 7550.0,
+                },
+            },
             "levels": {
                 "put_wall": 7500.0,
                 "flip_low": 7510.0,
@@ -3067,8 +3312,13 @@ def test_render_status_separates_live_structure_from_frozen_event_level() -> Non
         datetime(2026, 7, 14, 5, 20, tzinfo=timezone.utc),
     )
 
-    assert "结构  ZeroGamma过渡　Put 7500　Flip 7520–7525　Call 7550" in text
-    assert "状态  TESTING（测试）　事件位 Flip上沿 7515" in text
+    assert "结构  ZeroGamma过渡　Put 7500　Flip 7510–7515　Call 7550" in text
+    assert (
+        "结构更新  新链 Put 7500　Flip 7520–7525　Call 7550　稳定确认 2/3，旧结构暂停"
+        in text
+    )
+    assert "动作  暂停新开仓：当前 OI/GEX 结构正在切换确认" in text
+    assert "状态  INVALIDATED（已失效）　事件位 Flip上沿 7515" in text
 
 
 def test_render_status_template_limits_candidates_to_nearest_two() -> None:

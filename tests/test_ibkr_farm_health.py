@@ -21,9 +21,11 @@ def test_classify_farm_error_detects_broken_and_ok_messages():
     )
     assert classify_farm_error(2119, "Market data farm is connecting:usfarm.nj") == (
         FarmLinkStatus.CONNECTING,
-        None,
+        "usfarm",
     )
-    assert classify_farm_error(2110, "Connectivity between Trader Workstation and server is broken.") == (
+    assert classify_farm_error(
+        2110, "Connectivity between Trader Workstation and server is broken."
+    ) == (
         FarmLinkStatus.BROKEN,
         "tws-server",
     )
@@ -69,6 +71,50 @@ def test_farm_health_tracker_restarts_after_sustained_broken_state():
     assert tracker.should_restart_gateway(now=t0 + 31)
 
 
+def test_unrelated_farm_ok_does_not_clear_futures_farm_outage() -> None:
+    tracker = FarmHealthTracker(broken_restart_seconds=30.0)
+    t0 = 3000.0
+
+    tracker.observe(2103, "Market data farm connection is broken:hfarm", now=t0)
+    event = tracker.observe(
+        2104,
+        "Market data farm connection is OK:usopt",
+        now=t0 + 1.0,
+    )
+
+    assert event is None
+    assert tracker.status is FarmLinkStatus.BROKEN
+    assert tracker.farms["hfarm"] is FarmLinkStatus.BROKEN
+    assert tracker.farms["usopt"] is FarmLinkStatus.OK
+    assert tracker.broken_since == t0
+    assert tracker.oldest_broken_farm() == "hfarm"
+    assert tracker.should_restart_gateway(now=t0 + 31.0)
+
+    recovered = tracker.observe(
+        2104,
+        "Market data farm connection is OK:hfarm",
+        now=t0 + 32.0,
+    )
+    assert recovered is not None
+    assert recovered.status is FarmLinkStatus.OK
+    assert tracker.broken_since is None
+
+
+def test_recovering_oldest_broken_farm_keeps_other_outage_active() -> None:
+    tracker = FarmHealthTracker(broken_restart_seconds=30.0)
+    t0 = 4000.0
+    tracker.observe(2103, "Market data farm connection is broken:hfarm", now=t0)
+    tracker.observe(2103, "Market data farm connection is broken:usopt", now=t0 + 5.0)
+
+    tracker.observe(2104, "Market data farm connection is OK:hfarm", now=t0 + 10.0)
+
+    assert tracker.status is FarmLinkStatus.BROKEN
+    assert tracker.broken_since == t0 + 5.0
+    assert tracker.oldest_broken_farm() == "usopt"
+    assert not tracker.should_restart_gateway(now=t0 + 34.0)
+    assert tracker.should_restart_gateway(now=t0 + 36.0)
+
+
 def test_tws_1100_outage_starts_recovery_timer_until_1102() -> None:
     tracker = FarmHealthTracker(broken_restart_seconds=30.0)
     t0 = 2000.0
@@ -101,6 +147,10 @@ def test_mark_probe_failed_starts_broken_timer():
     event = tracker.mark_probe_failed(probe, now=t0)
     assert event.status is FarmLinkStatus.BROKEN
     assert tracker.should_restart_gateway(now=t0 + 10)
+
+    tracker.mark_probe_succeeded()
+    assert tracker.status is FarmLinkStatus.OK
+    assert tracker.broken_since is None
 
 
 def test_farm_tracker_market_data_ready_transitions() -> None:

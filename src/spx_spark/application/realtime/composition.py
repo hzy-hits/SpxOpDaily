@@ -366,6 +366,7 @@ def run_realtime_engine_cycle(
             result.tick,
             now=projection_now,
             policy=settings.level_decision,
+            notifications_enabled=True,
         )
     except Exception as exc:  # noqa: BLE001 - shadow audit must not break realtime
         level_shadow = {

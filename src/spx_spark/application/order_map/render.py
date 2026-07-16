@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from spx_spark.application.order_map.models import PLAY_ORDER, PLAY_TEMPLATE_LINES
+from spx_spark.application.order_map.wall_ladder_presentation import primary_wall_strike
 from spx_spark.analytics.options.pricing import finite_float
 
 
@@ -131,14 +132,18 @@ def _market_feature_lines(payload: dict[str, Any]) -> list[str]:
     presentation = payload.get("candidate_presentation")
     primary_play = presentation.get("play") if isinstance(presentation, dict) else None
     if isinstance(greek, dict):
-        score_rows = greek.get("contract_scores") if isinstance(greek.get("contract_scores"), dict) else {}
+        score_rows = (
+            greek.get("contract_scores") if isinstance(greek.get("contract_scores"), dict) else {}
+        )
         selected = next(
             (
                 row
                 for candidate in payload.get("candidates") or []
                 if isinstance(candidate, dict)
                 and candidate.get("play") == primary_play
-                and isinstance((row := score_rows.get(str(candidate.get("contract_id") or ""))), dict)
+                and isinstance(
+                    (row := score_rows.get(str(candidate.get("contract_id") or ""))), dict
+                )
             ),
             None,
         )
@@ -370,7 +375,7 @@ def _wall_ladder_lines(payload: dict[str, Any]) -> list[str]:
             continue
         # Payload order is GEX rank; rungs[0] is the primary wall. Display in
         # spatial order (nearest first) so it reads as an actual ladder.
-        primary_strike = rungs[0].get("strike")
+        primary_strike = primary_wall_strike(payload, key, rungs)
         spatial = sorted(
             rungs,
             key=lambda rung: -(rung.get("strike") or 0.0),
@@ -393,6 +398,10 @@ def _wall_ladder_lines(payload: dict[str, Any]) -> list[str]:
             aggressive = rung.get("limit_aggressive")
             conservative = rung.get("limit_conservative")
             current = rung.get("current_mid")
+            quote_executable = rung.get("execution_quote_status") != "range_only"
+            quote_reasons = tuple(
+                str(item) for item in rung.get("execution_quote_reasons") or ()
+            )
             if projected is not None:
                 stale_tag = " [stale]" if rung.get("degraded") else ""
                 range_low = rung.get("projection_range_low")
@@ -409,15 +418,26 @@ def _wall_ladder_lines(payload: dict[str, Any]) -> list[str]:
                 )
                 reference_text = (
                     "触位重算"
-                    if rung.get("projection_timing_capped") is True
+                    if rung.get("projection_timing_capped") is True or not quote_executable
                     else f"{_fmt_premium(aggressive)}/{_fmt_premium(conservative)}"
                 )
-                price_text = (
-                    f"{opt_label} BS触位区间{range_text}"
-                    f"(现{_fmt_premium(current)}) "
-                    f"触发后参考{reference_text}"
-                    f"{stale_tag}"
-                )
+                if quote_executable:
+                    price_text = (
+                        f"{opt_label} BS触位区间{range_text}"
+                        f"(现{_fmt_premium(current)}) "
+                        f"触发后参考{reference_text}"
+                        f"{stale_tag}"
+                    )
+                else:
+                    gate_label = (
+                        "跨源报价分歧"
+                        if "provider_mid_divergence_exceeded" in quote_reasons
+                        else "报价门控未通过"
+                    )
+                    price_text = (
+                        f"{opt_label} 现{_fmt_premium(current)} [{gate_label}] "
+                        "BS暂不估值，触位重算"
+                    )
             else:
                 price_text = f"{opt_label} 参考价-"
             lines.append(f"  {star}{strike} ({oi_text}{prob_text}) → {price_text}")
@@ -515,6 +535,13 @@ def render_research_only_template(
                 f"({distance_text}); 观察报价 "
                 f"{'; '.join(observed_markets) if observed_markets else '-'}"
             )
+    frozen = payload.get("frozen_option_structure")
+    if isinstance(frozen, dict):
+        lines.extend(_wall_ladder_lines(payload))
+        lines.append(
+            "结构降级: 上述为同到期日最后有效 OI/GEX 墙位，仅用于定位；"
+            "BS、限价和新开仓等待实时 SPXW NBBO/IV 恢复后重算。"
+        )
     divergence = pricing.get("divergence_bps")
     if isinstance(divergence, (int, float)):
         lines.append(f"HL 与定价候选分歧: {float(divergence):+.0f} bps")
@@ -759,6 +786,24 @@ def _level_decision_lines(payload: dict[str, Any]) -> list[str]:
         _level_position_line(spot, levels),
         f"关键位决策: {phase.upper()}，{kind} {level}{distance}；{status}",
     ]
+    candidate = decision.get("structure_candidate")
+    if decision.get("structure_change_pending") is True and isinstance(candidate, dict):
+        candidate_levels = (
+            candidate.get("levels") if isinstance(candidate.get("levels"), dict) else {}
+        )
+        count = int(finite_float(candidate.get("confirmation_count")) or 0)
+        required = int(finite_float(candidate.get("required_confirmations")) or 0)
+        progress = f"{count}/{required}" if required > 0 else "确认中"
+        lines.extend(
+            (
+                "新链候选: Put Wall "
+                f"{_dash(candidate_levels.get('put_wall'))} | Flip "
+                f"{_dash(candidate_levels.get('flip_low'))}–"
+                f"{_dash(candidate_levels.get('flip_high'))} | Call Wall "
+                f"{_dash(candidate_levels.get('call_wall'))}",
+                f"结构切换: 稳定确认 {progress}；确认前旧结构事件暂停，不生成交易判断",
+            )
+        )
     expiry = str(decision.get("expiry") or "-")
     level_source = str(decision.get("level_source") or "-")
     if level_source != "-":

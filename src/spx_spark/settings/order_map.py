@@ -21,6 +21,7 @@ class OrderMapPolicy:
     execution_max_quote_age_seconds: float = 15.0
     execution_max_source_age_seconds: float = 15.0
     execution_max_provider_mid_divergence_bps: float = 800.0
+    execution_max_provider_underlier_divergence_points: float = 3.0
     frontrun_fraction: float = 0.30
     frontrun_min_points: float = 2.0
     frontrun_max_points: float = 8.0

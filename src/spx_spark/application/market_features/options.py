@@ -17,7 +17,15 @@ from spx_spark.application.market_features.models import (
     OptionStructureFrame,
 )
 from spx_spark.features.exposure_map import ExposureMap, ExpiryExposure
-from spx_spark.marketdata import InstrumentType, MarketDataQuality, OptionRight, Provider, Quote, as_utc
+from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
+from spx_spark.marketdata import (
+    InstrumentType,
+    MarketDataQuality,
+    OptionRight,
+    Provider,
+    Quote,
+    as_utc,
+)
 from spx_spark.settings.market_features import MarketFeatureSettings
 from spx_spark.storage import LatestState, select_best_quotes
 
@@ -31,6 +39,7 @@ def build_option_structure_frame(
     previous_contracts: dict[str, Any],
     policy: MarketFeatureSettings,
     exposure_map: ExposureMap | None = None,
+    last_usable_frame: dict[str, Any] | None = None,
 ) -> tuple[OptionStructureFrame, dict[str, Any]]:
     now = as_utc(now)
     front = options_map.expiries[0] if options_map.expiries else None
@@ -47,19 +56,24 @@ def build_option_structure_frame(
     if front and (front.coverage.live <= 0 or front.coverage.with_mid <= 0):
         quality = FrameQuality.DEGRADED
     structure = structure_features(front, history=history, underlier=options_map.underlier.price)
+    frozen_expiry: str | None = None
+    if front is None:
+        frozen_expiry, structure = frozen_structure_for_session(
+            last_usable_frame,
+            now=now,
+        )
     volatility = option_volatility_features(front, next_expiry, history=history, now=now)
     concentration = concentration_features(state, front)
     density = density_features(front, history=history, now=now)
-    exposure = exposure_features(
-        _expiry_exposure(exposure_map, front.expiry if front else None)
-    )
-    frame_id = f"options:{front.expiry if front else 'none'}:{now.strftime('%Y%m%dT%H%M')}"
+    exposure = exposure_features(_expiry_exposure(exposure_map, front.expiry if front else None))
+    effective_expiry = front.expiry if front else frozen_expiry
+    frame_id = f"options:{effective_expiry or 'none'}:{now.strftime('%Y%m%dT%H%M')}"
     frame = OptionStructureFrame(
         schema_version=1,
         frame_id=frame_id,
         as_of=now,
         quality=quality,
-        front_expiry=front.expiry if front else None,
+        front_expiry=effective_expiry,
         next_expiry=next_expiry.expiry if next_expiry else None,
         structure=structure,
         volatility=volatility,
@@ -74,6 +88,69 @@ def build_option_structure_frame(
         exposure=exposure,
     )
     return frame, current_contracts
+
+
+def frozen_structure_for_session(
+    frame: dict[str, Any] | None,
+    *,
+    now: datetime,
+) -> tuple[str | None, dict[str, Any]]:
+    """Retain same-session OI/GEX locations without treating old quotes as live."""
+
+    expected_expiry = DEFAULT_MARKET_CALENDAR.research_expiry(now).strftime("%Y%m%d")
+    if not isinstance(frame, dict) or str(frame.get("front_expiry") or "") != expected_expiry:
+        return None, _empty_structure()
+    prior = frame.get("structure")
+    if not isinstance(prior, dict) or not _structure_has_levels(prior):
+        return None, _empty_structure()
+    frozen = {
+        key: prior.get(key)
+        for key in (
+            "put_wall",
+            "call_wall",
+            "zero_gamma",
+            "flip_zone",
+            "gamma_state",
+            "gex_quality",
+            "net_gex",
+            "abs_gex",
+            "net_gamma_ratio",
+            "max_pain",
+            "call_walls",
+            "put_walls",
+        )
+    }
+    frozen.update(
+        {
+            "underlier": None,
+            "distance_to_put_wall": None,
+            "distance_to_call_wall": None,
+            "distance_to_zero_gamma": None,
+            "put_wall_migration_points": None,
+            "call_wall_migration_points": None,
+            "zero_gamma_migration_points": None,
+            "frozen": True,
+            "source": "frozen_last_usable_option_frame",
+            "frozen_as_of": frame.get("as_of"),
+        }
+    )
+    return expected_expiry, frozen
+
+
+def option_frame_has_usable_live_structure(frame: OptionStructureFrame) -> bool:
+    return bool(
+        frame.front_expiry
+        and frame.structure.get("frozen") is not True
+        and _structure_has_levels(frame.structure)
+        and frame.l1.contract_count > 0
+        and frame.l1.diagnostics.get("fresh_candidate_count", 0) > 0
+    )
+
+
+def _structure_has_levels(structure: dict[str, Any]) -> bool:
+    return any(
+        _number(structure.get(key)) is not None for key in ("put_wall", "call_wall", "zero_gamma")
+    )
 
 
 def _expiry_exposure(
@@ -131,9 +208,7 @@ def structure_features(
         "distance_to_call_wall": _difference(underlier, front.call_wall),
         "distance_to_zero_gamma": _difference(underlier, front.zero_gamma),
         "put_wall_migration_points": _difference(front.put_wall, _number(prior.get("put_wall"))),
-        "call_wall_migration_points": _difference(
-            front.call_wall, _number(prior.get("call_wall"))
-        ),
+        "call_wall_migration_points": _difference(front.call_wall, _number(prior.get("call_wall"))),
         "zero_gamma_migration_points": _difference(
             front.zero_gamma, _number(prior.get("zero_gamma"))
         ),
@@ -186,9 +261,7 @@ def option_volatility_features(
     return result
 
 
-def concentration_features(
-    state: LatestState, front: ExpiryOptionsMap | None
-) -> dict[str, Any]:
+def concentration_features(state: LatestState, front: ExpiryOptionsMap | None) -> dict[str, Any]:
     if front is None:
         return {
             "strike_volume_top5_share": None,
@@ -280,7 +353,9 @@ def build_l1_microstructure(
         underlier=front.atm_strike,
         limit=policy.hot_option_limit,
     )
-    current_contracts = {quote.instrument.canonical_id: _contract_sample(quote) for quote in selected}
+    current_contracts = {
+        quote.instrument.canonical_id: _contract_sample(quote) for quote in selected
+    }
     spreads = [quote.spread_bps for quote in selected if quote.spread_bps is not None]
     imbalances = [
         imbalance(quote.bid_size, quote.ask_size)
@@ -339,11 +414,7 @@ def build_l1_microstructure(
         1.0 - (spread_p90 or 10_000.0) / policy.l1_spread_p90_limit_bps,
     )
     execution_score = 100.0 * (0.60 * p50_component + 0.40 * p90_component)
-    liquidity_score = (
-        round(0.45 * coverage_score + 0.55 * execution_score, 1)
-        if selected
-        else None
-    )
+    liquidity_score = round(0.45 * coverage_score + 0.55 * execution_score, 1) if selected else None
     quality = (
         FrameQuality.READY
         if selected
@@ -388,9 +459,7 @@ def build_l1_microstructure(
     return frame, current_contracts
 
 
-def provider_mid_divergences(
-    quotes: list[Quote], *, policy: MarketFeatureSettings
-) -> list[float]:
+def provider_mid_divergences(quotes: list[Quote], *, policy: MarketFeatureSettings) -> list[float]:
     grouped: dict[str, dict[Provider, Quote]] = defaultdict(dict)
     for quote in quotes:
         if quote.provider in {Provider.SCHWAB, Provider.IBKR}:
@@ -448,9 +517,7 @@ def _fresh_front_quotes(
     ]
 
 
-def _select_hot_quotes(
-    quotes: list[Quote], *, underlier: float | None, limit: int
-) -> list[Quote]:
+def _select_hot_quotes(quotes: list[Quote], *, underlier: float | None, limit: int) -> list[Quote]:
     by_contract: dict[str, Quote] = {}
     for quote in quotes:
         key = quote.instrument.canonical_id
@@ -496,9 +563,7 @@ def _history_value(
 ) -> float | None:
     target = as_utc(now) - timedelta(minutes=minutes)
     candidates = [
-        item
-        for item in history
-        if (_parse_at(item.get("as_of")) or as_utc(now)) <= target
+        item for item in history if (_parse_at(item.get("as_of")) or as_utc(now)) <= target
     ]
     if not candidates:
         return None

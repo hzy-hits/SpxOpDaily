@@ -29,6 +29,9 @@ from spx_spark.application.order_map.writer_validation import (
     actionable_writer_output_valid as actionable_writer_output_valid,
     globex_writer_output_valid as globex_writer_output_valid,
 )
+from spx_spark.application.order_map.wall_ladder_presentation import (
+    detail_ladder_lines as _detail_ladder_lines,
+)
 from spx_spark.notifier.llm_writer import previous_push_json
 
 
@@ -155,6 +158,16 @@ def _compact_level_line(payload: dict[str, Any]) -> str:
     flip_zone = payload.get("flip_zone")
     live_flip = flip_zone if isinstance(flip_zone, list) and len(flip_zone) >= 2 else None
 
+    if frozen_levels:
+        put_wall = frozen_levels.get("put_wall")
+        call_wall = frozen_levels.get("call_wall")
+        flip_low = frozen_levels.get("flip_low")
+        flip_high = frozen_levels.get("flip_high")
+        return (
+            f"Put {_dash(put_wall)}　Flip {_dash(flip_low)}–{_dash(flip_high)}　"
+            f"Call {_dash(call_wall)}"
+        )
+
     def candidate_level(play: str, fallback: str) -> object:
         candidate = by_play.get(play)
         if isinstance(candidate, dict) and candidate.get("level") is not None:
@@ -169,6 +182,27 @@ def _compact_level_line(payload: dict[str, Any]) -> str:
         return f"候选 {_level_probs_line(payload)}"
     return (
         f"Put {_dash(put_wall)}　Flip {_dash(flip_low)}–{_dash(flip_high)}　Call {_dash(call_wall)}"
+    )
+
+
+def _compact_structure_candidate_line(payload: dict[str, Any]) -> str | None:
+    decision = payload.get("level_decision")
+    if not isinstance(decision, dict) or decision.get("structure_change_pending") is not True:
+        return None
+    candidate = decision.get("structure_candidate")
+    if not isinstance(candidate, dict):
+        return None
+    levels = candidate.get("levels")
+    if not isinstance(levels, dict) or not levels:
+        return None
+    count = int(finite_float(candidate.get("confirmation_count")) or 0)
+    required = int(finite_float(candidate.get("required_confirmations")) or 0)
+    progress = f"{count}/{required}" if required > 0 else "确认中"
+    return (
+        "结构更新  新链 Put "
+        f"{_dash(levels.get('put_wall'))}　Flip {_dash(levels.get('flip_low'))}–"
+        f"{_dash(levels.get('flip_high'))}　Call {_dash(levels.get('call_wall'))}　"
+        f"稳定确认 {progress}，旧结构暂停"
     )
 
 
@@ -499,6 +533,7 @@ def render_status_template(
             f"{_compact_level_line(payload)}　ZG {_dash(payload.get('zero_gamma'))}　"
             f"EM ±{_dash(payload.get('expected_move_points'))}"
         ),
+        *([line] if (line := _compact_structure_candidate_line(payload)) else []),
         *([line] if (line := _compact_oi_line(payload)) else []),
         *([line] if (line := _compact_decision_line(payload)) else []),
         *([line] if (line := _compact_breakout_filter_line(payload)) else []),
@@ -560,127 +595,6 @@ def _detail_candidate_lines(payload: dict[str, Any]) -> list[str]:
             rendered.append(f"- **{detail_labels[label]}**　{content}")
         elif line:
             rendered.append(line)
-    return rendered
-
-
-def _detail_ladder_lines(payload: dict[str, Any]) -> list[str]:
-    ladder = payload.get("wall_ladder") if isinstance(payload.get("wall_ladder"), dict) else {}
-    put_rungs = [rung for rung in ladder.get("put_walls") or [] if isinstance(rung, dict)]
-    call_rungs = [rung for rung in ladder.get("call_walls") or [] if isinstance(rung, dict)]
-    selected: list[tuple[dict[str, Any], str, str]] = []
-
-    def has_pricing(rung: dict[str, Any]) -> bool:
-        return (
-            finite_float(rung.get("current_mid")) is not None
-            and finite_float(rung.get("projected_mid")) is not None
-            and any(
-                finite_float(rung.get(key)) is not None
-                for key in ("limit_aggressive", "limit_conservative")
-            )
-        )
-
-    if put_rungs:
-        primary = put_rungs[0]
-        support_rungs = sorted(
-            [rung for rung in put_rungs if has_pricing(rung)][:3],
-            key=lambda rung: -(rung.get("strike") or 0.0),
-        )
-        secondary_index = 0
-        for rung in support_rungs:
-            if rung is primary:
-                label = "主 Put Wall"
-            else:
-                label = "次级支撑" if secondary_index == 0 else "外侧支撑"
-                secondary_index += 1
-            selected.append((rung, label, "C"))
-
-    if call_rungs:
-        primary = call_rungs[0]
-        priced_call_rungs = [rung for rung in call_rungs if has_pricing(rung)]
-        if not priced_call_rungs:
-            call_rungs = []
-        underlier = payload.get("underlier") if isinstance(payload.get("underlier"), dict) else {}
-        spot = finite_float(underlier.get("price"))
-
-        def call_distance(rung: dict[str, Any]) -> float:
-            distance = finite_float(rung.get("distance_points"))
-            strike = finite_float(rung.get("strike"))
-            if distance is not None:
-                return abs(distance)
-            if strike is not None and spot is not None:
-                return abs(strike - spot)
-            return float("inf")
-
-        if priced_call_rungs:
-            nearest = min(priced_call_rungs, key=call_distance)
-            ranked = primary if has_pricing(primary) else priced_call_rungs[0]
-            secondary = priced_call_rungs[1] if len(priced_call_rungs) > 1 else None
-            call_selection = sorted(
-                {
-                    id(rung): rung for rung in (nearest, ranked, secondary) if rung is not None
-                }.values(),
-                key=lambda rung: rung.get("strike") or 0.0,
-            )
-            for rung in call_selection:
-                label = (
-                    "主 Call Wall"
-                    if rung is primary
-                    else "近端 Call GEX"
-                    if rung is nearest
-                    else "次级 Call GEX"
-                )
-                selected.append((rung, label, "P"))
-
-    if not selected:
-        return []
-    rendered = [
-        "| SPX 墙位 | 结构 | 合约 | 当前 mid | 触位情景 | 触发后参考 |",
-        "| ---: | --- | --- | ---: | ---: | ---: |",
-    ]
-    for rung, label, default_right in selected:
-        strike = rung.get("strike")
-        right = str(rung.get("option_right") or default_right)
-        option_strike = rung.get("option_strike")
-        contract = f"{_dash(option_strike if option_strike is not None else strike)}{right}"
-        current = finite_float(rung.get("current_mid"))
-        projected = finite_float(rung.get("projected_mid"))
-        range_low = finite_float(rung.get("projection_range_low"))
-        range_high = finite_float(rung.get("projection_range_high"))
-        if range_low is None:
-            range_low = projected
-        if range_high is None:
-            range_high = projected
-        timing_capped = rung.get("projection_timing_capped") is True
-        if timing_capped and range_high is not None:
-            bs_range = f"早触≈{range_high:.2f} / 晚触重算"
-        elif range_low is not None and range_high is not None:
-            low, high = min(range_low, range_high), max(range_low, range_high)
-            bs_range = f"{low:.2f}" if abs(high - low) < 0.005 else f"{low:.2f}–{high:.2f}"
-        else:
-            bs_range = "-"
-        limits = [
-            value
-            for value in (
-                finite_float(rung.get("limit_aggressive")),
-                finite_float(rung.get("limit_conservative")),
-            )
-            if value is not None
-        ]
-        reference = (
-            "触位重算"
-            if timing_capped
-            else f"{min(limits):.2f}–{max(limits):.2f}"
-            if limits
-            else "-"
-        )
-        rendered.append(
-            f"| {_dash(strike)} | {label} | {contract} | {current:.2f} | {bs_range} | {reference} |"
-            if current is not None and projected is not None
-            else f"| {_dash(strike)} | {label} | {contract} | - | - | {reference} |"
-        )
-    rendered.append(
-        "> 触位情景是标的到墙时的早/基准/晚到达估值，不是当前合理价；“晚触重算”表示时间估计已触及上限。"
-    )
     return rendered
 
 
@@ -799,7 +713,7 @@ def render_feishu_delivery_text(
             if has_plan
             else ("## 关键位状态\n", "## 当前布局参考\n")
             if active
-            else ()
+            else ("## 当前布局参考\n",)
         )
         detail_blocks = [
             block for block in blocks if any(block.startswith(title) for title in allowed_titles)

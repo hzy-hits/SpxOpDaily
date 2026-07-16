@@ -125,6 +125,7 @@ class OrderCandidate:
     execution_quote_spread_percentile: float | None = None
     execution_quote_source_age_seconds: float | None = None
     execution_quote_provider_divergence_bps: float | None = None
+    execution_quote_excluded_providers: tuple[str, ...] = ()
     touch_time_model_source: str = "brownian_heuristic"
 
 

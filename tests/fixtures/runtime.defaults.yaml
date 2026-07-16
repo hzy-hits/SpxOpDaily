@@ -712,7 +712,7 @@ service_loop:
     value: 60
     description: Delay before retrying an unavailable IBKR snapshot connection.
   ibkr_conflict_probe_seconds:
-    value: 15
+    value: 5
     description: Delay before a read-only probe after an IBKR session conflict.
   max_concurrent_tasks:
     value: 4
@@ -873,16 +873,16 @@ runtime_policy:
     value: 60
     description: Seconds to wait before retrying an unavailable IBKR connection.
   ibkr_conflict_retry_minutes:
-    value: 0
+    value: 1
     description: Minutes before trying to reclaim a competing IBKR session; zero disables fighting.
   ibkr_conflict_probe_seconds:
-    value: 15
+    value: 5
     description: Seconds between non-invasive probes after an IBKR session conflict.
   ibkr_fallback_provider:
     value: schwab
     description: Provider name used when IBKR is unavailable or intentionally disabled.
   strict_no_session_fight:
-    value: true
+    value: false
     description: Prevents collectors from competing with a phone or desktop IBKR session.
   weekend_maintenance_mode:
     value: true
@@ -1539,7 +1539,7 @@ level_decision_shadow:
     description: Runs the mutually-exclusive wall/flip decision state machine as an input to the deterministic TradeReady gate.
   notify_transitions:
     value: true
-    description: Retained for compatibility; level transitions are audit-only and never bypass the TradeReady gate.
+    description: Sends one deterministic market-warning notification when a wall or flip path reaches CONFIRMED; executable contract and price instructions remain exclusive to TradeReady.
   formal_signal_enabled:
     value: false
     description: Allows CONFIRMED to enter deterministic TradeReady evaluation; it does not make the state directly actionable or submit an order.
@@ -1621,6 +1621,7 @@ order_map_policy:
   execution_max_quote_age_seconds: {value: 15.0, description: Maximum transport quote age.}
   execution_max_source_age_seconds: {value: 15.0, description: Maximum source quote age.}
   execution_max_provider_mid_divergence_bps: {value: 800.0, description: Maximum provider mid divergence.}
+  execution_max_provider_underlier_divergence_points: {value: 3.0, description: Maximum provider model-underlier divergence.}
   frontrun_fraction: {value: 0.30, description: Frontrun fraction.}
   frontrun_min_points: {value: 2.0, description: Minimum frontrun.}
   frontrun_max_points: {value: 8.0, description: Maximum frontrun.}

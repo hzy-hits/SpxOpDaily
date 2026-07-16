@@ -20,7 +20,7 @@ from spx_spark.application.order_map.level_decision_outcomes import advance_leve
 from spx_spark.application.order_map.level_decision_outcomes import LevelOutcomeSettings
 from spx_spark.application.order_map.trigger_coordinates import resolve_trigger_coordinate
 from spx_spark.application.order_map.stable_structure import advance_stable_structure
-from spx_spark.config import StorageSettings
+from spx_spark.config import NotificationSettings, StorageSettings
 from spx_spark.domain.analytics import AnalyticsStatus
 from spx_spark.ibkr.atm_reference import (
     BASIS_MAX_ABS_POINTS,
@@ -29,6 +29,8 @@ from spx_spark.ibkr.atm_reference import (
 )
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR, ET
 from spx_spark.marketdata import MarketDataQuality
+from spx_spark.notifier.dispatcher import dispatch_notification
+from spx_spark.notifier.receipts import NotificationEnvelope
 from spx_spark.options_map import build_options_map
 from spx_spark.schwab.symbols import active_quarterly_contract_month
 from spx_spark.settings.level_decision import LevelDecisionPolicy
@@ -55,11 +57,17 @@ def load_level_decision_shadow(storage: StorageSettings) -> dict[str, object]:
         return _public_state(empty_level_state(datetime.now(tz=timezone.utc)))
     decision = payload.get("decision") if isinstance(payload, dict) else None
     structure = payload.get("structure") if isinstance(payload, dict) else None
+    structure_stability = (
+        payload.get("structure_stability") if isinstance(payload, dict) else None
+    )
     latest_observation = payload.get("latest_observation") if isinstance(payload, dict) else None
     return _public_state(
         decision if isinstance(decision, Mapping) else {},
         formal_signal_enabled=bool(payload.get("formal_signal_enabled")),
         structure=structure if isinstance(structure, Mapping) else None,
+        structure_stability=(
+            structure_stability if isinstance(structure_stability, Mapping) else None
+        ),
         latest_observation=(
             latest_observation if isinstance(latest_observation, Mapping) else None
         ),
@@ -68,10 +76,11 @@ def load_level_decision_shadow(storage: StorageSettings) -> dict[str, object]:
 
 def run_level_decision_shadow(
     storage: StorageSettings,
-    tick: EngineTick,
+    tick: EngineTick | None,
     *,
     now: datetime,
     policy: LevelDecisionPolicy | None = None,
+    notifications_enabled: bool = False,
 ) -> dict[str, object]:
     policy = policy or LevelDecisionPolicy()
     if not policy.enabled:
@@ -95,6 +104,11 @@ def run_level_decision_shadow(
             switch_min_points=policy.structure_switch_min_points,
         )
         frozen_structure = promoted_structure or persisted.get("structure")
+        structure_candidate = stability_state.get("candidate")
+        structure_change_pending = bool(
+            isinstance(structure_candidate, Mapping)
+            and _structure_levels(structure_candidate)
+        )
         previous = persisted.get("decision")
         observation = _observation(
             storage,
@@ -104,6 +118,7 @@ def run_level_decision_shadow(
             frozen_structure=(frozen_structure if isinstance(frozen_structure, Mapping) else None),
             max_frozen_structure_age_sessions=policy.max_frozen_structure_age_sessions,
             active_decision=previous if isinstance(previous, Mapping) else None,
+            structure_change_pending=structure_change_pending,
         )
         transition = advance_level_decision(
             previous if isinstance(previous, Mapping) else None,
@@ -172,12 +187,14 @@ def run_level_decision_shadow(
         notify_transitions=policy.notify_transitions,
         formal_signal_enabled=policy.formal_signal_enabled,
         invalidation_buffer_points=policy.break_buffer_points,
+        notifications_enabled=notifications_enabled,
     )
 
     public = _public_state(
         transition.state,
         formal_signal_enabled=policy.formal_signal_enabled,
         structure=frozen_structure if isinstance(frozen_structure, Mapping) else None,
+        structure_stability=stability_state,
         latest_observation={
             "spot": observation.spot,
             "es": observation.es,
@@ -246,6 +263,7 @@ def _observation(
     frozen_structure: Mapping[str, object] | None = None,
     max_frozen_structure_age_sessions: int = 1,
     active_decision: Mapping[str, object] | None = None,
+    structure_change_pending: bool = False,
 ) -> LevelObservation:
     structure_age = _structure_session_age(frozen_structure, now=now)
     structure_usable = (
@@ -254,6 +272,8 @@ def _observation(
     spx_levels = _structure_levels(frozen_structure) if structure_usable else {}
     level_source = str((frozen_structure or {}).get("source") or "unavailable")
     quality_reasons: list[str] = []
+    if structure_change_pending:
+        quality_reasons.append("structure_change_pending")
     if frozen_structure is not None and not structure_usable:
         quality_reasons.append("frozen_structure_session_ttl_expired")
     state = LatestStateStore(storage).load(now=now)
@@ -285,9 +305,7 @@ def _observation(
     coordinate_basis = coordinate.basis_points
     active_kind = str((active_decision or {}).get("trigger_coordinate_kind") or "")
     active_phase = str((active_decision or {}).get("phase") or "far")
-    active_basis = _positive_or_negative_float(
-        (active_decision or {}).get("trigger_basis_points")
-    )
+    active_basis = _positive_or_negative_float((active_decision or {}).get("trigger_basis_points"))
     if active_phase not in {"far", "invalidated", "expired"} and es is not None:
         if active_kind == "es_equivalent" and active_basis is not None:
             levels = {name: value + active_basis for name, value in spx_levels.items()}
@@ -297,7 +315,9 @@ def _observation(
             coordinate_kind = active_kind
             coordinate_instrument = "future:ES"
             coordinate_basis = active_basis
-        elif active_kind in {"official_spx", "chain_implied_spx"} and coordinate_kind != active_kind:
+        elif (
+            active_kind in {"official_spx", "chain_implied_spx"} and coordinate_kind != active_kind
+        ):
             if active_basis is not None:
                 levels = dict(spx_levels)
                 spot = es - active_basis
@@ -332,7 +352,9 @@ def _observation(
     )
 
 
-def _live_structure(tick: EngineTick, *, now: datetime) -> dict[str, object] | None:
+def _live_structure(tick: EngineTick | None, *, now: datetime) -> dict[str, object] | None:
+    if tick is None:
+        return None
     analytics = getattr(tick, "analytics", None)
     if analytics is None or analytics.status is not AnalyticsStatus.SUCCESS:
         return None
@@ -427,6 +449,7 @@ def _public_state(
     *,
     formal_signal_enabled: bool = False,
     structure: Mapping[str, object] | None = None,
+    structure_stability: Mapping[str, object] | None = None,
     latest_observation: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     phase = str(state.get("phase") or LevelPhase.FAR.value)
@@ -445,6 +468,23 @@ def _public_state(
         for key, value in levels.items()
         if es_basis is not None and isinstance(value, int | float)
     }
+    structure_candidate = (
+        structure_stability.get("candidate")
+        if isinstance(structure_stability, Mapping)
+        else None
+    )
+    public_candidate = (
+        {
+            "expiry": structure_candidate.get("expiry"),
+            "levels": dict(structure_candidate.get("levels") or {}),
+            "confirmation_count": structure_candidate.get("confirmation_count"),
+            "required_confirmations": structure_candidate.get("required_confirmations"),
+            "first_seen_at": structure_candidate.get("first_seen_at"),
+            "last_seen_at": structure_candidate.get("last_seen_at"),
+        }
+        if isinstance(structure_candidate, Mapping)
+        else None
+    )
     return {
         "mode": "live" if formal_signal_enabled else "shadow",
         "formal_signal_enabled": formal_signal_enabled,
@@ -475,6 +515,8 @@ def _public_state(
         "level_bands": dict((structure or {}).get("level_bands") or {}),
         "structure_promoted_at": (structure or {}).get("promoted_at"),
         "structure_duration_seconds": (structure or {}).get("duration_seconds"),
+        "structure_change_pending": public_candidate is not None,
+        "structure_candidate": public_candidate,
         "spot": spot,
         "es": es,
         "spot_source": spot_source,
@@ -581,8 +623,9 @@ def _deliver_transition(
     notify_transitions: bool,
     formal_signal_enabled: bool,
     invalidation_buffer_points: float,
+    notifications_enabled: bool,
 ) -> dict[str, object] | None:
-    del observation, invalidation_buffer_points
+    del invalidation_buffer_points
     if not transition.changed:
         return None
     state = transition.state
@@ -603,8 +646,77 @@ def _deliver_transition(
         "sinks": [],
         "delivered": False,
     }
+    if level_confirmed and notify_transitions and notifications_enabled:
+        notification = NotificationSettings.from_env()
+        if not notification.enabled:
+            result["reason"] = "notification_disabled"
+        elif not any(
+            bool(getattr(notification, field, False))
+            for field in ("feishu_enabled", "bark_enabled", "bark_friend_enabled")
+        ):
+            result["reason"] = "no_delivery_sink"
+        else:
+            event_id = f"level-path:{state.get('event_id')}:confirmed"
+            text = _confirmed_path_message(state, observation)
+            try:
+                dispatch = dispatch_notification(
+                    notification,
+                    NotificationEnvelope(
+                        event_id=event_id,
+                        source="level_decision",
+                        kind="level_path_confirmed",
+                        lane="market_warning",
+                        occurred_at=_utc(now),
+                    ),
+                    title="SPX PATH CONFIRMED",
+                    text=text,
+                    friend=True,
+                    feishu_text=text,
+                    attempted_at=_utc(now),
+                )
+            except Exception as exc:  # Delivery failure must not roll back the state machine.
+                result["reason"] = f"delivery_error:{type(exc).__name__}"
+            else:
+                result.update(
+                    {
+                        "notification_event_id": event_id,
+                        "reason": "confirmed_market_warning",
+                        "sinks": [sink.to_dict() for sink in dispatch.sinks],
+                        "delivered": dispatch.delivered,
+                    }
+                )
     _append_unique(_delivery_audit_path(storage, now), result)
     return result
+
+
+def _confirmed_path_message(
+    state: Mapping[str, object],
+    observation: LevelObservation,
+) -> str:
+    thesis = str(state.get("thesis") or "none")
+    direction = str(state.get("direction") or "")
+    path = {
+        ("breakout", "up"): "向上突破",
+        ("breakout", "down"): "向下突破",
+        ("fade", "up"): "下破拒绝后向上收复",
+        ("fade", "down"): "上破拒绝后向下回落",
+    }.get((thesis, direction), "关键位路径")
+    spx_level = _positive_float(state.get("spx_level", state.get("level")))
+    spx_spot = observation.spx_spot
+    coordinate = str(state.get("trigger_coordinate_kind") or "unknown")
+    spot_label = "SPX" if coordinate == "official_spx" else "SPX代理"
+    expires_at = str(state.get("expires_at") or "-")
+    return "\n".join(
+        (
+            f"SPX 路径确认 · {path}",
+            f"关键位  {_level_kind_label(state.get('level_kind'))} {_format_level(spx_level)}",
+            f"位置    {spot_label} {_format_level(spx_spot)}，ES {_format_level(observation.es)}",
+            "状态    回踩与方向保持已经确认，路径有效",
+            "执行    尚未通过实时 NBBO、目标空间和收益风险门控；等待 TRADE READY",
+            f"时效    {expires_at}",
+            "本提醒不连接真实订单、成交或持仓状态。",
+        )
+    )
 
 
 def _level_structure_summary(levels: Mapping[str, float]) -> str:

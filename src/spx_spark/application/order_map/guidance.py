@@ -82,6 +82,18 @@ def build_decision_guidance(payload: Mapping[str, Any]) -> DecisionGuidance:
 
     gate_reason = _gate_reason(decision, intent, payload)
     if gate_reason is not None:
+        if "structure_change_pending" in gate_reason.split(";"):
+            return DecisionGuidance(
+                bias=bias,
+                bias_direction=direction,
+                trend_score=trend_score,
+                mean_reversion_score=reversion_score,
+                action=GuidanceAction.PAUSED,
+                action_text="暂停新开仓：当前 OI/GEX 结构正在切换确认",
+                trigger_text=_structure_candidate_trigger(decision),
+                invalidation_text="旧墙位状态事件已失效；新结构确认前不判断突破或拒绝",
+                gate_reason=gate_reason,
+            )
         return DecisionGuidance(
             bias=bias,
             bias_direction=direction,
@@ -292,6 +304,8 @@ def _levels(payload: Mapping[str, Any], decision: Mapping[str, Any]) -> dict[str
         for key in ("put_wall", "flip_low", "flip_high", "call_wall")
         if (value := _number(decision_levels.get(key))) is not None
     }
+    if result:
+        return result
     flip = payload.get("flip_zone")
     if isinstance(flip, list | tuple) and len(flip) >= 2:
         parsed = sorted(value for item in flip[:2] if (value := _number(item)) is not None)
@@ -311,6 +325,14 @@ def _levels(payload: Mapping[str, Any], decision: Mapping[str, Any]) -> dict[str
     return result
 
 
+def _structure_candidate_trigger(decision: Mapping[str, Any]) -> str:
+    candidate = _mapping(decision.get("structure_candidate"))
+    count = int(_number(candidate.get("confirmation_count")) or 0)
+    required = int(_number(candidate.get("required_confirmations")) or 0)
+    suffix = f"（{count}/{required}）" if required > 0 else ""
+    return f"等待新结构完成稳定确认{suffix}，随后重新建立关键位事件"
+
+
 def _reason_label(reason: str) -> str:
     labels = {
         "decision_snapshot_level_drift": "墙位已移动，旧状态事件与当前结构不一致",
@@ -322,6 +344,7 @@ def _reason_label(reason: str) -> str:
         "spx_price_unavailable": "SPX 触发坐标不可用",
         "key_levels_unavailable": "Put Wall、Flip 或 Call Wall 不完整",
         "level_observation_quality_failed": "关键位观察质量未通过",
+        "structure_change_pending": "当前 OI/GEX 结构正在切换确认",
         "follow_through_hold_pending": "确认后的持续时间不足",
         "follow_through_distance_pending": "确认后的价格跟随不足",
         "regime_direction_conflict": "趋势方向与关键位路径冲突",

@@ -117,7 +117,12 @@ class StreamRuntime:
                     if not probe.ok:
                         event = self.collector.farm_health.mark_probe_failed(probe)
                         log_event(event.to_log_event(task="ibkr_stream"))
+                    else:
+                        self.collector.farm_health.mark_probe_succeeded()
                     self.collector.subscribe_base()
+                    prime = getattr(self.collector, "prime_priority_market_data", None)
+                    if callable(prime):
+                        prime()
                     needs_reconnect_backoff = self.session_loop()
                 else:
                     persist_account_standby_state(self.storage_settings)
@@ -129,12 +134,17 @@ class StreamRuntime:
                     )
                     needs_reconnect_backoff = self.account_standby_loop()
             except Exception as exc:  # noqa: BLE001
-                needs_reconnect_backoff = True
-                persist_state_only(
-                    unavailable_state(f"session failed: {exc}", connected=False),
-                    self.storage_settings,
-                )
-                log_event({"task": "ibkr_stream", "event": "session_error", "error": str(exc)})
+                setup_errors = self.collector.drain_new_errors()
+                if has_competing_session_error(setup_errors):
+                    needs_reconnect_backoff = False
+                    self._defer_competing_session(phase="subscription_setup")
+                else:
+                    needs_reconnect_backoff = True
+                    persist_state_only(
+                        unavailable_state(f"session failed: {exc}", connected=False),
+                        self.storage_settings,
+                    )
+                    log_event({"task": "ibkr_stream", "event": "session_error", "error": str(exc)})
             finally:
                 self.collector.teardown()
             if self.session_had_healthy_flush:
@@ -161,10 +171,7 @@ class StreamRuntime:
             )
             if position_event is not None:
                 log_event(position_event)
-            if (
-                not self.collector.ib.isConnected()
-                or self.collector.tws_connectivity_lost
-            ):
+            if not self.collector.ib.isConnected() or self.collector.tws_connectivity_lost:
                 persist_state_only(
                     unavailable_state("IBKR account standby disconnected"),
                     self.storage_settings,
@@ -198,9 +205,7 @@ class StreamRuntime:
     def session_loop(self) -> bool:
         while not self.expired():
             self.collector.ib.sleep(
-                effective_hot_flush_sleep_seconds(
-                    self.stream_settings.flush_interval_seconds
-                )
+                effective_hot_flush_sleep_seconds(self.stream_settings.flush_interval_seconds)
             )
             event = self.collector.flush()
             log_event(event)
@@ -243,26 +248,7 @@ class StreamRuntime:
                 return False
 
             if action is StreamAction.CONFLICT_WAIT:
-                persist_state_only(
-                    unavailable_state(
-                        "competing session blocks live market data (IBKR 10197)",
-                        connected=self.collector.ib.isConnected(),
-                    ),
-                    self.storage_settings,
-                )
-                self.collector.defer_market_data_after_conflict(
-                    seconds=self.runtime_policy.ibkr_conflict_probe_seconds
-                )
-                log_event(
-                    {
-                        "task": "ibkr_stream",
-                        "event": "competing_session",
-                        "probe_in_seconds": self.runtime_policy.ibkr_conflict_probe_seconds,
-                        "account_standby_eligible": (
-                            self.collector.broker_settings.account_read_enabled
-                        ),
-                    }
-                )
+                self._defer_competing_session(phase="active_session")
                 return False
 
             if action is StreamAction.POLICY_BLOCKED:
@@ -277,6 +263,27 @@ class StreamRuntime:
             log_event({"task": "ibkr_stream", "event": "disconnected"})
             return True
         return False
+
+    def _defer_competing_session(self, *, phase: str) -> None:
+        persist_state_only(
+            unavailable_state(
+                "competing session blocks live market data (IBKR 10197)",
+                connected=self.collector.ib.isConnected(),
+            ),
+            self.storage_settings,
+        )
+        self.collector.defer_market_data_after_conflict(
+            seconds=self.runtime_policy.ibkr_conflict_probe_seconds
+        )
+        log_event(
+            {
+                "task": "ibkr_stream",
+                "event": "competing_session",
+                "phase": phase,
+                "probe_in_seconds": self.runtime_policy.ibkr_conflict_probe_seconds,
+                "account_standby_eligible": self.collector.broker_settings.account_read_enabled,
+            }
+        )
 
     def _should_restart_gateway(self) -> bool:
         if not self.stream_settings.auto_restart_gateway_on_farm_broken:
@@ -293,6 +300,7 @@ class StreamRuntime:
 
     def _restart_gateway_for_farm_outage(self) -> None:
         broken_seconds = self.collector.farm_health.broken_duration()
+        failed_farm = self.collector.farm_health.oldest_broken_farm()
         persist_state_only(
             unavailable_state(
                 "IBKR data farms broken; restarting gateway",
@@ -309,7 +317,7 @@ class StreamRuntime:
                 "event": "gateway_restart_requested",
                 "restarted": restarted,
                 "broken_seconds": round(broken_seconds or 0.0, 1),
-                "farm": self.collector.farm_health.last_farm,
+                "farm": failed_farm,
                 "cooldown_seconds": self.stream_settings.gateway_restart_cooldown_seconds,
             }
         )

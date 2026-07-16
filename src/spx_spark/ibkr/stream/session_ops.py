@@ -30,6 +30,7 @@ prepare_ib_client = stream_deps.prepare_ib_client
 time = stream_deps.time
 write_snapshot = stream_deps.write_snapshot
 
+
 class SessionOps:
     def _on_error(self, req_id: int, error_code: int, message: str, contract: Any) -> None:
         error = IbkrError(
@@ -62,15 +63,19 @@ class SessionOps:
                 self.subscription_health_failed = True
 
         if error_code in SUBSCRIPTION_REJECTION_CODES:
+            if error_code == 10197:
+                # Live/paper ownership conflicts affect the whole market-data
+                # session, including requests not registered locally yet.
+                self.subscription_health_failed = True
             self.subscription_rejection_sequence += 1
-            self.subscription_rejection_log.append(
-                (self.subscription_rejection_sequence, error)
-            )
+            self.subscription_rejection_log.append((self.subscription_rejection_sequence, error))
             del self.subscription_rejection_log[:-MAX_TRACKED_ERRORS]
             row = self.subscription_rows_by_req_id.get(req_id)
             if row is not None:
                 row.error = f"IBKR {error_code}: {message}"
                 row.subscribed = False
+                if error_code == 200:
+                    self.qualified_option_contracts.pop(row.label, None)
                 if getattr(self, "subscription_lane_by_req_id", {}).get(req_id) in {
                     "base",
                     "hot",
@@ -99,9 +104,7 @@ class SessionOps:
                 "PROVIDER_FAILOVER_CONTROL_IBKR_STREAM_ENABLED",
                 bool(settings_value("provider_failover.control_ibkr_stream_enabled")),
             ),
-            control_max_age_seconds=(
-                self.provider_failover_settings.control_state_max_age_seconds
-            ),
+            control_max_age_seconds=(self.provider_failover_settings.control_state_max_age_seconds),
             override=override,
         )
 
@@ -228,7 +231,6 @@ class SessionOps:
         self.slow_qualified_contracts = {}
         self.slow_unresolved_contracts = set()
         self.option_cache = {}
-        self.qualified_option_contracts = {}
         self.subscription_rejection_sequence = 0
         self.subscription_rejection_log = []
         self.errors = []

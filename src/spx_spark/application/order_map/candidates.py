@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import math
 from datetime import datetime, timezone
 from typing import Any
 
@@ -15,13 +14,10 @@ from spx_spark.application.order_map.execution_quote import evaluate_execution_q
 from spx_spark.application.order_map.pricing import (
     BSProjection,
     YEAR_SECONDS,
-    build_option_price_bs_projection,
+    build_chain_option_price_bs_projection,
     expiry_close_utc,
-    fit_iv_surface,
-    parity_forward,
     project_option_price,
     round_to_tick,
-    smile_slope_per_point,
     touch_eta_minutes,
 )
 from spx_spark.application.order_map.spot import resolve_spx_spot
@@ -195,37 +191,20 @@ def _build_candidate(
 
     strike_float = finite_float(quote.instrument.strike) or float(target_strike)
     vendor_iv = finite_float(quote.greeks.implied_vol) if quote.greeks is not None else None
-    surface = fit_iv_surface(pairs, right, strike_float, strike_step)
-    smoothed_iv = surface.value_at(strike_float) if surface is not None else None
-    iv = smoothed_iv if smoothed_iv is not None and smoothed_iv > 0 else vendor_iv
-    slope = smile_slope_per_point(pairs, right, strike_float, strike_step)
-    discount_factor = (
-        math.exp(-policy.risk_free_rate * tau_now_years)
-        if tau_now_years is not None and tau_now_years > 0
-        else 1.0
-    )
-    forward_now = parity_forward(pairs, discount_factor=discount_factor)
     quote_gate = evaluate_execution_quote(quote, all_quotes, as_of=as_of, policy=policy)
 
     def _project(target: float) -> tuple[float, str, BSProjection | None]:
-        surface_iv_at_touch = None
-        if surface is not None and iv is not None:
-            surface_iv_at_touch = surface.value_at(
-                strike_float - policy.vol_slope_beta * (spot - target)
-            )
-            surface_iv_at_touch = min(max(surface_iv_at_touch, 0.5 * iv), 2.5 * iv)
-        bs_projection = build_option_price_bs_projection(
+        bs_projection = build_chain_option_price_bs_projection(
             mid=mid,
-            iv=iv,
+            vendor_iv=vendor_iv,
             strike=strike_float,
             right=right,
             spot=spot,
             target=target,
             tau_now_years=tau_now_years,
             em_points=em_points,
-            slope_per_point=slope,
-            forward_now=forward_now,
-            surface_iv_at_touch=surface_iv_at_touch,
+            pairs=pairs,
+            strike_step=strike_step,
             empirical_touch_fractions=empirical_touch_fractions,
             policy=policy,
         )
@@ -340,6 +319,7 @@ def _build_candidate(
         execution_quote_spread_percentile=quote_gate.spread_percentile,
         execution_quote_source_age_seconds=quote_gate.source_age_seconds,
         execution_quote_provider_divergence_bps=quote_gate.provider_mid_divergence_bps,
+        execution_quote_excluded_providers=quote_gate.excluded_providers,
         touch_time_model_source=touch_time_model_source,
     )
 

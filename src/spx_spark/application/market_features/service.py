@@ -28,6 +28,7 @@ from spx_spark.application.market_features.market import (
 from spx_spark.application.market_features.options import (
     build_option_structure_frame,
     merge_option_history,
+    option_frame_has_usable_live_structure,
 )
 from spx_spark.application.market_features.state import (
     append_audit,
@@ -50,6 +51,7 @@ from spx_spark.application.market_features.trade_intent_runtime import process_t
 from spx_spark.application.market_features.virtual_strategy import process_virtual_strategy
 from spx_spark.application.order_map.level_decision_shadow import (
     load_level_decision_shadow,
+    run_level_decision_shadow,
 )
 from spx_spark.application.order_map.decision_consistency import coherent_level_decision
 from spx_spark.application.order_map.level_trigger_repricing import (
@@ -100,7 +102,11 @@ def run(argv: list[str] | None = None, *, now: datetime | None = None) -> int:
         previous_contracts=_dict(persisted.get("option_contracts")),
         policy=policy,
         exposure_map=exposure_map,
+        last_usable_frame=_dict(persisted.get("last_usable_option_frame")),
     )
+    last_usable_option_frame = _dict(persisted.get("last_usable_option_frame"))
+    if option_frame_has_usable_live_structure(option_frame):
+        last_usable_option_frame = option_frame.to_dict()
     sample = normalized_market_sample(latest, now=evaluation_now, policy=policy)
     existing_samples = _dict_list(persisted.get("market_samples"))
     if len(existing_samples) < 5:
@@ -134,7 +140,18 @@ def run(argv: list[str] | None = None, *, now: datetime | None = None) -> int:
         market_frame,
         max_sessions=policy.volume_baseline_sessions,
     )
-    raw_level_decision = load_level_decision_shadow(storage)
+    level_decision_refresh_error: str | None = None
+    try:
+        raw_level_decision = run_level_decision_shadow(
+            storage,
+            None,
+            now=evaluation_now,
+            policy=app.level_decision,
+            notifications_enabled=True,
+        )
+    except Exception as exc:  # The last durable decision remains usable on refresh failure.
+        level_decision_refresh_error = f"{type(exc).__name__}:{exc}"
+        raw_level_decision = load_level_decision_shadow(storage)
     level_decision = coherent_level_decision(
         raw_level_decision,
         expiry=option_frame.front_expiry,
@@ -262,6 +279,7 @@ def run(argv: list[str] | None = None, *, now: datetime | None = None) -> int:
             "market_samples": samples,
             "option_history": option_history,
             "option_contracts": contracts,
+            "last_usable_option_frame": last_usable_option_frame,
             "volume_baselines": volume_baselines,
             "session_episode": session_episode,
             "last_decision_context": context.to_dict(),
@@ -280,6 +298,7 @@ def run(argv: list[str] | None = None, *, now: datetime | None = None) -> int:
             "trade_intent_delivery": intent_delivery,
             "trade_candidate": trade_candidate,
             "confirmed_gate": confirmed_gate,
+            "level_decision_refresh_error": level_decision_refresh_error,
             "virtual_strategy": virtual_strategy,
         }
     )

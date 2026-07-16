@@ -772,7 +772,7 @@ service_loop:
     value: 60
     description: Delay before retrying an unavailable IBKR snapshot connection.
   ibkr_conflict_probe_seconds:
-    value: 15
+    value: 5
     description: Delay before a read-only probe after an IBKR live/paper market-data conflict; short enough to recover promptly after the live user logs out.
   max_concurrent_tasks:
     value: 4
@@ -933,17 +933,17 @@ runtime_policy:
     value: 60
     description: Seconds to wait before retrying an unavailable IBKR connection.
   ibkr_conflict_retry_minutes:
-    value: 0
-    description: Minutes before trying to reclaim a competing IBKR session; zero disables fighting.
+    value: 1
+    description: Minutes before an active reclaim attempt after an IBKR live/paper conflict.
   ibkr_conflict_probe_seconds:
-    value: 15
+    value: 5
     description: Seconds between non-invasive probes after an IBKR live/paper market-data conflict.
   ibkr_fallback_provider:
     value: schwab
     description: Provider name used when IBKR is unavailable or intentionally disabled.
   strict_no_session_fight:
-    value: true
-    description: Prevents collectors from competing with a phone or desktop IBKR session.
+    value: false
+    description: Allows the paper collector to reclaim market data promptly after a live session releases it; live still has IBKR-enforced priority while connected.
   weekend_maintenance_mode:
     value: true
     description: Reserves non-trading weekends for maintenance unless futures have reopened.
@@ -1628,8 +1628,8 @@ level_decision_shadow:
     value: true
     description: Runs the mutually-exclusive wall/flip decision state machine as an input to the deterministic TradeReady gate.
   notify_transitions:
-    value: false
-    description: Retained for compatibility; level transitions are audit-only and never bypass the TradeReady gate.
+    value: true
+    description: Sends one deterministic market-warning notification when a wall or flip path reaches CONFIRMED; executable contract and price instructions remain exclusive to TradeReady.
   formal_signal_enabled:
     value: true
     description: Allows CONFIRMED to enter deterministic TradeReady evaluation; it does not make the state directly actionable or submit an order.
@@ -1741,6 +1741,7 @@ order_map_policy:
   execution_max_quote_age_seconds: {value: 15.0, description: Maximum local transport age for an execution anchor.}
   execution_max_source_age_seconds: {value: 15.0, description: Maximum provider timestamp age for an execution anchor.}
   execution_max_provider_mid_divergence_bps: {value: 800.0, description: Maximum IBKR/Schwab mid divergence for an executable conditional price.}
+  execution_max_provider_underlier_divergence_points: {value: 3.0, description: Exclude a provider cross-check when its option-model underlier differs from the selected primary source.}
   frontrun_fraction: {value: 0.30, description: Fraction of level distance used for frontrun placement.}
   frontrun_min_points: {value: 2.0, description: Minimum frontrun offset.}
   frontrun_max_points: {value: 8.0, description: Maximum frontrun offset.}

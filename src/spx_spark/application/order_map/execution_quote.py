@@ -31,6 +31,7 @@ class ExecutionQuoteGate:
     source_age_seconds: float | None
     provider_mid_divergence_bps: float | None
     providers: tuple[str, ...]
+    excluded_providers: tuple[str, ...]
 
     @property
     def executable(self) -> bool:
@@ -89,13 +90,21 @@ def evaluate_execution_quote(
     if source_age is None or source_age > policy.execution_max_source_age_seconds:
         reasons.append("source_quote_stale_or_unverified")
 
-    provider_mids = {
-        item.provider.value: item.mid
-        for item in all_quotes
-        if item.instrument.canonical_id == quote.instrument.canonical_id
-        and item.mid is not None
-        and configured_quote_use_decision(item, as_of=as_of).pricing_allowed
-    }
+    provider_mids: dict[str, float] = {}
+    excluded_providers: list[str] = []
+    for item in all_quotes:
+        if item.instrument.canonical_id != quote.instrument.canonical_id or item.mid is None:
+            continue
+        exclusion = _provider_quote_exclusion(
+            item,
+            reference=quote,
+            as_of=as_of,
+            policy=policy,
+        )
+        if exclusion is not None:
+            excluded_providers.append(f"{item.provider.value}:{exclusion}")
+            continue
+        provider_mids[item.provider.value] = item.mid
     divergence = _mid_divergence_bps(tuple(provider_mids.values()))
     if divergence is not None and divergence > policy.execution_max_provider_mid_divergence_bps:
         reasons.append("provider_mid_divergence_exceeded")
@@ -116,6 +125,7 @@ def evaluate_execution_quote(
         source_age_seconds=source_age,
         provider_mid_divergence_bps=divergence,
         providers=tuple(sorted(provider_mids)),
+        excluded_providers=tuple(sorted(set(excluded_providers))),
     )
 
 
@@ -124,6 +134,38 @@ def _age_seconds(as_of: datetime, value: datetime | None) -> float | None:
         return None
     now = _utc(as_of)
     return max((now - _utc(value)).total_seconds(), 0.0)
+
+
+def _provider_quote_exclusion(
+    quote: Quote,
+    *,
+    reference: Quote,
+    as_of: datetime,
+    policy: OrderMapPolicy,
+) -> str | None:
+    """Reject stale or differently anchored providers from cross-source checks."""
+
+    if not configured_quote_use_decision(quote, as_of=as_of).pricing_allowed:
+        return "quote_not_actionable"
+    source_at = quote.quote_time or quote.trade_time
+    source_age = _age_seconds(as_of, source_at)
+    if source_age is None or source_age > policy.execution_max_source_age_seconds:
+        return "source_stale_or_unverified"
+    reference_underlier = _greeks_underlier(reference)
+    quote_underlier = _greeks_underlier(quote)
+    if (
+        reference_underlier is not None
+        and quote_underlier is not None
+        and abs(reference_underlier - quote_underlier)
+        > policy.execution_max_provider_underlier_divergence_points
+    ):
+        return "model_underlier_divergence"
+    return None
+
+
+def _greeks_underlier(quote: Quote) -> float | None:
+    value = quote.greeks.underlier_price if quote.greeks is not None else None
+    return float(value) if value is not None and value > 0 else None
 
 
 def _utc(value: datetime) -> datetime:

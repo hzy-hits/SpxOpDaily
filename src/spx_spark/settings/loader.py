@@ -641,6 +641,9 @@ def load_settings(
         execution_max_provider_mid_divergence_bps=float(
             get("order_map_policy.execution_max_provider_mid_divergence_bps")
         ),
+        execution_max_provider_underlier_divergence_points=float(
+            get("order_map_policy.execution_max_provider_underlier_divergence_points")
+        ),
         frontrun_fraction=float(get("order_map_policy.frontrun_fraction")),
         frontrun_min_points=float(get("order_map_policy.frontrun_min_points")),
         frontrun_max_points=float(get("order_map_policy.frontrun_max_points")),

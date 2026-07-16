@@ -70,11 +70,7 @@ class FlushOps:
                 spec.expiry
                 for spec in (
                     self.option_plan.hot
-                    + tuple(
-                        item
-                        for rotation in self.option_plan.rotations
-                        for item in rotation
-                    )
+                    + tuple(item for rotation in self.option_plan.rotations for item in rotation)
                 )
             )
             if self.option_plan is not None
@@ -89,9 +85,7 @@ class FlushOps:
         )
         if not self.farm_health.market_data_ready():
             farm_reason = "IBKR market data farms not ready"
-            outage_reason = (
-                f"{outage_reason}; {farm_reason}" if outage_reason else farm_reason
-            )
+            outage_reason = f"{outage_reason}; {farm_reason}" if outage_reason else farm_reason
         error_count = provider_error_count(self.errors)
         if outage_reason is not None:
             error_count = max(error_count, 1)
@@ -123,6 +117,10 @@ class FlushOps:
             "provider_status": (
                 snapshot.provider_state.status.value if snapshot.provider_state else "unknown"
             ),
+            "provider_reason": (
+                snapshot.provider_state.reason if snapshot.provider_state else None
+            ),
+            "farm_status": self.farm_health.status.value,
             "rotation_index": self.rotation_index,
             "tws_connectivity_lost": self.tws_connectivity_lost,
             "source_session": source_session,
@@ -143,6 +141,16 @@ class FlushOps:
         # qualification before the hot-plan work has had its bounded turn.
         self.advance_slow_poll(allow_start=False)
         if self._subscription_lifecycle_blocked():
+            return
+        option_warmup = bool(
+            self.option_plan is not None
+            and getattr(self.option_plan, "rotation_count", 0) > 0
+            and self.rotation_index < getattr(self.option_plan, "rotation_count", 0)
+        )
+        if option_warmup:
+            if lifecycle_has_qualification_budget(lifecycle_started):
+                self.rotate_options()
+            self.advance_slow_poll(allow_start=False)
             return
         self.ensure_option_plan(rows)
         if self._subscription_lifecycle_blocked():

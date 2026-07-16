@@ -33,6 +33,7 @@ option_contracts_from_specs = stream_deps.option_contracts_from_specs
 qualify_and_subscribe = stream_deps.qualify_and_subscribe
 reference_quote_from_row = stream_deps.reference_quote_from_row
 should_replan = stream_deps.should_replan
+snapshot_rows = stream_deps.snapshot_rows
 split_base_contracts = stream_deps.split_base_contracts
 time = stream_deps.time
 
@@ -94,11 +95,6 @@ class OptionSubscriptionOps:
         )
         if subscribed == 0:
             raise RuntimeError(f"no base contracts subscribed ({failed} failed)")
-        self._qualify_slow_contracts()
-        self._raise_if_subscription_setup_interrupted(
-            setup_connectivity_sequence,
-            phase="slow_qualification",
-        )
         self.slow_chunks = chunked(
             self.slow_contracts,
             self.stream_settings.slow_poll_chunk_size,
@@ -109,10 +105,54 @@ class OptionSubscriptionOps:
             hold_seconds=self.stream_settings.slow_poll_hold_seconds,
         )
         self.slow_scheduler.reset(now=time.monotonic())
-        self.ib.sleep(self.ibkr_settings.quote_wait_seconds)
+
+    def prime_priority_market_data(self) -> None:
+        """Recover ES and the SPXW hot lane before any slow context work."""
+
+        started_at = time.monotonic()
+        deadline = started_at + max(float(self.ibkr_settings.quote_wait_seconds), 0.0)
+        rows: list[VerifyRow] = []
+        while True:
+            self._raise_if_subscription_setup_interrupted(
+                getattr(self, "tws_connectivity_loss_sequence", 0),
+                phase="priority_anchor_wait",
+            )
+            rows = snapshot_rows(
+                self.base_subs,
+                self.ibkr_settings.stale_after_seconds,
+                slow_index_stale_after_seconds=self.ibkr_settings.slow_index_stale_after_seconds,
+                slow_index_labels=self.ibkr_settings.slow_index_labels,
+            )
+            by_label = {row.label: row for row in rows}
+            reference = reference_quote_from_row(
+                by_label.get("future:ES"),
+                as_of=datetime.now(tz=timezone.utc),
+            )
+            if (
+                reference is not None
+                and reference.value is not None
+                and reference.freshness == "fresh"
+            ):
+                break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            self.ib.sleep(min(remaining, 0.25))
+
+        self.ensure_option_plan(rows)
         self._raise_if_subscription_setup_interrupted(
-            setup_connectivity_sequence,
-            phase="base_quote_wait",
+            getattr(self, "tws_connectivity_loss_sequence", 0),
+            phase="priority_option_subscribe",
+        )
+        log_event(
+            {
+                "task": "ibkr_stream",
+                "event": "priority_market_data_primed",
+                "elapsed_seconds": round(max(time.monotonic() - started_at, 0.0), 3),
+                "es_ready": any(row.label == "future:ES" and row.stale is False for row in rows),
+                "hot_contracts": len(self.hot_subs),
+                "expiry": self.option_plan.expiry if self.option_plan is not None else None,
+            }
         )
 
     def _raise_if_subscription_setup_interrupted(
@@ -121,29 +161,31 @@ class OptionSubscriptionOps:
         *,
         phase: str,
     ) -> None:
-        if not self._connectivity_changed_since(connectivity_sequence):
+        connectivity_changed = self._connectivity_changed_since(connectivity_sequence)
+        subscription_failed = getattr(self, "subscription_health_failed", False)
+        if not connectivity_changed and not subscription_failed:
             return
-        self.subscriptions_lost = True
-        self.subscription_health_failed = True
+        if connectivity_changed:
+            self.subscriptions_lost = True
+            self.subscription_health_failed = True
         log_event(
             {
                 "task": "ibkr_stream",
                 "event": "subscription_setup_interrupted",
                 "phase": phase,
+                "cause": (
+                    "connectivity_changed" if connectivity_changed else "subscription_rejected"
+                ),
             }
         )
-        raise RuntimeError(f"TWS connectivity changed during {phase}")
+        raise RuntimeError(f"IBKR subscription setup interrupted during {phase}")
 
     def ensure_option_plan(self, rows: list[VerifyRow]) -> None:
         if self.skip_options:
             return
         decision_at = datetime.now(tz=timezone.utc)
-        current_expiry, next_expiry = self.market_calendar.option_collection_expiries(
-            decision_at
-        )
-        next_session_prefetch = self.market_calendar.is_next_expiry_prefetch_window(
-            decision_at
-        )
+        current_expiry, next_expiry = self.market_calendar.option_collection_expiries(decision_at)
+        next_session_prefetch = self.market_calendar.is_next_expiry_prefetch_window(decision_at)
         today = current_expiry.strftime("%Y%m%d")
         next_expiry_text = next_expiry.strftime("%Y%m%d")
         by_label = {row.label: row for row in rows}
@@ -165,9 +207,7 @@ class OptionSubscriptionOps:
         )
         stable = self.atm_reference_controller.stable_atm
         expiry_rollover = bool(
-            stable is not None
-            and stable.expiry is not None
-            and stable.expiry != today
+            stable is not None and stable.expiry is not None and stable.expiry != today
         ) or bool(
             self.option_replan_controller.accepted_expiry is not None
             and self.option_replan_controller.accepted_expiry != today
@@ -178,9 +218,7 @@ class OptionSubscriptionOps:
             trading_date=trading_date,
             trading_days_since_basis=basis_age,
             spx=reference_quote_from_row(by_label.get("index:SPX"), as_of=decision_at),
-            ibus500=reference_quote_from_row(
-                by_label.get("cfd:IBUS500"), as_of=decision_at
-            ),
+            ibus500=reference_quote_from_row(by_label.get("cfd:IBUS500"), as_of=decision_at),
             es=reference_quote_from_row(
                 by_label.get("future:ES"),
                 contract=str(es_contract) if es_contract else None,
@@ -303,8 +341,16 @@ class OptionSubscriptionOps:
         )
 
     def reconcile_option_plan(self, plan: OptionSubscriptionPlan) -> bool:
+        cache = getattr(self, "qualified_option_contracts", None)
+        if cache is not None:
+            expiry_token = f":{plan.expiry}:"
+            self.qualified_option_contracts = {
+                label: definition for label, definition in cache.items() if expiry_token in label
+            }
         desired_contracts = option_contracts_from_specs(plan.hot)
-        desired_by_label = {label: (label, kind, contract) for label, kind, contract in desired_contracts}
+        desired_by_label = {
+            label: (label, kind, contract) for label, kind, contract in desired_contracts
+        }
         retained_labels = set(self.hot_subs) & set(desired_by_label)
         added_labels = set(desired_by_label) - retained_labels
         obsolete_labels = set(self.hot_subs) - retained_labels
@@ -366,20 +412,14 @@ class OptionSubscriptionOps:
             )
             return False
 
-        obsolete_subs = {
-            label: remaining_hot[label]
-            for label in obsolete_labels - release_labels
-        }
+        obsolete_subs = {label: remaining_hot[label] for label in obsolete_labels - release_labels}
         if not self._cancel_batch(obsolete_subs):
             self._cancel_batch(additions)
             restored = self._restore_subscriptions(released_subs, lane="hot")
             self.hot_subs = {**remaining_hot, **restored}
             return False
         self.hot_subs = {
-            **{
-                label: remaining_hot[label]
-                for label in retained_labels
-            },
+            **{label: remaining_hot[label] for label in retained_labels},
             **additions,
         }
         self.option_plan = plan
@@ -412,9 +452,7 @@ class OptionSubscriptionOps:
         qualify = getattr(self.ib, "qualifyContracts", None)
         if pending and callable(qualify):
             try:
-                qualified = self._batch_qualify(
-                    [contract for _, _, contract in pending]
-                )
+                qualified = self._batch_qualify([contract for _, _, contract in pending])
             except Exception as exc:  # noqa: BLE001
                 qualified = []
                 log_event(
@@ -456,8 +494,7 @@ class OptionSubscriptionOps:
         lane: str = "hot",
     ) -> bool:
         if len(subscriptions) != expected_count or any(
-            not row.subscribed or row.error
-            for _, row in subscriptions.values()
+            not row.subscribed or row.error for _, row in subscriptions.values()
         ):
             return False
         if subscriptions and confirm_seconds > 0:
@@ -491,9 +528,7 @@ class OptionSubscriptionOps:
         rejection_sequence: int,
     ) -> bool:
         rows_by_request_id = {
-            row.request_id: row
-            for _, row in subscriptions.values()
-            if row.request_id is not None
+            row.request_id: row for _, row in subscriptions.values() if row.request_id is not None
         }
         rejected = False
         for sequence, error in getattr(self, "subscription_rejection_log", []):

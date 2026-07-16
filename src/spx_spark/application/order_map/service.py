@@ -26,6 +26,7 @@ from spx_spark.application.order_map.decision_consistency import (
 )
 from spx_spark.application.order_map.delivery import send_order_map
 from spx_spark.application.order_map.es_volume_attach import attach_es_volume_signal
+from spx_spark.application.order_map.frozen_structure import attach_frozen_option_structure
 from spx_spark.application.order_map.guidance import STATUS_BRIEF_SYSTEM_PROMPT
 from spx_spark.application.order_map.hl_volume import (
     attach_hl_volume_signal,
@@ -489,6 +490,7 @@ def build_order_payload_with_retry(
             decision_context=load_json(feature_paths["decision"]),
             max_level_drift_points=app.market_features.trade_structure_drift_points,
         )
+        attach_frozen_option_structure(payload, option_frame)
         payload["level_trigger_repricing"] = load_json(
             default_level_trigger_repricing_path(storage_settings)
         )
@@ -683,16 +685,12 @@ def _status_delivery_reason(
         )
         current_intent = str(fingerprint.get("trade_intent_id") or "")
         if not prior_intent and not current_intent:
-            structural_changes = [
-                change for change in changes if not change.startswith("决策剧本")
-            ]
+            structural_changes = [change for change in changes if not change.startswith("决策剧本")]
             if structural_changes:
                 return "material_changes"
             last_status_at = finite_float(previous.get("last_status_at"))
-            if (
-                last_status_at is None
-                or int(now.timestamp() // GTH_STATUS_CADENCE_SECONDS)
-                > int(last_status_at // GTH_STATUS_CADENCE_SECONDS)
+            if last_status_at is None or int(now.timestamp() // GTH_STATUS_CADENCE_SECONDS) > int(
+                last_status_at // GTH_STATUS_CADENCE_SECONDS
             ):
                 return f"gth_quarter_hour_heartbeat:{phase}"
             return None

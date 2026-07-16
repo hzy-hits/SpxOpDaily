@@ -26,9 +26,11 @@ from spx_spark.application.market_features.models import (
 )
 from spx_spark.application.market_features.options import (
     _fresh_front_quotes,
+    build_option_structure_frame,
     imbalance,
     provider_mid_divergences,
 )
+from spx_spark.analytics.options.models import OptionsMap, UnderlierReference
 from spx_spark.marketdata import (
     InstrumentId,
     MarketDataQuality,
@@ -40,6 +42,78 @@ from spx_spark.storage import LatestState
 
 
 UTC = timezone.utc
+
+
+def test_missing_live_chain_retains_same_expiry_structure_without_pricing() -> None:
+    now = datetime(2026, 7, 16, 1, 0, tzinfo=UTC)
+    state = LatestState(created_at=now, as_of=now, quotes=(), best_quotes=())
+    empty_map = OptionsMap(
+        created_at=now,
+        as_of=now,
+        underlier=UnderlierReference(price=None, source=None),
+        expiries=(),
+        warnings=("missing live SPXW",),
+    )
+    last_usable = {
+        "as_of": "2026-07-16T00:30:00+00:00",
+        "front_expiry": "20260716",
+        "structure": {
+            "put_wall": 7525.0,
+            "call_wall": 7625.0,
+            "zero_gamma": 7572.0,
+            "flip_zone": [7570.0, 7575.0],
+            "gamma_state": "zero_gamma_transition",
+            "put_walls": [{"strike": 7525.0, "open_interest": 3622.0, "gex": -1.3e9}],
+            "call_walls": [{"strike": 7625.0, "open_interest": 1562.0, "gex": 9.3e8}],
+        },
+    }
+
+    frame, contracts = build_option_structure_frame(
+        state,
+        empty_map,
+        now=now,
+        history=[],
+        previous_contracts={},
+        policy=MarketFeatureSettings(),
+        last_usable_frame=last_usable,
+    )
+
+    assert frame.quality is FrameQuality.UNAVAILABLE
+    assert frame.front_expiry == "20260716"
+    assert frame.structure["frozen"] is True
+    assert frame.structure["put_wall"] == 7525.0
+    assert frame.structure["underlier"] is None
+    assert frame.volatility["atm_iv_0dte"] is None
+    assert frame.l1.quality is FrameQuality.UNAVAILABLE
+    assert contracts == {}
+
+
+def test_missing_chain_does_not_carry_prior_expiry_structure() -> None:
+    now = datetime(2026, 7, 16, 1, 0, tzinfo=UTC)
+    state = LatestState(created_at=now, as_of=now, quotes=(), best_quotes=())
+    empty_map = OptionsMap(
+        created_at=now,
+        as_of=now,
+        underlier=UnderlierReference(price=None, source=None),
+        expiries=(),
+        warnings=(),
+    )
+    frame, _ = build_option_structure_frame(
+        state,
+        empty_map,
+        now=now,
+        history=[],
+        previous_contracts={},
+        policy=MarketFeatureSettings(),
+        last_usable_frame={
+            "front_expiry": "20260715",
+            "structure": {"put_wall": 7500.0},
+        },
+    )
+
+    assert frame.front_expiry is None
+    assert frame.structure.get("frozen") is not True
+    assert frame.structure["put_wall"] is None
 
 
 def test_minute_frame_calculates_path_volume_cross_asset_and_volatility() -> None:

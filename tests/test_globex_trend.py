@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
+from spx_spark.application.globex_trend import service as globex_service
 from spx_spark.application.globex_trend.machine import (
     advance_trend_state,
     initial_state,
@@ -21,9 +24,7 @@ UTC = timezone.utc
 
 
 def test_trend_context_resets_at_gth_and_rth_boundaries() -> None:
-    assert trend_context_id(datetime(2026, 7, 13, 23, 0, tzinfo=UTC)).endswith(
-        ":globex"
-    )
+    assert trend_context_id(datetime(2026, 7, 13, 23, 0, tzinfo=UTC)).endswith(":globex")
     assert trend_context_id(datetime(2026, 7, 14, 0, 30, tzinfo=UTC)).endswith(":gth")
     assert trend_context_id(datetime(2026, 7, 14, 13, 30, tzinfo=UTC)).endswith(":rth")
 
@@ -156,11 +157,63 @@ def test_es_transition_uses_rth_semantics_during_cash_session() -> None:
 
     alert = alert_from_event(event)
 
-    assert alert.severity == "info"
-    assert alert.research_only is True
+    assert alert.severity == "high"
+    assert alert.research_only is False
     assert alert.title == "ES RTH 多头趋势确认"
     assert "ES RTH 趋势确认切换" in alert.detail
     assert "不得按夜盘薄流动性解释" in alert.detail
+
+
+def test_runtime_delivers_confirmed_transition_once(tmp_path, monkeypatch) -> None:
+    start = datetime(2026, 7, 14, 0, 15, tzinfo=UTC)
+    policy = replace(
+        GlobexTrendSettings(),
+        confirmation_observations=1,
+    )
+    storage = SimpleNamespace(data_root=str(tmp_path))
+    delivered: list[str] = []
+
+    class Store:
+        def __init__(self, _storage) -> None:
+            pass
+
+        def load(self, *, now: datetime) -> LatestState:
+            price = 7600.0 if now == start else 7595.0
+            quote = _es_quote(Provider.IBKR, price, now, now)
+            return LatestState(now, now, (quote,), (quote,))
+
+    def fake_notify(payload, **_kwargs):
+        event_id = str(payload["alerts"][0]["event_id"])
+        delivered.append(event_id)
+        return SimpleNamespace(
+            acknowledged_event_ids=(event_id,),
+            to_dict=lambda: {"sent_count": 1},
+        )
+
+    monkeypatch.setattr(
+        globex_service,
+        "load_app_settings",
+        lambda: SimpleNamespace(globex_trend=policy),
+    )
+    monkeypatch.setattr(
+        globex_service,
+        "StorageSettings",
+        SimpleNamespace(from_env=lambda: storage),
+    )
+    monkeypatch.setattr(globex_service, "LatestStateStore", Store)
+    monkeypatch.setattr(globex_service, "notify_payload", fake_notify)
+    monkeypatch.setattr(
+        globex_service,
+        "NotificationSettings",
+        SimpleNamespace(from_env=lambda: SimpleNamespace()),
+    )
+
+    assert globex_service.run([], now=start) == 0
+    assert globex_service.run([], now=start + timedelta(minutes=15)) == 0
+    assert globex_service.run([], now=start + timedelta(minutes=16)) == 0
+
+    assert len(delivered) == 1
+    assert delivered[0].endswith(":bearish")
 
 
 def test_es_transition_keeps_globex_semantics_outside_cash_session() -> None:

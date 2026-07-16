@@ -11,7 +11,7 @@ from spx_spark.sampling import OptionContractSpec
 
 MAX_TRACKED_ERRORS = 200
 SUBSCRIPTION_CONFIRM_SECONDS = 0.5
-SUBSCRIPTION_REJECTION_CODES = frozenset({100, 101, 200, 354, 420})
+SUBSCRIPTION_REJECTION_CODES = frozenset({100, 101, 200, 354, 420, 10197})
 OPTION_ROTATION_RETRY_SECONDS = 30.0
 QUALIFICATION_TIMEOUT_SECONDS = 5.0
 HOT_FLUSH_LIFECYCLE_BUDGET_SECONDS = 6.0
@@ -42,7 +42,6 @@ class ReconnectPolicy:
         self.attempt = 0
 
 
-
 def lifecycle_has_qualification_budget(
     started_at: float,
     *,
@@ -59,7 +58,6 @@ def effective_hot_flush_sleep_seconds(configured_seconds: float) -> float:
     """Honor faster flush settings while enforcing the reliability ceiling."""
 
     return min(max(float(configured_seconds), 0.0), HOT_FLUSH_SLEEP_MAX_SECONDS)
-
 
 
 @dataclass(frozen=True)
@@ -86,4 +84,3 @@ def replace_client_id(settings: IbkrSettings, client_id: int) -> IbkrSettings:
     payload = asdict(settings)
     payload["client_id"] = client_id
     return IbkrSettings(**payload)
-

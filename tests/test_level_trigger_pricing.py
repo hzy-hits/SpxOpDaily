@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -90,6 +91,38 @@ def test_execution_quote_gate_blocks_wide_and_cross_provider_mid() -> None:
     assert gate.executable is False
     assert "spread_points_exceeded" in gate.reasons
     assert "provider_mid_divergence_exceeded" in gate.reasons
+
+
+def test_execution_quote_gate_ignores_provider_with_stale_source_timestamp() -> None:
+    schwab = _option(bid=8.0, ask=8.2, provider=Provider.SCHWAB)
+    stale_ibkr = _option(bid=2.0, ask=2.2)
+    stale_ibkr = replace(stale_ibkr, quote_time=NOW - timedelta(minutes=5))
+
+    gate = evaluate_execution_quote(schwab, (schwab, stale_ibkr), as_of=NOW)
+
+    assert gate.executable is True
+    assert gate.providers == ("schwab",)
+    assert gate.provider_mid_divergence_bps is None
+
+
+def test_execution_quote_gate_excludes_provider_with_stale_model_underlier() -> None:
+    schwab = _option(bid=12.2, ask=12.4, provider=Provider.SCHWAB)
+    schwab = replace(
+        schwab,
+        greeks=replace(schwab.greeks, underlier_price=7544.7),
+    )
+    ibkr = _option(bid=6.3, ask=6.4)
+    ibkr = replace(
+        ibkr,
+        greeks=replace(ibkr.greeks, underlier_price=7563.8),
+    )
+
+    gate = evaluate_execution_quote(schwab, (schwab, ibkr), as_of=NOW)
+
+    assert gate.executable is True
+    assert gate.providers == ("schwab",)
+    assert gate.provider_mid_divergence_bps is None
+    assert gate.excluded_providers == ("ibkr:model_underlier_divergence",)
 
 
 def test_parity_forward_and_black76_projection_expose_scenario_range() -> None:

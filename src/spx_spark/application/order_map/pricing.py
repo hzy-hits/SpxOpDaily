@@ -188,6 +188,56 @@ def fit_iv_surface(
     return IVSurfaceFit(strike, *coefficients, point_count=len(points))
 
 
+def build_chain_option_price_bs_projection(
+    *,
+    mid: float,
+    vendor_iv: float | None,
+    strike: float,
+    right: str,
+    spot: float,
+    target: float,
+    tau_now_years: float | None,
+    em_points: float | None,
+    pairs: dict[float, dict[OptionRight, Quote]],
+    strike_step: float,
+    empirical_touch_fractions: tuple[float, float, float] | None = None,
+    policy: OrderMapPolicy = DEFAULT_ORDER_MAP_POLICY,
+) -> BSProjection | None:
+    """Apply one chain-derived IV and forward convention to every scenario view."""
+
+    surface = fit_iv_surface(pairs, right, strike, strike_step)
+    smoothed_iv = surface.value_at(strike) if surface is not None else None
+    iv = smoothed_iv if smoothed_iv is not None and smoothed_iv > 0 else vendor_iv
+    slope = smile_slope_per_point(pairs, right, strike, strike_step)
+    discount_factor = (
+        math.exp(-policy.risk_free_rate * tau_now_years)
+        if tau_now_years is not None and tau_now_years > 0
+        else 1.0
+    )
+    forward_now = parity_forward(pairs, discount_factor=discount_factor)
+    surface_iv_at_touch = None
+    if surface is not None and iv is not None:
+        surface_iv_at_touch = surface.value_at(
+            strike - policy.vol_slope_beta * (spot - target)
+        )
+        surface_iv_at_touch = min(max(surface_iv_at_touch, 0.5 * iv), 2.5 * iv)
+    return build_option_price_bs_projection(
+        mid=mid,
+        iv=iv,
+        strike=strike,
+        right=right,
+        spot=spot,
+        target=target,
+        tau_now_years=tau_now_years,
+        em_points=em_points,
+        slope_per_point=slope,
+        forward_now=forward_now,
+        surface_iv_at_touch=surface_iv_at_touch,
+        empirical_touch_fractions=empirical_touch_fractions,
+        policy=policy,
+    )
+
+
 def _solve_3x3(matrix: list[list[float]], vector: list[float]) -> tuple[float, float, float] | None:
     augmented = [row[:] + [vector[index]] for index, row in enumerate(matrix)]
     for column in range(3):

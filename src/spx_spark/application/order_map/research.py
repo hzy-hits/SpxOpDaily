@@ -12,13 +12,13 @@ from spx_spark.application.order_map.candidates import (
     _quote_greeks_ok,
     _quote_mid_structural,
 )
+from spx_spark.application.order_map.execution_quote import evaluate_execution_quote
 from spx_spark.application.order_map.pricing import (
     YEAR_SECONDS,
-    build_option_price_bs_projection,
+    build_chain_option_price_bs_projection,
     expiry_close_utc,
     project_option_price,
     round_to_tick,
-    smile_slope_per_point,
 )
 from spx_spark.marketdata import OptionRight, Quote
 from spx_spark.options_map import (
@@ -187,6 +187,7 @@ def _wall_rung_option_ref(
     right: str,
     spot: float,
     expiry_quotes: list[Quote],
+    all_quotes: tuple[Quote, ...] | list[Quote] | None = None,
     pairs: dict[float, dict[OptionRight, Quote]],
     strike_step: float,
     tau_now_years: float | None,
@@ -226,6 +227,10 @@ def _wall_rung_option_ref(
         "projection_timing_capped": False,
         "quote_quality": None,
         "degraded": False,
+        "execution_quote_status": "range_only",
+        "execution_quote_reasons": ("quote_missing_or_unusable",),
+        "execution_quote_provider_divergence_bps": None,
+        "execution_quote_excluded_providers": (),
     }
     if (
         quote is None
@@ -241,19 +246,25 @@ def _wall_rung_option_ref(
     gamma = finite_float(quote.greeks.gamma) if quote.greeks is not None else None  # type: ignore[union-attr]
     if mid is None or delta is None or gamma is None:
         return empty
+    quote_gate = evaluate_execution_quote(
+        quote,
+        all_quotes or expiry_quotes,
+        as_of=as_of or datetime.now(tz=timezone.utc),
+        policy=policy,
+    )
     strike_float = finite_float(quote.instrument.strike) or float(target_strike)
-    iv = finite_float(quote.greeks.implied_vol) if quote.greeks is not None else None
-    slope = smile_slope_per_point(pairs, right, strike_float, strike_step)
-    bs_projection = build_option_price_bs_projection(
+    vendor_iv = finite_float(quote.greeks.implied_vol) if quote.greeks is not None else None
+    bs_projection = build_chain_option_price_bs_projection(
         mid=mid,
-        iv=iv,
+        vendor_iv=vendor_iv,
         strike=strike_float,
         right=right,
         spot=spot,
         target=wall_strike,
         tau_now_years=tau_now_years,
         em_points=em_points,
-        slope_per_point=slope,
+        pairs=pairs,
+        strike_step=strike_step,
         policy=policy,
     )
     if bs_projection is not None:
@@ -272,9 +283,11 @@ def _wall_rung_option_ref(
         "strike": int(round(strike_float)),
         "current_mid": mid,
         "projected_mid": projected,
-        "limit_aggressive": round_to_tick(projected),
-        "limit_conservative": round_to_tick(
-            projected * policy.conservative_limit_multiplier
+        "limit_aggressive": round_to_tick(projected) if quote_gate.executable else None,
+        "limit_conservative": (
+            round_to_tick(projected * policy.conservative_limit_multiplier)
+            if quote_gate.executable
+            else None
         ),
         "projection_model": model,
         "projection_range_low": (
@@ -299,6 +312,12 @@ def _wall_rung_option_ref(
         ),
         "quote_quality": quality,
         "degraded": degraded,
+        "execution_quote_status": quote_gate.status.value,
+        "execution_quote_reasons": quote_gate.reasons,
+        "execution_quote_provider_divergence_bps": (
+            quote_gate.provider_mid_divergence_bps
+        ),
+        "execution_quote_excluded_providers": quote_gate.excluded_providers,
     }
 
 
@@ -355,6 +374,10 @@ def _wall_ladder_payload(
                 "projection_timing_capped": False,
                 "quote_quality": None,
                 "degraded": False,
+                "execution_quote_status": "range_only",
+                "execution_quote_reasons": ("quote_missing_or_unusable",),
+                "execution_quote_provider_divergence_bps": None,
+                "execution_quote_excluded_providers": (),
             }
             if spot is not None:
                 _, prob_touch, _, _ = probability_for_level(
@@ -368,6 +391,7 @@ def _wall_ladder_payload(
                     right=right,
                     spot=spot,
                     expiry_quotes=expiry_quotes,
+                    all_quotes=state.quotes,
                     pairs=pairs,
                     strike_step=strike_step,
                     tau_now_years=tau_now_years,
@@ -406,6 +430,18 @@ def _wall_ladder_payload(
                     ),
                     "quote_quality": option_ref.get("quote_quality"),
                     "degraded": bool(option_ref.get("degraded")),
+                    "execution_quote_status": option_ref.get(
+                        "execution_quote_status"
+                    ),
+                    "execution_quote_reasons": option_ref.get(
+                        "execution_quote_reasons"
+                    ),
+                    "execution_quote_provider_divergence_bps": option_ref.get(
+                        "execution_quote_provider_divergence_bps"
+                    ),
+                    "execution_quote_excluded_providers": option_ref.get(
+                        "execution_quote_excluded_providers"
+                    ),
                 }
             )
     return ladder

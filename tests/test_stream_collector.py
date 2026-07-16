@@ -71,9 +71,15 @@ def test_position_shadow_failure_never_breaks_market_data_or_overwrites_snapshot
     collector.ib = object()
     collector.storage_settings = object()
     writes: list[object] = []
-    patch_stream(monkeypatch, "fetch_positions", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("shadow failed")),
+    patch_stream(
+        monkeypatch,
+        "fetch_positions",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("shadow failed")),
     )
-    patch_stream(monkeypatch, "write_snapshot", lambda *args, **kwargs: writes.append(args),
+    patch_stream(
+        monkeypatch,
+        "write_snapshot",
+        lambda *args, **kwargs: writes.append(args),
     )
 
     event = collector.flush_position_shadow_if_due(now_monotonic=100.0)
@@ -118,7 +124,10 @@ def test_account_read_uses_position_capable_socket_even_when_shadow_write_is_off
     )
     collector.market_data_allowed = lambda: False
     calls: list[int] = []
-    patch_stream(monkeypatch, "connect_broker_readonly_with_positions", lambda _ib, _settings, *, client_id: calls.append(client_id),
+    patch_stream(
+        monkeypatch,
+        "connect_broker_readonly_with_positions",
+        lambda _ib, _settings, *, client_id: calls.append(client_id),
     )
 
     collector.open_session()
@@ -179,9 +188,13 @@ def test_runtime_preserves_competing_session_reason_during_cooldown(monkeypatch)
     persisted: list[object] = []
     events: list[dict[str, object]] = []
     sleeps: list[float] = []
-    patch_stream(monkeypatch, "persist_state_only", lambda state, _storage: persisted.append(state),
+    patch_stream(
+        monkeypatch,
+        "persist_state_only",
+        lambda state, _storage: persisted.append(state),
     )
     patch_stream(monkeypatch, "log_event", events.append)
+
     def stop_after_sleep(seconds: float) -> None:
         sleeps.append(seconds)
         runtime.deadline = 0.0
@@ -189,9 +202,7 @@ def test_runtime_preserves_competing_session_reason_during_cooldown(monkeypatch)
     runtime.sleep = stop_after_sleep
 
     assert runtime.run() == 0
-    assert persisted[0].reason == (
-        "competing live session owns shared market data (IBKR 10197)"
-    )
+    assert persisted[0].reason == ("competing live session owns shared market data (IBKR 10197)")
     assert events[0]["reason"] == persisted[0].reason
     assert events[0]["retry_in_seconds"] == 15.0
     assert sleeps == [15.0]
@@ -246,16 +257,15 @@ def test_subscription_lifecycle_gives_due_slow_poll_priority(monkeypatch) -> Non
     collector = object.__new__(StreamCollector)
     collector.option_plan = SimpleNamespace(expiry="20260710")
     calls: list[tuple[str, object]] = []
-    collector.advance_slow_poll = lambda **kwargs: calls.append(
-        ("slow", kwargs["allow_start"])
-    )
+    collector.advance_slow_poll = lambda **kwargs: calls.append(("slow", kwargs["allow_start"]))
     collector.ensure_option_plan = lambda rows: calls.append(("option", rows))
-    collector.ensure_spy_option_plan = lambda rows, *, expiry: calls.append(
-        ("spy", expiry)
-    )
+    collector.ensure_spy_option_plan = lambda rows, *, expiry: calls.append(("spy", expiry))
     collector.slow_poll_start_due = lambda: True
     collector.rotate_options = lambda: calls.append(("rotate", None))
-    patch_stream(monkeypatch, "lifecycle_has_qualification_budget", lambda *_args, **_kwargs: True,
+    patch_stream(
+        monkeypatch,
+        "lifecycle_has_qualification_budget",
+        lambda *_args, **_kwargs: True,
     )
 
     rows: list[VerifyRow] = []
@@ -274,16 +284,15 @@ def test_subscription_lifecycle_rotates_when_slow_poll_is_not_due(monkeypatch) -
     collector = object.__new__(StreamCollector)
     collector.option_plan = SimpleNamespace(expiry="20260710")
     calls: list[tuple[str, object]] = []
-    collector.advance_slow_poll = lambda **kwargs: calls.append(
-        ("slow", kwargs["allow_start"])
-    )
+    collector.advance_slow_poll = lambda **kwargs: calls.append(("slow", kwargs["allow_start"]))
     collector.ensure_option_plan = lambda rows: calls.append(("option", rows))
-    collector.ensure_spy_option_plan = lambda rows, *, expiry: calls.append(
-        ("spy", expiry)
-    )
+    collector.ensure_spy_option_plan = lambda rows, *, expiry: calls.append(("spy", expiry))
     collector.slow_poll_start_due = lambda: False
     collector.rotate_options = lambda: calls.append(("rotate", None))
-    patch_stream(monkeypatch, "lifecycle_has_qualification_budget", lambda *_args, **_kwargs: True,
+    patch_stream(
+        monkeypatch,
+        "lifecycle_has_qualification_budget",
+        lambda *_args, **_kwargs: True,
     )
 
     rows: list[VerifyRow] = []
@@ -302,16 +311,15 @@ def test_subscription_lifecycle_starts_no_new_work_without_budget(monkeypatch) -
     collector = object.__new__(StreamCollector)
     collector.option_plan = SimpleNamespace(expiry="20260710")
     calls: list[tuple[str, object]] = []
-    collector.advance_slow_poll = lambda **kwargs: calls.append(
-        ("slow", kwargs["allow_start"])
-    )
+    collector.advance_slow_poll = lambda **kwargs: calls.append(("slow", kwargs["allow_start"]))
     collector.ensure_option_plan = lambda rows: calls.append(("option", rows))
-    collector.ensure_spy_option_plan = lambda rows, *, expiry: calls.append(
-        ("spy", expiry)
-    )
+    collector.ensure_spy_option_plan = lambda rows, *, expiry: calls.append(("spy", expiry))
     collector.slow_poll_start_due = lambda: True
     collector.rotate_options = lambda: calls.append(("rotate", None))
-    patch_stream(monkeypatch, "lifecycle_has_qualification_budget", lambda *_args, **_kwargs: False,
+    patch_stream(
+        monkeypatch,
+        "lifecycle_has_qualification_budget",
+        lambda *_args, **_kwargs: False,
     )
 
     rows: list[VerifyRow] = []
@@ -320,6 +328,33 @@ def test_subscription_lifecycle_starts_no_new_work_without_budget(monkeypatch) -
     assert calls == [
         ("slow", False),
         ("option", rows),
+        ("slow", False),
+    ]
+
+
+def test_subscription_lifecycle_finishes_spxw_warmup_before_rth_basis_work(
+    monkeypatch,
+) -> None:
+    collector = object.__new__(StreamCollector)
+    collector.option_plan = SimpleNamespace(expiry="20260710", rotation_count=8)
+    collector.rotation_index = 0
+    calls: list[tuple[str, object]] = []
+    collector.advance_slow_poll = lambda **kwargs: calls.append(("slow", kwargs["allow_start"]))
+    collector.ensure_option_plan = lambda rows: calls.append(("option", rows))
+    collector.ensure_spy_option_plan = lambda rows, *, expiry: calls.append(("spy", expiry))
+    collector.rotate_options = lambda: calls.append(("rotate", None))
+    patch_stream(
+        monkeypatch,
+        "lifecycle_has_qualification_budget",
+        lambda *_args, **_kwargs: True,
+    )
+
+    rows: list[VerifyRow] = []
+    collector._advance_subscription_lifecycle(rows, lifecycle_started=100.0)
+
+    assert calls == [
+        ("slow", False),
+        ("rotate", None),
         ("slow", False),
     ]
 
@@ -352,18 +387,27 @@ def test_hot_flush_sleep_is_capped_for_twelve_second_reliability_budget() -> Non
 
 
 def test_subscription_outage_reason_prioritizes_lost_subscription_state() -> None:
-    assert subscription_outage_reason(
-        tws_connectivity_lost=True,
-        subscriptions_lost=False,
-    ) == "TWS upstream connectivity lost; subscription lifecycle paused"
-    assert subscription_outage_reason(
-        tws_connectivity_lost=False,
-        subscriptions_lost=True,
-    ) == "TWS restored without market-data subscriptions; rebuilding"
-    assert subscription_outage_reason(
-        tws_connectivity_lost=False,
-        subscriptions_lost=False,
-    ) is None
+    assert (
+        subscription_outage_reason(
+            tws_connectivity_lost=True,
+            subscriptions_lost=False,
+        )
+        == "TWS upstream connectivity lost; subscription lifecycle paused"
+    )
+    assert (
+        subscription_outage_reason(
+            tws_connectivity_lost=False,
+            subscriptions_lost=True,
+        )
+        == "TWS restored without market-data subscriptions; rebuilding"
+    )
+    assert (
+        subscription_outage_reason(
+            tws_connectivity_lost=False,
+            subscriptions_lost=False,
+        )
+        is None
+    )
 
 
 def test_snapshot_from_rows_can_request_provider_replace():
@@ -594,7 +638,10 @@ def _option_row(label: str, *, subscribed: bool = True) -> VerifyRow:
 
 def test_option_cache_carries_rotated_strikes_across_flushes():
     cache: dict[str, tuple[float, VerifyRow]] = {}
-    slice_a = [_option_row("option:SPXW:20260708:7350:P"), _option_row("option:SPXW:20260708:7350:C")]
+    slice_a = [
+        _option_row("option:SPXW:20260708:7350:P"),
+        _option_row("option:SPXW:20260708:7350:C"),
+    ]
     update_option_cache(cache, slice_a, now_monotonic=100.0, expiry="20260708")
 
     # Next flush: rotation moved on to another slice; 7350 must still be
@@ -696,10 +743,7 @@ def test_option_reconcile_adds_replacements_before_removing_obsolete(monkeypatch
     call_order: list[tuple[str, set[str]]] = []
 
     def fake_contracts(specs):
-        return [
-            (option_spec_label(spec), "option", object())
-            for spec in specs
-        ]
+        return [(option_spec_label(spec), "option", object()) for spec in specs]
 
     def fake_qualify(ib, contracts, *, qualify=False):
         labels = {label for label, _, _ in contracts}
@@ -762,9 +806,15 @@ def test_option_reconcile_partial_failure_keeps_accepted_hot_plan(monkeypatch) -
     collector.hot_subs = old_subs.copy()
     collector.option_plan = old_plan
     collector.rotation_index = 0
-    patch_stream(monkeypatch, "option_contracts_from_specs", lambda specs: [(option_spec_label(spec), "option", object()) for spec in specs],
+    patch_stream(
+        monkeypatch,
+        "option_contracts_from_specs",
+        lambda specs: [(option_spec_label(spec), "option", object()) for spec in specs],
     )
-    patch_stream(monkeypatch, "qualify_and_subscribe", lambda ib, contracts, qualify=False: {
+    patch_stream(
+        monkeypatch,
+        "qualify_and_subscribe",
+        lambda ib, contracts, qualify=False: {
             label: (
                 None,
                 VerifyRow(label=label, kind=kind, symbol="SPX", subscribed=False),
@@ -882,9 +932,15 @@ def test_option_reconcile_correlates_async_rejection_to_added_request(monkeypatc
             collector._on_error(501, 101, "max tickers", None)
 
     collector.ib = FakeIB()
-    patch_stream(monkeypatch, "option_contracts_from_specs", lambda specs: [(option_spec_label(spec), "option", object()) for spec in specs],
+    patch_stream(
+        monkeypatch,
+        "option_contracts_from_specs",
+        lambda specs: [(option_spec_label(spec), "option", object()) for spec in specs],
     )
-    patch_stream(monkeypatch, "qualify_and_subscribe", lambda ib, contracts, qualify=False: {
+    patch_stream(
+        monkeypatch,
+        "qualify_and_subscribe",
+        lambda ib, contracts, qualify=False: {
             label: (
                 SimpleNamespace(contract=contract),
                 VerifyRow(
@@ -1031,7 +1087,10 @@ def test_option_reconcile_restores_released_coverage_after_sync_failure(monkeypa
             for label, kind, contract in contracts
         }
 
-    patch_stream(monkeypatch, "option_contracts_from_specs", lambda specs: [(option_spec_label(spec), "option", object()) for spec in specs],
+    patch_stream(
+        monkeypatch,
+        "option_contracts_from_specs",
+        lambda specs: [(option_spec_label(spec), "option", object()) for spec in specs],
     )
     patch_stream(monkeypatch, "qualify_and_subscribe", fake_qualify)
     patch_stream(monkeypatch, "cancel_subscriptions", lambda *args: None)
@@ -1117,6 +1176,54 @@ def test_base_request_id_rejection_marks_session_for_reconnect() -> None:
     assert collector.subscription_health_failed is True
 
 
+def test_competing_session_rejection_fails_base_setup_immediately() -> None:
+    collector = object.__new__(StreamCollector)
+    collector.errors = []
+    collector.subscription_rejection_sequence = 0
+    collector.subscription_rejection_log = []
+    collector.subscription_rows_by_req_id = {}
+    collector.subscription_lane_by_req_id = {}
+    collector.subscription_health_failed = False
+    collector.qualified_option_contracts = {}
+    collector.farm_health = SimpleNamespace(observe=lambda *args: None)
+    row = VerifyRow(
+        label="future:ES",
+        kind="future",
+        symbol="ES",
+        subscribed=True,
+        request_id=19,
+    )
+    collector._register_subscription_rows(
+        {"future:ES": (SimpleNamespace(contract=object()), row)},
+        lane="base",
+    )
+
+    collector._on_error(19, 10197, "No market data during competing live session", None)
+
+    assert row.subscribed is False
+    assert collector.subscription_health_failed is True
+    with pytest.raises(RuntimeError, match="priority_anchor_wait"):
+        collector._raise_if_subscription_setup_interrupted(
+            0,
+            phase="priority_anchor_wait",
+        )
+
+
+def test_competing_session_rejection_is_session_wide_before_request_registration() -> None:
+    collector = object.__new__(StreamCollector)
+    collector.errors = []
+    collector.subscription_rejection_sequence = 0
+    collector.subscription_rejection_log = []
+    collector.subscription_rows_by_req_id = {}
+    collector.subscription_lane_by_req_id = {}
+    collector.subscription_health_failed = False
+    collector.farm_health = SimpleNamespace(observe=lambda *args: None)
+
+    collector._on_error(991, 10197, "No market data during competing live session", None)
+
+    assert collector.subscription_health_failed is True
+
+
 def test_teardown_clears_prior_session_errors(monkeypatch) -> None:
     collector = object.__new__(StreamCollector)
     collector.ib = SimpleNamespace(isConnected=lambda: False)
@@ -1136,7 +1243,10 @@ def test_teardown_clears_prior_session_errors(monkeypatch) -> None:
         )
     ]
     discard_calls: list[dict[str, object]] = []
-    patch_stream(monkeypatch, "discard_subscriptions", lambda _ib, subscriptions: discard_calls.append(subscriptions) or True,
+    patch_stream(
+        monkeypatch,
+        "discard_subscriptions",
+        lambda _ib, subscriptions: discard_calls.append(subscriptions) or True,
     )
 
     def unexpected_cancel(*args) -> bool:
@@ -1177,7 +1287,10 @@ def test_base_rejection_during_subscription_is_reconciled_after_registration(
     collector.slow_qualified_contracts = {}
     collector.slow_unresolved_contracts = set()
 
-    patch_stream(monkeypatch, "build_base_contracts", lambda _settings: [
+    patch_stream(
+        monkeypatch,
+        "build_base_contracts",
+        lambda _settings: [
             ("index:SPX", "index", object()),
             ("stock:SPY", "stock", object()),
         ],
@@ -1208,7 +1321,10 @@ def test_base_rejection_during_subscription_is_reconciled_after_registration(
             ),
         }
 
-    patch_stream(monkeypatch, "qualify_and_subscribe", subscribe_with_early_rejection,
+    patch_stream(
+        monkeypatch,
+        "qualify_and_subscribe",
+        subscribe_with_early_rejection,
     )
     patch_stream(monkeypatch, "log_event", lambda *args: None)
 
@@ -1253,7 +1369,10 @@ def test_base_subscription_rebuilds_if_connectivity_changes_during_setup(
     collector.slow_qualified_contracts = {}
     collector.slow_unresolved_contracts = set()
 
-    patch_stream(monkeypatch, "build_base_contracts", lambda _settings: [("index:SPX", "index", object())],
+    patch_stream(
+        monkeypatch,
+        "build_base_contracts",
+        lambda _settings: [("index:SPX", "index", object())],
     )
 
     def subscribe_across_outage(*args, **kwargs):
@@ -1272,7 +1391,10 @@ def test_base_subscription_rebuilds_if_connectivity_changes_during_setup(
             )
         }
 
-    patch_stream(monkeypatch, "qualify_and_subscribe", subscribe_across_outage,
+    patch_stream(
+        monkeypatch,
+        "qualify_and_subscribe",
+        subscribe_across_outage,
     )
     patch_stream(monkeypatch, "log_event", lambda *args: None)
 
@@ -1449,7 +1571,10 @@ def test_established_but_unhealthy_sessions_keep_reconnect_backoff(monkeypatch) 
     runtime.sleep = stop_after_two_delays
     patch_stream(monkeypatch, "persist_state_only", lambda *args: None)
     patch_stream(monkeypatch, "log_event", lambda *args: None)
-    patch_stream(monkeypatch, "probe_data_plane", lambda *args: SimpleNamespace(ok=True, to_log_event=lambda: {}),
+    patch_stream(
+        monkeypatch,
+        "probe_data_plane",
+        lambda *args: SimpleNamespace(ok=True, to_log_event=lambda: {}),
     )
 
     assert runtime.run() == 0
@@ -1512,7 +1637,8 @@ def test_teardown_clears_option_cache(monkeypatch) -> None:
     collector.slow_scheduler = None
     collector.slow_qualified_contracts = {}
     collector.slow_unresolved_contracts = set()
-    collector.qualified_option_contracts = {}
+    qualified = ("option:SPXW:20260711:6900:C", "option", object())
+    collector.qualified_option_contracts = {qualified[0]: qualified}
     collector.option_plan = None
     collector.spy_plan_key = None
     collector.spy_retry_at = 0.0
@@ -1529,14 +1655,64 @@ def test_teardown_clears_option_cache(monkeypatch) -> None:
         old.label: (100.0, old),
         "option:SPXW:20260711:6900:P": (100.0, replace_row(old, "option:SPXW:20260711:6900:P")),
     }
-    patch_stream(monkeypatch, "discard_subscriptions", lambda *_args, **_kwargs: True,
+    patch_stream(
+        monkeypatch,
+        "discard_subscriptions",
+        lambda *_args, **_kwargs: True,
     )
-    patch_stream(monkeypatch, "cancel_subscriptions", lambda *_args, **_kwargs: True,
+    patch_stream(
+        monkeypatch,
+        "cancel_subscriptions",
+        lambda *_args, **_kwargs: True,
     )
 
     collector.teardown()
 
     assert collector.option_cache == {}
+    assert collector.qualified_option_contracts == {qualified[0]: qualified}
+
+
+def test_priority_prime_waits_for_fresh_es_then_builds_spxw_plan(monkeypatch) -> None:
+    collector = object.__new__(StreamCollector)
+    now = datetime.now(tz=timezone.utc)
+    row = VerifyRow(
+        label="future:ES",
+        kind="future",
+        symbol="ES",
+        subscribed=True,
+        market_data_type=1,
+        last=7600.0,
+        ticker_time=now.isoformat(),
+        stale=False,
+    )
+    collector.base_subs = {"future:ES": (SimpleNamespace(), row)}
+    collector.hot_subs = {}
+    collector.option_plan = None
+    collector.ibkr_settings = SimpleNamespace(
+        quote_wait_seconds=1.0,
+        stale_after_seconds=10.0,
+        slow_index_stale_after_seconds=60.0,
+        slow_index_labels=frozenset(),
+    )
+    collector.subscription_health_failed = False
+    collector.tws_connectivity_loss_sequence = 0
+    collector.subscriptions_lost = False
+    collector._connectivity_changed_since = lambda _sequence: False
+    calls: list[list[VerifyRow]] = []
+
+    def ensure(rows: list[VerifyRow]) -> None:
+        calls.append(rows)
+        collector.option_plan = SimpleNamespace(expiry="20260716")
+
+    collector.ensure_option_plan = ensure
+    collector.ib = SimpleNamespace(sleep=lambda _seconds: None)
+    patch_stream(monkeypatch, "snapshot_rows", lambda *_args, **_kwargs: [row])
+    patch_stream(monkeypatch, "log_event", lambda *_args, **_kwargs: None)
+
+    collector.prime_priority_market_data()
+
+    assert calls == [[row]]
+    assert collector.option_plan.expiry == "20260716"
 
 
 def replace_row(row: VerifyRow, label: str) -> VerifyRow:
@@ -1590,7 +1766,10 @@ def test_first_flush_after_reconnect_excludes_pre_disconnect_option_rows(monkeyp
         return SimpleNamespace(best_quote_count=len(snapshot.quotes))
 
     patch_stream(monkeypatch, "persist_provider_snapshot", capture_snapshot)
-    patch_stream(monkeypatch, "snapshot_rows", lambda subscriptions, *_args, **_kwargs: [row for _, row in subscriptions.values()],
+    patch_stream(
+        monkeypatch,
+        "snapshot_rows",
+        lambda subscriptions, *_args, **_kwargs: [row for _, row in subscriptions.values()],
     )
 
     collector.flush()
@@ -1659,7 +1838,10 @@ def test_flush_marks_all_rows_stale_during_tws_connectivity_loss(monkeypatch) ->
         return SimpleNamespace(best_quote_count=len(snapshot.quotes))
 
     patch_stream(monkeypatch, "persist_provider_snapshot", capture_snapshot)
-    patch_stream(monkeypatch, "snapshot_rows", lambda subscriptions, *_args, **_kwargs: [row for _, row in subscriptions.values()],
+    patch_stream(
+        monkeypatch,
+        "snapshot_rows",
+        lambda subscriptions, *_args, **_kwargs: [row for _, row in subscriptions.values()],
     )
 
     collector.flush()
@@ -1696,10 +1878,16 @@ def test_session_loop_reconnect_path_persists_unavailable(monkeypatch) -> None:
             return True
 
     persisted: list[object] = []
-    patch_stream(monkeypatch, "persist_state_only", lambda state, _storage: persisted.append(state),
+    patch_stream(
+        monkeypatch,
+        "persist_state_only",
+        lambda state, _storage: persisted.append(state),
     )
     patch_stream(monkeypatch, "log_event", lambda _event: None)
-    patch_stream(monkeypatch, "has_competing_session_error", lambda _errors: False,
+    patch_stream(
+        monkeypatch,
+        "has_competing_session_error",
+        lambda _errors: False,
     )
 
     runtime = StreamRuntime(
@@ -1720,7 +1908,13 @@ def test_session_loop_reconnect_path_persists_unavailable(monkeypatch) -> None:
 
 
 def test_quote_to_dict_round_trips_source_session() -> None:
-    from spx_spark.marketdata import InstrumentId, MarketDataQuality, Provider, Quote, quote_from_dict
+    from spx_spark.marketdata import (
+        InstrumentId,
+        MarketDataQuality,
+        Provider,
+        Quote,
+        quote_from_dict,
+    )
 
     now = datetime(2026, 7, 11, 14, 0, tzinfo=timezone.utc)
     with_session = Quote(
@@ -1772,7 +1966,10 @@ def test_flush_stamps_connection_generation_on_quotes(monkeypatch) -> None:
         return SimpleNamespace(best_quote_count=len(snapshot.quotes))
 
     patch_stream(monkeypatch, "persist_provider_snapshot", capture_snapshot)
-    patch_stream(monkeypatch, "snapshot_rows", lambda subscriptions, *_args, **_kwargs: [row for _, row in subscriptions.values()],
+    patch_stream(
+        monkeypatch,
+        "snapshot_rows",
+        lambda subscriptions, *_args, **_kwargs: [row for _, row in subscriptions.values()],
     )
 
     collector.flush()
@@ -1797,7 +1994,10 @@ def test_flush_stamps_connection_generation_on_quotes(monkeypatch) -> None:
     )
     patch_stream(monkeypatch, "connect_market_data_only", fake_connect)
     patch_stream(monkeypatch, "log_event", lambda _event: None)
-    patch_stream(monkeypatch, "replace_client_id", lambda settings, client_id: settings,
+    patch_stream(
+        monkeypatch,
+        "replace_client_id",
+        lambda settings, client_id: settings,
     )
     collector.market_data_allowed = lambda: True
     before = collector.connection_generation
@@ -1851,7 +2051,10 @@ def test_flush_reports_outage_while_farm_not_ready(monkeypatch) -> None:
         return SimpleNamespace(best_quote_count=len(snapshot.quotes))
 
     patch_stream(monkeypatch, "persist_provider_snapshot", capture_snapshot)
-    patch_stream(monkeypatch, "snapshot_rows", lambda subscriptions, *_args, **_kwargs: [row for _, row in subscriptions.values()],
+    patch_stream(
+        monkeypatch,
+        "snapshot_rows",
+        lambda subscriptions, *_args, **_kwargs: [row for _, row in subscriptions.values()],
     )
     patch_stream(monkeypatch, "log_event", lambda _event: None)
 

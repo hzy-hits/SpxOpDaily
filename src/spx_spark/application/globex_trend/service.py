@@ -17,9 +17,10 @@ from spx_spark.application.globex_trend.state import (
     save_trend_state,
     trend_state_path,
 )
-from spx_spark.config import StorageSettings
+from spx_spark.config import NotificationSettings, StorageSettings
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 from spx_spark.marketdata import MarketDataQuality, Provider, Quote, as_utc
+from spx_spark.notifier import notify_payload
 from spx_spark.settings import load_app_settings
 from spx_spark.settings.globex_trend import GlobexTrendSettings
 from spx_spark.storage import LatestState, LatestStateStore
@@ -35,7 +36,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--no-notify",
         action="store_true",
-        help="Retained for compatibility; trend transitions are context-only.",
+        help="Record trend transitions without sending human notifications.",
     )
     return parser.parse_args(argv)
 
@@ -76,15 +77,15 @@ def select_live_es(
             continue
         transport_at = as_utc(quote.last_update_at or quote.received_at)
         source_at = as_utc(
-            quote.quote_time
-            or quote.trade_time
-            or quote.last_update_at
-            or quote.received_at
+            quote.quote_time or quote.trade_time or quote.last_update_at or quote.received_at
         )
-        if max(
-            (now - transport_at).total_seconds(),
-            (now - source_at).total_seconds(),
-        ) <= policy.max_quote_age_seconds:
+        if (
+            max(
+                (now - transport_at).total_seconds(),
+                (now - source_at).total_seconds(),
+            )
+            <= policy.max_quote_age_seconds
+        ):
             matches.append(quote)
     if not matches:
         return None
@@ -92,10 +93,7 @@ def select_live_es(
         matches,
         key=lambda quote: (
             as_utc(
-                quote.quote_time
-                or quote.trade_time
-                or quote.last_update_at
-                or quote.received_at
+                quote.quote_time or quote.trade_time or quote.last_update_at or quote.received_at
             ),
             -provider_rank[quote.provider],
         ),
@@ -127,7 +125,7 @@ def alert_from_event(event: dict[str, Any]) -> Alert:
         f"当前路径判断：{direction}；{session_context}这是趋势状态切换，不是自动下单。"
     )
     return Alert(
-        severity="info",
+        severity="high",
         kind="globex_trend_transition",
         instrument_id="future:ES",
         title=f"ES {session_label} {REGIME_LABELS_CN.get(target, target)}确认",
@@ -135,7 +133,7 @@ def alert_from_event(event: dict[str, Any]) -> Alert:
         provider=str(event.get("provider") or ""),
         quality="live",
         value=float(event["price"]),
-        research_only=True,
+        research_only=False,
         source_gate="globex_trend_machine",
         dedup_group=str(event["event_id"]),
         event_id=str(event["event_id"]),
@@ -172,10 +170,7 @@ def run(
         else:
             path = trend_state_path(storage.data_root)
             source_at = as_utc(
-                quote.quote_time
-                or quote.trade_time
-                or quote.last_update_at
-                or quote.received_at
+                quote.quote_time or quote.trade_time or quote.last_update_at or quote.received_at
             )
             with locked_trend_state(path):
                 state = load_trend_state(path)
@@ -188,9 +183,7 @@ def run(
                     source_at=source_at,
                     policy=policy,
                 )
-                # Trend changes feed market context and scheduled summaries.
-                # They are not a human notification queue or a trade signal.
-                state["pending_event"] = None
+                pending = pending_event(state, now=evaluation_now, policy=policy)
                 save_trend_state(path, state)
             output.update(
                 {
@@ -200,11 +193,35 @@ def run(
                     "metrics": state.get("metrics"),
                     "transition": transition,
                     "provider": quote.provider.value,
-                    "notification_policy": "context_only",
+                    "notification_policy": "direct_market_warning",
                 }
             )
-            if transition is not None:
-                output["context_event"] = alert_from_event(transition).to_dict()
+            if pending is not None and not args.no_notify:
+                alert = alert_from_event(pending)
+                payload = {
+                    "created_at": evaluation_now.isoformat(),
+                    "as_of": evaluation_now.isoformat(),
+                    "alerts": [alert.to_dict()],
+                    "alert_count": 1,
+                    "globex_trend": state,
+                }
+                result = notify_payload(
+                    payload,
+                    settings=NotificationSettings.from_env(),
+                    now=evaluation_now,
+                    record_telemetry=False,
+                )
+                output["notification"] = result.to_dict()
+                if alert.event_id in set(result.acknowledged_event_ids):
+                    with locked_trend_state(path):
+                        latest_state = load_trend_state(path)
+                        latest_pending = latest_state.get("pending_event")
+                        if (
+                            isinstance(latest_pending, dict)
+                            and latest_pending.get("event_id") == alert.event_id
+                        ):
+                            latest_state["pending_event"] = None
+                            save_trend_state(path, latest_state)
     if args.json:
         print(json.dumps(output, sort_keys=True))
     return 0 if output["ok"] else 1
