@@ -47,6 +47,9 @@ def test_confirmed_path_requires_all_gates_before_trade_ready() -> None:
     assert intent["entry_limit"] == pytest.approx(10.1)
     assert intent["invalidation_spx"] == 7547.0
     assert intent["target_spx"] == 7575.0
+    assert intent["remaining_target_room_points"] == 21.0
+    assert intent["remaining_reward_risk"] == 3.0
+    assert intent["expires_at"] == (NOW + timedelta(seconds=20)).isoformat()
     assert intent["automatic_ordering"] is False
 
 
@@ -82,6 +85,34 @@ def test_pending_filter_and_opposing_regime_fail_closed() -> None:
     assert intent["status"] == "blocked"
     assert "breakout_filter_not_supported" in intent["block_reasons"]
     assert "regime_direction_conflict" in intent["block_reasons"]
+
+
+def test_confirmed_session_recovery_blocks_opposite_single_level_signal() -> None:
+    market, options, latest, context, repricing = _ready_inputs()
+    context = DecisionContext(
+        **{
+            **context.__dict__,
+            "session_episode": {
+                "phase": "recovery",
+                "reversal_direction": "down",
+                "break_level": 7560.0,
+            },
+        }
+    )
+
+    intent = evaluate_trade_intent(
+        context,
+        market,
+        options,
+        latest,
+        repricing,
+        now=NOW,
+        feature_policy=MarketFeatureSettings(),
+        order_policy=OrderMapPolicy(),
+    )
+
+    assert intent["status"] == "blocked"
+    assert "session_episode_direction_conflict" in intent["block_reasons"]
 
 
 def test_stale_es_anchor_fails_closed() -> None:
@@ -152,6 +183,33 @@ def test_live_structure_drift_from_frozen_event_fails_closed() -> None:
 
     assert intent["status"] == "blocked"
     assert "trigger_structure_drift" in intent["block_reasons"]
+
+
+def test_remaining_target_room_and_reward_risk_fail_closed() -> None:
+    market, options, latest, context, repricing = _ready_inputs()
+    context = DecisionContext(
+        **{
+            **context.__dict__,
+            "level_decision": {**context.level_decision, "spot": 7574.0},
+        }
+    )
+
+    intent = evaluate_trade_intent(
+        context,
+        market,
+        options,
+        latest,
+        repricing,
+        now=NOW,
+        feature_policy=MarketFeatureSettings(),
+        order_policy=OrderMapPolicy(),
+    )
+
+    assert intent["status"] == "blocked"
+    assert intent["remaining_target_room_points"] == 1.0
+    assert intent["remaining_reward_risk"] == pytest.approx(1.0 / 27.0)
+    assert "remaining_target_room_insufficient" in intent["block_reasons"]
+    assert "remaining_reward_risk_insufficient" in intent["block_reasons"]
 
 
 def test_intent_identity_is_semantic_across_rearmed_event_ids() -> None:
@@ -296,9 +354,7 @@ def test_disabled_notification_does_not_run_writer_or_hold_delivery_lease(
     result = process_trade_intent(storage, intent, now=NOW, settings=settings)
 
     assert result["reason"] == "notification_disabled"
-    state = json.loads(
-        (tmp_path / "latest" / "trade_intent_delivery_state.json").read_text()
-    )
+    state = json.loads((tmp_path / "latest" / "trade_intent_delivery_state.json").read_text())
     assert state["inflight"] == {}
 
 
@@ -308,8 +364,7 @@ def test_invalidation_explicitly_rearms_semantic_delivery(tmp_path, monkeypatch)
         "intent_id": "intent:semantic",
         "semantic_scope": "2026-07-14|level_breakout_call|7550.0000",
         "semantic_key": (
-            "2026-07-14|level_breakout_call|7550.0000|"
-            "option:SPX:SPXW:20260714:7550:C"
+            "2026-07-14|level_breakout_call|7550.0000|option:SPX:SPXW:20260714:7550:C"
         ),
         "event_id": "level:first",
         "phase": "confirmed",

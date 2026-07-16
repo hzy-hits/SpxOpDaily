@@ -7,6 +7,28 @@ from enum import StrEnum
 from typing import Any, Mapping
 
 
+STATUS_BRIEF_SYSTEM_PROMPT = "\n".join(
+    (
+        "你是 SPX 盘中决策便签的事实编辑器。代码已经完成方向、状态机和执行门控裁决，你只负责压缩表达。",
+        "第一屏必须依次回答：当前偏向、现在是否进场、唯一确认条件、明确证伪条件。不得用指标罗列代替结论。",
+        "只能使用模板中已经出现的数字；previous_push 只用于判断剧本维持或有变，禁止引用上一条的价格或自行计算新数字。",
+        "TradeReady 之外不得写买入、开仓、挂单或追价；PAUSED 必须明确说明门控失败原因，不能伪装成普通观望。",
+        "不要复述完整 Greeks、墙位阶梯、风险中性分布或内部 JSON 字段。输出简洁中文，保留模板首行。",
+    )
+)
+
+SESSION_EPISODE_PROMPT_RULE = (
+    "session_episode 是跨单个 wall/flip 事件保留的当日结构路径。优先读取 break_direction、break_level、"
+    "extreme_spot、reclaim_at、recovery_ratio 和 phase；v_reversal_confirmed/recovery 可用于压制与整段路径"
+    "相反的单点追单，但它仍是行情形态告警，不是订单、成交或持仓。trade_candidate 只表示显示 ask 是否触及"
+    "参考限价，broker_order_state=not_connected 时严禁写成已挂单、已成交或已撤单。"
+)
+
+_ACTIVE_PATH_PHASES = frozenset(
+    {"BREAK_PENDING", "REJECT_PENDING", "ACCEPTED", "REJECTED", "RETEST", "CONFIRMED"}
+)
+
+
 class GuidanceAction(StrEnum):
     TRADE_READY = "trade_ready"
     WAIT_FOR_TRIGGER = "wait_for_trigger"
@@ -67,8 +89,8 @@ def build_decision_guidance(payload: Mapping[str, Any]) -> DecisionGuidance:
             mean_reversion_score=reversion_score,
             action=GuidanceAction.PAUSED,
             action_text=f"暂停新开仓：{_reason_label(gate_reason)}",
-            trigger_text=_trigger_text(mode, direction, levels),
-            invalidation_text=_invalidation_text(mode, direction, levels),
+            trigger_text=_trigger_text(mode, direction, levels, decision),
+            invalidation_text=_invalidation_text(mode, direction, levels, decision),
             gate_reason=gate_reason,
         )
 
@@ -78,9 +100,9 @@ def build_decision_guidance(payload: Mapping[str, Any]) -> DecisionGuidance:
         trend_score=trend_score,
         mean_reversion_score=reversion_score,
         action=GuidanceAction.WAIT_FOR_TRIGGER,
-        action_text=_waiting_action(decision, intent),
-        trigger_text=_trigger_text(mode, direction, levels),
-        invalidation_text=_invalidation_text(mode, direction, levels),
+        action_text=_waiting_action(decision, intent, mode=mode, direction=direction),
+        trigger_text=_trigger_text(mode, direction, levels, decision),
+        invalidation_text=_invalidation_text(mode, direction, levels, decision),
         gate_reason=None,
     )
 
@@ -115,8 +137,23 @@ def _gate_reason(
     return None
 
 
-def _waiting_action(decision: Mapping[str, Any], intent: Mapping[str, Any]) -> str:
+def _waiting_action(
+    decision: Mapping[str, Any],
+    intent: Mapping[str, Any],
+    *,
+    mode: str,
+    direction: str,
+) -> str:
     phase = str(decision.get("phase") or "far").upper()
+    local_direction = _decision_direction(decision)
+    if (
+        phase in _ACTIVE_PATH_PHASES
+        and mode == "trending"
+        and local_direction in {"up", "down"}
+        and direction in {"up", "down"}
+        and local_direction != direction
+    ):
+        return f"当前不进场；趋势偏{_direction_cn(direction)}与局部{_path_cn(decision)}路径冲突"
     if phase == "FAR":
         return "当前不进场；等待价格进入关键位测试"
     if phase in {"APPROACHING", "TESTING"}:
@@ -128,7 +165,24 @@ def _waiting_action(decision: Mapping[str, Any], intent: Mapping[str, Any]) -> s
     return "当前不进场；等待新事件"
 
 
-def _trigger_text(mode: str, direction: str, levels: Mapping[str, float]) -> str:
+def _trigger_text(
+    mode: str,
+    direction: str,
+    levels: Mapping[str, float],
+    decision: Mapping[str, Any],
+) -> str:
+    phase = str(decision.get("phase") or "far").upper()
+    thesis = str(decision.get("thesis") or "none")
+    if phase in _ACTIVE_PATH_PHASES and thesis in {"fade", "breakout"}:
+        level = _number(decision.get("level"))
+        kind = _level_kind_cn(str(decision.get("level_kind") or ""))
+        path = "REJECTED→RETEST→CONFIRMED" if thesis == "fade" else "ACCEPTED→RETEST→CONFIRMED"
+        option = "Call" if _decision_direction(decision) == "up" else "Put"
+        return (
+            f"{kind} {level:g} 需完成 {path}；之后才评估 {option}"
+            if level is not None
+            else f"当前路径需完成 {path}"
+        )
     put_wall = levels.get("put_wall")
     flip_low = levels.get("flip_low")
     flip_high = levels.get("flip_high")
@@ -151,7 +205,27 @@ def _trigger_text(mode: str, direction: str, levels: Mapping[str, float]) -> str
     return "等待关键位状态机生成方向确认"
 
 
-def _invalidation_text(mode: str, direction: str, levels: Mapping[str, float]) -> str:
+def _invalidation_text(
+    mode: str,
+    direction: str,
+    levels: Mapping[str, float],
+    decision: Mapping[str, Any],
+) -> str:
+    thesis = str(decision.get("thesis") or "none")
+    phase = str(decision.get("phase") or "far").upper()
+    level_kind = str(decision.get("level_kind") or "")
+    band = _mapping(_mapping(decision.get("level_bands")).get(level_kind))
+    local_direction = _decision_direction(decision)
+    if (
+        phase in _ACTIVE_PATH_PHASES
+        and thesis in {"fade", "breakout"}
+        and local_direction in {"up", "down"}
+    ):
+        boundary_key = "low" if local_direction == "up" else "high"
+        boundary = _number(band.get(boundary_key))
+        if boundary is not None:
+            relation = "跌破" if local_direction == "up" else "收回"
+            return f"SPX {relation} {boundary:g} 则当前{_path_cn(decision)}路径失效"
     flip_low = levels.get("flip_low")
     flip_high = levels.get("flip_high")
     if mode == "trending" and direction == "down" and flip_high is not None:
@@ -178,6 +252,37 @@ def _trade_ready_invalidation(plan: Mapping[str, Any]) -> str:
 
 def _level_condition(level: float | None, relation: str, suffix: str) -> str:
     return f"SPX {level:g} {relation}{suffix}" if level is not None else suffix.lstrip("且")
+
+
+def _decision_direction(decision: Mapping[str, Any]) -> str:
+    direction = str(decision.get("direction") or "")
+    if direction in {"up", "down"}:
+        return direction
+    thesis = str(decision.get("thesis") or "none")
+    kind = str(decision.get("level_kind") or "")
+    lower_level = kind in {"put_wall", "flip_low"}
+    if thesis == "fade":
+        return "up" if lower_level else "down"
+    if thesis == "breakout":
+        return "down" if lower_level else "up"
+    return "none"
+
+
+def _direction_cn(direction: str) -> str:
+    return "多" if direction == "up" else "空"
+
+
+def _path_cn(decision: Mapping[str, Any]) -> str:
+    return "反弹" if str(decision.get("thesis") or "") == "fade" else "突破"
+
+
+def _level_kind_cn(kind: str) -> str:
+    return {
+        "put_wall": "Put Wall",
+        "call_wall": "Call Wall",
+        "flip_low": "Flip 下沿",
+        "flip_high": "Flip 上沿",
+    }.get(kind, "关键位")
 
 
 def _levels(payload: Mapping[str, Any], decision: Mapping[str, Any]) -> dict[str, float]:

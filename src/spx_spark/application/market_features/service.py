@@ -14,6 +14,9 @@ from spx_spark.application.market_features.composition import (
     build_decision_audit,
     build_decision_context,
 )
+from spx_spark.application.market_features.confirmed_gate_audit import (
+    reconcile_confirmed_gate,
+)
 from spx_spark.application.market_features.greek_decision import build_greek_decision
 from spx_spark.application.market_features.market import (
     build_minute_market_frame,
@@ -32,6 +35,15 @@ from spx_spark.application.market_features.state import (
     load_json,
     projection_paths,
     save_json,
+)
+from spx_spark.application.market_features.session_episode import (
+    advance_session_episode,
+    record_session_episode_transition,
+)
+from spx_spark.application.market_features.trade_candidate import (
+    advance_trade_candidate,
+    gate_trade_intent,
+    virtual_entry_intent,
 )
 from spx_spark.application.market_features.trade_intent import evaluate_trade_intent
 from spx_spark.application.market_features.trade_intent_runtime import process_trade_intent
@@ -100,9 +112,7 @@ def run(argv: list[str] | None = None, *, now: datetime | None = None) -> int:
         policy=policy,
     )
     frame_samples = (
-        samples
-        if samples and samples[-1].get("at") == sample.get("at")
-        else [*samples, sample]
+        samples if samples and samples[-1].get("at") == sample.get("at") else [*samples, sample]
     )
     volume_baselines = _dict(persisted.get("volume_baselines"))
     expected_move = option_frame.volatility.get("expected_move_points_0dte")
@@ -124,11 +134,28 @@ def run(argv: list[str] | None = None, *, now: datetime | None = None) -> int:
         market_frame,
         max_sessions=policy.volume_baseline_sessions,
     )
+    raw_level_decision = load_level_decision_shadow(storage)
     level_decision = coherent_level_decision(
-        load_level_decision_shadow(storage),
+        raw_level_decision,
         expiry=option_frame.front_expiry,
         structure=option_frame.structure,
         max_level_drift_points=policy.trade_structure_drift_points,
+    )
+    previous_session_episode = _dict(persisted.get("session_episode"))
+    session_episode = advance_session_episode(
+        previous_session_episode,
+        session_id=market_frame.session_id,
+        now=evaluation_now,
+        spot=_number(option_frame.structure.get("underlier")),
+        market=market_frame,
+        options=option_frame,
+        policy=policy,
+    )
+    record_session_episode_transition(
+        storage,
+        previous_session_episode or None,
+        session_episode,
+        now=evaluation_now,
     )
     macro_event = macro_event_state(evaluation_now)
     context = build_decision_context(
@@ -138,6 +165,7 @@ def run(argv: list[str] | None = None, *, now: datetime | None = None) -> int:
         trend=trend,
         level_decision=level_decision,
         macro_event=macro_event,
+        session_episode=session_episode,
         policy=policy,
     )
     repricing = load_json(default_level_trigger_repricing_path(storage))
@@ -150,6 +178,19 @@ def run(argv: list[str] | None = None, *, now: datetime | None = None) -> int:
         now=evaluation_now,
         feature_policy=policy,
         order_policy=app.order_map,
+    )
+    trade_candidate = advance_trade_candidate(
+        storage,
+        latest,
+        trade_intent,
+        now=evaluation_now,
+    )
+    trade_intent = gate_trade_intent(trade_intent, trade_candidate)
+    confirmed_gate = reconcile_confirmed_gate(
+        storage,
+        raw_level_decision,
+        trade_intent,
+        now=evaluation_now,
     )
     contract_id = str(trade_intent.get("contract_id") or "")
     focused = build_zero_dte_greeks_reference(
@@ -179,19 +220,19 @@ def run(argv: list[str] | None = None, *, now: datetime | None = None) -> int:
         context,
         trade_intent=trade_intent,
         greek_decision=greek_decision,
+        trade_candidate=trade_candidate,
+        confirmed_gate=confirmed_gate,
     )
     intent_delivery = process_trade_intent(
         storage,
         trade_intent,
         now=evaluation_now,
     )
-    gth_signal = load_json(
-        Path(storage.data_root) / "latest" / "gth_dip_reclaim_signal.json"
-    )
+    gth_signal = load_json(Path(storage.data_root) / "latest" / "gth_dip_reclaim_signal.json")
     virtual_strategy = process_virtual_strategy(
         storage,
         latest,
-        trade_intent=trade_intent,
+        trade_intent=virtual_entry_intent(trade_candidate),
         gth_signal=gth_signal,
         option_structure=option_frame.structure,
         macro_event=macro_event,
@@ -206,6 +247,7 @@ def run(argv: list[str] | None = None, *, now: datetime | None = None) -> int:
     save_json(projections["market"], market_frame.to_dict())
     save_json(projections["option"], option_frame.to_dict())
     save_json(projections["decision"], context.to_dict())
+    save_json(projections["session_episode"], session_episode)
     if audit is not None:
         append_audit(
             storage.data_root,
@@ -221,6 +263,7 @@ def run(argv: list[str] | None = None, *, now: datetime | None = None) -> int:
             "option_history": option_history,
             "option_contracts": contracts,
             "volume_baselines": volume_baselines,
+            "session_episode": session_episode,
             "last_decision_context": context.to_dict(),
         },
     )
@@ -235,6 +278,8 @@ def run(argv: list[str] | None = None, *, now: datetime | None = None) -> int:
             "audit_appended": audit is not None,
             "trade_intent_status": trade_intent.get("status"),
             "trade_intent_delivery": intent_delivery,
+            "trade_candidate": trade_candidate,
+            "confirmed_gate": confirmed_gate,
             "virtual_strategy": virtual_strategy,
         }
     )
@@ -248,7 +293,15 @@ def _dict(value: object) -> dict[str, Any]:
 
 
 def _dict_list(value: object) -> list[dict[str, Any]]:
-    return [dict(item) for item in value or [] if isinstance(item, dict)] if isinstance(value, list) else []
+    return (
+        [dict(item) for item in value or [] if isinstance(item, dict)]
+        if isinstance(value, list)
+        else []
+    )
+
+
+def _number(value: object) -> float | None:
+    return float(value) if isinstance(value, int | float) else None
 
 
 def _seed_samples_from_trend(

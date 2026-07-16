@@ -11,6 +11,7 @@ STATE_NAME = "market_feature_state.json"
 MARKET_FRAME_NAME = "minute_market_frame.json"
 OPTION_FRAME_NAME = "option_structure_frame.json"
 DECISION_CONTEXT_NAME = "decision_context.json"
+SESSION_EPISODE_NAME = "session_episode.json"
 
 
 def feature_state_path(data_root: str) -> Path:
@@ -23,6 +24,7 @@ def projection_paths(data_root: str) -> dict[str, Path]:
         "market": root / MARKET_FRAME_NAME,
         "option": root / OPTION_FRAME_NAME,
         "decision": root / DECISION_CONTEXT_NAME,
+        "session_episode": root / SESSION_EPISODE_NAME,
     }
 
 

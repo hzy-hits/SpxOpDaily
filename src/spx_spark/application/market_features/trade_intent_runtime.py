@@ -23,6 +23,7 @@ DELIVERY_LEASE_SECONDS = 120.0
 TRADE_INTENT_SYSTEM_PROMPT = """你是 SPX 指数期权自营台的 execution trader，只负责排版一条已经通过代码硬门槛的 0DTE 交易意图。
 写成机构级 execution ticket，不是散户喊单、币圈频道、财经播报或情绪鼓动。
 不得改变方向、合约、NBBO、入场上限、失效位、目标位、有效期或最大亏损；不得补造数据。
+TradeReady 只是未连接券商订单的行情候选告警，不得写成已挂单、已成交、已持仓或已撤单。
 输出简短 Markdown，固定使用 Desk View、Execution、Risk、Targets、Timing 五部分。
 只给一个主方向；相反方向只能作为当前交易的失效条件。禁用『需要看盘、半路、不追、剧本、砸、抢、扛、顶上』等口语。
 决断体现在价格纪律和失效纪律，不得用夸张措辞制造确定性。"""
@@ -56,8 +57,7 @@ def process_trade_intent(
         state = read_json_object(state_path)
         delivered = dict(state.get("delivered") or {})
         semantic_keys = {
-            str(key): str(value)
-            for key, value in dict(state.get("semantic_keys") or {}).items()
+            str(key): str(value) for key, value in dict(state.get("semantic_keys") or {}).items()
         }
         semantic_key = str(intent.get("semantic_key") or "")
         semantic_scope = str(intent.get("semantic_scope") or "")
@@ -73,8 +73,7 @@ def process_trade_intent(
         duplicate = bool(
             intent_id
             and (
-                intent_id in delivered
-                or (semantic_key and semantic_key in semantic_keys.values())
+                intent_id in delivered or (semantic_key and semantic_key in semantic_keys.values())
             )
         )
         inflight = {
@@ -206,10 +205,12 @@ def render_trade_intent(intent: Mapping[str, object]) -> str:
             "## 风险",
             f"SPX 回到 **{_fmt(intent.get('invalidation_spx'))}** 失效　"
             f"目标 **{_fmt(intent.get('target_spx'))}**　"
+            f"剩余空间 **{_fmt(intent.get('remaining_target_room_points'))} 点**　"
+            f"收益风险比 **{_fmt(intent.get('remaining_reward_risk'))}**　"
             f"单张最大权利金 `${_fmt(intent.get('max_loss_per_contract'))}`",
             "## 时效",
             f"意图过期 `{intent.get('expires_at')}`　时间止损 `{intent.get('time_stop_at')}`",
-            "自动下单关闭，数量由人工确认。",
+            "未连接真实订单、成交或持仓状态；这是行情条件候选，数量由人工确认。",
         )
     )
 

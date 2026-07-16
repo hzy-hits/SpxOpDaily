@@ -305,15 +305,9 @@ def load_settings(
         rth_end_et=str(get("market_features.rth_end_et")),
         curb_end_et=str(get("market_features.curb_end_et")),
         min_l1_liquidity_score=float(get("market_features.min_l1_liquidity_score")),
-        l1_spread_p50_limit_bps=float(
-            get("market_features.l1_spread_p50_limit_bps")
-        ),
-        l1_spread_p90_limit_bps=float(
-            get("market_features.l1_spread_p90_limit_bps")
-        ),
-        trade_follow_through_seconds=float(
-            get("market_features.trade_follow_through_seconds")
-        ),
+        l1_spread_p50_limit_bps=float(get("market_features.l1_spread_p50_limit_bps")),
+        l1_spread_p90_limit_bps=float(get("market_features.l1_spread_p90_limit_bps")),
+        trade_follow_through_seconds=float(get("market_features.trade_follow_through_seconds")),
         trade_follow_through_min_points=float(
             get("market_features.trade_follow_through_min_points")
         ),
@@ -327,21 +321,25 @@ def load_settings(
         trade_market_anchor_max_age_seconds=float(
             get("market_features.trade_market_anchor_max_age_seconds")
         ),
-        trade_structure_drift_points=float(
-            get("market_features.trade_structure_drift_points")
-        ),
-        trade_entry_spread_fraction=float(
-            get("market_features.trade_entry_spread_fraction")
-        ),
+        trade_structure_drift_points=float(get("market_features.trade_structure_drift_points")),
+        trade_entry_spread_fraction=float(get("market_features.trade_entry_spread_fraction")),
         trade_intent_ttl_seconds=float(get("market_features.trade_intent_ttl_seconds")),
+        trade_entry_window_seconds=float(get("market_features.trade_entry_window_seconds")),
         trade_invalidation_buffer_points=float(
             get("market_features.trade_invalidation_buffer_points")
         ),
         trade_target_em_fraction=float(get("market_features.trade_target_em_fraction")),
+        trade_min_target_room_points=float(get("market_features.trade_min_target_room_points")),
+        trade_min_reward_risk=float(get("market_features.trade_min_reward_risk")),
         trade_time_stop_minutes=int(get("market_features.trade_time_stop_minutes")),
-        greek_decision_min_coverage=float(
-            get("market_features.greek_decision_min_coverage")
+        session_episode_enabled=bool(get("market_features.session_episode_enabled")),
+        session_break_buffer_points=float(get("market_features.session_break_buffer_points")),
+        session_extreme_extension_points=float(
+            get("market_features.session_extreme_extension_points")
         ),
+        session_reclaim_hold_seconds=float(get("market_features.session_reclaim_hold_seconds")),
+        session_recovery_ratio=float(get("market_features.session_recovery_ratio")),
+        greek_decision_min_coverage=float(get("market_features.greek_decision_min_coverage")),
         greek_target_delta_min=float(get("market_features.greek_target_delta_min")),
         greek_target_delta_max=float(get("market_features.greek_target_delta_max")),
         greek_max_theta_15m_loss_fraction=float(
@@ -352,19 +350,13 @@ def load_settings(
         ),
         greek_delta_saturation=float(get("market_features.greek_delta_saturation")),
         virtual_strategy_enabled=bool(get("market_features.virtual_strategy_enabled")),
-        virtual_profit_take_fraction=float(
-            get("market_features.virtual_profit_take_fraction")
-        ),
+        virtual_profit_take_fraction=float(get("market_features.virtual_profit_take_fraction")),
         virtual_gamma_retention_fraction=float(
             get("market_features.virtual_gamma_retention_fraction")
         ),
-        virtual_iv_drop_vol_points=float(
-            get("market_features.virtual_iv_drop_vol_points")
-        ),
+        virtual_iv_drop_vol_points=float(get("market_features.virtual_iv_drop_vol_points")),
         virtual_wall_touch_points=float(get("market_features.virtual_wall_touch_points")),
-        virtual_gth_time_stop_minutes=int(
-            get("market_features.virtual_gth_time_stop_minutes")
-        ),
+        virtual_gth_time_stop_minutes=int(get("market_features.virtual_gth_time_stop_minutes")),
     )
 
     ibkr = IbkrSettingsSlice(
@@ -400,12 +392,8 @@ def load_settings(
                 get("schwab.collection.cadence.off_hours_confirmation_chain_seconds")
             ),
             gth_quote_seconds=float(get("schwab.collection.cadence.gth_quote_seconds")),
-            gth_front_chain_seconds=float(
-                get("schwab.collection.cadence.gth_front_chain_seconds")
-            ),
-            gth_next_chain_seconds=float(
-                get("schwab.collection.cadence.gth_next_chain_seconds")
-            ),
+            gth_front_chain_seconds=float(get("schwab.collection.cadence.gth_front_chain_seconds")),
+            gth_next_chain_seconds=float(get("schwab.collection.cadence.gth_next_chain_seconds")),
             gth_confirmation_chain_seconds=float(
                 get("schwab.collection.cadence.gth_confirmation_chain_seconds")
             ),
@@ -546,31 +534,17 @@ def load_settings(
         gth_dip_reclaim_enabled=bool(get("intraday_shock.gth_dip_reclaim_enabled")),
         gth_short_horizon_seconds=int(get("intraday_shock.gth_short_horizon_seconds")),
         gth_long_horizon_seconds=int(get("intraday_shock.gth_long_horizon_seconds")),
-        gth_short_min_drawdown_points=float(
-            get("intraday_shock.gth_short_min_drawdown_points")
-        ),
-        gth_long_min_drawdown_points=float(
-            get("intraday_shock.gth_long_min_drawdown_points")
-        ),
-        gth_short_min_descent_seconds=int(
-            get("intraday_shock.gth_short_min_descent_seconds")
-        ),
-        gth_long_min_descent_seconds=int(
-            get("intraday_shock.gth_long_min_descent_seconds")
-        ),
-        gth_expected_move_fraction=float(
-            get("intraday_shock.gth_expected_move_fraction")
-        ),
+        gth_short_min_drawdown_points=float(get("intraday_shock.gth_short_min_drawdown_points")),
+        gth_long_min_drawdown_points=float(get("intraday_shock.gth_long_min_drawdown_points")),
+        gth_short_min_descent_seconds=int(get("intraday_shock.gth_short_min_descent_seconds")),
+        gth_long_min_descent_seconds=int(get("intraday_shock.gth_long_min_descent_seconds")),
+        gth_expected_move_fraction=float(get("intraday_shock.gth_expected_move_fraction")),
         gth_reclaim_fraction=float(get("intraday_shock.gth_reclaim_fraction")),
         gth_min_reclaim_points=float(get("intraday_shock.gth_min_reclaim_points")),
         gth_confirm_samples=int(get("intraday_shock.gth_confirm_samples")),
         gth_confirm_hold_seconds=int(get("intraday_shock.gth_confirm_hold_seconds")),
-        gth_session_warmup_seconds=int(
-            get("intraday_shock.gth_session_warmup_seconds")
-        ),
-        gth_max_signals_per_session=int(
-            get("intraday_shock.gth_max_signals_per_session")
-        ),
+        gth_session_warmup_seconds=int(get("intraday_shock.gth_session_warmup_seconds")),
+        gth_max_signals_per_session=int(get("intraday_shock.gth_max_signals_per_session")),
         gth_cooldown_seconds=int(get("intraday_shock.gth_cooldown_seconds")),
         data_root=data_root,
     )
@@ -592,18 +566,14 @@ def load_settings(
         structure_drift_points=float(get("level_decision_shadow.structure_drift_points")),
         es_confirm_ratio=float(get("level_decision_shadow.es_confirm_ratio")),
         terminal_rearm_seconds=float(get("level_decision_shadow.terminal_rearm_seconds")),
-        structure_interval_seconds=int(
-            get("level_decision_shadow.structure_interval_seconds")
-        ),
+        structure_interval_seconds=int(get("level_decision_shadow.structure_interval_seconds")),
         structure_required_confirmations=int(
             get("level_decision_shadow.structure_required_confirmations")
         ),
         structure_band_half_width_points=float(
             get("level_decision_shadow.structure_band_half_width_points")
         ),
-        structure_switch_min_points=float(
-            get("level_decision_shadow.structure_switch_min_points")
-        ),
+        structure_switch_min_points=float(get("level_decision_shadow.structure_switch_min_points")),
         max_frozen_structure_age_sessions=int(
             get("level_decision_shadow.max_frozen_structure_age_sessions")
         ),

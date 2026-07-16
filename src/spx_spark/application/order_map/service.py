@@ -26,6 +26,7 @@ from spx_spark.application.order_map.decision_consistency import (
 )
 from spx_spark.application.order_map.delivery import send_order_map
 from spx_spark.application.order_map.es_volume_attach import attach_es_volume_signal
+from spx_spark.application.order_map.guidance import STATUS_BRIEF_SYSTEM_PROMPT
 from spx_spark.application.order_map.hl_volume import (
     attach_hl_volume_signal,
     default_hl_volume_sample_path,
@@ -39,7 +40,6 @@ from spx_spark.application.order_map.level_trigger_repricing import (
 from spx_spark.application.order_map.models import SHANGHAI_TZ
 from spx_spark.application.order_map.prompts import (
     GLOBEX_CONTEXT_SYSTEM_PROMPT,
-    STATUS_BRIEF_SYSTEM_PROMPT,
     actionable_writer_output_valid,
     build_status_prompt,
     globex_writer_output_valid,

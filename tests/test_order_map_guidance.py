@@ -96,6 +96,32 @@ def test_guidance_emits_one_trade_ready_plan() -> None:
     assert guidance.invalidation_text == "SPX 7565 失效；目标 7545"
 
 
+def test_guidance_exposes_trend_and_local_path_conflict() -> None:
+    payload = _payload()
+    payload["level_decision"] = {
+        "phase": "reject_pending",
+        "thesis": "fade",
+        "level_kind": "put_wall",
+        "level": 7550.0,
+        "quality_ok": True,
+        "snapshot_consistent": True,
+        "level_bands": {"put_wall": {"low": 7545.0, "high": 7555.0}},
+    }
+
+    guidance = build_decision_guidance(payload)
+
+    assert guidance.action_text == "当前不进场；趋势偏空与局部反弹路径冲突"
+    assert guidance.trigger_text == (
+        "Put Wall 7550 需完成 REJECTED→RETEST→CONFIRMED；之后才评估 Call"
+    )
+    assert guidance.invalidation_text == "SPX 跌破 7545 则当前反弹路径失效"
+
+    payload["level_decision"]["phase"] = "expired"  # type: ignore[index]
+    expired = build_decision_guidance(payload)
+    assert expired.action_text == "当前不进场；等待新事件"
+    assert expired.trigger_text == "SPX 7560 下方保持且状态机 CONFIRMED 后才评估 Put"
+
+
 def test_status_first_screen_is_guidance_and_far_delivery_stays_compact() -> None:
     payload = _payload()
     rendered = render_status_template(payload, [], NOW)

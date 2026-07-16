@@ -19,8 +19,9 @@ def coherent_level_decision(
     """Return a decision only when it belongs to the current option surface."""
 
     row = dict(decision or {})
-    current_levels = _structure_levels(structure)
     previous_levels = _decision_levels(row)
+    frozen_structure = _uses_frozen_decision_structure(row) and bool(previous_levels)
+    current_levels = previous_levels if frozen_structure else _structure_levels(structure)
     reason = _inconsistency_reason(
         row,
         expiry=expiry,
@@ -29,6 +30,9 @@ def coherent_level_decision(
     )
     if reason is None:
         row["snapshot_consistent"] = True
+        row["snapshot_validation_source"] = (
+            "decision_frozen_structure" if frozen_structure else "live_option_frame"
+        )
         return row
 
     retain_frozen_context = not current_levels and bool(previous_levels)
@@ -53,11 +57,12 @@ def coherent_level_decision(
         "levels": contextual_levels,
         "level_bands": dict(row.get("level_bands") or {}) if retain_frozen_context else {},
         "level_source": (
-            "frozen_last_usable_structure"
-            if retain_frozen_context
-            else row.get("level_source")
+            "frozen_last_usable_structure" if retain_frozen_context else row.get("level_source")
         ),
         "snapshot_consistent": False,
+        "snapshot_validation_source": (
+            "decision_frozen_structure" if frozen_structure else "live_option_frame"
+        ),
     }
 
 
@@ -139,6 +144,9 @@ def apply_decision_projections(
     payload["regime_decision"] = context.get("regime_decision", {})
     payload["breakout_filter"] = context.get("breakout_filter", {})
     payload["trade_intent"] = context.get("trade_intent", {})
+    payload["session_episode"] = context.get("session_episode", {})
+    payload["trade_candidate"] = context.get("trade_candidate", {})
+    payload["confirmed_gate"] = context.get("confirmed_gate", {})
 
 
 def decision_context_matches_frames(
@@ -219,6 +227,11 @@ def _decision_levels(decision: Mapping[str, object]) -> dict[str, float]:
         for key in LEVEL_KEYS
         if isinstance((value := levels.get(key)), int | float)
     }
+
+
+def _uses_frozen_decision_structure(decision: Mapping[str, object]) -> bool:
+    source = str(decision.get("level_source") or "").lower()
+    return source.startswith("stable_") or "frozen" in source
 
 
 def _number(value: object) -> float | None:

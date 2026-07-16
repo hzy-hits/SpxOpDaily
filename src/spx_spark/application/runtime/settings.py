@@ -56,7 +56,7 @@ class ServiceLoopSettings:
     globex_trend_enabled: bool = False
     globex_trend_interval_seconds: int = 30
     market_features_enabled: bool = False
-    market_features_interval_seconds: int = 60
+    market_features_interval_seconds: int = 5
 
     @classmethod
     def from_app_settings(cls, app: AppSettings) -> "ServiceLoopSettings":

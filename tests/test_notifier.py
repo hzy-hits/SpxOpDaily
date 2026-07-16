@@ -2467,7 +2467,7 @@ def test_feishu_sectioned_card_converts_wall_table_to_compact_layout() -> None:
             "状态  APPROACHING（接近）",
             "",
             "## 墙位阶梯",
-            "| SPX 墙位 | 结构 | 合约 | 当前 mid | BS 触位价 | 触发后参考 |",
+            "| SPX 墙位 | 结构 | 合约 | 当前 mid | 触位情景 | 触发后参考 |",
             "| ---: | --- | --- | ---: | ---: | ---: |",
             "| 7550 | 主 Put Wall | 7550C | 23.75 | 18.22 | 15.40–18.20 |",
             "| 7535 | 次级支撑 | 7535C | 34.65 | 15.92 | 13.50–15.90 |",
@@ -2481,12 +2481,12 @@ def test_feishu_sectioned_card_converts_wall_table_to_compact_layout() -> None:
     assert [column["display_name"] for column in table["columns"]] == [
         "结构",
         "合约 / 现价",
-        "BS区间 / 触发参考",
+        "触位情景 / 触发后",
     ]
     assert table["rows"][0] == {
         "c0": "7550\n主 Put Wall",
         "c1": "7550C\n现 23.75",
-        "c2": "BS区间 18.22\n参考 15.40–18.20",
+        "c2": "触位情景 18.22\n触发后 15.40–18.20",
     }
     assert card["header"]["template"] == "orange"
 

@@ -128,9 +128,7 @@ def evaluate_trade_intent(
     elif follow_move < follow_threshold:
         reasons.append("follow_through_distance_pending")
 
-    reasons.extend(
-        item for item in context.invalidations if item in HARD_CONTEXT_INVALIDATIONS
-    )
+    reasons.extend(item for item in context.invalidations if item in HARD_CONTEXT_INVALIDATIONS)
     if context.macro_event.get("mode") == "pre_event":
         reasons.append("macro_event_pre_release_entry_block")
     reasons.extend(_direction_blockers(context, market, thesis=thesis, direction=direction))
@@ -188,6 +186,47 @@ def evaluate_trade_intent(
                 )
             )
 
+    invalidation = (
+        trigger_level - direction_sign * feature_policy.trade_invalidation_buffer_points
+        if trigger_level is not None
+        else None
+    )
+    target = (
+        _target_spx(
+            options,
+            spot=spot,
+            trigger_level=trigger_level,
+            direction=direction_sign,
+            expected_move=expected_move,
+            policy=feature_policy,
+        )
+        if spot is not None and trigger_level is not None
+        else None
+    )
+    target_room = (
+        direction_sign * (target - spot) if target is not None and spot is not None else None
+    )
+    invalidation_distance = (
+        direction_sign * (spot - invalidation)
+        if spot is not None and invalidation is not None
+        else None
+    )
+    reward_risk = (
+        target_room / invalidation_distance
+        if target_room is not None
+        and invalidation_distance is not None
+        and invalidation_distance > 0
+        else None
+    )
+    if target_room is None:
+        reasons.append("target_room_unavailable")
+    elif target_room < feature_policy.trade_min_target_room_points:
+        reasons.append("remaining_target_room_insufficient")
+    if invalidation_distance is None or invalidation_distance <= 0:
+        reasons.append("invalidation_distance_unavailable")
+    elif reward_risk is None or reward_risk < feature_policy.trade_min_reward_risk:
+        reasons.append("remaining_reward_risk_insufficient")
+
     unique_reasons = list(dict.fromkeys(reasons))
     if unique_reasons or candidate is None or quote is None or quote_gate is None:
         return {
@@ -197,6 +236,13 @@ def evaluate_trade_intent(
             "confirmation_age_seconds": confirmation_age,
             "follow_through_points": follow_move,
             "follow_through_required_points": follow_threshold,
+            "spx_spot": spot,
+            "trigger_level": trigger_level,
+            "invalidation_spx": (round(invalidation, 2) if invalidation is not None else None),
+            "target_spx": round(target, 2) if target is not None else None,
+            "remaining_target_room_points": target_room,
+            "invalidation_distance_points": invalidation_distance,
+            "remaining_reward_risk": reward_risk,
             "block_reasons": unique_reasons or ["candidate_unavailable"],
         }
 
@@ -208,16 +254,14 @@ def evaluate_trade_intent(
     entry_limit = round_to_tick(
         min(mid, bid + feature_policy.trade_entry_spread_fraction * (ask - bid))
     )
-    invalidation = trigger_level - direction_sign * feature_policy.trade_invalidation_buffer_points
-    target = _target_spx(
-        options,
-        spot=spot,
-        trigger_level=trigger_level,
-        direction=direction_sign,
-        expected_move=expected_move,
-        policy=feature_policy,
+    assert invalidation is not None
+    assert target is not None
+    intent_expires_at = now + timedelta(
+        seconds=min(
+            feature_policy.trade_entry_window_seconds,
+            feature_policy.trade_intent_ttl_seconds,
+        )
     )
-    intent_expires_at = now + timedelta(seconds=feature_policy.trade_intent_ttl_seconds)
     if event_expires_at is not None:
         intent_expires_at = min(intent_expires_at, event_expires_at)
     time_stop_at = now + timedelta(minutes=feature_policy.trade_time_stop_minutes)
@@ -247,6 +291,9 @@ def evaluate_trade_intent(
         "trigger_level": trigger_level,
         "invalidation_spx": round(invalidation, 2),
         "target_spx": round(target, 2),
+        "remaining_target_room_points": target_room,
+        "invalidation_distance_points": invalidation_distance,
+        "remaining_reward_risk": reward_risk,
         "confirmation_age_seconds": confirmation_age,
         "follow_through_points": follow_move,
         "follow_through_required_points": follow_threshold,
@@ -270,6 +317,15 @@ def _direction_blockers(
 ) -> list[str]:
     reasons: list[str] = []
     sign = 1 if direction == "up" else -1
+    episode = context.session_episode
+    episode_phase = str(episode.get("phase") or "observing")
+    episode_direction = str(episode.get("reversal_direction") or "")
+    if (
+        episode_phase in {"v_reversal_confirmed", "recovery"}
+        and episode_direction in {"up", "down"}
+        and episode_direction != direction
+    ):
+        reasons.append("session_episode_direction_conflict")
     regime = context.regime_decision
     regime_direction = str(regime.get("direction") or "none")
     if (
@@ -294,12 +350,14 @@ def _direction_blockers(
 
     price_volume = str(market.volume.get("price_volume_alignment_5m") or "unavailable")
     price_return_5m = _number(market.es.get("return_5m_points"))
-    if price_volume != "price_volume_aligned" or price_return_5m is None or price_return_5m * sign <= 0:
+    if (
+        price_volume != "price_volume_aligned"
+        or price_return_5m is None
+        or price_return_5m * sign <= 0
+    ):
         reasons.append("price_volume_not_directionally_aligned")
 
-    cross = str(
-        market.cross_asset.get("es_spy_direction_confirmation_15m") or "unavailable"
-    )
+    cross = str(market.cross_asset.get("es_spy_direction_confirmation_15m") or "unavailable")
     if DEFAULT_MARKET_CALENDAR.is_rth_open(context.as_of):
         es_return_15m = _number(market.es.get("return_15m_points"))
         if cross != "confirmed":
@@ -489,7 +547,9 @@ def _target_spx(
 def _contract_label(candidate: Mapping[str, object]) -> str:
     strike = _number(candidate.get("strike"))
     right = str(candidate.get("right") or "")
-    return f"SPXW {strike:g}{right}" if strike is not None and right else str(candidate["contract_id"])
+    return (
+        f"SPXW {strike:g}{right}" if strike is not None and right else str(candidate["contract_id"])
+    )
 
 
 def _evidence(context: DecisionContext) -> list[str]:

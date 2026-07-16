@@ -55,7 +55,7 @@ globex_trend:
 
 market_features:
   enabled: {value: true, description: Builds unified minute market, option structure and decision-context frames.}
-  interval_seconds: {value: 60, description: Runtime evaluation cadence.}
+  interval_seconds: {value: 5, description: Fast decision-gate cadence aligned with the five-second level state machine; durable feature samples remain minute-spaced.}
   sample_interval_seconds: {value: 60, description: Minimum spacing between durable feature samples.}
   max_quote_age_seconds: {value: 90.0, description: Maximum source age for live cross-asset features.}
   retention_hours: {value: 18, description: Intraday market-sample retention.}
@@ -77,12 +77,20 @@ market_features:
   trade_repricing_max_age_seconds: {value: 90.0, description: Maximum age of the matching realtime option repricing record.}
   trade_quote_max_age_seconds: {value: 5.0, description: Maximum transport and source age for an option quote used in a trade-ready intent.}
   trade_market_anchor_max_age_seconds: {value: 20.0, description: Maximum observation, source and transport age for the ES anchor and level observation used by a trade-ready intent.}
-  trade_structure_drift_points: {value: 2.5, description: Maximum difference between the frozen decision level and the current option structure before trade readiness is blocked.}
+  trade_structure_drift_points: {value: 2.5, description: Maximum drift for decisions sourced directly from the live option frame; stable decisions are validated against their frozen promoted structure.}
   trade_entry_spread_fraction: {value: 0.35, description: Fraction of the live bid-ask spread used for the initial buy limit, capped at mid.}
   trade_intent_ttl_seconds: {value: 90.0, description: Lifetime of a newly emitted trade intent before it must be recalculated.}
+  trade_entry_window_seconds: {value: 20.0, description: Maximum time an alert candidate may wait for the displayed ask to reach its entry limit; this is not a broker order TTL.}
   trade_invalidation_buffer_points: {value: 3.0, description: SPX reclaim distance beyond the trigger level that invalidates a trade intent.}
   trade_target_em_fraction: {value: 0.15, description: Expected-move fraction used for a fallback SPX target when no outward structure exists.}
+  trade_min_target_room_points: {value: 3.0, description: Minimum remaining SPX points from the evaluated spot to the deterministic target.}
+  trade_min_reward_risk: {value: 0.25, description: Minimum remaining target distance divided by distance to the SPX invalidation level.}
   trade_time_stop_minutes: {value: 15, description: Default maximum holding time for an unextended 0DTE trade intent.}
+  session_episode_enabled: {value: true, description: Maintains one session-level structural path above individual wall and flip events.}
+  session_break_buffer_points: {value: 2.0, description: SPX distance beyond a frozen structural level required to record a session break or reclaim.}
+  session_extreme_extension_points: {value: 5.0, description: Minimum extension beyond the broken level before the session path is classified as an extreme.}
+  session_reclaim_hold_seconds: {value: 60.0, description: Minimum hold after reclaim before cross-asset alignment can confirm a V reversal.}
+  session_recovery_ratio: {value: 0.50, description: Fraction of the break-side excursion recovered before the session episode advances to recovery.}
   greek_decision_min_coverage: {value: 0.60, description: Minimum usable and open-interest coverage required before Greeks may adjust same-direction contract confidence or exits.}
   greek_target_delta_min: {value: 0.35, description: Lower absolute Delta bound for a preferred 0DTE candidate contract.}
   greek_target_delta_max: {value: 0.70, description: Upper absolute Delta bound for a preferred 0DTE candidate contract.}

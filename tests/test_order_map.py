@@ -1064,14 +1064,15 @@ def test_feishu_wall_layout_matches_compact_trading_table() -> None:
         }
     )
 
-    assert lines[2:7] == [
+    assert lines[2:8] == [
         "| 7550 | 主 Put Wall | 7550C | 23.75 | 18.22 | 15.49–18.22 |",
         "| 7535 | 次级支撑 | 7535C | 34.65 | 15.92 | 13.53–15.92 |",
         "| 7525 | 外侧支撑 | 7525C | 42.65 | 7.67 | 6.52–7.67 |",
         "| 7570 | 近端 Call GEX | 7570P | 21.35 | 14.79 | 12.57–14.79 |",
-        "| 7600 | 主 Call Wall | 7600P | 41.95 | 3.71–9.80 | 触位重算 |",
+        "| 7600 | 主 Call Wall | 7600P | 41.95 | 早触≈9.80 / 晚触重算 | 触位重算 |",
+        "| 7610 | 次级 Call GEX | 7610P | 50.85 | 3.82 | 3.25–3.82 |",
     ]
-    assert lines[7].startswith("> BS 区间覆盖早/基准/晚触位时间")
+    assert lines[8].startswith("> 触位情景是标的到墙时的早/基准/晚到达估值")
 
 
 def test_actionable_pricing_rejects_stale_and_frozen_quotes() -> None:

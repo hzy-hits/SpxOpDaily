@@ -58,6 +58,9 @@ def submit_due_tasks(
             continue
         if task.runtime is not None:
             task.runtime.mark_running(now_monotonic=now)
+        # Anchor normal cadence at task start. The in-flight guard still
+        # prevents overlap when a run lasts longer than its interval.
+        task.next_run_monotonic = now + max(task.interval_seconds, 1)
         in_flight[task.name] = submit(task)
 
 
@@ -93,7 +96,11 @@ def drain_finished_tasks(
             event["task_mode"] = task.runtime.mode.value
             event["consecutive_failures"] = task.runtime.consecutive_failures
         events.append(event)
-        task.next_run_monotonic = time.monotonic() + next_delay_seconds(task, event)
+        # IBKR snapshot retries have result-dependent backoff. Tasks that were
+        # inserted directly into in_flight (mainly tests) also need a fallback
+        # schedule because they did not pass through submit_due_tasks().
+        if task.name == "ibkr" or task.next_run_monotonic <= 0:
+            task.next_run_monotonic = time.monotonic() + next_delay_seconds(task, event)
     return events
 
 
@@ -141,7 +148,9 @@ def run_loop(
     try:
         while True:
             now = time.monotonic()
-            submit_due_tasks(tasks, in_flight, lambda task: executor.submit(run_task, task), now=now)
+            submit_due_tasks(
+                tasks, in_flight, lambda task: executor.submit(run_task, task), now=now
+            )
             for event in drain_finished_tasks(tasks, in_flight):
                 print_event(event)
 

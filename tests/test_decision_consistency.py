@@ -46,6 +46,56 @@ def test_level_decision_fails_closed_when_promoted_wall_moves() -> None:
     assert result["quality_reason"] == "decision_snapshot_level_drift"
 
 
+def test_stable_level_decision_uses_its_frozen_structure_not_transient_live_wall() -> None:
+    result = coherent_level_decision(
+        {
+            "expiry": "20260715",
+            "phase": "confirmed",
+            "thesis": "breakout",
+            "direction": "up",
+            "event_id": "stable-event",
+            "level_kind": "call_wall",
+            "level": 7560.0,
+            "levels": {
+                "put_wall": 7550.0,
+                "flip_low": 7550.0,
+                "flip_high": 7555.0,
+                "call_wall": 7560.0,
+            },
+            "level_source": "stable_15m_oi_gex",
+            "formal_signal": True,
+        },
+        expiry="20260715",
+        structure={"put_wall": 7550.0, "call_wall": 7600.0},
+        max_level_drift_points=2.5,
+    )
+
+    assert result["phase"] == "confirmed"
+    assert result["event_id"] == "stable-event"
+    assert result["snapshot_consistent"] is True
+    assert result["snapshot_validation_source"] == "decision_frozen_structure"
+
+
+def test_stable_level_decision_still_fails_closed_on_expiry_rollover() -> None:
+    result = coherent_level_decision(
+        {
+            "expiry": "20260715",
+            "phase": "confirmed",
+            "level_kind": "call_wall",
+            "level": 7560.0,
+            "levels": {"call_wall": 7560.0},
+            "level_source": "stable_15m_oi_gex",
+            "formal_signal": True,
+        },
+        expiry="20260716",
+        structure={"call_wall": 7560.0},
+        max_level_drift_points=2.5,
+    )
+
+    assert result["phase"] == "far"
+    assert result["quality_reason"] == "decision_snapshot_expiry_mismatch"
+
+
 def test_level_decision_retains_frozen_context_when_current_structure_is_missing() -> None:
     levels = {
         "put_wall": 7550.0,

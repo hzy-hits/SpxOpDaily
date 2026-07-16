@@ -41,7 +41,15 @@ _MD_BULLET_RE = re.compile(r"^[-*]\s+")
 _SPX_STATUS_HEADER_RE = re.compile(r"^【(SPX 15m · .+)】$")
 _STATUS_PLAN_RE = re.compile(r"^(计划\d+\s*·\s*\S+)\s{2}(.*)$")
 _TABLE_SEPARATOR_CELL_RE = re.compile(r"^:?-{3,}:?$")
-_WALL_LAYOUT_HEADERS = ["SPX 墙位", "结构", "合约", "当前 mid", "BS 触位区间", "触发后参考"]
+_WALL_LAYOUT_HEADERS = ["SPX 墙位", "结构", "合约", "当前 mid", "触位情景", "触发后参考"]
+_INTERMEDIATE_WALL_LAYOUT_HEADERS = [
+    "SPX 墙位",
+    "结构",
+    "合约",
+    "当前 mid",
+    "BS 触位区间",
+    "触发后参考",
+]
 _LEGACY_WALL_LAYOUT_HEADERS = [
     "SPX 墙位",
     "结构",
@@ -270,11 +278,11 @@ def _wall_layout_element(rows: list[list[str]], *, table_index: int) -> dict[str
             [
                 f"{cells[0]}\n{cells[1]}",
                 f"{cells[2]}\n现 {cells[3]}",
-                f"BS区间 {cells[4]}\n参考 {cells[5]}",
+                f"触位情景 {cells[4]}\n触发后 {cells[5]}",
             ]
         )
     return _native_table_element(
-        ["结构", "合约 / 现价", "BS区间 / 触发参考"],
+        ["结构", "合约 / 现价", "触位情景 / 触发后"],
         compact_rows,
         table_index=table_index,
     )
@@ -312,7 +320,11 @@ def _markdown_and_table_elements(
                 rows.append(row)
                 index += 1
             if rows:
-                if headers in (_WALL_LAYOUT_HEADERS, _LEGACY_WALL_LAYOUT_HEADERS):
+                if headers in (
+                    _WALL_LAYOUT_HEADERS,
+                    _INTERMEDIATE_WALL_LAYOUT_HEADERS,
+                    _LEGACY_WALL_LAYOUT_HEADERS,
+                ):
                     elements.append(_wall_layout_element(rows, table_index=table_index))
                     table_index += 1
                 else:

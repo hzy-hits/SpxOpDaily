@@ -8,7 +8,7 @@ from datetime import datetime
 from typing import Any
 
 from spx_spark.analytics.options.pricing import finite_float
-from spx_spark.application.order_map.guidance import build_decision_guidance
+from spx_spark.application.order_map import guidance as guidance_module
 from spx_spark.application.order_map.models import PLAY_ORDER, SHANGHAI_TZ
 from spx_spark.application.order_map.render import (
     _candidate_by_play,
@@ -45,15 +45,6 @@ GLOBEX_CONTEXT_SYSTEM_PROMPT = "\n".join(
     )
 )
 
-STATUS_BRIEF_SYSTEM_PROMPT = "\n".join(
-    (
-        "你是 SPX 盘中决策便签的事实编辑器。代码已经完成方向、状态机和执行门控裁决，你只负责压缩表达。",
-        "第一屏必须依次回答：当前偏向、现在是否进场、唯一确认条件、明确证伪条件。不得用指标罗列代替结论。",
-        "只能使用模板中已经出现的数字；previous_push 只用于判断剧本维持或有变，禁止引用上一条的价格或自行计算新数字。",
-        "TradeReady 之外不得写买入、开仓、挂单或追价；PAUSED 必须明确说明门控失败原因，不能伪装成普通观望。",
-        "不要复述完整 Greeks、墙位阶梯、风险中性分布或内部 JSON 字段。输出简洁中文，保留模板首行。",
-    )
-)
 
 def build_order_prompt(
     payload: dict[str, Any],
@@ -91,6 +82,7 @@ def build_order_prompt(
             "breakout_filter.verdict=blocked 时删除/降级同事件 breakout 候选并优先说明假突破风险；pending 时不得写突破成立；"
             "supported 且 actionable=true 才能把 CONFIRMED breakout 写成可执行候选。"
             "说明时引用 impulse_score、barrier_score、local_abs_gex_share、next_wall_distance_points 和 OI/Volume DEX 分歧中真正改变判断的字段。",
+            guidance_module.SESSION_EPISODE_PROMPT_RULE,
             "",
             "输出中文，最多 18 行。第一行以『条件执行参考:』开头，复述模板第一行的日期与时间。",
             "接着给地形定调：pin 还是 transition，为什么(gamma 状态+价格相对 flip 的位置)，今天哪类 play 优先。",
@@ -159,11 +151,7 @@ def _compact_level_line(payload: dict[str, Any]) -> str:
     decision = payload.get("level_decision")
     if not isinstance(decision, dict):
         return f"候选 {_level_probs_line(payload)}"
-    frozen_levels = (
-        decision.get("levels")
-        if isinstance(decision.get("levels"), dict)
-        else {}
-    )
+    frozen_levels = decision.get("levels") if isinstance(decision.get("levels"), dict) else {}
     flip_zone = payload.get("flip_zone")
     live_flip = flip_zone if isinstance(flip_zone, list) and len(flip_zone) >= 2 else None
 
@@ -180,9 +168,7 @@ def _compact_level_line(payload: dict[str, Any]) -> str:
     if all(value is None for value in (put_wall, flip_low, flip_high, call_wall)):
         return f"候选 {_level_probs_line(payload)}"
     return (
-        f"Put {_dash(put_wall)}　"
-        f"Flip {_dash(flip_low)}–{_dash(flip_high)}　"
-        f"Call {_dash(call_wall)}"
+        f"Put {_dash(put_wall)}　Flip {_dash(flip_low)}–{_dash(flip_high)}　Call {_dash(call_wall)}"
     )
 
 
@@ -219,10 +205,7 @@ def _compact_decision_line(payload: dict[str, Any]) -> str | None:
         "flip_high": "Flip上沿",
         "call_wall": "Call Wall",
     }.get(str(decision.get("level_kind") or ""), str(decision.get("level_kind") or "-"))
-    return (
-        f"状态  {phase}（{phase_label}）　事件位 {kind} {_dash(level)}"
-        f"{distance}　{guidance}"
-    )
+    return f"状态  {phase}（{phase_label}）　事件位 {kind} {_dash(level)}{distance}　{guidance}"
 
 
 def _compact_breakout_filter_line(payload: dict[str, Any]) -> str | None:
@@ -331,9 +314,7 @@ def _compact_option_line(payload: dict[str, Any]) -> str | None:
     ]
     if isinstance(options, dict):
         l1 = options.get("l1") if isinstance(options.get("l1"), dict) else {}
-        diagnostics = (
-            l1.get("diagnostics") if isinstance(l1.get("diagnostics"), dict) else {}
-        )
+        diagnostics = l1.get("diagnostics") if isinstance(l1.get("diagnostics"), dict) else {}
         provider_counts = diagnostics.get("selected_provider_counts")
         provider_text = ""
         if isinstance(provider_counts, dict):
@@ -349,7 +330,7 @@ def _compact_option_line(payload: dict[str, Any]) -> str | None:
 
 
 def _compact_guidance_lines(payload: dict[str, Any]) -> list[str]:
-    guidance = build_decision_guidance(payload)
+    guidance = guidance_module.build_decision_guidance(payload)
     scores = ""
     if guidance.trend_score is not None and guidance.mean_reversion_score is not None:
         scores = f"（趋势 {guidance.trend_score:g} / 回归 {guidance.mean_reversion_score:g}）"
@@ -633,8 +614,11 @@ def _detail_ladder_lines(payload: dict[str, Any]) -> list[str]:
         if priced_call_rungs:
             nearest = min(priced_call_rungs, key=call_distance)
             ranked = primary if has_pricing(primary) else priced_call_rungs[0]
+            secondary = priced_call_rungs[1] if len(priced_call_rungs) > 1 else None
             call_selection = sorted(
-                {id(rung): rung for rung in (nearest, ranked)}.values(),
+                {
+                    id(rung): rung for rung in (nearest, ranked, secondary) if rung is not None
+                }.values(),
                 key=lambda rung: rung.get("strike") or 0.0,
             )
             for rung in call_selection:
@@ -643,14 +627,14 @@ def _detail_ladder_lines(payload: dict[str, Any]) -> list[str]:
                     if rung is primary
                     else "近端 Call GEX"
                     if rung is nearest
-                    else "重点 Call GEX"
+                    else "次级 Call GEX"
                 )
                 selected.append((rung, label, "P"))
 
     if not selected:
         return []
     rendered = [
-        "| SPX 墙位 | 结构 | 合约 | 当前 mid | BS 触位区间 | 触发后参考 |",
+        "| SPX 墙位 | 结构 | 合约 | 当前 mid | 触位情景 | 触发后参考 |",
         "| ---: | --- | --- | ---: | ---: | ---: |",
     ]
     for rung, label, default_right in selected:
@@ -666,7 +650,10 @@ def _detail_ladder_lines(payload: dict[str, Any]) -> list[str]:
             range_low = projected
         if range_high is None:
             range_high = projected
-        if range_low is not None and range_high is not None:
+        timing_capped = rung.get("projection_timing_capped") is True
+        if timing_capped and range_high is not None:
+            bs_range = f"早触≈{range_high:.2f} / 晚触重算"
+        elif range_low is not None and range_high is not None:
             low, high = min(range_low, range_high), max(range_low, range_high)
             bs_range = f"{low:.2f}" if abs(high - low) < 0.005 else f"{low:.2f}–{high:.2f}"
         else:
@@ -681,19 +668,18 @@ def _detail_ladder_lines(payload: dict[str, Any]) -> list[str]:
         ]
         reference = (
             "触位重算"
-            if rung.get("projection_timing_capped") is True
+            if timing_capped
             else f"{min(limits):.2f}–{max(limits):.2f}"
             if limits
             else "-"
         )
         rendered.append(
-            f"| {_dash(strike)} | {label} | {contract} | "
-            f"{current:.2f} | {bs_range} | {reference} |"
+            f"| {_dash(strike)} | {label} | {contract} | {current:.2f} | {bs_range} | {reference} |"
             if current is not None and projected is not None
             else f"| {_dash(strike)} | {label} | {contract} | - | - | {reference} |"
         )
     rendered.append(
-        "> BS 区间覆盖早/基准/晚触位时间；出现“触位重算”表示时间估计已触及上限，不得按静态期权价预挂。"
+        "> 触位情景是标的到墙时的早/基准/晚到达估值，不是当前合理价；“晚触重算”表示时间估计已触及上限。"
     )
     return rendered
 
@@ -889,10 +875,13 @@ def _status_writer_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "level_decision",
         "regime_decision",
         "breakout_filter",
+        "session_episode",
+        "trade_candidate",
+        "confirmed_gate",
         "warnings",
     )
     compact = {key: payload.get(key) for key in keys if key in payload}
-    compact["decision_guidance"] = build_decision_guidance(payload).to_dict()
+    compact["decision_guidance"] = guidance_module.build_decision_guidance(payload).to_dict()
     signed_gex = payload.get("signed_gex_proxy")
     if isinstance(signed_gex, dict):
         compact["signed_gex_proxy"] = {

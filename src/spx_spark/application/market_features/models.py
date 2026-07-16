@@ -105,7 +105,10 @@ class DecisionContext:
     regime_decision: dict[str, Any] = field(default_factory=dict)
     breakout_filter: dict[str, Any] = field(default_factory=dict)
     macro_event: dict[str, Any] = field(default_factory=dict)
+    session_episode: dict[str, Any] = field(default_factory=dict)
     greek_decision: dict[str, Any] = field(default_factory=dict)
+    trade_candidate: dict[str, Any] = field(default_factory=dict)
+    confirmed_gate: dict[str, Any] = field(default_factory=dict)
     virtual_strategy: dict[str, Any] = field(default_factory=dict)
     trade_intent: dict[str, Any] = field(default_factory=dict)
 

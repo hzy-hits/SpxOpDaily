@@ -28,13 +28,12 @@ def build_decision_context(
     trend: dict[str, Any],
     level_decision: dict[str, Any],
     macro_event: dict[str, Any] | None = None,
+    session_episode: dict[str, Any] | None = None,
     policy: MarketFeatureSettings | None = None,
 ) -> DecisionContext:
     policy = policy or MarketFeatureSettings()
     regime = str(trend.get("regime") or "neutral")
-    es_spy = str(
-        market.cross_asset.get("es_spy_direction_confirmation_15m") or "unavailable"
-    )
+    es_spy = str(market.cross_asset.get("es_spy_direction_confirmation_15m") or "unavailable")
     price_volume = str(market.volume.get("price_volume_alignment_5m") or "unavailable")
     liquidity = options.l1.metrics.get("liquidity_score")
     regime_decision = build_regime_decision(
@@ -61,20 +60,16 @@ def build_decision_context(
     provider_divergence = market.cross_asset.get("es_provider_divergence")
     if isinstance(provider_divergence, dict) and provider_divergence.get("available") is False:
         invalidations.append("cross_provider_comparison_unavailable")
-    if (
-        isinstance(liquidity, int | float)
-        and liquidity < policy.min_l1_liquidity_score
-    ):
+    if isinstance(liquidity, int | float) and liquidity < policy.min_l1_liquidity_score:
         invalidations.append("hot_option_liquidity_low")
     confirmations = {
         "globex_regime": regime,
         "es_spy_direction": es_spy,
         "price_volume_alignment": price_volume,
-        "vix_vvix_direction": market.volatility.get(
-            "vix_vvix_direction_confirmation_15m"
-        ),
+        "vix_vvix_direction": market.volatility.get("vix_vvix_direction_confirmation_15m"),
         "option_liquidity_score": liquidity,
         "level_phase": level_decision.get("phase"),
+        "session_episode_phase": (session_episode or {}).get("phase"),
         "formal_level_signal": level_decision.get("formal_signal") is True,
         "regime_mode": regime_decision.get("mode"),
         "breakout_verdict": breakout_filter.get("verdict"),
@@ -85,10 +80,12 @@ def build_decision_context(
         "regime": regime,
         "level_event": level_decision.get("event_id"),
         "level_phase": level_decision.get("phase"),
+        "session_episode_id": (session_episode or {}).get("episode_id"),
+        "session_episode_phase": (session_episode or {}).get("phase"),
     }
-    digest = hashlib.sha256(
-        json.dumps(context_key, sort_keys=True).encode("utf-8")
-    ).hexdigest()[:16]
+    digest = hashlib.sha256(json.dumps(context_key, sort_keys=True).encode("utf-8")).hexdigest()[
+        :16
+    ]
     return DecisionContext(
         schema_version=1,
         context_id=f"decision:{digest}",
@@ -108,25 +105,21 @@ def build_decision_context(
         regime_decision=regime_decision,
         breakout_filter=breakout_filter,
         macro_event=dict(macro_event or {}),
+        session_episode=dict(session_episode or {}),
     )
 
 
 def decision_signature(context: dict[str, Any]) -> tuple[object, ...]:
     trend = context.get("trend") if isinstance(context.get("trend"), dict) else {}
-    level = (
-        context.get("level_decision")
-        if isinstance(context.get("level_decision"), dict)
-        else {}
-    )
+    level = context.get("level_decision") if isinstance(context.get("level_decision"), dict) else {}
     confirmations = (
-        context.get("confirmations")
-        if isinstance(context.get("confirmations"), dict)
-        else {}
+        context.get("confirmations") if isinstance(context.get("confirmations"), dict) else {}
     )
     trade_intent = (
-        context.get("trade_intent")
-        if isinstance(context.get("trade_intent"), dict)
-        else {}
+        context.get("trade_intent") if isinstance(context.get("trade_intent"), dict) else {}
+    )
+    session_episode = (
+        context.get("session_episode") if isinstance(context.get("session_episode"), dict) else {}
     )
     return (
         trend.get("regime"),
@@ -137,6 +130,8 @@ def decision_signature(context: dict[str, Any]) -> tuple[object, ...]:
         confirmations.get("price_volume_alignment"),
         confirmations.get("regime_mode"),
         confirmations.get("breakout_verdict"),
+        session_episode.get("episode_id"),
+        session_episode.get("phase"),
         trade_intent.get("status"),
         trade_intent.get("intent_id"),
         tuple(trade_intent.get("block_reasons") or ()),
@@ -155,9 +150,7 @@ def build_decision_audit(
     trade = context.trade_intent
     trigger = "context_initialized" if not previous else "decision_context_changed"
     outcome_reference = str(level.get("event_id")) if level.get("event_id") else None
-    digest = hashlib.sha256(
-        f"{context.context_id}:{trigger}".encode("utf-8")
-    ).hexdigest()[:16]
+    digest = hashlib.sha256(f"{context.context_id}:{trigger}".encode("utf-8")).hexdigest()[:16]
     return DecisionAudit(
         schema_version=2,
         audit_id=f"audit:{digest}",
@@ -174,9 +167,7 @@ def build_decision_audit(
         contract_id=(str(trade["contract_id"]) if trade.get("contract_id") else None),
         decision_bid=_optional_number(trade.get("decision_bid")),
         decision_ask=_optional_number(trade.get("decision_ask")),
-        quote_source_at=(
-            str(trade["quote_source_at"]) if trade.get("quote_source_at") else None
-        ),
+        quote_source_at=(str(trade["quote_source_at"]) if trade.get("quote_source_at") else None),
         block_reasons=tuple(str(item) for item in trade.get("block_reasons") or ()),
     )
 

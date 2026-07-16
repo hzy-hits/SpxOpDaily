@@ -9,7 +9,7 @@ from datetime import time
 @dataclass(frozen=True)
 class MarketFeatureSettings:
     enabled: bool = True
-    interval_seconds: int = 60
+    interval_seconds: int = 5
     sample_interval_seconds: int = 60
     max_quote_age_seconds: float = 90.0
     retention_hours: int = 18
@@ -44,9 +44,17 @@ class MarketFeatureSettings:
     trade_structure_drift_points: float = 2.5
     trade_entry_spread_fraction: float = 0.35
     trade_intent_ttl_seconds: float = 90.0
+    trade_entry_window_seconds: float = 20.0
     trade_invalidation_buffer_points: float = 3.0
     trade_target_em_fraction: float = 0.15
+    trade_min_target_room_points: float = 3.0
+    trade_min_reward_risk: float = 0.25
     trade_time_stop_minutes: int = 15
+    session_episode_enabled: bool = True
+    session_break_buffer_points: float = 2.0
+    session_extreme_extension_points: float = 5.0
+    session_reclaim_hold_seconds: float = 60.0
+    session_recovery_ratio: float = 0.50
     greek_decision_min_coverage: float = 0.60
     greek_target_delta_min: float = 0.35
     greek_target_delta_max: float = 0.70
@@ -92,9 +100,16 @@ class MarketFeatureSettings:
             self.trade_structure_drift_points,
             self.trade_entry_spread_fraction,
             self.trade_intent_ttl_seconds,
+            self.trade_entry_window_seconds,
             self.trade_invalidation_buffer_points,
             self.trade_target_em_fraction,
+            self.trade_min_target_room_points,
+            self.trade_min_reward_risk,
             self.trade_time_stop_minutes,
+            self.session_break_buffer_points,
+            self.session_extreme_extension_points,
+            self.session_reclaim_hold_seconds,
+            self.session_recovery_ratio,
             self.greek_decision_min_coverage,
             self.greek_target_delta_min,
             self.greek_target_delta_max,
@@ -136,6 +151,7 @@ class MarketFeatureSettings:
             self.trade_follow_through_em_fraction,
             self.trade_entry_spread_fraction,
             self.trade_target_em_fraction,
+            self.session_recovery_ratio,
             self.greek_decision_min_coverage,
             self.greek_max_theta_15m_loss_fraction,
             self.greek_max_iv_crush_loss_fraction,

@@ -10,7 +10,11 @@ from pathlib import Path
 from typing import Mapping
 
 from spx_spark.config import NotificationSettings, StorageSettings
-from spx_spark.greek_reference import calculate_contract_reference, inputs_from_quote, is_spxw_zero_dte
+from spx_spark.greek_reference import (
+    calculate_contract_reference,
+    inputs_from_quote,
+    is_spxw_zero_dte,
+)
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 from spx_spark.marketdata import OptionRight
 from spx_spark.notifier.dispatcher import dispatch_notification
@@ -185,6 +189,7 @@ def _new_episode(
         return _episode(
             source_id=source_id,
             source_kind="trade_intent",
+            direction=str(trade_intent.get("direction") or ""),
             contract_id=contract_id,
             snapshot=snapshot,
             now=now,
@@ -195,7 +200,10 @@ def _new_episode(
         )
     if gth_signal.get("kind") != "gth_dip_reclaim_call":
         return {}
-    if str(gth_signal.get("session_date") or "") != DEFAULT_MARKET_CALENDAR.research_expiry(now).isoformat():
+    if (
+        str(gth_signal.get("session_date") or "")
+        != DEFAULT_MARKET_CALENDAR.research_expiry(now).isoformat()
+    ):
         return {}
     source_id = str(gth_signal.get("event_id") or "")
     if not source_id or source_id in consumed:
@@ -209,6 +217,7 @@ def _new_episode(
     return _episode(
         source_id=source_id,
         source_kind="gth_dip_reclaim_call",
+        direction="up",
         contract_id=selected.instrument.canonical_id,
         snapshot=snapshot,
         now=now,
@@ -223,6 +232,7 @@ def _episode(
     *,
     source_id: str,
     source_kind: str,
+    direction: str,
     contract_id: str,
     snapshot: Mapping[str, object],
     now: datetime,
@@ -231,6 +241,8 @@ def _episode(
     target_spx: float | None,
     invalidation_es: float | None,
 ) -> dict[str, object]:
+    if direction not in {"up", "down"}:
+        return {}
     episode_id = "virtual:" + hashlib.sha256(f"{source_id}|{contract_id}".encode()).hexdigest()[:24]
     return {
         "schema_version": 1,
@@ -238,7 +250,7 @@ def _episode(
         "status": "active",
         "source_signal_id": source_id,
         "source_kind": source_kind,
-        "direction": "up",
+        "direction": direction,
         "contract_id": contract_id,
         "opened_at": now.isoformat(),
         "time_stop_at": stop.isoformat(),
@@ -253,6 +265,8 @@ def _episode(
         "mae_fraction": 0.0,
         "automatic_ordering": False,
         "account_position_source": "none",
+        "entry_basis": "decision_quote_snapshot",
+        "execution_assumption": "none",
         "last": dict(snapshot),
     }
 
@@ -278,24 +292,41 @@ def _exit_decision(
     es = _number(es_quote.effective_price) if es_quote is not None else None
     invalidation_spx = _number(active.get("invalidation_spx"))
     invalidation_es = _number(active.get("invalidation_es"))
-    if invalidation_spx is not None and spx is not None and spx <= invalidation_spx:
-        return "strategy_invalidation", "exit"
+    direction = str(active.get("direction") or "")
+    if invalidation_spx is not None and spx is not None:
+        invalidated = (direction == "up" and spx <= invalidation_spx) or (
+            direction == "down" and spx >= invalidation_spx
+        )
+        if invalidated:
+            return "strategy_invalidation", "exit"
     if invalidation_es is not None and es is not None and es <= invalidation_es:
         return "gth_dip_low_broken", "exit"
     entry_mid = _number(active.get("entry_mid"))
     mid = _number(current.get("mid"))
-    if entry_mid and mid is not None and mid / entry_mid - 1.0 >= policy.virtual_profit_take_fraction:
+    if (
+        entry_mid
+        and mid is not None
+        and mid / entry_mid - 1.0 >= policy.virtual_profit_take_fraction
+    ):
         return "premium_profit_target", "take_profit_or_reduce"
     target_spx = _number(active.get("target_spx"))
-    if target_spx is not None and spx is not None and spx >= target_spx:
-        return "underlier_target_reached", "take_profit"
+    if target_spx is not None and spx is not None:
+        target_reached = (direction == "up" and spx >= target_spx) or (
+            direction == "down" and spx <= target_spx
+        )
+        if target_reached:
+            return "underlier_target_reached", "take_profit"
     call_wall = _number(option_structure.get("call_wall"))
-    if call_wall is not None and spx is not None and spx >= call_wall - policy.virtual_wall_touch_points:
+    if (
+        active.get("source_kind") == "gth_dip_reclaim_call"
+        and call_wall is not None
+        and spx is not None
+        and spx >= call_wall - policy.virtual_wall_touch_points
+    ):
         return "call_wall_touched", "take_profit_or_reduce"
     quality = current.get("quality") if isinstance(current.get("quality"), Mapping) else {}
     greek_exit_allowed = bool(
-        greek_decision.get("mode") == "decision_grade"
-        and quality.get("status") == "ok"
+        greek_decision.get("mode") == "decision_grade" and quality.get("status") == "ok"
     )
     delta = abs(_number(current.get("delta")) or 0.0)
     if greek_exit_allowed and delta >= policy.greek_delta_saturation:
@@ -380,16 +411,26 @@ def _select_call(latest: LatestState, *, now: datetime, policy: MarketFeatureSet
         if quote.instrument.right is not OptionRight.CALL or not is_spxw_zero_dte(quote, as_of=now):
             continue
         decision = configured_quote_use_decision(quote, as_of=now)
-        delta = abs(quote.greeks.delta) if quote.greeks is not None and quote.greeks.delta is not None else None
+        delta = (
+            abs(quote.greeks.delta)
+            if quote.greeks is not None and quote.greeks.delta is not None
+            else None
+        )
         if not decision.pricing_allowed or quote.mid is None or delta is None:
             continue
         if not policy.greek_target_delta_min <= delta <= policy.greek_target_delta_max:
             continue
         rows.append(quote)
-    return min(rows, key=lambda row: (abs(abs(row.greeks.delta) - 0.50), row.spread_bps or 1e9)) if rows else None
+    return (
+        min(rows, key=lambda row: (abs(abs(row.greeks.delta) - 0.50), row.spread_bps or 1e9))
+        if rows
+        else None
+    )
 
 
-def _contract_snapshot(latest: LatestState, contract_id: str, *, now: datetime) -> dict[str, object]:
+def _contract_snapshot(
+    latest: LatestState, contract_id: str, *, now: datetime
+) -> dict[str, object]:
     quote = latest.best_quote(contract_id)
     if quote is None or quote.mid is None:
         return {}
@@ -423,24 +464,35 @@ def _spx_reference(latest: LatestState, current: Mapping[str, object]) -> float 
 
 
 def _render_exit(closed: Mapping[str, object]) -> str:
-    snapshot = closed.get("exit_snapshot") if isinstance(closed.get("exit_snapshot"), Mapping) else {}
+    snapshot = (
+        closed.get("exit_snapshot") if isinstance(closed.get("exit_snapshot"), Mapping) else {}
+    )
     return "\n".join(
         (
             f"虚拟策略｜{closed.get('exit_action')}",
             f"主策略 `{closed.get('source_kind')}`，合约 `{closed.get('contract_id')}`。",
             f"原因：`{closed.get('exit_reason')}`。",
             f"虚拟入场 {_fmt(closed.get('entry_mid'))}，当前 {_fmt(snapshot.get('mid'))}，MFE {_pct(closed.get('mfe_fraction'))} / MAE {_pct(closed.get('mae_fraction'))}。",
-            "这是系统策略生命周期的止盈/减仓建议，不读取 IBKR 仓位，也不自动下单。",
+            "这是显示报价路径的影子生命周期，不读取 IBKR 仓位、不假设成交，也不自动下单。",
         )
     )
 
 
 def _append_audit(storage: StorageSettings, now: datetime, payload: Mapping[str, object]) -> None:
-    path = Path(storage.data_root) / "features" / "virtual_strategy" / f"date={now.date().isoformat()}" / "events.jsonl"
+    path = (
+        Path(storage.data_root)
+        / "features"
+        / "virtual_strategy"
+        / f"date={now.date().isoformat()}"
+        / "events.jsonl"
+    )
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor = os.open(path, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600)
     try:
-        os.write(descriptor, (json.dumps(dict(payload), ensure_ascii=False, sort_keys=True) + "\n").encode())
+        os.write(
+            descriptor,
+            (json.dumps(dict(payload), ensure_ascii=False, sort_keys=True) + "\n").encode(),
+        )
         os.fsync(descriptor)
     finally:
         os.close(descriptor)

@@ -105,7 +105,7 @@ def test_service_loop_can_enable_market_features_explicitly() -> None:
     names = [task.name for task in tasks]
     assert names[:3] == ["provider_failover", "market_features", "intraday_shock"]
     features = next(task for task in tasks if task.name == "market_features")
-    assert features.interval_seconds == 60
+    assert features.interval_seconds == 5
     assert features.command is not None
 
 
@@ -360,6 +360,24 @@ def test_submit_due_tasks_skips_in_flight_and_not_due_tasks() -> None:
 
         assert submitted == ["ready"]
         assert set(in_flight) == {"ready", "busy"}
+        assert ready.next_run_monotonic == 1.0
+
+
+def test_normal_task_keeps_start_anchored_schedule_after_completion() -> None:
+    task = ServiceTask("fixed_rate", interval_seconds=5, fn=lambda: 0)
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        in_flight: dict = {}
+        submit_due_tasks(
+            [task],
+            in_flight,
+            lambda item: executor.submit(run_task, item),
+            now=100.0,
+        )
+        in_flight["fixed_rate"].result()
+        drain_finished_tasks([task], in_flight)
+
+    assert task.next_run_monotonic == 105.0
 
 
 def test_drain_finished_tasks_emits_events_and_reschedules() -> None:
