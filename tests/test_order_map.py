@@ -257,6 +257,80 @@ def test_feishu_keeps_priced_wall_layout_when_level_state_is_far() -> None:
     assert "| 7525 | 主 Put Wall | 7525C | 32.00 | 13.00–15.00 | 12.00–14.00 |" in text
 
 
+def test_feishu_delivery_includes_eight_strike_exposure_map() -> None:
+    from spx_spark.application.order_map.prompts import render_feishu_delivery_text
+
+    key_strikes = [
+        {
+            "strike": 7530.0 + index * 5,
+            "distance_points": -17.0 + index * 5,
+            "roles": ["ATM"] if index == 3 else [f"暴露{index + 1}"],
+            "call_delta": 0.65 - index * 0.05,
+            "put_delta": -0.35 - index * 0.05,
+            "call_gamma": 0.004 + index * 0.0001,
+            "put_gamma": 0.0041 + index * 0.0001,
+            "oi_weighted": {
+                "net_gex": 20_000_000.0 - index * 1_000_000,
+                "abs_gex": 80_000_000.0,
+                "net_dex_proxy": 500_000.0,
+                "abs_dex_proxy": 2_000_000.0,
+            },
+            "volume_weighted": {
+                "net_gex": -5_000_000.0,
+                "abs_gex": 25_000_000.0,
+                "net_dex_proxy": -100_000.0,
+                "abs_dex_proxy": 800_000.0,
+            },
+        }
+        for index in range(8)
+    ]
+    payload = {
+        "research_only": False,
+        "expiry": "20260717",
+        "session_phase": {"name_cn": "美盘上午主战场"},
+        "underlier": {"price": 7547.0, "source": "index:SPX"},
+        "gamma_state": "zero_gamma_transition",
+        "level_decision": {"phase": "far"},
+        "plan_candidates": [],
+        "wall_ladder": {"put_walls": [], "call_walls": []},
+        "option_structure_frame": {
+            "exposure": {
+                "oi_weighted": {
+                    "net_gex": 120_000_000.0,
+                    "abs_gex": 640_000_000.0,
+                    "net_gamma_ratio": 0.1875,
+                    "net_dex_proxy": 4_000_000.0,
+                    "abs_dex_proxy": 16_000_000.0,
+                    "net_dex_ratio_proxy": 0.25,
+                },
+                "volume_weighted": {
+                    "net_gex": -40_000_000.0,
+                    "abs_gex": 200_000_000.0,
+                    "net_gamma_ratio": -0.2,
+                    "net_dex_proxy": -800_000.0,
+                    "abs_dex_proxy": 6_400_000.0,
+                    "net_dex_ratio_proxy": -0.125,
+                },
+                "key_strikes": key_strikes,
+            }
+        },
+        "warnings": [],
+    }
+
+    text = render_feishu_delivery_text(
+        payload,
+        [],
+        datetime(2026, 7, 17, 14, 0, tzinfo=timezone.utc),
+        "决策摘要",
+    )
+
+    assert "## 0DTE 暴露地图" in text
+    assert "OI代理　GEX净/绝 +120.0M/+640.0M（+19%）" in text
+    assert "| 7545 | ATM　-2.0点 |" in text
+    assert sum(line.startswith("| 75") for line in text.splitlines()) == 8
+    assert "均不是 dealer 实仓" in text
+
+
 def make_coverage(*, total: int = 4) -> OptionCoverage:
     return OptionCoverage(
         total=total,
@@ -1173,9 +1247,7 @@ def test_feishu_wall_layout_suppresses_limits_when_quote_is_range_only() -> None
                         "limit_aggressive": None,
                         "limit_conservative": None,
                         "execution_quote_status": "range_only",
-                        "execution_quote_reasons": [
-                            "provider_mid_divergence_exceeded"
-                        ],
+                        "execution_quote_reasons": ["provider_mid_divergence_exceeded"],
                     }
                 ],
                 "call_walls": [],
@@ -1206,9 +1278,7 @@ def test_feishu_wall_layout_labels_the_stable_structure_as_primary() -> None:
     lines = _detail_ladder_lines(
         {
             "underlier": {"price": 7561.0},
-            "level_decision": {
-                "levels": {"put_wall": 7550.0, "call_wall": 7600.0}
-            },
+            "level_decision": {"levels": {"put_wall": 7550.0, "call_wall": 7600.0}},
             "wall_ladder": {
                 "put_walls": [rung(7525, "C"), rung(7550, "C"), rung(7500, "C")],
                 "call_walls": [rung(7575, "P"), rung(7555, "P")],
@@ -2191,6 +2261,14 @@ def test_prompts_include_previous_push() -> None:
                     "abs_dex_proxy": 2_800_000.0,
                     "net_dex_ratio_proxy": 0.25,
                 },
+                "key_strikes": [
+                    {
+                        "strike": 7550.0,
+                        "roles": ["ATM", "Flip下"],
+                        "call_delta": 0.52,
+                        "put_delta": -0.48,
+                    }
+                ],
                 "warnings": ["oi_volume_gex_divergent"],
             },
         },
@@ -2217,6 +2295,7 @@ def test_prompts_include_previous_push() -> None:
     assert "SPXW_0DTE_options_not_ES_options" in status_prompt
     assert '"net_dex_proxy":-900000.0' in status_prompt
     assert '"abs_dex_proxy":4500000.0' in status_prompt
+    assert '"key_strikes":[{"strike":7550.0' in status_prompt
     assert "两者背离时优先提示假突破风险" in status_prompt
     assert "不是 ES 期货自身的 GEX/DEX" in order_prompt
     assert "secret_scenario_price" not in order_prompt
@@ -3313,10 +3392,7 @@ def test_render_status_keeps_stable_and_candidate_structures_explicit() -> None:
     )
 
     assert "结构  ZeroGamma过渡　Put 7500　Flip 7510–7515　Call 7550" in text
-    assert (
-        "结构更新  新链 Put 7500　Flip 7520–7525　Call 7550　稳定确认 2/3，旧结构暂停"
-        in text
-    )
+    assert "结构更新  新链 Put 7500　Flip 7520–7525　Call 7550　稳定确认 2/3，旧结构暂停" in text
     assert "动作  暂停新开仓：当前 OI/GEX 结构正在切换确认" in text
     assert "状态  INVALIDATED（已失效）　事件位 Flip上沿 7515" in text
 

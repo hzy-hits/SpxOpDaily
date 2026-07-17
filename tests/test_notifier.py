@@ -203,18 +203,29 @@ def test_notifier_shadow_records_context_consumption(tmp_path, monkeypatch) -> N
         assert connection.execute("SELECT count(*) FROM events").fetchone()[0] == 1
         assert connection.execute("SELECT count(*) FROM decisions").fetchone()[0] == 1
         assert connection.execute("SELECT count(*) FROM alert_deliveries").fetchone()[0] >= 1
-        assert connection.execute(
-            "SELECT count(*) FROM alert_deliveries WHERE status='sent'"
-        ).fetchone()[0] == 0
-        assert connection.execute(
-            "SELECT count(*) FROM alert_deliveries WHERE channel='context_policy'"
-        ).fetchone()[0] == 1
-        assert connection.execute(
-            "SELECT status, action, side FROM decisions"
-        ).fetchone() == ("context", "observe", "none")
-        assert connection.execute(
-            "SELECT status FROM alert_deliveries WHERE channel='context_policy'"
-        ).fetchone()[0] == "consumed"
+        assert (
+            connection.execute(
+                "SELECT count(*) FROM alert_deliveries WHERE status='sent'"
+            ).fetchone()[0]
+            == 0
+        )
+        assert (
+            connection.execute(
+                "SELECT count(*) FROM alert_deliveries WHERE channel='context_policy'"
+            ).fetchone()[0]
+            == 1
+        )
+        assert connection.execute("SELECT status, action, side FROM decisions").fetchone() == (
+            "context",
+            "observe",
+            "none",
+        )
+        assert (
+            connection.execute(
+                "SELECT status FROM alert_deliveries WHERE channel='context_policy'"
+            ).fetchone()[0]
+            == "consumed"
+        )
     finally:
         connection.close()
 
@@ -2162,10 +2173,7 @@ def test_bark_title_maps_kinds_to_chinese_categories() -> None:
     )
     assert bark_title_for_alerts([{"kind": "price_move_from_close"}]) == "SPX 价格异动"
     assert bark_title_for_alerts([{"kind": "globex_trend_transition"}]) == "SPX 价格异动"
-    assert (
-        bark_title_for_alerts([{"kind": "gth_dip_reclaim_call"}])
-        == "SPX 0DTE | CALL RECLAIM"
-    )
+    assert bark_title_for_alerts([{"kind": "gth_dip_reclaim_call"}]) == "SPX 0DTE | CALL RECLAIM"
     assert bark_title_for_alerts([{"kind": "option_wall_proximity"}]) == "SPX 结构信号"
     assert (
         bark_title_for_alerts([{"kind": "unknown_kind", "severity": "high"}])
@@ -2214,12 +2222,8 @@ def test_direct_push_and_agent_prompts_carry_steven_micopedia_guardrails() -> No
         assert "net_dex_proxy" in prompt
         assert "Hyperliquid" in prompt
         assert "不是下单授权" in prompt or "不下单指令" in prompt
-    assert direct_push_header([{"kind": "gth_dip_reclaim_call"}]) == (
-        "SPX 0DTE | CALL RECLAIM"
-    )
-    assert direct_push_header([{"kind": "ibkr_session_restored"}]) == (
-        "SPX | SYSTEM STATUS"
-    )
+    assert direct_push_header([{"kind": "gth_dip_reclaim_call"}]) == ("SPX 0DTE | CALL RECLAIM")
+    assert direct_push_header([{"kind": "ibkr_session_restored"}]) == ("SPX | SYSTEM STATUS")
 
 
 def test_alert_key_uses_dedup_group_not_title() -> None:
@@ -2489,6 +2493,34 @@ def test_feishu_sectioned_card_converts_wall_table_to_compact_layout() -> None:
         "c2": "触位情景 18.22\n触发后 15.40–18.20",
     }
     assert card["header"]["template"] == "orange"
+
+
+def test_feishu_sectioned_card_converts_exposure_table_to_compact_layout() -> None:
+    from spx_spark.notifier.format_push import build_feishu_card
+
+    text = "\n".join(
+        (
+            "【SPX 15m · 12:45 · 0DTE 07-17 · 亚盘夜盘】",
+            "## 0DTE 暴露地图",
+            "| SPX Strike | 位置 | CΔ / PΔ | CΓ / PΓ | OI GEX净/绝 · DEX净/绝 | 量 GEX净/绝 · DEX净/绝 |",
+            "| ---: | --- | ---: | ---: | ---: | ---: |",
+            "| 7550 | ATM·ZG　+1.5点 | +0.55 / -0.45 | 0.0040 / 0.0041 | +29.9m/+269.3m · +803.9k/+5.2m | -224.4m/+374.0m · -5.6m/+8.1m |",
+        )
+    )
+
+    card = build_feishu_card(text, title="SPX 15分钟市场状态", kind="status")
+
+    table = next(element for element in card["body"]["elements"] if element["tag"] == "table")
+    assert [column["display_name"] for column in table["columns"]] == [
+        "Strike / 位置",
+        "Delta / Gamma",
+        "GEX / DEX proxy",
+    ]
+    assert table["rows"][0] == {
+        "c0": "7550\nATM·ZG　+1.5点",
+        "c1": "Δ +0.55 / -0.45\nΓ 0.0040 / 0.0041",
+        "c2": "OI +29.9m/+269.3m · +803.9k/+5.2m\n量 -224.4m/+374.0m · -5.6m/+8.1m",
+    }
 
 
 def test_feishu_sectioned_card_collapses_secondary_evidence() -> None:

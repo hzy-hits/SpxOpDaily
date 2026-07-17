@@ -10,6 +10,7 @@ from typing import Any
 from spx_spark.analytics.options.pricing import finite_float
 from spx_spark.application.order_map import guidance as guidance_module
 from spx_spark.application.order_map.models import PLAY_ORDER, SHANGHAI_TZ
+from spx_spark.application.order_map.exposure_presentation import exposure_strike_lines
 from spx_spark.application.order_map.render import (
     _candidate_by_play,
     _dash,
@@ -79,7 +80,7 @@ def build_order_prompt(
             "TradeReady 仅表示已通过代码决策门控、可供操作员执行，自动下单仍关闭；"
             "GEX/*_proxy 是结构代理；Hyperliquid 只作弱次级证据，不作 SPX 锚。",
             "signed_gex_proxy 与 option_structure_frame.exposure 来自 SPXW 0DTE 期权链，不是 ES 期货自身的 GEX/DEX。"
-            "读取 net/abs GEX、OI/成交量加权 net/abs DEX proxy 及 coverage/warnings；只在非 null 且质量足够时用于确认或反驳突破，"
+            "读取 net/abs GEX、OI/成交量加权 net/abs DEX proxy、key_strikes 8档地图及 coverage/warnings；只在非 null 且质量足够时用于确认或反驳突破，"
             "OI 与成交量口径方向背离时必须优先考虑假突破，不得把 proxy 写成 dealer 实仓。",
             "regime_decision 与 breakout_filter 是代码生成的确定性决策层，不得自行改判。"
             "breakout_filter.verdict=blocked 时删除/降级同事件 breakout 候选并优先说明假突破风险；pending 时不得写突破成立；"
@@ -665,6 +666,7 @@ def render_feishu_status_detail_template(
     sections: list[tuple[str, list[str]]] = [
         ("市场概览", overview),
         ("Greeks 与波动", greek_and_vol),
+        ("0DTE 暴露地图", exposure_strike_lines(payload)),
         ("ES 与跨资产确认", market_confirmation),
         ("关键位状态", key_level_context),
         ("当前布局参考", _detail_ladder_lines(payload)),
@@ -709,11 +711,16 @@ def render_feishu_delivery_text(
             "confirmed",
         }
         allowed_titles = (
-            ("## 关键位状态\n", "## 当前布局参考\n", "## 条件计划与 BS 审计\n")
+            (
+                "## 0DTE 暴露地图\n",
+                "## 关键位状态\n",
+                "## 当前布局参考\n",
+                "## 条件计划与 BS 审计\n",
+            )
             if has_plan
-            else ("## 关键位状态\n", "## 当前布局参考\n")
+            else ("## 0DTE 暴露地图\n", "## 关键位状态\n", "## 当前布局参考\n")
             if active
-            else ("## 当前布局参考\n",)
+            else ("## 0DTE 暴露地图\n", "## 当前布局参考\n")
         )
         detail_blocks = [
             block for block in blocks if any(block.startswith(title) for title in allowed_titles)
@@ -756,7 +763,8 @@ def build_status_prompt(
             "supported 且 actionable=true=突破过滤通过。不得绕过代码 verdict，也不得把 DEX proxy 写成 dealer 实仓。",
             "exposure_context 是 SPXW 0DTE 期权链推导的实时结构，不是 ES 期货自身的 GEX/DEX。"
             "net/abs GEX 用于判断结构净方向与集中度，OI/成交量加权 DEX proxy 用于检查突破方向是否得到 delta 暴露共振；"
-            "两者背离时优先提示假突破风险。字段为 null、coverage 不足或 warnings 非空时必须明确降权，禁止补算或猜测。",
+            "key_strikes 是最多 8 个墙位/ATM/Flip/ZG 与暴露集中档，只引用其中真正改变当前判断的近端档位；"
+            "OI 与成交两者背离时优先提示假突破风险。字段为 null、coverage 不足或 warnings 非空时必须明确降权，禁止补算或猜测。",
             "输出中文，第一行逐字保留模板标题；先给剧本维持/有变，再给当前位置和状态机结论。",
             "只保留会改变当前决策的内容：时段、SPX/ES、wall/flip、状态机、ES 路径与量价、"
             "Max Pain/OI 或波动率中最重要的一项、最多两个情景、相对上次变化和下一确认/证伪阈值。",
@@ -897,5 +905,8 @@ def _status_exposure_context(payload: dict[str, Any]) -> dict[str, Any]:
         "gex_weighting_divergence": exposure.get("gex_weighting_divergence"),
         "oi_weighted": aggregate("oi_weighted"),
         "volume_weighted": aggregate("volume_weighted"),
+        "key_strikes": [row for row in exposure.get("key_strikes") or [] if isinstance(row, dict)][
+            :8
+        ],
         "warnings": exposure.get("warnings"),
     }

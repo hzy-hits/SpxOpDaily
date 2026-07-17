@@ -10,6 +10,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from spx_spark.analytics.options.models import ExpiryOptionsMap, OptionsMap
+from spx_spark.application.market_features.exposure_strikes import key_strike_features
 from spx_spark.application.market_features.market import quote_source_at
 from spx_spark.application.market_features.models import (
     FrameQuality,
@@ -65,7 +66,10 @@ def build_option_structure_frame(
     volatility = option_volatility_features(front, next_expiry, history=history, now=now)
     concentration = concentration_features(state, front)
     density = density_features(front, history=history, now=now)
-    exposure = exposure_features(_expiry_exposure(exposure_map, front.expiry if front else None))
+    exposure = exposure_features(
+        _expiry_exposure(exposure_map, front.expiry if front else None),
+        underlier=options_map.underlier.price,
+    )
     effective_expiry = front.expiry if front else frozen_expiry
     frame_id = f"options:{effective_expiry or 'none'}:{now.strftime('%Y%m%dT%H%M')}"
     frame = OptionStructureFrame(
@@ -162,13 +166,18 @@ def _expiry_exposure(
     return next((item for item in exposure_map.expiries if item.expiry == expiry), None)
 
 
-def exposure_features(exposure: ExpiryExposure | None) -> dict[str, Any]:
+def exposure_features(
+    exposure: ExpiryExposure | None,
+    *,
+    underlier: float | None = None,
+) -> dict[str, Any]:
     if exposure is None:
         return {
             "quality": "unavailable",
             "oi_quality": "missing",
             "oi_weighted": {},
             "volume_weighted": {},
+            "key_strikes": [],
             "warnings": ["exposure_map_unavailable"],
         }
     return {
@@ -179,6 +188,7 @@ def exposure_features(exposure: ExpiryExposure | None) -> dict[str, Any]:
         "iv_coverage_ratio": exposure.iv_coverage_ratio,
         "oi_weighted": asdict(exposure.oi_weighted),
         "volume_weighted": asdict(exposure.volume_weighted),
+        "key_strikes": key_strike_features(exposure, underlier=underlier),
         "gex_weighting_divergence": exposure.gex_weighting_divergence,
         "sign_convention": exposure.sign_convention,
         "dealer_position_sign": exposure.dealer_position_sign,

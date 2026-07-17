@@ -58,6 +58,14 @@ _LEGACY_WALL_LAYOUT_HEADERS = [
     "BS 触位价",
     "触发后参考",
 ]
+_EXPOSURE_LAYOUT_HEADERS = [
+    "SPX Strike",
+    "位置",
+    "CΔ / PΔ",
+    "CΓ / PΓ",
+    "OI GEX净/绝 · DEX净/绝",
+    "量 GEX净/绝 · DEX净/绝",
+]
 _COLLAPSED_STATUS_SECTIONS = frozenset(
     {"Greeks 与波动", "ES 与跨资产确认", "风险中性分布", "观察情景与 BS 审计"}
 )
@@ -179,14 +187,10 @@ def _sectioned_card_parts(
         if not content:
             continue
         section_title = (
-            content.splitlines()[0].removeprefix("## ").strip()
-            if content.startswith("## ")
-            else ""
+            content.splitlines()[0].removeprefix("## ").strip() if content.startswith("## ") else ""
         )
         collapsed = section_title in _COLLAPSED_STATUS_SECTIONS
-        render_content = (
-            "\n".join(content.splitlines()[1:]).strip() if collapsed else content
-        )
+        render_content = "\n".join(content.splitlines()[1:]).strip() if collapsed else content
         if index:
             elements.append({"tag": "hr"})
         block_elements, table_index = _markdown_and_table_elements(
@@ -288,6 +292,26 @@ def _wall_layout_element(rows: list[list[str]], *, table_index: int) -> dict[str
     )
 
 
+def _exposure_layout_element(rows: list[list[str]], *, table_index: int) -> dict[str, Any]:
+    """Fold the six-field exposure map into a mobile-safe three-column table."""
+
+    compact_rows: list[list[str]] = []
+    for row in rows:
+        cells = [*row, *([""] * max(0, 6 - len(row)))]
+        compact_rows.append(
+            [
+                f"{cells[0]}\n{cells[1]}",
+                f"Δ {cells[2]}\nΓ {cells[3]}",
+                f"OI {cells[4]}\n量 {cells[5]}",
+            ]
+        )
+    return _native_table_element(
+        ["Strike / 位置", "Delta / Gamma", "GEX / DEX proxy"],
+        compact_rows,
+        table_index=table_index,
+    )
+
+
 def _markdown_and_table_elements(
     content: str,
     *,
@@ -327,10 +351,11 @@ def _markdown_and_table_elements(
                 ):
                     elements.append(_wall_layout_element(rows, table_index=table_index))
                     table_index += 1
+                elif headers == _EXPOSURE_LAYOUT_HEADERS:
+                    elements.append(_exposure_layout_element(rows, table_index=table_index))
+                    table_index += 1
                 else:
-                    elements.append(
-                        _native_table_element(headers, rows, table_index=table_index)
-                    )
+                    elements.append(_native_table_element(headers, rows, table_index=table_index))
                     table_index += 1
             continue
         markdown_lines.append(lines[index])

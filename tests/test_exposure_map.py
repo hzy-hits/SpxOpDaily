@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from spx_spark.application.market_features.exposure_strikes import key_strike_features
 from spx_spark.features import exposure_map as exposure_module
 from spx_spark.features.exposure_map import (
     ExposureInputRow,
@@ -250,6 +251,43 @@ def test_exposure_map_strike_rows_sorted_and_paired() -> None:
     assert front.put_delta == pytest.approx(DELTA_PUT_7500, rel=1e-9)
     assert front.call_gamma == pytest.approx(GAMMA_7500, rel=1e-9)
     assert front.put_gamma == pytest.approx(GAMMA_7500, rel=1e-9)
+
+
+def test_key_strike_features_selects_eight_spatially_sorted_structural_rows() -> None:
+    expiry = DEFAULT_MARKET_CALENDAR.research_expiry(AS_OF).strftime("%Y%m%d")
+    underlier = make_golden_state().quotes[0]
+    options: list[Quote] = []
+    for index, strike in enumerate(range(7475, 7525, 5)):
+        for right, delta in (("C", 0.55), ("P", -0.45)):
+            options.append(
+                make_option(
+                    expiry=expiry,
+                    strike=float(strike),
+                    right=right,
+                    mark=10.0,
+                    iv=IV,
+                    gamma=0.003,
+                    delta=delta,
+                    open_interest=float(100 + index * 100 + (50 if right == "C" else 0)),
+                    volume=float(50 + index * 20),
+                )
+            )
+    state = LatestState(
+        created_at=AS_OF,
+        as_of=AS_OF,
+        quotes=(underlier, *options),
+        best_quotes=(underlier, *options),
+    )
+    expiry_exposure = build_exposure_map(state).expiries[0]
+
+    rows = key_strike_features(expiry_exposure, underlier=SPOT)
+
+    assert len(rows) == 8
+    assert [row["strike"] for row in rows] == sorted(row["strike"] for row in rows)
+    assert any("ATM" in row["roles"] for row in rows)
+    assert any("主Put墙" in row["roles"] for row in rows)
+    assert any("主Call墙" in row["roles"] for row in rows)
+    assert all("oi_weighted" in row and "volume_weighted" in row for row in rows)
 
 
 def test_net_dex_proxy_by_expiry_weighting_selector() -> None:
