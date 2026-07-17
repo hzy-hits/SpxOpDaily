@@ -354,6 +354,7 @@ class StorageSettings:
     slow_index_stale_after_seconds: float
     slow_index_labels: frozenset[str]
     delayed_stale_after_seconds: float = field(default_factory=lambda: 60)
+    rotation_stale_after_seconds: float = field(default_factory=lambda: 45.0)
     provider_priority: tuple[str, ...] = field(
         default_factory=lambda: tuple(
             str(item).lower()
@@ -422,6 +423,10 @@ class StorageSettings:
             delayed_stale_after_seconds=env_float(
                 "MARKET_DATA_DELAYED_STALE_AFTER_SECONDS",
                 float(settings_value("market_data.delayed_stale_after_seconds")),
+            ),
+            rotation_stale_after_seconds=env_float(
+                "MARKET_DATA_ROTATION_STALE_AFTER_SECONDS",
+                float(settings_value("market_data.rotation_stale_after_seconds")),
             ),
             provider_priority=tuple(
                 provider.lower()

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import fcntl
 import json
+import logging
+import os
 from collections import defaultdict
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
@@ -28,6 +30,8 @@ from spx_spark.marketdata import (
     quote_from_dict,
     quote_use_decision,
 )
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -149,7 +153,20 @@ class LatestStateStore:
         if not self.path.exists():
             return LatestState(created_at=now, as_of=now, quotes=(), best_quotes=())
 
-        payload = json.loads(self.path.read_text(encoding="utf-8"))
+        try:
+            payload = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            # A corrupt state file must not crash collectors in a loop: move it
+            # aside for forensics and rebuild from an empty projection so the
+            # next update() writes a fresh file.
+            quarantine_path = self._quarantine_corrupt_state(now=now)
+            LOGGER.warning(
+                "latest state unreadable (%s); quarantined %s to %s, rebuilding empty",
+                exc,
+                self.path,
+                quarantine_path,
+            )
+            return LatestState(created_at=now, as_of=now, quotes=(), best_quotes=())
         quotes_payload = payload.get("quotes") if isinstance(payload, dict) else []
         best_payload = payload.get("best_quotes") if isinstance(payload, dict) else []
         provider_states_payload = payload.get("provider_states") if isinstance(payload, dict) else []
@@ -178,6 +195,7 @@ class LatestStateStore:
                     delayed_stale_after_seconds=self.settings.delayed_stale_after_seconds,
                     slow_stale_after_seconds=self.settings.slow_index_stale_after_seconds,
                     slow_labels=self.settings.slow_index_labels,
+                    rotation_stale_after_seconds=self.settings.rotation_stale_after_seconds,
                 )
                 for quote in quotes
             )
@@ -193,6 +211,17 @@ class LatestStateStore:
             best_quotes=best_quotes,
             provider_states=provider_states,
         )
+
+    def _quarantine_corrupt_state(self, *, now: datetime) -> Path | None:
+        """Move an unreadable state file aside so the next write can self-heal."""
+        quarantine_path = self.path.with_name(
+            f"{self.path.name}.corrupt-{int(now.timestamp())}"
+        )
+        try:
+            self.path.rename(quarantine_path)
+        except OSError:
+            return None
+        return quarantine_path
 
     def update(
         self,
@@ -223,6 +252,7 @@ class LatestStateStore:
                     delayed_stale_after_seconds=self.settings.delayed_stale_after_seconds,
                     slow_stale_after_seconds=self.settings.slow_index_stale_after_seconds,
                     slow_labels=self.settings.slow_index_labels,
+                    rotation_stale_after_seconds=self.settings.rotation_stale_after_seconds,
                 )
                 for quote in provider_latest
             )
@@ -285,8 +315,12 @@ class LatestStateStore:
     def write(self, state: LatestState) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         temp_path = self.path.with_suffix(f"{self.path.suffix}.tmp")
-        temp_path.write_text(json.dumps(state.to_dict(), indent=2, sort_keys=True), encoding="utf-8")
+        with temp_path.open("w", encoding="utf-8") as handle:
+            handle.write(json.dumps(state.to_dict(), indent=2, sort_keys=True))
+            handle.flush()
+            os.fsync(handle.fileno())
         temp_path.replace(self.path)
+        _fsync_directory(self.path.parent)
 
 
 class LatestMarketProjectionStore(LatestStateStore):
@@ -327,12 +361,15 @@ def merge_option_observations(left: Quote, right: Quote) -> Quote:
     def structure_time(quote: Quote) -> datetime:
         return as_utc(quote.structure_time or quote.received_at)
 
+    # A priceless row (e.g. a Schwab MISSING placeholder from a partial batch
+    # response) must not displace last-known-good pricing; the kept quote_time
+    # lets quote_use_decision still mark the merged row stale.
     pricing = max(
         (left, right),
         key=lambda quote: (
+            quote.has_price,
             pricing_time(quote),
             quote.mid is not None,
-            quote.has_price,
         ),
     )
     greek_candidates = [quote for quote in (left, right) if quote.greeks is not None]
@@ -446,6 +483,15 @@ def resolve_stale_after_seconds(
     return slow_seconds if instrument_id in slow_labels else default_seconds
 
 
+def _is_ibkr_rotated_option(quote: Quote) -> bool:
+    """IBKR stream option rows refresh on a round-robin cycle, not every tick."""
+
+    return (
+        quote.provider == Provider.IBKR
+        and quote.instrument.instrument_type == InstrumentType.OPTION
+    )
+
+
 def degrade_stale_quote(
     quote: Quote,
     *,
@@ -454,9 +500,18 @@ def degrade_stale_quote(
     delayed_stale_after_seconds: float = 60.0,
     slow_stale_after_seconds: float | None = None,
     slow_labels: frozenset[str] | None = None,
+    rotation_stale_after_seconds: float | None = None,
 ) -> Quote:
     threshold = stale_after_seconds
-    if slow_stale_after_seconds is not None and slow_labels:
+    if rotation_stale_after_seconds is not None and _is_ibkr_rotated_option(quote):
+        # Rotating slices are only re-subscribed once per cycle (~25s); the
+        # generic 15s window would always mark the oldest slice stale even
+        # though the row is as fresh as the rotation design allows. Callers
+        # that deliberately widen the window (e.g. GTH analytics at 90s) win
+        # over the rotation default.
+        threshold = max(rotation_stale_after_seconds, stale_after_seconds)
+        delayed_stale_after_seconds = threshold
+    elif slow_stale_after_seconds is not None and slow_labels:
         threshold = resolve_stale_after_seconds(
             quote.instrument.canonical_id,
             default_seconds=stale_after_seconds,
@@ -490,16 +545,26 @@ def configured_quote_use_decision(
 ) -> QuoteUseDecision:
     settings = settings or StorageSettings.from_env()
     is_slow = quote.instrument.canonical_id in settings.slow_index_labels
-    stale_after_seconds = (
-        settings.slow_index_stale_after_seconds
-        if is_slow
-        else settings.latest_stale_after_seconds
-    )
-    delayed_stale_after_seconds = (
-        settings.slow_index_stale_after_seconds
-        if is_slow
-        else settings.delayed_stale_after_seconds
-    )
+    if _is_ibkr_rotated_option(quote):
+        # See degrade_stale_quote: rotation rows use the wider of the rotation
+        # window and the caller-configured latest window (GTH analytics
+        # deliberately sets 90s).
+        stale_after_seconds = max(
+            settings.rotation_stale_after_seconds,
+            settings.latest_stale_after_seconds,
+        )
+        delayed_stale_after_seconds = stale_after_seconds
+    else:
+        stale_after_seconds = (
+            settings.slow_index_stale_after_seconds
+            if is_slow
+            else settings.latest_stale_after_seconds
+        )
+        delayed_stale_after_seconds = (
+            settings.slow_index_stale_after_seconds
+            if is_slow
+            else settings.delayed_stale_after_seconds
+        )
     return quote_use_decision(
         quote,
         as_of=as_of,
@@ -515,3 +580,19 @@ def quote_sort_key(quote: Quote) -> tuple[str, str]:
 
 def as_utc_from_payload(value: object) -> datetime:
     return parse_timestamp(value) or datetime.now(tz=timezone.utc)
+
+
+def _fsync_directory(path: Path) -> None:
+    flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+        flags |= os.O_DIRECTORY
+    try:
+        directory_fd = os.open(path, flags)
+    except OSError:
+        return
+    try:
+        os.fsync(directory_fd)
+    except OSError:
+        pass
+    finally:
+        os.close(directory_fd)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import multiprocessing
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 from spx_spark.config import StorageSettings
@@ -13,10 +14,12 @@ from spx_spark.marketdata import (
     ProviderState,
     ProviderStatus,
     Quote,
+    QuoteFreshness,
 )
 from spx_spark.storage import (
     JsonlQuoteWriter,
     LatestStateStore,
+    configured_quote_use_decision,
     degrade_stale_quote,
     prune_expired_option_quotes,
 )
@@ -524,3 +527,80 @@ def test_latest_state_update_prunes_expired_options(tmp_path) -> None:
 
     expiries = {quote.instrument.expiry for quote in state.quotes}
     assert expiries == {"20260707"}
+
+
+def test_ibkr_rotated_option_row_uses_rotation_window() -> None:
+    received_at = datetime(2026, 7, 7, 14, 0, tzinfo=timezone.utc)
+    quote = make_option_quote(expiry="20260707", received_at=received_at)
+    as_of = received_at + timedelta(seconds=20)
+
+    degraded = degrade_stale_quote(
+        quote,
+        as_of=as_of,
+        stale_after_seconds=15.0,
+        rotation_stale_after_seconds=45.0,
+    )
+
+    assert degraded.quality == MarketDataQuality.LIVE
+
+
+def test_ibkr_rotated_option_row_stale_beyond_rotation_window() -> None:
+    received_at = datetime(2026, 7, 7, 14, 0, tzinfo=timezone.utc)
+    quote = make_option_quote(expiry="20260707", received_at=received_at)
+    as_of = received_at + timedelta(seconds=50)
+
+    degraded = degrade_stale_quote(
+        quote,
+        as_of=as_of,
+        stale_after_seconds=15.0,
+        rotation_stale_after_seconds=45.0,
+    )
+
+    assert degraded.quality == MarketDataQuality.STALE
+
+
+def test_rotation_window_does_not_apply_to_schwab_options_or_ibkr_indexes() -> None:
+    received_at = datetime(2026, 7, 7, 14, 0, tzinfo=timezone.utc)
+    as_of = received_at + timedelta(seconds=20)
+    schwab_option = replace(
+        make_option_quote(expiry="20260707", received_at=received_at),
+        provider=Provider.SCHWAB,
+        provider_symbol="schwab:SPXW:20260707:7500:C",
+    )
+    ibkr_index = make_quote(
+        provider=Provider.IBKR,
+        quality=MarketDataQuality.LIVE,
+        mark=7500.0,
+        received_at=received_at,
+    )
+
+    for quote in (schwab_option, ibkr_index):
+        degraded = degrade_stale_quote(
+            quote,
+            as_of=as_of,
+            stale_after_seconds=15.0,
+            rotation_stale_after_seconds=45.0,
+        )
+        assert degraded.quality == MarketDataQuality.STALE
+
+
+def test_configured_decision_uses_rotation_window_for_ibkr_options(tmp_path) -> None:
+    settings = make_storage_settings(tmp_path)
+    assert settings.rotation_stale_after_seconds == 45.0
+    received_at = datetime(2026, 7, 7, 14, 0, tzinfo=timezone.utc)
+    quote = make_option_quote(expiry="20260707", received_at=received_at)
+
+    fresh_decision = configured_quote_use_decision(
+        quote,
+        as_of=received_at + timedelta(seconds=20),
+        settings=settings,
+    )
+    stale_decision = configured_quote_use_decision(
+        quote,
+        as_of=received_at + timedelta(seconds=50),
+        settings=settings,
+    )
+
+    assert fresh_decision.pricing_allowed
+    assert stale_decision.freshness == QuoteFreshness.STALE
+    assert not stale_decision.pricing_allowed

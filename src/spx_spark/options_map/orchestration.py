@@ -97,6 +97,7 @@ def group_spxw_option_quotes(
             delayed_stale_after_seconds=settings.delayed_stale_after_seconds,
             slow_stale_after_seconds=settings.slow_index_stale_after_seconds,
             slow_labels=settings.slow_index_labels,
+            rotation_stale_after_seconds=settings.rotation_stale_after_seconds,
         )
         for quote in state.quotes
         if is_spxw_option(quote)

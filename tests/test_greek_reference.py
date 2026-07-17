@@ -128,7 +128,7 @@ def test_exact_same_day_filter_and_configured_freshness() -> None:
     assert missing is None
     assert blocked.reasons == ("not_exact_same_day_spxw",)
 
-    stale = make_quote(now=now, updated_at=now - timedelta(seconds=16))
+    stale = make_quote(now=now, updated_at=now - timedelta(seconds=46))
     missing, blocked = inputs_from_quote(
         stale,
         as_of=now,
@@ -136,7 +136,7 @@ def test_exact_same_day_filter_and_configured_freshness() -> None:
     )
     assert missing is None
     assert blocked.status == "blocked"
-    assert "transport_stale_after_15s" in blocked.reasons[0]
+    assert "transport_stale_after_45s" in blocked.reasons[0]
 
 
 def test_zero_dte_boundary_includes_preceding_gth_and_early_close() -> None:
@@ -406,7 +406,7 @@ def test_normal_slow_rotation_reports_partial_coverage_without_using_stale_greek
             now=now,
             strike=strike,
             right=right,
-            updated_at=now - timedelta(seconds=16),
+            updated_at=now - timedelta(seconds=46),
         )
         for strike in (5940.0, 5950.0, 5960.0, 6040.0, 6050.0, 6060.0, 6070.0)
         for right in ("C", "P")

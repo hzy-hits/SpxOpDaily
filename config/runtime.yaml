@@ -21,9 +21,12 @@ market_data:
   delayed_stale_after_seconds:
     value: 60
     description: Maximum age allowed for a quote explicitly labelled delayed.
+  rotation_stale_after_seconds:
+    value: 45.0
+    description: Freshness window for IBKR stream option rows, which refresh on a round-robin rotation cycle (~25s); shorter windows always mark the oldest slice stale even though it is as fresh as the design allows.
   slow_index_stale_after_seconds:
-    value: 900
-    description: Longer freshness window for slow-moving index and macro reference quotes.
+    value: 360
+    description: Longer freshness window for slow-moving index and macro reference quotes. Sized to the IBKR slow-poll cadence (300s) plus slack; anything longer lets a dead collector's quotes pose as fresh.
   slow_index_labels:
     value: [index:VIX, index:VIX1D, index:VIX9D, index:VIX3M, index:VVIX, index:SKEW, equity:QQQ, equity:IWM, equity:DIA, equity:HYG, equity:LQD, equity:TLT, equity:IEF, equity:SHY, equity:UUP, equity:GLD, equity:USO, equity:RSP, equity:XLU]
     description: Canonical instruments that use the longer slow-index freshness window.
@@ -979,6 +982,9 @@ hyperliquid:
   large_trade_notional_threshold:
     value: 100000.0
     description: USD notional threshold for flagging large Hyperliquid proxy trades.
+  live_trade_max_age_seconds:
+    value: 120.0
+    description: Maximum age of the last Hyperliquid proxy trade before the quote is marked stale instead of live.
   proxy_basis_warn_bps:
     value: 50.0
     description: Basis warning threshold in basis points versus a live cash/index anchor.
@@ -1061,6 +1067,15 @@ maintenance:
   trash_retention_days:
     value: 7
     description: Retention period in days for trash/quarantine files before deletion.
+  outbox_retention_days:
+    value: 30
+    description: Retention period in days for acked domain-event outbox rows before purge.
+  review_audit_retention_days:
+    value: 30
+    description: Retention period in days for alert review audit JSONL entries before trim.
+  alert_cooldown_hours:
+    value: 24.0
+    description: Cooldown in hours between disk-pressure ops alerts at the same action level.
   warn_pct:
     value: 70.0
     description: Disk budget usage percent where maintenance emits warnings.
