@@ -29,6 +29,7 @@ def make_quote(
     strike: float = 6000.0,
     right: str = "C",
     updated_at: datetime | None = None,
+    quote_time: datetime | None = None,
 ) -> Quote:
     spot = 6000.0
     iv = 0.20
@@ -48,7 +49,7 @@ def make_quote(
         quality=MarketDataQuality.LIVE,
         bid=max(model - 0.05, 0.01),
         ask=max(model + 0.05, 0.06),
-        quote_time=now,
+        quote_time=quote_time or now,
         last_update_at=updated_at or now,
         market_data_type=1,
         open_interest=100.0 if right == "C" else 60.0,
@@ -74,7 +75,7 @@ def make_state(
             expiry=expiry,
             strike=strike,
             right=right,
-            updated_at=(now - timedelta(seconds=46) if stale_put and right == "P" else now),
+            quote_time=(now - timedelta(seconds=46) if stale_put and right == "P" else now),
         )
         for strike in (5995.0, 6000.0, 6005.0)
         for right in ("C", "P")
@@ -160,7 +161,7 @@ def test_all_stale_exact_expiry_quotes_fail_closed_but_record_health_snapshot(tm
     now = datetime(2026, 7, 10, 19, 0, tzinfo=timezone.utc)
     state = make_state(now)
     stale = tuple(
-        replace(quote, last_update_at=now - timedelta(seconds=46)) for quote in state.best_quotes
+        replace(quote, quote_time=now - timedelta(seconds=46)) for quote in state.best_quotes
     )
     state = replace(state, quotes=stale, best_quotes=stale)
 
@@ -205,7 +206,7 @@ def test_high_coverage_partial_chain_remains_usable_with_warning(tmp_path) -> No
             now=now,
             strike=strike,
             right=right,
-            updated_at=(
+            quote_time=(
                 now - timedelta(seconds=46)
                 if strike == 5980.0 and right == "P"
                 else now

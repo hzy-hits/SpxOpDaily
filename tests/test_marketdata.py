@@ -476,3 +476,34 @@ def test_quote_last_update_at_round_trips_through_json_payload() -> None:
     restored = quote_from_dict(quote.to_dict())
 
     assert restored.last_update_at == last_update_at
+
+
+def test_prefer_quote_time_judges_by_tick_recency_not_price_fingerprint() -> None:
+    now = datetime(2026, 7, 17, 12, 0, tzinfo=timezone.utc)
+    quote = Quote(
+        instrument=InstrumentId.option(
+            "SPX",
+            expiry="20260717",
+            strike=7300.0,
+            right="C",
+            trading_class="SPXW",
+        ),
+        provider=Provider.IBKR,
+        received_at=now,
+        quality=MarketDataQuality.LIVE,
+        market_data_type=1,
+        bid=180.0,
+        ask=183.0,
+        mark=181.5,
+        quote_time=now - timedelta(seconds=20),
+        last_update_at=now - timedelta(seconds=200),
+    )
+
+    fingerprint_decision = quote_use_decision(quote, as_of=now, stale_after_seconds=45.0)
+    tick_decision = quote_use_decision(
+        quote, as_of=now, stale_after_seconds=45.0, prefer_quote_time=True
+    )
+
+    assert fingerprint_decision.freshness == QuoteFreshness.STALE
+    assert tick_decision.freshness == QuoteFreshness.FRESH
+    assert tick_decision.pricing_allowed is True

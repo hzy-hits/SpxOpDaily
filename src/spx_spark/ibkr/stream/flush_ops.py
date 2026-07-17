@@ -132,26 +132,34 @@ class FlushOps:
         }
 
     def _observe_data_flow(self, now: datetime) -> None:
-        """Feed ES tick liveness into farm health (zombie-session detector)."""
+        """Feed ES liveness into farm health (zombie-session detector).
+
+        Uses the price-change fingerprint first: a half-recovered farm can
+        keep redelivering identical snapshots (ticker time advances, prices
+        never change), which only the fingerprint exposes. A full zombie
+        freeze shows up in both.
+        """
 
         entry = self.base_subs.get("future:ES")
         row = entry[1] if entry is not None else None
-        ticker_time = None
-        raw_ticker_time = getattr(row, "ticker_time", None) if row is not None else None
-        if raw_ticker_time:
-            try:
-                ticker_time = datetime.fromisoformat(str(raw_ticker_time))
-            except ValueError:
-                ticker_time = None
+        reference_time = None
+        for attr in ("last_update_at", "ticker_time"):
+            raw = getattr(row, attr, None) if row is not None else None
+            if raw:
+                try:
+                    reference_time = datetime.fromisoformat(str(raw))
+                except ValueError:
+                    continue
+                break
         silence_seconds = float(getattr(self.stream_settings, "data_flow_silence_seconds", 120.0))
         if data_flow_silence_breached(
-            ticker_time=ticker_time,
+            ticker_time=reference_time,
             now=now,
             silence_seconds=silence_seconds,
         ):
-            age = (now - ticker_time).total_seconds()
+            age = (now - reference_time).total_seconds()
             event = self.farm_health.mark_data_flow_silent(
-                f"no ES ticks for {age:.0f}s during an open Globex session"
+                f"no ES price updates for {age:.0f}s during an open Globex session"
             )
             if event is not None:
                 log_event(

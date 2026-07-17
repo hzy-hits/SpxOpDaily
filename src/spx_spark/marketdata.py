@@ -450,6 +450,7 @@ def quote_use_decision(
     stale_after_seconds: float = 15.0,
     delayed_stale_after_seconds: float = 60.0,
     allow_frozen: bool = False,
+    prefer_quote_time: bool = False,
 ) -> QuoteUseDecision:
     """Separate feed mode from transport freshness and fail closed for actionability."""
 
@@ -490,7 +491,7 @@ def quote_use_decision(
             reason=f"feed_quality_{quote.quality.value}",
         )
 
-    transport_time = quote.last_update_at
+    transport_time = None if prefer_quote_time else quote.last_update_at
     if transport_time is None and feed_mode in {
         MarketDataQuality.LIVE,
         MarketDataQuality.SYNTHETIC,

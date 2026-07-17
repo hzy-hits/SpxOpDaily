@@ -128,7 +128,7 @@ def test_exact_same_day_filter_and_configured_freshness() -> None:
     assert missing is None
     assert blocked.reasons == ("not_exact_same_day_spxw",)
 
-    stale = make_quote(now=now, updated_at=now - timedelta(seconds=46))
+    stale = replace(make_quote(now=now), quote_time=now - timedelta(seconds=46))
     missing, blocked = inputs_from_quote(
         stale,
         as_of=now,
@@ -402,11 +402,13 @@ def test_normal_slow_rotation_reports_partial_coverage_without_using_stale_greek
         for right in ("C", "P")
     )
     stale = tuple(
-        make_quote(
-            now=now,
-            strike=strike,
-            right=right,
-            updated_at=now - timedelta(seconds=46),
+        replace(
+            make_quote(
+                now=now,
+                strike=strike,
+                right=right,
+            ),
+            quote_time=now - timedelta(seconds=46),
         )
         for strike in (5940.0, 5950.0, 5960.0, 6040.0, 6050.0, 6060.0, 6070.0)
         for right in ("C", "P")

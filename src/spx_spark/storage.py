@@ -525,6 +525,10 @@ def degrade_stale_quote(
         delayed_stale_after_seconds=threshold
         if slow_labels and quote.instrument.canonical_id in slow_labels
         else delayed_stale_after_seconds,
+        # Rotating/quiet stream options re-confirm on every subscription
+        # slice even when the price is unchanged; judge them by tick recency
+        # (quote_time), not by the price-change fingerprint.
+        prefer_quote_time=_is_ibkr_rotated_option(quote),
     )
     if decision.freshness != QuoteFreshness.STALE:
         if decision.freshness == QuoteFreshness.UNKNOWN and quote.quality in {
@@ -571,6 +575,7 @@ def configured_quote_use_decision(
         stale_after_seconds=stale_after_seconds,
         delayed_stale_after_seconds=delayed_stale_after_seconds,
         allow_frozen=allow_frozen,
+        prefer_quote_time=_is_ibkr_rotated_option(quote),
     )
 
 
