@@ -35,6 +35,22 @@ def _fmt_eta_minutes(minutes: float) -> str:
     return f"{minutes:.0f} 分钟"
 
 
+_UNDERLIER_SOURCE_LABELS = {
+    "chain_implied": "期权隐含",
+    "index:SPX": "现金指数",
+    "future:ES": "ES推算",
+    "cfd:IBUS500": "IBUS500",
+    "equity:SPY*10": "SPY×10",
+    "hl_perp": "HL永续",
+}
+
+
+def underlier_source_label(source: Any) -> str:
+    """Human-readable Chinese tag for an underlier pricing source."""
+
+    return _UNDERLIER_SOURCE_LABELS.get(str(source or ""), str(source or "-"))
+
+
 def _day_move_line(payload: dict[str, Any]) -> str | None:
     day_move = payload.get("day_move") if isinstance(payload.get("day_move"), dict) else {}
     points = day_move.get("points")
@@ -559,7 +575,7 @@ def render_template(payload: dict[str, Any]) -> str:
 
     underlier = payload.get("underlier") if isinstance(payload.get("underlier"), dict) else {}
     underlier_price = underlier.get("price")
-    underlier_source = underlier.get("source") or "-"
+    underlier_source = underlier_source_label(underlier.get("source"))
 
     expected_move = payload.get("expected_move_points")
     gamma_state = payload.get("gamma_state") or "-"

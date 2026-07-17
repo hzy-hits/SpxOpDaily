@@ -24,6 +24,7 @@ from spx_spark.application.order_map.render import (
     _rn_density_line,
     render_research_only_template,
     render_template,
+    underlier_source_label,
 )
 from spx_spark.application.order_map.state import _session_phase_of
 from spx_spark.application.order_map.writer_validation import (
@@ -272,8 +273,14 @@ def _compact_price_line(payload: dict[str, Any]) -> str:
     em_used = finite_float(day_move.get("em_used_fraction"))
     change = f"{points:+.1f}" if points is not None else "-"
     used = f"{em_used:.0%}" if em_used is not None else "-"
+    source = underlier.get("source")
+    spx_text = _dash(underlier.get("price"))
+    if source and source != "index:SPX":
+        # GTH pushes price off the option chain, not the frozen cash print;
+        # say so, otherwise the SPX/ES gap reads as a data bug.
+        spx_text = f"{spx_text}({underlier_source_label(source)})"
     return (
-        f"价格  SPX {_dash(underlier.get('price'))}　ES {_dash(payload.get('es_last'))}　"
+        f"价格  SPX {spx_text}　ES {_dash(payload.get('es_last'))}　"
         f"较昨收 {change}　GTH EM已用 {used}"
     )
 

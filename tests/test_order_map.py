@@ -3971,3 +3971,33 @@ def test_es_volume_signal_binds_direction_location_event() -> None:
     assert signal["price_delta"] == -28.0
     assert signal["location"] == "at_put_wall"
     assert signal["event_id"] == "elevated_sell_into_support"
+
+
+def test_compact_price_line_labels_chain_implied_source() -> None:
+    from spx_spark.application.order_map.prompts import _compact_price_line
+
+    line = _compact_price_line(
+        {
+            "underlier": {"price": 7474.0, "source": "chain_implied"},
+            "es_last": 7513.25,
+            "day_move": {"points": -59.8, "em_used_fraction": 0.99},
+        }
+    )
+
+    assert "SPX 7474(期权隐含)" in line
+    assert "ES 7513.2" in line
+
+
+def test_compact_price_line_leaves_cash_index_untagged() -> None:
+    from spx_spark.application.order_map.prompts import _compact_price_line
+
+    line = _compact_price_line(
+        {
+            "underlier": {"price": 7550.0, "source": "index:SPX"},
+            "es_last": 7595.0,
+            "day_move": {"points": 12.5, "em_used_fraction": 0.4},
+        }
+    )
+
+    assert "SPX 7550　" in line
+    assert "期权隐含" not in line
