@@ -9,6 +9,7 @@ import pytest
 
 from spx_spark.market_context import _cme_contract_expiry, build_market_context
 from spx_spark.marketdata import InstrumentId, InstrumentType, MarketDataQuality, Provider, Quote
+from spx_spark.settings import settings_value
 from spx_spark.storage import LatestState
 
 
@@ -507,3 +508,35 @@ def test_hyperliquid_gate_falls_back_to_raw_basis_without_contract_symbol() -> N
     assert gate["anchor_is_future"] is True
     assert gate["state"] == "basis_warn"
     assert gate["anchor_cash_equivalent"] is None
+
+
+def test_hyperliquid_gate_survives_missing_carry_config(monkeypatch) -> None:
+    now = datetime(2026, 7, 17, 5, 0, tzinfo=timezone.utc)
+    es = make_provider_quote(
+        InstrumentId.future("ES", provider_symbol="/ESU26"),
+        7513.0,
+        7480.0,
+        now,
+        provider=Provider.IBKR,
+    )
+    proxy = make_provider_quote(
+        InstrumentId(symbol="xyz:SP500", instrument_type=InstrumentType.CRYPTO_PERP),
+        7449.0,
+        7480.0,
+        now,
+        provider=Provider.HYPERLIQUID,
+    )
+    state = LatestState(created_at=now, as_of=now, quotes=(), best_quotes=(es, proxy))
+
+    def _raise_missing(path: str) -> object:
+        if path == "hyperliquid.es_carry_annual_rate":
+            raise KeyError(path)
+        return settings_value(path)
+
+    monkeypatch.setattr("spx_spark.market_context.settings_value", _raise_missing)
+
+    gate = build_market_context(state)["derived"]["hyperliquid_spx_proxy"]
+
+    assert gate["anchor_cash_equivalent"] is None
+    assert gate["basis_bps"] == pytest.approx(-85.2, abs=0.5)
+    assert gate["state"] == "basis_warn"

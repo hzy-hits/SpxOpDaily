@@ -410,10 +410,15 @@ def _future_carry_adjusted_price(
     days_to_expiry = (expiry - as_of.date()).days
     if days_to_expiry < 0:
         return None
-    carry_rate = env_float(
-        "HYPERLIQUID_ES_CARRY_ANNUAL_RATE",
-        float(settings_value("hyperliquid.es_carry_annual_rate")),
-    )
+    try:
+        carry_rate = env_float(
+            "HYPERLIQUID_ES_CARRY_ANNUAL_RATE",
+            float(settings_value("hyperliquid.es_carry_annual_rate")),
+        )
+    except (KeyError, TypeError, ValueError):
+        # Config/code skew during a deploy must not break the status push;
+        # fall back to the raw anchor comparison.
+        return None
     return anchor.price * math.exp(-carry_rate * days_to_expiry / 365.0)
 
 
