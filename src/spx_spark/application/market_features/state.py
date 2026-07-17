@@ -39,8 +39,16 @@ def load_json(path: str | Path) -> dict[str, Any]:
 def save_json(path: str | Path, payload: dict[str, Any]) -> None:
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
+    rendered = json.dumps(payload, sort_keys=True, indent=2) + "\n"
+    try:
+        # Skip the write entirely when content is unchanged: the 5s service
+        # loop would otherwise rewrite multi-MB state files all day.
+        if target.read_text(encoding="utf-8") == rendered:
+            return
+    except OSError:
+        pass
     temporary = target.with_suffix(f"{target.suffix}.tmp")
-    temporary.write_text(json.dumps(payload, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    temporary.write_text(rendered, encoding="utf-8")
     temporary.replace(target)
 
 

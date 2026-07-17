@@ -22,16 +22,23 @@ def test_weekend_bulk_compaction_is_bounded_low_priority_and_persistent() -> Non
     assert "Persistent=true" in timer
 
 
-def test_retention_audits_run_after_market_and_never_execute_deletion() -> None:
+def test_retention_audits_run_after_market_and_weekly_prune_is_threshold_gated() -> None:
     daily = read("systemd/spx-spark-maintenance-daily.timer")
     weekly = read("systemd/spx-spark-maintenance-weekly.timer")
     weekly_script = read("scripts/run-maintenance-weekly.sh")
 
     assert "OnCalendar=*-*-* 07:30:00 Asia/Shanghai" in daily
     assert "OnCalendar=Sun *-*-* 13:00:00 Asia/Shanghai" in weekly
-    assert "--execute" not in weekly_script
-    assert "spx-spark-maintenance prune" in weekly_script
-    assert "spx-spark-maintenance prune --json" not in weekly_script
+    # Deletion only fires when the dry-run report crosses the prune watermark;
+    # below it the weekly pass stays audit-only.
+    assert "spx-spark-maintenance dry-run --json --no-write" in weekly_script
+    assert "action_level" in weekly_script
+    assert "prune|critical_stop_raw)" in weekly_script
+    assert "spx-spark-maintenance prune --execute" in weekly_script
+    assert "spx-spark-maintenance prune\n" in weekly_script
+    # Ledger retention rides the same weekly off-market window.
+    assert "spx-spark-maintenance purge-outbox --vacuum" in weekly_script
+    assert "spx-spark-maintenance trim-review-audit" in weekly_script
 
 
 def test_installer_enables_weekend_bulk_timer() -> None:

@@ -26,6 +26,10 @@ HOST="${IBKR_HOST:-127.0.0.1}"
 PORT="${IBKR_PORT:-4001}"
 STATE_FILE="${IBC_WATCHDOG_STATE:-/srv/data/spx-spark/runtime/ibc/watchdog-failures}"
 THRESHOLD="${IBC_WATCHDOG_FAILURE_THRESHOLD:-3}"
+# Daily cap on gateway restarts: a broken probe would otherwise restart (and
+# trigger a fresh 2FA push) every THRESHOLD checks forever.
+MAX_RESTARTS_PER_DAY="${IBC_WATCHDOG_MAX_RESTARTS_PER_DAY:-6}"
+RESTART_STATE="${IBC_WATCHDOG_RESTART_STATE:-/srv/data/spx-spark/runtime/ibc/watchdog-restarts}"
 RUNTIME_MODE_FILE="${RUNTIME_MODE_PATH:-runtime/mode.json}"
 # Grace period after a gateway (re)start: login + 2FA + farm reconnect can take
 # minutes, and counting probe failures during that window creates a restart ->
@@ -33,6 +37,32 @@ RUNTIME_MODE_FILE="${RUNTIME_MODE_PATH:-runtime/mode.json}"
 STARTUP_GRACE_SECONDS="${IBC_WATCHDOG_STARTUP_GRACE_SECONDS:-600}"
 
 log() { echo "[ibc-watchdog] $*"; }
+
+restarts_today() {
+  local today saved_date saved_count
+  today="$(date +%F)"
+  if [[ -f "$RESTART_STATE" ]]; then
+    saved_date="$(cut -d: -f1 "$RESTART_STATE" 2>/dev/null || true)"
+    saved_count="$(cut -d: -f2 "$RESTART_STATE" 2>/dev/null || true)"
+    if [[ "$saved_date" == "$today" && "$saved_count" =~ ^[0-9]+$ ]]; then
+      echo "$saved_count"
+      return
+    fi
+  fi
+  echo 0
+}
+
+restart_gateway() {
+  local count
+  count="$(restarts_today)"
+  if (( count >= MAX_RESTARTS_PER_DAY )); then
+    log "daily restart cap reached ($count/$MAX_RESTARTS_PER_DAY); not restarting $SERVICE"
+    return 1
+  fi
+  mkdir -p "$(dirname "$RESTART_STATE")"
+  printf '%s:%s\n' "$(date +%F)" "$((count + 1))" > "$RESTART_STATE"
+  systemctl --user restart "$SERVICE"
+}
 
 enabled="$(systemctl --user is-enabled "$SERVICE" 2>/dev/null || true)"
 if [[ "$enabled" != "enabled" && "$enabled" != "linked" && "$enabled" != "alias" ]]; then
@@ -92,7 +122,7 @@ if timeout 5 bash -c "exec 3<>/dev/tcp/$HOST/$PORT" 2>/dev/null; then
   fi
 
   probe_exit=0
-  probe_output="$(cd "$ROOT" && timeout 60 uv run spx-spark-ibkr-farm-probe --json 2>&1)" || probe_exit=$?
+  probe_output="$(cd "$ROOT" && timeout 60 uv run --no-sync spx-spark-ibkr-farm-probe --json 2>&1)" || probe_exit=$?
   if (( probe_exit == 0 )); then
     rm -f "$STATE_FILE" "$DATA_PLANE_STATE"
     log "API port $HOST:$PORT and data plane are healthy"
@@ -120,9 +150,9 @@ if timeout 5 bash -c "exec 3<>/dev/tcp/$HOST/$PORT" 2>/dev/null; then
     exit 0
   fi
 
-  log "data plane unhealthy for $probe_failures consecutive checks; restarting $SERVICE"
+  log "data plane unhealthy for $probe_failures consecutive checks; requesting restart of $SERVICE"
   rm -f "$STATE_FILE" "$DATA_PLANE_STATE"
-  systemctl --user restart "$SERVICE"
+  restart_gateway
   exit 0
 fi
 
@@ -140,6 +170,6 @@ if (( failures < THRESHOLD )); then
   exit 0
 fi
 
-log "API port $HOST:$PORT dead for $failures consecutive checks; restarting $SERVICE"
+log "API port $HOST:$PORT dead for $failures consecutive checks; requesting restart of $SERVICE"
 rm -f "$STATE_FILE"
-systemctl --user restart "$SERVICE"
+restart_gateway

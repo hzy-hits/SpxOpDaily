@@ -4,7 +4,7 @@ Description=Run SPX Spark order map push before US open (Beijing)
 [Timer]
 OnCalendar=Mon..Fri 14:00 Asia/Shanghai
 OnCalendar=Mon..Fri 16:30 Asia/Shanghai
-Persistent=false
+Persistent=true
 
 [Install]
 WantedBy=timers.target

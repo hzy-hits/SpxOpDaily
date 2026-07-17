@@ -271,20 +271,24 @@ def run(argv: list[str] | None = None, *, now: datetime | None = None) -> int:
             context.session_id,
             audit.to_dict(),
         )
-    save_json(
-        state_path,
-        {
-            "schema_version": 1,
-            "updated_at": evaluation_now.isoformat(),
-            "market_samples": samples,
-            "option_history": option_history,
-            "option_contracts": contracts,
-            "last_usable_option_frame": last_usable_option_frame,
-            "volume_baselines": volume_baselines,
-            "session_episode": session_episode,
-            "last_decision_context": context.to_dict(),
-        },
-    )
+    state_payload: dict[str, Any] = {
+        "schema_version": 1,
+        "market_samples": samples,
+        "option_history": option_history,
+        "option_contracts": contracts,
+        "last_usable_option_frame": last_usable_option_frame,
+        "volume_baselines": volume_baselines,
+        "session_episode": session_episode,
+        "last_decision_context": context.to_dict(),
+    }
+    previous_state = {key: value for key, value in persisted.items() if key != "updated_at"}
+    if previous_state == state_payload and isinstance(persisted.get("updated_at"), str):
+        # Content unchanged: keep the prior timestamp so save_json can skip
+        # the rewrite instead of churning a multi-MB file every cycle.
+        state_payload["updated_at"] = persisted["updated_at"]
+    else:
+        state_payload["updated_at"] = evaluation_now.isoformat()
+    save_json(state_path, state_payload)
     output.update(
         {
             "market_frame_id": market_frame.frame_id,

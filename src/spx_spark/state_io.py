@@ -4,9 +4,13 @@ import fcntl
 import json
 import os
 import tempfile
+import time
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
+
+
+DEFAULT_LOCK_TIMEOUT_SECONDS = 60.0
 
 
 def read_json_object(path: Path) -> dict[str, object]:
@@ -63,9 +67,33 @@ def atomic_write_json_secure(path: Path, payload: Mapping[str, object]) -> None:
         temp_path.unlink(missing_ok=True)
 
 
+def _flock_with_timeout(file_descriptor: int, lock_path: Path, timeout_seconds: float) -> None:
+    deadline = time.monotonic() + max(timeout_seconds, 0.0)
+    delay_seconds = 0.05
+    while True:
+        try:
+            fcntl.flock(file_descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except BlockingIOError:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(
+                    f"timed out after {timeout_seconds}s waiting for state lock {lock_path}"
+                ) from None
+            time.sleep(min(delay_seconds, remaining))
+            delay_seconds = min(delay_seconds * 2, 1.0)
+
+
 @contextmanager
-def exclusive_state_lock(path: Path) -> Iterator[None]:
-    """Hold an advisory lock across a complete state read-modify-write cycle."""
+def exclusive_state_lock(
+    path: Path,
+    timeout_seconds: float = DEFAULT_LOCK_TIMEOUT_SECONDS,
+) -> Iterator[None]:
+    """Hold an advisory lock across a complete state read-modify-write cycle.
+
+    Waiting is bounded: a wedged lock holder raises TimeoutError after
+    *timeout_seconds* instead of blocking the caller forever.
+    """
 
     path = Path(path)
     lock_path = path.with_name(f"{path.name}.lock")
@@ -73,7 +101,7 @@ def exclusive_state_lock(path: Path) -> Iterator[None]:
     file_descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
     os.fchmod(file_descriptor, 0o600)
     with os.fdopen(file_descriptor, "a+", encoding="utf-8") as handle:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        _flock_with_timeout(handle.fileno(), lock_path, timeout_seconds)
         try:
             yield
         finally:

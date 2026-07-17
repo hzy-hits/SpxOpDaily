@@ -12,9 +12,9 @@ if ! flock -n 9; then
   exit 0
 fi
 
-uv run python -m spx_spark.data_platform.lake.compact "$@"
+uv run --no-sync python -m spx_spark.data_platform.lake.compact "$@"
 
 replay_status=0
-uv run python -m spx_spark.data_platform.cli replay-spool || replay_status=$?
-uv run python -m spx_spark.data_platform.cli sync-manifests
+uv run --no-sync python -m spx_spark.data_platform.cli replay-spool || replay_status=$?
+uv run --no-sync python -m spx_spark.data_platform.cli sync-manifests
 exit "$replay_status"

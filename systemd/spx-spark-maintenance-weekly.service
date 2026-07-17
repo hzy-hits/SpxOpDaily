@@ -1,5 +1,5 @@
 [Unit]
-Description=SPX Spark weekly non-destructive retention audit
+Description=SPX Spark weekly threshold-gated retention maintenance
 After=network-online.target
 Wants=network-online.target
 

@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import stat
+import threading
+import time
 from pathlib import Path
+
+import pytest
 
 from spx_spark.state_io import atomic_write_json_secure, exclusive_state_lock
 
@@ -43,3 +48,39 @@ def test_exclusive_state_lock_uses_owner_only_lock_file(tmp_path) -> None:
         lock_path = tmp_path / "state.json.lock"
         assert lock_path.exists()
         assert file_mode(lock_path) == 0o600
+
+
+def test_exclusive_state_lock_times_out_when_lock_is_held(tmp_path) -> None:
+    state_path = tmp_path / "state.json"
+    lock_path = tmp_path / "state.json.lock"
+    holder = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(holder, fcntl.LOCK_EX)
+    try:
+        started = time.monotonic()
+        with pytest.raises(TimeoutError, match="waiting for state lock"):
+            with exclusive_state_lock(state_path, timeout_seconds=0.3):
+                pass
+        assert time.monotonic() - started < 5
+    finally:
+        fcntl.flock(holder, fcntl.LOCK_UN)
+        os.close(holder)
+
+
+def test_exclusive_state_lock_acquires_after_holder_releases(tmp_path) -> None:
+    state_path = tmp_path / "state.json"
+    lock_path = tmp_path / "state.json.lock"
+    holder = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(holder, fcntl.LOCK_EX)
+
+    def release_later() -> None:
+        time.sleep(0.2)
+        fcntl.flock(holder, fcntl.LOCK_UN)
+        os.close(holder)
+
+    releaser = threading.Thread(target=release_later)
+    releaser.start()
+    try:
+        with exclusive_state_lock(state_path, timeout_seconds=5):
+            pass
+    finally:
+        releaser.join()

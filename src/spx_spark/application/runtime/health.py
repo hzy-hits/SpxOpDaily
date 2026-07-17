@@ -7,6 +7,7 @@ from datetime import datetime
 from spx_spark.application.realtime.health import evaluate_engine_health
 from spx_spark.application.runtime.tasks import TaskRuntimeState
 from spx_spark.domain.health import EngineHealth, EngineMode, TaskCriticality
+from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 
 
 # Exit code for unrecoverable critical-task failure (systemd Restart=on-failure).
@@ -102,6 +103,7 @@ def aggregate_runtime_health(
         engine_failed=False,
         warmed_up=warmed,
         any_critical_success=any_success,
+        cash_session_open=DEFAULT_MARKET_CALENDAR.is_rth_open(checked_at),
     )
 
 

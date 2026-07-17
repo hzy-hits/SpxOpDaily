@@ -2,9 +2,12 @@
 Description=Run SPX Spark pre-market map push before US open
 
 [Timer]
-OnCalendar=Mon..Fri 21:00 Asia/Shanghai
-OnCalendar=Mon..Fri 22:00 Asia/Shanghai
-Persistent=false
+# Fire inside the ET 8:30-9:30 send window (see morning_map/constants.py);
+# already_sent dedups, and a trading-day check skips holidays. Two triggers
+# (window front/back) keep the push alive if one slot is missed.
+OnCalendar=Mon..Fri *-*-* 08:35:00 America/New_York
+OnCalendar=Mon..Fri *-*-* 09:15:00 America/New_York
+Persistent=true
 
 [Install]
 WantedBy=timers.target

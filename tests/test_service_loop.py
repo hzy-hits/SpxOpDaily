@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 
 from concurrent.futures import ThreadPoolExecutor
 
+import pytest
+
+from spx_spark.application.runtime.runner import run_task_command
 from spx_spark.service_loop import (
     ServiceLoopSettings,
     ServiceTask,
@@ -215,6 +219,30 @@ def test_run_task_times_out_hanging_command(monkeypatch) -> None:
     assert event["ok"] is False
     assert event["exit_code"] == 124
     assert event["error"] == "service task exceeded 1s timeout"
+
+
+def test_run_task_command_timeout_kills_whole_process_group(tmp_path) -> None:
+    pid_file = tmp_path / "grandchild.pid"
+    child_script = (
+        "import subprocess, sys, time\n"
+        "grandchild = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+        f"open({str(pid_file)!r}, 'w').write(str(grandchild.pid))\n"
+        "time.sleep(60)\n"
+    )
+
+    code, _stdout, _stderr, error = run_task_command((sys.executable, "-c", child_script), 1)
+
+    assert code == 124
+    assert error == "service task exceeded 1s timeout"
+    grandchild_pid = int(pid_file.read_text(encoding="utf-8"))
+    for _ in range(100):
+        try:
+            os.kill(grandchild_pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.05)
+    else:
+        pytest.fail("grandchild survived the process-group kill")
 
 
 def test_ibkr_task_extracts_provider_state_from_json_stdout() -> None:

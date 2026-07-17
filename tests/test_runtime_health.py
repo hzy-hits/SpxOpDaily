@@ -15,7 +15,8 @@ from spx_spark.domain.health import EngineMode, TaskCriticality, TaskMode
 from spx_spark.service_loop import ServiceTask, drain_finished_tasks, submit_due_tasks
 
 
-NOW = datetime(2026, 7, 11, 15, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 7, 13, 15, 0, tzinfo=timezone.utc)  # Monday 11:00 ET, RTH open
+OFF_HOURS = datetime(2026, 7, 14, 1, 0, tzinfo=timezone.utc)  # Monday 21:00 ET, RTH closed
 
 
 def test_heartbeat_ok_false_when_not_ready() -> None:
@@ -132,6 +133,38 @@ def test_heartbeat_ok_true_only_when_ready() -> None:
     assert health.mode is EngineMode.READY
     assert event["ok"] is True
     assert event["in_flight_tasks"] == ["hyperliquid"]
+
+def test_off_hours_heartbeat_reports_cash_session_closed() -> None:
+    states = [
+        TaskRuntimeState(
+            name="ibkr",
+            criticality=TaskCriticality.CRITICAL,
+            mode=TaskMode.IDLE,
+            last_success_at=OFF_HOURS,
+        ),
+        TaskRuntimeState(
+            name="realtime_engine",
+            criticality=TaskCriticality.IMPORTANT,
+            mode=TaskMode.IDLE,
+            last_success_at=OFF_HOURS,
+            last_engine_health={
+                "mode": "ready",
+                "factors": {
+                    "tradfi_anchor": True,
+                    "front_chain_fresh": True,
+                    "analytics_ok": True,
+                    "outbox_writable": True,
+                    "critical_tasks_ok": True,
+                },
+                "reasons": [],
+            },
+        ),
+    ]
+    health = aggregate_runtime_health(states, checked_at=OFF_HOURS)
+    assert health.factors["cash_session_open"] is False
+    assert health.mode is not EngineMode.READY
+    assert "cash_session_closed" in health.reasons
+
 
 def test_heartbeat_uses_latest_realtime_engine_factors() -> None:
     state = TaskRuntimeState(

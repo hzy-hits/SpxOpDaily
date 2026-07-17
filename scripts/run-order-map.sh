@@ -6,4 +6,4 @@ export PATH="$HOME/.local/bin:$PATH"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-exec uv run spx-spark-order-map "$@"
+exec uv run --no-sync spx-spark-order-map "$@"

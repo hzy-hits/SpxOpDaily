@@ -1,5 +1,5 @@
 [Unit]
-Description=Run SPX Spark weekly non-destructive retention audit
+Description=Run SPX Spark weekly threshold-gated retention maintenance
 
 [Timer]
 OnCalendar=Sun *-*-* 13:00:00 Asia/Shanghai

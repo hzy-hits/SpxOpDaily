@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import os
 import signal
 import subprocess
 import threading
@@ -97,22 +98,45 @@ def run_task(task: ServiceTask) -> dict[str, object]:
 
 
 def run_task_command(command: tuple[str, ...], timeout_seconds: int) -> tuple[int, str, str, str | None]:
+    # start_new_session puts the child in its own process group so a timeout
+    # can kill the whole tree (grandchildren like codex exec / openclaw agent)
+    # instead of orphaning them into a lock fight with the next instance.
+    process = subprocess.Popen(
+        list(command),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
     try:
-        completed = subprocess.run(
-            list(command),
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=timeout_seconds if timeout_seconds > 0 else None,
+        stdout_text, stderr_text = process.communicate(
+            timeout=timeout_seconds if timeout_seconds > 0 else None
         )
-    except subprocess.TimeoutExpired as exc:
+    except subprocess.TimeoutExpired:
+        kill_process_group(process)
+        stdout_text, stderr_text = process.communicate()
         return (
             124,
-            normalize_timeout_output(exc.stdout),
-            normalize_timeout_output(exc.stderr),
+            normalize_timeout_output(stdout_text),
+            normalize_timeout_output(stderr_text),
             f"service task exceeded {timeout_seconds}s timeout",
         )
-    return completed.returncode, completed.stdout, completed.stderr, None
+    return process.returncode, stdout_text, stderr_text, None
+
+
+def kill_process_group(process: subprocess.Popen, grace_seconds: float = 5.0) -> None:
+    """SIGTERM the child's process group, then SIGKILL after a short grace."""
+
+    def signal_group(sig: int) -> None:
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(process.pid, sig)
+
+    signal_group(signal.SIGTERM)
+    deadline = time.monotonic() + grace_seconds
+    while process.poll() is None and time.monotonic() < deadline:
+        time.sleep(0.05)
+    if process.poll() is None:
+        signal_group(signal.SIGKILL)
 
 
 def normalize_timeout_output(value: str | bytes | None) -> str:
