@@ -33,7 +33,13 @@ from spx_spark.domain.analytics import (
 )
 from spx_spark.domain.market import MarketSnapshot
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
-from spx_spark.marketdata import OptionRight, Provider, ProviderStatus, Quote
+from spx_spark.marketdata import (
+    FUTURE_TIMESTAMP_TOLERANCE_SECONDS,
+    OptionRight,
+    Provider,
+    ProviderStatus,
+    Quote,
+)
 from spx_spark.options_map.orchestration import select_underlier
 from spx_spark.settings.analytics import AnalyticsSettings
 from spx_spark.storage import LatestState, select_best_quotes
@@ -291,7 +297,11 @@ def evaluate_front_chain_fresh(
         if analytical_quote.quality in BAD_QUALITIES:
             continue
         age_ms = quote.quote_age_ms(now)
-        if age_ms is None or age_ms / 1000.0 > max_age_seconds:
+        if (
+            age_ms is None
+            or age_ms / 1000.0 > max_age_seconds
+            or age_ms < -FUTURE_TIMESTAMP_TOLERANCE_SECONDS * 1000.0
+        ):
             continue
         fresh_quotes.append(analytical_quote)
     if not fresh_quotes:

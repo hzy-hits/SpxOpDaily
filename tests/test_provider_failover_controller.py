@@ -1,4 +1,5 @@
 import json
+import logging
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
@@ -339,3 +340,114 @@ def test_provider_health_rejects_close_only_anchor() -> None:
 
     assert health.healthy is False
     assert "index:SPX" in health.reason
+
+
+def seed_control(tmp_path, payload: dict) -> None:
+    (tmp_path / "failover.json").write_text(json.dumps(payload), encoding="utf-8")
+
+
+def test_gth_to_rth_switch_keeps_streaks_and_reenters_ibkr_fallback(tmp_path) -> None:
+    cfg = settings(tmp_path)
+    gth = datetime(2026, 7, 13, 13, 29, tzinfo=UTC)
+    seed_control(
+        tmp_path,
+        {
+            "mode": "ibkr_fallback",
+            "updated_at": gth.isoformat(),
+            "sequence": 4,
+            "schwab_unhealthy_streak": 9,
+            "schwab_recovery_streak": 0,
+            "ibkr_unhealthy_streak": 0,
+            "ibkr_recovery_streak": 9,
+            "monitoring_active": True,
+            "monitoring_context": "gth",
+        },
+    )
+    now = datetime(2026, 7, 13, 14, 0, tzinfo=UTC)
+    rows = (
+        quote(InstrumentId.index("SPX"), Provider.IBKR, now),
+        quote(InstrumentId.future("ES"), Provider.IBKR, now),
+    )
+
+    state = evaluate_and_persist(latest(now, *rows), cfg)
+    raw = json.loads((tmp_path / "failover.json").read_text(encoding="utf-8"))
+
+    # Schwab is still down across the boundary: one re-evaluation must be
+    # enough to re-enter IBKR fallback instead of restarting the hysteresis.
+    assert state.mode == FailoverMode.IBKR_FALLBACK
+    assert state.schwab_unhealthy_streak == 10
+    assert raw["monitoring_context"] == "rth"
+    assert raw["new_entries_allowed"] is True
+
+
+def test_context_switch_with_both_providers_down_stays_fail_closed(tmp_path) -> None:
+    cfg = settings(tmp_path)
+    gth = datetime(2026, 7, 13, 13, 29, tzinfo=UTC)
+    seed_control(
+        tmp_path,
+        {
+            "mode": "ibkr_fallback",
+            "updated_at": gth.isoformat(),
+            "sequence": 4,
+            "schwab_unhealthy_streak": 9,
+            "schwab_recovery_streak": 0,
+            "ibkr_unhealthy_streak": 3,
+            "ibkr_recovery_streak": 0,
+            "monitoring_active": True,
+            "monitoring_context": "gth",
+        },
+    )
+    now = datetime(2026, 7, 13, 14, 0, tzinfo=UTC)
+
+    state = evaluate_and_persist(latest(now), cfg)
+    raw = json.loads((tmp_path / "failover.json").read_text(encoding="utf-8"))
+
+    assert state.mode == FailoverMode.RECOVERY_PENDING
+    assert raw["new_entries_allowed"] is False
+    assert raw["ibkr_market_data_required"] is True
+
+
+def test_corrupt_state_file_fails_closed_to_recovery_pending(
+    tmp_path,
+    caplog,
+) -> None:
+    cfg = settings(tmp_path)
+    (tmp_path / "failover.json").write_text("{not valid json", encoding="utf-8")
+    now = datetime(2026, 7, 13, 14, 0, tzinfo=UTC)
+    rows = (
+        quote(InstrumentId.index("SPX"), Provider.SCHWAB, now),
+        quote(InstrumentId.future("ES"), Provider.SCHWAB, now),
+    )
+
+    with caplog.at_level(logging.WARNING):
+        state = evaluate_and_persist(latest(now, *rows), cfg)
+
+    # Even with Schwab quotes healthy, recovery must be re-confirmed through
+    # the streak thresholds rather than assumed from a corrupt state file.
+    assert state.mode == FailoverMode.RECOVERY_PENDING
+    assert any("recovery_pending" in message for message in caplog.messages)
+
+    later = now + timedelta(seconds=15)
+    recovered = evaluate_and_persist(
+        latest(
+            later,
+            quote(InstrumentId.index("SPX"), Provider.SCHWAB, later),
+            quote(InstrumentId.future("ES"), Provider.SCHWAB, later),
+        ),
+        cfg,
+    )
+    assert recovered.mode == FailoverMode.SCHWAB_PRIMARY
+
+
+def test_missing_state_file_keeps_initial_primary_default(tmp_path) -> None:
+    cfg = settings(tmp_path)
+    now = datetime(2026, 7, 13, 14, 0, tzinfo=UTC)
+    rows = (
+        quote(InstrumentId.index("SPX"), Provider.SCHWAB, now),
+        quote(InstrumentId.future("ES"), Provider.SCHWAB, now),
+    )
+
+    state = evaluate_and_persist(latest(now, *rows), cfg)
+
+    assert state.mode == FailoverMode.SCHWAB_PRIMARY
+    assert state.sequence == 0

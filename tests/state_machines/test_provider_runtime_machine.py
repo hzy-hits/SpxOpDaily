@@ -70,7 +70,9 @@ def test_reconnect_backoff_table(
     min_seconds: float,
     max_seconds: float,
     expected_delays: list[float],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr("spx_spark.ibkr.stream.models.reconnect_jitter", lambda s: s)
     policy = ReconnectPolicy(min_seconds=min_seconds, max_seconds=max_seconds)
     assert [policy.next_delay() for _ in expected_delays] == expected_delays
     policy.reset()

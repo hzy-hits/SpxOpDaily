@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -13,7 +13,12 @@ from spx_spark.hyperliquid.collector import (
     recent_trade_stats,
     resolve_market,
 )
-from spx_spark.marketdata import InstrumentType, MarketDataQuality, Provider
+from spx_spark.marketdata import (
+    InstrumentType,
+    MarketDataQuality,
+    Provider,
+    quote_use_decision,
+)
 
 
 def test_find_asset_context_matches_universe_index():
@@ -119,6 +124,67 @@ def test_infer_symbol_warning_for_low_priced_hyperliquid_spx():
 
     assert warning is not None
     assert "not official Cboe SPX" in warning
+
+
+def _context_with_trades(received_at: datetime, trades: list[dict[str, object]]):
+    return build_asset_context(
+        coin="SPX",
+        dex="",
+        requested_coin="SPX",
+        all_mids={"SPX": "7500.25"},
+        meta_and_contexts=[
+            {"universe": [{"name": "SPX"}]},
+            [{"markPx": "7500.5", "oraclePx": "7500.0"}],
+        ],
+        book=None,
+        trades=trades,
+        received_at=received_at,
+        book_depth_levels=5,
+        large_trade_notional_threshold=100_000,
+    )
+
+
+def _trade_at(when: datetime) -> dict[str, object]:
+    return {"px": "7500.75", "sz": "2", "side": "B", "time": int(when.timestamp() * 1000)}
+
+
+def test_quote_from_context_flags_stale_when_last_trade_is_old() -> None:
+    received_at = datetime(2026, 7, 6, 13, 30, tzinfo=timezone.utc)
+    context = _context_with_trades(
+        received_at,
+        [_trade_at(received_at - timedelta(seconds=300))],
+    )
+
+    quote = quote_from_context(context)
+
+    assert quote.quality == MarketDataQuality.STALE
+    # Transport time stays honest; only the quality flag gates downstream use.
+    assert quote.quote_time == received_at
+    decision = quote_use_decision(quote, as_of=received_at)
+    assert decision.research_usable is False
+    assert decision.alert_allowed is False
+    assert decision.pricing_allowed is False
+
+
+def test_quote_from_context_flags_stale_without_any_trade() -> None:
+    received_at = datetime(2026, 7, 6, 13, 30, tzinfo=timezone.utc)
+    quote = quote_from_context(_context_with_trades(received_at, []))
+
+    assert quote.quality == MarketDataQuality.STALE
+
+
+def test_quote_from_context_live_window_uses_configured_threshold() -> None:
+    received_at = datetime(2026, 7, 6, 13, 30, tzinfo=timezone.utc)
+    context = _context_with_trades(
+        received_at,
+        [_trade_at(received_at - timedelta(seconds=60))],
+    )
+
+    assert quote_from_context(context).quality == MarketDataQuality.LIVE
+    assert (
+        quote_from_context(context, live_trade_max_age_seconds=30.0).quality
+        == MarketDataQuality.STALE
+    )
 
 
 def test_resolve_market_maps_sp500_usdc_alias_to_xyz_perp():

@@ -412,6 +412,20 @@ def test_future_transport_timestamp_fails_closed() -> None:
     assert decision.pricing_allowed is False
 
 
+def test_quote_age_ms_reports_negative_for_future_source_time() -> None:
+    now = datetime(2026, 7, 7, 14, 0, tzinfo=timezone.utc)
+    quote = Quote(
+        instrument=InstrumentId.index("SPX"),
+        provider=Provider.IBKR,
+        received_at=now,
+        quality=MarketDataQuality.LIVE,
+        mark=7500.0,
+        quote_time=now + timedelta(seconds=30),
+    )
+
+    assert quote.quote_age_ms(now) == -30_000.0
+
+
 def test_synthetic_quote_is_fresh_research_only() -> None:
     now = datetime(2026, 7, 7, 14, 0, tzinfo=timezone.utc)
     quote = Quote(

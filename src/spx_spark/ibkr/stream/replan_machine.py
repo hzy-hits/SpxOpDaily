@@ -29,10 +29,13 @@ def should_replan(
 def estimate_spy_reference(rows: list[VerifyRow]) -> float | None:
     by_label = {row.label: row for row in rows}
     spy = by_label.get("stock:SPY")
-    if spy:
-        price = first_present(spy.market_price, spy.last, midpoint(spy.bid, spy.ask), spy.close)
-        if price:
-            return price
+    # Align with estimate_atm_reference: only explicitly fresh, non-delayed
+    # rows may anchor a new option plan; stale/unknown rows fail closed.
+    if spy is None or spy.stale is not False or spy.market_data_type in {3, 4}:
+        return None
+    price = first_present(spy.market_price, spy.last, midpoint(spy.bid, spy.ask), spy.close)
+    if price:
+        return price
     return None
 
 

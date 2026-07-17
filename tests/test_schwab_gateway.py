@@ -119,6 +119,8 @@ def manager_with_fake_client(
         "client_from_access_functions",
         lambda *args, **kwargs: fake_client,
     )
+    # Pin jitter to identity so backoff assertions stay deterministic.
+    monkeypatch.setattr(gateway, "retry_jitter", lambda seconds: seconds)
     manager = SchwabSessionManager(
         settings,
         request_policy=policy,

@@ -1480,7 +1480,8 @@ def test_decide_after_flush_priorities():
     )
 
 
-def test_reconnect_policy_backs_off_exponentially_and_resets():
+def test_reconnect_policy_backs_off_exponentially_and_resets(monkeypatch):
+    monkeypatch.setattr("spx_spark.ibkr.stream.models.reconnect_jitter", lambda s: s)
     policy = ReconnectPolicy(min_seconds=5.0, max_seconds=60.0)
 
     assert policy.next_delay() == 5.0
@@ -1494,6 +1495,15 @@ def test_reconnect_policy_backs_off_exponentially_and_resets():
     assert policy.next_delay() == 5.0
 
 
+def test_reconnect_policy_jitters_delay_within_bounds():
+    policy = ReconnectPolicy(min_seconds=10.0, max_seconds=12.0)
+
+    delays = [policy.next_delay() for _ in range(50)]
+
+    assert all(5.0 <= delay <= 12.0 for delay in delays)
+    assert len({round(delay, 6) for delay in delays}) > 1
+
+
 def test_connect_backoff_is_honored_when_tcp_port_is_already_open(monkeypatch) -> None:
     sleeps: list[float] = []
     patch_stream(monkeypatch, "api_port_open", lambda *args: True)
@@ -1505,6 +1515,8 @@ def test_connect_backoff_is_honored_when_tcp_port_is_already_open(monkeypatch) -
 
 
 def test_established_but_unhealthy_sessions_keep_reconnect_backoff(monkeypatch) -> None:
+    monkeypatch.setattr("spx_spark.ibkr.stream.models.reconnect_jitter", lambda s: s)
+
     class FakeIb:
         def sleep(self, _seconds: float) -> None:
             return None

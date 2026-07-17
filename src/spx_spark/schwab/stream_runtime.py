@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import random
 import threading
 import time
 from collections import Counter
@@ -226,19 +227,26 @@ class SchwabStreamRuntime:
                 delay = self.settings.reconnect_min_seconds
             except Exception as exc:  # noqa: BLE001 - never log provider/token details
                 self.telemetry.reconnect(type(exc).__name__)
+                # Jitter the sleep so co-located processes kicked offline
+                # together do not reconnect in lockstep; the capped doubling
+                # of the base delay is unchanged.
+                retry_in_seconds = min(
+                    self.settings.reconnect_max_seconds,
+                    delay * random.uniform(0.5, 1.5),
+                )
                 print(
                     json.dumps(
                         {
                             "event": "schwab_stream_reconnect",
                             "ok": False,
                             "error_type": type(exc).__name__,
-                            "retry_in_seconds": delay,
+                            "retry_in_seconds": retry_in_seconds,
                         },
                         sort_keys=True,
                     ),
                     flush=True,
                 )
-                await self._wait_for_stop(delay)
+                await self._wait_for_stop(retry_in_seconds)
                 delay = min(self.settings.reconnect_max_seconds, delay * 2)
 
     async def _run_session(self) -> None:

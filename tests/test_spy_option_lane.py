@@ -59,6 +59,8 @@ def test_estimate_spy_reference_prefers_market_price_then_mid() -> None:
         market_price=628.5,
         bid=627.0,
         ask=629.0,
+        stale=False,
+        market_data_type=1,
     )
     assert estimate_spy_reference([with_market_price]) == 628.5
 
@@ -68,8 +70,24 @@ def test_estimate_spy_reference_prefers_market_price_then_mid() -> None:
         symbol="SPY",
         bid=627.0,
         ask=629.0,
+        stale=False,
+        market_data_type=1,
     )
     assert estimate_spy_reference([with_mid]) == 628.0
+
+
+def test_estimate_spy_reference_excludes_stale_and_delayed_rows() -> None:
+    base = {
+        "label": "stock:SPY",
+        "kind": "stock",
+        "symbol": "SPY",
+        "market_price": 628.5,
+    }
+    assert estimate_spy_reference([VerifyRow(**base, stale=True)]) is None
+    assert estimate_spy_reference([VerifyRow(**base, stale=None)]) is None
+    for delayed_type in (3, 4):
+        row = VerifyRow(**base, stale=False, market_data_type=delayed_type)
+        assert estimate_spy_reference([row]) is None
 
 
 def test_stream_settings_read_spy_lane_env(monkeypatch) -> None:
@@ -111,6 +129,8 @@ def test_unchanged_spy_plan_is_not_requalified(monkeypatch) -> None:
             kind="stock",
             symbol="SPY",
             market_price=628.3,
+            stale=False,
+            market_data_type=1,
         )
     ]
 
@@ -148,10 +168,24 @@ def test_changed_spy_plan_retains_overlap_and_qualifies_only_additions(monkeypat
     patch_stream(monkeypatch, "qualify_and_subscribe", fake_qualify)
     patch_stream(monkeypatch, "cancel_subscriptions", fake_cancel)
     first_rows = [
-        VerifyRow(label="stock:SPY", kind="stock", symbol="SPY", market_price=628.3)
+        VerifyRow(
+            label="stock:SPY",
+            kind="stock",
+            symbol="SPY",
+            market_price=628.3,
+            stale=False,
+            market_data_type=1,
+        )
     ]
     second_rows = [
-        VerifyRow(label="stock:SPY", kind="stock", symbol="SPY", market_price=630.3)
+        VerifyRow(
+            label="stock:SPY",
+            kind="stock",
+            symbol="SPY",
+            market_price=630.3,
+            stale=False,
+            market_data_type=1,
+        )
     ]
 
     collector.ensure_spy_option_plan(first_rows, expiry="20260707")

@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from urllib.error import URLError
 
 import pytest
 
@@ -574,6 +575,54 @@ def test_skipped_chain_does_not_forge_received_at(
     assert output["request_count"] == 0
     # No second persist: prior chain timestamp must remain the only write.
     assert persisted_received_at == [t0]
+
+
+def test_collector_fails_when_due_lanes_all_fail_despite_cadence_skips(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    _isolate_collector_storage(monkeypatch, tmp_path)
+    monkeypatch.setenv("SCHWAB_COLLECT_QUOTES", "$SPX")
+    monkeypatch.setenv("SCHWAB_COLLECT_CHAINS", "SPX,SPY")
+    offline = {"value": False}
+
+    class FakeClient:
+        def get_json(self, path: str, params: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+            if offline["value"]:
+                raise URLError("simulated network outage")
+            if path == "/marketdata/v1/quotes":
+                return 200, {
+                    "$SPX": {
+                        "assetMainType": "INDEX",
+                        "quote": {"lastPrice": 6500.0},
+                    }
+                }
+            symbol = str(params["symbol"])
+            underlier = symbol.lstrip("$")
+            return 200, _chain_payload(underlier if underlier != "SPX" else "SPXW", strike=6500.0)
+
+    monkeypatch.setattr(schwab_collector, "build_schwab_client", lambda _settings: FakeClient())
+    monkeypatch.setattr(
+        schwab_collector,
+        "persist_provider_snapshot",
+        lambda _snapshot, _storage: None,
+    )
+
+    t0 = datetime(2026, 7, 11, 14, 30, 0, tzinfo=timezone.utc)
+    assert schwab_collector.run(now=t0) == 0
+    capsys.readouterr()
+
+    offline["value"] = True
+    t1 = t0 + timedelta(seconds=15)
+    assert schwab_collector.run(now=t1) == 1
+    output = json.loads(capsys.readouterr().out)
+    # The quote lane was due and failed; the remaining lanes were only
+    # cadence-skipped, which must not mark the round as ok.
+    assert output["ok"] is False
+    assert output["quote_counts"] == {}
+    assert output["chains_skipped"]
+    assert output["errors"]
 
 
 def test_collector_warns_when_request_budget_exceeded(

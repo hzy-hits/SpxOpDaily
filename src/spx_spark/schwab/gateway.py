@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import os
+import random
 import threading
 import time
 from collections.abc import Callable
@@ -97,8 +98,13 @@ class SchwabRequestPolicy:
     def backoff_seconds(self, retry_index: int) -> float:
         return min(
             self.retry_max_seconds,
-            self.retry_base_seconds * (2**retry_index),
+            retry_jitter(self.retry_base_seconds * (2**retry_index)),
         )
+
+
+def retry_jitter(seconds: float) -> float:
+    """Desynchronize concurrent retry loops that share one token owner."""
+    return seconds * random.uniform(0.5, 1.5)
 
 
 class EvenIntervalRateLimiter:

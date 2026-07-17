@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 from dataclasses import dataclass
 from datetime import datetime
@@ -22,6 +23,9 @@ from spx_spark.provider_failover import (
 from spx_spark.settings import settings_value
 from spx_spark.state_io import atomic_write_json_secure
 from spx_spark.storage import LatestState, LatestStateStore
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -179,8 +183,20 @@ def load_failover_state(path: str | Path, *, now: datetime) -> FailoverState:
         if not isinstance(raw, dict):
             raise ValueError("state root is not an object")
         return FailoverState.from_dict(raw)
-    except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+    except FileNotFoundError:
         return FailoverState.initial(now=now)
+    except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
+        # A corrupt state file must not silently restore primary semantics:
+        # fail closed to recovery pending and re-derive health from scratch.
+        LOGGER.warning(
+            "Provider failover state %s is unreadable (%s); assuming recovery_pending",
+            state_path,
+            exc,
+        )
+        return FailoverState(
+            mode=FailoverMode.RECOVERY_PENDING,
+            updated_at=as_utc(now),
+        )
 
 
 def load_failover_control(path: str | Path) -> dict[str, object]:
@@ -434,9 +450,18 @@ def evaluate_and_persist(
     if context == "gth":
         schwab = ProviderHealth(False, "IBKR is the configured GTH SPXW primary")
     previous_context = str(persisted_control.get("monitoring_context") or "")
-    if previous_context != context or (
+    # Only a known prior context counts as a session transition. A missing or
+    # corrupt state file leaves no trustworthy prior context; resetting then
+    # would silently restore primary semantics over the conservative default.
+    context_changed = bool(previous_context) and previous_context != context
+    if context_changed or (
         context == "gth" and current.mode is FailoverMode.SCHWAB_PRIMARY
     ):
+        # Session boundaries re-derive the mode from the active context, but
+        # the unhealthy/recovery streaks carry over: a provider that was down
+        # before the boundary is still down after it, so advance_failover
+        # below re-evaluates the carried state against current health instead
+        # of restarting the hysteresis from zero.
         current = FailoverState(
             mode=(
                 FailoverMode.IBKR_FALLBACK
@@ -447,6 +472,10 @@ def evaluate_and_persist(
             ),
             updated_at=latest.as_of,
             sequence=current.sequence,
+            schwab_unhealthy_streak=current.schwab_unhealthy_streak,
+            schwab_recovery_streak=current.schwab_recovery_streak,
+            ibkr_unhealthy_streak=current.ibkr_unhealthy_streak,
+            ibkr_recovery_streak=current.ibkr_recovery_streak,
         )
     updated = advance_failover(
         current,

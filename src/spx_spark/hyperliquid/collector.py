@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import sys
 import time
@@ -13,7 +14,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urljoin
 from urllib.request import Request, urlopen
 
-from spx_spark.config import HyperliquidSettings, StorageSettings
+from spx_spark.config import HyperliquidSettings, StorageSettings, env_float
 from spx_spark.marketdata import (
     InstrumentId,
     InstrumentType,
@@ -27,6 +28,12 @@ from spx_spark.marketdata import (
     parse_timestamp,
 )
 from spx_spark.provider_adapter import ProviderSnapshot, persist_provider_snapshot
+from spx_spark.settings import settings_value
+
+
+# Fallback freshness tier when no configured value is available: the 30s poll
+# cadence may miss a few cycles before the proxy is declared stale.
+DEFAULT_LIVE_TRADE_MAX_AGE_SECONDS = 120.0
 
 
 COIN_ALIASES: dict[str, tuple[str, str]] = {
@@ -324,7 +331,11 @@ def infer_symbol_warning(coin: str, price: float | None) -> str | None:
     return None
 
 
-def quote_from_context(context: HyperliquidAssetContext) -> Quote:
+def quote_from_context(
+    context: HyperliquidAssetContext,
+    *,
+    live_trade_max_age_seconds: float = DEFAULT_LIVE_TRADE_MAX_AGE_SECONDS,
+) -> Quote:
     instrument = InstrumentId(
         symbol=context.coin,
         instrument_type=InstrumentType.CRYPTO_PERP,
@@ -333,7 +344,21 @@ def quote_from_context(context: HyperliquidAssetContext) -> Quote:
         currency="USD",
     )
     price = first_present(context.mark_px, context.mid_px, context.trade_stats.last_price)
-    quality = MarketDataQuality.LIVE if price is not None else MarketDataQuality.MISSING
+    # The info API returns no quote timestamp, so received_at cannot prove the
+    # market is live (cached/frozen responses re-fresh on every poll). Only a
+    # recent last trade distinguishes a trading market from a frozen one.
+    last_trade_time = context.trade_stats.last_trade_time
+    trade_age_seconds = (
+        (as_utc(context.received_at) - as_utc(last_trade_time)).total_seconds()
+        if last_trade_time is not None
+        else None
+    )
+    if price is None:
+        quality = MarketDataQuality.MISSING
+    elif trade_age_seconds is not None and trade_age_seconds <= live_trade_max_age_seconds:
+        quality = MarketDataQuality.LIVE
+    else:
+        quality = MarketDataQuality.STALE
     return Quote(
         instrument=instrument,
         provider=Provider.HYPERLIQUID,
@@ -413,6 +438,10 @@ def write_context(
     path = context_path(storage_settings, context)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
+        # Manual runs and the systemd collector can target the same hourly
+        # file; hold one advisory lock through buffered flush/close so their
+        # JSONL rows cannot interleave (same pattern as JsonlQuoteWriter).
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
         handle.write(json.dumps(context.to_dict(), sort_keys=True, separators=(",", ":")))
         handle.write("\n")
     return path
@@ -425,6 +454,7 @@ def collect_once(
     coin: str,
     dex: str,
     requested_coin: str,
+    live_trade_max_age_seconds: float = DEFAULT_LIVE_TRADE_MAX_AGE_SECONDS,
 ) -> tuple[HyperliquidAssetContext, Quote, ProviderState, float]:
     start = time.perf_counter()
     all_mids = client.info(with_dex({"type": "allMids"}, dex))
@@ -448,7 +478,10 @@ def collect_once(
         book_depth_levels=settings.book_depth_levels,
         large_trade_notional_threshold=settings.large_trade_notional_threshold,
     )
-    quote = quote_from_context(context)
+    quote = quote_from_context(
+        context,
+        live_trade_max_age_seconds=live_trade_max_age_seconds,
+    )
     latency_ms = (time.perf_counter() - start) * 1000.0
     state = provider_state_from_quote(
         quote,
@@ -524,6 +557,10 @@ def run(argv: list[str] | None = None) -> int:
         return 0
 
     started = time.perf_counter()
+    live_trade_max_age_seconds = env_float(
+        "HYPERLIQUID_LIVE_TRADE_MAX_AGE_SECONDS",
+        float(settings_value("hyperliquid.live_trade_max_age_seconds")),
+    )
     try:
         context, quote, state, _ = collect_once(
             client,
@@ -531,6 +568,7 @@ def run(argv: list[str] | None = None) -> int:
             coin=coin,
             dex=dex,
             requested_coin=requested_coin,
+            live_trade_max_age_seconds=live_trade_max_age_seconds,
         )
     except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as exc:
         checked_at = datetime.now(tz=timezone.utc)

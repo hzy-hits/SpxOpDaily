@@ -288,7 +288,11 @@ def run(
         )
 
     quota_deferred = any("planned_request_ceiling" in error for error in errors)
-    ok = bool(quote_counts) or bool(chains_skipped) or quota_deferred
+    # A lane that was due and attempted records an error when its fetch fails;
+    # cadence/quota skips record none. If every due lane failed, the round is
+    # not ok even when other lanes were cadence-skipped.
+    fetches_failed = any("planned_request_ceiling" not in error for error in errors)
+    ok = bool(quote_counts) or quota_deferred or not fetches_failed
     summary = {
         "ok": ok,
         "symbols": list(quote_counts.keys()),

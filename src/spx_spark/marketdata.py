@@ -70,6 +70,11 @@ class ProviderStatus(str, Enum):
     UNKNOWN = "unknown"
 
 
+# Source timestamps slightly ahead of the local clock are tolerated; beyond
+# this bound they are treated as clock skew and fail closed.
+FUTURE_TIMESTAMP_TOLERANCE_SECONDS = 5.0
+
+
 QUALITY_RANK: dict[MarketDataQuality, int] = {
     MarketDataQuality.LIVE: 100,
     MarketDataQuality.FROZEN: 85,
@@ -364,7 +369,9 @@ class Quote:
     def quote_age_ms(self, as_of: datetime | None = None) -> float | None:
         source_time = self.quote_time or self.trade_time or self.received_at
         as_of = as_utc(as_of or self.received_at)
-        return max((as_of - as_utc(source_time)).total_seconds() * 1000.0, 0.0)
+        # Honest signed age: future source timestamps go negative so callers
+        # can reject clock skew instead of sorting it as perfectly fresh.
+        return (as_of - as_utc(source_time)).total_seconds() * 1000.0
 
     def session_source_time(self, session: QuoteMarketSession) -> datetime | None:
         for observation in self.session_observations:
@@ -500,7 +507,7 @@ def quote_use_decision(
         )
 
     age_seconds = (as_utc(as_of) - as_utc(transport_time)).total_seconds()
-    if age_seconds < -5.0:
+    if age_seconds < -FUTURE_TIMESTAMP_TOLERANCE_SECONDS:
         return QuoteUseDecision(
             feed_mode=feed_mode,
             freshness=QuoteFreshness.UNKNOWN,

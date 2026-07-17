@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import random
 import time
 from dataclasses import dataclass
 from enum import Enum
@@ -34,12 +35,20 @@ class ReconnectPolicy:
     attempt: int = 0
 
     def next_delay(self) -> float:
-        delay = min(self.min_seconds * (2**self.attempt), self.max_seconds)
+        base = min(self.min_seconds * (2**self.attempt), self.max_seconds)
         self.attempt += 1
-        return delay
+        # Jitter avoids synchronized reconnect storms after a shared disconnect;
+        # cap again so jittered values never exceed max_seconds.
+        return min(reconnect_jitter(base), self.max_seconds)
 
     def reset(self) -> None:
         self.attempt = 0
+
+
+def reconnect_jitter(seconds: float) -> float:
+    """Scale a backoff delay by a random factor in [0.5, 1.5)."""
+
+    return seconds * random.uniform(0.5, 1.5)
 
 
 def lifecycle_has_qualification_budget(
