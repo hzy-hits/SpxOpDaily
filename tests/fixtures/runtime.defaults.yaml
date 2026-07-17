@@ -841,6 +841,9 @@ ibkr_stream:
   slow_poll_hold_seconds:
     value: 10.0
     description: Seconds to hold each slow-poll subscription chunk before releasing it.
+  data_flow_silence_seconds:
+    value: 120.0
+    description: Max seconds without ES ticks during an open Globex session before the stream treats the farm as a broken zombie session (no error codes, quotes frozen) and feeds the gateway-restart gate.
   slow_poll_chunk_size:
     value: 6
     description: Number of slow-poll labels requested in each chunk.

@@ -165,3 +165,61 @@ def test_farm_tracker_market_data_ready_transitions() -> None:
 
     tracker.observe(1100, "Connectivity between IB and TWS has been lost", now=1002.0)
     assert tracker.market_data_ready() is False
+
+
+def test_data_flow_silence_marks_farm_broken_and_live_clears() -> None:
+    tracker = FarmHealthTracker()
+    now = time.monotonic()
+
+    event = tracker.mark_data_flow_silent("no ES ticks for 150s", now=now)
+    assert event is not None
+    assert tracker.status is FarmLinkStatus.BROKEN
+    assert tracker.market_data_ready() is False
+
+    # Repeated detections do not spam events, and duration accumulates.
+    assert tracker.mark_data_flow_silent("no ES ticks for 160s", now=now + 10) is None
+    assert tracker.broken_duration(now=now + 181) == 181
+    assert tracker.should_restart_gateway(now=now + 181) is True
+
+    tracker.mark_data_flow_live()
+    assert tracker.status is FarmLinkStatus.OK
+    assert tracker.market_data_ready() is True
+    assert tracker.should_restart_gateway(now=now + 400) is False
+
+
+def test_data_flow_silence_breach_requires_open_session_window() -> None:
+    from datetime import datetime, timezone
+
+    from spx_spark.ibkr.farm_health import data_flow_silence_breached
+
+    # 2026-07-17 06:00 UTC = 02:00 ET Friday: Globex open.
+    now = datetime(2026, 7, 17, 6, 0, tzinfo=timezone.utc)
+    frozen = datetime(2026, 7, 17, 5, 56, tzinfo=timezone.utc)
+    assert (
+        data_flow_silence_breached(ticker_time=frozen, now=now, silence_seconds=120.0) is True
+    )
+    # Fresh ticks never breach.
+    fresh = datetime(2026, 7, 17, 5, 59, 30, tzinfo=timezone.utc)
+    assert (
+        data_flow_silence_breached(ticker_time=fresh, now=now, silence_seconds=120.0) is False
+    )
+    # Weekend silence is expected, not a breach.
+    weekend_now = datetime(2026, 7, 18, 12, 0, tzinfo=timezone.utc)
+    weekend_frozen = datetime(2026, 7, 18, 11, 0, tzinfo=timezone.utc)
+    assert (
+        data_flow_silence_breached(
+            ticker_time=weekend_frozen, now=weekend_now, silence_seconds=120.0
+        )
+        is False
+    )
+    # Right after the Sunday Globex open the window was closed moments ago.
+    reopen = datetime(2026, 7, 19, 22, 1, tzinfo=timezone.utc)
+    friday_close_tick = datetime(2026, 7, 17, 20, 59, tzinfo=timezone.utc)
+    assert (
+        data_flow_silence_breached(
+            ticker_time=friday_close_tick, now=reopen, silence_seconds=120.0
+        )
+        is False
+    )
+    # No tick timestamp yet (warmup) never breaches.
+    assert data_flow_silence_breached(ticker_time=None, now=now, silence_seconds=120.0) is False

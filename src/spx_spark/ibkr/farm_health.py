@@ -16,11 +16,12 @@ import subprocess
 import sys
 import time
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any
 
 from spx_spark.config import IbkrSettings, RuntimePolicySettings
+from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 from spx_spark.runtime_mode import load_override
 
 
@@ -31,6 +32,33 @@ TWS_CONNECTIVITY_LOST_CODES = frozenset({1100, 2110})
 TWS_CONNECTIVITY_RESTORED_CODES = frozenset({1101, 1102})
 
 NON_DEGRADING_ERROR_CODES = FARM_OK_CODES | FARM_CONNECTING_CODES | TWS_CONNECTIVITY_RESTORED_CODES
+
+DATA_FLOW_SILENCE_FARM = "data-flow-silence"
+
+
+def data_flow_silence_breached(
+    *,
+    ticker_time: datetime | None,
+    now: datetime,
+    silence_seconds: float,
+) -> bool:
+    """True when subscribed market data stopped ticking during an open session.
+
+    The connection can stay alive while a farm silently stops delivering
+    ticks (zombie session): no error codes, ``reqCurrentTime`` fine, quotes
+    frozen. ES is the canary because it trades nearly 24h on weekdays. The
+    session must have been open across the whole silent window so the
+    expected quiet around the daily Globex break and weekends never fires.
+    """
+
+    if ticker_time is None or silence_seconds <= 0:
+        return False
+    if (now - ticker_time).total_seconds() <= silence_seconds:
+        return False
+    window_start = now - timedelta(seconds=silence_seconds)
+    return DEFAULT_MARKET_CALENDAR.is_globex_open(now) and DEFAULT_MARKET_CALENDAR.is_globex_open(
+        window_start
+    )
 
 _FARM_NAME_RE = re.compile(
     r"(?:market data farm(?: connection)? is|hmds data farm connection is|sec-def data farm connection is)"
@@ -291,6 +319,43 @@ class FarmHealthTracker:
             return
         self.farms["data-plane-probe"] = FarmLinkStatus.OK
         self.broken_since_by_farm.pop("data-plane-probe", None)
+        self._refresh_aggregate_status()
+
+    def mark_data_flow_silent(
+        self, message: str, *, now: float | None = None
+    ) -> FarmStatusEvent | None:
+        """Register a zombie-session detection: subscribed, but no ticks.
+
+        Mirrors the data-plane probe path with its own synthetic farm so a
+        silent freeze accumulates broken duration towards the gateway
+        restart gate exactly like an explicit farm error would.
+        """
+
+        if now is None:
+            now = time.monotonic()
+        previous = self.status
+        self.last_error_code = None
+        self.last_error_message = message
+        self.last_farm = DATA_FLOW_SILENCE_FARM
+        self.farms[DATA_FLOW_SILENCE_FARM] = FarmLinkStatus.BROKEN
+        self.broken_since_by_farm.setdefault(DATA_FLOW_SILENCE_FARM, now)
+        self._refresh_aggregate_status()
+        if self.status == previous:
+            return None
+        return FarmStatusEvent(
+            status=self.status,
+            message=message,
+            farm=DATA_FLOW_SILENCE_FARM,
+            broken_seconds=0.0,
+        )
+
+    def mark_data_flow_live(self) -> None:
+        """Clear only a prior data-flow silence detection."""
+
+        if DATA_FLOW_SILENCE_FARM not in self.farms:
+            return
+        self.farms[DATA_FLOW_SILENCE_FARM] = FarmLinkStatus.OK
+        self.broken_since_by_farm.pop(DATA_FLOW_SILENCE_FARM, None)
         self._refresh_aggregate_status()
 
     def broken_duration(self, *, now: float | None = None) -> float | None:

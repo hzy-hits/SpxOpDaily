@@ -162,6 +162,7 @@ class IbkrStreamSettings:
     slow_poll_chunk_size: int = field(default_factory=lambda: 6)
     atm_state_path: str = field(default_factory=lambda: "")
     freeze_quotes_on_connectivity_loss: bool = field(default_factory=lambda: bool(True))
+    data_flow_silence_seconds: float = field(default_factory=lambda: 120.0)
 
     @classmethod
     def from_env(cls) -> "IbkrStreamSettings":
@@ -250,6 +251,10 @@ class IbkrStreamSettings:
             freeze_quotes_on_connectivity_loss=env_bool(
                 "IBKR_STREAM_FREEZE_QUOTES_ON_CONNECTIVITY_LOSS",
                 bool(settings_value("ibkr_stream.freeze_quotes_on_connectivity_loss")),
+            ),
+            data_flow_silence_seconds=env_float(
+                "IBKR_STREAM_DATA_FLOW_SILENCE_SECONDS",
+                float(settings_value("ibkr_stream.data_flow_silence_seconds")),
             ),
         )
 
