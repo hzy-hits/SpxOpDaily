@@ -35,8 +35,8 @@ def _event_id(
     *,
     provider: str = Provider.UNKNOWN.value,
 ) -> str:
-    minute = as_utc(anchor_at).strftime("%H%M")
-    base = f"spx_shock:{session_date.replace('-', '')}:{direction}:{minute}"
+    stamp = as_utc(anchor_at).strftime("%H%M%S")
+    base = f"spx_shock:{session_date.replace('-', '')}:{direction}:{stamp}"
     return base if provider == Provider.UNKNOWN.value else f"{base}:{provider}"
 
 

@@ -500,6 +500,8 @@ def _run_gth_dip_reclaim(
             session_warmup_seconds=settings.gth_session_warmup_seconds,
             max_signals_per_session=settings.gth_max_signals_per_session,
             cooldown_seconds=settings.gth_cooldown_seconds,
+            delivery_retry_seconds=settings.retry_seconds,
+            signal_expiry_seconds=settings.event_expiry_seconds,
             entry_allowed=(
                 macro.get("entry_allowed") is True and not virtual_strategy_active
             ),
@@ -507,7 +509,7 @@ def _run_gth_dip_reclaim(
         monitor_state["gth_dip"] = gth_state
         monitor_state["updated_at"] = sample_at.isoformat()
         atomic_write_json_secure(state_path, monitor_state)
-        if signal is not None:
+        if signal is not None and not signal.get("delivery_retry"):
             atomic_write_json_secure(
                 Path(storage_settings.data_root) / "latest" / "gth_dip_reclaim_signal.json",
                 {**signal, "macro_event": macro},
@@ -549,7 +551,7 @@ def _run_gth_dip_reclaim(
             "entry_suppressed_by_active_virtual_strategy": virtual_strategy_active,
         }
     )
-    if signal is not None:
+    if signal is not None and not signal.get("delivery_retry"):
         try:
             greek_result = sample_zero_dte_greeks_shadow(
                 latest,

@@ -71,7 +71,7 @@ def test_trump_style_down_shock_then_v_reclaim_is_two_phases(tmp_path) -> None:
     )
     assert [alert.kind for alert in alerts] == [SHOCK_KIND]
     shock = alerts[0]
-    assert shock.event_id == "spx_shock:20260710:down:1432"
+    assert shock.event_id == "spx_shock:20260710:down:143226"
     assert shock.value is not None and shock.value <= -20.0
 
     state = mark_alert_attempts(state, alerts, at=start + timedelta(seconds=22), delivered=True)
@@ -195,7 +195,7 @@ def test_up_shock_and_down_reversal_are_symmetric(tmp_path) -> None:
         cfg,
     )
     assert [alert.kind for alert in alerts] == [SHOCK_KIND]
-    assert alerts[0].event_id == "spx_shock:20260710:up:1500"
+    assert alerts[0].event_id == "spx_shock:20260710:up:150000"
     assert "急拉" in alerts[0].title
     state = mark_alert_attempts(state, alerts, at=start + timedelta(seconds=30), delivered=True)
 
@@ -654,3 +654,23 @@ def test_es_must_confirm_shock_direction(tmp_path, spx_now: float, es_now: float
         cfg,
     )
     assert alerts == []
+
+
+def test_same_minute_shocks_get_distinct_event_ids(tmp_path) -> None:
+    cfg = settings(tmp_path)
+    event_ids: list[str] = []
+    for second in (26, 41):
+        start = datetime(2026, 7, 10, 14, 32, second, tzinfo=UTC)
+        state = empty_monitor_state("2026-07-10")
+        state, _ = advance_monitor_state(state, sample(start, 7500.0, 7550.0), cfg)
+        _, alerts = advance_monitor_state(
+            state,
+            sample(start + timedelta(seconds=20), 7480.0, 7528.0),
+            cfg,
+        )
+        assert [alert.kind for alert in alerts] == [SHOCK_KIND]
+        event_ids.append(str(alerts[0].event_id))
+    assert event_ids == [
+        "spx_shock:20260710:down:143226",
+        "spx_shock:20260710:down:143241",
+    ]

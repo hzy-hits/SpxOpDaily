@@ -36,6 +36,8 @@ def advance_gth_dip(
     max_signals_per_session: int,
     cooldown_seconds: int,
     entry_allowed: bool,
+    delivery_retry_seconds: int = 30,
+    signal_expiry_seconds: int = 600,
 ) -> tuple[dict[str, object], Alert | None, dict[str, object] | None]:
     """Advance one session state and emit at most one confirmed Call advisory."""
 
@@ -55,10 +57,33 @@ def advance_gth_dip(
         if isinstance(item, Mapping)
         and (_time(item.get("at")) or now) >= now - timedelta(seconds=long_horizon_seconds)
     ]
-    if not samples or _time(samples[-1].get("at")) != now:
+    enqueued = not samples or _time(samples[-1].get("at")) != now
+    if enqueued:
         samples.append({"at": now.isoformat(), "es": float(es), "provider": provider})
     state["samples"] = samples
     state["updated_at"] = now.isoformat()
+
+    # Redelivery mirrors the RTH shock path: re-emit an unacknowledged signal
+    # on the retry interval (same event_id, idempotent downstream) until the
+    # service records delivered_at or the signal ages out.
+    raw_signal = state.get("last_signal")
+    last_signal = dict(raw_signal) if isinstance(raw_signal, Mapping) else None
+    if last_signal is not None and not last_signal.get("delivered_at"):
+        confirmed_at = _time(last_signal.get("confirmed_at"))
+        attempt_at = _time(last_signal.get("last_delivery_attempt_at"))
+        expired = confirmed_at is None or (
+            now - confirmed_at
+        ).total_seconds() > signal_expiry_seconds
+        due = attempt_at is None or (
+            now - attempt_at
+        ).total_seconds() >= delivery_retry_seconds
+        if not expired and due:
+            last_signal["last_delivery_attempt_at"] = now.isoformat()
+            state["last_signal"] = last_signal
+            state["status"] = "delivery_retry"
+            retry_signal = {**last_signal, "delivery_retry": True}
+            return state, _signal_alert(last_signal), retry_signal
+
     first_sample_at = _time(state.get("first_sample_at")) or now
     if (now - first_sample_at).total_seconds() < session_warmup_seconds:
         state["status"] = "session_warmup"
@@ -67,7 +92,7 @@ def advance_gth_dip(
         state["status"] = "session_signal_limit"
         return state, None, None
 
-    last_signal_at = _time((state.get("last_signal") or {}).get("confirmed_at")) if isinstance(state.get("last_signal"), Mapping) else None
+    last_signal_at = _time(last_signal.get("confirmed_at")) if last_signal is not None else None
     if last_signal_at is not None and (now - last_signal_at).total_seconds() < cooldown_seconds:
         state["status"] = "cooldown"
         return state, None, None
@@ -104,14 +129,17 @@ def advance_gth_dip(
         )
     )
     event_id = "gth-dip:" + hashlib.sha256(token.encode()).hexdigest()[:24]
-    prior_signal = state.get("last_signal") if isinstance(state.get("last_signal"), Mapping) else {}
+    prior_signal = last_signal or {}
     if prior_signal.get("event_id") == event_id:
         state["status"] = "already_confirmed"
         state["pending"] = None
         return state, None, None
     prior_pending = state.get("pending") if isinstance(state.get("pending"), Mapping) else {}
     same_pending = prior_pending.get("event_id") == event_id
-    count = int(prior_pending.get("confirm_count") or 0) + 1 if same_pending else 1
+    if same_pending:
+        count = int(prior_pending.get("confirm_count") or 0) + (1 if enqueued else 0)
+    else:
+        count = 1
     confirm_started_at = (
         prior_pending.get("confirm_started_at") if same_pending else now.isoformat()
     )
@@ -138,6 +166,7 @@ def advance_gth_dip(
         "session_date": session_date,
         "direction": "up",
         "confirmed_at": now.isoformat(),
+        "last_delivery_attempt_at": now.isoformat(),
         "es": float(es),
         "expected_move_points": expected_move_points,
         "automatic_ordering": False,
@@ -146,28 +175,7 @@ def advance_gth_dip(
     state["signal_count"] = int(state.get("signal_count") or 0) + 1
     state["pending"] = None
     state["status"] = "confirmed"
-    alert = Alert(
-        severity="high",
-        kind=GTH_DIP_RECLAIM_CALL_KIND,
-        instrument_id="future:ES",
-        title=f"SPX 0DTE | CALL RECLAIM ({int(chosen['horizon_seconds']) // 60}m)",
-        detail=(
-            f"Desk View：ES 自 {float(chosen['peak']):.2f} 回落至 {float(chosen['trough']):.2f} 后"
-            f"回升至 {float(es):.2f}，回撤 {float(chosen['drawdown_points']):.2f} 点并收复"
-            f" {float(chosen['recovery_fraction']):.0%}；Call 方向进入执行评估。"
-            "Execution：仅在新鲜 SPXW NBBO 通过门控后建立 TradeReady。"
-            "Risk：ES 跌破本次低点即撤销 Call 判断；自动下单关闭。"
-        ),
-        provider=provider,
-        quality=MarketDataQuality.LIVE.value,
-        value=float(chosen["recovery_points"]),
-        threshold=float(chosen["required_recovery_points"]),
-        source_gate="es_gth_15_60m_dip_reclaim_confirmed",
-        dedup_group=f"{event_id}:gth-dip-reclaim",
-        event_id=event_id,
-        source_at=now.isoformat(),
-    )
-    return state, alert, signal
+    return state, _signal_alert(signal), signal
 
 
 def mark_gth_delivery(
@@ -179,6 +187,33 @@ def mark_gth_delivery(
         signal["delivered_at"] = _utc(at).isoformat()
         result["last_signal"] = signal
     return result
+
+
+def _signal_alert(signal: Mapping[str, object]) -> Alert:
+    """Rebuild the confirmed-signal alert so a redelivery stays identical."""
+
+    event_id = str(signal["event_id"])
+    return Alert(
+        severity="high",
+        kind=GTH_DIP_RECLAIM_CALL_KIND,
+        instrument_id="future:ES",
+        title=f"SPX 0DTE | CALL RECLAIM ({int(signal['horizon_seconds']) // 60}m)",
+        detail=(
+            f"Desk View：ES 自 {float(signal['peak']):.2f} 回落至 {float(signal['trough']):.2f} 后"
+            f"回升至 {float(signal['es']):.2f}，回撤 {float(signal['drawdown_points']):.2f} 点并收复"
+            f" {float(signal['recovery_fraction']):.0%}；Call 方向进入执行评估。"
+            "Execution：仅在新鲜 SPXW NBBO 通过门控后建立 TradeReady。"
+            "Risk：ES 跌破本次低点即撤销 Call 判断；自动下单关闭。"
+        ),
+        provider=str(signal["provider"]),
+        quality=MarketDataQuality.LIVE.value,
+        value=float(signal["recovery_points"]),
+        threshold=float(signal["required_recovery_points"]),
+        source_gate="es_gth_15_60m_dip_reclaim_confirmed",
+        dedup_group=f"{event_id}:gth-dip-reclaim",
+        event_id=event_id,
+        source_at=str(signal["confirmed_at"]),
+    )
 
 
 def _dip_candidate(
