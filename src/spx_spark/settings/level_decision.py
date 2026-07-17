@@ -10,7 +10,7 @@ class LevelDecisionPolicy:
     enabled: bool = True
     notify_transitions: bool = True
     formal_signal_enabled: bool = False
-    approach_points: float = 12.0
+    approach_points: float = 20.0
     test_points: float = 4.0
     break_buffer_points: float = 3.0
     reject_points: float = 6.0
@@ -25,9 +25,9 @@ class LevelDecisionPolicy:
     es_confirm_ratio: float = 0.25
     terminal_rearm_seconds: float = 30.0
     structure_interval_seconds: int = 900
-    structure_required_confirmations: int = 3
+    structure_required_confirmations: int = 2
     structure_band_half_width_points: float = 5.0
-    structure_switch_min_points: float = 10.0
+    structure_switch_min_points: float = 5.0
     max_frozen_structure_age_sessions: int = 1
     outcome_horizons_seconds: tuple[int, ...] = (30, 60, 180, 300)
     outcome_sample_tolerance_seconds: float = 20.0

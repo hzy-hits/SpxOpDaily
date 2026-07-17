@@ -71,16 +71,17 @@ market_features:
   premarket_end_et: {value: "09:30", description: US premarket end.}
   rth_end_et: {value: "16:00", description: Cash RTH end.}
   curb_end_et: {value: "17:00", description: Curb segment end.}
-  min_l1_liquidity_score: {value: 40.0, description: Minimum L1 liquidity score.}
+  min_l1_liquidity_score: {value: 30.0, description: Minimum L1 liquidity score.}
+  min_l1_two_sided_ratio: {value: 0.65, description: Minimum two-sided ratio for the L1 frame.}
   l1_spread_p50_limit_bps: {value: 500.0, description: Median L1 spread score ceiling.}
   l1_spread_p90_limit_bps: {value: 1500.0, description: Tail L1 spread score ceiling.}
-  trade_follow_through_seconds: {value: 30.0, description: Follow-through hold.}
+  trade_follow_through_seconds: {value: 15.0, description: Follow-through hold.}
   trade_follow_through_min_points: {value: 2.0, description: Fixed follow-through distance.}
   trade_follow_through_em_fraction: {value: 0.05, description: EM follow-through fraction.}
   trade_repricing_max_age_seconds: {value: 90.0, description: Repricing freshness.}
   trade_quote_max_age_seconds: {value: 5.0, description: Trade quote freshness.}
   trade_market_anchor_max_age_seconds: {value: 20.0, description: Trade market-anchor freshness.}
-  trade_structure_drift_points: {value: 2.5, description: Maximum live-frame decision drift.}
+  trade_structure_drift_points: {value: 5.0, description: Maximum live-frame decision drift.}
   trade_entry_spread_fraction: {value: 0.35, description: Initial entry spread fraction.}
   trade_intent_ttl_seconds: {value: 90.0, description: Trade intent TTL.}
   trade_entry_window_seconds: {value: 20.0, description: Alert candidate entry observation window.}
@@ -1568,8 +1569,8 @@ level_decision_shadow:
     value: false
     description: Allows CONFIRMED to enter deterministic TradeReady evaluation; it does not make the state directly actionable or submit an order.
   approach_points:
-    value: 12.0
-    description: Distance from the nearest frozen wall or flip boundary that arms an approach.
+    value: 20.0
+    description: Distance from the nearest frozen wall or flip boundary that arms an approach; 20 points keeps 0DTE setups observable instead of locking the machine in FAR between widely spaced walls.
   test_points:
     value: 4.0
     description: Distance treated as an active test of the frozen level.
@@ -1608,9 +1609,9 @@ level_decision_shadow:
     description: Minimum same-direction ES move relative to the observed SPX move.
   terminal_rearm_seconds: {value: 30.0, description: Terminal event rearm delay.}
   structure_interval_seconds: {value: 900, description: Stable structure observation bucket seconds.}
-  structure_required_confirmations: {value: 3, description: Distinct buckets required for wall replacement.}
+  structure_required_confirmations: {value: 2, description: Distinct buckets required for wall replacement.}
   structure_band_half_width_points: {value: 5.0, description: Published wall range half width.}
-  structure_switch_min_points: {value: 10.0, description: Material wall-center displacement.}
+  structure_switch_min_points: {value: 5.0, description: Material wall-center displacement.}
   max_frozen_structure_age_sessions: {value: 1, description: Frozen structure session TTL.}
   outcome_horizons_seconds: {value: [30, 60, 180, 300], description: Outcome horizons.}
   outcome_sample_tolerance_seconds: {value: 20.0, description: Outcome sample tolerance.}

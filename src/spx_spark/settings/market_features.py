@@ -22,7 +22,8 @@ class MarketFeatureSettings:
     premarket_end_et: str = "09:30"
     rth_end_et: str = "16:00"
     curb_end_et: str = "17:00"
-    min_l1_liquidity_score: float = 40.0
+    min_l1_liquidity_score: float = 30.0
+    min_l1_two_sided_ratio: float = 0.65
     l1_spread_p50_limit_bps: float = 500.0
     l1_spread_p90_limit_bps: float = 1500.0
     trend_efficiency_high: float = 0.45
@@ -35,13 +36,13 @@ class MarketFeatureSettings:
     breakout_score_margin: float = 12.0
     breakout_local_gex_band_points: float = 10.0
     breakout_near_wall_points: float = 10.0
-    trade_follow_through_seconds: float = 30.0
+    trade_follow_through_seconds: float = 15.0
     trade_follow_through_min_points: float = 2.0
     trade_follow_through_em_fraction: float = 0.05
     trade_repricing_max_age_seconds: float = 90.0
     trade_quote_max_age_seconds: float = 5.0
     trade_market_anchor_max_age_seconds: float = 20.0
-    trade_structure_drift_points: float = 2.5
+    trade_structure_drift_points: float = 5.0
     trade_entry_spread_fraction: float = 0.35
     trade_intent_ttl_seconds: float = 90.0
     trade_entry_window_seconds: float = 20.0
@@ -79,6 +80,7 @@ class MarketFeatureSettings:
             self.hot_option_limit,
             self.provider_sync_tolerance_seconds,
             self.min_l1_liquidity_score,
+            self.min_l1_two_sided_ratio,
             self.l1_spread_p50_limit_bps,
             self.l1_spread_p90_limit_bps,
             self.trend_efficiency_high,
@@ -138,6 +140,8 @@ class MarketFeatureSettings:
             raise ValueError("market feature session boundaries must be increasing")
         if self.min_l1_liquidity_score > 100:
             raise ValueError("min_l1_liquidity_score cannot exceed 100")
+        if not 0 < self.min_l1_two_sided_ratio <= 1:
+            raise ValueError("min_l1_two_sided_ratio must be within (0, 1]")
         if not 0 < self.trend_efficiency_low < self.trend_efficiency_high <= 1:
             raise ValueError("trend efficiency thresholds must be ordered within (0, 1]")
         score_fields = (

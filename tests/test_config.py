@@ -272,3 +272,18 @@ def test_live_ibkr_execution_requires_account_visibility(monkeypatch) -> None:
 
     with pytest.raises(ValueError, match="requires IBKR_BROKER_ACCOUNT_READ_ENABLED"):
         IbkrBrokerSettings.from_env()
+
+
+def test_zero_dte_gate_relaxation_loads_from_runtime_defaults() -> None:
+    from spx_spark.settings.loader import load_app_settings
+
+    settings = load_app_settings()
+    mf = settings.market_features
+    assert mf.min_l1_liquidity_score == 30.0
+    assert mf.min_l1_two_sided_ratio == 0.65
+    assert mf.trade_follow_through_seconds == 15.0
+    assert mf.trade_structure_drift_points == 5.0
+    ld = settings.level_decision
+    assert ld.approach_points == 20.0
+    assert ld.structure_required_confirmations == 2
+    assert ld.structure_switch_min_points == 5.0

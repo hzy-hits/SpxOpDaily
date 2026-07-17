@@ -305,6 +305,7 @@ def load_settings(
         rth_end_et=str(get("market_features.rth_end_et")),
         curb_end_et=str(get("market_features.curb_end_et")),
         min_l1_liquidity_score=float(get("market_features.min_l1_liquidity_score")),
+        min_l1_two_sided_ratio=float(get("market_features.min_l1_two_sided_ratio")),
         l1_spread_p50_limit_bps=float(get("market_features.l1_spread_p50_limit_bps")),
         l1_spread_p90_limit_bps=float(get("market_features.l1_spread_p90_limit_bps")),
         trade_follow_through_seconds=float(get("market_features.trade_follow_through_seconds")),

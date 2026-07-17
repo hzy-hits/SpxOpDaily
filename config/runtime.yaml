@@ -71,16 +71,17 @@ market_features:
   premarket_end_et: {value: "09:30", description: End of the US premarket segment in America/New_York time.}
   rth_end_et: {value: "16:00", description: End of the cash RTH segment in America/New_York time.}
   curb_end_et: {value: "17:00", description: End of the curb segment in America/New_York time.}
-  min_l1_liquidity_score: {value: 40.0, description: Minimum hot-option L1 liquidity score before decision context marks it usable.}
+  min_l1_liquidity_score: {value: 30.0, description: Minimum hot-option L1 liquidity score before decision context marks it usable; 30 keeps GTH-eligible chains usable while the execution quote gate still enforces spread/age limits.}
+  min_l1_two_sided_ratio: {value: 0.65, description: Minimum fraction of selected hot options with two-sided quotes for the L1 frame to be READY; 0.75 was calibrated to RTH liquidity and is unreachable in GTH.}
   l1_spread_p50_limit_bps: {value: 500.0, description: Median spread ceiling used to score whether hot-option L1 quotes are executable.}
   l1_spread_p90_limit_bps: {value: 1500.0, description: Tail spread ceiling used to score whether hot-option L1 quotes are executable.}
-  trade_follow_through_seconds: {value: 30.0, description: Minimum time a confirmed path must remain outside its level before becoming trade-ready.}
+  trade_follow_through_seconds: {value: 15.0, description: Minimum time a confirmed path must remain outside its level before becoming trade-ready; 15s matches 0DTE holding horizons.}
   trade_follow_through_min_points: {value: 2.0, description: Minimum additional movement beyond the confirmed level required for trade readiness.}
   trade_follow_through_em_fraction: {value: 0.05, description: Expected-move fraction used when it exceeds the fixed follow-through threshold.}
   trade_repricing_max_age_seconds: {value: 90.0, description: Maximum age of the matching realtime option repricing record.}
   trade_quote_max_age_seconds: {value: 5.0, description: Maximum transport and source age for an option quote used in a trade-ready intent.}
   trade_market_anchor_max_age_seconds: {value: 20.0, description: Maximum observation, source and transport age for the ES anchor and level observation used by a trade-ready intent.}
-  trade_structure_drift_points: {value: 2.5, description: Maximum drift for decisions sourced directly from the live option frame; stable decisions are validated against their frozen promoted structure.}
+  trade_structure_drift_points: {value: 5.0, description: Maximum drift for decisions sourced directly from the live option frame; stable decisions are validated against their frozen promoted structure. 5.0 matches the structure band half-width so GTH OI/GEX jitter stops invalidating live decisions.}
   trade_entry_spread_fraction: {value: 0.35, description: Fraction of the live bid-ask spread used for the initial buy limit, capped at mid.}
   trade_intent_ttl_seconds: {value: 90.0, description: Lifetime of a newly emitted trade intent before it must be recalculated.}
   trade_entry_window_seconds: {value: 20.0, description: Maximum time an alert candidate may wait for the displayed ask to reach its entry limit; this is not a broker order TTL.}
@@ -1658,8 +1659,8 @@ level_decision_shadow:
     value: true
     description: Allows CONFIRMED to enter deterministic TradeReady evaluation; it does not make the state directly actionable or submit an order.
   approach_points:
-    value: 12.0
-    description: Distance from the nearest frozen wall or flip boundary that arms an approach.
+    value: 20.0
+    description: Distance from the nearest frozen wall or flip boundary that arms an approach; 20 points keeps 0DTE setups observable instead of locking the machine in FAR between widely spaced walls.
   test_points:
     value: 4.0
     description: Distance treated as an active test of the frozen level.
@@ -1703,14 +1704,14 @@ level_decision_shadow:
     value: 900
     description: Distinct observation bucket size for the stable OI/GEX map; 900 seconds keeps the map on a fifteen-minute terrain cadence.
   structure_required_confirmations:
-    value: 3
-    description: Number of distinct fifteen-minute buckets required before a materially different wall structure replaces the promoted map.
+    value: 2
+    description: Number of distinct fifteen-minute buckets required before a materially different wall structure replaces the promoted map; 2 accepts a wall migration in about fifteen minutes, which a 6.5-hour 0DTE session can actually use.
   structure_band_half_width_points:
     value: 5.0
     description: Half-width in SPX points used to publish each promoted wall as a range instead of a false-precision single tick.
   structure_switch_min_points:
-    value: 10.0
-    description: Minimum center displacement in SPX points that starts a candidate wall switch; smaller OI/GEX changes extend the current wall duration.
+    value: 5.0
+    description: Minimum center displacement in SPX points that starts a candidate wall switch; smaller OI/GEX changes extend the current wall duration. 5.0 matches the published band half-width.
   max_frozen_structure_age_sessions:
     value: 1
     description: Maximum trading-session age of a frozen OI/GEX wall structure; older levels fail closed.

@@ -428,7 +428,7 @@ def build_l1_microstructure(
     quality = (
         FrameQuality.READY
         if selected
-        and two_sided_ratio >= 0.75
+        and two_sided_ratio >= policy.min_l1_two_sided_ratio
         and liquidity_score is not None
         and liquidity_score >= policy.min_l1_liquidity_score
         else FrameQuality.DEGRADED
