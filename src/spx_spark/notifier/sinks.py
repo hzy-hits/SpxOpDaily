@@ -14,6 +14,50 @@ def openclaw_state_dir() -> Path:
     return Path(os.getenv("OPENCLAW_STATE_DIR") or Path.home() / ".openclaw")
 
 
+BARK_MAX_CHARS_DEFAULT = 1500
+BARK_TRUNCATION_MARK = "\n…（已截断）"
+
+
+def bark_max_chars() -> int:
+    """Per-field cap for Bark payloads; the server 413-rejects oversized posts.
+
+    CJK long-form pushes (post-close reviews run ~2.9k chars ≈ 9KB+ UTF-8) hit
+    that limit, so every text field is truncated before posting. Override with
+    ``ALERT_NOTIFY_BARK_MAX_CHARS``.
+    """
+
+    raw = os.getenv("ALERT_NOTIFY_BARK_MAX_CHARS", "").strip()
+    if not raw:
+        return BARK_MAX_CHARS_DEFAULT
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return BARK_MAX_CHARS_DEFAULT
+
+
+def truncate_bark_text(text: str, max_chars: int) -> str:
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars].rstrip() + BARK_TRUNCATION_MARK
+
+
+def http_permanent_error(exc: Exception) -> bool:
+    """True for deterministic HTTP failures that retries cannot fix.
+
+    4xx responses (except 429 rate limiting) reject the payload itself, so the
+    same request fails on every retry; network errors, timeouts, 429, and 5xx
+    stay retryable.
+    """
+
+    import urllib.error
+
+    return (
+        isinstance(exc, urllib.error.HTTPError)
+        and 400 <= exc.code < 500
+        and exc.code != 429
+    )
+
+
 def resolve_default_weixin_delivery(
     *,
     account: str,
@@ -197,21 +241,29 @@ def send_bark_message(
             ok=False,
             error="missing bark url",
         )
+    max_chars = bark_max_chars()
     payload: dict[str, object] = {
         "title": title,
-        "body": body,
+        "body": truncate_bark_text(body, max_chars),
         "group": group or settings.bark_group,
     }
     if markdown and settings.bark_markdown_enabled:
         # Bark ignores body when markdown is set for the App detail view;
         # lockscreen still uses body from the notification service strip.
-        payload["markdown"] = markdown
+        # Both fields are length-capped: Bark 413-rejects oversized payloads.
+        payload["markdown"] = truncate_bark_text(markdown, max_chars)
     if settings.bark_level:
         payload["level"] = settings.bark_level
     try:
         response = poster(settings.bark_url, payload, settings.bark_timeout_seconds)
     except Exception as exc:  # noqa: BLE001
-        return SinkResult(sink="bark", attempted=True, ok=False, error=str(exc))
+        return SinkResult(
+            sink="bark",
+            attempted=True,
+            ok=False,
+            error=str(exc),
+            permanent=http_permanent_error(exc),
+        )
     code = response.get("code")
     ok = code in (200, "200")
     return SinkResult(
@@ -245,7 +297,7 @@ def send_bark_friend_message(
         )
     payload: dict[str, object] = {
         "title": title,
-        "body": body,
+        "body": truncate_bark_text(body, bark_max_chars()),
         "group": settings.bark_group,
     }
     if settings.bark_level:
@@ -253,7 +305,13 @@ def send_bark_friend_message(
     try:
         response = poster(settings.bark_friend_url, payload, settings.bark_timeout_seconds)
     except Exception as exc:  # noqa: BLE001
-        return SinkResult(sink="bark_friend", attempted=True, ok=False, error=str(exc))
+        return SinkResult(
+            sink="bark_friend",
+            attempted=True,
+            ok=False,
+            error=str(exc),
+            permanent=http_permanent_error(exc),
+        )
     code = response.get("code")
     ok = code in (200, "200")
     return SinkResult(
@@ -324,7 +382,13 @@ def send_feishu_card(
     try:
         response = poster(settings.feishu_webhook_url, payload, settings.feishu_timeout_seconds)
     except Exception as exc:  # noqa: BLE001
-        return SinkResult(sink="feishu", attempted=True, ok=False, error=str(exc))
+        return SinkResult(
+            sink="feishu",
+            attempted=True,
+            ok=False,
+            error=str(exc),
+            permanent=http_permanent_error(exc),
+        )
     # Feishu webhook success: {"code": 0, "msg": "success"} (also StatusCode=0 legacy).
     code = response.get("code", response.get("StatusCode"))
     ok = code in (0, "0")

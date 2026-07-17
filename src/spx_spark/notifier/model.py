@@ -18,6 +18,9 @@ class SinkResult:
     error: str | None = None
     alert_keys: tuple[str, ...] = ()
     verdict: str | None = None
+    # Deterministic failure (e.g. HTTP 4xx except 429): retrying the identical
+    # payload cannot succeed, so the outbox dead-letters on the first attempt.
+    permanent: bool = False
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)

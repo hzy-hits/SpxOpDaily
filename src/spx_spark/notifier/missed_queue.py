@@ -244,7 +244,7 @@ def run() -> int:
 
         summary = recover_pending_notifications(settings)
         print(json.dumps(summary, sort_keys=True))
-        return 1 if int(summary.get("dead_letter_total", 0)) else 0
+        return 0 if summary.get("ok") else 1
     pending_before = len(load_missed(settings.missed_queue_path))
     result = flush_missed(settings)
     pending_after = len(load_missed(settings.missed_queue_path))

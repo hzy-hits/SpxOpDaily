@@ -101,6 +101,7 @@ def _deliver_claimed_job(
             worker_id=worker_id,
             ok=sink.ok,
             error=sink.error,
+            permanent=sink.permanent,
             now=attempted_at,
         )
         delivered_targets += int(sink.ok)
@@ -172,6 +173,72 @@ def _migrate_legacy_queue(
     return imported
 
 
+def _notify_dead_letters(
+    settings: NotificationSettings,
+    outbox: NotificationDeliveryOutbox,
+    *,
+    runner: CommandRunner,
+    now: datetime,
+) -> int:
+    """Push a one-shot ops alert for new dead letters, then acknowledge them.
+
+    The ops message goes straight to the sinks, never through the outbox, so a
+    broken channel cannot turn the alert about dead letters into another dead
+    letter. When every configured sink fails, the dead letters stay
+    unacknowledged and the next recovery run retries the ops alert; when no
+    sink is configured at all, they are acknowledged to avoid poisoning the
+    recovery health check forever.
+    """
+
+    dead_letters = outbox.list_dead_letters(unacknowledged_only=True)
+    if not dead_letters:
+        return 0
+    sinks = deliver_trade_push(
+        settings,
+        title="SPX 投递死信告警",
+        text=f"{len(dead_letters)} 条告警投递死信，请检查投递链路。",
+        kind="status",
+        lane="ops",
+        friend=False,
+        runner=runner,
+    )
+    attempted = any(sink.attempted for sink in sinks)
+    delivered = any(sink.ok for sink in sinks if sink.attempted)
+    if attempted and not delivered:
+        return 0
+    for event_id in {str(entry["event_id"]) for entry in dead_letters}:
+        outbox.acknowledge_dead_letter(event_id, now=now)
+    return len(dead_letters)
+
+
+def _prune_terminal_shadow_entries(
+    settings: NotificationSettings,
+    outbox: NotificationDeliveryOutbox,
+) -> int:
+    """Drop legacy-shadow rows whose event reached a terminal outbox state.
+
+    The JSONL shadow exists only for rollback to the pre-outbox path; outbox
+    mode never calls ``flush_missed``, so rows whose event delivered or
+    dead-lettered in SQLite would otherwise linger forever.
+    """
+
+    terminal_ids: set[str] = set()
+    for entry in load_missed(settings.missed_queue_path):
+        event_id = str(entry.get("entry_id") or "")
+        if not event_id:
+            continue
+        summary = outbox.summary(event_id)
+        if summary is not None and summary.status in (
+            DeliveryStatus.DELIVERED,
+            DeliveryStatus.DEAD_LETTER,
+        ):
+            terminal_ids.add(event_id)
+    if not terminal_ids:
+        return 0
+    ack_missed_event_ids(settings.missed_queue_path, frozenset(terminal_ids))
+    return len(terminal_ids)
+
+
 def recover_pending_notifications(
     settings: NotificationSettings,
     *,
@@ -206,8 +273,13 @@ def recover_pending_notifications(
         dead_lettered += result.dead_lettered_targets
     counts = outbox.count_targets()
     dead_letter_total = counts.get(DeliveryStatus.DEAD_LETTER.value, 0)
+    dead_letter_notified = _notify_dead_letters(settings, outbox, runner=runner, now=now)
+    # Health is judged only by dead letters nobody has reviewed yet; history
+    # alone must not fail the task forever.
+    dead_letter_unacknowledged = outbox.count_unacknowledged_dead_letters()
+    pruned_shadow = _prune_terminal_shadow_entries(settings, outbox)
     return {
-        "ok": dead_letter_total == 0,
+        "ok": dead_letter_unacknowledged == 0,
         "imported_legacy": imported,
         "jobs": len(jobs),
         "attempted_targets": attempted_targets,
@@ -216,6 +288,9 @@ def recover_pending_notifications(
         "claimed_targets": counts.get(DeliveryStatus.CLAIMED.value, 0),
         "dead_lettered": dead_lettered,
         "dead_letter_total": dead_letter_total,
+        "dead_letter_unacknowledged": dead_letter_unacknowledged,
+        "dead_letter_notified": dead_letter_notified,
+        "pruned_shadow": pruned_shadow,
     }
 
 

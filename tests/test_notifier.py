@@ -2658,3 +2658,98 @@ def test_send_bark_message_accepts_markdown_and_group_override(tmp_path) -> None
     assert result.ok is True
     assert posts[0]["group"] == "spx-ops"
     assert posts[0]["markdown"] == "**detail**"
+
+
+def test_send_bark_message_truncates_oversized_body_and_markdown(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("ALERT_NOTIFY_BARK_MAX_CHARS", "100")
+    posts: list[dict[str, object]] = []
+
+    def poster(url: str, payload: dict[str, object], timeout: float) -> dict[str, object]:
+        posts.append(payload)
+        return {"code": 200}
+
+    settings = replace(
+        make_settings(str(tmp_path / "notify-state.json")),
+        bark_enabled=True,
+        bark_url="https://api.day.app/test-key",
+        bark_markdown_enabled=True,
+    )
+
+    result = send_bark_message(
+        settings,
+        "盘后复盘",
+        "正" * 300,
+        markdown="# 复盘\n" + "文" * 300,
+        poster=poster,
+    )
+
+    assert result.ok is True
+    body = str(posts[0]["body"])
+    markdown = str(posts[0]["markdown"])
+    assert body.endswith("…（已截断）")
+    assert markdown.endswith("…（已截断）")
+    assert len(body) <= 100 + len("\n…（已截断）")
+    assert len(markdown) <= 100 + len("\n…（已截断）")
+
+
+def test_send_bark_message_uses_default_limit_when_env_missing(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("ALERT_NOTIFY_BARK_MAX_CHARS", raising=False)
+    posts: list[dict[str, object]] = []
+
+    def poster(url: str, payload: dict[str, object], timeout: float) -> dict[str, object]:
+        posts.append(payload)
+        return {"code": 200}
+
+    settings = replace(
+        make_settings(str(tmp_path / "notify-state.json")),
+        bark_enabled=True,
+        bark_url="https://api.day.app/test-key",
+    )
+
+    result = send_bark_message(settings, "t", "长" * 2000, poster=poster)
+
+    assert result.ok is True
+    assert len(str(posts[0]["body"])) <= 1500 + len("\n…（已截断）")
+
+
+def test_send_bark_message_marks_only_deterministic_http_errors_permanent(tmp_path) -> None:
+    import urllib.error
+
+    settings = replace(
+        make_settings(str(tmp_path / "notify-state.json")),
+        bark_enabled=True,
+        bark_url="https://api.day.app/test-key",
+    )
+
+    def failing_poster(code: int):
+        def poster(url: str, payload: dict[str, object], timeout: float) -> dict[str, object]:
+            raise urllib.error.HTTPError(url, code, "error", {}, None)
+
+        return poster
+
+    too_large = send_bark_message(settings, "t", "b", poster=failing_poster(413))
+    assert too_large.ok is False
+    assert too_large.permanent is True
+
+    bad_request = send_bark_message(settings, "t", "b", poster=failing_poster(400))
+    assert bad_request.permanent is True
+
+    rate_limited = send_bark_message(settings, "t", "b", poster=failing_poster(429))
+    assert rate_limited.permanent is False
+
+    server_error = send_bark_message(settings, "t", "b", poster=failing_poster(500))
+    assert server_error.permanent is False
+
+    network_error = send_bark_message(
+        settings,
+        "t",
+        "b",
+        poster=lambda *_: (_ for _ in ()).throw(OSError("connection reset")),
+    )
+    assert network_error.permanent is False

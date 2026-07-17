@@ -153,3 +153,75 @@ def test_database_is_owner_readable_only(tmp_path) -> None:
     outbox = _outbox(tmp_path)
     assert outbox.writable() is True
     assert oct(os.stat(outbox.path).st_mode & 0o777) == "0o600"
+
+
+def test_permanent_failure_dead_letters_on_first_attempt(tmp_path) -> None:
+    outbox = _outbox(tmp_path)
+    _enqueue(outbox)
+    outbox.claim_due(worker_id="inline", limit_targets=10, now=NOW)
+
+    assert outbox.settle_target(
+        "event-1",
+        "bark",
+        worker_id="inline",
+        ok=False,
+        error="HTTP Error 413: Request Entity Too Large",
+        permanent=True,
+        now=NOW,
+    ) is DeliveryStatus.DEAD_LETTER
+
+    summary = outbox.summary("event-1")
+    assert summary is not None
+    assert summary.dead_letter_targets == 1
+    assert summary.pending_targets == 0  # feishu is still claimed by inline
+    # the dead-lettered target never comes back for retry
+    assert outbox.claim_due(worker_id="later", limit_targets=10, now=NOW) == []
+
+
+def test_dead_letter_list_acknowledge_and_replay(tmp_path) -> None:
+    outbox = _outbox(tmp_path, max_attempts=1)
+    _enqueue(outbox)
+    job = outbox.claim_due(worker_id="inline", limit_targets=10, now=NOW)[0]
+    for target in job.targets:
+        assert outbox.settle_target(
+            "event-1",
+            target,
+            worker_id="inline",
+            ok=False,
+            error="down",
+            now=NOW,
+        ) is DeliveryStatus.DEAD_LETTER
+
+    dead = outbox.list_dead_letters()
+    assert {row["sink"] for row in dead} == {"bark", "feishu"}
+    assert all(row["acknowledged"] is False for row in dead)
+    assert all(row["title"] == "SPX warning" for row in dead)
+    assert outbox.count_unacknowledged_dead_letters() == 2
+
+    assert outbox.acknowledge_dead_letter("event-1", now=NOW) == 2
+    assert outbox.acknowledge_dead_letter("event-1", now=NOW) == 0
+    assert outbox.count_unacknowledged_dead_letters() == 0
+    assert outbox.list_dead_letters(unacknowledged_only=True) == []
+    assert all(row["acknowledged"] for row in outbox.list_dead_letters())
+
+    assert outbox.replay_dead_letter("event-1", now=NOW) == 2
+    assert outbox.replay_dead_letter("event-1", now=NOW) == 0
+    summary = outbox.summary("event-1")
+    assert summary is not None
+    assert summary.status is DeliveryStatus.PENDING
+
+    retry = outbox.claim_due(worker_id="replay", limit_targets=10, now=NOW)
+    assert len(retry) == 1
+    assert set(retry[0].targets) == {"bark", "feishu"}
+    for target in retry[0].targets:
+        outbox.settle_target(
+            "event-1",
+            target,
+            worker_id="replay",
+            ok=True,
+            error=None,
+            now=NOW,
+        )
+    summary = outbox.summary("event-1")
+    assert summary is not None
+    assert summary.status is DeliveryStatus.DELIVERED

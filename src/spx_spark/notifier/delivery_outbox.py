@@ -71,6 +71,7 @@ CREATE TABLE IF NOT EXISTS notification_delivery_targets (
     claimed_at TEXT,
     delivered_at TEXT,
     last_error TEXT,
+    acknowledged_at TEXT,
     updated_at TEXT NOT NULL,
     PRIMARY KEY (event_id, sink),
     FOREIGN KEY (event_id) REFERENCES notification_delivery_events(event_id)
@@ -150,6 +151,17 @@ class NotificationDeliveryOutbox:
     def _initialize(self) -> None:
         with self._connect() as connection:
             connection.executescript(_SCHEMA)
+            columns = {
+                str(row["name"])
+                for row in connection.execute(
+                    "PRAGMA table_info(notification_delivery_targets)"
+                )
+            }
+            if "acknowledged_at" not in columns:
+                connection.execute(
+                    "ALTER TABLE notification_delivery_targets "
+                    "ADD COLUMN acknowledged_at TEXT"
+                )
 
     def writable(self) -> bool:
         try:
@@ -396,6 +408,7 @@ class NotificationDeliveryOutbox:
         worker_id: str,
         ok: bool,
         error: str | None,
+        permanent: bool = False,
         now: datetime | None = None,
     ) -> DeliveryStatus:
         now = _utc(now)
@@ -424,7 +437,9 @@ class NotificationDeliveryOutbox:
                     age_seconds = (now - _parse(row["created_at"])).total_seconds()
                     exhausted = attempts >= int(row["max_attempts"])
                     expired = age_seconds >= self.dead_letter_after_seconds
-                    if exhausted or expired:
+                    # Permanent failures (deterministic 4xx) dead-letter on the
+                    # first attempt: retrying the identical payload cannot help.
+                    if permanent or exhausted or expired:
                         status = DeliveryStatus.DEAD_LETTER
                         next_attempt_at = now_text
                     else:
@@ -534,3 +549,114 @@ class NotificationDeliveryOutbox:
                     """
                 )
             }
+
+    def list_dead_letters(
+        self,
+        *,
+        unacknowledged_only: bool = False,
+    ) -> list[dict[str, object]]:
+        """Dead-letter targets joined with their event, oldest update first."""
+
+        query = """
+            SELECT t.event_id, t.sink, t.attempts, t.max_attempts, t.last_error,
+                   t.updated_at, t.acknowledged_at, e.title, e.kind, e.lane
+            FROM notification_delivery_targets AS t
+            JOIN notification_delivery_events AS e USING (event_id)
+            WHERE t.status = ?
+        """
+        if unacknowledged_only:
+            query += " AND t.acknowledged_at IS NULL"
+        query += " ORDER BY t.updated_at, t.event_id, t.sink"
+        with self._connect() as connection:
+            rows = connection.execute(
+                query,
+                (DeliveryStatus.DEAD_LETTER.value,),
+            ).fetchall()
+        return [
+            {
+                "event_id": str(row["event_id"]),
+                "sink": str(row["sink"]),
+                "title": str(row["title"]),
+                "kind": str(row["kind"]),
+                "lane": str(row["lane"]),
+                "attempts": int(row["attempts"]),
+                "max_attempts": int(row["max_attempts"]),
+                "last_error": row["last_error"],
+                "updated_at": str(row["updated_at"]),
+                "acknowledged": row["acknowledged_at"] is not None,
+            }
+            for row in rows
+        ]
+
+    def count_unacknowledged_dead_letters(self) -> int:
+        """Dead letters no operator has reviewed yet; drives recovery health."""
+
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT COUNT(*) AS count FROM notification_delivery_targets
+                WHERE status = ? AND acknowledged_at IS NULL
+                """,
+                (DeliveryStatus.DEAD_LETTER.value,),
+            ).fetchone()
+        return int(row["count"])
+
+    def replay_dead_letter(self, event_id: str, *, now: datetime | None = None) -> int:
+        """Reset one event's dead-letter targets to pending with a fresh budget.
+
+        Returns the number of targets requeued; the next recovery run picks
+        them up like any other pending target.
+        """
+
+        now_text = _iso(_utc(now))
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                cursor = connection.execute(
+                    """
+                    UPDATE notification_delivery_targets
+                    SET status = ?, attempts = 0, next_attempt_at = ?,
+                        claimed_by = NULL, claimed_at = NULL, last_error = NULL,
+                        acknowledged_at = NULL, updated_at = ?
+                    WHERE event_id = ? AND status = ?
+                    """,
+                    (
+                        DeliveryStatus.PENDING.value,
+                        now_text,
+                        now_text,
+                        event_id,
+                        DeliveryStatus.DEAD_LETTER.value,
+                    ),
+                )
+                replayed = cursor.rowcount
+                if replayed:
+                    self._refresh_event_status(connection, event_id, now_text)
+                connection.execute("COMMIT")
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
+        return replayed
+
+    def acknowledge_dead_letter(
+        self,
+        event_id: str,
+        *,
+        now: datetime | None = None,
+    ) -> int:
+        """Flag one event's dead-letter targets as reviewed by an operator.
+
+        Acknowledged dead letters stay in the ledger but no longer fail the
+        recovery task's health check. Returns the newly acknowledged count.
+        """
+
+        now_text = _iso(_utc(now))
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE notification_delivery_targets
+                SET acknowledged_at = ?, updated_at = ?
+                WHERE event_id = ? AND status = ? AND acknowledged_at IS NULL
+                """,
+                (now_text, now_text, event_id, DeliveryStatus.DEAD_LETTER.value),
+            )
+        return cursor.rowcount
