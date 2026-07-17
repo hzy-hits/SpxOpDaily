@@ -56,6 +56,9 @@ class IntradayStrategySettings:
     level_drift_tolerance_points: float = 5.0
     es_confirm_ratio: float = 0.50
     es_hold_tolerance_bps: float = 1.0
+    # Flip-reclaim reuses the shock machine's reclaim-hold thresholds (one override point).
+    reclaim_hold_fraction: float = 0.55
+    es_reclaim_hold_fraction: float = 0.35
 
     @classmethod
     def from_env(cls) -> "IntradayStrategySettings":
@@ -103,6 +106,14 @@ class IntradayStrategySettings:
             es_hold_tolerance_bps=env_float(
                 "ALERT_INTRADAY_CALL_ES_HOLD_TOLERANCE_BPS",
                 float(settings_value("intraday_strategy.es_hold_tolerance_bps")),
+            ),
+            reclaim_hold_fraction=env_float(
+                "ALERT_INTRADAY_RECLAIM_HOLD_FRACTION",
+                float(settings_value("intraday_shock.reclaim_hold_fraction")),
+            ),
+            es_reclaim_hold_fraction=env_float(
+                "ALERT_INTRADAY_RECLAIM_ES_HOLD_FRACTION",
+                float(settings_value("intraday_shock.es_reclaim_hold_fraction")),
             ),
         )
 
@@ -726,8 +737,10 @@ def advance_intraday_strategy(
                     holds = (
                         sample.spx >= flip_high + settings.level_buffer_points
                         and sample.es >= es_floor
-                        and float(recent_event.get("spx_recovery_fraction") or 0.0) >= 0.55
-                        and float(recent_event.get("es_recovery_fraction") or 0.0) >= 0.35
+                        and float(recent_event.get("spx_recovery_fraction") or 0.0)
+                        >= settings.reclaim_hold_fraction
+                        and float(recent_event.get("es_recovery_fraction") or 0.0)
+                        >= settings.es_reclaim_hold_fraction
                     )
                     count = int(flip_watch.get("confirm_count") or 0) + 1 if holds else 0
                     flip_watch["confirm_count"] = count
@@ -806,12 +819,8 @@ def advance_intraday_strategy(
                     "confirm_count": 0,
                     "pre_cross_spx": sample.spx,
                     "pre_cross_es": sample.es,
-                    "last_spx_source_at": _source_at(
-                        sample, "spx_source_at"
-                    ).isoformat(),
-                    "last_es_source_at": _source_at(
-                        sample, "es_source_at"
-                    ).isoformat(),
+                    "last_spx_source_at": _source_at(sample, "spx_source_at").isoformat(),
+                    "last_es_source_at": _source_at(sample, "es_source_at").isoformat(),
                 }
                 level = current_wall
                 crossed_at = None
@@ -820,10 +829,7 @@ def advance_intraday_strategy(
                 level = None
         if level is None:
             wall_watch = None
-        elif (
-            crossed_at is not None
-            and sample.spx < level - settings.level_buffer_points
-        ):
+        elif crossed_at is not None and sample.spx < level - settings.level_buffer_points:
             # A failed breakout resets the watch; a new stable pre-break wall
             # can arm on a later sample.
             wall_watch = None

@@ -365,7 +365,8 @@ def data_invalid_conditions(inputs: StevenInputs) -> bool:
     if front is None or front.quality == "unavailable":
         return True
     age = front.snapshot_age_seconds
-    if age is not None and age > inputs.settings.max_snapshot_age_seconds:
+    # Fail closed: an unknown snapshot age cannot prove freshness.
+    if age is None or age > inputs.settings.max_snapshot_age_seconds:
         return True
     return False
 
@@ -376,10 +377,12 @@ def _active_shock_event(shock_state: Mapping[str, Any] | None) -> dict[str, Any]
     active = shock_state.get("active_event")
     if not isinstance(active, dict):
         return None
-    phase = str(active.get("phase") or "")
-    if phase in COMPLETED_SHOCK_PHASES:
+    # The shock machine (application/shock/machine.py) keys the event lifecycle
+    # by "status" (shock_confirmed/reclaim_confirmed/completed/expired/...).
+    status = str(active.get("status") or "")
+    if status in COMPLETED_SHOCK_PHASES:
         return None
-    if phase:
+    if status:
         return active
     return None
 
@@ -396,7 +399,9 @@ def _event_wait_active(inputs: StevenInputs) -> bool:
     if inputs.previous_state == "EVENT_WAIT" and inputs.previous_state_since is not None:
         elapsed = (inputs.as_of - inputs.previous_state_since).total_seconds()
         return elapsed < cooldown
-    return True
+    # Outside EVENT_WAIT only fresh tags re-trigger; tags already consumed by an
+    # earlier episode must not flap the machine back in after the cooldown exit.
+    return bool(tags - set(inputs.consumed_event_tags))
 
 
 def _event_stabilized(inputs: StevenInputs) -> bool:
@@ -417,10 +422,10 @@ def _watch_entry_ok(inputs: StevenInputs, regime: str, map_levels: Mapping[str, 
     front = front_expiry(inputs.exposure)
     settings = inputs.settings
     if regime == "bullish" and support:
-        if spot - max(support) <= settings.dip_watch_max_distance_points:
+        if 0 <= spot - max(support) <= settings.dip_watch_max_distance_points:
             return "BULLISH_DIP_WATCH"
     if regime == "bearish" and support:
-        if spot - max(support) <= settings.break_watch_max_distance_points:
+        if 0 <= spot - max(support) <= settings.break_watch_max_distance_points:
             return "BEARISH_BREAK_WATCH"
     # T8: mixed may enter RANGE_PIN_WATCH when pin + gamma ratio hold
     if regime == "mixed" and pin is not None and front is not None:
@@ -451,13 +456,13 @@ def _watch_still_valid(
         return (
             regime == "bullish"
             and bool(support)
-            and spot - max(support) <= settings.dip_watch_max_distance_points
+            and 0 <= spot - max(support) <= settings.dip_watch_max_distance_points
         )
     if watch_state == "BEARISH_BREAK_WATCH":
         return (
             regime == "bearish"
             and bool(support)
-            and spot - max(support) <= settings.break_watch_max_distance_points
+            and 0 <= spot - max(support) <= settings.break_watch_max_distance_points
         )
     if watch_state == "RANGE_PIN_WATCH":
         if pin is None or front is None:
@@ -581,6 +586,7 @@ def build_steven_signal(inputs: StevenInputs) -> StevenSignal:
                 "snapshot_age_seconds": None,
             },
             warnings=(f"steven_build_error:{type(exc).__name__}",),
+            consumed_event_tags=inputs.consumed_event_tags,
         )
 
 
@@ -637,6 +643,12 @@ def _build_steven_signal_inner(inputs: StevenInputs) -> StevenSignal:
             inputs.previous_state if inputs.previous_state in WATCH_STATES else "OBSERVE_ONLY"
         )
         expression = "none"
+    # Tags handled by an EVENT_WAIT episode stay consumed while still present so
+    # they cannot re-trigger T3; tags that vanish upstream are forgotten.
+    active_tags = set(inputs.event_tags) & EVENT_WAIT_TAGS
+    consumed_event_tags = set(inputs.consumed_event_tags) & active_tags
+    if machine_state == "EVENT_WAIT":
+        consumed_event_tags |= active_tags
     return StevenSignal(
         created_at=inputs.created_at,
         as_of=inputs.as_of,
@@ -657,6 +669,7 @@ def _build_steven_signal_inner(inputs: StevenInputs) -> StevenSignal:
         watch_exit_since=watch_exit_since,
         lockout_until=lockout_until,
         daily_setup_count=daily_setup_count,
+        consumed_event_tags=tuple(sorted(consumed_event_tags)),
     )
 
 

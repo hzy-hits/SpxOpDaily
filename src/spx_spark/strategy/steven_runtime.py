@@ -194,6 +194,7 @@ def inputs_from_latest_state(
     lockout_until = None
     data_healthy_since = None
     watch_exit_since = None
+    consumed_event_tags: tuple[str, ...] = ()
     if isinstance(previous_payload, Mapping):
         previous_state = str(previous_payload.get("machine_state") or "OBSERVE_ONLY")
         previous_state_since = _parse_optional_dt(previous_payload.get("state_since"))
@@ -204,6 +205,9 @@ def inputs_from_latest_state(
         lockout_until = _parse_optional_dt(previous_payload.get("lockout_until"))
         data_healthy_since = _parse_optional_dt(previous_payload.get("data_healthy_since"))
         watch_exit_since = _parse_optional_dt(previous_payload.get("watch_exit_since"))
+        raw_consumed = previous_payload.get("consumed_event_tags")
+        if isinstance(raw_consumed, list):
+            consumed_event_tags = tuple(str(item) for item in raw_consumed)
 
     return StevenInputs(
         created_at=datetime.now(tz=timezone.utc),
@@ -218,6 +222,7 @@ def inputs_from_latest_state(
         hl_volume=hl_volume,
         session_phase=_session_phase_for(state.as_of),
         event_tags=tags,
+        consumed_event_tags=consumed_event_tags,
         previous_state=previous_state,
         previous_state_since=previous_state_since,
         trading_date=trading_date,

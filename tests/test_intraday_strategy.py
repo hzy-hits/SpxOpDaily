@@ -118,6 +118,56 @@ def test_flip_reclaim_requires_two_new_pairs_above_frozen_flip() -> None:
     assert "not_dealer_position" in decision.signed_gex_sign_method
 
 
+def test_flip_reclaim_hold_thresholds_follow_settings() -> None:
+    start = datetime(2026, 7, 10, 14, 30, tzinfo=UTC)
+    state = empty_monitor_state("2026-07-10")
+    state, _, _ = advance(state, start, 7510.0, 5500.0)
+    state, _, _ = advance(state, start + timedelta(seconds=5), 7508.0, 5498.0)
+    state["active_event"] = {
+        "event_id": "spx_shock:20260710:down:1430",
+        "direction": "down",
+        "anchor_at": start.isoformat(),
+        "extreme_spx": 7485.0,
+        "reclaim_confirmed_at": None,
+        "spx_recovery_fraction": 0.0,
+        "es_recovery_fraction": 0.0,
+    }
+    state, decision, _ = advance(state, start + timedelta(seconds=10), 7485.0, 5480.0)
+    assert decision.status == "watch"
+    event = dict(state["active_event"])
+    event.update(
+        {
+            "reclaim_confirmed_at": (start + timedelta(seconds=15)).isoformat(),
+            "spx_recovery_fraction": 0.70,
+            "es_recovery_fraction": 0.50,
+        }
+    )
+    state["active_event"] = event
+    # Strict settings hold the 0.70/0.50 recovery fractions below threshold, so
+    # the same samples that confirm under defaults must not confirm here.
+    strict = replace(
+        IntradayStrategySettings(),
+        confirm_samples=1,
+        reclaim_hold_fraction=0.75,
+        es_reclaim_hold_fraction=0.55,
+    )
+    state, decision, _ = advance(
+        state, start + timedelta(seconds=15), 7504.0, 5492.0, settings=strict
+    )
+    state, decision, signals = advance(
+        state, start + timedelta(seconds=20), 7504.5, 5492.2, settings=strict
+    )
+    assert decision.flip_reclaim_call is False
+    assert not signals
+    # Default thresholds accept the same recovery fractions.
+    relaxed = replace(IntradayStrategySettings(), confirm_samples=1)
+    state, decision, signals = advance(
+        state, start + timedelta(seconds=25), 7505.0, 5492.4, settings=relaxed
+    )
+    assert decision.flip_reclaim_call is True
+    assert [row.kind for row in signals] == [FLIP_RECLAIM_CALL_KIND]
+
+
 def test_gamma_sign_alone_never_creates_directional_bias() -> None:
     start = datetime(2026, 7, 10, 14, 30, tzinfo=UTC)
     for gamma_state in ("positive_gamma_pin", "negative_gamma", "zero_gamma_transition"):

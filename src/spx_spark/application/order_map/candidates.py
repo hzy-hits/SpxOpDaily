@@ -21,11 +21,11 @@ from spx_spark.application.order_map.pricing import (
     touch_eta_minutes,
 )
 from spx_spark.application.order_map.spot import resolve_spx_spot
-from spx_spark.config import NY_TZ
 from spx_spark.intraday_strategy import (
     CALL_WALL_BREAKOUT_CALL_KIND,
     FLIP_RECLAIM_CALL_KIND,
 )
+from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 from spx_spark.marketdata import OptionRight, Quote
 from spx_spark.options_map import (
     OptionsMap,
@@ -224,6 +224,7 @@ def _build_candidate(
         underlier=spot,
         pairs=pairs,
         strike_step=strike_step,
+        tau_years=tau_now_years,
     )
 
     frontrun_level = frontrun_level_for(spot, level, policy=policy)
@@ -238,6 +239,7 @@ def _build_candidate(
             underlier=spot,
             pairs=pairs,
             strike_step=strike_step,
+            tau_years=tau_now_years,
         )
 
     # Every price here is conditional on the underlier reaching ``level`` at
@@ -427,7 +429,9 @@ def build_candidates(
         and bias_invalidation is not None
         and invalidation_holds
         and bias_expiry == front.expiry
-        and front.expiry == now_utc.astimezone(NY_TZ).strftime("%Y%m%d")
+        # Same research-expiry semantics as the level decision machine: during
+        # GTH the front expiry has already rolled to the next trading day.
+        and front.expiry == DEFAULT_MARKET_CALENDAR.research_expiry(now_utc).strftime("%Y%m%d")
         and front.gex_quality == "open_interest_gex"
         and options_map.underlier.source == "index:SPX"
         and (bias_play != CALL_WALL_BREAKOUT_CALL_KIND or front.wall_method == "oi_gex")

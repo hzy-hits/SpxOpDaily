@@ -89,6 +89,7 @@ def persist_steven_state(
         "episode_id": episode_id_for(trading_date),
         "episode_seq_last": episode_seq_last,
         "daily_setup_count": signal.daily_setup_count,
+        "consumed_event_tags": list(signal.consumed_event_tags),
         "lockout_until": signal.lockout_until.isoformat() if signal.lockout_until else None,
         "data_healthy_since": (
             signal.data_healthy_since.isoformat() if signal.data_healthy_since else None

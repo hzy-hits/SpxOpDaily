@@ -205,6 +205,7 @@ class StevenInputs:
     hl_volume: dict[str, Any] | None = None
     session_phase: str = "unknown"
     event_tags: tuple[str, ...] = ()
+    consumed_event_tags: tuple[str, ...] = ()
     previous_state: str = "OBSERVE_ONLY"
     previous_state_since: datetime | None = None
     trading_date: str | None = None
@@ -222,6 +223,9 @@ class StevenInputs:
             phase = "unknown"
         object.__setattr__(self, "session_phase", phase)
         object.__setattr__(self, "event_tags", normalize_tags(self.event_tags))
+        object.__setattr__(
+            self, "consumed_event_tags", normalize_tags(self.consumed_event_tags)
+        )
         state = self.previous_state if self.previous_state in MACHINE_STATES else "OBSERVE_ONLY"
         object.__setattr__(self, "previous_state", state)
         if self.previous_state_since is not None:
@@ -255,6 +259,7 @@ class StevenSignal:
     watch_exit_since: datetime | None = None
     lockout_until: datetime | None = None
     daily_setup_count: int = 0
+    consumed_event_tags: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {

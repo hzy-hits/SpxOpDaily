@@ -385,6 +385,7 @@ def _wall_ladder_payload(
                     underlier=spot,
                     pairs=pairs,
                     strike_step=strike_step,
+                    tau_years=tau_now_years,
                 )
                 option_ref = _wall_rung_option_ref(
                     wall_strike=wall.strike,

@@ -43,6 +43,7 @@ from spx_spark.strategy.steven import (
     evaluate_flow,
     evaluate_trigger,
     inputs_from_latest_state,
+    persist_steven_state,
     steven_context_note,
     validate_contract_dict,
 )
@@ -206,6 +207,46 @@ def make_bar(
     )
 
 
+def make_shock_event(status: str = "shock_confirmed") -> dict[str, Any]:
+    """active_event payload with the real schema written by shock/machine.py."""
+    event: dict[str, Any] = {
+        "event_id": "spx_shock:20260713:down:1400",
+        "direction": "down",
+        "status": status,
+        "anchor_at": (AS_OF - timedelta(minutes=2)).isoformat(),
+        "anchor_spx": 7520.0,
+        "anchor_es": 5520.0,
+        "extreme_at": (AS_OF - timedelta(minutes=1)).isoformat(),
+        "extreme_es_at": (AS_OF - timedelta(minutes=1)).isoformat(),
+        "extreme_spx": 7485.0,
+        "extreme_es": 5485.0,
+        "shock_spx_bps": -46.5,
+        "shock_es_bps": -63.4,
+        "shock_threshold_bps": 35.0,
+        "shock_duration_seconds": 60.0,
+        "provider": "schwab",
+        "shock_delivered": True,
+        "shock_last_attempt_at": None,
+        "reclaim_streak": 0,
+        "reclaim_confirmed_at": None,
+        "reclaim_delivered": False,
+        "reclaim_last_attempt_at": None,
+        "reclaim_threshold": 0.6,
+        "reclaim_counted_spx_source_at": None,
+        "reclaim_counted_es_source_at": None,
+        "spx_recovery_fraction": 0.0,
+        "es_recovery_fraction": 0.0,
+    }
+    if status == "reclaim_confirmed":
+        event["reclaim_confirmed_at"] = AS_OF.isoformat()
+        event["reclaim_streak"] = 2
+    if status == "completed":
+        event["completed_at"] = AS_OF.isoformat()
+    if status == "expired":
+        event["expired_at"] = AS_OF.isoformat()
+    return event
+
+
 def make_inputs(**overrides: Any) -> StevenInputs:
     settings = overrides.pop("settings", StevenSettings())
     exposure = overrides.pop("exposure", make_exposure())
@@ -283,6 +324,19 @@ def test_gate1_missing_or_stale_anchor_forces_invalid() -> None:
         signal = build_steven_signal(inputs)
         assert signal.machine_state == "DATA_INVALID"
         assert signal.status == "invalid"
+
+
+def test_gate1_unknown_snapshot_age_forces_invalid() -> None:
+    # Fail closed: an unknown snapshot age cannot prove freshness.
+    inputs = make_inputs(
+        exposure=make_exposure(
+            make_expiry(snapshot_age_seconds=None, net_dex=500000.0),
+            make_expiry(expiry="20260714", net_dex=500000.0),
+        ),
+    )
+    signal = build_steven_signal(inputs)
+    assert signal.machine_state == "DATA_INVALID"
+    assert signal.status == "invalid"
 
 
 def test_gate2_proxy_metrics_never_raise_confidence_or_drive_regime() -> None:
@@ -396,7 +450,7 @@ def test_gate5_active_shock_forces_event_wait() -> None:
         previous_state="BULLISH_DIP_WATCH",
         underlier_price=7475.0,
         bars_1m=bars,
-        shock_state={"active_event": {"phase": "shock_confirmed", "event_id": "e1"}},
+        shock_state={"active_event": make_shock_event("shock_confirmed")},
         es_volume={"direction": "up"},
     )
     signal = build_steven_signal(inputs)
@@ -514,19 +568,21 @@ def test_t2_data_invalid_recovers_after_hold() -> None:
 def test_t3_event_tags_or_shock_to_event_wait() -> None:
     for kwargs in (
         {"event_tags": ("fomc",)},
-        {"shock_state": {"active_event": {"phase": "shock_confirmed"}}},
+        {"shock_state": {"active_event": make_shock_event("shock_confirmed")}},
+        {"shock_state": {"active_event": make_shock_event("reclaim_confirmed")}},
     ):
         inputs = make_inputs(previous_state="OBSERVE_ONLY", **kwargs)
         state, rule = _advance(inputs)
         assert state == "EVENT_WAIT"
         assert rule == "T3"
-    # Counterexample: completed shock does not enter
-    done = make_inputs(
-        previous_state="OBSERVE_ONLY",
-        shock_state={"active_event": {"phase": "completed"}},
-    )
-    state, rule = _advance(done)
-    assert state != "EVENT_WAIT" or rule != "T3"
+    # Counterexample: terminal shock statuses do not enter
+    for terminal in ("completed", "expired"):
+        done = make_inputs(
+            previous_state="OBSERVE_ONLY",
+            shock_state={"active_event": make_shock_event(terminal)},
+        )
+        state, rule = _advance(done)
+        assert state != "EVENT_WAIT" or rule != "T3"
 
 
 def test_t4_event_wait_exits_after_stabilization() -> None:
@@ -539,7 +595,7 @@ def test_t4_event_wait_exits_after_stabilization() -> None:
         previous_state="EVENT_WAIT",
         previous_state_since=AS_OF - timedelta(seconds=1000),
         event_tags=(),
-        shock_state={"active_event": {"phase": "completed"}},
+        shock_state={"active_event": make_shock_event("completed")},
         bars_1m=small,
         settings=settings,
     )
@@ -551,12 +607,96 @@ def test_t4_event_wait_exits_after_stabilization() -> None:
     bad = make_inputs(
         previous_state="EVENT_WAIT",
         previous_state_since=AS_OF - timedelta(seconds=1000),
-        shock_state={"active_event": {"phase": "completed"}},
+        shock_state={"active_event": make_shock_event("completed")},
         bars_1m=tuple(wide),
         settings=settings,
     )
     state, rule = _advance(bad)
     assert state == "EVENT_WAIT"
+
+
+def test_event_wait_consumed_tags_do_not_flap_back() -> None:
+    settings = StevenSettings(
+        event_wait_cooldown_seconds=900.0,
+        event_stabilize_bars=2,
+        event_stabilize_range_points=10.0,
+    )
+    small = (
+        make_bar(AS_OF - timedelta(minutes=2), close=7500.0, high=7502.0, low=7499.0),
+        make_bar(AS_OF - timedelta(minutes=1), close=7500.5, high=7502.5, low=7499.5),
+    )
+    # Fresh tag enters EVENT_WAIT and is consumed by the episode.
+    entered = make_inputs(previous_state="OBSERVE_ONLY", event_tags=("fomc",), settings=settings)
+    state, rule = _advance(entered)
+    assert state == "EVENT_WAIT"
+    assert rule == "T3"
+    signal = build_steven_signal(entered)
+    assert set(signal.consumed_event_tags) == {"fomc"}
+    # Cooldown elapsed and bars stabilized → exit to OBSERVE_ONLY.
+    exited = make_inputs(
+        previous_state="EVENT_WAIT",
+        previous_state_since=AS_OF - timedelta(seconds=1000),
+        event_tags=("fomc",),
+        consumed_event_tags=signal.consumed_event_tags,
+        bars_1m=small,
+        settings=settings,
+    )
+    state, rule = _advance(exited)
+    assert state == "OBSERVE_ONLY"
+    assert rule == "T4"
+    # The same unchanged tags must not re-enter EVENT_WAIT (no flapping).
+    steady = make_inputs(
+        previous_state="OBSERVE_ONLY",
+        event_tags=("fomc",),
+        consumed_event_tags=signal.consumed_event_tags,
+        bars_1m=small,
+        settings=settings,
+    )
+    state, rule = _advance(steady)
+    assert state != "EVENT_WAIT"
+    assert rule != "T3"
+    # A genuinely new tag re-triggers EVENT_WAIT.
+    fresh = make_inputs(
+        previous_state="OBSERVE_ONLY",
+        event_tags=("fomc", "cpi"),
+        consumed_event_tags=signal.consumed_event_tags,
+        bars_1m=small,
+        settings=settings,
+    )
+    state, rule = _advance(fresh)
+    assert state == "EVENT_WAIT"
+    assert rule == "T3"
+    # Tags cleared upstream are forgotten; a later reappearance is fresh again.
+    cleared = build_steven_signal(
+        make_inputs(
+            previous_state="OBSERVE_ONLY",
+            event_tags=(),
+            consumed_event_tags=signal.consumed_event_tags,
+            settings=settings,
+        )
+    )
+    assert cleared.consumed_event_tags == ()
+
+
+def test_consumed_event_tags_persist_roundtrip(tmp_path: Path) -> None:
+    signal = build_steven_signal(make_inputs(previous_state="OBSERVE_ONLY", event_tags=("fomc",)))
+    assert signal.machine_state == "EVENT_WAIT"
+    payload = persist_steven_state(
+        signal,
+        data_root=tmp_path,
+        trading_date="2026-07-13",
+        episode_seq_last=0,
+    )
+    assert payload["consumed_event_tags"] == ["fomc"]
+    state = LatestState(created_at=AS_OF, as_of=AS_OF, quotes=(), best_quotes=())
+    inputs = inputs_from_latest_state(
+        state,
+        data_root=tmp_path,
+        event_tags=("fomc",),
+        previous_payload=payload,
+    )
+    assert inputs.previous_state == "EVENT_WAIT"
+    assert set(inputs.consumed_event_tags) == {"fomc"}
 
 
 def test_t5_unknown_or_mixed_regime_to_regime_unknown() -> None:
@@ -604,6 +744,15 @@ def test_t6_bullish_near_support_enters_dip_watch() -> None:
     )
     state, rule = _advance(far)
     assert state != "BULLISH_DIP_WATCH"
+    # Spot already below support is a break in progress, not a dip to buy.
+    broken = make_inputs(
+        previous_state="OBSERVE_ONLY",
+        exposure=exposure,
+        underlier_price=7400.0,
+        settings=settings,
+    )
+    state, rule = _advance(broken)
+    assert state != "BULLISH_DIP_WATCH"
 
 
 def test_t7_bearish_near_support_enters_break_watch() -> None:
@@ -626,6 +775,43 @@ def test_t7_bearish_near_support_enters_break_watch() -> None:
     )
     state, rule = _advance(far)
     assert state != "BEARISH_BREAK_WATCH"
+    # The break already happened; arming a fresh watch here is too late.
+    broken = make_inputs(
+        previous_state="REGIME_UNKNOWN",
+        exposure=exposure,
+        underlier_price=7400.0,
+    )
+    state, rule = _advance(broken)
+    assert state != "BEARISH_BREAK_WATCH"
+
+
+def test_watch_invalidated_when_spot_breaks_below_support() -> None:
+    settings = StevenSettings(watch_exit_hold_seconds=120.0)
+    exposure = make_exposure(
+        make_expiry(net_dex=500000.0, put_walls=(7470.0,)),
+        make_expiry(expiry="20260714", net_dex=500000.0),
+    )
+    held = make_inputs(
+        previous_state="BULLISH_DIP_WATCH",
+        exposure=exposure,
+        underlier_price=7400.0,
+        bars_1m=(),
+        watch_exit_since=AS_OF - timedelta(seconds=30),
+        settings=settings,
+    )
+    state, rule = _advance(held)
+    assert state == "BULLISH_DIP_WATCH"
+    expired = make_inputs(
+        previous_state="BULLISH_DIP_WATCH",
+        exposure=exposure,
+        underlier_price=7400.0,
+        bars_1m=(),
+        watch_exit_since=AS_OF - timedelta(seconds=180),
+        settings=settings,
+    )
+    state, rule = _advance(expired)
+    assert state == "OBSERVE_ONLY"
+    assert rule == "T12"
 
 
 def test_t8_mixed_pin_conditions_enter_range_pin_watch() -> None:

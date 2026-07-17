@@ -10,7 +10,10 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from spx_spark.application.order_map.pricing import build_option_price_bs_projection
+from spx_spark.application.order_map.pricing import (
+    build_option_price_bs_projection,
+    parity_forward,
+)
 from spx_spark.application.order_map.pricing_audit import (
     append_pricing_audit,
     build_pricing_audit_record,
@@ -877,6 +880,64 @@ def test_build_candidates_produces_three_plays_with_limits() -> None:
     assert "call_wall_breakout_call" not in {row.play for row in unanchored}
 
 
+def test_build_candidates_bias_gate_uses_research_expiry_during_gth() -> None:
+    # 2026-07-07 21:00 ET (01:00 UTC next day): inside GTH the research expiry
+    # has rolled to the next trading day while the New York calendar date has
+    # not. The bias gate must follow the research expiry like the level
+    # decision machine does.
+    now = datetime(2026, 7, 8, 1, 0, tzinfo=timezone.utc)
+    underlier = Quote(
+        instrument=InstrumentId.index("SPX"),
+        provider=Provider.IBKR,
+        provider_symbol="index:SPX",
+        received_at=now,
+        quality=MarketDataQuality.LIVE,
+        mark=7569.0,
+        quote_time=now,
+    )
+
+    def _state_for(expiry: str) -> LatestState:
+        return make_state(
+            underlier,
+            make_option(
+                expiry=expiry, strike=7530, right="C", mark=43.0, delta=0.72, gamma=0.007, now=now
+            ),
+            make_option(
+                expiry=expiry, strike=7530, right="P", mark=9.1, delta=-0.28, gamma=0.007, now=now
+            ),
+            now=now,
+        )
+
+    def _map_for(expiry: str) -> OptionsMap:
+        return replace(
+            make_options_map(replace(make_front_expiry(), expiry=expiry)),
+            underlier=UnderlierReference(price=7569.0, source="index:SPX"),
+        )
+
+    flip_bias = {
+        "status": "confirmed",
+        "play": "flip_reclaim_call",
+        "expiry": "20260708",
+        "level": 7530.0,
+        "invalidation_level": 7527.0,
+    }
+    rolled = build_candidates(
+        _state_for("20260708"),
+        _map_for("20260708"),
+        conditional_call_bias=flip_bias,
+    )
+    assert [row.play for row in rolled].count("flip_reclaim_call") == 1
+
+    # A front expiry still pinned to the calendar day is stale at this hour and
+    # must keep the gate closed.
+    stale = build_candidates(
+        _state_for("20260707"),
+        _map_for("20260707"),
+        conditional_call_bias={**flip_bias, "expiry": "20260707"},
+    )
+    assert "flip_reclaim_call" not in {row.play for row in stale}
+
+
 def test_order_payload_retry_rebuilds_after_stale_candidate_refresh(
     monkeypatch,
     tmp_path: Path,
@@ -885,7 +946,7 @@ def test_order_payload_retry_rebuilds_after_stale_candidate_refresh(
     states = [
         make_candidate_retry_state(
             state_now=now,
-            candidate_quote_at=now - timedelta(seconds=30),
+            candidate_quote_at=now - timedelta(seconds=46),
             vix=15.0,
         ),
         make_candidate_retry_state(
@@ -920,7 +981,7 @@ def test_order_payload_retry_is_bounded_when_candidate_stays_stale(
     states = [
         make_candidate_retry_state(
             state_now=now + timedelta(seconds=offset),
-            candidate_quote_at=now - timedelta(seconds=30),
+            candidate_quote_at=now - timedelta(seconds=46),
             vix=15.0 + offset,
         )
         for offset in (0, 10, 20)
@@ -940,7 +1001,7 @@ def test_order_payload_retry_is_bounded_when_candidate_stays_stale(
     assert sleeps == [10.0, 10.0]
     assert len(payload["candidates"]) == 2
     assert any(
-        item == "bad_quality_for_7550P:transport_stale_after_15s" for item in payload["warnings"]
+        item == "bad_quality_for_7550P:transport_stale_after_45s" for item in payload["warnings"]
     )
 
 
@@ -2426,8 +2487,9 @@ def test_chain_implied_spot_uses_put_call_parity() -> None:
     from spx_spark.options_map import pair_by_strike
 
     now = datetime(2026, 7, 7, 6, 0, tzinfo=timezone.utc)
-    # True spot 7517: C(7515)=12.0, P(7515)=10.0 -> implied 7517;
-    # the wing pair has a larger |C-P| so parity should pick 7515.
+    # True spot ~7517: the 7515 pair implies 7517, the looser 7550 wing pair
+    # implies 7518; with fewer than five pairs both enter the sample and the
+    # median of two is their average.
     quotes = [
         make_option(
             expiry="20260707", strike=7515, right="C", mark=12.0, delta=0.52, gamma=0.008, now=now
@@ -2445,7 +2507,39 @@ def test_chain_implied_spot_uses_put_call_parity() -> None:
     pairs = pair_by_strike(quotes)
     assert set(pairs[7515.0]) == {OptionRight.CALL, OptionRight.PUT}
     implied = chain_implied_spot(pairs)
-    assert implied == pytest.approx(7517.0)
+    assert implied == pytest.approx(7517.5)
+
+
+def test_chain_implied_spot_matches_parity_forward_median() -> None:
+    # Same robust convention as parity_forward with discount_factor=1.0:
+    # five tightest |C - P| pairs, median of K + C - P.
+    now = datetime(2026, 7, 7, 6, 0, tzinfo=timezone.utc)
+    quotes = [
+        make_option(
+            expiry="20260707", strike=strike, right=right, mark=mark, delta=delta, gamma=0.004,
+            now=now,
+        )
+        for strike, right, mark, delta in (
+            (7490, "C", 14.0, 0.9),
+            (7490, "P", 2.0, -0.1),
+            (7495, "C", 9.0, 0.75),
+            (7495, "P", 2.1, -0.25),
+            (7498, "C", 4.0, 0.6),
+            (7498, "P", 3.9, -0.4),
+            (7500, "C", 5.4, 0.52),
+            (7500, "P", 3.3, -0.48),
+            (7505, "C", 2.2, 0.35),
+            (7505, "P", 5.3, -0.65),
+            (7510, "C", 1.1, 0.2),
+            (7510, "P", 9.2, -0.8),
+        )
+    ]
+    pairs = pair_by_strike(quotes)
+
+    implied = chain_implied_spot(pairs)
+
+    assert implied == pytest.approx(7501.9)
+    assert implied == pytest.approx(parity_forward(pairs, discount_factor=1.0))
 
 
 def test_build_candidates_skips_missing_greeks_with_warning() -> None:
