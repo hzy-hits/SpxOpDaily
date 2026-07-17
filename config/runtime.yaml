@@ -904,6 +904,9 @@ ibkr_stream:
   data_flow_silence_seconds:
     value: 120.0
     description: Max seconds without ES ticks during an open Globex session before the stream treats the farm as a broken zombie session (no error codes, quotes frozen) and feeds the gateway-restart gate.
+  option_stale_after_seconds:
+    value: 45.0
+    description: Freshness window for stream option rows, which refresh on a round-robin rotation cycle (~24s) or may be genuinely quiet in GTH; the normal 10s live-symbol window flaps them live/stale on every beat. Execution quotes stay capped at five seconds by the trade-intent gate.
   slow_poll_chunk_size:
     value: 6
     description: Number of slow-poll labels requested in each chunk.

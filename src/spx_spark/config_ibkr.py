@@ -163,6 +163,7 @@ class IbkrStreamSettings:
     atm_state_path: str = field(default_factory=lambda: "")
     freeze_quotes_on_connectivity_loss: bool = field(default_factory=lambda: bool(True))
     data_flow_silence_seconds: float = field(default_factory=lambda: 120.0)
+    option_stale_after_seconds: float = field(default_factory=lambda: 45.0)
 
     @classmethod
     def from_env(cls) -> "IbkrStreamSettings":
@@ -255,6 +256,10 @@ class IbkrStreamSettings:
             data_flow_silence_seconds=env_float(
                 "IBKR_STREAM_DATA_FLOW_SILENCE_SECONDS",
                 float(settings_value("ibkr_stream.data_flow_silence_seconds")),
+            ),
+            option_stale_after_seconds=env_float(
+                "IBKR_STREAM_OPTION_STALE_AFTER_SECONDS",
+                float(settings_value("ibkr_stream.option_stale_after_seconds")),
             ),
         )
 

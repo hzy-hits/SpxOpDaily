@@ -60,6 +60,9 @@ class FlushOps:
             self.ibkr_settings.stale_after_seconds,
             slow_index_stale_after_seconds=self.ibkr_settings.slow_index_stale_after_seconds,
             slow_index_labels=self.ibkr_settings.slow_index_labels,
+            option_stale_after_seconds=getattr(
+                self.stream_settings, "option_stale_after_seconds", 45.0
+            ),
         )
         merge_slow_rows(rows, self.slow_cache, set(subscriptions))
         update_option_cache(

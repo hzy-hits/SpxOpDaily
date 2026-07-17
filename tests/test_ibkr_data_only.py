@@ -478,3 +478,53 @@ def test_discard_subscriptions_attempts_every_ticker_after_one_failure() -> None
 
     assert not discard_subscriptions(ib, subscriptions)
     assert ib.wrapper.calls == tickers
+
+
+def test_snapshot_rows_option_stale_after_seconds_covers_rotation_gap() -> None:
+    from types import SimpleNamespace
+
+    now = datetime(2026, 7, 17, 12, 0, tzinfo=timezone.utc)
+    old_tick = now - timedelta(seconds=20)
+
+    def quiet_ticker() -> SimpleNamespace:
+        return SimpleNamespace(
+            contract=SimpleNamespace(right="C"),
+            marketDataType=1,
+            bid=10.0,
+            ask=10.5,
+            last=10.2,
+            close=9.8,
+            bidSize=1,
+            askSize=2,
+            lastSize=1,
+            volume=1500.0,
+            callOpenInterest=100.0,
+            putOpenInterest=float("nan"),
+            time=old_tick,
+            modelGreeks=None,
+            marketPrice=lambda: 10.25,
+        )
+
+    def subs() -> dict:
+        return {
+            "option:SPXW:20260717:7500:C": (
+                quiet_ticker(),
+                VerifyRow(label="option:SPXW:20260717:7500:C", kind="option", symbol="SPX"),
+            ),
+            "future:ES": (
+                quiet_ticker(),
+                VerifyRow(label="future:ES", kind="future", symbol="ES"),
+            ),
+        }
+
+    default_rows = {row.label: row for row in snapshot_rows(subs(), 10.0, now=now)}
+    assert default_rows["option:SPXW:20260717:7500:C"].stale is True
+    assert default_rows["future:ES"].stale is True
+
+    option_rows = {
+        row.label: row
+        for row in snapshot_rows(subs(), 10.0, option_stale_after_seconds=45.0, now=now)
+    }
+    assert option_rows["option:SPXW:20260717:7500:C"].stale is False
+    # Non-option rows keep the normal live-symbol threshold.
+    assert option_rows["future:ES"].stale is True

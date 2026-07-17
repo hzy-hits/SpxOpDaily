@@ -391,6 +391,7 @@ def snapshot_rows(
     *,
     slow_index_stale_after_seconds: float | None = None,
     slow_index_labels: frozenset[str] | None = None,
+    option_stale_after_seconds: float | None = None,
     now: datetime | None = None,
 ) -> list[VerifyRow]:
     now = now or datetime.now(tz=timezone.utc)
@@ -402,11 +403,17 @@ def snapshot_rows(
     slow_labels = slow_index_labels or frozenset()
     for label, (ticker, row) in subscriptions.items():
         row_label = str(getattr(row, "label", "") or label)
-        row_stale_after = (
-            slow_index_stale_after_seconds
-            if slow_index_stale_after_seconds is not None and row_label in slow_labels
-            else stale_after_seconds
-        )
+        if option_stale_after_seconds is not None and row.kind == "option":
+            # Stream option rows rotate or can be genuinely quiet in GTH; the
+            # normal 10s live-symbol window flaps them live/stale on every
+            # beat. Execution safety stays with the trade-intent 5s gate.
+            row_stale_after = option_stale_after_seconds
+        else:
+            row_stale_after = (
+                slow_index_stale_after_seconds
+                if slow_index_stale_after_seconds is not None and row_label in slow_labels
+                else stale_after_seconds
+            )
         if ticker is None:
             rows.append(row)
             continue
