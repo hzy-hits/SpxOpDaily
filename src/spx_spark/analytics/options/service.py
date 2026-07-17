@@ -25,6 +25,7 @@ from spx_spark.analytics.options.pricing import (
     interpolated_atm_iv,
     option_iv,
     option_mid,
+    time_to_expiry_years,
     weighted_mean,
     wing_iv_at_delta,
 )
@@ -178,7 +179,11 @@ def build_expiry_map(
     if underlier_mismatch:
         warnings.append("underlier mismatch; wall distance and gamma alerts suppressed")
 
-    # ATM straddle ≈ 1.25σ; industry 1σ approximation ≈ 0.85×straddle.
+    # Industry expected-move convention: 0.85 x ATM straddle. An ATM straddle
+    # is ~0.798x of a true 1-sigma move (1-sigma ~ 1.25x straddle), so
+    # 0.85 x straddle ~ 0.68 sigma — roughly a 50% interval, ~32% tighter
+    # than a real 1-sigma move. Downstream coefficients (e.g. the order-map
+    # touch-time 0.6) are calibrated against this EM unit; do not rescale.
     expected_move = straddle * 0.85 if straddle is not None else None
     expected_move_pct = (
         expected_move / underlier if expected_move is not None and underlier else None
@@ -209,6 +214,7 @@ def build_expiry_map(
 
     level_probabilities: list[LevelProbability] = []
     if underlier is not None:
+        tau_years = time_to_expiry_years(expiry, as_of=as_of)
         for level_name, level_value in (
             ("put_wall", put_wall),
             ("zero_gamma", zero),
@@ -221,6 +227,7 @@ def build_expiry_map(
                 underlier=underlier,
                 pairs=pairs,
                 strike_step=strike_step,
+                tau_years=tau_years,
             )
             level_probabilities.append(
                 LevelProbability(

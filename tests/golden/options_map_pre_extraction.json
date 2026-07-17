@@ -61,24 +61,24 @@
         {
           "level": 7500.0,
           "level_name": "put_wall",
-          "prob_close_beyond": 0.5039893563146316,
-          "prob_touch": 1.0,
+          "prob_close_beyond": 0.49895592152539653,
+          "prob_touch": 0.9979118430507931,
           "source_delta": 0.5039893563146316,
           "source_strike": 7500.0
         },
         {
           "level": 7514.756328151529,
           "level_name": "zero_gamma",
-          "prob_close_beyond": 0.5039893563146316,
-          "prob_touch": 1.0,
+          "prob_close_beyond": 0.3526632395237629,
+          "prob_touch": 0.7053264790475258,
           "source_delta": 0.5039893563146316,
           "source_strike": 7500.0
         },
         {
           "level": 7500.0,
           "level_name": "call_wall",
-          "prob_close_beyond": 0.5039893563146316,
-          "prob_touch": 1.0,
+          "prob_close_beyond": 0.49895592152539653,
+          "prob_touch": 0.9979118430507931,
           "source_delta": 0.5039893563146316,
           "source_strike": 7500.0
         }

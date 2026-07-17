@@ -10,26 +10,29 @@ from spx_spark.marketdata import InstrumentType, OptionRight, Provider, Quote
 
 
 def chain_implied_spot(pairs: dict[float, dict[OptionRight, Quote]]) -> float | None:
-    """SPX spot implied by put-call parity at the synthetic ATM strike.
+    """SPX spot implied by put-call parity near the synthetic ATM strike.
 
-    S ~= K + C(K) - P(K) at the strike where |C - P| is smallest (r~=0 for
-    0DTE/1DTE). This is the option market's own SPX-scale reference, so it
-    avoids the ES/SPY basis that otherwise forces gamma/wall suppression
-    outside SPX cash hours.
+    S ~= K + C(K) - P(K) at the tightest pairs (r~=0 for 0DTE/1DTE). Like
+    parity_forward in application/order_map/pricing.py, take the five pairs
+    with the smallest |C - P| and return the median of their per-pair
+    implied spots, so one stale or crossed pair cannot shift the whole
+    wall/zero-gamma map. This is the option market's own SPX-scale
+    reference, so it avoids the ES/SPY basis that otherwise forces
+    gamma/wall suppression outside SPX cash hours.
     """
-    best: tuple[float, float, float, float] | None = None
+    values: list[tuple[float, float]] = []
     for strike, sides in pairs.items():
         call_mid = option_mid(sides.get(OptionRight.CALL))
         put_mid = option_mid(sides.get(OptionRight.PUT))
         if call_mid is None or put_mid is None:
             continue
-        diff = abs(call_mid - put_mid)
-        if best is None or diff < best[0]:
-            best = (diff, strike, call_mid, put_mid)
-    if best is None:
+        values.append((abs(call_mid - put_mid), strike + call_mid - put_mid))
+    if not values:
         return None
-    _, strike, call_mid, put_mid = best
-    return strike + call_mid - put_mid
+    values.sort(key=lambda item: item[0])
+    sample = sorted(value for _, value in values[: min(5, len(values))])
+    middle = len(sample) // 2
+    return sample[middle] if len(sample) % 2 else (sample[middle - 1] + sample[middle]) / 2
 
 
 
