@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from spx_spark.market_context import build_market_context
+import pytest
+
+from spx_spark.market_context import _cme_contract_expiry, build_market_context
 from spx_spark.marketdata import InstrumentId, InstrumentType, MarketDataQuality, Provider, Quote
 from spx_spark.storage import LatestState
 
@@ -446,3 +448,62 @@ def test_hyperliquid_proxy_gate_uses_futures_thresholds_when_only_es_anchor() ->
     assert gate_120["anchor_is_future"] is True
     assert gate_120["state"] == "basis_warn"
     assert gate_120["usable_for_alert"] is False
+
+
+def test_hyperliquid_gate_strips_futures_carry_before_basis() -> None:
+    assert _cme_contract_expiry("/ESU26") == date(2026, 9, 18)
+    assert _cme_contract_expiry("MESZ26") == date(2026, 12, 18)
+    assert _cme_contract_expiry("future:ES") is None
+    assert _cme_contract_expiry(None) is None
+
+    now = datetime(2026, 7, 17, 5, 0, tzinfo=timezone.utc)
+    es = make_provider_quote(
+        InstrumentId.future("ES", provider_symbol="/ESU26"),
+        7513.0,
+        7480.0,
+        now,
+        provider=Provider.IBKR,
+    )
+    proxy = make_provider_quote(
+        InstrumentId(symbol="xyz:SP500", instrument_type=InstrumentType.CRYPTO_PERP),
+        7449.0,
+        7480.0,
+        now,
+        provider=Provider.HYPERLIQUID,
+    )
+    state = LatestState(created_at=now, as_of=now, quotes=(), best_quotes=(es, proxy))
+
+    gate = build_market_context(state)["derived"]["hyperliquid_spx_proxy"]
+
+    # Raw basis is -85bps (basis_warn); stripping ~63 days of carry leaves
+    # about -25bps, which is a fair anchor.
+    assert gate["anchor_is_future"] is True
+    assert gate["state"] == "basis_ok"
+    assert gate["usable_for_alert"] is True
+    assert gate["anchor_cash_equivalent"] == pytest.approx(7467.7, abs=0.5)
+    assert gate["basis_bps"] == pytest.approx(-25.0, abs=2.0)
+
+
+def test_hyperliquid_gate_falls_back_to_raw_basis_without_contract_symbol() -> None:
+    now = datetime(2026, 7, 17, 5, 0, tzinfo=timezone.utc)
+    es = make_provider_quote(
+        InstrumentId.future("ES"),
+        7513.0,
+        7480.0,
+        now,
+        provider=Provider.IBKR,
+    )
+    proxy = make_provider_quote(
+        InstrumentId(symbol="xyz:SP500", instrument_type=InstrumentType.CRYPTO_PERP),
+        7449.0,
+        7480.0,
+        now,
+        provider=Provider.HYPERLIQUID,
+    )
+    state = LatestState(created_at=now, as_of=now, quotes=(), best_quotes=(es, proxy))
+
+    gate = build_market_context(state)["derived"]["hyperliquid_spx_proxy"]
+
+    assert gate["anchor_is_future"] is True
+    assert gate["state"] == "basis_warn"
+    assert gate["anchor_cash_equivalent"] is None

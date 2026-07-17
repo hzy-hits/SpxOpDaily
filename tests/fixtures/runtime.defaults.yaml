@@ -934,6 +934,9 @@ hyperliquid:
   proxy_futures_basis_warn_bps:
     value: 80.0
     description: Wider warning threshold in basis points when the anchor is ES or MES futures.
+  es_carry_annual_rate:
+    value: 0.035
+    description: Annualized futures carry rate (risk-free minus dividend yield) stripped from ES/MES anchors before computing the Hyperliquid proxy basis; the front quarter otherwise books ~75bps of phantom basis.
   proxy_futures_basis_block_bps:
     value: 150.0
     description: Wider block threshold in basis points when the anchor is ES or MES futures.

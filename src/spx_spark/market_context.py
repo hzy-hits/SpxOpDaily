@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+import math
 import os
+import re
 from dataclasses import asdict, dataclass
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from statistics import median
 
@@ -84,6 +87,7 @@ class MarketContextEntry:
     alert_allowed: bool
     pricing_allowed: bool
     use_reason: str
+    provider_symbol: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -118,7 +122,7 @@ def build_market_context(
             "hyg_lqd": ratio(by_id, "equity:HYG", "equity:LQD"),
             "tlt_ief": ratio(by_id, "equity:TLT", "equity:IEF"),
             "spx_sector_breadth": spx_sector_breadth(state),
-            "hyperliquid_spx_proxy": hyperliquid_spx_proxy_gate(by_id),
+            "hyperliquid_spx_proxy": hyperliquid_spx_proxy_gate(by_id, as_of=state.as_of),
             "polymarket_context": load_latest_polymarket_context(),
         },
     }
@@ -170,6 +174,7 @@ def entry_from_quote(quote: Quote, *, state: LatestState) -> MarketContextEntry:
         alert_allowed=decision.alert_allowed,
         pricing_allowed=decision.pricing_allowed,
         use_reason=decision.reason,
+        provider_symbol=quote.instrument.provider_symbol,
     )
 
 
@@ -360,7 +365,63 @@ def first_actionable_entry(
     return None
 
 
-def hyperliquid_spx_proxy_gate(entries: dict[str, MarketContextEntry]) -> dict[str, object]:
+_CME_MONTH_CODES = {
+    "F": 1, "G": 2, "H": 3, "J": 4, "K": 5, "M": 6,
+    "N": 7, "Q": 8, "U": 9, "V": 10, "X": 11, "Z": 12,
+}
+_CME_CONTRACT_PATTERN = re.compile(r"^/?[A-Z]{1,4}([FGHJKMNQUVXZ])(\d{2})$")
+
+
+def _cme_third_friday(year: int, month: int) -> date:
+    first = date(year, month, 1)
+    first_friday = first + timedelta(days=(4 - first.weekday()) % 7)
+    return first_friday + timedelta(days=14)
+
+
+def _cme_contract_expiry(provider_symbol: str | None) -> date | None:
+    """Resolve a CME contract symbol like /ESU26 to its third-Friday expiry."""
+
+    if not provider_symbol:
+        return None
+    match = _CME_CONTRACT_PATTERN.fullmatch(provider_symbol.strip().upper())
+    if match is None:
+        return None
+    return _cme_third_friday(2000 + int(match.group(2)), _CME_MONTH_CODES[match.group(1)])
+
+
+def _future_carry_adjusted_price(
+    anchor: MarketContextEntry,
+    *,
+    as_of: datetime,
+) -> float | None:
+    """Convert a futures anchor to its cash equivalent by stripping carry.
+
+    A quarterly future trades at F = S * e^((r-q)T); comparing a cash-level
+    proxy against raw F books (r-q)T of phantom basis (~75bps for the front
+    quarter), which would otherwise eat the warn budget. Returns None when
+    the contract cannot be resolved, so callers fall back to the raw price.
+    """
+
+    if anchor.price is None:
+        return None
+    expiry = _cme_contract_expiry(anchor.provider_symbol)
+    if expiry is None:
+        return None
+    days_to_expiry = (expiry - as_of.date()).days
+    if days_to_expiry < 0:
+        return None
+    carry_rate = env_float(
+        "HYPERLIQUID_ES_CARRY_ANNUAL_RATE",
+        float(settings_value("hyperliquid.es_carry_annual_rate")),
+    )
+    return anchor.price * math.exp(-carry_rate * days_to_expiry / 365.0)
+
+
+def hyperliquid_spx_proxy_gate(
+    entries: dict[str, MarketContextEntry],
+    *,
+    as_of: datetime | None = None,
+) -> dict[str, object]:
     default_warn_bps = env_float(
         "HYPERLIQUID_PROXY_BASIS_WARN_BPS",
         float(settings_value("hyperliquid.proxy_basis_warn_bps")),
@@ -414,7 +475,13 @@ def hyperliquid_spx_proxy_gate(entries: dict[str, MarketContextEntry]) -> dict[s
 
     assert proxy.price is not None
     assert anchor.price is not None
-    basis_bps = (proxy.price / anchor.price - 1.0) * 10_000.0
+    basis_reference = anchor.price
+    anchor_cash_equivalent = None
+    if anchor_is_future and as_of is not None:
+        anchor_cash_equivalent = _future_carry_adjusted_price(anchor, as_of=as_of)
+        if anchor_cash_equivalent is not None:
+            basis_reference = anchor_cash_equivalent
+    basis_bps = (proxy.price / basis_reference - 1.0) * 10_000.0
     abs_basis = abs(basis_bps)
     if abs_basis >= block_bps:
         state = "basis_blocked"
@@ -438,6 +505,7 @@ def hyperliquid_spx_proxy_gate(entries: dict[str, MarketContextEntry]) -> dict[s
         "anchor": anchor.instrument_id,
         "proxy": proxy.instrument_id,
         "anchor_is_future": anchor_is_future,
+        "anchor_cash_equivalent": anchor_cash_equivalent,
         "warn_bps": warn_bps,
         "block_bps": block_bps,
     }
