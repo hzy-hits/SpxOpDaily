@@ -437,6 +437,43 @@ class SqliteEventOutbox:
             )
             return cursor.rowcount
 
+    def purge_acked_older_than(
+        self,
+        *,
+        days: int,
+        now: datetime | None = None,
+        vacuum: bool = False,
+    ) -> int:
+        """Delete acked (terminal) rows older than ``days``; returns the count.
+
+        Only ``acked`` rows are eligible: pending, claimed, and dead-letter
+        rows are never touched, so in-flight delivery and operator replay
+        evidence survive retention. A WAL checkpoint follows the delete so
+        the ``-wal`` file stays bounded; freed pages are reused by future
+        appends but the main file does not shrink. ``vacuum=True`` rebuilds
+        the database to reclaim the file space — it takes an exclusive lock
+        and rewrites the whole file, so callers should only use it from
+        low-frequency off-market maintenance windows.
+        """
+
+        if days < 1:
+            raise ValueError("days must be >= 1")
+        now = now or _utc_now()
+        cutoff = _iso(now - timedelta(days=days))
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                DELETE FROM domain_event_outbox
+                WHERE status = ? AND updated_at < ?
+                """,
+                (OutboxStatus.ACKED.value, cutoff),
+            )
+            deleted = cursor.rowcount
+            connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            if vacuum and deleted:
+                connection.execute("VACUUM")
+        return deleted
+
     def count_by_status(self) -> dict[str, int]:
         with self._connect() as connection:
             rows = connection.execute(

@@ -126,6 +126,9 @@ class MaintenanceSettings:
     feature_5s_retention_days: int
     log_retention_days: int
     trash_retention_days: int
+    outbox_retention_days: int
+    review_audit_retention_days: int
+    alert_cooldown_hours: float
     warn_pct: float
     compact_pct: float
     degraded_pct: float
@@ -171,6 +174,18 @@ class MaintenanceSettings:
             trash_retention_days=env_int(
                 "MAINTENANCE_TRASH_RETENTION_DAYS",
                 int(settings_value("maintenance.trash_retention_days")),
+            ),
+            outbox_retention_days=env_int(
+                "MAINTENANCE_OUTBOX_RETENTION_DAYS",
+                int(settings_value("maintenance.outbox_retention_days")),
+            ),
+            review_audit_retention_days=env_int(
+                "MAINTENANCE_REVIEW_AUDIT_RETENTION_DAYS",
+                int(settings_value("maintenance.review_audit_retention_days")),
+            ),
+            alert_cooldown_hours=env_float(
+                "MAINTENANCE_ALERT_COOLDOWN_HOURS",
+                float(settings_value("maintenance.alert_cooldown_hours")),
             ),
             warn_pct=env_float(
                 "MAINTENANCE_WARN_PCT", float(settings_value("maintenance.warn_pct"))

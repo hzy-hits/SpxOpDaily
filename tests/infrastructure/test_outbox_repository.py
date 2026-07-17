@@ -127,3 +127,69 @@ def test_neutral_empty_append_does_not_grow_outbox(tmp_path) -> None:
     result = outbox.append([])
     assert result.accepted == 0
     assert outbox.count_by_status() == {}
+
+
+def _ack_and_age(outbox: SqliteEventOutbox, event_id: str, *, at: datetime) -> None:
+    outbox.append([_event(event_id)])
+    outbox.claim(consumer_id="n", now=NOW)
+    assert outbox.ack([event_id], consumer_id="n", outcome="consumed") == 1
+    with sqlite3.connect(outbox.path) as connection:
+        connection.execute(
+            "UPDATE domain_event_outbox SET updated_at = ? WHERE event_id = ?",
+            (at.isoformat(), event_id),
+        )
+
+
+def test_purge_acked_older_than_deletes_only_expired_acked(tmp_path) -> None:
+    outbox = SqliteEventOutbox(tmp_path / "outbox.sqlite", max_attempts=1)
+    old = NOW - timedelta(days=40)
+    recent = NOW - timedelta(days=2)
+    _ack_and_age(outbox, "old-acked", at=old)
+    _ack_and_age(outbox, "recent-acked", at=recent)
+    outbox.append([_event("old-pending")])
+    with sqlite3.connect(outbox.path) as connection:
+        connection.execute(
+            "UPDATE domain_event_outbox SET updated_at = ? WHERE event_id = ?",
+            (old.isoformat(), "old-pending"),
+        )
+    outbox.claim(consumer_id="n", now=NOW)
+    assert outbox.fail("old-pending", error="boom", consumer_id="n", now=NOW) is (
+        OutboxStatus.DEAD_LETTER
+    )
+    with sqlite3.connect(outbox.path) as connection:
+        connection.execute(
+            "UPDATE domain_event_outbox SET updated_at = ? WHERE event_id = ?",
+            (old.isoformat(), "old-pending"),
+        )
+
+    deleted = outbox.purge_acked_older_than(days=30, now=NOW)
+
+    assert deleted == 1
+    counts = outbox.count_by_status()
+    # The recent acked row and the ancient dead-letter both survive retention.
+    assert counts.get(OutboxStatus.ACKED.value) == 1
+    assert counts.get(OutboxStatus.DEAD_LETTER.value) == 1
+    assert [record.event_id for record in outbox.dead_letters()] == ["old-pending"]
+
+
+def test_purge_acked_older_than_rejects_invalid_days(tmp_path) -> None:
+    outbox = SqliteEventOutbox(tmp_path / "outbox.sqlite")
+
+    for days in (0, -1):
+        try:
+            outbox.purge_acked_older_than(days=days, now=NOW)
+        except ValueError:
+            continue
+        raise AssertionError(f"days={days} should raise ValueError")
+
+
+def test_purge_acked_with_vacuum_keeps_surviving_rows(tmp_path) -> None:
+    outbox = SqliteEventOutbox(tmp_path / "outbox.sqlite")
+    _ack_and_age(outbox, "old-acked", at=NOW - timedelta(days=40))
+    outbox.append([_event("still-pending")])
+
+    deleted = outbox.purge_acked_older_than(days=30, now=NOW, vacuum=True)
+
+    assert deleted == 1
+    assert outbox.count_by_status().get(OutboxStatus.PENDING.value) == 1
+    assert outbox.writable() is True
