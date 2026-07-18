@@ -1401,8 +1401,8 @@ data_platform:
     value: false
     description: Enables deletion of verified raw JSONL sources after grace; disabled by default.
   raw_delete_grace_hours:
-    value: 72
-    description: Rollback grace period in hours after verified compaction before raw deletion.
+    value: 48
+    description: Rollback grace period in hours after verified compaction before raw deletion. 48h bounds raw JSONL to about two days (~25GB) since the verified Parquet copy is the durable record.
   writer_version:
     value: spx-spark-v1
     description: Writer version stamped onto research-platform records.
