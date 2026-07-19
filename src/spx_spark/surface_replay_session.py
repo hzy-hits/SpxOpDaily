@@ -41,6 +41,7 @@ from spx_spark.surface_replay_session_models import (
     SESSION_SURFACE_BUCKET_MINUTES,
     SESSION_SURFACE_BUCKET_OPTIONS,
     SESSION_SURFACE_CACHE_VERSION,
+    SESSION_SURFACE_GTH_COMPLETE_CHAIN_AVAILABLE,
     SESSION_SURFACE_GTH_QUOTE_MAX_AGE_SECONDS,
     SESSION_SURFACE_KIND,
     SESSION_SURFACE_LOCK_TIMEOUT_SECONDS,
@@ -239,6 +240,7 @@ def build_session_surface_artifact(
         frames,
         as_of=cutoff,
         weighting=selector.weighting,
+        active_session_kind=window.segment_kind(cutoff),
     )
     source_hashes_after = (
         _source_hashes(context)
@@ -369,12 +371,17 @@ def build_session_surface_artifact(
             "event_sampled_spx_ohlc_available": True,
             "official_spx_ohlc_available": False,
             "exact_sod_available": False,
-            "first_validated_baseline_available": bool(frames),
+            "first_validated_baseline_available": (
+                strike_metadata["baseline_at"] is not None
+            ),
             "projection_is_model_scenario": True,
             "historical_surface_is_model_proxy": True,
             "gth_available": gth_data_available,
             "gth_data_available": gth_data_available,
             "gth_contract_declared": True,
+            "gth_complete_chain_available": (
+                SESSION_SURFACE_GTH_COMPLETE_CHAIN_AVAILABLE
+            ),
         },
         "missing_ranges": missing_ranges,
         "provenance": {
@@ -412,6 +419,7 @@ def build_session_surface_artifact(
                 "dealer_position_sign_unknown",
                 "spx_ohlc_is_event_sampled_not_official",
                 "gth_surface_is_ibkr_oi_volume_proxy",
+                "gth_contract_universe_completeness_unproven",
                 "gth_reference_is_schwab_es_minus_frozen_previous_rth_basis",
                 "legacy_frame_incomplete_expiry_projection_is_missing",
             ],
@@ -501,6 +509,9 @@ def load_cached_session_surface(
         or provenance.get("calculation_engine") != VECTORIZED_CALCULATION_ENGINE
         or provenance.get("numeric_reduction")
         != "extended_precision_or_fsum_signed_float64_gross"
+        or not isinstance(provenance.get("known_limitations"), list)
+        or "gth_contract_universe_completeness_unproven"
+        not in provenance["known_limitations"]
     ):
         raise ReplaySessionSurfaceCacheError("session_surface_cache_provenance_invalid")
     expected_hashes = provenance.get("parquet_file_sha256")
@@ -599,6 +610,12 @@ def load_cached_session_surface(
         kind = column.get("kind")
         if kind not in {"historical", "projection", "missing"}:
             raise ReplaySessionSurfaceCacheError("session_surface_cache_column_invalid")
+        if (
+            kind != "missing"
+            and column.get("source_session_kind") == "gth"
+            and column.get("quality") != "degraded"
+        ):
+            raise ReplaySessionSurfaceCacheError("session_surface_cache_column_invalid")
         source_at = column.get("source_at")
         source_clock = _cache_clock(source_at) if source_at is not None else None
         if source_clock is not None and source_clock > cutoff:
@@ -634,6 +651,11 @@ def load_cached_session_surface(
                 _finite(extremum.get("price")) is None
                 or _finite(extremum.get("value")) is None
             ):
+                raise ReplaySessionSurfaceCacheError(
+                    "session_surface_cache_extremum_invalid"
+                )
+            extremum_price = float(extremum["price"])
+            if extremum_price in {float(price_grid[0]), float(price_grid[-1])}:
                 raise ReplaySessionSurfaceCacheError(
                     "session_surface_cache_extremum_invalid"
                 )
@@ -705,12 +727,89 @@ def load_cached_session_surface(
     else:
         raise ReplaySessionSurfaceCacheError("session_surface_cache_reference_invalid")
     strike_metadata = payload.get("strike_profile_metadata")
-    if not isinstance(strike_metadata, Mapping):
+    if (
+        not isinstance(strike_metadata, Mapping)
+        or strike_metadata.get("baseline_label")
+        != "first_validated_same_segment_provider"
+        or strike_metadata.get("comparison_semantics")
+        != "snapshot_state_not_position_or_flow"
+        or strike_metadata.get("exact_sod_available") is not False
+        or strike_metadata.get("proxy_metric") != "signed_gamma"
+        or strike_metadata.get("missing_join_value") is not None
+    ):
         raise ReplaySessionSurfaceCacheError("session_surface_cache_strike_invalid")
     for key in ("baseline_at", "current_at"):
         value = strike_metadata.get(key)
         if value is not None and _cache_clock(value) > cutoff:
             raise ReplaySessionSurfaceCacheError("session_surface_cache_lookahead")
+    baseline_at = strike_metadata.get("baseline_at")
+    current_at = strike_metadata.get("current_at")
+    baseline_contract = tuple(
+        strike_metadata.get(key)
+        for key in (
+            "baseline_session_kind",
+            "baseline_surface_provider",
+            "baseline_reference_method",
+        )
+    )
+    current_contract = tuple(
+        strike_metadata.get(key)
+        for key in (
+            "current_session_kind",
+            "current_surface_provider",
+            "current_reference_method",
+        )
+    )
+    expected_current_contract = {
+        "gth": ("gth", "ibkr", "es_basis_inferred_spx"),
+        "rth": ("rth", "schwab", "direct_index_spx"),
+    }.get(window.segment_kind(as_of))
+    gth_baseline_must_be_unavailable = (
+        current_at is not None
+        and current_contract[0] == "gth"
+        and not SESSION_SURFACE_GTH_COMPLETE_CHAIN_AVAILABLE
+    )
+    expected_baseline_unavailable_reason = (
+        "gth_contract_universe_completeness_unproven"
+        if gth_baseline_must_be_unavailable
+        else None
+    )
+    if (
+        strike_metadata.get("baseline_unavailable_reason")
+        != expected_baseline_unavailable_reason
+        or (baseline_at is None) != all(value is None for value in baseline_contract)
+        or (current_at is None) != all(value is None for value in current_contract)
+        or (baseline_at is not None and any(value is None for value in baseline_contract))
+        or (current_at is not None and any(value is None for value in current_contract))
+        or (baseline_at is not None and current_at is None)
+        or (
+            current_at is not None
+            and current_contract != expected_current_contract
+        )
+        or (gth_baseline_must_be_unavailable and baseline_at is not None)
+        or (
+            baseline_at is not None
+            and current_at is not None
+            and (
+                baseline_contract != current_contract
+                or _cache_clock(baseline_at) > _cache_clock(current_at)
+            )
+        )
+    ):
+        raise ReplaySessionSurfaceCacheError("session_surface_cache_strike_invalid")
+    for row in strike_profile:
+        if not isinstance(row, Mapping):
+            raise ReplaySessionSurfaceCacheError("session_surface_cache_strike_invalid")
+        if baseline_at is None and any(
+            row.get(key) is not None
+            for key in ("first_validated_proxy", "first_validated_open_interest")
+        ):
+            raise ReplaySessionSurfaceCacheError("session_surface_cache_strike_invalid")
+        if current_at is None and any(
+            row.get(key) is not None
+            for key in ("current_proxy", "current_open_interest")
+        ):
+            raise ReplaySessionSurfaceCacheError("session_surface_cache_strike_invalid")
     capabilities = payload.get("capabilities")
     required_capabilities = {
         "proxy_position_available": True,
@@ -721,10 +820,15 @@ def load_cached_session_surface(
         "known_clock_no_lookahead": True,
         "official_spx_ohlc_available": False,
         "exact_sod_available": False,
+        "gth_complete_chain_available": (
+            SESSION_SURFACE_GTH_COMPLETE_CHAIN_AVAILABLE
+        ),
     }
     if not isinstance(capabilities, Mapping) or any(
         capabilities.get(key) is not value
         for key, value in required_capabilities.items()
+    ) or capabilities.get("first_validated_baseline_available") is not (
+        baseline_at is not None
     ) or not isinstance(capabilities.get("gth_available"), bool) or (
         capabilities.get("gth_data_available")
         is not capabilities.get("gth_available")

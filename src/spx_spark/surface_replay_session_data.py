@@ -28,6 +28,7 @@ from spx_spark.surface_replay_session_frames import (
 )
 from spx_spark.surface_replay_session_models import (
     MAX_SINGLE_BUILD_EVALUATIONS,
+    SESSION_SURFACE_GTH_COMPLETE_CHAIN_AVAILABLE,
     SESSION_SURFACE_POLICY_VERSION,
     SESSION_SURFACE_PRICE_EXTENT_POINTS,
     FrameLoader,
@@ -54,6 +55,9 @@ from spx_spark.surface_replay_trend import TrendContext
 # The wrappers intentionally resolve collaborators from this module at call time.
 # Existing tests and callers can continue monkeypatching this facade after the
 # source/query implementations have moved to focused modules.
+_UNSCOPED_SESSION_KIND = object()
+
+
 def _basis_payload(
     state: BasisState,
     *,
@@ -495,32 +499,68 @@ def _surface_payload(
                 else None
             ),
         )
+        if (
+            column.get("kind") != "missing"
+            and column.get("source_session_kind") == "gth"
+        ):
+            # The GTH collector proves freshness for the contracts it observed,
+            # but it does not prove that every expected chain contract was
+            # present in the frame.  Preserve the values while preventing a
+            # partial chain from being presented as fully ready.
+            column["quality"] = "degraded"
         columns.append(column)
         for metric in _METRIC_TO_OUTPUT:
             matrices[metric].append(values[metric])
         zero_ridges.append(zero)
         signed_gamma = values["signed_gamma"]
-        positive = [
-            (price, value)
-            for price, value in zip(price_grid, signed_gamma, strict=True)
-            if value is not None and value > 0
-        ]
-        negative = [
-            (price, value)
-            for price, value in zip(price_grid, signed_gamma, strict=True)
-            if value is not None and value < 0
-        ]
-        if positive:
-            peak_price, peak_value = max(positive, key=lambda row: row[1])
-            positive_peaks.append({"price": peak_price, "value": peak_value})
-        else:
-            positive_peaks.append(None)
-        if negative:
-            trough_price, trough_value = min(negative, key=lambda row: row[1])
-            negative_troughs.append({"price": trough_price, "value": trough_value})
-        else:
-            negative_troughs.append(None)
+        positive_peaks.append(
+            _interior_local_extremum(price_grid, signed_gamma, positive=True)
+        )
+        negative_troughs.append(
+            _interior_local_extremum(price_grid, signed_gamma, positive=False)
+        )
     return columns, matrices, zero_ridges, positive_peaks, negative_troughs
+
+
+def _interior_local_extremum(
+    price_grid: tuple[float, ...],
+    values: list[float | None],
+    *,
+    positive: bool,
+) -> dict[str, float] | None:
+    """Return a bounded interior extremum without relabeling a grid edge as a peak."""
+
+    if len(price_grid) != len(values) or len(values) < 3:
+        return None
+    candidates: list[tuple[int, float]] = []
+    for index in range(1, len(values) - 1):
+        value = values[index]
+        left = values[index - 1]
+        right = values[index + 1]
+        if (
+            value is None
+            or left is None
+            or right is None
+            or not math.isfinite(value)
+            or not math.isfinite(left)
+            or not math.isfinite(right)
+            or (value <= 0 if positive else value >= 0)
+        ):
+            continue
+        if positive:
+            local = value >= left and value >= right and (value > left or value > right)
+        else:
+            local = value <= left and value <= right and (value < left or value < right)
+        if local:
+            candidates.append((index, value))
+    if not candidates:
+        return None
+    index, value = (
+        max(candidates, key=lambda item: item[1])
+        if positive
+        else min(candidates, key=lambda item: item[1])
+    )
+    return {"price": price_grid[index], "value": value}
 
 
 def _strike_value(
@@ -554,9 +594,58 @@ def _strike_profile(
     *,
     as_of: datetime,
     weighting: str,
+    active_session_kind: str | None | object = _UNSCOPED_SESSION_KIND,
 ) -> tuple[list[dict[str, object]], dict[str, object]]:
-    baseline = frames[0] if frames else None
-    current = _current_frame(frames, as_of)
+    eligible_frames = (
+        frames
+        if active_session_kind is _UNSCOPED_SESSION_KIND
+        else tuple(
+            frame for frame in frames if frame.session_kind == active_session_kind
+        )
+    )
+    current = (
+        _current_frame(eligible_frames, as_of)
+        if active_session_kind is _UNSCOPED_SESSION_KIND
+        or active_session_kind in {"gth", "rth"}
+        else None
+    )
+    comparable_contract = (
+        (
+            current.session_kind,
+            current.surface_provider,
+            current.reference_method,
+        )
+        if current is not None
+        else None
+    )
+    gth_baseline_unavailable = (
+        current is not None
+        and current.session_kind == "gth"
+        and not SESSION_SURFACE_GTH_COMPLETE_CHAIN_AVAILABLE
+    )
+    cutoff = as_utc(as_of)
+    baseline = (
+        None
+        if gth_baseline_unavailable
+        else min(
+            (
+                frame
+                for frame in frames
+                if comparable_contract is not None
+                and (frame.known_at or frame.at) <= cutoff
+                and frame.valid_until > frame.at
+                and frame.quality in {"ready", "degraded", "ok"}
+                and (
+                    frame.session_kind,
+                    frame.surface_provider,
+                    frame.reference_method,
+                )
+                == comparable_contract
+            ),
+            key=lambda frame: frame.at,
+            default=None,
+        )
+    )
 
     def indexed(frame: _FrameState | None) -> dict[float, Mapping[str, Any]]:
         if frame is None:
@@ -599,9 +688,29 @@ def _strike_profile(
             }
         )
     metadata = {
-        "baseline_label": "first_validated",
+        "baseline_label": "first_validated_same_segment_provider",
+        "baseline_unavailable_reason": (
+            "gth_contract_universe_completeness_unproven"
+            if gth_baseline_unavailable
+            else None
+        ),
         "baseline_at": _iso(baseline.at) if baseline is not None else None,
         "current_at": _iso(current.at) if current is not None else None,
+        "baseline_session_kind": baseline.session_kind if baseline is not None else None,
+        "baseline_surface_provider": (
+            baseline.surface_provider if baseline is not None else None
+        ),
+        "baseline_reference_method": (
+            baseline.reference_method if baseline is not None else None
+        ),
+        "current_session_kind": current.session_kind if current is not None else None,
+        "current_surface_provider": (
+            current.surface_provider if current is not None else None
+        ),
+        "current_reference_method": (
+            current.reference_method if current is not None else None
+        ),
+        "comparison_semantics": "snapshot_state_not_position_or_flow",
         "exact_sod_available": False,
         "missing_join_value": None,
         "proxy_metric": "signed_gamma",
@@ -692,6 +801,7 @@ __all__ = (
     "_causal_frames",
     "_causal_spx",
     "_fixed_price_grid",
+    "_interior_local_extremum",
     "_robust_domain",
     "_strike_profile",
     "_surface_missing_ranges",

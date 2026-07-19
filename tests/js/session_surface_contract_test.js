@@ -85,10 +85,14 @@ for (const name of [
   "scheduledMissingSessionSurfacePresentation",
   "renderSessionSurfaceChrome",
   "normalizeSessionMetricUnits",
+  "normalizeStrikeProfileMetadata",
   "cockpitCandleDisplayTime",
   "cockpitCandleAtTime",
   "clampSessionSurfacePlayback",
   "sessionGridPriceDomain",
+  "strikeProfileComparisonLabel",
+  "strikeProfileDomains",
+  "strikeProxyColor",
 ]) {
   assert.equal(typeof hooks[name], "function", `missing test hook ${name}`);
 }
@@ -206,11 +210,11 @@ function fixture({ bucketMinutes = 5, priceStep = 10 } = {}) {
   };
 }
 
-function v2Fixture() {
+function v5Fixture() {
   const payload = fixture();
   const asOf = "2026-07-17T13:35:00Z";
   payload.schema_version = 2;
-  payload.policy_version = "spxw_session_surface.v2";
+  payload.policy_version = "spxw_session_surface.v5";
   payload.provider = "mixed";
   payload.as_of = asOf;
   payload.providers = {
@@ -263,7 +267,7 @@ function v2Fixture() {
     const historical = bucket.end_at <= asOf;
     return {
       kind: historical ? "historical" : "projection",
-      quality: "ready",
+      quality: "degraded",
       source_at: historical ? bucket.end_at : asOf,
       valid_until: "2026-07-17T13:40:00Z",
       reason: null,
@@ -331,7 +335,28 @@ function v2Fixture() {
       frozen_at: "2026-07-17T13:25:00Z",
     },
   };
+  payload.strike_profile_metadata = {
+    baseline_label: "first_validated_same_segment_provider",
+    baseline_at: null,
+    baseline_session_kind: null,
+    baseline_surface_provider: null,
+    baseline_reference_method: null,
+    baseline_unavailable_reason: "gth_contract_universe_completeness_unproven",
+    current_at: asOf,
+    current_session_kind: "gth",
+    current_surface_provider: "ibkr",
+    current_reference_method: "es_basis_inferred_spx",
+    comparison_semantics: "snapshot_state_not_position_or_flow",
+    exact_sod_available: false,
+    missing_join_value: null,
+    proxy_metric: "signed_gamma",
+  };
+  payload.strike_profile.forEach((row) => {
+    row.first_validated_proxy = null;
+    row.first_validated_open_interest = null;
+  });
   payload.capabilities.gth_available = true;
+  payload.capabilities.gth_complete_chain_available = false;
   payload.capabilities.official_spx_ohlc_available = false;
   payload.missing_ranges = [{
     start_at: "2026-07-17T13:40:00Z",
@@ -373,7 +398,7 @@ async function sign(payload) {
     at: new Date("2026-07-17T13:35:00Z"),
   };
   const normalizedV2 = await hooks.normalizeSessionSurface(
-    await sign(v2Fixture()),
+    await sign(v5Fixture()),
     expectedV2,
   );
   assert.equal(normalizedV2.schemaVersion, 2);
@@ -388,9 +413,32 @@ async function sign(payload) {
   assert.equal(normalizedV2.surfaceColumns[2].kind, "missing");
   assert.equal(normalizedV2.candles[0].inferred, true);
   assert.equal(normalizedV2.reference.acceptedAtMs, null);
+  assert.equal(normalizedV2.strikeProfileMetadata.contractVerified, true);
+  assert.equal(normalizedV2.strikeProfileMetadata.baselineSessionKind, null);
+  assert.equal(normalizedV2.strikeProfileMetadata.baselineSurfaceProvider, null);
+  assert.equal(
+    normalizedV2.strikeProfileMetadata.baselineUnavailableReason,
+    "gth_contract_universe_completeness_unproven",
+  );
+  assert.equal(
+    normalizedV2.strikeProfileMetadata.comparisonSemantics,
+    "snapshot_state_not_position_or_flow",
+  );
+  assert.match(
+    hooks.strikeProfileComparisonLabel(normalizedV2.strikeProfileMetadata),
+    /cross-snapshot comparison disabled/,
+  );
+  const strikeDomains = hooks.strikeProfileDomains(normalizedV2.strikeProfile);
+  assert.equal(strikeDomains.openInterest.maxAbs, 120);
+  assert.equal(strikeDomains.gamma.maxAbs, 12.5);
+  assert.match(hooks.strikeProxyColor(1), /55, 146, 190/);
+  assert.match(hooks.strikeProxyColor(-1), /220, 103, 95/);
+  assert.equal(hooks.strikeProxyColor(0), hooks.strikeProxyColor(null));
   const inferredPresentation = hooks.referencePresentation(normalizedV2);
   assert.equal(inferredPresentation.inferred, true);
-  assert.match(inferredPresentation.providerText, /IBKR SPXW · SCHWAB ES−BASIS INFERRED/);
+  assert.match(inferredPresentation.providerText, /IBKR SPXW.*PARTIAL-CHAIN PROXY/);
+  assert.match(inferredPresentation.providerTitle, /chain completeness unproven/);
+  assert.match(inferredPresentation.legendText, /completeness unproven/);
   assert.match(inferredPresentation.referenceText, /NOT OFFICIAL SPX OHLC/);
   assert.match(inferredPresentation.clockText, /ACCEPTED unavailable/);
 
@@ -410,7 +458,7 @@ async function sign(payload) {
   assert.match(directPresentation.providerText, /SCHWAB SPXW · SCHWAB SPX REF/);
   assert.equal(directPresentation.referenceText, "DIRECT SPX REFERENCE");
 
-  const honestUnavailableGth = v2Fixture();
+  const honestUnavailableGth = v5Fixture();
   honestUnavailableGth.capabilities.gth_available = false;
   const normalizedUnavailableGth = await hooks.normalizeSessionSurface(
     await sign(honestUnavailableGth),
@@ -418,25 +466,68 @@ async function sign(payload) {
   );
   assert.equal(normalizedUnavailableGth.capabilities.gth_available, false);
 
-  const invalidProjectionSource = v2Fixture();
+  const invalidProjectionSource = v5Fixture();
   invalidProjectionSource.surface_columns[3].surface_provider = "schwab";
   await assert.rejects(
     hooks.normalizeSessionSurface(await sign(invalidProjectionSource), expectedV2),
     /invalid_session_surface_column_segment_contract/,
   );
 
-  const futureAcceptedReference = v2Fixture();
+  const falselyReadyGth = v5Fixture();
+  falselyReadyGth.surface_columns[0].quality = "ready";
+  await assert.rejects(
+    hooks.normalizeSessionSurface(await sign(falselyReadyGth), expectedV2),
+    /invalid_session_surface_gth_column_quality/,
+  );
+
+  const futureAcceptedReference = v5Fixture();
   futureAcceptedReference.reference.accepted_at = "2026-07-17T13:35:01Z";
   await assert.rejects(
     hooks.normalizeSessionSurface(await sign(futureAcceptedReference), expectedV2),
     /invalid_session_surface_reference_contract/,
   );
 
-  const gapWithValues = v2Fixture();
+  const gapWithValues = v5Fixture();
   gapWithValues.gamma_surface[2][0] = 1;
   await assert.rejects(
     hooks.normalizeSessionSurface(await sign(gapWithValues), expectedV2),
     /session_surface_missing_column_has_values/,
+  );
+
+  const crossSegmentBaseline = v5Fixture();
+  Object.assign(crossSegmentBaseline.strike_profile_metadata, {
+    baseline_at: "2026-07-17T13:30:00Z",
+    baseline_session_kind: "rth",
+    baseline_surface_provider: "schwab",
+    baseline_reference_method: "direct_index_spx",
+    baseline_unavailable_reason: null,
+  });
+  crossSegmentBaseline.strike_profile[0].first_validated_proxy = 8.25;
+  crossSegmentBaseline.strike_profile[0].first_validated_open_interest = 100;
+  await assert.rejects(
+    hooks.normalizeSessionSurface(await sign(crossSegmentBaseline), expectedV2),
+    /invalid_session_surface_strike_profile_comparison_contract/,
+  );
+
+  const missingBaselineReason = v5Fixture();
+  delete missingBaselineReason.strike_profile_metadata.baseline_unavailable_reason;
+  await assert.rejects(
+    hooks.normalizeSessionSurface(await sign(missingBaselineReason), expectedV2),
+    /invalid_session_surface_strike_profile_metadata/,
+  );
+
+  const falselyCompleteGth = v5Fixture();
+  falselyCompleteGth.capabilities.gth_complete_chain_available = true;
+  await assert.rejects(
+    hooks.normalizeSessionSurface(await sign(falselyCompleteGth), expectedV2),
+    /invalid_session_surface_capabilities_contract/,
+  );
+
+  const negativeOpenInterest = v5Fixture();
+  negativeOpenInterest.strike_profile[0].current_open_interest = -1;
+  await assert.rejects(
+    hooks.normalizeSessionSurface(await sign(negativeOpenInterest), expectedV2),
+    /negative_session_surface_open_interest/,
   );
 
   const invalidUnits = fixture();

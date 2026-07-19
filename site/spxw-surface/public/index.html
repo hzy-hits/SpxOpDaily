@@ -140,12 +140,18 @@
         <article class="cockpit-panel cockpit-panel-strike" data-cockpit-panel="strike">
           <header class="cockpit-panel-header">
             <div>
-              <p class="panel-kicker">STRIKE × CURRENT CUT</p>
-              <h2>Strike Profile <span class="proxy-inline">Proxy</span></h2>
+              <p class="panel-kicker">STRIKE × SNAPSHOT STATE</p>
+              <h2><span id="cockpit-strike-title">Open Interest by Strike</span> <span class="proxy-inline">Proxy</span></h2>
             </div>
-            <div class="panel-readout">
-              <strong id="cockpit-strike-value">—</strong>
-              <span>Current vs First Validated</span>
+            <div class="strike-header-tools">
+              <div class="strike-mode-switch" role="group" aria-label="Strike profile metric">
+                <button id="cockpit-strike-mode-oi" type="button" class="active" aria-pressed="true" title="Call plus Put open-interest contracts">OI</button>
+                <button id="cockpit-strike-mode-gamma" type="button" aria-pressed="false" title="Call-positive / Put-negative OI-weighted gamma exposure proxy">Γ Proxy</button>
+              </div>
+              <div class="panel-readout">
+                <strong id="cockpit-strike-value">—</strong>
+                <span id="cockpit-strike-readout-label">OI = Call + Put open-interest contracts</span>
+              </div>
             </div>
           </header>
           <div id="cockpit-strike-stage" class="cockpit-canvas-stage">
@@ -153,10 +159,12 @@
             <canvas id="cockpit-strike-overlay" class="cockpit-overlay" role="img" tabindex="0" aria-label="Strike exposure proxy profile aligned to SPX price"></canvas>
             <div id="cockpit-strike-empty" class="cockpit-panel-empty">Waiting for strike profile</div>
           </div>
-          <footer class="cockpit-panel-legend">
-            <span><i class="legend-bar current"></i>Current</span>
-            <span><i class="legend-bar baseline"></i>First Validated</span>
-            <span><i class="legend-spot"></i>SPX spot</span>
+          <footer class="cockpit-panel-legend cockpit-strike-legend">
+            <span><i class="legend-bar current"></i><span id="cockpit-strike-current-legend">Current OI</span></span>
+            <span><i class="legend-bar baseline"></i><span id="cockpit-strike-baseline-legend">First validated OI · same segment/provider/method</span></span>
+            <span id="cockpit-strike-color-legend">Color = call+/put− Γ sign</span>
+            <span id="cockpit-strike-domain">domain —</span>
+            <span class="proxy-limit">Not MM / participant / flow</span>
           </footer>
         </article>
 
@@ -222,6 +230,7 @@
           <div><dt>Missing</dt><dd id="cockpit-audit-missing">—</dd></div>
           <div><dt>Capabilities</dt><dd id="cockpit-audit-capabilities">—</dd></div>
           <div><dt>Reference</dt><dd id="cockpit-audit-reference">—</dd></div>
+          <div><dt>Strike comparison</dt><dd id="cockpit-audit-strike">—</dd></div>
           <div><dt>Provenance</dt><dd id="cockpit-audit-provenance">—</dd></div>
         </dl>
 

@@ -1522,7 +1522,7 @@ body.mode-live .replay-session-picker {
 
 .cockpit-panel {
   display: grid;
-  grid-template-rows: 53px minmax(0, 1fr) 33px;
+  grid-template-rows: 53px minmax(0, 1fr) 42px;
   min-width: 0;
   overflow: hidden;
   border: 1px solid var(--cockpit-border);
@@ -1576,6 +1576,53 @@ body.mode-live .replay-session-picker {
   color: var(--cockpit-muted);
   font-size: 8px;
   white-space: nowrap;
+}
+
+.strike-header-tools {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  min-width: 0;
+}
+
+.strike-header-tools .panel-readout span {
+  max-width: 174px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.strike-mode-switch {
+  display: inline-flex;
+  flex: 0 0 auto;
+  overflow: hidden;
+  border: 1px solid #315a75;
+  border-radius: 5px;
+  background: #071b2c;
+}
+
+.strike-mode-switch button {
+  min-width: 30px;
+  min-height: 23px;
+  padding: 2px 5px;
+  border: 0;
+  border-right: 1px solid #315a75;
+  border-radius: 0;
+  background: transparent;
+  color: #8ea8b8;
+  font-size: 8px;
+  font-weight: 760;
+  white-space: nowrap;
+}
+
+.strike-mode-switch button:last-child {
+  border-right: 0;
+}
+
+.strike-mode-switch button.active,
+.strike-mode-switch button[aria-pressed="true"] {
+  background: #1c5d83;
+  color: #eff9fd;
 }
 
 .cockpit-canvas-stage {
@@ -1637,6 +1684,19 @@ body.mode-live .replay-session-picker {
   display: inline-flex;
   align-items: center;
   gap: 4px;
+}
+
+.cockpit-strike-legend {
+  align-content: center;
+  gap: 3px 7px;
+  padding: 4px 7px;
+  line-height: 1.15;
+  white-space: normal;
+}
+
+.cockpit-strike-legend .proxy-limit {
+  color: #e4bd69;
+  font-weight: 700;
 }
 
 .extrema-marker-key {

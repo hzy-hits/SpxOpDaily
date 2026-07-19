@@ -20,7 +20,8 @@ def test_replay_service_is_unix_socket_only_and_resource_bounded() -> None:
     assert "--bind-host" not in runner
     assert "Nice=10" in unit
     assert "IOSchedulingClass=idle" in unit
-    assert "MemoryMax=2G" in unit
+    assert "MemoryHigh=2G" in unit
+    assert "MemoryMax=3G" in unit
     assert "ProtectSystem=strict" in unit
     assert "EnvironmentFile=" not in unit
     assert "SPX_SPARK_DISABLE_DOTENV=1" in unit

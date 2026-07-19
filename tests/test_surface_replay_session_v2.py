@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -13,7 +14,7 @@ from spx_spark.surface_dashboard_replay import (
     ReplaySourceError,
     _canonical_sha256,
 )
-from spx_spark.surface_replay_service import ReplayCatalog
+from spx_spark.surface_replay_service import ReplayCacheError, ReplayCatalog
 from spx_spark.surface_replay_session_frames import causal_frames
 from spx_spark.surface_replay_session_models import (
     SessionSurfaceBuildCache,
@@ -335,6 +336,11 @@ def test_v2_gth_surface_uses_ibkr_chain_and_causal_schwab_es_basis(
     assert reference["source_at"] <= payload["as_of"]
     assert reference["known_at"] <= payload["as_of"]
     assert payload["capabilities"]["gth_data_available"] is True
+    assert payload["capabilities"]["gth_complete_chain_available"] is False
+    assert (
+        "gth_contract_universe_completeness_unproven"
+        in payload["provenance"]["known_limitations"]
+    )
 
     historical = [
         row for row in payload["surface_columns"] if row["kind"] == "historical"
@@ -342,6 +348,7 @@ def test_v2_gth_surface_uses_ibkr_chain_and_causal_schwab_es_basis(
     assert historical
     assert all(row["surface_provider"] == "ibkr" for row in historical)
     assert all(row["source_session_kind"] == "gth" for row in historical)
+    assert all(row["quality"] == "degraded" for row in historical)
     rth_projections = [
         row
         for row in payload["surface_columns"]
@@ -350,6 +357,7 @@ def test_v2_gth_surface_uses_ibkr_chain_and_causal_schwab_es_basis(
     assert rth_projections
     assert all(row["source_session_kind"] == "gth" for row in rth_projections)
     assert all(row["surface_provider"] == "ibkr" for row in rth_projections)
+    assert all(row["quality"] == "degraded" for row in rth_projections)
     assert all(
         row["reference_method"] == "es_basis_inferred_spx"
         for row in rth_projections
@@ -365,8 +373,66 @@ def test_v2_gth_surface_uses_ibkr_chain_and_causal_schwab_es_basis(
     assert payload["provenance"]["lookahead_rows_selected"] == 0
     assert payload["provenance"]["gth_surface_quote_max_age_seconds"] == 30.0
     assert payload["provenance"]["reference_max_age_seconds"] == 5.0
+    strike_metadata = payload["strike_profile_metadata"]
+    assert strike_metadata["baseline_at"] is None
+    assert strike_metadata["baseline_session_kind"] is None
+    assert strike_metadata["baseline_surface_provider"] is None
+    assert strike_metadata["baseline_reference_method"] is None
+    assert strike_metadata["baseline_unavailable_reason"] == (
+        "gth_contract_universe_completeness_unproven"
+    )
+    assert strike_metadata["current_session_kind"] == "gth"
+    assert strike_metadata["current_surface_provider"] == "ibkr"
+    assert payload["capabilities"]["first_validated_baseline_available"] is False
+    assert all(
+        row["first_validated_proxy"] is None
+        and row["first_validated_open_interest"] is None
+        for row in payload["strike_profile"]
+    )
     assert max(payload["price_grid"]) < 8000.0
     assert all(row.get("source_at") is None or row["source_at"] <= payload["as_of"] for row in payload["surface_columns"])
+
+
+def test_v2_gth_cache_rejects_partial_chain_baseline_claim(tmp_path: Path) -> None:
+    catalog = _catalog_with_gth(tmp_path)
+    catalog.session_surface(
+        SESSION_DATE,
+        at=GTH_AT,
+        role="front",
+        weighting="oi_weighted",
+        bucket_minutes=5,
+        price_step=5.0,
+    )
+    cache_files = list(
+        (
+            catalog.data_root
+            / "published"
+            / "spxw-surface"
+            / "session-surface-cache"
+        ).rglob("*.json")
+    )
+    assert len(cache_files) == 1
+    path = cache_files[0]
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    metadata = payload["strike_profile_metadata"]
+    metadata["baseline_at"] = metadata["current_at"]
+    metadata["baseline_session_kind"] = "gth"
+    metadata["baseline_surface_provider"] = "ibkr"
+    metadata["baseline_reference_method"] = "es_basis_inferred_spx"
+    metadata["baseline_unavailable_reason"] = None
+    payload.pop("artifact_sha256")
+    payload["artifact_sha256"] = _canonical_sha256(payload)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ReplayCacheError, match="session_surface_cache_strike_invalid"):
+        catalog.session_surface(
+            SESSION_DATE,
+            at=GTH_AT,
+            role="front",
+            weighting="oi_weighted",
+            bucket_minutes=5,
+            price_step=5.0,
+        )
 
 
 def test_v2_gth_missing_basis_fails_closed_without_chain_coordinate(
@@ -449,6 +515,28 @@ def test_v2_0925_et_boundary_forces_closed_gap_missing(
     )
     assert gap["kind"] == "missing"
     assert gap["reason"] == "scheduled_closed_gap"
+    assert payload["strike_profile"] == []
+    strike_metadata = payload["strike_profile_metadata"]
+    assert strike_metadata["current_at"] is None
+    assert strike_metadata["current_session_kind"] is None
+    assert strike_metadata["current_surface_provider"] is None
+    assert strike_metadata["current_reference_method"] is None
+    assert strike_metadata["baseline_at"] is None
+    assert strike_metadata["baseline_session_kind"] is None
+    assert strike_metadata["baseline_surface_provider"] is None
+    assert strike_metadata["baseline_reference_method"] is None
+    assert strike_metadata["baseline_unavailable_reason"] is None
+    assert payload["capabilities"]["first_validated_baseline_available"] is False
+
+    cached = catalog.session_surface(
+        SESSION_DATE,
+        at=boundary,
+        role="front",
+        weighting="oi_weighted",
+        bucket_minutes=5,
+        price_step=5.0,
+    )
+    assert cached == payload
 
 
 def _cached_gth_frame(at: datetime, index: int) -> _FrameState:

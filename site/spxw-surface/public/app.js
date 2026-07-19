@@ -7,7 +7,7 @@ const SESSION_SURFACE_SCHEMA_VERSIONS = new Set([1, 2]);
 const SESSION_SURFACE_KIND = "spxw_session_surface";
 const SESSION_SURFACE_POLICY_VERSIONS = new Map([
   [1, "spxw_session_surface.v1"],
-  [2, "spxw_session_surface.v2"],
+  [2, "spxw_session_surface.v5"],
 ]);
 const SESSION_SEGMENT_CONTRACT = {
   gth: {
@@ -160,6 +160,14 @@ const dom = {
   cockpitStrikeOverlay: document.querySelector("#cockpit-strike-overlay"),
   cockpitStrikeEmpty: document.querySelector("#cockpit-strike-empty"),
   cockpitStrikeValue: document.querySelector("#cockpit-strike-value"),
+  cockpitStrikeTitle: document.querySelector("#cockpit-strike-title"),
+  cockpitStrikeReadoutLabel: document.querySelector("#cockpit-strike-readout-label"),
+  cockpitStrikeModeOi: document.querySelector("#cockpit-strike-mode-oi"),
+  cockpitStrikeModeGamma: document.querySelector("#cockpit-strike-mode-gamma"),
+  cockpitStrikeCurrentLegend: document.querySelector("#cockpit-strike-current-legend"),
+  cockpitStrikeBaselineLegend: document.querySelector("#cockpit-strike-baseline-legend"),
+  cockpitStrikeColorLegend: document.querySelector("#cockpit-strike-color-legend"),
+  cockpitStrikeDomain: document.querySelector("#cockpit-strike-domain"),
   cockpitCharmStage: document.querySelector("#cockpit-charm-stage"),
   cockpitCharmBase: document.querySelector("#cockpit-charm-base"),
   cockpitCharmOverlay: document.querySelector("#cockpit-charm-overlay"),
@@ -177,6 +185,7 @@ const dom = {
   cockpitAuditMissing: document.querySelector("#cockpit-audit-missing"),
   cockpitAuditCapabilities: document.querySelector("#cockpit-audit-capabilities"),
   cockpitAuditReference: document.querySelector("#cockpit-audit-reference"),
+  cockpitAuditStrike: document.querySelector("#cockpit-audit-strike"),
   cockpitAuditProvenance: document.querySelector("#cockpit-audit-provenance"),
   cockpitAuditFrozen: document.querySelector("#cockpit-audit-frozen"),
   cockpitAuditPit: document.querySelector("#cockpit-audit-pit"),
@@ -315,6 +324,7 @@ const app = {
   cockpitHover: null,
   cockpitPriceDomain: null,
   cockpitColorDomains: {},
+  strikeMode: "oi",
   cockpitPaintRaf: null,
 };
 
@@ -1582,6 +1592,10 @@ function normalizeSurfaceColumn(
         referenceMethod !== providerContract.referenceMethod) {
       throw new Error("invalid_session_surface_column_segment_contract");
     }
+    if (kind !== "missing" && sourceSessionKind === "gth" &&
+        normalizedStatus(raw.quality) !== "degraded") {
+      throw new Error("invalid_session_surface_gth_column_quality");
+    }
   } else if (["session_kind", "source_session_kind", "surface_provider", "reference_method"]
       .some((field) => Object.prototype.hasOwnProperty.call(raw, field))) {
     throw new Error("session_surface_v1_has_segment_column_contract");
@@ -1738,19 +1752,24 @@ function normalizeStrikeProfile(raw) {
       "invalid_session_surface_first_validated_proxy",
     );
     if (strike === null || strike <= 0) throw new Error("invalid_session_surface_strike");
+    const currentOpenInterest = finiteOrNull(
+      item.current_open_interest,
+      "invalid_session_surface_current_open_interest",
+    );
+    const firstValidatedOpenInterest = finiteOrNull(
+      item.first_validated_open_interest ?? item.baseline_open_interest,
+      "invalid_session_surface_first_validated_open_interest",
+    );
+    if (currentOpenInterest < 0 || firstValidatedOpenInterest < 0) {
+      throw new Error("negative_session_surface_open_interest");
+    }
     return {
       raw: item,
       strike,
       currentProxy,
       firstValidatedProxy,
-      currentOpenInterest: finiteOrNull(
-        item.current_open_interest,
-        "invalid_session_surface_current_open_interest",
-      ),
-      firstValidatedOpenInterest: finiteOrNull(
-        item.first_validated_open_interest ?? item.baseline_open_interest,
-        "invalid_session_surface_first_validated_open_interest",
-      ),
+      currentOpenInterest,
+      firstValidatedOpenInterest,
       quality: normalizedStatus(item.quality),
     };
   }).sort((left, right) => left.strike - right.strike);
@@ -1758,6 +1777,145 @@ function normalizeStrikeProfile(raw) {
     throw new Error("duplicate_session_surface_strike");
   }
   return rows;
+}
+
+function normalizeStrikeProfileMetadata(raw, {
+  schemaVersion,
+  asOfMs,
+  strikeProfile,
+}) {
+  if (schemaVersion === 1) {
+    if (raw !== undefined && raw !== null && !isObject(raw)) {
+      throw new Error("invalid_session_surface_strike_profile_metadata");
+    }
+    const baselineAt = raw?.baseline_at === null || raw?.baseline_at === undefined
+      ? null
+      : parseDate(raw.baseline_at);
+    const currentAt = raw?.current_at === null || raw?.current_at === undefined
+      ? null
+      : parseDate(raw.current_at);
+    if ((raw?.baseline_at && !baselineAt) || (raw?.current_at && !currentAt) ||
+        (baselineAt && baselineAt.getTime() > asOfMs) ||
+        (currentAt && currentAt.getTime() > asOfMs)) {
+      throw new Error("invalid_session_surface_strike_profile_metadata_clock");
+    }
+    return {
+      raw: raw || null,
+      baselineLabel: nonEmptyString(raw?.baseline_label) || "first_validated",
+      baselineAt,
+      baselineAtMs: baselineAt?.getTime() ?? null,
+      baselineSessionKind: null,
+      baselineSurfaceProvider: null,
+      baselineReferenceMethod: null,
+      currentAt,
+      currentAtMs: currentAt?.getTime() ?? null,
+      currentSessionKind: null,
+      currentSurfaceProvider: null,
+      currentReferenceMethod: null,
+      comparisonSemantics: "snapshot_state_not_position_or_flow",
+      baselineUnavailableReason: null,
+      exactSodAvailable: false,
+      proxyMetric: "signed_gamma",
+      contractVerified: false,
+    };
+  }
+  if (!isObject(raw) ||
+      raw.baseline_label !== "first_validated_same_segment_provider" ||
+      raw.comparison_semantics !== "snapshot_state_not_position_or_flow" ||
+      !Object.prototype.hasOwnProperty.call(raw, "baseline_unavailable_reason") ||
+      ![null, "gth_contract_universe_completeness_unproven"].includes(
+        raw.baseline_unavailable_reason,
+      ) ||
+      raw.exact_sod_available !== false ||
+      raw.missing_join_value !== null ||
+      raw.proxy_metric !== "signed_gamma") {
+    throw new Error("invalid_session_surface_strike_profile_metadata");
+  }
+  const normalizeClock = (key) => {
+    if (raw[key] === null) return null;
+    const at = parseDate(raw[key]);
+    if (!at || at.getTime() > asOfMs) {
+      throw new Error("invalid_session_surface_strike_profile_metadata_clock");
+    }
+    return at;
+  };
+  const baselineAt = normalizeClock("baseline_at");
+  const currentAt = normalizeClock("current_at");
+  if (baselineAt && currentAt && baselineAt.getTime() > currentAt.getTime()) {
+    throw new Error("invalid_session_surface_strike_profile_metadata_clock");
+  }
+  const normalizeContext = (prefix, at) => {
+    const sessionKind = raw[`${prefix}_session_kind`];
+    const surfaceProvider = raw[`${prefix}_surface_provider`];
+    const referenceMethod = raw[`${prefix}_reference_method`];
+    if (!at) {
+      if ([sessionKind, surfaceProvider, referenceMethod].some((value) => value !== null)) {
+        throw new Error("invalid_session_surface_strike_profile_metadata_context");
+      }
+      return { sessionKind: null, surfaceProvider: null, referenceMethod: null };
+    }
+    const contract = SESSION_SEGMENT_CONTRACT[sessionKind];
+    if (!contract || sessionKind === "closed_gap" ||
+        surfaceProvider !== contract.surfaceProvider ||
+        referenceMethod !== contract.referenceMethod) {
+      throw new Error("invalid_session_surface_strike_profile_metadata_context");
+    }
+    return { sessionKind, surfaceProvider, referenceMethod };
+  };
+  const baseline = normalizeContext("baseline", baselineAt);
+  const current = normalizeContext("current", currentAt);
+  const baselineUnavailableReason = raw.baseline_unavailable_reason;
+  const baselineValues = strikeProfile.some((row) =>
+    row.firstValidatedProxy !== null || row.firstValidatedOpenInterest !== null);
+  const currentValues = strikeProfile.some((row) =>
+    row.currentProxy !== null || row.currentOpenInterest !== null);
+  const gthBaselineUnavailable = current.sessionKind === "gth" && !baselineAt;
+  if ((baselineValues && !baselineAt) || (currentValues && !currentAt) ||
+      (baselineAt && !currentAt) ||
+      (current.sessionKind === "gth" && Boolean(baselineAt)) ||
+      (gthBaselineUnavailable !==
+        (baselineUnavailableReason === "gth_contract_universe_completeness_unproven")) ||
+      (!currentAt && baselineUnavailableReason !== null) ||
+      (baselineAt && currentAt && (
+        baseline.sessionKind !== current.sessionKind ||
+        baseline.surfaceProvider !== current.surfaceProvider ||
+        baseline.referenceMethod !== current.referenceMethod
+      ))) {
+    throw new Error("invalid_session_surface_strike_profile_comparison_contract");
+  }
+  return {
+    raw,
+    baselineLabel: raw.baseline_label,
+    baselineAt,
+    baselineAtMs: baselineAt?.getTime() ?? null,
+    baselineSessionKind: baseline.sessionKind,
+    baselineSurfaceProvider: baseline.surfaceProvider,
+    baselineReferenceMethod: baseline.referenceMethod,
+    currentAt,
+    currentAtMs: currentAt?.getTime() ?? null,
+    currentSessionKind: current.sessionKind,
+    currentSurfaceProvider: current.surfaceProvider,
+    currentReferenceMethod: current.referenceMethod,
+    comparisonSemantics: raw.comparison_semantics,
+    baselineUnavailableReason,
+    exactSodAvailable: false,
+    proxyMetric: raw.proxy_metric,
+    contractVerified: true,
+  };
+}
+
+function strikeProfileDomains(strikeProfile) {
+  return {
+    gamma: robustDomain(
+      strikeProfile.flatMap((row) => [row.currentProxy, row.firstValidatedProxy]),
+    ),
+    openInterest: robustDomain(
+      strikeProfile.flatMap((row) => [
+        row.currentOpenInterest,
+        row.firstValidatedOpenInterest,
+      ]),
+    ),
+  };
 }
 
 function normalizeMissingRanges(raw, sessionStartMs, sessionEndMs) {
@@ -2079,6 +2237,10 @@ async function normalizeSessionSurface(raw, expected = {}) {
     { schemaVersion, segments: sessionSegments },
   );
   const strikeProfile = normalizeStrikeProfile(raw.strike_profile);
+  const strikeProfileMetadata = normalizeStrikeProfileMetadata(
+    raw.strike_profile_metadata,
+    { schemaVersion, asOfMs: asOf.getTime(), strikeProfile },
+  );
   const spot = finiteOrNull(raw.spot, "invalid_session_surface_spot");
   if (spot !== null && spot <= 0) throw new Error("invalid_session_surface_spot");
   const spotSourceAt = raw.spot_source_at === null ? null : parseDate(raw.spot_source_at);
@@ -2163,6 +2325,7 @@ async function normalizeSessionSurface(raw, expected = {}) {
       capabilities.historical_surface_is_model_proxy !== true ||
       (schemaVersion === 2 && (
         typeof capabilities.gth_available !== "boolean" ||
+        capabilities.gth_complete_chain_available !== false ||
         capabilities.official_spx_ohlc_available !== false
       ))) {
     throw new Error("invalid_session_surface_capabilities_contract");
@@ -2184,6 +2347,7 @@ async function normalizeSessionSurface(raw, expected = {}) {
   }
   const colorDomains = isObject(raw.color_domains) ? raw.color_domains : {};
   const metricUnits = normalizeSessionMetricUnits(raw.metric_units);
+  const strikeDomains = strikeProfileDomains(strikeProfile);
   const domains = {
     gamma: robustDomain(gamma, suppliedColorDomain(colorDomains, "gamma")),
     charm: robustDomain(charm, suppliedColorDomain(colorDomains, "charm")),
@@ -2191,10 +2355,8 @@ async function normalizeSessionSurface(raw, expected = {}) {
     grossGamma: grossGamma
       ? robustDomain(grossGamma, suppliedColorDomain(colorDomains, "gross_gamma"))
       : null,
-    strike: robustDomain(
-      strikeProfile.flatMap((row) => [row.currentProxy, row.firstValidatedProxy]),
-      suppliedColorDomain(colorDomains, "strike"),
-    ),
+    strikeGamma: strikeDomains.gamma,
+    strikeOpenInterest: strikeDomains.openInterest,
   };
   return {
     raw,
@@ -2231,6 +2393,7 @@ async function normalizeSessionSurface(raw, expected = {}) {
     gammaNegativeTroughs,
     candles,
     strikeProfile,
+    strikeProfileMetadata,
     spot,
     spotSourceAtMs: spotSourceAt?.getTime() ?? null,
     spotKnownAtMs: spotKnownAt?.getTime() ?? null,
@@ -2441,6 +2604,15 @@ function historicalOnlyLiveSurface(surface) {
     currentProxy: null,
     currentOpenInterest: null,
   }));
+  const strikeProfileMetadata = {
+    ...surface.strikeProfileMetadata,
+    currentAt: null,
+    currentAtMs: null,
+    currentSessionKind: null,
+    currentSurfaceProvider: null,
+    currentReferenceMethod: null,
+  };
+  const strikeDomains = strikeProfileDomains(strikeProfile);
   return {
     ...surface,
     status: "degraded",
@@ -2458,6 +2630,7 @@ function historicalOnlyLiveSurface(surface) {
     candles: surface.candles.filter((candle) =>
       candle.endMs <= surface.historyFrozenThroughMs),
     strikeProfile,
+    strikeProfileMetadata,
     spot: null,
     spotSourceAtMs: null,
     spotKnownAtMs: null,
@@ -2474,7 +2647,8 @@ function historicalOnlyLiveSurface(surface) {
       charm: robustDomain(charm),
       vanna: robustDomain(vanna),
       grossGamma: robustDomain(grossGamma),
-      strike: robustDomain(strikeProfile.flatMap((row) => [row.firstValidatedProxy])),
+      strikeGamma: strikeDomains.gamma,
+      strikeOpenInterest: strikeDomains.openInterest,
     },
     clientLeaseMasked: true,
     sourceArtifactSha256: surface.artifactSha256,
@@ -3054,7 +3228,7 @@ function resizeCanvas(canvas) {
 
 function updateCockpitStableDomains(surface) {
   const key = `${surface.sessionDate}|${surface.role}|${surface.weighting}`;
-  for (const metric of ["gamma", "charm", "strike"]) {
+  for (const metric of ["gamma", "charm", "strikeGamma", "strikeOpenInterest"]) {
     app.cockpitColorDomains[metric] = expandOnlyDomain(
       app.cockpitColorDomains[metric],
       surface.domains[metric],
@@ -3527,6 +3701,52 @@ function drawCockpitSurface(panel, matrix) {
   empty.hidden = numericCount > 0;
 }
 
+function normalizedStrikeMode(value = app.strikeMode) {
+  return value === "gamma" ? "gamma" : "oi";
+}
+
+function renderCockpitStrikeModeChrome(surface = app.sessionSurface) {
+  const mode = normalizedStrikeMode();
+  const oiMode = mode === "oi";
+  dom.cockpitStrikeModeOi.setAttribute("aria-pressed", String(oiMode));
+  dom.cockpitStrikeModeGamma.setAttribute("aria-pressed", String(!oiMode));
+  dom.cockpitStrikeModeOi.classList.toggle("active", oiMode);
+  dom.cockpitStrikeModeGamma.classList.toggle("active", !oiMode);
+  dom.cockpitStrikeTitle.textContent = oiMode ? "Open Interest by Strike" : "Gamma by Strike";
+  dom.cockpitStrikeReadoutLabel.textContent = oiMode
+    ? "OI = Call + Put open-interest contracts"
+    : `Γ Proxy · ${surface ? sessionMetricUnitLabel(surface, "signed_gamma") : "metric unit"}`;
+  dom.cockpitStrikeCurrentLegend.textContent = oiMode ? "Current OI" : "Current Γ Proxy";
+  const baselineUnavailable = surface?.strikeProfileMetadata
+    ?.baselineUnavailableReason === "gth_contract_universe_completeness_unproven";
+  const baselineMissing = surface && !surface.strikeProfileMetadata?.baselineAt;
+  dom.cockpitStrikeBaselineLegend.textContent = baselineMissing
+    ? baselineUnavailable
+      ? "Baseline unavailable · GTH chain completeness unproven"
+      : "Baseline unavailable · no comparable validated snapshot"
+    : oiMode
+      ? "First validated OI · same segment/provider/method"
+      : "First validated Γ · same segment/provider/method";
+  dom.cockpitStrikeColorLegend.textContent = oiMode
+    ? "Color = call+/put− Γ sign"
+    : "Call + / Put − OI-weighted Γ proxy";
+  const domain = oiMode
+    ? app.cockpitColorDomains.strikeOpenInterest
+    : app.cockpitColorDomains.strikeGamma;
+  dom.cockpitStrikeDomain.textContent = domain
+    ? oiMode
+      ? `0–${compactNumber(domain.maxAbs, 1)} contracts`
+      : `±${compactNumber(domain.maxAbs, 1)} · ${surface ? sessionMetricUnitLabel(surface, "signed_gamma") : "metric unit"}`
+    : "domain —";
+}
+
+function strikeProxyColor(value) {
+  if (!Number.isFinite(value) || value === 0) return "rgba(145, 163, 174, 0.72)";
+  return value < 0
+    ? "rgba(220, 103, 95, 0.82)"
+    : "rgba(55, 146, 190, 0.84)";
+}
+
 function drawCockpitStrike() {
   const surface = app.sessionSurface;
   if (!surface || !app.cockpitPriceDomain) return;
@@ -3536,9 +3756,14 @@ function drawCockpitStrike() {
   context.fillStyle = "#081d30";
   context.fillRect(0, 0, layout.width, layout.height);
   drawCockpitPriceAxes(context, layout, app.cockpitPriceDomain, { side: "left" });
-  const domain = app.cockpitColorDomains.strike;
-  const zeroX = layout.plotLeft + layout.plotWidth / 2;
-  const halfWidth = layout.plotWidth / 2;
+  const mode = normalizedStrikeMode();
+  const oiMode = mode === "oi";
+  const domain = oiMode
+    ? app.cockpitColorDomains.strikeOpenInterest
+    : app.cockpitColorDomains.strikeGamma;
+  const maximum = Math.max(domain?.maxAbs || 0, 1e-12);
+  const zeroX = oiMode ? layout.plotLeft : layout.plotLeft + layout.plotWidth / 2;
+  const availableWidth = oiMode ? layout.plotWidth : layout.plotWidth / 2;
   context.save();
   context.strokeStyle = "rgba(219, 233, 240, 0.62)";
   context.setLineDash([3, 4]);
@@ -3550,14 +3775,25 @@ function drawCockpitStrike() {
   for (const row of surface.strikeProfile) {
     if (row.strike < app.cockpitPriceDomain.min || row.strike > app.cockpitPriceDomain.max) continue;
     const y = sessionPriceToY(layout, app.cockpitPriceDomain, row.strike);
-    const currentRatio = row.currentProxy === null ? 0 : Math.min(Math.abs(row.currentProxy) / domain.maxAbs, 1);
-    const baselineRatio = row.firstValidatedProxy === null
+    const currentValue = oiMode ? row.currentOpenInterest : row.currentProxy;
+    const baselineValue = oiMode ? row.firstValidatedOpenInterest : row.firstValidatedProxy;
+    const currentRatio = currentValue === null
       ? 0
-      : Math.min(Math.abs(row.firstValidatedProxy) / domain.maxAbs, 1);
-    if (row.firstValidatedProxy !== null) {
-      const width = baselineRatio * halfWidth;
-      const x = row.firstValidatedProxy < 0 ? zeroX - width : zeroX;
-      context.strokeStyle = "rgba(192, 207, 216, 0.72)";
+      : Math.min(Math.abs(currentValue) / maximum, 1);
+    const baselineRatio = baselineValue === null
+      ? 0
+      : Math.min(Math.abs(baselineValue) / maximum, 1);
+    if (currentValue !== null) {
+      const width = currentRatio * availableWidth;
+      const x = !oiMode && currentValue < 0 ? zeroX - width : zeroX;
+      context.fillStyle = strikeProxyColor(row.currentProxy);
+      context.fillRect(x, y - 1.7, Math.max(width, currentValue === 0 ? 1 : 0), 3.4);
+    }
+    if (baselineValue !== null) {
+      const width = baselineRatio * availableWidth;
+      const x = !oiMode && baselineValue < 0 ? zeroX - width : zeroX;
+      const endpointX = !oiMode && baselineValue < 0 ? x : x + width;
+      context.strokeStyle = "rgba(218, 228, 234, 0.92)";
       context.lineWidth = 1.5;
       context.setLineDash([3, 3]);
       context.beginPath();
@@ -3565,28 +3801,32 @@ function drawCockpitStrike() {
       context.lineTo(x + width, y);
       context.stroke();
       context.setLineDash([]);
-    }
-    if (row.currentProxy !== null) {
-      const width = currentRatio * halfWidth;
-      const x = row.currentProxy < 0 ? zeroX - width : zeroX;
-      context.fillStyle = row.currentProxy < 0
-        ? "rgba(220, 103, 95, 0.82)"
-        : "rgba(55, 146, 190, 0.84)";
-      context.fillRect(x, y - 1.7, Math.max(width, row.currentProxy === 0 ? 1 : 0), 3.4);
+      context.fillStyle = "rgba(218, 228, 234, 0.96)";
+      context.fillRect(endpointX - 1.25, y - 3, 2.5, 6);
     }
   }
   context.fillStyle = "#91a9b9";
   context.font = "8px ui-monospace, SFMono-Regular, monospace";
   context.textBaseline = "top";
   context.textAlign = "left";
-  context.fillText(`−${compactNumber(domain.maxAbs, 1)}`, layout.plotLeft, layout.plotBottom + 8);
-  context.textAlign = "center";
-  context.fillText("0", zeroX, layout.plotBottom + 8);
-  context.textAlign = "right";
-  context.fillText(`+${compactNumber(domain.maxAbs, 1)}`, layout.plotRight, layout.plotBottom + 8);
+  if (oiMode) {
+    context.fillText("0", layout.plotLeft, layout.plotBottom + 8);
+    context.textAlign = "center";
+    context.fillText("Call + Put OI contracts →", layout.plotLeft + layout.plotWidth / 2, layout.plotBottom + 8);
+    context.textAlign = "right";
+    context.fillText(compactNumber(domain?.maxAbs || 0, 1), layout.plotRight, layout.plotBottom + 8);
+  } else {
+    context.fillText(`−${compactNumber(domain?.maxAbs || 0, 1)}`, layout.plotLeft, layout.plotBottom + 8);
+    context.textAlign = "center";
+    context.fillText("0 · Γ Proxy", zeroX, layout.plotBottom + 8);
+    context.textAlign = "right";
+    context.fillText(`+${compactNumber(domain?.maxAbs || 0, 1)}`, layout.plotRight, layout.plotBottom + 8);
+  }
   context.restore();
-  empty.hidden = surface.strikeProfile.some((row) =>
-    row.currentProxy !== null || row.firstValidatedProxy !== null);
+  empty.hidden = surface.strikeProfile.some((row) => oiMode
+    ? row.currentOpenInterest !== null || row.firstValidatedOpenInterest !== null
+    : row.currentProxy !== null || row.firstValidatedProxy !== null);
+  renderCockpitStrikeModeChrome(surface);
 }
 
 function nearestNumericIndex(values, target, selector = (value) => value) {
@@ -3679,12 +3919,12 @@ function referencePresentation(surface, frameSessionKind = null) {
   const referenceProvider = reference?.provider?.toUpperCase() ||
     segment?.referenceProvider?.toUpperCase() || "—";
   const providerText = effectiveSessionKind === "gth"
-    ? `${surfaceProvider} SPXW · ${referenceProvider} ES−BASIS INFERRED`
+    ? `${surfaceProvider} SPXW · PARTIAL-CHAIN PROXY`
     : effectiveSessionKind === "rth"
       ? `${surfaceProvider} SPXW · ${referenceProvider} SPX REF`
       : "CLOSED GAP · NO PROVIDER";
   const providerTitle = segment
-    ? `${segment.kind.toUpperCase()} surface provider ${surfaceProvider}; reference provider ${referenceProvider}`
+    ? `${segment.kind.toUpperCase()} surface provider ${surfaceProvider}; reference provider ${referenceProvider}${segment.kind === "gth" ? "; SPXW chain completeness unproven" : ""}`
     : "No session segment at display time";
   if (!reference || reference.price === null) {
     return {
@@ -3694,7 +3934,7 @@ function referencePresentation(surface, frameSessionKind = null) {
       referenceTitle: reference?.missingReason || "Reference cleared or unavailable",
       clockText: "CLOCKS MISSING",
       clockTitle: "No valid source/basis clocks",
-      legendText: "GTH inferred ref / RTH direct ref",
+      legendText: "GTH PARTIAL-CHAIN PROXY · completeness unproven / RTH direct ref",
       inferred: false,
       missing: true,
     };
@@ -3723,7 +3963,7 @@ function referencePresentation(surface, frameSessionKind = null) {
     referenceTitle,
     clockText,
     clockTitle,
-    legendText: "GTH inferred ref / RTH direct ref",
+    legendText: "GTH PARTIAL-CHAIN PROXY · completeness unproven / RTH direct ref",
     inferred,
     missing: false,
   };
@@ -3837,9 +4077,14 @@ function renderCockpitReadouts(spot) {
   const strike = strikeIndex >= 0 ? surface.strikeProfile[strikeIndex] : null;
   dom.cockpitGammaValue.textContent = gamma.value === null ? "Γ —" : `Γ ${compactNumber(gamma.value, 3)}`;
   dom.cockpitCharmValue.textContent = charm.value === null ? "Charm —" : compactNumber(charm.value, 3);
-  dom.cockpitStrikeValue.textContent = strike?.currentProxy === null || !strike
+  const strikeValue = normalizedStrikeMode() === "oi"
+    ? strike?.currentOpenInterest
+    : strike?.currentProxy;
+  dom.cockpitStrikeValue.textContent = strikeValue === null || strikeValue === undefined || !strike
     ? "—"
-    : `${strike.strike.toFixed(0)} · ${compactNumber(strike.currentProxy, 2)}`;
+    : normalizedStrikeMode() === "oi"
+      ? `${strike.strike.toFixed(0)} · OI ${compactNumber(strikeValue, 1)}`
+      : `${strike.strike.toFixed(0)} · Γ ${compactNumber(strikeValue, 2)}`;
 }
 
 function drawCockpitDynamic() {
@@ -3867,6 +4112,7 @@ function renderCockpitStatic() {
     dom.cockpitCharmThreshold.textContent = "neutral —";
     dom.cockpitGammaDomain.textContent = "domain —";
     dom.cockpitCharmDomain.textContent = "domain —";
+    renderCockpitStrikeModeChrome(null);
     dom.cockpitTooltip.hidden = true;
     dom.cockpitTooltip.replaceChildren();
     if (dom.cockpitTooltip.dataset) delete dom.cockpitTooltip.dataset.panel;
@@ -3888,6 +4134,36 @@ function renderCockpitStatic() {
   dom.cockpitCharmDomain.textContent = `domain ±${compactNumber(charmDomain.maxAbs, 2)} · ${charmUnit}`;
   drawCockpitDynamic();
   renderCockpitAudit();
+}
+
+function strikeProfileContextLabel(metadata, prefix) {
+  const at = metadata?.[`${prefix}At`];
+  if (!at) return `${prefix}: unavailable`;
+  const sessionKind = metadata[`${prefix}SessionKind`];
+  const provider = metadata[`${prefix}SurfaceProvider`];
+  const referenceMethod = metadata[`${prefix}ReferenceMethod`];
+  return `${prefix}: ${sessionKind?.toUpperCase() || "segment undeclared"} / ${provider?.toUpperCase() || "provider undeclared"} / ${referenceMethodLabel(referenceMethod)} @ ${formatReplayAsOf(at)}`;
+}
+
+function strikeProfileComparisonLabel(metadata) {
+  if (!metadata) return "Strike comparison metadata unavailable";
+  const baselineUnavailable = metadata.baselineUnavailableReason ===
+    "gth_contract_universe_completeness_unproven";
+  const baselineMissing = !metadata.baselineAt;
+  return [
+    strikeProfileContextLabel(metadata, "current"),
+    baselineMissing
+      ? baselineUnavailable
+        ? "baseline: unavailable · GTH contract-universe completeness unproven"
+        : "baseline: unavailable · no comparable validated snapshot"
+      : strikeProfileContextLabel(metadata, "baseline"),
+    "snapshot state only; not MM/participant position or signed flow",
+    metadata.contractVerified
+      ? baselineMissing
+        ? "cross-snapshot comparison disabled"
+        : "same-segment/provider/reference-method contract verified"
+      : "legacy metadata; segment/provider unverified",
+  ].join(" · ");
 }
 
 function cockpitTooltipFor(panel, timeMs, price) {
@@ -3914,9 +4190,22 @@ function cockpitTooltipFor(panel, timeMs, price) {
   const charmLine = document.createElement("span");
   charmLine.textContent = `Charm raw: ${charm.value === null ? "missing" : String(charm.value)} ${sessionMetricUnitLabel(surface, "charm")} · ${charm.column?.quality || "unknown"}`;
   const strikeLine = document.createElement("span");
+  const baselineUnavailable = !surface.strikeProfileMetadata?.baselineAt;
+  const gthBaselineUnavailable = surface.strikeProfileMetadata
+    ?.baselineUnavailableReason === "gth_contract_universe_completeness_unproven";
+  const baselineOiText = baselineUnavailable
+    ? gthBaselineUnavailable
+      ? "baseline unavailable (GTH chain completeness unproven)"
+      : "baseline unavailable (no comparable validated snapshot)"
+    : `first validated ${strike?.firstValidatedOpenInterest ?? "missing"} contracts`;
+  const baselineGammaText = baselineUnavailable
+    ? "Γ baseline unavailable"
+    : `Γ baseline ${strike?.firstValidatedProxy ?? "missing"}`;
   strikeLine.textContent = strike
-    ? `Strike ${strike.strike}: current ${strike.currentProxy ?? "missing"}; first validated ${strike.firstValidatedProxy ?? "missing"} ${sessionMetricUnitLabel(surface, "signed_gamma")}`
+    ? `Strike ${strike.strike}: OI current ${strike.currentOpenInterest ?? "missing"} contracts; ${baselineOiText} · color sign Γ proxy ${strike.currentProxy ?? "missing"}; ${baselineGammaText} ${sessionMetricUnitLabel(surface, "signed_gamma")}`
     : "Strike profile: missing";
+  const strikeSemanticsLine = document.createElement("span");
+  strikeSemanticsLine.textContent = strikeProfileComparisonLabel(surface.strikeProfileMetadata);
   const candleLine = document.createElement("span");
   candleLine.textContent = candle
     ? candle.inferred
@@ -3955,6 +4244,7 @@ function cockpitTooltipFor(panel, timeMs, price) {
     gammaLine,
     charmLine,
     strikeLine,
+    strikeSemanticsLine,
     semanticsLine,
     candleLine,
     sourceLine,
@@ -4018,6 +4308,7 @@ function renderCockpitAudit() {
     dom.cockpitAuditMissing.textContent = "—";
     dom.cockpitAuditCapabilities.textContent = "—";
     dom.cockpitAuditReference.textContent = "—";
+    dom.cockpitAuditStrike.textContent = "—";
     dom.cockpitAuditProvenance.textContent = "—";
     dom.cockpitAuditFrozen.textContent = "—";
     dom.cockpitAuditPit.textContent = "PIT —";
@@ -4064,6 +4355,9 @@ function renderCockpitAudit() {
             ? `basis=${reference.basis.value} ${reference.basis.method} frozen_at=${referenceIsoLabel(reference.basis.frozenAtMs)}`
             : "basis=none",
         ].join(" · ");
+  dom.cockpitAuditStrike.textContent = strikeProfileComparisonLabel(
+    surface.strikeProfileMetadata,
+  );
   dom.cockpitAuditProvenance.textContent = summarizeAuditObject(surface.provenance);
   dom.cockpitAuditFrozen.textContent = isReplayView()
     ? "Frozen replay"
@@ -6949,6 +7243,23 @@ dom.metricFilter.addEventListener("change", () => {
   if (dom.scenarioDiagnostic.open) renderVisuals();
 });
 
+function setCockpitStrikeMode(mode) {
+  const next = normalizedStrikeMode(mode);
+  if (next === app.strikeMode) {
+    renderCockpitStrikeModeChrome(app.sessionSurface);
+    return;
+  }
+  app.strikeMode = next;
+  renderCockpitStrikeModeChrome(app.sessionSurface);
+  if (!app.sessionSurface) return;
+  drawCockpitStrike();
+  drawCockpitOverlay("strike", cockpitCurrentSpot());
+  renderCockpitReadouts(cockpitCurrentSpot());
+}
+
+dom.cockpitStrikeModeOi.addEventListener("click", () => setCockpitStrikeMode("oi"));
+dom.cockpitStrikeModeGamma.addEventListener("click", () => setCockpitStrikeMode("gamma"));
+
 function setAuditDrawer(open) {
   const visible = open === true;
   dom.cockpitAuditDrawer.hidden = !visible;
@@ -7159,6 +7470,7 @@ if (isObject(globalThis.__SPX_SPARK_TEST_HOOK__)) {
     normalizeSessionMetricUnits,
     normalizeSessionReference,
     normalizeSessionSegments,
+    normalizeStrikeProfileMetadata,
     normalizeReplayTrend,
     referencePresentation,
     renderReferenceChrome,
@@ -7183,6 +7495,9 @@ if (isObject(globalThis.__SPX_SPARK_TEST_HOOK__)) {
     cockpitCandleAtTime,
     clampSessionSurfacePlayback,
     sessionGridPriceDomain,
+    strikeProfileComparisonLabel,
+    strikeProfileDomains,
+    strikeProxyColor,
   });
 }
 

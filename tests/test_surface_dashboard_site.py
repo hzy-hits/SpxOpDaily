@@ -144,8 +144,11 @@ def test_frontend_keeps_live_and_replay_clock_contracts_separate() -> None:
     assert "source_session_kind" in app
     assert "projected from ${sourceKind}" in app
     assert 'typeof capabilities.gth_available !== "boolean"' in app
+    assert 'capabilities.gth_complete_chain_available !== false' in app
     assert 'icon.className = `legend-candle${presentation.inferred ? " inferred" : ""}`' in app
     assert "NOT OFFICIAL SPX OHLC" in app
+    assert "SPXW · PARTIAL-CHAIN PROXY" in app
+    assert "chain completeness unproven" in app
     assert 'id="reference-chip"' in page
     assert 'id="reference-clock"' in page
     assert 'id="provider-chip"' in page
@@ -153,6 +156,27 @@ def test_frontend_keeps_live_and_replay_clock_contracts_separate() -> None:
     assert "Participant (unavailable)" in page
     assert 'id="cockpit-gamma-base"' in page
     assert 'id="cockpit-strike-base"' in page
+    assert 'id="cockpit-strike-mode-oi"' in page
+    assert 'id="cockpit-strike-mode-gamma"' in page
+    assert "OI = Call + Put open-interest contracts" in page
+    assert "Not MM / participant / flow" in page
+    assert 'id="cockpit-audit-strike"' in page
+    assert 'app.strikeMode = next' in app
+    assert 'drawCockpitOverlay("strike", cockpitCurrentSpot())' in app
+    assert "first_validated_same_segment_provider" in app
+    assert "snapshot_state_not_position_or_flow" in app
+    assert 'currentOpenInterest' in app
+    assert 'firstValidatedOpenInterest' in app
+    assert '[2, "spxw_session_surface.v5"]' in app
+    assert "baseline_unavailable_reason" in app
+    assert "cross-snapshot comparison disabled" in app
+    strike_draw = app[app.index("function drawCockpitStrike()") : app.index(
+        "function nearestNumericIndex", app.index("function drawCockpitStrike()")
+    )]
+    assert strike_draw.index("if (currentValue !== null)") < strike_draw.index(
+        "if (baselineValue !== null)"
+    )
+    assert "endpointX" in strike_draw
     assert 'id="cockpit-charm-base"' in page
     assert 'id="cockpit-live-placeholder"' not in page
     assert "LEGACY ROLLING SNAPSHOT" in page
