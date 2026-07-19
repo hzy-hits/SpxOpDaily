@@ -102,9 +102,10 @@ MemoryMax=3G
 
 调整后同一生产数据：
 
-- 一次性全 GTH seed：17.08 s；peak RSS 约 1.12 GiB，无 swap/high event。
+- 一次性全 GTH seed：17.08 s；peak memory 约 1.12 GB，无 swap/high event。
 - 相邻未缓存 GTH cutoff：0.544 s。
 - GTH/RTH disk cache hit：约 0.14 s。
+- 部署后完整预热 5 个 timeline、242 个 surface request 用时 3 分 28 秒；最终生成 244 个 v5/cache8 artifact，service peak/current memory 约 1.49/0.90 GB，swap=0。
 - Redis 未引入；当前瓶颈是首次 DuckDB/GTH 原始扫描和曲面物化，不是缓存查找或网络。
 
 ## 测试
