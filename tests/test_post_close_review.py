@@ -450,6 +450,46 @@ def test_llm_writer_disabled_keeps_template() -> None:
     assert payload["llm_writer"]["status"] == "disabled"
 
 
+def test_post_close_runtime_defaults_to_deepseek(monkeypatch) -> None:
+    monkeypatch.delenv("SPX_REVIEW_LLM_PROVIDER", raising=False)
+    monkeypatch.delenv("SPX_REVIEW_LLM_MODEL", raising=False)
+
+    settings = ReviewLlmSettings.from_env()
+
+    assert settings.provider == "deepseek"
+    assert settings.model == "deepseek-v4-pro"
+
+
+def test_post_close_normalizes_stale_grok_environment_to_deepseek(monkeypatch) -> None:
+    monkeypatch.setenv("SPX_REVIEW_LLM_PROVIDER", "grok_cli")
+    monkeypatch.setenv("SPX_REVIEW_LLM_MODEL", "grok-4.5")
+
+    settings = ReviewLlmSettings.from_env()
+
+    assert settings.provider == "deepseek"
+    assert settings.model == "deepseek-v4-pro"
+
+
+def test_post_close_rejects_legacy_grok_provider_without_invoking_it() -> None:
+    payload = {"trading_date": "2026-07-06"}
+    markdown = "# SPX/SPXW Post-Close Review - 2026-07-06\n\nTemplate"
+    settings = ReviewLlmSettings(
+        enabled=True,
+        provider="grok_cli",
+        model="grok-4.5",
+        url="https://api.deepseek.com/v1/chat/completions",
+        env_file="/no/such/file",
+        timeout_seconds=1,
+        max_tokens=100,
+    )
+
+    output = maybe_write_llm_review(payload, markdown, settings)
+
+    assert output == markdown
+    assert payload["llm_writer"]["status"] == "fallback_template"
+    assert payload["llm_writer"]["error"] == "unsupported provider: grok_cli"
+
+
 def test_llm_writer_falls_back_without_key(monkeypatch) -> None:
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
     payload = {"trading_date": "2026-07-06"}

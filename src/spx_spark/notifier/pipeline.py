@@ -41,7 +41,6 @@ from spx_spark.notifier.sinks import (
     any_delivery_ok,
     bark_title_for_alerts,
     run_codex_exec,
-    run_grok_agent,
     run_openclaw_agent,
 )
 from spx_spark.notifier.state import (
@@ -597,7 +596,6 @@ def notify_payload(
         settings.feishu_enabled
         or settings.bark_enabled
         or settings.deepseek_enabled
-        or settings.grok_enabled
     ):
         # Legacy: OpenClaw-only mode still dumps the raw template without review.
         delivery_sinks = _scope_sinks(
@@ -716,46 +714,6 @@ def notify_payload(
             )
         review_candidates = strong_review_candidates
 
-    if settings.grok_enabled and review_candidates:
-        review_attempted = True
-        grok_result, grok_message = run_grok_agent(
-            settings,
-            build_codex_prompt(payload, review_candidates, previous_push=load_previous_push()),
-            runner=runner,
-        )
-        grok_result = _scope_sink(
-            grok_result,
-            review_candidates,
-            verdict="reviewed" if grok_result.ok else "failed",
-        )
-        sinks.append(grok_result)
-        if grok_result.ok:
-            review_candidates = _deliver_review_message(
-                payload=payload,
-                message=grok_message,
-                review_candidates=review_candidates,
-                settings=settings,
-                runner=runner,
-                now_utc=now_utc,
-                alerts_marked_sent=alerts_marked_sent,
-                acknowledged_event_ids=acknowledged_event_ids,
-                sinks=sinks,
-                reviewer_sink=grok_result,
-                reviewer_name="grok_cli",
-                deliver=settings.grok_deliver,
-            )
-        else:
-            review_candidates = _handle_reviewer_failure(
-                result=grok_result,
-                payload=payload,
-                review_candidates=review_candidates,
-                settings=settings,
-                runner=runner,
-                now_utc=now_utc,
-                alerts_marked_sent=alerts_marked_sent,
-                acknowledged_event_ids=acknowledged_event_ids,
-                sinks=sinks,
-            )
     if settings.deepseek_enabled and review_candidates:
         review_attempted = True
         deepseek_result, deepseek_message = run_deepseek_reviewer(

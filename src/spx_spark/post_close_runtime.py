@@ -44,14 +44,23 @@ class ReviewLlmSettings:
     @classmethod
     def from_env(cls) -> "ReviewLlmSettings":
         load_dotenv()
+        provider = os.getenv(
+            "SPX_REVIEW_LLM_PROVIDER", str(settings_value("review.llm_provider"))
+        ).strip()
+        legacy_grok_provider = provider.lower() in {"grok", "grok_cli"}
         return cls(
             enabled=env_bool("SPX_REVIEW_LLM_ENABLED", bool(settings_value("review.llm_enabled"))),
-            provider=os.getenv(
-                "SPX_REVIEW_LLM_PROVIDER", str(settings_value("review.llm_provider"))
-            ).strip(),
-            model=os.getenv(
-                "SPX_REVIEW_LLM_MODEL", str(settings_value("review.llm_model"))
-            ).strip(),
+            # Normalize a stale Grok deployment override onto the DeepSeek
+            # default instead of either invoking Grok or passing a Grok model
+            # name to the DeepSeek endpoint.
+            provider="deepseek" if legacy_grok_provider else provider,
+            model=(
+                str(settings_value("review.llm_model"))
+                if legacy_grok_provider
+                else os.getenv(
+                    "SPX_REVIEW_LLM_MODEL", str(settings_value("review.llm_model"))
+                ).strip()
+            ),
             url=os.getenv(
                 "SPX_REVIEW_LLM_URL",
                 str(settings_value("review.llm_url")),
@@ -230,30 +239,7 @@ def maybe_write_llm_review(
     }
     if not settings.enabled:
         return deterministic_markdown
-    if settings.provider.lower() in {"grok", "grok_cli"}:
-        notification_settings = NotificationSettings.from_env()
-        markdown, writer = generate_push_text(
-            deterministic_markdown,
-            build_llm_writer_prompt(payload, deterministic_markdown),
-            notification_settings,
-            system=DEFAULT_SYSTEM_PROMPT,
-        )
-        payload["llm_writer"].update(
-            {
-                "provider": writer,
-                "model": (
-                    notification_settings.grok_model
-                    if writer == "grok_cli"
-                    else settings.model
-                ),
-            }
-        )
-        if writer == "template" or not markdown:
-            payload["llm_writer"]["status"] = "fallback_template"
-            payload["llm_writer"]["error"] = "all configured writers failed"
-            return deterministic_markdown
-        payload["llm_writer"]["status"] = "ok"
-    elif settings.provider.lower() == "deepseek":
+    if settings.provider.lower() == "deepseek":
         # Resolve through the compatibility facade so existing integrations can
         # replace the writer without importing this runtime module directly.
         from spx_spark import post_close_review as facade

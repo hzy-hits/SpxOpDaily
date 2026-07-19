@@ -25,6 +25,7 @@ from spx_spark.notifier import (
     SinkResult,
 )
 from spx_spark.notifier.state import load_acknowledged_event_ids, mark_alerts_sent
+from spx_spark.notifier.llm_writer import _provider_order
 from spx_spark.notifier.pipeline import _dispatch_alerts
 
 
@@ -343,6 +344,57 @@ def test_grok_agent_uses_configured_model_and_read_only_mode(tmp_path) -> None:
     assert "--disable-web-search" in command
     assert "--verbatim" in command
     assert command[command.index("--max-turns") + 1] == "1"
+
+
+def test_scheduled_writer_forces_deepseek_first_and_excludes_grok(monkeypatch) -> None:
+    monkeypatch.setenv(
+        "SPX_PUSH_LLM_PROVIDER_ORDER",
+        "grok_cli,openclaw,deepseek,grok_cli",
+    )
+
+    assert _provider_order() == ("deepseek", "openclaw")
+
+
+def test_runtime_settings_ignore_legacy_grok_enable_override(monkeypatch) -> None:
+    monkeypatch.setenv("ALERT_NOTIFY_GROK_ENABLED", "true")
+
+    assert NotificationSettings.from_env().grok_enabled is False
+
+
+def test_alert_pipeline_ignores_dormant_grok_flag_and_uses_deepseek(
+    tmp_path,
+) -> None:
+    def runner(command: list[str], timeout_seconds: float) -> subprocess.CompletedProcess[str]:
+        raise AssertionError(f"local CLI reviewer must not run: {command!r}")
+
+    payload = make_payload()
+    payload["alerts"] = [
+        {
+            "severity": "high",
+            "kind": "iv_term_gap",
+            "instrument_id": "iv_surface:SPXW",
+            "title": "0DTE vs next ATM IV gap 0.051",
+            "detail": "Front SPXW ATM IV differs from next expiry.",
+            "source_gate": "iv_surface",
+        }
+    ]
+    settings = replace(
+        make_settings(str(tmp_path / "notify-state.json")),
+        grok_enabled=True,
+        deepseek_enabled=True,
+        openclaw_agent_enabled=False,
+        codex_enabled=False,
+    )
+
+    result = notify_payload(
+        payload,
+        settings=settings,
+        runner=runner,
+        now=datetime(2026, 7, 7, 0, 0, tzinfo=timezone.utc),
+    )
+
+    assert result.sinks[0].sink == "deepseek_reviewer"
+    assert not any("grok" in sink.sink for sink in result.sinks)
 
 
 def test_raw_observation_does_not_run_openclaw_agent(tmp_path) -> None:

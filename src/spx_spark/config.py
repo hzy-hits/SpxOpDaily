@@ -740,10 +740,10 @@ class NotificationSettings:
                 "ALERT_NOTIFY_DEEPSEEK_TEMPERATURE",
                 float(settings_value("notification.deepseek_temperature")),
             ),
-            grok_enabled=env_bool(
-                "ALERT_NOTIFY_GROK_ENABLED",
-                bool(settings_value("notification.grok_enabled")),
-            ),
+            # Retain the compatibility fields so old constructors and audit
+            # records still deserialize, but do not permit an old .env value
+            # to restore Grok as a production routing candidate.
+            grok_enabled=False,
             grok_deliver=env_bool(
                 "ALERT_NOTIFY_GROK_DELIVER",
                 bool(settings_value("notification.grok_deliver")),

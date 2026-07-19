@@ -19,7 +19,7 @@ from typing import Any
 from spx_spark.config import NotificationSettings, env_bool, load_dotenv
 from spx_spark.notifier.model import CommandRunner, default_runner
 from spx_spark.notifier.prompts import DESK_STYLE_GUARDRAILS
-from spx_spark.notifier.sinks import run_grok_agent, run_openclaw_agent
+from spx_spark.notifier.sinks import run_openclaw_agent
 from spx_spark.settings import settings_value
 
 # Master-to-apprentice doctrine: this system prompt is written as a veteran SPX
@@ -152,12 +152,18 @@ def _provider_order() -> tuple[str, ...]:
     configured = os.getenv("SPX_PUSH_LLM_PROVIDER_ORDER", "").strip()
     raw: object = configured.split(",") if configured else settings_value("push_llm.provider_order")
     if not isinstance(raw, list | tuple):
-        return ("grok_cli", "deepseek", "openclaw")
-    allowed = {"grok_cli", "deepseek", "openclaw"}
+        return ("deepseek", "openclaw")
+    # Grok is intentionally not a runtime writer candidate.  Keep DeepSeek
+    # first even when an old environment still carries the former provider
+    # order; OpenClaw remains the optional analysis fallback.
+    allowed = {"deepseek", "openclaw"}
     providers = tuple(
         dict.fromkeys(str(provider).strip().lower() for provider in raw if str(provider).strip())
     )
-    return tuple(provider for provider in providers if provider in allowed)
+    fallbacks = tuple(
+        provider for provider in providers if provider in allowed and provider != "deepseek"
+    )
+    return ("deepseek", *fallbacks)
 
 
 def read_env_file_value(path: str, key: str) -> str:
@@ -290,17 +296,7 @@ def generate_push_text(
     """Return generated text and provider, with deterministic template fallback."""
     writer_settings = LlmWriterSettings.from_env()
     for provider in writer_settings.provider_order:
-        if provider == "grok_cli" and settings.grok_enabled:
-            sink, reply = run_grok_agent(
-                settings,
-                prompt,
-                system=system or DEFAULT_SYSTEM_PROMPT,
-                runner=runner,
-            )
-            if sink.ok and reply:
-                return reply, "grok_cli"
-            print(f"llm_writer: grok_cli failed ({sink.error}); falling back", file=sys.stderr)
-        elif provider == "deepseek":
+        if provider == "deepseek":
             reply, error = call_llm_writer(
                 prompt,
                 system=system or DEFAULT_SYSTEM_PROMPT,

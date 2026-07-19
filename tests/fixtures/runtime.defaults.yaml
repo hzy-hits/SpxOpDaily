@@ -1202,7 +1202,7 @@ notification:
     description: Requires an explicit delivery cue before Codex output can be forwarded.
   deepseek_enabled:
     value: true
-    description: Enables DeepSeek reviewer as fallback when the primary Grok CLI reviewer is unavailable or fails.
+    description: Enables DeepSeek API as the primary alert reviewer.
   deepseek_deliver:
     value: true
     description: Allows DeepSeek-approved review output to be delivered.
@@ -1228,11 +1228,11 @@ notification:
     value: 0.1
     description: Sampling temperature for deterministic reviewer output.
   grok_enabled:
-    value: true
-    description: Enables the local Grok CLI reviewer and writer provider after CLI authentication.
+    value: false
+    description: Dormant compatibility flag; Grok is not a runtime reviewer or writer candidate.
   grok_deliver:
     value: true
-    description: Allows Grok-reviewed output that passes delivery gates to be forwarded.
+    description: Legacy compatibility value; ignored while Grok routing is removed.
   grok_command:
     value: agent
     description: Command name or path for the local Grok agent CLI.
@@ -1689,10 +1689,10 @@ review:
     value: true
     description: Enables LLM narrative generation for post-close review.
   llm_provider:
-    value: grok_cli
-    description: Provider label for post-close review LLM calls.
+    value: deepseek
+    description: DeepSeek API provider for post-close review LLM calls.
   llm_model:
-    value: grok-4.5
+    value: deepseek-v4-pro
     description: Model name for post-close review LLM calls.
   llm_url:
     value: https://api.deepseek.com/v1/chat/completions
@@ -1704,8 +1704,8 @@ review:
     value: 120
     description: Timeout in seconds for post-close review LLM calls.
   llm_max_tokens:
-    value: 2200
-    description: Maximum completion tokens for post-close review LLM output.
+    value: 12800
+    description: Maximum completion tokens for the reasoning model, including adequate headroom before visible review output.
   min_index_bucket_ratio:
     value: 0.9
     description: Minimum fraction of expected index time buckets required for complete review.
@@ -1752,7 +1752,7 @@ review:
 push_llm:
   enabled:
     value: true
-    description: Enables the DeepSeek API provider as a scheduled-writer fallback; Grok CLI is controlled by notification.grok_enabled.
+    description: Enables DeepSeek API as the primary scheduled-report writer.
   model:
     value: deepseek-v4-pro
     description: Model name for scheduled push LLM writer.
@@ -1769,8 +1769,8 @@ push_llm:
     value: 12800
     description: Maximum completion tokens for scheduled push LLM output.
   provider_order:
-    value: [grok_cli, deepseek, openclaw]
-    description: Ordered writer providers; disabled or failed providers fall through to the next provider and deterministic template.
+    value: [deepseek, openclaw]
+    description: Ordered writer providers; DeepSeek failure falls through to optional OpenClaw and the deterministic template.
 
 human_focus:
   event_tags:
