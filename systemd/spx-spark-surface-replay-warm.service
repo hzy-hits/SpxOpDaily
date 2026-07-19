@@ -1,5 +1,5 @@
 [Unit]
-Description=Warm the latest SPXW Session Replay catalog and trend artifact
+Description=Warm the latest SPXW Session Replay catalog and session surfaces
 After=spx-spark-surface-replay.service
 Wants=spx-spark-surface-replay.service
 

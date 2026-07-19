@@ -29,6 +29,7 @@ from spx_spark.surface_dashboard_replay import (
     ReplaySourceError,
 )
 from spx_spark.surface_replay_trend import TrendSelector
+from spx_spark.surface_replay_session import SessionSurfaceSelector
 
 
 LOGGER = logging.getLogger(__name__)
@@ -94,6 +95,17 @@ class ReplayCatalogProtocol(Protocol):
         role: str,
         weighting: str,
         metric: str,
+    ) -> dict[str, object]: ...
+
+    def session_surface(
+        self,
+        session_date: date,
+        *,
+        at: datetime,
+        role: str,
+        weighting: str,
+        bucket_minutes: int,
+        price_step: float,
     ) -> dict[str, object]: ...
 
 
@@ -187,7 +199,7 @@ class ReplayAPI:
                 parsed.query,
                 keep_blank_values=True,
                 strict_parsing=True,
-                max_num_fields=4,
+                max_num_fields=8,
             )
         except ValueError as exc:
             raise ReplayRequestError("invalid_query") from exc
@@ -278,6 +290,41 @@ class ReplayAPI:
                 role=selector.role,
                 weighting=selector.weighting,
                 metric=selector.metric,
+            )
+            return self._artifact_response(payload)
+        session_surface_match = re.fullmatch(
+            r"/api/v1/replay/sessions/(\d{4}-\d{2}-\d{2})/session-surface",
+            path,
+        )
+        if session_surface_match:
+            values = self._single_query(
+                query,
+                required=frozenset(
+                    {"at", "role", "weighting", "bucket_minutes", "price_step"}
+                ),
+                allowed=frozenset(
+                    {"at", "role", "weighting", "bucket_minutes", "price_step"}
+                ),
+            )
+            try:
+                bucket_minutes = int(values["bucket_minutes"])
+                price_step = float(values["price_step"])
+                selector = SessionSurfaceSelector(
+                    role=values["role"],
+                    weighting=values["weighting"],
+                    bucket_minutes=bucket_minutes,
+                    price_step=price_step,
+                )
+            except (TypeError, ValueError) as exc:
+                raise ReplayRequestError("invalid_session_surface_selector") from exc
+            session_date = _parse_session_date(session_surface_match.group(1))
+            payload = self.catalog.session_surface(
+                session_date,
+                at=_parse_at(values["at"]),
+                role=selector.role,
+                weighting=selector.weighting,
+                bucket_minutes=selector.bucket_minutes,
+                price_step=selector.price_step,
             )
             return self._artifact_response(payload)
         frame_query_match = re.fullmatch(

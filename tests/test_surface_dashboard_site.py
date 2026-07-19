@@ -76,6 +76,11 @@ def test_frontend_keeps_live_and_replay_clock_contracts_separate() -> None:
     assert "isObject(expiry?.raw?.coverage)" in app
     assert "AbortController" in app
     assert "requestGeneration" in app
+    assert "SESSION_SURFACE_RETRY_DELAYS_MS" in app
+    assert "scheduleSessionSurfaceRetry(key)" in app
+    assert "renderSessionSurfaceChrome(\"unavailable\", reason)" in app
+    assert "sessionSurfaceFrameIndexFor" in app
+    assert "return Math.max(index, 0)" not in app
     assert 'if (app.mode !== "live") return;' in app
     assert "window.setTimeout(refreshSnapshot, POLL_INTERVAL_MS)" in app
     assert "HISTORICAL REPLAY" in page
@@ -108,6 +113,19 @@ def test_frontend_keeps_live_and_replay_clock_contracts_separate() -> None:
     assert "app.frameLoading || !trend || gammaCount < 2" in app
     assert "app.trendLoading || app.frameLoading" in app
     assert 'cache: "no-cache"' in app
+    assert "/trend?" not in app
+    assert "async function normalizeSessionSurface(raw, expected = {})" in app
+    assert "const surface = await normalizeSessionSurface(payload" in app
+    assert "function sessionSurfaceRequestDecision(" in app
+    assert 'return interrupt ? "interrupt" : "queue"' in app
+    assert "session_surface_missing_column_has_values" in app
+    assert "session_surface_artifact_hash_mismatch" in app
+    assert 'id="provider-chip"' in page
+    assert 'id="position-mode-filter"' in page
+    assert "Participant (unavailable)" in page
+    assert 'id="cockpit-gamma-base"' in page
+    assert 'id="cockpit-strike-base"' in page
+    assert 'id="cockpit-charm-base"' in page
     assert "verifiedReplayFrameCache" not in app
     assert "@media (max-width: 380px)" in read("public/styles.css")
 
@@ -117,6 +135,19 @@ def test_frontend_strictly_normalizes_compact_trend_fixture() -> None:
         [
             "node",
             str(ROOT / "tests" / "js" / "surface_trend_contract_test.js"),
+            str(SITE / "public" / "app.js"),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_frontend_strictly_normalizes_causal_session_surface_fixture() -> None:
+    subprocess.run(
+        [
+            "node",
+            str(ROOT / "tests" / "js" / "session_surface_contract_test.js"),
             str(SITE / "public" / "app.js"),
         ],
         check=True,

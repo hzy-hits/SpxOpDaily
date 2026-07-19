@@ -2,6 +2,14 @@
 
 const SNAPSHOT_URL = "api/v1/snapshot";
 const REPLAY_SESSIONS_URL = "api/v1/replay/sessions";
+const SESSION_SURFACE_SCHEMA_VERSION = 1;
+const SESSION_SURFACE_KIND = "spxw_session_surface";
+const SESSION_SURFACE_POLICY_VERSION = "spxw_session_surface.v1";
+const SESSION_SURFACE_BUCKET_MINUTES = 5;
+const SESSION_SURFACE_PRICE_STEP = 5;
+const SESSION_SURFACE_PRICE_EXTENT_POINTS = 100;
+const SESSION_SURFACE_BUCKET_MINUTES_ALLOWED = new Set([5, 10, 15]);
+const SESSION_SURFACE_PRICE_STEPS_ALLOWED = new Set([2.5, 5, 10]);
 const REPLAY_TREND_KIND = "spxw_intraday_gamma_replay";
 const REPLAY_TREND_POLICY_VERSION = "spxw_surface_replay_trend.v1";
 const REPLAY_POLICY_VERSION = "spxw_surface_replay.v3";
@@ -20,6 +28,7 @@ const MARKET_TIME_ZONE = "America/New_York";
 const POLL_INTERVAL_MS = 5_000;
 const REQUEST_TIMEOUT_MS = 4_500;
 const REPLAY_REQUEST_TIMEOUT_MS = 60_000;
+const SESSION_SURFACE_RETRY_DELAYS_MS = [1_000, 3_000, 10_000];
 const SVG_NS = "http://www.w3.org/2000/svg";
 
 const METRICS = {
@@ -109,6 +118,44 @@ const dom = {
   replayFramePosition: document.querySelector("#replay-frame-position"),
   replayTimelineStart: document.querySelector("#replay-timeline-start"),
   replayTimelineEnd: document.querySelector("#replay-timeline-end"),
+  sessionCockpit: document.querySelector("#session-cockpit"),
+  cockpitTimeline: document.querySelector("#cockpit-timeline"),
+  cockpitLivePlaceholder: document.querySelector("#cockpit-live-placeholder"),
+  cockpitLoading: document.querySelector("#cockpit-loading"),
+  cockpitTooltip: document.querySelector("#cockpit-tooltip"),
+  cockpitGammaStage: document.querySelector("#cockpit-gamma-stage"),
+  cockpitGammaBase: document.querySelector("#cockpit-gamma-base"),
+  cockpitGammaOverlay: document.querySelector("#cockpit-gamma-overlay"),
+  cockpitGammaEmpty: document.querySelector("#cockpit-gamma-empty"),
+  cockpitGammaValue: document.querySelector("#cockpit-gamma-value"),
+  cockpitGammaThreshold: document.querySelector("#cockpit-gamma-threshold"),
+  cockpitGammaDomain: document.querySelector("#cockpit-gamma-domain"),
+  cockpitStrikeStage: document.querySelector("#cockpit-strike-stage"),
+  cockpitStrikeBase: document.querySelector("#cockpit-strike-base"),
+  cockpitStrikeOverlay: document.querySelector("#cockpit-strike-overlay"),
+  cockpitStrikeEmpty: document.querySelector("#cockpit-strike-empty"),
+  cockpitStrikeValue: document.querySelector("#cockpit-strike-value"),
+  cockpitCharmStage: document.querySelector("#cockpit-charm-stage"),
+  cockpitCharmBase: document.querySelector("#cockpit-charm-base"),
+  cockpitCharmOverlay: document.querySelector("#cockpit-charm-overlay"),
+  cockpitCharmEmpty: document.querySelector("#cockpit-charm-empty"),
+  cockpitCharmValue: document.querySelector("#cockpit-charm-value"),
+  cockpitCharmThreshold: document.querySelector("#cockpit-charm-threshold"),
+  cockpitCharmDomain: document.querySelector("#cockpit-charm-domain"),
+  cockpitAuditToggle: document.querySelector("#cockpit-audit-toggle"),
+  cockpitAuditClose: document.querySelector("#cockpit-audit-close"),
+  cockpitAuditDrawer: document.querySelector("#cockpit-audit-drawer"),
+  cockpitAuditScrim: document.querySelector("#cockpit-audit-scrim"),
+  cockpitAuditAsOf: document.querySelector("#cockpit-audit-as-of"),
+  cockpitAuditContract: document.querySelector("#cockpit-audit-contract"),
+  cockpitAuditStats: document.querySelector("#cockpit-audit-stats"),
+  cockpitAuditMissing: document.querySelector("#cockpit-audit-missing"),
+  cockpitAuditCapabilities: document.querySelector("#cockpit-audit-capabilities"),
+  cockpitAuditProvenance: document.querySelector("#cockpit-audit-provenance"),
+  cockpitAuditFrozen: document.querySelector("#cockpit-audit-frozen"),
+  cockpitAuditPit: document.querySelector("#cockpit-audit-pit"),
+  cockpitAuditModel: document.querySelector("#cockpit-audit-model"),
+  providerChip: document.querySelector("#provider-chip"),
   trendPanel: document.querySelector("#trend-panel"),
   trendTitle: document.querySelector("#trend-title"),
   trendSubtitle: document.querySelector("#trend-subtitle"),
@@ -184,6 +231,8 @@ const app = {
   projectionPolicySha256: "",
   timelineSha256: "",
   sourceFingerprint: "",
+  timelineOpenMs: null,
+  timelineCloseMs: null,
   sessions: [],
   sessionDate: "",
   frames: [],
@@ -203,6 +252,22 @@ const app = {
   timelineStepMinutes: REPLAY_TIMELINE_STEP_MINUTES,
   playing: false,
   speed: 1,
+  sessionSurface: null,
+  sessionSurfaceLoading: false,
+  sessionSurfaceController: null,
+  sessionSurfaceGeneration: 0,
+  sessionSurfaceRequestKey: "",
+  sessionSurfaceRenderedKey: "",
+  sessionSurfaceKeyframeIndex: -1,
+  sessionSurfacePending: false,
+  sessionSurfaceRetryTimer: null,
+  sessionSurfaceRetryKey: "",
+  sessionSurfaceRetryCount: 0,
+  cockpitLayouts: {},
+  cockpitHover: null,
+  cockpitPriceDomain: null,
+  cockpitColorDomains: {},
+  cockpitPaintRaf: null,
 };
 
 function initialModeFromQuery() {
@@ -1026,6 +1091,556 @@ async function normalizeReplayTrend(raw, expected) {
   };
 }
 
+function finiteOrNull(value, error) {
+  if (value === null || value === undefined) return null;
+  const parsed = finiteNumber(value);
+  if (parsed === null) throw new Error(error);
+  return parsed;
+}
+
+function robustDomain(values, supplied = null) {
+  const magnitudes = values
+    .flat(Infinity)
+    .filter((value) => Number.isFinite(value))
+    .map((value) => Math.abs(value))
+    .sort((left, right) => left - right);
+  const quantilePosition = magnitudes.length ? (magnitudes.length - 1) * 0.98 : -1;
+  const quantileLower = quantilePosition >= 0 ? Math.floor(quantilePosition) : -1;
+  const quantileUpper = quantilePosition >= 0 ? Math.ceil(quantilePosition) : -1;
+  const quantileFraction = quantilePosition >= 0 ? quantilePosition - quantileLower : 0;
+  const robustMaximum = quantileLower >= 0
+    ? magnitudes[quantileLower] +
+      (magnitudes[quantileUpper] - magnitudes[quantileLower]) * quantileFraction
+    : 0;
+  let suppliedMaximum = null;
+  let suppliedThreshold = null;
+  if (Number.isFinite(supplied)) {
+    suppliedMaximum = Math.abs(supplied);
+  } else if (Array.isArray(supplied)) {
+    suppliedMaximum = Math.max(
+      ...supplied.filter((value) => Number.isFinite(value)).map((value) => Math.abs(value)),
+      0,
+    );
+  } else if (isObject(supplied)) {
+    const bounds = Array.isArray(supplied.domain) ? supplied.domain : [];
+    suppliedMaximum = [
+      supplied.max_abs,
+      supplied.maxAbs,
+      supplied.symmetric_max,
+      supplied.robust_max,
+      ...bounds,
+    ].reduce((maximum, value) => {
+      const parsed = finiteNumber(value);
+      return parsed === null ? maximum : Math.max(maximum, Math.abs(parsed));
+    }, 0);
+    suppliedThreshold = [
+      supplied.threshold,
+      supplied.zero_threshold,
+      supplied.neutral_threshold,
+    ].map(finiteNumber).find((value) => value !== null && value >= 0) ?? null;
+  }
+  const maxAbs = Math.max(suppliedMaximum || 0, robustMaximum, 1e-12);
+  const threshold = Math.min(
+    suppliedThreshold ?? maxAbs * 0.025,
+    maxAbs,
+  );
+  return { maxAbs, threshold, sampleCount: magnitudes.length };
+}
+
+function expandOnlyDomain(previous, candidate, key) {
+  if (!previous || previous.key !== key) return { ...candidate, key };
+  return {
+    key,
+    maxAbs: Math.max(previous.maxAbs, candidate.maxAbs),
+    threshold: Math.max(previous.threshold, candidate.threshold),
+    sampleCount: candidate.sampleCount,
+  };
+}
+
+function sessionTimeToX(layout, sessionStartMs, sessionEndMs, timestampMs) {
+  const span = Math.max(sessionEndMs - sessionStartMs, 1);
+  const ratio = Math.max(0, Math.min((timestampMs - sessionStartMs) / span, 1));
+  return layout.plotLeft + ratio * layout.plotWidth;
+}
+
+function sessionXToTime(layout, sessionStartMs, sessionEndMs, x) {
+  const ratio = Math.max(0, Math.min((x - layout.plotLeft) / layout.plotWidth, 1));
+  return sessionStartMs + ratio * (sessionEndMs - sessionStartMs);
+}
+
+function sessionPriceToY(layout, priceDomain, price) {
+  const span = Math.max(priceDomain.max - priceDomain.min, 1e-9);
+  const ratio = Math.max(0, Math.min((price - priceDomain.min) / span, 1));
+  return layout.plotTop + (1 - ratio) * layout.plotHeight;
+}
+
+function sessionYToPrice(layout, priceDomain, y) {
+  const ratio = Math.max(0, Math.min((y - layout.plotTop) / layout.plotHeight, 1));
+  return priceDomain.max - ratio * (priceDomain.max - priceDomain.min);
+}
+
+function normalizeSessionMatrix(raw, name, timeCount, priceCount, { optional = false } = {}) {
+  if (raw === null || raw === undefined) {
+    if (optional) return null;
+    throw new Error(`missing_session_surface_${name}`);
+  }
+  if (!Array.isArray(raw) || raw.length !== timeCount) {
+    throw new Error(`invalid_session_surface_${name}_shape`);
+  }
+  return raw.map((row) => {
+    if (!Array.isArray(row) || row.length !== priceCount) {
+      throw new Error(`invalid_session_surface_${name}_shape`);
+    }
+    return row.map((value) => finiteOrNull(value, `invalid_session_surface_${name}_value`));
+  });
+}
+
+function normalizeSessionTimeBuckets(raw, sessionStartMs, sessionEndMs, bucketMinutes) {
+  if (!Array.isArray(raw) || !raw.length) throw new Error("invalid_session_surface_time_buckets");
+  const starts = raw.map((item) => {
+    const value = isObject(item)
+      ? item.start_at ?? item.bucket_start ?? item.at
+      : item;
+    const parsed = parseDate(value);
+    if (!parsed) throw new Error("invalid_session_surface_bucket_start");
+    return parsed.getTime();
+  });
+  if (starts.some((value, index) =>
+    value < sessionStartMs || value >= sessionEndMs || (index > 0 && value <= starts[index - 1]))) {
+    throw new Error("invalid_session_surface_bucket_order");
+  }
+  const buckets = raw.map((item, index) => {
+    const explicitEnd = isObject(item)
+      ? parseDate(item.end_at ?? item.bucket_end)?.getTime()
+      : null;
+    const derivedEnd = starts[index + 1] ?? Math.min(
+      starts[index] + bucketMinutes * 60_000,
+      sessionEndMs,
+    );
+    const endMs = explicitEnd ?? derivedEnd;
+    const policyEnd = Math.min(starts[index] + bucketMinutes * 60_000, sessionEndMs);
+    const previousPolicyEnd = index > 0
+      ? Math.min(starts[index - 1] + bucketMinutes * 60_000, sessionEndMs)
+      : null;
+    if (!Number.isFinite(endMs) || endMs !== policyEnd || endMs <= starts[index] ||
+        endMs > sessionEndMs || (index > 0 && starts[index] !== previousPolicyEnd)) {
+      throw new Error("invalid_session_surface_bucket_end");
+    }
+    return {
+      raw: item,
+      startMs: starts[index],
+      endMs,
+      centerMs: starts[index] + (endMs - starts[index]) / 2,
+    };
+  });
+  if (buckets[0].startMs !== sessionStartMs || buckets.at(-1).endMs !== sessionEndMs) {
+    throw new Error("invalid_session_surface_bucket_coverage");
+  }
+  return buckets;
+}
+
+function normalizeSurfaceColumn(raw, bucket, asOfMs) {
+  if (!isObject(raw)) throw new Error("invalid_session_surface_column");
+  const kind = String(raw.kind || "").toLowerCase();
+  if (!["historical", "projection", "missing"].includes(kind)) {
+    throw new Error("invalid_session_surface_column_kind");
+  }
+  const sourceAt = raw.source_at === null || raw.source_at === undefined
+    ? null
+    : parseDate(raw.source_at);
+  if ((raw.source_at !== null && raw.source_at !== undefined && !sourceAt) ||
+      (sourceAt && sourceAt.getTime() > asOfMs)) {
+    throw new Error("session_surface_lookahead_column");
+  }
+  if (kind === "historical" && bucket.endMs > asOfMs) {
+    throw new Error("session_surface_historical_after_cutoff");
+  }
+  if (kind === "historical" && sourceAt && sourceAt.getTime() > bucket.endMs) {
+    throw new Error("session_surface_historical_source_after_bucket");
+  }
+  if (kind === "projection" && bucket.endMs <= asOfMs) {
+    throw new Error("session_surface_projection_before_cutoff");
+  }
+  const validUntil = raw.valid_until === null || raw.valid_until === undefined
+    ? null
+    : parseDate(raw.valid_until);
+  if (raw.valid_until !== null && raw.valid_until !== undefined && !validUntil) {
+    throw new Error("invalid_session_surface_column_valid_until");
+  }
+  if (kind === "historical" && (!validUntil || validUntil.getTime() <= bucket.endMs)) {
+    throw new Error("session_surface_historical_ttl_expired_at_bucket");
+  }
+  if (kind === "projection" && (!validUntil || validUntil.getTime() <= asOfMs)) {
+    throw new Error("session_surface_projection_ttl_expired_at_cutoff");
+  }
+  return {
+    raw,
+    kind,
+    quality: normalizedStatus(raw.quality),
+    sourceAtMs: sourceAt?.getTime() ?? null,
+    validUntilMs: validUntil?.getTime() ?? null,
+    reason: nonEmptyString(raw.reason) || nonEmptyString(raw.missing_reason),
+  };
+}
+
+function normalizeSessionCandles(raw, sessionStartMs, sessionEndMs, asOfMs) {
+  if (!Array.isArray(raw)) throw new Error("invalid_session_surface_candles");
+  return raw.map((item) => {
+    if (!isObject(item)) throw new Error("invalid_session_surface_candle");
+    const start = parseDate(item.start_at);
+    const end = parseDate(item.end_at);
+    const open = finiteNumber(item.open);
+    const high = finiteNumber(item.high);
+    const low = finiteNumber(item.low);
+    const close = finiteNumber(item.close);
+    const samples = item.sample_count;
+    const sourceAt = item.source_at === undefined || item.source_at === null
+      ? null
+      : parseDate(item.source_at);
+    const knownAt = item.known_at === undefined || item.known_at === null
+      ? null
+      : parseDate(item.known_at);
+    if (
+      !start || !end ||
+      start.getTime() < sessionStartMs || start.getTime() > asOfMs ||
+      end.getTime() <= start.getTime() || end.getTime() > sessionEndMs ||
+      [open, high, low, close].some((value) => value === null) ||
+      low > Math.min(open, close) || high < Math.max(open, close) || high < low ||
+      !Number.isSafeInteger(samples) || samples < 1 ||
+      typeof item.complete !== "boolean" ||
+      item.complete !== (end.getTime() <= asOfMs) ||
+      !sourceAt || sourceAt.getTime() < start.getTime() ||
+      sourceAt.getTime() >= end.getTime() || sourceAt.getTime() > asOfMs ||
+      !knownAt || knownAt.getTime() < sourceAt.getTime() || knownAt.getTime() > asOfMs
+    ) {
+      throw new Error("invalid_session_surface_candle_contract");
+    }
+    return {
+      raw: item,
+      startMs: start.getTime(),
+      endMs: end.getTime(),
+      open,
+      high,
+      low,
+      close,
+      sampleCount: samples,
+      complete: item.complete,
+      sourceAtMs: sourceAt?.getTime() ?? null,
+      knownAtMs: knownAt?.getTime() ?? null,
+    };
+  }).sort((left, right) => left.startMs - right.startMs);
+}
+
+function normalizeGammaExtrema(raw, name, count, sign) {
+  if (!Array.isArray(raw) || raw.length !== count) {
+    throw new Error(`invalid_session_surface_${name}_shape`);
+  }
+  return raw.map((item) => {
+    if (item === null) return null;
+    if (!isObject(item)) throw new Error(`invalid_session_surface_${name}`);
+    const price = finiteNumber(item.price);
+    const value = finiteNumber(item.value);
+    if (price === null || price <= 0 || value === null ||
+        (sign > 0 && value <= 0) || (sign < 0 && value >= 0)) {
+      throw new Error(`invalid_session_surface_${name}`);
+    }
+    return { raw: item, price, value };
+  });
+}
+
+function normalizeStrikeProfile(raw) {
+  if (!Array.isArray(raw)) throw new Error("invalid_session_surface_strike_profile");
+  const rows = raw.map((item) => {
+    if (!isObject(item)) throw new Error("invalid_session_surface_strike_row");
+    const strike = finiteNumber(item.strike);
+    const currentProxy = finiteOrNull(item.current_proxy, "invalid_session_surface_current_proxy");
+    const firstValidatedProxy = finiteOrNull(
+      item.first_validated_proxy ?? item.baseline_proxy,
+      "invalid_session_surface_first_validated_proxy",
+    );
+    if (strike === null || strike <= 0) throw new Error("invalid_session_surface_strike");
+    return {
+      raw: item,
+      strike,
+      currentProxy,
+      firstValidatedProxy,
+      currentOpenInterest: finiteOrNull(
+        item.current_open_interest,
+        "invalid_session_surface_current_open_interest",
+      ),
+      firstValidatedOpenInterest: finiteOrNull(
+        item.first_validated_open_interest ?? item.baseline_open_interest,
+        "invalid_session_surface_first_validated_open_interest",
+      ),
+      quality: normalizedStatus(item.quality),
+    };
+  }).sort((left, right) => left.strike - right.strike);
+  if (rows.some((row, index) => index > 0 && row.strike === rows[index - 1].strike)) {
+    throw new Error("duplicate_session_surface_strike");
+  }
+  return rows;
+}
+
+function normalizeMissingRanges(raw, sessionStartMs, sessionEndMs) {
+  if (raw === undefined || raw === null) return [];
+  if (!Array.isArray(raw)) throw new Error("invalid_session_surface_missing_ranges");
+  return raw.map((item) => {
+    if (!isObject(item)) throw new Error("invalid_session_surface_missing_range");
+    const start = parseDate(item.start_at);
+    const end = parseDate(item.end_at);
+    if (!start || !end || start.getTime() < sessionStartMs ||
+        end.getTime() > sessionEndMs || end.getTime() <= start.getTime()) {
+      throw new Error("invalid_session_surface_missing_range_clock");
+    }
+    return {
+      raw: item,
+      startMs: start.getTime(),
+      endMs: end.getTime(),
+      reason: nonEmptyString(item.reason) || "missing",
+      components: Array.isArray(item.components)
+        ? item.components.map(nonEmptyString).filter(Boolean)
+        : nonEmptyString(item.component)
+          ? [nonEmptyString(item.component)]
+          : [],
+    };
+  });
+}
+
+function suppliedColorDomain(raw, metric) {
+  if (!isObject(raw)) return null;
+  return raw[metric] ?? raw[`${metric}_surface`] ?? null;
+}
+
+async function normalizeSessionSurface(raw, expected = {}) {
+  if (!isObject(raw)) throw new Error("session_surface_not_an_object");
+  if (
+    raw.schema_version !== SESSION_SURFACE_SCHEMA_VERSION ||
+    raw.kind !== SESSION_SURFACE_KIND ||
+    raw.policy_version !== SESSION_SURFACE_POLICY_VERSION ||
+    raw.mode !== "replay" ||
+    raw.provider !== "schwab" ||
+    raw.trading_class !== "SPXW" ||
+    raw.coordinate !== "SPX"
+  ) {
+    throw new Error("invalid_session_surface_identity_contract");
+  }
+  const artifactBody = { ...raw };
+  delete artifactBody.artifact_sha256;
+  const artifactSha256 = await canonicalReplaySha256(artifactBody);
+  if (!sha256String(raw.artifact_sha256) || raw.artifact_sha256 !== artifactSha256) {
+    throw new Error("session_surface_artifact_hash_mismatch");
+  }
+  const asOf = parseDate(raw.as_of);
+  const sessionStart = parseDate(raw.session_start);
+  const sessionEnd = parseDate(raw.session_end);
+  if (!asOf || !sessionStart || !sessionEnd ||
+      sessionStart.getTime() >= sessionEnd.getTime() ||
+      asOf.getTime() < sessionStart.getTime() || asOf.getTime() > sessionEnd.getTime()) {
+    throw new Error("invalid_session_surface_clock_contract");
+  }
+  if (expected.at instanceof Date && asOf.getTime() !== expected.at.getTime()) {
+    throw new Error("unexpected_session_surface_as_of");
+  }
+  const sessionDate = nonEmptyString(raw.session_date);
+  if (!sessionDate || !/^\d{4}-\d{2}-\d{2}$/.test(sessionDate) ||
+      (expected.sessionDate && sessionDate !== expected.sessionDate)) {
+    throw new Error("invalid_session_surface_session_date");
+  }
+  const role = nonEmptyString(raw.role);
+  const weighting = nonEmptyString(raw.weighting);
+  const expiry = nonEmptyString(raw.expiry);
+  if (!role || !["front", "next"].includes(role) ||
+      !weighting || !WEIGHTINGS[weighting] ||
+      !expiry || !/^\d{8}$/.test(expiry) ||
+      (expected.role && role !== expected.role) ||
+      (expected.weighting && weighting !== expected.weighting)) {
+    throw new Error("invalid_session_surface_selector_contract");
+  }
+  const bucketMinutes = finiteNumber(raw.bucket_minutes) ?? SESSION_SURFACE_BUCKET_MINUTES;
+  const priceStep = finiteNumber(raw.price_step) ?? SESSION_SURFACE_PRICE_STEP;
+  if (
+    !SESSION_SURFACE_BUCKET_MINUTES_ALLOWED.has(bucketMinutes) ||
+    !SESSION_SURFACE_PRICE_STEPS_ALLOWED.has(priceStep) ||
+    (expected.bucketMinutes !== undefined && bucketMinutes !== expected.bucketMinutes) ||
+    (expected.priceStep !== undefined && priceStep !== expected.priceStep)
+  ) {
+    throw new Error("invalid_session_surface_grid_policy");
+  }
+  if (!Array.isArray(raw.price_grid) || raw.price_grid.length < 2) {
+    throw new Error("invalid_session_surface_price_grid");
+  }
+  const priceGrid = raw.price_grid.map((value) => {
+    const parsed = finiteNumber(value);
+    if (parsed === null || parsed <= 0) throw new Error("invalid_session_surface_price");
+    return parsed;
+  });
+  if (priceGrid.some((value, index) => index > 0 && value <= priceGrid[index - 1])) {
+    throw new Error("invalid_session_surface_price_order");
+  }
+  const expectedPriceCount = Math.round(2 * SESSION_SURFACE_PRICE_EXTENT_POINTS / priceStep) + 1;
+  if (priceGrid.length !== expectedPriceCount || priceGrid.some((value, index) =>
+    index > 0 && Math.abs(value - priceGrid[index - 1] - priceStep) > 1e-9)) {
+    throw new Error("invalid_session_surface_price_grid_policy");
+  }
+  const timeBuckets = normalizeSessionTimeBuckets(
+    raw.time_buckets,
+    sessionStart.getTime(),
+    sessionEnd.getTime(),
+    bucketMinutes,
+  );
+  if (!Array.isArray(raw.surface_columns) || raw.surface_columns.length !== timeBuckets.length) {
+    throw new Error("invalid_session_surface_columns_shape");
+  }
+  const surfaceColumns = raw.surface_columns.map((item, index) =>
+    normalizeSurfaceColumn(item, timeBuckets[index], asOf.getTime()));
+  const gamma = normalizeSessionMatrix(
+    raw.gamma_surface,
+    "gamma",
+    timeBuckets.length,
+    priceGrid.length,
+  );
+  const charm = normalizeSessionMatrix(
+    raw.charm_surface,
+    "charm",
+    timeBuckets.length,
+    priceGrid.length,
+  );
+  const vanna = normalizeSessionMatrix(
+    raw.vanna_surface,
+    "vanna",
+    timeBuckets.length,
+    priceGrid.length,
+  );
+  const grossGamma = normalizeSessionMatrix(
+    raw.gross_gamma_surface,
+    "gross_gamma",
+    timeBuckets.length,
+    priceGrid.length,
+  );
+  if (grossGamma?.some((row) => row.some((value) => value !== null && value < 0))) {
+    throw new Error("negative_session_surface_gross_gamma");
+  }
+  if (!Array.isArray(raw.zero_ridges) || raw.zero_ridges.length !== timeBuckets.length) {
+    throw new Error("invalid_session_surface_zero_ridges");
+  }
+  const zeroRidges = raw.zero_ridges.map((value) =>
+    finiteOrNull(value, "invalid_session_surface_zero_ridge"));
+  const gammaPositivePeaks = normalizeGammaExtrema(
+    raw.gamma_positive_peaks,
+    "gamma_positive_peaks",
+    timeBuckets.length,
+    1,
+  );
+  const gammaNegativeTroughs = normalizeGammaExtrema(
+    raw.gamma_negative_troughs,
+    "gamma_negative_troughs",
+    timeBuckets.length,
+    -1,
+  );
+  surfaceColumns.forEach((column, index) => {
+    if (column.kind !== "missing") return;
+    for (const matrix of [gamma, grossGamma, charm, vanna]) {
+      if (matrix[index].some((value) => value !== null)) {
+        throw new Error("session_surface_missing_column_has_values");
+      }
+    }
+    if (zeroRidges[index] !== null || gammaPositivePeaks[index] !== null ||
+        gammaNegativeTroughs[index] !== null) {
+      throw new Error("session_surface_missing_column_has_extrema");
+    }
+  });
+  const candles = normalizeSessionCandles(
+    raw.candles,
+    sessionStart.getTime(),
+    sessionEnd.getTime(),
+    asOf.getTime(),
+  );
+  const strikeProfile = normalizeStrikeProfile(raw.strike_profile);
+  const spot = finiteNumber(raw.spot);
+  if (spot === null || spot <= 0) throw new Error("invalid_session_surface_spot");
+  const spotSourceAt = parseDate(raw.spot_source_at);
+  const spotKnownAt = parseDate(raw.spot_known_at);
+  if (!spotSourceAt || !spotKnownAt || spotSourceAt.getTime() > asOf.getTime() ||
+      spotKnownAt.getTime() > asOf.getTime()) {
+    throw new Error("session_surface_lookahead_spot");
+  }
+  const capabilities = raw.capabilities;
+  if (!isObject(capabilities) ||
+      capabilities.proxy_position_available !== true ||
+      capabilities.participant_position_available !== false ||
+      capabilities.open_close_available !== false ||
+      capabilities.signed_flow_available !== false ||
+      capabilities.dealer_position_sign_available !== false ||
+      capabilities.strict_point_in_time_available !== false ||
+      capabilities.known_clock_no_lookahead !== true ||
+      capabilities.projection_is_model_scenario !== true ||
+      capabilities.historical_surface_is_model_proxy !== true) {
+    throw new Error("invalid_session_surface_capabilities_contract");
+  }
+  const provenance = raw.provenance;
+  if (!isObject(provenance) ||
+      provenance.lookahead_rows_selected !== 0 ||
+      provenance.point_in_time_confidence !== "bounded_not_proven" ||
+      provenance.availability_clock_available !== false ||
+      provenance.availability_clock !== "unavailable") {
+    throw new Error("invalid_session_surface_provenance_contract");
+  }
+  const colorDomains = isObject(raw.color_domains) ? raw.color_domains : {};
+  const domains = {
+    gamma: robustDomain(gamma, suppliedColorDomain(colorDomains, "gamma")),
+    charm: robustDomain(charm, suppliedColorDomain(colorDomains, "charm")),
+    vanna: vanna ? robustDomain(vanna, suppliedColorDomain(colorDomains, "vanna")) : null,
+    grossGamma: grossGamma
+      ? robustDomain(grossGamma, suppliedColorDomain(colorDomains, "gross_gamma"))
+      : null,
+    strike: robustDomain(
+      strikeProfile.flatMap((row) => [row.currentProxy, row.firstValidatedProxy]),
+      suppliedColorDomain(colorDomains, "strike"),
+    ),
+  };
+  return {
+    raw,
+    kind: nonEmptyString(raw.kind),
+    schemaVersion: raw.schema_version ?? null,
+    sessionDate,
+    asOf,
+    asOfMs: asOf.getTime(),
+    sessionStart,
+    sessionStartMs: sessionStart.getTime(),
+    sessionEnd,
+    sessionEndMs: sessionEnd.getTime(),
+    expiry,
+    role,
+    weighting,
+    bucketMinutes,
+    priceStep,
+    priceGrid,
+    timeBuckets,
+    surfaceColumns,
+    gamma,
+    charm,
+    vanna,
+    grossGamma,
+    zeroRidges,
+    gammaPositivePeaks,
+    gammaNegativeTroughs,
+    candles,
+    strikeProfile,
+    spot,
+    spotSourceAtMs: spotSourceAt.getTime(),
+    spotKnownAtMs: spotKnownAt.getTime(),
+    domains,
+    artifactSha256,
+    capabilities,
+    provenance,
+    missingRanges: normalizeMissingRanges(
+      raw.missing_ranges,
+      sessionStart.getTime(),
+      sessionEnd.getTime(),
+    ),
+  };
+}
+
 function effectiveSnapshotStatus(snapshot) {
   if (!snapshot) return "unavailable";
   if (!["ready", "degraded"].includes(snapshot.status)) return "unavailable";
@@ -1244,32 +1859,44 @@ function updateModeQuery(frame = replayFrame(), { push = false } = {}) {
 function updateModeChrome() {
   const replay = isReplayView();
   const frame = replayFrame();
-  const verifiedTrend = replay && app.trend;
+  const verifiedTrend = replay && app.trend && !app.trend.metadataOnly;
+  const verifiedSessionSurface = replay && app.sessionSurface;
   const verifiedFrame = replay && app.snapshot?.mode === "replay";
   const replayAt = Number.isFinite(app.playheadMs)
     ? new Date(app.playheadMs)
     : app.snapshot?.mode === "replay" ? app.snapshot.requestedAsOf : frame?.at;
   document.body.classList.toggle("mode-replay", replay);
-  dom.trendPanel.hidden = !replay;
+  dom.trendPanel.hidden = true;
+  dom.sessionCockpit.hidden = !replay;
+  dom.cockpitTimeline.hidden = !replay;
+  dom.cockpitLivePlaceholder.hidden = replay;
   dom.modeFilter.value = replay ? "replay" : "live";
   dom.replayBanner.hidden = !replay;
   dom.replayConsole.hidden = !replay;
   dom.pageLede.textContent = replay
-    ? "按交易日连续回放 SPX 实际走势与 Gamma proxy 区间。SPX 仅在 recorded known_at 到达后显示；Schwab 缺少真实 availability clock，PIT 仍为有界但未严格证明。"
+    ? "Gamma、Strike 与 Charm 共用一个 SPX 坐标和交易时钟；颜色、OHLC 与缺失区间均来自冻结回放合同。"
     : "标的价格 × 时间的期权暴露地形。所有值均来自只读生产快照，不提供下单入口。";
-  const sourceFiles = verifiedTrend
+  const sourceFiles = verifiedSessionSurface
+    ? app.sessionSurface.provenance?.source_files
+    : verifiedTrend
     ? app.trend.source?.source_files
     : verifiedFrame ? app.snapshot.source?.source_files : null;
   dom.sourceFile.textContent = replay
-    ? sourceFiles?.join(", ") || (frame?.id ? `replay frame ${frame.id}` : "replay catalog")
+    ? (Array.isArray(sourceFiles) ? sourceFiles.join(", ") : null) ||
+      (frame?.id ? `replay frame ${frame.id}` : "replay catalog")
     : "spxw_surface_dashboard.json";
   dom.sourceMode.textContent = replay
-    ? verifiedTrend
+    ? verifiedSessionSurface
+      ? `CUTOFF SESSION SURFACE · Gamma + Strike + Charm · latest validated frame ≤ playhead · Bounded PIT · Not live`
+      : verifiedTrend
       ? `COMPACT TREND ARTIFACT VERIFIED · Visual ${REPLAY_VISUAL_FPS} fps · SPX recorded known_at + Gamma valid_until · Bounded PIT · Not live`
-      : `SESSION REPLAY · Visual ${REPLAY_VISUAL_FPS} fps · SPX observed / Gamma hold-last · Bounded PIT · Not live`
+      : `SESSION REPLAY CLOCK · timeline metadata only · market values fetched per validated cutoff · Bounded PIT · Not live`
     : "5 秒只读刷新";
   if (replay) {
-    if (verifiedTrend) {
+    if (verifiedSessionSurface) {
+      dom.replayBannerLabel.textContent = `Replay · ${formatMarketTime(app.sessionSurface.asOf)} · Session surface`;
+      dom.replayBannerAsOf.textContent = `As of ${formatReplayAsOf(app.sessionSurface.asOf)} · latest validated frame at or before playhead · no future chain, candle, or position values requested`;
+    } else if (verifiedTrend) {
       dom.replayBannerLabel.textContent = replayAt
         ? `Replay · ${formatMarketTime(replayAt)} · Compact trend verified`
         : "Replay · Compact trend verified";
@@ -1361,6 +1988,7 @@ function updateFilters() {
   if (isReplayView()) {
     for (const role of ["front", "next"]) {
       const expiry = expiries.find((item) => item.role === role)?.expiry ||
+        (app.sessionSurface?.role === role ? app.sessionSurface.expiry : null) ||
         (app.trend?.role === role ? app.trend.gamma.keyframes[0]?.expiry : null);
       const option = document.createElement("option");
       option.value = role;
@@ -1423,6 +2051,7 @@ function renderSummary() {
     ? `${STATUS_LABELS[status]} · Bounded PIT`
     : expired ? "Stale / fail closed" : STATUS_LABELS[status];
   const expiry = selectedExpiry();
+  dom.providerChip.textContent = expiry?.providers.includes("schwab") ? "SCHWAB" : "Provider —";
   const activeReasons = [...new Set([...snapshot.reasons, ...(expiry?.warnings || [])])];
   const reasons = expired ? ["snapshot_valid_until_elapsed", ...activeReasons] : activeReasons;
   const displayedReasons = reasons.map(reasonLabel);
@@ -1543,6 +2172,714 @@ function resizeCanvas(canvas) {
   const context = canvas.getContext("2d");
   context.setTransform(ratio, 0, 0, ratio, 0, 0);
   return { context, width, height };
+}
+
+function updateCockpitStableDomains(surface) {
+  const key = `${surface.sessionDate}|${surface.role}|${surface.weighting}`;
+  for (const metric of ["gamma", "charm", "strike"]) {
+    app.cockpitColorDomains[metric] = expandOnlyDomain(
+      app.cockpitColorDomains[metric],
+      surface.domains[metric],
+      `${key}|${metric}`,
+    );
+  }
+  const prices = [
+    ...surface.priceGrid,
+    ...surface.candles.flatMap((candle) => [candle.low, candle.high]),
+    surface.spot,
+  ].filter(Number.isFinite);
+  const padding = Math.max(surface.priceStep, 1);
+  const candidate = {
+    key,
+    min: Math.floor((Math.min(...prices) - padding) / padding) * padding,
+    max: Math.ceil((Math.max(...prices) + padding) / padding) * padding,
+  };
+  if (!app.cockpitPriceDomain || app.cockpitPriceDomain.key !== key) {
+    app.cockpitPriceDomain = candidate;
+  } else {
+    app.cockpitPriceDomain = {
+      key,
+      min: Math.min(app.cockpitPriceDomain.min, candidate.min),
+      max: Math.max(app.cockpitPriceDomain.max, candidate.max),
+    };
+  }
+}
+
+function divergingColor(value, domain, { projection = false } = {}) {
+  if (!Number.isFinite(value)) return "rgba(69, 85, 97, 0.58)";
+  const absolute = Math.abs(value);
+  const maximum = Math.max(domain?.maxAbs || 0, 1e-12);
+  const threshold = Math.min(domain?.threshold || 0, maximum);
+  const opacityScale = projection ? 0.72 : 1;
+  if (absolute <= threshold) return `rgba(220, 226, 228, ${0.72 * opacityScale})`;
+  const ratio = Math.sqrt(Math.max(0, Math.min((absolute - threshold) / Math.max(maximum - threshold, 1e-12), 1)));
+  if (value < 0) {
+    return `rgba(${Math.round(198 + ratio * 30)}, ${Math.round(133 - ratio * 45)}, ${Math.round(125 - ratio * 40)}, ${(0.34 + ratio * 0.58) * opacityScale})`;
+  }
+  return `rgba(${Math.round(107 - ratio * 72)}, ${Math.round(164 - ratio * 33)}, ${Math.round(190 - ratio * 21)}, ${(0.34 + ratio * 0.58) * opacityScale})`;
+}
+
+function cockpitElements(panel) {
+  if (panel === "gamma") {
+    return {
+      stage: dom.cockpitGammaStage,
+      base: dom.cockpitGammaBase,
+      overlay: dom.cockpitGammaOverlay,
+      empty: dom.cockpitGammaEmpty,
+    };
+  }
+  if (panel === "charm") {
+    return {
+      stage: dom.cockpitCharmStage,
+      base: dom.cockpitCharmBase,
+      overlay: dom.cockpitCharmOverlay,
+      empty: dom.cockpitCharmEmpty,
+    };
+  }
+  return {
+    stage: dom.cockpitStrikeStage,
+    base: dom.cockpitStrikeBase,
+    overlay: dom.cockpitStrikeOverlay,
+    empty: dom.cockpitStrikeEmpty,
+  };
+}
+
+function resizeCockpitPanel(panel) {
+  const elements = cockpitElements(panel);
+  const width = Math.max(elements.stage?.clientWidth || 0, 240);
+  const height = Math.max(elements.stage?.clientHeight || 0, 360);
+  const ratio = Math.min(window.devicePixelRatio || 1, 2);
+  for (const canvas of [elements.base, elements.overlay]) {
+    const pixelWidth = Math.round(width * ratio);
+    const pixelHeight = Math.round(height * ratio);
+    if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) {
+      canvas.width = pixelWidth;
+      canvas.height = pixelHeight;
+    }
+    canvas.getContext("2d").setTransform(ratio, 0, 0, ratio, 0, 0);
+  }
+  const narrow = width < 430;
+  const horizontal = panel === "strike"
+    ? { left: narrow ? 37 : 45, right: narrow ? 37 : 45 }
+    : { left: narrow ? 8 : 12, right: narrow ? 42 : 50 };
+  const layout = {
+    panel,
+    width,
+    height,
+    ratio,
+    plotLeft: horizontal.left,
+    plotRight: width - horizontal.right,
+    plotTop: 14,
+    plotBottom: height - 29,
+  };
+  layout.plotWidth = Math.max(layout.plotRight - layout.plotLeft, 1);
+  layout.plotHeight = Math.max(layout.plotBottom - layout.plotTop, 1);
+  app.cockpitLayouts[panel] = layout;
+  return { ...elements, layout };
+}
+
+function hatchCockpitRect(context, x, y, width, height, color = "rgba(189, 207, 217, 0.24)") {
+  if (width <= 0 || height <= 0) return;
+  context.save();
+  context.beginPath();
+  context.rect(x, y, width, height);
+  context.clip();
+  context.strokeStyle = color;
+  context.lineWidth = 0.7;
+  for (let offset = -height; offset <= width; offset += 7) {
+    context.beginPath();
+    context.moveTo(x + offset, y + height);
+    context.lineTo(x + offset + height, y);
+    context.stroke();
+  }
+  context.restore();
+}
+
+function cockpitPriceBounds(surface, index) {
+  const price = surface.priceGrid[index];
+  const lower = index === 0
+    ? price - (surface.priceGrid[1] - price) / 2
+    : (surface.priceGrid[index - 1] + price) / 2;
+  const upper = index === surface.priceGrid.length - 1
+    ? price + (price - surface.priceGrid[index - 1]) / 2
+    : (price + surface.priceGrid[index + 1]) / 2;
+  return { lower, upper };
+}
+
+function drawCockpitTimeAxes(context, layout, surface) {
+  const ticks = layout.width < 470 ? 4 : 6;
+  context.save();
+  context.font = "8px ui-monospace, SFMono-Regular, monospace";
+  context.fillStyle = "#91a9b9";
+  context.strokeStyle = "rgba(128, 166, 189, 0.17)";
+  context.lineWidth = 0.7;
+  context.textBaseline = "top";
+  for (let index = 0; index < ticks; index += 1) {
+    const ratio = index / (ticks - 1);
+    const at = surface.sessionStartMs + ratio * (surface.sessionEndMs - surface.sessionStartMs);
+    const x = layout.plotLeft + ratio * layout.plotWidth;
+    context.beginPath();
+    context.moveTo(x + 0.5, layout.plotTop);
+    context.lineTo(x + 0.5, layout.plotBottom);
+    context.stroke();
+    context.textAlign = index === 0 ? "left" : index === ticks - 1 ? "right" : "center";
+    context.fillText(formatAxisMarketTime(at), x, layout.plotBottom + 8);
+  }
+  context.restore();
+}
+
+function drawCockpitPriceAxes(context, layout, priceDomain, { side = "right" } = {}) {
+  const ticks = layout.height < 500 ? 6 : 9;
+  context.save();
+  context.font = "8px ui-monospace, SFMono-Regular, monospace";
+  context.fillStyle = "#9eb2c0";
+  context.strokeStyle = "rgba(128, 166, 189, 0.14)";
+  context.lineWidth = 0.7;
+  context.textBaseline = "middle";
+  for (let index = 0; index < ticks; index += 1) {
+    const ratio = index / (ticks - 1);
+    const price = priceDomain.max - ratio * (priceDomain.max - priceDomain.min);
+    const y = layout.plotTop + ratio * layout.plotHeight;
+    context.beginPath();
+    context.moveTo(layout.plotLeft, y + 0.5);
+    context.lineTo(layout.plotRight, y + 0.5);
+    context.stroke();
+    context.textAlign = side === "right" ? "left" : "right";
+    const labelX = side === "right" ? layout.plotRight + 4 : layout.plotLeft - 4;
+    context.fillText(price.toFixed(0), labelX, y);
+  }
+  context.restore();
+}
+
+function drawCockpitMissingRange(context, layout, surface, startMs, endMs) {
+  const x1 = sessionTimeToX(layout, surface.sessionStartMs, surface.sessionEndMs, startMs);
+  const x2 = sessionTimeToX(layout, surface.sessionStartMs, surface.sessionEndMs, endMs);
+  context.fillStyle = "rgba(39, 56, 70, 0.72)";
+  context.fillRect(x1, layout.plotTop, Math.max(x2 - x1, 0.5), layout.plotHeight);
+  hatchCockpitRect(context, x1, layout.plotTop, Math.max(x2 - x1, 0.5), layout.plotHeight);
+}
+
+function missingRangeAppliesToPanel(range, panel) {
+  if (!range.components.length) return true;
+  const aliases = panel === "gamma"
+    ? new Set(["gamma", "gamma_surface", "signed_gamma", "surface"])
+    : new Set(["charm", "charm_surface", "surface"]);
+  return range.components.some((component) => aliases.has(component));
+}
+
+function drawCockpitCandles(context, layout, surface) {
+  const visible = surface.candles.filter((candle) => candle.startMs <= surface.asOfMs);
+  if (!visible.length) return;
+  const nominalWidth = Math.max(
+    Math.min(layout.plotWidth / Math.max(surface.timeBuckets.length, 1) * 0.58, 5),
+    1.2,
+  );
+  context.save();
+  for (const candle of visible) {
+    const x = sessionTimeToX(
+      layout,
+      surface.sessionStartMs,
+      surface.sessionEndMs,
+      candle.startMs + (candle.endMs - candle.startMs) / 2,
+    );
+    const highY = sessionPriceToY(layout, app.cockpitPriceDomain, candle.high);
+    const lowY = sessionPriceToY(layout, app.cockpitPriceDomain, candle.low);
+    const openY = sessionPriceToY(layout, app.cockpitPriceDomain, candle.open);
+    const closeY = sessionPriceToY(layout, app.cockpitPriceDomain, candle.close);
+    const rising = candle.close >= candle.open;
+    const color = rising ? "#63d0ad" : "#ef7b6e";
+    context.strokeStyle = "rgba(5, 15, 24, 0.78)";
+    context.lineWidth = 3;
+    context.beginPath();
+    context.moveTo(x, highY);
+    context.lineTo(x, lowY);
+    context.stroke();
+    context.strokeStyle = color;
+    context.lineWidth = 1;
+    context.stroke();
+    const top = Math.min(openY, closeY);
+    const height = Math.max(Math.abs(closeY - openY), 1);
+    context.fillStyle = rising ? "rgba(34, 116, 91, 0.86)" : "rgba(142, 57, 55, 0.86)";
+    context.strokeStyle = color;
+    context.lineWidth = 0.8;
+    context.fillRect(x - nominalWidth / 2, top, nominalWidth, height);
+    context.strokeRect(x - nominalWidth / 2, top, nominalWidth, height);
+    if (!candle.complete) {
+      context.setLineDash([2, 2]);
+      context.strokeStyle = "#f0cf72";
+      context.strokeRect(x - nominalWidth / 2 - 1, top - 1, nominalWidth + 2, height + 2);
+      context.setLineDash([]);
+    }
+  }
+  context.restore();
+}
+
+function drawGammaExtremaMarkers(context, layout, surface) {
+  const definitions = [
+    { rows: surface.gammaPositivePeaks, symbol: "+", color: "#8fe3ca" },
+    { rows: surface.gammaNegativeTroughs, symbol: "−", color: "#ff9a91" },
+  ];
+  context.save();
+  context.font = "bold 8px ui-monospace, SFMono-Regular, monospace";
+  context.textAlign = "center";
+  context.textBaseline = "middle";
+  for (const definition of definitions) {
+    definition.rows.forEach((marker, index) => {
+      if (!marker || marker.price < app.cockpitPriceDomain.min ||
+          marker.price > app.cockpitPriceDomain.max) return;
+      const x = sessionTimeToX(
+        layout,
+        surface.sessionStartMs,
+        surface.sessionEndMs,
+        surface.timeBuckets[index].centerMs,
+      );
+      const y = sessionPriceToY(layout, app.cockpitPriceDomain, marker.price);
+      context.beginPath();
+      context.arc(x, y, 4.2, 0, Math.PI * 2);
+      context.fillStyle = "rgba(5, 20, 32, 0.9)";
+      context.fill();
+      context.strokeStyle = definition.color;
+      context.lineWidth = 1;
+      context.stroke();
+      context.fillStyle = definition.color;
+      context.fillText(definition.symbol, x, y + 0.3);
+    });
+  }
+  context.restore();
+}
+
+function drawCockpitSurface(panel, matrix) {
+  const surface = app.sessionSurface;
+  if (!surface || !app.cockpitPriceDomain) return;
+  const { base, empty, layout } = resizeCockpitPanel(panel);
+  const context = base.getContext("2d");
+  context.clearRect(0, 0, layout.width, layout.height);
+  context.fillStyle = "#081d30";
+  context.fillRect(0, 0, layout.width, layout.height);
+  const domain = app.cockpitColorDomains[panel];
+  let numericCount = 0;
+  let projectionBoundary = null;
+  surface.timeBuckets.forEach((bucket, timeIndex) => {
+    const column = surface.surfaceColumns[timeIndex];
+    const x1 = sessionTimeToX(layout, surface.sessionStartMs, surface.sessionEndMs, bucket.startMs);
+    const x2 = sessionTimeToX(layout, surface.sessionStartMs, surface.sessionEndMs, bucket.endMs);
+    if (column.kind === "projection" && projectionBoundary === null) projectionBoundary = x1;
+    if (column.kind === "missing") {
+      drawCockpitMissingRange(context, layout, surface, bucket.startMs, bucket.endMs);
+      return;
+    }
+    for (let priceIndex = 0; priceIndex < surface.priceGrid.length; priceIndex += 1) {
+      const value = matrix[timeIndex][priceIndex];
+      const bounds = cockpitPriceBounds(surface, priceIndex);
+      if (bounds.upper < app.cockpitPriceDomain.min || bounds.lower > app.cockpitPriceDomain.max) continue;
+      const y1 = sessionPriceToY(
+        layout,
+        app.cockpitPriceDomain,
+        Math.min(bounds.upper, app.cockpitPriceDomain.max),
+      );
+      const y2 = sessionPriceToY(
+        layout,
+        app.cockpitPriceDomain,
+        Math.max(bounds.lower, app.cockpitPriceDomain.min),
+      );
+      const width = Math.max(x2 - x1 + 0.45, 0.75);
+      const height = Math.max(y2 - y1 + 0.45, 0.75);
+      if (value === null) {
+        context.fillStyle = "rgba(8, 29, 48, 0.96)";
+        context.fillRect(x1, y1, width, height);
+        hatchCockpitRect(context, x1, y1, width, height, "rgba(160, 184, 198, 0.18)");
+      } else {
+        context.fillStyle = divergingColor(value, domain, { projection: column.kind === "projection" });
+        context.fillRect(x1, y1, width, height);
+        numericCount += 1;
+      }
+    }
+  });
+  for (const range of surface.missingRanges) {
+    if (missingRangeAppliesToPanel(range, panel)) {
+      drawCockpitMissingRange(context, layout, surface, range.startMs, range.endMs);
+    }
+  }
+  if (panel === "gamma") {
+    context.save();
+    context.strokeStyle = "rgba(7, 25, 39, 0.92)";
+    context.lineWidth = 3.4;
+    context.beginPath();
+    let drawing = false;
+    surface.zeroRidges.forEach((ridge, index) => {
+      if (!Number.isFinite(ridge)) {
+        drawing = false;
+        return;
+      }
+      const x = sessionTimeToX(
+        layout,
+        surface.sessionStartMs,
+        surface.sessionEndMs,
+        surface.timeBuckets[index].centerMs,
+      );
+      const y = sessionPriceToY(layout, app.cockpitPriceDomain, ridge);
+      if (!drawing) context.moveTo(x, y);
+      else context.lineTo(x, y);
+      drawing = true;
+    });
+    context.stroke();
+    context.strokeStyle = "rgba(222, 239, 246, 0.88)";
+    context.lineWidth = 1;
+    context.stroke();
+    context.restore();
+  }
+  if (projectionBoundary !== null) {
+    context.save();
+    context.setLineDash([4, 4]);
+    context.strokeStyle = "rgba(241, 211, 113, 0.9)";
+    context.lineWidth = 1;
+    context.beginPath();
+    context.moveTo(projectionBoundary, layout.plotTop);
+    context.lineTo(projectionBoundary, layout.plotBottom);
+    context.stroke();
+    context.setLineDash([]);
+    context.fillStyle = "#efd685";
+    context.font = "8px ui-monospace, SFMono-Regular, monospace";
+    context.textAlign = "left";
+    context.fillText("projection →", Math.min(projectionBoundary + 4, layout.plotRight - 62), layout.plotTop + 10);
+    context.restore();
+  }
+  drawCockpitTimeAxes(context, layout, surface);
+  drawCockpitPriceAxes(context, layout, app.cockpitPriceDomain, { side: "right" });
+  drawCockpitCandles(context, layout, surface);
+  if (panel === "gamma") drawGammaExtremaMarkers(context, layout, surface);
+  empty.hidden = numericCount > 0;
+}
+
+function drawCockpitStrike() {
+  const surface = app.sessionSurface;
+  if (!surface || !app.cockpitPriceDomain) return;
+  const { base, empty, layout } = resizeCockpitPanel("strike");
+  const context = base.getContext("2d");
+  context.clearRect(0, 0, layout.width, layout.height);
+  context.fillStyle = "#081d30";
+  context.fillRect(0, 0, layout.width, layout.height);
+  drawCockpitPriceAxes(context, layout, app.cockpitPriceDomain, { side: "left" });
+  const domain = app.cockpitColorDomains.strike;
+  const zeroX = layout.plotLeft + layout.plotWidth / 2;
+  const halfWidth = layout.plotWidth / 2;
+  context.save();
+  context.strokeStyle = "rgba(219, 233, 240, 0.62)";
+  context.setLineDash([3, 4]);
+  context.beginPath();
+  context.moveTo(zeroX, layout.plotTop);
+  context.lineTo(zeroX, layout.plotBottom);
+  context.stroke();
+  context.setLineDash([]);
+  for (const row of surface.strikeProfile) {
+    if (row.strike < app.cockpitPriceDomain.min || row.strike > app.cockpitPriceDomain.max) continue;
+    const y = sessionPriceToY(layout, app.cockpitPriceDomain, row.strike);
+    const currentRatio = row.currentProxy === null ? 0 : Math.min(Math.abs(row.currentProxy) / domain.maxAbs, 1);
+    const baselineRatio = row.firstValidatedProxy === null
+      ? 0
+      : Math.min(Math.abs(row.firstValidatedProxy) / domain.maxAbs, 1);
+    if (row.firstValidatedProxy !== null) {
+      const width = baselineRatio * halfWidth;
+      const x = row.firstValidatedProxy < 0 ? zeroX - width : zeroX;
+      context.strokeStyle = "rgba(192, 207, 216, 0.72)";
+      context.lineWidth = 1.5;
+      context.setLineDash([3, 3]);
+      context.beginPath();
+      context.moveTo(x, y);
+      context.lineTo(x + width, y);
+      context.stroke();
+      context.setLineDash([]);
+    }
+    if (row.currentProxy !== null) {
+      const width = currentRatio * halfWidth;
+      const x = row.currentProxy < 0 ? zeroX - width : zeroX;
+      context.fillStyle = row.currentProxy < 0
+        ? "rgba(220, 103, 95, 0.82)"
+        : "rgba(55, 146, 190, 0.84)";
+      context.fillRect(x, y - 1.7, Math.max(width, row.currentProxy === 0 ? 1 : 0), 3.4);
+    }
+  }
+  context.fillStyle = "#91a9b9";
+  context.font = "8px ui-monospace, SFMono-Regular, monospace";
+  context.textBaseline = "top";
+  context.textAlign = "left";
+  context.fillText(`−${compactNumber(domain.maxAbs, 1)}`, layout.plotLeft, layout.plotBottom + 8);
+  context.textAlign = "center";
+  context.fillText("0", zeroX, layout.plotBottom + 8);
+  context.textAlign = "right";
+  context.fillText(`+${compactNumber(domain.maxAbs, 1)}`, layout.plotRight, layout.plotBottom + 8);
+  context.restore();
+  empty.hidden = surface.strikeProfile.some((row) =>
+    row.currentProxy !== null || row.firstValidatedProxy !== null);
+}
+
+function nearestNumericIndex(values, target, selector = (value) => value) {
+  if (!values.length || !Number.isFinite(target)) return -1;
+  let best = 0;
+  let distance = Math.abs(selector(values[0]) - target);
+  for (let index = 1; index < values.length; index += 1) {
+    const candidate = Math.abs(selector(values[index]) - target);
+    if (candidate < distance) {
+      best = index;
+      distance = candidate;
+    }
+  }
+  return best;
+}
+
+function cockpitCurrentSpot() {
+  return app.sessionSurface?.spot ?? null;
+}
+
+function cockpitValueAt(panel, timeMs, price) {
+  const surface = app.sessionSurface;
+  if (!surface) return { value: null, timeIndex: -1, priceIndex: -1, column: null };
+  const matrix = panel === "gamma" ? surface.gamma : surface.charm;
+  const timeIndex = nearestNumericIndex(surface.timeBuckets, timeMs, (bucket) => bucket.centerMs);
+  const priceIndex = nearestNumericIndex(surface.priceGrid, price);
+  return {
+    value: timeIndex >= 0 && priceIndex >= 0 ? matrix[timeIndex][priceIndex] : null,
+    timeIndex,
+    priceIndex,
+    column: timeIndex >= 0 ? surface.surfaceColumns[timeIndex] : null,
+  };
+}
+
+function drawCockpitOverlay(panel, spot) {
+  const surface = app.sessionSurface;
+  const layout = app.cockpitLayouts[panel];
+  const overlay = cockpitElements(panel).overlay;
+  if (!surface || !layout || !overlay || !app.cockpitPriceDomain) return;
+  const context = overlay.getContext("2d");
+  context.clearRect(0, 0, layout.width, layout.height);
+  context.save();
+  const spotY = Number.isFinite(spot)
+    ? sessionPriceToY(layout, app.cockpitPriceDomain, spot)
+    : null;
+  if (spotY !== null) {
+    context.setLineDash([5, 4]);
+    context.strokeStyle = "rgba(244, 210, 103, 0.94)";
+    context.lineWidth = 1;
+    context.beginPath();
+    context.moveTo(layout.plotLeft, spotY);
+    context.lineTo(layout.plotRight, spotY);
+    context.stroke();
+    context.setLineDash([]);
+  }
+  if (panel !== "strike" && Number.isFinite(app.playheadMs)) {
+    const currentX = sessionTimeToX(
+      layout,
+      surface.sessionStartMs,
+      surface.sessionEndMs,
+      app.playheadMs,
+    );
+    context.strokeStyle = "rgba(239, 246, 250, 0.88)";
+    context.lineWidth = 1;
+    context.beginPath();
+    context.moveTo(currentX, layout.plotTop);
+    context.lineTo(currentX, layout.plotBottom);
+    context.stroke();
+  }
+  if (app.cockpitHover) {
+    const hoverY = sessionPriceToY(layout, app.cockpitPriceDomain, app.cockpitHover.price);
+    context.setLineDash([2, 3]);
+    context.strokeStyle = "rgba(232, 242, 248, 0.76)";
+    context.lineWidth = 0.8;
+    context.beginPath();
+    context.moveTo(layout.plotLeft, hoverY);
+    context.lineTo(layout.plotRight, hoverY);
+    context.stroke();
+    if (panel !== "strike") {
+      const hoverX = sessionTimeToX(
+        layout,
+        surface.sessionStartMs,
+        surface.sessionEndMs,
+        app.cockpitHover.timeMs,
+      );
+      context.beginPath();
+      context.moveTo(hoverX, layout.plotTop);
+      context.lineTo(hoverX, layout.plotBottom);
+      context.stroke();
+    }
+    context.setLineDash([]);
+  }
+  context.restore();
+}
+
+function renderCockpitReadouts(spot) {
+  const surface = app.sessionSurface;
+  if (!surface) return;
+  const at = Number.isFinite(app.playheadMs) ? app.playheadMs : surface.asOfMs;
+  const gamma = cockpitValueAt("gamma", at, spot);
+  const charm = cockpitValueAt("charm", at, spot);
+  const strikeIndex = nearestNumericIndex(surface.strikeProfile, spot, (row) => row.strike);
+  const strike = strikeIndex >= 0 ? surface.strikeProfile[strikeIndex] : null;
+  dom.cockpitGammaValue.textContent = gamma.value === null ? "Γ —" : `Γ ${compactNumber(gamma.value, 3)}`;
+  dom.cockpitCharmValue.textContent = charm.value === null ? "Charm —" : compactNumber(charm.value, 3);
+  dom.cockpitStrikeValue.textContent = strike?.currentProxy === null || !strike
+    ? "—"
+    : `${strike.strike.toFixed(0)} · ${compactNumber(strike.currentProxy, 2)}`;
+}
+
+function drawCockpitDynamic() {
+  if (!app.sessionSurface) return;
+  const spot = cockpitCurrentSpot();
+  for (const panel of ["gamma", "strike", "charm"]) drawCockpitOverlay(panel, spot);
+  renderCockpitReadouts(spot);
+}
+
+function renderCockpitStatic() {
+  const surface = app.sessionSurface;
+  if (!surface) {
+    for (const panel of ["gamma", "strike", "charm"]) {
+      const elements = cockpitElements(panel);
+      for (const canvas of [elements.base, elements.overlay]) {
+        const context = canvas.getContext("2d");
+        context.clearRect(0, 0, canvas.width, canvas.height);
+      }
+      elements.empty.hidden = false;
+    }
+    dom.cockpitGammaValue.textContent = "Γ —";
+    dom.cockpitStrikeValue.textContent = "—";
+    dom.cockpitCharmValue.textContent = "Charm —";
+    dom.cockpitGammaThreshold.textContent = "neutral —";
+    dom.cockpitCharmThreshold.textContent = "neutral —";
+    dom.cockpitGammaDomain.textContent = "domain —";
+    dom.cockpitCharmDomain.textContent = "domain —";
+    dom.cockpitTooltip.hidden = true;
+    dom.cockpitTooltip.replaceChildren();
+    if (dom.cockpitTooltip.dataset) delete dom.cockpitTooltip.dataset.panel;
+    if (isReplayView()) dom.providerChip.textContent = "Provider —";
+    return;
+  }
+  dom.providerChip.textContent = "SCHWAB";
+  updateCockpitStableDomains(surface);
+  drawCockpitSurface("gamma", surface.gamma);
+  drawCockpitStrike();
+  drawCockpitSurface("charm", surface.charm);
+  const gammaDomain = app.cockpitColorDomains.gamma;
+  const charmDomain = app.cockpitColorDomains.charm;
+  dom.cockpitGammaThreshold.textContent = `neutral ±${compactNumber(gammaDomain.threshold, 2)}`;
+  dom.cockpitCharmThreshold.textContent = `neutral ±${compactNumber(charmDomain.threshold, 2)}`;
+  dom.cockpitGammaDomain.textContent = `domain ±${compactNumber(gammaDomain.maxAbs, 2)}`;
+  dom.cockpitCharmDomain.textContent = `domain ±${compactNumber(charmDomain.maxAbs, 2)}`;
+  drawCockpitDynamic();
+  renderCockpitAudit();
+}
+
+function cockpitTooltipFor(panel, timeMs, price) {
+  const surface = app.sessionSurface;
+  if (!surface) return;
+  const gamma = cockpitValueAt("gamma", timeMs, price);
+  const charm = cockpitValueAt("charm", timeMs, price);
+  const strikeIndex = nearestNumericIndex(surface.strikeProfile, price, (row) => row.strike);
+  const strike = strikeIndex >= 0 ? surface.strikeProfile[strikeIndex] : null;
+  const candle = surface.candles.find((item) =>
+    item.startMs <= timeMs && timeMs < item.endMs) || null;
+  const title = document.createElement("strong");
+  title.textContent = `${formatMarketTime(new Date(timeMs))} · SPX ${price.toFixed(2)}`;
+  const gammaLine = document.createElement("span");
+  const peak = gamma.timeIndex >= 0 ? surface.gammaPositivePeaks[gamma.timeIndex] : null;
+  const trough = gamma.timeIndex >= 0 ? surface.gammaNegativeTroughs[gamma.timeIndex] : null;
+  const extremaText = [
+    peak ? `peak +${String(peak.value)} @ ${peak.price}` : null,
+    trough ? `trough ${String(trough.value)} @ ${trough.price}` : null,
+  ].filter(Boolean).join(" · ");
+  gammaLine.textContent = `Gamma raw: ${gamma.value === null ? "missing" : String(gamma.value)} · ${gamma.column?.kind || "missing"}${extremaText ? ` · ${extremaText}` : ""}`;
+  const charmLine = document.createElement("span");
+  charmLine.textContent = `Charm raw: ${charm.value === null ? "missing" : String(charm.value)} · ${charm.column?.quality || "unknown"}`;
+  const strikeLine = document.createElement("span");
+  strikeLine.textContent = strike
+    ? `Strike ${strike.strike}: current ${strike.currentProxy ?? "missing"}; first validated ${strike.firstValidatedProxy ?? "missing"}`
+    : "Strike profile: missing";
+  const candleLine = document.createElement("span");
+  candleLine.textContent = candle
+    ? `OHLC ${candle.open} / ${candle.high} / ${candle.low} / ${candle.close} · n=${candle.sampleCount}${candle.complete ? "" : " · partial"}`
+    : "OHLC: missing";
+  dom.cockpitTooltip.replaceChildren(title, gammaLine, charmLine, strikeLine, candleLine);
+  dom.cockpitTooltip.dataset.panel = panel;
+}
+
+function cockpitPointerMove(panel, event) {
+  const surface = app.sessionSurface;
+  const layout = app.cockpitLayouts[panel];
+  const overlay = cockpitElements(panel).overlay;
+  if (!surface || !layout || !overlay) return;
+  const rect = overlay.getBoundingClientRect();
+  const x = event.clientX - rect.left;
+  const y = event.clientY - rect.top;
+  if (x < layout.plotLeft || x > layout.plotRight || y < layout.plotTop || y > layout.plotBottom) {
+    dom.cockpitTooltip.hidden = true;
+    return;
+  }
+  const timeMs = panel === "strike"
+    ? app.cockpitHover?.timeMs ?? app.playheadMs ?? surface.asOfMs
+    : sessionXToTime(layout, surface.sessionStartMs, surface.sessionEndMs, x);
+  const price = sessionYToPrice(layout, app.cockpitPriceDomain, y);
+  app.cockpitHover = { panel, timeMs, price };
+  drawCockpitDynamic();
+  cockpitTooltipFor(panel, timeMs, price);
+  const cockpitRect = dom.sessionCockpit.getBoundingClientRect();
+  const localX = event.clientX - cockpitRect.left;
+  const localY = event.clientY - cockpitRect.top;
+  const tooltipWidth = Math.min(310, Math.max(cockpitRect.width - 16, 190));
+  dom.cockpitTooltip.style.width = `${tooltipWidth}px`;
+  dom.cockpitTooltip.style.left = `${Math.min(Math.max(localX + 12, 8), Math.max(cockpitRect.width - tooltipWidth - 8, 8))}px`;
+  dom.cockpitTooltip.style.top = `${Math.min(Math.max(localY + 12, 8), Math.max(cockpitRect.height - 112, 8))}px`;
+  dom.cockpitTooltip.hidden = false;
+}
+
+function clearCockpitHover() {
+  app.cockpitHover = null;
+  dom.cockpitTooltip.hidden = true;
+  drawCockpitDynamic();
+}
+
+function summarizeAuditObject(value) {
+  if (!isObject(value)) return "—";
+  const entries = Object.entries(value)
+    .filter(([, item]) => ["string", "number", "boolean"].includes(typeof item))
+    .slice(0, 12);
+  return entries.length
+    ? entries.map(([key, item]) => `${key}=${String(item)}`).join(" · ")
+    : "—";
+}
+
+function renderCockpitAudit() {
+  const surface = app.sessionSurface;
+  if (!surface) {
+    dom.cockpitAuditAsOf.textContent = "—";
+    dom.cockpitAuditContract.textContent = "—";
+    dom.cockpitAuditStats.textContent = "—";
+    dom.cockpitAuditMissing.textContent = "—";
+    dom.cockpitAuditCapabilities.textContent = "—";
+    dom.cockpitAuditProvenance.textContent = "—";
+    dom.cockpitAuditFrozen.textContent = "—";
+    dom.cockpitAuditPit.textContent = "PIT —";
+    dom.cockpitAuditModel.textContent = "Model —";
+    return;
+  }
+  const counts = surface.surfaceColumns.reduce(
+    (result, column) => ({ ...result, [column.kind]: result[column.kind] + 1 }),
+    { historical: 0, projection: 0, missing: 0 },
+  );
+  const pit = surface.provenance.point_in_time_confidence ||
+    surface.raw.point_in_time_confidence || "bounded_not_proven";
+  const model = surface.provenance.model || surface.raw.model || "proxy model";
+  dom.cockpitAuditAsOf.textContent = `${formatReplayAsOf(surface.asOf)} · session ${formatMarketTime(surface.sessionStart)} → ${formatMarketTime(surface.sessionEnd)}`;
+  dom.cockpitAuditContract.textContent = `${surface.role.toUpperCase()} ${surface.expiry} · ${surface.weighting} · ${surface.bucketMinutes}m × ${surface.priceStep} SPX`;
+  dom.cockpitAuditStats.textContent = `${surface.timeBuckets.length} buckets · ${surface.priceGrid.length} SPX rows · ${surface.candles.length} candles · ${surface.strikeProfile.length} strikes · historical ${counts.historical} / projection ${counts.projection} / missing ${counts.missing}`;
+  dom.cockpitAuditMissing.textContent = surface.missingRanges.length
+    ? surface.missingRanges.map((range) => {
+        const scope = range.components.length ? ` [${range.components.join(", ")}]` : "";
+        return `${formatMarketTime(new Date(range.startMs), false)}–${formatMarketTime(new Date(range.endMs), false)}${scope} ${range.reason}`;
+      }).join(" · ")
+    : "No declared missing ranges";
+  dom.cockpitAuditCapabilities.textContent = summarizeAuditObject(surface.capabilities);
+  dom.cockpitAuditProvenance.textContent = summarizeAuditObject(surface.provenance);
+  dom.cockpitAuditFrozen.textContent = isReplayView() ? "Frozen replay" : "Live rolling";
+  dom.cockpitAuditPit.textContent = `PIT ${String(pit).replaceAll("_", " ")}`;
+  dom.cockpitAuditModel.textContent = `Model ${model}`;
 }
 
 function binarySearchLastAtOrBefore(values, target, selector = (value) => value) {
@@ -1841,6 +3178,13 @@ function renderTrendStatic() {
     clearTrendVisuals();
     return;
   }
+  if (trend.metadataOnly) {
+    app.trendLayout = null;
+    app.trendPriceLayer = null;
+    app.trendHit = null;
+    drawMetadataReplayDynamic(app.playheadMs ?? trend.openMs, { announce: true });
+    return;
+  }
   const layout = resizeTrendCanvases();
   const priceExtent = trendPriceExtent(trend);
   layout.yMin = priceExtent.min;
@@ -1969,13 +3313,93 @@ function drawTrendFutureMask(context, layout, cursorX) {
   );
 }
 
-function drawTrendDynamic(playheadMs, { announce = false } = {}) {
+function drawMetadataReplayDynamic(
+  playheadMs,
+  { announce = false, loadSessionSurface = true } = {},
+) {
   const trend = app.trend;
+  if (!trend?.metadataOnly) return;
+  const clamped = Math.max(trend.openMs, Math.min(playheadMs, trend.closeMs));
+  app.playheadMs = clamped;
+  // A backwards seek must never leave a later cutoff painted while the older
+  // session-surface request is in flight.  Keeping an older surface while
+  // moving forward is causal; keeping a newer one while moving backward is not.
+  if (app.sessionSurface?.asOfMs > clamped) {
+    cancelSessionSurfaceRequest({ clear: true });
+  }
+  const previousIndex = app.activeGammaIndex;
+  app.activeGammaIndex = binarySearchLastAtOrBefore(
+    trend.gamma.keyframes,
+    clamped,
+    (keyframe) => keyframe.atMs,
+  );
+  dom.replayFrameTime.textContent = formatMarketTime(new Date(clamped));
+  dom.replayFramePosition.textContent = `Keyframe ${Math.max(app.activeGammaIndex + 1, 0)} / ${trend.gamma.keyframes.length}`;
+  dom.replayTimeline.value = String(Math.floor(clamped / 1_000));
+  dom.replayTimeline.setAttribute(
+    "aria-valuetext",
+    `${formatMarketTime(new Date(clamped))}, validated keyframe ${Math.max(app.activeGammaIndex + 1, 0)} of ${trend.gamma.keyframes.length}`,
+  );
+  const surface = app.sessionSurface;
+  const spot = cockpitCurrentSpot();
+  if (surface) {
+    setStatusPill("ready", "Replay · Session surface");
+    dom.summaryStatus.textContent = "Ready · Frozen · Bounded PIT";
+    dom.summaryReasons.textContent = "Session-surface cutoff · dealer side unknown";
+    dom.summaryFreshness.textContent = "Frozen · Bounded PIT";
+    dom.summaryAsOf.textContent = `as of ${formatReplayAsOf(surface.asOf)}`;
+    const totalCells = surface.timeBuckets.length * surface.priceGrid.length;
+    const availableCells = [surface.gamma, surface.charm]
+      .flat(2)
+      .filter(Number.isFinite).length;
+    dom.summaryCoverage.textContent = totalCells
+      ? `${Math.min(availableCells / (totalCells * 2) * 100, 100).toFixed(1)}%`
+      : "—";
+    dom.summaryContracts.textContent = `${surface.strikeProfile.length} strikes · ${surface.candles.length} candles`;
+    dom.summaryExpiries.textContent = `${surface.role.toUpperCase()} · ${surface.expiry}`;
+    dom.summaryUnderlier.textContent = `SPX ${Number.isFinite(spot) ? spot.toFixed(2) : "—"}`;
+    dom.schemaVersion.textContent = `session surface schema ${surface.schemaVersion ?? "—"}`;
+    dom.signConvention.textContent = "calls + / puts − proxy; participant and dealer side unknown";
+    dom.refreshState.textContent = `Frozen replay · cutoff ${formatMarketTime(surface.asOf, false)}`;
+  } else {
+    setStatusPill("unknown", "Loading session surface");
+    dom.summaryStatus.textContent = "Waiting · Frozen replay";
+    dom.summaryReasons.textContent = "No cutoff-bound market values loaded";
+    dom.summaryFreshness.textContent = "Frozen · pending validation";
+    dom.summaryAsOf.textContent = `playhead ${formatReplayAsOf(new Date(clamped))}`;
+    dom.summaryCoverage.textContent = "—";
+    dom.summaryContracts.textContent = "—";
+    dom.summaryExpiries.textContent = "—";
+    dom.summaryUnderlier.textContent = "SPX —";
+    dom.schemaVersion.textContent = "session surface schema —";
+    dom.signConvention.textContent = "participant and dealer side unknown";
+    dom.refreshState.textContent = "Waiting for cutoff-bound session surface";
+  }
+  drawCockpitDynamic();
+  if (loadSessionSurface && app.activeGammaIndex !== previousIndex) {
+    maybeLoadSessionSurfaceForPlayhead();
+  }
+  if (announce) {
+    dom.trendAccessibleSummary.textContent = `${formatMarketTime(new Date(clamped))}; session values are fetched only from the latest validated frame at or before this playhead.`;
+    updateModeChrome();
+  }
+}
+
+function drawTrendDynamic(
+  playheadMs,
+  { announce = false, loadSessionSurface = true } = {},
+) {
+  const trend = app.trend;
+  if (trend?.metadataOnly) {
+    drawMetadataReplayDynamic(playheadMs, { announce, loadSessionSurface });
+    return;
+  }
   const layout = app.trendLayout;
   if (!trend || !layout) return;
   const clamped = Math.max(trend.openMs, Math.min(playheadMs, trend.closeMs));
   app.playheadMs = clamped;
   app.activeSpotIndex = binarySearchLastAtOrBefore(trend.spx.knownMs, clamped);
+  const previousGammaIndex = app.activeGammaIndex;
   const gamma = activeGammaAt(clamped);
   app.activeGammaIndex = gamma.index;
   revealTrendPriceThrough(app.activeSpotIndex);
@@ -2032,15 +3456,19 @@ function drawTrendDynamic(playheadMs, { announce = false } = {}) {
   const activeStatus = gamma.keyframe?.status || (gamma.index >= 0 ? "unavailable" : "unknown");
   setTrendQuality(activeStatus, gamma.keyframe ? null : "Gamma gap");
   dom.replayFrameTime.textContent = formatMarketTime(new Date(clamped));
-  dom.replayFramePosition.textContent = `Gamma ${gamma.index >= 0 ? gamma.index + 1 : 0} / ${trend.gamma.keyframes.length}`;
+  dom.replayFramePosition.textContent = `Keyframe ${gamma.index >= 0 ? gamma.index + 1 : 0} / ${trend.gamma.keyframes.length}`;
   dom.replayTimeline.value = String(Math.floor(clamped / 1_000));
   dom.replayTimeline.setAttribute(
     "aria-valuetext",
-    `${formatMarketTime(new Date(clamped))}, Gamma keyframe ${gamma.index >= 0 ? gamma.index + 1 : 0} of ${trend.gamma.keyframes.length}`,
+    `${formatMarketTime(new Date(clamped))}, validated keyframe ${gamma.index >= 0 ? gamma.index + 1 : 0} of ${trend.gamma.keyframes.length}`,
   );
   if (announce) {
     dom.trendAccessibleSummary.textContent = `${formatMarketTime(new Date(clamped))}，${heldSpot === null ? "SPX 价格不可用" : `SPX ${heldSpot.toFixed(2)}`}，${gammaValue === null ? "Gamma proxy 不可用" : `Gamma proxy ${compactNumber(gammaValue, 2)}`}。图中仅显示回放游标前已知数据；Y 轴以首个已知 SPX 观测的固定窗口设定，不使用未来日内高低点。`;
     renderTrendReplaySummary(heldSpot, gamma.keyframe);
+  }
+  drawCockpitDynamic();
+  if (loadSessionSurface && gamma.index !== previousGammaIndex) {
+    maybeLoadSessionSurfaceForPlayhead();
   }
 }
 
@@ -2721,6 +4149,40 @@ async function normalizeReplayTimeline(raw, sessionDate, expectedProjectionPolic
   };
 }
 
+function buildMetadataReplayClock(timeline) {
+  const keyframes = timeline.frames.map((frame, index) => ({
+    id: frame.id,
+    atMs: frame.at.getTime(),
+    validUntilMs: timeline.frames[index + 1]?.at.getTime() ?? timeline.closeAt.getTime(),
+    status: frame.status,
+    expiry: null,
+    values: [],
+    referenceSpot: null,
+    frameArtifactSha256: frame.artifactSha256,
+  }));
+  return {
+    metadataOnly: true,
+    status: "unknown",
+    sessionDate: app.sessionDate,
+    openMs: timeline.openAt.getTime(),
+    closeMs: timeline.closeAt.getTime(),
+    role: app.expiryRole,
+    weighting: app.weighting,
+    metric: "signed_gamma",
+    spx: {
+      knownMs: keyframes.length ? [keyframes[0].atMs] : [],
+      sourceMs: [],
+      prices: [],
+    },
+    gamma: {
+      keyframes,
+      spotOffsets: [],
+      gaps: [],
+      metricUnit: "proxy units",
+    },
+  };
+}
+
 function renderReplaySessionOptions() {
   dom.replaySessionFilter.replaceChildren();
   if (!app.sessions.length) {
@@ -2742,13 +4204,17 @@ function renderReplaySessionOptions() {
   dom.replaySessionFilter.disabled = app.replayCatalogLoading;
 }
 
+function replayPlaybackStartMs(trend) {
+  if (!trend) return 0;
+  if (trend.metadataOnly) return trend.openMs;
+  return Math.max(trend.openMs, trend.spx.knownMs[0]);
+}
+
 function updateReplayControls() {
   const trend = app.trend;
   const gammaCount = trend?.gamma.keyframes.length || 0;
   const currentSession = app.sessions.find((item) => item.date === app.sessionDate);
-  const playbackStartMs = trend
-    ? Math.max(trend.openMs, trend.spx.knownMs[0])
-    : 0;
+  const playbackStartMs = replayPlaybackStartMs(trend);
   const minSeconds = trend ? Math.ceil(playbackStartMs / 1_000) : 0;
   const maxSeconds = trend ? Math.floor(trend.closeMs / 1_000) : 0;
   const currentSeconds = trend && Number.isFinite(app.playheadMs)
@@ -2783,20 +4249,22 @@ function updateReplayControls() {
   dom.replayPlay.setAttribute("aria-label", app.playing ? "暂停回放" : "播放回放");
   if (trend) {
     dom.replayFrameTime.textContent = formatMarketTime(new Date(app.playheadMs ?? trend.openMs));
-    dom.replayFramePosition.textContent = `Gamma ${Math.max(currentGammaIndex + 1, 0)} / ${gammaCount}`;
+    dom.replayFramePosition.textContent = `Keyframe ${Math.max(currentGammaIndex + 1, 0)} / ${gammaCount}`;
     dom.replayTimelineStart.textContent = formatMarketTime(new Date(trend.openMs), false);
     dom.replayTimelineEnd.textContent = formatMarketTime(new Date(trend.closeMs), false);
   } else {
     dom.replayFrameTime.textContent = "—";
-    dom.replayFramePosition.textContent = "Gamma 0 / 0";
+    dom.replayFramePosition.textContent = "Keyframe 0 / 0";
     dom.replayTimelineStart.textContent = "—";
     dom.replayTimelineEnd.textContent = "—";
   }
   const sessionLabel = currentSession?.label || app.sessionDate || "—";
   dom.replaySessionMeta.textContent = navigationLocked
-    ? `${sessionLabel} · 正在校验回放走势合同`
+    ? `${sessionLabel} · 正在校验回放目录与时间轴`
     : trend
-    ? `${sessionLabel} · ${trend.spx.prices.length} 个 SPX observations · ${gammaCount} 个 Gamma keyframes · Visual ${REPLAY_VISUAL_FPS} fps · hold-last · availability clock 缺失`
+    ? trend.metadataOnly
+      ? `${sessionLabel} · ${gammaCount} validated frame clocks · market values requested only at latest frame ≤ playhead · Visual ${REPLAY_VISUAL_FPS} fps`
+      : `${sessionLabel} · ${trend.spx.prices.length} 个 SPX observations · ${gammaCount} 个 Gamma keyframes · Visual ${REPLAY_VISUAL_FPS} fps · hold-last · availability clock 缺失`
     : `${sessionLabel} · 没有可用的盘中走势`;
   updateModeChrome();
 }
@@ -2821,7 +4289,13 @@ function stopPlayback({ syncFrame = false, announce = true } = {}) {
     drawTrendDynamic(app.playheadMs, { announce });
   }
   updateReplayControls();
-  if (syncFrame) syncScenarioFrameToPlayhead();
+  if (syncFrame && app.trend?.metadataOnly) {
+    app.frameIndex = sessionSurfaceFrameIndex();
+    updateModeQuery(replayFrame());
+    maybeLoadSessionSurfaceForPlayhead({ force: true });
+  } else if (syncFrame) {
+    syncScenarioFrameToPlayhead();
+  }
 }
 
 function schedulePlayback() {
@@ -2875,7 +4349,7 @@ function startPlayback() {
   if (!app.trend || app.trendLoading || app.frameLoading) return;
   cancelPlaybackAnimation();
   dom.scenarioDiagnostic.open = false;
-  const playbackStartMs = Math.max(app.trend.openMs, app.trend.spx.knownMs[0]);
+  const playbackStartMs = replayPlaybackStartMs(app.trend);
   if (!Number.isFinite(app.playheadMs) || app.playheadMs >= app.trend.closeMs) {
     app.playheadMs = playbackStartMs;
     drawTrendDynamic(app.playheadMs, { announce: true });
@@ -2891,11 +4365,16 @@ function startPlayback() {
 function seekReplay(playheadMs, { syncFrame = false, announce = true } = {}) {
   if (!app.trend || !Number.isFinite(playheadMs)) return;
   stopPlayback({ syncFrame: false, announce: false });
-  const playbackStartMs = Math.max(app.trend.openMs, app.trend.spx.knownMs[0]);
+  const playbackStartMs = replayPlaybackStartMs(app.trend);
   app.playheadMs = Math.max(playbackStartMs, Math.min(playheadMs, app.trend.closeMs));
-  drawTrendDynamic(app.playheadMs, { announce });
+  drawTrendDynamic(app.playheadMs, { announce, loadSessionSurface: false });
   updateReplayControls();
-  if (syncFrame) syncScenarioFrameToPlayhead();
+  if (syncFrame) {
+    app.frameIndex = sessionSurfaceFrameIndex();
+    updateModeQuery(replayFrame());
+    syncScenarioFrameToPlayhead();
+    maybeLoadSessionSurfaceForPlayhead({ force: true, interrupt: true });
+  }
 }
 
 function adjacentGammaPlayhead(direction) {
@@ -2928,6 +4407,228 @@ function cancelSnapshotWork() {
   app.requestGeneration += 1;
   if (app.requestController) app.requestController.abort();
   app.requestController = null;
+  cancelSessionSurfaceRequest({ clear: true });
+}
+
+function renderSessionSurfaceChrome(status, reason = "") {
+  if (!isReplayView()) return;
+  const unavailable = status === "unavailable";
+  setStatusPill(
+    unavailable ? "unavailable" : "unknown",
+    unavailable ? "Replay · Session surface unavailable" : "Replay · Loading session surface",
+  );
+  dom.providerChip.textContent = "Provider —";
+  dom.refreshState.textContent = unavailable
+    ? "Cutoff-bound surface unavailable · retrying"
+    : "Loading cutoff-bound session surface";
+  dom.summaryStatus.textContent = unavailable ? "Unavailable · Bounded PIT" : "Loading · Bounded PIT";
+  dom.summaryReasons.textContent = reason || "Waiting for a validated cutoff-bound surface";
+  dom.summaryFreshness.textContent = "Frozen · Bounded PIT";
+  dom.summaryAsOf.textContent = Number.isFinite(app.playheadMs)
+    ? `playhead ${formatReplayAsOf(new Date(app.playheadMs))}`
+    : "as of —";
+  dom.summaryCoverage.textContent = "—";
+  dom.summaryContracts.textContent = "—";
+  dom.summaryExpiries.textContent = `${app.expiryRole.toUpperCase()} · —`;
+  dom.summaryUnderlier.textContent = "SPX —";
+}
+
+function clearSessionSurfaceRetry() {
+  window.clearTimeout(app.sessionSurfaceRetryTimer);
+  app.sessionSurfaceRetryTimer = null;
+  app.sessionSurfaceRetryKey = "";
+  app.sessionSurfaceRetryCount = 0;
+}
+
+function cancelSessionSurfaceRequest({ clear = false } = {}) {
+  app.sessionSurfaceGeneration += 1;
+  if (app.sessionSurfaceController) app.sessionSurfaceController.abort();
+  app.sessionSurfaceController = null;
+  app.sessionSurfaceLoading = false;
+  app.sessionSurfaceRequestKey = "";
+  app.sessionSurfacePending = false;
+  clearSessionSurfaceRetry();
+  dom.cockpitLoading.hidden = true;
+  if (clear) {
+    app.sessionSurface = null;
+    app.sessionSurfaceRenderedKey = "";
+    app.sessionSurfaceKeyframeIndex = -1;
+    app.cockpitHover = null;
+    app.cockpitPriceDomain = null;
+    app.cockpitColorDomains = {};
+    renderCockpitStatic();
+    renderCockpitAudit();
+    renderSessionSurfaceChrome("loading");
+  }
+}
+
+function sessionSurfaceFrameIndexFor(keyframes, playheadMs) {
+  if (!Array.isArray(keyframes) || !keyframes.length || !Number.isFinite(playheadMs)) return -1;
+  return binarySearchLastAtOrBefore(keyframes, playheadMs, (keyframe) => keyframe.atMs);
+}
+
+function sessionSurfaceFrameIndex(playheadMs = app.playheadMs) {
+  return sessionSurfaceFrameIndexFor(app.trend?.gamma.keyframes, playheadMs);
+}
+
+function sessionSurfaceRequestUrl(frame) {
+  const params = new URLSearchParams({
+    at: formatIsoUtc(frame.at),
+    role: app.expiryRole,
+    weighting: app.weighting,
+    bucket_minutes: String(SESSION_SURFACE_BUCKET_MINUTES),
+    price_step: String(SESSION_SURFACE_PRICE_STEP),
+  });
+  return `${REPLAY_SESSIONS_URL}/${encodeURIComponent(app.sessionDate)}/session-surface?${params}`;
+}
+
+function sessionSurfaceRequestDecision({
+  inFlightKey,
+  targetKey,
+  renderedKey,
+  force = false,
+  interrupt = false,
+}) {
+  if (targetKey === inFlightKey) return "skip";
+  if (inFlightKey) return interrupt ? "interrupt" : "queue";
+  if (!force && targetKey === renderedKey) return "skip";
+  return "start";
+}
+
+function shouldResetCockpitDomains(previousAsOfMs, nextAsOfMs) {
+  return Number.isFinite(previousAsOfMs) && Number.isFinite(nextAsOfMs) &&
+    nextAsOfMs < previousAsOfMs;
+}
+
+function scheduleSessionSurfaceRetry(key) {
+  if (app.mode !== "replay" || app.sessionSurfaceRetryKey !== key) return;
+  const delay = SESSION_SURFACE_RETRY_DELAYS_MS[
+    Math.min(app.sessionSurfaceRetryCount, SESSION_SURFACE_RETRY_DELAYS_MS.length - 1)
+  ];
+  app.sessionSurfaceRetryCount += 1;
+  window.clearTimeout(app.sessionSurfaceRetryTimer);
+  app.sessionSurfaceRetryTimer = window.setTimeout(() => {
+    app.sessionSurfaceRetryTimer = null;
+    const index = sessionSurfaceFrameIndex();
+    const frame = index >= 0 ? app.frames[index] : null;
+    const currentKey = frame
+      ? `${app.sessionDate}|${frame.id}|${app.expiryRole}|${app.weighting}`
+      : "";
+    if (currentKey === key && !app.sessionSurfaceController) {
+      void loadSessionSurfaceAtPlayhead({ force: true });
+    }
+  }, delay);
+}
+
+async function loadSessionSurfaceAtPlayhead({ force = false, interrupt = false } = {}) {
+  if (app.mode !== "replay" || !app.trend || !app.sessionDate || !app.frames.length) return;
+  const frameIndex = sessionSurfaceFrameIndex();
+  const frame = app.frames[frameIndex];
+  if (!frame) return;
+  const role = app.expiryRole;
+  const weighting = app.weighting;
+  const key = `${app.sessionDate}|${frame.id}|${role}|${weighting}`;
+  const decision = sessionSurfaceRequestDecision({
+    inFlightKey: app.sessionSurfaceController ? app.sessionSurfaceRequestKey : "",
+    targetKey: key,
+    renderedKey: app.sessionSurfaceRenderedKey,
+    force,
+    interrupt,
+  });
+  if (decision === "skip") return;
+  if (decision === "queue") {
+    // Playback may outrun cold surface builds. Keep exactly one request in
+    // flight and coalesce every crossed keyframe into the latest playhead.
+    app.sessionSurfacePending = true;
+    return;
+  }
+  if (decision === "interrupt") cancelSessionSurfaceRequest({ clear: false });
+  window.clearTimeout(app.sessionSurfaceRetryTimer);
+  app.sessionSurfaceRetryTimer = null;
+  if (app.sessionSurfaceRetryKey !== key) {
+    app.sessionSurfaceRetryKey = key;
+    app.sessionSurfaceRetryCount = 0;
+  }
+  const controller = new AbortController();
+  const generation = ++app.sessionSurfaceGeneration;
+  const abortTimer = window.setTimeout(() => controller.abort(), REPLAY_REQUEST_TIMEOUT_MS);
+  app.sessionSurfaceController = controller;
+  app.sessionSurfaceLoading = true;
+  app.sessionSurfaceRequestKey = key;
+  dom.cockpitLoading.hidden = false;
+  renderSessionSurfaceChrome("loading");
+  try {
+    const response = await fetch(sessionSurfaceRequestUrl(frame), {
+      cache: "no-cache",
+      headers: { Accept: "application/json" },
+      signal: controller.signal,
+    });
+    if (!response.ok) throw new Error(`session_surface_http_${response.status}`);
+    const payload = await response.json();
+    const surface = await normalizeSessionSurface(payload, {
+      at: frame.at,
+      sessionDate: app.sessionDate,
+      role,
+      weighting,
+      bucketMinutes: SESSION_SURFACE_BUCKET_MINUTES,
+      priceStep: SESSION_SURFACE_PRICE_STEP,
+    });
+    if (
+      generation !== app.sessionSurfaceGeneration ||
+      app.mode !== "replay" ||
+      (surface.sessionDate && app.sessionDate !== surface.sessionDate) ||
+      app.expiryRole !== role ||
+      app.weighting !== weighting ||
+      app.sessionSurfaceRequestKey !== key
+    ) return;
+    const previousSurface = app.sessionSurface;
+    if (shouldResetCockpitDomains(previousSurface?.asOfMs, surface.asOfMs)) {
+      app.cockpitPriceDomain = null;
+      app.cockpitColorDomains = {};
+    }
+    app.sessionSurface = surface;
+    app.sessionSurfaceRenderedKey = key;
+    app.sessionSurfaceKeyframeIndex = frameIndex;
+    app.sessionSurfaceLoading = false;
+    dom.cockpitLoading.hidden = true;
+    clearSessionSurfaceRetry();
+    setNotice("");
+    renderCockpitStatic();
+    drawMetadataReplayDynamic(app.playheadMs ?? surface.asOfMs, { announce: true });
+  } catch (error) {
+    if (generation !== app.sessionSurfaceGeneration || controller.signal.aborted) return;
+    app.sessionSurfaceLoading = false;
+    dom.cockpitLoading.hidden = true;
+    const reason = error instanceof Error ? error.message : "session_surface_fetch_failed";
+    setNotice(`Session cockpit unavailable at this keyframe: ${reason}`, true);
+    renderSessionSurfaceChrome("unavailable", reason);
+    scheduleSessionSurfaceRetry(key);
+    if (!app.sessionSurface) renderCockpitStatic();
+  } finally {
+    window.clearTimeout(abortTimer);
+    const ownsRequest = app.sessionSurfaceController === controller;
+    if (ownsRequest) app.sessionSurfaceController = null;
+    if (app.sessionSurfaceRequestKey === key && key !== app.sessionSurfaceRenderedKey) {
+      app.sessionSurfaceRequestKey = "";
+    }
+    if (ownsRequest && generation === app.sessionSurfaceGeneration) {
+      const drainPending = app.sessionSurfacePending;
+      app.sessionSurfacePending = false;
+      if (!drainPending) {
+        app.sessionSurfaceLoading = false;
+        dom.cockpitLoading.hidden = true;
+      } else {
+        Promise.resolve().then(() => maybeLoadSessionSurfaceForPlayhead());
+      }
+    }
+  }
+}
+
+function maybeLoadSessionSurfaceForPlayhead({ force = false, interrupt = false } = {}) {
+  const index = sessionSurfaceFrameIndex();
+  if (index < 0) return;
+  if (!force && index === app.sessionSurfaceKeyframeIndex) return;
+  void loadSessionSurfaceAtPlayhead({ force, interrupt });
 }
 
 function resetReplayNavigationState() {
@@ -2939,6 +4640,8 @@ function resetReplayNavigationState() {
   app.projectionPolicySha256 = "";
   app.timelineSha256 = "";
   app.sourceFingerprint = "";
+  app.timelineOpenMs = null;
+  app.timelineCloseMs = null;
   app.trend = null;
   app.trendLoading = false;
   app.playheadMs = null;
@@ -2947,6 +4650,7 @@ function resetReplayNavigationState() {
   app.lastPaintMs = 0;
   app.timelineStepMinutes = REPLAY_TIMELINE_STEP_MINUTES;
   clearTrendVisuals();
+  cancelSessionSurfaceRequest({ clear: true });
 }
 
 function beginSnapshotRequest(timeoutMs = REQUEST_TIMEOUT_MS) {
@@ -3099,9 +4803,12 @@ async function loadReplayCatalog() {
 async function loadReplayTimeline(sessionDate, { preserveRequestedAt = true } = {}) {
   if (app.mode !== "replay" || app.sessionDate !== sessionDate) return;
   stopPlayback();
+  cancelSessionSurfaceRequest({ clear: true });
   app.frames = [];
   app.frameIndex = -1;
   app.snapshot = null;
+  app.trend = null;
+  app.activeGammaIndex = -1;
   renderReplaySessionOptions();
   updateReplayControls();
   const requestedAtText = preserveRequestedAt
@@ -3129,20 +4836,32 @@ async function loadReplayTimeline(sessionDate, { preserveRequestedAt = true } = 
     app.timelineStepMinutes = timeline.stepMinutes;
     app.timelineSha256 = timeline.timelineSha256;
     app.sourceFingerprint = timeline.sourceFingerprint;
+    app.timelineOpenMs = timeline.openAt.getTime();
+    app.timelineCloseMs = timeline.closeAt.getTime();
     let frameIndex = timeline.frames.length - 1;
+    let requestedPlayheadMs = timeline.closeAt.getTime();
     if (requestedAtText) {
       const requestedAt = parseDate(requestedAtText);
       if (!requestedAt) throw new Error("invalid_requested_replay_at");
-      frameIndex = timeline.frames.findIndex((item) => item.at.getTime() === requestedAt.getTime());
-      if (frameIndex < 0) throw new Error("requested_replay_frame_unavailable");
+      requestedPlayheadMs = Math.max(
+        timeline.openAt.getTime(),
+        Math.min(requestedAt.getTime(), timeline.closeAt.getTime()),
+      );
+      frameIndex = binarySearchLastAtOrBefore(
+        timeline.frames,
+        requestedPlayheadMs,
+        (item) => item.at.getTime(),
+      );
     }
     app.frameIndex = frameIndex;
-    app.playheadMs = requestedAtText
-      ? timeline.frames[frameIndex].at.getTime()
-      : timeline.closeAt.getTime();
+    app.playheadMs = requestedPlayheadMs;
+    app.trend = buildMetadataReplayClock(timeline);
+    app.trendLoading = false;
+    app.activeGammaIndex = -1;
     app.replayCatalogLoading = false;
     updateReplayControls();
     updateModeQuery(requestedAtText ? replayFrame() : null);
+    drawMetadataReplayDynamic(app.playheadMs, { announce: true });
   } catch (error) {
     if (!requestIsCurrent(generation, "replay")) return;
     app.replayCatalogLoading = false;
@@ -3154,101 +4873,7 @@ async function loadReplayTimeline(sessionDate, { preserveRequestedAt = true } = 
     if (app.requestController === controller) app.requestController = null;
   }
   if (app.mode === "replay" && app.sessionDate === sessionDate) {
-    loadReplayTrend();
-  }
-}
-
-function replayTrendRequestUrl() {
-  const role = ["front", "next"].includes(app.expiryRole) ? app.expiryRole : "front";
-  const params = new URLSearchParams({
-    role,
-    weighting: app.weighting,
-    metric: app.metric,
-  });
-  return `${REPLAY_SESSIONS_URL}/${encodeURIComponent(app.sessionDate)}/trend?${params}`;
-}
-
-function renderTrendFailure(error) {
-  const reason = error instanceof Error ? error.message : "replay_trend_fetch_failed";
-  app.trend = null;
-  app.trendLoading = false;
-  clearTrendVisuals();
-  setTrendQuality("unavailable");
-  dom.trendTitle.textContent = "SPX intraday · Gamma proxy unavailable";
-  dom.trendSubtitle.textContent = reason;
-  updateFilters();
-  setStatusPill("unavailable", "Replay trend unavailable");
-  setNotice("无法读取或校验盘中走势合同；主图已清空，不会回退到未验证数据。", true);
-  updateReplayControls();
-}
-
-async function loadReplayTrend({ syncScenario = false } = {}) {
-  if (app.mode !== "replay" || !app.sessionDate || !app.frames.length) return;
-  stopPlayback();
-  app.trendLoading = true;
-  app.trend = null;
-  clearTrendVisuals();
-  dom.trendTitle.textContent = "SPX intraday · Gamma proxy zones";
-  dom.trendSubtitle.textContent = "正在读取并校验紧凑走势 artifact";
-  updateFilters();
-  updateReplayControls();
-  const sessionDate = app.sessionDate;
-  const role = ["front", "next"].includes(app.expiryRole) ? app.expiryRole : "front";
-  const weighting = app.weighting;
-  const metric = app.metric;
-  const { controller, generation, abortTimer } = beginSnapshotRequest(REPLAY_REQUEST_TIMEOUT_MS);
-  let shouldSyncScenario = false;
-  try {
-    const response = await fetch(replayTrendRequestUrl(), {
-      cache: "no-cache",
-      headers: { Accept: "application/json" },
-      signal: controller.signal,
-    });
-    if (!response.ok) throw new Error(`replay_trend_http_${response.status}`);
-    const payload = await response.json();
-    const trend = await normalizeReplayTrend(payload, {
-      sessionDate,
-      role,
-      weighting,
-      metric,
-      projectionPolicySha256: app.projectionPolicySha256,
-      timelineSha256: app.timelineSha256,
-      sourceFingerprint: app.sourceFingerprint,
-      frames: app.frames,
-    });
-    if (
-      !requestIsCurrent(generation, "replay") ||
-      app.sessionDate !== sessionDate ||
-      app.expiryRole !== role ||
-      app.weighting !== weighting ||
-      app.metric !== metric
-    ) return;
-    app.trend = trend;
-    app.trendLoading = false;
-    const requestedPlayhead = Number.isFinite(app.playheadMs) ? app.playheadMs : trend.openMs;
-    app.playheadMs = Math.max(trend.openMs, Math.min(requestedPlayhead, trend.closeMs));
-    dom.trendTitle.textContent = `SPX intraday · ${METRICS[metric].label} proxy zones`;
-    dom.trendSubtitle.textContent = `${role.toUpperCase()} ${trend.gamma.keyframes[0]?.expiry || "—"} · ${WEIGHTINGS[weighting]} · X: session time · Y: absolute SPX · Gamma sample-and-hold only within valid_until`;
-    dom.trendCadence.textContent = `Visual ${REPLAY_VISUAL_FPS} fps · SPX observed ~1–2s · Gamma keyframes ~${app.timelineStepMinutes}m · hold-last · first-observation fixed axis · color intensity normalized per keyframe · not market-data FPS`;
-    if (!app.snapshot && !dom.scenarioDiagnostic.open) {
-      dom.surfaceTitle.textContent = "Scenario diagnostic · full frame not loaded";
-      dom.surfaceSubtitle.textContent = "展开后按当前 Gamma keyframe 异步加载并校验完整 Spot × Forward-time frame";
-    }
-    renderTrendStatic();
-    updateFilters();
-    updateReplayControls();
-    const exactUrlFrame = app.frames.find((frame) => frame.at.getTime() === app.playheadMs);
-    updateModeQuery(exactUrlFrame || null);
-    shouldSyncScenario = syncScenario;
-  } catch (error) {
-    if (!requestIsCurrent(generation, "replay")) return;
-    renderTrendFailure(error);
-  } finally {
-    window.clearTimeout(abortTimer);
-    if (app.requestController === controller) app.requestController = null;
-  }
-  if (shouldSyncScenario && app.mode === "replay" && app.sessionDate === sessionDate) {
-    syncScenarioFrameToPlayhead();
+    maybeLoadSessionSurfaceForPlayhead({ force: true });
   }
 }
 
@@ -3283,6 +4908,7 @@ function renderScenarioFetchFailure(error) {
 function syncScenarioFrameToPlayhead() {
   if (
     app.mode !== "replay" ||
+    app.trend?.metadataOnly ||
     app.playing ||
     app.frameLoading ||
     !dom.scenarioDiagnostic.open ||
@@ -3445,20 +5071,77 @@ dom.expiryFilter.addEventListener("change", () => {
   }
   renderSummary();
   renderVisuals();
-  if (isReplayView()) loadReplayTrend();
+  if (isReplayView()) {
+    if (app.trend) app.trend.role = app.expiryRole;
+    cancelSessionSurfaceRequest({ clear: true });
+    maybeLoadSessionSurfaceForPlayhead({ force: true });
+  }
 });
 dom.weightingFilter.addEventListener("change", () => {
   app.weighting = dom.weightingFilter.value;
   renderSummary();
   renderVisuals();
-  if (isReplayView()) loadReplayTrend();
+  if (isReplayView()) {
+    if (app.trend) app.trend.weighting = app.weighting;
+    cancelSessionSurfaceRequest({ clear: true });
+    maybeLoadSessionSurfaceForPlayhead({ force: true });
+  }
 });
 dom.metricFilter.addEventListener("change", () => {
   app.metric = dom.metricFilter.value;
   renderSummary();
   renderVisuals();
-  if (isReplayView()) loadReplayTrend();
 });
+
+function setAuditDrawer(open) {
+  const visible = open === true;
+  dom.cockpitAuditDrawer.hidden = !visible;
+  dom.cockpitAuditScrim.hidden = !visible;
+  dom.cockpitAuditToggle.setAttribute("aria-expanded", String(visible));
+  document.body.classList.toggle("audit-open", visible);
+  if (visible) renderCockpitAudit();
+}
+
+dom.cockpitAuditToggle.addEventListener("click", () => {
+  setAuditDrawer(dom.cockpitAuditDrawer.hidden);
+});
+dom.cockpitAuditClose.addEventListener("click", () => setAuditDrawer(false));
+dom.cockpitAuditScrim.addEventListener("click", () => setAuditDrawer(false));
+
+for (const panel of ["gamma", "strike", "charm"]) {
+  const overlay = cockpitElements(panel).overlay;
+  overlay.addEventListener("pointermove", (event) => cockpitPointerMove(panel, event));
+  overlay.addEventListener("pointerleave", clearCockpitHover);
+  if (panel !== "strike") {
+    overlay.addEventListener("click", (event) => {
+      const surface = app.sessionSurface;
+      const layout = app.cockpitLayouts[panel];
+      if (!surface || !layout) return;
+      const rect = overlay.getBoundingClientRect();
+      const x = event.clientX - rect.left;
+      if (x < layout.plotLeft || x > layout.plotRight) return;
+      const at = sessionXToTime(layout, surface.sessionStartMs, surface.sessionEndMs, x);
+      seekReplay(at, { syncFrame: true, announce: true });
+    });
+  }
+  overlay.addEventListener("keydown", (event) => {
+    if (!app.trend) return;
+    if (event.key === " " || event.key === "Spacebar") {
+      event.preventDefault();
+      if (app.playing) stopPlayback({ syncFrame: true, announce: true });
+      else startPlayback();
+      return;
+    }
+    const delta = event.key === "ArrowLeft" ? -60_000 : event.key === "ArrowRight" ? 60_000 : 0;
+    if (delta) {
+      event.preventDefault();
+      seekReplay((app.playheadMs ?? app.trend.openMs) + delta, {
+        syncFrame: true,
+        announce: true,
+      });
+    }
+  });
+}
 dom.heatmap.addEventListener("pointermove", (event) => {
   if (app.chartHit) tooltipForHit(app.chartHit, event);
 });
@@ -3500,7 +5183,7 @@ dom.trendOverlay.addEventListener("keydown", (event) => {
     event.preventDefault();
     seekReplay(
       event.key === "Home"
-        ? Math.max(app.trend.openMs, app.trend.spx.knownMs[0])
+        ? replayPlaybackStartMs(app.trend)
         : app.trend.closeMs,
       {
         syncFrame: true,
@@ -3525,17 +5208,26 @@ window.addEventListener("popstate", () => {
   setViewMode(initialModeFromQuery(), { syncQuery: false });
 });
 
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !dom.cockpitAuditDrawer.hidden) setAuditDrawer(false);
+});
+
 if ("ResizeObserver" in window) {
   const resizeObserver = new ResizeObserver(() => {
     if (app.snapshot && dom.scenarioDiagnostic.open) window.requestAnimationFrame(renderVisuals);
     if (app.trend) window.requestAnimationFrame(renderTrendStatic);
+    if (app.sessionSurface) window.requestAnimationFrame(renderCockpitStatic);
   });
   resizeObserver.observe(dom.heatmapStage);
   resizeObserver.observe(dom.trendStage);
+  resizeObserver.observe(dom.cockpitGammaStage);
+  resizeObserver.observe(dom.cockpitStrikeStage);
+  resizeObserver.observe(dom.cockpitCharmStage);
 } else {
   window.addEventListener("resize", () => {
     if (app.snapshot && dom.scenarioDiagnostic.open) window.requestAnimationFrame(renderVisuals);
     if (app.trend) window.requestAnimationFrame(renderTrendStatic);
+    if (app.sessionSurface) window.requestAnimationFrame(renderCockpitStatic);
   });
 }
 
@@ -3548,7 +5240,18 @@ document.addEventListener("visibilitychange", () => {
 if (isObject(globalThis.__SPX_SPARK_TEST_HOOK__)) {
   Object.assign(globalThis.__SPX_SPARK_TEST_HOOK__, {
     canonicalReplaySha256,
+    expandOnlyDomain,
+    missingRangeAppliesToPanel,
+    normalizeSessionSurface,
     normalizeReplayTrend,
+    robustDomain,
+    sessionSurfaceFrameIndexFor,
+    sessionSurfaceRequestDecision,
+    sessionPriceToY,
+    sessionTimeToX,
+    sessionXToTime,
+    sessionYToPrice,
+    shouldResetCockpitDomains,
   });
 }
 

@@ -58,6 +58,14 @@ from spx_spark.surface_replay_trend import (
     TrendSelector,
     materialize_trend,
 )
+from spx_spark.surface_replay_session import (
+    ReplaySessionSurfaceBusyError,
+    ReplaySessionSurfaceCacheError,
+    SESSION_SURFACE_LOCK_TIMEOUT_SECONDS,
+    SessionSurfaceBuildCache,
+    SessionSurfaceSelector,
+    materialize_session_surface,
+)
 
 
 SERVICE_KIND = "spxw_surface_replay_catalog"
@@ -68,24 +76,11 @@ MAX_CACHE_ARTIFACT_BYTES = 32 * 1024 * 1024
 GENERATION_LOCK_TIMEOUT_SECONDS = 2.0
 
 _SESSION_DATE_RE = re.compile(r"\A\d{4}-\d{2}-\d{2}\Z")
-
 __all__ = [
-    "APIResponse",
-    "DEFAULT_BIND_HOST",
-    "DEFAULT_BIND_PORT",
-    "DEFAULT_FRAME_MINUTES",
-    "MAX_REQUEST_TARGET_BYTES",
-    "ReplayAPI",
-    "ReplayBusyError",
-    "ReplayCacheError",
-    "ReplayCatalog",
-    "ReplayHTTPServer",
-    "ReplayRequestError",
-    "ReplaySession",
-    "ReplayUnixHTTPServer",
-    "main",
-    "parse_args",
-    "run",
+    "APIResponse", "DEFAULT_BIND_HOST", "DEFAULT_BIND_PORT", "DEFAULT_FRAME_MINUTES",
+    "MAX_REQUEST_TARGET_BYTES", "ReplayAPI", "ReplayBusyError", "ReplayCacheError",
+    "ReplayCatalog", "ReplayHTTPServer", "ReplayRequestError", "ReplaySession",
+    "ReplayUnixHTTPServer", "main", "parse_args", "run",
 ]
 
 
@@ -129,6 +124,8 @@ class ReplayCatalog:
         # one uncached build active so concurrent browser prefetches cannot exhaust RAM.
         self._generation_lock = threading.BoundedSemaphore(value=1)
         self._trend_lock = threading.BoundedSemaphore(value=1)
+        self._session_surface_lock = threading.BoundedSemaphore(value=1)
+        self._session_surface_build_cache = SessionSurfaceBuildCache()
         self._scan_lock = threading.Lock()
 
     @property
@@ -601,6 +598,7 @@ class ReplayCatalog:
         requested: datetime,
         source_paths: tuple[Path, ...],
         source_fingerprint: str,
+        verified_source_hashes: Mapping[str, str] | None = None,
     ) -> dict[str, object]:
         if self._source_fingerprint(source_paths) != source_fingerprint:
             raise ReplayCacheError("replay_cache_source_context_changed")
@@ -667,6 +665,10 @@ class ReplayCatalog:
             str(source_path.relative_to(self.data_root)): source_path
             for source_path in source_paths
         }
+        if verified_source_hashes is not None and set(verified_source_hashes) != set(
+            current_paths
+        ):
+            raise ReplayCacheError("replay_cache_verified_source_context_invalid")
         for relative_path in source_files:
             source_path = current_paths.get(relative_path)
             expected_hash = parquet_hashes.get(relative_path)
@@ -676,7 +678,15 @@ class ReplayCatalog:
                 or not re.fullmatch(r"[0-9a-f]{64}", expected_hash)
             ):
                 raise ReplayCacheError("replay_cache_source_file_mismatch")
-            actual_source_hash = _sha256(source_path)
+            actual_source_hash = (
+                verified_source_hashes.get(relative_path)
+                if verified_source_hashes is not None
+                else _sha256(source_path)
+            )
+            if not isinstance(actual_source_hash, str) or not re.fullmatch(
+                r"[0-9a-f]{64}", actual_source_hash
+            ):
+                raise ReplayCacheError("replay_cache_verified_source_hash_invalid")
             if not hmac.compare_digest(expected_hash, actual_source_hash):
                 raise ReplayCacheError("replay_cache_source_hash_mismatch")
         if self._source_fingerprint(source_paths) != source_fingerprint:
@@ -745,6 +755,98 @@ class ReplayCatalog:
             raise ReplayCacheError(str(exc)) from exc
         finally:
             self._trend_lock.release()
+
+    def session_surface(
+        self,
+        session_date: date,
+        *,
+        at: datetime,
+        role: str,
+        weighting: str,
+        bucket_minutes: int,
+        price_step: float,
+    ) -> dict[str, object]:
+        selector = SessionSurfaceSelector(
+            role=role,
+            weighting=weighting,
+            bucket_minutes=bucket_minutes,
+            price_step=price_step,
+        )
+        requested = as_utc(at)
+        if requested.microsecond:
+            raise ReplayRequestError("replay_at_subsecond_not_supported")
+        if requested.astimezone(ET).date() != session_date:
+            raise ReplayRequestError("replay_at_session_mismatch")
+        session = self.get_session(session_date)
+        if not as_utc(session.open_at) <= requested <= as_utc(session.close_at):
+            raise ReplayRequestError("replay_at_outside_session")
+        frames = self.viable_frames(session_date)
+        source_paths = self._relevant_paths(session)
+        source_fingerprint = self._source_fingerprint(source_paths)
+        context = TrendContext(
+            data_root=self.data_root,
+            session_date=session_date,
+            open_at=session.open_at,
+            close_at=session.close_at,
+            close_grace_elapsed_at=self._close_grace_elapsed_at(session),
+            close_grace_policy=SESSION_CLOSE_GRACE_POLICY,
+            close_grace_seconds=SESSION_CLOSE_GRACE_SECONDS,
+            frame_minutes=self.frame_minutes,
+            lookback_seconds=self.lookback_seconds,
+            timeline_policy_version=TIMELINE_POLICY_VERSION,
+            projection_policy=self.projection_policy,
+            projection_policy_sha256=self.projection_policy_sha256,
+            source_paths=source_paths,
+            source_fingerprint=source_fingerprint,
+            frames=frames,
+        )
+
+        def current_source_fingerprint() -> str:
+            current_session = self.get_session(session_date)
+            return self._source_fingerprint(self._relevant_paths(current_session))
+
+        verified_source_hashes: dict[str, str] | None = None
+
+        def session_frame_loader(frame_at: datetime) -> dict[str, object]:
+            nonlocal verified_source_hashes
+            cache_path = self._cache_path(
+                frame_at,
+                source_fingerprint=source_fingerprint,
+            )
+            if not cache_path.is_file():
+                return self._ensure_materialized_frame(frame_at)
+            if verified_source_hashes is None:
+                verified_source_hashes = {
+                    str(path.relative_to(self.data_root)): _sha256(path)
+                    for path in source_paths
+                }
+            return self._read_cached_frame(
+                cache_path,
+                requested=frame_at,
+                source_paths=source_paths,
+                source_fingerprint=source_fingerprint,
+                verified_source_hashes=verified_source_hashes,
+            )
+
+        if not self._session_surface_lock.acquire(
+            timeout=SESSION_SURFACE_LOCK_TIMEOUT_SECONDS
+        ):
+            raise ReplayBusyError("replay_session_surface_generation_busy")
+        try:
+            return materialize_session_surface(
+                context=context,
+                as_of=requested,
+                selector=selector,
+                frame_loader=session_frame_loader,
+                current_source_fingerprint=current_source_fingerprint,
+                build_cache=self._session_surface_build_cache,
+            )
+        except ReplaySessionSurfaceBusyError as exc:
+            raise ReplayBusyError("replay_session_surface_generation_busy") from exc
+        except ReplaySessionSurfaceCacheError as exc:
+            raise ReplayCacheError(str(exc)) from exc
+        finally:
+            self._session_surface_lock.release()
 
     def sessions_payload(self) -> dict[str, object]:
         sessions = self.discover_sessions()

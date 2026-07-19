@@ -28,13 +28,28 @@ if [[ -z "$session_date" ]]; then
   exit 0
 fi
 
-curl --silent --show-error --fail --max-time 90 \
-  --unix-socket "$SOCKET_PATH" \
-  "http://localhost/api/v1/replay/sessions/$session_date/timeline?step_minutes=5" \
-  >/dev/null
+timeline_json="$(
+  curl --silent --show-error --fail --max-time 90 \
+    --unix-socket "$SOCKET_PATH" \
+    "http://localhost/api/v1/replay/sessions/$session_date/timeline?step_minutes=5"
+)"
+mapfile -t frame_times < <(
+  "$PYTHON" -c \
+    'import json,sys; print("\n".join(row["at"] for row in json.load(sys.stdin).get("frames", [])))' \
+    <<<"$timeline_json"
+)
 
-curl --silent --show-error --fail --max-time 300 \
-  --unix-socket "$SOCKET_PATH" \
-  "http://localhost/api/v1/replay/sessions/$session_date/trend?role=front&weighting=oi_weighted&metric=signed_gamma" \
-  >/dev/null
-printf 'warmed replay catalog and trend artifact for %s\n' "$session_date"
+for frame_at in "${frame_times[@]}"; do
+  curl --silent --show-error --fail --max-time 90 \
+    --unix-socket "$SOCKET_PATH" \
+    --get \
+    --data-urlencode "at=$frame_at" \
+    --data-urlencode "role=front" \
+    --data-urlencode "weighting=oi_weighted" \
+    --data-urlencode "bucket_minutes=5" \
+    --data-urlencode "price_step=5" \
+    "http://localhost/api/v1/replay/sessions/$session_date/session-surface" \
+    >/dev/null
+done
+printf 'warmed replay catalog and %s default session surfaces for %s\n' \
+  "${#frame_times[@]}" "$session_date"

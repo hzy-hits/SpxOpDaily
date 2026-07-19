@@ -3,245 +3,301 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta name="color-scheme" content="light">
+    <meta name="color-scheme" content="dark light">
     <meta name="robots" content="noindex,nofollow,noarchive">
-    <title>SPXW Exposure Surface</title>
+    <title>SPXW Session Cockpit</title>
     <link rel="stylesheet" href="styles.css">
     <script src="app.js" defer></script>
   </head>
   <body>
-    <main class="shell">
-      <header class="page-header">
-        <div>
-          <p class="eyebrow">SPXW · Front / Next Expiry</p>
-          <h1>Exposure Surface</h1>
-          <p id="page-lede" class="lede">标的价格 × 时间的期权暴露地形。所有值均来自只读生产快照，不提供下单入口。</p>
+    <main class="shell cockpit-shell">
+      <header class="cockpit-topbar">
+        <div class="cockpit-brand">
+          <span class="brand-mark" aria-hidden="true">SPX</span>
+          <div>
+            <p class="eyebrow">SPXW · FRONT / NEXT EXPIRY</p>
+            <h1>Session Cockpit</h1>
+          </div>
         </div>
-        <div class="header-state" aria-live="polite">
+        <p id="page-lede" class="lede">同一交易时钟下的 SPX 价格、Gamma / Charm 暴露代理与 strike 结构。</p>
+        <div class="cockpit-head-state" aria-live="polite">
+          <span class="proxy-badge" title="Calls positive / puts negative; dealer position is not inferred">PROXY</span>
+          <span id="provider-chip" class="provider-chip" title="Validated data provider">Provider —</span>
           <span id="status-pill" class="status-pill status-loading">正在连接</span>
-          <span id="refresh-state" class="refresh-state">等待首个快照</span>
+          <span id="refresh-state" class="refresh-state">等待数据</span>
+          <button id="cockpit-audit-toggle" class="audit-button" type="button" aria-controls="cockpit-audit-drawer" aria-expanded="false">Data / Audit</button>
         </div>
       </header>
 
-      <section id="replay-banner" class="replay-banner" hidden aria-live="polite">
-        <strong>HISTORICAL REPLAY</strong>
-        <span id="replay-banner-label">Replay · waiting for a session</span>
-        <span class="replay-banner-tag">Frozen</span>
-        <span class="replay-banner-tag">Not live</span>
-        <span class="replay-banner-tag replay-banner-warning">Bounded PIT</span>
-        <span class="replay-banner-tag replay-banner-warning">Availability clock missing</span>
-        <small id="replay-banner-as-of">Select a bounded-PIT frame · received/source clock cutoff · availability timing is not proven</small>
-      </section>
-
-      <section class="summary-grid" aria-label="快照摘要">
-        <article class="summary-card">
-          <span class="summary-label">数据状态</span>
-          <strong id="summary-status">—</strong>
-          <small id="summary-reasons">尚未加载</small>
-        </article>
-        <article class="summary-card">
-          <span class="summary-label">新鲜度</span>
-          <strong id="summary-freshness">—</strong>
-          <small id="summary-as-of">as of —</small>
-        </article>
-        <article class="summary-card">
-          <span class="summary-label">覆盖率</span>
-          <strong id="summary-coverage">—</strong>
-          <small id="summary-contracts">可用合约 —</small>
-        </article>
-        <article class="summary-card">
-          <span class="summary-label">到期结构</span>
-          <strong id="summary-expiries">—</strong>
-          <small id="summary-underlier">SPX —</small>
-        </article>
-      </section>
-
-      <section id="data-notice" class="data-notice" hidden aria-live="polite"></section>
-
-      <section class="control-bar" aria-label="曲面过滤器">
-        <label class="mode-control">
-          <span>View</span>
-          <select id="mode-filter">
-            <option value="live">Live · production</option>
-            <option value="replay">Replay · sessions</option>
-          </select>
-        </label>
-        <label class="expiry-control">
-          <span>Expiration</span>
-          <select id="expiry-filter" disabled>
-            <option value="">无可用到期日</option>
-          </select>
-        </label>
-        <label>
-          <span>Weighting</span>
-          <select id="weighting-filter" disabled>
-            <option value="oi_weighted">OI · Signed proxy</option>
-            <option value="volume_weighted">Volume · Activity proxy</option>
-          </select>
-        </label>
-        <label>
-          <span>Metric</span>
-          <select id="metric-filter" disabled>
-            <option value="signed_gamma">Signed gamma</option>
-            <option value="gross_gamma">Gross gamma</option>
-            <option value="charm">Charm</option>
-            <option value="vanna">Vanna</option>
-          </select>
-        </label>
-      </section>
-
-      <section id="trend-panel" class="panel trend-panel" aria-labelledby="trend-title" hidden>
-        <header class="panel-header trend-header">
-          <div>
-            <p class="panel-kicker">SPX INTRADAY · GAMMA PROXY REGIME</p>
-            <h2 id="trend-title">SPX intraday · Gamma proxy zones</h2>
-            <p id="trend-subtitle">等待历史 SPX 走势与 Gamma keyframes</p>
-          </div>
-          <div class="trend-head-state">
-            <div class="trend-readouts">
-              <strong id="trend-spot">SPX —</strong>
-              <span id="trend-regime">Γ proxy —</span>
-            </div>
-            <div id="trend-quality" class="quality-chip">AVAILABLE —</div>
-          </div>
-        </header>
-
-        <div id="trend-stage" class="trend-stage">
-          <canvas id="trend-base" aria-hidden="true"></canvas>
-          <canvas id="trend-overlay" role="img" tabindex="0" aria-label="SPX 盘中价格与 Gamma proxy 区间"></canvas>
-          <div id="trend-tooltip" class="chart-tooltip" hidden></div>
-          <div id="trend-empty" class="chart-empty">
-            <strong>暂无可用盘中走势</strong>
-            <span>仅在通过回放合同、时钟与自哈希验证后绘制。</span>
-          </div>
-        </div>
-
-        <div class="trend-legend" aria-label="SPX 盘中走势图例">
-          <span><i class="trend-line-price"></i>SPX observed</span>
-          <span><i class="legend-swatch positive"></i><b>+</b> Gamma proxy</span>
-          <span><i class="legend-swatch negative hatched"></i><b>−</b> Gamma proxy</span>
-          <span><i class="legend-line ridge"></i>Zero ridge</span>
-          <span><i class="legend-swatch missing"></i>Gap / unavailable</span>
-          <span id="trend-cadence" class="trend-cadence">Visual 30 fps · SPX observed ~1–2s · Gamma keyframes ~5m · hold-last · first-observation fixed axis · not market-data FPS</span>
-        </div>
-        <p id="trend-accessible-summary" class="sr-only" aria-live="polite"></p>
-
-        <section id="replay-console" class="replay-console trend-transport" hidden aria-label="历史回放控制器">
-          <div class="replay-console-head">
-            <div>
-              <p class="panel-kicker">SESSION REPLAY</p>
-              <h2>Continuous session timeline</h2>
-              <p id="replay-session-meta">正在读取可回放交易日</p>
-            </div>
-            <label class="replay-session-picker">
-              <span>Session date</span>
-              <select id="replay-session-filter" disabled>
-                <option value="">正在加载</option>
-              </select>
-            </label>
-          </div>
-          <div class="replay-transport">
-            <div class="replay-buttons" aria-label="回放播放控制">
-              <button id="replay-previous" type="button" disabled aria-label="上一个 Gamma keyframe" title="上一个 Gamma keyframe">←</button>
-              <button id="replay-play" type="button" class="replay-play" disabled aria-label="播放回放">▶ <span>播放</span></button>
-              <button id="replay-next" type="button" disabled aria-label="下一个 Gamma keyframe" title="下一个 Gamma keyframe">→</button>
-            </div>
-            <label class="replay-speed-picker">
-              <span>Speed</span>
-              <select id="replay-speed" disabled>
-                <option value="1">1×</option>
-                <option value="2">2×</option>
-                <option value="4">4×</option>
-              </select>
-            </label>
-            <div class="replay-time-output">
-              <strong id="replay-frame-time">—</strong>
-              <span id="replay-frame-position">Gamma 0 / 0</span>
-            </div>
-          </div>
-          <label class="replay-timeline-label" for="replay-timeline">
-            <span>Session clock · one-second seek</span>
-            <input id="replay-timeline" type="range" min="0" max="0" step="1" value="0" disabled>
+      <section class="cockpit-toolbar" aria-label="Session cockpit controls">
+        <div class="toolbar-filters">
+          <label class="compact-control mode-control">
+            <span>View</span>
+            <select id="mode-filter">
+              <option value="live">Live</option>
+              <option value="replay">Replay</option>
+            </select>
           </label>
-          <div class="replay-timeline-ends" aria-hidden="true">
-            <span id="replay-timeline-start">—</span>
-            <span id="replay-timeline-end">—</span>
+          <label class="compact-control replay-session-picker">
+            <span>Session</span>
+            <select id="replay-session-filter" disabled>
+              <option value="">Loading</option>
+            </select>
+          </label>
+          <label class="compact-control expiry-control">
+            <span>Expiration</span>
+            <select id="expiry-filter" disabled>
+              <option value="">Unavailable</option>
+            </select>
+          </label>
+          <label class="compact-control">
+            <span>Weighting</span>
+            <select id="weighting-filter" disabled>
+              <option value="oi_weighted">OI proxy</option>
+              <option value="volume_weighted">Volume activity</option>
+            </select>
+          </label>
+          <label class="compact-control position-mode-control">
+            <span>Position Mode</span>
+            <select id="position-mode-filter" aria-label="Position mode">
+              <option value="proxy">OI / Volume Proxy</option>
+              <option value="participant" disabled>Participant (unavailable)</option>
+            </select>
+          </label>
+          <label class="compact-control metric-engine-control" hidden>
+            <span>Metric engine</span>
+            <select id="metric-filter" disabled>
+              <option value="signed_gamma">Signed gamma</option>
+              <option value="gross_gamma">Gross gamma</option>
+              <option value="charm">Charm</option>
+              <option value="vanna">Vanna</option>
+            </select>
+          </label>
+        </div>
+
+        <section id="replay-console" class="compact-transport" hidden aria-label="历史回放控制器">
+          <div class="replay-buttons" aria-label="回放播放控制">
+            <button id="replay-previous" type="button" disabled aria-label="上一个 validated keyframe" title="Previous validated keyframe">←</button>
+            <button id="replay-play" type="button" class="replay-play" disabled aria-label="播放回放">▶ 播放</button>
+            <button id="replay-next" type="button" disabled aria-label="下一个 validated keyframe" title="Next validated keyframe">→</button>
+          </div>
+          <label class="compact-control replay-speed-picker">
+            <span>Speed</span>
+            <select id="replay-speed" disabled>
+              <option value="1">1×</option>
+              <option value="2">2×</option>
+              <option value="4">4×</option>
+            </select>
+          </label>
+          <div class="replay-time-output">
+            <strong id="replay-frame-time">—</strong>
+            <span id="replay-frame-position">Keyframe 0 / 0</span>
           </div>
         </section>
       </section>
 
-      <details id="scenario-diagnostic" class="panel scenario-panel">
-        <summary class="panel-header scenario-summary">
-          <div>
-            <p class="panel-kicker">SECONDARY DIAGNOSTIC · SPXW CHAIN EXPOSURE PROXY</p>
-            <h2 id="surface-title">Scenario surface · Spot × Forward time</h2>
-            <p id="surface-subtitle">等待生产快照</p>
-          </div>
-          <div id="surface-quality" class="quality-chip">—</div>
-        </summary>
+      <section id="data-notice" class="data-notice cockpit-notice" hidden aria-live="polite"></section>
 
-        <div class="scenario-body">
-          <div id="heatmap-stage" class="heatmap-stage">
-            <canvas id="heatmap" role="img" aria-label="SPXW 情景暴露热图"></canvas>
-            <div id="heatmap-tooltip" class="chart-tooltip" hidden></div>
-            <div id="heatmap-empty" class="chart-empty">
-              <strong>暂无可用曲面</strong>
-              <span>收到 ready 或 degraded 的有效矩形网格后才会绘制。</span>
-            </div>
-          </div>
-
-          <div id="chart-legend" class="chart-legend" aria-label="图例">
-            <span id="legend-negative"><i class="legend-swatch negative"></i><b>−</b> 负暴露</span>
-            <span id="legend-neutral"><i class="legend-swatch neutral"></i><b>0</b> 中性</span>
-            <span id="legend-positive"><i class="legend-swatch positive"></i><b>+</b> 正暴露</span>
-            <span id="legend-ridge"><i class="legend-line ridge"></i>Zero ridge</span>
-            <span id="legend-peak"><i class="legend-marker peak"></i>正峰</span>
-            <span id="legend-trough"><i class="legend-marker trough"></i>负谷</span>
-            <span id="legend-domain" class="legend-domain">色域 —</span>
-          </div>
-          <p id="chart-accessible-summary" class="sr-only" aria-live="polite"></p>
-        </div>
-      </details>
-
-      <section class="detail-grid">
-        <article class="panel ladder-panel" aria-labelledby="ladder-title">
-          <header class="panel-header compact">
-            <div>
-              <p class="panel-kicker">CURRENT SPOT SLICE</p>
-              <h2 id="ladder-title">Strike ladder</h2>
-              <p id="ladder-subtitle">等待真实 strike ladder</p>
-            </div>
-          </header>
-          <div id="ladder-wrap" class="ladder-wrap">
-            <svg id="ladder-chart" role="img" aria-label="按执行价排列的期权暴露"></svg>
-            <div id="ladder-empty" class="detail-empty">快照未提供可用的 strike ladder。</div>
-          </div>
-        </article>
-
-        <article class="panel extrema-panel" aria-labelledby="extrema-title">
-          <header class="panel-header compact">
-            <div>
-              <p class="panel-kicker">SURFACE EXTREMA</p>
-              <h2 id="extrema-title">Peaks / Troughs</h2>
-              <p id="extrema-subtitle">按所选指标绝对幅度排序；数值不代表已知 dealer 实仓方向。</p>
-            </div>
-          </header>
-          <div class="extrema-columns">
-            <section>
-              <h3 id="peak-heading"><span class="extrema-symbol positive">+</span> Positive peaks</h3>
-              <ol id="peak-list" class="extrema-list"><li class="empty-row">暂无数据</li></ol>
-            </section>
-            <section>
-              <h3 id="trough-heading"><span class="extrema-symbol negative">−</span> Negative troughs</h3>
-              <ol id="trough-list" class="extrema-list"><li class="empty-row">暂无数据</li></ol>
-            </section>
-          </div>
-        </article>
+      <section id="cockpit-timeline" class="cockpit-timeline" hidden aria-label="Session clock">
+        <span id="replay-timeline-start">—</span>
+        <label for="replay-timeline">
+          <span class="sr-only">Session clock · one-second seek</span>
+          <input id="replay-timeline" type="range" min="0" max="0" step="1" value="0" disabled>
+        </label>
+        <span id="replay-timeline-end">—</span>
       </section>
 
-      <footer class="page-footer">
-        <p>来源：<code id="source-file">spxw_surface_dashboard.json</code> · <span id="source-mode">5 秒只读刷新</span> · <span id="schema-version">schema —</span></p>
-        <p>OI / volume 暴露为模型代理；<span id="sign-convention">dealer position sign unknown</span>。</p>
+      <section id="session-cockpit" class="session-cockpit" hidden aria-label="SPXW session exposure cockpit">
+        <article class="cockpit-panel cockpit-panel-gamma" data-cockpit-panel="gamma">
+          <header class="cockpit-panel-header">
+            <div>
+              <p class="panel-kicker">TIME × SPX</p>
+              <h2>Gamma Surface <span class="proxy-inline">Proxy</span></h2>
+            </div>
+            <div class="panel-readout">
+              <strong id="cockpit-gamma-value">—</strong>
+              <span id="cockpit-gamma-threshold">neutral ±—</span>
+            </div>
+          </header>
+          <div id="cockpit-gamma-stage" class="cockpit-canvas-stage">
+            <canvas id="cockpit-gamma-base" aria-hidden="true"></canvas>
+            <canvas id="cockpit-gamma-overlay" class="cockpit-overlay" role="img" tabindex="0" aria-label="Gamma proxy surface with SPX OHLC candles"></canvas>
+            <div id="cockpit-gamma-empty" class="cockpit-panel-empty">Waiting for Gamma session surface</div>
+          </div>
+          <footer class="cockpit-panel-legend">
+            <span><i class="legend-swatch negative"></i>− proxy</span>
+            <span><i class="legend-swatch neutral"></i>neutral</span>
+            <span><i class="legend-swatch positive"></i>+ proxy</span>
+            <span class="extrema-marker-key positive">⊕ peak</span>
+            <span class="extrema-marker-key negative">⊖ trough</span>
+            <span><i class="legend-candle"></i>SPX OHLC</span>
+            <span id="cockpit-gamma-domain">domain —</span>
+          </footer>
+        </article>
+
+        <article class="cockpit-panel cockpit-panel-strike" data-cockpit-panel="strike">
+          <header class="cockpit-panel-header">
+            <div>
+              <p class="panel-kicker">STRIKE × CURRENT CUT</p>
+              <h2>Strike Profile <span class="proxy-inline">Proxy</span></h2>
+            </div>
+            <div class="panel-readout">
+              <strong id="cockpit-strike-value">—</strong>
+              <span>Current vs First Validated</span>
+            </div>
+          </header>
+          <div id="cockpit-strike-stage" class="cockpit-canvas-stage">
+            <canvas id="cockpit-strike-base" aria-hidden="true"></canvas>
+            <canvas id="cockpit-strike-overlay" class="cockpit-overlay" role="img" tabindex="0" aria-label="Strike exposure proxy profile aligned to SPX price"></canvas>
+            <div id="cockpit-strike-empty" class="cockpit-panel-empty">Waiting for strike profile</div>
+          </div>
+          <footer class="cockpit-panel-legend">
+            <span><i class="legend-bar current"></i>Current</span>
+            <span><i class="legend-bar baseline"></i>First Validated</span>
+            <span><i class="legend-spot"></i>SPX spot</span>
+          </footer>
+        </article>
+
+        <article class="cockpit-panel cockpit-panel-charm" data-cockpit-panel="charm">
+          <header class="cockpit-panel-header">
+            <div>
+              <p class="panel-kicker">TIME × SPX</p>
+              <h2>Charm Surface <span class="proxy-inline">Proxy</span></h2>
+            </div>
+            <div class="panel-readout">
+              <strong id="cockpit-charm-value">—</strong>
+              <span id="cockpit-charm-threshold">neutral ±—</span>
+            </div>
+          </header>
+          <div id="cockpit-charm-stage" class="cockpit-canvas-stage">
+            <canvas id="cockpit-charm-base" aria-hidden="true"></canvas>
+            <canvas id="cockpit-charm-overlay" class="cockpit-overlay" role="img" tabindex="0" aria-label="Charm proxy surface with SPX OHLC candles"></canvas>
+            <div id="cockpit-charm-empty" class="cockpit-panel-empty">Waiting for Charm session surface</div>
+          </div>
+          <footer class="cockpit-panel-legend">
+            <span><i class="legend-swatch negative"></i>− proxy</span>
+            <span><i class="legend-swatch neutral"></i>neutral</span>
+            <span><i class="legend-swatch positive"></i>+ proxy</span>
+            <span><i class="legend-candle"></i>SPX OHLC</span>
+            <span id="cockpit-charm-domain">domain —</span>
+          </footer>
+        </article>
+
+        <div id="cockpit-tooltip" class="cockpit-tooltip" hidden></div>
+        <div id="cockpit-loading" class="cockpit-loading" hidden aria-live="polite">Loading validated session surface…</div>
+      </section>
+
+      <section id="cockpit-live-placeholder" class="cockpit-live-placeholder" hidden>
+        <strong>Live session canvas is waiting for a durable session-surface feed.</strong>
+        <span>The current production snapshot remains available in the secondary diagnostic below.</span>
+      </section>
+
+      <aside id="cockpit-audit-drawer" class="audit-drawer" hidden aria-label="Data and audit details">
+        <header class="audit-drawer-header">
+          <div>
+            <p class="panel-kicker">DATA / AUDIT</p>
+            <h2>Session contract</h2>
+          </div>
+          <button id="cockpit-audit-close" type="button" aria-label="Close Data and Audit drawer">×</button>
+        </header>
+
+        <section id="replay-banner" class="replay-banner" hidden aria-live="polite">
+          <strong>HISTORICAL REPLAY</strong>
+          <span id="replay-banner-label">Replay · waiting for a session</span>
+          <span class="replay-banner-tag">Frozen</span>
+          <span class="replay-banner-tag">Not live</span>
+          <span class="replay-banner-tag replay-banner-warning">Bounded PIT</span>
+          <span class="replay-banner-tag replay-banner-warning">Availability clock missing</span>
+          <small id="replay-banner-as-of">Select a bounded-PIT frame</small>
+        </section>
+
+        <div class="audit-badges" aria-label="Data semantics">
+          <span class="proxy-badge">PROXY</span>
+          <span id="cockpit-audit-frozen" class="audit-chip">Frozen —</span>
+          <span id="cockpit-audit-pit" class="audit-chip warning">PIT —</span>
+          <span id="cockpit-audit-model" class="audit-chip">Model —</span>
+        </div>
+
+        <dl class="audit-list">
+          <div><dt>As of</dt><dd id="cockpit-audit-as-of">—</dd></div>
+          <div><dt>Contract</dt><dd id="cockpit-audit-contract">—</dd></div>
+          <div><dt>Coverage</dt><dd id="cockpit-audit-stats">—</dd></div>
+          <div><dt>Missing</dt><dd id="cockpit-audit-missing">—</dd></div>
+          <div><dt>Capabilities</dt><dd id="cockpit-audit-capabilities">—</dd></div>
+          <div><dt>Provenance</dt><dd id="cockpit-audit-provenance">—</dd></div>
+        </dl>
+
+        <section class="summary-grid audit-summary" aria-label="快照摘要">
+          <article class="summary-card"><span class="summary-label">数据状态</span><strong id="summary-status">—</strong><small id="summary-reasons">尚未加载</small></article>
+          <article class="summary-card"><span class="summary-label">新鲜度</span><strong id="summary-freshness">—</strong><small id="summary-as-of">as of —</small></article>
+          <article class="summary-card"><span class="summary-label">覆盖率</span><strong id="summary-coverage">—</strong><small id="summary-contracts">可用合约 —</small></article>
+          <article class="summary-card"><span class="summary-label">到期结构</span><strong id="summary-expiries">—</strong><small id="summary-underlier">SPX —</small></article>
+        </section>
+
+        <p id="replay-session-meta" class="audit-session-meta">正在读取可回放交易日</p>
+        <p class="audit-source">来源：<code id="source-file">spxw_surface_dashboard.json</code></p>
+        <p class="audit-source"><span id="source-mode">5 秒只读刷新</span> · <span id="schema-version">schema —</span> · <span id="sign-convention">dealer position sign unknown</span></p>
+      </aside>
+      <button id="cockpit-audit-scrim" class="audit-scrim" type="button" hidden aria-label="Close Data and Audit drawer"></button>
+
+      <section id="secondary-diagnostics" class="secondary-diagnostics" aria-label="Secondary diagnostics">
+        <details id="scenario-diagnostic" class="panel scenario-panel">
+          <summary class="panel-header scenario-summary">
+            <div>
+              <p class="panel-kicker">SECONDARY DIAGNOSTIC · SPXW CHAIN EXPOSURE PROXY</p>
+              <h2 id="surface-title">Scenario surface · Spot × Forward time</h2>
+              <p id="surface-subtitle">等待生产快照</p>
+            </div>
+            <div id="surface-quality" class="quality-chip">—</div>
+          </summary>
+          <div class="scenario-body">
+            <div id="heatmap-stage" class="heatmap-stage">
+              <canvas id="heatmap" role="img" aria-label="SPXW 情景暴露热图"></canvas>
+              <div id="heatmap-tooltip" class="chart-tooltip" hidden></div>
+              <div id="heatmap-empty" class="chart-empty"><strong>暂无可用曲面</strong><span>收到 ready 或 degraded 的有效矩形网格后才会绘制。</span></div>
+            </div>
+            <div id="chart-legend" class="chart-legend" aria-label="图例">
+              <span id="legend-negative"><i class="legend-swatch negative"></i><b>−</b> 负暴露</span>
+              <span id="legend-neutral"><i class="legend-swatch neutral"></i><b>0</b> 中性</span>
+              <span id="legend-positive"><i class="legend-swatch positive"></i><b>+</b> 正暴露</span>
+              <span id="legend-ridge"><i class="legend-line ridge"></i>Zero ridge</span>
+              <span id="legend-peak"><i class="legend-marker peak"></i>正峰</span>
+              <span id="legend-trough"><i class="legend-marker trough"></i>负谷</span>
+              <span id="legend-domain" class="legend-domain">色域 —</span>
+            </div>
+            <p id="chart-accessible-summary" class="sr-only" aria-live="polite"></p>
+          </div>
+        </details>
+
+        <section class="detail-grid">
+          <article class="panel ladder-panel" aria-labelledby="ladder-title">
+            <header class="panel-header compact"><div><p class="panel-kicker">CURRENT SPOT SLICE</p><h2 id="ladder-title">Strike ladder</h2><p id="ladder-subtitle">等待真实 strike ladder</p></div></header>
+            <div id="ladder-wrap" class="ladder-wrap"><svg id="ladder-chart" role="img" aria-label="按执行价排列的期权暴露"></svg><div id="ladder-empty" class="detail-empty">快照未提供可用的 strike ladder。</div></div>
+          </article>
+          <article class="panel extrema-panel" aria-labelledby="extrema-title">
+            <header class="panel-header compact"><div><p class="panel-kicker">SURFACE EXTREMA</p><h2 id="extrema-title">Peaks / Troughs</h2><p id="extrema-subtitle">按所选指标绝对幅度排序；数值不代表已知 dealer 实仓方向。</p></div></header>
+            <div class="extrema-columns">
+              <section><h3 id="peak-heading"><span class="extrema-symbol positive">+</span> Positive peaks</h3><ol id="peak-list" class="extrema-list"><li class="empty-row">暂无数据</li></ol></section>
+              <section><h3 id="trough-heading"><span class="extrema-symbol negative">−</span> Negative troughs</h3><ol id="trough-list" class="extrema-list"><li class="empty-row">暂无数据</li></ol></section>
+            </div>
+          </article>
+        </section>
+      </section>
+
+      <section id="trend-panel" class="engine-only" hidden aria-hidden="true">
+        <h2 id="trend-title">SPX intraday engine</h2>
+        <p id="trend-subtitle">—</p>
+        <strong id="trend-spot">SPX —</strong>
+        <span id="trend-regime">Γ proxy —</span>
+        <span id="trend-quality">—</span>
+        <div id="trend-stage"><canvas id="trend-base"></canvas><canvas id="trend-overlay"></canvas><div id="trend-tooltip" hidden></div><div id="trend-empty"></div></div>
+        <span id="trend-cadence">—</span>
+        <p id="trend-accessible-summary"></p>
+      </section>
+
+      <footer class="page-footer cockpit-footer">
+        <p>Read-only research surface · no order entry</p>
+        <p>OI / volume values are structural or activity proxies; participant and dealer position are not asserted.</p>
       </footer>
     </main>
   </body>

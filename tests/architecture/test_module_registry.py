@@ -71,6 +71,9 @@ LAYERS = {
     "surface_dashboard_replay": 5,
     "surface_replay_http": 5,
     "surface_replay_service": 5,
+    "surface_replay_session": 5,
+    "surface_replay_session_data": 5,
+    "surface_replay_session_models": 5,
     "surface_replay_trend": 5,
     "infrastructure": 4,
 }
