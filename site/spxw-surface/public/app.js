@@ -181,6 +181,9 @@ const dom = {
   cockpitAuditFrozen: document.querySelector("#cockpit-audit-frozen"),
   cockpitAuditPit: document.querySelector("#cockpit-audit-pit"),
   cockpitAuditModel: document.querySelector("#cockpit-audit-model"),
+  legacyDiagnosticEntry: document.querySelector("#legacy-diagnostic-entry"),
+  legacyDiagnosticStatus: document.querySelector("#legacy-diagnostic-status"),
+  legacyDiagnosticOpen: document.querySelector("#legacy-diagnostic-open"),
   providerChip: document.querySelector("#provider-chip"),
   referenceChip: document.querySelector("#reference-chip"),
   referenceClock: document.querySelector("#reference-clock"),
@@ -5563,6 +5566,10 @@ function updateScenarioDiagnosticAvailability() {
   const replay = isReplayView();
   const legacyIndex = replay ? legacyReplayFrameIndexAtOrBefore() : -1;
   const available = !replay || legacyIndex >= 0;
+  const entry = legacyDiagnosticEntryState({ replay, available, playing: app.playing });
+  dom.legacyDiagnosticEntry.hidden = entry.hidden;
+  dom.legacyDiagnosticOpen.disabled = entry.disabled;
+  dom.legacyDiagnosticStatus.textContent = entry.status;
   dom.scenarioDiagnostic.classList.toggle("unavailable", !available);
   dom.scenarioDiagnostic.setAttribute("aria-disabled", String(!available));
   if (replay && !available) {
@@ -5573,6 +5580,20 @@ function updateScenarioDiagnosticAvailability() {
       : "This timeline contains no validated legacy frame artifact.";
   }
   return available;
+}
+
+function legacyDiagnosticEntryState({ replay = false, available = false, playing = false } = {}) {
+  return {
+    hidden: !replay,
+    disabled: !replay || !available || playing,
+    status: !replay
+      ? "Replay only"
+      : playing
+        ? "Pause replay to open the cached diagnostic"
+        : available
+          ? "Cached RTH artifact at or before the playhead · no future selection"
+          : "Unavailable at this playhead · future artifacts are never selected",
+  };
 }
 
 function updateReplayControls() {
@@ -6937,11 +6958,27 @@ function setAuditDrawer(open) {
   if (visible) renderCockpitAudit();
 }
 
+function closeLegacyDiagnosticOverlay({ restoreFocus = true } = {}) {
+  const wasVisible = document.body.classList.contains?.("legacy-diagnostic-open") === true;
+  document.body.classList.remove("legacy-diagnostic-open");
+  if (dom.scenarioDiagnostic.open) dom.scenarioDiagnostic.open = false;
+  if (restoreFocus && wasVisible) dom.cockpitAuditToggle.focus();
+}
+
+function openLegacyDiagnosticOverlay() {
+  if (!isReplayView() || app.playing || !updateScenarioDiagnosticAvailability()) return;
+  setAuditDrawer(false);
+  document.body.classList.add("legacy-diagnostic-open");
+  dom.scenarioDiagnostic.open = true;
+  dom.scenarioDiagnostic.querySelector("summary")?.focus();
+}
+
 dom.cockpitAuditToggle.addEventListener("click", () => {
   setAuditDrawer(dom.cockpitAuditDrawer.hidden);
 });
 dom.cockpitAuditClose.addEventListener("click", () => setAuditDrawer(false));
 dom.cockpitAuditScrim.addEventListener("click", () => setAuditDrawer(false));
+dom.legacyDiagnosticOpen.addEventListener("click", openLegacyDiagnosticOverlay);
 
 for (const panel of ["gamma", "strike", "charm"]) {
   const overlay = cockpitElements(panel).overlay;
@@ -7030,6 +7067,7 @@ dom.trendOverlay.addEventListener("keydown", (event) => {
 });
 dom.scenarioDiagnostic.addEventListener("toggle", () => {
   if (!dom.scenarioDiagnostic.open) {
+    closeLegacyDiagnosticOverlay();
     app.liveDiagnosticGeneration += 1;
     if (app.liveDiagnosticController) app.liveDiagnosticController.abort();
     app.liveDiagnosticController = null;
@@ -7056,7 +7094,13 @@ window.addEventListener("popstate", () => {
 });
 
 document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape" && !dom.cockpitAuditDrawer.hidden) setAuditDrawer(false);
+  if (event.key !== "Escape") return;
+  if (document.body.classList.contains("legacy-diagnostic-open")) {
+    event.preventDefault();
+    closeLegacyDiagnosticOverlay();
+  } else if (!dom.cockpitAuditDrawer.hidden) {
+    setAuditDrawer(false);
+  }
 });
 
 if ("ResizeObserver" in window) {
@@ -7121,6 +7165,7 @@ if (isObject(globalThis.__SPX_SPARK_TEST_HOOK__)) {
     robustDomain,
     verifyReplayDigests,
     legacyReplayFrameIndexFor,
+    legacyDiagnosticEntryState,
     sessionSurfaceFrameIndexFor,
     sessionSurfaceRequestDecision,
     sessionSurfaceFailureDisposition,

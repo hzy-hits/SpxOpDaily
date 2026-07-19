@@ -212,6 +212,30 @@ def test_frontend_uses_extended_surface_timeline_without_relabeling_legacy_artif
     )
 
 
+def test_replay_legacy_diagnostic_is_launched_from_a_fixed_audit_overlay() -> None:
+    page = read("public/index.html")
+    app = read("public/app.js")
+    styles = read("public/styles.css")
+
+    drawer_start = page.index('id="cockpit-audit-drawer"')
+    drawer_end = page.index("</aside>", drawer_start)
+    entry = page.index('id="legacy-diagnostic-entry"')
+    assert drawer_start < entry < drawer_end
+    assert 'id="legacy-diagnostic-open"' in page
+    assert 'aria-controls="secondary-diagnostics"' in page
+    assert 'id="secondary-diagnostics"' in page
+    assert 'role="dialog"' in page
+    assert 'aria-modal="true"' in page
+    assert 'body.mode-replay .secondary-diagnostics {' in styles
+    assert 'body.mode-replay.legacy-diagnostic-open .secondary-diagnostics {' in styles
+    assert "position: fixed;" in styles
+    assert "max-height: calc(100vh - 24px);" in styles
+    assert "function openLegacyDiagnosticOverlay()" in app
+    assert 'dom.legacyDiagnosticOpen.addEventListener("click", openLegacyDiagnosticOverlay)' in app
+    assert 'document.body.classList.add("legacy-diagnostic-open")' in app
+    assert "legacyDiagnosticEntryState" in app
+
+
 def test_memorable_entry_is_redirect_only_and_loopback_bound() -> None:
     entry = read("entry-nginx.conf")
     compose = read("compose.yaml")

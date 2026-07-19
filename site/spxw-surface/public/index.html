@@ -225,6 +225,14 @@
           <div><dt>Provenance</dt><dd id="cockpit-audit-provenance">—</dd></div>
         </dl>
 
+        <section id="legacy-diagnostic-entry" class="audit-action" hidden>
+          <div>
+            <strong>Legacy scenario diagnostic</strong>
+            <span id="legacy-diagnostic-status">Waiting for a cached RTH artifact</span>
+          </div>
+          <button id="legacy-diagnostic-open" type="button" aria-controls="secondary-diagnostics" disabled>Open diagnostic</button>
+        </section>
+
         <section class="summary-grid audit-summary" aria-label="快照摘要">
           <article class="summary-card"><span class="summary-label">数据状态</span><strong id="summary-status">—</strong><small id="summary-reasons">尚未加载</small></article>
           <article class="summary-card"><span class="summary-label">新鲜度</span><strong id="summary-freshness">—</strong><small id="summary-as-of">as of —</small></article>
@@ -238,7 +246,7 @@
       </aside>
       <button id="cockpit-audit-scrim" class="audit-scrim" type="button" hidden aria-label="Close Data and Audit drawer"></button>
 
-      <section id="secondary-diagnostics" class="secondary-diagnostics" aria-label="Secondary diagnostics">
+      <section id="secondary-diagnostics" class="secondary-diagnostics" role="dialog" aria-modal="true" aria-label="Secondary diagnostics">
         <details id="scenario-diagnostic" class="panel scenario-panel">
           <summary class="panel-header scenario-summary">
             <div>

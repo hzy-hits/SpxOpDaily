@@ -62,6 +62,7 @@ for (const name of [
   "normalizeReplayTimeline",
   "verifyReplayDigests",
   "legacyReplayFrameIndexFor",
+  "legacyDiagnosticEntryState",
 ]) {
   assert.equal(typeof hooks[name], "function", `missing test hook ${name}`);
 }
@@ -261,6 +262,35 @@ async function timelineFixture({ extended = true } = {}) {
     hooks.legacyReplayFrameIndexFor(futureCached, Date.parse("2026-07-17T13:37:00Z")),
     -1,
   );
+  assert.deepEqual(hooks.legacyDiagnosticEntryState({
+    replay: true,
+    available: true,
+    playing: false,
+  }), {
+    hidden: false,
+    disabled: false,
+    status: "Cached RTH artifact at or before the playhead · no future selection",
+  });
+  assert.equal(hooks.legacyDiagnosticEntryState({
+    replay: true,
+    available: false,
+    playing: false,
+  }).disabled, true);
+  assert.match(hooks.legacyDiagnosticEntryState({
+    replay: true,
+    available: false,
+    playing: false,
+  }).status, /future artifacts are never selected/);
+  assert.match(hooks.legacyDiagnosticEntryState({
+    replay: true,
+    available: true,
+    playing: true,
+  }).status, /Pause replay/);
+  assert.equal(hooks.legacyDiagnosticEntryState({
+    replay: false,
+    available: true,
+    playing: false,
+  }).hidden, true);
 
   const projectionPolicy = { spot_step: 5, time_slices: [0, 5] };
   const projectionPolicySha256 = await hooks.canonicalReplaySha256(projectionPolicy);
