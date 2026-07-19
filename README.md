@@ -94,7 +94,10 @@ The report writes `logs/ibkr-trading-hours-report-*.json` and classifies each
 requested row as `ok`, `stale`, `delayed`, `frozen`, `missing_price`,
 `missing_bid_ask`, `missing_greeks`, `missing`, or `error`. Run it during
 regular U.S. trading hours for the real acceptance result; weekend or overnight
-runs are marked `not_rth` unless `--allow-outside-rth` is set.
+runs are marked `not_rth` unless `--allow-outside-rth` is set. With the minimal
+SPX+ES base universe, one-shot commands intentionally do not infer SPX ATM from
+raw ES outside RTH; GTH SPXW acceptance and collection belong to the persistent
+stream, which maintains the qualified SPX/ES basis and stable ATM state.
 
 On a headless host, view the Gateway login window through an SSH tunnel:
 
@@ -109,11 +112,13 @@ to localhost and is only for manual Gateway login/configuration.
 
 `spx-spark-ibkr-stream` is the persistent alternative to the snapshot
 collector. It keeps one read-only connection (own client id 172) with base
-contracts always subscribed, a hot SPXW lane near ATM, and the remaining
-option-line budget rotating through the sampling planner's strike groups. It
-flushes to raw storage and latest state every 5 seconds, re-plans when SPX
-drifts 10+ points, reconnects with exponential backoff, backs off politely on
-a competing session (IBKR 10197), and re-checks runtime mode continuously.
+SPX and ES anchors always subscribed, a hot SPXW lane near ATM, and the
+remaining option-line budget rotating through the sampling planner's strike
+groups. It checks pending exact-leg pin requests every 50ms while preserving
+the two-second raw/latest flush cadence, re-plans when SPX drifts 10+ points,
+reconnects with exponential backoff, backs off politely on a competing session
+(IBKR 10197), and re-checks runtime mode continuously. Broad VIX-family, ETF,
+MES, and cross-index context remains on Schwab rather than consuming IBKR lines.
 
 ```bash
 scripts/run-ibkr-stream.sh --print-config
@@ -132,15 +137,15 @@ systemctl --user enable --now spx-spark-ibkr-stream.service
 
 ### IBKR Index CFDs
 
-`IBKR_VERIFY_CFDS` (default `IBUS500`) adds IBKR index CFDs to the collector
-and verifier universe. `IBUS500` tracks the S&P 500 cash index at the same
+`IBKR_VERIFY_CFDS` is empty by default. Opting in to `IBUS500` adds that IBKR
+index CFD to the collector and verifier universe. `IBUS500` tracks the S&P 500 cash index at the same
 price level and trades nearly 24h on weekdays, so it doubles as an off-hours
-SPX price proxy and as an extra ATM-reference fallback (`SPX -> ES -> IBUS500 ->
-SPY*10`). Rows appear as `cfd:IBUS500` and the trading-hours report groups them
+SPX price proxy. The persistent stream prefers fresh RTH `SPX`, then an opt-in
+off-hours `IBUS500`, then basis-adjusted `ES`, then `SPY*10`; stateless commands
+never use raw ES. Rows appear as `cfd:IBUS500` and the trading-hours report groups them
 under `cfd_proxies` (optional group; it never fails the overall status). CFD
 market data requires the account's CFD permission; without it the row shows an
-entitlement error and everything else keeps working. Set `IBKR_VERIFY_CFDS=` to
-disable.
+entitlement error and everything else keeps working.
 
 ### Session Recovery
 
@@ -152,9 +157,10 @@ returns to IBKR automatically. A watchdog timer (`ibc-watchdog.timer`) also
 restarts the Gateway when the process is alive but the API port stays dead.
 See `docs/headless-deployment.md` (Session Recovery Chain) for details.
 
-Keep the P0 index set focused on SPX, vol-regime data, and a small cross-index
-context set: `SPX,VIX,VIX1D,VIX9D,VIX3M,VVIX,SKEW,NDX,RUT,DJX,DJU`.
-Use explicit exchanges when a broker symbol needs correction, for example:
+The production IBKR default is deliberately limited to SPX, ES, and SPXW.
+Schwab owns vol-regime, ETF, MES, and cross-index context. For a bounded IBKR
+entitlement diagnostic, use explicit exchanges when a broker symbol needs
+correction, for example:
 
 ```bash
 IBKR_VERIFY_INDEXES='SPX,VIX,VIX1D,VIX9D,VIX3M,VVIX,SKEW,NDX@NASDAQ,RUT@RUSSELL,DJX@CBOE,DJU@CBOE' \

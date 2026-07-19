@@ -1472,18 +1472,17 @@ Schwab 的 Market Data REST endpoints 和 Trader API streamer login 均已验证
 IBKR 官方默认提供至少 100 条 concurrent market-data lines；实际账户上限可能因账户条件、
 佣金或 quote booster 改变，并且 TWS 和 API clients 共享。实现以 100 为 configured ceiling，
 并通过成功订阅 high-watermark 与明确 ticker-limit rejection 维护持久化 effective estimate。
-当前配置的 worst-case 约为:
+当前生产拆分后的 steady-state peak 约为:
 
 ```text
-68 SPXW option lines
-+ 16 SPY option lines
-+ 2 direct anchors
-+ 6 slow-poll peak
-= 92 concurrent lines
+84 SPXW option lines
++ 2 direct anchors (SPX + ES)
+= 86 concurrent lines
 ```
 
-这低于名义 100，但只剩约 8 条余量，对 TWS UI、replan overlap、取消延迟和其他 API client
-不够稳健。目标 allocator 默认保留至少 10%-15% discovered capacity。
+VIX 家族、ETF、MES 和跨指数上下文由 Schwab 承担，IBKR slow poll 与 SPY option lane
+默认关闭；exact-leg pin 抢占 rotation 行而不提高峰值。14 条余量留给取消延迟、重规划与
+operator 诊断，allocator 仍按实时 ticker-limit evidence 自动降容。
 
 ### 18.2 三种 quota 不得混淆
 

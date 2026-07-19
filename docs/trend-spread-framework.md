@@ -226,8 +226,8 @@ Do not promote any rule to "edge" until it survives this audit.
 
 ## MVP Order
 
-1. IBKR real-data acceptance for SPX, VIX family, ETF proxies, ES/MES, and SPXW
-   selected options.
+1. Real-data acceptance for Schwab SPX/VIX-family/ETF/ES/MES context and the
+   persistent IBKR SPX/ES/SPXW GTH lane.
 2. Persist selected raw quotes and latest state.
 3. Add 1-minute underlier features: SPX/SPY/QQQ/IWM/DIA returns and time bucket.
 4. Add SPXW ATM straddle and selected spread candidate features.

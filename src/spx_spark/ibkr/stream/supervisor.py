@@ -280,12 +280,12 @@ class StreamRuntime:
             getattr(self.stream_settings, "exact_leg_pin_enabled", False)
         )
         poll_seconds = max(
-            float(getattr(self.stream_settings, "quote_demand_poll_seconds", 0.25)),
+            float(getattr(self.stream_settings, "quote_demand_poll_seconds", 0.05)),
             0.01,
         )
         while not self.expired():
             remaining = next_flush_at - time.monotonic()
-            if remaining <= 0:
+            if remaining <= 1e-9:
                 return True
             sleep_seconds = min(remaining, poll_seconds) if demand_enabled else remaining
             self.collector.ib.sleep(sleep_seconds)

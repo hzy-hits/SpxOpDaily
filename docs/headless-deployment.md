@@ -216,7 +216,9 @@ IBKR_PORT=4002 IBKR_MAX_OPTION_LINES=40 scripts/run-ibkr-trading-hours-report.sh
 The report uses the same market-data-only connection path as the verifier:
 Read-Only API, no startup account fetches, no orders, no positions, and no
 executions. Use `--skip-options` for a fast index/ETF/futures check, then remove
-it during regular trading hours to validate SPXW bid/ask and model greeks.
+it during regular trading hours to validate SPXW bid/ask and model greeks. GTH
+SPXW validation uses the persistent stream: the stateless report deliberately
+does not turn raw ES into an SPX strike without the stream's qualified basis.
 
 ## systemd User Timer
 

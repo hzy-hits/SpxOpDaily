@@ -66,7 +66,7 @@ def stream_settings(**overrides: object) -> SimpleNamespace:
         "reconnect_max_seconds": 2.0,
         "flush_interval_seconds": 1.0,
         "exact_leg_pin_enabled": True,
-        "quote_demand_poll_seconds": 0.25,
+        "quote_demand_poll_seconds": 0.05,
         "auto_restart_gateway_on_farm_broken": False,
     }
     values.update(overrides)
@@ -100,16 +100,20 @@ def test_session_loop_polls_demand_with_bounded_slices_and_keeps_flush_cadence(
 ) -> None:
     clock = FakeClock()
     collector = FakeCollector(clock, disconnect_after_flushes=2)
-    runtime, events = make_runtime(monkeypatch, collector)
+    runtime, events = make_runtime(
+        monkeypatch,
+        collector,
+        flush_interval_seconds=0.2,
+    )
 
     assert runtime.session_loop() is True
 
-    assert collector.flush_times == pytest.approx([1.0, 2.0])
+    assert collector.flush_times == pytest.approx([0.2, 0.4])
     assert collector.demand_times == pytest.approx(
-        [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0]
+        [0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4]
     )
-    assert collector.ib.sleep_calls == pytest.approx([0.25] * 8)
-    assert all(0.0 < delay <= 0.25 for delay in collector.ib.sleep_calls)
+    assert collector.ib.sleep_calls == pytest.approx([0.05] * 8)
+    assert all(0.0 < delay <= 0.05 for delay in collector.ib.sleep_calls)
     assert sum(event["event"] == "flush" for event in events) == 2
     assert sum(event["event"] == "exact_leg_demand_polled" for event in events) == 8
 

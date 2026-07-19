@@ -218,7 +218,9 @@ IBKR collector notes:
 - default mode respects runtime policy and may only write `provider_state=unavailable`
 - `--force` attempts a real TWS/IB Gateway socket connection
 - `--skip-options` collects only base index/ETF/futures quotes
-- without `--skip-options`, the collector estimates ATM and requests the configured SPXW option set
+- without `--skip-options`, the collector estimates ATM from a fresh SPX-level
+  source and requests the configured SPXW option set; outside RTH, use the
+  persistent stream because raw ES is not a stateless SPX coordinate
 
 Hyperliquid collector notes:
 

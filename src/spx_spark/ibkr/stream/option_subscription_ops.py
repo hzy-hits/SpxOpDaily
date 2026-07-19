@@ -185,6 +185,7 @@ class OptionSubscriptionOps:
             return
         decision_at = datetime.now(tz=timezone.utc)
         current_expiry, next_expiry = self.market_calendar.option_collection_expiries(decision_at)
+        self._prepare_option_definition_cache(now=decision_at)
         next_session_prefetch = self.market_calendar.is_next_expiry_prefetch_window(decision_at)
         today = current_expiry.strftime("%Y%m%d")
         next_expiry_text = next_expiry.strftime("%Y%m%d")
@@ -436,6 +437,7 @@ class OptionSubscriptionOps:
     ) -> list[tuple[str, str, Any]]:
         """Batch-qualify unseen options and reuse resolved contracts by label."""
 
+        self._prepare_option_definition_cache()
         cache = getattr(self, "qualified_option_contracts", None)
         if cache is None:
             # Lightweight unit-test collectors built with object.__new__ do
@@ -443,13 +445,29 @@ class OptionSubscriptionOps:
             return definitions
         resolved: dict[str, tuple[str, str, Any]] = {}
         pending: list[tuple[str, str, Any]] = []
+        sources = getattr(self, "option_definition_resolution_sources", None)
+        if sources is None:
+            sources = {}
+            self.option_definition_resolution_sources = sources
         for label, kind, contract in definitions:
+            sources.pop(label, None)
+            definition_expiry = self._spxw_definition_expiry(label, kind=kind)
             cached = cache.get(label)
             if cached is not None:
                 resolved[label] = cached
+                sources[label] = "memory_cache"
+            elif self._apply_persisted_option_con_id(
+                label,
+                contract,
+                expiry=definition_expiry,
+            ):
+                resolved[label] = (label, kind, contract)
+                cache[label] = resolved[label]
+                sources[label] = "durable_cache"
             elif contract_has_con_id(contract):
                 resolved[label] = (label, kind, contract)
                 cache[label] = resolved[label]
+                sources[label] = "provided_con_id"
             else:
                 pending.append((label, kind, contract))
 
@@ -479,13 +497,139 @@ class OptionSubscriptionOps:
                 definition = (label, kind, matches.pop(0))
                 resolved[label] = definition
                 cache[label] = definition
+                sources[label] = "ibkr_qualification"
         elif pending:
             # Test doubles without an IB qualification surface still exercise
             # lifecycle logic through the mocked qualify_and_subscribe call.
             for item in pending:
                 resolved[item[0]] = item
+                sources[item[0]] = "unqualified_passthrough"
 
-        return [resolved[label] for label, _, _ in definitions if label in resolved]
+        ordered = [resolved[label] for label, _, _ in definitions if label in resolved]
+        self._remember_option_definitions(ordered)
+        return ordered
+
+    def _prepare_option_definition_cache(
+        self,
+        *,
+        now: datetime | None = None,
+    ) -> None:
+        persistent = getattr(self, "option_conid_cache", None)
+        calendar = getattr(self, "market_calendar", None)
+        if persistent is None or calendar is None:
+            return
+        at = now or datetime.now(tz=timezone.utc)
+        collection_expiries_at = getattr(calendar, "option_collection_expiries", None)
+        if callable(collection_expiries_at):
+            active_expiries = frozenset(
+                expiry.strftime("%Y%m%d") for expiry in collection_expiries_at(at)
+            )
+        else:
+            collection_expiry_at = getattr(calendar, "option_collection_expiry", None)
+            collection_expiry = (
+                collection_expiry_at(at)
+                if callable(collection_expiry_at)
+                else calendar.research_expiry(at)
+            )
+            active_expiries = frozenset({collection_expiry.strftime("%Y%m%d")})
+        previous_expiries = getattr(self, "_option_conid_cache_expiries", frozenset())
+        persistent.prepare(active_expiries)
+        prepared_expiries = getattr(persistent, "active_expiries", frozenset())
+        if prepared_expiries != active_expiries:
+            self._option_conid_cache_expiries = frozenset()
+            return
+        self._option_conid_cache_expiries = prepared_expiries
+        if not previous_expiries or previous_expiries == active_expiries:
+            return
+        cache = getattr(self, "qualified_option_contracts", None)
+        if cache is not None:
+            self.qualified_option_contracts = {
+                label: definition
+                for label, definition in cache.items()
+                if (
+                    (label_expiry := self._spxw_definition_expiry(label, kind="option")) is None
+                    or label_expiry in active_expiries
+                )
+            }
+
+    @staticmethod
+    def _spxw_definition_expiry(
+        label: str,
+        *,
+        kind: str,
+    ) -> str | None:
+        parts = label.split(":")
+        if (
+            kind != "option"
+            or len(parts) != 5
+            or parts[:2] != ["option", "SPXW"]
+            or len(parts[2]) != 8
+            or not parts[2].isdigit()
+        ):
+            return None
+        return parts[2]
+
+    def _apply_persisted_option_con_id(
+        self,
+        label: str,
+        contract: Any,
+        *,
+        expiry: str | None,
+    ) -> bool:
+        persistent = getattr(self, "option_conid_cache", None)
+        if (
+            persistent is None
+            or expiry is None
+            or expiry
+            not in getattr(self, "_option_conid_cache_expiries", frozenset())
+        ):
+            return False
+        con_id = persistent.cached_con_id(label, contract, expiry=expiry)
+        if con_id is None:
+            return False
+        contract.conId = con_id
+        return True
+
+    def _remember_option_definitions(
+        self,
+        definitions: list[tuple[str, str, Any]],
+    ) -> None:
+        persistent = getattr(self, "option_conid_cache", None)
+        if persistent is None:
+            return
+        by_expiry: dict[str, list[tuple[str, str, Any]]] = {}
+        for definition in definitions:
+            label, kind, _ = definition
+            expiry = self._spxw_definition_expiry(label, kind=kind)
+            if expiry is not None:
+                by_expiry.setdefault(expiry, []).append(definition)
+        active_expiries = getattr(self, "_option_conid_cache_expiries", frozenset())
+        for expiry, group in by_expiry.items():
+            if expiry in active_expiries:
+                persistent.remember(group, expiry=expiry)
+
+    def option_definition_resolution_source(self, label: str) -> str | None:
+        return getattr(self, "option_definition_resolution_sources", {}).get(label)
+
+    def _evict_option_definition(self, label: str) -> None:
+        cache = getattr(self, "qualified_option_contracts", None)
+        if cache is not None:
+            cache.pop(label, None)
+        persistent = getattr(self, "option_conid_cache", None)
+        expiry = self._spxw_definition_expiry(label, kind="option")
+        if persistent is not None and not getattr(
+            self,
+            "_option_conid_cache_expiries",
+            frozenset(),
+        ):
+            self._prepare_option_definition_cache()
+        if (
+            persistent is not None
+            and expiry is not None
+            and expiry
+            in getattr(self, "_option_conid_cache_expiries", frozenset())
+        ):
+            persistent.evict(label, expiry=expiry)
 
     def _subscription_batch_succeeded(
         self,
@@ -545,6 +689,8 @@ class OptionSubscriptionOps:
             if row is not None:
                 row.error = f"IBKR {error.error_code}: {error.message}"
                 row.subscribed = False
+                if error.error_code == 200:
+                    self._evict_option_definition(row.label)
         return rejected
 
     def _register_subscription_rows(

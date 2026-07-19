@@ -25,11 +25,11 @@ market_data:
     value: 45.0
     description: Freshness window for IBKR stream option rows, which refresh on a round-robin rotation cycle (~25s); shorter windows always mark the oldest slice stale even though it is as fresh as the design allows.
   slow_index_stale_after_seconds:
-    value: 360
-    description: Longer freshness window for slow-moving index and macro reference quotes. Sized to the IBKR slow-poll cadence (300s) plus slack; anything longer lets a dead collector's quotes pose as fresh.
+    value: 90
+    description: Bounded freshness window for Schwab volatility-index context; three missed 30s quote cycles make the context stale.
   slow_index_labels:
-    value: [index:VIX, index:VIX1D, index:VIX9D, index:VIX3M, index:VVIX, index:SKEW, equity:QQQ, equity:IWM, equity:DIA, equity:HYG, equity:LQD, equity:TLT, equity:IEF, equity:SHY, equity:UUP, equity:GLD, equity:USO, equity:RSP, equity:XLU]
-    description: Canonical instruments that use the longer slow-index freshness window.
+    value: [index:VIX, index:VIX1D, index:VIX9D, index:VIX3M, index:VVIX, index:SKEW]
+    description: Calculated volatility indexes allowed a bounded slow-context window; Schwab ETF quotes use the normal live threshold.
 
 analytics:
   max_chain_age_seconds: {value: 15.0, description: Maximum chain age.}
@@ -754,17 +754,17 @@ ibkr:
     value: 1
     description: IBKR market data type requested by the collector; 1 means live data.
   verify_indexes:
-    value: [SPX, VIX, VIX1D, VIX9D, VIX3M, VVIX, SKEW]
-    description: Index symbols verified and collected from IBKR.
+    value: [SPX]
+    description: Minimal IBKR cash-index anchor; broad index context is collected by Schwab.
   verify_stocks:
-    value: [SPY, QQQ, IWM, DIA, HYG, LQD, TLT, IEF, SHY, UUP, GLD, USO, RSP, XLU]
-    description: ETF and equity context symbols verified and collected from IBKR.
+    value: []
+    description: IBKR equity context is disabled by default because Schwab owns the broad ETF universe.
   verify_futures:
-    value: [ES, MES]
-    description: Equity-index futures verified and collected from IBKR.
+    value: [ES]
+    description: Minimal IBKR futures anchor; MES remains available from Schwab.
   verify_cfds:
-    value: [IBUS500]
-    description: Optional IBKR index CFD symbols used as near-24h SPX cash proxies when entitled.
+    value: []
+    description: Optional IBKR index CFDs are opt-in and disabled in the minimal production universe.
   option_strike_window_points:
     value: 50
     description: SPXW option strikes within this many index points of the reference are requested by the verifier.
@@ -784,8 +784,8 @@ ibkr:
     value: 300.0
     description: Longer stale threshold in seconds for slow-updating IBKR index labels.
   slow_index_labels:
-    value: [index:SKEW, index:VVIX]
-    description: IBKR canonical labels allowed to use the slow-index stale threshold.
+    value: []
+    description: Optional custom IBKR labels allowed to use the slow-index stale threshold.
   qualify_contracts:
     value: true
     description: Whether IBKR contracts are qualified before market-data requests.
@@ -840,8 +840,8 @@ ibkr_stream:
     value: 2
     description: SPY strike spacing in dollars used for stream subscription planning.
   slow_poll_labels:
-    value: [index:VIX, index:VIX1D, index:VIX9D, index:VIX3M, index:VVIX, index:SKEW, stock:QQQ, stock:IWM, stock:DIA, stock:HYG, stock:LQD, stock:TLT, stock:IEF, stock:SHY, stock:UUP, stock:GLD, stock:USO, stock:RSP, stock:XLU]
-    description: Stream labels polled periodically instead of held as persistent subscriptions.
+    value: []
+    description: Disabled by default; Schwab supplies VIX-family and ETF context without consuming IBKR lines.
   slow_poll_interval_seconds:
     value: 300.0
     description: Seconds between slow-poll batches for context indexes and ETFs.
@@ -867,7 +867,7 @@ ibkr_stream:
     value: true
     description: Enables same-owner reconciliation of short-lived exact SPXW leg quote demands.
   quote_demand_poll_seconds:
-    value: 0.25
+    value: 0.05
     description: Maximum scheduler sleep between exact-leg quote-demand checks while market data is active.
   quote_demand_path:
     value: ""

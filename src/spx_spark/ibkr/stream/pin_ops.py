@@ -15,6 +15,7 @@ from spx_spark.ibkr.quote_demand import (
 )
 from spx_spark.ibkr.stream import deps as stream_deps
 from spx_spark.ibkr.stream.capacity_tracker import active_market_data_lines
+from spx_spark.ibkr.stream.pin_readiness import ExactLegQuoteReadiness
 from spx_spark.ibkr.verifier import VerifyRow
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 
@@ -52,12 +53,18 @@ class ExactLegPinOps:
         self._exact_leg_pin_origins: dict[str, str] = {}
         self._exact_leg_hot_victims: Subscriptions = {}
         self._exact_leg_last_file_revision: tuple[int, int] | None = None
+        self._exact_leg_readiness = ExactLegQuoteReadiness()
+        self._clear_exact_leg_lifecycle()
 
     def _reset_exact_leg_pin(self) -> None:
+        readiness = getattr(self, "_exact_leg_readiness", None)
+        if readiness is not None:
+            readiness.reset()
         self._exact_leg_demand = None
         self._exact_leg_pin_origins = {}
         self._exact_leg_hot_victims = {}
         self._exact_leg_last_file_revision = None
+        self._clear_exact_leg_lifecycle()
 
     def exact_leg_pin_demand_id(self) -> str | None:
         demand = getattr(self, "_exact_leg_demand", None)
@@ -93,6 +100,10 @@ class ExactLegPinOps:
                         now=current,
                         reason="session_expiry_rolled",
                     )
+                return self._advance_exact_leg_readiness(
+                    demand=active_demand,
+                    now=current,
+                )
             return None
         self._exact_leg_last_file_revision = revision
 
@@ -107,6 +118,7 @@ class ExactLegPinOps:
                 # Replace a possibly stale active acknowledgement after a
                 # collector restart, even though there is nothing local left
                 # to cancel.
+                self._clear_exact_leg_lifecycle()
                 return self._ack_event(
                     now=current,
                     status="idle",
@@ -133,6 +145,12 @@ class ExactLegPinOps:
         labels = tuple(leg.label for leg in demand.legs)
         current_labels = tuple(getattr(self, "pinned_subs", {}))
         if set(labels) == set(current_labels) and len(current_labels) == 2:
+            lifecycle_started = self._begin_exact_leg_lifecycle(
+                demand=demand,
+                now=current,
+            )
+            if self._exact_leg_accepted_at is None:
+                self._exact_leg_accepted_at = current
             if not self._subscriptions_healthy(self.pinned_subs):
                 self.subscription_health_failed = True
                 return self._ack_event(
@@ -141,19 +159,41 @@ class ExactLegPinOps:
                     reason="pinned_subscription_unhealthy",
                     demand=demand,
                 )
+            if lifecycle_started:
+                self._set_exact_leg_resolution_sources(
+                    {label: "active_subscription" for label in labels}
+                )
+                self._arm_exact_leg_quote_watchers(
+                    self.pinned_subs,
+                    cold_labels=frozenset(),
+                    now=current,
+                )
             # A heartbeat or a new event using the same pair only extends the
             # lease. It must never churn subscriptions or request ids.
             self._exact_leg_demand = demand
+            ready_metrics = self._sample_exact_leg_readiness(
+                demand=demand,
+                now=current,
+            )
+            became_ready = bool(
+                ready_metrics is not None and self._exact_leg_ready_at is None
+            )
+            if became_ready:
+                self._exact_leg_ready_at = current
+                self._exact_leg_ready_metrics = ready_metrics
             return self._ack_event(
                 now=current,
                 status="active",
-                reason="lease_refreshed",
+                reason="exact_legs_ready" if became_ready else "lease_refreshed",
                 demand=demand,
                 reused_lines=2,
+                quote_state="ready" if ready_metrics is not None else "warming",
+                **(ready_metrics or {}),
             )
 
         if current_labels:
             self._release_exact_leg_pin(now=current, reason="superseded", write_ack=False)
+            self._begin_exact_leg_lifecycle(demand=demand, now=current)
             if self._subscription_lifecycle_blocked():
                 return self._ack_event(
                     now=current,
@@ -161,6 +201,8 @@ class ExactLegPinOps:
                     reason="subscription_lifecycle_blocked",
                     demand=demand,
                 )
+        else:
+            self._begin_exact_leg_lifecycle(demand=demand, now=current)
         return self._admit_exact_leg_pin(
             demand,
             now=current,
@@ -176,6 +218,7 @@ class ExactLegPinOps:
         expected_revision: tuple[int, int] | None,
         use_wall_clock: bool,
     ) -> dict[str, object]:
+        self._begin_exact_leg_lifecycle(demand=demand, now=now)
         if self._subscription_lifecycle_blocked():
             return self._ack_event(
                 now=now,
@@ -216,9 +259,40 @@ class ExactLegPinOps:
                     existing[label] = subscriptions[label]
                     break
         missing_labels = [label for label in desired_labels if label not in existing]
-        resolved = self._resolve_option_definitions(
-            [definitions[label] for label in missing_labels]
-        )
+        accepted_at = self._pin_phase_now(now=now, use_wall_clock=use_wall_clock)
+        if self._exact_leg_accepted_at is None:
+            self._exact_leg_accepted_at = accepted_at
+        resolution_sources = {
+            label: "active_subscription" for label in existing
+        }
+        resolution_started_at = None
+        resolution_finished_at = None
+        if missing_labels:
+            resolution_started_at = self._pin_phase_now(
+                now=now,
+                use_wall_clock=use_wall_clock,
+            )
+            resolved = self._resolve_option_definitions(
+                [definitions[label] for label in missing_labels]
+            )
+            resolution_finished_at = self._pin_phase_now(
+                now=now,
+                use_wall_clock=use_wall_clock,
+            )
+            resolution_sources.update(
+                {
+                    label: self._option_resolution_source(label)
+                    for label in missing_labels
+                }
+            )
+        else:
+            resolved = []
+        self._set_exact_leg_resolution_sources(resolution_sources)
+        if "ibkr_qualification" in resolution_sources.values():
+            if self._exact_leg_qualification_started_at is None:
+                self._exact_leg_qualification_started_at = resolution_started_at
+            if self._exact_leg_qualification_finished_at is None:
+                self._exact_leg_qualification_finished_at = resolution_finished_at
         if len(resolved) != len(missing_labels):
             return self._ack_event(
                 now=now,
@@ -299,7 +373,14 @@ class ExactLegPinOps:
 
         rejection_sequence = getattr(self, "subscription_rejection_sequence", 0)
         connectivity_sequence = getattr(self, "tws_connectivity_loss_sequence", 0)
-        submitted_at = datetime.now(tz=timezone.utc)
+        submitted_at = None
+        if resolved:
+            submitted_at = self._pin_phase_now(
+                now=now,
+                use_wall_clock=use_wall_clock,
+            )
+            if self._exact_leg_subscription_requested_at is None:
+                self._exact_leg_subscription_requested_at = submitted_at
         additions = (
             qualify_and_subscribe(self.ib, resolved, qualify=False) if resolved else {}
         )
@@ -363,16 +444,35 @@ class ExactLegPinOps:
         self._exact_leg_hot_victims = hot_victims
         self._exact_leg_demand = demand
         self.rotation_retry_at = 0.0
+        readiness_now = self._pin_phase_now(now=now, use_wall_clock=use_wall_clock)
+        self._arm_exact_leg_quote_watchers(
+            self.pinned_subs,
+            cold_labels=frozenset(additions),
+            now=readiness_now,
+        )
+        ready_metrics = self._sample_exact_leg_readiness(
+            demand=demand,
+            now=readiness_now,
+        )
+        if ready_metrics is not None:
+            self._exact_leg_ready_at = readiness_now
+            self._exact_leg_ready_metrics = ready_metrics
         return self._ack_event(
-            now=now,
+            now=readiness_now,
             status="active",
-            reason="exact_legs_pinned",
+            reason=(
+                "exact_legs_ready"
+                if ready_metrics is not None
+                else "exact_legs_pinned"
+            ),
             demand=demand,
             submitted_at=submitted_at,
             reused_lines=sum(1 for lane in origins.values() if lane == "hot"),
             promoted_lines=sum(1 for lane in origins.values() if lane == "rotation"),
             subscribed_lines=len(additions),
             preempted_lines=sum(len(rows) for _, rows in released),
+            quote_state="ready" if ready_metrics is not None else "warming",
+            **(ready_metrics or {}),
         )
 
     def _release_exact_leg_pin(
@@ -399,6 +499,7 @@ class ExactLegPinOps:
             self._register_subscription_rows({label: transfer_to_hot[label]}, lane="hot")
         self.hot_subs.update(transfer_to_hot)
         release_ok = self._cancel_batch(cancel) if cancel else True
+        self._detach_exact_leg_quote_watchers()
         self.pinned_subs = {}
 
         victims = {
@@ -424,7 +525,120 @@ class ExactLegPinOps:
         )
         if write_ack:
             self._write_pin_ack(event)
+        self._clear_exact_leg_lifecycle()
         return event
+
+    def _begin_exact_leg_lifecycle(
+        self,
+        *,
+        demand: ExactLegQuoteDemand,
+        now: datetime,
+    ) -> bool:
+        """Keep first-observation telemetry stable for one demand lifecycle."""
+
+        if getattr(self, "_exact_leg_lifecycle_demand_id", None) == demand.demand_id:
+            return False
+        self._clear_exact_leg_lifecycle()
+        self._exact_leg_lifecycle_demand_id = demand.demand_id
+        self._exact_leg_first_observed_at = now
+        return True
+
+    def _clear_exact_leg_lifecycle(self) -> None:
+        self._exact_leg_lifecycle_demand_id: str | None = None
+        self._exact_leg_first_observed_at: datetime | None = None
+        self._exact_leg_accepted_at: datetime | None = None
+        self._exact_leg_qualification_started_at: datetime | None = None
+        self._exact_leg_qualification_finished_at: datetime | None = None
+        self._exact_leg_subscription_requested_at: datetime | None = None
+        self._exact_leg_ready_at: datetime | None = None
+        self._exact_leg_ready_metrics: dict[str, object] = {}
+        self._exact_leg_resolution_sources: dict[str, str] = {}
+        self._exact_leg_resolution_source: str | None = None
+        readiness = getattr(self, "_exact_leg_readiness", None)
+        if readiness is not None:
+            readiness.clear_evidence()
+
+    @staticmethod
+    def _pin_phase_now(*, now: datetime, use_wall_clock: bool) -> datetime:
+        return datetime.now(tz=timezone.utc) if use_wall_clock else now
+
+    def _option_resolution_source(self, label: str) -> str:
+        query = getattr(self, "option_definition_resolution_source", None)
+        source = query(label) if callable(query) else None
+        if not source:
+            source = getattr(self, "option_definition_resolution_sources", {}).get(
+                label
+            )
+        return str(source or "unknown")
+
+    def _set_exact_leg_resolution_sources(
+        self,
+        sources: dict[str, str],
+    ) -> None:
+        self._exact_leg_resolution_sources = dict(sorted(sources.items()))
+        unique = set(sources.values())
+        self._exact_leg_resolution_source = (
+            next(iter(unique))
+            if len(unique) == 1
+            else "mixed"
+            if unique
+            else None
+        )
+
+    def _arm_exact_leg_quote_watchers(
+        self,
+        subscriptions: Subscriptions,
+        *,
+        cold_labels: frozenset[str],
+        now: datetime,
+    ) -> None:
+        self._exact_leg_readiness.arm(
+            subscriptions,
+            cold_labels=cold_labels,
+            now=now,
+        )
+
+    def _detach_exact_leg_quote_watchers(self) -> None:
+        self._exact_leg_readiness.detach()
+
+    def _advance_exact_leg_readiness(
+        self,
+        *,
+        demand: ExactLegQuoteDemand,
+        now: datetime,
+    ) -> dict[str, object] | None:
+        """Publish the one-way warming -> ready transition independently."""
+
+        if self._exact_leg_ready_at is not None:
+            return None
+        ready_metrics = self._sample_exact_leg_readiness(demand=demand, now=now)
+        if ready_metrics is None:
+            return None
+        self._exact_leg_ready_at = now
+        self._exact_leg_ready_metrics = ready_metrics
+        return self._ack_event(
+            now=now,
+            status="active",
+            reason="exact_legs_ready",
+            demand=demand,
+            quote_state="ready",
+            **ready_metrics,
+        )
+
+    def _sample_exact_leg_readiness(
+        self,
+        *,
+        demand: ExactLegQuoteDemand,
+        now: datetime,
+    ) -> dict[str, object] | None:
+        """Sample only the pinned tickers and apply the action-time 5s contract."""
+        return self._exact_leg_readiness.sample(
+            demand=demand,
+            pinned=getattr(self, "pinned_subs", {}),
+            now=now,
+            market_calendar=getattr(self, "market_calendar", DEFAULT_MARKET_CALENDAR),
+            connection_generation=getattr(self, "connection_generation", 0),
+        )
 
     def _pin_release_needed(self, additions: int) -> int:
         if additions <= 0:
@@ -583,6 +797,22 @@ class ExactLegPinOps:
         **metrics: object,
     ) -> dict[str, object]:
         tracker = getattr(self, "capacity_tracker", None)
+        lifecycle_matches = bool(
+            demand is not None
+            and getattr(self, "_exact_leg_lifecycle_demand_id", None)
+            == demand.demand_id
+        )
+
+        def lifecycle_time(attribute: str) -> str | None:
+            value = getattr(self, attribute, None) if lifecycle_matches else None
+            return value.isoformat() if isinstance(value, datetime) else None
+
+        lifecycle_submitted_at = (
+            getattr(self, "_exact_leg_subscription_requested_at", None)
+            if lifecycle_matches
+            else None
+        )
+        effective_submitted_at = submitted_at or lifecycle_submitted_at
         return {
             "task": "ibkr_stream",
             "event": "exact_leg_quote_demand",
@@ -598,10 +828,40 @@ class ExactLegPinOps:
             ),
             "source_provider": demand.source_provider if demand is not None else None,
             "quote_provider": demand.quote_provider if demand is not None else "ibkr",
+            "session_date": demand.session_date if demand is not None else None,
+            "automatic_ordering": (
+                demand.automatic_ordering if demand is not None else False
+            ),
             "demand_updated_at": demand.updated_at.isoformat() if demand is not None else None,
             "valid_until": demand.valid_until.isoformat() if demand is not None else None,
             "observed_at": now.isoformat(),
-            "submitted_at": submitted_at.isoformat() if submitted_at is not None else None,
+            "first_observed_at": lifecycle_time("_exact_leg_first_observed_at"),
+            "accepted_at": lifecycle_time("_exact_leg_accepted_at"),
+            "qualification_started_at": lifecycle_time(
+                "_exact_leg_qualification_started_at"
+            ),
+            "qualification_finished_at": lifecycle_time(
+                "_exact_leg_qualification_finished_at"
+            ),
+            "resolution_source": (
+                getattr(self, "_exact_leg_resolution_source", None)
+                if lifecycle_matches
+                else None
+            ),
+            "resolution_sources": (
+                dict(getattr(self, "_exact_leg_resolution_sources", {}))
+                if lifecycle_matches
+                else {}
+            ),
+            "subscription_requested_at": lifecycle_time(
+                "_exact_leg_subscription_requested_at"
+            ),
+            "ready_at": lifecycle_time("_exact_leg_ready_at"),
+            "submitted_at": (
+                effective_submitted_at.isoformat()
+                if isinstance(effective_submitted_at, datetime)
+                else None
+            ),
             "connection_generation": getattr(self, "connection_generation", 0),
             "pinned_labels": sorted(getattr(self, "pinned_subs", {})),
             "active_lines": active_market_data_lines(self),

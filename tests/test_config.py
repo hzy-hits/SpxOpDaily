@@ -185,27 +185,22 @@ def test_storage_provider_priority_rejects_empty_duplicate_or_unknown_values(
         StorageSettings.from_env()
 
 
-def test_ibkr_default_verifier_uses_dia_as_dow_proxy(monkeypatch, tmp_path):
+def test_ibkr_default_verifier_uses_minimal_spx_es_universe(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("IBKR_VERIFY_STOCKS", raising=False)
     monkeypatch.delenv("IBKR_VERIFY_INDEXES", raising=False)
+    monkeypatch.delenv("IBKR_VERIFY_FUTURES", raising=False)
+    monkeypatch.delenv("IBKR_VERIFY_CFDS", raising=False)
     monkeypatch.delenv("IBKR_QUALIFY_CONTRACTS", raising=False)
     monkeypatch.delenv("IBKR_REQUEST_TIMEOUT_SECONDS", raising=False)
 
     settings = IbkrSettings.from_env()
 
-    assert "DIA" in settings.verify_stocks
-    assert settings.verify_indexes == [
-        "SPX",
-        "VIX",
-        "VIX1D",
-        "VIX9D",
-        "VIX3M",
-        "VVIX",
-        "SKEW",
-    ]
-    assert "RSP" in settings.verify_stocks
-    assert "XLU" in settings.verify_stocks
+    assert settings.verify_indexes == ["SPX"]
+    assert settings.verify_stocks == []
+    assert settings.verify_futures == ["ES"]
+    assert settings.verify_cfds == []
+    assert settings.slow_index_labels == frozenset()
     assert settings.qualify_contracts is True
     assert settings.request_timeout_seconds == 30.0
 

@@ -253,7 +253,7 @@ Until this is tested, mark Schwab concurrent behavior as `assumed_non_conflictin
 Recommended operating modes:
 
 - `manual_protected`: do not connect or auto-reconnect IBKR; use Schwab, Hyperliquid, TradeXYZ, Polymarket, and any non-conflicting feeds.
-- `ibkr_afternoon`: connect IBKR after manual trading is done; collect SPX/SPXW Greeks, SPX/VIX/VVIX/SKEW, ES/MES, and ETF confirmations.
+- `ibkr_afternoon`: connect the persistent IBKR owner for SPX/ES anchors and SPXW discovery/exact-leg quotes; keep VIX-family, MES, and ETF confirmations on Schwab.
 - `ibkr_close`: force an IBKR verification and high-resolution snapshot into the close.
 - `post_close`: stop IBKR, write session report, and release the broker session.
 
@@ -302,12 +302,12 @@ The collector should treat IBKR as opportunistic:
 
 Fallback should be feature-level, not a global provider switch:
 
-- SPXW option quotes and Greeks: IBKR first; Schwab if verified for SPX/SPXW; otherwise unavailable
+- SPXW option quotes and Greeks: IBKR is mandatory in GTH; during RTH Schwab may be primary only after live SPXW acceptance, with IBKR as the independent fallback
 - SPY/QQQ/IWM option quotes: Schwab first during protected manual trading; IBKR can cross-check inside its allowed window
 - ES/MES: Schwab or IBKR when entitled; Hyperliquid SPX is context only, not a true ES replacement
 - when IBKR is recently unavailable and no TradFi anchor is live, Hyperliquid can preserve situational awareness through `broker_unavailable_proxy_watch`, but wall/gamma/IV alerts stay disabled until SPXW data is live and fresh
-- SPX/VIX/VVIX/SKEW: IBKR/Cboe when available; otherwise mark unavailable unless another verified vendor is added
-- risk proxies: Schwab/IBKR ETF quotes are interchangeable if live and fresh
+- SPX/VIX/VVIX/SKEW: Schwab is the broad-context owner; IBKR retains SPX only as a local SPXW ATM/basis anchor. Each calculated index must still pass its own session/freshness gate.
+- risk proxies: Schwab owns ETF quotes by default; IBKR ETF checks are explicit, bounded diagnostics only
 - chain/prediction signals: keep running independently regardless of broker state
 
 Every feature row should include:
@@ -326,7 +326,7 @@ P0:
 
 - SPX/SPXW or XSP option chain and selected L1 option quotes
 - SPY/QQQ/IWM options if SPX is unavailable
-- SPX cash, VIX family, VVIX, SKEW from IBKR/Cboe where available
+- SPX cash, VIX family, VVIX, and SKEW from Schwab when live and session-valid; IBKR keeps a local SPX anchor for its SPXW owner
 - SPY, QQQ, IWM, HYG, LQD, TLT, IEF, SHY, UUP, GLD, USO
 - Hyperliquid SPX context
 

@@ -75,7 +75,15 @@ class SessionOps:
                 row.error = f"IBKR {error_code}: {message}"
                 row.subscribed = False
                 if error_code == 200:
-                    self.qualified_option_contracts.pop(row.label, None)
+                    evict_option_definition = getattr(
+                        self,
+                        "_evict_option_definition",
+                        None,
+                    )
+                    if callable(evict_option_definition):
+                        evict_option_definition(row.label)
+                    else:
+                        self.qualified_option_contracts.pop(row.label, None)
                 if getattr(self, "subscription_lane_by_req_id", {}).get(req_id) in {
                     "base",
                     "hot",
@@ -157,6 +165,13 @@ class SessionOps:
         self.last_position_shadow_at = None
         if self.market_data_allowed():
             self.ib.reqMarketDataType(self.ibkr_settings.market_data_type)
+        prepare_option_definition_cache = getattr(
+            self,
+            "_prepare_option_definition_cache",
+            None,
+        )
+        if callable(prepare_option_definition_cache):
+            prepare_option_definition_cache()
         self.connection_generation = getattr(self, "connection_generation", 0) + 1
         log_event(
             {

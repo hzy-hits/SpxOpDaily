@@ -35,7 +35,10 @@ def test_split_base_contracts_partitions_by_label() -> None:
         ("future:ES", "future", object()),
     ]
 
-    persistent, slow = split_base_contracts(contracts, DEFAULT_SLOW_POLL_LABELS)
+    persistent, slow = split_base_contracts(
+        contracts,
+        ("index:VIX", "stock:QQQ"),
+    )
 
     assert [label for label, _, _ in persistent] == ["index:SPX", "stock:SPY", "future:ES"]
     assert [label for label, _, _ in slow] == ["index:VIX", "stock:QQQ"]
@@ -51,8 +54,8 @@ def test_chunked_sizes() -> None:
 def test_stream_settings_slow_poll_env(monkeypatch) -> None:
     monkeypatch.delenv("IBKR_STREAM_SLOW_POLL_LABELS", raising=False)
     settings = IbkrStreamSettings.from_env()
-    assert len(settings.slow_poll_labels) == 19
-    assert settings.slow_poll_labels == DEFAULT_SLOW_POLL_LABELS
+    assert settings.slow_poll_labels == ()
+    assert DEFAULT_SLOW_POLL_LABELS == ()
 
     monkeypatch.setenv("IBKR_STREAM_SLOW_POLL_LABELS", "")
     settings = IbkrStreamSettings.from_env()
@@ -62,7 +65,7 @@ def test_stream_settings_slow_poll_env(monkeypatch) -> None:
 def test_stream_settings_exact_leg_demand_defaults_and_env(monkeypatch) -> None:
     settings = IbkrStreamSettings.from_env()
     assert settings.exact_leg_pin_enabled is True
-    assert settings.quote_demand_poll_seconds == 0.25
+    assert settings.quote_demand_poll_seconds == 0.05
     assert settings.quote_demand_path == ""
     assert settings.quote_demand_ack_path == ""
 

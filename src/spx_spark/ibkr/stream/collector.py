@@ -23,6 +23,10 @@ from spx_spark.ibkr.stream.capacity_tracker import (
 )
 from spx_spark.ibkr.stream.flush_ops import FlushOps
 from spx_spark.ibkr.stream.models import OptionSubscriptionPlan
+from spx_spark.ibkr.stream.option_conid_cache import (
+    SpxwConIdCache,
+    option_conid_cache_path,
+)
 from spx_spark.ibkr.stream.option_subscription_ops import OptionSubscriptionOps
 from spx_spark.ibkr.stream.pin_ops import ExactLegPinOps
 from spx_spark.ibkr.stream.session_ops import SessionOps
@@ -121,6 +125,11 @@ class StreamCollector(
         # strikes and jump from push to push.
         self.option_cache: dict[str, tuple[float, VerifyRow]] = {}
         self.qualified_option_contracts: dict[str, tuple[str, str, Any]] = {}
+        self.option_conid_cache = SpxwConIdCache(
+            option_conid_cache_path(storage_settings.data_root)
+        )
+        self._option_conid_cache_expiries: frozenset[str] = frozenset()
+        self.option_definition_resolution_sources: dict[str, str] = {}
         self.connection_generation = 0
         self._initialize_exact_leg_pin()
 

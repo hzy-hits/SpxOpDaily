@@ -15,27 +15,7 @@ from spx_spark.runtime_config import (
 
 default_spxw_expiry = _default_spxw_expiry
 
-DEFAULT_SLOW_POLL_LABELS = (
-    "index:VIX",
-    "index:VIX1D",
-    "index:VIX9D",
-    "index:VIX3M",
-    "index:VVIX",
-    "index:SKEW",
-    "stock:QQQ",
-    "stock:IWM",
-    "stock:DIA",
-    "stock:HYG",
-    "stock:LQD",
-    "stock:TLT",
-    "stock:IEF",
-    "stock:SHY",
-    "stock:UUP",
-    "stock:GLD",
-    "stock:USO",
-    "stock:RSP",
-    "stock:XLU",
-)
+DEFAULT_SLOW_POLL_LABELS: tuple[str, ...] = ()
 
 
 def env_str(name: str, default: str = "") -> str:

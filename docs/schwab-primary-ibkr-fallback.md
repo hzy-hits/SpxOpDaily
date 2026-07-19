@@ -33,9 +33,11 @@ The normal Oracle deployment uses the dedicated IBKR Paper username and
 
 The GTH Paper plan uses 56 continuously subscribed SPXW contracts and a
 28-contract rotating slice. The slice advances every two seconds. Together
-with four base lines and a six-line slow-poll batch, the expected peak is 94
-of the initial 100-line entitlement; runtime ticker-limit evidence reduces the
-effective capacity automatically.
+with the SPX and ES base anchors, the expected peak is 86 of the initial
+100-line entitlement. VIX-family, ETF, MES, and cross-index context stays on
+Schwab; IBKR slow polling is disabled by default. Exact GTH legs preempt slots
+from the rotating slice rather than increasing that peak. Runtime ticker-limit
+evidence reduces the effective capacity automatically.
 
 The Live username is intentionally not kept logged in on Oracle. Live-account
 positions, orders, fills, and PnL therefore remain outside this deployment's

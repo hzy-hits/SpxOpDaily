@@ -1,15 +1,18 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 from spx_spark.ibkr.quote_demand import (
     build_exact_leg_quote_demand,
+    quote_demand_ack_path,
     quote_demand_path,
     write_exact_leg_quote_demand,
     write_quote_demand_tombstone,
 )
 from spx_spark.ibkr.stream.capacity_tracker import active_market_data_lines
+from spx_spark.ibkr.stream.contracts import option_contracts_from_specs
 from spx_spark.ibkr.stream.models import OptionSubscriptionPlan
 from spx_spark.ibkr.stream.collector import StreamCollector
 from spx_spark.ibkr.verifier import VerifyRow
@@ -29,7 +32,7 @@ class FakeIB:
 
 def _subscription(label: str, request_id: int) -> tuple[object, VerifyRow]:
     contract = SimpleNamespace(label=label)
-    ticker = SimpleNamespace(contract=contract)
+    ticker = SimpleNamespace(contract=contract, ticks=[])
     return ticker, VerifyRow(
         label=label,
         kind="option",
@@ -48,6 +51,25 @@ def _option_pair(expiry: str, strike: int, request_id: int) -> dict[str, object]
             f"option:SPXW:{expiry}:{strike}:P", request_id + 1
         ),
     }
+
+
+def _set_live_nbbo(
+    subscription: tuple[object, VerifyRow],
+    *,
+    at: datetime,
+    bid: float,
+    ask: float,
+) -> None:
+    ticker, _row = subscription
+    ticker.marketDataType = 1
+    ticker.bid = bid
+    ticker.ask = ask
+    ticker.time = at
+    ticker.ticks = [
+        SimpleNamespace(time=at, tickType=1),
+        SimpleNamespace(time=at, tickType=2),
+    ]
+    ticker.marketPrice = lambda: (bid + ask) / 2.0
 
 
 def _collector(tmp_path) -> StreamCollector:
@@ -85,6 +107,7 @@ def _collector(tmp_path) -> StreamCollector:
     collector.subscriptions_lost = False
     collector.tws_connectivity_loss_sequence = 0
     collector.qualified_option_contracts = {}
+    collector.option_definition_resolution_sources = {}
     collector.connection_generation = 3
     collector.capacity_tracker = SimpleNamespace(
         effective_capacity=100,
@@ -437,3 +460,208 @@ def test_exact_leg_pin_rejects_non_current_research_expiry(tmp_path) -> None:
     assert event is not None and event["status"] == "rejected"
     assert event["reason"] == "session_expiry_mismatch"
     assert collector.pinned_subs == {}
+
+
+def test_exact_leg_pin_ack_tracks_phases_and_only_becomes_ready_after_fresh_nbbo(
+    tmp_path, monkeypatch
+) -> None:
+    now = datetime(2026, 7, 20, 2, 0, tzinfo=UTC)
+    collector = _collector(tmp_path)
+    _patch_transport(monkeypatch, collector)
+    demand = _demand(now)
+    write_exact_leg_quote_demand(quote_demand_path(tmp_path), demand)
+
+    admitted = collector.reconcile_exact_leg_demand(now=now)
+
+    assert admitted is not None and admitted["status"] == "active"
+    assert admitted["quote_state"] == "warming"
+    assert admitted["ready_at"] is None
+    assert admitted["first_observed_at"] == now.isoformat()
+    assert admitted["accepted_at"] == now.isoformat()
+    assert admitted["qualification_started_at"] is None
+    assert admitted["qualification_finished_at"] is None
+    assert admitted["resolution_source"] == "unqualified_passthrough"
+    assert admitted["subscription_requested_at"] == now.isoformat()
+    assert admitted["submitted_at"] == admitted["subscription_requested_at"]
+    assert admitted["automatic_ordering"] is False
+
+    ready_at = now + timedelta(milliseconds=200)
+    long_label, short_label = (leg.label for leg in demand.legs)
+    _set_live_nbbo(
+        collector.pinned_subs[long_label],
+        at=ready_at - timedelta(milliseconds=100),
+        bid=10.0,
+        ask=10.4,
+    )
+    _set_live_nbbo(
+        collector.pinned_subs[short_label],
+        at=ready_at - timedelta(milliseconds=150),
+        bid=5.0,
+        ask=5.4,
+    )
+
+    ready = collector.reconcile_exact_leg_demand(now=ready_at)
+
+    assert ready is not None and ready["status"] == "active"
+    assert ready["reason"] == "exact_legs_ready"
+    assert ready["quote_state"] == "ready"
+    assert ready["ready_at"] == ready_at.isoformat()
+    assert ready["first_observed_at"] == admitted["first_observed_at"]
+    assert ready["accepted_at"] == admitted["accepted_at"]
+    assert ready["qualification_started_at"] == admitted["qualification_started_at"]
+    assert ready["qualification_finished_at"] == admitted["qualification_finished_at"]
+    assert ready["subscription_requested_at"] == admitted["subscription_requested_at"]
+    assert ready["nbbo_cross_leg_receipt_skew_seconds"] == 0.05
+    assert ready["nbbo_cross_leg_transport_skew_seconds"] == 0.0
+    assert ready["nbbo_receipt_time_basis"] == "ib_async_owner_packet_received_at"
+    persisted = json.loads(quote_demand_ack_path(tmp_path).read_text())
+    assert persisted["kind"] == "ibkr_exact_leg_quote_demand_ack"
+    assert all(persisted[key] == value for key, value in ready.items())
+    assert collector.reconcile_exact_leg_demand(now=ready_at) is None
+
+
+def test_exact_leg_pin_ready_rejects_one_sided_nbbo_and_receipt_skew(
+    tmp_path, monkeypatch
+) -> None:
+    now = datetime(2026, 7, 20, 2, 0, tzinfo=UTC)
+    collector = _collector(tmp_path)
+    _patch_transport(monkeypatch, collector)
+    demand = _demand(now)
+    write_exact_leg_quote_demand(quote_demand_path(tmp_path), demand)
+    assert collector.reconcile_exact_leg_demand(now=now)["quote_state"] == "warming"
+    long_label, short_label = (leg.label for leg in demand.legs)
+
+    check_at = now + timedelta(seconds=1)
+    _set_live_nbbo(
+        collector.pinned_subs[long_label],
+        at=check_at - timedelta(seconds=5),
+        bid=10.0,
+        ask=10.4,
+    )
+    _set_live_nbbo(
+        collector.pinned_subs[short_label],
+        at=check_at + timedelta(seconds=1),
+        bid=5.0,
+        ask=5.4,
+    )
+    assert collector.reconcile_exact_leg_demand(now=check_at) is None
+    assert collector._exact_leg_ready_at is None
+
+    corrected_at = check_at + timedelta(milliseconds=100)
+    _set_live_nbbo(
+        collector.pinned_subs[long_label],
+        at=corrected_at,
+        bid=10.0,
+        ask=10.4,
+    )
+    _set_live_nbbo(
+        collector.pinned_subs[short_label],
+        at=corrected_at,
+        bid=5.0,
+        ask=-1.0,
+    )
+    assert collector.reconcile_exact_leg_demand(now=corrected_at) is None
+    assert collector._exact_leg_ready_at is None
+
+    _set_live_nbbo(
+        collector.pinned_subs[short_label],
+        at=corrected_at,
+        bid=5.0,
+        ask=5.4,
+    )
+    ready = collector.reconcile_exact_leg_demand(now=corrected_at)
+    assert ready is not None and ready["quote_state"] == "ready"
+
+
+def test_exact_leg_pin_reused_quotes_require_new_bbo_and_ignore_oi_only_updates(
+    tmp_path, monkeypatch
+) -> None:
+    now = datetime(2026, 7, 20, 2, 0, tzinfo=UTC)
+    collector = _collector(tmp_path)
+    _patch_transport(monkeypatch, collector)
+    demand = _demand(now)
+    long_label, short_label = (leg.label for leg in demand.legs)
+    collector.hot_subs[long_label] = _subscription(long_label, 1)
+    collector.rotation_subs[short_label] = _subscription(short_label, 2)
+    _set_live_nbbo(collector.hot_subs[long_label], at=now, bid=10.0, ask=10.4)
+    _set_live_nbbo(collector.rotation_subs[short_label], at=now, bid=5.0, ask=5.4)
+    write_exact_leg_quote_demand(quote_demand_path(tmp_path), demand)
+    admitted = collector.reconcile_exact_leg_demand(now=now)
+    assert admitted["quote_state"] == "warming"
+    assert admitted["resolution_source"] == "active_subscription"
+    assert collector._exact_leg_ready_at is None
+
+    check_at = now + timedelta(seconds=1)
+    for ticker, _row in collector.pinned_subs.values():
+        ticker.time = check_at
+        ticker.callOpenInterest = 1234.0
+        ticker.modelGreeks = SimpleNamespace(delta=0.5)
+        ticker.ticks = [SimpleNamespace(time=check_at, tickType=27)]
+
+    assert collector.reconcile_exact_leg_demand(now=check_at) is None
+    assert collector._exact_leg_ready_at is None
+
+    bbo_at = check_at + timedelta(milliseconds=100)
+    long_ticker, _long_row = collector.pinned_subs[long_label]
+    long_ticker.bid = 10.1
+    long_ticker.ask = 10.5
+    long_ticker.ticks = [SimpleNamespace(time=bbo_at, tickType=1)]
+    _set_live_nbbo(
+        collector.pinned_subs[short_label],
+        at=bbo_at,
+        bid=5.1,
+        ask=5.5,
+    )
+    assert collector.reconcile_exact_leg_demand(now=bbo_at) is None
+    assert collector._exact_leg_ready_at is None
+
+    ask_at = bbo_at + timedelta(milliseconds=10)
+    long_ticker.ticks = [SimpleNamespace(time=ask_at, tickType=2)]
+    ready = collector.reconcile_exact_leg_demand(now=ask_at)
+    assert ready is not None and ready["quote_state"] == "ready"
+
+
+def test_exact_leg_pin_memory_cache_hit_has_no_qualification_rpc_timestamps(
+    tmp_path, monkeypatch
+) -> None:
+    now = datetime(2026, 7, 20, 2, 0, tzinfo=UTC)
+    collector = _collector(tmp_path)
+    _patch_transport(monkeypatch, collector)
+    demand = _demand(now)
+    cached = option_contracts_from_specs(demand.specs())
+    collector.qualified_option_contracts = {
+        label: (label, kind, contract) for label, kind, contract in cached
+    }
+    write_exact_leg_quote_demand(quote_demand_path(tmp_path), demand)
+
+    event = collector.reconcile_exact_leg_demand(now=now)
+
+    assert event is not None and event["resolution_source"] == "memory_cache"
+    assert event["qualification_started_at"] is None
+    assert event["qualification_finished_at"] is None
+
+
+def test_exact_leg_pin_records_qualification_timestamps_only_for_real_rpc(
+    tmp_path, monkeypatch
+) -> None:
+    now = datetime(2026, 7, 20, 2, 0, tzinfo=UTC)
+    collector = _collector(tmp_path)
+    _patch_transport(monkeypatch, collector)
+    qualify_calls: list[int] = []
+
+    def qualify(*contracts):
+        qualify_calls.append(len(contracts))
+        for index, contract in enumerate(contracts, start=1):
+            contract.conId = 900_000 + index
+        return list(contracts)
+
+    collector.ib.qualifyContracts = qualify
+    demand = _demand(now)
+    write_exact_leg_quote_demand(quote_demand_path(tmp_path), demand)
+
+    event = collector.reconcile_exact_leg_demand(now=now)
+
+    assert qualify_calls == [2]
+    assert event is not None and event["resolution_source"] == "ibkr_qualification"
+    assert event["qualification_started_at"] == now.isoformat()
+    assert event["qualification_finished_at"] == now.isoformat()

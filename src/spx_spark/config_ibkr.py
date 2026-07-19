@@ -46,11 +46,9 @@ class IbkrSettings:
     # Slow-updating indices (SKEW/VVIX tick every few minutes) use a longer
     # stale threshold so they do not flap between live and stale.
     slow_index_stale_after_seconds: float = field(default_factory=lambda: 300.0)
-    slow_index_labels: frozenset[str] = field(
-        default_factory=lambda: frozenset(str(item) for item in ["index:SKEW", "index:VVIX"])
-    )
-    # IBKR index CFDs such as IBUS500 (S&P 500 CFD). Defaults empty in code so
-    # existing callers are unaffected; from_env defaults to IBUS500.
+    slow_index_labels: frozenset[str] = field(default_factory=frozenset)
+    # Optional IBKR index CFDs such as IBUS500 (S&P 500 CFD). The production
+    # default is empty so Schwab remains the broad-context owner.
     verify_cfds: list[str] = field(default_factory=list)
 
     @classmethod
@@ -129,34 +127,9 @@ class IbkrStreamSettings:
     gateway_restart_cooldown_seconds: float
     auto_restart_gateway_on_farm_broken: bool
     market_data_line_capacity: int = 100
-    spy_option_lines: int = field(default_factory=lambda: 16)
+    spy_option_lines: int = field(default_factory=lambda: 0)
     spy_strike_step: int = field(default_factory=lambda: 2)
-    slow_poll_labels: tuple[str, ...] = field(
-        default_factory=lambda: tuple(
-            str(item)
-            for item in [
-                "index:VIX",
-                "index:VIX1D",
-                "index:VIX9D",
-                "index:VIX3M",
-                "index:VVIX",
-                "index:SKEW",
-                "stock:QQQ",
-                "stock:IWM",
-                "stock:DIA",
-                "stock:HYG",
-                "stock:LQD",
-                "stock:TLT",
-                "stock:IEF",
-                "stock:SHY",
-                "stock:UUP",
-                "stock:GLD",
-                "stock:USO",
-                "stock:RSP",
-                "stock:XLU",
-            ]
-        )
-    )
+    slow_poll_labels: tuple[str, ...] = field(default_factory=tuple)
     slow_poll_interval_seconds: float = field(default_factory=lambda: 300.0)
     slow_poll_hold_seconds: float = field(default_factory=lambda: 10.0)
     slow_poll_chunk_size: int = field(default_factory=lambda: 6)
@@ -165,7 +138,7 @@ class IbkrStreamSettings:
     data_flow_silence_seconds: float = field(default_factory=lambda: 120.0)
     option_stale_after_seconds: float = field(default_factory=lambda: 45.0)
     exact_leg_pin_enabled: bool = field(default_factory=lambda: bool(True))
-    quote_demand_poll_seconds: float = field(default_factory=lambda: 0.25)
+    quote_demand_poll_seconds: float = field(default_factory=lambda: 0.05)
     quote_demand_path: str = field(default_factory=lambda: "")
     quote_demand_ack_path: str = field(default_factory=lambda: "")
 
