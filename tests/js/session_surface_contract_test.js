@@ -68,6 +68,11 @@ for (const name of [
   "sessionSurfaceFrameIndexFor",
   "sessionSurfaceRequestDecision",
   "shouldResetCockpitDomains",
+  "normalizeSessionMetricUnits",
+  "cockpitCandleDisplayTime",
+  "cockpitCandleAtTime",
+  "clampSessionSurfacePlayback",
+  "sessionGridPriceDomain",
 ]) {
   assert.equal(typeof hooks[name], "function", `missing test hook ${name}`);
 }
@@ -153,6 +158,12 @@ function fixture({ bucketMinutes = 5, priceStep = 10 } = {}) {
     spot: 7502,
     spot_source_at: "2026-07-17T13:39:58Z",
     spot_known_at: "2026-07-17T13:39:59Z",
+    metric_units: {
+      signed_gamma: "proxy_delta_dollars_per_1pct_underlier_move",
+      gross_gamma: "gross_delta_dollars_per_1pct_underlier_move",
+      charm: "proxy_1pct_notional_delta_change_per_calendar_minute",
+      vanna: "proxy_1pct_notional_delta_change_per_1_vol_point",
+    },
     capabilities: {
       proxy_position_available: true,
       participant_position_available: false,
@@ -199,6 +210,18 @@ async function sign(payload) {
   assert.equal(normalized.gammaPositivePeaks[0].value, 20);
   assert.equal(normalized.gammaNegativeTroughs[0].price, 7460);
   assert.deepEqual(normalized.missingRanges[0].components, ["spx_candles"]);
+  assert.equal(
+    normalized.metricUnits.charm,
+    "proxy_1pct_notional_delta_change_per_calendar_minute",
+  );
+  assert.deepEqual(hooks.sessionGridPriceDomain(normalized), { min: 7390, max: 7610 });
+
+  const invalidUnits = fixture();
+  invalidUnits.metric_units.charm = "mystery_unit";
+  await assert.rejects(
+    hooks.normalizeSessionSurface(await sign(invalidUnits), expected),
+    /invalid_session_surface_metric_units/,
+  );
 
   const tampered = await sign(fixture());
   tampered.spot = 7600;
@@ -303,6 +326,18 @@ async function sign(payload) {
   assert.equal(hooks.sessionSurfaceFrameIndexFor(frameClocks, 2000), 1);
   assert.equal(hooks.shouldResetCockpitDomains(Date.parse("2026-07-17T15:30:00Z"), Date.parse("2026-07-17T10:27:00Z")), true);
   assert.equal(hooks.shouldResetCockpitDomains(Date.parse("2026-07-17T10:27:00Z"), Date.parse("2026-07-17T15:30:00Z")), false);
+
+  const partial = { startMs: 100, endMs: 200, complete: false };
+  assert.equal(hooks.cockpitCandleDisplayTime(partial, 120), 120);
+  assert.equal(hooks.cockpitCandleAtTime([partial], 120, 120), partial);
+  assert.equal(hooks.cockpitCandleAtTime([partial], 121, 120), null);
+  assert.equal(hooks.cockpitCandleAtTime([partial], 150, 120), null);
+
+  const playbackFrames = [{ atMs: 100 }, { atMs: 200 }, { atMs: 300 }];
+  assert.equal(hooks.clampSessionSurfacePlayback(playbackFrames, 150, 0), 150);
+  assert.equal(hooks.clampSessionSurfacePlayback(playbackFrames, 250, 0), 200);
+  assert.equal(hooks.clampSessionSurfacePlayback(playbackFrames, 250, 1), 250);
+  assert.equal(hooks.clampSessionSurfacePlayback(playbackFrames, 350, 2), 350);
 })().catch((error) => {
   process.nextTick(() => {
     throw error;

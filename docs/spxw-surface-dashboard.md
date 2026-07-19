@@ -61,9 +61,10 @@ but it does not manufacture 30-fps observations. The timeline response contains
 only frame clocks and hashes. When the playhead enters a validated frame, the
 browser requests one cutoff-bound Session Surface at the latest frame at or
 before the playhead. It never downloads the old full-session trend artifact or
-future SPX values. Requests are single-flight and coalesced if a cold build is
-slower than playback; the Canvas overlay continues at 30 fps while the static
-surface remains cached.
+future SPX values. Requests are single-flight. At a validated cutoff boundary,
+the market clock waits for that cutoff's verified surface instead of skipping a
+keyframe; the Canvas overlay continues at 30 fps while the static surface stays
+cached. The post-close warmer keeps the normal replay path off the cold builder.
 
 Each response has a fixed 09:30--16:00 ET canvas by default. Completed columns
 use only the causal frame valid at that bucket end and never get rebuilt from a

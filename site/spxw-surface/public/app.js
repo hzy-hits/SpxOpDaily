@@ -1411,6 +1411,24 @@ function suppliedColorDomain(raw, metric) {
   return raw[metric] ?? raw[`${metric}_surface`] ?? null;
 }
 
+function normalizeSessionMetricUnits(raw) {
+  if (!isObject(raw)) throw new Error("invalid_session_surface_metric_units");
+  const result = {};
+  for (const metric of ["signed_gamma", "gross_gamma", "charm", "vanna"]) {
+    const unit = nonEmptyString(raw[metric]);
+    if (!unit || !UNIT_LABELS[unit]) {
+      throw new Error("invalid_session_surface_metric_units");
+    }
+    result[metric] = unit;
+  }
+  return result;
+}
+
+function sessionMetricUnitLabel(surface, metric) {
+  const unit = surface?.metricUnits?.[metric];
+  return UNIT_LABELS[unit] || unit || "unknown unit";
+}
+
 async function normalizeSessionSurface(raw, expected = {}) {
   if (!isObject(raw)) throw new Error("session_surface_not_an_object");
   if (
@@ -1586,6 +1604,7 @@ async function normalizeSessionSurface(raw, expected = {}) {
     throw new Error("invalid_session_surface_provenance_contract");
   }
   const colorDomains = isObject(raw.color_domains) ? raw.color_domains : {};
+  const metricUnits = normalizeSessionMetricUnits(raw.metric_units);
   const domains = {
     gamma: robustDomain(gamma, suppliedColorDomain(colorDomains, "gamma")),
     charm: robustDomain(charm, suppliedColorDomain(colorDomains, "charm")),
@@ -1629,6 +1648,7 @@ async function normalizeSessionSurface(raw, expected = {}) {
     spot,
     spotSourceAtMs: spotSourceAt.getTime(),
     spotKnownAtMs: spotKnownAt.getTime(),
+    metricUnits,
     domains,
     artifactSha256,
     capabilities,
@@ -2183,26 +2203,23 @@ function updateCockpitStableDomains(surface) {
       `${key}|${metric}`,
     );
   }
-  const prices = [
-    ...surface.priceGrid,
-    ...surface.candles.flatMap((candle) => [candle.low, candle.high]),
-    surface.spot,
-  ].filter(Number.isFinite);
-  const padding = Math.max(surface.priceStep, 1);
+  // Lock the visible Y-axis to the session grid. Candles and spot may be clipped
+  // at the edge, but they must never make the replay coordinate system jump.
   const candidate = {
     key,
-    min: Math.floor((Math.min(...prices) - padding) / padding) * padding,
-    max: Math.ceil((Math.max(...prices) + padding) / padding) * padding,
+    ...sessionGridPriceDomain(surface),
   };
   if (!app.cockpitPriceDomain || app.cockpitPriceDomain.key !== key) {
     app.cockpitPriceDomain = candidate;
-  } else {
-    app.cockpitPriceDomain = {
-      key,
-      min: Math.min(app.cockpitPriceDomain.min, candidate.min),
-      max: Math.max(app.cockpitPriceDomain.max, candidate.max),
-    };
   }
+}
+
+function sessionGridPriceDomain(surface) {
+  const padding = Math.max(surface.priceStep, 1);
+  return {
+    min: surface.priceGrid[0] - padding,
+    max: surface.priceGrid.at(-1) + padding,
+  };
 }
 
 function divergingColor(value, domain, { projection = false } = {}) {
@@ -2376,11 +2393,12 @@ function drawCockpitCandles(context, layout, surface) {
   );
   context.save();
   for (const candle of visible) {
+    const displayAtMs = cockpitCandleDisplayTime(candle, surface.asOfMs);
     const x = sessionTimeToX(
       layout,
       surface.sessionStartMs,
       surface.sessionEndMs,
-      candle.startMs + (candle.endMs - candle.startMs) / 2,
+      displayAtMs,
     );
     const highY = sessionPriceToY(layout, app.cockpitPriceDomain, candle.high);
     const lowY = sessionPriceToY(layout, app.cockpitPriceDomain, candle.low);
@@ -2412,6 +2430,16 @@ function drawCockpitCandles(context, layout, surface) {
     }
   }
   context.restore();
+}
+
+function cockpitCandleDisplayTime(candle, asOfMs) {
+  const centerMs = candle.startMs + (candle.endMs - candle.startMs) / 2;
+  return Math.min(centerMs, asOfMs);
+}
+
+function cockpitCandleAtTime(candles, timeMs, asOfMs) {
+  if (!Number.isFinite(timeMs) || timeMs > asOfMs) return null;
+  return candles.find((item) => item.startMs <= timeMs && timeMs < item.endMs) || null;
 }
 
 function drawGammaExtremaMarkers(context, layout, surface) {
@@ -2759,10 +2787,12 @@ function renderCockpitStatic() {
   drawCockpitSurface("charm", surface.charm);
   const gammaDomain = app.cockpitColorDomains.gamma;
   const charmDomain = app.cockpitColorDomains.charm;
+  const gammaUnit = sessionMetricUnitLabel(surface, "signed_gamma");
+  const charmUnit = sessionMetricUnitLabel(surface, "charm");
   dom.cockpitGammaThreshold.textContent = `neutral ±${compactNumber(gammaDomain.threshold, 2)}`;
   dom.cockpitCharmThreshold.textContent = `neutral ±${compactNumber(charmDomain.threshold, 2)}`;
-  dom.cockpitGammaDomain.textContent = `domain ±${compactNumber(gammaDomain.maxAbs, 2)}`;
-  dom.cockpitCharmDomain.textContent = `domain ±${compactNumber(charmDomain.maxAbs, 2)}`;
+  dom.cockpitGammaDomain.textContent = `domain ±${compactNumber(gammaDomain.maxAbs, 2)} · ${gammaUnit}`;
+  dom.cockpitCharmDomain.textContent = `domain ±${compactNumber(charmDomain.maxAbs, 2)} · ${charmUnit}`;
   drawCockpitDynamic();
   renderCockpitAudit();
 }
@@ -2774,8 +2804,7 @@ function cockpitTooltipFor(panel, timeMs, price) {
   const charm = cockpitValueAt("charm", timeMs, price);
   const strikeIndex = nearestNumericIndex(surface.strikeProfile, price, (row) => row.strike);
   const strike = strikeIndex >= 0 ? surface.strikeProfile[strikeIndex] : null;
-  const candle = surface.candles.find((item) =>
-    item.startMs <= timeMs && timeMs < item.endMs) || null;
+  const candle = cockpitCandleAtTime(surface.candles, timeMs, surface.asOfMs);
   const title = document.createElement("strong");
   title.textContent = `${formatMarketTime(new Date(timeMs))} · SPX ${price.toFixed(2)}`;
   const gammaLine = document.createElement("span");
@@ -2785,12 +2814,12 @@ function cockpitTooltipFor(panel, timeMs, price) {
     peak ? `peak +${String(peak.value)} @ ${peak.price}` : null,
     trough ? `trough ${String(trough.value)} @ ${trough.price}` : null,
   ].filter(Boolean).join(" · ");
-  gammaLine.textContent = `Gamma raw: ${gamma.value === null ? "missing" : String(gamma.value)} · ${gamma.column?.kind || "missing"}${extremaText ? ` · ${extremaText}` : ""}`;
+  gammaLine.textContent = `Gamma raw: ${gamma.value === null ? "missing" : String(gamma.value)} ${sessionMetricUnitLabel(surface, "signed_gamma")} · ${gamma.column?.kind || "missing"}${extremaText ? ` · ${extremaText}` : ""}`;
   const charmLine = document.createElement("span");
-  charmLine.textContent = `Charm raw: ${charm.value === null ? "missing" : String(charm.value)} · ${charm.column?.quality || "unknown"}`;
+  charmLine.textContent = `Charm raw: ${charm.value === null ? "missing" : String(charm.value)} ${sessionMetricUnitLabel(surface, "charm")} · ${charm.column?.quality || "unknown"}`;
   const strikeLine = document.createElement("span");
   strikeLine.textContent = strike
-    ? `Strike ${strike.strike}: current ${strike.currentProxy ?? "missing"}; first validated ${strike.firstValidatedProxy ?? "missing"}`
+    ? `Strike ${strike.strike}: current ${strike.currentProxy ?? "missing"}; first validated ${strike.firstValidatedProxy ?? "missing"} ${sessionMetricUnitLabel(surface, "signed_gamma")}`
     : "Strike profile: missing";
   const candleLine = document.createElement("span");
   candleLine.textContent = candle
@@ -4242,7 +4271,8 @@ function updateReplayControls() {
     : -1;
   dom.replayPrevious.disabled = navigationLocked || previousIndex < 0;
   dom.replayNext.disabled = navigationLocked || !trend || currentGammaIndex >= gammaCount - 1;
-  dom.replayPlay.disabled = navigationLocked || app.frameLoading || !trend || gammaCount < 2;
+  dom.replayPlay.disabled = navigationLocked || app.frameLoading || !trend || gammaCount < 2 ||
+    (trend.metadataOnly && (!app.sessionSurface || app.sessionSurfaceLoading));
   dom.replaySpeed.disabled = navigationLocked || !trend || gammaCount < 2;
   dom.replaySpeed.value = String(app.speed);
   dom.replayPlay.textContent = app.playing ? "❚❚ 暂停" : "▶ 播放";
@@ -4328,10 +4358,17 @@ function playbackTick(now) {
     app.playheadAnchorMs = app.playheadMs ?? app.trend.openMs;
   }
   const elapsedWallMs = Math.max(now - app.wallAnchorMs, 0);
-  const playheadMs = Math.min(
+  let playheadMs = Math.min(
     app.playheadAnchorMs + elapsedWallMs * REPLAY_MARKET_TIME_RATE * app.speed,
     app.trend.closeMs,
   );
+  if (app.trend.metadataOnly) {
+    playheadMs = clampSessionSurfacePlayback(
+      app.trend.gamma.keyframes,
+      playheadMs,
+      app.sessionSurfaceKeyframeIndex,
+    );
+  }
   // Allow one small rAF scheduling quantum of tolerance so 60 Hz displays
   // consistently paint every second callback instead of occasionally every third.
   if (now - app.lastPaintMs >= REPLAY_VISUAL_FRAME_MS * 0.9 || playheadMs >= app.trend.closeMs) {
@@ -4347,6 +4384,7 @@ function playbackTick(now) {
 
 function startPlayback() {
   if (!app.trend || app.trendLoading || app.frameLoading) return;
+  if (app.trend.metadataOnly && (!app.sessionSurface || app.sessionSurfaceLoading)) return;
   cancelPlaybackAnimation();
   dom.scenarioDiagnostic.open = false;
   const playbackStartMs = replayPlaybackStartMs(app.trend);
@@ -4360,6 +4398,15 @@ function startPlayback() {
   app.lastPaintMs = 0;
   updateReplayControls();
   schedulePlayback();
+}
+
+function clampSessionSurfacePlayback(keyframes, targetMs, renderedIndex) {
+  if (!Array.isArray(keyframes) || !keyframes.length || !Number.isFinite(targetMs) ||
+      !Number.isSafeInteger(renderedIndex) || renderedIndex < 0) {
+    return targetMs;
+  }
+  const next = keyframes[renderedIndex + 1];
+  return next && Number.isFinite(next.atMs) ? Math.min(targetMs, next.atMs) : targetMs;
 }
 
 function seekReplay(playheadMs, { syncFrame = false, announce = true } = {}) {
@@ -4537,8 +4584,8 @@ async function loadSessionSurfaceAtPlayhead({ force = false, interrupt = false }
   });
   if (decision === "skip") return;
   if (decision === "queue") {
-    // Playback may outrun cold surface builds. Keep exactly one request in
-    // flight and coalesce every crossed keyframe into the latest playhead.
+    // Keep one request in flight. Playback is boundary-clamped, while explicit
+    // seeks and selector changes coalesce to their latest requested cutoff.
     app.sessionSurfacePending = true;
     return;
   }
@@ -5243,6 +5290,7 @@ if (isObject(globalThis.__SPX_SPARK_TEST_HOOK__)) {
     expandOnlyDomain,
     missingRangeAppliesToPanel,
     normalizeSessionSurface,
+    normalizeSessionMetricUnits,
     normalizeReplayTrend,
     robustDomain,
     sessionSurfaceFrameIndexFor,
@@ -5252,6 +5300,10 @@ if (isObject(globalThis.__SPX_SPARK_TEST_HOOK__)) {
     sessionXToTime,
     sessionYToPrice,
     shouldResetCockpitDomains,
+    cockpitCandleDisplayTime,
+    cockpitCandleAtTime,
+    clampSessionSurfacePlayback,
+    sessionGridPriceDomain,
   });
 }
 

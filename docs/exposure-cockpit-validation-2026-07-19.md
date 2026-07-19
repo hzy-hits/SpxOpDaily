@@ -129,25 +129,26 @@ signed_flow_available=false
 - `node --check site/spxw-surface/public/app.js`：通过。
 - Ruff：通过。
 - `git diff --check`：通过。
-- 覆盖：坐标正反变换、共享 grid、PIT/no-lookahead、首帧前 fail-closed、missing-null、稳定/回退重置色域、极端值 p98、能力标志和部署契约。
+- 覆盖：坐标正反变换、固定共享 grid、PIT/no-lookahead、首帧前 fail-closed、partial candle cutoff、missing-null、metric units、稳定/回退重置色域、极端值 p98、连续 keyframe playback、能力标志和部署契约。
 
 ## 性能结果
 
-在部署版本以 4× replay 连续运行 33.613 个衍生播放秒：
+73 个默认 cutoff 全部预热后，在部署版本从 10:27:49 ET 以 4× replay 连续运行 13.005 秒，市场时钟到 12:29:49 ET：
 
-- dynamic Canvas paints：1004，`29.869 fps`
-- static surface paints：8
+- dynamic Canvas paints：385，`29.60 fps`
+- static surface paints：播放中 23，排空最终请求后 24
 - DOM nodes：295 → 295
-- JS heap：3,059,030 → 3,428,942 bytes，增加约 0.35 MiB
-- 约 84 个市场分钟只请求 9 个 session-surface；请求串行并合并，没有逐动画帧请求 API
-- Replay 服务进程：当前约 56.1 MiB，测试峰值 56.8 MiB
+- 跨越 24 个 validated keyframe，发出 24 个唯一 session-surface 请求；顺序逐项一致，`missing=[]`、`duplicates=[]`
+- 最终 surface cutoff 与 playhead 同为 12:29:49 ET，无 loading/pending
+- JS heap 强制 GC：1,708,790 → 1,954,092 bytes，保留增量约 0.23 MiB
+- Console 与 page errors 均为空
 
 API 实测：
 
 - 10:27 首次构建 5.816 s / 303,244 bytes；缓存命中 0.147 s
 - 15:30 首次构建 5.018 s / 317,014 bytes；缓存命中 0.141 s
 
-Canvas 播放已达到约 30 fps；冷构建仍约 5–6 秒。默认交易日 post-close warmer 现在预热所有默认 front/OI/5m/5pt cutoff，以避免历史回放落到冷路径。若未来要支持真正实时 Session Surface，服务端 accumulator 应增量写列，不能依赖这条冷构建路径。
+Canvas 播放已达到约 30 fps；冷构建仍约 5–6 秒。默认交易日 post-close warmer 现在预热所有默认 front/OI/5m/5pt cutoff，以避免历史回放落到冷路径。若请求未预热，playhead 会停在下一 validated cutoff 等待验证，不会跳过市场状态。Canvas base 在两个 cutoff 之间持续复用；每个新 cutoff 仍重画一次 78×41 base，而不是实现逐列 dirty-rectangle 更新。实测该路径不影响约 30 fps，因此本轮没有引入 WebGL。
 
 ## 仍属于 Proxy 的部分
 
@@ -165,7 +166,9 @@ Canvas 播放已达到约 30 fps；冷构建仍约 5–6 秒。默认交易日 p
 - signed flow；
 - open/close 分解。
 
-Live 与 Replay 共用同一固定 contract 还需要服务端 durable live session accumulator。当前 Live publisher 使用移动 scenario grid，前端已经 fail closed，不会将其补零或伪造成历史列。
+Live 与 Replay 共用同一固定 contract 还需要服务端 durable live session accumulator。这不是 participant 外部数据阻塞，而是尚未完成的内部架构项。当前五秒 publisher 只覆盖 latest moving-grid snapshot，无法恢复已覆盖的盘中历史；今天又是非 RTH，不能完成真实盘中 rollover、断档、重启恢复和 lease 验收。前端因此 fail closed，不会将移动网格补零或伪造成 Session Canvas。
+
+接口已支持 5/10/15 分钟与 2.5/5/10 SPX 点配置；当前页面固定使用验收默认值 5 分钟 × 5 点，尚未在工具栏暴露这两个高级选择器。
 
 ## 部署与回滚
 
