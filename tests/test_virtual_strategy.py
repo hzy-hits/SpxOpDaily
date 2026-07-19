@@ -907,7 +907,7 @@ def _rth_action_contract() -> dict[str, object]:
 def _gth_contract() -> dict[str, object]:
     return {
         "schema_version": 3,
-        "policy_version": "gth_dip_reclaim.v3+sha256:test",
+        "policy_version": "gth_dip_reclaim.v4+sha256:test",
         "valid_until": "2026-07-15T03:09:30+00:00",
         "coordinate": {
             "kind": "raw_es",

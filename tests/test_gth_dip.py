@@ -14,6 +14,7 @@ from spx_spark.application.shock.service import (
     _gth_trend_entry_quality,
     _virtual_strategy_blocks_gth,
 )
+from spx_spark.ibkr.quote_demand import select_gth_quote_demand
 
 
 NOW = datetime(2026, 7, 14, 3, 0, tzinfo=timezone.utc)
@@ -74,7 +75,7 @@ def test_slow_es_dip_reclaim_confirms_without_spx() -> None:
     assert signal["direction"] == "up"
     assert signal["drawdown_points"] == 14
     assert signal["schema_version"] == 3
-    assert str(signal["policy_version"]).startswith("gth_dip_reclaim.v3+sha256:")
+    assert str(signal["policy_version"]).startswith("gth_dip_reclaim.v4+sha256:")
     assert signal["valid_until"] == (NOW + timedelta(minutes=23)).isoformat()
     assert signal["coordinate"]["kind"] == "raw_es"
     assert signal["coordinate"]["instrument_id"] == "future:ES"
@@ -198,7 +199,152 @@ def test_provider_switch_resets_pending_confirmation() -> None:
     )
     assert alert is None
     assert signal is None
+    assert state["pending"] is None
+    assert state["samples"] == [
+        {
+            "at": (NOW + timedelta(minutes=13)).isoformat(),
+            "es": 7552.0,
+            "provider": "ibkr",
+        }
+    ]
+    assert state["first_sample_at"] == NOW.isoformat()
+    assert state["provider_changed"] is True
+
+
+def test_equal_timestamp_provider_switch_cannot_relabel_pending() -> None:
+    state = None
+    for minute, es in ((0, 7560), (5, 7554), (10, 7546), (12, 7551)):
+        state, _alert, _signal = advance(state, minute, es)
+    assert state["pending"]["provider"] == "schwab"
+
+    state, alert, signal = advance_gth_dip(
+        state,
+        session_date="2026-07-14",
+        at=NOW + timedelta(minutes=12),
+        es=7551,
+        provider="ibkr",
+        expected_move_points=80,
+        short_horizon_seconds=900,
+        long_horizon_seconds=3600,
+        short_min_drawdown_points=8,
+        long_min_drawdown_points=12,
+        short_min_descent_seconds=0,
+        long_min_descent_seconds=0,
+        expected_move_fraction=0.10,
+        reclaim_fraction=0.35,
+        min_reclaim_points=4,
+        confirm_samples=2,
+        confirm_hold_seconds=0,
+        session_warmup_seconds=0,
+        max_signals_per_session=3,
+        cooldown_seconds=900,
+        entry_allowed=True,
+        es_spx_basis=45.0,
+    )
+
+    assert alert is None
+    assert signal is None
+    assert state["provider_changed"] is True
+    assert state["pending"] is None
+    assert {row["provider"] for row in state["samples"]} == {"ibkr"}
+
+
+def test_persisted_mixed_provider_history_uses_only_contiguous_suffix() -> None:
+    state = {
+        "schema_version": 1,
+        "session_date": "2026-07-14",
+        "first_sample_at": NOW.isoformat(),
+        "signal_count": 0,
+        "samples": [
+            {"at": NOW.isoformat(), "es": 7560.0, "provider": "schwab"},
+            {
+                "at": (NOW + timedelta(minutes=5)).isoformat(),
+                "es": 7540.0,
+                "provider": "schwab",
+            },
+            {
+                "at": (NOW + timedelta(minutes=10)).isoformat(),
+                "es": 7550.0,
+                "provider": "ibkr",
+            },
+        ],
+    }
+
+    state, alert, signal = advance_gth_dip(
+        state,
+        session_date="2026-07-14",
+        at=NOW + timedelta(minutes=11),
+        es=7552,
+        provider="ibkr",
+        expected_move_points=80,
+        short_horizon_seconds=900,
+        long_horizon_seconds=3600,
+        short_min_drawdown_points=8,
+        long_min_drawdown_points=12,
+        short_min_descent_seconds=0,
+        long_min_descent_seconds=0,
+        expected_move_fraction=0.10,
+        reclaim_fraction=0.35,
+        min_reclaim_points=4,
+        confirm_samples=2,
+        confirm_hold_seconds=0,
+        session_warmup_seconds=0,
+        max_signals_per_session=3,
+        cooldown_seconds=900,
+        entry_allowed=True,
+        es_spx_basis=45.0,
+    )
+
+    assert alert is None and signal is None
+    assert {row["provider"] for row in state["samples"]} == {"ibkr"}
+    assert state["pending"] is None
+
+
+def test_spread_policy_change_restarts_confirmation_and_refreezes_legs() -> None:
+    state = None
+    levels = {"call_wall": 7580.0}
+    for minute, es in ((0, 7560), (5, 7554), (10, 7546), (12, 7551)):
+        state, alert, signal = advance(
+            state,
+            minute,
+            es,
+            structure_levels=levels,
+            spread_max_width_points=75.0,
+        )
+    assert alert is None and signal is None
+    assert state["pending"]["spread"]["width_points"] == 75
+    old_policy = state["pending"]["spread_policy_version"]
+
+    state, alert, signal = advance(
+        state,
+        13,
+        7552,
+        structure_levels=levels,
+        spread_max_width_points=50.0,
+    )
+
+    assert alert is None and signal is None
     assert state["pending"]["confirm_count"] == 1
+    assert state["pending"]["spread"]["width_points"] == 50
+    assert state["pending"]["spread_policy_version"] != old_policy
+
+
+def test_corrupt_frozen_spread_restarts_instead_of_crashing_confirmation() -> None:
+    state = None
+    for minute, es in ((0, 7560), (5, 7554), (10, 7546), (12, 7551)):
+        state, _alert, _signal = advance(state, minute, es)
+    state["pending"]["spread"] = {
+        "right": "C",
+        "expiry_date": "2026-07-14",
+        "long_strike": 7505,
+        "short_strike": 7555,
+    }
+
+    state, alert, signal = advance(state, 13, 7552)
+
+    assert alert is None and signal is None
+    assert state["pending"]["confirm_count"] == 1
+    assert state["pending"]["spread"]["width_points"] == 40
 
 
 def confirmed_signal_state():
@@ -380,6 +526,82 @@ def test_signal_payload_carries_spread_and_redelivery_is_identical() -> None:
     assert retry is not None
     assert retry.detail == alert.detail
     assert retry_signal["delivery_retry"] is True
+
+
+def test_pending_freezes_exact_spread_and_confirmation_reuses_it() -> None:
+    state = None
+    for minute, es in ((0, 7560), (5, 7554), (10, 7546)):
+        state, _, _ = advance(state, minute, es)
+    state, alert, _ = advance(
+        state,
+        12,
+        7551,
+        structure_levels={"flip_high": 7530.0},
+        es_spx_basis=45.0,
+    )
+    assert alert is None
+    pending_spread = dict(state["pending"]["spread"])
+    assert (pending_spread["long_strike"], pending_spread["short_strike"]) == (7505, 7530)
+
+    state, alert, signal = advance(
+        state,
+        13,
+        7557,
+        structure_levels={"call_wall": 7580.0},
+        es_spx_basis=35.0,
+    )
+    assert alert is not None
+    assert signal["spread"] == pending_spread
+
+
+def test_real_pending_and_confirmed_state_publish_exact_leg_demand() -> None:
+    state = None
+    for minute, es in ((0, 7560), (5, 7554), (10, 7546), (12, 7551)):
+        state, alert, signal = advance(state, minute, es)
+    assert alert is None and signal is None
+
+    pending_demand, reason = select_gth_quote_demand(
+        at=NOW + timedelta(minutes=12),
+        session_date="2026-07-14",
+        provider="schwab",
+        gth_state=state,
+        virtual_active=None,
+    )
+    assert reason == "selected"
+    assert pending_demand is not None and pending_demand.status == "pending"
+
+    state, alert, signal = advance(state, 13, 7552)
+    assert alert is not None and signal is not None
+    confirmed_demand, reason = select_gth_quote_demand(
+        at=NOW + timedelta(minutes=13),
+        session_date="2026-07-14",
+        provider="schwab",
+        gth_state=state,
+        virtual_active=None,
+    )
+    assert reason == "selected"
+    assert confirmed_demand is not None and confirmed_demand.status == "confirmed"
+    assert confirmed_demand.demand_id == pending_demand.demand_id
+    assert confirmed_demand.legs == pending_demand.legs
+
+
+def test_pending_freezes_spread_when_coordinates_first_become_available() -> None:
+    state = None
+    for minute, es in ((0, 7560), (5, 7554), (10, 7546)):
+        state, _, _ = advance(state, minute, es, es_spx_basis=None)
+    state, alert, _ = advance(state, 12, 7551, es_spx_basis=None)
+    assert alert is None
+    assert state["pending"]["spread"] is None
+
+    state, alert, signal = advance(state, 13, 7552, es_spx_basis=45.0)
+    assert alert is None and signal is None
+    assert state["pending"]["confirm_count"] == 1
+    pending_spread = dict(state["pending"]["spread"])
+
+    state, alert, signal = advance(state, 14, 7553, es_spx_basis=45.0)
+    assert alert is not None
+    assert signal["spread"] == pending_spread
+    assert signal["spread"]["long_strike"] == 7505
 
 
 def test_signal_spread_anchors_to_structure_wall() -> None:

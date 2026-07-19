@@ -48,7 +48,8 @@ def test_active_line_count_deduplicates_labels_across_lanes() -> None:
         base_subs={"SPX": object()},
         hot_subs={"C1": object()},
         rotation_subs={"C1": object(), "P1": object()},
+        pinned_subs={"C1": object(), "C2": object()},
         spy_subs={},
         slow_active_subs={"VIX": object()},
     )
-    assert active_market_data_lines(owner) == 4
+    assert active_market_data_lines(owner) == 5

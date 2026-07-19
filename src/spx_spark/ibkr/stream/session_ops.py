@@ -79,6 +79,7 @@ class SessionOps:
                 if getattr(self, "subscription_lane_by_req_id", {}).get(req_id) in {
                     "base",
                     "hot",
+                    "pinned",
                 }:
                     self.subscription_health_failed = True
             elif req_id < 0:
@@ -206,6 +207,7 @@ class SessionOps:
             else cancel_subscriptions
         )
         release(self.ib, self.rotation_subs)
+        release(self.ib, getattr(self, "pinned_subs", {}))
         release(self.ib, self.hot_subs)
         release(self.ib, self.spy_subs)
         release(self.ib, self.slow_active_subs)
@@ -213,6 +215,7 @@ class SessionOps:
         self.base_subs = {}
         self.hot_subs = {}
         self.rotation_subs = {}
+        self.pinned_subs = {}
         self.spy_subs = {}
         self.spy_plan_key = None
         self.spy_retry_at = 0.0
@@ -231,6 +234,8 @@ class SessionOps:
         self.slow_qualified_contracts = {}
         self.slow_unresolved_contracts = set()
         self.option_cache = {}
+        if hasattr(self, "_reset_exact_leg_pin"):
+            self._reset_exact_leg_pin()
         self.subscription_rejection_sequence = 0
         self.subscription_rejection_log = []
         self.errors = []

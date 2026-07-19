@@ -59,6 +59,25 @@ def test_stream_settings_slow_poll_env(monkeypatch) -> None:
     assert settings.slow_poll_labels == ()
 
 
+def test_stream_settings_exact_leg_demand_defaults_and_env(monkeypatch) -> None:
+    settings = IbkrStreamSettings.from_env()
+    assert settings.exact_leg_pin_enabled is True
+    assert settings.quote_demand_poll_seconds == 0.25
+    assert settings.quote_demand_path == ""
+    assert settings.quote_demand_ack_path == ""
+
+    monkeypatch.setenv("IBKR_STREAM_EXACT_LEG_PIN_ENABLED", "false")
+    monkeypatch.setenv("IBKR_STREAM_QUOTE_DEMAND_POLL_SECONDS", "0.1")
+    monkeypatch.setenv("IBKR_STREAM_QUOTE_DEMAND_PATH", "/tmp/demand.json")
+    monkeypatch.setenv("IBKR_STREAM_QUOTE_DEMAND_ACK_PATH", "/tmp/demand-ack.json")
+
+    settings = IbkrStreamSettings.from_env()
+    assert settings.exact_leg_pin_enabled is False
+    assert settings.quote_demand_poll_seconds == 0.1
+    assert settings.quote_demand_path == "/tmp/demand.json"
+    assert settings.quote_demand_ack_path == "/tmp/demand-ack.json"
+
+
 def test_flush_merges_slow_cache_rows() -> None:
     cached = VerifyRow(label="index:VIX", kind="index", symbol="VIX")
     subscribed = VerifyRow(label="index:SPX", kind="index", symbol="SPX")

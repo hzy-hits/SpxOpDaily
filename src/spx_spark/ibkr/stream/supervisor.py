@@ -203,10 +203,14 @@ class StreamRuntime:
         return False
 
     def session_loop(self) -> bool:
+        flush_interval = effective_hot_flush_sleep_seconds(
+            self.stream_settings.flush_interval_seconds
+        )
+        next_flush_at = time.monotonic() + flush_interval
         while not self.expired():
-            self.collector.ib.sleep(
-                effective_hot_flush_sleep_seconds(self.stream_settings.flush_interval_seconds)
-            )
+            if not self._wait_for_hot_flush(next_flush_at=next_flush_at):
+                return False
+            flush_started_at = time.monotonic()
             event = self.collector.flush()
             log_event(event)
             position_event = self.collector.flush_position_shadow_if_due(
@@ -214,7 +218,13 @@ class StreamRuntime:
             )
             if position_event is not None:
                 log_event(position_event)
-            if self.collector.subscription_health_failed:
+
+            # Classify newly observed 10197 errors before the generic
+            # subscription-health branch.  A competing live session must use
+            # the conflict cooldown instead of an ordinary reconnect loop.
+            new_errors = self.collector.drain_new_errors()
+            competing = has_competing_session_error(new_errors)
+            if self.collector.subscription_health_failed and not competing:
                 persist_state_only(
                     unavailable_state(
                         "IBKR subscription lifecycle failed; reconnecting",
@@ -230,8 +240,6 @@ class StreamRuntime:
                 )
                 return True
 
-            new_errors = self.collector.drain_new_errors()
-            competing = has_competing_session_error(new_errors)
             gateway_restart = self._should_restart_gateway()
             action = decide_after_flush(
                 connected=self.collector.ib.isConnected(),
@@ -241,6 +249,7 @@ class StreamRuntime:
             )
             if action is StreamAction.CONTINUE:
                 self.session_had_healthy_flush = True
+                next_flush_at = flush_started_at + flush_interval
                 continue
 
             if action is StreamAction.GATEWAY_RESTART:
@@ -262,6 +271,37 @@ class StreamRuntime:
             )
             log_event({"task": "ibkr_stream", "event": "disconnected"})
             return True
+        return False
+
+    def _wait_for_hot_flush(self, *, next_flush_at: float) -> bool:
+        """Poll exact-leg demand without increasing the durable flush cadence."""
+
+        demand_enabled = bool(
+            getattr(self.stream_settings, "exact_leg_pin_enabled", False)
+        )
+        poll_seconds = max(
+            float(getattr(self.stream_settings, "quote_demand_poll_seconds", 0.25)),
+            0.01,
+        )
+        while not self.expired():
+            remaining = next_flush_at - time.monotonic()
+            if remaining <= 0:
+                return True
+            sleep_seconds = min(remaining, poll_seconds) if demand_enabled else remaining
+            self.collector.ib.sleep(sleep_seconds)
+            if self.expired():
+                return False
+            lifecycle_blocked = bool(
+                getattr(self.collector, "subscription_health_failed", False)
+                or getattr(self.collector, "tws_connectivity_lost", False)
+                or not self.collector.ib.isConnected()
+            )
+            if demand_enabled and not lifecycle_blocked:
+                reconcile = getattr(self.collector, "reconcile_exact_leg_demand", None)
+                if callable(reconcile):
+                    event = reconcile()
+                    if event is not None:
+                        log_event(event)
         return False
 
     def _defer_competing_session(self, *, phase: str) -> None:

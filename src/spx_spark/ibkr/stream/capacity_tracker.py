@@ -103,6 +103,7 @@ def active_market_data_lines(owner: Any) -> int:
         "base_subs",
         "hot_subs",
         "rotation_subs",
+        "pinned_subs",
         "spy_subs",
         "slow_active_subs",
     ):

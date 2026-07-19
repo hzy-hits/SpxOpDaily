@@ -16,6 +16,7 @@ def patch_stream(monkeypatch: pytest.MonkeyPatch, name: str, value) -> None:
         "session_ops",
         "slow_poll_ops",
         "option_subscription_ops",
+        "pin_ops",
         "spy_rotation_ops",
         "flush_ops",
         "collector",

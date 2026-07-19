@@ -678,7 +678,7 @@ def _evaluate_gth_spread_entry(
         ]
         return result(reasons, terminal=True)
     if not str(gth_signal.get("policy_version") or "").startswith(
-        "gth_dip_reclaim.v3+sha256:"
+        "gth_dip_reclaim.v4+sha256:"
     ):
         return result(["source_policy_incompatible"], terminal=True)
     coordinate = gth_signal.get("coordinate")

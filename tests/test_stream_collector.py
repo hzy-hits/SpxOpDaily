@@ -1257,7 +1257,7 @@ def test_teardown_clears_prior_session_errors(monkeypatch) -> None:
     collector.teardown()
 
     assert collector.errors == []
-    assert len(discard_calls) == 5
+    assert len(discard_calls) == 6
 
 
 def test_base_rejection_during_subscription_is_reconciled_after_registration(

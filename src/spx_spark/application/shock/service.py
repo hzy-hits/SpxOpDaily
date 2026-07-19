@@ -53,6 +53,14 @@ from spx_spark.data_platform.integration import (
 from spx_spark.data_platform.settings import DataPlatformSettings
 from spx_spark.greek_shadow import sample_zero_dte_greeks_shadow
 from spx_spark.ibkr.atm_reference import BASIS_MAX_ABS_POINTS
+from spx_spark.ibkr.quote_demand import (
+    ExactLegQuoteDemand,
+    load_exact_leg_quote_demand,
+    quote_demand_path,
+    select_gth_quote_demand,
+    write_exact_leg_quote_demand,
+    write_quote_demand_tombstone,
+)
 from spx_spark.macro_event_clock import macro_event_state
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 from spx_spark.intraday_event_outcomes import (
@@ -452,6 +460,14 @@ def _run_gth_dip_reclaim(
     session_date: str,
     no_notify: bool,
 ) -> dict[str, Any]:
+    virtual_state = read_json_object(
+        Path(storage_settings.data_root) / "latest" / "virtual_strategy_state.json"
+    )
+    virtual_active = (
+        virtual_state.get("active")
+        if isinstance(virtual_state.get("active"), Mapping)
+        else None
+    )
     sample, sample_error = live_es_sample(latest, settings)
     payload: dict[str, Any] = {
         "created_at": datetime.now(tz=timezone.utc).isoformat(),
@@ -461,6 +477,20 @@ def _run_gth_dip_reclaim(
         "alerts": [],
     }
     if sample is None:
+        monitor_state = load_monitor_state(settings.state_path, session_date=session_date)
+        _persist_gth_quote_demand(
+            storage_settings,
+            at=datetime.now(tz=timezone.utc),
+            session_date=session_date,
+            provider=None,
+            gth_state=(
+                monitor_state.get("gth_dip")
+                if isinstance(monitor_state.get("gth_dip"), Mapping)
+                else {}
+            ),
+            virtual_active=virtual_active,
+            forced_clear_reason=sample_error or "gth_sample_unavailable",
+        )
         payload["skipped_reason"] = sample_error
         return payload
     sample_at, es, provider = sample
@@ -474,12 +504,6 @@ def _run_gth_dip_reclaim(
     except Exception:  # ES-led detection must survive a missing GTH chain.
         options_map = None
     macro = macro_event_state(sample_at)
-    virtual_state = read_json_object(
-        Path(storage_settings.data_root) / "latest" / "virtual_strategy_state.json"
-    )
-    virtual_active = (
-        virtual_state.get("active") if isinstance(virtual_state.get("active"), Mapping) else None
-    )
     virtual_strategy_blocks_gth = _virtual_strategy_blocks_gth(virtual_active)
     level_shadow = read_json_object(
         Path(storage_settings.data_root) / "latest" / "level_decision_shadow_state.json"
@@ -551,12 +575,21 @@ def _run_gth_dip_reclaim(
                 {**signal, "macro_event": macro},
             )
 
+    _persist_gth_quote_demand(
+        storage_settings,
+        at=datetime.now(tz=timezone.utc),
+        session_date=session_date,
+        provider=provider,
+        gth_state=gth_state,
+        virtual_active=virtual_active,
+    )
+
     _append_gth_detector_health(
         storage_settings,
         sample_at,
         {
             "schema_version": 1,
-            "policy_version": policy_version("gth_detector_runtime.v3", settings),
+            "policy_version": policy_version("gth_detector_runtime.v4", settings),
             "record_key": sample_at.isoformat(),
             "at": sample_at.isoformat(),
             "session_date": session_date,
@@ -755,6 +788,51 @@ def _virtual_strategy_blocks_gth(active: Mapping[str, object] | None) -> bool:
     """Only an already tracked two-leg GTH spread blocks another spread signal."""
 
     return bool(active and active.get("position_type") == "call_debit_spread")
+
+
+def _persist_gth_quote_demand(
+    storage: StorageSettings,
+    *,
+    at: datetime,
+    session_date: str,
+    provider: str | None,
+    gth_state: Mapping[str, object],
+    virtual_active: Mapping[str, object] | None,
+    forced_clear_reason: str | None = None,
+) -> ExactLegQuoteDemand | None:
+    path = quote_demand_path(storage.data_root)
+    demand, reason = select_gth_quote_demand(
+        at=at,
+        session_date=session_date,
+        provider=provider,
+        gth_state=gth_state,
+        virtual_active=virtual_active,
+        forced_clear_reason=forced_clear_reason,
+    )
+    previous, _ = load_exact_leg_quote_demand(path, now=at)
+    if demand is not None:
+        if (
+            previous is not None
+            and previous.demand_id == demand.demand_id
+            and previous.created_at <= demand.updated_at
+        ):
+            demand = replace(demand, created_at=previous.created_at)
+        write_exact_leg_quote_demand(path, demand)
+        return demand
+    raw_previous = read_json_object(path)
+    if (
+        raw_previous.get("kind") == "ibkr_exact_leg_quote_demand_tombstone"
+        and raw_previous.get("reason") == reason
+    ):
+        return None
+    write_quote_demand_tombstone(
+        path,
+        at=at,
+        reason=reason,
+        previous_demand_id=str(raw_previous.get("demand_id") or "") or None,
+        previous_event_id=str(raw_previous.get("event_id") or "") or None,
+    )
+    return None
 
 
 def _state_time(value: object) -> datetime | None:

@@ -24,6 +24,7 @@ from spx_spark.ibkr.stream.capacity_tracker import (
 from spx_spark.ibkr.stream.flush_ops import FlushOps
 from spx_spark.ibkr.stream.models import OptionSubscriptionPlan
 from spx_spark.ibkr.stream.option_subscription_ops import OptionSubscriptionOps
+from spx_spark.ibkr.stream.pin_ops import ExactLegPinOps
 from spx_spark.ibkr.stream.session_ops import SessionOps
 from spx_spark.ibkr.stream.slow_poll_ops import SlowPollOps
 from spx_spark.ibkr.stream.spy_rotation_ops import SpyRotationOps
@@ -38,6 +39,7 @@ class StreamCollector(
     SessionOps,
     SlowPollOps,
     OptionSubscriptionOps,
+    ExactLegPinOps,
     SpyRotationOps,
     FlushOps,
 ):
@@ -74,6 +76,7 @@ class StreamCollector(
         self.base_subs: dict[str, tuple[Any, VerifyRow]] = {}
         self.hot_subs: dict[str, tuple[Any, VerifyRow]] = {}
         self.rotation_subs: dict[str, tuple[Any, VerifyRow]] = {}
+        self.pinned_subs: dict[str, tuple[Any, VerifyRow]] = {}
         self.spy_subs: dict[str, tuple[Any, VerifyRow]] = {}
         self.spy_plan_key: tuple[str, int] | None = None
         self.spy_retry_at = 0.0
@@ -119,5 +122,6 @@ class StreamCollector(
         self.option_cache: dict[str, tuple[float, VerifyRow]] = {}
         self.qualified_option_contracts: dict[str, tuple[str, str, Any]] = {}
         self.connection_generation = 0
+        self._initialize_exact_leg_pin()
 
         ib.errorEvent += self._on_error

@@ -863,6 +863,18 @@ ibkr_stream:
   freeze_quotes_on_connectivity_loss:
     value: true
     description: Freezes IBKR-derived fields as stale and stops quote persistence when the socket disconnects or upstream connectivity is lost.
+  exact_leg_pin_enabled:
+    value: true
+    description: Enables same-owner reconciliation of short-lived exact SPXW leg quote demands.
+  quote_demand_poll_seconds:
+    value: 0.25
+    description: Maximum scheduler sleep between exact-leg quote-demand checks while market data is active.
+  quote_demand_path:
+    value: ""
+    description: Optional exact-leg quote-demand path; empty derives the latest path from the configured market-data root.
+  quote_demand_ack_path:
+    value: ""
+    description: Optional exact-leg quote-demand acknowledgement path; empty derives the latest path from the configured market-data root.
 
 ibkr_positions:
   client_id:

@@ -16,6 +16,7 @@ discard_subscriptions = stream_deps.discard_subscriptions
 estimate_spy_reference = stream_deps.estimate_spy_reference
 log_event = stream_deps.log_event
 option_contracts_from_specs = stream_deps.option_contracts_from_specs
+option_spec_label = stream_deps.option_spec_label
 qualify_and_subscribe = stream_deps.qualify_and_subscribe
 spy_option_contracts = stream_deps.spy_option_contracts
 time = stream_deps.time
@@ -155,10 +156,29 @@ class SpyRotationOps:
         self.rotation_subs = {}
         slice_index = self.rotation_index % plan.rotation_count
         slice_specs = plan.rotations[slice_index]
+        pinned_labels = set(getattr(self, "pinned_subs", {}))
+        max_option_lines = int(
+            getattr(
+                self.stream_settings,
+                "max_option_lines",
+                len(getattr(self, "hot_subs", {})) + len(pinned_labels) + len(slice_specs),
+            )
+        )
+        available_lines = max(
+            max_option_lines
+            - len(getattr(self, "hot_subs", {}))
+            - len(pinned_labels),
+            0,
+        )
+        eligible_specs = tuple(
+            spec
+            for spec in slice_specs
+            if option_spec_label(spec) not in pinned_labels
+        )[:available_lines]
         rejection_sequence = self.subscription_rejection_sequence
         connectivity_sequence = getattr(self, "tws_connectivity_loss_sequence", 0)
         definitions = self._resolve_option_definitions(
-            option_contracts_from_specs(slice_specs)
+            option_contracts_from_specs(eligible_specs)
         )
         replacement = qualify_and_subscribe(
             self.ib,
@@ -167,7 +187,7 @@ class SpyRotationOps:
         )
         if not self._subscription_batch_succeeded(
             replacement,
-            expected_count=len(slice_specs),
+            expected_count=len(eligible_specs),
             rejection_sequence=rejection_sequence,
             connectivity_sequence=connectivity_sequence,
             lane="rotation",
@@ -179,11 +199,10 @@ class SpyRotationOps:
                     "task": "ibkr_stream",
                     "event": "option_rotation_failed",
                     "slice_index": slice_index,
-                    "contracts": len(slice_specs),
+                    "contracts": len(eligible_specs),
                 }
             )
             return
         self.rotation_subs = replacement
         self.rotation_index += 1
         self.rotation_retry_at = 0.0
-

@@ -351,8 +351,9 @@ class OptionSubscriptionOps:
         desired_by_label = {
             label: (label, kind, contract) for label, kind, contract in desired_contracts
         }
+        pinned_labels = set(getattr(self, "pinned_subs", {}))
         retained_labels = set(self.hot_subs) & set(desired_by_label)
-        added_labels = set(desired_by_label) - retained_labels
+        added_labels = set(desired_by_label) - retained_labels - pinned_labels
         obsolete_labels = set(self.hot_subs) - retained_labels
 
         if not self._cancel_batch(self.rotation_subs):
@@ -363,7 +364,10 @@ class OptionSubscriptionOps:
             "max_option_lines",
             len(self.hot_subs) + len(added_labels),
         )
-        free_lines = max(int(max_lines) - len(self.hot_subs), 0)
+        # Pinned exact legs share the SPXW option-line ceiling.  A plan refresh
+        # must not silently add normal hot coverage back above that ceiling.
+        hot_line_budget = max(int(max_lines) - len(pinned_labels), 0)
+        free_lines = max(hot_line_budget - len(self.hot_subs), 0)
         release_count = max(len(added_labels) - free_lines, 0)
         release_labels = set(
             sorted(

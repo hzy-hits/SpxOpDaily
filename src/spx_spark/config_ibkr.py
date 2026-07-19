@@ -164,6 +164,10 @@ class IbkrStreamSettings:
     freeze_quotes_on_connectivity_loss: bool = field(default_factory=lambda: bool(True))
     data_flow_silence_seconds: float = field(default_factory=lambda: 120.0)
     option_stale_after_seconds: float = field(default_factory=lambda: 45.0)
+    exact_leg_pin_enabled: bool = field(default_factory=lambda: bool(True))
+    quote_demand_poll_seconds: float = field(default_factory=lambda: 0.25)
+    quote_demand_path: str = field(default_factory=lambda: "")
+    quote_demand_ack_path: str = field(default_factory=lambda: "")
 
     @classmethod
     def from_env(cls) -> "IbkrStreamSettings":
@@ -260,6 +264,22 @@ class IbkrStreamSettings:
             option_stale_after_seconds=env_float(
                 "IBKR_STREAM_OPTION_STALE_AFTER_SECONDS",
                 float(settings_value("ibkr_stream.option_stale_after_seconds")),
+            ),
+            exact_leg_pin_enabled=env_bool(
+                "IBKR_STREAM_EXACT_LEG_PIN_ENABLED",
+                bool(settings_value("ibkr_stream.exact_leg_pin_enabled")),
+            ),
+            quote_demand_poll_seconds=env_float(
+                "IBKR_STREAM_QUOTE_DEMAND_POLL_SECONDS",
+                float(settings_value("ibkr_stream.quote_demand_poll_seconds")),
+            ),
+            quote_demand_path=env_str(
+                "IBKR_STREAM_QUOTE_DEMAND_PATH",
+                str(settings_value("ibkr_stream.quote_demand_path")),
+            ),
+            quote_demand_ack_path=env_str(
+                "IBKR_STREAM_QUOTE_DEMAND_ACK_PATH",
+                str(settings_value("ibkr_stream.quote_demand_ack_path")),
             ),
         )
 

@@ -53,6 +53,7 @@ class FlushOps:
             **self.base_subs,
             **self.hot_subs,
             **self.rotation_subs,
+            **getattr(self, "pinned_subs", {}),
             **self.spy_subs,
         }
         rows = snapshot_rows(
@@ -127,6 +128,10 @@ class FlushOps:
             ),
             "farm_status": self.farm_health.status.value,
             "rotation_index": self.rotation_index,
+            "pinned_contracts": len(getattr(self, "pinned_subs", {})),
+            "pinned_demand_id": self.exact_leg_pin_demand_id()
+            if hasattr(self, "exact_leg_pin_demand_id")
+            else None,
             "tws_connectivity_lost": self.tws_connectivity_lost,
             "source_session": source_session,
         }

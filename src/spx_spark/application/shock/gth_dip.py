@@ -69,20 +69,32 @@ def advance_gth_dip(
         if isinstance(item, Mapping)
         and (_time(item.get("at")) or now) >= now - timedelta(seconds=long_horizon_seconds)
     ]
+    if samples:
+        # Persisted pre-v4 state may already contain mixed-provider history.
+        # Keep only the latest provider-continuous suffix before computing any
+        # peak/trough geometry.
+        suffix_provider = str(samples[-1].get("provider") or "")
+        suffix: list[dict[str, object]] = []
+        for item in reversed(samples):
+            if str(item.get("provider") or "") != suffix_provider:
+                break
+            suffix.append(item)
+        samples = list(reversed(suffix))
     previous_provider = str(samples[-1].get("provider") or "") if samples else ""
+    provider_changed = bool(previous_provider and previous_provider != provider)
+    if provider_changed:
+        # Provider price bases and timestamps are not interchangeable.  A
+        # switch starts a new continuous observation window; retaining the old
+        # provider's peak/trough would let the new provider confirm a mixed-
+        # coordinate event.  This also catches equal-timestamp failovers.
+        samples = []
+        state["pending"] = None
     enqueued = not samples or _time(samples[-1].get("at")) != now
-    provider_changed = bool(
-        enqueued and previous_provider and previous_provider != provider
-    )
     if enqueued:
         samples.append({"at": now.isoformat(), "es": float(es), "provider": provider})
     state["samples"] = samples
     state["updated_at"] = now.isoformat()
-    if provider_changed:
-        # A confirmation may not span providers: their source timestamps and
-        # price bases are not interchangeable. Raw observations remain for
-        # the horizon detector, but eligibility must start again.
-        state["pending"] = None
+    state["provider_changed"] = provider_changed
 
     # Redelivery mirrors the RTH shock path: re-emit an unacknowledged signal
     # on the retry interval (same event_id, idempotent downstream) until the
@@ -166,33 +178,8 @@ def advance_gth_dip(
         state["pending"] = None
         state["status"] = "suppressed_pre_event"
         return state, None, None
-    prior_pending = state.get("pending") if isinstance(state.get("pending"), Mapping) else {}
-    same_pending = prior_pending.get("event_id") == event_id
-    if same_pending:
-        count = int(prior_pending.get("confirm_count") or 0) + (1 if enqueued else 0)
-    else:
-        count = 1
-    confirm_started_at = (
-        prior_pending.get("confirm_started_at") if same_pending else now.isoformat()
-    )
-    pending = {
-        **chosen,
-        "event_id": event_id,
-        "confirm_count": count,
-        "confirm_started_at": confirm_started_at,
-        "provider": provider,
-    }
-    state["pending"] = pending
-    state["status"] = "confirming"
-    confirm_started = _time(confirm_started_at) or now
-    if (
-        count < confirm_samples
-        or (now - confirm_started).total_seconds() < confirm_hold_seconds
-    ):
-        return state, None, None
-
     detector_policy_version = policy_version(
-        "gth_dip_reclaim.v3",
+        "gth_dip_reclaim.v4",
         {
             "short_horizon_seconds": short_horizon_seconds,
             "long_horizon_seconds": long_horizon_seconds,
@@ -209,12 +196,105 @@ def advance_gth_dip(
             "max_signals_per_session": max_signals_per_session,
             "cooldown_seconds": cooldown_seconds,
             "signal_expiry_seconds": signal_expiry_seconds,
+            "spread_selection_semantics": "first_valid_pending_frozen.v1",
             "spread_min_width_points": spread_min_width_points,
             "spread_max_width_points": spread_max_width_points,
             "spread_default_width_points": spread_default_width_points,
             "exit_clock_et": exit_clock_et,
         },
     )
+    prior_pending = state.get("pending") if isinstance(state.get("pending"), Mapping) else {}
+    spread_policy_version = policy_version(
+        "gth_spread_selection.v1",
+        {
+            "min_width_points": spread_min_width_points,
+            "max_width_points": spread_max_width_points,
+            "default_width_points": spread_default_width_points,
+            "exit_clock_et": exit_clock_et,
+        },
+    )
+    prior_spread_valid = _spread_matches_policy(
+        prior_pending.get("spread"),
+        at=now,
+        session_date=session_date,
+        expected_trough=float(chosen["trough"]),
+        min_width_points=spread_min_width_points,
+        max_width_points=spread_max_width_points,
+        default_width_points=spread_default_width_points,
+        exit_clock_et=exit_clock_et,
+    )
+    same_pending = (
+        prior_pending.get("event_id") == event_id
+        and prior_pending.get("provider") == provider
+        and prior_pending.get("policy_version") == detector_policy_version
+        and prior_pending.get("spread_policy_version") == spread_policy_version
+        and prior_spread_valid
+    )
+    if same_pending:
+        count = int(prior_pending.get("confirm_count") or 0) + (1 if enqueued else 0)
+    else:
+        count = 1
+    confirm_started_at = (
+        prior_pending.get("confirm_started_at") if same_pending else now.isoformat()
+    )
+    frozen_spread = (
+        dict(prior_pending["spread"])
+        if same_pending and isinstance(prior_pending.get("spread"), Mapping)
+        else None
+    )
+    if frozen_spread is None:
+        # Freeze the exact legs as soon as this event first has enough
+        # coordinate evidence.  Confirmation must use these same legs so the
+        # collector can prewarm the contracts while the detector is pending.
+        frozen_spread = _spread_structure(
+            at=now,
+            session_date=session_date,
+            es=float(es),
+            trough=float(chosen["trough"]),
+            expected_move_points=expected_move_points,
+            structure_levels=structure_levels,
+            es_spx_basis=es_spx_basis,
+            min_width_points=spread_min_width_points,
+            max_width_points=spread_max_width_points,
+            default_width_points=spread_default_width_points,
+            exit_clock_et=exit_clock_et,
+        )
+    pending = {
+        **chosen,
+        **strategy_event_fields(
+            policy_version_value=detector_policy_version,
+            valid_until=None,
+            coordinate={
+                "kind": "raw_es",
+                "instrument_id": "future:ES",
+                "observed_value": float(es),
+                "target_value": float(chosen["trough"])
+                + float(chosen["required_recovery_points"]),
+                "spx_observed_value": None,
+                "basis_points": 0.0,
+                "as_of": now,
+                "provider": provider,
+            },
+            block_reasons=(),
+        ),
+        "event_id": event_id,
+        "session_date": session_date,
+        "confirm_count": count,
+        "confirm_started_at": confirm_started_at,
+        "provider": provider,
+        "spread_policy_version": spread_policy_version,
+        "spread": frozen_spread,
+        "automatic_ordering": False,
+    }
+    state["pending"] = pending
+    state["status"] = "confirming"
+    confirm_started = _time(confirm_started_at) or now
+    if (
+        count < confirm_samples
+        or (now - confirm_started).total_seconds() < confirm_hold_seconds
+    ):
+        return state, None, None
+
     valid_until = now + timedelta(seconds=signal_expiry_seconds)
     signal = {
         **pending,
@@ -243,19 +323,7 @@ def advance_gth_dip(
         "expected_move_points": expected_move_points,
         "automatic_ordering": False,
         "entry_quality": _frozen_entry_quality(entry_quality),
-        "spread": _spread_structure(
-            at=now,
-            session_date=session_date,
-            es=float(es),
-            trough=float(pending["trough"]),
-            expected_move_points=expected_move_points,
-            structure_levels=structure_levels,
-            es_spx_basis=es_spx_basis,
-            min_width_points=spread_min_width_points,
-            max_width_points=spread_max_width_points,
-            default_width_points=spread_default_width_points,
-            exit_clock_et=exit_clock_et,
-        ),
+        "spread": dict(frozen_spread) if frozen_spread is not None else None,
     }
     state["last_signal"] = signal
     state["signal_count"] = int(state.get("signal_count") or 0) + 1
@@ -401,6 +469,85 @@ def _spread_structure(
         "exit_by_utc": exit_context["exit_at"].strftime("%H:%M"),
         "quantity_policy": "operator_selected",
     }
+
+
+def _spread_matches_policy(
+    value: object,
+    *,
+    at: datetime,
+    session_date: str,
+    expected_trough: float,
+    min_width_points: float,
+    max_width_points: float,
+    default_width_points: float,
+    exit_clock_et: str,
+) -> bool:
+    if not isinstance(value, Mapping):
+        return False
+    long_strike = _finite_number(value.get("long_strike"))
+    short_strike = _finite_number(value.get("short_strike"))
+    width = _finite_number(value.get("width_points"))
+    invalidation = _finite_number(value.get("invalidation_es"))
+    basis = _finite_number(value.get("es_spx_basis_used"))
+    spx_equiv = _finite_number(value.get("spx_equiv"))
+    target_wall = _finite_number(value.get("target_wall"))
+    target_wall_kind = value.get("target_wall_kind")
+    expected_exit = _gth_exit_context(session_date, exit_clock_et=exit_clock_et)
+    raw_exit_at = value.get("exit_at")
+    try:
+        exit_at = (
+            datetime.fromisoformat(raw_exit_at)
+            if isinstance(raw_exit_at, str)
+            else None
+        )
+    except ValueError:
+        exit_at = None
+    anchor = value.get("anchor")
+    return bool(
+        value.get("right") == "C"
+        and value.get("expiry_date") == session_date
+        and long_strike is not None
+        and short_strike is not None
+        and long_strike > 0
+        and short_strike > long_strike
+        and long_strike.is_integer()
+        and short_strike.is_integer()
+        and int(long_strike) % 5 == 0
+        and int(short_strike) % 5 == 0
+        and width is not None
+        and width == short_strike - long_strike
+        and min_width_points <= width <= max_width_points
+        and anchor in {"structure_wall", "expected_move", "default"}
+        and (anchor != "default" or width == int(default_width_points))
+        and (
+            anchor != "structure_wall"
+            or (
+                target_wall is not None
+                and target_wall_kind in {"flip_high", "call_wall"}
+                and target_wall > long_strike
+                and target_wall - long_strike >= min_width_points
+                and short_strike
+                == min(target_wall, long_strike + int(max_width_points))
+            )
+        )
+        and (
+            anchor == "structure_wall"
+            or (target_wall is None and target_wall_kind is None)
+        )
+        and invalidation == expected_trough
+        and basis is not None
+        and spx_equiv is not None
+        and _round_strike(spx_equiv) == long_strike
+        and value.get("exit_clock_et") == exit_clock_et
+        and expected_exit is not None
+        and value.get("exit_window_note") == expected_exit["window_note"]
+        and value.get("exit_by_utc") == expected_exit["exit_at"].strftime("%H:%M")
+        and value.get("quantity_policy") == "operator_selected"
+        and exit_at is not None
+        and exit_at.tzinfo is not None
+        and exit_at.astimezone(timezone.utc) == expected_exit["exit_at"]
+        and _utc(at) < exit_at.astimezone(timezone.utc)
+    )
 
 
 def _gth_exit_context(
