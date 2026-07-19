@@ -931,6 +931,11 @@ class LiveSessionAccumulator:
             self._rollover_for_clock(request_clock)
             self._freeze_due(request_clock)
             if self._manifest is None or self._runtime is None or self._active_date is None:
+                if (
+                    self._input_status == "waiting"
+                    and self._last_error == "live_snapshot_not_rth"
+                ):
+                    raise LiveSessionError("live_session_not_rth")
                 raise LiveSessionError("live_session_unavailable")
             active_date = self._active_date
             manifest = self._manifest

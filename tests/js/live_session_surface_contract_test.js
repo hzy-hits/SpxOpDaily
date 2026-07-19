@@ -65,6 +65,8 @@ for (const name of [
   "liveSurfaceDisplayState",
   "liveSurfaceIdentity",
   "liveSurfaceTransitionIssue",
+  "unavailableLiveMessage",
+  "unavailableLiveReason",
 ]) {
   assert.equal(typeof hooks[name], "function", `missing test hook ${name}`);
 }
@@ -435,6 +437,11 @@ function expirePayload(payload) {
     hooks.liveSurfaceDisplayState(normalized, arrivedAfterLease),
     "expired",
     "a response that can only have arrived after the exclusive lease is masked immediately",
+  );
+  assert.equal(hooks.unavailableLiveReason("live_session_not_rth"), "market_closed");
+  assert.match(
+    hooks.unavailableLiveMessage("live_session_not_rth"),
+    /first validated RTH snapshot/,
   );
 })().catch((error) => {
   process.nextTick(() => { throw error; });

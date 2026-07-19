@@ -4940,11 +4940,12 @@ function renderLiveSessionSurfaceChrome(phase = app.livePhase, reason = app.live
   if (app.mode !== "live") return;
   const surface = app.sessionSurface;
   const historicalOnly = phase === "historical_only";
+  const marketClosed = unavailableLiveReason(reason) === "market_closed";
   const fresh = phase === "fresh" || phase === "refreshing" || phase === "degraded_retained";
   const unavailable = !surface || phase === "unavailable";
   const status = unavailable ? "unavailable" : historicalOnly ? "degraded" : surface.status;
   const label = unavailable
-    ? "Live · Unavailable"
+    ? marketClosed ? "Live · Market closed" : "Live · Unavailable"
     : historicalOnly
       ? "Live · Historical only"
       : phase === "degraded_retained"
@@ -4963,7 +4964,7 @@ function renderLiveSessionSurfaceChrome(phase = app.livePhase, reason = app.live
     ? Math.max((surface.validUntilMs - serverNowMs) / 1_000, 0)
     : null;
   dom.refreshState.textContent = unavailable
-    ? "Live surface unavailable · retrying"
+    ? marketClosed ? "Market closed · waiting for next RTH" : "Live surface unavailable · retrying"
     : historicalOnly
       ? `Historical frozen through ${formatMarketTime(surface.historyFrozenThrough, false)}`
       : `${formatAge(ageSeconds)} old · lease ${formatAge(leaseSeconds)}`;
@@ -5002,6 +5003,16 @@ function renderLiveSessionSurfaceChrome(phase = app.livePhase, reason = app.live
   dom.signConvention.textContent = "calls + / puts − proxy; participant and dealer side unknown";
   dom.cockpitLoading.hidden = !(phase === "connecting" && !surface);
   updateModeChrome();
+}
+
+function unavailableLiveReason(reason) {
+  return reason === "live_session_not_rth" ? "market_closed" : "unavailable";
+}
+
+function unavailableLiveMessage(reason) {
+  return unavailableLiveReason(reason) === "market_closed"
+    ? "Market is closed. Live Session Canvas will start from the first validated RTH snapshot; Replay remains available for prior sessions."
+    : `Live Session Surface unavailable: ${reason}`;
 }
 
 function expireLiveSessionSurface(expectedArtifactSha256 = null) {
@@ -5444,7 +5455,16 @@ async function refreshLiveSessionSurface() {
       }
       return;
     }
-    if (!response.ok) throw new Error(`live_session_surface_http_${response.status}`);
+    if (!response.ok) {
+      let responseError = null;
+      try {
+        const errorPayload = await response.json();
+        responseError = isObject(errorPayload) ? nonEmptyString(errorPayload.error) : null;
+      } catch (_error) {
+        responseError = null;
+      }
+      throw new Error(responseError || `live_session_surface_http_${response.status}`);
+    }
     const payload = await response.json();
     const surface = await normalizeSessionSurface(payload, {
       mode: "live",
@@ -5491,7 +5511,7 @@ async function refreshLiveSessionSurface() {
       renderCockpitStatic();
       renderCockpitAudit();
       renderLiveSessionSurfaceChrome();
-      setNotice(`Live Session Surface unavailable: ${reason}`, true);
+      setNotice(unavailableLiveMessage(reason), true);
     }
   } finally {
     window.clearTimeout(abortTimer);
@@ -6073,6 +6093,8 @@ if (isObject(globalThis.__SPX_SPARK_TEST_HOOK__)) {
     liveSurfaceDisplayState,
     liveSurfaceIdentity,
     liveSurfaceTransitionIssue,
+    unavailableLiveMessage,
+    unavailableLiveReason,
     missingRangeAppliesToPanel,
     normalizeSessionSurface,
     normalizeSessionMetricUnits,

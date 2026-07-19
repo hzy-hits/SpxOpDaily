@@ -380,6 +380,8 @@ def test_closed_weekend_snapshot_is_waiting_not_invalid(tmp_path: Path) -> None:
     assert health["input_status"] == "waiting"
     assert health["last_error"] == "live_snapshot_not_rth"
     assert health["active_session"] is None
+    with pytest.raises(LiveSessionError, match="live_session_not_rth"):
+        accumulator.session_surface(SELECTOR, now=sunday)
 
 
 def test_frozen_derived_column_survives_new_input_and_restart(tmp_path: Path) -> None:
