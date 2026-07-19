@@ -67,6 +67,7 @@ for (const name of [
   "normalizeSessionSegments",
   "normalizeSessionReference",
   "referencePresentation",
+  "renderReferenceChrome",
   "robustDomain",
   "expandOnlyDomain",
   "sessionTimeToX",
@@ -602,6 +603,17 @@ async function sign(payload) {
     hooks.scheduledMissingSessionSurfacePresentation({ sessionKind: "rth" }).scheduledMissing,
     false,
   );
+  const closedGapPresentation = hooks.referencePresentation(normalizedV2, "closed_gap");
+  assert.equal(closedGapPresentation.providerText, "CLOSED GAP · NO PROVIDER");
+  assert.equal(closedGapPresentation.referenceText, "REFERENCE MISSING");
+  assert.equal(closedGapPresentation.clockText, "CLOCKS MISSING");
+  hooks.renderReferenceChrome(normalizedV2, "closed_gap");
+  assert.equal(
+    stubElements.get("#provider-chip").textContent,
+    "CLOSED GAP · NO PROVIDER",
+  );
+  assert.equal(stubElements.get("#reference-chip").textContent, "REFERENCE MISSING");
+  assert.match(stubElements.get("#reference-chip").className, /missing/);
   hooks.renderSessionSurfaceChrome("unavailable", "session_surface_http_503", {
     retrying: true,
   });

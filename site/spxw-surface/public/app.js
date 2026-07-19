@@ -3637,7 +3637,7 @@ function referenceIsoLabel(timeMs) {
     : "unavailable";
 }
 
-function referencePresentation(surface) {
+function referencePresentation(surface, frameSessionKind = null) {
   if (!surface) {
     return {
       providerText: "Provider —",
@@ -3665,14 +3665,19 @@ function referencePresentation(surface) {
     };
   }
   const displayTimeMs = cockpitDisplayTimeMs(surface) ?? surface.asOfMs;
-  const segment = sessionSegmentAtTime(surface.sessionSegments, displayTimeMs);
-  const reference = surface.reference;
+  const displaySegment = sessionSegmentAtTime(surface.sessionSegments, displayTimeMs);
+  const effectiveSessionKind = ["gth", "closed_gap", "rth"].includes(frameSessionKind)
+    ? frameSessionKind
+    : displaySegment?.kind;
+  const segment = surface.sessionSegments.find((item) => item.kind === effectiveSessionKind) ||
+    displaySegment;
+  const reference = effectiveSessionKind === "closed_gap" ? null : surface.reference;
   const surfaceProvider = segment?.surfaceProvider?.toUpperCase() || "—";
   const referenceProvider = reference?.provider?.toUpperCase() ||
     segment?.referenceProvider?.toUpperCase() || "—";
-  const providerText = segment?.kind === "gth"
+  const providerText = effectiveSessionKind === "gth"
     ? `${surfaceProvider} SPXW · ${referenceProvider} ES−BASIS INFERRED`
-    : segment?.kind === "rth"
+    : effectiveSessionKind === "rth"
       ? `${surfaceProvider} SPXW · ${referenceProvider} SPX REF`
       : "CLOSED GAP · NO PROVIDER";
   const providerTitle = segment
@@ -3721,8 +3726,13 @@ function referencePresentation(surface) {
   };
 }
 
-function renderReferenceChrome(surface = app.sessionSurface) {
-  const presentation = referencePresentation(surface);
+function renderReferenceChrome(surface = app.sessionSurface, frameSessionKind = null) {
+  const activeFrameKind = frameSessionKind || (
+    surface === app.sessionSurface
+      ? app.frames[app.sessionSurfaceKeyframeIndex]?.sessionKind
+      : null
+  );
+  const presentation = referencePresentation(surface, activeFrameKind);
   dom.providerChip.textContent = presentation.providerText;
   dom.providerChip.title = presentation.providerTitle;
   dom.referenceChip.textContent = presentation.referenceText;
@@ -7107,6 +7117,7 @@ if (isObject(globalThis.__SPX_SPARK_TEST_HOOK__)) {
     normalizeSessionSegments,
     normalizeReplayTrend,
     referencePresentation,
+    renderReferenceChrome,
     robustDomain,
     verifyReplayDigests,
     legacyReplayFrameIndexFor,
