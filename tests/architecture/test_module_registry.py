@@ -23,6 +23,7 @@ LAYERS = {
     "config_providers": 1,
     "storage": 1,
     "state_io": 1,
+    "surface_artifact": 1,
     "sampling": 1,
     "runtime_mode": 1,
     "provider_adapter": 1,
@@ -75,6 +76,11 @@ LAYERS = {
     "surface_replay_session_data": 5,
     "surface_replay_session_models": 5,
     "surface_replay_trend": 5,
+    "surface_live_session_http": 5,
+    "surface_live_session_models": 5,
+    "surface_live_session_projection": 5,
+    "surface_live_session_store": 5,
+    "surface_live_session_worker": 5,
     "infrastructure": 4,
 }
 

@@ -21,7 +21,11 @@ services:
       - ${SPXW_SURFACE_PUBLISH_DIR:-/srv/data/spx-spark/data/published/spxw-surface}:/usr/share/nginx/data:ro
       - ${SPXW_SURFACE_REPLAY_RUNTIME_DIR:-/srv/data/spx-spark/data/published/spxw-surface/runtime}:/usr/share/nginx/replay-runtime:ro
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:18082/healthz"]
+      test:
+        - "CMD-SHELL"
+        - >-
+          wget -qO- http://127.0.0.1:18082/healthz >/dev/null &&
+          wget -qO- http://127.0.0.1:18082/api/v1/live/healthz >/dev/null
       interval: 30s
       timeout: 3s
       retries: 3

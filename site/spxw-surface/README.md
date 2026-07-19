@@ -31,12 +31,21 @@ The corresponding managed-tunnel ingress is intentionally path-free:
 Keep this rule before the final catch-all ingress and validate both the tunnel
 rule and the unauthenticated 302/401 chain after recovery on a new host.
 
-The browser polls the relative endpoint `api/v1/snapshot` every five seconds.
-The endpoint maps only to the dedicated publisher output:
+Live Cockpit polls the leased Session Surface endpoint every five seconds:
+
+```text
+api/v1/live/session-surface?role=front&weighting=oi_weighted&bucket_minutes=5&price_step=5
+```
+
+The host accumulator validates the publisher self hash, freezes completed
+five-minute columns durably, and serves the shared Live/Replay matrix contract
+over `runtime/live/live-api.sock`. The legacy rolling scenario diagnostic reads
+`api/v1/snapshot` only when its drawer is opened. That endpoint maps only to the
+dedicated publisher output:
 
 `/srv/data/spx-spark/data/published/spxw-surface/snapshot.json`
 
-Replay uses four read-only API resources:
+Replay uses read-only API resources:
 
 - `api/v1/replay/sessions`
 - `api/v1/replay/sessions/YYYY-MM-DD/timeline?step_minutes=5`
@@ -87,10 +96,14 @@ configurable UID/GID and does not require broader permissions.
 
 ## Run
 
-The live producer must publish at least one snapshot before its endpoint can
-return 200. Install and start the Unix-socket replay service first:
+The live producer must publish at least one validated RTH snapshot before the
+Session Canvas endpoint can return 200. Weekends, holidays, pre-open, and a
+missing or expired lease remain fail-closed. Install the independent Live
+service and the Unix-socket Replay service first:
 
 ```bash
+systemctl --user restart spx-spark-surface-dashboard.service
+/home/ubuntu/spx-spark/scripts/install-spxw-surface-live-service.sh --now
 install -m 0644 \
   /home/ubuntu/spx-spark/systemd/spx-spark-surface-replay.service \
   /home/ubuntu/.config/systemd/user/spx-spark-surface-replay.service
@@ -103,6 +116,9 @@ systemctl --user enable --now spx-spark-surface-replay.service
 systemctl --user enable --now spx-spark-surface-replay-warm.timer
 curl --unix-socket \
   /srv/data/spx-spark/data/published/spxw-surface/runtime/replay-api.sock \
+  http://localhost/healthz
+curl --unix-socket \
+  /srv/data/spx-spark/data/published/spxw-surface/runtime/live/live-api.sock \
   http://localhost/healthz
 ```
 
@@ -142,3 +158,10 @@ The generator refuses to overwrite an existing replay. `--force` is reserved
 for an explicitly audited replacement. Session Replay never uses `--force`;
 lookback, projection-policy, or source-version changes write to a new cache
 namespace.
+
+Live state is retained under
+`published/spxw-surface/live/session=YYYY-MM-DD/`. Do not delete it during a
+restart or rollback: its immutable boundary records are the evidence that later
+snapshots did not rewrite earlier columns. Operational details and the exact
+clock/proxy contract are documented in
+[`docs/spxw-live-session-surface-2026-07-19.md`](../../docs/spxw-live-session-surface-2026-07-19.md).

@@ -1353,6 +1353,10 @@ body {
   min-width: 178px;
 }
 
+body.mode-live .replay-session-picker {
+  display: none;
+}
+
 .compact-control.expiry-control {
   min-width: 154px;
 }

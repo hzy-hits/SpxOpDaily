@@ -528,7 +528,11 @@ def _frame_for_historical_end(
     frames: tuple[_FrameState, ...],
     end: datetime,
 ) -> _FrameState | None:
-    candidates = [row for row in frames if row.at <= end < row.valid_until]
+    candidates = [
+        row
+        for row in frames
+        if (row.known_at or row.at) <= end < row.valid_until
+    ]
     return candidates[-1] if candidates else None
 
 
@@ -537,7 +541,11 @@ def _current_frame(
     as_of: datetime,
 ) -> _FrameState | None:
     cutoff = as_utc(as_of)
-    candidates = [row for row in frames if row.at <= cutoff < row.valid_until]
+    candidates = [
+        row
+        for row in frames
+        if (row.known_at or row.at) <= cutoff < row.valid_until
+    ]
     return candidates[-1] if candidates else None
 
 

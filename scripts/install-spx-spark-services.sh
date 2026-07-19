@@ -26,6 +26,10 @@ ln -sfn "$ROOT/systemd/spx-spark-data-compact-weekend.timer" "$USER_UNIT_DIR/spx
 ln -sfn "$ROOT/systemd/spx-spark-backtest-weekly.service" "$USER_UNIT_DIR/spx-spark-backtest-weekly.service"
 ln -sfn "$ROOT/systemd/spx-spark-backtest-weekly.timer" "$USER_UNIT_DIR/spx-spark-backtest-weekly.timer"
 
+# Pre-create the narrowly writable live-surface paths before its strict
+# filesystem sandbox is established, then install its user unit idempotently.
+"$ROOT/scripts/install-spxw-surface-live-service.sh"
+
 systemctl --user daemon-reload
 systemctl --user enable spx-spark-24h.service
 systemctl --user enable spx-spark-market-features-hot.service
@@ -47,6 +51,7 @@ echo "  spx-spark-market-features-hot.service"
 echo "  spx-spark-intraday-shock-hot.service"
 echo "  spx-spark-notification-delivery.service"
 echo "  spx-spark-surface-dashboard.service"
+echo "  spx-spark-surface-live.service"
 echo "  spx-spark-ibkr-stream.service"
 echo "  spx-spark-post-close-review.timer"
 echo "  spx-spark-morning-map.timer"
@@ -69,5 +74,6 @@ if [[ "${1:-}" == "--now" ]]; then
   systemctl --user restart spx-spark-intraday-shock-hot.service
   systemctl --user restart spx-spark-notification-delivery.service
   systemctl --user restart spx-spark-surface-dashboard.service
-  systemctl --user status spx-spark-24h.service spx-spark-market-features-hot.service spx-spark-intraday-shock-hot.service spx-spark-notification-delivery.service spx-spark-surface-dashboard.service spx-spark-ibkr-stream.service --no-pager
+  "$ROOT/scripts/install-spxw-surface-live-service.sh" --now
+  systemctl --user status spx-spark-24h.service spx-spark-market-features-hot.service spx-spark-intraday-shock-hot.service spx-spark-notification-delivery.service spx-spark-surface-dashboard.service spx-spark-surface-live.service spx-spark-ibkr-stream.service --no-pager
 fi

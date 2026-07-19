@@ -1,0 +1,36 @@
+[Unit]
+Description=SPX Spark durable read-only SPXW live session-surface API
+After=spx-spark-surface-dashboard.service
+Wants=spx-spark-surface-dashboard.service
+ConditionPathIsDirectory=/srv/data/spx-spark/data/published/spxw-surface/live
+ConditionPathIsDirectory=/srv/data/spx-spark/data/published/spxw-surface/runtime/live
+
+[Service]
+Type=simple
+WorkingDirectory=/home/ubuntu/spx-spark
+Environment=PATH=/home/ubuntu/.local/bin:/home/ubuntu/.cargo/bin:/usr/local/bin:/usr/bin:/bin
+Environment=SPX_SPARK_DISABLE_DOTENV=1
+Environment=MARKET_DATA_DATA_ROOT=/srv/data/spx-spark/data
+ExecStart=/home/ubuntu/spx-spark/scripts/run-spxw-surface-live-service.sh
+Restart=always
+RestartSec=2
+KillSignal=SIGTERM
+TimeoutStopSec=15
+SuccessExitStatus=143 SIGTERM
+UMask=0077
+Nice=5
+CPUWeight=100
+IOWeight=100
+MemoryHigh=512M
+MemoryMax=1G
+TasksMax=32
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+RestrictAddressFamilies=AF_UNIX
+ReadWritePaths=/srv/data/spx-spark/data/published/spxw-surface/live
+ReadWritePaths=/srv/data/spx-spark/data/published/spxw-surface/runtime/live
+
+[Install]
+WantedBy=default.target

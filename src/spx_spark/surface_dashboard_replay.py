@@ -6,7 +6,6 @@ import argparse
 import hashlib
 import json
 import math
-import struct
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -30,6 +29,7 @@ from spx_spark.marketdata import (
     clean_float,
 )
 from spx_spark.storage import LatestState, select_best_quotes
+from spx_spark.surface_artifact import canonical_sha256 as _canonical_sha256
 from spx_spark.state_io import exclusive_state_lock
 from spx_spark.surface_dashboard import (
     DASHBOARD_SCHEMA_VERSION,
@@ -667,37 +667,6 @@ def load_replay_state(
         min_observation_age_seconds=min(observation_ages),
         selection_audit=selection_audit,
     )
-
-
-def _canonical_bytes(value: object) -> bytes:
-    if value is None:
-        return b"n;"
-    if isinstance(value, bool):
-        return b"b1;" if value else b"b0;"
-    if isinstance(value, int | float):
-        if isinstance(value, int) and abs(value) > 2**53 - 1:
-            raise ValueError("canonical integer exceeds IEEE-754 safe range")
-        number = float(value)
-        if not math.isfinite(number):
-            raise ValueError("canonical number must be finite")
-        return b"f" + struct.pack(">d", number).hex().encode("ascii") + b";"
-    if isinstance(value, str):
-        encoded = value.encode("utf-8")
-        return b"s" + str(len(encoded)).encode("ascii") + b":" + encoded
-    if isinstance(value, list | tuple):
-        parts = [_canonical_bytes(item) for item in value]
-        return b"a" + str(len(parts)).encode("ascii") + b"[" + b"".join(parts) + b"]"
-    if isinstance(value, dict):
-        if not all(isinstance(key, str) for key in value):
-            raise TypeError("canonical object keys must be strings")
-        keys = sorted(value)
-        parts = [_canonical_bytes(key) + _canonical_bytes(value[key]) for key in keys]
-        return b"o" + str(len(parts)).encode("ascii") + b"{" + b"".join(parts) + b"}"
-    raise TypeError(f"unsupported canonical value: {type(value).__name__}")
-
-
-def _canonical_sha256(value: object) -> str:
-    return hashlib.sha256(_canonical_bytes(value)).hexdigest()
 
 
 def _projection_policy(settings: StorageSettings) -> dict[str, object]:

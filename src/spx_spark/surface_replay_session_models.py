@@ -113,6 +113,10 @@ class _FrameState:
     strike_rows: tuple[Mapping[str, Any], ...]
     quality: str
     warnings: tuple[str, ...]
+    # Replay artifacts are materialized at their model clock, so ``None``
+    # means availability equals ``at``.  Live frames retain the later local
+    # acceptance clock separately to avoid using availability as pricing time.
+    known_at: datetime | None = None
 
 
 class SessionSurfaceBuildCache:

@@ -42,6 +42,7 @@ def test_frontend_keeps_live_and_replay_clock_contracts_separate() -> None:
     page = read("public/index.html")
 
     assert 'const REPLAY_SESSIONS_URL = "api/v1/replay/sessions"' in app
+    assert 'const LIVE_SESSION_SURFACE_URL = "api/v1/live/session-surface"' in app
     assert "function normalizeReplaySessions(raw)" in app
     assert "function normalizeReplayTimeline(raw, sessionDate, expectedProjectionPolicySha256)" in app
     assert "async function loadReplayCatalog()" in app
@@ -82,7 +83,14 @@ def test_frontend_keeps_live_and_replay_clock_contracts_separate() -> None:
     assert "sessionSurfaceFrameIndexFor" in app
     assert "return Math.max(index, 0)" not in app
     assert 'if (app.mode !== "live") return;' in app
-    assert "window.setTimeout(refreshSnapshot, POLL_INTERVAL_MS)" in app
+    assert "async function refreshLiveSessionSurface()" in app
+    assert "LIVE_SESSION_REQUEST_TIMEOUT_MS" in app
+    assert "Math.max(POLL_INTERVAL_MS - elapsed, 0)" in app
+    assert "live_surface_server_time_header_mismatch" in app
+    assert "historicalOnlyLiveSurface" in app
+    assert "dom.scenarioDiagnostic.open = false" in app
+    assert "else refreshLiveSessionSurface();" in app
+    assert "if (!isReplayView()) return;" in app
     assert "HISTORICAL REPLAY" in page
     assert "Frozen" in page
     assert "Not live" in page
@@ -126,6 +134,8 @@ def test_frontend_keeps_live_and_replay_clock_contracts_separate() -> None:
     assert 'id="cockpit-gamma-base"' in page
     assert 'id="cockpit-strike-base"' in page
     assert 'id="cockpit-charm-base"' in page
+    assert 'id="cockpit-live-placeholder"' not in page
+    assert "LEGACY ROLLING SNAPSHOT" in page
     assert "verifiedReplayFrameCache" not in app
     assert "@media (max-width: 380px)" in read("public/styles.css")
 
@@ -148,6 +158,19 @@ def test_frontend_strictly_normalizes_causal_session_surface_fixture() -> None:
         [
             "node",
             str(ROOT / "tests" / "js" / "session_surface_contract_test.js"),
+            str(SITE / "public" / "app.js"),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_frontend_strictly_normalizes_live_session_surface_and_lease() -> None:
+    subprocess.run(
+        [
+            "node",
+            str(ROOT / "tests" / "js" / "live_session_surface_contract_test.js"),
             str(SITE / "public" / "app.js"),
         ],
         check=True,

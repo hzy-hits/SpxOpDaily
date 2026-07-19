@@ -1,6 +1,7 @@
 "use strict";
 
 const SNAPSHOT_URL = "api/v1/snapshot";
+const LIVE_SESSION_SURFACE_URL = "api/v1/live/session-surface";
 const REPLAY_SESSIONS_URL = "api/v1/replay/sessions";
 const SESSION_SURFACE_SCHEMA_VERSION = 1;
 const SESSION_SURFACE_KIND = "spxw_session_surface";
@@ -27,8 +28,17 @@ const REPLAY_MARKET_TIME_RATE = 150;
 const MARKET_TIME_ZONE = "America/New_York";
 const POLL_INTERVAL_MS = 5_000;
 const REQUEST_TIMEOUT_MS = 4_500;
+const LIVE_SESSION_REQUEST_TIMEOUT_MS = 15_000;
 const REPLAY_REQUEST_TIMEOUT_MS = 60_000;
 const SESSION_SURFACE_RETRY_DELAYS_MS = [1_000, 3_000, 10_000];
+const LIVE_STATUS_VALUES = new Set([
+  "initializing",
+  "ready",
+  "degraded",
+  "lease_expired",
+  "closed",
+  "unavailable",
+]);
 const SVG_NS = "http://www.w3.org/2000/svg";
 
 const METRICS = {
@@ -120,7 +130,6 @@ const dom = {
   replayTimelineEnd: document.querySelector("#replay-timeline-end"),
   sessionCockpit: document.querySelector("#session-cockpit"),
   cockpitTimeline: document.querySelector("#cockpit-timeline"),
-  cockpitLivePlaceholder: document.querySelector("#cockpit-live-placeholder"),
   cockpitLoading: document.querySelector("#cockpit-loading"),
   cockpitTooltip: document.querySelector("#cockpit-tooltip"),
   cockpitGammaStage: document.querySelector("#cockpit-gamma-stage"),
@@ -227,6 +236,14 @@ const app = {
   reducedMotionTimer: null,
   requestController: null,
   requestGeneration: 0,
+  liveLeaseTimer: null,
+  liveServerAnchorMs: null,
+  livePerformanceAnchorMs: null,
+  liveRequestStartedAtMs: null,
+  livePhase: "off",
+  liveDiagnosticController: null,
+  liveDiagnosticGeneration: 0,
+  liveLastError: "",
   replayCatalogLoading: false,
   projectionPolicySha256: "",
   timelineSha256: "",
@@ -1239,7 +1256,7 @@ function normalizeSessionTimeBuckets(raw, sessionStartMs, sessionEndMs, bucketMi
   return buckets;
 }
 
-function normalizeSurfaceColumn(raw, bucket, asOfMs) {
+function normalizeSurfaceColumn(raw, bucket, asOfMs, { mode = "replay" } = {}) {
   if (!isObject(raw)) throw new Error("invalid_session_surface_column");
   const kind = String(raw.kind || "").toLowerCase();
   if (!["historical", "projection", "missing"].includes(kind)) {
@@ -1252,11 +1269,34 @@ function normalizeSurfaceColumn(raw, bucket, asOfMs) {
       (sourceAt && sourceAt.getTime() > asOfMs)) {
     throw new Error("session_surface_lookahead_column");
   }
+  const knownAt = raw.known_at === null || raw.known_at === undefined
+    ? null
+    : parseDate(raw.known_at);
+  const acceptedAt = raw.accepted_at === null || raw.accepted_at === undefined
+    ? null
+    : parseDate(raw.accepted_at);
+  const sourceFrameSha256 = raw.source_frame_sha256 === null ||
+    raw.source_frame_sha256 === undefined
+    ? null
+    : nonEmptyString(raw.source_frame_sha256);
+  if (mode === "live" && kind !== "missing") {
+    if (!sourceAt || !knownAt || !acceptedAt ||
+        knownAt.getTime() < sourceAt.getTime() ||
+        acceptedAt.getTime() < knownAt.getTime() ||
+        acceptedAt.getTime() > asOfMs ||
+        !sha256String(sourceFrameSha256)) {
+      throw new Error("invalid_live_session_surface_column_clock");
+    }
+  }
   if (kind === "historical" && bucket.endMs > asOfMs) {
     throw new Error("session_surface_historical_after_cutoff");
   }
   if (kind === "historical" && sourceAt && sourceAt.getTime() > bucket.endMs) {
     throw new Error("session_surface_historical_source_after_bucket");
+  }
+  if (mode === "live" && kind === "historical" && acceptedAt &&
+      acceptedAt.getTime() > bucket.endMs) {
+    throw new Error("live_session_surface_historical_accepted_after_bucket");
   }
   if (kind === "projection" && bucket.endMs <= asOfMs) {
     throw new Error("session_surface_projection_before_cutoff");
@@ -1278,6 +1318,9 @@ function normalizeSurfaceColumn(raw, bucket, asOfMs) {
     kind,
     quality: normalizedStatus(raw.quality),
     sourceAtMs: sourceAt?.getTime() ?? null,
+    knownAtMs: knownAt?.getTime() ?? null,
+    acceptedAtMs: acceptedAt?.getTime() ?? null,
+    sourceFrameSha256,
     validUntilMs: validUntil?.getTime() ?? null,
     reason: nonEmptyString(raw.reason) || nonEmptyString(raw.missing_reason),
   };
@@ -1431,12 +1474,15 @@ function sessionMetricUnitLabel(surface, metric) {
 
 async function normalizeSessionSurface(raw, expected = {}) {
   if (!isObject(raw)) throw new Error("session_surface_not_an_object");
+  const mode = expected.mode === "live" ? "live" : "replay";
   if (
     raw.schema_version !== SESSION_SURFACE_SCHEMA_VERSION ||
     raw.kind !== SESSION_SURFACE_KIND ||
     raw.policy_version !== SESSION_SURFACE_POLICY_VERSION ||
-    raw.mode !== "replay" ||
-    raw.provider !== "schwab" ||
+    raw.mode !== mode ||
+    (mode === "replay"
+      ? raw.provider !== "schwab"
+      : !["schwab", "ibkr", "mixed", "unavailable"].includes(raw.provider)) ||
     raw.trading_class !== "SPXW" ||
     raw.coordinate !== "SPX"
   ) {
@@ -1456,8 +1502,103 @@ async function normalizeSessionSurface(raw, expected = {}) {
       asOf.getTime() < sessionStart.getTime() || asOf.getTime() > sessionEnd.getTime()) {
     throw new Error("invalid_session_surface_clock_contract");
   }
-  if (expected.at instanceof Date && asOf.getTime() !== expected.at.getTime()) {
+  if (mode === "replay" && expected.at instanceof Date &&
+      asOf.getTime() !== expected.at.getTime()) {
     throw new Error("unexpected_session_surface_as_of");
+  }
+  let status = "ready";
+  let liveStatus = null;
+  let createdAt = null;
+  let acceptedAt = null;
+  let sourceAsOf = null;
+  let validUntil = null;
+  let historyFrozenThrough = null;
+  let accumulatorStartedAt = null;
+  let serverTime = null;
+  let availability = null;
+  if (mode === "replay") {
+    for (const field of [
+      "created_at",
+      "server_time",
+      "accepted_at",
+      "source_as_of",
+      "valid_until",
+      "live_status",
+      "availability",
+      "history_frozen_through",
+      "accumulator_started_at",
+    ]) {
+      if (Object.prototype.hasOwnProperty.call(raw, field)) {
+        throw new Error("replay_session_surface_has_live_contract");
+      }
+    }
+  } else {
+    status = normalizedStatus(raw.status || raw.quality);
+    liveStatus = nonEmptyString(raw.live_status);
+    createdAt = parseDate(raw.created_at);
+    serverTime = parseDate(raw.server_time);
+    acceptedAt = raw.accepted_at === null ? null : parseDate(raw.accepted_at);
+    sourceAsOf = raw.source_as_of === null ? null : parseDate(raw.source_as_of);
+    validUntil = raw.valid_until === null ? null : parseDate(raw.valid_until);
+    historyFrozenThrough = raw.history_frozen_through === null
+      ? null
+      : parseDate(raw.history_frozen_through);
+    accumulatorStartedAt = parseDate(raw.accumulator_started_at);
+    availability = raw.availability;
+    if (!LIVE_STATUS_VALUES.has(liveStatus) ||
+        !["ready", "degraded", "unavailable"].includes(status) ||
+        raw.automatic_ordering !== false ||
+        [
+          "source_as_of",
+          "accepted_at",
+          "valid_until",
+          "history_frozen_through",
+          "spot",
+          "spot_source_at",
+          "spot_known_at",
+        ].some((field) => !Object.prototype.hasOwnProperty.call(raw, field)) ||
+        !createdAt || !serverTime || !accumulatorStartedAt ||
+        !isObject(availability) ||
+        [
+          "projection_available",
+          "current_strike_profile_available",
+          "current_spot_available",
+          "historical_surface_available",
+        ].some((field) => typeof availability[field] !== "boolean")) {
+      throw new Error("invalid_live_session_surface_root_contract");
+    }
+    const acceptedMs = acceptedAt?.getTime() ?? null;
+    const sourceAsOfMs = sourceAsOf?.getTime() ?? null;
+    const validUntilMs = validUntil?.getTime() ?? null;
+    const frozenMs = historyFrozenThrough?.getTime() ?? null;
+    if (
+      accumulatorStartedAt.getTime() > createdAt.getTime() ||
+      createdAt.getTime() < asOf.getTime() ||
+      serverTime.getTime() < createdAt.getTime() ||
+      serverTime.getTime() < asOf.getTime() ||
+      (acceptedMs !== null && (
+        acceptedMs > asOf.getTime() || acceptedMs > createdAt.getTime()
+      )) ||
+      (sourceAsOfMs !== null && (
+        acceptedMs === null || sourceAsOfMs > acceptedMs
+      )) ||
+      (validUntilMs !== null && (
+        acceptedMs === null || validUntilMs <= acceptedMs
+      )) ||
+      (frozenMs !== null && (
+        frozenMs < sessionStart.getTime() ||
+        frozenMs > Math.min(asOf.getTime(), sessionEnd.getTime())
+      ))
+    ) {
+      throw new Error("invalid_live_session_surface_clock_contract");
+    }
+    const neverAccepted = acceptedAt === null;
+    if (neverAccepted !== (validUntil === null) ||
+        neverAccepted !== (sourceAsOf === null) ||
+        (neverAccepted && historyFrozenThrough !== null) ||
+        (neverAccepted && Object.values(availability).some(Boolean))) {
+      throw new Error("invalid_live_session_surface_availability_clock");
+    }
   }
   const sessionDate = nonEmptyString(raw.session_date);
   if (!sessionDate || !/^\d{4}-\d{2}-\d{2}$/.test(sessionDate) ||
@@ -1510,7 +1651,7 @@ async function normalizeSessionSurface(raw, expected = {}) {
     throw new Error("invalid_session_surface_columns_shape");
   }
   const surfaceColumns = raw.surface_columns.map((item, index) =>
-    normalizeSurfaceColumn(item, timeBuckets[index], asOf.getTime()));
+    normalizeSurfaceColumn(item, timeBuckets[index], asOf.getTime(), { mode }));
   const gamma = normalizeSessionMatrix(
     raw.gamma_surface,
     "gamma",
@@ -1574,13 +1715,62 @@ async function normalizeSessionSurface(raw, expected = {}) {
     asOf.getTime(),
   );
   const strikeProfile = normalizeStrikeProfile(raw.strike_profile);
-  const spot = finiteNumber(raw.spot);
-  if (spot === null || spot <= 0) throw new Error("invalid_session_surface_spot");
-  const spotSourceAt = parseDate(raw.spot_source_at);
-  const spotKnownAt = parseDate(raw.spot_known_at);
-  if (!spotSourceAt || !spotKnownAt || spotSourceAt.getTime() > asOf.getTime() ||
-      spotKnownAt.getTime() > asOf.getTime()) {
+  const spot = finiteOrNull(raw.spot, "invalid_session_surface_spot");
+  if (spot !== null && spot <= 0) throw new Error("invalid_session_surface_spot");
+  const spotSourceAt = raw.spot_source_at === null ? null : parseDate(raw.spot_source_at);
+  const spotKnownAt = raw.spot_known_at === null ? null : parseDate(raw.spot_known_at);
+  if (mode === "replay" && (!spot || !spotSourceAt || !spotKnownAt)) {
+    throw new Error("invalid_session_surface_spot");
+  }
+  if ((spotSourceAt && spotSourceAt.getTime() > asOf.getTime()) ||
+      (spotKnownAt && spotKnownAt.getTime() > asOf.getTime())) {
     throw new Error("session_surface_lookahead_spot");
+  }
+  if (mode === "live") {
+    const hasSpotContract = spot !== null && spotSourceAt && spotKnownAt;
+    if (availability.current_spot_available !== Boolean(hasSpotContract) ||
+        (hasSpotContract && sourceAsOf && spotSourceAt.getTime() > sourceAsOf.getTime()) ||
+        (hasSpotContract && acceptedAt && spotKnownAt.getTime() !== acceptedAt.getTime())) {
+      throw new Error("invalid_live_session_surface_spot_availability");
+    }
+    const hasCurrentStrike = strikeProfile.some((row) =>
+      row.currentProxy !== null || row.currentOpenInterest !== null);
+    if (availability.current_strike_profile_available !== hasCurrentStrike ||
+        (!availability.current_strike_profile_available && strikeProfile.some((row) =>
+          row.currentProxy !== null || row.currentOpenInterest !== null))) {
+      throw new Error("invalid_live_session_surface_strike_availability");
+    }
+    const frozenMs = historyFrozenThrough?.getTime() ?? sessionStart.getTime();
+    const dynamicUnavailable = !availability.projection_available;
+    if (dynamicUnavailable) {
+      surfaceColumns.forEach((column, index) => {
+        if (timeBuckets[index].endMs <= frozenMs) return;
+        if (column.kind !== "missing" ||
+            [gamma, grossGamma, charm, vanna].some((matrix) =>
+              matrix[index].some((value) => value !== null)) ||
+            zeroRidges[index] !== null || gammaPositivePeaks[index] !== null ||
+            gammaNegativeTroughs[index] !== null) {
+          throw new Error("live_session_surface_unavailable_projection_has_values");
+        }
+      });
+    }
+    const hasHistorical = surfaceColumns.some((column, index) =>
+      column.kind === "historical" && timeBuckets[index].endMs <= frozenMs);
+    if (availability.historical_surface_available !== hasHistorical) {
+      throw new Error("invalid_live_session_surface_historical_availability");
+    }
+    const terminal = ["lease_expired", "closed", "unavailable", "initializing"].includes(liveStatus);
+    if (terminal && (
+      availability.projection_available ||
+      availability.current_strike_profile_available ||
+      availability.current_spot_available
+    )) {
+      throw new Error("invalid_live_session_surface_terminal_availability");
+    }
+    if ((availability.projection_available || availability.current_spot_available ||
+         availability.current_strike_profile_available) && !validUntil) {
+      throw new Error("invalid_live_session_surface_dynamic_lease");
+    }
   }
   const capabilities = raw.capabilities;
   if (!isObject(capabilities) ||
@@ -1589,7 +1779,7 @@ async function normalizeSessionSurface(raw, expected = {}) {
       capabilities.open_close_available !== false ||
       capabilities.signed_flow_available !== false ||
       capabilities.dealer_position_sign_available !== false ||
-      capabilities.strict_point_in_time_available !== false ||
+      capabilities.strict_point_in_time_available !== (mode === "live") ||
       capabilities.known_clock_no_lookahead !== true ||
       capabilities.projection_is_model_scenario !== true ||
       capabilities.historical_surface_is_model_proxy !== true) {
@@ -1598,9 +1788,16 @@ async function normalizeSessionSurface(raw, expected = {}) {
   const provenance = raw.provenance;
   if (!isObject(provenance) ||
       provenance.lookahead_rows_selected !== 0 ||
-      provenance.point_in_time_confidence !== "bounded_not_proven" ||
-      provenance.availability_clock_available !== false ||
-      provenance.availability_clock !== "unavailable") {
+      provenance.point_in_time_confidence !==
+        (mode === "live" ? "observed_live" : "bounded_not_proven") ||
+      provenance.availability_clock_available !== (mode === "live") ||
+      provenance.availability_clock !== (mode === "live" ? "accepted_at" : "unavailable") ||
+      (mode === "live" && (
+        provenance.per_leg_availability_clock_available !== false ||
+        !sha256String(provenance.frozen_history_prefix_sha256) ||
+        (sourceAsOf && parseDate(provenance.source_as_of)?.getTime() !== sourceAsOf.getTime()) ||
+        (!sourceAsOf && provenance.source_as_of !== null)
+      ))) {
     throw new Error("invalid_session_surface_provenance_contract");
   }
   const colorDomains = isObject(raw.color_domains) ? raw.color_domains : {};
@@ -1619,6 +1816,10 @@ async function normalizeSessionSurface(raw, expected = {}) {
   };
   return {
     raw,
+    mode,
+    status,
+    liveStatus,
+    provider: raw.provider,
     kind: nonEmptyString(raw.kind),
     schemaVersion: raw.schema_version ?? null,
     sessionDate,
@@ -1646,8 +1847,23 @@ async function normalizeSessionSurface(raw, expected = {}) {
     candles,
     strikeProfile,
     spot,
-    spotSourceAtMs: spotSourceAt.getTime(),
-    spotKnownAtMs: spotKnownAt.getTime(),
+    spotSourceAtMs: spotSourceAt?.getTime() ?? null,
+    spotKnownAtMs: spotKnownAt?.getTime() ?? null,
+    createdAt,
+    createdAtMs: createdAt?.getTime() ?? null,
+    acceptedAt,
+    acceptedAtMs: acceptedAt?.getTime() ?? null,
+    sourceAsOf,
+    sourceAsOfMs: sourceAsOf?.getTime() ?? null,
+    validUntil,
+    validUntilMs: validUntil?.getTime() ?? null,
+    historyFrozenThrough,
+    historyFrozenThroughMs: historyFrozenThrough?.getTime() ?? null,
+    accumulatorStartedAt,
+    accumulatorStartedAtMs: accumulatorStartedAt?.getTime() ?? null,
+    serverTime,
+    serverTimeMs: serverTime?.getTime() ?? null,
+    availability,
     metricUnits,
     domains,
     artifactSha256,
@@ -1659,6 +1875,239 @@ async function normalizeSessionSurface(raw, expected = {}) {
       sessionEnd.getTime(),
     ),
   };
+}
+
+function liveSurfaceIdentity(surface) {
+  if (!surface) return "";
+  return [
+    surface.sessionDate,
+    surface.sessionStartMs,
+    surface.sessionEndMs,
+    surface.expiry,
+    surface.role,
+    surface.weighting,
+    surface.bucketMinutes,
+    surface.priceStep,
+    surface.priceGrid.join(","),
+    surface.timeBuckets.map((bucket) => `${bucket.startMs}:${bucket.endMs}`).join(","),
+  ].join("|");
+}
+
+function liveFrozenPrefixSignature(surface, throughMs = surface?.historyFrozenThroughMs) {
+  if (!surface || !Number.isFinite(throughMs)) return "";
+  const indexes = surface.timeBuckets
+    .map((bucket, index) => bucket.endMs <= throughMs ? index : -1)
+    .filter((index) => index >= 0);
+  return JSON.stringify({
+    columns: indexes.map((index) => {
+      const column = surface.surfaceColumns[index];
+      return [
+        column.kind,
+        column.quality,
+        column.sourceAtMs,
+        column.knownAtMs,
+        column.acceptedAtMs,
+        column.sourceFrameSha256,
+        column.validUntilMs,
+        column.reason,
+      ];
+    }),
+    gamma: indexes.map((index) => surface.gamma[index]),
+    grossGamma: indexes.map((index) => surface.grossGamma[index]),
+    charm: indexes.map((index) => surface.charm[index]),
+    vanna: indexes.map((index) => surface.vanna[index]),
+    zeroRidges: indexes.map((index) => surface.zeroRidges[index]),
+    positive: indexes.map((index) => surface.gammaPositivePeaks[index]),
+    negative: indexes.map((index) => surface.gammaNegativeTroughs[index]),
+    candles: surface.candles
+      .filter((candle) => candle.endMs <= throughMs)
+      .map((candle) => [
+        candle.startMs,
+        candle.endMs,
+        candle.open,
+        candle.high,
+        candle.low,
+        candle.close,
+        candle.sampleCount,
+        candle.sourceAtMs,
+        candle.knownAtMs,
+      ]),
+    baseline: surface.strikeProfile
+      .filter((row) => row.firstValidatedProxy !== null ||
+        row.firstValidatedOpenInterest !== null)
+      .map((row) => [
+        row.strike,
+        row.firstValidatedProxy,
+        row.firstValidatedOpenInterest,
+      ]),
+  });
+}
+
+function liveSurfaceTransitionIssue(previous, next) {
+  if (!previous || previous.mode !== "live") return null;
+  if (!next || next.mode !== "live") return "live_surface_mode_changed";
+  if (next.sessionDate < previous.sessionDate) return "live_surface_session_regressed";
+  if (next.sessionDate !== previous.sessionDate) return null;
+  if (liveSurfaceIdentity(previous) !== liveSurfaceIdentity(next)) {
+    return "live_surface_grid_or_selector_drift";
+  }
+  if (next.asOfMs < previous.asOfMs ||
+      next.createdAtMs < previous.createdAtMs ||
+      next.serverTimeMs < previous.serverTimeMs ||
+      (previous.sourceAsOfMs !== null &&
+       (next.sourceAsOfMs === null || next.sourceAsOfMs < previous.sourceAsOfMs)) ||
+      (previous.acceptedAtMs !== null &&
+       (next.acceptedAtMs === null || next.acceptedAtMs < previous.acceptedAtMs)) ||
+      (previous.historyFrozenThroughMs !== null &&
+       (next.historyFrozenThroughMs === null ||
+        next.historyFrozenThroughMs < previous.historyFrozenThroughMs))) {
+    return "live_surface_clock_regressed";
+  }
+  if (next.accumulatorStartedAtMs !== previous.accumulatorStartedAtMs) {
+    return "live_surface_accumulator_identity_changed";
+  }
+  if (previous.historyFrozenThroughMs !== null &&
+      liveFrozenPrefixSignature(previous, previous.historyFrozenThroughMs) !==
+      liveFrozenPrefixSignature(next, previous.historyFrozenThroughMs)) {
+    return "live_surface_frozen_prefix_changed";
+  }
+  if (previous.historyFrozenThroughMs === next.historyFrozenThroughMs &&
+      previous.provenance.frozen_history_prefix_sha256 !==
+      next.provenance.frozen_history_prefix_sha256) {
+    return "live_surface_frozen_prefix_hash_changed";
+  }
+  return null;
+}
+
+function liveSurfaceDisplayState(surface, serverNowMs) {
+  if (!surface || surface.mode !== "live" || !Number.isFinite(serverNowMs)) {
+    return "unavailable";
+  }
+  const dynamicAvailable = surface.availability?.projection_available === true ||
+    surface.availability?.current_strike_profile_available === true ||
+    surface.availability?.current_spot_available === true;
+  const leaseFresh = Number.isFinite(surface.validUntilMs) && serverNowMs < surface.validUntilMs;
+  if (dynamicAvailable && leaseFresh &&
+      ["ready", "degraded"].includes(surface.liveStatus) &&
+      ["ready", "degraded"].includes(surface.status)) {
+    return "fresh";
+  }
+  if (!dynamicAvailable && surface.availability?.historical_surface_available === true &&
+      ["degraded", "lease_expired", "closed", "unavailable"].includes(surface.liveStatus)) {
+    return "historical_only";
+  }
+  if (dynamicAvailable && !leaseFresh) return "expired";
+  return "unavailable";
+}
+
+function historicalOnlyLiveSurface(surface) {
+  if (!surface || surface.mode !== "live" ||
+      surface.availability?.historical_surface_available !== true ||
+      !Number.isFinite(surface.historyFrozenThroughMs)) {
+    return null;
+  }
+  const frozenColumn = surface.timeBuckets.map((bucket) =>
+    bucket.endMs <= surface.historyFrozenThroughMs);
+  const maskMatrix = (matrix) => matrix.map((row, index) =>
+    frozenColumn[index] ? row : row.map(() => null));
+  const surfaceColumns = surface.surfaceColumns.map((column, index) => frozenColumn[index]
+    ? column
+    : {
+        ...column,
+        kind: "missing",
+        quality: "unavailable",
+        sourceAtMs: null,
+        knownAtMs: null,
+        acceptedAtMs: null,
+        sourceFrameSha256: null,
+        validUntilMs: null,
+        reason: "live_lease_expired_client_mask",
+      });
+  const gamma = maskMatrix(surface.gamma);
+  const grossGamma = maskMatrix(surface.grossGamma);
+  const charm = maskMatrix(surface.charm);
+  const vanna = maskMatrix(surface.vanna);
+  const strikeProfile = surface.strikeProfile.map((row) => ({
+    ...row,
+    currentProxy: null,
+    currentOpenInterest: null,
+  }));
+  return {
+    ...surface,
+    status: "degraded",
+    liveStatus: surface.liveStatus === "closed" ? "closed" : "lease_expired",
+    surfaceColumns,
+    gamma,
+    grossGamma,
+    charm,
+    vanna,
+    zeroRidges: surface.zeroRidges.map((value, index) => frozenColumn[index] ? value : null),
+    gammaPositivePeaks: surface.gammaPositivePeaks.map((value, index) =>
+      frozenColumn[index] ? value : null),
+    gammaNegativeTroughs: surface.gammaNegativeTroughs.map((value, index) =>
+      frozenColumn[index] ? value : null),
+    candles: surface.candles.filter((candle) =>
+      candle.endMs <= surface.historyFrozenThroughMs),
+    strikeProfile,
+    spot: null,
+    spotSourceAtMs: null,
+    spotKnownAtMs: null,
+    availability: {
+      ...surface.availability,
+      projection_available: false,
+      current_strike_profile_available: false,
+      current_spot_available: false,
+      historical_surface_available: true,
+    },
+    domains: {
+      gamma: robustDomain(gamma),
+      charm: robustDomain(charm),
+      vanna: robustDomain(vanna),
+      grossGamma: robustDomain(grossGamma),
+      strike: robustDomain(strikeProfile.flatMap((row) => [row.firstValidatedProxy])),
+    },
+    clientLeaseMasked: true,
+    sourceArtifactSha256: surface.artifactSha256,
+  };
+}
+
+function liveServerTimeFromHeaders(headers, requestStartedAtMs, receivedAtMs) {
+  if (!headers || typeof headers.get !== "function" ||
+      !Number.isFinite(requestStartedAtMs) || !Number.isFinite(receivedAtMs) ||
+      receivedAtMs < requestStartedAtMs) {
+    return null;
+  }
+  const exact = nonEmptyString(headers.get("X-SPXW-Server-Time"));
+  const fallback = nonEmptyString(headers.get("Date"));
+  const parsed = parseDate(exact || fallback);
+  if (!parsed) return null;
+  const wholeSecondSafetyMs = exact ? 0 : 1_000;
+  return parsed.getTime() + wholeSecondSafetyMs;
+}
+
+function liveServerTimeMatchesArtifact(headers, artifactServerTimeMs) {
+  if (!headers || typeof headers.get !== "function" ||
+      !Number.isFinite(artifactServerTimeMs)) return false;
+  const exact = parseDate(headers.get("X-SPXW-Server-Time"));
+  if (exact) return exact.getTime() === artifactServerTimeMs;
+  const fallback = parseDate(headers.get("Date"));
+  return Boolean(fallback) && Math.abs(fallback.getTime() - artifactServerTimeMs) <= 2_000;
+}
+
+function conservativeLiveServerNow(surface, headerServerTimeMs, requestElapsedMs) {
+  if (!surface || !Number.isFinite(surface.serverTimeMs) ||
+      !Number.isFinite(surface.asOfMs) || !Number.isFinite(headerServerTimeMs) ||
+      !Number.isFinite(requestElapsedMs) || requestElapsedMs < 0) {
+    return null;
+  }
+  // During RTH, as_of is sampled at request dispatch and server_time after
+  // projection.  Removing that measured backend interval from the full client
+  // round trip leaves a conservative transport/serialization upper bound.
+  // Adding it prevents a response that arrived after an exclusive lease from
+  // being treated as fresh merely because the signed server clock is older.
+  const backendElapsedMs = Math.max(surface.serverTimeMs - surface.asOfMs, 0);
+  const transportAndClientMs = Math.max(requestElapsedMs - backendElapsedMs, 0);
+  return Math.max(surface.serverTimeMs, headerServerTimeMs) + transportAndClientMs;
 }
 
 function effectiveSnapshotStatus(snapshot) {
@@ -1675,10 +2124,7 @@ function effectiveSnapshotStatus(snapshot) {
 }
 
 function selectedExpiry() {
-  if (isReplayView()) {
-    return app.snapshot?.expiries.find((item) => item.role === app.expiryRole) || null;
-  }
-  return app.snapshot?.expiries.find((item) => item.expiry === app.expiry) || null;
+  return app.snapshot?.expiries.find((item) => item.role === app.expiryRole) || null;
 }
 
 function metricArray(weighting, metric) {
@@ -1880,38 +2326,40 @@ function updateModeChrome() {
   const replay = isReplayView();
   const frame = replayFrame();
   const verifiedTrend = replay && app.trend && !app.trend.metadataOnly;
-  const verifiedSessionSurface = replay && app.sessionSurface;
+  const verifiedSessionSurface = app.sessionSurface;
   const verifiedFrame = replay && app.snapshot?.mode === "replay";
   const replayAt = Number.isFinite(app.playheadMs)
     ? new Date(app.playheadMs)
     : app.snapshot?.mode === "replay" ? app.snapshot.requestedAsOf : frame?.at;
   document.body.classList.toggle("mode-replay", replay);
+  document.body.classList.toggle("mode-live", !replay);
   dom.trendPanel.hidden = true;
-  dom.sessionCockpit.hidden = !replay;
+  dom.sessionCockpit.hidden = false;
   dom.cockpitTimeline.hidden = !replay;
-  dom.cockpitLivePlaceholder.hidden = replay;
   dom.modeFilter.value = replay ? "replay" : "live";
   dom.replayBanner.hidden = !replay;
   dom.replayConsole.hidden = !replay;
   dom.pageLede.textContent = replay
     ? "Gamma、Strike 与 Charm 共用一个 SPX 坐标和交易时钟；颜色、OHLC 与缺失区间均来自冻结回放合同。"
-    : "标的价格 × 时间的期权暴露地形。所有值均来自只读生产快照，不提供下单入口。";
+    : "Gamma、Strike 与 Charm 共用固定 Session Canvas；历史列冻结，当前时刻右侧仅显示有 lease 的投影。";
   const sourceFiles = verifiedSessionSurface
     ? app.sessionSurface.provenance?.source_files
     : verifiedTrend
     ? app.trend.source?.source_files
     : verifiedFrame ? app.snapshot.source?.source_files : null;
-  dom.sourceFile.textContent = replay
-    ? (Array.isArray(sourceFiles) ? sourceFiles.join(", ") : null) ||
-      (frame?.id ? `replay frame ${frame.id}` : "replay catalog")
-    : "spxw_surface_dashboard.json";
+  dom.sourceFile.textContent = (Array.isArray(sourceFiles) ? sourceFiles.join(", ") : null) ||
+    (replay
+      ? (frame?.id ? `replay frame ${frame.id}` : "replay catalog")
+      : "live session accumulator");
   dom.sourceMode.textContent = replay
     ? verifiedSessionSurface
       ? `CUTOFF SESSION SURFACE · Gamma + Strike + Charm · latest validated frame ≤ playhead · Bounded PIT · Not live`
       : verifiedTrend
       ? `COMPACT TREND ARTIFACT VERIFIED · Visual ${REPLAY_VISUAL_FPS} fps · SPX recorded known_at + Gamma valid_until · Bounded PIT · Not live`
       : `SESSION REPLAY CLOCK · timeline metadata only · market values fetched per validated cutoff · Bounded PIT · Not live`
-    : "5 秒只读刷新";
+    : verifiedSessionSurface
+      ? `LIVE SESSION SURFACE · ${String(app.sessionSurface.liveStatus).toUpperCase()} · accepted_at clock · read-only`
+      : "LIVE SESSION SURFACE · waiting for a validated lease";
   if (replay) {
     if (verifiedSessionSurface) {
       dom.replayBannerLabel.textContent = `Replay · ${formatMarketTime(app.sessionSurface.asOf)} · Session surface`;
@@ -2003,59 +2451,30 @@ function setNotice(message, isError = false) {
 
 function updateFilters() {
   const expiries = app.snapshot?.expiries || [];
-  const previous = app.expiry;
   dom.expiryFilter.replaceChildren();
-  if (isReplayView()) {
-    for (const role of ["front", "next"]) {
-      const expiry = expiries.find((item) => item.role === role)?.expiry ||
-        (app.sessionSurface?.role === role ? app.sessionSurface.expiry : null) ||
-        (app.trend?.role === role ? app.trend.gamma.keyframes[0]?.expiry : null);
-      const option = document.createElement("option");
-      option.value = role;
-      option.textContent = expiry
-        ? `${role.toUpperCase()} · ${formatExpiry(expiry)} · ${expiry}`
-        : `${role.toUpperCase()} · ${role === "front" ? "0DTE" : "next trading day"}`;
-      dom.expiryFilter.append(option);
-    }
-    app.expiryRole = ["front", "next"].includes(app.expiryRole) ? app.expiryRole : "front";
-    app.expiry = app.expiryRole;
-    dom.expiryFilter.value = app.expiryRole;
-    const enabled = app.frames.length > 0 &&
+  for (const role of ["front", "next"]) {
+    const expiry = expiries.find((item) => item.role === role)?.expiry ||
+      (app.sessionSurface?.role === role ? app.sessionSurface.expiry : null) ||
+      (app.trend?.role === role ? app.trend.gamma.keyframes[0]?.expiry : null);
+    const option = document.createElement("option");
+    option.value = role;
+    option.textContent = expiry
+      ? `${role.toUpperCase()} · ${formatExpiry(expiry)} · ${expiry}`
+      : `${role.toUpperCase()} · ${role === "front" ? "0DTE" : "next trading day"}`;
+    dom.expiryFilter.append(option);
+  }
+  app.expiryRole = ["front", "next"].includes(app.expiryRole) ? app.expiryRole : "front";
+  app.expiry = app.expiryRole;
+  dom.expiryFilter.value = app.expiryRole;
+  const enabled = isReplayView()
+    ? app.frames.length > 0 &&
       sha256String(app.timelineSha256) &&
       sha256String(app.sourceFingerprint) &&
-      !app.trendLoading;
-    dom.expiryFilter.disabled = !enabled;
-    dom.weightingFilter.disabled = !enabled;
-    dom.metricFilter.disabled = !enabled;
-    dom.weightingFilter.value = app.weighting;
-    dom.metricFilter.value = app.metric;
-    return;
-  }
-  if (!expiries.length) {
-    const option = document.createElement("option");
-    option.value = "";
-    option.textContent = "无可用到期日";
-    dom.expiryFilter.append(option);
-    app.expiry = "";
-  } else {
-    for (const expiry of expiries) {
-      const option = document.createElement("option");
-      option.value = expiry.expiry;
-      const role = expiry.role === "front" ? "FRONT" : expiry.role === "next" ? "NEXT" : expiry.role.toUpperCase();
-      option.textContent = `${role} · ${formatExpiry(expiry.expiry)} · ${expiry.expiry}`;
-      dom.expiryFilter.append(option);
-    }
-    const retained = expiries.some((item) => item.expiry === previous);
-    app.expiry = retained
-      ? previous
-      : (expiries.find((item) => item.role === app.expiryRole) || expiries[0]).expiry;
-    app.expiryRole = expiries.find((item) => item.expiry === app.expiry)?.role || app.expiryRole;
-    dom.expiryFilter.value = app.expiry;
-  }
-  const enabled = expiries.length > 0 && ["ready", "degraded"].includes(effectiveSnapshotStatus(app.snapshot));
+      !app.trendLoading
+    : app.mode === "live";
   dom.expiryFilter.disabled = !enabled;
   dom.weightingFilter.disabled = !enabled;
-  dom.metricFilter.disabled = !enabled;
+  dom.metricFilter.disabled = !enabled || !dom.scenarioDiagnostic.open;
   dom.weightingFilter.value = app.weighting;
   dom.metricFilter.value = app.metric;
 }
@@ -2656,7 +3075,22 @@ function nearestNumericIndex(values, target, selector = (value) => value) {
 }
 
 function cockpitCurrentSpot() {
-  return app.sessionSurface?.spot ?? null;
+  const surface = app.sessionSurface;
+  if (!surface) return null;
+  if (surface.mode === "live" && surface.availability?.current_spot_available !== true) {
+    return null;
+  }
+  return surface.spot ?? null;
+}
+
+function cockpitDisplayTimeMs(surface = app.sessionSurface) {
+  if (!surface) return null;
+  if (surface.mode === "live") {
+    return surface.clientLeaseMasked && Number.isFinite(surface.historyFrozenThroughMs)
+      ? surface.historyFrozenThroughMs
+      : surface.asOfMs;
+  }
+  return Number.isFinite(app.playheadMs) ? app.playheadMs : surface.asOfMs;
 }
 
 function cockpitValueAt(panel, timeMs, price) {
@@ -2694,12 +3128,13 @@ function drawCockpitOverlay(panel, spot) {
     context.stroke();
     context.setLineDash([]);
   }
-  if (panel !== "strike" && Number.isFinite(app.playheadMs)) {
+  const displayTimeMs = cockpitDisplayTimeMs(surface);
+  if (panel !== "strike" && Number.isFinite(displayTimeMs)) {
     const currentX = sessionTimeToX(
       layout,
       surface.sessionStartMs,
       surface.sessionEndMs,
-      app.playheadMs,
+      displayTimeMs,
     );
     context.strokeStyle = "rgba(239, 246, 250, 0.88)";
     context.lineWidth = 1;
@@ -2737,7 +3172,7 @@ function drawCockpitOverlay(panel, spot) {
 function renderCockpitReadouts(spot) {
   const surface = app.sessionSurface;
   if (!surface) return;
-  const at = Number.isFinite(app.playheadMs) ? app.playheadMs : surface.asOfMs;
+  const at = cockpitDisplayTimeMs(surface);
   const gamma = cockpitValueAt("gamma", at, spot);
   const charm = cockpitValueAt("charm", at, spot);
   const strikeIndex = nearestNumericIndex(surface.strikeProfile, spot, (row) => row.strike);
@@ -2777,10 +3212,10 @@ function renderCockpitStatic() {
     dom.cockpitTooltip.hidden = true;
     dom.cockpitTooltip.replaceChildren();
     if (dom.cockpitTooltip.dataset) delete dom.cockpitTooltip.dataset.panel;
-    if (isReplayView()) dom.providerChip.textContent = "Provider —";
+    dom.providerChip.textContent = "Provider —";
     return;
   }
-  dom.providerChip.textContent = "SCHWAB";
+  dom.providerChip.textContent = String(surface.provider || "—").toUpperCase();
   updateCockpitStableDomains(surface);
   drawCockpitSurface("gamma", surface.gamma);
   drawCockpitStrike();
@@ -2842,7 +3277,7 @@ function cockpitPointerMove(panel, event) {
     return;
   }
   const timeMs = panel === "strike"
-    ? app.cockpitHover?.timeMs ?? app.playheadMs ?? surface.asOfMs
+    ? app.cockpitHover?.timeMs ?? cockpitDisplayTimeMs(surface)
     : sessionXToTime(layout, surface.sessionStartMs, surface.sessionEndMs, x);
   const price = sessionYToPrice(layout, app.cockpitPriceDomain, y);
   app.cockpitHover = { panel, timeMs, price };
@@ -2895,7 +3330,10 @@ function renderCockpitAudit() {
   const pit = surface.provenance.point_in_time_confidence ||
     surface.raw.point_in_time_confidence || "bounded_not_proven";
   const model = surface.provenance.model || surface.raw.model || "proxy model";
-  dom.cockpitAuditAsOf.textContent = `${formatReplayAsOf(surface.asOf)} · session ${formatMarketTime(surface.sessionStart)} → ${formatMarketTime(surface.sessionEnd)}`;
+  const leaseText = surface.mode === "live"
+    ? ` · accepted ${formatIsoUtc(surface.acceptedAt)} · valid until ${formatIsoUtc(surface.validUntil)}`
+    : "";
+  dom.cockpitAuditAsOf.textContent = `${formatReplayAsOf(surface.asOf)}${leaseText} · session ${formatMarketTime(surface.sessionStart)} → ${formatMarketTime(surface.sessionEnd)}`;
   dom.cockpitAuditContract.textContent = `${surface.role.toUpperCase()} ${surface.expiry} · ${surface.weighting} · ${surface.bucketMinutes}m × ${surface.priceStep} SPX`;
   dom.cockpitAuditStats.textContent = `${surface.timeBuckets.length} buckets · ${surface.priceGrid.length} SPX rows · ${surface.candles.length} candles · ${surface.strikeProfile.length} strikes · historical ${counts.historical} / projection ${counts.projection} / missing ${counts.missing}`;
   dom.cockpitAuditMissing.textContent = surface.missingRanges.length
@@ -2904,9 +3342,16 @@ function renderCockpitAudit() {
         return `${formatMarketTime(new Date(range.startMs), false)}–${formatMarketTime(new Date(range.endMs), false)}${scope} ${range.reason}`;
       }).join(" · ")
     : "No declared missing ranges";
-  dom.cockpitAuditCapabilities.textContent = summarizeAuditObject(surface.capabilities);
+  dom.cockpitAuditCapabilities.textContent = [
+    summarizeAuditObject(surface.capabilities),
+    surface.availability ? `availability: ${summarizeAuditObject(surface.availability)}` : null,
+  ].filter(Boolean).join(" · ");
   dom.cockpitAuditProvenance.textContent = summarizeAuditObject(surface.provenance);
-  dom.cockpitAuditFrozen.textContent = isReplayView() ? "Frozen replay" : "Live rolling";
+  dom.cockpitAuditFrozen.textContent = isReplayView()
+    ? "Frozen replay"
+    : surface.clientLeaseMasked
+      ? "Live lease expired · client projection mask"
+      : `Live ${surface.liveStatus}`;
   dom.cockpitAuditPit.textContent = `PIT ${String(pit).replaceAll("_", " ")}`;
   dom.cockpitAuditModel.textContent = `Model ${model}`;
 }
@@ -4445,8 +4890,15 @@ function adjacentGammaPlayhead(direction) {
 
 function cancelSnapshotWork() {
   window.clearTimeout(app.timer);
+  window.clearTimeout(app.liveLeaseTimer);
   cancelPlaybackAnimation();
   app.timer = null;
+  app.liveLeaseTimer = null;
+  app.liveServerAnchorMs = null;
+  app.livePerformanceAnchorMs = null;
+  app.liveRequestStartedAtMs = null;
+  app.livePhase = "off";
+  app.liveLastError = "";
   app.playing = false;
   app.frameLoading = false;
   app.trendLoading = false;
@@ -4454,7 +4906,180 @@ function cancelSnapshotWork() {
   app.requestGeneration += 1;
   if (app.requestController) app.requestController.abort();
   app.requestController = null;
+  app.liveDiagnosticGeneration += 1;
+  if (app.liveDiagnosticController) app.liveDiagnosticController.abort();
+  app.liveDiagnosticController = null;
   cancelSessionSurfaceRequest({ clear: true });
+}
+
+function liveSessionSurfaceRequestUrl() {
+  const params = new URLSearchParams({
+    role: app.expiryRole,
+    weighting: app.weighting,
+    bucket_minutes: String(SESSION_SURFACE_BUCKET_MINUTES),
+    price_step: String(SESSION_SURFACE_PRICE_STEP),
+  });
+  return `${LIVE_SESSION_SURFACE_URL}?${params}`;
+}
+
+function liveClockNowMs() {
+  if (Number.isFinite(app.liveServerAnchorMs) &&
+      Number.isFinite(app.livePerformanceAnchorMs)) {
+    return app.liveServerAnchorMs + Math.max(performance.now() - app.livePerformanceAnchorMs, 0);
+  }
+  return null;
+}
+
+function setLiveClockAnchor(serverNowMs) {
+  if (!Number.isFinite(serverNowMs)) throw new Error("live_surface_server_time_missing");
+  app.liveServerAnchorMs = serverNowMs;
+  app.livePerformanceAnchorMs = performance.now();
+}
+
+function renderLiveSessionSurfaceChrome(phase = app.livePhase, reason = app.liveLastError) {
+  if (app.mode !== "live") return;
+  const surface = app.sessionSurface;
+  const historicalOnly = phase === "historical_only";
+  const fresh = phase === "fresh" || phase === "refreshing" || phase === "degraded_retained";
+  const unavailable = !surface || phase === "unavailable";
+  const status = unavailable ? "unavailable" : historicalOnly ? "degraded" : surface.status;
+  const label = unavailable
+    ? "Live · Unavailable"
+    : historicalOnly
+      ? "Live · Historical only"
+      : phase === "degraded_retained"
+        ? "Live · Refresh degraded"
+        : "Live · Session surface";
+  setStatusPill(status, label);
+  dom.providerChip.textContent = surface
+    ? String(surface.provider || "—").toUpperCase()
+    : "Provider —";
+  const serverNowMs = liveClockNowMs();
+  const ageSeconds = surface && Number.isFinite(serverNowMs)
+    ? Math.max((serverNowMs - surface.asOfMs) / 1_000, 0)
+    : null;
+  const leaseSeconds = surface && Number.isFinite(serverNowMs) &&
+      Number.isFinite(surface.validUntilMs)
+    ? Math.max((surface.validUntilMs - serverNowMs) / 1_000, 0)
+    : null;
+  dom.refreshState.textContent = unavailable
+    ? "Live surface unavailable · retrying"
+    : historicalOnly
+      ? `Historical frozen through ${formatMarketTime(surface.historyFrozenThrough, false)}`
+      : `${formatAge(ageSeconds)} old · lease ${formatAge(leaseSeconds)}`;
+  dom.summaryStatus.textContent = unavailable
+    ? "Unavailable · fail closed"
+    : historicalOnly
+      ? "Degraded · historical only"
+      : `${STATUS_LABELS[status]} · observed live`;
+  dom.summaryReasons.textContent = reason || (historicalOnly
+    ? "Projection, current strike and current spot are unavailable"
+    : "accepted_at availability clock · dealer side unknown");
+  dom.summaryFreshness.textContent = historicalOnly
+    ? "Lease expired · dynamic values cleared"
+    : fresh ? `${formatAge(ageSeconds)} · lease ${formatAge(leaseSeconds)}` : "—";
+  dom.summaryAsOf.textContent = surface ? `as of ${formatReplayAsOf(surface.asOf)}` : "as of —";
+  if (surface) {
+    const totalCells = surface.timeBuckets.length * surface.priceGrid.length * 2;
+    const availableCells = [surface.gamma, surface.charm].flat(2).filter(Number.isFinite).length;
+    dom.summaryCoverage.textContent = totalCells
+      ? `${Math.min(availableCells / totalCells * 100, 100).toFixed(1)}%`
+      : "—";
+    dom.summaryContracts.textContent = `${surface.strikeProfile.length} strikes · ${surface.candles.length} candles`;
+    dom.summaryExpiries.textContent = `${surface.role.toUpperCase()} · ${surface.expiry}`;
+    const lastCandle = surface.candles.at(-1);
+    dom.summaryUnderlier.textContent = Number.isFinite(cockpitCurrentSpot())
+      ? `SPX ${cockpitCurrentSpot().toFixed(2)}`
+      : lastCandle ? `Current — · last OHLC ${lastCandle.close.toFixed(2)}` : "SPX current —";
+    dom.schemaVersion.textContent = `session surface schema ${surface.schemaVersion}`;
+  } else {
+    dom.summaryCoverage.textContent = "—";
+    dom.summaryContracts.textContent = "—";
+    dom.summaryExpiries.textContent = `${app.expiryRole.toUpperCase()} · —`;
+    dom.summaryUnderlier.textContent = "SPX current —";
+    dom.schemaVersion.textContent = "session surface schema —";
+  }
+  dom.signConvention.textContent = "calls + / puts − proxy; participant and dealer side unknown";
+  dom.cockpitLoading.hidden = !(phase === "connecting" && !surface);
+  updateModeChrome();
+}
+
+function expireLiveSessionSurface(expectedArtifactSha256 = null) {
+  if (app.mode !== "live" || !app.sessionSurface) return;
+  if (expectedArtifactSha256 &&
+      app.sessionSurface.artifactSha256 !== expectedArtifactSha256) return;
+  window.clearTimeout(app.liveLeaseTimer);
+  app.liveLeaseTimer = null;
+  const historical = historicalOnlyLiveSurface(app.sessionSurface);
+  app.sessionSurface = historical;
+  app.livePhase = historical ? "historical_only" : "unavailable";
+  app.liveLastError = "live_surface_lease_expired";
+  app.cockpitHover = null;
+  renderCockpitStatic();
+  renderCockpitAudit();
+  renderLiveSessionSurfaceChrome();
+  setNotice(
+    historical
+      ? "Live lease 已到期；projection、Current strike 和 Current spot 已清除，仅保留冻结历史。"
+      : "Live lease 已到期且没有可安全显示的冻结历史。",
+    true,
+  );
+}
+
+function scheduleLiveLeaseExpiry(surface, serverNowMs) {
+  window.clearTimeout(app.liveLeaseTimer);
+  app.liveLeaseTimer = null;
+  if (!surface || surface.mode !== "live" || !Number.isFinite(surface.validUntilMs)) return;
+  const hasDynamic = surface.availability?.projection_available === true ||
+    surface.availability?.current_strike_profile_available === true ||
+    surface.availability?.current_spot_available === true;
+  if (!hasDynamic) return;
+  const delay = surface.validUntilMs - serverNowMs;
+  if (delay <= 0) {
+    expireLiveSessionSurface(surface.artifactSha256);
+    return;
+  }
+  const artifactSha256 = surface.artifactSha256;
+  app.liveLeaseTimer = window.setTimeout(() => {
+    app.liveLeaseTimer = null;
+    expireLiveSessionSurface(artifactSha256);
+  }, delay);
+}
+
+function applyLiveSessionSurface(surface, serverNowMs) {
+  const previous = app.sessionSurface;
+  const transitionIssue = liveSurfaceTransitionIssue(previous, surface);
+  if (transitionIssue) throw new Error(transitionIssue);
+  const newSession = previous?.mode === "live" && previous.sessionDate !== surface.sessionDate;
+  if (newSession) {
+    app.cockpitPriceDomain = null;
+    app.cockpitColorDomains = {};
+  }
+  let display = surface;
+  const displayState = liveSurfaceDisplayState(surface, serverNowMs);
+  if (displayState === "expired") display = historicalOnlyLiveSurface(surface);
+  if (displayState === "unavailable" || (displayState === "expired" && !display)) {
+    display = null;
+  }
+  app.sessionSurface = display;
+  app.sessionDate = surface.sessionDate;
+  app.livePhase = display
+    ? displayState === "fresh" ? "fresh" : "historical_only"
+    : "unavailable";
+  app.liveLastError = "";
+  app.cockpitHover = null;
+  renderCockpitStatic();
+  renderCockpitAudit();
+  updateFilters();
+  renderLiveSessionSurfaceChrome();
+  if (displayState === "fresh") {
+    scheduleLiveLeaseExpiry(surface, serverNowMs);
+    setNotice("");
+  } else if (display) {
+    setNotice("Live dynamic lease 不可用；仅显示服务端确认的冻结历史，未来区域保持 Missing。", true);
+  } else {
+    setNotice("Live Session Surface 当前不可用；没有显示旧 projection 或旧 current 值。", true);
+  }
 }
 
 function renderSessionSurfaceChrome(status, reason = "") {
@@ -4734,9 +5359,11 @@ function renderLoadingState() {
   setStatusPill("unknown", replay ? "Loading replay" : "正在连接");
   dom.refreshState.textContent = replay
     ? frame ? `正在读取并校验 ${frame.label}` : "正在读取回放目录"
-    : "等待首个快照";
+    : "等待首个 Live Session Surface";
   dom.summaryStatus.textContent = "—";
-  dom.summaryReasons.textContent = replay ? "校验 replay / cutoff 契约；PIT 仅有界，availability clock 缺失" : "尚未加载";
+  dom.summaryReasons.textContent = replay
+    ? "校验 replay / cutoff 契约；PIT 仅有界，availability clock 缺失"
+    : "校验 accepted_at、lease、固定网格与冻结历史前缀";
   dom.summaryFreshness.textContent = replay ? "Frozen · Bounded PIT" : "—";
   dom.summaryAsOf.textContent = replay && frame ? `as of ${formatReplayAsOf(frame.at)}` : "as of —";
   dom.summaryCoverage.textContent = "—";
@@ -4744,7 +5371,7 @@ function renderLoadingState() {
   dom.summaryExpiries.textContent = "—";
   dom.summaryUnderlier.textContent = "SPX —";
   dom.surfaceTitle.textContent = "Spot × Time surface";
-  dom.surfaceSubtitle.textContent = replay ? "等待冻结历史回放" : "等待生产快照";
+  dom.surfaceSubtitle.textContent = replay ? "等待冻结历史回放" : "Legacy diagnostic folded";
   setNotice(replay ? "正在读取历史回放；不会显示实时快照或缓存值。" : "");
   updateModeChrome();
 }
@@ -4777,11 +5404,116 @@ function renderFetchFailure(error, mode) {
   updateModeChrome();
 }
 
-async function refreshSnapshot() {
+async function refreshLiveSessionSurface() {
   if (app.mode !== "live") return;
   window.clearTimeout(app.timer);
   app.timer = null;
-  const { controller, generation, abortTimer } = beginSnapshotRequest();
+  const role = app.expiryRole;
+  const weighting = app.weighting;
+  const requestStartedAtMs = performance.now();
+  app.liveRequestStartedAtMs = requestStartedAtMs;
+  const hadSurface = Boolean(app.sessionSurface);
+  app.livePhase = hadSurface ? "refreshing" : "connecting";
+  renderLiveSessionSurfaceChrome();
+  const { controller, generation, abortTimer } = beginSnapshotRequest(
+    LIVE_SESSION_REQUEST_TIMEOUT_MS,
+  );
+  try {
+    const response = await fetch(liveSessionSurfaceRequestUrl(), {
+      cache: "no-cache",
+      headers: { Accept: "application/json" },
+      signal: controller.signal,
+    });
+    const responseReceivedAtMs = performance.now();
+    const serverNowMs = liveServerTimeFromHeaders(
+      response.headers,
+      requestStartedAtMs,
+      responseReceivedAtMs,
+    );
+    if (!Number.isFinite(serverNowMs)) throw new Error("live_surface_server_time_missing");
+    if (!requestIsCurrent(generation, "live") ||
+        app.expiryRole !== role || app.weighting !== weighting) return;
+    if (response.status === 304) {
+      const state = liveSurfaceDisplayState(app.sessionSurface, serverNowMs);
+      if (state === "expired") expireLiveSessionSurface();
+      else {
+        app.livePhase = state === "fresh"
+          ? "fresh"
+          : state === "historical_only" ? "historical_only" : "unavailable";
+        renderLiveSessionSurfaceChrome(app.livePhase);
+      }
+      return;
+    }
+    if (!response.ok) throw new Error(`live_session_surface_http_${response.status}`);
+    const payload = await response.json();
+    const surface = await normalizeSessionSurface(payload, {
+      mode: "live",
+      role,
+      weighting,
+      bucketMinutes: SESSION_SURFACE_BUCKET_MINUTES,
+      priceStep: SESSION_SURFACE_PRICE_STEP,
+    });
+    if (!liveServerTimeMatchesArtifact(response.headers, surface.serverTimeMs)) {
+      throw new Error("live_surface_server_time_header_mismatch");
+    }
+    if (!requestIsCurrent(generation, "live") ||
+        app.expiryRole !== role || app.weighting !== weighting) return;
+    const trustedServerNowMs = conservativeLiveServerNow(
+      surface,
+      serverNowMs,
+      Math.max(performance.now() - requestStartedAtMs, 0),
+    );
+    if (!Number.isFinite(trustedServerNowMs)) {
+      throw new Error("live_surface_conservative_clock_unavailable");
+    }
+    setLiveClockAnchor(trustedServerNowMs);
+    applyLiveSessionSurface(surface, trustedServerNowMs);
+    if (dom.scenarioDiagnostic.open) void refreshSnapshot();
+  } catch (error) {
+    if (!requestIsCurrent(generation, "live")) return;
+    const reason = error instanceof Error ? error.message : "live_session_surface_fetch_failed";
+    app.liveLastError = reason;
+    const serverNowMs = liveClockNowMs();
+    const state = liveSurfaceDisplayState(app.sessionSurface, serverNowMs);
+    if (state === "expired") {
+      expireLiveSessionSurface();
+    } else if (state === "fresh") {
+      app.livePhase = "degraded_retained";
+      renderLiveSessionSurfaceChrome();
+      setNotice(`Live refresh failed; current artifact remains valid only until its lease: ${reason}`, true);
+    } else if (state === "historical_only") {
+      app.livePhase = "historical_only";
+      renderLiveSessionSurfaceChrome();
+      setNotice(`Live refresh failed; only frozen historical data remains: ${reason}`, true);
+    } else {
+      app.sessionSurface = null;
+      app.livePhase = "unavailable";
+      renderCockpitStatic();
+      renderCockpitAudit();
+      renderLiveSessionSurfaceChrome();
+      setNotice(`Live Session Surface unavailable: ${reason}`, true);
+    }
+  } finally {
+    window.clearTimeout(abortTimer);
+    if (app.requestController === controller) app.requestController = null;
+    app.liveRequestStartedAtMs = null;
+    if (requestIsCurrent(generation, "live")) {
+      const elapsed = Math.max(performance.now() - requestStartedAtMs, 0);
+      app.timer = window.setTimeout(
+        refreshLiveSessionSurface,
+        Math.max(POLL_INTERVAL_MS - elapsed, 0),
+      );
+    }
+  }
+}
+
+async function refreshSnapshot() {
+  if (app.mode !== "live" || !dom.scenarioDiagnostic.open) return;
+  const generation = ++app.liveDiagnosticGeneration;
+  if (app.liveDiagnosticController) app.liveDiagnosticController.abort();
+  const controller = new AbortController();
+  const abortTimer = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  app.liveDiagnosticController = controller;
   try {
     const response = await fetch(SNAPSHOT_URL, {
       cache: "no-store",
@@ -4789,20 +5521,20 @@ async function refreshSnapshot() {
       signal: controller.signal,
     });
     if (!response.ok) throw new Error(`snapshot_http_${response.status}`);
-    const payload = await response.json();
-    const snapshot = normalizeSnapshot(payload);
-    if (!requestIsCurrent(generation, "live")) return;
+    const snapshot = normalizeSnapshot(await response.json());
+    if (generation !== app.liveDiagnosticGeneration || app.mode !== "live" ||
+        !dom.scenarioDiagnostic.open) return;
     app.snapshot = snapshot;
-    render();
+    renderVisuals();
   } catch (error) {
-    if (!requestIsCurrent(generation, "live")) return;
-    renderFetchFailure(error, "live");
+    if (generation !== app.liveDiagnosticGeneration || controller.signal.aborted) return;
+    app.snapshot = null;
+    renderVisuals();
+    dom.surfaceTitle.textContent = "Legacy scenario diagnostic unavailable";
+    dom.surfaceSubtitle.textContent = error instanceof Error ? error.message : "snapshot_failed";
   } finally {
     window.clearTimeout(abortTimer);
-    if (app.requestController === controller) app.requestController = null;
-    if (requestIsCurrent(generation, "live")) {
-      app.timer = window.setTimeout(refreshSnapshot, POLL_INTERVAL_MS);
-    }
+    if (app.liveDiagnosticController === controller) app.liveDiagnosticController = null;
   }
 }
 
@@ -5035,13 +5767,38 @@ function setViewMode(mode, { syncQuery = true } = {}) {
   cancelSnapshotWork();
   resetReplayNavigationState();
   app.mode = mode;
+  app.livePhase = mode === "live" ? "connecting" : "off";
   app.replayCatalogLoading = mode === "replay";
-  dom.scenarioDiagnostic.open = mode === "live";
+  dom.scenarioDiagnostic.open = false;
   if (syncQuery) updateModeQuery(null, { push: true });
   renderLoadingState();
   updateReplayControls();
   if (mode === "replay") loadReplayCatalog();
-  else refreshSnapshot();
+  else refreshLiveSessionSurface();
+}
+
+function restartLiveSurfaceForSelector() {
+  if (app.mode !== "live") return;
+  window.clearTimeout(app.timer);
+  window.clearTimeout(app.liveLeaseTimer);
+  app.timer = null;
+  app.liveLeaseTimer = null;
+  app.requestGeneration += 1;
+  if (app.requestController) app.requestController.abort();
+  app.requestController = null;
+  app.sessionSurface = null;
+  app.sessionDate = "";
+  app.livePhase = "connecting";
+  app.liveLastError = "";
+  app.cockpitPriceDomain = null;
+  app.cockpitColorDomains = {};
+  app.cockpitHover = null;
+  renderCockpitStatic();
+  renderCockpitAudit();
+  updateFilters();
+  renderLiveSessionSurfaceChrome();
+  void refreshLiveSessionSurface();
+  if (dom.scenarioDiagnostic.open) void refreshSnapshot();
 }
 
 dom.modeFilter.addEventListener("change", () => {
@@ -5107,37 +5864,36 @@ dom.replayTimeline.addEventListener("change", () => {
   });
 });
 dom.expiryFilter.addEventListener("change", () => {
+  app.expiryRole = ["front", "next"].includes(dom.expiryFilter.value)
+    ? dom.expiryFilter.value
+    : "front";
+  app.expiry = app.expiryRole;
   if (isReplayView()) {
-    app.expiryRole = ["front", "next"].includes(dom.expiryFilter.value)
-      ? dom.expiryFilter.value
-      : "front";
-    app.expiry = app.expiryRole;
-  } else {
-    app.expiry = dom.expiryFilter.value;
-    app.expiryRole = selectedExpiry()?.role || app.expiryRole;
-  }
-  renderSummary();
-  renderVisuals();
-  if (isReplayView()) {
+    renderSummary();
+    renderVisuals();
     if (app.trend) app.trend.role = app.expiryRole;
     cancelSessionSurfaceRequest({ clear: true });
     maybeLoadSessionSurfaceForPlayhead({ force: true });
+  } else {
+    restartLiveSurfaceForSelector();
   }
 });
 dom.weightingFilter.addEventListener("change", () => {
   app.weighting = dom.weightingFilter.value;
-  renderSummary();
-  renderVisuals();
   if (isReplayView()) {
+    renderSummary();
+    renderVisuals();
     if (app.trend) app.trend.weighting = app.weighting;
     cancelSessionSurfaceRequest({ clear: true });
     maybeLoadSessionSurfaceForPlayhead({ force: true });
+  } else {
+    restartLiveSurfaceForSelector();
   }
 });
 dom.metricFilter.addEventListener("change", () => {
   app.metric = dom.metricFilter.value;
-  renderSummary();
-  renderVisuals();
+  if (isReplayView()) renderSummary();
+  if (dom.scenarioDiagnostic.open) renderVisuals();
 });
 
 function setAuditDrawer(open) {
@@ -5161,6 +5917,7 @@ for (const panel of ["gamma", "strike", "charm"]) {
   overlay.addEventListener("pointerleave", clearCockpitHover);
   if (panel !== "strike") {
     overlay.addEventListener("click", (event) => {
+      if (!isReplayView()) return;
       const surface = app.sessionSurface;
       const layout = app.cockpitLayouts[panel];
       if (!surface || !layout) return;
@@ -5172,6 +5929,7 @@ for (const panel of ["gamma", "strike", "charm"]) {
     });
   }
   overlay.addEventListener("keydown", (event) => {
+    if (!isReplayView()) return;
     if (!app.trend) return;
     if (event.key === " " || event.key === "Spacebar") {
       event.preventDefault();
@@ -5239,15 +5997,24 @@ dom.trendOverlay.addEventListener("keydown", (event) => {
   }
 });
 dom.scenarioDiagnostic.addEventListener("toggle", () => {
-  if (!dom.scenarioDiagnostic.open) return;
+  if (!dom.scenarioDiagnostic.open) {
+    app.liveDiagnosticGeneration += 1;
+    if (app.liveDiagnosticController) app.liveDiagnosticController.abort();
+    app.liveDiagnosticController = null;
+    updateFilters();
+    return;
+  }
   if (app.playing) {
     dom.scenarioDiagnostic.open = false;
     return;
   }
   if (isReplayView() && app.trend && !app.playing) {
     syncScenarioFrameToPlayhead();
-  } else if (app.snapshot) {
-    window.requestAnimationFrame(renderVisuals);
+  } else if (app.mode === "live") {
+    updateFilters();
+    dom.surfaceTitle.textContent = "Legacy scenario diagnostic · loading";
+    dom.surfaceSubtitle.textContent = "Secondary rolling Spot × Forward-time snapshot";
+    void refreshSnapshot();
   }
 });
 
@@ -5282,12 +6049,30 @@ document.addEventListener("visibilitychange", () => {
   if (document.hidden && app.playing) {
     stopPlayback({ syncFrame: false, announce: true });
   }
+  if (!document.hidden && app.mode === "live") {
+    const state = liveSurfaceDisplayState(app.sessionSurface, liveClockNowMs());
+    if (state === "expired") expireLiveSessionSurface();
+    if (!app.requestController) {
+      window.clearTimeout(app.timer);
+      app.timer = null;
+      void refreshLiveSessionSurface();
+    }
+  }
 });
 
 if (isObject(globalThis.__SPX_SPARK_TEST_HOOK__)) {
   Object.assign(globalThis.__SPX_SPARK_TEST_HOOK__, {
     canonicalReplaySha256,
+    cockpitDisplayTimeMs,
     expandOnlyDomain,
+    historicalOnlyLiveSurface,
+    conservativeLiveServerNow,
+    liveFrozenPrefixSignature,
+    liveServerTimeFromHeaders,
+    liveServerTimeMatchesArtifact,
+    liveSurfaceDisplayState,
+    liveSurfaceIdentity,
+    liveSurfaceTransitionIssue,
     missingRangeAppliesToPanel,
     normalizeSessionSurface,
     normalizeSessionMetricUnits,

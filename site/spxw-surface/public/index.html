@@ -187,11 +187,6 @@
         <div id="cockpit-loading" class="cockpit-loading" hidden aria-live="polite">Loading validated session surface…</div>
       </section>
 
-      <section id="cockpit-live-placeholder" class="cockpit-live-placeholder" hidden>
-        <strong>Live session canvas is waiting for a durable session-surface feed.</strong>
-        <span>The current production snapshot remains available in the secondary diagnostic below.</span>
-      </section>
-
       <aside id="cockpit-audit-drawer" class="audit-drawer" hidden aria-label="Data and audit details">
         <header class="audit-drawer-header">
           <div>
@@ -244,9 +239,9 @@
         <details id="scenario-diagnostic" class="panel scenario-panel">
           <summary class="panel-header scenario-summary">
             <div>
-              <p class="panel-kicker">SECONDARY DIAGNOSTIC · SPXW CHAIN EXPOSURE PROXY</p>
-              <h2 id="surface-title">Scenario surface · Spot × Forward time</h2>
-              <p id="surface-subtitle">等待生产快照</p>
+              <p class="panel-kicker">SECONDARY DIAGNOSTIC · LEGACY ROLLING SNAPSHOT</p>
+              <h2 id="surface-title">Legacy scenario · Spot × Forward time</h2>
+              <p id="surface-subtitle">折叠状态不读取旧 snapshot；展开后仅用于诊断，不作为主图 fallback。</p>
             </div>
             <div id="surface-quality" class="quality-chip">—</div>
           </summary>

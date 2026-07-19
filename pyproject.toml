@@ -50,6 +50,7 @@ spx-spark-schwab-oauth = "spx_spark.schwab.oauth_service:main"
 spx-spark-surface-dashboard = "spx_spark.surface_dashboard:main"
 spx-spark-surface-dashboard-replay = "spx_spark.surface_dashboard_replay:main"
 spx-spark-surface-replay-service = "spx_spark.surface_replay_service:main"
+spx-spark-surface-live-service = "spx_spark.surface_live_session_http:main"
 
 [dependency-groups]
 dev = [

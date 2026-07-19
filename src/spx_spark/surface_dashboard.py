@@ -29,6 +29,7 @@ from spx_spark.options_map.orchestration import (
 )
 from spx_spark.state_io import atomic_write_json_secure
 from spx_spark.storage import LatestState, LatestStateStore, configured_quote_use_decision
+from spx_spark.surface_artifact import canonical_sha256
 
 
 DASHBOARD_SCHEMA_VERSION = 1
@@ -111,6 +112,7 @@ def _fresh_underlier(
             return {
                 "price": price,
                 "source": "index:SPX",
+                "provider": spx_quote.provider.value,
                 "quality": decision.feed_mode.value,
                 "source_at": source_at.isoformat(),
                 "age_seconds": round((as_utc(state.as_of) - source_at).total_seconds(), 6),
@@ -135,6 +137,7 @@ def _fresh_underlier(
     return {
         "price": implied_price,
         "source": "chain_implied",
+        "provider": None,
         "quality": "derived_fresh_pairs",
         "source_at": None,
         "age_seconds": None,
@@ -163,6 +166,9 @@ def _contracts_for_expiry(
     call_count = 0
     put_count = 0
     strikes: set[float] = set()
+    transport_times: list[datetime] = []
+    received_times: list[datetime] = []
+    structure_times: list[datetime] = []
 
     for quote in quotes:
         decision = configured_quote_use_decision(
@@ -193,6 +199,9 @@ def _contracts_for_expiry(
                 volume=quote.volume,
             )
         )
+        transport_times.append(_transport_time(quote))
+        received_times.append(as_utc(quote.received_at))
+        structure_times.append(as_utc(quote.structure_time or quote.received_at))
         providers.add(quote.provider.value)
         strikes.add(strike)
         with_open_interest += int(open_interest is not None)
@@ -222,8 +231,54 @@ def _contracts_for_expiry(
             "with_volume": with_volume,
             "with_positive_volume": with_positive_volume,
         },
+        "input_clocks": _input_clock_payload(
+            as_of=state.as_of,
+            transport_times=transport_times,
+            received_times=received_times,
+            structure_times=structure_times,
+        ),
     }
     return contracts, metadata
+
+
+def _input_clock_payload(
+    *,
+    as_of: datetime,
+    transport_times: list[datetime],
+    received_times: list[datetime],
+    structure_times: list[datetime],
+) -> dict[str, object]:
+    selection_clock = as_utc(as_of)
+    known_times = [
+        max(transport, received, structure)
+        for transport, received, structure in zip(
+            transport_times,
+            received_times,
+            structure_times,
+            strict=True,
+        )
+    ]
+
+    def encoded_max(values: list[datetime]) -> str | None:
+        return max(values).isoformat() if values else None
+
+    def maximum_age(values: list[datetime]) -> float | None:
+        if not values:
+            return None
+        return max((selection_clock - value).total_seconds() for value in values)
+
+    return {
+        "selection_as_of": selection_clock.isoformat(),
+        "contract_clock_count": len(known_times),
+        "min_source_at": min(transport_times).isoformat() if transport_times else None,
+        "max_source_at": encoded_max(transport_times),
+        "max_received_at": encoded_max(received_times),
+        "max_structure_at": encoded_max(structure_times),
+        "max_known_at": encoded_max(known_times),
+        "max_transport_age_seconds": maximum_age(transport_times),
+        "max_structure_age_seconds": maximum_age(structure_times),
+        "future_clock_count": sum(value > selection_clock for value in known_times),
+    }
 
 
 def _expiry_surface(
@@ -322,7 +377,7 @@ def build_dashboard_snapshot(
             "lease_seconds": lease_seconds,
         }
     )
-    return {
+    payload: dict[str, object] = {
         "schema_version": DASHBOARD_SCHEMA_VERSION,
         "kind": DASHBOARD_KIND,
         "surface_version": SURFACE_SCHEMA_VERSION,
@@ -335,7 +390,13 @@ def build_dashboard_snapshot(
         "underlier": projection["underlier"],
         "quality": quality,
         "expiries": projection["expiries"],
+        "source_state": {
+            "created_at": as_utc(state.created_at).isoformat(),
+            "selection_as_of": projection["as_of"],
+        },
     }
+    payload["artifact_sha256"] = canonical_sha256(payload)
+    return payload
 
 
 def build_surface_projection(
@@ -368,6 +429,7 @@ def build_surface_projection(
         underlier_payload: dict[str, object] = {
             "price": None,
             "source": None,
+            "provider": None,
             "quality": "unavailable",
             "source_at": None,
             "age_seconds": None,
