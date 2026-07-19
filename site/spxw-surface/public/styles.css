@@ -154,6 +154,58 @@ h1 {
   font-variant-numeric: tabular-nums;
 }
 
+.replay-banner {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  margin: 0 0 16px;
+  padding: 13px 16px;
+  border: 2px solid #9b681f;
+  border-radius: 13px;
+  background: #fff8e8;
+  box-shadow: 0 8px 24px rgb(112 74 22 / 10%);
+  color: #5e3c10;
+}
+
+.replay-banner strong {
+  font-size: 13px;
+  font-weight: 820;
+  letter-spacing: 0.12em;
+}
+
+.replay-banner > span:not(.replay-banner-tag) {
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.replay-banner-tag {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 2px 9px;
+  border: 1px solid #9b681f;
+  border-radius: 999px;
+  background: var(--surface);
+  color: #5e3c10;
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.replay-banner small {
+  flex-basis: 100%;
+  color: #704a16;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.45;
+}
+
+body.mode-replay .shell {
+  border-top: 4px solid #9b681f;
+}
+
 .summary-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -239,7 +291,11 @@ h1 {
   min-width: 175px;
 }
 
-.control-bar label:first-child {
+.control-bar .mode-control {
+  min-width: 255px;
+}
+
+.control-bar .expiry-control {
   min-width: 210px;
 }
 
@@ -621,8 +677,13 @@ code {
   }
 
   .control-bar label,
-  .control-bar label:first-child {
+  .control-bar .mode-control,
+  .control-bar .expiry-control {
     min-width: 0;
+  }
+
+  .replay-banner {
+    align-items: flex-start;
   }
 
   .panel-header {

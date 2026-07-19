@@ -48,6 +48,7 @@ spx-spark-schwab-collector = "spx_spark.schwab.collector:main"
 spx-spark-schwab-marketdata = "spx_spark.schwab.collector:loop_main"
 spx-spark-schwab-oauth = "spx_spark.schwab.oauth_service:main"
 spx-spark-surface-dashboard = "spx_spark.surface_dashboard:main"
+spx-spark-surface-dashboard-replay = "spx_spark.surface_dashboard_replay:main"
 
 [dependency-groups]
 dev = [

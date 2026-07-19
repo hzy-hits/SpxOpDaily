@@ -25,3 +25,29 @@ services:
       timeout: 3s
       retries: 3
       start_period: 5s
+
+  spxw-surface-entry:
+    image: nginx:alpine
+    container_name: spxw-surface-entry
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:18084:18084"
+    user: "${SPXW_SURFACE_UID:-1001}:${SPXW_SURFACE_GID:-1001}"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /var/cache/nginx:uid=${SPXW_SURFACE_UID:-1001},gid=${SPXW_SURFACE_GID:-1001},mode=0750
+      - /var/run:uid=${SPXW_SURFACE_UID:-1001},gid=${SPXW_SURFACE_GID:-1001},mode=0750
+      - /tmp:uid=${SPXW_SURFACE_UID:-1001},gid=${SPXW_SURFACE_GID:-1001},mode=0750
+    entrypoint: ["nginx", "-g", "daemon off;"]
+    volumes:
+      - ./entry-nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:18084/healthz"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s

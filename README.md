@@ -321,7 +321,7 @@ coverage and freshness. Signed views use a call-positive / put-negative proxy;
 dealer positioning, participant identity, and signed flow remain unknown. The
 private dashboard is served behind code-server on port `18082`; see
 [docs/spxw-surface-dashboard.md](docs/spxw-surface-dashboard.md) for the model,
-safety contract, and runtime layout.
+safety contract, frozen Friday replay, and short `spx.zh3nyu.com` entry point.
 
 The same 5-second SPX/ES path monitor now freezes the pre-move flip band and
 call wall. Two fresh synchronized confirmations can produce a short-lived

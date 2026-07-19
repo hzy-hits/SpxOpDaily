@@ -68,6 +68,7 @@ LAYERS = {
     "morning_map": 5,
     "order_map": 5,
     "surface_dashboard": 5,
+    "surface_dashboard_replay": 5,
     "infrastructure": 4,
 }
 

@@ -309,6 +309,43 @@ def build_dashboard_snapshot(
         raise ValueError("interval_seconds must be positive and finite")
     created_at = as_utc(now or datetime.now(tz=timezone.utc))
     lease_seconds = interval_seconds * 2.0
+    projection = build_surface_projection(
+        state,
+        storage_settings=storage_settings,
+        surface_builder=surface_builder,
+    )
+
+    quality = dict(projection["quality"])
+    quality.update(
+        {
+            "refresh_interval_seconds": interval_seconds,
+            "lease_seconds": lease_seconds,
+        }
+    )
+    return {
+        "schema_version": DASHBOARD_SCHEMA_VERSION,
+        "kind": DASHBOARD_KIND,
+        "surface_version": SURFACE_SCHEMA_VERSION,
+        "created_at": created_at.isoformat(),
+        "as_of": projection["as_of"],
+        "valid_until": (created_at + timedelta(seconds=lease_seconds)).isoformat(),
+        "status": projection["status"],
+        "automatic_ordering": False,
+        "session": projection["session"],
+        "underlier": projection["underlier"],
+        "quality": quality,
+        "expiries": projection["expiries"],
+    }
+
+
+def build_surface_projection(
+    state: LatestState,
+    *,
+    storage_settings: StorageSettings,
+    surface_builder: SurfaceBuilder = build_exposure_surface,
+) -> dict[str, object]:
+    """Build the clock-neutral surface body shared by live and replay envelopes."""
+
     as_of = as_utc(state.as_of)
     session = _session_payload(as_of)
     requested_expiries = list(session["research_expiries"])
@@ -364,14 +401,8 @@ def build_dashboard_snapshot(
         status = "degraded"
 
     return {
-        "schema_version": DASHBOARD_SCHEMA_VERSION,
-        "kind": DASHBOARD_KIND,
-        "surface_version": SURFACE_SCHEMA_VERSION,
-        "created_at": created_at.isoformat(),
         "as_of": as_of.isoformat(),
-        "valid_until": (created_at + timedelta(seconds=lease_seconds)).isoformat(),
         "status": status,
-        "automatic_ordering": False,
         "session": session,
         "underlier": underlier_payload,
         "quality": {
@@ -379,8 +410,6 @@ def build_dashboard_snapshot(
             "reasons": list(dict.fromkeys(reasons)),
             "requested_expiry_count": len(requested_expiries),
             "published_expiry_count": len(published),
-            "refresh_interval_seconds": interval_seconds,
-            "lease_seconds": lease_seconds,
         },
         "expiries": published,
     }

@@ -1,6 +1,21 @@
 "use strict";
 
 const SNAPSHOT_URL = "api/v1/snapshot";
+const REPLAY = Object.freeze({
+  id: "2026-07-17T183500Z",
+  label: "Replay · Fri 7/17 14:35 ET",
+  url: "api/v1/replays/2026-07-17T183500Z",
+  view: "friday",
+  requestedAsOf: "2026-07-17T18:35:00Z",
+  asOfLabel: "Fri 7/17 14:35 ET · 2026-07-17 18:35 UTC",
+  policyVersion: "spxw_surface_replay.v2",
+  sourceFile: "lake/quotes/schema=v1/date=2026-07-17/provider=schwab/hour=18/quotes.parquet",
+  sourceSha256: "85dc310f97113cf106ba54ef5532f3a002c10e67cec069de9c8933924cac2dff",
+  rawSourceFile: "raw/provider=schwab/date=2026-07-17/hour=18/quotes.jsonl",
+  rawSourceSha256: "7e627e0d2f5415a48934196b4ab29d9448e21ead53aaa742d8b6da46b46fca43",
+  projectionPolicySha256: "aa507d6490f5734c52c46a7f5b6763e4d1f402523a75cf1a5df0c6e6dd83dd55",
+  artifactSha256: "475ba8eae84269f4fe453a231a438d2f47ff38a640dbfb2113e98b71210b0e0f",
+});
 const POLL_INTERVAL_MS = 5_000;
 const REQUEST_TIMEOUT_MS = 4_500;
 const SVG_NS = "http://www.w3.org/2000/svg";
@@ -52,6 +67,11 @@ const STATUS_LABELS = {
   unknown: "Unknown",
 };
 
+const REASON_LABELS = {
+  unpaired_strike: "部分 strike 缺少 Call/Put 配对（unpaired_strike）",
+  underlier_unavailable: "标的行情不可用（underlier_unavailable）",
+};
+
 const COLORS = {
   ink: "#17202a",
   muted: "#687482",
@@ -66,6 +86,9 @@ const COLORS = {
 };
 
 const dom = {
+  pageLede: document.querySelector("#page-lede"),
+  replayBanner: document.querySelector("#replay-banner"),
+  replayBannerAsOf: document.querySelector("#replay-banner-as-of"),
   statusPill: document.querySelector("#status-pill"),
   refreshState: document.querySelector("#refresh-state"),
   summaryStatus: document.querySelector("#summary-status"),
@@ -77,6 +100,7 @@ const dom = {
   summaryExpiries: document.querySelector("#summary-expiries"),
   summaryUnderlier: document.querySelector("#summary-underlier"),
   notice: document.querySelector("#data-notice"),
+  modeFilter: document.querySelector("#mode-filter"),
   expiryFilter: document.querySelector("#expiry-filter"),
   weightingFilter: document.querySelector("#weighting-filter"),
   metricFilter: document.querySelector("#metric-filter"),
@@ -103,18 +127,29 @@ const dom = {
   peakHeading: document.querySelector("#peak-heading"),
   troughHeading: document.querySelector("#trough-heading"),
   extremaSubtitle: document.querySelector("#extrema-subtitle"),
+  sourceFile: document.querySelector("#source-file"),
+  sourceMode: document.querySelector("#source-mode"),
   schemaVersion: document.querySelector("#schema-version"),
   signConvention: document.querySelector("#sign-convention"),
 };
 
 const app = {
+  mode: initialModeFromQuery(),
   snapshot: null,
   expiry: "",
   weighting: "oi_weighted",
   metric: "signed_gamma",
   chartHit: null,
   timer: null,
+  requestController: null,
+  requestGeneration: 0,
 };
+
+function initialModeFromQuery() {
+  return new URLSearchParams(window.location.search).get("view") === REPLAY.view
+    ? "replay"
+    : "live";
+}
 
 function isObject(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -147,6 +182,63 @@ function reasonsFrom(value) {
     .flatMap((candidate) => (Array.isArray(candidate) ? candidate : []))
     .filter((item) => typeof item === "string" && item.trim())
     .map((item) => item.trim());
+}
+
+function reasonLabel(reason) {
+  return REASON_LABELS[reason] || reason;
+}
+
+function canonicalReplayBytes(value) {
+  const encoder = new TextEncoder();
+  function encode(item) {
+    if (item === null) return "n;";
+    if (typeof item === "boolean") return item ? "b1;" : "b0;";
+    if (typeof item === "number") {
+      if (!Number.isFinite(item)) throw new Error("replay_hash_non_finite_number");
+      if (Number.isInteger(item) && !Number.isSafeInteger(item)) {
+        throw new Error("replay_hash_unsafe_integer");
+      }
+      const buffer = new ArrayBuffer(8);
+      new DataView(buffer).setFloat64(0, item, false);
+      const hex = Array.from(new Uint8Array(buffer), (byte) => byte.toString(16).padStart(2, "0")).join("");
+      return `f${hex};`;
+    }
+    if (typeof item === "string") {
+      return `s${encoder.encode(item).length}:${item}`;
+    }
+    if (Array.isArray(item)) {
+      return `a${item.length}[${item.map(encode).join("")}]`;
+    }
+    if (isObject(item)) {
+      const keys = Object.keys(item).sort();
+      return `o${keys.length}{${keys.map((key) => `${encode(key)}${encode(item[key])}`).join("")}}`;
+    }
+    throw new Error("replay_hash_unsupported_value");
+  }
+  return encoder.encode(encode(value));
+}
+
+async function canonicalReplaySha256(value) {
+  if (!globalThis.crypto?.subtle) throw new Error("replay_crypto_unavailable");
+  const digest = await globalThis.crypto.subtle.digest("SHA-256", canonicalReplayBytes(value));
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+async function verifyReplayDigests(raw) {
+  if (!isObject(raw.projection_policy)) throw new Error("missing_replay_projection_policy");
+  const policyDigest = await canonicalReplaySha256(raw.projection_policy);
+  if (
+    policyDigest !== raw.projection_policy_sha256 ||
+    policyDigest !== REPLAY.projectionPolicySha256
+  ) {
+    throw new Error("replay_projection_policy_hash_mismatch");
+  }
+  const artifactBody = { ...raw };
+  delete artifactBody.artifact_sha256;
+  const artifactDigest = await canonicalReplaySha256(artifactBody);
+  if (artifactDigest !== raw.artifact_sha256 || artifactDigest !== REPLAY.artifactSha256) {
+    throw new Error("replay_artifact_hash_mismatch");
+  }
 }
 
 function parseDate(value) {
@@ -259,6 +351,7 @@ function normalizeSnapshot(raw) {
     : expiryRows.map(normalizeExpiry).filter(Boolean);
   return {
     raw,
+    mode: "live",
     kind,
     schemaVersion: String(raw.schema_version),
     status,
@@ -274,9 +367,207 @@ function normalizeSnapshot(raw) {
   };
 }
 
+async function normalizeReplaySnapshot(raw) {
+  if (!isObject(raw)) throw new Error("replay_not_an_object");
+  await verifyReplayDigests(raw);
+  if (nonEmptyString(raw.kind) !== "spxw_surface_dashboard_replay") {
+    throw new Error("unexpected_replay_kind");
+  }
+  if (raw.schema_version !== 1) throw new Error("unsupported_replay_schema");
+  if (raw.mode !== "replay") throw new Error("invalid_replay_mode");
+  if (raw.policy_version !== REPLAY.policyVersion) {
+    throw new Error("unexpected_replay_policy_version");
+  }
+  if (raw.replay_id !== REPLAY.id) throw new Error("unexpected_replay_id");
+  if (raw.frozen !== true) throw new Error("replay_must_be_frozen");
+  if (raw.automatic_ordering !== false) throw new Error("unsafe_automatic_ordering_contract");
+  if (Object.prototype.hasOwnProperty.call(raw, "valid_until")) {
+    throw new Error("replay_must_not_have_valid_until");
+  }
+  if (Object.prototype.hasOwnProperty.call(raw, "created_at")) {
+    throw new Error("replay_must_not_have_live_created_at");
+  }
+  if (raw.session_date !== "2026-07-17") throw new Error("unexpected_replay_session_date");
+
+  const status = normalizedStatus(raw.status || raw.quality);
+  if (status === "unknown") throw new Error("unsupported_replay_status");
+  const requestedAsOf = parseDate(raw.requested_as_of);
+  const dataAsOf = parseDate(raw.data_as_of);
+  const generatedAt = parseDate(raw.generated_at);
+  const expectedAsOf = parseDate(REPLAY.requestedAsOf);
+  if (!requestedAsOf || !dataAsOf || !generatedAt || !expectedAsOf) {
+    throw new Error("invalid_replay_clock_contract");
+  }
+  if (requestedAsOf.getTime() !== expectedAsOf.getTime()) {
+    throw new Error("unexpected_replay_requested_as_of");
+  }
+  if (dataAsOf.getTime() > requestedAsOf.getTime()) {
+    throw new Error("replay_data_after_requested_as_of");
+  }
+  if (generatedAt.getTime() < dataAsOf.getTime()) {
+    throw new Error("replay_generated_before_data");
+  }
+
+  const source = isObject(raw.source) ? raw.source : null;
+  if (!source) throw new Error("missing_replay_source_contract");
+  const cutoffFields = [
+    "received_at",
+    "source_at",
+    "quote_time",
+    "trade_time",
+    "last_update_at",
+  ];
+  if (
+    !Array.isArray(source.cutoff_fields) ||
+    source.cutoff_fields.length !== cutoffFields.length ||
+    source.cutoff_fields.some((field, index) => field !== cutoffFields[index])
+  ) {
+    throw new Error("unsafe_replay_cutoff_fields");
+  }
+  if (
+    source.cutoff_rule !==
+    "received_at_and_available_source_clocks_lte_requested_as_of"
+  ) {
+    throw new Error("unsafe_replay_cutoff_rule");
+  }
+  if (source.lookahead_rows_selected !== 0) throw new Error("replay_lookahead_detected");
+  if (source.coordinate !== "SPX") throw new Error("unsafe_replay_coordinate");
+  if (source.trading_class !== "SPXW") throw new Error("unsafe_replay_trading_class");
+  if (source.provider !== "schwab") throw new Error("unexpected_replay_provider");
+  if (source.dataset !== "lake/quotes/schema=v1") throw new Error("unexpected_replay_dataset");
+  if (source.lookback_seconds !== 15) throw new Error("unexpected_replay_lookback");
+  if (
+    source.selection_rule !==
+    "latest_complete_row_per_instrument_by_available_clocks_then_surface_input_completeness"
+  ) {
+    throw new Error("unsafe_replay_selection_rule");
+  }
+  if (source.replay_loader_field_stitching !== false) {
+    throw new Error("replay_field_stitching_detected");
+  }
+  if (source.source_files_verified_unchanged_during_read !== true) {
+    throw new Error("unverified_replay_source_files");
+  }
+  if (
+    source.structure_clock_available !== false ||
+    source.compacted_at_available !== false ||
+    !Array.isArray(source.compacted_at) ||
+    source.compacted_at.length !== 0 ||
+    !Array.isArray(source.lake_schema_versions) ||
+    source.lake_schema_versions.length !== 1 ||
+    source.lake_schema_versions[0] !== "v1" ||
+    !Array.isArray(source.lake_writer_versions) ||
+    source.lake_writer_versions.length !== 1 ||
+    source.lake_writer_versions[0] !== "spx-spark-quote-compactor-v1"
+  ) {
+    throw new Error("unexpected_replay_lake_lineage");
+  }
+  const maxTransportAge = finiteNumber(source.max_transport_age_seconds);
+  if (maxTransportAge === null || maxTransportAge < 0 || maxTransportAge > 15) {
+    throw new Error("unsafe_replay_transport_age");
+  }
+  const maxObservationAge = finiteNumber(source.max_observation_age_seconds);
+  const minObservationAge = finiteNumber(source.min_observation_age_seconds);
+  if (
+    maxObservationAge === null ||
+    minObservationAge === null ||
+    minObservationAge < 0 ||
+    maxObservationAge < minObservationAge ||
+    maxObservationAge > 15
+  ) {
+    throw new Error("unsafe_replay_observation_age");
+  }
+  const expiryCounts = isObject(source.selected_expiry_counts)
+    ? source.selected_expiry_counts
+    : {};
+  if (
+    source.selected_quote_count !== 241 ||
+    expiryCounts["20260717"] !== 160 ||
+    expiryCounts["20260720"] !== 80
+  ) {
+    throw new Error("unexpected_replay_quote_coverage");
+  }
+  if (
+    source.raw_candidate_count !== 2106 ||
+    source.eligible_candidate_count !== 2106 ||
+    source.source_clock_rows_excluded !== 0 ||
+    source.duplicate_received_at_group_count !== 480 ||
+    source.duplicate_received_at_row_count !== 960 ||
+    source.resolved_by_surface_completeness_instrument_count !== 35 ||
+    source.ambiguous_top_instrument_count !== 0 ||
+    source.dropped_ambiguous_instrument_count !== 0 ||
+    source.identical_top_duplicate_row_count !== 0
+  ) {
+    throw new Error("unexpected_replay_selection_audit");
+  }
+  if (
+    !Array.isArray(source.source_files) ||
+    source.source_files.length !== 1 ||
+    source.source_files[0] !== REPLAY.sourceFile
+  ) {
+    throw new Error("unexpected_replay_source_file");
+  }
+  const sourceHashes = isObject(source.parquet_file_sha256)
+    ? source.parquet_file_sha256
+    : {};
+  if (
+    Object.keys(sourceHashes).length !== 1 ||
+    sourceHashes[REPLAY.sourceFile] !== REPLAY.sourceSha256
+  ) {
+    throw new Error("invalid_replay_source_hash");
+  }
+  const rawSourceHashes = isObject(source.raw_source_file_sha256)
+    ? source.raw_source_file_sha256
+    : {};
+  if (
+    Object.keys(rawSourceHashes).length !== 1 ||
+    rawSourceHashes[REPLAY.rawSourceFile] !== REPLAY.rawSourceSha256
+  ) {
+    throw new Error("invalid_replay_raw_source_hash");
+  }
+  if (
+    raw.projection_policy_sha256 !== REPLAY.projectionPolicySha256 ||
+    raw.artifact_sha256 !== REPLAY.artifactSha256
+  ) {
+    throw new Error("invalid_replay_artifact_hash");
+  }
+
+  if (!Array.isArray(raw.expiries)) throw new Error("invalid_replay_expiries");
+  const normalizedExpiries = raw.expiries.map(normalizeExpiry);
+  if (normalizedExpiries.some((expiry) => !expiry)) throw new Error("invalid_replay_expiry");
+  const expiries = status === "unavailable" ? [] : normalizedExpiries;
+  return {
+    raw,
+    mode: "replay",
+    kind: raw.kind,
+    replayId: raw.replay_id,
+    schemaVersion: String(raw.schema_version),
+    status,
+    createdAt: generatedAt,
+    generatedAt,
+    asOf: requestedAsOf,
+    requestedAsOf,
+    dataAsOf,
+    validUntil: null,
+    frozen: true,
+    automaticOrdering: false,
+    source,
+    quality: isObject(raw.quality) ? raw.quality : {},
+    reasons: [...reasonsFrom(raw.quality), ...reasonsFrom(raw)],
+    underlier: isObject(raw.underlier) ? raw.underlier : {},
+    session: isObject(raw.session) ? raw.session : {},
+    expiries,
+  };
+}
+
 function effectiveSnapshotStatus(snapshot) {
   if (!snapshot) return "unavailable";
   if (!["ready", "degraded"].includes(snapshot.status)) return "unavailable";
+  if (snapshot.mode === "replay") {
+    if (snapshot.frozen !== true || snapshot.validUntil !== null) return "unavailable";
+    if (snapshot.source?.lookahead_rows_selected !== 0) return "unavailable";
+    return snapshot.status;
+  }
   if (!snapshot.validUntil) return "unavailable";
   if (snapshot.validUntil && Date.now() > snapshot.validUntil.getTime()) return "unavailable";
   return snapshot.status;
@@ -415,6 +706,40 @@ function formatDateTime(date) {
   }).format(date);
 }
 
+function formatIsoUtc(date) {
+  if (!(date instanceof Date)) return "—";
+  return date.toISOString().replace(".000Z", "Z");
+}
+
+function isReplayView() {
+  return app.mode === "replay";
+}
+
+function updateModeQuery() {
+  const url = new URL(window.location.href);
+  if (isReplayView()) url.searchParams.set("view", REPLAY.view);
+  else url.searchParams.delete("view");
+  window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
+}
+
+function updateModeChrome() {
+  const replay = isReplayView();
+  document.body.classList.toggle("mode-replay", replay);
+  dom.modeFilter.value = replay ? REPLAY.view : "live";
+  dom.replayBanner.hidden = !replay;
+  dom.pageLede.textContent = replay
+    ? "标的价格 × 时间的期权暴露地形。当前为冻结历史回放，不是实时行情，也不提供下单入口。"
+    : "标的价格 × 时间的期权暴露地形。所有值均来自只读生产快照，不提供下单入口。";
+  dom.sourceFile.textContent = replay
+    ? `replays/${REPLAY.id}.json`
+    : "spxw_surface_dashboard.json";
+  dom.sourceMode.textContent = replay ? "HISTORICAL REPLAY · Frozen · Not live" : "5 秒只读刷新";
+  if (replay) {
+    const dataAsOf = app.snapshot?.mode === "replay" ? formatIsoUtc(app.snapshot.dataAsOf) : "等待校验";
+    dom.replayBannerAsOf.textContent = `As of ${REPLAY.asOfLabel} · data_as_of ${dataAsOf} · received/source clock cutoff · 0 selected lookahead rows`;
+  }
+}
+
 function formatAge(seconds) {
   if (!Number.isFinite(seconds) || seconds < 0) return "—";
   if (seconds < 60) return `${Math.round(seconds)}s`;
@@ -443,6 +768,8 @@ function compactNumber(value, digits = 2) {
 function ratioValue(coverage) {
   const explicit = finiteNumber(coverage.ratio);
   if (explicit !== null) return explicit;
+  const usableRatio = finiteNumber(coverage.usable_ratio);
+  if (usableRatio !== null) return usableRatio;
   const usable = finiteNumber(coverage.usable_contracts);
   const total = finiteNumber(coverage.total_contracts);
   return usable !== null && total && total > 0 ? usable / total : null;
@@ -453,7 +780,8 @@ function currentCoverage(view, expiry) {
     if (!best) return row;
     return Math.abs(row.minutesForward) < Math.abs(best.minutesForward) ? row : best;
   }, null);
-  const coverage = nearest?.coverage || {};
+  const expiryCoverage = isObject(expiry?.raw?.coverage) ? expiry.raw.coverage : null;
+  const coverage = expiryCoverage || nearest?.coverage || {};
   return {
     ratio: ratioValue(coverage),
     usable: finiteNumber(coverage.usable_contracts),
@@ -514,18 +842,27 @@ function updateFilters() {
 function renderSummary() {
   const snapshot = app.snapshot;
   if (!snapshot) return;
+  const replay = isReplayView() && snapshot.mode === "replay";
   const status = effectiveSnapshotStatus(snapshot);
-  const expired = snapshot.validUntil && Date.now() > snapshot.validUntil.getTime();
-  setStatusPill(status, expired ? "Stale" : null);
-  dom.summaryStatus.textContent = expired ? "Stale / fail closed" : STATUS_LABELS[status];
-  const reasons = expired ? ["snapshot_valid_until_elapsed", ...snapshot.reasons] : snapshot.reasons;
-  dom.summaryReasons.textContent = reasons.slice(0, 3).join(" · ") || "无质量警告";
+  const expired = !replay && snapshot.validUntil && Date.now() > snapshot.validUntil.getTime();
+  setStatusPill(status, replay ? `Replay · ${STATUS_LABELS[status]}` : expired ? "Stale" : null);
+  dom.summaryStatus.textContent = replay
+    ? `${STATUS_LABELS[status]} · Frozen replay`
+    : expired ? "Stale / fail closed" : STATUS_LABELS[status];
+  const expiry = selectedExpiry();
+  const activeReasons = [...new Set([...snapshot.reasons, ...(expiry?.warnings || [])])];
+  const reasons = expired ? ["snapshot_valid_until_elapsed", ...activeReasons] : activeReasons;
+  const displayedReasons = reasons.map(reasonLabel);
+  dom.summaryReasons.textContent = displayedReasons.slice(0, 3).join(" · ") || "无质量警告";
 
   const ageSeconds = snapshot.asOf ? Math.max((Date.now() - snapshot.asOf.getTime()) / 1000, 0) : null;
-  dom.summaryFreshness.textContent = expired ? `过期 ${formatAge(ageSeconds)}` : formatAge(ageSeconds);
-  dom.summaryAsOf.textContent = `as of ${formatDateTime(snapshot.asOf)}`;
+  dom.summaryFreshness.textContent = replay
+    ? "Frozen · Not live"
+    : expired ? `过期 ${formatAge(ageSeconds)}` : formatAge(ageSeconds);
+  dom.summaryAsOf.textContent = replay
+    ? `as of ${REPLAY.asOfLabel}`
+    : `as of ${formatDateTime(snapshot.asOf)}`;
 
-  const expiry = selectedExpiry();
   const view = surfaceView(expiry, app.weighting, app.metric);
   const coverage = currentCoverage(view, expiry);
   dom.summaryCoverage.textContent = coverage.ratio === null ? "—" : `${(coverage.ratio * 100).toFixed(1)}%`;
@@ -552,14 +889,19 @@ function renderSummary() {
     ? "dealer side unknown"
     : "dealer side not asserted";
   dom.signConvention.textContent = `${sign}; ${dealer}`;
-  dom.refreshState.textContent = `最近检查 ${new Date().toLocaleTimeString("zh-CN", { hour12: false })}`;
+  dom.refreshState.textContent = replay
+    ? `Frozen replay · loaded ${new Date().toLocaleTimeString("zh-CN", { hour12: false })}`
+    : `最近检查 ${new Date().toLocaleTimeString("zh-CN", { hour12: false })}`;
+  updateModeChrome();
 
   if (expired) {
     setNotice("快照已超过 valid_until，所有曲面已清空；等待 publisher 产生新数据。", true);
   } else if (status === "unavailable") {
-    setNotice(`生产快照不可用${reasons.length ? `：${reasons.slice(0, 4).join(" · ")}` : ""}`, true);
-  } else if (status === "degraded" || reasons.length) {
-    setNotice(`当前为降级视图${reasons.length ? `：${reasons.slice(0, 4).join(" · ")}` : ""}`);
+    setNotice(`${replay ? "历史回放" : "生产快照"}不可用${displayedReasons.length ? `：${displayedReasons.slice(0, 4).join(" · ")}` : ""}`, true);
+  } else if (status === "degraded") {
+    setNotice(`${replay ? "历史回放为降级视图" : "当前为降级视图"}${displayedReasons.length ? `：${displayedReasons.slice(0, 4).join(" · ")}` : ""}`);
+  } else if (displayedReasons.length) {
+    setNotice(`${replay ? "历史回放质量提示" : "当前数据质量提示"}：${displayedReasons.slice(0, 4).join(" · ")}`);
   } else {
     setNotice("");
   }
@@ -573,6 +915,7 @@ function render() {
 
 function renderVisuals() {
   const snapshot = app.snapshot;
+  const replay = isReplayView() && snapshot?.mode === "replay";
   const expiry = selectedExpiry();
   const metric = METRICS[app.metric];
   const view = surfaceView(expiry, app.weighting, app.metric);
@@ -582,12 +925,12 @@ function renderVisuals() {
 
   const role = expiry?.role === "front" ? "Front" : expiry?.role === "next" ? "Next" : "Expiry";
   dom.surfaceTitle.textContent = expiry
-    ? `${role} ${expiry.expiry} · ${metric.label}`
+    ? `${replay ? "Replay · " : ""}${role} ${expiry.expiry} · ${metric.label}`
     : "Spot × Time surface";
   const semanticsText = WEIGHTING_DESCRIPTIONS[app.weighting] || WEIGHTINGS[app.weighting];
   dom.surfaceSubtitle.textContent = expiry
-    ? `${semanticsText} · X: SPX scenario spot · Y: minutes forward · ${view?.unit || "model units"}`
-    : "等待生产快照";
+    ? `${replay ? `HISTORICAL REPLAY · Frozen · Not live · as of ${REPLAY.asOfLabel} · ` : ""}${semanticsText} · X: SPX scenario spot · Y: minutes forward · ${view?.unit || "model units"}`
+    : replay ? "等待冻结历史回放" : "等待生产快照";
 
   const available = snapshotStatus !== "unavailable" && quality !== "unavailable" && view?.numericCount > 0;
   dom.heatmapEmpty.hidden = available;
@@ -703,7 +1046,7 @@ function drawHeatmap(view) {
 
   app.chartHit = { view, margins, plotWidth, plotHeight, cellWidth, cellHeight, width, height };
   const coverage = currentCoverage(view, selectedExpiry());
-  dom.accessibleSummary.textContent = `${METRICS[app.metric].label} 曲面，${view.spots.length} 个 spot 场景，${view.rows.length} 个时间切片，覆盖率 ${coverage.ratio === null ? "未知" : `${(coverage.ratio * 100).toFixed(1)}%`}，色域 ${signed ? `正负对称 ±${compactNumber(domain)}` : `0 到 ${compactNumber(domain)}`}。`;
+  dom.accessibleSummary.textContent = `${isReplayView() ? `历史回放，Frozen，Not live，as of ${REPLAY.asOfLabel}。` : ""}${METRICS[app.metric].label} 曲面，${view.spots.length} 个 spot 场景，${view.rows.length} 个时间切片，覆盖率 ${coverage.ratio === null ? "未知" : `${(coverage.ratio * 100).toFixed(1)}%`}，色域 ${signed ? `正负对称 ±${compactNumber(domain)}` : `0 到 ${compactNumber(domain)}`}。`;
 }
 
 function drawAxes(context, view, margins, plotWidth, plotHeight, width, height) {
@@ -1089,10 +1432,90 @@ function renderExtremaList(container, points, emptyLabel) {
   }
 }
 
-async function refreshSnapshot() {
+function cancelSnapshotWork() {
   window.clearTimeout(app.timer);
+  app.timer = null;
+  app.requestGeneration += 1;
+  if (app.requestController) app.requestController.abort();
+  app.requestController = null;
+}
+
+function beginSnapshotRequest() {
+  if (app.requestController) app.requestController.abort();
   const controller = new AbortController();
+  const generation = ++app.requestGeneration;
   const abortTimer = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  app.requestController = controller;
+  return { controller, generation, abortTimer };
+}
+
+function requestIsCurrent(generation, mode) {
+  return app.requestGeneration === generation && app.mode === mode;
+}
+
+function clearDashboardState() {
+  app.snapshot = null;
+  app.expiry = "";
+  updateFilters();
+  setQualityChip("unavailable");
+  dom.heatmapEmpty.hidden = false;
+  clearCanvas();
+  clearLadder();
+  renderExtrema(null);
+  updateLegend(null);
+  dom.schemaVersion.textContent = "schema —";
+  dom.signConvention.textContent = "dealer position sign unknown";
+}
+
+function renderLoadingState() {
+  clearDashboardState();
+  const replay = isReplayView();
+  setStatusPill("unknown", replay ? "Loading replay" : "正在连接");
+  dom.refreshState.textContent = replay ? "正在读取并校验冻结快照" : "等待首个快照";
+  dom.summaryStatus.textContent = "—";
+  dom.summaryReasons.textContent = replay ? "校验 replay / cutoff / lookahead 契约" : "尚未加载";
+  dom.summaryFreshness.textContent = replay ? "Frozen · Not live" : "—";
+  dom.summaryAsOf.textContent = replay ? `as of ${REPLAY.asOfLabel}` : "as of —";
+  dom.summaryCoverage.textContent = "—";
+  dom.summaryContracts.textContent = "可用合约 —";
+  dom.summaryExpiries.textContent = "—";
+  dom.summaryUnderlier.textContent = "SPX —";
+  dom.surfaceTitle.textContent = "Spot × Time surface";
+  dom.surfaceSubtitle.textContent = replay ? "等待冻结历史回放" : "等待生产快照";
+  setNotice(replay ? "正在读取历史回放；不会显示实时快照或缓存值。" : "");
+  updateModeChrome();
+}
+
+function renderFetchFailure(error, mode) {
+  clearDashboardState();
+  const replay = mode === "replay";
+  const reason = error instanceof Error ? error.message : `${mode}_snapshot_fetch_failed`;
+  setStatusPill("unavailable", replay ? "Replay unavailable" : null);
+  dom.refreshState.textContent = replay ? "历史回放读取失败；未自动重试" : "读取失败；5 秒后重试";
+  dom.summaryStatus.textContent = "Unavailable";
+  dom.summaryReasons.textContent = reason;
+  dom.summaryFreshness.textContent = replay ? "Frozen · Not live" : "—";
+  dom.summaryAsOf.textContent = replay ? `as of ${REPLAY.asOfLabel}` : "as of —";
+  dom.summaryCoverage.textContent = "—";
+  dom.summaryContracts.textContent = "可用合约 —";
+  dom.summaryExpiries.textContent = "—";
+  dom.summaryUnderlier.textContent = "SPX —";
+  dom.surfaceTitle.textContent = replay ? "Replay unavailable" : "Spot × Time surface";
+  dom.surfaceSubtitle.textContent = replay ? `HISTORICAL REPLAY · Frozen · Not live · as of ${REPLAY.asOfLabel}` : "等待生产快照";
+  setNotice(
+    replay
+      ? "无法读取或校验历史回放；图表已清空，不会回退到生产快照、fixture 或缓存值。"
+      : "无法读取生产快照；图表已清空，页面不会显示 fixture 或上一次缓存值。",
+    true,
+  );
+  updateModeChrome();
+}
+
+async function refreshSnapshot() {
+  if (app.mode !== "live") return;
+  window.clearTimeout(app.timer);
+  app.timer = null;
+  const { controller, generation, abortTimer } = beginSnapshotRequest();
   try {
     const response = await fetch(SNAPSHOT_URL, {
       cache: "no-store",
@@ -1101,35 +1524,59 @@ async function refreshSnapshot() {
     });
     if (!response.ok) throw new Error(`snapshot_http_${response.status}`);
     const payload = await response.json();
-    app.snapshot = normalizeSnapshot(payload);
+    const snapshot = normalizeSnapshot(payload);
+    if (!requestIsCurrent(generation, "live")) return;
+    app.snapshot = snapshot;
     render();
   } catch (error) {
-    app.snapshot = null;
-    app.expiry = "";
-    updateFilters();
-    setStatusPill("unavailable");
-    dom.refreshState.textContent = "读取失败；5 秒后重试";
-    dom.summaryStatus.textContent = "Unavailable";
-    dom.summaryReasons.textContent = error instanceof Error ? error.message : "snapshot_fetch_failed";
-    dom.summaryFreshness.textContent = "—";
-    dom.summaryAsOf.textContent = "as of —";
-    dom.summaryCoverage.textContent = "—";
-    dom.summaryContracts.textContent = "可用合约 —";
-    dom.summaryExpiries.textContent = "—";
-    dom.summaryUnderlier.textContent = "SPX —";
-    setNotice("无法读取生产快照；图表已清空，页面不会显示 fixture 或上一次缓存值。", true);
-    setQualityChip("unavailable");
-    dom.heatmapEmpty.hidden = false;
-    clearCanvas();
-    clearLadder();
-    renderExtrema(null);
-    updateLegend(null);
+    if (!requestIsCurrent(generation, "live")) return;
+    renderFetchFailure(error, "live");
   } finally {
     window.clearTimeout(abortTimer);
-    app.timer = window.setTimeout(refreshSnapshot, POLL_INTERVAL_MS);
+    if (app.requestController === controller) app.requestController = null;
+    if (requestIsCurrent(generation, "live")) {
+      app.timer = window.setTimeout(refreshSnapshot, POLL_INTERVAL_MS);
+    }
   }
 }
 
+async function loadReplaySnapshot() {
+  if (app.mode !== "replay") return;
+  const { controller, generation, abortTimer } = beginSnapshotRequest();
+  try {
+    const response = await fetch(REPLAY.url, {
+      cache: "no-store",
+      headers: { Accept: "application/json" },
+      signal: controller.signal,
+    });
+    if (!response.ok) throw new Error(`replay_http_${response.status}`);
+    const payload = await response.json();
+    const snapshot = await normalizeReplaySnapshot(payload);
+    if (!requestIsCurrent(generation, "replay")) return;
+    app.snapshot = snapshot;
+    render();
+  } catch (error) {
+    if (!requestIsCurrent(generation, "replay")) return;
+    renderFetchFailure(error, "replay");
+  } finally {
+    window.clearTimeout(abortTimer);
+    if (app.requestController === controller) app.requestController = null;
+  }
+}
+
+function setViewMode(mode, { syncQuery = true } = {}) {
+  if (!["live", "replay"].includes(mode)) return;
+  cancelSnapshotWork();
+  app.mode = mode;
+  if (syncQuery) updateModeQuery();
+  renderLoadingState();
+  if (mode === "replay") loadReplaySnapshot();
+  else refreshSnapshot();
+}
+
+dom.modeFilter.addEventListener("change", () => {
+  setViewMode(dom.modeFilter.value === REPLAY.view ? "replay" : "live");
+});
 dom.expiryFilter.addEventListener("change", () => {
   app.expiry = dom.expiryFilter.value;
   renderSummary();
@@ -1163,4 +1610,4 @@ if ("ResizeObserver" in window) {
   });
 }
 
-refreshSnapshot();
+setViewMode(app.mode, { syncQuery: false });
