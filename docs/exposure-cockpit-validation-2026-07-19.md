@@ -122,6 +122,12 @@ signed_flow_available=false
 
 四张截图均为 2048×1150。浏览器验证中三个 Canvas stage 的 `top=198`、`bottom=1100`、`height=902` 完全一致，document 与 viewport 同为 2048×1150。
 
+### Live 周日 fail-closed
+
+![Live closed Sunday](assets/exposure-cockpit/live-closed-2026-07-19-2048x1150.png)
+
+该 2048×1150 截图来自 Oracle 实际部署入口。三栏仍完整占据首屏，但明确显示 Market closed / Missing，不加载周五数据、不画伪造零值，也不把 Replay 冒充 Live。
+
 ## 测试结果
 
 - Python 全量测试：`1773 passed, 1 warning`；warning 仅为上游 websockets deprecation。
