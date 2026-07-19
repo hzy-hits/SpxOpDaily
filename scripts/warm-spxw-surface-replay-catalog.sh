@@ -17,39 +17,76 @@ sessions_json="$(
     --unix-socket "$SOCKET_PATH" \
     http://localhost/api/v1/replay/sessions
 )"
-session_date="$(
+mapfile -t session_dates < <(
   "$PYTHON" -c \
-    'import json,sys; rows=json.load(sys.stdin).get("sessions", []); print(rows[0]["session_date"] if rows else "")' \
+    'import datetime,json,sys; rows=json.load(sys.stdin).get("sessions", []); print("\n".join(value for row in rows if isinstance(row, dict) and isinstance((value := row.get("session_date")), str) and datetime.date.fromisoformat(value)))' \
     <<<"$sessions_json"
-)"
+)
 
-if [[ -z "$session_date" ]]; then
+if (( ${#session_dates[@]} == 0 )); then
   printf 'no replay session available\n'
   exit 0
 fi
 
-timeline_json="$(
-  curl --silent --show-error --fail --max-time 90 \
-    --unix-socket "$SOCKET_PATH" \
-    "http://localhost/api/v1/replay/sessions/$session_date/timeline?step_minutes=5"
-)"
-mapfile -t frame_times < <(
-  "$PYTHON" -c \
-    'import json,sys; print("\n".join(row["at"] for row in json.load(sys.stdin).get("frames", [])))' \
-    <<<"$timeline_json"
-)
+latest_session="${session_dates[0]}"
+timeline_count=0
+surface_count=0
+latest_frame_times=()
+for session_date in "${session_dates[@]}"; do
+  timeline_json="$(
+    curl --silent --show-error --fail --max-time 90 \
+      --unix-socket "$SOCKET_PATH" \
+      "http://localhost/api/v1/replay/sessions/$session_date/timeline?step_minutes=5"
+  )"
+  mapfile -t frame_times < <(
+    "$PYTHON" -c \
+      'import json,sys; payload=json.load(sys.stdin); rows=payload.get("surface_frames") or payload.get("frames", []); print("\n".join(row["at"] for row in rows if isinstance(row, dict) and isinstance(row.get("at"), str)))' \
+      <<<"$timeline_json"
+  )
+  timeline_count=$((timeline_count + 1))
+  if (( ${#frame_times[@]} == 0 )); then
+    continue
+  fi
 
-for frame_at in "${frame_times[@]}"; do
-  curl --silent --show-error --fail --max-time 90 \
-    --unix-socket "$SOCKET_PATH" \
-    --get \
-    --data-urlencode "at=$frame_at" \
-    --data-urlencode "role=front" \
-    --data-urlencode "weighting=oi_weighted" \
-    --data-urlencode "bucket_minutes=5" \
-    --data-urlencode "price_step=5" \
-    "http://localhost/api/v1/replay/sessions/$session_date/session-surface" \
-    >/dev/null
+  surface_times=("${frame_times[-1]}")
+  if [[ "$session_date" == "$latest_session" ]]; then
+    latest_frame_times=("${frame_times[@]}")
+  fi
+  for frame_at in "${surface_times[@]}"; do
+    curl --silent --show-error --fail --max-time 90 \
+      --unix-socket "$SOCKET_PATH" \
+      --get \
+      --data-urlencode "at=$frame_at" \
+      --data-urlencode "role=front" \
+      --data-urlencode "weighting=oi_weighted" \
+      --data-urlencode "bucket_minutes=5" \
+      --data-urlencode "price_step=5" \
+      "http://localhost/api/v1/replay/sessions/$session_date/session-surface" \
+      >/dev/null
+    surface_count=$((surface_count + 1))
+  done
 done
-printf 'warmed replay catalog and %s default session surfaces for %s\n' \
-  "${#frame_times[@]}" "$session_date"
+
+# Land every catalog date first. Only then spend the remaining warm window on
+# every playhead of the latest session for smooth same-day replay.
+if (( ${#latest_frame_times[@]} > 1 )); then
+  latest_landing_time="${latest_frame_times[-1]}"
+  for frame_at in "${latest_frame_times[@]}"; do
+    if [[ "$frame_at" == "$latest_landing_time" ]]; then
+      continue
+    fi
+    curl --silent --show-error --fail --max-time 90 \
+      --unix-socket "$SOCKET_PATH" \
+      --get \
+      --data-urlencode "at=$frame_at" \
+      --data-urlencode "role=front" \
+      --data-urlencode "weighting=oi_weighted" \
+      --data-urlencode "bucket_minutes=5" \
+      --data-urlencode "price_step=5" \
+      "http://localhost/api/v1/replay/sessions/$latest_session/session-surface" \
+      >/dev/null
+    surface_count=$((surface_count + 1))
+  done
+fi
+printf 'warmed %s replay timelines and %s default session surfaces; full playback=%s\n' \
+  "$timeline_count" "$surface_count" "$latest_session"

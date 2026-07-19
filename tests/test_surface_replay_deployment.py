@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -35,7 +36,13 @@ def test_post_close_timer_warms_catalog_and_default_session_surfaces() -> None:
     assert "21:20:00 UTC" in timer
     assert "22:20:00 UTC" in timer
     assert "23:20:00 UTC" in timer
+    assert 'for session_date in "${session_dates[@]}"' in warmer
+    assert 'latest_session="${session_dates[0]}"' in warmer
+    assert 'surface_times=("${frame_times[-1]}")' in warmer
+    assert 'latest_frame_times=("${frame_times[@]}")' in warmer
+    assert "Land every catalog date first" in warmer
     assert "/timeline?step_minutes=5" in warmer
+    assert 'payload.get("surface_frames") or payload.get("frames", [])' in warmer
     assert 'row["at"]' in warmer
     assert '"role=front"' in warmer
     assert '"weighting=oi_weighted"' in warmer
@@ -61,6 +68,83 @@ def test_replay_shell_entrypoints_parse() -> None:
             capture_output=True,
             text=True,
         )
+
+
+def test_catalog_warmer_lands_every_session_before_latest_full_playback(
+    tmp_path: Path,
+) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_curl = fake_bin / "curl"
+    fake_curl.write_text(
+        """#!/usr/bin/env python3
+import json
+import os
+from pathlib import Path
+import sys
+
+args = sys.argv[1:]
+url = next(value for value in args if value.startswith("http://"))
+log = Path(os.environ["WARM_TEST_LOG"])
+if url.endswith("/api/v1/replay/sessions"):
+    print(json.dumps({"sessions": [
+        {"session_date": "2026-07-17"},
+        {"session_date": "2026-07-16"},
+    ]}))
+elif "/timeline?" in url:
+    session = url.split("/sessions/", 1)[1].split("/", 1)[0]
+    surface_frames = (
+        ["2026-07-17T00:20:00Z", "2026-07-17T14:35:00Z"]
+        if session == "2026-07-17"
+        else ["2026-07-16T00:20:00Z", "2026-07-16T14:30:00Z"]
+    )
+    with log.open("a", encoding="utf-8") as stream:
+        stream.write(f"timeline:{session}\\n")
+    print(json.dumps({
+        "frames": [{"at": "2099-01-01T00:00:00Z"}],
+        "surface_frames": [{"at": value} for value in surface_frames],
+    }))
+else:
+    session = url.split("/sessions/", 1)[1].split("/", 1)[0]
+    encoded = [
+        args[index + 1]
+        for index, value in enumerate(args)
+        if value == "--data-urlencode"
+    ]
+    at = next(value.removeprefix("at=") for value in encoded if value.startswith("at="))
+    with log.open("a", encoding="utf-8") as stream:
+        stream.write(f"surface:{session}:{at}\\n")
+    print("{}")
+""",
+        encoding="utf-8",
+    )
+    fake_curl.chmod(0o755)
+    log = tmp_path / "warm.log"
+    env = os.environ.copy()
+    env.update(
+        {
+            "PATH": f"{fake_bin}:{env['PATH']}",
+            "WARM_TEST_LOG": str(log),
+            "MARKET_DATA_DATA_ROOT": str(tmp_path / "data"),
+        }
+    )
+
+    completed = subprocess.run(
+        ["bash", str(ROOT / "scripts/warm-spxw-surface-replay-catalog.sh")],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert log.read_text(encoding="utf-8").splitlines() == [
+        "timeline:2026-07-17",
+        "surface:2026-07-17:2026-07-17T14:35:00Z",
+        "timeline:2026-07-16",
+        "surface:2026-07-16:2026-07-16T14:30:00Z",
+        "surface:2026-07-17:2026-07-17T00:20:00Z",
+    ]
+    assert "warmed 2 replay timelines and 3 default session surfaces" in completed.stdout
 
 
 def test_only_canonical_service_module_is_directly_executable() -> None:

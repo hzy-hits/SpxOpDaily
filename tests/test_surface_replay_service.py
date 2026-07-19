@@ -173,6 +173,104 @@ def test_timeline_source_scan_uses_configured_lookback_at_session_open(
     assert timeline["frames"][0]["at"] == "2026-07-17T13:30:01Z"
 
 
+def test_timeline_excludes_candidates_inside_front_expiry_min_tau(
+    tmp_path: Path,
+) -> None:
+    source = write_quote_partition(tmp_path)
+    replacement = source.with_name("quotes.replacement.parquet")
+    session_close = datetime(2026, 7, 17, 20, 0, tzinfo=timezone.utc)
+    retained_at = session_close - timedelta(seconds=311)
+    excluded_at = session_close - timedelta(seconds=149)
+    connection = duckdb.connect()
+    try:
+        connection.execute(
+            "CREATE TABLE replay_source AS SELECT * FROM read_parquet(?)",
+            [str(source)],
+        )
+        connection.execute(
+            """
+            UPDATE replay_source
+            SET received_at = ?, source_at = ?, quote_time = ?, last_update_at = ?
+            WHERE trading_class = 'SPXW'
+            """,
+            [retained_at] * 4,
+        )
+        connection.execute(
+            """
+            INSERT INTO replay_source
+            SELECT * REPLACE (
+                ?::TIMESTAMPTZ AS received_at,
+                ?::TIMESTAMPTZ AS source_at,
+                ?::TIMESTAMPTZ AS quote_time,
+                ?::TIMESTAMPTZ AS last_update_at
+            )
+            FROM replay_source
+            WHERE trading_class = 'SPXW'
+              AND received_at = ?::TIMESTAMPTZ
+            """,
+            [excluded_at, excluded_at, excluded_at, excluded_at, retained_at],
+        )
+        for candidate_at in (retained_at, excluded_at):
+            spx_at = candidate_at - timedelta(seconds=1)
+            connection.execute(
+                """
+                INSERT INTO replay_source
+                SELECT * REPLACE (
+                    ?::TIMESTAMPTZ AS received_at,
+                    ?::TIMESTAMPTZ AS source_at,
+                    ?::TIMESTAMPTZ AS quote_time,
+                    ?::TIMESTAMPTZ AS last_update_at
+                )
+                FROM replay_source
+                WHERE instrument_id = 'index:SPX'
+                LIMIT 1
+                """,
+                [spx_at] * 4,
+            )
+        connection.execute(
+            "COPY replay_source TO ? (FORMAT PARQUET)",
+            [str(replacement)],
+        )
+    finally:
+        connection.close()
+    replacement.replace(source)
+    settings = storage_settings(tmp_path)
+    replay_catalog = ReplayCatalog(
+        data_root=settings.data_root,
+        storage_settings=settings,
+    )
+
+    assert replay_catalog.viable_frames(session_close.date()) == (retained_at,)
+
+
+def test_old_timeline_policy_manifest_is_rescanned(
+    catalog: ReplayCatalog,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    catalog.viable_frames(AS_OF.date())
+    manifest = catalog._manifest_path(AS_OF.date())
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    payload["timeline_policy_version"] = (
+        "spxw_surface_replay_timeline.event_driven.v1"
+    )
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+    catalog._timeline_memory.clear()
+    rescanned = (EVENT_AS_OF,)
+    scans: list[object] = []
+
+    def rescan(*args: object, **kwargs: object) -> tuple[datetime, ...]:
+        scans.append((args, kwargs))
+        return rescanned
+
+    monkeypatch.setattr(catalog, "_scan_viable_frames", rescan)
+
+    assert catalog.viable_frames(AS_OF.date()) == rescanned
+    assert len(scans) == 1
+    updated = json.loads(manifest.read_text(encoding="utf-8"))
+    assert updated["timeline_policy_version"] == service_module.TIMELINE_POLICY_VERSION
+    assert service_module.TIMELINE_POLICY_VERSION.endswith(".v2")
+
+
 def test_frame_builds_policy_scoped_cache_and_reuses_it(
     catalog: ReplayCatalog,
     monkeypatch: pytest.MonkeyPatch,
@@ -253,6 +351,40 @@ def test_frame_cache_namespace_changes_with_source_stat(catalog: ReplayCatalog) 
     source_paths[0].touch()
 
     assert catalog._cache_path(EVENT_AS_OF) != before
+
+
+def test_verified_source_hashes_are_reused_only_for_unchanged_fingerprint(
+    catalog: ReplayCatalog,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_paths, fingerprint = catalog._frame_source_context(EVENT_AS_OF)
+    original_sha256 = service_module._sha256
+    hashed: list[Path] = []
+
+    def counted_sha256(path: Path) -> str:
+        hashed.append(path)
+        return original_sha256(path)
+
+    monkeypatch.setattr(service_module, "_sha256", counted_sha256)
+
+    first = catalog._verified_source_hashes(
+        source_paths,
+        source_fingerprint=fingerprint,
+    )
+    second = catalog._verified_source_hashes(
+        source_paths,
+        source_fingerprint=fingerprint,
+    )
+
+    assert second == first
+    assert hashed == list(source_paths)
+
+    source_paths[0].touch()
+    with pytest.raises(ReplayCacheError, match="replay_cache_source_context_changed"):
+        catalog._verified_source_hashes(
+            source_paths,
+            source_fingerprint=fingerprint,
+        )
 
 
 def test_frame_requires_timeline_membership(catalog: ReplayCatalog) -> None:

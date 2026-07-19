@@ -660,6 +660,11 @@ select:disabled {
   user-select: none;
 }
 
+.scenario-panel.unavailable > summary {
+  cursor: not-allowed;
+  opacity: 0.58;
+}
+
 .scenario-panel > summary::-webkit-details-marker {
   display: none;
 }
@@ -1231,6 +1236,7 @@ body {
 
 .proxy-badge,
 .provider-chip,
+.reference-chip,
 .proxy-inline,
 .audit-chip {
   display: inline-flex;
@@ -1260,6 +1266,44 @@ body {
   background: #0b273e;
   color: #9fb8c7;
   letter-spacing: 0.06em;
+}
+
+.reference-chip {
+  min-height: 24px;
+  max-width: 185px;
+  overflow: hidden;
+  padding: 4px 8px;
+  border-color: #466879;
+  background: #102b3d;
+  color: #c1d5df;
+  letter-spacing: 0.045em;
+  text-overflow: ellipsis;
+}
+
+.reference-chip.inferred {
+  border-style: dashed;
+  border-color: #9a7540;
+  background: #342b1e;
+  color: #f0d392;
+}
+
+.reference-chip.missing {
+  border-color: #824f52;
+  background: #3b2027;
+  color: #f2a7aa;
+}
+
+.reference-clock {
+  display: inline-block;
+  max-width: 295px;
+  overflow: hidden;
+  color: var(--cockpit-muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 8px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .proxy-inline {
@@ -1633,6 +1677,12 @@ body.mode-live .replay-session-picker {
   background: rgb(35 117 93 / 45%);
 }
 
+.legend-candle.inferred {
+  border-style: dashed;
+  background: rgb(226 176 76 / 16%);
+  opacity: 0.65;
+}
+
 .legend-bar {
   display: inline-block;
   width: 17px;
@@ -1653,7 +1703,7 @@ body.mode-live .replay-session-picker {
   position: absolute;
   z-index: 12;
   min-width: 190px;
-  max-width: 310px;
+  max-width: 390px;
   padding: 8px 9px;
   border: 1px solid #527896;
   border-radius: 6px;
@@ -1894,6 +1944,10 @@ body.mode-replay .secondary-diagnostics {
     display: none;
   }
 
+  .reference-clock {
+    display: none;
+  }
+
   .cockpit-toolbar {
     align-items: stretch;
     flex-direction: column;
@@ -1927,6 +1981,10 @@ body.mode-replay .secondary-diagnostics {
 
   .cockpit-head-state .refresh-state {
     display: none;
+  }
+
+  .reference-chip {
+    max-width: 150px;
   }
 
   .toolbar-filters,

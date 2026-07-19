@@ -10,6 +10,7 @@ import pytest
 
 import spx_spark.surface_dashboard_replay as replay_module
 from spx_spark.config import StorageSettings
+from spx_spark.marketdata import QuoteMarketSession
 from spx_spark.surface_dashboard_replay import (
     QUOTE_LAKE_DATASET,
     REPLAY_KIND,
@@ -122,6 +123,7 @@ def write_quote_partition(
     *,
     include_options: bool = True,
     include_ambiguous_top: bool = False,
+    include_market_session: bool = True,
 ) -> Path:
     partition = (
         tmp_path
@@ -313,6 +315,8 @@ def write_quote_partition(
             )
     placeholders = ",".join("?" for _ in rows[0])
     connection.executemany(f"INSERT INTO quotes VALUES ({placeholders})", rows)
+    if not include_market_session:
+        connection.execute("ALTER TABLE quotes DROP COLUMN market_session")
     connection.execute("COPY quotes TO ? (FORMAT PARQUET)", [str(partition)])
     connection.close()
     return partition
@@ -346,6 +350,44 @@ def test_load_replay_state_enforces_point_in_time_cutoff(tmp_path: Path) -> None
     )
     assert selected_call.bid == 21.0
     assert all(quote.received_at <= AS_OF for quote in loaded.state.quotes)
+    assert {quote.market_session for quote in loaded.state.quotes} == {
+        QuoteMarketSession.REGULAR
+    }
+
+
+def test_replay_loader_supports_legacy_partition_without_market_session(
+    tmp_path: Path,
+) -> None:
+    partition = write_quote_partition(tmp_path, include_market_session=False)
+    settings = storage_settings(tmp_path)
+
+    loaded = load_replay_state(data_root=settings.data_root, as_of=AS_OF)
+    payload = build_replay_snapshot(
+        loaded,
+        storage_settings=settings,
+        generated_at=AS_OF + timedelta(minutes=1),
+    )
+
+    connection = duckdb.connect()
+    try:
+        columns = {
+            row[0]
+            for row in connection.execute(
+                "DESCRIBE SELECT * FROM read_parquet(?)",
+                [str(partition)],
+            ).fetchall()
+        }
+    finally:
+        connection.close()
+    assert "market_session" not in columns
+    assert loaded.selected_quote_count == 41
+    assert loaded.selected_expiry_counts == {FRONT: 20, NEXT: 20}
+    assert loaded.selection_audit.source_clock_rows_excluded == 1
+    assert all(quote.received_at <= AS_OF for quote in loaded.state.quotes)
+    assert all(quote.market_session is None for quote in loaded.state.quotes)
+    assert payload["status"] == "ready"
+    assert payload["source"]["lookahead_rows_selected"] == 0
+    assert payload["source"]["source_clock_rows_excluded"] == 1
 
 
 def test_replay_snapshot_is_frozen_and_has_no_live_lease(tmp_path: Path) -> None:

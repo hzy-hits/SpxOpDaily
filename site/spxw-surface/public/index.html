@@ -23,6 +23,8 @@
         <div class="cockpit-head-state" aria-live="polite">
           <span class="proxy-badge" title="Calls positive / puts negative; dealer position is not inferred">PROXY</span>
           <span id="provider-chip" class="provider-chip" title="Validated data provider">Provider —</span>
+          <span id="reference-chip" class="reference-chip" title="Reference method">Reference —</span>
+          <span id="reference-clock" class="reference-clock" title="Reference source clocks">Clocks —</span>
           <span id="status-pill" class="status-pill status-loading">正在连接</span>
           <span id="refresh-state" class="refresh-state">等待数据</span>
           <button id="cockpit-audit-toggle" class="audit-button" type="button" aria-controls="cockpit-audit-drawer" aria-expanded="false">Data / Audit</button>
@@ -121,7 +123,7 @@
           </header>
           <div id="cockpit-gamma-stage" class="cockpit-canvas-stage">
             <canvas id="cockpit-gamma-base" aria-hidden="true"></canvas>
-            <canvas id="cockpit-gamma-overlay" class="cockpit-overlay" role="img" tabindex="0" aria-label="Gamma proxy surface with SPX OHLC candles"></canvas>
+            <canvas id="cockpit-gamma-overlay" class="cockpit-overlay" role="img" tabindex="0" aria-label="Gamma proxy surface with explicitly sourced reference candles"></canvas>
             <div id="cockpit-gamma-empty" class="cockpit-panel-empty">Waiting for Gamma session surface</div>
           </div>
           <footer class="cockpit-panel-legend">
@@ -130,7 +132,7 @@
             <span><i class="legend-swatch positive"></i>+ proxy</span>
             <span class="extrema-marker-key positive">⊕ peak</span>
             <span class="extrema-marker-key negative">⊖ trough</span>
-            <span><i class="legend-candle"></i>SPX OHLC</span>
+            <span><i id="cockpit-gamma-reference-icon" class="legend-candle"></i><span id="cockpit-gamma-reference-legend">Reference path</span></span>
             <span id="cockpit-gamma-domain">domain —</span>
           </footer>
         </article>
@@ -171,14 +173,14 @@
           </header>
           <div id="cockpit-charm-stage" class="cockpit-canvas-stage">
             <canvas id="cockpit-charm-base" aria-hidden="true"></canvas>
-            <canvas id="cockpit-charm-overlay" class="cockpit-overlay" role="img" tabindex="0" aria-label="Charm proxy surface with SPX OHLC candles"></canvas>
+            <canvas id="cockpit-charm-overlay" class="cockpit-overlay" role="img" tabindex="0" aria-label="Charm proxy surface with explicitly sourced reference candles"></canvas>
             <div id="cockpit-charm-empty" class="cockpit-panel-empty">Waiting for Charm session surface</div>
           </div>
           <footer class="cockpit-panel-legend">
             <span><i class="legend-swatch negative"></i>− proxy</span>
             <span><i class="legend-swatch neutral"></i>neutral</span>
             <span><i class="legend-swatch positive"></i>+ proxy</span>
-            <span><i class="legend-candle"></i>SPX OHLC</span>
+            <span><i id="cockpit-charm-reference-icon" class="legend-candle"></i><span id="cockpit-charm-reference-legend">Reference path</span></span>
             <span id="cockpit-charm-domain">domain —</span>
           </footer>
         </article>
@@ -219,6 +221,7 @@
           <div><dt>Coverage</dt><dd id="cockpit-audit-stats">—</dd></div>
           <div><dt>Missing</dt><dd id="cockpit-audit-missing">—</dd></div>
           <div><dt>Capabilities</dt><dd id="cockpit-audit-capabilities">—</dd></div>
+          <div><dt>Reference</dt><dd id="cockpit-audit-reference">—</dd></div>
           <div><dt>Provenance</dt><dd id="cockpit-audit-provenance">—</dd></div>
         </dl>
 

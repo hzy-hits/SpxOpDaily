@@ -58,6 +58,9 @@ vm.runInThisContext(fs.readFileSync(appPath, "utf8"), { filename: appPath });
 const hooks = globalThis.__SPX_SPARK_TEST_HOOK__;
 for (const name of [
   "normalizeSessionSurface",
+  "normalizeSessionSegments",
+  "normalizeSessionReference",
+  "referencePresentation",
   "robustDomain",
   "expandOnlyDomain",
   "sessionTimeToX",
@@ -190,6 +193,142 @@ function fixture({ bucketMinutes = 5, priceStep = 10 } = {}) {
   };
 }
 
+function v2Fixture() {
+  const payload = fixture();
+  const asOf = "2026-07-17T13:35:00Z";
+  payload.schema_version = 2;
+  payload.policy_version = "spxw_session_surface.v2";
+  payload.provider = "mixed";
+  payload.as_of = asOf;
+  payload.providers = {
+    gth_surface: "ibkr",
+    gth_reference: "schwab",
+    rth_surface: "schwab",
+    rth_reference: "schwab",
+  };
+  payload.session_segments = [
+    {
+      kind: "gth",
+      start_at: "2026-07-17T13:30:00Z",
+      end_at: "2026-07-17T13:40:00Z",
+      surface_provider: "ibkr",
+      reference_method: "es_basis_inferred_spx",
+      reference_provider: "schwab",
+    },
+    {
+      kind: "closed_gap",
+      start_at: "2026-07-17T13:40:00Z",
+      end_at: "2026-07-17T13:45:00Z",
+      surface_provider: null,
+      reference_method: null,
+      reference_provider: null,
+    },
+    {
+      kind: "rth",
+      start_at: "2026-07-17T13:45:00Z",
+      end_at: "2026-07-17T14:00:00Z",
+      surface_provider: "schwab",
+      reference_method: "direct_index_spx",
+      reference_provider: "schwab",
+    },
+  ];
+  payload.surface_columns = payload.time_buckets.map((bucket, index) => {
+    const sessionKind = index < 2 ? "gth" : index === 2 ? "closed_gap" : "rth";
+    if (sessionKind === "closed_gap") {
+      return {
+        kind: "missing",
+        quality: "unavailable",
+        source_at: null,
+        valid_until: null,
+        reason: "scheduled_closed_gap",
+        session_kind: sessionKind,
+        source_session_kind: null,
+        surface_provider: null,
+        reference_method: null,
+      };
+    }
+    const historical = bucket.end_at <= asOf;
+    return {
+      kind: historical ? "historical" : "projection",
+      quality: "ready",
+      source_at: historical ? bucket.end_at : asOf,
+      valid_until: "2026-07-17T13:40:00Z",
+      reason: null,
+      session_kind: sessionKind,
+      source_session_kind: "gth",
+      surface_provider: "ibkr",
+      reference_method: "es_basis_inferred_spx",
+    };
+  });
+  for (const matrixName of [
+    "gamma_surface",
+    "gross_gamma_surface",
+    "charm_surface",
+    "vanna_surface",
+  ]) {
+    payload[matrixName][2] = payload[matrixName][2].map(() => null);
+  }
+  payload.zero_ridges[2] = null;
+  payload.gamma_positive_peaks[2] = null;
+  payload.gamma_negative_troughs[2] = null;
+  payload.candles = [{
+    start_at: "2026-07-17T13:30:00Z",
+    end_at: "2026-07-17T13:35:00Z",
+    open: 7498,
+    high: 7504,
+    low: 7496,
+    close: 7502,
+    sample_count: 8,
+    complete: true,
+    source_at: "2026-07-17T13:34:58Z",
+    known_at: "2026-07-17T13:34:59Z",
+    session_kind: "gth",
+    reference_method: "es_basis_inferred_spx",
+    reference_provider: "schwab",
+    reference_instrument_id: "/ESU26",
+    accepted_at: null,
+    valid_until: "2026-07-17T13:40:00Z",
+    basis_value: 45,
+    basis_observed_at: "2026-07-17T13:29:59Z",
+    render_style: "inferred_dashed",
+  }];
+  payload.spot_source_at = "2026-07-17T13:34:58Z";
+  payload.spot_known_at = "2026-07-17T13:34:59Z";
+  payload.reference = {
+    coordinate: "SPX",
+    price: payload.spot,
+    method: "es_basis_inferred_spx",
+    provider: "schwab",
+    instrument_id: "/ESU26",
+    source_at: "2026-07-17T13:34:58Z",
+    known_at: "2026-07-17T13:34:59Z",
+    accepted_at: null,
+    valid_until: "2026-07-17T13:40:00Z",
+    quality: "ready",
+    missing_reason: null,
+    basis: {
+      value: 45,
+      method: "frozen_previous_rth_median",
+      provider: "schwab",
+      es_contract: "/ESU26",
+      sample_count: 12,
+      window_start_at: "2026-07-17T13:00:00Z",
+      window_end_at: "2026-07-17T13:20:00Z",
+      known_at: "2026-07-17T13:25:00Z",
+      frozen_at: "2026-07-17T13:25:00Z",
+    },
+  };
+  payload.capabilities.gth_available = true;
+  payload.capabilities.official_spx_ohlc_available = false;
+  payload.missing_ranges = [{
+    start_at: "2026-07-17T13:40:00Z",
+    end_at: "2026-07-17T13:45:00Z",
+    reason: "scheduled_closed_gap",
+    component: "surface",
+  }];
+  return payload;
+}
+
 async function sign(payload) {
   delete payload.artifact_sha256;
   payload.artifact_sha256 = await hooks.canonicalReplaySha256(payload);
@@ -215,6 +354,77 @@ async function sign(payload) {
     "proxy_1pct_notional_delta_change_per_calendar_minute",
   );
   assert.deepEqual(hooks.sessionGridPriceDomain(normalized), { min: 7390, max: 7610 });
+
+  const expectedV2 = {
+    ...expected,
+    at: new Date("2026-07-17T13:35:00Z"),
+  };
+  const normalizedV2 = await hooks.normalizeSessionSurface(
+    await sign(v2Fixture()),
+    expectedV2,
+  );
+  assert.equal(normalizedV2.schemaVersion, 2);
+  assert.deepEqual(
+    normalizedV2.sessionSegments.map((segment) => segment.kind),
+    ["gth", "closed_gap", "rth"],
+  );
+  assert.equal(normalizedV2.surfaceColumns[3].sessionKind, "rth");
+  assert.equal(normalizedV2.surfaceColumns[3].sourceSessionKind, "gth");
+  assert.equal(normalizedV2.surfaceColumns[3].surfaceProvider, "ibkr");
+  assert.equal(normalizedV2.surfaceColumns[3].referenceMethod, "es_basis_inferred_spx");
+  assert.equal(normalizedV2.surfaceColumns[2].kind, "missing");
+  assert.equal(normalizedV2.candles[0].inferred, true);
+  assert.equal(normalizedV2.reference.acceptedAtMs, null);
+  const inferredPresentation = hooks.referencePresentation(normalizedV2);
+  assert.equal(inferredPresentation.inferred, true);
+  assert.match(inferredPresentation.providerText, /IBKR SPXW · SCHWAB ES−BASIS INFERRED/);
+  assert.match(inferredPresentation.referenceText, /NOT OFFICIAL SPX OHLC/);
+  assert.match(inferredPresentation.clockText, /ACCEPTED unavailable/);
+
+  const directPresentation = hooks.referencePresentation({
+    ...normalizedV2,
+    asOfMs: Date.parse("2026-07-17T13:50:00Z"),
+    reference: {
+      ...normalizedV2.reference,
+      method: "direct_index_spx",
+      provider: "schwab",
+      instrumentId: "index:SPX",
+      basis: null,
+      inferred: false,
+    },
+  });
+  assert.equal(directPresentation.inferred, false);
+  assert.match(directPresentation.providerText, /SCHWAB SPXW · SCHWAB SPX REF/);
+  assert.equal(directPresentation.referenceText, "DIRECT SPX REFERENCE");
+
+  const honestUnavailableGth = v2Fixture();
+  honestUnavailableGth.capabilities.gth_available = false;
+  const normalizedUnavailableGth = await hooks.normalizeSessionSurface(
+    await sign(honestUnavailableGth),
+    expectedV2,
+  );
+  assert.equal(normalizedUnavailableGth.capabilities.gth_available, false);
+
+  const invalidProjectionSource = v2Fixture();
+  invalidProjectionSource.surface_columns[3].surface_provider = "schwab";
+  await assert.rejects(
+    hooks.normalizeSessionSurface(await sign(invalidProjectionSource), expectedV2),
+    /invalid_session_surface_column_segment_contract/,
+  );
+
+  const futureAcceptedReference = v2Fixture();
+  futureAcceptedReference.reference.accepted_at = "2026-07-17T13:35:01Z";
+  await assert.rejects(
+    hooks.normalizeSessionSurface(await sign(futureAcceptedReference), expectedV2),
+    /invalid_session_surface_reference_contract/,
+  );
+
+  const gapWithValues = v2Fixture();
+  gapWithValues.gamma_surface[2][0] = 1;
+  await assert.rejects(
+    hooks.normalizeSessionSurface(await sign(gapWithValues), expectedV2),
+    /session_surface_missing_column_has_values/,
+  );
 
   const invalidUnits = fixture();
   invalidUnits.metric_units.charm = "mystery_unit";

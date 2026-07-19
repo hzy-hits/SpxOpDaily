@@ -45,6 +45,14 @@ def test_frontend_keeps_live_and_replay_clock_contracts_separate() -> None:
     assert 'const LIVE_SESSION_SURFACE_URL = "api/v1/live/session-surface"' in app
     assert "function normalizeReplaySessions(raw)" in app
     assert "function normalizeReplayTimeline(raw, sessionDate, expectedProjectionPolicySha256)" in app
+    assert '"surface_frames"' in app
+    assert 'raw.surface_provider !== "mixed"' in app
+    assert "surfaceTimelineExtended" in app
+    assert "app.frames = timeline.surfaceFrames" in app
+    assert "app.legacyFrames = timeline.frames" in app
+    assert "legacyReplayFrameIndexAtOrBefore" in app
+    assert "const frame = legacyReplayFrame();" in app
+    assert "legacy_replay_artifact_unavailable_at_cutoff" in app
     assert "async function loadReplayCatalog()" in app
     assert "async function loadReplayTimeline(" in app
     assert "async function loadReplayFrame()" in app
@@ -80,6 +88,7 @@ def test_frontend_keeps_live_and_replay_clock_contracts_separate() -> None:
     assert "SESSION_SURFACE_RETRY_DELAYS_MS" in app
     assert "scheduleSessionSurfaceRetry(key)" in app
     assert "renderSessionSurfaceChrome(\"unavailable\", reason)" in app
+    assert "Refresh the transport after releasing" in app
     assert "sessionSurfaceFrameIndexFor" in app
     assert "return Math.max(index, 0)" not in app
     assert 'if (app.mode !== "live") return;' in app
@@ -128,6 +137,13 @@ def test_frontend_keeps_live_and_replay_clock_contracts_separate() -> None:
     assert 'return interrupt ? "interrupt" : "queue"' in app
     assert "session_surface_missing_column_has_values" in app
     assert "session_surface_artifact_hash_mismatch" in app
+    assert "source_session_kind" in app
+    assert "projected from ${sourceKind}" in app
+    assert 'typeof capabilities.gth_available !== "boolean"' in app
+    assert 'icon.className = `legend-candle${presentation.inferred ? " inferred" : ""}`' in app
+    assert "NOT OFFICIAL SPX OHLC" in app
+    assert 'id="reference-chip"' in page
+    assert 'id="reference-clock"' in page
     assert 'id="provider-chip"' in page
     assert 'id="position-mode-filter"' in page
     assert "Participant (unavailable)" in page
@@ -171,6 +187,19 @@ def test_frontend_strictly_normalizes_live_session_surface_and_lease() -> None:
         [
             "node",
             str(ROOT / "tests" / "js" / "live_session_surface_contract_test.js"),
+            str(SITE / "public" / "app.js"),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_frontend_uses_extended_surface_timeline_without_relabeling_legacy_artifacts() -> None:
+    subprocess.run(
+        [
+            "node",
+            str(ROOT / "tests" / "js" / "replay_surface_timeline_contract_test.js"),
             str(SITE / "public" / "app.js"),
         ],
         check=True,

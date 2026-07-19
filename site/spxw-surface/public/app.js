@@ -3,9 +3,25 @@
 const SNAPSHOT_URL = "api/v1/snapshot";
 const LIVE_SESSION_SURFACE_URL = "api/v1/live/session-surface";
 const REPLAY_SESSIONS_URL = "api/v1/replay/sessions";
-const SESSION_SURFACE_SCHEMA_VERSION = 1;
+const SESSION_SURFACE_SCHEMA_VERSIONS = new Set([1, 2]);
 const SESSION_SURFACE_KIND = "spxw_session_surface";
-const SESSION_SURFACE_POLICY_VERSION = "spxw_session_surface.v1";
+const SESSION_SURFACE_POLICY_VERSIONS = new Map([
+  [1, "spxw_session_surface.v1"],
+  [2, "spxw_session_surface.v2"],
+]);
+const SESSION_SEGMENT_CONTRACT = {
+  gth: {
+    surfaceProvider: "ibkr",
+    referenceProvider: "schwab",
+    referenceMethod: "es_basis_inferred_spx",
+  },
+  closed_gap: { surfaceProvider: null, referenceProvider: null, referenceMethod: null },
+  rth: {
+    surfaceProvider: "schwab",
+    referenceProvider: "schwab",
+    referenceMethod: "direct_index_spx",
+  },
+};
 const SESSION_SURFACE_BUCKET_MINUTES = 5;
 const SESSION_SURFACE_PRICE_STEP = 5;
 const SESSION_SURFACE_PRICE_EXTENT_POINTS = 100;
@@ -15,7 +31,7 @@ const REPLAY_TREND_KIND = "spxw_intraday_gamma_replay";
 const REPLAY_TREND_POLICY_VERSION = "spxw_surface_replay_trend.v1";
 const REPLAY_POLICY_VERSION = "spxw_surface_replay.v3";
 const REPLAY_CATALOG_KIND = "spxw_surface_replay_catalog";
-const REPLAY_TIMELINE_POLICY_VERSION = "spxw_surface_replay_timeline.event_driven.v1";
+const REPLAY_TIMELINE_POLICY_VERSION = "spxw_surface_replay_timeline.event_driven.v2";
 const REPLAY_FRAME_VALIDATION = "known_clock_validation_on_frame_request";
 const REPLAY_CLOSE_GRACE_POLICY = "session_close_plus_2h_grace";
 const REPLAY_CLOSE_GRACE_SECONDS = 2 * 60 * 60;
@@ -160,11 +176,18 @@ const dom = {
   cockpitAuditStats: document.querySelector("#cockpit-audit-stats"),
   cockpitAuditMissing: document.querySelector("#cockpit-audit-missing"),
   cockpitAuditCapabilities: document.querySelector("#cockpit-audit-capabilities"),
+  cockpitAuditReference: document.querySelector("#cockpit-audit-reference"),
   cockpitAuditProvenance: document.querySelector("#cockpit-audit-provenance"),
   cockpitAuditFrozen: document.querySelector("#cockpit-audit-frozen"),
   cockpitAuditPit: document.querySelector("#cockpit-audit-pit"),
   cockpitAuditModel: document.querySelector("#cockpit-audit-model"),
   providerChip: document.querySelector("#provider-chip"),
+  referenceChip: document.querySelector("#reference-chip"),
+  referenceClock: document.querySelector("#reference-clock"),
+  cockpitGammaReferenceIcon: document.querySelector("#cockpit-gamma-reference-icon"),
+  cockpitGammaReferenceLegend: document.querySelector("#cockpit-gamma-reference-legend"),
+  cockpitCharmReferenceIcon: document.querySelector("#cockpit-charm-reference-icon"),
+  cockpitCharmReferenceLegend: document.querySelector("#cockpit-charm-reference-legend"),
   trendPanel: document.querySelector("#trend-panel"),
   trendTitle: document.querySelector("#trend-title"),
   trendSubtitle: document.querySelector("#trend-subtitle"),
@@ -247,6 +270,8 @@ const app = {
   replayCatalogLoading: false,
   projectionPolicySha256: "",
   timelineSha256: "",
+  surfaceTimelineSha256: "",
+  surfaceTimelineExtended: false,
   sourceFingerprint: "",
   timelineOpenMs: null,
   timelineCloseMs: null,
@@ -254,6 +279,8 @@ const app = {
   sessionDate: "",
   frames: [],
   frameIndex: -1,
+  legacyFrames: [],
+  legacyFrameIndex: -1,
   frameLoading: false,
   trend: null,
   trendLoading: false,
@@ -1256,7 +1283,211 @@ function normalizeSessionTimeBuckets(raw, sessionStartMs, sessionEndMs, bucketMi
   return buckets;
 }
 
-function normalizeSurfaceColumn(raw, bucket, asOfMs, { mode = "replay" } = {}) {
+function sessionSegmentAtTime(segments, timeMs) {
+  if (!Array.isArray(segments) || !segments.length || !Number.isFinite(timeMs)) return null;
+  const match = segments.find((segment) =>
+    segment.startMs <= timeMs && timeMs < segment.endMs);
+  if (match) return match;
+  const last = segments.at(-1);
+  return timeMs === last.endMs ? last : null;
+}
+
+function sessionSegmentForBucket(segments, bucket) {
+  return segments.find((segment) =>
+    segment.startMs <= bucket.startMs && bucket.endMs <= segment.endMs) || null;
+}
+
+function normalizeSessionSegments(raw, sessionStartMs, sessionEndMs, schemaVersion) {
+  if (schemaVersion === 1) {
+    if (raw !== undefined && raw !== null) {
+      throw new Error("session_surface_v1_has_session_segments");
+    }
+    return [];
+  }
+  if (!Array.isArray(raw) || raw.length !== 3) {
+    throw new Error("invalid_session_surface_segments");
+  }
+  const expectedKinds = ["gth", "closed_gap", "rth"];
+  const segments = raw.map((item, index) => {
+    if (!isObject(item)) throw new Error("invalid_session_surface_segment");
+    const kind = nonEmptyString(item.kind);
+    const contract = kind ? SESSION_SEGMENT_CONTRACT[kind] : null;
+    const start = parseDate(item.start_at);
+    const end = parseDate(item.end_at);
+    const surfaceProvider = item.surface_provider === null
+      ? null
+      : nonEmptyString(item.surface_provider);
+    const referenceMethod = item.reference_method === null
+      ? null
+      : nonEmptyString(item.reference_method);
+    const suppliedReferenceProvider = Object.prototype.hasOwnProperty.call(
+      item,
+      "reference_provider",
+    )
+      ? item.reference_provider === null
+        ? null
+        : nonEmptyString(item.reference_provider)
+      : contract?.referenceProvider;
+    if (!contract || kind !== expectedKinds[index] || !start || !end ||
+        end.getTime() <= start.getTime() ||
+        surfaceProvider !== contract.surfaceProvider ||
+        referenceMethod !== contract.referenceMethod ||
+        suppliedReferenceProvider !== contract.referenceProvider) {
+      throw new Error("invalid_session_surface_segment_contract");
+    }
+    return {
+      raw: item,
+      kind,
+      startMs: start.getTime(),
+      endMs: end.getTime(),
+      surfaceProvider,
+      referenceProvider: suppliedReferenceProvider,
+      referenceMethod,
+    };
+  });
+  if (segments[0].startMs !== sessionStartMs || segments.at(-1).endMs !== sessionEndMs ||
+      segments.some((segment, index) =>
+        index > 0 && segment.startMs !== segments[index - 1].endMs)) {
+    throw new Error("invalid_session_surface_segment_coverage");
+  }
+  return segments;
+}
+
+function normalizeSessionProviders(raw, schemaVersion) {
+  if (schemaVersion === 1) {
+    if (raw !== undefined && raw !== null) {
+      throw new Error("session_surface_v1_has_providers_contract");
+    }
+    return null;
+  }
+  if (!isObject(raw) || raw.gth_surface !== "ibkr" || raw.gth_reference !== "schwab" ||
+      raw.rth_surface !== "schwab" || raw.rth_reference !== "schwab") {
+    throw new Error("invalid_session_surface_providers_contract");
+  }
+  return {
+    raw,
+    gthSurface: raw.gth_surface,
+    gthReference: raw.gth_reference,
+    rthSurface: raw.rth_surface,
+    rthReference: raw.rth_reference,
+  };
+}
+
+function normalizeReferenceBasis(raw, asOfMs) {
+  if (!isObject(raw)) throw new Error("invalid_session_surface_reference_basis");
+  const value = finiteNumber(raw.value);
+  const esContract = nonEmptyString(raw.es_contract);
+  const sampleCount = raw.sample_count;
+  const windowStart = parseDate(raw.window_start_at);
+  const windowEnd = parseDate(raw.window_end_at);
+  const knownAt = parseDate(raw.known_at);
+  const frozenAt = parseDate(raw.frozen_at);
+  if (value === null || raw.method !== "frozen_previous_rth_median" ||
+      raw.provider !== "schwab" || !esContract ||
+      !Number.isSafeInteger(sampleCount) || sampleCount < 1 ||
+      !windowStart || !windowEnd || !knownAt || !frozenAt ||
+      windowStart.getTime() > windowEnd.getTime() ||
+      windowEnd.getTime() > knownAt.getTime() ||
+      knownAt.getTime() > frozenAt.getTime() || frozenAt.getTime() > asOfMs) {
+    throw new Error("invalid_session_surface_reference_basis");
+  }
+  return {
+    raw,
+    value,
+    method: raw.method,
+    provider: raw.provider,
+    esContract,
+    sampleCount,
+    windowStartMs: windowStart.getTime(),
+    windowEndMs: windowEnd.getTime(),
+    knownAtMs: knownAt.getTime(),
+    frozenAtMs: frozenAt.getTime(),
+  };
+}
+
+function normalizeSessionReference(raw, asOfMs, activeSegment) {
+  if (!isObject(raw) || raw.coordinate !== "SPX") {
+    throw new Error("invalid_session_surface_reference_contract");
+  }
+  const price = finiteOrNull(raw.price, "invalid_session_surface_reference_price");
+  const method = raw.method === null ? null : nonEmptyString(raw.method);
+  const provider = raw.provider === null ? null : nonEmptyString(raw.provider);
+  const instrumentId = raw.instrument_id === null
+    ? null
+    : nonEmptyString(raw.instrument_id);
+  const sourceAt = raw.source_at === null ? null : parseDate(raw.source_at);
+  const knownAt = raw.known_at === null ? null : parseDate(raw.known_at);
+  const acceptedAt = raw.accepted_at === null ? null : parseDate(raw.accepted_at);
+  const validUntil = raw.valid_until === null ? null : parseDate(raw.valid_until);
+  const quality = normalizedStatus(raw.quality);
+  const missingReason = raw.missing_reason === null
+    ? null
+    : nonEmptyString(raw.missing_reason);
+  if (price === null) {
+    if ([method, provider, instrumentId, sourceAt, knownAt, acceptedAt, validUntil]
+        .some((value) => value !== null) || raw.basis !== null || !missingReason ||
+        quality !== "unavailable" || !activeSegment) {
+      throw new Error("invalid_session_surface_missing_reference");
+    }
+    return {
+      raw,
+      coordinate: raw.coordinate,
+      price: null,
+      method: null,
+      provider: null,
+      instrumentId: null,
+      sourceAtMs: null,
+      knownAtMs: null,
+      acceptedAtMs: null,
+      validUntilMs: null,
+      quality,
+      missingReason,
+      basis: null,
+      inferred: false,
+    };
+  }
+  if (price <= 0 || !activeSegment || activeSegment.kind === "closed_gap" ||
+      !["es_basis_inferred_spx", "direct_index_spx"].includes(method) ||
+      method !== activeSegment.referenceMethod ||
+      provider !== SESSION_SEGMENT_CONTRACT[activeSegment.kind].referenceProvider ||
+      !instrumentId || !sourceAt || !knownAt ||
+      sourceAt.getTime() > knownAt.getTime() ||
+      knownAt.getTime() > asOfMs ||
+      (acceptedAt && (knownAt.getTime() > acceptedAt.getTime() ||
+        acceptedAt.getTime() > asOfMs)) ||
+      (validUntil && validUntil.getTime() <= (acceptedAt?.getTime() ?? knownAt.getTime())) ||
+      !["ready", "degraded"].includes(quality) || missingReason !== null) {
+    throw new Error("invalid_session_surface_reference_contract");
+  }
+  const inferred = method === "es_basis_inferred_spx";
+  const basis = inferred ? normalizeReferenceBasis(raw.basis, asOfMs) : null;
+  if ((!inferred && raw.basis !== null) || (inferred && !basis)) {
+    throw new Error("invalid_session_surface_reference_basis_contract");
+  }
+  return {
+    raw,
+    coordinate: raw.coordinate,
+    price,
+    method,
+    provider,
+    instrumentId,
+    sourceAtMs: sourceAt.getTime(),
+    knownAtMs: knownAt.getTime(),
+    acceptedAtMs: acceptedAt?.getTime() ?? null,
+    validUntilMs: validUntil?.getTime() ?? null,
+    quality,
+    missingReason: null,
+    basis,
+    inferred,
+  };
+}
+
+function normalizeSurfaceColumn(
+  raw,
+  bucket,
+  asOfMs,
+  { mode = "replay", schemaVersion = 1, segment = null, activeSegment = null } = {},
+) {
   if (!isObject(raw)) throw new Error("invalid_session_surface_column");
   const kind = String(raw.kind || "").toLowerCase();
   if (!["historical", "projection", "missing"].includes(kind)) {
@@ -1313,6 +1544,44 @@ function normalizeSurfaceColumn(raw, bucket, asOfMs, { mode = "replay" } = {}) {
   if (kind === "projection" && (!validUntil || validUntil.getTime() <= asOfMs)) {
     throw new Error("session_surface_projection_ttl_expired_at_cutoff");
   }
+  let sessionKind = null;
+  let sourceSessionKind = null;
+  let surfaceProvider = null;
+  let referenceMethod = null;
+  if (schemaVersion === 2) {
+    sessionKind = nonEmptyString(raw.session_kind);
+    sourceSessionKind = raw.source_session_kind === null ||
+      raw.source_session_kind === undefined
+      ? null
+      : nonEmptyString(raw.source_session_kind);
+    surfaceProvider = raw.surface_provider === null
+      ? null
+      : nonEmptyString(raw.surface_provider);
+    referenceMethod = raw.reference_method === null
+      ? null
+      : nonEmptyString(raw.reference_method);
+    const sourceContract = sourceSessionKind
+      ? SESSION_SEGMENT_CONTRACT[sourceSessionKind]
+      : null;
+    const targetContract = SESSION_SEGMENT_CONTRACT[segment?.kind];
+    const providerContract = kind === "missing" ? targetContract : sourceContract;
+    if (!segment || sessionKind !== segment.kind ||
+        (segment.kind === "closed_gap" && kind !== "missing") ||
+        (kind === "missing" && sourceSessionKind !== null) ||
+        (kind === "historical" && sourceSessionKind !== segment.kind) ||
+        (kind === "projection" && (
+          !activeSegment || activeSegment.kind === "closed_gap" ||
+          sourceSessionKind !== activeSegment.kind
+        )) ||
+        !providerContract ||
+        surfaceProvider !== providerContract.surfaceProvider ||
+        referenceMethod !== providerContract.referenceMethod) {
+      throw new Error("invalid_session_surface_column_segment_contract");
+    }
+  } else if (["session_kind", "source_session_kind", "surface_provider", "reference_method"]
+      .some((field) => Object.prototype.hasOwnProperty.call(raw, field))) {
+    throw new Error("session_surface_v1_has_segment_column_contract");
+  }
   return {
     raw,
     kind,
@@ -1323,10 +1592,20 @@ function normalizeSurfaceColumn(raw, bucket, asOfMs, { mode = "replay" } = {}) {
     sourceFrameSha256,
     validUntilMs: validUntil?.getTime() ?? null,
     reason: nonEmptyString(raw.reason) || nonEmptyString(raw.missing_reason),
+    sessionKind,
+    sourceSessionKind,
+    surfaceProvider,
+    referenceMethod,
   };
 }
 
-function normalizeSessionCandles(raw, sessionStartMs, sessionEndMs, asOfMs) {
+function normalizeSessionCandles(
+  raw,
+  sessionStartMs,
+  sessionEndMs,
+  asOfMs,
+  { schemaVersion = 1, segments = [] } = {},
+) {
   if (!Array.isArray(raw)) throw new Error("invalid_session_surface_candles");
   return raw.map((item) => {
     if (!isObject(item)) throw new Error("invalid_session_surface_candle");
@@ -1358,6 +1637,49 @@ function normalizeSessionCandles(raw, sessionStartMs, sessionEndMs, asOfMs) {
     ) {
       throw new Error("invalid_session_surface_candle_contract");
     }
+    const segment = schemaVersion === 2
+      ? sessionSegmentAtTime(segments, start.getTime())
+      : null;
+    let sessionKind = null;
+    let referenceMethod = null;
+    let referenceProvider = null;
+    let referenceInstrumentId = null;
+    let acceptedAt = null;
+    let validUntil = null;
+    let basisValue = null;
+    let basisObservedAt = null;
+    let renderStyle = "legacy_solid";
+    if (schemaVersion === 2) {
+      sessionKind = nonEmptyString(item.session_kind);
+      referenceMethod = nonEmptyString(item.reference_method);
+      referenceProvider = nonEmptyString(item.reference_provider);
+      referenceInstrumentId = nonEmptyString(item.reference_instrument_id);
+      acceptedAt = parseDate(item.accepted_at);
+      validUntil = parseDate(item.valid_until);
+      basisValue = finiteOrNull(
+        item.basis_value,
+        "invalid_session_surface_candle_basis_value",
+      );
+      basisObservedAt = item.basis_observed_at === null
+        ? null
+        : parseDate(item.basis_observed_at);
+      renderStyle = nonEmptyString(item.render_style);
+      const inferred = referenceMethod === "es_basis_inferred_spx";
+      if (!segment || segment.kind === "closed_gap" || end.getTime() > segment.endMs ||
+          sessionKind !== segment.kind || referenceMethod !== segment.referenceMethod ||
+          referenceProvider !== SESSION_SEGMENT_CONTRACT[segment.kind].referenceProvider ||
+          !referenceInstrumentId ||
+          (acceptedAt && (acceptedAt.getTime() < knownAt.getTime() ||
+            acceptedAt.getTime() > asOfMs)) ||
+          (validUntil && validUntil.getTime() <=
+            (acceptedAt?.getTime() ?? knownAt.getTime())) ||
+          renderStyle !== (inferred ? "inferred_dashed" : "direct_solid") ||
+          (inferred && (basisValue === null || !basisObservedAt ||
+            basisObservedAt.getTime() > sourceAt.getTime())) ||
+          (!inferred && (basisValue !== null || basisObservedAt !== null))) {
+        throw new Error("invalid_session_surface_candle_reference_contract");
+      }
+    }
     return {
       raw: item,
       startMs: start.getTime(),
@@ -1370,6 +1692,16 @@ function normalizeSessionCandles(raw, sessionStartMs, sessionEndMs, asOfMs) {
       complete: item.complete,
       sourceAtMs: sourceAt?.getTime() ?? null,
       knownAtMs: knownAt?.getTime() ?? null,
+      sessionKind,
+      referenceMethod,
+      referenceProvider,
+      referenceInstrumentId,
+      acceptedAtMs: acceptedAt?.getTime() ?? null,
+      validUntilMs: validUntil?.getTime() ?? null,
+      basisValue,
+      basisObservedAtMs: basisObservedAt?.getTime() ?? null,
+      renderStyle,
+      inferred: renderStyle === "inferred_dashed",
     };
   }).sort((left, right) => left.startMs - right.startMs);
 }
@@ -1475,14 +1807,19 @@ function sessionMetricUnitLabel(surface, metric) {
 async function normalizeSessionSurface(raw, expected = {}) {
   if (!isObject(raw)) throw new Error("session_surface_not_an_object");
   const mode = expected.mode === "live" ? "live" : "replay";
+  const schemaVersion = raw.schema_version;
+  const policyVersion = SESSION_SURFACE_POLICY_VERSIONS.get(schemaVersion);
+  const providerValid = schemaVersion === 2
+    ? raw.provider === "mixed"
+    : mode === "replay"
+      ? raw.provider === "schwab"
+      : ["schwab", "ibkr", "mixed", "unavailable"].includes(raw.provider);
   if (
-    raw.schema_version !== SESSION_SURFACE_SCHEMA_VERSION ||
+    !SESSION_SURFACE_SCHEMA_VERSIONS.has(schemaVersion) ||
     raw.kind !== SESSION_SURFACE_KIND ||
-    raw.policy_version !== SESSION_SURFACE_POLICY_VERSION ||
+    raw.policy_version !== policyVersion ||
     raw.mode !== mode ||
-    (mode === "replay"
-      ? raw.provider !== "schwab"
-      : !["schwab", "ibkr", "mixed", "unavailable"].includes(raw.provider)) ||
+    !providerValid ||
     raw.trading_class !== "SPXW" ||
     raw.coordinate !== "SPX"
   ) {
@@ -1647,11 +1984,33 @@ async function normalizeSessionSurface(raw, expected = {}) {
     sessionEnd.getTime(),
     bucketMinutes,
   );
+  const sessionSegments = normalizeSessionSegments(
+    raw.session_segments,
+    sessionStart.getTime(),
+    sessionEnd.getTime(),
+    schemaVersion,
+  );
+  const providers = normalizeSessionProviders(raw.providers, schemaVersion);
+  const activeSegment = schemaVersion === 2
+    ? sessionSegmentAtTime(sessionSegments, asOf.getTime())
+    : null;
   if (!Array.isArray(raw.surface_columns) || raw.surface_columns.length !== timeBuckets.length) {
     throw new Error("invalid_session_surface_columns_shape");
   }
-  const surfaceColumns = raw.surface_columns.map((item, index) =>
-    normalizeSurfaceColumn(item, timeBuckets[index], asOf.getTime(), { mode }));
+  const surfaceColumns = raw.surface_columns.map((item, index) => {
+    const segment = schemaVersion === 2
+      ? sessionSegmentForBucket(sessionSegments, timeBuckets[index])
+      : null;
+    if (schemaVersion === 2 && !segment) {
+      throw new Error("session_surface_bucket_crosses_segment");
+    }
+    return normalizeSurfaceColumn(item, timeBuckets[index], asOf.getTime(), {
+      mode,
+      schemaVersion,
+      segment,
+      activeSegment,
+    });
+  });
   const gamma = normalizeSessionMatrix(
     raw.gamma_surface,
     "gamma",
@@ -1713,13 +2072,28 @@ async function normalizeSessionSurface(raw, expected = {}) {
     sessionStart.getTime(),
     sessionEnd.getTime(),
     asOf.getTime(),
+    { schemaVersion, segments: sessionSegments },
   );
   const strikeProfile = normalizeStrikeProfile(raw.strike_profile);
   const spot = finiteOrNull(raw.spot, "invalid_session_surface_spot");
   if (spot !== null && spot <= 0) throw new Error("invalid_session_surface_spot");
   const spotSourceAt = raw.spot_source_at === null ? null : parseDate(raw.spot_source_at);
   const spotKnownAt = raw.spot_known_at === null ? null : parseDate(raw.spot_known_at);
-  if (mode === "replay" && (!spot || !spotSourceAt || !spotKnownAt)) {
+  let reference = null;
+  if (schemaVersion === 2) {
+    reference = normalizeSessionReference(raw.reference, asOf.getTime(), activeSegment);
+    if ((reference.price === null) !== (spot === null) ||
+        (reference.price !== null && Math.abs(reference.price - spot) > 1e-9)) {
+      throw new Error("session_surface_reference_spot_mismatch");
+    }
+  } else if (Object.prototype.hasOwnProperty.call(raw, "reference")) {
+    throw new Error("session_surface_v1_has_reference_contract");
+  }
+  if (mode === "replay" && schemaVersion === 1 && (!spot || !spotSourceAt || !spotKnownAt)) {
+    throw new Error("invalid_session_surface_spot");
+  }
+  if (mode === "replay" && schemaVersion === 2 && spot !== null &&
+      (!spotSourceAt || !spotKnownAt)) {
     throw new Error("invalid_session_surface_spot");
   }
   if ((spotSourceAt && spotSourceAt.getTime() > asOf.getTime()) ||
@@ -1782,7 +2156,11 @@ async function normalizeSessionSurface(raw, expected = {}) {
       capabilities.strict_point_in_time_available !== (mode === "live") ||
       capabilities.known_clock_no_lookahead !== true ||
       capabilities.projection_is_model_scenario !== true ||
-      capabilities.historical_surface_is_model_proxy !== true) {
+      capabilities.historical_surface_is_model_proxy !== true ||
+      (schemaVersion === 2 && (
+        typeof capabilities.gth_available !== "boolean" ||
+        capabilities.official_spx_ohlc_available !== false
+      ))) {
     throw new Error("invalid_session_surface_capabilities_contract");
   }
   const provenance = raw.provenance;
@@ -1820,8 +2198,10 @@ async function normalizeSessionSurface(raw, expected = {}) {
     status,
     liveStatus,
     provider: raw.provider,
+    providers,
     kind: nonEmptyString(raw.kind),
-    schemaVersion: raw.schema_version ?? null,
+    schemaVersion,
+    policyVersion,
     sessionDate,
     asOf,
     asOfMs: asOf.getTime(),
@@ -1836,6 +2216,7 @@ async function normalizeSessionSurface(raw, expected = {}) {
     priceStep,
     priceGrid,
     timeBuckets,
+    sessionSegments,
     surfaceColumns,
     gamma,
     charm,
@@ -1849,6 +2230,7 @@ async function normalizeSessionSurface(raw, expected = {}) {
     spot,
     spotSourceAtMs: spotSourceAt?.getTime() ?? null,
     spotKnownAtMs: spotKnownAt?.getTime() ?? null,
+    reference,
     createdAt,
     createdAtMs: createdAt?.getTime() ?? null,
     acceptedAt,
@@ -1880,6 +2262,8 @@ async function normalizeSessionSurface(raw, expected = {}) {
 function liveSurfaceIdentity(surface) {
   if (!surface) return "";
   return [
+    surface.schemaVersion,
+    surface.policyVersion,
     surface.sessionDate,
     surface.sessionStartMs,
     surface.sessionEndMs,
@@ -1890,6 +2274,15 @@ function liveSurfaceIdentity(surface) {
     surface.priceStep,
     surface.priceGrid.join(","),
     surface.timeBuckets.map((bucket) => `${bucket.startMs}:${bucket.endMs}`).join(","),
+    surface.sessionSegments.map((segment) =>
+      `${segment.kind}:${segment.startMs}:${segment.endMs}:${segment.surfaceProvider}:${segment.referenceProvider}:${segment.referenceMethod}`
+    ).join(","),
+    surface.providers ? JSON.stringify({
+      gthSurface: surface.providers.gthSurface,
+      gthReference: surface.providers.gthReference,
+      rthSurface: surface.providers.rthSurface,
+      rthReference: surface.providers.rthReference,
+    }) : "v1",
   ].join("|");
 }
 
@@ -1910,6 +2303,9 @@ function liveFrozenPrefixSignature(surface, throughMs = surface?.historyFrozenTh
         column.sourceFrameSha256,
         column.validUntilMs,
         column.reason,
+        column.sessionKind,
+        column.surfaceProvider,
+        column.referenceMethod,
       ];
     }),
     gamma: indexes.map((index) => surface.gamma[index]),
@@ -1931,6 +2327,15 @@ function liveFrozenPrefixSignature(surface, throughMs = surface?.historyFrozenTh
         candle.sampleCount,
         candle.sourceAtMs,
         candle.knownAtMs,
+        candle.sessionKind,
+        candle.referenceMethod,
+        candle.referenceProvider,
+        candle.referenceInstrumentId,
+        candle.acceptedAtMs,
+        candle.validUntilMs,
+        candle.basisValue,
+        candle.basisObservedAtMs,
+        candle.renderStyle,
       ]),
     baseline: surface.strikeProfile
       .filter((row) => row.firstValidatedProxy !== null ||
@@ -2052,6 +2457,7 @@ function historicalOnlyLiveSurface(surface) {
     spot: null,
     spotSourceAtMs: null,
     spotKnownAtMs: null,
+    reference: null,
     availability: {
       ...surface.availability,
       projection_available: false,
@@ -2275,6 +2681,27 @@ function replayFrame() {
   return app.frameIndex >= 0 ? app.frames[app.frameIndex] || null : null;
 }
 
+function legacyReplayFrame() {
+  return app.legacyFrameIndex >= 0
+    ? app.legacyFrames[app.legacyFrameIndex] || null
+    : null;
+}
+
+function legacyReplayFrameIndexFor(frames, playheadMs) {
+  if (!Number.isFinite(playheadMs) || !Array.isArray(frames) || !frames.length) return -1;
+  let index = binarySearchLastAtOrBefore(
+    frames,
+    playheadMs,
+    (frame) => frame.at.getTime(),
+  );
+  while (index >= 0 && frames[index].cached !== true) index -= 1;
+  return index;
+}
+
+function legacyReplayFrameIndexAtOrBefore(playheadMs = app.playheadMs) {
+  return legacyReplayFrameIndexFor(app.legacyFrames, playheadMs);
+}
+
 function formatMarketTime(date, includeDate = true) {
   if (!(date instanceof Date)) return "—";
   const options = {
@@ -2303,7 +2730,13 @@ function viewPath(mode) {
   return `${root}/${mode}` || `/${mode}`;
 }
 
-function updateModeQuery(frame = replayFrame(), { push = false } = {}) {
+function replayPlayheadQueryClock() {
+  return Number.isFinite(app.playheadMs)
+    ? { at: new Date(app.playheadMs) }
+    : replayFrame();
+}
+
+function updateModeQuery(frame = replayPlayheadQueryClock(), { push = false } = {}) {
   const url = new URL(window.location.href);
   url.pathname = viewPath(app.mode);
   url.searchParams.delete("view");
@@ -2340,8 +2773,8 @@ function updateModeChrome() {
   dom.replayBanner.hidden = !replay;
   dom.replayConsole.hidden = !replay;
   dom.pageLede.textContent = replay
-    ? "Gamma、Strike 与 Charm 共用一个 SPX 坐标和交易时钟；颜色、OHLC 与缺失区间均来自冻结回放合同。"
-    : "Gamma、Strike 与 Charm 共用固定 Session Canvas；历史列冻结，当前时刻右侧仅显示有 lease 的投影。";
+    ? "Gamma、Strike 与 Charm 共用一个 SPX 坐标和交易时钟；参考价格方法、provider 与缺失区间均来自冻结回放合同。"
+    : "Gamma、Strike 与 Charm 共用固定 Session Canvas；GTH 推断参考与 RTH 直接参考严格分标，当前时刻右侧仅显示有 lease 的投影。";
   const sourceFiles = verifiedSessionSurface
     ? app.sessionSurface.provenance?.source_files
     : verifiedTrend
@@ -2469,6 +2902,7 @@ function updateFilters() {
   const enabled = isReplayView()
     ? app.frames.length > 0 &&
       sha256String(app.timelineSha256) &&
+      sha256String(app.surfaceTimelineSha256) &&
       sha256String(app.sourceFingerprint) &&
       !app.trendLoading
     : app.mode === "live";
@@ -2490,7 +2924,8 @@ function renderSummary() {
     ? `${STATUS_LABELS[status]} · Bounded PIT`
     : expired ? "Stale / fail closed" : STATUS_LABELS[status];
   const expiry = selectedExpiry();
-  dom.providerChip.textContent = expiry?.providers.includes("schwab") ? "SCHWAB" : "Provider —";
+  if (app.sessionSurface) renderReferenceChrome(app.sessionSurface);
+  else dom.providerChip.textContent = expiry?.providers.includes("schwab") ? "SCHWAB" : "Provider —";
   const activeReasons = [...new Set([...snapshot.reasons, ...(expiry?.warnings || [])])];
   const reasons = expired ? ["snapshot_valid_until_elapsed", ...activeReasons] : activeReasons;
   const displayedReasons = reasons.map(reasonLabel);
@@ -2795,6 +3230,77 @@ function drawCockpitMissingRange(context, layout, surface, startMs, endMs) {
   hatchCockpitRect(context, x1, layout.plotTop, Math.max(x2 - x1, 0.5), layout.plotHeight);
 }
 
+function drawCockpitSessionSegmentBackgrounds(context, layout, surface) {
+  if (!surface.sessionSegments.length) return;
+  const fills = {
+    gth: "rgba(42, 104, 139, 0.13)",
+    closed_gap: "rgba(91, 68, 40, 0.64)",
+    rth: "rgba(35, 105, 88, 0.07)",
+  };
+  context.save();
+  for (const segment of surface.sessionSegments) {
+    const x1 = sessionTimeToX(
+      layout,
+      surface.sessionStartMs,
+      surface.sessionEndMs,
+      segment.startMs,
+    );
+    const x2 = sessionTimeToX(
+      layout,
+      surface.sessionStartMs,
+      surface.sessionEndMs,
+      segment.endMs,
+    );
+    const width = Math.max(x2 - x1, 0.75);
+    context.fillStyle = fills[segment.kind];
+    context.fillRect(x1, layout.plotTop, width, layout.plotHeight);
+    if (segment.kind === "closed_gap") {
+      hatchCockpitRect(
+        context,
+        x1,
+        layout.plotTop,
+        width,
+        layout.plotHeight,
+        "rgba(238, 190, 103, 0.48)",
+      );
+    }
+  }
+  context.restore();
+}
+
+function drawCockpitSessionSegmentBoundaries(context, layout, surface) {
+  if (!surface.sessionSegments.length) return;
+  context.save();
+  context.font = "bold 8px ui-monospace, SFMono-Regular, monospace";
+  context.textBaseline = "top";
+  for (const [index, segment] of surface.sessionSegments.entries()) {
+    const x = sessionTimeToX(
+      layout,
+      surface.sessionStartMs,
+      surface.sessionEndMs,
+      segment.startMs,
+    );
+    if (index > 0) {
+      context.setLineDash(segment.kind === "rth" ? [] : [3, 3]);
+      context.strokeStyle = segment.kind === "rth"
+        ? "rgba(98, 213, 190, 0.92)"
+        : "rgba(238, 190, 103, 0.9)";
+      context.lineWidth = segment.kind === "rth" ? 1.25 : 1;
+      context.beginPath();
+      context.moveTo(x, layout.plotTop);
+      context.lineTo(x, layout.plotBottom);
+      context.stroke();
+    }
+    if (segment.kind !== "closed_gap") {
+      context.setLineDash([]);
+      context.fillStyle = segment.kind === "gth" ? "#8fc7e1" : "#8fe3ca";
+      context.textAlign = "left";
+      context.fillText(segment.kind.toUpperCase(), Math.min(x + 4, layout.plotRight - 22), layout.plotTop + 2);
+    }
+  }
+  context.restore();
+}
+
 function missingRangeAppliesToPanel(range, panel) {
   if (!range.components.length) return true;
   const aliases = panel === "gamma"
@@ -2812,6 +3318,14 @@ function drawCockpitCandles(context, layout, surface) {
   );
   context.save();
   for (const candle of visible) {
+    context.save();
+    if (candle.inferred) {
+      context.globalAlpha = 0.56;
+      context.setLineDash([3, 2]);
+    } else {
+      context.globalAlpha = 1;
+      context.setLineDash([]);
+    }
     const displayAtMs = cockpitCandleDisplayTime(candle, surface.asOfMs);
     const x = sessionTimeToX(
       layout,
@@ -2825,18 +3339,26 @@ function drawCockpitCandles(context, layout, surface) {
     const closeY = sessionPriceToY(layout, app.cockpitPriceDomain, candle.close);
     const rising = candle.close >= candle.open;
     const color = rising ? "#63d0ad" : "#ef7b6e";
-    context.strokeStyle = "rgba(5, 15, 24, 0.78)";
-    context.lineWidth = 3;
+    if (!candle.inferred) {
+      context.strokeStyle = "rgba(5, 15, 24, 0.78)";
+      context.lineWidth = 3;
+      context.beginPath();
+      context.moveTo(x, highY);
+      context.lineTo(x, lowY);
+      context.stroke();
+    }
+    context.strokeStyle = color;
+    context.lineWidth = 1;
+    if (candle.inferred) context.setLineDash([3, 2]);
     context.beginPath();
     context.moveTo(x, highY);
     context.lineTo(x, lowY);
     context.stroke();
-    context.strokeStyle = color;
-    context.lineWidth = 1;
-    context.stroke();
     const top = Math.min(openY, closeY);
     const height = Math.max(Math.abs(closeY - openY), 1);
-    context.fillStyle = rising ? "rgba(34, 116, 91, 0.86)" : "rgba(142, 57, 55, 0.86)";
+    context.fillStyle = candle.inferred
+      ? rising ? "rgba(34, 116, 91, 0.34)" : "rgba(142, 57, 55, 0.34)"
+      : rising ? "rgba(34, 116, 91, 0.86)" : "rgba(142, 57, 55, 0.86)";
     context.strokeStyle = color;
     context.lineWidth = 0.8;
     context.fillRect(x - nominalWidth / 2, top, nominalWidth, height);
@@ -2847,6 +3369,7 @@ function drawCockpitCandles(context, layout, surface) {
       context.strokeRect(x - nominalWidth / 2 - 1, top - 1, nominalWidth + 2, height + 2);
       context.setLineDash([]);
     }
+    context.restore();
   }
   context.restore();
 }
@@ -2903,6 +3426,7 @@ function drawCockpitSurface(panel, matrix) {
   context.clearRect(0, 0, layout.width, layout.height);
   context.fillStyle = "#081d30";
   context.fillRect(0, 0, layout.width, layout.height);
+  drawCockpitSessionSegmentBackgrounds(context, layout, surface);
   const domain = app.cockpitColorDomains[panel];
   let numericCount = 0;
   let projectionBoundary = null;
@@ -2995,6 +3519,7 @@ function drawCockpitSurface(panel, matrix) {
   drawCockpitPriceAxes(context, layout, app.cockpitPriceDomain, { side: "right" });
   drawCockpitCandles(context, layout, surface);
   if (panel === "gamma") drawGammaExtremaMarkers(context, layout, surface);
+  drawCockpitSessionSegmentBoundaries(context, layout, surface);
   empty.hidden = numericCount > 0;
 }
 
@@ -3091,6 +3616,125 @@ function cockpitDisplayTimeMs(surface = app.sessionSurface) {
       : surface.asOfMs;
   }
   return Number.isFinite(app.playheadMs) ? app.playheadMs : surface.asOfMs;
+}
+
+function referenceMethodLabel(method) {
+  if (method === "es_basis_inferred_spx") return "ES−basis inferred SPX";
+  if (method === "direct_index_spx") return "Direct SPX reference";
+  return "Reference unavailable";
+}
+
+function referenceClockLabel(timeMs) {
+  return Number.isFinite(timeMs)
+    ? formatMarketTime(new Date(timeMs), false)
+    : "—";
+}
+
+function referenceIsoLabel(timeMs) {
+  return Number.isFinite(timeMs)
+    ? formatIsoUtc(new Date(timeMs))
+    : "unavailable";
+}
+
+function referencePresentation(surface) {
+  if (!surface) {
+    return {
+      providerText: "Provider —",
+      providerTitle: "No validated surface provider",
+      referenceText: "Reference —",
+      referenceTitle: "No validated reference",
+      clockText: "Clocks —",
+      clockTitle: "No validated reference clocks",
+      legendText: "Reference path",
+      inferred: false,
+      missing: true,
+    };
+  }
+  if (surface.schemaVersion === 1) {
+    return {
+      providerText: String(surface.provider || "—").toUpperCase(),
+      providerTitle: `Surface provider ${String(surface.provider || "unknown")} · v1 RTH-only contract`,
+      referenceText: "V1 RTH · METHOD UNDECLARED",
+      referenceTitle: "Schema v1 has no session_segments/reference contract; no GTH semantics are inferred",
+      clockText: `SRC ${referenceClockLabel(surface.spotSourceAtMs)} · KNOWN ${referenceClockLabel(surface.spotKnownAtMs)}`,
+      clockTitle: `spot source_at ${surface.spotSourceAtMs ? formatIsoUtc(new Date(surface.spotSourceAtMs)) : "unavailable"}; spot known_at ${surface.spotKnownAtMs ? formatIsoUtc(new Date(surface.spotKnownAtMs)) : "unavailable"}`,
+      legendText: "SPX reference samples · v1 RTH",
+      inferred: false,
+      missing: false,
+    };
+  }
+  const displayTimeMs = cockpitDisplayTimeMs(surface) ?? surface.asOfMs;
+  const segment = sessionSegmentAtTime(surface.sessionSegments, displayTimeMs);
+  const reference = surface.reference;
+  const surfaceProvider = segment?.surfaceProvider?.toUpperCase() || "—";
+  const referenceProvider = reference?.provider?.toUpperCase() ||
+    segment?.referenceProvider?.toUpperCase() || "—";
+  const providerText = segment?.kind === "gth"
+    ? `${surfaceProvider} SPXW · ${referenceProvider} ES−BASIS INFERRED`
+    : segment?.kind === "rth"
+      ? `${surfaceProvider} SPXW · ${referenceProvider} SPX REF`
+      : "CLOSED GAP · NO PROVIDER";
+  const providerTitle = segment
+    ? `${segment.kind.toUpperCase()} surface provider ${surfaceProvider}; reference provider ${referenceProvider}`
+    : "No session segment at display time";
+  if (!reference || reference.price === null) {
+    return {
+      providerText,
+      providerTitle,
+      referenceText: "REFERENCE MISSING",
+      referenceTitle: reference?.missingReason || "Reference cleared or unavailable",
+      clockText: "CLOCKS MISSING",
+      clockTitle: "No valid source/basis clocks",
+      legendText: "GTH inferred ref / RTH direct ref",
+      inferred: false,
+      missing: true,
+    };
+  }
+  const inferred = reference.inferred;
+  const referenceText = inferred
+    ? "INFERRED · NOT OFFICIAL SPX OHLC"
+    : "DIRECT SPX REFERENCE";
+  const referenceTitle = `${referenceMethodLabel(reference.method)} · provider ${reference.provider} · instrument ${reference.instrumentId} · price ${reference.price}`;
+  const clockText = inferred
+    ? `SRC ${referenceClockLabel(reference.sourceAtMs)} · BASIS ${referenceClockLabel(reference.basis?.frozenAtMs)} · ACCEPTED ${Number.isFinite(reference.acceptedAtMs) ? referenceClockLabel(reference.acceptedAtMs) : "unavailable"}`
+    : `SRC ${referenceClockLabel(reference.sourceAtMs)} · ACCEPTED ${Number.isFinite(reference.acceptedAtMs) ? referenceClockLabel(reference.acceptedAtMs) : "unavailable"}`;
+  const clockTitle = [
+    `source_at ${referenceIsoLabel(reference.sourceAtMs)}`,
+    `known_at ${referenceIsoLabel(reference.knownAtMs)}`,
+    `accepted_at ${referenceIsoLabel(reference.acceptedAtMs)}`,
+    `valid_until ${referenceIsoLabel(reference.validUntilMs)}`,
+    reference.basis
+      ? `basis ${reference.basis.value} (${reference.basis.method}); basis known_at ${formatIsoUtc(new Date(reference.basis.knownAtMs))}; frozen_at ${formatIsoUtc(new Date(reference.basis.frozenAtMs))}`
+      : null,
+  ].filter(Boolean).join("; ");
+  return {
+    providerText,
+    providerTitle,
+    referenceText,
+    referenceTitle,
+    clockText,
+    clockTitle,
+    legendText: "GTH inferred ref / RTH direct ref",
+    inferred,
+    missing: false,
+  };
+}
+
+function renderReferenceChrome(surface = app.sessionSurface) {
+  const presentation = referencePresentation(surface);
+  dom.providerChip.textContent = presentation.providerText;
+  dom.providerChip.title = presentation.providerTitle;
+  dom.referenceChip.textContent = presentation.referenceText;
+  dom.referenceChip.title = presentation.referenceTitle;
+  dom.referenceChip.className = `reference-chip${presentation.inferred ? " inferred" : ""}${presentation.missing ? " missing" : ""}`;
+  dom.referenceClock.textContent = presentation.clockText;
+  dom.referenceClock.title = presentation.clockTitle;
+  for (const icon of [dom.cockpitGammaReferenceIcon, dom.cockpitCharmReferenceIcon]) {
+    icon.className = `legend-candle${presentation.inferred ? " inferred" : ""}`;
+  }
+  for (const label of [dom.cockpitGammaReferenceLegend, dom.cockpitCharmReferenceLegend]) {
+    label.textContent = presentation.legendText;
+  }
 }
 
 function cockpitValueAt(panel, timeMs, price) {
@@ -3212,10 +3856,10 @@ function renderCockpitStatic() {
     dom.cockpitTooltip.hidden = true;
     dom.cockpitTooltip.replaceChildren();
     if (dom.cockpitTooltip.dataset) delete dom.cockpitTooltip.dataset.panel;
-    dom.providerChip.textContent = "Provider —";
+    renderReferenceChrome(null);
     return;
   }
-  dom.providerChip.textContent = String(surface.provider || "—").toUpperCase();
+  renderReferenceChrome(surface);
   updateCockpitStableDomains(surface);
   drawCockpitSurface("gamma", surface.gamma);
   drawCockpitStrike();
@@ -3240,6 +3884,9 @@ function cockpitTooltipFor(panel, timeMs, price) {
   const strikeIndex = nearestNumericIndex(surface.strikeProfile, price, (row) => row.strike);
   const strike = strikeIndex >= 0 ? surface.strikeProfile[strikeIndex] : null;
   const candle = cockpitCandleAtTime(surface.candles, timeMs, surface.asOfMs);
+  const segment = surface.schemaVersion === 2
+    ? sessionSegmentAtTime(surface.sessionSegments, timeMs)
+    : null;
   const title = document.createElement("strong");
   title.textContent = `${formatMarketTime(new Date(timeMs))} · SPX ${price.toFixed(2)}`;
   const gammaLine = document.createElement("span");
@@ -3258,9 +3905,47 @@ function cockpitTooltipFor(panel, timeMs, price) {
     : "Strike profile: missing";
   const candleLine = document.createElement("span");
   candleLine.textContent = candle
-    ? `OHLC ${candle.open} / ${candle.high} / ${candle.low} / ${candle.close} · n=${candle.sampleCount}${candle.complete ? "" : " · partial"}`
-    : "OHLC: missing";
-  dom.cockpitTooltip.replaceChildren(title, gammaLine, charmLine, strikeLine, candleLine);
+    ? candle.inferred
+      ? `INFERRED reference sample (ES−basis; NOT official SPX OHLC): ${candle.open} / ${candle.high} / ${candle.low} / ${candle.close} · n=${candle.sampleCount}${candle.complete ? "" : " · partial"}`
+      : `Direct SPX reference sample: ${candle.open} / ${candle.high} / ${candle.low} / ${candle.close} · n=${candle.sampleCount}${candle.complete ? "" : " · partial"}`
+    : "Reference sample: missing";
+  const sourceLine = document.createElement("span");
+  sourceLine.textContent = candle
+    ? `Reference provider ${candle.referenceProvider || surface.provider} · ${candle.referenceInstrumentId || "instrument undeclared"} · source ${referenceIsoLabel(candle.sourceAtMs)} · known ${referenceIsoLabel(candle.knownAtMs)} · accepted ${referenceIsoLabel(candle.acceptedAtMs)} · valid until ${referenceIsoLabel(candle.validUntilMs)}`
+    : `Surface source ${referenceIsoLabel(gamma.column?.sourceAtMs)} · known ${referenceIsoLabel(gamma.column?.knownAtMs)} · accepted ${referenceIsoLabel(gamma.column?.acceptedAtMs)} · valid until ${referenceIsoLabel(gamma.column?.validUntilMs)}`;
+  const semanticsLine = document.createElement("span");
+  if (surface.schemaVersion === 2) {
+    const targetKind = segment?.kind?.toUpperCase() || "UNKNOWN SEGMENT";
+    const sourceKind = gamma.column?.sourceSessionKind?.toUpperCase() || null;
+    const sourceProvider = gamma.column?.surfaceProvider || "none";
+    const method = gamma.column?.referenceMethod || segment?.referenceMethod;
+    const sourceMethod = method === "es_basis_inferred_spx"
+      ? "ES−basis inferred"
+      : method === "direct_index_spx" ? "direct SPX" : "reference unavailable";
+    semanticsLine.textContent = gamma.column?.kind === "projection" &&
+        sourceKind && sourceKind !== targetKind
+      ? `${targetKind} scenario · projected from ${sourceKind} ${sourceProvider.toUpperCase()}/${sourceMethod}`
+      : `${targetKind} · source ${sourceKind || "unavailable"} · surface provider ${sourceProvider} · ${referenceMethodLabel(method)}`;
+  } else {
+    semanticsLine.textContent =
+      "Schema v1 RTH-only · reference method undeclared · no GTH semantics inferred";
+  }
+  const basisLine = document.createElement("span");
+  basisLine.textContent = candle?.inferred
+    ? `ES−SPX basis ${candle.basisValue ?? "missing"} · basis observed ${referenceIsoLabel(candle.basisObservedAtMs)} · dashed / reduced opacity`
+    : candle
+      ? "Basis: none · direct reference rendered solid"
+      : "Basis: unavailable";
+  dom.cockpitTooltip.replaceChildren(
+    title,
+    gammaLine,
+    charmLine,
+    strikeLine,
+    semanticsLine,
+    candleLine,
+    sourceLine,
+    basisLine,
+  );
   dom.cockpitTooltip.dataset.panel = panel;
 }
 
@@ -3286,11 +3971,12 @@ function cockpitPointerMove(panel, event) {
   const cockpitRect = dom.sessionCockpit.getBoundingClientRect();
   const localX = event.clientX - cockpitRect.left;
   const localY = event.clientY - cockpitRect.top;
-  const tooltipWidth = Math.min(310, Math.max(cockpitRect.width - 16, 190));
+  const tooltipWidth = Math.min(390, Math.max(cockpitRect.width - 16, 190));
   dom.cockpitTooltip.style.width = `${tooltipWidth}px`;
   dom.cockpitTooltip.style.left = `${Math.min(Math.max(localX + 12, 8), Math.max(cockpitRect.width - tooltipWidth - 8, 8))}px`;
-  dom.cockpitTooltip.style.top = `${Math.min(Math.max(localY + 12, 8), Math.max(cockpitRect.height - 112, 8))}px`;
   dom.cockpitTooltip.hidden = false;
+  const tooltipHeight = Math.max(dom.cockpitTooltip.offsetHeight || 172, 120);
+  dom.cockpitTooltip.style.top = `${Math.min(Math.max(localY + 12, 8), Math.max(cockpitRect.height - tooltipHeight - 8, 8))}px`;
 }
 
 function clearCockpitHover() {
@@ -3317,6 +4003,7 @@ function renderCockpitAudit() {
     dom.cockpitAuditStats.textContent = "—";
     dom.cockpitAuditMissing.textContent = "—";
     dom.cockpitAuditCapabilities.textContent = "—";
+    dom.cockpitAuditReference.textContent = "—";
     dom.cockpitAuditProvenance.textContent = "—";
     dom.cockpitAuditFrozen.textContent = "—";
     dom.cockpitAuditPit.textContent = "PIT —";
@@ -3346,6 +4033,23 @@ function renderCockpitAudit() {
     summarizeAuditObject(surface.capabilities),
     surface.availability ? `availability: ${summarizeAuditObject(surface.availability)}` : null,
   ].filter(Boolean).join(" · ");
+  const reference = surface.reference;
+  dom.cockpitAuditReference.textContent = surface.schemaVersion === 1
+    ? "v1 RTH-only contract · reference method/provider split unavailable · no GTH inferred"
+    : reference?.price === null || !reference
+      ? `missing · ${reference?.missingReason || "reference cleared"}`
+      : [
+          `${referenceMethodLabel(reference.method)} ${reference.price}`,
+          `provider=${reference.provider}`,
+          `instrument=${reference.instrumentId}`,
+          `source_at=${referenceIsoLabel(reference.sourceAtMs)}`,
+          `known_at=${referenceIsoLabel(reference.knownAtMs)}`,
+          `accepted_at=${referenceIsoLabel(reference.acceptedAtMs)}`,
+          `valid_until=${referenceIsoLabel(reference.validUntilMs)}`,
+          reference.basis
+            ? `basis=${reference.basis.value} ${reference.basis.method} frozen_at=${referenceIsoLabel(reference.basis.frozenAtMs)}`
+            : "basis=none",
+        ].join(" · ");
   dom.cockpitAuditProvenance.textContent = summarizeAuditObject(surface.provenance);
   dom.cockpitAuditFrozen.textContent = isReplayView()
     ? "Frozen replay"
@@ -4514,6 +5218,23 @@ function normalizeReplaySessions(raw) {
     if (frameCount !== null && (!Number.isInteger(frameCount) || frameCount < 0)) {
       throw new Error("invalid_replay_session_frame_count");
     }
+    const surfaceFrameCount = Object.prototype.hasOwnProperty.call(item, "surface_frame_count")
+      ? finiteNumber(item.surface_frame_count)
+      : null;
+    const surfaceTimelineStatus = Object.prototype.hasOwnProperty.call(
+      item,
+      "surface_timeline_status",
+    )
+      ? nonEmptyString(item.surface_timeline_status)
+      : null;
+    if ((surfaceFrameCount !== null &&
+        (!Number.isSafeInteger(surfaceFrameCount) || surfaceFrameCount < 1)) ||
+        (Object.prototype.hasOwnProperty.call(item, "surface_frame_count") &&
+          surfaceFrameCount === null) ||
+        (Object.prototype.hasOwnProperty.call(item, "surface_timeline_status") &&
+          !surfaceTimelineStatus)) {
+      throw new Error("invalid_replay_session_surface_timeline_summary");
+    }
     const closeAt = parseDate(item.close_at);
     const closeGraceElapsedAt = parseDate(item.session_close_grace_elapsed_at);
     if (
@@ -4531,6 +5252,8 @@ function normalizeReplaySessions(raw) {
       date,
       label: nonEmptyString(item.label) || date,
       frameCount,
+      surfaceFrameCount,
+      surfaceTimelineStatus,
       status: normalizedStatus(item.status),
     };
   }).sort((left, right) => right.date.localeCompare(left.date));
@@ -4612,22 +5335,138 @@ async function normalizeReplayTimeline(raw, sessionDate, expectedProjectionPolic
   if (await canonicalReplaySha256(frames.map((frame) => frame.id)) !== raw.timeline_sha256) {
     throw new Error("invalid_replay_timeline_hash");
   }
+
+  const surfaceFieldNames = [
+    "surface_open_at",
+    "surface_close_at",
+    "surface_provider",
+    "surface_frame_interval_minutes",
+    "surface_frame_count",
+    "surface_timeline_sha256",
+    "session_segments",
+    "surface_frames",
+  ];
+  const suppliedSurfaceFieldCount = surfaceFieldNames.filter((field) =>
+    Object.prototype.hasOwnProperty.call(raw, field)).length;
+  if (suppliedSurfaceFieldCount !== 0 && suppliedSurfaceFieldCount !== surfaceFieldNames.length) {
+    throw new Error("incomplete_replay_surface_timeline_contract");
+  }
+
+  let surfaceFrames = frames;
+  let surfaceOpenAt = openAt;
+  let surfaceCloseAt = closeAt;
+  let surfaceTimelineSha256 = raw.timeline_sha256;
+  let surfaceSegments = [];
+  let surfaceTimelineExtended = false;
+  if (suppliedSurfaceFieldCount === surfaceFieldNames.length) {
+    surfaceOpenAt = parseDate(raw.surface_open_at);
+    surfaceCloseAt = parseDate(raw.surface_close_at);
+    const surfaceStepMinutes = raw.surface_frame_interval_minutes;
+    if (!surfaceOpenAt || !surfaceCloseAt || surfaceOpenAt >= surfaceCloseAt ||
+        surfaceCloseAt.getTime() !== closeAt.getTime() ||
+        surfaceCloseAt.toISOString().slice(0, 10) !== sessionDate ||
+        raw.surface_provider !== "mixed" ||
+        surfaceStepMinutes !== REPLAY_TIMELINE_STEP_MINUTES ||
+        !Number.isSafeInteger(raw.surface_frame_count) || raw.surface_frame_count < 1 ||
+        !sha256String(raw.surface_timeline_sha256) ||
+        !Array.isArray(raw.surface_frames)) {
+      throw new Error("invalid_replay_surface_timeline_contract");
+    }
+    surfaceSegments = normalizeSessionSegments(
+      raw.session_segments,
+      surfaceOpenAt.getTime(),
+      surfaceCloseAt.getTime(),
+      2,
+    );
+    if (surfaceSegments.at(-1)?.startMs !== openAt.getTime()) {
+      throw new Error("invalid_replay_surface_rth_alignment");
+    }
+    const surfaceStepMs = surfaceStepMinutes * 60_000;
+    const surfaceSeen = new Set();
+    let previousSurfaceAt = null;
+    surfaceFrames = raw.surface_frames.map((item, index) => {
+      if (!isObject(item)) throw new Error("invalid_replay_surface_timeline_frame");
+      const at = parseDate(item.at);
+      const requestedAsOf = parseDate(item.requested_as_of);
+      if (!at || !requestedAsOf || requestedAsOf.getTime() !== at.getTime() ||
+          at.getUTCMilliseconds() !== 0 || at <= surfaceOpenAt || at > surfaceCloseAt ||
+          surfaceSeen.has(at.getTime()) ||
+          (previousSurfaceAt && at.getTime() - previousSurfaceAt.getTime() !== surfaceStepMs) ||
+          (!previousSurfaceAt && at.getTime() !== surfaceOpenAt.getTime() + surfaceStepMs)) {
+        throw new Error("invalid_replay_surface_timeline_clock");
+      }
+      surfaceSeen.add(at.getTime());
+      previousSurfaceAt = at;
+      const id = nonEmptyString(item.id) || nonEmptyString(item.replay_id);
+      const expectedId = formatIsoUtc(at).replaceAll(":", "");
+      const bucket = { startMs: at.getTime() - surfaceStepMs, endMs: at.getTime() };
+      const segment = sessionSegmentForBucket(surfaceSegments, bucket);
+      const status = nonEmptyString(item.status);
+      const expectedStatus = segment?.kind === "closed_gap"
+        ? "scheduled_missing"
+        : "unvalidated_playhead";
+      if (!segment || id !== expectedId || item.session_kind !== segment.kind ||
+          status !== expectedStatus ||
+          item.projection_policy_sha256 !== expectedProjectionPolicySha256 ||
+          ["artifact_sha256", "cached", "url", "frame_url"].some((field) =>
+            Object.prototype.hasOwnProperty.call(item, field))) {
+        throw new Error("invalid_replay_surface_timeline_frame_contract");
+      }
+      return {
+        raw: item,
+        at,
+        id,
+        label: nonEmptyString(item.label) || nonEmptyString(item.label_et) ||
+          formatMarketTime(at),
+        url: "",
+        cached: false,
+        status: normalizedStatus(status),
+        timelineStatus: status,
+        artifactSha256: "",
+        projectionPolicySha256: expectedProjectionPolicySha256,
+        sessionKind: segment.kind,
+      };
+    });
+    if (raw.surface_frame_count !== surfaceFrames.length ||
+        surfaceFrames.at(-1)?.at.getTime() !== surfaceCloseAt.getTime()) {
+      throw new Error("invalid_replay_surface_timeline_frame_count");
+    }
+    const surfaceHashBody = raw.surface_frames.map((item) => ({
+      at: item.at,
+      session_kind: item.session_kind,
+      status: item.status,
+    }));
+    if (await canonicalReplaySha256(surfaceHashBody) !== raw.surface_timeline_sha256) {
+      throw new Error("invalid_replay_surface_timeline_hash");
+    }
+    surfaceTimelineSha256 = raw.surface_timeline_sha256;
+    surfaceTimelineExtended = true;
+  }
   return {
     frames,
-    stepMinutes: raw.step_minutes,
+    surfaceFrames,
+    stepMinutes: surfaceTimelineExtended
+      ? raw.surface_frame_interval_minutes
+      : raw.step_minutes,
     projectionPolicySha256: expectedProjectionPolicySha256,
     timelineSha256: raw.timeline_sha256,
+    surfaceTimelineSha256,
     sourceFingerprint: raw.source_fingerprint,
     openAt,
     closeAt,
+    surfaceOpenAt,
+    surfaceCloseAt,
+    surfaceSegments,
+    surfaceTimelineExtended,
   };
 }
 
 function buildMetadataReplayClock(timeline) {
-  const keyframes = timeline.frames.map((frame, index) => ({
+  const keyframes = timeline.surfaceFrames.map((frame, index) => ({
     id: frame.id,
     atMs: frame.at.getTime(),
-    validUntilMs: timeline.frames[index + 1]?.at.getTime() ?? timeline.closeAt.getTime(),
+    validUntilMs: timeline.surfaceFrames[index + 1]?.at.getTime() ??
+      timeline.surfaceCloseAt.getTime(),
     status: frame.status,
     expiry: null,
     values: [],
@@ -4636,10 +5475,12 @@ function buildMetadataReplayClock(timeline) {
   }));
   return {
     metadataOnly: true,
+    surfaceTimelineExtended: timeline.surfaceTimelineExtended,
+    surfaceSegments: timeline.surfaceSegments,
     status: "unknown",
     sessionDate: app.sessionDate,
-    openMs: timeline.openAt.getTime(),
-    closeMs: timeline.closeAt.getTime(),
+    openMs: timeline.surfaceOpenAt.getTime(),
+    closeMs: timeline.surfaceCloseAt.getTime(),
     role: app.expiryRole,
     weighting: app.weighting,
     metric: "signed_gamma",
@@ -4670,7 +5511,9 @@ function renderReplaySessionOptions() {
   for (const session of app.sessions) {
     const option = document.createElement("option");
     option.value = session.date;
-    const count = session.frameCount === null ? "" : ` · ${session.frameCount} frames`;
+    const count = session.surfaceFrameCount !== null
+      ? ` · ${session.surfaceFrameCount} surface cutoffs`
+      : session.frameCount === null ? "" : ` · ${session.frameCount} legacy frames`;
     option.textContent = `${session.label}${count}`;
     dom.replaySessionFilter.append(option);
   }
@@ -4680,8 +5523,24 @@ function renderReplaySessionOptions() {
 
 function replayPlaybackStartMs(trend) {
   if (!trend) return 0;
-  if (trend.metadataOnly) return trend.openMs;
+  if (trend.metadataOnly) return trend.gamma.keyframes[0]?.atMs ?? trend.openMs;
   return Math.max(trend.openMs, trend.spx.knownMs[0]);
+}
+
+function updateScenarioDiagnosticAvailability() {
+  const replay = isReplayView();
+  const legacyIndex = replay ? legacyReplayFrameIndexAtOrBefore() : -1;
+  const available = !replay || legacyIndex >= 0;
+  dom.scenarioDiagnostic.classList.toggle("unavailable", !available);
+  dom.scenarioDiagnostic.setAttribute("aria-disabled", String(!available));
+  if (replay && !available) {
+    dom.scenarioDiagnostic.open = false;
+    dom.surfaceTitle.textContent = "Legacy scenario diagnostic unavailable at playhead";
+    dom.surfaceSubtitle.textContent = app.legacyFrames.length
+      ? "No legacy RTH artifact exists at or before this cutoff; future artifacts are never loaded."
+      : "This timeline contains no validated legacy frame artifact.";
+  }
+  return available;
 }
 
 function updateReplayControls() {
@@ -4717,7 +5576,7 @@ function updateReplayControls() {
   dom.replayPrevious.disabled = navigationLocked || previousIndex < 0;
   dom.replayNext.disabled = navigationLocked || !trend || currentGammaIndex >= gammaCount - 1;
   dom.replayPlay.disabled = navigationLocked || app.frameLoading || !trend || gammaCount < 2 ||
-    (trend.metadataOnly && (!app.sessionSurface || app.sessionSurfaceLoading));
+    (!app.playing && trend.metadataOnly && (!app.sessionSurface || app.sessionSurfaceLoading));
   dom.replaySpeed.disabled = navigationLocked || !trend || gammaCount < 2;
   dom.replaySpeed.value = String(app.speed);
   dom.replayPlay.textContent = app.playing ? "❚❚ 暂停" : "▶ 播放";
@@ -4738,9 +5597,10 @@ function updateReplayControls() {
     ? `${sessionLabel} · 正在校验回放目录与时间轴`
     : trend
     ? trend.metadataOnly
-      ? `${sessionLabel} · ${gammaCount} validated frame clocks · market values requested only at latest frame ≤ playhead · Visual ${REPLAY_VISUAL_FPS} fps`
+      ? `${sessionLabel} · ${gammaCount} surface cutoff clocks${trend.surfaceTimelineExtended ? " · GTH + closed gap + RTH" : " · legacy RTH fallback"} · ${app.legacyFrames.length} legacy diagnostic artifacts · Visual ${REPLAY_VISUAL_FPS} fps`
       : `${sessionLabel} · ${trend.spx.prices.length} 个 SPX observations · ${gammaCount} 个 Gamma keyframes · Visual ${REPLAY_VISUAL_FPS} fps · hold-last · availability clock 缺失`
     : `${sessionLabel} · 没有可用的盘中走势`;
+  updateScenarioDiagnosticAvailability();
   updateModeChrome();
 }
 
@@ -4766,7 +5626,7 @@ function stopPlayback({ syncFrame = false, announce = true } = {}) {
   updateReplayControls();
   if (syncFrame && app.trend?.metadataOnly) {
     app.frameIndex = sessionSurfaceFrameIndex();
-    updateModeQuery(replayFrame());
+    updateModeQuery();
     maybeLoadSessionSurfaceForPlayhead({ force: true });
   } else if (syncFrame) {
     syncScenarioFrameToPlayhead();
@@ -4863,7 +5723,7 @@ function seekReplay(playheadMs, { syncFrame = false, announce = true } = {}) {
   updateReplayControls();
   if (syncFrame) {
     app.frameIndex = sessionSurfaceFrameIndex();
-    updateModeQuery(replayFrame());
+    updateModeQuery();
     syncScenarioFrameToPlayhead();
     maybeLoadSessionSurfaceForPlayhead({ force: true, interrupt: true });
   }
@@ -4952,9 +5812,7 @@ function renderLiveSessionSurfaceChrome(phase = app.livePhase, reason = app.live
         ? "Live · Refresh degraded"
         : "Live · Session surface";
   setStatusPill(status, label);
-  dom.providerChip.textContent = surface
-    ? String(surface.provider || "—").toUpperCase()
-    : "Provider —";
+  renderReferenceChrome(surface);
   const serverNowMs = liveClockNowMs();
   const ageSeconds = surface && Number.isFinite(serverNowMs)
     ? Math.max((serverNowMs - surface.asOfMs) / 1_000, 0)
@@ -5100,7 +5958,7 @@ function renderSessionSurfaceChrome(status, reason = "") {
     unavailable ? "unavailable" : "unknown",
     unavailable ? "Replay · Session surface unavailable" : "Replay · Loading session surface",
   );
-  dom.providerChip.textContent = "Provider —";
+  renderReferenceChrome(app.sessionSurface);
   dom.refreshState.textContent = unavailable
     ? "Cutoff-bound surface unavailable · retrying"
     : "Loading cutoff-bound session surface";
@@ -5303,6 +6161,10 @@ async function loadSessionSurfaceAtPlayhead({ force = false, interrupt = false }
       } else {
         Promise.resolve().then(() => maybeLoadSessionSurfaceForPlayhead());
       }
+      // A seek or pause can finish while the play control is disabled for the
+      // cutoff-bound surface request.  Refresh the transport after releasing
+      // that request so the user can immediately resume playback.
+      updateReplayControls();
     }
   }
 }
@@ -5320,9 +6182,13 @@ function resetReplayNavigationState() {
   app.sessionDate = "";
   app.frames = [];
   app.frameIndex = -1;
-  app.projectionPolicySha256 = "";
+  app.legacyFrames = [];
+  app.legacyFrameIndex = -1;
   app.timelineSha256 = "";
+  app.surfaceTimelineSha256 = "";
+  app.surfaceTimelineExtended = false;
   app.sourceFingerprint = "";
+  app.projectionPolicySha256 = "";
   app.timelineOpenMs = null;
   app.timelineCloseMs = null;
   app.trend = null;
@@ -5605,6 +6471,12 @@ async function loadReplayTimeline(sessionDate, { preserveRequestedAt = true } = 
   cancelSessionSurfaceRequest({ clear: true });
   app.frames = [];
   app.frameIndex = -1;
+  app.legacyFrames = [];
+  app.legacyFrameIndex = -1;
+  app.timelineSha256 = "";
+  app.surfaceTimelineSha256 = "";
+  app.surfaceTimelineExtended = false;
+  app.sourceFingerprint = "";
   app.snapshot = null;
   app.trend = null;
   app.activeGammaIndex = -1;
@@ -5630,24 +6502,27 @@ async function loadReplayTimeline(sessionDate, { preserveRequestedAt = true } = 
       app.projectionPolicySha256,
     );
     if (!requestIsCurrent(generation, "replay") || app.sessionDate !== sessionDate) return;
-    if (!timeline.frames.length) throw new Error("replay_timeline_empty");
-    app.frames = timeline.frames;
+    if (!timeline.surfaceFrames.length) throw new Error("replay_surface_timeline_empty");
+    app.frames = timeline.surfaceFrames;
+    app.legacyFrames = timeline.frames;
     app.timelineStepMinutes = timeline.stepMinutes;
     app.timelineSha256 = timeline.timelineSha256;
+    app.surfaceTimelineSha256 = timeline.surfaceTimelineSha256;
+    app.surfaceTimelineExtended = timeline.surfaceTimelineExtended;
     app.sourceFingerprint = timeline.sourceFingerprint;
-    app.timelineOpenMs = timeline.openAt.getTime();
-    app.timelineCloseMs = timeline.closeAt.getTime();
-    let frameIndex = timeline.frames.length - 1;
-    let requestedPlayheadMs = timeline.closeAt.getTime();
+    app.timelineOpenMs = timeline.surfaceOpenAt.getTime();
+    app.timelineCloseMs = timeline.surfaceCloseAt.getTime();
+    let frameIndex = timeline.surfaceFrames.length - 1;
+    let requestedPlayheadMs = timeline.surfaceCloseAt.getTime();
     if (requestedAtText) {
       const requestedAt = parseDate(requestedAtText);
       if (!requestedAt) throw new Error("invalid_requested_replay_at");
       requestedPlayheadMs = Math.max(
-        timeline.openAt.getTime(),
-        Math.min(requestedAt.getTime(), timeline.closeAt.getTime()),
+        timeline.surfaceFrames[0].at.getTime(),
+        Math.min(requestedAt.getTime(), timeline.surfaceCloseAt.getTime()),
       );
       frameIndex = binarySearchLastAtOrBefore(
-        timeline.frames,
+        timeline.surfaceFrames,
         requestedPlayheadMs,
         (item) => item.at.getTime(),
       );
@@ -5659,7 +6534,7 @@ async function loadReplayTimeline(sessionDate, { preserveRequestedAt = true } = 
     app.activeGammaIndex = -1;
     app.replayCatalogLoading = false;
     updateReplayControls();
-    updateModeQuery(requestedAtText ? replayFrame() : null);
+    updateModeQuery(requestedAtText ? replayPlayheadQueryClock() : null);
     drawMetadataReplayDynamic(app.playheadMs, { announce: true });
   } catch (error) {
     if (!requestIsCurrent(generation, "replay")) return;
@@ -5707,30 +6582,22 @@ function renderScenarioFetchFailure(error) {
 function syncScenarioFrameToPlayhead() {
   if (
     app.mode !== "replay" ||
-    app.trend?.metadataOnly ||
     app.playing ||
     app.frameLoading ||
     !dom.scenarioDiagnostic.open ||
-    !app.trend ||
     !Number.isFinite(app.playheadMs)
   ) return;
-  let gammaIndex = binarySearchLastAtOrBefore(
-    app.trend.gamma.keyframes,
-    app.playheadMs,
-    (keyframe) => keyframe.atMs,
-  );
-  if (gammaIndex < 0) gammaIndex = 0;
-  const keyframe = app.trend.gamma.keyframes[gammaIndex];
-  const frameIndex = app.frames.findIndex((frame) => frame.id === keyframe.id);
+  const frameIndex = legacyReplayFrameIndexAtOrBefore();
   if (frameIndex < 0) {
-    renderScenarioFetchFailure(new Error("replay_trend_frame_not_in_timeline"));
+    dom.scenarioDiagnostic.open = false;
+    renderScenarioFetchFailure(new Error("legacy_replay_artifact_unavailable_at_cutoff"));
+    updateScenarioDiagnosticAvailability();
     return;
   }
-  app.frameIndex = frameIndex;
-  app.frames[frameIndex].artifactSha256 = keyframe.frameArtifactSha256;
-  updateModeQuery(app.frames[frameIndex]);
+  app.legacyFrameIndex = frameIndex;
+  const frame = app.legacyFrames[frameIndex];
   updateReplayControls();
-  if (app.snapshot?.mode === "replay" && app.snapshot.replayId === keyframe.id) return;
+  if (app.snapshot?.mode === "replay" && app.snapshot.replayId === frame.id) return;
   loadReplayFrame();
 }
 
@@ -5741,7 +6608,7 @@ function replayFrameRequestUrl(frame) {
 
 async function loadReplayFrame() {
   if (app.mode !== "replay") return;
-  const frame = replayFrame();
+  const frame = legacyReplayFrame();
   if (!frame) return;
   const sessionDate = app.sessionDate;
   app.frameLoading = true;
@@ -5763,7 +6630,7 @@ async function loadReplayFrame() {
       artifactSha256: frame.artifactSha256,
       projectionPolicySha256: frame.projectionPolicySha256,
     });
-    if (!requestIsCurrent(generation, "replay") || replayFrame() !== frame ||
+    if (!requestIsCurrent(generation, "replay") || legacyReplayFrame() !== frame ||
         app.sessionDate !== sessionDate) return;
     frame.artifactSha256 = snapshot.raw.artifact_sha256;
     frame.cached = true;
@@ -5832,8 +6699,12 @@ dom.replaySessionFilter.addEventListener("change", () => {
   app.sessionDate = date;
   app.frames = [];
   app.frameIndex = -1;
+  app.legacyFrames = [];
+  app.legacyFrameIndex = -1;
   app.snapshot = null;
   app.timelineSha256 = "";
+  app.surfaceTimelineSha256 = "";
+  app.surfaceTimelineExtended = false;
   app.sourceFingerprint = "";
   app.trend = null;
   app.playheadMs = null;
@@ -6028,6 +6899,7 @@ dom.scenarioDiagnostic.addEventListener("toggle", () => {
     dom.scenarioDiagnostic.open = false;
     return;
   }
+  if (isReplayView() && !updateScenarioDiagnosticAvailability()) return;
   if (isReplayView() && app.trend && !app.playing) {
     syncScenarioFrameToPlayhead();
   } else if (app.mode === "live") {
@@ -6096,10 +6968,17 @@ if (isObject(globalThis.__SPX_SPARK_TEST_HOOK__)) {
     unavailableLiveMessage,
     unavailableLiveReason,
     missingRangeAppliesToPanel,
+    normalizeReplaySessions,
+    normalizeReplayTimeline,
     normalizeSessionSurface,
     normalizeSessionMetricUnits,
+    normalizeSessionReference,
+    normalizeSessionSegments,
     normalizeReplayTrend,
+    referencePresentation,
     robustDomain,
+    verifyReplayDigests,
+    legacyReplayFrameIndexFor,
     sessionSurfaceFrameIndexFor,
     sessionSurfaceRequestDecision,
     sessionPriceToY,

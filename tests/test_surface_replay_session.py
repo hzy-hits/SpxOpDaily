@@ -11,6 +11,7 @@ import pytest
 
 import spx_spark.surface_dashboard_replay as replay_module
 import spx_spark.surface_replay_service as service_module
+import spx_spark.surface_replay_session as session_module
 from spx_spark.surface_replay_service import (
     ReplayAPI,
     ReplayCacheError,
@@ -18,6 +19,7 @@ from spx_spark.surface_replay_service import (
     ReplayRequestError,
 )
 from spx_spark.surface_replay_session import (
+    SESSION_SURFACE_CACHE_VERSION,
     SESSION_SURFACE_KIND,
     SESSION_SURFACE_POLICY_VERSION,
 )
@@ -57,19 +59,30 @@ def test_session_surface_endpoint_builds_frontend_contract(
     response = ReplayAPI(catalog).dispatch("GET", _target())
     payload = response.payload
 
-    assert payload["schema_version"] == 1
+    assert payload["schema_version"] == 2
     assert payload["kind"] == SESSION_SURFACE_KIND == "spxw_session_surface"
     assert payload["policy_version"] == SESSION_SURFACE_POLICY_VERSION
     assert payload["mode"] == "replay"
     assert payload["session_date"] == "2026-07-17"
-    assert payload["session_start"] == "2026-07-17T13:30:00+00:00"
+    assert payload["session_start"] == "2026-07-17T00:15:00+00:00"
     assert payload["session_end"] == "2026-07-17T20:00:00+00:00"
     assert payload["as_of"] == AS_OF.isoformat()
     assert payload["expiry"] == "20260717"
     assert payload["role"] == "front"
     assert payload["weighting"] == "oi_weighted"
     assert payload["coordinate"] == "SPX"
-    assert payload["provider"] == "schwab"
+    assert payload["provider"] == "mixed"
+    assert payload["providers"] == {
+        "gth_surface": "ibkr",
+        "gth_reference": "schwab",
+        "rth_surface": "schwab",
+        "rth_reference": "schwab",
+    }
+    assert [row["kind"] for row in payload["session_segments"]] == [
+        "gth",
+        "closed_gap",
+        "rth",
+    ]
     assert payload["trading_class"] == "SPXW"
     assert payload["bucket_minutes"] == 5
     assert payload["price_step"] == 5.0
@@ -78,10 +91,10 @@ def test_session_surface_endpoint_builds_frontend_contract(
     buckets = payload["time_buckets"]
     price_grid = payload["price_grid"]
     columns = payload["surface_columns"]
-    assert len(buckets) == 78
+    assert len(buckets) == 237
     assert buckets[0] == {
-        "start_at": "2026-07-17T13:30:00+00:00",
-        "end_at": "2026-07-17T13:35:00+00:00",
+        "start_at": "2026-07-17T00:15:00+00:00",
+        "end_at": "2026-07-17T00:20:00+00:00",
     }
     assert buckets[-1]["end_at"] == payload["session_end"]
     assert len(price_grid) == 41
@@ -119,6 +132,8 @@ def test_session_surface_endpoint_builds_frontend_contract(
     assert capabilities["signed_flow_available"] is False
     assert capabilities["strict_point_in_time_available"] is False
     assert capabilities["known_clock_no_lookahead"] is True
+    assert capabilities["gth_contract_declared"] is True
+    assert capabilities["gth_data_available"] is False
     assert payload["provenance"]["point_in_time_confidence"] == (
         "bounded_not_proven"
     )
@@ -169,46 +184,84 @@ def test_session_surface_is_causal_and_never_loads_future_frame(
     assert len(payload["provenance"]["causal_frame_artifact_sha256"]) == 1
 
 
+def test_session_surface_marks_incomplete_legacy_frame_missing(
+    catalog: ReplayCatalog,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        catalog,
+        "viable_frames",
+        lambda _session_date: (EVENT_AS_OF,),
+    )
+
+    def incomplete_frame(_requested: object) -> dict[str, object]:
+        raise replay_module.ReplaySourceError(
+            "replay_front_next_projection_incomplete"
+        )
+
+    monkeypatch.setattr(catalog, "_ensure_materialized_frame", incomplete_frame)
+
+    payload = _surface(catalog)
+
+    assert payload["provenance"]["causal_frame_count"] == 0
+    assert (
+        "legacy_frame_incomplete_expiry_projection_is_missing"
+        in payload["provenance"]["known_limitations"]
+    )
+    rth_columns = [
+        row
+        for row in payload["surface_columns"]
+        if row["session_kind"] == "rth"
+    ]
+    assert rth_columns
+    assert all(row["kind"] == "missing" for row in rth_columns)
+    assert all(
+        all(value is None for value in row)
+        for row in payload["gamma_surface"]
+    )
+
+
 def test_session_surface_candles_are_aligned_and_current_bar_can_be_partial(
     catalog: ReplayCatalog,
 ) -> None:
     complete = _surface(catalog)["candles"]
 
-    assert complete == [
-        {
-            "start_at": "2026-07-17T18:25:00+00:00",
-            "end_at": "2026-07-17T18:30:00+00:00",
-            "open": 7459.0,
-            "high": 7462.0,
-            "low": 7459.0,
-            "close": 7462.0,
-            "sample_count": 2,
-            "complete": True,
-            "source_at": "2026-07-17T18:29:59+00:00",
-            "known_at": "2026-07-17T18:29:59+00:00",
-            "quality": "event_sampled",
-        }
-    ]
+    assert len(complete) == 1
+    assert complete[0] == {
+        **complete[0],
+        "start_at": "2026-07-17T18:25:00+00:00",
+        "end_at": "2026-07-17T18:30:00+00:00",
+        "open": 7459.0,
+        "high": 7462.0,
+        "low": 7459.0,
+        "close": 7462.0,
+        "sample_count": 2,
+        "complete": True,
+        "source_at": "2026-07-17T18:29:59+00:00",
+        "known_at": "2026-07-17T18:29:59+00:00",
+        "accepted_at": None,
+        "reference_method": "direct_index_spx",
+        "reference_provider": "schwab",
+        "reference_instrument_id": "index:SPX",
+        "render_style": "direct_solid",
+        "session_kind": "rth",
+        "quality": "event_sampled",
+    }
 
     partial = _surface(
         catalog,
         at="2026-07-17T18:29:58Z",
     )["candles"]
-    assert partial == [
-        {
-            "start_at": "2026-07-17T18:25:00+00:00",
-            "end_at": "2026-07-17T18:30:00+00:00",
-            "open": 7459.0,
-            "high": 7459.0,
-            "low": 7459.0,
-            "close": 7459.0,
-            "sample_count": 1,
-            "complete": False,
-            "source_at": "2026-07-17T18:29:55+00:00",
-            "known_at": "2026-07-17T18:29:55+00:00",
-            "quality": "event_sampled",
-        }
-    ]
+    assert len(partial) == 1
+    assert partial[0]["start_at"] == "2026-07-17T18:25:00+00:00"
+    assert partial[0]["end_at"] == "2026-07-17T18:30:00+00:00"
+    assert partial[0]["open"] == partial[0]["high"] == 7459.0
+    assert partial[0]["low"] == partial[0]["close"] == 7459.0
+    assert partial[0]["sample_count"] == 1
+    assert partial[0]["complete"] is False
+    assert partial[0]["source_at"] == "2026-07-17T18:29:55+00:00"
+    assert partial[0]["known_at"] == "2026-07-17T18:29:55+00:00"
+    assert partial[0]["accepted_at"] is None
 
 
 def test_session_surface_missing_columns_are_null_not_zero(
@@ -352,6 +405,112 @@ def test_completed_candle_is_frozen_against_late_same_source_revision(
     )["provenance"]["spx_dedupe_rule"].startswith("earliest_known_at")
 
 
+def test_completed_candle_rejects_unique_event_known_after_bucket_end(
+    tmp_path: Path,
+) -> None:
+    source = write_quote_partition(tmp_path)
+    replacement = source.with_name("quotes.replacement.parquet")
+    normal_source_at = AS_OF - timedelta(seconds=4)
+    normal_known_at = AS_OF - timedelta(seconds=3)
+    late_source_at = AS_OF - timedelta(seconds=3)
+    late_known_at = AS_OF + timedelta(seconds=30)
+    connection = duckdb.connect()
+    try:
+        connection.execute(
+            "CREATE TABLE replay_source AS SELECT * FROM read_parquet(?)",
+            [str(source)],
+        )
+        connection.execute(
+            """
+            INSERT INTO replay_source
+            SELECT * REPLACE (
+                ?::TIMESTAMPTZ AS received_at,
+                ?::TIMESTAMPTZ AS source_at,
+                ?::TIMESTAMPTZ AS quote_time,
+                ?::TIMESTAMPTZ AS last_update_at,
+                7470.0 AS last,
+                7470.0 AS mark
+            )
+            FROM read_parquet(?)
+            WHERE instrument_id = 'index:SPX'
+            LIMIT 1
+            """,
+            [
+                normal_known_at,
+                normal_source_at,
+                normal_source_at,
+                normal_known_at,
+                str(source),
+            ],
+        )
+        connection.execute(
+            """
+            INSERT INTO replay_source
+            SELECT * REPLACE (
+                ?::TIMESTAMPTZ AS received_at,
+                ?::TIMESTAMPTZ AS source_at,
+                ?::TIMESTAMPTZ AS quote_time,
+                ?::TIMESTAMPTZ AS last_update_at,
+                7000.0 AS last,
+                7000.0 AS mark
+            )
+            FROM read_parquet(?)
+            WHERE instrument_id = 'index:SPX'
+            LIMIT 1
+            """,
+            [
+                late_known_at,
+                late_source_at,
+                late_source_at,
+                late_known_at,
+                str(source),
+            ],
+        )
+        connection.execute(
+            "COPY replay_source TO ? (FORMAT PARQUET)",
+            [str(replacement)],
+        )
+    finally:
+        connection.close()
+    replacement.replace(source)
+    settings = storage_settings(tmp_path)
+    replay_catalog = ReplayCatalog(
+        data_root=settings.data_root,
+        storage_settings=settings,
+    )
+
+    before = _surface(replay_catalog)["candles"]
+    after = _surface(
+        replay_catalog,
+        at="2026-07-17T18:31:00Z",
+    )["candles"]
+    bucket_start = "2026-07-17T18:25:00+00:00"
+    before_completed = next(row for row in before if row["start_at"] == bucket_start)
+    after_completed = next(row for row in after if row["start_at"] == bucket_start)
+
+    assert before_completed == after_completed
+    assert before_completed["sample_count"] == 3
+    assert before_completed["high"] == 7470.0
+    assert before_completed["low"] == 7459.0
+
+
+def test_session_surface_cache_contract_bumped_for_frozen_candles(
+    catalog: ReplayCatalog,
+) -> None:
+    assert SESSION_SURFACE_CACHE_VERSION == 5
+    _surface(catalog)
+    cache_files = list(
+        (
+            catalog.data_root
+            / "published"
+            / "spxw-surface"
+            / "session-surface-cache"
+        ).rglob("2026-07-17T183000Z.json")
+    )
+    assert len(cache_files) == 1
+    assert "contract=5" in cache_files[0].parts
+
+
 def test_session_surface_supports_bounded_10m_and_2_5_point_grid(
     catalog: ReplayCatalog,
 ) -> None:
@@ -363,13 +522,13 @@ def test_session_surface_supports_bounded_10m_and_2_5_point_grid(
 
     assert payload["bucket_minutes"] == 10
     assert payload["price_step"] == 2.5
-    assert len(payload["time_buckets"]) == 39
+    assert len(payload["time_buckets"]) == 119
     assert len(payload["price_grid"]) == 81
     assert all(
         right - left == 2.5
         for left, right in zip(payload["price_grid"], payload["price_grid"][1:])
     )
-    assert len(payload["gamma_surface"]) == 39
+    assert len(payload["gamma_surface"]) == 119
     assert all(len(row) == 81 for row in payload["gamma_surface"])
 
 
@@ -407,7 +566,12 @@ def test_session_surface_file_cache_reuses_artifact_without_frames(
     def unexpected_frame(*_args: object, **_kwargs: object) -> dict[str, object]:
         raise AssertionError("verified session-surface cache reloaded a frame")
 
+    def unexpected_source_hashes(*_args: object, **_kwargs: object) -> dict[str, str]:
+        raise AssertionError("verified session-surface cache rehashed source files")
+
     monkeypatch.setattr(catalog, "frame", unexpected_frame)
+    monkeypatch.setattr(service_module, "_sha256", unexpected_source_hashes)
+    monkeypatch.setattr(session_module, "_source_hashes", unexpected_source_hashes)
     second = _surface(catalog)
 
     assert second["artifact_sha256"] == first["artifact_sha256"]

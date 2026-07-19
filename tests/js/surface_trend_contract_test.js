@@ -80,7 +80,7 @@ function fixture() {
     mode: "replay",
     policy_version: "spxw_surface_replay_trend.v1",
     frame_policy_version: "spxw_surface_replay.v3",
-    timeline_policy_version: "spxw_surface_replay_timeline.event_driven.v1",
+    timeline_policy_version: "spxw_surface_replay_timeline.event_driven.v2",
     session_date: "2026-07-17",
     provider: "schwab",
     coordinate: "SPX",

@@ -38,6 +38,7 @@ from spx_spark.surface_replay_session_models import (
     SESSION_SURFACE_BUCKET_MINUTES,
     SESSION_SURFACE_BUCKET_OPTIONS,
     SESSION_SURFACE_CACHE_VERSION,
+    SESSION_SURFACE_GTH_QUOTE_MAX_AGE_SECONDS,
     SESSION_SURFACE_KIND,
     SESSION_SURFACE_LOCK_TIMEOUT_SECONDS,
     SESSION_SURFACE_MODE,
@@ -45,17 +46,21 @@ from spx_spark.surface_replay_session_models import (
     SESSION_SURFACE_PRICE_EXTENT_POINTS,
     SESSION_SURFACE_PRICE_STEP,
     SESSION_SURFACE_PRICE_STEP_OPTIONS,
+    SESSION_SURFACE_REFERENCE_MAX_AGE_SECONDS,
     SESSION_SURFACE_SCHEMA_VERSION,
     FrameLoader,
     FingerprintLoader,
     SessionSurfaceBuildCache,
     SessionSurfaceSelector,
+    SessionSurfaceWindow,
     _cache_clock,
     _finite,
     _iso,
     _METRIC_TO_OUTPUT,
     _session_buckets,
     _SHA256_RE,
+    _SPXObservation,
+    session_surface_window,
 )
 from spx_spark.surface_replay_trend import (
     TrendContext,
@@ -63,6 +68,59 @@ from spx_spark.surface_replay_trend import (
     _source_files,
     _source_hashes,
 )
+
+
+def _reference_payload(
+    *,
+    current: _SPXObservation | None,
+    observations: tuple[_SPXObservation, ...],
+    cutoff: datetime,
+    window: SessionSurfaceWindow,
+) -> dict[str, object]:
+    session_kind = window.segment_kind(cutoff)
+    if current is not None:
+        return {
+            "coordinate": "SPX",
+            "price": current.price,
+            "method": current.method,
+            "provider": current.provider,
+            "instrument_id": current.instrument_id,
+            "source_at": _iso(current.source_at),
+            "known_at": _iso(current.known_at),
+            "accepted_at": None,
+            "valid_until": (
+                _iso(current.valid_until)
+                if current.valid_until is not None
+                else None
+            ),
+            "quality": "ready",
+            "missing_reason": None,
+            "basis": dict(current.basis) if current.basis is not None else None,
+            "render_style": (
+                "inferred_dashed"
+                if current.method == "es_basis_inferred_spx"
+                else "direct_solid"
+            ),
+        }
+    return {
+        "coordinate": "SPX",
+        "price": None,
+        "method": None,
+        "provider": None,
+        "instrument_id": None,
+        "source_at": None,
+        "known_at": None,
+        "accepted_at": None,
+        "valid_until": None,
+        "quality": "unavailable",
+        "missing_reason": (
+            "scheduled_closed_gap"
+            if session_kind == "closed_gap"
+            else "fresh_coordinate_reference_unavailable"
+        ),
+        "basis": None,
+        "render_style": None,
+    }
 
 
 def session_surface_cache_path(
@@ -78,7 +136,7 @@ def session_surface_cache_path(
         / "published"
         / "spxw-surface"
         / "session-surface-cache"
-        / "policy=v1"
+        / "policy=v2"
         / f"contract={SESSION_SURFACE_CACHE_VERSION}"
         / f"frame={context.frame_minutes}m"
         / f"bucket={selector.bucket_minutes}m"
@@ -101,30 +159,55 @@ def build_session_surface_artifact(
     frame_loader: FrameLoader,
     current_source_fingerprint: FingerprintLoader,
     build_cache: SessionSurfaceBuildCache,
+    verified_source_hashes: Mapping[str, str] | None = None,
 ) -> dict[str, object]:
     """Build one response whose observed inputs are all bounded by ``as_of``."""
 
     cutoff = as_utc(as_of)
-    session_start = as_utc(context.open_at)
-    session_end = as_utc(context.close_at)
+    window = session_surface_window(context.session_date)
+    session_start = as_utc(window.session_start)
+    session_end = as_utc(window.session_end)
     if not session_start <= cutoff <= session_end:
         raise ReplaySourceError("session_surface_at_outside_session")
     _assert_source_fingerprint(context, current_source_fingerprint)
-    source_hashes_before = _source_hashes(context)
-    observations, anchor_observation = _causal_spx(
+    if verified_source_hashes is None:
+        source_hashes_before = _source_hashes(context)
+    else:
+        expected_source_files = set(_source_files(context))
+        if set(verified_source_hashes) != expected_source_files or any(
+            not isinstance(value, str) or not _SHA256_RE.fullmatch(value)
+            for value in verified_source_hashes.values()
+        ):
+            raise ReplaySourceError("session_surface_verified_source_hashes_invalid")
+        source_hashes_before = dict(verified_source_hashes)
+    observations, anchor_observation, current_observation = _causal_spx(
         context,
         as_of=cutoff,
         build_cache=build_cache,
     )
+    active_session_kind = window.segment_kind(cutoff)
+    expected_reference_method = (
+        "es_basis_inferred_spx"
+        if active_session_kind == "gth"
+        else "direct_index_spx"
+        if active_session_kind == "rth"
+        else None
+    )
+    if (
+        current_observation is not None
+        and current_observation.method != expected_reference_method
+    ):
+        current_observation = None
     frames = _causal_frames(
         context,
         as_of=cutoff,
         role=selector.role,
         frame_loader=frame_loader,
         build_cache=build_cache,
+        reference_observations=observations,
     )
     buckets = _session_buckets(context, bucket_minutes=selector.bucket_minutes)
-    spot = observations[-1].price
+    spot = current_observation.price if current_observation is not None else None
     price_grid_anchor_spot = anchor_observation.price
     price_grid = _fixed_price_grid(price_grid_anchor_spot, step=selector.price_step)
     (
@@ -140,19 +223,30 @@ def build_session_surface_artifact(
         price_grid=price_grid,
         weighting=selector.weighting,
         build_cache=build_cache,
+        session_window=window,
+        projection_allowed=current_observation is not None,
     )
-    candle_rows, candle_missing = _candles(observations, buckets, as_of=cutoff)
+    candle_rows, candle_missing = _candles(
+        observations,
+        buckets,
+        as_of=cutoff,
+        session_window=window,
+    )
     strike_rows, strike_metadata = _strike_profile(
         frames,
         as_of=cutoff,
         weighting=selector.weighting,
     )
-    source_hashes_after = _source_hashes(context)
+    source_hashes_after = (
+        _source_hashes(context)
+        if verified_source_hashes is None
+        else dict(verified_source_hashes)
+    )
     if source_hashes_before != source_hashes_after:
         raise ReplaySourceError("session_surface_source_changed_during_build")
     _assert_source_fingerprint(context, current_source_fingerprint)
 
-    research_expiries = DEFAULT_MARKET_CALENDAR.research_expiries(context.open_at)
+    research_expiries = DEFAULT_MARKET_CALENDAR.research_expiries(window.session_start)
     expiry_index = 0 if selector.role == "front" else 1
     if len(research_expiries) <= expiry_index:
         raise ReplaySourceError("session_surface_expiry_unavailable")
@@ -168,6 +262,11 @@ def build_session_surface_artifact(
         *candle_missing,
     ]
     selected_hashes = [row.artifact_sha256 for row in frames]
+    gth_reference_available = any(
+        row.method == "es_basis_inferred_spx" for row in observations
+    )
+    gth_surface_available = any(row.session_kind == "gth" for row in frames)
+    gth_data_available = gth_reference_available and gth_surface_available
     payload: dict[str, object] = {
         "schema_version": SESSION_SURFACE_SCHEMA_VERSION,
         "kind": SESSION_SURFACE_KIND,
@@ -181,7 +280,14 @@ def build_session_surface_artifact(
         "role": selector.role,
         "weighting": selector.weighting,
         "coordinate": "SPX",
-        "provider": "schwab",
+        "provider": "mixed",
+        "providers": {
+            "gth_surface": "ibkr",
+            "gth_reference": "schwab",
+            "rth_surface": "schwab",
+            "rth_reference": "schwab",
+        },
+        "session_segments": list(window.segments()),
         "trading_class": "SPXW",
         "bucket_minutes": selector.bucket_minutes,
         "price_step": selector.price_step,
@@ -196,7 +302,11 @@ def build_session_surface_artifact(
             "steps_each_side": int(
                 round(SESSION_SURFACE_PRICE_EXTENT_POINTS / selector.price_step)
             ),
-            "current_spot_in_grid": price_grid[0] <= spot <= price_grid[-1],
+            "current_spot_in_grid": (
+                price_grid[0] <= spot <= price_grid[-1]
+                if spot is not None
+                else False
+            ),
             "observed_spot_range_in_grid": (
                 price_grid[0] <= min(row.price for row in observations)
                 and max(row.price for row in observations) <= price_grid[-1]
@@ -215,8 +325,8 @@ def build_session_surface_artifact(
         "gamma_negative_troughs": gamma_negative_troughs,
         "candles": candle_rows,
         "candle_policy": {
-            "kind": "event_sampled_spx_ohlc",
-            "price_field": "mark",
+            "kind": "event_sampled_spx_coordinate_reference_ohlc",
+            "price_field": "direct_mark_or_es_minus_frozen_basis",
             "market_clock": "source_at",
             "official_consolidated_ohlc": False,
             "current_partial_allowed": True,
@@ -224,8 +334,22 @@ def build_session_surface_artifact(
         "strike_profile": strike_rows,
         "strike_profile_metadata": strike_metadata,
         "spot": spot,
-        "spot_source_at": _iso(observations[-1].source_at),
-        "spot_known_at": _iso(observations[-1].known_at),
+        "spot_source_at": (
+            _iso(current_observation.source_at)
+            if current_observation is not None
+            else None
+        ),
+        "spot_known_at": (
+            _iso(current_observation.known_at)
+            if current_observation is not None
+            else None
+        ),
+        "reference": _reference_payload(
+            current=current_observation,
+            observations=observations,
+            cutoff=cutoff,
+            window=window,
+        ),
         "color_domains": {
             output_name: _robust_domain(metric_values[metric])
             for metric, output_name in _METRIC_TO_OUTPUT.items()
@@ -245,7 +369,9 @@ def build_session_surface_artifact(
             "first_validated_baseline_available": bool(frames),
             "projection_is_model_scenario": True,
             "historical_surface_is_model_proxy": True,
-            "gth_available": False,
+            "gth_available": gth_data_available,
+            "gth_data_available": gth_data_available,
+            "gth_contract_declared": True,
         },
         "missing_ranges": missing_ranges,
         "provenance": {
@@ -278,7 +404,17 @@ def build_session_surface_artifact(
                 "received_at_is_cycle_started_at",
                 "dealer_position_sign_unknown",
                 "spx_ohlc_is_event_sampled_not_official",
+                "gth_surface_is_ibkr_oi_volume_proxy",
+                "gth_reference_is_schwab_es_minus_frozen_previous_rth_basis",
+                "legacy_frame_incomplete_expiry_projection_is_missing",
             ],
+            "reference_max_age_seconds": SESSION_SURFACE_REFERENCE_MAX_AGE_SECONDS,
+            "gth_surface_quote_max_age_seconds": (
+                SESSION_SURFACE_GTH_QUOTE_MAX_AGE_SECONDS
+            ),
+            "gth_surface_quote_age_semantics": (
+                "analytical_exposure_proxy_not_trade_exact_leg_gate"
+            ),
             "historical_selection": (
                 "latest_causal_validated_frame_with_minutes_forward_0_valid_at_bucket_end"
             ),
@@ -302,6 +438,7 @@ def load_cached_session_surface(
     as_of: datetime,
     selector: SessionSurfaceSelector,
     current_source_fingerprint: FingerprintLoader,
+    verified_source_hashes: Mapping[str, str] | None = None,
 ) -> dict[str, object]:
     _assert_source_fingerprint(context, current_source_fingerprint)
     try:
@@ -329,11 +466,14 @@ def load_cached_session_surface(
         "bucket_minutes": selector.bucket_minutes,
         "price_step": selector.price_step,
         "coordinate": "SPX",
-        "provider": "schwab",
+        "provider": "mixed",
         "trading_class": "SPXW",
     }
     if any(payload.get(key) != value for key, value in expected.items()):
         raise ReplaySessionSurfaceCacheError("session_surface_cache_contract_invalid")
+    window = session_surface_window(context.session_date)
+    if payload.get("session_segments") != list(window.segments()):
+        raise ReplaySessionSurfaceCacheError("session_surface_cache_segments_invalid")
     stored_hash = payload.get("artifact_sha256")
     if not isinstance(stored_hash, str) or not _SHA256_RE.fullmatch(stored_hash):
         raise ReplaySessionSurfaceCacheError("session_surface_cache_hash_invalid")
@@ -354,7 +494,18 @@ def load_cached_session_surface(
     ):
         raise ReplaySessionSurfaceCacheError("session_surface_cache_provenance_invalid")
     expected_hashes = provenance.get("parquet_file_sha256")
-    current_hashes = _source_hashes(context)
+    if verified_source_hashes is None:
+        current_hashes = _source_hashes(context)
+    else:
+        expected_source_files = set(_source_files(context))
+        if set(verified_source_hashes) != expected_source_files or any(
+            not isinstance(value, str) or not _SHA256_RE.fullmatch(value)
+            for value in verified_source_hashes.values()
+        ):
+            raise ReplaySessionSurfaceCacheError(
+                "session_surface_cache_verified_source_hashes_invalid"
+            )
+        current_hashes = dict(verified_source_hashes)
     if not isinstance(expected_hashes, Mapping) or set(expected_hashes) != set(current_hashes):
         raise ReplaySessionSurfaceCacheError("session_surface_cache_source_invalid")
     for name, actual in current_hashes.items():
@@ -483,6 +634,10 @@ def load_cached_session_surface(
         end_at = _cache_clock(candle.get("end_at"))
         source_at = candle.get("source_at")
         known_at = candle.get("known_at")
+        if candle.get("accepted_at") is not None:
+            raise ReplaySessionSurfaceCacheError(
+                "session_surface_cache_acceptance_clock_invalid"
+            )
         if (
             source_at is not None
             and _cache_clock(source_at) > cutoff
@@ -505,14 +660,40 @@ def load_cached_session_surface(
             or not isinstance(candle.get("complete"), bool)
         ):
             raise ReplaySessionSurfaceCacheError("session_surface_cache_candle_invalid")
-    spot_source_at = _cache_clock(payload.get("spot_source_at"))
-    spot_known_at = _cache_clock(payload.get("spot_known_at"))
-    if (
-        spot_source_at > cutoff
-        or spot_known_at > cutoff
-        or _finite(payload.get("spot")) is None
-    ):
-        raise ReplaySessionSurfaceCacheError("session_surface_cache_lookahead")
+    reference = payload.get("reference")
+    if not isinstance(reference, Mapping) or reference.get("accepted_at") is not None:
+        raise ReplaySessionSurfaceCacheError("session_surface_cache_reference_invalid")
+    reference_quality = reference.get("quality")
+    if reference_quality == "ready":
+        spot_source_at = _cache_clock(payload.get("spot_source_at"))
+        spot_known_at = _cache_clock(payload.get("spot_known_at"))
+        if (
+            spot_source_at > cutoff
+            or spot_known_at > cutoff
+            or _finite(payload.get("spot")) is None
+            or _finite(reference.get("price")) != _finite(payload.get("spot"))
+            or _cache_clock(reference.get("source_at")) != spot_source_at
+            or _cache_clock(reference.get("known_at")) != spot_known_at
+        ):
+            raise ReplaySessionSurfaceCacheError("session_surface_cache_lookahead")
+    elif reference_quality == "unavailable":
+        if any(
+            value is not None
+            for value in (
+                payload.get("spot"),
+                payload.get("spot_source_at"),
+                payload.get("spot_known_at"),
+                reference.get("price"),
+                reference.get("source_at"),
+                reference.get("known_at"),
+                reference.get("valid_until"),
+            )
+        ):
+            raise ReplaySessionSurfaceCacheError(
+                "session_surface_cache_reference_invalid"
+            )
+    else:
+        raise ReplaySessionSurfaceCacheError("session_surface_cache_reference_invalid")
     strike_metadata = payload.get("strike_profile_metadata")
     if not isinstance(strike_metadata, Mapping):
         raise ReplaySessionSurfaceCacheError("session_surface_cache_strike_invalid")
@@ -534,7 +715,10 @@ def load_cached_session_surface(
     if not isinstance(capabilities, Mapping) or any(
         capabilities.get(key) is not value
         for key, value in required_capabilities.items()
-    ):
+    ) or not isinstance(capabilities.get("gth_available"), bool) or (
+        capabilities.get("gth_data_available")
+        is not capabilities.get("gth_available")
+    ) or capabilities.get("gth_contract_declared") is not True:
         raise ReplaySessionSurfaceCacheError(
             "session_surface_cache_capabilities_invalid"
         )
@@ -550,6 +734,7 @@ def materialize_session_surface(
     frame_loader: FrameLoader,
     current_source_fingerprint: FingerprintLoader,
     build_cache: SessionSurfaceBuildCache,
+    verified_source_hashes: Mapping[str, str] | None = None,
 ) -> dict[str, object]:
     destination = session_surface_cache_path(
         context,
@@ -563,6 +748,7 @@ def materialize_session_surface(
             as_of=as_of,
             selector=selector,
             current_source_fingerprint=current_source_fingerprint,
+            verified_source_hashes=verified_source_hashes,
         )
     destination.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -577,6 +763,7 @@ def materialize_session_surface(
                     as_of=as_of,
                     selector=selector,
                     current_source_fingerprint=current_source_fingerprint,
+                    verified_source_hashes=verified_source_hashes,
                 )
             payload = build_session_surface_artifact(
                 context=context,
@@ -585,6 +772,7 @@ def materialize_session_surface(
                 frame_loader=frame_loader,
                 current_source_fingerprint=current_source_fingerprint,
                 build_cache=build_cache,
+                verified_source_hashes=verified_source_hashes,
             )
             atomic_write_json_secure(destination, payload)
             return load_cached_session_surface(
@@ -593,6 +781,7 @@ def materialize_session_surface(
                 as_of=as_of,
                 selector=selector,
                 current_source_fingerprint=current_source_fingerprint,
+                verified_source_hashes=verified_source_hashes,
             )
     except TimeoutError as exc:
         raise ReplaySessionSurfaceBusyError("session_surface_generation_locked") from exc

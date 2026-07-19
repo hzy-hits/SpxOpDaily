@@ -190,6 +190,23 @@ def _read_latest_rows(
     expiries: tuple[date, date],
 ) -> tuple[list[dict[str, object]], ReplaySelectionAudit]:
     connection.execute("SET TimeZone='UTC'")
+    parquet_columns = {
+        str(row[0])
+        for row in connection.execute(
+            "DESCRIBE SELECT * FROM read_parquet(?, union_by_name=true)",
+            [[str(path) for path in paths]],
+        ).fetchall()
+        if row and row[0] is not None
+    }
+    # ``market_session`` was added after the first normalized quote-lake
+    # partitions. Keep the projection otherwise fixed and strict: newer rows
+    # retain their recorded value while legacy-only inputs receive an explicit
+    # nullable value rather than failing during DuckDB binding.
+    market_session_projection = (
+        "market_session,"
+        if "market_session" in parquet_columns
+        else "NULL::VARCHAR AS market_session,"
+    )
     common_ctes = """
         WITH bounds AS (
             SELECT
@@ -233,7 +250,7 @@ def _read_latest_rows(
                 open_interest,
                 source_latency_ms,
                 market_data_type,
-                market_session,
+                __MARKET_SESSION_PROJECTION__
                 implied_vol,
                 delta,
                 gamma,
@@ -279,7 +296,7 @@ def _read_latest_rows(
             FROM raw_candidates
             WHERE NOT _source_clock_after_cutoff
         )
-    """
+    """.replace("__MARKET_SESSION_PROJECTION__", market_session_projection)
     parameters = [
         window_start.isoformat(),
         requested_as_of.isoformat(),

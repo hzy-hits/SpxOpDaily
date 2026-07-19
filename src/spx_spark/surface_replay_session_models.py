@@ -8,20 +8,21 @@ import threading
 from collections import OrderedDict
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from typing import Any
 
 from spx_spark.features.exposure_surface import SurfaceContract
+from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR, ET
 from spx_spark.marketdata import as_utc
 from spx_spark.surface_dashboard_replay import ReplaySourceError
 from spx_spark.surface_replay_trend import TrendContext
 
 
-SESSION_SURFACE_SCHEMA_VERSION = 1
+SESSION_SURFACE_SCHEMA_VERSION = 2
 SESSION_SURFACE_KIND = "spxw_session_surface"
 SESSION_SURFACE_MODE = "replay"
-SESSION_SURFACE_POLICY_VERSION = "spxw_session_surface.v1"
-SESSION_SURFACE_CACHE_VERSION = 2
+SESSION_SURFACE_POLICY_VERSION = "spxw_session_surface.v2"
+SESSION_SURFACE_CACHE_VERSION = 5
 SESSION_SURFACE_BUCKET_MINUTES = 5
 SESSION_SURFACE_PRICE_STEP = 5.0
 SESSION_SURFACE_PRICE_EXTENT_POINTS = 100.0
@@ -30,6 +31,9 @@ SESSION_SURFACE_PRICE_STEP_OPTIONS = (2.5, 5.0, 10.0)
 MAX_SESSION_SURFACE_CACHE_ARTIFACT_BYTES = 64 * 1024 * 1024
 MAX_SINGLE_BUILD_EVALUATIONS = 4_000_000
 SESSION_SURFACE_LOCK_TIMEOUT_SECONDS = 15.0
+SESSION_SURFACE_REFERENCE_MAX_AGE_SECONDS = 5.0
+SESSION_SURFACE_GTH_QUOTE_MAX_AGE_SECONDS = 30.0
+SESSION_SURFACE_BASIS_MAX_SKEW_SECONDS = 2.0
 
 SESSION_SURFACE_ROLES = frozenset({"front", "next"})
 SESSION_SURFACE_WEIGHTINGS = frozenset({"oi_weighted", "volume_weighted"})
@@ -88,9 +92,16 @@ class _SPXObservation:
     source_at: datetime
     known_at: datetime
     received_at: datetime
-    price: float
+    price: float | None
     source_file: str
     source_row: int
+    method: str = "direct_index_spx"
+    provider: str = "schwab"
+    instrument_id: str = "index:SPX"
+    valid_until: datetime | None = None
+    basis: Mapping[str, Any] | None = None
+    usable: bool = True
+    error: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,6 +128,85 @@ class _FrameState:
     # means availability equals ``at``.  Live frames retain the later local
     # acceptance clock separately to avoid using availability as pricing time.
     known_at: datetime | None = None
+    session_kind: str = "rth"
+    surface_provider: str = "schwab"
+    reference_method: str = "direct_index_spx"
+
+
+@dataclass(frozen=True, slots=True)
+class SessionSurfaceWindow:
+    """One trading date's fixed GTH -> closed gap -> RTH canvas."""
+
+    session_date: date
+    session_start: datetime
+    gth_end: datetime
+    rth_open: datetime
+    session_end: datetime
+    previous_rth_open: datetime
+    previous_rth_end: datetime
+
+    def segment_kind(self, at: datetime) -> str | None:
+        clock = as_utc(at)
+        if as_utc(self.session_start) <= clock < as_utc(self.gth_end):
+            return "gth"
+        if as_utc(self.gth_end) <= clock < as_utc(self.rth_open):
+            return "closed_gap"
+        if as_utc(self.rth_open) <= clock <= as_utc(self.session_end):
+            return "rth"
+        return None
+
+    def segments(self) -> tuple[dict[str, object], ...]:
+        return (
+            {
+                "kind": "gth",
+                "start_at": _iso(self.session_start),
+                "end_at": _iso(self.gth_end),
+                "surface_provider": "ibkr",
+                "reference_method": "es_basis_inferred_spx",
+                "reference_provider": "schwab",
+            },
+            {
+                "kind": "closed_gap",
+                "start_at": _iso(self.gth_end),
+                "end_at": _iso(self.rth_open),
+                "surface_provider": None,
+                "reference_method": None,
+                "reference_provider": None,
+            },
+            {
+                "kind": "rth",
+                "start_at": _iso(self.rth_open),
+                "end_at": _iso(self.session_end),
+                "surface_provider": "schwab",
+                "reference_method": "direct_index_spx",
+                "reference_provider": "schwab",
+            },
+        )
+
+
+def session_surface_window(session_date: date) -> SessionSurfaceWindow:
+    market_session = DEFAULT_MARKET_CALENDAR.session(session_date)
+    if market_session is None:
+        raise ReplaySourceError("session_surface_session_unavailable")
+    previous_date = DEFAULT_MARKET_CALENDAR.previous_trading_day(session_date)
+    previous_session = DEFAULT_MARKET_CALENDAR.session(previous_date)
+    if previous_session is None:
+        raise ReplaySourceError("session_surface_previous_session_unavailable")
+    session_start = datetime.combine(
+        session_date - timedelta(days=1),
+        time(20, 15),
+        tzinfo=ET,
+    )
+    gth_end = datetime.combine(session_date, time(9, 25), tzinfo=ET)
+    return SessionSurfaceWindow(
+        session_date=session_date,
+        session_start=session_start,
+        gth_end=gth_end,
+        rth_open=market_session.open_at,
+        session_end=market_session.close_at,
+        previous_rth_open=previous_session.open_at,
+        previous_rth_end=previous_session.close_at,
+    )
 
 
 class SessionSurfaceBuildCache:
@@ -279,7 +369,9 @@ __all__ = (
     "ReplaySessionSurfaceCacheError",
     "SESSION_SURFACE_BUCKET_MINUTES",
     "SESSION_SURFACE_BUCKET_OPTIONS",
+    "SESSION_SURFACE_BASIS_MAX_SKEW_SECONDS",
     "SESSION_SURFACE_CACHE_VERSION",
+    "SESSION_SURFACE_GTH_QUOTE_MAX_AGE_SECONDS",
     "SESSION_SURFACE_KIND",
     "SESSION_SURFACE_LOCK_TIMEOUT_SECONDS",
     "SESSION_SURFACE_MODE",
@@ -287,7 +379,10 @@ __all__ = (
     "SESSION_SURFACE_PRICE_EXTENT_POINTS",
     "SESSION_SURFACE_PRICE_STEP",
     "SESSION_SURFACE_PRICE_STEP_OPTIONS",
+    "SESSION_SURFACE_REFERENCE_MAX_AGE_SECONDS",
     "SESSION_SURFACE_SCHEMA_VERSION",
+    "SessionSurfaceWindow",
     "SessionSurfaceBuildCache",
     "SessionSurfaceSelector",
+    "session_surface_window",
 )

@@ -1,11 +1,10 @@
-"""Causal source parsing and fixed-grid calculations for session-surface replay."""
+"""Compatibility facade and fixed-grid calculations for Session Surface replay."""
 
 from __future__ import annotations
 
 import math
-import re
 from collections.abc import Mapping
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Any
 
 import duckdb
@@ -15,11 +14,16 @@ from spx_spark.features.exposure_surface import (
     SurfaceGridConfig,
     build_exposure_surface,
 )
+from spx_spark.ibkr.atm_reference import BasisState
 from spx_spark.marketdata import as_utc
-from spx_spark.surface_dashboard_replay import (
-    REPLAY_POLICY_VERSION,
-    ReplaySourceError,
-    replay_id,
+from spx_spark.surface_dashboard_replay import ReplaySourceError
+from spx_spark.surface_replay_session_frames import (
+    causal_frames as _causal_frames_impl,
+    contracts_and_strikes as _contracts_and_strikes_impl,
+    gth_frame_hash as _gth_frame_hash_impl,
+    gth_reference_at as _gth_reference_at_impl,
+    load_gth_frames as _load_gth_frames_impl,
+    parse_role_frame as _parse_role_frame_impl,
 )
 from spx_spark.surface_replay_session_models import (
     MAX_SINGLE_BUILD_EVALUATIONS,
@@ -27,120 +31,51 @@ from spx_spark.surface_replay_session_models import (
     SESSION_SURFACE_PRICE_EXTENT_POINTS,
     FrameLoader,
     SessionSurfaceBuildCache,
-    _clock,
+    SessionSurfaceWindow,
     _finite,
     _FrameState,
     _iso,
     _KernelColumn,
-    _list,
-    _mapping,
     _METRIC_TO_OUTPUT,
     _nonnegative,
-    _SHA256_RE,
     _SPXObservation,
+)
+from spx_spark.surface_replay_session_reference import (
+    basis_payload as _basis_payload_impl,
+    candles as _candles_impl,
+    causal_spx as _causal_spx_impl,
+    load_previous_rth_basis as _load_previous_rth_basis_impl,
+    load_spx_session as _load_spx_session_impl,
 )
 from spx_spark.surface_replay_trend import TrendContext
 
 
+# The wrappers intentionally resolve collaborators from this module at call time.
+# Existing tests and callers can continue monkeypatching this facade after the
+# source/query implementations have moved to focused modules.
+def _basis_payload(
+    state: BasisState,
+    *,
+    known_at: datetime,
+    frozen_at: datetime,
+) -> dict[str, object]:
+    return _basis_payload_impl(state, known_at=known_at, frozen_at=frozen_at)
+
+
+def _load_previous_rth_basis(context: TrendContext) -> dict[str, object] | None:
+    return _load_previous_rth_basis_impl(
+        context,
+        payload_builder=_basis_payload,
+        connect_factory=duckdb.connect,
+    )
+
+
 def _load_spx_session(context: TrendContext) -> tuple[_SPXObservation, ...]:
-    query = """
-        WITH source AS MATERIALIZED (
-            SELECT
-                source_at,
-                received_at,
-                GREATEST(
-                    received_at,
-                    COALESCE(source_at, received_at),
-                    COALESCE(quote_time, received_at),
-                    COALESCE(trade_time, received_at),
-                    COALESCE(last_update_at, received_at)
-                ) AS known_at,
-                mark,
-                filename AS source_file,
-                file_row_number AS source_row
-            FROM read_parquet(
-                ?,
-                union_by_name=true,
-                filename=true,
-                file_row_number=true
-            )
-            WHERE provider = 'schwab'
-              AND instrument_id = 'index:SPX'
-              AND source_at >= ?::TIMESTAMPTZ
-              AND source_at < ?::TIMESTAMPTZ
-              AND received_at IS NOT NULL
-              AND mark IS NOT NULL
-              AND isfinite(mark)
-              AND mark > 0
-              AND quality = 'live'
-              AND error IS NULL
-        ),
-        eligible AS (
-            SELECT *
-            FROM source
-            WHERE known_at <= ?::TIMESTAMPTZ
-        )
-        SELECT source_at, known_at, received_at, mark, source_file, source_row
-        FROM eligible
-        ORDER BY source_at, known_at, source_file, source_row
-    """
-    connection = duckdb.connect()
-    try:
-        connection.execute("SET TimeZone='UTC'")
-        connection.execute("SET threads=1")
-        rows = connection.execute(
-            query,
-            [
-                [str(path) for path in context.source_paths],
-                as_utc(context.open_at),
-                as_utc(context.close_at),
-                as_utc(context.close_at),
-            ],
-        ).fetchall()
-    finally:
-        connection.close()
-    observations: list[_SPXObservation] = []
-    previous: datetime | None = None
-    for (
-        raw_source,
-        raw_known,
-        raw_received,
-        raw_price,
-        raw_source_file,
-        raw_source_row,
-    ) in rows:
-        if (
-            not isinstance(raw_source, datetime)
-            or not isinstance(raw_known, datetime)
-            or not isinstance(raw_received, datetime)
-        ):
-            raise ReplaySourceError("session_surface_spx_clock_invalid")
-        source_at = as_utc(raw_source)
-        known_at = as_utc(raw_known)
-        received_at = as_utc(raw_received)
-        price = _finite(raw_price)
-        if (
-            price is None
-            or price <= 0
-            or known_at < source_at
-            or known_at < received_at
-            or (previous is not None and source_at < previous)
-        ):
-            raise ReplaySourceError("session_surface_spx_contract_invalid")
-        observations.append(
-            _SPXObservation(
-                source_at=source_at,
-                known_at=known_at,
-                received_at=received_at,
-                price=price,
-                source_file=str(raw_source_file),
-                source_row=int(raw_source_row),
-            )
-        )
-        previous = source_at
-    if not observations:
-        raise ReplaySourceError("session_surface_spx_unavailable")
-    return tuple(observations)
+    return _load_spx_session_impl(
+        context,
+        basis_loader=_load_previous_rth_basis,
+        connect_factory=duckdb.connect,
+    )
 
 
 def _causal_spx(
@@ -148,47 +83,17 @@ def _causal_spx(
     *,
     as_of: datetime,
     build_cache: SessionSurfaceBuildCache,
-) -> tuple[tuple[_SPXObservation, ...], _SPXObservation]:
-    key = (context.source_fingerprint, context.session_date.isoformat())
-    observations = build_cache.get_spx(key)
-    if observations is None:
-        observations = _load_spx_session(context)
-        build_cache.put_spx(key, observations)
-    cutoff = as_utc(as_of)
-    eligible = tuple(
-        row
-        for row in observations
-        if row.source_at <= cutoff and row.known_at <= cutoff
+) -> tuple[
+    tuple[_SPXObservation, ...],
+    _SPXObservation,
+    _SPXObservation | None,
+]:
+    return _causal_spx_impl(
+        context,
+        as_of=as_of,
+        build_cache=build_cache,
+        spx_loader=_load_spx_session,
     )
-    if not eligible:
-        raise ReplaySourceError("session_surface_causal_spx_unavailable")
-    anchor = min(
-        eligible,
-        key=lambda row: (
-            row.known_at,
-            row.received_at,
-            row.source_at,
-            row.source_file,
-            row.source_row,
-        ),
-    )
-    by_source: dict[datetime, _SPXObservation] = {}
-    for row in eligible:
-        previous = by_source.get(row.source_at)
-        if previous is None or (
-            row.known_at,
-            row.received_at,
-            row.source_file,
-            row.source_row,
-        ) < (
-            previous.known_at,
-            previous.received_at,
-            previous.source_file,
-            previous.source_row,
-        ):
-            by_source[row.source_at] = row
-    selected = tuple(by_source[key] for key in sorted(by_source))
-    return selected, anchor
 
 
 def _candles(
@@ -196,52 +101,14 @@ def _candles(
     buckets: tuple[tuple[datetime, datetime], ...],
     *,
     as_of: datetime,
+    session_window: SessionSurfaceWindow | None = None,
 ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
-    cutoff = as_utc(as_of)
-    rows: list[dict[str, object]] = []
-    missing: list[dict[str, object]] = []
-    observation_index = 0
-    for start, end in buckets:
-        if start > cutoff:
-            break
-        values: list[_SPXObservation] = []
-        while observation_index < len(observations):
-            observation = observations[observation_index]
-            if observation.source_at < start:
-                observation_index += 1
-                continue
-            if observation.source_at >= end or observation.source_at > cutoff:
-                break
-            values.append(observation)
-            observation_index += 1
-        if not values:
-            missing.append(
-                {
-                    "start_at": _iso(start),
-                    "end_at": _iso(min(end, cutoff) if cutoff < end else end),
-                    "reason": "spx_event_samples_unavailable",
-                    "component": "candles",
-                }
-            )
-            continue
-        prices = [row.price for row in values]
-        last = values[-1]
-        rows.append(
-            {
-                "start_at": _iso(start),
-                "end_at": _iso(end),
-                "open": prices[0],
-                "high": max(prices),
-                "low": min(prices),
-                "close": prices[-1],
-                "sample_count": len(prices),
-                "complete": end <= cutoff,
-                "source_at": _iso(last.source_at),
-                "known_at": _iso(max(row.known_at for row in values)),
-                "quality": "event_sampled",
-            }
-        )
-    return rows, [row for row in missing if row["start_at"] != row["end_at"]]
+    return _candles_impl(
+        observations,
+        buckets,
+        as_of=as_of,
+        session_window=session_window,
+    )
 
 
 def _contracts_and_strikes(
@@ -249,42 +116,7 @@ def _contracts_and_strikes(
     *,
     expiry: str,
 ) -> tuple[tuple[SurfaceContract, ...], tuple[Mapping[str, Any], ...]]:
-    raw_rows = _list(
-        surface.get("strike_ladder"),
-        code="session_surface_strike_ladder_invalid",
-    )
-    contracts: list[SurfaceContract] = []
-    strike_rows: list[Mapping[str, Any]] = []
-    previous_strike: float | None = None
-    for raw_row in raw_rows:
-        row = _mapping(raw_row, code="session_surface_strike_row_invalid")
-        strike = _finite(row.get("strike"))
-        if (
-            strike is None
-            or strike <= 0
-            or (previous_strike is not None and strike <= previous_strike)
-        ):
-            raise ReplaySourceError("session_surface_strike_order_invalid")
-        for side, right in (("call", "C"), ("put", "P")):
-            raw_leg = row.get(side)
-            if raw_leg is None:
-                continue
-            leg = _mapping(raw_leg, code="session_surface_strike_leg_invalid")
-            contracts.append(
-                SurfaceContract(
-                    expiry=expiry,
-                    strike=strike,
-                    right=right,
-                    iv=_finite(leg.get("iv")),
-                    open_interest=_nonnegative(leg.get("open_interest")),
-                    volume=_nonnegative(leg.get("volume")),
-                )
-            )
-        strike_rows.append(dict(row))
-        previous_strike = strike
-    if not contracts or not strike_rows:
-        raise ReplaySourceError("session_surface_contracts_unavailable")
-    return tuple(contracts), tuple(strike_rows)
+    return _contracts_and_strikes_impl(surface, expiry=expiry)
 
 
 def _parse_role_frame(
@@ -294,71 +126,53 @@ def _parse_role_frame(
     frame: Mapping[str, Any],
     role: str,
 ) -> _FrameState:
-    requested = as_utc(requested)
-    expected = {
-        "kind": "spxw_surface_dashboard_replay",
-        "mode": "replay",
-        "policy_version": REPLAY_POLICY_VERSION,
-        "session_date": context.session_date.isoformat(),
-        "requested_as_of": requested.isoformat(),
-        "projection_policy_sha256": context.projection_policy_sha256,
-        "frozen": True,
-        "automatic_ordering": False,
-    }
-    if any(frame.get(key) != value for key, value in expected.items()):
-        raise ReplaySourceError("session_surface_frame_contract_invalid")
-    artifact_hash = frame.get("artifact_sha256")
-    if not isinstance(artifact_hash, str) or not _SHA256_RE.fullmatch(artifact_hash):
-        raise ReplaySourceError("session_surface_frame_hash_invalid")
-    source = _mapping(frame.get("source"), code="session_surface_frame_source_invalid")
-    if (
-        source.get("lookahead_rows_selected") != 0
-        or source.get("availability_clock_available") is not False
-        or source.get("point_in_time_confidence") != "bounded_not_proven"
-    ):
-        raise ReplaySourceError("session_surface_frame_pit_contract_invalid")
-    expiries = _list(frame.get("expiries"), code="session_surface_expiries_invalid")
-    selected = [
-        value
-        for value in expiries
-        if isinstance(value, Mapping) and value.get("role") == role
-    ]
-    if len(selected) != 1:
-        raise ReplaySourceError("session_surface_frame_role_invalid")
-    expiry_row = selected[0]
-    expiry = expiry_row.get("expiry")
-    if not isinstance(expiry, str) or not re.fullmatch(r"\d{8}", expiry):
-        raise ReplaySourceError("session_surface_expiry_invalid")
-    expiry_close = _clock(
-        expiry_row.get("expiry_close"),
-        code="session_surface_expiry_close_invalid",
+    return _parse_role_frame_impl(
+        context,
+        requested=requested,
+        frame=frame,
+        role=role,
+        contracts_parser=_contracts_and_strikes,
     )
-    surface = _mapping(
-        expiry_row.get("surface"),
-        code="session_surface_frame_surface_invalid",
-    )
-    surface_as_of = _clock(
-        surface.get("as_of"),
-        code="session_surface_frame_surface_clock_invalid",
-    )
-    reference_spot = _finite(surface.get("reference_spot"))
-    if surface_as_of != requested or reference_spot is None or reference_spot <= 0:
-        raise ReplaySourceError("session_surface_frame_surface_contract_invalid")
-    contracts, strike_rows = _contracts_and_strikes(surface, expiry=expiry)
-    raw_warnings = expiry_row.get("warnings")
-    warnings = tuple(str(value) for value in raw_warnings) if isinstance(raw_warnings, list) else ()
-    quality = str(expiry_row.get("quality") or "unavailable")
-    return _FrameState(
-        at=requested,
-        valid_until=requested,
-        artifact_sha256=artifact_hash,
+
+
+def _gth_reference_at(
+    observations: tuple[_SPXObservation, ...],
+    at: datetime,
+) -> _SPXObservation | None:
+    return _gth_reference_at_impl(observations, at)
+
+
+def _gth_frame_hash(
+    *,
+    expiry: str,
+    at: datetime,
+    reference: _SPXObservation,
+    rows: list[tuple[object, ...]],
+) -> str:
+    return _gth_frame_hash_impl(
         expiry=expiry,
-        expiry_close=expiry_close,
-        reference_spot=reference_spot,
-        contracts=contracts,
-        strike_rows=strike_rows,
-        quality=quality,
-        warnings=warnings,
+        at=at,
+        reference=reference,
+        rows=rows,
+    )
+
+
+def _load_gth_frames(
+    context: TrendContext,
+    *,
+    as_of: datetime,
+    role: str,
+    reference_observations: tuple[_SPXObservation, ...],
+) -> tuple[_FrameState, ...]:
+    return _load_gth_frames_impl(
+        context,
+        as_of=as_of,
+        role=role,
+        reference_observations=reference_observations,
+        reference_selector=_gth_reference_at,
+        hash_builder=_gth_frame_hash,
+        connect_factory=duckdb.connect,
+        surface_builder=build_exposure_surface,
     )
 
 
@@ -369,55 +183,18 @@ def _causal_frames(
     role: str,
     frame_loader: FrameLoader,
     build_cache: SessionSurfaceBuildCache,
+    reference_observations: tuple[_SPXObservation, ...] = (),
 ) -> tuple[_FrameState, ...]:
-    cutoff = as_utc(as_of)
-    requested_frames = tuple(
-        as_utc(value) for value in context.frames if as_utc(value) <= cutoff
+    return _causal_frames_impl(
+        context,
+        as_of=as_of,
+        role=role,
+        frame_loader=frame_loader,
+        build_cache=build_cache,
+        reference_observations=reference_observations,
+        gth_loader=_load_gth_frames,
+        frame_parser=_parse_role_frame,
     )
-    parsed: list[_FrameState] = []
-    for requested in requested_frames:
-        cache_key = (context.source_fingerprint, role, replay_id(requested))
-        row = build_cache.get_frame(cache_key)
-        if row is None:
-            row = _parse_role_frame(
-                context,
-                requested=requested,
-                frame=frame_loader(requested),
-                role=role,
-            )
-            build_cache.put_frame(cache_key, row)
-        parsed.append(row)
-    if any(right.at <= left.at for left, right in zip(parsed, parsed[1:])):
-        raise ReplaySourceError("session_surface_timeline_invalid")
-    expiry_values = {row.expiry for row in parsed}
-    if len(expiry_values) > 1:
-        raise ReplaySourceError("session_surface_expiry_changed")
-    resolved: list[_FrameState] = []
-    for index, row in enumerate(parsed):
-        next_at = parsed[index + 1].at if index + 1 < len(parsed) else None
-        valid_until = min(
-            row.at + timedelta(minutes=context.frame_minutes),
-            row.expiry_close,
-            as_utc(context.close_at),
-            next_at if next_at is not None else as_utc(context.close_at),
-        )
-        if row.quality not in {"ready", "degraded", "ok"}:
-            valid_until = row.at
-        resolved.append(
-            _FrameState(
-                at=row.at,
-                valid_until=valid_until,
-                artifact_sha256=row.artifact_sha256,
-                expiry=row.expiry,
-                expiry_close=row.expiry_close,
-                reference_spot=row.reference_spot,
-                contracts=row.contracts,
-                strike_rows=row.strike_rows,
-                quality=row.quality,
-                warnings=row.warnings,
-            )
-        )
-    return tuple(resolved)
 
 
 def _fixed_price_grid(spot: float, *, step: float) -> tuple[float, ...]:
@@ -454,8 +231,7 @@ def _kernel_columns_uncached(
         per_offset = max(len(frame.contracts) * len(price_grid) * 3, 1)
         chunk_size = max(1, min(24, MAX_SINGLE_BUILD_EVALUATIONS // per_offset))
         chunks = tuple(
-            offsets[index : index + chunk_size]
-            for index in range(0, len(offsets), chunk_size)
+            offsets[index : index + chunk_size] for index in range(0, len(offsets), chunk_size)
         )
         max_time_points = max(24, chunk_size)
         max_cells = max(1_944, len(price_grid) * chunk_size)
@@ -528,11 +304,7 @@ def _frame_for_historical_end(
     frames: tuple[_FrameState, ...],
     end: datetime,
 ) -> _FrameState | None:
-    candidates = [
-        row
-        for row in frames
-        if (row.known_at or row.at) <= end < row.valid_until
-    ]
+    candidates = [row for row in frames if (row.known_at or row.at) <= end < row.valid_until]
     return candidates[-1] if candidates else None
 
 
@@ -541,11 +313,7 @@ def _current_frame(
     as_of: datetime,
 ) -> _FrameState | None:
     cutoff = as_utc(as_of)
-    candidates = [
-        row
-        for row in frames
-        if (row.known_at or row.at) <= cutoff < row.valid_until
-    ]
+    candidates = [row for row in frames if (row.known_at or row.at) <= cutoff < row.valid_until]
     return candidates[-1] if candidates else None
 
 
@@ -575,6 +343,8 @@ def _surface_payload(
     price_grid: tuple[float, ...],
     weighting: str,
     build_cache: SessionSurfaceBuildCache,
+    session_window: SessionSurfaceWindow | None = None,
+    projection_allowed: bool = True,
 ) -> tuple[
     list[dict[str, object]],
     dict[str, list[list[float | None]]],
@@ -583,7 +353,7 @@ def _surface_payload(
     list[dict[str, float] | None],
 ]:
     cutoff = as_utc(as_of)
-    current = _current_frame(frames, cutoff)
+    current = _current_frame(frames, cutoff) if projection_allowed else None
     historical_frames = {
         row.artifact_sha256: row
         for _start, end in buckets
@@ -619,8 +389,14 @@ def _surface_payload(
     zero_ridges: list[float | None] = []
     positive_peaks: list[dict[str, float] | None] = []
     negative_troughs: list[dict[str, float] | None] = []
-    for _start, end in buckets:
-        if end <= cutoff:
+    for start, end in buckets:
+        session_kind = session_window.segment_kind(start) if session_window is not None else None
+        if session_kind == "closed_gap":
+            column, values, zero = _missing_column(
+                reason="scheduled_closed_gap",
+                price_points=len(price_grid),
+            )
+        elif end <= cutoff:
             frame = _frame_for_historical_end(frames, end)
             if frame is None:
                 column, values, zero = _missing_column(
@@ -641,16 +417,18 @@ def _surface_payload(
                 else:
                     column = {
                         "kind": "historical",
-                        "quality": "ready" if kernel.quality == "ok" else "degraded",
+                        "quality": ("ready" if kernel.quality == "ok" else "degraded"),
                         "source_at": _iso(frame.at),
                         "valid_until": _iso(frame.valid_until),
                         "reason": None,
                         "source_frame_sha256": frame.artifact_sha256,
                         "minutes_forward": 0.0,
+                        "session_kind": session_kind or frame.session_kind,
+                        "source_session_kind": frame.session_kind,
+                        "surface_provider": frame.surface_provider,
+                        "reference_method": frame.reference_method,
                     }
-                    values = {
-                        metric: list(kernel.metrics[metric]) for metric in _METRIC_TO_OUTPUT
-                    }
+                    values = {metric: list(kernel.metrics[metric]) for metric in _METRIC_TO_OUTPUT}
                     zero = kernel.zero_ridge
         elif current is None:
             column, values, zero = _missing_column(
@@ -659,9 +437,12 @@ def _surface_payload(
             )
         else:
             kernel = projection_by_end.get(end)
-            if kernel is None or kernel.quality == "unavailable" or not any(
-                value is not None for value in (
-                    kernel.metrics["signed_gamma"] if kernel is not None else ()
+            if (
+                kernel is None
+                or kernel.quality == "unavailable"
+                or not any(
+                    value is not None
+                    for value in (kernel.metrics["signed_gamma"] if kernel is not None else ())
                 )
             ):
                 reason = (
@@ -686,12 +467,32 @@ def _surface_payload(
                     "source_frame_sha256": current.artifact_sha256,
                     "scenario_at": _iso(end),
                     "minutes_forward": minutes_forward,
-                    "scenario_semantics": "fixed_iv_oi_volume_tau_decay_not_forecast",
+                    "scenario_semantics": ("fixed_iv_oi_volume_tau_decay_not_forecast"),
+                    "session_kind": session_kind or current.session_kind,
+                    "source_session_kind": current.session_kind,
+                    "surface_provider": current.surface_provider,
+                    "reference_method": current.reference_method,
                 }
-                values = {
-                    metric: list(kernel.metrics[metric]) for metric in _METRIC_TO_OUTPUT
-                }
+                values = {metric: list(kernel.metrics[metric]) for metric in _METRIC_TO_OUTPUT}
                 zero = kernel.zero_ridge
+        column.setdefault("session_kind", session_kind)
+        column.setdefault("source_session_kind", None)
+        if column.get("kind") == "missing":
+            column["source_session_kind"] = None
+        column.setdefault(
+            "surface_provider",
+            ("ibkr" if session_kind == "gth" else "schwab" if session_kind == "rth" else None),
+        )
+        column.setdefault(
+            "reference_method",
+            (
+                "es_basis_inferred_spx"
+                if session_kind == "gth"
+                else "direct_index_spx"
+                if session_kind == "rth"
+                else None
+            ),
+        )
         columns.append(column)
         for metric in _METRIC_TO_OUTPUT:
             matrices[metric].append(values[metric])
@@ -714,9 +515,7 @@ def _surface_payload(
             positive_peaks.append(None)
         if negative:
             trough_price, trough_value = min(negative, key=lambda row: row[1])
-            negative_troughs.append(
-                {"price": trough_price, "value": trough_value}
-            )
+            negative_troughs.append({"price": trough_price, "value": trough_value})
         else:
             negative_troughs.append(None)
     return columns, matrices, zero_ridges, positive_peaks, negative_troughs
@@ -730,11 +529,7 @@ def _strike_value(
     if row is None:
         return None, None, "unavailable"
     raw_weightings = row.get("weightings")
-    selected = (
-        raw_weightings.get(weighting)
-        if isinstance(raw_weightings, Mapping)
-        else None
-    )
+    selected = raw_weightings.get(weighting) if isinstance(raw_weightings, Mapping) else None
     metrics = selected.get("metrics") if isinstance(selected, Mapping) else None
     proxy = metrics.get("signed_gamma") if isinstance(metrics, Mapping) else None
     oi_values: list[float] = []
@@ -744,7 +539,11 @@ def _strike_value(
             value = _nonnegative(leg.get("open_interest"))
             if value is not None:
                 oi_values.append(value)
-    quality = str(selected.get("quality") or row.get("quality") or "unavailable") if isinstance(selected, Mapping) else str(row.get("quality") or "unavailable")
+    quality = (
+        str(selected.get("quality") or row.get("quality") or "unavailable")
+        if isinstance(selected, Mapping)
+        else str(row.get("quality") or "unavailable")
+    )
     return _finite(proxy), math.fsum(oi_values) if oi_values else None, quality
 
 
@@ -810,10 +609,7 @@ def _strike_profile(
 
 def _robust_domain(matrix: list[list[float | None]]) -> dict[str, object]:
     values = sorted(
-        abs(value)
-        for row in matrix
-        for value in row
-        if value is not None and math.isfinite(value)
+        abs(value) for row in matrix for value in row if value is not None and math.isfinite(value)
     )
     if values:
         position = (len(values) - 1) * 0.98
@@ -822,10 +618,7 @@ def _robust_domain(matrix: list[list[float | None]]) -> dict[str, object]:
         fraction = position - lower
         robust = values[lower] + (values[upper] - values[lower]) * fraction
         raw_values = [
-            value
-            for row in matrix
-            for value in row
-            if value is not None and math.isfinite(value)
+            value for row in matrix for value in row if value is not None and math.isfinite(value)
         ]
         raw_min = min(raw_values)
         raw_max = max(raw_values)
@@ -890,6 +683,7 @@ def _surface_missing_ranges(
             }
         )
     return ranges
+
 
 __all__ = (
     "_candles",
