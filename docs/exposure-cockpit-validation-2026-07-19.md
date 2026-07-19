@@ -184,7 +184,8 @@ docker inspect --format '{{.State.Health.Status}}' spxw-surface
 回滚使用一次可审计的 revert，不覆盖工作树：
 
 ```bash
-git revert <cockpit-commit>
+git revert --no-commit 4880722c9c4273d1b9958d05e26a0dd6b1adc436..HEAD
+git commit -m "revert: remove SPXW session exposure cockpit"
 systemctl --user restart spx-spark-surface-replay.service
 docker compose -f site/spxw-surface/compose.yaml restart spxw-surface
 ```
