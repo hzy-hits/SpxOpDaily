@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <meta name="robots" content="noindex,nofollow,noarchive">
+    <title>SPXW Exposure Surface</title>
+    <link rel="stylesheet" href="styles.css">
+    <script src="app.js" defer></script>
+  </head>
+  <body>
+    <main class="shell">
+      <header class="page-header">
+        <div>
+          <p class="eyebrow">SPXW · Front / Next Expiry</p>
+          <h1>Exposure Surface</h1>
+          <p class="lede">标的价格 × 时间的期权暴露地形。所有值均来自只读生产快照，不提供下单入口。</p>
+        </div>
+        <div class="header-state" aria-live="polite">
+          <span id="status-pill" class="status-pill status-loading">正在连接</span>
+          <span id="refresh-state" class="refresh-state">等待首个快照</span>
+        </div>
+      </header>
+
+      <section class="summary-grid" aria-label="快照摘要">
+        <article class="summary-card">
+          <span class="summary-label">数据状态</span>
+          <strong id="summary-status">—</strong>
+          <small id="summary-reasons">尚未加载</small>
+        </article>
+        <article class="summary-card">
+          <span class="summary-label">新鲜度</span>
+          <strong id="summary-freshness">—</strong>
+          <small id="summary-as-of">as of —</small>
+        </article>
+        <article class="summary-card">
+          <span class="summary-label">覆盖率</span>
+          <strong id="summary-coverage">—</strong>
+          <small id="summary-contracts">可用合约 —</small>
+        </article>
+        <article class="summary-card">
+          <span class="summary-label">到期结构</span>
+          <strong id="summary-expiries">—</strong>
+          <small id="summary-underlier">SPX —</small>
+        </article>
+      </section>
+
+      <section id="data-notice" class="data-notice" hidden aria-live="polite"></section>
+
+      <section class="control-bar" aria-label="曲面过滤器">
+        <label>
+          <span>Expiration</span>
+          <select id="expiry-filter" disabled>
+            <option value="">无可用到期日</option>
+          </select>
+        </label>
+        <label>
+          <span>Weighting</span>
+          <select id="weighting-filter" disabled>
+            <option value="oi_weighted">OI · Signed proxy</option>
+            <option value="volume_weighted">Volume · Activity proxy</option>
+          </select>
+        </label>
+        <label>
+          <span>Metric</span>
+          <select id="metric-filter" disabled>
+            <option value="signed_gamma">Signed gamma</option>
+            <option value="gross_gamma">Gross gamma</option>
+            <option value="charm">Charm</option>
+            <option value="vanna">Vanna</option>
+          </select>
+        </label>
+      </section>
+
+      <section class="panel heatmap-panel" aria-labelledby="surface-title">
+        <header class="panel-header">
+          <div>
+            <p class="panel-kicker">SPXW CHAIN EXPOSURE PROXY</p>
+            <h2 id="surface-title">Spot × Time surface</h2>
+            <p id="surface-subtitle">等待生产快照</p>
+          </div>
+          <div id="surface-quality" class="quality-chip">—</div>
+        </header>
+
+        <div id="heatmap-stage" class="heatmap-stage">
+          <canvas id="heatmap" role="img" aria-label="SPXW 暴露热图"></canvas>
+          <div id="heatmap-tooltip" class="chart-tooltip" hidden></div>
+          <div id="heatmap-empty" class="chart-empty">
+            <strong>暂无可用曲面</strong>
+            <span>收到 ready 或 degraded 的有效矩形网格后才会绘制。</span>
+          </div>
+        </div>
+
+        <div id="chart-legend" class="chart-legend" aria-label="图例">
+          <span id="legend-negative"><i class="legend-swatch negative"></i><b>−</b> 负暴露</span>
+          <span id="legend-neutral"><i class="legend-swatch neutral"></i><b>0</b> 中性</span>
+          <span id="legend-positive"><i class="legend-swatch positive"></i><b>+</b> 正暴露</span>
+          <span id="legend-ridge"><i class="legend-line ridge"></i>Zero ridge</span>
+          <span id="legend-peak"><i class="legend-marker peak"></i>正峰</span>
+          <span id="legend-trough"><i class="legend-marker trough"></i>负谷</span>
+          <span id="legend-domain" class="legend-domain">色域 —</span>
+        </div>
+        <p id="chart-accessible-summary" class="sr-only" aria-live="polite"></p>
+      </section>
+
+      <section class="detail-grid">
+        <article class="panel ladder-panel" aria-labelledby="ladder-title">
+          <header class="panel-header compact">
+            <div>
+              <p class="panel-kicker">CURRENT SPOT SLICE</p>
+              <h2 id="ladder-title">Strike ladder</h2>
+              <p id="ladder-subtitle">等待真实 strike ladder</p>
+            </div>
+          </header>
+          <div id="ladder-wrap" class="ladder-wrap">
+            <svg id="ladder-chart" role="img" aria-label="按执行价排列的期权暴露"></svg>
+            <div id="ladder-empty" class="detail-empty">快照未提供可用的 strike ladder。</div>
+          </div>
+        </article>
+
+        <article class="panel extrema-panel" aria-labelledby="extrema-title">
+          <header class="panel-header compact">
+            <div>
+              <p class="panel-kicker">SURFACE EXTREMA</p>
+              <h2 id="extrema-title">Peaks / Troughs</h2>
+              <p id="extrema-subtitle">按所选指标绝对幅度排序；数值不代表已知 dealer 实仓方向。</p>
+            </div>
+          </header>
+          <div class="extrema-columns">
+            <section>
+              <h3 id="peak-heading"><span class="extrema-symbol positive">+</span> Positive peaks</h3>
+              <ol id="peak-list" class="extrema-list"><li class="empty-row">暂无数据</li></ol>
+            </section>
+            <section>
+              <h3 id="trough-heading"><span class="extrema-symbol negative">−</span> Negative troughs</h3>
+              <ol id="trough-list" class="extrema-list"><li class="empty-row">暂无数据</li></ol>
+            </section>
+          </div>
+        </article>
+      </section>
+
+      <footer class="page-footer">
+        <p>来源：<code>spxw_surface_dashboard.json</code> · 5 秒只读刷新 · <span id="schema-version">schema —</span></p>
+        <p>OI / volume 暴露为模型代理；<span id="sign-convention">dealer position sign unknown</span>。</p>
+      </footer>
+    </main>
+  </body>
+</html>

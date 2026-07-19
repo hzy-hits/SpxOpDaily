@@ -103,6 +103,20 @@ def test_notification_delivery_has_a_persistent_subsecond_worker() -> None:
     assert "enable spx-spark-notification-delivery.service" in installer
 
 
+def test_surface_dashboard_worker_publishes_to_an_isolated_read_only_feed() -> None:
+    service = read("systemd/spx-spark-surface-dashboard.service")
+    runner = read("scripts/run-spxw-surface-dashboard.sh")
+    installer = read("scripts/install-spx-spark-services.sh")
+
+    assert "scripts/run-spxw-surface-dashboard.sh --interval-seconds 5" in service
+    assert "Restart=always" in service
+    assert "SuccessExitStatus=143 SIGTERM" in service
+    assert "/published/spxw-surface/snapshot.json" in runner
+    assert "--output-path" in runner
+    assert "spx_spark.surface_dashboard" in runner
+    assert "enable spx-spark-surface-dashboard.service" in installer
+
+
 def test_compaction_runner_has_a_non_blocking_whole_run_lock() -> None:
     runner = read("scripts/run-data-compact.sh")
 

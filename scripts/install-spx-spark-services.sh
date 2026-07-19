@@ -9,6 +9,7 @@ ln -sfn "$ROOT/systemd/spx-spark-24h.service" "$USER_UNIT_DIR/spx-spark-24h.serv
 ln -sfn "$ROOT/systemd/spx-spark-market-features-hot.service" "$USER_UNIT_DIR/spx-spark-market-features-hot.service"
 ln -sfn "$ROOT/systemd/spx-spark-intraday-shock-hot.service" "$USER_UNIT_DIR/spx-spark-intraday-shock-hot.service"
 ln -sfn "$ROOT/systemd/spx-spark-notification-delivery.service" "$USER_UNIT_DIR/spx-spark-notification-delivery.service"
+ln -sfn "$ROOT/systemd/spx-spark-surface-dashboard.service" "$USER_UNIT_DIR/spx-spark-surface-dashboard.service"
 ln -sfn "$ROOT/systemd/spx-spark-ibkr-stream.service" "$USER_UNIT_DIR/spx-spark-ibkr-stream.service"
 ln -sfn "$ROOT/systemd/spx-spark-post-close-review.service" "$USER_UNIT_DIR/spx-spark-post-close-review.service"
 ln -sfn "$ROOT/systemd/spx-spark-post-close-review.timer" "$USER_UNIT_DIR/spx-spark-post-close-review.timer"
@@ -30,6 +31,7 @@ systemctl --user enable spx-spark-24h.service
 systemctl --user enable spx-spark-market-features-hot.service
 systemctl --user enable spx-spark-intraday-shock-hot.service
 systemctl --user enable spx-spark-notification-delivery.service
+systemctl --user enable spx-spark-surface-dashboard.service
 systemctl --user enable spx-spark-ibkr-stream.service
 systemctl --user enable spx-spark-post-close-review.timer
 systemctl --user enable spx-spark-morning-map.timer
@@ -44,6 +46,7 @@ echo "  spx-spark-24h.service"
 echo "  spx-spark-market-features-hot.service"
 echo "  spx-spark-intraday-shock-hot.service"
 echo "  spx-spark-notification-delivery.service"
+echo "  spx-spark-surface-dashboard.service"
 echo "  spx-spark-ibkr-stream.service"
 echo "  spx-spark-post-close-review.timer"
 echo "  spx-spark-morning-map.timer"
@@ -65,5 +68,6 @@ if [[ "${1:-}" == "--now" ]]; then
   systemctl --user restart spx-spark-market-features-hot.service
   systemctl --user restart spx-spark-intraday-shock-hot.service
   systemctl --user restart spx-spark-notification-delivery.service
-  systemctl --user status spx-spark-24h.service spx-spark-market-features-hot.service spx-spark-intraday-shock-hot.service spx-spark-notification-delivery.service spx-spark-ibkr-stream.service --no-pager
+  systemctl --user restart spx-spark-surface-dashboard.service
+  systemctl --user status spx-spark-24h.service spx-spark-market-features-hot.service spx-spark-intraday-shock-hot.service spx-spark-notification-delivery.service spx-spark-surface-dashboard.service spx-spark-ibkr-stream.service --no-pager
 fi

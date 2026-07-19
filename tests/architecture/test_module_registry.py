@@ -67,6 +67,7 @@ LAYERS = {
     "latest_state": 5,
     "morning_map": 5,
     "order_map": 5,
+    "surface_dashboard": 5,
     "infrastructure": 4,
 }
 

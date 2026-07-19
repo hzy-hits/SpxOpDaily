@@ -1,0 +1,22 @@
+[Unit]
+Description=SPX Spark read-only SPXW exposure-surface projection worker
+After=network-online.target spx-spark-schwab-marketdata.service
+Wants=network-online.target spx-spark-schwab-marketdata.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/ubuntu/spx-spark
+EnvironmentFile=-/home/ubuntu/spx-spark/.env
+Environment=PATH=/home/ubuntu/.local/bin:/home/ubuntu/.cargo/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/home/ubuntu/spx-spark/scripts/run-spxw-surface-dashboard.sh --interval-seconds 5
+Restart=always
+RestartSec=2
+KillSignal=SIGTERM
+TimeoutStopSec=15
+SuccessExitStatus=143 SIGTERM
+UMask=0077
+CPUWeight=200
+IOWeight=200
+
+[Install]
+WantedBy=default.target
