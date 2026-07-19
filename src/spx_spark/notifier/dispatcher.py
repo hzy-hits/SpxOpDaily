@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import os
 
 from spx_spark.config import NotificationSettings
 from spx_spark.notifier.delivery_outbox import (
+    DeliveryClaimLost,
     DeliveryJob,
     DeliveryStatus,
     NotificationDeliveryOutbox,
@@ -39,12 +41,35 @@ class DispatchResult:
 
 
 @dataclass(frozen=True)
+class EnqueueResult:
+    """Result of the producer-only notification boundary.
+
+    ``accepted`` means the exact event is durably present in the SQLite
+    outbox and has not terminally dead-lettered. ``inserted`` distinguishes a
+    new row from an idempotent replay; neither case performs network I/O.
+    """
+
+    envelope: NotificationEnvelope
+    targets: tuple[str, ...]
+    outcome: str
+    accepted: bool
+    inserted: bool
+    duplicate: bool
+    delivered: bool
+    queued_for_recovery: bool
+
+
+@dataclass(frozen=True)
 class _JobResult:
     sinks: tuple[SinkResult, ...]
     status: DeliveryStatus
     delivered_targets: int
     pending_targets: int
     dead_lettered_targets: int
+    lost_claim_targets: int
+
+
+ASYNC_CLAIM_TARGET_LIMIT = 1
 
 
 def _delivery_outbox(settings: NotificationSettings) -> NotificationDeliveryOutbox:
@@ -61,6 +86,93 @@ def _transport_lane(envelope: NotificationEnvelope) -> str:
     return "ops" if envelope.lane == "ops_transition" else "trade"
 
 
+def enqueue_notification(
+    settings: NotificationSettings,
+    envelope: NotificationEnvelope,
+    *,
+    title: str,
+    text: str,
+    friend: bool = False,
+    feishu_text: str | None = None,
+    enqueued_at: datetime | None = None,
+) -> EnqueueResult:
+    """Persist one final notification template and return without delivery.
+
+    This is the latency-critical producer API.  The supplied text is already
+    final: this function never invokes an LLM/reviewer and never opens a Bark
+    or Feishu connection.  ``consume_pending_notifications`` owns all claims,
+    delivery attempts and retries.
+
+    Replaying the same ``event_id`` and identical payload is successful and
+    reported as ``duplicate=True``.  Reusing an ``event_id`` for different
+    content remains a hard collision in ``NotificationDeliveryOutbox``.
+    """
+
+    envelope.validate()
+    at = enqueued_at or datetime.now(tz=timezone.utc)
+    if not settings.delivery_outbox_enabled or not settings.delivery_outbox_path:
+        return EnqueueResult(
+            envelope=envelope,
+            targets=(),
+            outcome="outbox_disabled",
+            accepted=False,
+            inserted=False,
+            duplicate=False,
+            delivered=False,
+            queued_for_recovery=False,
+        )
+
+    targets = delivery_target_names(
+        settings,
+        lane=_transport_lane(envelope),
+        friend=friend,
+    )
+    if not targets:
+        return EnqueueResult(
+            envelope=envelope,
+            targets=(),
+            outcome="no_sink",
+            accepted=False,
+            inserted=False,
+            duplicate=False,
+            delivered=False,
+            queued_for_recovery=False,
+        )
+
+    outbox = _delivery_outbox(settings)
+    inserted = outbox.enqueue(
+        envelope,
+        title=title,
+        text=text,
+        feishu_text=feishu_text,
+        friend=friend,
+        targets=targets,
+        now=at,
+    )
+    summary = outbox.summary(envelope.event_id)
+    if summary is None:  # Defensive: enqueue and summary share one durable DB.
+        raise RuntimeError(f"delivery event disappeared: {envelope.event_id}")
+    queued = summary.pending_targets + summary.claimed_targets > 0
+    if queued and settings.delivery_outbox_legacy_shadow_enabled:
+        append_missed(
+            settings.missed_queue_path,
+            text,
+            kind=envelope.kind,
+            at=envelope.occurred_at,
+            event_id=envelope.event_id,
+        )
+    return EnqueueResult(
+        envelope=envelope,
+        targets=tuple(targets),
+        outcome=summary.status.value,
+        accepted=summary.status is not DeliveryStatus.DEAD_LETTER,
+        inserted=inserted,
+        duplicate=not inserted,
+        delivered=summary.delivered_targets > 0,
+        queued_for_recovery=queued,
+    )
+
+
 def _deliver_claimed_job(
     settings: NotificationSettings,
     outbox: NotificationDeliveryOutbox,
@@ -68,7 +180,7 @@ def _deliver_claimed_job(
     *,
     worker_id: str,
     runner: CommandRunner,
-    attempted_at: datetime,
+    completion_clock: Callable[[], datetime],
 ) -> _JobResult:
     sinks = deliver_trade_push(
         settings,
@@ -85,6 +197,8 @@ def _deliver_claimed_job(
     normalized_sinks = list(sinks)
     delivered_targets = 0
     dead_lettered_targets = 0
+    lost_claim_targets = 0
+    receipt_at: datetime | None = None
     for target in job.targets:
         sink = sinks_by_name.get(target)
         if sink is None:
@@ -95,15 +209,23 @@ def _deliver_claimed_job(
                 error="configured delivery target is currently unavailable",
             )
             normalized_sinks.append(sink)
-        status = outbox.settle_target(
-            job.envelope.event_id,
-            target,
-            worker_id=worker_id,
-            ok=sink.ok,
-            error=sink.error,
-            permanent=sink.permanent,
-            now=attempted_at,
-        )
+        receipt_at = completion_clock()
+        try:
+            status = outbox.settle_target(
+                job.envelope.event_id,
+                target,
+                worker_id=worker_id,
+                ok=sink.ok,
+                error=sink.error,
+                permanent=sink.permanent,
+                now=receipt_at,
+            )
+        except DeliveryClaimLost:
+            # The new lease owner is authoritative. The external request may
+            # already have completed, so record the race without overwriting
+            # the newer claim or restarting this consumer.
+            lost_claim_targets += 1
+            continue
         delivered_targets += int(sink.ok)
         dead_lettered_targets += int(status is DeliveryStatus.DEAD_LETTER)
 
@@ -122,7 +244,7 @@ def _deliver_claimed_job(
         sinks=normalized_sinks,
         outcome=summary.status.value,
         queued_for_recovery=pending > 0,
-        attempted_at=attempted_at,
+        attempted_at=receipt_at or completion_clock(),
     )
     return _JobResult(
         sinks=tuple(normalized_sinks),
@@ -130,6 +252,7 @@ def _deliver_claimed_job(
         delivered_targets=delivered_targets,
         pending_targets=pending,
         dead_lettered_targets=dead_lettered_targets,
+        lost_claim_targets=lost_claim_targets,
     )
 
 
@@ -239,26 +362,33 @@ def _prune_terminal_shadow_entries(
     return len(terminal_ids)
 
 
-def recover_pending_notifications(
+def consume_pending_notifications(
     settings: NotificationSettings,
     *,
     runner: CommandRunner = default_runner,
     now: datetime | None = None,
+    notify_dead_letters: bool = True,
+    worker_id: str | None = None,
+    completion_clock: Callable[[], datetime] | None = None,
 ) -> dict[str, object]:
-    """Drain due sink targets without resending targets already delivered."""
+    """Claim and deliver one target, keeping work below the stale-lease TTL."""
 
     now = now or datetime.now(tz=timezone.utc)
+    completion_clock = completion_clock or (lambda: datetime.now(tz=timezone.utc))
     outbox = _delivery_outbox(settings)
     imported = _migrate_legacy_queue(settings, outbox, now=now)
-    worker_id = f"notification-recovery:{os.getpid()}"
+    worker_id = worker_id or f"notification-recovery:{os.getpid()}"
     jobs = outbox.claim_due(
         worker_id=worker_id,
-        limit_targets=settings.delivery_outbox_recovery_batch_size,
+        # Reserving a backlog lets later targets outlive the claim while the
+        # sinks block. The next poll immediately claims the next due target.
+        limit_targets=ASYNC_CLAIM_TARGET_LIMIT,
         now=now,
     )
     attempted_targets = 0
     delivered_targets = 0
     dead_lettered = 0
+    lost_claim_targets = 0
     for job in jobs:
         result = _deliver_claimed_job(
             settings,
@@ -266,14 +396,19 @@ def recover_pending_notifications(
             job,
             worker_id=worker_id,
             runner=runner,
-            attempted_at=now,
+            completion_clock=completion_clock,
         )
         attempted_targets += len(job.targets)
         delivered_targets += result.delivered_targets
         dead_lettered += result.dead_lettered_targets
+        lost_claim_targets += result.lost_claim_targets
     counts = outbox.count_targets()
     dead_letter_total = counts.get(DeliveryStatus.DEAD_LETTER.value, 0)
-    dead_letter_notified = _notify_dead_letters(settings, outbox, runner=runner, now=now)
+    dead_letter_notified = (
+        _notify_dead_letters(settings, outbox, runner=runner, now=now)
+        if notify_dead_letters
+        else 0
+    )
     # Health is judged only by dead letters nobody has reviewed yet; history
     # alone must not fail the task forever.
     dead_letter_unacknowledged = outbox.count_unacknowledged_dead_letters()
@@ -287,11 +422,29 @@ def recover_pending_notifications(
         "pending_targets": counts.get(DeliveryStatus.PENDING.value, 0),
         "claimed_targets": counts.get(DeliveryStatus.CLAIMED.value, 0),
         "dead_lettered": dead_lettered,
+        "lost_claim_targets": lost_claim_targets,
         "dead_letter_total": dead_letter_total,
         "dead_letter_unacknowledged": dead_letter_unacknowledged,
         "dead_letter_notified": dead_letter_notified,
         "pruned_shadow": pruned_shadow,
     }
+
+
+def recover_pending_notifications(
+    settings: NotificationSettings,
+    *,
+    runner: CommandRunner = default_runner,
+    now: datetime | None = None,
+    completion_clock: Callable[[], datetime] | None = None,
+) -> dict[str, object]:
+    """Backward-compatible name for one asynchronous consumer cycle."""
+
+    return consume_pending_notifications(
+        settings,
+        runner=runner,
+        now=now,
+        completion_clock=completion_clock,
+    )
 
 
 def _dispatch_via_outbox(
@@ -353,7 +506,7 @@ def _dispatch_via_outbox(
             jobs[0],
             worker_id=worker_id,
             runner=runner,
-            attempted_at=attempted_at,
+            completion_clock=lambda: attempted_at,
         )
         sinks = result.sinks
     summary = outbox.summary(envelope.event_id)

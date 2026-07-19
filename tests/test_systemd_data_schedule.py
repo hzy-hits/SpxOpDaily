@@ -49,6 +49,60 @@ def test_installer_enables_weekend_bulk_timer() -> None:
     assert "enable --now spx-spark-data-compact-weekend.timer" in installer
 
 
+def test_market_features_hot_worker_is_a_dedicated_single_owner_service() -> None:
+    hot_service = read("systemd/spx-spark-market-features-hot.service")
+    shared_service = read("systemd/spx-spark-24h.service")
+    runner = read("scripts/run-market-features-hot-worker.sh")
+    installer = read("scripts/install-spx-spark-services.sh")
+
+    assert "scripts/run-market-features-hot-worker.sh" in hot_service
+    assert "RuntimeDirectory=" not in hot_service
+    assert "--lock-path=%t/spx-spark-market-features-hot-worker.lock" in hot_service
+    assert "RestartPreventExitStatus" not in hot_service
+    assert "RestartSec=10" in hot_service
+    assert "KillSignal=SIGTERM" in hot_service
+    assert "SPX_SERVICE_ENABLE_MARKET_FEATURES=false" in shared_service
+    assert "--exclude-task market_features" in shared_service
+    assert 'exec "$ENTRYPOINT" "$@"' in runner
+    assert "spx_spark.application.runtime.market_features_hot_worker" in runner
+    assert "enable spx-spark-market-features-hot.service" in installer
+    assert installer.index("restart spx-spark-24h.service") < installer.index(
+        "restart spx-spark-market-features-hot.service"
+    )
+
+
+def test_intraday_shock_hot_worker_is_a_dedicated_single_owner_service() -> None:
+    hot_service = read("systemd/spx-spark-intraday-shock-hot.service")
+    shared_service = read("systemd/spx-spark-24h.service")
+    runner = read("scripts/run-intraday-shock-hot-worker.sh")
+    installer = read("scripts/install-spx-spark-services.sh")
+
+    assert "scripts/run-intraday-shock-hot-worker.sh" in hot_service
+    assert "RuntimeDirectory=" not in hot_service
+    assert "--lock-path=%t/spx-spark-intraday-shock-hot-worker.lock" in hot_service
+    assert "RestartPreventExitStatus" not in hot_service
+    assert "RestartSec=10" in hot_service
+    assert "KillSignal=SIGTERM" in hot_service
+    assert "SPX_SERVICE_ENABLE_INTRADAY_SHOCK=false" in shared_service
+    assert "--exclude-task intraday_shock" in shared_service
+    assert 'exec "$ENTRYPOINT" "$@"' in runner
+    assert "spx_spark.application.runtime.intraday_shock_hot_worker" in runner
+    assert "enable spx-spark-intraday-shock-hot.service" in installer
+    assert installer.index("restart spx-spark-24h.service") < installer.index(
+        "restart spx-spark-intraday-shock-hot.service"
+    )
+
+
+def test_notification_delivery_has_a_persistent_subsecond_worker() -> None:
+    service = read("systemd/spx-spark-notification-delivery.service")
+    installer = read("scripts/install-spx-spark-services.sh")
+
+    assert "spx_spark.notifier.delivery_worker --poll-seconds 0.5" in service
+    assert "Restart=always" in service
+    assert "SuccessExitStatus=143 SIGTERM" in service
+    assert "enable spx-spark-notification-delivery.service" in installer
+
+
 def test_compaction_runner_has_a_non_blocking_whole_run_lock() -> None:
     runner = read("scripts/run-data-compact.sh")
 

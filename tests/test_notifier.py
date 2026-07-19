@@ -25,6 +25,7 @@ from spx_spark.notifier import (
     SinkResult,
 )
 from spx_spark.notifier.state import load_acknowledged_event_ids, mark_alerts_sent
+from spx_spark.notifier.pipeline import _dispatch_alerts
 
 
 def make_settings(
@@ -1667,6 +1668,111 @@ def test_intraday_shock_delivers_without_reviewer_and_records_ack(tmp_path) -> N
     assert entries[-1]["reviewer"] == "direct_policy"
     assert entries[-1]["parser_verdict"] == "not_run"
     assert entries[-1]["outcome"] == "delivered"
+
+
+def test_intraday_shock_durably_enqueues_without_network_on_hot_path(
+    tmp_path, monkeypatch
+) -> None:
+    source_at = datetime(2026, 7, 10, 14, 32, tzinfo=timezone.utc)
+    payload = make_payload()
+    payload["alerts"] = [
+        {
+            "severity": "high",
+            "kind": "intraday_price_shock",
+            "instrument_id": "index:SPX",
+            "title": "SPX/ES confirmed 急跌 26.2 bps",
+            "detail": "SPX/ES live anchors confirmed the short-window shock.",
+            "quality": "live",
+            "source_gate": "spx_es_intraday_shock_confirmed",
+            "dedup_group": "spx_shock:20260710:down:1432:shock",
+            "event_id": "spx_shock:20260710:down:1432",
+            "source_at": source_at.isoformat(),
+        }
+    ]
+    outbox_path = tmp_path / "delivery-outbox.sqlite"
+    settings = replace(
+        make_settings(str(tmp_path / "notify-state.json")),
+        deepseek_enabled=True,
+        direct_push_llm_enabled=False,
+        delivery_outbox_enabled=True,
+        delivery_outbox_path=str(outbox_path),
+        delivery_outbox_legacy_shadow_enabled=False,
+    )
+    monkeypatch.setattr(
+        "spx_spark.notifier.pipeline.dispatch_notification",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("hot producer must not perform inline delivery")
+        ),
+    )
+
+    result = notify_payload(payload, settings=settings, now=source_at)
+
+    assert result.sent_count == 0
+    assert result.outcome == "queued"
+    assert result.acknowledged_event_ids == (
+        "spx_shock:20260710:down:1432",
+        "spx_shock:20260710:down:1432:shock",
+    )
+    assert [sink.verdict for sink in result.sinks] == ["queued"]
+    with sqlite3.connect(outbox_path) as connection:
+        row = connection.execute(
+            "SELECT status, occurred_at FROM notification_delivery_events"
+        ).fetchone()
+    assert row == ("pending", source_at.isoformat(timespec="microseconds"))
+
+    # Producer acknowledgement prevents a second, changing market snapshot
+    # from attempting to mutate the immutable outbox event.
+    second = notify_payload(
+        {**payload, "as_of": (source_at + timedelta(seconds=5)).isoformat()},
+        settings=settings,
+        now=source_at + timedelta(seconds=5),
+    )
+    assert second.skipped_reason == "no_alerts_after_severity_or_cooldown"
+
+
+def test_async_alert_without_source_event_id_keeps_stable_outbox_identity(tmp_path) -> None:
+    source_at = datetime(2026, 7, 10, 14, 32, tzinfo=timezone.utc)
+    alerts = [
+        {
+            "severity": "high",
+            "kind": "price_move",
+            "instrument_id": "index:SPX",
+            "title": "SPX moved",
+            "detail": "Stable semantic event without a producer event id.",
+            "source_at": source_at.isoformat(),
+        }
+    ]
+    outbox_path = tmp_path / "delivery-outbox.sqlite"
+    settings = replace(
+        make_settings(str(tmp_path / "notify-state.json")),
+        delivery_outbox_enabled=True,
+        delivery_outbox_path=str(outbox_path),
+        delivery_outbox_legacy_shadow_enabled=False,
+    )
+    def runner(*_args, **_kwargs) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess([], 0, "", "")
+
+    for now in (source_at, source_at + timedelta(seconds=5)):
+        sinks = _dispatch_alerts(
+            payload={"as_of": now.isoformat()},
+            alerts=alerts,
+            settings=settings,
+            title="SPX moved",
+            text="Stable payload",
+            kind="direct_alert",
+            lane="market",
+            friend=False,
+            runner=runner,
+            now=now,
+        )
+        assert [sink.verdict for sink in sinks] == ["queued"]
+
+    with sqlite3.connect(outbox_path) as connection:
+        rows = connection.execute(
+            "SELECT event_id, occurred_at FROM notification_delivery_events"
+        ).fetchall()
+    assert len(rows) == 1
+    assert rows[0][1] == source_at.isoformat(timespec="microseconds")
 
 
 def test_call_path_delivers_without_reviewer_and_records_strategy_ack(tmp_path) -> None:

@@ -358,6 +358,15 @@ def load_settings(
         virtual_iv_drop_vol_points=float(get("market_features.virtual_iv_drop_vol_points")),
         virtual_wall_touch_points=float(get("market_features.virtual_wall_touch_points")),
         virtual_gth_time_stop_minutes=int(get("market_features.virtual_gth_time_stop_minutes")),
+        virtual_gth_exit_clock_et=str(get("intraday_shock.gth_exit_clock_et")),
+        virtual_gth_spread_saturation_fraction=float(
+            get("market_features.virtual_gth_spread_saturation_fraction")
+        ),
+        play_stats_enabled=bool(get("market_features.play_stats_enabled")),
+        play_stats_window_days=int(get("market_features.play_stats_window_days")),
+        play_stats_horizon=str(get("market_features.play_stats_horizon")),
+        play_stats_min_samples=int(get("market_features.play_stats_min_samples")),
+        play_stats_refresh_seconds=float(get("market_features.play_stats_refresh_seconds")),
     )
 
     ibkr = IbkrSettingsSlice(
@@ -547,6 +556,15 @@ def load_settings(
         gth_session_warmup_seconds=int(get("intraday_shock.gth_session_warmup_seconds")),
         gth_max_signals_per_session=int(get("intraday_shock.gth_max_signals_per_session")),
         gth_cooldown_seconds=int(get("intraday_shock.gth_cooldown_seconds")),
+        gth_spread_min_width_points=float(get("intraday_shock.gth_spread_min_width_points")),
+        gth_spread_max_width_points=float(get("intraday_shock.gth_spread_max_width_points")),
+        gth_spread_default_width_points=float(
+            get("intraday_shock.gth_spread_default_width_points")
+        ),
+        gth_structure_max_age_seconds=float(
+            get("intraday_shock.gth_structure_max_age_seconds")
+        ),
+        gth_exit_clock_et=str(get("intraday_shock.gth_exit_clock_et")),
         data_root=data_root,
     )
     level_decision = LevelDecisionPolicy(

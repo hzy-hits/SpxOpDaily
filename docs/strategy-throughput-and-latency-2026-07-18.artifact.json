@@ -1,0 +1,871 @@
+{
+  "surface": "report",
+  "manifest": {
+    "version": 1,
+    "surface": "report",
+    "title": "SPX 0DTE：每日 1–2 笔目标的门禁与实时性诊断",
+    "description": "四个健康完整 session 的机会漏斗、历史/当前执行节奏、GTH exact-spread 数据缺口，以及不牺牲安全门的提频方案。",
+    "generatedAt": "2026-07-18T15:37:52.872708+00:00",
+    "sources": [
+      {
+        "id": "diagnostic_notebook",
+        "label": "Reproducible throughput and latency diagnostic",
+        "path": "notebooks/0dte-throughput-latency-diagnostic-2026-07-18.ipynb",
+        "query": {
+          "engine": "Python standard-library notebook + systemd journal",
+          "id": "0dte-throughput-latency-2026-07-18",
+          "sql": "SELECT 4 AS rth_confirmed, 3 AS material_intents, 2 AS trade_ready, 2 AS fresh_exact_l1, 1 AS strict_fill",
+          "description": "Fixed-cutoff event funnel, decision latency, RTH service cadence and GTH readiness reconciliation.",
+          "executed_at": "2026-07-18T15:37:52.872708+00:00",
+          "language": "python",
+          "filters": [
+            "exclusive cutoff 2026-07-18T00:00:00Z",
+            "health-complete sessions 2026-07-14 through 2026-07-17",
+            "RTH 13:30 <= UTC < 20:00",
+            "opportunities deduplicated by payload event/intent ID"
+          ],
+          "metric_definitions": [
+            "Material intent is a non-observing persisted intent evaluation.",
+            "Strict fill is the recorded-provider ask at or below the persisted limit before the exclusive entry expiry and before target/invalidation.",
+            "Runner finished_at is currently emitted before execution, so service gap is measured between consecutive market_features scheduler start markers during RTH."
+          ],
+          "tables_used": [
+            "features/level_trigger_repricing",
+            "features/trade_intents",
+            "features/gth_dip_reclaim",
+            "features/virtual_strategy",
+            "systemd user journal: spx-spark-24h.service"
+          ]
+        }
+      },
+      {
+        "id": "strict_backtest",
+        "label": "Production trade-ready strict replay",
+        "query": {
+          "engine": "spx-spark odte_level_backtest",
+          "id": "validation-2026-07-18-contract-v3-cutoff-2026-07-17",
+          "sql": "SELECT 14 AS confirmed, 2 AS trade_ready, 1 AS strict_fills, 800.0 AS replay_pnl_usd, 0 AS gth_forward_exact_entries",
+          "description": "Point-in-time replay of persisted production decisions and forward-only readiness state.",
+          "executed_at": "2026-07-18T14:19:09.442436+00:00",
+          "language": "python",
+          "filters": [
+            "automatic ordering disabled",
+            "observing telemetry excluded from pass/block and PnL",
+            "prefill proxy excluded from production totals"
+          ],
+          "metric_definitions": [
+            "Trade-ready is a unique persisted production decision.",
+            "Forward v3 evidence excludes all legacy v1/v2 records."
+          ],
+          "tables_used": [
+            "reports/odte_level_backtest/validation=2026-07-18-contract-v3/cutoff=2026-07-17",
+            "lake/quotes/schema=v1"
+          ]
+        }
+      },
+      {
+        "id": "runtime_journal",
+        "label": "Production scheduler cadence",
+        "query": {
+          "engine": "journalctl",
+          "id": "spx-spark-market-features-rth-2026-07-14-17",
+          "sql": "SELECT session_date, percentile_cont(0.5) WITHIN GROUP (ORDER BY start_gap_seconds) AS gap_p50 FROM market_features_runs GROUP BY session_date",
+          "description": "RTH market_features scheduler start-to-start cadence and task duration from the live service journal; runner finished_at is a pre-execution marker in this build.",
+          "executed_at": "2026-07-18T15:37:52.872708+00:00",
+          "language": "shell+python",
+          "filters": [
+            "unit spx-spark-24h.service",
+            "task market_features",
+            "2026-07-14 through 2026-07-17 RTH"
+          ],
+          "tables_used": [
+            "systemd journal"
+          ]
+        }
+      },
+      {
+        "id": "runtime_code",
+        "label": "Current decision-path implementation review",
+        "query": {
+          "engine": "repository source inspection",
+          "id": "market-features-hot-path-2026-07-18",
+          "sql": "SELECT 'intent -> synchronous reasoning/notification -> virtual execution' AS observed_ordering",
+          "description": "Read-only review of service ordering, scheduler configuration, time capture and notification timeouts.",
+          "executed_at": "2026-07-18T15:37:52.872708+00:00",
+          "language": "python+yaml",
+          "filters": [
+            "current working tree",
+            "no product code changes in this diagnostic"
+          ],
+          "tables_used": [
+            "src/spx_spark/application/market_features/service.py",
+            "src/spx_spark/application/market_features/trade_intent_runtime.py",
+            "src/spx_spark/application/runtime/runner.py",
+            "config/runtime.yaml"
+          ]
+        }
+      },
+      {
+        "id": "report_narrative",
+        "label": "Diagnostic recommendation narrative",
+        "path": "strategy-throughput-and-latency-2026-07-18.md",
+        "query": {
+          "engine": "evidence-backed report snapshot",
+          "id": "0dte-throughput-operating-plan-2026-07-18",
+          "sql": "SELECT * FROM execution_slo ORDER BY priority",
+          "description": "Gate disposition, execution SLO and staged engineering recommendation.",
+          "executed_at": "2026-07-18T15:37:52.872708+00:00",
+          "language": "sql"
+        }
+      }
+    ],
+    "cards": [
+      {
+        "id": "confirmed_supply",
+        "description": "Four health-complete sessions, deduplicated by event ID.",
+        "dataset": "headline",
+        "sourceId": "diagnostic_notebook",
+        "metrics": [
+          {
+            "label": "Confirmed events",
+            "field": "confirmed_events",
+            "format": "number"
+          }
+        ]
+      },
+      {
+        "id": "rth_capture",
+        "description": "Share of RTH confirmed events that reached a material persisted intent.",
+        "dataset": "headline",
+        "sourceId": "diagnostic_notebook",
+        "metrics": [
+          {
+            "label": "RTH intent capture",
+            "field": "rth_intent_capture",
+            "format": "percent"
+          }
+        ]
+      },
+      {
+        "id": "ready_per_session",
+        "description": "Unique production trade-ready decisions per health-complete session.",
+        "dataset": "headline",
+        "sourceId": "strict_backtest",
+        "metrics": [
+          {
+            "label": "Trade-ready / session",
+            "field": "ready_per_session",
+            "format": "number"
+          }
+        ]
+      },
+      {
+        "id": "fill_per_session",
+        "description": "Strict point-in-time replay fills per health-complete session.",
+        "dataset": "headline",
+        "sourceId": "strict_backtest",
+        "metrics": [
+          {
+            "label": "Strict fills / session",
+            "field": "fill_per_session",
+            "format": "number"
+          }
+        ]
+      },
+      {
+        "id": "gth_forward_exact",
+        "description": "Forward-v3 GTH entries with exact two-leg execution evidence.",
+        "dataset": "headline",
+        "sourceId": "strict_backtest",
+        "metrics": [
+          {
+            "label": "GTH exact entries",
+            "field": "gth_exact_entries",
+            "format": "number"
+          }
+        ]
+      },
+      {
+        "id": "current_cadence",
+        "description": "July 17 RTH median market_features scheduler start-to-start gap.",
+        "dataset": "headline",
+        "sourceId": "runtime_journal",
+        "metrics": [
+          {
+            "label": "Current cadence (s)",
+            "field": "current_cadence_seconds",
+            "format": "number"
+          }
+        ]
+      }
+    ],
+    "charts": [
+      {
+        "id": "rth_funnel_chart",
+        "title": "RTH opportunity funnel",
+        "subtitle": "Independent opportunities across four health-complete sessions",
+        "intent": "comparison",
+        "question": "Where does the production opportunity flow lose capacity?",
+        "rationale": "A stage bar chart makes the small denominator and upstream capture loss explicit.",
+        "type": "bar",
+        "dataset": "rth_funnel",
+        "sourceId": "diagnostic_notebook",
+        "encodings": {
+          "x": {
+            "field": "stage",
+            "type": "nominal",
+            "label": "Stage"
+          },
+          "y": {
+            "field": "opportunities",
+            "type": "quantitative",
+            "format": "number",
+            "label": "Independent opportunities"
+          },
+          "tooltip": [
+            {
+              "field": "opportunities",
+              "type": "quantitative",
+              "format": "number",
+              "label": "Opportunities"
+            },
+            {
+              "field": "conversion",
+              "type": "quantitative",
+              "format": "percent",
+              "label": "From RTH confirmed"
+            }
+          ]
+        },
+        "valueFormat": "number",
+        "layout": "full",
+        "labels": {
+          "values": "all"
+        },
+        "maxRows": 5,
+        "palette": {
+          "kind": "identity",
+          "name": "blue"
+        },
+        "settings": {
+          "categoryLabelPolicy": "wrap",
+          "groupMode": "single",
+          "showValues": true,
+          "sort": "none"
+        },
+        "surface": {
+          "surface": "export",
+          "interactiveLegend": false,
+          "showControls": false,
+          "viewMode": "visualization"
+        }
+      },
+      {
+        "id": "cadence_chart",
+        "title": "RTH decision-service cadence changed materially",
+        "subtitle": "Median scheduler start-to-start gap; lower is faster",
+        "intent": "trend",
+        "question": "Did the production polling cadence improve during the evidence window?",
+        "rationale": "A chronological bar chart shows the discrete cadence rollout without implying more precision than four sessions support.",
+        "type": "bar",
+        "dataset": "cadence",
+        "sourceId": "runtime_journal",
+        "encodings": {
+          "x": {
+            "field": "session",
+            "type": "nominal",
+            "label": "RTH session"
+          },
+          "y": {
+            "field": "gap_p50_seconds",
+            "type": "quantitative",
+            "format": "number",
+            "label": "Median start-to-start gap (s)"
+          },
+          "tooltip": [
+            {
+              "field": "runs",
+              "type": "quantitative",
+              "format": "number",
+              "label": "Runs"
+            },
+            {
+              "field": "gap_p95_seconds",
+              "type": "quantitative",
+              "format": "number",
+              "label": "Gap p95 (s)"
+            },
+          {
+            "field": "duration_p50_seconds",
+            "type": "quantitative",
+            "format": "number",
+            "label": "Duration p50 (s)"
+          },
+          {
+            "field": "gaps_over_10_seconds",
+            "type": "quantitative",
+            "format": "number",
+            "label": "Gaps >10s"
+          },
+          {
+            "field": "max_gap_seconds",
+            "type": "quantitative",
+            "format": "number",
+            "label": "Max gap (s)"
+          }
+          ]
+        },
+        "valueFormat": "number",
+        "layout": "full",
+        "labels": {
+          "values": "all"
+        },
+        "maxRows": 4,
+        "palette": {
+          "kind": "identity",
+          "name": "orange"
+        },
+        "settings": {
+          "categoryLabelPolicy": "wrap",
+          "groupMode": "single",
+          "showValues": true,
+          "sort": "none"
+        },
+        "surface": {
+          "surface": "export",
+          "interactiveLegend": false,
+          "showControls": false,
+          "viewMode": "visualization"
+        }
+      }
+    ],
+    "tables": [
+      {
+        "id": "rth_events_table",
+        "title": "Four RTH confirmed opportunities",
+        "subtitle": "One event never reached material intent; two reached trade-ready with fresh quotes.",
+        "dataset": "rth_events",
+        "sourceId": "diagnostic_notebook",
+        "defaultSort": {
+          "field": "confirmed_at",
+          "direction": "asc"
+        },
+        "density": "spacious",
+        "layout": "full",
+        "columns": [
+          {
+            "field": "confirmed_at",
+            "label": "Confirmed UTC",
+            "type": "text"
+          },
+          {
+            "field": "direction",
+            "label": "Direction",
+            "type": "text"
+          },
+          {
+            "field": "final_state",
+            "label": "Final state",
+            "type": "text"
+          },
+          {
+            "field": "decision_delay_seconds",
+            "label": "Confirm→decision s",
+            "format": "number"
+          },
+          {
+            "field": "quote_age_seconds",
+            "label": "Quote age s",
+            "format": "number"
+          },
+          {
+            "field": "strict_outcome",
+            "label": "Strict outcome",
+            "type": "text"
+          }
+        ]
+      },
+      {
+        "id": "gate_disposition_table",
+        "title": "Gate disposition",
+        "subtitle": "Safety, data acquisition, strategy and research readiness must not share one blocked bucket.",
+        "dataset": "gate_disposition",
+        "sourceId": "runtime_code",
+        "density": "spacious",
+        "layout": "full",
+        "columns": [
+          {
+            "field": "class",
+            "label": "Class",
+            "type": "text"
+          },
+          {
+            "field": "examples",
+            "label": "Examples",
+            "type": "text"
+          },
+          {
+            "field": "runtime_state",
+            "label": "Runtime state",
+            "type": "text"
+          },
+          {
+            "field": "decision",
+            "label": "Decision",
+            "type": "text"
+          }
+        ]
+      },
+      {
+        "id": "execution_slo_table",
+        "title": "Operating target and execution SLO",
+        "subtitle": "The daily goal becomes a weekly capacity target with explicit capture and latency guardrails.",
+        "dataset": "execution_slo",
+        "sourceId": "report_narrative",
+        "density": "spacious",
+        "layout": "full",
+        "columns": [
+          {
+            "field": "metric",
+            "label": "Metric",
+            "type": "text"
+          },
+          {
+            "field": "target",
+            "label": "Target",
+            "type": "text"
+          },
+          {
+            "field": "current",
+            "label": "Current evidence",
+            "type": "text"
+          },
+          {
+            "field": "status",
+            "label": "Status",
+            "type": "text"
+          }
+        ]
+      }
+    ],
+    "blocks": [
+      {
+        "id": "title",
+        "type": "markdown",
+        "layout": "full",
+        "body": "# SPX 0DTE：每日 1–2 笔目标的门禁与实时性诊断\n\n**结论：历史执行确实慢；当前仍不是实时 execution lane；但没有证据证明硬安全门是主要瓶颈。**"
+      },
+      {
+        "id": "executive_summary",
+        "type": "markdown",
+        "layout": "full",
+        "sourceId": "report_narrative",
+        "body": "## Executive Summary\n\n四个健康完整 session 的 RTH 漏斗是 4 confirmed → 3 material intent → 2 trade-ready → 2 fresh exact L1 → 1 strict replay fill。严格回放只有 0.25 笔/session，距离每日 1–2 笔明显不足；但一个 RTH confirmed 根本没有进入 intent，GTH forward exact entry 又是 0，因此主要证据指向采集和执行热路径，而不是整体放松门禁。\n\n7 月 14–15 日服务中位 cadence 约 62 秒，7 月 16–17 日改善到约 5 秒；两个 trade-ready 都发生在旧 cadence 下，在确认后 47.45/82.38 秒才落地，决策 quote age 却只有 0.73/1.86 秒。新 5 秒 cadence 尚无新的 trade-ready 样本可做端到端验证，且结构上仍是轮询告警/虚拟执行。建议把目标定义为平均每周 5–10 个合格操作、每天最多 2 个、允许无交易日。"
+      },
+      {
+        "id": "headline_metrics",
+        "type": "metric-strip",
+        "layout": "full",
+        "cardIds": [
+          "confirmed_supply",
+          "rth_capture",
+          "ready_per_session",
+          "fill_per_session",
+          "gth_forward_exact",
+          "current_cadence"
+        ]
+      },
+      {
+        "id": "funnel_chart_block",
+        "type": "chart",
+        "layout": "full",
+        "chartId": "rth_funnel_chart"
+      },
+      {
+        "id": "funnel_interpretation",
+        "type": "markdown",
+        "layout": "full",
+        "sourceId": "diagnostic_notebook",
+        "body": "漏斗说明低产量不只是策略拒绝：4 个 RTH confirmed 中只有 3 个留下 material intent，先损失了 25% capture；两个 fresh exact L1 决策中一个严格回放成交、另一个 target_before_entry。20-session readiness 只是离线研究晋级条件，不参与这个 runtime 漏斗。"
+      },
+      {
+        "id": "rth_events_block",
+        "type": "table",
+        "layout": "full",
+        "tableId": "rth_events_table"
+      },
+      {
+        "id": "cadence_chart_block",
+        "type": "chart",
+        "layout": "full",
+        "chartId": "cadence_chart"
+      },
+      {
+        "id": "cadence_interpretation",
+        "type": "markdown",
+        "layout": "full",
+        "sourceId": "runtime_journal",
+        "body": "轮询从约 62 秒缩短到约 5 秒是实质改善，但新 cadence 尚无 trade-ready 样本可验证端到端延迟，5 秒 scheduler cadence 也不等于实时交易。当前热路径仍会在持久化 virtual action 前执行同步推理/通知，并与慢任务共享 worker；action 还可能复用服务开头捕获的旧时间，形成 TOCTOU 风险。"
+      },
+      {
+        "id": "gth_diagnosis",
+        "type": "markdown",
+        "layout": "full",
+        "sourceId": "strict_backtest",
+        "body": "## GTH 不是靠放宽 stale quote 修复\n\nGTH dip/reclaim 已有 6 个 legacy 信号，但 forward-v3 exact two-leg entry 为 0。旧 virtual open 缺 provider、source timestamp、bid/ask 和 exact spread legs，不能证明真实成交。5 秒 freshness 应继续 hard；在 pending 阶段预订阅目标 long/short 两腿并保持 hot lane，同时 shadow 记录 5/10/15 秒覆盖率。"
+      },
+      {
+        "id": "gate_disposition_block",
+        "type": "table",
+        "layout": "full",
+        "tableId": "gate_disposition_table"
+      },
+      {
+        "id": "gate_interpretation",
+        "type": "markdown",
+        "layout": "full",
+        "sourceId": "runtime_code",
+        "body": "把 option structure、候选或行情暂缺改为 pending_data 并在 TTL 内重试；把方向/regime 归入 rejected_strategy；schema、TTL、coordinate、expiry、exact NBBO、freshness 和 max loss 继续 blocked_safety。只有软策略门进入 shadow counterfactual，不能用缺数据来证明策略太严。"
+      },
+      {
+        "id": "execution_slo_block",
+        "type": "table",
+        "layout": "full",
+        "tableId": "execution_slo_table"
+      },
+      {
+        "id": "recommended_next_steps",
+        "type": "markdown",
+        "layout": "full",
+        "sourceId": "report_narrative",
+        "body": "## Recommended Next Steps\n\n1. P0：detector/intent/quote/action 确定性校验后先持久化；LLM、Bark、飞书全部走 async outbox。\n2. P0：action 点使用新 wall clock 和新 quote，隔离交易 hot worker，并记录 detector→intent→quote→persist→deliver 分段耗时。\n3. P0：GTH pending 时热订阅精确双腿，避免 24 秒轮转与 5 秒 freshness 冲突。\n4. P1：shadow 评估 ES 1m opposition、冗余微观确认、5/10/15 秒 freshness 和 15/30 秒 entry window。\n5. 20 个 forward complete sessions 与 exact-spread cohorts 前，不晋级 GTH、Put 或退出规则；automatic ordering 保持关闭。"
+      },
+      {
+        "id": "limitations",
+        "type": "markdown",
+        "layout": "full",
+        "sourceId": "report_narrative",
+        "body": "## Caveats\n\nproduction trade-ready 只有 2 个，strict replay fill 只有 1 个；没有足够样本证明策略 edge，也没有足够样本证明删除软门会改善收益。Top-of-book 回放不含队列、滑点、部分成交、佣金或人工反应延迟。本报告用于工程诊断和研究裁决，不构成投资建议；automatic_ordering=False。"
+      },
+      {
+        "id": "further_questions",
+        "type": "markdown",
+        "layout": "full",
+        "sourceId": "report_narrative",
+        "body": "## Further Questions\n\n- 修复热路径后，confirmed→material intent capture 能否稳定达到 90%？\n- GTH 两腿预热后，5 秒 exact freshness 的同步覆盖率是多少？\n- 20 个 forward session 后，软策略拒绝对同 cohort 收益和回撤的贡献是多少？\n- 何时把真实 broker order/fill 状态机纳入端到端 SLO？"
+      }
+    ]
+  },
+  "snapshot": {
+    "version": 1,
+    "generatedAt": "2026-07-18T15:37:52.872708+00:00",
+    "status": "ready",
+    "datasets": {
+      "headline": [
+        {
+          "confirmed_events": 14,
+          "rth_intent_capture": 0.75,
+          "ready_per_session": 0.5,
+          "fill_per_session": 0.25,
+          "gth_exact_entries": 0,
+          "current_cadence_seconds": 5.009
+        }
+      ],
+      "rth_funnel": [
+        {
+          "stage_order": 1,
+          "stage": "Confirmed RTH",
+          "opportunities": 4,
+          "conversion": 1.0
+        },
+        {
+          "stage_order": 2,
+          "stage": "Material intent",
+          "opportunities": 3,
+          "conversion": 0.75
+        },
+        {
+          "stage_order": 3,
+          "stage": "Trade-ready",
+          "opportunities": 2,
+          "conversion": 0.5
+        },
+        {
+          "stage_order": 4,
+          "stage": "Fresh exact L1",
+          "opportunities": 2,
+          "conversion": 0.5
+        },
+        {
+          "stage_order": 5,
+          "stage": "Strict replay fill",
+          "opportunities": 1,
+          "conversion": 0.25
+        }
+      ],
+      "cadence": [
+        {
+          "session": "2026-07-14",
+          "runs": 378,
+          "gap_p50_seconds": 62.089,
+          "gap_p95_seconds": 63.058,
+          "gap_p99_seconds": 63.638,
+          "duration_p50_seconds": 1.984,
+          "gaps_over_10_seconds": 377,
+          "max_gap_seconds": 84.133
+        },
+        {
+          "session": "2026-07-15",
+          "runs": 371,
+          "gap_p50_seconds": 62.744,
+          "gap_p95_seconds": 64.125,
+          "gap_p99_seconds": 65.214,
+          "duration_p50_seconds": 2.455,
+          "gaps_over_10_seconds": 370,
+          "max_gap_seconds": 79.871
+        },
+        {
+          "session": "2026-07-16",
+          "runs": 4471,
+          "gap_p50_seconds": 5.006,
+          "gap_p95_seconds": 6.36,
+          "gap_p99_seconds": 10.091,
+          "duration_p50_seconds": 2.735,
+          "gaps_over_10_seconds": 47,
+          "max_gap_seconds": 106.629
+        },
+        {
+          "session": "2026-07-17",
+          "runs": 4551,
+          "gap_p50_seconds": 5.009,
+          "gap_p95_seconds": 6.104,
+          "gap_p99_seconds": 7.219,
+          "duration_p50_seconds": 3.262,
+          "gaps_over_10_seconds": 2,
+          "max_gap_seconds": 13.015
+        }
+      ],
+      "rth_events": [
+        {
+          "confirmed_at": "2026-07-14 14:32:30Z",
+          "direction": "up / call",
+          "final_state": "trade_ready",
+          "decision_delay_seconds": 82.38,
+          "quote_age_seconds": 1.86,
+          "strict_outcome": "fill; +$800 replay"
+        },
+        {
+          "confirmed_at": "2026-07-15 14:54:33Z",
+          "direction": "down / put",
+          "final_state": "rejected_strategy",
+          "decision_delay_seconds": 38.97,
+          "quote_age_seconds": null,
+          "strict_outcome": "ES 1m opposed"
+        },
+        {
+          "confirmed_at": "2026-07-15 15:50:03Z",
+          "direction": "down / put",
+          "final_state": "trade_ready",
+          "decision_delay_seconds": 47.45,
+          "quote_age_seconds": 0.73,
+          "strict_outcome": "target_before_entry"
+        },
+        {
+          "confirmed_at": "2026-07-15 17:49:27Z",
+          "direction": "up / call",
+          "final_state": "no material intent",
+          "decision_delay_seconds": null,
+          "quote_age_seconds": null,
+          "strict_outcome": "capture gap"
+        }
+      ],
+      "gate_disposition": [
+        {
+          "order": 1,
+          "class": "Safety",
+          "examples": "schema/policy/coordinate/expiry/TTL; exact NBBO; max loss",
+          "runtime_state": "blocked_safety",
+          "decision": "Keep hard"
+        },
+        {
+          "order": 2,
+          "class": "Data acquisition",
+          "examples": "structure/candidate/quote unavailable",
+          "runtime_state": "pending_data",
+          "decision": "Retry within TTL; not strategy reject"
+        },
+        {
+          "order": 3,
+          "class": "Strategy",
+          "examples": "ES 1m opposition; redundant micro-confirmations",
+          "runtime_state": "rejected_strategy",
+          "decision": "Shadow counterfactual first"
+        },
+        {
+          "order": 4,
+          "class": "Research readiness",
+          "examples": "20 complete sessions and exact-spread cohorts",
+          "runtime_state": "offline review",
+          "decision": "Never suppress runtime opportunities"
+        }
+      ],
+      "execution_slo": [
+        {
+          "order": 1,
+          "metric": "Qualified operations",
+          "target": "5–10/week; max 2/day; zero-day valid",
+          "current": "1 strict fill / 4 sessions",
+          "status": "Below capacity target"
+        },
+        {
+          "order": 2,
+          "metric": "Valid-signal capture",
+          "target": ">=90%",
+          "current": "3/4 RTH confirmed reached material intent",
+          "status": "75%"
+        },
+        {
+          "order": 3,
+          "metric": "Detector→intent",
+          "target": "p95 <1s excluding explicit hold",
+          "current": "47.45s and 82.38s for ready events",
+          "status": "Not met"
+        },
+        {
+          "order": 4,
+          "metric": "Fresh quote→persist",
+          "target": "p95 <0.5s",
+          "current": "No end-to-end span",
+          "status": "Not instrumented"
+        },
+        {
+          "order": 5,
+          "metric": "RTH cadence",
+          "target": "p95 gap <=5.5s; none >10s",
+          "current": "Jul-17 p95 6.10s; 2 gaps >10s; max 13.02s",
+          "status": "Near, not met"
+        },
+        {
+          "order": 6,
+          "metric": "GTH exact-spread evidence",
+          "target": ">=20 entries before promotion",
+          "current": "0",
+          "status": "Collecting"
+        }
+      ]
+    }
+  },
+  "sources": [
+    {
+      "id": "diagnostic_notebook",
+      "label": "Reproducible throughput and latency diagnostic",
+      "path": "notebooks/0dte-throughput-latency-diagnostic-2026-07-18.ipynb",
+      "query": {
+        "engine": "Python standard-library notebook + systemd journal",
+        "id": "0dte-throughput-latency-2026-07-18",
+        "sql": "SELECT 4 AS rth_confirmed, 3 AS material_intents, 2 AS trade_ready, 2 AS fresh_exact_l1, 1 AS strict_fill",
+        "description": "Fixed-cutoff event funnel, decision latency, RTH service cadence and GTH readiness reconciliation.",
+        "executed_at": "2026-07-18T15:37:52.872708+00:00",
+        "language": "python",
+        "filters": [
+          "exclusive cutoff 2026-07-18T00:00:00Z",
+          "health-complete sessions 2026-07-14 through 2026-07-17",
+          "RTH 13:30 <= UTC < 20:00",
+          "opportunities deduplicated by payload event/intent ID"
+        ],
+        "metric_definitions": [
+          "Material intent is a non-observing persisted intent evaluation.",
+          "Strict fill is the recorded-provider ask at or below the persisted limit before the exclusive entry expiry and before target/invalidation.",
+          "Runner finished_at is currently emitted before execution, so service gap is measured between consecutive market_features scheduler start markers during RTH."
+        ],
+        "tables_used": [
+          "features/level_trigger_repricing",
+          "features/trade_intents",
+          "features/gth_dip_reclaim",
+          "features/virtual_strategy",
+          "systemd user journal: spx-spark-24h.service"
+        ]
+      }
+    },
+    {
+      "id": "strict_backtest",
+      "label": "Production trade-ready strict replay",
+      "query": {
+        "engine": "spx-spark odte_level_backtest",
+        "id": "validation-2026-07-18-contract-v3-cutoff-2026-07-17",
+        "sql": "SELECT 14 AS confirmed, 2 AS trade_ready, 1 AS strict_fills, 800.0 AS replay_pnl_usd, 0 AS gth_forward_exact_entries",
+        "description": "Point-in-time replay of persisted production decisions and forward-only readiness state.",
+        "executed_at": "2026-07-18T14:19:09.442436+00:00",
+        "language": "python",
+        "filters": [
+          "automatic ordering disabled",
+          "observing telemetry excluded from pass/block and PnL",
+          "prefill proxy excluded from production totals"
+        ],
+        "metric_definitions": [
+          "Trade-ready is a unique persisted production decision.",
+          "Forward v3 evidence excludes all legacy v1/v2 records."
+        ],
+        "tables_used": [
+          "reports/odte_level_backtest/validation=2026-07-18-contract-v3/cutoff=2026-07-17",
+          "lake/quotes/schema=v1"
+        ]
+      }
+    },
+    {
+      "id": "runtime_journal",
+      "label": "Production scheduler cadence",
+      "query": {
+        "engine": "journalctl",
+        "id": "spx-spark-market-features-rth-2026-07-14-17",
+        "sql": "SELECT session_date, percentile_cont(0.5) WITHIN GROUP (ORDER BY start_gap_seconds) AS gap_p50 FROM market_features_runs GROUP BY session_date",
+        "description": "RTH market_features scheduler start-to-start cadence and task duration from the live service journal; runner finished_at is a pre-execution marker in this build.",
+        "executed_at": "2026-07-18T15:37:52.872708+00:00",
+        "language": "shell+python",
+        "filters": [
+          "unit spx-spark-24h.service",
+          "task market_features",
+          "2026-07-14 through 2026-07-17 RTH"
+        ],
+        "tables_used": [
+          "systemd journal"
+        ]
+      }
+    },
+    {
+      "id": "runtime_code",
+      "label": "Current decision-path implementation review",
+      "query": {
+        "engine": "repository source inspection",
+        "id": "market-features-hot-path-2026-07-18",
+        "sql": "SELECT 'intent -> synchronous reasoning/notification -> virtual execution' AS observed_ordering",
+        "description": "Read-only review of service ordering, scheduler configuration, time capture and notification timeouts.",
+        "executed_at": "2026-07-18T15:37:52.872708+00:00",
+        "language": "python+yaml",
+        "filters": [
+          "current working tree",
+          "no product code changes in this diagnostic"
+        ],
+        "tables_used": [
+          "src/spx_spark/application/market_features/service.py",
+          "src/spx_spark/application/market_features/trade_intent_runtime.py",
+          "src/spx_spark/application/runtime/runner.py",
+          "config/runtime.yaml"
+        ]
+      }
+    },
+    {
+      "id": "report_narrative",
+      "label": "Diagnostic recommendation narrative",
+      "path": "strategy-throughput-and-latency-2026-07-18.md",
+      "query": {
+        "engine": "evidence-backed report snapshot",
+        "id": "0dte-throughput-operating-plan-2026-07-18",
+        "sql": "SELECT * FROM execution_slo ORDER BY priority",
+        "description": "Gate disposition, execution SLO and staged engineering recommendation.",
+        "executed_at": "2026-07-18T15:37:52.872708+00:00",
+        "language": "sql"
+      }
+    }
+  ]
+}

@@ -11,6 +11,13 @@ from typing import Mapping
 
 from spx_spark.config import StorageSettings
 from spx_spark.state_io import atomic_write_json_secure, exclusive_state_lock, read_json_object
+from spx_spark.strategy_contract import (
+    STRATEGY_EVENT_SCHEMA_VERSION,
+    normalize_block_reasons,
+    parse_aware_time,
+    policy_version,
+    strategy_event_fields,
+)
 
 
 TERMINAL_LEVEL_PHASES = frozenset({"invalidated", "expired"})
@@ -54,7 +61,7 @@ def reconcile_confirmed_gate(
 
         if event_id and phase == "confirmed" and event_id not in completed:
             if not pending:
-                pending = _pending(level_decision, now=now)
+                pending = _pending(level_decision, intent, now=now)
             evaluated_event = str(intent.get("event_id") or "")
             evaluated_status = str(intent.get("status") or "observing")
             if evaluated_event == event_id and evaluated_status == "trade_ready":
@@ -114,8 +121,31 @@ def reconcile_confirmed_gate(
         return {"status": "observing", "event_id": event_id or None, "phase": phase}
 
 
-def _pending(level: Mapping[str, object], *, now: datetime) -> dict[str, object]:
+def _pending(
+    level: Mapping[str, object],
+    intent: Mapping[str, object],
+    *,
+    now: datetime,
+) -> dict[str, object]:
+    raw_coordinate = intent.get("coordinate")
+    if not isinstance(raw_coordinate, Mapping):
+        raw_coordinate = level.get("trigger_coordinate")
+    coordinate = dict(raw_coordinate) if isinstance(raw_coordinate, Mapping) else None
+    valid_until = parse_aware_time(intent.get("valid_until")) or parse_aware_time(
+        level.get("expires_at")
+    )
+    source_policy_version = str(intent.get("policy_version") or "") or None
+    gate_policy_version = policy_version(
+        "confirmed_gate.v3",
+        {"source_policy_version": source_policy_version or "unavailable"},
+    )
     return {
+        **strategy_event_fields(
+            policy_version_value=gate_policy_version,
+            valid_until=valid_until,
+            coordinate=coordinate,
+            block_reasons=(),
+        ),
         "event_id": level.get("event_id"),
         "confirmed_at": level.get("phase_at") or level.get("confirmed_at") or now.isoformat(),
         "direction": level.get("direction"),
@@ -126,6 +156,8 @@ def _pending(level: Mapping[str, object], *, now: datetime) -> dict[str, object]
         "last_evaluated_at": now.isoformat(),
         "last_trade_status": "observing",
         "last_block_reasons": [],
+        "source_schema_version": intent.get("schema_version"),
+        "source_policy_version": source_policy_version,
     }
 
 
@@ -139,11 +171,34 @@ def _finalize(
 ) -> dict[str, object]:
     event_id = str(pending.get("event_id") or "")
     record_key = "confirmed-gate:" + hashlib.sha256(event_id.encode()).hexdigest()[:24]
+    source_issues: list[str] = []
+    if pending.get("source_schema_version") != STRATEGY_EVENT_SCHEMA_VERSION:
+        source_issues.append("source_strategy_schema_unsupported")
+    if not str(pending.get("source_policy_version") or ""):
+        source_issues.append("source_policy_version_unavailable")
+    valid_until = parse_aware_time(pending.get("valid_until"))
+    if valid_until is None:
+        source_issues.append("source_valid_until_unavailable")
+    raw_coordinate = pending.get("coordinate")
+    coordinate = dict(raw_coordinate) if isinstance(raw_coordinate, Mapping) else None
+    if not coordinate or coordinate.get("kind") == "unavailable":
+        source_issues.append("source_coordinate_unavailable")
+    normalized_reasons = normalize_block_reasons([*reasons, *source_issues])
+    effective_status = "blocked" if status == "trade_ready" and source_issues else status
+    gate_policy_version = str(pending.get("policy_version") or "") or policy_version(
+        "confirmed_gate.v3",
+        {"source_policy_version": pending.get("source_policy_version") or "unavailable"},
+    )
     return {
-        "schema_version": 1,
+        **strategy_event_fields(
+            policy_version_value=gate_policy_version,
+            valid_until=valid_until,
+            coordinate=coordinate,
+            block_reasons=normalized_reasons,
+        ),
         "record_key": record_key,
         "event_id": event_id,
-        "status": status,
+        "status": effective_status,
         "terminal": True,
         "terminal_at": now.isoformat(),
         "confirmed_at": pending.get("confirmed_at"),
@@ -152,7 +207,8 @@ def _finalize(
         "level_kind": pending.get("level_kind"),
         "level": pending.get("level"),
         "session_id": pending.get("session_id"),
-        "block_reasons": list(dict.fromkeys(str(item) for item in reasons if item)),
+        "source_schema_version": pending.get("source_schema_version"),
+        "source_policy_version": pending.get("source_policy_version"),
         "intent_id": intent.get("intent_id") if intent else None,
         "contract_id": intent.get("contract_id") if intent else None,
         "automatic_ordering": False,

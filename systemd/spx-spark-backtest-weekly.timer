@@ -1,0 +1,11 @@
+[Unit]
+Description=Run the SPX Spark 0DTE level backtest weekly
+
+[Timer]
+OnCalendar=Mon *-*-* 09:17:00
+RandomizedDelaySec=300
+Persistent=true
+Unit=spx-spark-backtest-weekly.service
+
+[Install]
+WantedBy=timers.target

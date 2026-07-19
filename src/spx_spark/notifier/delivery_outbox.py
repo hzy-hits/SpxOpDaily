@@ -20,6 +20,10 @@ class DeliveryStatus(str, Enum):
     DEAD_LETTER = "dead_letter"
 
 
+class DeliveryClaimLost(ValueError):
+    """The target lease moved to another consumer before settlement."""
+
+
 DELIVERY_SINKS = frozenset({"bark", "feishu", "bark_friend"})
 
 
@@ -427,7 +431,9 @@ class NotificationDeliveryOutbox:
                     (event_id, sink, DeliveryStatus.CLAIMED.value, worker_id),
                 ).fetchone()
                 if row is None:
-                    raise ValueError(f"target {event_id}/{sink} is not claimed by {worker_id}")
+                    raise DeliveryClaimLost(
+                        f"target {event_id}/{sink} is not claimed by {worker_id}"
+                    )
                 if ok:
                     status = DeliveryStatus.DELIVERED
                     next_attempt_at = now_text

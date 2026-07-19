@@ -1,0 +1,719 @@
+{
+  "surface": "report",
+  "manifest": {
+    "version": 1,
+    "surface": "report",
+    "title": "SPX 0DTE：GTH、Put/Down 与入场质量修复验证",
+    "description": "真实 trade_ready 回放、v3 五字段契约、forward-only 20-session readiness、GTH 生命周期与账户回放覆盖审计的 2026-07-18 技术快照。",
+    "generatedAt": "2026-07-18T14:23:20+00:00",
+    "sources": [
+      {
+        "id": "validation_report",
+        "label": "Technical validation narrative",
+        "path": "strategy-backtest-validation-2026-07-18.md",
+        "query": {
+          "engine": "canonical report snapshot",
+          "id": "entry-quality-release-decisions-2026-07-18",
+          "sql": "SELECT * FROM release_decisions ORDER BY priority",
+          "description": "Evidence-backed engineering and strategy release boundaries in the technical report.",
+          "executed_at": "2026-07-18T13:10:00+00:00",
+          "language": "sql"
+        }
+      },
+      {
+        "id": "engineering_validation",
+        "label": "Repository implementation validation",
+        "query": {
+          "engine": "pytest+ruff+git",
+          "id": "spx-spark-validation-2026-07-18-entry-quality",
+          "sql": "SELECT 1541 AS tests_passed, 1 AS third_party_deprecation_warnings",
+          "description": "Complete repository test suite plus Ruff and whitespace validation after the fixes and module split.",
+          "executed_at": "2026-07-18T14:23:20+00:00",
+          "language": "shell",
+          "filters": [
+            "working tree including K3 and entry-quality fixes",
+            "automatic ordering disabled"
+          ],
+          "metric_definitions": [
+            "Tests passed is the terminal pytest count from the complete repository suite."
+          ],
+          "tables_used": [
+            "src/spx_spark",
+            "tests"
+          ]
+        }
+      },
+      {
+        "id": "entry_quality_backtest",
+        "label": "Production trade-ready replay through 2026-07-17",
+        "query": {
+          "engine": "spx-spark odte_level_backtest",
+          "id": "validation-2026-07-18-contract-v3-cutoff-2026-07-17",
+          "sql": "SELECT 5 AS observed_partitions, 4 AS health_complete_sessions, 474 AS evaluations, 452 AS observing, 20 AS blocked, 2 AS trade_ready, 1 AS strict_fills, 800.0 AS production_pnl_usd, 217 AS s2_health_complete, 6 AS s2_proxy_fills, 100.0 AS s2_proxy_pnl_usd",
+          "description": "Point-in-time replay of persisted production trade-ready decisions on health-complete sessions plus a separately labelled S2 observational proxy.",
+          "executed_at": "2026-07-18T14:19:09.442436+00:00",
+          "language": "python",
+          "filters": [
+            "exclusive cutoff 2026-07-18T00:00:00Z",
+            "five observed feature partitions through 2026-07-17; four health-complete sessions from 2026-07-14 through 2026-07-17",
+            "2026-07-13 excluded because GTH minute coverage is 85.19 percent, below the 90 percent gate",
+            "trade-ready uses exact persisted provider, contract, limit and window",
+            "target/invalidation before fill remains a skip without PnL",
+            "outcome horizons excluded from production entry gates",
+            "S2 excluded from production strategy total"
+          ],
+          "metric_definitions": [
+            "Observing is non-terminal telemetry and is neither pass nor block.",
+            "Strict fill is the first recorded-provider ask at or below the persisted limit before the exclusive expiry window.",
+            "Production PnL includes only baseline naked trades from the trade_ready set."
+          ],
+          "tables_used": [
+            "features/trade_intents",
+            "features/pricing_outcomes",
+            "lake/quotes/schema=v1"
+          ]
+        }
+      },
+      {
+        "id": "gth_lifecycle_audit",
+        "label": "GTH confirmation-to-virtual-open lifecycle audit",
+        "query": {
+          "engine": "stdlib point-in-time notebook",
+          "id": "gth-lifecycle-cutoff-2026-07-17",
+          "sql": "SELECT 6 AS confirmations, 6 AS virtual_opens, 2 AS opens_after_600s_ttl, 5261.461 AS max_lag_seconds",
+          "description": "Event-id join of GTH confirmations and historical virtual opens, excluding the partial 2026-07-18 partition.",
+          "executed_at": "2026-07-18T13:00:00+00:00",
+          "language": "python",
+          "filters": [
+            "confirmed_at before 2026-07-18T00:00:00Z",
+            "future clock skew tolerated through five seconds",
+            "historical 600-second validity reconstructed because legacy signals lack valid_until"
+          ],
+          "metric_definitions": [
+            "Stale means virtual opened more than 600 seconds after confirmation."
+          ],
+          "tables_used": [
+            "features/gth_dip_reclaim",
+            "features/virtual_strategy"
+          ]
+        }
+      },
+      {
+        "id": "strict_replay",
+        "label": "IBKR spread replay quote-coverage sensitivity",
+        "query": {
+          "engine": "spx-spark odte_level_replay",
+          "id": "statement-replay-2026-07-18",
+          "sql": "SELECT * FROM replay_robustness ORDER BY entry_age_seconds",
+          "description": "Seven core GTH Call debit rounds compared on threshold-specific common cohorts; rows are data-coverage sensitivity, not strategy parameter sensitivity.",
+          "executed_at": "2026-07-18T11:13:00+00:00",
+          "language": "python",
+          "filters": [
+            "core cohort GTH Call debit 0DTE",
+            "sat85, trail33 and clock must all have a valid exit"
+          ],
+          "metric_definitions": [
+            "Common is the count of rounds with valid exits under all three rules at that quote gate.",
+            "Changing the age/skew gate changes cohort membership."
+          ],
+          "tables_used": [
+            "IBKR activity statement",
+            "lake/quotes/schema=v1"
+          ]
+        }
+      },
+      {
+        "id": "entry_quality_notebook",
+        "label": "Reproducible entry-quality diagnostics",
+        "path": "notebooks/entry-quality-gates-2026-07-18.ipynb",
+        "query": {
+          "engine": "Python standard library notebook",
+          "id": "entry-quality-notebook-2026-07-18",
+          "sql": "SELECT 'validated top-to-bottom' AS status",
+          "description": "Reconciles current production replay, corrected S2 proxy, retired legacy diagnostics and GTH lifecycle lags.",
+          "executed_at": "2026-07-18T13:00:00+00:00",
+          "language": "python"
+        }
+      },
+      {
+        "id": "strategy_readiness",
+        "label": "Forward-only strategy readiness audit",
+        "query": {
+          "engine": "spx-spark strategy_readiness",
+          "id": "forward-v3-readiness-2026-07-18",
+          "sql": "SELECT 5 AS observed_partitions, 4 AS health_complete_sessions, 0 AS contract_consistent_sessions, 0 AS gth_exact_entries, 0 AS put_exact_entries, 0 AS exact_spread_complete_exits, 43 AS legacy_material_decisions_excluded, 20 AS target",
+          "description": "Frozen forward-only review gate. Five partitions were observed, four are health-complete, and 43 pre-v3 material decisions are retained for audit but excluded from forward evidence.",
+          "executed_at": "2026-07-18T14:19:09.442436+00:00",
+          "language": "python",
+          "filters": [
+            "schema version 3 only",
+            "policy-consistent producer roles",
+            "GTH and RTH minute coverage at least 90 percent",
+            "semantic samples deduplicated",
+            "automatic promotion disabled"
+          ],
+          "metric_definitions": [
+            "A complete session is one research expiry with both GTH and RTH minute coverage at or above 90 percent and no forward contract anomaly.",
+            "Repeated service evaluations never count as additional sessions or opportunities.",
+            "Ready means eligible for a fixed-cutoff human review, not automatic promotion."
+          ],
+          "tables_used": [
+            "features/level_decision_health",
+            "features/gth_dip_reclaim",
+            "features/trade_intents",
+            "features/virtual_strategy"
+          ]
+        }
+      }
+    ],
+    "cards": [
+      {
+        "id": "tests_passed",
+        "description": "Complete repository pytest result after all fixes.",
+        "dataset": "headline",
+        "sourceId": "engineering_validation",
+        "metrics": [
+          {
+            "label": "Tests passed",
+            "field": "tests_passed",
+            "format": "number"
+          }
+        ]
+      },
+      {
+        "id": "observed_partitions",
+        "description": "Feature-store partitions observed through the fixed cutoff; observation alone does not mean health-complete or contract-consistent.",
+        "dataset": "headline",
+        "sourceId": "strategy_readiness",
+        "metrics": [
+          {
+            "label": "Observed partitions",
+            "field": "observed_partitions",
+            "format": "number"
+          }
+        ]
+      },
+      {
+        "id": "health_complete_sessions",
+        "description": "Sessions passing the 90 percent GTH/RTH minute-coverage health gate; these predate the forward policy window and do not count toward readiness.",
+        "dataset": "headline",
+        "sourceId": "strategy_readiness",
+        "metrics": [
+          {
+            "label": "Health-complete sessions",
+            "field": "health_complete_sessions",
+            "format": "number"
+          }
+        ]
+      },
+      {
+        "id": "forward_v3_sessions",
+        "description": "Contract-consistent forward-v3 sessions toward the frozen 20-session review gate.",
+        "dataset": "headline",
+        "sourceId": "strategy_readiness",
+        "metrics": [
+          {
+            "label": "Forward v3 sessions",
+            "field": "forward_v3_sessions",
+            "format": "number"
+          }
+        ]
+      },
+      {
+        "id": "trade_ready_decisions",
+        "description": "Unique persisted production entry decisions through the cutoff.",
+        "dataset": "headline",
+        "sourceId": "entry_quality_backtest",
+        "metrics": [
+          {
+            "label": "Trade-ready decisions",
+            "field": "trade_ready_decisions",
+            "format": "number"
+          }
+        ]
+      },
+      {
+        "id": "strict_fills",
+        "description": "Production decisions that satisfy exact limit-window replay.",
+        "dataset": "headline",
+        "sourceId": "entry_quality_backtest",
+        "metrics": [
+          {
+            "label": "Strict replay fills",
+            "field": "strict_fills",
+            "format": "number"
+          }
+        ]
+      }
+    ],
+    "charts": [
+      {
+        "id": "cohort_execution_coverage",
+        "title": "Replay coverage by evidence cohort",
+        "subtitle": "Production is the only strategy cohort; S2 is observational and historical GTH exact spread is unavailable",
+        "intent": "comparison",
+        "question": "How much of each evidence cohort survives to a replayed baseline entry?",
+        "rationale": "The categorical bar chart exposes the production sample bottleneck while keeping proxy roles explicit.",
+        "type": "bar",
+        "dataset": "cohort_coverage",
+        "sourceId": "entry_quality_backtest",
+        "encodings": {
+          "x": {
+            "field": "cohort",
+            "type": "nominal",
+            "label": "Evidence cohort"
+          },
+          "y": {
+            "field": "coverage",
+            "type": "quantitative",
+            "format": "percent",
+            "label": "Replay entry coverage"
+          },
+          "tooltip": [
+            {
+              "field": "candidates",
+              "type": "quantitative",
+              "format": "number",
+              "label": "Candidates"
+            },
+            {
+              "field": "entries",
+              "type": "quantitative",
+              "format": "number",
+              "label": "Entries"
+            },
+            {
+              "field": "role",
+              "type": "nominal",
+              "label": "Role"
+            }
+          ]
+        },
+        "valueFormat": "percent",
+        "layout": "full",
+        "labels": {
+          "values": "all"
+        },
+        "maxRows": 3,
+        "palette": {
+          "kind": "identity",
+          "name": "blue"
+        },
+        "settings": {
+          "categoryLabelPolicy": "wrap",
+          "groupMode": "single",
+          "showValues": true,
+          "sort": "none"
+        },
+        "surface": {
+          "surface": "export",
+          "interactiveLegend": false,
+          "showControls": false,
+          "viewMode": "visualization"
+        }
+      }
+    ],
+    "tables": [
+      {
+        "id": "strategy_readiness",
+        "title": "Forward-only readiness gates",
+        "subtitle": "Current independent v3 samples versus frozen review thresholds; legacy v1/v2 rows are excluded.",
+        "dataset": "strategy_readiness",
+        "sourceId": "strategy_readiness",
+        "defaultSort": {
+          "field": "gate",
+          "direction": "asc"
+        },
+        "density": "spacious",
+        "layout": "full",
+        "columns": [
+          {"field": "gate", "label": "Independent review unit", "type": "text"},
+          {"field": "current", "label": "Current", "format": "number"},
+          {"field": "target", "label": "Target", "format": "number"},
+          {"field": "status", "label": "Status", "type": "text"},
+          {"field": "before_target", "label": "Before threshold", "type": "text"}
+        ]
+      },
+      {
+        "id": "intent_status",
+        "title": "Production intent telemetry",
+        "subtitle": "Evaluation records are not unique opportunities; observing is neither pass nor block.",
+        "dataset": "intent_status",
+        "sourceId": "entry_quality_backtest",
+        "defaultSort": {
+          "field": "records",
+          "direction": "desc"
+        },
+        "density": "spacious",
+        "layout": "full",
+        "columns": [
+          {"field": "status", "label": "Status", "type": "text"},
+          {"field": "records", "label": "Records", "format": "number"},
+          {"field": "distinct_events", "label": "Distinct events", "format": "number"},
+          {"field": "meaning", "label": "Meaning", "type": "text"}
+        ]
+      },
+      {
+        "id": "production_replay",
+        "title": "Exact production trade-ready replay",
+        "subtitle": "One fill and one target-before-entry; no skipped intent is assigned zero PnL.",
+        "dataset": "production_replay",
+        "sourceId": "entry_quality_backtest",
+        "defaultSort": {
+          "field": "evaluated_at",
+          "direction": "asc"
+        },
+        "density": "spacious",
+        "layout": "full",
+        "columns": [
+          {"field": "evaluated_at", "label": "Evaluated at", "type": "text"},
+          {"field": "direction", "label": "Direction", "type": "text"},
+          {"field": "contract", "label": "Contract", "type": "text"},
+          {"field": "result", "label": "Strict replay", "type": "text"},
+          {"field": "timing", "label": "Timing evidence", "type": "text"},
+          {"field": "pnl", "label": "PnL", "format": "currency"}
+        ]
+      },
+      {
+        "id": "before_after",
+        "title": "Retired diagnosis versus corrected evidence",
+        "subtitle": "Legacy values remain only as an error audit and are not current strategy evidence.",
+        "dataset": "before_after",
+        "sourceId": "entry_quality_notebook",
+        "defaultSort": {
+          "field": "metric",
+          "direction": "asc"
+        },
+        "density": "spacious",
+        "layout": "full",
+        "columns": [
+          {"field": "metric", "label": "Metric", "type": "text"},
+          {"field": "legacy", "label": "Legacy / superseded", "type": "text"},
+          {"field": "current", "label": "Corrected / current", "type": "text"},
+          {"field": "role", "label": "Evidence role", "type": "text"}
+        ]
+      },
+      {
+        "id": "gth_lifecycle",
+        "title": "Historical GTH confirmation-to-open lags",
+        "subtitle": "Two of six virtual opens exceed the reconstructed 600-second validity window.",
+        "dataset": "gth_lifecycle",
+        "sourceId": "gth_lifecycle_audit",
+        "defaultSort": {
+          "field": "confirmed_at",
+          "direction": "asc"
+        },
+        "density": "dense",
+        "layout": "full",
+        "columns": [
+          {"field": "confirmed_at", "label": "Confirmed", "type": "text"},
+          {"field": "opened_at", "label": "Virtual open", "type": "text"},
+          {"field": "lag_seconds", "label": "Lag seconds", "format": "number"},
+          {"field": "validity", "label": "Validity", "type": "text"}
+        ]
+      },
+      {
+        "id": "replay_robustness",
+        "title": "Account replay quote-coverage sensitivity",
+        "subtitle": "Each age/skew row has a different common cohort; values are not a strategy parameter comparison.",
+        "dataset": "replay_robustness",
+        "sourceId": "strict_replay",
+        "defaultSort": {
+          "field": "entry_age_seconds",
+          "direction": "asc"
+        },
+        "density": "dense",
+        "layout": "full",
+        "columns": [
+          {"field": "threshold", "label": "Age / skew gate", "type": "text"},
+          {"field": "entry_age_seconds", "label": "Entry age seconds", "format": "number"},
+          {"field": "common", "label": "Common", "format": "number"},
+          {"field": "rounds", "label": "Rounds", "format": "number"},
+          {"field": "actual_net", "label": "Actual net", "format": "currency"},
+          {"field": "sat85_net", "label": "sat85 est. net", "format": "currency"},
+          {"field": "trail33_net", "label": "trail33 est. net", "format": "currency"},
+          {"field": "clock_net", "label": "clock est. net", "format": "currency"}
+        ]
+      },
+      {
+        "id": "release_decisions",
+        "title": "Release boundaries",
+        "subtitle": "Deterministic safety fixes are separated from unvalidated strategy hypotheses.",
+        "dataset": "release_decisions",
+        "sourceId": "validation_report",
+        "defaultSort": {
+          "field": "priority",
+          "direction": "asc"
+        },
+        "density": "spacious",
+        "layout": "full",
+        "columns": [
+          {"field": "priority", "label": "Priority", "format": "number"},
+          {"field": "item", "label": "Item", "type": "text"},
+          {"field": "decision", "label": "Decision", "type": "text"},
+          {"field": "basis", "label": "Basis", "type": "text"}
+        ]
+      }
+    ],
+    "blocks": [
+      {
+        "id": "title",
+        "type": "markdown",
+        "layout": "full",
+        "body": "# SPX 0DTE：GTH、Put/Down 与入场质量修复验证\n\n**状态：v3 工程契约已落地；forward readiness 0/20，策略保持 collecting/shadow，自动下单关闭。**"
+      },
+      {
+        "id": "technical_summary",
+        "type": "markdown",
+        "layout": "full",
+        "sourceId": "validation_report",
+        "body": "## Technical Summary\n\n旧报告的 S2/GTH/Put 负值不是 production 策略表现：S2 只是 follow-through-only proxy，12 笔旧交易中 0 笔曾进入 trade_ready；chain_implied_spx 又被错误映射为 ES-45，并有 semantic duplicates。当前严格 production cohort 只有 2 个 trade-ready：1 个 Call 模拟成交 +$800，1 个 Put 在限价满足前先到目标，因而无入场、无 PnL。n=2 只证明语义修正，不能证明方向或策略 edge。\n\nGTH 历史 6 次 virtual open 中有 2 次在确认后 826 秒和 5,261 秒才开仓。新代码用 v3 五字段契约、exclusive valid_until、suppression/provider reset 和 exact executable NBBO fail closed；趋势一致性只做版本化 shadow。\n\n新的裁决门只接纳自然产生的 forward-v3 evidence：本次 cutoff 有 5 个 observed partitions、4 个 health-complete sessions；2026-07-13 因 GTH 覆盖仅 85.19% 被排除。四个健康完整 session 均早于 forward policy window，因此 contract-consistent session、GTH exact entry、Put exact entry 和 exact-spread complete exit 全部为 0/20。另有 43 条 legacy material decision 被排除，只作审计。未达门槛时 GTH、Put、sat85/trail33/clock 均保持 collecting/shadow；达标也只进入人工 review，不会自动晋级。\n\n> 内部工程与策略研究快照，不构成投资建议；automatic_ordering=False。"
+      },
+      {
+        "id": "headline_metrics",
+        "type": "metric-strip",
+        "layout": "full",
+        "cardIds": [
+          "tests_passed",
+          "observed_partitions",
+          "health_complete_sessions",
+          "forward_v3_sessions",
+          "trade_ready_decisions",
+          "strict_fills"
+        ]
+      },
+      {
+        "id": "key_findings",
+        "type": "markdown",
+        "layout": "full",
+        "sourceId": "validation_report",
+        "body": "## Key Findings\n\n1. Put 方向映射没有反转；267/267 的 play、right、direction 一致。\n2. 旧 8 笔 Put/-$1,730 与 GTH 坐标错误和重复混杂，不能据此禁 Put。\n3. 474 evaluations 中 452 observing 不是 pass/block；真实 trade-ready 只有 2 个。\n4. 健康完整 cohort 的 S2 proxy 为 217 unique、6 replay entries、+$100，但只作观察，不计 production total。\n5. GTH 直接工程缺陷是 2/6 stale opens；经济趋势门因 n=6 只能 shadow。\n6. v3 已统一 schema、policy、validity、coordinate 和 block reasons；43 条旧 v1/v2 material decision 永久只作历史审计。\n7. 20 session 不是 20 次 evaluation；5 个 observed partitions 中只有 4 个 health-complete，当前四项 forward readiness 均为 0/20。"
+      },
+      {
+        "id": "readiness_definition",
+        "type": "markdown",
+        "layout": "full",
+        "sourceId": "strategy_readiness",
+        "body": "## 冻结的 forward-only 裁决门\n\n截止 2026-07-17 观察到 5 个 partition，其中 2026-07-14..17 四个通过健康完整门；2026-07-13 的 GTH 覆盖为 673/790（85.19%），低于 90% 门槛。完整 session 还要求参与裁决的 forward 事件契约一致、没有重复 semantic sample；四个健康完整 session 均早于 forward policy window，所以 contract-consistent 仍为 0/20。readiness 显式排除 43 条 legacy material decision。每个 signal、intent 或 episode 最多计一次；服务轮询产生的重复 evaluation 不增加样本。以下四项达到 20 只代表 ready for review，automatic promotion 永远关闭。"
+      },
+      {
+        "id": "readiness_table",
+        "type": "table",
+        "layout": "full",
+        "tableId": "strategy_readiness"
+      },
+      {
+        "id": "intent_status_table",
+        "type": "table",
+        "layout": "full",
+        "tableId": "intent_status"
+      },
+      {
+        "id": "production_replay_table",
+        "type": "table",
+        "layout": "full",
+        "tableId": "production_replay"
+      },
+      {
+        "id": "put_interpretation",
+        "type": "markdown",
+        "layout": "full",
+        "sourceId": "entry_quality_backtest",
+        "body": "## Put/Down 怎么处理\n\n不硬禁 Put。唯一 production Put 在 15:51:04Z 已触及记录目标，直到 15:51:25Z ask 才低于限价；正确结果是 target_before_entry，而不是事后记一笔亏损。RTH Put 继续 collecting/shadow，并固定按 RTH/GTH × direction × thesis 分层；同时收满 20 个 forward complete session 和 20 个 point-in-time exact Put entries 前不得晋级。"
+      },
+      {
+        "id": "before_after_table",
+        "type": "table",
+        "layout": "full",
+        "tableId": "before_after"
+      },
+      {
+        "id": "coverage_chart",
+        "type": "chart",
+        "layout": "full",
+        "chartId": "cohort_execution_coverage"
+      },
+      {
+        "id": "gth_diagnosis",
+        "type": "markdown",
+        "layout": "full",
+        "sourceId": "gth_lifecycle_audit",
+        "body": "## GTH 怎么改善\n\n立即 enforce 的是机制安全门：v3 五字段契约、exclusive signal TTL、suppression/provider reset、raw-ES coordinate、same-session exact legs、双腿新鲜同步有序 NBBO、0 < debit ask < width。趋势方向属于收益假设：历史 6 个信号重放都在 bearish regime，但这是事后 legacy 小样本，所以只登记 gth_trend_alignment_shadow_v1。收满 20 个 forward sessions 和 20 个 exact GTH entries 前不得晋级。"
+      },
+      {
+        "id": "gth_table",
+        "type": "table",
+        "layout": "full",
+        "tableId": "gth_lifecycle"
+      },
+      {
+        "id": "replay_context",
+        "type": "markdown",
+        "layout": "full",
+        "sourceId": "strict_replay",
+        "body": "## 为什么原 replay 三行会从负变正\n\n门越宽，common cohort 越大。30s/5s 恰好只留下核心 7 个实际回合中唯一的亏损回合；90s/15s 和 300s/60s 加入的是盈利回合。三行改变了样本组成，不能解释成 age 参数改善了策略。"
+      },
+      {
+        "id": "replay_table",
+        "type": "table",
+        "layout": "full",
+        "tableId": "replay_robustness"
+      },
+      {
+        "id": "methodology",
+        "type": "markdown",
+        "layout": "full",
+        "sourceId": "entry_quality_backtest",
+        "body": "## Methodology\n\nProduction replay 只读持久化 trade-ready；使用 exact provider/contract/limit/window，并在成交前检查 recorded target/invalidation。S2 official SPX、chain parity、raw ES 分开处理，缺原生路径 fail closed；按 semantic key 去重。未来 outcome horizons 不进入 entry gate；未成交和缺失不填 0。\n\nForward readiness 只读自然产生的 v3 事件；policy 按 producer role 冻结，valid_until 使用半开区间，coordinate 不做隐式换算，block reasons 必须可审计。v1/v2 原样保留但永不补写成 v3。"
+      },
+      {
+        "id": "limitations",
+        "type": "markdown",
+        "layout": "full",
+        "sourceId": "validation_report",
+        "body": "## Limitations and Robustness\n\nProduction 只有 2 个 intent、1 个模拟成交；历史窗口不是正式 OOS。旧 intent 的 stored expires_at 反映当时 runtime，而当前代码已固定 20 秒 entry window。GTH detector 没有用 raw ES 全量重检；forward-v3 exact-spread evidence 为 0/20，legacy/derived spread 不得回填。Top-of-book 不含队列、滑点、部分成交、人工反应或真实佣金。账户 replay 缺失非随机且不能按 event_id 归因 K3。"
+      },
+      {
+        "id": "release_table",
+        "type": "table",
+        "layout": "full",
+        "tableId": "release_decisions"
+      },
+      {
+        "id": "recommended_next_steps",
+        "type": "markdown",
+        "layout": "full",
+        "sourceId": "validation_report",
+        "body": "## Recommended Next Steps\n\n1. 部署 v3、TTL、reset 和 executable-NBBO 工程门，自动下单继续关闭。\n2. GTH trend alignment 保持 collecting/shadow；20 sessions 与 20 exact GTH entries 前不得晋级。\n3. RTH Put 不硬禁；20 sessions 与 20 exact Put entries 前不得晋级。\n4. 持续保存 policy/config fingerprint、真实 entry window、fill-time NBBO 和 terminal block reasons。\n5. 收满 20 个 exact-spread complete exits 后，才在固定 cutoff 比较 sat85/trail33/clock。\n6. 每周刷新 readiness，但只在冻结门槛满足后触发人工 review，绝不自动 promotion。"
+      },
+      {
+        "id": "further_questions",
+        "type": "markdown",
+        "layout": "full",
+        "sourceId": "validation_report",
+        "body": "## Further Questions\n\n- 20 个 forward sessions 与 20 个 exact GTH entries 后，bullish-alignment shadow 的 coverage 和同 cohort outcome 如何？\n- 更多 Put/Call 中 target_before_entry 的比例是多少？\n- blocked reasons 中哪些是策略过滤，哪些是采集缺失？\n- synthetic:SPXW_PARITY 是否应进入 quote lake？\n- fill-time NBBO 能否降低 account replay 的非随机缺失？"
+      }
+    ]
+  },
+  "snapshot": {
+    "version": 1,
+    "generatedAt": "2026-07-18T14:23:20+00:00",
+    "status": "ready",
+    "datasets": {
+      "headline": [
+        {
+          "tests_passed": 1541,
+          "observed_partitions": 5,
+          "health_complete_sessions": 4,
+          "forward_v3_sessions": 0,
+          "trade_ready_decisions": 2,
+          "strict_fills": 1
+        }
+      ],
+      "strategy_readiness": [
+        {"order": 1, "gate": "Contract-consistent complete session", "current": 0, "target": 20, "status": "Collecting", "before_target": "No strategy rule promotion"},
+        {"order": 2, "gate": "GTH exact two-leg entry", "current": 0, "target": 20, "status": "Collecting", "before_target": "GTH entry and trend remain shadow"},
+        {"order": 3, "gate": "Put point-in-time exact entry", "current": 0, "target": 20, "status": "Collecting", "before_target": "Put remains shadow; neither banned nor promoted"},
+        {"order": 4, "gate": "Exact-spread complete entry to exit", "current": 0, "target": 20, "status": "Collecting", "before_target": "sat85, trail33 and clock remain shadow"}
+      ],
+      "intent_status": [
+        {"order": 1, "status": "observing", "records": 452, "distinct_events": 279, "meaning": "Non-terminal telemetry; neither pass nor block"},
+        {"order": 2, "status": "blocked", "records": 20, "distinct_events": 5, "meaning": "Explicit production gate block"},
+        {"order": 3, "status": "trade_ready", "records": 2, "distinct_events": 2, "meaning": "Unique decisions eligible for strict replay"}
+      ],
+      "production_replay": [
+        {
+          "evaluated_at": "2026-07-14 14:33:52Z",
+          "direction": "up / call",
+          "contract": "SPXW 7530C",
+          "result": "Filled 19.8 → exit 27.8",
+          "timing": "Ask <= 19.9 limit at 14:33:53.651Z",
+          "pnl": 800.0
+        },
+        {
+          "evaluated_at": "2026-07-15 15:50:51Z",
+          "direction": "down / put",
+          "contract": "SPXW 7560P",
+          "result": "target_before_entry",
+          "timing": "Target 15:51:04Z; limit first met 15:51:25Z",
+          "pnl": null
+        }
+      ],
+      "cohort_coverage": [
+        {"cohort": "Production trade-ready", "candidates": 2, "entries": 1, "coverage": 0.5, "role": "Production strategy cohort"},
+        {"cohort": "S2 corrected proxy", "candidates": 217, "entries": 6, "coverage": 0.027649769585253458, "role": "Observational only"},
+        {"cohort": "GTH exact spread history", "candidates": 6, "entries": 0, "coverage": 0.0, "role": "Historical schema unavailable"}
+      ],
+      "before_after": [
+        {"order": 1, "metric": "S2 candidates", "legacy": "267 snapshots", "current": "217 health-complete unique keys", "role": "Current proxy only"},
+        {"order": 2, "metric": "S2 replay rows / PnL", "legacy": "12 / -$1,560", "current": "6 / +$100", "role": "Observational, not production"},
+        {"order": 3, "metric": "S2 put/down", "legacy": "8 rows / -$1,730", "current": "3 rows / +$120", "role": "Do not infer direction edge"},
+        {"order": 4, "metric": "Combined GTH diagnostic", "legacy": "12 rows / -$3,250", "current": "Retired mixed proxy total", "role": "Not production evidence"},
+        {"order": 5, "metric": "Production trade-ready", "legacy": "Not present", "current": "2 decisions / 1 fill / +$800", "role": "n=1; not an edge claim"}
+      ],
+      "gth_lifecycle": [
+        {"confirmed_at": "2026-07-15 07:39:15Z", "opened_at": "2026-07-15 07:53:01Z", "lag_seconds": 826.461, "validity": "STALE"},
+        {"confirmed_at": "2026-07-16 06:09:55Z", "opened_at": "2026-07-16 06:09:53Z", "lag_seconds": -1.521, "validity": "Fresh clock skew"},
+        {"confirmed_at": "2026-07-16 08:33:22Z", "opened_at": "2026-07-16 10:01:03Z", "lag_seconds": 5261.461, "validity": "STALE"},
+        {"confirmed_at": "2026-07-16 11:53:49Z", "opened_at": "2026-07-16 11:53:52Z", "lag_seconds": 3.43, "validity": "Fresh"},
+        {"confirmed_at": "2026-07-17 04:51:50Z", "opened_at": "2026-07-17 04:51:54Z", "lag_seconds": 4.645, "validity": "Fresh"},
+        {"confirmed_at": "2026-07-17 07:05:11Z", "opened_at": "2026-07-17 07:05:11Z", "lag_seconds": 0.674, "validity": "Fresh"}
+      ],
+      "replay_robustness": [
+        {"threshold": "30s age / 5s skew", "entry_age_seconds": 30, "common": 1, "rounds": 7, "actual_net": -1411, "sat85_net": -2686, "trail33_net": -2686, "clock_net": -2686},
+        {"threshold": "90s / 15s", "entry_age_seconds": 90, "common": 3, "rounds": 7, "actual_net": 3052, "sat85_net": 1407, "trail33_net": -1713, "clock_net": 1407},
+        {"threshold": "300s / 60s", "entry_age_seconds": 300, "common": 5, "rounds": 7, "actual_net": 9226, "sat85_net": 7041, "trail33_net": 1531, "clock_net": 7041}
+      ],
+      "release_decisions": [
+        {"priority": 1, "item": "GTH TTL / suppression / provider reset", "decision": "Deploy deterministic safety fix", "basis": "Direct lifecycle bugs; no economic tuning"},
+        {"priority": 2, "item": "GTH executable exact-spread NBBO", "decision": "Enforce for virtual entry", "basis": "Prevents malformed or non-executable debit shadow"},
+        {"priority": 3, "item": "v3 five-field strategy contract", "decision": "Deploy forward only", "basis": "Legacy v1/v2 remains audit-only and is never backfilled"},
+        {"priority": 4, "item": "20-session and exact-data readiness", "decision": "Collecting 0/20", "basis": "Repeated evaluations are not independent evidence; promotion is manual only"},
+        {"priority": 5, "item": "GTH bullish trend alignment", "decision": "Collecting / shadow only", "basis": "Requires 20 forward sessions and 20 exact GTH entries"},
+        {"priority": 6, "item": "RTH Put/down", "decision": "Collecting / shadow; do not ban", "basis": "Requires 20 forward sessions and 20 exact Put entries"},
+        {"priority": 7, "item": "sat85 / trail33 / clock", "decision": "Collecting / shadow only", "basis": "Requires 20 exact-spread complete exits"},
+        {"priority": 8, "item": "S2 follow-through", "decision": "Observation only", "basis": "Corrected proxy is not the production gate"},
+        {"priority": 9, "item": "Automatic ordering", "decision": "Remain disabled", "basis": "Readiness never performs automatic promotion"}
+      ]
+    }
+  },
+  "sources": [
+    {
+      "id": "validation_report",
+      "label": "Technical validation narrative",
+      "path": "strategy-backtest-validation-2026-07-18.md",
+      "query": {"engine": "canonical report snapshot", "id": "entry-quality-release-decisions-2026-07-18", "sql": "SELECT * FROM release_decisions ORDER BY priority", "description": "Evidence-backed release boundaries.", "executed_at": "2026-07-18T13:10:00+00:00", "language": "sql"}
+    },
+    {
+      "id": "engineering_validation",
+      "label": "Repository implementation validation",
+      "query": {"engine": "pytest+ruff+git", "id": "spx-spark-validation-2026-07-18-entry-quality", "sql": "SELECT 1541 AS tests_passed, 1 AS third_party_deprecation_warnings", "description": "Complete repository validation.", "executed_at": "2026-07-18T14:23:20+00:00", "language": "shell", "tables_used": ["src/spx_spark", "tests"]}
+    },
+    {
+      "id": "entry_quality_backtest",
+      "label": "Production trade-ready replay through 2026-07-17",
+      "query": {"engine": "spx-spark odte_level_backtest", "id": "validation-2026-07-18-contract-v3-cutoff-2026-07-17", "sql": "SELECT 5 AS observed_partitions, 4 AS health_complete_sessions, 474 AS evaluations, 2 AS trade_ready, 1 AS strict_fills, 800.0 AS production_pnl_usd", "description": "Exact persisted trade-ready replay and corrected S2 observational proxy over health-complete sessions.", "executed_at": "2026-07-18T14:19:09.442436+00:00", "language": "python", "tables_used": ["features/trade_intents", "features/pricing_outcomes", "lake/quotes/schema=v1"]}
+    },
+    {
+      "id": "gth_lifecycle_audit",
+      "label": "GTH confirmation-to-virtual-open lifecycle audit",
+      "query": {"engine": "stdlib point-in-time notebook", "id": "gth-lifecycle-cutoff-2026-07-17", "sql": "SELECT 6 AS confirmations, 2 AS stale_opens", "description": "GTH lifecycle lag audit.", "executed_at": "2026-07-18T13:00:00+00:00", "language": "python", "tables_used": ["features/gth_dip_reclaim", "features/virtual_strategy"]}
+    },
+    {
+      "id": "strict_replay",
+      "label": "IBKR spread replay quote-coverage sensitivity",
+      "query": {"engine": "spx-spark odte_level_replay", "id": "statement-replay-2026-07-18", "sql": "SELECT * FROM replay_robustness", "description": "Threshold-specific common-cohort coverage sensitivity.", "executed_at": "2026-07-18T11:13:00+00:00", "language": "python", "tables_used": ["IBKR activity statement", "lake/quotes/schema=v1"]}
+    },
+    {
+      "id": "entry_quality_notebook",
+      "label": "Reproducible entry-quality diagnostics",
+      "path": "notebooks/entry-quality-gates-2026-07-18.ipynb",
+      "query": {"engine": "Python standard library notebook", "id": "entry-quality-notebook-2026-07-18", "sql": "SELECT 'validated top-to-bottom' AS status", "description": "Reconciles current and retired diagnostic evidence.", "executed_at": "2026-07-18T13:00:00+00:00", "language": "python"}
+    },
+    {
+      "id": "strategy_readiness",
+      "label": "Forward-only strategy readiness audit",
+      "query": {"engine": "spx-spark strategy_readiness", "id": "forward-v3-readiness-2026-07-18", "sql": "SELECT 5 AS observed_partitions, 4 AS health_complete_sessions, 0 AS contract_consistent_sessions, 0 AS gth_exact_entries, 0 AS put_exact_entries, 0 AS exact_spread_complete_exits, 43 AS legacy_material_decisions_excluded, 20 AS target", "description": "Frozen forward-only review gate; 43 legacy v1/v2 material decisions are excluded and automatic promotion is disabled.", "executed_at": "2026-07-18T14:19:09.442436+00:00", "language": "python", "tables_used": ["features/level_decision_health", "features/gth_dip_reclaim", "features/trade_intents", "features/virtual_strategy"]}
+    }
+  ]
+}

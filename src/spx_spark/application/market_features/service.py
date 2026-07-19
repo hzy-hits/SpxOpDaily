@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from collections.abc import Callable
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,10 +26,15 @@ from spx_spark.application.market_features.market import (
     session_segment,
     update_volume_baselines,
 )
+from spx_spark.application.market_features.models import DecisionContext
 from spx_spark.application.market_features.options import (
     build_option_structure_frame,
     merge_option_history,
     option_frame_has_usable_live_structure,
+)
+from spx_spark.application.market_features.play_outcome_stats import (
+    PlayOutcomeStats,
+    PlayOutcomeStatsProvider,
 )
 from spx_spark.application.market_features.state import (
     append_audit,
@@ -54,6 +60,7 @@ from spx_spark.application.order_map.level_decision_shadow import (
     run_level_decision_shadow,
 )
 from spx_spark.application.order_map.decision_consistency import coherent_level_decision
+from spx_spark.application.order_map.models import level_decision_play
 from spx_spark.application.order_map.level_trigger_repricing import (
     default_level_trigger_repricing_path,
 )
@@ -66,6 +73,7 @@ from spx_spark.options_map import build_options_map
 from spx_spark.settings import load_app_settings
 from spx_spark.settings.market_features import MarketFeatureSettings
 from spx_spark.storage import LatestStateStore
+from spx_spark.strategy_contract import policy_version
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -74,9 +82,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def run(argv: list[str] | None = None, *, now: datetime | None = None) -> int:
+def run(
+    argv: list[str] | None = None,
+    *,
+    now: datetime | None = None,
+    action_clock: Callable[[], datetime] | None = None,
+) -> int:
     args = parse_args(argv)
     evaluation_now = as_utc(now or datetime.now(tz=timezone.utc))
+    resolved_action_clock = _resolve_action_clock(
+        evaluation_now,
+        evaluation_time_injected=now is not None,
+        action_clock=action_clock,
+    )
     app = load_app_settings()
     policy = app.market_features
     output: dict[str, Any] = {"ok": True, "at": evaluation_now.isoformat()}
@@ -87,6 +105,11 @@ def run(argv: list[str] | None = None, *, now: datetime | None = None) -> int:
         return 0
 
     storage = StorageSettings.from_env()
+    play_stats_provider = PlayOutcomeStatsProvider(
+        Path(storage.data_root) / "features",
+        settings=policy,
+        cache_path=Path(storage.data_root) / "latest" / "play_outcome_stats_cache.json",
+    )
     state_path = feature_state_path(storage.data_root)
     persisted = load_json(state_path)
     trend = load_trend_state(trend_state_path(storage.data_root))
@@ -186,6 +209,7 @@ def run(argv: list[str] | None = None, *, now: datetime | None = None) -> int:
         policy=policy,
     )
     repricing = load_json(default_level_trigger_repricing_path(storage))
+    play_stats = _lookup_play_stats(play_stats_provider, context, policy=policy)
     trade_intent = evaluate_trade_intent(
         context,
         market_frame,
@@ -195,6 +219,7 @@ def run(argv: list[str] | None = None, *, now: datetime | None = None) -> int:
         now=evaluation_now,
         feature_policy=policy,
         order_policy=app.order_map,
+        play_stats=play_stats,
     )
     trade_candidate = advance_trade_candidate(
         storage,
@@ -240,22 +265,35 @@ def run(argv: list[str] | None = None, *, now: datetime | None = None) -> int:
         trade_candidate=trade_candidate,
         confirmed_gate=confirmed_gate,
     )
+    expected_trade_intent_policy_version = policy_version(
+        "rth_trade_intent.v3",
+        {"market_features": policy, "order_map": app.order_map},
+    )
+    delivery_action_now = as_utc(resolved_action_clock())
     intent_delivery = process_trade_intent(
         storage,
         trade_intent,
         now=evaluation_now,
+        feature_policy=policy,
+        expected_policy_version=expected_trade_intent_policy_version,
+        action_now=delivery_action_now,
     )
+    # Delivery may cross a process/network boundary.  Never open or close a
+    # lifecycle episode from the evaluation clock or the earlier quote snapshot.
+    action_now = as_utc(resolved_action_clock())
+    action_latest = LatestStateStore(storage).load(now=action_now)
     gth_signal = load_json(Path(storage.data_root) / "latest" / "gth_dip_reclaim_signal.json")
     virtual_strategy = process_virtual_strategy(
         storage,
-        latest,
+        action_latest,
         trade_intent=virtual_entry_intent(trade_candidate),
         gth_signal=gth_signal,
         option_structure=option_frame.structure,
         macro_event=macro_event,
         greek_decision=greek_decision,
-        now=evaluation_now,
+        now=action_now,
         policy=policy,
+        expected_trade_intent_policy_version=expected_trade_intent_policy_version,
     )
     context = replace(context, virtual_strategy=virtual_strategy)
     previous_context = _dict(persisted.get("last_decision_context"))
@@ -300,6 +338,9 @@ def run(argv: list[str] | None = None, *, now: datetime | None = None) -> int:
             "audit_appended": audit is not None,
             "trade_intent_status": trade_intent.get("status"),
             "trade_intent_delivery": intent_delivery,
+            "evaluation_at": evaluation_now.isoformat(),
+            "action_revalidated_at": action_now.isoformat(),
+            "action_quote_state_created_at": action_latest.created_at.isoformat(),
             "trade_candidate": trade_candidate,
             "confirmed_gate": confirmed_gate,
             "level_decision_refresh_error": level_decision_refresh_error,
@@ -309,6 +350,42 @@ def run(argv: list[str] | None = None, *, now: datetime | None = None) -> int:
     if args.json:
         print(json.dumps(output, sort_keys=True))
     return 0
+
+
+def _lookup_play_stats(
+    provider: PlayOutcomeStatsProvider,
+    context: DecisionContext,
+    *,
+    policy: MarketFeatureSettings,
+) -> PlayOutcomeStats | None:
+    if not policy.play_stats_enabled:
+        return None
+    level = context.level_decision
+    play = level_decision_play(
+        str(level.get("thesis") or "none"),
+        str(level.get("direction") or ""),
+    )
+    level_kind = str(level.get("level_kind") or "")
+    if play is None or not level_kind:
+        return None
+    return provider.lookup(play, level_kind)
+
+
+def _system_utcnow() -> datetime:
+    return datetime.now(tz=timezone.utc)
+
+
+def _resolve_action_clock(
+    evaluation_now: datetime,
+    *,
+    evaluation_time_injected: bool,
+    action_clock: Callable[[], datetime] | None,
+) -> Callable[[], datetime]:
+    if action_clock is not None:
+        return action_clock
+    if evaluation_time_injected:
+        return lambda: evaluation_now
+    return _system_utcnow
 
 
 def _dict(value: object) -> dict[str, Any]:
@@ -365,7 +442,13 @@ def _seed_samples_from_trend(
 
 
 def main() -> None:
-    raise SystemExit(run())
+    # Direct CLI/legacy scheduler invocations share the persistent worker's
+    # sole-owner lock. The hot worker calls run() inside its already-held lock.
+    from spx_spark.application.runtime.market_features_hot_worker import (
+        run_locked_market_features_once,
+    )
+
+    raise SystemExit(run_locked_market_features_once(run))
 
 
 if __name__ == "__main__":

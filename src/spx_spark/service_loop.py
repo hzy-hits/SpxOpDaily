@@ -67,6 +67,7 @@ __all__ = [
     "build_tasks",
     "console_script",
     "drain_finished_tasks",
+    "exclude_tasks",
     "future_event",
     "main",
     "make_run_ibkr",
@@ -100,7 +101,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the SPX Spark 24h service loop.")
     parser.add_argument("--once", action="store_true", help="Run each enabled task once and exit.")
     parser.add_argument("--print-config", action="store_true", help="Print resolved service settings.")
+    parser.add_argument(
+        "--exclude-task",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help="Exclude one task from this scheduler instance; may be repeated.",
+    )
     return parser.parse_args(argv)
+
+
+def exclude_tasks(tasks: list[ServiceTask], names: list[str]) -> list[ServiceTask]:
+    excluded = frozenset(names)
+    return [task for task in tasks if task.name not in excluded]
 
 
 def run(argv: list[str] | None = None) -> int:
@@ -111,13 +124,14 @@ def run(argv: list[str] | None = None) -> int:
 
     app_settings = load_app_settings()
     settings = ServiceLoopSettings.from_app_settings(app_settings)
-    tasks = build_tasks(settings)
+    tasks = exclude_tasks(build_tasks(settings), args.exclude_task)
     if args.print_config:
         print(
             json.dumps(
                 {
                     "settings": asdict(settings),
                     "tasks": [task.name for task in tasks],
+                    "excluded_tasks": sorted(set(args.exclude_task)),
                     "app_settings_sources": {
                         path: source.origin for path, source in app_settings.sources.items()
                     },

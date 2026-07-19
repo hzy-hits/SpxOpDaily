@@ -221,7 +221,7 @@ def test_operator_override_confirms_level_but_still_requires_trade_intent(
 def test_confirmed_level_path_sends_one_non_executable_warning(tmp_path, monkeypatch) -> None:
     storage = SimpleNamespace(data_root=str(tmp_path))
     current: dict[str, LevelObservation] = {}
-    dispatched: list[tuple[object, str]] = []
+    enqueued: list[tuple[object, str]] = []
     monkeypatch.setattr(
         shadow_service,
         "_observation",
@@ -240,11 +240,18 @@ def test_confirmed_level_path_sends_one_non_executable_warning(tmp_path, monkeyp
         ),
     )
 
-    def fake_dispatch(_settings, envelope, **kwargs):
-        dispatched.append((envelope, kwargs["text"]))
-        return SimpleNamespace(sinks=(), delivered=True)
+    def fake_enqueue(_settings, envelope, **kwargs):
+        enqueued.append((envelope, kwargs["text"]))
+        return SimpleNamespace(
+            targets=("feishu",),
+            accepted=True,
+            inserted=True,
+            duplicate=False,
+            queued_for_recovery=True,
+            delivered=False,
+        )
 
-    monkeypatch.setattr(shadow_service, "dispatch_notification", fake_dispatch)
+    monkeypatch.setattr(shadow_service, "enqueue_notification", fake_enqueue)
     policy = replace(
         LevelDecisionPolicy(),
         formal_signal_enabled=True,
@@ -280,9 +287,11 @@ def test_confirmed_level_path_sends_one_non_executable_warning(tmp_path, monkeyp
 
     assert result is not None
     assert result["phase"] == "confirmed"
-    assert result["delivery"]["delivered"] is True
-    assert len(dispatched) == 1
-    envelope, text = dispatched[0]
+    assert result["delivery"]["accepted"] is True
+    assert result["delivery"]["queued"] is True
+    assert result["delivery"]["delivered"] is False
+    assert len(enqueued) == 1
+    envelope, text = enqueued[0]
     assert envelope.kind == "level_path_confirmed"
     assert envelope.event_id.endswith(":confirmed")
     assert "等待 TRADE READY" in text

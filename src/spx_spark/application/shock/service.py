@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 from dataclasses import asdict, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from spx_spark.alert_model import Alert
 from spx_spark.application.order_map.level_decision_shadow import load_level_decision_shadow
@@ -51,7 +52,9 @@ from spx_spark.data_platform.integration import (
 )
 from spx_spark.data_platform.settings import DataPlatformSettings
 from spx_spark.greek_shadow import sample_zero_dte_greeks_shadow
+from spx_spark.ibkr.atm_reference import BASIS_MAX_ABS_POINTS
 from spx_spark.macro_event_clock import macro_event_state
+from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 from spx_spark.intraday_event_outcomes import (
     IntradayEventOutcomeSettings,
     IntradayEventOutcomeTracker,
@@ -73,6 +76,7 @@ from spx_spark.state_io import (
     read_json_object,
 )
 from spx_spark.storage import LatestStateStore
+from spx_spark.strategy_contract import policy_version
 from spx_spark.strategy.steven import (
     annotate_alerts_with_steven_context,
     load_steven_state_for_alerts,
@@ -473,7 +477,27 @@ def _run_gth_dip_reclaim(
     virtual_state = read_json_object(
         Path(storage_settings.data_root) / "latest" / "virtual_strategy_state.json"
     )
-    virtual_strategy_active = isinstance(virtual_state.get("active"), dict)
+    virtual_active = (
+        virtual_state.get("active") if isinstance(virtual_state.get("active"), Mapping) else None
+    )
+    virtual_strategy_blocks_gth = _virtual_strategy_blocks_gth(virtual_active)
+    level_shadow = read_json_object(
+        Path(storage_settings.data_root) / "latest" / "level_decision_shadow_state.json"
+    )
+    structure_levels, es_spx_basis = _gth_spread_inputs(
+        level_shadow,
+        session_date=session_date,
+        at=latest.as_of,
+        max_age_seconds=settings.gth_structure_max_age_seconds,
+    )
+    trend_quality = _gth_trend_entry_quality(
+        read_json_object(
+            Path(storage_settings.data_root) / "latest" / "globex_trend_state.json"
+        ),
+        session_date=session_date,
+        at=sample_at,
+        max_age_seconds=settings.gth_structure_max_age_seconds,
+    )
     state_path = Path(settings.state_path)
     with exclusive_state_lock(state_path):
         monitor_state = load_monitor_state(settings.state_path, session_date=session_date)
@@ -502,8 +526,15 @@ def _run_gth_dip_reclaim(
             cooldown_seconds=settings.gth_cooldown_seconds,
             delivery_retry_seconds=settings.retry_seconds,
             signal_expiry_seconds=settings.event_expiry_seconds,
+            structure_levels=structure_levels,
+            es_spx_basis=es_spx_basis,
+            spread_min_width_points=settings.gth_spread_min_width_points,
+            spread_max_width_points=settings.gth_spread_max_width_points,
+            spread_default_width_points=settings.gth_spread_default_width_points,
+            exit_clock_et=settings.gth_exit_clock_et,
+            entry_quality=trend_quality,
             entry_allowed=(
-                macro.get("entry_allowed") is True and not virtual_strategy_active
+                macro.get("entry_allowed") is True and not virtual_strategy_blocks_gth
             ),
         )
         monitor_state["gth_dip"] = gth_state
@@ -519,6 +550,26 @@ def _run_gth_dip_reclaim(
                 sample_at,
                 {**signal, "macro_event": macro},
             )
+
+    _append_gth_detector_health(
+        storage_settings,
+        sample_at,
+        {
+            "schema_version": 1,
+            "policy_version": policy_version("gth_detector_runtime.v3", settings),
+            "record_key": sample_at.isoformat(),
+            "at": sample_at.isoformat(),
+            "session_date": session_date,
+            "provider": provider,
+            "es": es,
+            "detector_status": gth_state.get("status"),
+            "entry_allowed": macro.get("entry_allowed") is True
+            and not virtual_strategy_blocks_gth,
+            "macro_mode": macro.get("mode"),
+            "coordinate_kind": "raw_es",
+            "instrument_id": "future:ES",
+        },
+    )
 
     notify_settings = replace(
         NotificationSettings.from_env(),
@@ -548,7 +599,7 @@ def _run_gth_dip_reclaim(
             "macro_event": macro,
             "expected_move_points": expected_move,
             "gth_dip": gth_state,
-            "entry_suppressed_by_active_virtual_strategy": virtual_strategy_active,
+            "entry_suppressed_by_active_virtual_strategy": virtual_strategy_blocks_gth,
         }
     )
     if signal is not None and not signal.get("delivery_retry"):
@@ -594,6 +645,138 @@ def _run_gth_dip_reclaim(
     return payload
 
 
+def _gth_spread_inputs(
+    level_shadow: Mapping[str, object],
+    *,
+    session_date: str,
+    at: datetime,
+    max_age_seconds: float,
+) -> tuple[dict[str, float] | None, float | None]:
+    """Return only same-session, fresh, quality-qualified spread coordinates."""
+
+    now = _state_time(at)
+    updated_at = _state_time(level_shadow.get("updated_at"))
+    if (
+        now is None
+        or updated_at is None
+        or not _fresh_at(updated_at, now=now, max_age_seconds=max_age_seconds)
+        or DEFAULT_MARKET_CALENDAR.research_expiry(now).isoformat() != session_date
+        or DEFAULT_MARKET_CALENDAR.research_expiry(updated_at).isoformat() != session_date
+    ):
+        return None, None
+    observation = level_shadow.get("latest_observation")
+    if not isinstance(observation, Mapping) or observation.get("quality_ok") is not True:
+        return None, None
+    basis = observation.get("trigger_basis_points")
+    if (
+        isinstance(basis, bool)
+        or not isinstance(basis, int | float)
+        or not math.isfinite(float(basis))
+        or abs(float(basis)) > BASIS_MAX_ABS_POINTS
+    ):
+        return None, None
+    structure = level_shadow.get("structure")
+    if (
+        not isinstance(structure, Mapping)
+        or structure.get("session_date") != session_date
+        or str(structure.get("expiry") or "") != session_date
+    ):
+        return None, None
+    confirmed_at = _state_time(structure.get("last_confirmed_at"))
+    if confirmed_at is None or not _fresh_at(
+        confirmed_at,
+        now=now,
+        max_age_seconds=max_age_seconds,
+    ):
+        return None, None
+    levels = structure.get("levels")
+    structure_levels = (
+        {
+            str(key): float(value)
+            for key, value in levels.items()
+            if (
+                not isinstance(value, bool)
+                and isinstance(value, int | float)
+                and math.isfinite(float(value))
+                and float(value) > 0
+            )
+        }
+        if isinstance(levels, Mapping)
+        else None
+    )
+    if not structure_levels:
+        return None, None
+    return structure_levels, float(basis)
+
+
+def _gth_trend_entry_quality(
+    trend_state: Mapping[str, object],
+    *,
+    session_date: str,
+    at: datetime,
+    max_age_seconds: float,
+) -> dict[str, object]:
+    """Freeze a non-enforcing GTH trend-alignment hypothesis at confirmation time."""
+
+    now = _state_time(at)
+    updated_at = _state_time(trend_state.get("updated_at"))
+    session_id = str(trend_state.get("session_id") or "")
+    regime = str(trend_state.get("regime") or "")
+    reasons: list[str] = []
+    if now is None or updated_at is None:
+        reasons.append("trend_context_unavailable")
+    elif not _fresh_at(updated_at, now=now, max_age_seconds=max_age_seconds):
+        reasons.append("trend_context_stale")
+    if session_id != f"{session_date}:globex":
+        reasons.append("trend_session_mismatch")
+    if regime != "bullish":
+        reasons.append("trend_not_bullish")
+    metrics = trend_state.get("metrics")
+    metrics = metrics if isinstance(metrics, Mapping) else {}
+    features = {
+        "session_id": session_id or None,
+        "trend_updated_at": updated_at.isoformat() if updated_at is not None else None,
+        "regime": regime or None,
+        "return_15m_points": metrics.get("return_15m_points"),
+        "return_60m_points": metrics.get("return_60m_points"),
+        "return_180m_points": metrics.get("return_180m_points"),
+    }
+    return {
+        "mode": "shadow",
+        "policy_version": "gth_trend_alignment_shadow_v1",
+        "evaluated_at": now.isoformat() if now is not None else None,
+        "verdict": "blocked" if reasons else "pass",
+        "block_reasons": reasons,
+        "features": features,
+    }
+
+
+def _virtual_strategy_blocks_gth(active: Mapping[str, object] | None) -> bool:
+    """Only an already tracked two-leg GTH spread blocks another spread signal."""
+
+    return bool(active and active.get("position_type") == "call_debit_spread")
+
+
+def _state_time(value: object) -> datetime | None:
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value)
+        except ValueError:
+            return None
+    else:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(timezone.utc)
+
+
+def _fresh_at(value: datetime, *, now: datetime, max_age_seconds: float) -> bool:
+    age = (now - value).total_seconds()
+    return -5.0 <= age <= max_age_seconds
+
+
 def _append_gth_signal_audit(
     storage: StorageSettings,
     at: datetime,
@@ -618,5 +801,34 @@ def _append_gth_signal_audit(
         os.close(descriptor)
 
 
+def _append_gth_detector_health(
+    storage: StorageSettings,
+    at: datetime,
+    payload: Mapping[str, object],
+) -> None:
+    session_date = str(payload.get("session_date") or "unknown")
+    path = (
+        Path(storage.data_root)
+        / "features"
+        / "gth_detector_health"
+        / f"date={session_date}"
+        / "samples.jsonl"
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(path, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600)
+    try:
+        os.write(
+            descriptor,
+            (json.dumps(dict(payload), ensure_ascii=False, sort_keys=True) + "\n").encode(),
+        )
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 def main() -> None:
-    raise SystemExit(run())
+    from spx_spark.application.runtime.intraday_shock_hot_worker import (
+        run_locked_intraday_shock_once,
+    )
+
+    raise SystemExit(run_locked_intraday_shock_once(run))

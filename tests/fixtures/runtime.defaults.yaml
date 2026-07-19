@@ -106,7 +106,13 @@ market_features:
   virtual_gamma_retention_fraction: {value: 0.60, description: Virtual Gamma retention exit fraction.}
   virtual_iv_drop_vol_points: {value: 1.0, description: Post-event IV decline threshold.}
   virtual_wall_touch_points: {value: 5.0, description: Call Wall take-profit distance.}
-  virtual_gth_time_stop_minutes: {value: 360, description: GTH virtual strategy time stop.}
+  virtual_gth_time_stop_minutes: {value: 810, description: GTH virtual strategy backstop from the 20:15 ET open through the shared 09:45 ET exit clock.}
+  virtual_gth_spread_saturation_fraction: {value: 0.85, description: GTH two-leg virtual spread value-saturation exit fraction.}
+  play_stats_enabled: {value: true, description: Enables fail-open rolling win-rate stats on trade-ready alerts.}
+  play_stats_window_days: {value: 20, description: Rolling lookback window in days for pricing outcomes.}
+  play_stats_horizon: {value: "300", description: Outcome horizon key in seconds defining a win.}
+  play_stats_min_samples: {value: 10, description: Minimum matched outcomes before play stats are shown.}
+  play_stats_refresh_seconds: {value: 900.0, description: Minimum seconds between pricing-outcome store reloads.}
 
 provider_failover:
   enabled:
@@ -1522,6 +1528,11 @@ intraday_shock:
   gth_session_warmup_seconds: {value: 3600, description: Initial GTH history warmup.}
   gth_max_signals_per_session: {value: 3, description: Maximum GTH signals per session.}
   gth_cooldown_seconds: {value: 3600, description: GTH signal cooldown seconds.}
+  gth_spread_min_width_points: {value: 15.0, description: GTH debit-spread minimum width points.}
+  gth_spread_max_width_points: {value: 75.0, description: GTH debit-spread maximum width points.}
+  gth_spread_default_width_points: {value: 50.0, description: GTH debit-spread fallback width points.}
+  gth_structure_max_age_seconds: {value: 90.0, description: Maximum age of same-session quality-qualified GTH structure inputs.}
+  gth_exit_clock_et: {value: "09:45", description: Shared America/New_York GTH spread and virtual-strategy exit clock.}
 
 intraday_strategy:
   level_buffer_points:

@@ -105,6 +105,19 @@ def test_invalidation_before_entry_quote_retires_candidate(tmp_path) -> None:
 
 def _intent() -> dict[str, object]:
     return {
+        "schema_version": 3,
+        "policy_version": "rth_trade_intent.v3+sha256:test",
+        "valid_until": (NOW + timedelta(seconds=90)).isoformat(),
+        "coordinate": {
+            "kind": "official_spx",
+            "instrument_id": "index:SPX",
+            "observed_value": 7551.08,
+            "target_value": 7560.0,
+            "spx_observed_value": 7551.08,
+            "basis_points": 0.0,
+            "as_of": NOW.isoformat(),
+        },
+        "block_reasons": [],
         "status": "trade_ready",
         "intent_id": "intent:test-put",
         "event_id": "level:test-put",

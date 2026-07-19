@@ -6,6 +6,10 @@ from datetime import datetime, timezone
 from typing import Any
 
 from spx_spark.application.order_map.models import LEVEL_DECISION_PLAYS, level_decision_play
+from spx_spark.strategy_contract import (
+    STRATEGY_EVENT_SCHEMA_VERSION,
+    actionable_strategy_contract_issues,
+)
 
 
 def apply_candidate_presentation(payload: dict[str, Any], *, now: datetime) -> None:
@@ -44,7 +48,7 @@ def apply_candidate_presentation(payload: dict[str, Any], *, now: datetime) -> N
             "order_style": "live_nbbo_limit",
             "invalidation_spx": intent.get("invalidation_spx"),
             "target_spx": intent.get("target_spx"),
-            "intent_expires_at": intent.get("expires_at"),
+            "intent_expires_at": intent.get("valid_until") or intent.get("expires_at"),
             "time_stop_at": intent.get("time_stop_at"),
             "max_loss_per_contract": intent.get("max_loss_per_contract"),
             "provider": intent.get("provider"),
@@ -78,7 +82,7 @@ def apply_candidate_presentation(payload: dict[str, Any], *, now: datetime) -> N
             "intent_id": intent.get("intent_id"),
         }
         return
-    direction, direction_source = _primary_direction(payload)
+    direction, direction_source = _primary_direction(payload, now=now)
     primary = _choose_primary(candidates, payload=payload, direction=direction)
     payload["observation_candidates"] = [_as_observation(primary)] if primary else []
     payload["opposing_invalidation"] = _opposing_invalidation(
@@ -107,7 +111,7 @@ def _directional_setup_active(payload: dict[str, Any]) -> bool:
     )
 
 
-def _primary_direction(payload: dict[str, Any]) -> tuple[str, str]:
+def _primary_direction(payload: dict[str, Any], *, now: datetime) -> tuple[str, str]:
     for source, value in (
         ("trade_intent", payload.get("trade_intent")),
         ("level_decision", payload.get("level_decision")),
@@ -116,7 +120,11 @@ def _primary_direction(payload: dict[str, Any]) -> tuple[str, str]:
         if isinstance(value, dict) and str(value.get("direction") or "") in {"up", "down"}:
             return str(value["direction"]), source
     gth = payload.get("gth_dip_reclaim_signal")
-    if isinstance(gth, dict) and gth.get("kind") == "gth_dip_reclaim_call":
+    if (
+        isinstance(gth, dict)
+        and gth.get("kind") == "gth_dip_reclaim_call"
+        and not actionable_strategy_contract_issues(gth, now=now)
+    ):
         return "up", "gth_dip_reclaim"
     trend = payload.get("globex_trend")
     regime = str(trend.get("regime") or "") if isinstance(trend, dict) else ""
@@ -202,11 +210,20 @@ def _supported_plan_play(
         return None, f"trade_intent_{intent.get('status') or 'unavailable'}"
     if decision.get("phase") != "confirmed":
         return None, "decision_not_confirmed"
-    expires_at = _timestamp(intent.get("expires_at"))
-    if expires_at is None:
-        return None, "trade_intent_expiry_unavailable"
-    if _utc(now) >= expires_at:
-        return None, "trade_intent_expired"
+    if intent.get("schema_version") == STRATEGY_EVENT_SCHEMA_VERSION:
+        contract_issues = actionable_strategy_contract_issues(intent, now=now)
+        if "strategy_event_expired" in contract_issues:
+            return None, "trade_intent_expired"
+        if contract_issues:
+            return None, f"trade_intent_{contract_issues[0]}"
+    elif intent.get("schema_version") == 1:
+        expires_at = _timestamp(intent.get("expires_at"))
+        if expires_at is None:
+            return None, "trade_intent_expiry_unavailable"
+        if _utc(now) >= expires_at:
+            return None, "trade_intent_expired"
+    else:
+        return None, "trade_intent_strategy_schema_unsupported"
 
     thesis = str(decision.get("thesis") or "")
     direction = str(decision.get("direction") or "")

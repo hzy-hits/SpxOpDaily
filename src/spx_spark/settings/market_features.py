@@ -67,7 +67,14 @@ class MarketFeatureSettings:
     virtual_gamma_retention_fraction: float = 0.60
     virtual_iv_drop_vol_points: float = 1.0
     virtual_wall_touch_points: float = 5.0
-    virtual_gth_time_stop_minutes: int = 360
+    virtual_gth_time_stop_minutes: int = 810
+    virtual_gth_exit_clock_et: str = "09:45"
+    virtual_gth_spread_saturation_fraction: float = 0.85
+    play_stats_enabled: bool = True
+    play_stats_window_days: int = 20
+    play_stats_horizon: str = "300"
+    play_stats_min_samples: int = 10
+    play_stats_refresh_seconds: float = 900.0
 
     def __post_init__(self) -> None:
         positive = (
@@ -123,6 +130,7 @@ class MarketFeatureSettings:
             self.virtual_iv_drop_vol_points,
             self.virtual_wall_touch_points,
             self.virtual_gth_time_stop_minutes,
+            self.virtual_gth_spread_saturation_fraction,
         )
         if any(value <= 0 for value in positive):
             raise ValueError("market feature settings must be positive")
@@ -162,15 +170,31 @@ class MarketFeatureSettings:
             self.greek_delta_saturation,
             self.virtual_profit_take_fraction,
             self.virtual_gamma_retention_fraction,
+            self.virtual_gth_spread_saturation_fraction,
         )
         if any(value > 1 for value in fractions):
             raise ValueError("market feature trade fractions cannot exceed 1")
         if not 0 < self.greek_target_delta_min < self.greek_target_delta_max < 1:
             raise ValueError("Greek target delta band must be ordered within (0, 1)")
+        if _parse_clock(self.virtual_gth_exit_clock_et) <= time(4, 30):
+            raise ValueError("virtual GTH exit clock must be after 04:30 ET")
+        if self.play_stats_window_days <= 0 or self.play_stats_min_samples <= 0:
+            raise ValueError("play stats window and minimum samples must be positive")
+        if self.play_stats_refresh_seconds < 0:
+            raise ValueError("play stats refresh seconds must be non-negative")
+        try:
+            horizon_seconds = int(self.play_stats_horizon)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("play stats horizon must be a positive integer") from exc
+        if horizon_seconds <= 0 or str(horizon_seconds) != self.play_stats_horizon:
+            raise ValueError("play stats horizon must be a canonical positive integer")
 
 
 def _parse_clock(value: str) -> time:
     try:
-        return time.fromisoformat(value)
-    except ValueError as exc:
+        parsed = time.fromisoformat(value)
+    except (TypeError, ValueError) as exc:
         raise ValueError(f"invalid ET clock: {value}") from exc
+    if parsed.tzinfo is not None or parsed.second or parsed.microsecond:
+        raise ValueError(f"invalid ET clock: {value}")
+    return parsed

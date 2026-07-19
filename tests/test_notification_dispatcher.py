@@ -273,9 +273,11 @@ def test_recovery_prunes_shadow_entry_once_event_dead_letters(
     # Exhaust the feishu retries (max_attempts=4, schedule 15s/60s/300s).
     recovered = None
     for offset in (15, 75, 375):
+        cycle_now = NOW + timedelta(seconds=offset)
         recovered = recover_pending_notifications(
             settings,
-            now=NOW + timedelta(seconds=offset),
+            now=cycle_now,
+            completion_clock=lambda cycle_now=cycle_now: cycle_now,
         )
     assert recovered is not None
     assert recovered["dead_lettered"] == 1

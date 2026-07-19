@@ -2,7 +2,13 @@
 
 from spx_spark.notifier.missed_queue import append_missed, flush_missed
 from spx_spark.notifier.deepseek import run_deepseek_reviewer
-from spx_spark.notifier.dispatcher import DispatchResult, dispatch_notification
+from spx_spark.notifier.dispatcher import (
+    DispatchResult,
+    EnqueueResult,
+    consume_pending_notifications,
+    dispatch_notification,
+    enqueue_notification,
+)
 from spx_spark.notifier.model import (
     CommandRunner,
     NotificationResult,
@@ -48,6 +54,7 @@ __all__ = [
     "append_missed",
     "CommandRunner",
     "DispatchResult",
+    "EnqueueResult",
     "flush_missed",
     "NotificationResult",
     "NotificationEnvelope",
@@ -59,9 +66,11 @@ __all__ = [
     "codex_message_requests_delivery",
     "codex_message_respects_human_scope",
     "context_only_alerts",
+    "consume_pending_notifications",
     "default_runner",
     "dispatch_notification",
     "direct_push_alerts",
+    "enqueue_notification",
     "format_alert_message",
     "is_human_visible_alert",
     "is_market_signal_alert",

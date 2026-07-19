@@ -1,0 +1,22 @@
+[Unit]
+Description=SPX Spark persistent notification outbox delivery worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/ubuntu/spx-spark
+EnvironmentFile=-/home/ubuntu/spx-spark/.env
+Environment=PATH=/home/ubuntu/.local/bin:/home/ubuntu/.cargo/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/home/ubuntu/spx-spark/.venv/bin/python -m spx_spark.notifier.delivery_worker --poll-seconds 0.5
+Restart=always
+RestartSec=2
+KillSignal=SIGTERM
+TimeoutStopSec=15
+SuccessExitStatus=143 SIGTERM
+UMask=0077
+CPUWeight=300
+IOWeight=300
+
+[Install]
+WantedBy=default.target

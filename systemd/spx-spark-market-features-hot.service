@@ -1,0 +1,22 @@
+[Unit]
+Description=SPX Spark persistent market-feature hot worker
+After=network-online.target spx-spark-schwab-marketdata.service spx-spark-ibkr-stream.service
+Wants=network-online.target spx-spark-schwab-marketdata.service spx-spark-ibkr-stream.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/ubuntu/spx-spark
+EnvironmentFile=-/home/ubuntu/spx-spark/.env
+Environment=PATH=/home/ubuntu/.local/bin:/home/ubuntu/.cargo/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/home/ubuntu/spx-spark/scripts/run-market-features-hot-worker.sh --lock-path=%t/spx-spark-market-features-hot-worker.lock
+Restart=always
+RestartSec=10
+KillSignal=SIGTERM
+TimeoutStopSec=135
+SuccessExitStatus=0
+UMask=0077
+CPUWeight=800
+IOWeight=800
+
+[Install]
+WantedBy=default.target

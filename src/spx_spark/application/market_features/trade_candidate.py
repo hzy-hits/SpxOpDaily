@@ -12,6 +12,13 @@ from typing import Mapping
 from spx_spark.config import StorageSettings
 from spx_spark.state_io import atomic_write_json_secure, exclusive_state_lock, read_json_object
 from spx_spark.storage import LatestState, configured_quote_use_decision
+from spx_spark.strategy_contract import (
+    STRATEGY_EVENT_SCHEMA_VERSION,
+    actionable_strategy_contract_issues,
+    parse_aware_time,
+    policy_version,
+    strategy_event_fields,
+)
 
 
 class CandidatePhase(str, Enum):
@@ -56,7 +63,12 @@ def advance_trade_candidate(
         }
         completed = set(completed_candidates)
         completed.update(str(item) for item in state.get("completed_candidate_ids") or [])
-        incoming_id = _candidate_id(intent) if intent.get("status") == "trade_ready" else ""
+        incoming_id = (
+            _candidate_id(intent)
+            if intent.get("status") == "trade_ready"
+            and not actionable_strategy_contract_issues(intent, now=now)
+            else ""
+        )
 
         if active and incoming_id and incoming_id != active.get("candidate_id"):
             terminal = _terminal(
@@ -168,8 +180,19 @@ def gate_trade_intent(
 
 
 def _armed_candidate(intent: Mapping[str, object], *, now: datetime) -> dict[str, object]:
+    raw_coordinate = intent.get("coordinate")
+    coordinate = dict(raw_coordinate) if isinstance(raw_coordinate, Mapping) else None
+    candidate_policy_version = policy_version(
+        "trade_candidate.v3",
+        {"source_policy_version": intent.get("policy_version")},
+    )
     return {
-        "schema_version": 1,
+        **strategy_event_fields(
+            policy_version_value=candidate_policy_version,
+            valid_until=parse_aware_time(intent.get("valid_until")),
+            coordinate=coordinate,
+            block_reasons=(),
+        ),
         "phase": CandidatePhase.ARMED.value,
         "candidate_id": _candidate_id(intent),
         "intent_id": intent.get("intent_id"),
@@ -197,7 +220,11 @@ def _advance_active(
     direction = str(active.get("direction") or "")
     target = _number(active.get("target_spx"))
     invalidation = _number(active.get("invalidation_spx"))
-    expires_at = _time(active.get("expires_at"))
+    expires_at = (
+        parse_aware_time(active.get("valid_until"))
+        if active.get("schema_version") == STRATEGY_EVENT_SCHEMA_VERSION
+        else _time(active.get("expires_at"))
+    )
     spot = _usable_price(latest, "index:SPX", now=now)
     observation: dict[str, object] = {
         "at": now.isoformat(),
@@ -261,8 +288,19 @@ def _terminal(
     now: datetime,
 ) -> dict[str, object]:
     observation = dict(active.get("last_observation") or {})
+    terminal_reasons = (
+        [] if phase is CandidatePhase.QUOTE_REACHED_ENTRY else [reason or f"candidate_{phase.value}"]
+    )
+    raw_coordinate = active.get("coordinate")
+    coordinate = dict(raw_coordinate) if isinstance(raw_coordinate, Mapping) else None
     payload = {
         **dict(active),
+        **strategy_event_fields(
+            policy_version_value=str(active.get("policy_version") or "trade_candidate.v3"),
+            valid_until=parse_aware_time(active.get("valid_until")),
+            coordinate=coordinate,
+            block_reasons=terminal_reasons,
+        ),
         "event": "candidate_terminal",
         "phase": phase.value,
         "terminal_reason": reason,

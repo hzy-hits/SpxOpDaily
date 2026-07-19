@@ -11,7 +11,7 @@ from pathlib import Path
 from spx_spark.config import env_bool, env_csv_preserve, env_float, env_int
 from spx_spark.marketdata import Provider, as_utc
 from spx_spark.settings import AppSettings, ShockSettings, load_app_settings
-from spx_spark.settings.shock import DEFAULT_SHOCK_SETTINGS
+from spx_spark.settings.shock import DEFAULT_SHOCK_SETTINGS, validate_gth_spread_policy
 
 
 STATE_SCHEMA_VERSION = 1
@@ -59,6 +59,11 @@ class IntradayShockSettings:
     gth_session_warmup_seconds: int = 3600
     gth_max_signals_per_session: int = 3
     gth_cooldown_seconds: int = 3600
+    gth_spread_min_width_points: float = 15.0
+    gth_spread_max_width_points: float = 75.0
+    gth_spread_default_width_points: float = 50.0
+    gth_structure_max_age_seconds: float = 90.0
+    gth_exit_clock_et: str = "09:45"
 
     def __post_init__(self) -> None:
         if not self.anchor_provider_priority:
@@ -72,6 +77,13 @@ class IntradayShockSettings:
             )
         if self.provider_switch_reset_seconds <= 0:
             raise ValueError("intraday shock provider switch reset seconds must be positive")
+        validate_gth_spread_policy(
+            min_width_points=self.gth_spread_min_width_points,
+            max_width_points=self.gth_spread_max_width_points,
+            default_width_points=self.gth_spread_default_width_points,
+            structure_max_age_seconds=self.gth_structure_max_age_seconds,
+            exit_clock_et=self.gth_exit_clock_et,
+        )
 
     @classmethod
     def from_policy(
@@ -195,6 +207,11 @@ class IntradayShockSettings:
             gth_session_warmup_seconds=policy.gth_session_warmup_seconds,
             gth_max_signals_per_session=policy.gth_max_signals_per_session,
             gth_cooldown_seconds=policy.gth_cooldown_seconds,
+            gth_spread_min_width_points=policy.gth_spread_min_width_points,
+            gth_spread_max_width_points=policy.gth_spread_max_width_points,
+            gth_spread_default_width_points=policy.gth_spread_default_width_points,
+            gth_structure_max_age_seconds=policy.gth_structure_max_age_seconds,
+            gth_exit_clock_et=policy.gth_exit_clock_et,
         )
 
     @classmethod

@@ -2772,6 +2772,19 @@ def test_candidate_presentation_requires_one_directionally_supported_plan() -> N
         "es_last": 7540.0,
         "vol_context": {},
         "trade_intent": {
+            "schema_version": 3,
+            "policy_version": "rth_trade_intent.v3+sha256:test",
+            "valid_until": "2026-07-14T04:16:30+00:00",
+            "coordinate": {
+                "kind": "chain_implied_spx",
+                "instrument_id": "synthetic:SPXW_PARITY",
+                "observed_value": 7495.0,
+                "target_value": 7500.0,
+                "spx_observed_value": 7495.0,
+                "basis_points": 45.0,
+                "as_of": "2026-07-14T04:15:00+00:00",
+            },
+            "block_reasons": [],
             "status": "trade_ready",
             "intent_id": "intent-1",
             "context_id": "context-1",
@@ -2885,11 +2898,13 @@ def test_candidate_presentation_requires_one_directionally_supported_plan() -> N
 
     payload["trade_intent"]["status"] = "trade_ready"
     payload["trade_intent"]["expires_at"] = evaluation_now.isoformat()
+    payload["trade_intent"]["valid_until"] = evaluation_now.isoformat()
     _apply_candidate_presentation(payload, now=evaluation_now)
     assert payload["plan_candidates"] == []
     assert payload["candidate_presentation"]["reason"] == "trade_intent_expired"
 
     payload["trade_intent"]["expires_at"] = "2026-07-14T04:16:30+00:00"
+    payload["trade_intent"]["valid_until"] = "2026-07-14T04:16:30+00:00"
     payload["level_trigger_repricing"]["event_id"] = "event-2"
     _apply_candidate_presentation(payload, now=evaluation_now)
     assert payload["plan_candidates"] == []
@@ -2904,6 +2919,39 @@ def test_candidate_presentation_requires_one_directionally_supported_plan() -> N
     assert payload["plan_candidates"] == []
     assert payload["candidate_presentation"]["reason"] == "unique_trade_ready_candidate_unavailable"
 
+
+def test_candidate_primary_direction_ignores_expired_or_legacy_gth_signal() -> None:
+    from spx_spark.application.order_map.candidate_presentation import _primary_direction
+
+    now = datetime(2026, 7, 14, 4, 15, tzinfo=timezone.utc)
+    signal = {
+        "schema_version": 3,
+        "policy_version": "gth_dip_reclaim.v3+sha256:test",
+        "valid_until": (now + timedelta(seconds=30)).isoformat(),
+        "coordinate": {
+            "kind": "raw_es",
+            "instrument_id": "future:ES",
+            "observed_value": 7550.0,
+            "target_value": 7548.0,
+            "basis_points": 0.0,
+            "as_of": now.isoformat(),
+        },
+        "block_reasons": [],
+        "kind": "gth_dip_reclaim_call",
+    }
+
+    assert _primary_direction({"gth_dip_reclaim_signal": signal}, now=now) == (
+        "up",
+        "gth_dip_reclaim",
+    )
+    assert _primary_direction(
+        {"gth_dip_reclaim_signal": {**signal, "valid_until": now.isoformat()}},
+        now=now,
+    ) == ("", "nearest_level_no_direction_guess")
+    assert _primary_direction(
+        {"gth_dip_reclaim_signal": {"kind": "gth_dip_reclaim_call"}},
+        now=now,
+    ) == ("", "nearest_level_no_direction_guess")
 
 def test_status_fingerprint_tracks_trade_intent_identity() -> None:
     from spx_spark.application.order_map.service import (

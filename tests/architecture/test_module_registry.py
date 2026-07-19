@@ -17,6 +17,7 @@ LAYERS = {
     "market_calendar": 0,
     "macro_event_clock": 0,
     "alert_model": 0,
+    "strategy_contract": 0,
     "config": 1,
     "config_ibkr": 1,
     "config_providers": 1,
@@ -77,6 +78,7 @@ L0_MODULES = {
     "market_calendar",
     "macro_event_clock",
     "alert_model",
+    "strategy_contract",
 }
 L2_PROVIDERS = {"ibkr", "schwab", "hyperliquid", "polymarket", "mock_collector"}
 L5_MODULES = {module for module, layer in LAYERS.items() if layer == 5}

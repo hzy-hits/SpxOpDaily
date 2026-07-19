@@ -106,7 +106,13 @@ market_features:
   virtual_gamma_retention_fraction: {value: 0.60, description: Remaining contract Gamma fraction below which negative Color can trigger a convexity-decay exit.}
   virtual_iv_drop_vol_points: {value: 1.0, description: IV decline in volatility points that activates post-event Vanna-drag exit logic.}
   virtual_wall_touch_points: {value: 5.0, description: SPX distance from the promoted Call Wall treated as a profit-taking touch.}
-  virtual_gth_time_stop_minutes: {value: 360, description: Maximum lifetime of an ES-led GTH virtual Call episode, long enough to span the overnight-to-data-release path.}
+  virtual_gth_time_stop_minutes: {value: 810, description: Backstop maximum lifetime from the 20:15 ET GTH open through the shared 09:45 ET exit clock.}
+  virtual_gth_spread_saturation_fraction: {value: 0.85, description: Fraction of the listed debit-spread width treated as value saturation for the GTH two-leg virtual take-profit.}
+  play_stats_enabled: {value: true, description: Enriches trade-ready alerts with rolling historical win-rate stats from the system's own pricing-outcome labels; fails open when the outcome store is unavailable.}
+  play_stats_window_days: {value: 20, description: Rolling lookback window in days over completed pricing outcomes feeding the same-signal win-rate block.}
+  play_stats_horizon: {value: "300", description: Outcome horizon key in seconds whose return_fraction defines a win (return_fraction > 0).}
+  play_stats_min_samples: {value: 10, description: Minimum matched outcomes before play stats are attached; below this the alert omits the block entirely.}
+  play_stats_refresh_seconds: {value: 900.0, description: Minimum seconds between reloads of the pricing-outcomes store by the realtime play-stats provider.}
 
 provider_failover:
   enabled:
@@ -1612,6 +1618,21 @@ intraday_shock:
   gth_cooldown_seconds:
     value: 3600
     description: Minimum time between delivered GTH dip-reclaim advisories within one SPX trading session.
+  gth_spread_min_width_points:
+    value: 15.0
+    description: Minimum SPXW 0DTE debit-spread width in points for the GTH dip-reclaim ambush-order advisory.
+  gth_spread_max_width_points:
+    value: 75.0
+    description: Maximum SPXW 0DTE debit-spread width in points; a farther target wall caps the short strike at this width.
+  gth_spread_default_width_points:
+    value: 50.0
+    description: Fallback SPXW 0DTE debit-spread width in points when neither structure walls nor an expected move are available.
+  gth_structure_max_age_seconds:
+    value: 90.0
+    description: Maximum age of both the same-session stable structure confirmation and its quality-qualified ES-to-SPX basis before exact GTH spread legs are suppressed.
+  gth_exit_clock_et:
+    value: "09:45"
+    description: America/New_York latest-exit wall clock shared by the GTH spread advisory and virtual lifecycle; UTC and Beijing displays are derived with DST.
 
 intraday_strategy:
   level_buffer_points:

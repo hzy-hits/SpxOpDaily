@@ -29,7 +29,7 @@ from spx_spark.ibkr.atm_reference import (
 )
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR, ET
 from spx_spark.marketdata import MarketDataQuality
-from spx_spark.notifier.dispatcher import dispatch_notification
+from spx_spark.notifier.dispatcher import enqueue_notification
 from spx_spark.notifier.receipts import NotificationEnvelope
 from spx_spark.options_map import build_options_map
 from spx_spark.schwab.symbols import active_quarterly_contract_month
@@ -644,6 +644,8 @@ def _deliver_transition(
         "delivery_gate": "trade_intent_required",
         "reason": "observation_only",
         "sinks": [],
+        "accepted": False,
+        "queued": False,
         "delivered": False,
     }
     if level_confirmed and notify_transitions and notifications_enabled:
@@ -659,7 +661,7 @@ def _deliver_transition(
             event_id = f"level-path:{state.get('event_id')}:confirmed"
             text = _confirmed_path_message(state, observation)
             try:
-                dispatch = dispatch_notification(
+                enqueued = enqueue_notification(
                     notification,
                     NotificationEnvelope(
                         event_id=event_id,
@@ -672,7 +674,7 @@ def _deliver_transition(
                     text=text,
                     friend=True,
                     feishu_text=text,
-                    attempted_at=_utc(now),
+                    enqueued_at=_utc(now),
                 )
             except Exception as exc:  # Delivery failure must not roll back the state machine.
                 result["reason"] = f"delivery_error:{type(exc).__name__}"
@@ -681,8 +683,13 @@ def _deliver_transition(
                     {
                         "notification_event_id": event_id,
                         "reason": "confirmed_market_warning",
-                        "sinks": [sink.to_dict() for sink in dispatch.sinks],
-                        "delivered": dispatch.delivered,
+                        "targets": list(enqueued.targets),
+                        "accepted": enqueued.accepted,
+                        "inserted": enqueued.inserted,
+                        "duplicate": enqueued.duplicate,
+                        "queued": enqueued.queued_for_recovery,
+                        # Delivery belongs to the independent outbox consumer.
+                        "delivered": enqueued.delivered,
                     }
                 )
     _append_unique(_delivery_audit_path(storage, now), result)

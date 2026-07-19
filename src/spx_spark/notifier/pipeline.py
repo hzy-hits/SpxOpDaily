@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-from dataclasses import replace
 from datetime import datetime, timezone
 import hashlib
 
 from spx_spark.config import NotificationSettings
 from spx_spark.notifier.deepseek import deepseek_usage_limited, run_deepseek_reviewer
-from spx_spark.notifier.dispatcher import dispatch_notification
+from spx_spark.notifier.dispatcher import dispatch_notification, enqueue_notification
 from spx_spark.notifier.llm_writer import generate_push_text, load_previous_push, record_push
 from spx_spark.notifier.model import CommandRunner, NotificationResult, SinkResult, default_runner
 from spx_spark.notifier.policy import (
@@ -21,6 +20,14 @@ from spx_spark.notifier.policy import (
     is_review_failure_failopen_alert,
     split_time_sensitive_review_candidates,
     strip_delivery_protocol_cue,
+)
+from spx_spark.notifier.pipeline_support import (
+    record_delivered_event_ids as _record_delivered_event_ids,
+    scope_sink as _scope_sink,
+    scope_sinks as _scope_sinks,
+    stable_notification_time as _stable_notification_time,
+    successful_delivery_outcome as _successful_delivery_outcome,
+    telemetry_alert_key as _telemetry_alert_key,
 )
 from spx_spark.notifier.prompts import (
     build_codex_prompt,
@@ -45,32 +52,6 @@ from spx_spark.notifier.state import (
 )
 
 
-def _telemetry_alert_key(alert: dict[str, object]) -> str:
-    return str(alert.get("decision_id") or alert_key(alert))
-
-
-def _scope_sink(
-    sink: SinkResult,
-    alerts: list[dict[str, object]],
-    *,
-    verdict: str | None = None,
-) -> SinkResult:
-    return replace(
-        sink,
-        alert_keys=tuple(dict.fromkeys(_telemetry_alert_key(alert) for alert in alerts)),
-        verdict=verdict or sink.verdict,
-    )
-
-
-def _scope_sinks(
-    sinks: list[SinkResult],
-    alerts: list[dict[str, object]],
-    *,
-    verdict: str | None = None,
-) -> list[SinkResult]:
-    return [_scope_sink(sink, alerts, verdict=verdict) for sink in sinks]
-
-
 def _dispatch_alerts(
     *,
     payload: dict[str, object],
@@ -85,6 +66,7 @@ def _dispatch_alerts(
     now: datetime,
 ) -> list[SinkResult]:
     identity = "\n".join(sorted(_telemetry_alert_key(alert) for alert in alerts))
+    occurred_at = _stable_notification_time(payload, alerts, fallback=now)
     source_event_id = str(payload.get("_notification_event_id") or "").strip()
     if source_event_id:
         suffix = hashlib.sha256(f"{kind}|{identity}".encode("utf-8")).hexdigest()[:16]
@@ -93,7 +75,7 @@ def _dispatch_alerts(
         event_id = notification_event_id(
             kind,
             source="alert_pipeline",
-            occurred_at=now,
+            occurred_at=occurred_at,
             identity=identity,
         )
     if lane in {"ops", "mixed"}:
@@ -102,15 +84,47 @@ def _dispatch_alerts(
         receipt_lane = "position_safety"
     else:
         receipt_lane = "market_warning"
+    envelope = NotificationEnvelope(
+        event_id=event_id,
+        source="alert_pipeline",
+        kind=kind,
+        lane=receipt_lane,
+        occurred_at=occurred_at,
+    )
+    if settings.delivery_outbox_enabled and settings.delivery_outbox_path:
+        enqueued = enqueue_notification(
+            settings,
+            envelope,
+            title=title,
+            text=text,
+            friend=friend,
+            enqueued_at=now,
+        )
+        if not enqueued.targets:
+            return [
+                SinkResult(
+                    sink="notification_outbox",
+                    attempted=True,
+                    ok=False,
+                    error=enqueued.outcome,
+                    verdict="rejected",
+                )
+            ]
+        return [
+            SinkResult(
+                sink=target,
+                attempted=True,
+                # Producer acknowledgement means the durable consumer now owns
+                # retries.  ``verdict`` keeps this distinct from human delivery.
+                ok=enqueued.accepted,
+                error=None if enqueued.accepted else enqueued.outcome,
+                verdict="delivered" if enqueued.delivered else "queued",
+            )
+            for target in enqueued.targets
+        ]
     dispatched = dispatch_notification(
         settings,
-        NotificationEnvelope(
-            event_id=event_id,
-            source="alert_pipeline",
-            kind=kind,
-            lane=receipt_lane,
-            occurred_at=now,
-        ),
+        envelope,
         title=title,
         text=text,
         friend=friend,
@@ -160,25 +174,6 @@ def _filter_recent_shock_correlations(
             )
         )
     return kept, suppressed
-
-
-def _record_delivered_event_ids(
-    alerts: list[dict[str, object]],
-    acknowledged_event_ids: set[str],
-) -> None:
-    for alert in alerts:
-        if alert.get("event_id"):
-            acknowledged_event_ids.add(str(alert["event_id"]))
-        # Shock and reclaim intentionally share one event id. Keep a
-        # phase-specific acknowledgement so the monitor can recover if the
-        # process exits between committing notifier state and monitor state.
-        if str(alert.get("kind") or "") in {
-            "intraday_price_shock",
-            "intraday_price_reclaim",
-            "flip_reclaim_call",
-            "call_wall_breakout_call",
-        } and alert.get("dedup_group"):
-            acknowledged_event_ids.add(str(alert["dedup_group"]))
 
 
 def _failopen_safety_alerts(
@@ -372,7 +367,7 @@ def _deliver_review_message(
                 alerts_marked_sent.extend(delivery_candidates)
                 _record_delivered_event_ids(delivery_candidates, acknowledged_event_ids)
                 record_push("intraday_alert", human_message, at=now_utc.isoformat())
-                outcome = "delivered"
+                outcome = _successful_delivery_outcome(delivery_sinks)
                 remaining: list[dict[str, object]] = []
             else:
                 outcome = "delivery_failed_pending"
@@ -632,7 +627,11 @@ def notify_payload(
             raw_reply=format_alert_message(payload, bypass_alerts),
             parser_verdict="not_run",
             scope_ok=None,
-            outcome="delivered" if any_delivery_ok(delivery_sinks) else "delivery_failed_pending",
+            outcome=(
+                _successful_delivery_outcome(delivery_sinks)
+                if any_delivery_ok(delivery_sinks)
+                else "delivery_failed_pending"
+            ),
             delivery_sinks=delivery_sinks,
         )
     elif bypass_alerts:
@@ -676,7 +675,11 @@ def notify_payload(
             raw_reply=bypass_message,
             parser_verdict="not_run",
             scope_ok=None,
-            outcome="delivered" if any_delivery_ok(delivery_sinks) else "delivery_failed_pending",
+            outcome=(
+                _successful_delivery_outcome(delivery_sinks)
+                if any_delivery_ok(delivery_sinks)
+                else "delivery_failed_pending"
+            ),
             delivery_sinks=delivery_sinks,
         )
 
@@ -902,7 +905,16 @@ def notify_payload(
         )
 
     sent_count = sum(
-        1 for sink in sinks if sink.sink in ("bark", "feishu") and sink.ok
+        1
+        for sink in sinks
+        if sink.sink in ("bark", "feishu") and sink.ok and sink.verdict != "queued"
+    )
+    queued_count = sum(
+        1
+        for sink in sinks
+        if sink.sink in ("bark", "feishu", "bark_friend")
+        and sink.ok
+        and sink.verdict == "queued"
     )
     if alerts_marked_sent or acknowledged_event_ids:
         mark_alerts_sent(
@@ -915,6 +927,8 @@ def notify_payload(
     skipped_reason = None if sinks else "no_enabled_sinks"
     if sent_count > 0:
         outcome = "delivered"
+    elif queued_count > 0:
+        outcome = "queued"
     elif review_candidates:
         outcome = "pending"
     elif alerts_marked_sent or acknowledged_event_ids:

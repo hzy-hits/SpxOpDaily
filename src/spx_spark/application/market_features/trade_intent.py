@@ -13,6 +13,7 @@ from spx_spark.application.market_features.models import (
     MinuteMarketFrame,
     OptionStructureFrame,
 )
+from spx_spark.application.market_features.play_outcome_stats import PlayOutcomeStats
 from spx_spark.application.order_map.execution_quote import evaluate_execution_quote
 from spx_spark.application.order_map.models import level_decision_play
 from spx_spark.application.order_map.pricing import round_to_tick
@@ -20,6 +21,11 @@ from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 from spx_spark.settings.market_features import MarketFeatureSettings
 from spx_spark.settings.order_map import OrderMapPolicy
 from spx_spark.storage import LatestState
+from spx_spark.strategy_contract import (
+    policy_version,
+    strategy_contract_issues,
+    strategy_event_fields,
+)
 
 
 HARD_CONTEXT_INVALIDATIONS = frozenset(
@@ -42,6 +48,7 @@ def evaluate_trade_intent(
     now: datetime,
     feature_policy: MarketFeatureSettings,
     order_policy: OrderMapPolicy,
+    play_stats: PlayOutcomeStats | None = None,
 ) -> dict[str, object]:
     """Fail closed unless the signal, direction and live option quote all agree."""
 
@@ -52,6 +59,13 @@ def evaluate_trade_intent(
     thesis = str(level.get("thesis") or "none")
     direction = str(level.get("direction") or "")
     trigger_level = _number(level.get("level"))
+    event_expires_at = _datetime(level.get("expires_at"))
+    raw_coordinate = level.get("trigger_coordinate")
+    coordinate = dict(raw_coordinate) if isinstance(raw_coordinate, Mapping) else None
+    intent_policy_version = policy_version(
+        "rth_trade_intent.v3",
+        {"market_features": feature_policy, "order_map": order_policy},
+    )
     play = level_decision_play(thesis, direction)
     semantic_scope = (
         "|".join((context.session_id, play, f"{trigger_level:.4f}"))
@@ -59,7 +73,12 @@ def evaluate_trade_intent(
         else None
     )
     base: dict[str, object] = {
-        "schema_version": 1,
+        **strategy_event_fields(
+            policy_version_value=intent_policy_version,
+            valid_until=event_expires_at,
+            coordinate=coordinate,
+            block_reasons=(),
+        ),
         "status": "observing",
         "event_id": event_id or None,
         "context_id": context.context_id,
@@ -81,6 +100,14 @@ def evaluate_trade_intent(
         reasons.append("formal_signal_unavailable")
     if level.get("quality_ok") is not True:
         reasons.append("level_observation_quality_failed")
+    reasons.extend(
+        issue
+        for issue in strategy_contract_issues(
+            base,
+            require_actionable_coordinate=True,
+        )
+        if issue.startswith("coordinate_")
+    )
     if direction not in {"up", "down"}:
         reasons.append("direction_unavailable")
     direction_sign = 1 if direction == "up" else -1
@@ -94,7 +121,6 @@ def evaluate_trade_intent(
         if confirmation_age < feature_policy.trade_follow_through_seconds:
             reasons.append("follow_through_hold_pending")
 
-    event_expires_at = _datetime(level.get("expires_at"))
     if event_expires_at is None:
         reasons.append("level_event_expiry_unavailable")
     elif now >= event_expires_at:
@@ -271,8 +297,14 @@ def evaluate_trade_intent(
     token = semantic_key
     intent_id = "intent:" + hashlib.sha256(token.encode()).hexdigest()[:24]
     source_at = quote.quote_time or quote.trade_time or quote.last_update_at or quote.received_at
-    return {
+    payload: dict[str, object] = {
         **base,
+        **strategy_event_fields(
+            policy_version_value=intent_policy_version,
+            valid_until=intent_expires_at,
+            coordinate=coordinate,
+            block_reasons=(),
+        ),
         "status": "trade_ready",
         "intent_id": intent_id,
         "semantic_key": semantic_key,
@@ -306,6 +338,9 @@ def evaluate_trade_intent(
         "evidence": _evidence(context),
         "block_reasons": [],
     }
+    if play_stats is not None:
+        payload["play_stats"] = _play_stats_payload(play_stats)
+    return payload
 
 
 def _direction_blockers(
@@ -550,6 +585,23 @@ def _contract_label(candidate: Mapping[str, object]) -> str:
     return (
         f"SPXW {strike:g}{right}" if strike is not None and right else str(candidate["contract_id"])
     )
+
+
+def _play_stats_payload(stats: PlayOutcomeStats) -> dict[str, object]:
+    try:
+        horizon_seconds: object = int(stats.horizon)
+    except (TypeError, ValueError):
+        horizon_seconds = stats.horizon
+    return {
+        "play": stats.play,
+        "level_kind": stats.level_kind,
+        "window_days": stats.window_days,
+        "horizon_seconds": horizon_seconds,
+        "sample_count": stats.sample_count,
+        "winrate": round(stats.winrate, 4),
+        "avg_return_fraction": round(stats.avg_return, 6),
+        "median_return_fraction": round(stats.median_return, 6),
+    }
 
 
 def _evidence(context: DecisionContext) -> list[str]:

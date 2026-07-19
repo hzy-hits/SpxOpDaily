@@ -15,6 +15,7 @@ from spx_spark.service_loop import (
     ServiceTask,
     build_tasks,
     drain_finished_tasks,
+    exclude_tasks,
     next_delay_seconds,
     run_once,
     run_task,
@@ -111,6 +112,17 @@ def test_service_loop_can_enable_market_features_explicitly() -> None:
     features = next(task for task in tasks if task.name == "market_features")
     assert features.interval_seconds == 5
     assert features.command is not None
+
+
+def test_service_loop_can_exclude_hot_tasks_for_dedicated_owners() -> None:
+    tasks = build_tasks(make_settings(market_features_enabled=True))
+
+    filtered = exclude_tasks(tasks, ["market_features", "intraday_shock"])
+
+    assert "market_features" in [task.name for task in tasks]
+    assert "intraday_shock" in [task.name for task in tasks]
+    assert "market_features" not in [task.name for task in filtered]
+    assert "intraday_shock" not in [task.name for task in filtered]
 
 
 def test_service_loop_can_enable_polymarket_explicitly() -> None:
