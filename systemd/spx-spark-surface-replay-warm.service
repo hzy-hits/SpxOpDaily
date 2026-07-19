@@ -1,0 +1,21 @@
+[Unit]
+Description=Warm the latest SPXW Session Replay catalog
+After=spx-spark-surface-replay.service
+Wants=spx-spark-surface-replay.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/ubuntu/spx-spark
+Environment=MARKET_DATA_DATA_ROOT=/srv/data/spx-spark/data
+ExecStart=/home/ubuntu/spx-spark/scripts/warm-spxw-surface-replay-catalog.sh
+UMask=0077
+Nice=15
+IOSchedulingClass=idle
+CPUWeight=10
+IOWeight=10
+NoNewPrivileges=true
+PrivateNetwork=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+RestrictAddressFamilies=AF_UNIX

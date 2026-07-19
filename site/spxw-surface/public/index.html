@@ -25,10 +25,55 @@
 
       <section id="replay-banner" class="replay-banner" hidden aria-live="polite">
         <strong>HISTORICAL REPLAY</strong>
-        <span>Replay · Fri 7/17 14:35 ET</span>
+        <span id="replay-banner-label">Replay · waiting for a session</span>
         <span class="replay-banner-tag">Frozen</span>
         <span class="replay-banner-tag">Not live</span>
-        <small id="replay-banner-as-of">As of Fri 7/17 14:35 ET · 2026-07-17 18:35 UTC · received/source clock cutoff · 0 selected lookahead rows</small>
+        <span class="replay-banner-tag replay-banner-warning">Bounded PIT</span>
+        <span class="replay-banner-tag replay-banner-warning">Availability clock missing</span>
+        <small id="replay-banner-as-of">Select a bounded-PIT frame · received/source clock cutoff · availability timing is not proven</small>
+      </section>
+
+      <section id="replay-console" class="replay-console" hidden aria-label="历史回放控制器">
+        <div class="replay-console-head">
+          <div>
+            <p class="panel-kicker">SESSION REPLAY</p>
+            <h2>Session timeline</h2>
+            <p id="replay-session-meta">正在读取可回放交易日</p>
+          </div>
+          <label class="replay-session-picker">
+            <span>Session date</span>
+            <select id="replay-session-filter" disabled>
+              <option value="">正在加载</option>
+            </select>
+          </label>
+        </div>
+        <div class="replay-transport">
+          <div class="replay-buttons" aria-label="回放播放控制">
+            <button id="replay-previous" type="button" disabled aria-label="上一帧" title="上一帧">←</button>
+            <button id="replay-play" type="button" class="replay-play" disabled aria-label="播放回放">▶ <span>播放</span></button>
+            <button id="replay-next" type="button" disabled aria-label="下一帧" title="下一帧">→</button>
+          </div>
+          <label class="replay-speed-picker">
+            <span>Speed</span>
+            <select id="replay-speed" disabled>
+              <option value="1">1×</option>
+              <option value="2">2×</option>
+              <option value="4">4×</option>
+            </select>
+          </label>
+          <div class="replay-time-output" aria-live="polite">
+            <strong id="replay-frame-time">—</strong>
+            <span id="replay-frame-position">0 / 0</span>
+          </div>
+        </div>
+        <label class="replay-timeline-label" for="replay-timeline">
+          <span>Available bounded-PIT frames</span>
+          <input id="replay-timeline" type="range" min="0" max="0" step="1" value="0" disabled>
+        </label>
+        <div class="replay-timeline-ends" aria-hidden="true">
+          <span id="replay-timeline-start">—</span>
+          <span id="replay-timeline-end">—</span>
+        </div>
       </section>
 
       <section class="summary-grid" aria-label="快照摘要">
@@ -61,7 +106,7 @@
           <span>View</span>
           <select id="mode-filter">
             <option value="live">Live · production</option>
-            <option value="friday">Replay · Fri 7/17 14:35 ET</option>
+            <option value="replay">Replay · sessions</option>
           </select>
         </label>
         <label class="expiry-control">

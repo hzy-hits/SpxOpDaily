@@ -69,6 +69,8 @@ LAYERS = {
     "order_map": 5,
     "surface_dashboard": 5,
     "surface_dashboard_replay": 5,
+    "surface_replay_http": 5,
+    "surface_replay_service": 5,
     "infrastructure": 4,
 }
 

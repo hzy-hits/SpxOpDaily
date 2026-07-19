@@ -19,6 +19,7 @@ services:
       - ./public:/usr/share/nginx/html:ro
       - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
       - ${SPXW_SURFACE_PUBLISH_DIR:-/srv/data/spx-spark/data/published/spxw-surface}:/usr/share/nginx/data:ro
+      - ${SPXW_SURFACE_REPLAY_RUNTIME_DIR:-/srv/data/spx-spark/data/published/spxw-surface/runtime}:/usr/share/nginx/replay-runtime:ro
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:18082/healthz"]
       interval: 30s

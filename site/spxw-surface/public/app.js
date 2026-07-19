@@ -1,23 +1,19 @@
 "use strict";
 
 const SNAPSHOT_URL = "api/v1/snapshot";
-const REPLAY = Object.freeze({
-  id: "2026-07-17T183500Z",
-  label: "Replay · Fri 7/17 14:35 ET",
-  url: "api/v1/replays/2026-07-17T183500Z",
-  view: "friday",
-  requestedAsOf: "2026-07-17T18:35:00Z",
-  asOfLabel: "Fri 7/17 14:35 ET · 2026-07-17 18:35 UTC",
-  policyVersion: "spxw_surface_replay.v2",
-  sourceFile: "lake/quotes/schema=v1/date=2026-07-17/provider=schwab/hour=18/quotes.parquet",
-  sourceSha256: "85dc310f97113cf106ba54ef5532f3a002c10e67cec069de9c8933924cac2dff",
-  rawSourceFile: "raw/provider=schwab/date=2026-07-17/hour=18/quotes.jsonl",
-  rawSourceSha256: "7e627e0d2f5415a48934196b4ab29d9448e21ead53aaa742d8b6da46b46fca43",
-  projectionPolicySha256: "aa507d6490f5734c52c46a7f5b6763e4d1f402523a75cf1a5df0c6e6dd83dd55",
-  artifactSha256: "475ba8eae84269f4fe453a231a438d2f47ff38a640dbfb2113e98b71210b0e0f",
-});
+const REPLAY_SESSIONS_URL = "api/v1/replay/sessions";
+const REPLAY_POLICY_VERSION = "spxw_surface_replay.v3";
+const REPLAY_CATALOG_KIND = "spxw_surface_replay_catalog";
+const REPLAY_TIMELINE_POLICY_VERSION = "spxw_surface_replay_timeline.event_driven.v1";
+const REPLAY_FRAME_VALIDATION = "known_clock_validation_on_frame_request";
+const REPLAY_CLOSE_GRACE_POLICY = "session_close_plus_2h_grace";
+const REPLAY_CLOSE_GRACE_SECONDS = 2 * 60 * 60;
+const REPLAY_TIMELINE_STEP_MINUTES = 5;
+const REPLAY_PLAY_INTERVAL_MS = 2_000;
+const MARKET_TIME_ZONE = "America/New_York";
 const POLL_INTERVAL_MS = 5_000;
 const REQUEST_TIMEOUT_MS = 4_500;
+const REPLAY_REQUEST_TIMEOUT_MS = 60_000;
 const SVG_NS = "http://www.w3.org/2000/svg";
 
 const METRICS = {
@@ -70,6 +66,11 @@ const STATUS_LABELS = {
 const REASON_LABELS = {
   unpaired_strike: "部分 strike 缺少 Call/Put 配对（unpaired_strike）",
   underlier_unavailable: "标的行情不可用（underlier_unavailable）",
+  bounded_point_in_time_not_proven: "有界 PIT：缺少真实 availability clock，不能严格证明无前视",
+  schwab_availability_clock_unavailable: "Schwab availability clock 不可用",
+  availability_clock_unavailable: "availability clock 不可用",
+  response_finished_at_unavailable: "Schwab response_finished_at 不可用",
+  received_at_is_cycle_started_at: "received_at 实为采集 cycle_started_at，并非响应完成时间",
 };
 
 const COLORS = {
@@ -88,7 +89,20 @@ const COLORS = {
 const dom = {
   pageLede: document.querySelector("#page-lede"),
   replayBanner: document.querySelector("#replay-banner"),
+  replayBannerLabel: document.querySelector("#replay-banner-label"),
   replayBannerAsOf: document.querySelector("#replay-banner-as-of"),
+  replayConsole: document.querySelector("#replay-console"),
+  replaySessionFilter: document.querySelector("#replay-session-filter"),
+  replaySessionMeta: document.querySelector("#replay-session-meta"),
+  replayPrevious: document.querySelector("#replay-previous"),
+  replayPlay: document.querySelector("#replay-play"),
+  replayNext: document.querySelector("#replay-next"),
+  replaySpeed: document.querySelector("#replay-speed"),
+  replayTimeline: document.querySelector("#replay-timeline"),
+  replayFrameTime: document.querySelector("#replay-frame-time"),
+  replayFramePosition: document.querySelector("#replay-frame-position"),
+  replayTimelineStart: document.querySelector("#replay-timeline-start"),
+  replayTimelineEnd: document.querySelector("#replay-timeline-end"),
   statusPill: document.querySelector("#status-pill"),
   refreshState: document.querySelector("#refresh-state"),
   summaryStatus: document.querySelector("#summary-status"),
@@ -137,16 +151,29 @@ const app = {
   mode: initialModeFromQuery(),
   snapshot: null,
   expiry: "",
+  expiryRole: "front",
   weighting: "oi_weighted",
   metric: "signed_gamma",
   chartHit: null,
   timer: null,
+  playbackTimer: null,
   requestController: null,
   requestGeneration: 0,
+  replayCatalogLoading: false,
+  projectionPolicySha256: "",
+  sessions: [],
+  sessionDate: "",
+  frames: [],
+  frameIndex: -1,
+  frameLoading: false,
+  timelineStepMinutes: REPLAY_TIMELINE_STEP_MINUTES,
+  playing: false,
+  speed: 1,
 };
 
 function initialModeFromQuery() {
-  return new URLSearchParams(window.location.search).get("view") === REPLAY.view
+  const view = new URLSearchParams(window.location.search).get("view");
+  return /\/(?:replay|friday)\/?$/.test(window.location.pathname) || ["replay", "friday"].includes(view)
     ? "replay"
     : "live";
 }
@@ -224,20 +251,30 @@ async function canonicalReplaySha256(value) {
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
-async function verifyReplayDigests(raw) {
+function sha256String(value) {
+  return typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
+}
+
+async function verifyReplayDigests(raw, expected = null) {
+  if (!sha256String(expected?.projectionPolicySha256)) {
+    throw new Error("missing_expected_replay_projection_policy_hash");
+  }
   if (!isObject(raw.projection_policy)) throw new Error("missing_replay_projection_policy");
   const policyDigest = await canonicalReplaySha256(raw.projection_policy);
-  if (
-    policyDigest !== raw.projection_policy_sha256 ||
-    policyDigest !== REPLAY.projectionPolicySha256
-  ) {
+  if (!sha256String(raw.projection_policy_sha256) || policyDigest !== raw.projection_policy_sha256) {
     throw new Error("replay_projection_policy_hash_mismatch");
+  }
+  if (policyDigest !== expected.projectionPolicySha256) {
+    throw new Error("replay_timeline_policy_hash_mismatch");
   }
   const artifactBody = { ...raw };
   delete artifactBody.artifact_sha256;
   const artifactDigest = await canonicalReplaySha256(artifactBody);
-  if (artifactDigest !== raw.artifact_sha256 || artifactDigest !== REPLAY.artifactSha256) {
+  if (!sha256String(raw.artifact_sha256) || artifactDigest !== raw.artifact_sha256) {
     throw new Error("replay_artifact_hash_mismatch");
+  }
+  if (expected?.artifactSha256 && artifactDigest !== expected.artifactSha256) {
+    throw new Error("replay_timeline_artifact_hash_mismatch");
   }
 }
 
@@ -367,18 +404,24 @@ function normalizeSnapshot(raw) {
   };
 }
 
-async function normalizeReplaySnapshot(raw) {
+async function normalizeReplaySnapshot(raw, expected) {
   if (!isObject(raw)) throw new Error("replay_not_an_object");
-  await verifyReplayDigests(raw);
+  if (!isObject(expected) || !(expected.at instanceof Date) || !expected.sessionDate) {
+    throw new Error("missing_expected_replay_frame");
+  }
+  await verifyReplayDigests(raw, expected);
   if (nonEmptyString(raw.kind) !== "spxw_surface_dashboard_replay") {
     throw new Error("unexpected_replay_kind");
   }
   if (raw.schema_version !== 1) throw new Error("unsupported_replay_schema");
   if (raw.mode !== "replay") throw new Error("invalid_replay_mode");
-  if (raw.policy_version !== REPLAY.policyVersion) {
+  if (raw.policy_version !== REPLAY_POLICY_VERSION) {
     throw new Error("unexpected_replay_policy_version");
   }
-  if (raw.replay_id !== REPLAY.id) throw new Error("unexpected_replay_id");
+  const replayId = nonEmptyString(raw.replay_id);
+  if (!replayId || (expected.id && replayId !== expected.id)) {
+    throw new Error("unexpected_replay_id");
+  }
   if (raw.frozen !== true) throw new Error("replay_must_be_frozen");
   if (raw.automatic_ordering !== false) throw new Error("unsafe_automatic_ordering_contract");
   if (Object.prototype.hasOwnProperty.call(raw, "valid_until")) {
@@ -387,18 +430,17 @@ async function normalizeReplaySnapshot(raw) {
   if (Object.prototype.hasOwnProperty.call(raw, "created_at")) {
     throw new Error("replay_must_not_have_live_created_at");
   }
-  if (raw.session_date !== "2026-07-17") throw new Error("unexpected_replay_session_date");
+  if (raw.session_date !== expected.sessionDate) throw new Error("unexpected_replay_session_date");
 
   const status = normalizedStatus(raw.status || raw.quality);
   if (status === "unknown") throw new Error("unsupported_replay_status");
   const requestedAsOf = parseDate(raw.requested_as_of);
   const dataAsOf = parseDate(raw.data_as_of);
   const generatedAt = parseDate(raw.generated_at);
-  const expectedAsOf = parseDate(REPLAY.requestedAsOf);
-  if (!requestedAsOf || !dataAsOf || !generatedAt || !expectedAsOf) {
+  if (!requestedAsOf || !dataAsOf || !generatedAt) {
     throw new Error("invalid_replay_clock_contract");
   }
-  if (requestedAsOf.getTime() !== expectedAsOf.getTime()) {
+  if (requestedAsOf.getTime() !== expected.at.getTime()) {
     throw new Error("unexpected_replay_requested_as_of");
   }
   if (dataAsOf.getTime() > requestedAsOf.getTime()) {
@@ -410,6 +452,30 @@ async function normalizeReplaySnapshot(raw) {
 
   const source = isObject(raw.source) ? raw.source : null;
   if (!source) throw new Error("missing_replay_source_contract");
+  const pitFieldNames = [
+    "point_in_time_confidence",
+    "availability_clock_available",
+    "known_limitations",
+  ];
+  const pitFieldCount = pitFieldNames.filter((field) =>
+    Object.prototype.hasOwnProperty.call(source, field)).length;
+  if (pitFieldCount !== pitFieldNames.length) {
+    throw new Error("incomplete_replay_pit_confidence_contract");
+  }
+  if (
+    source.point_in_time_confidence !== "bounded_not_proven" ||
+    source.availability_clock_available !== false ||
+    !Array.isArray(source.known_limitations) ||
+    source.known_limitations.length < 1 ||
+    source.known_limitations.some((item) => !nonEmptyString(item))
+  ) {
+    throw new Error("unsafe_replay_pit_confidence_contract");
+  }
+  const knownLimitations = source.known_limitations.map((item) => item.trim());
+  const replayPitReasons = [
+    "bounded_point_in_time_not_proven",
+    ...knownLimitations,
+  ];
   const cutoffFields = [
     "received_at",
     "source_at",
@@ -480,67 +546,79 @@ async function normalizeReplaySnapshot(raw) {
   const expiryCounts = isObject(source.selected_expiry_counts)
     ? source.selected_expiry_counts
     : {};
+  const selectedQuoteCount = finiteNumber(source.selected_quote_count);
+  const expiryCountValues = Object.values(expiryCounts).map(finiteNumber);
   if (
-    source.selected_quote_count !== 241 ||
-    expiryCounts["20260717"] !== 160 ||
-    expiryCounts["20260720"] !== 80
+    !Number.isInteger(selectedQuoteCount) ||
+    selectedQuoteCount <= 0 ||
+    expiryCountValues.length < 1 ||
+    expiryCountValues.some((value) => !Number.isInteger(value) || value <= 0) ||
+    expiryCountValues.reduce((sum, value) => sum + value, 0) > selectedQuoteCount
   ) {
     throw new Error("unexpected_replay_quote_coverage");
   }
+  const rawCandidateCount = finiteNumber(source.raw_candidate_count);
+  const eligibleCandidateCount = finiteNumber(source.eligible_candidate_count);
+  const ambiguousTopCount = finiteNumber(source.ambiguous_top_instrument_count);
+  const droppedAmbiguousCount = finiteNumber(source.dropped_ambiguous_instrument_count);
+  const auditCounts = [
+    source.source_clock_rows_excluded,
+    source.duplicate_received_at_group_count,
+    source.duplicate_received_at_row_count,
+    source.resolved_by_surface_completeness_instrument_count,
+    source.identical_top_duplicate_row_count,
+    ambiguousTopCount,
+    droppedAmbiguousCount,
+  ].map(finiteNumber);
   if (
-    source.raw_candidate_count !== 2106 ||
-    source.eligible_candidate_count !== 2106 ||
-    source.source_clock_rows_excluded !== 0 ||
-    source.duplicate_received_at_group_count !== 480 ||
-    source.duplicate_received_at_row_count !== 960 ||
-    source.resolved_by_surface_completeness_instrument_count !== 35 ||
-    source.ambiguous_top_instrument_count !== 0 ||
-    source.dropped_ambiguous_instrument_count !== 0 ||
-    source.identical_top_duplicate_row_count !== 0
+    !Number.isInteger(rawCandidateCount) ||
+    !Number.isInteger(eligibleCandidateCount) ||
+    rawCandidateCount < eligibleCandidateCount ||
+    eligibleCandidateCount < selectedQuoteCount ||
+    auditCounts.some((value) => !Number.isInteger(value) || value < 0) ||
+    droppedAmbiguousCount !== ambiguousTopCount
   ) {
     throw new Error("unexpected_replay_selection_audit");
   }
   if (
     !Array.isArray(source.source_files) ||
-    source.source_files.length !== 1 ||
-    source.source_files[0] !== REPLAY.sourceFile
+    source.source_files.length < 1 ||
+    source.source_files.some((file) => !nonEmptyString(file) || !file.startsWith("lake/quotes/schema=v1/"))
   ) {
     throw new Error("unexpected_replay_source_file");
   }
   const sourceHashes = isObject(source.parquet_file_sha256)
     ? source.parquet_file_sha256
     : {};
-  if (
-    Object.keys(sourceHashes).length !== 1 ||
-    sourceHashes[REPLAY.sourceFile] !== REPLAY.sourceSha256
-  ) {
+  if (Object.keys(sourceHashes).length !== source.source_files.length ||
+      source.source_files.some((file) => !sha256String(sourceHashes[file]))) {
     throw new Error("invalid_replay_source_hash");
   }
   const rawSourceHashes = isObject(source.raw_source_file_sha256)
     ? source.raw_source_file_sha256
     : {};
-  if (
-    Object.keys(rawSourceHashes).length !== 1 ||
-    rawSourceHashes[REPLAY.rawSourceFile] !== REPLAY.rawSourceSha256
-  ) {
+  const rawSourceFiles = Object.keys(rawSourceHashes);
+  if (rawSourceFiles.length < 1 ||
+      rawSourceFiles.some((file) => !file.startsWith("raw/provider=schwab/") || !sha256String(rawSourceHashes[file]))) {
     throw new Error("invalid_replay_raw_source_hash");
-  }
-  if (
-    raw.projection_policy_sha256 !== REPLAY.projectionPolicySha256 ||
-    raw.artifact_sha256 !== REPLAY.artifactSha256
-  ) {
-    throw new Error("invalid_replay_artifact_hash");
   }
 
   if (!Array.isArray(raw.expiries)) throw new Error("invalid_replay_expiries");
   const normalizedExpiries = raw.expiries.map(normalizeExpiry);
   if (normalizedExpiries.some((expiry) => !expiry)) throw new Error("invalid_replay_expiry");
   const expiries = status === "unavailable" ? [] : normalizedExpiries;
+  const normalizedSource = {
+    ...source,
+    point_in_time_confidence: "bounded_not_proven",
+    availability_clock_available: false,
+    known_limitations: knownLimitations,
+  };
   return {
     raw,
     mode: "replay",
     kind: raw.kind,
-    replayId: raw.replay_id,
+    replayId,
+    sessionDate: raw.session_date,
     schemaVersion: String(raw.schema_version),
     status,
     createdAt: generatedAt,
@@ -551,9 +629,9 @@ async function normalizeReplaySnapshot(raw) {
     validUntil: null,
     frozen: true,
     automaticOrdering: false,
-    source,
+    source: normalizedSource,
     quality: isObject(raw.quality) ? raw.quality : {},
-    reasons: [...reasonsFrom(raw.quality), ...reasonsFrom(raw)],
+    reasons: [...replayPitReasons, ...reasonsFrom(raw.quality), ...reasonsFrom(raw)],
     underlier: isObject(raw.underlier) ? raw.underlier : {},
     session: isObject(raw.session) ? raw.session : {},
     expiries,
@@ -608,12 +686,16 @@ function surfaceView(expiry, weightingKey, metricKey) {
     const weighting = weightingFromSlice(slice, weightingKey);
     const values = metricArray(weighting, metricKey);
     const reordered = surface.spotOrder.map(({ index }) => finiteNumber(values?.[index]));
+    const quality = normalizedStatus(weighting?.quality || slice.raw.quality);
+    const metricShapeValid = Array.isArray(values) &&
+      values.length === surface.spotGrid.length &&
+      values.every((value) => value === null || finiteNumber(value) !== null);
     return {
       minutesForward: slice.minutesForward,
       tauSeconds: slice.tauSeconds,
       values: reordered,
       weighting,
-      quality: normalizedStatus(weighting?.quality || slice.raw.quality),
+      quality,
       warnings: [...reasonsFrom(weighting?.quality), ...reasonsFrom(weighting), ...slice.warnings],
       zeroRidgeSpot: metricKey === "signed_gamma" ? finiteNumber(weighting?.zero_ridge_spot) : null,
       positivePeak: metricKey === "signed_gamma" && isObject(weighting?.positive_peak)
@@ -629,10 +711,7 @@ function surfaceView(expiry, weightingKey, metricKey) {
           }
         : null,
       coverage: isObject(weighting?.coverage) ? weighting.coverage : {},
-      shapeValid:
-        Array.isArray(values) &&
-        values.length === surface.spotGrid.length &&
-        values.every((value) => finiteNumber(value) !== null),
+      shapeValid: metricShapeValid || (values === null && quality === "unavailable"),
     };
   });
   const numericCount = rows.reduce(
@@ -680,10 +759,15 @@ function activeSurfaceQuality(expiry, view) {
   if (!expiry || !view || !view.shapeValid || view.numericCount === 0 || view.invalidCount > 0) {
     return "unavailable";
   }
+  // A degraded near-expiry surface can intentionally omit later time slices.
+  // Keep the rectangular grid and render those cells as missing instead of
+  // hiding the valid observed slices that remain.
+  const rowQualities = view.rows.map((row) =>
+    row.quality === "unavailable" ? "degraded" : row.quality);
   return worstQuality([
     expiry.quality,
     expiry.surface?.quality || "unknown",
-    ...view.rows.map((row) => row.quality),
+    ...rowQualities,
   ]);
 }
 
@@ -715,28 +799,85 @@ function isReplayView() {
   return app.mode === "replay";
 }
 
-function updateModeQuery() {
+function replayFrame() {
+  return app.frameIndex >= 0 ? app.frames[app.frameIndex] || null : null;
+}
+
+function formatMarketTime(date, includeDate = true) {
+  if (!(date instanceof Date)) return "—";
+  const options = {
+    timeZone: MARKET_TIME_ZONE,
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  };
+  if (includeDate) {
+    options.month = "2-digit";
+    options.day = "2-digit";
+  }
+  return `${new Intl.DateTimeFormat("en-US", options).format(date)} ET`;
+}
+
+function formatReplayAsOf(date) {
+  if (!(date instanceof Date)) return "waiting for an audited frame";
+  return `${formatMarketTime(date)} · ${formatIsoUtc(date)} UTC`;
+}
+
+function viewPath(mode) {
+  const current = window.location.pathname;
+  const base = current.replace(/\/(?:index\.html|live|replay|friday)\/?$/, "/");
+  const root = base.replace(/\/$/, "");
+  return `${root}/${mode}` || `/${mode}`;
+}
+
+function updateModeQuery(frame = replayFrame(), { push = false } = {}) {
   const url = new URL(window.location.href);
-  if (isReplayView()) url.searchParams.set("view", REPLAY.view);
-  else url.searchParams.delete("view");
-  window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
+  url.pathname = viewPath(app.mode);
+  url.searchParams.delete("view");
+  if (isReplayView()) {
+    if (app.sessionDate) url.searchParams.set("date", app.sessionDate);
+    else url.searchParams.delete("date");
+    if (frame?.at) url.searchParams.set("at", formatIsoUtc(frame.at));
+    else url.searchParams.delete("at");
+  } else {
+    url.searchParams.delete("date");
+    url.searchParams.delete("at");
+  }
+  const target = `${url.pathname}${url.search}${url.hash}`;
+  const current = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+  if (target === current) return;
+  window.history[push ? "pushState" : "replaceState"](null, "", target);
 }
 
 function updateModeChrome() {
   const replay = isReplayView();
+  const frame = replayFrame();
+  const replayAt = app.snapshot?.mode === "replay" ? app.snapshot.requestedAsOf : frame?.at;
   document.body.classList.toggle("mode-replay", replay);
-  dom.modeFilter.value = replay ? REPLAY.view : "live";
+  dom.modeFilter.value = replay ? "replay" : "live";
   dom.replayBanner.hidden = !replay;
+  dom.replayConsole.hidden = !replay;
   dom.pageLede.textContent = replay
-    ? "标的价格 × 时间的期权暴露地形。当前为冻结历史回放，不是实时行情，也不提供下单入口。"
+    ? "按交易日回放标的价格 × 时间的期权暴露地形。帧使用有界 PIT；Schwab 缺少真实 availability clock，因此不能严格证明无前视。"
     : "标的价格 × 时间的期权暴露地形。所有值均来自只读生产快照，不提供下单入口。";
+  const sourceFiles = app.snapshot?.mode === "replay" ? app.snapshot.source?.source_files : null;
   dom.sourceFile.textContent = replay
-    ? `replays/${REPLAY.id}.json`
+    ? sourceFiles?.join(", ") || (frame?.id ? `replay frame ${frame.id}` : "replay catalog")
     : "spxw_surface_dashboard.json";
-  dom.sourceMode.textContent = replay ? "HISTORICAL REPLAY · Frozen · Not live" : "5 秒只读刷新";
+  dom.sourceMode.textContent = replay
+    ? `SESSION REPLAY · Frozen · Bounded PIT · frame ${app.frameIndex >= 0 ? app.frameIndex + 1 : 0}/${app.frames.length} · Not live`
+    : "5 秒只读刷新";
   if (replay) {
-    const dataAsOf = app.snapshot?.mode === "replay" ? formatIsoUtc(app.snapshot.dataAsOf) : "等待校验";
-    dom.replayBannerAsOf.textContent = `As of ${REPLAY.asOfLabel} · data_as_of ${dataAsOf} · received/source clock cutoff · 0 selected lookahead rows`;
+    const verified = app.snapshot?.mode === "replay";
+    const dataAsOf = verified ? formatIsoUtc(app.snapshot.dataAsOf) : "等待校验";
+    const auditState = verified
+      ? `${app.snapshot.source.lookahead_rows_selected} selected lookahead rows`
+      : "frame contract not yet verified";
+    dom.replayBannerLabel.textContent = replayAt
+      ? `Replay · ${formatMarketTime(replayAt)}`
+      : "Replay · select an audited frame";
+    dom.replayBannerAsOf.textContent = `As of ${formatReplayAsOf(replayAt)} · data_as_of ${dataAsOf} · received/source clock cutoff · ${auditState} · availability clock missing, PIT bounded not proven`;
   }
 }
 
@@ -828,7 +969,8 @@ function updateFilters() {
     const retained = expiries.some((item) => item.expiry === previous);
     app.expiry = retained
       ? previous
-      : (expiries.find((item) => item.role === "front") || expiries[0]).expiry;
+      : (expiries.find((item) => item.role === app.expiryRole) || expiries[0]).expiry;
+    app.expiryRole = expiries.find((item) => item.expiry === app.expiry)?.role || app.expiryRole;
     dom.expiryFilter.value = app.expiry;
   }
   const enabled = expiries.length > 0 && ["ready", "degraded"].includes(effectiveSnapshotStatus(app.snapshot));
@@ -847,7 +989,7 @@ function renderSummary() {
   const expired = !replay && snapshot.validUntil && Date.now() > snapshot.validUntil.getTime();
   setStatusPill(status, replay ? `Replay · ${STATUS_LABELS[status]}` : expired ? "Stale" : null);
   dom.summaryStatus.textContent = replay
-    ? `${STATUS_LABELS[status]} · Frozen replay`
+    ? `${STATUS_LABELS[status]} · Bounded PIT`
     : expired ? "Stale / fail closed" : STATUS_LABELS[status];
   const expiry = selectedExpiry();
   const activeReasons = [...new Set([...snapshot.reasons, ...(expiry?.warnings || [])])];
@@ -857,10 +999,10 @@ function renderSummary() {
 
   const ageSeconds = snapshot.asOf ? Math.max((Date.now() - snapshot.asOf.getTime()) / 1000, 0) : null;
   dom.summaryFreshness.textContent = replay
-    ? "Frozen · Not live"
+    ? "Frozen · Bounded PIT"
     : expired ? `过期 ${formatAge(ageSeconds)}` : formatAge(ageSeconds);
   dom.summaryAsOf.textContent = replay
-    ? `as of ${REPLAY.asOfLabel}`
+    ? `as of ${formatReplayAsOf(snapshot.requestedAsOf)}`
     : `as of ${formatDateTime(snapshot.asOf)}`;
 
   const view = surfaceView(expiry, app.weighting, app.metric);
@@ -929,7 +1071,7 @@ function renderVisuals() {
     : "Spot × Time surface";
   const semanticsText = WEIGHTING_DESCRIPTIONS[app.weighting] || WEIGHTINGS[app.weighting];
   dom.surfaceSubtitle.textContent = expiry
-    ? `${replay ? `HISTORICAL REPLAY · Frozen · Not live · as of ${REPLAY.asOfLabel} · ` : ""}${semanticsText} · X: SPX scenario spot · Y: minutes forward · ${view?.unit || "model units"}`
+    ? `${replay ? `SESSION REPLAY · Frozen · Not live · as of ${formatReplayAsOf(snapshot.requestedAsOf)} · ` : ""}${semanticsText} · X: SPX scenario spot · Y: minutes forward · ${view?.unit || "model units"}`
     : replay ? "等待冻结历史回放" : "等待生产快照";
 
   const available = snapshotStatus !== "unavailable" && quality !== "unavailable" && view?.numericCount > 0;
@@ -1046,7 +1188,8 @@ function drawHeatmap(view) {
 
   app.chartHit = { view, margins, plotWidth, plotHeight, cellWidth, cellHeight, width, height };
   const coverage = currentCoverage(view, selectedExpiry());
-  dom.accessibleSummary.textContent = `${isReplayView() ? `历史回放，Frozen，Not live，as of ${REPLAY.asOfLabel}。` : ""}${METRICS[app.metric].label} 曲面，${view.spots.length} 个 spot 场景，${view.rows.length} 个时间切片，覆盖率 ${coverage.ratio === null ? "未知" : `${(coverage.ratio * 100).toFixed(1)}%`}，色域 ${signed ? `正负对称 ±${compactNumber(domain)}` : `0 到 ${compactNumber(domain)}`}。`;
+  const replayAsOf = app.snapshot?.mode === "replay" ? formatReplayAsOf(app.snapshot.requestedAsOf) : "";
+  dom.accessibleSummary.textContent = `${isReplayView() ? `历史回放，Frozen，Not live，as of ${replayAsOf}。` : ""}${METRICS[app.metric].label} 曲面，${view.spots.length} 个 spot 场景，${view.rows.length} 个时间切片，覆盖率 ${coverage.ratio === null ? "未知" : `${(coverage.ratio * 100).toFixed(1)}%`}，色域 ${signed ? `正负对称 ±${compactNumber(domain)}` : `0 到 ${compactNumber(domain)}`}。`;
 }
 
 function drawAxes(context, view, margins, plotWidth, plotHeight, width, height) {
@@ -1432,19 +1575,256 @@ function renderExtremaList(container, points, emptyLabel) {
   }
 }
 
+function validateReplayCatalogContract(raw) {
+  if (
+    !isObject(raw) ||
+    raw.schema_version !== 1 ||
+    raw.kind !== REPLAY_CATALOG_KIND ||
+    raw.provider !== "schwab" ||
+    raw.coordinate !== "SPX" ||
+    raw.trading_class !== "SPXW" ||
+    raw.frame_interval_minutes !== REPLAY_TIMELINE_STEP_MINUTES ||
+    raw.timeline_policy_version !== REPLAY_TIMELINE_POLICY_VERSION ||
+    raw.availability_proven !== false ||
+    raw.availability_clock !== "unavailable" ||
+    raw.point_in_time_confidence !== "bounded_not_proven" ||
+    raw.frame_validation !== REPLAY_FRAME_VALIDATION ||
+    raw.only_close_grace_elapsed_sessions !== true ||
+    raw.session_close_grace_policy !== REPLAY_CLOSE_GRACE_POLICY ||
+    raw.session_close_grace_seconds !== REPLAY_CLOSE_GRACE_SECONDS ||
+    raw.data_finalization_proven !== false ||
+    !sha256String(raw.projection_policy_sha256)
+  ) {
+    throw new Error("invalid_replay_catalog_contract");
+  }
+  return raw.projection_policy_sha256;
+}
+
+function validateCloseGraceClock(closeAt, elapsedAt) {
+  return closeAt instanceof Date && elapsedAt instanceof Date &&
+    elapsedAt.getTime() - closeAt.getTime() === REPLAY_CLOSE_GRACE_SECONDS * 1_000;
+}
+
+function normalizeReplaySessions(raw) {
+  const projectionPolicySha256 = validateReplayCatalogContract(raw);
+  if (!Array.isArray(raw.sessions)) throw new Error("invalid_replay_sessions_catalog");
+  const dates = new Set();
+  const sessions = raw.sessions.map((item) => {
+    if (!isObject(item)) throw new Error("invalid_replay_session");
+    const date = nonEmptyString(item.date) || nonEmptyString(item.session_date);
+    if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date) || dates.has(date)) {
+      throw new Error("invalid_replay_session_date");
+    }
+    dates.add(date);
+    const frameCount = finiteNumber(item.frame_count);
+    if (frameCount !== null && (!Number.isInteger(frameCount) || frameCount < 0)) {
+      throw new Error("invalid_replay_session_frame_count");
+    }
+    const closeAt = parseDate(item.close_at);
+    const closeGraceElapsedAt = parseDate(item.session_close_grace_elapsed_at);
+    if (
+      item.session_close_grace_elapsed !== true ||
+      item.data_finalization_proven !== false ||
+      item.frame_interval_minutes !== REPLAY_TIMELINE_STEP_MINUTES ||
+      item.projection_policy_sha256 !== projectionPolicySha256 ||
+      closeAt?.toISOString().slice(0, 10) !== date ||
+      !validateCloseGraceClock(closeAt, closeGraceElapsedAt)
+    ) {
+      throw new Error("invalid_replay_session_contract");
+    }
+    return {
+      raw: item,
+      date,
+      label: nonEmptyString(item.label) || date,
+      frameCount,
+      status: normalizedStatus(item.status),
+    };
+  }).sort((left, right) => right.date.localeCompare(left.date));
+  return { sessions, projectionPolicySha256 };
+}
+
+function normalizeReplayTimeline(raw, sessionDate, expectedProjectionPolicySha256) {
+  if (
+    !isObject(raw) ||
+    raw.schema_version !== 1 ||
+    raw.kind !== REPLAY_CATALOG_KIND ||
+    raw.session_date !== sessionDate ||
+    raw.provider !== "schwab" ||
+    raw.coordinate !== "SPX" ||
+    raw.trading_class !== "SPXW" ||
+    raw.frame_interval_minutes !== REPLAY_TIMELINE_STEP_MINUTES ||
+    raw.step_minutes !== REPLAY_TIMELINE_STEP_MINUTES ||
+    raw.timeline_policy_version !== REPLAY_TIMELINE_POLICY_VERSION ||
+    raw.availability_proven !== false ||
+    raw.availability_clock !== "unavailable" ||
+    raw.point_in_time_confidence !== "bounded_not_proven" ||
+    raw.frame_validation !== REPLAY_FRAME_VALIDATION ||
+    raw.only_close_grace_elapsed_sessions !== true ||
+    raw.session_close_grace_elapsed !== true ||
+    raw.session_close_grace_policy !== REPLAY_CLOSE_GRACE_POLICY ||
+    raw.session_close_grace_seconds !== REPLAY_CLOSE_GRACE_SECONDS ||
+    raw.data_finalization_proven !== false ||
+    !sha256String(expectedProjectionPolicySha256) ||
+    raw.projection_policy_sha256 !== expectedProjectionPolicySha256 ||
+    !Array.isArray(raw.frames)
+  ) {
+    throw new Error("invalid_replay_timeline");
+  }
+  const openAt = parseDate(raw.open_at);
+  const closeAt = parseDate(raw.close_at);
+  const closeGraceElapsedAt = parseDate(raw.session_close_grace_elapsed_at);
+  if (!openAt || !closeAt || openAt >= closeAt ||
+      openAt.toISOString().slice(0, 10) !== sessionDate ||
+      closeAt.toISOString().slice(0, 10) !== sessionDate ||
+      !validateCloseGraceClock(closeAt, closeGraceElapsedAt)) {
+    throw new Error("invalid_replay_timeline_session_clock");
+  }
+  const seen = new Set();
+  let previousAt = null;
+  const frames = raw.frames.map((item) => {
+    if (!isObject(item)) throw new Error("invalid_replay_timeline_frame");
+    const at = parseDate(item.at || item.requested_as_of);
+    if (!at || at.getUTCMilliseconds() !== 0 || at < openAt || at >= closeAt ||
+        seen.has(at.getTime()) || (previousAt && at <= previousAt)) {
+      throw new Error("invalid_replay_timeline_clock");
+    }
+    seen.add(at.getTime());
+    previousAt = at;
+    const id = nonEmptyString(item.id) || nonEmptyString(item.replay_id);
+    const artifactSha256 = nonEmptyString(item.artifact_sha256);
+    const projectionPolicySha256 = nonEmptyString(item.projection_policy_sha256);
+    const expectedId = formatIsoUtc(at).replaceAll(":", "");
+    if (id !== expectedId) throw new Error("invalid_replay_timeline_id");
+    if (artifactSha256 && !sha256String(artifactSha256)) throw new Error("invalid_timeline_artifact_hash");
+    if (!sha256String(projectionPolicySha256) ||
+        projectionPolicySha256 !== expectedProjectionPolicySha256) {
+      throw new Error("invalid_timeline_policy_hash");
+    }
+    return {
+      raw: item,
+      at,
+      id,
+      label: nonEmptyString(item.label) || nonEmptyString(item.label_et) || formatMarketTime(at),
+      url: nonEmptyString(item.url) || nonEmptyString(item.frame_url),
+      cached: item.cached === true,
+      status: normalizedStatus(item.status),
+      artifactSha256,
+      projectionPolicySha256,
+    };
+  });
+  if (raw.frame_count !== frames.length) throw new Error("invalid_replay_timeline_frame_count");
+  return {
+    frames,
+    stepMinutes: raw.step_minutes,
+    projectionPolicySha256: expectedProjectionPolicySha256,
+  };
+}
+
+function renderReplaySessionOptions() {
+  dom.replaySessionFilter.replaceChildren();
+  if (!app.sessions.length) {
+    const option = document.createElement("option");
+    option.value = "";
+    option.textContent = "无可回放交易日";
+    dom.replaySessionFilter.append(option);
+    dom.replaySessionFilter.disabled = true;
+    return;
+  }
+  for (const session of app.sessions) {
+    const option = document.createElement("option");
+    option.value = session.date;
+    const count = session.frameCount === null ? "" : ` · ${session.frameCount} frames`;
+    option.textContent = `${session.label}${count}`;
+    dom.replaySessionFilter.append(option);
+  }
+  dom.replaySessionFilter.value = app.sessionDate;
+  dom.replaySessionFilter.disabled = app.replayCatalogLoading;
+}
+
+function updateReplayControls() {
+  const frame = replayFrame();
+  const frameCount = app.frames.length;
+  const currentSession = app.sessions.find((item) => item.date === app.sessionDate);
+  dom.replayTimeline.min = "0";
+  dom.replayTimeline.max = String(Math.max(frameCount - 1, 0));
+  dom.replayTimeline.value = String(Math.max(app.frameIndex, 0));
+  const navigationLocked = app.replayCatalogLoading;
+  dom.replaySessionFilter.disabled = navigationLocked || app.sessions.length === 0;
+  dom.replayTimeline.disabled = navigationLocked || frameCount === 0 || app.frameLoading;
+  dom.replayPrevious.disabled = navigationLocked || app.frameIndex <= 0 || app.frameLoading;
+  dom.replayNext.disabled = navigationLocked || app.frameIndex < 0 || app.frameIndex >= frameCount - 1 || app.frameLoading;
+  dom.replayPlay.disabled = navigationLocked || frameCount < 2 || (app.frameLoading && !app.playing);
+  dom.replaySpeed.disabled = navigationLocked || frameCount < 2;
+  dom.replaySpeed.value = String(app.speed);
+  dom.replayPlay.textContent = app.playing ? "❚❚ 暂停" : "▶ 播放";
+  dom.replayPlay.setAttribute("aria-label", app.playing ? "暂停回放" : "播放回放");
+  dom.replayFrameTime.textContent = frame ? frame.label : "—";
+  dom.replayFramePosition.textContent = `${app.frameIndex >= 0 ? app.frameIndex + 1 : 0} / ${frameCount}`;
+  dom.replayTimeline.setAttribute(
+    "aria-valuetext",
+    frame ? `${app.frameIndex + 1} of ${frameCount}, ${frame.label}` : "No replay frame selected",
+  );
+  dom.replayTimelineStart.textContent = frameCount ? formatMarketTime(app.frames[0].at, false) : "—";
+  dom.replayTimelineEnd.textContent = frameCount ? formatMarketTime(app.frames.at(-1).at, false) : "—";
+  const sessionLabel = currentSession?.label || app.sessionDate || "—";
+  const cachedCount = app.frames.filter((item) => item.cached).length;
+  dom.replaySessionMeta.textContent = navigationLocked
+    ? `${sessionLabel} · 正在校验回放目录合同`
+    : frameCount
+    ? `${sessionLabel} · ${frameCount} 个有界 PIT 帧 · ${app.timelineStepMinutes} 分钟索引 · ${cachedCount} 个已缓存 · availability clock 缺失`
+    : `${sessionLabel} · 没有可用有界 PIT 帧`;
+  updateModeChrome();
+}
+
+function stopPlayback() {
+  window.clearTimeout(app.playbackTimer);
+  app.playbackTimer = null;
+  app.playing = false;
+  updateReplayControls();
+}
+
+function schedulePlayback() {
+  window.clearTimeout(app.playbackTimer);
+  app.playbackTimer = null;
+  if (!app.playing || app.frameLoading) return;
+  if (app.frameIndex >= app.frames.length - 1) {
+    stopPlayback();
+    return;
+  }
+  app.playbackTimer = window.setTimeout(() => {
+    app.playbackTimer = null;
+    selectReplayFrame(app.frameIndex + 1, { keepPlaying: true });
+  }, REPLAY_PLAY_INTERVAL_MS / app.speed);
+}
+
 function cancelSnapshotWork() {
   window.clearTimeout(app.timer);
+  window.clearTimeout(app.playbackTimer);
   app.timer = null;
+  app.playbackTimer = null;
+  app.playing = false;
+  app.frameLoading = false;
+  app.replayCatalogLoading = false;
   app.requestGeneration += 1;
   if (app.requestController) app.requestController.abort();
   app.requestController = null;
 }
 
-function beginSnapshotRequest() {
+function resetReplayNavigationState() {
+  app.snapshot = null;
+  app.sessions = [];
+  app.sessionDate = "";
+  app.frames = [];
+  app.frameIndex = -1;
+  app.projectionPolicySha256 = "";
+  app.timelineStepMinutes = REPLAY_TIMELINE_STEP_MINUTES;
+}
+
+function beginSnapshotRequest(timeoutMs = REQUEST_TIMEOUT_MS) {
   if (app.requestController) app.requestController.abort();
   const controller = new AbortController();
   const generation = ++app.requestGeneration;
-  const abortTimer = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const abortTimer = window.setTimeout(() => controller.abort(), timeoutMs);
   app.requestController = controller;
   return { controller, generation, abortTimer };
 }
@@ -1470,12 +1850,15 @@ function clearDashboardState() {
 function renderLoadingState() {
   clearDashboardState();
   const replay = isReplayView();
+  const frame = replayFrame();
   setStatusPill("unknown", replay ? "Loading replay" : "正在连接");
-  dom.refreshState.textContent = replay ? "正在读取并校验冻结快照" : "等待首个快照";
+  dom.refreshState.textContent = replay
+    ? frame ? `正在读取并校验 ${frame.label}` : "正在读取回放目录"
+    : "等待首个快照";
   dom.summaryStatus.textContent = "—";
-  dom.summaryReasons.textContent = replay ? "校验 replay / cutoff / lookahead 契约" : "尚未加载";
-  dom.summaryFreshness.textContent = replay ? "Frozen · Not live" : "—";
-  dom.summaryAsOf.textContent = replay ? `as of ${REPLAY.asOfLabel}` : "as of —";
+  dom.summaryReasons.textContent = replay ? "校验 replay / cutoff 契约；PIT 仅有界，availability clock 缺失" : "尚未加载";
+  dom.summaryFreshness.textContent = replay ? "Frozen · Bounded PIT" : "—";
+  dom.summaryAsOf.textContent = replay && frame ? `as of ${formatReplayAsOf(frame.at)}` : "as of —";
   dom.summaryCoverage.textContent = "—";
   dom.summaryContracts.textContent = "可用合约 —";
   dom.summaryExpiries.textContent = "—";
@@ -1489,19 +1872,22 @@ function renderLoadingState() {
 function renderFetchFailure(error, mode) {
   clearDashboardState();
   const replay = mode === "replay";
+  const frame = replayFrame();
   const reason = error instanceof Error ? error.message : `${mode}_snapshot_fetch_failed`;
   setStatusPill("unavailable", replay ? "Replay unavailable" : null);
   dom.refreshState.textContent = replay ? "历史回放读取失败；未自动重试" : "读取失败；5 秒后重试";
   dom.summaryStatus.textContent = "Unavailable";
   dom.summaryReasons.textContent = reason;
-  dom.summaryFreshness.textContent = replay ? "Frozen · Not live" : "—";
-  dom.summaryAsOf.textContent = replay ? `as of ${REPLAY.asOfLabel}` : "as of —";
+  dom.summaryFreshness.textContent = replay ? "Frozen · Bounded PIT" : "—";
+  dom.summaryAsOf.textContent = replay && frame ? `as of ${formatReplayAsOf(frame.at)}` : "as of —";
   dom.summaryCoverage.textContent = "—";
   dom.summaryContracts.textContent = "可用合约 —";
   dom.summaryExpiries.textContent = "—";
   dom.summaryUnderlier.textContent = "SPX —";
   dom.surfaceTitle.textContent = replay ? "Replay unavailable" : "Spot × Time surface";
-  dom.surfaceSubtitle.textContent = replay ? `HISTORICAL REPLAY · Frozen · Not live · as of ${REPLAY.asOfLabel}` : "等待生产快照";
+  dom.surfaceSubtitle.textContent = replay
+    ? `SESSION REPLAY · Frozen · Not live${frame ? ` · as of ${formatReplayAsOf(frame.at)}` : ""}`
+    : "等待生产快照";
   setNotice(
     replay
       ? "无法读取或校验历史回放；图表已清空，不会回退到生产快照、fixture 或缓存值。"
@@ -1540,45 +1926,242 @@ async function refreshSnapshot() {
   }
 }
 
-async function loadReplaySnapshot() {
+async function loadReplayCatalog() {
   if (app.mode !== "replay") return;
-  const { controller, generation, abortTimer } = beginSnapshotRequest();
+  app.replayCatalogLoading = true;
+  updateReplayControls();
+  const { controller, generation, abortTimer } = beginSnapshotRequest(REPLAY_REQUEST_TIMEOUT_MS);
+  let sessionDate = "";
   try {
-    const response = await fetch(REPLAY.url, {
+    const response = await fetch(REPLAY_SESSIONS_URL, {
       cache: "no-store",
       headers: { Accept: "application/json" },
       signal: controller.signal,
     });
-    if (!response.ok) throw new Error(`replay_http_${response.status}`);
+    if (!response.ok) throw new Error(`replay_sessions_http_${response.status}`);
     const payload = await response.json();
-    const snapshot = await normalizeReplaySnapshot(payload);
+    const catalog = normalizeReplaySessions(payload);
     if (!requestIsCurrent(generation, "replay")) return;
-    app.snapshot = snapshot;
-    render();
+    if (!catalog.sessions.length) throw new Error("replay_sessions_empty");
+    const requestedDate = new URLSearchParams(window.location.search).get("date");
+    if (requestedDate && !catalog.sessions.some((item) => item.date === requestedDate)) {
+      throw new Error("requested_replay_session_unavailable");
+    }
+    app.sessions = catalog.sessions;
+    app.projectionPolicySha256 = catalog.projectionPolicySha256;
+    sessionDate = requestedDate || catalog.sessions[0].date;
+    app.sessionDate = sessionDate;
+    renderReplaySessionOptions();
+    updateReplayControls();
   } catch (error) {
     if (!requestIsCurrent(generation, "replay")) return;
+    app.replayCatalogLoading = false;
+    resetReplayNavigationState();
     renderFetchFailure(error, "replay");
+    renderReplaySessionOptions();
+    updateReplayControls();
+  } finally {
+    window.clearTimeout(abortTimer);
+    if (app.requestController === controller) app.requestController = null;
+  }
+  if (sessionDate && app.mode === "replay") loadReplayTimeline(sessionDate);
+}
+
+async function loadReplayTimeline(sessionDate, { preserveRequestedAt = true } = {}) {
+  if (app.mode !== "replay" || app.sessionDate !== sessionDate) return;
+  stopPlayback();
+  app.frames = [];
+  app.frameIndex = -1;
+  app.snapshot = null;
+  renderReplaySessionOptions();
+  updateReplayControls();
+  const requestedAtText = preserveRequestedAt
+    ? new URLSearchParams(window.location.search).get("at")
+    : null;
+  if (!preserveRequestedAt) updateModeQuery(null);
+  const url = `${REPLAY_SESSIONS_URL}/${encodeURIComponent(sessionDate)}/timeline?step_minutes=${REPLAY_TIMELINE_STEP_MINUTES}`;
+  const { controller, generation, abortTimer } = beginSnapshotRequest(REPLAY_REQUEST_TIMEOUT_MS);
+  try {
+    const response = await fetch(url, {
+      cache: "no-store",
+      headers: { Accept: "application/json" },
+      signal: controller.signal,
+    });
+    if (!response.ok) throw new Error(`replay_timeline_http_${response.status}`);
+    const payload = await response.json();
+    const timeline = normalizeReplayTimeline(
+      payload,
+      sessionDate,
+      app.projectionPolicySha256,
+    );
+    if (!requestIsCurrent(generation, "replay") || app.sessionDate !== sessionDate) return;
+    if (!timeline.frames.length) throw new Error("replay_timeline_empty");
+    app.frames = timeline.frames;
+    app.timelineStepMinutes = timeline.stepMinutes;
+    let frameIndex = timeline.frames.length - 1;
+    if (requestedAtText) {
+      const requestedAt = parseDate(requestedAtText);
+      if (!requestedAt) throw new Error("invalid_requested_replay_at");
+      frameIndex = timeline.frames.findIndex((item) => item.at.getTime() === requestedAt.getTime());
+      if (frameIndex < 0) throw new Error("requested_replay_frame_unavailable");
+    }
+    app.frameIndex = frameIndex;
+    app.replayCatalogLoading = false;
+    updateReplayControls();
+    updateModeQuery();
+  } catch (error) {
+    if (!requestIsCurrent(generation, "replay")) return;
+    app.replayCatalogLoading = false;
+    renderFetchFailure(error, "replay");
+    updateReplayControls();
+    return;
+  } finally {
+    window.clearTimeout(abortTimer);
+    if (app.requestController === controller) app.requestController = null;
+  }
+  if (app.mode === "replay" && app.sessionDate === sessionDate) loadReplayFrame();
+}
+
+function replayFrameRequestUrl(frame) {
+  const params = new URLSearchParams({ at: formatIsoUtc(frame.at) });
+  return `${REPLAY_SESSIONS_URL}/${encodeURIComponent(app.sessionDate)}/frame?${params}`;
+}
+
+async function loadReplayFrame() {
+  if (app.mode !== "replay") return;
+  const frame = replayFrame();
+  if (!frame) return;
+  const sessionDate = app.sessionDate;
+  app.frameLoading = true;
+  renderLoadingState();
+  updateReplayControls();
+  const { controller, generation, abortTimer } = beginSnapshotRequest(REPLAY_REQUEST_TIMEOUT_MS);
+  try {
+    const response = await fetch(replayFrameRequestUrl(frame), {
+      cache: "no-cache",
+      headers: { Accept: "application/json" },
+      signal: controller.signal,
+    });
+    if (!response.ok) throw new Error(`replay_frame_http_${response.status}`);
+    const payload = await response.json();
+    const snapshot = await normalizeReplaySnapshot(payload, {
+      sessionDate,
+      at: frame.at,
+      id: frame.id,
+      artifactSha256: frame.artifactSha256,
+      projectionPolicySha256: frame.projectionPolicySha256,
+    });
+    if (!requestIsCurrent(generation, "replay") || replayFrame() !== frame ||
+        app.sessionDate !== sessionDate) return;
+    frame.artifactSha256 = snapshot.raw.artifact_sha256;
+    frame.cached = true;
+    app.snapshot = snapshot;
+    app.frameLoading = false;
+    render();
+    updateReplayControls();
+    schedulePlayback();
+  } catch (error) {
+    if (!requestIsCurrent(generation, "replay")) return;
+    app.frameLoading = false;
+    app.playing = false;
+    renderFetchFailure(error, "replay");
+    updateReplayControls();
   } finally {
     window.clearTimeout(abortTimer);
     if (app.requestController === controller) app.requestController = null;
   }
 }
 
+function selectReplayFrame(index, { keepPlaying = false } = {}) {
+  if (!Number.isInteger(index) || index < 0 || index >= app.frames.length) return;
+  if (!keepPlaying) stopPlayback();
+  if (index === app.frameIndex && app.snapshot) {
+    if (keepPlaying) schedulePlayback();
+    return;
+  }
+  app.frameIndex = index;
+  updateModeQuery(replayFrame(), { push: !keepPlaying });
+  updateReplayControls();
+  loadReplayFrame();
+}
+
 function setViewMode(mode, { syncQuery = true } = {}) {
   if (!["live", "replay"].includes(mode)) return;
   cancelSnapshotWork();
+  resetReplayNavigationState();
   app.mode = mode;
-  if (syncQuery) updateModeQuery();
+  app.replayCatalogLoading = mode === "replay";
+  if (syncQuery) updateModeQuery(null, { push: true });
   renderLoadingState();
-  if (mode === "replay") loadReplaySnapshot();
+  updateReplayControls();
+  if (mode === "replay") loadReplayCatalog();
   else refreshSnapshot();
 }
 
 dom.modeFilter.addEventListener("change", () => {
-  setViewMode(dom.modeFilter.value === REPLAY.view ? "replay" : "live");
+  setViewMode(dom.modeFilter.value === "replay" ? "replay" : "live");
+});
+dom.replaySessionFilter.addEventListener("change", () => {
+  const date = dom.replaySessionFilter.value;
+  if (!app.sessions.some((item) => item.date === date) || date === app.sessionDate) return;
+  cancelSnapshotWork();
+  app.mode = "replay";
+  app.sessionDate = date;
+  app.frames = [];
+  app.frameIndex = -1;
+  app.snapshot = null;
+  app.replayCatalogLoading = true;
+  updateModeQuery(null, { push: true });
+  renderLoadingState();
+  loadReplayTimeline(date, { preserveRequestedAt: false });
+});
+dom.replayPrevious.addEventListener("click", () => {
+  selectReplayFrame(app.frameIndex - 1);
+});
+dom.replayNext.addEventListener("click", () => {
+  selectReplayFrame(app.frameIndex + 1);
+});
+dom.replayPlay.addEventListener("click", () => {
+  if (app.playing) {
+    stopPlayback();
+    return;
+  }
+  if (app.frameIndex >= app.frames.length - 1) {
+    app.frameIndex = 0;
+    updateModeQuery(replayFrame(), { push: true });
+    updateReplayControls();
+    app.playing = true;
+    loadReplayFrame();
+    return;
+  }
+  app.playing = true;
+  updateReplayControls();
+  schedulePlayback();
+});
+dom.replaySpeed.addEventListener("change", () => {
+  const speed = Number(dom.replaySpeed.value);
+  app.speed = [1, 2, 4].includes(speed) ? speed : 1;
+  updateReplayControls();
+  if (app.playing) schedulePlayback();
+});
+dom.replayTimeline.addEventListener("input", () => {
+  const index = Number(dom.replayTimeline.value);
+  const frame = app.frames[index];
+  if (frame) {
+    dom.replayFrameTime.textContent = frame.label;
+    dom.replayFramePosition.textContent = `${index + 1} / ${app.frames.length}`;
+    dom.replayTimeline.setAttribute(
+      "aria-valuetext",
+      `${index + 1} of ${app.frames.length}, ${frame.label}`,
+    );
+  }
+});
+dom.replayTimeline.addEventListener("change", () => {
+  selectReplayFrame(Number(dom.replayTimeline.value));
 });
 dom.expiryFilter.addEventListener("change", () => {
   app.expiry = dom.expiryFilter.value;
+  app.expiryRole = selectedExpiry()?.role || app.expiryRole;
   renderSummary();
   renderVisuals();
 });
@@ -1597,6 +2180,10 @@ dom.heatmap.addEventListener("pointermove", (event) => {
 });
 dom.heatmap.addEventListener("pointerleave", () => {
   dom.heatmapTooltip.hidden = true;
+});
+
+window.addEventListener("popstate", () => {
+  setViewMode(initialModeFromQuery(), { syncQuery: false });
 });
 
 if ("ResizeObserver" in window) {

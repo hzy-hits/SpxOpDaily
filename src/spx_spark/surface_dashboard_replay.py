@@ -1,4 +1,4 @@
-"""Point-in-time SPXW exposure-surface replay from the normalized quote lake."""
+"""Recorded-clock-bounded SPXW surface replay from the normalized quote lake."""
 
 from __future__ import annotations
 
@@ -6,7 +6,6 @@ import argparse
 import hashlib
 import json
 import math
-import os
 import struct
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -31,6 +30,7 @@ from spx_spark.marketdata import (
     clean_float,
 )
 from spx_spark.storage import LatestState, select_best_quotes
+from spx_spark.state_io import exclusive_state_lock
 from spx_spark.surface_dashboard import (
     DASHBOARD_SCHEMA_VERSION,
     build_surface_projection,
@@ -40,7 +40,7 @@ from spx_spark.surface_dashboard import (
 
 REPLAY_KIND = "spxw_surface_dashboard_replay"
 REPLAY_MODE = "replay"
-REPLAY_POLICY_VERSION = "spxw_surface_replay.v2"
+REPLAY_POLICY_VERSION = "spxw_surface_replay.v3"
 QUOTE_LAKE_DATASET = "lake/quotes/schema=v1"
 DEFAULT_LOOKBACK_SECONDS = 15.0
 MAX_LOOKBACK_SECONDS = 300.0
@@ -536,7 +536,11 @@ def load_replay_state(
     provider: Provider = SUPPORTED_PROVIDER,
     connection: duckdb.DuckDBPyConnection | None = None,
 ) -> ReplayLoadResult:
-    """Load one no-lookahead, single-provider point-in-time quote state."""
+    """Load one single-provider state bounded by every recorded source clock.
+
+    Legacy rows do not record response-finished/available-at, so this does not
+    claim that the selected response was observable at the requested instant.
+    """
 
     requested = _validate_request(as_of, lookback_seconds)
     if provider != SUPPORTED_PROVIDER:
@@ -768,6 +772,16 @@ def build_replay_snapshot(
             "cutoff_rule": (
                 "received_at_and_available_source_clocks_lte_requested_as_of"
             ),
+            "availability_clock_available": False,
+            "availability_clock": "unavailable",
+            "point_in_time_confidence": "bounded_not_proven",
+            "effective_available_at_rule": (
+                "max_available_source_clocks_lte_requested_as_of"
+            ),
+            "known_limitations": [
+                "response_finished_at_unavailable",
+                "received_at_is_cycle_started_at",
+            ],
             "selection_rule": (
                 "latest_complete_row_per_instrument_by_available_clocks_"
                 "then_surface_input_completeness"
@@ -830,29 +844,24 @@ def generate_replay(
 ) -> dict[str, object]:
     destination = Path(output_path).expanduser()
     destination.parent.mkdir(parents=True, exist_ok=True)
-    lock_path = destination.with_name(f"{destination.name}.lock")
     try:
-        lock_fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-    except FileExistsError as exc:
+        with exclusive_state_lock(destination, timeout_seconds=0.0):
+            if destination.exists() and not force:
+                raise ReplaySourceError("replay_output_already_exists")
+            loaded = load_replay_state(
+                data_root=data_root,
+                as_of=as_of,
+                lookback_seconds=lookback_seconds,
+            )
+            payload = build_replay_snapshot(
+                loaded,
+                storage_settings=storage_settings,
+                generated_at=generated_at,
+            )
+            write_dashboard_snapshot(payload, output_path=destination)
+            return payload
+    except TimeoutError as exc:
         raise ReplaySourceError("replay_generation_locked") from exc
-    try:
-        if destination.exists() and not force:
-            raise ReplaySourceError("replay_output_already_exists")
-        loaded = load_replay_state(
-            data_root=data_root,
-            as_of=as_of,
-            lookback_seconds=lookback_seconds,
-        )
-        payload = build_replay_snapshot(
-            loaded,
-            storage_settings=storage_settings,
-            generated_at=generated_at,
-        )
-        write_dashboard_snapshot(payload, output_path=destination)
-        return payload
-    finally:
-        os.close(lock_fd)
-        lock_path.unlink(missing_ok=True)
 
 
 def _parse_as_of(value: str) -> datetime:

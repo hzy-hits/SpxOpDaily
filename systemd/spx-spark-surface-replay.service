@@ -1,0 +1,34 @@
+[Unit]
+Description=SPX Spark read-only SPXW session replay API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/ubuntu/spx-spark
+Environment=PATH=/home/ubuntu/.local/bin:/home/ubuntu/.cargo/bin:/usr/local/bin:/usr/bin:/bin
+Environment=SPX_SPARK_DISABLE_DOTENV=1
+Environment=MARKET_DATA_DATA_ROOT=/srv/data/spx-spark/data
+ExecStart=/home/ubuntu/spx-spark/scripts/run-spxw-surface-replay-service.sh --frame-minutes 5
+Restart=always
+RestartSec=3
+KillSignal=SIGTERM
+TimeoutStopSec=15
+UMask=0077
+Nice=10
+IOSchedulingClass=idle
+CPUWeight=25
+IOWeight=25
+MemoryHigh=1G
+MemoryMax=2G
+TasksMax=64
+NoNewPrivileges=true
+PrivateNetwork=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+RestrictAddressFamilies=AF_UNIX
+ReadWritePaths=/srv/data/spx-spark/data/published/spxw-surface
+
+[Install]
+WantedBy=default.target

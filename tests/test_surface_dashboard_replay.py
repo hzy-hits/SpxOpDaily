@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fcntl
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -370,7 +371,7 @@ def test_replay_snapshot_is_frozen_and_has_no_live_lease(tmp_path: Path) -> None
     assert "valid_until" not in payload
     assert "created_at" not in payload
     assert payload["source"]["lookahead_rows_selected"] == 0
-    assert payload["policy_version"] == "spxw_surface_replay.v2"
+    assert payload["policy_version"] == "spxw_surface_replay.v3"
     assert payload["source"]["cutoff_rule"] == (
         "received_at_and_available_source_clocks_lte_requested_as_of"
     )
@@ -380,6 +381,16 @@ def test_replay_snapshot_is_frozen_and_has_no_live_lease(tmp_path: Path) -> None
         "quote_time",
         "trade_time",
         "last_update_at",
+    ]
+    assert payload["source"]["availability_clock_available"] is False
+    assert payload["source"]["availability_clock"] == "unavailable"
+    assert payload["source"]["point_in_time_confidence"] == "bounded_not_proven"
+    assert payload["source"]["effective_available_at_rule"] == (
+        "max_available_source_clocks_lte_requested_as_of"
+    )
+    assert payload["source"]["known_limitations"] == [
+        "response_finished_at_unavailable",
+        "received_at_is_cycle_started_at",
     ]
     assert payload["source"]["replay_loader_field_stitching"] is False
     assert payload["source"]["source_clock_rows_excluded"] == 1
@@ -501,7 +512,7 @@ def test_replay_generator_refuses_implicit_overwrite(tmp_path: Path) -> None:
         output_path=output_path,
         force=True,
     )
-    assert not output_path.with_name(f"{output_path.name}.lock").exists()
+    assert output_path.with_name(f"{output_path.name}.lock").is_file()
 
 
 def test_replay_generator_honors_exclusive_generation_lock(tmp_path: Path) -> None:
@@ -509,17 +520,38 @@ def test_replay_generator_honors_exclusive_generation_lock(tmp_path: Path) -> No
     settings = storage_settings(tmp_path)
     output_path = tmp_path / "replay.json"
     lock_path = output_path.with_name(f"{output_path.name}.lock")
-    lock_path.write_text("held", encoding="utf-8")
+    lock_path.touch(mode=0o600)
 
-    with pytest.raises(ReplaySourceError, match="replay_generation_locked"):
-        generate_replay(
-            as_of=AS_OF,
-            data_root=settings.data_root,
-            storage_settings=settings,
-            output_path=output_path,
-        )
+    with lock_path.open("a+", encoding="utf-8") as holder:
+        fcntl.flock(holder.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with pytest.raises(ReplaySourceError, match="replay_generation_locked"):
+            generate_replay(
+                as_of=AS_OF,
+                data_root=settings.data_root,
+                storage_settings=settings,
+                output_path=output_path,
+            )
+        fcntl.flock(holder.fileno(), fcntl.LOCK_UN)
 
-    assert lock_path.read_text(encoding="utf-8") == "held"
+    assert lock_path.is_file()
+
+
+def test_replay_generator_reuses_persistent_unlocked_lock_inode(tmp_path: Path) -> None:
+    write_quote_partition(tmp_path)
+    settings = storage_settings(tmp_path)
+    output_path = tmp_path / "replay.json"
+    lock_path = output_path.with_name(f"{output_path.name}.lock")
+    lock_path.write_text("persistent", encoding="utf-8")
+
+    payload = generate_replay(
+        as_of=AS_OF,
+        data_root=settings.data_root,
+        storage_settings=settings,
+        output_path=output_path,
+    )
+
+    assert payload["replay_id"] == "2026-07-17T183000Z"
+    assert lock_path.is_file()
 
 
 def test_replay_cli_requires_timezone() -> None:

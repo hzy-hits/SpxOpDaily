@@ -1,0 +1,13 @@
+[Unit]
+Description=Warm SPXW Session Replay after the RTH lake is compacted
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 21:20:00 UTC
+OnCalendar=Mon..Fri *-*-* 22:20:00 UTC
+OnCalendar=Mon..Fri *-*-* 23:20:00 UTC
+RandomizedDelaySec=120
+Persistent=true
+Unit=spx-spark-surface-replay-warm.service
+
+[Install]
+WantedBy=timers.target

@@ -42,33 +42,48 @@ surface. The browser does not keep an old surface on screen after expiry. This
 is especially important outside regular trading hours, when Schwab may not
 provide a fresh SPXW chain.
 
-Historical replay is a separate contract, endpoint, and browser mode. A replay
-has `kind=spxw_surface_dashboard_replay`, `mode=replay`, `frozen=true`, and no
-live `valid_until`. It is read once and never participates in the five-second
-polling loop. The UI repeats `HISTORICAL REPLAY`, the ET as-of time, `Frozen
-replay`, and `Not live` in text so color is not the only distinction.
+Historical replay is a separate contract and browser mode. A frame has
+`kind=spxw_surface_dashboard_replay`, `mode=replay`, `frozen=true`, and no live
+`valid_until`. Replay never participates in the five-second live polling loop.
+The UI repeats `HISTORICAL REPLAY`, the exact ET/UTC cutoff, `Frozen`, `Not live`,
+and `Bounded PIT` in text so it cannot be confused with a current lease.
 
-The first replay is a point-in-time reconstruction at Friday 2026-07-17 14:35
-ET (`2026-07-17T18:35:00Z`). It reads normalized Schwab rows received in the
-preceding 15 seconds and requires every available `received_at`, `source_at`,
-`quote_time`, `trade_time`, and `last_update_at` clock to be at or before the
-requested cutoff. Equal-clock variants are resolved only by surface-input
-completeness; the loader still selects one complete source row and never
-stitches fields.
-The checked slice resolved 35 complementary quote/structure variants, selected
-zero future-clock rows, and left zero ambiguous instruments. At that cutoff,
-SPX was 7462.30 with 1.79-second age; front-expiry usable coverage was 159/160
-(99.375%) and next-expiry coverage was 80/80. The front surface therefore
-retains an `unpaired_strike` warning. This is sufficient for a visual structure
-replay, not exact-spread execution.
+`/replay` is a session player rather than one static Friday image. It discovers
+trading dates from the normalized Schwab Parquet lake, indexes five-minute
+session buckets, and chooses the last complete observed chain cutoff in each
+bucket. Cutoffs therefore carry their real seconds and are not interpolated or
+forced onto round five-minute timestamps. The player provides a date selector,
+timeline, previous/next controls, and 1x/2x/4x playback while preserving the
+selected front/next expiry role.
 
-The replay also pins the Parquet and raw JSONL hashes, lake writer/schema,
-effective freshness policy, and an artifact digest. Lake v1 does not preserve a
-separate option `structure_time` and its `compacted_at` column is empty; the
-payload marks both limitations explicitly. Consequently, loader-level
-`field_stitching=false` does not prove that price, IV, and OI were observed on
-one exchange clock. Before rendering, the browser recomputes the pinned policy
-and artifact digests with Web Crypto and fails closed on any content change.
+Every frame reads the preceding 15 seconds and requires all available
+`received_at`, `source_at`, `quote_time`, `trade_time`, and `last_update_at`
+clocks to be at or before the requested cutoff. Future-clock candidates are
+excluded, equal-clock variants are resolved by surface-input completeness, one
+complete source row is selected per instrument, and fields are never stitched.
+The Parquet hashes are checked before and after the read. Each policy-v3 frame
+also carries raw-lineage hashes, the effective projection policy digest, and an
+artifact digest that the browser recomputes with Web Crypto before rendering.
+
+This is an explicitly **bounded**, not mathematically proven, point-in-time
+replay. Historical Schwab `received_at` records the collection-cycle start; the
+lake does not have a per-request `response_finished_at`/`available_at`. The five
+known clocks bound future data and the payload always requires zero selected
+lookahead rows, but a row whose actual HTTP response completed after the cutoff
+cannot be ruled out from legacy data. Policy v3 therefore publishes
+`point_in_time_confidence=bounded_not_proven`,
+`availability_clock_available=false`, and the known limitations. The browser
+fails closed if those fields are missing or softened. Lake v1 also lacks a
+separate option `structure_time`, so `field_stitching=false` does not prove that
+price, IV, and OI share one exchange clock.
+
+The archived 2026-07-17 14:35 ET v2 artifact remains available for audit, but
+the session player does not pin or reuse it. Dynamic frames use an independent
+`policy=v3` cache keyed by lookback, projection-policy digest, and the current
+session-source fingerprint. The service revalidates the artifact, projection
+policy, and referenced Parquet hashes before every response. Browser responses
+are revalidated rather than treated as immutable URLs because the lake can be
+rewritten after compaction.
 
 `automatic_ordering` is always `false`. Exact spread execution still requires
 fresh, pinned IBKR leg quotes and the independent execution gates; this surface
@@ -82,21 +97,35 @@ publish directory:
 ```text
 /srv/data/spx-spark/data/published/spxw-surface/snapshot.json
 /srv/data/spx-spark/data/published/spxw-surface/replays/2026-07-17T183500Z.json
+/srv/data/spx-spark/data/published/spxw-surface/replay-catalog/session=YYYY-MM-DD/timeline-5m.json
+/srv/data/spx-spark/data/published/spxw-surface/replay-cache/policy=v3/lookback=*/projection=*/source=*/*.json
+/srv/data/spx-spark/data/published/spxw-surface/runtime/replay-api.sock
 ```
 
-The nginx sidecar mounts that directory read-only and exposes only the exact
-live snapshot and checked replay endpoints. It shares the code-server network
-namespace, so the intended browser entry point remains behind code-server
-authentication:
+The low-priority host replay service reads Parquet, serializes generation with a
+global advisory lock, and listens only on a Unix socket. The lock inode is
+persistent; process exit releases `flock`, so a killed worker cannot leave a
+permanent stale lock. Nginx mounts the runtime
+directory read-only, proxies only `/api/v1/replay/`, and exposes no new TCP
+listener. It also serves the exact live snapshot and archived v2 frame. The
+weekday post-close timer warms only the latest timeline manifest; individual
+surface frames remain on-demand. Sessions are hidden until a two-hour
+post-close grace period has elapsed. That delay reduces compaction races but is
+not a compactor-completion marker, so the API explicitly publishes
+`data_finalization_proven=false` and never calls the source finalized. The
+sidecar shares the code-server network namespace, so the browser entry remains
+behind code-server authentication:
 
 ```text
-https://code.zh3nyu.com/proxy/18082/
+https://code.zh3nyu.com/proxy/18082/live
+https://code.zh3nyu.com/proxy/18082/replay
 https://spx.zh3nyu.com/
+https://spx.zh3nyu.com/replay
 https://spx.zh3nyu.com/friday
 ```
 
 The short hostname is a redirect-only loopback service; it exposes no JSON and
-lands on the code-server-authenticated URL. The frontend refreshes every five
-seconds in Live mode and shows freshness, coverage, input source, selected
-expiry, weighting, and metric beside the chart. Friday Replay performs one
-immutable fetch and never changes the live publisher or execution state.
+lands on the code-server-authenticated URL. `/friday` is a compatibility alias
+for the 2026-07-17 session. The frontend refreshes every five seconds only in
+Live mode. Replay indexes a session once, generates missing frames on demand,
+and never changes the live publisher, strategy state, or execution state.
