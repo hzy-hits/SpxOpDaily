@@ -2,16 +2,24 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import duckdb
 import pytest
 
+import spx_spark.surface_replay_session_data as session_data
 from spx_spark.surface_dashboard_replay import (
     QUOTE_LAKE_DATASET,
     ReplaySourceError,
     _canonical_sha256,
 )
 from spx_spark.surface_replay_service import ReplayCatalog
+from spx_spark.surface_replay_session_frames import causal_frames
+from spx_spark.surface_replay_session_models import (
+    SessionSurfaceBuildCache,
+    _FrameState,
+    session_surface_window,
+)
 from test_surface_dashboard_replay import _row, storage_settings, write_quote_partition
 
 
@@ -441,3 +449,169 @@ def test_v2_0925_et_boundary_forces_closed_gap_missing(
     )
     assert gap["kind"] == "missing"
     assert gap["reason"] == "scheduled_closed_gap"
+
+
+def _cached_gth_frame(at: datetime, index: int) -> _FrameState:
+    return _FrameState(
+        at=at,
+        known_at=at,
+        valid_until=at + timedelta(minutes=5),
+        artifact_sha256=f"{index:064x}",
+        expiry="20260717",
+        expiry_close=datetime(2026, 7, 17, 20, 0, tzinfo=timezone.utc),
+        reference_spot=7500.0,
+        contracts=(),
+        strike_rows=(),
+        quality="ready",
+        warnings=(),
+        session_kind="gth",
+        surface_provider="ibkr",
+        reference_method="es_basis_inferred_spx",
+    )
+
+
+def _cache_test_context(source_fingerprint: str) -> SimpleNamespace:
+    window = session_surface_window(SESSION_DATE)
+    return SimpleNamespace(
+        session_date=SESSION_DATE,
+        source_fingerprint=source_fingerprint,
+        frames=(),
+        frame_minutes=5,
+        close_at=window.session_end,
+    )
+
+
+def test_gth_close_seed_reuses_only_causal_early_prefix_without_rescan() -> None:
+    window = session_surface_window(SESSION_DATE)
+    clocks = (
+        datetime(2026, 7, 17, 0, 20, tzinfo=timezone.utc),
+        datetime(2026, 7, 17, 0, 25, tzinfo=timezone.utc),
+        datetime(2026, 7, 17, 0, 30, tzinfo=timezone.utc),
+    )
+    seeded_frames = tuple(
+        _cached_gth_frame(clock, index)
+        for index, clock in enumerate(clocks, start=1)
+    )
+    context = _cache_test_context("source-a")
+    cache = SessionSurfaceBuildCache()
+    loader_calls: list[datetime] = []
+
+    def close_loader(*_args: object, **kwargs: object) -> tuple[_FrameState, ...]:
+        loader_calls.append(kwargs["as_of"])
+        return seeded_frames
+
+    close_rows = causal_frames(
+        context,
+        as_of=window.session_end,
+        role="front",
+        frame_loader=lambda _requested: pytest.fail("unexpected RTH frame load"),
+        build_cache=cache,
+        gth_loader=close_loader,
+    )
+    assert tuple(row.at for row in close_rows) == clocks
+    assert loader_calls == [window.session_end]
+
+    def unexpected_loader(
+        *_args: object,
+        **_kwargs: object,
+    ) -> tuple[_FrameState, ...]:
+        pytest.fail("covered early GTH prefix rescanned")
+
+    arbitrary_early = GTH_AT + timedelta(minutes=2)
+    early_rows = causal_frames(
+        context,
+        as_of=arbitrary_early,
+        role="front",
+        frame_loader=lambda _requested: pytest.fail("unexpected RTH frame load"),
+        build_cache=cache,
+        gth_loader=unexpected_loader,
+    )
+
+    assert tuple(row.at for row in early_rows) == clocks[:2]
+    assert all((row.known_at or row.at) <= arbitrary_early for row in early_rows)
+    assert all(row.at <= arbitrary_early for row in early_rows)
+
+
+def test_close_seed_is_reused_across_surface_selectors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    catalog = _catalog_with_gth(tmp_path)
+    original_loader = session_data._load_gth_frames
+    loader_calls: list[datetime] = []
+
+    def counted_loader(*args: object, **kwargs: object) -> tuple[_FrameState, ...]:
+        loader_calls.append(kwargs["as_of"])
+        return original_loader(*args, **kwargs)
+
+    monkeypatch.setattr(session_data, "_load_gth_frames", counted_loader)
+    close = session_surface_window(SESSION_DATE).session_end
+    catalog.session_surface(
+        SESSION_DATE,
+        at=close,
+        role="front",
+        weighting="volume_weighted",
+        bucket_minutes=5,
+        price_step=2.5,
+    )
+    assert loader_calls == [close]
+
+    early = catalog.session_surface(
+        SESSION_DATE,
+        at=GTH_AT,
+        role="front",
+        weighting="oi_weighted",
+        bucket_minutes=5,
+        price_step=5.0,
+    )
+
+    assert loader_calls == [close]
+    assert all(
+        row["source_at"] is None or row["source_at"] <= early["as_of"]
+        for row in early["surface_columns"]
+    )
+    assert early["provenance"]["lookahead_rows_selected"] == 0
+
+
+def test_gth_frame_cache_isolated_by_source_and_role_and_strictly_bounded() -> None:
+    clock = datetime(2026, 7, 17, 0, 20, tzinfo=timezone.utc)
+    frame = _cached_gth_frame(clock, 1)
+    cache = SessionSurfaceBuildCache(
+        max_gth_frame_entries=2,
+        max_gth_contexts=1,
+    )
+    cache.put_gth_frames(
+        source_fingerprint="source-a",
+        role="front",
+        covered_until=GTH_AT,
+        frames=(frame,),
+    )
+
+    scopes: list[tuple[str, str]] = []
+
+    def scoped_loader(
+        context: SimpleNamespace,
+        *,
+        role: str,
+        **_kwargs: object,
+    ) -> tuple[_FrameState, ...]:
+        scopes.append((context.source_fingerprint, role))
+        return (frame,)
+
+    for context, role in (
+        (_cache_test_context("source-b"), "front"),
+        (_cache_test_context("source-a"), "next"),
+    ):
+        rows = causal_frames(
+            context,
+            as_of=GTH_AT,
+            role=role,
+            frame_loader=lambda _requested: pytest.fail("unexpected RTH frame load"),
+            build_cache=cache,
+            gth_loader=scoped_loader,
+        )
+        assert tuple(row.at for row in rows) == (clock,)
+
+    assert scopes == [("source-b", "front"), ("source-a", "next")]
+    assert len(cache._gth_frames) <= cache.max_gth_frame_entries
+    assert len(cache._gth_coverage) <= cache.max_gth_contexts

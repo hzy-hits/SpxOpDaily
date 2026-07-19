@@ -46,8 +46,12 @@ def test_post_close_timer_warms_catalog_and_default_session_surfaces() -> None:
     assert 'row["at"]' in warmer
     assert '"role=front"' in warmer
     assert '"weighting=oi_weighted"' in warmer
+    assert '"weighting=volume_weighted"' in warmer
     assert '"bucket_minutes=5"' in warmer
     assert '"price_step=5"' in warmer
+    assert '"price_step=2.5"' in warmer
+    assert "seeds the replay worker's causal" in warmer
+    assert "datetime.timedelta(seconds=3)" in warmer
     assert "/session-surface" in warmer
     assert "/trend?" not in warmer
     assert "/frame?" not in warmer
@@ -142,9 +146,10 @@ else:
         "surface:2026-07-17:2026-07-17T14:35:00Z",
         "timeline:2026-07-16",
         "surface:2026-07-16:2026-07-16T14:30:00Z",
+        "surface:2026-07-17:2026-07-17T14:34:57Z",
         "surface:2026-07-17:2026-07-17T00:20:00Z",
     ]
-    assert "warmed 2 replay timelines and 3 default session surfaces" in completed.stdout
+    assert "warmed 2 replay timelines and 4 session surface requests" in completed.stdout
 
 
 def test_only_canonical_service_module_is_directly_executable() -> None:

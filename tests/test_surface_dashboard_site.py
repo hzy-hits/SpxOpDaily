@@ -87,7 +87,11 @@ def test_frontend_keeps_live_and_replay_clock_contracts_separate() -> None:
     assert "requestGeneration" in app
     assert "SESSION_SURFACE_RETRY_DELAYS_MS" in app
     assert "scheduleSessionSurfaceRetry(key)" in app
-    assert "renderSessionSurfaceChrome(\"unavailable\", reason)" in app
+    assert 'renderSessionSurfaceChrome("unavailable", failure.reason, { retrying: true })' in app
+    assert "sessionSurfaceFailureDisposition" in app
+    assert "session_surface_timeout_" in app
+    assert "Replay · Unavailable · Retrying" in app
+    assert "Replay · Scheduled Missing" in app
     assert "Refresh the transport after releasing" in app
     assert "sessionSurfaceFrameIndexFor" in app
     assert "return Math.max(index, 0)" not in app

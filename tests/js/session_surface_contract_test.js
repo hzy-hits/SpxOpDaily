@@ -34,10 +34,16 @@ function stubElement() {
 
 globalThis.__SPX_SPARK_DISABLE_AUTO_START__ = true;
 globalThis.__SPX_SPARK_TEST_HOOK__ = {};
+const stubElements = new Map();
+function querySelector(selector) {
+  if (!stubElements.has(selector)) stubElements.set(selector, stubElement());
+  return stubElements.get(selector);
+}
+
 globalThis.document = {
   body: stubElement(),
   hidden: false,
-  querySelector: stubElement,
+  querySelector,
   createElement: stubElement,
   addEventListener() {},
 };
@@ -70,7 +76,13 @@ for (const name of [
   "missingRangeAppliesToPanel",
   "sessionSurfaceFrameIndexFor",
   "sessionSurfaceRequestDecision",
+  "sessionSurfaceFailureDisposition",
+  "sessionSurfaceBlocksPlayback",
+  "replaySessionSurfacePresentationPhase",
+  "shouldClearSessionSurfaceAfterFailure",
   "shouldResetCockpitDomains",
+  "scheduledMissingSessionSurfacePresentation",
+  "renderSessionSurfaceChrome",
   "normalizeSessionMetricUnits",
   "cockpitCandleDisplayTime",
   "cockpitCandleAtTime",
@@ -529,6 +541,83 @@ async function sign(payload) {
     renderedKey: "",
     interrupt: true,
   }), "interrupt");
+  assert.deepEqual(
+    hooks.sessionSurfaceFailureDisposition(new Error("ignored"), {
+      requestCurrent: false,
+      aborted: true,
+      timedOut: false,
+    }),
+    { cancelled: true, retry: false, reason: "" },
+  );
+  assert.deepEqual(
+    hooks.sessionSurfaceFailureDisposition(new Error("AbortError"), {
+      requestCurrent: true,
+      aborted: true,
+      timedOut: true,
+    }),
+    { cancelled: false, retry: true, reason: "session_surface_timeout_60s" },
+  );
+  assert.deepEqual(
+    hooks.sessionSurfaceFailureDisposition(new Error("session_surface_http_503"), {
+      requestCurrent: true,
+      aborted: false,
+      timedOut: false,
+    }),
+    { cancelled: false, retry: true, reason: "session_surface_http_503" },
+  );
+  assert.equal(hooks.sessionSurfaceBlocksPlayback({
+    metadataOnly: true,
+    hasSurface: false,
+    loading: true,
+    recoverableFailure: false,
+  }), true);
+  assert.equal(hooks.sessionSurfaceBlocksPlayback({
+    metadataOnly: true,
+    hasSurface: false,
+    loading: true,
+    recoverableFailure: true,
+  }), false);
+  assert.equal(hooks.replaySessionSurfacePresentationPhase({
+    lastError: "session_surface_http_503",
+    retryKey: "new-key",
+    hasSurface: true,
+  }), "retrying");
+  assert.equal(hooks.replaySessionSurfacePresentationPhase({
+    lastError: "",
+    retryKey: "",
+    hasSurface: true,
+  }), "ready");
+  assert.equal(hooks.shouldClearSessionSurfaceAfterFailure("new-key", "old-key"), true);
+  assert.equal(hooks.shouldClearSessionSurfaceAfterFailure("same-key", "same-key"), false);
+  assert.deepEqual(
+    hooks.scheduledMissingSessionSurfacePresentation({ sessionKind: "closed_gap" }),
+    {
+      scheduledMissing: true,
+      status: "Replay · Scheduled Missing",
+      reason: "Scheduled closed gap · market values are Missing, never zero-filled",
+      notice: "Scheduled Missing: the closed market gap contains no fabricated surface, reference, candle, or position values.",
+    },
+  );
+  assert.equal(
+    hooks.scheduledMissingSessionSurfacePresentation({ sessionKind: "rth" }).scheduledMissing,
+    false,
+  );
+  hooks.renderSessionSurfaceChrome("unavailable", "session_surface_http_503", {
+    retrying: true,
+  });
+  assert.equal(
+    stubElements.get("#status-pill").textContent,
+    "Replay · Unavailable · Retrying",
+  );
+  assert.equal(
+    stubElements.get("#refresh-state").textContent,
+    "Cutoff-bound surface unavailable · retrying",
+  );
+  assert.equal(
+    stubElements.get("#summary-status").textContent,
+    "Unavailable · Retrying · Bounded PIT",
+  );
+  assert.doesNotMatch(stubElements.get("#status-pill").textContent, /Loading/);
   const frameClocks = [{ atMs: 1000 }, { atMs: 2000 }];
   assert.equal(hooks.sessionSurfaceFrameIndexFor(frameClocks, 999), -1);
   assert.equal(hooks.sessionSurfaceFrameIndexFor(frameClocks, 1000), 0);

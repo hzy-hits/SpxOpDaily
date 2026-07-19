@@ -71,6 +71,27 @@ done
 # every playhead of the latest session for smooth same-day replay.
 if (( ${#latest_frame_times[@]} > 1 )); then
   latest_landing_time="${latest_frame_times[-1]}"
+  latest_seed_time="$(
+    "$PYTHON" -c \
+      'import datetime,sys; value=datetime.datetime.fromisoformat(sys.argv[1].replace("Z", "+00:00"))-datetime.timedelta(seconds=3); print(value.isoformat().replace("+00:00", "Z"))' \
+      "$latest_landing_time"
+  )"
+
+  # An off-timeline, non-default landing selector is normally absent for each
+  # new source fingerprint. Building it once seeds the replay worker's causal
+  # frame LRU; the default landing artifact may already be a disk-cache hit.
+  curl --silent --show-error --fail --max-time 90 \
+    --unix-socket "$SOCKET_PATH" \
+    --get \
+    --data-urlencode "at=$latest_seed_time" \
+    --data-urlencode "role=front" \
+    --data-urlencode "weighting=volume_weighted" \
+    --data-urlencode "bucket_minutes=5" \
+    --data-urlencode "price_step=2.5" \
+    "http://localhost/api/v1/replay/sessions/$latest_session/session-surface" \
+    >/dev/null
+  surface_count=$((surface_count + 1))
+
   for frame_at in "${latest_frame_times[@]}"; do
     if [[ "$frame_at" == "$latest_landing_time" ]]; then
       continue
@@ -88,5 +109,5 @@ if (( ${#latest_frame_times[@]} > 1 )); then
     surface_count=$((surface_count + 1))
   done
 fi
-printf 'warmed %s replay timelines and %s default session surfaces; full playback=%s\n' \
+printf 'warmed %s replay timelines and %s session surface requests; full playback=%s\n' \
   "$timeline_count" "$surface_count" "$latest_session"

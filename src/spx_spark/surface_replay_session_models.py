@@ -218,16 +218,22 @@ class SessionSurfaceBuildCache:
         max_kernel_entries: int = 256,
         max_frame_entries: int = 256,
         max_spx_sessions: int = 8,
+        max_gth_frame_entries: int = 256,
+        max_gth_contexts: int = 8,
     ) -> None:
         if (
             max_kernel_entries <= 0
             or max_frame_entries <= 0
             or max_spx_sessions <= 0
+            or max_gth_frame_entries <= 0
+            or max_gth_contexts <= 0
         ):
             raise ValueError("session-surface cache bounds must be positive")
         self.max_kernel_entries = max_kernel_entries
         self.max_frame_entries = max_frame_entries
         self.max_spx_sessions = max_spx_sessions
+        self.max_gth_frame_entries = max_gth_frame_entries
+        self.max_gth_contexts = max_gth_contexts
         self._lock = threading.Lock()
         self._kernels: OrderedDict[tuple[object, ...], tuple[_KernelColumn, ...]] = (
             OrderedDict()
@@ -236,6 +242,10 @@ class SessionSurfaceBuildCache:
         self._spx: OrderedDict[tuple[str, str], tuple[_SPXObservation, ...]] = (
             OrderedDict()
         )
+        self._gth_frames: OrderedDict[
+            tuple[str, str, datetime], _FrameState
+        ] = OrderedDict()
+        self._gth_coverage: OrderedDict[tuple[str, str], datetime] = OrderedDict()
 
     def get_kernel(self, key: tuple[object, ...]) -> tuple[_KernelColumn, ...] | None:
         with self._lock:
@@ -286,6 +296,83 @@ class SessionSurfaceBuildCache:
             self._frames.move_to_end(key)
             while len(self._frames) > self.max_frame_entries:
                 self._frames.popitem(last=False)
+
+    def get_gth_frames(
+        self,
+        *,
+        source_fingerprint: str,
+        role: str,
+        cutoff: datetime,
+    ) -> tuple[_FrameState, ...] | None:
+        """Return a complete causal prefix, or ``None`` when it is not covered."""
+
+        resolved_cutoff = as_utc(cutoff)
+        context_key = (source_fingerprint, role)
+        with self._lock:
+            covered_until = self._gth_coverage.get(context_key)
+            if covered_until is None or covered_until < resolved_cutoff:
+                return None
+            keys = [
+                key
+                for key in self._gth_frames
+                if key[:2] == context_key and key[2] <= resolved_cutoff
+            ]
+            for key in keys:
+                self._gth_frames.move_to_end(key)
+            self._gth_coverage.move_to_end(context_key)
+            return tuple(
+                self._gth_frames[key]
+                for key in sorted(keys, key=lambda value: value[2])
+            )
+
+    def put_gth_frames(
+        self,
+        *,
+        source_fingerprint: str,
+        role: str,
+        covered_until: datetime,
+        frames: tuple[_FrameState, ...],
+    ) -> None:
+        """Store one complete scan while keeping coverage honest under eviction."""
+
+        resolved_coverage = as_utc(covered_until)
+        context_key = (source_fingerprint, role)
+        by_clock: dict[datetime, _FrameState] = {}
+        for frame in frames:
+            frame_at = as_utc(frame.at)
+            if frame.session_kind != "gth" or frame_at > resolved_coverage:
+                raise ValueError("invalid causal GTH frame cache entry")
+            by_clock[frame_at] = frame
+        with self._lock:
+            previous_coverage = self._gth_coverage.get(context_key)
+            coverage_intact = previous_coverage is not None
+            inserted_keys: set[tuple[str, str, datetime]] = set()
+            for frame_at, frame in sorted(by_clock.items()):
+                key = (source_fingerprint, role, frame_at)
+                inserted_keys.add(key)
+                self._gth_frames[key] = frame
+                self._gth_frames.move_to_end(key)
+                while len(self._gth_frames) > self.max_gth_frame_entries:
+                    evicted_key, _evicted = self._gth_frames.popitem(last=False)
+                    evicted_context = evicted_key[:2]
+                    self._gth_coverage.pop(evicted_context, None)
+                    if evicted_context == context_key:
+                        coverage_intact = False
+            if inserted_keys <= self._gth_frames.keys():
+                target_coverage = resolved_coverage
+                if coverage_intact and previous_coverage is not None:
+                    target_coverage = max(previous_coverage, resolved_coverage)
+                self._gth_coverage[context_key] = target_coverage
+                self._gth_coverage.move_to_end(context_key)
+            else:
+                self._gth_coverage.pop(context_key, None)
+            while len(self._gth_coverage) > self.max_gth_contexts:
+                evicted_context, _covered = self._gth_coverage.popitem(last=False)
+                stale_keys = [
+                    key for key in self._gth_frames if key[:2] == evicted_context
+                ]
+                for key in stale_keys:
+                    self._gth_frames.pop(key, None)
 
 
 FrameLoader = Callable[[datetime], dict[str, object]]

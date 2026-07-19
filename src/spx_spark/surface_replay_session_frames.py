@@ -509,15 +509,40 @@ def causal_frames(
     frame_parser: Callable[..., _FrameState] = parse_role_frame,
 ) -> tuple[_FrameState, ...]:
     cutoff = as_utc(as_of)
+    window = session_surface_window(context.session_date)
+    gth_cutoff = min(cutoff, as_utc(window.gth_end))
     requested_frames = tuple(as_utc(value) for value in context.frames if as_utc(value) <= cutoff)
-    parsed: list[_FrameState] = list(
-        gth_loader(
+    cached_gth = build_cache.get_gth_frames(
+        source_fingerprint=context.source_fingerprint,
+        role=role,
+        cutoff=gth_cutoff,
+    )
+    if cached_gth is not None:
+        gth_frames = cached_gth or ()
+    else:
+        gth_frames = tuple(gth_loader(
             context,
             as_of=cutoff,
             role=role,
             reference_observations=reference_observations,
+        ))
+        if any(
+            row.session_kind != "gth"
+            or row.at < as_utc(window.session_start)
+            or row.at > gth_cutoff
+            or (row.known_at or row.at) > gth_cutoff
+            for row in gth_frames
+        ) or any(
+            right.at <= left.at for left, right in zip(gth_frames, gth_frames[1:])
+        ):
+            raise ReplaySourceError("session_surface_gth_timeline_invalid")
+        build_cache.put_gth_frames(
+            source_fingerprint=context.source_fingerprint,
+            role=role,
+            covered_until=gth_cutoff,
+            frames=gth_frames,
         )
-    )
+    parsed: list[_FrameState] = list(gth_frames)
     for requested in requested_frames:
         cache_key = (context.source_fingerprint, role, replay_id(requested))
         row = build_cache.get_frame(cache_key)

@@ -307,6 +307,7 @@ const app = {
   sessionSurfaceRetryTimer: null,
   sessionSurfaceRetryKey: "",
   sessionSurfaceRetryCount: 0,
+  sessionSurfaceLastError: "",
   cockpitLayouts: {},
   cockpitHover: null,
   cockpitPriceDomain: null,
@@ -4520,10 +4521,29 @@ function drawMetadataReplayDynamic(
   );
   const surface = app.sessionSurface;
   const spot = cockpitCurrentSpot();
-  if (surface) {
-    setStatusPill("ready", "Replay · Session surface");
-    dom.summaryStatus.textContent = "Ready · Frozen · Bounded PIT";
-    dom.summaryReasons.textContent = "Session-surface cutoff · dealer side unknown";
+  const surfacePhase = replaySessionSurfacePresentationPhase({
+    lastError: app.sessionSurfaceLastError,
+    retryKey: app.sessionSurfaceRetryKey,
+    hasSurface: Boolean(surface),
+  });
+  if (surfacePhase === "retrying") {
+    renderSessionSurfaceChrome("unavailable", app.sessionSurfaceLastError, {
+      retrying: true,
+    });
+  } else if (surfacePhase === "ready") {
+    const presentation = scheduledMissingSessionSurfacePresentation(
+      app.frames[app.sessionSurfaceKeyframeIndex],
+    );
+    setStatusPill(
+      presentation.scheduledMissing ? "degraded" : "ready",
+      presentation.scheduledMissing ? presentation.status : "Replay · Session surface",
+    );
+    dom.summaryStatus.textContent = presentation.scheduledMissing
+      ? "Scheduled Missing · Frozen · Bounded PIT"
+      : "Ready · Frozen · Bounded PIT";
+    dom.summaryReasons.textContent = presentation.scheduledMissing
+      ? presentation.reason
+      : "Session-surface cutoff · dealer side unknown";
     dom.summaryFreshness.textContent = "Frozen · Bounded PIT";
     dom.summaryAsOf.textContent = `as of ${formatReplayAsOf(surface.asOf)}`;
     const totalCells = surface.timeBuckets.length * surface.priceGrid.length;
@@ -4538,7 +4558,9 @@ function drawMetadataReplayDynamic(
     dom.summaryUnderlier.textContent = `SPX ${Number.isFinite(spot) ? spot.toFixed(2) : "—"}`;
     dom.schemaVersion.textContent = `session surface schema ${surface.schemaVersion ?? "—"}`;
     dom.signConvention.textContent = "calls + / puts − proxy; participant and dealer side unknown";
-    dom.refreshState.textContent = `Frozen replay · cutoff ${formatMarketTime(surface.asOf, false)}`;
+    dom.refreshState.textContent = presentation.scheduledMissing
+      ? "Scheduled closed gap · Missing · no fabricated market values"
+      : `Frozen replay · cutoff ${formatMarketTime(surface.asOf, false)}`;
   } else {
     setStatusPill("unknown", "Loading session surface");
     dom.summaryStatus.textContent = "Waiting · Frozen replay";
@@ -5575,8 +5597,17 @@ function updateReplayControls() {
     : -1;
   dom.replayPrevious.disabled = navigationLocked || previousIndex < 0;
   dom.replayNext.disabled = navigationLocked || !trend || currentGammaIndex >= gammaCount - 1;
+  const recoverableSurfaceFailure = Boolean(
+    app.sessionSurfaceLastError && app.sessionSurfaceRetryKey,
+  );
+  const surfaceBlocksPlayback = sessionSurfaceBlocksPlayback({
+    metadataOnly: trend?.metadataOnly === true,
+    hasSurface: Boolean(app.sessionSurface),
+    loading: app.sessionSurfaceLoading,
+    recoverableFailure: recoverableSurfaceFailure,
+  });
   dom.replayPlay.disabled = navigationLocked || app.frameLoading || !trend || gammaCount < 2 ||
-    (!app.playing && trend.metadataOnly && (!app.sessionSurface || app.sessionSurfaceLoading));
+    (!app.playing && surfaceBlocksPlayback);
   dom.replaySpeed.disabled = navigationLocked || !trend || gammaCount < 2;
   dom.replaySpeed.value = String(app.speed);
   dom.replayPlay.textContent = app.playing ? "❚❚ 暂停" : "▶ 播放";
@@ -5689,7 +5720,15 @@ function playbackTick(now) {
 
 function startPlayback() {
   if (!app.trend || app.trendLoading || app.frameLoading) return;
-  if (app.trend.metadataOnly && (!app.sessionSurface || app.sessionSurfaceLoading)) return;
+  const recoverableSurfaceFailure = Boolean(
+    app.sessionSurfaceLastError && app.sessionSurfaceRetryKey,
+  );
+  if (sessionSurfaceBlocksPlayback({
+    metadataOnly: app.trend.metadataOnly === true,
+    hasSurface: Boolean(app.sessionSurface),
+    loading: app.sessionSurfaceLoading,
+    recoverableFailure: recoverableSurfaceFailure,
+  })) return;
   cancelPlaybackAnimation();
   dom.scenarioDiagnostic.open = false;
   const playbackStartMs = replayPlaybackStartMs(app.trend);
@@ -5951,18 +5990,24 @@ function applyLiveSessionSurface(surface, serverNowMs) {
   }
 }
 
-function renderSessionSurfaceChrome(status, reason = "") {
+function renderSessionSurfaceChrome(status, reason = "", { retrying = false } = {}) {
   if (!isReplayView()) return;
   const unavailable = status === "unavailable";
   setStatusPill(
     unavailable ? "unavailable" : "unknown",
-    unavailable ? "Replay · Session surface unavailable" : "Replay · Loading session surface",
+    unavailable
+      ? retrying ? "Replay · Unavailable · Retrying" : "Replay · Session surface unavailable"
+      : "Replay · Loading session surface",
   );
   renderReferenceChrome(app.sessionSurface);
   dom.refreshState.textContent = unavailable
-    ? "Cutoff-bound surface unavailable · retrying"
+    ? retrying
+      ? "Cutoff-bound surface unavailable · retrying"
+      : "Cutoff-bound surface unavailable"
     : "Loading cutoff-bound session surface";
-  dom.summaryStatus.textContent = unavailable ? "Unavailable · Bounded PIT" : "Loading · Bounded PIT";
+  dom.summaryStatus.textContent = unavailable
+    ? retrying ? "Unavailable · Retrying · Bounded PIT" : "Unavailable · Bounded PIT"
+    : "Loading · Bounded PIT";
   dom.summaryReasons.textContent = reason || "Waiting for a validated cutoff-bound surface";
   dom.summaryFreshness.textContent = "Frozen · Bounded PIT";
   dom.summaryAsOf.textContent = Number.isFinite(app.playheadMs)
@@ -5979,6 +6024,7 @@ function clearSessionSurfaceRetry() {
   app.sessionSurfaceRetryTimer = null;
   app.sessionSurfaceRetryKey = "";
   app.sessionSurfaceRetryCount = 0;
+  app.sessionSurfaceLastError = "";
 }
 
 function cancelSessionSurfaceRequest({ clear = false } = {}) {
@@ -6041,6 +6087,55 @@ function shouldResetCockpitDomains(previousAsOfMs, nextAsOfMs) {
     nextAsOfMs < previousAsOfMs;
 }
 
+function replaySessionSurfacePresentationPhase({
+  lastError = "",
+  retryKey = "",
+  hasSurface = false,
+} = {}) {
+  if (lastError && retryKey) return "retrying";
+  return hasSurface ? "ready" : "loading";
+}
+
+function shouldClearSessionSurfaceAfterFailure(targetKey, renderedKey) {
+  return Boolean(targetKey) && targetKey !== renderedKey;
+}
+
+function sessionSurfaceBlocksPlayback({
+  metadataOnly = false,
+  hasSurface = false,
+  loading = false,
+  recoverableFailure = false,
+} = {}) {
+  return metadataOnly && (!hasSurface || loading) && !recoverableFailure;
+}
+
+function sessionSurfaceFailureDisposition(
+  error,
+  { requestCurrent = true, aborted = false, timedOut = false } = {},
+) {
+  if (!requestCurrent || (aborted && !timedOut)) {
+    return { cancelled: true, retry: false, reason: "" };
+  }
+  const reason = timedOut
+    ? `session_surface_timeout_${Math.round(REPLAY_REQUEST_TIMEOUT_MS / 1_000)}s`
+    : error instanceof Error
+      ? error.message
+      : "session_surface_fetch_failed";
+  return { cancelled: false, retry: true, reason };
+}
+
+function scheduledMissingSessionSurfacePresentation(frame) {
+  const scheduledMissing = frame?.sessionKind === "closed_gap";
+  return scheduledMissing
+    ? {
+        scheduledMissing: true,
+        status: "Replay · Scheduled Missing",
+        reason: "Scheduled closed gap · market values are Missing, never zero-filled",
+        notice: "Scheduled Missing: the closed market gap contains no fabricated surface, reference, candle, or position values.",
+      }
+    : { scheduledMissing: false, status: "", reason: "", notice: "" };
+}
+
 function scheduleSessionSurfaceRetry(key) {
   if (app.mode !== "replay" || app.sessionSurfaceRetryKey !== key) return;
   const delay = SESSION_SURFACE_RETRY_DELAYS_MS[
@@ -6086,18 +6181,33 @@ async function loadSessionSurfaceAtPlayhead({ force = false, interrupt = false }
   if (decision === "interrupt") cancelSessionSurfaceRequest({ clear: false });
   window.clearTimeout(app.sessionSurfaceRetryTimer);
   app.sessionSurfaceRetryTimer = null;
+  const retrying = app.sessionSurfaceRetryKey === key && Boolean(app.sessionSurfaceLastError);
   if (app.sessionSurfaceRetryKey !== key) {
     app.sessionSurfaceRetryKey = key;
     app.sessionSurfaceRetryCount = 0;
+    app.sessionSurfaceLastError = "";
   }
   const controller = new AbortController();
   const generation = ++app.sessionSurfaceGeneration;
-  const abortTimer = window.setTimeout(() => controller.abort(), REPLAY_REQUEST_TIMEOUT_MS);
+  let timedOut = false;
+  const abortTimer = window.setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, REPLAY_REQUEST_TIMEOUT_MS);
   app.sessionSurfaceController = controller;
   app.sessionSurfaceLoading = true;
   app.sessionSurfaceRequestKey = key;
-  dom.cockpitLoading.hidden = false;
-  renderSessionSurfaceChrome("loading");
+  dom.cockpitLoading.hidden = retrying;
+  if (retrying) {
+    setNotice(
+      `Session cockpit unavailable at this keyframe: ${app.sessionSurfaceLastError}. Retrying now.`,
+      true,
+    );
+    renderSessionSurfaceChrome("unavailable", app.sessionSurfaceLastError, { retrying: true });
+  } else {
+    setNotice("");
+    renderSessionSurfaceChrome("loading");
+  }
   try {
     const response = await fetch(sessionSurfaceRequestUrl(frame), {
       cache: "no-cache",
@@ -6133,18 +6243,39 @@ async function loadSessionSurfaceAtPlayhead({ force = false, interrupt = false }
     app.sessionSurfaceLoading = false;
     dom.cockpitLoading.hidden = true;
     clearSessionSurfaceRetry();
-    setNotice("");
+    const presentation = scheduledMissingSessionSurfacePresentation(frame);
+    setNotice(presentation.notice, presentation.scheduledMissing);
     renderCockpitStatic();
     drawMetadataReplayDynamic(app.playheadMs ?? surface.asOfMs, { announce: true });
   } catch (error) {
-    if (generation !== app.sessionSurfaceGeneration || controller.signal.aborted) return;
+    const failure = sessionSurfaceFailureDisposition(error, {
+      requestCurrent: generation === app.sessionSurfaceGeneration && app.mode === "replay",
+      aborted: controller.signal.aborted,
+      timedOut,
+    });
+    if (failure.cancelled) return;
     app.sessionSurfaceLoading = false;
     dom.cockpitLoading.hidden = true;
-    const reason = error instanceof Error ? error.message : "session_surface_fetch_failed";
-    setNotice(`Session cockpit unavailable at this keyframe: ${reason}`, true);
-    renderSessionSurfaceChrome("unavailable", reason);
+    app.sessionSurfaceLastError = failure.reason;
+    const clearFailedTarget = shouldClearSessionSurfaceAfterFailure(
+      key,
+      app.sessionSurfaceRenderedKey,
+    );
+    if (clearFailedTarget) {
+      app.sessionSurface = null;
+      app.sessionSurfaceRenderedKey = "";
+      app.sessionSurfaceKeyframeIndex = -1;
+      app.cockpitHover = null;
+      renderCockpitStatic();
+      renderCockpitAudit();
+    }
     scheduleSessionSurfaceRetry(key);
-    if (!app.sessionSurface) renderCockpitStatic();
+    setNotice(
+      `Session cockpit unavailable at this keyframe: ${failure.reason}. Retrying automatically.`,
+      true,
+    );
+    renderSessionSurfaceChrome("unavailable", failure.reason, { retrying: true });
+    if (!app.sessionSurface && !clearFailedTarget) renderCockpitStatic();
   } finally {
     window.clearTimeout(abortTimer);
     const ownsRequest = app.sessionSurfaceController === controller;
@@ -6981,11 +7112,17 @@ if (isObject(globalThis.__SPX_SPARK_TEST_HOOK__)) {
     legacyReplayFrameIndexFor,
     sessionSurfaceFrameIndexFor,
     sessionSurfaceRequestDecision,
+    sessionSurfaceFailureDisposition,
+    sessionSurfaceBlocksPlayback,
+    replaySessionSurfacePresentationPhase,
+    shouldClearSessionSurfaceAfterFailure,
     sessionPriceToY,
     sessionTimeToX,
     sessionXToTime,
     sessionYToPrice,
     shouldResetCockpitDomains,
+    scheduledMissingSessionSurfacePresentation,
+    renderSessionSurfaceChrome,
     cockpitCandleDisplayTime,
     cockpitCandleAtTime,
     clampSessionSurfacePlayback,
