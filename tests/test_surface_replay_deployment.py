@@ -28,7 +28,7 @@ def test_replay_service_is_unix_socket_only_and_resource_bounded() -> None:
     assert "ReadWritePaths=/srv/data/spx-spark/data/published/spxw-surface" in unit
 
 
-def test_post_close_timer_warms_catalog_without_materializing_frames() -> None:
+def test_post_close_timer_warms_catalog_and_compact_default_trend() -> None:
     timer = read("systemd/spx-spark-surface-replay-warm.timer")
     warmer = read("scripts/warm-spxw-surface-replay-catalog.sh")
 
@@ -36,6 +36,10 @@ def test_post_close_timer_warms_catalog_without_materializing_frames() -> None:
     assert "22:20:00 UTC" in timer
     assert "23:20:00 UTC" in timer
     assert "/timeline?step_minutes=5" in warmer
+    assert (
+        "/trend?role=front&weighting=oi_weighted&metric=signed_gamma"
+        in warmer
+    )
     assert "/frame?" not in warmer
     warm_unit = read("systemd/spx-spark-surface-replay-warm.service")
     assert "EnvironmentFile=" not in warm_unit

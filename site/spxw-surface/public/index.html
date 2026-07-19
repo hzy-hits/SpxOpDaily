@@ -33,49 +33,6 @@
         <small id="replay-banner-as-of">Select a bounded-PIT frame · received/source clock cutoff · availability timing is not proven</small>
       </section>
 
-      <section id="replay-console" class="replay-console" hidden aria-label="历史回放控制器">
-        <div class="replay-console-head">
-          <div>
-            <p class="panel-kicker">SESSION REPLAY</p>
-            <h2>Session timeline</h2>
-            <p id="replay-session-meta">正在读取可回放交易日</p>
-          </div>
-          <label class="replay-session-picker">
-            <span>Session date</span>
-            <select id="replay-session-filter" disabled>
-              <option value="">正在加载</option>
-            </select>
-          </label>
-        </div>
-        <div class="replay-transport">
-          <div class="replay-buttons" aria-label="回放播放控制">
-            <button id="replay-previous" type="button" disabled aria-label="上一帧" title="上一帧">←</button>
-            <button id="replay-play" type="button" class="replay-play" disabled aria-label="播放回放">▶ <span>播放</span></button>
-            <button id="replay-next" type="button" disabled aria-label="下一帧" title="下一帧">→</button>
-          </div>
-          <label class="replay-speed-picker">
-            <span>Speed</span>
-            <select id="replay-speed" disabled>
-              <option value="1">1×</option>
-              <option value="2">2×</option>
-              <option value="4">4×</option>
-            </select>
-          </label>
-          <div class="replay-time-output" aria-live="polite">
-            <strong id="replay-frame-time">—</strong>
-            <span id="replay-frame-position">0 / 0</span>
-          </div>
-        </div>
-        <label class="replay-timeline-label" for="replay-timeline">
-          <span>Available bounded-PIT frames</span>
-          <input id="replay-timeline" type="range" min="0" max="0" step="1" value="0" disabled>
-        </label>
-        <div class="replay-timeline-ends" aria-hidden="true">
-          <span id="replay-timeline-start">—</span>
-          <span id="replay-timeline-end">—</span>
-        </div>
-      </section>
-
       <section class="summary-grid" aria-label="快照摘要">
         <article class="summary-card">
           <span class="summary-label">数据状态</span>
@@ -133,36 +90,118 @@
         </label>
       </section>
 
-      <section class="panel heatmap-panel" aria-labelledby="surface-title">
-        <header class="panel-header">
+      <section id="trend-panel" class="panel trend-panel" aria-labelledby="trend-title" hidden>
+        <header class="panel-header trend-header">
           <div>
-            <p class="panel-kicker">SPXW CHAIN EXPOSURE PROXY</p>
-            <h2 id="surface-title">Spot × Time surface</h2>
+            <p class="panel-kicker">SPX INTRADAY · GAMMA PROXY REGIME</p>
+            <h2 id="trend-title">SPX intraday · Gamma proxy zones</h2>
+            <p id="trend-subtitle">等待历史 SPX 走势与 Gamma keyframes</p>
+          </div>
+          <div class="trend-head-state">
+            <div class="trend-readouts">
+              <strong id="trend-spot">SPX —</strong>
+              <span id="trend-regime">Γ proxy —</span>
+            </div>
+            <div id="trend-quality" class="quality-chip">AVAILABLE —</div>
+          </div>
+        </header>
+
+        <div id="trend-stage" class="trend-stage">
+          <canvas id="trend-base" aria-hidden="true"></canvas>
+          <canvas id="trend-overlay" role="img" tabindex="0" aria-label="SPX 盘中价格与 Gamma proxy 区间"></canvas>
+          <div id="trend-tooltip" class="chart-tooltip" hidden></div>
+          <div id="trend-empty" class="chart-empty">
+            <strong>暂无可用盘中走势</strong>
+            <span>仅在通过回放合同、时钟与自哈希验证后绘制。</span>
+          </div>
+        </div>
+
+        <div class="trend-legend" aria-label="SPX 盘中走势图例">
+          <span><i class="trend-line-price"></i>SPX observed</span>
+          <span><i class="legend-swatch positive"></i><b>+</b> Gamma proxy</span>
+          <span><i class="legend-swatch negative hatched"></i><b>−</b> Gamma proxy</span>
+          <span><i class="legend-line ridge"></i>Zero ridge</span>
+          <span><i class="legend-swatch missing"></i>Gap / unavailable</span>
+          <span id="trend-cadence" class="trend-cadence">Visual 30 fps · SPX observed ~1–2s · Gamma keyframes ~5m · hold-last · first-observation fixed axis · not market-data FPS</span>
+        </div>
+        <p id="trend-accessible-summary" class="sr-only" aria-live="polite"></p>
+
+        <section id="replay-console" class="replay-console trend-transport" hidden aria-label="历史回放控制器">
+          <div class="replay-console-head">
+            <div>
+              <p class="panel-kicker">SESSION REPLAY</p>
+              <h2>Continuous session timeline</h2>
+              <p id="replay-session-meta">正在读取可回放交易日</p>
+            </div>
+            <label class="replay-session-picker">
+              <span>Session date</span>
+              <select id="replay-session-filter" disabled>
+                <option value="">正在加载</option>
+              </select>
+            </label>
+          </div>
+          <div class="replay-transport">
+            <div class="replay-buttons" aria-label="回放播放控制">
+              <button id="replay-previous" type="button" disabled aria-label="上一个 Gamma keyframe" title="上一个 Gamma keyframe">←</button>
+              <button id="replay-play" type="button" class="replay-play" disabled aria-label="播放回放">▶ <span>播放</span></button>
+              <button id="replay-next" type="button" disabled aria-label="下一个 Gamma keyframe" title="下一个 Gamma keyframe">→</button>
+            </div>
+            <label class="replay-speed-picker">
+              <span>Speed</span>
+              <select id="replay-speed" disabled>
+                <option value="1">1×</option>
+                <option value="2">2×</option>
+                <option value="4">4×</option>
+              </select>
+            </label>
+            <div class="replay-time-output">
+              <strong id="replay-frame-time">—</strong>
+              <span id="replay-frame-position">Gamma 0 / 0</span>
+            </div>
+          </div>
+          <label class="replay-timeline-label" for="replay-timeline">
+            <span>Session clock · one-second seek</span>
+            <input id="replay-timeline" type="range" min="0" max="0" step="1" value="0" disabled>
+          </label>
+          <div class="replay-timeline-ends" aria-hidden="true">
+            <span id="replay-timeline-start">—</span>
+            <span id="replay-timeline-end">—</span>
+          </div>
+        </section>
+      </section>
+
+      <details id="scenario-diagnostic" class="panel scenario-panel">
+        <summary class="panel-header scenario-summary">
+          <div>
+            <p class="panel-kicker">SECONDARY DIAGNOSTIC · SPXW CHAIN EXPOSURE PROXY</p>
+            <h2 id="surface-title">Scenario surface · Spot × Forward time</h2>
             <p id="surface-subtitle">等待生产快照</p>
           </div>
           <div id="surface-quality" class="quality-chip">—</div>
-        </header>
+        </summary>
 
-        <div id="heatmap-stage" class="heatmap-stage">
-          <canvas id="heatmap" role="img" aria-label="SPXW 暴露热图"></canvas>
-          <div id="heatmap-tooltip" class="chart-tooltip" hidden></div>
-          <div id="heatmap-empty" class="chart-empty">
-            <strong>暂无可用曲面</strong>
-            <span>收到 ready 或 degraded 的有效矩形网格后才会绘制。</span>
+        <div class="scenario-body">
+          <div id="heatmap-stage" class="heatmap-stage">
+            <canvas id="heatmap" role="img" aria-label="SPXW 情景暴露热图"></canvas>
+            <div id="heatmap-tooltip" class="chart-tooltip" hidden></div>
+            <div id="heatmap-empty" class="chart-empty">
+              <strong>暂无可用曲面</strong>
+              <span>收到 ready 或 degraded 的有效矩形网格后才会绘制。</span>
+            </div>
           </div>
-        </div>
 
-        <div id="chart-legend" class="chart-legend" aria-label="图例">
-          <span id="legend-negative"><i class="legend-swatch negative"></i><b>−</b> 负暴露</span>
-          <span id="legend-neutral"><i class="legend-swatch neutral"></i><b>0</b> 中性</span>
-          <span id="legend-positive"><i class="legend-swatch positive"></i><b>+</b> 正暴露</span>
-          <span id="legend-ridge"><i class="legend-line ridge"></i>Zero ridge</span>
-          <span id="legend-peak"><i class="legend-marker peak"></i>正峰</span>
-          <span id="legend-trough"><i class="legend-marker trough"></i>负谷</span>
-          <span id="legend-domain" class="legend-domain">色域 —</span>
+          <div id="chart-legend" class="chart-legend" aria-label="图例">
+            <span id="legend-negative"><i class="legend-swatch negative"></i><b>−</b> 负暴露</span>
+            <span id="legend-neutral"><i class="legend-swatch neutral"></i><b>0</b> 中性</span>
+            <span id="legend-positive"><i class="legend-swatch positive"></i><b>+</b> 正暴露</span>
+            <span id="legend-ridge"><i class="legend-line ridge"></i>Zero ridge</span>
+            <span id="legend-peak"><i class="legend-marker peak"></i>正峰</span>
+            <span id="legend-trough"><i class="legend-marker trough"></i>负谷</span>
+            <span id="legend-domain" class="legend-domain">色域 —</span>
+          </div>
+          <p id="chart-accessible-summary" class="sr-only" aria-live="polite"></p>
         </div>
-        <p id="chart-accessible-summary" class="sr-only" aria-live="polite"></p>
-      </section>
+      </details>
 
       <section class="detail-grid">
         <article class="panel ladder-panel" aria-labelledby="ladder-title">

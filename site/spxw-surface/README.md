@@ -36,11 +36,23 @@ The endpoint maps only to the dedicated publisher output:
 
 `/srv/data/spx-spark/data/published/spxw-surface/snapshot.json`
 
-Replay uses three read-only API resources:
+Replay uses four read-only API resources:
 
 - `api/v1/replay/sessions`
 - `api/v1/replay/sessions/YYYY-MM-DD/timeline?step_minutes=5`
+- `api/v1/replay/sessions/YYYY-MM-DD/trend?role=front&weighting=oi_weighted&metric=signed_gamma`
 - `api/v1/replay/sessions/YYYY-MM-DD/frame?at=...`
+
+The compact trend artifact combines the observed intraday SPX path with the
+zero-forward-minute Gamma slice from each validated keyframe. The browser draws
+a smooth, approximately 30-fps playhead over those real observations; 30 fps is
+rendering frequency, not market-data frequency. SPX is held from the latest
+known observation and Gamma is held only through its declared validity window,
+with gaps shown explicitly. The separate spot-by-forward-time surface is a
+collapsed scenario diagnostic. The Y-axis uses a first-observation fixed window
+instead of future session extrema. Gamma intensity is normalized per keyframe,
+so its sign and location are comparable over time but color depth is not an
+absolute cross-time magnitude.
 
 The host service discovers sessions from Parquet, stores an atomic five-minute
 bucket catalog, and generates policy-v3 frames on demand. Actual
@@ -50,6 +62,7 @@ seconds need not be `00`. Derived state is stored under:
 ```text
 /srv/data/spx-spark/data/published/spxw-surface/replay-catalog/
 /srv/data/spx-spark/data/published/spxw-surface/replay-cache/policy=v3/lookback=*/projection=*/source=*/
+/srv/data/spx-spark/data/published/spxw-surface/trend-cache/
 ```
 
 The original checked Friday v2 replay remains at the exact archival endpoint
@@ -108,9 +121,8 @@ does not expose TCP; nginx connects through
 `published/spxw-surface/runtime/replay-api.sock`. Nginx mounts both the publish
 and runtime directories read-only. The timer checks the newest post-close-grace
 session catalog at 21:20, 22:20, and 23:20 UTC on weekdays (covering New York
-DST); it does not generate every frame or touch live strategy state. Frame URLs
-use private revalidation, and the browser keeps only a small in-memory cache of
-already hash-verified frames.
+DST), then materializes the default compact trend artifact. It does not touch
+live strategy state. Frame and trend URLs use private revalidation.
 
 For a non-production manual QA directory, set `SPXW_SURFACE_PUBLISH_DIR` and
 `SPXW_SURFACE_REPLAY_RUNTIME_DIR` before starting Compose. Test fixtures must

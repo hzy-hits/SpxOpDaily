@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 
@@ -104,9 +105,24 @@ def test_frontend_keeps_live_and_replay_clock_contracts_separate() -> None:
     assert 'throw new Error("missing_expected_replay_projection_policy_hash")' in app
     assert "function resetReplayNavigationState()" in app
     assert "const navigationLocked = app.replayCatalogLoading" in app
+    assert "app.frameLoading || !trend || gammaCount < 2" in app
+    assert "app.trendLoading || app.frameLoading" in app
     assert 'cache: "no-cache"' in app
     assert "verifiedReplayFrameCache" not in app
     assert "@media (max-width: 380px)" in read("public/styles.css")
+
+
+def test_frontend_strictly_normalizes_compact_trend_fixture() -> None:
+    subprocess.run(
+        [
+            "node",
+            str(ROOT / "tests" / "js" / "surface_trend_contract_test.js"),
+            str(SITE / "public" / "app.js"),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
 
 
 def test_memorable_entry_is_redirect_only_and_loopback_bound() -> None:

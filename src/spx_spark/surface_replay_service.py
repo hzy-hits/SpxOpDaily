@@ -51,6 +51,13 @@ from spx_spark.surface_replay_http import (
     parse_args,
     run,
 )
+from spx_spark.surface_replay_trend import (
+    ReplayTrendBusyError,
+    ReplayTrendCacheError,
+    TrendContext,
+    TrendSelector,
+    materialize_trend,
+)
 
 
 SERVICE_KIND = "spxw_surface_replay_catalog"
@@ -113,15 +120,15 @@ class ReplayCatalog:
         self.frame_minutes = int(frame_minutes)
         self.lookback_seconds = float(lookback_seconds)
         self._clock = clock or (lambda: datetime.now(tz=timezone.utc))
-        self.projection_policy_sha256 = _canonical_sha256(
-            _projection_policy(storage_settings)
-        )
+        self.projection_policy = _projection_policy(storage_settings)
+        self.projection_policy_sha256 = _canonical_sha256(self.projection_policy)
         self._locks_guard = threading.Lock()
         self._session_locks: dict[date, threading.Lock] = {}
         self._timeline_memory: dict[date, tuple[str, tuple[datetime, ...]]] = {}
         # Surface generation reads and hashes large Parquet partitions. Keep only
         # one uncached build active so concurrent browser prefetches cannot exhaust RAM.
         self._generation_lock = threading.BoundedSemaphore(value=1)
+        self._trend_lock = threading.BoundedSemaphore(value=1)
         self._scan_lock = threading.Lock()
 
     @property
@@ -688,6 +695,57 @@ class ReplayCatalog:
             )
         return self._ensure_materialized_frame(requested)
 
+    def trend(
+        self,
+        session_date: date,
+        *,
+        role: str,
+        weighting: str,
+        metric: str,
+    ) -> dict[str, object]:
+        selector = TrendSelector(role=role, weighting=weighting, metric=metric)
+        session = self.get_session(session_date)
+        frames = self.viable_frames(session_date)
+        source_paths = self._relevant_paths(session)
+        source_fingerprint = self._source_fingerprint(source_paths)
+        context = TrendContext(
+            data_root=self.data_root,
+            session_date=session_date,
+            open_at=session.open_at,
+            close_at=session.close_at,
+            close_grace_elapsed_at=self._close_grace_elapsed_at(session),
+            close_grace_policy=SESSION_CLOSE_GRACE_POLICY,
+            close_grace_seconds=SESSION_CLOSE_GRACE_SECONDS,
+            frame_minutes=self.frame_minutes,
+            lookback_seconds=self.lookback_seconds,
+            timeline_policy_version=TIMELINE_POLICY_VERSION,
+            projection_policy=self.projection_policy,
+            projection_policy_sha256=self.projection_policy_sha256,
+            source_paths=source_paths,
+            source_fingerprint=source_fingerprint,
+            frames=frames,
+        )
+
+        def current_source_fingerprint() -> str:
+            current_session = self.get_session(session_date)
+            return self._source_fingerprint(self._relevant_paths(current_session))
+
+        if not self._trend_lock.acquire(timeout=GENERATION_LOCK_TIMEOUT_SECONDS):
+            raise ReplayBusyError("replay_trend_generation_busy")
+        try:
+            return materialize_trend(
+                context=context,
+                selector=selector,
+                frame_loader=lambda requested: self.frame(session_date, requested),
+                current_source_fingerprint=current_source_fingerprint,
+            )
+        except ReplayTrendBusyError as exc:
+            raise ReplayBusyError("replay_trend_generation_busy") from exc
+        except ReplayTrendCacheError as exc:
+            raise ReplayCacheError(str(exc)) from exc
+        finally:
+            self._trend_lock.release()
+
     def sessions_payload(self) -> dict[str, object]:
         sessions = self.discover_sessions()
         rows: list[dict[str, object]] = []
@@ -765,6 +823,7 @@ class ReplayCatalog:
         frames = self.viable_frames(session_date)
         source_paths = self._relevant_paths(session)
         source_fingerprint = self._source_fingerprint(source_paths)
+        timeline_sha256 = _canonical_sha256([replay_id(value) for value in frames])
         session_date_text = session_date.isoformat()
         frame_rows: list[dict[str, object]] = []
         for requested in frames:
@@ -807,6 +866,8 @@ class ReplayCatalog:
             "frame_validation": "known_clock_validation_on_frame_request",
             "timeline_selection": "latest_coverage_candidate_per_bucket",
             "projection_policy_sha256": self.projection_policy_sha256,
+            "source_fingerprint": source_fingerprint,
+            "timeline_sha256": timeline_sha256,
             "session_close_grace_elapsed": True,
             "session_close_grace_elapsed_at": (
                 self._close_grace_elapsed_at(session).isoformat()

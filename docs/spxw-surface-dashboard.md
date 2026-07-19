@@ -48,13 +48,33 @@ Historical replay is a separate contract and browser mode. A frame has
 The UI repeats `HISTORICAL REPLAY`, the exact ET/UTC cutoff, `Frozen`, `Not live`,
 and `Bounded PIT` in text so it cannot be confused with a current lease.
 
-`/replay` is a session player rather than one static Friday image. It discovers
-trading dates from the normalized Schwab Parquet lake, indexes five-minute
-session buckets, and chooses the last complete observed chain cutoff in each
-bucket. Cutoffs therefore carry their real seconds and are not interpolated or
-forced onto round five-minute timestamps. The player provides a date selector,
-timeline, previous/next controls, and 1x/2x/4x playback while preserving the
-selected front/next expiry role.
+`/replay` is a session player rather than one static Friday image. Its primary
+chart uses actual session time on the horizontal axis and absolute SPX price on
+the vertical axis, with the observed SPX path overlaid on positive/negative
+Gamma-proxy bands. The older spot-by-forward-time surface remains available as
+a collapsed scenario diagnostic; it is not presented as the historical SPX
+chart.
+
+The browser renders the playhead at approximately 30 visual frames per second,
+but it does not manufacture 30-fps market observations. SPX readouts use the
+latest observation known at the playhead (typically one to two seconds apart),
+while Gamma uses the latest valid five-minute keyframe. Missing or expired
+Gamma intervals remain visibly blank instead of being interpolated. One compact
+trend artifact is loaded before playback, so animation does not fetch a new
+surface frame on every visual frame.
+
+The replay Y-axis uses a fixed window derived from the first known SPX
+observation rather than the full-session high/low, so future prices do not set
+the scale. A move beyond that window is clipped in this version. Gamma color
+intensity is normalized independently inside each keyframe: sign and zones are
+comparable over time, but color depth is not an absolute cross-time magnitude.
+
+The player discovers trading dates from the normalized Schwab Parquet lake,
+indexes five-minute session buckets, and chooses the last complete observed
+chain cutoff in each bucket. Cutoffs therefore carry their real seconds and are
+not interpolated or forced onto round five-minute timestamps. The player
+provides a date selector, timeline, previous/next controls, and 1x/2x/4x
+playback while preserving the selected front/next expiry role.
 
 Every frame reads the preceding 15 seconds and requires all available
 `received_at`, `source_at`, `quote_time`, `trade_time`, and `last_update_at`
@@ -99,6 +119,7 @@ publish directory:
 /srv/data/spx-spark/data/published/spxw-surface/replays/2026-07-17T183500Z.json
 /srv/data/spx-spark/data/published/spxw-surface/replay-catalog/session=YYYY-MM-DD/timeline-5m.json
 /srv/data/spx-spark/data/published/spxw-surface/replay-cache/policy=v3/lookback=*/projection=*/source=*/*.json
+/srv/data/spx-spark/data/published/spxw-surface/trend-cache/policy=v1/frame=5m/lookback=15s/projection=*/source=*/timeline=*/role=*/weighting=*/metric=*/*.json
 /srv/data/spx-spark/data/published/spxw-surface/runtime/replay-api.sock
 ```
 
@@ -108,10 +129,11 @@ persistent; process exit releases `flock`, so a killed worker cannot leave a
 permanent stale lock. Nginx mounts the runtime
 directory read-only, proxies only `/api/v1/replay/`, and exposes no new TCP
 listener. It also serves the exact live snapshot and archived v2 frame. The
-weekday post-close timer warms only the latest timeline manifest; individual
-surface frames remain on-demand. Sessions are hidden until a two-hour
-post-close grace period has elapsed. That delay reduces compaction races but is
-not a compactor-completion marker, so the API explicitly publishes
+weekday post-close timer warms the latest timeline manifest and the default
+front-expiry, OI-weighted signed-Gamma trend artifact. Alternate selectors and
+scenario-diagnostic frames remain on-demand. Sessions are hidden until a
+two-hour post-close grace period has elapsed. That delay reduces compaction
+races but is not a compactor-completion marker, so the API explicitly publishes
 `data_finalization_proven=false` and never calls the source finalized. The
 sidecar shares the code-server network namespace, so the browser entry remains
 behind code-server authentication:

@@ -28,6 +28,7 @@ from spx_spark.surface_dashboard_replay import (
     MAX_LOOKBACK_SECONDS,
     ReplaySourceError,
 )
+from spx_spark.surface_replay_trend import TrendSelector
 
 
 LOGGER = logging.getLogger(__name__)
@@ -84,6 +85,15 @@ class ReplayCatalogProtocol(Protocol):
         self,
         session_date: date,
         requested: datetime,
+    ) -> dict[str, object]: ...
+
+    def trend(
+        self,
+        session_date: date,
+        *,
+        role: str,
+        weighting: str,
+        metric: str,
     ) -> dict[str, object]: ...
 
 
@@ -244,6 +254,32 @@ class ReplayAPI:
                 self.catalog.timeline_payload(session_date),
                 (("Cache-Control", "private, max-age=30"),),
             )
+        trend_match = re.fullmatch(
+            r"/api/v1/replay/sessions/(\d{4}-\d{2}-\d{2})/trend",
+            path,
+        )
+        if trend_match:
+            values = self._single_query(
+                query,
+                required=frozenset({"role", "weighting", "metric"}),
+                allowed=frozenset({"role", "weighting", "metric"}),
+            )
+            try:
+                selector = TrendSelector(
+                    role=values["role"],
+                    weighting=values["weighting"],
+                    metric=values["metric"],
+                )
+            except ValueError as exc:
+                raise ReplayRequestError("invalid_trend_selector") from exc
+            session_date = _parse_session_date(trend_match.group(1))
+            payload = self.catalog.trend(
+                session_date,
+                role=selector.role,
+                weighting=selector.weighting,
+                metric=selector.metric,
+            )
+            return self._artifact_response(payload)
         frame_query_match = re.fullmatch(
             r"/api/v1/replay/sessions/(\d{4}-\d{2}-\d{2})/frame",
             path,
@@ -273,6 +309,10 @@ class ReplayAPI:
         requested: datetime,
     ) -> APIResponse:
         payload = self.catalog.frame(session_date, requested)
+        return self._artifact_response(payload)
+
+    @staticmethod
+    def _artifact_response(payload: dict[str, object]) -> APIResponse:
         artifact_hash = str(payload["artifact_sha256"])
         return APIResponse(
             HTTPStatus.OK,

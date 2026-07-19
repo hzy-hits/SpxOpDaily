@@ -287,6 +287,10 @@ def test_api_supports_session_timeline_and_both_frame_routes(
         "known_clock_validation_on_frame_request"
     )
     assert timeline.payload["projection_policy_sha256"] == catalog.projection_policy_sha256
+    assert len(timeline.payload["source_fingerprint"]) == 64
+    assert timeline.payload["timeline_sha256"] == service_module._canonical_sha256(
+        ["2026-07-17T182958Z"]
+    )
     assert timeline.payload["frames"][0]["projection_policy_sha256"] == (
         catalog.projection_policy_sha256
     )

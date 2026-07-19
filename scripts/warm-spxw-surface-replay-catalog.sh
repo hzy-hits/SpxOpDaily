@@ -32,4 +32,9 @@ curl --silent --show-error --fail --max-time 90 \
   --unix-socket "$SOCKET_PATH" \
   "http://localhost/api/v1/replay/sessions/$session_date/timeline?step_minutes=5" \
   >/dev/null
-printf 'warmed replay catalog for %s\n' "$session_date"
+
+curl --silent --show-error --fail --max-time 300 \
+  --unix-socket "$SOCKET_PATH" \
+  "http://localhost/api/v1/replay/sessions/$session_date/trend?role=front&weighting=oi_weighted&metric=signed_gamma" \
+  >/dev/null
+printf 'warmed replay catalog and trend artifact for %s\n' "$session_date"

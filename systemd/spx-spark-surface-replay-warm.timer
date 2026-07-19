@@ -1,5 +1,5 @@
 [Unit]
-Description=Warm SPXW Session Replay after the RTH lake is compacted
+Description=Warm SPXW Session Replay trend after the RTH lake is compacted
 
 [Timer]
 OnCalendar=Mon..Fri *-*-* 21:20:00 UTC
