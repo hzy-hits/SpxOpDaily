@@ -10,7 +10,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from spx_spark.features.exposure_surface import METRIC_UNITS
+from spx_spark.features.exposure_surface import (
+    METRIC_UNITS,
+    VECTORIZED_CALCULATION_ENGINE,
+)
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 from spx_spark.marketdata import as_utc
 from spx_spark.state_io import atomic_write_json_secure, exclusive_state_lock
@@ -136,7 +139,7 @@ def session_surface_cache_path(
         / "published"
         / "spxw-surface"
         / "session-surface-cache"
-        / "policy=v2"
+        / f"policy={SESSION_SURFACE_POLICY_VERSION.rsplit('.', maxsplit=1)[-1]}"
         / f"contract={SESSION_SURFACE_CACHE_VERSION}"
         / f"frame={context.frame_minutes}m"
         / f"bucket={selector.bucket_minutes}m"
@@ -378,6 +381,10 @@ def build_session_surface_artifact(
             "frame_policy_version": REPLAY_POLICY_VERSION,
             "timeline_policy_version": context.timeline_policy_version,
             "session_surface_policy_version": SESSION_SURFACE_POLICY_VERSION,
+            "calculation_engine": VECTORIZED_CALCULATION_ENGINE,
+            "numeric_reduction": (
+                "extended_precision_or_fsum_signed_float64_gross"
+            ),
             "projection_policy": dict(context.projection_policy),
             "projection_policy_sha256": context.projection_policy_sha256,
             "timeline_sha256": context.timeline_sha256,
@@ -491,6 +498,9 @@ def load_cached_session_surface(
         != context.projection_policy_sha256
         or provenance.get("lookahead_rows_selected") != 0
         or provenance.get("point_in_time_confidence") != "bounded_not_proven"
+        or provenance.get("calculation_engine") != VECTORIZED_CALCULATION_ENGINE
+        or provenance.get("numeric_reduction")
+        != "extended_precision_or_fsum_signed_float64_gross"
     ):
         raise ReplaySessionSurfaceCacheError("session_surface_cache_provenance_invalid")
     expected_hashes = provenance.get("parquet_file_sha256")

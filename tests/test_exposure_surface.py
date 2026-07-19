@@ -9,8 +9,10 @@ import pytest
 import spx_spark.features.exposure_surface as exposure_surface_module
 from spx_spark.analytics.greeks.black_scholes import bs_gamma
 from spx_spark.features.exposure_surface import (
+    SCALAR_CALCULATION_ENGINE,
     SurfaceContract,
     SurfaceGridConfig,
+    VECTORIZED_CALCULATION_ENGINE,
     build_exposure_surface,
 )
 
@@ -46,6 +48,77 @@ def crossing_contracts() -> tuple[SurfaceContract, ...]:
         contract(105.0, "C", oi=1000.0, volume=100.0),
         contract(105.0, "P", oi=100.0, volume=1000.0),
     )
+
+
+def test_vectorized_surface_metrics_preserve_exact_call_put_cancellation() -> None:
+    rows: list[SurfaceContract] = []
+    for right in ("C", "P"):
+        for index in range(64):
+            rows.append(
+                contract(
+                    80.0 + index * 40.0 / 63.0,
+                    right,
+                    iv=0.05 + (index % 17) * 0.10,
+                    oi=float(10 ** (index % 7)),
+                    volume=float(10 ** (index % 7)),
+                )
+            )
+    prepared, coverages, _qualities, _warnings = exposure_surface_module._prepared_contracts(
+        tuple(rows),
+        expiry=EXPIRY,
+        config=SurfaceGridConfig(min_usable_contracts=1, min_coverage_ratio=0.0),
+    )
+    kwargs = {
+        "spots": (95.0, 100.0, 105.0),
+        "tau_seconds": 1_800.0,
+        "coverages": coverages,
+        "reference_spot": 100.0,
+        "reference_tau_seconds": 1_800.0,
+    }
+
+    scalar, _ = exposure_surface_module._surface_metrics_scalar(
+        prepared,
+        reference_cache={},
+        **kwargs,
+    )
+    vectorized, _ = exposure_surface_module._surface_metrics_vectorized(
+        prepared,
+        reference_cache={},
+        **kwargs,
+    )
+
+    for weighting in ("oi_weighted", "volume_weighted"):
+        for metric in ("signed_gamma", "charm", "vanna"):
+            expected = scalar[weighting].to_dict()[metric]
+            assert expected == (0.0, 0.0, 0.0)
+            assert vectorized[weighting].to_dict()[metric] == expected
+
+
+def test_vectorized_stable_sum_preserves_small_real_imbalance() -> None:
+    rows = (
+        contract(100.0, "C", oi=1_000_000.0, volume=1_000_000.0),
+        contract(100.0, "P", oi=999_999.999999, volume=999_999.999999),
+    )
+    prepared, coverages, _qualities, _warnings = exposure_surface_module._prepared_contracts(
+        rows,
+        expiry=EXPIRY,
+        config=SurfaceGridConfig(min_usable_contracts=1, min_coverage_ratio=0.0),
+    )
+    vectorized, failed = exposure_surface_module._surface_metrics_vectorized(
+        prepared,
+        spots=(100.0,),
+        tau_seconds=1_800.0,
+        coverages=coverages,
+        reference_spot=100.0,
+        reference_tau_seconds=1_800.0,
+        reference_cache={},
+    )
+
+    assert failed == {"oi_weighted": False, "volume_weighted": False}
+    for weighting in ("oi_weighted", "volume_weighted"):
+        for metric in ("signed_gamma", "charm", "vanna"):
+            value = vectorized[weighting].to_dict()[metric][0]
+            assert value is not None and value != 0.0
 
 
 def test_builds_rectangular_surface_with_zero_ridge_and_global_extrema() -> None:
@@ -118,6 +191,171 @@ def test_oi_and_volume_weightings_are_independent() -> None:
     assert oi[0] < 0 < volume[0]
     assert oi[-1] is not None and volume[-1] is not None
     assert volume[-1] < 0 < oi[-1]
+
+
+def test_vectorized_kernel_matches_scalar_surface_and_reference_ladder() -> None:
+    kwargs = {
+        "spot": 100.0,
+        "as_of": AS_OF,
+        "expiry_close": EXPIRY_CLOSE,
+        "spot_points": (90.0, 95.0, 100.0, 105.0, 110.0),
+        "time_offsets_minutes": (0.0, 15.0, 30.0, 60.0),
+    }
+    scalar = build_exposure_surface(
+        crossing_contracts(),
+        **kwargs,
+        _calculation_engine=SCALAR_CALCULATION_ENGINE,
+    )
+    vectorized = build_exposure_surface(
+        crossing_contracts(),
+        **kwargs,
+        _calculation_engine=VECTORIZED_CALCULATION_ENGINE,
+    )
+
+    assert vectorized.quality == scalar.quality
+    assert vectorized.warnings == scalar.warnings
+    assert len(vectorized.time_slices) == len(scalar.time_slices)
+    for actual_slice, expected_slice in zip(
+        vectorized.time_slices,
+        scalar.time_slices,
+        strict=True,
+    ):
+        assert actual_slice.minutes_forward == expected_slice.minutes_forward
+        assert actual_slice.tau_seconds == expected_slice.tau_seconds
+        assert actual_slice.quality == expected_slice.quality
+        assert actual_slice.warnings == expected_slice.warnings
+        for weighting in ("oi_weighted", "volume_weighted"):
+            actual = actual_slice.weightings[weighting]
+            expected = expected_slice.weightings[weighting]
+            assert actual.coverage == expected.coverage
+            assert actual.quality == expected.quality
+            assert actual.warnings == expected.warnings
+            for metric, actual_values in actual.metrics.to_dict().items():
+                assert actual_values == pytest.approx(
+                    expected.metrics.to_dict()[metric],
+                    rel=2e-13,
+                    abs=1e-9,
+                )
+            assert actual.zero_ridge_spot == pytest.approx(
+                expected.zero_ridge_spot,
+                rel=2e-13,
+                abs=1e-10,
+            )
+
+    assert tuple(row.strike for row in vectorized.strike_ladder) == tuple(
+        row.strike for row in scalar.strike_ladder
+    )
+    for actual_row, expected_row in zip(
+        vectorized.strike_ladder,
+        scalar.strike_ladder,
+        strict=True,
+    ):
+        assert actual_row.call == expected_row.call
+        assert actual_row.put == expected_row.put
+        assert actual_row.quality == expected_row.quality
+        assert actual_row.warnings == expected_row.warnings
+        for weighting in ("oi_weighted", "volume_weighted"):
+            actual = actual_row.weightings[weighting]
+            expected = expected_row.weightings[weighting]
+            assert actual.quality == expected.quality
+            assert actual.warnings == expected.warnings
+            assert actual.metrics.signed_gamma == pytest.approx(
+                expected.metrics.signed_gamma,
+                rel=2e-13,
+                abs=1e-9,
+            )
+            assert actual.metrics.gross_gamma == pytest.approx(
+                expected.metrics.gross_gamma,
+                rel=2e-13,
+                abs=1e-9,
+            )
+            assert actual.metrics.charm == pytest.approx(
+                expected.metrics.charm,
+                rel=2e-13,
+                abs=1e-12,
+            )
+            assert actual.metrics.vanna == pytest.approx(
+                expected.metrics.vanna,
+                rel=2e-13,
+                abs=1e-12,
+            )
+
+
+def test_vectorized_kernel_preserves_zero_missing_and_independent_weightings() -> None:
+    rows = (
+        contract(95.0, "C", oi=0.0, volume=25.0),
+        contract(105.0, "P", oi=0.0, volume=None),
+    )
+    surface = build_exposure_surface(
+        rows,
+        spot=100.0,
+        as_of=AS_OF,
+        expiry_close=EXPIRY_CLOSE,
+        spot_points=(95.0, 100.0, 105.0),
+        time_offsets_minutes=(0.0,),
+        config=SurfaceGridConfig(min_usable_contracts=1),
+        _calculation_engine=VECTORIZED_CALCULATION_ENGINE,
+    )
+
+    oi = surface.time_slices[0].weightings["oi_weighted"]
+    volume = surface.time_slices[0].weightings["volume_weighted"]
+    assert oi.coverage.usable_contracts == 2
+    assert oi.metrics.signed_gamma == (0.0, 0.0, 0.0)
+    assert oi.metrics.gross_gamma == (0.0, 0.0, 0.0)
+    assert volume.coverage.usable_contracts == 1
+    assert all(value is not None and value > 0.0 for value in volume.metrics.signed_gamma)
+    assert all(value is not None and value > 0.0 for value in volume.metrics.gross_gamma)
+
+
+def test_vectorized_kernel_fails_closed_on_nonfinite_exposure_math() -> None:
+    surface = build_exposure_surface(
+        (contract(5e-324, "C", iv=10.0, oi=10_000_000.0, volume=0.0),),
+        spot=1e308,
+        as_of=AS_OF,
+        expiry_close=EXPIRY_CLOSE,
+        spot_points=(1e308,),
+        time_offsets_minutes=(0.0,),
+        config=SurfaceGridConfig(min_usable_contracts=1, min_coverage_ratio=0.0),
+        _calculation_engine=VECTORIZED_CALCULATION_ENGINE,
+    )
+
+    oi = surface.time_slices[0].weightings["oi_weighted"]
+    assert oi.quality == "unavailable"
+    assert oi.metrics.signed_gamma == (None,)
+    assert "calculation_failed" in oi.warnings
+    volume = surface.time_slices[0].weightings["volume_weighted"]
+    assert volume.quality == "ok"
+    assert volume.metrics.signed_gamma == (0.0,)
+    assert surface.strike_ladder[0].weightings["oi_weighted"].quality == "unavailable"
+    volume_ladder = surface.strike_ladder[0].weightings["volume_weighted"]
+    assert volume_ladder.quality == "degraded"
+    assert volume_ladder.metrics.signed_gamma == 0.0
+    json.dumps(surface.to_dict(), allow_nan=False)
+
+
+def test_vectorized_reference_cell_avoids_scalar_recalculation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def unexpected_scalar(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("reference strike ladder recalculated scalar Greeks")
+
+    monkeypatch.setattr(
+        exposure_surface_module,
+        "_contract_exposure_bases",
+        unexpected_scalar,
+    )
+    surface = build_exposure_surface(
+        crossing_contracts(),
+        spot=100.0,
+        as_of=AS_OF,
+        expiry_close=EXPIRY_CLOSE,
+        spot_points=(95.0, 100.0, 105.0),
+        time_offsets_minutes=(0.0, 30.0),
+        _calculation_engine=VECTORIZED_CALCULATION_ENGINE,
+    )
+
+    assert surface.quality == "ok"
+    assert all(row.quality == "ok" for row in surface.strike_ladder)
 
 
 def test_gamma_units_and_call_put_sign_convention_match_existing_kernel() -> None:

@@ -43,6 +43,13 @@ from spx_spark.features.exposure_surface_models import (
     SurfaceWeightingSlice,
     _PreparedContract,
 )
+from spx_spark.features.exposure_surface_vectorized import (
+    surface_metrics_vectorized as _surface_metrics_vectorized_impl,
+)
+
+
+SCALAR_CALCULATION_ENGINE = "python_math_fsum.v1"
+VECTORIZED_CALCULATION_ENGINE = "numpy_vectorized_bs_stable_sum.v1"
 
 
 def _aware(value: datetime) -> bool:
@@ -285,7 +292,7 @@ def _contract_exposure_bases(
     return gamma_base, charm_base, vanna_base
 
 
-def _surface_metrics(
+def _surface_metrics_scalar(
     contracts: tuple[_PreparedContract, ...],
     *,
     spots: tuple[float, ...],
@@ -391,6 +398,39 @@ def _surface_metrics(
         for weighting, values in rows.items()
     }
     return metrics, calculation_failed
+
+
+def _surface_metrics_vectorized(
+    contracts: tuple[_PreparedContract, ...],
+    *,
+    spots: tuple[float, ...],
+    tau_seconds: float,
+    coverages: Mapping[str, SurfaceCoverage],
+    reference_spot: float,
+    reference_tau_seconds: float,
+    reference_cache: dict[_PreparedContract, tuple[float, float, float] | None],
+) -> tuple[Mapping[str, SurfaceMetrics], Mapping[str, bool]]:
+    """Dispatch the replay-only optimized kernel after the expiry guard."""
+
+    if tau_seconds <= 0.0:
+        return _surface_metrics_scalar(
+            contracts,
+            spots=spots,
+            tau_seconds=tau_seconds,
+            coverages=coverages,
+            reference_spot=reference_spot,
+            reference_tau_seconds=reference_tau_seconds,
+            reference_cache=reference_cache,
+        )
+    return _surface_metrics_vectorized_impl(
+        contracts,
+        spots=spots,
+        tau_seconds=tau_seconds,
+        coverages=coverages,
+        reference_spot=reference_spot,
+        reference_tau_seconds=reference_tau_seconds,
+        reference_cache=reference_cache,
+    )
 
 
 def _nearest_zero_ridge(
@@ -688,6 +728,7 @@ def build_exposure_surface(
     spot_points: Iterable[float] | None = None,
     time_offsets_minutes: Iterable[float] | None = None,
     config: SurfaceGridConfig | None = None,
+    _calculation_engine: str = SCALAR_CALCULATION_ENGINE,
 ) -> ExposureSurface:
     """Build a bounded time-by-spot surface for one exact SPXW expiry.
 
@@ -696,6 +737,16 @@ def build_exposure_surface(
     delta-dollar proxy scale (Greek x weight x 100 x spot x 1%).
     """
 
+    if _calculation_engine not in {
+        SCALAR_CALCULATION_ENGINE,
+        VECTORIZED_CALCULATION_ENGINE,
+    }:
+        raise ValueError("unsupported exposure-surface calculation engine")
+    metrics_builder = (
+        _surface_metrics_vectorized
+        if _calculation_engine == VECTORIZED_CALCULATION_ENGINE
+        else _surface_metrics_scalar
+    )
     resolved_config = config or SurfaceGridConfig()
     if not _aware(as_of) or not _aware(expiry_close):
         raise ValueError("as_of and expiry_close must be timezone-aware")
@@ -788,7 +839,7 @@ def build_exposure_surface(
             )
             continue
 
-        metrics_by_weighting, calculation_failed = _surface_metrics(
+        metrics_by_weighting, calculation_failed = metrics_builder(
             prepared,
             spots=spot_grid,
             tau_seconds=tau_seconds,
@@ -887,6 +938,7 @@ __all__ = (
     "METRIC_UNITS",
     "MODEL",
     "SCHEMA_VERSION",
+    "SCALAR_CALCULATION_ENGINE",
     "SIGN_CONVENTION",
     "STRIKE_LADDER_BASIS",
     "SurfaceContract",
@@ -900,6 +952,7 @@ __all__ = (
     "SurfaceStrikeWeighting",
     "SurfaceTimeSlice",
     "SurfaceWeightingSlice",
+    "VECTORIZED_CALCULATION_ENGINE",
     "WEIGHTING_SEMANTICS",
     "build_exposure_surface",
 )

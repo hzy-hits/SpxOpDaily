@@ -494,11 +494,18 @@ def test_completed_candle_rejects_unique_event_known_after_bucket_end(
     assert before_completed["low"] == 7459.0
 
 
-def test_session_surface_cache_contract_bumped_for_frozen_candles(
+def test_session_surface_cache_contract_tracks_vectorized_kernel(
     catalog: ReplayCatalog,
 ) -> None:
-    assert SESSION_SURFACE_CACHE_VERSION == 5
-    _surface(catalog)
+    assert SESSION_SURFACE_CACHE_VERSION == 6
+    payload = _surface(catalog)
+    assert payload["policy_version"] == "spxw_session_surface.v3"
+    assert payload["provenance"]["calculation_engine"] == (
+        "numpy_vectorized_bs_stable_sum.v1"
+    )
+    assert payload["provenance"]["numeric_reduction"] == (
+        "extended_precision_or_fsum_signed_float64_gross"
+    )
     cache_files = list(
         (
             catalog.data_root
@@ -508,7 +515,39 @@ def test_session_surface_cache_contract_bumped_for_frozen_candles(
         ).rglob("2026-07-17T183000Z.json")
     )
     assert len(cache_files) == 1
-    assert "contract=5" in cache_files[0].parts
+    assert "policy=v3" in cache_files[0].parts
+    assert "contract=6" in cache_files[0].parts
+
+
+def test_session_surface_cache_rejects_old_numeric_engine(
+    catalog: ReplayCatalog,
+) -> None:
+    _surface(catalog)
+    matches = list(
+        (
+            catalog.data_root
+            / "published"
+            / "spxw-surface"
+            / "session-surface-cache"
+        ).rglob("2026-07-17T183000Z.json")
+    )
+    assert len(matches) == 1
+    path = matches[0]
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["provenance"]["calculation_engine"] = "python_math_fsum.v1"
+    payload.pop("artifact_sha256")
+    payload["artifact_sha256"] = replay_module._canonical_sha256(payload)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ReplayCacheError, match="session_surface_cache_provenance_invalid"):
+        catalog.session_surface(
+            AS_OF.date(),
+            at=AS_OF,
+            role="front",
+            weighting="oi_weighted",
+            bucket_minutes=5,
+            price_step=5.0,
+        )
 
 
 def test_session_surface_supports_bounded_10m_and_2_5_point_grid(

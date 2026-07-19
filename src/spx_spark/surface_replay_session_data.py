@@ -12,6 +12,7 @@ import duckdb
 from spx_spark.features.exposure_surface import (
     SurfaceContract,
     SurfaceGridConfig,
+    VECTORIZED_CALCULATION_ENGINE,
     build_exposure_surface,
 )
 from spx_spark.ibkr.atm_reference import BasisState
@@ -253,6 +254,7 @@ def _kernel_columns_uncached(
             spot_points=price_grid,
             time_offsets_minutes=chunk,
             config=config,
+            _calculation_engine=VECTORIZED_CALCULATION_ENGINE,
         )
         for time_slice in surface.time_slices:
             weighting_slice = time_slice.weightings[weighting]

@@ -1,5 +1,5 @@
 version = 1
-revision = 2
+revision = 3
 requires-python = ">=3.12"
 
 [[package]]
@@ -741,6 +741,7 @@ source = { editable = "." }
 dependencies = [
     { name = "duckdb" },
     { name = "ib-async" },
+    { name = "numpy" },
     { name = "pytz" },
     { name = "pyyaml" },
     { name = "schwab-py" },
@@ -756,6 +757,7 @@ dev = [
 requires-dist = [
     { name = "duckdb", specifier = ">=1.4,<2" },
     { name = "ib-async", specifier = ">=2.0.0" },
+    { name = "numpy", specifier = ">=2.0,<3" },
     { name = "pytz", specifier = ">=2025.2" },
     { name = "pyyaml", specifier = ">=6.0,<7" },
     { name = "schwab-py", specifier = "==1.5.1" },
