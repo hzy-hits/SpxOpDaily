@@ -142,6 +142,7 @@ signed_flow_available=false
 - 最终 surface cutoff 与 playhead 同为 12:29:49 ET，无 loading/pending
 - JS heap 强制 GC：1,708,790 → 1,954,092 bytes，保留增量约 0.23 MiB
 - Console 与 page errors 均为空
+- 73 个默认 cutoff 全量预热并完成浏览器回放后，Replay 服务 RSS 约 107.2 MiB、峰值 109.1 MiB；systemd `MemoryHigh=1 GiB`、`MemoryMax=2 GiB`
 
 API 实测：
 
