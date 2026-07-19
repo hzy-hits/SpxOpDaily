@@ -239,6 +239,12 @@ def validate_live_snapshot(payload: Mapping[str, Any]) -> ValidatedLiveInput:
         or not created_at < valid_until
     ):
         raise LiveSnapshotError("live_snapshot_lease_invalid")
+    session = mapping(payload.get("session"), code="live_snapshot_session_invalid")
+    # A valid publisher artifact outside RTH is an expected waiting state, not
+    # malformed input.  Stop before requiring an RTH calendar, direct SPX, or
+    # option frames; none of those should exist on a weekend/holiday snapshot.
+    if session.get("rth_open") is not True or session.get("state") != "rth":
+        raise LiveSnapshotError("live_snapshot_not_rth")
     source_session = DEFAULT_MARKET_CALENDAR.session(snapshot_as_of.astimezone(ET).date())
     if (
         source_session is None
@@ -246,9 +252,6 @@ def validate_live_snapshot(payload: Mapping[str, Any]) -> ValidatedLiveInput:
         or snapshot_as_of.astimezone(ET).date() != created_at.astimezone(ET).date()
     ):
         raise LiveSnapshotError("live_snapshot_session_clock_invalid")
-    session = mapping(payload.get("session"), code="live_snapshot_session_invalid")
-    if session.get("rth_open") is not True or session.get("state") != "rth":
-        raise LiveSnapshotError("live_snapshot_not_rth")
     underlier = mapping(payload.get("underlier"), code="live_underlier_invalid")
     spot = finite(underlier.get("price"))
     spot_provider = str(underlier.get("provider") or "").strip()

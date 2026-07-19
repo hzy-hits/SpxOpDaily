@@ -349,6 +349,39 @@ def test_poll_stamps_validation_completion_and_cannot_backfill_crossed_boundary(
     )
 
 
+def test_closed_weekend_snapshot_is_waiting_not_invalid(tmp_path: Path) -> None:
+    sunday = datetime(2026, 7, 19, 13, 30, tzinfo=UTC)
+    clock = MutableClock(sunday)
+    accumulator = _accumulator(tmp_path, clock)
+    payload = _publisher_snapshot(
+        source_as_of=sunday,
+        valid_until=sunday + timedelta(seconds=30),
+    )
+    payload["session"] = {
+        "state": "closed",
+        "rth_open": False,
+        "globex_open": False,
+        "spx_gth_open": False,
+        "research_expiries": ["20260720", "20260721"],
+    }
+    payload["underlier"] = {
+        "source": None,
+        "provider": None,
+        "price": None,
+        "source_at": None,
+        "quality": "unavailable",
+    }
+    payload["expiries"] = []
+    payload = signed_payload(payload)
+    (tmp_path / "snapshot.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    assert accumulator.poll_once(now=sunday) is False
+    health = accumulator.health_payload()
+    assert health["input_status"] == "waiting"
+    assert health["last_error"] == "live_snapshot_not_rth"
+    assert health["active_session"] is None
+
+
 def test_frozen_derived_column_survives_new_input_and_restart(tmp_path: Path) -> None:
     accepted = _at(13, 34, 50)
     clock = MutableClock(accepted)

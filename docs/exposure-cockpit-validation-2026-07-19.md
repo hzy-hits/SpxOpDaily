@@ -124,9 +124,9 @@ signed_flow_available=false
 
 ## 测试结果
 
-- Python 全量测试：`1772 passed, 1 warning`；warning 仅为上游 websockets deprecation。
+- Python 全量测试：`1773 passed, 1 warning`；warning 仅为上游 websockets deprecation。
 - Session Surface、部署、站点与架构定向测试：`65 passed`。
-- Live accumulator 的 boundary/lease/restart/OHLC 对抗测试：`23 passed`。
+- Live accumulator 的 boundary/lease/restart/OHLC/周末状态对抗测试：`24 passed`。
 - JavaScript contract tests：通过。
 - `node --check site/spxw-surface/public/app.js`：通过。
 - Ruff：通过。
