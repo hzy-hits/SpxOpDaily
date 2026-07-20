@@ -207,7 +207,9 @@ def test_chain_implied_underlier_requires_fresh_coeval_pairs(tmp_path: Path) -> 
     assert payload["status"] == "ready"
     assert payload["underlier"]["source"] == "chain_implied"
     assert payload["underlier"]["quality"] == "derived_fresh_pairs"
-    assert payload["underlier"]["source_at"] is None
+    assert payload["underlier"]["provider"] == "schwab"
+    assert payload["underlier"]["source_at"] == NOW.isoformat()
+    assert payload["underlier"]["age_seconds"] == 0.0
 
 
 def test_chain_implied_underlier_rejects_leg_skew_over_five_seconds(tmp_path: Path) -> None:

@@ -147,6 +147,45 @@ def test_spx_gth_tracks_trading_date_weekends_and_holidays() -> None:
     assert CALENDAR.is_spx_gth_open(et_datetime(labor_day, 20, 15)) is True
 
 
+def test_spx_session_window_segments_full_canvas() -> None:
+    trading_day = date(2026, 7, 17)
+    window = CALENDAR.spx_session_window(trading_day)
+
+    assert window is not None
+    assert window.session_start == et_datetime(date(2026, 7, 16), 20, 15)
+    assert window.gth_end == et_datetime(trading_day, 9, 25)
+    assert window.rth_open == et_datetime(trading_day, 9, 30)
+    assert window.session_end == et_datetime(trading_day, 16)
+    assert window.segment_at(et_datetime(date(2026, 7, 16), 20, 15)) == "gth"
+    assert window.segment_at(et_datetime(trading_day, 9, 24)) == "gth"
+    assert window.segment_at(et_datetime(trading_day, 9, 25)) == "closed_gap"
+    assert window.segment_at(et_datetime(trading_day, 9, 30)) == "rth"
+    assert window.segment_at(et_datetime(trading_day, 16)) == "rth"
+
+
+def test_spx_session_date_resolves_evening_gap_rth_and_retained_weekend() -> None:
+    friday = date(2026, 7, 17)
+    monday = date(2026, 7, 20)
+
+    assert CALENDAR.spx_session_date_for(et_datetime(date(2026, 7, 16), 20, 15)) == friday
+    assert CALENDAR.spx_session_date_for(et_datetime(friday, 9, 27)) == friday
+    assert CALENDAR.spx_session_date_for(et_datetime(friday, 15, 0)) == friday
+    assert CALENDAR.spx_session_date_for(et_datetime(friday, 16, 1)) is None
+    assert CALENDAR.spx_session_date_for(
+        et_datetime(date(2026, 7, 18), 12),
+        retain_completed=True,
+    ) == friday
+    assert CALENDAR.spx_session_date_for(et_datetime(date(2026, 7, 19), 20, 15)) == monday
+
+
+def test_spx_session_window_uses_actual_early_close() -> None:
+    early_day = date(2026, 11, 27)
+    window = CALENDAR.spx_session_window(early_day)
+
+    assert window is not None
+    assert window.session_end == et_datetime(early_day, 13)
+
+
 def test_utc_rollover_tracks_et_across_daylight_saving_change() -> None:
     before_dst = date(2026, 3, 6)
     after_dst = date(2026, 3, 9)

@@ -80,6 +80,7 @@ LAYERS = {
     "surface_replay_session_reference": 5,
     "surface_replay_trend": 5,
     "surface_live_session_http": 5,
+    "surface_live_session_input": 5,
     "surface_live_session_models": 5,
     "surface_live_session_projection": 5,
     "surface_live_session_store": 5,

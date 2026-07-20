@@ -34,6 +34,33 @@ class MarketSession:
         return int((self.close_at - self.open_at).total_seconds() // _FIVE_MINUTES)
 
 
+@dataclass(frozen=True, slots=True)
+class SpxSessionWindow:
+    """Full SPXW surface session for one trading date.
+
+    The canvas runs from the evening GTH open (20:15 ET on the preceding
+    calendar day) through the RTH close, split into gth / closed_gap / rth
+    segments.  Segment boundaries follow the replay surface contract:
+    gth [session_start, gth_end), closed_gap [gth_end, rth_open),
+    rth [rth_open, session_end].
+    """
+
+    trading_date: date
+    session_start: datetime
+    gth_end: datetime
+    rth_open: datetime
+    session_end: datetime
+
+    def segment_at(self, moment: datetime) -> str | None:
+        if self.session_start <= moment < self.gth_end:
+            return "gth"
+        if self.gth_end <= moment < self.rth_open:
+            return "closed_gap"
+        if self.rth_open <= moment <= self.session_end:
+            return "rth"
+        return None
+
+
 class MarketCalendar:
     """Deterministic US equity calendar using America/New_York wall time.
 
@@ -140,6 +167,54 @@ class MarketCalendar:
         if current.time() >= _SPX_GTH_OPEN:
             return self.is_trading_day(current.date() + timedelta(days=1))
         return False
+
+    def spx_session_window(self, day: date) -> SpxSessionWindow | None:
+        """Return the full GTH→closed_gap→RTH surface window for a trading date."""
+
+        session = self.session(day)
+        if session is None:
+            return None
+        return SpxSessionWindow(
+            trading_date=day,
+            session_start=datetime.combine(day - timedelta(days=1), _SPX_GTH_OPEN, tzinfo=ET),
+            gth_end=datetime.combine(day, _SPX_GTH_CLOSE, tzinfo=ET),
+            rth_open=session.open_at,
+            session_end=session.close_at,
+        )
+
+    def spx_session_date_for(self, now: datetime, *, retain_completed: bool = False) -> date | None:
+        """Resolve the trading date whose surface window contains ``now``.
+
+        Evening GTH (>= 20:15 ET) belongs to the next trading day; morning
+        GTH, the closed gap, and RTH belong to the current trading day.
+        Returns None outside every session window.  With
+        ``retain_completed=True`` a completed session stays current until the
+        next session's GTH open (post-close, weekends, and holidays resolve
+        to the most recent trading date whose window has already started).
+        """
+
+        current = _as_et(now)
+        if current.time() >= _SPX_GTH_OPEN:
+            candidate = self.next_trading_day(current.date())
+            window = self.spx_session_window(candidate)
+            if window is not None and window.session_start <= current < window.gth_end:
+                return candidate
+            if not retain_completed:
+                return None
+        else:
+            window = self.spx_session_window(current.date())
+            if window is not None and window.session_start <= current <= window.session_end:
+                return window.trading_date
+            if not retain_completed:
+                return None
+        candidate_day = current.date()
+        for _ in range(15):
+            if self.is_trading_day(candidate_day):
+                retained = self.spx_session_window(candidate_day)
+                if retained is not None and current >= retained.session_start:
+                    return retained.trading_date
+            candidate_day -= timedelta(days=1)
+        return None
 
     def research_expiry(self, now: datetime) -> date:
         current = _as_et(now)

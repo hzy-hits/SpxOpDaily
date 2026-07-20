@@ -8,12 +8,11 @@ import math
 import threading
 import time
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR, ET
+from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 from spx_spark.marketdata import as_utc
 from spx_spark.surface_live_session_models import (
     LIVE_BUCKET_MINUTES,
@@ -35,6 +34,10 @@ from spx_spark.surface_live_session_models import (
     signed_payload,
     verify_artifact,
 )
+from spx_spark.surface_live_session_input import (
+    LiveInput,
+    ValidatedLiveInput,
+)
 from spx_spark.surface_live_session_store import LiveSessionStateStore, state_payload
 from spx_spark.surface_replay_session_data import (
     _fixed_price_grid,
@@ -45,58 +48,6 @@ from spx_spark.surface_replay_session_models import SessionSurfaceBuildCache
 
 DEFAULT_POLL_SECONDS = 0.25
 MAX_CANDLE_SAMPLES = 4_096
-
-
-@dataclass(frozen=True, slots=True)
-class LiveInput:
-    artifact_sha256: str
-    as_of: datetime
-    valid_until: datetime
-    spot: float
-    spot_source_at: datetime
-    spot_provider: str
-    frames: Mapping[str, dict[str, object]]
-    providers: tuple[str, ...]
-
-
-@dataclass(frozen=True, slots=True)
-class ValidatedLiveInput:
-    artifact_sha256: str
-    as_of: datetime
-    created_at: datetime
-    valid_until: datetime
-    spot: float
-    spot_source_at: datetime
-    spot_provider: str
-    frame_templates: Mapping[str, dict[str, object]]
-    providers: tuple[str, ...]
-
-    def stamp(self, accepted_at: datetime) -> LiveInput:
-        accepted = as_utc(accepted_at)
-        session = DEFAULT_MARKET_CALENDAR.session(accepted.astimezone(ET).date())
-        if (
-            session is None
-            or self.as_of.astimezone(ET).date() != accepted.astimezone(ET).date()
-            or not session.open_at <= self.as_of <= self.created_at <= accepted < session.close_at
-            or not accepted < self.valid_until
-        ):
-            raise LiveSnapshotError("live_snapshot_acceptance_clock_invalid")
-        frames: dict[str, dict[str, object]] = {}
-        for role, template in self.frame_templates.items():
-            frame = dict(template)
-            frame.pop("artifact_sha256", None)
-            frame["accepted_at"] = iso(accepted)
-            frames[role] = signed_payload(frame)
-        return LiveInput(
-            artifact_sha256=self.artifact_sha256,
-            as_of=self.as_of,
-            valid_until=self.valid_until,
-            spot=self.spot,
-            spot_source_at=self.spot_source_at,
-            spot_provider=self.spot_provider,
-            frames=frames,
-            providers=self.providers,
-        )
 
 
 def _session_buckets(
@@ -124,6 +75,8 @@ def _frame_payload(
     valid_until: datetime,
     snapshot_hash: str,
     snapshot_as_of: datetime,
+    session_kind: str,
+    reference_method: str,
 ) -> dict[str, object]:
     expiry = expiry_row.get("expiry")
     if not isinstance(expiry, str) or len(expiry) != 8 or not expiry.isdigit():
@@ -190,6 +143,8 @@ def _frame_payload(
         "model_as_of": iso(snapshot_as_of),
         "valid_until": iso(valid_until),
         "reference_spot": reference_spot,
+        "session_kind": session_kind,
+        "reference_method": reference_method,
         "quality": str(expiry_row.get("quality") or surface.get("quality") or "unavailable"),
         "warnings": list(raw_warnings) if isinstance(raw_warnings, list) else [],
         "providers": providers,
@@ -240,28 +195,42 @@ def validate_live_snapshot(payload: Mapping[str, Any]) -> ValidatedLiveInput:
     ):
         raise LiveSnapshotError("live_snapshot_lease_invalid")
     session = mapping(payload.get("session"), code="live_snapshot_session_invalid")
-    # A valid publisher artifact outside RTH is an expected waiting state, not
-    # malformed input.  Stop before requiring an RTH calendar, direct SPX, or
-    # option frames; none of those should exist on a weekend/holiday snapshot.
-    if session.get("rth_open") is not True or session.get("state") != "rth":
+    # A valid publisher artifact outside any open segment is an expected
+    # waiting state, not malformed input.  GTH snapshots carry an IBKR chain
+    # with a chain-implied reference; RTH snapshots carry direct index:SPX.
+    session_state = session.get("state")
+    if session_state == "rth" and session.get("rth_open") is True:
+        segment = "rth"
+    elif session_state == "gth" and session.get("spx_gth_open") is True:
+        segment = "gth"
+    else:
         raise LiveSnapshotError("live_snapshot_not_rth")
-    source_session = DEFAULT_MARKET_CALENDAR.session(snapshot_as_of.astimezone(ET).date())
+    session_date = DEFAULT_MARKET_CALENDAR.spx_session_date_for(snapshot_as_of)
+    session_window = (
+        DEFAULT_MARKET_CALENDAR.spx_session_window(session_date)
+        if session_date is not None
+        else None
+    )
     if (
-        source_session is None
-        or not source_session.open_at <= snapshot_as_of <= created_at < source_session.close_at
-        or snapshot_as_of.astimezone(ET).date() != created_at.astimezone(ET).date()
+        session_window is None
+        or session_window.segment_at(snapshot_as_of) != segment
+        or not snapshot_as_of <= created_at <= session_window.session_end
     ):
         raise LiveSnapshotError("live_snapshot_session_clock_invalid")
     underlier = mapping(payload.get("underlier"), code="live_underlier_invalid")
     spot = finite(underlier.get("price"))
     spot_provider = str(underlier.get("provider") or "").strip()
+    expected_underlier_source = "index:SPX" if segment == "rth" else "chain_implied"
     if (
-        underlier.get("source") != "index:SPX"
+        underlier.get("source") != expected_underlier_source
         or spot is None
         or spot <= 0
         or not spot_provider
     ):
-        raise LiveSnapshotError("live_direct_spx_unavailable")
+        raise LiveSnapshotError(
+            "live_direct_spx_unavailable" if segment == "rth" else "live_gth_reference_unavailable"
+        )
+    reference_method = "direct_index_spx" if segment == "rth" else "chain_implied"
     spot_source_at = parse_clock(
         underlier.get("source_at"),
         code="live_spot_source_clock_invalid",
@@ -289,6 +258,8 @@ def validate_live_snapshot(payload: Mapping[str, Any]) -> ValidatedLiveInput:
             valid_until=valid_until,
             snapshot_hash=snapshot_hash,
             snapshot_as_of=snapshot_as_of,
+            session_kind=segment,
+            reference_method=reference_method,
         )
         frame_templates[role] = frame
         raw_frame_providers = frame.get("providers")
@@ -302,6 +273,8 @@ def validate_live_snapshot(payload: Mapping[str, Any]) -> ValidatedLiveInput:
         spot=spot,
         spot_source_at=spot_source_at,
         spot_provider=spot_provider,
+        session_kind=segment,
+        reference_method=reference_method,
         frame_templates=frame_templates,
         providers=tuple(sorted(providers)),
     )
@@ -361,7 +334,9 @@ class LiveSessionAccumulator:
             }
 
     def _restore_for_clock(self, now: datetime) -> None:
-        session_date = now.astimezone(ET).date()
+        session_date = DEFAULT_MARKET_CALENDAR.spx_session_date_for(now, retain_completed=True)
+        if session_date is None:
+            return
         manifest = self.store.load_manifest(session_date)
         if manifest is None:
             return
@@ -380,8 +355,8 @@ class LiveSessionAccumulator:
 
         if self._active_date is None or self._manifest is None or self._runtime is None:
             raise LiveSessionError("live_state_contract_unavailable")
-        session = DEFAULT_MARKET_CALENDAR.session(self._active_date)
-        if session is None:
+        window = DEFAULT_MARKET_CALENDAR.spx_session_window(self._active_date)
+        if window is None:
             raise LiveSessionError("live_manifest_non_trading_session")
         start = parse_clock(self._manifest.get("session_start"), code="live_manifest_start_invalid")
         close = parse_clock(self._manifest.get("session_end"), code="live_manifest_end_invalid")
@@ -396,8 +371,8 @@ class LiveSessionAccumulator:
             or bucket_minutes != LIVE_BUCKET_MINUTES
             or price_step != LIVE_PRICE_STEP
             or extent != LIVE_PRICE_EXTENT_POINTS
-            or start != session.open_at
-            or close != session.close_at
+            or start != window.session_start
+            or close != window.session_end
         ):
             raise LiveSessionError("live_persisted_contract_drift")
         for boundary in self._boundaries:
@@ -405,7 +380,7 @@ class LiveSessionAccumulator:
                 raise LiveSessionError("live_boundary_session_mismatch")
 
     def _rollover_for_clock(self, now: datetime) -> None:
-        current_date = now.astimezone(ET).date()
+        current_date = DEFAULT_MARKET_CALENDAR.spx_session_date_for(now, retain_completed=True)
         if self._active_date == current_date:
             return
         self._active_date = None
@@ -488,9 +463,13 @@ class LiveSessionAccumulator:
         return DEFAULT_MARKET_CALENDAR.session(self._active_date)
 
     def _initialize_session(self, live: LiveInput, *, accepted_at: datetime) -> None:
-        session_date = accepted_at.astimezone(ET).date()
-        market_session = DEFAULT_MARKET_CALENDAR.session(session_date)
-        if market_session is None or not market_session.open_at <= accepted_at < market_session.close_at:
+        session_date = DEFAULT_MARKET_CALENDAR.spx_session_date_for(accepted_at)
+        window = (
+            DEFAULT_MARKET_CALENDAR.spx_session_window(session_date)
+            if session_date is not None
+            else None
+        )
+        if window is None or window.segment_at(accepted_at) not in {"gth", "rth"}:
             raise LiveSnapshotError("live_snapshot_outside_rth")
         anchor = math.floor((live.spot / LIVE_PRICE_STEP) + 0.5) * LIVE_PRICE_STEP
         manifest = state_payload(
@@ -498,8 +477,8 @@ class LiveSessionAccumulator:
             session_date=session_date.isoformat(),
             values={
                 "policy_version": LIVE_SESSION_POLICY_VERSION,
-                "session_start": iso(market_session.open_at),
-                "session_end": iso(market_session.close_at),
+                "session_start": iso(window.session_start),
+                "session_end": iso(window.session_end),
                 "accumulator_started_at": iso(accepted_at),
                 "anchor": {
                     "price": live.spot,
@@ -507,6 +486,7 @@ class LiveSessionAccumulator:
                     "source_at": iso(live.spot_source_at),
                     "accepted_at": iso(accepted_at),
                     "provider": live.spot_provider,
+                    "method": live.reference_method,
                 },
                 "bucket_minutes": LIVE_BUCKET_MINUTES,
                 "price_step": LIVE_PRICE_STEP,
@@ -601,6 +581,9 @@ class LiveSessionAccumulator:
             return False
         start = parse_clock(self._manifest.get("session_start"), code="live_manifest_start_invalid")
         close = parse_clock(self._manifest.get("session_end"), code="live_manifest_end_invalid")
+        window = DEFAULT_MARKET_CALENDAR.spx_session_window(self._active_date)
+        if window is None:
+            raise LiveSessionError("live_manifest_non_trading_session")
         existing_ends = {row.get("end_at") for row in self._boundaries}
         candidates = self._runtime.get("candidate_by_role")
         candidate_map = candidates if isinstance(candidates, Mapping) else {}
@@ -614,6 +597,7 @@ class LiveSessionAccumulator:
             frame_by_role: dict[str, object] = {}
             frozen_columns: dict[str, object] = {}
             missing_roles: dict[str, str] = {}
+            bucket_segment = window.segment_at(bucket_start)
             for role in ("front", "next"):
                 candidate = candidate_map.get(role)
                 if isinstance(candidate, Mapping):
@@ -625,7 +609,12 @@ class LiveSessionAccumulator:
                         candidate.get("valid_until"),
                         code="live_candidate_valid_until_invalid",
                     )
-                    if accepted <= bucket_end < valid_until:
+                    candidate_segment = str(candidate.get("session_kind") or "")
+                    if (
+                        bucket_segment in {"gth", "rth"}
+                        and candidate_segment == bucket_segment
+                        and accepted <= bucket_end < valid_until
+                    ):
                         frame_by_role[role] = dict(candidate)
                         frozen_columns[role] = self._freeze_frame_columns(
                             candidate,
@@ -635,12 +624,16 @@ class LiveSessionAccumulator:
                 frame_by_role[role] = None
                 frozen_columns[role] = None
                 missing_roles[role] = "validated_surface_unavailable_at_bucket_end"
-            candle = self._sample_candle(
-                samples,
-                start=bucket_start,
-                end=bucket_end,
-                cutoff=bucket_end,
-                complete=True,
+            candle = (
+                self._sample_candle(
+                    samples,
+                    start=bucket_start,
+                    end=bucket_end,
+                    cutoff=bucket_end,
+                    complete=True,
+                )
+                if bucket_segment in {"gth", "rth"}
+                else None
             )
             boundary = state_payload(
                 kind="spxw_live_session_boundary",
@@ -709,6 +702,7 @@ class LiveSessionAccumulator:
         price_grid = _fixed_price_grid(anchor_spot, step=LIVE_PRICE_STEP)
         frame = frame_state(candidate)
         minutes_forward = max((bucket_end - frame.at).total_seconds() / 60.0, 0.0)
+        gth_sourced = frame.session_kind == "gth"
         output: dict[str, object] = {}
         for weighting in ("oi_weighted", "volume_weighted"):
             kernel = _kernel_columns(
@@ -730,8 +724,11 @@ class LiveSessionAccumulator:
                 for price, value in zip(price_grid, signed_gamma, strict=True)
                 if value is not None and value < 0
             ]
+            kernel_quality = "ready" if kernel.quality == "ok" else kernel.quality
             output[weighting] = {
-                "quality": "ready" if kernel.quality == "ok" else kernel.quality,
+                # A GTH frame proves freshness only for the contracts observed;
+                # never present a partial-chain column as fully ready.
+                "quality": "degraded" if gth_sourced and kernel_quality == "ready" else kernel_quality,
                 "warnings": list(kernel.warnings),
                 "source_at": candidate.get("source_at"),
                 "known_at": candidate.get("known_at"),
@@ -767,7 +764,10 @@ class LiveSessionAccumulator:
         ):
             raise LiveSnapshotError("live_acceptance_clock_invalid")
         with self._lock:
-            if self._active_date != accepted.astimezone(ET).date():
+            if self._active_date != DEFAULT_MARKET_CALENDAR.spx_session_date_for(
+                accepted,
+                retain_completed=True,
+            ):
                 self._active_date = None
                 self._manifest = None
                 self._runtime = None

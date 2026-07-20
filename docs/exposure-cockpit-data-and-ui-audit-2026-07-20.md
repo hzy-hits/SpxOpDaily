@@ -110,11 +110,46 @@ MemoryMax=3G
 
 ## 测试
 
-- Python 全量：`1808 passed, 1 warning`；warning 仅为上游 `websockets.legacy` deprecation。
+- Python 全量：`1819 passed, 1 warning`；warning 仅为上游 `websockets.legacy` deprecation。
 - JavaScript 四组 contract tests：通过。
 - `node --check site/spxw-surface/public/app.js`：通过。
 - Ruff、`git diff --check`、shell `bash -n`、systemd unit verify：通过。
 - 覆盖新增：same-provider baseline、GTH baseline fail-closed、09:25 boundary、cache tamper、PIT/no-lookahead、内部 extrema、OI 非负、GTH falsely-ready、色域与 missing-null。
+
+## Live v2 接力更新与部署冒烟
+
+2026-07-20 12:38 CST 完成 Live Session Surface v2 前滚部署：
+
+- Live Canvas 从 RTH-only 扩展为前一日 20:15 ET 至交易日 RTH close，共
+  `GTH / closed_gap / RTH` 三段；常规交易日为 237 个 5 分钟桶。
+- GTH 使用 IBKR partial chain 与 `chain_implied` SPX；reference 和非 missing
+  GTH columns 固定 degraded/dashed，`gth_complete_chain_available=false`。
+- 09:25–09:30 gap 全部 Missing；即使 GTH TTL 跨过 gap，也不能成为当前 RTH
+  surface、spot、strike state 或 candle。
+- Live 为 `schema_version=2`、
+  `policy_version=spxw_session_surface.live.v2`；Replay 继续使用独立 v5
+  contract，前端按 mode 校验 policy。
+- v2 持久化状态写入
+  `published/spxw-surface/live/policy=live-v2/`。旧 v1 immutable state 保留在原
+  namespace，部署与回滚均不需要删除证据。
+- Replay 浏览器增加 24-entry LRU 与下一 keyframe best-effort prefetch；切换
+  session/timeline 时清空 cache，避免源指纹更新后复用旧 normalized surface。
+
+生产冒烟实测：dashboard/live/replay systemd units 与两个 nginx sidecar 均
+active/healthy；Live Unix socket、nginx 代理均返回 200。2026-07-20 GTH 实际
+payload 为 `ready`，IBKR 159 个 front 合约，shape 为 `237 × 41`，reference 为
+IBKR `chain_implied` / degraded，签名 payload 通过浏览器严格 normalizer。公网
+`spx.zh3nyu.com` 返回预期 302 到 code-server，未认证目标返回预期 401。
+
+12:46 CST 上游随后暂时失去可用 parity pair，publisher 明确返回
+`underlier_unavailable`。Live 服务保持健康并按预期转为 `lease_expired`：spot、
+reference、current strike 和 projection 全部清空，已冻结的 2 个 historical
+columns 保留；这证明 fail-closed 路径也通过生产冒烟，不是服务重启失败。
+
+浏览器自动化 CLI 在该主机不可用，因此本次没有新增截图；视觉层由已部署
+HTML/CSS/JS、真实 nginx 路由、四组 JavaScript contract tests 和真实生产
+live-v2 payload normalizer 联合冒烟。此前同分辨率截图仍只作为旧回放视觉证据，
+不冒充本次 Live GTH 截图。
 
 ## 仍受外部数据阻塞
 

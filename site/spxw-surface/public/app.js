@@ -6,9 +6,15 @@ const REPLAY_SESSIONS_URL = "api/v1/replay/sessions";
 const SESSION_SURFACE_SCHEMA_VERSIONS = new Set([1, 2]);
 const SESSION_SURFACE_KIND = "spxw_session_surface";
 const SESSION_SURFACE_POLICY_VERSIONS = new Map([
-  [1, "spxw_session_surface.v1"],
-  [2, "spxw_session_surface.v5"],
+  ["replay:1", "spxw_session_surface.v1"],
+  ["replay:2", "spxw_session_surface.v5"],
+  ["live:1", "spxw_session_surface.v1"],
+  ["live:2", "spxw_session_surface.live.v2"],
 ]);
+const LIVE_SEGMENT_REFERENCE_METHODS = {
+  gth: "chain_implied",
+  rth: "direct_index_spx",
+};
 const SESSION_SEGMENT_CONTRACT = {
   gth: {
     surfaceProvider: "ibkr",
@@ -41,6 +47,7 @@ const REPLAY_TIMELINE_STEP_MINUTES = 5;
 const REPLAY_VISUAL_FPS = 30;
 const REPLAY_VISUAL_FRAME_MS = 1_000 / REPLAY_VISUAL_FPS;
 const REPLAY_MARKET_TIME_RATE = 150;
+const SESSION_SURFACE_CACHE_LIMIT = 24;
 const MARKET_TIME_ZONE = "America/New_York";
 const POLL_INTERVAL_MS = 5_000;
 const REQUEST_TIMEOUT_MS = 4_500;
@@ -320,6 +327,12 @@ const app = {
   sessionSurfaceRetryKey: "",
   sessionSurfaceRetryCount: 0,
   sessionSurfaceLastError: "",
+  sessionSurfaceCache: new Map(),
+  sessionSurfacePrefetchController: null,
+  sessionSurfacePrefetchKey: "",
+  replaySummarySignature: "",
+  replayFrameChrome: { clock: "", position: "", timelineSec: -1, aria: "" },
+  cockpitStaticSignature: "",
   cockpitLayouts: {},
   cockpitHover: null,
   cockpitPriceDomain: null,
@@ -1311,7 +1324,7 @@ function sessionSegmentForBucket(segments, bucket) {
     segment.startMs <= bucket.startMs && bucket.endMs <= segment.endMs) || null;
 }
 
-function normalizeSessionSegments(raw, sessionStartMs, sessionEndMs, schemaVersion) {
+function normalizeSessionSegments(raw, sessionStartMs, sessionEndMs, schemaVersion, mode = "replay") {
   if (schemaVersion === 1) {
     if (raw !== undefined && raw !== null) {
       throw new Error("session_surface_v1_has_session_segments");
@@ -1341,8 +1354,26 @@ function normalizeSessionSegments(raw, sessionStartMs, sessionEndMs, schemaVersi
       ? item.reference_provider === null
         ? null
         : nonEmptyString(item.reference_provider)
-      : contract?.referenceProvider;
-    if (!contract || kind !== expectedKinds[index] || !start || !end ||
+      : mode === "live"
+        ? null
+        : contract?.referenceProvider;
+    if (mode === "live") {
+      // Live providers fail over, so the artifact self-declares its providers;
+      // only the reference method semantics are pinned per segment kind.
+      const expectedMethod = LIVE_SEGMENT_REFERENCE_METHODS[kind] ?? null;
+      const observed = surfaceProvider !== null;
+      if (kind !== expectedKinds[index] || !start || !end ||
+          end.getTime() <= start.getTime() ||
+          (kind === "closed_gap" &&
+            (surfaceProvider !== null || referenceMethod !== null ||
+              suppliedReferenceProvider !== null)) ||
+          (kind !== "closed_gap" && (
+            (observed && (referenceMethod !== expectedMethod || !suppliedReferenceProvider)) ||
+            (!observed && (referenceMethod !== null || suppliedReferenceProvider !== null))
+          ))) {
+        throw new Error("invalid_session_surface_segment_contract");
+      }
+    } else if (!contract || kind !== expectedKinds[index] || !start || !end ||
         end.getTime() <= start.getTime() ||
         surfaceProvider !== contract.surfaceProvider ||
         referenceMethod !== contract.referenceMethod ||
@@ -1367,12 +1398,33 @@ function normalizeSessionSegments(raw, sessionStartMs, sessionEndMs, schemaVersi
   return segments;
 }
 
-function normalizeSessionProviders(raw, schemaVersion) {
+function normalizeSessionProviders(raw, schemaVersion, mode = "replay") {
   if (schemaVersion === 1) {
     if (raw !== undefined && raw !== null) {
       throw new Error("session_surface_v1_has_providers_contract");
     }
     return null;
+  }
+  if (mode === "live") {
+    if (!isObject(raw)) throw new Error("invalid_session_surface_providers_contract");
+    const values = {
+      gthSurface: raw.gth_surface,
+      gthReference: raw.gth_reference,
+      rthSurface: raw.rth_surface,
+      rthReference: raw.rth_reference,
+    };
+    for (const value of Object.values(values)) {
+      if (value !== null && !nonEmptyString(value)) {
+        throw new Error("invalid_session_surface_providers_contract");
+      }
+    }
+    return {
+      raw,
+      gthSurface: values.gthSurface ?? null,
+      gthReference: values.gthReference ?? null,
+      rthSurface: values.rthSurface ?? null,
+      rthReference: values.rthReference ?? null,
+    };
   }
   if (!isObject(raw) || raw.gth_surface !== "ibkr" || raw.gth_reference !== "schwab" ||
       raw.rth_surface !== "schwab" || raw.rth_reference !== "schwab") {
@@ -1419,7 +1471,7 @@ function normalizeReferenceBasis(raw, asOfMs) {
   };
 }
 
-function normalizeSessionReference(raw, asOfMs, activeSegment) {
+function normalizeSessionReference(raw, asOfMs, activeSegment, mode = "replay") {
   if (!isObject(raw) || raw.coordinate !== "SPX") {
     throw new Error("invalid_session_surface_reference_contract");
   }
@@ -1460,10 +1512,13 @@ function normalizeSessionReference(raw, asOfMs, activeSegment) {
       inferred: false,
     };
   }
+  const allowedMethods = mode === "live"
+    ? ["chain_implied", "direct_index_spx"]
+    : ["es_basis_inferred_spx", "direct_index_spx"];
   if (price <= 0 || !activeSegment || activeSegment.kind === "closed_gap" ||
-      !["es_basis_inferred_spx", "direct_index_spx"].includes(method) ||
+      !allowedMethods.includes(method) ||
       method !== activeSegment.referenceMethod ||
-      provider !== SESSION_SEGMENT_CONTRACT[activeSegment.kind].referenceProvider ||
+      provider !== activeSegment.referenceProvider ||
       !instrumentId || !sourceAt || !knownAt ||
       sourceAt.getTime() > knownAt.getTime() ||
       knownAt.getTime() > asOfMs ||
@@ -1473,11 +1528,12 @@ function normalizeSessionReference(raw, asOfMs, activeSegment) {
       !["ready", "degraded"].includes(quality) || missingReason !== null) {
     throw new Error("invalid_session_surface_reference_contract");
   }
-  const inferred = method === "es_basis_inferred_spx";
-  const basis = inferred ? normalizeReferenceBasis(raw.basis, asOfMs) : null;
-  if ((!inferred && raw.basis !== null) || (inferred && !basis)) {
+  const needsBasis = method === "es_basis_inferred_spx";
+  const basis = needsBasis ? normalizeReferenceBasis(raw.basis, asOfMs) : null;
+  if ((!needsBasis && raw.basis !== null) || (needsBasis && !basis)) {
     throw new Error("invalid_session_surface_reference_basis_contract");
   }
+  const inferred = method !== "direct_index_spx";
   return {
     raw,
     coordinate: raw.coordinate,
@@ -1500,7 +1556,7 @@ function normalizeSurfaceColumn(
   raw,
   bucket,
   asOfMs,
-  { mode = "replay", schemaVersion = 1, segment = null, activeSegment = null } = {},
+  { mode = "replay", schemaVersion = 1, segment = null, activeSegment = null, segmentsByKind = null } = {},
 ) {
   if (!isObject(raw)) throw new Error("invalid_session_surface_column");
   const kind = String(raw.kind || "").toLowerCase();
@@ -1575,9 +1631,9 @@ function normalizeSurfaceColumn(
       ? null
       : nonEmptyString(raw.reference_method);
     const sourceContract = sourceSessionKind
-      ? SESSION_SEGMENT_CONTRACT[sourceSessionKind]
+      ? segmentsByKind?.[sourceSessionKind] ?? null
       : null;
-    const targetContract = SESSION_SEGMENT_CONTRACT[segment?.kind];
+    const targetContract = segment?.kind ? segmentsByKind?.[segment.kind] ?? null : null;
     const providerContract = kind === "missing" ? targetContract : sourceContract;
     if (!segment || sessionKind !== segment.kind ||
         (segment.kind === "closed_gap" && kind !== "missing") ||
@@ -1682,19 +1738,20 @@ function normalizeSessionCandles(
         ? null
         : parseDate(item.basis_observed_at);
       renderStyle = nonEmptyString(item.render_style);
-      const inferred = referenceMethod === "es_basis_inferred_spx";
+      const inferred = referenceMethod !== "direct_index_spx";
+      const needsBasis = referenceMethod === "es_basis_inferred_spx";
       if (!segment || segment.kind === "closed_gap" || end.getTime() > segment.endMs ||
           sessionKind !== segment.kind || referenceMethod !== segment.referenceMethod ||
-          referenceProvider !== SESSION_SEGMENT_CONTRACT[segment.kind].referenceProvider ||
+          referenceProvider !== segment.referenceProvider ||
           !referenceInstrumentId ||
           (acceptedAt && (acceptedAt.getTime() < knownAt.getTime() ||
             acceptedAt.getTime() > asOfMs)) ||
           (validUntil && validUntil.getTime() <=
             (acceptedAt?.getTime() ?? knownAt.getTime())) ||
           renderStyle !== (inferred ? "inferred_dashed" : "direct_solid") ||
-          (inferred && (basisValue === null || !basisObservedAt ||
+          (needsBasis && (basisValue === null || !basisObservedAt ||
             basisObservedAt.getTime() > sourceAt.getTime())) ||
-          (!inferred && (basisValue !== null || basisObservedAt !== null))) {
+          (!needsBasis && (basisValue !== null || basisObservedAt !== null))) {
         throw new Error("invalid_session_surface_candle_reference_contract");
       }
     }
@@ -1783,6 +1840,7 @@ function normalizeStrikeProfileMetadata(raw, {
   schemaVersion,
   asOfMs,
   strikeProfile,
+  segmentsByKind,
 }) {
   if (schemaVersion === 1) {
     if (raw !== undefined && raw !== null && !isObject(raw)) {
@@ -1854,7 +1912,7 @@ function normalizeStrikeProfileMetadata(raw, {
       }
       return { sessionKind: null, surfaceProvider: null, referenceMethod: null };
     }
-    const contract = SESSION_SEGMENT_CONTRACT[sessionKind];
+    const contract = segmentsByKind?.[sessionKind];
     if (!contract || sessionKind === "closed_gap" ||
         surfaceProvider !== contract.surfaceProvider ||
         referenceMethod !== contract.referenceMethod) {
@@ -1970,9 +2028,11 @@ async function normalizeSessionSurface(raw, expected = {}) {
   if (!isObject(raw)) throw new Error("session_surface_not_an_object");
   const mode = expected.mode === "live" ? "live" : "replay";
   const schemaVersion = raw.schema_version;
-  const policyVersion = SESSION_SURFACE_POLICY_VERSIONS.get(schemaVersion);
+  const policyVersion = SESSION_SURFACE_POLICY_VERSIONS.get(`${mode}:${schemaVersion}`);
   const providerValid = schemaVersion === 2
-    ? raw.provider === "mixed"
+    ? mode === "replay"
+      ? raw.provider === "mixed"
+      : ["schwab", "ibkr", "mixed", "unavailable"].includes(raw.provider)
     : mode === "replay"
       ? raw.provider === "schwab"
       : ["schwab", "ibkr", "mixed", "unavailable"].includes(raw.provider);
@@ -2151,8 +2211,19 @@ async function normalizeSessionSurface(raw, expected = {}) {
     sessionStart.getTime(),
     sessionEnd.getTime(),
     schemaVersion,
+    mode,
   );
-  const providers = normalizeSessionProviders(raw.providers, schemaVersion);
+  const segmentsByKind = Object.fromEntries(
+    sessionSegments.map((segment) => [segment.kind, segment]),
+  );
+  const providers = normalizeSessionProviders(raw.providers, schemaVersion, mode);
+  if (mode === "live" && schemaVersion === 2 && providers && (
+      providers.gthSurface !== segmentsByKind.gth?.surfaceProvider ||
+      providers.gthReference !== segmentsByKind.gth?.referenceProvider ||
+      providers.rthSurface !== segmentsByKind.rth?.surfaceProvider ||
+      providers.rthReference !== segmentsByKind.rth?.referenceProvider)) {
+    throw new Error("invalid_session_surface_providers_contract");
+  }
   const activeSegment = schemaVersion === 2
     ? sessionSegmentAtTime(sessionSegments, asOf.getTime())
     : null;
@@ -2171,6 +2242,7 @@ async function normalizeSessionSurface(raw, expected = {}) {
       schemaVersion,
       segment,
       activeSegment,
+      segmentsByKind,
     });
   });
   const gamma = normalizeSessionMatrix(
@@ -2239,7 +2311,7 @@ async function normalizeSessionSurface(raw, expected = {}) {
   const strikeProfile = normalizeStrikeProfile(raw.strike_profile);
   const strikeProfileMetadata = normalizeStrikeProfileMetadata(
     raw.strike_profile_metadata,
-    { schemaVersion, asOfMs: asOf.getTime(), strikeProfile },
+    { schemaVersion, asOfMs: asOf.getTime(), strikeProfile, segmentsByKind },
   );
   const spot = finiteOrNull(raw.spot, "invalid_session_surface_spot");
   if (spot !== null && spot <= 0) throw new Error("invalid_session_surface_spot");
@@ -2247,7 +2319,7 @@ async function normalizeSessionSurface(raw, expected = {}) {
   const spotKnownAt = raw.spot_known_at === null ? null : parseDate(raw.spot_known_at);
   let reference = null;
   if (schemaVersion === 2) {
-    reference = normalizeSessionReference(raw.reference, asOf.getTime(), activeSegment);
+    reference = normalizeSessionReference(raw.reference, asOf.getTime(), activeSegment, mode);
     if ((reference.price === null) !== (spot === null) ||
         (reference.price !== null && Math.abs(reference.price - spot) > 1e-9)) {
       throw new Error("session_surface_reference_spot_mismatch");
@@ -2518,6 +2590,7 @@ function liveFrozenPrefixSignature(surface, throughMs = surface?.historyFrozenTh
 function liveSurfaceTransitionIssue(previous, next) {
   if (!previous || previous.mode !== "live") return null;
   if (!next || next.mode !== "live") return "live_surface_mode_changed";
+  if (next.schemaVersion !== previous.schemaVersion) return null;
   if (next.sessionDate < previous.sessionDate) return "live_surface_session_regressed";
   if (next.sessionDate !== previous.sessionDate) return null;
   if (liveSurfaceIdentity(previous) !== liveSurfaceIdentity(next)) {
@@ -3327,20 +3400,31 @@ function resizeCockpitPanel(panel) {
   return { ...elements, layout };
 }
 
+const cockpitHatchPatterns = new Map();
+
+function cockpitHatchPattern(context, color) {
+  let pattern = cockpitHatchPatterns.get(color);
+  if (pattern) return pattern;
+  const tile = document.createElement("canvas");
+  tile.width = 7;
+  tile.height = 7;
+  const tileContext = tile.getContext("2d");
+  tileContext.strokeStyle = color;
+  tileContext.lineWidth = 0.7;
+  tileContext.beginPath();
+  tileContext.moveTo(0, 7);
+  tileContext.lineTo(7, 0);
+  tileContext.stroke();
+  pattern = context.createPattern(tile, "repeat");
+  cockpitHatchPatterns.set(color, pattern);
+  return pattern;
+}
+
 function hatchCockpitRect(context, x, y, width, height, color = "rgba(189, 207, 217, 0.24)") {
   if (width <= 0 || height <= 0) return;
   context.save();
-  context.beginPath();
-  context.rect(x, y, width, height);
-  context.clip();
-  context.strokeStyle = color;
-  context.lineWidth = 0.7;
-  for (let offset = -height; offset <= width; offset += 7) {
-    context.beginPath();
-    context.moveTo(x + offset, y + height);
-    context.lineTo(x + offset + height, y);
-    context.stroke();
-  }
+  context.fillStyle = cockpitHatchPattern(context, color);
+  context.fillRect(x, y, width, height);
   context.restore();
 }
 
@@ -3716,20 +3800,16 @@ function renderCockpitStrikeModeChrome(surface = app.sessionSurface) {
   dom.cockpitStrikeReadoutLabel.textContent = oiMode
     ? "OI = Call + Put open-interest contracts"
     : `Γ Proxy · ${surface ? sessionMetricUnitLabel(surface, "signed_gamma") : "metric unit"}`;
-  dom.cockpitStrikeCurrentLegend.textContent = oiMode ? "Current OI" : "Current Γ Proxy";
+  dom.cockpitStrikeCurrentLegend.textContent = oiMode ? "Current OI" : "Current Γ";
   const baselineUnavailable = surface?.strikeProfileMetadata
     ?.baselineUnavailableReason === "gth_contract_universe_completeness_unproven";
   const baselineMissing = surface && !surface.strikeProfileMetadata?.baselineAt;
   dom.cockpitStrikeBaselineLegend.textContent = baselineMissing
     ? baselineUnavailable
-      ? "Baseline unavailable · GTH chain completeness unproven"
+      ? "Baseline unavailable · chain completeness unproven"
       : "Baseline unavailable · no comparable validated snapshot"
-    : oiMode
-      ? "First validated OI · same segment/provider/method"
-      : "First validated Γ · same segment/provider/method";
-  dom.cockpitStrikeColorLegend.textContent = oiMode
-    ? "Color = call+/put− Γ sign"
-    : "Call + / Put − OI-weighted Γ proxy";
+    : "Baseline · first validated";
+  dom.cockpitStrikeColorLegend.textContent = "Call + / Put −";
   const domain = oiMode
     ? app.cockpitColorDomains.strikeOpenInterest
     : app.cockpitColorDomains.strikeGamma;
@@ -3864,6 +3944,7 @@ function cockpitDisplayTimeMs(surface = app.sessionSurface) {
 
 function referenceMethodLabel(method) {
   if (method === "es_basis_inferred_spx") return "ES−basis inferred SPX";
+  if (method === "chain_implied") return "Chain-implied SPX · inferred";
   if (method === "direct_index_spx") return "Direct SPX reference";
   return "Reference unavailable";
 }
@@ -4117,13 +4198,29 @@ function renderCockpitStatic() {
     dom.cockpitTooltip.replaceChildren();
     if (dom.cockpitTooltip.dataset) delete dom.cockpitTooltip.dataset.panel;
     renderReferenceChrome(null);
+    app.cockpitStaticSignature = "";
     return;
   }
   renderReferenceChrome(surface);
   updateCockpitStableDomains(surface);
-  drawCockpitSurface("gamma", surface.gamma);
-  drawCockpitStrike();
-  drawCockpitSurface("charm", surface.charm);
+  const staticSignature = [
+    app.sessionSurfaceRenderedKey,
+    surface.asOfMs ?? "",
+    surface.historyFrozenThroughMs ?? "",
+    app.strikeMode,
+    dom.cockpitGammaStage?.clientWidth ?? 0,
+    dom.cockpitGammaStage?.clientHeight ?? 0,
+    dom.cockpitStrikeStage?.clientWidth ?? 0,
+    dom.cockpitStrikeStage?.clientHeight ?? 0,
+    dom.cockpitCharmStage?.clientWidth ?? 0,
+    dom.cockpitCharmStage?.clientHeight ?? 0,
+  ].join("|");
+  if (staticSignature !== app.cockpitStaticSignature) {
+    app.cockpitStaticSignature = staticSignature;
+    drawCockpitSurface("gamma", surface.gamma);
+    drawCockpitStrike();
+    drawCockpitSurface("charm", surface.charm);
+  }
   const gammaDomain = app.cockpitColorDomains.gamma;
   const charmDomain = app.cockpitColorDomains.charm;
   const gammaUnit = sessionMetricUnitLabel(surface, "signed_gamma");
@@ -4819,13 +4916,27 @@ function drawMetadataReplayDynamic(
     clamped,
     (keyframe) => keyframe.atMs,
   );
-  dom.replayFrameTime.textContent = formatMarketTime(new Date(clamped));
-  dom.replayFramePosition.textContent = `Keyframe ${Math.max(app.activeGammaIndex + 1, 0)} / ${trend.gamma.keyframes.length}`;
-  dom.replayTimeline.value = String(Math.floor(clamped / 1_000));
-  dom.replayTimeline.setAttribute(
-    "aria-valuetext",
-    `${formatMarketTime(new Date(clamped))}, validated keyframe ${Math.max(app.activeGammaIndex + 1, 0)} of ${trend.gamma.keyframes.length}`,
-  );
+  const chrome = app.replayFrameChrome;
+  const clockLabel = formatMarketTime(new Date(clamped));
+  if (chrome.clock !== clockLabel) {
+    chrome.clock = clockLabel;
+    dom.replayFrameTime.textContent = clockLabel;
+  }
+  const positionLabel = `Keyframe ${Math.max(app.activeGammaIndex + 1, 0)} / ${trend.gamma.keyframes.length}`;
+  if (chrome.position !== positionLabel) {
+    chrome.position = positionLabel;
+    dom.replayFramePosition.textContent = positionLabel;
+  }
+  const timelineSec = Math.floor(clamped / 1_000);
+  if (chrome.timelineSec !== timelineSec) {
+    chrome.timelineSec = timelineSec;
+    dom.replayTimeline.value = String(timelineSec);
+  }
+  const ariaLabel = `${clockLabel}, validated keyframe ${Math.max(app.activeGammaIndex + 1, 0)} of ${trend.gamma.keyframes.length}`;
+  if (chrome.aria !== ariaLabel) {
+    chrome.aria = ariaLabel;
+    dom.replayTimeline.setAttribute("aria-valuetext", ariaLabel);
+  }
   const surface = app.sessionSurface;
   const spot = cockpitCurrentSpot();
   const surfacePhase = replaySessionSurfacePresentationPhase({
@@ -4833,54 +4944,59 @@ function drawMetadataReplayDynamic(
     retryKey: app.sessionSurfaceRetryKey,
     hasSurface: Boolean(surface),
   });
-  if (surfacePhase === "retrying") {
-    renderSessionSurfaceChrome("unavailable", app.sessionSurfaceLastError, {
-      retrying: true,
-    });
-  } else if (surfacePhase === "ready") {
-    const presentation = scheduledMissingSessionSurfacePresentation(
-      app.frames[app.sessionSurfaceKeyframeIndex],
-    );
-    setStatusPill(
-      presentation.scheduledMissing ? "degraded" : "ready",
-      presentation.scheduledMissing ? presentation.status : "Replay · Session surface",
-    );
-    dom.summaryStatus.textContent = presentation.scheduledMissing
-      ? "Scheduled Missing · Frozen · Bounded PIT"
-      : "Ready · Frozen · Bounded PIT";
-    dom.summaryReasons.textContent = presentation.scheduledMissing
-      ? presentation.reason
-      : "Session-surface cutoff · dealer side unknown";
-    dom.summaryFreshness.textContent = "Frozen · Bounded PIT";
-    dom.summaryAsOf.textContent = `as of ${formatReplayAsOf(surface.asOf)}`;
-    const totalCells = surface.timeBuckets.length * surface.priceGrid.length;
-    const availableCells = [surface.gamma, surface.charm]
-      .flat(2)
-      .filter(Number.isFinite).length;
-    dom.summaryCoverage.textContent = totalCells
-      ? `${Math.min(availableCells / (totalCells * 2) * 100, 100).toFixed(1)}%`
-      : "—";
-    dom.summaryContracts.textContent = `${surface.strikeProfile.length} strikes · ${surface.candles.length} candles`;
-    dom.summaryExpiries.textContent = `${surface.role.toUpperCase()} · ${surface.expiry}`;
-    dom.summaryUnderlier.textContent = `SPX ${Number.isFinite(spot) ? spot.toFixed(2) : "—"}`;
-    dom.schemaVersion.textContent = `session surface schema ${surface.schemaVersion ?? "—"}`;
-    dom.signConvention.textContent = "calls + / puts − proxy; participant and dealer side unknown";
-    dom.refreshState.textContent = presentation.scheduledMissing
-      ? "Scheduled closed gap · Missing · no fabricated market values"
-      : `Frozen replay · cutoff ${formatMarketTime(surface.asOf, false)}`;
-  } else {
-    setStatusPill("unknown", "Loading session surface");
-    dom.summaryStatus.textContent = "Waiting · Frozen replay";
-    dom.summaryReasons.textContent = "No cutoff-bound market values loaded";
-    dom.summaryFreshness.textContent = "Frozen · pending validation";
-    dom.summaryAsOf.textContent = `playhead ${formatReplayAsOf(new Date(clamped))}`;
-    dom.summaryCoverage.textContent = "—";
-    dom.summaryContracts.textContent = "—";
-    dom.summaryExpiries.textContent = "—";
-    dom.summaryUnderlier.textContent = "SPX —";
-    dom.schemaVersion.textContent = "session surface schema —";
-    dom.signConvention.textContent = "participant and dealer side unknown";
-    dom.refreshState.textContent = "Waiting for cutoff-bound session surface";
+  // Summary chrome only changes with the surface, phase, or failure state;
+  // skip the DOM writes on identical playback frames.
+  const summarySignature = [
+    surfacePhase,
+    app.sessionSurfaceRenderedKey,
+    app.sessionSurfaceLastError,
+    app.frames[app.sessionSurfaceKeyframeIndex]?.sessionKind ?? "",
+  ].join("|");
+  if (summarySignature !== app.replaySummarySignature) {
+    app.replaySummarySignature = summarySignature;
+    if (surfacePhase === "retrying") {
+      renderSessionSurfaceChrome("unavailable", app.sessionSurfaceLastError, {
+        retrying: true,
+      });
+    } else if (surfacePhase === "ready") {
+      const presentation = scheduledMissingSessionSurfacePresentation(
+        app.frames[app.sessionSurfaceKeyframeIndex],
+      );
+      setStatusPill(
+        presentation.scheduledMissing ? "degraded" : "ready",
+        presentation.scheduledMissing ? presentation.status : "Replay · Session surface",
+      );
+      dom.summaryStatus.textContent = presentation.scheduledMissing
+        ? "Scheduled Missing · Frozen · Bounded PIT"
+        : "Ready · Frozen · Bounded PIT";
+      dom.summaryReasons.textContent = presentation.scheduledMissing
+        ? presentation.reason
+        : "Session-surface cutoff · dealer side unknown";
+      dom.summaryFreshness.textContent = "Frozen · Bounded PIT";
+      dom.summaryAsOf.textContent = `as of ${formatReplayAsOf(surface.asOf)}`;
+      dom.summaryCoverage.textContent = sessionSurfaceCoverageLabel(surface);
+      dom.summaryContracts.textContent = `${surface.strikeProfile.length} strikes · ${surface.candles.length} candles`;
+      dom.summaryExpiries.textContent = `${surface.role.toUpperCase()} · ${surface.expiry}`;
+      dom.summaryUnderlier.textContent = `SPX ${Number.isFinite(spot) ? spot.toFixed(2) : "—"}`;
+      dom.schemaVersion.textContent = `session surface schema ${surface.schemaVersion ?? "—"}`;
+      dom.signConvention.textContent = "calls + / puts − proxy; participant and dealer side unknown";
+      dom.refreshState.textContent = presentation.scheduledMissing
+        ? "Scheduled closed gap · Missing · no fabricated market values"
+        : `Frozen replay · cutoff ${formatMarketTime(surface.asOf, false)}`;
+    } else {
+      setStatusPill("unknown", "Loading session surface");
+      dom.summaryStatus.textContent = "Waiting · Frozen replay";
+      dom.summaryReasons.textContent = "No cutoff-bound market values loaded";
+      dom.summaryFreshness.textContent = "Frozen · pending validation";
+      dom.summaryAsOf.textContent = `playhead ${formatReplayAsOf(new Date(clamped))}`;
+      dom.summaryCoverage.textContent = "—";
+      dom.summaryContracts.textContent = "—";
+      dom.summaryExpiries.textContent = "—";
+      dom.summaryUnderlier.textContent = "SPX —";
+      dom.schemaVersion.textContent = "session surface schema —";
+      dom.signConvention.textContent = "participant and dealer side unknown";
+      dom.refreshState.textContent = "Waiting for cutoff-bound session surface";
+    }
   }
   drawCockpitDynamic();
   if (loadSessionSurface && app.activeGammaIndex !== previousIndex) {
@@ -6186,7 +6302,7 @@ function renderLiveSessionSurfaceChrome(phase = app.livePhase, reason = app.live
     ? Math.max((surface.validUntilMs - serverNowMs) / 1_000, 0)
     : null;
   dom.refreshState.textContent = unavailable
-    ? marketClosed ? "Market closed · waiting for next RTH" : "Live surface unavailable · retrying"
+    ? marketClosed ? "Market closed · waiting for next GTH/RTH session" : "Live surface unavailable · retrying"
     : historicalOnly
       ? `Historical frozen through ${formatMarketTime(surface.historyFrozenThrough, false)}`
       : `${formatAge(ageSeconds)} old · lease ${formatAge(leaseSeconds)}`;
@@ -6233,7 +6349,7 @@ function unavailableLiveReason(reason) {
 
 function unavailableLiveMessage(reason) {
   return unavailableLiveReason(reason) === "market_closed"
-    ? "Market is closed. Live Session Canvas will start from the first validated RTH snapshot; Replay remains available for prior sessions."
+    ? "Market is closed. Live Session Canvas starts from the first validated GTH or RTH snapshot; Replay remains available for prior sessions."
     : `Live Session Surface unavailable: ${reason}`;
 }
 
@@ -6355,6 +6471,7 @@ function clearSessionSurfaceRetry() {
 function cancelSessionSurfaceRequest({ clear = false } = {}) {
   app.sessionSurfaceGeneration += 1;
   if (app.sessionSurfaceController) app.sessionSurfaceController.abort();
+  cancelSessionSurfacePrefetch();
   app.sessionSurfaceController = null;
   app.sessionSurfaceLoading = false;
   app.sessionSurfaceRequestKey = "";
@@ -6368,6 +6485,7 @@ function cancelSessionSurfaceRequest({ clear = false } = {}) {
     app.cockpitHover = null;
     app.cockpitPriceDomain = null;
     app.cockpitColorDomains = {};
+    app.replaySummarySignature = "";
     renderCockpitStatic();
     renderCockpitAudit();
     renderSessionSurfaceChrome("loading");
@@ -6481,6 +6599,106 @@ function scheduleSessionSurfaceRetry(key) {
   }, delay);
 }
 
+function sessionSurfaceCoverageLabel(surface) {
+  const totalCells = surface.timeBuckets.length * surface.priceGrid.length;
+  if (!totalCells) return "—";
+  const availableCells = [surface.gamma, surface.charm]
+    .flat(2)
+    .filter(Number.isFinite).length;
+  return `${Math.min((availableCells / (totalCells * 2)) * 100, 100).toFixed(1)}%`;
+}
+
+function sessionSurfaceCacheGet(key) {
+  const entry = app.sessionSurfaceCache.get(key);
+  if (!entry) return null;
+  app.sessionSurfaceCache.delete(key);
+  app.sessionSurfaceCache.set(key, entry);
+  return entry;
+}
+
+function sessionSurfaceCachePut(key, entry) {
+  if (!key) return;
+  app.sessionSurfaceCache.delete(key);
+  app.sessionSurfaceCache.set(key, entry);
+  while (app.sessionSurfaceCache.size > SESSION_SURFACE_CACHE_LIMIT) {
+    app.sessionSurfaceCache.delete(app.sessionSurfaceCache.keys().next().value);
+  }
+}
+
+function cancelSessionSurfacePrefetch() {
+  if (app.sessionSurfacePrefetchController) app.sessionSurfacePrefetchController.abort();
+  app.sessionSurfacePrefetchController = null;
+  app.sessionSurfacePrefetchKey = "";
+}
+
+function applySessionSurface(surface, frame, frameIndex, key) {
+  const previousSurface = app.sessionSurface;
+  if (shouldResetCockpitDomains(previousSurface?.asOfMs, surface.asOfMs)) {
+    app.cockpitPriceDomain = null;
+    app.cockpitColorDomains = {};
+  }
+  app.sessionSurface = surface;
+  app.sessionSurfaceRenderedKey = key;
+  app.sessionSurfaceKeyframeIndex = frameIndex;
+  app.sessionSurfaceLoading = false;
+  app.replaySummarySignature = "";
+  dom.cockpitLoading.hidden = true;
+  clearSessionSurfaceRetry();
+  const presentation = scheduledMissingSessionSurfacePresentation(frame);
+  setNotice(presentation.notice, presentation.scheduledMissing);
+  renderCockpitStatic();
+  drawMetadataReplayDynamic(app.playheadMs ?? surface.asOfMs, { announce: true });
+  prefetchNextSessionSurface(frameIndex);
+}
+
+function prefetchNextSessionSurface(renderedIndex) {
+  cancelSessionSurfacePrefetch();
+  if (app.mode !== "replay" || !app.trend?.metadataOnly) return;
+  if (!Number.isSafeInteger(renderedIndex) || renderedIndex < 0) return;
+  const frame = app.frames[renderedIndex + 1];
+  if (!frame) return;
+  const sessionDate = app.sessionDate;
+  const role = app.expiryRole;
+  const weighting = app.weighting;
+  const key = `${sessionDate}|${frame.id}|${role}|${weighting}`;
+  if (app.sessionSurfaceCache.has(key)) return;
+  if (key === app.sessionSurfaceRequestKey) return;
+  const controller = new AbortController();
+  const generation = app.sessionSurfaceGeneration;
+  app.sessionSurfacePrefetchController = controller;
+  app.sessionSurfacePrefetchKey = key;
+  (async () => {
+    try {
+      const response = await fetch(sessionSurfaceRequestUrl(frame), {
+        cache: "no-cache",
+        headers: { Accept: "application/json" },
+        signal: controller.signal,
+      });
+      if (!response.ok) return;
+      const payload = await response.json();
+      const surface = await normalizeSessionSurface(payload, {
+        at: frame.at,
+        sessionDate,
+        role,
+        weighting,
+        bucketMinutes: SESSION_SURFACE_BUCKET_MINUTES,
+        priceStep: SESSION_SURFACE_PRICE_STEP,
+      });
+      if (controller.signal.aborted || generation !== app.sessionSurfaceGeneration) return;
+      if (app.mode !== "replay" || app.sessionDate !== sessionDate ||
+          app.expiryRole !== role || app.weighting !== weighting) return;
+      sessionSurfaceCachePut(key, { surface, frame });
+    } catch {
+      // Prefetch is best-effort; the foreground path owns retries and notices.
+    } finally {
+      if (app.sessionSurfacePrefetchController === controller) {
+        app.sessionSurfacePrefetchController = null;
+        app.sessionSurfacePrefetchKey = "";
+      }
+    }
+  })();
+}
+
 async function loadSessionSurfaceAtPlayhead({ force = false, interrupt = false } = {}) {
   if (app.mode !== "replay" || !app.trend || !app.sessionDate || !app.frames.length) return;
   const frameIndex = sessionSurfaceFrameIndex();
@@ -6511,6 +6729,12 @@ async function loadSessionSurfaceAtPlayhead({ force = false, interrupt = false }
     app.sessionSurfaceRetryKey = key;
     app.sessionSurfaceRetryCount = 0;
     app.sessionSurfaceLastError = "";
+  }
+  const cachedSurface = sessionSurfaceCacheGet(key);
+  if (cachedSurface) {
+    setNotice("");
+    applySessionSurface(cachedSurface.surface, cachedSurface.frame, frameIndex, key);
+    return;
   }
   const controller = new AbortController();
   const generation = ++app.sessionSurfaceGeneration;
@@ -6557,21 +6781,8 @@ async function loadSessionSurfaceAtPlayhead({ force = false, interrupt = false }
       app.weighting !== weighting ||
       app.sessionSurfaceRequestKey !== key
     ) return;
-    const previousSurface = app.sessionSurface;
-    if (shouldResetCockpitDomains(previousSurface?.asOfMs, surface.asOfMs)) {
-      app.cockpitPriceDomain = null;
-      app.cockpitColorDomains = {};
-    }
-    app.sessionSurface = surface;
-    app.sessionSurfaceRenderedKey = key;
-    app.sessionSurfaceKeyframeIndex = frameIndex;
-    app.sessionSurfaceLoading = false;
-    dom.cockpitLoading.hidden = true;
-    clearSessionSurfaceRetry();
-    const presentation = scheduledMissingSessionSurfacePresentation(frame);
-    setNotice(presentation.notice, presentation.scheduledMissing);
-    renderCockpitStatic();
-    drawMetadataReplayDynamic(app.playheadMs ?? surface.asOfMs, { announce: true });
+    sessionSurfaceCachePut(key, { surface, frame });
+    applySessionSurface(surface, frame, frameIndex, key);
   } catch (error) {
     const failure = sessionSurfaceFailureDisposition(error, {
       requestCurrent: generation === app.sessionSurfaceGeneration && app.mode === "replay",
@@ -6654,6 +6865,8 @@ function resetReplayNavigationState() {
   app.wallAnchorMs = null;
   app.lastPaintMs = 0;
   app.timelineStepMinutes = REPLAY_TIMELINE_STEP_MINUTES;
+  app.sessionSurfaceCache.clear();
+  app.replayFrameChrome = { clock: "", position: "", timelineSec: -1, aria: "" };
   clearTrendVisuals();
   cancelSessionSurfaceRequest({ clear: true });
 }
@@ -7481,6 +7694,9 @@ if (isObject(globalThis.__SPX_SPARK_TEST_HOOK__)) {
     sessionSurfaceFrameIndexFor,
     sessionSurfaceRequestDecision,
     sessionSurfaceFailureDisposition,
+    sessionSurfaceCacheGet,
+    sessionSurfaceCachePut,
+    sessionSurfaceCoverageLabel,
     sessionSurfaceBlocksPlayback,
     replaySessionSurfacePresentationPhase,
     shouldClearSessionSurfaceAfterFailure,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from http import HTTPStatus
@@ -26,9 +27,17 @@ UTC = timezone.utc
 SESSION_DATE = date(2026, 7, 17)
 SESSION_OPEN = datetime(2026, 7, 17, 13, 30, tzinfo=UTC)
 SESSION_CLOSE = datetime(2026, 7, 17, 20, 0, tzinfo=UTC)
+# The live session canvas spans the full GTH → closed gap → RTH window:
+# 20:15 ET on 2026-07-16 through the 2026-07-17 RTH close.
+SESSION_WINDOW_START = datetime(2026, 7, 17, 0, 15, tzinfo=UTC)
 FRONT_EXPIRY = "20260717"
 NEXT_EXPIRY = "20260720"
 SELECTOR = LiveSelector()
+
+
+def _bucket_end_index(at: datetime) -> int:
+    """Count of 5-minute window buckets whose end is at or before ``at``."""
+    return int((at - SESSION_WINDOW_START).total_seconds() // 300)
 
 
 @dataclass
@@ -85,6 +94,9 @@ def _frame(
     valid_until: datetime,
     scale: float = 1.0,
     sequence: int = 1,
+    session_kind: str = "rth",
+    reference_method: str = "direct_index_spx",
+    providers: list[str] | None = None,
 ) -> dict[str, object]:
     expiry = FRONT_EXPIRY if role == "front" else NEXT_EXPIRY
     expiry_close = SESSION_CLOSE if role == "front" else SESSION_CLOSE + timedelta(days=3)
@@ -109,9 +121,11 @@ def _frame(
             "model_as_of": iso(model_as_of),
             "valid_until": iso(valid_until),
             "reference_spot": 5000.0,
+            "session_kind": session_kind,
+            "reference_method": reference_method,
             "quality": "ready",
             "warnings": [],
-            "providers": ["schwab"],
+            "providers": providers if providers is not None else ["schwab"],
             "input_clocks": {
                 "selection_as_of": iso(model_as_of),
                 "max_source_at": iso(model_as_of - timedelta(milliseconds=300)),
@@ -134,6 +148,10 @@ def _live_input(
     scale: float = 1.0,
     sequence: int = 1,
     spot: float = 5000.0,
+    session_kind: str = "rth",
+    reference_method: str = "direct_index_spx",
+    spot_provider: str = "schwab",
+    frame_providers: list[str] | None = None,
 ) -> LiveInput:
     model_as_of = accepted_at - timedelta(milliseconds=500)
     per_role_valid = role_valid_until or {}
@@ -145,6 +163,9 @@ def _live_input(
             valid_until=per_role_valid.get(role, valid_until),
             scale=scale,
             sequence=sequence,
+            session_kind=session_kind,
+            reference_method=reference_method,
+            providers=frame_providers,
         )
         for role in roles
     }
@@ -163,9 +184,11 @@ def _live_input(
         valid_until=valid_until,
         spot=spot,
         spot_source_at=model_as_of - timedelta(milliseconds=250),
-        spot_provider="schwab",
+        spot_provider=spot_provider,
+        session_kind=session_kind,
+        reference_method=reference_method,
         frames=frames,
-        providers=("schwab",),
+        providers=tuple(frame_providers) if frame_providers is not None else ("schwab",),
     )
 
 
@@ -260,6 +283,87 @@ def _accumulator(
     )
 
 
+def _gth_publisher_snapshot(
+    *,
+    source_as_of: datetime,
+    valid_until: datetime,
+    spot_source_at: datetime | None = None,
+) -> dict[str, object]:
+    """GTH snapshot: IBKR chain with a chain-implied reference, no index:SPX."""
+
+    ladder = _strike_ladder()
+    known_at = source_as_of - timedelta(milliseconds=100)
+    source_at = source_as_of - timedelta(milliseconds=300)
+    expiry_rows: list[dict[str, object]] = []
+    for role, expiry, expiry_close in (
+        ("front", FRONT_EXPIRY, SESSION_CLOSE),
+        ("next", NEXT_EXPIRY, SESSION_CLOSE + timedelta(days=3)),
+    ):
+        expiry_rows.append(
+            {
+                "role": role,
+                "expiry": expiry,
+                "expiry_close": iso(expiry_close),
+                "contract_count": 6,
+                "quality": "ready",
+                "warnings": [],
+                "providers": ["ibkr"],
+                "input_clocks": {
+                    "selection_as_of": iso(source_as_of),
+                    "max_source_at": iso(source_at),
+                    "max_known_at": iso(known_at),
+                    "contract_clock_count": 6,
+                    "future_clock_count": 0,
+                },
+                "surface": {
+                    "as_of": iso(source_as_of),
+                    "reference_spot": 5000.0,
+                    "quality": "ready",
+                    "strike_ladder": ladder,
+                },
+            }
+        )
+    return signed_payload(
+        {
+            "schema_version": 1,
+            "kind": "spxw_surface_dashboard",
+            "surface_version": "test",
+            "status": "ready",
+            "as_of": iso(source_as_of),
+            "created_at": iso(source_as_of + timedelta(milliseconds=50)),
+            "valid_until": iso(valid_until),
+            "automatic_ordering": False,
+            "session": {
+                "state": "gth",
+                "rth_open": False,
+                "globex_open": True,
+                "spx_gth_open": True,
+                "research_expiries": [FRONT_EXPIRY, NEXT_EXPIRY],
+            },
+            "underlier": {
+                "source": "chain_implied",
+                "provider": "ibkr",
+                "price": 5000.0,
+                "source_at": iso(spot_source_at or source_at),
+                "quality": "derived_fresh_pairs",
+            },
+            "source_state": {
+                "created_at": iso(source_as_of - timedelta(seconds=1)),
+                "selection_as_of": iso(source_as_of),
+            },
+            "quality": {
+                "status": "ready",
+                "lease_seconds": 30.0,
+                "refresh_interval_seconds": 5.0,
+                "published_expiry_count": 2,
+                "requested_expiry_count": 2,
+                "reasons": [],
+            },
+            "expiries": expiry_rows,
+        }
+    )
+
+
 def _accept(
     accumulator: LiveSessionAccumulator,
     *,
@@ -307,7 +411,8 @@ def _state_with_boundaries(
     clock.value = freeze_at
     assert accumulator._freeze_due(freeze_at)  # exercise the persisted boundary transaction
     boundaries = list(store.load_boundaries(SESSION_DATE))
-    assert len(boundaries) == boundary_count
+    expected = _bucket_end_index(SESSION_OPEN + timedelta(minutes=5 * boundary_count))
+    assert len(boundaries) == expected
     return store, clock, boundaries
 
 
@@ -340,11 +445,13 @@ def test_poll_stamps_validation_completion_and_cannot_backfill_crossed_boundary(
     assert runtime is not None
     front = runtime["candidate_by_role"]["front"]
     assert front["accepted_at"] == iso(validation_finished)
-    first = accumulator.store.load_boundaries(SESSION_DATE)[0]
-    assert first["end_at"] == iso(_at(13, 35))
-    assert first["frame_by_role"]["front"] is None
-    assert first["frozen_columns"]["front"] is None
-    assert first["missing"]["surface_by_role"]["front"] == (
+    first_rth = accumulator.store.load_boundaries(SESSION_DATE)[
+        _bucket_end_index(_at(13, 35)) - 1
+    ]
+    assert first_rth["end_at"] == iso(_at(13, 35))
+    assert first_rth["frame_by_role"]["front"] is None
+    assert first_rth["frozen_columns"]["front"] is None
+    assert first_rth["missing"]["surface_by_role"]["front"] == (
         "validated_surface_unavailable_at_bucket_end"
     )
 
@@ -397,7 +504,8 @@ def test_frozen_derived_column_survives_new_input_and_restart(tmp_path: Path) ->
     )
     clock.value = _at(13, 35, 1)
     assert accumulator._freeze_due(clock.value)
-    frozen = accumulator.store.load_boundaries(SESSION_DATE)[0]
+    rth_index = _bucket_end_index(_at(13, 35)) - 1
+    frozen = accumulator.store.load_boundaries(SESSION_DATE)[rth_index]
     frozen_column = frozen["frozen_columns"]["front"]["oi_weighted"]
 
     second_at = _at(13, 35, 5)
@@ -411,18 +519,18 @@ def test_frozen_derived_column_survives_new_input_and_restart(tmp_path: Path) ->
     )
     clock.value = _at(13, 35, 6)
     before_restart = accumulator.session_surface(SELECTOR, now=clock.value)
-    assert before_restart["surface_columns"][0]["source_frame_sha256"] == (
+    assert before_restart["surface_columns"][rth_index]["source_frame_sha256"] == (
         frozen_column["source_frame_sha256"]
     )
-    assert before_restart["gamma_surface"][0] == frozen_column["metrics"]["signed_gamma"]
-    assert before_restart["charm_surface"][0] == frozen_column["metrics"]["charm"]
+    assert before_restart["gamma_surface"][rth_index] == frozen_column["metrics"]["signed_gamma"]
+    assert before_restart["charm_surface"][rth_index] == frozen_column["metrics"]["charm"]
 
     restarted = _accumulator(tmp_path, clock)
     after_restart = restarted.session_surface(SELECTOR, now=clock.value)
-    assert after_restart["surface_columns"][0] == before_restart["surface_columns"][0]
-    assert after_restart["gamma_surface"][0] == before_restart["gamma_surface"][0]
-    assert after_restart["charm_surface"][0] == before_restart["charm_surface"][0]
-    assert restarted.store.load_boundaries(SESSION_DATE)[0]["artifact_sha256"] == (
+    assert after_restart["surface_columns"][rth_index] == before_restart["surface_columns"][rth_index]
+    assert after_restart["gamma_surface"][rth_index] == before_restart["gamma_surface"][rth_index]
+    assert after_restart["charm_surface"][rth_index] == before_restart["charm_surface"][rth_index]
+    assert restarted.store.load_boundaries(SESSION_DATE)[rth_index]["artifact_sha256"] == (
         frozen["artifact_sha256"]
     )
 
@@ -438,10 +546,11 @@ def test_mid_session_missing_boundaries_are_never_backfilled(tmp_path: Path) -> 
         sequence=1,
     )
     boundaries_before = accumulator.store.load_boundaries(SESSION_DATE)
-    assert [row["end_at"] for row in boundaries_before] == [
-        iso(_at(13, 35)),
-        iso(_at(13, 40)),
+    expected_ends = [
+        iso(SESSION_WINDOW_START + timedelta(minutes=5 * (index + 1)))
+        for index in range(_bucket_end_index(_at(13, 40)))
     ]
+    assert [row["end_at"] for row in boundaries_before] == expected_ends
     assert all(row["frozen_columns"]["front"] is None for row in boundaries_before)
 
     clock.value = _at(13, 40, 2)
@@ -605,7 +714,8 @@ def test_event_sampled_candle_freezes_ohlc_and_expiry_removes_partial(
 
     clock.value = _at(13, 35, 1)
     assert accumulator._freeze_due(clock.value)
-    frozen = accumulator.store.load_boundaries(SESSION_DATE)[0]
+    rth_index = _bucket_end_index(_at(13, 35)) - 1
+    frozen = accumulator.store.load_boundaries(SESSION_DATE)[rth_index]
     assert frozen["candle"] == {
         "start_at": iso(_at(13, 30)),
         "end_at": iso(_at(13, 35)),
@@ -632,7 +742,7 @@ def test_event_sampled_candle_freezes_ohlc_and_expiry_removes_partial(
         spot_source_at=_at(13, 34, 59, 500_000),
     )
     assert accumulator.accept(late, accepted_at=late_at)
-    assert accumulator.store.load_boundaries(SESSION_DATE)[0]["candle"] == frozen["candle"]
+    assert accumulator.store.load_boundaries(SESSION_DATE)[rth_index]["candle"] == frozen["candle"]
 
     partial_at = _at(13, 35, 5)
     _accept(
@@ -837,3 +947,276 @@ def test_http_server_time_header_exactly_matches_signed_body(tmp_path: Path) -> 
     unsigned = dict(response.payload)
     artifact = unsigned.pop("artifact_sha256")
     assert artifact == canonical_sha256(unsigned)
+
+
+def _poll_snapshot(
+    accumulator: LiveSessionAccumulator,
+    tmp_path: Path,
+    payload: dict[str, object],
+    *,
+    now: datetime,
+) -> bool:
+    (tmp_path / "snapshot.json").write_text(json.dumps(payload), encoding="utf-8")
+    return accumulator.poll_once(now=now)
+
+
+def test_gth_snapshot_accepted_into_segmented_surface(tmp_path: Path) -> None:
+    accepted = _at(8, 0)  # 04:00 ET, morning GTH of the 2026-07-17 session
+    request_at = accepted + timedelta(milliseconds=100)
+    clock = MutableClock(accepted)
+    accumulator = _accumulator(tmp_path, clock)
+    payload = _gth_publisher_snapshot(source_as_of=accepted, valid_until=_at(8, 0, 30))
+    assert _poll_snapshot(accumulator, tmp_path, payload, now=request_at)
+
+    surface = accumulator.session_surface(SELECTOR, now=request_at)
+    assert surface["schema_version"] == 2
+    assert surface["policy_version"] == "spxw_session_surface.live.v2"
+    segments = surface["session_segments"]
+    assert [row["kind"] for row in segments] == ["gth", "closed_gap", "rth"]
+    assert segments[0]["surface_provider"] == "ibkr"
+    assert segments[0]["reference_method"] == "chain_implied"
+    assert segments[0]["reference_provider"] == "ibkr"
+    assert segments[1]["surface_provider"] is None
+    assert segments[2]["surface_provider"] is None
+    assert segments[2]["reference_method"] is None
+    assert surface["providers"] == {
+        "gth_surface": "ibkr",
+        "gth_reference": "ibkr",
+        "rth_surface": None,
+        "rth_reference": None,
+    }
+    capabilities = surface["capabilities"]
+    assert capabilities["gth_available"] is True
+    assert capabilities["gth_data_available"] is True
+    assert capabilities["gth_contract_declared"] is True
+    assert capabilities["gth_complete_chain_available"] is False
+
+    reference = surface["reference"]
+    assert reference["price"] == 5000.0
+    assert reference["method"] == "chain_implied"
+    assert reference["provider"] == "ibkr"
+    assert reference["instrument_id"] == "spxw_front_chain"
+    assert reference["quality"] == "degraded"
+    assert reference["render_style"] == "inferred_dashed"
+    assert reference["basis"] is None
+    assert surface["spot"] == 5000.0
+
+    projected = [
+        column
+        for column in surface["surface_columns"]
+        if column["kind"] == "projection"
+    ]
+    assert projected
+    assert all(
+        column["session_kind"] == "gth"
+        and column["source_session_kind"] == "gth"
+        and column["surface_provider"] == "ibkr"
+        and column["reference_method"] == "chain_implied"
+        and column["quality"] == "degraded"
+        for column in projected
+        if column["session_kind"] == "gth"
+    )
+
+    metadata = surface["strike_profile_metadata"]
+    assert metadata["current_session_kind"] == "gth"
+    assert metadata["baseline_at"] is None
+    assert metadata["baseline_unavailable_reason"] == (
+        "gth_contract_universe_completeness_unproven"
+    )
+
+    payload_path = tmp_path / "live-session-v2.json"
+    payload_path.write_text(json.dumps(surface), encoding="utf-8")
+    root = Path(__file__).resolve().parents[1]
+    subprocess.run(
+        [
+            "node",
+            str(root / "tests" / "js" / "live_session_surface_v2_payload_test.js"),
+            str(root / "site" / "spxw-surface" / "public" / "app.js"),
+            str(payload_path),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_gth_evening_snapshot_belongs_to_next_trading_day(tmp_path: Path) -> None:
+    accepted = _at(0, 30)  # 20:30 ET on 2026-07-16 → belongs to the 7/17 session
+    completed = accepted + timedelta(milliseconds=100)
+    clock = MutableClock(accepted)
+    accumulator = _accumulator(tmp_path, clock)
+    payload = _gth_publisher_snapshot(source_as_of=accepted, valid_until=_at(0, 30, 30))
+    assert _poll_snapshot(accumulator, tmp_path, payload, now=completed)
+
+    assert accumulator.health_payload()["active_session"] == "2026-07-17"
+    manifest = accumulator.store.load_manifest(SESSION_DATE)
+    assert manifest is not None
+    assert manifest["session_date"] == "2026-07-17"
+    assert manifest["session_start"] == iso(SESSION_WINDOW_START)
+    assert manifest["session_end"] == iso(SESSION_CLOSE)
+
+
+def test_gth_snapshot_requires_chain_implied_reference(tmp_path: Path) -> None:
+    accepted = _at(8, 0)
+    clock = MutableClock(accepted)
+    accumulator = _accumulator(tmp_path, clock)
+    payload = _gth_publisher_snapshot(source_as_of=accepted, valid_until=_at(8, 0, 30))
+    payload["underlier"] = {
+        "source": "index:SPX",
+        "provider": "schwab",
+        "price": 5000.0,
+        "source_at": iso(accepted - timedelta(milliseconds=300)),
+        "quality": "ready",
+    }
+    payload = signed_payload(payload)
+
+    assert _poll_snapshot(accumulator, tmp_path, payload, now=accepted) is False
+    health = accumulator.health_payload()
+    assert health["last_error"] == "live_gth_reference_unavailable"
+    assert health["active_session"] is None
+
+
+def test_gth_reference_lookahead_rejected(tmp_path: Path) -> None:
+    accepted = _at(8, 0)
+    clock = MutableClock(accepted)
+    accumulator = _accumulator(tmp_path, clock)
+    payload = _gth_publisher_snapshot(
+        source_as_of=accepted,
+        valid_until=_at(8, 0, 30),
+        spot_source_at=accepted + timedelta(seconds=1),
+    )
+
+    assert _poll_snapshot(accumulator, tmp_path, payload, now=accepted) is False
+    assert accumulator.health_payload()["last_error"] == "live_spot_lookahead"
+
+
+def test_closed_gap_marks_missing_and_clears_spot(tmp_path: Path) -> None:
+    accepted = _at(13, 20)  # 09:20 ET, late GTH
+    completed = accepted + timedelta(milliseconds=100)
+    clock = MutableClock(accepted)
+    accumulator = _accumulator(tmp_path, clock)
+    payload = _gth_publisher_snapshot(source_as_of=accepted, valid_until=_at(13, 35))
+    assert _poll_snapshot(accumulator, tmp_path, payload, now=completed)
+
+    gap_at = _at(13, 27)  # 09:27 ET, scheduled closed gap
+    clock.value = gap_at
+    surface = accumulator.session_surface(SELECTOR, now=gap_at)
+    gap_column = surface["surface_columns"][_bucket_end_index(_at(13, 30)) - 1]
+    assert gap_column["kind"] == "missing"
+    assert gap_column["session_kind"] == "closed_gap"
+    assert gap_column["source_session_kind"] is None
+    assert gap_column["reason"] == "scheduled_closed_gap"
+    assert all(column["kind"] != "projection" for column in surface["surface_columns"])
+    assert surface["spot"] is None
+    reference = surface["reference"]
+    assert reference["price"] is None
+    assert reference["quality"] == "unavailable"
+    assert reference["missing_reason"] == "scheduled_closed_gap"
+
+
+def test_rth_after_gth_keeps_gth_columns_degraded(tmp_path: Path) -> None:
+    gth_at = _at(13, 24)
+    gth_completed = gth_at + timedelta(milliseconds=100)
+    clock = MutableClock(gth_at)
+    accumulator = _accumulator(tmp_path, clock)
+    gth_payload = _gth_publisher_snapshot(source_as_of=gth_at, valid_until=_at(13, 35))
+    assert _poll_snapshot(accumulator, tmp_path, gth_payload, now=gth_completed)
+
+    rth_at = _at(13, 31)  # 09:31 ET, first RTH snapshot
+    rth_completed = rth_at + timedelta(milliseconds=100)
+    clock.value = rth_at
+    rth_payload = _publisher_snapshot(source_as_of=rth_at, valid_until=_at(13, 45))
+    assert _poll_snapshot(accumulator, tmp_path, rth_payload, now=rth_completed)
+
+    surface = accumulator.session_surface(SELECTOR, now=rth_completed)
+    segments = surface["session_segments"]
+    assert segments[0]["surface_provider"] == "ibkr"
+    assert segments[2]["surface_provider"] == "schwab"
+    assert segments[2]["reference_method"] == "direct_index_spx"
+    assert segments[2]["reference_provider"] == "schwab"
+
+    gth_column = surface["surface_columns"][_bucket_end_index(_at(13, 25)) - 1]
+    assert gth_column["kind"] == "historical"
+    assert gth_column["session_kind"] == "gth"
+    assert gth_column["source_session_kind"] == "gth"
+    assert gth_column["quality"] == "degraded"
+    assert gth_column["surface_provider"] == "ibkr"
+
+    gap_column = surface["surface_columns"][_bucket_end_index(_at(13, 30)) - 1]
+    assert gap_column["kind"] == "missing"
+    assert gap_column["reason"] == "scheduled_closed_gap"
+    gap_index = _bucket_end_index(_at(13, 30)) - 1
+    assert all(
+        value is None
+        for matrix_name in (
+            "gamma_surface",
+            "gross_gamma_surface",
+            "charm_surface",
+            "vanna_surface",
+        )
+        for value in surface[matrix_name][gap_index]
+    )
+    assert surface["zero_ridges"][gap_index] is None
+    assert surface["gamma_positive_peaks"][gap_index] is None
+    assert surface["gamma_negative_troughs"][gap_index] is None
+
+    reference = surface["reference"]
+    assert reference["method"] == "direct_index_spx"
+    assert reference["provider"] == "schwab"
+    assert reference["instrument_id"] == "index:SPX"
+    assert reference["quality"] == "ready"
+    assert reference["render_style"] == "direct_solid"
+
+    gth_candles = [
+        candle for candle in surface["candles"] if candle.get("session_kind") == "gth"
+    ]
+    assert gth_candles
+    assert all(
+        candle["reference_method"] == "chain_implied"
+        and candle["render_style"] == "inferred_dashed"
+        for candle in gth_candles
+    )
+
+
+def test_gth_lease_never_becomes_current_rth_surface(tmp_path: Path) -> None:
+    gth_at = _at(13, 24)
+    completed = gth_at + timedelta(milliseconds=100)
+    clock = MutableClock(gth_at)
+    accumulator = _accumulator(tmp_path, clock)
+    payload = _gth_publisher_snapshot(source_as_of=gth_at, valid_until=_at(13, 35))
+    assert _poll_snapshot(accumulator, tmp_path, payload, now=completed)
+
+    rth_at = _at(13, 31)
+    clock.value = rth_at
+    surface = accumulator.session_surface(SELECTOR, now=rth_at)
+
+    assert all(column["kind"] != "projection" for column in surface["surface_columns"])
+    assert surface["spot"] is None
+    assert surface["reference"]["price"] is None
+    assert surface["reference"]["missing_reason"] == (
+        "fresh_coordinate_reference_unavailable"
+    )
+    assert surface["availability"]["projection_available"] is False
+    assert surface["availability"]["current_spot_available"] is False
+    assert surface["strike_profile"] == []
+    assert surface["strike_profile_metadata"]["current_session_kind"] is None
+
+
+def test_weekend_retains_completed_session(tmp_path: Path) -> None:
+    accepted = _at(19, 59, 30)  # final RTH bucket of Friday 7/17
+    completed = accepted + timedelta(milliseconds=100)
+    clock = MutableClock(accepted)
+    accumulator = _accumulator(tmp_path, clock)
+    payload = _publisher_snapshot(source_as_of=accepted, valid_until=_at(20, 0, 30))
+    assert _poll_snapshot(accumulator, tmp_path, payload, now=completed)
+
+    saturday = datetime(2026, 7, 18, 15, 0, tzinfo=UTC)
+    clock.value = saturday
+    surface = accumulator.session_surface(LiveSelector(role="next"), now=saturday)
+    assert surface["session_date"] == "2026-07-17"
+    assert surface["live_status"] == "closed"
+    assert surface["spot"] is None
+    assert any(
+        column["kind"] == "historical" for column in surface["surface_columns"]
+    )
+    assert accumulator.health_payload()["active_session"] == "2026-07-17"

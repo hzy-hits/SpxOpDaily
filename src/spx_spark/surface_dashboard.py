@@ -134,13 +134,33 @@ def _fresh_underlier(
     implied_price = _finite_number(implied)
     if implied_price is None or implied_price <= 0:
         return None
+    pricing_quotes = [
+        quote
+        for quote in front_quotes
+        if configured_quote_use_decision(quote, as_of=state.as_of).pricing_allowed
+    ]
+    source_clock = max(
+        (_transport_time(quote) for quote in pricing_quotes),
+        default=None,
+    )
+    providers = sorted({quote.provider.value for quote in pricing_quotes})
     return {
         "price": implied_price,
         "source": "chain_implied",
-        "provider": None,
+        "provider": (
+            providers[0]
+            if len(providers) == 1
+            else "mixed"
+            if providers
+            else None
+        ),
         "quality": "derived_fresh_pairs",
-        "source_at": None,
-        "age_seconds": None,
+        "source_at": source_clock.isoformat() if source_clock is not None else None,
+        "age_seconds": (
+            round((as_utc(state.as_of) - source_clock).total_seconds(), 6)
+            if source_clock is not None
+            else None
+        ),
     }
 
 

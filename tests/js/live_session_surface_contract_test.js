@@ -441,7 +441,7 @@ function expirePayload(payload) {
   assert.equal(hooks.unavailableLiveReason("live_session_not_rth"), "market_closed");
   assert.match(
     hooks.unavailableLiveMessage("live_session_not_rth"),
-    /first validated RTH snapshot/,
+    /first validated GTH or RTH snapshot/,
   );
 })().catch((error) => {
   process.nextTick(() => { throw error; });

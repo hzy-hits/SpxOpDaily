@@ -78,6 +78,9 @@ for (const name of [
   "sessionSurfaceFrameIndexFor",
   "sessionSurfaceRequestDecision",
   "sessionSurfaceFailureDisposition",
+  "sessionSurfaceCacheGet",
+  "sessionSurfaceCachePut",
+  "sessionSurfaceCoverageLabel",
   "sessionSurfaceBlocksPlayback",
   "replaySessionSurfacePresentationPhase",
   "shouldClearSessionSurfaceAfterFailure",
@@ -728,6 +731,16 @@ async function sign(payload) {
   assert.equal(hooks.sessionSurfaceFrameIndexFor(frameClocks, 2000), 1);
   assert.equal(hooks.shouldResetCockpitDomains(Date.parse("2026-07-17T15:30:00Z"), Date.parse("2026-07-17T10:27:00Z")), true);
   assert.equal(hooks.shouldResetCockpitDomains(Date.parse("2026-07-17T10:27:00Z"), Date.parse("2026-07-17T15:30:00Z")), false);
+  assert.match(hooks.sessionSurfaceCoverageLabel(normalizedV2), /^\d+\.\d%$/);
+
+  for (let index = 0; index < 25; index += 1) {
+    hooks.sessionSurfaceCachePut(`cache-${index}`, { index });
+  }
+  assert.equal(hooks.sessionSurfaceCacheGet("cache-0"), null);
+  assert.deepEqual(hooks.sessionSurfaceCacheGet("cache-1"), { index: 1 });
+  hooks.sessionSurfaceCachePut("cache-25", { index: 25 });
+  assert.equal(hooks.sessionSurfaceCacheGet("cache-2"), null);
+  assert.deepEqual(hooks.sessionSurfaceCacheGet("cache-1"), { index: 1 });
 
   const partial = { startMs: 100, endMs: 200, complete: false };
   assert.equal(hooks.cockpitCandleDisplayTime(partial, 120), 120);

@@ -18,7 +18,7 @@ from spx_spark.surface_replay_session_models import _FrameState
 
 LIVE_SERVICE_SCHEMA_VERSION = 1
 LIVE_SESSION_STATE_SCHEMA_VERSION = 1
-LIVE_SESSION_POLICY_VERSION = "spxw_session_surface.v1"
+LIVE_SESSION_POLICY_VERSION = "spxw_session_surface.live.v2"
 LIVE_SESSION_KIND = "spxw_session_surface"
 LIVE_SESSION_MODE = "live"
 LIVE_BUCKET_MINUTES = 5
@@ -205,6 +205,26 @@ def frame_state(payload: Mapping[str, Any]) -> _FrameState:
     )
     raw_warnings = payload.get("warnings")
     warnings = tuple(str(value) for value in raw_warnings) if isinstance(raw_warnings, list) else ()
+    session_kind = str(payload.get("session_kind") or "rth")
+    if session_kind not in {"gth", "rth"}:
+        raise LiveSnapshotError("live_frame_session_kind_invalid")
+    frame_providers = payload.get("providers")
+    provider_values = (
+        sorted({str(value) for value in frame_providers if str(value)})
+        if isinstance(frame_providers, list)
+        else []
+    )
+    surface_provider = (
+        provider_values[0]
+        if len(provider_values) == 1
+        else "mixed"
+        if provider_values
+        else "ibkr" if session_kind == "gth" else "schwab"
+    )
+    reference_method = str(
+        payload.get("reference_method")
+        or ("chain_implied" if session_kind == "gth" else "direct_index_spx")
+    )
     return _FrameState(
         at=model_as_of,
         valid_until=valid_until,
@@ -217,6 +237,9 @@ def frame_state(payload: Mapping[str, Any]) -> _FrameState:
         quality=str(payload.get("quality") or "unavailable"),
         warnings=warnings,
         known_at=accepted_at,
+        session_kind=session_kind,
+        surface_provider=surface_provider,
+        reference_method=reference_method,
     )
 
 

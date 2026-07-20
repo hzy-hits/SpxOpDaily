@@ -38,9 +38,9 @@ and an explicit status.
 
 If the underlier, option quotes, implied volatility, or remaining time is not
 usable, the projection publishes an `unavailable` result with reasons and no
-surface. The browser does not keep an old surface on screen after expiry. This
-is especially important outside regular trading hours, when Schwab may not
-provide a fresh SPXW chain.
+surface. The browser does not keep an old surface on screen after expiry. Live
+GTH accepts only the policy-selected IBKR SPXW chain and a fresh chain-implied
+reference; RTH requires a direct SPX reference.
 
 Historical replay is a separate contract and browser mode. A frame has
 `kind=spxw_surface_dashboard_replay`, `mode=replay`, `frozen=true`, and no live
@@ -66,13 +66,14 @@ the market clock waits for that cutoff's verified surface instead of skipping a
 keyframe; the Canvas overlay continues at 30 fps while the static surface stays
 cached. The post-close warmer keeps the normal replay path off the cold builder.
 
-Each response has a fixed 09:30--16:00 ET canvas by default. Completed columns
-use only the causal frame valid at that bucket end and never get rebuilt from a
-later chain. Future columns use only the current cutoff's chain with fixed IV,
-OI/volume, and time decay, and are visibly labeled as model projections. Near
-expiry or missing inputs remain null and hatched; they are never converted to
-zero or interpolated. Event-sampled candles are cutoff-bound and stop at the
-response `as_of`.
+Each schema-2 response has a fixed full-session canvas: preceding-day 20:15 ET
+through the trading day's RTH close, segmented as GTH, the 09:25--09:30 closed
+gap, and RTH. Completed columns use only the causal frame valid at that bucket
+end and never get rebuilt from a later chain. Future columns use only the current
+cutoff's chain with fixed IV, OI/volume, and time decay, and are visibly labeled
+as model projections. The closed gap, near-expiry values, and missing inputs
+remain null and hatched; they are never converted to zero or interpolated.
+Event-sampled candles are cutoff-bound and stop at the response `as_of`.
 
 The price grid is anchored to the first causal SPX observation rather than the
 current spot or a future high/low, so adjacent replay responses retain the same
@@ -113,13 +114,15 @@ fails closed if those fields are missing or softened. Lake v1 also lacks a
 separate option `structure_time`, so `field_stitching=false` does not prove that
 price, IV, and OI share one exchange clock.
 
-The Session Surface contract is `schema_version=1`,
-`kind=spxw_session_surface`, and `policy_version=spxw_session_surface.v1`. It
-contains one shared time/price grid, nullable Gamma/Charm/Vanna/gross-Gamma
-matrices, historical/projection/missing column semantics, cutoff-bound candles,
-Gamma ridge/extrema, a Current-vs-First-Validated strike profile, missing
-ranges, capabilities, and provenance. The browser verifies the artifact
-SHA-256 and fails closed on a weakened PIT or capability contract.
+The current Session Surface contract is `schema_version=2` and
+`kind=spxw_session_surface`. Replay uses `policy_version=spxw_session_surface.v5`;
+Live uses the independent `policy_version=spxw_session_surface.live.v2`. It
+contains one shared time/price grid, explicit segment/provider/reference
+declarations, nullable Gamma/Charm/Vanna/gross-Gamma matrices,
+historical/projection/missing column semantics, cutoff-bound candles, Gamma
+ridge/extrema, a same-segment/provider/method strike comparison, missing ranges,
+capabilities, and provenance. The browser verifies the artifact SHA-256 and
+fails closed on a mode/policy mismatch or weakened PIT/capability contract.
 
 The capability boundary is explicit:
 
@@ -153,8 +156,10 @@ publish directory:
 /srv/data/spx-spark/data/published/spxw-surface/replays/2026-07-17T183500Z.json
 /srv/data/spx-spark/data/published/spxw-surface/replay-catalog/session=YYYY-MM-DD/timeline-5m.json
 /srv/data/spx-spark/data/published/spxw-surface/replay-cache/policy=v3/lookback=*/projection=*/source=*/*.json
-/srv/data/spx-spark/data/published/spxw-surface/session-surface-cache/policy=v1/contract=2/frame=5m/bucket=*/step=*/lookback=15s/projection=*/source=*/timeline=*/role=*/weighting=*/*.json
+/srv/data/spx-spark/data/published/spxw-surface/session-surface-cache/policy=v5/contract=8/frame=5m/bucket=*/step=*/lookback=15s/projection=*/source=*/timeline=*/role=*/weighting=*/*.json
+/srv/data/spx-spark/data/published/spxw-surface/live/policy=live-v2/session=YYYY-MM-DD/
 /srv/data/spx-spark/data/published/spxw-surface/runtime/replay-api.sock
+/srv/data/spx-spark/data/published/spxw-surface/runtime/live/live-api.sock
 ```
 
 The low-priority host replay service reads Parquet, serializes generation with a
@@ -186,11 +191,12 @@ for the 2026-07-17 session. The frontend refreshes every five seconds only in
 Live mode. Replay indexes a session once, generates missing frames on demand,
 and never changes the live publisher, strategy state, or execution state.
 
-The live five-second publisher still emits the original moving scenario grid;
-it cannot be losslessly inserted into a session-fixed price matrix. The cockpit
-therefore fails closed with an explicit live placeholder until a durable live
-session accumulator publishes this same contract. It does not interpolate the
-moving live grid or pretend browser-local history is complete.
+The live five-second publisher feeds a durable accumulator. The accumulator
+fixes the first validated segment-appropriate SPX coordinate, freezes causal
+five-minute boundaries, and publishes live schema 2 over a private Unix socket.
+It does not interpolate the publisher's moving scenario grid or pretend
+browser-local history is complete. GTH values remain partial-chain degraded,
+and the scheduled gap is always Missing.
 
 ## Deployment and rollback
 

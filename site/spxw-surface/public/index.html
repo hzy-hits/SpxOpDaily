@@ -22,9 +22,6 @@
         <p id="page-lede" class="lede">同一交易时钟下的 SPX 价格、Gamma / Charm 暴露代理与 strike 结构。</p>
         <div class="cockpit-head-state" aria-live="polite">
           <span class="proxy-badge" title="Calls positive / puts negative; dealer position is not inferred">PROXY</span>
-          <span id="provider-chip" class="provider-chip" title="Validated data provider">Provider —</span>
-          <span id="reference-chip" class="reference-chip" title="Reference method">Reference —</span>
-          <span id="reference-clock" class="reference-clock" title="Reference source clocks">Clocks —</span>
           <span id="status-pill" class="status-pill status-loading">正在连接</span>
           <span id="refresh-state" class="refresh-state">等待数据</span>
           <button id="cockpit-audit-toggle" class="audit-button" type="button" aria-controls="cockpit-audit-drawer" aria-expanded="false">Data / Audit</button>
@@ -114,7 +111,7 @@
           <header class="cockpit-panel-header">
             <div>
               <p class="panel-kicker">TIME × SPX</p>
-              <h2>Gamma Surface <span class="proxy-inline">Proxy</span></h2>
+              <h2>Gamma Surface</h2>
             </div>
             <div class="panel-readout">
               <strong id="cockpit-gamma-value">—</strong>
@@ -127,11 +124,11 @@
             <div id="cockpit-gamma-empty" class="cockpit-panel-empty">Waiting for Gamma session surface</div>
           </div>
           <footer class="cockpit-panel-legend">
-            <span><i class="legend-swatch negative"></i>− proxy</span>
-            <span><i class="legend-swatch neutral"></i>neutral</span>
-            <span><i class="legend-swatch positive"></i>+ proxy</span>
-            <span class="extrema-marker-key positive">⊕ peak</span>
-            <span class="extrema-marker-key negative">⊖ trough</span>
+            <span title="Negative exposure proxy"><i class="legend-swatch negative"></i>−</span>
+            <span title="Neutral"><i class="legend-swatch neutral"></i>0</span>
+            <span title="Positive exposure proxy"><i class="legend-swatch positive"></i>+</span>
+            <span class="extrema-marker-key positive" title="Peak">⊕</span>
+            <span class="extrema-marker-key negative" title="Trough">⊖</span>
             <span><i id="cockpit-gamma-reference-icon" class="legend-candle"></i><span id="cockpit-gamma-reference-legend">Reference path</span></span>
             <span id="cockpit-gamma-domain">domain —</span>
           </footer>
@@ -141,7 +138,7 @@
           <header class="cockpit-panel-header">
             <div>
               <p class="panel-kicker">STRIKE × SNAPSHOT STATE</p>
-              <h2><span id="cockpit-strike-title">Open Interest by Strike</span> <span class="proxy-inline">Proxy</span></h2>
+              <h2><span id="cockpit-strike-title">Open Interest by Strike</span></h2>
             </div>
             <div class="strike-header-tools">
               <div class="strike-mode-switch" role="group" aria-label="Strike profile metric">
@@ -161,8 +158,8 @@
           </div>
           <footer class="cockpit-panel-legend cockpit-strike-legend">
             <span><i class="legend-bar current"></i><span id="cockpit-strike-current-legend">Current OI</span></span>
-            <span><i class="legend-bar baseline"></i><span id="cockpit-strike-baseline-legend">First validated OI · same segment/provider/method</span></span>
-            <span id="cockpit-strike-color-legend">Color = call+/put− Γ sign</span>
+            <span title="First validated snapshot · same segment/provider/method"><i class="legend-bar baseline"></i><span id="cockpit-strike-baseline-legend">Baseline · first validated</span></span>
+            <span id="cockpit-strike-color-legend" title="Bar color = OI-weighted Γ proxy sign">Call + / Put −</span>
             <span id="cockpit-strike-domain">domain —</span>
             <span class="proxy-limit">Not MM / participant / flow</span>
           </footer>
@@ -172,7 +169,7 @@
           <header class="cockpit-panel-header">
             <div>
               <p class="panel-kicker">TIME × SPX</p>
-              <h2>Charm Surface <span class="proxy-inline">Proxy</span></h2>
+              <h2>Charm Surface</h2>
             </div>
             <div class="panel-readout">
               <strong id="cockpit-charm-value">—</strong>
@@ -185,9 +182,9 @@
             <div id="cockpit-charm-empty" class="cockpit-panel-empty">Waiting for Charm session surface</div>
           </div>
           <footer class="cockpit-panel-legend">
-            <span><i class="legend-swatch negative"></i>− proxy</span>
-            <span><i class="legend-swatch neutral"></i>neutral</span>
-            <span><i class="legend-swatch positive"></i>+ proxy</span>
+            <span title="Negative exposure proxy"><i class="legend-swatch negative"></i>−</span>
+            <span title="Neutral"><i class="legend-swatch neutral"></i>0</span>
+            <span title="Positive exposure proxy"><i class="legend-swatch positive"></i>+</span>
             <span><i id="cockpit-charm-reference-icon" class="legend-candle"></i><span id="cockpit-charm-reference-legend">Reference path</span></span>
             <span id="cockpit-charm-domain">domain —</span>
           </footer>
@@ -221,6 +218,12 @@
           <span id="cockpit-audit-frozen" class="audit-chip">Frozen —</span>
           <span id="cockpit-audit-pit" class="audit-chip warning">PIT —</span>
           <span id="cockpit-audit-model" class="audit-chip">Model —</span>
+        </div>
+
+        <div class="audit-meta-chips" aria-label="Provider and reference">
+          <span id="provider-chip" class="provider-chip" title="Validated data provider">Provider —</span>
+          <span id="reference-chip" class="reference-chip" title="Reference method">Reference —</span>
+          <span id="reference-clock" class="reference-clock" title="Reference source clocks">Clocks —</span>
         </div>
 
         <dl class="audit-list">
@@ -311,8 +314,7 @@
       </section>
 
       <footer class="page-footer cockpit-footer">
-        <p>Read-only research surface · no order entry</p>
-        <p>OI / volume values are structural or activity proxies; participant and dealer position are not asserted.</p>
+        <p>Read-only research surface · no order entry · OI/volume are activity proxies; participant and dealer position are not asserted.</p>
       </footer>
     </main>
   </body>

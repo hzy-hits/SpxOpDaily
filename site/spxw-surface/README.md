@@ -45,6 +45,12 @@ dedicated publisher output:
 
 `/srv/data/spx-spark/data/published/spxw-surface/snapshot.json`
 
+Live schema 2 covers the complete SPXW session: preceding-day 20:15 ET GTH,
+the 09:25–09:30 scheduled closed gap, and RTH through the actual close. GTH uses
+the IBKR partial chain with a dashed, degraded chain-implied SPX reference; RTH
+requires direct SPX. A GTH lease is never carried across the gap and relabeled
+as RTH. Replay schema 2 keeps its independent v5 ES-basis reference contract.
+
 Replay uses read-only API resources:
 
 - `api/v1/replay/sessions`
@@ -96,10 +102,10 @@ configurable UID/GID and does not require broader permissions.
 
 ## Run
 
-The live producer must publish at least one validated RTH snapshot before the
-Session Canvas endpoint can return 200. Weekends, holidays, pre-open, and a
-missing or expired lease remain fail-closed. Install the independent Live
-service and the Unix-socket Replay service first:
+The live producer must publish at least one validated GTH or RTH snapshot before
+the Session Canvas endpoint can return 200. Weekends, holidays, the scheduled
+closed gap, and a missing or expired lease remain fail-closed. Install the
+independent Live service and the Unix-socket Replay service first:
 
 ```bash
 systemctl --user restart spx-spark-surface-dashboard.service
@@ -159,9 +165,10 @@ for an explicitly audited replacement. Session Replay never uses `--force`;
 lookback, projection-policy, or source-version changes write to a new cache
 namespace.
 
-Live state is retained under
-`published/spxw-surface/live/session=YYYY-MM-DD/`. Do not delete it during a
-restart or rollback: its immutable boundary records are the evidence that later
-snapshots did not rewrite earlier columns. Operational details and the exact
-clock/proxy contract are documented in
+Live-v2 state is retained under
+`published/spxw-surface/live/policy=live-v2/session=YYYY-MM-DD/`. The former v1
+namespace remains at `published/spxw-surface/live/session=YYYY-MM-DD/`; v2 does
+not mutate it. Do not delete either namespace during restart or rollback: the
+immutable boundaries are evidence that later snapshots did not rewrite earlier
+columns. Operational details and the exact clock/proxy contract are documented in
 [`docs/spxw-live-session-surface-2026-07-19.md`](../../docs/spxw-live-session-surface-2026-07-19.md).

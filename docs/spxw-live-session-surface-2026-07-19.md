@@ -2,8 +2,11 @@
 
 ## Scope
 
-The Live cockpit uses the same fixed `09:30–16:00 ET` Session Canvas as
-Replay. It is a read-only market-structure view and does not change strategy,
+The Live cockpit uses the same full-session Canvas as Replay: `20:15 ET` on
+the preceding calendar day through the trading day's RTH close. The Canvas is
+split into GTH `[20:15, 09:25)`, a scheduled closed gap `[09:25, 09:30)`, and
+RTH `[09:30, close]`; early-close dates use the actual exchange-calendar close.
+It is a read-only market-structure view and does not change strategy,
 notification, proposal, or order boundaries.
 
 The source remains an exposure **proxy**:
@@ -15,6 +18,24 @@ The source remains an exposure **proxy**:
 - K lines are event-sampled SPX observations, not official consolidated OHLC.
 
 Those limitations are part of the API contract and remain visible in the UI.
+
+## Provider and reference contract
+
+- GTH surface: the fresh IBKR SPXW chain selected by the publisher.
+- GTH SPX coordinate: call/put-parity `chain_implied` SPX derived from fresh,
+  coeval front-expiry pairs in that same observed chain. It is rendered dashed,
+  carries the observed chain provider, and is always `degraded` because complete
+  GTH contract-universe coverage is not proven.
+- Closed gap: surface, spot, reference, strike state, and candles are Missing;
+  no GTH lease is projected through the gap or relabeled as RTH.
+- RTH surface: the publisher's validated SPXW pricing chain (normally Schwab,
+  with policy-controlled failover).
+- RTH SPX coordinate: a fresh direct `index:SPX` quote; no chain-implied value is
+  presented as direct SPX.
+
+Live GTH intentionally differs from Replay GTH. Replay uses a frozen
+`es_basis_inferred_spx` reference with Schwab basis evidence; Live uses the
+current chain-implied reference and has no ES-basis payload.
 
 ## Data path
 
@@ -61,19 +82,25 @@ candidate before accepting an artifact observed after that boundary. Frozen file
 are immutable and verified by canonical SHA-256. A restart reloads them; it does
 not recompute them from newer data.
 
+A boundary accepts only a frame from its own segment. In particular, a GTH
+candidate whose TTL extends past 09:25 cannot populate the closed gap or become
+the current RTH frame. GTH historical columns remain visibly `degraded`.
+
 Starting mid-session never backfills earlier buckets. Those buckets become
 explicit `missing` columns with null matrices. A disconnect preserves already
 frozen history but cannot preserve a stale current surface or projection.
 
 ## Stable coordinates
 
-The first validated direct `index:SPX` observation fixes the session price anchor.
-The default grid is +/-100 SPX points at five-point spacing. Time buckets cover
-the full market session at five-minute spacing. The grid does not recenter during
-the session; an out-of-grid spot is reported as a quality condition instead.
+The first validated segment-appropriate SPX reference fixes the session price
+anchor: chain-implied SPX in GTH or direct `index:SPX` if the accumulator first
+starts in RTH. The default grid is +/-100 SPX points at five-point spacing. Time
+buckets cover the full GTH→gap→RTH session at five-minute spacing. The grid does
+not recenter; an out-of-grid spot is reported as a quality condition.
 
-Only direct SPX can establish the coordinate or candles. Chain-implied SPX, ES,
-MES, and SPY are not accepted as substitutes for the SPX strike coordinate.
+GTH candles are event samples of the chain-implied reference and render dashed.
+RTH candles are event samples of direct SPX and render solid. Neither is official
+consolidated OHLC.
 
 ## Live API
 
@@ -86,17 +113,19 @@ GET /api/v1/live/session-surface
     &price_step=5
 ```
 
-Live and Replay return the shared `spxw_session_surface.v1` matrix contract. Live
-adds its accepted/lease clocks, availability flags, frozen-through clock, and
-live provenance. Missing data is null plus a Missing reason, never a fabricated
-zero.
+Live returns `schema_version=2` with
+`policy_version=spxw_session_surface.live.v2`. Replay also uses schema 2, but its
+independent policy is `spxw_session_surface.v5`; the browser validates the policy
+by mode. Live adds accepted/lease clocks, availability flags, frozen-through
+clock, dynamic provider declarations, and live provenance. Missing data is null
+plus a Missing reason, never a fabricated zero.
 
 ## State and recovery
 
 Production state is retained under:
 
 ```text
-/srv/data/spx-spark/data/published/spxw-surface/live/session=YYYY-MM-DD/
+/srv/data/spx-spark/data/published/spxw-surface/live/policy=live-v2/session=YYYY-MM-DD/
 /srv/data/spx-spark/data/published/spxw-surface/runtime/live/live-api.sock
 ```
 
@@ -105,8 +134,10 @@ written atomically with owner-only state permissions. The runtime candidate is
 persisted so a crash across a boundary cannot cause a post-boundary frame to
 rewrite the prior bucket.
 
-Do not delete the live state as a normal restart or rollback step. It is the
-evidence that frozen history was not reconstructed with later information.
+State is policy-namespaced. The former v1 state remains under
+`published/spxw-surface/live/session=YYYY-MM-DD/`; v2 never rewrites it. Do not
+delete either namespace as a normal restart or rollback step. These immutable
+records are evidence that frozen history was not reconstructed with later data.
 
 ## Deploy
 
@@ -126,14 +157,19 @@ systemd applies `ProtectSystem=strict`. The service uses `AF_UNIX` only. This ho
 does not provide a working private network namespace for user services, so the
 deployment does not claim `PrivateNetwork` isolation.
 
+The v2 policy namespace is a required deployment boundary. Running the v2 binary
+against a v1 manifest fails closed with `live_persisted_contract_drift`; do not
+work around that by deleting the old session directory.
+
 ## Rollback
 
 1. Restore the previous Git revision and Python environment.
 2. Restore the previous nginx configuration and recreate only the nginx sidecar.
 3. Stop and disable `spx-spark-surface-live.service` if that revision has no Live
    client.
-4. Keep `published/spxw-surface/live/` intact for audit and a later forward-only
-   resume.
+4. Keep both `published/spxw-surface/live/session=*` (v1) and
+   `published/spxw-surface/live/policy=live-v2/session=*` intact. The old binary
+   resumes only its v1 namespace after rollback.
 
 Stopping Live does not require stopping the dashboard publisher, Replay service,
 market-data collectors, or any strategy process.
@@ -142,15 +178,17 @@ market-data collectors, or any strategy process.
 
 On a weekend or exchange holiday the production health endpoint may report a
 healthy `waiting/closed` service while the surface endpoint remains unavailable.
-That is expected fail-closed behavior, not a synthetic session. A real RTH session
-must still be observed after deployment before operational acceptance can claim
-that production columns have accumulated end to end.
+That is expected fail-closed behavior, not a synthetic session. A real GTH or RTH
+snapshot must be observed after deployment before acceptance can claim a dynamic
+surface; full end-to-end acceptance additionally checks the 09:25 closed gap and
+the first RTH snapshot.
 
 ## Pre-deploy performance evidence
 
-Using the 2026-07-17 production-sized contract sets with the default five-point
-grid, the projection kernel probe measured about 2.865 seconds for the front
-expiry (159 contracts x 67 future buckets) and 1.503 seconds for the next expiry
-(80 x 67). The browser requests one selector at a time and the API timeout is 15
-seconds. These are engineering probes, not a substitute for the first real RTH
-publisher-to-browser p95/p99 measurement after deployment.
+The default contract now has 237 five-minute columns and 41 price rows on a
+regular trading day. The browser requests one selector at a time and the API
+timeout remains 15 seconds. Unit/contract coverage includes GTH acceptance,
+evening-to-next-trading-date routing, gap nulling, GTH→RTH transition, weekend
+retention, browser normalization of an actual signed live-v2 payload, and
+cross-segment lease rejection. These checks do not replace production
+publisher-to-browser p95/p99 measurement.

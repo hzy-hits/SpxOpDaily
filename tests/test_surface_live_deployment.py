@@ -34,6 +34,7 @@ def test_live_service_is_unix_socket_only_and_has_narrow_write_paths() -> None:
         in unit
     )
     assert 'runtime/live}' in runner
+    assert 'live/policy=live-v2}' in runner
     assert 'live-api.sock}' in runner
     assert '--input-path "$LIVE_INPUT_PATH"' in runner
     assert '--state-root "$LIVE_STATE_ROOT"' in runner
@@ -48,6 +49,7 @@ def test_live_installer_prepares_and_validates_private_runtime() -> None:
 
     assert 'mkdir -p "$LIVE_USER_UNIT_DIR"' in installer
     assert 'install -d -m 0700 "$LIVE_STATE_ROOT" "$LIVE_RUNTIME_ROOT"' in installer
+    assert 'live/policy=live-v2}' in installer
     assert "SPXW_SURFACE_UID" in installer
     assert "SPXW_SURFACE_GID" in installer
     assert "docker inspect --format '{{.Config.User}}' spxw-surface" in installer

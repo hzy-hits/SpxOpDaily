@@ -89,6 +89,7 @@ def test_frontend_keeps_live_and_replay_clock_contracts_separate() -> None:
     assert "scheduleSessionSurfaceRetry(key)" in app
     assert 'renderSessionSurfaceChrome("unavailable", failure.reason, { retrying: true })' in app
     assert "sessionSurfaceFailureDisposition" in app
+    assert "app.sessionSurfaceCache.clear()" in app
     assert "session_surface_timeout_" in app
     assert "Replay · Unavailable · Retrying" in app
     assert "Replay · Scheduled Missing" in app
@@ -167,7 +168,8 @@ def test_frontend_keeps_live_and_replay_clock_contracts_separate() -> None:
     assert "snapshot_state_not_position_or_flow" in app
     assert 'currentOpenInterest' in app
     assert 'firstValidatedOpenInterest' in app
-    assert '[2, "spxw_session_surface.v5"]' in app
+    assert '["replay:2", "spxw_session_surface.v5"]' in app
+    assert '["live:2", "spxw_session_surface.live.v2"]' in app
     assert "baseline_unavailable_reason" in app
     assert "cross-snapshot comparison disabled" in app
     strike_draw = app[app.index("function drawCockpitStrike()") : app.index(

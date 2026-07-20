@@ -36,7 +36,225 @@ from spx_spark.surface_replay_session_data import (
 from spx_spark.surface_replay_session_models import (
     SessionSurfaceBuildCache,
     _METRIC_TO_OUTPUT,
+    session_surface_window,
 )
+
+
+def _provider_label(frame: Mapping[str, Any] | None) -> str | None:
+    if not isinstance(frame, Mapping):
+        return None
+    raw = frame.get("providers")
+    values = sorted({str(value) for value in raw if str(value)}) if isinstance(raw, list) else []
+    if len(values) == 1:
+        return values[0]
+    if values:
+        return "mixed"
+    return None
+
+
+def _latest_frames_by_segment(
+    frame_payloads: Mapping[str, Mapping[str, Any]],
+) -> dict[str, Mapping[str, Any]]:
+    latest: dict[str, Mapping[str, Any]] = {}
+    for frame in frame_payloads.values():
+        kind = str(frame.get("session_kind") or "")
+        if kind not in {"gth", "rth"}:
+            continue
+        accepted = str(frame.get("accepted_at") or "")
+        current = latest.get(kind)
+        if current is None or str(current.get("accepted_at") or "") <= accepted:
+            latest[kind] = frame
+    return latest
+
+
+def _spot_provider_in_segment(
+    spot: Mapping[str, Any] | None,
+    window: Any,
+    segment: str,
+) -> str | None:
+    if not isinstance(spot, Mapping):
+        return None
+    try:
+        source_as_of = parse_clock(spot.get("source_as_of"), code="live_spot_model_clock_invalid")
+    except LiveSessionError:
+        return None
+    if window.segment_kind(source_as_of) != segment:
+        return None
+    provider = str(spot.get("provider") or "").strip()
+    return provider or None
+
+
+def _live_segments(
+    window: Any,
+    *,
+    latest_by_segment: Mapping[str, Mapping[str, Any]],
+    spot: Mapping[str, Any] | None,
+) -> list[dict[str, object]]:
+    gth_surface = _provider_label(latest_by_segment.get("gth"))
+    rth_surface = _provider_label(latest_by_segment.get("rth"))
+    # A chain-implied GTH reference is derived from the observed chain itself,
+    # so the observed chain provider is also the reference provider.
+    gth_reference = _spot_provider_in_segment(spot, window, "gth") or gth_surface
+    rth_reference = _spot_provider_in_segment(spot, window, "rth")
+    return [
+        {
+            "kind": "gth",
+            "start_at": iso(window.session_start),
+            "end_at": iso(window.gth_end),
+            "surface_provider": gth_surface,
+            "reference_method": "chain_implied" if gth_surface else None,
+            "reference_provider": gth_reference if gth_surface else None,
+        },
+        {
+            "kind": "closed_gap",
+            "start_at": iso(window.gth_end),
+            "end_at": iso(window.rth_open),
+            "surface_provider": None,
+            "reference_method": None,
+            "reference_provider": None,
+        },
+        {
+            "kind": "rth",
+            "start_at": iso(window.rth_open),
+            "end_at": iso(window.session_end),
+            "surface_provider": rth_surface,
+            "reference_method": "direct_index_spx" if rth_surface else None,
+            "reference_provider": rth_reference if rth_surface else None,
+        },
+    ]
+
+
+def _stamp_segment_columns(
+    columns: list[dict[str, object]],
+    buckets: tuple[tuple[datetime, datetime], ...],
+    *,
+    window: Any,
+    frame_payloads: Mapping[str, Mapping[str, Any]],
+    active_segment: str | None,
+    current_frame: Mapping[str, Any] | None,
+    segments: list[dict[str, object]],
+) -> None:
+    declared = {str(segment["kind"]): segment for segment in segments}
+    for (bucket_start, _bucket_end), column in zip(buckets, columns, strict=True):
+        segment = window.segment_kind(bucket_start)
+        declaration = declared.get(segment or "")
+        column["session_kind"] = segment
+        if segment == "closed_gap":
+            column["kind"] = "missing"
+            column["quality"] = "unavailable"
+            column["source_at"] = None
+            column["known_at"] = None
+            column["accepted_at"] = None
+            column["valid_until"] = None
+            column["reason"] = "scheduled_closed_gap"
+            column.pop("source_frame_sha256", None)
+            column["source_session_kind"] = None
+            column["surface_provider"] = None
+            column["reference_method"] = None
+            continue
+        if column.get("kind") == "missing":
+            column["source_session_kind"] = None
+            column["surface_provider"] = declaration.get("surface_provider") if declaration else None
+            column["reference_method"] = declaration.get("reference_method") if declaration else None
+            continue
+        frame = (
+            current_frame
+            if column.get("kind") == "projection"
+            else frame_payloads.get(str(column.get("source_frame_sha256") or ""))
+        )
+        source_kind = (
+            str(frame.get("session_kind"))
+            if isinstance(frame, Mapping) and frame.get("session_kind")
+            else active_segment
+            if column.get("kind") == "projection"
+            else segment
+        )
+        column["source_session_kind"] = source_kind
+        column["surface_provider"] = _provider_label(frame) or (
+            declaration.get("surface_provider") if declaration else None
+        )
+        column["reference_method"] = (
+            str(frame.get("reference_method"))
+            if isinstance(frame, Mapping) and frame.get("reference_method")
+            else declaration.get("reference_method") if declaration else None
+        )
+        if source_kind == "gth":
+            column["quality"] = "degraded"
+
+
+def _stamp_candles(candles: list[dict[str, object]], *, window: Any) -> None:
+    for candle in candles:
+        try:
+            start = parse_clock(candle.get("start_at"), code="live_candle_start_invalid")
+        except LiveSessionError:
+            continue
+        segment = window.segment_kind(start)
+        if segment not in {"gth", "rth"}:
+            continue
+        method = "chain_implied" if segment == "gth" else "direct_index_spx"
+        raw_providers = candle.get("providers")
+        providers = (
+            sorted({str(value) for value in raw_providers if str(value)})
+            if isinstance(raw_providers, list)
+            else []
+        )
+        candle["session_kind"] = segment
+        candle["reference_method"] = method
+        candle["reference_provider"] = (
+            providers[0] if len(providers) == 1 else "mixed" if providers else None
+        )
+        candle["reference_instrument_id"] = (
+            "spxw_front_chain" if segment == "gth" else "index:SPX"
+        )
+        candle["accepted_at"] = candle.get("known_at")
+        candle["valid_until"] = None
+        candle["basis_value"] = None
+        candle["basis_observed_at"] = None
+        candle["render_style"] = "inferred_dashed" if segment == "gth" else "direct_solid"
+
+
+def _reference_payload(
+    selected_spot: Mapping[str, Any] | None,
+    *,
+    active_segment: str | None,
+    valid_until: datetime | None,
+) -> dict[str, object]:
+    if selected_spot is None or active_segment not in {"gth", "rth"}:
+        return {
+            "coordinate": "SPX",
+            "price": None,
+            "method": None,
+            "provider": None,
+            "instrument_id": None,
+            "source_at": None,
+            "known_at": None,
+            "accepted_at": None,
+            "valid_until": None,
+            "quality": "unavailable",
+            "missing_reason": (
+                "scheduled_closed_gap"
+                if active_segment == "closed_gap"
+                else "fresh_coordinate_reference_unavailable"
+            ),
+            "basis": None,
+            "render_style": None,
+        }
+    gth = active_segment == "gth"
+    return {
+        "coordinate": "SPX",
+        "price": selected_spot.get("price"),
+        "method": "chain_implied" if gth else "direct_index_spx",
+        "provider": str(selected_spot.get("provider") or "") or None,
+        "instrument_id": "spxw_front_chain" if gth else "index:SPX",
+        "source_at": selected_spot.get("source_at"),
+        "known_at": selected_spot.get("accepted_at"),
+        "accepted_at": selected_spot.get("accepted_at"),
+        "valid_until": iso(valid_until) if valid_until else None,
+        "quality": "degraded" if gth else "ready",
+        "missing_reason": None,
+        "basis": None,
+        "render_style": "inferred_dashed" if gth else "direct_solid",
+    }
 
 
 def _buckets(start: datetime, close: datetime) -> tuple[tuple[datetime, datetime], ...]:
@@ -373,6 +591,11 @@ def build_live_session_surface(
     if request_clock < start:
         raise LiveSessionError("live_session_not_started")
     cutoff = min(request_clock, close)
+    try:
+        window = session_surface_window(active_date)
+    except Exception as exc:
+        raise LiveSessionError("live_session_window_unavailable") from exc
+    active_segment = window.segment_kind(cutoff)
     anchor = mapping(manifest.get("anchor"), code="live_manifest_anchor_invalid")
     anchor_spot = finite(anchor.get("grid_anchor"))
     if anchor_spot is None or anchor_spot <= 0:
@@ -381,6 +604,11 @@ def build_live_session_surface(
     price_grid = _fixed_price_grid(anchor_spot, step=selector.price_step)
     role_frame = _role_candidate(selector.role, runtime)
     current_frame = _valid_candidate(selector.role, runtime, cutoff)
+    current_frame_segment = (
+        str(current_frame.get("session_kind") or "")
+        if isinstance(current_frame, Mapping)
+        else None
+    )
     current_frames = (frame_state(current_frame),) if current_frame is not None else ()
     historical = _historical_prefix(
         role=selector.role,
@@ -397,6 +625,7 @@ def build_live_session_surface(
         price_grid=price_grid,
         weighting=selector.weighting,
         build_cache=build_cache,
+        session_window=window,
     )
     raw_spot = runtime.get("latest_spot")
     spot = raw_spot if isinstance(raw_spot, Mapping) else None
@@ -412,6 +641,12 @@ def build_live_session_surface(
         and valid_until is not None
         and source_as_of <= accepted_at <= cutoff < valid_until
         and cutoff < close
+        # The scheduled closed gap never projects a pre-gap frame forward and
+        # never exposes a pre-gap spot as current.
+        and active_segment != "closed_gap"
+        # A GTH lease must never become a current RTH surface merely because
+        # its TTL extends beyond the scheduled gap.
+        and current_frame_segment == active_segment
     )
     columns, metric_values, zero_ridges, positive_peaks, negative_troughs = _merge_projection(
         historical,
@@ -440,6 +675,7 @@ def build_live_session_surface(
         frames,
         as_of=cutoff,
         weighting=selector.weighting,
+        active_session_kind=active_segment,
     )
     candles, candle_missing = _candles(
         boundaries,
@@ -495,6 +731,32 @@ def build_live_session_surface(
             output_name: _robust_domain(metric_values[metric])
             for metric, output_name in _METRIC_TO_OUTPUT.items()
         }
+    latest_by_segment = _latest_frames_by_segment(frame_payloads)
+    segments = _live_segments(
+        window,
+        latest_by_segment=latest_by_segment,
+        spot=spot,
+    )
+    _stamp_segment_columns(
+        columns,
+        buckets,
+        window=window,
+        frame_payloads=frame_payloads,
+        active_segment=active_segment,
+        current_frame=current_frame,
+        segments=segments,
+    )
+    if active_segment == "closed_gap":
+        selected_spot = None
+    _stamp_candles(candles, window=window)
+    for row in candle_missing:
+        try:
+            row["session_kind"] = window.segment_kind(
+                parse_clock(row.get("start_at"), code="live_candle_missing_start_invalid")
+            )
+        except LiveSessionError:
+            row["session_kind"] = None
+    gth_available = "gth" in latest_by_segment
     historical_available = any(row.get("kind") == "historical" for row in columns)
     closed = finished >= close
     if closed:
@@ -527,11 +789,18 @@ def build_live_session_surface(
     if selected_spot is not None and selected_spot.get("provider"):
         providers.add(str(selected_spot["provider"]))
     provider_values = sorted(providers)
+    providers_contract = {
+        "gth_surface": segments[0]["surface_provider"],
+        "gth_reference": segments[0]["reference_provider"],
+        "rth_surface": segments[2]["surface_provider"],
+        "rth_reference": segments[2]["reference_provider"],
+    }
     expiry_index = 0 if selector.role == "front" else 1
     expiry = DEFAULT_MARKET_CALENDAR.research_expiries(start)[expiry_index].strftime("%Y%m%d")
     frozen_through = runtime.get("history_frozen_through")
+    anchor_method = str(anchor.get("method") or "direct_index_spx")
     payload: dict[str, object] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "kind": LIVE_SESSION_KIND,
         "policy_version": LIVE_SESSION_POLICY_VERSION,
         "mode": LIVE_SESSION_MODE,
@@ -553,14 +822,15 @@ def build_live_session_surface(
         "weighting": selector.weighting,
         "coordinate": LIVE_COORDINATE,
         "provider": provider_values[0] if len(provider_values) == 1 else "mixed" if provider_values else "unavailable",
-        "providers": provider_values,
+        "providers": providers_contract,
+        "session_segments": segments,
         "trading_class": LIVE_TRADING_CLASS,
         "bucket_minutes": selector.bucket_minutes,
         "price_step": selector.price_step,
         "price_grid": list(price_grid),
         "price_grid_policy": {
             "anchor": anchor_spot,
-            "anchor_source": "first_accepted_direct_index_spx",
+            "anchor_source": f"first_accepted_{anchor_method}",
             "anchor_source_at": anchor.get("source_at"),
             "anchor_known_at": anchor.get("accepted_at"),
             "extent_points_each_side": LIVE_PRICE_EXTENT_POINTS,
@@ -587,6 +857,11 @@ def build_live_session_surface(
         "spot": selected_spot.get("price") if selected_spot else None,
         "spot_source_at": selected_spot.get("source_at") if selected_spot else None,
         "spot_known_at": selected_spot.get("accepted_at") if selected_spot else None,
+        "reference": _reference_payload(
+            selected_spot,
+            active_segment=active_segment,
+            valid_until=valid_until,
+        ),
         "color_domains": color_domains,
         "metric_units": dict(METRIC_UNITS),
         "availability": {
@@ -609,7 +884,10 @@ def build_live_session_surface(
             "first_validated_baseline_available": bool(frames),
             "projection_is_model_scenario": True,
             "historical_surface_is_model_proxy": True,
-            "gth_available": False,
+            "gth_available": gth_available,
+            "gth_data_available": gth_available,
+            "gth_contract_declared": True,
+            "gth_complete_chain_available": False,
         },
         "missing_ranges": [*_surface_missing_ranges(buckets, columns), *candle_missing],
         "provenance": {
