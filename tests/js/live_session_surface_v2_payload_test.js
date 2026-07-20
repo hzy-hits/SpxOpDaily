@@ -75,8 +75,16 @@ const payload = JSON.parse(fs.readFileSync(payloadPath, "utf8"));
   ]);
   assert.equal(surface.providers.gthSurface, "ibkr");
   assert.equal(surface.providers.gthReference, "ibkr");
-  assert.equal(surface.reference.method, "chain_implied");
-  assert.equal(surface.reference.inferred, true);
+  if (surface.availability.current_spot_available) {
+    assert.equal(surface.reference.method, "chain_implied");
+    assert.equal(surface.reference.inferred, true);
+    assert(Number.isFinite(surface.reference.price));
+  } else {
+    assert.equal(surface.reference.method, null);
+    assert.equal(surface.reference.price, null);
+    assert.equal(surface.reference.missingReason, "fresh_coordinate_reference_unavailable");
+    assert(["degraded", "lease_expired", "unavailable"].includes(surface.liveStatus));
+  }
   assert.equal(surface.capabilities.gth_available, true);
 
   surface.surfaceColumns.forEach((column, index) => {

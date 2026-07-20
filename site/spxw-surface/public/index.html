@@ -74,6 +74,11 @@
           </label>
         </div>
 
+        <section id="live-viewport-controls" class="live-viewport-controls" aria-label="Live rolling window">
+          <span id="live-viewport-label">跟随当前 · 前 90m / 后 30m</span>
+          <button id="live-viewport-reset" type="button" disabled title="Return the rolling window to current market time">回到现在</button>
+        </section>
+
         <section id="replay-console" class="compact-transport" hidden aria-label="历史回放控制器">
           <div class="replay-buttons" aria-label="回放播放控制">
             <button id="replay-previous" type="button" disabled aria-label="上一个 validated keyframe" title="Previous validated keyframe">←</button>
@@ -120,7 +125,7 @@
           </header>
           <div id="cockpit-gamma-stage" class="cockpit-canvas-stage">
             <canvas id="cockpit-gamma-base" aria-hidden="true"></canvas>
-            <canvas id="cockpit-gamma-overlay" class="cockpit-overlay" role="img" tabindex="0" aria-label="Gamma proxy surface with explicitly sourced reference candles"></canvas>
+            <canvas id="cockpit-gamma-overlay" class="cockpit-overlay" role="img" tabindex="0" aria-label="Gamma proxy surface with explicitly sourced reference candles; in Live, drag horizontally to browse and press Home to return to now"></canvas>
             <div id="cockpit-gamma-empty" class="cockpit-panel-empty">Waiting for Gamma session surface</div>
           </div>
           <footer class="cockpit-panel-legend">
@@ -178,7 +183,7 @@
           </header>
           <div id="cockpit-charm-stage" class="cockpit-canvas-stage">
             <canvas id="cockpit-charm-base" aria-hidden="true"></canvas>
-            <canvas id="cockpit-charm-overlay" class="cockpit-overlay" role="img" tabindex="0" aria-label="Charm proxy surface with explicitly sourced reference candles"></canvas>
+            <canvas id="cockpit-charm-overlay" class="cockpit-overlay" role="img" tabindex="0" aria-label="Charm proxy surface with explicitly sourced reference candles; in Live, drag horizontally to browse and press Home to return to now"></canvas>
             <div id="cockpit-charm-empty" class="cockpit-panel-empty">Waiting for Charm session surface</div>
           </div>
           <footer class="cockpit-panel-legend">

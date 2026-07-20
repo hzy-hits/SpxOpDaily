@@ -57,6 +57,7 @@ const hooks = globalThis.__SPX_SPARK_TEST_HOOK__;
 for (const name of [
   "normalizeSessionSurface",
   "cockpitDisplayTimeMs",
+  "cockpitTimeWindow",
   "conservativeLiveServerNow",
   "historicalOnlyLiveSurface",
   "liveFrozenPrefixSignature",
@@ -65,6 +66,7 @@ for (const name of [
   "liveSurfaceDisplayState",
   "liveSurfaceIdentity",
   "liveSurfaceTransitionIssue",
+  "liveViewportStartAfterPan",
   "unavailableLiveMessage",
   "unavailableLiveReason",
 ]) {
@@ -275,6 +277,55 @@ function expirePayload(payload) {
 }
 
 (async () => {
+  const rollingSurface = {
+    mode: "live",
+    sessionStartMs: Date.parse("2026-07-17T13:30:00Z"),
+    sessionEndMs: Date.parse("2026-07-17T20:00:00Z"),
+    asOfMs: Date.parse("2026-07-17T16:00:00Z"),
+  };
+  assert.deepEqual(
+    hooks.cockpitTimeWindow(rollingSurface, {
+      serverNowMs: Date.parse("2026-07-17T16:00:00Z"),
+    }),
+    {
+      startMs: Date.parse("2026-07-17T14:30:00Z"),
+      endMs: Date.parse("2026-07-17T16:30:00Z"),
+      followsNow: true,
+    },
+  );
+  assert.deepEqual(
+    hooks.cockpitTimeWindow(rollingSurface, {
+      serverNowMs: Date.parse("2026-07-17T13:35:00Z"),
+    }),
+    {
+      startMs: Date.parse("2026-07-17T13:30:00Z"),
+      endMs: Date.parse("2026-07-17T15:30:00Z"),
+      followsNow: true,
+    },
+    "the full two-hour window stays inside the session near its open",
+  );
+  assert.deepEqual(
+    hooks.cockpitTimeWindow(rollingSurface, {
+      manualStartMs: Date.parse("2026-07-17T19:30:00Z"),
+    }),
+    {
+      startMs: Date.parse("2026-07-17T18:00:00Z"),
+      endMs: Date.parse("2026-07-17T20:00:00Z"),
+      followsNow: false,
+    },
+    "manual browsing is clamped to the session close",
+  );
+  assert.equal(
+    hooks.liveViewportStartAfterPan(
+      rollingSurface,
+      Date.parse("2026-07-17T14:30:00Z"),
+      -400,
+      800,
+    ),
+    Date.parse("2026-07-17T15:30:00Z"),
+    "dragging left browses one hour later in a two-hour window",
+  );
+
   const normalized = await hooks.normalizeSessionSurface(await sign(liveFixture()), expected());
   assert.equal(normalized.mode, "live");
   assert.equal(normalized.provider, "mixed");

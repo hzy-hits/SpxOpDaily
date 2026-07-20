@@ -48,6 +48,9 @@ const REPLAY_VISUAL_FPS = 30;
 const REPLAY_VISUAL_FRAME_MS = 1_000 / REPLAY_VISUAL_FPS;
 const REPLAY_MARKET_TIME_RATE = 150;
 const SESSION_SURFACE_CACHE_LIMIT = 24;
+const LIVE_VIEW_HISTORY_MS = 90 * 60_000;
+const LIVE_VIEW_HORIZON_MS = 30 * 60_000;
+const LIVE_VIEW_SPAN_MS = LIVE_VIEW_HISTORY_MS + LIVE_VIEW_HORIZON_MS;
 const MARKET_TIME_ZONE = "America/New_York";
 const POLL_INTERVAL_MS = 5_000;
 const REQUEST_TIMEOUT_MS = 4_500;
@@ -153,6 +156,9 @@ const dom = {
   replayTimelineEnd: document.querySelector("#replay-timeline-end"),
   sessionCockpit: document.querySelector("#session-cockpit"),
   cockpitTimeline: document.querySelector("#cockpit-timeline"),
+  liveViewportControls: document.querySelector("#live-viewport-controls"),
+  liveViewportLabel: document.querySelector("#live-viewport-label"),
+  liveViewportReset: document.querySelector("#live-viewport-reset"),
   cockpitLoading: document.querySelector("#cockpit-loading"),
   cockpitTooltip: document.querySelector("#cockpit-tooltip"),
   cockpitGammaStage: document.querySelector("#cockpit-gamma-stage"),
@@ -335,6 +341,8 @@ const app = {
   cockpitStaticSignature: "",
   cockpitLayouts: {},
   cockpitHover: null,
+  liveViewportStartMs: null,
+  liveViewportDrag: null,
   cockpitPriceDomain: null,
   cockpitColorDomains: {},
   strikeMode: "oi",
@@ -1237,6 +1245,81 @@ function sessionTimeToX(layout, sessionStartMs, sessionEndMs, timestampMs) {
 function sessionXToTime(layout, sessionStartMs, sessionEndMs, x) {
   const ratio = Math.max(0, Math.min((x - layout.plotLeft) / layout.plotWidth, 1));
   return sessionStartMs + ratio * (sessionEndMs - sessionStartMs);
+}
+
+function cockpitTimeWindow(
+  surface,
+  { serverNowMs = null, manualStartMs = null } = {},
+) {
+  if (!surface || surface.mode !== "live") {
+    return {
+      startMs: surface?.sessionStartMs ?? null,
+      endMs: surface?.sessionEndMs ?? null,
+      followsNow: false,
+    };
+  }
+  const sessionSpanMs = Math.max(surface.sessionEndMs - surface.sessionStartMs, 1);
+  const spanMs = Math.min(LIVE_VIEW_SPAN_MS, sessionSpanMs);
+  const latestStartMs = Math.max(surface.sessionEndMs - spanMs, surface.sessionStartMs);
+  const followsNow = !Number.isFinite(manualStartMs);
+  const anchorMs = Number.isFinite(serverNowMs) ? serverNowMs : surface.asOfMs;
+  const requestedStartMs = followsNow
+    ? anchorMs - LIVE_VIEW_HISTORY_MS
+    : manualStartMs;
+  const startMs = Math.max(
+    surface.sessionStartMs,
+    Math.min(requestedStartMs, latestStartMs),
+  );
+  return { startMs, endMs: startMs + spanMs, followsNow };
+}
+
+function activeCockpitTimeWindow(surface = app.sessionSurface) {
+  return cockpitTimeWindow(surface, {
+    serverNowMs: surface?.mode === "live" ? liveClockNowMs() : null,
+    manualStartMs: surface?.mode === "live" ? app.liveViewportStartMs : null,
+  });
+}
+
+function cockpitTimeToX(layout, surface, timestampMs) {
+  const window = activeCockpitTimeWindow(surface);
+  return sessionTimeToX(layout, window.startMs, window.endMs, timestampMs);
+}
+
+function cockpitXToTime(layout, surface, x) {
+  const window = activeCockpitTimeWindow(surface);
+  return sessionXToTime(layout, window.startMs, window.endMs, x);
+}
+
+function cockpitVisibleTimeRange(surface, startMs, endMs) {
+  const window = activeCockpitTimeWindow(surface);
+  const clippedStartMs = Math.max(startMs, window.startMs);
+  const clippedEndMs = Math.min(endMs, window.endMs);
+  return clippedEndMs > clippedStartMs
+    ? { startMs: clippedStartMs, endMs: clippedEndMs }
+    : null;
+}
+
+function updateLiveViewportChrome(surface = app.sessionSurface) {
+  const live = app.mode === "live";
+  dom.liveViewportControls.hidden = !live;
+  if (!live) return;
+  if (!surface) {
+    dom.liveViewportLabel.textContent = "跟随当前 · 前 90m / 后 30m";
+    dom.liveViewportReset.disabled = true;
+    return;
+  }
+  const window = activeCockpitTimeWindow(surface);
+  dom.liveViewportLabel.textContent = `${window.followsNow ? "跟随当前" : "浏览历史"} · ${formatAxisMarketTime(window.startMs)}–${formatAxisMarketTime(window.endMs)}`;
+  dom.liveViewportReset.disabled = window.followsNow;
+}
+
+function resetLiveViewport({ render = true } = {}) {
+  app.liveViewportStartMs = null;
+  app.liveViewportDrag = null;
+  document.body.classList.remove("live-viewport-dragging");
+  app.cockpitStaticSignature = "";
+  updateLiveViewportChrome();
+  if (render && app.sessionSurface) renderCockpitStatic();
 }
 
 function sessionPriceToY(layout, priceDomain, price) {
@@ -3023,9 +3106,10 @@ function updateModeChrome() {
   dom.modeFilter.value = replay ? "replay" : "live";
   dom.replayBanner.hidden = !replay;
   dom.replayConsole.hidden = !replay;
+  updateLiveViewportChrome();
   dom.pageLede.textContent = replay
     ? "Gamma、Strike 与 Charm 共用一个 SPX 坐标和交易时钟；参考价格方法、provider 与缺失区间均来自冻结回放合同。"
-    : "Gamma、Strike 与 Charm 共用固定 Session Canvas；GTH 推断参考与 RTH 直接参考严格分标，当前时刻右侧仅显示有 lease 的投影。";
+    : "完整 Session Canvas 由服务端保留；Live 视图自动跟随最近 90 分钟与未来 30 分钟，GTH 推断参考和 RTH 直接参考严格分标。";
   const sourceFiles = verifiedSessionSurface
     ? app.sessionSurface.provenance?.source_files
     : verifiedTrend
@@ -3441,6 +3525,7 @@ function cockpitPriceBounds(surface, index) {
 
 function drawCockpitTimeAxes(context, layout, surface) {
   const ticks = layout.width < 470 ? 4 : 6;
+  const window = activeCockpitTimeWindow(surface);
   context.save();
   context.font = "8px ui-monospace, SFMono-Regular, monospace";
   context.fillStyle = "#91a9b9";
@@ -3449,7 +3534,7 @@ function drawCockpitTimeAxes(context, layout, surface) {
   context.textBaseline = "top";
   for (let index = 0; index < ticks; index += 1) {
     const ratio = index / (ticks - 1);
-    const at = surface.sessionStartMs + ratio * (surface.sessionEndMs - surface.sessionStartMs);
+    const at = window.startMs + ratio * (window.endMs - window.startMs);
     const x = layout.plotLeft + ratio * layout.plotWidth;
     context.beginPath();
     context.moveTo(x + 0.5, layout.plotTop);
@@ -3485,8 +3570,10 @@ function drawCockpitPriceAxes(context, layout, priceDomain, { side = "right" } =
 }
 
 function drawCockpitMissingRange(context, layout, surface, startMs, endMs) {
-  const x1 = sessionTimeToX(layout, surface.sessionStartMs, surface.sessionEndMs, startMs);
-  const x2 = sessionTimeToX(layout, surface.sessionStartMs, surface.sessionEndMs, endMs);
+  const visible = cockpitVisibleTimeRange(surface, startMs, endMs);
+  if (!visible) return;
+  const x1 = cockpitTimeToX(layout, surface, visible.startMs);
+  const x2 = cockpitTimeToX(layout, surface, visible.endMs);
   context.fillStyle = "rgba(39, 56, 70, 0.72)";
   context.fillRect(x1, layout.plotTop, Math.max(x2 - x1, 0.5), layout.plotHeight);
   hatchCockpitRect(context, x1, layout.plotTop, Math.max(x2 - x1, 0.5), layout.plotHeight);
@@ -3501,18 +3588,10 @@ function drawCockpitSessionSegmentBackgrounds(context, layout, surface) {
   };
   context.save();
   for (const segment of surface.sessionSegments) {
-    const x1 = sessionTimeToX(
-      layout,
-      surface.sessionStartMs,
-      surface.sessionEndMs,
-      segment.startMs,
-    );
-    const x2 = sessionTimeToX(
-      layout,
-      surface.sessionStartMs,
-      surface.sessionEndMs,
-      segment.endMs,
-    );
+    const visible = cockpitVisibleTimeRange(surface, segment.startMs, segment.endMs);
+    if (!visible) continue;
+    const x1 = cockpitTimeToX(layout, surface, visible.startMs);
+    const x2 = cockpitTimeToX(layout, surface, visible.endMs);
     const width = Math.max(x2 - x1, 0.75);
     context.fillStyle = fills[segment.kind];
     context.fillRect(x1, layout.plotTop, width, layout.plotHeight);
@@ -3532,17 +3611,16 @@ function drawCockpitSessionSegmentBackgrounds(context, layout, surface) {
 
 function drawCockpitSessionSegmentBoundaries(context, layout, surface) {
   if (!surface.sessionSegments.length) return;
+  const window = activeCockpitTimeWindow(surface);
   context.save();
   context.font = "bold 8px ui-monospace, SFMono-Regular, monospace";
   context.textBaseline = "top";
   for (const [index, segment] of surface.sessionSegments.entries()) {
-    const x = sessionTimeToX(
-      layout,
-      surface.sessionStartMs,
-      surface.sessionEndMs,
-      segment.startMs,
-    );
-    if (index > 0) {
+    const visible = cockpitVisibleTimeRange(surface, segment.startMs, segment.endMs);
+    if (!visible) continue;
+    const boundaryVisible = segment.startMs >= window.startMs && segment.startMs <= window.endMs;
+    const x = cockpitTimeToX(layout, surface, Math.max(segment.startMs, window.startMs));
+    if (index > 0 && boundaryVisible) {
       context.setLineDash(segment.kind === "rth" ? [] : [3, 3]);
       context.strokeStyle = segment.kind === "rth"
         ? "rgba(98, 213, 190, 0.92)"
@@ -3572,10 +3650,19 @@ function missingRangeAppliesToPanel(range, panel) {
 }
 
 function drawCockpitCandles(context, layout, surface) {
-  const visible = surface.candles.filter((candle) => candle.startMs <= surface.asOfMs);
+  const window = activeCockpitTimeWindow(surface);
+  const visible = surface.candles.filter((candle) => {
+    const displayAtMs = cockpitCandleDisplayTime(candle, surface.asOfMs);
+    return candle.startMs <= surface.asOfMs &&
+      displayAtMs >= window.startMs && displayAtMs <= window.endMs;
+  });
   if (!visible.length) return;
+  const visibleBucketCount = Math.max(
+    Math.round((window.endMs - window.startMs) / (surface.bucketMinutes * 60_000)),
+    1,
+  );
   const nominalWidth = Math.max(
-    Math.min(layout.plotWidth / Math.max(surface.timeBuckets.length, 1) * 0.58, 5),
+    Math.min(layout.plotWidth / visibleBucketCount * 0.58, 5),
     1.2,
   );
   context.save();
@@ -3589,12 +3676,7 @@ function drawCockpitCandles(context, layout, surface) {
       context.setLineDash([]);
     }
     const displayAtMs = cockpitCandleDisplayTime(candle, surface.asOfMs);
-    const x = sessionTimeToX(
-      layout,
-      surface.sessionStartMs,
-      surface.sessionEndMs,
-      displayAtMs,
-    );
+    const x = cockpitTimeToX(layout, surface, displayAtMs);
     const highY = sessionPriceToY(layout, app.cockpitPriceDomain, candle.high);
     const lowY = sessionPriceToY(layout, app.cockpitPriceDomain, candle.low);
     const openY = sessionPriceToY(layout, app.cockpitPriceDomain, candle.open);
@@ -3647,6 +3729,7 @@ function cockpitCandleAtTime(candles, timeMs, asOfMs) {
 }
 
 function drawGammaExtremaMarkers(context, layout, surface) {
+  const window = activeCockpitTimeWindow(surface);
   const definitions = [
     { rows: surface.gammaPositivePeaks, symbol: "+", color: "#8fe3ca" },
     { rows: surface.gammaNegativeTroughs, symbol: "−", color: "#ff9a91" },
@@ -3659,12 +3742,9 @@ function drawGammaExtremaMarkers(context, layout, surface) {
     definition.rows.forEach((marker, index) => {
       if (!marker || marker.price < app.cockpitPriceDomain.min ||
           marker.price > app.cockpitPriceDomain.max) return;
-      const x = sessionTimeToX(
-        layout,
-        surface.sessionStartMs,
-        surface.sessionEndMs,
-        surface.timeBuckets[index].centerMs,
-      );
+      const centerMs = surface.timeBuckets[index].centerMs;
+      if (centerMs < window.startMs || centerMs > window.endMs) return;
+      const x = cockpitTimeToX(layout, surface, centerMs);
       const y = sessionPriceToY(layout, app.cockpitPriceDomain, marker.price);
       context.beginPath();
       context.arc(x, y, 4.2, 0, Math.PI * 2);
@@ -3693,9 +3773,11 @@ function drawCockpitSurface(panel, matrix) {
   let numericCount = 0;
   let projectionBoundary = null;
   surface.timeBuckets.forEach((bucket, timeIndex) => {
+    const visible = cockpitVisibleTimeRange(surface, bucket.startMs, bucket.endMs);
+    if (!visible) return;
     const column = surface.surfaceColumns[timeIndex];
-    const x1 = sessionTimeToX(layout, surface.sessionStartMs, surface.sessionEndMs, bucket.startMs);
-    const x2 = sessionTimeToX(layout, surface.sessionStartMs, surface.sessionEndMs, bucket.endMs);
+    const x1 = cockpitTimeToX(layout, surface, visible.startMs);
+    const x2 = cockpitTimeToX(layout, surface, visible.endMs);
     if (column.kind === "projection" && projectionBoundary === null) projectionBoundary = x1;
     if (column.kind === "missing") {
       drawCockpitMissingRange(context, layout, surface, bucket.startMs, bucket.endMs);
@@ -3739,17 +3821,14 @@ function drawCockpitSurface(panel, matrix) {
     context.lineWidth = 3.4;
     context.beginPath();
     let drawing = false;
+    const window = activeCockpitTimeWindow(surface);
     surface.zeroRidges.forEach((ridge, index) => {
-      if (!Number.isFinite(ridge)) {
+      const centerMs = surface.timeBuckets[index].centerMs;
+      if (!Number.isFinite(ridge) || centerMs < window.startMs || centerMs > window.endMs) {
         drawing = false;
         return;
       }
-      const x = sessionTimeToX(
-        layout,
-        surface.sessionStartMs,
-        surface.sessionEndMs,
-        surface.timeBuckets[index].centerMs,
-      );
+      const x = cockpitTimeToX(layout, surface, centerMs);
       const y = sessionPriceToY(layout, app.cockpitPriceDomain, ridge);
       if (!drawing) context.moveTo(x, y);
       else context.lineTo(x, y);
@@ -4108,13 +4187,10 @@ function drawCockpitOverlay(panel, spot) {
     context.setLineDash([]);
   }
   const displayTimeMs = cockpitDisplayTimeMs(surface);
-  if (panel !== "strike" && Number.isFinite(displayTimeMs)) {
-    const currentX = sessionTimeToX(
-      layout,
-      surface.sessionStartMs,
-      surface.sessionEndMs,
-      displayTimeMs,
-    );
+  const window = activeCockpitTimeWindow(surface);
+  if (panel !== "strike" && Number.isFinite(displayTimeMs) &&
+      displayTimeMs >= window.startMs && displayTimeMs <= window.endMs) {
+    const currentX = cockpitTimeToX(layout, surface, displayTimeMs);
     context.strokeStyle = "rgba(239, 246, 250, 0.88)";
     context.lineWidth = 1;
     context.beginPath();
@@ -4132,12 +4208,7 @@ function drawCockpitOverlay(panel, spot) {
     context.lineTo(layout.plotRight, hoverY);
     context.stroke();
     if (panel !== "strike") {
-      const hoverX = sessionTimeToX(
-        layout,
-        surface.sessionStartMs,
-        surface.sessionEndMs,
-        app.cockpitHover.timeMs,
-      );
+      const hoverX = cockpitTimeToX(layout, surface, app.cockpitHover.timeMs);
       context.beginPath();
       context.moveTo(hoverX, layout.plotTop);
       context.lineTo(hoverX, layout.plotBottom);
@@ -4198,15 +4269,20 @@ function renderCockpitStatic() {
     dom.cockpitTooltip.replaceChildren();
     if (dom.cockpitTooltip.dataset) delete dom.cockpitTooltip.dataset.panel;
     renderReferenceChrome(null);
+    updateLiveViewportChrome(null);
     app.cockpitStaticSignature = "";
     return;
   }
   renderReferenceChrome(surface);
+  const viewport = activeCockpitTimeWindow(surface);
+  updateLiveViewportChrome(surface);
   updateCockpitStableDomains(surface);
   const staticSignature = [
     app.sessionSurfaceRenderedKey,
     surface.asOfMs ?? "",
     surface.historyFrozenThroughMs ?? "",
+    viewport.startMs,
+    viewport.endMs,
     app.strikeMode,
     dom.cockpitGammaStage?.clientWidth ?? 0,
     dom.cockpitGammaStage?.clientHeight ?? 0,
@@ -4350,6 +4426,91 @@ function cockpitTooltipFor(panel, timeMs, price) {
   dom.cockpitTooltip.dataset.panel = panel;
 }
 
+function liveViewportStartAfterPan(surface, startMs, deltaPixels, plotWidth) {
+  if (!surface || surface.mode !== "live" || !Number.isFinite(startMs) ||
+      !Number.isFinite(deltaPixels) || !Number.isFinite(plotWidth) || plotWidth <= 0) {
+    return startMs;
+  }
+  const spanMs = Math.min(
+    LIVE_VIEW_SPAN_MS,
+    Math.max(surface.sessionEndMs - surface.sessionStartMs, 1),
+  );
+  const requestedStartMs = startMs - deltaPixels / plotWidth * spanMs;
+  return cockpitTimeWindow(surface, { manualStartMs: requestedStartMs }).startMs;
+}
+
+function panLiveViewportBy(deltaMs) {
+  const surface = app.sessionSurface;
+  if (app.mode !== "live" || surface?.mode !== "live" || !Number.isFinite(deltaMs)) return;
+  const current = activeCockpitTimeWindow(surface);
+  app.liveViewportStartMs = cockpitTimeWindow(surface, {
+    manualStartMs: current.startMs + deltaMs,
+  }).startMs;
+  app.cockpitStaticSignature = "";
+  app.cockpitHover = null;
+  dom.cockpitTooltip.hidden = true;
+  renderCockpitStatic();
+}
+
+function beginLiveViewportPan(panel, event) {
+  const surface = app.sessionSurface;
+  const layout = app.cockpitLayouts[panel];
+  const overlay = cockpitElements(panel).overlay;
+  if (app.mode !== "live" || surface?.mode !== "live" || panel === "strike" ||
+      !layout || !overlay || (event.pointerType === "mouse" && event.button !== 0)) return false;
+  const rect = overlay.getBoundingClientRect();
+  const x = event.clientX - rect.left;
+  if (x < layout.plotLeft || x > layout.plotRight) return false;
+  const viewport = activeCockpitTimeWindow(surface);
+  app.liveViewportDrag = {
+    panel,
+    pointerId: event.pointerId,
+    startClientX: event.clientX,
+    startMs: viewport.startMs,
+    active: false,
+  };
+  overlay.setPointerCapture?.(event.pointerId);
+  document.body.classList.add("live-viewport-dragging");
+  clearCockpitHover();
+  event.preventDefault();
+  return true;
+}
+
+function updateLiveViewportPan(panel, event) {
+  const drag = app.liveViewportDrag;
+  const surface = app.sessionSurface;
+  const layout = app.cockpitLayouts[panel];
+  if (!drag || drag.panel !== panel || drag.pointerId !== event.pointerId ||
+      surface?.mode !== "live" || !layout) return false;
+  const deltaPixels = event.clientX - drag.startClientX;
+  if (!drag.active && Math.abs(deltaPixels) < 4) {
+    event.preventDefault();
+    return true;
+  }
+  drag.active = true;
+  app.liveViewportStartMs = liveViewportStartAfterPan(
+    surface,
+    drag.startMs,
+    deltaPixels,
+    layout.plotWidth,
+  );
+  app.cockpitStaticSignature = "";
+  renderCockpitStatic();
+  event.preventDefault();
+  return true;
+}
+
+function endLiveViewportPan(panel, event) {
+  const drag = app.liveViewportDrag;
+  if (!drag || drag.panel !== panel || drag.pointerId !== event.pointerId) return false;
+  cockpitElements(panel).overlay?.releasePointerCapture?.(event.pointerId);
+  app.liveViewportDrag = null;
+  document.body.classList.remove("live-viewport-dragging");
+  updateLiveViewportChrome();
+  event.preventDefault();
+  return true;
+}
+
 function cockpitPointerMove(panel, event) {
   const surface = app.sessionSurface;
   const layout = app.cockpitLayouts[panel];
@@ -4364,7 +4525,7 @@ function cockpitPointerMove(panel, event) {
   }
   const timeMs = panel === "strike"
     ? app.cockpitHover?.timeMs ?? cockpitDisplayTimeMs(surface)
-    : sessionXToTime(layout, surface.sessionStartMs, surface.sessionEndMs, x);
+    : cockpitXToTime(layout, surface, x);
   const price = sessionYToPrice(layout, app.cockpitPriceDomain, y);
   app.cockpitHover = { panel, timeMs, price };
   drawCockpitDynamic();
@@ -6403,6 +6564,7 @@ function applyLiveSessionSurface(surface, serverNowMs) {
   if (newSession) {
     app.cockpitPriceDomain = null;
     app.cockpitColorDomains = {};
+    resetLiveViewport({ render: false });
   }
   let display = surface;
   const displayState = liveSurfaceDisplayState(surface, serverNowMs);
@@ -6865,6 +7027,9 @@ function resetReplayNavigationState() {
   app.wallAnchorMs = null;
   app.lastPaintMs = 0;
   app.timelineStepMinutes = REPLAY_TIMELINE_STEP_MINUTES;
+  app.liveViewportStartMs = null;
+  app.liveViewportDrag = null;
+  document.body.classList.remove("live-viewport-dragging");
   app.sessionSurfaceCache.clear();
   app.replayFrameChrome = { clock: "", position: "", timelineSec: -1, aria: "" };
   clearTrendVisuals();
@@ -7349,6 +7514,9 @@ function restartLiveSurfaceForSelector() {
   app.cockpitPriceDomain = null;
   app.cockpitColorDomains = {};
   app.cockpitHover = null;
+  app.liveViewportStartMs = null;
+  app.liveViewportDrag = null;
+  document.body.classList.remove("live-viewport-dragging");
   renderCockpitStatic();
   renderCockpitAudit();
   updateFilters();
@@ -7472,6 +7640,7 @@ function setCockpitStrikeMode(mode) {
 
 dom.cockpitStrikeModeOi.addEventListener("click", () => setCockpitStrikeMode("oi"));
 dom.cockpitStrikeModeGamma.addEventListener("click", () => setCockpitStrikeMode("gamma"));
+dom.liveViewportReset.addEventListener("click", () => resetLiveViewport());
 
 function setAuditDrawer(open) {
   const visible = open === true;
@@ -7506,8 +7675,15 @@ dom.legacyDiagnosticOpen.addEventListener("click", openLegacyDiagnosticOverlay);
 
 for (const panel of ["gamma", "strike", "charm"]) {
   const overlay = cockpitElements(panel).overlay;
-  overlay.addEventListener("pointermove", (event) => cockpitPointerMove(panel, event));
-  overlay.addEventListener("pointerleave", clearCockpitHover);
+  overlay.addEventListener("pointerdown", (event) => beginLiveViewportPan(panel, event));
+  overlay.addEventListener("pointermove", (event) => {
+    if (!updateLiveViewportPan(panel, event)) cockpitPointerMove(panel, event);
+  });
+  overlay.addEventListener("pointerup", (event) => endLiveViewportPan(panel, event));
+  overlay.addEventListener("pointercancel", (event) => endLiveViewportPan(panel, event));
+  overlay.addEventListener("pointerleave", () => {
+    if (!app.liveViewportDrag) clearCockpitHover();
+  });
   if (panel !== "strike") {
     overlay.addEventListener("click", (event) => {
       if (!isReplayView()) return;
@@ -7517,12 +7693,27 @@ for (const panel of ["gamma", "strike", "charm"]) {
       const rect = overlay.getBoundingClientRect();
       const x = event.clientX - rect.left;
       if (x < layout.plotLeft || x > layout.plotRight) return;
-      const at = sessionXToTime(layout, surface.sessionStartMs, surface.sessionEndMs, x);
+      const at = cockpitXToTime(layout, surface, x);
       seekReplay(at, { syncFrame: true, announce: true });
     });
   }
   overlay.addEventListener("keydown", (event) => {
-    if (!isReplayView()) return;
+    if (!isReplayView()) {
+      if (panel === "strike") return;
+      if (event.key === "Home") {
+        event.preventDefault();
+        resetLiveViewport();
+        return;
+      }
+      const liveDelta = event.key === "ArrowLeft"
+        ? -30 * 60_000
+        : event.key === "ArrowRight" ? 30 * 60_000 : 0;
+      if (liveDelta) {
+        event.preventDefault();
+        panLiveViewportBy(liveDelta);
+      }
+      return;
+    }
     if (!app.trend) return;
     if (event.key === " " || event.key === "Spacebar") {
       event.preventDefault();
@@ -7665,6 +7856,7 @@ if (isObject(globalThis.__SPX_SPARK_TEST_HOOK__)) {
   Object.assign(globalThis.__SPX_SPARK_TEST_HOOK__, {
     canonicalReplaySha256,
     cockpitDisplayTimeMs,
+    cockpitTimeWindow,
     expandOnlyDomain,
     historicalOnlyLiveSurface,
     conservativeLiveServerNow,
@@ -7673,6 +7865,7 @@ if (isObject(globalThis.__SPX_SPARK_TEST_HOOK__)) {
     liveServerTimeMatchesArtifact,
     liveSurfaceDisplayState,
     liveSurfaceIdentity,
+    liveViewportStartAfterPan,
     liveSurfaceTransitionIssue,
     unavailableLiveMessage,
     unavailableLiveReason,

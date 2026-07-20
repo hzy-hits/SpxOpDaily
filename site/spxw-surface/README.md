@@ -51,6 +51,14 @@ the IBKR partial chain with a dashed, degraded chain-implied SPX reference; RTH
 requires direct SPX. A GTH lease is never carried across the gap and relabeled
 as RTH. Replay schema 2 keeps its independent v5 ES-basis reference contract.
 
+The service and signed payload retain that complete immutable session grid. The
+Live browser presents it through an auto-following two-hour viewport: 90 minutes
+of history and a 30-minute horizon. Drag Gamma or Charm horizontally, or use the
+arrow keys, to browse the session; `Home` and **回到现在** restore auto-follow.
+Viewport movement never extends a lease or manufactures future values: expired
+and unavailable intervals remain Missing. Replay continues to show its full
+session clock.
+
 Replay uses read-only API resources:
 
 - `api/v1/replay/sessions`

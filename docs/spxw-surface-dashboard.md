@@ -198,6 +198,14 @@ It does not interpolate the publisher's moving scenario grid or pretend
 browser-local history is complete. GTH values remain partial-chain degraded,
 and the scheduled gap is always Missing.
 
+Live rendering uses a client-only rolling viewport over that unchanged full
+session contract. Auto-follow displays the preceding 90 minutes and following
+30 minutes, clamped at the session boundaries. Horizontal pointer drag or the
+arrow keys enters historical browse mode; `Home` or **回到现在** resumes
+auto-follow. The viewport only selects which signed columns are painted. It does
+not discard accumulated history, alter frozen hashes, extend `valid_until`, or
+replace Missing future columns. Replay keeps the full-session presentation.
+
 ## Deployment and rollback
 
 The frontend is bind-mounted from `site/spxw-surface/public`; Nginx

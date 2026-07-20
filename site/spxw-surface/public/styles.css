@@ -1428,6 +1428,40 @@ body.mode-live .replay-session-picker {
   min-width: 0;
 }
 
+.live-viewport-controls {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  min-width: 0;
+  margin-left: auto;
+  color: var(--cockpit-muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+body.mode-replay .live-viewport-controls {
+  display: none;
+}
+
+.live-viewport-controls button {
+  min-height: 29px;
+  padding: 4px 9px;
+  border-color: #367ca6;
+  border-radius: 6px;
+  background: #0d3b59;
+  color: #dceaf2;
+  font-size: 9px;
+}
+
+.live-viewport-controls button:disabled {
+  border-color: var(--cockpit-border);
+  background: #091f33;
+  color: #61798a;
+}
+
 .replay-buttons button {
   min-width: 31px;
   min-height: 29px;
@@ -1644,6 +1678,15 @@ body.mode-live .replay-session-picker {
   z-index: 2;
   outline: none;
   touch-action: pan-y;
+}
+
+body.mode-live .cockpit-panel-gamma .cockpit-overlay,
+body.mode-live .cockpit-panel-charm .cockpit-overlay {
+  cursor: grab;
+}
+
+body.mode-live.live-viewport-dragging .cockpit-overlay {
+  cursor: grabbing;
 }
 
 .cockpit-overlay:focus-visible {
@@ -2133,6 +2176,12 @@ body.mode-replay.legacy-diagnostic-open .scenario-panel > summary {
   .compact-transport {
     align-items: stretch;
     flex-wrap: wrap;
+  }
+
+  .live-viewport-controls {
+    width: 100%;
+    justify-content: space-between;
+    margin-left: 0;
   }
 
   .compact-control,

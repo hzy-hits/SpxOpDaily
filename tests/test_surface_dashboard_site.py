@@ -102,6 +102,13 @@ def test_frontend_keeps_live_and_replay_clock_contracts_separate() -> None:
     assert "Math.max(POLL_INTERVAL_MS - elapsed, 0)" in app
     assert "live_surface_server_time_header_mismatch" in app
     assert "historicalOnlyLiveSurface" in app
+    assert "LIVE_VIEW_HISTORY_MS = 90 * 60_000" in app
+    assert "LIVE_VIEW_HORIZON_MS = 30 * 60_000" in app
+    assert "function cockpitTimeWindow(" in app
+    assert "function beginLiveViewportPan(" in app
+    assert 'id="live-viewport-controls"' in page
+    assert 'id="live-viewport-reset"' in page
+    assert "回到现在" in page
     assert "dom.scenarioDiagnostic.open = false" in app
     assert "else refreshLiveSessionSurface();" in app
     assert "if (!isReplayView()) return;" in app
