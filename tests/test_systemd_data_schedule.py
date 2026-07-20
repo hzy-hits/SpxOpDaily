@@ -143,3 +143,17 @@ def test_schwab_oauth_service_is_loopback_only_and_private_by_default() -> None:
     assert "Unsupported Schwab environment key" in env_writer
     assert "umask 077" in env_writer
     assert "chmod 600" in env_writer
+
+
+def test_schwab_reauth_reminder_runs_each_sunday_in_beijing() -> None:
+    service = read("systemd/spx-spark-schwab-reauth-reminder.service")
+    timer = read("systemd/spx-spark-schwab-reauth-reminder.timer")
+    runner = read("scripts/run-schwab-reauth-reminder.sh")
+    installer = read("scripts/install-schwab-oauth-service.sh")
+
+    assert "scripts/run-schwab-reauth-reminder.sh" in service
+    assert "UMask=0077" in service
+    assert "OnCalendar=Sun *-*-* 20:00:00 Asia/Shanghai" in timer
+    assert "Persistent=true" in timer
+    assert "spx_spark.application.schwab_reauth_reminder" in runner
+    assert "enable --now spx-spark-schwab-reauth-reminder.timer" in installer

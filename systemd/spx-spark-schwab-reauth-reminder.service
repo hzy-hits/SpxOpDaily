@@ -1,0 +1,15 @@
+[Unit]
+Description=SPX Spark weekly Schwab reauthorization reminder
+After=network-online.target spx-spark-schwab-oauth.service
+Wants=network-online.target spx-spark-schwab-oauth.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/ubuntu/spx-spark
+EnvironmentFile=-/home/ubuntu/spx-spark/.env
+Environment=PATH=/home/ubuntu/.local/bin:/home/ubuntu/.cargo/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/home/ubuntu/spx-spark/scripts/run-schwab-reauth-reminder.sh
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+TimeoutStartSec=60

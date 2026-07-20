@@ -194,6 +194,14 @@ the browser through Cloudflare to Oracle. The server validates the server-side
 state, consumes it once, exchanges the authorization code, writes the token
 atomically with mode `0600`, and reloads the gateway client.
 
+The installed `spx-spark-schwab-reauth-reminder.timer` runs every Sunday at
+20:00 Asia/Shanghai. It generates a single-use authorization URL and sends it
+through the configured trade notification sinks. The URL remains valid only for
+the configured OAuth state TTL (normally 15 minutes), and Schwab still requires
+a human browser confirmation. The reminder is intentionally sent every Sunday:
+skipping a week could let a token refreshed midweek expire before the following
+Sunday.
+
 Verify without exposing the token:
 
 ```bash
