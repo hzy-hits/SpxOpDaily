@@ -1189,6 +1189,70 @@ def test_rth_after_gth_keeps_gth_columns_degraded(tmp_path: Path) -> None:
     )
 
 
+def test_rth_provider_failover_keeps_frozen_source_contract_browser_valid(
+    tmp_path: Path,
+) -> None:
+    ibkr_at = _at(13, 30, 30)
+    clock = MutableClock(ibkr_at)
+    accumulator = _accumulator(tmp_path, clock)
+    assert accumulator.accept(
+        _live_input(
+            accepted_at=ibkr_at,
+            valid_until=_at(13, 32),
+            sequence=1,
+            spot_provider="schwab",
+            frame_providers=["ibkr"],
+        ),
+        accepted_at=ibkr_at,
+    )
+
+    freeze_at = _at(13, 31, 1)
+    clock.value = freeze_at
+    assert accumulator._freeze_due(freeze_at)
+
+    schwab_at = _at(13, 31, 10)
+    clock.value = schwab_at
+    assert accumulator.accept(
+        _live_input(
+            accepted_at=schwab_at,
+            valid_until=_at(13, 33),
+            sequence=2,
+            spot_provider="schwab",
+            frame_providers=["schwab"],
+        ),
+        accepted_at=schwab_at,
+    )
+
+    request_at = schwab_at + timedelta(milliseconds=100)
+    clock.value = request_at
+    surface = accumulator.session_surface(SELECTOR, now=request_at)
+    rth_segment = next(
+        segment for segment in surface["session_segments"] if segment["kind"] == "rth"
+    )
+    frozen_column = surface["surface_columns"][_bucket_end_index(_at(13, 31)) - 1]
+    assert rth_segment["surface_provider"] == "schwab"
+    assert frozen_column["kind"] == "historical"
+    assert frozen_column["session_kind"] == "rth"
+    assert frozen_column["source_session_kind"] == "rth"
+    assert frozen_column["surface_provider"] == "ibkr"
+    assert frozen_column["reference_method"] == "direct_index_spx"
+
+    payload_path = tmp_path / "live-session-provider-failover-v2.json"
+    payload_path.write_text(json.dumps(surface), encoding="utf-8")
+    root = Path(__file__).resolve().parents[1]
+    subprocess.run(
+        [
+            "node",
+            str(root / "tests" / "js" / "live_session_surface_v2_payload_test.js"),
+            str(root / "site" / "spxw-surface" / "public" / "app.js"),
+            str(payload_path),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
 def test_gth_lease_never_becomes_current_rth_surface(tmp_path: Path) -> None:
     gth_at = _at(13, 24)
     completed = gth_at + timedelta(milliseconds=100)

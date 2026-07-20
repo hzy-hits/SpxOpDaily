@@ -1731,6 +1731,12 @@ function normalizeSurfaceColumn(
       : null;
     const targetContract = segment?.kind ? segmentsByKind?.[segment.kind] ?? null : null;
     const providerContract = kind === "missing" ? targetContract : sourceContract;
+    // A live segment declaration describes the latest accepted provider. Frozen
+    // historical columns remain bound to their own signed source frame, so an
+    // in-session provider failover must not retroactively invalidate them.
+    const providerMatchesContract = mode === "live" && kind === "historical"
+      ? surfaceProvider !== null
+      : surfaceProvider === providerContract?.surfaceProvider;
     if (!segment || sessionKind !== segment.kind ||
         (segment.kind === "closed_gap" && kind !== "missing") ||
         (kind === "missing" && sourceSessionKind !== null) ||
@@ -1740,7 +1746,7 @@ function normalizeSurfaceColumn(
           sourceSessionKind !== activeSegment.kind
         )) ||
         !providerContract ||
-        surfaceProvider !== providerContract.surfaceProvider ||
+        !providerMatchesContract ||
         referenceMethod !== providerContract.referenceMethod) {
       throw new Error("invalid_session_surface_column_segment_contract");
     }

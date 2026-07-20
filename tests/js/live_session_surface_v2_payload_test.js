@@ -56,15 +56,25 @@ vm.runInThisContext(fs.readFileSync(appPath, "utf8"), { filename: appPath });
 const hooks = globalThis.__SPX_SPARK_TEST_HOOK__;
 const payload = JSON.parse(fs.readFileSync(payloadPath, "utf8"));
 
-(async () => {
-  const surface = await hooks.normalizeSessionSurface(payload, {
+function expectedSurface() {
+  return {
     mode: "live",
     sessionDate: payload.session_date,
     role: payload.role,
     weighting: payload.weighting,
     bucketMinutes: payload.bucket_minutes,
     priceStep: payload.price_step,
-  });
+  };
+}
+
+async function resign(value) {
+  delete value.artifact_sha256;
+  value.artifact_sha256 = await hooks.canonicalReplaySha256(value);
+  return value;
+}
+
+(async () => {
+  const surface = await hooks.normalizeSessionSurface(payload, expectedSurface());
 
   assert.equal(surface.schemaVersion, 2);
   assert.equal(surface.policyVersion, "spxw_session_surface.live.v2");
@@ -73,11 +83,17 @@ const payload = JSON.parse(fs.readFileSync(payloadPath, "utf8"));
     "closed_gap",
     "rth",
   ]);
-  assert.equal(surface.providers.gthSurface, "ibkr");
-  assert.equal(surface.providers.gthReference, "ibkr");
+  assert.equal(surface.providers.gthSurface, payload.providers.gth_surface);
+  assert.equal(surface.providers.gthReference, payload.providers.gth_reference);
+  assert.equal(surface.providers.rthSurface, payload.providers.rth_surface);
+  assert.equal(surface.providers.rthReference, payload.providers.rth_reference);
+  const activeSegment = surface.sessionSegments.find((segment) =>
+    segment.startMs <= surface.asOfMs && surface.asOfMs < segment.endMs);
+  assert(activeSegment);
   if (surface.availability.current_spot_available) {
-    assert.equal(surface.reference.method, "chain_implied");
-    assert.equal(surface.reference.inferred, true);
+    assert.equal(surface.reference.method, activeSegment.referenceMethod);
+    assert.equal(surface.reference.provider, activeSegment.referenceProvider);
+    assert.equal(surface.reference.inferred, surface.reference.method !== "direct_index_spx");
     assert(Number.isFinite(surface.reference.price));
   } else {
     assert.equal(surface.reference.method, null);
@@ -85,7 +101,7 @@ const payload = JSON.parse(fs.readFileSync(payloadPath, "utf8"));
     assert.equal(surface.reference.missingReason, "fresh_coordinate_reference_unavailable");
     assert(["degraded", "lease_expired", "unavailable"].includes(surface.liveStatus));
   }
-  assert.equal(surface.capabilities.gth_available, true);
+  assert.equal(surface.capabilities.gth_available, payload.capabilities.gth_available);
 
   surface.surfaceColumns.forEach((column, index) => {
     if (column.sessionKind !== "closed_gap") return;
@@ -95,6 +111,20 @@ const payload = JSON.parse(fs.readFileSync(payloadPath, "utf8"));
       assert(matrix[index].every((value) => value === null));
     }
   });
+
+  const historicalIndex = payload.surface_columns.findIndex((column) =>
+    column.kind === "historical");
+  if (historicalIndex >= 0) {
+    const invalidHistoricalProvider = structuredClone(payload);
+    invalidHistoricalProvider.surface_columns[historicalIndex].surface_provider = null;
+    await assert.rejects(
+      hooks.normalizeSessionSurface(
+        await resign(invalidHistoricalProvider),
+        expectedSurface(),
+      ),
+      /invalid_session_surface_column_segment_contract/,
+    );
+  }
 })().catch((error) => {
   process.nextTick(() => { throw error; });
 });

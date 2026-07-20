@@ -120,6 +120,13 @@ by mode. Live adds accepted/lease clocks, availability flags, frozen-through
 clock, dynamic provider declarations, and live provenance. Missing data is null
 plus a Missing reason, never a fabricated zero.
 
+For Live, each segment's `surface_provider` is the latest accepted provider for
+that segment. A frozen historical column retains the provider of its signed
+source frame. Therefore an in-session failover (for example IBKR to Schwab) may
+leave historical RTH columns whose `surface_provider` differs from the current
+RTH segment declaration; the browser still enforces the source session and
+reference method while preserving that immutable provider provenance.
+
 ## State and recovery
 
 Production state is retained under:
