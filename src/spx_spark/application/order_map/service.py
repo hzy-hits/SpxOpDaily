@@ -17,6 +17,9 @@ from spx_spark.application.globex_trend.state import load_trend_state, trend_sta
 from spx_spark.application.market_features.greek_decision import build_greek_decision
 from spx_spark.application.market_features.state import load_json, projection_paths
 from spx_spark.application.order_map.bias_machine import load_intraday_call_bias
+from spx_spark.application.order_map.call_spread_shadow import (
+    build_skew_spread_shadows as _build_spread_shadows,
+)
 from spx_spark.application.order_map.candidate_presentation import (
     apply_candidate_presentation as _apply_candidate_presentation,
 )
@@ -179,6 +182,9 @@ def build_order_payload(
     }
     beijing = now.astimezone(SHANGHAI_TZ)
     trigger_coordinate = _report_trigger_coordinate(state, resolution, now=now)
+    skew_spread_shadows = _build_spread_shadows(
+        state, expiry=expiry, spot=pricing_spot, now=now, policy=policy
+    )
 
     # Keep prior-close change as context. Expected-move consumption is attached
     # later from the current GTH session so yesterday's move cannot leak into it.
@@ -214,6 +220,7 @@ def build_order_payload(
         "research_only": resolution.research_only,
         "analysis_mode": "globex_context" if resolution.research_only else "executable",
         "expiry": expiry,
+        **skew_spread_shadows,
         "expected_move_points": expected_move_points,
         "candidates": candidate_rows,
         "conditional_call_bias": annotate_call_bias_with_signal_mode(

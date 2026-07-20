@@ -4,9 +4,12 @@ from __future__ import annotations
 
 from typing import Any
 
+from spx_spark.analytics.options.pricing import finite_float
+from spx_spark.application.order_map.call_spread_shadow import (
+    compact_skew_spread_shadow_line,
+)
 from spx_spark.application.order_map.models import PLAY_ORDER, PLAY_TEMPLATE_LINES
 from spx_spark.application.order_map.wall_ladder_presentation import primary_wall_strike
-from spx_spark.analytics.options.pricing import finite_float
 
 
 def _dash(value: Any) -> str:
@@ -561,6 +564,8 @@ def render_research_only_template(
     divergence = pricing.get("divergence_bps")
     if isinstance(divergence, (int, float)):
         lines.append(f"HL 与定价候选分歧: {float(divergence):+.0f} bps")
+    if shadow_line := compact_skew_spread_shadow_line(payload):
+        lines.append(shadow_line)
     gate = str(pricing.get("gate_state") or "missing")
     lines.append(f"执行限制: {gate}；当前为不可执行定价，不生成期权模型价、概率、限价或下单建议。")
     return "\n".join(lines)

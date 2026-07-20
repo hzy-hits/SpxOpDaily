@@ -9,6 +9,10 @@ from typing import Any
 
 from spx_spark.analytics.options.pricing import finite_float
 from spx_spark.application.order_map import guidance as guidance_module
+from spx_spark.application.order_map.call_spread_shadow import (
+    compact_skew_spread_shadow_line,
+    skew_spread_shadow_detail_lines,
+)
 from spx_spark.application.order_map.models import PLAY_ORDER, SHANGHAI_TZ
 from spx_spark.application.order_map.exposure_presentation import exposure_strike_lines
 from spx_spark.application.order_map.render import (
@@ -553,6 +557,7 @@ def render_status_template(
             else []
         ),
         *([line] if (line := _compact_option_line(payload)) else []),
+        *([line] if (line := compact_skew_spread_shadow_line(payload)) else []),
         *(["", *candidate_section] if candidate_section else []),
     ]
     if changes:
@@ -678,6 +683,7 @@ def render_feishu_status_detail_template(
         ("关键位状态", key_level_context),
         ("当前布局参考", _detail_ladder_lines(payload)),
         ("风险中性分布", [density] if density else []),
+        ("Call / Put Skew Spread Shadow", skew_spread_shadow_detail_lines(payload)),
         (
             "条件计划与 BS 审计"
             if payload.get("plan_candidates") or "plan_candidates" not in payload
@@ -722,12 +728,22 @@ def render_feishu_delivery_text(
                 "## 0DTE 暴露地图\n",
                 "## 关键位状态\n",
                 "## 当前布局参考\n",
+                "## Call / Put Skew Spread Shadow\n",
                 "## 条件计划与 BS 审计\n",
             )
             if has_plan
-            else ("## 0DTE 暴露地图\n", "## 关键位状态\n", "## 当前布局参考\n")
+            else (
+                "## 0DTE 暴露地图\n",
+                "## 关键位状态\n",
+                "## 当前布局参考\n",
+                "## Call / Put Skew Spread Shadow\n",
+            )
             if active
-            else ("## 0DTE 暴露地图\n", "## 当前布局参考\n")
+            else (
+                "## 0DTE 暴露地图\n",
+                "## 当前布局参考\n",
+                "## Call / Put Skew Spread Shadow\n",
+            )
         )
         detail_blocks = [
             block for block in blocks if any(block.startswith(title) for title in allowed_titles)
@@ -782,6 +798,7 @@ def build_status_prompt(
             "order_style=live_nbbo_limit 时，必须保留实时 NBBO、入场上限、失效位、目标和意图到期时间，"
             "不得写『当前不可预挂』；非实时条件情景才保留『当前不可预挂』并等 SPX 触发后重算。",
             "TradeReady 可供操作员执行，但自动下单仍关闭；仓位方向未知时，负 gamma 不等于下跌，不得据此改变候选方向。",
+            "call_skew_spread_shadow 与 put_skew_spread_shadow 只能称为只读 Shadow：即使 status=candidate 也不是计划或订单，禁止补写拆腿执行；只能复述组合净借记、定义风险和门控边界。",
             "EXPIRED 表示系统自动重建事件，不得写成等待价格离开或停止监控。",
             "没有实质变化时直接写『剧本维持』，不要为了填满行数重复指标。",
             "previous_push:" + previous_push_json(previous_push),
@@ -807,9 +824,35 @@ def _status_writer_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "session_episode",
         "trade_candidate",
         "confirmed_gate",
+        "call_skew_spread_shadow",
+        "put_skew_spread_shadow",
         "warnings",
     )
     compact = {key: payload.get(key) for key in keys if key in payload}
+    for shadow_key in ("call_skew_spread_shadow", "put_skew_spread_shadow"):
+        shadow = compact.get(shadow_key)
+        if not isinstance(shadow, dict):
+            continue
+        candidate = shadow.get("candidate")
+        compact[shadow_key] = {
+            key: shadow.get(key)
+            for key in ("status", "reason", "automatic_ordering", "operator_action")
+        }
+        if isinstance(candidate, dict):
+            compact[shadow_key]["candidate"] = {
+                key: candidate.get(key)
+                for key in (
+                    "strategy",
+                    "long",
+                    "short",
+                    "executable_debit",
+                    "fair_debit",
+                    "edge_points",
+                    "iv_fit",
+                    "defined_risk",
+                    "execution",
+                )
+            }
     compact["decision_guidance"] = guidance_module.build_decision_guidance(payload).to_dict()
     signed_gex = payload.get("signed_gex_proxy")
     if isinstance(signed_gex, dict):

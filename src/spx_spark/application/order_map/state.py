@@ -13,6 +13,10 @@ from spx_spark.application.order_map.models import (
     BJ_WINDOW_START,
     SHANGHAI_TZ,
 )
+from spx_spark.application.order_map.call_spread_shadow import (
+    skew_spread_shadow_identity,
+    skew_spread_shadow_material_change,
+)
 from spx_spark.analytics.options.pricing import finite_float
 from spx_spark.config import NY_TZ, StorageSettings
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
@@ -56,6 +60,7 @@ def payload_fingerprint(payload: dict[str, Any]) -> dict[str, Any]:
         "flip_high": finite_float(flip_zone[1]) if flip_zone and len(flip_zone) >= 2 else None,
         "call_wall": level_of("call_wall_fade_put"),
         "expected_move_points": finite_float(payload.get("expected_move_points")),
+        "skew_spread_shadow_id": skew_spread_shadow_identity(payload),
     }
 
 
@@ -93,6 +98,12 @@ def material_changes(
     if prev_em and cur_em and prev_em > 0:
         if abs(cur_em / prev_em - 1.0) >= MATERIAL_EM_REL_CHANGE:
             changes.append(f"预期波幅 ±{_dash(prev_em)}→±{_dash(cur_em)} 点")
+    shadow_change = skew_spread_shadow_material_change(
+        str(previous.get("skew_spread_shadow_id") or ""),
+        str(current.get("skew_spread_shadow_id") or ""),
+    )
+    if shadow_change:
+        changes.append(shadow_change)
     return changes
 
 

@@ -10,7 +10,7 @@ Every human-facing message uses one of five lanes and the shared notifier dispat
 | `market_warning` | Fast market movement warning, not an entry instruction | Deterministic, no LLM latency or veto | SPX/ES shock, reclaim, flip reclaim, call-wall breakout |
 | `trade_ready` | Fully gated executable intent | Deterministic strategy gates; LLM is writer only | Contract, entry limit, invalidation, target, expiry |
 | `position_safety` | Existing-position or execution safety | Deterministic, never blocked by a reviewer | Open/close/quantity/PnL safety events when account tracking is explicitly enabled |
-| `scheduled_report` | Time-based map/status/review | Writer allowed; delivery is still receipted and retryable | Morning map, 15-minute status, post-close review |
+| `scheduled_report` | Time-based map/status/review | Writer allowed; delivery is still receipted and retryable | Morning map, 15-minute status (including the read-only [Call / Put Skew Spread Shadow](call-skew-spread-shadow.md)), post-close review |
 
 IV, Gamma and option-structure observations enter the reviewer lane. Explicit
 data-quality observations remain audit-only. The direct and audit-only sets are
