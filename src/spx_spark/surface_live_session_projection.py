@@ -11,6 +11,7 @@ from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 from spx_spark.marketdata import as_utc
 from spx_spark.surface_artifact import canonical_sha256
 from spx_spark.surface_live_session_models import (
+    LIVE_BUCKET_MINUTES,
     LIVE_COORDINATE,
     LIVE_PRICE_EXTENT_POINTS,
     LIVE_SESSION_KIND,
@@ -261,7 +262,7 @@ def _buckets(start: datetime, close: datetime) -> tuple[tuple[datetime, datetime
     rows: list[tuple[datetime, datetime]] = []
     cursor = start
     while cursor < close:
-        end = min(cursor + timedelta(minutes=5), close)
+        end = min(cursor + timedelta(minutes=LIVE_BUCKET_MINUTES), close)
         rows.append((cursor, end))
         cursor = end
     return tuple(rows)

@@ -305,6 +305,20 @@ function expirePayload(payload) {
     "the full two-hour window stays inside the session near its open",
   );
   assert.deepEqual(
+    hooks.cockpitTimeWindow({
+      ...rollingSurface,
+      accumulatorStartedAtMs: Date.parse("2026-07-17T15:50:00Z"),
+    }, {
+      serverNowMs: Date.parse("2026-07-17T16:00:00Z"),
+    }),
+    {
+      startMs: Date.parse("2026-07-17T15:50:00Z"),
+      endMs: Date.parse("2026-07-17T16:30:00Z"),
+      followsNow: true,
+    },
+    "a newly started accumulator shows only collected history plus the live horizon",
+  );
+  assert.deepEqual(
     hooks.cockpitTimeWindow(rollingSurface, {
       manualStartMs: Date.parse("2026-07-17T19:30:00Z"),
     }),

@@ -28,10 +28,11 @@ const SESSION_SEGMENT_CONTRACT = {
     referenceMethod: "direct_index_spx",
   },
 };
-const SESSION_SURFACE_BUCKET_MINUTES = 5;
+const LIVE_SESSION_SURFACE_BUCKET_MINUTES = 1;
+const REPLAY_SESSION_SURFACE_BUCKET_MINUTES = 5;
 const SESSION_SURFACE_PRICE_STEP = 5;
 const SESSION_SURFACE_PRICE_EXTENT_POINTS = 100;
-const SESSION_SURFACE_BUCKET_MINUTES_ALLOWED = new Set([5, 10, 15]);
+const SESSION_SURFACE_BUCKET_MINUTES_ALLOWED = new Set([1, 5, 10, 15]);
 const SESSION_SURFACE_PRICE_STEPS_ALLOWED = new Set([2.5, 5, 10]);
 const REPLAY_TREND_KIND = "spxw_intraday_gamma_replay";
 const REPLAY_TREND_POLICY_VERSION = "spxw_surface_replay_trend.v1";
@@ -1266,11 +1267,23 @@ function cockpitTimeWindow(
   const requestedStartMs = followsNow
     ? anchorMs - LIVE_VIEW_HISTORY_MS
     : manualStartMs;
+  const accumulatedStartMs = followsNow && Number.isFinite(surface.accumulatorStartedAtMs)
+    ? Math.max(
+      surface.sessionStartMs,
+      Math.min(surface.accumulatorStartedAtMs, surface.sessionEndMs),
+    )
+    : surface.sessionStartMs;
   const startMs = Math.max(
-    surface.sessionStartMs,
+    accumulatedStartMs,
     Math.min(requestedStartMs, latestStartMs),
   );
-  return { startMs, endMs: startMs + spanMs, followsNow };
+  const endMs = followsNow && accumulatedStartMs > surface.sessionStartMs
+    ? Math.min(
+      surface.sessionEndMs,
+      Math.max(startMs + 1, anchorMs + LIVE_VIEW_HORIZON_MS),
+    )
+    : startMs + spanMs;
+  return { startMs, endMs, followsNow };
 }
 
 function activeCockpitTimeWindow(surface = app.sessionSurface) {
@@ -2257,7 +2270,11 @@ async function normalizeSessionSurface(raw, expected = {}) {
       (expected.weighting && weighting !== expected.weighting)) {
     throw new Error("invalid_session_surface_selector_contract");
   }
-  const bucketMinutes = finiteNumber(raw.bucket_minutes) ?? SESSION_SURFACE_BUCKET_MINUTES;
+  const bucketMinutes = finiteNumber(raw.bucket_minutes) ?? (
+    mode === "live"
+      ? LIVE_SESSION_SURFACE_BUCKET_MINUTES
+      : REPLAY_SESSION_SURFACE_BUCKET_MINUTES
+  );
   const priceStep = finiteNumber(raw.price_step) ?? SESSION_SURFACE_PRICE_STEP;
   if (
     !SESSION_SURFACE_BUCKET_MINUTES_ALLOWED.has(bucketMinutes) ||
@@ -6417,7 +6434,7 @@ function liveSessionSurfaceRequestUrl() {
   const params = new URLSearchParams({
     role: app.expiryRole,
     weighting: app.weighting,
-    bucket_minutes: String(SESSION_SURFACE_BUCKET_MINUTES),
+    bucket_minutes: String(LIVE_SESSION_SURFACE_BUCKET_MINUTES),
     price_step: String(SESSION_SURFACE_PRICE_STEP),
   });
   return `${LIVE_SESSION_SURFACE_URL}?${params}`;
@@ -6668,7 +6685,7 @@ function sessionSurfaceRequestUrl(frame) {
     at: formatIsoUtc(frame.at),
     role: app.expiryRole,
     weighting: app.weighting,
-    bucket_minutes: String(SESSION_SURFACE_BUCKET_MINUTES),
+    bucket_minutes: String(REPLAY_SESSION_SURFACE_BUCKET_MINUTES),
     price_step: String(SESSION_SURFACE_PRICE_STEP),
   });
   return `${REPLAY_SESSIONS_URL}/${encodeURIComponent(app.sessionDate)}/session-surface?${params}`;
@@ -6843,7 +6860,7 @@ function prefetchNextSessionSurface(renderedIndex) {
         sessionDate,
         role,
         weighting,
-        bucketMinutes: SESSION_SURFACE_BUCKET_MINUTES,
+        bucketMinutes: REPLAY_SESSION_SURFACE_BUCKET_MINUTES,
         priceStep: SESSION_SURFACE_PRICE_STEP,
       });
       if (controller.signal.aborted || generation !== app.sessionSurfaceGeneration) return;
@@ -6932,7 +6949,7 @@ async function loadSessionSurfaceAtPlayhead({ force = false, interrupt = false }
       sessionDate: app.sessionDate,
       role,
       weighting,
-      bucketMinutes: SESSION_SURFACE_BUCKET_MINUTES,
+      bucketMinutes: REPLAY_SESSION_SURFACE_BUCKET_MINUTES,
       priceStep: SESSION_SURFACE_PRICE_STEP,
     });
     if (
@@ -7170,7 +7187,7 @@ async function refreshLiveSessionSurface() {
       mode: "live",
       role,
       weighting,
-      bucketMinutes: SESSION_SURFACE_BUCKET_MINUTES,
+      bucketMinutes: LIVE_SESSION_SURFACE_BUCKET_MINUTES,
       priceStep: SESSION_SURFACE_PRICE_STEP,
     });
     if (!liveServerTimeMatchesArtifact(response.headers, surface.serverTimeMs)) {

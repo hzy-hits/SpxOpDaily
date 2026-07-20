@@ -102,6 +102,8 @@ def test_frontend_keeps_live_and_replay_clock_contracts_separate() -> None:
     assert "Math.max(POLL_INTERVAL_MS - elapsed, 0)" in app
     assert "live_surface_server_time_header_mismatch" in app
     assert "historicalOnlyLiveSurface" in app
+    assert "LIVE_SESSION_SURFACE_BUCKET_MINUTES = 1" in app
+    assert "REPLAY_SESSION_SURFACE_BUCKET_MINUTES = 5" in app
     assert "LIVE_VIEW_HISTORY_MS = 90 * 60_000" in app
     assert "LIVE_VIEW_HORIZON_MS = 30 * 60_000" in app
     assert "function cockpitTimeWindow(" in app

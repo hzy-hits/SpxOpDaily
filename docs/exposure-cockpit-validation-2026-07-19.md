@@ -12,7 +12,7 @@
 
 Replay 页面已从逐帧 `Now/+5m` 情景报告改造成固定 Session Canvas：Gamma、Current/First Validated Strike Exposure Proxy、Charm 三栏默认同屏，使用相同 SPX 价格纵轴，并叠加仅截至回放 cutoff 的 SPX K 线。历史列冻结，当前 cutoff 右侧明确标为 projection；缺失值保持 `null` 并以斜纹显示，不以零值补齐。
 
-当前实现仍是 OI/Volume Exposure Proxy，不是 Market Maker、Dealer 或 participant 实际仓位。Live 已接入独立的 durable Session Canvas accumulator；它只接受带自哈希、仍在 lease 内的 RTH 生产快照，按五分钟边界冻结历史列。周末、跨日、断档、过期或缺少 direct SPX 时保留冻结历史并清空动态内容，不把 moving scenario 或旧报价伪装成 Live。
+当前实现仍是 OI/Volume Exposure Proxy，不是 Market Maker、Dealer 或 participant 实际仓位。Live 已接入独立的 durable Session Canvas accumulator；它只接受带自哈希、仍在 lease 内、具有分段适用 SPX reference 的 GTH/RTH 生产快照，按一分钟边界冻结历史列。周末、跨日、断档、过期、GTH 缺少 chain-implied reference 或 RTH 缺少 direct SPX 时保留冻结历史并清空动态内容，不把 moving scenario 或旧报价伪装成 Live。
 
 ## 实际运行入口
 

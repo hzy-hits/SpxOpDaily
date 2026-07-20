@@ -14,6 +14,7 @@ import spx_spark.surface_live_session_worker as live_worker
 from spx_spark.surface_artifact import canonical_sha256
 from spx_spark.surface_live_session_http import LiveAPI
 from spx_spark.surface_live_session_models import (
+    LIVE_BUCKET_MINUTES,
     LiveSelector,
     LiveSessionError,
     iso,
@@ -36,8 +37,11 @@ SELECTOR = LiveSelector()
 
 
 def _bucket_end_index(at: datetime) -> int:
-    """Count of 5-minute window buckets whose end is at or before ``at``."""
-    return int((at - SESSION_WINDOW_START).total_seconds() // 300)
+    """Count of live window buckets whose end is at or before ``at``."""
+    return int(
+        (at - SESSION_WINDOW_START).total_seconds()
+        // (LIVE_BUCKET_MINUTES * 60)
+    )
 
 
 @dataclass
@@ -407,11 +411,16 @@ def _state_with_boundaries(
         accepted_at=accepted,
         valid_until=_at(13, 55),
     )
-    freeze_at = SESSION_OPEN + timedelta(minutes=5 * boundary_count, seconds=1)
+    freeze_at = SESSION_OPEN + timedelta(
+        minutes=LIVE_BUCKET_MINUTES * boundary_count,
+        seconds=1,
+    )
     clock.value = freeze_at
     assert accumulator._freeze_due(freeze_at)  # exercise the persisted boundary transaction
     boundaries = list(store.load_boundaries(SESSION_DATE))
-    expected = _bucket_end_index(SESSION_OPEN + timedelta(minutes=5 * boundary_count))
+    expected = _bucket_end_index(
+        SESSION_OPEN + timedelta(minutes=LIVE_BUCKET_MINUTES * boundary_count)
+    )
     assert len(boundaries) == expected
     return store, clock, boundaries
 
@@ -547,7 +556,7 @@ def test_mid_session_missing_boundaries_are_never_backfilled(tmp_path: Path) -> 
     )
     boundaries_before = accumulator.store.load_boundaries(SESSION_DATE)
     expected_ends = [
-        iso(SESSION_WINDOW_START + timedelta(minutes=5 * (index + 1)))
+        iso(SESSION_WINDOW_START + timedelta(minutes=LIVE_BUCKET_MINUTES * (index + 1)))
         for index in range(_bucket_end_index(_at(13, 40)))
     ]
     assert [row["end_at"] for row in boundaries_before] == expected_ends
@@ -697,9 +706,9 @@ def test_event_sampled_candle_freezes_ohlc_and_expiry_removes_partial(
     accumulator = _accumulator(tmp_path, clock)
     for sequence, (accepted_at, spot) in enumerate(
         (
-            (_at(13, 30, 1), 5000.0),
-            (_at(13, 31, 1), 5002.0),
-            (_at(13, 32, 1), 4998.0),
+            (_at(13, 34, 1), 5000.0),
+            (_at(13, 34, 15), 5002.0),
+            (_at(13, 34, 30), 4998.0),
             (_at(13, 34, 59), 5001.0),
         ),
         start=1,
@@ -717,7 +726,7 @@ def test_event_sampled_candle_freezes_ohlc_and_expiry_removes_partial(
     rth_index = _bucket_end_index(_at(13, 35)) - 1
     frozen = accumulator.store.load_boundaries(SESSION_DATE)[rth_index]
     assert frozen["candle"] == {
-        "start_at": iso(_at(13, 30)),
+        "start_at": iso(_at(13, 34)),
         "end_at": iso(_at(13, 35)),
         "open": 5000.0,
         "high": 5002.0,
@@ -899,7 +908,7 @@ def test_missing_selector_role_keeps_coherent_root_clock_but_no_dynamic_data(
     ("field", "value"),
     [
         ("policy_version", "spxw_session_surface.legacy"),
-        ("bucket_minutes", 1),
+        ("bucket_minutes", 5),
         ("price_step", 2.5),
         ("price_extent_points_each_side", 200.0),
         ("session_end", iso(_at(19, 55))),
@@ -937,7 +946,7 @@ def test_http_server_time_header_exactly_matches_signed_body(tmp_path: Path) -> 
     response = api.dispatch(
         "GET",
         "/api/v1/live/session-surface"
-        "?role=front&weighting=oi_weighted&bucket_minutes=5&price_step=5",
+        "?role=front&weighting=oi_weighted&bucket_minutes=1&price_step=5",
     )
 
     assert response.status == HTTPStatus.OK
@@ -971,6 +980,8 @@ def test_gth_snapshot_accepted_into_segmented_surface(tmp_path: Path) -> None:
     surface = accumulator.session_surface(SELECTOR, now=request_at)
     assert surface["schema_version"] == 2
     assert surface["policy_version"] == "spxw_session_surface.live.v2"
+    assert surface["bucket_minutes"] == 1
+    assert len(surface["time_buckets"]) == 1_185
     segments = surface["session_segments"]
     assert [row["kind"] for row in segments] == ["gth", "closed_gap", "rth"]
     assert segments[0]["surface_provider"] == "ibkr"
@@ -1115,7 +1126,7 @@ def test_closed_gap_marks_missing_and_clears_spot(tmp_path: Path) -> None:
 
 
 def test_rth_after_gth_keeps_gth_columns_degraded(tmp_path: Path) -> None:
-    gth_at = _at(13, 24)
+    gth_at = _at(13, 24, 30)
     gth_completed = gth_at + timedelta(milliseconds=100)
     clock = MutableClock(gth_at)
     accumulator = _accumulator(tmp_path, clock)

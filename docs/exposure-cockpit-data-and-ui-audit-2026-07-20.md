@@ -160,6 +160,19 @@ Live UI 在不改变签名 payload、冻结历史或 lease 语义的前提下，
 “回到现在”恢复自动跟随；窗口在 session open/close 自动夹紧。租约过期后窗口
 继续随服务端时钟滚动，但失效点之后仍为 Missing，不延长或伪造 projection。
 
+Live 的持久化列频率随后从 5 分钟提高到 1 分钟：dashboard publisher 仍每 5 秒
+刷新、lease 仍为 10 秒，accumulator 在每个 1 分钟边界冻结最后一份在边界时仍
+有效的候选。常规完整 session 从 237 列增加到 1,185 列；Replay 保持 5 分钟。
+新状态写入 `live/policy=live-v2/bucket=1m/`，既有 v2 五分钟证据不被覆盖。真实
+reference 缺口仍保持 Missing，不以插值制造连续性。新 namespace 不用后来数据
+反填切换前的一分钟历史；自动跟随视窗从 `accumulator_started_at` 起画，避免把尚未
+收集的整段历史挤进默认窗口，手动横移仍可审计这些 Missing。
+
+2026-07-20 14:25 CST 切换时，IBKR collector 正被另一个共享行情会话以 `10197`
+拒绝，publisher 因而为 `underlier_unavailable`。一分钟服务与 Unix socket 健康，
+但在收到首份新鲜 chain-implied GTH snapshot 前按契约返回 503；该外部数据阻塞不
+通过旧 reference、ES 替代或插值绕过。
+
 ## 仍受外部数据阻塞
 
 以下能力没有用模型推断冒充完成：

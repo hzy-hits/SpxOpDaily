@@ -19,7 +19,11 @@ from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 from spx_spark.config import StorageSettings
-from spx_spark.surface_live_session_models import LiveSelector, LiveSessionError
+from spx_spark.surface_live_session_models import (
+    LIVE_BUCKET_MINUTES,
+    LiveSelector,
+    LiveSessionError,
+)
 from spx_spark.surface_live_session_store import LiveSessionStateStore
 from spx_spark.surface_live_session_worker import (
     DEFAULT_POLL_SECONDS,
@@ -271,14 +275,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--state-root", "--state-dir", dest="state_root", type=Path)
     parser.add_argument("--unix-socket", type=Path)
     parser.add_argument("--poll-seconds", type=float, default=DEFAULT_POLL_SECONDS)
-    parser.add_argument("--bucket-minutes", type=int, default=5)
+    parser.add_argument("--bucket-minutes", type=int, default=LIVE_BUCKET_MINUTES)
     parser.add_argument("--price-step", type=float, default=5.0)
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args(argv)
     if not math.isfinite(args.poll_seconds) or args.poll_seconds <= 0:
         parser.error("--poll-seconds must be positive and finite")
-    if args.bucket_minutes != 5:
-        parser.error("--bucket-minutes only supports 5")
+    if args.bucket_minutes != LIVE_BUCKET_MINUTES:
+        parser.error(f"--bucket-minutes only supports {LIVE_BUCKET_MINUTES}")
     if not math.isclose(args.price_step, 5.0, rel_tol=0.0, abs_tol=1e-12):
         parser.error("--price-step only supports 5")
     return args

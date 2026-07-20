@@ -157,7 +157,7 @@ publish directory:
 /srv/data/spx-spark/data/published/spxw-surface/replay-catalog/session=YYYY-MM-DD/timeline-5m.json
 /srv/data/spx-spark/data/published/spxw-surface/replay-cache/policy=v3/lookback=*/projection=*/source=*/*.json
 /srv/data/spx-spark/data/published/spxw-surface/session-surface-cache/policy=v5/contract=8/frame=5m/bucket=*/step=*/lookback=15s/projection=*/source=*/timeline=*/role=*/weighting=*/*.json
-/srv/data/spx-spark/data/published/spxw-surface/live/policy=live-v2/session=YYYY-MM-DD/
+/srv/data/spx-spark/data/published/spxw-surface/live/policy=live-v2/bucket=1m/session=YYYY-MM-DD/
 /srv/data/spx-spark/data/published/spxw-surface/runtime/replay-api.sock
 /srv/data/spx-spark/data/published/spxw-surface/runtime/live/live-api.sock
 ```
@@ -193,7 +193,7 @@ and never changes the live publisher, strategy state, or execution state.
 
 The live five-second publisher feeds a durable accumulator. The accumulator
 fixes the first validated segment-appropriate SPX coordinate, freezes causal
-five-minute boundaries, and publishes live schema 2 over a private Unix socket.
+one-minute boundaries, and publishes live schema 2 over a private Unix socket.
 It does not interpolate the publisher's moving scenario grid or pretend
 browser-local history is complete. GTH values remain partial-chain degraded,
 and the scheduled gap is always Missing.

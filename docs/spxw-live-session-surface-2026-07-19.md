@@ -42,7 +42,7 @@ current chain-implied reference and has no ES-basis payload.
 ```text
 LatestState
   -> spx-spark-surface-dashboard (atomic, leased snapshot + self hash)
-  -> spx-spark-surface-live (durable five-minute accumulator)
+  -> spx-spark-surface-live (durable one-minute Live accumulator)
   -> runtime/live/live-api.sock (GET only)
   -> nginx /api/v1/live/session-surface
   -> Gamma / Strike Proxy / Charm Session Canvas
@@ -76,7 +76,7 @@ serialization, and client work. A response that may have arrived at or after
 the exclusive lease is therefore masked immediately instead of receiving a new
 client-side grace period.
 
-At each five-minute boundary the accumulator freezes the last candidate accepted
+At each one-minute boundary the accumulator freezes the last candidate accepted
 no later than the boundary and still valid at the boundary. It freezes the old
 candidate before accepting an artifact observed after that boundary. Frozen files
 are immutable and verified by canonical SHA-256. A restart reloads them; it does
@@ -95,7 +95,7 @@ frozen history but cannot preserve a stale current surface or projection.
 The first validated segment-appropriate SPX reference fixes the session price
 anchor: chain-implied SPX in GTH or direct `index:SPX` if the accumulator first
 starts in RTH. The default grid is +/-100 SPX points at five-point spacing. Time
-buckets cover the full GTH→gap→RTH session at five-minute spacing. The grid does
+buckets cover the full GTH→gap→RTH session at one-minute spacing. The grid does
 not recenter; an out-of-grid spot is reported as a quality condition.
 
 GTH candles are event samples of the chain-implied reference and render dashed.
@@ -109,7 +109,7 @@ GET /api/v1/live/healthz
 GET /api/v1/live/session-surface
     ?role=front|next
     &weighting=oi_weighted|volume_weighted
-    &bucket_minutes=5
+    &bucket_minutes=1
     &price_step=5
 ```
 
@@ -125,19 +125,21 @@ plus a Missing reason, never a fabricated zero.
 Production state is retained under:
 
 ```text
-/srv/data/spx-spark/data/published/spxw-surface/live/policy=live-v2/session=YYYY-MM-DD/
+/srv/data/spx-spark/data/published/spxw-surface/live/policy=live-v2/bucket=1m/session=YYYY-MM-DD/
 /srv/data/spx-spark/data/published/spxw-surface/runtime/live/live-api.sock
 ```
 
-The session manifest, five-minute boundary records, and runtime candidate are
+The session manifest, one-minute boundary records, and runtime candidate are
 written atomically with owner-only state permissions. The runtime candidate is
 persisted so a crash across a boundary cannot cause a post-boundary frame to
 rewrite the prior bucket.
 
-State is policy-namespaced. The former v1 state remains under
-`published/spxw-surface/live/session=YYYY-MM-DD/`; v2 never rewrites it. Do not
-delete either namespace as a normal restart or rollback step. These immutable
-records are evidence that frozen history was not reconstructed with later data.
+State is policy-and-cadence-namespaced. The former five-minute v2 state remains
+under `published/spxw-surface/live/policy=live-v2/session=YYYY-MM-DD/`, and v1
+remains under `published/spxw-surface/live/session=YYYY-MM-DD/`. The one-minute
+service never rewrites either namespace. Do not delete these as a normal restart
+or rollback step; immutable records prove frozen history was not reconstructed
+with later data.
 
 ## Deploy
 
@@ -161,15 +163,22 @@ The v2 policy namespace is a required deployment boundary. Running the v2 binary
 against a v1 manifest fails closed with `live_persisted_contract_drift`; do not
 work around that by deleting the old session directory.
 
+The one-minute cadence also starts in its own empty namespace. It does not
+reinterpret five-minute boundaries as one-minute evidence or backfill them from
+later snapshots. Until the first fresh segment-appropriate snapshot arrives, the
+surface endpoint returns 503 while `/healthz` remains available. The browser's
+follow-now viewport begins at `accumulator_started_at` after initialization;
+manual panning can still inspect earlier Missing time.
+
 ## Rollback
 
 1. Restore the previous Git revision and Python environment.
 2. Restore the previous nginx configuration and recreate only the nginx sidecar.
 3. Stop and disable `spx-spark-surface-live.service` if that revision has no Live
    client.
-4. Keep both `published/spxw-surface/live/session=*` (v1) and
-   `published/spxw-surface/live/policy=live-v2/session=*` intact. The old binary
-   resumes only its v1 namespace after rollback.
+4. Keep v1, five-minute v2, and
+   `published/spxw-surface/live/policy=live-v2/bucket=1m/session=*` intact. The
+   restored binary resumes its matching namespace after rollback.
 
 Stopping Live does not require stopping the dashboard publisher, Replay service,
 market-data collectors, or any strategy process.
@@ -185,8 +194,8 @@ the first RTH snapshot.
 
 ## Pre-deploy performance evidence
 
-The default contract now has 237 five-minute columns and 41 price rows on a
-regular trading day. The browser requests one selector at a time and the API
+The Live contract now has 1,185 one-minute columns and 41 price rows on a regular
+trading day; Replay remains five-minute. The browser requests one selector at a time and the API
 timeout remains 15 seconds. Unit/contract coverage includes GTH acceptance,
 evening-to-next-trading-date routing, gap nulling, GTH→RTH transition, weekend
 retention, browser normalization of an actual signed live-v2 payload, and

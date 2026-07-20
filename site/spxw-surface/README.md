@@ -34,11 +34,11 @@ rule and the unauthenticated 302/401 chain after recovery on a new host.
 Live Cockpit polls the leased Session Surface endpoint every five seconds:
 
 ```text
-api/v1/live/session-surface?role=front&weighting=oi_weighted&bucket_minutes=5&price_step=5
+api/v1/live/session-surface?role=front&weighting=oi_weighted&bucket_minutes=1&price_step=5
 ```
 
 The host accumulator validates the publisher self hash, freezes completed
-five-minute columns durably, and serves the shared Live/Replay matrix contract
+one-minute Live columns durably, and serves the shared Live/Replay matrix contract
 over `runtime/live/live-api.sock`. The legacy rolling scenario diagnostic reads
 `api/v1/snapshot` only when its drawer is opened. That endpoint maps only to the
 dedicated publisher output:
@@ -173,10 +173,12 @@ for an explicitly audited replacement. Session Replay never uses `--force`;
 lookback, projection-policy, or source-version changes write to a new cache
 namespace.
 
-Live-v2 state is retained under
-`published/spxw-surface/live/policy=live-v2/session=YYYY-MM-DD/`. The former v1
-namespace remains at `published/spxw-surface/live/session=YYYY-MM-DD/`; v2 does
-not mutate it. Do not delete either namespace during restart or rollback: the
+Live-v2 one-minute state is retained under
+`published/spxw-surface/live/policy=live-v2/bucket=1m/session=YYYY-MM-DD/`. The
+former five-minute v2 namespace remains at
+`published/spxw-surface/live/policy=live-v2/session=YYYY-MM-DD/`, and v1 remains
+at `published/spxw-surface/live/session=YYYY-MM-DD/`. Do not delete any namespace
+during restart or rollback: the
 immutable boundaries are evidence that later snapshots did not rewrite earlier
 columns. Operational details and the exact clock/proxy contract are documented in
 [`docs/spxw-live-session-surface-2026-07-19.md`](../../docs/spxw-live-session-surface-2026-07-19.md).
