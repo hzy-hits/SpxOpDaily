@@ -9,6 +9,9 @@ from spx_spark.application.order_map.call_spread_shadow import (
     compact_skew_spread_shadow_line,
 )
 from spx_spark.application.order_map.models import PLAY_ORDER, PLAY_TEMPLATE_LINES
+from spx_spark.application.order_map.strike_coverage_presentation import (
+    strike_price_coverage_line as _strike_price_coverage_line,
+)
 from spx_spark.application.order_map.wall_ladder_presentation import primary_wall_strike
 
 
@@ -518,6 +521,8 @@ def render_research_only_template(
     if line := _globex_trend_line(payload):
         lines.append(line)
     lines.extend(_market_feature_lines(payload))
+    if line := _strike_price_coverage_line(payload):
+        lines.append(line)
     lines.extend(_level_decision_lines(payload))
     gamma_state = str(payload.get("gamma_state") or "")
     if gamma_state and not gamma_state.startswith("unknown"):

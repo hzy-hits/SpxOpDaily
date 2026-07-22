@@ -31,6 +31,9 @@ from spx_spark.application.order_map.render import (
     underlier_source_label,
 )
 from spx_spark.application.order_map.state import _session_phase_of
+from spx_spark.application.order_map.strike_coverage_presentation import (
+    strike_price_coverage_line as _strike_price_coverage_line,
+)
 from spx_spark.application.order_map.writer_validation import (
     actionable_writer_output_valid as actionable_writer_output_valid,
     globex_writer_output_valid as globex_writer_output_valid,
@@ -547,6 +550,7 @@ def render_status_template(
         ),
         *([line] if (line := _compact_structure_candidate_line(payload)) else []),
         *([line] if (line := _compact_oi_line(payload)) else []),
+        *([line] if (line := _strike_price_coverage_line(payload)) else []),
         *([line] if (line := _compact_decision_line(payload)) else []),
         *([line] if (line := _compact_breakout_filter_line(payload)) else []),
         "",
@@ -866,6 +870,28 @@ def _status_writer_payload(payload: dict[str, Any]) -> dict[str, Any]:
                 "weighting",
                 "sign_method",
                 "dealer_position_sign",
+            )
+        }
+    strike_coverage = payload.get("strike_price_coverage")
+    if isinstance(strike_coverage, dict):
+        compact["strike_price_coverage"] = {
+            key: strike_coverage.get(key)
+            for key in (
+                "expiry",
+                "reference_price",
+                "center_strike",
+                "strike_step_points",
+                "radius_strikes",
+                "target_pair_count",
+                "complete_pair_count",
+                "coverage_ratio",
+                "complete_min_strike",
+                "complete_max_strike",
+                "radius_points",
+                "point_target_pair_count",
+                "point_complete_pair_count",
+                "point_coverage_ratio",
+                "price_contract",
             )
         }
     exposure_context = _status_exposure_context(payload)

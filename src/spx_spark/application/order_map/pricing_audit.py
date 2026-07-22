@@ -34,6 +34,7 @@ def build_pricing_audit_record(
         "underlier": payload.get("underlier"),
         "pricing_reference": payload.get("pricing_reference"),
         "expected_move_points": payload.get("expected_move_points"),
+        "strike_price_coverage": payload.get("strike_price_coverage"),
         "candidates": payload.get("candidates") if isinstance(payload.get("candidates"), list) else [],
         "wall_ladder": payload.get("wall_ladder"),
         "warnings": payload.get("warnings") if isinstance(payload.get("warnings"), list) else [],

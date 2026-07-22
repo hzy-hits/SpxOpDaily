@@ -1,0 +1,695 @@
+{
+  "surface": "report",
+  "manifest": {
+    "version": 1,
+    "surface": "report",
+    "title": "SPX GTH 结构为什么总觉得缺一层",
+    "description": "2026-07-22 GTH 三小时实时数据、故障日志与当前结构算法的证据化诊断。",
+    "generatedAt": "2026-07-22T04:45:44+00:00",
+    "sources": [
+      {
+        "id": "runtime_snapshot",
+        "label": "GTH runtime snapshot at 2026-07-22 12:33 CST",
+        "path": "data/latest/market_feature_state.json",
+        "query": {
+          "engine": "jq over live JSON state",
+          "id": "gth-runtime-window-20260722T013355Z-043331Z",
+          "sql": "SELECT 181 AS total_frames, 130 AS ready_frames, 7 AS degraded_frames, 44 AS unavailable_frames, 350 AS es_session_samples, 22 AS raw_structure_changes, 129 AS comparable_structure_transitions",
+          "description": "Bounded 181-frame GTH option-history window plus the latest ES market frame and provider-failover state.",
+          "executed_at": "2026-07-22T04:33:56.514300+00:00",
+          "language": "jq+shell",
+          "filters": [
+            "181 retained one-minute option frames",
+            "2026-07-22T01:33:55Z through 2026-07-22T04:33:31Z",
+            "GTH session 2026-07-22",
+            "no imputation of unavailable frames"
+          ],
+          "metric_definitions": [
+            "Availability rate is frames satisfying the component-specific non-null and quality predicate divided by 181 retained frames.",
+            "Live structure requires quality=ready and structure.frozen is not true.",
+            "Fresh L1 requires contract_count>0 and fresh_candidate_count>0.",
+            "Raw structure change rate is consecutive ready, non-frozen frames whose (put wall, flip zone, call wall) signature changed, divided by 129 comparable transitions.",
+            "Risk-neutral density is available only when density.quality=ok."
+          ],
+          "tables_used": [
+            "data/latest/market_feature_state.json",
+            "data/latest/minute_market_frame.json",
+            "data/latest/option_structure_frame.json",
+            "data/latest/provider_failover_state.json",
+            "data/published/spxw-surface/snapshot.json"
+          ]
+        }
+      },
+      {
+        "id": "ibkr_runtime_journal",
+        "label": "IBKR stream and Schwab GTH chain journal",
+        "query": {
+          "engine": "systemd journal",
+          "id": "gth-feed-failures-20260722",
+          "sql": "journalctl --user -u spx-spark-ibkr-stream.service --since '2026-07-22 09:45:00' --output=cat | rg '10197|competing_session|policy_blocked'",
+          "description": "Read-only inspection of the two material GTH option-data outages and the current Schwab fallback freshness.",
+          "executed_at": "2026-07-22T04:31:25.041580+00:00",
+          "language": "shell",
+          "filters": [
+            "unit spx-spark-ibkr-stream.service",
+            "GTH window beginning 2026-07-22 08:15 CST",
+            "IBKR error 10197 and competing-session policy events"
+          ],
+          "tables_used": [
+            "systemd journal: spx-spark-ibkr-stream.service",
+            "systemd journal: spx-spark-schwab-marketdata.service"
+          ]
+        }
+      },
+      {
+        "id": "runtime_code",
+        "label": "Current GTH feature and decision implementation",
+        "path": "src/spx_spark/application/market_features/decision_filters.py",
+        "query": {
+          "engine": "repository source inspection",
+          "id": "gth-structure-code-review-1b50fae6",
+          "sql": "rg -n 'gth_complete_chain_available|dealer_position_sign|_payload_is_thin|trend_score|mean_reversion_score|frozen_last_usable_option_frame' src/spx_spark",
+          "description": "Read-only review of option exposure conventions, GTH quality bypass, stability, session features and additive regime scoring on master commit 1b50fae6.",
+          "executed_at": "2026-07-22T04:32:31+00:00",
+          "language": "shell+python",
+          "filters": [
+            "branch master",
+            "commit 1b50fae6df44c4f75e337e68a752a78d692f9c4d",
+            "no product-code changes in this diagnostic"
+          ],
+          "tables_used": [
+            "src/spx_spark/analytics/options/exposure.py",
+            "src/spx_spark/features/exposure_map.py",
+            "src/spx_spark/application/market_features/market.py",
+            "src/spx_spark/application/market_features/options.py",
+            "src/spx_spark/application/market_features/decision_filters.py",
+            "src/spx_spark/application/order_map/service.py",
+            "src/spx_spark/surface_live_session_projection.py"
+          ]
+        }
+      },
+      {
+        "id": "forward_validation",
+        "label": "Forward-only GTH readiness validation",
+        "path": "docs/strategy-backtest-validation-2026-07-18.artifact.json",
+        "query": {
+          "engine": "spx-spark strategy_readiness",
+          "id": "forward-v3-readiness-2026-07-18",
+          "sql": "SELECT 0 AS contract_consistent_sessions, 0 AS gth_exact_entries, 20 AS review_target",
+          "description": "Frozen forward-only readiness gate for exact GTH two-leg evidence.",
+          "executed_at": "2026-07-18T14:19:09.442436+00:00",
+          "language": "sql",
+          "filters": [
+            "forward-v3 contract only",
+            "legacy v1/v2 material decisions excluded",
+            "automatic promotion disabled"
+          ],
+          "tables_used": [
+            "features/level_decision_health",
+            "features/gth_dip_reclaim",
+            "features/trade_intents",
+            "features/virtual_strategy"
+          ]
+        }
+      },
+      {
+        "id": "diagnostic_synthesis",
+        "label": "GTH structure diagnostic synthesis",
+        "path": "gth-structure-diagnostic-2026-07-22.artifact.json",
+        "query": {
+          "engine": "evidence-backed technical review",
+          "id": "gth-structure-gap-priorities-20260722",
+          "sql": "SELECT * FROM root_causes ORDER BY rank",
+          "description": "Prioritized synthesis of live-frame quality, feed failures, state-machine behavior and current feature coverage.",
+          "executed_at": "2026-07-22T04:33:56.514300+00:00",
+          "language": "sql",
+          "tables_used": [
+            "availability",
+            "outage_runs",
+            "root_causes"
+          ]
+        }
+      },
+      {
+        "id": "strike_report_audit",
+        "label": "GTH strike coverage and 15-minute report audit",
+        "path": "data/audit/order_map_pricing/date=2026-07-22/reports.jsonl",
+        "query": {
+          "engine": "DuckDB as-of reconstruction + JSON report audit + repository contract inspection",
+          "id": "gth-strike-report-audit-20260722T0815-1230CST",
+          "sql": "SELECT 18 AS delivered_reports, 18 AS scheduled_reports, 18.0/18.0 AS delivery_rate, 758.0/(14.0*61.0) AS raw_30_strike_coverage, 0.0/18.0 AS full_ladder_render_rate",
+          "description": "Separates the 81-strike rotating collection universe, fresh as-of quote coverage, the 64-contract L1 feature cap and what the 15-minute report actually renders.",
+          "executed_at": "2026-07-22T04:45:44+00:00",
+          "language": "sql+python+jq",
+          "filters": [
+            "SPXW expiry 2026-07-22",
+            "scheduled reports 08:15-12:30 CST",
+            "fresh quote age <=90 seconds",
+            "stable healthy comparison excludes 08:15 warm-up and the 10:00 outage",
+            "full C/P pair requires both call and put with two-sided quotes"
+          ],
+          "metric_definitions": [
+            "+/-30 strike levels means 30 five-point strikes below ATM, ATM, and 30 above: 61 C/P pairs or 122 option contracts.",
+            "+/-30 points means ATM-30 through ATM+30 at five-point spacing: 13 C/P pairs or 26 option contracts.",
+            "L1 feature coverage reproduces the implementation sort by distance to underlier followed by the 64-contract truncation.",
+            "A report has a full strike-price ladder only if it renders the complete target grid rather than OI counts or top-four walls."
+          ],
+          "tables_used": [
+            "data/lake/quotes/schema=v1/date=2026-07-22/provider=ibkr/hour=*/quotes.parquet",
+            "data/audit/order_map_pricing/date=2026-07-22/reports.jsonl",
+            "config/runtime.yaml",
+            "src/spx_spark/sampling.py",
+            "src/spx_spark/ibkr/stream/quota_plan.py",
+            "src/spx_spark/application/market_features/options.py",
+            "src/spx_spark/application/order_map/prompts.py",
+            "src/spx_spark/application/order_map/writer_validation.py"
+          ]
+        }
+      }
+    ],
+    "cards": [
+      {
+        "id": "option_ready_rate",
+        "description": "Frames with a ready option structure in the retained three-hour GTH window.",
+        "dataset": "headline",
+        "sourceId": "runtime_snapshot",
+        "metrics": [
+          {"label": "Option structure ready", "field": "option_ready_rate", "format": "percent"}
+        ]
+      },
+      {
+        "id": "density_valid_rate",
+        "description": "Frames whose option-implied density passed the strict quality gate.",
+        "dataset": "headline",
+        "sourceId": "runtime_snapshot",
+        "metrics": [
+          {"label": "Density quality=ok", "field": "density_valid_rate", "format": "percent"}
+        ]
+      },
+      {
+        "id": "dealer_sign_rate",
+        "description": "The current exposure model explicitly does not infer participant or dealer inventory sign.",
+        "dataset": "headline",
+        "sourceId": "runtime_snapshot",
+        "metrics": [
+          {"label": "Dealer sign known", "field": "dealer_sign_known_rate", "format": "percent"}
+        ]
+      },
+      {
+        "id": "structure_change_rate",
+        "description": "Signature changes across 129 consecutive comparable ready-frame transitions.",
+        "dataset": "headline",
+        "sourceId": "runtime_snapshot",
+        "metrics": [
+          {"label": "Raw wall/flip mutation", "field": "raw_structure_change_rate", "format": "percent"}
+        ]
+      },
+      {
+        "id": "max_outage",
+        "description": "Longest consecutive unavailable run in the retained GTH window.",
+        "dataset": "headline",
+        "sourceId": "runtime_snapshot",
+        "metrics": [
+          {"label": "Max unavailable run", "field": "max_unavailable_run_frames", "format": "number", "unit": " min"}
+        ]
+      },
+      {
+        "id": "current_outage",
+        "description": "Still-open unavailable run at the 12:33 CST cutoff.",
+        "dataset": "headline",
+        "sourceId": "runtime_snapshot",
+        "metrics": [
+          {"label": "Current unavailable run", "field": "current_unavailable_run_frames", "format": "number", "unit": " min"}
+        ]
+      },
+      {
+        "id": "es_samples",
+        "description": "The ES market frame remained ready while the option frame was unavailable.",
+        "dataset": "headline",
+        "sourceId": "runtime_snapshot",
+        "metrics": [
+          {"label": "Current ES session samples", "field": "es_sample_count", "format": "number"}
+        ]
+      },
+      {
+        "id": "report_delivery_rate",
+        "description": "All scheduled reports from 08:15 through 12:30 CST were durably delivered.",
+        "dataset": "report_headline",
+        "sourceId": "strike_report_audit",
+        "metrics": [
+          {"label": "15m reports delivered", "field": "delivery_rate", "format": "percent"}
+        ]
+      },
+      {
+        "id": "raw_30_strike_coverage",
+        "description": "Average fresh full C/P coverage of the 61-level ATM +/-30-strike target across 14 stable healthy report snapshots.",
+        "dataset": "report_headline",
+        "sourceId": "strike_report_audit",
+        "metrics": [
+          {"label": "Raw +/-30-strike coverage", "field": "raw_30_strike_coverage", "format": "percent"}
+        ]
+      },
+      {
+        "id": "full_ladder_render_rate",
+        "description": "No delivered report rendered a complete strike-price ladder; reports show compressed structure instead.",
+        "dataset": "report_headline",
+        "sourceId": "strike_report_audit",
+        "metrics": [
+          {"label": "Full price ladder rendered", "field": "full_ladder_render_rate", "format": "percent"}
+        ]
+      }
+    ],
+    "charts": [
+      {
+        "id": "availability_chart",
+        "title": "GTH structural component availability",
+        "subtitle": "181 one-minute frames, 09:33–12:33 CST; rate is valid frames / 181",
+        "intent": "comparison",
+        "question": "Which GTH structural layers were actually populated in the latest three-hour window?",
+        "rationale": "Horizontal bars expose the split between continuous ES context, intermittent option analytics and the permanently unknown dealer sign.",
+        "type": "bar",
+        "dataset": "availability",
+        "sourceId": "runtime_snapshot",
+        "encodings": {
+          "x": {"field": "component", "type": "nominal", "label": "Structural component"},
+          "y": {"field": "availability_rate", "type": "quantitative", "format": "percent", "label": "Availability"},
+          "tooltip": [
+            {"field": "available_frames", "type": "quantitative", "format": "number", "label": "Available frames"},
+            {"field": "total_frames", "type": "quantitative", "format": "number", "label": "Total frames"},
+            {"field": "predicate", "type": "nominal", "label": "Validity predicate"}
+          ]
+        },
+        "valueFormat": "percent",
+        "layout": "full",
+        "labels": {"values": "all"},
+        "maxRows": 9,
+        "palette": {"kind": "identity", "name": "blue"},
+        "settings": {
+          "categoryLabelPolicy": "wrap",
+          "groupMode": "single",
+          "showValues": true,
+          "sort": "none"
+        },
+        "surface": {
+          "surface": "export",
+          "interactiveLegend": false,
+          "showControls": false,
+          "viewMode": "visualization"
+        }
+      }
+    ],
+    "tables": [
+      {
+        "id": "outage_runs_table",
+        "title": "Material GTH option-frame runs",
+        "subtitle": "Runs with at least three consecutive frames; timestamps are UTC and CST.",
+        "dataset": "outage_runs",
+        "sourceId": "runtime_snapshot",
+        "defaultSort": {"field": "start_utc", "direction": "asc"},
+        "density": "spacious",
+        "layout": "full",
+        "columns": [
+          {"field": "start_utc", "label": "Start UTC", "type": "text"},
+          {"field": "start_cst", "label": "Start CST", "type": "text"},
+          {"field": "status", "label": "Status", "type": "text"},
+          {"field": "frames", "label": "Minutes", "format": "number"},
+          {"field": "interpretation", "label": "Interpretation", "type": "text"}
+        ]
+      },
+      {
+        "id": "root_causes_table",
+        "title": "Why the GTH structure feels incomplete",
+        "subtitle": "Ordered by causal impact on the current report, not by implementation effort.",
+        "dataset": "root_causes",
+        "sourceId": "diagnostic_synthesis",
+        "defaultSort": {"field": "rank", "direction": "asc"},
+        "density": "spacious",
+        "layout": "full",
+        "columns": [
+          {"field": "rank", "label": "Rank", "format": "number"},
+          {"field": "cause", "label": "Cause", "type": "text"},
+          {"field": "evidence", "label": "Observed evidence", "type": "text"},
+          {"field": "effect", "label": "What the report loses", "type": "text"},
+          {"field": "fix_direction", "label": "Design direction", "type": "text"}
+        ]
+      },
+      {
+        "id": "strike_layers_table",
+        "title": "What +/-30 means at each layer",
+        "subtitle": "The collection universe, fresh cache, L1 feature and report are intentionally different widths.",
+        "dataset": "strike_layers",
+        "sourceId": "strike_report_audit",
+        "density": "spacious",
+        "layout": "full",
+        "columns": [
+          {"field": "layer", "label": "Layer", "type": "text"},
+          {"field": "observed_coverage", "label": "Observed coverage", "type": "text"},
+          {"field": "contract", "label": "Contract", "type": "text"},
+          {"field": "consequence", "label": "Consequence", "type": "text"}
+        ]
+      },
+      {
+        "id": "report_contract_table",
+        "title": "15-minute report contract audit",
+        "subtitle": "Cadence and fail-closed behavior pass; strike disclosure and LLM semantic fidelity do not.",
+        "dataset": "report_contract",
+        "sourceId": "strike_report_audit",
+        "density": "spacious",
+        "layout": "full",
+        "columns": [
+          {"field": "check", "label": "Check", "type": "text"},
+          {"field": "result", "label": "Result", "type": "text"},
+          {"field": "evidence", "label": "Evidence", "type": "text"},
+          {"field": "assessment", "label": "Assessment", "type": "text"}
+        ]
+      }
+    ],
+    "blocks": [
+      {
+        "id": "title",
+        "type": "markdown",
+        "layout": "full",
+        "body": "# SPX GTH 结构为什么总觉得缺一层\n\n**结论：当前产物更准确地说是“ES 路径 + 间歇性 SPXW 代理结构”，还不是完整的 GTH 市场结构。**"
+      },
+      {
+        "id": "technical_summary",
+        "type": "markdown",
+        "layout": "full",
+        "sourceId": "runtime_snapshot",
+        "body": "## Technical Summary\n\n截至 2026-07-22 12:33 CST，ES 分钟帧仍为 ready，累计 350 个 session 样本；同一时刻 SPXW 期权帧为 unavailable，L1 合约数为 0，墙位来自 frozen_last_usable_option_frame。最近 181 个一分钟期权帧里只有 130 个 ready（71.8%），风险中性密度只有 119 个 quality=ok（65.7%），dealer position sign 则是 0/181。\n\n因此缺失感不是行情刷新频率低，而是刷新最频繁的是 ES 价格路径；用于解释 dealer/vol/skew/liquidity 的 SPXW 数据是一整组同时掉线的依赖。结构一掉线，系统仍能发 GTH heartbeat，但只能把 ES 映射到冻结墙位，信息量看起来很多，新增信息却很少。\n\n新增的 strike 审计进一步表明：健康时底层并不算稀疏。14 个稳定健康的 15 分钟截面里，ATM +/-30 点始终有 13/13 个完整 C/P 对；若“+/-30 strikes”指上下各 30 档，则底层平均有 54.1/61 对（88.8%），但 L1 特征被截成最多 64 个合约，也就是 32 个 C/P strike 对，报告又继续压缩为 OI 摘要、最多 8 个 key strikes 或每侧 top-4 墙位。因此“没有最终 +/-30 档价格”主要是 feature/report contract 的截断，不是原始采集完全没有。\n\n15 分钟 cadence 也不是问题：08:15–12:30 CST 共 18/18 份送达，相邻间隔 894–908 秒。但内容校验存在真实缺口：09:15 的 LLM 改写把模板中的 Call Wall 7550 写成 7500，并把数值 ES/L1 行改成定性描述；这些数字都曾出现在模板别处，所以当前只检查“有没有新数字”的 validator 没有识别字段错配。"
+      },
+      {
+        "id": "headline_metrics",
+        "type": "metric-strip",
+        "layout": "full",
+        "cardIds": [
+          "option_ready_rate",
+          "density_valid_rate",
+          "dealer_sign_rate",
+          "structure_change_rate",
+          "max_outage",
+          "current_outage",
+          "es_samples"
+        ]
+      },
+      {
+        "id": "key_findings_header",
+        "type": "markdown",
+        "layout": "full",
+        "body": "## Key Findings"
+      },
+      {
+        "id": "availability_chart_block",
+        "type": "chart",
+        "layout": "full",
+        "chartId": "availability_chart"
+      },
+      {
+        "id": "availability_interpretation",
+        "type": "markdown",
+        "layout": "full",
+        "sourceId": "runtime_snapshot",
+        "body": "价格锚 181/181 都存在，但 chain-implied SPX 锚只有 127/181；L1、实时结构、exposure 和 ATM IV 都只有 130/181。它们几乎同步缺失，说明不是四个独立算法同时坏掉，而是上游 SPXW 链一断，整个结构栈一起退化。dealer sign 0/181 是另一类问题：这是模型能力未声明，不是临时故障。"
+      },
+      {
+        "id": "feed_fracture",
+        "type": "markdown",
+        "layout": "full",
+        "sourceId": "ibkr_runtime_journal",
+        "body": "### 1. GTH 的单点不在 ES，而在 SPXW 实时链\n\n今天 09:50–10:09 CST 的 20 分钟缺口和 12:16 CST 之后的持续缺口都出现 IBKR 10197：competing live session owns shared market data。Schwab 的 ES 锚仍新鲜，但 GTH SPXW 返回的是上一交易时段的 stale chain，所以 fallback 不能重建实时 IV、skew、density 或 NBBO。"
+      },
+      {
+        "id": "outage_runs_block",
+        "type": "table",
+        "layout": "full",
+        "tableId": "outage_runs_table"
+      },
+      {
+        "id": "proxy_gap",
+        "type": "markdown",
+        "layout": "full",
+        "sourceId": "runtime_code",
+        "body": "### 2. 当前 GEX 是结构代理，不是 dealer 仓位\n\n公式固定为 call positive、put negative，再乘 OI（盘中版本可加 volume）和 BS gamma；代码明确写着 dealer_position_sign=unknown。OI 主要是上一结算时点存量，volume 也没有 open/close 与买卖方向。因此墙位可以做定位，但不能回答“隔夜是谁在加仓、dealer 是否真的短 gamma、哪一侧正在被迫对冲”。"
+      },
+      {
+        "id": "stability_gap",
+        "type": "markdown",
+        "layout": "full",
+        "sourceId": "runtime_snapshot",
+        "body": "### 3. 原始结构会跳，稳定层又容易被数据缺口卡住\n\n130 个可比较的 ready 帧产生 129 次相邻转换，其中墙/Flip 签名变化 22 次（17.1%）。稳定结构要求跨桶两次确认；当前候选停在 1/2，而旧结构事件已 invalidated。于是报告连续重复“结构切换中”，既不敢采用新墙，也不能从旧墙生成新判断。"
+      },
+      {
+        "id": "feature_gap",
+        "type": "markdown",
+        "layout": "full",
+        "sourceId": "runtime_code",
+        "body": "### 4. ES 帧有路径，但还没有完整的 auction/flow 结构\n\n现有 ES 帧包含 1/5/15/60/180m 回报、session high/low、Asia/Europe 范围、VWAP、swing 与总成交量增量。它没有按价成交分布 POC/VAH/VAL、主动买卖 CVD、订单簿失衡、吸收/扫单、Asia/Europe open anchored VWAP。当前 price_volume_alignment 只是价格方向与累计总 volume 增量的规则，不是 aggressor flow。"
+      },
+      {
+        "id": "model_gap",
+        "type": "markdown",
+        "layout": "full",
+        "sourceId": "forward_validation",
+        "body": "### 5. 最终 regime 是规则分数，不是经 GTH 样本校准的概率\n\n趋势/回归层按固定 +25/+20/+15/+10 权重累加，再与阈值比较；输出的 80/30 是 rule score，不是 80%/30%。截至 2026-07-18，forward-v3 contract-consistent session 与 exact GTH two-leg entry 都是 0/20，尚没有足够的同口径证据去校准 Asia、Europe、US premarket 各时段的命中率与置信区间。"
+      },
+      {
+        "id": "root_causes_block",
+        "type": "table",
+        "layout": "full",
+        "tableId": "root_causes_table"
+      },
+      {
+        "id": "strike_coverage_header",
+        "type": "markdown",
+        "layout": "full",
+        "sourceId": "strike_report_audit",
+        "body": "## Strike Coverage Audit\n\n**“+/-30”必须先说单位。** 当前五点一档：`+/-30 points` 只有 13 个 strike 对；`+/-30 strike levels` 则是 61 个 strike 对、122 条期权线。前者今天健康截面全部覆盖，后者的底层新鲜缓存大多覆盖 53–56/61 对，却无法穿过 64-contract L1 cap，更不会在压缩后的 15 分钟文本里逐档出现。"
+      },
+      {
+        "id": "strike_headline_metrics",
+        "type": "metric-strip",
+        "layout": "full",
+        "cardIds": [
+          "report_delivery_rate",
+          "raw_30_strike_coverage",
+          "full_ladder_render_rate"
+        ]
+      },
+      {
+        "id": "strike_layers_block",
+        "type": "table",
+        "layout": "full",
+        "tableId": "strike_layers_table"
+      },
+      {
+        "id": "report_contract_header",
+        "type": "markdown",
+        "layout": "full",
+        "sourceId": "strike_report_audit",
+        "body": "## 15-Minute Report Audit\n\n定时器、投递和 outage 时的 fail-closed 表达都工作正常；不能说整份报告“没有问题”。`81档/77档正常` 说的是结构/OI universe，不代表 81 档都有当前可执行价格。报告没有披露新鲜 C/P 对数量、连续半径、最远 strike 与价格 age，又由 LLM 在安全模板上二次改写；当前 validator 只禁止新造数字，不能保证数字仍绑定原字段。"
+      },
+      {
+        "id": "report_contract_block",
+        "type": "table",
+        "layout": "full",
+        "tableId": "report_contract_table"
+      },
+      {
+        "id": "scope_definitions",
+        "type": "markdown",
+        "layout": "full",
+        "sourceId": "runtime_snapshot",
+        "body": "## Scope, Data and Metric Definitions\n\n诊断窗口是 2026-07-22 09:33–12:33 CST 的 181 个 GTH 一分钟 option frames，并对照 12:33 CST 的 minute_market_frame、option_structure_frame、provider_failover_state 与 live surface snapshot。ready 只表示该帧通过当前质量规则；它不等于 dealer sign、official SPX OHLC 或完整 GTH chain 可用。availability 不插值，也不把冻结结构计为实时结构。"
+      },
+      {
+        "id": "methodology",
+        "type": "markdown",
+        "layout": "full",
+        "body": "## Methodology\n\n1. 复现同一时刻 ES 与 SPXW 两条数据链的质量状态。\n2. 在保留窗口内按明确 predicate 统计各结构层可用率，并识别连续 outage runs。\n3. 对 ready、non-frozen 帧计算 put wall / flip / call wall 相邻签名变化。\n4. 对照 IBKR 与 Schwab journal 确认共同上游故障。\n5. 审阅 exposure 公式、GTH thin-payload 规则、稳定确认和 regime scoring，区分数据缺失、模型能力缺失与表达层压缩。\n6. 在每个 scheduled report 的 snapshot_as_of 上重建每个 IBKR 合约的最后状态，只接受 live、mid 非空、source age<=90 秒的 SPXW 20260722 报价，并分别统计 +/-30 points 与 +/-30 strike levels 的完整 C/P 对。\n7. 复现 64-contract L1 distance sort，并逐份比较 delivered_text、template、writer 与 delivered_ok。"
+      },
+      {
+        "id": "limitations",
+        "type": "markdown",
+        "layout": "full",
+        "body": "## Limitations and Uncertainty\n\n这是单个 GTH session 的三小时运行快照，足以定位当前缺口，但不足以评价策略收益。IBKR 10197 能证明共享行情被其他 live session 占用，不能仅凭服务端日志识别具体客户端。dealer 仓位、open/close 与 aggressor side 本来就不在现有数据契约中，因此不能从 OI/volume 反推。Schwab GTH stale chain 被正确 fail closed；报告中“不可执行”是安全行为，不应通过放宽 freshness 消除。\n\nStrike as-of 审计使用已压实的 quote lake 重建最近合约状态，与生产 LatestState 的语义一致，但不是交易所原生逐包回放；08:15 是新到期日 warm-up，10:00 是已确认 outage，因此稳定健康均值只使用其余 14 个截面。覆盖率证明数据存在，不等于每档都适合成交。"
+      },
+      {
+        "id": "recommended_steps",
+        "type": "markdown",
+        "layout": "full",
+        "body": "## Recommended Next Steps\n\n1. P0：把 IBKR GTH market-data ownership 做成硬运行前提；竞争 session 出现时立即显示“谁占用/何时恢复”，并停止反复重连风暴。若账户规则允许，交易终端与采集使用独立行情 entitlement。\n2. P0：报告显式拆成 `ES path ready`、`SPXW structure ready`、`execution ready` 三层；冻结墙只显示 last-known age，不再与实时判断混排。\n3. P1：补 auction layer：Asia/Europe open、anchored VWAP、POC/VAH/VAL、initial balance、overnight inventory。\n4. P1：数据许可时补 flow layer：aggressor delta/CVD、book imbalance、absorption/sweep；否则明确标为 unavailable，不能用总 volume delta 代替。\n5. P1：墙位稳定从“值相等两次”升级为 rank persistence + exposure magnitude + uncertainty band；数据 gap 暂停确认时钟，不反复制造 1/2 候选。\n6. P1：按 Asia/Europe/US premarket 分层保存 regime score 与 outcome，输出经验命中率、样本量和置信区间；分数继续 shadow，直到 forward exact cohort 达标。\n7. P0：15 分钟报告固定输出三种 coverage：`structure strikes`、`fresh C/P pairs`、`priced radius`，并明确单位是 points 还是 strike levels；不要再用“77档正常”替代价格覆盖。\n8. P0：GTH 数字字段直接使用 deterministic template；若保留 LLM，只允许改写解释段，并把结构化字段逐字段回验。Call Wall、Flip、ES horizons、L1 count/score 缺失或错位时必须回退模板。\n9. P1：如果产品目标确实是上下各 30 档实时价格，将 L1 数据模型从 64 contracts 提升为至少 122 contracts，或把 full ladder 作为独立表格/网页视图，不挤进 15 分钟摘要。"
+      },
+      {
+        "id": "further_questions",
+        "type": "markdown",
+        "layout": "full",
+        "body": "## Further Questions\n\n- IBKR 共享行情占用能否从客户端/会话元数据定位并在网页直接提示？\n- 当前 64-line hot lane 是否足以同时覆盖 ATM、25d call/put、关键墙与 exact spread 双腿？\n- 产品要的“+/-30”是 +/-30 points，还是 ATM 上下各 30 个 strike levels？\n- 完整价格梯应放在网页可滚动表格，还是只在报告附件提供快照？\n- 墙位 rank persistence 的最佳半衰期应按 Asia、Europe、US premarket 分开吗？\n- 在没有 aggressor-side ES 数据时，是否接受仅用 auction profile，还是采购可验证的 tick/depth 源？"
+      }
+    ]
+  },
+  "snapshot": {
+    "version": 1,
+    "generatedAt": "2026-07-22T04:45:44+00:00",
+    "status": "ready",
+    "datasets": {
+      "headline": [
+        {
+          "option_ready_rate": 0.7182320441988951,
+          "density_valid_rate": 0.6574585635359116,
+          "dealer_sign_known_rate": 0.0,
+          "raw_structure_change_rate": 0.17054263565891473,
+          "max_unavailable_run_frames": 20,
+          "current_unavailable_run_frames": 18,
+          "es_sample_count": 350
+        }
+      ],
+      "report_headline": [
+        {
+          "delivery_rate": 1.0,
+          "raw_30_strike_coverage": 0.8875878220140515,
+          "full_ladder_render_rate": 0.0
+        }
+      ],
+      "availability": [
+        {"order": 1, "component": "ES/underlier reference", "available_frames": 181, "total_frames": 181, "availability_rate": 1.0, "predicate": "underlier non-null"},
+        {"order": 2, "component": "L1 fresh contracts", "available_frames": 130, "total_frames": 181, "availability_rate": 0.7182320441988951, "predicate": "contract_count>0 and fresh_candidate_count>0"},
+        {"order": 3, "component": "Live non-frozen structure", "available_frames": 130, "total_frames": 181, "availability_rate": 0.7182320441988951, "predicate": "quality=ready and frozen!=true"},
+        {"order": 4, "component": "Exposure map", "available_frames": 130, "total_frames": 181, "availability_rate": 0.7182320441988951, "predicate": "exposure.quality=ok"},
+        {"order": 5, "component": "ATM IV 0DTE", "available_frames": 130, "total_frames": 181, "availability_rate": 0.7182320441988951, "predicate": "atm_iv_0dte non-null"},
+        {"order": 6, "component": "Call+put 25d skew", "available_frames": 129, "total_frames": 181, "availability_rate": 0.712707182320442, "predicate": "both 25d skew values non-null"},
+        {"order": 7, "component": "SPX chain-implied anchor", "available_frames": 127, "total_frames": 181, "availability_rate": 0.7016574585635359, "predicate": "underlier_source=chain_implied"},
+        {"order": 8, "component": "Risk-neutral density", "available_frames": 119, "total_frames": 181, "availability_rate": 0.6574585635359116, "predicate": "density.quality=ok"},
+        {"order": 9, "component": "Known dealer position sign", "available_frames": 0, "total_frames": 181, "availability_rate": 0.0, "predicate": "dealer_position_sign!=unknown"}
+      ],
+      "outage_runs": [
+        {"start_utc": "2026-07-22 01:33", "start_cst": "2026-07-22 09:33", "status": "ready", "frames": 17, "interpretation": "Initial usable SPXW hot lane"},
+        {"start_utc": "2026-07-22 01:50", "start_cst": "2026-07-22 09:50", "status": "unavailable", "frames": 20, "interpretation": "IBKR 10197 competing live session"},
+        {"start_utc": "2026-07-22 02:10", "start_cst": "2026-07-22 10:10", "status": "ready", "frames": 10, "interpretation": "Recovered live chain"},
+        {"start_utc": "2026-07-22 02:21", "start_cst": "2026-07-22 10:21", "status": "ready", "frames": 16, "interpretation": "Recovered after one missing frame"},
+        {"start_utc": "2026-07-22 02:38", "start_cst": "2026-07-22 10:38", "status": "ready", "frames": 12, "interpretation": "Recovered after one missing frame"},
+        {"start_utc": "2026-07-22 02:55", "start_cst": "2026-07-22 10:55", "status": "ready", "frames": 54, "interpretation": "Longest continuous usable run"},
+        {"start_utc": "2026-07-22 03:50", "start_cst": "2026-07-22 11:50", "status": "ready", "frames": 10, "interpretation": "Usable before current degradation"},
+        {"start_utc": "2026-07-22 04:00", "start_cst": "2026-07-22 12:00", "status": "degraded", "frames": 3, "interpretation": "No fresh L1; insufficient strikes"},
+        {"start_utc": "2026-07-22 04:03", "start_cst": "2026-07-22 12:03", "status": "ready", "frames": 4, "interpretation": "Brief recovery"},
+        {"start_utc": "2026-07-22 04:08", "start_cst": "2026-07-22 12:08", "status": "ready", "frames": 4, "interpretation": "Final usable chain; last usable frame 12:11"},
+        {"start_utc": "2026-07-22 04:12", "start_cst": "2026-07-22 12:12", "status": "degraded", "frames": 4, "interpretation": "Chain collapses to zero fresh L1"},
+        {"start_utc": "2026-07-22 04:16", "start_cst": "2026-07-22 12:16", "status": "unavailable", "frames": 18, "interpretation": "Open outage at cutoff; frozen structure"}
+      ],
+      "root_causes": [
+        {"rank": 1, "cause": "GTH SPXW live-chain ownership is fragile", "evidence": "IBKR 10197 during both material gaps; current coverage 0/20 contracts and 0/10 pairs; Schwab chain timestamp is prior session", "effect": "IV, skew, density, L1 and live walls disappear together", "fix_direction": "Make market-data ownership a first-class health contract and remove the shared-session single point"},
+        {"rank": 2, "cause": "GEX sign is a house proxy, not participant inventory", "evidence": "Calls positive, puts negative; dealer_position_sign=unknown in 181/181 frames", "effect": "Walls locate concentration but cannot describe actual dealer hedging pressure", "fix_direction": "Keep proxy label; add open/close and signed-flow evidence only from a defensible source"},
+        {"rank": 3, "cause": "Raw walls mutate faster than the confirmation clock", "evidence": "22 signature changes across 129 comparable transitions; stable layer requires two buckets", "effect": "Repeated 1/2 confirmation and invalidated events", "fix_direction": "Use rank persistence, magnitude bands and gap-aware confirmation"},
+        {"rank": 4, "cause": "Mixed coordinates and clocks", "evidence": "ES path is continuous; SPX strikes use chain-implied or ES+basis; GTH opens at 20:15 ET while Globex context begins earlier", "effect": "Location can drift even when the economic structure did not", "fix_direction": "Carry coordinate, basis age and session anchor on every structural level"},
+        {"rank": 5, "cause": "Auction and signed-flow layers are incomplete", "evidence": "Returns, ranges and VWAP exist; no POC/VAH/VAL, CVD, absorption or ES depth in the decision frame", "effect": "The report sees direction but not acceptance, inventory or liquidity behavior", "fix_direction": "Add auction profile first; add signed flow only with auditable tick/depth data"},
+        {"rank": 6, "cause": "Regime scores are deterministic heuristics without GTH calibration", "evidence": "Fixed additive point weights; forward exact GTH cohort remains 0/20", "effect": "80/30 looks precise but is not a probability or confidence estimate", "fix_direction": "Calibrate by session phase and report n, hit rate and uncertainty"}
+      ],
+      "strike_layers": [
+        {"order": 1, "layer": "Sampling universe", "observed_coverage": "81 strikes / 162 C+P contracts across roughly ATM +/-200 points", "contract": "Wide strikes are rotated; they are not all guaranteed concurrent", "consequence": "The lake can be dense even when a single feature frame is narrower"},
+        {"order": 2, "layer": "Fresh as-of quote cache", "observed_coverage": "Stable healthy snapshots averaged 54.1/61 full pairs inside +/-30 strike levels; range 53-56/61", "contract": "quality=live, source age<=90s, call+put both two-sided", "consequence": "Raw data was mostly present; it was not a complete 61-pair grid"},
+        {"order": 3, "layer": "L1 microstructure feature", "observed_coverage": "64 contracts = 32 complete near-ATM C/P strike pairs in every stable healthy snapshot", "contract": "Sorted nearest ATM and truncated at hot_option_limit=64", "consequence": "Cannot represent ATM plus 30 strikes on both sides, which needs 122 contracts"},
+        {"order": 4, "layer": "15-minute text", "observed_coverage": "0/18 reports rendered a full price grid", "contract": "Compact prompt limits key_strikes to 8 and prohibits full Greeks/wall ladders; walls are top-4 per side", "consequence": "OI count can say 76-81 strikes normal while per-strike prices remain invisible"},
+        {"order": 5, "layer": "+/-30 points control", "observed_coverage": "13/13 full C/P pairs in all 14 stable healthy snapshots", "contract": "ATM-30 through ATM+30 at five-point increments", "consequence": "If the intended width was points rather than strike levels, collection was sufficient"}
+      ],
+      "report_contract": [
+        {"order": 1, "check": "Cadence and delivery", "result": "18/18 delivered", "evidence": "08:15-12:30 CST; adjacent snapshot gaps 894-908 seconds", "assessment": "PASS"},
+        {"order": 2, "check": "Fail-closed outage disclosure", "result": "Correctly degraded", "evidence": "10:00, 12:15 and 12:30 reported L1 unavailable and blocked executable pricing", "assessment": "PASS"},
+        {"order": 3, "check": "Price-coverage disclosure", "result": "Missing", "evidence": "Reports show 76-81 OI strikes but do not show fresh pair count, priced radius, extrema or quote age", "assessment": "FAIL"},
+        {"order": 4, "check": "LLM numeric/field fidelity", "result": "One material semantic mismatch observed", "evidence": "09:15 template Call Wall 7550 became 7500; numeric ES 60m/VWAP and L1 73.6 (IBKR 64) were omitted", "assessment": "FAIL"},
+        {"order": 5, "check": "Writer behavior", "result": "10 template fallbacks; 8 DeepSeek outputs", "evidence": "Only 2/8 DeepSeek outputs were byte-identical to the deterministic template; validator checks number membership, not field binding", "assessment": "RISK"},
+        {"order": 6, "check": "Full +/-30-strike price ladder", "result": "0/18 rendered", "evidence": "Report contract intentionally compresses to summaries and top walls", "assessment": "FAIL for the requested product behavior"}
+      ]
+    }
+  },
+  "sources": [
+    {
+      "id": "runtime_snapshot",
+      "label": "GTH runtime snapshot at 2026-07-22 12:33 CST",
+      "path": "data/latest/market_feature_state.json",
+      "query": {
+        "engine": "jq over live JSON state",
+        "id": "gth-runtime-window-20260722T013355Z-043331Z",
+          "sql": "SELECT 181 AS total_frames, 130 AS ready_frames, 7 AS degraded_frames, 44 AS unavailable_frames, 350 AS es_session_samples, 22 AS raw_structure_changes, 129 AS comparable_structure_transitions",
+        "description": "Bounded 181-frame GTH option-history window plus the latest ES market frame and provider-failover state.",
+        "executed_at": "2026-07-22T04:33:56.514300+00:00",
+        "language": "jq+shell",
+        "filters": ["181 retained one-minute option frames", "2026-07-22T01:33:55Z through 2026-07-22T04:33:31Z", "GTH session 2026-07-22", "no imputation of unavailable frames"],
+        "metric_definitions": ["Availability rate is frames satisfying the component-specific non-null and quality predicate divided by 181 retained frames.", "Live structure requires quality=ready and structure.frozen is not true.", "Fresh L1 requires contract_count>0 and fresh_candidate_count>0.", "Raw structure change rate is consecutive ready, non-frozen frames whose (put wall, flip zone, call wall) signature changed, divided by 129 comparable transitions.", "Risk-neutral density is available only when density.quality=ok."],
+        "tables_used": ["data/latest/market_feature_state.json", "data/latest/minute_market_frame.json", "data/latest/option_structure_frame.json", "data/latest/provider_failover_state.json", "data/published/spxw-surface/snapshot.json"]
+      }
+    },
+    {
+      "id": "ibkr_runtime_journal",
+      "label": "IBKR stream and Schwab GTH chain journal",
+      "query": {
+        "engine": "systemd journal",
+        "id": "gth-feed-failures-20260722",
+        "sql": "journalctl --user -u spx-spark-ibkr-stream.service --since '2026-07-22 09:45:00' --output=cat | rg '10197|competing_session|policy_blocked'",
+        "description": "Read-only inspection of the two material GTH option-data outages and the current Schwab fallback freshness.",
+        "executed_at": "2026-07-22T04:31:25.041580+00:00",
+        "language": "shell",
+        "filters": ["unit spx-spark-ibkr-stream.service", "GTH window beginning 2026-07-22 08:15 CST", "IBKR error 10197 and competing-session policy events"],
+        "tables_used": ["systemd journal: spx-spark-ibkr-stream.service", "systemd journal: spx-spark-schwab-marketdata.service"]
+      }
+    },
+    {
+      "id": "runtime_code",
+      "label": "Current GTH feature and decision implementation",
+      "path": "src/spx_spark/application/market_features/decision_filters.py",
+      "query": {
+        "engine": "repository source inspection",
+        "id": "gth-structure-code-review-1b50fae6",
+        "sql": "rg -n 'gth_complete_chain_available|dealer_position_sign|_payload_is_thin|trend_score|mean_reversion_score|frozen_last_usable_option_frame' src/spx_spark",
+        "description": "Read-only review of option exposure conventions, GTH quality bypass, stability, session features and additive regime scoring on master commit 1b50fae6.",
+        "executed_at": "2026-07-22T04:32:31+00:00",
+        "language": "shell+python",
+        "filters": ["branch master", "commit 1b50fae6df44c4f75e337e68a752a78d692f9c4d", "no product-code changes in this diagnostic"],
+        "tables_used": ["src/spx_spark/analytics/options/exposure.py", "src/spx_spark/features/exposure_map.py", "src/spx_spark/application/market_features/market.py", "src/spx_spark/application/market_features/options.py", "src/spx_spark/application/market_features/decision_filters.py", "src/spx_spark/application/order_map/service.py", "src/spx_spark/surface_live_session_projection.py"]
+      }
+    },
+    {
+      "id": "forward_validation",
+      "label": "Forward-only GTH readiness validation",
+      "path": "docs/strategy-backtest-validation-2026-07-18.artifact.json",
+      "query": {
+        "engine": "spx-spark strategy_readiness",
+        "id": "forward-v3-readiness-2026-07-18",
+        "sql": "SELECT 0 AS contract_consistent_sessions, 0 AS gth_exact_entries, 20 AS review_target",
+        "description": "Frozen forward-only readiness gate for exact GTH two-leg evidence.",
+        "executed_at": "2026-07-18T14:19:09.442436+00:00",
+        "language": "sql",
+        "filters": ["forward-v3 contract only", "legacy v1/v2 material decisions excluded", "automatic promotion disabled"],
+        "tables_used": ["features/level_decision_health", "features/gth_dip_reclaim", "features/trade_intents", "features/virtual_strategy"]
+      }
+    },
+    {
+      "id": "diagnostic_synthesis",
+      "label": "GTH structure diagnostic synthesis",
+      "path": "gth-structure-diagnostic-2026-07-22.artifact.json",
+      "query": {
+        "engine": "evidence-backed technical review",
+        "id": "gth-structure-gap-priorities-20260722",
+        "sql": "SELECT * FROM root_causes ORDER BY rank",
+        "description": "Prioritized synthesis of live-frame quality, feed failures, state-machine behavior and current feature coverage.",
+        "executed_at": "2026-07-22T04:33:56.514300+00:00",
+        "language": "sql",
+        "tables_used": ["availability", "outage_runs", "root_causes"]
+      }
+    },
+    {
+      "id": "strike_report_audit",
+      "label": "GTH strike coverage and 15-minute report audit",
+      "path": "data/audit/order_map_pricing/date=2026-07-22/reports.jsonl",
+      "query": {
+        "engine": "DuckDB as-of reconstruction + JSON report audit + repository contract inspection",
+        "id": "gth-strike-report-audit-20260722T0815-1230CST",
+        "sql": "SELECT 18 AS delivered_reports, 18 AS scheduled_reports, 18.0/18.0 AS delivery_rate, 758.0/(14.0*61.0) AS raw_30_strike_coverage, 0.0/18.0 AS full_ladder_render_rate",
+        "description": "Separates the 81-strike rotating collection universe, fresh as-of quote coverage, the 64-contract L1 feature cap and what the 15-minute report actually renders.",
+        "executed_at": "2026-07-22T04:45:44+00:00",
+        "language": "sql+python+jq",
+        "filters": ["SPXW expiry 2026-07-22", "scheduled reports 08:15-12:30 CST", "fresh quote age <=90 seconds", "stable healthy comparison excludes 08:15 warm-up and the 10:00 outage", "full C/P pair requires both call and put with two-sided quotes"],
+        "metric_definitions": ["+/-30 strike levels means 30 five-point strikes below ATM, ATM, and 30 above: 61 C/P pairs or 122 option contracts.", "+/-30 points means ATM-30 through ATM+30 at five-point spacing: 13 C/P pairs or 26 option contracts.", "L1 feature coverage reproduces the implementation sort by distance to underlier followed by the 64-contract truncation.", "A report has a full strike-price ladder only if it renders the complete target grid rather than OI counts or top-four walls."],
+        "tables_used": ["data/lake/quotes/schema=v1/date=2026-07-22/provider=ibkr/hour=*/quotes.parquet", "data/audit/order_map_pricing/date=2026-07-22/reports.jsonl", "config/runtime.yaml", "src/spx_spark/sampling.py", "src/spx_spark/ibkr/stream/quota_plan.py", "src/spx_spark/application/market_features/options.py", "src/spx_spark/application/order_map/prompts.py", "src/spx_spark/application/order_map/writer_validation.py"]
+      }
+    }
+  ]
+}

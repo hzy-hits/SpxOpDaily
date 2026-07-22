@@ -662,6 +662,11 @@ def test_pricing_audit_persists_model_payload_separately_from_prose(tmp_path: Pa
         "underlier": {"price": 7533.2, "source": "chain_implied"},
         "pricing_reference": {"pricing_allowed": True},
         "expected_move_points": 32.0,
+        "strike_price_coverage": {
+            "target_pair_count": 61,
+            "complete_pair_count": 54,
+            "rows": [{"strike": 7500.0, "complete_pair": True}],
+        },
         "candidates": [
             {
                 "contract_id": "option:SPX:SPXW:20260713:7500:C",
@@ -684,6 +689,8 @@ def test_pricing_audit_persists_model_payload_separately_from_prose(tmp_path: Pa
     path = append_pricing_audit(str(tmp_path), record)
     loaded = json.loads(path.read_text(encoding="utf-8"))
     assert loaded["candidates"][0]["projection_model"] == "bs_repricing"
+    assert loaded["strike_price_coverage"]["complete_pair_count"] == 54
+    assert loaded["strike_price_coverage"]["rows"][0]["strike"] == 7500.0
     assert loaded["template"] == "raw 9.12"
     assert loaded["delivered_text"] == "writer 9.12"
 
@@ -2407,6 +2414,69 @@ def test_globex_prompts_require_proxy_analysis_without_executable_pricing() -> N
     )
 
 
+def test_globex_writer_rejects_rebound_or_omitted_status_numeric_facts() -> None:
+    from spx_spark.application.order_map.prompts import globex_writer_output_valid
+
+    template = "\n".join(
+        (
+            "【SPX 15m · 09:15 · 0DTE 07-22 · 亚盘夜盘】",
+            "结构  ZeroGamma过渡　Put 7500　Flip 7495–7500　Call 7550",
+            "结构更新  新链 Put 7500　Flip 7495–7500　Call 7500",
+            "波动  L1流动性 73.6（IBKR 64）",
+        )
+    )
+    faithful = template + "\n剧本维持"
+    rebound = faithful.replace("Call 7550", "Call 7500", 1)
+    omitted = "\n".join(line for line in faithful.splitlines() if not line.startswith("波动"))
+
+    assert globex_writer_output_valid(faithful, template)
+    assert not globex_writer_output_valid(rebound, template)
+    assert not globex_writer_output_valid(omitted, template)
+
+
+def test_strike_price_coverage_separates_full_pairs_from_oi_strikes() -> None:
+    from spx_spark.application.order_map.research import _strike_price_coverage
+    from spx_spark.application.order_map.strike_coverage_presentation import (
+        strike_price_coverage_line,
+    )
+
+    now = datetime(2026, 7, 22, 2, 15, tzinfo=timezone.utc)
+    quotes = [
+        make_option(
+            expiry="20260722",
+            strike=strike,
+            right=right,
+            mark=10.0,
+            delta=0.5 if right == "C" else -0.5,
+            gamma=0.01,
+            now=now,
+        )
+        for strike in (7490, 7495, 7500, 7505, 7510)
+        for right in ("C", "P")
+        if not (strike == 7510 and right == "P")
+    ]
+    coverage = _strike_price_coverage(
+        make_state(*quotes, now=now),
+        expiry="20260722",
+        reference_price=7501.0,
+        as_of=now,
+        radius_strikes=2,
+        radius_points=5,
+    )
+
+    assert coverage["center_strike"] == 7500.0
+    assert coverage["target_pair_count"] == 5
+    assert coverage["complete_pair_count"] == 4
+    assert coverage["point_target_pair_count"] == 3
+    assert coverage["point_complete_pair_count"] == 3
+    assert coverage["complete_min_strike"] == 7490.0
+    assert coverage["complete_max_strike"] == 7505.0
+    assert coverage["rows"][-1]["complete_pair"] is False
+    assert strike_price_coverage_line({"strike_price_coverage": coverage}) == (
+        "价格覆盖  ATM上下各2档 4/5对　±5点 3/3对　双边C/P区间 7490–7505"
+    )
+
+
 def test_actionable_writer_requires_exact_numbers_contracts_and_no_prehang() -> None:
     from spx_spark.application.order_map.prompts import actionable_writer_output_valid
 
@@ -3466,6 +3536,16 @@ def test_render_status_template_contains_levels_and_changes() -> None:
                 "exact_expiry_contract_count": 10,
             },
         },
+        "strike_price_coverage": {
+            "radius_strikes": 30,
+            "target_pair_count": 61,
+            "complete_pair_count": 54,
+            "complete_min_strike": 7350.0,
+            "complete_max_strike": 7650.0,
+            "radius_points": 30,
+            "point_target_pair_count": 13,
+            "point_complete_pair_count": 13,
+        },
         "warnings": [],
     }
     now = datetime(2026, 7, 7, 6, 30, tzinfo=timezone.utc)
@@ -3477,6 +3557,7 @@ def test_render_status_template_contains_levels_and_changes() -> None:
     assert "Max Pain 7510" in text
     assert "Call峰 7550（6,555）" in text
     assert "Put峰 7500（3,604）" in text
+    assert "价格覆盖  ATM上下各30档 54/61对　±30点 13/13对" in text
     assert "0DTE Greeks" not in text
     assert "墙阶梯" not in text
     assert "收盘分布" not in text

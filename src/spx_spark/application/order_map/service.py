@@ -61,6 +61,7 @@ from spx_spark.application.order_map.research import (
     _index_value,
     _research_candidates,
     _research_wall_ladder,
+    _strike_price_coverage,
     _wall_ladder_payload,
 )
 from spx_spark.application.order_map.signal_machine import annotate_call_bias_with_signal_mode
@@ -185,6 +186,15 @@ def build_order_payload(
     skew_spread_shadows = _build_spread_shadows(
         state, expiry=expiry, spot=pricing_spot, now=now, policy=policy
     )
+    coverage_reference = (
+        resolution.research_price if resolution.research_price is not None else pricing_spot
+    )
+    strike_price_coverage = _strike_price_coverage(
+        state,
+        expiry=expiry,
+        reference_price=coverage_reference,
+        as_of=now,
+    )
 
     # Keep prior-close change as context. Expected-move consumption is attached
     # later from the current GTH session so yesterday's move cannot leak into it.
@@ -220,6 +230,7 @@ def build_order_payload(
         "research_only": resolution.research_only,
         "analysis_mode": "globex_context" if resolution.research_only else "executable",
         "expiry": expiry,
+        "strike_price_coverage": strike_price_coverage,
         **skew_spread_shadows,
         "expected_move_points": expected_move_points,
         "candidates": candidate_rows,

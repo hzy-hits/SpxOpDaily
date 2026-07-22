@@ -24,13 +24,26 @@ _GLOBEX_FORBIDDEN_PHRASES = (
 
 
 def globex_writer_output_valid(text: str, template: str) -> bool:
-    """Reject invented prices and causal decoration in an off-hours brief."""
+    """Reject invented or rebound numeric facts in an off-hours brief."""
 
     if any(phrase in text for phrase in _GLOBEX_FORBIDDEN_PHRASES):
         return False
     template_header = template.splitlines()[0].strip() if template.strip() else ""
-    if template_header.startswith("【SPX 15m ·") and not text.startswith(template_header):
+    is_status_template = template_header.startswith("【SPX 15m ·")
+    if is_status_template and not text.startswith(template_header):
         return False
+    # Numeric membership alone is insufficient: an LLM can move a valid wall
+    # value onto the wrong label or omit a populated L1 line. Every
+    # deterministic template line containing a number must therefore survive
+    # verbatim apart from whitespace. Narrative-only lines may still be edited.
+    if is_status_template:
+        normalized_output_lines = {
+            re.sub(r"\s+", "", line) for line in text.splitlines() if line.strip()
+        }
+        for line in template.splitlines():
+            normalized_line = re.sub(r"\s+", "", line)
+            if _NUMBER_PATTERN.search(line) and normalized_line not in normalized_output_lines:
+                return False
     allowed = [float(value) for value in _NUMBER_PATTERN.findall(template)]
     for raw in _NUMBER_PATTERN.findall(text):
         value = float(raw)

@@ -33,6 +33,99 @@ from spx_spark.storage import LatestState, configured_quote_use_decision
 from spx_spark.settings.order_map import DEFAULT_ORDER_MAP_POLICY, OrderMapPolicy
 
 
+def _strike_price_coverage(
+    state: LatestState,
+    *,
+    expiry: str,
+    reference_price: float | None,
+    as_of: datetime,
+    radius_strikes: int = 30,
+    radius_points: int = 30,
+) -> dict[str, object]:
+    """Audit fresh two-sided C/P prices without confusing them with OI coverage."""
+
+    quotes = _front_expiry_quotes(state, expiry)
+    pairs = pair_by_strike(quotes)
+    strike_step = max(1, int(round(median_strike_step(sorted(pairs)) if pairs else 5.0)))
+    center = round_to_step(reference_price, strike_step) if reference_price is not None else None
+    target_strikes = (
+        [
+            center + offset * strike_step
+            for offset in range(-radius_strikes, radius_strikes + 1)
+            if center + offset * strike_step > 0
+        ]
+        if center is not None
+        else []
+    )
+
+    def observed_side(quote: Quote | None) -> dict[str, object]:
+        if quote is None:
+            return {
+                "bid": None,
+                "ask": None,
+                "provider": None,
+                "quality": None,
+                "freshness": None,
+                "usable": False,
+            }
+        decision = configured_quote_use_decision(quote, as_of=as_of)
+        bid = finite_float(quote.bid) if decision.research_usable else None
+        ask = finite_float(quote.ask) if decision.research_usable else None
+        usable = bid is not None and ask is not None
+        return {
+            "bid": bid if usable else None,
+            "ask": ask if usable else None,
+            "provider": quote.provider.value,
+            "quality": quote.quality.value,
+            "freshness": decision.freshness.value,
+            "usable": usable,
+        }
+
+    rows: list[dict[str, object]] = []
+    complete_strikes: list[float] = []
+    for strike in target_strikes:
+        pair = pairs.get(float(strike), {})
+        call = observed_side(pair.get(OptionRight.CALL))
+        put = observed_side(pair.get(OptionRight.PUT))
+        complete = call["usable"] is True and put["usable"] is True
+        if complete:
+            complete_strikes.append(float(strike))
+        rows.append(
+            {
+                "strike": float(strike),
+                "call": call,
+                "put": put,
+                "complete_pair": complete,
+            }
+        )
+
+    point_targets = {
+        float(strike)
+        for strike in target_strikes
+        if center is not None and abs(strike - center) <= radius_points
+    }
+    point_complete = sum(strike in point_targets for strike in complete_strikes)
+    target_count = len(target_strikes)
+    return {
+        "expiry": expiry,
+        "reference_price": reference_price,
+        "center_strike": float(center) if center is not None else None,
+        "strike_step_points": strike_step,
+        "radius_strikes": radius_strikes,
+        "target_pair_count": target_count,
+        "complete_pair_count": len(complete_strikes),
+        "coverage_ratio": len(complete_strikes) / target_count if target_count else 0.0,
+        "complete_min_strike": min(complete_strikes) if complete_strikes else None,
+        "complete_max_strike": max(complete_strikes) if complete_strikes else None,
+        "radius_points": radius_points,
+        "point_target_pair_count": len(point_targets),
+        "point_complete_pair_count": point_complete,
+        "point_coverage_ratio": point_complete / len(point_targets) if point_targets else 0.0,
+        "price_contract": "fresh_two_sided_call_and_put",
+        "rows": rows,
+    }
+
+
 def _observed_option_reference(
     quotes: list[Quote],
     *,
