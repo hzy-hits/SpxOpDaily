@@ -90,6 +90,8 @@ class VerifyRow:
     ticker_time: str | None = None
     last_update_at: str | None = None
     request_id: int | None = None
+    sampling_mode: str | None = None
+    sampling_group: int | None = None
     stale: bool | None = None
     error: str | None = None
 

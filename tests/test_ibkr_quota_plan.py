@@ -14,7 +14,7 @@ def test_validation_allocation_keeps_twenty_six_line_reserve() -> None:
 def test_fallback_allocation_expands_spxw_and_keeps_six_line_reserve() -> None:
     plan = plan_ibkr_option_allocation(fallback=True)
     assert plan.mode is IbkrQuotaMode.FALLBACK
-    assert (plan.hot_option_lines, plan.rotation_option_lines) == (56, 28)
+    assert (plan.hot_option_lines, plan.rotation_option_lines) == (46, 38)
     assert plan.option_lines == 84
     assert plan.reserve_lines == 6
 

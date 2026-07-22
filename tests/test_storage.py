@@ -586,13 +586,13 @@ def test_rotation_window_does_not_apply_to_schwab_options_or_ibkr_indexes() -> N
 
 def test_configured_decision_uses_rotation_window_for_ibkr_options(tmp_path) -> None:
     settings = make_storage_settings(tmp_path)
-    assert settings.rotation_stale_after_seconds == 45.0
+    assert settings.rotation_stale_after_seconds == 90.0
     received_at = datetime(2026, 7, 7, 14, 0, tzinfo=timezone.utc)
     quote = make_option_quote(expiry="20260707", received_at=received_at)
 
     fresh_decision = configured_quote_use_decision(
         quote,
-        as_of=received_at + timedelta(seconds=20),
+        as_of=received_at + timedelta(seconds=10),
         settings=settings,
     )
     stale_decision = configured_quote_use_decision(
@@ -602,8 +602,10 @@ def test_configured_decision_uses_rotation_window_for_ibkr_options(tmp_path) -> 
     )
 
     assert fresh_decision.pricing_allowed
-    assert stale_decision.freshness == QuoteFreshness.STALE
+    assert stale_decision.freshness == QuoteFreshness.FRESH
+    assert stale_decision.research_usable
     assert not stale_decision.pricing_allowed
+    assert stale_decision.reason == "transport_stale_after_15s"
 
 
 def test_configured_decision_uses_tick_recency_for_quiet_ibkr_options(tmp_path) -> None:
@@ -627,4 +629,5 @@ def test_configured_decision_uses_tick_recency_for_quiet_ibkr_options(tmp_path) 
     decision = configured_quote_use_decision(aged, as_of=as_of, settings=settings)
 
     assert decision.freshness == QuoteFreshness.FRESH
-    assert decision.pricing_allowed
+    assert decision.research_usable
+    assert not decision.pricing_allowed

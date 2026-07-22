@@ -8,7 +8,7 @@
 
 | 阶段 | 状态 | 证据 |
 | --- | --- | --- |
-| Phase 1 数据预算 | 配置已写入 YAML | GTH/次日预采使用 `ibkr_stream.max_option_lines=84`（SPXW hot 56 + rotation 28）、SPY option lines=0、2s flush、`sampling.hot_window_points=55`；Schwab A/B 档 `chain_interval_seconds` + `$SPX` `option_chain_strike_count=40` |
+| Phase 1 数据预算 | 配置已写入 YAML | GTH/次日预采使用 `ibkr_stream.max_option_lines=84`（SPXW core 46 + rotation 38）、SPY option lines=0、2s flush、`sampling.hot_window_points=55`；Schwab SPXW Level-One 上限 160 contracts（80 个完整 C/P strike） |
 | Phase 2 exposure_map / bars | 代码已合入 | `src/spx_spark/features/exposure_map.py`、`bar_builder.py`；golden/单测已有 |
 | Phase 3 Steven observe_only | 代码已合入，默认关 | `src/spx_spark/strategy/steven.py`；`steven.enabled=false`、`alert_context_enabled=false` |
 | Phase 0/4 盘中验收与 forward 审计 | 仍待交易日 | 周末不可验收 OI；forward metrics 模块已有但需盘中样本 |
@@ -34,12 +34,17 @@
 | 用途 | 行数 | 配置来源 |
 | --- | --- | --- |
 | 基础锚 `index:SPX`、`stock:SPY`、`future:ES/MES` | 4（常驻） | `ibkr_stream` base subs |
-| SPXW 期权 | GTH/预采 84（hot 56 + rotation 28）；RTH 验证 64 | adaptive quota allocator, `max_option_lines=84` |
+| SPXW 期权 | GTH/预采 84（core 46 + rotation 38）；RTH 验证 64（core 44 + rotation 20） | adaptive quota allocator, `max_option_lines=84` |
 | SPY 期权（墙对照） | 0 | Schwab 承担；`ibkr_stream.spy_option_lines=0` |
 | VIX 家族 + ETF/指数 | 轮换（slow poll，每批 6 行、300s 周期） | `slow_poll_labels`, `slow_poll_chunk_size=6` |
 
 GTH 峰值约 94 行（84 option + 4 base + 6 slow poll），保留 6 行余量；ticker-limit
 会下调运行时容量。实际 RTH 收盘前 30 分钟起（正常交易日美东 15:30，计划早收盘日 12:30）front expiry 切到下一交易日，17:00 分析日期再正式切换。
+
+稠密优先模式把轮转报价限制在 90 秒 freshness window 内，并以 ATM 上下各 30 档的
+61-strike 目标面审计。报告分别给出 core 完整对、rotation 补齐对、缺失 C/P、每档报价年龄
+及完整 C/P 对数；原始 bid/ask 不做插值，只允许 IV 曲面和结构函数平滑。IV/skew/GEX/density
+继续消费完整可用结构面，主墙另记录最近 15 帧的 Top-4 rank persistence 与 Wilson 95% 区间。
 
 ### 1.2 Schwab REST（120 req/min，quotes 单批上限 500 symbol）
 

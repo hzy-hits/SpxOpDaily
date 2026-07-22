@@ -180,6 +180,16 @@ def quote_from_ibkr_row(
         source_latency_ms=elapsed_ms(quote_time, received_at),
         market_data_type=market_data_type,
         greeks=greeks,
+        sampling_mode=(
+            str(get_value(row, "sampling_mode"))
+            if get_value(row, "sampling_mode") is not None
+            else None
+        ),
+        sampling_group=(
+            int(get_value(row, "sampling_group"))
+            if get_value(row, "sampling_group") is not None
+            else None
+        ),
         source_session=source_session,
         error=str(error) if error else None,
     )

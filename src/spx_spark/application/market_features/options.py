@@ -122,6 +122,7 @@ def frozen_structure_for_session(
             "max_pain",
             "call_walls",
             "put_walls",
+            "wall_rank_persistence",
         )
     }
     frozen.update(
@@ -208,6 +209,21 @@ def structure_features(
     prior = prior_frame.get("structure") if prior_frame.get("front_expiry") == front.expiry else {}
     prior = prior if isinstance(prior, dict) else {}
     max_pain = front.max_pain.to_dict() if front.max_pain else None
+    wall_rank_persistence = {
+        "lookback_frame_limit": 15,
+        "call": _wall_rank_persistence(
+            front.expiry,
+            [wall.strike for wall in front.call_walls],
+            history,
+            side="call",
+        ),
+        "put": _wall_rank_persistence(
+            front.expiry,
+            [wall.strike for wall in front.put_walls],
+            history,
+            side="put",
+        ),
+    }
     return {
         "underlier": underlier,
         "put_wall": front.put_wall,
@@ -230,7 +246,87 @@ def structure_features(
         "max_pain": max_pain,
         "call_walls": [wall.to_dict() for wall in front.call_walls],
         "put_walls": [wall.to_dict() for wall in front.put_walls],
+        "wall_rank_persistence": wall_rank_persistence,
     }
+
+
+def _wall_rank_persistence(
+    expiry: str,
+    current_walls: list[float],
+    history: list[dict[str, Any]],
+    *,
+    side: str,
+    lookback_frames: int = 15,
+) -> dict[str, Any]:
+    primary = current_walls[0] if current_walls else None
+    if primary is None:
+        return {
+            "primary_strike": None,
+            "observations": 0,
+            "top4_presence_ratio": None,
+            "same_rank_ratio": None,
+            "mean_rank_score": None,
+            "top4_presence_confidence_95": None,
+        }
+    historical_ranks: list[int | None] = []
+    key = f"{side}_walls"
+    for item in reversed(history):
+        if not isinstance(item, dict) or item.get("front_expiry") != expiry:
+            continue
+        structure = item.get("structure")
+        if not isinstance(structure, dict) or structure.get("frozen") is True:
+            continue
+        rows = structure.get(key)
+        if not isinstance(rows, list):
+            continue
+        strikes = [_number(row.get("strike")) for row in rows[:4] if isinstance(row, dict)]
+        strikes = [strike for strike in strikes if strike is not None]
+        if not strikes:
+            continue
+        historical_ranks.append(
+            next(
+                (rank for rank, strike in enumerate(strikes, start=1) if strike == primary),
+                None,
+            )
+        )
+        if len(historical_ranks) >= lookback_frames:
+            break
+    observations = len(historical_ranks)
+    if not observations:
+        return {
+            "primary_strike": primary,
+            "observations": 0,
+            "top4_presence_ratio": None,
+            "same_rank_ratio": None,
+            "mean_rank_score": None,
+            "top4_presence_confidence_95": None,
+        }
+    present = sum(rank is not None for rank in historical_ranks)
+    same_rank = sum(rank == 1 for rank in historical_ranks)
+    rank_scores = [
+        max(0.0, 1.0 - (rank - 1) / 4.0) if rank is not None else 0.0 for rank in historical_ranks
+    ]
+    low, high = _binomial_interval(present, observations)
+    return {
+        "primary_strike": primary,
+        "observations": observations,
+        "top4_presence_ratio": round(present / observations, 4),
+        "same_rank_ratio": round(same_rank / observations, 4),
+        "mean_rank_score": round(sum(rank_scores) / observations, 4),
+        "top4_presence_confidence_95": [low, high],
+    }
+
+
+def _binomial_interval(successes: int, total: int, *, z: float = 1.96) -> tuple[float, float]:
+    proportion = successes / total
+    denominator = 1.0 + z * z / total
+    center = (proportion + z * z / (2.0 * total)) / denominator
+    margin = (
+        z
+        * ((proportion * (1.0 - proportion) / total + z * z / (4.0 * total * total)) ** 0.5)
+        / denominator
+    )
+    return round(max(0.0, center - margin), 4), round(min(1.0, center + margin), 4)
 
 
 def option_volatility_features(
@@ -596,6 +692,11 @@ def _empty_structure() -> dict[str, Any]:
         "net_gex": None,
         "abs_gex": None,
         "net_gamma_ratio": None,
+        "wall_rank_persistence": {
+            "lookback_frame_limit": 15,
+            "call": None,
+            "put": None,
+        },
     }
 
 

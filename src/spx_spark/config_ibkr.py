@@ -136,7 +136,7 @@ class IbkrStreamSettings:
     atm_state_path: str = field(default_factory=lambda: "")
     freeze_quotes_on_connectivity_loss: bool = field(default_factory=lambda: bool(True))
     data_flow_silence_seconds: float = field(default_factory=lambda: 120.0)
-    option_stale_after_seconds: float = field(default_factory=lambda: 45.0)
+    option_stale_after_seconds: float = field(default_factory=lambda: 90.0)
     exact_leg_pin_enabled: bool = field(default_factory=lambda: bool(True))
     quote_demand_poll_seconds: float = field(default_factory=lambda: 0.05)
     quote_demand_path: str = field(default_factory=lambda: "")

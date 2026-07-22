@@ -22,8 +22,8 @@ market_data:
     value: 60
     description: Maximum age allowed for a quote explicitly labelled delayed.
   rotation_stale_after_seconds:
-    value: 45.0
-    description: Freshness window for IBKR stream option rows, which refresh on a round-robin rotation cycle (~25s); shorter windows always mark the oldest slice stale even though it is as fresh as the design allows.
+    value: 90.0
+    description: Freshness window for IBKR stream option rows; bounds the dense rotating cache to 90 seconds while execution quotes remain subject to their stricter gate.
   slow_index_stale_after_seconds:
     value: 90
     description: Bounded freshness window for Schwab volatility-index context; three missed 30s quote cycles make the context stale.
@@ -862,7 +862,7 @@ ibkr_stream:
     description: Client id for the persistent streaming collector.
   flush_interval_seconds:
     value: 2.0
-    description: Maximum seconds between hot-lane flushes and SPXW rotation slices; completes the aggressive 56-hot/28-rotating Paper plan while remaining below IBKR message pacing.
+    description: Maximum seconds between hot-lane flushes and SPXW rotation slices; completes the dense 46-core/38-rotating Paper plan while remaining below IBKR message pacing.
   policy_check_seconds:
     value: 30.0
     description: Seconds between runtime-policy checks in the stream collector.
@@ -874,7 +874,7 @@ ibkr_stream:
     description: Maximum production SPXW option lines; the adaptive allocator uses 64 for RTH validation and 84 during GTH or next-session prefetch.
   hot_lane_share:
     value: 0.6875
-    description: Legacy fallback value; the adaptive allocator explicitly assigns 44/20 validation and 54/24 fallback hot/rotation lines.
+    description: Legacy fallback value; the adaptive allocator explicitly assigns 44/20 validation and 46/38 fallback core/rotation lines.
   reconnect_min_seconds:
     value: 5.0
     description: Minimum reconnect backoff in seconds after stream disconnect.
@@ -912,8 +912,8 @@ ibkr_stream:
     value: 120.0
     description: Max seconds without ES ticks during an open Globex session before the stream treats the farm as a broken zombie session (no error codes, quotes frozen) and feeds the gateway-restart gate.
   option_stale_after_seconds:
-    value: 45.0
-    description: Freshness window for stream option rows, which refresh on a round-robin rotation cycle (~24s) or may be genuinely quiet in GTH; the normal 10s live-symbol window flaps them live/stale on every beat. Execution quotes stay capped at five seconds by the trade-intent gate.
+    value: 90.0
+    description: Collector freshness window for the dense IBKR option rotation cache; rows older than 90 seconds are excluded, while execution quotes stay capped by the trade-intent gate.
   slow_poll_chunk_size:
     value: 6
     description: Number of slow-poll labels requested in each chunk.

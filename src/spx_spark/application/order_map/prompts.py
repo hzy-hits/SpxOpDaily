@@ -884,7 +884,16 @@ def _status_writer_payload(payload: dict[str, Any]) -> dict[str, Any]:
                 "radius_strikes",
                 "target_pair_count",
                 "complete_pair_count",
+                "core_complete_pair_count",
+                "rotation_assisted_pair_count",
+                "missing_call_count",
+                "missing_put_count",
                 "coverage_ratio",
+                "coverage_confidence_95_low",
+                "coverage_confidence_95_high",
+                "pair_quote_age_p50_seconds",
+                "pair_quote_age_p90_seconds",
+                "pair_quote_age_max_seconds",
                 "complete_min_strike",
                 "complete_max_strike",
                 "radius_points",
@@ -892,6 +901,8 @@ def _status_writer_payload(payload: dict[str, Any]) -> dict[str, Any]:
                 "point_complete_pair_count",
                 "point_coverage_ratio",
                 "price_contract",
+                "nbbo_interpolation",
+                "smoothing_scope",
             )
         }
     exposure_context = _status_exposure_context(payload)

@@ -33,6 +33,24 @@ def strike_price_coverage_line(payload: dict[str, Any]) -> str | None:
         complete_range = f"{_dash(low)}–{_dash(high)}"
     radius = int(value.get("radius_strikes") or 30)
     points = int(value.get("radius_points") or 30)
+    core = value.get("core_complete_pair_count")
+    rotation = value.get("rotation_assisted_pair_count")
+    missing_call = value.get("missing_call_count")
+    missing_put = value.get("missing_put_count")
+    if all(isinstance(item, int) for item in (core, rotation, missing_call, missing_put)):
+        age_p50 = _dash(value.get("pair_quote_age_p50_seconds"))
+        age_p90 = _dash(value.get("pair_quote_age_p90_seconds"))
+        confidence_low = value.get("coverage_confidence_95_low")
+        confidence_high = value.get("coverage_confidence_95_high")
+        confidence = "-"
+        if isinstance(confidence_low, (int, float)) and isinstance(confidence_high, (int, float)):
+            confidence = f"{confidence_low * 100:.0f}–{confidence_high * 100:.0f}%"
+        return (
+            f"价格覆盖  核心{core}对+轮转{rotation}对={complete}/{target}对　"
+            f"缺C {missing_call}/缺P {missing_put}　age P50/P90 {age_p50}/{age_p90}s　"
+            f"95%CI {confidence}　±{points}点 {point_complete}/{point_target}对　"
+            f"双边区间 {complete_range}　NBBO不插值"
+        )
     return (
         f"价格覆盖  ATM上下各{radius}档 {complete}/{target}对　"
         f"±{points}点 {point_complete}/{point_target}对　"

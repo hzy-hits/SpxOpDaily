@@ -40,9 +40,7 @@ def plan_ibkr_option_allocation(
     if discovered_capacity <= 0:
         raise ValueError("IBKR discovered line capacity must be positive")
     mode = IbkrQuotaMode.FALLBACK if fallback else IbkrQuotaMode.VALIDATION
-    target_hot, target_rotation, minimum_reserve = (
-        (56, 28, 6) if fallback else (44, 20, 20)
-    )
+    target_hot, target_rotation, minimum_reserve = (46, 38, 6) if fallback else (44, 20, 20)
     usable = max(discovered_capacity - base_lines - temporary_lines - minimum_reserve, 0)
     hot = min(target_hot, usable)
     hot -= hot % 2

@@ -86,6 +86,8 @@ def test_ibkr_row_normalizes_option_quote_and_greeks():
         und_price=7501.0,
         volume=1250,
         open_interest=4321,
+        sampling_mode="ibkr_stream_rotation",
+        sampling_group=3,
         error=None,
     )
 
@@ -100,6 +102,8 @@ def test_ibkr_row_normalizes_option_quote_and_greeks():
     assert quote.greeks.delta == 0.51
     assert quote.volume == 1250
     assert quote.open_interest == 4321
+    assert quote.sampling_mode == "ibkr_stream_rotation"
+    assert quote.sampling_group == 3
 
 
 def test_schwab_option_contract_normalizes_chain_fields():

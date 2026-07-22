@@ -569,13 +569,29 @@ def configured_quote_use_decision(
             if is_slow
             else settings.delayed_stale_after_seconds
         )
-    return quote_use_decision(
+    decision = quote_use_decision(
         quote,
         as_of=as_of,
         stale_after_seconds=stale_after_seconds,
         delayed_stale_after_seconds=delayed_stale_after_seconds,
         allow_frozen=allow_frozen,
         prefer_quote_time=_is_ibkr_rotated_option(quote),
+    )
+    if not _is_ibkr_rotated_option(quote) or not decision.research_usable:
+        return decision
+    pricing_decision = quote_use_decision(
+        quote,
+        as_of=as_of,
+        stale_after_seconds=settings.latest_stale_after_seconds,
+        delayed_stale_after_seconds=settings.delayed_stale_after_seconds,
+        allow_frozen=allow_frozen,
+        prefer_quote_time=True,
+    )
+    return replace(
+        decision,
+        alert_allowed=pricing_decision.alert_allowed,
+        pricing_allowed=pricing_decision.pricing_allowed,
+        reason=pricing_decision.reason if not pricing_decision.pricing_allowed else decision.reason,
     )
 
 

@@ -143,6 +143,33 @@ def _market_feature_lines(payload: dict[str, Any]) -> list[str]:
             f"{_dash(option_vol.get('atm_iv_change_60m'))}; "
             f"L1流动性 {_l1_liquidity_text(l1)}"
         )
+        persistence = structure.get("wall_rank_persistence")
+        if isinstance(persistence, dict):
+            parts: list[str] = []
+            for key, label in (("put", "P"), ("call", "C")):
+                item = persistence.get(key)
+                if not isinstance(item, dict) or not item.get("observations"):
+                    continue
+                ratio = item.get("top4_presence_ratio")
+                confidence = item.get("top4_presence_confidence_95")
+                ratio_text = (
+                    f"{float(ratio) * 100:.0f}%" if isinstance(ratio, (int, float)) else "-"
+                )
+                confidence_text = "-"
+                if (
+                    isinstance(confidence, list)
+                    and len(confidence) == 2
+                    and all(isinstance(value, (int, float)) for value in confidence)
+                ):
+                    confidence_text = (
+                        f"{float(confidence[0]) * 100:.0f}–{float(confidence[1]) * 100:.0f}%"
+                    )
+                parts.append(
+                    f"{label}{_dash(item.get('primary_strike'))} "
+                    f"Top4 {ratio_text}(95%CI {confidence_text},n={item.get('observations')})"
+                )
+            if parts:
+                lines.append(f"墙位Rank持续: {'; '.join(parts)}")
     macro = payload.get("macro_event")
     if isinstance(macro, dict) and macro.get("mode") != "normal":
         event = macro.get("active_event") if isinstance(macro.get("active_event"), dict) else {}

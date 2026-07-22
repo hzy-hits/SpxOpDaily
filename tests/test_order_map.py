@@ -1008,7 +1008,7 @@ def test_order_payload_retry_is_bounded_when_candidate_stays_stale(
     assert sleeps == [10.0, 10.0]
     assert len(payload["candidates"]) == 2
     assert any(
-        item == "bad_quality_for_7550P:transport_stale_after_45s" for item in payload["warnings"]
+        item == "bad_quality_for_7550P:transport_stale_after_15s" for item in payload["warnings"]
     )
 
 
@@ -2455,6 +2455,17 @@ def test_strike_price_coverage_separates_full_pairs_from_oi_strikes() -> None:
         for right in ("C", "P")
         if not (strike == 7510 and right == "P")
     ]
+    quotes = [
+        replace(
+            quote,
+            quote_time=now - timedelta(seconds=30),
+            sampling_mode="ibkr_stream_rotation",
+            sampling_group=2,
+        )
+        if quote.instrument.strike == 7490
+        else quote
+        for quote in quotes
+    ]
     coverage = _strike_price_coverage(
         make_state(*quotes, now=now),
         expiry="20260722",
@@ -2467,13 +2478,24 @@ def test_strike_price_coverage_separates_full_pairs_from_oi_strikes() -> None:
     assert coverage["center_strike"] == 7500.0
     assert coverage["target_pair_count"] == 5
     assert coverage["complete_pair_count"] == 4
+    assert coverage["core_complete_pair_count"] == 3
+    assert coverage["rotation_assisted_pair_count"] == 1
+    assert coverage["missing_call_count"] == 0
+    assert coverage["missing_put_count"] == 1
+    assert coverage["pair_quote_age_p50_seconds"] == 0.0
+    assert coverage["pair_quote_age_p90_seconds"] == pytest.approx(21.0)
+    assert coverage["nbbo_interpolation"] is False
     assert coverage["point_target_pair_count"] == 3
     assert coverage["point_complete_pair_count"] == 3
     assert coverage["complete_min_strike"] == 7490.0
     assert coverage["complete_max_strike"] == 7505.0
     assert coverage["rows"][-1]["complete_pair"] is False
+    assert coverage["rows"][0]["coverage_lane"] == "rotation"
+    assert coverage["rows"][0]["call"]["quote_age_seconds"] == 30.0
     assert strike_price_coverage_line({"strike_price_coverage": coverage}) == (
-        "价格覆盖  ATM上下各2档 4/5对　±5点 3/3对　双边C/P区间 7490–7505"
+        "价格覆盖  核心3对+轮转1对=4/5对　缺C 0/缺P 1　"
+        "age P50/P90 0/21s　95%CI 38–96%　±5点 3/3对　"
+        "双边区间 7490–7505　NBBO不插值"
     )
 
 

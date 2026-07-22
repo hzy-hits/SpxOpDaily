@@ -20,7 +20,7 @@ from spx_spark.application.order_map.pricing import (
     project_option_price,
     round_to_tick,
 )
-from spx_spark.marketdata import OptionRight, Quote
+from spx_spark.marketdata import OptionRight, Provider, Quote, as_utc
 from spx_spark.options_map import (
     BAD_QUALITIES,
     OptionsMap,
@@ -66,36 +66,79 @@ def _strike_price_coverage(
                 "provider": None,
                 "quality": None,
                 "freshness": None,
+                "quote_age_seconds": None,
+                "lane": None,
+                "sampling_mode": None,
+                "sampling_group": None,
                 "usable": False,
             }
         decision = configured_quote_use_decision(quote, as_of=as_of)
         bid = finite_float(quote.bid) if decision.research_usable else None
         ask = finite_float(quote.ask) if decision.research_usable else None
         usable = bid is not None and ask is not None
+        source_at = (
+            quote.quote_time or quote.trade_time or quote.received_at
+            if quote.provider is Provider.IBKR
+            else quote.last_update_at or quote.quote_time or quote.trade_time or quote.received_at
+        )
+        age_seconds = (as_utc(as_of) - as_utc(source_at)).total_seconds()
+        lane = "rotation" if "rotation" in str(quote.sampling_mode or "") else "core"
         return {
             "bid": bid if usable else None,
             "ask": ask if usable else None,
             "provider": quote.provider.value,
             "quality": quote.quality.value,
             "freshness": decision.freshness.value,
+            "quote_age_seconds": round(age_seconds, 3),
+            "lane": lane,
+            "sampling_mode": quote.sampling_mode,
+            "sampling_group": quote.sampling_group,
             "usable": usable,
         }
 
     rows: list[dict[str, object]] = []
     complete_strikes: list[float] = []
+    core_complete = 0
+    rotation_assisted = 0
+    missing_calls = 0
+    missing_puts = 0
+    pair_ages: list[float] = []
     for strike in target_strikes:
         pair = pairs.get(float(strike), {})
         call = observed_side(pair.get(OptionRight.CALL))
         put = observed_side(pair.get(OptionRight.PUT))
         complete = call["usable"] is True and put["usable"] is True
+        if call["usable"] is not True:
+            missing_calls += 1
+        if put["usable"] is not True:
+            missing_puts += 1
+        coverage_lane = None
+        pair_age = None
         if complete:
             complete_strikes.append(float(strike))
+            coverage_lane = (
+                "rotation" if "rotation" in {call.get("lane"), put.get("lane")} else "core"
+            )
+            if coverage_lane == "rotation":
+                rotation_assisted += 1
+            else:
+                core_complete += 1
+            ages = [
+                value
+                for value in (call.get("quote_age_seconds"), put.get("quote_age_seconds"))
+                if isinstance(value, (int, float))
+            ]
+            if ages:
+                pair_age = max(float(value) for value in ages)
+                pair_ages.append(pair_age)
         rows.append(
             {
                 "strike": float(strike),
                 "call": call,
                 "put": put,
                 "complete_pair": complete,
+                "coverage_lane": coverage_lane,
+                "pair_quote_age_seconds": pair_age,
             }
         )
 
@@ -106,6 +149,7 @@ def _strike_price_coverage(
     }
     point_complete = sum(strike in point_targets for strike in complete_strikes)
     target_count = len(target_strikes)
+    confidence_low, confidence_high = _wilson_interval(len(complete_strikes), target_count)
     return {
         "expiry": expiry,
         "reference_price": reference_price,
@@ -114,7 +158,16 @@ def _strike_price_coverage(
         "radius_strikes": radius_strikes,
         "target_pair_count": target_count,
         "complete_pair_count": len(complete_strikes),
+        "core_complete_pair_count": core_complete,
+        "rotation_assisted_pair_count": rotation_assisted,
+        "missing_call_count": missing_calls,
+        "missing_put_count": missing_puts,
         "coverage_ratio": len(complete_strikes) / target_count if target_count else 0.0,
+        "coverage_confidence_95_low": confidence_low,
+        "coverage_confidence_95_high": confidence_high,
+        "pair_quote_age_p50_seconds": _percentile(pair_ages, 0.50),
+        "pair_quote_age_p90_seconds": _percentile(pair_ages, 0.90),
+        "pair_quote_age_max_seconds": max(pair_ages) if pair_ages else None,
         "complete_min_strike": min(complete_strikes) if complete_strikes else None,
         "complete_max_strike": max(complete_strikes) if complete_strikes else None,
         "radius_points": radius_points,
@@ -122,8 +175,35 @@ def _strike_price_coverage(
         "point_complete_pair_count": point_complete,
         "point_coverage_ratio": point_complete / len(point_targets) if point_targets else 0.0,
         "price_contract": "fresh_two_sided_call_and_put",
+        "nbbo_interpolation": False,
+        "smoothing_scope": "iv_surface_and_structure_only",
         "rows": rows,
     }
+
+
+def _percentile(values: list[float], quantile: float) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    index = (len(ordered) - 1) * quantile
+    low = int(index)
+    high = min(low + 1, len(ordered) - 1)
+    weight = index - low
+    return round(ordered[low] * (1.0 - weight) + ordered[high] * weight, 3)
+
+
+def _wilson_interval(successes: int, total: int, *, z: float = 1.96) -> tuple[float, float]:
+    if total <= 0:
+        return 0.0, 0.0
+    proportion = successes / total
+    denominator = 1.0 + z * z / total
+    center = (proportion + z * z / (2.0 * total)) / denominator
+    margin = (
+        z
+        * ((proportion * (1.0 - proportion) / total + z * z / (4.0 * total * total)) ** 0.5)
+        / denominator
+    )
+    return round(max(0.0, center - margin), 4), round(min(1.0, center + margin), 4)
 
 
 def _observed_option_reference(

@@ -136,7 +136,7 @@ def test_exact_same_day_filter_and_configured_freshness() -> None:
     )
     assert missing is None
     assert blocked.status == "blocked"
-    assert "transport_stale_after_45s" in blocked.reasons[0]
+    assert "transport_stale_after_15s" in blocked.reasons[0]
 
 
 def test_zero_dte_boundary_includes_preceding_gth_and_early_close() -> None:

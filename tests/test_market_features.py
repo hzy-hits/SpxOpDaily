@@ -26,6 +26,7 @@ from spx_spark.application.market_features.models import (
 )
 from spx_spark.application.market_features.options import (
     _fresh_front_quotes,
+    _wall_rank_persistence,
     build_option_structure_frame,
     imbalance,
     provider_mid_divergences,
@@ -42,6 +43,36 @@ from spx_spark.storage import LatestState
 
 
 UTC = timezone.utc
+
+
+def test_wall_rank_persistence_tracks_primary_rank_and_confidence() -> None:
+    history = [
+        {
+            "front_expiry": "20260722",
+            "structure": {
+                "call_walls": [{"strike": strike} for strike in strikes],
+            },
+        }
+        for strikes in (
+            (7600.0, 7610.0),
+            (7610.0, 7600.0),
+            (7610.0, 7620.0),
+            (7600.0, 7620.0),
+        )
+    ]
+
+    result = _wall_rank_persistence(
+        "20260722",
+        [7600.0, 7610.0],
+        history,
+        side="call",
+    )
+
+    assert result["observations"] == 4
+    assert result["top4_presence_ratio"] == 0.75
+    assert result["same_rank_ratio"] == 0.5
+    assert result["mean_rank_score"] == 0.6875
+    assert result["top4_presence_confidence_95"] == [0.3006, 0.9544]
 
 
 def test_missing_live_chain_retains_same_expiry_structure_without_pricing() -> None:

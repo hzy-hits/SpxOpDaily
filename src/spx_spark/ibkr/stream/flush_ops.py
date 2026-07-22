@@ -49,6 +49,17 @@ class FlushOps:
                 "tws_connectivity_lost": self.tws_connectivity_lost,
             }
 
+        for _, row in self.hot_subs.values():
+            row.sampling_mode = "ibkr_stream_core"
+            row.sampling_group = None
+        rotation_group = max(self.rotation_index - 1, 0)
+        for _, row in self.rotation_subs.values():
+            row.sampling_mode = "ibkr_stream_rotation"
+            row.sampling_group = rotation_group
+        for _, row in getattr(self, "pinned_subs", {}).values():
+            row.sampling_mode = "ibkr_stream_pinned"
+            row.sampling_group = None
+
         subscriptions = {
             **self.base_subs,
             **self.hot_subs,
@@ -62,7 +73,7 @@ class FlushOps:
             slow_index_stale_after_seconds=self.ibkr_settings.slow_index_stale_after_seconds,
             slow_index_labels=self.ibkr_settings.slow_index_labels,
             option_stale_after_seconds=getattr(
-                self.stream_settings, "option_stale_after_seconds", 45.0
+                self.stream_settings, "option_stale_after_seconds", 90.0
             ),
         )
         merge_slow_rows(rows, self.slow_cache, set(subscriptions))
