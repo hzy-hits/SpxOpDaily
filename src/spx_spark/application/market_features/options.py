@@ -10,6 +10,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from spx_spark.analytics.options.models import ExpiryOptionsMap, OptionsMap
+from spx_spark.analytics.statistics import percentile, wilson_score_interval
 from spx_spark.application.market_features.exposure_strikes import key_strike_features
 from spx_spark.application.market_features.market import quote_source_at
 from spx_spark.application.market_features.models import (
@@ -306,27 +307,15 @@ def _wall_rank_persistence(
     rank_scores = [
         max(0.0, 1.0 - (rank - 1) / 4.0) if rank is not None else 0.0 for rank in historical_ranks
     ]
-    low, high = _binomial_interval(present, observations)
+    low, high = wilson_score_interval(present, observations)
     return {
         "primary_strike": primary,
         "observations": observations,
         "top4_presence_ratio": round(present / observations, 4),
         "same_rank_ratio": round(same_rank / observations, 4),
         "mean_rank_score": round(sum(rank_scores) / observations, 4),
-        "top4_presence_confidence_95": [low, high],
+        "top4_presence_confidence_95": [round(low, 4), round(high, 4)],
     }
-
-
-def _binomial_interval(successes: int, total: int, *, z: float = 1.96) -> tuple[float, float]:
-    proportion = successes / total
-    denominator = 1.0 + z * z / total
-    center = (proportion + z * z / (2.0 * total)) / denominator
-    margin = (
-        z
-        * ((proportion * (1.0 - proportion) / total + z * z / (4.0 * total * total)) ** 0.5)
-        / denominator
-    )
-    return round(max(0.0, center - margin), 4), round(min(1.0, center + margin), 4)
 
 
 def option_volatility_features(
@@ -496,8 +485,8 @@ def build_l1_microstructure(
         elif quote.instrument.right is OptionRight.PUT:
             put_rises.append(velocity > 0)
     divergences = provider_mid_divergences(candidates, policy=policy)
-    spread_p50 = _percentile(spreads, 0.50)
-    spread_p90 = _percentile(spreads, 0.90)
+    spread_p50 = percentile(spreads, 0.50)
+    spread_p90 = percentile(spreads, 0.90)
     historical_spreads = [
         _number(item.get("l1", {}).get("metrics", {}).get("spread_p50_bps"))
         for item in history
@@ -547,7 +536,7 @@ def build_l1_microstructure(
             "quote_update_ratio": changed / common if common else None,
             "call_mid_rising_ratio": sum(call_rises) / len(call_rises) if call_rises else None,
             "put_mid_rising_ratio": sum(put_rises) / len(put_rises) if put_rises else None,
-            "cross_provider_mid_difference_p50": _percentile(divergences, 0.50),
+            "cross_provider_mid_difference_p50": percentile(divergences, 0.50),
             "cross_provider_mid_difference_max": max(divergences) if divergences else None,
             "two_sided_ratio": two_sided_ratio,
             "coverage_score": round(coverage_score, 1) if selected else None,
@@ -712,18 +701,6 @@ def _empty_l1() -> L1MicrostructureFrame:
 
 def _difference(first: float | None, second: float | None) -> float | None:
     return first - second if first is not None and second is not None else None
-
-
-def _percentile(values: list[float], quantile: float) -> float | None:
-    if not values:
-        return None
-    ordered = sorted(values)
-    index = (len(ordered) - 1) * quantile
-    lower = math.floor(index)
-    upper = math.ceil(index)
-    if lower == upper:
-        return ordered[lower]
-    return ordered[lower] + (ordered[upper] - ordered[lower]) * (index - lower)
 
 
 def _parse_at(value: object) -> datetime | None:

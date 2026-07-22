@@ -115,7 +115,7 @@ def _wall_rank_persistence_line(payload: dict[str, Any]) -> str | None:
             continue
         ratio = item.get("top4_presence_ratio")
         confidence = item.get("top4_presence_confidence_95")
-        ratio_text = f"{float(ratio) * 100:.0f}%" if isinstance(ratio, (int, float)) else "-"
+        ratio_text = f"{float(ratio) * 100:.2f}%" if isinstance(ratio, (int, float)) else "-"
         confidence_text = "-"
         if (
             isinstance(confidence, list)
@@ -123,7 +123,8 @@ def _wall_rank_persistence_line(payload: dict[str, Any]) -> str | None:
             and all(isinstance(value, (int, float)) for value in confidence)
         ):
             confidence_text = (
-                f"{float(confidence[0]) * 100:.0f}–{float(confidence[1]) * 100:.0f}%"
+                f"{float(confidence[0]) * 100:.2f}–"
+                f"{float(confidence[1]) * 100:.2f}%"
             )
         parts.append(
             f"{label}{_dash(item.get('primary_strike'))} "

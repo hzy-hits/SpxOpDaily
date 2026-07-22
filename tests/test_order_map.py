@@ -2494,7 +2494,7 @@ def test_strike_price_coverage_separates_full_pairs_from_oi_strikes() -> None:
     assert coverage["rows"][0]["call"]["quote_age_seconds"] == 30.0
     assert strike_price_coverage_line({"strike_price_coverage": coverage}) == (
         "价格覆盖  核心3对+轮转1对=4/5对　缺C 0/缺P 1　"
-        "age P50/P90 0/21s　95%CI 38–96%　±5点 3/3对　"
+        "age P50/P90 0.00/21.00s　95%CI 37.55–96.38%　±5点 3/3对　"
         "双边区间 7490–7505　NBBO不插值"
     )
 
@@ -3762,8 +3762,8 @@ def test_market_feature_report_uses_consistent_quality_and_volume_source() -> No
     assert "源 ibkr" in lines[1]
     assert "L1流动性 不可用" in lines[2]
     assert lines[3] == (
-        "墙位Rank持续: P7500 Top4 80%(95%CI 55–93%,n=15); "
-        "C7550 Top4 60%(95%CI 36–80%,n=15)"
+        "墙位Rank持续: P7500 Top4 80.00%(95%CI 55.00–93.00%,n=15); "
+        "C7550 Top4 60.00%(95%CI 36.00–80.00%,n=15)"
     )
 
 

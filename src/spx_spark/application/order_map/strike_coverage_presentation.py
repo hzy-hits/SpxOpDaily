@@ -13,6 +13,10 @@ def _dash(value: Any) -> str:
     return str(value)
 
 
+def _two_decimals(value: Any) -> str:
+    return f"{float(value):.2f}" if isinstance(value, (int, float)) else "-"
+
+
 def strike_price_coverage_line(payload: dict[str, Any]) -> str | None:
     value = payload.get("strike_price_coverage")
     if not isinstance(value, dict):
@@ -38,13 +42,13 @@ def strike_price_coverage_line(payload: dict[str, Any]) -> str | None:
     missing_call = value.get("missing_call_count")
     missing_put = value.get("missing_put_count")
     if all(isinstance(item, int) for item in (core, rotation, missing_call, missing_put)):
-        age_p50 = _dash(value.get("pair_quote_age_p50_seconds"))
-        age_p90 = _dash(value.get("pair_quote_age_p90_seconds"))
+        age_p50 = _two_decimals(value.get("pair_quote_age_p50_seconds"))
+        age_p90 = _two_decimals(value.get("pair_quote_age_p90_seconds"))
         confidence_low = value.get("coverage_confidence_95_low")
         confidence_high = value.get("coverage_confidence_95_high")
         confidence = "-"
         if isinstance(confidence_low, (int, float)) and isinstance(confidence_high, (int, float)):
-            confidence = f"{confidence_low * 100:.0f}–{confidence_high * 100:.0f}%"
+            confidence = f"{confidence_low * 100:.2f}–{confidence_high * 100:.2f}%"
         return (
             f"价格覆盖  核心{core}对+轮转{rotation}对={complete}/{target}对　"
             f"缺C {missing_call}/缺P {missing_put}　age P50/P90 {age_p50}/{age_p90}s　"

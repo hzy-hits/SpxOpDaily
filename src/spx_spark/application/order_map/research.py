@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from spx_spark.analytics.options.pricing import finite_float
+from spx_spark.analytics.statistics import percentile, wilson_score_interval
 from spx_spark.application.order_map.candidates import (
     _find_option_quote,
     _front_expiry_quotes,
@@ -149,7 +150,9 @@ def _strike_price_coverage(
     }
     point_complete = sum(strike in point_targets for strike in complete_strikes)
     target_count = len(target_strikes)
-    confidence_low, confidence_high = _wilson_interval(len(complete_strikes), target_count)
+    confidence_low, confidence_high = wilson_score_interval(
+        len(complete_strikes), target_count
+    )
     return {
         "expiry": expiry,
         "reference_price": reference_price,
@@ -163,10 +166,14 @@ def _strike_price_coverage(
         "missing_call_count": missing_calls,
         "missing_put_count": missing_puts,
         "coverage_ratio": len(complete_strikes) / target_count if target_count else 0.0,
-        "coverage_confidence_95_low": confidence_low,
-        "coverage_confidence_95_high": confidence_high,
-        "pair_quote_age_p50_seconds": _percentile(pair_ages, 0.50),
-        "pair_quote_age_p90_seconds": _percentile(pair_ages, 0.90),
+        "coverage_confidence_95_low": round(confidence_low, 4),
+        "coverage_confidence_95_high": round(confidence_high, 4),
+        "pair_quote_age_p50_seconds": round(percentile(pair_ages, 0.50), 3)
+        if pair_ages
+        else None,
+        "pair_quote_age_p90_seconds": round(percentile(pair_ages, 0.90), 3)
+        if pair_ages
+        else None,
         "pair_quote_age_max_seconds": max(pair_ages) if pair_ages else None,
         "complete_min_strike": min(complete_strikes) if complete_strikes else None,
         "complete_max_strike": max(complete_strikes) if complete_strikes else None,
@@ -179,31 +186,6 @@ def _strike_price_coverage(
         "smoothing_scope": "iv_surface_and_structure_only",
         "rows": rows,
     }
-
-
-def _percentile(values: list[float], quantile: float) -> float | None:
-    if not values:
-        return None
-    ordered = sorted(values)
-    index = (len(ordered) - 1) * quantile
-    low = int(index)
-    high = min(low + 1, len(ordered) - 1)
-    weight = index - low
-    return round(ordered[low] * (1.0 - weight) + ordered[high] * weight, 3)
-
-
-def _wilson_interval(successes: int, total: int, *, z: float = 1.96) -> tuple[float, float]:
-    if total <= 0:
-        return 0.0, 0.0
-    proportion = successes / total
-    denominator = 1.0 + z * z / total
-    center = (proportion + z * z / (2.0 * total)) / denominator
-    margin = (
-        z
-        * ((proportion * (1.0 - proportion) / total + z * z / (4.0 * total * total)) ** 0.5)
-        / denominator
-    )
-    return round(max(0.0, center - margin), 4), round(min(1.0, center + margin), 4)
 
 
 def _observed_option_reference(
