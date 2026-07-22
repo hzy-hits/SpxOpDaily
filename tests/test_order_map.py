@@ -3731,7 +3731,22 @@ def test_market_feature_report_uses_consistent_quality_and_volume_source() -> No
             },
         },
         "option_structure_frame": {
-            "structure": {},
+            "structure": {
+                "wall_rank_persistence": {
+                    "put": {
+                        "primary_strike": 7500.0,
+                        "observations": 15,
+                        "top4_presence_ratio": 0.8,
+                        "top4_presence_confidence_95": [0.55, 0.93],
+                    },
+                    "call": {
+                        "primary_strike": 7550.0,
+                        "observations": 15,
+                        "top4_presence_ratio": 0.6,
+                        "top4_presence_confidence_95": [0.36, 0.8],
+                    },
+                }
+            },
             "volatility": {},
             "l1": {
                 "quality": "unavailable",
@@ -3746,6 +3761,10 @@ def test_market_feature_report_uses_consistent_quality_and_volume_source() -> No
     assert "窗口不足" in lines[1]
     assert "源 ibkr" in lines[1]
     assert "L1流动性 不可用" in lines[2]
+    assert lines[3] == (
+        "墙位Rank持续: P7500 Top4 80%(95%CI 55–93%,n=15); "
+        "C7550 Top4 60%(95%CI 36–80%,n=15)"
+    )
 
 
 def test_compact_option_line_identifies_selected_quote_provider() -> None:
