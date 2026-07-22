@@ -56,6 +56,7 @@ def test_schwab_instrument_table_owns_index_and_trading_class_aliases() -> None:
     assert by_symbol["SPY"]["chain_interval_seconds"] == 15
     assert "option_chain_strike_count" not in by_symbol["SPY"]
     assert runtime_value("ibkr_stream.max_option_lines") == 84
+    assert runtime_value("market_features.hot_option_limit") == 84
     assert runtime_value("sampling.hot_window_points") == 55
     assert runtime_value("schwab.collection.request_budget_warning_per_minute") == 84
     assert runtime_value("schwab.quote_symbol_capacity") == 500

@@ -15,7 +15,7 @@ class MarketFeatureSettings:
     retention_hours: int = 18
     option_history_minutes: int = 180
     volume_baseline_sessions: int = 20
-    hot_option_limit: int = 64
+    hot_option_limit: int = 84
     provider_sync_tolerance_seconds: float = 5.0
     asia_end_et: str = "03:00"
     europe_end_et: str = "08:00"

@@ -64,7 +64,7 @@ market_features:
   retention_hours: {value: 18, description: Market sample retention.}
   option_history_minutes: {value: 180, description: Option aggregate history.}
   volume_baseline_sessions: {value: 20, description: Same-clock volume baseline sessions.}
-  hot_option_limit: {value: 64, description: Hot option contract limit.}
+  hot_option_limit: {value: 84, description: Hot option contract limit.}
   provider_sync_tolerance_seconds: {value: 5.0, description: Cross-provider synchronization tolerance.}
   asia_end_et: {value: "03:00", description: Asia segment end.}
   europe_end_et: {value: "08:00", description: Europe segment end.}

@@ -64,7 +64,7 @@ market_features:
   retention_hours: {value: 18, description: Intraday market-sample retention.}
   option_history_minutes: {value: 180, description: Aggregate option-feature history used for impulses and percentiles.}
   volume_baseline_sessions: {value: 20, description: Required same-clock sessions before publishing a volume-pace percentile.}
-  hot_option_limit: {value: 64, description: Maximum near-ATM option contracts in the L1 microstructure frame.}
+  hot_option_limit: {value: 84, description: Maximum near-ATM option contracts in the L1 microstructure frame; matches the safe IBKR fallback option budget while preserving base, exact-leg, and reserve lines.}
   provider_sync_tolerance_seconds: {value: 5.0, description: Maximum Schwab-versus-IBKR source-time skew for price-divergence metrics.}
   asia_end_et: {value: "03:00", description: End of the configured Asia segment in America/New_York time.}
   europe_end_et: {value: "08:00", description: End of the configured Europe segment in America/New_York time.}
