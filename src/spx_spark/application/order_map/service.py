@@ -102,16 +102,10 @@ from spx_spark.settings.order_map import DEFAULT_ORDER_MAP_POLICY, OrderMapPolic
 
 
 STATUS_KEY_WINDOW_PHASES = frozenset(
-    {
-        "europe_session",
-        "us_data_hour",
-        "us_open_hour",
-        "us_midday_confirmation",
-    }
+    ("europe_session", "us_data_hour", "us_open_hour", "us_midday_confirmation")
 )
 GTH_STATUS_PHASES = frozenset({"asia_globex", "europe_session", "us_data_hour"})
 GTH_STATUS_CADENCE_SECONDS = 15.0 * 60.0
-
 
 def build_order_payload(
     state: LatestState,
@@ -122,18 +116,14 @@ def build_order_payload(
     now = now or state.as_of
     options_map = build_options_map(state)
     warnings = list(options_map.warnings)
-
     front = options_map.expiries[0] if options_map.expiries else None
-    expiry = (
-        front.expiry
-        if front is not None
-        else DEFAULT_MARKET_CALENDAR.research_expiry(now).strftime("%Y%m%d")
-    )
+    expiry = front.expiry if front is not None else DEFAULT_MARKET_CALENDAR.research_expiry(
+        now
+    ).strftime("%Y%m%d")
     expected_move_points = front.expected_move_points if front is not None else None
     gamma_state = front.gamma_state if front is not None else "unknown"
     zero_gamma = front.zero_gamma if front is not None else None
     flip_zone = list(front.gamma_flip_zone) if front is not None and front.gamma_flip_zone else None
-
     if options_map.underlier.price is None:
         warnings.append("missing underlier reference")
     if not options_map.expiries:

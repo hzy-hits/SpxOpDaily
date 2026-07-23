@@ -17,7 +17,11 @@ from pathlib import Path
 from typing import Iterator, Mapping, NamedTuple, Sequence
 from zoneinfo import ZoneInfo
 
-from spx_spark.strategy_contract import parse_aware_time, strategy_contract_issues
+from spx_spark.strategy_contract import (
+    parse_aware_time,
+    pricing_outcome_semantic_key,
+    strategy_contract_issues,
+)
 
 logger = logging.getLogger(__name__)
 SET_CONFIRMED = "confirmed"
@@ -536,15 +540,15 @@ def load_prefill_signals(features_root: Path) -> list[Signal]:
 
     Recorded ``prefill_ask`` values precede the production follow-through gate
     and are never treated as fills. Entry is repriced from the quote lake after
-    the hold interval in :func:`evaluate_signal`. Repeated snapshots of one
-    production semantic key are collapsed to its earliest valid first touch;
+    the hold interval in :func:`evaluate_signal`. Regenerated event IDs for
+    one economic touch are collapsed by first-touch time, contract and play;
     this proxy is never counted as the production strategy cohort.
     """
     by_semantic_key: dict[str, Signal] = {}
     for path in sorted(features_root.glob("pricing_outcomes/date=*/outcomes.jsonl")):
         for record in _iter_jsonl(path):
             signal = _prefill_signal(record)
-            semantic_key = str(record.get("key") or "")
+            semantic_key = pricing_outcome_semantic_key(record) or str(record.get("key") or "")
             if signal is None or not semantic_key:
                 continue
             previous = by_semantic_key.get(semantic_key)

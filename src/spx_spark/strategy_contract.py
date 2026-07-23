@@ -27,6 +27,16 @@ _COORDINATE_INSTRUMENTS = {
 }
 
 
+def pricing_outcome_semantic_key(record: Mapping[str, object]) -> str | None:
+    """Identify one economic touch across regenerated level event IDs."""
+
+    parts = tuple(
+        str(record.get(field) or "").strip()
+        for field in ("first_touch_at", "contract_id", "play")
+    )
+    return "\x1f".join(parts) if all(parts) else None
+
+
 def policy_version(namespace: str, policy: object) -> str:
     """Return a stable, non-secret version for one effective policy payload."""
 

@@ -94,6 +94,8 @@ def evaluate_trade_intent(
         return base
 
     reasons: list[str] = []
+    if not DEFAULT_MARKET_CALENDAR.is_rth_open(now):
+        reasons.append("rth_session_required")
     if level.get("formal_signal_enabled") is not True:
         reasons.append("formal_signal_disabled")
     if level.get("formal_signal") is not True:
@@ -117,6 +119,8 @@ def evaluate_trade_intent(
         reasons.append("confirmed_at_unavailable")
         confirmation_age = None
     else:
+        if not DEFAULT_MARKET_CALENDAR.is_rth_open(confirmed_at):
+            reasons.append("rth_confirmation_required")
         confirmation_age = max((now - confirmed_at).total_seconds(), 0.0)
         if confirmation_age < feature_policy.trade_follow_through_seconds:
             reasons.append("follow_through_hold_pending")

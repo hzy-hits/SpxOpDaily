@@ -13,10 +13,11 @@ from typing import Iterable, Mapping
 
 from spx_spark.settings.market_features import MarketFeatureSettings
 from spx_spark.state_io import atomic_write_json_secure, read_json_object
+from spx_spark.strategy_contract import pricing_outcome_semantic_key
 
 
 LOGGER = logging.getLogger(__name__)
-CACHE_SCHEMA_VERSION = 1
+CACHE_SCHEMA_VERSION = 2
 CACHE_FILENAME = "play_outcome_stats_cache.json"
 
 
@@ -46,6 +47,7 @@ def load_play_outcome_stats(
     horizon_key = str(horizon)
     earliest = now - timedelta(days=window_days)
     returns: dict[tuple[str, str], list[float]] = {}
+    seen_semantic_keys: set[str] = set()
     for row in _outcome_rows(
         features_root,
         earliest=earliest.date(),
@@ -63,6 +65,11 @@ def load_play_outcome_stats(
         level_kind = str(row.get("level_kind") or "")
         if not play or not level_kind:
             continue
+        semantic_key = pricing_outcome_semantic_key(row) or str(row.get("key") or "").strip()
+        if semantic_key and semantic_key in seen_semantic_keys:
+            continue
+        if semantic_key:
+            seen_semantic_keys.add(semantic_key)
         returns.setdefault((play, level_kind), []).append(value)
     as_of = now.isoformat()
     return {

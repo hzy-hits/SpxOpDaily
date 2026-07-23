@@ -379,20 +379,6 @@ def _compact_option_line(payload: dict[str, Any]) -> str | None:
     return "波动  " + "　".join(parts)
 
 
-def _compact_guidance_lines(payload: dict[str, Any]) -> list[str]:
-    guidance = guidance_module.build_decision_guidance(payload)
-    scores = ""
-    if guidance.trend_score is not None and guidance.mean_reversion_score is not None:
-        scores = f"（趋势 {guidance.trend_score:g} / 回归 {guidance.mean_reversion_score:g}）"
-    gate = "可执行" if guidance.action.value == "trade_ready" else "未通过执行门控"
-    return [
-        f"判断  {guidance.bias}{scores}　{gate}",
-        f"动作  {guidance.action_text}",
-        f"确认  {guidance.trigger_text}",
-        f"证伪  {guidance.invalidation_text}",
-    ]
-
-
 def _ratio(numerator: Any, denominator: Any) -> str:
     top = finite_float(numerator)
     bottom = finite_float(denominator)
@@ -540,7 +526,7 @@ def render_status_template(
         candidate_section = []
     lines = [
         f"【SPX 15m · {beijing.strftime('%H:%M')} · 0DTE {expiry_text} · {phase.get('name_cn')}】",
-        *_compact_guidance_lines(payload),
+        *guidance_module.compact_guidance_lines(payload),
         "",
         *([line] if (line := _compact_clock_line(phase)) else []),
         _compact_price_line(payload),

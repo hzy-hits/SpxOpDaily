@@ -88,7 +88,7 @@ market_features:
   trade_invalidation_buffer_points: {value: 3.0, description: SPX reclaim distance beyond the trigger level that invalidates a trade intent.}
   trade_target_em_fraction: {value: 0.15, description: Expected-move fraction used for a fallback SPX target when no outward structure exists.}
   trade_min_target_room_points: {value: 3.0, description: Minimum remaining SPX points from the evaluated spot to the deterministic target.}
-  trade_min_reward_risk: {value: 0.25, description: Minimum remaining target distance divided by distance to the SPX invalidation level.}
+  trade_min_reward_risk: {value: 1.0, description: Minimum remaining target distance divided by distance to the SPX invalidation level; 1.0 requires at least even gross reward/risk before costs.}
   trade_time_stop_minutes: {value: 15, description: Default maximum holding time for an unextended 0DTE trade intent.}
   session_episode_enabled: {value: true, description: Maintains one session-level structural path above individual wall and flip events.}
   session_break_buffer_points: {value: 2.0, description: SPX distance beyond a frozen structural level required to record a session break or reclaim.}
@@ -108,8 +108,8 @@ market_features:
   virtual_wall_touch_points: {value: 5.0, description: SPX distance from the promoted Call Wall treated as a profit-taking touch.}
   virtual_gth_time_stop_minutes: {value: 810, description: Backstop maximum lifetime from the 20:15 ET GTH open through the shared 09:45 ET exit clock.}
   virtual_gth_spread_saturation_fraction: {value: 0.85, description: Fraction of the listed debit-spread width treated as value saturation for the GTH two-leg virtual take-profit.}
-  play_stats_enabled: {value: true, description: Enriches trade-ready alerts with rolling historical win-rate stats from the system's own pricing-outcome labels; fails open when the outcome store is unavailable.}
-  play_stats_window_days: {value: 20, description: Rolling lookback window in days over completed pricing outcomes feeding the same-signal win-rate block.}
+  play_stats_enabled: {value: true, description: Enriches trade-ready alerts with semantically deduplicated rolling outcome stats; the execution gate remains independent and fails open when the outcome store is unavailable.}
+  play_stats_window_days: {value: 20, description: Rolling lookback window in days over completed pricing outcomes feeding the same-signal statistics block.}
   play_stats_horizon: {value: "300", description: Outcome horizon key in seconds whose return_fraction defines a win (return_fraction > 0).}
   play_stats_min_samples: {value: 10, description: Minimum matched outcomes before play stats are attached; below this the alert omits the block entirely.}
   play_stats_refresh_seconds: {value: 900.0, description: Minimum seconds between reloads of the pricing-outcomes store by the realtime play-stats provider.}

@@ -94,13 +94,24 @@ def _slices(rows: Sequence[Trade], key_fn) -> dict[str, dict]:
     return {key: _slice_stats(grouped[key]) for key in sorted(grouped)}
 
 
+def _trade_session_date(row: Trade) -> date:
+    """Resolve the economic session, preferring the SPXW contract expiry."""
+    parts = row.contract_id.split(":")
+    if len(parts) >= 4 and parts[:3] == ["option", "SPX", "SPXW"]:
+        try:
+            return datetime.strptime(parts[3], "%Y%m%d").date()
+        except ValueError:
+            pass
+    return datetime.fromisoformat(row.entry_time).date()
+
+
 def aggregate(
     trades: Sequence[Trade],
     skips: Sequence[Skip],
     signal_counts: dict[str, int],
     profiles: Sequence[Profile] = PROFILES,
 ) -> dict:
-    """Per profile x set x variant aggregates with thesis/level/regime/hour slices."""
+    """Per profile x set x variant aggregates with signal and session slices."""
     by_profile: dict[str, dict] = {}
     for profile in profiles:
         profile_rows = [row for row in trades if row.profile == profile.name]
@@ -130,6 +141,8 @@ def aggregate(
                     "by_hour_bucket": _slices(
                         rows, lambda row: hour_bucket(datetime.fromisoformat(row.entry_time))
                     ),
+                    "by_session_date": _slices(rows, _trade_session_date),
+                    "by_weekday": _slices(rows, lambda row: _trade_session_date(row).strftime("%A")),
                 }
                 if set_name == SET_PREFILL:
                     bucket["ft_gate"] = {
@@ -225,7 +238,7 @@ def build_artifact(
             }
         )
     return {
-        "schema_version": 5,
+        "schema_version": 6,
         "generated_at": generated_at.isoformat(),
         "features_root": str(features_root),
         "data_root": str(data_root),
@@ -321,6 +334,7 @@ def build_artifact(
         "limitations": [
             "small_sample",
             "fills_assume_full_size_at_top_of_book",
+            "commissions_slippage_queue_partial_fills_and_market_impact_not_modeled",
             "gth_underlier_uses_es_minus_fixed_basis",
             "readiness_health_complete_sessions_only",
             "legacy_gth_without_recorded_spread_has_no_spread_wall_trade",

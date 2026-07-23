@@ -1,0 +1,1163 @@
+{
+  "surface": "report",
+  "manifest": {
+    "version": 1,
+    "surface": "report",
+    "title": "SPX 0DTE 信号与风险复盘：截至 2026-07-22",
+    "description": "固定截止日的生产 trade-ready 回放、周一至周三信号归因、历史统计去重审计与风险参数修复记录。",
+    "generatedAt": "2026-07-23T12:00:00+00:00",
+    "sources": [
+      {
+        "id": "final_backtest",
+        "label": "0DTE point-in-time replay through 2026-07-22",
+        "path": "data/reports/odte_level_backtest/diagnostic=2026-07-23-final/cutoff=2026-07-22/artifact.json",
+        "query": {
+          "engine": "spx-spark odte_level_backtest",
+          "id": "signal-risk-review-final-cutoff-20260722",
+          "sql": "SELECT * FROM read_json_auto('data/reports/odte_level_backtest/diagnostic=2026-07-23-final/cutoff=2026-07-22/artifact.json')",
+          "description": "Fixed-cutoff production-intent replay and separately labelled control/proxy cohorts.",
+          "executed_at": "2026-07-23T11:24:32.782469+00:00",
+          "language": "sql",
+          "filters": [
+            "exclusive cutoff 2026-07-23T00:00:00Z",
+            "only readiness-health-complete sessions enter executable replay",
+            "production total is trade_ready × baseline × naked only",
+            "confirmed, prefill and gth_dip remain control/proxy cohorts"
+          ],
+          "metric_definitions": [
+            "Strict fill is the first recorded-provider ask at or below the persisted entry limit before the exclusive expires_at.",
+            "Backtest PnL is one-contract replay PnL and is not the user's broker-account PnL.",
+            "Commissions, explicit slippage, queue position, partial fills, market impact and manual alert latency are not modeled."
+          ],
+          "tables_used": [
+            "features/trade_intents",
+            "features/level_decision_health",
+            "features/pricing_outcomes",
+            "lake/quotes/schema=v1"
+          ]
+        }
+      },
+      {
+        "id": "recent_outcomes",
+        "label": "Confirmed level outcomes for 2026-07-20 through 2026-07-22",
+        "path": "data/features/level_decision_outcomes/date=*/outcomes.jsonl",
+        "query": {
+          "engine": "DuckDB JSONL review",
+          "id": "recent-confirmed-directional-300s-20260720-22",
+          "sql": "SELECT confirmed_at, event_id, direction, thesis, level_kind, level, return_bps, CASE WHEN direction = 'up' THEN return_bps ELSE -return_bps END AS directional_return_bps FROM read_json_auto('data/features/level_decision_outcomes/date=*/outcomes.jsonl') WHERE horizon_seconds = 300 AND CAST(confirmed_at AS TIMESTAMP) >= TIMESTAMP '2026-07-20 00:00:00' AND CAST(confirmed_at AS TIMESTAMP) < TIMESTAMP '2026-07-23 00:00:00' ORDER BY confirmed_at",
+          "description": "Unique formal confirmations at the 300-second horizon, signed so positive means the predicted direction was correct.",
+          "executed_at": "2026-07-23T12:00:00+00:00",
+          "language": "sql",
+          "filters": [
+            "horizon_seconds=300",
+            "confirmed_at before 2026-07-23T00:00:00Z",
+            "no interpolation",
+            "America/New_York timestamps used for RTH classification"
+          ],
+          "metric_definitions": [
+            "Directional return bps equals raw SPX return bps for up signals and its negative for down signals.",
+            "Direction correct means directional return bps is strictly greater than zero.",
+            "RTH is 09:30 inclusive through 16:00 exclusive America/New_York on a trading day."
+          ],
+          "tables_used": [
+            "features/level_decision_outcomes"
+          ]
+        }
+      },
+      {
+        "id": "play_stats_audit",
+        "label": "Raw versus semantic pricing-outcome statistics at the 2026-07-22 intent",
+        "path": "data/features/pricing_outcomes/date=*/outcomes.jsonl",
+        "query": {
+          "engine": "production-equivalent Python audit",
+          "id": "breakout-call-flip-high-stats-at-20260722T092205Z",
+          "sql": "WITH eligible AS (SELECT *, horizons.\"300\".return_fraction AS return_fraction FROM read_json_auto('data/features/pricing_outcomes/date=*/outcomes.jsonl') WHERE touched = TRUE AND completed_at BETWEEN TIMESTAMP '2026-07-02 09:22:05.290029' AND TIMESTAMP '2026-07-22 09:22:05.290029' AND horizons.\"300\".return_fraction IS NOT NULL), ranked AS (SELECT *, ROW_NUMBER() OVER (PARTITION BY first_touch_at, contract_id, play ORDER BY completed_at, event_id, level_kind) AS semantic_rank FROM eligible), compared AS (SELECT 'raw_event_rows' AS method, return_fraction FROM eligible WHERE play = 'level_breakout_call' AND level_kind = 'flip_high' UNION ALL SELECT 'semantic_first_touch', return_fraction FROM ranked WHERE semantic_rank = 1 AND play = 'level_breakout_call' AND level_kind = 'flip_high') SELECT method, COUNT(*) AS sample_count, SUM(CASE WHEN return_fraction > 0 THEN 1 ELSE 0 END) AS wins, AVG(return_fraction) AS avg_return FROM compared GROUP BY method ORDER BY method",
+          "description": "Compares legacy event-row counting with semantic first-touch/contract/play deduplication before grouping.",
+          "executed_at": "2026-07-23T12:00:00+00:00",
+          "language": "sql",
+          "filters": [
+            "as-of 2026-07-22T09:22:05.290029Z",
+            "rolling 20 days",
+            "touched outcomes only",
+            "300-second option-mid return",
+            "semantic identity = first_touch_at + contract_id + play",
+            "deduplication occurs globally before play/level_kind grouping"
+          ],
+          "metric_definitions": [
+            "Win rate is positive 300-second option-mid return divided by retained sample count.",
+            "Confidence interval is a two-sided 95 percent Wilson interval for a binomial proportion.",
+            "Average return is the arithmetic mean of 300-second option-mid return fractions."
+          ],
+          "tables_used": [
+            "features/pricing_outcomes",
+            "src/spx_spark/strategy_contract.py"
+          ]
+        }
+      },
+      {
+        "id": "implementation_review",
+        "label": "Implemented risk-boundary and observability changes",
+        "path": "src/spx_spark/application/market_features/trade_intent.py",
+        "query": {
+          "engine": "repository diff and focused tests",
+          "id": "risk-boundary-fixes-20260723",
+          "sql": "SELECT * FROM parameter_decisions ORDER BY priority",
+          "description": "Reviewed code/config changes made in response to the fixed-cutoff evidence.",
+          "executed_at": "2026-07-23T12:00:00+00:00",
+          "language": "sql",
+          "filters": [
+            "no automatic ordering enabled",
+            "no weekday-specific parameter tuning",
+            "no loosening of quote freshness",
+            "forward-only health schema; historical observations are not fabricated"
+          ],
+          "metric_definitions": [
+            "A 1.00 reward/risk floor implies a 50 percent pre-cost break-even win rate when reward and risk estimates are accurate.",
+            "The previous 0.25 floor implied an 80 percent pre-cost break-even win rate.",
+            "Schema v2 health snapshots support future audit-equivalent walk-forward reconstruction; they do not repair 2026-07-14 through 2026-07-22."
+          ],
+          "tables_used": [
+            "config/runtime.yaml",
+            "src/spx_spark/application/market_features/trade_intent.py",
+            "src/spx_spark/application/market_features/play_outcome_stats.py",
+            "src/spx_spark/application/order_map/prompts.py",
+            "src/spx_spark/application/order_map/level_decision_shadow.py"
+          ]
+        }
+      },
+      {
+        "id": "broker_reconciliation",
+        "label": "Redacted broker-statement coverage inventory",
+        "query": {
+          "engine": "local file inventory",
+          "id": "broker-statement-coverage-20260723",
+          "sql": "SELECT DATE '2026-07-16' AS latest_statement_end, DATE '2026-07-20' AS required_start, DATE '2026-07-22' AS required_end",
+          "description": "The latest available broker Activity/Flex statement ends before the reported loss window; account identifiers are intentionally omitted.",
+          "executed_at": "2026-07-23T12:00:00+00:00",
+          "language": "sql",
+          "filters": [
+            "account identifier redacted",
+            "no statement or fill ledger covering 2026-07-20 through 2026-07-22 was available"
+          ],
+          "metric_definitions": [
+            "Loss reconciled means every broker fill, fee, size and realized PnL in the reported loss window is joined to a system signal or classified as discretionary/unmatched."
+          ],
+          "tables_used": [
+            "redacted broker Activity/Flex statement inventory"
+          ]
+        }
+      },
+      {
+        "id": "companion_notebook",
+        "label": "Executable companion analysis",
+        "path": "spx-0dte-signal-risk-review-2026-07-23.ipynb",
+        "query": {
+          "engine": "Python notebook",
+          "id": "signal-risk-review-notebook-20260723",
+          "sql": "SELECT 'executed top-to-bottom' AS validation_status",
+          "description": "Reproduces recent directional outcomes, weekday slices, trade-ready replay rows and semantic-statistics correction.",
+          "executed_at": "2026-07-23T12:00:00+00:00",
+          "language": "sql"
+        }
+      }
+    ],
+    "cards": [
+      {
+        "id": "actual_loss_reconciled",
+        "description": "The reported approximately $12,000 loss cannot yet be tied to broker fills because the required statement window is missing.",
+        "dataset": "headline",
+        "sourceId": "broker_reconciliation",
+        "metrics": [
+          {
+            "label": "实际亏损已对账",
+            "field": "actual_loss_reconciled",
+            "format": "percent"
+          }
+        ]
+      },
+      {
+        "id": "recent_confirmations",
+        "description": "Formal 300-second confirmations from Monday through Wednesday in the recent review window.",
+        "dataset": "headline",
+        "sourceId": "recent_outcomes",
+        "metrics": [
+          {
+            "label": "近三日确认",
+            "field": "recent_confirmations",
+            "format": "number"
+          },
+          {
+            "label": "方向正确",
+            "field": "recent_directional_hit_rate",
+            "format": "percent"
+          }
+        ]
+      },
+      {
+        "id": "rth_confirmations",
+        "description": "Recent formal confirmations that occurred inside regular trading hours.",
+        "dataset": "headline",
+        "sourceId": "recent_outcomes",
+        "metrics": [
+          {
+            "label": "近三日 RTH 确认",
+            "field": "recent_rth_confirmations",
+            "format": "number"
+          },
+          {
+            "label": "非 RTH 确认",
+            "field": "recent_non_rth_confirmations",
+            "format": "number"
+          }
+        ]
+      },
+      {
+        "id": "strict_trade_ready",
+        "description": "All unique persisted production entry decisions in the seven-session backtest.",
+        "dataset": "headline",
+        "sourceId": "final_backtest",
+        "metrics": [
+          {
+            "label": "生产决策",
+            "field": "strict_trade_ready_decisions",
+            "format": "number"
+          },
+          {
+            "label": "严格成交",
+            "field": "strict_fills",
+            "format": "number"
+          }
+        ]
+      },
+      {
+        "id": "forward_readiness",
+        "description": "Contract-consistent sessions toward the frozen 20-session review gate.",
+        "dataset": "headline",
+        "sourceId": "final_backtest",
+        "metrics": [
+          {
+            "label": "Forward v3 会话",
+            "field": "contract_consistent_sessions",
+            "format": "number"
+          },
+          {
+            "label": "人工复审门槛",
+            "field": "readiness_target",
+            "format": "number"
+          }
+        ]
+      }
+    ],
+    "charts": [
+      {
+        "id": "recent_directional_chart",
+        "title": "近三日正式确认的 300 秒方向收益",
+        "subtitle": "周二两次方向正确；周三仅 1/5 正确且均发生在 RTH 之外",
+        "intent": "comparison",
+        "question": "Monday through Wednesday formal confirmations moved in the predicted direction after 300 seconds?",
+        "rationale": "Event-level bars preserve the very small sample and expose winner/loss concentration without hiding it behind an aggregate.",
+        "type": "bar",
+        "dataset": "recent_events",
+        "sourceId": "recent_outcomes",
+        "encodings": {
+          "x": {
+            "field": "event_label",
+            "type": "nominal",
+            "label": "确认事件"
+          },
+          "y": {
+            "field": "directional_return_bps",
+            "type": "quantitative",
+            "format": "number",
+            "label": "方向收益 (bps)"
+          },
+          "color": {
+            "field": "weekday_cn",
+            "type": "nominal",
+            "label": "星期"
+          },
+          "tooltip": [
+            {
+              "field": "confirmed_et",
+              "type": "nominal",
+              "label": "确认时间 ET"
+            },
+            {
+              "field": "direction",
+              "type": "nominal",
+              "label": "方向"
+            },
+            {
+              "field": "play",
+              "type": "nominal",
+              "label": "Play"
+            },
+            {
+              "field": "level_kind",
+              "type": "nominal",
+              "label": "Level"
+            },
+            {
+              "field": "directional_return_bps",
+              "type": "quantitative",
+              "format": "number",
+              "label": "300s 方向收益"
+            },
+            {
+              "field": "session",
+              "type": "nominal",
+              "label": "Session"
+            }
+          ]
+        },
+        "valueFormat": "number",
+        "layout": "full",
+        "labels": {
+          "values": "all"
+        },
+        "maxRows": 7,
+        "settings": {
+          "categoryLabelPolicy": "wrap",
+          "groupMode": "single",
+          "showValues": true,
+          "sort": "none"
+        },
+        "surface": {
+          "surface": "export",
+          "interactiveLegend": false,
+          "showControls": false,
+          "viewMode": "visualization"
+        }
+      },
+      {
+        "id": "play_stats_chart",
+        "title": "Jul 22 intent 所见历史胜率：原始行与语义样本",
+        "subtitle": "去重后 95% Wilson 区间仍为 29.89%–58.96%，不足以证明正向 edge",
+        "intent": "comparison",
+        "question": "How much did regenerated event rows distort the historical win-rate shown to the bad July 22 intent?",
+        "rationale": "Two bars show the material change from event-row inflation while the supporting table retains count, return and uncertainty.",
+        "type": "bar",
+        "dataset": "play_stats_compare",
+        "sourceId": "play_stats_audit",
+        "encodings": {
+          "x": {
+            "field": "method_cn",
+            "type": "nominal",
+            "label": "统计口径"
+          },
+          "y": {
+            "field": "winrate",
+            "type": "quantitative",
+            "format": "percent",
+            "label": "300s 胜率"
+          },
+          "tooltip": [
+            {
+              "field": "sample_count",
+              "type": "quantitative",
+              "format": "number",
+              "label": "样本数"
+            },
+            {
+              "field": "avg_return",
+              "type": "quantitative",
+              "format": "percent",
+              "label": "平均收益"
+            },
+            {
+              "field": "ci_low",
+              "type": "quantitative",
+              "format": "percent",
+              "label": "95% CI low"
+            },
+            {
+              "field": "ci_high",
+              "type": "quantitative",
+              "format": "percent",
+              "label": "95% CI high"
+            }
+          ]
+        },
+        "valueFormat": "percent",
+        "layout": "full",
+        "labels": {
+          "values": "all"
+        },
+        "maxRows": 2,
+        "settings": {
+          "categoryLabelPolicy": "wrap",
+          "groupMode": "single",
+          "showValues": true,
+          "sort": "none"
+        },
+        "surface": {
+          "surface": "export",
+          "interactiveLegend": false,
+          "showControls": false,
+          "viewMode": "visualization"
+        }
+      }
+    ],
+    "tables": [
+      {
+        "id": "weekday_table",
+        "title": "周一至周三：两种不同证据口径",
+        "subtitle": "Formal 300s outcomes describe signal direction; control/proxy replay PnL is not production PnL.",
+        "dataset": "weekday_summary",
+        "sourceId": "recent_outcomes",
+        "defaultSort": {
+          "field": "weekday_order",
+          "direction": "asc"
+        },
+        "density": "spacious",
+        "layout": "full",
+        "columns": [
+          {
+            "field": "weekday_order",
+            "label": "#",
+            "format": "number"
+          },
+          {
+            "field": "weekday_cn",
+            "label": "星期",
+            "type": "text"
+          },
+          {
+            "field": "recent_confirmations",
+            "label": "近三日确认",
+            "format": "number"
+          },
+          {
+            "field": "recent_directional_mean_bps_display",
+            "label": "300s 方向均值",
+            "type": "text"
+          },
+          {
+            "field": "recent_direction_correct_display",
+            "label": "方向正确",
+            "type": "text"
+          },
+          {
+            "field": "confirmed_proxy_fills",
+            "label": "历史 proxy fills",
+            "format": "number"
+          },
+          {
+            "field": "confirmed_proxy_pnl_display",
+            "label": "历史 proxy PnL",
+            "type": "text"
+          },
+          {
+            "field": "decision",
+            "label": "参数结论",
+            "type": "text"
+          }
+        ]
+      },
+      {
+        "id": "trade_ready_table",
+        "title": "全部 3 个 production trade-ready 决策",
+        "subtitle": "Only the July 14 decision filled under the stored provider, limit and window.",
+        "dataset": "trade_ready_decisions",
+        "sourceId": "final_backtest",
+        "defaultSort": {
+          "field": "evaluated_et",
+          "direction": "asc"
+        },
+        "density": "spacious",
+        "layout": "full",
+        "columns": [
+          {
+            "field": "evaluated_et",
+            "label": "时间 ET",
+            "type": "text"
+          },
+          {
+            "field": "contract",
+            "label": "合约",
+            "type": "text"
+          },
+          {
+            "field": "session",
+            "label": "Session",
+            "type": "text"
+          },
+          {
+            "field": "entry_limit",
+            "label": "Limit",
+            "format": "number"
+          },
+          {
+            "field": "result",
+            "label": "回放结果",
+            "type": "text"
+          },
+          {
+            "field": "skip_reason",
+            "label": "跳过原因",
+            "type": "text"
+          },
+          {
+            "field": "pnl_display",
+            "label": "一张 PnL",
+            "type": "text"
+          }
+        ]
+      },
+      {
+        "id": "play_stats_table",
+        "title": "level_breakout_call / flip_high 历史统计审计",
+        "subtitle": "Snapshot exactly as of the first July 22 trade-ready evaluation.",
+        "dataset": "play_stats_compare",
+        "sourceId": "play_stats_audit",
+        "defaultSort": {
+          "field": "method_order",
+          "direction": "asc"
+        },
+        "density": "spacious",
+        "layout": "full",
+        "columns": [
+          {
+            "field": "method_order",
+            "label": "#",
+            "format": "number"
+          },
+          {
+            "field": "method_cn",
+            "label": "统计口径",
+            "type": "text"
+          },
+          {
+            "field": "sample_count",
+            "label": "n",
+            "format": "number"
+          },
+          {
+            "field": "winrate_display",
+            "label": "胜率",
+            "type": "text"
+          },
+          {
+            "field": "avg_return_display",
+            "label": "平均 300s 收益",
+            "type": "text"
+          },
+          {
+            "field": "ci_display",
+            "label": "胜率 95% CI",
+            "type": "text"
+          },
+          {
+            "field": "interpretation",
+            "label": "解释",
+            "type": "text"
+          }
+        ]
+      },
+      {
+        "id": "cohort_table",
+        "title": "Baseline replay cohorts",
+        "subtitle": "Cohorts are mutually labelled; only trade_ready is the production strategy total.",
+        "dataset": "baseline_cohorts",
+        "sourceId": "final_backtest",
+        "defaultSort": {
+          "field": "cohort_order",
+          "direction": "asc"
+        },
+        "density": "spacious",
+        "layout": "full",
+        "columns": [
+          {
+            "field": "cohort_order",
+            "label": "#",
+            "format": "number"
+          },
+          {
+            "field": "cohort",
+            "label": "Cohort",
+            "type": "text"
+          },
+          {
+            "field": "role",
+            "label": "Role",
+            "type": "text"
+          },
+          {
+            "field": "fills",
+            "label": "Fills",
+            "format": "number"
+          },
+          {
+            "field": "winrate_display",
+            "label": "Win rate",
+            "type": "text"
+          },
+          {
+            "field": "median_pnl_display",
+            "label": "Median PnL",
+            "type": "text"
+          },
+          {
+            "field": "total_pnl_display",
+            "label": "Total PnL",
+            "type": "text"
+          },
+          {
+            "field": "warning",
+            "label": "Boundary",
+            "type": "text"
+          }
+        ]
+      },
+      {
+        "id": "parameter_decisions_table",
+        "title": "模型与产品决策",
+        "subtitle": "Changes are risk-boundary or measurement repairs, not a claim that the strategy now has proven edge.",
+        "dataset": "parameter_decisions",
+        "sourceId": "implementation_review",
+        "defaultSort": {
+          "field": "priority",
+          "direction": "asc"
+        },
+        "density": "spacious",
+        "layout": "full",
+        "columns": [
+          {
+            "field": "priority",
+            "label": "Priority",
+            "format": "number"
+          },
+          {
+            "field": "decision",
+            "label": "Decision",
+            "type": "text"
+          },
+          {
+            "field": "before",
+            "label": "Before",
+            "type": "text"
+          },
+          {
+            "field": "after",
+            "label": "After",
+            "type": "text"
+          },
+          {
+            "field": "status",
+            "label": "Status",
+            "type": "text"
+          },
+          {
+            "field": "evidence",
+            "label": "Evidence / boundary",
+            "type": "text"
+          }
+        ]
+      }
+    ],
+    "blocks": [
+      {
+        "id": "title",
+        "type": "markdown",
+        "layout": "full",
+        "body": "# SPX 0DTE 信号与风险复盘：截至 2026-07-22"
+      },
+      {
+        "id": "technical_summary",
+        "type": "markdown",
+        "layout": "full",
+        "body": "## Technical Summary\n\n**先把边界说清楚：现有材料不能解释你最近约 $12,000 的真实亏损。** 本地最新 broker Activity/Flex 覆盖只到 2026-07-16，缺少 7/20–7/22 的成交、数量、手续费与人工追价记录；因此本报告状态是 `partial`，回测盈亏不能冒充账户盈亏。\n\n系统侧找到的是可修复的风险漏洞，而不是“周一至周三专属参数”。固定截止 7/22 的近三日共有 7 次正式 300 秒确认：周一 0 次、周二 2/2 方向正确、周三 1/5 方向正确；7 次全部在 RTH 之外。尤其 7/22 05:22 ET 的 Call intent 被名为 `rth_trade_intent.v3` 的策略放行，剩余 reward/risk 仅 0.76；严格回放因 20 秒窗口内 limit 未成交而正确跳过，但人工追价会暴露在随后 5/15 分钟的回撤里。\n\n已做五类稳健修复：RTH intent 硬限制为 RTH；最低 reward/risk 从 0.25 提升到 1.00；历史 play stats 按经济 first-touch 语义去重；15 分钟报告在被门控时第一行固定显示 `NO TRADE`；level_decision_health 升级为 schema v2，保存未来审计等价 walk-forward 所需的观测与配置。没有按星期调参，也没有放宽行情 freshness。"
+      },
+      {
+        "id": "headline_metrics",
+        "type": "metric-strip",
+        "layout": "full",
+        "cardIds": [
+          "actual_loss_reconciled",
+          "recent_confirmations",
+          "rth_confirmations",
+          "strict_trade_ready",
+          "forward_readiness"
+        ]
+      },
+      {
+        "id": "key_visual_findings",
+        "type": "markdown",
+        "layout": "full",
+        "body": "## Key Visual Findings\n\n图中的每根柱都是一条独立正式确认，不把重复 evaluation 当作新信号。正值表示预测方向在 300 秒后正确；负值表示反向。小样本不做平滑，也不把周二的 2/2 或周三的 1/5 外推成 weekday edge。"
+      },
+      {
+        "id": "recent_directional_chart_block",
+        "type": "chart",
+        "layout": "full",
+        "chartId": "recent_directional_chart"
+      },
+      {
+        "id": "recent_interpretation",
+        "type": "markdown",
+        "layout": "full",
+        "sourceId": "recent_outcomes",
+        "body": "### Recent Signal Attribution\n\n周二两次都是 00:41–00:51 ET 的非 RTH down breakout，方向收益分别为 +0.74、+0.54 bps。周三五次里只有 08:45 ET 的 down breakout 为正；其余四次为负，最差是 16:02 ET 的 put-wall fade（-15.23 bps）。周三均值为 -3.69 bps。这里评价的是 300 秒标的方向，不是期权成交盈亏。"
+      },
+      {
+        "id": "weekday_table_block",
+        "type": "table",
+        "layout": "full",
+        "tableId": "weekday_table"
+      },
+      {
+        "id": "trade_ready_header",
+        "type": "markdown",
+        "layout": "full",
+        "body": "## Production Trade-Ready Replay\n\n固定截止回放只有 3 个 unique production decisions：1 个严格成交、2 个安全跳过。样本量不足以声称策略正收益；唯一成交的 +$800 也没有覆盖手续费、显式滑点、排队、部分成交、市场冲击或人工通知延迟。"
+      },
+      {
+        "id": "trade_ready_table_block",
+        "type": "table",
+        "layout": "full",
+        "tableId": "trade_ready_table"
+      },
+      {
+        "id": "bad_intent_case",
+        "type": "markdown",
+        "layout": "full",
+        "sourceId": "final_backtest",
+        "body": "### Jul 22 Bad Intent\n\n7/22 05:22 ET 的 7490C intent 不属于 RTH，却通过了名为 RTH 的 intent policy。记录 bid/ask 为 18.20/18.40、limit 18.20、剩余目标 5.60 点、失效距离 7.40 点，reward/risk=0.76。严格回放没有成交；若手动按 ask 18.40 追入，5 分钟 bid 约 17.50（-$90/张），15 分钟 bid 约 15.10（-$330/张）。这证明需要修复交易边界，不证明某个星期应被永久禁用。"
+      },
+      {
+        "id": "stats_integrity",
+        "type": "markdown",
+        "layout": "full",
+        "body": "## Historical Statistics Integrity\n\n坏 intent 当时看到的 `sample_count=63 / winrate=30.16% / avg=-1.96%` 把同一次经济触碰生成的不同 event rows 重复计数。按 `first_touch_at + contract_id + play` 全局去重后，同一 play/level_kind 只剩 41 个样本，胜率 43.90%，平均 300 秒收益 +0.28%。修复方向是正确计数，不是用修正后的 43.90% 解除门控：95% 区间仍很宽，且未计交易成本。"
+      },
+      {
+        "id": "play_stats_chart_block",
+        "type": "chart",
+        "layout": "full",
+        "chartId": "play_stats_chart"
+      },
+      {
+        "id": "play_stats_table_block",
+        "type": "table",
+        "layout": "full",
+        "tableId": "play_stats_table"
+      },
+      {
+        "id": "cohort_separation",
+        "type": "markdown",
+        "layout": "full",
+        "body": "## Cohort Separation\n\n`confirmed`、`prefill`、`gth_dip` 是 control/proxy，不得与 production `trade_ready` 相加。confirmed baseline 的 13 个裸单合计 +$310，但中位数 -$160，收益依赖少数大赢家；GTH proxy 3 个裸单 0 胜、合计 -$440。forward exact GTH entry 与 exact spread complete exit 仍为 0/20，因此 GTH 保持 shadow。"
+      },
+      {
+        "id": "cohort_table_block",
+        "type": "table",
+        "layout": "full",
+        "tableId": "cohort_table"
+      },
+      {
+        "id": "scope_data_definitions",
+        "type": "markdown",
+        "layout": "full",
+        "body": "## Scope, Data and Definitions\n\n研究截止为 2026-07-22，exclusive cutoff 是 2026-07-23T00:00:00Z；不使用 7/23 的未完成 session。回放覆盖 8 个 observed partitions，其中 7 个通过分钟覆盖健康门槛，但 forward contract-consistent session 为 0/20。最近信号层读取正式 `level_decision_outcomes` 的 300 秒结果；交易层读取 persisted `trade_intents` 并严格使用记录的 provider、contract、limit 与 expires_at。\n\n`directional_return_bps` 是标的 300 秒原始回报按信号方向加符号。`proxy PnL` 是一张合约的历史报价回放，不是 broker PnL。`semantic sample` 是同一个 first touch、contract 与 play 的一次经济机会。所有金额显示到小数点后两位。"
+      },
+      {
+        "id": "methodology_validation",
+        "type": "markdown",
+        "layout": "full",
+        "body": "## Methodology and Model Validation\n\n1. 冻结 7/22 cutoff，复跑 production trade-ready 与 control/proxy cohorts。\n2. 从正式 outcome store 提取 7/20–7/22 的 300 秒结果，按方向签名并用 ET 判定 RTH。\n3. 对 3 个 unique trade-ready intent 复核 stored window、limit、provider 与成交前 target/invalidation。\n4. 在坏 intent 的准确 as-of 上重算 20 日 play stats，先复现 legacy event-row 口径，再做全局 semantic dedup；胜率区间使用 Wilson 95% CI。\n5. 检查 backtest weekday slices，但只作为描述性切片；Monday n=0、Tuesday n=2、Wednesday n=5，拒绝 weekday-specific tuning。\n6. 仅实施由契约或风险算术直接支持的修复；不能用现有 persisted signals 重建任意参数下的新信号，故不做伪 walk-forward 优化。\n7. 新增 level_decision_health schema v2，为未来逐帧审计等价回放保存 spot/ES、levels/SPX levels、坐标、稳定/候选结构、machine settings、source snapshot 与 engine health。"
+      },
+      {
+        "id": "limitations_robustness",
+        "type": "markdown",
+        "layout": "full",
+        "body": "## Limitations and Robustness\n\n最重要的缺口是 broker ledger：缺少 7/20–7/22 的真实成交、数量、手续费与是否追价，因此无法把约 $12,000 拆成系统信号、执行偏差、仓位大小与 discretionary trades。回测假设 top-of-book 全量成交，未建模 commissions、显式 slippage、queue position、partial fills、market impact 或 operator latency，结果偏乐观。\n\n信号历史只有 7 个健康 session、3 个 unique production decisions、1 个严格成交；没有独立 holdout，也无法对 7/14–7/22 补建 schema v2 原始状态。confirmed/proxy 的星期切片含 Tuesday n=6、Wednesday n=7，但不是 production cohort，且被少数大赢家主导。参数修改因此只限 fail-closed 边界；收益参数、星期参数和 GTH 晋级均未据此优化。"
+      },
+      {
+        "id": "parameter_decisions",
+        "type": "markdown",
+        "layout": "full",
+        "body": "## Parameter and Product Decisions\n\n最低 reward/risk 从 0.25 提高到 1.00 是风险预算修复：0.25 需要 80% 的成本前胜率才能 break even，而当前任何去重 cohort 都不支持这个门槛。它不是新 edge 的证明。RTH-only、NO TRADE 优先和语义去重分别修复交易边界、阅读风险和统计污染；health schema v2 修复未来可审计性。"
+      },
+      {
+        "id": "parameter_decisions_table_block",
+        "type": "table",
+        "layout": "full",
+        "tableId": "parameter_decisions_table"
+      },
+      {
+        "id": "next_steps",
+        "type": "markdown",
+        "layout": "full",
+        "body": "## Next Steps\n\n1. P0：导入覆盖 2026-07-20–2026-07-22 的最新 IBKR Activity/Flex CSV，逐笔连接 intent、成交时间、数量、费用与实际退出，完成约 $12,000 loss attribution。\n2. P0：保持自动下单关闭；RTH intent 只在 RTH 生成，GTH 继续走 exact-spread shadow contract。\n3. P0：从 7/23 起连续收集 schema v2 health frames；达到至少 20 个 contract-consistent sessions、20 个 exact GTH entries、20 个 Put entries 与 20 个 exact exits 后再做冻结 cutoff 人工复审。\n4. P1：在 forward 数据上预先登记候选参数和主指标，采用 rolling walk-forward；成本情景至少包含 commission、半点/一档滑点、延迟与 partial-fill sensitivity。\n5. P1：报告继续同时展示 raw record count 与 semantic opportunity count，防止服务重算次数冒充样本量。"
+      },
+      {
+        "id": "further_questions",
+        "type": "markdown",
+        "layout": "full",
+        "body": "## Further Questions\n\n- 真实亏损中有多少来自系统提示后追价、加仓或未按 time stop 退出？\n- 7/20–7/22 每笔订单的 contract、quantity、commission 与 realized PnL 是什么？\n- 在新的 RR>=1.00 和 RTH-only 约束下，未来 20 个 session 的机会数与 fill rate 会下降多少？\n- GTH exact spread 的 short leg 流动性和报价年龄能否在每次 shadow decision 中完整保留？\n- 哪些参数应预先冻结，避免在看到星期结果后反复挑选阈值？"
+      }
+    ]
+  },
+  "snapshot": {
+    "version": 1,
+    "generatedAt": "2026-07-23T12:00:00+00:00",
+    "status": "partial",
+    "accessIssues": [
+      {
+        "id": "missing_recent_broker_statement",
+        "scope": "actual_loss_reconciliation",
+        "sourceId": "broker_reconciliation",
+        "dataset": "broker_loss_reconciliation",
+        "message": "缺少覆盖 2026-07-20 至 2026-07-22 的 broker Activity/Flex 成交与费用数据；约 $12,000 的真实亏损暂不能逐笔归因。"
+      }
+    ],
+    "datasets": {
+      "headline": [
+        {
+          "actual_loss_reconciled": 0.0,
+          "recent_confirmations": 7,
+          "recent_directional_hit_rate": 0.428571,
+          "recent_rth_confirmations": 0,
+          "recent_non_rth_confirmations": 7,
+          "strict_trade_ready_decisions": 3,
+          "strict_fills": 1,
+          "contract_consistent_sessions": 0,
+          "readiness_target": 20
+        }
+      ],
+      "recent_events": [
+        {
+          "event_label": "Tue 00:41",
+          "session_date": "2026-07-21",
+          "weekday_cn": "周二",
+          "confirmed_et": "2026-07-21 00:41:19 ET",
+          "direction": "down",
+          "play": "breakout",
+          "level_kind": "flip_low",
+          "level": 7480.0,
+          "raw_return_bps": -0.735697,
+          "directional_return_bps": 0.735697,
+          "direction_correct": true,
+          "attribution": "no_follow_through",
+          "session": "non-RTH"
+        },
+        {
+          "event_label": "Tue 00:51",
+          "session_date": "2026-07-21",
+          "weekday_cn": "周二",
+          "confirmed_et": "2026-07-21 00:51:29 ET",
+          "direction": "down",
+          "play": "breakout",
+          "level_kind": "flip_low",
+          "level": 7480.0,
+          "raw_return_bps": -0.535103,
+          "directional_return_bps": 0.535103,
+          "direction_correct": true,
+          "attribution": "no_follow_through",
+          "session": "non-RTH"
+        },
+        {
+          "event_label": "Wed 05:21",
+          "session_date": "2026-07-22",
+          "weekday_cn": "周三",
+          "confirmed_et": "2026-07-22 05:21:50 ET",
+          "direction": "up",
+          "play": "breakout",
+          "level_kind": "flip_high",
+          "level": 7490.0,
+          "raw_return_bps": -1.000787,
+          "directional_return_bps": -1.000787,
+          "direction_correct": false,
+          "attribution": "no_follow_through",
+          "session": "non-RTH"
+        },
+        {
+          "event_label": "Wed 05:25",
+          "session_date": "2026-07-22",
+          "weekday_cn": "周三",
+          "confirmed_et": "2026-07-22 05:25:11 ET",
+          "direction": "up",
+          "play": "breakout",
+          "level_kind": "flip_high",
+          "level": 7490.0,
+          "raw_return_bps": -4.069923,
+          "directional_return_bps": -4.069923,
+          "direction_correct": false,
+          "attribution": "no_follow_through",
+          "session": "non-RTH"
+        },
+        {
+          "event_label": "Wed 08:45",
+          "session_date": "2026-07-22",
+          "weekday_cn": "周三",
+          "confirmed_et": "2026-07-22 08:45:12 ET",
+          "direction": "down",
+          "play": "breakout",
+          "level_kind": "flip_low",
+          "level": 7490.0,
+          "raw_return_bps": -5.143277,
+          "directional_return_bps": 5.143277,
+          "direction_correct": true,
+          "attribution": "follow_through",
+          "session": "non-RTH"
+        },
+        {
+          "event_label": "Wed 16:02",
+          "session_date": "2026-07-22",
+          "weekday_cn": "周三",
+          "confirmed_et": "2026-07-22 16:02:10 ET",
+          "direction": "up",
+          "play": "fade",
+          "level_kind": "put_wall",
+          "level": 7537.995,
+          "raw_return_bps": -15.231284,
+          "directional_return_bps": -15.231284,
+          "direction_correct": false,
+          "attribution": "no_follow_through",
+          "session": "non-RTH"
+        },
+        {
+          "event_label": "Wed 16:18",
+          "session_date": "2026-07-22",
+          "weekday_cn": "周三",
+          "confirmed_et": "2026-07-22 16:18:51 ET",
+          "direction": "up",
+          "play": "breakout",
+          "level_kind": "call_wall",
+          "level": 7547.995,
+          "raw_return_bps": -3.309943,
+          "directional_return_bps": -3.309943,
+          "direction_correct": false,
+          "attribution": "no_follow_through",
+          "session": "non-RTH"
+        }
+      ],
+      "weekday_summary": [
+        {
+          "weekday_order": 1,
+          "weekday_cn": "周一",
+          "recent_confirmations": 0,
+          "recent_directional_mean_bps": null,
+          "recent_directional_mean_bps_display": "—",
+          "recent_direction_correct_display": "0/0",
+          "confirmed_proxy_fills": 0,
+          "confirmed_proxy_pnl_usd": null,
+          "confirmed_proxy_pnl_display": "—",
+          "decision": "无样本；不调参"
+        },
+        {
+          "weekday_order": 2,
+          "weekday_cn": "周二",
+          "recent_confirmations": 2,
+          "recent_directional_mean_bps": 0.6354,
+          "recent_directional_mean_bps_display": "+0.64 bps",
+          "recent_direction_correct_display": "2/2",
+          "confirmed_proxy_fills": 6,
+          "confirmed_proxy_pnl_usd": 100.0,
+          "confirmed_proxy_pnl_display": "+$100.00",
+          "decision": "样本过小；不调参"
+        },
+        {
+          "weekday_order": 3,
+          "weekday_cn": "周三",
+          "recent_confirmations": 5,
+          "recent_directional_mean_bps": -3.693732,
+          "recent_directional_mean_bps_display": "-3.69 bps",
+          "recent_direction_correct_display": "1/5",
+          "confirmed_proxy_fills": 7,
+          "confirmed_proxy_pnl_usd": 210.0,
+          "confirmed_proxy_pnl_display": "+$210.00",
+          "decision": "修执行边界；不做 weekday overfit"
+        }
+      ],
+      "trade_ready_decisions": [
+        {
+          "evaluated_at": "2026-07-14T14:33:52.983728+00:00",
+          "evaluated_et": "2026-07-14 10:33:52 ET",
+          "contract": "SPXW 7530C",
+          "session": "RTH",
+          "entry_limit": 19.9,
+          "result": "filled",
+          "skip_reason": "—",
+          "pnl_usd": 800.0,
+          "pnl_display": "+$800.00",
+          "provider": "schwab",
+          "play": "level_breakout_call"
+        },
+        {
+          "evaluated_at": "2026-07-15T15:50:51.090773+00:00",
+          "evaluated_et": "2026-07-15 11:50:51 ET",
+          "contract": "SPXW 7560P",
+          "session": "RTH",
+          "entry_limit": 14.6,
+          "result": "skipped",
+          "skip_reason": "target_before_entry",
+          "pnl_usd": null,
+          "pnl_display": "—",
+          "provider": "schwab",
+          "play": "level_breakout_put"
+        },
+        {
+          "evaluated_at": "2026-07-22T09:22:05.290029+00:00",
+          "evaluated_et": "2026-07-22 05:22:05 ET",
+          "contract": "SPXW 7490C",
+          "session": "non-RTH",
+          "entry_limit": 18.2,
+          "result": "skipped",
+          "skip_reason": "entry_limit_not_reached",
+          "pnl_usd": null,
+          "pnl_display": "—",
+          "provider": "ibkr",
+          "play": "level_breakout_call"
+        }
+      ],
+      "play_stats_compare": [
+        {
+          "method_order": 1,
+          "method_cn": "原始 event rows",
+          "sample_count": 63,
+          "wins": 19,
+          "winrate": 0.301587,
+          "winrate_display": "30.16%",
+          "avg_return": -0.019559,
+          "avg_return_display": "-1.96%",
+          "ci_low": 0.202377,
+          "ci_high": 0.423604,
+          "ci_display": "20.24%–42.36%",
+          "interpretation": "21 个重复经济机会污染样本量"
+        },
+        {
+          "method_order": 2,
+          "method_cn": "语义 first-touch",
+          "sample_count": 41,
+          "wins": 18,
+          "winrate": 0.439024,
+          "winrate_display": "43.90%",
+          "avg_return": 0.002768,
+          "avg_return_display": "+0.28%",
+          "ci_low": 0.298901,
+          "ci_high": 0.589595,
+          "ci_display": "29.89%–58.96%",
+          "interpretation": "计数已纠正；区间仍宽，不能解除门控"
+        }
+      ],
+      "baseline_cohorts": [
+        {
+          "cohort_order": 1,
+          "cohort": "trade_ready",
+          "role": "production",
+          "signals": 3,
+          "fills": 1,
+          "winrate": 1.0,
+          "winrate_display": "100.00%",
+          "median_pnl_usd": 800.0,
+          "median_pnl_display": "+$800.00",
+          "total_pnl_usd": 800.0,
+          "total_pnl_display": "+$800.00",
+          "warning": "n=1；不是 edge claim"
+        },
+        {
+          "cohort_order": 2,
+          "cohort": "confirmed",
+          "role": "control/proxy",
+          "signals": 21,
+          "fills": 13,
+          "winrate": 0.384615,
+          "winrate_display": "38.46%",
+          "median_pnl_usd": -160.0,
+          "median_pnl_display": "-$160.00",
+          "total_pnl_usd": 310.0,
+          "total_pnl_display": "+$310.00",
+          "warning": "少数赢家主导；不得并入生产总计"
+        },
+        {
+          "cohort_order": 3,
+          "cohort": "prefill",
+          "role": "observational proxy",
+          "signals": 256,
+          "fills": 6,
+          "winrate": 0.666667,
+          "winrate_display": "66.67%",
+          "median_pnl_usd": 55.0,
+          "median_pnl_display": "+$55.00",
+          "total_pnl_usd": 100.0,
+          "total_pnl_display": "+$100.00",
+          "warning": "follow-through-only；非生产"
+        },
+        {
+          "cohort_order": 4,
+          "cohort": "gth_dip",
+          "role": "GTH proxy",
+          "signals": 6,
+          "fills": 3,
+          "winrate": 0.0,
+          "winrate_display": "0.00%",
+          "median_pnl_usd": -140.0,
+          "median_pnl_display": "-$140.00",
+          "total_pnl_usd": -440.0,
+          "total_pnl_display": "-$440.00",
+          "warning": "exact entry/exit 0/20；保持 shadow"
+        }
+      ],
+      "parameter_decisions": [
+        {
+          "priority": 1,
+          "decision": "RTH execution boundary",
+          "before": "rth_trade_intent 可在非 RTH 放行",
+          "after": "非 RTH 固定 blocker: rth_session_required",
+          "status": "已实现",
+          "evidence": "7/22 05:22 ET bad intent 泄漏；这是契约错误"
+        },
+        {
+          "priority": 2,
+          "decision": "Minimum reward/risk",
+          "before": "0.25（成本前 break-even 胜率 80.00%）",
+          "after": "1.00（成本前 break-even 胜率 50.00%）",
+          "status": "已实现",
+          "evidence": "bad intent RR=0.76；提门槛是 risk-off，不是收益优化"
+        },
+        {
+          "priority": 3,
+          "decision": "Play outcome identity",
+          "before": "event key 重算可重复计数",
+          "after": "first_touch_at + contract_id + play 全局去重",
+          "status": "已实现",
+          "evidence": "Jul 22 同一统计从 n=63 修正为 n=41"
+        },
+        {
+          "priority": 4,
+          "decision": "15m report hierarchy",
+          "before": "bias 在第一行，容易被读成入场方向",
+          "after": "被门控时第一行固定 NO TRADE",
+          "status": "已实现",
+          "evidence": "近期报告没有 explicit entry，却可能强化方向错觉"
+        },
+        {
+          "priority": 5,
+          "decision": "Audit-equivalent replay telemetry",
+          "before": "health v1 无法重建逐帧模型输入",
+          "after": "schema v2 保存状态、参数、source snapshot 与 engine health",
+          "status": "已实现（forward-only）",
+          "evidence": "支持未来 walk-forward；7/14–7/22 不可回补"
+        },
+        {
+          "priority": 6,
+          "decision": "Weekday-specific tuning",
+          "before": "无 weekday gate",
+          "after": "保持无 weekday gate",
+          "status": "拒绝调参",
+          "evidence": "Monday n=0、Tuesday n=2、Wednesday n=5"
+        },
+        {
+          "priority": 7,
+          "decision": "GTH promotion",
+          "before": "shadow",
+          "after": "继续 shadow",
+          "status": "保持",
+          "evidence": "GTH exact entries=0/20；exact exits=0/20"
+        }
+      ],
+      "broker_loss_reconciliation": []
+    }
+  }
+}

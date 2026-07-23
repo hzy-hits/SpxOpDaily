@@ -46,6 +46,11 @@ def test_shadow_persists_mutually_exclusive_state_and_transition_audit(
             levels={"put_wall": 100.0, "call_wall": 120.0},
             quality_ok=True,
             session_date="2026-07-13",
+            spx_levels={"put_wall": 100.0, "call_wall": 120.0},
+            trigger_coordinate_kind="official_spx",
+            trigger_instrument_id="index:SPX",
+            trigger_basis_points=4905.0,
+            spx_spot=95.0,
         )
     }
     monkeypatch.setattr(
@@ -65,6 +70,11 @@ def test_shadow_persists_mutually_exclusive_state_and_transition_audit(
         levels={"put_wall": 100.0, "call_wall": 120.0},
         quality_ok=True,
         session_date="2026-07-13",
+        spx_levels={"put_wall": 100.0, "call_wall": 120.0},
+        trigger_coordinate_kind="official_spx",
+        trigger_instrument_id="index:SPX",
+        trigger_basis_points=4901.0,
+        spx_spot=99.0,
     )
     result = run_level_decision_shadow(storage, SimpleNamespace(), now=NOW + timedelta(seconds=5))
     assert result["phase"] == "testing"
@@ -75,6 +85,24 @@ def test_shadow_persists_mutually_exclusive_state_and_transition_audit(
     rows = [json.loads(line) for line in audit.read_text().splitlines()]
     assert [row["current_phase"] for row in rows] == ["approaching", "testing"]
     assert len({row["record_key"] for row in rows}) == 2
+
+    health = (
+        tmp_path
+        / "features"
+        / "level_decision_health"
+        / "date=2026-07-13"
+        / "samples.jsonl"
+    )
+    samples = [json.loads(line) for line in health.read_text().splitlines()]
+    latest = samples[-1]
+    assert latest["schema_version"] == 2
+    assert latest["spot"] == 99.0
+    assert latest["es"] == 5000.0
+    assert latest["levels"]["put_wall"] == 100.0
+    assert latest["spx_levels"]["call_wall"] == 120.0
+    assert latest["trigger_coordinate_kind"] == "official_spx"
+    assert latest["trigger_instrument_id"] == "index:SPX"
+    assert latest["machine_settings"]["accept_hold_seconds"] == 20.0
 
 
 def test_outside_rth_advances_when_es_globex_observation_is_usable(tmp_path, monkeypatch) -> None:

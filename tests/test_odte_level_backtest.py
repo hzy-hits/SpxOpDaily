@@ -678,6 +678,45 @@ def test_aggregate_groups_by_profile_set_variant_and_slices() -> None:
     assert set(profiles) == {profile.name for profile in PROFILES}
 
 
+def test_aggregate_session_slices_prefer_spxw_expiry_and_fallback_to_entry_date() -> None:
+    gth_entry = datetime(2026, 7, 14, 23, 30, tzinfo=timezone.utc)
+    fallback_entry = datetime(2026, 7, 16, 14, 30, tzinfo=timezone.utc)
+    trades = [
+        _trade(
+            100.0,
+            entry_time=gth_entry.isoformat(),
+            exit_time=(gth_entry + timedelta(minutes=15)).isoformat(),
+            contract_id="option:SPX:SPXW:20260715:7550:C",
+        ),
+        _trade(
+            -50.0,
+            entry_time=fallback_entry.isoformat(),
+            exit_time=(fallback_entry + timedelta(minutes=15)).isoformat(),
+            contract_id="future:ES",
+        ),
+    ]
+
+    profiles = aggregate(trades, [], {"confirmed": 2})
+    slices = profiles["baseline"]["confirmed"]["variants"]["naked"]["slices"]
+
+    assert slices["by_session_date"] == {
+        "2026-07-15": {
+            "n": 1,
+            "winrate": 1.0,
+            "avg_pnl_usd": 100.0,
+            "total_pnl_usd": 100.0,
+        },
+        "2026-07-16": {
+            "n": 1,
+            "winrate": 0.0,
+            "avg_pnl_usd": -50.0,
+            "total_pnl_usd": -50.0,
+        },
+    }
+    assert slices["by_weekday"]["Wednesday"]["n"] == 1
+    assert slices["by_weekday"]["Thursday"]["n"] == 1
+
+
 def test_wide_invalidation_scales_buffer_with_expected_move() -> None:
     signal = _signal(expected_move_points=40.0)  # buffer max(3, 0.15*40) = 6
     long_series = _flat_series(ENTRY, 1800)
@@ -976,7 +1015,11 @@ def test_load_prefill_signals_filters_and_parses(tmp_path: Path) -> None:
             {
                 **base,
                 "first_touch_at": "2026-07-15T14:50:05+00:00",
-            },  # repeated production semantic key: keep earliest touch
+            },  # a later economic touch remains independent
+            {
+                **base,
+                "key": "level:regenerated|level_breakout_call|option:SPX:SPXW:20260715:7550:C",
+            },  # regenerated event id for the same economic touch: collapse
             {**base, "touched": False, "key": "skip:untouched"},
             {
                 **base,
@@ -990,14 +1033,15 @@ def test_load_prefill_signals_filters_and_parses(tmp_path: Path) -> None:
         ],
     )
     signals = load_prefill_signals(root)
-    assert len(signals) == 2
-    assert signals[0].entry_px is None
-    assert signals[0].entry_at == datetime(2026, 7, 15, 14, 36, 20, tzinfo=timezone.utc)
-    assert signals[0].direction == "up"
-    assert signals[0].strike == 7550.0
-    assert signals[0].expiry == date(2026, 7, 15)
-    fallback = signals[1]
-    assert fallback.direction == "down"
+    assert len(signals) == 3
+    early = next(signal for signal in signals if signal.direction == "up" and signal.at.minute == 36)
+    assert early.entry_px is None
+    assert early.entry_at == datetime(2026, 7, 15, 14, 36, 20, tzinfo=timezone.utc)
+    assert early.strike == 7550.0
+    assert early.expiry == date(2026, 7, 15)
+    late = next(signal for signal in signals if signal.direction == "up" and signal.at.minute == 50)
+    assert late.entry_at == datetime(2026, 7, 15, 14, 50, 20, tzinfo=timezone.utc)
+    fallback = next(signal for signal in signals if signal.direction == "down")
     assert fallback.entry_px is None
     assert fallback.entry_at == datetime(2026, 7, 15, 14, 36, 20, tzinfo=timezone.utc)
 
@@ -1462,7 +1506,7 @@ def test_run_as_of_uses_readiness_complete_sessions_and_keeps_partitions(
     artifact = json.loads((target / "artifact.json").read_text(encoding="utf-8"))
     persisted_readiness = json.loads((target / "readiness.json").read_text(encoding="utf-8"))
     report = (target / "report.md").read_text(encoding="utf-8")
-    assert artifact["schema_version"] == 5
+    assert artifact["schema_version"] == 6
     assert artifact["signal_counts"]["confirmed"] == 1
     assert artifact["window"]["complete_sessions"] == ["2026-07-15"]
     assert artifact["window"]["trading_days"] == 1

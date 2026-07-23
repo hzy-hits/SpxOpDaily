@@ -337,6 +337,88 @@ def test_remaining_target_room_and_reward_risk_fail_closed() -> None:
     assert "remaining_reward_risk_insufficient" in intent["block_reasons"]
 
 
+def test_default_reward_risk_floor_blocks_sub_one_ratio() -> None:
+    market, options, latest, context, repricing = _ready_inputs()
+    context = replace(
+        context,
+        level_decision={**context.level_decision, "spot": 7563.0},
+    )
+
+    intent = evaluate_trade_intent(
+        context,
+        market,
+        options,
+        latest,
+        repricing,
+        now=NOW,
+        feature_policy=MarketFeatureSettings(),
+        order_policy=OrderMapPolicy(),
+    )
+
+    assert intent["remaining_target_room_points"] == 12.0
+    assert intent["remaining_reward_risk"] == pytest.approx(0.75)
+    assert intent["status"] == "blocked"
+    assert "remaining_reward_risk_insufficient" in intent["block_reasons"]
+
+
+def test_rth_intent_policy_blocks_premarket_trade_ready() -> None:
+    market, options, latest, context, repricing = _ready_inputs()
+    premarket = datetime(2026, 7, 14, 9, 22, tzinfo=UTC)
+    quote = replace(
+        latest.best_quotes[0],
+        received_at=premarket,
+        last_update_at=premarket,
+        quote_time=premarket,
+    )
+    latest = replace(
+        latest,
+        created_at=premarket,
+        as_of=premarket,
+        quotes=(quote,),
+        best_quotes=(quote,),
+    )
+    market = replace(
+        market,
+        as_of=premarket,
+        es={
+            **market.es,
+            "observed_at": premarket.isoformat(),
+            "source_at": premarket.isoformat(),
+            "transport_at": premarket.isoformat(),
+        },
+    )
+    options = replace(options, as_of=premarket)
+    level = {
+        **context.level_decision,
+        "phase_at": (premarket - timedelta(seconds=60)).isoformat(),
+        "expires_at": (premarket + timedelta(minutes=3)).isoformat(),
+        "updated_at": premarket.isoformat(),
+        "trigger_coordinate": {
+            **context.level_decision["trigger_coordinate"],
+            "as_of": premarket.isoformat(),
+        },
+    }
+    context = replace(context, as_of=premarket, level_decision=level)
+    repricing = {**repricing, "as_of": premarket.isoformat()}
+
+    intent = evaluate_trade_intent(
+        context,
+        market,
+        options,
+        latest,
+        repricing,
+        now=premarket,
+        feature_policy=MarketFeatureSettings(),
+        order_policy=OrderMapPolicy(),
+    )
+
+    assert intent["status"] == "blocked"
+    assert intent["block_reasons"] == [
+        "rth_session_required",
+        "rth_confirmation_required",
+    ]
+
+
 def test_intent_identity_is_semantic_across_rearmed_event_ids() -> None:
     market, options, latest, context, repricing = _ready_inputs()
     first = evaluate_trade_intent(

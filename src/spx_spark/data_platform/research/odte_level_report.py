@@ -28,7 +28,7 @@ from .odte_level_signals import (
 
 
 def _fmt_money(value: float | None) -> str:
-    return "-" if value is None else f"{value:+.0f}"
+    return "-" if value is None else f"{value:+.2f}"
 
 
 def _fmt_pct(value: float | None) -> str:
@@ -158,11 +158,12 @@ def _render_report(artifact: dict, trades: Sequence[Trade]) -> str:
         "- 成交价:多头腿按 ask 进场、止损/到期按 bid 出场;价差腿按 long ask − short bid "
         "进、long bid − short ask 出;固定止盈按 mid 触发并按 mid 出场。双腿必须满足"
         "入场时效/时间偏差和逐笔 mark 新鲜度限制,不使用未来 short quote 或无限前填。",
+        "- 未建模佣金、显式滑点、队列顺序、部分成交和市场冲击；top-of-book 结果偏乐观。",
         "- 退出规则按顺序:失效(标的反向破 level+缓冲,S3 为 ES 跌破 trough)、目标墙/"
         "公式目标、止盈(fixed/trailing/sat85/trail33)、时间止损、数据末端兜底。"
         "标的报价超过 30 秒不能触发墙/失效;计划退出附近没有新鲜可执行 mark 时跳过,"
         "不把早期数据末端当成交。",
-        "- S1 在信号后 15 秒跟进进场;S2 按生产 semantic key 去重,在首次触碰后持有"
+        "- S1 在信号后 15 秒跟进进场;S2 按首次触碰时间+合约+play 语义去重,在首次触碰后持有"
         "15 秒,按"
         "方向×(spot−trigger) ≥ max(2,0.05×EM) 过门后重新读取 ask,历史 prefill 不计入 PnL;"
         "S3 有生产 spread 时直接使用保存的 long/short strike,不重新按 delta 选腿。",
@@ -368,6 +369,8 @@ def _render_report(artifact: dict, trades: Sequence[Trade]) -> str:
         ("按 level_kind(baseline)", "by_level_kind"),
         ("按 trend_regime(baseline)", "by_trend_regime"),
         ("按小时桶(America/New_York,baseline)", "by_hour_bucket"),
+        ("按到期交易日(baseline)", "by_session_date"),
+        ("按到期交易日星期(baseline)", "by_weekday"),
     ):
         lines.extend(
             [

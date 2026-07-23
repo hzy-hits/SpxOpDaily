@@ -119,6 +119,30 @@ def build_decision_guidance(payload: Mapping[str, Any]) -> DecisionGuidance:
     )
 
 
+def compact_guidance_lines(payload: Mapping[str, Any]) -> list[str]:
+    """Render the decision gate before any non-actionable market bias."""
+
+    guidance = build_decision_guidance(payload)
+    scores = ""
+    if guidance.trend_score is not None and guidance.mean_reversion_score is not None:
+        scores = f"（趋势 {guidance.trend_score:g} / 回归 {guidance.mean_reversion_score:g}）"
+    if guidance.action is not GuidanceAction.TRADE_READY:
+        return [
+            "结论  NO TRADE · 未通过执行门控",
+            f"动作  {guidance.action_text}",
+            f"观察  {guidance.bias}（仅结构背景，不是入场方向）",
+            f"确认  {guidance.trigger_text}",
+            f"证伪  {guidance.invalidation_text}",
+        ]
+    return [
+        "结论  TRADE READY · 可执行（自动下单关闭）",
+        f"判断  {guidance.bias}{scores}",
+        f"动作  {guidance.action_text}",
+        f"确认  {guidance.trigger_text}",
+        f"证伪  {guidance.invalidation_text}",
+    ]
+
+
 def _bias_label(mode: str, direction: str) -> str:
     if mode == "trending":
         return {"up": "趋势偏多", "down": "趋势偏空"}.get(direction, "趋势方向不明")

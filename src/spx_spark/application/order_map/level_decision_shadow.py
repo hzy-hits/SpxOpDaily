@@ -5,6 +5,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+from dataclasses import asdict
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Mapping
@@ -165,6 +166,12 @@ def run_level_decision_shadow(
                 transition,
                 rth=session is not None,
                 formal_signal_enabled=policy.formal_signal_enabled,
+                tick=tick,
+                settings=settings,
+                stable_structure=(
+                    frozen_structure if isinstance(frozen_structure, Mapping) else None
+                ),
+                structure_stability=stability_state,
             ),
         )
         if transition.changed:
@@ -595,17 +602,46 @@ def _health_record(
     *,
     rth: bool,
     formal_signal_enabled: bool,
+    tick: EngineTick | None,
+    settings: LevelDecisionSettings,
+    stable_structure: Mapping[str, object] | None,
+    structure_stability: Mapping[str, object] | None,
 ) -> dict[str, object]:
     formal_signal = formal_signal_enabled and transition.current_phase is LevelPhase.CONFIRMED
+    engine_health = getattr(tick, "health", None)
+    structure_candidate = (
+        structure_stability.get("candidate")
+        if isinstance(structure_stability, Mapping)
+        else None
+    )
     return {
+        "schema_version": 2,
         "record_key": _utc(observation.at).isoformat(),
         "at": _utc(observation.at).isoformat(),
         "session_date": observation.session_date,
         "session_mode": "rth" if rth else "globex",
+        "tick_id": getattr(tick, "tick_id", None),
+        "source_snapshot_id": getattr(tick, "source_snapshot_id", None),
+        "spot": observation.spot,
+        "spx_spot": observation.spx_spot,
+        "es": observation.es,
+        "levels": dict(observation.levels),
+        "spx_levels": dict(observation.spx_levels or {}),
         "quality_ok": observation.quality_ok,
         "quality_reason": observation.quality_reason,
         "spot_source": observation.spot_source,
         "level_source": observation.level_source,
+        "trigger_coordinate_kind": observation.trigger_coordinate_kind,
+        "trigger_instrument_id": observation.trigger_instrument_id,
+        "trigger_basis_points": observation.trigger_basis_points,
+        "stable_structure": dict(stable_structure or {}),
+        "structure_candidate": (
+            dict(structure_candidate) if isinstance(structure_candidate, Mapping) else None
+        ),
+        "machine_settings": asdict(settings),
+        "engine_health": (
+            engine_health.to_dict() if hasattr(engine_health, "to_dict") else None
+        ),
         "phase": transition.current_phase.value,
         "formal_signal": formal_signal,
         "level_path_confirmed": formal_signal,

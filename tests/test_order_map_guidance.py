@@ -126,8 +126,9 @@ def test_status_first_screen_is_guidance_and_far_delivery_stays_compact() -> Non
     payload = _payload()
     rendered = render_status_template(payload, [], NOW)
 
-    assert "判断  趋势偏空（趋势 70 / 回归 45）　未通过执行门控" in rendered
+    assert "结论  NO TRADE · 未通过执行门控" in rendered
     assert "动作  当前不进场；等待价格进入关键位测试" in rendered
+    assert "观察  趋势偏空（仅结构背景，不是入场方向）" in rendered
     assert "确认  SPX 7560 下方保持且状态机 CONFIRMED 后才评估 Put" in rendered
     assert "证伪  SPX 收回 7565 且 ES 量价不再同向时，偏空判断取消" in rendered
 

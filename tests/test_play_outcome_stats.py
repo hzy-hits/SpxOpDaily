@@ -79,6 +79,30 @@ def test_loader_includes_window_boundaries(tmp_path: Path) -> None:
     assert stats[("level_fade_put", "call_wall")].sample_count == 2
 
 
+def test_loader_semantically_deduplicates_regenerated_event_ids(tmp_path: Path) -> None:
+    common = {
+        "first_touch_at": "2026-07-13T14:35:00+00:00",
+        "contract_id": "option:SPX:SPXW:20260713:7550:P",
+    }
+    rows = [
+        {
+            **_row("level_fade_put", "call_wall", 0.05, days_ago=1),
+            **common,
+            "key": "level:first|level_fade_put|contract",
+        },
+        {
+            **_row("level_fade_put", "call_wall", 0.05, days_ago=1),
+            **common,
+            "key": "level:regenerated|level_fade_put|contract",
+        },
+    ]
+    _write_outcomes(tmp_path, "2026-07-13", rows)
+
+    stats = load_play_outcome_stats(tmp_path, window_days=20, horizon="300", now=NOW)
+
+    assert stats[("level_fade_put", "call_wall")].sample_count == 1
+
+
 def test_loader_returns_empty_when_store_missing(tmp_path: Path) -> None:
     stats = load_play_outcome_stats(tmp_path / "missing", window_days=20, horizon="300", now=NOW)
 
