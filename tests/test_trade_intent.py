@@ -337,7 +337,7 @@ def test_remaining_target_room_and_reward_risk_fail_closed() -> None:
     assert "remaining_reward_risk_insufficient" in intent["block_reasons"]
 
 
-def test_default_reward_risk_floor_blocks_sub_one_ratio() -> None:
+def test_default_reward_risk_floor_retains_observed_sub_one_rth_opportunity() -> None:
     market, options, latest, context, repricing = _ready_inputs()
     context = replace(
         context,
@@ -357,8 +357,8 @@ def test_default_reward_risk_floor_blocks_sub_one_ratio() -> None:
 
     assert intent["remaining_target_room_points"] == 12.0
     assert intent["remaining_reward_risk"] == pytest.approx(0.75)
-    assert intent["status"] == "blocked"
-    assert "remaining_reward_risk_insufficient" in intent["block_reasons"]
+    assert intent["status"] == "trade_ready"
+    assert "remaining_reward_risk_insufficient" not in intent["block_reasons"]
 
 
 def test_rth_intent_policy_blocks_premarket_trade_ready() -> None:

@@ -5,7 +5,6 @@ from __future__ import annotations
 import fcntl
 import json
 import os
-from dataclasses import asdict
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Mapping
@@ -19,6 +18,10 @@ from spx_spark.application.order_map.level_decision_machine import (
 )
 from spx_spark.application.order_map.level_decision_outcomes import advance_level_outcomes
 from spx_spark.application.order_map.level_decision_outcomes import LevelOutcomeSettings
+from spx_spark.application.order_map.level_decision_records import (
+    build_health_record,
+    build_transition_record,
+)
 from spx_spark.application.order_map.trigger_coordinates import resolve_trigger_coordinate
 from spx_spark.application.order_map.stable_structure import advance_stable_structure
 from spx_spark.config import NotificationSettings, StorageSettings
@@ -111,6 +114,13 @@ def run_level_decision_shadow(
             and _structure_levels(structure_candidate)
         )
         previous = persisted.get("decision")
+        # A candidate is telemetry, not a decision structure, until promotion.
+        # Keep an active lifecycle on its frozen stable levels; only suppress a
+        # new arm while the replacement structure is still being confirmed.
+        structure_pending_blocks_new_arm = _structure_pending_blocks_new_arm(
+            previous if isinstance(previous, Mapping) else None,
+            structure_change_pending=structure_change_pending,
+        )
         observation = _observation(
             storage,
             tick,
@@ -119,7 +129,7 @@ def run_level_decision_shadow(
             frozen_structure=(frozen_structure if isinstance(frozen_structure, Mapping) else None),
             max_frozen_structure_age_sessions=policy.max_frozen_structure_age_sessions,
             active_decision=previous if isinstance(previous, Mapping) else None,
-            structure_change_pending=structure_change_pending,
+            structure_pending_blocks_new_arm=structure_pending_blocks_new_arm,
         )
         transition = advance_level_decision(
             previous if isinstance(previous, Mapping) else None,
@@ -155,13 +165,15 @@ def run_level_decision_shadow(
                 "trigger_basis_points": observation.trigger_basis_points,
                 "spx_levels": dict(observation.spx_levels or {}),
                 "spx_spot": observation.spx_spot,
+                "structure_change_pending": structure_change_pending,
+                "new_arm_blocked": structure_pending_blocks_new_arm,
             },
             "updated_at": _utc(now).isoformat(),
         }
         atomic_write_json_secure(state_path, payload)
         _append_record(
             _health_path(storage, now),
-            _health_record(
+            build_health_record(
                 observation,
                 transition,
                 rth=session is not None,
@@ -172,15 +184,19 @@ def run_level_decision_shadow(
                     frozen_structure if isinstance(frozen_structure, Mapping) else None
                 ),
                 structure_stability=stability_state,
+                structure_change_pending=structure_change_pending,
+                new_arm_blocked=structure_pending_blocks_new_arm,
             ),
         )
         if transition.changed:
             _append_unique(
                 _audit_path(storage, now),
-                _transition_record(
+                build_transition_record(
                     transition,
                     observation,
                     formal_signal_enabled=policy.formal_signal_enabled,
+                    structure_change_pending=structure_change_pending,
+                    new_arm_blocked=structure_pending_blocks_new_arm,
                 ),
             )
         for row in completed:
@@ -214,6 +230,8 @@ def run_level_decision_shadow(
             "trigger_basis_points": observation.trigger_basis_points,
             "spx_levels": dict(observation.spx_levels or {}),
             "spx_spot": observation.spx_spot,
+            "structure_change_pending": structure_change_pending,
+            "new_arm_blocked": structure_pending_blocks_new_arm,
         },
     )
     public.update(
@@ -261,6 +279,26 @@ def _outcome_settings(policy: LevelDecisionPolicy) -> LevelOutcomeSettings:
     )
 
 
+def _structure_pending_blocks_new_arm(
+    active_decision: Mapping[str, object] | None,
+    *,
+    structure_change_pending: bool,
+) -> bool:
+    if not structure_change_pending:
+        return False
+    try:
+        phase = LevelPhase(
+            str((active_decision or {}).get("phase") or LevelPhase.FAR.value)
+        )
+    except ValueError:
+        phase = LevelPhase.FAR
+    return phase in {
+        LevelPhase.FAR,
+        LevelPhase.INVALIDATED,
+        LevelPhase.EXPIRED,
+    }
+
+
 def _observation(
     storage: StorageSettings,
     tick: EngineTick,
@@ -270,7 +308,7 @@ def _observation(
     frozen_structure: Mapping[str, object] | None = None,
     max_frozen_structure_age_sessions: int = 1,
     active_decision: Mapping[str, object] | None = None,
-    structure_change_pending: bool = False,
+    structure_pending_blocks_new_arm: bool = False,
 ) -> LevelObservation:
     structure_age = _structure_session_age(frozen_structure, now=now)
     structure_usable = (
@@ -279,8 +317,6 @@ def _observation(
     spx_levels = _structure_levels(frozen_structure) if structure_usable else {}
     level_source = str((frozen_structure or {}).get("source") or "unavailable")
     quality_reasons: list[str] = []
-    if structure_change_pending:
-        quality_reasons.append("structure_change_pending")
     if frozen_structure is not None and not structure_usable:
         quality_reasons.append("frozen_structure_session_ttl_expired")
     state = LatestStateStore(storage).load(now=now)
@@ -356,6 +392,12 @@ def _observation(
         trigger_instrument_id=coordinate_instrument,
         trigger_basis_points=coordinate_basis,
         spx_spot=spx_spot,
+        arm_allowed=not structure_pending_blocks_new_arm,
+        arm_block_reason=(
+            "structure_change_pending_new_arm_blocked"
+            if structure_pending_blocks_new_arm
+            else None
+        ),
     )
 
 
@@ -492,6 +534,12 @@ def _public_state(
         if isinstance(structure_candidate, Mapping)
         else None
     )
+    observed_pending = observation.get("structure_change_pending")
+    structure_change_pending = (
+        observed_pending
+        if isinstance(observed_pending, bool)
+        else public_candidate is not None
+    )
     return {
         "mode": "live" if formal_signal_enabled else "shadow",
         "formal_signal_enabled": formal_signal_enabled,
@@ -522,7 +570,8 @@ def _public_state(
         "level_bands": dict((structure or {}).get("level_bands") or {}),
         "structure_promoted_at": (structure or {}).get("promoted_at"),
         "structure_duration_seconds": (structure or {}).get("duration_seconds"),
-        "structure_change_pending": public_candidate is not None,
+        "structure_change_pending": structure_change_pending,
+        "new_arm_blocked": bool(observation.get("new_arm_blocked")),
         "structure_candidate": public_candidate,
         "spot": spot,
         "es": es,
@@ -548,105 +597,6 @@ def _public_state(
         "quality_ok": observation.get("quality_ok"),
         "quality_reason": observation.get("quality_reason"),
         "updated_at": state.get("updated_at"),
-    }
-
-
-def _transition_record(
-    transition,
-    observation: LevelObservation,
-    *,
-    formal_signal_enabled: bool,
-) -> dict[str, object]:
-    state = transition.state
-    formal_signal = formal_signal_enabled and transition.current_phase is LevelPhase.CONFIRMED
-    return {
-        "record_key": (
-            f"{state.get('event_id') or 'far'}:"
-            f"{state.get('transition_count') or 0}:{transition.current_phase.value}"
-        ),
-        "event_id": state.get("event_id"),
-        "at": _utc(observation.at).isoformat(),
-        "previous_phase": transition.previous_phase.value,
-        "current_phase": transition.current_phase.value,
-        "thesis": state.get("thesis"),
-        "direction": state.get("direction"),
-        "level_kind": state.get("level_kind"),
-        "level": state.get("level"),
-        "spx_level": state.get("spx_level", state.get("level")),
-        "spot": observation.spot,
-        "es": observation.es,
-        "levels": dict(observation.levels),
-        "quality_ok": observation.quality_ok,
-        "quality_reason": observation.quality_reason,
-        "spot_source": observation.spot_source,
-        "trigger_coordinate_kind": observation.trigger_coordinate_kind,
-        "trigger_instrument_id": observation.trigger_instrument_id,
-        "trigger_basis_points": observation.trigger_basis_points,
-        "level_source": observation.level_source,
-        "reason": transition.reason,
-        "formal_signal": formal_signal,
-        "level_path_confirmed": formal_signal,
-        "actionable": False,
-        "action_gate": "trade_intent_required",
-        "attribution": _transition_attribution(
-            transition.current_phase,
-            transition.reason,
-        ),
-        "state": dict(state),
-    }
-
-
-def _health_record(
-    observation: LevelObservation,
-    transition,
-    *,
-    rth: bool,
-    formal_signal_enabled: bool,
-    tick: EngineTick | None,
-    settings: LevelDecisionSettings,
-    stable_structure: Mapping[str, object] | None,
-    structure_stability: Mapping[str, object] | None,
-) -> dict[str, object]:
-    formal_signal = formal_signal_enabled and transition.current_phase is LevelPhase.CONFIRMED
-    engine_health = getattr(tick, "health", None)
-    structure_candidate = (
-        structure_stability.get("candidate")
-        if isinstance(structure_stability, Mapping)
-        else None
-    )
-    return {
-        "schema_version": 2,
-        "record_key": _utc(observation.at).isoformat(),
-        "at": _utc(observation.at).isoformat(),
-        "session_date": observation.session_date,
-        "session_mode": "rth" if rth else "globex",
-        "tick_id": getattr(tick, "tick_id", None),
-        "source_snapshot_id": getattr(tick, "source_snapshot_id", None),
-        "spot": observation.spot,
-        "spx_spot": observation.spx_spot,
-        "es": observation.es,
-        "levels": dict(observation.levels),
-        "spx_levels": dict(observation.spx_levels or {}),
-        "quality_ok": observation.quality_ok,
-        "quality_reason": observation.quality_reason,
-        "spot_source": observation.spot_source,
-        "level_source": observation.level_source,
-        "trigger_coordinate_kind": observation.trigger_coordinate_kind,
-        "trigger_instrument_id": observation.trigger_instrument_id,
-        "trigger_basis_points": observation.trigger_basis_points,
-        "stable_structure": dict(stable_structure or {}),
-        "structure_candidate": (
-            dict(structure_candidate) if isinstance(structure_candidate, Mapping) else None
-        ),
-        "machine_settings": asdict(settings),
-        "engine_health": (
-            engine_health.to_dict() if hasattr(engine_health, "to_dict") else None
-        ),
-        "phase": transition.current_phase.value,
-        "formal_signal": formal_signal,
-        "level_path_confirmed": formal_signal,
-        "actionable": False,
-        "action_gate": "trade_intent_required",
     }
 
 
@@ -811,22 +761,6 @@ def _level_kind_label(value: object) -> str:
 
 def _format_level(value: float | None) -> str:
     return f"{value:.2f}" if value is not None else "-"
-
-
-def _transition_attribution(phase: LevelPhase, reason: str) -> str:
-    if phase is LevelPhase.CONFIRMED:
-        return "confirmed_pending_outcome"
-    if phase is LevelPhase.EXPIRED:
-        return "no_confirmation"
-    if phase is not LevelPhase.INVALIDATED:
-        return "state_progression"
-    if reason == "structure_drift":
-        return "level_error"
-    if "data" in reason or "stale" in reason or "unavailable" in reason:
-        return "data_error"
-    if reason == "crossed_invalidation":
-        return "false_break_or_rejection"
-    return "invalidated_other"
 
 
 def _load_state(path: Path) -> dict[str, object]:

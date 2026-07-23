@@ -49,7 +49,7 @@ class MarketFeatureSettings:
     trade_invalidation_buffer_points: float = 3.0
     trade_target_em_fraction: float = 0.15
     trade_min_target_room_points: float = 3.0
-    trade_min_reward_risk: float = 1.0
+    trade_min_reward_risk: float = 0.25
     trade_time_stop_minutes: int = 15
     session_episode_enabled: bool = True
     session_break_buffer_points: float = 2.0

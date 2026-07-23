@@ -6,7 +6,11 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 from spx_spark.application.order_map import level_decision_shadow as shadow_service
-from spx_spark.application.order_map.level_decision_machine import LevelObservation
+from spx_spark.application.order_map.level_decision_machine import (
+    LevelObservation,
+    LevelPhase,
+    advance_level_decision,
+)
 from spx_spark.application.order_map.level_decision_shadow import (
     _structure_session_age,
     load_level_decision_shadow,
@@ -32,6 +36,220 @@ def test_frozen_structure_ttl_counts_trading_sessions() -> None:
         )
         == 2
     )
+
+
+def test_pending_structure_gate_applies_only_before_a_new_arm() -> None:
+    terminal = {
+        LevelPhase.FAR,
+        LevelPhase.INVALIDATED,
+        LevelPhase.EXPIRED,
+    }
+
+    assert shadow_service._structure_pending_blocks_new_arm(
+        None,
+        structure_change_pending=True,
+    )
+    for phase in LevelPhase:
+        assert (
+            shadow_service._structure_pending_blocks_new_arm(
+                {"phase": phase.value},
+                structure_change_pending=True,
+            )
+            is (phase in terminal)
+        )
+        assert not shadow_service._structure_pending_blocks_new_arm(
+            {"phase": phase.value},
+            structure_change_pending=False,
+        )
+
+
+def test_pending_structure_keeps_active_lifecycle_on_frozen_stable_levels(
+    tmp_path, monkeypatch
+) -> None:
+    storage = SimpleNamespace(data_root=str(tmp_path))
+    stable = _stable_structure(NOW, put_wall=100.0, call_wall=120.0)
+    armed = advance_level_decision(
+        None,
+        _level_observation(NOW, spot=95.0, levels=stable["levels"]),
+    )
+    _write_shadow_state(tmp_path, decision=armed.state, stable=stable)
+    monkeypatch.setattr(
+        shadow_service,
+        "_live_structure",
+        lambda *_args, **_kwargs: _live_structure(
+            NOW + timedelta(seconds=5),
+            put_wall=110.0,
+            call_wall=130.0,
+        ),
+    )
+    seen: dict[str, object] = {}
+
+    def fake_observation(_storage, _tick, *, now, frozen_structure, **kwargs):
+        blocks_arm = kwargs["structure_pending_blocks_new_arm"]
+        levels = shadow_service._structure_levels(frozen_structure)
+        seen.update({"blocks_arm": blocks_arm, "levels": levels})
+        return _level_observation(
+            now,
+            spot=96.0,
+            levels=levels,
+            arm_allowed=not blocks_arm,
+            arm_block_reason=(
+                "structure_change_pending_new_arm_blocked" if blocks_arm else None
+            ),
+        )
+
+    monkeypatch.setattr(shadow_service, "_observation", fake_observation)
+
+    result = run_level_decision_shadow(
+        storage,
+        SimpleNamespace(),
+        now=NOW + timedelta(seconds=5),
+    )
+
+    assert result["phase"] == LevelPhase.TESTING.value
+    assert result["reason"] == "entered_test_zone"
+    assert result["structure_change_pending"] is True
+    assert result["new_arm_blocked"] is False
+    assert result["quality_ok"] is True
+    assert result["quality_reason"] is None
+    assert seen == {
+        "blocks_arm": False,
+        "levels": {"put_wall": 100.0, "call_wall": 120.0},
+    }
+    health = (
+        tmp_path
+        / "features"
+        / "level_decision_health"
+        / "date=2026-07-13"
+        / "samples.jsonl"
+    )
+    sample = json.loads(health.read_text().splitlines()[-1])
+    assert sample["structure_change_pending"] is True
+    assert sample["new_arm_blocked"] is False
+    assert sample["levels"]["put_wall"] == 100.0
+    audit = (
+        tmp_path
+        / "features"
+        / "level_decision_audit"
+        / "date=2026-07-13"
+        / "transitions.jsonl"
+    )
+    transition = json.loads(audit.read_text().splitlines()[-1])
+    assert transition["structure_change_pending"] is True
+    assert transition["new_arm_blocked"] is False
+
+
+def test_pending_structure_blocks_new_arm_until_promotion(tmp_path, monkeypatch) -> None:
+    storage = SimpleNamespace(data_root=str(tmp_path))
+    stable = _stable_structure(NOW, put_wall=100.0, call_wall=120.0)
+    _write_shadow_state(tmp_path, decision=None, stable=stable)
+    monkeypatch.setattr(
+        shadow_service,
+        "_live_structure",
+        lambda *_args, **_kwargs: _live_structure(
+            NOW + timedelta(seconds=5),
+            put_wall=110.0,
+            call_wall=130.0,
+        ),
+    )
+
+    def fake_observation(_storage, _tick, *, now, frozen_structure, **kwargs):
+        blocks_arm = kwargs["structure_pending_blocks_new_arm"]
+        return _level_observation(
+            now,
+            spot=100.0,
+            levels=shadow_service._structure_levels(frozen_structure),
+            arm_allowed=not blocks_arm,
+            arm_block_reason=(
+                "structure_change_pending_new_arm_blocked" if blocks_arm else None
+            ),
+        )
+
+    monkeypatch.setattr(shadow_service, "_observation", fake_observation)
+
+    result = run_level_decision_shadow(
+        storage,
+        SimpleNamespace(),
+        now=NOW + timedelta(seconds=5),
+    )
+
+    assert result["phase"] == LevelPhase.FAR.value
+    assert result["event_id"] is None
+    assert result["structure_change_pending"] is True
+    assert result["new_arm_blocked"] is True
+    assert result["quality_ok"] is True
+    assert result["quality_reason"] is None
+
+
+def test_promoted_structure_still_runs_machine_drift_validation(
+    tmp_path, monkeypatch
+) -> None:
+    storage = SimpleNamespace(data_root=str(tmp_path))
+    stable = _stable_structure(NOW, put_wall=100.0, call_wall=120.0)
+    armed = advance_level_decision(
+        None,
+        _level_observation(NOW, spot=95.0, levels=stable["levels"]),
+    )
+    bucket = int(NOW.timestamp()) // 900
+    candidate = {
+        **_live_structure(
+            NOW - timedelta(seconds=900),
+            put_wall=110.0,
+            call_wall=130.0,
+        ),
+        "levels": {"put_wall": 110.0, "call_wall": 130.0},
+        "samples": [
+            {
+                "bucket": bucket - 1,
+                "levels": {"put_wall": 110.0, "call_wall": 130.0},
+                "at": (NOW - timedelta(seconds=900)).isoformat(),
+            }
+        ],
+        "confirmation_count": 1,
+        "required_confirmations": 2,
+    }
+    _write_shadow_state(
+        tmp_path,
+        decision=armed.state,
+        stable=stable,
+        candidate=candidate,
+        last_bucket=bucket - 1,
+    )
+    monkeypatch.setattr(
+        shadow_service,
+        "_live_structure",
+        lambda *_args, **_kwargs: _live_structure(
+            NOW + timedelta(seconds=5),
+            put_wall=110.0,
+            call_wall=130.0,
+        ),
+    )
+
+    def fake_observation(_storage, _tick, *, now, frozen_structure, **kwargs):
+        blocks_arm = kwargs["structure_pending_blocks_new_arm"]
+        return _level_observation(
+            now,
+            spot=96.0,
+            levels=shadow_service._structure_levels(frozen_structure),
+            arm_allowed=not blocks_arm,
+            arm_block_reason=(
+                "structure_change_pending_new_arm_blocked" if blocks_arm else None
+            ),
+        )
+
+    monkeypatch.setattr(shadow_service, "_observation", fake_observation)
+
+    result = run_level_decision_shadow(
+        storage,
+        SimpleNamespace(),
+        now=NOW + timedelta(seconds=5),
+    )
+
+    assert result["phase"] == LevelPhase.INVALIDATED.value
+    assert result["reason"] == "structure_drift"
+    assert result["structure_change_pending"] is False
+    assert result["new_arm_blocked"] is False
+    assert result["levels"]["put_wall"] == 110.0
 
 
 def test_shadow_persists_mutually_exclusive_state_and_transition_audit(
@@ -324,3 +542,92 @@ def test_confirmed_level_path_sends_one_non_executable_warning(tmp_path, monkeyp
     assert envelope.event_id.endswith(":confirmed")
     assert "等待 TRADE READY" in text
     assert "本提醒不连接真实订单" in text
+
+
+def _stable_structure(
+    at: datetime,
+    *,
+    put_wall: float,
+    call_wall: float,
+) -> dict[str, object]:
+    return {
+        "levels": {"put_wall": put_wall, "call_wall": call_wall},
+        "expiry": "20260713",
+        "source": "stable_15m_oi_gex",
+        "observed_at": at.isoformat(),
+        "session_date": "2026-07-13",
+        "promoted_at": at.isoformat(),
+        "last_confirmed_at": at.isoformat(),
+        "confirmation_count": 1,
+    }
+
+
+def _live_structure(
+    at: datetime,
+    *,
+    put_wall: float,
+    call_wall: float,
+) -> dict[str, object]:
+    return {
+        "levels": {"put_wall": put_wall, "call_wall": call_wall},
+        "expiry": "20260713",
+        "source": "live_oi_gex",
+        "observed_at": at.isoformat(),
+        "session_date": "2026-07-13",
+    }
+
+
+def _level_observation(
+    at: datetime,
+    *,
+    spot: float,
+    levels: dict[str, float],
+    quality_ok: bool = True,
+    quality_reason: str | None = None,
+    arm_allowed: bool = True,
+    arm_block_reason: str | None = None,
+) -> LevelObservation:
+    return LevelObservation(
+        at=at,
+        spot=spot,
+        es=5000.0,
+        levels=levels,
+        quality_ok=quality_ok,
+        quality_reason=quality_reason,
+        session_date="2026-07-13",
+        spx_levels=levels,
+        trigger_coordinate_kind="official_spx",
+        trigger_instrument_id="index:SPX",
+        trigger_basis_points=4905.0,
+        spx_spot=spot,
+        arm_allowed=arm_allowed,
+        arm_block_reason=arm_block_reason,
+    )
+
+
+def _write_shadow_state(
+    tmp_path,
+    *,
+    decision: dict[str, object] | None,
+    stable: dict[str, object],
+    candidate: dict[str, object] | None = None,
+    last_bucket: int | None = None,
+) -> None:
+    path = tmp_path / "latest" / "level_decision_shadow_state.json"
+    path.parent.mkdir(parents=True)
+    payload: dict[str, object] = {
+        "schema_version": 1,
+        "outcomes": {},
+        "structure": stable,
+        "structure_stability": {
+            "schema_version": 1,
+            "stable": stable,
+            "candidate": candidate,
+            "last_bucket": (
+                last_bucket if last_bucket is not None else int(NOW.timestamp()) // 900
+            ),
+        },
+    }
+    if decision is not None:
+        payload["decision"] = decision
+    path.write_text(json.dumps(payload), encoding="utf-8")

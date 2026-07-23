@@ -88,7 +88,7 @@ market_features:
   trade_invalidation_buffer_points: {value: 3.0, description: SPX invalidation buffer.}
   trade_target_em_fraction: {value: 0.15, description: Fallback target EM fraction.}
   trade_min_target_room_points: {value: 3.0, description: Minimum remaining SPX target room.}
-  trade_min_reward_risk: {value: 1.0, description: Minimum target-room to invalidation-distance ratio.}
+  trade_min_reward_risk: {value: 0.25, description: Minimum target-room to invalidation-distance ratio.}
   trade_time_stop_minutes: {value: 15, description: Default time stop.}
   session_episode_enabled: {value: true, description: Enables the session structural episode.}
   session_break_buffer_points: {value: 2.0, description: Structural break and reclaim buffer.}

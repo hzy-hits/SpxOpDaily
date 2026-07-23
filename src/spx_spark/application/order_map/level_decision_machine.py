@@ -63,6 +63,8 @@ class LevelObservation:
     trigger_instrument_id: str | None = None
     trigger_basis_points: float | None = None
     spx_spot: float | None = None
+    arm_allowed: bool = True
+    arm_block_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -108,8 +110,22 @@ def advance_level_decision(
     state.pop("quality_failed_at", None)
 
     if phase is LevelPhase.FAR:
+        if not observation.arm_allowed:
+            return _unchanged(
+                state,
+                phase,
+                now,
+                observation.arm_block_reason or "new_arm_blocked",
+            )
         return _arm_nearest_level(observation, settings=settings)
     if phase in TERMINAL_PHASES:
+        if not observation.arm_allowed:
+            return _unchanged(
+                state,
+                phase,
+                now,
+                observation.arm_block_reason or "new_arm_blocked",
+            )
         return _handle_terminal_rearm(
             state,
             phase,
@@ -262,22 +278,6 @@ def _handle_bad_quality(
     settings: LevelDecisionSettings,
 ) -> LevelTransition:
     now = _utc(observation.at)
-    quality_reasons = {
-        reason.strip()
-        for reason in str(observation.quality_reason or "").split(";")
-        if reason.strip()
-    }
-    if "structure_change_pending" in quality_reasons and phase not in {
-        LevelPhase.FAR,
-        *TERMINAL_PHASES,
-    }:
-        return _transition(
-            state,
-            phase,
-            LevelPhase.INVALIDATED,
-            now,
-            "structure_change_pending",
-        )
     if phase in TERMINAL_PHASES or phase is LevelPhase.FAR:
         return _unchanged(state, phase, now, observation.quality_reason or "data_blocked")
     failed_at = _optional_datetime(state.get("quality_failed_at"))

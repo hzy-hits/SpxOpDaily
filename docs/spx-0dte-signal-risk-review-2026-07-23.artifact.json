@@ -4,7 +4,7 @@
     "version": 1,
     "surface": "report",
     "title": "SPX 0DTE 信号与风险复盘：截至 2026-07-22",
-    "description": "固定截止日的生产 trade-ready 回放、周一至周三信号归因、历史统计去重审计与风险参数修复记录。",
+    "description": "固定截止日的全部持久化信号盘点、RTH/GTH 漏斗、245 组参数敏感性、生产 trade-ready 回放与稳健修复记录。",
     "generatedAt": "2026-07-23T12:00:00+00:00",
     "sources": [
       {
@@ -33,6 +33,42 @@
             "features/trade_intents",
             "features/level_decision_health",
             "features/pricing_outcomes",
+            "lake/quotes/schema=v1"
+          ]
+        }
+      },
+      {
+        "id": "all_signal_audit",
+        "label": "Exhaustive persisted-signal, RTH funnel and parameter audit through 2026-07-22",
+        "path": "docs/spx-0dte-all-signal-backtest-2026-07-23.md",
+        "query": {
+          "engine": "DuckDB, point-in-time quote replay and production-equivalent Python",
+          "id": "all-signal-rth-funnel-parameter-grid-20260723",
+          "sql": "SELECT * FROM read_json_auto('data/features/*/date=*/*.jsonl', union_by_name=true) WHERE event_time < TIMESTAMPTZ '2026-07-23T00:00:00Z'; REPLAY 245 FOLLOW_THROUGH PARAMETER SETS WITH RECEIVED_AT KNOWLEDGE CUTOFF",
+          "description": "Reconciles raw records to semantic opportunities, classifies RTH by America/New_York time, evaluates every persisted formal signal and runs an exact-NBBO follow-through sensitivity grid.",
+          "executed_at": "2026-07-23T12:00:00+00:00",
+          "language": "sql",
+          "filters": [
+            "exclusive cutoff 2026-07-23T00:00:00Z",
+            "2026-07-23 partial session excluded",
+            "RTH = 09:30 inclusive to 16:00 exclusive America/New_York",
+            "semantic pricing identity = first_touch_at + contract_id + play",
+            "all parameter choices use point-in-time quote paths",
+            "expanding walk-forward results are separated from in-sample grid ranking"
+          ],
+          "metric_definitions": [
+            "Formal signal is the first transition of one lifecycle into CONFIRMED.",
+            "Raw intent evaluations are telemetry cadence rows, not independent signals.",
+            "Control/proxy PnL is one-contract replay PnL and is not production-account PnL.",
+            "Structure-pending counterfactuals are underlier-only and are never counted as exact option trades."
+          ],
+          "tables_used": [
+            "features/level_decision_audit",
+            "features/level_decision_health",
+            "features/level_decision_outcomes",
+            "features/pricing_outcomes",
+            "features/trade_intents",
+            "features/gth_dip_reclaim",
             "lake/quotes/schema=v1"
           ]
         }
@@ -109,11 +145,13 @@
             "no automatic ordering enabled",
             "no weekday-specific parameter tuning",
             "no loosening of quote freshness",
+            "no loosening of the 20-second entry window or limit discipline",
             "forward-only health schema; historical observations are not fabricated"
           ],
           "metric_definitions": [
-            "A 1.00 reward/risk floor implies a 50 percent pre-cost break-even win rate when reward and risk estimates are accurate.",
-            "The previous 0.25 floor implied an 80 percent pre-cost break-even win rate.",
+            "The temporary 1.00 reward/risk floor removed every historically quantifiable RTH TradeReady opportunity and did not select better directional outcomes.",
+            "The restored 0.25 floor remains subordinate to RTH-only, three-point target room, ES confirmation, quote freshness, limit and entry-window gates.",
+            "The best in-sample follow-through grid failed the expanding walk-forward tail and therefore remains shadow-only.",
             "Schema v2 health snapshots support future audit-equivalent walk-forward reconstruction; they do not repair 2026-07-14 through 2026-07-22."
           ],
           "tables_used": [
@@ -121,7 +159,8 @@
             "src/spx_spark/application/market_features/trade_intent.py",
             "src/spx_spark/application/market_features/play_outcome_stats.py",
             "src/spx_spark/application/order_map/prompts.py",
-            "src/spx_spark/application/order_map/level_decision_shadow.py"
+            "src/spx_spark/application/order_map/level_decision_shadow.py",
+            "src/spx_spark/application/order_map/level_decision_records.py"
           ]
         }
       },
@@ -195,18 +234,18 @@
       },
       {
         "id": "rth_confirmations",
-        "description": "Recent formal confirmations that occurred inside regular trading hours.",
+        "description": "Full persisted formal RTH history versus the recent Monday-through-Wednesday window.",
         "dataset": "headline",
-        "sourceId": "recent_outcomes",
+        "sourceId": "all_signal_audit",
         "metrics": [
           {
-            "label": "近三日 RTH 确认",
-            "field": "recent_rth_confirmations",
+            "label": "全历史 RTH 确认",
+            "field": "full_rth_confirmations",
             "format": "number"
           },
           {
-            "label": "非 RTH 确认",
-            "field": "recent_non_rth_confirmations",
+            "label": "近三日 RTH 确认",
+            "field": "recent_rth_confirmations",
             "format": "number"
           }
         ]
@@ -455,6 +494,201 @@
         ]
       },
       {
+        "id": "full_session_signal_table",
+        "title": "全部正式 CONFIRMED：RTH 与非 RTH",
+        "subtitle": "RTH historically produced four formal signals; zero applies only to the recent 7/20–7/22 window.",
+        "dataset": "full_session_signals",
+        "sourceId": "all_signal_audit",
+        "defaultSort": {
+          "field": "session_date",
+          "direction": "asc"
+        },
+        "density": "spacious",
+        "layout": "full",
+        "columns": [
+          {
+            "field": "session_date",
+            "label": "日期",
+            "type": "text"
+          },
+          {
+            "field": "rth_n",
+            "label": "RTH n",
+            "format": "number"
+          },
+          {
+            "field": "rth_hit_display",
+            "label": "RTH 方向正确",
+            "type": "text"
+          },
+          {
+            "field": "rth_mean_display",
+            "label": "RTH 300s 均值",
+            "type": "text"
+          },
+          {
+            "field": "non_rth_n",
+            "label": "非 RTH n",
+            "format": "number"
+          },
+          {
+            "field": "non_rth_mean_display",
+            "label": "非 RTH 300s 均值",
+            "type": "text"
+          }
+        ]
+      },
+      {
+        "id": "rth_funnel_table",
+        "title": "最近三日 RTH 状态机漏斗",
+        "subtitle": "All three sessions had 390/390 minute coverage; structure candidate handling, not missing quotes, dominated the zero-confirmation result.",
+        "dataset": "rth_funnel",
+        "sourceId": "all_signal_audit",
+        "defaultSort": {
+          "field": "session_date",
+          "direction": "asc"
+        },
+        "density": "spacious",
+        "layout": "full",
+        "columns": [
+          {
+            "field": "session_date",
+            "label": "日期",
+            "type": "text"
+          },
+          {
+            "field": "lifecycle",
+            "label": "Lifecycle",
+            "format": "number"
+          },
+          {
+            "field": "testing",
+            "label": "Testing",
+            "format": "number"
+          },
+          {
+            "field": "break_pending",
+            "label": "Break pending",
+            "format": "number"
+          },
+          {
+            "field": "accepted_rejected",
+            "label": "Accepted/rejected",
+            "format": "number"
+          },
+          {
+            "field": "retest",
+            "label": "Retest",
+            "format": "number"
+          },
+          {
+            "field": "confirmed",
+            "label": "Confirmed",
+            "format": "number"
+          },
+          {
+            "field": "structure_invalidated",
+            "label": "Structure invalidated",
+            "format": "number"
+          },
+          {
+            "field": "coverage_display",
+            "label": "RTH minute coverage",
+            "type": "text"
+          }
+        ]
+      },
+      {
+        "id": "signal_inventory_table",
+        "title": "Raw telemetry 与经济样本对账",
+        "subtitle": "Evaluation cadence and regenerated records are not independent trading signals.",
+        "dataset": "signal_inventory",
+        "sourceId": "all_signal_audit",
+        "defaultSort": {
+          "field": "layer_order",
+          "direction": "asc"
+        },
+        "density": "spacious",
+        "layout": "full",
+        "columns": [
+          {
+            "field": "layer_order",
+            "label": "#",
+            "format": "number"
+          },
+          {
+            "field": "layer",
+            "label": "数据层",
+            "type": "text"
+          },
+          {
+            "field": "raw_rows",
+            "label": "Raw rows",
+            "format": "number"
+          },
+          {
+            "field": "semantic_grain",
+            "label": "去重粒度",
+            "type": "text"
+          },
+          {
+            "field": "usable_conclusion",
+            "label": "可用结论",
+            "type": "text"
+          }
+        ]
+      },
+      {
+        "id": "parameter_sensitivity_table",
+        "title": "Follow-through 参数敏感性与诚实验证",
+        "subtitle": "The 245-way in-sample winner failed the expanding walk-forward tail and is not promoted.",
+        "dataset": "parameter_sensitivity",
+        "sourceId": "all_signal_audit",
+        "defaultSort": {
+          "field": "profile_order",
+          "direction": "asc"
+        },
+        "density": "spacious",
+        "layout": "full",
+        "columns": [
+          {
+            "field": "profile_order",
+            "label": "#",
+            "format": "number"
+          },
+          {
+            "field": "profile",
+            "label": "参数",
+            "type": "text"
+          },
+          {
+            "field": "rth_n",
+            "label": "RTH n",
+            "format": "number"
+          },
+          {
+            "field": "rth_pnl_display",
+            "label": "RTH PnL",
+            "type": "text"
+          },
+          {
+            "field": "session_behavior",
+            "label": "会话行为",
+            "type": "text"
+          },
+          {
+            "field": "validation",
+            "label": "验证结论",
+            "type": "text"
+          },
+          {
+            "field": "decision",
+            "label": "生产决定",
+            "type": "text"
+          }
+        ]
+      },
+      {
         "id": "trade_ready_table",
         "title": "全部 3 个 production trade-ready 决策",
         "subtitle": "Only the July 14 decision filled under the stored provider, limit and window.",
@@ -666,7 +900,7 @@
         "id": "technical_summary",
         "type": "markdown",
         "layout": "full",
-        "body": "## Technical Summary\n\n**先把边界说清楚：现有材料不能解释你最近约 $12,000 的真实亏损。** 本地最新 broker Activity/Flex 覆盖只到 2026-07-16，缺少 7/20–7/22 的成交、数量、手续费与人工追价记录；因此本报告状态是 `partial`，回测盈亏不能冒充账户盈亏。\n\n系统侧找到的是可修复的风险漏洞，而不是“周一至周三专属参数”。固定截止 7/22 的近三日共有 7 次正式 300 秒确认：周一 0 次、周二 2/2 方向正确、周三 1/5 方向正确；7 次全部在 RTH 之外。尤其 7/22 05:22 ET 的 Call intent 被名为 `rth_trade_intent.v3` 的策略放行，剩余 reward/risk 仅 0.76；严格回放因 20 秒窗口内 limit 未成交而正确跳过，但人工追价会暴露在随后 5/15 分钟的回撤里。\n\n已做五类稳健修复：RTH intent 硬限制为 RTH；最低 reward/risk 从 0.25 提升到 1.00；历史 play stats 按经济 first-touch 语义去重；15 分钟报告在被门控时第一行固定显示 `NO TRADE`；level_decision_health 升级为 schema v2，保存未来审计等价 walk-forward 所需的观测与配置。没有按星期调参，也没有放宽行情 freshness。"
+        "body": "## Technical Summary\n\n**RTH 不是从来没有信号。** 7/13–7/22 的 21 个正式 `CONFIRMED` 中，RTH 有 4 个、非 RTH 有 17 个；RTH 的 300 秒方向结果为 3 正 1 负，baseline 裸单 control replay 合计 +$885.00。最近 7/20–7/22 才是 RTH 正式确认归零。\n\n最近三日归零也不是行情断流：每天 RTH 都覆盖 390/390 分钟，健康采样约每 5 秒一次，最大间隔低于 10.1 秒。10 个 RTH lifecycle 中，9 个被 `structure_change_pending` 立即失效，剩余 1 个因 90 秒内没有 retest 而超时。已经把结构候选从行情质量失败中拆出：pending 只阻止新 arm/rearm，已有 lifecycle 继续使用冻结 stable levels，候选真正 promoted 后再做 drift 校验。\n\n245 组 follow-through 网格的样本内冠军在 expanding walk-forward 后段为 -$360.00，因此不写入生产。RR=1.00 也撤回到 0.25：1.00 会删除全部历史可量化 RTH TradeReady，且高 RR 历史子集并未更好。RTH-only、至少 3 点 target room、ES 反向 blocker、20 秒 entry window、不追价和 baseline exit 全部保留。\n\n**现有材料仍不能解释你最近约 $12,000 的真实亏损。** 本地 broker Activity/Flex 只覆盖到 7/16，缺少 7/20–7/22 的成交、数量、手续费和实际退出；因此报告状态仍是 `partial`，回测盈亏不能冒充账户盈亏。"
       },
       {
         "id": "headline_metrics",
@@ -679,6 +913,32 @@
           "strict_trade_ready",
           "forward_readiness"
         ]
+      },
+      {
+        "id": "rth_answer",
+        "type": "markdown",
+        "layout": "full",
+        "sourceId": "all_signal_audit",
+        "body": "## RTH 到底有没有信号？\n\n完整历史有 4 个正式 RTH confirmations，分别发生在 7/14 10:32 ET 和 7/15 10:54、11:50、13:49 ET。只有最近 7/20–7/22 为零。下面把全历史和最近窗口分开，避免再把“近三日为零”误读成“RTH 从未有信号”。"
+      },
+      {
+        "id": "full_session_signal_table_block",
+        "type": "table",
+        "layout": "full",
+        "tableId": "full_session_signal_table"
+      },
+      {
+        "id": "rth_zero_root_cause",
+        "type": "markdown",
+        "layout": "full",
+        "sourceId": "all_signal_audit",
+        "body": "### 最近三日为什么归零\n\n最近三日有完整行情和 10 个 RTH lifecycle：6 个到 testing、4 个到 break_pending、1 个到 accepted，但没有 retest/confirmed。9 个 lifecycle 被结构 candidate pending 提前杀死。用真实 SPX/ES 路径做有限反事实重放，7/20 与 7/21 的两个 break-pending 事件本可继续确认，7/22 那条仍会 timeout；前两条确认后 300 秒方向约为 -2.01、-1.40 bps。因此修复恢复的是状态机产出与可观察性，不是收益提升证明。"
+      },
+      {
+        "id": "rth_funnel_table_block",
+        "type": "table",
+        "layout": "full",
+        "tableId": "rth_funnel_table"
       },
       {
         "id": "key_visual_findings",
@@ -758,25 +1018,44 @@
         "id": "scope_data_definitions",
         "type": "markdown",
         "layout": "full",
-        "body": "## Scope, Data and Definitions\n\n研究截止为 2026-07-22，exclusive cutoff 是 2026-07-23T00:00:00Z；不使用 7/23 的未完成 session。回放覆盖 8 个 observed partitions，其中 7 个通过分钟覆盖健康门槛，但 forward contract-consistent session 为 0/20。最近信号层读取正式 `level_decision_outcomes` 的 300 秒结果；交易层读取 persisted `trade_intents` 并严格使用记录的 provider、contract、limit 与 expires_at。\n\n`directional_return_bps` 是标的 300 秒原始回报按信号方向加符号。`proxy PnL` 是一张合约的历史报价回放，不是 broker PnL。`semantic sample` 是同一个 first touch、contract 与 play 的一次经济机会。所有金额显示到小数点后两位。"
+        "body": "## Scope, Data and Definitions\n\n研究截止为 2026-07-22，exclusive cutoff 是 2026-07-23T00:00:00Z；不使用 7/23 的未完成 session。回放覆盖 8 个 observed partitions，其中 7 个通过分钟覆盖健康门槛，但 forward contract-consistent session 为 0/20。信号层读取首次进入 `CONFIRMED` 的 lifecycle 与正式 300 秒 outcomes；交易层读取 persisted `trade_intents` 并严格使用记录的 provider、contract、limit 与 expires_at。\n\n`directional_return_bps` 是标的 300 秒原始回报按信号方向加符号。`proxy PnL` 是一张合约的历史报价回放，不是 broker PnL。`semantic sample` 是同一个 first touch、contract 与 play 的一次经济机会。42,719 个 intent evaluation 主要是 5 秒 telemetry，不是独立信号。所有金额显示到小数点后两位。"
+      },
+      {
+        "id": "signal_inventory_table_block",
+        "type": "table",
+        "layout": "full",
+        "tableId": "signal_inventory_table"
       },
       {
         "id": "methodology_validation",
         "type": "markdown",
         "layout": "full",
-        "body": "## Methodology and Model Validation\n\n1. 冻结 7/22 cutoff，复跑 production trade-ready 与 control/proxy cohorts。\n2. 从正式 outcome store 提取 7/20–7/22 的 300 秒结果，按方向签名并用 ET 判定 RTH。\n3. 对 3 个 unique trade-ready intent 复核 stored window、limit、provider 与成交前 target/invalidation。\n4. 在坏 intent 的准确 as-of 上重算 20 日 play stats，先复现 legacy event-row 口径，再做全局 semantic dedup；胜率区间使用 Wilson 95% CI。\n5. 检查 backtest weekday slices，但只作为描述性切片；Monday n=0、Tuesday n=2、Wednesday n=5，拒绝 weekday-specific tuning。\n6. 仅实施由契约或风险算术直接支持的修复；不能用现有 persisted signals 重建任意参数下的新信号，故不做伪 walk-forward 优化。\n7. 新增 level_decision_health schema v2，为未来逐帧审计等价回放保存 spot/ES、levels/SPX levels、坐标、稳定/候选结构、machine settings、source snapshot 与 engine health。"
+        "body": "## Methodology and Model Validation\n\n1. 冻结 7/22 cutoff，对 1,515 条 lifecycle transitions、84 条 formal outcomes、365 条 pricing outcomes、42,719 条 intent evaluations 与 6 条 GTH signals 做 grain reconciliation。\n2. RTH 一律用 America/New_York 09:30–16:00 的 event timestamp 分类，不使用会混入盘后记录的 `session_bucket=rth_close`。\n3. 复跑全部 persisted production trade-ready 与 control/proxy cohorts；严格使用 received-at knowledge cutoff、stored provider、contract、limit 与 expires_at。\n4. 对 245 组 follow-through 参数做 exact-NBBO 重评分，同时报告 in-sample、leave-one-session-out、去最佳交易与 expanding walk-forward；只有后者可支持晋级。\n5. 对最近 3 个 structure-invalidated break-pending events 只做明确标注的 underlier counterfactual，不把它们计入 exact option PnL。\n6. 检查 weekday、play、direction、exit、spread、RR、target room、entry window 与追价敏感性；拒绝在小样本上挑星期或把网格冠军上线。\n7. level_decision_health schema v2 从 7/23 起保存 spot/ES、levels、坐标、稳定/候选结构、machine settings、source snapshot 与 engine health，供未来 audit-equivalent walk-forward 使用。"
       },
       {
         "id": "limitations_robustness",
         "type": "markdown",
         "layout": "full",
-        "body": "## Limitations and Robustness\n\n最重要的缺口是 broker ledger：缺少 7/20–7/22 的真实成交、数量、手续费与是否追价，因此无法把约 $12,000 拆成系统信号、执行偏差、仓位大小与 discretionary trades。回测假设 top-of-book 全量成交，未建模 commissions、显式 slippage、queue position、partial fills、market impact 或 operator latency，结果偏乐观。\n\n信号历史只有 7 个健康 session、3 个 unique production decisions、1 个严格成交；没有独立 holdout，也无法对 7/14–7/22 补建 schema v2 原始状态。confirmed/proxy 的星期切片含 Tuesday n=6、Wednesday n=7，但不是 production cohort，且被少数大赢家主导。参数修改因此只限 fail-closed 边界；收益参数、星期参数和 GTH 晋级均未据此优化。"
+        "body": "## Limitations and Robustness\n\n最重要的缺口是 broker ledger：缺少 7/20–7/22 的真实成交、数量、手续费与是否追价，因此无法把约 $12,000 拆成系统信号、执行偏差、仓位大小与 discretionary trades。回测假设 top-of-book 全量成交，未建模 commissions、显式 slippage、queue position、partial fills、market impact 或 operator latency，结果偏乐观。\n\n信号历史只有 7 个健康 backtest sessions、3 个 unique production decisions、1 个严格成交；245-way grid 有明显选择偏差，且没有独立 holdout。7/22 前 health 缺少逐帧 live-level/candidate payload，所以不能对全历史做 audit-equivalent FSM sweep；结构反事实只可用于诊断，不能冒充交易回测。收益参数、星期参数、play filters、exit 与 GTH 晋级均未据此优化。"
+      },
+      {
+        "id": "parameter_sensitivity_header",
+        "type": "markdown",
+        "layout": "full",
+        "sourceId": "all_signal_audit",
+        "body": "## Parameter Sensitivity\n\n当前 follow-through 对 96 个 RTH semantic candidates 为 5 pass、88 fail、3 unavailable，exact RTH n=5、+$60.00，但只覆盖两个会话且去最佳后为 -$80.00。245 组中样本内最优的 `20s / max(0.5pt, 7.5% EM)` 为 RTH n=14、+$815.00；然而前三日训练为 +$1,175.00，后续唯一触发日 7/22 两笔为 -$360.00。没有一个诚实重评分参数能让最近周一、周二、周三同时既有信号又盈利，因此不为“看起来有信号”强行放宽。"
+      },
+      {
+        "id": "parameter_sensitivity_table_block",
+        "type": "table",
+        "layout": "full",
+        "tableId": "parameter_sensitivity_table"
       },
       {
         "id": "parameter_decisions",
         "type": "markdown",
         "layout": "full",
-        "body": "## Parameter and Product Decisions\n\n最低 reward/risk 从 0.25 提高到 1.00 是风险预算修复：0.25 需要 80% 的成本前胜率才能 break even，而当前任何去重 cohort 都不支持这个门槛。它不是新 edge 的证明。RTH-only、NO TRADE 优先和语义去重分别修复交易边界、阅读风险和统计污染；health schema v2 修复未来可审计性。"
+        "body": "## Parameter and Product Decisions\n\nRR 1.00 回退到 0.25，因为 1.00 会删除全部历史可量化 RTH TradeReady，RR>=1.00 的两个方向样本反而均为负。0.25 不是 edge claim；它仍与 RTH-only、至少 3 点 target room、ES 同向、实时双边报价、限价和 20 秒窗口联合使用。结构 pending 生命周期修复解决近期 RTH 信号被错误吞掉的问题；follow-through、entry window、exit、spread、weekday 与 GTH 参数不放宽。"
       },
       {
         "id": "parameter_decisions_table_block",
@@ -788,13 +1067,13 @@
         "id": "next_steps",
         "type": "markdown",
         "layout": "full",
-        "body": "## Next Steps\n\n1. P0：导入覆盖 2026-07-20–2026-07-22 的最新 IBKR Activity/Flex CSV，逐笔连接 intent、成交时间、数量、费用与实际退出，完成约 $12,000 loss attribution。\n2. P0：保持自动下单关闭；RTH intent 只在 RTH 生成，GTH 继续走 exact-spread shadow contract。\n3. P0：从 7/23 起连续收集 schema v2 health frames；达到至少 20 个 contract-consistent sessions、20 个 exact GTH entries、20 个 Put entries 与 20 个 exact exits 后再做冻结 cutoff 人工复审。\n4. P1：在 forward 数据上预先登记候选参数和主指标，采用 rolling walk-forward；成本情景至少包含 commission、半点/一档滑点、延迟与 partial-fill sensitivity。\n5. P1：报告继续同时展示 raw record count 与 semantic opportunity count，防止服务重算次数冒充样本量。"
+        "body": "## Next Steps\n\n1. P0：导入覆盖 2026-07-20–2026-07-22 的最新 IBKR Activity/Flex CSV，逐笔连接 intent、成交时间、数量、费用与实际退出，完成约 $12,000 loss attribution。\n2. P0：保持自动下单关闭；RTH intent 只在 RTH 生成，GTH 继续走 exact-spread shadow contract。\n3. P0：验证 structure-pending 修复的 forward lifecycle、formal confirmation、TradeReady blocker 与通知去重；不能用反事实 PnL替代真实观察。\n4. P0：从 7/23 起连续收集 schema v2 health frames；达到至少 20 个 contract-consistent sessions、20 个 exact GTH entries、20 个 Put entries 与 20 个 exact exits 后再做冻结 cutoff 人工复审。\n5. P1：预先登记 `20s/max(0.5pt,7.5% EM)` 等 shadow candidates 与主指标，采用 rolling walk-forward；成本情景至少包含 commission、半点/一档滑点、延迟与 partial-fill sensitivity。\n6. P1：报告继续同时展示 raw record count 与 semantic opportunity count，防止服务重算次数冒充样本量。"
       },
       {
         "id": "further_questions",
         "type": "markdown",
         "layout": "full",
-        "body": "## Further Questions\n\n- 真实亏损中有多少来自系统提示后追价、加仓或未按 time stop 退出？\n- 7/20–7/22 每笔订单的 contract、quantity、commission 与 realized PnL 是什么？\n- 在新的 RR>=1.00 和 RTH-only 约束下，未来 20 个 session 的机会数与 fill rate 会下降多少？\n- GTH exact spread 的 short leg 流动性和报价年龄能否在每次 shadow decision 中完整保留？\n- 哪些参数应预先冻结，避免在看到星期结果后反复挑选阈值？"
+        "body": "## Further Questions\n\n- 真实亏损中有多少来自系统提示后追价、加仓或未按 time stop 退出？\n- 7/20–7/22 每笔订单的 contract、quantity、commission 与 realized PnL 是什么？\n- structure-pending 修复后，未来 20 个 RTH sessions 的 lifecycle→confirmed→TradeReady 转化率是多少？\n- RR 0.25 与预登记 shadow RR floors 在 forward 数据中的机会数、fill rate 与净成本后表现如何？\n- GTH exact spread 的 short leg 流动性和报价年龄能否在每次 shadow decision 中完整保留？"
       }
     ]
   },
@@ -817,6 +1096,8 @@
           "actual_loss_reconciled": 0.0,
           "recent_confirmations": 7,
           "recent_directional_hit_rate": 0.428571,
+          "full_rth_confirmations": 4,
+          "full_non_rth_confirmations": 17,
           "recent_rth_confirmations": 0,
           "recent_non_rth_confirmations": 7,
           "strict_trade_ready_decisions": 3,
@@ -930,6 +1211,182 @@
           "direction_correct": false,
           "attribution": "no_follow_through",
           "session": "non-RTH"
+        }
+      ],
+      "full_session_signals": [
+        {
+          "session_date": "2026-07-13",
+          "rth_n": 0,
+          "rth_hit_display": "0/0",
+          "rth_mean_display": "—",
+          "non_rth_n": 1,
+          "non_rth_mean_display": "-5.26 bps"
+        },
+        {
+          "session_date": "2026-07-14",
+          "rth_n": 1,
+          "rth_hit_display": "1/1",
+          "rth_mean_display": "+9.84 bps",
+          "non_rth_n": 4,
+          "non_rth_mean_display": "-1.80 bps"
+        },
+        {
+          "session_date": "2026-07-15",
+          "rth_n": 3,
+          "rth_hit_display": "2/3",
+          "rth_mean_display": "+0.10 bps",
+          "non_rth_n": 4,
+          "non_rth_mean_display": "-0.98 bps"
+        },
+        {
+          "session_date": "2026-07-16",
+          "rth_n": 0,
+          "rth_hit_display": "0/0",
+          "rth_mean_display": "—",
+          "non_rth_n": 1,
+          "non_rth_mean_display": "+1.97 bps"
+        },
+        {
+          "session_date": "2026-07-17",
+          "rth_n": 0,
+          "rth_hit_display": "0/0",
+          "rth_mean_display": "—",
+          "non_rth_n": 0,
+          "non_rth_mean_display": "—"
+        },
+        {
+          "session_date": "2026-07-20",
+          "rth_n": 0,
+          "rth_hit_display": "0/0",
+          "rth_mean_display": "—",
+          "non_rth_n": 0,
+          "non_rth_mean_display": "—"
+        },
+        {
+          "session_date": "2026-07-21",
+          "rth_n": 0,
+          "rth_hit_display": "0/0",
+          "rth_mean_display": "—",
+          "non_rth_n": 2,
+          "non_rth_mean_display": "+0.64 bps"
+        },
+        {
+          "session_date": "2026-07-22",
+          "rth_n": 0,
+          "rth_hit_display": "0/0",
+          "rth_mean_display": "—",
+          "non_rth_n": 5,
+          "non_rth_mean_display": "-3.69 bps"
+        }
+      ],
+      "rth_funnel": [
+        {
+          "session_date": "2026-07-20",
+          "lifecycle": 2,
+          "testing": 1,
+          "break_pending": 1,
+          "accepted_rejected": 0,
+          "retest": 0,
+          "confirmed": 0,
+          "structure_invalidated": 2,
+          "coverage_display": "390/390 min"
+        },
+        {
+          "session_date": "2026-07-21",
+          "lifecycle": 3,
+          "testing": 1,
+          "break_pending": 1,
+          "accepted_rejected": 0,
+          "retest": 0,
+          "confirmed": 0,
+          "structure_invalidated": 3,
+          "coverage_display": "390/390 min"
+        },
+        {
+          "session_date": "2026-07-22",
+          "lifecycle": 5,
+          "testing": 4,
+          "break_pending": 2,
+          "accepted_rejected": 1,
+          "retest": 0,
+          "confirmed": 0,
+          "structure_invalidated": 4,
+          "coverage_display": "390/390 min"
+        }
+      ],
+      "signal_inventory": [
+        {
+          "layer_order": 1,
+          "layer": "level_decision_audit",
+          "raw_rows": 1515,
+          "semantic_grain": "1,508 record keys / 607 lifecycle events",
+          "usable_conclusion": "21 first CONFIRMED"
+        },
+        {
+          "layer_order": 2,
+          "layer": "level_decision_outcomes",
+          "raw_rows": 84,
+          "semantic_grain": "21 events × 4 horizons",
+          "usable_conclusion": "82 complete / 2 incomplete"
+        },
+        {
+          "layer_order": 3,
+          "layer": "pricing_outcomes",
+          "raw_rows": 365,
+          "semantic_grain": "270 semantic first touches",
+          "usable_conclusion": "95 duplicates removed; 256 enter final replay"
+        },
+        {
+          "layer_order": 4,
+          "layer": "trade_intents",
+          "raw_rows": 42719,
+          "semantic_grain": "3 unique terminal intents",
+          "usable_conclusion": "2 RTH / 1 non-RTH; 1 strict fill"
+        },
+        {
+          "layer_order": 5,
+          "layer": "gth_dip_reclaim",
+          "raw_rows": 6,
+          "semantic_grain": "6 unique legacy signals",
+          "usable_conclusion": "all non-RTH; shadow only"
+        }
+      ],
+      "parameter_sensitivity": [
+        {
+          "profile_order": 1,
+          "profile": "Current: 15s / 2pt / 5% EM",
+          "rth_n": 5,
+          "rth_pnl_display": "+$60.00",
+          "session_behavior": "7/14 +$210; 7/15 -$150; later 0",
+          "validation": "2 sessions; remove best = -$80",
+          "decision": "Keep production baseline"
+        },
+        {
+          "profile_order": 2,
+          "profile": "Grid top: 20s / 0.5pt / 7.5% EM",
+          "rth_n": 14,
+          "rth_pnl_display": "+$815.00",
+          "session_behavior": "training +$1,175; 7/22 -$360",
+          "validation": "245-way winner fails expanding tail",
+          "decision": "Shadow only"
+        },
+        {
+          "profile_order": 3,
+          "profile": "20s / 1pt / 5% EM",
+          "rth_n": 17,
+          "rth_pnl_display": "+$415.00",
+          "session_behavior": "first 3 days +$775; 7/22 -$360",
+          "validation": "clear regime/selection split",
+          "decision": "Shadow only"
+        },
+        {
+          "profile_order": 4,
+          "profile": "45s / 2pt / 5% EM",
+          "rth_n": 10,
+          "rth_pnl_display": "+$390.00",
+          "session_behavior": "7/17 -$340; 7/20–22 no RTH",
+          "validation": "does not restore recent robust signals",
+          "decision": "Do not promote"
         }
       ],
       "weekday_summary": [
@@ -1110,14 +1567,22 @@
         },
         {
           "priority": 2,
-          "decision": "Minimum reward/risk",
-          "before": "0.25（成本前 break-even 胜率 80.00%）",
-          "after": "1.00（成本前 break-even 胜率 50.00%）",
+          "decision": "Structure candidate lifecycle",
+          "before": "candidate pending 立即使 active lifecycle invalidated",
+          "after": "pending 仅阻止新 arm；active 使用 frozen stable level",
           "status": "已实现",
-          "evidence": "bad intent RR=0.76；提门槛是 risk-off，不是收益优化"
+          "evidence": "最近 10 个 RTH lifecycle 中 9 个被 pending 杀死"
         },
         {
           "priority": 3,
+          "decision": "Minimum reward/risk",
+          "before": "临时提高为 1.00",
+          "after": "恢复 0.25；保留 RTH/room/ES/NBBO/limit gates",
+          "status": "已回退",
+          "evidence": "1.00 历史 RTH TradeReady=0；RR>=1 两样本均方向错误"
+        },
+        {
+          "priority": 4,
           "decision": "Play outcome identity",
           "before": "event key 重算可重复计数",
           "after": "first_touch_at + contract_id + play 全局去重",
@@ -1125,7 +1590,7 @@
           "evidence": "Jul 22 同一统计从 n=63 修正为 n=41"
         },
         {
-          "priority": 4,
+          "priority": 5,
           "decision": "15m report hierarchy",
           "before": "bias 在第一行，容易被读成入场方向",
           "after": "被门控时第一行固定 NO TRADE",
@@ -1133,7 +1598,7 @@
           "evidence": "近期报告没有 explicit entry，却可能强化方向错觉"
         },
         {
-          "priority": 5,
+          "priority": 6,
           "decision": "Audit-equivalent replay telemetry",
           "before": "health v1 无法重建逐帧模型输入",
           "after": "schema v2 保存状态、参数、source snapshot 与 engine health",
@@ -1141,7 +1606,15 @@
           "evidence": "支持未来 walk-forward；7/14–7/22 不可回补"
         },
         {
-          "priority": 6,
+          "priority": 7,
+          "decision": "Follow-through tuning",
+          "before": "current 15s/2pt/5% EM",
+          "after": "生产保持；grid top 仅 shadow",
+          "status": "不晋级",
+          "evidence": "245-way winner expanding tail=-$360.00"
+        },
+        {
+          "priority": 8,
           "decision": "Weekday-specific tuning",
           "before": "无 weekday gate",
           "after": "保持无 weekday gate",
@@ -1149,7 +1622,7 @@
           "evidence": "Monday n=0、Tuesday n=2、Wednesday n=5"
         },
         {
-          "priority": 7,
+          "priority": 9,
           "decision": "GTH promotion",
           "before": "shadow",
           "after": "继续 shadow",

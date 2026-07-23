@@ -88,7 +88,7 @@ market_features:
   trade_invalidation_buffer_points: {value: 3.0, description: SPX reclaim distance beyond the trigger level that invalidates a trade intent.}
   trade_target_em_fraction: {value: 0.15, description: Expected-move fraction used for a fallback SPX target when no outward structure exists.}
   trade_min_target_room_points: {value: 3.0, description: Minimum remaining SPX points from the evaluated spot to the deterministic target.}
-  trade_min_reward_risk: {value: 1.0, description: Minimum remaining target distance divided by distance to the SPX invalidation level; 1.0 requires at least even gross reward/risk before costs.}
+  trade_min_reward_risk: {value: 0.25, description: Minimum remaining target distance divided by distance to the SPX invalidation level; retained at 0.25 because the 1.0 risk-off experiment removed every historical RTH TradeReady opportunity without improving the direction cohort. RTH, target-room, ES-confirmation and exact quote gates remain mandatory.}
   trade_time_stop_minutes: {value: 15, description: Default maximum holding time for an unextended 0DTE trade intent.}
   session_episode_enabled: {value: true, description: Maintains one session-level structural path above individual wall and flip events.}
   session_break_buffer_points: {value: 2.0, description: SPX distance beyond a frozen structural level required to record a session break or reclaim.}
