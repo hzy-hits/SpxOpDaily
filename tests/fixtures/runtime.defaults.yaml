@@ -40,6 +40,23 @@ analytics:
   provider_priority: {value: [schwab, ibkr], description: Option provider priority.}
   underlier_reference_tolerance_fraction: {value: 0.02, description: Underlier tolerance.}
 
+spring_gamma_v3:
+  enabled: {value: true, description: Enables Spring Gamma v3 shadow prediction recording.}
+  report_enabled: {value: true, description: Includes eligible Spring Gamma v3 shadow predictions in reports.}
+  prediction_interval_seconds: {value: 60, description: Minute shadow prediction cadence.}
+  horizons_minutes: {value: [15, 30, 60], description: Shadow prediction horizons.}
+  rth_greek_max_age_seconds: {value: 15.0, description: Maximum RTH Greek-reference age.}
+  rth_iv_max_age_seconds: {value: 15.0, description: Maximum RTH IV-surface age.}
+  gth_greek_max_age_seconds: {value: 90.0, description: Maximum GTH Greek-reference age.}
+  gth_iv_max_age_seconds: {value: 90.0, description: Maximum GTH IV-surface age.}
+  min_pair_ratio: {value: 0.80, description: Minimum complete Call/Put pair ratio.}
+  min_iv: {value: 0.60, description: Minimum IV coverage ratio.}
+  min_delta: {value: 0.60, description: Minimum Delta coverage ratio.}
+  min_oi: {value: 0.60, description: Minimum open-interest coverage ratio.}
+  min_paired_strikes: {value: 3, description: Minimum paired-strike count.}
+  min_probability: {value: 0.60, description: Minimum uncalibrated directional probability proxy.}
+  min_margin: {value: 0.10, description: Minimum directional probability-proxy margin.}
+
 globex_trend:
   enabled: {value: true, description: Runs the continuous ES session trend and reversal state machine, rendering Globex or RTH semantics from the event timestamp.}
   interval_seconds: {value: 30, description: Evaluation cadence in the 24h runtime.}

@@ -329,6 +329,12 @@ def option_volatility_features(
         return {
             "atm_iv_0dte": None,
             "atm_iv_1dte": None,
+            "put_skew_25d_0dte": None,
+            "call_skew_25d_0dte": None,
+            "put_skew_25d_1dte": None,
+            "call_skew_25d_1dte": None,
+            "expected_move_points_0dte": None,
+            "expected_move_points_1dte": None,
             "atm_iv_change_5m": None,
             "atm_iv_change_15m": None,
             "atm_iv_change_60m": None,
@@ -341,7 +347,11 @@ def option_volatility_features(
         "put_skew_25d_0dte": front.put_skew_25d,
         "call_skew_25d_0dte": front.call_skew_25d,
         "put_skew_25d_1dte": next_expiry.put_skew_25d if next_expiry else None,
+        "call_skew_25d_1dte": next_expiry.call_skew_25d if next_expiry else None,
         "expected_move_points_0dte": front.expected_move_points,
+        "expected_move_points_1dte": (
+            next_expiry.expected_move_points if next_expiry else None
+        ),
         "term_gap": _difference(current_iv, next_expiry.atm_iv if next_expiry else None),
     }
     for minutes in (5, 15, 60):

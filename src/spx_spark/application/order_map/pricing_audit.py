@@ -35,6 +35,11 @@ def build_pricing_audit_record(
         "pricing_reference": payload.get("pricing_reference"),
         "expected_move_points": payload.get("expected_move_points"),
         "strike_price_coverage": payload.get("strike_price_coverage"),
+        "spring_gamma_v3_shadow": (
+            dict(payload["spring_gamma_v3_shadow"])
+            if isinstance(payload.get("spring_gamma_v3_shadow"), Mapping)
+            else None
+        ),
         "candidates": payload.get("candidates") if isinstance(payload.get("candidates"), list) else [],
         "wall_ladder": payload.get("wall_ladder"),
         "warnings": payload.get("warnings") if isinstance(payload.get("warnings"), list) else [],

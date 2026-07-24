@@ -31,6 +31,7 @@ from spx_spark.settings.schwab import (
     SchwabWideChainSettings,
 )
 from spx_spark.settings.shock import ShockSettings
+from spx_spark.settings.spring_gamma_v3 import SpringGammaV3Settings
 from spx_spark.settings.storage import StorageSettingsSlice
 
 _SECRET_KEY_FRAGMENTS = (
@@ -270,6 +271,31 @@ def load_settings(
         underlier_reference_tolerance_fraction=float(
             get("analytics.underlier_reference_tolerance_fraction")
         ),
+    )
+    spring_gamma_v3 = SpringGammaV3Settings(
+        enabled=bool(get("spring_gamma_v3.enabled")),
+        report_enabled=bool(get("spring_gamma_v3.report_enabled")),
+        prediction_interval_seconds=int(
+            get("spring_gamma_v3.prediction_interval_seconds")
+        ),
+        horizons_minutes=tuple(
+            int(item) for item in get("spring_gamma_v3.horizons_minutes")
+        ),
+        rth_greek_max_age_seconds=float(
+            get("spring_gamma_v3.rth_greek_max_age_seconds")
+        ),
+        rth_iv_max_age_seconds=float(get("spring_gamma_v3.rth_iv_max_age_seconds")),
+        gth_greek_max_age_seconds=float(
+            get("spring_gamma_v3.gth_greek_max_age_seconds")
+        ),
+        gth_iv_max_age_seconds=float(get("spring_gamma_v3.gth_iv_max_age_seconds")),
+        min_pair_ratio=float(get("spring_gamma_v3.min_pair_ratio")),
+        min_iv=float(get("spring_gamma_v3.min_iv")),
+        min_delta=float(get("spring_gamma_v3.min_delta")),
+        min_oi=float(get("spring_gamma_v3.min_oi")),
+        min_paired_strikes=int(get("spring_gamma_v3.min_paired_strikes")),
+        min_probability=float(get("spring_gamma_v3.min_probability")),
+        min_margin=float(get("spring_gamma_v3.min_margin")),
     )
     globex_trend = GlobexTrendSettings(
         enabled=bool(get("globex_trend.enabled")),
@@ -692,6 +718,7 @@ def load_settings(
         analytics=analytics,
         globex_trend=globex_trend,
         market_features=market_features,
+        spring_gamma_v3=spring_gamma_v3,
         alerts=alerts,
         runtime=runtime,
         shock=shock,

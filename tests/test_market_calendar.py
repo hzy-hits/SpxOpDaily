@@ -66,14 +66,16 @@ def test_research_expiry_rolls_at_exactly_1700_et() -> None:
     assert CALENDAR.research_expiry(et_datetime(date(2026, 7, 10), 17)) == date(2026, 7, 13)
 
 
-def test_option_collection_rolls_next_session_at_1530_without_moving_research_clock() -> None:
+def test_option_collection_prefetch_keeps_0dte_until_rth_close() -> None:
     thursday = date(2026, 7, 9)
 
     assert CALENDAR.option_collection_expiry(et_datetime(thursday, 15, 29)) == thursday
-    assert CALENDAR.option_collection_expiry(et_datetime(thursday, 15, 30)) == date(
-        2026, 7, 10
-    )
+    assert CALENDAR.option_collection_expiry(et_datetime(thursday, 15, 30)) == thursday
     assert CALENDAR.option_collection_expiries(et_datetime(thursday, 15, 30)) == (
+        thursday,
+        date(2026, 7, 10),
+    )
+    assert CALENDAR.option_collection_expiries(et_datetime(thursday, 16)) == (
         date(2026, 7, 10),
         date(2026, 7, 13),
     )
@@ -82,13 +84,12 @@ def test_option_collection_rolls_next_session_at_1530_without_moving_research_cl
     assert not CALENDAR.is_next_expiry_prefetch_window(et_datetime(thursday, 17))
 
 
-def test_option_collection_uses_actual_early_close_minus_thirty_minutes() -> None:
+def test_option_collection_keeps_0dte_through_actual_early_close() -> None:
     early_close = date(2026, 11, 27)
 
     assert CALENDAR.option_collection_expiry(et_datetime(early_close, 12, 29)) == early_close
-    assert CALENDAR.option_collection_expiry(et_datetime(early_close, 12, 30)) == date(
-        2026, 11, 30
-    )
+    assert CALENDAR.option_collection_expiry(et_datetime(early_close, 12, 30)) == early_close
+    assert CALENDAR.option_collection_expiry(et_datetime(early_close, 13)) == date(2026, 11, 30)
     assert CALENDAR.research_expiry(et_datetime(early_close, 12, 30)) == early_close
     assert CALENDAR.is_next_expiry_prefetch_window(et_datetime(early_close, 12, 30))
 

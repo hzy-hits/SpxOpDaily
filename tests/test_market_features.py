@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 
@@ -29,6 +30,7 @@ from spx_spark.application.market_features.options import (
     _wall_rank_persistence,
     build_option_structure_frame,
     imbalance,
+    option_volatility_features,
     provider_mid_divergences,
 )
 from spx_spark.analytics.options.models import OptionsMap, UnderlierReference
@@ -43,6 +45,32 @@ from spx_spark.storage import LatestState
 
 
 UTC = timezone.utc
+
+
+def test_option_volatility_features_keep_both_expiry_contexts() -> None:
+    now = datetime(2026, 7, 24, 14, 0, tzinfo=UTC)
+    front = SimpleNamespace(
+        atm_iv=0.18,
+        put_skew_25d=0.03,
+        call_skew_25d=-0.01,
+        expected_move_points=24.25,
+    )
+    next_expiry = SimpleNamespace(
+        atm_iv=0.16,
+        put_skew_25d=0.02,
+        call_skew_25d=-0.02,
+        expected_move_points=55.75,
+    )
+
+    result = option_volatility_features(front, next_expiry, history=[], now=now)
+
+    assert result["atm_iv_0dte"] == 0.18
+    assert result["atm_iv_1dte"] == 0.16
+    assert result["expected_move_points_0dte"] == 24.25
+    assert result["expected_move_points_1dte"] == 55.75
+    assert result["put_skew_25d_1dte"] == 0.02
+    assert result["call_skew_25d_1dte"] == -0.02
+    assert result["term_gap"] == pytest.approx(0.02)
 
 
 def test_wall_rank_persistence_tracks_primary_rank_and_confidence() -> None:

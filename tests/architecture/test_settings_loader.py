@@ -7,7 +7,7 @@ import pytest
 import yaml
 
 from spx_spark.application.shock.models import IntradayShockSettings
-from spx_spark.settings import AppSettings, load_settings
+from spx_spark.settings import AppSettings, SpringGammaV3Settings, load_settings
 from spx_spark.settings.market_features import MarketFeatureSettings
 from spx_spark.settings.shock import ShockSettings
 
@@ -36,6 +36,13 @@ def test_load_settings_from_fixture_is_stable(
     assert settings.schwab.wide_chain.next_expiry_strike_count == 40
     assert settings.market_features.enabled is True
     assert settings.market_features.volume_baseline_sessions == 20
+    assert isinstance(settings.spring_gamma_v3, SpringGammaV3Settings)
+    assert settings.spring_gamma_v3.authority == "shadow"
+    assert settings.spring_gamma_v3.prediction_interval_seconds == 60
+    assert settings.spring_gamma_v3.horizons_minutes == (15, 30, 60)
+    assert settings.spring_gamma_v3.rth_greek_max_age_seconds == 15.0
+    assert settings.spring_gamma_v3.gth_greek_max_age_seconds == 90.0
+    assert settings.sources["spring_gamma_v3.enabled"].origin == "defaults"
     assert settings.sources["market_data.provider_priority"].origin == "defaults"
 
 
@@ -71,6 +78,29 @@ def test_deployment_overlay_beats_defaults(tmp_path: Path) -> None:
     )
     assert settings.alerts.steven_enabled is True
     assert settings.sources["steven.enabled"].origin == "deployment"
+
+
+def test_spring_gamma_v3_deployment_overlay_remains_shadow_only(tmp_path: Path) -> None:
+    overlay = {
+        "spring_gamma_v3": {
+            "report_enabled": {"value": False},
+            "min_probability": {"value": 0.65},
+        }
+    }
+    deployment = tmp_path / "deployment.yaml"
+    deployment.write_text(yaml.safe_dump(overlay), encoding="utf-8")
+
+    settings = load_settings(
+        defaults_path=FIXTURE,
+        deployment_path=deployment,
+        environ={},
+    )
+
+    assert settings.spring_gamma_v3.report_enabled is False
+    assert settings.spring_gamma_v3.min_probability == 0.65
+    assert settings.spring_gamma_v3.authority == "shadow"
+    assert "authority" not in settings.raw["spring_gamma_v3"]
+    assert settings.sources["spring_gamma_v3.min_probability"].origin == "deployment"
 
 
 def test_deployment_overlay_rejects_unknown_paths(tmp_path: Path) -> None:
@@ -184,3 +214,27 @@ def test_market_feature_settings_reject_invalid_play_stats(
 ) -> None:
     with pytest.raises(ValueError):
         replace(MarketFeatureSettings(), **overrides)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    (
+        {"prediction_interval_seconds": 0},
+        {"horizons_minutes": ()},
+        {"horizons_minutes": (30, 15)},
+        {"rth_greek_max_age_seconds": 0.0},
+        {"gth_iv_max_age_seconds": -1.0},
+        {"min_pair_ratio": 0.0},
+        {"min_iv": 1.01},
+        {"min_delta": -0.1},
+        {"min_oi": 1.1},
+        {"min_paired_strikes": 0},
+        {"min_probability": 0.5},
+        {"min_margin": 0.0},
+    ),
+)
+def test_spring_gamma_v3_rejects_invalid_policy(
+    overrides: dict[str, object],
+) -> None:
+    with pytest.raises(ValueError):
+        replace(SpringGammaV3Settings(), **overrides)

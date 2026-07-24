@@ -234,13 +234,18 @@ class MarketCalendar:
         return current, self.next_trading_day(current)
 
     def option_collection_expiry(self, now: datetime) -> date:
-        """Roll acquisition to the next expiry 30 minutes before the RTH close."""
+        """Keep same-day acquisition through RTH close, then roll.
+
+        ``is_next_expiry_prefetch_window`` still opens thirty minutes before
+        the close so collectors can favor the already-included next expiry.
+        The front expiry must not be discarded during the most time-sensitive
+        final thirty minutes of 0DTE trading.
+        """
 
         current = _as_et(now)
         session = self.session(current.date())
         if session is not None:
-            prefetch_at = session.close_at - _NEXT_EXPIRY_PREFETCH_BEFORE_CLOSE
-            if prefetch_at <= current < session.review_ready_at:
+            if session.close_at <= current < session.review_ready_at:
                 return self.next_trading_day(session.trading_date)
         return self.research_expiry(current)
 

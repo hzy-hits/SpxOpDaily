@@ -27,9 +27,14 @@ from spx_spark.application.order_map.render import (
     _l1_liquidity_text,
     _rn_density_line,
     _wall_rank_persistence_line,
-    render_research_only_template,
     render_template,
     underlier_source_label,
+)
+from spx_spark.application.order_map.spring_gamma_presentation import (
+    SPRING_GAMMA_V3_SHADOW_SYSTEM_RULE,
+    render_research_only_template,
+    spring_gamma_v3_shadow_line,
+    spring_gamma_v3_writer_summary,
 )
 from spx_spark.application.order_map.state import _session_phase_of
 from spx_spark.application.order_map.strike_coverage_presentation import (
@@ -54,6 +59,7 @@ GLOBEX_CONTEXT_SYSTEM_PROMPT = "\n".join(
         "ES 阈值只能使用 es_equivalent_levels 明列的值；没有下方结构位就明确写没有，不得为了双向表达自造整数关口。",
         "禁止比喻、拟人、夸张修辞和隐藏因果；禁止使用『无引力』『气垫』『燃料』『卖方收工』『真金白银』等措辞。",
         "现金 SPX 或新期权链缺失时，不生成期权价格、Greeks、概率、限价或下单指令。不得写『等开盘再说』。",
+        SPRING_GAMMA_V3_SHADOW_SYSTEM_RULE,
         "输出简洁中文，先结论，再位置，再双向条件，最后写数据限制。数字逐字引用，不改写。",
     )
 )
@@ -550,6 +556,7 @@ def render_status_template(
         ),
         *([line] if (line := _compact_option_line(payload)) else []),
         *([line] if (line := compact_skew_spread_shadow_line(payload)) else []),
+        *([line] if (line := spring_gamma_v3_shadow_line(payload)) else []),
         *(["", *candidate_section] if candidate_section else []),
     ]
     if changes:
@@ -818,6 +825,7 @@ def _status_writer_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "confirmed_gate",
         "call_skew_spread_shadow",
         "put_skew_spread_shadow",
+        "spring_gamma_v3_shadow",
         "warnings",
     )
     compact = {key: payload.get(key) for key in keys if key in payload}
@@ -845,6 +853,10 @@ def _status_writer_payload(payload: dict[str, Any]) -> dict[str, Any]:
                     "execution",
                 )
             }
+    spring_gamma_shadow = compact.get("spring_gamma_v3_shadow")
+    spring_gamma_summary = spring_gamma_v3_writer_summary(spring_gamma_shadow)
+    if spring_gamma_summary is not None:
+        compact["spring_gamma_v3_shadow"] = spring_gamma_summary
     compact["decision_guidance"] = guidance_module.build_decision_guidance(payload).to_dict()
     signed_gex = payload.get("signed_gex_proxy")
     if isinstance(signed_gex, dict):

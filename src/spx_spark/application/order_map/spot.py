@@ -32,6 +32,46 @@ def hyperliquid_sp500_price(
     return finite_float(quote.mid or quote.mark or quote.effective_price)
 
 
+def report_trigger_coordinate(
+    state: LatestState,
+    resolution: SpotResolution,
+    *,
+    now: datetime,
+) -> dict[str, object]:
+    """Return the level-compatible price coordinate used by report triggers."""
+
+    if DEFAULT_MARKET_CALENDAR.is_rth_open(now):
+        quote = state.best_quote("index:SPX")
+        if quote is not None and configured_quote_use_decision(
+            quote, as_of=now
+        ).pricing_allowed:
+            return {
+                "kind": "official_spx",
+                "instrument_id": "index:SPX",
+                "observed_value": quote.effective_price,
+                "source": "index:SPX",
+            }
+        return {
+            "kind": "unavailable",
+            "instrument_id": None,
+            "observed_value": None,
+            "source": "official_spx_unavailable_use_realtime_es_equivalent",
+        }
+    if resolution.pricing_source == "chain_implied":
+        return {
+            "kind": "chain_implied_spx",
+            "instrument_id": "synthetic:SPXW_PARITY",
+            "observed_value": resolution.pricing_price,
+            "source": "chain_implied",
+        }
+    return {
+        "kind": "unavailable",
+        "instrument_id": None,
+        "observed_value": None,
+        "source": "chain_implied_unavailable_use_realtime_es_equivalent",
+    }
+
+
 def _actionable_chain_spot(
     state: LatestState,
     options_map: OptionsMap,

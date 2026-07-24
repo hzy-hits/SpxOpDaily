@@ -40,6 +40,23 @@ analytics:
   provider_priority: {value: [schwab, ibkr], description: Option provider selection priority.}
   underlier_reference_tolerance_fraction: {value: 0.02, description: Maximum chain-implied versus proxy underlier divergence.}
 
+spring_gamma_v3:
+  enabled: {value: true, description: Enables Spring Gamma v3 shadow prediction recording; this setting cannot grant production decision authority.}
+  report_enabled: {value: true, description: Includes eligible Spring Gamma v3 shadow predictions in the fifteen-minute report without changing production intent.}
+  prediction_interval_seconds: {value: 60, description: Minute cadence for durable Spring Gamma v3 shadow snapshots; evaluation remains shadow-only and report delivery remains fifteen-minute.}
+  horizons_minutes: {value: [15, 30, 60], description: Forward return horizons evaluated by the shadow predictor.}
+  rth_greek_max_age_seconds: {value: 15.0, description: Maximum RTH Greek-reference age accepted by the shadow predictor.}
+  rth_iv_max_age_seconds: {value: 15.0, description: Maximum RTH IV-surface age accepted by the shadow predictor.}
+  gth_greek_max_age_seconds: {value: 90.0, description: Maximum GTH Greek-reference rotation age accepted for shadow research only.}
+  gth_iv_max_age_seconds: {value: 90.0, description: Maximum GTH IV-surface rotation age accepted for shadow research only.}
+  min_pair_ratio: {value: 0.80, description: Minimum complete Call/Put pair ratio required before shadow inference.}
+  min_iv: {value: 0.60, description: Minimum IV coverage ratio required before shadow inference.}
+  min_delta: {value: 0.60, description: Minimum Delta coverage ratio required before shadow inference.}
+  min_oi: {value: 0.60, description: Minimum open-interest coverage ratio required before OI-weighted shadow features.}
+  min_paired_strikes: {value: 3, description: Minimum distinct strikes with usable Call and Put inputs required before shadow inference.}
+  min_probability: {value: 0.60, description: Minimum uncalibrated shadow probability proxy required to publish a research label; it is not a production probability.}
+  min_margin: {value: 0.10, description: Minimum shadow probability-proxy margin over the competing direction required to publish a research label.}
+
 globex_trend:
   enabled: {value: true, description: Runs the continuous ES session trend and reversal state machine, rendering Globex or RTH semantics from the event timestamp.}
   interval_seconds: {value: 30, description: Evaluation cadence in the 24h runtime.}

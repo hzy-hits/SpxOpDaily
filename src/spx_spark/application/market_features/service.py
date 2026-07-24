@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from collections.abc import Callable
 from dataclasses import replace
@@ -47,6 +48,19 @@ from spx_spark.application.market_features.session_episode import (
     advance_session_episode,
     record_session_episode_transition,
 )
+from spx_spark.application.market_features.spring_gamma_v3 import (
+    SCHEMA_VERSION as SPRING_GAMMA_V3_SCHEMA_VERSION,
+    build_spring_gamma_v3_shadow,
+)
+from spx_spark.application.market_features.spring_gamma_v3_io import (
+    latest_spring_gamma_v3_shadow_path,
+    persist_spring_gamma_v3_shadow,
+    spring_gamma_v3_prediction_due,
+    validate_spring_gamma_v3_shadow,
+)
+from spx_spark.application.market_features.wall_probability import (
+    build_wall_probability_tenor_shadow,
+)
 from spx_spark.application.market_features.trade_candidate import (
     advance_trade_candidate,
     gate_trade_intent,
@@ -68,8 +82,12 @@ from spx_spark.config import StorageSettings
 from spx_spark.features.exposure_map import build_exposure_map
 from spx_spark.greek_reference import build_zero_dte_greeks_reference
 from spx_spark.macro_event_clock import macro_event_state
+from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 from spx_spark.marketdata import as_utc
-from spx_spark.options_map import build_options_map
+from spx_spark.options_map import (
+    build_options_map,
+    group_spxw_option_quotes,
+)
 from spx_spark.settings import load_app_settings
 from spx_spark.settings.market_features import MarketFeatureSettings
 from spx_spark.storage import LatestStateStore
@@ -254,6 +272,18 @@ def run(
         macro_event=macro_event,
         policy=policy,
     )
+    spring_gamma_v3 = _process_spring_gamma_v3_shadow(
+        storage=storage,
+        latest_state=latest,
+        options_map=options_map,
+        market_frame=market_frame,
+        option_frame=option_frame,
+        greek_reference=focused,
+        exposure_map=exposure_map,
+        level_decision=level_decision,
+        now=evaluation_now,
+        settings=app.spring_gamma_v3,
+    )
     if contract_id:
         score = greek_decision.get("contract_scores", {}).get(contract_id)
         if isinstance(score, dict):
@@ -345,11 +375,241 @@ def run(
             "confirmed_gate": confirmed_gate,
             "level_decision_refresh_error": level_decision_refresh_error,
             "virtual_strategy": virtual_strategy,
+            "spring_gamma_v3_shadow": spring_gamma_v3,
         }
     )
     if args.json:
         print(json.dumps(output, sort_keys=True))
     return 0
+
+
+def _process_spring_gamma_v3_shadow(
+    *,
+    storage: StorageSettings,
+    latest_state: object,
+    options_map: object,
+    market_frame: object,
+    option_frame: object,
+    greek_reference: dict[str, Any],
+    exposure_map: object,
+    level_decision: dict[str, object],
+    now: datetime,
+    settings: object,
+) -> dict[str, object]:
+    """Evaluate and persist the isolated research shadow without failing the hot loop."""
+
+    interval = 900
+    session_id = "unknown"
+    expected_expiry = DEFAULT_MARKET_CALENDAR.research_expiry(now).strftime("%Y%m%d")
+    try:
+        configured_interval = getattr(settings, "prediction_interval_seconds", interval)
+        if isinstance(configured_interval, bool):
+            raise ValueError("prediction_interval_seconds must be a positive integer")
+        parsed_interval = int(configured_interval)
+        if parsed_interval <= 0:
+            raise ValueError("prediction_interval_seconds must be a positive integer")
+        interval = parsed_interval
+        market_payload = market_frame.to_dict()
+        if not isinstance(market_payload, dict):
+            raise TypeError("market_frame.to_dict() must return a mapping")
+        session_id = str(market_payload.get("session_id") or "unknown")
+        latest_path = latest_spring_gamma_v3_shadow_path(storage.data_root)
+        latest_shadow = _reusable_spring_gamma_v3_shadow(
+            load_json(latest_path),
+            now=now,
+            session_id=session_id,
+            expected_expiry=expected_expiry,
+        )
+        if not spring_gamma_v3_prediction_due(
+            latest_shadow,
+            now=now,
+            session_id=session_id,
+            prediction_interval_seconds=interval,
+        ):
+            return {
+                "evaluated": False,
+                "status": str(latest_shadow.get("status") or "unknown"),
+                "prediction_id": latest_shadow.get("prediction_id"),
+            }
+
+        shadow = build_spring_gamma_v3_shadow(
+            market_frame=market_frame,
+            option_frame=option_frame,
+            greek_reference=greek_reference,
+            exposure_map=exposure_map,
+            now=now,
+            expected_expiry=expected_expiry,
+            settings=settings,
+            level_decision=level_decision,
+        )
+        direction = shadow.get("direction")
+        direction_decision = (
+            str(direction.get("decision") or "abstain")
+            if isinstance(direction, dict)
+            else "abstain"
+        )
+        wall_probability = build_wall_probability_tenor_shadow(
+            options_map=options_map,
+            grouped_quotes=group_spxw_option_quotes(
+                latest_state,
+                storage_settings=storage,
+            ),
+            option_frame=option_frame,
+            direction=direction_decision,
+            now=now,
+            horizons=getattr(settings, "horizons_minutes", (15, 30, 60)),
+        )
+        shadow = validate_spring_gamma_v3_shadow(
+            _attach_wall_probability_shadow(shadow, wall_probability)
+        )
+    except Exception as exc:  # A research calculation must never stop production frames.
+        shadow = _failed_spring_gamma_v3_shadow(
+            now=now,
+            session_id=session_id,
+            expected_expiry=expected_expiry,
+            error=exc,
+        )
+
+    try:
+        persisted = persist_spring_gamma_v3_shadow(
+            shadow,
+            data_root=storage.data_root,
+            prediction_interval_seconds=interval,
+        )
+    except Exception as exc:  # Preserve the production hot loop on research I/O failure.
+        return {
+            "evaluated": True,
+            "status": "failed",
+            "prediction_id": shadow.get("prediction_id"),
+            "error": f"{type(exc).__name__}:{exc}",
+        }
+    return {
+        "evaluated": True,
+        "status": shadow.get("status"),
+        "prediction_id": shadow.get("prediction_id"),
+        **persisted,
+    }
+
+
+def _reusable_spring_gamma_v3_shadow(
+    payload: dict[str, Any],
+    *,
+    now: datetime,
+    session_id: str,
+    expected_expiry: str,
+) -> dict[str, Any]:
+    """Return only a current-session shadow that may suppress this bucket."""
+
+    try:
+        record = validate_spring_gamma_v3_shadow(payload)
+        text = str(record["as_of"]).strip()
+        as_of = datetime.fromisoformat(
+            f"{text[:-1]}+00:00" if text.endswith(("Z", "z")) else text
+        )
+    except (TypeError, ValueError):
+        return {}
+    if (
+        record.get("session_id") != session_id
+        or record.get("expiry") != expected_expiry
+        or as_utc(as_of) > as_utc(now)
+    ):
+        return {}
+    return record
+
+
+def _attach_wall_probability_shadow(
+    shadow: dict[str, object],
+    wall_probability: dict[str, object],
+) -> dict[str, object]:
+    """Combine the two isolated shadows and preserve a complete input identity."""
+
+    combined = dict(shadow)
+    combined["wall_probability"] = wall_probability
+    if wall_probability.get("status") != "ready":
+        if combined.get("status") == "ready":
+            direction = combined.get("direction")
+            if isinstance(direction, dict):
+                combined["direction"] = {**direction, "decision": "abstain"}
+            combined.update(
+                {
+                    "status": "abstain",
+                    "regime": "abstain",
+                    "opportunity": "abstain",
+                    "abstain": True,
+                }
+            )
+        wall_reasons = [
+            str(reason)
+            for reason in wall_probability.get("abstain_reasons", [])
+            if str(reason)
+        ]
+        combined["abstain_reasons"] = list(
+            dict.fromkeys(
+                [
+                    *[
+                        str(reason)
+                        for reason in combined.get("abstain_reasons", [])
+                        if str(reason)
+                    ],
+                    *[f"wall_probability:{reason}" for reason in wall_reasons],
+                ]
+            )
+        )
+
+    direction_fingerprint = str(combined.get("input_fingerprint") or "")
+    combined["direction_input_fingerprint"] = direction_fingerprint
+    encoded = json.dumps(
+        {
+            "direction_input_fingerprint": direction_fingerprint,
+            "wall_probability": wall_probability,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode()
+    fingerprint = hashlib.sha256(encoded).hexdigest()
+    combined["input_fingerprint"] = fingerprint
+    combined["prediction_id"] = (
+        f"spring-gamma-v3:{combined.get('session_id') or 'unknown'}:"
+        f"{combined.get('expiry') or 'unknown'}:{fingerprint[:16]}"
+    )
+    return combined
+
+
+def _failed_spring_gamma_v3_shadow(
+    *,
+    now: datetime,
+    session_id: str,
+    expected_expiry: str,
+    error: Exception,
+) -> dict[str, object]:
+    error_code = f"{type(error).__name__}:{error}"
+    fingerprint = hashlib.sha256(
+        f"{now.isoformat()}|{session_id}|{expected_expiry}|{error_code}".encode()
+    ).hexdigest()
+    return {
+        "schema_version": SPRING_GAMMA_V3_SCHEMA_VERSION,
+        "model_version": "spring_gamma_v3_es_only_shadow.v1",
+        "prediction_id": f"spring-gamma-v3:{session_id}:{expected_expiry}:{fingerprint[:16]}",
+        "input_fingerprint": fingerprint,
+        "as_of": now.isoformat(),
+        "session_id": session_id,
+        "session": "unknown",
+        "expiry": expected_expiry,
+        "status": "failed",
+        "mode": "shadow",
+        "direction_authority": "none",
+        "action_authority": "none",
+        "actionable": False,
+        "automatic_ordering": False,
+        "calibration_status": "uncalibrated_shadow",
+        "direction": {"decision": "abstain"},
+        "regime": "abstain",
+        "opportunity": "abstain",
+        "abstain": True,
+        "abstain_reasons": ["shadow_runtime_failure"],
+        "error": error_code,
+    }
 
 
 def _lookup_play_stats(

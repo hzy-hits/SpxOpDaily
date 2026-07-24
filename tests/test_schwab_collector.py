@@ -131,7 +131,7 @@ def test_fetch_chain_uses_calendar_research_expiries() -> None:
     assert captured["strikeCount"] == 20
 
 
-def test_fetch_chain_prefetches_next_session_during_final_rth_half_hour() -> None:
+def test_fetch_chain_keeps_0dte_and_next_session_during_final_rth_half_hour() -> None:
     captured: dict[str, Any] = {}
 
     class FakeClient:
@@ -146,8 +146,8 @@ def test_fetch_chain_prefetches_next_session_during_final_rth_half_hour() -> Non
         now=datetime(2026, 7, 9, 19, 30, tzinfo=timezone.utc),
     )
 
-    assert captured["fromDate"] == "2026-07-10"
-    assert captured["toDate"] == "2026-07-13"
+    assert captured["fromDate"] == "2026-07-09"
+    assert captured["toDate"] == "2026-07-10"
 
 
 def test_fetch_chain_uses_per_instrument_strike_count_for_spx() -> None:

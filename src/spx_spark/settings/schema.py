@@ -22,6 +22,7 @@ from spx_spark.settings.order_map import OrderMapPolicy
 from spx_spark.settings.runtime import RuntimeSettingsSlice
 from spx_spark.settings.schwab import SchwabSettingsSlice
 from spx_spark.settings.shock import ShockSettings
+from spx_spark.settings.spring_gamma_v3 import SpringGammaV3Settings
 from spx_spark.settings.storage import StorageSettingsSlice
 
 
@@ -41,6 +42,7 @@ class AppSettings:
     analytics: AnalyticsSettings
     globex_trend: GlobexTrendSettings
     market_features: MarketFeatureSettings
+    spring_gamma_v3: SpringGammaV3Settings
     alerts: AlertSettings
     runtime: RuntimeSettingsSlice
     shock: ShockSettings

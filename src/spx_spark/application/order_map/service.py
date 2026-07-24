@@ -65,7 +65,14 @@ from spx_spark.application.order_map.research import (
     _wall_ladder_payload,
 )
 from spx_spark.application.order_map.signal_machine import annotate_call_bias_with_signal_mode
-from spx_spark.application.order_map.spot import hyperliquid_sp500_price, resolve_spx_spot
+from spx_spark.application.order_map.spot import (
+    hyperliquid_sp500_price,
+    report_trigger_coordinate,
+    resolve_spx_spot,
+)
+from spx_spark.application.order_map.spring_gamma_projection import (
+    attach_spring_gamma_v3_shadow,
+)
 from spx_spark.application.order_map.state import (
     REFRESH_COOLDOWN_SECONDS_DEFAULT,
     already_sent,
@@ -96,7 +103,7 @@ from spx_spark.notifier.model import CommandRunner, default_runner
 from spx_spark.notifier.receipts import NotificationEnvelope, notification_event_id
 from spx_spark.options_map import build_options_map
 from spx_spark.ibkr.position_watcher import default_positions_path, load_snapshot
-from spx_spark.storage import LatestState, LatestStateStore, configured_quote_use_decision
+from spx_spark.storage import LatestState, LatestStateStore
 from spx_spark.settings import load_app_settings
 from spx_spark.settings.order_map import DEFAULT_ORDER_MAP_POLICY, OrderMapPolicy
 
@@ -172,7 +179,7 @@ def build_order_payload(
         "contracts": [],
     }
     beijing = now.astimezone(SHANGHAI_TZ)
-    trigger_coordinate = _report_trigger_coordinate(state, resolution, now=now)
+    trigger_coordinate = report_trigger_coordinate(state, resolution, now=now)
     skew_spread_shadows = _build_spread_shadows(
         state, expiry=expiry, spot=pricing_spot, now=now, policy=policy
     )
@@ -315,42 +322,6 @@ def build_order_payload(
         "es_last": _index_value(state, "future:ES"),
         "session_phase": session_phase(now),
         "warnings": list(dict.fromkeys(warnings)),
-    }
-
-
-def _report_trigger_coordinate(
-    state: LatestState,
-    resolution,
-    *,
-    now: datetime,
-) -> dict[str, object]:
-    if DEFAULT_MARKET_CALENDAR.is_rth_open(now):
-        quote = state.best_quote("index:SPX")
-        if quote is not None and configured_quote_use_decision(quote, as_of=now).pricing_allowed:
-            return {
-                "kind": "official_spx",
-                "instrument_id": "index:SPX",
-                "observed_value": quote.effective_price,
-                "source": "index:SPX",
-            }
-        return {
-            "kind": "unavailable",
-            "instrument_id": None,
-            "observed_value": None,
-            "source": "official_spx_unavailable_use_realtime_es_equivalent",
-        }
-    if resolution.pricing_source == "chain_implied":
-        return {
-            "kind": "chain_implied_spx",
-            "instrument_id": "synthetic:SPXW_PARITY",
-            "observed_value": resolution.pricing_price,
-            "source": "chain_implied",
-        }
-    return {
-        "kind": "unavailable",
-        "instrument_id": None,
-        "observed_value": None,
-        "source": "chain_implied_unavailable_use_realtime_es_equivalent",
     }
 
 
@@ -533,6 +504,12 @@ def build_order_payload_with_retry(
             now=evaluation_now,
         )
         _apply_candidate_presentation(payload, now=evaluation_now)
+    attach_spring_gamma_v3_shadow(
+        payload,
+        storage_settings.data_root,
+        settings=getattr(app, "spring_gamma_v3", None),
+        now=evaluation_now,
+    )
     return payload
 
 
