@@ -64,6 +64,7 @@ def _strike_price_coverage(
             return {
                 "bid": None,
                 "ask": None,
+                "mid": None,
                 "provider": None,
                 "quality": None,
                 "freshness": None,
@@ -76,7 +77,14 @@ def _strike_price_coverage(
         decision = configured_quote_use_decision(quote, as_of=as_of)
         bid = finite_float(quote.bid) if decision.research_usable else None
         ask = finite_float(quote.ask) if decision.research_usable else None
-        usable = bid is not None and ask is not None
+        mid = finite_float(quote.mid) if decision.research_usable else None
+        usable = (
+            bid is not None
+            and bid >= 0
+            and ask is not None
+            and ask >= bid
+            and mid is not None
+        )
         source_at = (
             quote.quote_time or quote.trade_time or quote.received_at
             if quote.provider is Provider.IBKR
@@ -87,6 +95,7 @@ def _strike_price_coverage(
         return {
             "bid": bid if usable else None,
             "ask": ask if usable else None,
+            "mid": mid if usable else None,
             "provider": quote.provider.value,
             "quality": quote.quality.value,
             "freshness": decision.freshness.value,

@@ -2499,6 +2499,71 @@ def test_strike_price_coverage_separates_full_pairs_from_oi_strikes() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    ("call_bid", "call_ask", "expected_usable"),
+    (
+        pytest.param(-1.0, -1.0, False, id="ibkr-negative-one-placeholder"),
+        pytest.param(1.2, 1.1, False, id="crossed-market"),
+        pytest.param(0.0, 1.0, True, id="zero-bid-is-valid"),
+        pytest.param(1e308, 1e308, False, id="non-finite-mid"),
+    ),
+)
+def test_strike_price_coverage_requires_strict_finite_nbbo(
+    call_bid: float,
+    call_ask: float,
+    expected_usable: bool,
+) -> None:
+    from spx_spark.application.order_map.research import _strike_price_coverage
+
+    now = datetime(2026, 7, 22, 14, 30, tzinfo=timezone.utc)
+    call = replace(
+        make_option(
+            expiry="20260722",
+            strike=7500,
+            right="C",
+            mark=10.0,
+            delta=0.5,
+            gamma=0.01,
+            now=now,
+        ),
+        bid=call_bid,
+        ask=call_ask,
+    )
+    put = replace(
+        make_option(
+            expiry="20260722",
+            strike=7500,
+            right="P",
+            mark=10.0,
+            delta=-0.5,
+            gamma=0.01,
+            now=now,
+        ),
+        bid=0.0,
+        ask=1.0,
+    )
+
+    coverage = _strike_price_coverage(
+        make_state(call, put, now=now),
+        expiry="20260722",
+        reference_price=7500.0,
+        as_of=now,
+        radius_strikes=0,
+        radius_points=0,
+    )
+
+    row = coverage["rows"][0]
+    assert row["call"]["usable"] is expected_usable
+    assert row["put"]["usable"] is True
+    assert row["complete_pair"] is expected_usable
+    assert coverage["complete_pair_count"] == int(expected_usable)
+    assert coverage["missing_call_count"] == int(not expected_usable)
+    assert coverage["missing_put_count"] == 0
+    assert row["call"]["mid"] == (0.5 if expected_usable else None)
+    assert row["put"]["mid"] == 0.5
+    assert coverage["nbbo_interpolation"] is False
+
+
 def test_actionable_writer_requires_exact_numbers_contracts_and_no_prehang() -> None:
     from spx_spark.application.order_map.prompts import actionable_writer_output_valid
 

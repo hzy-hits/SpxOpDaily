@@ -19,6 +19,10 @@ from spx_spark.application.market_features.composition import (
 from spx_spark.application.market_features.confirmed_gate_audit import (
     reconcile_confirmed_gate,
 )
+from spx_spark.application.market_features.es_bar_state import (
+    advance_es_bar_state,
+    completed_es_bars,
+)
 from spx_spark.application.market_features.greek_decision import build_greek_decision
 from spx_spark.application.market_features.market import (
     build_minute_market_frame,
@@ -28,6 +32,11 @@ from spx_spark.application.market_features.market import (
     update_volume_baselines,
 )
 from spx_spark.application.market_features.models import DecisionContext
+from spx_spark.application.market_features.market_state_5m import score_market_state_5m
+from spx_spark.application.market_features.market_state_5m_inputs import (
+    build_market_state_5m_inputs,
+    update_same_time_range_baselines,
+)
 from spx_spark.application.market_features.options import (
     build_option_structure_frame,
     merge_option_history,
@@ -49,6 +58,7 @@ from spx_spark.application.market_features.session_episode import (
     record_session_episode_transition,
 )
 from spx_spark.application.market_features.spring_gamma_v3 import (
+    MODEL_VERSION as SPRING_GAMMA_V3_MODEL_VERSION,
     SCHEMA_VERSION as SPRING_GAMMA_V3_SCHEMA_VERSION,
     build_spring_gamma_v3_shadow,
 )
@@ -149,6 +159,16 @@ def run(
     if option_frame_has_usable_live_structure(option_frame):
         last_usable_option_frame = option_frame.to_dict()
     sample = normalized_market_sample(latest, now=evaluation_now, policy=policy)
+    latest_root = Path(storage.data_root) / "latest"
+    es_bar_path = latest_root / "es_bars_5m.json"
+    es_bar_state = advance_es_bar_state(
+        load_json(es_bar_path),
+        sample,
+        now=evaluation_now,
+        policy=policy,
+    )
+    save_json(es_bar_path, es_bar_state)
+    es_bars = completed_es_bars(es_bar_state)
     existing_samples = _dict_list(persisted.get("market_samples"))
     if len(existing_samples) < 5:
         existing_samples = _seed_samples_from_trend(trend, policy)
@@ -161,6 +181,45 @@ def run(
     frame_samples = (
         samples if samples and samples[-1].get("at") == sample.get("at") else [*samples, sample]
     )
+    range_baseline_path = latest_root / "market_state_5m_range_baselines.json"
+    range_baselines = update_same_time_range_baselines(
+        load_json(range_baseline_path),
+        bars=es_bars,
+        now=evaluation_now,
+    )
+    save_json(range_baseline_path, range_baselines)
+    market_state_inputs = build_market_state_5m_inputs(
+        bars=es_bars,
+        market_samples=frame_samples,
+        range_baselines=range_baselines,
+        now=evaluation_now,
+    )
+    market_state_values = _dict(market_state_inputs.get("values"))
+    rth_market_state = score_market_state_5m(
+        now=evaluation_now,
+        price_vs_vwap=market_state_values.get("price_vs_vwap"),
+        vwap_slope=_number(market_state_values.get("vwap_slope")),
+        opening_range_state=market_state_values.get("opening_range_state"),
+        market_structure=market_state_values.get("market_structure"),
+        efficiency_ratio=_number(market_state_values.get("efficiency_ratio")),
+        vwap_cross_count=(
+            int(value)
+            if (
+                (value := market_state_values.get("vwap_cross_count"))
+                is not None
+                and isinstance(value, int)
+                and not isinstance(value, bool)
+            )
+            else None
+        ),
+        same_time_range_ratio=_number(
+            market_state_values.get("same_time_range_ratio")
+        ),
+        breadth_above_vwap=_number(
+            market_state_values.get("breadth_above_vwap")
+        ),
+    )
+    rth_market_state["input_lineage"] = market_state_inputs
     volume_baselines = _dict(persisted.get("volume_baselines"))
     expected_move = option_frame.volatility.get("expected_move_points_0dte")
     atm_iv = option_frame.volatility.get("atm_iv_0dte")
@@ -174,6 +233,13 @@ def run(
         structural_levels=option_frame.structure,
         volume_baselines=volume_baselines,
         policy=policy,
+    )
+    market_frame = replace(
+        market_frame,
+        diagnostics={
+            **market_frame.diagnostics,
+            "rth_market_state": rth_market_state,
+        },
     )
     option_history = merge_option_history(option_history, option_frame, policy=policy)
     volume_baselines = update_volume_baselines(
@@ -589,7 +655,7 @@ def _failed_spring_gamma_v3_shadow(
     ).hexdigest()
     return {
         "schema_version": SPRING_GAMMA_V3_SCHEMA_VERSION,
-        "model_version": "spring_gamma_v3_es_only_shadow.v1",
+        "model_version": SPRING_GAMMA_V3_MODEL_VERSION,
         "prediction_id": f"spring-gamma-v3:{session_id}:{expected_expiry}:{fingerprint[:16]}",
         "input_fingerprint": fingerprint,
         "as_of": now.isoformat(),

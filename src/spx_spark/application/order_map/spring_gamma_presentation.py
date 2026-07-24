@@ -84,10 +84,12 @@ def spring_gamma_v3_shadow_line(payload: dict[str, Any]) -> str | None:
         )
         details.append(f"首要原因 {' '.join(primary_reason.split())}")
 
-    return (
+    summary = (
         f"Spring Gamma v3 Shadow  {status} · {' · '.join(details)}；"
         "方向分数未校准；墙触达概率为风险中性启发式；无方向/执行权限"
     )
+    state_lines = _rth_market_state_lines(shadow)
+    return "\n".join([*state_lines, summary]) if state_lines else summary
 
 
 def spring_gamma_v3_writer_summary(shadow: object) -> dict[str, Any] | None:
@@ -137,11 +139,157 @@ def spring_gamma_v3_writer_summary(shadow: object) -> dict[str, Any] | None:
         compact["wall_probability_level"] = level_name
     if isinstance(abstain_reasons, list):
         compact["abstain_reasons"] = [str(reason) for reason in abstain_reasons[:5]]
+    if (market_state := _compact_rth_market_state(shadow)) is not None:
+        compact["rth_market_state"] = market_state
+    option_overlay = shadow.get("option_overlay")
+    if isinstance(option_overlay, dict):
+        compact["option_overlay"] = {
+            "status": option_overlay.get("status"),
+            "market_state_independent": option_overlay.get(
+                "market_state_independent"
+            ),
+            "reasons": [
+                str(reason)
+                for reason in option_overlay.get("reasons", [])[:5]
+                if str(reason)
+            ]
+            if isinstance(option_overlay.get("reasons"), list)
+            else [],
+        }
     compact["semantics"] = (
         "direction_score_uncalibrated_wall_probability_risk_neutral_heuristic_"
         "no_direction_or_execution_authority"
     )
     return compact
+
+
+def _rth_market_state_lines(shadow: dict[str, Any]) -> list[str]:
+    if str(shadow.get("session") or "").lower() != "rth":
+        return []
+    state = _compact_rth_market_state(shadow)
+    if state is None:
+        return []
+    state_name = str(state.get("state") or "UNCERTAIN")
+    direction_score = _finite_shadow_value(state.get("D"))
+    quality = state.get("Q") if isinstance(state.get("Q"), dict) else {}
+    volatility = state.get("V") if isinstance(state.get("V"), dict) else {}
+    availability = (
+        state.get("input_availability")
+        if isinstance(state.get("input_availability"), dict)
+        else {}
+    )
+    er = _finite_shadow_value(quality.get("efficiency_ratio"))
+    crosses = quality.get("vwap_cross_count")
+    range_ratio = _finite_shadow_value(volatility.get("same_time_range_ratio"))
+    breadth = _finite_shadow_value(state.get("breadth_above_vwap"))
+    available = availability.get("available_count")
+    required = availability.get("required_count")
+    metrics = [
+        f"D {direction_score:+.2f}/10" if direction_score is not None else "D -",
+        f"ER {er:.2f}" if er is not None else "ER -",
+        f"VWAP穿越 {int(crosses)}" if isinstance(crosses, int) else "VWAP穿越 -",
+        f"Range {range_ratio:.2f}x" if range_ratio is not None else "Range -",
+        f"宽度 {breadth:.2%}" if breadth is not None else "宽度 -",
+        (
+            f"数据 {int(available)}/{int(required)}"
+            if isinstance(available, int) and isinstance(required, int)
+            else "数据 -"
+        ),
+    ]
+    wait, trigger, expression = _state_playbook(
+        state_name,
+        option_overlay=shadow.get("option_overlay"),
+    )
+    return [
+        f"RTH状态 Shadow  {state_name} · {' · '.join(metrics)}　只读",
+        f"状态路径  等待位置：{wait}",
+        f"状态路径  触发确认：{trigger}",
+        f"状态路径  期权结构：{expression}",
+    ]
+
+
+def _compact_rth_market_state(shadow: dict[str, Any]) -> dict[str, Any] | None:
+    source = shadow.get("rth_market_state")
+    if not isinstance(source, dict) or source.get("schema_version") != "market_state_5m.v1":
+        return None
+    quality = source.get("Q") if isinstance(source.get("Q"), dict) else {}
+    volatility = source.get("V") if isinstance(source.get("V"), dict) else {}
+    components = (
+        source.get("direction_components")
+        if isinstance(source.get("direction_components"), dict)
+        else {}
+    )
+    breadth = _finite_shadow_value(
+        source.get("breadth_above_vwap"),
+        components.get("breadth_above_vwap_ratio"),
+        (
+            source.get("input_lineage", {})
+            .get("values", {})
+            .get("breadth_above_vwap")
+            if isinstance(source.get("input_lineage"), dict)
+            and isinstance(source.get("input_lineage", {}).get("values"), dict)
+            else None
+        ),
+    )
+    return {
+        "schema_version": source.get("schema_version"),
+        "rule_version": source.get("rule_version"),
+        "state": source.get("state"),
+        "status": source.get("status"),
+        "D": source.get("D"),
+        "Q": {
+            "quality": quality.get("quality"),
+            "efficiency_ratio": quality.get("efficiency_ratio"),
+            "vwap_cross_count": quality.get("vwap_cross_count"),
+        },
+        "V": {
+            "state": volatility.get("state"),
+            "same_time_range_ratio": volatility.get("same_time_range_ratio"),
+        },
+        "breadth_above_vwap": breadth,
+        "input_availability": source.get("input_availability"),
+        "pin_proxy_candidate": source.get("pin_proxy_candidate"),
+        "action_authority": "none",
+        "actionable": False,
+    }
+
+
+def _state_playbook(
+    state: str,
+    *,
+    option_overlay: object,
+) -> tuple[str, str, str]:
+    overlay = option_overlay if isinstance(option_overlay, dict) else {}
+    option_ready = str(overlay.get("status") or "") == "ready"
+    if state == "TREND_UP":
+        wait = "VWAP/ORH与上涨腿回撤区（本层未计算回撤比例）"
+        trigger = "仅记录外部level lifecycle确认；D≥6、ER>0.45且VWAP穿越≤2"
+        expression = (
+            "方向映射Call；具体价差仅以独立实时双腿Shadow为准"
+            if option_ready
+            else "期权overlay不可用；不映射价差"
+        )
+    elif state == "TREND_DOWN":
+        wait = "VWAP/ORL与下跌腿反弹区（本层未计算反弹比例）"
+        trigger = "仅记录外部level lifecycle确认；D≤-6、ER>0.45且VWAP穿越≤2"
+        expression = (
+            "方向映射Put；具体价差仅以独立实时双腿Shadow为准"
+            if option_ready
+            else "期权overlay不可用；不映射价差"
+        )
+    elif state == "LOW_VOL_RANGE":
+        wait = "实时墙位边缘（只读观察）"
+        trigger = "需外部墙位拒绝/收回；Pin仍缺整数strike与跨式衰减确认"
+        expression = "本层不选择期权结构"
+    elif state == "HIGH_VOL_CHOP":
+        wait = "高波动低效率环境（只读标签）"
+        trigger = "ER或VWAP穿越改变后重新评分"
+        expression = "本层不选择期权结构"
+    else:
+        wait = "等待8项输入完整并匹配明确状态"
+        trigger = "未确认"
+        expression = "本层不选择期权结构"
+    return wait, trigger, expression
 
 
 def _finite_shadow_value(*values: object) -> float | None:

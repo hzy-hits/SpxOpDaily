@@ -1,0 +1,1054 @@
+{
+  "manifest": {
+    "blocks": [
+      {
+        "body": "# RTH 5分钟状态策略：数据修复与因果重放",
+        "id": "title",
+        "layout": "full",
+        "type": "markdown"
+      },
+      {
+        "body": "## 结论\n\n**数据问题来自两个独立层面：旧状态机和缺失的特征生产合同，不能统一归因成“行情没采到”。** 7/20–7/22 的 ES/SPY 原始 RTH 覆盖完整，但旧 lifecycle 把活动 path 大量置为 `INVALIDATED`；修复后的 7/23 记录到 7 个 formal signals。",
+        "id": "executive",
+        "layout": "full",
+        "sourceId": "data_quality_audit",
+        "type": "markdown"
+      },
+      {
+        "body": "**因果重放结果。** 新因果重放在 2026-07-06–2026-07-23 共评估 1050 个 5 分钟边界，八输入完整率 0.00%，明确分类率 0.00%。",
+        "id": "executive_replay",
+        "layout": "full",
+        "sourceId": "causal_replay",
+        "type": "markdown"
+      },
+      {
+        "body": "**没有据此修改生产阈值。** 这些边界高度重叠、历史 session 少于 20 个，forward ES 只用于检查状态语义，不是净成本后策略回测。当前版本先修数据合同并保持 Shadow。",
+        "id": "executive_decision",
+        "layout": "full",
+        "sourceId": "causal_replay",
+        "type": "markdown"
+      },
+      {
+        "cardIds": [
+          "days_card",
+          "ready_card",
+          "classified_card",
+          "baseline_card"
+        ],
+        "id": "headline",
+        "layout": "full",
+        "type": "metric-strip"
+      },
+      {
+        "body": "## 根因不是单一采集故障\n\nSchwab 在 7/20–7/23 的 ES/SPY/RSP RTH 分钟覆盖均为 390/390。真正让周一至周三 formal 归零的是旧 lifecycle：候选结构待确认时，活动 level path 被立即置为 `INVALIDATED`。`b7e1901` 修复后，7/23 恢复 7 个 formal signals；它们随后全部被剩余空间、方向一致性、reward/risk 或 option freshness gate 阻止。",
+        "id": "root_cause",
+        "layout": "full",
+        "sourceId": "data_quality_audit",
+        "type": "markdown"
+      },
+      {
+        "id": "lifecycle_block",
+        "layout": "full",
+        "tableId": "lifecycle_table",
+        "type": "table"
+      },
+      {
+        "body": "## 新状态的数据质量\n\n重放使用 `received_at` 作为知识时钟，并再次要求 `source_at` 不晚于评估时点；VWAP边界、历史baseline、连续bar和sector横截面时间偏差均严格fail closed。下面把“有ES bar”和“八项全部可用”分开显示。",
+        "id": "coverage_intro",
+        "layout": "full",
+        "sourceId": "causal_replay",
+        "type": "markdown"
+      },
+      {
+        "chartId": "coverage_chart",
+        "id": "coverage_chart_block",
+        "layout": "full",
+        "type": "chart"
+      },
+      {
+        "id": "coverage_table_block",
+        "layout": "full",
+        "tableId": "coverage_table",
+        "type": "table"
+      },
+      {
+        "id": "missing_table_block",
+        "layout": "full",
+        "tableId": "missing_table",
+        "type": "table"
+      },
+      {
+        "body": "## 状态结果不是下单信号\n\nD只描述方向，Q描述路径效率，V描述同刻波动强度。`UNCERTAIN`被保留；LOW_VOL_PIN在缺少整数strike和ATM跨式衰减确认时不会发出。",
+        "id": "states_intro",
+        "layout": "full",
+        "sourceId": "causal_replay",
+        "type": "markdown"
+      },
+      {
+        "chartId": "state_chart",
+        "id": "state_chart_block",
+        "layout": "full",
+        "type": "chart"
+      },
+      {
+        "id": "forward_table_block",
+        "layout": "full",
+        "tableId": "forward_table",
+        "type": "table"
+      },
+      {
+        "body": "## 实现决策\n\n八变量状态与 option overlay 已拆开；只有 ready 8/8 状态参与 Spring Gamma v3 Shadow 确认，warming状态仅诊断。报告不根据未计算的skew、edge或双腿价格推荐spread。\n\n- ES 5m bars：按 source time 聚合，并门控首尾覆盖、连续网格和 gap。\n- 八变量：RTH VWAP、OR、结构、ER、穿越、同刻 range 和 breadth 全部因果派生；缺失保持 `UNCERTAIN`。\n- Provider 切换：选取具有完整 5 分钟窗口的来源，并去重 stale quote。\n- Option coverage：拒绝负 bid、crossed market 和无效 mid。\n- Spring Gamma：ready 8/8 状态与 option overlay 分离。",
+        "id": "implementation_intro",
+        "layout": "full",
+        "sourceId": "implementation",
+        "type": "markdown"
+      },
+      {
+        "body": "## 参数决定\n\n**本轮保持用户给出的 D/Q/V 阈值，不调生产 gate。** 原因是历史边界重叠、同刻基线未满20个session，而且没有实际期权双腿成交、费用和滑点。下一步应累计至少20个合约一致的完整RTH sessions，再用预登记的walk-forward切分评估；训练日期和汇报日期不能是同一批。",
+        "id": "parameter_decision",
+        "layout": "full",
+        "sourceId": "causal_replay",
+        "type": "markdown"
+      },
+      {
+        "body": "**历史执行证据还不可用于定参。** 旧派生 signal 受 lifecycle bug 污染，且 7/20–7/23 最后30分钟的同日0DTE NBBO不可恢复；因此不能从这些日期推导可执行 spread 的净成本表现。",
+        "id": "parameter_audit_limit",
+        "layout": "full",
+        "sourceId": "data_quality_audit",
+        "type": "markdown"
+      },
+      {
+        "body": "## 限制与今天的验收\n\n- 同刻历史基线当前最多 9 个session，低于目标20。",
+        "id": "limitations",
+        "layout": "full",
+        "sourceId": "causal_replay",
+        "type": "markdown"
+      },
+      {
+        "body": "- 7/20–7/23 的15:30–16:00同日0DTE历史NBBO不可恢复，保持missing。",
+        "id": "limitations_audit",
+        "layout": "full",
+        "sourceId": "data_quality_audit",
+        "type": "markdown"
+      },
+      {
+        "body": "- 今日RTH需现场验证09:30后的bar连续性、约10:00的8/8状态、15:30后的同日0DTE保留和15分钟报告渲染。\n- 自动下单仍关闭；本报告不提供个性化交易建议。",
+        "id": "live_acceptance",
+        "layout": "full",
+        "type": "markdown"
+      }
+    ],
+    "cards": [
+      {
+        "dataset": "headline",
+        "description": "Sessions with at least one complete RTH ES 5m bar.",
+        "id": "days_card",
+        "metrics": [
+          {
+            "field": "raw_trading_days",
+            "format": "number",
+            "label": "原始RTH交易日"
+          }
+        ],
+        "sourceId": "causal_replay"
+      },
+      {
+        "dataset": "headline",
+        "description": "Share of replay boundaries with all eight causal inputs.",
+        "id": "ready_card",
+        "metrics": [
+          {
+            "field": "input_ready_ratio",
+            "format": "percent",
+            "label": "八输入完整率"
+          }
+        ],
+        "sourceId": "causal_replay"
+      },
+      {
+        "dataset": "headline",
+        "description": "Share of boundaries assigned a state other than UNCERTAIN.",
+        "id": "classified_card",
+        "metrics": [
+          {
+            "field": "classified_ratio",
+            "format": "percent",
+            "label": "明确状态率"
+          }
+        ],
+        "sourceId": "causal_replay"
+      },
+      {
+        "dataset": "headline",
+        "description": "Largest strictly-prior same-time range sample available.",
+        "id": "baseline_card",
+        "metrics": [
+          {
+            "field": "max_prior_baseline_sessions",
+            "format": "number",
+            "label": "最大历史基线",
+            "unit": " sessions"
+          }
+        ],
+        "sourceId": "causal_replay"
+      }
+    ],
+    "charts": [
+      {
+        "dataset": "coverage_long",
+        "encodings": {
+          "color": {
+            "field": "metric",
+            "label": "证据层",
+            "type": "nominal"
+          },
+          "tooltip": [
+            {
+              "field": "ratio",
+              "format": "percent",
+              "label": "完整率",
+              "type": "quantitative"
+            }
+          ],
+          "x": {
+            "field": "trading_date",
+            "label": "交易日",
+            "type": "temporal"
+          },
+          "y": {
+            "field": "ratio",
+            "format": "percent",
+            "label": "完整率",
+            "type": "quantitative"
+          }
+        },
+        "id": "coverage_chart",
+        "intent": "trend",
+        "labels": {
+          "values": "none"
+        },
+        "layout": "full",
+        "maxRows": 50,
+        "question": "On which sessions were ES bars and all eight state inputs available?",
+        "rationale": "Two causal coverage series expose where the feature funnel drops.",
+        "settings": {
+          "showValues": false,
+          "sort": "none"
+        },
+        "sourceId": "causal_replay",
+        "subtitle": "ES bar完整不等于八输入完整；sector breadth和历史基线仍会独立fail closed",
+        "surface": {
+          "interactiveLegend": false,
+          "showControls": false,
+          "surface": "export",
+          "viewMode": "visualization"
+        },
+        "title": "逐日因果特征完整率",
+        "type": "line",
+        "valueFormat": "percent"
+      },
+      {
+        "dataset": "state_distribution",
+        "encodings": {
+          "tooltip": [
+            {
+              "field": "slot_share",
+              "format": "percent",
+              "label": "占比",
+              "type": "quantitative"
+            }
+          ],
+          "x": {
+            "field": "state",
+            "label": "状态",
+            "type": "nominal"
+          },
+          "y": {
+            "field": "slot_count",
+            "format": "number",
+            "label": "5m边界数",
+            "type": "quantitative"
+          }
+        },
+        "id": "state_chart",
+        "intent": "comparison",
+        "labels": {
+          "values": "all"
+        },
+        "layout": "full",
+        "maxRows": 8,
+        "question": "How often did each rule state appear in the causal replay?",
+        "rationale": "Counts show rule selectivity without presenting PnL as validated alpha.",
+        "settings": {
+          "showValues": true,
+          "sort": "descending"
+        },
+        "sourceId": "causal_replay",
+        "subtitle": "UNCERTAIN被保留；状态边界是重叠观察，不是独立交易样本",
+        "surface": {
+          "interactiveLegend": false,
+          "showControls": false,
+          "surface": "export",
+          "viewMode": "visualization"
+        },
+        "title": "五分钟状态分布",
+        "type": "bar",
+        "valueFormat": "number"
+      }
+    ],
+    "description": "Causal data-quality replay and implementation readout for the RTH eight-variable market-state rollout.",
+    "generatedAt": "2026-07-24T11:47:29.848736+00:00",
+    "sources": [
+      {
+        "id": "causal_replay",
+        "label": "RTH 5m causal replay, 2026-07-06–2026-07-23",
+        "path": "reports/market_state_5m/replay=2026-07-24/artifact.json",
+        "query": {
+          "description": "Loads live ES and eleven sector ETFs, replays only rows known by each five-minute boundary, and attaches future ES paths afterwards.",
+          "engine": "DuckDB + production-equivalent Python",
+          "executed_at": "2026-07-24T11:47:29.848736+00:00",
+          "filters": [
+            "2026-07-06 through 2026-07-23",
+            "RTH state evaluated in America/New_York",
+            "received_at <= replay_as_of and source_at <= replay_as_of",
+            "no bar, NBBO, breadth, or missing-value interpolation",
+            "same-time baselines use only baseline_date < trading_date"
+          ],
+          "id": "rth-market-state-5m-replay-20260724",
+          "language": "sql",
+          "metric_definitions": [
+            "Input-ready ratio is 5m boundaries with all eight inputs available.",
+            "Classified ratio excludes UNCERTAIN.",
+            "Forward paths are overlapping evaluation labels, not independent trades."
+          ],
+          "sql": "SELECT provider, instrument_id, source_at, received_at, effective_price, volume FROM read_parquet('lake/quotes/schema=v1/date=*/provider=*/hour=*/quotes.parquet', hive_partitioning=true, union_by_name=true) WHERE quality='live' AND instrument_id IN ('future:ES','equity:XLB','equity:XLC','equity:XLE','equity:XLF','equity:XLI','equity:XLK','equity:XLP','equity:XLRE','equity:XLU','equity:XLV','equity:XLY')",
+          "tables_used": [
+            "lake/quotes/schema=v1"
+          ]
+        }
+      },
+      {
+        "description": "Point-in-time audit of quote coverage, lifecycle transitions, report cadence, option-chain gaps and confirmed-gate attribution.",
+        "id": "data_quality_audit",
+        "label": "RTH lifecycle and data-quality audit, 2026-07-24",
+        "path": "docs/rth-state-data-quality-audit-2026-07-24.md",
+        "query": {
+          "description": "Reproduces the four reviewed lifecycle totals transcribed from the saved point-in-time audit.",
+          "engine": "DuckDB",
+          "executed_at": "2026-07-24T11:47:29.848736+00:00",
+          "filters": [
+            "09:30 through 16:00 America/New_York",
+            "2026-07-20 through 2026-07-23",
+            "formal_signals counts unique transitions; health rows are samples"
+          ],
+          "id": "rth-lifecycle-audit-extract-20260724",
+          "language": "sql",
+          "metric_definitions": [
+            "health_samples counts repeated level-health observations.",
+            "formal_signals counts unique formal transitions."
+          ],
+          "sql": "SELECT * FROM (VALUES ('2026-07-20', 6221, 4140, 6191, 0, '旧 lifecycle bug 污染'), ('2026-07-21', 6215, 2296, 5955, 0, '旧 lifecycle bug 污染'), ('2026-07-22', 6209, 1399, 5884, 0, '旧 lifecycle bug 污染'), ('2026-07-23', 6210, 0, 9, 7, 'b7e1901 后恢复；7/7 被下游 gate 阻止')) AS audited(date, health_samples, structure_pending, invalidated_samples, formal_signals, interpretation)"
+        }
+      },
+      {
+        "description": "Pure scorer, causal input extractor, ES bar state, Spring Gamma Shadow integration and strict NBBO coverage changes.",
+        "id": "implementation",
+        "label": "RTH market-state v1 implementation and tests",
+        "path": "docs/rth-five-minute-market-state-v1.md"
+      }
+    ],
+    "surface": "report",
+    "tables": [
+      {
+        "columns": [
+          {
+            "field": "trading_date",
+            "label": "日期",
+            "type": "text"
+          },
+          {
+            "field": "weekday",
+            "label": "星期",
+            "type": "text"
+          },
+          {
+            "field": "es_ok_bars",
+            "format": "number",
+            "label": "ES完整bar"
+          },
+          {
+            "field": "es_bar_coverage_ratio",
+            "format": "percent",
+            "label": "ES bar完整率"
+          },
+          {
+            "field": "sector_count",
+            "format": "number",
+            "label": "Sector数"
+          },
+          {
+            "field": "complete_input_slots",
+            "format": "number",
+            "label": "8/8边界"
+          },
+          {
+            "field": "complete_input_ratio",
+            "format": "percent",
+            "label": "8/8完整率"
+          }
+        ],
+        "dataset": "coverage_by_day",
+        "defaultSort": {
+          "direction": "asc",
+          "field": "trading_date"
+        },
+        "density": "compact",
+        "id": "coverage_table",
+        "layout": "full",
+        "sourceId": "causal_replay",
+        "subtitle": "完整率以严格连续、首尾覆盖和因果时间为准。",
+        "title": "逐日数据漏斗"
+      },
+      {
+        "columns": [
+          {
+            "field": "input",
+            "label": "输入",
+            "type": "text"
+          },
+          {
+            "field": "missing_slots",
+            "format": "number",
+            "label": "缺失边界"
+          },
+          {
+            "field": "missing_share",
+            "format": "percent",
+            "label": "缺失率"
+          }
+        ],
+        "dataset": "input_missing",
+        "defaultSort": {
+          "direction": "desc",
+          "field": "missing_slots"
+        },
+        "density": "compact",
+        "id": "missing_table",
+        "layout": "full",
+        "sourceId": "causal_replay",
+        "subtitle": "缺失保持缺失，不按0分或中性填充。",
+        "title": "八输入缺失归因"
+      },
+      {
+        "columns": [
+          {
+            "field": "date",
+            "label": "日期",
+            "type": "text"
+          },
+          {
+            "field": "health_samples",
+            "format": "number",
+            "label": "health样本"
+          },
+          {
+            "field": "structure_pending",
+            "format": "number",
+            "label": "pending"
+          },
+          {
+            "field": "invalidated_samples",
+            "format": "number",
+            "label": "invalidated"
+          },
+          {
+            "field": "formal_signals",
+            "format": "number",
+            "label": "formal"
+          },
+          {
+            "field": "interpretation",
+            "label": "解释",
+            "type": "text"
+          }
+        ],
+        "dataset": "lifecycle",
+        "defaultSort": {
+          "direction": "asc",
+          "field": "date"
+        },
+        "density": "compact",
+        "id": "lifecycle_table",
+        "layout": "full",
+        "sourceId": "data_quality_audit",
+        "subtitle": "原始行情可用，但旧 lifecycle 派生标签被 structure pending 污染。",
+        "title": "为什么周一至周三没有 formal signal"
+      },
+      {
+        "columns": [
+          {
+            "field": "state",
+            "label": "状态",
+            "type": "text"
+          },
+          {
+            "field": "horizon_minutes",
+            "format": "number",
+            "label": "Horizon(min)"
+          },
+          {
+            "field": "sample_count",
+            "format": "number",
+            "label": "n"
+          },
+          {
+            "field": "median_endpoint_points",
+            "format": "number",
+            "label": "中位ES终值"
+          },
+          {
+            "field": "mean_endpoint_points",
+            "format": "number",
+            "label": "平均ES终值"
+          },
+          {
+            "field": "directional_hit_ratio",
+            "format": "percent",
+            "label": "方向命中"
+          }
+        ],
+        "dataset": "forward_summary",
+        "defaultSort": {
+          "direction": "desc",
+          "field": "sample_count"
+        },
+        "density": "compact",
+        "id": "forward_table",
+        "layout": "full",
+        "sourceId": "causal_replay",
+        "subtitle": "每5分钟滚动、样本高度重叠、未计期权成本；不能当作策略胜率。",
+        "title": "状态后的 ES 路径（仅语义检查）"
+      }
+    ],
+    "title": "RTH 5分钟状态策略：数据修复与因果重放",
+    "version": 1
+  },
+  "snapshot": {
+    "datasets": {
+      "changes": [
+        {
+          "change": "5秒 source-time OHLC；首尾覆盖、连续网格和gap门控",
+          "effect": "不再依赖长期为空的 SPX bar 文件",
+          "layer": "ES 5m bars"
+        },
+        {
+          "change": "RTH VWAP/OR/structure/ER/cross/range/breadth 因果派生",
+          "effect": "缺失保持 UNCERTAIN，不补成中性",
+          "layer": "八变量"
+        },
+        {
+          "change": "5m volume 选择完整窗口 provider，重复 stale quote 去重",
+          "effect": "Schwab→IBKR 时不再丢失已有5m量价窗",
+          "layer": "Provider切换"
+        },
+        {
+          "change": "bid>=0、ask>=bid、mid有限；拒绝-1占位和crossed market",
+          "effect": "61档完整价对展示不再虚高",
+          "layer": "Option coverage"
+        },
+        {
+          "change": "ready 8/8 状态参与Shadow确认；option overlay独立",
+          "effect": "期权缺失不抹掉市场状态；warming不误杀旧诊断",
+          "layer": "Spring Gamma v3"
+        },
+        {
+          "change": "状态→观察位置→外部触发→只读方向映射",
+          "effect": "不根据未计算的skew/edge虚构spread建议",
+          "layer": "15m报告"
+        }
+      ],
+      "coverage_by_day": [
+        {
+          "complete_input_ratio": 0.0,
+          "complete_input_slots": 0,
+          "es_bar_coverage_ratio": 0.42,
+          "es_expected_bars": 78,
+          "es_ok_bars": 33,
+          "replay_slots": 75,
+          "sector_count": 1,
+          "trading_date": "2026-07-06",
+          "weekday": "Monday"
+        },
+        {
+          "complete_input_ratio": 0.0,
+          "complete_input_slots": 0,
+          "es_bar_coverage_ratio": 0.12,
+          "es_expected_bars": 78,
+          "es_ok_bars": 9,
+          "replay_slots": 75,
+          "sector_count": 1,
+          "trading_date": "2026-07-07",
+          "weekday": "Tuesday"
+        },
+        {
+          "complete_input_ratio": 0.0,
+          "complete_input_slots": 0,
+          "es_bar_coverage_ratio": 0.09,
+          "es_expected_bars": 78,
+          "es_ok_bars": 7,
+          "replay_slots": 75,
+          "sector_count": 1,
+          "trading_date": "2026-07-08",
+          "weekday": "Wednesday"
+        },
+        {
+          "complete_input_ratio": 0.0,
+          "complete_input_slots": 0,
+          "es_bar_coverage_ratio": 0.14,
+          "es_expected_bars": 78,
+          "es_ok_bars": 11,
+          "replay_slots": 75,
+          "sector_count": 1,
+          "trading_date": "2026-07-09",
+          "weekday": "Thursday"
+        },
+        {
+          "complete_input_ratio": 0.0,
+          "complete_input_slots": 0,
+          "es_bar_coverage_ratio": 0.95,
+          "es_expected_bars": 78,
+          "es_ok_bars": 74,
+          "replay_slots": 75,
+          "sector_count": 1,
+          "trading_date": "2026-07-10",
+          "weekday": "Friday"
+        },
+        {
+          "complete_input_ratio": 0.0,
+          "complete_input_slots": 0,
+          "es_bar_coverage_ratio": 1.0,
+          "es_expected_bars": 78,
+          "es_ok_bars": 78,
+          "replay_slots": 75,
+          "sector_count": 11,
+          "trading_date": "2026-07-13",
+          "weekday": "Monday"
+        },
+        {
+          "complete_input_ratio": 0.0,
+          "complete_input_slots": 0,
+          "es_bar_coverage_ratio": 1.0,
+          "es_expected_bars": 78,
+          "es_ok_bars": 78,
+          "replay_slots": 75,
+          "sector_count": 11,
+          "trading_date": "2026-07-14",
+          "weekday": "Tuesday"
+        },
+        {
+          "complete_input_ratio": 0.0,
+          "complete_input_slots": 0,
+          "es_bar_coverage_ratio": 1.0,
+          "es_expected_bars": 78,
+          "es_ok_bars": 78,
+          "replay_slots": 75,
+          "sector_count": 11,
+          "trading_date": "2026-07-15",
+          "weekday": "Wednesday"
+        },
+        {
+          "complete_input_ratio": 0.0,
+          "complete_input_slots": 0,
+          "es_bar_coverage_ratio": 1.0,
+          "es_expected_bars": 78,
+          "es_ok_bars": 78,
+          "replay_slots": 75,
+          "sector_count": 11,
+          "trading_date": "2026-07-16",
+          "weekday": "Thursday"
+        },
+        {
+          "complete_input_ratio": 0.0,
+          "complete_input_slots": 0,
+          "es_bar_coverage_ratio": 1.0,
+          "es_expected_bars": 78,
+          "es_ok_bars": 78,
+          "replay_slots": 75,
+          "sector_count": 11,
+          "trading_date": "2026-07-17",
+          "weekday": "Friday"
+        },
+        {
+          "complete_input_ratio": 0.0,
+          "complete_input_slots": 0,
+          "es_bar_coverage_ratio": 1.0,
+          "es_expected_bars": 78,
+          "es_ok_bars": 78,
+          "replay_slots": 75,
+          "sector_count": 11,
+          "trading_date": "2026-07-20",
+          "weekday": "Monday"
+        },
+        {
+          "complete_input_ratio": 0.0,
+          "complete_input_slots": 0,
+          "es_bar_coverage_ratio": 1.0,
+          "es_expected_bars": 78,
+          "es_ok_bars": 78,
+          "replay_slots": 75,
+          "sector_count": 11,
+          "trading_date": "2026-07-21",
+          "weekday": "Tuesday"
+        },
+        {
+          "complete_input_ratio": 0.0,
+          "complete_input_slots": 0,
+          "es_bar_coverage_ratio": 1.0,
+          "es_expected_bars": 78,
+          "es_ok_bars": 78,
+          "replay_slots": 75,
+          "sector_count": 11,
+          "trading_date": "2026-07-22",
+          "weekday": "Wednesday"
+        },
+        {
+          "complete_input_ratio": 0.0,
+          "complete_input_slots": 0,
+          "es_bar_coverage_ratio": 1.0,
+          "es_expected_bars": 78,
+          "es_ok_bars": 78,
+          "replay_slots": 75,
+          "sector_count": 11,
+          "trading_date": "2026-07-23",
+          "weekday": "Thursday"
+        }
+      ],
+      "coverage_long": [
+        {
+          "metric": "ES 5m完整bar",
+          "ratio": 0.42,
+          "trading_date": "2026-07-06"
+        },
+        {
+          "metric": "八输入完整",
+          "ratio": 0.0,
+          "trading_date": "2026-07-06"
+        },
+        {
+          "metric": "ES 5m完整bar",
+          "ratio": 0.12,
+          "trading_date": "2026-07-07"
+        },
+        {
+          "metric": "八输入完整",
+          "ratio": 0.0,
+          "trading_date": "2026-07-07"
+        },
+        {
+          "metric": "ES 5m完整bar",
+          "ratio": 0.09,
+          "trading_date": "2026-07-08"
+        },
+        {
+          "metric": "八输入完整",
+          "ratio": 0.0,
+          "trading_date": "2026-07-08"
+        },
+        {
+          "metric": "ES 5m完整bar",
+          "ratio": 0.14,
+          "trading_date": "2026-07-09"
+        },
+        {
+          "metric": "八输入完整",
+          "ratio": 0.0,
+          "trading_date": "2026-07-09"
+        },
+        {
+          "metric": "ES 5m完整bar",
+          "ratio": 0.95,
+          "trading_date": "2026-07-10"
+        },
+        {
+          "metric": "八输入完整",
+          "ratio": 0.0,
+          "trading_date": "2026-07-10"
+        },
+        {
+          "metric": "ES 5m完整bar",
+          "ratio": 1.0,
+          "trading_date": "2026-07-13"
+        },
+        {
+          "metric": "八输入完整",
+          "ratio": 0.0,
+          "trading_date": "2026-07-13"
+        },
+        {
+          "metric": "ES 5m完整bar",
+          "ratio": 1.0,
+          "trading_date": "2026-07-14"
+        },
+        {
+          "metric": "八输入完整",
+          "ratio": 0.0,
+          "trading_date": "2026-07-14"
+        },
+        {
+          "metric": "ES 5m完整bar",
+          "ratio": 1.0,
+          "trading_date": "2026-07-15"
+        },
+        {
+          "metric": "八输入完整",
+          "ratio": 0.0,
+          "trading_date": "2026-07-15"
+        },
+        {
+          "metric": "ES 5m完整bar",
+          "ratio": 1.0,
+          "trading_date": "2026-07-16"
+        },
+        {
+          "metric": "八输入完整",
+          "ratio": 0.0,
+          "trading_date": "2026-07-16"
+        },
+        {
+          "metric": "ES 5m完整bar",
+          "ratio": 1.0,
+          "trading_date": "2026-07-17"
+        },
+        {
+          "metric": "八输入完整",
+          "ratio": 0.0,
+          "trading_date": "2026-07-17"
+        },
+        {
+          "metric": "ES 5m完整bar",
+          "ratio": 1.0,
+          "trading_date": "2026-07-20"
+        },
+        {
+          "metric": "八输入完整",
+          "ratio": 0.0,
+          "trading_date": "2026-07-20"
+        },
+        {
+          "metric": "ES 5m完整bar",
+          "ratio": 1.0,
+          "trading_date": "2026-07-21"
+        },
+        {
+          "metric": "八输入完整",
+          "ratio": 0.0,
+          "trading_date": "2026-07-21"
+        },
+        {
+          "metric": "ES 5m完整bar",
+          "ratio": 1.0,
+          "trading_date": "2026-07-22"
+        },
+        {
+          "metric": "八输入完整",
+          "ratio": 0.0,
+          "trading_date": "2026-07-22"
+        },
+        {
+          "metric": "ES 5m完整bar",
+          "ratio": 1.0,
+          "trading_date": "2026-07-23"
+        },
+        {
+          "metric": "八输入完整",
+          "ratio": 0.0,
+          "trading_date": "2026-07-23"
+        }
+      ],
+      "forward_summary": [
+        {
+          "directional_hit_ratio": null,
+          "evaluation_only": true,
+          "horizon_minutes": 15,
+          "mean_endpoint_points": -0.26,
+          "median_endpoint_points": -0.25,
+          "sample_count": 745,
+          "state": "UNCERTAIN"
+        },
+        {
+          "directional_hit_ratio": null,
+          "evaluation_only": true,
+          "horizon_minutes": 30,
+          "mean_endpoint_points": -0.81,
+          "median_endpoint_points": -0.75,
+          "sample_count": 711,
+          "state": "UNCERTAIN"
+        },
+        {
+          "directional_hit_ratio": null,
+          "evaluation_only": true,
+          "horizon_minutes": 60,
+          "mean_endpoint_points": -1.84,
+          "median_endpoint_points": -1.5,
+          "sample_count": 649,
+          "state": "UNCERTAIN"
+        }
+      ],
+      "headline": [
+        {
+          "classified_ratio": 0.0,
+          "input_ready_ratio": 0.0,
+          "max_prior_baseline_sessions": 9,
+          "raw_trading_days": 14,
+          "replay_slots": 1050
+        }
+      ],
+      "input_missing": [
+        {
+          "input": "same_time_range_ratio",
+          "missing_share": 1.0,
+          "missing_slots": 1050
+        },
+        {
+          "input": "breadth_above_vwap",
+          "missing_share": 0.8838095238095238,
+          "missing_slots": 928
+        },
+        {
+          "input": "vwap_cross_count",
+          "missing_share": 0.3619047619047619,
+          "missing_slots": 380
+        },
+        {
+          "input": "vwap_slope",
+          "missing_share": 0.3438095238095238,
+          "missing_slots": 361
+        },
+        {
+          "input": "price_vs_vwap",
+          "missing_share": 0.3342857142857143,
+          "missing_slots": 351
+        },
+        {
+          "input": "market_structure",
+          "missing_share": 0.32095238095238093,
+          "missing_slots": 337
+        },
+        {
+          "input": "efficiency_ratio",
+          "missing_share": 0.3180952380952381,
+          "missing_slots": 334
+        },
+        {
+          "input": "opening_range_state",
+          "missing_share": 0.2857142857142857,
+          "missing_slots": 300
+        }
+      ],
+      "lifecycle": [
+        {
+          "date": "2026-07-20",
+          "formal_signals": 0,
+          "health_samples": 6221,
+          "interpretation": "旧 lifecycle bug 污染",
+          "invalidated_samples": 6191,
+          "structure_pending": 4140
+        },
+        {
+          "date": "2026-07-21",
+          "formal_signals": 0,
+          "health_samples": 6215,
+          "interpretation": "旧 lifecycle bug 污染",
+          "invalidated_samples": 5955,
+          "structure_pending": 2296
+        },
+        {
+          "date": "2026-07-22",
+          "formal_signals": 0,
+          "health_samples": 6209,
+          "interpretation": "旧 lifecycle bug 污染",
+          "invalidated_samples": 5884,
+          "structure_pending": 1399
+        },
+        {
+          "date": "2026-07-23",
+          "formal_signals": 7,
+          "health_samples": 6210,
+          "interpretation": "b7e1901 后恢复；7/7 被下游 gate 阻止",
+          "invalidated_samples": 9,
+          "structure_pending": 0
+        }
+      ],
+      "state_distribution": [
+        {
+          "slot_count": 1050,
+          "slot_share": 1.0,
+          "state": "UNCERTAIN"
+        }
+      ]
+    },
+    "generatedAt": "2026-07-24T11:47:29.848736+00:00",
+    "status": "ready",
+    "version": 1
+  },
+  "sources": [
+    {
+      "id": "causal_replay",
+      "label": "RTH 5m causal replay, 2026-07-06–2026-07-23",
+      "path": "reports/market_state_5m/replay=2026-07-24/artifact.json",
+      "query": {
+        "description": "Loads live ES and eleven sector ETFs, replays only rows known by each five-minute boundary, and attaches future ES paths afterwards.",
+        "engine": "DuckDB + production-equivalent Python",
+        "executed_at": "2026-07-24T11:47:29.848736+00:00",
+        "filters": [
+          "2026-07-06 through 2026-07-23",
+          "RTH state evaluated in America/New_York",
+          "received_at <= replay_as_of and source_at <= replay_as_of",
+          "no bar, NBBO, breadth, or missing-value interpolation",
+          "same-time baselines use only baseline_date < trading_date"
+        ],
+        "id": "rth-market-state-5m-replay-20260724",
+        "language": "sql",
+        "metric_definitions": [
+          "Input-ready ratio is 5m boundaries with all eight inputs available.",
+          "Classified ratio excludes UNCERTAIN.",
+          "Forward paths are overlapping evaluation labels, not independent trades."
+        ],
+        "sql": "SELECT provider, instrument_id, source_at, received_at, effective_price, volume FROM read_parquet('lake/quotes/schema=v1/date=*/provider=*/hour=*/quotes.parquet', hive_partitioning=true, union_by_name=true) WHERE quality='live' AND instrument_id IN ('future:ES','equity:XLB','equity:XLC','equity:XLE','equity:XLF','equity:XLI','equity:XLK','equity:XLP','equity:XLRE','equity:XLU','equity:XLV','equity:XLY')",
+        "tables_used": [
+          "lake/quotes/schema=v1"
+        ]
+      }
+    },
+    {
+      "description": "Point-in-time audit of quote coverage, lifecycle transitions, report cadence, option-chain gaps and confirmed-gate attribution.",
+      "id": "data_quality_audit",
+      "label": "RTH lifecycle and data-quality audit, 2026-07-24",
+      "path": "docs/rth-state-data-quality-audit-2026-07-24.md",
+      "query": {
+        "description": "Reproduces the four reviewed lifecycle totals transcribed from the saved point-in-time audit.",
+        "engine": "DuckDB",
+        "executed_at": "2026-07-24T11:47:29.848736+00:00",
+        "filters": [
+          "09:30 through 16:00 America/New_York",
+          "2026-07-20 through 2026-07-23",
+          "formal_signals counts unique transitions; health rows are samples"
+        ],
+        "id": "rth-lifecycle-audit-extract-20260724",
+        "language": "sql",
+        "metric_definitions": [
+          "health_samples counts repeated level-health observations.",
+          "formal_signals counts unique formal transitions."
+        ],
+        "sql": "SELECT * FROM (VALUES ('2026-07-20', 6221, 4140, 6191, 0, '旧 lifecycle bug 污染'), ('2026-07-21', 6215, 2296, 5955, 0, '旧 lifecycle bug 污染'), ('2026-07-22', 6209, 1399, 5884, 0, '旧 lifecycle bug 污染'), ('2026-07-23', 6210, 0, 9, 7, 'b7e1901 后恢复；7/7 被下游 gate 阻止')) AS audited(date, health_samples, structure_pending, invalidated_samples, formal_signals, interpretation)"
+      }
+    },
+    {
+      "description": "Pure scorer, causal input extractor, ES bar state, Spring Gamma Shadow integration and strict NBBO coverage changes.",
+      "id": "implementation",
+      "label": "RTH market-state v1 implementation and tests",
+      "path": "docs/rth-five-minute-market-state-v1.md"
+    }
+  ],
+  "surface": "report"
+}

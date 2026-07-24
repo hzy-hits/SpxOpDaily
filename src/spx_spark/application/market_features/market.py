@@ -30,6 +30,17 @@ TRACKED_INSTRUMENTS = (
     "index:VIX3M",
     "index:VVIX",
     "index:SKEW",
+    "equity:XLB",
+    "equity:XLC",
+    "equity:XLE",
+    "equity:XLF",
+    "equity:XLI",
+    "equity:XLK",
+    "equity:XLP",
+    "equity:XLRE",
+    "equity:XLU",
+    "equity:XLV",
+    "equity:XLY",
 )
 
 
@@ -314,16 +325,22 @@ def volume_features(
             else ()
         )
     }
+    providers.update(
+        str(quote.get("provider"))
+        for row in samples
+        if (quote := _instrument(row, "future:ES"))
+        and quote.get("provider")
+    )
     by_provider = {provider: _volume_points(samples, provider=provider) for provider in providers}
     session_provider = (
         max(by_provider, key=lambda provider: len(by_provider[provider])) if by_provider else None
     )
     current_quote = _instrument(samples[-1], "future:ES") if samples else None
     current_provider = str(current_quote.get("provider")) if current_quote else None
-    recent_provider = (
-        current_provider
-        if current_provider in by_provider and len(by_provider[current_provider]) >= 2
-        else session_provider
+    recent_provider = _recent_volume_provider(
+        by_provider,
+        current_provider=current_provider,
+        now=now,
     )
     points = by_provider.get(recent_provider, _volume_points(samples))
     session_points = by_provider.get(session_provider, points)
@@ -387,6 +404,12 @@ def volume_features(
         ),
         "session_reset_detected": any(cur[1] < prev[1] for prev, cur in zip(points, points[1:])),
         "recent_volume_provider": recent_provider,
+        "selected_es_provider": current_provider,
+        "recent_volume_provider_fallback": bool(
+            recent_provider
+            and current_provider
+            and recent_provider != current_provider
+        ),
         "session_vwap_provider": session_provider,
     }
 
@@ -681,9 +704,8 @@ def _volume_weighted_price(points: list[tuple[datetime, float, float]]) -> float
 def _volume_points(
     samples: list[dict[str, Any]], *, provider: str | None = None
 ) -> list[tuple[datetime, float, float]]:
-    points: list[tuple[datetime, float, float]] = []
+    points_by_source_at: dict[datetime, tuple[datetime, float, float]] = {}
     for row in samples:
-        at = _parse_at(row.get("at"))
         quote = None
         if provider is not None:
             provider_quotes = row.get("es_by_provider")
@@ -696,11 +718,47 @@ def _volume_points(
                     quote = selected
         else:
             quote = _instrument(row, "future:ES")
+        at = (
+            _parse_at(quote.get("source_at"))
+            if quote
+            else None
+        ) or _parse_at(row.get("at"))
         volume = _number(quote.get("volume")) if quote else None
         price = _number(quote.get("price")) if quote else None
         if at is not None and volume is not None and price is not None:
-            points.append((at, volume, price))
-    return points
+            points_by_source_at[at] = (at, volume, price)
+    return [points_by_source_at[at] for at in sorted(points_by_source_at)]
+
+
+def _recent_volume_provider(
+    by_provider: dict[str, list[tuple[datetime, float, float]]],
+    *,
+    current_provider: str | None,
+    now: datetime,
+) -> str | None:
+    """Select a provider with a fresh, complete 5-minute cumulative-volume window."""
+
+    candidates: list[tuple[int, datetime, int, str]] = []
+    current_at = as_utc(now)
+    for provider, points in by_provider.items():
+        window = _complete_volume_window(points, minutes=5)
+        if window is None:
+            continue
+        endpoint = window[1][0]
+        age_seconds = (current_at - endpoint).total_seconds()
+        if age_seconds < -5.0 or age_seconds > 125.0:
+            continue
+        candidates.append(
+            (
+                int(provider == current_provider),
+                endpoint,
+                len(points),
+                provider,
+            )
+        )
+    if not candidates:
+        return current_provider if current_provider in by_provider else None
+    return max(candidates)[3]
 
 
 def _complete_volume_window(

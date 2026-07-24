@@ -17,12 +17,17 @@ from datetime import datetime, timezone
 import numpy as np
 
 from spx_spark.analytics.options.pricing import finite_float
+from spx_spark.application.market_features.spring_gamma_rth_state import (
+    extract_rth_market_state,
+    missing_rth_market_state,
+    ready_rth_market_state,
+)
 from spx_spark.marketdata import as_utc
 from spx_spark.settings.spring_gamma_v3 import SpringGammaV3Settings
 
 
 SCHEMA_VERSION = "spring_gamma_v3_shadow.v1"
-MODEL_VERSION = "spring_gamma_v3_es_only_shadow.v1"
+MODEL_VERSION = "spring_gamma_v3_rth_state_shadow.v2"
 CALIBRATION_STATUS = "uncalibrated_shadow"
 
 _HORIZONS = (15, 30, 60)
@@ -40,6 +45,21 @@ _GTH_SEGMENTS = frozenset({"asia", "europe", "us_premarket", "curb", "gth"})
 _SPRING_PHASES = frozenset({"rejected", "retest", "confirmed"})
 _FADE_SIGN = {"put_wall": 1, "flip_low": 1, "flip_high": -1, "call_wall": -1}
 _GOOD_LEVEL_QUALITY = frozenset({"ready", "ok", "live", "confirmed"})
+_RTH_TREND_SIGN = {"TREND_UP": 1, "TREND_DOWN": -1}
+_MARKET_GATE_REASONS = frozenset(
+    {
+        "shadow_disabled",
+        "required_horizons_not_configured",
+        "requested_session_invalid",
+        "market_session_unknown",
+        "market_session_mismatch",
+        "market_frame_unavailable",
+        "es_source_timestamp_missing",
+        "market_timestamp_missing",
+        "market_frame_stale",
+        "market_frame_stale_future_timestamp",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -93,6 +113,9 @@ def build_spring_gamma_v3_shadow(
     coverage = _strike_coverage(expiry_row, exposures)
     freshness = _freshness(market, options, greeks, exposures, expiry_row, at)
     structure_risk = _structure_risk(greeks, selected_session)
+    rth_market_state = (
+        extract_rth_market_state(market) if selected_session == "rth" else {}
+    )
     gate_reasons = _gate_reasons(
         market,
         options,
@@ -112,6 +135,8 @@ def build_spring_gamma_v3_shadow(
         level,
         policy,
         structure_risk,
+        rth_market_state,
+        selected_session,
         gate_passed=gate_passed,
     )
     reasons = list(dict.fromkeys([*gate_reasons, *direction_reasons]))
@@ -155,6 +180,24 @@ def build_spring_gamma_v3_shadow(
         "direction": decision,
         "regime": opportunity,
         "opportunity": opportunity,
+        "rth_market_state": rth_market_state or missing_rth_market_state(
+            selected_session
+        ),
+        "option_overlay": {
+            "status": (
+                "ready"
+                if not [
+                    reason
+                    for reason in gate_reasons
+                    if reason not in _MARKET_GATE_REASONS
+                ]
+                else "unavailable"
+            ),
+            "reasons": [
+                reason for reason in gate_reasons if reason not in _MARKET_GATE_REASONS
+            ],
+            "market_state_independent": True,
+        },
         "quality": {
             "gate_status": "pass" if gate_passed else "fail",
             "policy_session": selected_session,
@@ -240,6 +283,8 @@ def _decide(
     level: Mapping[str, object],
     policy: _Policy,
     structure_risk: Mapping[str, object],
+    rth_market_state: Mapping[str, object],
+    session: str,
     *,
     gate_passed: bool,
 ) -> tuple[dict[str, object], str, list[str]]:
@@ -266,6 +311,34 @@ def _decide(
     elif trend_sign:
         candidate, candidate_sign = "trend_continuation", trend_sign
 
+    state_name = str(rth_market_state.get("state") or "")
+    state_sign = _RTH_TREND_SIGN.get(state_name, 0)
+    state_required = session == "rth" and ready_rth_market_state(rth_market_state)
+    state_alignment = (
+        "diagnostic_only_incomplete"
+        if session == "rth" and rth_market_state and not state_required
+        else "not_required"
+    )
+    if state_required:
+        if candidate == "spring_reversion":
+            state_alignment = (
+                "range_reversion_allowed"
+                if state_name == "LOW_VOL_RANGE"
+                else "spring_reversion_state_blocked"
+            )
+            if state_alignment != "range_reversion_allowed":
+                candidate, candidate_sign = "transition", 0
+        elif candidate == "trend_continuation":
+            state_alignment = (
+                "trend_aligned"
+                if state_sign and state_sign == candidate_sign
+                else "trend_state_conflict"
+            )
+            if state_alignment != "trend_aligned":
+                candidate, candidate_sign = "transition", 0
+        else:
+            state_alignment = "no_directional_setup"
+
     multiplier = finite_float(structure_risk.get("confidence_multiplier")) or 0.0
     confidence_score = raw_score * multiplier if raw_score is not None else None
     confident = _confident(confidence_score, policy)
@@ -280,6 +353,12 @@ def _decide(
         reasons.append("structure_gate_failed")
     elif candidate == "transition":
         reasons.append("transition_no_direction")
+        if state_required and state_alignment in {
+            "spring_reversion_state_blocked",
+            "trend_state_conflict",
+            "no_directional_setup",
+        }:
+            reasons.append(f"rth_market_state:{state_alignment}")
         if spring_sign:
             reasons.append("spring_reversion_path_unconfirmed")
     elif not confident:
@@ -306,6 +385,8 @@ def _decide(
             "calibration_status": CALIBRATION_STATUS,
             "direction_score_adjustment_from_structure": 0.0,
             "confidence_multiplier_from_structure_risk": _round(multiplier),
+            "rth_market_state": state_name or None,
+            "rth_market_state_alignment": state_alignment,
         },
         opportunity,
         reasons,

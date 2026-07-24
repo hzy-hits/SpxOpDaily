@@ -349,6 +349,76 @@ def test_volume_alignment_does_not_mix_incomplete_price_and_volume_windows() -> 
     assert frame.volume["price_volume_alignment_reason_5m"] == "insufficient_synchronized_window"
 
 
+def test_volume_uses_complete_provider_window_during_provider_switch() -> None:
+    now = datetime(2026, 7, 13, 15, 0, tzinfo=UTC)
+    session_id = globex_session_id(now)
+    samples = []
+    for offset in range(-6, 1):
+        at = now + timedelta(minutes=offset)
+        row = _market_sample(
+            at,
+            session_id=session_id,
+            es=7600.0 + offset,
+            volume=100_000.0 + (offset + 6) * 100.0,
+        )
+        schwab = dict(row["instruments"]["future:ES"])
+        row["es_by_provider"] = {"schwab": schwab}
+        if offset >= -1:
+            ibkr = {
+                **schwab,
+                "provider": "ibkr",
+                "volume": 10_000.0 + (offset + 1) * 50.0,
+            }
+            row["es_by_provider"]["ibkr"] = ibkr
+            row["instruments"]["future:ES"] = ibkr
+        samples.append(row)
+
+    frame = build_minute_market_frame(
+        samples,
+        now=now,
+        expected_move_points=None,
+        atm_iv=None,
+        structural_levels={},
+        volume_baselines={},
+        policy=MarketFeatureSettings(),
+    )
+
+    assert frame.volume["selected_es_provider"] == "ibkr"
+    assert frame.volume["recent_volume_provider"] == "schwab"
+    assert frame.volume["recent_volume_provider_fallback"] is True
+    assert frame.volume["volume_delta_5m"] == pytest.approx(500.0)
+
+
+def test_repeated_stale_volume_quote_cannot_fake_complete_window() -> None:
+    now = datetime(2026, 7, 13, 15, 0, tzinfo=UTC)
+    session_id = globex_session_id(now)
+    source_at = now - timedelta(minutes=6)
+    samples = []
+    for offset in range(-6, 1):
+        at = now + timedelta(minutes=offset)
+        row = _market_sample(
+            at,
+            session_id=session_id,
+            es=7600.0,
+            volume=100_000.0,
+        )
+        row["instruments"]["future:ES"]["source_at"] = source_at.isoformat()
+        samples.append(row)
+
+    frame = build_minute_market_frame(
+        samples,
+        now=now,
+        expected_move_points=None,
+        atm_iv=None,
+        structural_levels={},
+        volume_baselines={},
+        policy=MarketFeatureSettings(),
+    )
+
+    assert frame.volume["volume_delta_5m"] is None
+    assert frame.volume["price_volume_alignment_5m"] == "unavailable"
+
+
 def test_l1_helpers_measure_imbalance_and_only_compare_synchronized_providers() -> None:
     now = datetime(2026, 7, 13, 12, 0, tzinfo=UTC)
     instrument = InstrumentId.option(

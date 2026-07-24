@@ -150,6 +150,37 @@ def _build(
     )
 
 
+def _attach_rth_market_state(
+    market: dict[str, Any],
+    state: str,
+    *,
+    direction_score: int,
+) -> None:
+    market["diagnostics"]["rth_market_state"] = {
+        "schema_version": "market_state_5m.v1",
+        "rule_version": "market_state_5m_eight_variable_rules.v1",
+        "as_of": market["as_of"],
+        "state": state,
+        "market_state": state,
+        "D": direction_score,
+        "Q": {
+            "quality": "high",
+            "efficiency_ratio": 0.70,
+            "vwap_cross_count": 0,
+        },
+        "V": {"state": "normal", "same_time_range_ratio": 1.0},
+        "status": "ready",
+        "input_availability": {
+            "required_count": 8,
+            "available_count": 8,
+            "complete": True,
+        },
+        "reasons": [],
+        "action_authority": "none",
+        "actionable": False,
+    }
+
+
 def test_ready_trend_is_continuous_es_only_and_permanently_non_actionable() -> None:
     inputs = _inputs()
     result = _build(inputs)
@@ -187,6 +218,91 @@ def test_ready_trend_is_continuous_es_only_and_permanently_non_actionable() -> N
     assert changed_result["direction"] == result["direction"]
     assert changed_result["opportunity"] == result["opportunity"]
     assert changed_result["risk"]["net_gamma_ratio_proxy"] == -0.90
+
+
+def test_rth_state_is_independent_and_gates_directional_setup() -> None:
+    aligned_inputs = _inputs()
+    _attach_rth_market_state(aligned_inputs[0], "TREND_UP", direction_score=8)
+    aligned = _build(aligned_inputs)
+
+    assert aligned["status"] == "ready"
+    assert aligned["direction"]["decision"] == "up"
+    assert aligned["direction"]["rth_market_state_alignment"] == "trend_aligned"
+    assert aligned["rth_market_state"]["D"] == 8
+    assert aligned["option_overlay"]["status"] == "ready"
+
+    chop_inputs = deepcopy(aligned_inputs)
+    _attach_rth_market_state(chop_inputs[0], "HIGH_VOL_CHOP", direction_score=0)
+    chop = _build(chop_inputs)
+
+    assert chop["status"] == "abstain"
+    assert chop["direction"]["decision"] == "abstain"
+    assert chop["rth_market_state"]["state"] == "HIGH_VOL_CHOP"
+    assert "rth_market_state:trend_state_conflict" in chop["abstain_reasons"]
+
+
+def test_option_failure_does_not_erase_ready_rth_market_state() -> None:
+    inputs = _inputs()
+    _attach_rth_market_state(inputs[0], "TREND_UP", direction_score=7)
+    inputs[1]["quality"] = "unavailable"
+    result = _build(inputs)
+
+    assert result["status"] == "abstain"
+    assert result["rth_market_state"]["status"] == "ready"
+    assert result["rth_market_state"]["state"] == "TREND_UP"
+    assert result["option_overlay"]["status"] == "unavailable"
+    assert "option_frame_unavailable" in result["option_overlay"]["reasons"]
+
+
+def test_incomplete_rth_state_is_visible_but_cannot_veto_legacy_shadow() -> None:
+    inputs = _inputs()
+    _attach_rth_market_state(inputs[0], "UNCERTAIN", direction_score=4)
+    state = inputs[0]["diagnostics"]["rth_market_state"]
+    state["status"] = "uncertain"
+    state["input_availability"] = {
+        "required_count": 8,
+        "available_count": 7,
+        "complete": False,
+    }
+
+    result = _build(inputs)
+
+    assert result["status"] == "ready"
+    assert result["direction"]["decision"] == "up"
+    assert result["rth_market_state"]["state"] == "UNCERTAIN"
+    assert (
+        result["direction"]["rth_market_state_alignment"]
+        == "diagnostic_only_incomplete"
+    )
+
+
+def test_gth_shadow_does_not_carry_an_rth_state() -> None:
+    inputs = _inputs(segment="europe")
+    _attach_rth_market_state(inputs[0], "TREND_UP", direction_score=8)
+
+    result = _build(inputs)
+
+    assert result["session"] == "gth"
+    assert result["rth_market_state"]["state"] == "UNCERTAIN"
+    assert result["rth_market_state"]["reasons"] == [
+        "rth_market_state_not_applicable_outside_rth"
+    ]
+
+
+def test_stale_rth_state_is_rejected_instead_of_reused() -> None:
+    inputs = _inputs()
+    _attach_rth_market_state(inputs[0], "TREND_DOWN", direction_score=-8)
+    inputs[0]["diagnostics"]["rth_market_state"]["as_of"] = (
+        NOW - timedelta(minutes=5)
+    ).isoformat()
+
+    result = _build(inputs)
+
+    assert result["direction"]["decision"] == "up"
+    assert result["rth_market_state"]["state"] == "UNCERTAIN"
+    assert result["rth_market_state"]["reasons"] == [
+        "rth_market_state_not_attached"
+    ]
 
 
 def test_charm_vanna_only_reduce_confidence_and_never_flip_direction() -> None:

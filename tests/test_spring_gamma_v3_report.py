@@ -248,6 +248,53 @@ def test_ready_and_abstain_shadow_lines_are_deterministic_and_two_decimal() -> N
     assert gth.index("Spring Gamma v3 Shadow") < gth.index("执行限制:")
 
 
+def test_rth_eight_feature_state_renders_state_to_expression_path() -> None:
+    payload = _production_payload()
+    shadow = _shadow()
+    shadow["rth_market_state"] = {
+        "schema_version": "market_state_5m.v1",
+        "rule_version": "market_state_5m_eight_variable_rules.v1",
+        "state": "TREND_UP",
+        "status": "ready",
+        "D": 8,
+        "Q": {
+            "quality": "high",
+            "efficiency_ratio": 0.72,
+            "vwap_cross_count": 0,
+        },
+        "V": {"state": "high", "same_time_range_ratio": 1.35},
+        "input_availability": {
+            "required_count": 8,
+            "available_count": 8,
+            "complete": True,
+        },
+        "input_lineage": {"values": {"breadth_above_vwap": 0.68}},
+        "action_authority": "none",
+        "actionable": False,
+    }
+    shadow["option_overlay"] = {
+        "status": "ready",
+        "reasons": [],
+        "market_state_independent": True,
+    }
+    payload["spring_gamma_v3_shadow"] = shadow
+
+    rendered = render_status_template(payload, [], NOW)
+    compact = _status_writer_payload(payload)["spring_gamma_v3_shadow"]
+
+    assert (
+        "RTH状态 Shadow  TREND_UP · D +8.00/10 · ER 0.72 · VWAP穿越 0 · "
+        "Range 1.35x · 宽度 68.00% · 数据 8/8　只读"
+    ) in rendered
+    assert "状态路径  等待位置：VWAP/ORH与上涨腿回撤区（本层未计算回撤比例）" in rendered
+    assert "状态路径  触发确认：仅记录外部level lifecycle确认" in rendered
+    assert "状态路径  期权结构：方向映射Call；具体价差仅以独立实时双腿Shadow为准" in rendered
+    assert compact["rth_market_state"]["state"] == "TREND_UP"
+    assert compact["rth_market_state"]["breadth_above_vwap"] == 0.68
+    assert compact["option_overlay"]["market_state_independent"] is True
+    assert compact["action_authority"] == "none"
+
+
 def test_nested_wall_probability_selects_nearest_directional_target() -> None:
     payload = _production_payload()
     shadow = _shadow(wall_probability=None)
