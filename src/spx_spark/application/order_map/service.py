@@ -27,6 +27,9 @@ from spx_spark.application.order_map.candidate_presentation import (
     apply_candidate_presentation as _apply_candidate_presentation,
 )
 from spx_spark.application.order_map.candidates import build_candidates
+from spx_spark.application.order_map.convexity_idea_radar import (
+    attach_convexity_idea_radar,
+)
 from spx_spark.application.order_map.decision_consistency import (
     apply_decision_projections,
 )
@@ -480,6 +483,7 @@ def build_order_payload_with_retry(
         settings=getattr(app, "spring_gamma_v3", None),
         now=evaluation_now,
     )
+    attach_convexity_idea_radar(payload, now=evaluation_now)
     return payload
 
 

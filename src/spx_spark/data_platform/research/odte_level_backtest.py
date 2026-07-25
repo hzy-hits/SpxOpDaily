@@ -24,7 +24,7 @@ Relevant data conventions:
 from __future__ import annotations
 
 import logging
-from bisect import bisect_left, bisect_right
+from bisect import bisect_left
 from dataclasses import replace
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
@@ -37,6 +37,12 @@ from .odte_level_aggregate import (
     write_outputs,
 )
 from .odte_level_quotes import QuoteStore, pick_provider
+from .odte_level_timing import (
+    first_tick_at_or_after as _first_tick_at_or_after,
+    in_rth_1300_entry_window as _in_rth_1300_entry_window,
+    option_tick_mid as _tick_mid,
+    tick_at_or_before as _tick_at_or_before,
+)
 from .odte_level_signals import (
     FT_GATE_EM_FRACTION,
     FT_GATE_POINTS,
@@ -50,6 +56,8 @@ from .odte_level_signals import (
     POINTS_PER_CONTRACT,
     PROFILES,
     PROFIT_TARGET_MULTIPLE,
+    RTH_ANALYSIS_START_ET_HHMM,
+    RTH_EXIT_CLOCK_ET_HHMM,
     SATURATION_FRACTION,
     SET_CONFIRMED,
     SET_GTH_DIP,
@@ -88,32 +96,6 @@ from .odte_level_signals import (
 from .strategy_readiness import build_strategy_readiness
 
 logger = logging.getLogger(__name__)
-
-
-def _tick_mid(tick: OptionTick) -> float | None:
-    if tick.mid is not None:
-        return tick.mid
-    if tick.bid is not None and tick.ask is not None:
-        return (tick.bid + tick.ask) / 2.0
-    return None
-
-
-def _first_tick_at_or_after(
-    series: Sequence[OptionTick], times: Sequence[datetime], at: datetime
-) -> OptionTick | None:
-    index = bisect_left(times, at)
-    if index >= len(series):
-        return None
-    return series[index]
-
-
-def _tick_at_or_before(
-    series: Sequence, times: Sequence[datetime], at: datetime, *, fallback_first: bool
-):
-    index = bisect_right(times, at) - 1
-    if index < 0:
-        return series[0] if fallback_first and series else None
-    return series[index]
 
 
 # ---------------------------------------------------------------------------
@@ -196,6 +178,8 @@ def simulate_trade(
     bid (or long bid minus short ask). GTH signals
     (future:ES underlier) use the profile's GTH time-stop/max-hold overrides,
     or expiry-date 09:45 America/New_York when the profile sets gth_clock_exit.
+    The RTH 13:00 profile accepts entries in [09:45, 13:00) New York time and
+    uses the first fresh executable bid at/after 13:00 as its clock exit.
     """
     dir_sign = 1 if signal.direction == "up" else -1
     requested_entry_at = signal.entry_at
@@ -205,7 +189,7 @@ def simulate_trade(
     gth = signal.underlier_instrument == "future:ES"
     expiry_close: datetime | None = None
     exit_clock: datetime | None = None
-    if gth:
+    if gth or profile.rth_clock_exit:
         if signal.expiry is None:
             return Skip(signal.set_name, profile.name, signal.key, variant, "no_expiry")
         expiry_close = expiry_close_at(signal.expiry)
@@ -213,7 +197,34 @@ def simulate_trade(
             return Skip(
                 signal.set_name, profile.name, signal.key, variant, "entry_after_expiry_close"
             )
-        if profile.gth_clock_exit:
+        if profile.rth_clock_exit:
+            opened_at = next_exit_clock(
+                requested_entry_at,
+                signal.expiry,
+                hhmm=RTH_ANALYSIS_START_ET_HHMM,
+            )
+            exit_clock = next_exit_clock(
+                requested_entry_at,
+                signal.expiry,
+                hhmm=RTH_EXIT_CLOCK_ET_HHMM,
+            )
+            if requested_entry_at < opened_at:
+                return Skip(
+                    signal.set_name,
+                    profile.name,
+                    signal.key,
+                    variant,
+                    "entry_before_rth_window",
+                )
+            if requested_entry_at >= exit_clock:
+                return Skip(
+                    signal.set_name,
+                    profile.name,
+                    signal.key,
+                    variant,
+                    "entry_after_exit_clock",
+                )
+        elif profile.gth_clock_exit:
             exit_clock = next_exit_clock(requested_entry_at, signal.expiry)
             if requested_entry_at >= exit_clock:
                 return Skip(
@@ -411,7 +422,11 @@ def simulate_trade(
     else:
         target = formula_target(signal.level, dir_sign, signal.expected_move_points)
     underlier_times = [tick.at for tick in underlier]
-    if production_entry and signal.recorded_time_stop_at is not None:
+    if profile.rth_clock_exit:
+        assert exit_clock is not None  # established by the RTH clock preflight
+        stop_at = exit_clock
+        hold_until = stop_at + MAX_MARK_QUOTE_AGE
+    elif production_entry and signal.recorded_time_stop_at is not None:
         stop_at = signal.recorded_time_stop_at
         hold_until = min(entry_at + MAX_HOLD, stop_at + MAX_MARK_QUOTE_AGE)
     elif gth and profile.gth_clock_exit:
@@ -524,6 +539,16 @@ def simulate_trade(
             break
 
     if exit_px is None:
+        if profile.rth_clock_exit and (
+            last_tick is None or last_tick.at < stop_at
+        ):
+            return Skip(
+                signal.set_name,
+                profile.name,
+                signal.key,
+                variant,
+                "no_fresh_exit_quote_after_rth_exit",
+            )
         if last_tick is None or stop_at - last_tick.at > MAX_MARK_QUOTE_AGE:
             return Skip(
                 signal.set_name,
@@ -602,8 +627,9 @@ def evaluate_signal(
     Quote series are loaded a single time (shared QuoteStore cache); for GTH
     signals the load window covers the longest profile horizon (gth_360 needs
     entry+370min; clock profiles use expiry-date 09:45 America/New_York, and no
-    GTH path may cross the expiry 16:00 ET close). Profiles may restrict sets
-    (set_names), GTH-only signals (gth_only) or spread variants (spread_only).
+    GTH path may cross the expiry 16:00 ET close). The RTH clock profile loads
+    the same exact contracts through 13:00 ET. Profiles may restrict sets
+    (set_names), GTH/RTH windows, or spread variants (spread_only).
     S2 signals enter only after passing the production follow-through gate.
     S3 ``spread_wall`` uses the two strikes persisted by production and is
     unavailable for legacy events that did not persist a spread.
@@ -616,6 +642,7 @@ def evaluate_signal(
         for profile in profiles
         if (profile.set_names is None or signal.set_name in profile.set_names)
         and (not profile.gth_only or signal.underlier_instrument == "future:ES")
+        and (not profile.rth_only or _in_rth_1300_entry_window(signal))
     ]
     if not active_profiles:
         return [], []
@@ -692,6 +719,15 @@ def evaluate_signal(
             max(max(horizons), t0 + MAX_ENTRY_QUOTE_AGE) + MAX_MARK_QUOTE_AGE,
             session_close,
         )
+    rth_clock_profiles = [profile for profile in active_profiles if profile.rth_clock_exit]
+    if rth_clock_profiles:
+        rth_exit = next_exit_clock(
+            t0,
+            signal.expiry,
+            hhmm=RTH_EXIT_CLOCK_ET_HHMM,
+        )
+        load_end = max(load_end, rth_exit + MAX_MARK_QUOTE_AGE)
+        load_end = min(load_end, expiry_close_at(signal.expiry))
     provider = signal.entry_provider
     if signal.set_name != SET_TRADE_READY:
         provider = pick_provider(

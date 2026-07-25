@@ -9,13 +9,15 @@ FRAMEWORK_GUARDRAILS = (
     "再 expression，最后 exit；输出是检查清单与解释，不是下单授权、不是可执行交易信号。",
     "GEX/gamma_state 与任何 net_dex_proxy/dagex_proxy/vex_proxy/cex_proxy 都是自家结构代理；"
     "不得写成 vendor Net DEX/DAGEX，不得把代理指标置信度说成 high。",
+    "公开 OI、成交量与 NBBO 不能识别参与者身份或净仓方向；不得据此声称 dealer/做市商买卖、移仓、"
+    "防守/弃守，也不得把墙位或 pin 因果归于 gamma。B-L 与触达概率是风险中性启发，不是真实胜率。",
     "锚只能是 SPX/ES（或明确的 chain_implied）；Hyperliquid SP500 只是弱研究代理，"
     "绝不能单独确认破位、墙失效或 SETUP。",
     "若 JSON 含 steven / steven_context：只作 observe_only 附注，不得抬 severity、不得改成买卖指令。",
     "严格按 as_of 判断会话：09:30-16:00 ET 是 SPX RTH，此时 ES 只能称 RTH/日内路径，"
     "不得称 GTH 或用夜盘薄流动性解释；GTH 是 SPX 期权的现金盘外时段，ES 自身是 Globex。",
-    "12:00-13:00 ET 是搭档睡前的午盘趋势确认窗：用完整上午的 ES/SPX 路径、VWAP、量价、墙位和 vol regime"
-    "决定平仓、减仓或带保护持有。原则上不因午前噪音过早平仓，但硬止损、结构失效和风险上限始终优先。",
+    "12:00-13:00 ET 是本策略 0DTE 的午盘确认与退出窗：用完整上午路径决定退出，撤销未成交意图并在"
+    "13:00 ET 前清空；不得建议带保护继续持有。硬止损、结构失效和风险上限始终优先。",
 )
 
 # Shared voice for every human-facing market message.  The delivery protocol
@@ -29,7 +31,8 @@ DESK_STYLE_GUARDRAILS = (
     "分别改写为事件结论、执行区间、风险回报不足、主策略、结构区间、流量驱动、持有条件或策略升级。",
     "人类可见正文使用固定栏目：`## Desk View`、`## Execution`、`## Risk`，确有目标时增加 `## Targets`，"
     "数据降级时增加 `## Data Quality`；不要使用『证据/条件/盯』或四段式资讯播报。",
-    "每条只保留一个主方向、一个执行区间、一个明确失效条件和最多两个目标；相反方向只能写成失效后的状态转换。",
+    "生产计划只保留一个主方向、一个执行区间、一个明确失效条件和最多两个目标；相反方向只写成状态转换。"
+    "Convexity Idea Radar 是例外：可并列最佳 Call/Put 条件假设，但无执行权限。",
     "区分事实与判断：价格、墙位、NBBO、Greeks 是事实；方向倾向与执行结论是判断。不得把观察状态写成入场授权。",
 )
 
@@ -129,7 +132,7 @@ def build_direct_push_prompt(payload: dict[str, object], alerts: list[dict[str, 
             "按类别保留必要信息：",
             "- 持仓事件：哪条腿、数量/方向怎么变的、浮盈浮亏多少，此刻价格站在关键位的哪一侧——这决定他是该锁利润还是该按剧本扛；",
             "- 系统事件(IBKR 会话中断/恢复)：行情数据和已挂限价单受不受影响，他要做什么——多数时候是知悉即可，需要检查挂单就直说；",
-            "- 盘外波动率信号(skew 急陡/ATM IV 跳升)：谁在抢什么(如机构买下行保护)、这通常领先什么，拿什么确认(价格/gamma/VIX)——信号≠行动，确认位没到就只是提高警觉；",
+            "- 盘外波动率信号(skew 急陡/ATM IV 跳升)：只写观测到的曲面变化、相对历史幅度及价格/VIX确认；不得推断是谁在买保护——信号≠行动；",
             "- 0DTE Call 结构确认：写清收复 flip 或突破 call wall、首选执行区间和失效线；注明 SPX/ES 确认状态与自动下单关闭；",
             "只用 JSON 里的事实，数字不编不改；数据 degraded 时如实说明。",
             "不要输出 JSON、系统思考或索取更多数据。",
@@ -154,8 +157,8 @@ def build_agent_prompt(payload: dict[str, object], alerts: list[dict[str, object
         (
             "盘中告警触发了，你要给搭档发一条便签。他只做 SPX/SPXW 0DTE/1DTE 买方(call/put/垂直价差)，"
             "盘前挂了限价单，此刻可能盯盘也可能在睡觉。他扫一眼要能回答：市场在干什么，我挂的单/持仓要不要动。",
-            "动笔前先想清楚(不写出来)：这个告警背后是谁在动手——对冲盘、抢保护的、还是单纯流动性薄？"
-            "价格此刻站的位置对他的挂单意味着成交概率变高还是剧本作废？",
+            "动笔前先想清楚(不写出来)：这个告警是价格、报价、波动曲面真实变化，还是数据/流动性噪声？"
+            "价格此刻站的位置对他的挂单意味着触发更近还是主策略已失效？",
             "只根据下面的 JSON 做判断；不下单指令，不假设缺失数据。",
             *FRAMEWORK_GUARDRAILS,
             *DESK_STYLE_GUARDRAILS,
@@ -166,11 +169,11 @@ def build_agent_prompt(payload: dict[str, object], alerts: list[dict[str, object
             "regime_decision 与 breakout_filter 是代码生成的确定性结论；不得自行翻案。blocked/pending 不得描述成有效突破，supported 且 actionable=true 才可称为突破过滤通过。",
             "剧本必须双向：跌破关键位讲防守，但价格收复关键位并站稳时必须明说反弹剧本激活，不许在价格回升时还重复防守结论。",
             "输出中文，最多 12 行，采用机构 tactical update 栏目，结论先行：",
-            "第一句话说清发生了什么、对挂单/持仓意味着什么(如『价格逼近 7500 put wall，反弹买 call 的挂单可能马上成交』)。",
+            "第一句话说清发生了什么、对挂单/持仓意味着什么(如『价格逼近 7500 put wall，结构测试临近但接受/拒绝尚未确认』)。",
             "然后 2-3 行证据：触发告警的关键数字 + gamma 地形(flip_zone、zero gamma、墙位触及/收破概率)。",
             "然后 1-2 行 if/then：价格到哪个具体位置主策略失效并发生状态转换。",
             "最后 1 行 vol regime 与数据质量(VIX/VIX1D、dip_context、有无 degraded)。",
-            "数字要具体(『7550 墙触及概率约 24%、收在上方约 12%』『flip zone 7475-7495，跌进去 gamma 转负』)，"
+            "数字要具体(『15m 风险中性墙触达启发约 24%、终值越墙约 12%』『flip zone 7475-7495，跌进去 gamma 转负』)，"
             "但只挑改变判断的那几个，别把 JSON 复述一遍。",
             json.dumps(compact_payload, ensure_ascii=False, sort_keys=True),
         )
@@ -237,7 +240,7 @@ def build_codex_prompt(
         (
             "你是 SPX 指数期权自营台的 senior trader，负责判断一个事件是否足以改变当日 0DTE 风险配置。"
             "接收者是专业交易员；发送成本高，只有新增信息改变方向倾向、执行区间、失效条件或退出决策时才外发。",
-            "先在内部回答三个问题：这是真实价格/对冲流还是数据噪声？它是否改变现有策略的风险回报？"
+            "先在内部回答三个问题：这是真实价格/报价变化还是数据噪声？它是否改变现有策略的风险回报？"
             "相较上一条通知是否出现新的可证伪信息？任一项无法成立时，不发送。",
             "只根据下面的本机 JSON 判断。不下单指令，不编造缺失数据。",
             *FRAMEWORK_GUARDRAILS,
@@ -253,14 +256,17 @@ def build_codex_prompt(
             "gamma_state 为 zero_gamma_transition（micopedia 为 transition）表示零 gamma 交叉区：突破后波动可能放大，不得把靠近墙位直接当作支撑确认。",
             "greeks_reference_0dte 是严格 SPXW 当日到期的 reference-only 情景层；只用于解释价格/时间/IV 冲击。position_sign/direction unknown 时不得推导 dealer 净方向，负 gamma 不等于看跌，也不能单独触发推送。",
             "regime_decision 与 breakout_filter 是代码裁决，不是让你二次猜测的原始指标；blocked/pending 不得写成突破确认，supported 且 actionable=true 才能升级 breakout。",
-            "方向表达必须单一：跌破关键位时主策略转为防守；重新收复并持续站稳时，主策略才切回反弹。"
-            "相反方向只作为当前判断的失效与状态转换，不得平铺成第二套同权重方案。",
+            "生产方向表达必须单一：跌破关键位时主策略转为风险控制；重新收复并持续站稳时，主策略才切回反弹。"
+            "相反方向只作为当前判断的失效与状态转换；若输入含 Convexity Idea Radar，则另行保留最佳 Call/Put 条件假设。",
             "风险回报纪律按机构口径表达：价格位于两个执行区间之间时写『当前价格不具备入场赔率，首选执行区间为 XX』；",
-            "当日移动接近或超过 expected_move_points 时量化剩余空间，不使用 FOMO、恐慌或劝告式语言；",
-            "价格进入 put wall 支撑区时给出 Call 候选的执行条件与带下沿失效位；进入 call wall 阻力区时给出减仓/止盈条件，"
+            "当日移动接近或超过 expected_move_points 时只量化 EM 已使用比例，不得补算剩余空间、尾部概率或胜率；",
+            "价格进入 put wall 下方结构区时，仅在价格路径确认拒绝后给出 Call 候选；进入 call wall 上方结构区时，"
+            "仅在确认拒绝后讨论 Put，确认接受则保留相反方向假设；"
             "不得用『接多』『割肉』『不追』等散户表达。",
-            "墙位阶梯（human_focus_context 里的 wall_ladder）有上下各 4 档：判断支撑/阻力时看整条阶梯而不是单点；相邻 put 墙 OI 接近时按支撑带表述（如 7460-7500 带），价格在带内磨底不等于支撑失效。",
-            "rn_density（若 quality=ok）是市场定价的收盘分布：价格逼近 p10/p90（80% 区间边缘）时应指出『已到市场定价的尾部，顺方向继续赌需要新信息』；prob_below_put_wall/prob_above_call_wall 给出收在墙外的市场定价概率，可直接引用。",
+            "wall_ladder 是上下各最多 4 档的 OI/GEX 集中地图；相邻档可称结构集中带，但没有价格接受/拒绝确认时，"
+            "不得直接命名为支撑、阻力或硬墙。",
+            "rn_density（quality=ok）只表示输入所列到期终值的风险中性分布，不是 13:00 区间或真实胜率；"
+            "prob_below_put_wall/prob_above_call_wall 只有同时写明 horizon 与风险中性语义时才可引用。",
             "previous_push 是最近一条已外发推送；若本次结论与它实质相同（同方向、同关键位、无新概率/位置增量），判为不需要推送。"
             "若方向相对上一条反转，必须写明『Desk View 已由 X 调整为 Y』及触发该调整的价格条件。",
             ("previous_push: " + previous_text) if previous_text else "previous_push: null",
@@ -272,8 +278,8 @@ def build_codex_prompt(
             "内部协议行之后，输出中文且最多 11 行。正文首行使用 `**SPX 0DTE | TACTICAL UPDATE**`；"
             "随后使用 `## Desk View` 给出唯一主判断，`## Execution` 给出首选执行区间与当前是否授权，"
             "`## Risk` 给出精确失效位，确有目标时使用 `## Targets`；数据降级才增加 `## Data Quality`。",
-            "引用数字要具体，例如『7550 墙触及概率约 24%、收在上方约 12%』『flip zone 7475-7495，跌进去 gamma 转负』"
-            "『尾部保护贵(dip_context=expensive_tail_protection)，急跌大概率是保护盘驱动』；"
+            "引用数字要具体，例如『15m 风险中性墙触达启发约 24%、终值越墙约 12%』『flip zone 7475-7495，跌进去 gamma 转负』"
+            "『尾部保护相对昂贵(dip_context=expensive_tail_protection)，但公开报价不能识别买方身份』；"
             "只挑改变判断的数字，不要复述全部 JSON。",
             "如果数据质量不足，明确说 degraded。",
             "如果值得外发，第一行必须且只能写 `需要看盘:`；如果不值得外发，第一行必须且只能写 `不需要推送:`。",

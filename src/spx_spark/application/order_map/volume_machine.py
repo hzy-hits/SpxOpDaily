@@ -255,7 +255,7 @@ def classify_volume_price_event(
         if pace == "elevated":
             event_id = "elevated_break_holds"
             sequence = "break_hold"
-            hints.append("放量破位后仍在破位侧：加速/弃守更可信，条件单可按剧本执行")
+            hints.append("放量破位后仍在破位侧：加速/破位接受更可信，条件单可按剧本执行")
         elif pace == "quiet":
             event_id = "quiet_breakdown_holds"
             sequence = "break_hold"
@@ -267,7 +267,7 @@ def classify_volume_price_event(
     elif pace == "elevated" and direction == "down" and location in {"at_put_wall", "in_flip"}:
         event_id = "elevated_sell_into_support"
         sequence = "wall_test"
-        hints.append("放量砸向支撑/flip：墙在接还是弃守未定；反弹单等缩量收回，破位单等站不稳确认")
+        hints.append("放量砸向支撑/flip：拒绝还是破位接受未定；反弹单等缩量收回，破位单等站不稳确认")
     elif pace == "elevated" and direction == "up" and location in {"at_call_wall", "in_flip"}:
         event_id = "elevated_buy_into_resistance"
         sequence = "wall_test"
@@ -279,7 +279,7 @@ def classify_volume_price_event(
     ):
         event_id = "quiet_sell_near_support"
         sequence = "vacuum_or_abandon"
-        hints.append("缩量靠近/跌破支撑：可能是弃守阴跌，也可能是真空漂移；站不稳才当破位")
+        hints.append("缩量靠近/跌破支撑：可能是低量破位接受，也可能是真空漂移；站不稳才当破位")
     elif (
         pace == "quiet"
         and direction == "up"

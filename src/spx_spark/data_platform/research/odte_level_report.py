@@ -154,6 +154,9 @@ def _render_report(artifact: dict, trades: Sequence[Trade]) -> str:
         "wide_invalidation(失效缓冲 max(3, 0.15×EM))、"
         "trailing_tp(浮盈 +15% 激活、回撤峰值浮盈 1/3 按 bid 出场)、"
         "gth_360(仅 GTH 信号时间止损 15→360 分钟)。",
+        "- RTH 13:00 profile:rth_1300 只接收 09:45≤entry<13:00 ET；保留同一 exact "
+        "contract 和入场 ask，继续执行失效/目标规则，不设固定止盈，并在 13:00 ET 后首个"
+        "30 秒内新鲜 bid 强制退出。运行标准 backtest 命令即会在总体表生成该 profile。",
         "- 三个 GTH 价差出场 profile(仅 S1 GTH + S3、仅价差执行,时钟锚定到期日 09:45 ET):"
         "sat85(价差价值 ≥85% 宽度按 bid 止盈)、trail33(≥50% 宽度激活、峰值浮盈回撤 "
         "1/3 止盈)、clock(只挂失效线 + 时钟)。",

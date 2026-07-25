@@ -824,6 +824,150 @@ def test_gth_360_extends_time_stop_only_for_gth_signals() -> None:
     assert datetime.fromisoformat(rth.exit_time) == ENTRY + timedelta(minutes=15)
 
 
+def test_rth_1300_profile_loads_exact_contract_through_clock_exit() -> None:
+    rth_exit_tick = datetime(2026, 7, 15, 17, 0, 15, tzinfo=timezone.utc)
+    long_series = _flat_series(
+        ENTRY,
+        int((rth_exit_tick - ENTRY).total_seconds()),
+        step=30,
+        bid=9.8,
+        ask=10.0,
+    )
+    underlier = _flat_underlier(
+        7555.0,
+        seconds=int((rth_exit_tick - T0).total_seconds()) + 30,
+        step=5,
+    )
+    store = _MemoryQuoteStore({7550.0: long_series}, underlier)
+
+    trades, _ = evaluate_signal(
+        store,
+        _signal(contract_id="option:SPX:SPXW:20260715:7550:C"),
+        profiles=[_profile("rth_1300")],
+    )
+
+    naked = next(row for row in trades if row.variant == "naked")
+    assert naked.contract_id == "option:SPX:SPXW:20260715:7550:C"
+    assert naked.entry_px == 10.0  # exact-contract ask
+    assert naked.exit_px == 9.8  # first fresh exact-contract bid after 13:00 ET
+    assert naked.exit_reason == "time_stop"
+    assert datetime.fromisoformat(naked.exit_time) == rth_exit_tick
+
+
+def test_rth_1300_profile_overrides_recorded_15_minute_time_stop() -> None:
+    rth_exit_tick = datetime(2026, 7, 15, 17, 0, 0, tzinfo=timezone.utc)
+    long_series = _flat_series(
+        T0,
+        int((rth_exit_tick - T0).total_seconds()),
+        step=30,
+        bid=9.8,
+        ask=10.0,
+    )
+    underlier = _flat_underlier(
+        7555.0,
+        seconds=int((rth_exit_tick - T0).total_seconds()) + 30,
+        step=5,
+    )
+
+    result = simulate_trade(
+        _ready_signal(),
+        "naked",
+        long_series,
+        None,
+        underlier,
+        _profile("rth_1300"),
+    )
+
+    assert result.exit_reason == "time_stop"
+    assert datetime.fromisoformat(result.exit_time) == rth_exit_tick
+
+
+def test_rth_1300_profile_requires_a_fresh_quote_at_or_after_exit() -> None:
+    last_pre_exit = datetime(2026, 7, 15, 16, 59, 45, tzinfo=timezone.utc)
+    long_series = _flat_series(
+        ENTRY,
+        int((last_pre_exit - ENTRY).total_seconds()),
+        step=30,
+        bid=9.8,
+        ask=10.0,
+    )
+    if long_series[-1].at != last_pre_exit:
+        long_series.append(_tick(last_pre_exit, 9.8, 10.0))
+    underlier = _flat_underlier(
+        7555.0,
+        seconds=int((last_pre_exit - T0).total_seconds()),
+        step=5,
+    )
+
+    result = simulate_trade(
+        _signal(),
+        "naked",
+        long_series,
+        None,
+        underlier,
+        _profile("rth_1300"),
+    )
+
+    assert isinstance(result, Skip)
+    assert result.reason == "no_fresh_exit_quote_after_rth_exit"
+
+
+def test_rth_1300_profile_rejects_entries_outside_rth_window() -> None:
+    profile = _profile("rth_1300")
+    premarket_entry = datetime(2026, 7, 15, 13, 0, 15, tzinfo=timezone.utc)
+    premarket = simulate_trade(
+        _signal(
+            at=datetime(2026, 7, 15, 13, 0, tzinfo=timezone.utc),
+            entry_at=premarket_entry,
+        ),
+        "naked",
+        _flat_series(premarket_entry, 60),
+        None,
+        _flat_underlier(
+            7555.0,
+            start=datetime(2026, 7, 15, 13, 0, tzinfo=timezone.utc),
+        ),
+        profile,
+    )
+    after_cutoff_entry = datetime(2026, 7, 15, 17, 0, 15, tzinfo=timezone.utc)
+    after_cutoff = simulate_trade(
+        _signal(
+            at=datetime(2026, 7, 15, 17, 0, tzinfo=timezone.utc),
+            entry_at=after_cutoff_entry,
+        ),
+        "naked",
+        _flat_series(after_cutoff_entry, 60),
+        None,
+        _flat_underlier(
+            7555.0,
+            start=datetime(2026, 7, 15, 17, 0, tzinfo=timezone.utc),
+        ),
+        profile,
+    )
+    before_analysis_entry = datetime(2026, 7, 15, 13, 40, 15, tzinfo=timezone.utc)
+    before_analysis = simulate_trade(
+        _signal(
+            at=datetime(2026, 7, 15, 13, 40, tzinfo=timezone.utc),
+            entry_at=before_analysis_entry,
+        ),
+        "naked",
+        _flat_series(before_analysis_entry, 60),
+        None,
+        _flat_underlier(
+            7555.0,
+            start=datetime(2026, 7, 15, 13, 40, tzinfo=timezone.utc),
+        ),
+        profile,
+    )
+
+    assert isinstance(premarket, Skip)
+    assert premarket.reason == "entry_before_rth_window"
+    assert isinstance(before_analysis, Skip)
+    assert before_analysis.reason == "entry_before_rth_window"
+    assert isinstance(after_cutoff, Skip)
+    assert after_cutoff.reason == "entry_after_exit_clock"
+
+
 def _write_jsonl(path: Path, records: list) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as handle:
@@ -1250,6 +1394,14 @@ def test_exit_clock_is_expiry_anchored_dst_aware_and_never_rolls() -> None:
     assert next_exit_clock(
         datetime(2026, 12, 15, 6, 0, tzinfo=timezone.utc), date(2026, 12, 15)
     ) == datetime(2026, 12, 15, 14, 45, tzinfo=timezone.utc)
+    assert next_exit_clock(morning, expiry, hhmm=(13, 0)) == datetime(
+        2026, 7, 15, 17, 0, tzinfo=timezone.utc
+    )
+    assert next_exit_clock(
+        datetime(2026, 12, 15, 6, 0, tzinfo=timezone.utc),
+        date(2026, 12, 15),
+        hhmm=(13, 0),
+    ) == datetime(2026, 12, 15, 18, 0, tzinfo=timezone.utc)
     assert expiry_close_at(date(2026, 12, 15)) == datetime(2026, 12, 15, 21, 0, tzinfo=timezone.utc)
 
 

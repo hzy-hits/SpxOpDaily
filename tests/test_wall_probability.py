@@ -182,20 +182,18 @@ def build(
 
 
 @pytest.mark.parametrize(
-    ("hour", "minute", "expected_summary", "expected_by_horizon"),
+    ("hour", "minute"),
     (
-        (11, 30, "1DTE", {"15m": "1DTE", "30m": "1DTE", "60m": "1DTE"}),
-        (12, 30, "mixed", {"15m": "1DTE", "30m": "1DTE", "60m": "0DTE"}),
-        (12, 59, "0DTE", {"15m": "0DTE", "30m": "0DTE", "60m": "0DTE"}),
-        (13, 0, "0DTE", {"15m": "0DTE", "30m": "0DTE", "60m": "0DTE"}),
-        (15, 30, "0DTE", {"15m": "0DTE", "30m": "0DTE", "60m": "1DTE"}),
+        (11, 30),
+        (12, 30),
+        (12, 59),
+        (13, 0),
+        (15, 30),
     ),
 )
-def test_tenor_prior_uses_each_horizons_planned_exit(
+def test_tenor_mandate_keeps_exact_0dte_as_the_only_expression(
     hour: int,
     minute: int,
-    expected_summary: str,
-    expected_by_horizon: dict[str, str],
 ) -> None:
     now = datetime(2026, 7, 23, hour, minute, tzinfo=ET)
 
@@ -207,20 +205,19 @@ def test_tenor_prior_uses_each_horizons_planned_exit(
     assert result["actionable"] is False
     assert result["policy_status"] == POLICY_STATUS
     tenor = result["tenor_shadow"]
-    assert tenor["preferred_tenor"] == expected_summary
+    assert tenor["preferred_tenor"] == "0DTE"
     assert {
         key: row["preferred_tenor"]
         for key, row in tenor["by_horizon"].items()
-    } == (
-        expected_by_horizon
-        if not (hour == 15 and minute == 30)
-        else {"15m": "0DTE", "30m": "0DTE", "60m": "0DTE"}
-    )
+    } == {"15m": "0DTE", "30m": "0DTE", "60m": "0DTE"}
     assert {
         key: row["selected_tenor"]
         for key, row in tenor["by_horizon"].items()
-    } == expected_by_horizon
-    # Even when 1DTE is the expression, the wall path remains exact 0DTE.
+    } == (
+        {"15m": "0DTE", "30m": "0DTE", "60m": None}
+        if hour == 15 and minute == 30
+        else {"15m": "0DTE", "30m": "0DTE", "60m": "0DTE"}
+    )
     assert result["path"]["tenor"] == "0DTE"
     assert result["path"]["expiry"] == FRONT
 
@@ -299,7 +296,7 @@ def test_call_only_front_chain_cannot_publish_all_wall_probabilities() -> None:
     )
 
 
-def test_unavailable_1dte_falls_back_to_0dte_before_cutoff() -> None:
+def test_unavailable_1dte_does_not_change_0dte_mandate() -> None:
     now = datetime(2026, 7, 23, 12, 30, tzinfo=ET)
     options_map, grouped, frame = inputs(now)
     grouped.pop(NEXT)
@@ -310,11 +307,11 @@ def test_unavailable_1dte_falls_back_to_0dte_before_cutoff() -> None:
 
     assert result["status"] == "ready"
     tenor = result["tenor_shadow"]
-    assert tenor["preferred_tenor"] == "mixed"
+    assert tenor["preferred_tenor"] == "0DTE"
     assert tenor["selected_tenor"] == "0DTE"
-    assert tenor["fallback_used"] is True
+    assert tenor["fallback_used"] is False
     assert tenor["eligibility"]["1DTE"]["eligible"] is False
-    assert "preferred_tenor_unavailable_fallback_used" in result["warnings"]
+    assert "next_expiry_benchmark_unavailable" in result["warnings"]
 
 
 def test_wall_probabilities_are_bounded_nd2_and_reflection_values() -> None:
@@ -415,8 +412,8 @@ def test_late_rth_expiry_gate_is_horizon_local() -> None:
         "holding_window_crosses_expiry"
         in result["horizon_status"]["60m"]["reasons"]
     )
-    assert result["tenor_shadow"]["by_horizon"]["60m"]["selected_tenor"] == "1DTE"
-    assert result["tenor_shadow"]["by_horizon"]["60m"]["fallback_used"] is True
+    assert result["tenor_shadow"]["by_horizon"]["60m"]["selected_tenor"] is None
+    assert result["tenor_shadow"]["by_horizon"]["60m"]["fallback_used"] is False
     assert all(
         row["status"] == "unavailable"
         and row["reason"] == "holding_window_crosses_expiry"
@@ -459,11 +456,11 @@ def test_early_close_uses_calendar_session_close() -> None:
 
     assert result["status"] == "ready"
     assert result["available_horizons"] == ["15m", "30m"]
-    assert (
-        result["horizon_status"]["60m"]["reasons"]
-        == ["holding_window_crosses_expiry"]
-    )
-    assert result["tenor_shadow"]["by_horizon"]["60m"]["selected_tenor"] == "1DTE"
+    assert result["horizon_status"]["60m"]["reasons"] == [
+        "holding_window_crosses_expiry",
+        "expression_tenor_unavailable",
+    ]
+    assert result["tenor_shadow"]["by_horizon"]["60m"]["selected_tenor"] is None
 
 
 def test_front_expiry_close_boundary_is_inclusive_per_horizon() -> None:

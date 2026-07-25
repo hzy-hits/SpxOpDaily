@@ -25,7 +25,14 @@ def _parse_as_of(value: str) -> date | datetime:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(
+        description="Backtest exact-contract 0DTE level signals against the quote lake.",
+        epilog=(
+            "The standard run includes profile rth_1300: RTH entries from 09:45 "
+            "through 12:59 ET, exact ask entry, and the first fresh bid at/after "
+            "13:00 ET as the forced clock exit."
+        ),
+    )
     parser.add_argument(
         "--features-root",
         default="/srv/data/spx-spark/data/features",

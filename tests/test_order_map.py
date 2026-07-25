@@ -2366,6 +2366,12 @@ def test_prompts_include_previous_push() -> None:
     assert '"key_strikes":[{"strike":7550.0' in status_prompt
     assert "两者背离时优先提示假突破风险" in status_prompt
     assert "不是 ES 期货自身的 GEX/DEX" in order_prompt
+    assert "Radar 必须分别保留最佳 Call/Put" in order_prompt
+    assert "生产计划仍最多一条" in order_prompt
+    assert "13:00 ET 后停止新想法" in order_prompt
+    assert "只能称结构集中带" in order_prompt
+    assert "不是到达时钟或自动撤单依据" in order_prompt
+    assert "卖腿放 80% 区间外沿附近最划算" not in order_prompt
     assert "secret_scenario_price" not in order_prompt
     assert "secret_scenario_price" not in status_prompt
 

@@ -16,6 +16,8 @@ STATUS_BRIEF_SYSTEM_PROMPT = "\n".join(
         "Spring Gamma v3 Shadow 的方向分数未校准、墙触达概率仅为风险中性启发式；"
         "Shadow 与 RTH 15分钟状态窗均无方向或执行权限，必须保留模板中的确定性摘要，"
         "不得据此修改生产 guidance、候选、裁决、限价或下单动作。",
+        "Convexity Idea Radar 是独立的双向研究假设层：可同时保留 Call 与 Put 灵感，"
+        "但不得覆盖唯一生产计划、不得把风险中性分布写成真实胜率，也不得把未检出的 skew 边际写成错误定价。",
         "不要复述完整 Greeks、墙位阶梯、风险中性分布或内部 JSON 字段。输出简洁中文，保留模板首行。",
     )
 )

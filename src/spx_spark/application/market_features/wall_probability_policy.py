@@ -1,4 +1,4 @@
-"""Freshness and tenor policy helpers for the wall-probability shadow."""
+"""Freshness and 0DTE mandate helpers for the wall-probability shadow."""
 
 from __future__ import annotations
 
@@ -192,11 +192,10 @@ def tenor_plan_by_horizon(
     result: dict[str, dict[str, object]] = {}
     for horizon in horizons:
         planned_exit = local + timedelta(minutes=horizon)
-        preferred = (
-            ("1DTE" if planned_exit <= cutoff else "0DTE")
-            if prior_available
-            else None
-        )
+        # The discretionary mandate is exact same-day 0DTE with a 13:00 ET
+        # hard exit.  The next expiry remains in ``market`` as a term-structure
+        # benchmark; it must never replace a missing or expired 0DTE quote.
+        preferred = "0DTE" if prior_available else None
         holding = {
             tenor: _holding_window(
                 expiry=str(eligibility[tenor].get("expiry") or ""),
@@ -420,9 +419,6 @@ def _select_tenor(
 
     if selectable(preferred):
         return preferred, False
-    fallback = "0DTE" if preferred == "1DTE" else "1DTE"
-    if selectable(fallback):
-        return fallback, True
     return None, False
 
 

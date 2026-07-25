@@ -1,8 +1,9 @@
-"""Risk-neutral wall probabilities and a non-executable 0DTE/1DTE shadow.
+"""Risk-neutral wall probabilities and a non-executable 0DTE shadow.
 
 This module deliberately has no direction or action authority.  The wall path
-always comes from the exact, current 0DTE structure.  A next-expiry chain may
-only be selected as an expression tenor; it never supplies or changes a wall.
+always comes from the exact, current 0DTE structure.  A next-expiry chain is
+retained only as a term-structure benchmark; it never supplies a wall or an
+expression tenor.
 
 Probabilities reuse :func:`probability_for_level`.  Only live, two-sided
 quotes carrying a real implied volatility are supplied to that function, so
@@ -335,7 +336,7 @@ def build_wall_probability_tenor_shadow(
         POLICY_STATUS,
     ]
     if eligibility_1dte["eligible"] is not True:
-        warnings.append("next_expiry_expression_unavailable")
+        warnings.append("next_expiry_benchmark_unavailable")
     if fallback_used:
         warnings.append("preferred_tenor_unavailable_fallback_used")
 
@@ -418,9 +419,7 @@ def build_wall_probability_tenor_shadow(
         "horizon_status": horizon_status,
         "tenor_shadow": {
             "cutoff_et": "13:00",
-            "policy": (
-                "prefer_1dte_only_when_planned_exit_at_or_before_13_et"
-            ),
+            "policy": "0dte_only_until_13_et_hard_exit_1dte_benchmark_only",
             "policy_status": POLICY_STATUS,
             "selection_authority": "none",
             "execution_usable": False,

@@ -13,8 +13,15 @@ from spx_spark.application.order_map.call_spread_shadow import (
     compact_skew_spread_shadow_line,
     skew_spread_shadow_detail_lines,
 )
+from spx_spark.application.order_map.convexity_idea_presentation import (
+    compact_convexity_idea_radar,
+    render_convexity_idea_radar_lines,
+)
 from spx_spark.application.order_map.models import PLAY_ORDER, SHANGHAI_TZ
-from spx_spark.application.order_map.exposure_presentation import exposure_strike_lines
+from spx_spark.application.order_map.exposure_presentation import (
+    compact_exposure_context,
+    exposure_strike_lines,
+)
 from spx_spark.application.order_map.render import (
     _candidate_by_play,
     _dash,
@@ -88,8 +95,8 @@ def build_order_prompt(
     return "\n".join(
         (
             "这条是当天第一张『条件交易地图』。搭档下午刚坐到屏幕前，要用它确定触发位、候选合约和触发后的价格参考。",
-            "动笔前先在心里过一遍(不写出来)：今天的 OI 是怎么摆的——put 侧是密集防线还是孤零零一档？dealer 在现价附近是"
-            "正 gamma 压波动还是负 gamma 放大波动？今天的 play 里哪张是真机会、哪张只是模板凑数？想清楚再落笔，观点要有取舍，"
+            "动笔前先在心里过一遍(不写出来)：今天的 OI 是密集带还是孤立档？现价对 flip/墙位是接受、拒绝还是尚未确认？"
+            "GEX 代理与价格路径、量价和 IV 是否一致？今天的 play 里哪张有可证伪条件、哪张只是模板凑数？想清楚再落笔，观点要有取舍，"
             "所有候选同等推荐等于没推荐。",
             "框架口径：Micopedia/Steven（regime→map→flow→trigger→expression→exit）；"
             "TradeReady 仅表示已通过代码决策门控、可供操作员执行，自动下单仍关闭；"
@@ -104,12 +111,13 @@ def build_order_prompt(
             guidance_module.SESSION_EPISODE_PROMPT_RULE,
             "",
             "输出中文，最多 18 行。第一行以『条件执行参考:』开头，复述模板第一行的日期与时间。",
-            "接着给地形定调：pin 还是 transition，为什么(gamma 状态+价格相对 flip 的位置)，今天哪类 play 优先。",
-            "墙位讲阶梯不讲孤点(数据在 wall_ladder，OI 定位 + 每档 BS 情景价)：相邻 put 墙 OI 接近(差三成以内)就说成一条支撑带并给出"
-            "破了之后的二、三档；第一档独大才说单点硬墙。call 侧同理。"
+            "接着给结构代理定调：pin 或 transition 只描述 gamma_state 与价格相对 flip 的组合，不归因参与者行为；"
+            "价格接受/拒绝路径决定哪类 play 优先。",
+            "墙位讲阶梯不讲孤点(数据在 wall_ladder，OI 定位 + 每档 BS 情景价)：相邻 OI 档接近(差三成以内)"
+            "只能称结构集中带；第一档独大称主要集中档。没有价格确认时不得称支撑带、阻力带或硬墙。"
             "每档 put 墙对应 Call、每档 call 墙对应 Put 的触位情景价只能作为标的触发后的价格参考，不得写成现在可预挂的期权订单。",
-            "rn_density(B-L 风险中性分布)可用时引用：市场把收盘定价在哪个中位、80% 区间在哪；给垂直价差选腿时"
-            "买腿放赌的方向内、卖腿放 80% 区间外沿附近最划算；quality 非 ok 时注明并降权。",
+            "rn_density(B-L 风险中性分布)可用时只能引用输入所列到期终值的中位和80%区间；它不是 13:00 物理区间或真实胜率，"
+            "不能据此宣称某个垂直价差腿位最划算；quality 非 ok 时保持不可用。",
             "max_pain 可用时必须同时报告合并 OI 的 settlement_strike、Call OI峰和 Put OI峰。Max Pain 只表示当前"
             "采样窗口内的到期赔付最小点，OI峰只表示持仓集中，不得单独解释为支撑、阻力或方向预测；quality 非 ok 时降权。",
             "spxw_0dte_greeks_reference 是严格当日到期的情景层；position_sign/direction=unknown 时负 gamma 不等于下跌。"
@@ -117,14 +125,16 @@ def build_order_prompt(
             "等待成本和退出，mode=explanation_only 时不得改变排序、限价或动作。",
             "conditional_call_bias 只有 status=confirmed 才有效，它来自 5 秒 SPX/ES 价格路径对冻结 flip/旧 call wall 的确认，"
             "不是 Gamma 猜方向；confirmed 时优先讲对应 call 的回踩位与失效线，watch/neutral 不新增动作。",
+            "convexity_idea_radar 是独立双向灵感板：生产计划仍最多一条，但 Radar 必须分别保留最佳 Call/Put 的"
+            "触发、反证和不交易条件。只有 observed_local_skew_edge 可称局部 skew 证据；风险中性目的地图不是"
+            "13:00 物理区间，gth_prior 未冻结就明确缺失。13:00 ET 后停止新想法，本策略 0DTE 必须清零。",
             "",
             "然后逐条处理 plan_candidates（最多 1 条）；只有这里的条目可称为计划。"
             "order_style=live_nbbo_limit 表示 TradeReady：必须逐字保留 NBBO、买入上限、失效位、目标和意图到期时间，"
             "不得写『当前不可预挂』。observation_candidates 最多 1 条且是唯一主观察策略，不得补写执行或挂单动作；"
             "opposing_invalidation 只写成主策略失效条件，禁止平铺成第二套反向计划。",
-            "- 墙位价 vs 先手挡价的取舍：墙位价便宜但常在墙前几点反转吃不到，先手挡成交率高；预估价已含触达前的"
-            "时间衰减与 vol 斜率(BS 重定价)，比现价低不是便宜，是时间价值正常流失；",
-            "- 赔率账：触达概率、到位预估价、现价放一起，这笔单赌的是一次多大概率的什么事，赔付幅度配不配得上这个概率；",
+            "- 结构边界触发价 vs 先手挡价的取舍：只比较输入已有的可执行报价、触发距离与模型情景价，不假设边界前必然反转；",
+            "- 赔率账：只有带 horizon/semantics 的风险中性概率才可与到位预估价、现价并列，且必须明确它不是真实胜率；",
             "- execution_quote_status=executable 时才可给条件价；range_only 只能报告早/基准/晚触的范围和门控原因，不得给限价；",
             "- underlier_triggered_limit 必须先由 trigger_coordinate 指定的同坐标价格触及 target，再用届时实时 mid/IV 重算并提交限价；",
             "- 仅对 underlier_triggered_limit，禁止把 limit_aggressive/limit_conservative 写成现在可预挂。"
@@ -139,11 +149,11 @@ def build_order_prompt(
             "quiet_mid_range / elevated_mid_range 都是半路，不追单。",
             "hl_volume(HL SP500 永续，24/7 薄代理)只当次级证据：与 ES 同向加一分确认，分歧提示 crypto 侧先动或噪声；"
             "aggressor_buy_ratio/book_imbalance 是 ES 没有的方向色彩；ES 停盘/周末时它是唯一量价源，但绝不单独确认破位。",
-            "每张单的 touch_eta_minutes 是按布朗缩放估的到位耗时：给出时效纪律——约 2 倍该时间价格还没来，"
-            "赔率已被 theta 吃掉，写明大约几点(北京)前不来就撤单。",
+            "touch_eta_minutes 是布朗缩放启发，不是到达时钟或自动撤单依据；只能说明时间风险。任何 horizon/ETA"
+            "跨过 13:00 ET 都不可用于本策略，新意图停止且持仓必须清零。",
             "session_phase 是搭档的时钟：这张图会跨欧盘、美盘数据小时和开盘使用，建议要写清哪些单是欧盘就能成交的埋伏、"
             "哪些要等美盘数据落地校准后才算数；不许把『等开盘』当默认建议。",
-            "day_move.em_used_fraction ≥ 0.7 时点明：从当日 GTH 开始已走完预期波幅的多少，顺方向追单赔率差；挂单纪律是等价格来找你，不去半路追它。",
+            "day_move.em_used_fraction ≥ 0.7 时只报告从当日 GTH 开始已使用预期波幅的比例；不得据此补算剩余空间、尾部概率或胜率。",
             "previous_push 是上一条推送正文；关键位相对它有实质变化就在定调处说『剧本有变』并指出哪张单要改，没变化不必提。",
             "previous_push:" + previous_push_json(previous_push),
             "JSON:" + json.dumps(writer_payload, ensure_ascii=False, separators=(",", ":")),
@@ -557,6 +567,7 @@ def render_status_template(
         *([line] if (line := _compact_option_line(payload)) else []),
         *([line] if (line := compact_skew_spread_shadow_line(payload)) else []),
         *([line] if (line := spring_gamma_v3_shadow_line(payload)) else []),
+        *render_convexity_idea_radar_lines(payload),
         *(["", *candidate_section] if candidate_section else []),
     ]
     if changes:
@@ -767,6 +778,10 @@ def build_status_prompt(
                 "用这些可见事实定义当前偏多/偏空/中性，并判断代理 SPX 在 Put Wall、Flip、Call Wall 的阶段。",
                 "必须给一个主情景，以及升级到 breakout/fade 所需的具体确认条件和证伪条件。结构若来自上一 RTH，要明确结构日期与质量，不得把旧 OI 当成今天新链。",
                 "夜盘可做方向与关键位准备，不许写『等开盘再说』。但现金 SPX 与新 0DTE 链不可用时，不得编造 Greeks、期权模型价、限价、触达概率、ETA 或直接下单指令。",
+                "convexity_idea_radar 是 13:00 ET 前强制退出的双向灵感板，不是执行裁决。必须区分 16:00 风险中性终值分布、"
+                "尚未校准的 13:00 物理区间与真实胜率；"
+                "可同时保留上测/下测的 Call 与 Put 假设，但只能把 edge_status=observed_local_skew_edge 称为局部 skew 证据，"
+                "不得把 unknown/not_observed 改写为错误定价。",
                 "SPX levels 与 es_equivalent_levels 是两个坐标系。谈 ES 阈值只能逐字引用 es_equivalent_levels，严禁把 SPX strike 当 ES 价格，也不得自行换算。",
                 "不得推断输入中没有的历史触碰次数、墙是否弃守、dealer 行为或 gamma 燃料。避免比喻，用结构、价格和条件直接表达。",
                 "输出中文且总共不超过 16 行，首行逐字保留模板标题；使用 ## 结论、## 位置与路径、## 双向条件、## 数据限制四段，"
@@ -798,6 +813,13 @@ def build_status_prompt(
             "不得写『当前不可预挂』；非实时条件情景才保留『当前不可预挂』并等 SPX 触发后重算。",
             "TradeReady 可供操作员执行，但自动下单仍关闭；仓位方向未知时，负 gamma 不等于下跌，不得据此改变候选方向。",
             "call_skew_spread_shadow 与 put_skew_spread_shadow 只能称为只读 Shadow：即使 status=candidate 也不是计划或订单，禁止补写拆腿执行；只能复述组合净借记、定义风险和门控边界。",
+            "convexity_idea_radar 是独立的双向假设层，不改变唯一生产计划。它允许同时呈现一条 Call 和一条 Put 灵感："
+            "先说市场正在定价的 16:00 风险中性目的地区间；若 mark_1300_proxy 不可用，必须明确没有 13:00 物理区间。"
+            "若 gth_prior 未冻结，也不得把当前 RTH 曲面倒称为盘前预判。"
+            "再说上/下边界接受或拒绝时哪项市场假设可能出错，分别给最强 Call 与 Put 的触发、证伪和不交易条件，"
+            "并点名下一根闭合 5 分钟 K 线最值得验证的一项矛盾。"
+            "只有 edge_status=observed_local_skew_edge 才可称为局部 skew 边际证据；not_observed 只是未检出，unknown 是数据不足，均不证明错价。"
+            "风险中性分布不是物理概率，Spring 方向概率未校准，均不得写成胜率。",
             "EXPIRED 表示系统自动重建事件，不得写成等待价格离开或停止监控。",
             "没有实质变化时直接写『剧本维持』，不要为了填满行数重复指标。",
             "previous_push:" + previous_push_json(previous_push),
@@ -827,6 +849,7 @@ def _status_writer_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "put_skew_spread_shadow",
         "spring_gamma_v3_shadow",
         "spring_gamma_v3_state_window",
+        "convexity_idea_radar",
         "warnings",
     )
     compact = {key: payload.get(key) for key in keys if key in payload}
@@ -858,6 +881,9 @@ def _status_writer_payload(payload: dict[str, Any]) -> dict[str, Any]:
     spring_gamma_summary = spring_gamma_v3_writer_summary(spring_gamma_shadow)
     if spring_gamma_summary is not None:
         compact["spring_gamma_v3_shadow"] = spring_gamma_summary
+    radar_summary = compact_convexity_idea_radar(compact.get("convexity_idea_radar"))
+    if radar_summary is not None:
+        compact["convexity_idea_radar"] = radar_summary
     compact["decision_guidance"] = guidance_module.build_decision_guidance(payload).to_dict()
     signed_gex = payload.get("signed_gex_proxy")
     if isinstance(signed_gex, dict):
@@ -906,7 +932,7 @@ def _status_writer_payload(payload: dict[str, Any]) -> dict[str, Any]:
                 "smoothing_scope",
             )
         }
-    exposure_context = _status_exposure_context(payload)
+    exposure_context = compact_exposure_context(payload)
     if exposure_context:
         compact["exposure_context"] = exposure_context
     classified = "plan_candidates" in payload
@@ -954,47 +980,3 @@ def _status_writer_payload(payload: dict[str, Any]) -> dict[str, Any]:
     if classified:
         compact["candidate_presentation"] = payload.get("candidate_presentation")
     return compact
-
-
-def _status_exposure_context(payload: dict[str, Any]) -> dict[str, Any]:
-    """Expose bounded SPXW-derived exposure facts to the 15-minute writer."""
-
-    frame = payload.get("option_structure_frame")
-    if not isinstance(frame, dict):
-        return {}
-    exposure = frame.get("exposure")
-    if not isinstance(exposure, dict):
-        return {}
-
-    def aggregate(name: str) -> dict[str, Any] | None:
-        value = exposure.get(name)
-        if not isinstance(value, dict):
-            return None
-        keys = (
-            "net_gex",
-            "abs_gex",
-            "net_gamma_ratio",
-            "net_dex_proxy",
-            "abs_dex_proxy",
-            "net_dex_ratio_proxy",
-        )
-        return {key: value.get(key) for key in keys}
-
-    return {
-        "instrument_scope": "SPXW_0DTE_options_not_ES_options",
-        "as_of": frame.get("as_of"),
-        "quality": exposure.get("quality"),
-        "snapshot_age_seconds": exposure.get("snapshot_age_seconds"),
-        "delta_coverage_ratio": exposure.get("delta_coverage_ratio"),
-        "iv_coverage_ratio": exposure.get("iv_coverage_ratio"),
-        "oi_quality": exposure.get("oi_quality"),
-        "dealer_position_sign": exposure.get("dealer_position_sign"),
-        "sign_convention": exposure.get("sign_convention"),
-        "gex_weighting_divergence": exposure.get("gex_weighting_divergence"),
-        "oi_weighted": aggregate("oi_weighted"),
-        "volume_weighted": aggregate("volume_weighted"),
-        "key_strikes": [row for row in exposure.get("key_strikes") or [] if isinstance(row, dict)][
-            :8
-        ],
-        "warnings": exposure.get("warnings"),
-    }

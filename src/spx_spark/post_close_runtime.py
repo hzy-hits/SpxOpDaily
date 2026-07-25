@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -20,6 +21,45 @@ from spx_spark.notifier.receipts import NotificationEnvelope, notification_event
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR, ET, MarketCalendar
 from spx_spark.post_close_render import fmt, render_markdown
 from spx_spark.settings import settings_value
+
+
+_UNSUPPORTED_DEALER_CAUSAL_CLAIMS = (
+    re.compile(
+        r"(?:dealer|做市商|防守方|主力|期权卖方).{0,24}"
+        r"(?:裸露|净多|净空|净买|净卖|买入|卖出|移仓|调仓|防守|弃守|"
+        r"long\s+gamma|short\s+gamma|bought|sold|moved|rolled|defended|abandoned)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?:gamma\s*裸露|裸露区|(?:gamma|伽马).{0,12}(?:压住|压制|钉住|推动|驱动))",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?:对冲盘|保护盘|机构(?:资金)?|客户流).{0,24}"
+        r"(?:接住|托住|买入|卖出|抢入|推动|驱动|防守|弃守|移仓)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?:B-L|风险中性|触达概率).{0,30}"
+        r"(?:胜率|成功率|大概率|物理概率|13:00(?:\s*ET)?\s*(?:区间|概率))",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?:胜率|成功率|大概率|物理概率|13:00(?:\s*ET)?\s*(?:区间|概率)).{0,30}"
+        r"(?:B-L|风险中性|触达概率)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?:Put\s*Wall|Call\s*Wall|墙位|结构档).{0,32}"
+        r"(?:大概率|高概率|低概率|必然|一定).{0,12}"
+        r"(?:反弹|回落|突破|守住|失守|上涨|下跌)",
+        re.IGNORECASE,
+    ),
+)
+
+_CLAUSE_BOUNDARY = re.compile(r"[。！？；;]|(?:但|不过|然而|可是|却)")
+
+
 @dataclass(frozen=True)
 class ReviewPaths:
     report_dir: Path
@@ -147,8 +187,9 @@ def build_llm_writer_prompt(payload: dict[str, Any], deterministic_markdown: str
             "你是做了十几年 SPX 期权的自营交易员，收盘后给搭档写当日复盘。搭档只做 SPX/SPXW 0DTE/1DTE 买方"
             "(call/put/垂直价差)，他要的不是当日行情回放，而是对账：盘前那张地图说的墙位/gamma/预期波幅，"
             "今天市场兑现了多少、哪里打脸了、明天的剧本要改哪里。",
-            "写之前先想清楚(不写出来)：今天价格是被墙拦住的还是根本没碰到墙？pin 是 gamma 压出来的还是碰巧？"
-            "预期波幅是高估还是低估了，错在 vol 定价还是错在事件？模型今天哪里说对了、哪里说错了，都要点名。",
+            "写之前先想清楚(不写出来)：今天价格是否测试墙位，路径是接受还是拒绝？pin 是否仅与结构代理一致，"
+            "还是价格路径并不支持；不得把一致性写成参与者或 gamma 因果。预期波幅是高估还是低估了，"
+            "模型今天哪里说对了、哪里说错了，都要点名。",
             "只允许使用给定 JSON 和模板报告里的事实；不编造价格、新闻、仓位。",
             "框架口径：复盘对照 Micopedia/Steven observe_only 剧本（regime→map→trigger→exit）；"
             "Steven episode 若存在只作审计附注；*_proxy 曝露不是 vendor DEX；不下单授权。",
@@ -163,6 +204,11 @@ def build_llm_writer_prompt(payload: dict[str, Any], deterministic_markdown: str
             "数据 degraded 时只说明覆盖质量，不给方向判断。",
             "spxw_0dte_greeks_reference 是同日到期的 reference-only 影子层；position_sign/direction 永远 unknown。"
             "负 gamma 不等于看跌，绝不能据此改写 Call/Put 方向；next expiry 只能用于已有 ATM IV gap 对照。",
+            "公共期权报价不能识别交易者身份或做市商净仓位。禁止写 dealer/做市商买卖、移仓、防守/弃守、"
+            "裸露区，禁止把 pin 或墙位行为因果归于 dealer gamma；最多写“与给定结构代理一致，但因仓位符号未知"
+            "无法归因”。观察到的墙位变化只能称结构迁移。",
+            "风险中性分布和触达概率不得写成真实胜率、物理概率或 13:00 区间。输入没有冻结的 Radar 盘前先验与"
+            "13:00 实际退出结果，因此本复盘不得评价 Convexity Radar 的 Alpha。",
             "",
             "JSON:",
             json.dumps(compact, ensure_ascii=False, sort_keys=True),
@@ -249,6 +295,11 @@ def maybe_write_llm_review(
             payload["llm_writer"]["status"] = "fallback_template"
             payload["llm_writer"]["error"] = error or "empty response"
             return deterministic_markdown
+        semantic_error = _unsupported_llm_review_claim(markdown)
+        if semantic_error:
+            payload["llm_writer"]["status"] = "fallback_template"
+            payload["llm_writer"]["error"] = semantic_error
+            return deterministic_markdown
         payload["llm_writer"]["status"] = "ok"
     else:
         payload["llm_writer"]["status"] = "fallback_template"
@@ -259,6 +310,38 @@ def maybe_write_llm_review(
     if narrative.startswith(expected_title):
         narrative = narrative[len(expected_title) :].lstrip()
     return deterministic_markdown.rstrip() + "\n\n## LLM Commentary\n\n" + narrative + "\n"
+
+
+def _unsupported_llm_review_claim(markdown: str) -> str | None:
+    normalized = " ".join(markdown.split())
+    for pattern in _UNSUPPORTED_DEALER_CAUSAL_CLAIMS:
+        if match := pattern.search(normalized):
+            boundaries = [
+                boundary.end()
+                for boundary in _CLAUSE_BOUNDARY.finditer(
+                    normalized,
+                    0,
+                    match.start(),
+                )
+            ]
+            context = normalized[boundaries[-1] if boundaries else 0 : match.end()]
+            if any(
+                token in context
+                for token in (
+                    "不能",
+                    "无法",
+                    "不得",
+                    "禁止",
+                    "不可",
+                    "不是",
+                    "不等于",
+                    "没有证据",
+                )
+            ):
+                continue
+            excerpt = " ".join(match.group(0).split())[:80]
+            return f"unsupported_dealer_causal_claim: {excerpt}"
+    return None
 
 
 def default_output_dir(settings: StorageSettings) -> Path:
@@ -409,8 +492,10 @@ def build_review_push_prompt(payload: dict[str, Any], summary: str) -> str:
             "只依据 JSON 与摘要事实。输出中文，第一行必须是摘要第一行；正文使用 ## 今日结论、## 结构复盘、"
             "## 明日检查、## 数据质量四段。不要输出本机路径，也不要索取更多数据。",
             "必须覆盖：当日价格路径一句话(相对预期波幅走了多少)、墙位/zero gamma/gamma state 的收盘位、IV 与 skew 当日变化；",
-            "然后 2-3 句结构点评，要下判断不要罗列：pin 是 gamma 压出来的还是碰巧、墙被打穿过没有、IV 是 crush 还是抬升、"
-            "今天地图哪里说对了哪里说错了；",
+            "然后 2-3 句结构点评，要下判断不要罗列：pin 是否仅与结构代理一致、墙位测试是接受还是拒绝、"
+            "IV 是 crush 还是抬升、今天地图哪里说对了哪里说错了；不得补造参与者或 gamma 因果。",
+            "风险中性概率不得写成真实胜率或 13:00 区间；此输入不含冻结 Radar 先验和 13:00 实际结果，"
+            "不得评价 Convexity Radar Alpha。",
             "最后 2-3 条『下一交易日开盘前检查项』，写成看什么、到什么位置意味着什么。数据 degraded 时如实说明。",
             "JSON:" + json.dumps(compact, ensure_ascii=False, separators=(",", ":")),
             "摘要:" + summary,
@@ -439,6 +524,16 @@ def push_review(
         runner=runner,
         system=DEFAULT_SYSTEM_PROMPT,
     )
+    semantic_error = (
+        _unsupported_llm_review_claim(text) if writer != "template" else None
+    )
+    if semantic_error:
+        text = summary
+        writer = "template"
+        payload["push_llm_writer"] = {
+            "status": "fallback_template",
+            "error": semantic_error,
+        }
     used_agent = writer != "template"
     feishu_text = text
     if full_markdown:
@@ -476,6 +571,7 @@ def push_review(
         "text": text,
         "used_agent": used_agent,
         "writer": writer,
+        "writer_error": semantic_error,
         "im_ok": any(s.sink == "feishu" and s.ok for s in delivery_sinks),
         "bark_ok": any(s.sink == "bark" and s.ok for s in delivery_sinks),
         "feishu_ok": any(s.sink == "feishu" and s.ok for s in delivery_sinks),

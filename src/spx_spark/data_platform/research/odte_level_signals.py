@@ -72,6 +72,9 @@ SPREAD_WALL_DEFAULT_WIDTH = 50.0
 SPREAD_WALL_EM_FRACTION = 0.5
 NEW_YORK = ZoneInfo("America/New_York")
 EXIT_CLOCK_ET_HHMM = (9, 45)
+RTH_OPEN_ET_HHMM = (9, 30)
+RTH_ANALYSIS_START_ET_HHMM = (9, 45)
+RTH_EXIT_CLOCK_ET_HHMM = (13, 0)
 EXPIRY_CLOSE_ET_HHMM = (16, 0)
 SATURATION_FRACTION = 0.85  # sat85: take profit at 85% of spread width
 TRAIL33_ARM_FRACTION = 0.50  # trail33: arm at 50% of spread width
@@ -90,6 +93,8 @@ class Profile:
     gth_max_hold: timedelta | None = None  # overrides MAX_HOLD for GTH signals
     gth_clock_exit: bool = False  # GTH stop anchored to expiry-date 09:45 ET
     gth_only: bool = False  # evaluate GTH signals only under this profile
+    rth_clock_exit: bool = False  # RTH stop anchored to expiry-date 13:00 ET
+    rth_only: bool = False  # evaluate entries in [09:45, 13:00) ET only
     spread_only: bool = False  # skip the naked variant under this profile
     set_names: tuple[str, ...] | None = None  # None => every set
 
@@ -101,12 +106,19 @@ PROFILE_GTH_360 = "gth_360"
 PROFILE_SAT85 = "sat85"
 PROFILE_TRAIL33 = "trail33"
 PROFILE_CLOCK = "clock"
+PROFILE_RTH_1300 = "rth_1300"
 _GTH_EVAL_SETS = (SET_CONFIRMED, SET_GTH_DIP)
 PROFILES = (
     Profile(name=PROFILE_BASELINE),
     Profile(name=PROFILE_WIDE_INVALIDATION, invalidation_em_fraction=WIDE_INVALIDATION_EM_FRACTION),
     Profile(name=PROFILE_TRAILING_TP, profit_target_mode="trailing"),
     Profile(name=PROFILE_GTH_360, gth_time_stop=GTH_TIME_STOP, gth_max_hold=GTH_MAX_HOLD),
+    Profile(
+        name=PROFILE_RTH_1300,
+        profit_target_mode="clock",
+        rth_clock_exit=True,
+        rth_only=True,
+    ),
     Profile(
         name=PROFILE_SAT85,
         profit_target_mode="sat85",
@@ -320,10 +332,11 @@ def next_exit_clock(
     expiry: date | None = None,
     hhmm: tuple[int, int] = EXIT_CLOCK_ET_HHMM,
 ) -> datetime:
-    """The expiry session's 09:45 America/New_York exit clock in UTC.
+    """Return an expiry-session America/New_York wall clock in UTC.
 
-    The historical name is retained for API compatibility. The result never
-    rolls to the following day when ``at`` is already past the clock.
+    The historical name and 09:45 default are retained for API compatibility.
+    The result never rolls to the following day when ``at`` is already past
+    the requested clock.
     """
     aware = at if at.tzinfo else at.replace(tzinfo=timezone.utc)
     session_date = expiry or aware.astimezone(NEW_YORK).date()

@@ -25,7 +25,7 @@ from spx_spark.notifier import (
     SinkResult,
 )
 from spx_spark.notifier.state import load_acknowledged_event_ids, mark_alerts_sent
-from spx_spark.notifier.llm_writer import _provider_order
+from spx_spark.notifier.llm_writer import DEFAULT_SYSTEM_PROMPT, _provider_order
 from spx_spark.notifier.pipeline import _dispatch_alerts
 
 
@@ -2382,6 +2382,38 @@ def test_direct_push_and_agent_prompts_carry_steven_micopedia_guardrails() -> No
         assert "不是下单授权" in prompt or "不下单指令" in prompt
     assert direct_push_header([{"kind": "gth_dip_reclaim_call"}]) == ("SPX 0DTE | CALL RECLAIM")
     assert direct_push_header([{"kind": "ibkr_session_restored"}]) == ("SPX | SYSTEM STATUS")
+
+
+def test_llm_prompts_do_not_infer_participant_causality_from_public_options_data() -> None:
+    from spx_spark.notifier.prompts import build_agent_prompt, build_direct_push_prompt
+
+    payload = make_payload()
+    alerts = [payload["alerts"][0]]
+    prompts = (
+        DEFAULT_SYSTEM_PROMPT,
+        build_codex_prompt(payload, alerts),
+        build_direct_push_prompt(payload, alerts),
+        build_agent_prompt(payload, alerts),
+    )
+
+    for prompt in prompts:
+        assert "公开 OI" in prompt
+        assert "不得据此声称 dealer/做市商买卖" in prompt
+    assert "卖方在弃守或移仓" not in DEFAULT_SYSTEM_PROMPT
+    assert "pin 是 gamma 压出来的" not in DEFAULT_SYSTEM_PROMPT
+    assert "急跌大概率是保护盘驱动" not in "\n".join(prompts)
+    assert "低概率高赔付" not in DEFAULT_SYSTEM_PROMPT
+    assert "高概率低赔付" not in DEFAULT_SYSTEM_PROMPT
+    assert "170% EM" not in DEFAULT_SYSTEM_PROMPT
+    assert "剩余下行空间不足" not in DEFAULT_SYSTEM_PROMPT
+    assert "带保护继续持有" not in DEFAULT_SYSTEM_PROMPT
+    assert "持仓带什么 bracket" not in DEFAULT_SYSTEM_PROMPT
+    assert "不得建议 bracket" in DEFAULT_SYSTEM_PROMPT
+    assert "13:00 ET 前清空" in DEFAULT_SYSTEM_PROMPT
+    assert "最佳 Call 与一条最佳 Put" in DEFAULT_SYSTEM_PROMPT
+    assert "结构测试临近但接受/拒绝尚未确认" in prompts[3]
+    assert "15m 风险中性墙触达启发约 24%" in prompts[3]
+    assert "只量化 EM 已使用比例" in prompts[1]
 
 
 def test_alert_key_uses_dedup_group_not_title() -> None:

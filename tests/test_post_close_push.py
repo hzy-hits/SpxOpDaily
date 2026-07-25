@@ -183,3 +183,42 @@ def test_push_review_uses_writer_and_attaches_full_report(
     )
     assert "墙位失效" in card_text
     assert "完整价格路径" in card_text
+
+
+def test_push_review_rejects_unsupported_llm_causality_before_delivery(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("SPX_REVIEW_PUSH_ENABLED", raising=False)
+    settings = make_settings(str(tmp_path / "notify-state.json"))
+    cards: list[dict[str, object]] = []
+    payload = sample_payload()
+    summary = build_push_summary(payload, latest_markdown_path="/tmp/review.md")
+    monkeypatch.setattr(
+        "spx_spark.post_close_review.NotificationSettings.from_env",
+        lambda: settings,
+    )
+    monkeypatch.setattr(
+        "spx_spark.post_close_runtime.generate_push_text",
+        lambda template, prompt, settings, **kwargs: (
+            "【盘后复盘 2026-07-07】\n\n对冲盘接住了 Put Wall。",
+            "grok_cli",
+        ),
+    )
+    monkeypatch.setattr(
+        "spx_spark.notifier.sinks.post_feishu",
+        lambda url, payload, timeout: cards.append(payload) or {"code": 0, "msg": "success"},
+    )
+
+    result = push_review(payload, latest_markdown_path="/tmp/review.md")
+
+    assert result["writer"] == "template"
+    assert result["used_agent"] is False
+    assert result["text"] == summary
+    assert result["writer_error"].startswith("unsupported_dealer_causal_claim:")
+    card_text = "\n".join(
+        str(item.get("content") or "")
+        for item in cards[0]["card"]["body"]["elements"]
+        if isinstance(item, dict)
+    )
+    assert "对冲盘接住" not in card_text

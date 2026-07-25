@@ -8,6 +8,9 @@ from spx_spark.analytics.options.pricing import finite_float
 from spx_spark.application.order_map.call_spread_shadow import (
     compact_skew_spread_shadow_line,
 )
+from spx_spark.application.order_map.convexity_idea_presentation import (
+    render_convexity_idea_radar_lines,
+)
 from spx_spark.application.order_map.models import PLAY_ORDER, PLAY_TEMPLATE_LINES
 from spx_spark.application.order_map.strike_coverage_presentation import (
     strike_price_coverage_line as _strike_price_coverage_line,
@@ -608,6 +611,7 @@ def render_research_only_template(
         lines.append(f"HL 与定价候选分歧: {float(divergence):+.0f} bps")
     if shadow_line := compact_skew_spread_shadow_line(payload):
         lines.append(shadow_line)
+    lines.extend(render_convexity_idea_radar_lines(payload))
     gate = str(pricing.get("gate_state") or "missing")
     lines.append(f"执行限制: {gate}；当前为不可执行定价，不生成期权模型价、概率、限价或下单建议。")
     return "\n".join(lines)
@@ -666,6 +670,7 @@ def render_template(payload: dict[str, Any]) -> str:
     density_line = _rn_density_line(payload)
     if density_line:
         lines.append(density_line)
+    lines.extend(render_convexity_idea_radar_lines(payload))
 
     presented_candidates, presentation_role = _presented_candidates(payload)
     by_play = _candidate_by_play({"candidates": presented_candidates})

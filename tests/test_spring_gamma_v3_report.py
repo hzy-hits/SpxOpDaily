@@ -588,6 +588,93 @@ def test_nested_wall_probability_selects_nearest_directional_target() -> None:
     assert "0.45678" not in rendered
 
 
+def test_nested_wall_probability_cannot_cross_1300_hard_exit() -> None:
+    payload = _production_payload()
+    shadow = _shadow(wall_probability=None)
+    shadow["as_of"] = datetime(
+        2026,
+        7,
+        24,
+        12,
+        59,
+        tzinfo=ZoneInfo("America/New_York"),
+    ).isoformat()
+    shadow["wall_probability"] = {
+        "path": {"underlier": 7558.0},
+        "stable_levels": {"flip_high": 7565.0},
+        "wall_probabilities": {
+            horizon: {
+                "flip_high": {
+                    "status": "available",
+                    "level": 7565.0,
+                    "touch_probability_2x_reflection": probability,
+                }
+            }
+            for horizon, probability in (
+                ("15m", 0.45),
+                ("30m", 0.55),
+                ("60m", 0.65),
+            )
+        },
+    }
+    payload["spring_gamma_v3_shadow"] = shadow
+
+    rendered = render_status_template(
+        payload,
+        [],
+        datetime(2026, 7, 24, 12, 59, tzinfo=ZoneInfo("America/New_York")),
+    )
+    compact = _status_writer_payload(payload)["spring_gamma_v3_shadow"]
+
+    assert "墙触达概率 0." not in rendered
+    assert "wall_probability" not in compact
+
+
+def test_nested_wall_probability_allows_exit_at_exactly_1300() -> None:
+    payload = _production_payload()
+    shadow = _shadow(wall_probability=None)
+    shadow["as_of"] = datetime(
+        2026,
+        7,
+        24,
+        12,
+        30,
+        tzinfo=ZoneInfo("America/New_York"),
+    ).isoformat()
+    shadow["wall_probability"] = {
+        "path": {"underlier": 7558.0},
+        "stable_levels": {"flip_high": 7565.0},
+        "wall_probabilities": {
+            "30m": {
+                "flip_high": {
+                    "status": "available",
+                    "level": 7565.0,
+                    "touch_probability_2x_reflection": 0.46,
+                }
+            },
+            "60m": {
+                "flip_high": {
+                    "status": "available",
+                    "level": 7565.0,
+                    "touch_probability_2x_reflection": 0.76,
+                }
+            },
+        },
+    }
+    payload["spring_gamma_v3_shadow"] = shadow
+
+    rendered = render_status_template(
+        payload,
+        [],
+        datetime(2026, 7, 24, 12, 30, tzinfo=ZoneInfo("America/New_York")),
+    )
+    compact = _status_writer_payload(payload)["spring_gamma_v3_shadow"]
+
+    assert "墙触达概率 0.46（30m Flip High）" in rendered
+    assert compact["wall_probability"] == 0.46
+    assert compact["wall_probability_horizon"] == "30m"
+
+
 def test_gth_abstain_uses_partial_wall_contract_upstream_direction_only() -> None:
     payload = _production_payload()
     shadow = _shadow(

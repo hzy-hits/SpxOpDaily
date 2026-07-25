@@ -189,6 +189,8 @@ def build_artifact(
             ),
             "gth_clock_exit": profile.gth_clock_exit,
             "gth_only": profile.gth_only,
+            "rth_clock_exit": profile.rth_clock_exit,
+            "rth_only": profile.rth_only,
             "spread_only": profile.spread_only,
             "set_names": list(profile.set_names) if profile.set_names else None,
         }

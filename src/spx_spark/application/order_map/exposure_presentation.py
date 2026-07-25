@@ -7,6 +7,48 @@ from typing import Any
 from spx_spark.analytics.options.pricing import finite_float
 
 
+def compact_exposure_context(payload: dict[str, Any]) -> dict[str, Any]:
+    """Expose bounded SPXW-derived exposure facts to the 15-minute writer."""
+
+    frame = payload.get("option_structure_frame")
+    exposure = frame.get("exposure") if isinstance(frame, dict) else None
+    if not isinstance(exposure, dict):
+        return {}
+
+    def aggregate(name: str) -> dict[str, Any] | None:
+        value = exposure.get(name)
+        if not isinstance(value, dict):
+            return None
+        keys = (
+            "net_gex",
+            "abs_gex",
+            "net_gamma_ratio",
+            "net_dex_proxy",
+            "abs_dex_proxy",
+            "net_dex_ratio_proxy",
+        )
+        return {key: value.get(key) for key in keys}
+
+    return {
+        "instrument_scope": "SPXW_0DTE_options_not_ES_options",
+        "as_of": frame.get("as_of"),
+        "quality": exposure.get("quality"),
+        "snapshot_age_seconds": exposure.get("snapshot_age_seconds"),
+        "delta_coverage_ratio": exposure.get("delta_coverage_ratio"),
+        "iv_coverage_ratio": exposure.get("iv_coverage_ratio"),
+        "oi_quality": exposure.get("oi_quality"),
+        "dealer_position_sign": exposure.get("dealer_position_sign"),
+        "sign_convention": exposure.get("sign_convention"),
+        "gex_weighting_divergence": exposure.get("gex_weighting_divergence"),
+        "oi_weighted": aggregate("oi_weighted"),
+        "volume_weighted": aggregate("volume_weighted"),
+        "key_strikes": [
+            row for row in exposure.get("key_strikes") or [] if isinstance(row, dict)
+        ][:8],
+        "warnings": exposure.get("warnings"),
+    }
+
+
 def exposure_strike_lines(payload: dict[str, Any]) -> list[str]:
     frame = payload.get("option_structure_frame")
     exposure = frame.get("exposure") if isinstance(frame, dict) else None

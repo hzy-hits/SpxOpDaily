@@ -29,6 +29,10 @@ from spx_spark.post_close_review import (
     session_window,
     write_outputs,
 )
+from spx_spark.post_close_runtime import (
+    build_llm_writer_prompt,
+    build_review_push_prompt,
+)
 from spx_spark.storage import JsonlQuoteWriter, LatestState
 
 
@@ -450,6 +454,19 @@ def test_llm_writer_disabled_keeps_template() -> None:
     assert payload["llm_writer"]["status"] == "disabled"
 
 
+def test_post_close_prompts_request_structural_consistency_not_gamma_causality() -> None:
+    payload = {"trading_date": "2026-07-06"}
+    deterministic = "# SPX/SPXW Post-Close Review - 2026-07-06"
+
+    writer = build_llm_writer_prompt(payload, deterministic)
+    push = build_review_push_prompt(payload, deterministic)
+
+    assert "不得把一致性写成参与者或 gamma 因果" in writer
+    assert "不得补造参与者或 gamma 因果" in push
+    assert "pin 是 gamma 压出来的" not in writer
+    assert "pin 是 gamma 压出来的" not in push
+
+
 def test_post_close_runtime_defaults_to_deepseek(monkeypatch) -> None:
     monkeypatch.delenv("SPX_REVIEW_LLM_PROVIDER", raising=False)
     monkeypatch.delenv("SPX_REVIEW_LLM_MODEL", raising=False)
@@ -544,6 +561,123 @@ def test_successful_llm_writer_preserves_deterministic_completeness(
     assert "## Data Completeness" in output
     assert "## LLM Commentary" in output
     assert "Narrative only" in output
+
+
+@pytest.mark.parametrize(
+    "unsupported_claim",
+    (
+        "这里已经进入 dealer 裸露区。",
+        "做市商\n移仓并调高了防守位。",
+        "防守方未弃守 Call Wall。",
+        "这段路径是 Gamma 钉住的。",
+        "主力正在卖出 Call 防守上墙。",
+        "对冲盘接住了 Put Wall。",
+        "机构资金抢入保护并驱动了急跌。",
+        "风险中性分布给出的就是真实胜率。",
+        "13:00 ET 区间就是 B-L 分布。",
+        "风险中性分布显示胜率约70%。",
+        "B-L分布意味着胜率80%。",
+        "触达概率就是成功率。",
+        "Put Wall第一次测试大概率反弹。",
+        "不能仅凭价格判断；但做市商正在移仓并防守 Put Wall。",
+        "无法确认全部数据，不过对冲盘接住了 Put Wall。",
+    ),
+)
+def test_llm_writer_rejects_unsupported_dealer_causal_claims(
+    monkeypatch,
+    unsupported_claim: str,
+) -> None:
+    payload = {"trading_date": "2026-07-06"}
+    deterministic = "# SPX/SPXW Post-Close Review - 2026-07-06\n\nTemplate"
+    settings = ReviewLlmSettings(
+        enabled=True,
+        provider="deepseek",
+        model="test",
+        url="https://example.invalid",
+        env_file="/no/such/file",
+        timeout_seconds=1,
+        max_tokens=100,
+    )
+    monkeypatch.setattr(
+        "spx_spark.post_close_review.call_deepseek_writer",
+        lambda *args: (
+            "# SPX/SPXW Post-Close Review - 2026-07-06\n\n" + unsupported_claim,
+            None,
+        ),
+    )
+
+    output = maybe_write_llm_review(payload, deterministic, settings)
+
+    assert output == deterministic
+    assert payload["llm_writer"]["status"] == "fallback_template"
+    assert payload["llm_writer"]["error"].startswith(
+        "unsupported_dealer_causal_claim:"
+    )
+
+
+def test_llm_writer_allows_explicit_unknown_dealer_position_caveat(
+    monkeypatch,
+) -> None:
+    payload = {"trading_date": "2026-07-06"}
+    deterministic = "# SPX/SPXW Post-Close Review - 2026-07-06\n\nTemplate"
+    settings = ReviewLlmSettings(
+        enabled=True,
+        provider="deepseek",
+        model="test",
+        url="https://example.invalid",
+        env_file="/no/such/file",
+        timeout_seconds=1,
+        max_tokens=100,
+    )
+    monkeypatch.setattr(
+        "spx_spark.post_close_review.call_deepseek_writer",
+        lambda *args: (
+            "# SPX/SPXW Post-Close Review - 2026-07-06\n\n"
+            "当前数据无法识别做市商净仓位，也不能说这段路径由 Gamma 驱动。",
+            None,
+        ),
+    )
+
+    output = maybe_write_llm_review(payload, deterministic, settings)
+
+    assert payload["llm_writer"]["status"] == "ok"
+    assert "无法识别做市商净仓位" in output
+
+
+@pytest.mark.parametrize(
+    "caveat",
+    (
+        "当前数据不能证明对冲盘接住了价格。",
+        "风险中性分布不是真实胜率，也不是 13:00 ET 区间。",
+    ),
+)
+def test_llm_writer_allows_explicit_causal_and_probability_caveats(
+    monkeypatch,
+    caveat: str,
+) -> None:
+    payload = {"trading_date": "2026-07-06"}
+    deterministic = "# SPX/SPXW Post-Close Review - 2026-07-06\n\nTemplate"
+    settings = ReviewLlmSettings(
+        enabled=True,
+        provider="deepseek",
+        model="test",
+        url="https://example.invalid",
+        env_file="/no/such/file",
+        timeout_seconds=1,
+        max_tokens=100,
+    )
+    monkeypatch.setattr(
+        "spx_spark.post_close_review.call_deepseek_writer",
+        lambda *args: (
+            "# SPX/SPXW Post-Close Review - 2026-07-06\n\n" + caveat,
+            None,
+        ),
+    )
+
+    output = maybe_write_llm_review(payload, deterministic, settings)
+
+    assert payload["llm_writer"]["status"] == "ok"
+    assert caveat in output
 
 
 def test_push_summary_does_not_label_next_expiry_as_0dte() -> None:

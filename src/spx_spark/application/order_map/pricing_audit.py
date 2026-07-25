@@ -44,6 +44,21 @@ def build_pricing_audit_record(
         "pricing_reference": payload.get("pricing_reference"),
         "expected_move_points": payload.get("expected_move_points"),
         "strike_price_coverage": payload.get("strike_price_coverage"),
+        "convexity_idea_radar": (
+            dict(payload["convexity_idea_radar"])
+            if isinstance(payload.get("convexity_idea_radar"), Mapping)
+            else None
+        ),
+        "level_decision": (
+            dict(payload["level_decision"])
+            if isinstance(payload.get("level_decision"), Mapping)
+            else None
+        ),
+        "day_move": (
+            dict(payload["day_move"])
+            if isinstance(payload.get("day_move"), Mapping)
+            else None
+        ),
         "spring_gamma_v3_shadow": (
             dict(payload["spring_gamma_v3_shadow"])
             if isinstance(payload.get("spring_gamma_v3_shadow"), Mapping)

@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from datetime import datetime, time, timedelta
 from typing import Any
 
 from spx_spark.analytics.options.pricing import finite_float
 from spx_spark.application.order_map.render import (
     render_research_only_template as _render_research_only_template,
 )
+from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR, ET
 
 
 SPRING_GAMMA_V3_SHADOW_SYSTEM_RULE = (
@@ -404,6 +406,50 @@ def _finite_shadow_value(*values: object) -> float | None:
     return None
 
 
+def _shadow_datetime(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(ET)
+
+
+def _spring_gamma_hard_exit(shadow: dict[str, Any]) -> datetime | None:
+    expiry = str(shadow.get("expiry") or "").strip()
+    try:
+        expiry_day = datetime.strptime(expiry, "%Y%m%d").date()
+    except ValueError:
+        return None
+    session = DEFAULT_MARKET_CALENDAR.session(expiry_day)
+    if session is None:
+        return None
+    strategy_cutoff = datetime.combine(expiry_day, time(13), tzinfo=ET)
+    return min(strategy_cutoff, session.close_at)
+
+
+def _wall_probability_planned_exit(
+    shadow: dict[str, Any],
+    *,
+    horizon_key: object,
+    row: dict[str, Any],
+) -> datetime | None:
+    explicit = row.get("planned_exit_at")
+    if explicit is not None:
+        return _shadow_datetime(explicit)
+    as_of = _shadow_datetime(shadow.get("as_of"))
+    horizon = _finite_shadow_value(
+        row.get("horizon_minutes"),
+        str(horizon_key).strip().lower().removesuffix("m"),
+    )
+    if as_of is None or horizon is None or horizon < 0:
+        return None
+    return as_of + timedelta(minutes=horizon)
+
+
 def _spring_gamma_wall_probability(
     shadow: dict[str, Any],
 ) -> tuple[float, str | None, str | None] | None:
@@ -477,6 +523,7 @@ def _spring_gamma_wall_probability(
     )
     stable_levels = wall_contract.get("stable_levels")
     stable_level_payload = stable_levels if isinstance(stable_levels, dict) else {}
+    hard_exit = _spring_gamma_hard_exit(shadow)
     candidates: list[tuple[float, float, float, str, str]] = []
     for horizon_key, horizon_rows in probabilities.items():
         if not isinstance(horizon_rows, dict):
@@ -487,6 +534,14 @@ def _spring_gamma_wall_probability(
                 continue
             if str(raw_row.get("status") or "available").lower() != "available":
                 continue
+            if hard_exit is not None:
+                planned_exit = _wall_probability_planned_exit(
+                    shadow,
+                    horizon_key=horizon_key,
+                    row=raw_row,
+                )
+                if planned_exit is None or planned_exit > hard_exit:
+                    continue
             probability = finite_float(raw_row.get("touch_probability_2x_reflection"))
             level = _finite_shadow_value(
                 raw_row.get("level"),
