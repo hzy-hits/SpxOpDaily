@@ -178,7 +178,6 @@ def _valid_session_boundary(
         and DEFAULT_MARKET_CALENDAR.next_trading_day(previous_day) == current_day
         and previous_start == previous_session.close_at - timedelta(minutes=5)
         and current_start == current_session.open_at
-        and current.get("gap_before") is not True
     )
 
 

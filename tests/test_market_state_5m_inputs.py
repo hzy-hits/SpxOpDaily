@@ -275,6 +275,7 @@ def test_rth_sma_rejects_truncated_cross_session_boundary() -> None:
         )
         for index in range(40)
     )
+    rows[10]["gap_before"] = True
 
     moving = _moving_average_diagnostics(rows)
 
@@ -309,6 +310,7 @@ def test_rth_sma_accepts_complete_adjacent_session_boundary() -> None:
         )
         for index in range(40)
     )
+    rows[10]["gap_before"] = True
 
     moving = _moving_average_diagnostics(rows)
 
