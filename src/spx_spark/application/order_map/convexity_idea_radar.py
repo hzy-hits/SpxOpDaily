@@ -50,7 +50,7 @@ def build_convexity_idea_radar(
     lower_test = _boundary(levels, side="lower", spot=spot)
     upper_test = _boundary(levels, side="upper", spot=spot)
     destination = _destination_map(payload, now=now, mandate=mandate)
-    market_state = _market_state(payload)
+    market_state = _market_state(payload, levels=levels)
     wall_probabilities = build_wall_probability_context(
         payload,
         mandate=mandate,
@@ -182,6 +182,10 @@ def build_convexity_idea_radar(
             ),
             "llm_role": (
                 "rank_and_criticize_hypotheses_using_supplied_facts_never_invent_prices_or_flow"
+            ),
+            "moving_average_regime": (
+                "read_only_confluence_never_direction_or_entry_authority;"
+                "cross_alone_cannot_generate_call_or_put"
             ),
         },
     }
@@ -370,7 +374,11 @@ def _destination_map(
     }
 
 
-def _market_state(payload: Mapping[str, Any]) -> dict[str, Any]:
+def _market_state(
+    payload: Mapping[str, Any],
+    *,
+    levels: Mapping[str, float],
+) -> dict[str, Any]:
     shadow = _mapping(payload.get("spring_gamma_v3_shadow"))
     state = _mapping(shadow.get("rth_market_state"))
     quality = _mapping(state.get("Q"))
@@ -402,7 +410,11 @@ def _market_state(payload: Mapping[str, Any]) -> dict[str, Any]:
             "calibration_status": direction.get("calibration_status")
             or shadow.get("calibration_status"),
         },
-        "moving_averages": _moving_average_context(state, payload),
+        "moving_averages": _moving_average_context(
+            state,
+            payload,
+            levels=levels,
+        ),
         "action_authority": "none",
     }
 
@@ -755,6 +767,8 @@ def _tensions(
 def _moving_average_context(
     state: Mapping[str, Any],
     payload: Mapping[str, Any],
+    *,
+    levels: Mapping[str, float],
 ) -> dict[str, Any] | None:
     lineage = _mapping(state.get("input_lineage"))
     diagnostics = _mapping(lineage.get("diagnostics"))
@@ -763,23 +777,130 @@ def _moving_average_context(
         intent = _mapping(payload.get("trade_intent"))
         moving = _mapping(intent.get("moving_average_context"))
     if not moving:
-        return None
-    return {
+        return {
+            "status": "unavailable",
+            "ma200_structure_confluence": _ma200_structure_confluence(
+                {},
+                levels=levels,
+            ),
+            "action_authority": "none",
+            "actionable": False,
+        }
+    result = {
         key: moving.get(key)
         for key in (
             "status",
             "price",
             "sma20",
             "sma50",
+            "sma200",
+            "atr_5m",
+            "distance_to_sma20_points",
+            "distance_to_sma50_points",
+            "distance_to_sma200_points",
+            "distance_to_sma50_atr",
+            "distance_to_sma200_atr",
+            "ma50_slope_3_atr",
+            "ma50_slope_6_atr",
+            "ma200_slope_3_atr",
+            "ma200_slope_6_atr",
+            "ma50_ma200_spread_points",
+            "ma50_ma200_spread_atr",
+            "spread_change_3_atr",
+            "cross_direction",
+            "bars_since_cross",
+            "cross_persistent_2_bars",
+            "cross_fresh",
+            "regime_state",
+            "regime_direction",
+            "same_direction_convexity",
+            "thresholds",
             "relation",
             "spx_equivalent_sma20",
             "spx_equivalent_sma50",
+            "spx_equivalent_sma200",
             "spx_projection_near_line",
             "spx_projection_near_line_tolerance_points",
             "contract_identity",
             "basis_contract_identity_matches_sma",
             "action_authority",
         )
+    }
+    result["ma200_structure_confluence"] = _ma200_structure_confluence(
+        moving,
+        levels=levels,
+    )
+    result["action_authority"] = "none"
+    result["actionable"] = False
+    return result
+
+
+def _ma200_structure_confluence(
+    moving: Mapping[str, Any],
+    *,
+    levels: Mapping[str, float],
+) -> dict[str, Any]:
+    projected_ma200 = _number(moving.get("spx_equivalent_sma200"))
+    atr = _number(moving.get("atr_5m"))
+    base = {
+        "source": "spx_equivalent_sma200_basis_projection",
+        "nearest_kind": None,
+        "nearest_level": None,
+        "distance_points": None,
+        "distance_atr": None,
+        "decision_zone_threshold_atr": 0.5,
+        "decision_zone": None,
+        "direction_authority": "none",
+        "entry_trigger": False,
+        "action_authority": "none",
+    }
+    if projected_ma200 is None:
+        return {
+            **base,
+            "status": "unavailable",
+            "reason": "spx_equivalent_sma200_unavailable",
+            "interpretation": "no_confluence_claim",
+        }
+    if atr is None or atr <= 0:
+        return {
+            **base,
+            "status": "unavailable",
+            "reason": "atr_5m_unavailable",
+            "interpretation": "no_confluence_claim",
+        }
+    candidates = [
+        (kind, level)
+        for kind, raw_level in levels.items()
+        if (level := _number(raw_level)) is not None
+    ]
+    if not candidates:
+        return {
+            **base,
+            "status": "unavailable",
+            "reason": "stable_levels_unavailable",
+            "interpretation": "no_confluence_claim",
+        }
+    kind, level = min(
+        candidates,
+        key=lambda item: (abs(item[1] - projected_ma200), item[0]),
+    )
+    distance_points = abs(level - projected_ma200)
+    distance_atr = distance_points / atr
+    decision_zone = distance_atr <= 0.5
+    return {
+        **base,
+        "status": "ready",
+        "reason": None,
+        "nearest_kind": kind,
+        "nearest_level": _rounded(level),
+        "distance_points": _rounded(distance_points),
+        "distance_atr": _rounded(distance_atr),
+        "decision_zone": decision_zone,
+        "interpretation": (
+            "wait_for_wall_or_flip_acceptance_or_rejection"
+            if decision_zone
+            else "location_context_only"
+        ),
     }
 
 

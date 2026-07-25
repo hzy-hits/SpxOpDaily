@@ -1,0 +1,595 @@
+{
+  "surface": "report",
+  "manifest": {
+    "version": 1,
+    "surface": "report",
+    "title": "MA50/MA200 日内四态审计",
+    "description": "ES RTH MA50/MA200 四态的因果回放、15 分钟前瞻与净化交易审计。",
+    "generatedAt": "2026-07-25T16:07:36Z",
+    "cards": [
+      {
+        "id": "coverage",
+        "description": "2026-07-06 至 2026-07-24 完整 RTH 的因果 5 分钟评分覆盖。",
+        "dataset": "headline",
+        "sourceId": "ma_replay",
+        "metrics": [
+          {
+            "label": "5分钟边界",
+            "field": "slots",
+            "format": "number"
+          },
+          {
+            "label": "完整RTH",
+            "field": "sessions",
+            "format": "number"
+          }
+        ]
+      },
+      {
+        "id": "extended_forward",
+        "description": "TREND_EXTENDED episode 在未来 15 分钟继续同向的合并结果。",
+        "dataset": "headline",
+        "sourceId": "ma_replay",
+        "metrics": [
+          {
+            "label": "延伸态15分钟同向命中率",
+            "field": "extended_15m_hit",
+            "format": "percent"
+          },
+          {
+            "label": "平均同向ES点数",
+            "field": "extended_15m_mean",
+            "format": "number",
+            "signed": true
+          },
+          {
+            "label": "可评估episode",
+            "field": "extended_episodes",
+            "format": "number"
+          }
+        ]
+      },
+      {
+        "id": "cleaned_trade_pnl",
+        "description": "去重并剔除首个可执行 ask 前已终结事件后的 RTH confirmed 样本；未计成本。",
+        "dataset": "headline",
+        "sourceId": "joined_audit",
+        "metrics": [
+          {
+            "label": "净化样本P&L",
+            "field": "cleaned_pnl",
+            "format": "currency",
+            "signed": true
+          },
+          {
+            "label": "可执行交易",
+            "field": "cleaned_trades",
+            "format": "number"
+          },
+          {
+            "label": "原始记录",
+            "field": "original_trades",
+            "format": "number"
+          }
+        ]
+      }
+    ],
+    "charts": [
+      {
+        "id": "regime_distribution",
+        "title": "MA50/MA200 四态覆盖",
+        "subtitle": "TREND_ALIGNED 只占 1.69%；绝大多数边界处于延伸、转折或冲突状态。",
+        "type": "bar",
+        "dataset": "regime_counts",
+        "sourceId": "ma_replay",
+        "encodings": {
+          "x": {
+            "field": "state",
+            "type": "nominal",
+            "label": "状态"
+          },
+          "y": {
+            "field": "slots",
+            "type": "quantitative",
+            "label": "5分钟边界数"
+          },
+          "tooltip": [
+            {
+              "field": "share",
+              "type": "quantitative",
+              "label": "占比",
+              "format": "percent"
+            },
+            {
+              "field": "episodes",
+              "type": "quantitative",
+              "label": "Episode数",
+              "format": "number"
+            },
+            {
+              "field": "up_slots",
+              "type": "quantitative",
+              "label": "向上边界",
+              "format": "number"
+            },
+            {
+              "field": "down_slots",
+              "type": "quantitative",
+              "label": "向下边界",
+              "format": "number"
+            }
+          ]
+        },
+        "yAxisTitle": "边界数",
+        "valueFormat": "number",
+        "layout": "full"
+      },
+      {
+        "id": "forward_15m",
+        "title": "四态 episode 的未来15分钟同向变化",
+        "subtitle": "延伸态两侧平均同向变化均不为正，支持不追价；其余置信区间仍很宽。",
+        "type": "bar",
+        "dataset": "forward_15m",
+        "sourceId": "ma_replay",
+        "encodings": {
+          "x": {
+            "field": "label",
+            "type": "nominal",
+            "label": "状态与方向"
+          },
+          "y": {
+            "field": "mean_directional_points",
+            "type": "quantitative",
+            "label": "平均同向ES点数"
+          },
+          "tooltip": [
+            {
+              "field": "n",
+              "type": "quantitative",
+              "label": "n",
+              "format": "number"
+            },
+            {
+              "field": "hit_rate",
+              "type": "quantitative",
+              "label": "同向命中率",
+              "format": "percent"
+            },
+            {
+              "field": "wilson_low",
+              "type": "quantitative",
+              "label": "95%CI下界",
+              "format": "percent"
+            },
+            {
+              "field": "wilson_high",
+              "type": "quantitative",
+              "label": "95%CI上界",
+              "format": "percent"
+            },
+            {
+              "field": "median_directional_points",
+              "type": "quantitative",
+              "label": "中位同向ES点数",
+              "format": "number"
+            }
+          ]
+        },
+        "yAxisTitle": "ES点数",
+        "valueFormat": "number",
+        "layout": "full"
+      }
+    ],
+    "tables": [
+      {
+        "id": "trade_audit",
+        "title": "净化后的 RTH confirmed 交易",
+        "subtitle": "Exact-contract ask 入场、13:00 ET 前策略窗口；P&L 未计佣金、滑点和人工延迟。",
+        "dataset": "trade_audit",
+        "sourceId": "joined_audit",
+        "defaultSort": {
+          "field": "decision_et",
+          "direction": "asc"
+        },
+        "density": "dense",
+        "layout": "full",
+        "columns": [
+          {
+            "field": "decision_et",
+            "label": "决策时间 ET",
+            "type": "text"
+          },
+          {
+            "field": "direction",
+            "label": "方向",
+            "type": "text"
+          },
+          {
+            "field": "pnl_usd",
+            "label": "P&L",
+            "format": "currency",
+            "movement": true
+          },
+          {
+            "field": "regime_state",
+            "label": "MA状态",
+            "type": "text"
+          },
+          {
+            "field": "regime_direction",
+            "label": "MA方向",
+            "type": "text"
+          },
+          {
+            "field": "distance_ma50_atr",
+            "label": "距MA50/ATR",
+            "format": "number",
+            "movement": true
+          },
+          {
+            "field": "distance_ma200_atr",
+            "label": "距MA200/ATR",
+            "format": "number",
+            "movement": true
+          },
+          {
+            "field": "interpretation",
+            "label": "解释",
+            "type": "text"
+          }
+        ]
+      }
+    ],
+    "sources": [
+      {
+        "id": "ma_replay",
+        "label": "IBKR ES RTH 因果 MA 四态回放",
+        "path": "scripts/build_market_state_5m_ibkr_history.py",
+        "query": {
+          "engine": "SQLite reviewed-result projection",
+          "language": "sql",
+          "description": "将因果 Python 回放的已审阅聚合值投影为报告卡片和图表使用的确定性行集。",
+          "executed_at": "2026-07-25T16:07:36Z",
+          "sql": "WITH reviewed(dataset, label, state, direction, slots, share, episodes, sample_n, hit_rate, ci_low, ci_high, mean_points, median_points) AS (VALUES ('headline','coverage',NULL,NULL,1125,NULL,119,15,NULL,NULL,NULL,NULL,NULL),('headline','extended',NULL,NULL,NULL,0.3458,30,30,0.4000,NULL,NULL,-2.08,NULL),('regime','TREND_EXTENDED','TREND_EXTENDED',NULL,389,0.3458,31,NULL,NULL,NULL,NULL,NULL,NULL),('regime','MIXED','MIXED',NULL,377,0.3351,53,NULL,NULL,NULL,NULL,NULL,NULL),('regime','REGIME_TRANSITION','REGIME_TRANSITION',NULL,340,0.3022,27,NULL,NULL,NULL,NULL,NULL,NULL),('regime','TREND_ALIGNED','TREND_ALIGNED',NULL,19,0.0169,8,NULL,NULL,NULL,NULL,NULL,NULL),('forward','TRANSITION/down','REGIME_TRANSITION','down',NULL,NULL,NULL,14,0.5714,0.3259,0.7862,2.02,1.88),('forward','TRANSITION/up','REGIME_TRANSITION','up',NULL,NULL,NULL,12,0.5833,0.3195,0.8067,-1.60,1.75),('forward','ALIGNED/up','TREND_ALIGNED','up',NULL,NULL,NULL,6,0.5000,0.1876,0.8124,-3.29,-3.38),('forward','EXTENDED/down','TREND_EXTENDED','down',NULL,NULL,NULL,13,0.3846,0.1771,0.6448,-4.38,-3.75),('forward','EXTENDED/up','TREND_EXTENDED','up',NULL,NULL,NULL,17,0.4118,0.2161,0.6400,-0.31,-1.50)) SELECT * FROM reviewed ORDER BY dataset, label",
+          "filters": [
+            "2026-07-06 through 2026-07-24",
+            "09:45-15:55 America/New_York",
+            "TRADES, 5 mins, useRTH=true",
+            "ES expiry 20260918",
+            "bar_end <= as_of"
+          ],
+          "tables_used": [
+            "scripts/build_market_state_5m_ibkr_history.py reviewed output"
+          ],
+          "metric_definitions": [
+            "slot share = state slots / 1125 causal RTH boundaries",
+            "directional points = ES forward change, multiplied by -1 for down states",
+            "hit rate = share of episode starts with positive 15-minute directional points",
+            "95% confidence intervals use the binomial Wilson interval"
+          ]
+        }
+      },
+      {
+        "id": "level_backtest",
+        "label": "0DTE level exact-contract 回测",
+        "path": "scripts/backtest-0dte-levels.py"
+      },
+      {
+        "id": "joined_audit",
+        "label": "MA 四态与净化交易联合审计",
+        "path": "docs/ma50-ma200-regime-audit-2026-07-25.md",
+        "query": {
+          "engine": "SQLite reviewed-result projection",
+          "language": "sql",
+          "description": "返回与因果 MA 四态连接后的七笔净化 exact-contract 交易，并附带净化前后样本汇总。",
+          "executed_at": "2026-07-25T16:07:36Z",
+          "sql": "WITH trades(decision_et,direction,pnl_usd,regime_state,regime_direction,distance_ma50_atr,distance_ma200_atr,interpretation) AS (VALUES ('2026-07-14 10:32','Up',1030,'MIXED','-',0.74,-1.22,'wall确认有效，均线不提供方向'),('2026-07-15 10:54','Down',-520,'MIXED','-',0.83,1.70,'均线冲突，单样本失败'),('2026-07-15 11:50','Down',240,'MIXED','-',-0.43,0.93,'wall路径胜于静态排列'),('2026-07-23 09:46','Down',730,'REGIME_TRANSITION','Down',-8.97,-7.46,'早盘转折继续，但已极端偏离'),('2026-07-23 12:16','Down',-460,'TREND_EXTENDED','Down',-3.58,-8.48,'典型同向追价失败'),('2026-07-24 10:07','Up',460,'TREND_EXTENDED','Down',-0.20,-6.46,'逆慢趋势wall机会，不能硬veto'),('2026-07-24 11:34','Down',-460,'REGIME_TRANSITION','Up',3.56,-0.80,'旧死叉掩盖短期上行转折')) SELECT *, COUNT(*) OVER () AS cleaned_trades, SUM(pnl_usd) OVER () AS cleaned_pnl, 9 AS original_trades FROM trades ORDER BY decision_et",
+          "filters": [
+            "RTH confirmed events only",
+            "rth_1300 strategy window",
+            "exact-contract ask entry",
+            "10-minute economic-event cooldown",
+            "no forward-filled MA state"
+          ],
+          "tables_used": [
+            "scripts/build_market_state_5m_ibkr_history.py reviewed output",
+            "scripts/backtest-0dte-levels.py reviewed output"
+          ],
+          "metric_definitions": [
+            "cleaned trades remove duplicate economic events inside 10 minutes",
+            "cleaned trades exclude events already terminated before executable entry",
+            "P&L is USD per one contract before commission, slippage and human latency",
+            "MA distances are expressed in shared session-aware RTH ATR14 units"
+          ]
+        }
+      }
+    ],
+    "blocks": [
+      {
+        "id": "title",
+        "type": "markdown",
+        "body": "# MA50/MA200 日内四态审计"
+      },
+      {
+        "id": "technical_summary",
+        "type": "markdown",
+        "body": "## 技术摘要\n\n旧的“均线同向 4 笔全亏”不是反向均线 Alpha。净化后只有 7 笔独立可执行样本；主要问题是**均线滞后、极端追价、生命周期重复与伪入场**。\n\n上线后的四态只做位置纪律：`TREND_EXTENDED` 禁止追同向 0DTE 凸性；`REGIME_TRANSITION` 与 `MIXED` 等待 wall/flip 接受或拒绝；`TREND_ALIGNED` 也不能单独生成 Call/Put。"
+      },
+      {
+        "id": "headline_metrics",
+        "type": "metric-strip",
+        "cardIds": [
+          "coverage",
+          "extended_forward",
+          "cleaned_trade_pnl"
+        ]
+      },
+      {
+        "id": "coverage_finding",
+        "type": "markdown",
+        "sourceId": "ma_replay",
+        "body": "## 四态不是独立交易 Alpha\n\n15 个完整 RTH 的 1,125 个因果边界中，健康 `TREND_ALIGNED` 只有 19 个、占 1.69%。金叉/死叉与静态 MA50−MA200 符号过慢，不能替代 Spring Gamma D/Q/V、宽度和真实 wall 生命周期。"
+      },
+      {
+        "id": "distribution_chart",
+        "type": "chart",
+        "chartId": "regime_distribution",
+        "layout": "full"
+      },
+      {
+        "id": "extended_finding",
+        "type": "markdown",
+        "sourceId": "ma_replay",
+        "body": "## 延伸状态支持“不追价”，不支持机械反向\n\n30 个可评估 `TREND_EXTENDED` episode 的未来 15 分钟同向命中率为 40.00%，平均同向变化 −2.08 ES 点。两侧样本的 Wilson 区间仍很宽，因此只能升级为追价风险提示，不能反向开仓。"
+      },
+      {
+        "id": "forward_chart",
+        "type": "chart",
+        "chartId": "forward_15m",
+        "layout": "full"
+      },
+      {
+        "id": "trade_finding",
+        "type": "markdown",
+        "sourceId": "joined_audit",
+        "body": "## 旧“同向均线亏损”由追价、滞后与样本污染共同造成\n\n9 条原始记录净化为 7 笔：一笔是 10 分钟内重复经济事件，另一笔在首个可执行 ask 前已到达目标。仍亏损的典型同向样本是 `TREND_EXTENDED/down`；另一个旧死叉样本实际已进入短期上行转折。硬性 MA veto 也会删除一笔 +$460 winner。"
+      },
+      {
+        "id": "trade_table",
+        "type": "table",
+        "tableId": "trade_audit",
+        "layout": "full"
+      },
+      {
+        "id": "definitions",
+        "type": "markdown",
+        "body": "## 指标与动作契约\n\n- `distance_to_sma50_atr = (P − MA50) / ATR14`\n- `distance_to_sma200_atr = (P − MA200) / ATR14`\n- `ma50_ma200_spread_atr = (MA50 − MA200) / ATR14`\n- 侧别阈值 0.10 ATR；斜率阈值 0.02 ATR。\n- 延伸阈值：`|P−MA50| >= 2 ATR` 或 `|P−MA200| >= 4 ATR`。\n- 新鲜交叉不超过 6 根闭合 bar，并记录两根持续性。\n\n四态均无 `action_authority`。MA200 与最近稳定 wall/flip 相距不超过 0.50 ATR 时只标记 `decision_zone`，含义是等待接受或拒绝。"
+      },
+      {
+        "id": "methodology",
+        "type": "markdown",
+        "body": "## 数据与方法\n\n所有 MA 与 ATR 只使用同一 ES 合约的闭合 RTH 5分钟 bar。ATR14 跨 RTH 交易日保留日内 true range，但排除 GTH 与隔夜跳空。回放固定 ES 2026-09 合约，每个边界仅使用 `bar_end <= as_of` 的数据。交易重放使用 exact-contract ask，并对事件去重、入场前路径完整性与终结顺序执行 fail-closed 检查。"
+      },
+      {
+        "id": "limitations",
+        "type": "markdown",
+        "body": "## 限制与稳健性\n\n15 个交易日、119 个状态 episode 和 7 笔净化交易不足以验证期权 Alpha。P&L 未计佣金、滑点、成交概率与人工延迟；历史 bar 也不能证明当时生产投递、NBBO 与 wall 数据面完整。SPX 等价值 MA200 是 ES 均线减同步 basis 的坐标投影，不是现金 SPX 自身历史 MA200。"
+      },
+      {
+        "id": "recommendations",
+        "type": "markdown",
+        "body": "## 推荐动作\n\n1. `TREND_ALIGNED`：只允许与 wall/flip 和 D/Q/V 同向时进入候选，不直接触发。\n2. `TREND_EXTENDED`：禁止追同向 0DTE 凸性；等待回踩、结构重装或新 wall 事件。\n3. `REGIME_TRANSITION`：忽略尚未交叉的慢排列，重点观察 MA50 转向是否获得 wall 接受/拒绝确认。\n4. `MIXED`：方向权重归零，仅保留位置提示。\n5. 累计至少 20 个独立 episode/方向后再做冻结阈值的 walk-forward 晋升。"
+      },
+      {
+        "id": "open_questions",
+        "type": "markdown",
+        "body": "## 待回答问题\n\n- 延伸警告应主要由 MA50 距离、MA200 距离还是两者交互触发？\n- 转折方向与 wall 确认相反时，何种 D/Q/V 与宽度组合仍值得保留？\n- 1DTE 卖方表达与 0DTE 买方表达是否需要不同的延伸阈值？"
+      }
+    ]
+  },
+  "snapshot": {
+    "version": 1,
+    "generatedAt": "2026-07-25T16:07:36Z",
+    "status": "ready",
+    "datasets": {
+      "headline": [
+        {
+          "sessions": 15,
+          "slots": 1125,
+          "episode_count": 119,
+          "extended_share": 0.3458,
+          "extended_15m_hit": 0.4,
+          "extended_15m_mean": -2.08,
+          "extended_episodes": 30,
+          "cleaned_trades": 7,
+          "cleaned_pnl": 1020,
+          "original_trades": 9
+        }
+      ],
+      "regime_counts": [
+        {
+          "state": "TREND_EXTENDED",
+          "slots": 389,
+          "share": 0.3458,
+          "episodes": 31,
+          "up_slots": 195,
+          "down_slots": 194,
+          "none_slots": 0
+        },
+        {
+          "state": "MIXED",
+          "slots": 377,
+          "share": 0.3351,
+          "episodes": 53,
+          "up_slots": 0,
+          "down_slots": 0,
+          "none_slots": 377
+        },
+        {
+          "state": "REGIME_TRANSITION",
+          "slots": 340,
+          "share": 0.3022,
+          "episodes": 27,
+          "up_slots": 204,
+          "down_slots": 136,
+          "none_slots": 0
+        },
+        {
+          "state": "TREND_ALIGNED",
+          "slots": 19,
+          "share": 0.0169,
+          "episodes": 8,
+          "up_slots": 18,
+          "down_slots": 1,
+          "none_slots": 0
+        }
+      ],
+      "forward_15m": [
+        {
+          "label": "TRANSITION/down",
+          "state": "REGIME_TRANSITION",
+          "direction": "down",
+          "n": 14,
+          "hit_rate": 0.5714,
+          "wilson_low": 0.3259,
+          "wilson_high": 0.7862,
+          "mean_directional_points": 2.02,
+          "median_directional_points": 1.88
+        },
+        {
+          "label": "TRANSITION/up",
+          "state": "REGIME_TRANSITION",
+          "direction": "up",
+          "n": 12,
+          "hit_rate": 0.5833,
+          "wilson_low": 0.3195,
+          "wilson_high": 0.8067,
+          "mean_directional_points": -1.6,
+          "median_directional_points": 1.75
+        },
+        {
+          "label": "ALIGNED/up",
+          "state": "TREND_ALIGNED",
+          "direction": "up",
+          "n": 6,
+          "hit_rate": 0.5,
+          "wilson_low": 0.1876,
+          "wilson_high": 0.8124,
+          "mean_directional_points": -3.29,
+          "median_directional_points": -3.38
+        },
+        {
+          "label": "EXTENDED/down",
+          "state": "TREND_EXTENDED",
+          "direction": "down",
+          "n": 13,
+          "hit_rate": 0.3846,
+          "wilson_low": 0.1771,
+          "wilson_high": 0.6448,
+          "mean_directional_points": -4.38,
+          "median_directional_points": -3.75
+        },
+        {
+          "label": "EXTENDED/up",
+          "state": "TREND_EXTENDED",
+          "direction": "up",
+          "n": 17,
+          "hit_rate": 0.4118,
+          "wilson_low": 0.2161,
+          "wilson_high": 0.64,
+          "mean_directional_points": -0.31,
+          "median_directional_points": -1.5
+        }
+      ],
+      "trade_audit": [
+        {
+          "decision_et": "2026-07-14 10:32",
+          "direction": "Up",
+          "pnl_usd": 1030,
+          "regime_state": "MIXED",
+          "regime_direction": "-",
+          "distance_ma50_atr": 0.74,
+          "distance_ma200_atr": -1.22,
+          "interpretation": "wall确认有效，均线不提供方向"
+        },
+        {
+          "decision_et": "2026-07-15 10:54",
+          "direction": "Down",
+          "pnl_usd": -520,
+          "regime_state": "MIXED",
+          "regime_direction": "-",
+          "distance_ma50_atr": 0.83,
+          "distance_ma200_atr": 1.7,
+          "interpretation": "均线冲突，单样本失败"
+        },
+        {
+          "decision_et": "2026-07-15 11:50",
+          "direction": "Down",
+          "pnl_usd": 240,
+          "regime_state": "MIXED",
+          "regime_direction": "-",
+          "distance_ma50_atr": -0.43,
+          "distance_ma200_atr": 0.93,
+          "interpretation": "wall路径胜于静态排列"
+        },
+        {
+          "decision_et": "2026-07-23 09:46",
+          "direction": "Down",
+          "pnl_usd": 730,
+          "regime_state": "REGIME_TRANSITION",
+          "regime_direction": "Down",
+          "distance_ma50_atr": -8.97,
+          "distance_ma200_atr": -7.46,
+          "interpretation": "早盘转折继续，但已极端偏离"
+        },
+        {
+          "decision_et": "2026-07-23 12:16",
+          "direction": "Down",
+          "pnl_usd": -460,
+          "regime_state": "TREND_EXTENDED",
+          "regime_direction": "Down",
+          "distance_ma50_atr": -3.58,
+          "distance_ma200_atr": -8.48,
+          "interpretation": "典型同向追价失败"
+        },
+        {
+          "decision_et": "2026-07-24 10:07",
+          "direction": "Up",
+          "pnl_usd": 460,
+          "regime_state": "TREND_EXTENDED",
+          "regime_direction": "Down",
+          "distance_ma50_atr": -0.2,
+          "distance_ma200_atr": -6.46,
+          "interpretation": "逆慢趋势wall机会，不能硬veto"
+        },
+        {
+          "decision_et": "2026-07-24 11:34",
+          "direction": "Down",
+          "pnl_usd": -460,
+          "regime_state": "REGIME_TRANSITION",
+          "regime_direction": "Up",
+          "distance_ma50_atr": 3.56,
+          "distance_ma200_atr": -0.8,
+          "interpretation": "旧死叉掩盖短期上行转折"
+        }
+      ]
+    }
+  },
+  "sources": [
+    {
+      "id": "ma_replay",
+      "label": "IBKR ES RTH 因果 MA 四态回放",
+      "path": "scripts/build_market_state_5m_ibkr_history.py"
+    },
+    {
+      "id": "level_backtest",
+      "label": "0DTE level exact-contract 回测",
+      "path": "scripts/backtest-0dte-levels.py"
+    },
+    {
+      "id": "joined_audit",
+      "label": "MA 四态与净化交易联合审计",
+      "path": "docs/ma50-ma200-regime-audit-2026-07-25.md"
+    }
+  ]
+}

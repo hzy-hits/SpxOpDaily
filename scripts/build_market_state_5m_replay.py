@@ -503,6 +503,13 @@ def _bars_from_samples(
                 "trailing_edge_gap_seconds": trailing_gap,
                 "provider_counts": dict(sorted(providers.items())),
                 "provider": provider,
+                # The v1 quote lake does not persist the futures expiry. Scope
+                # the identity to one replay session so RTH ATR can be causal
+                # without ever joining an unverified series across a roll.
+                "contract_identity": f"replay:future:ES:{local.date().isoformat()}",
+                "contract_identity_source": (
+                    "session_scoped_quote_lake_identity_not_verified_expiry"
+                ),
                 "segment": segment,
                 "trading_date_et": local.date().isoformat(),
                 "gap_before": False,
@@ -1007,6 +1014,11 @@ def build_replay_outputs(
             "state_input_clock": (
                 "received_at <= replay_as_of and source_at <= replay_as_of; "
                 "bar VWAP requires source_at < bar_end; no interpolation"
+            ),
+            "es_contract_identity": (
+                "v1 quote lake lacks futures expiry; ATR identity is scoped to one "
+                "replay session and is never joined across sessions or used to "
+                "claim a verified MA50/MA200 history"
             ),
             "forward_label_clock": (
                 "future ES bars are attached only after state scoring and never enter inputs"

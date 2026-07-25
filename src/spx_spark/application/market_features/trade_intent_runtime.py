@@ -316,13 +316,22 @@ def _moving_average_lines(value: object) -> list[str]:
     price = value.get("price")
     sma20 = value.get("sma20")
     sma50 = value.get("sma50")
-    if not any(isinstance(item, int | float) for item in (price, sma20, sma50)):
+    sma200 = value.get("sma200")
+    if not any(
+        isinstance(item, int | float)
+        for item in (price, sma20, sma50, sma200)
+    ):
         return []
     spx20 = value.get("spx_equivalent_sma20")
     spx50 = value.get("spx_equivalent_sma50")
+    spx200 = value.get("spx_equivalent_sma200")
     projection = (
-        f"　SPX等价值 `{_fmt_fixed(spx20)} / {_fmt_fixed(spx50)}`"
-        if isinstance(spx20, int | float) or isinstance(spx50, int | float)
+        "　SPX基差投影 "
+        f"`{_fmt_fixed(spx20)} / {_fmt_fixed(spx50)} / {_fmt_fixed(spx200)}`"
+        if any(
+            isinstance(item, int | float)
+            for item in (spx20, spx50, spx200)
+        )
         else ""
     )
     precision = (
@@ -330,13 +339,48 @@ def _moving_average_lines(value: object) -> list[str]:
         if value.get("spx_projection_near_line") is True
         else ""
     )
+    regime = str(value.get("regime_state") or "-")
+    regime_direction = str(value.get("regime_direction") or "-")
+    convexity = str(value.get("same_direction_convexity") or "-")
+    cross = str(value.get("cross_direction") or "-")
+    cross_age = value.get("bars_since_cross")
+    cross_age_text = str(int(cross_age)) if isinstance(cross_age, int | float) else "-"
+    persistent = _bool_text(value.get("cross_persistent_2_bars"))
+    fresh = _bool_text(value.get("cross_fresh"))
+    regime_guard = _moving_average_regime_guard(regime)
     return [
         "## 均线位置",
-        f"ES 5m P/MA20/MA50 "
-        f"`{_fmt_fixed(price)} / {_fmt_fixed(sma20)} / {_fmt_fixed(sma50)}`　"
+        f"ES 5m P/MA20/MA50/MA200 "
+        f"`{_fmt_fixed(price)} / {_fmt_fixed(sma20)} / {_fmt_fixed(sma50)} / "
+        f"{_fmt_fixed(sma200)}`　"
         f"状态 `{value.get('relation') or '-'}`{projection}{precision}",
-        "SPX等价值使用同步 ES−SPX 基差投影，不是 SPX 自身历史均线；本项只读。",
+        "MA50/200 "
+        f"`{regime}`　方向 `{regime_direction}`　同向凸性 `{convexity}`　"
+        f"距MA50/200 ATR `{_fmt_fixed(value.get('distance_to_sma50_atr'))} / "
+        f"{_fmt_fixed(value.get('distance_to_sma200_atr'))}`　"
+        f"斜率3/6根 MA50 `{_fmt_fixed(value.get('ma50_slope_3_atr'))} / "
+        f"{_fmt_fixed(value.get('ma50_slope_6_atr'))}`、"
+        f"MA200 `{_fmt_fixed(value.get('ma200_slope_3_atr'))} / "
+        f"{_fmt_fixed(value.get('ma200_slope_6_atr'))}`　"
+        f"间距 `{_fmt_fixed(value.get('ma50_ma200_spread_atr'))} ATR`"
+        f"（3根Δ `{_fmt_fixed(value.get('spread_change_3_atr'))}`）　"
+        f"交叉 `{cross}` 已 {cross_age_text} 根，持续2根 `{persistent}`，"
+        f"新鲜 `{fresh}`。",
+        f"{regime_guard} 均线与交叉不单独生成方向、入场或自动动作。",
+        "SPX数值使用同步 ES−SPX 基差投影，不是 SPX 自身历史均线；本项只读。",
     ]
+
+
+def _moving_average_regime_guard(regime: str) -> str:
+    if regime == "TREND_EXTENDED":
+        return "趋势已延伸：禁止追同向凸性；"
+    if regime in {"REGIME_TRANSITION", "MIXED"}:
+        return "结构未统一：必须等待 wall/flip 接受或拒绝确认；"
+    return "仅作 wall/flip 条件的趋势背景；"
+
+
+def _bool_text(value: object) -> str:
+    return "是" if value is True else "否" if value is False else "-"
 
 
 def _play_stats_lines(stats: object) -> list[str]:
@@ -369,6 +413,9 @@ def _fmt_pct(value: object) -> str:
 def _writer_prompt(intent: Mapping[str, object], template: str) -> str:
     return (
         "把下面已经通过确定性门控的交易意图排成易扫读飞书消息。只做解释和排版，不重新判断。\n"
+        "MA50/MA200及交叉只作只读背景：不得仅凭金叉/死叉生成Call/Put、改变墙位方向或"
+        "覆盖wall/flip确认；TREND_EXTENDED必须写明禁止追同向凸性，"
+        "REGIME_TRANSITION/MIXED必须写明等待wall/flip接受或拒绝确认。\n"
         f"事实 JSON:\n{json.dumps(dict(intent), ensure_ascii=False, sort_keys=True)}\n"
         f"确定性模板:\n{template}"
     )
@@ -401,6 +448,26 @@ def _writer_output_valid(text: str, intent: Mapping[str, object]) -> bool:
                     f"{float(winrate) * 100:.0f}%",
                 )
             )
+    moving = intent.get("moving_average_context")
+    if isinstance(moving, Mapping):
+        regime = str(moving.get("regime_state") or "")
+        if regime:
+            required.extend(("均线", regime))
+        if regime == "TREND_EXTENDED":
+            required.append("禁止追同向凸性")
+        elif regime in {"REGIME_TRANSITION", "MIXED"}:
+            required.append("wall/flip")
+    forbidden_ma_triggers = (
+        "金叉买Call",
+        "金叉买 Call",
+        "死叉买Put",
+        "死叉买 Put",
+        "交叉即买",
+        "仅凭金叉",
+        "仅凭死叉",
+    )
+    if any(token in text for token in forbidden_ma_triggers):
+        return False
     return bool(text.strip()) and all(token and token in text for token in required)
 
 

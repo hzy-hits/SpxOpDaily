@@ -24,6 +24,9 @@ def observation(
     quality_ok: bool = True,
     arm_allowed: bool = True,
     arm_block_reason: str | None = None,
+    trigger_coordinate_kind: str = "unknown",
+    trigger_basis_points: float | None = None,
+    spx_spot: float | None = None,
 ) -> LevelObservation:
     return LevelObservation(
         at=NOW + timedelta(seconds=seconds),
@@ -33,6 +36,9 @@ def observation(
         quality_ok=quality_ok,
         quality_reason=None if quality_ok else "stale_chain",
         session_date="2026-07-13",
+        trigger_coordinate_kind=trigger_coordinate_kind,
+        trigger_basis_points=trigger_basis_points,
+        spx_spot=spx_spot,
         arm_allowed=arm_allowed,
         arm_block_reason=arm_block_reason,
     )
@@ -265,15 +271,112 @@ def test_active_level_nearby_extends_ttl_instead_of_entering_a_dead_zone() -> No
     assert extended.reason == "event_ttl_extended_near_level"
 
 
-def test_legacy_expired_event_rearms_near_level_after_terminal_hold() -> None:
+def test_expired_event_must_exit_reset_band_before_rearming_same_level() -> None:
     armed = advance(None, 0, spot=95.0, es=5000.0)
-    legacy = {
+    expired = {
         **armed.state,
         "phase": LevelPhase.EXPIRED.value,
         "phase_at": NOW.isoformat(),
     }
-    rearmed = advance(legacy, 31, spot=95.0, es=5000.0)
-    assert rearmed.previous_phase is LevelPhase.EXPIRED
+    waiting = advance(expired, 31, spot=95.0, es=5000.0)
+    assert waiting.current_phase is LevelPhase.EXPIRED
+    assert waiting.reason == "terminal_waiting_for_level_exit"
+
+    exited = advance(waiting.state, 32, spot=87.0, es=4992.0)
+    assert exited.current_phase is LevelPhase.FAR
+    assert exited.reason == "terminal_level_exited"
+
+    rearmed = advance(exited.state, 33, spot=95.0, es=5000.0)
     assert rearmed.current_phase is LevelPhase.APPROACHING
-    assert rearmed.reason == "expired_event_rearmed"
+    assert rearmed.reason == "nearest_level_armed"
     assert rearmed.state["event_id"] != armed.state["event_id"]
+
+
+def test_terminal_structure_promotion_can_rearm_without_old_level_exit() -> None:
+    armed = advance(None, 0, spot=95.0, es=5000.0)
+    terminal = {
+        **armed.state,
+        "phase": LevelPhase.INVALIDATED.value,
+        "phase_at": NOW.isoformat(),
+    }
+    promoted = advance(
+        terminal,
+        31,
+        spot=106.0,
+        es=5011.0,
+        levels={"put_wall": 107.0, "call_wall": 120.0},
+    )
+    assert promoted.current_phase is LevelPhase.TESTING
+    assert promoted.reason == "stable_structure_promoted_rearm"
+    assert promoted.state["level"] == 107.0
+
+
+def test_terminal_removed_level_kind_clears_phantom_reset_band() -> None:
+    armed = advance(None, 0, spot=95.0, es=5000.0)
+    terminal = {
+        **armed.state,
+        "phase": LevelPhase.EXPIRED.value,
+        "phase_at": NOW.isoformat(),
+    }
+
+    promoted = advance(
+        terminal,
+        31,
+        spot=95.0,
+        es=5000.0,
+        levels={"call_wall": 120.0},
+    )
+
+    assert promoted.current_phase is LevelPhase.FAR
+    assert promoted.reason == "stable_structure_promoted"
+    assert "level" not in promoted.state
+
+
+def test_terminal_removed_level_kind_can_rearm_near_replacement_kind() -> None:
+    armed = advance(None, 0, spot=95.0, es=5000.0)
+    terminal = {
+        **armed.state,
+        "phase": LevelPhase.INVALIDATED.value,
+        "phase_at": NOW.isoformat(),
+    }
+
+    promoted = advance(
+        terminal,
+        31,
+        spot=95.0,
+        es=5000.0,
+        levels={"flip_low": 96.0, "call_wall": 120.0},
+    )
+
+    assert promoted.current_phase is LevelPhase.TESTING
+    assert promoted.reason == "stable_structure_promoted_rearm"
+    assert promoted.state["level_kind"] == "flip_low"
+    assert promoted.state["level"] == 96.0
+    assert promoted.state["event_id"] != armed.state["event_id"]
+
+
+def test_confirmation_persists_spx_coordinate_decision_spot() -> None:
+    kwargs = {
+        "trigger_coordinate_kind": "es_equivalent",
+        "trigger_basis_points": 45.0,
+        "spx_spot": 95.0,
+    }
+    armed = advance(None, 0, spot=140.0, es=5000.0, levels={"put_wall": 145.0}, **kwargs)
+    testing = advance(armed.state, 5, spot=144.0, es=5000.0, levels={"put_wall": 145.0}, **kwargs)
+    pending = advance(
+        testing.state, 10, spot=141.0, es=4999.0, levels={"put_wall": 145.0}, **kwargs
+    )
+    accepted = advance(
+        pending.state, 31, spot=140.0, es=4997.0, levels={"put_wall": 145.0}, **kwargs
+    )
+    retest = advance(
+        accepted.state, 40, spot=144.0, es=4998.0, levels={"put_wall": 145.0}, **kwargs
+    )
+    holding = advance(
+        retest.state, 45, spot=140.0, es=4996.0, levels={"put_wall": 145.0}, **kwargs
+    )
+    confirmed = advance(
+        holding.state, 56, spot=139.0, es=4994.0, levels={"put_wall": 145.0}, **kwargs
+    )
+    assert confirmed.current_phase is LevelPhase.CONFIRMED
+    assert confirmed.state["decision_spot"] == 95.0

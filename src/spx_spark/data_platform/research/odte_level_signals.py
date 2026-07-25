@@ -40,6 +40,7 @@ SPREAD_WIDTHS = {VARIANT_SPREAD5: 5.0, VARIANT_SPREAD10: 10.0}
 
 DEFAULT_BASIS_POINTS = 45.0
 FOLLOW_THROUGH_DELAY = timedelta(seconds=15)
+CONFIRMED_COOLDOWN = timedelta(minutes=10)
 MAX_ENTRY_QUOTE_AGE = timedelta(seconds=30)
 MAX_ENTRY_LEG_SKEW = timedelta(seconds=5)
 MAX_MARK_QUOTE_AGE = timedelta(seconds=30)
@@ -376,6 +377,82 @@ def formula_target(level: float, dir_sign: int, expected_move_points: float | No
     return level + dir_sign * max(5.0, expected_move_points * 0.15)
 
 
+def replay_boundaries(
+    signal: Signal,
+    profile: Profile,
+    dir_sign: int,
+) -> tuple[float, float, float | None]:
+    """Return point-in-time invalidation and target boundaries for replay."""
+    inv_level = signal.invalidation_level if signal.invalidation_level is not None else signal.level
+    inv_buffer = signal.invalidation_buffer
+    if (
+        profile.invalidation_em_fraction is not None
+        and inv_buffer > 0
+        and signal.expected_move_points is not None
+    ):
+        inv_buffer = max(
+            inv_buffer,
+            profile.invalidation_em_fraction * signal.expected_move_points,
+        )
+    if signal.target_mode == "wall":
+        target = nearest_wall(signal.level, signal.walls, dir_sign)
+    elif signal.target_mode == "recorded":
+        target = signal.target_level
+    else:
+        target = formula_target(signal.level, dir_sign, signal.expected_move_points)
+    return inv_level, inv_buffer, target
+
+
+def pre_entry_path_reason(
+    signal: Signal,
+    underlier: Sequence[UnderlierTick],
+    *,
+    entry_at: datetime,
+    dir_sign: int,
+    invalidation_level: float,
+    invalidation_buffer: float,
+    target: float | None,
+) -> str | None:
+    """Reject a control whose thesis ended before its first executable ask.
+
+    The path begins with the persisted decision spot when available, otherwise
+    with the latest causal underlier observation at or before the decision.
+    Missing boundary coverage fails closed instead of assuming the path held.
+    """
+    if entry_at < signal.at:
+        return "pre_entry_underlier_unavailable"
+    ordered = sorted(underlier, key=lambda tick: tick.at)
+    samples: list[UnderlierTick] = []
+    if signal.decision_spot is not None:
+        samples.append(UnderlierTick(at=signal.at, price=signal.decision_spot))
+    else:
+        anchor = next((tick for tick in reversed(ordered) if tick.at <= signal.at), None)
+        if anchor is None or signal.at - anchor.at > MAX_UNDERLIER_QUOTE_AGE:
+            return "pre_entry_underlier_unavailable"
+        samples.append(anchor)
+    samples.extend(tick for tick in ordered if signal.at < tick.at <= entry_at)
+    previous: UnderlierTick | None = None
+    for tick in samples:
+        if previous is not None and tick.at - previous.at > MAX_UNDERLIER_QUOTE_AGE:
+            return "pre_entry_underlier_unavailable"
+        # A fallback anchor before the decision establishes coverage only; it
+        # cannot retrospectively end a thesis that did not exist yet.
+        if tick.at >= signal.at:
+            if (dir_sign == 1 and tick.price <= invalidation_level - invalidation_buffer) or (
+                dir_sign == -1 and tick.price >= invalidation_level + invalidation_buffer
+            ):
+                return "invalidation_before_entry"
+            if target is not None and (
+                (dir_sign == 1 and tick.price >= target)
+                or (dir_sign == -1 and tick.price <= target)
+            ):
+                return "target_before_entry"
+        previous = tick
+    if entry_at - samples[-1].at > MAX_UNDERLIER_QUOTE_AGE:
+        return "pre_entry_underlier_unavailable"
+    return None
+
+
 def hour_bucket(at: datetime) -> str:
     """RTH buckets in America/New_York local time; everything else is GTH."""
     aware = at if at.tzinfo else at.replace(tzinfo=timezone.utc)
@@ -434,6 +511,21 @@ def _confirmed_signal(record: dict, session_date: date) -> Signal | None:
             wall_map[wall_key] = adjusted
     strike = round_strike(spx_level)
     right = right_for(direction)
+    state = record.get("state")
+    persisted_decision_spot = (
+        _float(state.get("decision_spot")) if isinstance(state, Mapping) else None
+    )
+    decision_spot = (
+        persisted_decision_spot
+        or _float(record.get("decision_spot"))
+        or _float(record.get("spx_spot"))
+    )
+    if decision_spot is None:
+        trigger_spot = _float(record.get("spot"))
+        if trigger_spot is not None:
+            decision_spot = trigger_spot - basis if kind == "es_equivalent" else trigger_spot
+    if decision_spot is None or not math.isfinite(decision_spot) or decision_spot <= 0:
+        return None
     return Signal(
         set_name=SET_CONFIRMED,
         key=str(record.get("event_id")),
@@ -447,6 +539,7 @@ def _confirmed_signal(record: dict, session_date: date) -> Signal | None:
         thesis=record.get("thesis"),
         walls=tuple(walls),
         wall_map=wall_map,
+        decision_spot=decision_spot,
         basis_points=basis,
         underlier_instrument=underlier_instrument,
         invalidation_level=spx_level,
@@ -456,8 +549,8 @@ def _confirmed_signal(record: dict, session_date: date) -> Signal | None:
 
 
 def load_confirmed_signals(features_root: Path) -> list[Signal]:
-    """S1: first transition into the confirmed phase, deduped by event_id."""
-    signals: list[Signal] = []
+    """S1: first confirmed transitions, with legacy economic-event cooldown."""
+    candidates: list[Signal] = []
     seen: set[str] = set()
     for path in sorted(features_root.glob("level_decision_audit/date=*/transitions.jsonl")):
         try:
@@ -472,11 +565,32 @@ def load_confirmed_signals(features_root: Path) -> list[Signal]:
             event_id = record.get("event_id")
             if not event_id or event_id in seen:
                 continue
+            # The first observed transition owns the event id even when its
+            # payload is incomplete. Allowing a later row to repair it would
+            # select information that was unavailable at the original event.
+            seen.add(event_id)
             signal = _confirmed_signal(record, session_date)
             if signal is None:
                 continue
-            seen.add(event_id)
-            signals.append(signal)
+            candidates.append(signal)
+    signals: list[Signal] = []
+    last_kept: dict[
+        tuple[date | None, str | None, str, str, str | None],
+        datetime,
+    ] = {}
+    for signal in sorted(candidates, key=lambda row: (row.at, row.key)):
+        semantic_key = (
+            signal.expiry,
+            signal.level_kind,
+            f"{signal.level:.4f}",
+            signal.direction,
+            signal.contract_id,
+        )
+        previous_at = last_kept.get(semantic_key)
+        if previous_at is not None and signal.at - previous_at < CONFIRMED_COOLDOWN:
+            continue
+        last_kept[semantic_key] = signal.at
+        signals.append(signal)
     return signals
 
 

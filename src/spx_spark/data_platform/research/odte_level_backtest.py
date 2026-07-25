@@ -81,13 +81,13 @@ from .odte_level_signals import (
     _float,
     contract_id_for,
     expiry_close_at,
-    formula_target,
     load_confirmed_signals,
     load_gth_dip_signals,
     load_prefill_signals,
     load_trade_ready_signals,
-    nearest_wall,
     next_exit_clock,
+    pre_entry_path_reason,
+    replay_boundaries,
     right_for,
     spread_strikes,
     trade_intent_coverage,
@@ -182,6 +182,7 @@ def simulate_trade(
     uses the first fresh executable bid at/after 13:00 as its clock exit.
     """
     dir_sign = 1 if signal.direction == "up" else -1
+    inv_level, inv_buffer, target = replay_boundaries(signal, profile, dir_sign)
     requested_entry_at = signal.entry_at
     production_entry = signal.set_name == SET_TRADE_READY
     if production_entry and variant != VARIANT_NAKED:
@@ -271,43 +272,17 @@ def simulate_trade(
             None,
         )
         boundary_at = entry_tick.at if entry_tick is not None else entry_expires_at
-        pre_entry_prices: list[UnderlierTick] = []
-        if signal.decision_spot is not None:
-            pre_entry_prices.append(
-                UnderlierTick(at=requested_entry_at, price=signal.decision_spot)
-            )
-        pre_entry_prices.extend(
-            tick for tick in underlier if requested_entry_at <= tick.at <= boundary_at
+        reason = pre_entry_path_reason(
+            signal,
+            underlier,
+            entry_at=boundary_at,
+            dir_sign=dir_sign,
+            invalidation_level=invalidation,
+            invalidation_buffer=0.0,
+            target=target,
         )
-        pre_entry_prices.sort(key=lambda tick: tick.at)
-        for spot_tick in pre_entry_prices:
-            spot = spot_tick.price
-            if (dir_sign == 1 and spot <= invalidation) or (
-                dir_sign == -1 and spot >= invalidation
-            ):
-                return Skip(
-                    signal.set_name,
-                    profile.name,
-                    signal.key,
-                    variant,
-                    "invalidation_before_entry",
-                )
-            if (dir_sign == 1 and spot >= target) or (dir_sign == -1 and spot <= target):
-                return Skip(
-                    signal.set_name,
-                    profile.name,
-                    signal.key,
-                    variant,
-                    "target_before_entry",
-                )
-        if not pre_entry_prices or boundary_at - pre_entry_prices[-1].at > MAX_UNDERLIER_QUOTE_AGE:
-            return Skip(
-                signal.set_name,
-                profile.name,
-                signal.key,
-                variant,
-                "pre_entry_underlier_unavailable",
-            )
+        if reason is not None:
+            return Skip(signal.set_name, profile.name, signal.key, variant, reason)
         if entry_tick is None:
             return Skip(
                 signal.set_name, profile.name, signal.key, variant, "entry_limit_not_reached"
@@ -386,6 +361,18 @@ def simulate_trade(
     else:
         entry_px = long_entry_px
 
+    if not production_entry:
+        reason = pre_entry_path_reason(
+            signal,
+            underlier,
+            entry_at=entry_at,
+            dir_sign=dir_sign,
+            invalidation_level=inv_level,
+            invalidation_buffer=inv_buffer,
+            target=target,
+        )
+        if reason is not None:
+            return Skip(signal.set_name, profile.name, signal.key, variant, reason)
     if expiry_close is not None and entry_at >= expiry_close:
         return Skip(signal.set_name, profile.name, signal.key, variant, "entry_after_expiry_close")
     if exit_clock is not None and entry_at >= exit_clock:
@@ -406,21 +393,6 @@ def simulate_trade(
             return None
         return mark
 
-    inv_level = signal.invalidation_level if signal.invalidation_level is not None else signal.level
-    inv_buffer = signal.invalidation_buffer
-    if profile.invalidation_em_fraction is not None and inv_buffer > 0:
-        # wide_invalidation: scale the buffer with expected move; fall back to the
-        # fixed buffer when EM is missing. S3's trough rule (buffer 0) is untouched.
-        if signal.expected_move_points is not None:
-            inv_buffer = max(
-                inv_buffer, profile.invalidation_em_fraction * signal.expected_move_points
-            )
-    if signal.target_mode == "wall":
-        target = nearest_wall(signal.level, signal.walls, dir_sign)
-    elif signal.target_mode == "recorded":
-        target = signal.target_level
-    else:
-        target = formula_target(signal.level, dir_sign, signal.expected_move_points)
     underlier_times = [tick.at for tick in underlier]
     if profile.rth_clock_exit:
         assert exit_clock is not None  # established by the RTH clock preflight

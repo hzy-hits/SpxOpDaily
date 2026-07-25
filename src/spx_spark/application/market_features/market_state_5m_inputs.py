@@ -20,12 +20,13 @@ from spx_spark.application.market_features.market_state_5m import (
 from spx_spark.application.market_features.moving_average_context import (
     moving_average_diagnostics as _moving_average_diagnostics,
     project_spx_equivalent_moving_averages,
+    rth_atr_5m,
 )
 from spx_spark.config import NY_TZ
 from spx_spark.marketdata import as_utc
 
 
-SCHEMA_VERSION = "market_state_5m_inputs.v1"
+SCHEMA_VERSION = "market_state_5m_inputs.v2"
 SECTOR_INSTRUMENTS = (
     "equity:XLB",
     "equity:XLC",
@@ -259,22 +260,7 @@ def _continuous_rth_from_open(
 def _atr_5m(
     bars: Sequence[Mapping[str, object]],
 ) -> tuple[float | None, dict[str, object]]:
-    usable = _contiguous_ok_tail(bars)
-    true_ranges: list[float] = []
-    for previous, current in zip(usable, usable[1:]):
-        high = float(current["high"])
-        low = float(current["low"])
-        prior_close = float(previous["close"])
-        true_ranges.append(max(high - low, abs(high - prior_close), abs(low - prior_close)))
-    window = true_ranges[-14:]
-    value = statistics.fmean(window) if len(window) >= 6 else None
-    return value, {
-        "value": value,
-        "periods_used": len(window),
-        "target_periods": 14,
-        "minimum_periods": 6,
-        "method": "simple_mean_true_range_no_gap_fill",
-    }
+    return rth_atr_5m(bars)
 
 
 def _es_vwap_series(

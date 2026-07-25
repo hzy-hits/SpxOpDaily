@@ -356,9 +356,26 @@ def test_render_trade_intent_shows_greek_risk_and_soft_pilot_diagnostics() -> No
                 "price": 7603.0,
                 "sma20": 7595.0,
                 "sma50": 7580.0,
+                "sma200": 7550.0,
+                "atr_5m": 10.0,
+                "distance_to_sma50_atr": 2.3,
+                "distance_to_sma200_atr": 5.3,
+                "ma50_slope_3_atr": 0.31,
+                "ma50_slope_6_atr": 0.48,
+                "ma200_slope_3_atr": 0.04,
+                "ma200_slope_6_atr": 0.08,
+                "ma50_ma200_spread_atr": 3.0,
+                "cross_direction": "golden",
+                "bars_since_cross": 27,
+                "cross_persistent_2_bars": True,
+                "cross_fresh": False,
+                "regime_state": "TREND_EXTENDED",
+                "regime_direction": "up",
+                "same_direction_convexity": "do_not_chase",
                 "relation": "bullish_stack",
                 "spx_equivalent_sma20": 7550.0,
                 "spx_equivalent_sma50": 7535.0,
+                "spx_equivalent_sma200": 7505.0,
                 "spx_projection_near_line": True,
                 "action_authority": "none",
             },
@@ -370,8 +387,15 @@ def test_render_trade_intent_shows_greek_risk_and_soft_pilot_diagnostics() -> No
     assert "15分钟Theta情景 `12.34%`" in text
     assert "IV下降3波动点情景 `8.76%`" in text
     assert "## 均线位置" in text
-    assert "ES 5m P/MA20/MA50 `7603.00 / 7595.00 / 7580.00`" in text
-    assert "SPX等价值 `7550.00 / 7535.00`" in text
+    assert (
+        "ES 5m P/MA20/MA50/MA200 "
+        "`7603.00 / 7595.00 / 7580.00 / 7550.00`"
+    ) in text
+    assert "SPX基差投影 `7550.00 / 7535.00 / 7505.00`" in text
+    assert "MA50/200 `TREND_EXTENDED`" in text
+    assert "同向凸性 `do_not_chase`" in text
+    assert "交叉 `golden` 已 27 根" in text
+    assert "禁止追同向凸性" in text
     assert "贴线区：不确认突破" in text
     assert "不是 SPX 自身历史均线；本项只读" in text
     assert "## 辅助确认" in text
@@ -406,6 +430,25 @@ def test_llm_writer_output_must_preserve_play_stats() -> None:
 
     assert _writer_output_valid(template, intent)
     assert not _writer_output_valid(without_stats, intent)
+
+
+def test_llm_writer_rejects_ma_cross_as_standalone_trade_trigger() -> None:
+    intent = {
+        **_render_intent(),
+        "moving_average_context": {
+            "regime_state": "REGIME_TRANSITION",
+            "regime_direction": "up",
+            "same_direction_convexity": "wait_for_wall_confirmation",
+        },
+    }
+    safe = (
+        render_trade_intent(intent)
+        + "\nREGIME_TRANSITION 均线背景；等待wall/flip接受或拒绝。"
+    )
+    unsafe = safe + "\n金叉买Call。"
+
+    assert _writer_output_valid(safe, intent)
+    assert not _writer_output_valid(unsafe, intent)
 
 
 def test_pending_filter_and_opposing_regime_fail_closed() -> None:

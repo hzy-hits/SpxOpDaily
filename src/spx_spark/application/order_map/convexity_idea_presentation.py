@@ -84,6 +84,12 @@ def render_convexity_idea_radar_lines(payload: Mapping[str, Any]) -> list[str]:
     if volatility_text:
         lines.append(f"波动估值  {volatility_text}；Greeks/IV 不是方向 Alpha")
 
+    lines.extend(
+        _moving_average_lines(
+            _mapping(_mapping(radar.get("market_state")).get("moving_averages"))
+        )
+    )
+
     tests = _mapping(radar.get("boundary_tests"))
     lower = _mapping(tests.get("lower"))
     upper = _mapping(tests.get("upper"))
@@ -111,6 +117,75 @@ def render_convexity_idea_radar_lines(payload: Mapping[str, Any]) -> list[str]:
         "无局部 skew 边际不等于没有方向机会"
     )
     return lines
+
+
+def _moving_average_lines(value: Mapping[str, Any]) -> list[str]:
+    if not value:
+        return []
+    regime = str(value.get("regime_state") or "-")
+    direction = str(value.get("regime_direction") or "-")
+    convexity = str(value.get("same_direction_convexity") or "-")
+    cross = str(value.get("cross_direction") or "-")
+    age = value.get("bars_since_cross")
+    age_text = str(int(age)) if isinstance(age, int | float) else "-"
+    persistent = _bool_text(value.get("cross_persistent_2_bars"))
+    fresh = _bool_text(value.get("cross_fresh"))
+    line = (
+        f"MA50/200背景  {regime}/{direction} · 同向凸性 {convexity} · "
+        f"距MA50/200 {_dash(value.get('distance_to_sma50_atr'))}/"
+        f"{_dash(value.get('distance_to_sma200_atr'))} ATR · "
+        "斜率3/6 "
+        f"MA50 {_dash(value.get('ma50_slope_3_atr'))}/"
+        f"{_dash(value.get('ma50_slope_6_atr'))}、"
+        f"MA200 {_dash(value.get('ma200_slope_3_atr'))}/"
+        f"{_dash(value.get('ma200_slope_6_atr'))} ATR · "
+        f"间距 {_dash(value.get('ma50_ma200_spread_atr'))} ATR/"
+        f"3根Δ {_dash(value.get('spread_change_3_atr'))} · "
+        f"交叉 {cross}/{age_text}根/持续2根{persistent}/新鲜{fresh}"
+    )
+    if regime == "TREND_EXTENDED":
+        line += "；禁止追同向凸性"
+    elif regime in {"REGIME_TRANSITION", "MIXED"}:
+        line += "；必须等待wall/flip接受或拒绝确认"
+    else:
+        line += "；仅作边界测试共振"
+
+    confluence = _mapping(value.get("ma200_structure_confluence"))
+    if confluence.get("status") != "ready":
+        confluence_line = (
+            "MA200×结构位  unavailable"
+            f"（{confluence.get('reason') or 'moving_average_context_unavailable'}）；"
+            "不得补算共振或方向"
+        )
+    else:
+        labels = {
+            "put_wall": "Put Wall",
+            "flip_low": "Flip Low",
+            "flip_high": "Flip High",
+            "call_wall": "Call Wall",
+        }
+        kind = str(confluence.get("nearest_kind") or "-")
+        zone = "是" if confluence.get("decision_zone") is True else "否"
+        confluence_line = (
+            "MA200×结构位  SPX基差投影邻近 "
+            f"{labels.get(kind, kind)} {_dash(confluence.get('nearest_level'))} · "
+            f"距离 {_dash(confluence.get('distance_points'))}点/"
+            f"{_dash(confluence.get('distance_atr'))}ATR · 决策区 {zone}；"
+            "只等待wall/flip接受或拒绝，不生成方向/入场"
+        )
+    return [
+        line + "；均线交叉不能单独生成Call/Put",
+        confluence_line + "（非SPX自身MA200）",
+    ]
+
+
+def _dash(value: object) -> str:
+    number = _number(value)
+    return f"{number:.2f}" if number is not None else "-"
+
+
+def _bool_text(value: object) -> str:
+    return "是" if value is True else "否" if value is False else "-"
 
 
 def _wall_probability_text(

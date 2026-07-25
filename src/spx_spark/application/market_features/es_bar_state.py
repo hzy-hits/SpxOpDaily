@@ -7,7 +7,7 @@ bars without filling gaps or replaying duplicate provider timestamps.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -20,6 +20,7 @@ from spx_spark.settings.market_features import MarketFeatureSettings
 SCHEMA_VERSION = "es_5m_bar_state.v1"
 INTERVAL_SECONDS = 300
 MAX_CLOSED_BARS = 432
+MAX_RTH_MA_BARS = 320
 MIN_OK_SAMPLES = 20
 MAX_OK_GAP_SECONDS = 30.0
 MAX_EDGE_GAP_SECONDS = 30.0
@@ -80,6 +81,10 @@ def advance_es_bar_state(
     bar_start = _bucket_start(source_at)
     current = _mapping(state.get("current_bar"))
     closed = _bar_rows(state.get("closed_bars"))
+    rth_ma_history = _merge_bars(
+        _rth_ma_rows(state.get("rth_ma_history")),
+        (_compact_rth_bar(row) for row in closed if row.get("segment") == "rth"),
+    )[-MAX_RTH_MA_BARS:]
     segment = session_segment(source_at, policy=policy)
 
     if current and _parse_at(current.get("bar_start")) == bar_start:
@@ -95,6 +100,11 @@ def advance_es_bar_state(
         if current:
             finalized = _finalize_bar(current)
             closed = _upsert_closed(closed, finalized)
+            if finalized.get("segment") == "rth":
+                rth_ma_history = _merge_bars(
+                    rth_ma_history,
+                    [_compact_rth_bar(finalized)],
+                )[-MAX_RTH_MA_BARS:]
             previous_start = _parse_at(current.get("bar_start"))
             gap_before = bool(
                 previous_start is None
@@ -118,6 +128,7 @@ def advance_es_bar_state(
         **_mapping(state.get("diagnostics")),
         "last_rejection": None,
         "closed_bar_count": len(closed[-MAX_CLOSED_BARS:]),
+        "rth_ma_bar_count": len(rth_ma_history),
         "sampling": "fresh_live_es_source_timestamps_no_gap_fill",
         "min_ok_samples": MIN_OK_SAMPLES,
         "max_ok_gap_seconds": MAX_OK_GAP_SECONDS,
@@ -132,6 +143,7 @@ def advance_es_bar_state(
         "contract_identity": contract_identity or previous_contract_identity or None,
         "current_bar": current,
         "closed_bars": closed[-MAX_CLOSED_BARS:],
+        "rth_ma_history": rth_ma_history,
         "diagnostics": diagnostics,
     }
 
@@ -141,7 +153,11 @@ def completed_es_bars(
 ) -> list[dict[str, object]]:
     """Return validated completed bars in chronological order."""
 
-    return _bar_rows(_valid_state(state).get("closed_bars"))
+    valid = _valid_state(state)
+    return _merge_bars(
+        _rth_ma_rows(valid.get("rth_ma_history")),
+        _bar_rows(valid.get("closed_bars")),
+    )
 
 
 def _valid_state(previous: Mapping[str, object] | None) -> dict[str, object]:
@@ -155,9 +171,11 @@ def _valid_state(previous: Mapping[str, object] | None) -> dict[str, object]:
             "contract_identity": None,
             "current_bar": {},
             "closed_bars": [],
+            "rth_ma_history": [],
             "diagnostics": {
                 "last_rejection": None,
                 "closed_bar_count": 0,
+                "rth_ma_bar_count": 0,
                 "sampling": "fresh_live_es_source_timestamps_no_gap_fill",
                 "min_ok_samples": MIN_OK_SAMPLES,
                 "max_ok_gap_seconds": MAX_OK_GAP_SECONDS,
@@ -225,6 +243,7 @@ def _with_diagnostic(
     diagnostics["last_rejection"] = rejection
     diagnostics["last_rejection_at"] = at.isoformat()
     diagnostics["closed_bar_count"] = len(_bar_rows(result.get("closed_bars")))
+    diagnostics["rth_ma_bar_count"] = len(_rth_ma_rows(result.get("rth_ma_history")))
     result["diagnostics"] = diagnostics
     return result
 
@@ -347,6 +366,49 @@ def _upsert_closed(
     return sorted(result, key=lambda row: str(row.get("bar_start") or ""))
 
 
+def _merge_bars(
+    older: Iterable[Mapping[str, object]],
+    newer: Iterable[Mapping[str, object]],
+) -> list[dict[str, object]]:
+    """Merge chronological bars by start time, preferring the newer row."""
+
+    by_start: dict[str, dict[str, object]] = {}
+    for row in (*older, *newer):
+        start = str(row.get("bar_start") or "")
+        if start:
+            by_start[start] = dict(row)
+    return [by_start[start] for start in sorted(by_start)]
+
+
+def _compact_rth_bar(row: Mapping[str, object]) -> dict[str, object]:
+    """Keep only fields required by RTH MA/ATR calculations."""
+
+    fields = (
+        "bar_start",
+        "bar_end",
+        "interval_seconds",
+        "open",
+        "high",
+        "low",
+        "close",
+        "quality",
+        "gap_before",
+        "segment",
+        "trading_date_et",
+        "contract_identity",
+        "contract_identity_ambiguous",
+    )
+    return {field: row.get(field) for field in fields}
+
+
+def _rth_ma_rows(value: object) -> list[dict[str, object]]:
+    return [
+        row
+        for row in _bar_rows(value)
+        if row.get("segment") == "rth"
+    ]
+
+
 def _bar_rows(value: object) -> list[dict[str, object]]:
     if not isinstance(value, list):
         return []
@@ -397,6 +459,8 @@ def _parse_at(value: object) -> datetime | None:
 
 __all__ = [
     "INTERVAL_SECONDS",
+    "MAX_CLOSED_BARS",
+    "MAX_RTH_MA_BARS",
     "SCHEMA_VERSION",
     "advance_es_bar_state",
     "completed_es_bars",

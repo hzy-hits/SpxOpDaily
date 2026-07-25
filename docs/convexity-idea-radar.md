@@ -112,6 +112,34 @@ Call 和 Put 必须同时出现在灵感板上。单向趋势标签不得删除�
 有效待验证假设。LLM 的价值是说明哪项事实支持或反驳每个分支，而不是提前替人
 选择答案。
 
+## MA50/MA200 只读状态
+
+5 分钟 RTH MA50/MA200 用来回答“当前路径与慢背景处在哪种关系”，不增加
+Spring Gamma 的 D/Q/V 分数，也不改变上下边界的 Call/Put 映射：
+
+| 状态 | 含义 | 同向凸性处理 |
+|---|---|---|
+| `TREND_ALIGNED` | 价格侧别、MA50/MA200 排列及斜率一致 | `confluence_only`；仍等待 wall/flip 状态机 |
+| `TREND_EXTENDED` | 趋势一致但价格到均线的 ATR 距离已过度延伸 | `do_not_chase`；禁止追同向 Call/Put |
+| `REGIME_TRANSITION` | 价格与 MA50 已转向，MA50/MA200 旧交叉尚未跟上 | `wait_for_wall_confirmation` |
+| `MIXED` | 价格、排列、斜率或间距变化互相冲突 | `wait_for_wall_confirmation` |
+
+首版阈值固定为：侧别 `0.10 ATR`、斜率 `0.02 ATR`、延伸距离
+`|P-MA50| >= 2 ATR` 或 `|P-MA200| >= 4 ATR`、新鲜交叉不超过 6 根。
+ATR14 与均线同样只使用闭合 RTH bar，跨交易日延续有效日内 true range，但排除
+GTH 和隔夜跳空。阈值处于 shadow 观察期，不是已证明的 Alpha。
+
+数据包保留 `distance_to_sma50_atr`、`distance_to_sma200_atr`、MA50/MA200
+过去 3/6 根闭合 K 线的 ATR 标准化斜率、两均线间距及三根变化、交叉方向、
+`bars_since_cross`、两根持续性和新鲜度。金叉/死叉只有在闭合 K 线上成立；
+即使交叉新鲜，也不能单独生成方向、Call/Put、入场或自动动作。
+
+`spx_equivalent_sma200` 仍是 `ES SMA200 - 同步 ES−SPX basis` 的坐标投影，
+不是现金 SPX 自身 MA200。Radar 会将它与四个稳定 wall/flip 中最近一档比较：
+距离不超过 `0.50 ATR5m` 时只标记 `decision_zone=true`，含义是该处更值得等待
+wall/flip 的接受或拒绝；它不是支撑/阻力结论。投影、ATR 或稳定结构缺失时，
+`ma200_structure_confluence.status=unavailable`，LLM 不得补算。
+
 ## 13:00 ET 操作时序
 
 ### GTH：准备
@@ -184,6 +212,10 @@ LLM 的推荐输出是一张“双向争论卡”，而不是单向喊单：
 4. 期权证据：分别说明 `observed`、`not_observed` 或 `unknown`。
 5. 人工检查项：下一根闭合 5 分钟 K 线、宽度、VWAP/结构是否同步，以及报价
    是否仍新鲜。
+
+若输入带有 MA50/MA200 状态，LLM 必须保留对应约束：
+`TREND_EXTENDED` 明写“不追同向凸性”；`REGIME_TRANSITION` 或 `MIXED`
+明写“等待 wall/flip 接受或拒绝”。不得把金叉/死叉改写成独立买入理由。
 
 允许 LLM 指出类似以下张力：
 
@@ -265,7 +297,8 @@ walk-forward 进行：
 1. **建立 13:00 物理标签**：记录 GTH 截止信息、09:30 起每个边界首次测试、
    接受/拒绝/重测、13:00 SPX、13:00 前上/下触及、MFE/MAE 和实现区间。
 2. **建立条件特征**：GTH range/gap、ES-SPX basis、稳定墙位距离、隐含预期波幅
-   使用量、ATM IV/skew、RTH Opening Range、D/Q/V、宽度和 MA20/MA50 位置。
+   使用量、ATM IV/skew、RTH Opening Range、D/Q/V、宽度和
+   MA20/MA50/MA200 状态。
 3. **生成物理 13:00 band**：只用更早交易日估计条件经验分布；分别检验区间
    覆盖率、Brier score、可靠性曲线和分位数损失，不复用 16:00 风险中性分布。
 4. **估计表达价值**：用当时严格 NBBO 为成本，在同一历史路径上计算 13:00

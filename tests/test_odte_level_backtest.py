@@ -232,8 +232,8 @@ def test_stale_underlier_cannot_trigger_invalidation_or_target() -> None:
         UnderlierTick(at=ENTRY - timedelta(seconds=31), price=7540.0),
     ]
     result = simulate_trade(_signal(), "naked", long_series, None, stale)
-    assert isinstance(result, Trade)
-    assert result.exit_reason == "time_stop"
+    assert isinstance(result, Skip)
+    assert result.reason == "pre_entry_underlier_unavailable"
 
 
 def test_target_wall_exit_for_up_signal() -> None:
@@ -246,11 +246,60 @@ def test_target_wall_exit_for_up_signal() -> None:
     assert result.exit_time == (ENTRY + timedelta(seconds=150)).isoformat()
 
 
-def test_invalidation_beats_profit_target_on_same_tick() -> None:
+def test_invalidation_at_first_ask_skips_entry_instead_of_booking_the_spread() -> None:
     long_series = [_tick(ENTRY, 12.9, 13.1)]  # mid 13.0 >= 1.3 * entry would trigger
     underlier = [UnderlierTick(at=ENTRY, price=7540.0)]  # invalidates first
-    result = simulate_trade(_signal(), "naked", long_series, None, underlier)
-    assert result.exit_reason == "invalidation"
+    result = simulate_trade(
+        _signal(decision_spot=7555.0), "naked", long_series, None, underlier
+    )
+    assert isinstance(result, Skip)
+    assert result.reason == "invalidation_before_entry"
+
+
+def test_nonproduction_target_at_first_ask_skips_entry() -> None:
+    result = simulate_trade(
+        _signal(decision_spot=7555.0),
+        "naked",
+        [_tick(ENTRY, 9.8, 10.0)],
+        None,
+        [UnderlierTick(at=ENTRY, price=7560.0)],
+    )
+    assert isinstance(result, Skip)
+    assert result.reason == "target_before_entry"
+
+
+def test_nonproduction_mid_path_underlier_gap_fails_closed() -> None:
+    entry_at = T0 + timedelta(seconds=45)
+    result = simulate_trade(
+        _signal(entry_at=entry_at, decision_spot=7555.0),
+        "naked",
+        [_tick(entry_at, 9.8, 10.0)],
+        None,
+        [
+            UnderlierTick(at=T0 + timedelta(seconds=5), price=7555.0),
+            UnderlierTick(at=T0 + timedelta(seconds=40), price=7555.0),
+            UnderlierTick(at=entry_at, price=7555.0),
+        ],
+    )
+    assert isinstance(result, Skip)
+    assert result.reason == "pre_entry_underlier_unavailable"
+
+
+def test_pre_entry_boundary_before_later_path_gap_keeps_causal_reason() -> None:
+    entry_at = T0 + timedelta(seconds=45)
+    result = simulate_trade(
+        _signal(entry_at=entry_at, decision_spot=7555.0),
+        "naked",
+        [_tick(entry_at, 9.8, 10.0)],
+        None,
+        [
+            UnderlierTick(at=T0 + timedelta(seconds=5), price=7560.0),
+            UnderlierTick(at=T0 + timedelta(seconds=40), price=7555.0),
+            UnderlierTick(at=entry_at, price=7555.0),
+        ],
+    )
+    assert isinstance(result, Skip)
+    assert result.reason == "target_before_entry"
 
 
 def test_profit_target_triggers_at_mid_and_exits_at_bid() -> None:
@@ -1090,6 +1139,7 @@ def test_load_confirmed_signals_dedupes_and_normalizes(tmp_path: Path) -> None:
         },
         "trigger_coordinate_kind": "official_spx",
         "trigger_basis_points": 44.46,
+        "spot": 7554.0,
     }
     gth = {
         **confirmed,
@@ -1106,6 +1156,7 @@ def test_load_confirmed_signals_dedupes_and_normalizes(tmp_path: Path) -> None:
         },
         "trigger_coordinate_kind": "es_equivalent",
         "trigger_basis_points": 45.43,
+        "spot": 7601.43,
     }
     _write_jsonl(
         root / "level_decision_audit/date=2026-07-15/transitions.jsonl",
@@ -1120,18 +1171,120 @@ def test_load_confirmed_signals_dedupes_and_normalizes(tmp_path: Path) -> None:
     )
     signals = load_confirmed_signals(root)
     assert len(signals) == 2
-    first = signals[0]
+    by_key = {signal.key: signal for signal in signals}
+    first = by_key["level:aaa"]
     assert first.direction == "down"
     assert first.entry_at == first.at + timedelta(seconds=15)
     assert first.underlier_instrument == "index:SPX"
     assert first.basis_points == 0.0
     assert first.strike == 7560.0
     assert first.contract_id == "option:SPX:SPXW:20260715:7560:P"
-    second = signals[1]
+    assert first.decision_spot == 7554.0
+    second = by_key["level:bbb"]
     assert second.underlier_instrument == "future:ES"
     assert second.basis_points == 45.43
     assert second.level == 7555.0
+    assert second.decision_spot == 7556.0
     assert second.walls == (7550.0, 7550.0, 7555.0, 7600.0)  # es coords minus basis
+
+
+def test_load_confirmed_signals_cools_down_legacy_duplicate_economic_events(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "features"
+
+    def record(at: str, event_id: str, *, level: float = 7550.0) -> dict:
+        return {
+            "at": at,
+            "current_phase": "confirmed",
+            "previous_phase": "retest",
+            "event_id": event_id,
+            "direction": "up",
+            "level": level,
+            "spx_level": level,
+            "level_kind": "flip_high",
+            "levels": {"call_wall": 7600.0},
+            "spot": 7555.0,
+            "trigger_coordinate_kind": "official_spx",
+        }
+
+    _write_jsonl(
+        root / "level_decision_audit/date=2026-07-15/transitions.jsonl",
+        [
+            record("2026-07-15T14:00:00+00:00", "level:first"),
+            record("2026-07-15T14:09:59+00:00", "level:duplicate"),
+            record("2026-07-15T14:10:00+00:00", "level:after-cooldown"),
+            record("2026-07-15T14:11:00+00:00", "level:different-level", level=7555.0),
+        ],
+    )
+    signals = load_confirmed_signals(root)
+    assert [signal.key for signal in signals] == [
+        "level:first",
+        "level:after-cooldown",
+        "level:different-level",
+    ]
+
+
+def test_load_confirmed_signals_cooldown_uses_expiry_across_gth_midnight(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "features"
+
+    def record(at: str, event_id: str) -> dict:
+        return {
+            "at": at,
+            "current_phase": "confirmed",
+            "previous_phase": "retest",
+            "event_id": event_id,
+            "direction": "up",
+            "level": 7550.0,
+            "spx_level": 7550.0,
+            "level_kind": "flip_high",
+            "levels": {"call_wall": 7600.0},
+            "spot": 7555.0,
+            "trigger_coordinate_kind": "official_spx",
+        }
+
+    _write_jsonl(
+        root / "level_decision_audit/date=2026-07-15/transitions.jsonl",
+        [
+            record("2026-07-15T03:59:00+00:00", "level:before-et-midnight"),
+            record("2026-07-15T04:05:00+00:00", "level:after-et-midnight"),
+        ],
+    )
+
+    signals = load_confirmed_signals(root)
+
+    assert [signal.key for signal in signals] == ["level:before-et-midnight"]
+    assert signals[0].expiry == date(2026, 7, 15)
+
+
+def test_load_confirmed_signals_first_incomplete_event_id_cannot_be_repaired(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "features"
+    valid = {
+        "at": "2026-07-15T14:00:01+00:00",
+        "current_phase": "confirmed",
+        "previous_phase": "retest",
+        "event_id": "level:incomplete-first",
+        "direction": "up",
+        "level": 7550.0,
+        "spx_level": 7550.0,
+        "level_kind": "flip_high",
+        "levels": {"call_wall": 7600.0},
+        "spot": 7555.0,
+        "trigger_coordinate_kind": "official_spx",
+    }
+    _write_jsonl(
+        root / "level_decision_audit/date=2026-07-15/transitions.jsonl",
+        [
+            {**valid, "at": "2026-07-15T14:00:00+00:00", "spot": None},
+            valid,
+        ],
+    )
+
+    assert load_confirmed_signals(root) == []
 
 
 def test_load_prefill_signals_filters_and_parses(tmp_path: Path) -> None:
@@ -1453,7 +1606,7 @@ def test_sat85_not_triggered_falls_to_clock_stop() -> None:
         "spread_wall",
         long_series,
         short_series,
-        _flat_underlier(7555.0, start=morning, seconds=8 * 3600, step=900),
+        _flat_underlier(7555.0, start=signal.at, seconds=8 * 3600, step=900),
         _profile("sat85"),
         spread_width=20.0,
     )
@@ -1512,7 +1665,8 @@ def test_clock_profile_ignores_profit_but_keeps_invalidation() -> None:
         _profile("clock"),
         spread_width=20.0,
     )
-    assert stopped.exit_reason == "invalidation"  # trough rule survives clock profile
+    assert isinstance(stopped, Skip)
+    assert stopped.reason == "invalidation_before_entry"
 
 
 def test_clock_profile_rejects_entry_after_same_day_exit_clock() -> None:
@@ -1639,6 +1793,7 @@ def test_run_as_of_uses_readiness_complete_sessions_and_keeps_partitions(
             "level_kind": "flip_high",
             "levels": {"call_wall": 7600.0},
             "trigger_coordinate_kind": "official_spx",
+            "spot": 7555.0,
         }
 
     _write_jsonl(

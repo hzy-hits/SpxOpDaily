@@ -10,6 +10,7 @@ from spx_spark.application.market_features.market_state_5m import (
 )
 from spx_spark.application.market_features.market_state_5m_inputs import (
     SECTOR_INSTRUMENTS,
+    _atr_5m,
     _bar_vwaps,
     _es_vwap_series,
     _moving_average_diagnostics,
@@ -17,6 +18,10 @@ from spx_spark.application.market_features.market_state_5m_inputs import (
     build_market_state_5m_inputs,
     project_spx_equivalent_moving_averages,
     update_same_time_range_baselines,
+)
+from spx_spark.application.market_features.moving_average_context import (
+    _ma_regime,
+    rth_atr_5m,
 )
 from spx_spark.market_calendar import ET
 
@@ -143,6 +148,36 @@ def baselines(value: float = 31.0, count: int = 20) -> dict[str, object]:
     }
 
 
+def rth_history(
+    closes: list[float],
+    *,
+    contract_identity: str = "ES:202609",
+) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    close_index = 0
+    for day in (22, 23, 24):
+        session_start = DAY.replace(day=day, hour=9, minute=30)
+        for bar_index in range(78):
+            if close_index >= len(closes):
+                return rows
+            close = closes[close_index]
+            rows.append(
+                bar(
+                    session_start + timedelta(minutes=5 * bar_index),
+                    open_=close - 0.25,
+                    high=close + 1.0,
+                    low=close - 1.0,
+                    close=close,
+                    segment="rth",
+                    contract_identity=contract_identity,
+                )
+            )
+            close_index += 1
+    if close_index != len(closes):
+        raise AssertionError("test history exceeds three RTH sessions")
+    return rows
+
+
 def test_derives_all_eight_inputs_and_scores_clean_trend_up() -> None:
     derived = build_market_state_5m_inputs(
         bars=trending_bars(),
@@ -151,6 +186,7 @@ def test_derives_all_eight_inputs_and_scores_clean_trend_up() -> None:
         now=DAY,
     )
 
+    assert derived["schema_version"] == "market_state_5m_inputs.v2"
     assert derived["status"] == "ready"
     assert derived["available_count"] == 8
     values = derived["values"]
@@ -191,10 +227,11 @@ def test_rth_sma20_sma50_and_spx_basis_projection_are_read_only() -> None:
         basis_contract_identity="ES:202609",
     )
 
-    assert moving["status"] == "ready"
+    assert moving["status"] == "partial"
     assert moving["price"] == 7449.0
     assert moving["sma20"] == 7439.5
     assert moving["sma50"] == 7424.5
+    assert moving["sma200"] is None
     assert moving["relation"] == "bullish_stack"
     assert moving["contract_identity"] == "ES:202609"
     assert moving["action_authority"] == "none"
@@ -206,6 +243,60 @@ def test_rth_sma20_sma50_and_spx_basis_projection_are_read_only() -> None:
     assert projected["projection_method"] == (
         "es_sma_minus_synchronized_current_basis_not_cash_spx_sma"
     )
+
+
+def test_rth_atr14_ignores_real_gth_path_and_overnight_gap() -> None:
+    prior_start = DAY.replace(day=23, hour=15, minute=30)
+    prior_rth = [
+        bar(
+            prior_start + timedelta(minutes=5 * index),
+            open_=100.0,
+            high=101.0,
+            low=99.0,
+            close=100.0,
+            segment="rth",
+        )
+        for index in range(6)
+    ]
+    gth_start = DAY.replace(day=23, hour=16, minute=0)
+    gth = [
+        bar(
+            gth_start + timedelta(minutes=5 * index),
+            open_=5000.0,
+            high=5100.0,
+            low=4900.0,
+            close=5000.0,
+            segment="globex",
+        )
+        for index in range(12)
+    ]
+    current_start = DAY.replace(hour=9, minute=30)
+    current_rth = [
+        bar(
+            current_start + timedelta(minutes=5 * index),
+            open_=1000.0,
+            high=1002.0,
+            low=998.0,
+            close=1000.0,
+            segment="rth",
+        )
+        for index in range(8)
+    ]
+    current_rth[0]["gap_before"] = True
+    rth_only = [*prior_rth, *current_rth]
+    with_real_session_path = [*prior_rth, *gth, *current_rth]
+
+    shared, diagnostics = rth_atr_5m(with_real_session_path)
+    production, production_diagnostics = _atr_5m(with_real_session_path)
+    without_gth, _ = rth_atr_5m(rth_only)
+
+    assert shared == pytest.approx((6 * 2.0 + 8 * 4.0) / 14)
+    assert production == pytest.approx(shared)
+    assert without_gth == pytest.approx(shared)
+    assert diagnostics["periods_used"] == 14
+    assert diagnostics["session_count"] == 2
+    assert diagnostics["overnight_gap_included"] is False
+    assert production_diagnostics["method"] == diagnostics["method"]
 
 
 def test_rth_sma_fails_closed_without_contract_identity() -> None:
@@ -314,9 +405,196 @@ def test_rth_sma_accepts_complete_adjacent_session_boundary() -> None:
 
     moving = _moving_average_diagnostics(rows)
 
-    assert moving["status"] == "ready"
+    assert moving["status"] == "partial"
     assert moving["sma20"] == 7429.5
     assert moving["sma50"] == 7406.5
+
+
+def test_ma50_ma200_aligned_regime_uses_closed_rth_bars_and_atr_units() -> None:
+    rows = rth_history([7400.0 + index * 0.2 for index in range(220)])
+
+    moving = _moving_average_diagnostics(rows, atr_5m=10.0)
+
+    assert moving["status"] == "ready"
+    assert moving["price"] == 7443.8
+    assert moving["sma50"] == 7438.9
+    assert moving["sma200"] == 7423.9
+    assert moving["distance_to_sma50_atr"] == pytest.approx(0.49)
+    assert moving["distance_to_sma200_atr"] == pytest.approx(1.99)
+    assert moving["ma50_ma200_spread_points"] == pytest.approx(15.0)
+    assert moving["ma50_ma200_spread_atr"] == pytest.approx(1.5)
+    assert moving["ma50_slope_3_atr"] == pytest.approx(0.06)
+    assert moving["ma50_slope_6_atr"] == pytest.approx(0.12)
+    assert moving["ma200_slope_3_atr"] == pytest.approx(0.06)
+    assert moving["ma200_slope_6_atr"] == pytest.approx(0.12)
+    assert moving["spread_change_3_atr"] == pytest.approx(0.0)
+    assert moving["regime_state"] == "TREND_ALIGNED"
+    assert moving["regime_direction"] == "up"
+    assert moving["same_direction_convexity"] == "confluence_only"
+    assert moving["action_authority"] == "none"
+
+
+def test_ma50_ma200_extended_regime_does_not_authorize_chasing() -> None:
+    rows = rth_history([7400.0 + index for index in range(220)])
+
+    moving = _moving_average_diagnostics(rows, atr_5m=10.0)
+
+    assert moving["distance_to_sma50_atr"] == pytest.approx(2.45)
+    assert moving["distance_to_sma200_atr"] == pytest.approx(9.95)
+    assert moving["regime_state"] == "TREND_EXTENDED"
+    assert moving["regime_direction"] == "up"
+    assert moving["same_direction_convexity"] == "do_not_chase"
+
+
+@pytest.mark.parametrize(
+    (
+        "inputs",
+        "expected_state",
+        "expected_direction",
+        "expected_convexity",
+    ),
+    [
+        (
+            {
+                "distance50_atr": 0.5,
+                "distance200_atr": -1.0,
+                "spread_atr": -0.5,
+                "ma50_slope_3_atr": 0.1,
+                "ma50_slope_6_atr": 0.05,
+                "ma200_slope_3_atr": -0.03,
+                "ma200_slope_6_atr": -0.05,
+                "spread_change_3_atr": 0.08,
+            },
+            "REGIME_TRANSITION",
+            "up",
+            "wait_for_wall_confirmation",
+        ),
+        (
+            {
+                "distance50_atr": 0.5,
+                "distance200_atr": 0.8,
+                "spread_atr": 0.4,
+                "ma50_slope_3_atr": -0.1,
+                "ma50_slope_6_atr": 0.05,
+                "ma200_slope_3_atr": 0.03,
+                "ma200_slope_6_atr": -0.05,
+                "spread_change_3_atr": -0.08,
+            },
+            "MIXED",
+            None,
+            "wait_for_wall_confirmation",
+        ),
+        (
+            {
+                "distance50_atr": -0.5,
+                "distance200_atr": -1.5,
+                "spread_atr": -0.8,
+                "ma50_slope_3_atr": -0.08,
+                "ma50_slope_6_atr": -0.12,
+                "ma200_slope_3_atr": -0.03,
+                "ma200_slope_6_atr": -0.06,
+                "spread_change_3_atr": -0.02,
+            },
+            "TREND_ALIGNED",
+            "down",
+            "confluence_only",
+        ),
+        (
+            {
+                "distance50_atr": -2.5,
+                "distance200_atr": -3.5,
+                "spread_atr": -0.8,
+                "ma50_slope_3_atr": -0.08,
+                "ma50_slope_6_atr": -0.12,
+                "ma200_slope_3_atr": -0.03,
+                "ma200_slope_6_atr": -0.06,
+                "spread_change_3_atr": -0.02,
+            },
+            "TREND_EXTENDED",
+            "down",
+            "do_not_chase",
+        ),
+    ],
+    ids=("transition_up", "mixed", "aligned_down", "extended_down"),
+)
+def test_ma_regime_direct_classification_covers_all_directional_branches(
+    inputs: dict[str, float],
+    expected_state: str,
+    expected_direction: str | None,
+    expected_convexity: str,
+) -> None:
+    assert _ma_regime(**inputs) == (
+        expected_state,
+        expected_direction,
+        expected_convexity,
+    )
+
+
+def test_ma50_ma200_cross_age_persistence_and_fresh_boundary() -> None:
+    closes = [7400.0] * 200 + [7400.0 + 5.0 * index for index in range(1, 8)]
+    fresh = _moving_average_diagnostics(rth_history(closes), atr_5m=10.0)
+
+    assert fresh["cross_direction"] == "golden"
+    assert fresh["bars_since_cross"] == 6
+    assert fresh["cross_persistent_2_bars"] is True
+    assert fresh["cross_fresh"] is True
+    assert fresh["regime_state"] == "TREND_EXTENDED"
+
+    stale = _moving_average_diagnostics(
+        rth_history([*closes, 7440.0]),
+        atr_5m=10.0,
+    )
+    assert stale["bars_since_cross"] == 7
+    assert stale["cross_persistent_2_bars"] is True
+    assert stale["cross_fresh"] is False
+
+
+def test_ma50_ma200_warms_and_fails_closed_on_gap_or_contract_roll() -> None:
+    warming = _moving_average_diagnostics(
+        rth_history([7400.0 + index * 0.1 for index in range(199)]),
+        atr_5m=8.0,
+    )
+    assert warming["sma200"] is None
+    assert warming["regime_state"] is None
+    assert warming["same_direction_convexity"] is None
+
+    rows = rth_history([7400.0 + index * 0.1 for index in range(210)])
+    rows[-100]["gap_before"] = True
+    gapped = _moving_average_diagnostics(rows, atr_5m=8.0)
+    assert gapped["sma200"] is None
+    assert gapped["regime_state"] is None
+    assert "sma200_rth_gap" in gapped["reasons"]
+
+    rolled_rows = rth_history(
+        [7300.0 + index * 0.1 for index in range(210)],
+        contract_identity="ES:202609",
+    )
+    for row in rolled_rows[-50:]:
+        row["contract_identity"] = "ES:202612"
+    rolled = _moving_average_diagnostics(rolled_rows, atr_5m=8.0)
+    assert rolled["contract_identity"] == "ES:202612"
+    assert rolled["rth_bar_count"] == 50
+    assert rolled["sma200"] is None
+    assert rolled["regime_state"] is None
+
+
+def test_spx_projection_includes_sma200_and_near_line_detection() -> None:
+    projected = project_spx_equivalent_moving_averages(
+        {
+            "sma20": 7440.0,
+            "sma50": 7425.0,
+            "sma200": 7400.0,
+            "distance_to_sma20_points": 10.0,
+            "distance_to_sma50_points": 8.0,
+            "distance_to_sma200_points": 4.0,
+            "contract_identity": "ES:202609",
+        },
+        es_spx_basis_points=34.15,
+        basis_contract_identity="ES:202609",
+    )
+
+    assert projected["spx_equivalent_sma200"] == 7365.85
+    assert projected["spx_projection_near_line"] is True
 
 
 def test_missing_breadth_and_range_history_are_not_filled_as_neutral() -> None:

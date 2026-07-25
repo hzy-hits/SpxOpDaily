@@ -218,6 +218,9 @@ def advance_level_decision(
         ):
             state["confirmed_at"] = now.isoformat()
             state["direction"] = "up" if desired_direction > 0 else "down"
+            decision_spot = _spx_decision_spot(observation)
+            if decision_spot is not None:
+                state["decision_spot"] = decision_spot
             return _transition(state, phase, LevelPhase.CONFIRMED, now, "retest_confirmed")
         return _update_extreme(state, phase, observation, "confirmation_hold")
 
@@ -401,11 +404,13 @@ def _handle_terminal_rearm(
     kind = str(state.get("level_kind") or "")
     current_level = observation.levels.get(kind)
     old_level = state.get("level")
-    if (
+    kind_removed = kind in LEVEL_OUTSIDE_DIRECTION and current_level is None
+    kind_migrated = bool(
         current_level is not None
         and isinstance(old_level, int | float)
         and abs(float(current_level) - float(old_level)) > settings.structure_drift_points
-    ):
+    )
+    if kind_removed or kind_migrated:
         armed = _arm_nearest_level(observation, settings=settings)
         if armed.current_phase is not LevelPhase.FAR:
             return LevelTransition(
@@ -416,21 +421,26 @@ def _handle_terminal_rearm(
                 "stable_structure_promoted_rearm",
             )
         return _to_far(state, phase, now, "stable_structure_promoted")
-    if phase is LevelPhase.EXPIRED:
-        armed = _arm_nearest_level(observation, settings=settings)
-        if armed.current_phase is not LevelPhase.FAR:
-            return LevelTransition(
-                phase,
-                armed.current_phase,
-                armed.state,
-                True,
-                "expired_event_rearmed",
-            )
     level = state.get("level")
     if isinstance(level, int | float) and observation.spot is not None:
         if abs(float(observation.spot) - float(level)) <= settings.approach_points:
             return _unchanged(state, phase, now, "terminal_waiting_for_level_exit")
     return _to_far(state, phase, now, "terminal_level_exited")
+
+
+def _spx_decision_spot(observation: LevelObservation) -> float | None:
+    if observation.spx_spot is not None:
+        return float(observation.spx_spot)
+    if observation.spot is None:
+        return None
+    if observation.trigger_coordinate_kind in {"official_spx", "chain_implied_spx"}:
+        return float(observation.spot)
+    if (
+        observation.trigger_coordinate_kind == "es_equivalent"
+        and observation.trigger_basis_points is not None
+    ):
+        return float(observation.spot) - float(observation.trigger_basis_points)
+    return None
 
 
 def _optional_datetime(value: object) -> datetime | None:

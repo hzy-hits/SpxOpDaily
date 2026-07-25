@@ -279,6 +279,7 @@ def test_bar_edge_gap_is_partial_and_sector_source_times_are_not_aligned() -> No
 
     assert bars[0]["quality"] == "partial"
     assert bars[0]["leading_edge_gap_seconds"] == 31.0
+    assert bars[0]["contract_identity"] == "replay:future:ES:2026-07-23"
 
     tick = datetime.combine(day, time(9, 31), tzinfo=ET).astimezone(UTC)
     sector_points = [

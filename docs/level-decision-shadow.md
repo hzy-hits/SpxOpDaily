@@ -48,29 +48,57 @@ direction or select the contract in the current pilot.
 `quantity=operator_selected` and `automatic_ordering=false` remain part of every
 ticket.
 
-## MA20/MA50 location context
+## MA20/MA50/MA200 location context
 
 The RTH report and TradeReady ticket now carry closed-bar **5-minute RTH
-SMA20/SMA50** as read-only location context. SMA20 is treated as a fast
-reclaim/pullback reference and SMA50 as a slower regime/support reference. A
-single intrabar touch or cross is not a breakout: the wall/flip lifecycle,
-closed-bar acceptance, ATR-sized distance, and retest still provide the actual
-trigger. The moving averages do not add another direction score or hard gate
-because they substantially overlap VWAP and HH/HL.
+SMA20/SMA50/SMA200** as read-only location context. SMA20 is a fast
+reclaim/pullback reference; MA50/MA200 describe a slower background. A single
+intrabar touch or cross is not a breakout: the wall/flip lifecycle, closed-bar
+acceptance, ATR-sized distance, and retest still provide the actual trigger.
+The moving averages do not add another direction score or hard gate because
+they substantially overlap VWAP and HH/HL.
+
+The MA50/MA200 classifier has four non-executable states:
+
+- `TREND_ALIGNED`: price side, slopes and MA ordering agree;
+  `same_direction_convexity=confluence_only`.
+- `TREND_EXTENDED`: the direction agrees but ATR-normalized distance is
+  excessive; `same_direction_convexity=do_not_chase`.
+- `REGIME_TRANSITION`: price and MA50 have turned before the lagging MA50/200
+  cross; `same_direction_convexity=wait_for_wall_confirmation`.
+- `MIXED`: price, slopes and ordering conflict; it also requires wall/flip
+  confirmation.
+
+The initial shadow contract uses closed RTH bars only. ATR14 is session-aware:
+it carries valid intraday true ranges across sessions but excludes GTH and the
+overnight jump. A side or slope is meaningful above `0.10 ATR` and `0.02 ATR`
+respectively; `TREND_EXTENDED` begins at `|P-MA50| >= 2 ATR` or
+`|P-MA200| >= 4 ATR`; a cross is “fresh” for at most six closed bars. These are
+versioned pilot thresholds, not fitted proof of alpha.
+
+The audit retains ATR-normalized price distances, MA50/MA200 slopes over three
+and six closed bars, MA50-minus-MA200 spread and its three-bar change, cross
+direction and age, two-bar persistence and freshness. A golden/death cross
+never creates a Call/Put direction or order on its own. `TREND_EXTENDED` must be
+rendered as “do not chase”; transition/mixed states must be rendered as “wait
+for wall/flip acceptance or rejection.”
 
 ES and cash SPX are not the same price series. The displayed SPX-equivalent
 levels use the synchronized current basis:
 
 ```text
-SPX_MA_proxy = ES_RTH_5m_SMA - current_synchronized_(ES - SPX)_basis
+SPX_MA_proxy = ES_RTH_5m_SMA(20|50|200) - current_synchronized_(ES - SPX)_basis
 ```
 
 This is a coordinate projection, not SPX's own historical moving average; the
-exact identity is `MA(SPX) = MA(ES) - MA(basis)`. In the available ten-session
-synchronized sample, ES and SPX agreed on which side of SMA20/SMA50 price was
-on 97.67%/98.50% of observations. Current-basis projection error had P90
-1.07/1.55 points and maxima 3.85/4.11 points, so a projected line within roughly
-four SPX points is near-line context rather than proof of a cash-index break.
+exact identity is `MA(SPX) = MA(ES) - MA(basis)`. The existing synchronized
+sample supports the prior SMA20/SMA50 coordinate checks; it does not turn the
+new MA200 projection into a cash-index MA200. Radar compares projected MA200
+with the nearest stable wall/flip and marks a decision zone only when their
+absolute distance is at most 0.50 ATR5m. That flag means “wait for this
+wall/flip's acceptance or rejection,” never “this level will hold.” Missing
+ATR, projected MA200 or stable levels makes the confluence explicitly
+unavailable.
 
 The small matching upside-control join did not support a bullish-stack veto:
 none of its eight events had `price > SMA20 > SMA50`, including seven winners.
@@ -78,7 +106,10 @@ That is not evidence against moving averages; it is evidence that imposing the
 stack as a hard requirement would delete the whole current sample. ES contract
 identity is persisted on each new bar and bar history resets on a known futures
 roll so the discontinuity cannot manufacture a moving-average break. Legacy
-bars without a verifiable contract identity are not backfilled.
+bars without a verifiable contract identity are not backfilled. The five-second
+hot state keeps 432 complete bars plus a separate 320-row compact RTH
+MA/ATR history, avoiding multi-megabyte full-bar rewrites while retaining the
+206 closed bars required by MA200 and its six-bar slope.
 
 ## State machine
 

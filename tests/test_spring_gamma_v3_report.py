@@ -495,12 +495,32 @@ def test_rth_eight_feature_state_renders_state_to_expression_path() -> None:
                     "price": 7603.0,
                     "sma20": 7595.0,
                     "sma50": 7580.0,
+                    "sma200": 7550.0,
+                    "atr_5m": 10.0,
                     "distance_to_sma20_points": 8.0,
                     "distance_to_sma50_points": 23.0,
+                    "distance_to_sma200_points": 53.0,
+                    "distance_to_sma50_atr": 2.3,
+                    "distance_to_sma200_atr": 5.3,
+                    "ma50_slope_3_atr": 0.31,
+                    "ma50_slope_6_atr": 0.48,
+                    "ma200_slope_3_atr": 0.04,
+                    "ma200_slope_6_atr": 0.08,
+                    "ma50_ma200_spread_points": 30.0,
+                    "ma50_ma200_spread_atr": 3.0,
+                    "spread_change_3_atr": 0.27,
+                    "cross_direction": "golden",
+                    "bars_since_cross": 27,
+                    "cross_persistent_2_bars": True,
+                    "cross_fresh": False,
+                    "regime_state": "TREND_EXTENDED",
+                    "regime_direction": "up",
+                    "same_direction_convexity": "do_not_chase",
                     "relation": "bullish_stack",
                     "contract_identity": "ES:202609",
                     "spx_equivalent_sma20": 7550.0,
                     "spx_equivalent_sma50": 7535.0,
+                    "spx_equivalent_sma200": 7505.0,
                     "spx_projection_near_line": False,
                     "spx_projection_near_line_tolerance_points": 4.25,
                     "projection_method": (
@@ -528,9 +548,13 @@ def test_rth_eight_feature_state_renders_state_to_expression_path() -> None:
         "Range 1.35x · 宽度 68.00% · 数据 8/8　只读"
     ) in rendered
     assert (
-        "ES 5m均线  P/MA20/MA50 7603.00/7595.00/7580.00 · bullish_stack · "
-        "SPX等价值 MA20/50 7550.00/7535.00（基差投影，非SPX自身均线）　只读"
+        "ES 5m均线  P/MA20/MA50/MA200 7603.00/7595.00/7580.00/7550.00 · "
+        "bullish_stack · SPX基差投影 MA20/50/200 7550.00/7535.00/7505.00"
     ) in rendered
+    assert "MA50/200 TREND_EXTENDED/up · 同向凸性 do_not_chase" in rendered
+    assert "间距 3.00 ATR/3根Δ 0.27" in rendered
+    assert "交叉 golden/27根/持续2根是/新鲜否 · 禁止追同向凸性" in rendered
+    assert "非自身历史均线；均线不生成方向/入场" in rendered
     assert "状态路径  等待位置：VWAP/ORH与上涨腿回撤区（本层未计算回撤比例）" in rendered
     assert "状态路径  触发确认：仅记录外部level lifecycle确认" in rendered
     assert "状态路径  期权结构：方向映射Call；具体价差仅以独立实时双腿Shadow为准" in rendered
@@ -538,6 +562,11 @@ def test_rth_eight_feature_state_renders_state_to_expression_path() -> None:
     assert compact["rth_market_state"]["breadth_above_vwap"] == 0.68
     assert compact["rth_market_state"]["moving_averages"]["sma20"] == 7595.0
     assert compact["rth_market_state"]["moving_averages"]["spx_equivalent_sma50"] == 7535.0
+    assert compact["rth_market_state"]["moving_averages"]["sma200"] == 7550.0
+    assert (
+        compact["rth_market_state"]["moving_averages"]["same_direction_convexity"]
+        == "do_not_chase"
+    )
     assert compact["option_overlay"]["market_state_independent"] is True
     assert compact["action_authority"] == "none"
 

@@ -222,21 +222,59 @@ def _moving_average_line(value: object) -> str | None:
     price = _finite_shadow_value(value.get("price"))
     sma20 = _finite_shadow_value(value.get("sma20"))
     sma50 = _finite_shadow_value(value.get("sma50"))
-    if price is None and sma20 is None and sma50 is None:
+    sma200 = _finite_shadow_value(value.get("sma200"))
+    if price is None and sma20 is None and sma50 is None and sma200 is None:
         return None
     spx20 = _finite_shadow_value(value.get("spx_equivalent_sma20"))
     spx50 = _finite_shadow_value(value.get("spx_equivalent_sma50"))
+    spx200 = _finite_shadow_value(value.get("spx_equivalent_sma200"))
     projection = (
-        f" · SPX等价值 MA20/50 {_shadow_dash(spx20)}/{_shadow_dash(spx50)}"
-        if spx20 is not None or spx50 is not None
+        " · SPX基差投影 MA20/50/200 "
+        f"{_shadow_dash(spx20)}/{_shadow_dash(spx50)}/{_shadow_dash(spx200)}"
+        if spx20 is not None or spx50 is not None or spx200 is not None
         else ""
     )
     precision = " · 贴线区不确认突破" if value.get("spx_projection_near_line") is True else ""
+    regime = str(value.get("regime_state") or "-")
+    direction = str(value.get("regime_direction") or "-")
+    convexity = str(value.get("same_direction_convexity") or "-")
+    cross = str(value.get("cross_direction") or "-")
+    age = value.get("bars_since_cross")
+    age_text = str(int(age)) if isinstance(age, int | float) else "-"
+    persistent = _shadow_bool(value.get("cross_persistent_2_bars"))
+    fresh = _shadow_bool(value.get("cross_fresh"))
+    guard = _moving_average_regime_guard(regime)
     return (
-        f"ES 5m均线  P/MA20/MA50 {_shadow_dash(price)}/{_shadow_dash(sma20)}/"
-        f"{_shadow_dash(sma50)} · {value.get('relation') or '-'}{projection}{precision}"
-        "（基差投影，非SPX自身均线）　只读"
+        f"ES 5m均线  P/MA20/MA50/MA200 {_shadow_dash(price)}/{_shadow_dash(sma20)}/"
+        f"{_shadow_dash(sma50)}/{_shadow_dash(sma200)} · "
+        f"{value.get('relation') or '-'}{projection}{precision} · "
+        f"MA50/200 {regime}/{direction} · 同向凸性 {convexity} · "
+        "距MA50/200 "
+        f"{_shadow_dash(_finite_shadow_value(value.get('distance_to_sma50_atr')))}/"
+        f"{_shadow_dash(_finite_shadow_value(value.get('distance_to_sma200_atr')))} ATR · "
+        "斜率3/6 "
+        f"MA50 {_shadow_dash(_finite_shadow_value(value.get('ma50_slope_3_atr')))}/"
+        f"{_shadow_dash(_finite_shadow_value(value.get('ma50_slope_6_atr')))}，"
+        f"MA200 {_shadow_dash(_finite_shadow_value(value.get('ma200_slope_3_atr')))}/"
+        f"{_shadow_dash(_finite_shadow_value(value.get('ma200_slope_6_atr')))} ATR · "
+        "间距 "
+        f"{_shadow_dash(_finite_shadow_value(value.get('ma50_ma200_spread_atr')))} ATR/"
+        f"3根Δ {_shadow_dash(_finite_shadow_value(value.get('spread_change_3_atr')))} · "
+        f"交叉 {cross}/{age_text}根/持续2根{persistent}/新鲜{fresh} · {guard}"
+        "（SPX为基差投影，非自身历史均线；均线不生成方向/入场）　只读"
     )
+
+
+def _moving_average_regime_guard(regime: str) -> str:
+    if regime == "TREND_EXTENDED":
+        return "禁止追同向凸性 · "
+    if regime in {"REGIME_TRANSITION", "MIXED"}:
+        return "等待wall/flip接受或拒绝 · "
+    return ""
+
+
+def _shadow_bool(value: object) -> str:
+    return "是" if value is True else "否" if value is False else "-"
 
 
 def _shadow_dash(value: float | None) -> str:
@@ -319,8 +357,28 @@ def _compact_rth_market_state(shadow: dict[str, Any]) -> dict[str, Any] | None:
             "price",
             "sma20",
             "sma50",
+            "sma200",
+            "atr_5m",
             "distance_to_sma20_points",
             "distance_to_sma50_points",
+            "distance_to_sma200_points",
+            "distance_to_sma50_atr",
+            "distance_to_sma200_atr",
+            "ma50_slope_3_atr",
+            "ma50_slope_6_atr",
+            "ma200_slope_3_atr",
+            "ma200_slope_6_atr",
+            "ma50_ma200_spread_points",
+            "ma50_ma200_spread_atr",
+            "spread_change_3_atr",
+            "cross_direction",
+            "bars_since_cross",
+            "cross_persistent_2_bars",
+            "cross_fresh",
+            "regime_state",
+            "regime_direction",
+            "same_direction_convexity",
+            "thresholds",
             "relation",
             "latest_bar_end",
             "contract_identity",
@@ -329,6 +387,7 @@ def _compact_rth_market_state(shadow: dict[str, Any]) -> dict[str, Any] | None:
             "basis_contract_identity_matches_sma",
             "spx_equivalent_sma20",
             "spx_equivalent_sma50",
+            "spx_equivalent_sma200",
             "projection_method",
             "spx_projection_near_line",
             "spx_projection_near_line_tolerance_points",

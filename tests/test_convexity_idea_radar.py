@@ -68,6 +68,45 @@ def _payload() -> dict[str, object]:
                     "price_vs_vwap": 2,
                     "market_structure": -2,
                 },
+                "input_lineage": {
+                    "diagnostics": {
+                        "moving_averages": {
+                            "status": "ready",
+                            "price": 7454.9,
+                            "sma20": 7452.0,
+                            "sma50": 7448.0,
+                            "sma200": 7455.2,
+                            "atr_5m": 8.0,
+                            "distance_to_sma20_points": 2.9,
+                            "distance_to_sma50_points": 6.9,
+                            "distance_to_sma200_points": -0.3,
+                            "distance_to_sma50_atr": 0.8625,
+                            "distance_to_sma200_atr": -0.0375,
+                            "ma50_slope_3_atr": 0.22,
+                            "ma50_slope_6_atr": 0.35,
+                            "ma200_slope_3_atr": -0.01,
+                            "ma200_slope_6_atr": -0.04,
+                            "ma50_ma200_spread_points": -7.2,
+                            "ma50_ma200_spread_atr": -0.9,
+                            "spread_change_3_atr": 0.23,
+                            "cross_direction": "death",
+                            "bars_since_cross": 108,
+                            "cross_persistent_2_bars": True,
+                            "cross_fresh": False,
+                            "regime_state": "REGIME_TRANSITION",
+                            "regime_direction": "up",
+                            "same_direction_convexity": (
+                                "wait_for_wall_confirmation"
+                            ),
+                            "relation": "price_above_sma50_below_sma200",
+                            "spx_equivalent_sma20": 7407.0,
+                            "spx_equivalent_sma50": 7403.0,
+                            "spx_equivalent_sma200": 7410.2,
+                            "basis_contract_identity_matches_sma": True,
+                            "action_authority": "none",
+                        }
+                    }
+                },
             },
             "option_overlay": {"status": "ready", "reasons": []},
             "wall_probability": {
@@ -196,6 +235,17 @@ def test_radar_keeps_both_boundaries_and_both_option_sides_before_exit() -> None
     assert {row["option_right"] for row in radar["hypotheses"]} == {"C", "P"}
     assert radar["action_authority"] == "none"
     assert radar["automatic_ordering"] is False
+    moving = radar["market_state"]["moving_averages"]
+    assert moving["regime_state"] == "REGIME_TRANSITION"
+    assert moving["same_direction_convexity"] == "wait_for_wall_confirmation"
+    confluence = moving["ma200_structure_confluence"]
+    assert confluence["status"] == "ready"
+    assert confluence["nearest_kind"] == "flip_high"
+    assert confluence["nearest_level"] == 7410.0
+    assert confluence["distance_points"] == 0.2
+    assert confluence["distance_atr"] == 0.02
+    assert confluence["decision_zone"] is True
+    assert confluence["entry_trigger"] is False
     probability = radar["boundary_tests"]["risk_neutral_wall_probabilities"]
     assert probability["horizons"]["15m"]["flip_high"]["prob_touch"] == 0.24
     assert probability["horizons"]["30m"]["call_wall"]["prob_touch"] == 0.08
@@ -222,6 +272,39 @@ def test_radar_separates_risk_neutral_destination_from_physical_probability() ->
     assert "7368.12/7412.79/7461.99" in "\n".join(lines)
     assert "风险中性而非真实胜率" in "\n".join(lines)
     assert "上 15/30/60m 24.00%/-/-" in "\n".join(lines)
+    rendered = "\n".join(lines)
+    assert "MA50/200背景  REGIME_TRANSITION/up" in rendered
+    assert "必须等待wall/flip接受或拒绝确认" in rendered
+    assert (
+        "MA200×结构位  SPX基差投影邻近 Flip High 7410.00 · "
+        "距离 0.20点/0.02ATR · 决策区 是"
+    ) in rendered
+    assert "不生成方向/入场（非SPX自身MA200）" in rendered
+
+
+def test_radar_ma200_wall_confluence_is_explicitly_unavailable_without_atr() -> None:
+    payload = _payload()
+    moving = payload["spring_gamma_v3_shadow"]["rth_market_state"]["input_lineage"][
+        "diagnostics"
+    ]["moving_averages"]
+    moving["atr_5m"] = None
+
+    radar = build_convexity_idea_radar(
+        payload,
+        now=datetime(2026, 7, 24, 10, 0, tzinfo=ET),
+    )
+    confluence = radar["market_state"]["moving_averages"][
+        "ma200_structure_confluence"
+    ]
+
+    assert confluence["status"] == "unavailable"
+    assert confluence["reason"] == "atr_5m_unavailable"
+    assert confluence["decision_zone"] is None
+    rendered = "\n".join(
+        render_convexity_idea_radar_lines({"convexity_idea_radar": radar})
+    )
+    assert "MA200×结构位  unavailable（atr_5m_unavailable）" in rendered
+    assert "不得补算共振或方向" in rendered
 
 
 def test_radar_only_names_observed_local_skew_edge_as_evidence() -> None:
@@ -547,6 +630,10 @@ def test_compact_writer_packet_preserves_two_sided_context() -> None:
     assert compact is not None
     assert compact["boundary_tests"]["lower"]["level"] == 7395.0
     assert compact["boundary_tests"]["upper"]["level"] == 7410.0
+    moving = compact["market_state"]["moving_averages"]
+    assert moving["regime_state"] == "REGIME_TRANSITION"
+    assert moving["same_direction_convexity"] == "wait_for_wall_confirmation"
+    assert moving["ma200_structure_confluence"]["decision_zone"] is True
     assert writer["option_evidence"]["call"]["edge_status"] == "observed_local_skew_edge"
     assert writer["option_evidence"]["put"]["edge_status"] == "not_observed"
 

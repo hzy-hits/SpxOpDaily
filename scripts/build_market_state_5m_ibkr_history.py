@@ -34,13 +34,16 @@ from spx_spark.application.market_features.market_state_5m_inputs import (
     MIN_RANGE_BASELINE_SESSIONS,
     SECTOR_INSTRUMENTS,
     TARGET_RANGE_BASELINE_SESSIONS,
-    _atr_5m,
     _efficiency_ratio,
     _market_structure,
     _opening_range_state,
     _price_vs_vwap,
     _vwap_cross_count,
     _vwap_slope,
+)
+from spx_spark.application.market_features.moving_average_context import (
+    moving_average_diagnostics,
+    rth_atr_5m,
 )
 from spx_spark.config import NY_TZ
 
@@ -299,6 +302,7 @@ def _score_day(
     trading_day: date,
     *,
     es_rows: list[dict[str, object]],
+    es_history_rows: list[dict[str, object]],
     sectors: dict[str, dict[date, list[dict[str, object]]]],
     ranges: dict[tuple[date, str], float],
 ) -> list[dict[str, object]]:
@@ -309,7 +313,15 @@ def _score_day(
             for row in es_rows
             if datetime.fromisoformat(str(row["bar_end"])) <= as_of
         ]
-        atr, _ = _atr_5m(prefix)
+        moving_average_history = [
+            row
+            for row in es_history_rows
+            if datetime.fromisoformat(str(row["bar_end"])) <= as_of
+        ]
+        atr, _ = rth_atr_5m(moving_average_history)
+        moving_averages = moving_average_diagnostics(
+            moving_average_history,
+        )
         vwaps = _bar_vwaps(prefix)
         opening, _ = _opening_range_state(prefix)
         slot = as_of.astimezone(NY_TZ).strftime("%H:%M")
@@ -359,6 +371,7 @@ def _score_day(
                 "es_close": origin,
                 "range_baseline_samples": range_samples,
                 "breadth_instruments": breadth_count,
+                "moving_average_diagnostics": moving_averages,
                 "forward_es": _forward_es(es_rows, as_of=as_of, origin=origin),
             }
         )
@@ -417,6 +430,113 @@ def _forward_summary(rows: list[dict[str, object]]) -> list[dict[str, object]]:
     return result
 
 
+def _ma_episode_origins(
+    observations: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    origins: list[dict[str, object]] = []
+    previous_key: tuple[str | None, str | None] | None = None
+    previous_at: datetime | None = None
+    for row in observations:
+        moving = row.get("moving_average_diagnostics")
+        if not isinstance(moving, dict):
+            continue
+        state = moving.get("regime_state")
+        direction = moving.get("regime_direction")
+        key = (
+            state if isinstance(state, str) else None,
+            direction if isinstance(direction, str) else None,
+        )
+        at = datetime.fromisoformat(str(row["as_of"]))
+        new_episode = bool(
+            key[0] is not None
+            and (
+                key != previous_key
+                or previous_at is None
+                or at - previous_at > timedelta(minutes=5)
+            )
+        )
+        if new_episode:
+            origins.append(row)
+        previous_key = key
+        previous_at = at
+    return origins
+
+
+def _ma_regime_direction_counts(
+    rows: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    grouped: Counter[tuple[str, str]] = Counter()
+    for row in rows:
+        moving = row.get("moving_average_diagnostics")
+        if not isinstance(moving, dict):
+            grouped[("UNAVAILABLE", "none")] += 1
+            continue
+        state = moving.get("regime_state")
+        direction = moving.get("regime_direction")
+        grouped[
+            (
+                state if isinstance(state, str) else "UNAVAILABLE",
+                direction if isinstance(direction, str) else "none",
+            )
+        ] += 1
+    return [
+        {
+            "regime_state": state,
+            "regime_direction": direction,
+            "count": count,
+        }
+        for (state, direction), count in sorted(grouped.items())
+    ]
+
+
+def _ma_forward_summary(rows: list[dict[str, object]]) -> list[dict[str, object]]:
+    grouped: dict[tuple[str, str, int], list[float]] = defaultdict(list)
+    for row in rows:
+        moving = row.get("moving_average_diagnostics")
+        if not isinstance(moving, dict):
+            continue
+        state = moving.get("regime_state")
+        if not isinstance(state, str):
+            continue
+        direction_value = moving.get("regime_direction")
+        direction = direction_value if isinstance(direction_value, str) else "none"
+        for minutes in HORIZONS_MINUTES:
+            value = row["forward_es"][f"{minutes}m"]["endpoint_points"]
+            if isinstance(value, int | float):
+                grouped[(state, direction, minutes)].append(float(value))
+    result: list[dict[str, object]] = []
+    for (state, direction, minutes), values in sorted(grouped.items()):
+        sign = 1 if direction == "up" else -1 if direction == "down" else 0
+        directional_values = [value * sign for value in values] if sign else []
+        result.append(
+            {
+                "regime_state": state,
+                "regime_direction": direction,
+                "horizon_minutes": minutes,
+                "n": len(values),
+                "mean_endpoint_points": statistics.fmean(values),
+                "median_endpoint_points": statistics.median(values),
+                "mean_directional_points": (
+                    statistics.fmean(directional_values)
+                    if directional_values
+                    else None
+                ),
+                "median_directional_points": (
+                    statistics.median(directional_values)
+                    if directional_values
+                    else None
+                ),
+                "directional_hit_rate": (
+                    sum(value > 0 for value in directional_values)
+                    / len(directional_values)
+                    if directional_values
+                    else None
+                ),
+            }
+        )
+    return result
+
+
 def _round_numbers(value: Any) -> Any:
     if isinstance(value, dict):
         return {key: _round_numbers(item) for key, item in value.items()}
@@ -454,6 +574,9 @@ def build_report(args: argparse.Namespace) -> dict[str, object]:
             end_at=end_at,
             duration=args.duration,
         )
+        es_contract_identity = f"future:ES:{args.es_expiry}"
+        for row in es_rows:
+            row["contract_identity"] = es_contract_identity
         sector_rows = {
             symbol: _request_bars(
                 ib,
@@ -480,14 +603,23 @@ def build_report(args: argparse.Namespace) -> dict[str, object]:
             _score_day(
                 trading_day,
                 es_rows=day_rows,
+                es_history_rows=es_rows,
                 sectors=sectors,
                 ranges=ranges,
             )
         )
     episodes = _episode_origins(observations)
+    ma_episodes = _ma_episode_origins(observations)
     state_counts = Counter(str(row["state"]) for row in observations)
     ready_counts = Counter(
         str(row["state"]) for row in observations if row["status"] == "ready"
+    )
+    ma_regime_counts = Counter(
+        str(
+            row["moving_average_diagnostics"].get("regime_state")
+            or "UNAVAILABLE"
+        )
+        for row in observations
     )
     daily = []
     for trading_day in sorted({str(row["trading_date"]) for row in observations}):
@@ -498,6 +630,16 @@ def build_report(args: argparse.Namespace) -> dict[str, object]:
                 "slot_count": len(rows),
                 "ready_count": sum(row["status"] == "ready" for row in rows),
                 "state_counts": dict(Counter(str(row["state"]) for row in rows)),
+                "ma_regime_counts": dict(
+                    Counter(
+                        str(
+                            row["moving_average_diagnostics"].get("regime_state")
+                            or "UNAVAILABLE"
+                        )
+                        for row in rows
+                    )
+                ),
+                "ma_regime_direction_counts": _ma_regime_direction_counts(rows),
                 "minimum_range_baseline_samples": min(
                     int(row["range_baseline_samples"]) for row in rows
                 ),
@@ -508,7 +650,7 @@ def build_report(args: argparse.Namespace) -> dict[str, object]:
         )
     return _round_numbers(
         {
-            "schema_version": "market_state_5m_ibkr_historical_replay.v1",
+            "schema_version": "market_state_5m_ibkr_historical_replay.v2",
             "generated_at": datetime.now(tz=UTC).isoformat(),
             "model": {
                 "schema_version": SCHEMA_VERSION,
@@ -541,6 +683,11 @@ def build_report(args: argparse.Namespace) -> dict[str, object]:
                 "vwap": "IBKR historical bar WAP weighted by bar volume",
                 "breadth": "11 sector ETF closes above their own cumulative RTH VWAP",
                 "future_labels": "attached after scoring",
+                "moving_averages": (
+                    "closed RTH bars from the same requested ES contract, ending "
+                    "at or before as_of; ATR14 is the shared session-aware RTH "
+                    "implementation and excludes overnight gaps"
+                ),
                 "thresholds_overridden": False,
             },
             "coverage": {
@@ -551,13 +698,21 @@ def build_report(args: argparse.Namespace) -> dict[str, object]:
                 "scored_session_count": len(daily),
                 "slot_count": len(observations),
                 "episode_count": len(episodes),
+                "ma_episode_count": len(ma_episodes),
             },
             "state_counts": dict(state_counts),
             "ready_state_counts": dict(ready_counts),
+            "ma_regime_counts": dict(ma_regime_counts),
+            "ma_regime_direction_counts": _ma_regime_direction_counts(
+                observations
+            ),
             "daily": daily,
             "slot_forward_summary": _forward_summary(observations),
             "episode_forward_summary": _forward_summary(episodes),
+            "ma_slot_forward_summary": _ma_forward_summary(observations),
+            "ma_episode_forward_summary": _ma_forward_summary(ma_episodes),
             "episodes": episodes,
+            "ma_episodes": ma_episodes,
             "observations": observations,
         }
     )

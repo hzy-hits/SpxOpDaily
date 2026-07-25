@@ -3,12 +3,21 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 from spx_spark.application.market_features.es_bar_state import (
+    MAX_CLOSED_BARS,
+    MAX_RTH_MA_BARS,
+    SCHEMA_VERSION,
     advance_es_bar_state,
     completed_es_bars,
 )
 
 
 UTC = timezone.utc
+
+
+def test_full_bar_state_stays_bounded_and_compact_rth_history_covers_sma200() -> None:
+    assert MAX_CLOSED_BARS == 432
+    assert MAX_RTH_MA_BARS == 320
+    assert MAX_RTH_MA_BARS >= 256
 
 
 def sample(
@@ -60,6 +69,76 @@ def test_builds_real_five_minute_ohlc_without_filling_gaps() -> None:
     assert bars[0]["sample_count"] == 60
     assert bars[0]["quality"] == "ok"
     assert state["current_bar"]["bar_start"] == next_at.isoformat()
+    assert len(state["rth_ma_history"]) == 1
+    assert "sample_count" not in state["rth_ma_history"][0]
+    assert "provider_counts" not in state["rth_ma_history"][0]
+
+
+def test_hot_full_bars_are_capped_while_older_rth_ma_sessions_are_returned() -> None:
+    base = datetime(2026, 7, 10, 0, 0, tzinfo=UTC)
+
+    def stored_bar(
+        start: datetime,
+        *,
+        segment: str,
+        trading_day: str,
+    ) -> dict[str, object]:
+        return {
+            "bar_start": start.isoformat(),
+            "bar_end": (start + timedelta(minutes=5)).isoformat(),
+            "interval_seconds": 300,
+            "open": 7400.0,
+            "high": 7401.0,
+            "low": 7399.0,
+            "close": 7400.5,
+            "quality": "ok",
+            "gap_before": False,
+            "segment": segment,
+            "trading_date_et": trading_day,
+            "contract_identity": "ES:202609",
+        }
+
+    full = [
+        stored_bar(
+            base + timedelta(minutes=5 * index),
+            segment="globex",
+            trading_day="2026-07-10",
+        )
+        for index in range(MAX_CLOSED_BARS + 25)
+    ]
+    rth: list[dict[str, object]] = []
+    for day_offset in range(4):
+        session_start = datetime(2026, 7, 6 + day_offset, 13, 30, tzinfo=UTC)
+        rth.extend(
+            stored_bar(
+                session_start + timedelta(minutes=5 * index),
+                segment="rth",
+                trading_day=f"2026-07-{6 + day_offset:02d}",
+            )
+            for index in range(70)
+        )
+    at = base + timedelta(minutes=5 * (MAX_CLOSED_BARS + 30))
+    previous = {
+        "schema_version": SCHEMA_VERSION,
+        "interval_seconds": 300,
+        "updated_at": (at - timedelta(minutes=5)).isoformat(),
+        "last_source_at": (at - timedelta(minutes=5)).isoformat(),
+        "last_provider": "schwab",
+        "contract_identity": "ES:202609",
+        "current_bar": {},
+        "closed_bars": full,
+        "rth_ma_history": rth,
+        "diagnostics": {},
+    }
+
+    state = advance_es_bar_state(previous, sample(at, 7410.0), now=at)
+    completed = completed_es_bars(state)
+
+    assert len(state["closed_bars"]) == MAX_CLOSED_BARS
+    assert len(state["rth_ma_history"]) == 280
+    assert len(completed) == MAX_CLOSED_BARS + 280
+    assert sum(row.get("segment") == "rth" for row in completed) == 280
+    assert all("provider_counts" not in row for row in state["rth_ma_history"])
 
 
 def test_duplicate_and_out_of_order_source_timestamps_do_not_inflate_bar() -> None:
@@ -152,6 +231,7 @@ def test_known_contract_change_resets_bar_history() -> None:
     )
 
     assert completed_es_bars(rolled) == []
+    assert rolled["rth_ma_history"] == []
     assert rolled["contract_identity"] == "ES:202612"
     assert rolled["current_bar"]["contract_identity"] == "ES:202612"
     assert rolled["diagnostics"]["contract_reset_from"] == "ES:202609"
