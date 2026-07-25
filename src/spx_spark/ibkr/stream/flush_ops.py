@@ -9,7 +9,7 @@ from spx_spark.ibkr.stream import deps as stream_deps
 from spx_spark.ibkr.stream.models import lifecycle_has_qualification_budget
 from spx_spark.ibkr.verifier import VerifyRow
 from spx_spark.config import default_spxw_expiry
-from spx_spark.marketdata import ProviderStatus
+from spx_spark.marketdata import MarketDataQuality, ProviderStatus
 
 decide_after_flush = stream_deps.decide_after_flush
 has_competing_session_error = stream_deps.has_competing_session_error
@@ -44,6 +44,8 @@ class FlushOps:
                 "event": "flush",
                 "quotes": 0,
                 "best_quotes": 0,
+                "fresh_quotes": 0,
+                "data_plane_healthy": False,
                 "provider_status": ProviderStatus.UNAVAILABLE.value,
                 "rotation_index": self.rotation_index,
                 "tws_connectivity_lost": self.tws_connectivity_lost,
@@ -120,6 +122,16 @@ class FlushOps:
             source_session=source_session,
         )
         write_result = persist_provider_snapshot(snapshot, self.storage_settings)
+        fresh_quote_count = sum(
+            1
+            for quote in snapshot.quotes
+            if quote.is_usable and quote.quality is MarketDataQuality.LIVE
+        )
+        data_plane_healthy = bool(
+            fresh_quote_count > 0
+            and self.farm_health.market_data_ready()
+            and not self.tws_connectivity_lost
+        )
         lifecycle_started = time.monotonic()
 
         self._advance_subscription_lifecycle(
@@ -131,6 +143,8 @@ class FlushOps:
             "event": "flush",
             "quotes": snapshot.quote_count,
             "best_quotes": write_result.best_quote_count,
+            "fresh_quotes": fresh_quote_count,
+            "data_plane_healthy": data_plane_healthy,
             "provider_status": (
                 snapshot.provider_state.status.value if snapshot.provider_state else "unknown"
             ),

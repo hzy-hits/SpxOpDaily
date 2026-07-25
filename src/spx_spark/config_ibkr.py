@@ -384,6 +384,18 @@ class RuntimePolicySettings:
     weekend_maintenance_mode: bool
     runtime_mode_path: str
     agent_override_default_ttl_minutes: int
+    ibkr_conflict_probe_max_seconds: int = 300
+
+    def __post_init__(self) -> None:
+        if self.ibkr_conflict_probe_seconds <= 0:
+            raise ValueError("IBKR_CONFLICT_PROBE_SECONDS must be positive")
+        if self.ibkr_conflict_probe_max_seconds < max(
+            self.ibkr_conflict_probe_seconds,
+            1,
+        ):
+            raise ValueError(
+                "IBKR_CONFLICT_PROBE_MAX_SECONDS cannot be below the probe interval"
+            )
 
     @classmethod
     def from_env(cls) -> "RuntimePolicySettings":
@@ -436,6 +448,10 @@ class RuntimePolicySettings:
             agent_override_default_ttl_minutes=env_int(
                 "AGENT_OVERRIDE_DEFAULT_TTL_MINUTES",
                 int(settings_value("runtime_policy.agent_override_default_ttl_minutes")),
+            ),
+            ibkr_conflict_probe_max_seconds=env_int(
+                "IBKR_CONFLICT_PROBE_MAX_SECONDS",
+                int(settings_value("runtime_policy.ibkr_conflict_probe_max_seconds")),
             ),
         )
 

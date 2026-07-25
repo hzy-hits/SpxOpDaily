@@ -239,6 +239,29 @@ def test_chain_implied_underlier_rejects_leg_skew_over_five_seconds(tmp_path: Pa
     assert payload["expiries"] == []
 
 
+def test_chain_implied_underlier_uses_provider_observation_not_last_change_clock(
+    tmp_path: Path,
+) -> None:
+    settings = storage_settings(tmp_path)
+    front, next_expiry = research_expiries()
+    quiet_front = [
+        replace(quote, quote_time=NOW - timedelta(seconds=6))
+        if quote.instrument.right.value == "P"
+        else quote
+        for quote in option_chain(front)
+    ]
+    state = make_state(*quiet_front, *option_chain(next_expiry))
+
+    payload = build_dashboard_snapshot(
+        state,
+        storage_settings=settings,
+        now=NOW,
+    )
+
+    assert payload["status"] == "ready"
+    assert payload["underlier"]["source"] == "chain_implied"
+
+
 def test_stale_inputs_fail_closed_without_a_surface(tmp_path: Path) -> None:
     settings = storage_settings(tmp_path)
     front, next_expiry = research_expiries()

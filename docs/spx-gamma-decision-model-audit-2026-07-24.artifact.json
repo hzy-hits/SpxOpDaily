@@ -1,0 +1,1695 @@
+{
+  "surface": "report",
+  "manifest": {
+    "version": 1,
+    "surface": "report",
+    "title": "SPX Gamma / Steven / 15 分钟判断模型审计",
+    "description": "审计 Gamma 结构代理、Steven 状态机、15 分钟可见方向与执行门控为何没有形成统一、可校准的信号模型。",
+    "generatedAt": "2026-07-24T04:43:12.401144+00:00",
+    "sources": [
+      {
+        "id": "report_audit",
+        "label": "Persisted 15-minute status reports",
+        "path": "audit/order_map_pricing/date=*/reports.jsonl",
+        "query": {
+          "engine": "Python + source-code contract audit",
+          "id": "gamma-decision-audit-report_audit-20260724",
+          "sql": "SELECT 'audit/order_map_pricing/date=*/reports.jsonl' AS audited_source_path, 'parsed by the reproducible Python companion notebook' AS method",
+          "description": "Extracts visible bias, score, Gamma label, underlier and later ES movement.",
+          "executed_at": "2026-07-24T04:43:14.844337+00:00",
+          "language": "sql",
+          "filters": [
+            "2026-07-03 <= trading_date <= 2026-07-23",
+            "status reports only where applicable",
+            "future report linkage within ±180 seconds and same trading date"
+          ],
+          "metric_definitions": [
+            "Directional result = visible side × later ES change.",
+            "Observations overlap and are descriptive, not independent trades."
+          ],
+          "tables_used": [
+            "audit/order_map_pricing/date=*/reports.jsonl"
+          ]
+        }
+      },
+      {
+        "id": "gamma_code",
+        "label": "Gamma proxy and classification source",
+        "path": "src/spx_spark/analytics/options/{exposure.py,service.py,levels.py}",
+        "query": {
+          "engine": "Python + source-code contract audit",
+          "id": "gamma-decision-audit-gamma_code-20260724",
+          "sql": "SELECT 'src/spx_spark/analytics/options/{exposure.py,service.py,levels.py}' AS audited_source_path, 'parsed by the reproducible Python companion notebook' AS method",
+          "description": "Audits formula, weighting, quality contract, zero-gamma scan and regime thresholds.",
+          "executed_at": "2026-07-24T04:43:14.844350+00:00",
+          "language": "sql",
+          "filters": [
+            "2026-07-03 <= trading_date <= 2026-07-23",
+            "status reports only where applicable",
+            "future report linkage within ±180 seconds and same trading date"
+          ],
+          "metric_definitions": [
+            "Call sign is +1 and Put sign is −1 by house convention.",
+            "Dealer position sign is unknown."
+          ],
+          "tables_used": [
+            "src/spx_spark/analytics/options/{exposure.py,service.py,levels.py}"
+          ]
+        }
+      },
+      {
+        "id": "decision_code",
+        "label": "15-minute decision and guidance source",
+        "path": "src/spx_spark/{market_calendar.py,application/market_features/{market.py,decision_filters.py},application/order_map/{guidance.py,writer.py}}",
+        "query": {
+          "engine": "Python + source-code contract audit",
+          "id": "gamma-decision-audit-decision_code-20260724",
+          "sql": "SELECT 'src/spx_spark/{market_calendar.py,application/market_features/{market.py,decision_filters.py},application/order_map/{guidance.py,writer.py}}' AS audited_source_path, 'parsed by the reproducible Python companion notebook' AS method",
+          "description": "Traces visible direction, score branches, expiry timing, intent projection and semantic rendering.",
+          "executed_at": "2026-07-24T04:43:14.844355+00:00",
+          "language": "sql",
+          "filters": [
+            "2026-07-03 <= trading_date <= 2026-07-23",
+            "status reports only where applicable",
+            "future report linkage within ±180 seconds and same trading date"
+          ],
+          "metric_definitions": [
+            "regime_decision owns visible bias.",
+            "trade_intent and guidance own action authorization."
+          ],
+          "tables_used": [
+            "src/spx_spark/{market_calendar.py,application/market_features/{market.py,decision_filters.py},application/order_map/{guidance.py,writer.py}}"
+          ]
+        }
+      },
+      {
+        "id": "option_history",
+        "label": "Current cached option-structure history",
+        "path": "latest/market_feature_state.json",
+        "query": {
+          "engine": "Python + source-code contract audit",
+          "id": "gamma-decision-audit-option_history-20260724",
+          "sql": "SELECT 'latest/market_feature_state.json' AS audited_source_path, 'parsed by the reproducible Python companion notebook' AS method",
+          "description": "Quantifies READY frames with low Greek coverage, one-sided walls and extreme ratios.",
+          "executed_at": "2026-07-24T04:43:14.844359+00:00",
+          "language": "sql",
+          "filters": [
+            "2026-07-03 <= trading_date <= 2026-07-23",
+            "status reports only where applicable",
+            "future report linkage within ±180 seconds and same trading date"
+          ],
+          "metric_definitions": [
+            "Low coverage is IV coverage <50%.",
+            "Extreme ratio is |net_gamma_ratio| >0.95."
+          ],
+          "tables_used": [
+            "latest/market_feature_state.json"
+          ]
+        }
+      },
+      {
+        "id": "steven_audit",
+        "label": "Steven episode and bar lake",
+        "path": "config/runtime.yaml + deployed .env + lake/steven/{episodes,bars}/date=*",
+        "query": {
+          "engine": "Python + source-code contract audit",
+          "id": "gamma-decision-audit-steven_audit-20260724",
+          "sql": "SELECT 'config/runtime.yaml + deployed .env + lake/steven/{episodes,bars}/date=*' AS audited_source_path, 'parsed by the reproducible Python companion notebook' AS method",
+          "description": "Checks effective enablement and counts revisions, transitions, setups and missing inputs.",
+          "executed_at": "2026-07-24T04:43:14.844363+00:00",
+          "language": "sql",
+          "filters": [
+            "2026-07-03 <= trading_date <= 2026-07-23",
+            "status reports only where applicable",
+            "future report linkage within ±180 seconds and same trading date"
+          ],
+          "metric_definitions": [
+            "YAML default is off, but the deployed environment overrides Steven on.",
+            "SETUP_CONFIRMED is the only counted completed setup state."
+          ],
+          "tables_used": [
+            "config/runtime.yaml + deployed .env + lake/steven/{episodes,bars}/date=*"
+          ]
+        }
+      },
+      {
+        "id": "trade_intent_audit",
+        "label": "RTH trade-intent event lake",
+        "path": "features/trade_intents/date=*/events.jsonl",
+        "query": {
+          "engine": "Python + source-code contract audit",
+          "id": "gamma-decision-audit-trade_intent_audit-20260724",
+          "sql": "SELECT 'features/trade_intents/date=*/events.jsonl' AS audited_source_path, 'parsed by the reproducible Python companion notebook' AS method",
+          "description": "Counts RTH observing, blocked and Ready signature records plus unique event IDs.",
+          "executed_at": "2026-07-24T04:43:14.844366+00:00",
+          "language": "sql",
+          "filters": [
+            "2026-07-03 <= trading_date <= 2026-07-23",
+            "status reports only where applicable",
+            "future report linkage within ±180 seconds and same trading date"
+          ],
+          "metric_definitions": [
+            "Window is 2026-07-14 through 2026-07-23, 09:30–16:00 ET.",
+            "Evaluation counts are not independent trades."
+          ],
+          "tables_used": [
+            "features/trade_intents/date=*/events.jsonl"
+          ]
+        }
+      },
+      {
+        "id": "notebook",
+        "label": "Executed companion notebook",
+        "path": "spx-gamma-decision-model-audit-2026-07-24.ipynb",
+        "query": {
+          "engine": "Python + source-code contract audit",
+          "id": "gamma-decision-audit-notebook-20260724",
+          "sql": "SELECT 'spx-gamma-decision-model-audit-2026-07-24.ipynb' AS audited_source_path, 'parsed by the reproducible Python companion notebook' AS method",
+          "description": "Recomputes report, Gamma-quality, score-calibration and Steven assertions top-to-bottom.",
+          "executed_at": "2026-07-24T04:43:14.844387+00:00",
+          "language": "sql",
+          "filters": [
+            "2026-07-03 <= trading_date <= 2026-07-23",
+            "status reports only where applicable",
+            "future report linkage within ±180 seconds and same trading date"
+          ],
+          "metric_definitions": [
+            "Assertions fail if the frozen audit population changes."
+          ],
+          "tables_used": [
+            "spx-gamma-decision-model-audit-2026-07-24.ipynb"
+          ]
+        }
+      }
+    ],
+    "cards": [
+      {
+        "id": "reports",
+        "description": "Persisted status-report population through 2026-07-23.",
+        "dataset": "headline",
+        "sourceId": "report_audit",
+        "metrics": [
+          {
+            "label": "15m 报告",
+            "field": "reports",
+            "format": "number"
+          }
+        ]
+      },
+      {
+        "id": "zero_share",
+        "description": "RTH reports classified as zero-gamma transition.",
+        "dataset": "headline",
+        "sourceId": "report_audit",
+        "metrics": [
+          {
+            "label": "RTH ZeroGamma占比",
+            "field": "rth_zero_gamma_share",
+            "format": "percent"
+          }
+        ]
+      },
+      {
+        "id": "low_coverage",
+        "description": "Cached READY frames with IV coverage below 50%.",
+        "dataset": "headline",
+        "sourceId": "option_history",
+        "metrics": [
+          {
+            "label": "低覆盖仍READY",
+            "field": "low_coverage_ready",
+            "format": "number"
+          }
+        ]
+      },
+      {
+        "id": "steven",
+        "description": "Steven event volume versus completed setups.",
+        "dataset": "headline",
+        "sourceId": "steven_audit",
+        "metrics": [
+          {
+            "label": "Steven events",
+            "field": "steven_events",
+            "format": "number"
+          },
+          {
+            "label": "SETUP_CONFIRMED",
+            "field": "steven_setups",
+            "format": "number"
+          }
+        ]
+      },
+      {
+        "id": "high_score",
+        "description": "Mean signed ES points after 60m for RTH trend score ≥65.",
+        "dataset": "headline",
+        "sourceId": "report_audit",
+        "metrics": [
+          {
+            "label": "RTH 65+ 60m均值",
+            "field": "rth_high_score_60m_mean",
+            "format": "number"
+          }
+        ]
+      },
+      {
+        "id": "trade_ready",
+        "description": "RTH Ready signature records that occurred between 15-minute report slots.",
+        "dataset": "headline",
+        "sourceId": "trade_intent_audit",
+        "metrics": [
+          {
+            "label": "RTH Trade Ready",
+            "field": "rth_trade_ready",
+            "format": "number"
+          }
+        ]
+      }
+    ],
+    "charts": [
+      {
+        "id": "gamma_distribution_chart",
+        "title": "Gamma state distribution by session",
+        "subtitle": "The 0.5% zero-gamma override collapses nearly all RTH observations into transition.",
+        "intent": "comparison",
+        "question": "Gamma state distribution by session",
+        "rationale": "The 0.5% zero-gamma override collapses nearly all RTH observations into transition.",
+        "type": "bar",
+        "dataset": "gamma_distribution",
+        "sourceId": "report_audit",
+        "encodings": {
+          "x": {
+            "field": "session",
+            "type": "nominal",
+            "label": "session"
+          },
+          "y": {
+            "field": "count",
+            "type": "quantitative",
+            "format": "number",
+            "label": "count"
+          },
+          "tooltip": [
+            {
+              "field": "share",
+              "type": "quantitative",
+              "format": "percent",
+              "label": "share"
+            }
+          ],
+          "color": {
+            "field": "gamma_state",
+            "type": "nominal",
+            "label": "gamma_state"
+          }
+        },
+        "valueFormat": "number",
+        "layout": "full",
+        "labels": {
+          "values": "none"
+        },
+        "maxRows": 200,
+        "settings": {
+          "categoryLabelPolicy": "wrap",
+          "groupMode": "grouped",
+          "showValues": false,
+          "sort": "none"
+        },
+        "surface": {
+          "surface": "export",
+          "interactiveLegend": false,
+          "showControls": false,
+          "viewMode": "visualization"
+        }
+      },
+      {
+        "id": "score_chart",
+        "title": "RTH 60m result by trend-score bucket",
+        "subtitle": "The highest production score bucket is not the best-performing bucket.",
+        "intent": "comparison",
+        "question": "RTH 60m result by trend-score bucket",
+        "rationale": "The highest production score bucket is not the best-performing bucket.",
+        "type": "bar",
+        "dataset": "rth_score_60m",
+        "sourceId": "report_audit",
+        "encodings": {
+          "x": {
+            "field": "score_bucket",
+            "type": "nominal",
+            "label": "score_bucket"
+          },
+          "y": {
+            "field": "mean_signed_es_points",
+            "type": "quantitative",
+            "format": "number",
+            "label": "mean_signed_es_points"
+          },
+          "tooltip": [
+            {
+              "field": "n",
+              "type": "quantitative",
+              "format": "number",
+              "label": "n"
+            },
+            {
+              "field": "hit_rate",
+              "type": "quantitative",
+              "format": "percent",
+              "label": "hit rate"
+            }
+          ]
+        },
+        "valueFormat": "number",
+        "layout": "full",
+        "labels": {
+          "values": "none"
+        },
+        "maxRows": 200,
+        "settings": {
+          "categoryLabelPolicy": "wrap",
+          "groupMode": "single",
+          "showValues": false,
+          "sort": "none"
+        },
+        "surface": {
+          "surface": "export",
+          "interactiveLegend": false,
+          "showControls": false,
+          "viewMode": "visualization"
+        }
+      }
+    ],
+    "tables": [
+      {
+        "id": "model_layers_table",
+        "title": "Actual model architecture",
+        "subtitle": "The report is not driven by one unified Gamma model.",
+        "dataset": "model_layers",
+        "sourceId": "decision_code",
+        "density": "compact",
+        "layout": "full",
+        "columns": [
+          {
+            "field": "layer",
+            "label": "Layer",
+            "type": "text"
+          },
+          {
+            "field": "actual_authority",
+            "label": "Authority",
+            "type": "text"
+          },
+          {
+            "field": "inputs",
+            "label": "Inputs",
+            "type": "text"
+          },
+          {
+            "field": "output",
+            "label": "Output",
+            "type": "text"
+          },
+          {
+            "field": "used_by_15m_direction",
+            "label": "15m方向?",
+            "type": "text"
+          },
+          {
+            "field": "critical_issue",
+            "label": "Critical issue",
+            "type": "text"
+          }
+        ]
+      },
+      {
+        "id": "weights_table",
+        "title": "Hard-coded score specification",
+        "subtitle": "Most points are correlated transformations of the same ES path.",
+        "dataset": "score_weights",
+        "sourceId": "decision_code",
+        "density": "compact",
+        "layout": "full",
+        "columns": [
+          {
+            "field": "model",
+            "label": "Model",
+            "type": "text"
+          },
+          {
+            "field": "feature",
+            "label": "Feature",
+            "type": "text"
+          },
+          {
+            "field": "points",
+            "label": "Points",
+            "format": "number"
+          },
+          {
+            "field": "options_feature",
+            "label": "Options input",
+            "type": "text"
+          }
+        ]
+      },
+      {
+        "id": "findings_table",
+        "title": "Validated model findings",
+        "subtitle": "Severity reflects potential to misstate structure, direction or model readiness.",
+        "dataset": "findings",
+        "sourceId": "decision_code",
+        "density": "compact",
+        "layout": "full",
+        "columns": [
+          {
+            "field": "severity",
+            "label": "Severity",
+            "type": "text"
+          },
+          {
+            "field": "finding",
+            "label": "Finding",
+            "type": "text"
+          },
+          {
+            "field": "evidence",
+            "label": "Evidence",
+            "type": "text"
+          },
+          {
+            "field": "impact",
+            "label": "Impact",
+            "type": "text"
+          },
+          {
+            "field": "required_fix",
+            "label": "Required fix",
+            "type": "text"
+          }
+        ]
+      },
+      {
+        "id": "gamma_perf_table",
+        "title": "Visible bias performance by Gamma label",
+        "subtitle": "Sparse non-transition RTH cells are not estimable.",
+        "dataset": "gamma_performance",
+        "sourceId": "report_audit",
+        "density": "compact",
+        "layout": "full",
+        "columns": [
+          {
+            "field": "session",
+            "label": "Session",
+            "type": "text"
+          },
+          {
+            "field": "gamma_state",
+            "label": "Gamma state",
+            "type": "text"
+          },
+          {
+            "field": "horizon",
+            "label": "Horizon",
+            "type": "text"
+          },
+          {
+            "field": "n",
+            "label": "n",
+            "format": "number"
+          },
+          {
+            "field": "hit_rate",
+            "label": "Hit rate",
+            "format": "percent"
+          },
+          {
+            "field": "mean_signed_es_points",
+            "label": "Mean signed ES",
+            "format": "number"
+          }
+        ]
+      },
+      {
+        "id": "proposed_model_table",
+        "title": "Proposed v2 decision contract",
+        "subtitle": "Structure, direction, setup and execution should be separately calibrated.",
+        "dataset": "proposed_model",
+        "sourceId": "decision_code",
+        "density": "compact",
+        "layout": "full",
+        "columns": [
+          {
+            "field": "stage",
+            "label": "#",
+            "format": "number"
+          },
+          {
+            "field": "name",
+            "label": "Stage",
+            "type": "text"
+          },
+          {
+            "field": "output",
+            "label": "Output",
+            "type": "text"
+          },
+          {
+            "field": "minimum_contract",
+            "label": "Minimum contract",
+            "type": "text"
+          },
+          {
+            "field": "action",
+            "label": "Rule",
+            "type": "text"
+          }
+        ]
+      },
+      {
+        "id": "recommendations_table",
+        "title": "Implementation order and acceptance tests",
+        "subtitle": "No live threshold change should precede validity and calibration.",
+        "dataset": "recommendations",
+        "sourceId": "decision_code",
+        "density": "compact",
+        "layout": "full",
+        "columns": [
+          {
+            "field": "priority",
+            "label": "Priority",
+            "format": "number"
+          },
+          {
+            "field": "change",
+            "label": "Change",
+            "type": "text"
+          },
+          {
+            "field": "why",
+            "label": "Why",
+            "type": "text"
+          },
+          {
+            "field": "acceptance",
+            "label": "Acceptance",
+            "type": "text"
+          }
+        ]
+      }
+    ],
+    "blocks": [
+      {
+        "id": "title",
+        "type": "markdown",
+        "layout": "full",
+        "body": "# SPX Gamma / Steven / 15 分钟判断模型审计\n\n技术审计窗口：2026-07-03–2026-07-23；快照生成：2026-07-24T04:43:12.401144+00:00。"
+      },
+      {
+        "id": "technical_summary",
+        "type": "markdown",
+        "layout": "full",
+        "sourceId": "decision_code",
+        "body": "## Technical Summary\n\n**你的判断是对的：当前不是一个经过校准的 Gamma 决策模型。** 报告可见方向来自手写 ES 动量/回归积分；Gamma 主要是结构地图，Steven 是另一套未接入报告的 observe-only 状态机，执行门控又是第四套逻辑。最严重的问题是 Gamma 完整性未 fail-closed：少数单边 Greeks 也能产生 ±1 的 net ratio 和 READY 状态。"
+      },
+      {
+        "id": "metric_strip",
+        "type": "metric-strip",
+        "layout": "full",
+        "cardIds": [
+          "reports",
+          "zero_share",
+          "low_coverage",
+          "steven",
+          "high_score",
+          "trade_ready"
+        ]
+      },
+      {
+        "id": "key_findings",
+        "type": "markdown",
+        "layout": "full",
+        "body": "## Key Findings\n\n- RTH 125/129（96.90%）被归为 ZeroGamma 过渡，几乎没有可验证的状态对照组。\n- 当前缓存里 28 帧在 IV 覆盖 <50% 时仍为 READY；最新极端样本覆盖 0.00%、ratio 0.98。\n- RTH 60m：趋势分 65+ 的方向均值 -4.38 点，低于 45–64 档 +6.26 点；分数没有单调校准。\n- 显示为 trending 的 RTH 60m 均值 -3.32 点，transition 为 +3.79 点。\n- RTH 只有 2 条 Ready 记录，均落在 15 分钟报告时点之间；报告无法回看已过期的 Ready。\n- Steven 产生 5,324 条事件但 0 setup；它没有进入 15 分钟报告。"
+      },
+      {
+        "id": "gamma_chart_block",
+        "type": "chart",
+        "layout": "full",
+        "chartId": "gamma_distribution_chart"
+      },
+      {
+        "id": "score_chart_block",
+        "type": "chart",
+        "layout": "full",
+        "chartId": "score_chart"
+      },
+      {
+        "id": "scope",
+        "type": "markdown",
+        "layout": "full",
+        "body": "## Scope, Data, and Metric Definitions\n\n报告审计使用实际持久化 status payload。后续 ES 结果联结同一 trading_date、目标时间 ±3 分钟、来源兼容的报告。这些 15 分钟点位互相重叠且自相关，只用于诊断排序/校准，不能当独立交易 PnL。当前 option history 是 7/24 的滚动 181 帧快照；它证明合同缺陷，不代表三周质量占比。"
+      },
+      {
+        "id": "architecture_table_block",
+        "type": "table",
+        "layout": "full",
+        "tableId": "model_layers_table"
+      },
+      {
+        "id": "model_spec",
+        "type": "markdown",
+        "layout": "full",
+        "sourceId": "gamma_code",
+        "body": "## Model Specification and Validation\n\n现行 GEX 代理为 `sign × gamma × weight × 100 × spot² × 0.01`，Call sign=+1、Put sign=−1；0DTE `weight=OI+累计volume`。`net_gamma_ratio=sum(net_gex)/sum(abs_gex)`。分类先检查 `abs(zero_gamma-spot)/spot <= 0.005`，满足即 transition；否则 ±0.15 判正/负 Gamma。\n\n这里有两个不可忽略的语义限制：累计 volume 没有开/平仓与 aggressor sign；Call+/Put− 也不是 dealer inventory。所以它最多是结构集中度代理，不能直接推导 dealer 对冲方向。"
+      },
+      {
+        "id": "weights_table_block",
+        "type": "table",
+        "layout": "full",
+        "tableId": "weights_table"
+      },
+      {
+        "id": "findings_table_block",
+        "type": "table",
+        "layout": "full",
+        "tableId": "findings_table"
+      },
+      {
+        "id": "gamma_perf_table_block",
+        "type": "table",
+        "layout": "full",
+        "tableId": "gamma_perf_table"
+      },
+      {
+        "id": "steven",
+        "type": "markdown",
+        "layout": "full",
+        "sourceId": "steven_audit",
+        "body": "### Steven model status\n\n`config/runtime.yaml` 默认关闭 Steven，但部署环境已覆盖为开启，所以服务确实在运行。问题不是“没启动”，而是每轮只恢复 closed bars、不恢复 open partial bar，并读取错误的 flow 输入路径；因此 1m/5m bar 与 ES/HL volume 长期缺失。15 分钟 order-map payload 只装载 market/option/decision projections，不装载 `steven_state`。审计期 5,324 行中 3,725 次 map revision、1,586 次 state transition、0 次 SETUP_CONFIRMED；5,323 行标记 missing_bars_1m，相关 1m bar 文件为空。"
+      },
+      {
+        "id": "methods",
+        "type": "markdown",
+        "layout": "full",
+        "body": "## Methodology\n\n1. 静态追踪公式、分类、质量、报告投影与执行门控的代码所有权。\n2. 对 521 份 status 报告解析 Gamma 标签、可见 regime、分数与 ES 后续路径。\n3. 对滚动 option history 重算低覆盖 READY、单边墙位和极端 ratio。\n4. 对 Steven episode/bar lake 统计状态产出与输入缺失。\n5. 对 RTH trade-intent lake 区分 signature record 与 unique event，并核对 Ready 时间。\n6. 所有结论由 companion notebook 的固定断言复算。"
+      },
+      {
+        "id": "limitations",
+        "type": "markdown",
+        "layout": "full",
+        "body": "## Limitations, Uncertainty, and Robustness\n\n- 非 transition 的 RTH Gamma 样本只有 4 份，不能估计正/负 Gamma 的真实条件收益。\n- 报告结果是重叠时间窗，没有计期权 spread、slippage、theta、IV 与手续费。\n- 当前滚动 option history 只保存约 3 小时；三周完整 Greeks coverage 尚未持久化，属于数据合同缺口。\n- Gamma/dealer sign 缺失是识别限制，不是靠调阈值就能解决。\n- 近期真实账户亏损未与 broker fills/fees 完整对账，本报告不把模型方向结果冒充净 PnL 解释。"
+      },
+      {
+        "id": "proposed_model",
+        "type": "markdown",
+        "layout": "full",
+        "body": "## Recommended Next Steps\n\n先修数据有效性，再建概率模型，最后才讨论阈值。生产参数现在不应放松；应该把候选模型放进 shadow，用按交易日分块的 expanding walk-forward 校准。"
+      },
+      {
+        "id": "proposed_model_table_block",
+        "type": "table",
+        "layout": "full",
+        "tableId": "proposed_model_table"
+      },
+      {
+        "id": "recommendations_table_block",
+        "type": "table",
+        "layout": "full",
+        "tableId": "recommendations_table"
+      },
+      {
+        "id": "further_questions",
+        "type": "markdown",
+        "layout": "full",
+        "body": "## Further Questions\n\n- 15 分钟报告最终只服务执行，还是同时保留独立结构研究页？两个产品应分开。\n- 是否有可购入的 signed option flow / aggressor / dealer positioning 数据源？没有时必须保留 proxy 语义。\n- 下一轮实现是否接受先关闭低覆盖 Gamma 文案，即使短期报告会显示更多 `unknown`？"
+      },
+      {
+        "id": "reproducibility",
+        "type": "markdown",
+        "layout": "full",
+        "sourceId": "notebook",
+        "body": "## Reproducibility\n\n伴随 notebook `spx-gamma-decision-model-audit-2026-07-24.ipynb` 已从仓库根目录 top-to-bottom 执行。它锁定 521 份报告、397 份 transition 标签、5,324 个 Steven events、0 setup，以及 18,822 条 RTH intent signature / 2 条 Ready，并验证低覆盖 Gamma READY 确实存在。"
+      }
+    ]
+  },
+  "snapshot": {
+    "version": 1,
+    "generatedAt": "2026-07-24T04:43:12.401144+00:00",
+    "status": "ready",
+    "accessIssues": [],
+    "datasets": {
+      "headline": [
+        {
+          "reports": 521,
+          "rth_zero_gamma_share": 0.9689922480620154,
+          "low_coverage_ready": 28,
+          "steven_events": 5324,
+          "steven_setups": 0,
+          "rth_trade_ready": 2,
+          "rth_high_score_60m_mean": -4.381249999999966
+        }
+      ],
+      "gamma_distribution": [
+        {
+          "session": "RTH",
+          "gamma_state": "ZG",
+          "count": 125,
+          "share": 0.9689922480620154
+        },
+        {
+          "session": "RTH",
+          "gamma_state": "Neg",
+          "count": 3,
+          "share": 0.023255813953488372
+        },
+        {
+          "session": "RTH",
+          "gamma_state": "Pos",
+          "count": 0,
+          "share": 0.0
+        },
+        {
+          "session": "RTH",
+          "gamma_state": "Mix",
+          "count": 1,
+          "share": 0.007751937984496124
+        },
+        {
+          "session": "RTH",
+          "gamma_state": "Missing",
+          "count": 0,
+          "share": 0.0
+        },
+        {
+          "session": "GTH",
+          "gamma_state": "ZG",
+          "count": 272,
+          "share": 0.6938775510204082
+        },
+        {
+          "session": "GTH",
+          "gamma_state": "Neg",
+          "count": 54,
+          "share": 0.1377551020408163
+        },
+        {
+          "session": "GTH",
+          "gamma_state": "Pos",
+          "count": 1,
+          "share": 0.002551020408163265
+        },
+        {
+          "session": "GTH",
+          "gamma_state": "Mix",
+          "count": 0,
+          "share": 0.0
+        },
+        {
+          "session": "GTH",
+          "gamma_state": "Missing",
+          "count": 65,
+          "share": 0.16581632653061223
+        }
+      ],
+      "zero_gamma_distance": [
+        {
+          "session": "ALL",
+          "n": 364,
+          "median_distance_points": 8.949999999999818,
+          "within_0_10_pct": 0.4258241758241758,
+          "within_0_25_pct": 0.8131868131868132,
+          "within_0_50_pct": 1.0
+        },
+        {
+          "session": "RTH",
+          "n": 121,
+          "median_distance_points": 10.0,
+          "within_0_10_pct": 0.38016528925619836,
+          "within_0_25_pct": 0.8429752066115702,
+          "within_0_50_pct": 1.0
+        },
+        {
+          "session": "GTH",
+          "n": 243,
+          "median_distance_points": 8.5,
+          "within_0_10_pct": 0.448559670781893,
+          "within_0_25_pct": 0.7983539094650206,
+          "within_0_50_pct": 1.0
+        }
+      ],
+      "score_performance": [
+        {
+          "session": "RTH",
+          "score_bucket": "0–44",
+          "horizon": "15m",
+          "n": 16,
+          "hit_rate": 0.5625,
+          "mean_signed_es_points": 0.7062500000000114,
+          "median_signed_es_points": 0.599999999999909
+        },
+        {
+          "session": "RTH",
+          "score_bucket": "0–44",
+          "horizon": "30m",
+          "n": 15,
+          "hit_rate": 0.4,
+          "mean_signed_es_points": -0.9399999999999636,
+          "median_signed_es_points": -1.3999999999996362
+        },
+        {
+          "session": "RTH",
+          "score_bucket": "0–44",
+          "horizon": "60m",
+          "n": 9,
+          "hit_rate": 0.5555555555555556,
+          "mean_signed_es_points": 0.7444444444444243,
+          "median_signed_es_points": 6.699999999999818
+        },
+        {
+          "session": "RTH",
+          "score_bucket": "45–64",
+          "horizon": "15m",
+          "n": 10,
+          "hit_rate": 0.6,
+          "mean_signed_es_points": 0.4699999999999818,
+          "median_signed_es_points": 1.199999999999818
+        },
+        {
+          "session": "RTH",
+          "score_bucket": "45–64",
+          "horizon": "30m",
+          "n": 10,
+          "hit_rate": 0.6,
+          "mean_signed_es_points": 4.3699999999999815,
+          "median_signed_es_points": 3.0
+        },
+        {
+          "session": "RTH",
+          "score_bucket": "45–64",
+          "horizon": "60m",
+          "n": 9,
+          "hit_rate": 0.7777777777777778,
+          "mean_signed_es_points": 6.255555555555576,
+          "median_signed_es_points": 9.199999999999818
+        },
+        {
+          "session": "RTH",
+          "score_bucket": "65+",
+          "horizon": "15m",
+          "n": 36,
+          "hit_rate": 0.4444444444444444,
+          "mean_signed_es_points": -0.4111111111110909,
+          "median_signed_es_points": -0.34999999999990905
+        },
+        {
+          "session": "RTH",
+          "score_bucket": "65+",
+          "horizon": "30m",
+          "n": 34,
+          "hit_rate": 0.6176470588235294,
+          "mean_signed_es_points": -0.21470588235289303,
+          "median_signed_es_points": 1.800000000000182
+        },
+        {
+          "session": "RTH",
+          "score_bucket": "65+",
+          "horizon": "60m",
+          "n": 32,
+          "hit_rate": 0.5,
+          "mean_signed_es_points": -4.381249999999966,
+          "median_signed_es_points": 1.099999999999909
+        },
+        {
+          "session": "GTH",
+          "score_bucket": "0–44",
+          "horizon": "15m",
+          "n": 48,
+          "hit_rate": 0.4791666666666667,
+          "mean_signed_es_points": 0.020833333333314386,
+          "median_signed_es_points": -0.25
+        },
+        {
+          "session": "GTH",
+          "score_bucket": "0–44",
+          "horizon": "30m",
+          "n": 48,
+          "hit_rate": 0.4375,
+          "mean_signed_es_points": 1.0104166666666667,
+          "median_signed_es_points": -0.650000000000091
+        },
+        {
+          "session": "GTH",
+          "score_bucket": "0–44",
+          "horizon": "60m",
+          "n": 47,
+          "hit_rate": 0.5319148936170213,
+          "mean_signed_es_points": 1.4595744680850948,
+          "median_signed_es_points": 0.5
+        },
+        {
+          "session": "GTH",
+          "score_bucket": "45–64",
+          "horizon": "15m",
+          "n": 45,
+          "hit_rate": 0.37777777777777777,
+          "mean_signed_es_points": -0.522222222222202,
+          "median_signed_es_points": -0.8000000000001819
+        },
+        {
+          "session": "GTH",
+          "score_bucket": "45–64",
+          "horizon": "30m",
+          "n": 44,
+          "hit_rate": 0.4318181818181818,
+          "mean_signed_es_points": -0.9931818181818347,
+          "median_signed_es_points": -2.150000000000091
+        },
+        {
+          "session": "GTH",
+          "score_bucket": "45–64",
+          "horizon": "60m",
+          "n": 43,
+          "hit_rate": 0.4883720930232558,
+          "mean_signed_es_points": -0.41627906976741225,
+          "median_signed_es_points": -1.199999999999818
+        },
+        {
+          "session": "GTH",
+          "score_bucket": "65+",
+          "horizon": "15m",
+          "n": 101,
+          "hit_rate": 0.5148514851485149,
+          "mean_signed_es_points": -0.07920792079209722,
+          "median_signed_es_points": 0.3999999999996362
+        },
+        {
+          "session": "GTH",
+          "score_bucket": "65+",
+          "horizon": "30m",
+          "n": 101,
+          "hit_rate": 0.5445544554455446,
+          "mean_signed_es_points": 0.736633663366315,
+          "median_signed_es_points": 0.8000000000001819
+        },
+        {
+          "session": "GTH",
+          "score_bucket": "65+",
+          "horizon": "60m",
+          "n": 97,
+          "hit_rate": 0.5979381443298969,
+          "mean_signed_es_points": 1.3824742268041181,
+          "median_signed_es_points": 1.5
+        }
+      ],
+      "rth_score_60m": [
+        {
+          "session": "RTH",
+          "score_bucket": "0–44",
+          "horizon": "60m",
+          "n": 9,
+          "hit_rate": 0.5555555555555556,
+          "mean_signed_es_points": 0.7444444444444243,
+          "median_signed_es_points": 6.699999999999818
+        },
+        {
+          "session": "RTH",
+          "score_bucket": "45–64",
+          "horizon": "60m",
+          "n": 9,
+          "hit_rate": 0.7777777777777778,
+          "mean_signed_es_points": 6.255555555555576,
+          "median_signed_es_points": 9.199999999999818
+        },
+        {
+          "session": "RTH",
+          "score_bucket": "65+",
+          "horizon": "60m",
+          "n": 32,
+          "hit_rate": 0.5,
+          "mean_signed_es_points": -4.381249999999966,
+          "median_signed_es_points": 1.099999999999909
+        }
+      ],
+      "mode_performance": [
+        {
+          "session": "RTH",
+          "mode": "trending",
+          "horizon": "15m",
+          "n": 44,
+          "hit_rate": 0.4772727272727273,
+          "mean_signed_es_points": -0.2590909090908802
+        },
+        {
+          "session": "RTH",
+          "mode": "trending",
+          "horizon": "30m",
+          "n": 41,
+          "hit_rate": 0.6097560975609756,
+          "mean_signed_es_points": 0.5170731707317473
+        },
+        {
+          "session": "RTH",
+          "mode": "trending",
+          "horizon": "60m",
+          "n": 39,
+          "hit_rate": 0.5128205128205128,
+          "mean_signed_es_points": -3.320512820512774
+        },
+        {
+          "session": "RTH",
+          "mode": "transition",
+          "horizon": "15m",
+          "n": 30,
+          "hit_rate": 0.6,
+          "mean_signed_es_points": 0.8633333333333212
+        },
+        {
+          "session": "RTH",
+          "mode": "transition",
+          "horizon": "30m",
+          "n": 30,
+          "hit_rate": 0.5,
+          "mean_signed_es_points": 1.6433333333333393
+        },
+        {
+          "session": "RTH",
+          "mode": "transition",
+          "horizon": "60m",
+          "n": 21,
+          "hit_rate": 0.6666666666666666,
+          "mean_signed_es_points": 3.7857142857142856
+        },
+        {
+          "session": "GTH",
+          "mode": "trending",
+          "horizon": "15m",
+          "n": 108,
+          "hit_rate": 0.5370370370370371,
+          "mean_signed_es_points": 0.3592592592592441
+        },
+        {
+          "session": "GTH",
+          "mode": "trending",
+          "horizon": "30m",
+          "n": 108,
+          "hit_rate": 0.5648148148148148,
+          "mean_signed_es_points": 1.16203703703702
+        },
+        {
+          "session": "GTH",
+          "mode": "trending",
+          "horizon": "60m",
+          "n": 104,
+          "hit_rate": 0.6153846153846154,
+          "mean_signed_es_points": 2.356730769230764
+        },
+        {
+          "session": "GTH",
+          "mode": "transition",
+          "horizon": "15m",
+          "n": 94,
+          "hit_rate": 0.43617021276595747,
+          "mean_signed_es_points": -0.1595744680851064
+        },
+        {
+          "session": "GTH",
+          "mode": "transition",
+          "horizon": "30m",
+          "n": 93,
+          "hit_rate": 0.44086021505376344,
+          "mean_signed_es_points": 0.24731182795697948
+        },
+        {
+          "session": "GTH",
+          "mode": "transition",
+          "horizon": "60m",
+          "n": 91,
+          "hit_rate": 0.5164835164835165,
+          "mean_signed_es_points": 0.9417582417582497
+        }
+      ],
+      "rth_mode_60m": [
+        {
+          "session": "RTH",
+          "mode": "trending",
+          "horizon": "60m",
+          "n": 39,
+          "hit_rate": 0.5128205128205128,
+          "mean_signed_es_points": -3.320512820512774
+        },
+        {
+          "session": "RTH",
+          "mode": "transition",
+          "horizon": "60m",
+          "n": 21,
+          "hit_rate": 0.6666666666666666,
+          "mean_signed_es_points": 3.7857142857142856
+        }
+      ],
+      "gamma_performance": [
+        {
+          "session": "RTH",
+          "gamma_state": "negative_gamma_acceleration",
+          "horizon": "15m",
+          "n": 3,
+          "hit_rate": 0.3333333333333333,
+          "mean_signed_es_points": -11.133333333333212
+        },
+        {
+          "session": "RTH",
+          "gamma_state": "negative_gamma_acceleration",
+          "horizon": "30m",
+          "n": 2,
+          "hit_rate": 0.0,
+          "mean_signed_es_points": -22.549999999999727
+        },
+        {
+          "session": "RTH",
+          "gamma_state": "negative_gamma_acceleration",
+          "horizon": "60m",
+          "n": 3,
+          "hit_rate": 0.0,
+          "mean_signed_es_points": -41.13333333333321
+        },
+        {
+          "session": "RTH",
+          "gamma_state": "zero_gamma_transition",
+          "horizon": "15m",
+          "n": 70,
+          "hit_rate": 0.5428571428571428,
+          "mean_signed_es_points": 1.0814285714285818
+        },
+        {
+          "session": "RTH",
+          "gamma_state": "zero_gamma_transition",
+          "horizon": "30m",
+          "n": 68,
+          "hit_rate": 0.5882352941176471,
+          "mean_signed_es_points": 1.8264705882353183
+        },
+        {
+          "session": "RTH",
+          "gamma_state": "zero_gamma_transition",
+          "horizon": "60m",
+          "n": 56,
+          "hit_rate": 0.6071428571428571,
+          "mean_signed_es_points": 1.4535714285714545
+        },
+        {
+          "session": "RTH",
+          "gamma_state": "mixed_gamma",
+          "horizon": "15m",
+          "n": 1,
+          "hit_rate": 0.0,
+          "mean_signed_es_points": -27.800000000000182
+        },
+        {
+          "session": "RTH",
+          "gamma_state": "mixed_gamma",
+          "horizon": "30m",
+          "n": 1,
+          "hit_rate": 0.0,
+          "mean_signed_es_points": -8.600000000000364
+        },
+        {
+          "session": "RTH",
+          "gamma_state": "mixed_gamma",
+          "horizon": "60m",
+          "n": 1,
+          "hit_rate": 0.0,
+          "mean_signed_es_points": -8.0
+        },
+        {
+          "session": "GTH",
+          "gamma_state": "negative_gamma_acceleration",
+          "horizon": "15m",
+          "n": 49,
+          "hit_rate": 0.5714285714285714,
+          "mean_signed_es_points": 0.44489795918369573
+        },
+        {
+          "session": "GTH",
+          "gamma_state": "negative_gamma_acceleration",
+          "horizon": "30m",
+          "n": 48,
+          "hit_rate": 0.5833333333333334,
+          "mean_signed_es_points": 1.4187500000000075
+        },
+        {
+          "session": "GTH",
+          "gamma_state": "negative_gamma_acceleration",
+          "horizon": "60m",
+          "n": 48,
+          "hit_rate": 0.625,
+          "mean_signed_es_points": 2.3895833333333485
+        },
+        {
+          "session": "GTH",
+          "gamma_state": "zero_gamma_transition",
+          "horizon": "15m",
+          "n": 152,
+          "hit_rate": 0.46710526315789475,
+          "mean_signed_es_points": 0.06381578947366506
+        },
+        {
+          "session": "GTH",
+          "gamma_state": "zero_gamma_transition",
+          "horizon": "30m",
+          "n": 152,
+          "hit_rate": 0.4868421052631579,
+          "mean_signed_es_points": 0.6032894736841914
+        },
+        {
+          "session": "GTH",
+          "gamma_state": "zero_gamma_transition",
+          "horizon": "60m",
+          "n": 146,
+          "hit_rate": 0.5547945205479452,
+          "mean_signed_es_points": 1.5589041095890375
+        },
+        {
+          "session": "GTH",
+          "gamma_state": "positive_gamma_pin",
+          "horizon": "15m",
+          "n": 1,
+          "hit_rate": 0.0,
+          "mean_signed_es_points": -7.699999999999818
+        },
+        {
+          "session": "GTH",
+          "gamma_state": "positive_gamma_pin",
+          "horizon": "30m",
+          "n": 1,
+          "hit_rate": 0.0,
+          "mean_signed_es_points": -11.300000000000182
+        },
+        {
+          "session": "GTH",
+          "gamma_state": "positive_gamma_pin",
+          "horizon": "60m",
+          "n": 1,
+          "hit_rate": 0.0,
+          "mean_signed_es_points": -11.5
+        }
+      ],
+      "current_quality_rows": [
+        {
+          "measure": "All cached frames",
+          "count": 181
+        },
+        {
+          "measure": "Marked READY",
+          "count": 151
+        },
+        {
+          "measure": "READY, IV coverage <50%",
+          "count": 28
+        },
+        {
+          "measure": "READY, one wall side missing",
+          "count": 11
+        },
+        {
+          "measure": "Low coverage, |ratio|>0.95",
+          "count": 11
+        }
+      ],
+      "steven_events": [
+        {
+          "event_kind": "map_revision",
+          "count": 3725
+        },
+        {
+          "event_kind": "state_transition",
+          "count": 1586
+        },
+        {
+          "event_kind": "pre_market_map",
+          "count": 13
+        }
+      ],
+      "steven_states": [
+        {
+          "machine_state": "REGIME_UNKNOWN",
+          "count": 2583
+        },
+        {
+          "machine_state": "BEARISH_BREAK_WATCH",
+          "count": 1262
+        },
+        {
+          "machine_state": "OBSERVE_ONLY",
+          "count": 611
+        },
+        {
+          "machine_state": "DATA_INVALID",
+          "count": 383
+        },
+        {
+          "machine_state": "BULLISH_DIP_WATCH",
+          "count": 351
+        },
+        {
+          "machine_state": "RANGE_PIN_WATCH",
+          "count": 105
+        },
+        {
+          "machine_state": "EVENT_WAIT",
+          "count": 29
+        }
+      ],
+      "trade_intent_rows": [
+        {
+          "status": "observing",
+          "signature_records": 18706,
+          "unique_events": 167
+        },
+        {
+          "status": "blocked",
+          "signature_records": 114,
+          "unique_events": 9
+        },
+        {
+          "status": "trade_ready",
+          "signature_records": 2,
+          "unique_events": 2
+        }
+      ],
+      "model_layers": [
+        {
+          "layer": "Options map / Gamma state",
+          "actual_authority": "Structure context",
+          "inputs": "Call+/Put− BS gamma × OI(+unsigned volume intraday), zero-gamma scan",
+          "output": "walls, zero_gamma, net_gamma_ratio, gamma_state",
+          "used_by_15m_direction": "No",
+          "critical_issue": "Dealer sign unknown; weak completeness gate; 0.5% transition override"
+        },
+        {
+          "layer": "15m regime_decision",
+          "actual_authority": "Visible bias",
+          "inputs": "ES 15/60m, efficiency, VWAP, price-volume, ES/SPY, VIX, swing",
+          "output": "trending / transition / mean_reverting + up/down",
+          "used_by_15m_direction": "Yes",
+          "critical_issue": "Hand weights, correlated evidence, missing values score zero, no calibration"
+        },
+        {
+          "layer": "Breakout filter",
+          "actual_authority": "Breakout veto/support",
+          "inputs": "Level path + local GEX share + DEX proxies + momentum/flow",
+          "output": "blocked / pending / supported",
+          "used_by_15m_direction": "Only after breakout path",
+          "critical_issue": "Proxy quality warning does not invalidate all structure metrics"
+        },
+        {
+          "layer": "Greek decision",
+          "actual_authority": "Focused contract confidence",
+          "inputs": "Delta/gamma/speed/color/theta/vanna for candidate contract",
+          "output": "±25 confidence adjustment",
+          "used_by_15m_direction": "Explicitly none",
+          "critical_issue": "Usually explanation_only when coverage is weak"
+        },
+        {
+          "layer": "Steven",
+          "actual_authority": "Observe-only separate state machine",
+          "inputs": "Cross-expiry Net DEX proxy, walls, bars, weak flow proxies",
+          "output": "watch/setup/exit states",
+          "used_by_15m_direction": "No",
+          "critical_issue": "Deployment enables it, but bar/flow wiring is empty and report has no consumer"
+        },
+        {
+          "layer": "Trade intent + guidance",
+          "actual_authority": "Action / NO TRADE",
+          "inputs": "Formal level CONFIRMED + RTH + follow-through + quotes + RR + regime gates",
+          "output": "trade_ready / blocked / observing",
+          "used_by_15m_direction": "Action only",
+          "critical_issue": "Current Ready envelope ≤20s versus 900s report cadence; states collapse into NO TRADE"
+        }
+      ],
+      "score_weights": [
+        {
+          "model": "Trend",
+          "feature": "ES 15m+60m aligned",
+          "points": 25,
+          "options_feature": "No"
+        },
+        {
+          "model": "Trend",
+          "feature": "60m trend efficiency",
+          "points": 20,
+          "options_feature": "No"
+        },
+        {
+          "model": "Trend",
+          "feature": "Price vs VWAP",
+          "points": 10,
+          "options_feature": "No"
+        },
+        {
+          "model": "Trend",
+          "feature": "VWAP slope",
+          "points": 10,
+          "options_feature": "No"
+        },
+        {
+          "model": "Trend",
+          "feature": "Price-volume alignment",
+          "points": 15,
+          "options_feature": "No"
+        },
+        {
+          "model": "Trend",
+          "feature": "ES/SPY confirmation",
+          "points": 10,
+          "options_feature": "No"
+        },
+        {
+          "model": "Trend",
+          "feature": "VIX/VVIX confirmation",
+          "points": 10,
+          "options_feature": "No"
+        },
+        {
+          "model": "Trend",
+          "feature": "Higher-low/lower-high",
+          "points": 10,
+          "options_feature": "No"
+        },
+        {
+          "model": "Mean reversion",
+          "feature": "Low efficiency",
+          "points": 25,
+          "options_feature": "No"
+        },
+        {
+          "model": "Mean reversion",
+          "feature": "Flat VWAP",
+          "points": 15,
+          "options_feature": "No"
+        },
+        {
+          "model": "Mean reversion",
+          "feature": "15m/60m conflict",
+          "points": 15,
+          "options_feature": "No"
+        },
+        {
+          "model": "Mean reversion",
+          "feature": "Volume/cross-asset/vol divergence",
+          "points": 35,
+          "options_feature": "No"
+        },
+        {
+          "model": "Mean reversion",
+          "feature": "Level rejection path",
+          "points": 15,
+          "options_feature": "Level FSM"
+        },
+        {
+          "model": "Mean reversion",
+          "feature": "Price between walls",
+          "points": 5,
+          "options_feature": "Only direct option input"
+        }
+      ],
+      "findings": [
+        {
+          "severity": "Critical",
+          "finding": "Low-completeness Gamma can still be READY",
+          "evidence": "28 cached READY frames had IV coverage <50%; 11 READY frames were missing one wall side. Latest ratio=0.9811868371969308 at IV coverage=None.",
+          "impact": "Missing Put or Call Greeks can mechanically force net_gamma_ratio toward ±1.",
+          "required_fix": "Pair-balanced structural coverage gate before GEX aggregation/classification."
+        },
+        {
+          "severity": "Critical",
+          "finding": "Gamma is not dealer Gamma",
+          "evidence": "Code declares dealer_position_sign=unknown and applies call+ / put− house convention.",
+          "impact": "It locates concentrations but cannot identify dealer hedging direction.",
+          "required_fix": "Keep proxy label; add signed-flow/dealer inventory source before directional use."
+        },
+        {
+          "severity": "High",
+          "finding": "Zero-gamma band collapses the state space",
+          "evidence": "125/129 RTH reports were zero_gamma_transition; classifier checks ±0.5% (about 37 SPX points) before net ratio.",
+          "impact": "RTH has almost no positive/negative regime sample for validation or decisions.",
+          "required_fix": "Calibrate a volatility-normalized band with hysteresis; shadow-test 0.10–0.25% candidates."
+        },
+        {
+          "severity": "High",
+          "finding": "Visible report bias is not a Gamma model",
+          "evidence": "Gamma/skew/charm/vanna are absent from trend_score; walls contribute only 5 mean-reversion points.",
+          "impact": "The user sees ES momentum heuristics presented beside Gamma structure and reasonably assumes one model.",
+          "required_fix": "Publish separate Structure regime, Direction probability, and Action state."
+        },
+        {
+          "severity": "High",
+          "finding": "Trend score is not monotonically calibrated in RTH",
+          "evidence": "At 60m, score 45–64: n=9, hit=77.8%, mean=+6.26; score 65+: n=32, hit=50.0%, mean=-4.38.",
+          "impact": "A higher score does not mean higher directional edge.",
+          "required_fix": "Replace point totals with walk-forward calibrated probabilities and abstention."
+        },
+        {
+          "severity": "High",
+          "finding": "Steven is a disconnected dead end",
+          "evidence": "5,324 episode rows, 3,725 map revisions, 0 SETUP_CONFIRMED; 5,323 rows missing 1m bars.",
+          "impact": "It adds state churn and storage but gives the 15m report no guidance.",
+          "required_fix": "Disable the deployment override or rebuild usable bars/flow and feed one audited projection."
+        },
+        {
+          "severity": "High",
+          "finding": "The 15m report misses the action signal by design",
+          "evidence": "RTH had 18,822 persisted intent-signature records: 18,706 observing, 114 blocked, 2 Ready at 07-14 10:33:52 ET, 07-15 11:50:51 ET. Those two old-schema rows have no lease; under the current policy each emitted Ready envelope is valid for at most 20s, while the status report cadence is 900s and reads only current intent.",
+          "impact": "A genuine Ready event can occur and expire between two reports.",
+          "required_fix": "Add a recent-event window/immediate lane and render NO SETUP / SIGNAL BLOCKED / TRADE READY separately."
+        },
+        {
+          "severity": "High",
+          "finding": "One mean-reversion feature is unreachable",
+          "evidence": "The volume frame emits a nonnegative cumulative-volume delta, while the score waits for price_volume_divergent.",
+          "impact": "The advertised divergence branch cannot earn its 15 mean-reversion points on live data.",
+          "required_fix": "Define a signed price/volume divergence feature and prove both branches with replay tests."
+        },
+        {
+          "severity": "High",
+          "finding": "The final 0DTE RTH window is structurally stale",
+          "evidence": "Collector rolls away from same-day expiry at 15:30 ET, while analytics requests it until 17:00 ET.",
+          "impact": "The most gamma-sensitive closing 30 minutes lose fresh same-day structure.",
+          "required_fix": "Align collection and analytics expiry contracts; never analyze an expired chain with a floored 15m tenor."
+        },
+        {
+          "severity": "Medium",
+          "finding": "Negative-Gamma display contract mismatch",
+          "evidence": "Classifier emits negative_gamma_acceleration; prompt maps negative_gamma_expansion.",
+          "impact": "User-facing reports leak raw internal enum instead of 负Gamma.",
+          "required_fix": "One enum contract with exhaustive rendering test."
+        },
+        {
+          "severity": "Medium",
+          "finding": "Micopedia semantics are distorted",
+          "evidence": "positive_gamma_pin maps to pin/OPEX regime; zero_gamma_transition maps to negative_gamma_trend.",
+          "impact": "Secondary narrative overstates OPEX pin and treats transition as negative Gamma.",
+          "required_fix": "Separate positive, pin, transition, and event-tag semantics."
+        },
+        {
+          "severity": "Medium",
+          "finding": "LLM report validation checks numbers, not meaning",
+          "evidence": "The semantic validator requires numeric template lines but accepts reversed bias or NO TRADE changed to TRADE READY.",
+          "impact": "The gate remains deterministic, but the natural-language report can invert its meaning.",
+          "required_fix": "Validate direction/action enums and reason codes independently of prose."
+        }
+      ],
+      "proposed_model": [
+        {
+          "stage": 1,
+          "name": "Data validity",
+          "output": "valid / degraded / invalid",
+          "minimum_contract": "≥60% complete C/P Greeks in core + both wings + quote age + OI age",
+          "action": "Invalid never emits Gamma regime or direction."
+        },
+        {
+          "stage": 2,
+          "name": "Structure",
+          "output": "pin / acceleration / transition probabilities",
+          "minimum_contract": "OI-only baseline; volume shown separately unless signed/open-close flow exists",
+          "action": "Smooth IV/GEX functions, never interpolate NBBO."
+        },
+        {
+          "stage": 3,
+          "name": "Direction",
+          "output": "P(up), P(down), P(abstain) at 15/30/60m",
+          "minimum_contract": "Walk-forward day-blocked calibration; missingness indicators; no duplicated evidence points",
+          "action": "Direction is separate from structure."
+        },
+        {
+          "stage": 4,
+          "name": "Setup",
+          "output": "fade / breakout / spread candidate",
+          "minimum_contract": "Level FSM + structure interaction + signed movement outcome",
+          "action": "Only candidates above pre-registered expected-value floor survive."
+        },
+        {
+          "stage": 5,
+          "name": "Execution",
+          "output": "NO SETUP / SIGNAL BLOCKED / TRADE READY",
+          "minimum_contract": "Live NBBO, quote age, fill model, RR, exposure cap",
+          "action": "Keep immediate events plus a recent-event window; expose one primary reason code."
+        }
+      ],
+      "recommendations": [
+        {
+          "priority": 0,
+          "change": "Freeze production parameter promotion",
+          "why": "Current scores and Gamma states are not calibrated; Steven has zero setups.",
+          "acceptance": "No model threshold promoted from overlapping report observations."
+        },
+        {
+          "priority": 1,
+          "change": "Gamma completeness fail-closed",
+          "why": "READY is possible at 1.85% IV coverage and with one wall side missing.",
+          "acceptance": "Synthetic one-sided/low-coverage chains always return unknown_insufficient_structure."
+        },
+        {
+          "priority": 2,
+          "change": "Align 0DTE collection and analytics expiry",
+          "why": "Collector drops same-day SPXW at 15:30 ET while analytics requests it through 17:00.",
+          "acceptance": "Fresh same-day coverage through the declared RTH close; expired chains always invalid."
+        },
+        {
+          "priority": 3,
+          "change": "Remove unsigned volume from positioning Gamma",
+          "why": "Cumulative volume lacks open/close and aggressor sign.",
+          "acceptance": "OI baseline and volume-activity overlay are separate fields and charts."
+        },
+        {
+          "priority": 4,
+          "change": "Repair unreachable and duplicated score features",
+          "why": "Volume divergence cannot occur and correlated ES path evidence is counted repeatedly.",
+          "acceptance": "Replay exercises every feature branch; ablation shows stable incremental value."
+        },
+        {
+          "priority": 5,
+          "change": "Shadow calibrated zero-gamma bands",
+          "why": "0.5% labels 96.90% of RTH reports as transition.",
+          "acceptance": "Day-blocked out-of-sample comparison for 0.10%, 0.25%, EM-scaled bands and hysteresis."
+        },
+        {
+          "priority": 6,
+          "change": "Replace point score with calibrated horizon models",
+          "why": "RTH score 65+ underperforms the 45–64 bucket at 60m.",
+          "acceptance": "Brier/log loss, calibration slope, hit/return by decile and explicit abstain rate."
+        },
+        {
+          "priority": 7,
+          "change": "Unify and harden the report contract",
+          "why": "Structure/direction/setup/action are conflated; 20s Ready events fall between 15m reports.",
+          "acceptance": "Four fields, recent-event window, three action states, and enum-level semantic validation."
+        },
+        {
+          "priority": 8,
+          "change": "Retire or rebuild Steven",
+          "why": "5,324 events, 0 setups, empty 1m bar files, and no report consumer.",
+          "acceptance": "One owner, one consumer, non-empty bars, flow availability, and replayed state transition tests."
+        }
+      ]
+    }
+  }
+}

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 import os
+import sqlite3
 
 import pytest
 
@@ -153,6 +154,22 @@ def test_database_is_owner_readable_only(tmp_path) -> None:
     outbox = _outbox(tmp_path)
     assert outbox.writable() is True
     assert oct(os.stat(outbox.path).st_mode & 0o777) == "0o600"
+
+
+def test_database_uses_delete_journal_mode_to_avoid_wal_reset_race(tmp_path) -> None:
+    outbox = _outbox(tmp_path)
+
+    with sqlite3.connect(outbox.path) as connection:
+        assert connection.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
+
+
+def test_writable_rejects_structurally_corrupt_database(tmp_path) -> None:
+    outbox = _outbox(tmp_path)
+    with outbox.path.open("r+b") as database:
+        database.seek(4096)
+        database.write(b"\x00" * 256)
+
+    assert outbox.writable() is False
 
 
 def test_permanent_failure_dead_letters_on_first_attempt(tmp_path) -> None:

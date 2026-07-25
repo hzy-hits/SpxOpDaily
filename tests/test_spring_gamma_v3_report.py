@@ -4,6 +4,7 @@ import json
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 from spx_spark.application.order_map.guidance import (
     STATUS_BRIEF_SYSTEM_PROMPT,
@@ -21,6 +22,7 @@ from spx_spark.application.order_map.spring_gamma_presentation import (
 )
 from spx_spark.application.order_map.spring_gamma_projection import (
     attach_spring_gamma_v3_shadow,
+    build_spring_gamma_v3_state_window,
 )
 
 
@@ -77,9 +79,7 @@ def _shadow(
         },
         "abstain": status == "abstain",
         "abstain_reasons": (
-            ["greek_frame_stale", "pair_ratio_below_minimum"]
-            if status == "abstain"
-            else []
+            ["greek_frame_stale", "pair_ratio_below_minimum"] if status == "abstain" else []
         ),
     }
     if wall_probability is not None:
@@ -172,12 +172,21 @@ def test_shadow_loader_is_report_flagged_and_fail_closed(tmp_path) -> None:
     )
     assert "spring_gamma_v3_shadow" not in rejected
 
-    for stale_or_crossed in (
-        {**shadow, "expiry": "20260727"},
-        {**shadow, "session_id": "2026-07-23"},
-        {**shadow, "session": "gth"},
-        {**shadow, "as_of": (NOW - timedelta(seconds=121)).isoformat()},
-        {**shadow, "as_of": (NOW + timedelta(microseconds=1)).isoformat()},
+    for stale_or_crossed, reason in (
+        ({**shadow, "expiry": "20260727"}, "expiry_mismatch"),
+        ({**shadow, "session_id": "2026-07-23"}, "session_id_mismatch"),
+        ({**shadow, "session": "gth"}, "session_kind_mismatch"),
+        (
+            {**shadow, "as_of": (NOW - timedelta(seconds=121)).isoformat()},
+            "projection_stale",
+        ),
+        (
+            {
+                **shadow,
+                "as_of": (NOW + timedelta(seconds=5, microseconds=1)).isoformat(),
+            },
+            "projection_future_beyond_tolerance",
+        ),
     ):
         (latest / "spring_gamma_v3_shadow.json").write_text(
             json.dumps(stale_or_crossed),
@@ -190,6 +199,8 @@ def test_shadow_loader_is_report_flagged_and_fail_closed(tmp_path) -> None:
             report_enabled=True,
         )
         assert "spring_gamma_v3_shadow" not in skipped
+        assert skipped["spring_gamma_v3_projection_diagnostic"]["status"] == "rejected"
+        assert skipped["spring_gamma_v3_projection_diagnostic"]["reason"] == reason
 
     (latest / "spring_gamma_v3_shadow.json").write_text(
         json.dumps(shadow),
@@ -208,6 +219,212 @@ def test_shadow_loader_is_report_flagged_and_fail_closed(tmp_path) -> None:
         report_enabled=True,
     )
     assert "spring_gamma_v3_shadow" not in unknown_segment
+
+
+def test_future_clock_tolerance_and_durable_rth_state_window_are_auditable(
+    tmp_path,
+) -> None:
+    latest = tmp_path / "latest"
+    latest.mkdir()
+
+    def state_prediction(
+        at: datetime,
+        state: str,
+        prediction_id: str,
+    ) -> dict[str, object]:
+        prediction = _shadow()
+        prediction.update(
+            {
+                "as_of": at.isoformat(),
+                "prediction_id": prediction_id,
+                "input_fingerprint": f"input-{prediction_id}",
+                "rth_market_state": {
+                    "schema_version": "market_state_5m.v1",
+                    "rule_version": "market_state_5m_eight_variable_rules.v1",
+                    "as_of": at.isoformat(),
+                    "state": state,
+                    "status": "ready" if state != "UNCERTAIN" else "uncertain",
+                    "D": 8 if state == "TREND_UP" else 0,
+                    "Q": {
+                        "quality": "high",
+                        "efficiency_ratio": 0.72 if state == "TREND_UP" else 0.12,
+                        "vwap_cross_count": 0 if state == "TREND_UP" else 3,
+                    },
+                    "V": {"state": "normal", "same_time_range_ratio": 1.0},
+                    "input_availability": {
+                        "required_count": 8,
+                        "available_count": 8,
+                        "complete": True,
+                    },
+                    "action_authority": "none",
+                    "actionable": False,
+                },
+            }
+        )
+        return prediction
+
+    predictions = [
+        state_prediction(NOW - timedelta(minutes=14), "LOW_VOL_RANGE", "p-1"),
+        state_prediction(NOW - timedelta(minutes=8), "LOW_VOL_RANGE", "p-2"),
+        state_prediction(NOW - timedelta(minutes=4), "TREND_UP", "p-3"),
+    ]
+    future = state_prediction(
+        NOW + timedelta(seconds=2, milliseconds=750),
+        "TREND_UP",
+        "p-4",
+    )
+    raw = tmp_path / "features" / "spring_gamma_v3" / "date=2026-07-24" / "predictions.jsonl"
+    raw.parent.mkdir(parents=True)
+    raw.write_text(
+        "".join(json.dumps(row) + "\n" for row in predictions),
+        encoding="utf-8",
+    )
+    (latest / "spring_gamma_v3_shadow.json").write_text(
+        json.dumps(future),
+        encoding="utf-8",
+    )
+    payload: dict[str, object] = {
+        "expiry": "20260724",
+        "trading_date": "2026-07-24",
+        "minute_market_frame": {
+            "session_id": "2026-07-24",
+            "diagnostics": {"segment": "rth"},
+        },
+    }
+
+    _attach(payload, tmp_path, report_enabled=True)
+
+    assert payload["spring_gamma_v3_shadow"] == future
+    assert payload["spring_gamma_v3_projection_diagnostic"]["status"] == "attached"
+    assert (
+        payload["spring_gamma_v3_projection_diagnostic"]["reason"]
+        == "projection_future_within_tolerance"
+    )
+    window = payload["spring_gamma_v3_state_window"]
+    assert window == {
+        "schema_version": "spring_gamma_v3_state_window.v1",
+        "session_id": "2026-07-24",
+        "session": "rth",
+        "expiry": "20260724",
+        "window_start": (NOW - timedelta(minutes=15)).isoformat(),
+        "window_end": NOW.isoformat(),
+        "window_minutes": 15,
+        "sample_count": 4,
+        "states": ["TREND_UP", "LOW_VOL_RANGE"],
+        "counts": {"TREND_UP": 2, "LOW_VOL_RANGE": 2},
+        "five_minute_slot_count": 4,
+        "five_minute_slot_counts": {"TREND_UP": 2, "LOW_VOL_RANGE": 2},
+        "latest_state": "TREND_UP",
+        "latest_state_as_of": future["as_of"],
+        "future_tolerance_seconds": 5.0,
+        "max_future_skew_seconds": 2.75,
+        "source": "durable_spring_gamma_v3_predictions",
+        "action_authority": "none",
+        "actionable": False,
+    }
+
+    rendered = render_status_template(payload, [], NOW)
+    assert (
+        "RTH状态15m  TREND_UP 2样本/2档 · LOW_VOL_RANGE 2样本/2档 · "
+        "最新 TREND_UP · 覆盖 4样本/4档　只读"
+    ) in rendered
+    audit = build_pricing_audit_record(
+        payload,
+        generated_at=NOW,
+        report_kind="status",
+        template=rendered,
+        delivered_text=rendered,
+        writer="template",
+        delivered_ok=True,
+    )
+    assert audit["spring_gamma_v3_state_window"] == window
+    assert audit["spring_gamma_v3_projection_diagnostic"]["reason"] == (
+        "projection_future_within_tolerance"
+    )
+
+
+def test_state_window_uses_precise_causal_boundary_not_minute_bucket(
+    tmp_path,
+) -> None:
+    et = ZoneInfo("America/New_York")
+    report_now = datetime(2026, 7, 24, 10, 45, 8, tzinfo=et)
+    window_start = report_now - timedelta(minutes=15)
+
+    def prediction(
+        at: datetime,
+        state: str,
+        prediction_id: str,
+    ) -> dict[str, object]:
+        row = _shadow()
+        row.update(
+            {
+                "as_of": at.isoformat(),
+                "prediction_id": prediction_id,
+                "input_fingerprint": f"input-{prediction_id}",
+                "rth_market_state": {
+                    "schema_version": "market_state_5m.v1",
+                    "state": state,
+                    "action_authority": "none",
+                    "actionable": False,
+                },
+            }
+        )
+        return row
+
+    rows = [
+        prediction(
+            window_start - timedelta(milliseconds=1),
+            "UNCERTAIN",
+            "before-window",
+        ),
+        # 10:30:30 ET is causally inside a 10:45:08 report window even though
+        # it shares the start minute's bucket.
+        prediction(
+            window_start + timedelta(seconds=22),
+            "LOW_VOL_RANGE",
+            "inside-start-minute",
+        ),
+        # Content fingerprints can remain unchanged across real minute ticks;
+        # the as-of clock, not prediction_id alone, distinguishes observations.
+        prediction(
+            report_now - timedelta(minutes=2),
+            "LOW_VOL_RANGE",
+            "inside-end",
+        ),
+        prediction(report_now - timedelta(seconds=1), "TREND_UP", "inside-end"),
+        prediction(report_now - timedelta(seconds=1), "TREND_UP", "inside-end"),
+        prediction(
+            report_now + timedelta(seconds=6),
+            "LOW_VOL_RANGE",
+            "future-beyond-tolerance",
+        ),
+    ]
+    raw = tmp_path / "features" / "spring_gamma_v3" / "date=2026-07-24" / "predictions.jsonl"
+    raw.parent.mkdir(parents=True)
+    raw.write_text(
+        "".join(json.dumps(row) + "\n" for row in rows),
+        encoding="utf-8",
+    )
+    future_latest = prediction(
+        report_now + timedelta(seconds=2),
+        "TREND_UP",
+        "future-within-tolerance",
+    )
+
+    window = build_spring_gamma_v3_state_window(
+        tmp_path,
+        now=report_now,
+        session_id="2026-07-24",
+        expiry="20260724",
+        latest_candidate=future_latest,
+    )
+
+    assert window["window_start"] == window_start.isoformat()
+    assert window["window_end"] == report_now.isoformat()
+    assert window["sample_count"] == 4
+    assert window["counts"] == {"TREND_UP": 2, "LOW_VOL_RANGE": 2}
+    assert window["latest_state"] == "TREND_UP"
+    assert window["max_future_skew_seconds"] == 2.0
 
 
 def test_ready_and_abstain_shadow_lines_are_deterministic_and_two_decimal() -> None:
@@ -427,9 +644,7 @@ def test_writer_and_pricing_audit_keep_bounded_non_authoritative_shadow() -> Non
     assert "不得据此修改生产 guidance、候选、裁决、限价或下单动作" in (
         SPRING_GAMMA_V3_SHADOW_SYSTEM_RULE
     )
-    assert "不得据此修改生产 guidance、候选、裁决、限价或下单动作" in (
-        STATUS_BRIEF_SYSTEM_PROMPT
-    )
+    assert "不得据此修改生产 guidance、候选、裁决、限价或下单动作" in (STATUS_BRIEF_SYSTEM_PROMPT)
 
     audit = build_pricing_audit_record(
         payload,

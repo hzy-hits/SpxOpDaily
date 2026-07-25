@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import datetime
 
 from spx_spark.analytics.options.chain import median_strike_step, pair_by_strike
@@ -30,6 +31,7 @@ from spx_spark.analytics.options.pricing import (
     wing_iv_at_delta,
 )
 from spx_spark.analytics.options.probability import probability_for_level
+from spx_spark.analytics.options.quote_policy import option_analytical_pricing_allowed
 from spx_spark.analytics.options.quality import build_coverage
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 from spx_spark.marketdata import OptionRight, Quote
@@ -43,7 +45,17 @@ def build_expiry_map(
     as_of: datetime,
     underlier_mismatch: bool = False,
 ) -> ExpiryOptionsMap:
-    coverage = build_coverage(quotes, as_of=as_of)
+    coverage_quotes = quotes
+    quotes = [
+        quote
+        for quote in quotes
+        if not (
+            isinstance(quote.raw, Mapping)
+            and quote.raw.get("analytical_only") is True
+        )
+        or option_analytical_pricing_allowed(quote)
+    ]
+    coverage = build_coverage(coverage_quotes, as_of=as_of)
     pairs = pair_by_strike(quotes)
     strikes = sorted(pairs)
     warnings: list[str] = []
@@ -242,7 +254,7 @@ def build_expiry_map(
 
     return ExpiryOptionsMap(
         expiry=expiry,
-        option_count=len(quotes),
+        option_count=len(coverage_quotes),
         strike_count=len(strikes),
         atm_strike=atm_strike,
         atm_call_mid=atm_call_mid,

@@ -53,9 +53,19 @@ below the YAML default until removed).
 The Paper username receives shared Live subscriptions only while the sharing
 Live username is not consuming them in TWS, Mobile, or Client Portal. IBKR
 error `10197` is therefore an entitlement-owner conflict, not a line-capacity
-or rotation failure. The collector preserves that reason through its cooldown
-and probes every 15 seconds so it rebuilds the `54 + 24` SPXW plan promptly
-after the Live session releases the data.
+or rotation failure. The collector preserves that reason through a dedicated
+circuit breaker. Non-invasive probes start after
+`IBKR_CONFLICT_PROBE_SECONDS` and back off exponentially to
+`IBKR_CONFLICT_PROBE_MAX_SECONDS`; only a flush with fresh, usable data closes
+the circuit. A TCP reconnect alone does not reset it, and the collector never
+preempts or logs out the external Live session.
+
+The stream also writes
+`<MARKET_DATA_DATA_ROOT>/latest/ibkr_stream_health.json`. This projection keeps
+systemd process state separate from market-data readiness with explicit
+`process_active`, `data_plane_healthy`, `policy_blocked`, `retry_at`,
+`circuit_state`, and `reason` fields. Operators must not interpret an active
+systemd unit as proof that the IBKR data plane is healthy.
 
 Secrets and operator-private endpoints stay out of YAML. API keys, app secrets,
 device-specific Bark URLs, Feishu webhook URLs/secrets and other credentials
@@ -161,6 +171,15 @@ API streamer login is approved and ES/MES messages are production inputs.
 SPXW option coverage remains an independent health dimension; a connected
 WebSocket does not imply that GTH option quotes are available. See
 [schwab-primary-ibkr-fallback.md](schwab-primary-ibkr-fallback.md).
+
+Spring Gamma's tracked default
+`spring_gamma_v3.min_paired_strikes=13` is the minimum number of complete C/P
+pairs whose two legs independently pass the analytical gate. It is not the
+density target: coverage still reports progress against the nearest 61
+strikes, and labels 13–48 pairs only as `core_covered`. OI/volume from a
+rejected analytical leg may remain visible for source auditing but cannot
+satisfy the pair minimum. Local overrides must not lower this gate merely to
+make a historical replay reach the 75% daily acceptance threshold.
 
 Every setting consumed with `runtime_value("path.to.setting")` must have both
 `value` and `description`. The architecture tests reject new literal defaults

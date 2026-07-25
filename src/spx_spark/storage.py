@@ -5,7 +5,7 @@ import json
 import logging
 import os
 from collections import defaultdict
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
@@ -27,6 +27,7 @@ from spx_spark.marketdata import (
     choose_best_quote,
     parse_timestamp,
     provider_state_from_dict,
+    quality_from_market_data_type,
     quote_from_dict,
     quote_use_decision,
 )
@@ -358,8 +359,135 @@ def merge_option_observations(left: Quote, right: Quote) -> Quote:
     def pricing_time(quote: Quote) -> datetime:
         return as_utc(quote.quote_time or quote.trade_time or quote.received_at)
 
-    def structure_time(quote: Quote) -> datetime:
-        return as_utc(quote.structure_time or quote.received_at)
+    def field_time(quote: Quote, field: str) -> datetime:
+        raw = quote.raw if isinstance(quote.raw, Mapping) else {}
+        explicit = parse_timestamp(raw.get(f"{field}_observed_at"))
+        if explicit is not None:
+            return as_utc(explicit)
+        field_provider = raw.get(f"{field}_provider")
+        if field_provider is not None and str(field_provider) != quote.provider.value:
+            # A merged field belongs to a different provider, so neither the
+            # top-level structure clock nor this flush's receipt time proves
+            # that provider re-observed it. Retain the value for forensics but
+            # give it a deterministically stale clock until explicit
+            # provenance is available.
+            return datetime(1970, 1, 1, tzinfo=timezone.utc)
+        if quote.structure_time is not None:
+            return as_utc(quote.structure_time)
+        if (
+            field in {"greeks", "open_interest"}
+            and quote.provider is Provider.IBKR
+            and quote.sampling_mode is not None
+        ):
+            return datetime(1970, 1, 1, tzinfo=timezone.utc)
+        return as_utc(quote.received_at)
+
+    def pricing_observed_at(quote: Quote) -> datetime:
+        raw = quote.raw if isinstance(quote.raw, Mapping) else {}
+        explicit = parse_timestamp(raw.get("pricing_observed_at"))
+        return as_utc(explicit or quote.last_update_at or quote.received_at)
+
+    def bool_or_none(value: object) -> bool | None:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)) and value in {0, 1}:
+            return bool(value)
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"true", "1", "yes"}:
+                return True
+            if normalized in {"false", "0", "no"}:
+                return False
+        return None
+
+    def generic_delayed(raw: Mapping[str, object]) -> bool | None:
+        values: list[bool] = []
+        for key, value in raw.items():
+            normalized = "".join(
+                character for character in str(key).lower() if character.isalnum()
+            )
+            if normalized not in {"isdelayed", "delayed"}:
+                continue
+            parsed = bool_or_none(value)
+            if parsed is not None:
+                values.append(parsed)
+        if True in values:
+            return True
+        if False in values:
+            return False
+        return None
+
+    def field_provenance(
+        quote: Quote,
+        field: str,
+        *,
+        observed_at: datetime,
+        source_at: datetime | None = None,
+    ) -> dict[str, object]:
+        source_raw = quote.raw if isinstance(quote.raw, Mapping) else {}
+        provider_value = source_raw.get(f"{field}_provider")
+        provider = str(provider_value or quote.provider.value)
+        same_provider = provider == quote.provider.value
+        sampling = source_raw.get(f"{field}_sampling_mode")
+        if sampling is None and same_provider:
+            sampling = quote.sampling_mode
+        market_data_type = source_raw.get(f"{field}_market_data_type")
+        if market_data_type is None and same_provider:
+            market_data_type = quote.market_data_type
+        explicit_delayed = bool_or_none(
+            source_raw.get(f"{field}_explicit_delayed")
+        )
+        if explicit_delayed is None and same_provider:
+            explicit_delayed = generic_delayed(source_raw)
+        entitlement = bool_or_none(source_raw.get(f"{field}_live_entitlement"))
+        entitlement_source = source_raw.get(f"{field}_live_entitlement_source")
+        feed_mode = quality_from_market_data_type(market_data_type)
+        if explicit_delayed is True:
+            entitlement = False
+            entitlement_source = "explicit_delayed"
+        elif feed_mode in {
+            MarketDataQuality.FROZEN,
+            MarketDataQuality.DELAYED,
+            MarketDataQuality.DELAYED_FROZEN,
+        }:
+            entitlement = False
+            entitlement_source = f"market_data_type_{feed_mode.value}"
+        elif same_provider and quote.quality in {
+            MarketDataQuality.FROZEN,
+            MarketDataQuality.DELAYED,
+            MarketDataQuality.DELAYED_FROZEN,
+        }:
+            entitlement = False
+            entitlement_source = f"quality_{quote.quality.value}"
+        elif entitlement is None and explicit_delayed is False:
+            entitlement = True
+            entitlement_source = (
+                "schwab_explicit_not_delayed"
+                if provider == Provider.SCHWAB.value
+                else "explicit_not_delayed"
+            )
+        elif entitlement is None and feed_mode is MarketDataQuality.LIVE:
+            entitlement = True
+            entitlement_source = "market_data_type_live"
+        elif (
+            entitlement is None
+            and same_provider
+            and quote.quality is MarketDataQuality.LIVE
+        ):
+            entitlement = True
+            entitlement_source = "quality_live"
+        payload: dict[str, object] = {
+            f"{field}_provider": provider,
+            f"{field}_sampling_mode": sampling,
+            f"{field}_market_data_type": market_data_type,
+            f"{field}_explicit_delayed": explicit_delayed,
+            f"{field}_live_entitlement": entitlement,
+            f"{field}_live_entitlement_source": entitlement_source,
+            f"{field}_observed_at": observed_at.isoformat(),
+        }
+        if source_at is not None:
+            payload[f"{field}_source_at"] = source_at.isoformat()
+        return payload
 
     # A priceless row (e.g. a Schwab MISSING placeholder from a partial batch
     # response) must not displace last-known-good pricing; the kept quote_time
@@ -369,19 +497,56 @@ def merge_option_observations(left: Quote, right: Quote) -> Quote:
         key=lambda quote: (
             quote.has_price,
             pricing_time(quote),
+            pricing_observed_at(quote),
             quote.mid is not None,
         ),
     )
     greek_candidates = [quote for quote in (left, right) if quote.greeks is not None]
     oi_candidates = [quote for quote in (left, right) if quote.open_interest is not None]
-    greek_source = max(greek_candidates, key=structure_time) if greek_candidates else None
-    oi_source = max(oi_candidates, key=structure_time) if oi_candidates else None
+    greek_source = (
+        max(greek_candidates, key=lambda quote: field_time(quote, "greeks"))
+        if greek_candidates
+        else None
+    )
+    oi_source = (
+        max(oi_candidates, key=lambda quote: field_time(quote, "open_interest"))
+        if oi_candidates
+        else None
+    )
     latest_received = max(as_utc(left.received_at), as_utc(right.received_at))
+    raw = dict(pricing.raw or {})
+    raw.update(
+        field_provenance(
+            pricing,
+            "pricing",
+            observed_at=pricing_observed_at(pricing),
+            source_at=pricing_time(pricing),
+        )
+    )
+    if greek_source is not None:
+        raw.update(
+            field_provenance(
+                greek_source,
+                "greeks",
+                observed_at=field_time(greek_source, "greeks"),
+            )
+        )
+    if oi_source is not None:
+        raw.update(
+            field_provenance(
+                oi_source,
+                "open_interest",
+                observed_at=field_time(oi_source, "open_interest"),
+            )
+        )
     if greek_source is None and oi_source is None:
-        return replace(pricing, received_at=latest_received)
+        return replace(pricing, received_at=latest_received, raw=raw)
     structure_times = [
-        structure_time(source)
-        for source in (greek_source, oi_source)
+        field_time(source, field)
+        for source, field in (
+            (greek_source, "greeks"),
+            (oi_source, "open_interest"),
+        )
         if source is not None
     ]
     return replace(
@@ -397,6 +562,7 @@ def merge_option_observations(left: Quote, right: Quote) -> Quote:
             if oi_source is not None
             else None
         ),
+        raw=raw,
     )
 
 
@@ -577,6 +743,13 @@ def configured_quote_use_decision(
         allow_frozen=allow_frozen,
         prefer_quote_time=_is_ibkr_rotated_option(quote),
     )
+    if isinstance(quote.raw, Mapping) and quote.raw.get("analytical_only") is True:
+        return replace(
+            decision,
+            alert_allowed=False,
+            pricing_allowed=False,
+            reason="analytical_only_non_executable",
+        )
     if not _is_ibkr_rotated_option(quote) or not decision.research_usable:
         return decision
     pricing_decision = quote_use_decision(

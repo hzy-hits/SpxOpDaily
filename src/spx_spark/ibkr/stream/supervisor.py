@@ -7,7 +7,9 @@ from dataclasses import dataclass, field
 from spx_spark.config import IbkrStreamSettings, RuntimePolicySettings, StorageSettings
 from spx_spark.ibkr.stream import deps as stream_deps
 from spx_spark.ibkr.stream.collector import StreamCollector
+from spx_spark.ibkr.stream.health import persist_stream_health
 from spx_spark.ibkr.stream.models import (
+    CompetingSessionCircuit,
     ReconnectPolicy,
     StreamAction,
     effective_hot_flush_sleep_seconds,
@@ -35,6 +37,7 @@ class StreamRuntime:
     storage_settings: StorageSettings
     runtime_policy: RuntimePolicySettings
     reconnect: ReconnectPolicy = field(init=False)
+    competing_session_circuit: CompetingSessionCircuit = field(init=False)
     deadline: float | None = None
     last_gateway_restart_at: float | None = None
     session_had_healthy_flush: bool = False
@@ -43,6 +46,24 @@ class StreamRuntime:
         self.reconnect = ReconnectPolicy(
             min_seconds=self.stream_settings.reconnect_min_seconds,
             max_seconds=self.stream_settings.reconnect_max_seconds,
+        )
+        conflict_min = max(
+            float(getattr(self.runtime_policy, "ibkr_conflict_probe_seconds", 5.0)),
+            0.1,
+        )
+        conflict_max = max(
+            float(
+                getattr(
+                    self.runtime_policy,
+                    "ibkr_conflict_probe_max_seconds",
+                    300.0,
+                )
+            ),
+            conflict_min,
+        )
+        self.competing_session_circuit = CompetingSessionCircuit(
+            min_seconds=conflict_min,
+            max_seconds=conflict_max,
         )
 
     def expired(self) -> bool:
@@ -67,6 +88,12 @@ class StreamRuntime:
                     unavailable_state(reason),
                     self.storage_settings,
                 )
+                self._publish_health(
+                    data_plane_healthy=False,
+                    policy_blocked=True,
+                    reason=reason,
+                    retry_in_seconds=retry_seconds,
+                )
                 log_event(
                     {
                         "task": "ibkr_stream",
@@ -86,6 +113,12 @@ class StreamRuntime:
                     unavailable_state(f"connect failed: {exc}"),
                     self.storage_settings,
                 )
+                self._publish_health(
+                    data_plane_healthy=False,
+                    policy_blocked=False,
+                    reason=f"connect failed: {exc}",
+                    retry_in_seconds=delay,
+                )
                 connect_event: dict[str, object] = {
                     "task": "ibkr_stream",
                     "event": "connect_failed",
@@ -104,6 +137,11 @@ class StreamRuntime:
                 continue
 
             log_event({"task": "ibkr_stream", "event": "connected"})
+            self._publish_health(
+                data_plane_healthy=False,
+                policy_blocked=False,
+                reason="connected; awaiting first healthy data flush",
+            )
             needs_reconnect_backoff = False
             self.session_had_healthy_flush = False
             try:
@@ -117,6 +155,11 @@ class StreamRuntime:
                     if not probe.ok:
                         event = self.collector.farm_health.mark_probe_failed(probe)
                         log_event(event.to_log_event(task="ibkr_stream"))
+                        self._publish_health(
+                            data_plane_healthy=False,
+                            policy_blocked=False,
+                            reason=f"data-plane probe failed: {probe.reason}",
+                        )
                     else:
                         self.collector.farm_health.mark_probe_succeeded()
                     self.collector.subscribe_base()
@@ -126,6 +169,11 @@ class StreamRuntime:
                     needs_reconnect_backoff = self.session_loop()
                 else:
                     persist_account_standby_state(self.storage_settings)
+                    self._publish_health(
+                        data_plane_healthy=False,
+                        policy_blocked=True,
+                        reason="account standby connected; market data inactive",
+                    )
                     log_event(
                         {
                             "task": "ibkr_stream",
@@ -144,6 +192,11 @@ class StreamRuntime:
                         unavailable_state(f"session failed: {exc}", connected=False),
                         self.storage_settings,
                     )
+                    self._publish_health(
+                        data_plane_healthy=False,
+                        policy_blocked=False,
+                        reason=f"session failed: {exc}",
+                    )
                     log_event({"task": "ibkr_stream", "event": "session_error", "error": str(exc)})
             finally:
                 self.collector.teardown()
@@ -158,6 +211,12 @@ class StreamRuntime:
                         "retry_in_seconds": delay,
                     }
                 )
+                self._publish_health(
+                    data_plane_healthy=False,
+                    policy_blocked=False,
+                    reason="session reconnect backoff",
+                    retry_in_seconds=delay,
+                )
                 self.sleep(delay)
         return 0
 
@@ -171,6 +230,13 @@ class StreamRuntime:
             )
             if position_event is not None:
                 log_event(position_event)
+            block_reason = getattr(self.collector, "market_data_block_reason", None)
+            reason = block_reason() if callable(block_reason) else None
+            self._publish_health(
+                data_plane_healthy=False,
+                policy_blocked=reason is not None,
+                reason=reason or "account standby; market data inactive",
+            )
             if not self.collector.ib.isConnected() or self.collector.tws_connectivity_lost:
                 persist_state_only(
                     unavailable_state("IBKR account standby disconnected"),
@@ -182,6 +248,11 @@ class StreamRuntime:
                         "event": "account_standby_disconnected",
                     }
                 )
+                self._publish_health(
+                    data_plane_healthy=False,
+                    policy_blocked=True,
+                    reason="account standby disconnected",
+                )
                 return True
             self.session_had_healthy_flush = True
             if not self.collector.connection_required():
@@ -191,6 +262,11 @@ class StreamRuntime:
                         "event": "account_standby_not_required",
                     }
                 )
+                self._publish_health(
+                    data_plane_healthy=False,
+                    policy_blocked=True,
+                    reason="account standby no longer required",
+                )
                 return False
             if self.collector.market_data_allowed():
                 log_event(
@@ -198,6 +274,11 @@ class StreamRuntime:
                         "task": "ibkr_stream",
                         "event": "market_data_activation_requested",
                     }
+                )
+                self._publish_health(
+                    data_plane_healthy=False,
+                    policy_blocked=False,
+                    reason="market-data activation requested",
                 )
                 return False
         return False
@@ -232,6 +313,11 @@ class StreamRuntime:
                     ),
                     self.storage_settings,
                 )
+                self._publish_health(
+                    data_plane_healthy=False,
+                    policy_blocked=False,
+                    reason="IBKR subscription lifecycle failed; reconnecting",
+                )
                 log_event(
                     {
                         "task": "ibkr_stream",
@@ -248,7 +334,37 @@ class StreamRuntime:
                 gateway_restart=gateway_restart,
             )
             if action is StreamAction.CONTINUE:
-                self.session_had_healthy_flush = True
+                data_plane_healthy = bool(
+                    event.get(
+                        "data_plane_healthy",
+                        event.get("provider_status") == "available"
+                        and int(event.get("quotes") or 0) > 0
+                        and event.get("farm_status", "ok") == "ok",
+                    )
+                )
+                reason = (
+                    "healthy market-data flush"
+                    if data_plane_healthy
+                    else str(
+                        event.get("provider_reason")
+                        or f"data plane {event.get('provider_status', 'unknown')}"
+                    )
+                )
+                if data_plane_healthy:
+                    self.session_had_healthy_flush = True
+                    self.competing_session_circuit.close()
+                    clear_conflict = getattr(
+                        self.collector,
+                        "clear_market_data_conflict",
+                        None,
+                    )
+                    if callable(clear_conflict):
+                        clear_conflict()
+                self._publish_health(
+                    data_plane_healthy=data_plane_healthy,
+                    policy_blocked=False,
+                    reason=reason,
+                )
                 next_flush_at = flush_started_at + flush_interval
                 continue
 
@@ -262,12 +378,22 @@ class StreamRuntime:
 
             if action is StreamAction.POLICY_BLOCKED:
                 log_event({"task": "ibkr_stream", "event": "policy_blocked_mid_session"})
+                self._publish_health(
+                    data_plane_healthy=False,
+                    policy_blocked=True,
+                    reason="runtime policy blocked market data mid-session",
+                )
                 return False
 
             # RECONNECT: fall back to the outer loop's backoff.
             persist_state_only(
                 unavailable_state("IBKR disconnected mid-session", connected=False),
                 self.storage_settings,
+            )
+            self._publish_health(
+                data_plane_healthy=False,
+                policy_blocked=False,
+                reason="IBKR disconnected mid-session",
             )
             log_event({"task": "ibkr_stream", "event": "disconnected"})
             return True
@@ -305,6 +431,7 @@ class StreamRuntime:
         return False
 
     def _defer_competing_session(self, *, phase: str) -> None:
+        delay = self.competing_session_circuit.open(now_monotonic=time.monotonic())
         persist_state_only(
             unavailable_state(
                 "competing session blocks live market data (IBKR 10197)",
@@ -312,15 +439,21 @@ class StreamRuntime:
             ),
             self.storage_settings,
         )
-        self.collector.defer_market_data_after_conflict(
-            seconds=self.runtime_policy.ibkr_conflict_probe_seconds
+        self.collector.defer_market_data_after_conflict(seconds=delay)
+        self._publish_health(
+            data_plane_healthy=False,
+            policy_blocked=True,
+            reason="competing session blocks live market data (IBKR 10197)",
+            retry_in_seconds=delay,
         )
         log_event(
             {
                 "task": "ibkr_stream",
                 "event": "competing_session",
                 "phase": phase,
-                "probe_in_seconds": self.runtime_policy.ibkr_conflict_probe_seconds,
+                "probe_in_seconds": delay,
+                "conflict_count": self.competing_session_circuit.failures,
+                "circuit_state": "open",
                 "account_standby_eligible": self.collector.broker_settings.account_read_enabled,
             }
         )
@@ -348,6 +481,12 @@ class StreamRuntime:
             ),
             self.storage_settings,
         )
+        self._publish_health(
+            data_plane_healthy=False,
+            policy_blocked=False,
+            reason="IBKR data farms broken; restarting gateway",
+            retry_in_seconds=self.stream_settings.gateway_restart_cooldown_seconds,
+        )
         restarted = request_gateway_restart()
         self.last_gateway_restart_at = time.monotonic()
         self.collector.farm_health.reset()
@@ -363,6 +502,62 @@ class StreamRuntime:
         )
         self.collector.teardown()
         self.sleep(self.stream_settings.gateway_restart_cooldown_seconds)
+
+    def _publish_health(
+        self,
+        *,
+        data_plane_healthy: bool,
+        policy_blocked: bool,
+        reason: str,
+        retry_in_seconds: float | None = None,
+    ) -> None:
+        """Best-effort projection; telemetry failure must not stop collection."""
+
+        if not getattr(self.storage_settings, "data_root", None):
+            return
+        now_monotonic = time.monotonic()
+        circuit_state = self.competing_session_circuit.state(
+            now_monotonic=now_monotonic
+        )
+        circuit_remaining = self.competing_session_circuit.remaining_seconds(
+            now_monotonic=now_monotonic
+        )
+        if circuit_state == "open":
+            retry_in_seconds = circuit_remaining
+            policy_blocked = True
+            reason = "competing live session cooldown (IBKR 10197)"
+        connected = bool(
+            getattr(getattr(self.collector, "ib", None), "isConnected", lambda: False)()
+        )
+        try:
+            persist_stream_health(
+                self.storage_settings,
+                data_plane_healthy=data_plane_healthy,
+                policy_blocked=policy_blocked,
+                reason=reason,
+                connected=connected,
+                circuit_state=circuit_state,
+                conflict_count=self.competing_session_circuit.failures,
+                retry_in_seconds=retry_in_seconds,
+                connection_generation=getattr(
+                    self.collector,
+                    "connection_generation",
+                    None,
+                ),
+                max_age_seconds=max(
+                    float(getattr(self.stream_settings, "policy_check_seconds", 30.0))
+                    * 3.0,
+                    30.0,
+                ),
+            )
+        except OSError as exc:
+            log_event(
+                {
+                    "task": "ibkr_stream",
+                    "event": "health_projection_failed",
+                    "error_type": type(exc).__name__,
+                }
+            )
 
     def sleep(self, seconds: float) -> None:
         remaining = seconds

@@ -21,6 +21,7 @@ from spx_spark.analytics.options.pricing import finite_float
 from spx_spark.config import NY_TZ, StorageSettings
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 from spx_spark.application.order_map.render import _candidate_by_play, _dash
+from spx_spark.application.order_map.report_clock import rth_report_slot
 
 
 def default_state_path(settings: StorageSettings) -> str:
@@ -35,13 +36,6 @@ def default_state_path(settings: StorageSettings) -> str:
 REFRESH_COOLDOWN_SECONDS_DEFAULT = 1500.0
 MATERIAL_LEVEL_MOVE_POINTS = 5.0
 MATERIAL_EM_REL_CHANGE = 0.20
-
-# --- status report: fixed cadence across the partner's working day (Beijing
-# 08:15 -> next-day 01:30 every 15 minutes -- density is set by the systemd
-# timer, this window only bounds it) ---
-
-STATUS_WINDOW_START = time(8, 15)
-STATUS_WINDOW_END_EARLY = time(1, 30)  # inclusive last fire
 
 
 def payload_fingerprint(payload: dict[str, Any]) -> dict[str, Any]:
@@ -115,29 +109,24 @@ def within_refresh_window(now_utc: datetime) -> bool:
 
 
 def within_status_window(now_utc: datetime) -> bool:
-    """Beijing 08:15 through next-day 01:30: SPX GTH through the US session.
+    """Accept SPX GTH or a bounded ET RTH quarter-hour heartbeat.
 
-    The timer fires every 15 minutes; this gate only bounds the day.
-    The after-midnight leg belongs to the previous day's session, so it runs
-    on Tue-Sat local mornings (Sat 00:xx = Friday's US session). Last fire at
-    01:30 is inclusive.
+    Session ownership comes from the exchange calendar.  This avoids the
+    daylight-saving and after-midnight failure modes of a Beijing wall-clock
+    cutoff while retaining the existing GTH reporting window.
     """
-    local = now_utc.astimezone(SHANGHAI_TZ)
-    if not exchange_session_relevant(now_utc):
+
+    if now_utc.tzinfo is None or now_utc.utcoffset() is None:
         return False
-    if local.time() >= STATUS_WINDOW_START:
-        return local.weekday() < 5
-    if local.time() <= STATUS_WINDOW_END_EARLY:
-        return local.weekday() in (1, 2, 3, 4, 5)
-    return False
+    return DEFAULT_MARKET_CALENDAR.is_spx_gth_open(now_utc) or rth_report_slot(now_utc) is not None
 
 
 def exchange_session_relevant(now_utc: datetime) -> bool:
-    local = now_utc.astimezone(SHANGHAI_TZ)
-    associated_date = local.date()
-    if local.time() < STATUS_WINDOW_START:
-        associated_date -= timedelta(days=1)
-    return DEFAULT_MARKET_CALENDAR.is_trading_day(associated_date)
+    if now_utc.tzinfo is None or now_utc.utcoffset() is None:
+        return False
+    return DEFAULT_MARKET_CALENDAR.is_spx_gth_open(now_utc) or DEFAULT_MARKET_CALENDAR.is_rth_open(
+        now_utc
+    )
 
 
 def minutes_to_open(now_utc: datetime) -> int | None:

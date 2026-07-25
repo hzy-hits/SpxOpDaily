@@ -8,7 +8,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from spx_spark.analytics.options.quote_policy import gth_analytical_quote
+from spx_spark.analytics.options.quote_policy import (
+    gth_analytical_quote,
+    option_analytical_iv_allowed,
+    option_field_live_entitlement,
+)
 from spx_spark.config import StorageSettings
 from spx_spark.greek_reference import (
     SCHEMA_VERSION,
@@ -17,7 +21,7 @@ from spx_spark.greek_reference import (
     write_zero_dte_greeks_snapshot,
 )
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR, ET
-from spx_spark.marketdata import Quote, quote_use_decision
+from spx_spark.marketdata import Quote
 from spx_spark.options_map import (
     UNDERLIER_MISMATCH_SOURCES,
     OptionsMap,
@@ -44,21 +48,30 @@ def _analytically_fresh_quotes(
 ) -> tuple[Quote, ...]:
     if as_of.tzinfo is None or as_of.utcoffset() is None:
         return ()
-    if not DEFAULT_MARKET_CALENDAR.is_spx_gth_open(as_of):
-        return tuple(
-            quote
-            for quote in quotes
-            if configured_quote_use_decision(quote, as_of=as_of).pricing_allowed
+
+    def allowed(quote: Quote) -> bool:
+        raw = quote.raw if isinstance(quote.raw, Mapping) else {}
+        if raw.get("analytical_only") is True:
+            return option_analytical_iv_allowed(quote)
+        return bool(
+            configured_quote_use_decision(quote, as_of=as_of).pricing_allowed
+            and option_field_live_entitlement(quote, field="greeks")
+            and quote.greeks is not None
         )
+
+    if not DEFAULT_MARKET_CALENDAR.is_spx_gth_open(as_of):
+        return tuple(quote for quote in quotes if allowed(quote))
     max_age = load_app_settings().analytics.gth_max_chain_age_seconds
     return tuple(
-        quote
+        normalized
         for quote in quotes
-        if quote_use_decision(
-            gth_analytical_quote(quote, as_of=as_of, max_age_seconds=max_age),
-            as_of=as_of,
-            stale_after_seconds=max_age,
-        ).pricing_allowed
+        if allowed(
+            normalized := gth_analytical_quote(
+                quote,
+                as_of=as_of,
+                max_age_seconds=max_age,
+            )
+        )
     )
 
 
@@ -126,6 +139,24 @@ def _unavailable_reference(
 
 
 def _same_day_quotes(state: LatestState, expiry: str) -> tuple[Any, ...]:
+    if state.as_of.tzinfo is None or state.as_of.utcoffset() is None:
+        return tuple(
+            quote
+            for quote in state.best_quotes
+            if is_spxw_option(quote) and (quote.instrument.expiry or "") == expiry
+        )
+    from spx_spark.options_map import group_spxw_option_quotes
+
+    return tuple(
+        quote
+        for quote in group_spxw_option_quotes(state).get(expiry, ())
+        if is_spxw_option(quote) and (quote.instrument.expiry or "") == expiry
+    )
+
+
+def _canonical_same_day_quotes(state: LatestState, expiry: str) -> tuple[Quote, ...]:
+    """Return canonical quotes for strict pricing checks, never analytical clones."""
+
     return tuple(
         quote
         for quote in state.best_quotes
@@ -145,7 +176,10 @@ def _signed_oi_gex_proxy(
         quote
         for quote in quotes
         if is_spxw_zero_dte(quote, as_of=state.as_of)
-        and configured_quote_use_decision(quote, as_of=state.as_of).pricing_allowed
+        and (
+            configured_quote_use_decision(quote, as_of=state.as_of).pricing_allowed
+            or option_analytical_iv_allowed(quote)
+        )
     )
     rows = (
         build_gex_by_strike(
@@ -343,7 +377,7 @@ def sample_zero_dte_greeks_shadow(
     model = payload.get("model")
     spot = model.get("spot") if isinstance(model, Mapping) else None
     signed_gex_proxy = _signed_oi_gex_proxy(
-        same_day_quotes,
+        _canonical_same_day_quotes(state, expiry),
         state=state,
         spot=float(spot) if isinstance(spot, (int, float)) else None,
     )

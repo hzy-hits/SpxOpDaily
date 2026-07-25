@@ -4,6 +4,29 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 USER_UNIT_DIR="$HOME/.config/systemd/user"
 
+if ! git -C "$ROOT" fetch --quiet origin master; then
+  echo "Refusing deployment: could not refresh origin/master" >&2
+  exit 1
+fi
+DEPLOY_BRANCH="$(git -C "$ROOT" branch --show-current)"
+DEPLOY_HEAD="$(git -C "$ROOT" rev-parse HEAD)"
+DEPLOY_ORIGIN_MASTER="$(git -C "$ROOT" rev-parse refs/remotes/origin/master)"
+if [[ "$DEPLOY_BRANCH" != "master" ]]; then
+  echo "Refusing deployment from branch: $DEPLOY_BRANCH (expected master)" >&2
+  exit 1
+fi
+if [[ -n "$(git -C "$ROOT" status --porcelain=v1)" ]]; then
+  echo "Refusing deployment from a dirty worktree" >&2
+  exit 1
+fi
+if [[ "$DEPLOY_HEAD" != "$DEPLOY_ORIGIN_MASTER" ]]; then
+  echo "Refusing deployment: HEAD does not equal origin/master" >&2
+  exit 1
+fi
+
+cd "$ROOT"
+uv sync --frozen
+
 mkdir -p "$USER_UNIT_DIR"
 ln -sfn "$ROOT/systemd/spx-spark-24h.service" "$USER_UNIT_DIR/spx-spark-24h.service"
 ln -sfn "$ROOT/systemd/spx-spark-market-features-hot.service" "$USER_UNIT_DIR/spx-spark-market-features-hot.service"
@@ -13,6 +36,10 @@ ln -sfn "$ROOT/systemd/spx-spark-surface-dashboard.service" "$USER_UNIT_DIR/spx-
 ln -sfn "$ROOT/systemd/spx-spark-ibkr-stream.service" "$USER_UNIT_DIR/spx-spark-ibkr-stream.service"
 ln -sfn "$ROOT/systemd/spx-spark-post-close-review.service" "$USER_UNIT_DIR/spx-spark-post-close-review.service"
 ln -sfn "$ROOT/systemd/spx-spark-post-close-review.timer" "$USER_UNIT_DIR/spx-spark-post-close-review.timer"
+ln -sfn "$ROOT/systemd/spx-spark-rth-daily-acceptance.service" "$USER_UNIT_DIR/spx-spark-rth-daily-acceptance.service"
+ln -sfn "$ROOT/systemd/spx-spark-rth-daily-acceptance.timer" "$USER_UNIT_DIR/spx-spark-rth-daily-acceptance.timer"
+ln -sfn "$ROOT/systemd/spx-spark-order-map-status.service" "$USER_UNIT_DIR/spx-spark-order-map-status.service"
+ln -sfn "$ROOT/systemd/spx-spark-order-map-status.timer" "$USER_UNIT_DIR/spx-spark-order-map-status.timer"
 ln -sfn "$ROOT/systemd/spx-spark-morning-map.service" "$USER_UNIT_DIR/spx-spark-morning-map.service"
 ln -sfn "$ROOT/systemd/spx-spark-morning-map.timer" "$USER_UNIT_DIR/spx-spark-morning-map.timer"
 ln -sfn "$ROOT/systemd/spx-spark-maintenance-daily.service" "$USER_UNIT_DIR/spx-spark-maintenance-daily.service"
@@ -37,7 +64,9 @@ systemctl --user enable spx-spark-intraday-shock-hot.service
 systemctl --user enable spx-spark-notification-delivery.service
 systemctl --user enable spx-spark-surface-dashboard.service
 systemctl --user enable spx-spark-ibkr-stream.service
-systemctl --user enable spx-spark-post-close-review.timer
+systemctl --user enable --now spx-spark-post-close-review.timer
+systemctl --user enable --now spx-spark-rth-daily-acceptance.timer
+systemctl --user enable --now spx-spark-order-map-status.timer
 systemctl --user enable spx-spark-morning-map.timer
 systemctl --user enable --now spx-spark-maintenance-daily.timer
 systemctl --user enable --now spx-spark-maintenance-weekly.timer
@@ -54,6 +83,8 @@ echo "  spx-spark-surface-dashboard.service"
 echo "  spx-spark-surface-live.service"
 echo "  spx-spark-ibkr-stream.service"
 echo "  spx-spark-post-close-review.timer"
+echo "  spx-spark-rth-daily-acceptance.timer (17:30 America/New_York)"
+echo "  spx-spark-order-map-status.timer (exchange-local GTH/RTH clock)"
 echo "  spx-spark-morning-map.timer"
 echo "  spx-spark-maintenance-daily.timer (07:30 CST dry-run)"
 echo "  spx-spark-maintenance-weekly.timer (Sun 13:00 CST non-destructive audit)"
@@ -74,6 +105,8 @@ if [[ "${1:-}" == "--now" ]]; then
   systemctl --user restart spx-spark-intraday-shock-hot.service
   systemctl --user restart spx-spark-notification-delivery.service
   systemctl --user restart spx-spark-surface-dashboard.service
+  systemctl --user restart spx-spark-rth-daily-acceptance.timer
+  systemctl --user restart spx-spark-order-map-status.timer
   "$ROOT/scripts/install-spxw-surface-live-service.sh" --now
-  systemctl --user status spx-spark-24h.service spx-spark-market-features-hot.service spx-spark-intraday-shock-hot.service spx-spark-notification-delivery.service spx-spark-surface-dashboard.service spx-spark-surface-live.service spx-spark-ibkr-stream.service --no-pager
+  systemctl --user status spx-spark-24h.service spx-spark-market-features-hot.service spx-spark-intraday-shock-hot.service spx-spark-notification-delivery.service spx-spark-surface-dashboard.service spx-spark-surface-live.service spx-spark-ibkr-stream.service spx-spark-rth-daily-acceptance.timer spx-spark-order-map-status.timer --no-pager
 fi

@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import sys
 import time as time_module
 from dataclasses import asdict, replace
 from datetime import datetime, timedelta, timezone
@@ -16,6 +15,10 @@ from spx_spark.analytics.options.pricing import finite_float
 from spx_spark.application.globex_trend.state import load_trend_state, trend_state_path
 from spx_spark.application.market_features.greek_decision import build_greek_decision
 from spx_spark.application.market_features.state import load_json, projection_paths
+from spx_spark.application.order_map.audit_persistence import (
+    persist_order_map_pricing_audit,
+    persist_zero_dte_greeks_reference as _persist_zero_dte_greeks_reference,
+)
 from spx_spark.application.order_map.bias_machine import load_intraday_call_bias
 from spx_spark.application.order_map.call_spread_shadow import (
     build_skew_spread_shadows as _build_spread_shadows,
@@ -50,13 +53,10 @@ from spx_spark.application.order_map.prompts import (
     render_feishu_delivery_text,
     render_status_template,
 )
-from spx_spark.application.order_map.pricing_audit import (
-    append_pricing_audit,
-    build_pricing_audit_record,
-)
 from spx_spark.application.order_map.render import (
     render_template,
 )
+from spx_spark.application.order_map.report_clock import rth_report_slot
 from spx_spark.application.order_map.research import (
     _index_value,
     _research_candidates,
@@ -114,6 +114,7 @@ STATUS_KEY_WINDOW_PHASES = frozenset(
 GTH_STATUS_PHASES = frozenset({"asia_globex", "europe_session", "us_data_hour"})
 GTH_STATUS_CADENCE_SECONDS = 15.0 * 60.0
 
+
 def build_order_payload(
     state: LatestState,
     *,
@@ -124,9 +125,11 @@ def build_order_payload(
     options_map = build_options_map(state)
     warnings = list(options_map.warnings)
     front = options_map.expiries[0] if options_map.expiries else None
-    expiry = front.expiry if front is not None else DEFAULT_MARKET_CALENDAR.research_expiry(
-        now
-    ).strftime("%Y%m%d")
+    expiry = (
+        front.expiry
+        if front is not None
+        else DEFAULT_MARKET_CALENDAR.research_expiry(now).strftime("%Y%m%d")
+    )
     expected_move_points = front.expected_move_points if front is not None else None
     gamma_state = front.gamma_state if front is not None else "unknown"
     zero_gamma = front.zero_gamma if front is not None else None
@@ -329,42 +332,9 @@ def persist_zero_dte_greeks_reference(
     payload: dict[str, Any],
     storage_settings: StorageSettings,
 ) -> None:
-    reference = payload.get("_spxw_0dte_greeks_audit")
-    if not isinstance(reference, dict):
-        reference = payload.get("spxw_0dte_greeks_reference")
-    data_root = getattr(storage_settings, "data_root", None)
-    if not isinstance(reference, dict) or not isinstance(data_root, str) or not data_root:
-        return
-    try:
-        write_zero_dte_greeks_snapshot(reference, data_root=data_root)
-    except OSError as exc:
-        print(f"0DTE Greeks snapshot write failed: {exc}", file=sys.stderr)
-
-
-def persist_order_map_pricing_audit(
-    payload: dict[str, Any],
-    storage_settings: StorageSettings,
-    *,
-    now: datetime,
-    report_kind: str,
-    template: str,
-    result: dict[str, Any],
-) -> None:
-    try:
-        append_pricing_audit(
-            storage_settings.data_root,
-            build_pricing_audit_record(
-                payload,
-                generated_at=now,
-                report_kind=report_kind,
-                template=template,
-                delivered_text=str(result.get("text") or ""),
-                writer=str(result.get("writer") or "unknown"),
-                delivered_ok=result.get("delivered_ok") is True,
-            ),
-        )
-    except OSError as exc:
-        print(f"Order-map pricing audit write failed: {exc}", file=sys.stderr)
+    _persist_zero_dte_greeks_reference(
+        payload, storage_settings, writer=write_zero_dte_greeks_snapshot
+    )
 
 
 def _payload_is_thin(payload: dict[str, Any]) -> bool:
@@ -651,6 +621,20 @@ def _status_delivery_reason(
 ) -> str | None:
     if previous.get("last_status_date") != trading_date:
         return "initial_status"
+    current_rth_slot = rth_report_slot(now)
+    if current_rth_slot is not None:
+        last_status_at = finite_float(previous.get("last_status_at"))
+        previous_rth_slot = (
+            rth_report_slot(
+                datetime.fromtimestamp(last_status_at, tz=timezone.utc),
+                start_grace_seconds=GTH_STATUS_CADENCE_SECONDS - 0.001,
+            )
+            if last_status_at is not None
+            else None
+        )
+        if previous_rth_slot is not None and previous_rth_slot.key == current_rth_slot.key:
+            return None
+        return f"rth_quarter_hour_heartbeat:{current_rth_slot.key}"
     phase = str(fingerprint.get("status_phase") or "")
     previous_fingerprint = previous.get("status_fingerprint") or previous.get("fingerprint")
     previous_phase = (
@@ -699,10 +683,15 @@ def run_status(
     previous = load_order_map_state(state_path)
     storage_settings = StorageSettings.from_env()
     payload = build_order_payload_with_retry(storage_settings, now=now)
-    if _payload_is_thin(payload) and not args.force:
+    current_rth_slot = rth_report_slot(now)
+    if _payload_is_thin(payload) and not args.force and current_rth_slot is None:
         # A normal slow-poll/rotation gap; the next run gets the full snapshot.
         print(json.dumps({"skipped": True, "reason": "thin_snapshot_sampling_gap"}))
         return 0
+    if _payload_is_thin(payload) and current_rth_slot is not None:
+        warnings = payload.setdefault("warnings", [])
+        if isinstance(warnings, list):
+            warnings.append("rth_heartbeat_degraded_snapshot")
     fingerprint = _status_fingerprint(payload)
     changes = _status_material_changes(
         previous.get("status_fingerprint") or previous.get("fingerprint"),
@@ -749,11 +738,17 @@ def run_status(
         if not valid:
             text, writer = template, "template_validation_fallback"
     feishu_text = render_feishu_delivery_text(payload, changes, now, text)
+    report_occurred_at = current_rth_slot.slot_at if current_rth_slot is not None else now
+    event_identity = (
+        f"rth_slot:{current_rth_slot.key}"
+        if current_rth_slot is not None
+        else json.dumps(fingerprint, sort_keys=True, separators=(",", ":"))
+    )
     event_id = notification_event_id(
         "status",
         source="order_map_status",
-        occurred_at=now,
-        identity=json.dumps(fingerprint, sort_keys=True, separators=(",", ":")),
+        occurred_at=report_occurred_at,
+        identity=event_identity,
     )
     dispatch = dispatch_notification(
         settings,
@@ -762,7 +757,7 @@ def run_status(
             source="order_map_status",
             kind="status",
             lane="scheduled_report",
-            occurred_at=now,
+            occurred_at=report_occurred_at,
         ),
         title="SPX 15分钟市场状态",
         text=text,
@@ -788,6 +783,15 @@ def run_status(
         "bark_ok": bark_ok,
         "feishu_ok": feishu_ok,
         "delivered_ok": delivered_ok,
+        "notification_event_id": event_id,
+        "delivery_outcome": getattr(
+            dispatch,
+            "outcome",
+            "delivered" if delivered_ok else "pending",
+        ),
+        "queued_for_recovery": bool(getattr(dispatch, "queued_for_recovery", False)),
+        "occurred_at": report_occurred_at.isoformat(),
+        "report_slot_key": current_rth_slot.key if current_rth_slot is not None else None,
         "changes": changes,
         "delivery_reason": delivery_reason,
     }
@@ -819,7 +823,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--status",
         action="store_true",
-        help="Push a market status report (fixed cadence, Beijing 14:15 -> US open).",
+        help="Push an exchange-calendar GTH/RTH status heartbeat.",
     )
     return parser.parse_args(argv)
 

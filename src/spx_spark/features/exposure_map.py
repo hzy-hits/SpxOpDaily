@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from collections import Counter, defaultdict
-from dataclasses import asdict, dataclass
+from collections import defaultdict
+from dataclasses import replace
 from datetime import datetime
-from pathlib import Path
 from typing import Any
 
+from spx_spark.analytics.greeks.black_scholes import bs_delta, bs_gamma
 from spx_spark.analytics.greeks.higher_order import (
     bs_charm_per_minute,
     bs_vanna_per_vol_point,
@@ -29,6 +29,15 @@ from spx_spark.analytics.options.exposure import (
 )
 from spx_spark.analytics.options.exposure_types import StrikeGex, WallLevel
 from spx_spark.analytics.options.models import UnderlierReference
+from spx_spark.analytics.options.quote_policy import (
+    option_analytical_lane,
+    option_analytical_max_age_seconds,
+    option_analytical_iv_allowed,
+    option_analytical_pricing_allowed,
+    option_field_age_seconds,
+    option_field_live_entitlement,
+    option_field_live_entitlement_source,
+)
 from spx_spark.analytics.options.pricing import (
     finite_float,
     option_iv,
@@ -36,22 +45,36 @@ from spx_spark.analytics.options.pricing import (
     usable_delta,
 )
 from spx_spark.analytics.options.quality import option_gamma_structural
-from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR, ET
+from spx_spark.features.exposure_freshness import (
+    determine_iv_source as _determine_iv_source,
+    determine_oi_quality as _determine_oi_quality,
+    early_session as _early_session,
+    freshness_summary as _freshness_summary,
+    snapshot_age_seconds as _snapshot_age_seconds,
+    tau_is_floored as _tau_is_floored,
+)
+from spx_spark.features.exposure_schema import (
+    DEALER_POSITION_SIGN,
+    DIRECTION,
+    METHOD,
+    MODEL,
+    PROXY_DISCLAIMER,
+    SIGN_CONVENTION,
+    ExpiryExposure,
+    ExposureAggregates,
+    ExposureInputRow,
+    ExposureMap,
+    StrikeExposure,
+    StrikeExposureValues,
+    WallSet,
+    exposure_map_to_dict,
+    net_dex_proxy_by_expiry,
+    persist_exposure_map,
+)
+from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 from spx_spark.marketdata import Quote
 from spx_spark.settings import settings_value
-from spx_spark.state_io import atomic_write_json_secure
 from spx_spark.storage import LatestState, configured_quote_use_decision
-
-SIGN_CONVENTION = "calls_positive_puts_negative"
-DEALER_POSITION_SIGN = "unknown"
-DIRECTION = "unknown"
-MODEL = "bs_r0_q0"
-METHOD = "call_positive_put_negative_oi_proxy_not_dealer_position"
-PROXY_DISCLAIMER = (
-    "all *_proxy metrics are house-defined; not comparable to any vendor metric of similar name"
-)
-
-_MIN_TIME_TO_EXPIRY_YEARS = 15.0 / (60.0 * 24.0 * 365.0)
 
 # Re-export shared GEX types/helpers for existing import paths.
 __all__ = (
@@ -64,118 +87,12 @@ __all__ = (
     "nearest_zero",
     "signed_gex",
     "zero_gamma_bracket",
+    "METHOD",
+    "PROXY_DISCLAIMER",
+    "exposure_map_to_dict",
+    "net_dex_proxy_by_expiry",
+    "persist_exposure_map",
 )
-
-@dataclass(frozen=True)
-class ExposureInputRow:
-    contract_id: str
-    expiry: str
-    strike: float
-    right: str
-    provider: str
-    quality: str
-    bid: float | None
-    ask: float | None
-    mid: float | None
-    iv: float | None
-    delta: float | None
-    gamma: float | None
-    open_interest: float
-    volume: float
-    quote_age_seconds: float | None
-    pricing_allowed: bool
-
-
-@dataclass(frozen=True)
-class StrikeExposureValues:
-    call_gex: float | None
-    put_gex: float | None
-    net_gex: float | None
-    abs_gex: float | None
-    net_dex_proxy: float | None
-    vex_proxy: float | None
-    cex_proxy: float | None
-    abs_dex_proxy: float | None = None
-
-
-@dataclass(frozen=True)
-class StrikeExposure:
-    strike: float
-    call_open_interest: float
-    put_open_interest: float
-    call_volume: float
-    put_volume: float
-    call_iv: float | None
-    put_iv: float | None
-    call_delta: float | None
-    put_delta: float | None
-    call_gamma: float | None
-    put_gamma: float | None
-    call_vanna_per_vol_point: float | None
-    put_vanna_per_vol_point: float | None
-    call_charm_per_minute: float | None
-    put_charm_per_minute: float | None
-    oi_weighted: StrikeExposureValues
-    volume_weighted: StrikeExposureValues
-
-
-@dataclass(frozen=True)
-class ExposureAggregates:
-    net_gex: float | None
-    abs_gex: float | None
-    net_gamma_ratio: float | None
-    net_dex_proxy: float | None
-    net_dex_ratio_proxy: float | None
-    dagex_proxy: float | None
-    vex_proxy: float | None
-    cex_proxy: float | None
-    abs_dex_proxy: float | None = None
-
-
-@dataclass(frozen=True)
-class WallSet:
-    call_walls: tuple[WallLevel, ...]
-    put_walls: tuple[WallLevel, ...]
-    wall_method: str
-    pin_candidate: float | None
-
-
-@dataclass(frozen=True)
-class ExpiryExposure:
-    expiry: str
-    row_count: int
-    strike_count: int
-    quality: str
-    oi_quality: str
-    iv_source: str
-    snapshot_age_seconds: float | None
-    delta_coverage_ratio: float
-    iv_coverage_ratio: float
-    strikes: tuple[StrikeExposure, ...]
-    oi_weighted: ExposureAggregates
-    volume_weighted: ExposureAggregates
-    gex_weighting_divergence: float | None
-    walls: WallSet
-    zero_gamma: float | None
-    gamma_flip_zone: tuple[float, float] | None
-    zero_gamma_method: str
-    sign_convention: str
-    dealer_position_sign: str
-    direction: str
-    model: str
-    warnings: tuple[str, ...]
-
-
-@dataclass(frozen=True)
-class ExposureMap:
-    created_at: datetime
-    as_of: datetime
-    underlier: Any
-    expiries: tuple[ExpiryExposure, ...]
-    warnings: tuple[str, ...]
-
-    def to_dict(self) -> dict[str, Any]:
-        return exposure_map_to_dict(self)
 
 
 def _leg_weight(row: ExposureInputRow, weighting: str) -> float | None:
@@ -193,7 +110,7 @@ def _leg_weight(row: ExposureInputRow, weighting: str) -> float | None:
 
 
 def _leg_gex(row: ExposureInputRow, *, spot: float, weighting: str) -> float | None:
-    if not row.pricing_allowed:
+    if not row.analytical_allowed:
         return None
     weight = _leg_weight(row, weighting)
     if weight is None or row.gamma is None:
@@ -203,7 +120,7 @@ def _leg_gex(row: ExposureInputRow, *, spot: float, weighting: str) -> float | N
 
 
 def _leg_dex(row: ExposureInputRow, *, spot: float, weighting: str) -> float | None:
-    if not row.pricing_allowed:
+    if not row.analytical_allowed:
         return None
     weight = _leg_weight(row, weighting)
     if weight is None or row.delta is None:
@@ -214,7 +131,7 @@ def _leg_dex(row: ExposureInputRow, *, spot: float, weighting: str) -> float | N
 def _leg_vex(
     row: ExposureInputRow, *, spot: float, weighting: str, tau_years: float
 ) -> float | None:
-    if not row.pricing_allowed:
+    if not row.analytical_allowed:
         return None
     weight = _leg_weight(row, weighting)
     if weight is None or row.iv is None:
@@ -234,7 +151,7 @@ def _leg_cex(
     tau_years: float,
     tau_floored: bool,
 ) -> float | None:
-    if not row.pricing_allowed:
+    if not row.analytical_allowed:
         return None
     if tau_floored:
         return None
@@ -310,7 +227,68 @@ def exposure_input_row_from_quote(quote: Quote, *, as_of: datetime) -> ExposureI
     expiry = instrument.expiry
     if strike is None or strike <= 0 or right is None or not expiry:
         return None
+    raw = quote.raw if isinstance(quote.raw, dict) else {}
     age_ms = quote.quote_age_ms(as_of)
+    configured_decision = configured_quote_use_decision(quote, as_of=as_of)
+    analytical_only = raw.get("analytical_only") is True
+    analytical_reason = (
+        str(raw["analytical_rejection_reason"]) if raw.get("analytical_rejection_reason") else None
+    )
+    greek_rejections = raw.get("greeks_rejection_reasons")
+    if analytical_reason is None and isinstance(greek_rejections, list) and greek_rejections:
+        analytical_reason = str(greek_rejections[0])
+    pricing_lane = option_analytical_lane(quote, field="pricing")
+    greeks_lane = option_analytical_lane(quote, field="greeks")
+    core_max_age = float(settings_value("market_data.latest_stale_after_seconds"))
+    rotation_max_age = float(settings_value("market_data.rotation_stale_after_seconds"))
+    analytical_max_age = option_analytical_max_age_seconds(
+        quote,
+        core_max_age_seconds=core_max_age,
+        rotation_max_age_seconds=rotation_max_age,
+        field="greeks",
+    )
+    pricing_analytical_allowed = (
+        option_analytical_pricing_allowed(quote)
+        if analytical_only
+        else (
+            configured_decision.pricing_allowed
+            and option_field_live_entitlement(quote, field="pricing")
+        )
+    )
+    greeks_analytical_allowed = (
+        option_analytical_iv_allowed(quote)
+        if analytical_only
+        else (
+            quote.greeks is not None
+            and option_field_live_entitlement(quote, field="greeks")
+        )
+    )
+    if analytical_reason is None and not pricing_analytical_allowed:
+        if not option_field_live_entitlement(quote, field="pricing"):
+            source = option_field_live_entitlement_source(quote, field="pricing")
+            analytical_reason = (
+                f"pricing_field_not_live:{source or 'contract_rejected'}"
+            )
+        elif not analytical_only:
+            analytical_reason = configured_decision.reason
+    if analytical_reason is None and not greeks_analytical_allowed:
+        if quote.greeks is None:
+            analytical_reason = "greeks_missing"
+        elif not option_field_live_entitlement(quote, field="greeks"):
+            source = option_field_live_entitlement_source(quote, field="greeks")
+            analytical_reason = (
+                f"greeks_field_not_live:{source or 'contract_rejected'}"
+            )
+    analytical_allowed = pricing_analytical_allowed and greeks_analytical_allowed
+    if not analytical_allowed and analytical_reason is None:
+        analytical_reason = (
+            configured_decision.reason
+            if not pricing_analytical_allowed
+            else "greeks_missing_or_rejected"
+        )
+    iv = option_iv(quote) if analytical_allowed else None
+    delta = usable_delta(quote) if analytical_allowed else None
+    gamma = option_gamma_structural(quote, as_of=as_of) if analytical_allowed else None
     return ExposureInputRow(
         contract_id=instrument.canonical_id,
         expiry=expiry,
@@ -321,26 +299,40 @@ def exposure_input_row_from_quote(quote: Quote, *, as_of: datetime) -> ExposureI
         bid=quote.bid,
         ask=quote.ask,
         mid=quote.mid,
-        iv=option_iv(quote),
-        delta=usable_delta(quote),
-        gamma=option_gamma_structural(quote, as_of=as_of),
+        iv=iv,
+        delta=delta,
+        gamma=gamma,
         open_interest=finite_float(quote.open_interest) or 0.0,
         volume=finite_float(quote.volume) or 0.0,
         quote_age_seconds=age_ms / 1000.0 if age_ms is not None else None,
-        pricing_allowed=configured_quote_use_decision(quote, as_of=as_of).pricing_allowed,
+        observation_age_seconds=option_field_age_seconds(
+            quote,
+            as_of=as_of,
+            field="pricing",
+        ),
+        structure_age_seconds=option_field_age_seconds(
+            quote,
+            as_of=as_of,
+            field="greeks",
+        ),
+        pricing_provider=str(raw.get("pricing_provider") or quote.provider.value),
+        greeks_provider=(str(raw["greeks_provider"]) if raw.get("greeks_provider") else None),
+        open_interest_provider=str(raw.get("open_interest_provider") or quote.provider.value),
+        pricing_lane=pricing_lane,
+        greeks_lane=greeks_lane,
+        open_interest_lane=option_analytical_lane(quote, field="open_interest"),
+        open_interest_observation_age_seconds=option_field_age_seconds(
+            quote,
+            as_of=as_of,
+            field="open_interest",
+        ),
+        analytical_max_age_seconds=analytical_max_age,
+        pricing_allowed=(configured_decision.pricing_allowed if not analytical_only else False),
+        analytical_allowed=analytical_allowed,
+        analytical_reason=analytical_reason,
+        delta_source="vendor" if delta is not None else "missing",
+        gamma_source="vendor" if gamma is not None else "missing",
     )
-
-
-def _tau_is_floored(expiry: str, as_of: datetime) -> bool:
-    expiry_date = datetime.strptime(expiry, "%Y%m%d").date()
-    session = DEFAULT_MARKET_CALENDAR.session(expiry_date)
-    if session is None:
-        return True
-    delta_seconds = (session.close_at - as_of.astimezone(session.close_at.tzinfo)).total_seconds()
-    if delta_seconds <= 0:
-        return True
-    years = delta_seconds / (365.0 * 24.0 * 3600.0)
-    return years < _MIN_TIME_TO_EXPIRY_YEARS
 
 
 def _sum_optional(values: list[float | None]) -> float | None:
@@ -385,51 +377,31 @@ def _aggregate_exposure(
     )
 
 
-def _determine_oi_quality(rows: tuple[ExposureInputRow, ...]) -> str:
-    if not rows:
-        return "missing"
-    positive = [row for row in rows if row.open_interest > 0]
-    if not positive:
-        return "stale_or_zero"
-    providers = Counter(row.provider for row in positive)
-    dominant = providers.most_common(1)[0][0]
-    if dominant == "schwab":
-        return "schwab_unverified"
-    return "ibkr_ok"
-
-
-def _determine_iv_source(rows: tuple[ExposureInputRow, ...]) -> str:
-    if not rows:
-        return "missing"
-    with_iv = [row for row in rows if row.iv is not None]
-    if len(with_iv) / len(rows) < 0.5:
-        return "missing"
-    providers = Counter(row.provider for row in with_iv)
-    if len(providers) > 1:
-        return "mixed"
-    dominant = providers.most_common(1)[0][0]
-    if dominant == "schwab":
-        return "vendor_schwab"
-    return "vendor_ibkr"
-
-
-def _snapshot_age_seconds(rows: tuple[ExposureInputRow, ...]) -> float | None:
-    ages = [
-        row.quote_age_seconds
-        for row in rows
-        if row.pricing_allowed and row.quote_age_seconds is not None
-    ]
-    if not ages:
-        return None
-    return max(ages)
-
-
-def _early_session(as_of: datetime) -> bool:
-    session = DEFAULT_MARKET_CALENDAR.session(as_of.astimezone(ET).date())
-    if session is None:
-        return False
-    elapsed = (as_of.astimezone(ET) - session.open_at).total_seconds()
-    return 0 <= elapsed <= 30 * 60
+def _with_model_greeks(
+    row: ExposureInputRow,
+    *,
+    spot: float,
+    tau_years: float,
+) -> ExposureInputRow:
+    if not row.analytical_allowed or row.iv is None or spot <= 0 or tau_years <= 0:
+        return row
+    delta = row.delta
+    delta_source = row.delta_source
+    if delta is None or not -1.0 <= delta <= 1.0:
+        delta = bs_delta(spot, row.strike, row.iv, tau_years, row.right)
+        delta_source = "bs_from_observed_iv"
+    gamma = row.gamma
+    gamma_source = row.gamma_source
+    if gamma is None or gamma < 0:
+        gamma = bs_gamma(spot, row.strike, row.iv, tau_years)
+        gamma_source = "bs_from_observed_iv"
+    return replace(
+        row,
+        delta=delta,
+        gamma=gamma,
+        delta_source=delta_source,
+        gamma_source=gamma_source,
+    )
 
 
 def _build_strike_exposure(
@@ -443,28 +415,55 @@ def _build_strike_exposure(
 ) -> StrikeExposure:
     call_row = next((row for row in rows if row.right == "C"), None)
     put_row = next((row for row in rows if row.right == "P"), None)
-    call_iv = None if iv_missing else (call_row.iv if call_row else None)
-    put_iv = None if iv_missing else (put_row.iv if put_row else None)
+    call_analytical = call_row if call_row is not None and call_row.analytical_allowed else None
+    put_analytical = put_row if put_row is not None and put_row.analytical_allowed else None
+    call_iv = None if iv_missing else (call_analytical.iv if call_analytical else None)
+    put_iv = None if iv_missing else (put_analytical.iv if put_analytical else None)
     call_vanna = (
         None
-        if iv_missing or call_row is None or call_iv is None
+        if iv_missing or call_analytical is None or call_iv is None
         else bs_vanna_per_vol_point(spot, strike, call_iv, tau_years)
     )
     put_vanna = (
         None
-        if iv_missing or put_row is None or put_iv is None
+        if iv_missing or put_analytical is None or put_iv is None
         else bs_vanna_per_vol_point(spot, strike, put_iv, tau_years)
     )
     call_charm = (
         None
-        if iv_missing or call_row is None or call_iv is None
+        if iv_missing or call_analytical is None or call_iv is None
         else bs_charm_per_minute(spot, strike, call_iv, tau_years)
     )
     put_charm = (
         None
-        if iv_missing or put_row is None or put_iv is None
+        if iv_missing or put_analytical is None or put_iv is None
         else bs_charm_per_minute(spot, strike, put_iv, tau_years)
     )
+
+    def metadata(row: ExposureInputRow | None) -> dict[str, Any]:
+        if row is None:
+            return {"available": False}
+        return {
+            "available": True,
+            "pricing_provider": row.pricing_provider,
+            "greeks_provider": row.greeks_provider,
+            "open_interest_provider": row.open_interest_provider,
+            "pricing_lane": row.pricing_lane,
+            "greeks_lane": row.greeks_lane,
+            "open_interest_lane": row.open_interest_lane,
+            "source_age_seconds": row.quote_age_seconds,
+            "observed_age_seconds": row.observation_age_seconds,
+            "structure_age_seconds": row.structure_age_seconds,
+            "open_interest_observation_age_seconds": (row.open_interest_observation_age_seconds),
+            "analytical_max_age_seconds": row.analytical_max_age_seconds,
+            "pricing_allowed": row.pricing_allowed,
+            "analytical_allowed": row.analytical_allowed,
+            "analytical_reason": row.analytical_reason,
+            "delta_source": row.delta_source,
+            "gamma_source": row.gamma_source,
+            "nbbo_interpolated": False,
+        }
+
     return StrikeExposure(
         strike=strike,
         call_open_interest=call_row.open_interest if call_row else 0.0,
@@ -473,10 +472,10 @@ def _build_strike_exposure(
         put_volume=put_row.volume if put_row else 0.0,
         call_iv=call_iv,
         put_iv=put_iv,
-        call_delta=call_row.delta if call_row else None,
-        put_delta=put_row.delta if put_row else None,
-        call_gamma=call_row.gamma if call_row else None,
-        put_gamma=put_row.gamma if put_row else None,
+        call_delta=call_analytical.delta if call_analytical else None,
+        put_delta=put_analytical.delta if put_analytical else None,
+        call_gamma=call_analytical.gamma if call_analytical else None,
+        put_gamma=put_analytical.gamma if put_analytical else None,
         call_vanna_per_vol_point=call_vanna,
         put_vanna_per_vol_point=put_vanna,
         call_charm_per_minute=call_charm,
@@ -491,6 +490,10 @@ def _build_strike_exposure(
             weighting="volume_weighted",
             tau_floored=tau_floored,
         ),
+        leg_metadata={
+            "call": metadata(call_row),
+            "put": metadata(put_row),
+        },
     )
 
 
@@ -522,6 +525,7 @@ def _nullify_oi_weighted(strike: StrikeExposure) -> StrikeExposure:
         put_charm_per_minute=strike.put_charm_per_minute,
         oi_weighted=null_values,
         volume_weighted=strike.volume_weighted,
+        leg_metadata=strike.leg_metadata,
     )
 
 
@@ -556,6 +560,7 @@ def _nullify_vanna_family(strike: StrikeExposure) -> StrikeExposure:
         put_charm_per_minute=None,
         oi_weighted=_strip(strike.oi_weighted),
         volume_weighted=_strip(strike.volume_weighted),
+        leg_metadata=strike.leg_metadata,
     )
 
 
@@ -587,6 +592,7 @@ def _nullify_all(strike: StrikeExposure) -> StrikeExposure:
         put_charm_per_minute=None,
         oi_weighted=null_values,
         volume_weighted=null_values,
+        leg_metadata=strike.leg_metadata,
     )
 
 
@@ -602,21 +608,29 @@ def _build_expiry_exposure(
         for quote in quotes
         if (row := exposure_input_row_from_quote(quote, as_of=as_of)) is not None
     )
+    tau_years = time_to_expiry_years(expiry, as_of=as_of)
+    if spot is not None and spot > 0:
+        rows = tuple(_with_model_greeks(row, spot=spot, tau_years=tau_years) for row in rows)
     warnings: list[str] = []
     oi_quality = _determine_oi_quality(rows)
     iv_source = _determine_iv_source(rows)
     snapshot_age = _snapshot_age_seconds(rows)
+    freshness = _freshness_summary(rows)
     delta_coverage = (
-        sum(1 for row in rows if row.pricing_allowed and row.delta is not None) / len(rows)
+        sum(
+            1
+            for row in rows
+            if row.analytical_allowed and row.delta is not None and row.delta_source == "vendor"
+        )
+        / len(rows)
         if rows
         else 0.0
     )
     iv_coverage = (
-        sum(1 for row in rows if row.pricing_allowed and row.iv is not None) / len(rows)
+        sum(1 for row in rows if row.analytical_allowed and row.iv is not None) / len(rows)
         if rows
         else 0.0
     )
-    tau_years = time_to_expiry_years(expiry, as_of=as_of)
     tau_floored = _tau_is_floored(expiry, as_of)
     if tau_floored:
         for row in rows:
@@ -627,9 +641,11 @@ def _build_expiry_exposure(
 
     if oi_quality == "schwab_unverified":
         warnings.append("schwab_oi_unverified")
+    for reason, count in freshness.get("rejection_counts", {}).items():
+        warnings.append(f"analytical_leg_rejected:{reason}:{count}")
 
     quality = "ok"
-    unavailable = not any(row.pricing_allowed for row in rows)
+    unavailable = not any(row.analytical_allowed for row in rows)
     if unavailable:
         quality = "unavailable"
     elif oi_quality in {"stale_or_zero", "missing"}:
@@ -729,10 +745,7 @@ def _build_expiry_exposure(
         )
 
     divergence = None
-    if (
-        oi_weighted.net_gamma_ratio is not None
-        and volume_weighted.net_gamma_ratio is not None
-    ):
+    if oi_weighted.net_gamma_ratio is not None and volume_weighted.net_gamma_ratio is not None:
         divergence = volume_weighted.net_gamma_ratio - oi_weighted.net_gamma_ratio
 
     wall_method = "oi_gex"
@@ -797,7 +810,10 @@ def _build_expiry_exposure(
                     key=lambda strike: abs(strike.oi_weighted.net_gex or 0.0),
                 ).strike
 
-        pairs = pair_by_strike(quotes)
+        accepted_contract_ids = {row.contract_id for row in rows if row.analytical_allowed}
+        pairs = pair_by_strike(
+            [quote for quote in quotes if quote.instrument.canonical_id in accepted_contract_ids]
+        )
         zg_scan, flip_scan, scan_method = zero_gamma_spot_scan(
             pairs,
             underlier=spot,
@@ -842,6 +858,7 @@ def _build_expiry_exposure(
         direction=DIRECTION,
         model=MODEL,
         warnings=tuple(dict.fromkeys(warnings)),
+        freshness=freshness,
     )
 
 
@@ -875,9 +892,7 @@ def build_exposure_map(state: LatestState) -> ExposureMap:
     if underlier.price is None:
         warnings.append("missing SPX underlier reference")
     elif underlier_mismatch:
-        warnings.append(
-            f"underlier_mismatch: using {underlier.source} price for SPX strikes"
-        )
+        warnings.append(f"underlier_mismatch: using {underlier.source} price for SPX strikes")
 
     expiries = tuple(
         _build_expiry_exposure(
@@ -895,99 +910,3 @@ def build_exposure_map(state: LatestState) -> ExposureMap:
         expiries=expiries,
         warnings=tuple(dict.fromkeys(warnings)),
     )
-
-
-def exposure_map_to_dict(exposure: ExposureMap) -> dict[str, Any]:
-    def _values_dict(values: StrikeExposureValues) -> dict[str, Any]:
-        return asdict(values)
-
-    def _aggregates_dict(aggregates: ExposureAggregates) -> dict[str, Any]:
-        payload = asdict(aggregates)
-        return payload
-
-    expiries_payload = []
-    for expiry in exposure.expiries:
-        strikes_payload = []
-        for strike in expiry.strikes:
-            strikes_payload.append(
-                {
-                    "strike": strike.strike,
-                    "call_open_interest": strike.call_open_interest,
-                    "put_open_interest": strike.put_open_interest,
-                    "call_volume": strike.call_volume,
-                    "put_volume": strike.put_volume,
-                    "call_iv": strike.call_iv,
-                    "put_iv": strike.put_iv,
-                    "call_delta": strike.call_delta,
-                    "put_delta": strike.put_delta,
-                    "call_gamma": strike.call_gamma,
-                    "put_gamma": strike.put_gamma,
-                    "call_vanna_per_vol_point": strike.call_vanna_per_vol_point,
-                    "put_vanna_per_vol_point": strike.put_vanna_per_vol_point,
-                    "call_charm_per_minute": strike.call_charm_per_minute,
-                    "put_charm_per_minute": strike.put_charm_per_minute,
-                    "oi_weighted": _values_dict(strike.oi_weighted),
-                    "volume_weighted": _values_dict(strike.volume_weighted),
-                }
-            )
-        expiries_payload.append(
-            {
-                "expiry": expiry.expiry,
-                "row_count": expiry.row_count,
-                "strike_count": expiry.strike_count,
-                "quality": expiry.quality,
-                "oi_quality": expiry.oi_quality,
-                "iv_source": expiry.iv_source,
-                "snapshot_age_seconds": expiry.snapshot_age_seconds,
-                "delta_coverage_ratio": expiry.delta_coverage_ratio,
-                "iv_coverage_ratio": expiry.iv_coverage_ratio,
-                "strikes": strikes_payload,
-                "oi_weighted": _aggregates_dict(expiry.oi_weighted),
-                "volume_weighted": _aggregates_dict(expiry.volume_weighted),
-                "gex_weighting_divergence": expiry.gex_weighting_divergence,
-                "walls": {
-                    "call_walls": [wall.to_dict() for wall in expiry.walls.call_walls],
-                    "put_walls": [wall.to_dict() for wall in expiry.walls.put_walls],
-                    "wall_method": expiry.walls.wall_method,
-                    "pin_candidate": expiry.walls.pin_candidate,
-                },
-                "zero_gamma": expiry.zero_gamma,
-                "gamma_flip_zone": expiry.gamma_flip_zone,
-                "zero_gamma_method": expiry.zero_gamma_method,
-                "sign_convention": SIGN_CONVENTION,
-                "dealer_position_sign": DEALER_POSITION_SIGN,
-                "direction": DIRECTION,
-                "model": MODEL,
-                "method": METHOD,
-                "proxy_disclaimer": PROXY_DISCLAIMER,
-                "warnings": list(expiry.warnings),
-            }
-        )
-    return {
-        "created_at": exposure.created_at.isoformat(),
-        "as_of": exposure.as_of.isoformat(),
-        "underlier": asdict(exposure.underlier),
-        "expiries": expiries_payload,
-        "warnings": list(exposure.warnings),
-    }
-
-
-def net_dex_proxy_by_expiry(
-    exposure: ExposureMap, *, weighting: str
-) -> dict[str, float | None]:
-    if weighting not in {"oi_weighted", "volume_weighted"}:
-        raise ValueError(f"unsupported weighting: {weighting}")
-    result: dict[str, float | None] = {}
-    for expiry in exposure.expiries:
-        aggregates = (
-            expiry.oi_weighted if weighting == "oi_weighted" else expiry.volume_weighted
-        )
-        result[expiry.expiry] = aggregates.net_dex_proxy
-    return result
-
-
-def persist_exposure_map(exposure: ExposureMap, data_root: Path | str) -> Path:
-    """Atomically write exposure_map.json under {data_root}/latest/."""
-    path = Path(data_root) / "latest" / "exposure_map.json"
-    atomic_write_json_secure(path, exposure_map_to_dict(exposure))
-    return path

@@ -53,7 +53,7 @@ spring_gamma_v3:
   min_iv: {value: 0.60, description: Minimum IV coverage ratio.}
   min_delta: {value: 0.60, description: Minimum Delta coverage ratio.}
   min_oi: {value: 0.60, description: Minimum open-interest coverage ratio.}
-  min_paired_strikes: {value: 3, description: Minimum paired-strike count.}
+  min_paired_strikes: {value: 13, description: Minimum analytically accepted paired-strike core; density target remains 61.}
   min_probability: {value: 0.60, description: Minimum uncalibrated directional probability proxy.}
   min_margin: {value: 0.10, description: Minimum directional probability-proxy margin.}
 
@@ -922,7 +922,10 @@ runtime_policy:
     description: Minutes before trying to reclaim a competing IBKR session; zero disables fighting.
   ibkr_conflict_probe_seconds:
     value: 5
-    description: Seconds between non-invasive probes after an IBKR session conflict.
+    description: Initial seconds before a non-invasive probe after an IBKR session conflict.
+  ibkr_conflict_probe_max_seconds:
+    value: 300
+    description: Maximum exponential cooldown between non-invasive probes after repeated IBKR 10197 conflicts.
   ibkr_fallback_provider:
     value: schwab
     description: Provider name used when IBKR is unavailable or intentionally disabled.

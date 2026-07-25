@@ -412,6 +412,42 @@ class Quote:
             "effective_price": self.effective_price,
             "error": self.error,
         }
+        if isinstance(self.raw, Mapping):
+            provenance_keys = (
+                "pricing_provider",
+                "pricing_sampling_mode",
+                "pricing_market_data_type",
+                "pricing_explicit_delayed",
+                "pricing_live_entitlement",
+                "pricing_live_entitlement_source",
+                "pricing_observed_at",
+                "pricing_source_at",
+                "greeks_provider",
+                "greeks_sampling_mode",
+                "greeks_market_data_type",
+                "greeks_explicit_delayed",
+                "greeks_live_entitlement",
+                "greeks_live_entitlement_source",
+                "greeks_observed_at",
+                "open_interest_provider",
+                "open_interest_sampling_mode",
+                "open_interest_market_data_type",
+                "open_interest_explicit_delayed",
+                "open_interest_live_entitlement",
+                "open_interest_live_entitlement_source",
+                "open_interest_observed_at",
+            )
+            field_provenance = {
+                key: self.raw[key]
+                for key in provenance_keys
+                if key in self.raw
+                and (
+                    self.raw[key] is None
+                    or isinstance(self.raw[key], (str, int, float, bool))
+                )
+            }
+            if field_provenance:
+                payload["field_provenance"] = field_provenance
         if self.source_session is not None:
             payload["source_session"] = self.source_session
         if self.market_session is not None:
@@ -676,6 +712,21 @@ def quote_from_dict(payload: Mapping[str, Any]) -> Quote:
                 )
             )
 
+    raw = (
+        dict(payload["raw"])
+        if isinstance(payload.get("raw"), Mapping)
+        else {}
+    )
+    field_provenance = payload.get("field_provenance")
+    if isinstance(field_provenance, Mapping):
+        raw.update(
+            {
+                str(key): value
+                for key, value in field_provenance.items()
+                if value is None or isinstance(value, (str, int, float, bool))
+            }
+        )
+
     return Quote(
         instrument=instrument,
         provider=provider,
@@ -713,7 +764,7 @@ def quote_from_dict(payload: Mapping[str, Any]) -> Quote:
         market_session=market_session,
         session_observations=tuple(observations),
         error=payload.get("error"),
-        raw=payload.get("raw") if isinstance(payload.get("raw"), Mapping) else None,
+        raw=raw or None,
     )
 
 

@@ -1,0 +1,2155 @@
+{
+  "surface": "report",
+  "manifest": {
+    "version": 1,
+    "surface": "report",
+    "title": "SPX 三周信号与 15 分钟报告诊断：截至 2026-07-23",
+    "description": "分层审计 7/03–23 原始行情、生产 FSM、15 分钟报告行动价值、正式信号、严格回放与冻结后参数前瞻。",
+    "generatedAt": "2026-07-24T01:49:35.269362+00:00",
+    "sources": [
+      {
+        "id": "data_coverage",
+        "label": "RTH quote and 0DTE complete-pair coverage, 2026-07-03–23",
+        "path": "lake/quotes/schema=v1/date=*/provider=*/hour=*/quotes.parquet",
+        "query": {
+          "engine": "DuckDB + provider-union minute audit",
+          "id": "three-week-raw-coverage-20260724",
+          "sql": "SELECT date, COUNT(DISTINCT minute) FROM read_parquet('lake/quotes/schema=v1/date=*/provider=*/hour=*/quotes.parquet', hive_partitioning=true) WHERE instrument_id IN ('index:SPX','future:ES','equity:SPY') GROUP BY date",
+          "description": "Counts live RTH underlier minutes and minutes with at least one complete same-day SPXW C/P strike.",
+          "executed_at": "2026-07-24T01:49:35.269375+00:00",
+          "language": "sql",
+          "filters": [
+            "2026-07-03T00:00Z <= received_at < 2026-07-24T00:00Z",
+            "RTH = 09:30–16:00 America/New_York",
+            "live quality and positive effective price",
+            "complete C/P requires same strike and same-day SPXW expiry"
+          ],
+          "metric_definitions": [
+            "Live minute is a distinct RTH minute with valid SPX, ES and SPY evidence.",
+            "Complete C/P minute has at least one strike with both Call and Put observations.",
+            "390 minutes is a full regular session."
+          ],
+          "tables_used": [
+            "lake/quotes/schema=v1"
+          ]
+        }
+      },
+      {
+        "id": "report_audit",
+        "label": "Persisted 15-minute report pricing audit",
+        "path": "audit/order_map_pricing/date=*/reports.jsonl",
+        "query": {
+          "engine": "Python delivered-text audit",
+          "id": "three-week-15m-report-audit-20260724",
+          "sql": "SELECT generated_at, trading_date, delivered_text, template, candidates, strike_price_coverage, writer, delivered_ok FROM read_json_auto('audit/order_map_pricing/date=*/reports.jsonl', union_by_name=true) WHERE report_kind = 'status' AND trading_date BETWEEN DATE '2026-07-03' AND DATE '2026-07-23' ORDER BY generated_at",
+          "description": "Audits actual delivered report text, generation gaps, candidate rights, action state, visible headline flips and later ES direction.",
+          "executed_at": "2026-07-24T01:49:35.269380+00:00",
+          "language": "sql",
+          "filters": [
+            "report_kind=status",
+            "2026-07-03 <= trading_date <= 2026-07-23",
+            "direction outcome uses delivered_text headline, not template intended bias",
+            "same trading date and compatible ES source",
+            "future report timestamp within ±180 seconds"
+          ],
+          "metric_definitions": [
+            "Positive TradeReady requires an affirmative TradeReady conclusion or passed decision gate.",
+            "NO TRADE matches explicit gate failure, no-entry, observe-only or non-executable wording.",
+            "Directional hit means headline side × future ES change is strictly positive; flat is not a win.",
+            "RTH schedule coverage is observed 09:30–15:45 ET report slots divided by 26 slots per complete session."
+          ],
+          "tables_used": [
+            "audit/order_map_pricing",
+            "ledger/notification_delivery.sqlite"
+          ]
+        }
+      },
+      {
+        "id": "price_integrity",
+        "label": "Dense strike-price coverage integrity audit",
+        "path": "audit/order_map_pricing/date=*/reports.jsonl",
+        "query": {
+          "engine": "Python contract audit",
+          "id": "strike-price-sentinel-integrity-20260724",
+          "sql": "SELECT generated_at, strike_price_coverage FROM read_json_auto('audit/order_map_pricing/date=*/reports.jsonl', union_by_name=true) WHERE report_kind = 'status' AND strike_price_coverage IS NOT NULL AND trading_date BETWEEN DATE '2026-07-03' AND DATE '2026-07-23' ORDER BY generated_at",
+          "description": "Recalculates every claimed complete C/P row and rejects negative sentinel quotes.",
+          "executed_at": "2026-07-24T01:49:35.269383+00:00",
+          "language": "sql",
+          "filters": [
+            "reports containing strike_price_coverage",
+            "no interpolation",
+            "finite prices only",
+            "both Call and Put must satisfy positive two-sided contract"
+          ],
+          "metric_definitions": [
+            "False pair equals claimed complete pair minus genuine positive two-sided pair.",
+            "False-full report claims complete_pair_count >= target_pair_count but fails the genuine test."
+          ],
+          "tables_used": [
+            "audit/order_map_pricing",
+            "src/spx_spark/application/order_map/research.py"
+          ]
+        }
+      },
+      {
+        "id": "formal_outcomes",
+        "label": "Formal level-decision outcomes",
+        "path": "features/level_decision_outcomes/date=*/outcomes.jsonl",
+        "query": {
+          "engine": "Python semantic outcome audit",
+          "id": "formal-directional-outcomes-20260724",
+          "sql": "SELECT event_id, horizon_seconds, confirmed_at, direction, return_bps FROM read_json_auto('features/level_decision_outcomes/date=*/outcomes.jsonl', union_by_name=true) WHERE CAST(confirmed_at AS TIMESTAMPTZ) < TIMESTAMPTZ '2026-07-24T00:00:00Z' QUALIFY ROW_NUMBER() OVER (PARTITION BY event_id, horizon_seconds ORDER BY completed_at DESC) = 1",
+          "description": "Evaluates every unique formal confirmation at persisted 30/60/180/300-second horizons.",
+          "executed_at": "2026-07-24T01:49:35.269387+00:00",
+          "language": "sql",
+          "filters": [
+            "event time before 2026-07-24T00:00Z",
+            "unique event_id + horizon_seconds",
+            "finite completed return_bps only",
+            "RTH by confirmed_at in America/New_York"
+          ],
+          "metric_definitions": [
+            "Directional return is raw SPX return for up and its negative for down.",
+            "Hit rate is strictly positive directional return divided by complete events.",
+            "Wilson interval is a two-sided 95% binomial interval."
+          ],
+          "tables_used": [
+            "features/level_decision_outcomes",
+            "features/level_decision_audit"
+          ]
+        }
+      },
+      {
+        "id": "strict_backtest",
+        "label": "Fixed-cutoff production-equivalent and proxy replay",
+        "path": "reports/odte_level_backtest/diagnostic=2026-07-24-three-week/cutoff=2026-07-23/artifact.json",
+        "query": {
+          "engine": "spx-spark odte_level_backtest",
+          "id": "strict-three-week-replay-cutoff-20260723",
+          "sql": "SELECT * FROM read_json_auto('reports/odte_level_backtest/diagnostic=2026-07-24-three-week/cutoff=2026-07-23/artifact.json')",
+          "description": "Production intent replay plus separately labelled formal/prefill/GTH control cohorts over complete sessions.",
+          "executed_at": "2026-07-24T01:49:35.269390+00:00",
+          "language": "sql",
+          "filters": [
+            "exclusive cutoff 2026-07-24T00:00:00Z",
+            "complete sessions only",
+            "semantic first-touch deduplication",
+            "production total = trade_ready × baseline × naked",
+            "no commission, explicit slippage, queue, partial fill, impact or manual latency"
+          ],
+          "metric_definitions": [
+            "Strict fill uses recorded provider/contract/limit and contemporaneous top-of-book ask.",
+            "Gross replay PnL is one contract and is not broker-account PnL.",
+            "Control/proxy cohorts are excluded from production total."
+          ],
+          "tables_used": [
+            "features/trade_intents",
+            "features/pricing_outcomes",
+            "features/gth_dip_reclaim",
+            "features/level_decision_health",
+            "lake/quotes/schema=v1"
+          ]
+        }
+      },
+      {
+        "id": "parameter_forward",
+        "label": "Pre-registered follow-through candidate forward replay",
+        "path": "features/pricing_outcomes/date=2026-07-23/outcomes.jsonl",
+        "query": {
+          "engine": "spx-spark point-in-time candidate replay",
+          "id": "frozen-follow-through-forward-20260723",
+          "sql": "SELECT * FROM read_json_auto('features/pricing_outcomes/date=2026-07-23/outcomes.jsonl') WHERE touched = TRUE AND first_touch_at IS NOT NULL ORDER BY first_touch_at",
+          "description": "Replays current and frozen shadow follow-through candidates on the first post-registration RTH session.",
+          "executed_at": "2026-07-24T01:49:35.269394+00:00",
+          "language": "sql",
+          "filters": [
+            "candidate definitions fixed before 2026-07-23 RTH",
+            "29 semantic RTH touches",
+            "one-contract top-of-book gross replay",
+            "one forward session only"
+          ],
+          "metric_definitions": [
+            "A candidate pass is not a production signal and remains shadow-only.",
+            "Gross PnL excludes all explicit trading costs and execution frictions.",
+            "One forward session cannot satisfy promotion readiness."
+          ],
+          "tables_used": [
+            "features/pricing_outcomes",
+            "lake/quotes/schema=v1",
+            "src/spx_spark/data_platform/research/odte_level_backtest.py"
+          ]
+        }
+      },
+      {
+        "id": "production_history_boundary",
+        "label": "Production-history availability boundary",
+        "path": "features/level_decision_audit/date=*/events.jsonl",
+        "query": {
+          "engine": "DuckDB feature inventory",
+          "id": "production-history-boundary-20260724",
+          "sql": "SELECT MIN(CAST(regexp_extract(filename, 'date=([0-9-]+)', 1) AS DATE)) AS first_production_fsm_date FROM read_json_auto('features/level_decision_audit/date=*/events.jsonl', filename=true, union_by_name=true)",
+          "description": "Identifies the first persisted production FSM partition; no earlier signal state is fabricated.",
+          "executed_at": "2026-07-24T01:49:35.269396+00:00",
+          "language": "sql",
+          "filters": [
+            "requested window 2026-07-03 through 2026-07-23",
+            "persisted production feature partitions only"
+          ],
+          "metric_definitions": [
+            "Audit-equivalent history requires the production state transition record, not only later raw quotes."
+          ],
+          "tables_used": [
+            "features/level_decision_audit",
+            "features/trade_intents"
+          ]
+        }
+      },
+      {
+        "id": "broker_reconciliation",
+        "label": "Redacted broker-statement coverage inventory",
+        "path": "redacted broker Activity/Flex statement inventory",
+        "query": {
+          "engine": "Local file inventory",
+          "id": "broker-statement-boundary-20260724",
+          "sql": "SELECT DATE '2026-07-16' AS latest_statement_end, DATE '2026-07-17' AS missing_window_start, DATE '2026-07-23' AS missing_window_end",
+          "description": "Records the redacted coverage boundary without exposing account identifiers.",
+          "executed_at": "2026-07-24T01:49:35.269399+00:00",
+          "language": "sql",
+          "filters": [
+            "account identifiers omitted",
+            "no broker fills after 2026-07-16 available"
+          ],
+          "metric_definitions": [
+            "Actual loss reconciled requires every fill, size, fee and realized exit in the loss window."
+          ],
+          "tables_used": [
+            "redacted broker Activity/Flex statement inventory"
+          ]
+        }
+      },
+      {
+        "id": "companion_notebook",
+        "label": "Executed companion notebook",
+        "path": "spx-three-week-signal-diagnostic-2026-07-24.ipynb",
+        "query": {
+          "engine": "Python notebook",
+          "id": "three-week-diagnostic-notebook-20260724",
+          "sql": "SELECT 'spx-three-week-signal-diagnostic-2026-07-24.ipynb' AS notebook, 'executed top-to-bottom' AS validation_status",
+          "description": "Reproduces report/action classification, ES direction linkage, formal outcomes, sentinel-price integrity and fixed-cutoff production checks.",
+          "executed_at": "2026-07-24T01:49:35.269427+00:00",
+          "language": "sql",
+          "filters": [
+            "executed top-to-bottom from repository root"
+          ],
+          "metric_definitions": [
+            "Assertions fail closed when the reviewed source counts drift."
+          ],
+          "tables_used": [
+            "audit/order_map_pricing",
+            "features/level_decision_outcomes",
+            "reports/odte_level_backtest"
+          ]
+        }
+      }
+    ],
+    "cards": [
+      {
+        "id": "raw_window",
+        "description": "Raw market-state replay has fourteen trading days; this is not production signal history.",
+        "dataset": "headline",
+        "sourceId": "data_coverage",
+        "metrics": [
+          {
+            "label": "原始行情交易日",
+            "field": "raw_replay_trading_days",
+            "format": "number"
+          }
+        ]
+      },
+      {
+        "id": "production_window",
+        "description": "Sessions with intent/outcome-equivalent complete production evidence.",
+        "dataset": "headline",
+        "sourceId": "strict_backtest",
+        "metrics": [
+          {
+            "label": "完整生产会话",
+            "field": "production_complete_sessions",
+            "format": "number"
+          }
+        ]
+      },
+      {
+        "id": "rth_action",
+        "description": "Affirmative TradeReady actions in all persisted RTH 15-minute reports.",
+        "dataset": "headline",
+        "sourceId": "report_audit",
+        "metrics": [
+          {
+            "label": "RTH 报告 TradeReady",
+            "field": "rth_report_trade_ready",
+            "format": "number"
+          },
+          {
+            "label": "底层 RTH formal",
+            "field": "formal_rth_confirmed",
+            "format": "number"
+          }
+        ]
+      },
+      {
+        "id": "rth_schedule",
+        "description": "Observed report slots across eight complete RTH sessions divided by 208 full-session slots.",
+        "dataset": "headline",
+        "sourceId": "report_audit",
+        "metrics": [
+          {
+            "label": "RTH 报告时段覆盖",
+            "field": "rth_report_coverage",
+            "format": "percent"
+          }
+        ]
+      },
+      {
+        "id": "terminal_intents",
+        "description": "Unique persisted terminal production TradeReady decisions through the cutoff.",
+        "dataset": "headline",
+        "sourceId": "strict_backtest",
+        "metrics": [
+          {
+            "label": "生产终端意图",
+            "field": "exact_terminal_intents",
+            "format": "number"
+          }
+        ]
+      },
+      {
+        "id": "price_integrity_card",
+        "description": "Claimed complete price pairs that are actually negative sentinel placeholders.",
+        "dataset": "headline",
+        "sourceId": "price_integrity",
+        "metrics": [
+          {
+            "label": "哨兵误计价对",
+            "field": "false_complete_pairs",
+            "format": "number"
+          }
+        ]
+      },
+      {
+        "id": "forward_sessions",
+        "description": "Contract-consistent post-registration session count available for candidate promotion.",
+        "dataset": "headline",
+        "sourceId": "parameter_forward",
+        "metrics": [
+          {
+            "label": "冻结后前瞻会话",
+            "field": "forward_sessions",
+            "format": "number"
+          }
+        ]
+      }
+    ],
+    "charts": [
+      {
+        "id": "coverage_chart",
+        "title": "RTH 原始行情与完整 0DTE C/P 分钟覆盖",
+        "subtitle": "7/06–10 行情真实且稠密，但当时没有生产 FSM/intent，不能冒充生产信号回放",
+        "intent": "trend",
+        "question": "Which sessions have sufficient raw RTH market and same-day option-pair evidence?",
+        "rationale": "Grouped daily bars separate underlier availability from executable option-pair availability.",
+        "type": "bar",
+        "dataset": "coverage_long",
+        "sourceId": "data_coverage",
+        "encodings": {
+          "x": {
+            "field": "date",
+            "type": "nominal",
+            "label": "日期"
+          },
+          "y": {
+            "field": "minutes",
+            "type": "quantitative",
+            "format": "number",
+            "label": "覆盖分钟"
+          },
+          "color": {
+            "field": "layer",
+            "type": "nominal",
+            "label": "证据层"
+          },
+          "tooltip": [
+            {
+              "field": "minutes",
+              "type": "quantitative",
+              "format": "number",
+              "label": "分钟"
+            },
+            {
+              "field": "coverage_ratio",
+              "type": "quantitative",
+              "format": "percent",
+              "label": "390m 覆盖"
+            }
+          ]
+        },
+        "valueFormat": "number",
+        "layout": "full",
+        "labels": {
+          "values": "none"
+        },
+        "maxRows": 28,
+        "settings": {
+          "categoryLabelPolicy": "wrap",
+          "groupMode": "grouped",
+          "showValues": false,
+          "sort": "none"
+        },
+        "surface": {
+          "surface": "export",
+          "interactiveLegend": false,
+          "showControls": false,
+          "viewMode": "visualization"
+        }
+      },
+      {
+        "id": "report_action_chart",
+        "title": "15 分钟报告的行动状态",
+        "subtitle": "底层价格和双向候选多数存在，但用户可见报告没有一份正向 TradeReady",
+        "intent": "comparison",
+        "question": "How many delivered reports offered an affirmative action versus an explicit no-trade state?",
+        "rationale": "Session-level grouped bars make the action-layer failure visible without conflating candidate maps with authorization.",
+        "type": "bar",
+        "dataset": "report_action_long",
+        "sourceId": "report_audit",
+        "encodings": {
+          "x": {
+            "field": "session",
+            "type": "nominal",
+            "label": "Session"
+          },
+          "y": {
+            "field": "count",
+            "type": "quantitative",
+            "format": "number",
+            "label": "报告数"
+          },
+          "color": {
+            "field": "state",
+            "type": "nominal",
+            "label": "状态"
+          },
+          "tooltip": [
+            {
+              "field": "count",
+              "type": "quantitative",
+              "format": "number",
+              "label": "报告数"
+            }
+          ]
+        },
+        "valueFormat": "number",
+        "layout": "full",
+        "labels": {
+          "values": "all"
+        },
+        "maxRows": 6,
+        "settings": {
+          "categoryLabelPolicy": "wrap",
+          "groupMode": "grouped",
+          "showValues": true,
+          "sort": "none"
+        },
+        "surface": {
+          "surface": "export",
+          "interactiveLegend": false,
+          "showControls": false,
+          "viewMode": "visualization"
+        }
+      },
+      {
+        "id": "report_direction_chart",
+        "title": "RTH 报告 headline 后续 ES 方向表现",
+        "subtitle": "15m 接近随机；60m 胜率虽 56.67%，均值却为 -0.83 点，显示尾部反转风险",
+        "intent": "comparison",
+        "question": "Does the visible RTH directional headline predict later ES movement?",
+        "rationale": "Horizon bars show signed mean movement while tooltips retain sample size, hit rate and medians.",
+        "type": "bar",
+        "dataset": "report_direction_rth",
+        "sourceId": "report_audit",
+        "encodings": {
+          "x": {
+            "field": "horizon_label",
+            "type": "nominal",
+            "label": "后续窗口"
+          },
+          "y": {
+            "field": "mean_signed_es_points",
+            "type": "quantitative",
+            "format": "number",
+            "label": "方向签名 ES 均值（点）"
+          },
+          "tooltip": [
+            {
+              "field": "n",
+              "type": "quantitative",
+              "format": "number",
+              "label": "n"
+            },
+            {
+              "field": "hit_rate",
+              "type": "quantitative",
+              "format": "percent",
+              "label": "方向胜率"
+            },
+            {
+              "field": "median_signed_es_points",
+              "type": "quantitative",
+              "format": "number",
+              "label": "中位数"
+            }
+          ]
+        },
+        "valueFormat": "number",
+        "layout": "full",
+        "labels": {
+          "values": "all"
+        },
+        "maxRows": 3,
+        "settings": {
+          "categoryLabelPolicy": "wrap",
+          "groupMode": "single",
+          "showValues": true,
+          "sort": "none"
+        },
+        "surface": {
+          "surface": "export",
+          "interactiveLegend": false,
+          "showControls": false,
+          "viewMode": "visualization"
+        }
+      },
+      {
+        "id": "funnel_chart",
+        "title": "正式 level 状态机漏斗",
+        "subtitle": "RTH 有 11 个 Confirmed，不是“没有信号”；真正断裂发生在 formal→actionable",
+        "intent": "comparison",
+        "question": "How far did RTH and GTH lifecycles progress through the formal signal state machine?",
+        "rationale": "Grouped stage counts expose where opportunities are lost before confirmation.",
+        "type": "bar",
+        "dataset": "signal_funnel",
+        "sourceId": "formal_outcomes",
+        "encodings": {
+          "x": {
+            "field": "stage",
+            "type": "nominal",
+            "label": "最深到达阶段"
+          },
+          "y": {
+            "field": "count",
+            "type": "quantitative",
+            "format": "number",
+            "label": "Lifecycle 数"
+          },
+          "color": {
+            "field": "session",
+            "type": "nominal",
+            "label": "Session"
+          },
+          "tooltip": [
+            {
+              "field": "stage_order",
+              "type": "quantitative",
+              "format": "number",
+              "label": "顺序"
+            },
+            {
+              "field": "count",
+              "type": "quantitative",
+              "format": "number",
+              "label": "数量"
+            }
+          ]
+        },
+        "valueFormat": "number",
+        "layout": "full",
+        "labels": {
+          "values": "all"
+        },
+        "maxRows": 12,
+        "settings": {
+          "categoryLabelPolicy": "wrap",
+          "groupMode": "grouped",
+          "showValues": true,
+          "sort": "none"
+        },
+        "surface": {
+          "surface": "export",
+          "interactiveLegend": false,
+          "showControls": false,
+          "viewMode": "visualization"
+        }
+      },
+      {
+        "id": "formal_horizon_chart",
+        "title": "正式确认后的标的方向收益",
+        "subtitle": "30–300 秒所有均值都很小，300 秒胜率 43.75%；现有样本没有稳健方向 edge",
+        "intent": "comparison",
+        "question": "Do formal confirmed signals predict the underlier direction at persisted horizons?",
+        "rationale": "Horizon bars preserve the sign and magnitude of the event-level directional result.",
+        "type": "bar",
+        "dataset": "formal_horizons",
+        "sourceId": "formal_outcomes",
+        "encodings": {
+          "x": {
+            "field": "horizon_label",
+            "type": "nominal",
+            "label": "Horizon"
+          },
+          "y": {
+            "field": "mean_directional_bps",
+            "type": "quantitative",
+            "format": "number",
+            "label": "方向均值（bps）"
+          },
+          "tooltip": [
+            {
+              "field": "n",
+              "type": "quantitative",
+              "format": "number",
+              "label": "n"
+            },
+            {
+              "field": "hit_rate",
+              "type": "quantitative",
+              "format": "percent",
+              "label": "方向胜率"
+            },
+            {
+              "field": "hit_ci_low",
+              "type": "quantitative",
+              "format": "percent",
+              "label": "95% CI low"
+            },
+            {
+              "field": "hit_ci_high",
+              "type": "quantitative",
+              "format": "percent",
+              "label": "95% CI high"
+            }
+          ]
+        },
+        "valueFormat": "number",
+        "layout": "full",
+        "labels": {
+          "values": "all"
+        },
+        "maxRows": 4,
+        "settings": {
+          "categoryLabelPolicy": "wrap",
+          "groupMode": "single",
+          "showValues": true,
+          "sort": "none"
+        },
+        "surface": {
+          "surface": "export",
+          "interactiveLegend": false,
+          "showControls": false,
+          "viewMode": "visualization"
+        }
+      },
+      {
+        "id": "price_integrity_chart",
+        "title": "稠密价格覆盖：声称值与真实正价双边",
+        "subtitle": "421 个 -1/-1 哨兵价对被计为完整，48 份报告错误宣称满覆盖",
+        "intent": "comparison",
+        "question": "How much of the claimed dense C/P coverage is backed by valid positive two-sided prices?",
+        "rationale": "Direct count comparison quantifies the trust failure hidden by the dense-coverage label.",
+        "type": "bar",
+        "dataset": "price_integrity",
+        "sourceId": "price_integrity",
+        "encodings": {
+          "x": {
+            "field": "measure",
+            "type": "nominal",
+            "label": "覆盖口径"
+          },
+          "y": {
+            "field": "pairs",
+            "type": "quantitative",
+            "format": "number",
+            "label": "C/P 价对"
+          },
+          "tooltip": [
+            {
+              "field": "definition",
+              "type": "nominal",
+              "label": "定义"
+            }
+          ]
+        },
+        "valueFormat": "number",
+        "layout": "full",
+        "labels": {
+          "values": "all"
+        },
+        "maxRows": 3,
+        "settings": {
+          "categoryLabelPolicy": "wrap",
+          "groupMode": "single",
+          "showValues": true,
+          "sort": "none"
+        },
+        "surface": {
+          "surface": "export",
+          "interactiveLegend": false,
+          "showControls": false,
+          "viewMode": "visualization"
+        }
+      },
+      {
+        "id": "parameter_chart",
+        "title": "7/23 首个冻结后 RTH 会话的 follow-through 候选",
+        "subtitle": "所有正数都来自同一个 gross/top-of-book 前瞻会话，不能据此晋级生产",
+        "intent": "comparison",
+        "question": "How did the current gate and frozen shadow candidates behave in the first post-registration session?",
+        "rationale": "Candidate-level PnL bars make reactivity visible while the table preserves fills and the one-session limitation.",
+        "type": "bar",
+        "dataset": "parameter_forward",
+        "sourceId": "parameter_forward",
+        "encodings": {
+          "x": {
+            "field": "gate",
+            "type": "nominal",
+            "label": "Follow-through gate"
+          },
+          "y": {
+            "field": "gross_pnl_usd",
+            "type": "quantitative",
+            "format": "currency",
+            "label": "Gross PnL（1张）"
+          },
+          "tooltip": [
+            {
+              "field": "fills",
+              "type": "quantitative",
+              "format": "number",
+              "label": "fills"
+            },
+            {
+              "field": "semantic_touches",
+              "type": "quantitative",
+              "format": "number",
+              "label": "semantic touches"
+            },
+            {
+              "field": "forward_sessions",
+              "type": "quantitative",
+              "format": "number",
+              "label": "前瞻会话"
+            },
+            {
+              "field": "decision",
+              "type": "nominal",
+              "label": "结论"
+            }
+          ]
+        },
+        "valueFormat": "currency",
+        "layout": "full",
+        "labels": {
+          "values": "all"
+        },
+        "maxRows": 5,
+        "settings": {
+          "categoryLabelPolicy": "wrap",
+          "groupMode": "single",
+          "showValues": true,
+          "sort": "none"
+        },
+        "surface": {
+          "surface": "export",
+          "interactiveLegend": false,
+          "showControls": false,
+          "viewMode": "visualization"
+        }
+      }
+    ],
+    "tables": [
+      {
+        "id": "coverage_table",
+        "title": "证据层逐日覆盖",
+        "subtitle": "Raw data availability and production audit availability are deliberately separated.",
+        "dataset": "coverage_by_day",
+        "sourceId": "data_coverage",
+        "defaultSort": {
+          "field": "date",
+          "direction": "asc"
+        },
+        "density": "compact",
+        "layout": "full",
+        "columns": [
+          {
+            "field": "date",
+            "label": "日期",
+            "type": "text"
+          },
+          {
+            "field": "live_minutes",
+            "label": "SPX/ES/SPY live分钟",
+            "format": "number"
+          },
+          {
+            "field": "complete_cp_minutes",
+            "label": "完整0DTE C/P分钟",
+            "format": "number"
+          },
+          {
+            "field": "median_cp_pairs",
+            "label": "每分钟完整价对中位数",
+            "format": "number"
+          },
+          {
+            "field": "formal_layer",
+            "label": "生产证据层",
+            "type": "text"
+          },
+          {
+            "field": "note",
+            "label": "备注",
+            "type": "text"
+          }
+        ]
+      },
+      {
+        "id": "schedule_table",
+        "title": "15 分钟报告生成与缺口",
+        "subtitle": "All persisted reports show delivered_ok; missing slots are generation/schedule gaps.",
+        "dataset": "report_schedule",
+        "sourceId": "report_audit",
+        "defaultSort": {
+          "field": "date",
+          "direction": "asc"
+        },
+        "density": "compact",
+        "layout": "full",
+        "columns": [
+          {
+            "field": "date",
+            "label": "交易日",
+            "type": "text"
+          },
+          {
+            "field": "status_reports",
+            "label": "状态报告",
+            "format": "number"
+          },
+          {
+            "field": "rth_reports",
+            "label": "RTH报告",
+            "format": "number"
+          },
+          {
+            "field": "max_gap_minutes",
+            "label": "最大生成缺口(分钟)",
+            "format": "number"
+          },
+          {
+            "field": "delivered_ok",
+            "label": "audit delivered_ok",
+            "format": "number"
+          }
+        ]
+      },
+      {
+        "id": "report_session_table",
+        "title": "报告内价格存在，但行动授权缺失",
+        "subtitle": "Executable quote and two-sided scenario-map availability are not TradeReady.",
+        "dataset": "report_session",
+        "sourceId": "report_audit",
+        "defaultSort": {
+          "field": "session",
+          "direction": "desc"
+        },
+        "density": "compact",
+        "layout": "full",
+        "columns": [
+          {
+            "field": "session",
+            "label": "Session",
+            "type": "text"
+          },
+          {
+            "field": "reports",
+            "label": "报告",
+            "format": "number"
+          },
+          {
+            "field": "explicit_no_trade",
+            "label": "明确NO TRADE",
+            "format": "number"
+          },
+          {
+            "field": "positive_trade_ready",
+            "label": "正向TradeReady",
+            "format": "number"
+          },
+          {
+            "field": "with_any_executable_quote",
+            "label": "任一可执行quote",
+            "format": "number"
+          },
+          {
+            "field": "with_both_cp_candidates",
+            "label": "C/P双向候选",
+            "format": "number"
+          },
+          {
+            "field": "with_both_cp_executable",
+            "label": "C/P双边可执行",
+            "format": "number"
+          }
+        ]
+      },
+      {
+        "id": "replay_table",
+        "title": "生产与 proxy 回放不可混算",
+        "subtitle": "Every PnL figure is one-contract gross top-of-book replay.",
+        "dataset": "replay_cohorts",
+        "sourceId": "strict_backtest",
+        "defaultSort": {
+          "field": "opportunities",
+          "direction": "desc"
+        },
+        "density": "compact",
+        "layout": "full",
+        "columns": [
+          {
+            "field": "cohort",
+            "label": "Cohort",
+            "type": "text"
+          },
+          {
+            "field": "role",
+            "label": "证据角色",
+            "type": "text"
+          },
+          {
+            "field": "opportunities",
+            "label": "机会",
+            "format": "number"
+          },
+          {
+            "field": "fills",
+            "label": "fills",
+            "format": "number"
+          },
+          {
+            "field": "win_rate",
+            "label": "胜率",
+            "format": "percent"
+          },
+          {
+            "field": "gross_pnl_usd",
+            "label": "Gross PnL",
+            "format": "currency"
+          },
+          {
+            "field": "decision",
+            "label": "结论",
+            "type": "text"
+          }
+        ]
+      },
+      {
+        "id": "parameter_table",
+        "title": "冻结后参数前瞻：只保留 shadow",
+        "subtitle": "One forward session cannot pass promotion readiness.",
+        "dataset": "parameter_forward",
+        "sourceId": "parameter_forward",
+        "defaultSort": {
+          "field": "gross_pnl_usd",
+          "direction": "desc"
+        },
+        "density": "compact",
+        "layout": "full",
+        "columns": [
+          {
+            "field": "gate",
+            "label": "Gate",
+            "type": "text"
+          },
+          {
+            "field": "role",
+            "label": "角色",
+            "type": "text"
+          },
+          {
+            "field": "semantic_touches",
+            "label": "touches",
+            "format": "number"
+          },
+          {
+            "field": "fills",
+            "label": "fills",
+            "format": "number"
+          },
+          {
+            "field": "gross_pnl_usd",
+            "label": "Gross PnL",
+            "format": "currency"
+          },
+          {
+            "field": "forward_sessions",
+            "label": "前瞻会话",
+            "format": "number"
+          },
+          {
+            "field": "decision",
+            "label": "结论",
+            "type": "text"
+          }
+        ]
+      },
+      {
+        "id": "recommendation_table",
+        "title": "修复与验证顺序",
+        "subtitle": "Parameter loosening is deliberately excluded until the evidence contract is trustworthy.",
+        "dataset": "recommendations",
+        "sourceId": "companion_notebook",
+        "defaultSort": {
+          "field": "priority",
+          "direction": "asc"
+        },
+        "density": "spacious",
+        "layout": "full",
+        "columns": [
+          {
+            "field": "priority",
+            "label": "#",
+            "format": "number"
+          },
+          {
+            "field": "workstream",
+            "label": "工作流",
+            "type": "text"
+          },
+          {
+            "field": "change",
+            "label": "建议",
+            "type": "text"
+          },
+          {
+            "field": "evidence",
+            "label": "证据",
+            "type": "text"
+          },
+          {
+            "field": "validation",
+            "label": "验收",
+            "type": "text"
+          },
+          {
+            "field": "parameter_change",
+            "label": "改生产参数",
+            "type": "text"
+          }
+        ]
+      }
+    ],
+    "blocks": [
+      {
+        "id": "title",
+        "type": "markdown",
+        "layout": "full",
+        "body": "# SPX 三周信号与 15 分钟报告诊断：截至 2026-07-23"
+      },
+      {
+        "id": "executive_summary",
+        "type": "markdown",
+        "layout": "full",
+        "body": "## Executive Summary\n\n**你的判断是对的：现有 15 分钟报告几乎没有行动指导价值，但不是因为 RTH 没行情、也不是底层完全没信号。** 三周窗口有 14 个可用 raw RTH 交易日；audit-equivalent 生产历史却从 7/13 才开始，完整 intent/outcome 会话只有 8 个。521 份状态报告中正向 `TradeReady` 为 0；RTH 129 份中 127 份明确 `NO TRADE`，而底层实际有 11 个 RTH formal confirmations。\n\n断裂点有四个：formal 信号未锁存进下一份报告；formal→actionable 门控始终未通过；timer 只覆盖 RTH 前半段；报告用双向 C/P 情景地图和高频翻向 headline 替代唯一行动状态。RTH headline 15 分钟后方向胜率仅 52.70%，相邻报告翻向 28/85。稠密价格标签也不可信：421 个 `-1/-1` 哨兵价对被误计为完整双边。\n\n**现在不应把生产 follow-through 调松。** 生产终端意图总共只有 4 个。候选参数在 7/23 首个冻结后会话虽为正，但只有 1 个 forward session，且全部是未计成本的 top-of-book gross replay。优先级应是修证据链、报告行动层和全 RTH cadence；参数只保留 shadow，等至少 20 个合约一致完整 RTH sessions 再晋级。"
+      },
+      {
+        "id": "headline_metrics",
+        "type": "metric-strip",
+        "layout": "full",
+        "cardIds": [
+          "raw_window",
+          "production_window",
+          "rth_action",
+          "rth_schedule",
+          "terminal_intents",
+          "price_integrity_card",
+          "forward_sessions"
+        ]
+      },
+      {
+        "id": "coverage_answer",
+        "type": "markdown",
+        "layout": "full",
+        "sourceId": "data_coverage",
+        "body": "## 这不是三周生产信号历史\n\n7/03 是观察假日；7/06–10 已有真实、相当稠密的 RTH underlier 与 SPXW 数据，不能说“没数据”。但当时没有 `level_decision_audit`、`trade_intent` 和正式 outcome，所以只能用当前代码重算市场状态，不能回填为当时生产信号。最强诚实窗口是 raw replay 7/06–23、production FSM 7/13–23、intent/outcome 7/14–23。"
+      },
+      {
+        "id": "coverage_chart_block",
+        "type": "chart",
+        "layout": "full",
+        "chartId": "coverage_chart"
+      },
+      {
+        "id": "coverage_table_block",
+        "type": "table",
+        "layout": "full",
+        "tableId": "coverage_table"
+      },
+      {
+        "id": "report_failure_answer",
+        "type": "markdown",
+        "layout": "full",
+        "sourceId": "report_audit",
+        "body": "## 为什么 15 分钟报告没有指导作用\n\n报告是“条件地图/状态面板”，不是可执行信号面板。RTH 129 份全部有价格、EM、墙梯和双向候选，122 份至少有一个 executable quote；但 127 份明确 NO TRADE，正向 TradeReady 为 0。已生成报告的投递总体成功，主要缺陷是未生成、未覆盖和未承接瞬态 formal 事件。"
+      },
+      {
+        "id": "report_action_chart_block",
+        "type": "chart",
+        "layout": "full",
+        "chartId": "report_action_chart"
+      },
+      {
+        "id": "report_session_table_block",
+        "type": "table",
+        "layout": "full",
+        "tableId": "report_session_table"
+      },
+      {
+        "id": "cadence_answer",
+        "type": "markdown",
+        "layout": "full",
+        "sourceId": "report_audit",
+        "body": "### 时段截断与生成缺口\n\n7/14–23 八个完整 RTH 理论应有 208 个 15 分钟槽，实际只有 112 个（53.85%）。timer 在北京时间 01:30 左右结束，相当于 ET 13:30，最后 2.5 小时天然不进入报告；7/21 还出现 410.12 分钟生成缺口。521/521 持久化记录均标 delivered_ok，问题首先是 cadence 和生成层。"
+      },
+      {
+        "id": "schedule_table_block",
+        "type": "table",
+        "layout": "full",
+        "tableId": "schedule_table"
+      },
+      {
+        "id": "headline_answer",
+        "type": "markdown",
+        "layout": "full",
+        "sourceId": "report_audit",
+        "body": "### Headline 不是 edge\n\n用户可见 RTH 方向 headline 的 15/30/60 分钟表现分别为 n=74 / 71 / 60，胜率 52.70% / 56.34% / 56.67%，均值 +0.20 / +0.99 / -0.83 ES 点。同时相邻 headline 28/85 次翻向（32.94%）。这就是“每 15 分钟改口，但永远 NO TRADE”的体验。"
+      },
+      {
+        "id": "report_direction_chart_block",
+        "type": "chart",
+        "layout": "full",
+        "chartId": "report_direction_chart"
+      },
+      {
+        "id": "price_integrity_answer",
+        "type": "markdown",
+        "layout": "full",
+        "sourceId": "price_integrity",
+        "body": "### 稠密不等于可执行\n\n116 份带稠密覆盖合同的报告共声称 6,212 个完整 C/P 价对；按 `bid>=0, ask>0, ask>=bid` 重算只有 5,791 个。421 个负价哨兵被误计，48 份报告错误宣称满覆盖。NBBO 不应插值；结构/IV 平滑可以保留，但必须与可执行报价覆盖分栏。"
+      },
+      {
+        "id": "price_integrity_chart_block",
+        "type": "chart",
+        "layout": "full",
+        "chartId": "price_integrity_chart"
+      },
+      {
+        "id": "formal_answer",
+        "type": "markdown",
+        "layout": "full",
+        "sourceId": "formal_outcomes",
+        "body": "## 底层信号有产出，但尚无稳健 edge\n\n32 个 formal confirmations 中 RTH 11、GTH 21。300 秒方向均值 +0.43 bps、胜率 43.75%（95% Wilson 28.17%–60.67%）；RTH 子样本 n=11，均值 +0.21 bps、胜率 54.55%。样本和区间都不支持按星期、Call/Put 或 breakout/fade 上线新 gate。"
+      },
+      {
+        "id": "funnel_chart_block",
+        "type": "chart",
+        "layout": "full",
+        "chartId": "funnel_chart"
+      },
+      {
+        "id": "formal_horizon_chart_block",
+        "type": "chart",
+        "layout": "full",
+        "chartId": "formal_horizon_chart"
+      },
+      {
+        "id": "replay_answer",
+        "type": "markdown",
+        "layout": "full",
+        "sourceId": "strict_backtest",
+        "body": "### 回放结果不能混算\n\nFormal confirmed 裸单 control replay 21 fills，gross -$445；GTH dip proxy 3 fills，-$440。严格生产只有 4 个 unique terminal intents、2 fills、2 skips，gross +$780。生产 n=4 的正数不能证明策略盈利，proxy 更不能并入 production PnL。"
+      },
+      {
+        "id": "replay_table_block",
+        "type": "table",
+        "layout": "full",
+        "tableId": "replay_table"
+      },
+      {
+        "id": "parameter_answer",
+        "type": "markdown",
+        "layout": "full",
+        "sourceId": "parameter_forward",
+        "body": "## 参数结论：不改生产，只扩 shadow\n\n当前 `15s / 2.00pt / 5.00% EM` 在 7/23 的 29 个 RTH semantic touches 上 0 通过。冻结 shadow 候选在同一会话出现 2–6 fills、gross +$160 至 +$380；但这是唯一一个 post-registration session。此前 245 组样本内冠军在 expanding tail 首日为 -$360，说明用小样本最优直接上线会重复选择偏差。"
+      },
+      {
+        "id": "parameter_chart_block",
+        "type": "chart",
+        "layout": "full",
+        "chartId": "parameter_chart"
+      },
+      {
+        "id": "parameter_table_block",
+        "type": "table",
+        "layout": "full",
+        "tableId": "parameter_table"
+      },
+      {
+        "id": "next_steps",
+        "type": "markdown",
+        "layout": "full",
+        "body": "## Recommended Next Steps\n\n先修可信度与行动链，再收集参数证据。下面的前五项不放松风险门控，也不自动启用下单。完成后，每份 15 分钟报告应能回答三个问题：现在能不能做、若不能是哪一门、上一个 formal 信号后来怎样。"
+      },
+      {
+        "id": "recommendation_table_block",
+        "type": "table",
+        "layout": "full",
+        "tableId": "recommendation_table"
+      },
+      {
+        "id": "further_questions",
+        "type": "markdown",
+        "layout": "full",
+        "body": "## Further Questions\n\n- 最近约 $12,000 的亏损分别对应哪些 broker fills、数量、手续费和退出？本地 statement 仍只覆盖到 7/16。\n- 你希望 15 分钟报告是“执行指令面板”，还是保留一个独立的“结构研究面板”？两者继续混在一起会重复当前误读。\n- 全 RTH 报告是否应覆盖 09:30–16:00 ET，还是只保留开盘到 13:30 ET 但显式标注 coverage end？"
+      },
+      {
+        "id": "caveats",
+        "type": "markdown",
+        "layout": "full",
+        "body": "## Caveats\n\n- 回放未计 commission、显式 slippage、queue position、partial fill、market impact 和人工延迟；所有 PnL 都是偏乐观 gross。\n- QuoteStore 当前主要按 `quote_time` 选择，不是严格 `received_at` knowledge-time；生产调参前必须消除这一回看偏差风险。\n- 7/06–10 缺少当时生产 FSM/decision context；只能重算，不可冒充原样生产回放。\n- 报告方向样本彼此重叠且序列相关；Wilson 区间只描述事件行，不等于独立交易样本。\n- 真实账户亏损尚未完成 broker fill/fee reconciliation，本报告不能解释实际净 PnL。"
+      },
+      {
+        "id": "reproducibility",
+        "type": "markdown",
+        "layout": "full",
+        "sourceId": "companion_notebook",
+        "body": "## Reproducibility\n\n伴随 notebook 已从仓库根目录 top-to-bottom 执行，锁定 521 份报告、报告方向联结、32 个 formal outcomes、421 个哨兵误计价对和固定 cutoff 生产回放。若源数据或分类合同漂移，断言会失败。"
+      }
+    ]
+  },
+  "snapshot": {
+    "version": 1,
+    "generatedAt": "2026-07-24T01:49:35.269362+00:00",
+    "status": "partial",
+    "accessIssues": [
+      {
+        "id": "missing_broker_loss_window",
+        "scope": "actual_loss_reconciliation",
+        "sourceId": "broker_reconciliation",
+        "dataset": "broker_loss_reconciliation",
+        "message": "本地 broker Activity/Flex 仍只覆盖到 2026-07-16；最近约 $12,000 的真实亏损无法逐笔归因。"
+      },
+      {
+        "id": "production_history_starts_20260713",
+        "scope": "three_week_production_backtest",
+        "sourceId": "production_history_boundary",
+        "dataset": "production_history_gap",
+        "message": "7/03–7/12 缺少 audit-equivalent 生产 FSM/intent；不能把请求窗口称为三周生产信号回测。"
+      }
+    ],
+    "datasets": {
+      "headline": [
+        {
+          "raw_replay_trading_days": 14,
+          "production_complete_sessions": 8,
+          "status_reports": 521,
+          "rth_report_coverage": 0.5384615384615384,
+          "formal_rth_confirmed": 11,
+          "rth_report_trade_ready": 0,
+          "exact_terminal_intents": 4,
+          "false_complete_pairs": 421,
+          "forward_sessions": 1
+        }
+      ],
+      "coverage_by_day": [
+        {
+          "date": "2026-07-03",
+          "live_minutes": 0,
+          "complete_cp_minutes": 0,
+          "median_cp_pairs": 0,
+          "formal_layer": "无（休市）",
+          "note": "7/4 observed holiday"
+        },
+        {
+          "date": "2026-07-06",
+          "live_minutes": 367,
+          "complete_cp_minutes": 357,
+          "median_cp_pairs": 22,
+          "formal_layer": "无",
+          "note": "仅 raw/IV replay"
+        },
+        {
+          "date": "2026-07-07",
+          "live_minutes": 343,
+          "complete_cp_minutes": 339,
+          "median_cp_pairs": 39,
+          "formal_layer": "无",
+          "note": "仅 raw/IV replay"
+        },
+        {
+          "date": "2026-07-08",
+          "live_minutes": 388,
+          "complete_cp_minutes": 388,
+          "median_cp_pairs": 66,
+          "formal_layer": "无",
+          "note": "仅 raw/IV replay"
+        },
+        {
+          "date": "2026-07-09",
+          "live_minutes": 375,
+          "complete_cp_minutes": 374,
+          "median_cp_pairs": 58,
+          "formal_layer": "无",
+          "note": "仅 raw/IV replay"
+        },
+        {
+          "date": "2026-07-10",
+          "live_minutes": 386,
+          "complete_cp_minutes": 386,
+          "median_cp_pairs": 60,
+          "formal_layer": "无",
+          "note": "仅 raw/IV replay"
+        },
+        {
+          "date": "2026-07-13",
+          "live_minutes": 390,
+          "complete_cp_minutes": 390,
+          "median_cp_pairs": 67,
+          "formal_layer": "FSM/report（partial）",
+          "note": "GTH coverage 85.19%"
+        },
+        {
+          "date": "2026-07-14",
+          "live_minutes": 390,
+          "complete_cp_minutes": 390,
+          "median_cp_pairs": 62,
+          "formal_layer": "完整 intent/outcome",
+          "note": "complete session"
+        },
+        {
+          "date": "2026-07-15",
+          "live_minutes": 390,
+          "complete_cp_minutes": 361,
+          "median_cp_pairs": 67,
+          "formal_layer": "完整 intent/outcome",
+          "note": "late-chain gap"
+        },
+        {
+          "date": "2026-07-16",
+          "live_minutes": 390,
+          "complete_cp_minutes": 361,
+          "median_cp_pairs": 60,
+          "formal_layer": "完整 intent/outcome",
+          "note": "late-chain gap"
+        },
+        {
+          "date": "2026-07-17",
+          "live_minutes": 390,
+          "complete_cp_minutes": 361,
+          "median_cp_pairs": 70,
+          "formal_layer": "完整 intent/outcome",
+          "note": "late-chain gap"
+        },
+        {
+          "date": "2026-07-20",
+          "live_minutes": 390,
+          "complete_cp_minutes": 280,
+          "median_cp_pairs": 66,
+          "formal_layer": "完整 intent/outcome",
+          "note": "09:39–10:59 ET option gap"
+        },
+        {
+          "date": "2026-07-21",
+          "live_minutes": 390,
+          "complete_cp_minutes": 361,
+          "median_cp_pairs": 59,
+          "formal_layer": "完整 intent/outcome",
+          "note": "report outbox incident"
+        },
+        {
+          "date": "2026-07-22",
+          "live_minutes": 390,
+          "complete_cp_minutes": 361,
+          "median_cp_pairs": 58,
+          "formal_layer": "完整 intent/outcome",
+          "note": "late-chain gap"
+        },
+        {
+          "date": "2026-07-23",
+          "live_minutes": 390,
+          "complete_cp_minutes": 361,
+          "median_cp_pairs": 71,
+          "formal_layer": "完整 + first frozen forward",
+          "note": "only 1 forward-v3 session"
+        }
+      ],
+      "coverage_long": [
+        {
+          "date": "07-06",
+          "layer": "SPX/ES/SPY live",
+          "minutes": 367,
+          "coverage_ratio": 0.941025641025641
+        },
+        {
+          "date": "07-06",
+          "layer": "0DTE 完整 C/P",
+          "minutes": 357,
+          "coverage_ratio": 0.9153846153846154
+        },
+        {
+          "date": "07-07",
+          "layer": "SPX/ES/SPY live",
+          "minutes": 343,
+          "coverage_ratio": 0.8794871794871795
+        },
+        {
+          "date": "07-07",
+          "layer": "0DTE 完整 C/P",
+          "minutes": 339,
+          "coverage_ratio": 0.8692307692307693
+        },
+        {
+          "date": "07-08",
+          "layer": "SPX/ES/SPY live",
+          "minutes": 388,
+          "coverage_ratio": 0.9948717948717949
+        },
+        {
+          "date": "07-08",
+          "layer": "0DTE 完整 C/P",
+          "minutes": 388,
+          "coverage_ratio": 0.9948717948717949
+        },
+        {
+          "date": "07-09",
+          "layer": "SPX/ES/SPY live",
+          "minutes": 375,
+          "coverage_ratio": 0.9615384615384616
+        },
+        {
+          "date": "07-09",
+          "layer": "0DTE 完整 C/P",
+          "minutes": 374,
+          "coverage_ratio": 0.958974358974359
+        },
+        {
+          "date": "07-10",
+          "layer": "SPX/ES/SPY live",
+          "minutes": 386,
+          "coverage_ratio": 0.9897435897435898
+        },
+        {
+          "date": "07-10",
+          "layer": "0DTE 完整 C/P",
+          "minutes": 386,
+          "coverage_ratio": 0.9897435897435898
+        },
+        {
+          "date": "07-13",
+          "layer": "SPX/ES/SPY live",
+          "minutes": 390,
+          "coverage_ratio": 1.0
+        },
+        {
+          "date": "07-13",
+          "layer": "0DTE 完整 C/P",
+          "minutes": 390,
+          "coverage_ratio": 1.0
+        },
+        {
+          "date": "07-14",
+          "layer": "SPX/ES/SPY live",
+          "minutes": 390,
+          "coverage_ratio": 1.0
+        },
+        {
+          "date": "07-14",
+          "layer": "0DTE 完整 C/P",
+          "minutes": 390,
+          "coverage_ratio": 1.0
+        },
+        {
+          "date": "07-15",
+          "layer": "SPX/ES/SPY live",
+          "minutes": 390,
+          "coverage_ratio": 1.0
+        },
+        {
+          "date": "07-15",
+          "layer": "0DTE 完整 C/P",
+          "minutes": 361,
+          "coverage_ratio": 0.9256410256410257
+        },
+        {
+          "date": "07-16",
+          "layer": "SPX/ES/SPY live",
+          "minutes": 390,
+          "coverage_ratio": 1.0
+        },
+        {
+          "date": "07-16",
+          "layer": "0DTE 完整 C/P",
+          "minutes": 361,
+          "coverage_ratio": 0.9256410256410257
+        },
+        {
+          "date": "07-17",
+          "layer": "SPX/ES/SPY live",
+          "minutes": 390,
+          "coverage_ratio": 1.0
+        },
+        {
+          "date": "07-17",
+          "layer": "0DTE 完整 C/P",
+          "minutes": 361,
+          "coverage_ratio": 0.9256410256410257
+        },
+        {
+          "date": "07-20",
+          "layer": "SPX/ES/SPY live",
+          "minutes": 390,
+          "coverage_ratio": 1.0
+        },
+        {
+          "date": "07-20",
+          "layer": "0DTE 完整 C/P",
+          "minutes": 280,
+          "coverage_ratio": 0.717948717948718
+        },
+        {
+          "date": "07-21",
+          "layer": "SPX/ES/SPY live",
+          "minutes": 390,
+          "coverage_ratio": 1.0
+        },
+        {
+          "date": "07-21",
+          "layer": "0DTE 完整 C/P",
+          "minutes": 361,
+          "coverage_ratio": 0.9256410256410257
+        },
+        {
+          "date": "07-22",
+          "layer": "SPX/ES/SPY live",
+          "minutes": 390,
+          "coverage_ratio": 1.0
+        },
+        {
+          "date": "07-22",
+          "layer": "0DTE 完整 C/P",
+          "minutes": 361,
+          "coverage_ratio": 0.9256410256410257
+        },
+        {
+          "date": "07-23",
+          "layer": "SPX/ES/SPY live",
+          "minutes": 390,
+          "coverage_ratio": 1.0
+        },
+        {
+          "date": "07-23",
+          "layer": "0DTE 完整 C/P",
+          "minutes": 361,
+          "coverage_ratio": 0.9256410256410257
+        }
+      ],
+      "report_schedule": [
+        {
+          "date": "2026-07-13",
+          "status_reports": 17,
+          "rth_reports": 17,
+          "max_gap_minutes": 30.074938133333333,
+          "delivered_ok": 17
+        },
+        {
+          "date": "2026-07-14",
+          "status_reports": 64,
+          "rth_reports": 14,
+          "max_gap_minutes": 60.075752683333334,
+          "delivered_ok": 64
+        },
+        {
+          "date": "2026-07-15",
+          "status_reports": 66,
+          "rth_reports": 15,
+          "max_gap_minutes": 170.77340494999999,
+          "delivered_ok": 66
+        },
+        {
+          "date": "2026-07-16",
+          "status_reports": 68,
+          "rth_reports": 14,
+          "max_gap_minutes": 30.0015529,
+          "delivered_ok": 68
+        },
+        {
+          "date": "2026-07-17",
+          "status_reports": 65,
+          "rth_reports": 14,
+          "max_gap_minutes": 30.004319533333334,
+          "delivered_ok": 65
+        },
+        {
+          "date": "2026-07-20",
+          "status_reports": 63,
+          "rth_reports": 10,
+          "max_gap_minutes": 113.89193625,
+          "delivered_ok": 63
+        },
+        {
+          "date": "2026-07-21",
+          "status_reports": 43,
+          "rth_reports": 16,
+          "max_gap_minutes": 410.12086575,
+          "delivered_ok": 43
+        },
+        {
+          "date": "2026-07-22",
+          "status_reports": 68,
+          "rth_reports": 15,
+          "max_gap_minutes": 30.021646633333333,
+          "delivered_ok": 68
+        },
+        {
+          "date": "2026-07-23",
+          "status_reports": 67,
+          "rth_reports": 14,
+          "max_gap_minutes": 30.003021783333335,
+          "delivered_ok": 67
+        }
+      ],
+      "report_session": [
+        {
+          "session": "RTH",
+          "reports": 129,
+          "explicit_no_trade": 127,
+          "positive_trade_ready": 0,
+          "with_any_executable_quote": 122,
+          "with_both_cp_candidates": 129,
+          "with_both_cp_executable": 114
+        },
+        {
+          "session": "GTH",
+          "reports": 392,
+          "explicit_no_trade": 337,
+          "positive_trade_ready": 0,
+          "with_any_executable_quote": 290,
+          "with_both_cp_candidates": 293,
+          "with_both_cp_executable": 277
+        }
+      ],
+      "report_action_long": [
+        {
+          "session": "RTH",
+          "state": "已生成报告",
+          "count": 129
+        },
+        {
+          "session": "RTH",
+          "state": "明确 NO TRADE",
+          "count": 127
+        },
+        {
+          "session": "RTH",
+          "state": "正向 TradeReady",
+          "count": 0
+        },
+        {
+          "session": "GTH",
+          "state": "已生成报告",
+          "count": 392
+        },
+        {
+          "session": "GTH",
+          "state": "明确 NO TRADE",
+          "count": 337
+        },
+        {
+          "session": "GTH",
+          "state": "正向 TradeReady",
+          "count": 0
+        }
+      ],
+      "report_direction_all": [
+        {
+          "session": "ALL",
+          "horizon_minutes": 15,
+          "horizon_label": "15m",
+          "n": 319,
+          "wins": 160,
+          "hit_rate": 0.5015673981191222,
+          "mean_signed_es_points": 0.036990595611285836,
+          "median_signed_es_points": 0.1999999999998181,
+          "hit_ci_low": 0.447007968844257,
+          "hit_ci_high": 0.5560895267613348
+        },
+        {
+          "session": "ALL",
+          "horizon_minutes": 30,
+          "horizon_label": "30m",
+          "n": 317,
+          "wins": 167,
+          "hit_rate": 0.526813880126183,
+          "mean_signed_es_points": 0.6242902208201881,
+          "median_signed_es_points": 0.3999999999996362,
+          "hit_ci_low": 0.4718598478234056,
+          "hit_ci_high": 0.5811258232382034
+        },
+        {
+          "session": "ALL",
+          "horizon_minutes": 60,
+          "horizon_label": "60m",
+          "n": 299,
+          "wins": 165,
+          "hit_rate": 0.5518394648829431,
+          "mean_signed_es_points": 0.7371237458194059,
+          "median_signed_es_points": 1.199999999999818,
+          "hit_ci_low": 0.4951682891753708,
+          "hit_ci_high": 0.6071955024954203
+        },
+        {
+          "session": "RTH",
+          "horizon_minutes": 15,
+          "horizon_label": "15m",
+          "n": 74,
+          "wins": 39,
+          "hit_rate": 0.527027027027027,
+          "mean_signed_es_points": 0.19594594594595824,
+          "median_signed_es_points": 0.7000000000002728,
+          "hit_ci_low": 0.4147735676194863,
+          "hit_ci_high": 0.6366129307915196
+        },
+        {
+          "session": "RTH",
+          "horizon_minutes": 30,
+          "horizon_label": "30m",
+          "n": 71,
+          "wins": 40,
+          "hit_rate": 0.5633802816901409,
+          "mean_signed_es_points": 0.9929577464788989,
+          "median_signed_es_points": 0.6999999999998181,
+          "hit_ci_low": 0.4477154306941805,
+          "hit_ci_high": 0.6725387725484672
+        },
+        {
+          "session": "RTH",
+          "horizon_minutes": 60,
+          "horizon_label": "60m",
+          "n": 60,
+          "wins": 34,
+          "hit_rate": 0.5666666666666667,
+          "mean_signed_es_points": -0.8333333333333031,
+          "median_signed_es_points": 4.25,
+          "hit_ci_low": 0.44103438776125564,
+          "hit_ci_high": 0.6842760319531322
+        },
+        {
+          "session": "GTH",
+          "horizon_minutes": 15,
+          "horizon_label": "15m",
+          "n": 245,
+          "wins": 121,
+          "hit_rate": 0.49387755102040815,
+          "mean_signed_es_points": -0.011020408163268276,
+          "median_signed_es_points": -0.1999999999998181,
+          "hit_ci_low": 0.4318530352424977,
+          "hit_ci_high": 0.5560910958752929
+        },
+        {
+          "session": "GTH",
+          "horizon_minutes": 30,
+          "horizon_label": "30m",
+          "n": 246,
+          "wins": 127,
+          "hit_rate": 0.516260162601626,
+          "mean_signed_es_points": 0.5178861788617798,
+          "median_signed_es_points": 0.3000000000001819,
+          "hit_ci_low": 0.454043276491486,
+          "hit_ci_high": 0.5779770296569079
+        },
+        {
+          "session": "GTH",
+          "horizon_minutes": 60,
+          "horizon_label": "60m",
+          "n": 239,
+          "wins": 131,
+          "hit_rate": 0.5481171548117155,
+          "mean_signed_es_points": 1.1313807531380775,
+          "median_signed_es_points": 0.8000000000001819,
+          "hit_ci_low": 0.484756853870336,
+          "hit_ci_high": 0.6099551451091398
+        }
+      ],
+      "report_direction_rth": [
+        {
+          "session": "RTH",
+          "horizon_minutes": 15,
+          "horizon_label": "15m",
+          "n": 74,
+          "wins": 39,
+          "hit_rate": 0.527027027027027,
+          "mean_signed_es_points": 0.19594594594595824,
+          "median_signed_es_points": 0.7000000000002728,
+          "hit_ci_low": 0.4147735676194863,
+          "hit_ci_high": 0.6366129307915196
+        },
+        {
+          "session": "RTH",
+          "horizon_minutes": 30,
+          "horizon_label": "30m",
+          "n": 71,
+          "wins": 40,
+          "hit_rate": 0.5633802816901409,
+          "mean_signed_es_points": 0.9929577464788989,
+          "median_signed_es_points": 0.6999999999998181,
+          "hit_ci_low": 0.4477154306941805,
+          "hit_ci_high": 0.6725387725484672
+        },
+        {
+          "session": "RTH",
+          "horizon_minutes": 60,
+          "horizon_label": "60m",
+          "n": 60,
+          "wins": 34,
+          "hit_rate": 0.5666666666666667,
+          "mean_signed_es_points": -0.8333333333333031,
+          "median_signed_es_points": 4.25,
+          "hit_ci_low": 0.44103438776125564,
+          "hit_ci_high": 0.6842760319531322
+        }
+      ],
+      "headline_flips": [
+        {
+          "session": "RTH",
+          "directional_reports": 92,
+          "adjacent_pairs": 85,
+          "flips": 28,
+          "flip_rate": 0.32941176470588235
+        },
+        {
+          "session": "GTH",
+          "directional_reports": 250,
+          "adjacent_pairs": 242,
+          "flips": 80,
+          "flip_rate": 0.3305785123966942
+        }
+      ],
+      "price_integrity": [
+        {
+          "measure": "报告声称完整",
+          "pairs": 6212,
+          "definition": "strike_price_coverage.complete_pair_count"
+        },
+        {
+          "measure": "真实正价双边",
+          "pairs": 5791,
+          "definition": "C/P bid>=0, ask>0, ask>=bid"
+        },
+        {
+          "measure": "哨兵误计",
+          "pairs": 421,
+          "definition": "声称完整减真实正价双边"
+        }
+      ],
+      "formal_horizons": [
+        {
+          "horizon_seconds": 30,
+          "horizon_label": "30s",
+          "n": 32,
+          "mean_directional_bps": -0.184426625,
+          "hit_rate": 0.40625,
+          "hit_ci_low": 0.2551963484266544,
+          "hit_ci_high": 0.5773997512461714
+        },
+        {
+          "horizon_seconds": 60,
+          "horizon_label": "60s",
+          "n": 32,
+          "mean_directional_bps": -0.4617340625,
+          "hit_rate": 0.5,
+          "hit_ci_low": 0.33630882869327483,
+          "hit_ci_high": 0.6636911713067252
+        },
+        {
+          "horizon_seconds": 180,
+          "horizon_label": "180s",
+          "n": 30,
+          "mean_directional_bps": 0.8738422333333334,
+          "hit_rate": 0.6,
+          "hit_ci_low": 0.42320360253322487,
+          "hit_ci_high": 0.7540937188319814
+        },
+        {
+          "horizon_seconds": 300,
+          "horizon_label": "300s",
+          "n": 32,
+          "mean_directional_bps": 0.4305840937499999,
+          "hit_rate": 0.4375,
+          "hit_ci_low": 0.2816533111504037,
+          "hit_ci_high": 0.6067440886314801
+        }
+      ],
+      "formal_session_slices": [
+        {
+          "session": "RTH",
+          "n": 11,
+          "mean_directional_bps": 0.21412390909090895,
+          "hit_rate": 0.5454545454545454,
+          "hit_ci_low": 0.280091537409322,
+          "hit_ci_high": 0.7872872837754024
+        },
+        {
+          "session": "GTH",
+          "n": 21,
+          "mean_directional_bps": 0.5439679999999999,
+          "hit_rate": 0.38095238095238093,
+          "hit_ci_low": 0.2075101136856449,
+          "hit_ci_high": 0.5912134622488424
+        }
+      ],
+      "signal_funnel": [
+        {
+          "session": "RTH",
+          "stage": "Lifecycle",
+          "stage_order": 1,
+          "count": 202
+        },
+        {
+          "session": "RTH",
+          "stage": "Testing",
+          "stage_order": 2,
+          "count": 108
+        },
+        {
+          "session": "RTH",
+          "stage": "Break/Reject pending",
+          "stage_order": 3,
+          "count": 97
+        },
+        {
+          "session": "RTH",
+          "stage": "Accepted/Rejected",
+          "stage_order": 4,
+          "count": 56
+        },
+        {
+          "session": "RTH",
+          "stage": "Retest",
+          "stage_order": 5,
+          "count": 27
+        },
+        {
+          "session": "RTH",
+          "stage": "Confirmed",
+          "stage_order": 6,
+          "count": 11
+        },
+        {
+          "session": "GTH",
+          "stage": "Lifecycle",
+          "stage_order": 1,
+          "count": 512
+        },
+        {
+          "session": "GTH",
+          "stage": "Testing",
+          "stage_order": 2,
+          "count": 279
+        },
+        {
+          "session": "GTH",
+          "stage": "Break/Reject pending",
+          "stage_order": 3,
+          "count": 178
+        },
+        {
+          "session": "GTH",
+          "stage": "Accepted/Rejected",
+          "stage_order": 4,
+          "count": 80
+        },
+        {
+          "session": "GTH",
+          "stage": "Retest",
+          "stage_order": 5,
+          "count": 54
+        },
+        {
+          "session": "GTH",
+          "stage": "Confirmed",
+          "stage_order": 6,
+          "count": 21
+        }
+      ],
+      "replay_cohorts": [
+        {
+          "cohort": "Formal confirmed control",
+          "opportunities": 32,
+          "fills": 21,
+          "win_rate": 0.38095238095238093,
+          "gross_pnl_usd": -445,
+          "role": "control/proxy",
+          "decision": "不能当生产收益"
+        },
+        {
+          "cohort": "First-touch + current gate proxy",
+          "opportunities": 319,
+          "fills": 6,
+          "win_rate": 0.6666666666666666,
+          "gross_pnl_usd": 100,
+          "role": "observational proxy",
+          "decision": "样本与可得性偏差大"
+        },
+        {
+          "cohort": "GTH dip proxy",
+          "opportunities": 6,
+          "fills": 3,
+          "win_rate": 0.0,
+          "gross_pnl_usd": -440,
+          "role": "shadow proxy",
+          "decision": "保持 shadow"
+        },
+        {
+          "cohort": "Exact production TradeReady",
+          "opportunities": 4,
+          "fills": 2,
+          "win_rate": 0.5,
+          "gross_pnl_usd": 780,
+          "role": "production-equivalent",
+          "decision": "n=4，不能证明 edge"
+        }
+      ],
+      "parameter_forward": [
+        {
+          "gate": "15s / 2.00pt / 5.00% EM",
+          "role": "current production",
+          "semantic_touches": 29,
+          "fills": 0,
+          "gross_pnl_usd": 0,
+          "forward_sessions": 1,
+          "decision": "保留生产；不能用单日反应性强行调参"
+        },
+        {
+          "gate": "20s / 0.50pt / 7.50% EM",
+          "role": "pre-registered shadow",
+          "semantic_touches": 29,
+          "fills": 3,
+          "gross_pnl_usd": 380,
+          "forward_sessions": 1,
+          "decision": "继续 shadow；不得晋级"
+        },
+        {
+          "gate": "20s / 1.00pt / 5.00% EM",
+          "role": "shadow",
+          "semantic_touches": 29,
+          "fills": 5,
+          "gross_pnl_usd": 250,
+          "forward_sessions": 1,
+          "decision": "继续 shadow；先冻结唯一 fingerprint"
+        },
+        {
+          "gate": "20s / 1.00pt / 7.50% EM",
+          "role": "shadow",
+          "semantic_touches": 29,
+          "fills": 2,
+          "gross_pnl_usd": 160,
+          "forward_sessions": 1,
+          "decision": "继续 shadow"
+        },
+        {
+          "gate": "45s / 2.00pt / 5.00% EM",
+          "role": "shadow",
+          "semantic_touches": 29,
+          "fills": 6,
+          "gross_pnl_usd": 370,
+          "forward_sessions": 1,
+          "decision": "继续 shadow"
+        }
+      ],
+      "recommendations": [
+        {
+          "priority": 1,
+          "workstream": "价格完整性",
+          "change": "拒绝 bid<0、ask<=0、ask<bid；拆分结构覆盖与 executable NBBO 覆盖",
+          "evidence": "421 个哨兵价对被计为完整；48 份报告虚假满覆盖",
+          "validation": "负价/哨兵 fixture + production audit 回放",
+          "parameter_change": "否"
+        },
+        {
+          "priority": 2,
+          "workstream": "信号锁存",
+          "change": "formal CONFIRMED 至少锁存到下一份 15m 报告并展示 gate reason",
+          "evidence": "11 个 RTH formal；报告 0 TradeReady，6 个可承接事件也未显示",
+          "validation": "event→next-report linkage=100%",
+          "parameter_change": "否"
+        },
+        {
+          "priority": 3,
+          "workstream": "完整 RTH cadence",
+          "change": "timer 延伸至 16:00 ET；分别监控 generated 与 delivered SLO",
+          "evidence": "完整 RTH 槽位仅 112/208=53.85%",
+          "validation": "连续 5 日 26/26 RTH reports",
+          "parameter_change": "否"
+        },
+        {
+          "priority": 4,
+          "workstream": "报告行动层",
+          "change": "首屏固定 Action now / Conditional setup / Context only；双向 map 下沉",
+          "evidence": "RTH 127/129 NO TRADE；用户可见方向 28/85 翻向",
+          "validation": "每份报告唯一 action state + 自动 outcome label",
+          "parameter_change": "否"
+        },
+        {
+          "priority": 5,
+          "workstream": "回测严格性",
+          "change": "报价选择改为 received_at knowledge-time；冻结 candidate registry/fingerprint",
+          "evidence": "当前 replay 仍按 quote_time；候选文档存在两种阈值表述",
+          "validation": "point-in-time leakage test + immutable registry hash",
+          "parameter_change": "否"
+        },
+        {
+          "priority": 6,
+          "workstream": "参数晋级",
+          "change": "候选仅 shadow；20 个合约一致完整 RTH sessions 后 expanding walk-forward",
+          "evidence": "当前 forward-v3 只有 1 session；生产 terminal intents 仅 4",
+          "validation": "预登记门槛、成本后净 PnL、bootstrap CI、tail risk",
+          "parameter_change": "暂不"
+        }
+      ],
+      "writer_counts": [
+        {
+          "writer": "deepseek",
+          "reports": 98
+        },
+        {
+          "writer": "grok_cli",
+          "reports": 128
+        },
+        {
+          "writer": "template_validation_fallback",
+          "reports": 295
+        }
+      ],
+      "broker_loss_reconciliation": [],
+      "production_history_gap": []
+    }
+  }
+}

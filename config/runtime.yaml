@@ -53,7 +53,7 @@ spring_gamma_v3:
   min_iv: {value: 0.60, description: Minimum IV coverage ratio required before shadow inference.}
   min_delta: {value: 0.60, description: Minimum Delta coverage ratio required before shadow inference.}
   min_oi: {value: 0.60, description: Minimum open-interest coverage ratio required before OI-weighted shadow features.}
-  min_paired_strikes: {value: 3, description: Minimum distinct strikes with usable Call and Put inputs required before shadow inference.}
+  min_paired_strikes: {value: 13, description: Minimum distinct analytically accepted Call/Put strike pairs (the ±30-point 5-point core) required before shadow inference; density still targets 61 pairs.}
   min_probability: {value: 0.60, description: Minimum uncalibrated shadow probability proxy required to publish a research label; it is not a production probability.}
   min_margin: {value: 0.10, description: Minimum shadow probability-proxy margin over the competing direction required to publish a research label.}
 
@@ -982,7 +982,10 @@ runtime_policy:
     description: Minutes before an active reclaim attempt after an IBKR live/paper conflict.
   ibkr_conflict_probe_seconds:
     value: 5
-    description: Seconds between non-invasive probes after an IBKR live/paper market-data conflict.
+    description: Initial seconds before a non-invasive probe after an IBKR live/paper market-data conflict.
+  ibkr_conflict_probe_max_seconds:
+    value: 300
+    description: Maximum exponential cooldown between non-invasive probes after repeated IBKR 10197 conflicts.
   ibkr_fallback_provider:
     value: schwab
     description: Provider name used when IBKR is unavailable or intentionally disabled.
@@ -1706,8 +1709,8 @@ level_decision_shadow:
     value: true
     description: Sends one deterministic market-warning notification when a wall or flip path reaches CONFIRMED; executable contract and price instructions remain exclusive to TradeReady.
   formal_signal_enabled:
-    value: true
-    description: Allows CONFIRMED to enter deterministic TradeReady evaluation; it does not make the state directly actionable or submit an order.
+    value: false
+    description: Keeps CONFIRMED in shadow-only reporting until the statistical acceptance gates pass and an explicit review enables deterministic TradeReady evaluation.
   approach_points:
     value: 20.0
     description: Distance from the nearest frozen wall or flip boundary that arms an approach; 20 points keeps 0DTE setups observable instead of locking the machine in FAR between widely spaced walls.

@@ -1,0 +1,10 @@
+[Unit]
+Description=Validate the complete SPX Spark RTH path after the post-close review
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 17:30:00 America/New_York
+Persistent=true
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

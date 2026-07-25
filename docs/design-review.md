@@ -58,7 +58,7 @@ Gateway 每天强制 logoff/restart。不配置 `AutoRestartTime` 时走完整�
 - **写入节奏**：每 `IBKR_STREAM_FLUSH_SECONDS=2` 秒把 ticker 状态快照写入 raw + latest state并推进一片轮转（走既有 `persist_provider_snapshot`），盲区从 ~52s/min 降到 ~0。
 - **到期日预采**：实际 RTH 收盘前 30 分钟起（正常交易日美东 15:30，计划早收盘日 12:30），Schwab 与 IBKR 的采集 front expiry 切到下一交易日，提前保存 OI、Greeks、墙位候选；正式分析日期仍在 17:00 切换，避免破坏当日盘后复盘。
 - **重规划**：SPX 相对当前 ATM 漂移超过 `IBKR_STREAM_REPLAN_DRIFT_POINTS=10` 点、或跨日换到期日时，重建期权订阅计划。
-- **韧性**：断线走指数退避重连（5s→300s 封顶）；检测到 10197 竞争会话时退订断开、按 `IBKR_CONFLICT_PROBE_SECONDS` 静默等待再探测（不抢会话）；每次 flush 后复查 runtime mode，`protected` 随时生效。
+- **韧性**：断线走指数退避重连（5s→300s 封顶）；检测到 10197 竞争会话时退订断开，从 `IBKR_CONFLICT_PROBE_SECONDS` 指数退避到 `IBKR_CONFLICT_PROBE_MAX_SECONDS` 后再做非侵入探测（不抢会话），只有 fresh/usable flush 才闭合熔断；每次 flush 后复查 runtime mode，`protected` 随时生效。`latest/ibkr_stream_health.json` 另行表达 data-plane 健康、policy block、retry_at 与原因，systemd active 不再等同数据可用。
 - 快照 collector 保留，作为验证/一次性检查路径；24h loop 中的 ibkr 任务与 stream service 二选一，避免双份 IBKR 行情写入。
 
 ### 2.2 service_loop 串行调度（已实现：线程池并发）

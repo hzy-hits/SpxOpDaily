@@ -7,6 +7,7 @@ from datetime import datetime
 
 from spx_spark.analytics.options.chain import (
     chain_implied_spot,
+    enrich_option_greeks,
     enrich_open_interest,
     is_spxw_option,
     pair_by_strike,
@@ -14,6 +15,7 @@ from spx_spark.analytics.options.chain import (
 from spx_spark.analytics.options.constants import BAD_QUALITIES, UNDERLIER_CANDIDATES, UNDERLIER_MISMATCH_SOURCES
 from spx_spark.analytics.options.levels import build_spy_confluence
 from spx_spark.analytics.options.models import OptionsMap, UnderlierReference
+from spx_spark.analytics.options.quote_policy import analytical_option_quote
 from spx_spark.analytics.options.service import build_expiry_map
 from spx_spark.config import StorageSettings
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
@@ -89,6 +91,11 @@ def group_spxw_option_quotes(
 ) -> dict[str, list[Quote]]:
     ibkr_down = ibkr_provider_unavailable(state)
     settings = storage_settings or StorageSettings.from_env()
+    core_analytical_max_age = (
+        settings.rotation_stale_after_seconds
+        if DEFAULT_MARKET_CALENDAR.is_spx_gth_open(state.as_of)
+        else settings.latest_stale_after_seconds
+    )
     structural_candidates = tuple(
         degrade_stale_quote(
             quote,
@@ -102,18 +109,37 @@ def group_spxw_option_quotes(
         for quote in state.quotes
         if is_spxw_option(quote)
     )
+    analytical_candidates = tuple(
+        analytical_option_quote(
+            quote,
+            as_of=state.as_of,
+            core_max_age_seconds=core_analytical_max_age,
+            rotation_max_age_seconds=settings.rotation_stale_after_seconds,
+        )
+        for quote in structural_candidates
+    )
     candidates = tuple(
         quote
-        for quote in structural_candidates
+        for quote in analytical_candidates
         if not (quote.provider == Provider.IBKR and ibkr_down)
     )
-    selected = enrich_open_interest(
-        select_best_quotes(
-            candidates,
-            as_of=state.as_of,
-            provider_priority=settings.provider_priority,
+    selected = enrich_option_greeks(
+        enrich_open_interest(
+            select_best_quotes(
+                candidates,
+                as_of=state.as_of,
+                provider_priority=settings.provider_priority,
+            ),
+            structural_candidates,
         ),
-        structural_candidates,
+        tuple(
+            quote
+            for quote in structural_candidates
+            if not (quote.provider == Provider.IBKR and ibkr_down)
+        ),
+        as_of=state.as_of,
+        core_max_age_seconds=core_analytical_max_age,
+        rotation_max_age_seconds=settings.rotation_stale_after_seconds,
     )
     grouped: dict[str, list[Quote]] = defaultdict(list)
     for quote in selected:

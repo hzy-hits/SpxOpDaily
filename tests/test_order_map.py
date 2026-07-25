@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import math
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
@@ -2673,7 +2673,12 @@ def test_chain_implied_spot_matches_parity_forward_median() -> None:
     now = datetime(2026, 7, 7, 6, 0, tzinfo=timezone.utc)
     quotes = [
         make_option(
-            expiry="20260707", strike=strike, right=right, mark=mark, delta=delta, gamma=0.004,
+            expiry="20260707",
+            strike=strike,
+            right=right,
+            mark=mark,
+            delta=delta,
+            gamma=0.004,
             now=now,
         )
         for strike, right, mark, delta in (
@@ -3110,6 +3115,7 @@ def test_candidate_primary_direction_ignores_expired_or_legacy_gth_signal() -> N
         now=now,
     ) == ("", "nearest_level_no_direction_guess")
 
+
 def test_status_fingerprint_tracks_trade_intent_identity() -> None:
     from spx_spark.application.order_map.service import (
         _status_fingerprint,
@@ -3379,8 +3385,83 @@ def test_status_delivery_gate_sends_quarter_hour_gth_heartbeat_without_trade_int
     )
 
 
+def test_status_delivery_gate_sends_every_rth_slot_and_dedupes_same_slot() -> None:
+    from spx_spark.application.order_map.service import _status_delivery_reason
+
+    current = datetime(2026, 7, 24, 13, 30, 8, tzinfo=ZoneInfo("America/New_York"))
+    fingerprint = {"status_phase": "us_afternoon_unattended", "trade_intent_id": ""}
+    previous_slot = {
+        "last_status_date": "2026-07-24",
+        "last_status_at": datetime(
+            2026, 7, 24, 13, 15, 9, tzinfo=ZoneInfo("America/New_York")
+        ).timestamp(),
+        "status_fingerprint": fingerprint,
+    }
+    same_slot = {
+        **previous_slot,
+        "last_status_at": datetime(
+            2026, 7, 24, 13, 30, 7, tzinfo=ZoneInfo("America/New_York")
+        ).timestamp(),
+    }
+
+    assert (
+        _status_delivery_reason(
+            previous_slot,
+            fingerprint,
+            [],
+            now=current,
+            trading_date="2026-07-24",
+            position_risk=False,
+        )
+        == "rth_quarter_hour_heartbeat:2026-07-24:13:30"
+    )
+    assert (
+        _status_delivery_reason(
+            same_slot,
+            fingerprint,
+            [],
+            now=current,
+            trading_date="2026-07-24",
+            position_risk=False,
+        )
+        is None
+    )
+
+
+def test_shared_rth_report_clock_covers_full_session_and_timer_jitter() -> None:
+    from spx_spark.application.order_map.report_clock import (
+        rth_report_schedule,
+        rth_report_slot,
+        rth_report_slot_for_session,
+    )
+    from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
+
+    et = ZoneInfo("America/New_York")
+    regular = rth_report_schedule(date(2026, 7, 24))
+    early = rth_report_schedule(date(2026, 11, 27))
+
+    assert len(regular) == 26
+    assert regular[0].strftime("%H:%M") == "09:30"
+    assert regular[-1].strftime("%H:%M") == "15:45"
+    assert len(early) == 14
+    assert early[-1].strftime("%H:%M") == "12:45"
+    assert rth_report_slot(datetime(2026, 7, 24, 13, 30, 8, tzinfo=et)).key == ("2026-07-24:13:30")
+    assert rth_report_slot(datetime(2026, 7, 24, 15, 45, 8, tzinfo=et)).key == ("2026-07-24:15:45")
+    session = DEFAULT_MARKET_CALENDAR.session(date(2026, 7, 24))
+    assert session is not None
+    assert (
+        rth_report_slot_for_session(
+            datetime(2026, 7, 24, 13, 30, 8, tzinfo=et),
+            session=session,
+        ).key
+        == "2026-07-24:13:30"
+    )
+    assert rth_report_slot(datetime(2026, 7, 24, 13, 32, 1, tzinfo=et)) is None
+    assert rth_report_slot(datetime(2026, 7, 24, 16, 0, tzinfo=et)) is None
+
+
 def test_within_refresh_window_beijing() -> None:
-    # Refresh follows the status window: Beijing 08:15 -> next-day 01:30.
+    # Refresh follows the exchange-local GTH/RTH report clock.
     # 14:45 Beijing: fixed cadence continues pre-open.
     beijing_1445 = datetime(2026, 7, 7, 6, 45, tzinfo=timezone.utc)
     assert within_refresh_window(beijing_1445) is True
@@ -3390,12 +3471,12 @@ def test_within_refresh_window_beijing() -> None:
     # 23:45 Beijing: late US session now covered too.
     beijing_2345 = datetime(2026, 7, 7, 15, 45, tzinfo=timezone.utc)
     assert within_refresh_window(beijing_2345) is True
-    # 01:30 Beijing Wednesday: last inclusive fire of Tuesday's session.
+    # 01:30 Beijing Wednesday = 13:30 ET Tuesday: RTH heartbeat.
     beijing_0130 = datetime(2026, 7, 7, 17, 30, tzinfo=timezone.utc)
     assert within_refresh_window(beijing_0130) is True
-    # 01:45 Beijing: past the 01:30 cutoff.
+    # 01:45 Beijing = 13:45 ET: the afternoon is no longer truncated.
     beijing_0145 = datetime(2026, 7, 7, 17, 45, tzinfo=timezone.utc)
-    assert within_refresh_window(beijing_0145) is False
+    assert within_refresh_window(beijing_0145) is True
     # 09:00 Beijing: the reader's working morning is now inside the window.
     beijing_0900 = datetime(2026, 7, 7, 1, 0, tzinfo=timezone.utc)
     assert within_refresh_window(beijing_0900) is True
@@ -3408,9 +3489,9 @@ def test_within_refresh_window_beijing() -> None:
     # 07:00 Beijing: before the 07:30 start of the reader's day.
     beijing_0700 = datetime(2026, 7, 6, 23, 0, tzinfo=timezone.utc)
     assert within_refresh_window(beijing_0700) is False
-    # 02:30 Beijing: past the cutoff.
+    # 02:30 Beijing = 14:30 ET: full RTH coverage.
     beijing_0230 = datetime(2026, 7, 7, 18, 30, tzinfo=timezone.utc)
-    assert within_refresh_window(beijing_0230) is False
+    assert within_refresh_window(beijing_0230) is True
 
 
 def test_session_phase_tracks_partner_clock() -> None:
@@ -3554,15 +3635,15 @@ def test_within_status_window_and_minutes_to_open() -> None:
     beijing_2130 = datetime(2026, 7, 7, 13, 30, tzinfo=timezone.utc)
     assert within_status_window(beijing_2130) is True
     assert minutes_to_open(beijing_2130) is None
-    # 01:30 Beijing Wednesday = 13:30 ET Tuesday: still Tuesday's session (inclusive).
+    # 01:30 Beijing Wednesday = 13:30 ET Tuesday: still Tuesday's RTH.
     beijing_0130 = datetime(2026, 7, 7, 17, 30, tzinfo=timezone.utc)
     assert within_status_window(beijing_0130) is True
-    # 01:45 Beijing: past the 01:30 cutoff.
+    # 01:45 Beijing = 13:45 ET: the report clock continues.
     beijing_0145 = datetime(2026, 7, 7, 17, 45, tzinfo=timezone.utc)
-    assert within_status_window(beijing_0145) is False
-    # 02:30 Beijing: well past cutoff.
+    assert within_status_window(beijing_0145) is True
+    # 02:30 Beijing = 14:30 ET: full RTH heartbeat coverage.
     beijing_0230 = datetime(2026, 7, 7, 18, 30, tzinfo=timezone.utc)
-    assert within_status_window(beijing_0230) is False
+    assert within_status_window(beijing_0230) is True
     # Saturday 01:30 Beijing = Friday 13:30 ET: Friday's session, allowed.
     saturday_0130 = datetime(2026, 7, 10, 17, 30, tzinfo=timezone.utc)
     assert within_status_window(saturday_0130) is True

@@ -29,7 +29,7 @@ class SpringGammaV3Settings:
     min_iv: float = 0.60
     min_delta: float = 0.60
     min_oi: float = 0.60
-    min_paired_strikes: int = 3
+    min_paired_strikes: int = 13
     min_probability: float = 0.60
     min_margin: float = 0.10
 

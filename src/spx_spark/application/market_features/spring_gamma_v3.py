@@ -22,6 +22,9 @@ from spx_spark.application.market_features.spring_gamma_rth_state import (
     missing_rth_market_state,
     ready_rth_market_state,
 )
+from spx_spark.application.market_features.spring_gamma_coverage import (
+    strike_coverage as _strike_coverage,
+)
 from spx_spark.marketdata import as_utc
 from spx_spark.settings.spring_gamma_v3 import SpringGammaV3Settings
 
@@ -113,9 +116,7 @@ def build_spring_gamma_v3_shadow(
     coverage = _strike_coverage(expiry_row, exposures)
     freshness = _freshness(market, options, greeks, exposures, expiry_row, at)
     structure_risk = _structure_risk(greeks, selected_session)
-    rth_market_state = (
-        extract_rth_market_state(market) if selected_session == "rth" else {}
-    )
+    rth_market_state = extract_rth_market_state(market) if selected_session == "rth" else {}
     gate_reasons = _gate_reasons(
         market,
         options,
@@ -180,22 +181,14 @@ def build_spring_gamma_v3_shadow(
         "direction": decision,
         "regime": opportunity,
         "opportunity": opportunity,
-        "rth_market_state": rth_market_state or missing_rth_market_state(
-            selected_session
-        ),
+        "rth_market_state": rth_market_state or missing_rth_market_state(selected_session),
         "option_overlay": {
             "status": (
                 "ready"
-                if not [
-                    reason
-                    for reason in gate_reasons
-                    if reason not in _MARKET_GATE_REASONS
-                ]
+                if not [reason for reason in gate_reasons if reason not in _MARKET_GATE_REASONS]
                 else "unavailable"
             ),
-            "reasons": [
-                reason for reason in gate_reasons if reason not in _MARKET_GATE_REASONS
-            ],
+            "reasons": [reason for reason in gate_reasons if reason not in _MARKET_GATE_REASONS],
             "market_state_independent": True,
         },
         "quality": {
@@ -517,15 +510,25 @@ def _gate_reasons(
             ),
             ("greek_coverage_ratio", policy.min_pair_ratio, "greek_coverage_insufficient"),
         )
+        coverage_failed = False
         for key, minimum, reason in checks:
             if (finite_float(coverage.get(key)) or -1.0) < minimum:
                 reasons.append(reason)
+                coverage_failed = True
         if (finite_float(coverage.get("paired_strikes")) or 0) < policy.min_paired_strikes:
             reasons.append("paired_strikes_insufficient")
+            coverage_failed = True
         if not (finite_float(coverage.get("left_wing_paired_strikes")) or 0):
             reasons.append("left_wing_unpaired")
+            coverage_failed = True
         if not (finite_float(coverage.get("right_wing_paired_strikes")) or 0):
             reasons.append("right_wing_unpaired")
+            coverage_failed = True
+        if coverage_failed:
+            leg_rejections = _mapping(coverage.get("leg_rejection_reasons"))
+            for reason, count in sorted(leg_rejections.items()):
+                if (finite_float(count) or 0) > 0:
+                    reasons.append(f"option_leg_{reason}")
     return list(dict.fromkeys(reason for reason in reasons if reason))
 
 
@@ -572,99 +575,6 @@ def _greek_gate(greeks: Mapping[str, object], policy: _Policy) -> list[str]:
     return reasons
 
 
-def _strike_coverage(
-    expiry: Mapping[str, object],
-    exposures: Mapping[str, object],
-) -> dict[str, object]:
-    rows = [
-        row
-        for item in _items(expiry.get("strikes"))
-        if (row := _mapping(item)) and finite_float(row.get("strike")) is not None
-    ]
-    total, legs = len(rows), len(rows) * 2
-    complete = [_complete_pair(row) for row in rows]
-    spot = finite_float(_child(exposures, "underlier").get("price"))
-    core: list[Mapping[str, object]] = []
-    left: list[Mapping[str, object]] = []
-    right: list[Mapping[str, object]] = []
-    if spot is not None and rows:
-        core_size = max(1, math.ceil(total / 3))
-        core_strikes = {
-            float(row["strike"])
-            for row in sorted(rows, key=lambda row: abs(float(row["strike"]) - spot))[:core_size]
-        }
-        core = [row for row in rows if float(row["strike"]) in core_strikes]
-        left = [row for row in rows if float(row["strike"]) < spot]
-        right = [row for row in rows if float(row["strike"]) > spot]
-
-    def leg_ratio(metric: str) -> float | None:
-        return _ratio(
-            sum(_leg_valid(row, side, metric) for row in rows for side in ("call", "put")),
-            legs,
-        )
-
-    computed_iv, computed_delta = leg_ratio("iv"), leg_ratio("delta")
-    reported_iv = finite_float(expiry.get("iv_coverage_ratio"))
-    reported_delta = finite_float(expiry.get("delta_coverage_ratio"))
-    return {
-        "strike_count": total,
-        "complete_pair_ratio": _ratio(sum(complete), total),
-        "paired_strikes": sum(complete),
-        "core_strike_count": len(core),
-        "core_complete_pair_ratio": _pair_ratio(core),
-        "left_wing_strike_count": len(left),
-        "left_wing_paired_strikes": sum(_complete_pair(row) for row in left),
-        "left_wing_complete_pair_ratio": _pair_ratio(left),
-        "right_wing_strike_count": len(right),
-        "right_wing_paired_strikes": sum(_complete_pair(row) for row in right),
-        "right_wing_complete_pair_ratio": _pair_ratio(right),
-        "iv_coverage_ratio": (
-            _round(min(computed_iv, reported_iv))
-            if computed_iv is not None and reported_iv is not None
-            else None
-        ),
-        "delta_coverage_ratio": (
-            _round(min(computed_delta, reported_delta))
-            if computed_delta is not None and reported_delta is not None
-            else None
-        ),
-        "greek_coverage_ratio": leg_ratio("greeks"),
-        "nonzero_oi_leg_ratio": leg_ratio("nonzero_oi"),
-        "reported_iv_coverage_ratio": reported_iv,
-        "reported_delta_coverage_ratio": reported_delta,
-        "underlier": spot,
-        "partition_method": "nearest_one_third_core_with_spot_sided_wings",
-        "missing_values_are_zero": False,
-        "nbbo_interpolated": False,
-    }
-
-
-def _complete_pair(row: Mapping[str, object]) -> bool:
-    return all(
-        _leg_valid(row, side, metric)
-        for side in ("call", "put")
-        for metric in ("iv", "delta", "greeks")
-    )
-
-
-def _leg_valid(row: Mapping[str, object], side: str, metric: str) -> bool:
-    if metric == "iv":
-        return (finite_float(row.get(f"{side}_iv")) or 0.0) > 0
-    if metric == "delta":
-        value = finite_float(row.get(f"{side}_delta"))
-        return value is not None and -1.0 <= value <= 1.0
-    if metric == "nonzero_oi":
-        return (finite_float(row.get(f"{side}_open_interest")) or 0.0) > 0
-    gamma = finite_float(row.get(f"{side}_gamma"))
-    return (
-        metric == "greeks"
-        and gamma is not None
-        and gamma >= 0
-        and finite_float(row.get(f"{side}_vanna_per_vol_point")) is not None
-        and finite_float(row.get(f"{side}_charm_per_minute")) is not None
-    )
-
-
 def _freshness(
     market: Mapping[str, object],
     options: Mapping[str, object],
@@ -679,20 +589,38 @@ def _freshness(
     option_age = _age(now, options.get("as_of"))
     exposure_age = _age(now, exposures.get("as_of"))
     snapshot_age = finite_float(expiry.get("snapshot_age_seconds"))
+    expiry_freshness = _child(expiry, "freshness")
+    core_snapshot_age = finite_float(_child(expiry_freshness, "core").get("max_seconds"))
+    rotation_snapshot_age = finite_float(_child(expiry_freshness, "rotation").get("max_seconds"))
     exposure_snapshot_age = (
         exposure_age + snapshot_age
         if exposure_age is not None and snapshot_age is not None and snapshot_age >= 0
+        else None
+    )
+    core_exposure_age = (
+        exposure_age + core_snapshot_age
+        if exposure_age is not None and core_snapshot_age is not None and core_snapshot_age >= 0
+        else exposure_snapshot_age
+    )
+    rotation_exposure_age = (
+        exposure_age + rotation_snapshot_age
+        if exposure_age is not None
+        and rotation_snapshot_age is not None
+        and rotation_snapshot_age >= 0
         else None
     )
     return {
         "market_age_seconds": _round(_worst_age(market_ages)),
         "greek_age_seconds": _round(_worst_age(greek_ages)),
         "iv_age_seconds": _round(
-            _worst_age([age for age in (option_age, exposure_snapshot_age) if age is not None])
+            _worst_age([age for age in (option_age, core_exposure_age) if age is not None])
         ),
         "option_frame_age_seconds": _round(option_age),
         "exposure_frame_age_seconds": _round(exposure_age),
         "exposure_snapshot_age_seconds": _round(exposure_snapshot_age),
+        "core_exposure_snapshot_age_seconds": _round(core_exposure_age),
+        "rotation_exposure_snapshot_age_seconds": _round(rotation_exposure_age),
+        "option_clock_contract": expiry_freshness.get("clock_contract"),
     }
 
 
@@ -878,14 +806,6 @@ def _token(value: object) -> str:
 def _bounded(value: object, scale: float) -> float | None:
     number = finite_float(value)
     return _round(np.tanh(number / scale)) if number is not None else None
-
-
-def _ratio(numerator: int, denominator: int) -> float | None:
-    return _round(numerator / denominator) if denominator else None
-
-
-def _pair_ratio(rows: Sequence[Mapping[str, object]]) -> float | None:
-    return _ratio(sum(_complete_pair(row) for row in rows), len(rows))
 
 
 def _round(value: object) -> float | None:

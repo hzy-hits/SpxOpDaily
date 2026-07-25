@@ -159,6 +159,38 @@ def quote_from_ibkr_row(
             model="ibkr_model",
         )
 
+    sampling_mode = (
+        str(get_value(row, "sampling_mode"))
+        if get_value(row, "sampling_mode") is not None
+        else None
+    )
+    raw: dict[str, object] = {}
+    if greeks is not None:
+        greeks_observed_at = parse_timestamp(get_value(row, "greeks_observed_at"))
+        if greeks_observed_at is not None:
+            raw.update(
+                {
+                    "greeks_provider": Provider.IBKR.value,
+                    "greeks_sampling_mode": sampling_mode,
+                    "greeks_market_data_type": market_data_type,
+                    "greeks_observed_at": greeks_observed_at.isoformat(),
+                }
+            )
+    open_interest = clean_float(get_value(row, "open_interest"))
+    if open_interest is not None:
+        open_interest_observed_at = parse_timestamp(
+            get_value(row, "open_interest_observed_at")
+        )
+        if open_interest_observed_at is not None:
+            raw.update(
+                {
+                    "open_interest_provider": Provider.IBKR.value,
+                    "open_interest_sampling_mode": sampling_mode,
+                    "open_interest_market_data_type": market_data_type,
+                    "open_interest_observed_at": open_interest_observed_at.isoformat(),
+                }
+            )
+
     return Quote(
         instrument=instrument,
         provider=Provider.IBKR,
@@ -174,17 +206,13 @@ def quote_from_ibkr_row(
         ask_size=clean_float(get_value(row, "ask_size")),
         last_size=clean_float(get_value(row, "last_size")),
         volume=clean_float(get_value(row, "volume")),
-        open_interest=clean_float(get_value(row, "open_interest")),
+        open_interest=open_interest,
         quote_time=quote_time,
         last_update_at=parse_timestamp(get_value(row, "last_update_at")),
         source_latency_ms=elapsed_ms(quote_time, received_at),
         market_data_type=market_data_type,
         greeks=greeks,
-        sampling_mode=(
-            str(get_value(row, "sampling_mode"))
-            if get_value(row, "sampling_mode") is not None
-            else None
-        ),
+        sampling_mode=sampling_mode,
         sampling_group=(
             int(get_value(row, "sampling_group"))
             if get_value(row, "sampling_group") is not None
@@ -192,6 +220,7 @@ def quote_from_ibkr_row(
         ),
         source_session=source_session,
         error=str(error) if error else None,
+        raw=raw or None,
     )
 
 

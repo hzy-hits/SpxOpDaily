@@ -390,7 +390,9 @@ def quote_from_schwab_option_contract(
         trade_time=trade_time,
         last_update_at=received_at,
         source_latency_ms=elapsed_ms(quote_time or trade_time, received_at),
-        market_data_type="delayed" if delayed is True else None,
+        market_data_type=(
+            "delayed" if delayed is True else "live" if delayed is False else None
+        ),
         greeks=greeks,
         raw=contract,
     )

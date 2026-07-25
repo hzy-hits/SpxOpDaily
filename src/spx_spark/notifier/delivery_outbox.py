@@ -113,7 +113,7 @@ class NotificationDeliveryOutbox:
         retry_schedule_seconds: Sequence[float],
         dead_letter_after_seconds: float,
         claim_stale_after_seconds: float,
-        busy_timeout_ms: int = 1000,
+        busy_timeout_ms: int = 5000,
     ) -> None:
         if max_attempts < 1:
             raise ValueError("max_attempts must be >= 1")
@@ -147,13 +147,25 @@ class NotificationDeliveryOutbox:
         )
         connection.row_factory = sqlite3.Row
         connection.execute(f"PRAGMA busy_timeout={self.busy_timeout_ms}")
-        connection.execute("PRAGMA journal_mode=WAL")
-        connection.execute("PRAGMA synchronous=NORMAL")
+        connection.execute("PRAGMA synchronous=FULL")
         connection.execute("PRAGMA foreign_keys=ON")
         return connection
 
     def _initialize(self) -> None:
         with self._connect() as connection:
+            # The notification outbox is intentionally kept out of WAL mode.
+            # It has multiple short-lived producer/consumer processes, which
+            # matches the WAL-reset corruption race fixed only in SQLite
+            # 3.51.3.  This host can run an older system SQLite, and the queue
+            # is low-volume enough that rollback-journal serialization is the
+            # safer trade-off.
+            journal_mode = str(
+                connection.execute("PRAGMA journal_mode=DELETE").fetchone()[0]
+            ).lower()
+            if journal_mode != "delete":
+                raise sqlite3.OperationalError(
+                    f"notification outbox requires DELETE journal mode, got {journal_mode}"
+                )
             connection.executescript(_SCHEMA)
             columns = {
                 str(row["name"])
@@ -170,8 +182,11 @@ class NotificationDeliveryOutbox:
     def writable(self) -> bool:
         try:
             with self._connect() as connection:
+                result = connection.execute("PRAGMA quick_check(1)").fetchone()
+                if result is None or str(result[0]).lower() != "ok":
+                    return False
                 connection.execute("SELECT 1 FROM notification_delivery_events LIMIT 1")
-            return True
+                return True
         except sqlite3.Error:
             return False
 
@@ -274,7 +289,8 @@ class NotificationDeliveryOutbox:
                 self._refresh_event_status(connection, envelope.event_id, now_text)
                 connection.execute("COMMIT")
             except Exception:
-                connection.execute("ROLLBACK")
+                if connection.in_transaction:
+                    connection.execute("ROLLBACK")
                 raise
         return accepted
 
@@ -374,7 +390,8 @@ class NotificationDeliveryOutbox:
                     self._refresh_event_status(connection, touched_event_id, now_text)
                 connection.execute("COMMIT")
             except Exception:
-                connection.execute("ROLLBACK")
+                if connection.in_transaction:
+                    connection.execute("ROLLBACK")
                 raise
         grouped: dict[str, list[sqlite3.Row]] = {}
         for row in claimed_rows:
@@ -479,7 +496,8 @@ class NotificationDeliveryOutbox:
                 self._refresh_event_status(connection, event_id, now_text)
                 connection.execute("COMMIT")
             except Exception:
-                connection.execute("ROLLBACK")
+                if connection.in_transaction:
+                    connection.execute("ROLLBACK")
                 raise
         return status
 
@@ -639,7 +657,8 @@ class NotificationDeliveryOutbox:
                     self._refresh_event_status(connection, event_id, now_text)
                 connection.execute("COMMIT")
             except Exception:
-                connection.execute("ROLLBACK")
+                if connection.in_transaction:
+                    connection.execute("ROLLBACK")
                 raise
         return replayed
 

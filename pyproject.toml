@@ -38,6 +38,7 @@ spx-spark-order-map = "spx_spark.order_map:run"
 spx-spark-mock-collector = "spx_spark.mock_collector:main"
 spx-spark-options-map = "spx_spark.options_map:main"
 spx-spark-post-close-review = "spx_spark.post_close_review:main"
+spx-spark-rth-daily-acceptance = "spx_spark.application.order_map.rth_daily_acceptance:main"
 spx-spark-polymarket-collector = "spx_spark.polymarket.collector:main"
 spx-spark-runtime-mode = "spx_spark.runtime_mode:main"
 spx-spark-service-loop = "spx_spark.service_loop:main"
@@ -55,6 +56,9 @@ spx-spark-surface-live-service = "spx_spark.surface_live_session_http:main"
 
 [dependency-groups]
 dev = [
+  "ipykernel>=6,<8",
+  "nbclient>=0.10,<1",
+  "nbformat>=5.10,<6",
   "pytest>=8.0.0",
   "ruff>=0.8.0",
 ]

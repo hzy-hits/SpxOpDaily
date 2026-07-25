@@ -15,7 +15,13 @@ from pathlib import Path
 from types import FrameType
 from typing import Any, Protocol
 
+from spx_spark.analytics.options.chain import chain_implied_spot, pair_by_strike
 from spx_spark.analytics.options.pricing import finite_float, option_iv
+from spx_spark.analytics.options.quote_policy import (
+    option_analytical_iv_allowed,
+    option_analytical_pricing_allowed,
+    option_field_observed_at,
+)
 from spx_spark.config import StorageSettings
 from spx_spark.features.exposure_surface import (
     SCHEMA_VERSION as SURFACE_SCHEMA_VERSION,
@@ -24,7 +30,6 @@ from spx_spark.features.exposure_surface import SurfaceContract, build_exposure_
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 from spx_spark.marketdata import OptionRight, Quote, as_utc
 from spx_spark.options_map.orchestration import (
-    actionable_chain_implied_spot,
     group_spxw_option_quotes,
 )
 from spx_spark.state_io import atomic_write_json_secure
@@ -118,27 +123,29 @@ def _fresh_underlier(
                 "age_seconds": round((as_utc(state.as_of) - source_at).total_seconds(), 6),
             }
 
-    selected_chain_state = LatestState(
-        created_at=state.created_at,
-        as_of=state.as_of,
-        quotes=tuple(front_quotes),
-        best_quotes=tuple(front_quotes),
-        provider_states=state.provider_states,
-    )
-    implied = actionable_chain_implied_spot(
-        selected_chain_state,
-        expiry=front_expiry,
-        as_of=state.as_of,
-        max_leg_skew_seconds=MAX_CHAIN_LEG_SKEW_SECONDS,
-    )
-    implied_price = _finite_number(implied)
-    if implied_price is None or implied_price <= 0:
-        return None
     pricing_quotes = [
         quote
         for quote in front_quotes
-        if configured_quote_use_decision(quote, as_of=state.as_of).pricing_allowed
+        if (quote.instrument.expiry or "") == front_expiry
+        and option_analytical_pricing_allowed(quote)
     ]
+    cofresh_pairs: dict[float, dict[OptionRight, Quote]] = {}
+    for strike, sides in pair_by_strike(pricing_quotes).items():
+        call = sides.get(OptionRight.CALL)
+        put = sides.get(OptionRight.PUT)
+        if call is None or put is None:
+            continue
+        call_time = option_field_observed_at(call, field="pricing")
+        put_time = option_field_observed_at(put, field="pricing")
+        if (
+            abs((call_time - put_time).total_seconds())
+            <= MAX_CHAIN_LEG_SKEW_SECONDS
+        ):
+            cofresh_pairs[strike] = sides
+    implied = chain_implied_spot(cofresh_pairs)
+    implied_price = _finite_number(implied)
+    if implied_price is None or implied_price <= 0:
+        return None
     source_clock = max(
         (_transport_time(quote) for quote in pricing_quotes),
         default=None,
@@ -191,14 +198,11 @@ def _contracts_for_expiry(
     structure_times: list[datetime] = []
 
     for quote in quotes:
-        decision = configured_quote_use_decision(
-            quote,
-            as_of=state.as_of,
-            settings=settings,
-        )
-        if not decision.pricing_allowed:
+        if not option_analytical_pricing_allowed(quote):
             continue
         fresh_contracts += 1
+        if not option_analytical_iv_allowed(quote):
+            continue
         strike = _finite_number(quote.instrument.strike)
         if quote.greeks is not None and isinstance(quote.greeks.implied_vol, bool):
             continue

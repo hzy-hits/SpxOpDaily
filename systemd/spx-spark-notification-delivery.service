@@ -2,6 +2,8 @@
 Description=SPX Spark persistent notification outbox delivery worker
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 Type=simple

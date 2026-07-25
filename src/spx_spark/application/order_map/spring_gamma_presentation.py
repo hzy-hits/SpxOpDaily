@@ -12,8 +12,8 @@ from spx_spark.application.order_map.render import (
 
 SPRING_GAMMA_V3_SHADOW_SYSTEM_RULE = (
     "Spring Gamma v3 的方向分数未校准，墙触达概率仅为风险中性启发式，"
-    "Shadow 无方向/执行权限；"
-    "若输入存在该 Shadow，必须逐字保留模板中的确定性摘要行，"
+    "Shadow 与 RTH 15分钟状态窗均无方向/执行权限；"
+    "若输入存在该 Shadow 或状态窗，必须逐字保留模板中的确定性摘要行，"
     "不得据此修改生产 guidance、候选、裁决、限价或下单动作。"
 )
 
@@ -41,9 +41,10 @@ def render_research_only_template(
 def spring_gamma_v3_shadow_line(payload: dict[str, Any]) -> str | None:
     """Render one bounded Spring Gamma v3 status line."""
 
+    state_window_line = _rth_state_window_line(payload.get("spring_gamma_v3_state_window"))
     shadow = payload.get("spring_gamma_v3_shadow")
     if not isinstance(shadow, dict):
-        return None
+        return state_window_line
     status = str(shadow.get("status") or "unknown").strip().upper()
     direction = shadow.get("direction")
     direction_payload = direction if isinstance(direction, dict) else {}
@@ -89,7 +90,12 @@ def spring_gamma_v3_shadow_line(payload: dict[str, Any]) -> str | None:
         "方向分数未校准；墙触达概率为风险中性启发式；无方向/执行权限"
     )
     state_lines = _rth_market_state_lines(shadow)
-    return "\n".join([*state_lines, summary]) if state_lines else summary
+    lines = [
+        *([state_window_line] if state_window_line else []),
+        *state_lines,
+        summary,
+    ]
+    return "\n".join(lines)
 
 
 def spring_gamma_v3_writer_summary(shadow: object) -> dict[str, Any] | None:
@@ -145,13 +151,9 @@ def spring_gamma_v3_writer_summary(shadow: object) -> dict[str, Any] | None:
     if isinstance(option_overlay, dict):
         compact["option_overlay"] = {
             "status": option_overlay.get("status"),
-            "market_state_independent": option_overlay.get(
-                "market_state_independent"
-            ),
+            "market_state_independent": option_overlay.get("market_state_independent"),
             "reasons": [
-                str(reason)
-                for reason in option_overlay.get("reasons", [])[:5]
-                if str(reason)
+                str(reason) for reason in option_overlay.get("reasons", [])[:5] if str(reason)
             ]
             if isinstance(option_overlay.get("reasons"), list)
             else [],
@@ -174,9 +176,7 @@ def _rth_market_state_lines(shadow: dict[str, Any]) -> list[str]:
     quality = state.get("Q") if isinstance(state.get("Q"), dict) else {}
     volatility = state.get("V") if isinstance(state.get("V"), dict) else {}
     availability = (
-        state.get("input_availability")
-        if isinstance(state.get("input_availability"), dict)
-        else {}
+        state.get("input_availability") if isinstance(state.get("input_availability"), dict) else {}
     )
     er = _finite_shadow_value(quality.get("efficiency_ratio"))
     crosses = quality.get("vwap_cross_count")
@@ -208,6 +208,39 @@ def _rth_market_state_lines(shadow: dict[str, Any]) -> list[str]:
     ]
 
 
+def _rth_state_window_line(window: object) -> str | None:
+    if (
+        not isinstance(window, dict)
+        or window.get("schema_version") != "spring_gamma_v3_state_window.v1"
+        or window.get("session") != "rth"
+    ):
+        return None
+    sample_count = window.get("sample_count")
+    total_slots = window.get("five_minute_slot_count")
+    sample_text = int(sample_count) if isinstance(sample_count, int) else 0
+    slot_text = int(total_slots) if isinstance(total_slots, int) else 0
+    states = window.get("states")
+    counts = window.get("counts")
+    slot_counts = window.get("five_minute_slot_counts")
+    state_names = [str(state) for state in states if str(state)] if isinstance(states, list) else []
+    details: list[str] = []
+    if isinstance(counts, dict):
+        for state in state_names:
+            count = counts.get(state)
+            slots = slot_counts.get(state) if isinstance(slot_counts, dict) else None
+            if isinstance(count, int) and isinstance(slots, int):
+                details.append(f"{state} {count}样本/{slots}档")
+            elif isinstance(count, int):
+                details.append(f"{state} {count}样本")
+    if not details:
+        details.append("无有效状态样本")
+    latest_state = str(window.get("latest_state") or "-")
+    return (
+        f"RTH状态15m  {' · '.join(details)} · 最新 {latest_state} · "
+        f"覆盖 {sample_text}样本/{slot_text}档　只读"
+    )
+
+
 def _compact_rth_market_state(shadow: dict[str, Any]) -> dict[str, Any] | None:
     source = shadow.get("rth_market_state")
     if not isinstance(source, dict) or source.get("schema_version") != "market_state_5m.v1":
@@ -223,9 +256,7 @@ def _compact_rth_market_state(shadow: dict[str, Any]) -> dict[str, Any] | None:
         source.get("breadth_above_vwap"),
         components.get("breadth_above_vwap_ratio"),
         (
-            source.get("input_lineage", {})
-            .get("values", {})
-            .get("breadth_above_vwap")
+            source.get("input_lineage", {}).get("values", {}).get("breadth_above_vwap")
             if isinstance(source.get("input_lineage"), dict)
             and isinstance(source.get("input_lineage", {}).get("values"), dict)
             else None

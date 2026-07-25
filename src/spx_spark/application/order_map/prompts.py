@@ -826,6 +826,7 @@ def _status_writer_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "call_skew_spread_shadow",
         "put_skew_spread_shadow",
         "spring_gamma_v3_shadow",
+        "spring_gamma_v3_state_window",
         "warnings",
     )
     compact = {key: payload.get(key) for key in keys if key in payload}

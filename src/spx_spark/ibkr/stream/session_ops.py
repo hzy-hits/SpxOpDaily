@@ -140,6 +140,12 @@ class SessionOps:
             time.monotonic() + max(seconds, 0.0),
         )
 
+    def clear_market_data_conflict(self) -> None:
+        """Close the local cooldown only after a healthy market-data flush."""
+
+        self.market_data_retry_not_before = 0.0
+        self.market_data_retry_reason = None
+
     def market_data_block_reason(self) -> str | None:
         if time.monotonic() < self.market_data_retry_not_before:
             return self.market_data_retry_reason

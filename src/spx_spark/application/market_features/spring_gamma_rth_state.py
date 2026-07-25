@@ -93,6 +93,7 @@ def missing_rth_market_state(session: str) -> dict[str, object]:
 
     return {
         "schema_version": _SCHEMA_VERSION,
+        "rule_version": _RULE_VERSION,
         "state": "UNCERTAIN",
         "status": "uncertain",
         "D": None,

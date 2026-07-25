@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Iterable, Mapping
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from statistics import median
 from typing import TYPE_CHECKING, Any
@@ -14,13 +14,16 @@ from spx_spark.analytics.greeks.black_scholes import (
     bs_vega,
     intrinsic_value as _intrinsic,
 )
-from spx_spark.analytics.options.quote_policy import gth_analytical_quote
+from spx_spark.analytics.options.quote_policy import (
+    option_analytical_iv_allowed,
+    option_field_live_entitlement,
+    option_field_live_entitlement_source,
+)
 from spx_spark.config import StorageSettings
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR, ET
 from spx_spark.marketdata import InstrumentType, Quote
 from spx_spark.options_map import actionable_chain_implied_spot
 from spx_spark.storage import configured_quote_use_decision
-from spx_spark.settings import load_app_settings
 
 if TYPE_CHECKING:
     from spx_spark.options_map import OptionsMap
@@ -266,7 +269,24 @@ def inputs_from_quote(
         as_of=as_of,
         settings=storage_settings,
     )
-    if not decision.pricing_allowed:
+    analytical_only = (
+        isinstance(quote.raw, Mapping)
+        and quote.raw.get("analytical_only") is True
+    )
+    field_contract_allowed = (
+        option_analytical_iv_allowed(quote)
+        if analytical_only
+        else (
+            decision.pricing_allowed
+            and option_field_live_entitlement(quote, field="greeks")
+        )
+    )
+    if not field_contract_allowed:
+        if decision.pricing_allowed and not analytical_only:
+            source = option_field_live_entitlement_source(quote, field="greeks")
+            return None, _blocked(
+                f"greeks_field_not_live:{source or 'entitlement_unknown'}"
+            )
         return None, _blocked(f"quote_not_pricing_allowed:{decision.reason}")
 
     instrument = quote.instrument
@@ -741,7 +761,24 @@ def _reference_spot(
             settings=storage_settings,
         )
         value = quote.greeks.underlier_price if quote.greeks is not None else None
-        if decision.pricing_allowed and value is not None and math.isfinite(value) and value > 0:
+        analytical_only = (
+            isinstance(quote.raw, Mapping)
+            and quote.raw.get("analytical_only") is True
+        )
+        field_contract_allowed = (
+            option_analytical_iv_allowed(quote)
+            if analytical_only
+            else (
+                decision.pricing_allowed
+                and option_field_live_entitlement(quote, field="greeks")
+            )
+        )
+        if (
+            field_contract_allowed
+            and value is not None
+            and math.isfinite(value)
+            and value > 0
+        ):
             vendor_spots.append(float(value))
     vendor_spot = float(median(vendor_spots)) if vendor_spots else None
     if vendor_spot is not None:
@@ -827,22 +864,15 @@ def _exact_analytical_quotes(
     *,
     expiry: str,
 ) -> tuple[list[Quote], StorageSettings]:
-    as_of = state.as_of
-    gth_open = DEFAULT_MARKET_CALENDAR.is_spx_gth_open(as_of)
-    gth_max_age = load_app_settings().analytics.gth_max_chain_age_seconds
-    quotes = [
-        gth_analytical_quote(
-            quote,
-            as_of=as_of,
-            max_age_seconds=gth_max_age,
-        )
-        for quote in state.best_quotes
-        if is_spxw_zero_dte(quote, as_of=as_of)
-        and (quote.instrument.expiry or "") == expiry
-    ]
     settings = StorageSettings.from_env()
-    if gth_open:
-        settings = replace(settings, latest_stale_after_seconds=gth_max_age)
+    from spx_spark.options_map import group_spxw_option_quotes
+
+    grouped = group_spxw_option_quotes(state, storage_settings=settings)
+    quotes = [
+        quote
+        for quote in grouped.get(expiry, ())
+        if is_spxw_zero_dte(quote, as_of=state.as_of)
+    ]
     return quotes, settings
 
 

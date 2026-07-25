@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import random
 import time
+from math import ceil, log2
 from dataclasses import dataclass
 from enum import Enum
 
@@ -26,6 +27,50 @@ class StreamAction(str, Enum):
     CONFLICT_WAIT = "conflict_wait"
     POLICY_BLOCKED = "policy_blocked"
     GATEWAY_RESTART = "gateway_restart"
+
+
+@dataclass
+class CompetingSessionCircuit:
+    """Deterministic exponential cooldown for IBKR error 10197.
+
+    The circuit never preempts another IBKR session.  It only controls when
+    this collector may make its next ordinary, read-only market-data attempt.
+    A genuinely healthy data flush closes the circuit; merely reconnecting the
+    socket does not.
+    """
+
+    min_seconds: float
+    max_seconds: float
+    failures: int = 0
+    retry_not_before: float = 0.0
+
+    def __post_init__(self) -> None:
+        if self.min_seconds <= 0:
+            raise ValueError("competing-session cooldown minimum must be positive")
+        if self.max_seconds < self.min_seconds:
+            raise ValueError("competing-session cooldown maximum cannot be below minimum")
+
+    def open(self, *, now_monotonic: float) -> float:
+        max_doublings = max(ceil(log2(self.max_seconds / self.min_seconds)), 0)
+        exponent = min(self.failures, max_doublings)
+        delay = min(self.min_seconds * (2**exponent), self.max_seconds)
+        self.failures += 1
+        self.retry_not_before = now_monotonic + delay
+        return delay
+
+    def remaining_seconds(self, *, now_monotonic: float) -> float:
+        return max(self.retry_not_before - now_monotonic, 0.0)
+
+    def state(self, *, now_monotonic: float) -> str:
+        if self.failures == 0:
+            return "closed"
+        if self.remaining_seconds(now_monotonic=now_monotonic) > 0:
+            return "open"
+        return "half_open"
+
+    def close(self) -> None:
+        self.failures = 0
+        self.retry_not_before = 0.0
 
 
 @dataclass

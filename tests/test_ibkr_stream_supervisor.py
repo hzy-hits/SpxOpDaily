@@ -187,3 +187,142 @@ def test_competing_error_precedes_generic_subscription_health_reconnect(
     assert deferred == [5.0]
     assert any(event.get("event") == "competing_session" for event in events)
     assert not any(event.get("event") == "subscription_health_reconnect" for event in events)
+
+
+def test_repeated_competing_sessions_use_bounded_exponential_cooldown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = FakeClock()
+    collector = FakeCollector(clock)
+    collector.broker_settings = SimpleNamespace(account_read_enabled=False)  # type: ignore[attr-defined]
+    deferred: list[float] = []
+    collector.defer_market_data_after_conflict = (  # type: ignore[attr-defined]
+        lambda *, seconds: deferred.append(seconds)
+    )
+    runtime, events = make_runtime(monkeypatch, collector)
+    runtime.runtime_policy = SimpleNamespace(
+        ibkr_conflict_probe_seconds=5.0,
+        ibkr_conflict_probe_max_seconds=20.0,
+    )
+    runtime.__post_init__()
+
+    for expected_clock in (0.0, 5.0, 15.0, 35.0):
+        clock.now = expected_clock
+        runtime._defer_competing_session(phase="active_session")
+
+    assert deferred == [5.0, 10.0, 20.0, 20.0]
+    conflicts = [event for event in events if event.get("event") == "competing_session"]
+    assert [event["conflict_count"] for event in conflicts] == [1, 2, 3, 4]
+    assert [event["probe_in_seconds"] for event in conflicts] == deferred
+    assert runtime.competing_session_circuit.state(now_monotonic=54.0) == "open"
+    assert runtime.competing_session_circuit.state(now_monotonic=55.0) == "half_open"
+
+
+def test_healthy_data_flush_closes_competing_session_circuit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = FakeClock()
+    collector = FakeCollector(clock, disconnect_after_flushes=2)
+    original_flush = collector.flush
+    clear_calls: list[float] = []
+    collector.clear_market_data_conflict = lambda: clear_calls.append(clock.now)  # type: ignore[attr-defined]
+
+    def available_flush() -> dict[str, object]:
+        original_flush()
+        return {
+            "task": "ibkr_stream",
+            "event": "flush",
+            "quotes": 10,
+            "provider_status": "available",
+            "provider_reason": None,
+            "farm_status": "ok",
+        }
+
+    collector.flush = available_flush  # type: ignore[method-assign]
+    runtime, _events = make_runtime(monkeypatch, collector)
+    runtime.competing_session_circuit.open(now_monotonic=0.0)
+    runtime.competing_session_circuit.open(now_monotonic=5.0)
+
+    assert runtime.session_loop() is True
+
+    assert clear_calls == [1.0]
+    assert runtime.competing_session_circuit.failures == 0
+    assert runtime.session_had_healthy_flush is True
+
+
+def test_non_competing_subscription_failure_does_not_open_conflict_circuit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = FakeClock()
+    collector = FakeCollector(clock)
+    collector.subscription_health_failed = True
+    runtime, events = make_runtime(monkeypatch, collector)
+
+    assert runtime.session_loop() is True
+
+    assert runtime.competing_session_circuit.failures == 0
+    assert any(event.get("event") == "subscription_health_reconnect" for event in events)
+    assert not any(event.get("event") == "competing_session" for event in events)
+
+
+def test_health_projection_validity_tracks_policy_heartbeat(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = FakeClock()
+    collector = FakeCollector(clock)
+    runtime, _events = make_runtime(
+        monkeypatch,
+        collector,
+        policy_check_seconds=40.0,
+    )
+    runtime.storage_settings = SimpleNamespace(data_root="/tmp")  # type: ignore[assignment]
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        supervisor_module,
+        "persist_stream_health",
+        lambda _storage, **kwargs: captured.update(kwargs),
+    )
+
+    runtime._publish_health(
+        data_plane_healthy=False,
+        policy_blocked=True,
+        reason="test heartbeat",
+    )
+
+    assert captured["max_age_seconds"] == 120.0
+
+
+def test_competing_session_standby_heartbeats_keep_retry_visible(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = FakeClock()
+    collector = FakeCollector(clock)
+    collector.tws_connectivity_lost = False  # type: ignore[attr-defined]
+    collector.connection_required = lambda: True  # type: ignore[attr-defined]
+    collector.market_data_block_reason = (  # type: ignore[attr-defined]
+        lambda: "competing live session owns shared market data (IBKR 10197)"
+    )
+    runtime, _events = make_runtime(
+        monkeypatch,
+        collector,
+        policy_check_seconds=30.0,
+    )
+    runtime.storage_settings = SimpleNamespace(data_root="/tmp")  # type: ignore[assignment]
+    for _ in range(7):
+        runtime.competing_session_circuit.open(now_monotonic=clock.now)
+
+    captured: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        supervisor_module,
+        "persist_stream_health",
+        lambda _storage, **kwargs: captured.append(kwargs),
+    )
+
+    assert runtime.account_standby_loop() is False
+
+    assert captured
+    heartbeat = captured[-1]
+    assert heartbeat["policy_blocked"] is True
+    assert heartbeat["circuit_state"] == "open"
+    assert heartbeat["retry_in_seconds"] == pytest.approx(270.0)
+    assert heartbeat["reason"] == "competing live session cooldown (IBKR 10197)"

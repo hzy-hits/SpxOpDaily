@@ -2078,3 +2078,50 @@ def test_flush_reports_outage_while_farm_not_ready(monkeypatch) -> None:
     assert state.status.value == "degraded"
     assert "farm" in (state.reason or "").lower()
     assert event["provider_status"] == "degraded"
+    assert event["fresh_quotes"] == 1
+    assert event["data_plane_healthy"] is False
+
+
+def test_flush_reports_healthy_data_plane_with_fresh_quote_despite_partial_error(
+    monkeypatch,
+) -> None:
+    collector = _flush_test_collector()
+    collector.errors = [
+        stream_collector_module.IbkrError(
+            req_id=100,
+            error_code=200,
+            message="one optional contract was not found",
+            contract=None,
+            ts="2026-07-25T06:00:00+00:00",
+        )
+    ]
+    collector.base_subs = {
+        "future:ES": (
+            object(),
+            VerifyRow(
+                label="future:ES",
+                kind="future",
+                symbol="ES",
+                subscribed=True,
+                market_data_type=1,
+                last=6400.0,
+                ticker_time="2026-07-25T06:00:00+00:00",
+            ),
+        )
+    }
+
+    def capture_snapshot(snapshot, _storage):
+        return SimpleNamespace(best_quote_count=len(snapshot.quotes))
+
+    patch_stream(monkeypatch, "persist_provider_snapshot", capture_snapshot)
+    patch_stream(
+        monkeypatch,
+        "snapshot_rows",
+        lambda subscriptions, *_args, **_kwargs: [row for _, row in subscriptions.values()],
+    )
+
+    event = collector.flush()
+
+    assert event["provider_status"] == "degraded"
+    assert event["fresh_quotes"] == 1
+    assert event["data_plane_healthy"] is True

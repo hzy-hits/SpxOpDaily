@@ -33,6 +33,21 @@ attempt or age exhaustion. The 24-hour loop runs `notification_recovery` every
 60 seconds, so recovery does not depend on a later market alert. Shock events
 still enqueue and attempt delivery inline, keeping the fast path synchronous.
 
+The human-notification outbox uses SQLite rollback-journal (`DELETE`) mode with
+`synchronous=FULL`. It intentionally does not use WAL: notifications have
+multiple short-lived producer and consumer processes, which can meet the rare
+[WAL-reset corruption race](https://sqlite.org/wal.html#the_wal_reset_bug)
+present in SQLite versions before 3.51.3. The queue is low-volume, so
+serialized writes are preferable to WAL checkpoint risk.
+
+If integrity checking ever fails, stop every notification producer and
+consumer before recovery. Move the main database plus any adjacent `-wal`,
+`-shm`, or `-journal` files into one timestamped recovery directory; never
+separate or delete sidecars from a live database. Start the delivery worker to
+create the replacement, then require `PRAGMA journal_mode=DELETE`,
+`PRAGMA quick_check=ok`, a stable worker restart count, and one real scheduled
+report before restoring normal operation.
+
 During rollout, failed event IDs are mirrored into the old JSONL missed queue.
 The SQLite worker imports any pre-existing JSONL entries and removes the shadow
 only after the corresponding event is fully delivered. The JSONL flusher is
@@ -47,3 +62,7 @@ The intraday shock producer remains latency-critical. It may call the notifier
 before periodic outbox evaluation, but it uses the same cooldown state,
 dispatcher, receipt store and sink policy. The later periodic candidate is
 therefore deduplicated without creating a second human push.
+
+The exchange-local heartbeat, cross-process Spring projection and post-close
+operational gates are specified in
+[RTH runtime clock and end-to-end acceptance](rth-runtime-clock-and-acceptance.md).

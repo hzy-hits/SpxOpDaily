@@ -87,6 +87,8 @@ class VerifyRow:
     theta: float | None = None
     vega: float | None = None
     und_price: float | None = None
+    greeks_observed_at: str | None = None
+    open_interest_observed_at: str | None = None
     ticker_time: str | None = None
     last_update_at: str | None = None
     request_id: int | None = None
@@ -432,7 +434,14 @@ def snapshot_rows(
         row.last_size = clean_float(getattr(ticker, "lastSize", None))
         row.volume = clean_float(getattr(ticker, "volume", None))
         if row.kind == "option":
-            row.open_interest = option_open_interest_from_ticker(ticker)
+            previous_open_interest = row.open_interest
+            current_open_interest = option_open_interest_from_ticker(ticker)
+            row.open_interest = current_open_interest
+            if current_open_interest is not None and (
+                row.open_interest_observed_at is None
+                or current_open_interest != previous_open_interest
+            ):
+                row.open_interest_observed_at = now.isoformat()
 
         try:
             row.market_price = clean_float(ticker.marketPrice())
@@ -446,6 +455,7 @@ def snapshot_rows(
             row.ticker_time = ticker_time.astimezone(timezone.utc).isoformat()
             row.stale = (now - ticker_time.astimezone(timezone.utc)).total_seconds() > row_stale_after
 
+        previous_greeks = option_greeks_fingerprint(row)
         greeks = getattr(ticker, "modelGreeks", None)
         if greeks is not None:
             row.model_iv = clean_float(getattr(greeks, "impliedVol", None))
@@ -454,6 +464,11 @@ def snapshot_rows(
             row.theta = clean_float(getattr(greeks, "theta", None))
             row.vega = clean_float(getattr(greeks, "vega", None))
             row.und_price = clean_float(getattr(greeks, "undPrice", None))
+            current_greeks = option_greeks_fingerprint(row)
+            if any(value is not None for value in current_greeks) and (
+                row.greeks_observed_at is None or current_greeks != previous_greeks
+            ):
+                row.greeks_observed_at = now.isoformat()
 
         current_fingerprint = normalized_row_fingerprint(row)
         if (
@@ -483,6 +498,19 @@ def normalized_row_fingerprint(row: VerifyRow) -> tuple[object, ...]:
         row.model_iv,
         row.delta,
         row.gamma,
+        row.und_price,
+    )
+
+
+def option_greeks_fingerprint(row: VerifyRow) -> tuple[float | None, ...]:
+    """Values whose change proves a new IBKR model-Greeks observation."""
+
+    return (
+        row.model_iv,
+        row.delta,
+        row.gamma,
+        row.theta,
+        row.vega,
         row.und_price,
     )
 

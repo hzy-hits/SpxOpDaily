@@ -1,0 +1,13 @@
+[Unit]
+Description=SPX Spark daily RTH end-to-end operational acceptance
+After=network-online.target spx-spark-post-close-review.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/ubuntu/spx-spark
+EnvironmentFile=-/home/ubuntu/spx-spark/.env
+Environment=PATH=/home/ubuntu/.local/bin:/home/ubuntu/.cargo/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/home/ubuntu/spx-spark/scripts/run-rth-daily-acceptance.sh --date auto --strict
+UMask=0077
+TimeoutStartSec=15min
