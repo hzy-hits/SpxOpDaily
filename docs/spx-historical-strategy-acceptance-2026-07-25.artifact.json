@@ -1,0 +1,879 @@
+{
+  "surface": "report",
+  "manifest": {
+    "version": 1,
+    "surface": "report",
+    "title": "SPX 历史策略验收：截至 2026-07-24",
+    "description": "使用 received_at knowledge-time、严格实时行情过滤和因果八变量状态重放，评估 Spring Gamma、墙位 lifecycle、15 分钟报告与 0DTE/1DTE 选择。",
+    "generatedAt": "2026-07-25T08:25:19Z",
+    "sources": [
+      {
+        "id": "causal_state",
+        "label": "因果八变量 RTH 状态重放",
+        "path": "reports/market_state_5m/replay=2026-07-25-historical/artifact.json",
+        "query": {
+          "engine": "spx-spark market_state_5m replay",
+          "id": "causal-market-state-20260725",
+          "sql": "SELECT * FROM read_json_auto('reports/market_state_5m/replay=2026-07-25-historical/artifact.json')",
+          "description": "按每个 5 分钟边界仅使用 received_at/source_at 不晚于 as_of 的数据评分，未来 ES 路径在评分后单独挂接。",
+          "language": "sql",
+          "executed_at": "2026-07-25T08:14:53Z",
+          "filters": [
+            "RTH 09:45–16:00 America/New_York",
+            "无插值、无缺失 bar 合成",
+            "同刻区间基线仅使用严格先前交易日",
+            "生产阈值未覆盖"
+          ],
+          "metric_definitions": [
+            "Ready state requires all eight inputs.",
+            "Directional hit uses the state direction against later ES endpoint.",
+            "Forward labels are evaluation-only and never enter state inputs."
+          ],
+          "tables_used": [
+            "lake/quotes/schema=v1"
+          ]
+        }
+      },
+      {
+        "id": "formal_outcomes",
+        "label": "Formal level-decision outcomes",
+        "path": "features/level_decision_outcomes/date=*/outcomes.jsonl",
+        "query": {
+          "engine": "JSONL event audit",
+          "id": "formal-outcomes-through-20260724",
+          "sql": "SELECT event_id, confirmed_at, direction, horizon_seconds, return_bps FROM read_json_auto('features/level_decision_outcomes/date=*/outcomes.jsonl', union_by_name=true) WHERE status='complete' QUALIFY ROW_NUMBER() OVER (PARTITION BY event_id, horizon_seconds ORDER BY completed_at DESC)=1",
+          "description": "按唯一 formal event 与固定 30/60/180/300 秒窗口评估方向收益。",
+          "language": "sql",
+          "executed_at": "2026-07-25T08:20:00Z",
+          "filters": [
+            "39 unique events",
+            "RTH uses 09:30–16:00 America/New_York",
+            "directional return reverses raw return for down signals"
+          ],
+          "metric_definitions": [
+            "Hit rate is strictly positive directional return.",
+            "Wilson intervals are event-row intervals and do not remove same-session clustering."
+          ],
+          "tables_used": [
+            "features/level_decision_outcomes"
+          ]
+        }
+      },
+      {
+        "id": "strict_backtest",
+        "label": "0DTE strict-live knowledge-time replay",
+        "path": "reports/odte_level_backtest/diagnostic=2026-07-25-historical/cutoff=2026-07-24/artifact.json",
+        "query": {
+          "engine": "spx-spark odte_level_backtest",
+          "id": "strict-live-knowledge-time-20260724",
+          "sql": "SELECT * FROM read_json_auto('reports/odte_level_backtest/diagnostic=2026-07-25-historical/cutoff=2026-07-24/artifact.json')",
+          "description": "所有 execution tick 以 received_at 为知识时钟；拒绝非 live、未来时间戳、source age 超过 30 秒的行。",
+          "language": "sql",
+          "executed_at": "2026-07-25T08:22:31Z",
+          "filters": [
+            "quality=live and market_data_type in (live,1)",
+            "source_at between received_at-30s and received_at+5s",
+            "complete sessions only",
+            "ask entry and bid/mark exit according to replay contract"
+          ],
+          "metric_definitions": [
+            "Production total includes only exact persisted TradeReady intents.",
+            "Confirmed and GTH cohorts are controls, not production PnL.",
+            "Gross PnL excludes commissions, slippage, queue, partial fills and impact."
+          ],
+          "tables_used": [
+            "features/trade_intents",
+            "features/level_decision_audit",
+            "lake/quotes/schema=v1"
+          ]
+        }
+      },
+      {
+        "id": "report_audit",
+        "label": "三周 15 分钟报告诊断",
+        "path": "docs/spx-three-week-signal-diagnostic-2026-07-24.artifact.json",
+        "query": {
+          "engine": "Executed companion notebook",
+          "id": "three-week-report-audit-20260724",
+          "sql": "SELECT * FROM read_json_auto('docs/spx-three-week-signal-diagnostic-2026-07-24.artifact.json')",
+          "description": "审计用户可见 headline、生成 cadence、action state 与后续 ES 方向。",
+          "language": "sql",
+          "executed_at": "2026-07-24T01:49:35Z",
+          "filters": [
+            "persisted report text",
+            "RTH direction linked to later ES observations",
+            "overlapping horizons are not treated as independent sessions"
+          ],
+          "metric_definitions": [
+            "Headline hit is descriptive and is not a TradeReady decision.",
+            "Adjacent flip rate counts direction changes between neighboring RTH reports."
+          ],
+          "tables_used": [
+            "audit/order_map_pricing",
+            "docs/spx-three-week-signal-diagnostic-2026-07-24.ipynb"
+          ]
+        }
+      },
+      {
+        "id": "tenor_research",
+        "label": "0DTE/1DTE matched-tenor research",
+        "path": "docs/spring-gamma-v3-research-2026-07-24.artifact.json",
+        "query": {
+          "engine": "Executed Spring Gamma research notebook",
+          "id": "matched-tenor-research-20260724",
+          "sql": "SELECT * FROM read_json_auto('docs/spring-gamma-v3-research-2026-07-24.artifact.json')",
+          "description": "同 provider/right/strike、ask entry、固定窗口 bid exit 的 0DTE 与 1DTE 配对比较。",
+          "language": "sql",
+          "executed_at": "2026-07-24T09:00:00Z",
+          "filters": [
+            "RTH only",
+            "quote/source age <=15 seconds",
+            "same signal origin and contract coordinate"
+          ],
+          "metric_definitions": [
+            "PnL points are ask-entry to bid-exit and exclude fees/fill uncertainty.",
+            "0DTE minus 1DTE below zero favors 1DTE in the observed sample."
+          ],
+          "tables_used": [
+            "lake/quotes/schema=v1",
+            "docs/spring-gamma-v3-research-2026-07-24.ipynb"
+          ]
+        }
+      }
+    ],
+    "cards": [
+      {
+        "id": "state_ready",
+        "description": "Causal replay slots with a non-UNCERTAIN state.",
+        "dataset": "headline",
+        "sourceId": "causal_state",
+        "metrics": [
+          {
+            "label": "明确状态槽",
+            "field": "state_ready_slots",
+            "format": "number"
+          },
+          {
+            "label": "总边界",
+            "field": "state_total_slots",
+            "format": "number"
+          }
+        ]
+      },
+      {
+        "id": "formal_rth",
+        "description": "Formal RTH events; clustered in only four sessions.",
+        "dataset": "headline",
+        "sourceId": "formal_outcomes",
+        "metrics": [
+          {
+            "label": "RTH formal",
+            "field": "rth_formal_events",
+            "format": "number"
+          },
+          {
+            "label": "独立交易日",
+            "field": "rth_formal_days",
+            "format": "number"
+          }
+        ]
+      },
+      {
+        "id": "exact_fills",
+        "description": "Exact persisted production TradeReady fills in strict replay.",
+        "dataset": "headline",
+        "sourceId": "strict_backtest",
+        "metrics": [
+          {
+            "label": "生产精确成交",
+            "field": "exact_trade_ready_fills",
+            "format": "number"
+          },
+          {
+            "label": "Gross PnL",
+            "field": "exact_trade_ready_gross_usd",
+            "format": "currency"
+          }
+        ]
+      },
+      {
+        "id": "gth_result",
+        "description": "GTH formal direction at 300 seconds remains below 50% hit rate.",
+        "dataset": "headline",
+        "sourceId": "formal_outcomes",
+        "metrics": [
+          {
+            "label": "GTH 300s 命中",
+            "field": "gth_300_hit_rate",
+            "format": "percent"
+          }
+        ]
+      }
+    ],
+    "charts": [
+      {
+        "id": "state_count_chart",
+        "title": "因果八变量状态重放计数",
+        "subtitle": "1,118/1,125 个边界保持 UNCERTAIN；7 个明确状态全来自 7/24，不能据此调参",
+        "intent": "comparison",
+        "question": "How often did the full eight-input scorer produce an explicit state?",
+        "rationale": "A compact bar chart makes the fail-closed imbalance visible.",
+        "type": "bar",
+        "dataset": "state_counts",
+        "sourceId": "causal_state",
+        "encodings": {
+          "x": {
+            "field": "state",
+            "type": "nominal",
+            "label": "状态"
+          },
+          "y": {
+            "field": "count",
+            "type": "quantitative",
+            "format": "number",
+            "label": "5分钟边界数"
+          }
+        },
+        "valueFormat": "number",
+        "layout": "full",
+        "labels": {
+          "values": "all"
+        },
+        "maxRows": 4,
+        "settings": {
+          "categoryLabelPolicy": "wrap",
+          "groupMode": "single",
+          "showValues": true,
+          "sort": "none"
+        }
+      },
+      {
+        "id": "formal_horizon_chart",
+        "title": "Formal confirmation 后的方向命中率",
+        "subtitle": "RTH 的 180–300 秒延续是当前唯一值得继续验证的形态；GTH 仍不支持执行",
+        "intent": "comparison",
+        "question": "At which horizon do RTH and GTH formal confirmations retain direction?",
+        "rationale": "Grouped horizon bars separate the two session regimes.",
+        "type": "bar",
+        "dataset": "formal_horizons",
+        "sourceId": "formal_outcomes",
+        "encodings": {
+          "x": {
+            "field": "horizon",
+            "type": "nominal",
+            "label": "窗口"
+          },
+          "y": {
+            "field": "hit_rate",
+            "type": "quantitative",
+            "format": "percent",
+            "label": "方向命中率"
+          },
+          "color": {
+            "field": "session",
+            "type": "nominal",
+            "label": "Session"
+          },
+          "tooltip": [
+            {
+              "field": "n",
+              "type": "quantitative",
+              "format": "number",
+              "label": "n"
+            },
+            {
+              "field": "mean_directional_bps",
+              "type": "quantitative",
+              "format": "number",
+              "label": "方向均值 bps"
+            },
+            {
+              "field": "median_directional_bps",
+              "type": "quantitative",
+              "format": "number",
+              "label": "方向中位数 bps"
+            }
+          ]
+        },
+        "valueFormat": "percent",
+        "layout": "full",
+        "labels": {
+          "values": "all"
+        },
+        "maxRows": 8,
+        "settings": {
+          "categoryLabelPolicy": "wrap",
+          "groupMode": "grouped",
+          "showValues": true,
+          "sort": "none"
+        }
+      },
+      {
+        "id": "replay_pnl_chart",
+        "title": "严格回放的 control 与 production gross PnL",
+        "subtitle": "价差并未稳定优于裸腿；production +$780 只有两笔成交，不能作为 edge 证明",
+        "intent": "comparison",
+        "question": "Which replay cohorts and structures remain positive under strict-live knowledge-time filtering?",
+        "rationale": "Gross PnL bars expose both sign and cohort-role differences.",
+        "type": "bar",
+        "dataset": "replay_cohorts",
+        "sourceId": "strict_backtest",
+        "encodings": {
+          "x": {
+            "field": "cohort",
+            "type": "nominal",
+            "label": "回放队列"
+          },
+          "y": {
+            "field": "gross_pnl_usd",
+            "type": "quantitative",
+            "format": "currency",
+            "label": "Gross PnL"
+          },
+          "tooltip": [
+            {
+              "field": "fills",
+              "type": "quantitative",
+              "format": "number",
+              "label": "成交数"
+            },
+            {
+              "field": "win_rate",
+              "type": "quantitative",
+              "format": "percent",
+              "label": "胜率"
+            },
+            {
+              "field": "role",
+              "type": "nominal",
+              "label": "角色"
+            }
+          ]
+        },
+        "valueFormat": "currency",
+        "layout": "full",
+        "labels": {
+          "values": "all"
+        },
+        "maxRows": 6,
+        "settings": {
+          "categoryLabelPolicy": "wrap",
+          "groupMode": "single",
+          "showValues": true,
+          "sort": "none"
+        }
+      }
+    ],
+    "tables": [
+      {
+        "id": "strategy_rules_table",
+        "title": "当前可执行策略合同",
+        "subtitle": "这是一套风险收缩规则，不是自动下单授权。",
+        "dataset": "strategy_rules",
+        "sourceId": "formal_outcomes",
+        "defaultSort": {
+          "field": "order",
+          "direction": "asc"
+        },
+        "density": "compact",
+        "layout": "full",
+        "columns": [
+          {
+            "field": "order",
+            "label": "#",
+            "type": "number"
+          },
+          {
+            "field": "layer",
+            "label": "层",
+            "type": "text"
+          },
+          {
+            "field": "rule",
+            "label": "规则",
+            "type": "text"
+          },
+          {
+            "field": "authority",
+            "label": "权限",
+            "type": "text"
+          },
+          {
+            "field": "evidence",
+            "label": "历史证据",
+            "type": "text"
+          }
+        ]
+      },
+      {
+        "id": "replay_table",
+        "title": "严格实时 knowledge-time 回放",
+        "subtitle": "所有金额均为一张、未计交易成本的 gross；control 不等于 production。",
+        "dataset": "replay_cohorts",
+        "sourceId": "strict_backtest",
+        "defaultSort": {
+          "field": "gross_pnl_usd",
+          "direction": "desc"
+        },
+        "density": "compact",
+        "layout": "full",
+        "columns": [
+          {
+            "field": "cohort",
+            "label": "队列",
+            "type": "text"
+          },
+          {
+            "field": "role",
+            "label": "角色",
+            "type": "text"
+          },
+          {
+            "field": "fills",
+            "label": "n",
+            "type": "number"
+          },
+          {
+            "field": "win_rate",
+            "label": "胜率",
+            "type": "percent"
+          },
+          {
+            "field": "gross_pnl_usd",
+            "label": "Gross PnL",
+            "type": "currency"
+          },
+          {
+            "field": "decision",
+            "label": "结论",
+            "type": "text"
+          }
+        ]
+      },
+      {
+        "id": "tenor_table",
+        "title": "0DTE 与 1DTE 配对结果",
+        "subtitle": "13:00 ET 后样本仅 6–8 笔；没有证据支持硬切换到 0DTE。",
+        "dataset": "tenor_comparison",
+        "sourceId": "tenor_research",
+        "defaultSort": {
+          "field": "order",
+          "direction": "asc"
+        },
+        "density": "compact",
+        "layout": "full",
+        "columns": [
+          {
+            "field": "order",
+            "label": "#",
+            "type": "number"
+          },
+          {
+            "field": "cutoff",
+            "label": "时段",
+            "type": "text"
+          },
+          {
+            "field": "horizon",
+            "label": "持有",
+            "type": "text"
+          },
+          {
+            "field": "n",
+            "label": "配对 n",
+            "type": "number"
+          },
+          {
+            "field": "zero_mean_points",
+            "label": "0DTE 均值",
+            "type": "number"
+          },
+          {
+            "field": "one_mean_points",
+            "label": "1DTE 均值",
+            "type": "number"
+          },
+          {
+            "field": "difference_points",
+            "label": "0DTE−1DTE",
+            "type": "number"
+          },
+          {
+            "field": "decision",
+            "label": "结论",
+            "type": "text"
+          }
+        ]
+      }
+    ],
+    "blocks": [
+      {
+        "id": "title",
+        "type": "markdown",
+        "layout": "full",
+        "body": "# SPX 历史策略验收：截至 2026-07-24"
+      },
+      {
+        "id": "executive_summary",
+        "type": "markdown",
+        "layout": "full",
+        "body": "## Executive Summary\n\n**现在可以从历史数据完成工程验收，不必等下一个 RTH；但历史证据不允许把这套系统升级为自动交易策略。** 因果八变量重放覆盖 15 个 RTH、1,125 个边界，只有 7 个明确状态且全部来自 7/24。它证明新状态机能在真实历史上产出，也证明样本远不足以调参。\n\n15 分钟 headline 仍只能描述环境，不能作为入场。当前最值得继续验证的是：RTH 墙位 lifecycle 到 `CONFIRMED` 后等待约 180–300 秒的方向延续。RTH 180 秒命中 12/17，300 秒 10/17，但 17 个事件只来自 4 天并包含同级位重复确认，不能晋级。\n\n执行层保持 fail-closed：GTH 继续 shadow；Spring/Charm 只做 regime 与质量 gate；必须有 fresh SPXW 双边链、完整墙位结构和唯一方向触发。0DTE/1DTE 不按 13:00 ET 硬切换；配对样本在 60 分钟窗口整体更偏向 1DTE，下午样本太小且结论不显著。"
+      },
+      {
+        "id": "headline_metrics",
+        "type": "metric-strip",
+        "layout": "full",
+        "cardIds": [
+          "state_ready",
+          "formal_rth",
+          "exact_fills",
+          "gth_result"
+        ]
+      },
+      {
+        "id": "state_section",
+        "type": "markdown",
+        "layout": "full",
+        "sourceId": "causal_state",
+        "body": "## 八变量状态机：工程通过，统计未通过\n\n7/24 首次得到 19 个 8/8 完整输入槽，其中 5 个 `TREND_UP`、1 个 `TREND_DOWN`、1 个 `LOW_VOL_RANGE`。5 个 `TREND_UP` 的 15/30/60 分钟方向命中为 4/5、5/5、5/5；唯一 `TREND_DOWN` 三个窗口全部反向。因为全部来自同一天，这只能做功能验收，不能据此改分数或阈值。"
+      },
+      {
+        "id": "state_count_block",
+        "type": "chart",
+        "layout": "full",
+        "chartId": "state_count_chart"
+      },
+      {
+        "id": "headline_section",
+        "type": "markdown",
+        "layout": "full",
+        "sourceId": "report_audit",
+        "body": "## 15 分钟报告不再承担方向入场\n\n截至 7/23 的持久化 RTH headline，15/30/60 分钟命中分别为 52.70% / 56.34% / 56.67%，对应方向均值 +0.20 / +0.99 / −0.83 ES 点；相邻报告约 32.94% 翻向。胜率、均值与稳定性不一致，所以报告应显示状态、墙位、风险与 gate，不应把 headline 写成买 Call/Put 指令。"
+      },
+      {
+        "id": "formal_section",
+        "type": "markdown",
+        "layout": "full",
+        "sourceId": "formal_outcomes",
+        "body": "## 当前策略核心：墙位确认后的短延续\n\nRTH formal 在 30 秒仍近似随机，60 秒开始改善，180 秒达到 70.59%，300 秒回落到 58.82%。这支持“确认后等待 3–5 分钟再判断”，不支持触墙即买。GTH 300 秒只有 40.91% 命中且中位方向收益为负，继续仅做结构观察。"
+      },
+      {
+        "id": "formal_horizon_block",
+        "type": "chart",
+        "layout": "full",
+        "chartId": "formal_horizon_chart"
+      },
+      {
+        "id": "strategy_contract_section",
+        "type": "markdown",
+        "layout": "full",
+        "body": "## Strategy Contract\n\n方向、位置、触发和期权结构必须分层。Spring Gamma/Charm 不直接给方向；墙位决定候选方向；formal lifecycle 决定是否进入确认；实时 NBBO 和 spread 成本决定是否可执行。任何一层缺失都输出 `NO TRADE`，而不是用 ES 代理价格生成期权概率或限价。"
+      },
+      {
+        "id": "strategy_rules_block",
+        "type": "table",
+        "layout": "full",
+        "tableId": "strategy_rules_table"
+      },
+      {
+        "id": "replay_section",
+        "type": "markdown",
+        "layout": "full",
+        "sourceId": "strict_backtest",
+        "body": "## 严格回放：不要被 +$780 误导\n\n修复后 QuoteStore 使用 `received_at` knowledge-time，并拒绝非实时和过旧 source 行。exact production 仍只有 4 个 TradeReady、2 个成交，gross +$780；样本小到没有统计含义。Formal confirmed control 的裸腿为 +$500，但 5 点 spread 为 −$1,135、10 点 spread 为 −$680，说明“价差天然更稳”目前没有数据支持。"
+      },
+      {
+        "id": "replay_pnl_block",
+        "type": "chart",
+        "layout": "full",
+        "chartId": "replay_pnl_chart"
+      },
+      {
+        "id": "replay_table_block",
+        "type": "table",
+        "layout": "full",
+        "tableId": "replay_table"
+      },
+      {
+        "id": "tenor_section",
+        "type": "markdown",
+        "layout": "full",
+        "sourceId": "tenor_research",
+        "body": "## 0DTE / 1DTE\n\n在同 provider/right/strike 的 ask-entry→bid-exit 配对中，60 分钟全 RTH 的 0DTE−1DTE 均值为 −0.79 点，95% CI 为 −1.26 到 −0.30；13:00 ET 前为 −0.86 点。下午仅 6 个 60 分钟样本，差异 CI 跨零。当前合理做法是：13:00 前若其余 gate 全通过，优先把 1DTE 作为候选；下午不硬切 0DTE，继续并行 shadow。两者绝对收益多数仍为负，因此 tenor 选择不能挽救一个弱方向信号。"
+      },
+      {
+        "id": "tenor_table_block",
+        "type": "table",
+        "layout": "full",
+        "tableId": "tenor_table"
+      },
+      {
+        "id": "ibkr_section",
+        "type": "markdown",
+        "layout": "full",
+        "body": "## IBKR Paper Operational Note\n\n本机 Gateway 是 Paper 端口 4002，且系统只读、手工执行；账户与订单不会因为 Live 登录而混在一起。但 Paper 当前共享 Live username 的实时行情订阅，因此人工登录 Live 仍会触发 10197 并让 Live 获得行情优先级。运行策略时应把这视为行情中断：自动降级 Schwab，退出 Live 后由退避探针恢复 IBKR；若要真正同时在线，需要独立 username 与独立行情订阅。"
+      },
+      {
+        "id": "limitations",
+        "type": "markdown",
+        "layout": "full",
+        "body": "## Caveats\n\n- 17 个 RTH formal events 只分布在 4 个交易日，日内聚类使普通事件级置信区间偏乐观。\n- 八变量明确状态只来自 7/24；20 日同刻区间基线尚未形成。\n- 所有期权回放均未计佣金、显式滑点、排队、部分成交、冲击和人工延迟。\n- Spring/Charm 与 0DTE/1DTE 研究仍是 shadow；没有完成概率校准，也不能输出真实到墙概率。\n- 报告结论是风险与研究合同，不构成自动下单授权或收益承诺。"
+      }
+    ]
+  },
+  "snapshot": {
+    "version": 1,
+    "status": "ready",
+    "generatedAt": "2026-07-25T08:25:19Z",
+    "datasets": {
+      "headline": [
+        {
+          "state_ready_slots": 7,
+          "state_total_slots": 1125,
+          "rth_formal_events": 17,
+          "rth_formal_days": 4,
+          "exact_trade_ready_fills": 2,
+          "exact_trade_ready_gross_usd": 780.0,
+          "gth_300_hit_rate": 0.4091
+        }
+      ],
+      "state_counts": [
+        {
+          "state": "UNCERTAIN",
+          "count": 1118
+        },
+        {
+          "state": "TREND_UP",
+          "count": 5
+        },
+        {
+          "state": "TREND_DOWN",
+          "count": 1
+        },
+        {
+          "state": "LOW_VOL_RANGE",
+          "count": 1
+        }
+      ],
+      "formal_horizons": [
+        {
+          "session": "RTH",
+          "horizon": "30s",
+          "n": 17,
+          "hit_rate": 0.4706,
+          "mean_directional_bps": -0.15,
+          "median_directional_bps": -0.16
+        },
+        {
+          "session": "RTH",
+          "horizon": "60s",
+          "n": 17,
+          "hit_rate": 0.5882,
+          "mean_directional_bps": 0.44,
+          "median_directional_bps": 0.64
+        },
+        {
+          "session": "RTH",
+          "horizon": "180s",
+          "n": 17,
+          "hit_rate": 0.7059,
+          "mean_directional_bps": 2.26,
+          "median_directional_bps": 2.69
+        },
+        {
+          "session": "RTH",
+          "horizon": "300s",
+          "n": 17,
+          "hit_rate": 0.5882,
+          "mean_directional_bps": 1.34,
+          "median_directional_bps": 2.21
+        },
+        {
+          "session": "GTH",
+          "horizon": "30s",
+          "n": 22,
+          "hit_rate": 0.4091,
+          "mean_directional_bps": 0.07,
+          "median_directional_bps": -0.07
+        },
+        {
+          "session": "GTH",
+          "horizon": "60s",
+          "n": 22,
+          "hit_rate": 0.5455,
+          "mean_directional_bps": -0.43,
+          "median_directional_bps": 0.33
+        },
+        {
+          "session": "GTH",
+          "horizon": "180s",
+          "n": 20,
+          "hit_rate": 0.55,
+          "mean_directional_bps": 0.57,
+          "median_directional_bps": 0.33
+        },
+        {
+          "session": "GTH",
+          "horizon": "300s",
+          "n": 22,
+          "hit_rate": 0.4091,
+          "mean_directional_bps": 0.76,
+          "median_directional_bps": -0.46
+        }
+      ],
+      "replay_cohorts": [
+        {
+          "cohort": "Exact TradeReady naked",
+          "role": "production",
+          "fills": 2,
+          "win_rate": 0.5,
+          "gross_pnl_usd": 780.0,
+          "decision": "样本不足；保持 manual/shadow"
+        },
+        {
+          "cohort": "Formal naked",
+          "role": "control",
+          "fills": 28,
+          "win_rate": 0.4643,
+          "gross_pnl_usd": 500.0,
+          "decision": "仅观察；不计为生产收益"
+        },
+        {
+          "cohort": "Formal 5pt spread",
+          "role": "control",
+          "fills": 28,
+          "win_rate": 0.1786,
+          "gross_pnl_usd": -1135.0,
+          "decision": "不晋级"
+        },
+        {
+          "cohort": "Formal 10pt spread",
+          "role": "control",
+          "fills": 28,
+          "win_rate": 0.3214,
+          "gross_pnl_usd": -680.0,
+          "decision": "不晋级"
+        },
+        {
+          "cohort": "Formal wall spread",
+          "role": "control",
+          "fills": 28,
+          "win_rate": 0.3929,
+          "gross_pnl_usd": 75.0,
+          "decision": "近零且未计成本；不晋级"
+        },
+        {
+          "cohort": "GTH dip naked",
+          "role": "proxy",
+          "fills": 3,
+          "win_rate": 0.0,
+          "gross_pnl_usd": -440.0,
+          "decision": "GTH 保持 shadow"
+        }
+      ],
+      "strategy_rules": [
+        {
+          "order": 1,
+          "layer": "Regime",
+          "rule": "八变量 8/8；UNCERTAIN 时不做方向判断",
+          "authority": "shadow gate",
+          "evidence": "7 个明确槽，仅 1 天"
+        },
+        {
+          "order": 2,
+          "layer": "Structure",
+          "rule": "只使用当前 expiry 的真实 OI/GEX 墙位；缺链不生成概率",
+          "authority": "required",
+          "evidence": "历史 overlay 仅 125/390 Ready"
+        },
+        {
+          "order": 3,
+          "layer": "Trigger",
+          "rule": "必须走到 formal CONFIRMED，随后观察 180–300 秒；不在触墙首根追单",
+          "authority": "manual candidate",
+          "evidence": "RTH 180s 12/17，300s 10/17"
+        },
+        {
+          "order": 4,
+          "layer": "Charm",
+          "rule": "只调节追单风险与信号质量，不决定 Call/Put 方向",
+          "authority": "shadow modifier",
+          "evidence": "小样本有增量，但跨日不足"
+        },
+        {
+          "order": 5,
+          "layer": "Execution",
+          "rule": "fresh live SPXW 双边 NBBO、完整双腿、可接受 debit；否则 NO TRADE",
+          "authority": "required",
+          "evidence": "严格 live/knowledge-time replay"
+        },
+        {
+          "order": 6,
+          "layer": "Session",
+          "rule": "RTH 优先；GTH 只读 shadow",
+          "authority": "required",
+          "evidence": "GTH 300s 40.91%；dip 0/3"
+        },
+        {
+          "order": 7,
+          "layer": "Tenor",
+          "rule": "13:00 ET 前优先比较 1DTE；下午 0DTE/1DTE 并行 shadow，不硬切",
+          "authority": "candidate selection",
+          "evidence": "60m 配对偏向 1DTE；下午 n=6"
+        }
+      ],
+      "tenor_comparison": [
+        {
+          "order": 1,
+          "cutoff": "All RTH",
+          "horizon": "60m",
+          "n": 40,
+          "zero_mean_points": -1.01,
+          "one_mean_points": -0.22,
+          "difference_points": -0.79,
+          "decision": "样本偏向 1DTE"
+        },
+        {
+          "order": 2,
+          "cutoff": "<13:00 ET",
+          "horizon": "60m",
+          "n": 34,
+          "zero_mean_points": -1.46,
+          "one_mean_points": -0.59,
+          "difference_points": -0.86,
+          "decision": "样本偏向 1DTE"
+        },
+        {
+          "order": 3,
+          "cutoff": ">=13:00 ET",
+          "horizon": "15m",
+          "n": 8,
+          "zero_mean_points": -0.27,
+          "one_mean_points": -0.36,
+          "difference_points": 0.09,
+          "decision": "不显著"
+        },
+        {
+          "order": 4,
+          "cutoff": ">=13:00 ET",
+          "horizon": "30m",
+          "n": 7,
+          "zero_mean_points": -1.36,
+          "one_mean_points": -1.73,
+          "difference_points": 0.36,
+          "decision": "不显著"
+        },
+        {
+          "order": 5,
+          "cutoff": ">=13:00 ET",
+          "horizon": "60m",
+          "n": 6,
+          "zero_mean_points": 1.49,
+          "one_mean_points": 1.88,
+          "difference_points": -0.39,
+          "decision": "不显著"
+        }
+      ]
+    }
+  }
+}

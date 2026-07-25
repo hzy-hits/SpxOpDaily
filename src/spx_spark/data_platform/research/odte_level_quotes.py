@@ -17,6 +17,19 @@ from .odte_level_signals import (
     UnderlierTick,
 )
 
+KNOWLEDGE_TIME_GUARD_SQL = """
+    received_at IS NOT NULL
+    AND source_at IS NOT NULL
+    AND quality = 'live'
+    AND lower(coalesce(market_data_type, '')) IN ('live', '1')
+    AND source_at >= received_at - INTERVAL '30 seconds'
+    AND source_at <= received_at + INTERVAL '5 seconds'
+    AND (
+        quote_time IS NULL
+        OR quote_time <= received_at + INTERVAL '5 seconds'
+    )
+"""
+
 
 class QuoteStore:
     """DuckDB-backed quote loader over the parquet lake with in-memory caching."""
@@ -66,7 +79,7 @@ class QuoteStore:
         start: datetime,
         end: datetime,
     ) -> list[OptionTick]:
-        """All ticks for one SPXW contract within the window's hour partitions."""
+        """All received ticks for one SPXW contract in the knowledge-time window."""
         windows = self._day_hours(start, end)
         key = ("opt", provider, expiry, strike, right, start, end, windows)
         if key in self._options:
@@ -75,11 +88,12 @@ class QuoteStore:
         for day, hours in windows:
             hour_list = ",".join(f"'{hour}'" for hour in hours)
             query = (
-                "SELECT quote_time, bid, ask, mid "
+                "SELECT received_at, bid, ask, mid "
                 "FROM read_parquet(?, hive_partitioning=true) "
-                "WHERE trading_class='SPXW' AND expiry=? AND strike=? AND quote_time IS NOT NULL "
+                "WHERE trading_class='SPXW' AND expiry=? AND strike=? "
+                f"AND {KNOWLEDGE_TIME_GUARD_SQL} "
                 f'AND "right"=? AND hour IN ({hour_list}) '
-                "AND quote_time BETWEEN ? AND ? ORDER BY quote_time"
+                "AND received_at BETWEEN ? AND ? ORDER BY received_at, source_at"
             )
             try:
                 rows = self._con.execute(
@@ -114,10 +128,11 @@ class QuoteStore:
                 / "provider=*/hour=*/quotes.parquet"
             )
             query = (
-                "SELECT quote_time, COALESCE(mid, last, effective_price) "
+                "SELECT received_at, COALESCE(mid, last, effective_price) "
                 "FROM read_parquet(?, hive_partitioning=true) "
-                f"WHERE instrument_id=? AND quote_time IS NOT NULL AND hour IN ({hour_list}) "
-                "AND quote_time BETWEEN ? AND ? ORDER BY quote_time"
+                f"WHERE instrument_id=? AND {KNOWLEDGE_TIME_GUARD_SQL} "
+                f"AND hour IN ({hour_list}) "
+                "AND received_at BETWEEN ? AND ? ORDER BY received_at, source_at"
             )
             try:
                 rows = self._con.execute(query, [glob, instrument_id, start, end]).fetchall()
@@ -143,7 +158,7 @@ class QuoteStore:
         delta_target: float = DELTA_TARGET,
     ) -> float | None:
         """Production strike rule: delta in [delta_min, delta_max] closest to target."""
-        # Delta selection is point-in-time: only quotes known at or before the
+        # Delta selection is point-in-time: only rows received at or before the
         # decision may select a strike. The one-minute lookback tolerates a
         # quiet contract without admitting a future chain snapshot.
         start, end = t0 - timedelta(seconds=60), t0
@@ -157,18 +172,19 @@ class QuoteStore:
                 / "provider=*/hour=*/quotes.parquet"
             )
             query = (
-                "SELECT provider, strike, delta, quote_time "
+                "SELECT provider, strike, delta, received_at "
                 "FROM read_parquet(?, hive_partitioning=true) "
                 "WHERE trading_class='SPXW' AND expiry=? "
                 f'AND "right"=? AND delta IS NOT NULL AND hour IN ({hour_list}) '
-                "AND quote_time BETWEEN ? AND ?"
+                f"AND {KNOWLEDGE_TIME_GUARD_SQL} "
+                "AND received_at BETWEEN ? AND ?"
             )
             try:
                 rows = self._con.execute(query, [glob, expiry, right, start, end]).fetchall()
             except duckdb.IOException:
                 continue
-            for provider, strike, delta, quote_time in rows:
-                distance = (t0 - quote_time).total_seconds()
+            for provider, strike, delta, received_at in rows:
+                distance = (t0 - received_at).total_seconds()
                 slot = (provider, strike)
                 if slot not in nearest or distance < nearest[slot][0]:
                     nearest[slot] = (distance, delta)

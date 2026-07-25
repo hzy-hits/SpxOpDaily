@@ -1759,7 +1759,7 @@ def build_artifact() -> None:
             "body": (
                 "## Caveats\n\n"
                 "- 回放未计 commission、显式 slippage、queue position、partial fill、market impact 和人工延迟；所有 PnL 都是偏乐观 gross。\n"
-                "- QuoteStore 当前主要按 `quote_time` 选择，不是严格 `received_at` knowledge-time；生产调参前必须消除这一回看偏差风险。\n"
+                "- QuoteStore 已按 `received_at` knowledge-time 回放，并拒绝非实时、未来时间戳及 source age 超过 30 秒的报价；历史 PnL 仍未计手续费、滑点、排队、部分成交与冲击。\n"
                 "- 7/06–10 缺少当时生产 FSM/decision context；只能重算，不可冒充原样生产回放。\n"
                 "- 报告方向样本彼此重叠且序列相关；Wilson 区间只描述事件行，不等于独立交易样本。\n"
                 "- 真实账户亏损尚未完成 broker fill/fee reconciliation，本报告不能解释实际净 PnL。"
