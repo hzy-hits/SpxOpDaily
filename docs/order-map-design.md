@@ -120,11 +120,12 @@ def run(argv=None, *, now=None) -> int
 ```
 OnCalendar=Mon..Fri 14:00 Asia/Shanghai
 OnCalendar=Mon..Fri 16:30 Asia/Shanghai
-Persistent=false
+Persistent=true
 ```
 
 (16:30 第二次触发靠 already_sent 幂等跳过;仅当 14:00 那次因故障没发出时兜底。
-注意:already_sent 只在**成功发送后** mark,发送失败不 mark。)
+注意:already_sent 只在**成功发送后** mark,发送失败不 mark。`Persistent=true`
+确保主机或 user manager 在边界短暂离线后仍补跑；幂等状态阻止重复投递。)
 
 ### 新文件 `scripts/run-order-map.sh`
 

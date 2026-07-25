@@ -75,6 +75,19 @@ def test_main_installer_refuses_non_master_dirty_or_unpushed_deployments() -> No
     assert "uv sync --frozen" in installer
 
 
+def test_main_installer_owns_the_persistent_order_map_timer() -> None:
+    timer = read("systemd/spx-spark-order-map.timer")
+    installer = read("scripts/install-spx-spark-services.sh")
+
+    assert "Persistent=true" in timer
+    assert 'ln -sfn "$ROOT/systemd/spx-spark-order-map.service"' in installer
+    assert 'ln -sfn "$ROOT/systemd/spx-spark-order-map.timer"' in installer
+    assert "enable --now spx-spark-order-map.timer" in installer
+    assert "restart spx-spark-order-map.timer" in installer
+    assert 'for tracked_unit in "$ROOT"/systemd/spx-spark-*' in installer
+    assert "systemd unit drift" in installer
+
+
 def test_order_map_status_timer_covers_full_exchange_local_rth() -> None:
     timer = read("systemd/spx-spark-order-map-status.timer")
     installer = read("scripts/install-spx-spark-services.sh")
