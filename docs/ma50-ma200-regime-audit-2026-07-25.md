@@ -111,8 +111,41 @@ MA episode，11 个 sector ETF 均为 3,276 根历史 bar。
 - 07-20–22 的旧 lifecycle bug 使历史交易样本非随机缺失。
 - SPX 等价值 MA200 是 `ES MA200 − 同步 ES−SPX basis` 坐标投影，
   不是现金 SPX 自身历史 MA200。
-- 当前生产热状态只迁移已有闭合 RTH bar；合约 roll 后需累计至少 206 根有效
-  RTH bar 才能完整计算 MA200 及 6 根斜率。
+- 生产热状态不会跨合约续接。合约 roll 后必须等新合约 live identity 已确认，
+  再使用精确合约 IBKR 历史 RTH bar 做一次受控 warm-start，绝不能把旧合约
+  MA 历史拼入新合约。
+
+## MA200 生产 warm-start
+
+`scripts/warm_market_state_ma_history.py` 只向有界 `rth_ma_history` 注入精确
+ES 合约的闭合 RTH 聚合 bar，不改 `closed_bars`、`current_bar`、源时间或
+既有完整 live bar。若顶层合约身份为空，只有最近一个完整 RTH session 的每根
+live bar 都确认同一合约后，才将身份提升为该精确合约。默认先 dry-run；生产
+写入要求 market-feature hot worker 精确处于 `inactive`，并执行锁内二次状态
+检查、固定 hot-worker 进程 owner lock、SHA compare-and-swap、owner-only
+原始备份、严格目录 fsync 和原子替换。CLI 不能改写目标 service unit，live
+重叠收盘差上限固定为 2.00 ES 点且不可上调。
+
+```bash
+.venv/bin/python scripts/warm_market_state_ma_history.py \
+  --host 127.0.0.1 --port 4002 --client-id 299 \
+  --es-expiry 20260918 --duration "1 M" \
+  --min-overlap-bars 6
+
+systemctl --user stop spx-spark-market-features-hot.service
+.venv/bin/python scripts/warm_market_state_ma_history.py \
+  --host 127.0.0.1 --port 4002 --client-id 299 \
+  --es-expiry 20260918 --duration "1 M" \
+  --min-overlap-bars 6 --apply
+systemctl --user start spx-spark-market-features-hot.service
+```
+
+应用前必须满足：IBKR qualified exact contract、最近 320 根连续 RTH bar、
+历史末端严格等于最近完整 session 收盘、该 session 全部 5 分钟 live bar 均为
+同一精确合约且质量为 `ok`，以及所有重叠收盘差不超过 2.00 ES 点。这样历史
+seed 不会补掉当日 D/Q/V 的采集缺口，partial/ambiguous live bar 仍会使 MA
+fail closed。写后工具会锁内重读并验证 320 根和完整 MA `ready`；任一步失败
+会原子恢复原字节。返回的 `backup_path` 保留本次迁移前的可恢复状态。
 
 ## 推荐动作
 

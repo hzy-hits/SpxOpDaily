@@ -1,14 +1,22 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
+
+import pytest
 
 from spx_spark.application.market_features.es_bar_state import (
     MAX_CLOSED_BARS,
     MAX_RTH_MA_BARS,
+    MIN_RTH_MA_SEED_BARS,
     SCHEMA_VERSION,
     advance_es_bar_state,
     completed_es_bars,
+    seed_rth_ma_history,
 )
+from spx_spark.application.market_features.moving_average_context import (
+    moving_average_diagnostics,
+)
+from spx_spark.config import NY_TZ
 
 
 UTC = timezone.utc
@@ -17,7 +25,292 @@ UTC = timezone.utc
 def test_full_bar_state_stays_bounded_and_compact_rth_history_covers_sma200() -> None:
     assert MAX_CLOSED_BARS == 432
     assert MAX_RTH_MA_BARS == 320
+    assert MIN_RTH_MA_SEED_BARS == 206
     assert MAX_RTH_MA_BARS >= 256
+
+
+def seeded_rth_bars(
+    days: list[date],
+    *,
+    contract_identity: str = "ES:202609",
+) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    price = 7400.0
+    for trading_day in days:
+        start = datetime.combine(trading_day, time(9, 30), tzinfo=NY_TZ)
+        for index in range(78):
+            bar_start = start + timedelta(minutes=5 * index)
+            price += 0.1
+            rows.append(
+                {
+                    "bar_start": bar_start.isoformat(),
+                    "bar_end": (bar_start + timedelta(minutes=5)).isoformat(),
+                    "interval_seconds": 300,
+                    "open": price - 0.1,
+                    "high": price + 0.5,
+                    "low": price - 0.5,
+                    "close": price,
+                    "quality": "ok",
+                    "gap_before": False,
+                    "segment": "rth",
+                    "trading_date_et": trading_day.isoformat(),
+                    "contract_identity": contract_identity,
+                    "contract_identity_ambiguous": False,
+                }
+            )
+    return rows
+
+
+def test_exact_contract_seed_warms_ma200_without_mutating_hot_state() -> None:
+    rows = seeded_rth_bars(
+        [date(2026, 7, day) for day in (20, 21, 22, 23, 24)]
+    )
+    verified_full = rows[-78:]
+    previous = {
+        "schema_version": SCHEMA_VERSION,
+        "interval_seconds": 300,
+        "updated_at": "2026-07-25T12:00:00+00:00",
+        "last_source_at": "2026-07-25T09:45:58+00:00",
+        "last_provider": "ibkr",
+        "contract_identity": None,
+        "current_bar": {"bar_start": "2026-07-25T09:45:00+00:00"},
+        "closed_bars": verified_full,
+        "rth_ma_history": [],
+        "diagnostics": {},
+    }
+
+    state = seed_rth_ma_history(
+        previous,
+        rows,
+        contract_identity="ES:202609",
+        now=datetime(2026, 7, 25, 16, 0, tzinfo=UTC),
+        promote_contract_identity=True,
+    )
+    diagnostics = moving_average_diagnostics(completed_es_bars(state))
+
+    assert len(state["rth_ma_history"]) == MAX_RTH_MA_BARS
+    assert state["closed_bars"] == previous["closed_bars"]
+    assert state["current_bar"] == previous["current_bar"]
+    assert state["updated_at"] == previous["updated_at"]
+    assert state["last_source_at"] == previous["last_source_at"]
+    assert state["contract_identity"] == "ES:202609"
+    assert diagnostics["status"] == "ready"
+    assert diagnostics["contract_identity"] == "ES:202609"
+    assert diagnostics["sma200"] is not None
+    assert diagnostics["ma200_slope_6_atr"] is not None
+    assert diagnostics["reasons"] == []
+
+
+def test_seed_does_not_hide_partial_or_unidentified_live_rth_bars() -> None:
+    rows = seeded_rth_bars(
+        [date(2026, 7, day) for day in (20, 21, 22, 23, 24)]
+    )
+    partial_full = [
+        {
+            **row,
+            "quality": "partial",
+            "contract_identity": None,
+        }
+        for row in rows[-78:]
+    ]
+    previous = {
+        "schema_version": SCHEMA_VERSION,
+        "interval_seconds": 300,
+        "contract_identity": None,
+        "current_bar": {},
+        "closed_bars": partial_full,
+        "rth_ma_history": [],
+        "diagnostics": {},
+    }
+
+    state = seed_rth_ma_history(
+        previous,
+        rows,
+        contract_identity="ES:202609",
+        now=datetime(2026, 7, 25, 16, 0, tzinfo=UTC),
+        promote_contract_identity=True,
+    )
+    completed = completed_es_bars(state)
+    diagnostics = moving_average_diagnostics(completed)
+
+    assert completed[-1]["quality"] == "partial"
+    assert completed[-1]["contract_identity"] is None
+    assert diagnostics["status"] == "warming"
+    assert diagnostics["contract_identity"] is None
+
+
+def test_seed_remains_ready_after_verified_live_bar_cycle() -> None:
+    rows = seeded_rth_bars(
+        [date(2026, 7, day) for day in (20, 21, 22, 23, 24)]
+    )
+    previous = {
+        "schema_version": SCHEMA_VERSION,
+        "interval_seconds": 300,
+        "contract_identity": "ES:202609",
+        "current_bar": {},
+        "closed_bars": rows[-78:],
+        "rth_ma_history": [],
+        "diagnostics": {},
+    }
+    state = seed_rth_ma_history(
+        previous,
+        rows,
+        contract_identity="ES:202609",
+        now=datetime(2026, 7, 25, 16, 0, tzinfo=UTC),
+    )
+    start = datetime(2026, 7, 27, 13, 30, tzinfo=UTC)
+    for index in range(60):
+        at = start + timedelta(seconds=index * 5)
+        state = advance_es_bar_state(
+            state,
+            sample(at, 7450.0 + index / 100),
+            now=at,
+        )
+    next_at = start + timedelta(minutes=5)
+    state = advance_es_bar_state(
+        state,
+        sample(next_at, 7451.0),
+        now=next_at,
+    )
+    diagnostics = moving_average_diagnostics(completed_es_bars(state))
+
+    assert len(state["rth_ma_history"]) == MAX_RTH_MA_BARS
+    assert state["rth_ma_history"][-1]["bar_start"] == start.isoformat()
+    assert diagnostics["status"] == "ready"
+    assert diagnostics["latest_bar_end"] == next_at.isoformat()
+
+
+def test_verified_live_full_bar_remains_preferred_over_seed() -> None:
+    rows = seeded_rth_bars(
+        [date(2026, 7, day) for day in (20, 21, 22, 23, 24)]
+    )
+    live = {**rows[-1], "close": float(rows[-1]["close"]) + 0.25}
+    previous = {
+        "schema_version": SCHEMA_VERSION,
+        "interval_seconds": 300,
+        "contract_identity": "ES:202609",
+        "current_bar": {},
+        "closed_bars": [live],
+        "rth_ma_history": [],
+        "diagnostics": {},
+    }
+
+    state = seed_rth_ma_history(
+        previous,
+        rows,
+        contract_identity="ES:202609",
+        now=datetime(2026, 7, 25, 16, 0, tzinfo=UTC),
+    )
+    completed = completed_es_bars(state)
+
+    assert completed[-1]["close"] == live["close"]
+
+
+@pytest.mark.parametrize(
+    ("mutation", "error"),
+    [
+        (
+            lambda rows: rows[:100],
+            "rth_ma_seed_insufficient_bars",
+        ),
+        (
+            lambda rows: [
+                *rows[:-1],
+                {**rows[-1], "contract_identity": "ES:202612"},
+            ],
+            "rth_ma_seed_bar_contract_identity_mismatch",
+        ),
+        (
+            lambda rows: [
+                *rows[:-1],
+                {
+                    **rows[-1],
+                    "bar_start": (
+                        datetime.fromisoformat(str(rows[-1]["bar_start"]))
+                        + timedelta(minutes=5)
+                    ).isoformat(),
+                    "bar_end": (
+                        datetime.fromisoformat(str(rows[-1]["bar_end"]))
+                        + timedelta(minutes=5)
+                    ).isoformat(),
+                },
+            ],
+            "rth_ma_seed_outside_rth",
+        ),
+    ],
+)
+def test_seed_rejects_unqualified_history(mutation: object, error: str) -> None:
+    rows = seeded_rth_bars(
+        [date(2026, 7, day) for day in (20, 21, 22, 23, 24)]
+    )
+    changed = mutation(rows)  # type: ignore[operator]
+
+    with pytest.raises(ValueError, match=error):
+        seed_rth_ma_history(
+            {
+                "schema_version": SCHEMA_VERSION,
+                "interval_seconds": 300,
+            },
+            changed,
+            contract_identity="ES:202609",
+            now=datetime(2026, 7, 25, 16, 0, tzinfo=UTC),
+        )
+
+
+def test_seed_rejects_active_contract_mismatch_and_intraday_gap() -> None:
+    rows = seeded_rth_bars(
+        [date(2026, 7, day) for day in (20, 21, 22, 23, 24)]
+    )
+    with pytest.raises(ValueError, match="rth_ma_seed_contract_identity_mismatch"):
+        seed_rth_ma_history(
+            {
+                "schema_version": SCHEMA_VERSION,
+                "interval_seconds": 300,
+                "contract_identity": "ES:202612",
+            },
+            rows,
+            contract_identity="ES:202609",
+            now=datetime(2026, 7, 25, 16, 0, tzinfo=UTC),
+        )
+
+    rows[-2]["gap_before"] = True
+    with pytest.raises(ValueError, match="rth_ma_seed_intraday_gap"):
+        seed_rth_ma_history(
+            {
+                "schema_version": SCHEMA_VERSION,
+                "interval_seconds": 300,
+            },
+            rows,
+            contract_identity="ES:202609",
+            now=datetime(2026, 7, 25, 16, 0, tzinfo=UTC),
+        )
+
+
+def test_seed_rejects_invalid_state_schema_and_existing_future_history() -> None:
+    rows = seeded_rth_bars(
+        [date(2026, 7, day) for day in (20, 21, 22, 23, 24)]
+    )
+    with pytest.raises(ValueError, match="rth_ma_seed_state_schema_invalid"):
+        seed_rth_ma_history(
+            {},
+            rows,
+            contract_identity="ES:202609",
+            now=datetime(2026, 7, 25, 16, 0, tzinfo=UTC),
+        )
+
+    future = seeded_rth_bars([date(2026, 7, 27)])[0]
+    with pytest.raises(ValueError, match="rth_ma_existing_history_future"):
+        seed_rth_ma_history(
+            {
+                "schema_version": SCHEMA_VERSION,
+                "interval_seconds": 300,
+                "contract_identity": "ES:202609",
+                "rth_ma_history": [future],
+            },
+            rows,
+            contract_identity="ES:202609",
+            now=datetime(2026, 7, 25, 16, 0, tzinfo=UTC),
+        )
 
 
 def sample(

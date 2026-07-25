@@ -376,6 +376,11 @@
         "body": "## 限制与稳健性\n\n15 个交易日、119 个状态 episode 和 7 笔净化交易不足以验证期权 Alpha。P&L 未计佣金、滑点、成交概率与人工延迟；历史 bar 也不能证明当时生产投递、NBBO 与 wall 数据面完整。SPX 等价值 MA200 是 ES 均线减同步 basis 的坐标投影，不是现金 SPX 自身历史 MA200。"
       },
       {
+        "id": "production_warm_start",
+        "type": "markdown",
+        "body": "## MA200 生产 warm-start\n\n合约 roll 后不跨合约续接。`scripts/warm_market_state_ma_history.py` 只将精确合约 IBKR 历史 RTH bar 注入有界 MA 历史，不覆盖既有完整 live bar。候选必须含最近 320 根连续 RTH bar，末端严格等于最近完整 session 收盘；该 session 的全部 5 分钟 live bar 必须与 seed 时间桶一一对应、同一精确合约且质量 `ok`，所有重叠收盘差不超过不可上调的 2.00 ES 点。顶层 identity 为空时，只有上述完整 live session 能授权提升。工具默认 dry-run；写入固定检查真实 hot-worker unit 精确为 `inactive`，同时持有同一进程 owner lock，并执行锁内二次检查、SHA compare-and-swap、owner-only 备份、严格目录 fsync、写后重读与 MA `ready` 验证；失败会原子恢复原状态。partial/ambiguous live 仍优先暴露并 fail closed，因此不会用历史 seed 补掉当日 D/Q/V 缺口。"
+      },
+      {
         "id": "recommendations",
         "type": "markdown",
         "body": "## 推荐动作\n\n1. `TREND_ALIGNED`：只允许与 wall/flip 和 D/Q/V 同向时进入候选，不直接触发。\n2. `TREND_EXTENDED`：禁止追同向 0DTE 凸性；等待回踩、结构重装或新 wall 事件。\n3. `REGIME_TRANSITION`：忽略尚未交叉的慢排列，重点观察 MA50 转向是否获得 wall 接受/拒绝确认。\n4. `MIXED`：方向权重归零，仅保留位置提示。\n5. 累计至少 20 个独立 episode/方向后再做冻结阈值的 walk-forward 晋升。"

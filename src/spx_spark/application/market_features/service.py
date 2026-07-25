@@ -89,6 +89,7 @@ from spx_spark.application.order_map.models import level_decision_play
 from spx_spark.application.order_map.level_trigger_repricing import (
     default_level_trigger_repricing_path,
 )
+from spx_spark.state_io import exclusive_state_lock
 from spx_spark.config import StorageSettings
 from spx_spark.features.exposure_map import build_exposure_map
 from spx_spark.greek_reference import build_zero_dte_greeks_reference
@@ -162,13 +163,14 @@ def run(
     sample = normalized_market_sample(latest, now=evaluation_now, policy=policy)
     latest_root = Path(storage.data_root) / "latest"
     es_bar_path = latest_root / "es_bars_5m.json"
-    es_bar_state = advance_es_bar_state(
-        load_json(es_bar_path),
-        sample,
-        now=evaluation_now,
-        policy=policy,
-    )
-    save_json(es_bar_path, es_bar_state)
+    with exclusive_state_lock(es_bar_path):
+        es_bar_state = advance_es_bar_state(
+            load_json(es_bar_path),
+            sample,
+            now=evaluation_now,
+            policy=policy,
+        )
+        save_json(es_bar_path, es_bar_state)
     es_bars = completed_es_bars(es_bar_state)
     existing_samples = _dict_list(persisted.get("market_samples"))
     if len(existing_samples) < 5:
