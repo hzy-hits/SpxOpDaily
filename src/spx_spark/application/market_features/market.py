@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import re
 import statistics
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
@@ -14,7 +15,7 @@ from spx_spark.application.market_features.models import (
     MinuteMarketFrame,
 )
 from spx_spark.config import NY_TZ
-from spx_spark.marketdata import MarketDataQuality, Provider, Quote, as_utc
+from spx_spark.marketdata import InstrumentType, MarketDataQuality, Provider, Quote, as_utc
 from spx_spark.settings.market_features import MarketFeatureSettings
 from spx_spark.storage import LatestState
 
@@ -41,6 +42,23 @@ TRACKED_INSTRUMENTS = (
     "equity:XLU",
     "equity:XLV",
     "equity:XLY",
+)
+_CME_MONTH_CODES = {
+    "F": 1,
+    "G": 2,
+    "H": 3,
+    "J": 4,
+    "K": 5,
+    "M": 6,
+    "N": 7,
+    "Q": 8,
+    "U": 9,
+    "V": 10,
+    "X": 11,
+    "Z": 12,
+}
+_CME_CONTRACT_PATTERN = re.compile(
+    r"^/?(?P<root>[A-Z]{1,4})(?P<month>[FGHJKMNQUVXZ])(?P<year>\d{2})$"
 )
 
 
@@ -118,9 +136,13 @@ def quote_source_at(quote: Quote) -> datetime:
 
 
 def normalized_quote(quote: Quote) -> dict[str, Any]:
+    provider_symbol = quote.provider_symbol or quote.instrument.provider_symbol
+    contract_identity = _future_contract_identity(quote, provider_symbol)
     return {
         "price": quote.effective_price,
         "provider": quote.provider.value,
+        "provider_symbol": provider_symbol,
+        "contract_identity": contract_identity,
         "source_at": quote_source_at(quote).isoformat(),
         "transport_at": as_utc(quote.last_update_at or quote.received_at).isoformat(),
         "bid": quote.bid,
@@ -130,6 +152,26 @@ def normalized_quote(quote: Quote) -> dict[str, Any]:
         "volume": quote.volume,
         "quality": quote.quality.value,
     }
+
+
+def _future_contract_identity(quote: Quote, provider_symbol: str | None) -> str | None:
+    """Return one canonical ``ROOT:YYYYMM`` identity for a verified future."""
+
+    if quote.instrument.instrument_type is not InstrumentType.FUTURE:
+        return None
+    root = quote.instrument.symbol.strip().upper()
+    expiry = str(quote.instrument.expiry or "").strip()
+    if len(expiry) in {6, 8} and expiry.isdigit():
+        year = int(expiry[:4])
+        month = int(expiry[4:6])
+        if 2000 <= year <= 2099 and 1 <= month <= 12:
+            return f"{root}:{year:04d}{month:02d}"
+    match = _CME_CONTRACT_PATTERN.fullmatch(str(provider_symbol or "").strip().upper())
+    if match is None or match.group("root") != root:
+        return None
+    year = 2000 + int(match.group("year"))
+    month = _CME_MONTH_CODES[match.group("month")]
+    return f"{root}:{year:04d}{month:02d}"
 
 
 def merge_minute_sample(
@@ -328,8 +370,7 @@ def volume_features(
     providers.update(
         str(quote.get("provider"))
         for row in samples
-        if (quote := _instrument(row, "future:ES"))
-        and quote.get("provider")
+        if (quote := _instrument(row, "future:ES")) and quote.get("provider")
     )
     by_provider = {provider: _volume_points(samples, provider=provider) for provider in providers}
     session_provider = (
@@ -406,9 +447,7 @@ def volume_features(
         "recent_volume_provider": recent_provider,
         "selected_es_provider": current_provider,
         "recent_volume_provider_fallback": bool(
-            recent_provider
-            and current_provider
-            and recent_provider != current_provider
+            recent_provider and current_provider and recent_provider != current_provider
         ),
         "session_vwap_provider": session_provider,
     }
@@ -718,11 +757,7 @@ def _volume_points(
                     quote = selected
         else:
             quote = _instrument(row, "future:ES")
-        at = (
-            _parse_at(quote.get("source_at"))
-            if quote
-            else None
-        ) or _parse_at(row.get("at"))
+        at = (_parse_at(quote.get("source_at")) if quote else None) or _parse_at(row.get("at"))
         volume = _number(quote.get("volume")) if quote else None
         price = _number(quote.get("price")) if quote else None
         if at is not None and volume is not None and price is not None:

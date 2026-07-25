@@ -39,6 +39,7 @@ class MarketFeatureSettings:
     trade_follow_through_seconds: float = 15.0
     trade_follow_through_min_points: float = 2.0
     trade_follow_through_em_fraction: float = 0.05
+    trade_confirmed_pilot_enabled: bool = False
     trade_repricing_max_age_seconds: float = 90.0
     trade_quote_max_age_seconds: float = 5.0
     trade_market_anchor_max_age_seconds: float = 20.0

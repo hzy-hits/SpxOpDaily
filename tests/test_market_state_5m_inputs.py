@@ -12,8 +12,10 @@ from spx_spark.application.market_features.market_state_5m_inputs import (
     SECTOR_INSTRUMENTS,
     _bar_vwaps,
     _es_vwap_series,
+    _moving_average_diagnostics,
     _provider_vwap_series,
     build_market_state_5m_inputs,
+    project_spx_equivalent_moving_averages,
     update_same_time_range_baselines,
 )
 from spx_spark.market_calendar import ET
@@ -31,6 +33,7 @@ def bar(
     close: float,
     segment: str,
     quality: str = "ok",
+    contract_identity: str | None = "ES:202609",
 ) -> dict[str, object]:
     return {
         "bar_start": start.isoformat(),
@@ -45,6 +48,7 @@ def bar(
         "quality": quality,
         "gap_before": False,
         "provider": "schwab",
+        "contract_identity": contract_identity,
         "segment": segment,
         "trading_date_et": start.date().isoformat(),
     }
@@ -164,6 +168,153 @@ def test_derives_all_eight_inputs_and_scores_clean_trend_up() -> None:
     assert scored["state"] == TREND_UP
     assert scored["action_authority"] == "none"
     assert scored["actionable"] is False
+
+
+def test_rth_sma20_sma50_and_spx_basis_projection_are_read_only() -> None:
+    start = DAY.replace(hour=9, minute=30)
+    rows = [
+        bar(
+            start + timedelta(minutes=5 * index),
+            open_=7400.0 + index,
+            high=7401.0 + index,
+            low=7399.0 + index,
+            close=7400.0 + index,
+            segment="rth",
+        )
+        for index in range(50)
+    ]
+
+    moving = _moving_average_diagnostics(rows)
+    projected = project_spx_equivalent_moving_averages(
+        moving,
+        es_spx_basis_points=34.15,
+        basis_contract_identity="ES:202609",
+    )
+
+    assert moving["status"] == "ready"
+    assert moving["price"] == 7449.0
+    assert moving["sma20"] == 7439.5
+    assert moving["sma50"] == 7424.5
+    assert moving["relation"] == "bullish_stack"
+    assert moving["contract_identity"] == "ES:202609"
+    assert moving["action_authority"] == "none"
+    assert projected["spx_equivalent_sma20"] == 7405.35
+    assert projected["spx_equivalent_sma50"] == 7390.35
+    assert projected["basis_contract_identity_matches_sma"] is True
+    assert projected["spx_projection_near_line"] is False
+    assert projected["spx_projection_near_line_tolerance_points"] == 4.25
+    assert projected["projection_method"] == (
+        "es_sma_minus_synchronized_current_basis_not_cash_spx_sma"
+    )
+
+
+def test_rth_sma_fails_closed_without_contract_identity() -> None:
+    start = DAY.replace(hour=9, minute=30)
+    rows = [
+        bar(
+            start + timedelta(minutes=5 * index),
+            open_=7400.0 + index,
+            high=7401.0 + index,
+            low=7399.0 + index,
+            close=7400.0 + index,
+            segment="rth",
+            contract_identity=None,
+        )
+        for index in range(50)
+    ]
+
+    moving = _moving_average_diagnostics(rows)
+
+    assert moving["status"] == "warming"
+    assert moving["sma20"] is None
+    assert moving["sma50"] is None
+    assert "es_contract_identity_unavailable" in moving["reasons"]
+
+
+def test_spx_ma_projection_fails_closed_on_contract_mismatch() -> None:
+    projected = project_spx_equivalent_moving_averages(
+        {
+            "sma20": 7439.5,
+            "sma50": 7424.5,
+            "distance_to_sma20_points": 2.0,
+            "contract_identity": "ES:202609",
+        },
+        es_spx_basis_points=34.15,
+        basis_contract_identity="ES:202612",
+    )
+
+    assert projected["basis_contract_identity_matches_sma"] is False
+    assert projected["spx_equivalent_sma20"] is None
+    assert projected["spx_equivalent_sma50"] is None
+    assert projected["spx_projection_near_line"] is False
+    assert projected["projection_method"] == ("unavailable_basis_contract_identity_mismatch")
+
+
+def test_rth_sma_rejects_truncated_cross_session_boundary() -> None:
+    prior_start = DAY.replace(day=23, hour=15, minute=5)
+    current_start = DAY.replace(hour=9, minute=30)
+    rows = [
+        bar(
+            prior_start + timedelta(minutes=5 * index),
+            open_=7350.0 + index,
+            high=7351.0 + index,
+            low=7349.0 + index,
+            close=7350.0 + index,
+            segment="rth",
+        )
+        for index in range(10)
+    ]
+    rows.extend(
+        bar(
+            current_start + timedelta(minutes=5 * index),
+            open_=7400.0 + index,
+            high=7401.0 + index,
+            low=7399.0 + index,
+            close=7400.0 + index,
+            segment="rth",
+        )
+        for index in range(40)
+    )
+
+    moving = _moving_average_diagnostics(rows)
+
+    assert moving["status"] == "partial"
+    assert moving["sma20"] == 7429.5
+    assert moving["sma50"] is None
+    assert "sma50_rth_session_boundary_gap" in moving["reasons"]
+
+
+def test_rth_sma_accepts_complete_adjacent_session_boundary() -> None:
+    prior_start = DAY.replace(day=23, hour=15, minute=10)
+    current_start = DAY.replace(hour=9, minute=30)
+    rows = [
+        bar(
+            prior_start + timedelta(minutes=5 * index),
+            open_=7350.0 + index,
+            high=7351.0 + index,
+            low=7349.0 + index,
+            close=7350.0 + index,
+            segment="rth",
+        )
+        for index in range(10)
+    ]
+    rows.extend(
+        bar(
+            current_start + timedelta(minutes=5 * index),
+            open_=7400.0 + index,
+            high=7401.0 + index,
+            low=7399.0 + index,
+            close=7400.0 + index,
+            segment="rth",
+        )
+        for index in range(40)
+    )
+
+    moving = _moving_average_diagnostics(rows)
+
+    assert moving["status"] == "ready"
+    assert moving["sma20"] == 7429.5
+    assert moving["sma50"] == 7406.5
 
 
 def test_missing_breadth_and_range_history_are_not_filled_as_neutral() -> None:
@@ -347,8 +498,7 @@ def test_missing_middle_bar_is_not_compressed_into_a_thirty_minute_window() -> N
     assert derived["values"]["vwap_cross_count"] is None
     assert derived["values"]["same_time_range_ratio"] is None
     assert (
-        derived["diagnostics"]["same_time_range"]["reason"]
-        == "rth_bars_not_continuous_from_open"
+        derived["diagnostics"]["same_time_range"]["reason"] == "rth_bars_not_continuous_from_open"
     )
 
 
@@ -367,10 +517,7 @@ def test_sector_breadth_rejects_cross_section_timestamp_skew() -> None:
     )
 
     assert derived["values"]["breadth_above_vwap"] is None
-    assert (
-        derived["diagnostics"]["breadth"]["reason"]
-        == "sector_cross_section_timestamp_skew"
-    )
+    assert derived["diagnostics"]["breadth"]["reason"] == "sector_cross_section_timestamp_skew"
     assert derived["diagnostics"]["breadth"]["cross_section_skew_seconds"] == 50.0
 
 

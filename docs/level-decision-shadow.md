@@ -7,13 +7,78 @@ location as an immediate trade trigger. It observes one nearest frozen level at
 a time, makes breakout and fade mutually exclusive, and records outcomes without
 changing orders or candidate generation. State transitions remain in the
 append-only audit. Low-level transition pushes are optional and disabled in the
-production profile; promoted `CONFIRMED` signals always deliver independently.
+production profile; user-facing execution notification is reserved for the
+narrower TradeReady lane.
 
 The same machine supports two deployment modes. With
 `formal_signal_enabled=false`, every public result carries `mode=shadow` and
 `actionable=false`. An explicit operator override may set the flag to `true`;
 only `CONFIRMED` then carries `formal_signal=true` and `actionable=true`.
 No mode submits an order automatically.
+
+## Reviewed RTH upside pilot
+
+The explicit override currently exposes one deliberately narrow notification
+lane: `long_0dte_rth_upside_breakout_pilot`. It accepts only an RTH
+`CONFIRMED` breakout with direction `up`, the current session's exact 0DTE Call,
+and a two-sided selected-contract quote whose source and transport ages are at
+most 15 seconds. The quote is checked again immediately before enqueue. A
+jointly negative ES 1-minute and 5-minute return, an opposite active regime, a
+pre-event macro window, an explicitly blocked breakout filter, an expired event,
+or a wall drift over 10 points still blocks the ticket. Aggregate-chain L1, SPY
+confirmation, price/volume alignment, and the individual 1-minute/5-minute
+checks are retained as diagnostics instead of duplicative vetoes. Missing
+expected move is also disclosed as a diagnostic; target room must still come
+from the outward wall or the documented five-point fallback. The 15-minute time
+stop is capped at the exact SPXW expiry-session close.
+
+The 2026-07-25 point-in-time replay through 2026-07-24 uses Call ask entry and
+executable bid exit. Its matching RTH upside-breakout **control** contains 8
+fills over 4 trading days: 7 wins, gross PnL +$1,930 per one-contract sequence,
+and +$660 after removing the best day. This is not an end-to-end replay of every
+new live pilot gate. It excludes commissions, explicit slippage, queueing,
+partial fills, market impact, and human delay. The deployed rule is therefore
+an in-sample canary, not statistically established alpha; the acceptance report
+must keep `acceptance_gates_passed=false` until its normal thresholds pass.
+
+Delta, Gamma, the 15-minute Theta scenario, and a three-vol-point IV-crush
+scenario are displayed on the ticket when available. They explain
+contract/holding risk only; they never reverse or manufacture the ES/wall
+direction or select the contract in the current pilot.
+`quantity=operator_selected` and `automatic_ordering=false` remain part of every
+ticket.
+
+## MA20/MA50 location context
+
+The RTH report and TradeReady ticket now carry closed-bar **5-minute RTH
+SMA20/SMA50** as read-only location context. SMA20 is treated as a fast
+reclaim/pullback reference and SMA50 as a slower regime/support reference. A
+single intrabar touch or cross is not a breakout: the wall/flip lifecycle,
+closed-bar acceptance, ATR-sized distance, and retest still provide the actual
+trigger. The moving averages do not add another direction score or hard gate
+because they substantially overlap VWAP and HH/HL.
+
+ES and cash SPX are not the same price series. The displayed SPX-equivalent
+levels use the synchronized current basis:
+
+```text
+SPX_MA_proxy = ES_RTH_5m_SMA - current_synchronized_(ES - SPX)_basis
+```
+
+This is a coordinate projection, not SPX's own historical moving average; the
+exact identity is `MA(SPX) = MA(ES) - MA(basis)`. In the available ten-session
+synchronized sample, ES and SPX agreed on which side of SMA20/SMA50 price was
+on 97.67%/98.50% of observations. Current-basis projection error had P90
+1.07/1.55 points and maxima 3.85/4.11 points, so a projected line within roughly
+four SPX points is near-line context rather than proof of a cash-index break.
+
+The small matching upside-control join did not support a bullish-stack veto:
+none of its eight events had `price > SMA20 > SMA50`, including seven winners.
+That is not evidence against moving averages; it is evidence that imposing the
+stack as a hard requirement would delete the whole current sample. ES contract
+identity is persisted on each new bar and bar history resets on a known futures
+roll so the discontinuity cannot manufacture a moving-average break. Legacy
+bars without a verifiable contract identity are not backfilled.
 
 ## State machine
 

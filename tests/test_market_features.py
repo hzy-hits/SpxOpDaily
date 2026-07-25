@@ -17,6 +17,7 @@ from spx_spark.application.market_features.decision_filters import (
 )
 from spx_spark.application.market_features.market import (
     build_minute_market_frame,
+    normalized_quote,
     session_segment,
 )
 from spx_spark.application.market_features.models import (
@@ -45,6 +46,51 @@ from spx_spark.storage import LatestState
 
 
 UTC = timezone.utc
+
+
+def test_normalized_future_quote_exposes_only_specific_contract_identity() -> None:
+    at = datetime(2026, 7, 24, 14, 0, tzinfo=UTC)
+    specific = Quote(
+        instrument=InstrumentId.future("ES", provider_symbol="/ESU26"),
+        provider=Provider.SCHWAB,
+        received_at=at,
+        quote_time=at,
+        quality=MarketDataQuality.LIVE,
+        last=6400.0,
+    )
+    generic = Quote(
+        instrument=InstrumentId.future("ES", provider_symbol="future:ES"),
+        provider=Provider.IBKR,
+        received_at=at,
+        quote_time=at,
+        quality=MarketDataQuality.LIVE,
+        last=6400.0,
+    )
+    explicit_expiry = Quote(
+        instrument=InstrumentId.future(
+            "ES",
+            expiry="202609",
+            provider_symbol="future:ES",
+        ),
+        provider=Provider.IBKR,
+        received_at=at,
+        quote_time=at,
+        quality=MarketDataQuality.LIVE,
+        last=6400.0,
+    )
+    unverified_label = Quote(
+        instrument=InstrumentId.future("ES", provider_symbol="mock:ES"),
+        provider=Provider.MOCK,
+        received_at=at,
+        quote_time=at,
+        quality=MarketDataQuality.LIVE,
+        last=6400.0,
+    )
+
+    assert normalized_quote(specific)["contract_identity"] == "ES:202609"
+    assert normalized_quote(explicit_expiry)["contract_identity"] == "ES:202609"
+    assert normalized_quote(generic)["contract_identity"] is None
+    assert normalized_quote(unverified_label)["contract_identity"] is None
 
 
 def test_option_volatility_features_keep_both_expiry_contexts() -> None:

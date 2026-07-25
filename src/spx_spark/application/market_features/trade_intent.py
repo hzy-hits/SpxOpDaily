@@ -16,7 +16,7 @@ from spx_spark.application.market_features.models import (
 from spx_spark.application.market_features.play_outcome_stats import PlayOutcomeStats
 from spx_spark.application.order_map.execution_quote import evaluate_execution_quote
 from spx_spark.application.order_map.models import level_decision_play
-from spx_spark.application.order_map.pricing import round_to_tick
+from spx_spark.application.order_map.pricing import expiry_close_utc, round_to_tick
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 from spx_spark.settings.market_features import MarketFeatureSettings
 from spx_spark.settings.order_map import OrderMapPolicy
@@ -54,6 +54,7 @@ def evaluate_trade_intent(
 
     now = _utc(now)
     level = context.level_decision
+    pilot_enabled = feature_policy.trade_confirmed_pilot_enabled
     event_id = str(level.get("event_id") or "")
     phase = str(level.get("phase") or "far")
     thesis = str(level.get("thesis") or "none")
@@ -67,6 +68,7 @@ def evaluate_trade_intent(
         {"market_features": feature_policy, "order_map": order_policy},
     )
     play = level_decision_play(thesis, direction)
+    moving_average_context = _moving_average_context(market)
     semantic_scope = (
         "|".join((context.session_id, play, f"{trigger_level:.4f}"))
         if play is not None and trigger_level is not None
@@ -89,6 +91,11 @@ def evaluate_trade_intent(
         "semantic_scope": semantic_scope,
         "evaluated_at": now.isoformat(),
         "block_reasons": [],
+        "strategy_lane": (
+            "long_0dte_rth_upside_breakout_pilot" if pilot_enabled else "rth_confirmed_level"
+        ),
+        "pilot_mode": pilot_enabled,
+        "moving_average_context": moving_average_context,
     }
     if not event_id or phase != "confirmed" or thesis not in {"breakout", "fade"}:
         return base
@@ -112,6 +119,8 @@ def evaluate_trade_intent(
     )
     if direction not in {"up", "down"}:
         reasons.append("direction_unavailable")
+    if pilot_enabled and (thesis != "breakout" or direction != "up"):
+        reasons.append("pilot_scope_upside_breakout_only")
     direction_sign = 1 if direction == "up" else -1
 
     confirmed_at = _datetime(level.get("phase_at") or level.get("confirmed_at"))
@@ -137,13 +146,19 @@ def evaluate_trade_intent(
             options,
             now=now,
             policy=feature_policy,
+            pilot_enabled=pilot_enabled,
         )
     )
 
     spot = _number(level.get("spot"))
     expected_move = _number(options.volatility.get("expected_move_points_0dte"))
-    if expected_move is None:
+    if expected_move is None and not pilot_enabled:
         reasons.append("expected_move_unavailable")
+    expiry_close_at = expiry_close_utc(options.front_expiry or "")
+    if expiry_close_at is None:
+        reasons.append("expiry_close_unavailable")
+    elif now >= expiry_close_at:
+        reasons.append("expiry_closed")
     follow_threshold = max(
         feature_policy.trade_follow_through_min_points,
         (expected_move or 0.0) * feature_policy.trade_follow_through_em_fraction,
@@ -158,10 +173,26 @@ def evaluate_trade_intent(
     elif follow_move < follow_threshold:
         reasons.append("follow_through_distance_pending")
 
-    reasons.extend(item for item in context.invalidations if item in HARD_CONTEXT_INVALIDATIONS)
+    hard_invalidations = (
+        HARD_CONTEXT_INVALIDATIONS - {"es_spy_direction_divergent", "hot_option_liquidity_low"}
+        if pilot_enabled
+        else HARD_CONTEXT_INVALIDATIONS
+    )
+    reasons.extend(item for item in context.invalidations if item in hard_invalidations)
     if context.macro_event.get("mode") == "pre_event":
         reasons.append("macro_event_pre_release_entry_block")
-    reasons.extend(_direction_blockers(context, market, thesis=thesis, direction=direction))
+    reasons.extend(
+        _direction_blockers(
+            context,
+            market,
+            thesis=thesis,
+            direction=direction,
+            pilot_enabled=pilot_enabled,
+        )
+    )
+    pilot_diagnostics = (
+        _pilot_diagnostics(context, market, options, direction=direction) if pilot_enabled else []
+    )
 
     candidate = _matching_candidate(
         repricing,
@@ -273,6 +304,7 @@ def evaluate_trade_intent(
             "remaining_target_room_points": target_room,
             "invalidation_distance_points": invalidation_distance,
             "remaining_reward_risk": reward_risk,
+            "pilot_diagnostics": pilot_diagnostics,
             "block_reasons": unique_reasons or ["candidate_unavailable"],
         }
 
@@ -294,7 +326,12 @@ def evaluate_trade_intent(
     )
     if event_expires_at is not None:
         intent_expires_at = min(intent_expires_at, event_expires_at)
-    time_stop_at = now + timedelta(minutes=feature_policy.trade_time_stop_minutes)
+    assert expiry_close_at is not None
+    intent_expires_at = min(intent_expires_at, expiry_close_at)
+    time_stop_at = min(
+        now + timedelta(minutes=feature_policy.trade_time_stop_minutes),
+        expiry_close_at,
+    )
     contract_id = str(candidate["contract_id"])
     assert semantic_scope is not None
     semantic_key = "|".join((semantic_scope, contract_id))
@@ -339,6 +376,7 @@ def evaluate_trade_intent(
         "quantity": None,
         "quantity_policy": "operator_selected",
         "automatic_ordering": False,
+        "pilot_diagnostics": pilot_diagnostics,
         "evidence": _evidence(context),
         "block_reasons": [],
     }
@@ -353,6 +391,7 @@ def _direction_blockers(
     *,
     thesis: str,
     direction: str,
+    pilot_enabled: bool = False,
 ) -> list[str]:
     reasons: list[str] = []
     sign = 1 if direction == "up" else -1
@@ -373,6 +412,20 @@ def _direction_blockers(
         and regime_direction != direction
     ):
         reasons.append("regime_direction_conflict")
+    if pilot_enabled:
+        breakout_verdict = str(context.breakout_filter.get("verdict") or "unavailable")
+        if breakout_verdict == "blocked":
+            reasons.append("breakout_filter_blocked")
+        one_minute = _number(market.es.get("return_1m_points"))
+        five_minute = _number(market.es.get("return_5m_points"))
+        if (
+            one_minute is not None
+            and five_minute is not None
+            and one_minute * sign <= 0
+            and five_minute * sign <= 0
+        ):
+            reasons.append("es_1m_5m_jointly_oppose_direction")
+        return reasons
     if thesis == "breakout":
         breakout = context.breakout_filter
         if breakout.get("verdict") != "supported" or breakout.get("actionable") is not True:
@@ -454,13 +507,14 @@ def _market_anchor_blockers(
     *,
     now: datetime,
     policy: MarketFeatureSettings,
+    pilot_enabled: bool = False,
 ) -> list[str]:
     reasons: list[str] = []
     if market.quality is not FrameQuality.READY:
         reasons.append("market_frame_not_ready")
     if options.quality is not FrameQuality.READY:
         reasons.append("option_structure_not_ready")
-    if options.l1.quality is not FrameQuality.READY:
+    if options.l1.quality is not FrameQuality.READY and not pilot_enabled:
         reasons.append("option_l1_not_ready")
     expected_expiry = context.session_id.replace("-", "")
     level_expiry = str(context.level_decision.get("expiry") or "")
@@ -501,6 +555,85 @@ def _market_anchor_blockers(
             )
         )
     return reasons
+
+
+def _pilot_diagnostics(
+    context: DecisionContext,
+    market: MinuteMarketFrame,
+    options: OptionStructureFrame,
+    *,
+    direction: str,
+) -> list[str]:
+    """Return redundant context checks as labels, not pilot vetoes."""
+
+    sign = 1 if direction == "up" else -1
+    diagnostics: list[str] = []
+    breakout = context.breakout_filter
+    breakout_verdict = str(breakout.get("verdict") or "unavailable")
+    if breakout_verdict == "blocked":
+        diagnostics.append("breakout_filter_blocked")
+    elif breakout_verdict != "supported" or breakout.get("actionable") is not True:
+        diagnostics.append("breakout_filter_not_supported")
+    for horizon in ("return_1m_points", "return_5m_points"):
+        value = _number(market.es.get(horizon))
+        if value is None:
+            diagnostics.append(f"es_{horizon}_unavailable")
+        elif value * sign <= 0:
+            diagnostics.append(f"es_{horizon}_opposes_direction")
+    if market.volume.get("price_volume_alignment_5m") != "price_volume_aligned":
+        diagnostics.append("price_volume_not_directionally_aligned")
+    cross = str(market.cross_asset.get("es_spy_direction_confirmation_15m") or "unavailable")
+    if cross != "confirmed":
+        diagnostics.append(
+            "es_spy_direction_divergent"
+            if cross == "divergent"
+            else "rth_spy_confirmation_unavailable"
+        )
+    if options.l1.quality is not FrameQuality.READY:
+        diagnostics.append("option_l1_not_ready")
+    if _number(options.volatility.get("expected_move_points_0dte")) is None:
+        diagnostics.append("expected_move_unavailable")
+    if "hot_option_liquidity_low" in context.invalidations:
+        diagnostics.append("hot_option_liquidity_low")
+    return list(dict.fromkeys(diagnostics))
+
+
+def _moving_average_context(market: MinuteMarketFrame) -> dict[str, object]:
+    state = market.diagnostics.get("rth_market_state")
+    if not isinstance(state, Mapping):
+        return {}
+    lineage = state.get("input_lineage")
+    if not isinstance(lineage, Mapping):
+        return {}
+    diagnostics = lineage.get("diagnostics")
+    if not isinstance(diagnostics, Mapping):
+        return {}
+    moving = diagnostics.get("moving_averages")
+    if not isinstance(moving, Mapping):
+        return {}
+    allowed = (
+        "status",
+        "timeframe",
+        "session",
+        "price",
+        "sma20",
+        "sma50",
+        "distance_to_sma20_points",
+        "distance_to_sma50_points",
+        "relation",
+        "latest_bar_end",
+        "contract_identity",
+        "es_spx_basis_points",
+        "basis_contract_identity",
+        "basis_contract_identity_matches_sma",
+        "spx_equivalent_sma20",
+        "spx_equivalent_sma50",
+        "projection_method",
+        "spx_projection_near_line",
+        "spx_projection_near_line_tolerance_points",
+        "action_authority",
+    )
+    return {key: moving.get(key) for key in allowed if key in moving}
 
 
 def _current_structure_level(

@@ -17,6 +17,10 @@ from spx_spark.application.market_features.market_state_5m import (
     OpeningRangeState,
     PriceVsVwap,
 )
+from spx_spark.application.market_features.moving_average_context import (
+    moving_average_diagnostics as _moving_average_diagnostics,
+    project_spx_equivalent_moving_averages,
+)
 from spx_spark.config import NY_TZ
 from spx_spark.marketdata import as_utc
 
@@ -62,8 +66,7 @@ def build_market_state_5m_inputs(
     rth_bars = [
         bar
         for bar in closed
-        if bar.get("segment") == "rth"
-        and bar.get("trading_date_et") == trading_date.isoformat()
+        if bar.get("segment") == "rth" and bar.get("trading_date_et") == trading_date.isoformat()
     ]
     atr, atr_diagnostics = _atr_5m(closed)
     vwap_series, vwap_diagnostics = _es_vwap_series(
@@ -84,6 +87,7 @@ def build_market_state_5m_inputs(
         range_baselines or {},
         trading_date=trading_date,
     )
+    moving_averages = _moving_average_diagnostics(closed)
     breadth, breadth_diagnostics = _breadth_above_vwap(
         market_samples,
         trading_date=trading_date,
@@ -118,6 +122,7 @@ def build_market_state_5m_inputs(
             "vwap": vwap_diagnostics,
             "opening_range": opening_diagnostics,
             "same_time_range": range_diagnostics,
+            "moving_averages": moving_averages,
             "breadth": breadth_diagnostics,
             "price_source": "provider_neutral_live_es_5s_sampled_ohlc",
             "nbbo_interpolated": False,
@@ -141,8 +146,7 @@ def update_same_time_range_baselines(
     rth_bars = [
         bar
         for bar in _closed_bars(bars, now=at)
-        if bar.get("segment") == "rth"
-        and bar.get("trading_date_et") == trading_date.isoformat()
+        if bar.get("segment") == "rth" and bar.get("trading_date_et") == trading_date.isoformat()
     ]
     rth_bars = _continuous_rth_from_open(rth_bars)
     if not rth_bars:
@@ -160,9 +164,7 @@ def update_same_time_range_baselines(
         if isinstance(value, list)
     }
     rows = [
-        row
-        for row in slots.get(slot, [])
-        if row.get("trading_date_et") != trading_date.isoformat()
+        row for row in slots.get(slot, []) if row.get("trading_date_et") != trading_date.isoformat()
     ]
     current_row = {
         "trading_date_et": trading_date.isoformat(),
@@ -181,7 +183,7 @@ def update_same_time_range_baselines(
     if existing_current == current_row:
         return state
     rows.append(current_row)
-    slots[slot] = rows[-(max_sessions + 1):]
+    slots[slot] = rows[-(max_sessions + 1) :]
     return {
         "schema_version": "market_state_5m_range_baselines.v1",
         "updated_at": at.isoformat(),
@@ -246,8 +248,7 @@ def _continuous_rth_from_open(
     if first.time().replace(tzinfo=None) != time(9, 30):
         return []
     if any(
-        current != previous + timedelta(minutes=5)
-        for previous, current in zip(parsed, parsed[1:])
+        current != previous + timedelta(minutes=5) for previous, current in zip(parsed, parsed[1:])
     ):
         return []
     if any(bar.get("gap_before") is True for bar in ordered[1:]):
@@ -393,21 +394,14 @@ def _provider_vwap_series(
             continue
         numerator += current[2] * delta
         denominator += delta
-        observed_volume_ratio = denominator / (
-            denominator + skipped_cross_gap_volume
-        )
-        if (
-            gap_recovery_pending
-            and observed_volume_ratio < VWAP_MIN_OBSERVED_VOLUME_RATIO
-        ):
+        observed_volume_ratio = denominator / (denominator + skipped_cross_gap_volume)
+        if gap_recovery_pending and observed_volume_ratio < VWAP_MIN_OBSERVED_VOLUME_RATIO:
             continue
         gap_recovery_pending = False
         series.append((current[0], numerator / denominator))
     partial_observed_volume = bool(gaps or resets)
     total_known_volume = denominator + skipped_cross_gap_volume
-    observed_volume_ratio = (
-        denominator / total_known_volume if total_known_volume > 0 else None
-    )
+    observed_volume_ratio = denominator / total_known_volume if total_known_volume > 0 else None
     diagnostics: dict[str, object] = {
         "max_gap_seconds": max_gap,
         "gap_count": gaps,
@@ -418,9 +412,7 @@ def _provider_vwap_series(
         "minimum_observed_volume_ratio": VWAP_MIN_OBSERVED_VOLUME_RATIO,
         "partial_observed_volume": partial_observed_volume,
         "volume_coverage": (
-            "partial_observed_deltas"
-            if partial_observed_volume
-            else "all_observed_deltas"
+            "partial_observed_deltas" if partial_observed_volume else "all_observed_deltas"
         ),
     }
     if not series:
@@ -492,9 +484,7 @@ def _vwap_slope(
 ) -> float | None:
     window = _contiguous_ok_tail(bars)[-4:]
     values = [
-        vwaps[str(bar.get("bar_start"))]
-        for bar in window
-        if str(bar.get("bar_start")) in vwaps
+        vwaps[str(bar.get("bar_start"))] for bar in window if str(bar.get("bar_start")) in vwaps
     ]
     if atr is None or atr <= 0 or len(window) < 4 or len(values) < 4:
         return None
@@ -528,9 +518,7 @@ def _opening_range_state(
         else set()
     )
     observed_starts = {
-        start
-        for bar in opening
-        if (start := _parse_at(bar.get("bar_start"))) is not None
+        start for bar in opening if (start := _parse_at(bar.get("bar_start"))) is not None
     }
     if len(opening) != 3 or observed_starts != expected_starts:
         return None, {
@@ -543,9 +531,7 @@ def _opening_range_state(
     post = [
         bar
         for bar in bars
-        if (
-            start := _parse_at(bar.get("bar_start"))
-        ) is not None
+        if (start := _parse_at(bar.get("bar_start"))) is not None
         and start.astimezone(NY_TZ).time() >= time(9, 45)
         and bar.get("quality") == "ok"
     ]
@@ -662,9 +648,7 @@ def _same_time_range_ratio(
             -TARGET_RANGE_BASELINE_SESSIONS:
         ]
     ]
-    current = max(float(bar["high"]) for bar in usable) - min(
-        float(bar["low"]) for bar in usable
-    )
+    current = max(float(bar["high"]) for bar in usable) - min(float(bar["low"]) for bar in usable)
     if len(history) < MIN_RANGE_BASELINE_SESSIONS:
         return None, {
             "status": "warming",
@@ -738,12 +722,8 @@ def _breadth_above_vwap(
         fresh_candidates = [
             item
             for item in candidates
-            if 0.0
-            <= (now - item[1][-1][0]).total_seconds()
-            <= VWAP_MAX_GAP_SECONDS
-            and 0.0
-            <= (now - item[2][-1][0]).total_seconds()
-            <= VWAP_MAX_GAP_SECONDS
+            if 0.0 <= (now - item[1][-1][0]).total_seconds() <= VWAP_MAX_GAP_SECONDS
+            and 0.0 <= (now - item[2][-1][0]).total_seconds() <= VWAP_MAX_GAP_SECONDS
         ]
         if not fresh_candidates:
             missing.append(instrument_id)
@@ -759,10 +739,9 @@ def _breadth_above_vwap(
         vwap_at, vwap = series[-1]
         latest_at = points[-1][0]
         latest_price = points[-1][2]
-        if (
-            (now - latest_at).total_seconds() > VWAP_MAX_GAP_SECONDS
-            or (now - vwap_at).total_seconds() > VWAP_MAX_GAP_SECONDS
-        ):
+        if (now - latest_at).total_seconds() > VWAP_MAX_GAP_SECONDS or (
+            now - vwap_at
+        ).total_seconds() > VWAP_MAX_GAP_SECONDS:
             missing.append(instrument_id)
             continue
         usable.append(instrument_id)
@@ -778,14 +757,9 @@ def _breadth_above_vwap(
             "missing": missing,
         }
     cross_section_skew = (
-        (max(latest_times) - min(latest_times)).total_seconds()
-        if latest_times
-        else None
+        (max(latest_times) - min(latest_times)).total_seconds() if latest_times else None
     )
-    if (
-        cross_section_skew is None
-        or cross_section_skew > BREADTH_MAX_CROSS_SECTION_SKEW_SECONDS
-    ):
+    if cross_section_skew is None or cross_section_skew > BREADTH_MAX_CROSS_SECTION_SKEW_SECONDS:
         return None, {
             "status": "unavailable",
             "reason": "sector_cross_section_timestamp_skew",
@@ -793,9 +767,7 @@ def _breadth_above_vwap(
             "usable_count": len(usable),
             "minimum_usable": MIN_BREADTH_INSTRUMENTS,
             "cross_section_skew_seconds": cross_section_skew,
-            "maximum_cross_section_skew_seconds": (
-                BREADTH_MAX_CROSS_SECTION_SKEW_SECONDS
-            ),
+            "maximum_cross_section_skew_seconds": (BREADTH_MAX_CROSS_SECTION_SKEW_SECONDS),
             "providers_used": providers_used,
         }
     return above / len(usable), {
@@ -869,5 +841,6 @@ def _parse_at(value: object) -> datetime | None:
 __all__ = [
     "SCHEMA_VERSION",
     "build_market_state_5m_inputs",
+    "project_spx_equivalent_moving_averages",
     "update_same_time_range_baselines",
 ]

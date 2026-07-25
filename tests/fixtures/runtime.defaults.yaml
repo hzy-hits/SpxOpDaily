@@ -95,10 +95,11 @@ market_features:
   trade_follow_through_seconds: {value: 15.0, description: Follow-through hold.}
   trade_follow_through_min_points: {value: 2.0, description: Fixed follow-through distance.}
   trade_follow_through_em_fraction: {value: 0.05, description: EM follow-through fraction.}
+  trade_confirmed_pilot_enabled: {value: true, description: Reviewed RTH upside-breakout pilot is enabled by explicit operator override.}
   trade_repricing_max_age_seconds: {value: 90.0, description: Repricing freshness.}
-  trade_quote_max_age_seconds: {value: 5.0, description: Trade quote freshness.}
+  trade_quote_max_age_seconds: {value: 15.0, description: Exact selected-contract quote freshness for the reviewed pilot.}
   trade_market_anchor_max_age_seconds: {value: 20.0, description: Trade market-anchor freshness.}
-  trade_structure_drift_points: {value: 5.0, description: Maximum live-frame decision drift.}
+  trade_structure_drift_points: {value: 10.0, description: Maximum live-frame decision drift for the reviewed pilot.}
   trade_entry_spread_fraction: {value: 0.35, description: Initial entry spread fraction.}
   trade_intent_ttl_seconds: {value: 90.0, description: Trade intent TTL.}
   trade_entry_window_seconds: {value: 20.0, description: Alert candidate entry observation window.}
@@ -1606,11 +1607,11 @@ level_decision_shadow:
     value: true
     description: Runs the mutually-exclusive wall/flip decision state machine as an input to the deterministic TradeReady gate.
   notify_transitions:
-    value: true
-    description: Sends one deterministic market-warning notification when a wall or flip path reaches CONFIRMED; executable contract and price instructions remain exclusive to TradeReady.
-  formal_signal_enabled:
     value: false
-    description: Allows CONFIRMED to enter deterministic TradeReady evaluation; it does not make the state directly actionable or submit an order.
+    description: Persists transition audit without broad PATH CONFIRMED pushes.
+  formal_signal_enabled:
+    value: true
+    description: Explicit operator override allows CONFIRMED to enter deterministic TradeReady evaluation; it does not submit an order.
   approach_points:
     value: 20.0
     description: Distance from the nearest frozen wall or flip boundary that arms an approach; 20 points keeps 0DTE setups observable instead of locking the machine in FAR between widely spaced walls.

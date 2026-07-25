@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from spx_spark.application.market_features.market import normalized_quote
 from spx_spark.ibkr.adapter import quote_from_ibkr_row
 from spx_spark.marketdata import (
     InstrumentId,
@@ -104,6 +105,31 @@ def test_ibkr_row_normalizes_option_quote_and_greeks():
     assert quote.open_interest == 4321
     assert quote.sampling_mode == "ibkr_stream_rotation"
     assert quote.sampling_group == 3
+
+
+def test_ibkr_future_row_preserves_contract_month_for_cross_provider_bars() -> None:
+    received_at = datetime(2026, 7, 6, 13, 30, 5, tzinfo=timezone.utc)
+    row = SimpleNamespace(
+        label="future:ES",
+        kind="future",
+        symbol="ES",
+        exchange="CME",
+        contract_expiry="202609",
+        market_data_type=1,
+        bid=6400.0,
+        ask=6400.25,
+        last=6400.0,
+        market_price=6400.125,
+        close=None,
+        ticker_time=(received_at - timedelta(seconds=1)).isoformat(),
+        stale=False,
+        error=None,
+    )
+
+    quote = quote_from_ibkr_row(row, received_at=received_at)
+
+    assert quote.instrument.expiry == "202609"
+    assert normalized_quote(quote)["contract_identity"] == "ES:202609"
 
 
 def test_schwab_option_contract_normalizes_chain_fields():

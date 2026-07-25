@@ -35,6 +35,7 @@ from spx_spark.application.market_features.models import DecisionContext
 from spx_spark.application.market_features.market_state_5m import score_market_state_5m
 from spx_spark.application.market_features.market_state_5m_inputs import (
     build_market_state_5m_inputs,
+    project_spx_equivalent_moving_averages,
     update_same_time_range_baselines,
 )
 from spx_spark.application.market_features.options import (
@@ -205,21 +206,15 @@ def run(
         vwap_cross_count=(
             int(value)
             if (
-                (value := market_state_values.get("vwap_cross_count"))
-                is not None
+                (value := market_state_values.get("vwap_cross_count")) is not None
                 and isinstance(value, int)
                 and not isinstance(value, bool)
             )
             else None
         ),
-        same_time_range_ratio=_number(
-            market_state_values.get("same_time_range_ratio")
-        ),
-        breadth_above_vwap=_number(
-            market_state_values.get("breadth_above_vwap")
-        ),
+        same_time_range_ratio=_number(market_state_values.get("same_time_range_ratio")),
+        breadth_above_vwap=_number(market_state_values.get("breadth_above_vwap")),
     )
-    rth_market_state["input_lineage"] = market_state_inputs
     volume_baselines = _dict(persisted.get("volume_baselines"))
     expected_move = option_frame.volatility.get("expected_move_points_0dte")
     atm_iv = option_frame.volatility.get("atm_iv_0dte")
@@ -234,6 +229,27 @@ def run(
         volume_baselines=volume_baselines,
         policy=policy,
     )
+    input_diagnostics = _dict(market_state_inputs.get("diagnostics"))
+    sample_instruments = _dict(sample.get("instruments"))
+    selected_es = _dict(sample_instruments.get("future:ES"))
+    selected_es_identity = selected_es.get("contract_identity")
+    moving_averages = project_spx_equivalent_moving_averages(
+        _dict(input_diagnostics.get("moving_averages")),
+        es_spx_basis_points=_number(market_frame.cross_asset.get("es_spx_basis_points")),
+        basis_contract_identity=(
+            selected_es_identity
+            if isinstance(selected_es_identity, str) and selected_es_identity
+            else None
+        ),
+    )
+    market_state_inputs = {
+        **market_state_inputs,
+        "diagnostics": {
+            **input_diagnostics,
+            "moving_averages": moving_averages,
+        },
+    }
+    rth_market_state["input_lineage"] = market_state_inputs
     market_frame = replace(
         market_frame,
         diagnostics={
@@ -371,6 +387,7 @@ def run(
         trade_intent,
         now=evaluation_now,
         feature_policy=policy,
+        order_policy=app.order_map,
         expected_policy_version=expected_trade_intent_policy_version,
         action_now=delivery_action_now,
     )
@@ -569,9 +586,7 @@ def _reusable_spring_gamma_v3_shadow(
     try:
         record = validate_spring_gamma_v3_shadow(payload)
         text = str(record["as_of"]).strip()
-        as_of = datetime.fromisoformat(
-            f"{text[:-1]}+00:00" if text.endswith(("Z", "z")) else text
-        )
+        as_of = datetime.fromisoformat(f"{text[:-1]}+00:00" if text.endswith(("Z", "z")) else text)
     except (TypeError, ValueError):
         return {}
     if (
@@ -605,18 +620,12 @@ def _attach_wall_probability_shadow(
                 }
             )
         wall_reasons = [
-            str(reason)
-            for reason in wall_probability.get("abstain_reasons", [])
-            if str(reason)
+            str(reason) for reason in wall_probability.get("abstain_reasons", []) if str(reason)
         ]
         combined["abstain_reasons"] = list(
             dict.fromkeys(
                 [
-                    *[
-                        str(reason)
-                        for reason in combined.get("abstain_reasons", [])
-                        if str(reason)
-                    ],
+                    *[str(reason) for reason in combined.get("abstain_reasons", []) if str(reason)],
                     *[f"wall_probability:{reason}" for reason in wall_reasons],
                 ]
             )

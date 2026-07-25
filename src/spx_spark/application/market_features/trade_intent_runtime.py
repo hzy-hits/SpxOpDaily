@@ -10,12 +10,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Mapping
 
+from spx_spark.application.order_map.execution_quote import evaluate_execution_quote
 from spx_spark.application.order_map.pricing import round_to_tick
 from spx_spark.config import NotificationSettings, StorageSettings
 from spx_spark.notifier.dispatcher import enqueue_notification
 from spx_spark.notifier.model import CommandRunner, default_runner
 from spx_spark.notifier.receipts import NotificationEnvelope
 from spx_spark.settings.market_features import MarketFeatureSettings
+from spx_spark.settings.order_map import DEFAULT_ORDER_MAP_POLICY, OrderMapPolicy
 from spx_spark.state_io import atomic_write_json_secure, exclusive_state_lock, read_json_object
 from spx_spark.storage import LatestStateStore, configured_quote_use_decision
 from spx_spark.strategy_contract import (
@@ -43,6 +45,7 @@ def process_trade_intent(
     now: datetime,
     settings: NotificationSettings | None = None,
     feature_policy: MarketFeatureSettings | None = None,
+    order_policy: OrderMapPolicy | None = None,
     expected_policy_version: str | None = None,
     action_now: datetime | None = None,
     runner: CommandRunner = default_runner,
@@ -83,9 +86,7 @@ def process_trade_intent(
                 semantic_keys.pop(key, None)
         duplicate = bool(
             intent_id
-            and (
-                intent_id in accepted or (semantic_key and semantic_key in semantic_keys.values())
-            )
+            and (intent_id in accepted or (semantic_key and semantic_key in semantic_keys.values()))
         )
         inflight = {
             key: value
@@ -146,6 +147,7 @@ def process_trade_intent(
         intent,
         now=action_now,
         feature_policy=feature_policy,
+        order_policy=order_policy,
         expected_policy_version=expected_policy_version,
     )
     if action_reason:
@@ -267,6 +269,9 @@ def render_trade_intent(intent: Mapping[str, object]) -> str:
         f"收益风险比 **{_fmt(intent.get('remaining_reward_risk'))}**　"
         f"单张最大权利金 `${_fmt(intent.get('max_loss_per_contract'))}`",
     ]
+    lines.extend(_greek_risk_lines(intent.get("greek_confidence")))
+    lines.extend(_moving_average_lines(intent.get("moving_average_context")))
+    lines.extend(_pilot_diagnostic_lines(intent.get("pilot_diagnostics")))
     lines.extend(_play_stats_lines(intent.get("play_stats")))
     lines.extend(
         [
@@ -277,6 +282,61 @@ def render_trade_intent(intent: Mapping[str, object]) -> str:
         ]
     )
     return "\n".join(lines)
+
+
+def _greek_risk_lines(score: object) -> list[str]:
+    if not isinstance(score, Mapping):
+        return []
+    delta = score.get("delta")
+    gamma = score.get("gamma_per_point")
+    theta_loss = score.get("theta_15m_loss_fraction")
+    crush_loss = score.get("iv_down_3vol_loss_fraction")
+    if not any(isinstance(value, int | float) for value in (delta, gamma, theta_loss, crush_loss)):
+        return []
+    return [
+        "## 希腊风险",
+        f"Delta `{_fmt(delta)}`　Gamma `{_fmt(gamma)}`　"
+        f"15分钟Theta情景 `{_fmt_pct(theta_loss)}`　"
+        f"IV下降3波动点情景 `{_fmt_pct(crush_loss)}`　"
+        f"评分 `{_fmt(score.get('raw_score'))}`",
+        "希腊字母只用于合约与持有风险，不改变墙位方向。",
+    ]
+
+
+def _pilot_diagnostic_lines(value: object) -> list[str]:
+    if not isinstance(value, list | tuple) or not value:
+        return []
+    labels = "、".join(str(item) for item in value if item)
+    return ["## 辅助确认", f"非否决诊断：{labels}"] if labels else []
+
+
+def _moving_average_lines(value: object) -> list[str]:
+    if not isinstance(value, Mapping):
+        return []
+    price = value.get("price")
+    sma20 = value.get("sma20")
+    sma50 = value.get("sma50")
+    if not any(isinstance(item, int | float) for item in (price, sma20, sma50)):
+        return []
+    spx20 = value.get("spx_equivalent_sma20")
+    spx50 = value.get("spx_equivalent_sma50")
+    projection = (
+        f"　SPX等价值 `{_fmt_fixed(spx20)} / {_fmt_fixed(spx50)}`"
+        if isinstance(spx20, int | float) or isinstance(spx50, int | float)
+        else ""
+    )
+    precision = (
+        "　`贴线区：不确认突破`"
+        if value.get("spx_projection_near_line") is True
+        else ""
+    )
+    return [
+        "## 均线位置",
+        f"ES 5m P/MA20/MA50 "
+        f"`{_fmt_fixed(price)} / {_fmt_fixed(sma20)} / {_fmt_fixed(sma50)}`　"
+        f"状态 `{value.get('relation') or '-'}`{projection}{precision}",
+        "SPX等价值使用同步 ES−SPX 基差投影，不是 SPX 自身历史均线；本项只读。",
+    ]
 
 
 def _play_stats_lines(stats: object) -> list[str]:
@@ -302,6 +362,10 @@ def _play_stats_lines(stats: object) -> list[str]:
     ]
 
 
+def _fmt_pct(value: object) -> str:
+    return f"{float(value) * 100:.2f}%" if isinstance(value, int | float) else "-"
+
+
 def _writer_prompt(intent: Mapping[str, object], template: str) -> str:
     return (
         "把下面已经通过确定性门控的交易意图排成易扫读飞书消息。只做解释和排版，不重新判断。\n"
@@ -323,8 +387,11 @@ def _writer_output_valid(text: str, intent: Mapping[str, object]) -> bool:
         level_kind = str(stats.get("level_kind") or "")
         sample_count = stats.get("sample_count")
         winrate = stats.get("winrate")
-        if play and level_kind and isinstance(sample_count, int | float) and isinstance(
-            winrate, int | float
+        if (
+            play
+            and level_kind
+            and isinstance(sample_count, int | float)
+            and isinstance(winrate, int | float)
         ):
             required.extend(
                 (
@@ -399,6 +466,7 @@ def _action_revalidation(
     now: datetime,
     feature_policy: MarketFeatureSettings | None,
     expected_policy_version: str | None,
+    order_policy: OrderMapPolicy | None = None,
 ) -> tuple[str | None, dict[str, object]]:
     """Fail closed at enqueue time and, in production, reload the market projection."""
 
@@ -457,12 +525,7 @@ def _action_revalidation(
         reason = "action_quote_provider_unavailable"
     elif intent_provider != quote.provider.value:
         reason = "action_quote_provider_mismatch"
-    elif (
-        bid is None
-        or mid is None
-        or ask is None
-        or not 0 <= bid <= mid <= ask
-    ):
+    elif bid is None or mid is None or ask is None or not 0 <= bid <= mid <= ask:
         reason = "action_quote_nbbo_invalid"
     elif source_at is None:
         reason = "action_quote_source_time_unavailable"
@@ -490,15 +553,23 @@ def _action_revalidation(
             if not use.pricing_allowed:
                 reason = "action_quote_not_pricing_allowed"
             else:
-                action_limit = round_to_tick(
-                    min(mid, bid + entry_fraction * (ask - bid))
+                execution_gate = evaluate_execution_quote(
+                    quote,
+                    latest.quotes,
+                    as_of=now,
+                    policy=order_policy or DEFAULT_ORDER_MAP_POLICY,
                 )
-                evidence["recomputed_entry_limit"] = action_limit
-                reason = (
-                    None
-                    if math.isclose(action_limit, entry_limit, abs_tol=1e-9)
-                    else "action_entry_limit_changed"
-                )
+                evidence["execution_quote_gate"] = execution_gate.to_dict()
+                if not execution_gate.executable:
+                    reason = f"action_execution_quote_{execution_gate.reasons[0]}"
+                else:
+                    action_limit = round_to_tick(min(mid, bid + entry_fraction * (ask - bid)))
+                    evidence["recomputed_entry_limit"] = action_limit
+                    reason = (
+                        None
+                        if math.isclose(action_limit, entry_limit, abs_tol=1e-9)
+                        else "action_entry_limit_changed"
+                    )
     evidence["reason"] = reason
     return reason, evidence
 
@@ -555,6 +626,10 @@ def _fmt(value: object) -> str:
     if not isinstance(value, int | float):
         return "-"
     return f"{float(value):.2f}".rstrip("0").rstrip(".")
+
+
+def _fmt_fixed(value: object) -> str:
+    return f"{float(value):.2f}" if isinstance(value, int | float) else "-"
 
 
 def _number(value: object) -> float | None:

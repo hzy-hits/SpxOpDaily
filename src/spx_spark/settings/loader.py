@@ -275,19 +275,11 @@ def load_settings(
     spring_gamma_v3 = SpringGammaV3Settings(
         enabled=bool(get("spring_gamma_v3.enabled")),
         report_enabled=bool(get("spring_gamma_v3.report_enabled")),
-        prediction_interval_seconds=int(
-            get("spring_gamma_v3.prediction_interval_seconds")
-        ),
-        horizons_minutes=tuple(
-            int(item) for item in get("spring_gamma_v3.horizons_minutes")
-        ),
-        rth_greek_max_age_seconds=float(
-            get("spring_gamma_v3.rth_greek_max_age_seconds")
-        ),
+        prediction_interval_seconds=int(get("spring_gamma_v3.prediction_interval_seconds")),
+        horizons_minutes=tuple(int(item) for item in get("spring_gamma_v3.horizons_minutes")),
+        rth_greek_max_age_seconds=float(get("spring_gamma_v3.rth_greek_max_age_seconds")),
         rth_iv_max_age_seconds=float(get("spring_gamma_v3.rth_iv_max_age_seconds")),
-        gth_greek_max_age_seconds=float(
-            get("spring_gamma_v3.gth_greek_max_age_seconds")
-        ),
+        gth_greek_max_age_seconds=float(get("spring_gamma_v3.gth_greek_max_age_seconds")),
         gth_iv_max_age_seconds=float(get("spring_gamma_v3.gth_iv_max_age_seconds")),
         min_pair_ratio=float(get("spring_gamma_v3.min_pair_ratio")),
         min_iv=float(get("spring_gamma_v3.min_iv")),
@@ -341,6 +333,7 @@ def load_settings(
         trade_follow_through_em_fraction=float(
             get("market_features.trade_follow_through_em_fraction")
         ),
+        trade_confirmed_pilot_enabled=bool(get("market_features.trade_confirmed_pilot_enabled")),
         trade_repricing_max_age_seconds=float(
             get("market_features.trade_repricing_max_age_seconds")
         ),
@@ -587,9 +580,7 @@ def load_settings(
         gth_spread_default_width_points=float(
             get("intraday_shock.gth_spread_default_width_points")
         ),
-        gth_structure_max_age_seconds=float(
-            get("intraday_shock.gth_structure_max_age_seconds")
-        ),
+        gth_structure_max_age_seconds=float(get("intraday_shock.gth_structure_max_age_seconds")),
         gth_exit_clock_et=str(get("intraday_shock.gth_exit_clock_et")),
         data_root=data_root,
     )

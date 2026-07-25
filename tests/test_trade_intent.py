@@ -68,6 +68,196 @@ def test_confirmed_path_requires_all_gates_before_trade_ready() -> None:
     assert intent["automatic_ordering"] is False
 
 
+def test_reviewed_pilot_keeps_exact_quote_but_softens_redundant_context_gates() -> None:
+    market, options, latest, context, repricing = _ready_inputs()
+    market = replace(
+        market,
+        es={
+            **market.es,
+            "return_1m_points": -0.5,
+            "return_5m_points": 1.0,
+        },
+        volume={"price_volume_alignment_5m": "unavailable"},
+        cross_asset={"es_spy_direction_confirmation_15m": "divergent"},
+    )
+    options = replace(
+        options,
+        volatility={},
+        l1=replace(options.l1, quality=FrameQuality.UNAVAILABLE),
+    )
+    context = replace(
+        context,
+        invalidations=("es_spy_direction_divergent", "hot_option_liquidity_low"),
+        breakout_filter={
+            "event_id": "level:test",
+            "verdict": "pending",
+            "actionable": False,
+        },
+    )
+
+    intent = evaluate_trade_intent(
+        context,
+        market,
+        options,
+        latest,
+        repricing,
+        now=NOW,
+        feature_policy=MarketFeatureSettings(trade_confirmed_pilot_enabled=True),
+        order_policy=OrderMapPolicy(),
+    )
+
+    assert intent["status"] == "trade_ready"
+    assert intent["strategy_lane"] == "long_0dte_rth_upside_breakout_pilot"
+    assert intent["pilot_mode"] is True
+    assert intent["automatic_ordering"] is False
+    assert set(intent["pilot_diagnostics"]) == {
+        "breakout_filter_not_supported",
+        "es_return_1m_points_opposes_direction",
+        "price_volume_not_directionally_aligned",
+        "es_spy_direction_divergent",
+        "option_l1_not_ready",
+        "expected_move_unavailable",
+        "hot_option_liquidity_low",
+    }
+
+
+def test_reviewed_pilot_blocks_joint_immediate_reversal() -> None:
+    market, options, latest, context, repricing = _ready_inputs()
+    market = replace(
+        market,
+        es={
+            **market.es,
+            "return_1m_points": -1.0,
+            "return_5m_points": -2.0,
+        },
+    )
+
+    intent = evaluate_trade_intent(
+        context,
+        market,
+        options,
+        latest,
+        repricing,
+        now=NOW,
+        feature_policy=MarketFeatureSettings(trade_confirmed_pilot_enabled=True),
+        order_policy=OrderMapPolicy(),
+    )
+
+    assert intent["status"] == "blocked"
+    assert "es_1m_5m_jointly_oppose_direction" in intent["block_reasons"]
+
+
+def test_reviewed_pilot_keeps_explicit_breakout_block_as_hard_gate() -> None:
+    market, options, latest, context, repricing = _ready_inputs()
+    context = replace(
+        context,
+        breakout_filter={
+            "event_id": "level:test",
+            "verdict": "blocked",
+            "actionable": False,
+        },
+    )
+
+    intent = evaluate_trade_intent(
+        context,
+        market,
+        options,
+        latest,
+        repricing,
+        now=NOW,
+        feature_policy=MarketFeatureSettings(trade_confirmed_pilot_enabled=True),
+        order_policy=OrderMapPolicy(),
+    )
+
+    assert intent["status"] == "blocked"
+    assert "breakout_filter_blocked" in intent["block_reasons"]
+    assert "breakout_filter_blocked" in intent["pilot_diagnostics"]
+
+
+def test_reviewed_pilot_is_upside_breakout_only() -> None:
+    market, options, latest, context, repricing = _ready_inputs()
+    context = replace(
+        context,
+        level_decision={
+            **context.level_decision,
+            "thesis": "fade",
+        },
+    )
+
+    intent = evaluate_trade_intent(
+        context,
+        market,
+        options,
+        latest,
+        repricing,
+        now=NOW,
+        feature_policy=MarketFeatureSettings(trade_confirmed_pilot_enabled=True),
+        order_policy=OrderMapPolicy(),
+    )
+
+    assert intent["status"] == "blocked"
+    assert "pilot_scope_upside_breakout_only" in intent["block_reasons"]
+
+
+def test_zero_dte_time_stop_is_capped_at_expiry_close() -> None:
+    market, options, latest, context, repricing = _ready_inputs()
+    late = datetime(2026, 7, 14, 19, 50, tzinfo=UTC)
+    close = datetime(2026, 7, 14, 20, 0, tzinfo=UTC)
+    quote = replace(
+        latest.best_quotes[0],
+        received_at=late,
+        last_update_at=late,
+        quote_time=late,
+    )
+    latest = LatestState(
+        created_at=late,
+        as_of=late,
+        quotes=(quote,),
+        best_quotes=(quote,),
+    )
+    market = replace(
+        market,
+        as_of=late,
+        es={
+            **market.es,
+            "observed_at": late.isoformat(),
+            "source_at": late.isoformat(),
+            "transport_at": late.isoformat(),
+        },
+    )
+    options = replace(options, as_of=late)
+    context = replace(
+        context,
+        as_of=late,
+        level_decision={
+            **context.level_decision,
+            "phase_at": (late - timedelta(seconds=60)).isoformat(),
+            "expires_at": close.isoformat(),
+            "updated_at": late.isoformat(),
+            "trigger_coordinate": {
+                **context.level_decision["trigger_coordinate"],
+                "as_of": late.isoformat(),
+            },
+        },
+    )
+    repricing = {**repricing, "as_of": late.isoformat()}
+
+    intent = evaluate_trade_intent(
+        context,
+        market,
+        options,
+        latest,
+        repricing,
+        now=late,
+        feature_policy=MarketFeatureSettings(trade_confirmed_pilot_enabled=True),
+        order_policy=OrderMapPolicy(),
+    )
+
+    assert intent["status"] == "trade_ready"
+    assert intent["time_stop_at"] == close.isoformat()
+    assert datetime.fromisoformat(str(intent["valid_until"])) <= close
+
+
 def test_trade_ready_includes_play_stats_when_provided() -> None:
     market, options, latest, context, repricing = _ready_inputs()
     stats = PlayOutcomeStats(
@@ -147,6 +337,47 @@ def test_render_trade_intent_shows_play_stats_section() -> None:
     assert text.index("## 风险") < text.index("## 同类信号") < text.index("## 时效")
 
 
+def test_render_trade_intent_shows_greek_risk_and_soft_pilot_diagnostics() -> None:
+    text = render_trade_intent(
+        {
+            **_render_intent(),
+            "greek_confidence": {
+                "raw_score": 5.0,
+                "delta": 0.48,
+                "gamma_per_point": 0.02,
+                "theta_15m_loss_fraction": 0.1234,
+                "iv_down_3vol_loss_fraction": 0.0876,
+            },
+            "pilot_diagnostics": [
+                "rth_spy_confirmation_unavailable",
+                "option_l1_not_ready",
+            ],
+            "moving_average_context": {
+                "price": 7603.0,
+                "sma20": 7595.0,
+                "sma50": 7580.0,
+                "relation": "bullish_stack",
+                "spx_equivalent_sma20": 7550.0,
+                "spx_equivalent_sma50": 7535.0,
+                "spx_projection_near_line": True,
+                "action_authority": "none",
+            },
+        }
+    )
+
+    assert "## 希腊风险" in text
+    assert "Delta `0.48`" in text
+    assert "15分钟Theta情景 `12.34%`" in text
+    assert "IV下降3波动点情景 `8.76%`" in text
+    assert "## 均线位置" in text
+    assert "ES 5m P/MA20/MA50 `7603.00 / 7595.00 / 7580.00`" in text
+    assert "SPX等价值 `7550.00 / 7535.00`" in text
+    assert "贴线区：不确认突破" in text
+    assert "不是 SPX 自身历史均线；本项只读" in text
+    assert "## 辅助确认" in text
+    assert "rth_spy_confirmation_unavailable" in text
+
+
 def test_render_trade_intent_hides_play_stats_when_absent() -> None:
     text = render_trade_intent(_render_intent())
 
@@ -170,8 +401,7 @@ def test_llm_writer_output_must_preserve_play_stats() -> None:
     without_stats = "\n".join(
         line
         for line in template.splitlines()
-        if "同类信号" not in line
-        and "level_fade_put@call_wall" not in line
+        if "同类信号" not in line and "level_fade_put@call_wall" not in line
     )
 
     assert _writer_output_valid(template, intent)
@@ -751,6 +981,64 @@ def test_action_revalidation_reloads_quote_and_recomputes_limit(monkeypatch) -> 
     assert evidence["entry_limit"] == pytest.approx(10.1)
     assert evidence["recomputed_entry_limit"] == pytest.approx(10.3)
     assert evidence["quote_state_created_at"] == changed_latest.created_at.isoformat()
+
+
+def test_action_revalidation_rejects_spread_deterioration_even_if_limit_is_unchanged(
+    monkeypatch,
+) -> None:
+    market, options, latest, context, repricing = _ready_inputs()
+    feature_policy = MarketFeatureSettings()
+    order_policy = OrderMapPolicy()
+    intent = evaluate_trade_intent(
+        context,
+        market,
+        options,
+        latest,
+        repricing,
+        now=NOW,
+        feature_policy=feature_policy,
+        order_policy=order_policy,
+    )
+    action_at = NOW + timedelta(seconds=1)
+    wide_quote = replace(
+        latest.best_quotes[0],
+        received_at=action_at,
+        last_update_at=action_at,
+        quote_time=action_at,
+        bid=9.05,
+        ask=12.15,
+    )
+    wide_latest = LatestState(
+        created_at=action_at,
+        as_of=action_at,
+        quotes=(wide_quote,),
+        best_quotes=(wide_quote,),
+    )
+
+    class Store:
+        def __init__(self, _storage) -> None:
+            pass
+
+        def load(self, *, now):
+            assert now == action_at
+            return wide_latest
+
+    monkeypatch.setattr(
+        "spx_spark.application.market_features.trade_intent_runtime.LatestStateStore",
+        Store,
+    )
+    reason, evidence = _action_revalidation(
+        SimpleNamespace(),
+        intent,
+        now=action_at,
+        feature_policy=feature_policy,
+        order_policy=order_policy,
+        expected_policy_version=str(intent["policy_version"]),
+    )
+
+    assert reason == "action_execution_quote_spread_points_exceeded"
+    assert evidence["entry_limit"] == pytest.approx(10.1)
+    assert evidence["execution_quote_gate"]["spread_points"] == pytest.approx(3.1)
 
 
 def test_ready_action_revalidation_requires_feature_policy() -> None:

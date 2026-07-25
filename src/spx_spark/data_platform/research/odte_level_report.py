@@ -109,7 +109,9 @@ def _readiness_section(artifact: dict) -> list[str]:
         "| 冻结门槛 | 当前 | 目标 | 状态 |",
         "|---|---:|---:|---|",
     ]
-    lines.extend(f"| {label} | {count} | {target} | {status} |" for label, count, target, status in rows)
+    lines.extend(
+        f"| {label} | {count} | {target} | {status} |" for label, count, target, status in rows
+    )
     lines.extend(
         [
             "",
@@ -156,7 +158,8 @@ def _render_report(artifact: dict, trades: Sequence[Trade]) -> str:
         "sat85(价差价值 ≥85% 宽度按 bid 止盈)、trail33(≥50% 宽度激活、峰值浮盈回撤 "
         "1/3 止盈)、clock(只挂失效线 + 时钟)。",
         "- 成交价:多头腿按 ask 进场、止损/到期按 bid 出场;价差腿按 long ask − short bid "
-        "进、long bid − short ask 出;固定止盈按 mid 触发并按 mid 出场。双腿必须满足"
+        "进、long bid − short ask 出;固定止盈按 mid 触发，但仍按当时可执行 bid"
+        "(价差为 long bid − short ask)出场。双腿必须满足"
         "入场时效/时间偏差和逐笔 mark 新鲜度限制,不使用未来 short quote 或无限前填。",
         "- 未建模佣金、显式滑点、队列顺序、部分成交和市场冲击；top-of-book 结果偏乐观。",
         "- 退出规则按顺序:失效(标的反向破 level+缓冲,S3 为 ES 跌破 trough)、目标墙/"

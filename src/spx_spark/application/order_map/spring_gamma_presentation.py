@@ -200,12 +200,45 @@ def _rth_market_state_lines(shadow: dict[str, Any]) -> list[str]:
         state_name,
         option_overlay=shadow.get("option_overlay"),
     )
-    return [
+    lines = [
         f"RTH状态 Shadow  {state_name} · {' · '.join(metrics)}　只读",
+    ]
+    moving_average_line = _moving_average_line(state.get("moving_averages"))
+    if moving_average_line is not None:
+        lines.append(moving_average_line)
+    return [
+        *lines,
         f"状态路径  等待位置：{wait}",
         f"状态路径  触发确认：{trigger}",
         f"状态路径  期权结构：{expression}",
     ]
+
+
+def _moving_average_line(value: object) -> str | None:
+    if not isinstance(value, dict):
+        return None
+    price = _finite_shadow_value(value.get("price"))
+    sma20 = _finite_shadow_value(value.get("sma20"))
+    sma50 = _finite_shadow_value(value.get("sma50"))
+    if price is None and sma20 is None and sma50 is None:
+        return None
+    spx20 = _finite_shadow_value(value.get("spx_equivalent_sma20"))
+    spx50 = _finite_shadow_value(value.get("spx_equivalent_sma50"))
+    projection = (
+        f" · SPX等价值 MA20/50 {_shadow_dash(spx20)}/{_shadow_dash(spx50)}"
+        if spx20 is not None or spx50 is not None
+        else ""
+    )
+    precision = " · 贴线区不确认突破" if value.get("spx_projection_near_line") is True else ""
+    return (
+        f"ES 5m均线  P/MA20/MA50 {_shadow_dash(price)}/{_shadow_dash(sma20)}/"
+        f"{_shadow_dash(sma50)} · {value.get('relation') or '-'}{projection}{precision}"
+        "（基差投影，非SPX自身均线）　只读"
+    )
+
+
+def _shadow_dash(value: float | None) -> str:
+    return f"{value:.2f}" if value is not None else "-"
 
 
 def _rth_state_window_line(window: object) -> str | None:
@@ -262,6 +295,45 @@ def _compact_rth_market_state(shadow: dict[str, Any]) -> dict[str, Any] | None:
             else None
         ),
     )
+    input_lineage = (
+        source.get("input_lineage") if isinstance(source.get("input_lineage"), dict) else {}
+    )
+    input_diagnostics = (
+        input_lineage.get("diagnostics")
+        if isinstance(input_lineage.get("diagnostics"), dict)
+        else {}
+    )
+    raw_moving = (
+        input_diagnostics.get("moving_averages")
+        if isinstance(input_diagnostics.get("moving_averages"), dict)
+        else {}
+    )
+    moving_averages = {
+        key: raw_moving.get(key)
+        for key in (
+            "status",
+            "timeframe",
+            "session",
+            "price",
+            "sma20",
+            "sma50",
+            "distance_to_sma20_points",
+            "distance_to_sma50_points",
+            "relation",
+            "latest_bar_end",
+            "contract_identity",
+            "es_spx_basis_points",
+            "basis_contract_identity",
+            "basis_contract_identity_matches_sma",
+            "spx_equivalent_sma20",
+            "spx_equivalent_sma50",
+            "projection_method",
+            "spx_projection_near_line",
+            "spx_projection_near_line_tolerance_points",
+            "action_authority",
+        )
+        if key in raw_moving
+    }
     return {
         "schema_version": source.get("schema_version"),
         "rule_version": source.get("rule_version"),
@@ -278,6 +350,7 @@ def _compact_rth_market_state(shadow: dict[str, Any]) -> dict[str, Any] | None:
             "same_time_range_ratio": volatility.get("same_time_range_ratio"),
         },
         "breadth_above_vwap": breadth,
+        "moving_averages": moving_averages,
         "input_availability": source.get("input_availability"),
         "pin_proxy_candidate": source.get("pin_proxy_candidate"),
         "action_authority": "none",

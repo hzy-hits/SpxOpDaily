@@ -192,7 +192,8 @@ def simulate_trade(
     target_wall, profit-taking (fixed 1.3x / trailing / sat85 / trail33 per
     profile; clock has none), time_stop, then an end_of_data fallback.
     Stop-style exits pay the bid (long bid, or long bid - short ask for
-    spreads); the fixed profit target exits at the triggering mid. GTH signals
+    spreads); fixed profit targets trigger on mid but exit at the executable
+    bid (or long bid minus short ask). GTH signals
     (future:ES underlier) use the profile's GTH time-stop/max-hold overrides,
     or expiry-date 09:45 America/New_York when the profile sets gth_clock_exit.
     """
@@ -246,9 +247,7 @@ def simulate_trade(
                 "recorded_entry_fields_unavailable",
             )
         if requested_entry_at >= entry_expires_at:
-            return Skip(
-                signal.set_name, profile.name, signal.key, variant, "entry_window_expired"
-            )
+            return Skip(signal.set_name, profile.name, signal.key, variant, "entry_window_expired")
         entry_tick = next(
             (
                 tick
@@ -267,9 +266,7 @@ def simulate_trade(
                 UnderlierTick(at=requested_entry_at, price=signal.decision_spot)
             )
         pre_entry_prices.extend(
-            tick
-            for tick in underlier
-            if requested_entry_at <= tick.at <= boundary_at
+            tick for tick in underlier if requested_entry_at <= tick.at <= boundary_at
         )
         pre_entry_prices.sort(key=lambda tick: tick.at)
         for spot_tick in pre_entry_prices:
@@ -292,10 +289,7 @@ def simulate_trade(
                     variant,
                     "target_before_entry",
                 )
-        if (
-            not pre_entry_prices
-            or boundary_at - pre_entry_prices[-1].at > MAX_UNDERLIER_QUOTE_AGE
-        ):
+        if not pre_entry_prices or boundary_at - pre_entry_prices[-1].at > MAX_UNDERLIER_QUOTE_AGE:
             return Skip(
                 signal.set_name,
                 profile.name,
@@ -521,8 +515,12 @@ def simulate_trade(
                     break
         elif profile.profit_target_mode == "clock":
             pass  # clock profile: invalidation + clock stop only, no profit rule
-        elif pos_mid is not None and pos_mid >= PROFIT_TARGET_MULTIPLE * entry_px:
-            exit_px, exit_time, exit_reason = pos_mid, tick.at, "profit_target"
+        elif (
+            pos_mid is not None
+            and pos_mid >= PROFIT_TARGET_MULTIPLE * entry_px
+            and pos_stop is not None
+        ):
+            exit_px, exit_time, exit_reason = pos_stop, tick.at, "profit_target"
             break
 
     if exit_px is None:
@@ -880,9 +878,7 @@ def run(
     )
     readiness_sessions = strategy_readiness.get("sessions")
     readiness_details = (
-        readiness_sessions.get("details")
-        if isinstance(readiness_sessions, dict)
-        else None
+        readiness_sessions.get("details") if isinstance(readiness_sessions, dict) else None
     )
     complete_session_dates: set[date] = set()
     if isinstance(readiness_details, list):
@@ -911,7 +907,8 @@ def run(
         signal_sets[set_name] = [
             signal
             for signal in signals
-            if signal.at < cutoff_at and signal.at.date() <= last_complete_date
+            if signal.at < cutoff_at
+            and signal.at.date() <= last_complete_date
             and (signal.expiry or signal.at.date()) in complete_session_dates
         ]
     signal_counts = {name: len(signals) for name, signals in signal_sets.items()}

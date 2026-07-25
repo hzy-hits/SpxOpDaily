@@ -68,6 +68,7 @@ class VerifyRow:
     kind: str
     symbol: str
     exchange: str | None = None
+    contract_expiry: str | None = None
     qualified: bool = False
     subscribed: bool = False
     market_data_type: int | None = None
@@ -152,7 +153,9 @@ def build_base_contracts(settings: IbkrSettings) -> list[tuple[str, str, Any]]:
 
     for symbol in settings.verify_futures:
         expiry = settings.mes_expiry if symbol == "MES" else settings.es_expiry
-        contracts.append((f"future:{symbol}", "future", Future(symbol, expiry, "CME", currency="USD")))
+        contracts.append(
+            (f"future:{symbol}", "future", Future(symbol, expiry, "CME", currency="USD"))
+        )
 
     for symbol in settings.verify_cfds:
         contracts.append((f"cfd:{symbol}", "cfd", CFD(symbol, "SMART", "USD")))
@@ -277,6 +280,9 @@ def qualify_and_subscribe(
             kind=kind,
             symbol=getattr(contract, "symbol", label),
             exchange=getattr(contract, "exchange", None),
+            contract_expiry=(
+                str(getattr(contract, "lastTradeDateOrContractMonth", "") or "") or None
+            ),
         )
         if on_progress is not None:
             on_progress(label=label, index=index, total=len(contracts), phase="start")
@@ -286,11 +292,20 @@ def qualify_and_subscribe(
             if resolved is None:
                 result[label] = (None, row)
                 if on_progress is not None:
-                    on_progress(label=label, index=index, total=len(contracts), phase="failed", error=row.error)
+                    on_progress(
+                        label=label,
+                        index=index,
+                        total=len(contracts),
+                        phase="failed",
+                        error=row.error,
+                    )
                 continue
             contract = resolved
         elif qualify:
             row.qualified = True
+        row.contract_expiry = (
+            str(getattr(contract, "lastTradeDateOrContractMonth", "") or "") or row.contract_expiry
+        )
 
         ticker = subscribe_contract(ib, contract, row, allow_qualify_fallback=not qualify)
         result[label] = (ticker, row)
@@ -453,7 +468,9 @@ def snapshot_rows(
             if ticker_time.tzinfo is None:
                 ticker_time = ticker_time.replace(tzinfo=timezone.utc)
             row.ticker_time = ticker_time.astimezone(timezone.utc).isoformat()
-            row.stale = (now - ticker_time.astimezone(timezone.utc)).total_seconds() > row_stale_after
+            row.stale = (
+                now - ticker_time.astimezone(timezone.utc)
+            ).total_seconds() > row_stale_after
 
         previous_greeks = option_greeks_fingerprint(row)
         greeks = getattr(ticker, "modelGreeks", None)
@@ -471,9 +488,9 @@ def snapshot_rows(
                 row.greeks_observed_at = now.isoformat()
 
         current_fingerprint = normalized_row_fingerprint(row)
-        if (
-            row.last_update_at is None or current_fingerprint != previous_fingerprint
-        ) and any(value is not None for value in current_fingerprint):
+        if (row.last_update_at is None or current_fingerprint != previous_fingerprint) and any(
+            value is not None for value in current_fingerprint
+        ):
             row.last_update_at = now.isoformat()
 
         rows.append(row)
@@ -545,9 +562,7 @@ def estimate_atm_reference(rows: list[VerifyRow]) -> tuple[float | None, str]:
         row = by_label.get(label)
         if row is None or row.stale is not False or row.market_data_type in {3, 4}:
             continue
-        price = first_present(
-            row.market_price, row.last, midpoint(row.bid, row.ask), row.close
-        )
+        price = first_present(row.market_price, row.last, midpoint(row.bid, row.ask), row.close)
         if price:
             return price * multiplier, name
 
@@ -634,7 +649,8 @@ def print_rows(rows: list[VerifyRow]) -> None:
         )
 
     widths = [
-        max(len(headers[index]), *(len(line[index]) for line in table)) for index in range(len(headers))
+        max(len(headers[index]), *(len(line[index]) for line in table))
+        for index in range(len(headers))
     ]
     print(" | ".join(header.ljust(widths[index]) for index, header in enumerate(headers)))
     print("-+-".join("-" * width for width in widths))
@@ -704,7 +720,9 @@ def run(argv: list[str] | None = None) -> int:
         )
 
     try:
-        print(f"Connecting to IBKR at {settings.host}:{settings.port} clientId={settings.client_id}")
+        print(
+            f"Connecting to IBKR at {settings.host}:{settings.port} clientId={settings.client_id}"
+        )
         try:
             connect_market_data_only(ib, settings)
         except Exception as exc:  # noqa: BLE001
@@ -727,7 +745,10 @@ def run(argv: list[str] | None = None) -> int:
         if args.skip_options:
             rows = base_rows
         elif atm_reference is None:
-            print("Could not estimate SPX ATM reference; skipping SPXW option checks.", file=sys.stderr)
+            print(
+                "Could not estimate SPX ATM reference; skipping SPXW option checks.",
+                file=sys.stderr,
+            )
             rows = base_rows
         else:
             print(f"Estimated SPX ATM reference {atm_reference:.2f} from {atm_source}")

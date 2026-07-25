@@ -51,6 +51,7 @@ def instrument_from_ibkr_label(
     kind: str,
     symbol: str,
     exchange: str | None = None,
+    contract_expiry: str | None = None,
 ) -> InstrumentId:
     parts = label.split(":")
     if len(parts) >= 5 and parts[0] == "option":
@@ -67,7 +68,12 @@ def instrument_from_ibkr_label(
     if len(parts) >= 2 and parts[0] == "index":
         return InstrumentId.index(parts[1], provider_symbol=label, exchange=exchange or "CBOE")
     if len(parts) >= 2 and parts[0] == "future":
-        return InstrumentId.future(parts[1], provider_symbol=label, exchange=exchange or "CME")
+        return InstrumentId.future(
+            parts[1],
+            expiry=contract_expiry,
+            provider_symbol=label,
+            exchange=exchange or "CME",
+        )
     if len(parts) >= 2 and parts[0] == "cfd":
         return InstrumentId.cfd(
             parts[1],
@@ -131,6 +137,9 @@ def quote_from_ibkr_row(
         kind=kind,
         symbol=symbol,
         exchange=exchange or None,
+        contract_expiry=(
+            str(get_value(row, "contract_expiry")) if get_value(row, "contract_expiry") else None
+        ),
     )
     quality = classify_quote_quality(
         market_data_type=market_data_type,
@@ -178,9 +187,7 @@ def quote_from_ibkr_row(
             )
     open_interest = clean_float(get_value(row, "open_interest"))
     if open_interest is not None:
-        open_interest_observed_at = parse_timestamp(
-            get_value(row, "open_interest_observed_at")
-        )
+        open_interest_observed_at = parse_timestamp(get_value(row, "open_interest_observed_at"))
         if open_interest_observed_at is not None:
             raw.update(
                 {

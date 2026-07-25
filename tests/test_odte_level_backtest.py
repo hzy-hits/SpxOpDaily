@@ -253,15 +253,15 @@ def test_invalidation_beats_profit_target_on_same_tick() -> None:
     assert result.exit_reason == "invalidation"
 
 
-def test_profit_target_exits_at_mid() -> None:
+def test_profit_target_triggers_at_mid_and_exits_at_bid() -> None:
     long_series = _flat_series(ENTRY, 300, step=30)  # entry ask 10.0, mid 9.9
     long_series.append(_tick(ENTRY + timedelta(seconds=301), 13.4, 13.6))  # mid 13.5
     result = simulate_trade(
         _signal(), "naked", sorted(long_series, key=lambda t: t.at), None, _flat_underlier(7555.0)
     )
     assert result.exit_reason == "profit_target"
-    assert result.exit_px == 13.5
-    assert result.pnl_points == 3.5
+    assert result.exit_px == 13.4
+    assert result.pnl_points == 3.4
     assert result.mfe_points == 3.5
     assert result.mae_points == -0.1
 
@@ -1034,7 +1034,9 @@ def test_load_prefill_signals_filters_and_parses(tmp_path: Path) -> None:
     )
     signals = load_prefill_signals(root)
     assert len(signals) == 3
-    early = next(signal for signal in signals if signal.direction == "up" and signal.at.minute == 36)
+    early = next(
+        signal for signal in signals if signal.direction == "up" and signal.at.minute == 36
+    )
     assert early.entry_px is None
     assert early.entry_at == datetime(2026, 7, 15, 14, 36, 20, tzinfo=timezone.utc)
     assert early.strike == 7550.0
@@ -1464,9 +1466,7 @@ def test_run_as_of_uses_readiness_complete_sessions_and_keeps_partitions(
     readiness_call = {}
 
     def fake_readiness(root: Path, *, cutoff_at: datetime, generated_at: datetime) -> dict:
-        readiness_call.update(
-            {"root": root, "cutoff_at": cutoff_at, "generated_at": generated_at}
-        )
+        readiness_call.update({"root": root, "cutoff_at": cutoff_at, "generated_at": generated_at})
         return readiness
 
     monkeypatch.setattr(

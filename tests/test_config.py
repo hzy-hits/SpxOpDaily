@@ -306,8 +306,12 @@ def test_zero_dte_gate_relaxation_loads_from_runtime_defaults() -> None:
     assert mf.min_l1_liquidity_score == 30.0
     assert mf.min_l1_two_sided_ratio == 0.65
     assert mf.trade_follow_through_seconds == 15.0
-    assert mf.trade_structure_drift_points == 5.0
+    assert mf.trade_confirmed_pilot_enabled is True
+    assert mf.trade_quote_max_age_seconds == 15.0
+    assert mf.trade_structure_drift_points == 10.0
     ld = settings.level_decision
+    assert ld.notify_transitions is False
+    assert ld.formal_signal_enabled is True
     assert ld.approach_points == 20.0
     assert ld.structure_required_confirmations == 2
     assert ld.structure_switch_min_points == 5.0

@@ -485,7 +485,31 @@ def test_rth_eight_feature_state_renders_state_to_expression_path() -> None:
             "available_count": 8,
             "complete": True,
         },
-        "input_lineage": {"values": {"breadth_above_vwap": 0.68}},
+        "input_lineage": {
+            "values": {"breadth_above_vwap": 0.68},
+            "diagnostics": {
+                "moving_averages": {
+                    "status": "ready",
+                    "timeframe": "5m",
+                    "session": "rth",
+                    "price": 7603.0,
+                    "sma20": 7595.0,
+                    "sma50": 7580.0,
+                    "distance_to_sma20_points": 8.0,
+                    "distance_to_sma50_points": 23.0,
+                    "relation": "bullish_stack",
+                    "contract_identity": "ES:202609",
+                    "spx_equivalent_sma20": 7550.0,
+                    "spx_equivalent_sma50": 7535.0,
+                    "spx_projection_near_line": False,
+                    "spx_projection_near_line_tolerance_points": 4.25,
+                    "projection_method": (
+                        "es_sma_minus_synchronized_current_basis_not_cash_spx_sma"
+                    ),
+                    "action_authority": "none",
+                }
+            },
+        },
         "action_authority": "none",
         "actionable": False,
     }
@@ -503,11 +527,17 @@ def test_rth_eight_feature_state_renders_state_to_expression_path() -> None:
         "RTH状态 Shadow  TREND_UP · D +8.00/10 · ER 0.72 · VWAP穿越 0 · "
         "Range 1.35x · 宽度 68.00% · 数据 8/8　只读"
     ) in rendered
+    assert (
+        "ES 5m均线  P/MA20/MA50 7603.00/7595.00/7580.00 · bullish_stack · "
+        "SPX等价值 MA20/50 7550.00/7535.00（基差投影，非SPX自身均线）　只读"
+    ) in rendered
     assert "状态路径  等待位置：VWAP/ORH与上涨腿回撤区（本层未计算回撤比例）" in rendered
     assert "状态路径  触发确认：仅记录外部level lifecycle确认" in rendered
     assert "状态路径  期权结构：方向映射Call；具体价差仅以独立实时双腿Shadow为准" in rendered
     assert compact["rth_market_state"]["state"] == "TREND_UP"
     assert compact["rth_market_state"]["breadth_above_vwap"] == 0.68
+    assert compact["rth_market_state"]["moving_averages"]["sma20"] == 7595.0
+    assert compact["rth_market_state"]["moving_averages"]["spx_equivalent_sma50"] == 7535.0
     assert compact["option_overlay"]["market_state_independent"] is True
     assert compact["action_authority"] == "none"
 

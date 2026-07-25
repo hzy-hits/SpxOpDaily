@@ -95,10 +95,11 @@ market_features:
   trade_follow_through_seconds: {value: 15.0, description: Minimum time a confirmed path must remain outside its level before becoming trade-ready; 15s matches 0DTE holding horizons.}
   trade_follow_through_min_points: {value: 2.0, description: Minimum additional movement beyond the confirmed level required for trade readiness.}
   trade_follow_through_em_fraction: {value: 0.05, description: Expected-move fraction used when it exceeds the fixed follow-through threshold.}
+  trade_confirmed_pilot_enabled: {value: true, description: Enables the explicitly reviewed RTH upside-breakout pilot; formal confirmation plus exact selected-contract NBBO remain mandatory, while missing aggregate L1 and redundant micro-confirmations become diagnostics instead of vetoes. Automatic broker ordering remains disabled.}
   trade_repricing_max_age_seconds: {value: 90.0, description: Maximum age of the matching realtime option repricing record.}
-  trade_quote_max_age_seconds: {value: 5.0, description: Maximum transport and source age for an option quote used in a trade-ready intent.}
+  trade_quote_max_age_seconds: {value: 15.0, description: Maximum transport and source age for the exact selected-contract quote used in the reviewed RTH pilot; the limit-order window and enqueue-time quote revalidation remain mandatory.}
   trade_market_anchor_max_age_seconds: {value: 20.0, description: Maximum observation, source and transport age for the ES anchor and level observation used by a trade-ready intent.}
-  trade_structure_drift_points: {value: 5.0, description: Maximum drift for decisions sourced directly from the live option frame; stable decisions are validated against their frozen promoted structure. 5.0 matches the structure band half-width so GTH OI/GEX jitter stops invalidating live decisions.}
+  trade_structure_drift_points: {value: 10.0, description: Maximum live-versus-frozen wall drift for the reviewed RTH pilot; the event remains anchored to its frozen trigger and larger migration still blocks the intent.}
   trade_entry_spread_fraction: {value: 0.35, description: Fraction of the live bid-ask spread used for the initial buy limit, capped at mid.}
   trade_intent_ttl_seconds: {value: 90.0, description: Lifetime of a newly emitted trade intent before it must be recalculated.}
   trade_entry_window_seconds: {value: 20.0, description: Maximum time an alert candidate may wait for the displayed ask to reach its entry limit; this is not a broker order TTL.}
@@ -1706,11 +1707,11 @@ level_decision_shadow:
     value: true
     description: Runs the mutually-exclusive wall/flip decision state machine as an input to the deterministic TradeReady gate.
   notify_transitions:
-    value: true
-    description: Sends one deterministic market-warning notification when a wall or flip path reaches CONFIRMED; executable contract and price instructions remain exclusive to TradeReady.
-  formal_signal_enabled:
     value: false
-    description: Keeps CONFIRMED in shadow-only reporting until the statistical acceptance gates pass and an explicit review enables deterministic TradeReady evaluation.
+    description: Keeps every wall/flip transition in the audit but suppresses broad PATH CONFIRMED pushes; the reviewed upside pilot notifies only after its narrower TradeReady gate passes.
+  formal_signal_enabled:
+    value: true
+    description: Explicit operator override enabling deterministic RTH TradeReady evaluation after the point-in-time historical control replay; the acceptance report must continue to distinguish this pilot from an exact end-to-end replay or statistically completed promotion, and no broker order is submitted automatically.
   approach_points:
     value: 20.0
     description: Distance from the nearest frozen wall or flip boundary that arms an approach; 20 points keeps 0DTE setups observable instead of locking the machine in FAR between widely spaced walls.

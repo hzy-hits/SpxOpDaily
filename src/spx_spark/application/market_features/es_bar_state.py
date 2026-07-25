@@ -45,17 +45,38 @@ def advance_es_bar_state(
     source_at = _parse_at(quote.get("source_at")) if quote else None
     price = _number(quote.get("price")) if quote else None
     provider = str(quote.get("provider") or "unknown") if quote else "unknown"
-    rejection = _rejection_reason(
-        source_at=source_at,
-        price=price,
-        now=at,
-        last_source_at=_parse_at(state.get("last_source_at")),
+    contract_identity = _contract_identity(quote)
+    rejection = (
+        "es_contract_identity_provider_conflict"
+        if _provider_contract_identity_conflict(sample)
+        else _rejection_reason(
+            source_at=source_at,
+            price=price,
+            now=at,
+            last_source_at=_parse_at(state.get("last_source_at")),
+        )
     )
     if rejection is not None:
         return _with_diagnostic(state, at=at, rejection=rejection)
 
     assert source_at is not None
     assert price is not None
+    previous_contract_identity = str(state.get("contract_identity") or "")
+    if (
+        contract_identity is not None
+        and previous_contract_identity
+        and contract_identity != previous_contract_identity
+    ):
+        state = _valid_state(None)
+        diagnostics = dict(_mapping(state.get("diagnostics")))
+        diagnostics.update(
+            {
+                "contract_reset_at": at.isoformat(),
+                "contract_reset_from": previous_contract_identity,
+                "contract_reset_to": contract_identity,
+            }
+        )
+        state["diagnostics"] = diagnostics
     bar_start = _bucket_start(source_at)
     current = _mapping(state.get("current_bar"))
     closed = _bar_rows(state.get("closed_bars"))
@@ -67,6 +88,7 @@ def advance_es_bar_state(
             source_at=source_at,
             price=price,
             provider=provider,
+            contract_identity=contract_identity,
         )
     else:
         gap_before = False
@@ -86,24 +108,31 @@ def advance_es_bar_state(
             provider=provider,
             segment=segment,
             gap_before=gap_before,
+            contract_identity=contract_identity,
+            contract_identity_ambiguous=bool(
+                previous_contract_identity and contract_identity is None
+            ),
         )
 
+    diagnostics = {
+        **_mapping(state.get("diagnostics")),
+        "last_rejection": None,
+        "closed_bar_count": len(closed[-MAX_CLOSED_BARS:]),
+        "sampling": "fresh_live_es_source_timestamps_no_gap_fill",
+        "min_ok_samples": MIN_OK_SAMPLES,
+        "max_ok_gap_seconds": MAX_OK_GAP_SECONDS,
+        "max_edge_gap_seconds": MAX_EDGE_GAP_SECONDS,
+    }
     return {
         "schema_version": SCHEMA_VERSION,
         "interval_seconds": INTERVAL_SECONDS,
         "updated_at": at.isoformat(),
         "last_source_at": source_at.isoformat(),
         "last_provider": provider,
+        "contract_identity": contract_identity or previous_contract_identity or None,
         "current_bar": current,
         "closed_bars": closed[-MAX_CLOSED_BARS:],
-        "diagnostics": {
-            "last_rejection": None,
-            "closed_bar_count": len(closed[-MAX_CLOSED_BARS:]),
-            "sampling": "fresh_live_es_source_timestamps_no_gap_fill",
-            "min_ok_samples": MIN_OK_SAMPLES,
-            "max_ok_gap_seconds": MAX_OK_GAP_SECONDS,
-            "max_edge_gap_seconds": MAX_EDGE_GAP_SECONDS,
-        },
+        "diagnostics": diagnostics,
     }
 
 
@@ -123,6 +152,7 @@ def _valid_state(previous: Mapping[str, object] | None) -> dict[str, object]:
             "updated_at": None,
             "last_source_at": None,
             "last_provider": None,
+            "contract_identity": None,
             "current_bar": {},
             "closed_bars": [],
             "diagnostics": {
@@ -143,6 +173,27 @@ def _es_quote(sample: Mapping[str, object]) -> Mapping[str, object]:
         return {}
     quote = instruments.get("future:ES")
     return quote if isinstance(quote, Mapping) else {}
+
+
+def _contract_identity(
+    selected: Mapping[str, object],
+) -> str | None:
+    direct = selected.get("contract_identity")
+    return direct if isinstance(direct, str) and direct else None
+
+
+def _provider_contract_identity_conflict(sample: Mapping[str, object]) -> bool:
+    providers = sample.get("es_by_provider")
+    if not isinstance(providers, Mapping):
+        return False
+    identities = {
+        identity
+        for value in providers.values()
+        if isinstance(value, Mapping)
+        and isinstance((identity := value.get("contract_identity")), str)
+        and identity
+    }
+    return len(identities) > 1
 
 
 def _rejection_reason(
@@ -186,6 +237,8 @@ def _new_bar(
     provider: str,
     segment: str,
     gap_before: bool,
+    contract_identity: str | None,
+    contract_identity_ambiguous: bool,
 ) -> dict[str, object]:
     return {
         "bar_start": bar_start.isoformat(),
@@ -201,6 +254,8 @@ def _new_bar(
         "max_sample_gap_seconds": 0.0,
         "provider_counts": {provider: 1},
         "provider": provider,
+        "contract_identity": contract_identity,
+        "contract_identity_ambiguous": contract_identity_ambiguous,
         "segment": segment,
         "trading_date_et": source_at.astimezone(NY_TZ).date().isoformat(),
         "gap_before": gap_before,
@@ -214,6 +269,7 @@ def _add_observation(
     source_at: datetime,
     price: float,
     provider: str,
+    contract_identity: str | None,
 ) -> dict[str, object]:
     result = dict(current)
     last_source_at = _parse_at(result.get("last_source_at"))
@@ -239,6 +295,16 @@ def _add_observation(
     counts[provider] = counts.get(provider, 0) + 1
     result["provider_counts"] = counts
     result["provider"] = max(counts, key=counts.get)
+    current_identity = result.get("contract_identity")
+    current_known = isinstance(current_identity, str) and bool(current_identity)
+    incoming_known = isinstance(contract_identity, str) and bool(contract_identity)
+    if (
+        result.get("contract_identity_ambiguous") is True
+        or (current_known != incoming_known)
+        or (current_known and contract_identity != current_identity)
+    ):
+        result["contract_identity"] = None
+        result["contract_identity_ambiguous"] = True
     return result
 
 
@@ -251,15 +317,9 @@ def _finalize_bar(current: Mapping[str, object]) -> dict[str, object]:
     first = _parse_at(result.get("first_source_at"))
     last = _parse_at(result.get("last_source_at"))
     leading_gap = (
-        (first - start).total_seconds()
-        if first is not None and start is not None
-        else None
+        (first - start).total_seconds() if first is not None and start is not None else None
     )
-    trailing_gap = (
-        (end - last).total_seconds()
-        if end is not None and last is not None
-        else None
-    )
+    trailing_gap = (end - last).total_seconds() if end is not None and last is not None else None
     result["leading_edge_gap_seconds"] = leading_gap
     result["trailing_edge_gap_seconds"] = trailing_gap
     result["quality"] = (
@@ -267,6 +327,7 @@ def _finalize_bar(current: Mapping[str, object]) -> dict[str, object]:
         if sample_count >= MIN_OK_SAMPLES
         and max_gap is not None
         and max_gap <= MAX_OK_GAP_SECONDS
+        and result.get("contract_identity_ambiguous") is not True
         and leading_gap is not None
         and 0 <= leading_gap <= MAX_EDGE_GAP_SECONDS
         and trailing_gap is not None
