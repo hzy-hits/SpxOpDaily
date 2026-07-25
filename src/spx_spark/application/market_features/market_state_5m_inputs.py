@@ -43,6 +43,7 @@ VWAP_START_TOLERANCE_MINUTES = 5
 # source-timestamp jitter.  Keep the window tight enough to reject a third
 # missing bucket while avoiding a false all-sector outage at 127-128 seconds.
 VWAP_MAX_GAP_SECONDS = 135.0
+VWAP_MIN_OBSERVED_VOLUME_RATIO = 0.80
 BREADTH_MAX_CROSS_SECTION_SKEW_SECONDS = 45.0
 
 
@@ -326,8 +327,19 @@ def _es_vwap_series(
             "reason": "no_complete_rth_es_cumulative_volume_provider",
             "providers_seen": sorted(by_provider),
         }
+    fresh_candidates = [
+        item
+        for item in candidates
+        if 0.0 <= (now - item[1][-1][0]).total_seconds() <= VWAP_MAX_GAP_SECONDS
+    ]
+    if not fresh_candidates:
+        return [], {
+            "status": "unavailable",
+            "reason": "no_fresh_rth_es_cumulative_volume_provider",
+            "providers_seen": sorted(by_provider),
+        }
     provider, series, diagnostics = max(
-        candidates,
+        fresh_candidates,
         key=lambda item: (
             len(item[1]),
             item[1][-1][0],
@@ -356,37 +368,76 @@ def _provider_vwap_series(
     numerator = 0.0
     denominator = 0.0
     series: list[tuple[datetime, float]] = []
+    gaps = 0
     resets = 0
     max_gap = 0.0
+    skipped_cross_gap_volume = 0.0
+    gap_recovery_pending = False
     for previous, current in zip(points, points[1:]):
         gap = (current[0] - previous[0]).total_seconds()
         max_gap = max(max_gap, gap)
         delta = current[1] - previous[1]
+        sampling_gap = gap > VWAP_MAX_GAP_SECONDS
+        if sampling_gap:
+            gaps += 1
+            gap_recovery_pending = True
         if delta < 0:
             resets += 1
+        if sampling_gap:
+            if delta > 0:
+                skipped_cross_gap_volume += delta
+            continue
+        if delta < 0:
             continue
         if delta == 0:
             continue
         numerator += current[2] * delta
         denominator += delta
+        observed_volume_ratio = denominator / (
+            denominator + skipped_cross_gap_volume
+        )
+        if (
+            gap_recovery_pending
+            and observed_volume_ratio < VWAP_MIN_OBSERVED_VOLUME_RATIO
+        ):
+            continue
+        gap_recovery_pending = False
         series.append((current[0], numerator / denominator))
-    if resets or max_gap > VWAP_MAX_GAP_SECONDS or not series:
+    partial_observed_volume = bool(gaps or resets)
+    total_known_volume = denominator + skipped_cross_gap_volume
+    observed_volume_ratio = (
+        denominator / total_known_volume if total_known_volume > 0 else None
+    )
+    diagnostics: dict[str, object] = {
+        "max_gap_seconds": max_gap,
+        "gap_count": gaps,
+        "reset_count": resets,
+        "observed_volume": denominator,
+        "skipped_cross_gap_volume": skipped_cross_gap_volume,
+        "observed_volume_ratio": observed_volume_ratio,
+        "minimum_observed_volume_ratio": VWAP_MIN_OBSERVED_VOLUME_RATIO,
+        "partial_observed_volume": partial_observed_volume,
+        "volume_coverage": (
+            "partial_observed_deltas"
+            if partial_observed_volume
+            else "all_observed_deltas"
+        ),
+    }
+    if not series:
         return [], {
             "reason": (
                 "cumulative_volume_reset"
                 if resets
                 else "rth_volume_sampling_gap"
-                if max_gap > VWAP_MAX_GAP_SECONDS
+                if gaps
                 else "no_positive_volume_delta"
             ),
-            "reset_count": resets,
-            "max_gap_seconds": max_gap,
+            **diagnostics,
         }
     return series, {
         "first_at": first_at.isoformat(),
         "last_at": series[-1][0].isoformat(),
-        "max_gap_seconds": max_gap,
-        "reset_count": resets,
+        **diagnostics,
     }
 
 
@@ -684,11 +735,21 @@ def _breadth_above_vwap(
             series, _ = _provider_vwap_series(points, trading_date=trading_date)
             if series:
                 candidates.append((provider, series, points))
-        if not candidates:
+        fresh_candidates = [
+            item
+            for item in candidates
+            if 0.0
+            <= (now - item[1][-1][0]).total_seconds()
+            <= VWAP_MAX_GAP_SECONDS
+            and 0.0
+            <= (now - item[2][-1][0]).total_seconds()
+            <= VWAP_MAX_GAP_SECONDS
+        ]
+        if not fresh_candidates:
             missing.append(instrument_id)
             continue
         provider, series, points = max(
-            candidates,
+            fresh_candidates,
             key=lambda item: (
                 len(item[1]),
                 item[2][-1][0],

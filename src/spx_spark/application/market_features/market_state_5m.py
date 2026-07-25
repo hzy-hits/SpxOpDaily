@@ -15,7 +15,7 @@ from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR, ET
 
 
 SCHEMA_VERSION = "market_state_5m.v1"
-RULE_VERSION = "market_state_5m_eight_variable_rules.v1"
+RULE_VERSION = "market_state_5m_eight_variable_rules.v2"
 EARLIEST_CLASSIFICATION_ET = time(9, 45)
 
 TREND_UP = "TREND_UP"
@@ -84,6 +84,9 @@ _REQUIRED_FIELDS = (
     "vwap_cross_count",
     "same_time_range_ratio",
     "breadth_above_vwap",
+)
+_DIRECTIONAL_FIELDS = tuple(
+    field for field in _REQUIRED_FIELDS if field != "same_time_range_ratio"
 )
 
 __all__ = [
@@ -214,9 +217,25 @@ def score_market_state_5m(
     )
     quality = _quality(efficiency, crosses)
     volatility = _volatility(range_ratio)
-    can_classify = complete and time_error is None
+    directional_complete = all(
+        availability[name]["available"] is True for name in _DIRECTIONAL_FIELDS
+    )
+    range_missing = range_error == "same_time_range_ratio_missing"
+    can_classify_direction = (
+        directional_complete
+        and time_error is None
+        and range_error in {None, "same_time_range_ratio_missing"}
+    )
+    can_classify_volatility = complete and time_error is None
+    classification_tier = (
+        "complete"
+        if can_classify_volatility
+        else "directional_provisional"
+        if can_classify_direction and range_missing
+        else "unavailable"
+    )
     pin_proxy_candidate = bool(
-        can_classify
+        can_classify_volatility
         and direction_score is not None
         and abs(direction_score) <= 2
         and efficiency is not None
@@ -233,9 +252,17 @@ def score_market_state_5m(
         efficiency,
         crosses,
         range_ratio,
-        can_classify=can_classify,
+        can_classify_direction=can_classify_direction,
+        can_classify_volatility=can_classify_volatility,
         pin_proxy_candidate=pin_proxy_candidate,
     )
+    if (
+        state in {TREND_UP, TREND_DOWN}
+        and classification_tier == "directional_provisional"
+    ):
+        state_reasons.append(
+            "directional_state_provisional_without_same_time_range_ratio"
+        )
     gate_reasons = [
         reason
         for reason in (
@@ -269,7 +296,15 @@ def score_market_state_5m(
             "complete": complete,
             "fields": availability,
         },
-        "status": "ready" if state != UNCERTAIN else "uncertain",
+        "classification_tier": classification_tier,
+        "status": (
+            "ready"
+            if state != UNCERTAIN and classification_tier == "complete"
+            else "provisional"
+            if state in {TREND_UP, TREND_DOWN}
+            and classification_tier == "directional_provisional"
+            else "uncertain"
+        ),
         "reasons": reasons,
         "action_authority": "none",
         "actionable": False,
@@ -285,15 +320,15 @@ def _classify(
     crosses: int | None,
     range_ratio: float | None,
     *,
-    can_classify: bool,
+    can_classify_direction: bool,
+    can_classify_volatility: bool,
     pin_proxy_candidate: bool,
 ) -> tuple[str, list[str]]:
     if (
-        not can_classify
+        not can_classify_direction
         or direction_score is None
         or efficiency is None
         or crosses is None
-        or range_ratio is None
     ):
         return UNCERTAIN, ["classification_gate_failed"]
     if direction_score >= 6 and efficiency > 0.45 and crosses <= 2:
@@ -308,6 +343,8 @@ def _classify(
             "efficiency_ratio_above_0_45",
             "vwap_cross_count_at_most_2",
         ]
+    if not can_classify_volatility or range_ratio is None:
+        return UNCERTAIN, ["volatility_classification_gate_failed"]
     if efficiency < 0.25 and range_ratio > 1.25:
         return HIGH_VOL_CHOP, [
             "efficiency_ratio_below_0_25",

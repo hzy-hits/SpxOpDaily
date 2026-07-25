@@ -1,5 +1,7 @@
 # RTH 5 分钟市场状态与 Spring Gamma v3 Shadow
 
+当前规则版本：`market_state_5m_eight_variable_rules.v2`（2026-07-25）。
+
 ## 目标
 
 这套规则把“市场环境”和“能否执行期权”拆成两层：
@@ -28,8 +30,10 @@ Schwab/IBKR live ES
 
 状态与 option overlay 独立保存。期权链暂时不可用时，报告仍应显示可验证的
 ES 市场状态，但不得生成期限、概率、价差腿或限价。八变量状态只有在
-`status=ready` 且 `8/8 complete` 时才参与确认；warming/`UNCERTAIN` 只作诊断，
-不会把旧 Shadow 诊断方向误当成新状态结论，也不会作为否决门。
+`status=ready` 且 `8/8 complete` 时才参与 Spring 确认 gate。若七个方向输入
+完整而仅缺 `same_time_range_ratio`，趋势规则可以输出
+`status=provisional`、`classification_tier=directional_provisional`；
+它只读展示且不参与确认或否决。其他 warming/`UNCERTAIN` 同样只作诊断。
 
 ## 八个输入
 
@@ -50,6 +54,11 @@ ES bar，也绝不对不存在的 option bid/ask 做插值。
 一根 bar 只有在样本数、最大样本间隔、首端覆盖和尾端覆盖全部通过时才是 `ok`。
 30 分钟窗口必须是连续 5 分钟网格；缺一档就保持不可用，不会删除缺档后把两段
 行情压缩成一个“连续”窗口。同刻当日 range 也必须从 09:30 连续覆盖到当前。
+
+累计成交量 VWAP 遇到超过 135 秒的源采样洞时，不把跨洞成交量绑定到恢复点价格，
+也不插值。洞内 freshness 失败；后续只累计可归属的 volume delta，并在观测成交量
+占已知成交量至少 80% 后恢复发布。provider 选择先要求当前新鲜，再比较样本密度，
+避免“历史点更多但已经 stale”的源压过新鲜备用源。
 
 评分器从 09:45 ET 开始允许评估；由于 30 分钟 ER 和结构需要完整路径，正常
 情况下八项最早约在 10:00 ET 全部 ready。此前输出 `UNCERTAIN`，不会强迫给方向。
@@ -73,12 +82,12 @@ D 的范围固定为 `-10..+10`。ER、VWAP 穿越和同刻 range 不重复加�
 
 | 状态 | 规则 |
 |---|---|
-| `TREND_UP` | `D >= 6`、`ER > 0.45`、VWAP 穿越不超过 2 |
-| `TREND_DOWN` | `D <= -6`、`ER > 0.45`、VWAP 穿越不超过 2 |
+| `TREND_UP` | `D >= 6`、`ER > 0.45`、VWAP 穿越不超过 2；仅缺 range 时可只读 provisional |
+| `TREND_DOWN` | `D <= -6`、`ER > 0.45`、VWAP 穿越不超过 2；仅缺 range 时可只读 provisional |
 | `HIGH_VOL_CHOP` | `ER < 0.25` 且同刻 range ratio `> 1.25` |
 | `LOW_VOL_RANGE` | `abs(D) <= 2`、`ER < 0.25`、同刻 range ratio `< 0.75` |
 | `LOW_VOL_PIN` | 当前禁止直接发出 |
-| `UNCERTAIN` | 输入不完整、时间门未到或没有规则匹配 |
+| `UNCERTAIN` | 方向输入不完整、波动状态缺 range、时间门未到或没有规则匹配 |
 
 `LOW_VOL_PIN` 还需要整数 strike 邻近度与实时 ATM 跨式持续衰减确认。当前只有
 `pin_proxy_candidate`，主状态仍保守显示 `LOW_VOL_RANGE`。
@@ -108,8 +117,8 @@ D 的范围固定为 `-10..+10`。ER、VWAP 穿越和同刻 range 不重复加�
 墙位路径始终来自实时、精确到期日的 front 0DTE 结构；不能用 1DTE 墙替代。
 期权表达层沿用现有 tenor shadow：
 
-- 计划退出不晚于 13:00 ET 时，优先考虑有实时双边和 IV 的 1DTE 表达；
-- 计划退出晚于 13:00 ET 时，优先 0DTE；
+- 计划退出不晚于 13:00 ET 时，优先比较有实时双边和 IV 的 1DTE 表达；
+- 13:00 ET 后 0DTE/1DTE 继续并行 shadow，不做未经验证的硬切换；
 - 首选期限不可用或持有窗口跨过到期结算时，只能按既有 fail-closed policy
   回退或显示不可用。
 
@@ -129,11 +138,14 @@ reward/risk gate。
 
 历史重放必须逐日隔离状态，并只使用当时及以前可见的数据。旧 lifecycle bug
 期间的派生 phase 不能直接拿来调参；应从原始 quote lake 用当前逻辑重建。
+验收固定保留两本账：`as_collected` 用 `received_at/source_at` 验证当时生产真正
+知道什么；`strategy_research` 用 bar-end 因果时钟和明确标记的历史回填研究规则。
+历史回填不能反向冒充当时 live pipeline 已经正常交付。
 
 ## 已知边界
 
-- 当前历史 lake 少于完整 20 个可用 RTH session 时，同刻 range 只会标为
-  `partial`，不会伪装为满样本。
+- 当前生产同刻 range 已达到全日最低 10-session 门槛；少于 20 个 session 时仍标为
+  `partial`，不会伪装为 mature。
 - 7 月 20～22 日旧 signal lifecycle 污染了已有派生标签；原始行情仍可重放。
 - 7 月 20～23 日最后 30 分钟的历史同日 0DTE 链缺失，不能回填或插值。
 - 状态规则上线后仍需要 forward shadow 样本、成本与 walk-forward 验证，才能

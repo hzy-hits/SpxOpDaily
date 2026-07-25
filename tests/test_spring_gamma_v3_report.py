@@ -240,7 +240,7 @@ def test_future_clock_tolerance_and_durable_rth_state_window_are_auditable(
                 "input_fingerprint": f"input-{prediction_id}",
                 "rth_market_state": {
                     "schema_version": "market_state_5m.v1",
-                    "rule_version": "market_state_5m_eight_variable_rules.v1",
+                    "rule_version": "market_state_5m_eight_variable_rules.v2",
                     "as_of": at.isoformat(),
                     "state": state,
                     "status": "ready" if state != "UNCERTAIN" else "uncertain",
@@ -470,7 +470,7 @@ def test_rth_eight_feature_state_renders_state_to_expression_path() -> None:
     shadow = _shadow()
     shadow["rth_market_state"] = {
         "schema_version": "market_state_5m.v1",
-        "rule_version": "market_state_5m_eight_variable_rules.v1",
+        "rule_version": "market_state_5m_eight_variable_rules.v2",
         "state": "TREND_UP",
         "status": "ready",
         "D": 8,

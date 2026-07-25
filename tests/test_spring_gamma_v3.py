@@ -158,7 +158,7 @@ def _attach_rth_market_state(
 ) -> None:
     market["diagnostics"]["rth_market_state"] = {
         "schema_version": "market_state_5m.v1",
-        "rule_version": "market_state_5m_eight_variable_rules.v1",
+        "rule_version": "market_state_5m_eight_variable_rules.v2",
         "as_of": market["as_of"],
         "state": state,
         "market_state": state,
@@ -270,6 +270,30 @@ def test_incomplete_rth_state_is_visible_but_cannot_veto_legacy_shadow() -> None
     assert result["status"] == "ready"
     assert result["direction"]["decision"] == "up"
     assert result["rth_market_state"]["state"] == "UNCERTAIN"
+    assert (
+        result["direction"]["rth_market_state_alignment"]
+        == "diagnostic_only_incomplete"
+    )
+
+
+def test_provisional_directional_state_cannot_enter_the_spring_gate() -> None:
+    inputs = _inputs()
+    _attach_rth_market_state(inputs[0], "TREND_DOWN", direction_score=-8)
+    state = inputs[0]["diagnostics"]["rth_market_state"]
+    state["status"] = "provisional"
+    state["classification_tier"] = "directional_provisional"
+    state["input_availability"] = {
+        "required_count": 8,
+        "available_count": 7,
+        "complete": False,
+    }
+
+    result = _build(inputs)
+
+    assert result["status"] == "ready"
+    assert result["direction"]["decision"] == "up"
+    assert result["rth_market_state"]["state"] == "TREND_DOWN"
+    assert result["rth_market_state"]["status"] == "provisional"
     assert (
         result["direction"]["rth_market_state_alignment"]
         == "diagnostic_only_incomplete"

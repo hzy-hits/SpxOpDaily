@@ -11,6 +11,7 @@ from spx_spark.application.market_features.market_state_5m import (
 from spx_spark.application.market_features.market_state_5m_inputs import (
     SECTOR_INSTRUMENTS,
     _bar_vwaps,
+    _es_vwap_series,
     _provider_vwap_series,
     build_market_state_5m_inputs,
     update_same_time_range_baselines,
@@ -198,6 +199,43 @@ def test_provider_that_joins_late_cannot_fake_session_vwap() -> None:
     assert derived["diagnostics"]["vwap"]["first_at"].startswith("2026-07-24T09:30")
 
 
+def test_fresh_provider_beats_a_denser_but_stale_provider() -> None:
+    start = DAY.replace(hour=9, minute=30)
+    samples: list[dict[str, object]] = []
+    for index in range(31):
+        at = start + timedelta(minutes=index)
+        providers: dict[str, object] = {}
+        if index <= 20:
+            providers["schwab"] = {
+                "price": 7400.0 + index,
+                "volume": 100_000.0 + index * 100.0,
+                "source_at": at.isoformat(),
+            }
+        if index % 2 == 0:
+            providers["ibkr"] = {
+                "price": 7400.0 + index,
+                "volume": 100_000.0 + index * 100.0,
+                "source_at": at.isoformat(),
+            }
+        samples.append(
+            {
+                "at": at.isoformat(),
+                "segment": "rth",
+                "es_by_provider": providers,
+            }
+        )
+
+    series, diagnostics = _es_vwap_series(
+        samples,
+        trading_date=DAY.date(),
+        now=DAY,
+    )
+
+    assert series
+    assert diagnostics["provider"] == "ibkr"
+    assert datetime.fromisoformat(str(diagnostics["last_at"])) == DAY
+
+
 def test_opening_range_rejects_intrabar_spike_that_closes_inside() -> None:
     bars = trending_bars()
     rth = [row for row in bars if row["segment"] == "rth"]
@@ -351,3 +389,116 @@ def test_vwap_accepts_two_minute_snapshot_gap_with_source_jitter() -> None:
 
     assert len(series) == 2
     assert diagnostics["max_gap_seconds"] == pytest.approx(127.8)
+
+
+def test_vwap_sampling_gap_is_unavailable_then_recovers_from_fresh_delta() -> None:
+    start = DAY.replace(hour=9, minute=30)
+    before_gap = start + timedelta(minutes=1)
+    gap_at = start + timedelta(minutes=4)
+    recovered_at = start + timedelta(minutes=5)
+    points = [
+        (start, 10_000.0, 100.0),
+        (before_gap, 11_000.0, 101.0),
+        (gap_at, 11_100.0, 104.0),
+        (recovered_at, 11_200.0, 105.0),
+    ]
+
+    series, diagnostics = _provider_vwap_series(
+        points,
+        trading_date=DAY.date(),
+    )
+    gap_bar_vwap = _bar_vwaps(
+        [
+            {
+                "bar_start": (gap_at - timedelta(minutes=5)).isoformat(),
+                "bar_end": (gap_at + timedelta(seconds=1)).isoformat(),
+            }
+        ],
+        series,
+    )
+    recovered_bar_vwap = _bar_vwaps(
+        [
+            {
+                "bar_start": gap_at.isoformat(),
+                "bar_end": (recovered_at + timedelta(seconds=1)).isoformat(),
+            }
+        ],
+        series,
+    )
+
+    assert [at for at, _ in series] == [before_gap, recovered_at]
+    assert gap_bar_vwap == {}
+    assert recovered_bar_vwap[gap_at.isoformat()] == pytest.approx(101.363636)
+    assert diagnostics["gap_count"] == 1
+    assert diagnostics["reset_count"] == 0
+    assert diagnostics["observed_volume"] == pytest.approx(1_100.0)
+    assert diagnostics["skipped_cross_gap_volume"] == pytest.approx(100.0)
+    assert diagnostics["observed_volume_ratio"] == pytest.approx(11 / 12)
+    assert diagnostics["minimum_observed_volume_ratio"] == 0.80
+    assert diagnostics["partial_observed_volume"] is True
+    assert diagnostics["volume_coverage"] == "partial_observed_deltas"
+
+
+def test_vwap_sampling_gap_stays_unavailable_below_observed_volume_threshold() -> None:
+    start = DAY.replace(hour=9, minute=30)
+    before_gap = start + timedelta(minutes=1)
+    gap_at = start + timedelta(minutes=4)
+    after_gap_one = start + timedelta(minutes=5)
+    after_gap_two = start + timedelta(minutes=6)
+    points = [
+        (start, 10_000.0, 100.0),
+        (before_gap, 10_100.0, 101.0),
+        (gap_at, 11_000.0, 104.0),
+        (after_gap_one, 11_100.0, 105.0),
+        (after_gap_two, 11_200.0, 106.0),
+    ]
+
+    series, diagnostics = _provider_vwap_series(
+        points,
+        trading_date=DAY.date(),
+    )
+    post_gap_bar_vwap = _bar_vwaps(
+        [
+            {
+                "bar_start": gap_at.isoformat(),
+                "bar_end": (after_gap_two + timedelta(seconds=1)).isoformat(),
+            }
+        ],
+        series,
+    )
+
+    assert [at for at, _ in series] == [before_gap]
+    assert post_gap_bar_vwap == {}
+    assert diagnostics["observed_volume"] == pytest.approx(300.0)
+    assert diagnostics["skipped_cross_gap_volume"] == pytest.approx(900.0)
+    assert diagnostics["observed_volume_ratio"] == pytest.approx(0.25)
+    assert diagnostics["minimum_observed_volume_ratio"] == 0.80
+
+
+def test_vwap_volume_reset_skips_reset_delta_then_recovers() -> None:
+    start = DAY.replace(hour=9, minute=30)
+    before_reset = start + timedelta(minutes=1)
+    reset_at = start + timedelta(minutes=2)
+    recovered_at = start + timedelta(minutes=3)
+    points = [
+        (start, 10_000.0, 100.0),
+        (before_reset, 10_100.0, 101.0),
+        (reset_at, 5.0, 102.0),
+        (recovered_at, 105.0, 103.0),
+    ]
+
+    series, diagnostics = _provider_vwap_series(
+        points,
+        trading_date=DAY.date(),
+    )
+
+    assert [at for at, _ in series] == [before_reset, recovered_at]
+    assert series[-1][1] == pytest.approx(102.0)
+    assert diagnostics["gap_count"] == 0
+    assert diagnostics["reset_count"] == 1
+    assert diagnostics["observed_volume"] == pytest.approx(200.0)
+    assert diagnostics["skipped_cross_gap_volume"] == 0.0
+    assert diagnostics["observed_volume_ratio"] == 1.0
+    assert diagnostics["minimum_observed_volume_ratio"] == 0.80
+    assert diagnostics["partial_observed_volume"] is True
+    assert diagnostics["volume_coverage"] == "partial_observed_deltas"

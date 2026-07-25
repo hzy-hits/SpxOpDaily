@@ -96,7 +96,7 @@ def _full_day_rows(session, *, report_lag_seconds: int = 8):
                 "session": "rth",
                 "rth_market_state": {
                     "schema_version": "market_state_5m.v1",
-                    "rule_version": "market_state_5m_eight_variable_rules.v1",
+                    "rule_version": "market_state_5m_eight_variable_rules.v2",
                     "state": "UNCERTAIN",
                     "market_state": "UNCERTAIN",
                     "status": "uncertain",

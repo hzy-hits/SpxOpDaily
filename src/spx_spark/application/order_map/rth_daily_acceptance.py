@@ -42,7 +42,7 @@ MIN_REPORT_SLOT_COVERAGE = 1.0
 MIN_REPORT_PROJECTION_COVERAGE = 0.95
 MIN_OPTION_OVERLAY_READY_RATIO = 0.75
 MARKET_STATE_SCHEMA = "market_state_5m.v1"
-MARKET_STATE_RULE = "market_state_5m_eight_variable_rules.v1"
+MARKET_STATE_RULE = "market_state_5m_eight_variable_rules.v2"
 KNOWN_MARKET_STATES = frozenset(
     {
         "TREND_UP",

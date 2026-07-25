@@ -11,7 +11,7 @@ from spx_spark.marketdata import as_utc
 
 
 _SCHEMA_VERSION = "market_state_5m.v1"
-_RULE_VERSION = "market_state_5m_eight_variable_rules.v1"
+_RULE_VERSION = "market_state_5m_eight_variable_rules.v2"
 _KNOWN_STATES = frozenset(
     {
         "TREND_UP",
@@ -64,6 +64,7 @@ def extract_rth_market_state(market: Mapping[str, object]) -> dict[str, object]:
             "pin_confirmation",
             "low_vol_pin_emission_allowed",
             "input_availability",
+            "classification_tier",
             "status",
             "reasons",
             "action_authority",

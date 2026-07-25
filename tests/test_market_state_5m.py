@@ -302,11 +302,10 @@ def test_outside_actual_rth_session_is_not_classified(now: datetime) -> None:
         "market_structure",
         "efficiency_ratio",
         "vwap_cross_count",
-        "same_time_range_ratio",
         "breadth_above_vwap",
     ),
 )
-def test_every_declared_input_is_required_and_missing_is_fail_closed(
+def test_every_directional_input_is_required_and_missing_is_fail_closed(
     field: str,
 ) -> None:
     result = score(**{field: None})
@@ -316,6 +315,41 @@ def test_every_declared_input_is_required_and_missing_is_fail_closed(
     assert result["input_availability"]["available_count"] == 7
     assert result["input_availability"]["fields"][field]["available"] is False
     assert "classification_gate_failed" in result["reasons"]
+
+
+def test_missing_range_allows_only_a_provisional_directional_state() -> None:
+    result = score(same_time_range_ratio=None)
+
+    assert result["state"] == TREND_UP
+    assert result["status"] == "provisional"
+    assert result["classification_tier"] == "directional_provisional"
+    assert result["input_availability"]["complete"] is False
+    assert result["input_availability"]["available_count"] == 7
+    assert "classification_gate_failed" not in result["reasons"]
+    assert (
+        "directional_state_provisional_without_same_time_range_ratio"
+        in result["reasons"]
+    )
+    assert result["action_authority"] == "none"
+    assert result["actionable"] is False
+
+
+def test_missing_range_cannot_classify_range_or_chop_state() -> None:
+    result = score(
+        price_vs_vwap=PriceVsVwap.AROUND_OR_CROSS,
+        vwap_slope=0.0,
+        opening_range_state=OpeningRangeState.INSIDE,
+        market_structure=MarketStructure.OVERLAP,
+        breadth_above_vwap=0.50,
+        efficiency_ratio=0.24,
+        vwap_cross_count=3,
+        same_time_range_ratio=None,
+    )
+
+    assert result["state"] == UNCERTAIN
+    assert result["status"] == "uncertain"
+    assert result["classification_tier"] == "directional_provisional"
+    assert "volatility_classification_gate_failed" in result["reasons"]
 
 
 @pytest.mark.parametrize(

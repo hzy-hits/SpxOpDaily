@@ -6,6 +6,8 @@
 > 审计提出的 ES 5m bar、八变量 extractor、RTH 状态/option overlay 解耦及报告
 > 接线已在同一批改动中实现；当前运行合同见
 > `docs/rth-five-minute-market-state-v1.md`。
+> 本文中的 `market_state_5m_eight_variable_rules.v1` 是 7/24 历史快照；
+> 7/25 起运行版本为 v2，新增只读 directional provisional 与短采样洞恢复。
 
 ## 结论
 
