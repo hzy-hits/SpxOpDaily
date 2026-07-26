@@ -62,6 +62,7 @@ def _readiness_section(artifact: dict) -> list[str]:
     readiness = artifact.get("strategy_readiness") or {}
     thresholds = readiness.get("thresholds") or {}
     sessions = readiness.get("sessions") or {}
+    cohort_sessions = readiness.get("cohort_sessions") or {}
     cohorts = readiness.get("cohorts") or {}
     window = artifact.get("window") or {}
 
@@ -70,6 +71,11 @@ def _readiness_section(artifact: dict) -> list[str]:
         return value if isinstance(value, dict) else {}
 
     session_count = int(sessions.get("contract_consistent_complete") or 0)
+    put_session_row = (
+        cohort_sessions.get("put_exact_entry") if isinstance(cohort_sessions, dict) else {}
+    )
+    put_session_row = put_session_row if isinstance(put_session_row, dict) else {}
+    put_session_count = int(put_session_row.get("contract_consistent_complete") or 0)
     session_target = int(thresholds.get("complete_sessions") or 20)
     rows = (
         (
@@ -77,6 +83,12 @@ def _readiness_section(artifact: dict) -> list[str]:
             session_count,
             session_target,
             "ready" if session_count >= session_target else "collecting",
+        ),
+        (
+            "Put RTH contract-consistent sessions",
+            put_session_count,
+            session_target,
+            "ready" if put_session_count >= session_target else "collecting",
         ),
         (
             "GTH exact entries",
@@ -115,14 +127,16 @@ def _readiness_section(artifact: dict) -> list[str]:
     lines.extend(
         [
             "",
-            "回测 `complete_sessions` 只采用 `readiness.sessions.details` 中 "
-            "`complete=true` 的健康完整日期；裁决门槛进一步要求这些日期位于 v3 forward "
-            "policy window 且无 contract violation。observed partitions 仍单独保留，不能冒充"
-            "完整 session。",
+            "GTH/联合回测 `complete_sessions` 采用 `readiness.sessions.details` 中 "
+            "`complete=true` 的健康完整日期；RTH Put 使用独立的 "
+            "`readiness.cohort_sessions.put_exact_entry.dates`，不会因 GTH 缺口被剔除。"
+            "两者都要求位于各自 v3 forward policy window 且无 contract violation。"
+            "observed partitions 仍单独保留，不能冒充完整 session。",
             "",
             f"当前 observed partitions={window.get('observed_partition_count', 0)}，"
             f"health-complete backtest sessions={len(window.get('complete_sessions') or [])}，"
-            f"contract-consistent sessions={session_count}。",
+            f"contract-consistent sessions={session_count}，"
+            f"Put RTH contract-consistent sessions={put_session_count}。",
         ]
     )
     blockers = readiness.get("blockers") or []
@@ -203,16 +217,17 @@ def _render_report(artifact: dict, trades: Sequence[Trade]) -> str:
         lines.extend(
             [
                 "",
-                "## Production trade intent 覆盖度",
+                "## TradeIntent 覆盖度",
                 "",
                 "以下为原始 evaluation record 覆盖度,不是 pass rate;observing 是非决策遥测,"
-                "既不算 blocked,也不生成交易 PnL。重复 blocked evaluation 不被伪装成独立信号。",
+                "既不算 blocked,也不生成交易 PnL。shadow_ready 只表示 Put 精确报价观察"
+                "资格，不是成交或执行授权。重复 evaluation 不被伪装成独立信号。",
                 "",
                 "| 状态 | evaluation records | distinct event_id |",
                 "|---|---:|---:|",
             ]
         )
-        for status in ("observing", "blocked", SET_TRADE_READY):
+        for status in ("observing", "blocked", "shadow_ready", SET_TRADE_READY):
             lines.append(f"| {status} | {counts.get(status, 0)} | {distinct.get(status, 0)} |")
         lines.extend(
             [

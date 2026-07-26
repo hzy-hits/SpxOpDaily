@@ -6,7 +6,7 @@ import hashlib
 import json
 import math
 import os
-from datetime import datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Mapping
 
@@ -239,9 +239,7 @@ def _episode(
 ) -> dict[str, object]:
     if direction not in {"up", "down"}:
         return {}
-    episode_id = "virtual:" + hashlib.sha256(
-        f"{source_id}|{contract_id}".encode()
-    ).hexdigest()[:24]
+    episode_id = "virtual:" + hashlib.sha256(f"{source_id}|{contract_id}".encode()).hexdigest()[:24]
     source = dict(source_contract or {})
     raw_coordinate = source.get("coordinate")
     coordinate = dict(raw_coordinate) if isinstance(raw_coordinate, Mapping) else None
@@ -304,6 +302,9 @@ def _exit_decision(
     policy: MarketFeatureSettings,
 ) -> tuple[str | None, str | None]:
     stop = _time(active.get("time_stop_at"))
+    hard_exit = _rth_trade_hard_exit(active, now=now)
+    if hard_exit is not None:
+        stop = min(stop, hard_exit) if stop is not None else hard_exit
     if stop is not None and now >= stop:
         return "time_stop", "exit"
     if not current:
@@ -388,6 +389,61 @@ def _exit_decision(
     ):
         return "gamma_convexity_decayed", "exit"
     return None, None
+
+
+def _rth_trade_hard_exit(
+    active: Mapping[str, object],
+    *,
+    now: datetime,
+) -> datetime | None:
+    """Cap persisted RTH trade-intent episodes at 13:00 ET, including legacy state."""
+
+    if active.get("source_kind") != "trade_intent":
+        return None
+    session_day = _session_day(active.get("session_id"))
+    if session_day is None:
+        opened_at = _time(active.get("opened_at"))
+        session_day = (opened_at or _utc(now)).astimezone(ET).date()
+    return datetime.combine(session_day, time(13, 0), tzinfo=ET).astimezone(timezone.utc)
+
+
+def _cap_rth_trade_episode(
+    active: Mapping[str, object],
+    *,
+    now: datetime,
+) -> dict[str, object]:
+    """Migrate a persisted RTH episode to its effective 13:00 ET lifecycle contract."""
+
+    result = dict(active)
+    hard_exit = _rth_trade_hard_exit(result, now=now)
+    if hard_exit is None:
+        return result
+    persisted_stop = _time(result.get("time_stop_at"))
+    effective_stop = min(persisted_stop, hard_exit) if persisted_stop else hard_exit
+    if persisted_stop != effective_stop:
+        result["pre_hard_exit_time_stop_at"] = result.get("time_stop_at")
+        result["time_stop_at"] = effective_stop.isoformat()
+        result["rth_hard_exit_at"] = hard_exit.isoformat()
+        result["time_stop_policy"] = "rth_trade_intent_1300_et_cap"
+    valid_until = _time(result.get("valid_until"))
+    if valid_until is None or valid_until > effective_stop:
+        result["pre_hard_exit_valid_until"] = result.get("valid_until")
+        result["valid_until"] = effective_stop.isoformat()
+    return result
+
+
+def _session_day(value: object) -> date | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    try:
+        return date.fromisoformat(normalized)
+    except ValueError:
+        pass
+    try:
+        return datetime.strptime(normalized, "%Y%m%d").date()
+    except ValueError:
+        return None
 
 
 def _record_due_horizons(

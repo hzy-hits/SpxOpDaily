@@ -5,10 +5,10 @@
 The level-decision shadow prevents the order map from treating a wall or flip
 location as an immediate trade trigger. It observes one nearest frozen level at
 a time, makes breakout and fade mutually exclusive, and records outcomes without
-changing orders or candidate generation. State transitions remain in the
-append-only audit. Low-level transition pushes are optional and disabled in the
-production profile; user-facing execution notification is reserved for the
-narrower TradeReady lane.
+changing orders by itself. State transitions remain in the append-only audit.
+Low-level transition pushes are optional and disabled in the production profile;
+user-facing execution notification remains reserved for the reviewed Call
+TradeReady lane.
 
 The same machine supports two deployment modes. With
 `formal_signal_enabled=false`, every public result carries `mode=shadow` and
@@ -16,10 +16,40 @@ The same machine supports two deployment modes. With
 only `CONFIRMED` then carries `formal_signal=true` and `actionable=true`.
 No mode submits an order automatically.
 
-## Reviewed RTH upside pilot
+## Reviewed RTH TradeIntent lanes
 
-The explicit override currently exposes one deliberately narrow notification
-lane: `long_0dte_rth_upside_breakout_pilot`. It accepts only an RTH
+The explicit override exposes three deliberately separate lanes:
+
+| Wall path | Lane | Runtime authority |
+| --- | --- | --- |
+| Upside breakout | `long_0dte_rth_upside_breakout_pilot` | Existing Call `trade_ready` canary |
+| `flip_low` breakdown | `long_0dte_rth_flip_low_breakdown_put_shadow` | Put `shadow_ready`; exact displayed-quote observation only |
+| `call_wall` / `flip_high` rejection | `long_0dte_rth_upper_rejection_put_shadow` | Independent Put `shadow_ready`; exact displayed-quote observation only |
+| `put_wall` breakdown | `long_0dte_rth_put_wall_breakdown_disabled` | Disabled and unsupported |
+
+The two Put lanes have separate persisted lifecycle state and cannot supersede
+each other or the Call canary. Repeated evaluations of the same level event are
+deduplicated by `candidate_id=intent_id|event_id`; after the price leaves the
+reset band, a new level event may create a new candidate at the same wall. A Put
+`quote_reached_entry` record means that a qualifying, synchronized SPXW Put ask
+was displayed at or below the deterministic limit. It is not a fill, alert,
+broker order, or permission to trade:
+`execution_eligible=false`, `quote_observation_eligible=true`,
+`automatic_ordering=false`, `broker_order_state=not_connected`, and
+`execution_claim=none` are retained in the record.
+The collector accepts only canonical `option:SPX:SPXW:<session>:<strike>:P`
+identities with a positive strike and expiry equal to both `session_id` and the
+ET entry-window date; wrong-expiry SPXW contracts and SPX monthly-class
+contracts fail closed before observation.
+
+All three enabled lanes accept new entries only in the half-open interval
+`[09:45, 13:00) America/New_York`. `valid_until`, candidate expiry, and
+`time_stop_at` are capped at the same session's 13:00 ET hard exit. The runtime
+lifecycle also applies that cap to persisted legacy RTH TradeIntent episodes so
+a deployment cannot leave an older episode active past 13:00. DST conversion is
+performed from `America/New_York`, not with a fixed UTC offset.
+
+The Call canary accepts only an RTH
 `CONFIRMED` breakout with direction `up`, the current session's exact 0DTE Call,
 and a two-sided selected-contract quote whose source and transport ages are at
 most 15 seconds. The quote is checked again immediately before enqueue. A
@@ -30,7 +60,14 @@ confirmation, price/volume alignment, and the individual 1-minute/5-minute
 checks are retained as diagnostics instead of duplicative vetoes. Missing
 expected move is also disclosed as a diagnostic; target room must still come
 from the outward wall or the documented five-point fallback. The 15-minute time
-stop is capped at the exact SPXW expiry-session close.
+stop is capped at the earlier of its normal deadline and the 13:00 ET hard exit.
+
+The 15-minute report always renders a separate row for `flip_low` breakdown Put,
+upper rejection Put, and disabled `put_wall` breakdown Put. Each row exposes
+`WALL_SIGNAL`, `EXECUTION_ELIGIBLE`, and `PRIORITY` independently. Missing or
+blocked execution therefore remains visible as a Put hypothesis instead of
+being collapsed into “no Put strategy”; priority is report-only and never
+creates an intent.
 
 The 2026-07-25 point-in-time replay through 2026-07-24 uses Call ask entry and
 executable bid exit. Its matching RTH upside-breakout **control** contains 8
@@ -47,6 +84,43 @@ contract/holding risk only; they never reverse or manufacture the ES/wall
 direction or select the contract in the current pilot.
 `quantity=operator_selected` and `automatic_ordering=false` remain part of every
 ticket.
+
+## Put forward-readiness contract
+
+Put readiness is intentionally independent from the joint GTH cohort. A session
+can count for Put when its RTH minute coverage is at least 90%, the selected
+Put-lane `trade_intent` and `trade_candidate` policies are continuous, and its
+Put-only contract/duplicate audit is clean. Missing or malformed GTH records,
+Call intents, and non-shadow candidates do not remove that RTH session. The
+top-level readiness status still joins GTH exact entries, Put exact entries, and
+exact spread exits, so `put_exact_entry=ready` does not by itself make the
+overall strategy ready.
+
+The Put cohort counts only `shadow_ready` intents joined to exact
+`candidate_terminal/quote_reached_entry` observations. Both records and the
+embedded source intent must retain the non-executable safety fields, an
+allowlisted Put lane, identical event/intent/semantic identity, contract, limit,
+policy lineage, and the persisted v1 `[09:45, 13:00)` ET window. The terminal
+`candidate_id` must equal `intent_id|event_id`, while the nested observation's
+contract, entry limit, and timestamp must match that terminal record. Repeated
+evaluations of one `event_id` count once; a genuinely new level event at the
+same wall is separate evidence. Candidate policy continuity is declared only by
+`candidate_armed`; a late terminal record from an older candidate cannot roll
+the selected policy backward.
+
+Historical replay uses frozen evidence registries. Exact quote policy
+`put_shadow_exact_quote.v1` remains fixed at a 15-second source and transport
+age, and entry-window contract
+`rth_lanes_0945_1300_put_shadow.v1` remains fixed at 09:45–13:00 ET. Unknown
+versions fail closed instead of inheriting future runtime constants. The
+readiness artifact publishes the independent dates at
+`cohort_sessions.put_exact_entry.dates`; the report and RTH Put backtest use
+that list for eligible `[09:45, 13:00)` down TradeIntent records, while GTH
+evaluation continues to use the joint complete-session list. The current PnL
+loader still evaluates persisted `trade_ready` decisions only; a
+`shadow_ready` exact quote is readiness evidence, not a historical fill or PnL
+trade. Pre-contract history is not backfilled into this cohort. Automatic
+promotion and automatic ordering remain disabled.
 
 ## MA20/MA50/MA200 location context
 

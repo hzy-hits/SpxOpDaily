@@ -5,6 +5,9 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
+from spx_spark.application.market_features.trade_intent import (
+    live_trade_intent_authority_issues,
+)
 from spx_spark.application.order_map.models import LEVEL_DECISION_PLAYS, level_decision_play
 from spx_spark.strategy_contract import (
     STRATEGY_EVENT_SCHEMA_VERSION,
@@ -58,7 +61,9 @@ def apply_candidate_presentation(payload: dict[str, Any], *, now: datetime) -> N
             "decision_executable": True,
         }
         payload["plan_candidates"] = [plan]
-        opposing = _opposing_invalidation(candidates, primary_direction=str(intent.get("direction") or ""))
+        opposing = _opposing_invalidation(
+            candidates, primary_direction=str(intent.get("direction") or "")
+        )
         payload["observation_candidates"] = []
         payload["opposing_invalidation"] = opposing
         payload["candidate_presentation"] = {
@@ -104,8 +109,7 @@ def _directional_setup_active(payload: dict[str, Any]) -> bool:
     if not isinstance(decision, dict):
         return False
     return bool(
-        str(decision.get("phase") or "").lower()
-        in {"accepted", "retest", "confirmed"}
+        str(decision.get("phase") or "").lower() in {"accepted", "retest", "confirmed"}
         and str(decision.get("thesis") or "") in {"breakout", "fade"}
         and str(decision.get("direction") or "") in {"up", "down"}
     )
@@ -161,7 +165,9 @@ def _choose_primary(
             else 0.0
         )
         level = row.get("level")
-        distance = abs(float(level) - spot) if spot is not None and isinstance(level, int | float) else 1e9
+        distance = (
+            abs(float(level) - spot) if spot is not None and isinstance(level, int | float) else 1e9
+        )
         return (-confidence, distance, str(row.get("play") or ""))
 
     return min(pool, key=rank)
@@ -208,6 +214,9 @@ def _supported_plan_play(
         return None, "missing_decision_context"
     if intent.get("status") != "trade_ready":
         return None, f"trade_intent_{intent.get('status') or 'unavailable'}"
+    authority_issues = live_trade_intent_authority_issues(intent)
+    if authority_issues:
+        return None, authority_issues[0]
     if decision.get("phase") != "confirmed":
         return None, "decision_not_confirmed"
     if intent.get("schema_version") == STRATEGY_EVENT_SCHEMA_VERSION:

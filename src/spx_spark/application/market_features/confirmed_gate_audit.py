@@ -64,10 +64,13 @@ def reconcile_confirmed_gate(
                 pending = _pending(level_decision, intent, now=now)
             evaluated_event = str(intent.get("event_id") or "")
             evaluated_status = str(intent.get("status") or "observing")
-            if evaluated_event == event_id and evaluated_status == "trade_ready":
+            if evaluated_event == event_id and evaluated_status in {
+                "trade_ready",
+                "shadow_ready",
+            }:
                 finalized = _finalize(
                     pending,
-                    status="trade_ready",
+                    status=evaluated_status,
                     reasons=[],
                     now=now,
                     intent=intent,
@@ -184,7 +187,9 @@ def _finalize(
     if not coordinate or coordinate.get("kind") == "unavailable":
         source_issues.append("source_coordinate_unavailable")
     normalized_reasons = normalize_block_reasons([*reasons, *source_issues])
-    effective_status = "blocked" if status == "trade_ready" and source_issues else status
+    effective_status = (
+        "blocked" if status in {"trade_ready", "shadow_ready"} and source_issues else status
+    )
     gate_policy_version = str(pending.get("policy_version") or "") or policy_version(
         "confirmed_gate.v3",
         {"source_policy_version": pending.get("source_policy_version") or "unavailable"},

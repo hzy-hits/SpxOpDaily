@@ -14,14 +14,10 @@ from spx_spark.application.order_map.call_spread_shadow import (
     skew_spread_shadow_detail_lines,
 )
 from spx_spark.application.order_map.convexity_idea_presentation import (
-    compact_convexity_idea_radar,
     render_convexity_idea_radar_lines,
 )
 from spx_spark.application.order_map.models import PLAY_ORDER, SHANGHAI_TZ
-from spx_spark.application.order_map.exposure_presentation import (
-    compact_exposure_context,
-    exposure_strike_lines,
-)
+from spx_spark.application.order_map.exposure_presentation import exposure_strike_lines
 from spx_spark.application.order_map.render import (
     _candidate_by_play,
     _dash,
@@ -37,11 +33,19 @@ from spx_spark.application.order_map.render import (
     render_template,
     underlier_source_label,
 )
+from spx_spark.application.order_map.put_candidate_presentation import (
+    presentable_plan_candidates,
+    put_candidate_report_lines,
+    put_wall_breakdown_report_disabled,
+)
 from spx_spark.application.order_map.spring_gamma_presentation import (
     SPRING_GAMMA_V3_SHADOW_SYSTEM_RULE,
     render_research_only_template,
     spring_gamma_v3_shadow_line,
-    spring_gamma_v3_writer_summary,
+)
+from spx_spark.application.order_map.status_prompt_payload import (
+    build_status_writer_payload as _status_writer_payload,
+    status_guidance_lines as _status_guidance_lines,
 )
 from spx_spark.application.order_map.state import _session_phase_of
 from spx_spark.application.order_map.strike_coverage_presentation import (
@@ -79,6 +83,7 @@ def build_order_prompt(
 ) -> str:
     writer_payload = {key: value for key, value in payload.items() if not key.startswith("_")}
     if "plan_candidates" in writer_payload:
+        writer_payload["plan_candidates"] = presentable_plan_candidates(payload)
         writer_payload.pop("candidates", None)
     if payload.get("research_only") is True:
         return "\n".join(
@@ -402,8 +407,10 @@ def _ratio(numerator: Any, denominator: Any) -> str:
 
 
 def _compact_candidate_lines(payload: dict[str, Any], *, limit: int = 2) -> list[str]:
+    if put_wall_breakdown_report_disabled(payload):
+        return []
     classified = "plan_candidates" in payload
-    plans = [item for item in payload.get("plan_candidates") or [] if isinstance(item, dict)]
+    plans = presentable_plan_candidates(payload)
     candidates = plans or [
         item
         for item in (
@@ -508,10 +515,16 @@ def render_status_template(
     expiry = str(payload.get("expiry") or "-")
     expiry_text = f"{expiry[4:6]}-{expiry[6:8]}" if len(expiry) == 8 else expiry
     classified_candidates = "plan_candidates" in payload
-    has_plan = bool(payload.get("plan_candidates")) if classified_candidates else True
+    put_wall_disabled = put_wall_breakdown_report_disabled(payload)
+    presentable_plans = presentable_plan_candidates(payload)
+    has_plan = (
+        bool(presentable_plans) and not put_wall_disabled
+        if classified_candidates
+        else not put_wall_disabled
+    )
     candidate_lines = _compact_candidate_lines(payload)
     if has_plan and candidate_lines:
-        plans = [item for item in payload.get("plan_candidates") or [] if isinstance(item, dict)]
+        plans = presentable_plans
         live_plan = (
             plans[0]
             if len(plans) == 1 and plans[0].get("order_style") == "live_nbbo_limit"
@@ -542,7 +555,7 @@ def render_status_template(
         candidate_section = []
     lines = [
         f"【SPX 15m · {beijing.strftime('%H:%M')} · 0DTE {expiry_text} · {phase.get('name_cn')}】",
-        *guidance_module.compact_guidance_lines(payload),
+        *_status_guidance_lines(payload),
         "",
         *([line] if (line := _compact_clock_line(phase)) else []),
         _compact_price_line(payload),
@@ -557,6 +570,7 @@ def render_status_template(
         *([line] if (line := _strike_price_coverage_line(payload)) else []),
         *([line] if (line := _compact_decision_line(payload)) else []),
         *([line] if (line := _compact_breakout_filter_line(payload)) else []),
+        *put_candidate_report_lines(payload),
         "",
         *([line] if (line := _compact_flow_line(payload)) else []),
         *(
@@ -582,6 +596,8 @@ def render_status_template(
 
 
 def _detail_candidate_lines(payload: dict[str, Any]) -> list[str]:
+    if put_wall_breakdown_report_disabled(payload):
+        return []
     full_lines = render_template(payload).splitlines()
     start = next(
         (
@@ -696,7 +712,7 @@ def render_feishu_status_detail_template(
         ("Call / Put Skew Spread Shadow", skew_spread_shadow_detail_lines(payload)),
         (
             "条件计划与 BS 审计"
-            if payload.get("plan_candidates") or "plan_candidates" not in payload
+            if presentable_plan_candidates(payload) or "plan_candidates" not in payload
             else "观察情景与 BS 审计",
             _detail_candidate_lines(payload),
         ),
@@ -722,7 +738,7 @@ def render_feishu_delivery_text(
         blocks = [block for block in body.split("\n\n") if block]
         decision = payload.get("level_decision")
         phase = str(decision.get("phase") or "far") if isinstance(decision, dict) else "far"
-        has_plan = bool(payload.get("plan_candidates"))
+        has_plan = bool(presentable_plan_candidates(payload))
         active = phase in {
             "approaching",
             "testing",
@@ -782,9 +798,11 @@ def build_status_prompt(
                 "尚未校准的 13:00 物理区间与真实胜率；"
                 "可同时保留上测/下测的 Call 与 Put 假设，但只能把 edge_status=observed_local_skew_edge 称为局部 skew 证据，"
                 "不得把 unknown/not_observed 改写为错误定价。",
+                "模板中的三条 Put候选 行必须逐字保留；WALL_SIGNAL、EXECUTION_ELIGIBLE、PRIORITY 是相互独立的报告字段，"
+                "Put Wall跌破固定为 disabled/unsupported，不得改写成可执行策略。",
                 "SPX levels 与 es_equivalent_levels 是两个坐标系。谈 ES 阈值只能逐字引用 es_equivalent_levels，严禁把 SPX strike 当 ES 价格，也不得自行换算。",
                 "不得推断输入中没有的历史触碰次数、墙是否弃守、dealer 行为或 gamma 燃料。避免比喻，用结构、价格和条件直接表达。",
-                "输出中文且总共不超过 16 行，首行逐字保留模板标题；使用 ## 结论、## 位置与路径、## 双向条件、## 数据限制四段，"
+                "输出中文且总共不超过 20 行，首行逐字保留模板标题；使用 ## 结论、## 位置与路径、## 双向条件、## 数据限制四段，"
                 "每段最多 3 条短句。只允许引用模板中已经出现的数字，禁止输出 JSON 字段名、高精度小数或补算新数字。"
                 "末行说明下一条最值得盯的代理价格及改变判断的阈值。",
                 "previous_push:" + previous_push_json(previous_push),
@@ -813,6 +831,9 @@ def build_status_prompt(
             "不得写『当前不可预挂』；非实时条件情景才保留『当前不可预挂』并等 SPX 触发后重算。",
             "TradeReady 可供操作员执行，但自动下单仍关闭；仓位方向未知时，负 gamma 不等于下跌，不得据此改变候选方向。",
             "call_skew_spread_shadow 与 put_skew_spread_shadow 只能称为只读 Shadow：即使 status=candidate 也不是计划或订单，禁止补写拆腿执行；只能复述组合净借记、定义风险和门控边界。",
+            "模板中的三条 Put候选 行必须逐字保留；WALL_SIGNAL、EXECUTION_ELIGIBLE、PRIORITY 是三个独立字段。"
+            "Flip Low跌破与 Call Wall/Flip High拒绝必须分开；Put Wall跌破固定为 disabled/unsupported，"
+            "不得并入前两者或改写成计划。",
             "convexity_idea_radar 是独立的双向假设层，不改变唯一生产计划。它允许同时呈现一条 Call 和一条 Put 灵感："
             "先说市场正在定价的 16:00 风险中性目的地区间；若 mark_1300_proxy 不可用，必须明确没有 13:00 物理区间。"
             "若 gth_prior 未冻结，也不得把当前 RTH 曲面倒称为盘前预判。"
@@ -827,156 +848,3 @@ def build_status_prompt(
             "模板:" + template,
         )
     )
-
-
-def _status_writer_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    """Keep status prompts bounded so the CLI behaves like a one-shot LLM API."""
-
-    keys = (
-        "beijing_time",
-        "expiry",
-        "session_phase",
-        "research_only",
-        "analysis_mode",
-        "pricing_reference",
-        "level_decision",
-        "regime_decision",
-        "breakout_filter",
-        "session_episode",
-        "trade_candidate",
-        "confirmed_gate",
-        "call_skew_spread_shadow",
-        "put_skew_spread_shadow",
-        "spring_gamma_v3_shadow",
-        "spring_gamma_v3_state_window",
-        "convexity_idea_radar",
-        "warnings",
-    )
-    compact = {key: payload.get(key) for key in keys if key in payload}
-    for shadow_key in ("call_skew_spread_shadow", "put_skew_spread_shadow"):
-        shadow = compact.get(shadow_key)
-        if not isinstance(shadow, dict):
-            continue
-        candidate = shadow.get("candidate")
-        compact[shadow_key] = {
-            key: shadow.get(key)
-            for key in ("status", "reason", "automatic_ordering", "operator_action")
-        }
-        if isinstance(candidate, dict):
-            compact[shadow_key]["candidate"] = {
-                key: candidate.get(key)
-                for key in (
-                    "strategy",
-                    "long",
-                    "short",
-                    "executable_debit",
-                    "fair_debit",
-                    "edge_points",
-                    "iv_fit",
-                    "defined_risk",
-                    "execution",
-                )
-            }
-    spring_gamma_shadow = compact.get("spring_gamma_v3_shadow")
-    spring_gamma_summary = spring_gamma_v3_writer_summary(spring_gamma_shadow)
-    if spring_gamma_summary is not None:
-        compact["spring_gamma_v3_shadow"] = spring_gamma_summary
-    radar_summary = compact_convexity_idea_radar(compact.get("convexity_idea_radar"))
-    if radar_summary is not None:
-        compact["convexity_idea_radar"] = radar_summary
-    compact["decision_guidance"] = guidance_module.build_decision_guidance(payload).to_dict()
-    signed_gex = payload.get("signed_gex_proxy")
-    if isinstance(signed_gex, dict):
-        compact["signed_gex_proxy"] = {
-            key: signed_gex.get(key)
-            for key in (
-                "net_gex",
-                "abs_gex",
-                "net_gamma_ratio",
-                "gamma_state",
-                "weighting",
-                "sign_method",
-                "dealer_position_sign",
-            )
-        }
-    strike_coverage = payload.get("strike_price_coverage")
-    if isinstance(strike_coverage, dict):
-        compact["strike_price_coverage"] = {
-            key: strike_coverage.get(key)
-            for key in (
-                "expiry",
-                "reference_price",
-                "center_strike",
-                "strike_step_points",
-                "radius_strikes",
-                "target_pair_count",
-                "complete_pair_count",
-                "core_complete_pair_count",
-                "rotation_assisted_pair_count",
-                "missing_call_count",
-                "missing_put_count",
-                "coverage_ratio",
-                "coverage_confidence_95_low",
-                "coverage_confidence_95_high",
-                "pair_quote_age_p50_seconds",
-                "pair_quote_age_p90_seconds",
-                "pair_quote_age_max_seconds",
-                "complete_min_strike",
-                "complete_max_strike",
-                "radius_points",
-                "point_target_pair_count",
-                "point_complete_pair_count",
-                "point_coverage_ratio",
-                "price_contract",
-                "nbbo_interpolation",
-                "smoothing_scope",
-            )
-        }
-    exposure_context = compact_exposure_context(payload)
-    if exposure_context:
-        compact["exposure_context"] = exposure_context
-    classified = "plan_candidates" in payload
-    plans = payload.get("plan_candidates")
-    observations = payload.get("observation_candidates")
-    candidates = (
-        plans
-        if isinstance(plans, list) and plans
-        else observations
-        if classified and isinstance(observations, list)
-        else payload.get("candidates")
-    )
-    if isinstance(candidates, list):
-        candidate_keys = (
-            "intent_id",
-            "contract_id",
-            "play",
-            "level_label",
-            "level",
-            "strike",
-            "right",
-            "prob_touch",
-            "projection_range_low",
-            "projection_range_high",
-            "execution_quote_status",
-            "order_style",
-            "decision_bid",
-            "decision_ask",
-            "limit_aggressive",
-            "invalidation_spx",
-            "target_spx",
-            "intent_expires_at",
-            "automatic_ordering",
-        )
-        key = (
-            "plan_candidates"
-            if isinstance(plans, list) and plans
-            else ("observation_candidates" if classified else "candidates")
-        )
-        compact[key] = [
-            {key: item.get(key) for key in candidate_keys if key in item}
-            for item in candidates[:2]
-            if isinstance(item, dict)
-        ]
-    if classified:
-        compact["candidate_presentation"] = payload.get("candidate_presentation")
-    return compact

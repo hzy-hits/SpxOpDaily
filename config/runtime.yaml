@@ -95,7 +95,7 @@ market_features:
   trade_follow_through_seconds: {value: 15.0, description: Minimum time a confirmed path must remain outside its level before becoming trade-ready; 15s matches 0DTE holding horizons.}
   trade_follow_through_min_points: {value: 2.0, description: Minimum additional movement beyond the confirmed level required for trade readiness.}
   trade_follow_through_em_fraction: {value: 0.05, description: Expected-move fraction used when it exceeds the fixed follow-through threshold.}
-  trade_confirmed_pilot_enabled: {value: true, description: Enables the explicitly reviewed RTH upside-breakout pilot; formal confirmation plus exact selected-contract NBBO remain mandatory, while missing aggregate L1 and redundant micro-confirmations become diagnostics instead of vetoes. Automatic broker ordering remains disabled.}
+  trade_confirmed_pilot_enabled: {value: true, description: Enables the reviewed 09:45-13:00 ET lane set; upside breakouts retain the Call TradeReady canary, flip-low breakdowns and call-wall/flip-high rejections produce exact-quote Put shadows only, and put-wall breakdowns remain disabled. Formal confirmation plus exact selected-contract NBBO remain mandatory, and automatic broker ordering remains disabled.}
   trade_repricing_max_age_seconds: {value: 90.0, description: Maximum age of the matching realtime option repricing record.}
   trade_quote_max_age_seconds: {value: 15.0, description: Maximum transport and source age for the exact selected-contract quote used in the reviewed RTH pilot; the limit-order window and enqueue-time quote revalidation remain mandatory.}
   trade_market_anchor_max_age_seconds: {value: 20.0, description: Maximum observation, source and transport age for the ES anchor and level observation used by a trade-ready intent.}
@@ -107,7 +107,7 @@ market_features:
   trade_target_em_fraction: {value: 0.15, description: Expected-move fraction used for a fallback SPX target when no outward structure exists.}
   trade_min_target_room_points: {value: 3.0, description: Minimum remaining SPX points from the evaluated spot to the deterministic target.}
   trade_min_reward_risk: {value: 0.25, description: Minimum remaining target distance divided by distance to the SPX invalidation level; retained at 0.25 because the 1.0 risk-off experiment removed every historical RTH TradeReady opportunity without improving the direction cohort. RTH, target-room, ES-confirmation and exact quote gates remain mandatory.}
-  trade_time_stop_minutes: {value: 15, description: Default maximum holding time for an unextended 0DTE trade intent.}
+  trade_time_stop_minutes: {value: 15, description: Default maximum holding time for an unextended 0DTE trade intent; every intent and time stop is capped at the 13:00 ET hard exit.}
   session_episode_enabled: {value: true, description: Maintains one session-level structural path above individual wall and flip events.}
   session_break_buffer_points: {value: 2.0, description: SPX distance beyond a frozen structural level required to record a session break or reclaim.}
   session_extreme_extension_points: {value: 5.0, description: Minimum extension beyond the broken level before the session path is classified as an extreme.}

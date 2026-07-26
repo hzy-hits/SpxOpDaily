@@ -95,7 +95,7 @@ market_features:
   trade_follow_through_seconds: {value: 15.0, description: Follow-through hold.}
   trade_follow_through_min_points: {value: 2.0, description: Fixed follow-through distance.}
   trade_follow_through_em_fraction: {value: 0.05, description: EM follow-through fraction.}
-  trade_confirmed_pilot_enabled: {value: true, description: Reviewed RTH upside-breakout pilot is enabled by explicit operator override.}
+  trade_confirmed_pilot_enabled: {value: true, description: Enables the reviewed 09:45-13:00 ET lane set; upside breakouts retain the Call TradeReady canary, flip-low breakdowns and call-wall/flip-high rejections produce exact-quote Put shadows only, and put-wall breakdowns remain disabled.}
   trade_repricing_max_age_seconds: {value: 90.0, description: Repricing freshness.}
   trade_quote_max_age_seconds: {value: 15.0, description: Exact selected-contract quote freshness for the reviewed pilot.}
   trade_market_anchor_max_age_seconds: {value: 20.0, description: Trade market-anchor freshness.}
@@ -107,7 +107,7 @@ market_features:
   trade_target_em_fraction: {value: 0.15, description: Fallback target EM fraction.}
   trade_min_target_room_points: {value: 3.0, description: Minimum remaining SPX target room.}
   trade_min_reward_risk: {value: 0.25, description: Minimum target-room to invalidation-distance ratio.}
-  trade_time_stop_minutes: {value: 15, description: Default time stop.}
+  trade_time_stop_minutes: {value: 15, description: Default time stop, capped at the 13:00 ET RTH hard exit for reviewed TradeIntent lanes.}
   session_episode_enabled: {value: true, description: Enables the session structural episode.}
   session_break_buffer_points: {value: 2.0, description: Structural break and reclaim buffer.}
   session_extreme_extension_points: {value: 5.0, description: Extreme extension distance.}

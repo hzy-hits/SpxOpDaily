@@ -13,15 +13,16 @@ from __future__ import annotations
 
 import json
 from collections import Counter, defaultdict
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR, ET
+from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 
 from .strategy_readiness_evidence import (
+    PUT_SHADOW_LANES,
     _exact_spread_snapshot,
     cohort_result,
     count_exact_spread_exits,
@@ -29,6 +30,7 @@ from .strategy_readiness_evidence import (
     count_put_exact_entries,
     duplicate_audit,
 )
+from .strategy_readiness_sessions import measure_session_completeness
 
 
 __all__ = (
@@ -42,8 +44,6 @@ __all__ = (
 
 
 CONTRACT_SCHEMA_VERSION = 3
-GTH_OPEN_ET = time(20, 15)
-GTH_CLOSE_ET = time(9, 25)
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,6 +105,7 @@ REQUIRED_POLICY_ROLES = (
 )
 OPTIONAL_POLICY_ROLES = ("confirmed_gate", "trade_candidate")
 POLICY_ROLES = (*REQUIRED_POLICY_ROLES, *OPTIONAL_POLICY_ROLES)
+PUT_POLICY_ROLES = ("trade_intent", "trade_candidate")
 
 
 def build_strategy_readiness(
@@ -144,7 +145,6 @@ def build_strategy_readiness(
         policy_start_session=rollout_start_session,
         rollout_boundary_at=rollout_boundary_at,
     )
-
     duplicate_evidence = duplicate_audit(contract["compliant_records"])
     violating_sessions = set(contract["violating_sessions"])
     violating_sessions.update(duplicate_evidence["sessions"])
@@ -159,9 +159,51 @@ def build_strategy_readiness(
     ]
     consistent_set = set(consistent_sessions)
 
+    put_policy = _select_policy_bundle(
+        records,
+        requested=policy_versions,
+        roles=PUT_POLICY_ROLES,
+        required_roles=PUT_POLICY_ROLES,
+        record_filter=_put_shadow_record,
+    )
+    put_rollout_boundary_at = _policy_bundle_start_at(
+        put_policy,
+        roles=PUT_POLICY_ROLES,
+    )
+    put_rollout_start_session = _research_session(put_rollout_boundary_at)
+    put_post_reset_start_session = _next_trading_day(put_policy["version_reset_session"])
+    put_effective_start_session = _latest_date(
+        put_rollout_start_session,
+        put_post_reset_start_session,
+    )
+    put_contract = _contract_audit(
+        records,
+        selected_policies=put_policy["versions"],
+        cohort_start_session=put_effective_start_session,
+        policy_start_session=put_rollout_start_session,
+        rollout_boundary_at=put_rollout_boundary_at,
+        included_roles=PUT_POLICY_ROLES,
+        record_filter=_put_shadow_record,
+    )
+    put_duplicate_evidence = duplicate_audit(put_contract["compliant_records"])
+    put_violating_sessions = set(put_contract["violating_sessions"])
+    put_violating_sessions.update(put_duplicate_evidence["sessions"])
+    put_rth_complete = [row for row in session_rows if row.get("rth_complete") is True]
+    put_consistent_sessions = [
+        str(row["session_date"])
+        for row in put_rth_complete
+        if put_effective_start_session is not None
+        and date.fromisoformat(str(row["session_date"])) >= put_effective_start_session
+        and str(row["session_date"]) not in put_violating_sessions
+    ]
+    put_consistent_set = set(put_consistent_sessions)
+
     compliant = contract["compliant_records"]
     gth = count_gth_exact_entries(compliant, eligible_sessions=consistent_set)
-    put = count_put_exact_entries(compliant, eligible_sessions=consistent_set)
+    put = count_put_exact_entries(
+        put_contract["compliant_records"],
+        eligible_sessions=put_consistent_set,
+    )
     exits = count_exact_spread_exits(
         compliant,
         eligible_sessions=consistent_set,
@@ -185,6 +227,21 @@ def build_strategy_readiness(
         common_blockers.append("forward_v3_contract_unavailable")
     common_blockers = _unique(common_blockers)
 
+    put_blockers = list(put_policy["blockers"])
+    if len(put_consistent_sessions) < thresholds.complete_sessions:
+        put_blockers.append("put_rth_contract_consistent_complete_sessions_below_20")
+    if put_contract["coverage_ratio"] < thresholds.contract_coverage_ratio:
+        put_blockers.append("put_contract_compliance_below_100_percent")
+    if put_contract["invalid_records"]:
+        put_blockers.append("put_forward_contract_anomalies_present")
+    if put_contract["issues"].get("role_policy_version_mismatch", 0):
+        put_blockers.append("put_role_policy_version_drift_present")
+    if put_duplicate_evidence["duplicate_records"]:
+        put_blockers.append("put_duplicate_forward_samples_present")
+    if put_effective_start_session is None:
+        put_blockers.append("put_forward_v3_contract_unavailable")
+    put_blockers = _unique(put_blockers)
+
     cohorts = {
         "gth_exact_entry": cohort_result(
             count=int(gth["count"]),
@@ -202,9 +259,12 @@ def build_strategy_readiness(
             count=int(put["count"]),
             target=thresholds.put_exact_entries,
             count_blocker="put_exact_entries_below_20",
-            common_blockers=common_blockers,
+            common_blockers=put_blockers,
             details={
                 "eligible_trade_ready_puts": put["eligible_trade_ready_puts"],
+                "eligible_shadow_ready_puts": put["eligible_shadow_ready_puts"],
+                "exact_virtual_opens": put["exact_virtual_opens"],
+                "exact_shadow_quote_entries": put["exact_shadow_quote_entries"],
                 "unmatched_or_inexact_puts": put["unmatched_or_inexact_puts"],
                 "excluded_incomplete_session": put["excluded_incomplete_session"],
             },
@@ -221,9 +281,7 @@ def build_strategy_readiness(
             },
         ),
     }
-    all_blockers = _unique(
-        [*common_blockers, *(item for row in cohorts.values() for item in row["blockers"])]
-    )
+    all_blockers = _unique([item for row in cohorts.values() for item in row["blockers"]])
     ready = not all_blockers and all(row["status"] == "ready" for row in cohorts.values())
 
     public_contract = {
@@ -235,6 +293,18 @@ def build_strategy_readiness(
         {
             "duplicate_records": duplicate_evidence["duplicate_records"],
             "duplicate_keys": duplicate_evidence["keys"],
+            "required_coverage_ratio": thresholds.contract_coverage_ratio,
+        }
+    )
+    public_put_contract = {
+        key: value
+        for key, value in put_contract.items()
+        if key not in {"compliant_records", "violating_sessions"}
+    }
+    public_put_contract.update(
+        {
+            "duplicate_records": put_duplicate_evidence["duplicate_records"],
+            "duplicate_keys": put_duplicate_evidence["keys"],
             "required_coverage_ratio": thresholds.contract_coverage_ratio,
         }
     )
@@ -253,6 +323,20 @@ def build_strategy_readiness(
         )
         if session_id in violating_sessions:
             detail["reasons"] = [*detail["reasons"], "forward_contract_violation"]
+        detail["put_forward_policy_window"] = bool(
+            put_effective_start_session is not None
+            and date.fromisoformat(session_id) >= put_effective_start_session
+        )
+        detail["put_contract_consistent"] = bool(
+            detail["rth_complete"]
+            and detail["put_forward_policy_window"]
+            and session_id not in put_violating_sessions
+        )
+        detail["put_reasons"] = []
+        if detail["rth_complete"] is not True:
+            detail["put_reasons"].append("rth_minute_coverage_below_90_percent")
+        if session_id in put_violating_sessions:
+            detail["put_reasons"].append("put_forward_contract_violation")
         session_details.append(detail)
 
     return {
@@ -283,6 +367,33 @@ def build_strategy_readiness(
                 else None
             ),
         },
+        "cohort_policy_bundles": {
+            "put_exact_entry": {
+                "selection": put_policy["selection"],
+                "versions": put_policy["versions"],
+                "role_started_at": put_policy["role_started_at"],
+                "started_session": (
+                    put_rollout_start_session.isoformat()
+                    if put_rollout_start_session is not None
+                    else None
+                ),
+                "effective_started_session": (
+                    put_effective_start_session.isoformat()
+                    if put_effective_start_session is not None
+                    else None
+                ),
+                "version_reset_session": (
+                    put_policy["version_reset_session"].isoformat()
+                    if put_policy["version_reset_session"] is not None
+                    else None
+                ),
+                "post_reset_started_session": (
+                    put_post_reset_start_session.isoformat()
+                    if put_post_reset_start_session is not None
+                    else None
+                ),
+            }
+        },
         "thresholds": asdict(thresholds),
         "sessions": {
             "observed": len(session_rows),
@@ -295,98 +406,21 @@ def build_strategy_readiness(
             ),
             "details": session_details,
         },
+        "cohort_sessions": {
+            "put_exact_entry": {
+                "observed": len(session_rows),
+                "rth_complete": len(put_rth_complete),
+                "contract_consistent_complete": len(put_consistent_sessions),
+                "target": thresholds.complete_sessions,
+                "dates": put_consistent_sessions,
+            }
+        },
         "contract": public_contract,
+        "cohort_contracts": {"put_exact_entry": public_put_contract},
         "legacy_exclusion": contract["legacy_exclusion"],
         "cohorts": cohorts,
         "blockers": all_blockers,
     }
-
-
-def measure_session_completeness(
-    features_root: Path,
-    *,
-    cutoff_at: datetime,
-    minimum_coverage: float = 0.90,
-) -> list[dict[str, object]]:
-    """Measure GTH and RTH minute coverage without reading ``quality_ok``.
-
-    The GTH window for trading date D is 20:15 ET on D-1 through 09:25 ET on
-    D.  RTH uses the canonical calendar, including scheduled early closes.
-    Both intervals are half-open and each distinct wall-clock minute counts at
-    most once, so faster duplicate health samples cannot inflate coverage.
-    """
-
-    if not 0 < minimum_coverage <= 1:
-        raise ValueError("minimum coverage must be in (0, 1]")
-    cutoff = _utc(cutoff_at)
-    grouped: dict[date, list[datetime]] = defaultdict(list)
-    detector_grouped: dict[date, list[datetime]] = defaultdict(list)
-    root = Path(features_root).expanduser().resolve()
-    pattern = root / "level_decision_health/date=*"
-    for partition in sorted(root.glob(str(pattern.relative_to(root)))):
-        for path in sorted(partition.glob("*.jsonl")):
-            for payload in _read_json_objects(path):
-                at = _parse_time(payload.get("at"))
-                session_day = _parse_date(payload.get("session_date"))
-                if at is None or session_day is None or at >= cutoff:
-                    continue
-                grouped[session_day].append(at)
-
-    detector_pattern = root / "gth_detector_health/date=*"
-    for partition in sorted(root.glob(str(detector_pattern.relative_to(root)))):
-        for path in sorted(partition.glob("*.jsonl")):
-            for payload in _read_json_objects(path):
-                at = _parse_time(payload.get("at"))
-                session_day = _parse_date(payload.get("session_date"))
-                if at is None or session_day is None or at >= cutoff:
-                    continue
-                detector_grouped[session_day].append(at)
-    detector_started = min(detector_grouped, default=None)
-    detector_started_at = min(
-        (sample for samples in detector_grouped.values() for sample in samples),
-        default=None,
-    )
-
-    rows: list[dict[str, object]] = []
-    for session_day, samples in sorted(grouped.items()):
-        session = DEFAULT_MARKET_CALENDAR.session(session_day)
-        if session is None or session.close_at.astimezone(timezone.utc) > cutoff:
-            continue
-        gth_start = datetime.combine(session_day - timedelta(days=1), GTH_OPEN_ET, tzinfo=ET)
-        gth_end = datetime.combine(session_day, GTH_CLOSE_ET, tzinfo=ET)
-        gth = _window_coverage(samples, gth_start, gth_end)
-        rth = _window_coverage(samples, session.open_at, session.close_at)
-        detector_required = detector_started is not None and session_day >= detector_started
-        detector_gth = (
-            _window_coverage(detector_grouped.get(session_day, ()), gth_start, gth_end)
-            if detector_required
-            else None
-        )
-        reasons = []
-        if gth["coverage_ratio"] < minimum_coverage:
-            reasons.append("gth_minute_coverage_below_90_percent")
-        if rth["coverage_ratio"] < minimum_coverage:
-            reasons.append("rth_minute_coverage_below_90_percent")
-        if detector_gth is not None and detector_gth["coverage_ratio"] < minimum_coverage:
-            reasons.append("gth_detector_health_coverage_below_90_percent")
-        rows.append(
-            {
-                "session_date": session_day.isoformat(),
-                "complete": not reasons,
-                "gth": gth,
-                "rth": rth,
-                "gth_detector_health": detector_gth,
-                "gth_detector_health_required": detector_required,
-                "gth_detector_health_started_session": (
-                    detector_started.isoformat() if detector_started is not None else None
-                ),
-                "gth_detector_health_started_at": (
-                    detector_started_at.isoformat() if detector_started_at is not None else None
-                ),
-                "reasons": reasons,
-            }
-        )
-    return rows
 
 
 def validate_strategy_contract(
@@ -431,25 +465,6 @@ def validate_strategy_contract(
     return tuple(issues)
 
 
-def _window_coverage(
-    samples: Sequence[datetime], start: datetime, end: datetime
-) -> dict[str, object]:
-    start_utc = start.astimezone(timezone.utc)
-    end_utc = end.astimezone(timezone.utc)
-    expected = int((end_utc - start_utc).total_seconds() // 60)
-    minutes = {
-        sample.astimezone(timezone.utc).replace(second=0, microsecond=0)
-        for sample in samples
-        if start_utc <= sample.astimezone(timezone.utc) < end_utc
-    }
-    ratio = min(len(minutes) / expected, 1.0) if expected else 0.0
-    return {
-        "observed_minutes": len(minutes),
-        "expected_minutes": expected,
-        "coverage_ratio": round(ratio, 6),
-    }
-
-
 def _load_event_records(features_root: Path, *, cutoff_at: datetime) -> list[_Record]:
     records: list[_Record] = []
     for source, pattern in _EVENT_DATASETS.items():
@@ -491,13 +506,32 @@ def _load_event_records(features_root: Path, *, cutoff_at: datetime) -> list[_Re
 
 
 def _select_policy_bundle(
-    records: Sequence[_Record], *, requested: Mapping[str, str] | None
+    records: Sequence[_Record],
+    *,
+    requested: Mapping[str, str] | None,
+    roles: Sequence[str] = POLICY_ROLES,
+    required_roles: Sequence[str] = REQUIRED_POLICY_ROLES,
+    record_filter: Callable[[_Record], bool] | None = None,
 ) -> dict[str, Any]:
+    selected_roles = tuple(dict.fromkeys(roles))
+    selected_role_set = set(selected_roles)
+    required_role_set = set(required_roles)
+    unknown_roles = sorted(selected_role_set - set(POLICY_ROLES))
+    if unknown_roles:
+        raise ValueError(f"unknown policy roles: {', '.join(unknown_roles)}")
+    unknown_required = sorted(required_role_set - selected_role_set)
+    if unknown_required:
+        raise ValueError(
+            "required policy roles outside selected roles: " + ", ".join(unknown_required)
+        )
     by_role: dict[str, list[_Record]] = defaultdict(list)
     for record in records:
+        if record_filter is not None and not record_filter(record):
+            continue
         role = _policy_role(record)
         if (
-            role is not None
+            role in selected_role_set
+            and _declares_policy_version(record, role=role)
             and record.at is not None
             and (
                 record.payload.get("schema_version") == CONTRACT_SCHEMA_VERSION
@@ -517,11 +551,11 @@ def _select_policy_bundle(
         if unknown:
             raise ValueError(f"unknown policy roles: {', '.join(unknown)}")
 
-    for role in POLICY_ROLES:
+    for role in selected_roles:
         rows = sorted(by_role.get(role, ()), key=_record_sort_key)
         selected: str | None = None
         selected_start: datetime | None = None
-        if requested is not None and (role in requested or role in REQUIRED_POLICY_ROLES):
+        if requested is not None and (role in requested or role in required_role_set):
             value = requested.get(role)
             if value is not None and not str(value).strip():
                 raise ValueError(f"policy version for {role} must be non-empty")
@@ -545,7 +579,7 @@ def _select_policy_bundle(
                     reset_sessions.append(reset_session)
         versions[role] = selected
         if selected is None or selected_start is None:
-            if role not in REQUIRED_POLICY_ROLES:
+            if role not in required_role_set:
                 continue
             blockers.append(f"policy_role_unavailable:{role}")
         else:
@@ -555,7 +589,7 @@ def _select_policy_bundle(
         "versions": versions,
         "selection": selection,
         "role_started_at": {
-            role: starts[role].isoformat() if role in starts else None for role in POLICY_ROLES
+            role: starts[role].isoformat() if role in starts else None for role in selected_roles
         },
         "version_reset_session": max(reset_sessions, default=None),
         "blockers": blockers,
@@ -569,7 +603,14 @@ def _contract_audit(
     cohort_start_session: date | None,
     policy_start_session: date | None,
     rollout_boundary_at: datetime | None,
+    included_roles: Sequence[str] = POLICY_ROLES,
+    record_filter: Callable[[_Record], bool] | None = None,
 ) -> dict[str, Any]:
+    audited_roles = tuple(dict.fromkeys(included_roles))
+    audited_role_set = set(audited_roles)
+    unknown_roles = sorted(audited_role_set - set(POLICY_ROLES))
+    if unknown_roles:
+        raise ValueError(f"unknown contract roles: {', '.join(unknown_roles)}")
     compliant: list[_Record] = []
     invalid = 0
     issue_counts: Counter[str] = Counter()
@@ -584,6 +625,10 @@ def _contract_audit(
     policy_telemetry: Counter[str] = Counter()
 
     for record in records:
+        if record_filter is not None and not record_filter(record):
+            continue
+        if _policy_role(record) not in audited_role_set:
+            continue
         role = _record_role(record)
         in_forward_window = _in_forward_window(record, cohort_start_session)
         before_rollout_boundary = bool(
@@ -654,7 +699,7 @@ def _contract_audit(
                 "forward_records": role_totals[role],
                 "compliant_records": role_compliant[role],
             }
-            for role in POLICY_ROLES
+            for role in audited_roles
         },
         "telemetry_excluded": {
             "total": sum(telemetry.values()),
@@ -691,22 +736,51 @@ def _in_forward_window(
     return True
 
 
+def _put_shadow_record(record: _Record) -> bool:
+    if record.source not in {"trade_intents", "trade_candidates"}:
+        return False
+    row = record.payload
+    source = row.get("source_intent")
+    source = source if isinstance(source, Mapping) else {}
+    lane = _put_shadow_strategy_lane(record)
+    return bool(
+        lane in PUT_SHADOW_LANES
+        or "put_shadow" in lane.lower()
+        or (row.get("shadow_mode") is True or source.get("shadow_mode") is True)
+        and (
+            row.get("direction") == "down"
+            or source.get("direction") == "down"
+            or str(row.get("contract_id") or source.get("contract_id") or "").endswith(":P")
+        )
+    )
+
+
+def _put_shadow_strategy_lane(record: _Record) -> str:
+    row = record.payload
+    source = row.get("source_intent")
+    source = source if isinstance(source, Mapping) else {}
+    return str(row.get("strategy_lane") or source.get("strategy_lane") or "")
+
+
 def _record_role(record: _Record) -> str | None:
     row = record.payload
     if record.source == "gth_dip_reclaim":
         return "gth_signal"
-    if record.source == "trade_intents" and row.get("status") in {"blocked", "trade_ready"}:
+    if record.source == "trade_intents" and (
+        row.get("status") in {"blocked", "shadow_ready", "trade_ready"}
+        or _unregistered_put_shadow_record(record)
+    ):
         return "trade_intent"
     if (
         record.source == "confirmed_gate_results"
-        and row.get("status") in {"blocked", "trade_ready"}
+        and row.get("status") in {"blocked", "shadow_ready", "trade_ready"}
         and row.get("terminal") is True
     ):
         return "confirmed_gate"
-    if record.source == "trade_candidates" and row.get("event") in {
-        "candidate_armed",
-        "candidate_terminal",
-    }:
+    if record.source == "trade_candidates" and (
+        row.get("event") in {"candidate_armed", "candidate_terminal"}
+        or _unregistered_put_shadow_record(record)
+    ):
         return "trade_candidate"
     if record.source != "virtual_strategy":
         return None
@@ -733,14 +807,25 @@ def _policy_role(record: _Record) -> str | None:
     return _record_role(record)
 
 
+def _declares_policy_version(record: _Record, *, role: str) -> bool:
+    if role == "trade_candidate":
+        return record.payload.get("event") == "candidate_armed"
+    return True
+
+
 def _material_contract_issues(record: _Record, *, role: str) -> tuple[str, ...]:
     issues = list(validate_strategy_contract(record.payload, event_at=record.at))
+    if _unregistered_put_shadow_record(record):
+        issues.append("put_shadow_lane_unregistered")
     valid_until = _parse_time(record.payload.get("valid_until"))
     if role == "virtual_entry_decision" and record.payload.get("terminal") is not True:
         issues.append("entry_decision_not_terminal")
     requires_live_ttl = (
         role == "gth_signal"
-        or (role == "trade_intent" and record.payload.get("status") == "trade_ready")
+        or (
+            role == "trade_intent"
+            and record.payload.get("status") in {"shadow_ready", "trade_ready"}
+        )
         or (role == "virtual_entry_decision" and record.payload.get("status") == "trade_ready")
         or (role == "virtual_lifecycle" and record.payload.get("event") == "virtual_opened")
         or (role == "trade_candidate" and record.payload.get("event") == "candidate_armed")
@@ -749,6 +834,12 @@ def _material_contract_issues(record: _Record, *, role: str) -> tuple[str, ...]:
         if valid_until <= record.at:
             issues.append("valid_until_not_after_decision")
     return tuple(_unique(issues))
+
+
+def _unregistered_put_shadow_record(record: _Record) -> bool:
+    return bool(
+        _put_shadow_record(record) and _put_shadow_strategy_lane(record) not in PUT_SHADOW_LANES
+    )
 
 
 def _record_sort_key(record: _Record) -> tuple[datetime, str, int]:
@@ -799,22 +890,6 @@ def _record_session(
 
 def _research_session(at: datetime | None) -> date | None:
     return DEFAULT_MARKET_CALENDAR.research_expiry(at) if at is not None else None
-
-
-def _read_json_objects(path: Path) -> list[Mapping[str, object]]:
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return []
-    rows: list[Mapping[str, object]] = []
-    for line in lines:
-        try:
-            payload = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(payload, dict):
-            rows.append(payload)
-    return rows
 
 
 def _partition_date(path: Path) -> date | None:
@@ -869,6 +944,20 @@ def _detector_health_start_at(rows: Sequence[Mapping[str, object]]) -> datetime 
         if (parsed := _parse_time(row.get("gth_detector_health_started_at"))) is not None
     ]
     return min(times, default=None)
+
+
+def _policy_bundle_start_at(
+    bundle: Mapping[str, object],
+    *,
+    roles: Sequence[str],
+) -> datetime | None:
+    starts = bundle.get("role_started_at")
+    if not isinstance(starts, Mapping):
+        return None
+    parsed = [_parse_time(starts.get(role)) for role in roles]
+    if any(started_at is None for started_at in parsed):
+        return None
+    return max(parsed, default=None)
 
 
 def _latest_date(*values: object) -> date | None:

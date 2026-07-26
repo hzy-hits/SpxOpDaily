@@ -2954,13 +2954,18 @@ def test_candidate_presentation_requires_one_directionally_supported_plan() -> N
             },
             "block_reasons": [],
             "status": "trade_ready",
+            "strategy_lane": "long_0dte_rth_upside_breakout_pilot",
+            "shadow_mode": False,
+            "execution_eligible": True,
+            "quote_observation_eligible": False,
+            "automatic_ordering": False,
             "intent_id": "intent-1",
             "context_id": "context-1",
-            "contract_id": "option:SPX:SPXW:20260714:7500:P",
-            "play": "level_breakout_put",
+            "contract_id": "option:SPX:SPXW:20260714:7500:C",
+            "play": "level_breakout_call",
             "event_id": "event-1",
             "thesis": "breakout",
-            "direction": "down",
+            "direction": "up",
             "decision_bid": 10.0,
             "decision_ask": 10.4,
             "decision_mid": 10.2,
@@ -2973,55 +2978,55 @@ def test_candidate_presentation_requires_one_directionally_supported_plan() -> N
             "phase": "confirmed",
             "formal_signal": True,
             "actionable": False,
-            "play": "level_breakout_put",
+            "play": "level_breakout_call",
             "event_id": "event-1",
             "thesis": "breakout",
-            "direction": "down",
+            "direction": "up",
         },
         "decision_context": {
             "trade_intent": {"status": "trade_ready"},
             "breakout_filter": {
                 "event_id": "event-1",
-                "direction": "down",
+                "direction": "up",
                 "verdict": "supported",
                 "actionable": True,
             },
-            "regime_decision": {"mode": "trending", "direction": "down"},
+            "regime_decision": {"mode": "trending", "direction": "up"},
         },
         "level_trigger_repricing": {
             "event_id": "event-1",
             "candidates": [
                 {
-                    "play": "level_breakout_put",
+                    "play": "level_breakout_call",
                     "level": 7500.0,
                     "strike": 7500,
-                    "right": "P",
-                    "contract_id": "option:SPX:SPXW:20260714:7500:P",
+                    "right": "C",
+                    "contract_id": "option:SPX:SPXW:20260714:7500:C",
                     "execution_quote_status": "executable",
                 }
             ],
         },
         "candidates": [
             {
-                "play": "level_breakout_put",
-                "level": 7500.0,
-                "strike": 7500,
-                "right": "P",
-                "execution_quote_status": "executable",
-            },
-            {
-                "play": "level_breakout_put",
-                "level": 7495.0,
-                "strike": 7495,
-                "right": "P",
-                "contract_id": "option:SPX:SPXW:20260714:7495:P",
-                "execution_quote_status": "executable",
-            },
-            {
-                "play": "put_wall_bounce_call",
+                "play": "level_breakout_call",
                 "level": 7500.0,
                 "strike": 7500,
                 "right": "C",
+                "execution_quote_status": "executable",
+            },
+            {
+                "play": "level_breakout_call",
+                "level": 7495.0,
+                "strike": 7495,
+                "right": "C",
+                "contract_id": "option:SPX:SPXW:20260714:7495:C",
+                "execution_quote_status": "executable",
+            },
+            {
+                "play": "call_wall_fade_put",
+                "level": 7500.0,
+                "strike": 7500,
+                "right": "P",
                 "execution_quote_status": "executable",
             },
         ],
@@ -3030,10 +3035,10 @@ def test_candidate_presentation_requires_one_directionally_supported_plan() -> N
     evaluation_now = datetime(2026, 7, 14, 4, 15, tzinfo=timezone.utc)
     _apply_candidate_presentation(payload, now=evaluation_now)
 
-    assert [item["play"] for item in payload["plan_candidates"]] == ["level_breakout_put"]
+    assert [item["play"] for item in payload["plan_candidates"]] == ["level_breakout_call"]
     assert payload["plan_candidates"][0]["decision_executable"] is True
     assert payload["observation_candidates"] == []
-    assert payload["opposing_invalidation"]["play"] == "put_wall_bounce_call"
+    assert payload["opposing_invalidation"]["play"] == "call_wall_fade_put"
     presented = payload["plan_candidates"] + payload["observation_candidates"]
     assert (
         sum(item.get("contract_id") == payload["trade_intent"]["contract_id"] for item in presented)
@@ -3045,10 +3050,10 @@ def test_candidate_presentation_requires_one_directionally_supported_plan() -> N
         datetime(2026, 7, 14, 4, 15, tzinfo=timezone.utc),
     )
     assert "【条件计划】决策门控已通过" in rendered
-    assert "SPXW 7500P" in rendered
+    assert "SPXW 7500C" in rendered
     assert "实时 10/10.4" in rendered
     assert "入场≤10.1" in rendered
-    assert "SPXW 7500C" not in rendered
+    assert "SPXW 7500P" not in rendered
     from spx_spark.application.order_map.prompts import actionable_writer_output_valid
 
     assert actionable_writer_output_valid(rendered, rendered)
@@ -3061,7 +3066,7 @@ def test_candidate_presentation_requires_one_directionally_supported_plan() -> N
     _apply_candidate_presentation(payload, now=evaluation_now)
     assert payload["plan_candidates"] == []
     assert len(payload["observation_candidates"]) == 1
-    assert payload["observation_candidates"][0]["right"] == "P"
+    assert payload["observation_candidates"][0]["right"] == "C"
     assert payload["candidate_presentation"]["reason"] == "trade_intent_blocked"
 
     payload["trade_intent"]["status"] = "trade_ready"
@@ -3081,7 +3086,7 @@ def test_candidate_presentation_requires_one_directionally_supported_plan() -> N
 
     payload["level_trigger_repricing"]["event_id"] = "event-1"
     payload["level_trigger_repricing"]["candidates"][0]["contract_id"] = (
-        "option:SPX:SPXW:20260714:7495:P"
+        "option:SPX:SPXW:20260714:7495:C"
     )
     _apply_candidate_presentation(payload, now=evaluation_now)
     assert payload["plan_candidates"] == []

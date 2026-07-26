@@ -12,6 +12,9 @@ from typing import Mapping
 
 from spx_spark.application.order_map.execution_quote import evaluate_execution_quote
 from spx_spark.application.order_map.pricing import round_to_tick
+from spx_spark.application.market_features.trade_intent import (
+    live_trade_intent_authority_issues,
+)
 from spx_spark.config import NotificationSettings, StorageSettings
 from spx_spark.notifier.dispatcher import enqueue_notification
 from spx_spark.notifier.model import CommandRunner, default_runner
@@ -317,28 +320,17 @@ def _moving_average_lines(value: object) -> list[str]:
     sma20 = value.get("sma20")
     sma50 = value.get("sma50")
     sma200 = value.get("sma200")
-    if not any(
-        isinstance(item, int | float)
-        for item in (price, sma20, sma50, sma200)
-    ):
+    if not any(isinstance(item, int | float) for item in (price, sma20, sma50, sma200)):
         return []
     spx20 = value.get("spx_equivalent_sma20")
     spx50 = value.get("spx_equivalent_sma50")
     spx200 = value.get("spx_equivalent_sma200")
     projection = (
-        "　SPX基差投影 "
-        f"`{_fmt_fixed(spx20)} / {_fmt_fixed(spx50)} / {_fmt_fixed(spx200)}`"
-        if any(
-            isinstance(item, int | float)
-            for item in (spx20, spx50, spx200)
-        )
+        f"　SPX基差投影 `{_fmt_fixed(spx20)} / {_fmt_fixed(spx50)} / {_fmt_fixed(spx200)}`"
+        if any(isinstance(item, int | float) for item in (spx20, spx50, spx200))
         else ""
     )
-    precision = (
-        "　`贴线区：不确认突破`"
-        if value.get("spx_projection_near_line") is True
-        else ""
-    )
+    precision = "　`贴线区：不确认突破`" if value.get("spx_projection_near_line") is True else ""
     regime = str(value.get("regime_state") or "-")
     regime_direction = str(value.get("regime_direction") or "-")
     convexity = str(value.get("same_direction_convexity") or "-")
@@ -500,10 +492,13 @@ def _ready_contract_reason(
     now: datetime,
     expected_policy_version: str | None = None,
 ) -> str | None:
-    """Enforce v3; only explicitly versioned v1 events receive one-cycle fallback."""
+    """Enforce the current v3 contract and explicit live-Call authority."""
 
     schema_version = intent.get("schema_version")
     if schema_version == STRATEGY_EVENT_SCHEMA_VERSION:
+        authority_issues = live_trade_intent_authority_issues(intent)
+        if authority_issues:
+            return authority_issues[0]
         issues = actionable_strategy_contract_issues(intent, now=now)
         if issues:
             if "strategy_event_expired" in issues:
@@ -518,11 +513,6 @@ def _ready_contract_reason(
         if not isinstance(coordinate, Mapping) or coordinate.get("kind") != "official_spx":
             return "source_coordinate_mismatch"
         return None
-    if schema_version == 1:
-        expires_at = _datetime(intent.get("expires_at"))
-        if expires_at is None:
-            return "intent_expiry_unavailable"
-        return "intent_expired" if now >= expires_at else None
     return "strategy_schema_unsupported"
 
 

@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import math
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
 from typing import Mapping
+from zoneinfo import ZoneInfo
 
 from spx_spark.application.market_features.models import (
     DecisionContext,
@@ -37,6 +38,81 @@ HARD_CONTEXT_INVALIDATIONS = frozenset(
     }
 )
 
+ET = ZoneInfo("America/New_York")
+ENTRY_WINDOW_START_ET = time(9, 45)
+HARD_EXIT_ET = time(13, 0)
+CALL_BREAKOUT_PILOT_LANE = "long_0dte_rth_upside_breakout_pilot"
+FLIP_LOW_BREAKDOWN_PUT_SHADOW_LANE = "long_0dte_rth_flip_low_breakdown_put_shadow"
+UPPER_REJECTION_PUT_SHADOW_LANE = "long_0dte_rth_upper_rejection_put_shadow"
+PUT_WALL_BREAKDOWN_DISABLED_LANE = "long_0dte_rth_put_wall_breakdown_disabled"
+TRADE_INTENT_CONTRACT_VERSION = "rth_lanes_0945_1300_put_shadow.v1"
+
+
+def live_trade_intent_authority_issues(
+    intent: Mapping[str, object],
+) -> tuple[str, ...]:
+    """Return fail-closed reasons before any live-plan or virtual consumer."""
+
+    issues: list[str] = []
+    if intent.get("status") != "trade_ready":
+        issues.append("trade_intent_not_trade_ready")
+    if intent.get("execution_eligible") is not True:
+        issues.append("trade_intent_execution_authority_missing")
+    if intent.get("quote_observation_eligible") is not False:
+        issues.append("trade_intent_quote_observation_only")
+    if intent.get("shadow_mode") is not False:
+        issues.append("trade_intent_shadow_mode")
+    if intent.get("automatic_ordering") is not False:
+        issues.append("trade_intent_automatic_ordering_contract_invalid")
+    if intent.get("strategy_lane") in {
+        FLIP_LOW_BREAKDOWN_PUT_SHADOW_LANE,
+        UPPER_REJECTION_PUT_SHADOW_LANE,
+        PUT_WALL_BREAKDOWN_DISABLED_LANE,
+    }:
+        issues.append("put_lane_live_execution_forbidden")
+    if intent.get("strategy_lane") not in {
+        CALL_BREAKOUT_PILOT_LANE,
+        "rth_confirmed_level",
+    }:
+        issues.append("trade_intent_live_lane_not_approved")
+    if intent.get("direction") != "up":
+        issues.append("trade_intent_live_direction_not_call")
+    if not str(intent.get("contract_id") or "").endswith(":C"):
+        issues.append("trade_intent_live_contract_not_call")
+    return tuple(dict.fromkeys(issues))
+
+
+def trade_intent_policy_version(
+    feature_policy: MarketFeatureSettings,
+    order_policy: OrderMapPolicy,
+) -> str:
+    """Hash settings together with the executable lane and clock contract."""
+
+    return policy_version(
+        "rth_trade_intent.v3",
+        {
+            "market_features": feature_policy,
+            "order_map": order_policy,
+            "decision_contract": {
+                "version": TRADE_INTENT_CONTRACT_VERSION,
+                "entry_window_start_et": ENTRY_WINDOW_START_ET.isoformat(timespec="minutes"),
+                "entry_window_end_et": HARD_EXIT_ET.isoformat(timespec="minutes"),
+                "entry_window_end_inclusive": False,
+                "hard_exit_et": HARD_EXIT_ET.isoformat(timespec="minutes"),
+                "call_trade_ready_lane": CALL_BREAKOUT_PILOT_LANE,
+                "put_shadow_lanes": (
+                    FLIP_LOW_BREAKDOWN_PUT_SHADOW_LANE,
+                    UPPER_REJECTION_PUT_SHADOW_LANE,
+                ),
+                "put_shadow_status": "shadow_ready",
+                "put_shadow_execution_eligible": False,
+                "put_shadow_quote_observation_eligible": True,
+                "put_wall_breakdown_lane": PUT_WALL_BREAKDOWN_DISABLED_LANE,
+                "put_wall_breakdown_enabled": False,
+            },
+        },
+    )
+
 
 def evaluate_trade_intent(
     context: DecisionContext,
@@ -59,14 +135,20 @@ def evaluate_trade_intent(
     phase = str(level.get("phase") or "far")
     thesis = str(level.get("thesis") or "none")
     direction = str(level.get("direction") or "")
+    level_kind = str(level.get("level_kind") or "")
     trigger_level = _number(level.get("level"))
     event_expires_at = _datetime(level.get("expires_at"))
+    entry_window_start_at, hard_exit_at = _strategy_window(now)
+    valid_until = min(event_expires_at, hard_exit_at) if event_expires_at is not None else None
+    strategy_lane, put_shadow_lane, priority, pilot_scope_blocker = _pilot_scope(
+        pilot_enabled=pilot_enabled,
+        thesis=thesis,
+        direction=direction,
+        level_kind=level_kind,
+    )
     raw_coordinate = level.get("trigger_coordinate")
     coordinate = dict(raw_coordinate) if isinstance(raw_coordinate, Mapping) else None
-    intent_policy_version = policy_version(
-        "rth_trade_intent.v3",
-        {"market_features": feature_policy, "order_map": order_policy},
-    )
+    intent_policy_version = trade_intent_policy_version(feature_policy, order_policy)
     play = level_decision_play(thesis, direction)
     moving_average_context = _moving_average_context(market)
     semantic_scope = (
@@ -77,7 +159,7 @@ def evaluate_trade_intent(
     base: dict[str, object] = {
         **strategy_event_fields(
             policy_version_value=intent_policy_version,
-            valid_until=event_expires_at,
+            valid_until=valid_until,
             coordinate=coordinate,
             block_reasons=(),
         ),
@@ -88,13 +170,24 @@ def evaluate_trade_intent(
         "phase": phase,
         "thesis": thesis,
         "direction": direction or None,
+        "level_kind": level_kind or None,
         "semantic_scope": semantic_scope,
         "evaluated_at": now.isoformat(),
         "block_reasons": [],
-        "strategy_lane": (
-            "long_0dte_rth_upside_breakout_pilot" if pilot_enabled else "rth_confirmed_level"
-        ),
+        "strategy_lane": strategy_lane,
         "pilot_mode": pilot_enabled,
+        "shadow_mode": put_shadow_lane,
+        "wall_signal": (
+            "present"
+            if event_id and phase == "confirmed" and thesis in {"breakout", "fade"}
+            else "absent"
+        ),
+        "execution_eligible": False,
+        "quote_observation_eligible": False,
+        "priority": priority,
+        "trade_intent_contract_version": TRADE_INTENT_CONTRACT_VERSION,
+        "entry_window_start_at": entry_window_start_at.isoformat(),
+        "hard_exit_at": hard_exit_at.isoformat(),
         "moving_average_context": moving_average_context,
     }
     if not event_id or phase != "confirmed" or thesis not in {"breakout", "fade"}:
@@ -103,6 +196,10 @@ def evaluate_trade_intent(
     reasons: list[str] = []
     if not DEFAULT_MARKET_CALENDAR.is_rth_open(now):
         reasons.append("rth_session_required")
+    if now < entry_window_start_at:
+        reasons.append("strategy_entry_window_not_open")
+    elif now >= hard_exit_at:
+        reasons.append("strategy_entry_window_closed")
     if level.get("formal_signal_enabled") is not True:
         reasons.append("formal_signal_disabled")
     if level.get("formal_signal") is not True:
@@ -119,8 +216,8 @@ def evaluate_trade_intent(
     )
     if direction not in {"up", "down"}:
         reasons.append("direction_unavailable")
-    if pilot_enabled and (thesis != "breakout" or direction != "up"):
-        reasons.append("pilot_scope_upside_breakout_only")
+    if pilot_scope_blocker is not None:
+        reasons.append(pilot_scope_blocker)
     direction_sign = 1 if direction == "up" else -1
 
     confirmed_at = _datetime(level.get("phase_at") or level.get("confirmed_at"))
@@ -191,7 +288,15 @@ def evaluate_trade_intent(
         )
     )
     pilot_diagnostics = (
-        _pilot_diagnostics(context, market, options, direction=direction) if pilot_enabled else []
+        _pilot_diagnostics(
+            context,
+            market,
+            options,
+            thesis=thesis,
+            direction=direction,
+        )
+        if pilot_enabled
+        else []
     )
 
     candidate = _matching_candidate(
@@ -328,9 +433,11 @@ def evaluate_trade_intent(
         intent_expires_at = min(intent_expires_at, event_expires_at)
     assert expiry_close_at is not None
     intent_expires_at = min(intent_expires_at, expiry_close_at)
+    intent_expires_at = min(intent_expires_at, hard_exit_at)
     time_stop_at = min(
         now + timedelta(minutes=feature_policy.trade_time_stop_minutes),
         expiry_close_at,
+        hard_exit_at,
     )
     contract_id = str(candidate["contract_id"])
     assert semantic_scope is not None
@@ -346,7 +453,9 @@ def evaluate_trade_intent(
             coordinate=coordinate,
             block_reasons=(),
         ),
-        "status": "trade_ready",
+        "status": "shadow_ready" if put_shadow_lane else "trade_ready",
+        "execution_eligible": not put_shadow_lane,
+        "quote_observation_eligible": put_shadow_lane,
         "intent_id": intent_id,
         "semantic_key": semantic_key,
         "play": play,
@@ -376,6 +485,7 @@ def evaluate_trade_intent(
         "quantity": None,
         "quantity_policy": "operator_selected",
         "automatic_ordering": False,
+        "promotion_status": "collecting_shadow" if put_shadow_lane else "reviewed_pilot",
         "pilot_diagnostics": pilot_diagnostics,
         "evidence": _evidence(context),
         "block_reasons": [],
@@ -413,9 +523,10 @@ def _direction_blockers(
     ):
         reasons.append("regime_direction_conflict")
     if pilot_enabled:
-        breakout_verdict = str(context.breakout_filter.get("verdict") or "unavailable")
-        if breakout_verdict == "blocked":
-            reasons.append("breakout_filter_blocked")
+        if thesis == "breakout":
+            breakout_verdict = str(context.breakout_filter.get("verdict") or "unavailable")
+            if breakout_verdict == "blocked":
+                reasons.append("breakout_filter_blocked")
         one_minute = _number(market.es.get("return_1m_points"))
         five_minute = _number(market.es.get("return_5m_points"))
         if (
@@ -562,18 +673,20 @@ def _pilot_diagnostics(
     market: MinuteMarketFrame,
     options: OptionStructureFrame,
     *,
+    thesis: str,
     direction: str,
 ) -> list[str]:
     """Return redundant context checks as labels, not pilot vetoes."""
 
     sign = 1 if direction == "up" else -1
     diagnostics: list[str] = []
-    breakout = context.breakout_filter
-    breakout_verdict = str(breakout.get("verdict") or "unavailable")
-    if breakout_verdict == "blocked":
-        diagnostics.append("breakout_filter_blocked")
-    elif breakout_verdict != "supported" or breakout.get("actionable") is not True:
-        diagnostics.append("breakout_filter_not_supported")
+    if thesis == "breakout":
+        breakout = context.breakout_filter
+        breakout_verdict = str(breakout.get("verdict") or "unavailable")
+        if breakout_verdict == "blocked":
+            diagnostics.append("breakout_filter_blocked")
+        elif breakout_verdict != "supported" or breakout.get("actionable") is not True:
+            diagnostics.append("breakout_filter_not_supported")
     for horizon in ("return_1m_points", "return_5m_points"):
         value = _number(market.es.get(horizon))
         if value is None:
@@ -596,6 +709,38 @@ def _pilot_diagnostics(
     if "hot_option_liquidity_low" in context.invalidations:
         diagnostics.append("hot_option_liquidity_low")
     return list(dict.fromkeys(diagnostics))
+
+
+def _pilot_scope(
+    *,
+    pilot_enabled: bool,
+    thesis: str,
+    direction: str,
+    level_kind: str,
+) -> tuple[str, bool, str, str | None]:
+    if thesis == "breakout" and direction == "down" and level_kind == "flip_low":
+        return FLIP_LOW_BREAKDOWN_PUT_SHADOW_LANE, True, "normal", None
+    if thesis == "fade" and direction == "down" and level_kind in {"call_wall", "flip_high"}:
+        return UPPER_REJECTION_PUT_SHADOW_LANE, True, "normal", None
+    if thesis == "breakout" and direction == "down" and level_kind == "put_wall":
+        return (
+            PUT_WALL_BREAKDOWN_DISABLED_LANE,
+            False,
+            "disabled",
+            "put_wall_breakdown_disabled",
+        )
+    if not pilot_enabled:
+        return "rth_confirmed_level", False, "normal", None
+    if thesis == "breakout" and direction == "up":
+        return CALL_BREAKOUT_PILOT_LANE, False, "high", None
+    return CALL_BREAKOUT_PILOT_LANE, False, "disabled", "pilot_scope_upside_breakout_only"
+
+
+def _strategy_window(now: datetime) -> tuple[datetime, datetime]:
+    local = _utc(now).astimezone(ET)
+    start = datetime.combine(local.date(), ENTRY_WINDOW_START_ET, tzinfo=ET)
+    hard_exit = datetime.combine(local.date(), HARD_EXIT_ET, tzinfo=ET)
+    return start.astimezone(timezone.utc), hard_exit.astimezone(timezone.utc)
 
 
 def _moving_average_context(market: MinuteMarketFrame) -> dict[str, object]:

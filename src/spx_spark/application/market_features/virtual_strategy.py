@@ -8,16 +8,12 @@ import math
 from datetime import datetime, timedelta
 from typing import Mapping
 
-from spx_spark.config import NotificationSettings, StorageSettings
-from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
-from spx_spark.notifier.dispatcher import enqueue_notification
-from spx_spark.notifier.model import CommandRunner, default_runner
-from spx_spark.notifier.receipts import NotificationEnvelope
-from spx_spark.settings.market_features import MarketFeatureSettings
-from spx_spark.state_io import atomic_write_json_secure, exclusive_state_lock, read_json_object
-from spx_spark.storage import LatestState, configured_quote_use_decision
+from spx_spark.application.market_features.trade_intent import (
+    live_trade_intent_authority_issues,
+)
 from spx_spark.application.market_features.virtual_strategy_support import (
     _append_audit,
+    _cap_rth_trade_episode,
     _contract_snapshot,
     _episode,
     _event_contract,
@@ -33,6 +29,7 @@ from spx_spark.application.market_features.virtual_strategy_support import (
     _record_entry_decision,
     _record_due_horizons,
     _render_exit,
+    _rth_trade_hard_exit as _rth_trade_hard_exit,
     _should_replace_with_gth_spread,
     _spx_reference as _spx_reference,
     _state_path,
@@ -40,6 +37,14 @@ from spx_spark.application.market_features.virtual_strategy_support import (
     _trim_entry_decisions,
     _utc,
 )
+from spx_spark.config import NotificationSettings, StorageSettings
+from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
+from spx_spark.notifier.dispatcher import enqueue_notification
+from spx_spark.notifier.model import CommandRunner, default_runner
+from spx_spark.notifier.receipts import NotificationEnvelope
+from spx_spark.settings.market_features import MarketFeatureSettings
+from spx_spark.state_io import atomic_write_json_secure, exclusive_state_lock, read_json_object
+from spx_spark.storage import LatestState, configured_quote_use_decision
 from spx_spark.strategy_contract import (
     actionable_strategy_contract_issues,
     normalize_block_reasons,
@@ -72,7 +77,10 @@ def process_virtual_strategy(
     state_path = _state_path(storage)
     with exclusive_state_lock(state_path):
         state = read_json_object(state_path)
-        active = dict(state.get("active") or {})
+        active = _cap_rth_trade_episode(
+            dict(state.get("active") or {}),
+            now=now,
+        )
         consumed = set(str(item) for item in state.get("consumed_signal_ids") or [])
         entry_decisions = {
             str(key): dict(value)
@@ -268,11 +276,7 @@ def _new_episode(
     if trade_intent.get("status") == "trade_ready":
         source_id = str(trade_intent.get("intent_id") or "")
         contract_id = str(trade_intent.get("contract_id") or "")
-        if (
-            source_id
-            and source_id not in consumed
-            and contract_id
-        ):
+        if source_id and source_id not in consumed and contract_id:
             return _evaluate_trade_intent_entry(
                 latest,
                 trade_intent=trade_intent,
@@ -360,6 +364,9 @@ def _evaluate_trade_intent_entry(
         return result(["source_signal_id_unavailable"], terminal=True)
     if not contract_id:
         return result(["execution_contract_unavailable"], terminal=True)
+    authority_issues = live_trade_intent_authority_issues(trade_intent)
+    if authority_issues:
+        return result(authority_issues, terminal=True)
     contract_issues = list(actionable_strategy_contract_issues(trade_intent, now=now))
     if contract_issues:
         reasons = [
@@ -479,12 +486,7 @@ def _trade_intent_action_snapshot(
     bid = _number(quote.bid)
     mid = _number(quote.mid)
     ask = _number(quote.ask)
-    if (
-        bid is None
-        or mid is None
-        or ask is None
-        or not 0 <= bid <= mid <= ask
-    ):
+    if bid is None or mid is None or ask is None or not 0 <= bid <= mid <= ask:
         return {}, ["action_quote_nbbo_invalid"]
     source_at = quote.quote_time or quote.trade_time
     transport_at = quote.last_update_at or quote.received_at
@@ -636,9 +638,12 @@ def _evaluate_gth_spread_entry(
         valid_until = parse_aware_time(gth_signal.get("valid_until"))
         normalized = normalize_block_reasons(reasons)
         status = "trade_ready" if episode else "blocked" if terminal else "observing"
-        token = source_id or hashlib.sha256(
-            json.dumps(dict(gth_signal), sort_keys=True, default=str).encode()
-        ).hexdigest()[:24]
+        token = (
+            source_id
+            or hashlib.sha256(
+                json.dumps(dict(gth_signal), sort_keys=True, default=str).encode()
+            ).hexdigest()[:24]
+        )
         decision = {
             **strategy_event_fields(
                 policy_version_value=decision_policy,
@@ -677,9 +682,7 @@ def _evaluate_gth_spread_entry(
             for issue in source_contract_issues
         ]
         return result(reasons, terminal=True)
-    if not str(gth_signal.get("policy_version") or "").startswith(
-        "gth_dip_reclaim.v4+sha256:"
-    ):
+    if not str(gth_signal.get("policy_version") or "").startswith("gth_dip_reclaim.v4+sha256:"):
         return result(["source_policy_incompatible"], terminal=True)
     coordinate = gth_signal.get("coordinate")
     if not isinstance(coordinate, Mapping) or coordinate.get("kind") != "raw_es":

@@ -12,6 +12,10 @@ from spx_spark.application.order_map.convexity_idea_presentation import (
     render_convexity_idea_radar_lines,
 )
 from spx_spark.application.order_map.models import PLAY_ORDER, PLAY_TEMPLATE_LINES
+from spx_spark.application.order_map.put_candidate_presentation import (
+    presentable_plan_candidates,
+    put_candidate_report_lines,
+)
 from spx_spark.application.order_map.strike_coverage_presentation import (
     strike_price_coverage_line as _strike_price_coverage_line,
 )
@@ -125,10 +129,7 @@ def _wall_rank_persistence_line(payload: dict[str, Any]) -> str | None:
             and len(confidence) == 2
             and all(isinstance(value, (int, float)) for value in confidence)
         ):
-            confidence_text = (
-                f"{float(confidence[0]) * 100:.2f}–"
-                f"{float(confidence[1]) * 100:.2f}%"
-            )
+            confidence_text = f"{float(confidence[0]) * 100:.2f}–{float(confidence[1]) * 100:.2f}%"
         parts.append(
             f"{label}{_dash(item.get('primary_strike'))} "
             f"Top4 {ratio_text}(95%CI {confidence_text},n={item.get('observations')})"
@@ -461,9 +462,7 @@ def _wall_ladder_lines(payload: dict[str, Any]) -> list[str]:
             conservative = rung.get("limit_conservative")
             current = rung.get("current_mid")
             quote_executable = rung.get("execution_quote_status") != "range_only"
-            quote_reasons = tuple(
-                str(item) for item in rung.get("execution_quote_reasons") or ()
-            )
+            quote_reasons = tuple(str(item) for item in rung.get("execution_quote_reasons") or ())
             if projected is not None:
                 stale_tag = " [stale]" if rung.get("degraded") else ""
                 range_low = rung.get("projection_range_low")
@@ -497,8 +496,7 @@ def _wall_ladder_lines(payload: dict[str, Any]) -> list[str]:
                         else "报价门控未通过"
                     )
                     price_text = (
-                        f"{opt_label} 现{_fmt_premium(current)} [{gate_label}] "
-                        "BS暂不估值，触位重算"
+                        f"{opt_label} 现{_fmt_premium(current)} [{gate_label}] BS暂不估值，触位重算"
                     )
             else:
                 price_text = f"{opt_label} 参考价-"
@@ -521,7 +519,7 @@ def _presented_candidates(payload: dict[str, Any]) -> tuple[list[dict[str, Any]]
     if "plan_candidates" not in payload:
         rows = [item for item in payload.get("candidates") or [] if isinstance(item, dict)]
         return rows, "legacy"
-    plans = [item for item in payload.get("plan_candidates") or [] if isinstance(item, dict)]
+    plans = presentable_plan_candidates(payload)
     if plans:
         return plans, "plan"
     observations = [
@@ -564,6 +562,7 @@ def render_research_only_template(
     if line := _strike_price_coverage_line(payload):
         lines.append(line)
     lines.extend(_level_decision_lines(payload))
+    lines.extend(put_candidate_report_lines(payload))
     gamma_state = str(payload.get("gamma_state") or "")
     if gamma_state and not gamma_state.startswith("unknown"):
         lines.append(
@@ -665,6 +664,7 @@ def render_template(payload: dict[str, Any]) -> str:
     if hl_volume_line:
         lines.append(hl_volume_line)
     lines.extend(_level_decision_lines(payload))
+    lines.extend(put_candidate_report_lines(payload))
     ladder_lines = _wall_ladder_lines(payload)
     lines.extend(ladder_lines)
     density_line = _rn_density_line(payload)

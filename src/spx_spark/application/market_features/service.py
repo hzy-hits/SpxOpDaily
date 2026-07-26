@@ -73,11 +73,15 @@ from spx_spark.application.market_features.wall_probability import (
     build_wall_probability_tenor_shadow,
 )
 from spx_spark.application.market_features.trade_candidate import (
+    advance_put_shadow_candidates,
     advance_trade_candidate,
     gate_trade_intent,
     virtual_entry_intent,
 )
-from spx_spark.application.market_features.trade_intent import evaluate_trade_intent
+from spx_spark.application.market_features.trade_intent import (
+    evaluate_trade_intent,
+    trade_intent_policy_version,
+)
 from spx_spark.application.market_features.trade_intent_runtime import process_trade_intent
 from spx_spark.application.market_features.virtual_strategy import process_virtual_strategy
 from spx_spark.application.order_map.level_decision_shadow import (
@@ -103,7 +107,6 @@ from spx_spark.options_map import (
 from spx_spark.settings import load_app_settings
 from spx_spark.settings.market_features import MarketFeatureSettings
 from spx_spark.storage import LatestStateStore
-from spx_spark.strategy_contract import policy_version
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -329,7 +332,14 @@ def run(
         trade_intent,
         now=evaluation_now,
     )
+    put_shadow_exact = advance_put_shadow_candidates(
+        storage,
+        latest,
+        trade_intent,
+        now=evaluation_now,
+    )
     trade_intent = gate_trade_intent(trade_intent, trade_candidate)
+    trade_intent = {**trade_intent, "put_shadow_exact": put_shadow_exact}
     confirmed_gate = reconcile_confirmed_gate(
         storage,
         raw_level_decision,
@@ -379,10 +389,7 @@ def run(
         trade_candidate=trade_candidate,
         confirmed_gate=confirmed_gate,
     )
-    expected_trade_intent_policy_version = policy_version(
-        "rth_trade_intent.v3",
-        {"market_features": policy, "order_map": app.order_map},
-    )
+    expected_trade_intent_policy_version = trade_intent_policy_version(policy, app.order_map)
     delivery_action_now = as_utc(resolved_action_clock())
     intent_delivery = process_trade_intent(
         storage,
@@ -457,6 +464,7 @@ def run(
             "action_revalidated_at": action_now.isoformat(),
             "action_quote_state_created_at": action_latest.created_at.isoformat(),
             "trade_candidate": trade_candidate,
+            "put_shadow_exact": put_shadow_exact,
             "confirmed_gate": confirmed_gate,
             "level_decision_refresh_error": level_decision_refresh_error,
             "virtual_strategy": virtual_strategy,

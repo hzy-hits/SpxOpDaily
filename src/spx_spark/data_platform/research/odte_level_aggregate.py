@@ -142,7 +142,9 @@ def aggregate(
                         rows, lambda row: hour_bucket(datetime.fromisoformat(row.entry_time))
                     ),
                     "by_session_date": _slices(rows, _trade_session_date),
-                    "by_weekday": _slices(rows, lambda row: _trade_session_date(row).strftime("%A")),
+                    "by_weekday": _slices(
+                        rows, lambda row: _trade_session_date(row).strftime("%A")
+                    ),
                 }
                 if set_name == SET_PREFILL:
                     bucket["ft_gate"] = {
@@ -165,6 +167,7 @@ def build_artifact(
     features_root: Path,
     data_root: Path,
     sessions: Sequence[str],
+    put_sessions: Sequence[str],
     observed_partitions: Sequence[str],
     cutoff_at: datetime,
     as_of: date | datetime | None,
@@ -249,6 +252,8 @@ def build_artifact(
             "last_session": sessions[-1] if sessions else None,
             "trading_days": len(sessions),
             "complete_sessions": sessions,
+            "put_trading_days": len(put_sessions),
+            "put_complete_sessions": list(put_sessions),
             "observed_partition_count": len(observed_partitions),
             "observed_partitions": list(observed_partitions),
             "cutoff_at": cutoff_at.isoformat(),
@@ -277,7 +282,9 @@ def build_artifact(
             },
             "session_cohort": (
                 "backtest complete sessions are readiness.sessions.details rows with "
-                "complete=true; observed feature partitions remain a separate coverage concept"
+                "complete=true; RTH Put signals instead use "
+                "readiness.cohort_sessions.put_exact_entry.dates; observed feature "
+                "partitions remain a separate coverage concept"
             ),
             "production_strategy_set": SET_TRADE_READY,
             "entry": (
@@ -338,7 +345,7 @@ def build_artifact(
             "fills_assume_full_size_at_top_of_book",
             "commissions_slippage_queue_partial_fills_and_market_impact_not_modeled",
             "gth_underlier_uses_es_minus_fixed_basis",
-            "readiness_health_complete_sessions_only",
+            "readiness_cohort_complete_sessions_only",
             "legacy_gth_without_recorded_spread_has_no_spread_wall_trade",
             "prefill_is_follow_through_only_observational_proxy",
             "trade_ready_sample_is_not_an_out_of_sample_edge_claim",

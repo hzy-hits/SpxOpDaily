@@ -8,7 +8,9 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from spx_spark.data_platform.research.odte_level_backtest import (
+    _readiness_session_cohorts,
     _stats,
+    _uses_put_session_cohort,
     aggregate,
     evaluate_signal,
     follow_through_pass,
@@ -212,6 +214,34 @@ def test_hour_bucket_is_new_york_dst_aware() -> None:
     assert hour_bucket(datetime(2026, 12, 15, 13, 45, tzinfo=timezone.utc)) == "gth"
 
 
+def test_put_session_cohort_requires_rth_trade_intent_window() -> None:
+    expiry = date(2026, 7, 15)
+
+    def put_signal(at: datetime, *, set_name: str = SET_TRADE_READY) -> Signal:
+        return _ready_signal(
+            set_name=set_name,
+            at=at,
+            entry_at=at,
+            direction="down",
+            expiry=expiry,
+            contract_id="option:SPX:SPXW:20260715:7550:P",
+        )
+
+    assert _uses_put_session_cohort(put_signal(datetime(2026, 7, 15, 13, 45, tzinfo=timezone.utc)))
+    assert not _uses_put_session_cohort(
+        put_signal(datetime(2026, 7, 15, 12, 0, tzinfo=timezone.utc))
+    )
+    assert not _uses_put_session_cohort(
+        put_signal(datetime(2026, 7, 15, 17, 0, tzinfo=timezone.utc))
+    )
+    assert not _uses_put_session_cohort(
+        put_signal(
+            datetime(2026, 7, 15, 14, 0, tzinfo=timezone.utc),
+            set_name="gth_dip",
+        )
+    )
+
+
 def test_invalidation_exits_at_bid() -> None:
     long_series = _flat_series(ENTRY, 1800)
     underlier = _flat_underlier(7555.0)
@@ -249,9 +279,7 @@ def test_target_wall_exit_for_up_signal() -> None:
 def test_invalidation_at_first_ask_skips_entry_instead_of_booking_the_spread() -> None:
     long_series = [_tick(ENTRY, 12.9, 13.1)]  # mid 13.0 >= 1.3 * entry would trigger
     underlier = [UnderlierTick(at=ENTRY, price=7540.0)]  # invalidates first
-    result = simulate_trade(
-        _signal(decision_spot=7555.0), "naked", long_series, None, underlier
-    )
+    result = simulate_trade(_signal(decision_spot=7555.0), "naked", long_series, None, underlier)
     assert isinstance(result, Skip)
     assert result.reason == "invalidation_before_entry"
 
@@ -1101,6 +1129,12 @@ def test_trade_intent_coverage_keeps_observing_separate(tmp_path: Path) -> None:
                 "event_id": "level:block",
                 "evaluated_at": T0.isoformat(),
             },
+            {
+                "status": "shadow_ready",
+                "intent_id": "intent:put-shadow",
+                "event_id": "level:put-shadow",
+                "evaluated_at": T0.isoformat(),
+            },
             _trade_ready_record(),
             _trade_ready_record(evaluated_at="2026-07-16T00:00:00+00:00"),
         ],
@@ -1113,9 +1147,11 @@ def test_trade_intent_coverage_keeps_observing_separate(tmp_path: Path) -> None:
     assert coverage["records_by_status"] == {
         "observing": 1,
         "blocked": 1,
+        "shadow_ready": 1,
         "trade_ready": 1,
     }
-    assert coverage["evaluation_records"] == 3
+    assert coverage["evaluation_records"] == 4
+    assert coverage["distinct_shadow_ready_intent_ids"] == 1
     assert "excluded from pass/block" in coverage["observing_semantics"]
 
 
@@ -1758,6 +1794,15 @@ def test_run_as_of_uses_readiness_complete_sessions_and_keeps_partitions(
                 {"session_date": "2026-07-16", "complete": False},
             ],
         },
+        "cohort_sessions": {
+            "put_exact_entry": {
+                "observed": 2,
+                "rth_complete": 2,
+                "contract_consistent_complete": 2,
+                "target": 20,
+                "dates": ["2026-07-15", "2026-07-16"],
+            }
+        },
         "cohorts": {
             "gth_exact_entry": {"count": 0, "target": 20, "status": "collecting"},
             "put_exact_entry": {"count": 0, "target": 20, "status": "collecting"},
@@ -1780,13 +1825,13 @@ def test_run_as_of_uses_readiness_complete_sessions_and_keeps_partitions(
         fake_readiness,
     )
 
-    def transition(at: str, event_id: str) -> dict:
+    def transition(at: str, event_id: str, *, direction: str = "up") -> dict:
         return {
             "at": at,
             "current_phase": "confirmed",
             "previous_phase": "retest",
             "event_id": event_id,
-            "direction": "up",
+            "direction": direction,
             "thesis": "breakout",
             "level": 7550.0,
             "spx_level": 7550.0,
@@ -1802,7 +1847,33 @@ def test_run_as_of_uses_readiness_complete_sessions_and_keeps_partitions(
     )
     _write_jsonl(
         features / "level_decision_audit/date=2026-07-16/transitions.jsonl",
-        [transition("2026-07-16T14:00:00+00:00", "level:16")],
+        [
+            transition(
+                "2026-07-16T14:00:00+00:00",
+                "level:16",
+                direction="down",
+            )
+        ],
+    )
+    put_at = datetime(2026, 7, 16, 14, 0, tzinfo=timezone.utc)
+    _write_jsonl(
+        features / "trade_intents/date=2026-07-16/events.jsonl",
+        [
+            _trade_ready_record(
+                intent_id="intent:put-16",
+                event_id="level:put-16",
+                evaluated_at=put_at.isoformat(),
+                expires_at=(put_at + timedelta(seconds=20)).isoformat(),
+                time_stop_at=(put_at + timedelta(minutes=15)).isoformat(),
+                direction="down",
+                contract_id="option:SPX:SPXW:20260716:7550:P",
+                trigger_level=7550.0,
+                invalidation_spx=7553.0,
+                target_spx=7540.0,
+                spx_spot=7548.0,
+                play="level_breakout_put",
+            )
+        ],
     )
     target = run(
         features,
@@ -1817,6 +1888,11 @@ def test_run_as_of_uses_readiness_complete_sessions_and_keeps_partitions(
     assert artifact["signal_counts"]["confirmed"] == 1
     assert artifact["window"]["complete_sessions"] == ["2026-07-15"]
     assert artifact["window"]["trading_days"] == 1
+    assert artifact["window"]["put_complete_sessions"] == [
+        "2026-07-15",
+        "2026-07-16",
+    ]
+    assert artifact["window"]["put_trading_days"] == 2
     assert artifact["window"]["observed_partitions"] == ["2026-07-15", "2026-07-16"]
     assert artifact["window"]["observed_partition_count"] == 2
     assert artifact["window"]["cutoff_at"] == "2026-07-17T00:00:00+00:00"
@@ -1828,22 +1904,59 @@ def test_run_as_of_uses_readiness_complete_sessions_and_keeps_partitions(
     assert artifact["trade_intent_coverage"]["scope"] == {
         "kind": "observed_feature_partitions",
         "dates": ["2026-07-15", "2026-07-16"],
-        "note": "telemetry scope; the executable backtest cohort uses readiness-complete sessions",
+        "note": (
+            "telemetry scope; executable backtest signals use their readiness-complete "
+            "GTH/global or RTH Put session cohort"
+        ),
     }
-    assert artifact["signal_counts"]["trade_ready"] == 0
+    assert artifact["signal_counts"]["trade_ready"] == 1
     assert artifact["production_strategy_total"]["excluded_sets"] == [
         "confirmed",
         "prefill",
         "gth_dip",
     ]
-    assert artifact["trade_ready_decisions"] == []
+    assert [row["intent_id"] for row in artifact["trade_ready_decisions"]] == ["intent:put-16"]
     assert "expected_confirmed_signals" not in artifact
     assert "five_trading_days_small_sample" not in artifact["limitations"]
     assert "## 裁决冻结/样本就绪度" in report
+    assert "| Put RTH contract-consistent sessions | 2 | 20 | collecting |" in report
     assert "| GTH exact entries | 0 | 20 | collecting |" in report
     assert "| Put exact entries | 0 | 20 | collecting |" in report
     assert "| exact spread complete exits | 0 | 20 | collecting |" in report
+    assert "| shadow_ready | 0 | 0 |" in report
     assert "`automatic_promotion=false`" in report
+
+
+def test_readiness_session_cohort_excludes_contract_violating_complete_day() -> None:
+    readiness = {
+        "sessions": {
+            "details": [
+                {
+                    "session_date": "2026-07-15",
+                    "complete": True,
+                    "contract_consistent": False,
+                },
+                {
+                    "session_date": "2026-07-16",
+                    "complete": True,
+                    "contract_consistent": True,
+                },
+            ]
+        },
+        "cohort_sessions": {
+            "put_exact_entry": {
+                "dates": ["2026-07-15"],
+            }
+        },
+    }
+
+    global_dates, put_dates = _readiness_session_cohorts(
+        readiness,
+        last_complete_date=date(2026, 7, 16),
+    )
+
+    assert global_dates == {date(2026, 7, 16)}
+    assert put_dates == {date(2026, 7, 15)}
 
 
 def test_backtest_cli_exposes_and_parses_as_of() -> None:

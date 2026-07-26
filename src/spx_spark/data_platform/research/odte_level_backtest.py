@@ -37,6 +37,10 @@ from .odte_level_aggregate import (
     write_outputs,
 )
 from .odte_level_quotes import QuoteStore, pick_provider
+from .odte_level_session_cohorts import (
+    readiness_session_cohorts as _readiness_session_cohorts,
+    uses_put_session_cohort as _uses_put_session_cohort,
+)
 from .odte_level_timing import (
     first_tick_at_or_after as _first_tick_at_or_after,
     in_rth_1300_entry_window as _in_rth_1300_entry_window,
@@ -511,9 +515,7 @@ def simulate_trade(
             break
 
     if exit_px is None:
-        if profile.rth_clock_exit and (
-            last_tick is None or last_tick.at < stop_at
-        ):
+        if profile.rth_clock_exit and (last_tick is None or last_tick.at < stop_at):
             return Skip(
                 signal.set_name,
                 profile.name,
@@ -884,21 +886,10 @@ def run(
         cutoff_at=cutoff_at,
         generated_at=generated_at,
     )
-    readiness_sessions = strategy_readiness.get("sessions")
-    readiness_details = (
-        readiness_sessions.get("details") if isinstance(readiness_sessions, dict) else None
+    complete_session_dates, put_complete_session_dates = _readiness_session_cohorts(
+        strategy_readiness,
+        last_complete_date=last_complete_date,
     )
-    complete_session_dates: set[date] = set()
-    if isinstance(readiness_details, list):
-        for detail in readiness_details:
-            if not isinstance(detail, dict) or detail.get("complete") is not True:
-                continue
-            try:
-                session_date = date.fromisoformat(str(detail.get("session_date") or ""))
-            except ValueError:
-                continue
-            if session_date <= last_complete_date:
-                complete_session_dates.add(session_date)
 
     observed_partition_dates = sorted(
         session
@@ -917,7 +908,12 @@ def run(
             for signal in signals
             if signal.at < cutoff_at
             and signal.at.date() <= last_complete_date
-            and (signal.expiry or signal.at.date()) in complete_session_dates
+            and (signal.expiry or signal.at.date())
+            in (
+                put_complete_session_dates
+                if _uses_put_session_cohort(signal)
+                else complete_session_dates
+            )
         ]
     signal_counts = {name: len(signals) for name, signals in signal_sets.items()}
     intent_coverage = trade_intent_coverage(
@@ -929,7 +925,10 @@ def run(
     intent_coverage["scope"] = {
         "kind": "observed_feature_partitions",
         "dates": [session.isoformat() for session in observed_partition_dates],
-        "note": "telemetry scope; the executable backtest cohort uses readiness-complete sessions",
+        "note": (
+            "telemetry scope; executable backtest signals use their readiness-complete "
+            "GTH/global or RTH Put session cohort"
+        ),
     }
     logger.info("signal counts: %s", signal_counts)
 
@@ -952,12 +951,14 @@ def run(
     logger.info("skip reasons: %s", skip_summary)
 
     sessions = sorted(session.isoformat() for session in complete_session_dates)
+    put_sessions = sorted(session.isoformat() for session in put_complete_session_dates)
     observed_partitions = [session.isoformat() for session in observed_partition_dates]
     artifact = build_artifact(
         generated_at=generated_at,
         features_root=features_root,
         data_root=data_root,
         sessions=sessions,
+        put_sessions=put_sessions,
         observed_partitions=observed_partitions,
         cutoff_at=cutoff_at,
         as_of=as_of,

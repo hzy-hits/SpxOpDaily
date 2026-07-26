@@ -69,6 +69,32 @@ def test_blocked_confirmation_finalizes_when_level_expires(tmp_path) -> None:
     assert len(_rows(tmp_path)) == 1
 
 
+def test_shadow_ready_finalizes_without_becoming_live_trade_ready(tmp_path) -> None:
+    storage = SimpleNamespace(data_root=str(tmp_path))
+    level = {
+        **_confirmed("level:put-shadow"),
+        "direction": "down",
+        "level_kind": "flip_low",
+    }
+    intent = {
+        **_contract(),
+        "status": "shadow_ready",
+        "event_id": "level:put-shadow",
+        "intent_id": "intent:put-shadow",
+        "contract_id": "option:SPX:SPXW:20260715:7560:P",
+        "shadow_mode": True,
+        "automatic_ordering": False,
+    }
+
+    result = reconcile_confirmed_gate(storage, level, intent, now=NOW)
+
+    assert result["status"] == "shadow_ready"
+    assert result["terminal"] is True
+    assert result["intent_id"] == "intent:put-shadow"
+    assert result["block_reasons"] == []
+    assert len(_rows(tmp_path)) == 1
+
+
 def test_projection_gap_is_preserved_as_final_block_reason(tmp_path) -> None:
     storage = SimpleNamespace(data_root=str(tmp_path))
     reconcile_confirmed_gate(

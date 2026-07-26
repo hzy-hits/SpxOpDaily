@@ -17,10 +17,12 @@ from spx_spark.application.market_features.virtual_strategy import (
     _gth_time_stop,
     _new_gth_spread_episode,
     _record_entry_decision,
+    _rth_trade_hard_exit,
     _should_replace_with_gth_spread,
     _spread_snapshot,
     _spread_snapshot_decision,
     _trade_intent_action_snapshot,
+    process_virtual_strategy,
 )
 from spx_spark.marketdata import InstrumentId, MarketDataQuality, Provider, Quote
 from spx_spark.settings.market_features import MarketFeatureSettings
@@ -108,6 +110,163 @@ def test_long_call_keeps_upside_target_and_downside_invalidation() -> None:
         "underlier_target_reached",
         "take_profit",
     )
+
+
+@pytest.mark.parametrize(
+    ("session_id", "now", "expected"),
+    (
+        (
+            "2026-07-15",
+            datetime(2026, 7, 15, 16, 0, tzinfo=UTC),
+            datetime(2026, 7, 15, 17, 0, tzinfo=UTC),
+        ),
+        (
+            "2026-12-15",
+            datetime(2026, 12, 15, 17, 0, tzinfo=UTC),
+            datetime(2026, 12, 15, 18, 0, tzinfo=UTC),
+        ),
+    ),
+)
+def test_rth_trade_hard_exit_is_dst_aware(
+    session_id: str,
+    now: datetime,
+    expected: datetime,
+) -> None:
+    assert (
+        _rth_trade_hard_exit(
+            {"source_kind": "trade_intent", "session_id": session_id},
+            now=now,
+        )
+        == expected
+    )
+
+
+def test_rth_trade_hard_exit_is_half_open_and_does_not_change_gth() -> None:
+    persisted_stop = datetime(2026, 7, 15, 20, 0, tzinfo=UTC)
+    rth = {
+        "source_kind": "trade_intent",
+        "session_id": "2026-07-15",
+        "time_stop_at": persisted_stop.isoformat(),
+    }
+    gth = {
+        "source_kind": "gth_dip_reclaim_call",
+        "session_id": "2026-07-15",
+        "time_stop_at": persisted_stop.isoformat(),
+    }
+    latest = SimpleNamespace(best_quote=lambda _instrument_id: None)
+    common = {
+        "latest": latest,
+        "option_structure": {},
+        "macro_event": {},
+        "greek_decision": {},
+        "policy": MarketFeatureSettings(),
+    }
+
+    assert _exit_decision(
+        rth,
+        {},
+        now=datetime(2026, 7, 15, 16, 59, 59, tzinfo=UTC),
+        **common,
+    ) == (None, None)
+    assert _exit_decision(
+        rth,
+        {},
+        now=datetime(2026, 7, 15, 17, 0, tzinfo=UTC),
+        **common,
+    ) == ("time_stop", "exit")
+    assert _exit_decision(
+        gth,
+        {},
+        now=datetime(2026, 7, 15, 17, 0, tzinfo=UTC),
+        **common,
+    ) == (None, None)
+
+
+def test_persisted_legacy_rth_episode_is_closed_at_1300_et(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 7, 15, 17, 0, tzinfo=UTC)
+    state_path = tmp_path / "latest" / "virtual_strategy_state.json"
+    state_path.parent.mkdir(parents=True)
+    state_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "active": {
+                    "schema_version": 3,
+                    "policy_version": "virtual_strategy_lifecycle.v3+sha256:legacy",
+                    "valid_until": "2026-07-15T20:00:00+00:00",
+                    "coordinate": {
+                        "kind": "official_spx",
+                        "instrument_id": "index:SPX",
+                        "observed_value": 7550.0,
+                        "target_value": 7560.0,
+                        "spx_observed_value": 7550.0,
+                        "basis_points": 0.0,
+                        "as_of": "2026-07-15T16:55:00+00:00",
+                    },
+                    "block_reasons": [],
+                    "episode_id": "virtual:legacy-rth",
+                    "status": "active",
+                    "source_signal_id": "intent:legacy-rth",
+                    "source_kind": "trade_intent",
+                    "session_id": "2026-07-15",
+                    "direction": "up",
+                    "contract_id": "option:SPX:SPXW:20260715:7560:C",
+                    "opened_at": "2026-07-15T16:55:00+00:00",
+                    "time_stop_at": "2026-07-15T20:00:00+00:00",
+                    "entry_mid": 10.0,
+                    "entry_bid": 9.9,
+                    "entry_ask": 10.1,
+                    "entry_snapshot": {},
+                    "mfe_fraction": 0.0,
+                    "mae_fraction": 0.0,
+                    "automatic_ordering": False,
+                },
+                "consumed_signal_ids": ["intent:legacy-rth"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    notification_result = SimpleNamespace(
+        accepted=True,
+        inserted=True,
+        duplicate=False,
+        delivered=False,
+        queued_for_recovery=True,
+        outcome="queued",
+        targets=(),
+    )
+    monkeypatch.setattr(
+        virtual_strategy,
+        "enqueue_notification",
+        lambda *_args, **_kwargs: notification_result,
+    )
+
+    result = process_virtual_strategy(
+        SimpleNamespace(data_root=str(tmp_path)),
+        SimpleNamespace(best_quote=lambda _instrument_id: None, created_at=now),
+        trade_intent={},
+        gth_signal={},
+        option_structure={},
+        macro_event={},
+        greek_decision={},
+        now=now,
+        policy=MarketFeatureSettings(),
+        notification=SimpleNamespace(),
+    )
+
+    assert result["status"] == "closed"
+    assert result["exit_reason"] == "time_stop"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert state["active"] is None
+    assert state["last_closed"]["closed_at"] == now.isoformat()
+    assert state["last_closed"]["exit_reason"] == "time_stop"
+    assert state["last_closed"]["time_stop_at"] == now.isoformat()
+    assert state["last_closed"]["valid_until"] == now.isoformat()
+    assert state["last_closed"]["pre_hard_exit_time_stop_at"] == "2026-07-15T20:00:00+00:00"
+    assert state["last_closed"]["time_stop_policy"] == "rth_trade_intent_1300_et_cap"
 
 
 def test_gth_time_stop_uses_summer_dst_exit_clock() -> None:
@@ -604,6 +763,30 @@ def test_rth_action_underlier_guard_is_terminal_before_episode(
     assert decision["action_quote_snapshot"]["action_underlier"]["price"] == spx
 
 
+def test_rth_virtual_entry_rejects_mislabeled_put_trade_ready() -> None:
+    intent = {
+        **_rth_action_contract(),
+        "strategy_lane": "long_0dte_rth_flip_low_breakdown_put_shadow",
+        "shadow_mode": True,
+        "execution_eligible": False,
+        "quote_observation_eligible": True,
+        "direction": "down",
+        "contract_id": "option:SPX:SPXW:20260715:7550:P",
+    }
+
+    episode, decision = _evaluate_trade_intent_entry(
+        SimpleNamespace(created_at=NOW),
+        trade_intent=intent,
+        now=NOW,
+        policy=MarketFeatureSettings(),
+        expected_policy_version=str(intent["policy_version"]),
+    )
+
+    assert episode == {}
+    assert decision["terminal"] is True
+    assert decision["block_reasons"][0] == "trade_intent_execution_authority_missing"
+
+
 @pytest.mark.parametrize(
     ("spx", "es", "reason"),
     (
@@ -838,9 +1021,7 @@ def test_gth_entry_decision_records_quote_blockers_then_terminal_expiry(tmp_path
         entry_decisions=state,
         now=datetime(2026, 7, 15, 3, 9, 30, tzinfo=UTC),
     )
-    audit_path = (
-        tmp_path / "features" / "virtual_strategy" / "date=2026-07-15" / "events.jsonl"
-    )
+    audit_path = tmp_path / "features" / "virtual_strategy" / "date=2026-07-15" / "events.jsonl"
     rows = [json.loads(line) for line in audit_path.read_text().splitlines()]
     assert len(rows) == 2
     assert rows[-1]["block_reasons"] == [
@@ -886,6 +1067,11 @@ def _rth_action_contract() -> dict[str, object]:
         },
         "block_reasons": [],
         "status": "trade_ready",
+        "strategy_lane": "long_0dte_rth_upside_breakout_pilot",
+        "shadow_mode": False,
+        "execution_eligible": True,
+        "quote_observation_eligible": False,
+        "automatic_ordering": False,
         "intent_id": "candidate:rth-action",
         "evaluated_at": NOW.isoformat(),
         "direction": "up",

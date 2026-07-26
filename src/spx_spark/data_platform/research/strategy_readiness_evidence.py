@@ -10,8 +10,31 @@ from __future__ import annotations
 import math
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
-from datetime import date, datetime, timezone
+from datetime import date, datetime, time, timezone
 from typing import Any, Protocol
+
+from spx_spark.market_calendar import ET
+
+
+_PUT_SHADOW_EXACT_QUOTE_POLICIES = {
+    "put_shadow_exact_quote.v1": 15.0,
+}
+_PUT_SHADOW_ENTRY_WINDOW_POLICIES = {
+    "rth_lanes_0945_1300_put_shadow.v1": (time(9, 45), time(13, 0)),
+}
+_PUT_SHADOW_LANE_POLICIES = {
+    "long_0dte_rth_flip_low_breakdown_put_shadow": (
+        "level_breakout_put",
+        "breakout",
+        frozenset({"flip_low"}),
+    ),
+    "long_0dte_rth_upper_rejection_put_shadow": (
+        "level_fade_put",
+        "fade",
+        frozenset({"call_wall", "flip_high"}),
+    ),
+}
+PUT_SHADOW_LANES = frozenset(_PUT_SHADOW_LANE_POLICIES)
 
 
 class ReadinessRecord(Protocol):
@@ -132,41 +155,96 @@ def count_gth_exact_entries(
 def count_put_exact_entries(
     records: Sequence[ReadinessRecord], *, eligible_sessions: set[str]
 ) -> dict[str, int]:
-    """Count exact single-leg put entries joined to trade-ready intents."""
+    """Count exact Put quote entries from production and independent shadow lanes."""
 
-    intents = [
-        record
-        for record in records
-        if record.source == "trade_intents"
-        and record.payload.get("status") == "trade_ready"
-        and record.payload.get("direction") == "down"
-    ]
+    intent_groups: dict[str, list[ReadinessRecord]] = {}
+    for record in sorted(records, key=_record_sort_key):
+        if (
+            record.source == "trade_intents"
+            and record.payload.get("status") in {"trade_ready", "shadow_ready"}
+            and record.payload.get("direction") == "down"
+            and _nonempty_string(record.payload.get("intent_id"))
+        ):
+            identity = _put_intent_evidence_id(record.payload)
+            intent_groups.setdefault(identity, []).append(record)
     opens = [
         record
         for record in records
         if record.source == "virtual_strategy" and record.payload.get("event") == "virtual_opened"
     ]
-    opens_by_source = {
-        str(record.payload.get("source_signal_id")): record
-        for record in opens
-        if _nonempty_string(record.payload.get("source_signal_id"))
-    }
+    shadow_entries = [
+        record
+        for record in records
+        if record.source == "trade_candidates"
+        and record.payload.get("event") == "candidate_terminal"
+        and record.payload.get("phase") == "quote_reached_entry"
+        and record.payload.get("shadow_mode") is True
+    ]
     successes: set[str] = set()
     eligible = 0
+    eligible_trade_ready = 0
+    eligible_shadow_ready = 0
+    exact_virtual_opens = 0
+    exact_shadow_quote_entries = 0
     excluded_incomplete = 0
-    for intent in intents:
-        session_id = intent.session_date.isoformat() if intent.session_date else ""
-        if session_id not in eligible_sessions:
+    for evidence_id, group in intent_groups.items():
+        eligible_group = [
+            intent
+            for intent in group
+            if (intent.session_date.isoformat() if intent.session_date else "") in eligible_sessions
+        ]
+        if not eligible_group:
             excluded_incomplete += 1
             continue
         eligible += 1
-        intent_id = str(intent.payload.get("intent_id") or "")
-        opened = opens_by_source.get(intent_id)
-        if opened is not None and _exact_put_open(intent.payload, opened.payload):
-            successes.add(intent_id)
+        trade_ready = [
+            intent for intent in eligible_group if intent.payload.get("status") == "trade_ready"
+        ]
+        shadow_ready = [
+            intent for intent in eligible_group if intent.payload.get("status") == "shadow_ready"
+        ]
+        if trade_ready:
+            eligible_trade_ready += 1
+            opened = next(
+                (
+                    row
+                    for intent in trade_ready
+                    for row in sorted(opens, key=_record_sort_key)
+                    if _source_matches_intent(
+                        row.payload,
+                        str(intent.payload.get("intent_id") or ""),
+                    )
+                    and _exact_put_open(intent.payload, row.payload)
+                ),
+                None,
+            )
+            if opened is None:
+                continue
+            successes.add(evidence_id)
+            exact_virtual_opens += 1
+            continue
+        if not shadow_ready:
+            continue
+        eligible_shadow_ready += 1
+        shadow = next(
+            (
+                row
+                for intent in shadow_ready
+                for row in sorted(shadow_entries, key=_record_sort_key)
+                if _shadow_source_matches_intent(row.payload, intent.payload)
+                and _exact_put_shadow_entry(intent.payload, row.payload)
+            ),
+            None,
+        )
+        if shadow is not None:
+            successes.add(evidence_id)
+            exact_shadow_quote_entries += 1
     return {
         "count": len(successes),
-        "eligible_trade_ready_puts": eligible,
+        "eligible_trade_ready_puts": eligible_trade_ready,
+        "eligible_shadow_ready_puts": eligible_shadow_ready,
+        "exact_virtual_opens": exact_virtual_opens,
+        "exact_shadow_quote_entries": exact_shadow_quote_entries,
         "unmatched_or_inexact_puts": eligible - len(successes),
         "excluded_incomplete_session": excluded_incomplete,
     }
@@ -236,6 +314,10 @@ def _semantic_record_key(record: ReadinessRecord) -> str | None:
     if record.source == "gth_dip_reclaim":
         event_id = row.get("event_id")
         return f"gth_signal:{event_id}" if _nonempty_string(event_id) else None
+    if record.source == "trade_intents" and row.get("status") == "shadow_ready":
+        # A shadow-ready row is a repeated detector evaluation, not a second
+        # opportunity.  The consumed candidate lifecycle is audited below.
+        return None
     if record.source == "trade_intents" and row.get("status") == "trade_ready":
         intent_id = row.get("intent_id")
         return f"trade_ready:{intent_id}" if _nonempty_string(intent_id) else None
@@ -243,9 +325,9 @@ def _semantic_record_key(record: ReadinessRecord) -> str | None:
         record_key = row.get("record_key") or row.get("event_id")
         return f"confirmed_gate:{record_key}" if _nonempty_string(record_key) else None
     if record.source == "trade_candidates":
-        candidate_id = row.get("candidate_id")
         event = row.get("event")
-        return f"trade_candidate:{event}:{candidate_id}" if _nonempty_string(candidate_id) else None
+        identity = _put_candidate_evidence_id(row)
+        return f"trade_candidate:{event}:{identity}" if identity else None
     if record.source == "virtual_strategy" and row.get("event") == "virtual_entry_decision":
         decision_id = row.get("decision_id") or row.get("source_signal_id")
         return f"virtual_entry_decision:{decision_id}" if _nonempty_string(decision_id) else None
@@ -331,11 +413,270 @@ def _exact_put_open(intent: Mapping[str, object], opened: Mapping[str, object]) 
         or contract[0] != session_id
         or contract[2] != "P"
         or opened.get("contract_id") != contract_id
-        or opened.get("position_type") == "call_debit_spread"
+        or opened.get("position_type") != "single_option"
     ):
         return False
     snapshot = _entry_snapshot(opened)
     return _exact_quote_snapshot(snapshot, at=_event_at(opened), require_quality=True)
+
+
+def _exact_put_shadow_entry(
+    intent: Mapping[str, object],
+    candidate: Mapping[str, object],
+) -> bool:
+    source = candidate.get("source_intent")
+    observation = candidate.get("entry_observation")
+    contract_id = str(intent.get("contract_id") or "")
+    session_id = _parse_date(intent.get("session_id"))
+    contract = _parse_option_contract(contract_id)
+    entry_limit = _number(intent.get("entry_limit"))
+    intent_at = _parse_time(intent.get("evaluated_at"))
+    valid_until = _parse_time(intent.get("valid_until"))
+    source_intent_at = (
+        _parse_time(source.get("evaluated_at")) if isinstance(source, Mapping) else None
+    )
+    source_valid_until = (
+        _parse_time(source.get("valid_until")) if isinstance(source, Mapping) else None
+    )
+    candidate_valid_until = _parse_time(candidate.get("valid_until"))
+    source_entry_limit = _number(source.get("entry_limit")) if isinstance(source, Mapping) else None
+    candidate_entry_limit = _number(candidate.get("entry_limit"))
+    intent_lane = intent.get("strategy_lane")
+    lane_policy = _PUT_SHADOW_LANE_POLICIES.get(str(intent_lane))
+    window_contract_version = intent.get("trade_intent_contract_version")
+    window_policy = (
+        _PUT_SHADOW_ENTRY_WINDOW_POLICIES.get(str(window_contract_version))
+        if _nonempty_string(window_contract_version)
+        else None
+    )
+    entry_window_start_at = _parse_time(intent.get("entry_window_start_at"))
+    hard_exit_at = _parse_time(intent.get("hard_exit_at"))
+    source_entry_window_start_at = (
+        _parse_time(source.get("entry_window_start_at")) if isinstance(source, Mapping) else None
+    )
+    source_hard_exit_at = (
+        _parse_time(source.get("hard_exit_at")) if isinstance(source, Mapping) else None
+    )
+    candidate_entry_window_start_at = _parse_time(candidate.get("entry_window_start_at"))
+    candidate_hard_exit_at = _parse_time(candidate.get("hard_exit_at"))
+    quote_policy_version = (
+        observation.get("exact_quote_policy_version") if isinstance(observation, Mapping) else None
+    )
+    quote_max_age = (
+        _PUT_SHADOW_EXACT_QUOTE_POLICIES.get(str(quote_policy_version))
+        if _nonempty_string(quote_policy_version)
+        else None
+    )
+    declared_quote_max_age = (
+        _number(observation.get("exact_quote_max_age_seconds"))
+        if isinstance(observation, Mapping)
+        else None
+    )
+    expected_candidate_id = (
+        f"{source.get('intent_id')}|{source.get('event_id')}"
+        if isinstance(source, Mapping)
+        and _nonempty_string(source.get("intent_id"))
+        and _nonempty_string(source.get("event_id"))
+        else ""
+    )
+    observation_entry_limit = (
+        _number(observation.get("entry_limit")) if isinstance(observation, Mapping) else None
+    )
+    if (
+        contract is None
+        or session_id is None
+        or contract[0] != session_id
+        or contract[2] != "P"
+        or intent.get("status") != "shadow_ready"
+        or intent.get("shadow_mode") is not True
+        or intent.get("execution_eligible") is not False
+        or intent.get("quote_observation_eligible") is not True
+        or intent.get("automatic_ordering") is not False
+        or intent_lane not in PUT_SHADOW_LANES
+        or lane_policy is None
+        or not _put_shadow_lane_contract_matches(intent, lane_policy)
+        or intent_at is None
+        or valid_until is None
+        or window_policy is None
+        or entry_window_start_at is None
+        or hard_exit_at is None
+        or not isinstance(source, Mapping)
+        or not _same_put_intent_identity(source, intent)
+        or source.get("execution_eligible") is not False
+        or source.get("quote_observation_eligible") is not True
+        or source.get("automatic_ordering") is not False
+        or source.get("status") != "shadow_ready"
+        or source.get("shadow_mode") is not True
+        or source.get("direction") != "down"
+        or source.get("session_id") != intent.get("session_id")
+        or source.get("contract_id") != contract_id
+        or source.get("strategy_lane") != intent_lane
+        or not _put_shadow_lane_contract_matches(source, lane_policy)
+        or source.get("policy_version") != intent.get("policy_version")
+        or source.get("trade_intent_contract_version") != window_contract_version
+        or source_intent_at != intent_at
+        or source_valid_until != valid_until
+        or source_entry_window_start_at != entry_window_start_at
+        or source_hard_exit_at != hard_exit_at
+        or source_entry_limit is None
+        or entry_limit is None
+        or not math.isclose(source_entry_limit, entry_limit, abs_tol=1e-9)
+        or candidate.get("contract_id") != contract_id
+        or candidate.get("strategy_lane") != intent_lane
+        or not _put_shadow_lane_contract_matches(candidate, lane_policy)
+        or candidate.get("event_id") != source.get("event_id")
+        or candidate.get("intent_id") != source.get("intent_id")
+        or candidate.get("semantic_key") != source.get("semantic_key")
+        or candidate.get("candidate_id") != expected_candidate_id
+        or candidate.get("direction") != source.get("direction")
+        or not _nonempty_string(candidate.get("event_id"))
+        or not _nonempty_string(candidate.get("intent_id"))
+        or not _nonempty_string(candidate.get("semantic_key"))
+        or candidate_entry_limit is None
+        or not math.isclose(candidate_entry_limit, source_entry_limit, abs_tol=1e-9)
+        or candidate_valid_until != source_valid_until
+        or candidate.get("trade_intent_contract_version") != window_contract_version
+        or candidate_entry_window_start_at != source_entry_window_start_at
+        or candidate_hard_exit_at != source_hard_exit_at
+        or candidate.get("event") != "candidate_terminal"
+        or candidate.get("phase") != "quote_reached_entry"
+        or candidate.get("shadow_mode") is not True
+        or candidate.get("automatic_ordering") is not False
+        or candidate.get("execution_claim") != "none"
+        or candidate.get("broker_order_state") != "not_connected"
+        or not isinstance(observation, Mapping)
+        or observation.get("contract_id") != contract_id
+        or observation_entry_limit is None
+        or not math.isclose(observation_entry_limit, entry_limit, abs_tol=1e-9)
+        or observation.get("entry_condition") != "displayed_ask_at_or_below_limit"
+        or observation.get("quote_pricing_allowed") is not True
+        or observation.get("exact_quote_freshness_ok") is not True
+        or quote_max_age is None
+        or declared_quote_max_age != quote_max_age
+        or observation.get("quote_quality") != "live"
+        or not _nonempty_string(observation.get("provider"))
+        or _number(observation.get("ask")) is None
+        or float(observation["ask"]) > entry_limit
+    ):
+        return False
+    terminal_at = _parse_time(candidate.get("terminal_at"))
+    observation_at = _parse_time(observation.get("at"))
+    source_at = _parse_time(observation.get("quote_source_at"))
+    transport_at = _parse_time(observation.get("quote_transport_at"))
+    observed_source_age = _number(observation.get("quote_source_age_seconds"))
+    observed_transport_age = _number(observation.get("quote_transport_age_seconds"))
+    if (
+        not _valid_nbbo(observation)
+        or source_at is None
+        or transport_at is None
+        or terminal_at is None
+        or observation_at != terminal_at
+        or observed_source_age is None
+        or observed_transport_age is None
+    ):
+        return False
+    intent_local = intent_at.astimezone(ET)
+    terminal_local = terminal_at.astimezone(ET)
+    valid_until_local = valid_until.astimezone(ET)
+    entry_window_start_et, hard_exit_et = window_policy
+    expected_entry_window_start = datetime.combine(
+        session_id,
+        entry_window_start_et,
+        tzinfo=ET,
+    ).astimezone(timezone.utc)
+    expected_hard_exit = datetime.combine(
+        session_id,
+        hard_exit_et,
+        tzinfo=ET,
+    ).astimezone(timezone.utc)
+    if not (
+        entry_window_start_at == expected_entry_window_start
+        and hard_exit_at == expected_hard_exit
+        and intent_local.date() == session_id
+        and entry_window_start_et <= intent_local.time() < hard_exit_et
+        and intent_at <= terminal_at < valid_until
+        and terminal_local.date() == session_id
+        and entry_window_start_et <= terminal_local.time() < hard_exit_et
+        and valid_until_local.date() == session_id
+        and valid_until <= hard_exit_at
+    ):
+        return False
+    source_age = (terminal_at - source_at).total_seconds()
+    transport_age = (terminal_at - transport_at).total_seconds()
+    return bool(
+        0.0 <= source_age <= quote_max_age
+        and 0.0 <= transport_age <= quote_max_age
+        and math.isclose(observed_source_age, source_age, abs_tol=1e-6)
+        and math.isclose(observed_transport_age, transport_age, abs_tol=1e-6)
+    )
+
+
+def _put_shadow_lane_contract_matches(
+    payload: Mapping[str, object],
+    policy: tuple[str, str, frozenset[str]],
+) -> bool:
+    play, thesis, level_kinds = policy
+    return bool(
+        payload.get("play") == play
+        and payload.get("thesis") == thesis
+        and payload.get("level_kind") in level_kinds
+    )
+
+
+def _source_matches_intent(payload: Mapping[str, object], intent_id: str) -> bool:
+    source_id = str(payload.get("source_signal_id") or "")
+    return bool(source_id == intent_id or source_id.startswith(f"{intent_id}|"))
+
+
+def _shadow_source_matches_intent(
+    payload: Mapping[str, object],
+    intent: Mapping[str, object],
+) -> bool:
+    source = payload.get("source_intent")
+    return bool(isinstance(source, Mapping) and _same_put_intent_identity(source, intent))
+
+
+def _same_put_intent_identity(
+    left: Mapping[str, object],
+    right: Mapping[str, object],
+) -> bool:
+    left_event_id = left.get("event_id")
+    right_event_id = right.get("event_id")
+    left_intent_id = left.get("intent_id")
+    right_intent_id = right.get("intent_id")
+    left_semantic_key = left.get("semantic_key")
+    right_semantic_key = right.get("semantic_key")
+    return bool(
+        _nonempty_string(left_event_id)
+        and _nonempty_string(right_event_id)
+        and left_event_id == right_event_id
+        and _nonempty_string(left_intent_id)
+        and _nonempty_string(right_intent_id)
+        and left_intent_id == right_intent_id
+        and _nonempty_string(left_semantic_key)
+        and _nonempty_string(right_semantic_key)
+        and left_semantic_key == right_semantic_key
+    )
+
+
+def _put_intent_evidence_id(payload: Mapping[str, object]) -> str:
+    event_id = payload.get("event_id")
+    if _nonempty_string(event_id):
+        return f"event_id:{event_id}"
+    return f"intent_id:{payload.get('intent_id')}"
+
+
+def _put_candidate_evidence_id(payload: Mapping[str, object]) -> str:
+    source = payload.get("source_intent")
+    source = source if isinstance(source, Mapping) else {}
+    candidate_id = payload.get("candidate_id")
+    if _nonempty_string(candidate_id):
+        return f"candidate_id:{candidate_id}"
+    event_id = payload.get("event_id") or source.get("event_id")
+    intent_id = payload.get("intent_id") or source.get("intent_id")
+    if _nonempty_string(event_id) and _nonempty_string(intent_id):
+        return f"event_intent:{event_id}|{intent_id}"
+    return ""
 
 
 def _exact_spread_close(payload: Mapping[str, object]) -> bool:

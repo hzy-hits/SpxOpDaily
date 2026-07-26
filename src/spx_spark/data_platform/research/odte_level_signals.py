@@ -797,13 +797,17 @@ def trade_intent_coverage(
     """Count persisted intent telemetry without coercing ``observing``.
 
     Counts are raw evaluation-record coverage, not a gate pass rate: repeated
-    blocked evaluations remain repeated records and ``observing`` is kept as a
-    separate non-decision state.
+    evaluations remain repeated records, ``observing`` is a non-decision state,
+    and ``shadow_ready`` is reported separately from executable
+    ``trade_ready``.
     """
-    statuses = ("observing", "blocked", SET_TRADE_READY)
+    statuses = ("observing", "blocked", "shadow_ready", SET_TRADE_READY)
     by_status = {status: 0 for status in statuses}
     event_ids = {status: set() for status in statuses}
-    intent_ids: set[str] = set()
+    intent_ids = {
+        "shadow_ready": set(),
+        SET_TRADE_READY: set(),
+    }
     invalid_timestamp_records = 0
     other_status_records = 0
     for path in sorted(features_root.glob("trade_intents/date=*/events.jsonl")):
@@ -823,15 +827,14 @@ def trade_intent_coverage(
             if event_id:
                 event_ids[status].add(event_id)
             intent_id = str(record.get("intent_id") or "")
-            if status == SET_TRADE_READY and intent_id:
-                intent_ids.add(intent_id)
+            if status in intent_ids and intent_id:
+                intent_ids[status].add(intent_id)
     return {
         "evaluation_records": sum(by_status.values()) + other_status_records,
         "records_by_status": by_status,
-        "distinct_event_ids_by_status": {
-            status: len(event_ids[status]) for status in statuses
-        },
-        "distinct_trade_ready_intent_ids": len(intent_ids),
+        "distinct_event_ids_by_status": {status: len(event_ids[status]) for status in statuses},
+        "distinct_trade_ready_intent_ids": len(intent_ids[SET_TRADE_READY]),
+        "distinct_shadow_ready_intent_ids": len(intent_ids["shadow_ready"]),
         "invalid_timestamp_records": invalid_timestamp_records,
         "other_status_records": other_status_records,
         "observing_semantics": (

@@ -18,7 +18,11 @@ from spx_spark.application.market_features.models import (
 )
 from spx_spark.application.market_features.play_outcome_stats import PlayOutcomeStats
 from spx_spark.application.market_features.service import _resolve_action_clock
-from spx_spark.application.market_features.trade_intent import evaluate_trade_intent
+from spx_spark.application.market_features.trade_intent import (
+    TRADE_INTENT_CONTRACT_VERSION,
+    evaluate_trade_intent,
+    trade_intent_policy_version,
+)
 from spx_spark.application.market_features.trade_intent_runtime import (
     _action_revalidation,
     _writer_output_valid,
@@ -30,10 +34,31 @@ from spx_spark.marketdata import InstrumentId, MarketDataQuality, Provider, Quot
 from spx_spark.settings.market_features import MarketFeatureSettings
 from spx_spark.settings.order_map import OrderMapPolicy
 from spx_spark.storage import LatestState
+from spx_spark.strategy_contract import policy_version
 
 
 UTC = timezone.utc
 NOW = datetime(2026, 7, 14, 15, 0, tzinfo=UTC)
+
+
+def test_trade_intent_policy_hash_is_stable_and_resets_for_lane_clock_contract() -> None:
+    feature_policy = MarketFeatureSettings(trade_confirmed_pilot_enabled=True)
+    order_policy = OrderMapPolicy()
+
+    current = trade_intent_policy_version(feature_policy, order_policy)
+    repeated = trade_intent_policy_version(feature_policy, order_policy)
+    legacy = policy_version(
+        "rth_trade_intent.v3",
+        {
+            "market_features": feature_policy,
+            "order_map": order_policy,
+        },
+    )
+
+    assert TRADE_INTENT_CONTRACT_VERSION == "rth_lanes_0945_1300_put_shadow.v1"
+    assert current == repeated
+    assert current.startswith("rth_trade_intent.v3+sha256:")
+    assert current != legacy
 
 
 def test_confirmed_path_requires_all_gates_before_trade_ready() -> None:
@@ -66,6 +91,11 @@ def test_confirmed_path_requires_all_gates_before_trade_ready() -> None:
     assert intent["remaining_reward_risk"] == 3.0
     assert intent["expires_at"] == (NOW + timedelta(seconds=20)).isoformat()
     assert intent["automatic_ordering"] is False
+    assert intent["wall_signal"] == "present"
+    assert intent["execution_eligible"] is True
+    assert intent["quote_observation_eligible"] is False
+    assert intent["priority"] == "normal"
+    assert intent["shadow_mode"] is False
 
 
 def test_reviewed_pilot_keeps_exact_quote_but_softens_redundant_context_gates() -> None:
@@ -109,6 +139,11 @@ def test_reviewed_pilot_keeps_exact_quote_but_softens_redundant_context_gates() 
     assert intent["status"] == "trade_ready"
     assert intent["strategy_lane"] == "long_0dte_rth_upside_breakout_pilot"
     assert intent["pilot_mode"] is True
+    assert intent["wall_signal"] == "present"
+    assert intent["execution_eligible"] is True
+    assert intent["quote_observation_eligible"] is False
+    assert intent["priority"] == "high"
+    assert intent["shadow_mode"] is False
     assert intent["automatic_ordering"] is False
     assert set(intent["pilot_diagnostics"]) == {
         "breakout_filter_not_supported",
@@ -199,48 +234,9 @@ def test_reviewed_pilot_is_upside_breakout_only() -> None:
     assert "pilot_scope_upside_breakout_only" in intent["block_reasons"]
 
 
-def test_zero_dte_time_stop_is_capped_at_expiry_close() -> None:
-    market, options, latest, context, repricing = _ready_inputs()
+def test_reviewed_pilot_does_not_emit_trade_ready_after_1300_et() -> None:
     late = datetime(2026, 7, 14, 19, 50, tzinfo=UTC)
-    close = datetime(2026, 7, 14, 20, 0, tzinfo=UTC)
-    quote = replace(
-        latest.best_quotes[0],
-        received_at=late,
-        last_update_at=late,
-        quote_time=late,
-    )
-    latest = LatestState(
-        created_at=late,
-        as_of=late,
-        quotes=(quote,),
-        best_quotes=(quote,),
-    )
-    market = replace(
-        market,
-        as_of=late,
-        es={
-            **market.es,
-            "observed_at": late.isoformat(),
-            "source_at": late.isoformat(),
-            "transport_at": late.isoformat(),
-        },
-    )
-    options = replace(options, as_of=late)
-    context = replace(
-        context,
-        as_of=late,
-        level_decision={
-            **context.level_decision,
-            "phase_at": (late - timedelta(seconds=60)).isoformat(),
-            "expires_at": close.isoformat(),
-            "updated_at": late.isoformat(),
-            "trigger_coordinate": {
-                **context.level_decision["trigger_coordinate"],
-                "as_of": late.isoformat(),
-            },
-        },
-    )
-    repricing = {**repricing, "as_of": late.isoformat()}
+    market, options, latest, context, repricing = _retimed_inputs(late)
 
     intent = evaluate_trade_intent(
         context,
@@ -253,9 +249,286 @@ def test_zero_dte_time_stop_is_capped_at_expiry_close() -> None:
         order_policy=OrderMapPolicy(),
     )
 
+    assert intent["status"] == "blocked"
+    assert intent["execution_eligible"] is False
+    assert "strategy_entry_window_closed" in intent["block_reasons"]
+
+
+def test_trade_ready_intent_and_time_stop_are_capped_at_1300_et() -> None:
+    at = datetime(2026, 7, 14, 16, 59, 50, tzinfo=UTC)
+    hard_exit = datetime(2026, 7, 14, 17, 0, tzinfo=UTC)
+    market, options, latest, context, repricing = _retimed_inputs(at)
+
+    intent = evaluate_trade_intent(
+        context,
+        market,
+        options,
+        latest,
+        repricing,
+        now=at,
+        feature_policy=MarketFeatureSettings(trade_confirmed_pilot_enabled=True),
+        order_policy=OrderMapPolicy(),
+    )
+
     assert intent["status"] == "trade_ready"
-    assert intent["time_stop_at"] == close.isoformat()
-    assert datetime.fromisoformat(str(intent["valid_until"])) <= close
+    assert intent["expires_at"] == hard_exit.isoformat()
+    assert intent["valid_until"] == hard_exit.isoformat()
+    assert intent["time_stop_at"] == hard_exit.isoformat()
+    assert intent["hard_exit_at"] == hard_exit.isoformat()
+
+
+@pytest.mark.parametrize(
+    ("at", "reason"),
+    [
+        (
+            datetime(2026, 7, 14, 13, 44, 59, tzinfo=UTC),
+            "strategy_entry_window_not_open",
+        ),
+        (
+            datetime(2026, 7, 14, 17, 0, tzinfo=UTC),
+            "strategy_entry_window_closed",
+        ),
+    ],
+)
+def test_strategy_entry_window_is_half_open(at: datetime, reason: str) -> None:
+    market, options, latest, context, repricing = _retimed_inputs(at)
+
+    intent = evaluate_trade_intent(
+        context,
+        market,
+        options,
+        latest,
+        repricing,
+        now=at,
+        feature_policy=MarketFeatureSettings(trade_confirmed_pilot_enabled=True),
+        order_policy=OrderMapPolicy(),
+    )
+
+    assert intent["status"] == "blocked"
+    assert reason in intent["block_reasons"]
+
+
+def test_strategy_entry_window_opens_at_exactly_0945_et() -> None:
+    at = datetime(2026, 7, 14, 13, 45, tzinfo=UTC)
+    market, options, latest, context, repricing = _retimed_inputs(at)
+
+    intent = evaluate_trade_intent(
+        context,
+        market,
+        options,
+        latest,
+        repricing,
+        now=at,
+        feature_policy=MarketFeatureSettings(trade_confirmed_pilot_enabled=True),
+        order_policy=OrderMapPolicy(),
+    )
+
+    assert intent["status"] == "trade_ready"
+    assert intent["entry_window_start_at"] == at.isoformat()
+
+
+def test_flip_low_breakdown_put_is_exact_quote_shadow_ready() -> None:
+    market, options, latest, context, repricing = _put_shadow_inputs(
+        thesis="breakout",
+        level_kind="flip_low",
+        level=7525.0,
+    )
+
+    intent = evaluate_trade_intent(
+        context,
+        market,
+        options,
+        latest,
+        repricing,
+        now=NOW,
+        feature_policy=MarketFeatureSettings(trade_confirmed_pilot_enabled=True),
+        order_policy=OrderMapPolicy(),
+    )
+
+    assert intent["status"] == "shadow_ready"
+    assert intent["strategy_lane"] == "long_0dte_rth_flip_low_breakdown_put_shadow"
+    assert intent["contract_label"] == "SPXW 7525P"
+    assert intent["wall_signal"] == "present"
+    assert intent["execution_eligible"] is False
+    assert intent["quote_observation_eligible"] is True
+    assert intent["priority"] == "normal"
+    assert intent["shadow_mode"] is True
+    assert intent["promotion_status"] == "collecting_shadow"
+    assert intent["automatic_ordering"] is False
+
+
+@pytest.mark.parametrize(("level_kind", "level"), [("call_wall", 7550.0), ("flip_high", 7530.0)])
+def test_upper_rejection_put_is_exact_quote_shadow_ready(
+    level_kind: str,
+    level: float,
+) -> None:
+    market, options, latest, context, repricing = _put_shadow_inputs(
+        thesis="fade",
+        level_kind=level_kind,
+        level=level,
+    )
+
+    intent = evaluate_trade_intent(
+        context,
+        market,
+        options,
+        latest,
+        repricing,
+        now=NOW,
+        feature_policy=MarketFeatureSettings(trade_confirmed_pilot_enabled=True),
+        order_policy=OrderMapPolicy(),
+    )
+
+    assert intent["status"] == "shadow_ready"
+    assert intent["strategy_lane"] == "long_0dte_rth_upper_rejection_put_shadow"
+    assert intent["wall_signal"] == "present"
+    assert intent["execution_eligible"] is False
+    assert intent["quote_observation_eligible"] is True
+    assert intent["priority"] == "normal"
+    assert intent["shadow_mode"] is True
+    assert intent["automatic_ordering"] is False
+
+
+def test_upper_rejection_put_treats_bearish_regime_as_priority_not_hard_gate() -> None:
+    market, options, latest, context, repricing = _put_shadow_inputs(
+        thesis="fade",
+        level_kind="call_wall",
+        level=7550.0,
+    )
+    context = replace(
+        context,
+        regime_decision={"mode": "trending", "direction": "down", "trend_score": -80.0},
+    )
+
+    intent = evaluate_trade_intent(
+        context,
+        market,
+        options,
+        latest,
+        repricing,
+        now=NOW,
+        feature_policy=MarketFeatureSettings(trade_confirmed_pilot_enabled=True),
+        order_policy=OrderMapPolicy(),
+    )
+
+    assert intent["status"] == "shadow_ready"
+    assert "fade_regime_not_mean_reverting" not in intent["block_reasons"]
+
+
+def test_put_wall_breakdown_is_explicitly_disabled() -> None:
+    market, options, latest, context, repricing = _put_shadow_inputs(
+        thesis="breakout",
+        level_kind="put_wall",
+        level=7500.0,
+    )
+
+    intent = evaluate_trade_intent(
+        context,
+        market,
+        options,
+        latest,
+        repricing,
+        now=NOW,
+        feature_policy=MarketFeatureSettings(trade_confirmed_pilot_enabled=True),
+        order_policy=OrderMapPolicy(),
+    )
+
+    assert intent["status"] == "blocked"
+    assert intent["strategy_lane"] == "long_0dte_rth_put_wall_breakdown_disabled"
+    assert intent["wall_signal"] == "present"
+    assert intent["execution_eligible"] is False
+    assert intent["quote_observation_eligible"] is False
+    assert intent["priority"] == "disabled"
+    assert intent["shadow_mode"] is False
+    assert "put_wall_breakdown_disabled" in intent["block_reasons"]
+
+
+def test_put_lane_safety_does_not_revert_when_reviewed_pilot_flag_is_off() -> None:
+    market, options, latest, context, repricing = _put_shadow_inputs(
+        thesis="breakout",
+        level_kind="put_wall",
+        level=7500.0,
+    )
+
+    disabled = evaluate_trade_intent(
+        context,
+        market,
+        options,
+        latest,
+        repricing,
+        now=NOW,
+        feature_policy=MarketFeatureSettings(trade_confirmed_pilot_enabled=False),
+        order_policy=OrderMapPolicy(),
+    )
+
+    assert disabled["status"] == "blocked"
+    assert disabled["strategy_lane"] == "long_0dte_rth_put_wall_breakdown_disabled"
+    assert disabled["execution_eligible"] is False
+    assert disabled["quote_observation_eligible"] is False
+    assert "put_wall_breakdown_disabled" in disabled["block_reasons"]
+
+    flip_market, flip_options, flip_latest, flip_context, flip_repricing = _put_shadow_inputs(
+        thesis="breakout",
+        level_kind="flip_low",
+        level=7525.0,
+    )
+    shadow = evaluate_trade_intent(
+        flip_context,
+        flip_market,
+        flip_options,
+        flip_latest,
+        flip_repricing,
+        now=NOW,
+        feature_policy=MarketFeatureSettings(trade_confirmed_pilot_enabled=False),
+        order_policy=OrderMapPolicy(),
+    )
+
+    assert shadow["status"] == "shadow_ready"
+    assert shadow["strategy_lane"] == "long_0dte_rth_flip_low_breakdown_put_shadow"
+    assert shadow["execution_eligible"] is False
+    assert shadow["quote_observation_eligible"] is True
+    assert shadow["shadow_mode"] is True
+
+
+def test_put_shadow_ready_does_not_trigger_trade_intent_notification(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    market, options, latest, context, repricing = _put_shadow_inputs(
+        thesis="breakout",
+        level_kind="flip_low",
+        level=7525.0,
+    )
+    intent = evaluate_trade_intent(
+        context,
+        market,
+        options,
+        latest,
+        repricing,
+        now=NOW,
+        feature_policy=MarketFeatureSettings(trade_confirmed_pilot_enabled=True),
+        order_policy=OrderMapPolicy(),
+    )
+
+    def unexpected_enqueue(*args, **kwargs):
+        raise AssertionError("shadow_ready must not enqueue a TradeReady notification")
+
+    monkeypatch.setattr(
+        "spx_spark.application.market_features.trade_intent_runtime.enqueue_notification",
+        unexpected_enqueue,
+    )
+    result = process_trade_intent(
+        SimpleNamespace(data_root=str(tmp_path)),
+        intent,
+        now=NOW,
+        settings=_notification_settings(tmp_path),
+    )
+
+    assert result == {
+        "attempted": False,
+        "delivered": False,
+        "reason": "shadow_ready",
+    }
 
 
 def test_trade_ready_includes_play_stats_when_provided() -> None:
@@ -387,10 +660,7 @@ def test_render_trade_intent_shows_greek_risk_and_soft_pilot_diagnostics() -> No
     assert "15分钟Theta情景 `12.34%`" in text
     assert "IV下降3波动点情景 `8.76%`" in text
     assert "## 均线位置" in text
-    assert (
-        "ES 5m P/MA20/MA50/MA200 "
-        "`7603.00 / 7595.00 / 7580.00 / 7550.00`"
-    ) in text
+    assert ("ES 5m P/MA20/MA50/MA200 `7603.00 / 7595.00 / 7580.00 / 7550.00`") in text
     assert "SPX基差投影 `7550.00 / 7535.00 / 7505.00`" in text
     assert "MA50/200 `TREND_EXTENDED`" in text
     assert "同向凸性 `do_not_chase`" in text
@@ -441,10 +711,7 @@ def test_llm_writer_rejects_ma_cross_as_standalone_trade_trigger() -> None:
             "same_direction_convexity": "wait_for_wall_confirmation",
         },
     }
-    safe = (
-        render_trade_intent(intent)
-        + "\nREGIME_TRANSITION 均线背景；等待wall/flip接受或拒绝。"
-    )
+    safe = render_trade_intent(intent) + "\nREGIME_TRANSITION 均线背景；等待wall/flip接受或拒绝。"
     unsafe = safe + "\n金叉买Call。"
 
     assert _writer_output_valid(safe, intent)
@@ -688,6 +955,7 @@ def test_rth_intent_policy_blocks_premarket_trade_ready() -> None:
     assert intent["status"] == "blocked"
     assert intent["block_reasons"] == [
         "rth_session_required",
+        "strategy_entry_window_not_open",
         "rth_confirmation_required",
     ]
 
@@ -969,6 +1237,57 @@ def test_expired_trade_intent_is_not_delivered(tmp_path, monkeypatch) -> None:
         "attempted": False,
         "delivered": False,
         "reason": "intent_expired",
+    }
+
+
+def test_mislabeled_put_trade_ready_is_rejected_before_notification(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    intent = {
+        **_runtime_contract(NOW + timedelta(seconds=90)),
+        "intent_id": "intent:unsafe-put",
+        "event_id": "level:unsafe-put",
+        "strategy_lane": "long_0dte_rth_flip_low_breakdown_put_shadow",
+        "direction": "down",
+        "contract_id": "option:SPX:SPXW:20260714:7550:P",
+    }
+    monkeypatch.setattr(
+        "spx_spark.application.market_features.trade_intent_runtime.enqueue_notification",
+        lambda *_args, **_kwargs: pytest.fail("Put shadow must not notify"),
+    )
+
+    result = process_trade_intent(
+        SimpleNamespace(data_root=str(tmp_path)),
+        intent,
+        now=NOW,
+        settings=_notification_settings(tmp_path),
+    )
+
+    assert result == {
+        "attempted": False,
+        "delivered": False,
+        "reason": "put_lane_live_execution_forbidden",
+    }
+
+
+def test_legacy_v1_trade_ready_is_no_longer_execution_authority(tmp_path) -> None:
+    result = process_trade_intent(
+        SimpleNamespace(data_root=str(tmp_path)),
+        {
+            "schema_version": 1,
+            "status": "trade_ready",
+            "intent_id": "intent:legacy-v1",
+            "expires_at": (NOW + timedelta(seconds=90)).isoformat(),
+        },
+        now=NOW,
+        settings=SimpleNamespace(enabled=False),
+    )
+
+    assert result == {
+        "attempted": False,
+        "delivered": False,
+        "reason": "strategy_schema_unsupported",
     }
 
 
@@ -1453,6 +1772,117 @@ def _ready_inputs():
     return market, options, latest, context, repricing
 
 
+def _retimed_inputs(at: datetime):
+    market, options, latest, context, repricing = _ready_inputs()
+    quote = replace(
+        latest.best_quotes[0],
+        received_at=at,
+        last_update_at=at,
+        quote_time=at,
+    )
+    latest = replace(
+        latest,
+        created_at=at,
+        as_of=at,
+        quotes=(quote,),
+        best_quotes=(quote,),
+    )
+    market = replace(
+        market,
+        as_of=at,
+        es={
+            **market.es,
+            "observed_at": at.isoformat(),
+            "source_at": at.isoformat(),
+            "transport_at": at.isoformat(),
+        },
+    )
+    options = replace(options, as_of=at)
+    context = replace(
+        context,
+        as_of=at,
+        level_decision={
+            **context.level_decision,
+            "phase_at": (at - timedelta(seconds=60)).isoformat(),
+            "expires_at": (at + timedelta(minutes=3)).isoformat(),
+            "updated_at": at.isoformat(),
+            "trigger_coordinate": {
+                **context.level_decision["trigger_coordinate"],
+                "as_of": at.isoformat(),
+            },
+        },
+    )
+    repricing = {**repricing, "as_of": at.isoformat()}
+    return market, options, latest, context, repricing
+
+
+def _put_shadow_inputs(
+    *,
+    thesis: str,
+    level_kind: str,
+    level: float,
+):
+    market, options, latest, context, _repricing = _ready_inputs()
+    spot = level - 4.0
+    instrument = InstrumentId.option(
+        "SPX",
+        expiry="20260714",
+        strike=int(level),
+        right="P",
+        trading_class="SPXW",
+    )
+    quote = replace(latest.best_quotes[0], instrument=instrument)
+    latest = replace(latest, quotes=(quote,), best_quotes=(quote,))
+    market = replace(
+        market,
+        es={
+            **market.es,
+            "return_1m_points": -1.0,
+            "return_5m_points": -4.0,
+            "return_15m_points": -8.0,
+        },
+    )
+    play = "level_breakout_put" if thesis == "breakout" else "level_fade_put"
+    context = replace(
+        context,
+        trend={"regime": "bearish"},
+        level_decision={
+            **context.level_decision,
+            "thesis": thesis,
+            "direction": "down",
+            "level_kind": level_kind,
+            "level": level,
+            "spot": spot,
+            "trigger_coordinate": {
+                **context.level_decision["trigger_coordinate"],
+                "observed_value": spot,
+                "target_value": level,
+                "spx_observed_value": spot,
+            },
+        },
+        regime_decision={
+            "mode": "trending" if thesis == "breakout" else "mean_reverting",
+            "direction": "down",
+            "trend_score": -80.0,
+        },
+    )
+    repricing = {
+        "event_id": "level:test",
+        "as_of": NOW.isoformat(),
+        "expiry": "20260714",
+        "candidates": [
+            {
+                "play": play,
+                "contract_id": instrument.canonical_id,
+                "strike": int(level),
+                "right": "P",
+                "execution_quote_status": "executable",
+            }
+        ],
+    }
+    return market, options, latest, context, repricing
+
+
 def _render_intent() -> dict:
     return {
         "status": "trade_ready",
@@ -1484,6 +1914,14 @@ def _runtime_contract(valid_until: datetime) -> dict[str, object]:
         "schema_version": 3,
         "policy_version": "rth_trade_intent.v3+sha256:test",
         "valid_until": valid_until.isoformat(),
+        "status": "trade_ready",
+        "strategy_lane": "long_0dte_rth_upside_breakout_pilot",
+        "shadow_mode": False,
+        "execution_eligible": True,
+        "quote_observation_eligible": False,
+        "automatic_ordering": False,
+        "direction": "up",
+        "contract_id": "option:SPX:SPXW:20260714:7550:C",
         "coordinate": {
             "kind": "official_spx",
             "instrument_id": "index:SPX",

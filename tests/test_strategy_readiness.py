@@ -3,24 +3,46 @@ from __future__ import annotations
 import json
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
+import pytest
+
+from spx_spark.application.market_features.trade_candidate import (
+    PUT_SHADOW_EXACT_QUOTE_MAX_AGE_SECONDS,
+    PUT_SHADOW_EXACT_QUOTE_POLICY_VERSION,
+)
+from spx_spark.application.market_features.trade_intent import trade_intent_policy_version
 from spx_spark.data_platform.research.strategy_readiness import (
     DEFAULT_THRESHOLDS,
+    _contract_audit,
     _exact_spread_snapshot,
+    _material_contract_issues,
+    _put_shadow_record,
+    _select_policy_bundle,
     build_strategy_readiness,
     measure_session_completeness,
     validate_strategy_contract,
 )
+from spx_spark.data_platform.research.strategy_readiness_evidence import (
+    _exact_put_shadow_entry,
+    count_put_exact_entries,
+    duplicate_audit,
+)
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR, ET
+from spx_spark.settings.market_features import MarketFeatureSettings
+from spx_spark.settings.order_map import OrderMapPolicy
+from spx_spark.strategy_contract import policy_version
 
 
 ROLE_POLICIES = {
     "gth_detector_runtime": "gth_detector_runtime_v3_frozen",
     "gth_signal": "gth_signal_v3_frozen",
     "trade_intent": "trade_intent_v3_frozen",
+    "trade_candidate": "trade_candidate_v3_frozen",
     "virtual_entry_decision": "virtual_entry_decision_v3_frozen",
     "virtual_lifecycle": "virtual_lifecycle_v3_frozen",
 }
+PUT_SHADOW_WINDOW_CONTRACT_VERSION = "rth_lanes_0945_1300_put_shadow.v1"
 
 
 def _write_rows(path: Path, rows: list[dict[str, object]]) -> None:
@@ -42,6 +64,17 @@ def _health_window(day: date) -> tuple[datetime, datetime, datetime, datetime]:
     gth_start = gth_start.replace(hour=20, minute=15)
     gth_end = datetime.combine(day, datetime.min.time(), tzinfo=ET).replace(hour=9, minute=25)
     return gth_start, gth_end, session.open_at, session.close_at
+
+
+def _put_shadow_window(day: date) -> tuple[datetime, datetime]:
+    return (
+        datetime.combine(day, datetime.min.time(), tzinfo=ET)
+        .replace(hour=9, minute=45)
+        .astimezone(timezone.utc),
+        datetime.combine(day, datetime.min.time(), tzinfo=ET)
+        .replace(hour=13)
+        .astimezone(timezone.utc),
+    )
 
 
 def _minute_samples(start: datetime, end: datetime, *, take: int | None = None) -> list[datetime]:
@@ -140,6 +173,124 @@ def _single_snapshot(at: datetime) -> dict[str, object]:
     return _leg_snapshot(at, bid=10.0, mid=10.5, ask=11.0)
 
 
+def _write_put_shadow_evidence(
+    root: Path,
+    day: date,
+    *,
+    index: int,
+    write_candidate: bool = True,
+    candidate_policy_version: str | None = None,
+) -> None:
+    _, _, rth_start, _ = _health_window(day)
+    intent_at = (rth_start + timedelta(minutes=30)).astimezone(timezone.utc)
+    terminal_at = intent_at + timedelta(seconds=1)
+    expiry = day.strftime("%Y%m%d")
+    intent_id = f"intent:put:{index}"
+    contract_id = f"option:SPX:SPXW:{expiry}:7500:P"
+    lane = "long_0dte_rth_flip_low_breakdown_put_shadow"
+    semantic_key = f"{day.isoformat()}|level_breakout_put|7500.0000|{contract_id}"
+    entry_window_start_at, hard_exit_at = _put_shadow_window(day)
+    intent = {
+        **_envelope(
+            intent_at,
+            role="trade_intent",
+            kind="official_spx",
+            instrument_id="index:SPX",
+        ),
+        "status": "shadow_ready",
+        "intent_id": intent_id,
+        "event_id": f"level:put:{index}",
+        "semantic_key": semantic_key,
+        "session_id": day.isoformat(),
+        "evaluated_at": intent_at.isoformat(),
+        "direction": "down",
+        "play": "level_breakout_put",
+        "thesis": "breakout",
+        "level_kind": "flip_low",
+        "contract_id": contract_id,
+        "entry_limit": 10.1,
+        "strategy_lane": lane,
+        "shadow_mode": True,
+        "execution_eligible": False,
+        "quote_observation_eligible": True,
+        "automatic_ordering": False,
+        "trade_intent_contract_version": PUT_SHADOW_WINDOW_CONTRACT_VERSION,
+        "entry_window_start_at": entry_window_start_at.isoformat(),
+        "hard_exit_at": hard_exit_at.isoformat(),
+    }
+    _write_rows(
+        root / "trade_intents" / f"date={day.isoformat()}" / "events.jsonl",
+        [intent],
+    )
+    if not write_candidate:
+        return
+
+    candidate_envelope = _envelope(
+        intent_at,
+        role="trade_candidate",
+        kind="option_contract",
+        instrument_id=contract_id,
+        valid_until=datetime.fromisoformat(str(intent["valid_until"])),
+    )
+    if candidate_policy_version is not None:
+        candidate_envelope["policy_version"] = candidate_policy_version
+    armed = {
+        **candidate_envelope,
+        "event": "candidate_armed",
+        "phase": "armed",
+        "candidate_id": f"{intent_id}|level:put:{index}",
+        "intent_id": intent_id,
+        "event_id": intent["event_id"],
+        "semantic_key": semantic_key,
+        "session_id": day.isoformat(),
+        "direction": "down",
+        "play": intent["play"],
+        "thesis": intent["thesis"],
+        "level_kind": intent["level_kind"],
+        "strategy_lane": lane,
+        "shadow_mode": True,
+        "contract_id": contract_id,
+        "entry_limit": 10.1,
+        "trade_intent_contract_version": PUT_SHADOW_WINDOW_CONTRACT_VERSION,
+        "entry_window_start_at": entry_window_start_at.isoformat(),
+        "hard_exit_at": hard_exit_at.isoformat(),
+        "armed_at": intent_at.isoformat(),
+        "automatic_ordering": False,
+        "broker_order_state": "not_connected",
+        "source_intent": dict(intent),
+    }
+    terminal = {
+        **armed,
+        "event": "candidate_terminal",
+        "phase": "quote_reached_entry",
+        "terminal_at": terminal_at.isoformat(),
+        "execution_claim": "none",
+        "entry_observation": {
+            "at": terminal_at.isoformat(),
+            "contract_id": contract_id,
+            "entry_limit": 10.1,
+            "provider": "schwab",
+            "bid": 9.8,
+            "mid": 10.0,
+            "ask": 10.1,
+            "quote_quality": "live",
+            "quote_source_at": terminal_at.isoformat(),
+            "quote_transport_at": terminal_at.isoformat(),
+            "quote_source_age_seconds": 0.0,
+            "quote_transport_age_seconds": 0.0,
+            "quote_pricing_allowed": True,
+            "exact_quote_freshness_ok": True,
+            "exact_quote_policy_version": PUT_SHADOW_EXACT_QUOTE_POLICY_VERSION,
+            "exact_quote_max_age_seconds": PUT_SHADOW_EXACT_QUOTE_MAX_AGE_SECONDS,
+            "entry_condition": "displayed_ask_at_or_below_limit",
+        },
+    }
+    _write_rows(
+        root / "trade_candidates" / f"date={day.isoformat()}" / "events.jsonl",
+        [armed, terminal],
+    )
+
+
 def _trading_days(start: date, count: int) -> list[date]:
     days: list[date] = []
     current = start
@@ -154,7 +305,7 @@ def _write_complete_forward_cohort(root: Path, days: list[date]) -> datetime:
     for index, day in enumerate(days):
         _write_health(root, day)
         _write_detector_health(root, day, gth_minutes=790)
-        gth_start, _, rth_start, _ = _health_window(day)
+        gth_start, _, _, _ = _health_window(day)
         signal_at = (gth_start + timedelta(minutes=60)).astimezone(timezone.utc)
         spread_open_at = signal_at + timedelta(minutes=1)
         spread_close_at = signal_at + timedelta(minutes=10)
@@ -262,51 +413,35 @@ def _write_complete_forward_cohort(root: Path, days: list[date]) -> datetime:
             "last": exit_snapshot,
         }
 
-        intent_at = (rth_start + timedelta(minutes=30)).astimezone(timezone.utc)
-        put_open_at = intent_at + timedelta(minutes=1)
-        intent_id = f"intent:put:{index}"
-        put_contract = f"option:SPX:SPXW:{expiry}:7500:P"
-        intent = {
-            **_envelope(
-                intent_at,
-                role="trade_intent",
-                kind="official_spx",
-                instrument_id="index:SPX",
-            ),
-            "status": "trade_ready",
-            "intent_id": intent_id,
-            "event_id": f"level:put:{index}",
-            "session_id": day.isoformat(),
-            "evaluated_at": intent_at.isoformat(),
-            "direction": "down",
-            "contract_id": put_contract,
-        }
-        _write_rows(
-            root / "trade_intents" / f"date={day.isoformat()}" / "events.jsonl",
-            [intent],
-        )
-        put_snapshot = _single_snapshot(put_open_at)
-        put_open = {
-            **_envelope(
-                put_open_at,
-                role="virtual_lifecycle",
-                kind="option_contract",
-                instrument_id=put_contract,
-            ),
-            "event": "virtual_opened",
-            "episode_id": f"virtual:put:{index}",
-            "source_signal_id": intent_id,
-            "source_kind": "trade_intent",
-            "session_date": day.isoformat(),
-            "opened_at": put_open_at.isoformat(),
-            "position_type": "single_option",
-            "contract_id": put_contract,
-            "entry_mid": 10.5,
-            "last": put_snapshot,
-        }
+        _write_put_shadow_evidence(root, day, index=index)
         _write_rows(
             root / "virtual_strategy" / f"date={day.isoformat()}" / "events.jsonl",
-            [entry_decision, opened, closed, put_open],
+            [entry_decision, opened, closed],
+        )
+    last_session = DEFAULT_MARKET_CALENDAR.session(days[-1])
+    assert last_session is not None
+    return last_session.close_at.astimezone(timezone.utc) + timedelta(minutes=1)
+
+
+def _write_rth_put_shadow_cohort(
+    root: Path,
+    days: list[date],
+    *,
+    incomplete_rth_index: int | None = None,
+    write_candidate: bool = True,
+) -> datetime:
+    for index, day in enumerate(days):
+        _write_health(
+            root,
+            day,
+            gth_minutes=0,
+            rth_minutes=350 if index == incomplete_rth_index else None,
+        )
+        _write_put_shadow_evidence(
+            root,
+            day,
+            index=index,
+            write_candidate=write_candidate,
         )
     last_session = DEFAULT_MARKET_CALENDAR.session(days[-1])
     assert last_session is not None
@@ -375,6 +510,741 @@ def test_exact_spread_rejects_stale_and_skewed_leg_quotes() -> None:
     assert _exact_spread_snapshot(skewed, at=at) is False
 
 
+def test_put_exact_entry_counts_shadow_quote_and_compound_virtual_source_id() -> None:
+    day = date(2026, 7, 15)
+    at = datetime(2026, 7, 15, 14, 0, tzinfo=timezone.utc)
+    contract = "option:SPX:SPXW:20260715:7500:P"
+    entry_window_start_at, hard_exit_at = _put_shadow_window(day)
+    production_intent = {
+        "status": "trade_ready",
+        "intent_id": "intent:production-put",
+        "session_id": day.isoformat(),
+        "direction": "down",
+        "play": "level_breakout_put",
+        "thesis": "breakout",
+        "level_kind": "flip_low",
+        "contract_id": contract,
+    }
+    production_open = {
+        "event": "virtual_opened",
+        "source_signal_id": "intent:production-put|level:production-put",
+        "contract_id": contract,
+        "position_type": "single_option",
+        "opened_at": at.isoformat(),
+        "last": {
+            "bid": 9.8,
+            "mid": 10.0,
+            "ask": 10.2,
+            "source_at": at.isoformat(),
+            "quality": {"status": "ok"},
+        },
+    }
+    shadow_intent = {
+        "policy_version": "trade_intent_v3_frozen",
+        "status": "shadow_ready",
+        "intent_id": "intent:shadow-put",
+        "event_id": "level:shadow-put",
+        "semantic_key": f"{day.isoformat()}|level_breakout_put|7500|{contract}",
+        "session_id": day.isoformat(),
+        "direction": "down",
+        "play": "level_breakout_put",
+        "thesis": "breakout",
+        "level_kind": "flip_low",
+        "contract_id": contract,
+        "entry_limit": 10.1,
+        "evaluated_at": (at - timedelta(seconds=1)).isoformat(),
+        "valid_until": (at + timedelta(minutes=30)).isoformat(),
+        "strategy_lane": "long_0dte_rth_flip_low_breakdown_put_shadow",
+        "shadow_mode": True,
+        "execution_eligible": False,
+        "quote_observation_eligible": True,
+        "automatic_ordering": False,
+        "trade_intent_contract_version": PUT_SHADOW_WINDOW_CONTRACT_VERSION,
+        "entry_window_start_at": entry_window_start_at.isoformat(),
+        "hard_exit_at": hard_exit_at.isoformat(),
+    }
+    shadow_terminal = {
+        "event": "candidate_terminal",
+        "candidate_id": f"{shadow_intent['intent_id']}|{shadow_intent['event_id']}",
+        "event_id": shadow_intent["event_id"],
+        "intent_id": shadow_intent["intent_id"],
+        "semantic_key": shadow_intent["semantic_key"],
+        "direction": "down",
+        "phase": "quote_reached_entry",
+        "terminal_at": at.isoformat(),
+        "contract_id": contract,
+        "entry_limit": shadow_intent["entry_limit"],
+        "valid_until": shadow_intent["valid_until"],
+        "trade_intent_contract_version": PUT_SHADOW_WINDOW_CONTRACT_VERSION,
+        "entry_window_start_at": entry_window_start_at.isoformat(),
+        "hard_exit_at": hard_exit_at.isoformat(),
+        "strategy_lane": shadow_intent["strategy_lane"],
+        "play": shadow_intent["play"],
+        "thesis": shadow_intent["thesis"],
+        "level_kind": shadow_intent["level_kind"],
+        "shadow_mode": True,
+        "automatic_ordering": False,
+        "execution_claim": "none",
+        "broker_order_state": "not_connected",
+        "source_intent": dict(shadow_intent),
+        "entry_observation": {
+            "at": at.isoformat(),
+            "contract_id": contract,
+            "entry_limit": shadow_intent["entry_limit"],
+            "provider": "schwab",
+            "bid": 9.8,
+            "mid": 10.0,
+            "ask": 10.1,
+            "quote_quality": "live",
+            "quote_source_at": at.isoformat(),
+            "quote_transport_at": at.isoformat(),
+            "quote_source_age_seconds": 0.0,
+            "quote_transport_age_seconds": 0.0,
+            "quote_pricing_allowed": True,
+            "exact_quote_freshness_ok": True,
+            "exact_quote_policy_version": PUT_SHADOW_EXACT_QUOTE_POLICY_VERSION,
+            "exact_quote_max_age_seconds": PUT_SHADOW_EXACT_QUOTE_MAX_AGE_SECONDS,
+            "entry_condition": "displayed_ask_at_or_below_limit",
+        },
+    }
+
+    def record(source: str, payload: dict[str, object], line: int) -> SimpleNamespace:
+        return SimpleNamespace(
+            source=source,
+            payload=payload,
+            path=f"{source}.jsonl",
+            line_number=line,
+            at=at,
+            session_date=day,
+        )
+
+    result = count_put_exact_entries(
+        [
+            record("trade_intents", production_intent, 1),
+            record("virtual_strategy", production_open, 2),
+            record("trade_intents", shadow_intent, 3),
+            record("trade_candidates", shadow_terminal, 4),
+        ],
+        eligible_sessions={day.isoformat()},
+    )
+
+    assert result == {
+        "count": 2,
+        "eligible_trade_ready_puts": 1,
+        "eligible_shadow_ready_puts": 1,
+        "exact_virtual_opens": 1,
+        "exact_shadow_quote_entries": 1,
+        "unmatched_or_inexact_puts": 0,
+        "excluded_incomplete_session": 0,
+    }
+
+
+@pytest.mark.parametrize("age_seconds", [6.0, 15.0])
+def test_put_shadow_readiness_accepts_exact_quotes_through_fifteen_seconds(
+    age_seconds: float,
+) -> None:
+    at = datetime(2026, 7, 15, 14, 0, tzinfo=timezone.utc)
+    intent, candidate = _put_shadow_readiness_fixture(
+        at,
+        source_age_seconds=age_seconds,
+        transport_age_seconds=age_seconds,
+    )
+
+    assert _exact_put_shadow_entry(intent, candidate) is True
+
+
+@pytest.mark.parametrize(
+    ("scope", "field", "wrong_value"),
+    [
+        ("candidate", "candidate_id", "intent:other|level:other"),
+        ("observation", "contract_id", "option:SPX:SPXW:20260715:7510:P"),
+        ("observation", "entry_limit", 10.2),
+        ("observation", "at", "2026-07-15T14:00:01+00:00"),
+    ],
+)
+def test_put_shadow_readiness_binds_candidate_and_observation_lineage(
+    scope: str,
+    field: str,
+    wrong_value: object,
+) -> None:
+    at = datetime(2026, 7, 15, 14, 0, tzinfo=timezone.utc)
+    intent, candidate = _put_shadow_readiness_fixture(
+        at,
+        source_age_seconds=0.0,
+        transport_age_seconds=0.0,
+    )
+    target = candidate
+    if scope == "observation":
+        observation = candidate["entry_observation"]
+        assert isinstance(observation, dict)
+        target = observation
+    target[field] = wrong_value
+
+    assert _exact_put_shadow_entry(intent, candidate) is False
+
+
+@pytest.mark.parametrize(
+    ("source_age_seconds", "transport_age_seconds"),
+    [
+        (None, 0.0),
+        (15.001, 0.0),
+        (0.0, 15.001),
+        (-0.001, 0.0),
+        (0.0, -0.001),
+    ],
+)
+def test_put_shadow_readiness_rejects_stale_or_future_exact_quotes(
+    source_age_seconds: float | None,
+    transport_age_seconds: float,
+) -> None:
+    at = datetime(2026, 7, 15, 14, 0, tzinfo=timezone.utc)
+    intent, candidate = _put_shadow_readiness_fixture(
+        at,
+        source_age_seconds=source_age_seconds,
+        transport_age_seconds=transport_age_seconds,
+    )
+
+    assert _exact_put_shadow_entry(intent, candidate) is False
+
+
+@pytest.mark.parametrize(
+    ("policy_version", "max_age"),
+    [
+        ("put_shadow_exact_quote.v2", 15.0),
+        ("put_shadow_exact_quote.v1", 14.0),
+    ],
+)
+def test_put_shadow_readiness_rejects_unknown_or_drifted_quote_policy(
+    policy_version: str,
+    max_age: float,
+) -> None:
+    at = datetime(2026, 7, 15, 14, 0, tzinfo=timezone.utc)
+    intent, candidate = _put_shadow_readiness_fixture(
+        at,
+        source_age_seconds=0.0,
+        transport_age_seconds=0.0,
+    )
+    observation = candidate["entry_observation"]
+    assert isinstance(observation, dict)
+    observation["exact_quote_policy_version"] = policy_version
+    observation["exact_quote_max_age_seconds"] = max_age
+
+    assert _exact_put_shadow_entry(intent, candidate) is False
+
+
+@pytest.mark.parametrize("scope", ["intent", "source_intent"])
+@pytest.mark.parametrize(
+    ("field", "wrong_value"),
+    [
+        ("execution_eligible", True),
+        ("quote_observation_eligible", False),
+        ("automatic_ordering", True),
+    ],
+)
+@pytest.mark.parametrize("missing", [False, True], ids=["wrong", "missing"])
+def test_put_shadow_readiness_requires_non_executable_safety_contract(
+    scope: str,
+    field: str,
+    wrong_value: bool,
+    *,
+    missing: bool,
+) -> None:
+    at = datetime(2026, 7, 15, 14, 0, tzinfo=timezone.utc)
+    intent, candidate = _put_shadow_readiness_fixture(
+        at,
+        source_age_seconds=0.0,
+        transport_age_seconds=0.0,
+    )
+    target = intent
+    if scope == "source_intent":
+        source = candidate["source_intent"]
+        assert isinstance(source, dict)
+        target = source
+    if missing:
+        target.pop(field)
+    else:
+        target[field] = wrong_value
+
+    assert _exact_put_shadow_entry(intent, candidate) is False
+
+
+@pytest.mark.parametrize(
+    "terminal_at",
+    [
+        datetime(2026, 7, 15, 13, 44, 59, tzinfo=timezone.utc),
+        datetime(2026, 7, 15, 17, 0, tzinfo=timezone.utc),
+    ],
+    ids=["before_0945_et", "at_1300_et"],
+)
+def test_put_shadow_readiness_rejects_terminal_outside_entry_window(
+    terminal_at: datetime,
+) -> None:
+    intent, candidate = _put_shadow_readiness_fixture(
+        terminal_at,
+        source_age_seconds=0.0,
+        transport_age_seconds=0.0,
+    )
+
+    assert _exact_put_shadow_entry(intent, candidate) is False
+
+
+def test_put_shadow_readiness_rejects_terminal_before_intent_or_after_ttl() -> None:
+    terminal_at = datetime(2026, 7, 15, 14, 0, tzinfo=timezone.utc)
+    intent, candidate = _put_shadow_readiness_fixture(
+        terminal_at,
+        source_age_seconds=0.0,
+        transport_age_seconds=0.0,
+    )
+    after_terminal = (terminal_at + timedelta(seconds=1)).isoformat()
+    intent["evaluated_at"] = after_terminal
+    source = candidate["source_intent"]
+    assert isinstance(source, dict)
+    source["evaluated_at"] = after_terminal
+    assert _exact_put_shadow_entry(intent, candidate) is False
+
+    intent, candidate = _put_shadow_readiness_fixture(
+        terminal_at,
+        source_age_seconds=0.0,
+        transport_age_seconds=0.0,
+    )
+    terminal_ttl = terminal_at.isoformat()
+    intent["valid_until"] = terminal_ttl
+    source = candidate["source_intent"]
+    assert isinstance(source, dict)
+    source["valid_until"] = terminal_ttl
+    candidate["valid_until"] = terminal_ttl
+    assert _exact_put_shadow_entry(intent, candidate) is False
+
+
+def test_put_shadow_readiness_rejects_intent_or_ttl_outside_policy_window() -> None:
+    terminal_at = datetime(2026, 7, 15, 14, 0, tzinfo=timezone.utc)
+    intent, candidate = _put_shadow_readiness_fixture(
+        terminal_at,
+        source_age_seconds=0.0,
+        transport_age_seconds=0.0,
+    )
+    before_window = datetime(2026, 7, 15, 13, 0, tzinfo=timezone.utc).isoformat()
+    intent["evaluated_at"] = before_window
+    source = candidate["source_intent"]
+    assert isinstance(source, dict)
+    source["evaluated_at"] = before_window
+    assert _exact_put_shadow_entry(intent, candidate) is False
+
+    intent, candidate = _put_shadow_readiness_fixture(
+        terminal_at,
+        source_age_seconds=0.0,
+        transport_age_seconds=0.0,
+    )
+    after_hard_exit = datetime(2026, 7, 15, 20, 0, tzinfo=timezone.utc).isoformat()
+    intent["valid_until"] = after_hard_exit
+    source = candidate["source_intent"]
+    assert isinstance(source, dict)
+    source["valid_until"] = after_hard_exit
+    candidate["valid_until"] = after_hard_exit
+    assert _exact_put_shadow_entry(intent, candidate) is False
+
+
+@pytest.mark.parametrize(
+    ("field", "wrong_value"),
+    [
+        ("trade_intent_contract_version", "rth_put_shadow.v2"),
+        ("entry_window_start_at", "2026-07-15T13:46:00+00:00"),
+        ("hard_exit_at", "2026-07-15T17:01:00+00:00"),
+        ("level_kind", "call_wall"),
+    ],
+)
+def test_put_shadow_readiness_rejects_unknown_or_drifted_window_contract(
+    field: str,
+    wrong_value: str,
+) -> None:
+    at = datetime(2026, 7, 15, 14, 0, tzinfo=timezone.utc)
+    intent, candidate = _put_shadow_readiness_fixture(
+        at,
+        source_age_seconds=0.0,
+        transport_age_seconds=0.0,
+    )
+    intent[field] = wrong_value
+    source = candidate["source_intent"]
+    assert isinstance(source, dict)
+    source[field] = wrong_value
+    candidate[field] = wrong_value
+
+    assert _exact_put_shadow_entry(intent, candidate) is False
+
+
+@pytest.mark.parametrize(
+    ("field", "wrong_value"),
+    [
+        ("policy_version", "trade_intent_drift"),
+        ("evaluated_at", "2026-07-15T13:59:58+00:00"),
+        ("valid_until", "2026-07-15T14:29:59+00:00"),
+        ("entry_limit", 10.0),
+        ("trade_intent_contract_version", "rth_put_shadow.v2"),
+        ("entry_window_start_at", "2026-07-15T13:46:00+00:00"),
+        ("hard_exit_at", "2026-07-15T17:01:00+00:00"),
+        ("play", "level_fade_put"),
+    ],
+)
+def test_put_shadow_readiness_rejects_source_intent_lineage_drift(
+    field: str,
+    wrong_value: object,
+) -> None:
+    at = datetime(2026, 7, 15, 14, 0, tzinfo=timezone.utc)
+    intent, candidate = _put_shadow_readiness_fixture(
+        at,
+        source_age_seconds=0.0,
+        transport_age_seconds=0.0,
+    )
+    source = candidate["source_intent"]
+    assert isinstance(source, dict)
+    source[field] = wrong_value
+    if field in {
+        "valid_until",
+        "entry_limit",
+        "trade_intent_contract_version",
+        "entry_window_start_at",
+        "hard_exit_at",
+    }:
+        candidate[field] = wrong_value
+
+    assert _exact_put_shadow_entry(intent, candidate) is False
+
+
+@pytest.mark.parametrize(
+    ("field", "wrong_value"),
+    [
+        ("event_id", "level:wrong"),
+        ("intent_id", "intent:wrong"),
+        ("semantic_key", "wrong|semantic|key"),
+        ("strategy_lane", "long_0dte_rth_upper_rejection_put_shadow"),
+        ("contract_id", "option:SPX:SPXW:20260715:7495:P"),
+        ("entry_limit", 10.0),
+        ("trade_intent_contract_version", "rth_put_shadow.v2"),
+        ("entry_window_start_at", "2026-07-15T13:46:00+00:00"),
+        ("hard_exit_at", "2026-07-15T17:01:00+00:00"),
+    ],
+)
+def test_put_shadow_readiness_rejects_candidate_lineage_drift(
+    field: str,
+    wrong_value: object,
+) -> None:
+    at = datetime(2026, 7, 15, 14, 0, tzinfo=timezone.utc)
+    intent, candidate = _put_shadow_readiness_fixture(
+        at,
+        source_age_seconds=0.0,
+        transport_age_seconds=0.0,
+    )
+    candidate[field] = wrong_value
+
+    assert _exact_put_shadow_entry(intent, candidate) is False
+
+
+def test_put_shadow_readiness_rejects_unregistered_lane() -> None:
+    at = datetime(2026, 7, 15, 14, 0, tzinfo=timezone.utc)
+    intent, candidate = _put_shadow_readiness_fixture(
+        at,
+        source_age_seconds=0.0,
+        transport_age_seconds=0.0,
+    )
+    made_up_lane = "long_0dte_rth_made_up_put_shadow"
+    intent["strategy_lane"] = made_up_lane
+    candidate["strategy_lane"] = made_up_lane
+    source = candidate["source_intent"]
+    assert isinstance(source, dict)
+    source["strategy_lane"] = made_up_lane
+
+    assert _exact_put_shadow_entry(intent, candidate) is False
+
+
+def test_unregistered_put_shadow_lane_is_a_contract_violation_not_silently_filtered() -> None:
+    at = datetime(2026, 7, 15, 14, 0, tzinfo=timezone.utc)
+    payload = {
+        **_envelope(
+            at,
+            role="trade_intent",
+            kind="official_spx",
+            instrument_id="index:SPX",
+        ),
+        "status": "observing",
+        "strategy_lane": "long_0dte_rth_new_put_shadow",
+        "shadow_mode": True,
+    }
+    record = _readiness_record("trade_intents", payload, line=1, at=at)
+
+    assert _put_shadow_record(record) is True
+    assert "put_shadow_lane_unregistered" in _material_contract_issues(
+        record,
+        role="trade_intent",
+    )
+    audit = _contract_audit(
+        [record],
+        selected_policies={"trade_intent": payload["policy_version"]},
+        cohort_start_session=at.date(),
+        policy_start_session=at.date(),
+        rollout_boundary_at=None,
+        included_roles=("trade_intent",),
+        record_filter=_put_shadow_record,
+    )
+    assert audit["invalid_records"] == 1
+    assert audit["issues"]["put_shadow_lane_unregistered"] == 1
+
+
+@pytest.mark.parametrize("position_type", [None, "unknown"])
+def test_put_readiness_rejects_missing_or_unknown_production_position_type(
+    position_type: str | None,
+) -> None:
+    day = date(2026, 7, 15)
+    at = datetime(2026, 7, 15, 14, 0, tzinfo=timezone.utc)
+    contract = "option:SPX:SPXW:20260715:7500:P"
+    intent = {
+        "status": "trade_ready",
+        "intent_id": "intent:production-put",
+        "session_id": day.isoformat(),
+        "direction": "down",
+        "play": "level_breakout_put",
+        "thesis": "breakout",
+        "level_kind": "flip_low",
+        "contract_id": contract,
+    }
+    opened = {
+        "event": "virtual_opened",
+        "source_signal_id": "intent:production-put",
+        "contract_id": contract,
+        "opened_at": at.isoformat(),
+        "last": {
+            "bid": 9.8,
+            "mid": 10.0,
+            "ask": 10.2,
+            "source_at": at.isoformat(),
+            "quality": {"status": "ok"},
+        },
+    }
+    if position_type is not None:
+        opened["position_type"] = position_type
+
+    records = [
+        _readiness_record("trade_intents", intent, line=1, at=at),
+        _readiness_record("virtual_strategy", opened, line=2, at=at),
+    ]
+    result = count_put_exact_entries(records, eligible_sessions={day.isoformat()})
+
+    assert result["count"] == 0
+    assert result["exact_virtual_opens"] == 0
+    assert result["unmatched_or_inexact_puts"] == 1
+
+
+def test_distinct_shadow_events_are_separate_without_duplicate_anomaly() -> None:
+    at = datetime(2026, 7, 15, 14, 0, tzinfo=timezone.utc)
+    intent, terminal = _put_shadow_readiness_fixture(
+        at,
+        source_age_seconds=6.0,
+        transport_age_seconds=6.0,
+    )
+    rearmed = {
+        **intent,
+        "intent_id": "intent:shadow-put-restarted",
+        "event_id": "level:rearmed",
+    }
+    armed = {
+        **terminal,
+        "event": "candidate_armed",
+        "phase": "armed",
+        "armed_at": (at - timedelta(seconds=10)).isoformat(),
+    }
+    armed.pop("terminal_at")
+    armed.pop("entry_observation")
+    records = [
+        _readiness_record("trade_intents", intent, line=1, at=at),
+        _readiness_record("trade_intents", rearmed, line=2, at=at),
+        _readiness_record("trade_candidates", armed, line=3, at=at),
+        _readiness_record("trade_candidates", terminal, line=4, at=at),
+    ]
+
+    audit = duplicate_audit(records)
+    result = count_put_exact_entries(
+        records,
+        eligible_sessions={at.date().isoformat()},
+    )
+
+    assert audit == {"duplicate_records": 0, "keys": [], "sessions": set()}
+    assert result["count"] == 1
+    assert result["eligible_shadow_ready_puts"] == 2
+    assert result["exact_shadow_quote_entries"] == 1
+    assert result["unmatched_or_inexact_puts"] == 1
+
+
+def test_same_shadow_event_retries_dedupe_and_match_later_intent() -> None:
+    at = datetime(2026, 7, 15, 14, 0, tzinfo=timezone.utc)
+    first, terminal = _put_shadow_readiness_fixture(
+        at,
+        source_age_seconds=0.0,
+        transport_age_seconds=0.0,
+    )
+    retry = {
+        **first,
+        "intent_id": "intent:shadow-put-retry",
+    }
+    terminal["candidate_id"] = "intent:shadow-put-retry|level:first"
+    terminal["intent_id"] = retry["intent_id"]
+    terminal["source_intent"] = dict(retry)
+    records = [
+        _readiness_record("trade_intents", first, line=1, at=at),
+        _readiness_record("trade_intents", retry, line=2, at=at),
+        _readiness_record("trade_candidates", terminal, line=3, at=at),
+    ]
+
+    result = count_put_exact_entries(
+        records,
+        eligible_sessions={at.date().isoformat()},
+    )
+
+    assert result["count"] == 1
+    assert result["eligible_shadow_ready_puts"] == 1
+    assert result["unmatched_or_inexact_puts"] == 0
+
+
+def test_distinct_shadow_events_with_same_semantic_key_both_count() -> None:
+    at = datetime(2026, 7, 15, 14, 0, tzinfo=timezone.utc)
+    first, first_terminal = _put_shadow_readiness_fixture(
+        at,
+        source_age_seconds=0.0,
+        transport_age_seconds=0.0,
+    )
+    second = {
+        **first,
+        "intent_id": "intent:shadow-put-second",
+        "event_id": "level:second",
+    }
+    second_terminal = {
+        **first_terminal,
+        "candidate_id": "intent:shadow-put-second|level:second",
+        "intent_id": second["intent_id"],
+        "event_id": second["event_id"],
+        "source_intent": dict(second),
+    }
+    records = [
+        _readiness_record("trade_intents", first, line=1, at=at),
+        _readiness_record("trade_candidates", first_terminal, line=2, at=at),
+        _readiness_record("trade_intents", second, line=3, at=at),
+        _readiness_record("trade_candidates", second_terminal, line=4, at=at),
+    ]
+
+    assert duplicate_audit(records) == {
+        "duplicate_records": 0,
+        "keys": [],
+        "sessions": set(),
+    }
+    result = count_put_exact_entries(
+        records,
+        eligible_sessions={at.date().isoformat()},
+    )
+    assert result["count"] == 2
+    assert result["eligible_shadow_ready_puts"] == 2
+    assert result["exact_shadow_quote_entries"] == 2
+
+
+def _put_shadow_readiness_fixture(
+    at: datetime,
+    *,
+    source_age_seconds: float | None,
+    transport_age_seconds: float,
+) -> tuple[dict[str, object], dict[str, object]]:
+    day = at.date()
+    contract = f"option:SPX:SPXW:{day.strftime('%Y%m%d')}:7500:P"
+    semantic_key = f"{day.isoformat()}|level_breakout_put|7500|{contract}"
+    entry_window_start_at, hard_exit_at = _put_shadow_window(day)
+    intent: dict[str, object] = {
+        "policy_version": "trade_intent_v3_frozen",
+        "status": "shadow_ready",
+        "intent_id": "intent:shadow-put",
+        "event_id": "level:first",
+        "semantic_key": semantic_key,
+        "session_id": day.isoformat(),
+        "direction": "down",
+        "play": "level_breakout_put",
+        "thesis": "breakout",
+        "level_kind": "flip_low",
+        "contract_id": contract,
+        "entry_limit": 10.1,
+        "evaluated_at": (at - timedelta(seconds=1)).isoformat(),
+        "valid_until": (at + timedelta(minutes=30)).isoformat(),
+        "strategy_lane": "long_0dte_rth_flip_low_breakdown_put_shadow",
+        "shadow_mode": True,
+        "execution_eligible": False,
+        "quote_observation_eligible": True,
+        "automatic_ordering": False,
+        "trade_intent_contract_version": PUT_SHADOW_WINDOW_CONTRACT_VERSION,
+        "entry_window_start_at": entry_window_start_at.isoformat(),
+        "hard_exit_at": hard_exit_at.isoformat(),
+    }
+    candidate: dict[str, object] = {
+        "event": "candidate_terminal",
+        "candidate_id": "intent:shadow-put|level:first",
+        "intent_id": intent["intent_id"],
+        "event_id": intent["event_id"],
+        "semantic_key": semantic_key,
+        "direction": "down",
+        "phase": "quote_reached_entry",
+        "terminal_at": at.isoformat(),
+        "contract_id": contract,
+        "entry_limit": intent["entry_limit"],
+        "valid_until": intent["valid_until"],
+        "trade_intent_contract_version": PUT_SHADOW_WINDOW_CONTRACT_VERSION,
+        "entry_window_start_at": entry_window_start_at.isoformat(),
+        "hard_exit_at": hard_exit_at.isoformat(),
+        "strategy_lane": intent["strategy_lane"],
+        "play": intent["play"],
+        "thesis": intent["thesis"],
+        "level_kind": intent["level_kind"],
+        "shadow_mode": True,
+        "automatic_ordering": False,
+        "execution_claim": "none",
+        "broker_order_state": "not_connected",
+        "source_intent": dict(intent),
+        "entry_observation": {
+            "at": at.isoformat(),
+            "contract_id": contract,
+            "entry_limit": intent["entry_limit"],
+            "provider": "schwab",
+            "bid": 9.8,
+            "mid": 10.0,
+            "ask": 10.1,
+            "quote_quality": "live",
+            "quote_source_at": (at - timedelta(seconds=source_age_seconds)).isoformat()
+            if source_age_seconds is not None
+            else None,
+            "quote_transport_at": (at - timedelta(seconds=transport_age_seconds)).isoformat(),
+            "quote_source_age_seconds": source_age_seconds,
+            "quote_transport_age_seconds": transport_age_seconds,
+            "quote_pricing_allowed": True,
+            "exact_quote_freshness_ok": True,
+            "exact_quote_policy_version": PUT_SHADOW_EXACT_QUOTE_POLICY_VERSION,
+            "exact_quote_max_age_seconds": PUT_SHADOW_EXACT_QUOTE_MAX_AGE_SECONDS,
+            "entry_condition": "displayed_ask_at_or_below_limit",
+        },
+    }
+    return intent, candidate
+
+
+def _readiness_record(
+    source: str,
+    payload: dict[str, object],
+    *,
+    line: int,
+    at: datetime,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        source=source,
+        payload=payload,
+        path=f"{source}.jsonl",
+        line_number=line,
+        at=at,
+        session_date=at.date(),
+        partition_date=at.date(),
+        malformed_json=False,
+    )
+
+
 def test_twenty_clean_forward_sessions_and_exact_entries_are_review_ready(
     tmp_path: Path,
 ) -> None:
@@ -399,6 +1269,248 @@ def test_twenty_clean_forward_sessions_and_exact_entries_are_review_ready(
     assert result["cohorts"]["put_exact_entry"]["count"] == 20
     assert result["cohorts"]["exact_spread_complete_exit"]["count"] == 20
     assert result["blockers"] == []
+
+
+def test_put_readiness_uses_rth_only_while_overall_waits_for_gth(
+    tmp_path: Path,
+) -> None:
+    days = _trading_days(date(2026, 6, 22), DEFAULT_THRESHOLDS.complete_sessions)
+    cutoff = _write_rth_put_shadow_cohort(tmp_path, days)
+
+    result = build_strategy_readiness(
+        tmp_path,
+        cutoff_at=cutoff,
+        policy_versions=ROLE_POLICIES,
+        generated_at=cutoff,
+    )
+
+    put = result["cohorts"]["put_exact_entry"]
+    assert put["status"] == "ready"
+    assert put["count"] == 20
+    assert put["eligible_shadow_ready_puts"] == 20
+    assert put["exact_shadow_quote_entries"] == 20
+    assert put["blockers"] == []
+    assert result["cohort_sessions"]["put_exact_entry"] == {
+        "observed": 20,
+        "rth_complete": 20,
+        "contract_consistent_complete": 20,
+        "target": 20,
+        "dates": [day.isoformat() for day in days],
+    }
+    assert result["sessions"]["health_complete"] == 0
+    assert result["status"] == "collecting"
+    assert result["cohorts"]["gth_exact_entry"]["status"] == "collecting"
+    assert result["cohorts"]["exact_spread_complete_exit"]["status"] == "collecting"
+
+
+def test_gth_and_call_anomalies_do_not_change_put_readiness(tmp_path: Path) -> None:
+    days = _trading_days(date(2026, 6, 22), DEFAULT_THRESHOLDS.complete_sessions)
+    cutoff = _write_rth_put_shadow_cohort(tmp_path, days)
+    baseline = build_strategy_readiness(
+        tmp_path,
+        cutoff_at=cutoff,
+        policy_versions=ROLE_POLICIES,
+        generated_at=cutoff,
+    )
+
+    day = days[-1]
+    gth_start, _, rth_start, _ = _health_window(day)
+    anomaly_at = (gth_start + timedelta(minutes=30)).astimezone(timezone.utc)
+    bad_gth = {
+        **_envelope(
+            anomaly_at,
+            role="gth_signal",
+            kind="raw_es",
+            instrument_id="future:ES",
+        ),
+        "event_id": "gth:invalid-duplicate",
+        "session_date": day.isoformat(),
+        "confirmed_at": anomaly_at.isoformat(),
+    }
+    bad_gth.pop("coordinate")
+    _write_rows(
+        tmp_path / "gth_dip_reclaim" / f"date={day.isoformat()}" / "anomalies.jsonl",
+        [bad_gth, bad_gth],
+    )
+    call_at = (rth_start + timedelta(minutes=60)).astimezone(timezone.utc)
+    bad_call = {
+        **_envelope(
+            call_at,
+            role="trade_intent",
+            kind="official_spx",
+            instrument_id="index:SPX",
+        ),
+        "status": "blocked",
+        "intent_id": "intent:bad-call",
+        "event_id": "level:bad-call",
+        "session_id": day.isoformat(),
+        "evaluated_at": call_at.isoformat(),
+        "direction": "up",
+        "contract_id": f"option:SPX:SPXW:{day.strftime('%Y%m%d')}:7500:C",
+        "strategy_lane": "long_0dte_rth_upside_breakout_pilot",
+        "shadow_mode": False,
+    }
+    bad_call.pop("coordinate")
+    _write_rows(
+        tmp_path / "trade_intents" / f"date={day.isoformat()}" / "call-anomaly.jsonl",
+        [bad_call],
+    )
+
+    after = build_strategy_readiness(
+        tmp_path,
+        cutoff_at=cutoff,
+        policy_versions=ROLE_POLICIES,
+        generated_at=cutoff,
+    )
+
+    assert after["cohorts"]["put_exact_entry"] == baseline["cohorts"]["put_exact_entry"]
+    assert (
+        after["cohort_sessions"]["put_exact_entry"]
+        == baseline["cohort_sessions"]["put_exact_entry"]
+    )
+    assert (
+        after["cohort_contracts"]["put_exact_entry"]
+        == baseline["cohort_contracts"]["put_exact_entry"]
+    )
+
+
+def test_incomplete_rth_session_is_excluded_from_put_readiness(tmp_path: Path) -> None:
+    days = _trading_days(date(2026, 6, 22), DEFAULT_THRESHOLDS.complete_sessions)
+    cutoff = _write_rth_put_shadow_cohort(
+        tmp_path,
+        days,
+        incomplete_rth_index=len(days) - 1,
+    )
+
+    result = build_strategy_readiness(
+        tmp_path,
+        cutoff_at=cutoff,
+        policy_versions=ROLE_POLICIES,
+        generated_at=cutoff,
+    )
+
+    put = result["cohorts"]["put_exact_entry"]
+    assert put["status"] == "collecting"
+    assert put["count"] == 19
+    assert put["excluded_incomplete_session"] == 1
+    assert result["cohort_sessions"]["put_exact_entry"]["contract_consistent_complete"] == 19
+    assert "put_rth_contract_consistent_complete_sessions_below_20" in put["blockers"]
+    assert "put_exact_entries_below_20" in put["blockers"]
+
+
+def test_missing_candidate_policy_role_blocks_put_readiness(tmp_path: Path) -> None:
+    days = _trading_days(date(2026, 6, 22), DEFAULT_THRESHOLDS.complete_sessions)
+    cutoff = _write_rth_put_shadow_cohort(
+        tmp_path,
+        days,
+        write_candidate=False,
+    )
+
+    result = build_strategy_readiness(
+        tmp_path,
+        cutoff_at=cutoff,
+        policy_versions=ROLE_POLICIES,
+        generated_at=cutoff,
+    )
+
+    put = result["cohorts"]["put_exact_entry"]
+    assert put["status"] == "collecting"
+    assert put["count"] == 0
+    assert "policy_role_unavailable:trade_candidate" in put["blockers"]
+    assert result["cohort_policy_bundles"]["put_exact_entry"]["started_session"] is None
+
+
+def test_candidate_policy_drift_blocks_put_readiness(tmp_path: Path) -> None:
+    days = _trading_days(date(2026, 6, 22), DEFAULT_THRESHOLDS.complete_sessions)
+    cutoff = _write_rth_put_shadow_cohort(tmp_path, days)
+    drift_day = days[-1]
+    path = tmp_path / "trade_candidates" / f"date={drift_day.isoformat()}" / "events.jsonl"
+    rows = _read_rows(path)
+    for row in rows:
+        row["policy_version"] = "trade_candidate_v3_drift"
+    _write_rows(path, rows)
+
+    result = build_strategy_readiness(
+        tmp_path,
+        cutoff_at=cutoff,
+        policy_versions=ROLE_POLICIES,
+        generated_at=cutoff,
+    )
+
+    put = result["cohorts"]["put_exact_entry"]
+    assert put["status"] == "collecting"
+    assert put["count"] == 19
+    assert "put_role_policy_version_drift_present" in put["blockers"]
+    assert (
+        result["cohort_contracts"]["put_exact_entry"]["issues"]["role_policy_version_mismatch"] == 2
+    )
+
+
+def test_candidate_terminal_cannot_roll_back_latest_armed_policy() -> None:
+    start = datetime(2026, 7, 15, 14, 0, tzinfo=timezone.utc)
+    _, template = _put_shadow_readiness_fixture(
+        start,
+        source_age_seconds=0.0,
+        transport_age_seconds=0.0,
+    )
+
+    def candidate(
+        *,
+        event: str,
+        policy: str,
+        at: datetime,
+        suffix: str,
+    ) -> SimpleNamespace:
+        payload = {
+            **template,
+            "schema_version": 3,
+            "policy_version": policy,
+            "event": event,
+            "candidate_id": f"candidate:{suffix}",
+            "armed_at": at.isoformat(),
+            "terminal_at": at.isoformat(),
+        }
+        return _readiness_record("trade_candidates", payload, line=1, at=at)
+
+    records = [
+        candidate(
+            event="candidate_armed",
+            policy="candidate-policy-a",
+            at=start,
+            suffix="a",
+        ),
+        candidate(
+            event="candidate_armed",
+            policy="candidate-policy-b",
+            at=start + timedelta(minutes=1),
+            suffix="b",
+        ),
+        candidate(
+            event="candidate_terminal",
+            policy="candidate-policy-b",
+            at=start + timedelta(minutes=2),
+            suffix="b",
+        ),
+        candidate(
+            event="candidate_terminal",
+            policy="candidate-policy-a",
+            at=start + timedelta(minutes=3),
+            suffix="a",
+        ),
+    ]
+
+    selected = _select_policy_bundle(
+        records,
+        requested=None,
+        roles=("trade_candidate",),
+        required_roles=("trade_candidate",),
+        record_filter=_put_shadow_record,
+    )
+
+    assert selected["versions"]["trade_candidate"] == "candidate-policy-b"
+    assert (
+        selected["role_started_at"]["trade_candidate"] == (start + timedelta(minutes=1)).isoformat()
+    )
 
 
 def test_legacy_is_excluded_but_forward_invalid_and_duplicate_rows_block(
@@ -514,7 +1626,21 @@ def test_observing_policy_declaration_reopens_auto_cohort_and_explicit_drift_blo
 ) -> None:
     days = _trading_days(date(2026, 7, 13), 3)
     cutoff = _write_complete_forward_cohort(tmp_path, days)
-    changed = "trade_intent_v3_changed"
+    feature_policy = MarketFeatureSettings(trade_confirmed_pilot_enabled=True)
+    order_policy = OrderMapPolicy()
+    legacy = policy_version(
+        "rth_trade_intent.v3",
+        {"market_features": feature_policy, "order_map": order_policy},
+    )
+    changed = trade_intent_policy_version(feature_policy, order_policy)
+    assert changed != legacy
+
+    for day in days:
+        path = tmp_path / "trade_intents" / f"date={day.isoformat()}" / "events.jsonl"
+        rows = _read_rows(path)
+        for row in rows:
+            row["policy_version"] = legacy
+        _write_rows(path, rows)
 
     observing_path = tmp_path / "trade_intents" / f"date={days[1].isoformat()}" / "events.jsonl"
     observing = _read_rows(observing_path)[0]
@@ -544,7 +1670,7 @@ def test_observing_policy_declaration_reopens_auto_cohort_and_explicit_drift_blo
     explicit = build_strategy_readiness(
         tmp_path,
         cutoff_at=cutoff,
-        policy_versions=ROLE_POLICIES,
+        policy_versions={**ROLE_POLICIES, "trade_intent": legacy},
         generated_at=cutoff,
     )
     assert explicit["contract"]["telemetry_excluded"]["total"] == 1
