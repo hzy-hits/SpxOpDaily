@@ -8,6 +8,10 @@ from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Mapping
 
+from spx_spark.analytics.options.quote_policy import (
+    option_field_live_entitlement,
+    option_field_live_entitlement_source,
+)
 from spx_spark.application.market_features.virtual_strategy_spread import (
     spread_snapshot_decision,
 )
@@ -15,7 +19,6 @@ from spx_spark.application.market_features.virtual_strategy_state import (
     flush_pending_notifications,
 )
 from spx_spark.application.market_features.virtual_strategy_support import (
-    _contract_snapshot,
     _gth_spread_contract_ids,
     _number,
     _time,
@@ -193,7 +196,7 @@ def evaluate_gth_manual_candidate(
         max_quote_age_seconds=policy.gth_manual_candidate_quote_max_age_seconds,
         max_quote_skew_seconds=policy.provider_sync_tolerance_seconds,
         required_provider=Provider.IBKR.value,
-        contract_snapshot=_contract_snapshot,
+        contract_snapshot=_gth_bbo_contract_snapshot,
     )
     reasons.extend(quote_reasons)
     declared_width = _number(spread.get("width_points"))
@@ -614,6 +617,62 @@ def _blocked(
         "status": "blocked",
         "manual_action_eligible": False,
         "block_reasons": list(dict.fromkeys(reasons)),
+    }
+
+
+def _gth_bbo_contract_snapshot(
+    latest: LatestState,
+    contract_id: str,
+    *,
+    now: datetime,
+) -> dict[str, object]:
+    """Return execution BBO facts; Greeks are optional enrichment in GTH."""
+
+    quote = latest.best_quote(contract_id)
+    if (
+        quote is None
+        or quote.bid is None
+        or quote.mid is None
+        or quote.ask is None
+        or quote.quote_time is None
+        or not 0 <= quote.bid <= quote.mid <= quote.ask
+    ):
+        return {}
+    use = configured_quote_use_decision(quote, as_of=now)
+    if (
+        not use.pricing_allowed
+        or not option_field_live_entitlement(quote, field="pricing")
+    ):
+        return {}
+    pricing_entitlement_source = option_field_live_entitlement_source(
+        quote,
+        field="pricing",
+    )
+    source_at = as_utc(quote.quote_time)
+    transport_at = as_utc(quote.last_update_at or quote.received_at)
+    greeks = quote.greeks
+    iv = greeks.implied_vol if greeks is not None else None
+    underlier = greeks.underlier_price if greeks is not None else None
+    return {
+        "at": _utc(now).isoformat(),
+        "mid": float(quote.mid),
+        "bid": float(quote.bid),
+        "ask": float(quote.ask),
+        "provider": quote.provider.value,
+        "source_at": source_at.isoformat(),
+        "transport_at": transport_at.isoformat(),
+        "iv": iv,
+        "underlier": underlier,
+        "quality": {
+            "status": "ok",
+            "pricing_decision": use.reason,
+            "pricing_live_entitlement_source": pricing_entitlement_source,
+            "greeks": (
+                "available"
+                if iv is not None and underlier is not None
+                else "optional_unavailable"
+            ),
+        },
     }
 
 

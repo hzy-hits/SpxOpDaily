@@ -628,7 +628,7 @@ def render_operator_status_brief(
     lines.extend(
         line
         for line in radar_lines
-        if line.startswith(("30m路径分位", "机会["))
+        if line.startswith(("30m路径分位", "GTH方向观察", "机会["))
     )
     for line in (
         _compact_decision_line(payload),

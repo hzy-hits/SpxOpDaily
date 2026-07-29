@@ -87,6 +87,106 @@ def test_manual_candidate_is_ready_without_cash_spx(
     )
 
 
+def test_gth_manual_candidate_uses_fresh_bbo_without_vendor_greeks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    quotes = (
+        _option_quote(7505, "C", 14.0),
+        _option_quote(7545, "C", 3.0),
+    )
+    latest = LatestState(NOW, NOW, quotes, quotes)
+    monkeypatch.setattr(
+        candidate_module,
+        "actionable_chain_implied_reference",
+        lambda *_args, **_kwargs: {
+            "kind": "chain_implied_spx",
+            "instrument_id": "synthetic:SPXW_PARITY",
+            "price": 7530.0,
+            "lower_bound": 7529.5,
+            "upper_bound": 7530.5,
+            "uncertainty_points": 0.5,
+            "pair_count": 5,
+            "selected_pair_count": 5,
+            "dispersion_points": 1.0,
+            "provider": "ibkr",
+            "source_at": NOW.isoformat(),
+            "transport_at": NOW.isoformat(),
+        },
+    )
+    monkeypatch.setattr(
+        candidate_module,
+        "_direct_es_reference",
+        lambda *_args, **_kwargs: {
+            "kind": "raw_es",
+            "instrument_id": "future:ES",
+            "price": 7552.0,
+            "provider": "ibkr",
+            "source_at": NOW.isoformat(),
+            "transport_at": NOW.isoformat(),
+        },
+    )
+
+    candidate = evaluate_gth_manual_candidate(
+        latest,
+        _signal(NOW),
+        macro_event={"mode": "normal", "entry_allowed": True},
+        now=NOW,
+        policy=MarketFeatureSettings(),
+        new_entries_allowed=True,
+        new_entries_block_reason="allowed",
+    )
+
+    assert candidate["status"] == "manual_ready"
+    snapshot = candidate["exact_spread_snapshot"]
+    assert snapshot["mid"] == pytest.approx(11.0)
+    assert snapshot["long"]["iv"] is None
+    assert snapshot["short"]["iv"] is None
+    assert snapshot["long"]["quality"]["greeks"] == "optional_unavailable"
+    assert snapshot["short"]["quality"]["greeks"] == "optional_unavailable"
+    assert snapshot["delta"] is None
+    assert candidate["automatic_ordering"] is False
+
+
+@pytest.mark.parametrize(
+    "pricing_provenance",
+    (
+        {
+            "pricing_market_data_type": 3,
+            "pricing_live_entitlement": True,
+            "pricing_live_entitlement_source": "stale_live_claim",
+        },
+        {
+            "pricing_market_data_type": 2,
+            "pricing_live_entitlement": True,
+            "pricing_live_entitlement_source": "stale_live_claim",
+        },
+        {
+            "pricing_live_entitlement": False,
+            "pricing_live_entitlement_source": "explicit_test_denial",
+        },
+    ),
+    ids=("delayed", "frozen", "explicit-false"),
+)
+def test_gth_bbo_rejects_non_live_field_pricing_entitlement(
+    pricing_provenance: dict[str, object],
+) -> None:
+    quote = replace(
+        _option_quote(7505, "C", 14.0),
+        raw=pricing_provenance,
+    )
+    latest = LatestState(NOW, NOW, (quote,), (quote,))
+
+    assert quote.quality is MarketDataQuality.LIVE
+    assert (
+        candidate_module._gth_bbo_contract_snapshot(
+            latest,
+            quote.instrument.canonical_id,
+            now=NOW,
+        )
+        == {}
+    )
+
+
 @pytest.mark.parametrize(
     ("now", "ready"),
     (

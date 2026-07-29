@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from spx_spark.application.order_map.convexity_idea_radar import (
     build_convexity_idea_radar,
@@ -10,7 +10,10 @@ from spx_spark.application.order_map.convexity_idea_presentation import (
     render_convexity_idea_radar_lines,
 )
 from spx_spark.application.order_map.pricing_audit import build_pricing_audit_record
-from spx_spark.application.order_map.prompts import _status_writer_payload
+from spx_spark.application.order_map.prompts import (
+    _status_writer_payload,
+    render_operator_status_brief,
+)
 from spx_spark.market_calendar import ET
 
 
@@ -708,6 +711,76 @@ def test_actual_sunday_evening_gth_prepares_monday_session() -> None:
     assert radar["mandate"]["new_idea_generation_allowed"] is True
     assert radar["gth_prior"]["status"] == "live_context_not_frozen"
     assert radar["gth_prior"]["frozen_at"] is None
+
+
+def test_gth_radar_keeps_two_sided_live_es_observations_when_options_degrade() -> None:
+    payload = _payload()
+    gth = datetime(2026, 7, 26, 20, 30, tzinfo=ET)
+    payload["as_of"] = gth.isoformat()
+    payload["expiry"] = "20260727"
+    payload["globex_trend"] = {
+        "session_id": "2026-07-27:gth",
+        "regime": "bullish",
+        "updated_at": (gth - timedelta(seconds=10)).isoformat(),
+        "metrics": {
+            "return_15m_points": 7.0,
+            "return_60m_points": 19.0,
+            "return_180m_points": None,
+        },
+        "samples": [{"provider": "schwab"}],
+    }
+    payload["gth_dip_reclaim_signal"] = {
+        "kind": "gth_dip_reclaim_call",
+        "event_id": "gth-dip:live",
+        "session_date": "2026-07-27",
+        "confirmed_at": (gth - timedelta(minutes=1)).isoformat(),
+        "valid_until": (gth + timedelta(minutes=9)).isoformat(),
+        "entry_quality": {
+            "mode": "decision_grade",
+            "verdict": "pass",
+            "block_reasons": [],
+        },
+    }
+    payload["gth_manual_candidate"] = {
+        "status": "blocked",
+        "candidate_id": "gth-manual:live",
+        "source_signal_id": "gth-dip:live",
+        "evaluated_at": (gth - timedelta(seconds=5)).isoformat(),
+        "block_reasons": ["long_leg_quote_unavailable"],
+        "manual_action_eligible": False,
+        "automatic_ordering": False,
+        "broker_submission_allowed": False,
+    }
+    payload["spring_gamma_v3_shadow"]["as_of"] = gth.isoformat()
+    payload["spring_gamma_v3_shadow"]["expiry"] = "20260727"
+    payload["spring_gamma_v3_shadow"]["option_overlay"] = {
+        "status": "unavailable",
+        "reasons": ["gth_spxw_nbbo_unavailable"],
+    }
+
+    radar = build_convexity_idea_radar(payload, now=gth)
+
+    board = radar["opportunity_board"]
+    assert board["gth_observation"]["status"] == "ready"
+    assert board["lanes"]["call"]["status"] == "observed"
+    assert board["lanes"]["put"]["status"] == "observed"
+    assert board["lanes"]["call"]["priority"] == "HIGH"
+    assert "DIP_RECLAIM_ALIGNED" in board["lanes"]["call"]["gth_signal"]
+    assert board["lanes"]["put"]["gth_signal"] == "COUNTER_TREND"
+    for side in ("call", "put"):
+        assert board["lanes"][side]["execution"]["eligible"] is False
+        assert board["lanes"][side]["automatic_ordering"] is False
+
+    lines = render_convexity_idea_radar_lines({"convexity_idea_radar": radar})
+    assert any(line.startswith("GTH方向观察") for line in lines)
+    opportunity_lines = [line for line in lines if line.startswith("机会[")]
+    assert len(opportunity_lines) == 3
+    assert any("GTH_SIGNAL=DIP_RECLAIM_ALIGNED" in line for line in opportunity_lines)
+    payload["convexity_idea_radar"] = radar
+    operator_brief = render_operator_status_brief(payload, [], gth)
+    assert "GTH方向观察" in operator_brief
+    assert "15/60/180m 7.00/19.00/-" in operator_brief
+    assert "schwab" in operator_brief
 
 
 def test_wall_probability_requires_fresh_shadow_and_unexpired_horizon() -> None:

@@ -2185,6 +2185,7 @@ def test_globex_status_delivers_deterministic_operator_brief(monkeypatch, tmp_pa
             text=text,
             kind=envelope.kind,
             lane=envelope.lane,
+            expires_at=envelope.expires_at,
             friend=friend,
             feishu_text=feishu_text,
         )
@@ -2218,9 +2219,82 @@ def test_globex_status_delivers_deterministic_operator_brief(monkeypatch, tmp_pa
         "text": "bounded operator status",
         "kind": "status",
         "lane": "scheduled_report",
+        "expires_at": datetime(2026, 7, 7, 6, 15, tzinfo=timezone.utc),
         "friend": True,
         "feishu_text": "bounded operator status",
     }
+
+
+def test_gth_status_delivers_degraded_heartbeat_instead_of_skipping_thin_snapshot(
+    monkeypatch, tmp_path
+) -> None:
+    import spx_spark.application.order_map.service as order_map_module
+
+    now = datetime(2026, 7, 15, 4, 30, tzinfo=timezone.utc)
+    payload = {
+        "research_only": False,
+        "session_phase": {"name": "asia_globex"},
+        "underlier": {"price": None},
+        "candidates": [],
+        "warnings": [],
+    }
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(order_map_module, "within_status_window", lambda value: True)
+    monkeypatch.setattr(order_map_module, "load_order_map_state", lambda path: {})
+    monkeypatch.setattr(
+        order_map_module,
+        "build_order_payload_with_retry",
+        lambda *args, **kwargs: payload,
+    )
+    monkeypatch.setattr(order_map_module, "_has_open_position_risk", lambda settings: False)
+    monkeypatch.setattr(order_map_module, "render_status_template", lambda *args: "status")
+    monkeypatch.setattr(
+        order_map_module,
+        "render_operator_status_brief",
+        lambda value, *args: (
+            captured.update(warnings=list(value["warnings"])) or "operator status"
+        ),
+    )
+    monkeypatch.setattr(
+        order_map_module.NotificationSettings,
+        "from_env",
+        classmethod(lambda cls: object()),
+    )
+
+    def deliver(settings, envelope, **kwargs):
+        captured.update(
+            lane=envelope.lane,
+            expires_at=envelope.expires_at,
+            title=kwargs["title"],
+            text=kwargs["text"],
+        )
+        return SimpleNamespace(
+            sinks=(SimpleNamespace(sink="feishu", ok=True, attempted=True),),
+            delivered=True,
+        )
+
+    monkeypatch.setattr(order_map_module, "dispatch_notification", deliver)
+    monkeypatch.setattr(order_map_module, "mark_sent", lambda *args, **kwargs: None)
+    monkeypatch.setattr(order_map_module, "record_push", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        order_map_module,
+        "persist_zero_dte_greeks_reference",
+        lambda *args, **kwargs: None,
+    )
+
+    result = order_map_module.run_status(
+        SimpleNamespace(force=False, dry_run=False),
+        now=now,
+        state_path=str(tmp_path / "state.json"),
+        trading_date="2026-07-15",
+    )
+
+    assert result == 0
+    assert captured["warnings"] == ["gth_heartbeat_degraded_snapshot"]
+    assert captured["lane"] == "scheduled_report"
+    assert captured["expires_at"] == now + timedelta(minutes=15)
+    assert captured["title"] == "SPX GTH 方向观察（不可执行）"
+    assert captured["text"] == "operator status"
 
 
 def test_force_cannot_bypass_research_only_direct_map_gate(
@@ -3357,23 +3431,34 @@ def test_status_delivery_gate_allows_material_and_one_shot_key_windows() -> None
     )
 
 
-def test_status_delivery_gate_sends_hourly_gth_summary_without_trade_intent() -> None:
+def test_status_delivery_gate_sends_gth_quarter_hour_heartbeat() -> None:
     from spx_spark.application.order_map.service import _status_delivery_reason
 
     now = datetime(2026, 7, 15, 4, 14, tzinfo=timezone.utc)
-    fingerprint = {"status_phase": "asia_globex", "trade_intent_id": ""}
+    fingerprint = {"status_phase": "asia_globex", "trade_intent_id": "stale-rth-intent"}
     recent = {
         "last_status_date": "2026-07-15",
         "last_status_at": now.timestamp() - 13 * 60,
         "status_fingerprint": fingerprint,
     }
-    due = {**recent, "last_status_at": now.timestamp() - 61 * 60}
+    due = {**recent, "last_status_at": now.timestamp() - 16 * 60}
 
     assert (
         _status_delivery_reason(
             recent,
             fingerprint,
             ["决策剧本 过渡偏多→过渡偏空"],
+            now=now,
+            trading_date="2026-07-15",
+            position_risk=False,
+        )
+        == "material_changes"
+    )
+    assert (
+        _status_delivery_reason(
+            recent,
+            fingerprint,
+            [],
             now=now,
             trading_date="2026-07-15",
             position_risk=False,
@@ -3389,7 +3474,7 @@ def test_status_delivery_gate_sends_hourly_gth_summary_without_trade_intent() ->
             trading_date="2026-07-15",
             position_risk=False,
         )
-        == "gth_hourly_summary:asia_globex"
+        == "gth_quarter_hour_heartbeat:asia_globex"
     )
 
 

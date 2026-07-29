@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from spx_spark.application.order_map.convexity_gth_modifier_gate import (
+    build_ranked_active_event,
+    gth_skew_rank_gate_reasons,
+)
 from spx_spark.application.order_map.convexity_opportunity_board import (
     build_dense_opportunity_board,
 )
@@ -230,3 +235,264 @@ def test_closed_board_clears_stale_wall_skew_and_structure_evidence() -> None:
     assert board["lanes"]["call"]["wall_signal"] == "CLOSED"
     assert board["lanes"]["put"]["wall_signal"] == "CLOSED"
     assert board["lanes"]["vol_range"]["volatility_signal"] == "CLOSED"
+
+
+def test_gth_live_es_direction_survives_optional_option_data_gaps() -> None:
+    board = build_dense_opportunity_board(
+        mandate={"phase": "gth_preparation"},
+        market_state={
+            "D": None,
+            "efficiency_ratio": None,
+            "breadth_above_vwap": None,
+            "moving_averages": {},
+            "rolling_path_percentiles": {},
+            "gth_observation": {
+                "status": "ready",
+                "phase": "gth_preparation",
+                "trend": {
+                    "status": "ready",
+                    "regime": "bullish",
+                    "return_15m_points": 6.0,
+                    "return_60m_points": 18.0,
+                    "return_180m_points": None,
+                },
+                "dip_reclaim_call": {"status": "unavailable"},
+                "manual_candidate": {"status": "blocked"},
+            },
+        },
+        boundary_tests={"active_event": {}},
+        option_evidence={
+            "call": {"edge_status": "unknown"},
+            "put": {"edge_status": "unknown"},
+        },
+        volatility_context={},
+        data_quality={
+            "status": "degraded",
+            "reasons": [
+                "destination:unavailable",
+                "option_overlay_unavailable",
+            ],
+        },
+        hypotheses=[],
+    )
+
+    call = board["lanes"]["call"]
+    put = board["lanes"]["put"]
+    assert call["status"] == "observed"
+    assert put["status"] == "observed"
+    assert call["priority"] == "MEDIUM"
+    assert call["priority_score"] == 4
+    assert call["gth_signal"] == "TREND_BULLISH"
+    assert put["gth_signal"] == "COUNTER_TREND"
+    assert any(
+        row["feature"] == "optional_option_data_degraded_gth_rank_retained"
+        for row in call["score_contributions"]
+    )
+    for lane in (call, put):
+        assert lane["execution"]["eligible"] is False
+        assert lane["action_authority"] == "none"
+        assert lane["automatic_ordering"] is False
+
+
+def test_gth_bearish_trend_keeps_call_and_put_but_ranks_put_higher() -> None:
+    board = build_dense_opportunity_board(
+        mandate={"phase": "gth_preparation"},
+        market_state={
+            "D": None,
+            "moving_averages": {},
+            "rolling_path_percentiles": {},
+            "gth_observation": {
+                "status": "ready",
+                "phase": "gth_preparation",
+                "trend": {
+                    "status": "ready",
+                    "regime": "bearish",
+                    "return_15m_points": -7.0,
+                    "return_60m_points": -21.0,
+                    "return_180m_points": 3.0,
+                },
+                "dip_reclaim_call": {
+                    "status": "active",
+                    "entry_quality_verdict": "blocked",
+                },
+                "manual_candidate": {"status": "blocked"},
+            },
+        },
+        boundary_tests={"active_event": {}},
+        option_evidence={
+            "call": {"edge_status": "not_observed"},
+            "put": {"edge_status": "not_observed"},
+        },
+        volatility_context={},
+        data_quality={"status": "ready", "reasons": []},
+        hypotheses=[],
+    )
+
+    call = board["lanes"]["call"]
+    put = board["lanes"]["put"]
+    assert set(board["lanes"]) == {"call", "put", "vol_range"}
+    assert call["status"] == put["status"] == "observed"
+    assert "DIP_RECLAIM_OBSERVATION" in call["gth_signal"]
+    assert "COUNTER_TREND" in call["gth_signal"]
+    assert put["gth_signal"] == "TREND_BEARISH"
+    assert put["priority"] == "MEDIUM"
+    assert put["priority_score"] > call["priority_score"]
+    assert put["execution"]["eligible"] is False
+
+
+def test_stale_gth_wall_and_skew_cannot_elevate_fresh_direct_es_rank() -> None:
+    now = datetime(2026, 7, 30, 5, 0, tzinfo=timezone.utc)
+    mandate = {"phase": "gth_preparation", "trading_date": "2026-07-30"}
+    event = build_ranked_active_event(
+        {
+            "level_decision": {
+                "event_id": "old-wall",
+                "phase": "CONFIRMED",
+                "direction": "up",
+                "level_kind": "flip_high",
+                "formal_signal": True,
+                "quality_ok": True,
+                "expiry": "20260729",
+                "session_date": "2026-07-29",
+                "session_mode": "gth",
+                "expires_at": (now - timedelta(seconds=1)).isoformat(),
+            }
+        },
+        mandate=mandate,
+        now=now,
+    )
+    stale_candidate = {
+        "long": {"expiry": "20260729"},
+        "short": {"expiry": "20260729"},
+    }
+    skew_reasons = gth_skew_rank_gate_reasons(
+        {
+            "expiry": "20260729",
+            "as_of": (now - timedelta(minutes=10)).isoformat(),
+        },
+        candidate=stale_candidate,
+        mandate=mandate,
+        now=now,
+    )
+
+    board = build_dense_opportunity_board(
+        mandate=mandate,
+        market_state={
+            "D": None,
+            "moving_averages": {},
+            "rolling_path_percentiles": {},
+            "gth_observation": {
+                "status": "ready",
+                "trend": {
+                    "status": "ready",
+                    "regime": "bullish",
+                    "return_15m_points": 5.0,
+                    "return_60m_points": 12.0,
+                    "return_180m_points": None,
+                },
+                "dip_reclaim_call": {"status": "unavailable"},
+                "manual_candidate": {"status": "blocked"},
+            },
+        },
+        boundary_tests={"active_event": event},
+        option_evidence={
+            "call": {
+                "edge_status": "observed_local_skew_edge",
+                "rank_eligible": False,
+                "rank_gate_reasons": skew_reasons,
+                "vertical": {"strategy": "call_debit_spread"},
+            },
+            "put": {"edge_status": "unknown", "rank_eligible": False},
+        },
+        volatility_context={},
+        data_quality={"status": "degraded", "reasons": ["option_overlay_stale"]},
+        hypotheses=[],
+    )
+
+    call = board["lanes"]["call"]
+    assert event["rank_eligible"] is False
+    assert "gth_active_event_expired" in event["rank_gate_reasons"]
+    assert "gth_skew_stale_or_future" in skew_reasons
+    assert call["priority"] == "MEDIUM"
+    assert call["priority_score"] == 4
+    assert call["wall_signal"] == "UNAVAILABLE"
+    assert call["edge_status"] == "unknown"
+    assert not {
+        "wall_lifecycle",
+        "side_level_skew_context",
+    } & {row["feature"] for row in call["score_contributions"]}
+
+
+def test_current_gth_wall_and_skew_remain_optional_positive_modifiers() -> None:
+    now = datetime(2026, 7, 30, 5, 0, tzinfo=timezone.utc)
+    mandate = {"phase": "gth_preparation", "trading_date": "2026-07-30"}
+    event = build_ranked_active_event(
+        {
+            "level_decision": {
+                "event_id": "current-wall",
+                "phase": "CONFIRMED",
+                "direction": "up",
+                "level_kind": "flip_high",
+                "formal_signal": True,
+                "quality_ok": True,
+                "expiry": "20260730",
+                "session_date": "2026-07-30",
+                "session_mode": "gth",
+                "expires_at": (now + timedelta(minutes=2)).isoformat(),
+            }
+        },
+        mandate=mandate,
+        now=now,
+    )
+    candidate = {
+        "long": {"expiry": "20260730"},
+        "short": {"expiry": "20260730"},
+    }
+    skew_reasons = gth_skew_rank_gate_reasons(
+        {"expiry": "20260730", "as_of": (now - timedelta(seconds=10)).isoformat()},
+        candidate=candidate,
+        mandate=mandate,
+        now=now,
+    )
+    board = build_dense_opportunity_board(
+        mandate=mandate,
+        market_state={
+            "D": None,
+            "moving_averages": {},
+            "rolling_path_percentiles": {},
+            "gth_observation": {
+                "status": "ready",
+                "trend": {
+                    "status": "ready",
+                    "regime": "bullish",
+                    "return_15m_points": 5.0,
+                    "return_60m_points": 12.0,
+                    "return_180m_points": None,
+                },
+                "dip_reclaim_call": {"status": "unavailable"},
+                "manual_candidate": {"status": "blocked"},
+            },
+        },
+        boundary_tests={"active_event": event},
+        option_evidence={
+            "call": {
+                "edge_status": "observed_local_skew_edge",
+                "rank_eligible": not skew_reasons,
+                "rank_gate_reasons": skew_reasons,
+                "vertical": {"strategy": "call_debit_spread"},
+            },
+            "put": {"edge_status": "unknown", "rank_eligible": False},
+        },
+        volatility_context={},
+        data_quality={"status": "ready", "reasons": []},
+        hypotheses=[],
+    )
+
+    call = board["lanes"]["call"]
+    assert event["rank_eligible"] is True
+    assert skew_reasons == []
+    assert call["priority"] == "HIGH"
+    assert call["priority_score"] == 8
+    assert {"wall_lifecycle", "side_level_skew_context"} <= {
+        row["feature"] for row in call["score_contributions"]
+    }

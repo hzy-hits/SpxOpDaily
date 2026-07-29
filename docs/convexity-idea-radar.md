@@ -203,6 +203,31 @@ Put 分别保留上下边界的接受/拒绝路径；`Vol/Range` 只描述压缩
 `input=stale_fallback` 与 `lag`，且排序贡献最多 1 分。超过 15 分钟即恢复为
 `unavailable`，不会把旧路径伪装成实时信号。
 
+### GTH 双层信号合同
+
+GTH 不再要求完整 SPXW 定价链后才显示方向观察。每 15 分钟状态卡固定保留 Call
+和 Put 两侧，并使用同 session、120 秒内的实时 ES Globex trend 作为独立排序源：
+regime 与 15/60/180 分钟路径同向时提高对应侧优先级；已确认的 Dip-Reclaim
+仅在 entry quality 通过时增加 Call 侧排序，blocked 只显示观察标签、贡献 0 分。
+wall、skew、风险中性分布、统计 readiness 或 exact spread 缺失时，只标记为
+可选证据缺失，不删除任一侧。wall/skew 还必须通过当前 session、到期日与
+120 秒 freshness gate 后才能成为加分 modifier。
+
+GTH 输出分两层，禁止混用：
+
+- `GTH_SIGNAL` 是实时方向 WATCH。它可以在期权链降级时发送 Call/Put 观察卡，
+  但始终没有合约、限价或执行权限。
+- `MANUAL READY` 是独立的精确价差卡，仍要求 GTH 时钟、宏观事件、实时双腿
+  NBBO、同到期日、parity 坐标、失效位、目标空间、R/R 与 TTL 全部通过。
+
+GTH 借记价差的净价只依赖两腿真实 bid/mid/ask、字段时钟和 provider identity；
+vendor Greeks/IV 缺失不再被误报为“没有报价”。Greeks 若存在可附加用于风险解释，
+但不是计算 `long ask - short bid` 等可执行净价的前置条件。
+
+方向 WATCH 只进入每 15 分钟状态卡；没有 exact contract 的 m1/m2 继续留在
+审计上下文，避免把排队成功误当成人类已收到。这样增加的是可见观察密度，不是
+用缺失报价制造可执行交易。
+
 ### 13:00 ET：硬退出
 
 - 新想法生成关闭；

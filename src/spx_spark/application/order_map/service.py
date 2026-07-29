@@ -111,6 +111,7 @@ STATUS_KEY_WINDOW_PHASES = frozenset(
 )
 GTH_STATUS_PHASES = frozenset({"asia_globex", "europe_session", "us_data_hour"})
 STATUS_SUMMARY_CADENCE_SECONDS = 60.0 * 60.0
+GTH_STATUS_SUMMARY_CADENCE_SECONDS = 15.0 * 60.0
 RTH_SLOT_LOOKBACK_GRACE_SECONDS = 15.0 * 60.0 - 0.001
 
 
@@ -427,6 +428,9 @@ def build_order_payload_with_retry(
         payload["gth_dip_reclaim_signal"] = load_json(
             Path(storage_settings.data_root) / "latest" / "gth_dip_reclaim_signal.json"
         )
+        payload["gth_manual_candidate"] = load_json(
+            Path(storage_settings.data_root) / "latest" / "gth_manual_candidate.json"
+        )
         payload["minute_market_frame"] = market_frame
         _apply_gth_em_usage(payload, market_frame)
         payload["option_structure_frame"] = option_frame
@@ -654,26 +658,14 @@ def _status_delivery_reason(
             return "open_position_risk"
         return None
     if phase in GTH_STATUS_PHASES:
-        prior_intent = (
-            str(previous_fingerprint.get("trade_intent_id") or "")
-            if isinstance(previous_fingerprint, dict)
-            else ""
-        )
-        current_intent = str(fingerprint.get("trade_intent_id") or "")
-        if not prior_intent and not current_intent:
-            structural_changes = [
-                change for change in changes if not change.startswith("决策剧本")
-            ]
-            if structural_changes:
-                return "material_changes"
-            last_status_at = finite_float(previous.get("last_status_at"))
-            if last_status_at is None or int(
-                now.timestamp() // STATUS_SUMMARY_CADENCE_SECONDS
-            ) > int(
-                last_status_at // STATUS_SUMMARY_CADENCE_SECONDS
-            ):
-                return f"gth_hourly_summary:{phase}"
-            return None
+        if changes:
+            return "material_changes"
+        last_status_at = finite_float(previous.get("last_status_at"))
+        if last_status_at is None or int(
+            now.timestamp() // GTH_STATUS_SUMMARY_CADENCE_SECONDS
+        ) > int(last_status_at // GTH_STATUS_SUMMARY_CADENCE_SECONDS):
+            return f"gth_quarter_hour_heartbeat:{phase}"
+        return None
     if changes:
         return "material_changes"
     return None
@@ -695,14 +687,14 @@ def run_status(
     storage_settings = StorageSettings.from_env()
     payload = build_order_payload_with_retry(storage_settings, now=now)
     current_rth_slot = rth_report_slot(now)
-    if _payload_is_thin(payload) and not args.force and current_rth_slot is None:
-        # A normal slow-poll/rotation gap; the next run gets the full snapshot.
-        print(json.dumps({"skipped": True, "reason": "thin_snapshot_sampling_gap"}))
-        return 0
-    if _payload_is_thin(payload) and current_rth_slot is not None:
+    if _payload_is_thin(payload):
         warnings = payload.setdefault("warnings", [])
         if isinstance(warnings, list):
-            warnings.append("rth_heartbeat_degraded_snapshot")
+            warnings.append(
+                "rth_heartbeat_degraded_snapshot"
+                if current_rth_slot is not None
+                else "gth_heartbeat_degraded_snapshot"
+            )
     fingerprint = _status_fingerprint(payload)
     changes = _status_material_changes(
         previous.get("status_fingerprint") or previous.get("fingerprint"),
@@ -749,6 +741,11 @@ def run_status(
         occurred_at=report_occurred_at,
         identity=event_identity,
     )
+    status_title = (
+        "SPX GTH 方向观察（不可执行）"
+        if str(fingerprint.get("status_phase") or "") in GTH_STATUS_PHASES
+        else "SPX 市场状态（非信号）"
+    )
     dispatch = dispatch_notification(
         settings,
         NotificationEnvelope(
@@ -761,8 +758,13 @@ def run_status(
                 else "scheduled_report"
             ),
             occurred_at=report_occurred_at,
+            expires_at=(
+                None
+                if delivery_reason == "open_position_risk"
+                else report_occurred_at + timedelta(minutes=15)
+            ),
         ),
-        title="SPX 市场状态（非信号）",
+        title=status_title,
         text=text,
         friend=True,
         feishu_text=feishu_text,

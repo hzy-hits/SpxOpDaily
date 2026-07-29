@@ -7,6 +7,21 @@ from typing import Any, Mapping
 from spx_spark.analytics.options.pricing import finite_float
 
 
+def market_breadth(state: Mapping[str, Any]) -> float | None:
+    """Return the first available normalized breadth observation."""
+
+    value = finite_float(state.get("breadth_above_vwap"))
+    if value is not None:
+        return value
+    components = _mapping(state.get("direction_components"))
+    raw = finite_float(components.get("breadth_above_vwap_ratio"))
+    if raw is not None:
+        return raw
+    lineage = _mapping(state.get("input_lineage"))
+    values = _mapping(lineage.get("values"))
+    return finite_float(values.get("breadth_above_vwap"))
+
+
 def build_volatility_context(
     payload: Mapping[str, Any],
     *,

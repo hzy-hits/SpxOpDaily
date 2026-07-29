@@ -150,8 +150,21 @@ def render_convexity_opportunity_lines(radar: Mapping[str, Any]) -> list[str]:
         f"input={path.get('input_quality') or 'unavailable'}{lag_text} · "
         "小样本向50%收缩；历史排名非预测概率"
     )
+    mandate = _mapping(radar.get("mandate"))
+    gth_mode = mandate.get("phase") == "gth_preparation"
+    gth = _mapping(board.get("gth_observation"))
+    trend = _mapping(gth.get("trend"))
+    trend_ready = trend.get("status") == "ready"
+    gth_line = (
+        f"GTH方向观察  ES {trend.get('regime') if trend_ready else 'unavailable'} · "
+        f"15/60/180m {_dash(trend.get('return_15m_points') if trend_ready else None)}/"
+        f"{_dash(trend.get('return_60m_points') if trend_ready else None)}/"
+        f"{_dash(trend.get('return_180m_points') if trend_ready else None)} · "
+        f"{trend.get('provider') if trend_ready else '-'} · "
+        "Call/Put双边常驻；wall/skew缺失只影响排序"
+    )
     lanes = _mapping(board.get("lanes"))
-    lines = [path_line]
+    lines = [gth_line if gth_mode else path_line]
     for key, label in (
         ("call", "Call"),
         ("put", "Put"),
@@ -170,6 +183,8 @@ def render_convexity_opportunity_lines(radar: Mapping[str, Any]) -> list[str]:
             if key != "vol_range"
             else f"VOL_SIGNAL={lane.get('volatility_signal') or '-'}"
         )
+        if gth_mode and key != "vol_range":
+            signal_name += f" · GTH_SIGNAL={lane.get('gth_signal') or 'WATCH'}"
         structures = lane.get("structure_rank")
         structure_text = (
             "/".join(str(item) for item in structures[:2])

@@ -1,10 +1,4 @@
-"""Two-sided, non-executable context for discretionary 0DTE convexity ideas.
-
-The radar does not decide direction and does not claim that an option is
-mispriced.  It packages the deterministic facts a human or LLM needs to ask a
-better question: which market-priced assumption would have to be wrong for a
-Call or Put expression to have asymmetric value before the 13:00 ET exit?
-"""
+"""Rank falsifiable Call/Put questions without claiming option mispricing."""
 
 from __future__ import annotations
 
@@ -13,12 +7,21 @@ from math import ceil
 from typing import Any, Mapping
 
 from spx_spark.analytics.options.pricing import finite_float
+from spx_spark.application.order_map.convexity_gth_context import (
+    build_gth_observation_context,
+)
+from spx_spark.application.order_map.convexity_gth_modifier_gate import (
+    build_ranked_active_event,
+    gth_skew_rank_gate_reasons,
+)
 from spx_spark.application.order_map.convexity_idea_inputs import (
     build_volatility_context,
+    market_breadth,
 )
 from spx_spark.application.order_map.convexity_path_modifier import select_rolling_path_modifier
 from spx_spark.application.order_map.convexity_opportunity_board import (
     build_dense_opportunity_board,
+    preferred_option_evidence,
 )
 from spx_spark.application.order_map.convexity_idea_quality import (
     build_quality_summary,
@@ -54,23 +57,39 @@ def build_convexity_idea_radar(
     lower_test = _boundary(levels, side="lower", spot=spot)
     upper_test = _boundary(levels, side="upper", spot=spot)
     destination = _destination_map(payload, now=now, mandate=mandate)
-    market_state = _market_state(payload, levels=levels, now=now)
+    market_state = _market_state(payload, levels=levels, mandate=mandate, now=now)
     wall_probabilities = build_wall_probability_context(
         payload,
         mandate=mandate,
         now=now,
     )
-    call_evidence = _option_evidence(payload, right="C", level=_number(lower_test.get("level")))
-    put_evidence = _option_evidence(payload, right="P", level=_number(upper_test.get("level")))
+    call_evidence = _option_evidence(
+        payload,
+        right="C",
+        level=_number(lower_test.get("level")),
+        mandate=mandate,
+        now=now,
+    )
+    put_evidence = _option_evidence(
+        payload,
+        right="P",
+        level=_number(upper_test.get("level")),
+        mandate=mandate,
+        now=now,
+    )
     lower_put_evidence = _option_evidence(
         payload,
         right="P",
         level=_number(lower_test.get("level")),
+        mandate=mandate,
+        now=now,
     )
     upper_call_evidence = _option_evidence(
         payload,
         right="C",
         level=_number(upper_test.get("level")),
+        mandate=mandate,
+        now=now,
     )
     quality = build_quality_summary(
         payload,
@@ -146,7 +165,11 @@ def build_convexity_idea_radar(
     boundary_tests = {
         "lower": lower_test,
         "upper": upper_test,
-        "active_event": _active_event(payload),
+        "active_event": build_ranked_active_event(
+            payload,
+            mandate=mandate,
+            now=now,
+        ),
         "risk_neutral_wall_probabilities": wall_probabilities,
     }
     opportunity_board = build_dense_opportunity_board(
@@ -154,8 +177,8 @@ def build_convexity_idea_radar(
         market_state=market_state,
         boundary_tests=boundary_tests,
         option_evidence={
-            "call": _preferred_evidence(call_evidence, upper_call_evidence),
-            "put": _preferred_evidence(put_evidence, lower_put_evidence),
+            "call": preferred_option_evidence(call_evidence, upper_call_evidence),
+            "put": preferred_option_evidence(put_evidence, lower_put_evidence),
         },
         volatility_context=volatility_context,
         data_quality=quality,
@@ -403,6 +426,7 @@ def _market_state(
     payload: Mapping[str, Any],
     *,
     levels: Mapping[str, float],
+    mandate: Mapping[str, Any],
     now: datetime,
 ) -> dict[str, Any]:
     shadow = _mapping(payload.get("spring_gamma_v3_shadow"))
@@ -429,13 +453,18 @@ def _market_state(
         "efficiency_ratio": _number(quality.get("efficiency_ratio")),
         "vwap_cross_count": quality.get("vwap_cross_count"),
         "same_time_range_ratio": _number(volatility.get("same_time_range_ratio")),
-        "breadth_above_vwap": _market_breadth(state),
+        "breadth_above_vwap": market_breadth(state),
         "direction_components": state.get("direction_components"),
         "input_available_count": availability.get("available_count"),
         "input_required_count": availability.get("required_count"),
         "current_range_points": _number(same_time.get("current_range_points")),
         "same_time_median_range_points": _number(same_time.get("median_range_points")),
         "rolling_path_percentiles": rolling_path,
+        "gth_observation": build_gth_observation_context(
+            payload,
+            mandate=mandate,
+            now=now,
+        ),
         "uncalibrated_direction": {
             "decision": direction.get("decision"),
             "diagnostic_es_direction": direction.get("diagnostic_es_direction"),
@@ -452,21 +481,6 @@ def _market_state(
         ),
         "action_authority": "none",
     }
-
-
-def _preferred_evidence(
-    first: Mapping[str, Any],
-    second: Mapping[str, Any],
-) -> Mapping[str, Any]:
-    rank = {
-        "observed_local_skew_edge": 2,
-        "not_observed": 1,
-        "unknown": 0,
-    }
-    return max(
-        (first, second),
-        key=lambda row: rank.get(str(row.get("edge_status") or "unknown"), 0),
-    )
 
 
 def _level_map(payload: Mapping[str, Any]) -> dict[str, float]:
@@ -597,12 +611,23 @@ def _option_evidence(
     *,
     right: str,
     level: float | None,
+    mandate: Mapping[str, Any],
+    now: datetime,
 ) -> dict[str, Any]:
     shadow_key = "call_skew_spread_shadow" if right == "C" else "put_skew_spread_shadow"
     shadow = _mapping(payload.get(shadow_key))
     candidate = _mapping(shadow.get("candidate"))
     shadow_status = str(shadow.get("status") or "unavailable")
-    if shadow_status == "candidate" and candidate:
+    rank_gate_reasons = gth_skew_rank_gate_reasons(
+        shadow,
+        candidate=candidate,
+        mandate=mandate,
+        now=now,
+    )
+    rank_eligible = not rank_gate_reasons
+    if not rank_eligible:
+        edge_status = "unknown"
+    elif shadow_status == "candidate" and candidate:
         edge_status = "observed_local_skew_edge"
     elif shadow_status == "no_candidate":
         edge_status = "not_observed"
@@ -628,7 +653,11 @@ def _option_evidence(
         "edge_status": edge_status,
         "skew_shadow_status": shadow_status,
         "skew_shadow_reason": shadow.get("reason"),
-        "vertical": _compact_vertical(candidate) if candidate else None,
+        "skew_shadow_as_of": shadow.get("as_of"),
+        "skew_shadow_expiry": shadow.get("expiry"),
+        "rank_eligible": rank_eligible,
+        "rank_gate_reasons": rank_gate_reasons,
+        "vertical": _compact_vertical(candidate) if candidate and rank_eligible else None,
         "contract_reference": _compact_contract(reference, greek=greek),
         "claim_allowed": (
             "observed_local_skew_edge_only"
@@ -746,25 +775,6 @@ def _hypothesis(
         "edge_status": option_evidence.get("edge_status"),
         "contract_reference": option_evidence.get("contract_reference"),
         "action_authority": "none",
-    }
-
-
-def _active_event(payload: Mapping[str, Any]) -> dict[str, Any]:
-    decision = _mapping(payload.get("level_decision"))
-    return {
-        key: decision.get(key)
-        for key in (
-            "event_id",
-            "phase",
-            "thesis",
-            "direction",
-            "level_kind",
-            "level",
-            "formal_signal",
-            "quality_ok",
-            "quality_reason",
-            "expires_at",
-        )
     }
 
 
@@ -952,19 +962,6 @@ def _ma200_structure_confluence(
             else "location_context_only"
         ),
     }
-
-
-def _market_breadth(state: Mapping[str, Any]) -> float | None:
-    value = _number(state.get("breadth_above_vwap"))
-    if value is not None:
-        return value
-    components = _mapping(state.get("direction_components"))
-    raw = _number(components.get("breadth_above_vwap_ratio"))
-    if raw is not None:
-        return raw
-    lineage = _mapping(state.get("input_lineage"))
-    values = _mapping(lineage.get("values"))
-    return _number(values.get("breadth_above_vwap"))
 
 
 def _mapping(value: object) -> Mapping[str, Any]:
