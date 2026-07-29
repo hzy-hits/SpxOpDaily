@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from spx_spark.application.runtime.health import (
     CRITICAL_FAILURE_EXIT_CODE,
@@ -13,6 +13,7 @@ from spx_spark.application.runtime.health import (
 from spx_spark.application.runtime.tasks import TaskRuntimeState
 from spx_spark.domain.health import EngineMode, TaskCriticality, TaskMode
 from spx_spark.service_loop import ServiceTask, drain_finished_tasks, submit_due_tasks
+from spx_spark.application.runtime.scheduler import external_lease_states
 
 
 NOW = datetime(2026, 7, 13, 15, 0, tzinfo=timezone.utc)  # Monday 11:00 ET, RTH open
@@ -166,11 +167,50 @@ def test_off_hours_heartbeat_reports_cash_session_closed() -> None:
     assert "cash_session_closed" in health.reasons
 
 
+def test_gth_heartbeat_preserves_live_realtime_context() -> None:
+    states = [
+        TaskRuntimeState(
+            name="realtime_engine",
+            criticality=TaskCriticality.IMPORTANT,
+            readiness_required=True,
+            mode=TaskMode.IDLE,
+            last_success_at=OFF_HOURS,
+            last_engine_health={
+                "mode": "ready",
+                "factors": {
+                    "tradfi_anchor": True,
+                    "front_chain_fresh": True,
+                    "analytics_ok": True,
+                    "outbox_writable": True,
+                    "critical_tasks_ok": True,
+                    "globex_context_usable": True,
+                },
+                "reasons": ["cash_session_closed_live_option_chain"],
+            },
+        )
+    ]
+
+    health = aggregate_runtime_health(states, checked_at=OFF_HOURS)
+
+    assert health.mode is EngineMode.GLOBEX_CONTEXT
+    assert health.factors["globex_context_usable"] is True
+    assert health.actionable is False
+    assert health.reasons == ("cash_session_closed_live_option_chain_advisory_only",)
+    event = build_heartbeat_event(
+        states,
+        health=health,
+        in_flight_tasks=[],
+        finished_at=OFF_HOURS,
+    )
+    assert event["ok"] is True
+
+
 def test_heartbeat_uses_latest_realtime_engine_factors() -> None:
     state = TaskRuntimeState(
         name="realtime_engine",
         criticality=TaskCriticality.IMPORTANT,
         mode=TaskMode.IDLE,
+        last_success_at=NOW,
         last_engine_health={
             "mode": "blocked",
             "factors": {
@@ -195,6 +235,73 @@ def test_heartbeat_uses_latest_realtime_engine_factors() -> None:
     assert health.mode is EngineMode.BLOCKED
     assert event["ok"] is False
     assert event["tasks"][0]["last_engine_health"]["mode"] == "blocked"
+
+
+def test_failed_realtime_task_clears_cached_engine_health() -> None:
+    state = TaskRuntimeState(
+        name="realtime_engine",
+        last_success_at=NOW,
+        last_engine_health={
+            "factors": {
+                "tradfi_anchor": True,
+                "front_chain_fresh": True,
+                "analytics_ok": True,
+                "outbox_writable": True,
+            }
+        },
+    )
+
+    state.record_failure(finished_at=NOW + timedelta(seconds=1), error="boom")
+    health = aggregate_runtime_health([state], checked_at=NOW + timedelta(seconds=1))
+
+    assert state.last_engine_health is None
+    assert health.mode is not EngineMode.READY
+    assert health.factors["tradfi_anchor"] is False
+
+
+def test_stale_realtime_health_is_not_reused() -> None:
+    state = TaskRuntimeState(
+        name="realtime_engine",
+        last_success_at=NOW - timedelta(minutes=5),
+        last_engine_health={
+            "factors": {
+                "tradfi_anchor": True,
+                "front_chain_fresh": True,
+                "analytics_ok": True,
+                "outbox_writable": True,
+            }
+        },
+    )
+
+    health = aggregate_runtime_health([state], checked_at=NOW)
+
+    assert health.mode is not EngineMode.READY
+    assert health.factors["tradfi_anchor"] is False
+
+
+def test_external_worker_lease_participates_in_readiness(tmp_path) -> None:
+    path = tmp_path / "worker.lease.json"
+    path.write_text(
+        (
+            '{"ok":true,"finished_at":"'
+            + NOW.isoformat()
+            + '","consecutive_failures":0}'
+        ),
+        encoding="utf-8",
+    )
+
+    fresh = external_lease_states(
+        {"market_features": (path, 30.0)},
+        checked_at=NOW,
+    )[0]
+    stale = external_lease_states(
+        {"market_features": (path, 30.0)},
+        checked_at=NOW + timedelta(seconds=31),
+    )[0]
+
+    assert fresh.mode is TaskMode.IDLE
+    assert fresh.readiness_required is True
+    assert stale.mode is TaskMode.UNHEALTHY
 
 
 def test_critical_unrecoverable_detects_exit_condition() -> None:

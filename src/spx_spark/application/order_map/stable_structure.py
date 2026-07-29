@@ -13,6 +13,7 @@ from typing import Mapping
 
 
 LEVEL_NAMES = ("put_wall", "flip_low", "flip_high", "call_wall")
+CANDIDATE_TTL_GRACE_SECONDS = 60
 
 
 def advance_stable_structure(
@@ -33,8 +34,30 @@ def advance_stable_structure(
     if stable and not stable.get("promoted_at"):
         stable = _promoted(stable, now=now, band=band_half_width_points)
         state["stable"] = stable
+    candidate_ttl_seconds = (
+        interval_seconds * max(required_confirmations - 1, 1)
+        + CANDIDATE_TTL_GRACE_SECONDS
+    )
+    candidate = _mapping(state.get("candidate"))
+    if _candidate_expired(candidate, now=now, ttl_seconds=candidate_ttl_seconds):
+        state.update(
+            {
+                "candidate": None,
+                "candidate_expired_at": now.isoformat(),
+                "candidate_expiry_reason": "confirmation_timeout",
+            }
+        )
     if not live or not _levels(live):
-        return _public_state(state, stable, now=now, band=band_half_width_points), stable
+        return (
+            _public_state(
+                state,
+                stable,
+                now=now,
+                band=band_half_width_points,
+                candidate_ttl_seconds=candidate_ttl_seconds,
+            ),
+            stable,
+        )
 
     live_row = dict(live)
     live_levels = _levels(live_row)
@@ -48,7 +71,16 @@ def advance_stable_structure(
             "last_bucket": bucket,
             "promotion_reason": "bootstrap_first_usable_structure",
         }
-        return _public_state(state, stable, now=now, band=band_half_width_points), stable
+        return (
+            _public_state(
+                state,
+                stable,
+                now=now,
+                band=band_half_width_points,
+                candidate_ttl_seconds=candidate_ttl_seconds,
+            ),
+            stable,
+        )
 
     stable_expiry = str(stable.get("expiry") or "")
     live_expiry = str(live_row.get("expiry") or "")
@@ -61,7 +93,16 @@ def advance_stable_structure(
             "last_bucket": bucket,
             "promotion_reason": "expiry_rollover",
         }
-        return _public_state(state, stable, now=now, band=band_half_width_points), stable
+        return (
+            _public_state(
+                state,
+                stable,
+                now=now,
+                band=band_half_width_points,
+                candidate_ttl_seconds=candidate_ttl_seconds,
+            ),
+            stable,
+        )
 
     stable_levels = _levels(stable)
     if not _materially_different(stable_levels, live_levels, threshold=switch_min_points):
@@ -73,7 +114,16 @@ def advance_stable_structure(
             1 if state.get("last_bucket") != bucket else 0
         )
         state.update({"stable": stable, "candidate": None, "last_bucket": bucket})
-        return _public_state(state, stable, now=now, band=band_half_width_points), stable
+        return (
+            _public_state(
+                state,
+                stable,
+                now=now,
+                band=band_half_width_points,
+                candidate_ttl_seconds=candidate_ttl_seconds,
+            ),
+            stable,
+        )
 
     candidate = _mapping(state.get("candidate"))
     samples = [dict(item) for item in candidate.get("samples") or [] if isinstance(item, Mapping)]
@@ -106,7 +156,16 @@ def advance_stable_structure(
         )
     else:
         state.update({"candidate": candidate, "last_bucket": bucket})
-    return _public_state(state, stable, now=now, band=band_half_width_points), stable
+    return (
+        _public_state(
+            state,
+            stable,
+            now=now,
+            band=band_half_width_points,
+            candidate_ttl_seconds=candidate_ttl_seconds,
+        ),
+        stable,
+    )
 
 
 def _public_state(
@@ -115,6 +174,7 @@ def _public_state(
     *,
     now: datetime,
     band: float,
+    candidate_ttl_seconds: int,
 ) -> dict[str, object]:
     result = dict(state)
     if stable:
@@ -124,6 +184,7 @@ def _public_state(
         stable_row["duration_seconds"] = max((now - (promoted or now)).total_seconds(), 0.0)
         result["stable"] = stable_row
     result["updated_at"] = now.isoformat()
+    result["candidate_ttl_seconds"] = candidate_ttl_seconds
     return result
 
 
@@ -190,6 +251,22 @@ def _bands(levels: Mapping[str, float], half_width: float) -> dict[str, dict[str
 
 def _mapping(value: object) -> dict[str, object]:
     return dict(value) if isinstance(value, Mapping) else {}
+
+
+def _candidate_expired(
+    candidate: Mapping[str, object],
+    *,
+    now: datetime,
+    ttl_seconds: int,
+) -> bool:
+    if not candidate:
+        return False
+    last_seen = _datetime(candidate.get("last_seen_at"))
+    if last_seen is None:
+        samples = candidate.get("samples")
+        if isinstance(samples, list) and samples and isinstance(samples[-1], Mapping):
+            last_seen = _datetime(samples[-1].get("at"))
+    return last_seen is None or (now - last_seen).total_seconds() > ttl_seconds
 
 
 def _datetime(value: object) -> datetime | None:

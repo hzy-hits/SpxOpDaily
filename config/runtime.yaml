@@ -72,6 +72,11 @@ globex_trend:
   max_quote_age_seconds: {value: 90.0, description: Maximum ES transport age accepted by the trend machine.}
   retention_hours: {value: 18, description: Rolling ES path retained for indicators and audit.}
   pending_event_ttl_seconds: {value: 300, description: Retry lifetime for an unacknowledged confirmed transition notification.}
+  continuation_step_points: {value: 10.0, description: ES points per deterministic trend-continuation milestone.}
+  continuation_confirmation_observations: {value: 2, description: Consecutive one-minute samples required beyond a continuation milestone.}
+  continuation_cooldown_seconds: {value: 1800, description: Minimum spacing between continuation advisories in one trend context.}
+  continuation_max_milestones_per_transition: {value: 2, description: Maximum m1/m2 continuation milestones for one confirmed trend leg.}
+  continuation_session_budget: {value: 3, description: Maximum continuation advisories per GTH or Globex trend context.}
 
 market_features:
   enabled: {value: true, description: Builds unified minute market, option structure and decision-context frames.}
@@ -95,7 +100,7 @@ market_features:
   trade_follow_through_seconds: {value: 15.0, description: Minimum time a confirmed path must remain outside its level before becoming trade-ready; 15s matches 0DTE holding horizons.}
   trade_follow_through_min_points: {value: 2.0, description: Minimum additional movement beyond the confirmed level required for trade readiness.}
   trade_follow_through_em_fraction: {value: 0.05, description: Expected-move fraction used when it exceeds the fixed follow-through threshold.}
-  trade_confirmed_pilot_enabled: {value: true, description: Enables the reviewed 09:45-13:00 ET lane set; upside breakouts retain the Call TradeReady canary, flip-low breakdowns and call-wall/flip-high rejections produce exact-quote Put shadows only, and put-wall breakdowns remain disabled. Formal confirmation plus exact selected-contract NBBO remain mandatory, and automatic broker ordering remains disabled.}
+  trade_confirmed_pilot_enabled: {value: true, description: Enables the reviewed 09:45-13:00 ET manual-ready lane set for upside Call breakouts plus Flip Low breakdown and call-wall/flip-high rejection Puts. Put Wall breakdown remains disabled. Formal confirmation, official SPX coordinates, exact selected-contract NBBO, target room, and reward/risk remain mandatory; automatic broker ordering remains disabled.}
   trade_repricing_max_age_seconds: {value: 90.0, description: Maximum age of the matching realtime option repricing record.}
   trade_quote_max_age_seconds: {value: 15.0, description: Maximum transport and source age for the exact selected-contract quote used in the reviewed RTH pilot; the limit-order window and enqueue-time quote revalidation remain mandatory.}
   trade_market_anchor_max_age_seconds: {value: 20.0, description: Maximum observation, source and transport age for the ES anchor and level observation used by a trade-ready intent.}
@@ -108,6 +113,18 @@ market_features:
   trade_min_target_room_points: {value: 3.0, description: Minimum remaining SPX points from the evaluated spot to the deterministic target.}
   trade_min_reward_risk: {value: 0.25, description: Minimum remaining target distance divided by distance to the SPX invalidation level; retained at 0.25 because the 1.0 risk-off experiment removed every historical RTH TradeReady opportunity without improving the direction cohort. RTH, target-room, ES-confirmation and exact quote gates remain mandatory.}
   trade_time_stop_minutes: {value: 15, description: Default maximum holding time for an unextended 0DTE trade intent; every intent and time stop is capped at the 13:00 ET hard exit.}
+  gth_manual_candidate_enabled: {value: true, description: Enables runtime-gated manual-only GTH exact-spread signals; offline readiness remains evidence and does not suppress valid live operator signals, while broker submission stays disabled.}
+  gth_manual_candidate_quote_max_age_seconds: {value: 15.0, description: Maximum source and transport age for exact legs, parity pairs, and direct ES invalidation quotes used by a GTH manual candidate.}
+  gth_manual_candidate_ttl_seconds: {value: 20.0, description: Maximum lifetime of a manual GTH candidate before every quote must be recalculated.}
+  gth_manual_candidate_max_debit_fraction: {value: 0.65, description: Maximum candidate debit as a fraction of vertical width, evaluated at the synthetic natural ask.}
+  gth_manual_candidate_max_net_spread_fraction: {value: 0.20, description: Maximum synthetic net bid-ask width as a fraction of vertical width.}
+  gth_manual_candidate_min_parity_pairs: {value: 3, description: Minimum cofresh same-provider SPXW call-put pairs required for the GTH target coordinate.}
+  gth_manual_candidate_max_parity_dispersion_points: {value: 5.0, description: Maximum dispersion across tight put-call parity references allowed to authorize a GTH target coordinate.}
+  gth_manual_candidate_max_parity_interval_points: {value: 5.0, description: Maximum bid-ask parity interval width for each call-put pair used by a GTH target coordinate.}
+  gth_manual_candidate_target_room_buffer_points: {value: 1.0, description: Additional SPX room required beyond the parity uncertainty bound before a Call candidate may become manual-ready.}
+  gth_manual_candidate_close_buffer_seconds: {value: 30.0, description: Stops new manual candidates before the 09:25 ET GTH close so an operator is never handed a candidate at the exchange boundary.}
+  gth_manual_candidate_max_reclaim_age_seconds: {value: 1200.0, description: Maximum seconds from the detected ES trough to manual-ready evaluation; older reclaims remain observable but cannot become operator signals.}
+  gth_manual_candidate_min_reward_risk: {value: 1.0, description: Minimum vertical maximum-profit to maximum-loss ratio at the displayed debit limit for a GTH manual-ready signal.}
   session_episode_enabled: {value: true, description: Maintains one session-level structural path above individual wall and flip events.}
   session_break_buffer_points: {value: 2.0, description: SPX distance beyond a frozen structural level required to record a session break or reclaim.}
   session_extreme_extension_points: {value: 5.0, description: Minimum extension beyond the broken level before the session path is classified as an extreme.}
@@ -179,8 +196,8 @@ provider_failover:
     value: 60.0
     description: Maximum failover control-state age accepted by the IBKR stream before it fails closed to standby.
   transition_alert_max_age_seconds:
-    value: 300.0
-    description: Maximum age of a provider transition that may create a human notification after a process restart.
+    value: 900.0
+    description: Maximum transition age retained for the five-minute incident and three-minute recovery notification lifecycle.
   interval_seconds:
     value: 15
     description: Cadence for provider-health observations and failover state persistence.
@@ -1556,14 +1573,14 @@ intraday_shock:
     value: 180
     description: Longer shock horizon in seconds.
   one_minute_threshold_bps:
-    value: 20.0
-    description: SPX move threshold in basis points for the short shock horizon.
+    value: 30.0
+    description: SPX move threshold retained for structured shock audit on the short horizon; raw threshold crossings never push directly.
   three_minute_threshold_bps:
-    value: 35.0
-    description: SPX move threshold in basis points for the longer shock horizon.
+    value: 50.0
+    description: SPX move threshold retained for structured shock audit on the longer horizon; raw threshold crossings never push directly.
   es_confirm_ratio:
-    value: 0.5
-    description: Minimum ES same-direction move fraction required to confirm an SPX shock.
+    value: 0.8
+    description: Minimum ES same-direction move fraction required before a shock may feed the persistent wall/flip structure machine.
   max_spx_age_seconds:
     value: 15.0
     description: Maximum SPX quote age in seconds for shock-monitor samples.

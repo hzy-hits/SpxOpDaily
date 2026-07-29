@@ -185,6 +185,7 @@ def _signed_oi_gex_proxy(
         build_gex_by_strike(
             pair_by_strike(actionable),
             underlier=spot,
+            as_of=state.as_of,
             intraday=False,
         )
         if spot is not None and spot > 0

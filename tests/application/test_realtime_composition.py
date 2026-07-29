@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 
 from spx_spark.application.realtime.composition import (
@@ -154,6 +155,45 @@ def test_durable_processed_ids_survives_restart(tmp_path) -> None:
     again = DurableProcessedIdSet(path)
     assert "a" in again and "b" in again
     assert len(again) == 2
+
+
+def test_durable_processed_ids_evicts_by_observation_order_not_lexical_order(
+    tmp_path,
+) -> None:
+    path = tmp_path / "ids.json"
+    store = DurableProcessedIdSet(path, max_ids=2)
+    store.add("z-old")
+    store.add("m-middle")
+    store.add("a-new")
+
+    assert "z-old" not in store
+    assert store.as_set() == {"m-middle", "a-new"}
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["schema_version"] == 2
+    assert payload["event_ids"] == ["m-middle", "a-new"]
+    assert [item["event_id"] for item in payload["observations"]] == [
+        "m-middle",
+        "a-new",
+    ]
+    assert all(item["observed_at"] for item in payload["observations"])
+
+    reloaded = DurableProcessedIdSet(path, max_ids=2)
+    assert reloaded.as_set() == {"m-middle", "a-new"}
+
+
+def test_durable_processed_ids_migrates_legacy_order(tmp_path) -> None:
+    path = tmp_path / "ids.json"
+    path.write_text(
+        json.dumps({"schema_version": 1, "event_ids": ["z-old", "a-new"]}),
+        encoding="utf-8",
+    )
+
+    store = DurableProcessedIdSet(path, max_ids=2)
+    store.add("b-newest")
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["schema_version"] == 2
+    assert payload["event_ids"] == ["a-new", "b-newest"]
 
 
 def test_blocked_readiness_is_a_successful_runtime_observation(tmp_path) -> None:

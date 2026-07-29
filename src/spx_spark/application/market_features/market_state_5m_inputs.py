@@ -22,6 +22,11 @@ from spx_spark.application.market_features.moving_average_context import (
     project_spx_equivalent_moving_averages,
     rth_atr_5m,
 )
+from spx_spark.application.market_features.rolling_path_percentiles import (
+    ROLLING_PATH_WINDOW_BARS,
+    observed_rolling_path_state,
+    rank_rolling_path_percentiles,
+)
 from spx_spark.config import NY_TZ
 from spx_spark.marketdata import as_utc
 
@@ -88,6 +93,11 @@ def build_market_state_5m_inputs(
         range_baselines or {},
         trading_date=trading_date,
     )
+    rolling_path = _rolling_path_percentiles(
+        rth_bars,
+        range_baselines or {},
+        trading_date=trading_date,
+    )
     moving_averages = _moving_average_diagnostics(closed)
     breadth, breadth_diagnostics = _breadth_above_vwap(
         market_samples,
@@ -123,6 +133,7 @@ def build_market_state_5m_inputs(
             "vwap": vwap_diagnostics,
             "opening_range": opening_diagnostics,
             "same_time_range": range_diagnostics,
+            "rolling_path_percentiles": rolling_path,
             "moving_averages": moving_averages,
             "breadth": breadth_diagnostics,
             "price_source": "provider_neutral_live_es_5s_sampled_ohlc",
@@ -149,16 +160,23 @@ def update_same_time_range_baselines(
         for bar in _closed_bars(bars, now=at)
         if bar.get("segment") == "rth" and bar.get("trading_date_et") == trading_date.isoformat()
     ]
-    rth_bars = _continuous_rth_from_open(rth_bars)
-    if not rth_bars:
+    continuous_from_open = _continuous_rth_from_open(rth_bars)
+    path_atr, _ = _atr_5m(rth_bars)
+    rolling_path = _rolling_path_state(rth_bars, atr=path_atr)
+    rolling_tail = _contiguous_ok_tail(rth_bars)
+    latest = (
+        continuous_from_open[-1]
+        if continuous_from_open
+        else rolling_tail[-1]
+        if rolling_path.get("status") == "ready" and rolling_tail
+        else None
+    )
+    if latest is None:
         return state
-    last_end = _parse_at(rth_bars[-1].get("bar_end"))
+    last_end = _parse_at(latest.get("bar_end"))
     if last_end is None:
         return state
     slot = last_end.astimezone(NY_TZ).strftime("%H:%M")
-    current_range = max(float(bar["high"]) for bar in rth_bars) - min(
-        float(bar["low"]) for bar in rth_bars
-    )
     slots = {
         str(key): [dict(row) for row in value if isinstance(row, Mapping)]
         for key, value in _mapping(state.get("slots")).items()
@@ -169,10 +187,21 @@ def update_same_time_range_baselines(
     ]
     current_row = {
         "trading_date_et": trading_date.isoformat(),
-        "range_points": round(current_range, 6),
         "bar_end": last_end.isoformat(),
         "source": "live_es_5m_ohlc",
     }
+    if continuous_from_open:
+        current_range = max(float(bar["high"]) for bar in continuous_from_open) - min(
+            float(bar["low"]) for bar in continuous_from_open
+        )
+        current_row["range_points"] = round(current_range, 6)
+    if rolling_path.get("status") == "ready":
+        current_row.update(
+            {
+                "dip_atr_30m": rolling_path["dip_atr"],
+                "rally_atr_30m": rolling_path["rally_atr"],
+            }
+        )
     existing_current = next(
         (
             row
@@ -181,14 +210,23 @@ def update_same_time_range_baselines(
         ),
         None,
     )
+    if existing_current is not None:
+        current_row = {**dict(existing_current), **current_row}
     if existing_current == current_row:
         return state
     rows.append(current_row)
+    rows.sort(
+        key=lambda row: (
+            str(row.get("trading_date_et") or ""),
+            str(row.get("bar_end") or ""),
+        )
+    )
     slots[slot] = rows[-(max_sessions + 1) :]
     return {
         "schema_version": "market_state_5m_range_baselines.v1",
         "updated_at": at.isoformat(),
         "target_sessions": max_sessions,
+        "rolling_path_window_minutes": ROLLING_PATH_WINDOW_BARS * 5,
         "slots": slots,
     }
 
@@ -598,6 +636,76 @@ def _vwap_cross_count(
     if len(sides) < 6:
         return None
     return sum(left != right for left, right in zip(sides, sides[1:]))
+
+
+def _rolling_path_state(
+    bars: Sequence[Mapping[str, object]],
+    *,
+    atr: float | None,
+) -> dict[str, object]:
+    """Return one causal 30-minute drawdown/rebound observation.
+
+    The latest close is compared with the true high and low of the six most
+    recent contiguous, closed five-minute bars.  It describes where price is
+    inside the path already observed; it is not a forward-return probability.
+    """
+
+    window = _contiguous_ok_tail(bars)[-ROLLING_PATH_WINDOW_BARS:]
+    if len(window) < ROLLING_PATH_WINDOW_BARS:
+        return {
+            "status": "warming",
+            "reason": "rolling_path_requires_six_contiguous_closed_bars",
+            "window_minutes": ROLLING_PATH_WINDOW_BARS * 5,
+            "observed_bar_count": len(window),
+        }
+    if atr is None or atr <= 0:
+        return {
+            "status": "warming",
+            "reason": "rolling_path_atr_unavailable",
+            "window_minutes": ROLLING_PATH_WINDOW_BARS * 5,
+            "observed_bar_count": len(window),
+        }
+    close = float(window[-1]["close"])
+    high = max(float(bar["high"]) for bar in window)
+    low = min(float(bar["low"]) for bar in window)
+    dip_points = max(high - close, 0.0)
+    rally_points = max(close - low, 0.0)
+    return {
+        "status": "ready",
+        "window_minutes": ROLLING_PATH_WINDOW_BARS * 5,
+        "observed_bar_count": len(window),
+        "latest_bar_end": window[-1].get("bar_end"),
+        "close": round(close, 6),
+        "rolling_high": round(high, 6),
+        "rolling_low": round(low, 6),
+        "dip_points": round(dip_points, 6),
+        "rally_points": round(rally_points, 6),
+        "atr_5m": round(atr, 6),
+        "atr_source": "strict_session_local_rth_atr",
+        "dip_atr": round(dip_points / atr, 6),
+        "rally_atr": round(rally_points / atr, 6),
+        "input_quality": "strict",
+        "partial_bar_count": 0,
+    }
+
+
+def _rolling_path_percentiles(
+    bars: Sequence[Mapping[str, object]],
+    baselines: Mapping[str, object],
+    *,
+    trading_date: date,
+) -> dict[str, object]:
+    """Prepare one causal path observation for same-clock ranking."""
+    path_atr, _ = _atr_5m(bars)
+    current = observed_rolling_path_state(bars, strict_atr=path_atr)
+    end = _parse_at(current.get("latest_bar_end"))
+    slot = end.astimezone(NY_TZ).strftime("%H:%M") if end is not None else None
+    return rank_rolling_path_percentiles(
+        current=current,
+        slot_et=slot,
+        baselines=baselines,
+        trading_date=trading_date,
+    )
 
 
 def _same_time_range_ratio(

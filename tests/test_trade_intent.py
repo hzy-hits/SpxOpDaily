@@ -17,20 +17,26 @@ from spx_spark.application.market_features.models import (
     OptionStructureFrame,
 )
 from spx_spark.application.market_features.play_outcome_stats import PlayOutcomeStats
-from spx_spark.application.market_features.service import _resolve_action_clock
+from spx_spark.application.market_features.service import (
+    _apply_provider_entry_control,
+    _resolve_action_clock,
+)
 from spx_spark.application.market_features.trade_intent import (
     TRADE_INTENT_CONTRACT_VERSION,
     evaluate_trade_intent,
+    live_trade_intent_authority_issues,
     trade_intent_policy_version,
 )
 from spx_spark.application.market_features.trade_intent_runtime import (
     _action_revalidation,
+    _trade_ready_delivery_event_id,
     _writer_output_valid,
     process_trade_intent,
     render_trade_intent,
 )
 from spx_spark.config import NotificationSettings
 from spx_spark.marketdata import InstrumentId, MarketDataQuality, Provider, Quote
+from spx_spark.notifier.dispatcher import consume_pending_notifications
 from spx_spark.settings.market_features import MarketFeatureSettings
 from spx_spark.settings.order_map import OrderMapPolicy
 from spx_spark.storage import LatestState
@@ -55,7 +61,7 @@ def test_trade_intent_policy_hash_is_stable_and_resets_for_lane_clock_contract()
         },
     )
 
-    assert TRADE_INTENT_CONTRACT_VERSION == "rth_lanes_0945_1300_put_shadow.v1"
+    assert TRADE_INTENT_CONTRACT_VERSION == "rth_manual_lanes_0945_1300.v2"
     assert current == repeated
     assert current.startswith("rth_trade_intent.v3+sha256:")
     assert current != legacy
@@ -96,6 +102,26 @@ def test_confirmed_path_requires_all_gates_before_trade_ready() -> None:
     assert intent["quote_observation_eligible"] is False
     assert intent["priority"] == "normal"
     assert intent["shadow_mode"] is False
+
+
+def test_provider_failover_control_blocks_ready_intent_at_entry_boundary() -> None:
+    intent = {
+        "status": "trade_ready",
+        "execution_eligible": True,
+        "block_reasons": [],
+    }
+    control = {
+        "allowed": False,
+        "reason": "control_state_stale",
+        "mode": "ibkr_fallback",
+    }
+
+    blocked = _apply_provider_entry_control(intent, control)
+
+    assert blocked["status"] == "blocked"
+    assert blocked["execution_eligible"] is False
+    assert blocked["block_reasons"] == ["provider_failover_new_entries_blocked"]
+    assert blocked["provider_failover_control"] == control
 
 
 def test_reviewed_pilot_keeps_exact_quote_but_softens_redundant_context_gates() -> None:
@@ -327,7 +353,32 @@ def test_strategy_entry_window_opens_at_exactly_0945_et() -> None:
     assert intent["entry_window_start_at"] == at.isoformat()
 
 
-def test_flip_low_breakdown_put_is_exact_quote_shadow_ready() -> None:
+def test_evening_gth_uses_next_trading_session_window() -> None:
+    at = datetime(2026, 7, 27, 1, 32, 43, tzinfo=UTC)
+    market, options, latest, context, repricing = _retimed_inputs(at)
+
+    intent = evaluate_trade_intent(
+        context,
+        market,
+        options,
+        latest,
+        repricing,
+        now=at,
+        feature_policy=MarketFeatureSettings(trade_confirmed_pilot_enabled=True),
+        order_policy=OrderMapPolicy(),
+    )
+
+    assert intent["status"] == "blocked"
+    assert intent["entry_window_start_at"] == "2026-07-27T13:45:00+00:00"
+    assert intent["hard_exit_at"] == "2026-07-27T17:00:00+00:00"
+    assert intent["valid_until"] == (at + timedelta(minutes=3)).isoformat()
+    assert intent["execution_eligible"] is False
+    assert "rth_session_required" in intent["block_reasons"]
+    assert "strategy_entry_window_not_open" in intent["block_reasons"]
+    assert "strategy_entry_window_closed" not in intent["block_reasons"]
+
+
+def test_flip_low_breakdown_put_is_exact_quote_manual_ready() -> None:
     market, options, latest, context, repricing = _put_shadow_inputs(
         thesis="breakout",
         level_kind="flip_low",
@@ -345,20 +396,20 @@ def test_flip_low_breakdown_put_is_exact_quote_shadow_ready() -> None:
         order_policy=OrderMapPolicy(),
     )
 
-    assert intent["status"] == "shadow_ready"
-    assert intent["strategy_lane"] == "long_0dte_rth_flip_low_breakdown_put_shadow"
+    assert intent["status"] == "trade_ready"
+    assert intent["strategy_lane"] == "long_0dte_rth_flip_low_breakdown_put_manual"
     assert intent["contract_label"] == "SPXW 7525P"
     assert intent["wall_signal"] == "present"
-    assert intent["execution_eligible"] is False
-    assert intent["quote_observation_eligible"] is True
+    assert intent["execution_eligible"] is True
+    assert intent["quote_observation_eligible"] is False
     assert intent["priority"] == "normal"
-    assert intent["shadow_mode"] is True
-    assert intent["promotion_status"] == "collecting_shadow"
+    assert intent["shadow_mode"] is False
+    assert intent["promotion_status"] == "reviewed_pilot"
     assert intent["automatic_ordering"] is False
 
 
 @pytest.mark.parametrize(("level_kind", "level"), [("call_wall", 7550.0), ("flip_high", 7530.0)])
-def test_upper_rejection_put_is_exact_quote_shadow_ready(
+def test_upper_rejection_put_is_exact_quote_manual_ready(
     level_kind: str,
     level: float,
 ) -> None:
@@ -379,13 +430,13 @@ def test_upper_rejection_put_is_exact_quote_shadow_ready(
         order_policy=OrderMapPolicy(),
     )
 
-    assert intent["status"] == "shadow_ready"
-    assert intent["strategy_lane"] == "long_0dte_rth_upper_rejection_put_shadow"
+    assert intent["status"] == "trade_ready"
+    assert intent["strategy_lane"] == "long_0dte_rth_upper_rejection_put_manual"
     assert intent["wall_signal"] == "present"
-    assert intent["execution_eligible"] is False
-    assert intent["quote_observation_eligible"] is True
+    assert intent["execution_eligible"] is True
+    assert intent["quote_observation_eligible"] is False
     assert intent["priority"] == "normal"
-    assert intent["shadow_mode"] is True
+    assert intent["shadow_mode"] is False
     assert intent["automatic_ordering"] is False
 
 
@@ -411,8 +462,35 @@ def test_upper_rejection_put_treats_bearish_regime_as_priority_not_hard_gate() -
         order_policy=OrderMapPolicy(),
     )
 
-    assert intent["status"] == "shadow_ready"
+    assert intent["status"] == "trade_ready"
     assert "fade_regime_not_mean_reverting" not in intent["block_reasons"]
+
+
+def test_put_manual_ready_keeps_opposing_regime_as_diagnostic() -> None:
+    market, options, latest, context, repricing = _put_shadow_inputs(
+        thesis="breakout",
+        level_kind="flip_low",
+        level=7525.0,
+    )
+    context = replace(
+        context,
+        regime_decision={"mode": "trending", "direction": "up", "trend_score": 80.0},
+    )
+
+    intent = evaluate_trade_intent(
+        context,
+        market,
+        options,
+        latest,
+        repricing,
+        now=NOW,
+        feature_policy=MarketFeatureSettings(trade_confirmed_pilot_enabled=True),
+        order_policy=OrderMapPolicy(),
+    )
+
+    assert intent["status"] == "trade_ready"
+    assert "regime_direction_conflict" not in intent["block_reasons"]
+    assert "regime_direction_conflict" in intent["pilot_diagnostics"]
 
 
 def test_put_wall_breakdown_is_explicitly_disabled() -> None:
@@ -441,9 +519,10 @@ def test_put_wall_breakdown_is_explicitly_disabled() -> None:
     assert intent["priority"] == "disabled"
     assert intent["shadow_mode"] is False
     assert "put_wall_breakdown_disabled" in intent["block_reasons"]
+    assert intent["automatic_ordering"] is False
 
 
-def test_put_lane_safety_does_not_revert_when_reviewed_pilot_flag_is_off() -> None:
+def test_put_manual_lanes_fail_closed_when_reviewed_pilot_flag_is_off() -> None:
     market, options, latest, context, repricing = _put_shadow_inputs(
         thesis="breakout",
         level_kind="put_wall",
@@ -472,7 +551,7 @@ def test_put_lane_safety_does_not_revert_when_reviewed_pilot_flag_is_off() -> No
         level_kind="flip_low",
         level=7525.0,
     )
-    shadow = evaluate_trade_intent(
+    blocked = evaluate_trade_intent(
         flip_context,
         flip_market,
         flip_options,
@@ -483,17 +562,15 @@ def test_put_lane_safety_does_not_revert_when_reviewed_pilot_flag_is_off() -> No
         order_policy=OrderMapPolicy(),
     )
 
-    assert shadow["status"] == "shadow_ready"
-    assert shadow["strategy_lane"] == "long_0dte_rth_flip_low_breakdown_put_shadow"
-    assert shadow["execution_eligible"] is False
-    assert shadow["quote_observation_eligible"] is True
-    assert shadow["shadow_mode"] is True
+    assert blocked["status"] == "blocked"
+    assert blocked["strategy_lane"] == "long_0dte_rth_flip_low_breakdown_put_manual"
+    assert blocked["execution_eligible"] is False
+    assert blocked["quote_observation_eligible"] is False
+    assert blocked["shadow_mode"] is False
+    assert "reviewed_pilot_disabled" in blocked["block_reasons"]
 
 
-def test_put_shadow_ready_does_not_trigger_trade_intent_notification(
-    tmp_path,
-    monkeypatch,
-) -> None:
+def test_put_manual_ready_has_human_notification_authority(tmp_path) -> None:
     market, options, latest, context, repricing = _put_shadow_inputs(
         thesis="breakout",
         level_kind="flip_low",
@@ -510,25 +587,16 @@ def test_put_shadow_ready_does_not_trigger_trade_intent_notification(
         order_policy=OrderMapPolicy(),
     )
 
-    def unexpected_enqueue(*args, **kwargs):
-        raise AssertionError("shadow_ready must not enqueue a TradeReady notification")
-
-    monkeypatch.setattr(
-        "spx_spark.application.market_features.trade_intent_runtime.enqueue_notification",
-        unexpected_enqueue,
-    )
+    assert intent["status"] == "trade_ready"
+    assert intent["automatic_ordering"] is False
+    assert live_trade_intent_authority_issues(intent) == ()
     result = process_trade_intent(
         SimpleNamespace(data_root=str(tmp_path)),
         intent,
         now=NOW,
-        settings=_notification_settings(tmp_path),
+        settings=SimpleNamespace(enabled=False),
     )
-
-    assert result == {
-        "attempted": False,
-        "delivered": False,
-        "reason": "shadow_ready",
-    }
+    assert result["reason"] == "notification_disabled"
 
 
 def test_trade_ready_includes_play_stats_when_provided() -> None:
@@ -588,7 +656,7 @@ def test_trade_ready_omits_play_stats_when_unavailable() -> None:
     assert "play_stats" not in intent
 
 
-def test_render_trade_intent_shows_play_stats_section() -> None:
+def test_render_trade_intent_keeps_research_stats_out_of_action_card() -> None:
     intent = {
         **_render_intent(),
         "play_stats": {
@@ -605,12 +673,13 @@ def test_render_trade_intent_shows_play_stats_section() -> None:
 
     text = render_trade_intent(intent)
 
-    assert "## 同类信号" in text
-    assert "近20日 level_fade_put@call_wall（300s口径）: n=23 胜率61% 均值+3.2%" in text
-    assert text.index("## 风险") < text.index("## 同类信号") < text.index("## 时效")
+    assert "🟢 MANUAL READY · PUT" in text
+    assert "同类信号" not in text
+    assert "level_fade_put@call_wall" not in text
+    assert "买入  SPXW 07-15 7550P" in text
 
 
-def test_render_trade_intent_shows_greek_risk_and_soft_pilot_diagnostics() -> None:
+def test_render_trade_intent_keeps_diagnostics_out_of_action_card() -> None:
     text = render_trade_intent(
         {
             **_render_intent(),
@@ -655,21 +724,12 @@ def test_render_trade_intent_shows_greek_risk_and_soft_pilot_diagnostics() -> No
         }
     )
 
-    assert "## 希腊风险" in text
-    assert "Delta `0.48`" in text
-    assert "15分钟Theta情景 `12.34%`" in text
-    assert "IV下降3波动点情景 `8.76%`" in text
-    assert "## 均线位置" in text
-    assert ("ES 5m P/MA20/MA50/MA200 `7603.00 / 7595.00 / 7580.00 / 7550.00`") in text
-    assert "SPX基差投影 `7550.00 / 7535.00 / 7505.00`" in text
-    assert "MA50/200 `TREND_EXTENDED`" in text
-    assert "同向凸性 `do_not_chase`" in text
-    assert "交叉 `golden` 已 27 根" in text
-    assert "禁止追同向凸性" in text
-    assert "贴线区：不确认突破" in text
-    assert "不是 SPX 自身历史均线；本项只读" in text
-    assert "## 辅助确认" in text
-    assert "rth_spy_confirmation_unavailable" in text
+    assert "希腊风险" not in text
+    assert "MA50/200" not in text
+    assert "rth_spy_confirmation_unavailable" not in text
+    assert "限价  ≤ 10.10" in text
+    assert "止损  SPX 收回 7553.00" in text
+    assert "目标  SPX 7525.00" in text
 
 
 def test_render_trade_intent_hides_play_stats_when_absent() -> None:
@@ -678,7 +738,7 @@ def test_render_trade_intent_hides_play_stats_when_absent() -> None:
     assert "## 同类信号" not in text
 
 
-def test_llm_writer_output_must_preserve_play_stats() -> None:
+def test_llm_writer_output_must_preserve_action_ticket_fields() -> None:
     intent = {
         **_render_intent(),
         "play_stats": {
@@ -692,14 +752,12 @@ def test_llm_writer_output_must_preserve_play_stats() -> None:
         },
     }
     template = render_trade_intent(intent)
-    without_stats = "\n".join(
-        line
-        for line in template.splitlines()
-        if "同类信号" not in line and "level_fade_put@call_wall" not in line
+    without_limit = "\n".join(
+        line for line in template.splitlines() if not line.startswith("限价  ")
     )
 
     assert _writer_output_valid(template, intent)
-    assert not _writer_output_valid(without_stats, intent)
+    assert not _writer_output_valid(without_limit, intent)
 
 
 def test_llm_writer_rejects_ma_cross_as_standalone_trade_trigger() -> None:
@@ -1025,6 +1083,7 @@ def test_trade_ready_delivery_is_semantically_deduplicated(tmp_path, monkeypatch
         "time_stop_at": (NOW + timedelta(minutes=15)).isoformat(),
     }
     calls: list[str] = []
+    envelopes = []
     monkeypatch.setattr(
         "spx_spark.application.market_features.trade_intent_runtime._action_now",
         lambda: NOW,
@@ -1035,6 +1094,7 @@ def test_trade_ready_delivery_is_semantically_deduplicated(tmp_path, monkeypatch
     )
 
     def fake_enqueue(_settings, _envelope, **kwargs):
+        envelopes.append(_envelope)
         calls.append(str(kwargs["text"]))
         return SimpleNamespace(
             accepted=True,
@@ -1069,6 +1129,7 @@ def test_trade_ready_delivery_is_semantically_deduplicated(tmp_path, monkeypatch
     assert first["delivered"] is False
     assert second["reason"] == "already_accepted"
     assert len(calls) == 1
+    assert envelopes[0].expires_at == NOW + timedelta(seconds=90)
 
 
 def test_enqueue_ack_crash_replays_immutable_trade_ready_payload(
@@ -1164,9 +1225,16 @@ def test_enqueue_ack_crash_replays_immutable_trade_ready_payload(
             feature_policy=MarketFeatureSettings(),
         )
 
+    replay_intent = {
+        **intent,
+        "evaluated_at": (NOW + timedelta(seconds=121)).isoformat(),
+        "quote_source_at": (NOW + timedelta(seconds=121)).isoformat(),
+        "decision_bid": 10.05,
+        "decision_ask": 10.35,
+    }
     replay = process_trade_intent(
         storage,
-        intent,
+        replay_intent,
         now=NOW + timedelta(seconds=121),
         settings=settings,
         feature_policy=MarketFeatureSettings(),
@@ -1177,16 +1245,309 @@ def test_enqueue_ack_crash_replays_immutable_trade_ready_payload(
     assert replay["inserted"] is False
     state = json.loads((tmp_path / "latest" / "trade_intent_delivery_state.json").read_text())
     assert "delivered" not in state
-    assert "intent:crash-replay" in state["accepted"]
+    delivery_event_id = _trade_ready_delivery_event_id(intent)
+    assert delivery_event_id in state["accepted"]
     with sqlite3.connect(settings.delivery_outbox_path) as connection:
         rows = connection.execute(
-            "SELECT event_id, occurred_at, text FROM notification_delivery_events"
+            "SELECT event_id, occurred_at, expires_at, text "
+            "FROM notification_delivery_events"
         ).fetchall()
     assert len(rows) == 1
-    assert rows[0][0] == "intent:crash-replay"
+    assert rows[0][0] == delivery_event_id
     assert rows[0][1] == NOW.isoformat(timespec="microseconds")
-    assert "10 / 10.4" in rows[0][2]
-    assert "10.05" not in rows[0][2]
+    assert rows[0][2] == (NOW + timedelta(minutes=5)).isoformat(timespec="microseconds")
+    assert "10.00 / 10.40" in rows[0][3]
+    assert "10.05" not in rows[0][3]
+
+    deliveries: list[object] = []
+    monkeypatch.setattr(
+        "spx_spark.notifier.dispatcher.deliver_trade_push",
+        lambda *_args, **_kwargs: deliveries.append(object()),
+    )
+    consumed = consume_pending_notifications(
+        settings,
+        now=NOW + timedelta(minutes=6),
+        notify_dead_letters=False,
+    )
+
+    assert consumed["jobs"] == 0
+    assert consumed["attempted_targets"] == 0
+    assert deliveries == []
+    with sqlite3.connect(settings.delivery_outbox_path) as connection:
+        status = connection.execute(
+            "SELECT status FROM notification_delivery_events WHERE event_id = ?",
+            (delivery_event_id,),
+        ).fetchone()[0]
+    assert status == "dead_letter"
+
+
+def test_enqueue_ack_crash_then_invalidation_cancels_stale_ready(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    semantic_scope = "2026-07-14|level_breakout_call|7550.0000"
+    intent = {
+        **_runtime_contract(NOW + timedelta(minutes=5)),
+        "status": "trade_ready",
+        "intent_id": "intent:crash-invalidation",
+        "semantic_scope": semantic_scope,
+        "semantic_key": (
+            f"{semantic_scope}|option:SPX:SPXW:20260714:7550:C"
+        ),
+        "event_id": "level:crash-invalidation:first",
+        "evaluated_at": NOW.isoformat(),
+        "phase": "confirmed",
+        "direction": "up",
+        "thesis": "breakout",
+        "contract_label": "SPXW 7550C",
+        "decision_bid": 10.0,
+        "decision_ask": 10.4,
+        "entry_limit": 10.1,
+        "provider": "ibkr",
+        "quote_source_at": NOW.isoformat(),
+        "spx_spot": 7554.0,
+        "trigger_level": 7550.0,
+        "invalidation_spx": 7547.0,
+        "target_spx": 7575.0,
+        "max_loss_per_contract": 1010.0,
+        "expires_at": (NOW + timedelta(minutes=5)).isoformat(),
+        "time_stop_at": (NOW + timedelta(minutes=15)).isoformat(),
+    }
+    settings = replace(
+        NotificationSettings.from_env(),
+        enabled=True,
+        feishu_enabled=True,
+        feishu_webhook_url="https://open.feishu.cn/test",
+        bark_enabled=False,
+        bark_friend_enabled=False,
+        missed_queue_path=str(tmp_path / "missed.jsonl"),
+        delivery_receipt_path=str(tmp_path / "receipts.sqlite"),
+        delivery_outbox_enabled=True,
+        delivery_outbox_path=str(tmp_path / "delivery-outbox.sqlite"),
+        delivery_outbox_legacy_shadow_enabled=False,
+    )
+    monkeypatch.setattr(
+        trade_intent_runtime,
+        "_action_revalidation",
+        lambda *_args, **_kwargs: (
+            None,
+            {"quote_revalidation": "test_stub"},
+        ),
+    )
+    original_write = trade_intent_runtime.atomic_write_json_secure
+    state_writes = 0
+
+    def crash_after_enqueue(path, payload):
+        nonlocal state_writes
+        if path.name == "trade_intent_delivery_state.json":
+            state_writes += 1
+            if state_writes == 2:
+                raise RuntimeError("simulated crash after durable enqueue")
+        return original_write(path, payload)
+
+    monkeypatch.setattr(
+        trade_intent_runtime,
+        "atomic_write_json_secure",
+        crash_after_enqueue,
+    )
+    storage = SimpleNamespace(data_root=str(tmp_path))
+
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        process_trade_intent(
+            storage,
+            intent,
+            now=NOW,
+            action_now=NOW,
+            settings=settings,
+            feature_policy=MarketFeatureSettings(),
+        )
+
+    delivery_event_id = _trade_ready_delivery_event_id(intent)
+    crashed_state = json.loads(
+        (
+            tmp_path / "latest" / "trade_intent_delivery_state.json"
+        ).read_text()
+    )
+    assert crashed_state["accepted"] == {}
+    assert crashed_state["delivery_lifecycle_events"] == [
+        {
+            "event_id": delivery_event_id,
+            "semantic_key": intent["semantic_key"],
+            "semantic_scope": semantic_scope,
+        }
+    ]
+
+    invalidated = process_trade_intent(
+        storage,
+        {
+            "status": "observing",
+            "phase": "invalidated",
+            "event_id": intent["event_id"],
+            "semantic_scope": semantic_scope,
+        },
+        now=NOW + timedelta(seconds=1),
+        settings=settings,
+    )
+    consumed = consume_pending_notifications(
+        settings,
+        now=NOW + timedelta(seconds=2),
+        notify_dead_letters=False,
+    )
+
+    assert invalidated["reason"] == "observing"
+    assert consumed["jobs"] == 0
+    assert consumed["delivered_targets"] == 0
+    with sqlite3.connect(settings.delivery_outbox_path) as connection:
+        old_status = connection.execute(
+            "SELECT status FROM notification_delivery_events "
+            "WHERE event_id = ?",
+            (delivery_event_id,),
+        ).fetchone()
+    assert old_status == ("dead_letter",)
+
+    rearmed_intent = {
+        **intent,
+        "event_id": "level:crash-invalidation:second",
+        "evaluated_at": (NOW + timedelta(seconds=3)).isoformat(),
+        "quote_source_at": (NOW + timedelta(seconds=3)).isoformat(),
+    }
+    rearmed = process_trade_intent(
+        storage,
+        rearmed_intent,
+        now=NOW + timedelta(seconds=3),
+        action_now=NOW + timedelta(seconds=3),
+        settings=settings,
+        feature_policy=MarketFeatureSettings(),
+    )
+    rearmed_delivery_event_id = _trade_ready_delivery_event_id(
+        rearmed_intent
+    )
+
+    assert rearmed["accepted"] is True
+    assert rearmed_delivery_event_id != delivery_event_id
+    with sqlite3.connect(settings.delivery_outbox_path) as connection:
+        statuses = dict(
+            connection.execute(
+                "SELECT event_id, status FROM notification_delivery_events"
+            ).fetchall()
+        )
+    assert statuses == {
+        delivery_event_id: "dead_letter",
+        rearmed_delivery_event_id: "pending",
+    }
+
+
+def test_failed_rth_cancellation_blocks_rearmed_lifecycle(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    semantic_scope = "2026-07-14|level_breakout_call|7550.0000"
+    intent = {
+        **_runtime_contract(NOW + timedelta(minutes=5)),
+        "status": "trade_ready",
+        "intent_id": "intent:cancellation-gate",
+        "semantic_scope": semantic_scope,
+        "semantic_key": (
+            f"{semantic_scope}|option:SPX:SPXW:20260714:7550:C"
+        ),
+        "event_id": "level:cancellation-gate:first",
+        "evaluated_at": NOW.isoformat(),
+        "phase": "confirmed",
+        "direction": "up",
+        "thesis": "breakout",
+        "contract_label": "SPXW 7550C",
+        "decision_bid": 10.0,
+        "decision_ask": 10.4,
+        "entry_limit": 10.1,
+        "provider": "ibkr",
+        "quote_source_at": NOW.isoformat(),
+        "spx_spot": 7554.0,
+        "trigger_level": 7550.0,
+        "invalidation_spx": 7547.0,
+        "target_spx": 7575.0,
+        "max_loss_per_contract": 1010.0,
+        "expires_at": (NOW + timedelta(minutes=5)).isoformat(),
+        "time_stop_at": (NOW + timedelta(minutes=15)).isoformat(),
+    }
+    settings = replace(
+        NotificationSettings.from_env(),
+        enabled=True,
+        feishu_enabled=True,
+        feishu_webhook_url="https://open.feishu.cn/test",
+        bark_enabled=False,
+        bark_friend_enabled=False,
+        missed_queue_path=str(tmp_path / "missed.jsonl"),
+        delivery_receipt_path=str(tmp_path / "receipts.sqlite"),
+        delivery_outbox_enabled=True,
+        delivery_outbox_path=str(tmp_path / "delivery-outbox.sqlite"),
+        delivery_outbox_legacy_shadow_enabled=False,
+    )
+    monkeypatch.setattr(
+        trade_intent_runtime,
+        "_action_revalidation",
+        lambda *_args, **_kwargs: (
+            None,
+            {"quote_revalidation": "test_stub"},
+        ),
+    )
+    storage = SimpleNamespace(data_root=str(tmp_path))
+    first = process_trade_intent(
+        storage,
+        intent,
+        now=NOW,
+        action_now=NOW,
+        settings=settings,
+        feature_policy=MarketFeatureSettings(),
+    )
+    monkeypatch.setattr(
+        trade_intent_runtime,
+        "cancel_pending_notification",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("outbox unavailable")
+        ),
+    )
+
+    process_trade_intent(
+        storage,
+        {
+            "status": "observing",
+            "phase": "invalidated",
+            "event_id": intent["event_id"],
+            "semantic_scope": semantic_scope,
+        },
+        now=NOW + timedelta(seconds=1),
+        settings=settings,
+    )
+    rearmed = process_trade_intent(
+        storage,
+        {
+            **intent,
+            "event_id": "level:cancellation-gate:second",
+            "evaluated_at": (NOW + timedelta(seconds=2)).isoformat(),
+            "quote_source_at": (NOW + timedelta(seconds=2)).isoformat(),
+        },
+        now=NOW + timedelta(seconds=2),
+        action_now=NOW + timedelta(seconds=2),
+        settings=settings,
+        feature_policy=MarketFeatureSettings(),
+    )
+    state = json.loads(
+        (
+            tmp_path / "latest" / "trade_intent_delivery_state.json"
+        ).read_text()
+    )
+
+    first_delivery_event_id = _trade_ready_delivery_event_id(intent)
+    assert first["accepted"] is True
+    assert rearmed["reason"] == "lifecycle_cancellation_pending"
+    assert state["pending_delivery_cancellation_event_ids"] == [
+        first_delivery_event_id
+    ]
+    with sqlite3.connect(settings.delivery_outbox_path) as connection:
+        rows = connection.execute(
+            "SELECT event_id FROM notification_delivery_events"
+        ).fetchall()
+    assert rows == [(first_delivery_event_id,)]
 
 
 def test_legacy_delivered_state_migrates_to_accepted(tmp_path) -> None:
@@ -1211,7 +1572,7 @@ def test_legacy_delivered_state_migrates_to_accepted(tmp_path) -> None:
     )
 
     state = json.loads(state_path.read_text(encoding="utf-8"))
-    assert state["schema_version"] == 2
+    assert state["schema_version"] == 3
     assert state["accepted"] == {"intent:legacy": NOW.isoformat()}
     assert "delivered" not in state
 
@@ -1255,6 +1616,39 @@ def test_mislabeled_put_trade_ready_is_rejected_before_notification(
     monkeypatch.setattr(
         "spx_spark.application.market_features.trade_intent_runtime.enqueue_notification",
         lambda *_args, **_kwargs: pytest.fail("Put shadow must not notify"),
+    )
+
+    result = process_trade_intent(
+        SimpleNamespace(data_root=str(tmp_path)),
+        intent,
+        now=NOW,
+        settings=_notification_settings(tmp_path),
+    )
+
+    assert result == {
+        "attempted": False,
+        "delivered": False,
+        "reason": "put_lane_live_execution_forbidden",
+    }
+
+
+def test_forged_put_wall_trade_ready_is_rejected_before_notification(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    intent = {
+        **_runtime_contract(NOW + timedelta(seconds=90)),
+        "intent_id": "intent:unsafe-put-wall",
+        "event_id": "level:unsafe-put-wall",
+        "strategy_lane": "long_0dte_rth_put_wall_breakdown_disabled",
+        "direction": "down",
+        "contract_id": "option:SPX:SPXW:20260714:7500:P",
+        "level_kind": "put_wall",
+        "thesis": "breakout",
+    }
+    monkeypatch.setattr(
+        "spx_spark.application.market_features.trade_intent_runtime.enqueue_notification",
+        lambda *_args, **_kwargs: pytest.fail("disabled Put Wall must not notify"),
     )
 
     result = process_trade_intent(
@@ -1343,6 +1737,54 @@ def test_action_revalidation_reloads_quote_and_recomputes_limit(monkeypatch) -> 
     assert evidence["entry_limit"] == pytest.approx(10.1)
     assert evidence["recomputed_entry_limit"] == pytest.approx(10.3)
     assert evidence["quote_state_created_at"] == changed_latest.created_at.isoformat()
+
+
+@pytest.mark.parametrize(
+    "missing_field",
+    (
+        "decision_bid",
+        "decision_ask",
+        "trigger_level",
+        "spx_spot",
+        "invalidation_spx",
+        "target_spx",
+        "time_stop_at",
+        "max_loss_per_contract",
+    ),
+)
+def test_action_revalidation_rejects_incomplete_manual_card(
+    missing_field: str,
+) -> None:
+    market, options, latest, context, repricing = _ready_inputs()
+    policy = MarketFeatureSettings()
+    intent = evaluate_trade_intent(
+        context,
+        market,
+        options,
+        latest,
+        repricing,
+        now=NOW,
+        feature_policy=policy,
+        order_policy=OrderMapPolicy(),
+    )
+    incomplete = {key: value for key, value in intent.items() if key != missing_field}
+
+    reason, evidence = _action_revalidation(
+        SimpleNamespace(),
+        incomplete,
+        now=NOW,
+        feature_policy=policy,
+        expected_policy_version=str(intent["policy_version"]),
+    )
+
+    expected = (
+        "manual_card_time_stop_unavailable"
+        if missing_field == "time_stop_at"
+        else f"manual_card_field_missing:{missing_field}"
+    )
+    assert reason == expected
+    assert evidence["reason"] == expected
+    assert "quote_revalidation" not in evidence
 
 
 def test_action_revalidation_rejects_spread_deterioration_even_if_limit_is_unchanged(
@@ -1640,6 +2082,109 @@ def test_invalidation_explicitly_rearms_semantic_delivery(tmp_path, monkeypatch)
     assert len(calls) == 2
 
 
+def test_rearmed_semantic_intent_uses_distinct_durable_delivery_event(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    intent = {
+        **_runtime_contract(NOW + timedelta(minutes=5)),
+        "status": "trade_ready",
+        "intent_id": "intent:semantic-real-outbox",
+        "semantic_scope": "2026-07-14|level_breakout_call|7550.0000",
+        "semantic_key": (
+            "2026-07-14|level_breakout_call|7550.0000|option:SPX:SPXW:20260714:7550:C"
+        ),
+        "event_id": "level:first",
+        "evaluated_at": NOW.isoformat(),
+        "phase": "confirmed",
+        "direction": "up",
+        "thesis": "breakout",
+        "contract_label": "SPXW 7550C",
+        "decision_bid": 10.0,
+        "decision_ask": 10.4,
+        "entry_limit": 10.1,
+        "provider": "ibkr",
+        "quote_source_at": NOW.isoformat(),
+        "spx_spot": 7554.0,
+        "trigger_level": 7550.0,
+        "invalidation_spx": 7547.0,
+        "target_spx": 7575.0,
+        "max_loss_per_contract": 1010.0,
+        "expires_at": (NOW + timedelta(minutes=5)).isoformat(),
+        "time_stop_at": (NOW + timedelta(minutes=15)).isoformat(),
+    }
+    settings = replace(
+        NotificationSettings.from_env(),
+        enabled=True,
+        feishu_enabled=True,
+        feishu_webhook_url="https://open.feishu.cn/test",
+        bark_enabled=False,
+        bark_friend_enabled=False,
+        missed_queue_path=str(tmp_path / "missed.jsonl"),
+        delivery_receipt_path=str(tmp_path / "receipts.sqlite"),
+        delivery_outbox_enabled=True,
+        delivery_outbox_path=str(tmp_path / "delivery-outbox.sqlite"),
+        delivery_outbox_legacy_shadow_enabled=False,
+    )
+    monkeypatch.setattr(
+        "spx_spark.application.market_features.trade_intent_runtime._action_revalidation",
+        lambda *_args, **_kwargs: (None, {"quote_revalidation": "test_stub"}),
+    )
+    storage = SimpleNamespace(data_root=str(tmp_path))
+
+    first = process_trade_intent(
+        storage,
+        intent,
+        now=NOW,
+        action_now=NOW,
+        settings=settings,
+    )
+    process_trade_intent(
+        storage,
+        {
+            "status": "observing",
+            "phase": "invalidated",
+            "event_id": "level:first",
+            "semantic_scope": intent["semantic_scope"],
+        },
+        now=NOW + timedelta(minutes=1),
+        settings=settings,
+    )
+    rearmed_intent = {
+        **intent,
+        "event_id": "level:second",
+        "evaluated_at": (NOW + timedelta(minutes=2)).isoformat(),
+        "quote_source_at": (NOW + timedelta(minutes=2)).isoformat(),
+        "decision_bid": 10.1,
+        "decision_ask": 10.5,
+        "entry_limit": 10.2,
+        "max_loss_per_contract": 1020.0,
+    }
+    rearmed = process_trade_intent(
+        storage,
+        rearmed_intent,
+        now=NOW + timedelta(minutes=2),
+        action_now=NOW + timedelta(minutes=2),
+        settings=settings,
+    )
+
+    first_delivery_id = _trade_ready_delivery_event_id(intent)
+    second_delivery_id = _trade_ready_delivery_event_id(rearmed_intent)
+    assert first["accepted"] is True
+    assert rearmed["accepted"] is True
+    assert first_delivery_id != second_delivery_id
+    with sqlite3.connect(settings.delivery_outbox_path) as connection:
+        rows = connection.execute(
+            "SELECT event_id, status, text "
+            "FROM notification_delivery_events ORDER BY event_id"
+        ).fetchall()
+    assert {row[0] for row in rows} == {first_delivery_id, second_delivery_id}
+    statuses = {row[0]: row[1] for row in rows}
+    assert statuses[first_delivery_id] == "dead_letter"
+    assert statuses[second_delivery_id] == "pending"
+    assert len({row[2] for row in rows}) == 2
+
+
 def _ready_inputs():
     instrument = InstrumentId.option(
         "SPX",
@@ -1754,6 +2299,7 @@ def _ready_inputs():
             "actionable": True,
             "evidence": ["es_horizons_aligned_2"],
         },
+        macro_event={"mode": "normal", "entry_allowed": True},
     )
     repricing = {
         "event_id": "level:test",
@@ -1890,6 +2436,7 @@ def _render_intent() -> dict:
         "event_id": "level:render",
         "direction": "down",
         "thesis": "fade",
+        "contract_id": "option:SPX:SPXW:20260715:7550:P",
         "contract_label": "SPXW 7550P",
         "decision_bid": 10.0,
         "decision_ask": 10.4,

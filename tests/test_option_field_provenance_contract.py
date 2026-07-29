@@ -329,4 +329,5 @@ def test_rejected_analytical_leg_cannot_enter_parity_or_wall_map() -> None:
 
     assert expiry.atm_call_mid is None
     assert expiry.call_wall is None
-    assert expiry.put_wall == 7500.0
+    assert expiry.put_wall is None
+    assert expiry.wall_method == "unavailable"

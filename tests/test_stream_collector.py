@@ -2039,6 +2039,101 @@ def test_close_only_live_row_downgrades_to_unknown_quality() -> None:
     assert quote.quality is MarketDataQuality.UNKNOWN
 
 
+def test_close_only_live_row_rejects_fresh_clock_and_negative_sentinels() -> None:
+    from spx_spark.ibkr.adapter import quote_from_ibkr_row
+    from spx_spark.marketdata import MarketDataQuality
+
+    now = datetime(2026, 7, 27, 8, 57, tzinfo=timezone.utc)
+    row = VerifyRow(
+        label="index:SPX",
+        kind="index",
+        symbol="SPX",
+        subscribed=True,
+        market_data_type=1,
+        close=7411.98,
+        last=None,
+        bid=-1.0,
+        ask=-1.0,
+        ticker_time=now.isoformat(),
+    )
+
+    quote = quote_from_ibkr_row(row, received_at=now)
+
+    assert quote.quality is MarketDataQuality.UNKNOWN
+    assert quote.effective_price == 7411.98
+
+
+def test_close_only_gate_keeps_a_genuine_live_last_actionable() -> None:
+    from spx_spark.ibkr.adapter import quote_from_ibkr_row
+    from spx_spark.marketdata import MarketDataQuality
+
+    now = datetime(2026, 7, 27, 14, 0, tzinfo=timezone.utc)
+    row = VerifyRow(
+        label="index:SPX",
+        kind="index",
+        symbol="SPX",
+        subscribed=True,
+        market_data_type=1,
+        close=7411.98,
+        last=7498.5,
+        bid=-1.0,
+        ask=-1.0,
+        ticker_time=now.isoformat(),
+    )
+
+    quote = quote_from_ibkr_row(row, received_at=now)
+
+    assert quote.quality is MarketDataQuality.LIVE
+    assert quote.effective_price == 7498.5
+
+
+def test_close_only_gate_rejects_one_sided_residual_book() -> None:
+    from spx_spark.ibkr.adapter import quote_from_ibkr_row
+    from spx_spark.marketdata import MarketDataQuality
+
+    now = datetime(2026, 7, 27, 14, 0, tzinfo=timezone.utc)
+    row = VerifyRow(
+        label="index:SPX",
+        kind="index",
+        symbol="SPX",
+        subscribed=True,
+        market_data_type=1,
+        close=7411.98,
+        last=None,
+        bid=7498.0,
+        ask=-1.0,
+        ticker_time=now.isoformat(),
+    )
+
+    quote = quote_from_ibkr_row(row, received_at=now)
+
+    assert quote.quality is MarketDataQuality.UNKNOWN
+
+
+def test_close_only_gate_accepts_valid_two_sided_mid() -> None:
+    from spx_spark.ibkr.adapter import quote_from_ibkr_row
+    from spx_spark.marketdata import MarketDataQuality
+
+    now = datetime(2026, 7, 27, 14, 0, tzinfo=timezone.utc)
+    row = VerifyRow(
+        label="index:SPX",
+        kind="index",
+        symbol="SPX",
+        subscribed=True,
+        market_data_type=1,
+        close=7411.98,
+        last=None,
+        bid=7498.0,
+        ask=7499.0,
+        ticker_time=now.isoformat(),
+    )
+
+    quote = quote_from_ibkr_row(row, received_at=now)
+
+    assert quote.quality is MarketDataQuality.LIVE
+    assert quote.mid == 7498.5
+
+
 def test_flush_reports_outage_while_farm_not_ready(monkeypatch) -> None:
     collector = _flush_test_collector()
     collector.farm_health.observe(2119, "Market data farm is connecting:usfarm.nj", now=1.0)
@@ -2085,6 +2180,7 @@ def test_flush_reports_outage_while_farm_not_ready(monkeypatch) -> None:
 def test_flush_reports_healthy_data_plane_with_fresh_quote_despite_partial_error(
     monkeypatch,
 ) -> None:
+    observed_at = datetime.now(tz=timezone.utc)
     collector = _flush_test_collector()
     collector.errors = [
         stream_collector_module.IbkrError(
@@ -2092,7 +2188,7 @@ def test_flush_reports_healthy_data_plane_with_fresh_quote_despite_partial_error
             error_code=200,
             message="one optional contract was not found",
             contract=None,
-            ts="2026-07-25T06:00:00+00:00",
+            ts=observed_at.isoformat(),
         )
     ]
     collector.base_subs = {
@@ -2105,7 +2201,7 @@ def test_flush_reports_healthy_data_plane_with_fresh_quote_despite_partial_error
                 subscribed=True,
                 market_data_type=1,
                 last=6400.0,
-                ticker_time="2026-07-25T06:00:00+00:00",
+                ticker_time=observed_at.isoformat(),
             ),
         )
     }

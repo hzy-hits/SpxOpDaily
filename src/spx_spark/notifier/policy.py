@@ -92,14 +92,14 @@ DIRECT_PUSH_SYSTEM_EVENT_KINDS = frozenset(
 # but it must not replace a market-warning channel.
 INTRADAY_DIRECT_PUSH_KINDS = frozenset(
     {
-        "intraday_price_shock",
-        "intraday_price_reclaim",
-        "globex_trend_transition",
         "flip_reclaim_call",
         "call_wall_breakout_call",
         "gth_dip_reclaim_call",
+        "gth_advisory_invalidated",
     }
 )
+
+HIGH_MAGNITUDE_DIRECT_PUSH_KINDS: frozenset[str] = frozenset()
 
 # These are health/context observations, not human notifications. Everything
 # else that is human-visible and not a deterministic direct event enters the
@@ -113,8 +113,20 @@ CONTEXT_ONLY_ALERT_KINDS = frozenset(
         "required_data_degraded",
         "optional_data_degraded",
         "option_quote_freshness_degraded",
+        "option_underlier_gate_suppressed",
         "iv_surface_degraded",
         "iv_surface_stale",
+        # Relative-to-close buckets remain in the alert/audit ledger but are
+        # never sufficient for a direct human notification.
+        "price_move_from_close",
+        # Raw movement/trend observations may feed a persistent wall/flip
+        # lifecycle, but have no standalone human action.
+        "intraday_price_shock",
+        "intraday_price_reclaim",
+        "globex_trend_transition",
+        "globex_trend_continuation",
+        "gth_directional_advisory",
+        "gth_advisory_management",
     }
 )
 
@@ -244,6 +256,10 @@ def _is_direct_push_alert(alert: dict[str, object]) -> bool:
     return (
         kind in DIRECT_PUSH_SYSTEM_EVENT_KINDS
         or kind in INTRADAY_DIRECT_PUSH_KINDS
+        or (
+            kind in HIGH_MAGNITUDE_DIRECT_PUSH_KINDS
+            and severity_value(alert.get("severity")) >= severity_value("high")
+        )
         or is_position_holding_alert(alert)
     )
 
@@ -252,7 +268,12 @@ def alerts_are_latency_critical(alerts: list[dict[str, object]]) -> bool:
     """Whether a direct batch must avoid all LLM latency."""
 
     return bool(alerts) and all(
-        str(alert.get("kind") or "") in INTRADAY_DIRECT_PUSH_KINDS for alert in alerts
+        str(alert.get("kind") or "") in INTRADAY_DIRECT_PUSH_KINDS
+        or (
+            str(alert.get("kind") or "") in HIGH_MAGNITUDE_DIRECT_PUSH_KINDS
+            and severity_value(alert.get("severity")) >= severity_value("high")
+        )
+        for alert in alerts
     )
 
 
@@ -265,6 +286,9 @@ MARKET_SIGNAL_ALERT_KINDS = frozenset(
         "intraday_price_shock",
         "intraday_price_reclaim",
         "globex_trend_transition",
+        "globex_trend_continuation",
+        "gth_directional_advisory",
+        "gth_advisory_management",
         "flip_reclaim_call",
         "call_wall_breakout_call",
         "option_gamma_regime",

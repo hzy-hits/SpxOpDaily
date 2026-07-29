@@ -83,13 +83,14 @@ def evaluate_engine_health(
 
     if (
         not cash_session_open
+        and globex_context_usable
         and gth_option_session_open
         and all(readiness_factors.values())
     ):
         return EngineHealth(
-            mode=EngineMode.READY,
+            mode=EngineMode.GLOBEX_CONTEXT,
             factors=factors,
-            reasons=("cash_session_closed_live_option_chain",),
+            reasons=("cash_session_closed_live_option_chain_advisory_only",),
             checked_at=checked_at,
         )
 

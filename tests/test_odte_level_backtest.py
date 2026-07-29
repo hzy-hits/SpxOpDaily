@@ -525,6 +525,31 @@ def test_spread_skipped_when_short_leg_missing() -> None:
     assert result.reason == "no_short_leg"
 
 
+def test_evaluate_signal_never_builds_cross_provider_spread() -> None:
+    class Store(_MemoryQuoteStore):
+        def __init__(self) -> None:
+            super().__init__({}, _flat_underlier(7555.0, start=ENTRY))
+            self.requests: list[tuple[str, float]] = []
+
+        def option_series(self, *, provider: str, strike: float, start, end, **_kwargs):
+            self.requests.append((provider, strike))
+            rows = {
+                ("schwab", 7550.0): _flat_series(ENTRY, 1800, bid=9.8, ask=10.0),
+                ("ibkr", 7560.0): _flat_series(ENTRY, 1800, bid=5.0, ask=5.1),
+            }.get((provider, strike), [])
+            return [tick for tick in rows if start <= tick.at <= end]
+
+    store = Store()
+    trades, skips = evaluate_signal(store, _signal(), profiles=[_profile("baseline")])
+
+    assert not any(trade.variant == "spread10" for trade in trades)
+    assert any(
+        skip.variant == "spread10" and skip.reason == "no_short_leg"
+        for skip in skips
+    )
+    assert ("ibkr", 7560.0) not in store.requests
+
+
 def test_spread_entry_waits_for_both_legs_without_using_future_short_mark() -> None:
     long_series = [
         _tick(ENTRY, 9.8, 10.0),

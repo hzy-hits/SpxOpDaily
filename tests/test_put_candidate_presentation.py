@@ -9,6 +9,7 @@ from spx_spark.application.order_map.prompts import (
 )
 from spx_spark.application.order_map.put_candidate_presentation import (
     build_put_candidate_report,
+    presentable_plan_candidates,
     put_candidate_report_lines,
 )
 from spx_spark.application.order_map.writer_validation import (
@@ -142,8 +143,46 @@ def test_upper_rejection_can_reflect_shadow_ready_without_promoting_put_wall() -
 
     assert rejection["wall_signal"]["status"] == "CONFIRMED"
     assert rejection["execution_eligible"]["eligible"] is False
-    assert rejection["execution_eligible"]["reason"] == ("shadow_quote_observation_eligible")
+    assert rejection["execution_eligible"]["reason"] == "trade_intent_shadow_ready"
     assert rejection["priority"]["status"] == "HIGH"
+    assert put_wall["execution_eligible"]["eligible"] is False
+    assert put_wall["priority"]["status"] == "UNSUPPORTED"
+
+
+def test_flip_low_manual_ready_is_visible_without_promoting_put_wall() -> None:
+    payload = _payload()
+    payload["trade_intent"] = {
+        "event_id": "level:flip-low",
+        "status": "trade_ready",
+        "strategy_lane": "long_0dte_rth_flip_low_breakdown_put_manual",
+        "direction": "down",
+        "play": "level_breakout_put",
+        "contract_id": "option:SPX:SPXW:20260724:7560:P",
+        "execution_eligible": True,
+        "quote_observation_eligible": False,
+        "shadow_mode": False,
+        "automatic_ordering": False,
+    }
+    payload["plan_candidates"] = [
+        {
+            "play": "level_breakout_put",
+            "level_kind": "flip_low",
+            "strike": 7560.0,
+            "right": "P",
+        }
+    ]
+
+    report = build_put_candidate_report(payload)
+    flip = _candidate(report, "flip_low_breakdown")
+    put_wall = _candidate(report, "put_wall_breakdown")
+
+    assert flip["execution_eligible"] == {
+        "eligible": True,
+        "status": "eligible",
+        "reason": "manual_ready_exact_quote",
+        "source": "persisted_trade_intent_only",
+    }
+    assert presentable_plan_candidates(payload) == payload["plan_candidates"]
     assert put_wall["execution_eligible"]["eligible"] is False
     assert put_wall["priority"]["status"] == "UNSUPPORTED"
 
@@ -191,16 +230,23 @@ def test_status_formatter_suppresses_unsupported_put_wall_plan() -> None:
 
 def test_status_formatter_suppresses_stale_put_plan_during_flip_low_signal() -> None:
     payload = _payload()
-    payload["trade_intent"].update(
-        {
-            "status": "trade_ready",
-            "execution_eligible": True,
-        }
-    )
+    payload["trade_intent"] = {
+        "event_id": "level:flip-low",
+        "status": "trade_ready",
+        "strategy_lane": "long_0dte_rth_flip_low_breakdown_put_manual",
+        "direction": "down",
+        "play": "level_breakout_put",
+        "contract_id": "option:SPX:SPXW:20260724:7560:P",
+        "execution_eligible": True,
+        "quote_observation_eligible": False,
+        "shadow_mode": False,
+        "automatic_ordering": False,
+    }
     payload["plan_candidates"] = [
         {
             "play": "level_breakout_put",
             "level_kind": "put_wall",
+            "level_label": "put_wall 7550",
             "level": 7550.0,
             "strike": 7550.0,
             "right": "P",
@@ -215,7 +261,7 @@ def test_status_formatter_suppresses_stale_put_plan_during_flip_low_signal() -> 
     writer = _status_writer_payload(payload)
 
     assert "Put候选[flip_low_breakdown]" in rendered
-    assert "EXECUTION_ELIGIBLE=NO(put_lane_shadow_only)" in rendered
+    assert "EXECUTION_ELIGIBLE=YES(manual_ready_exact_quote)" in rendered
     assert "结论  NO TRADE" in rendered
     assert "【条件计划】" not in rendered
     assert "SPXW 7550P" not in rendered

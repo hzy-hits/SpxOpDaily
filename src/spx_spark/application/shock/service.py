@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from spx_spark.alert_model import Alert
+from spx_spark.application.globex_trend.service import trend_context_id
 from spx_spark.application.order_map.level_decision_shadow import load_level_decision_shadow
 from spx_spark.application.shock.delivery import (
     _notification_payload,
@@ -83,7 +84,7 @@ from spx_spark.state_io import (
     exclusive_state_lock,
     read_json_object,
 )
-from spx_spark.storage import LatestStateStore
+from spx_spark.storage import LatestStateStore, parse_option_expiry_date
 from spx_spark.strategy_contract import policy_version
 from spx_spark.strategy.steven import (
     annotate_alerts_with_steven_context,
@@ -697,6 +698,7 @@ def _gth_spread_inputs(
         or DEFAULT_MARKET_CALENDAR.research_expiry(updated_at).isoformat() != session_date
     ):
         return None, None
+    expected_expiry = DEFAULT_MARKET_CALENDAR.research_expiry(now)
     observation = level_shadow.get("latest_observation")
     if not isinstance(observation, Mapping) or observation.get("quality_ok") is not True:
         return None, None
@@ -709,10 +711,15 @@ def _gth_spread_inputs(
     ):
         return None, None
     structure = level_shadow.get("structure")
+    structure_expiry = (
+        parse_option_expiry_date(str(structure.get("expiry") or ""))
+        if isinstance(structure, Mapping)
+        else None
+    )
     if (
         not isinstance(structure, Mapping)
         or structure.get("session_date") != session_date
-        or str(structure.get("expiry") or "") != session_date
+        or structure_expiry != expected_expiry
     ):
         return None, None
     confirmed_at = _state_time(structure.get("last_confirmed_at"))
@@ -749,39 +756,64 @@ def _gth_trend_entry_quality(
     at: datetime,
     max_age_seconds: float,
 ) -> dict[str, object]:
-    """Freeze a non-enforcing GTH trend-alignment hypothesis at confirmation time."""
+    """Freeze the same-session trend gate used by an operator-ready GTH signal."""
 
     now = _state_time(at)
     updated_at = _state_time(trend_state.get("updated_at"))
     session_id = str(trend_state.get("session_id") or "")
     regime = str(trend_state.get("regime") or "")
+    metrics = trend_state.get("metrics")
+    metrics = metrics if isinstance(metrics, Mapping) else {}
+    return_15m = _trend_return(metrics.get("return_15m_points"))
+    return_60m = _trend_return(metrics.get("return_60m_points"))
+    return_180m = _trend_return(metrics.get("return_180m_points"))
     reasons: list[str] = []
     if now is None or updated_at is None:
         reasons.append("trend_context_unavailable")
     elif not _fresh_at(updated_at, now=now, max_age_seconds=max_age_seconds):
         reasons.append("trend_context_stale")
-    if session_id != f"{session_date}:globex":
+    expected_session_id = trend_context_id(at)
+    if (
+        not expected_session_id.startswith(f"{session_date}:")
+        or session_id != expected_session_id
+    ):
         reasons.append("trend_session_mismatch")
     if regime != "bullish":
         reasons.append("trend_not_bullish")
-    metrics = trend_state.get("metrics")
-    metrics = metrics if isinstance(metrics, Mapping) else {}
+    if return_15m is None:
+        reasons.append("trend_15m_unavailable")
+    elif return_15m <= 0:
+        reasons.append("trend_15m_not_positive")
+    if return_60m is None:
+        reasons.append("trend_60m_unavailable")
+    elif return_60m <= 0:
+        reasons.append("trend_60m_not_positive")
+    if return_180m is not None and return_180m < 0:
+        reasons.append("trend_180m_negative")
     features = {
         "session_id": session_id or None,
+        "expected_session_id": expected_session_id,
         "trend_updated_at": updated_at.isoformat() if updated_at is not None else None,
         "regime": regime or None,
-        "return_15m_points": metrics.get("return_15m_points"),
-        "return_60m_points": metrics.get("return_60m_points"),
-        "return_180m_points": metrics.get("return_180m_points"),
+        "return_15m_points": return_15m,
+        "return_60m_points": return_60m,
+        "return_180m_points": return_180m,
     }
     return {
-        "mode": "shadow",
-        "policy_version": "gth_trend_alignment_shadow_v1",
+        "mode": "decision_grade",
+        "policy_version": "gth_trend_alignment_live_v2",
         "evaluated_at": now.isoformat() if now is not None else None,
         "verdict": "blocked" if reasons else "pass",
         "block_reasons": reasons,
         "features": features,
     }
+
+
+def _trend_return(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    parsed = float(value)
+    return parsed if math.isfinite(parsed) else None
 
 
 def _virtual_strategy_blocks_gth(active: Mapping[str, object] | None) -> bool:

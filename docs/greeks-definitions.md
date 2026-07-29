@@ -377,8 +377,9 @@ delta / 分钟。
 
 ### 更新频率
 
-同 vanna。0DTE 尾盘 τ→下限（15 分钟 floor，`_MIN_TIME_TO_EXPIRY_YEARS`）时数值发散，
-τ 触 floor 的合约必须追加行级 warning `"tau_floored"` 且不进 `cex_proxy` 聚合。
+同 vanna。0DTE 尾盘始终使用截至 session close 的真实正 τ，不设置 15 分钟 floor。
+到达或超过 close（τ≤0）后不再计算；为兼容既有消费者，合约追加行级 warning
+`"tau_floored"`，且不进 `cex_proxy` 聚合。
 
 ### 质量位影响
 
@@ -468,7 +469,7 @@ USD delta 变化 /（分钟 × 1% move）。
 
 ### 按 expiry 聚合
 
-同 §6，双权重并存。`tau_floored` 的合约不进聚合（§5）。
+同 §6，双权重并存。τ≤0、带兼容标记 `tau_floored` 的合约不进聚合（§5）。
 
 ### 更新频率
 

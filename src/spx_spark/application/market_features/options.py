@@ -21,6 +21,7 @@ from spx_spark.application.market_features.models import (
 from spx_spark.features.exposure_map import ExposureMap, ExpiryExposure
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 from spx_spark.marketdata import (
+    FUTURE_TIMESTAMP_TOLERANCE_SECONDS,
     InstrumentType,
     MarketDataQuality,
     OptionRight,
@@ -613,13 +614,34 @@ def _fresh_front_quotes(
         if quote.instrument.instrument_type is InstrumentType.OPTION
         and quote.instrument.expiry == expiry
     ]
-    return [
-        quote
-        for quote in select_best_quotes(candidates, as_of=now)
-        if quote.quality is MarketDataQuality.LIVE
-        and quote.mid is not None
-        and (now - quote_source_at(quote)).total_seconds() <= policy.max_quote_age_seconds
-    ]
+    selected = select_best_quotes(
+        candidates,
+        as_of=now,
+        failover_mode=state.failover_mode,
+    )
+    fresh: list[Quote] = []
+    for quote in selected:
+        if (
+            quote.quality is not MarketDataQuality.LIVE
+            or quote.bid is None
+            or quote.mid is None
+            or quote.ask is None
+            or not 0 < quote.bid <= quote.mid <= quote.ask
+            or quote.quote_time is None
+        ):
+            continue
+        transport_at = quote.last_update_at or quote.received_at
+        source_age = (as_utc(now) - as_utc(quote.quote_time)).total_seconds()
+        transport_age = (as_utc(now) - as_utc(transport_at)).total_seconds()
+        if (
+            source_age < -FUTURE_TIMESTAMP_TOLERANCE_SECONDS
+            or transport_age < -FUTURE_TIMESTAMP_TOLERANCE_SECONDS
+            or source_age > policy.max_quote_age_seconds
+            or transport_age > policy.max_quote_age_seconds
+        ):
+            continue
+        fresh.append(quote)
+    return fresh
 
 
 def _select_hot_quotes(quotes: list[Quote], *, underlier: float | None, limit: int) -> list[Quote]:

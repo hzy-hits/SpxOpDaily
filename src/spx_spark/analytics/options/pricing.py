@@ -7,10 +7,7 @@ from datetime import datetime
 from typing import Any
 
 from spx_spark.analytics.greeks.black_scholes import bs_gamma as _core_bs_gamma
-from spx_spark.analytics.options.constants import (
-    BAD_QUALITIES,
-    _MIN_TIME_TO_EXPIRY_YEARS,
-)
+from spx_spark.analytics.options.constants import BAD_QUALITIES
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 from spx_spark.marketdata import OptionRight, Quote
 
@@ -75,16 +72,15 @@ def bs_gamma(spot: float, strike: float, iv: float, t_years: float) -> float | N
 
 
 def time_to_expiry_years(expiry: str, *, as_of: datetime) -> float:
-    """Years to the calendar session close, floored at fifteen minutes."""
+    """Actual positive years to session close; zero once unavailable/expired."""
     expiry_date = datetime.strptime(expiry, "%Y%m%d").date()
     session = DEFAULT_MARKET_CALENDAR.session(expiry_date)
     if session is None:
-        return _MIN_TIME_TO_EXPIRY_YEARS
+        return 0.0
     delta_seconds = (session.close_at - as_of.astimezone(session.close_at.tzinfo)).total_seconds()
     if delta_seconds <= 0:
-        return _MIN_TIME_TO_EXPIRY_YEARS
-    years = delta_seconds / (365.0 * 24.0 * 3600.0)
-    return max(years, _MIN_TIME_TO_EXPIRY_YEARS)
+        return 0.0
+    return delta_seconds / (365.0 * 24.0 * 3600.0)
 
 
 def interpolated_atm_iv(

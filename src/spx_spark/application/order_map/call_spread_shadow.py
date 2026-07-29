@@ -483,7 +483,7 @@ def _eligible_leg(
         and abs(model_underlier - spot) > policy.execution_max_provider_underlier_divergence_points
     ):
         reasons.append("model_underlier_divergence")
-    source_at = quote.quote_time or quote.trade_time
+    source_at = quote.quote_time
     transport_at = quote.last_update_at or quote.received_at
     if source_at is not None and (_utc(now) - _utc(source_at)).total_seconds() < -1.0:
         reasons.append("source_quote_in_future")
@@ -677,7 +677,7 @@ def _candidate_payload(
 
 
 def _leg_payload(leg: _Leg) -> dict[str, Any]:
-    source_at = leg.quote.quote_time or leg.quote.trade_time
+    source_at = leg.quote.quote_time
     transport_at = leg.quote.last_update_at or leg.quote.received_at
     return {
         "contract_id": leg.quote.instrument.canonical_id,
@@ -700,8 +700,8 @@ def _leg_payload(leg: _Leg) -> dict[str, Any]:
 
 
 def _legs_are_synchronized(long: Quote, short: Quote) -> bool:
-    long_source = long.quote_time or long.trade_time
-    short_source = short.quote_time or short.trade_time
+    long_source = long.quote_time
+    short_source = short.quote_time
     if long_source is None or short_source is None:
         return False
     long_transport = long.last_update_at or long.received_at

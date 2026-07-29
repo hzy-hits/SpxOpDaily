@@ -17,6 +17,8 @@ from types import FrameType
 from typing import Protocol
 
 from spx_spark.settings import load_app_settings
+from spx_spark.config import StorageSettings
+from spx_spark.state_io import atomic_write_json_secure
 
 
 DEFAULT_MAX_CONSECUTIVE_FAILURES = 5
@@ -151,6 +153,7 @@ def run_worker_loop(
     utcnow: Callable[[], datetime] = lambda: datetime.now(tz=timezone.utc),
     emit: Callable[[dict[str, object]], None] = print_event,
     task_name: str = "market_features_hot_worker",
+    lease_path: Path | None = None,
 ) -> int:
     """Run non-overlapping cycles on a start-anchored cadence.
 
@@ -183,22 +186,24 @@ def run_worker_loop(
         duration_seconds = max(finished_monotonic - started_monotonic, 0.0)
         ok = exit_code == 0 and error is None
         consecutive_failures = 0 if ok else consecutive_failures + 1
-        emit(
-            {
-                "task": task_name,
-                "event": "cycle_finished",
-                "cycle": cycle_number,
-                "ok": ok,
-                "exit_code": exit_code,
-                "error": error,
-                "started_at": started_at.isoformat(),
-                "finished_at": finished_at.isoformat(),
-                "duration_ms": duration_seconds * 1000.0,
-                "interval_seconds": interval_seconds,
-                "overrun_ms": max(duration_seconds - interval_seconds, 0.0) * 1000.0,
-                "consecutive_failures": consecutive_failures,
-            }
-        )
+        event = {
+            "schema_version": 1,
+            "task": task_name,
+            "event": "cycle_finished",
+            "cycle": cycle_number,
+            "ok": ok,
+            "exit_code": exit_code,
+            "error": error,
+            "started_at": started_at.isoformat(),
+            "finished_at": finished_at.isoformat(),
+            "duration_ms": duration_seconds * 1000.0,
+            "interval_seconds": interval_seconds,
+            "overrun_ms": max(duration_seconds - interval_seconds, 0.0) * 1000.0,
+            "consecutive_failures": consecutive_failures,
+        }
+        if lease_path is not None:
+            atomic_write_json_secure(lease_path, event)
+        emit(event)
         if consecutive_failures >= max_consecutive_failures:
             return 1
         if max_cycles is not None and cycle_number >= max_cycles:
@@ -249,6 +254,12 @@ def run(argv: list[str] | None = None) -> int:
     )
     lock_path = args.lock_path or default_lock_path()
     stop_event = threading.Event()
+    storage = StorageSettings.from_env()
+    lease_path = (
+        Path(storage.data_root)
+        / "latest"
+        / "market_features_hot_worker.lease.json"
+    )
     install_stop_handlers(stop_event)
 
     try:
@@ -269,6 +280,7 @@ def run(argv: list[str] | None = None) -> int:
                 stop_event=stop_event,
                 max_consecutive_failures=args.max_consecutive_failures,
                 max_cycles=1 if args.once else None,
+                lease_path=lease_path,
             )
     except ProcessLockUnavailable as exc:
         print_event(

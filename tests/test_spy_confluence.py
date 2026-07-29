@@ -15,6 +15,8 @@ from spx_spark.options_map import (
     build_spy_confluence,
 )
 
+NOW = datetime(2026, 7, 6, 14, 0, tzinfo=timezone.utc)
+
 
 def default_coverage(*, total: int = 4) -> OptionCoverage:
     return OptionCoverage(
@@ -67,7 +69,7 @@ def make_spy_option(
 
 
 def test_confluence_missing_spy_chain() -> None:
-    result = build_spy_confluence((), None)
+    result = build_spy_confluence((), None, as_of=NOW)
     assert result.quality == "missing_spy_chain"
 
 
@@ -134,6 +136,7 @@ def test_confluence_detects_confluent_call_wall() -> None:
     result = build_spy_confluence(
         quotes,
         front_spxw,
+        as_of=NOW,
         spy_underlier=750.0,
         spx_underlier=7500.0,
     )
@@ -159,5 +162,10 @@ def test_confluence_maps_strikes_times_ten() -> None:
         make_spy_option(strike=748, right="P", gamma=0.004, open_interest=5000, now=now),
         make_spy_option(strike=748, right="C", gamma=0.002, open_interest=500, now=now),
     )
-    result = build_spy_confluence(quotes, None, spy_underlier=750.0)
+    result = build_spy_confluence(
+        quotes,
+        None,
+        as_of=NOW,
+        spy_underlier=750.0,
+    )
     assert result.spy_put_wall_spx == 7480.0

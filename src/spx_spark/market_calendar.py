@@ -168,6 +168,26 @@ class MarketCalendar:
             return self.is_trading_day(current.date() + timedelta(days=1))
         return False
 
+    def is_post_rth_pre_gth_quiet(self, now: datetime) -> bool:
+        """Return the human-notification blackout after RTH until next GTH.
+
+        The boundary is derived from the completed exchange session and the
+        next trading day's SPX GTH window.  It therefore starts at the actual
+        close on early-close days, spans weekends/holidays, and follows ET
+        daylight-saving changes without Beijing-time constants.
+        """
+
+        current = _as_et(now)
+        completed_day = self.spx_session_date_for(current, retain_completed=True)
+        if completed_day is None:
+            return False
+        completed = self.session(completed_day)
+        if completed is None or current < completed.close_at:
+            return False
+        next_day = self.next_trading_day(completed_day)
+        next_window = self.spx_session_window(next_day)
+        return next_window is not None and current < next_window.session_start
+
     def spx_session_window(self, day: date) -> SpxSessionWindow | None:
         """Return the full GTH→closed_gap→RTH surface window for a trading date."""
 

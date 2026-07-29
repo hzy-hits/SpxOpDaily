@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 from spx_spark.marketdata import (
@@ -75,6 +76,136 @@ def test_select_underlier_prefers_es_over_hyperliquid() -> None:
     assert underlier.source == "future:ES"
 
 
+def test_select_underlier_rejects_friday_cash_spx_during_monday_gth() -> None:
+    now = datetime(2026, 7, 27, 8, 57, tzinfo=timezone.utc)
+    stale_cash = Quote(
+        instrument=InstrumentId.index("SPX"),
+        provider=Provider.SCHWAB,
+        received_at=now,
+        last_update_at=now,
+        quality=MarketDataQuality.LIVE,
+        last=7411.98,
+        trade_time=datetime(2026, 7, 24, 21, 26, 36, tzinfo=timezone.utc),
+    )
+    es = Quote(
+        instrument=InstrumentId.future("ES"),
+        provider=Provider.SCHWAB,
+        received_at=now,
+        last_update_at=now,
+        quality=MarketDataQuality.LIVE,
+        last=7519.0,
+        trade_time=now,
+        quote_time=now,
+    )
+    state = LatestState(now, now, (stale_cash, es), (stale_cash, es))
+
+    underlier = select_underlier(state)
+
+    assert underlier.source == "future:ES"
+    assert underlier.price == 7519.0
+
+
+def test_select_underlier_accepts_current_cash_spx_during_rth() -> None:
+    now = datetime(2026, 7, 27, 14, 0, tzinfo=timezone.utc)
+    spx = Quote(
+        instrument=InstrumentId.index("SPX"),
+        provider=Provider.SCHWAB,
+        received_at=now,
+        last_update_at=now,
+        quality=MarketDataQuality.LIVE,
+        last=7498.5,
+        trade_time=now,
+    )
+    state = LatestState(now, now, (spx,), (spx,))
+
+    underlier = select_underlier(state)
+
+    assert underlier.source == "index:SPX"
+    assert underlier.price == 7498.5
+    assert underlier.price_kind == "last"
+    assert underlier.freshness == "fresh"
+    assert underlier.session == "rth"
+    assert underlier.source_at == now
+    assert underlier.received_at == now
+
+
+def test_select_underlier_rejects_cash_mark_without_last_or_two_sided_mid() -> None:
+    now = datetime(2026, 7, 27, 14, 0, tzinfo=timezone.utc)
+    spx = Quote(
+        instrument=InstrumentId.index("SPX"),
+        provider=Provider.SCHWAB,
+        received_at=now,
+        quality=MarketDataQuality.LIVE,
+        mark=7498.5,
+        quote_time=now,
+    )
+    state = LatestState(now, now, (spx,), (spx,))
+
+    underlier = select_underlier(state)
+
+    assert underlier.price is None
+    assert underlier.source is None
+
+
+def test_select_underlier_uses_fresh_mid_when_last_trade_is_stale() -> None:
+    now = datetime(2026, 7, 27, 14, 0, tzinfo=timezone.utc)
+    spx = Quote(
+        instrument=InstrumentId.index("SPX"),
+        provider=Provider.IBKR,
+        received_at=now,
+        quality=MarketDataQuality.LIVE,
+        bid=7498.0,
+        ask=7499.0,
+        last=7411.98,
+        quote_time=now,
+        trade_time=now - timedelta(days=3),
+    )
+    state = LatestState(now, now, (spx,), (spx,))
+
+    underlier = select_underlier(state)
+
+    assert underlier.price == 7498.5
+    assert underlier.price_kind == "mid"
+    assert underlier.source_at == now
+
+
+def test_select_underlier_rejects_pricing_disallowed_close_only_quote() -> None:
+    now = datetime(2026, 7, 27, 14, 0, tzinfo=timezone.utc)
+    spx = Quote(
+        instrument=InstrumentId.index("SPX"),
+        provider=Provider.IBKR,
+        received_at=now,
+        quality=MarketDataQuality.UNKNOWN,
+        close=7411.98,
+        quote_time=now,
+    )
+    state = LatestState(now, now, (spx,), (spx,))
+
+    underlier = select_underlier(state)
+
+    assert underlier.price is None
+    assert underlier.source is None
+
+
+def test_select_underlier_rejects_future_source_clock() -> None:
+    now = datetime(2026, 7, 27, 14, 0, tzinfo=timezone.utc)
+    spx = Quote(
+        instrument=InstrumentId.index("SPX"),
+        provider=Provider.SCHWAB,
+        received_at=now,
+        last_update_at=now,
+        quality=MarketDataQuality.LIVE,
+        last=7498.5,
+        trade_time=now + timedelta(seconds=6),
+    )
+    state = LatestState(now, now, (spx,), (spx,))
+
+    underlier = select_underlier(state)
+
+    assert underlier.price is None
+    assert underlier.source is None
+
+
 def test_build_options_map_drops_ibkr_options_when_feed_unavailable() -> None:
     now = datetime(2026, 7, 6, 14, 0, tzinfo=timezone.utc)
     es = Quote(
@@ -115,7 +246,7 @@ def test_build_options_map_prefers_ibkr_spxw_over_mock_when_feed_available() -> 
         provider_symbol="SPX",
         received_at=now,
         quality=MarketDataQuality.LIVE,
-        mark=7524.0,
+        last=7524.0,
         quote_time=now,
     )
     ibkr_option = make_spxw_option(now=now, quality=MarketDataQuality.LIVE)
@@ -195,6 +326,31 @@ def test_group_spxw_selects_each_contract_by_quality_then_configured_provider(
 
     assert selected[(7500.0, "C")] == Provider.SCHWAB
     assert selected[(7495.0, "P")] == Provider.IBKR
+
+
+def test_group_spxw_obeys_durable_failover_mode(monkeypatch) -> None:
+    now = datetime(2026, 7, 6, 14, 0, tzinfo=timezone.utc)
+    monkeypatch.setenv(
+        "MARKET_DATA_PROVIDER_PRIORITY",
+        "schwab,ibkr,hyperliquid,polymarket,internal,mock,unknown",
+    )
+    schwab = make_spxw_option(now=now, provider=Provider.SCHWAB)
+    ibkr = make_spxw_option(now=now, provider=Provider.IBKR)
+
+    fallback = LatestState(
+        created_at=now,
+        as_of=now,
+        quotes=(schwab, ibkr),
+        best_quotes=(ibkr,),
+        failover_mode="ibkr_fallback",
+    )
+    unsafe = replace(fallback, failover_mode="recovery_pending")
+
+    assert {
+        quote.provider
+        for quote in group_spxw_option_quotes(fallback)["20260706"]
+    } == {Provider.IBKR}
+    assert group_spxw_option_quotes(unsafe) == {}
 
 
 def test_stale_ibkr_residue_does_not_exclude_live_schwab_contracts(monkeypatch) -> None:

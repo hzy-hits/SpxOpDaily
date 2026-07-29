@@ -11,6 +11,7 @@ import pytest
 
 from spx_spark.application.runtime.runner import run_task_command
 from spx_spark.service_loop import (
+    _external_hot_worker_leases,
     ServiceLoopSettings,
     ServiceTask,
     build_tasks,
@@ -123,6 +124,22 @@ def test_service_loop_can_exclude_hot_tasks_for_dedicated_owners() -> None:
     assert "intraday_shock" in [task.name for task in tasks]
     assert "market_features" not in [task.name for task in filtered]
     assert "intraday_shock" not in [task.name for task in filtered]
+
+
+def test_external_hot_worker_leases_are_wired_when_in_process_tasks_are_disabled() -> None:
+    settings = make_settings(
+        market_features_enabled=False,
+        intraday_shock_enabled=False,
+    )
+
+    leases = _external_hot_worker_leases(
+        excluded_names={"market_features", "intraday_shock"},
+        settings=settings,
+    )
+
+    assert set(leases) == {"market_features", "intraday_shock"}
+    assert leases["market_features"][1] == 30.0
+    assert leases["intraday_shock"][1] == 30.0
 
 
 def test_service_loop_can_enable_polymarket_explicitly() -> None:

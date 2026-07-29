@@ -171,6 +171,8 @@ def simulate_trade(
     spread_width: float | None = None,
     ft_pass: bool | None = None,
     short_contract_id: str | None = None,
+    long_provider: str | None = None,
+    short_provider: str | None = None,
 ) -> Trade | Skip:
     """Simulate one signal/variant/profile against in-memory quote series.
 
@@ -590,6 +592,8 @@ def simulate_trade(
         h60_ret=_hz("60"),
         h300_ret=_hz("300"),
         h900_ret=_hz("900"),
+        long_provider=long_provider,
+        short_provider=short_provider if variant != VARIANT_NAKED else None,
     )
 
 
@@ -763,14 +767,9 @@ def evaluate_signal(
     short_legs: dict[str, tuple[list[OptionTick], str | None]] = {}
     for variant, (short_strike, width) in leg_specs.items():
         short_contract_id = contract_id_for(signal.expiry, short_strike, right)
-        short_provider = pick_provider(
-            store,
-            expiry=signal.expiry,
-            strike=short_strike,
-            right=right,
-            t0=t0,
-            quote_side="bid",
-        )
+        # A vertical is one coherent market observation. Never synthesize a
+        # spread from a long leg on one provider and a short leg on another.
+        short_provider = provider
         short_series = (
             store.option_series(
                 provider=short_provider,
@@ -816,6 +815,8 @@ def evaluate_signal(
                 spread_width=spec[1] if spec else None,
                 ft_pass=ft_pass,
                 short_contract_id=short_contract_id,
+                long_provider=provider,
+                short_provider=provider if spec else None,
             )
             (trades if isinstance(result, Trade) else skips).append(result)
     return trades, skips

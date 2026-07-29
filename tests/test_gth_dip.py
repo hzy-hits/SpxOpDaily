@@ -70,8 +70,8 @@ def test_slow_es_dip_reclaim_confirms_without_spx() -> None:
     assert alert.kind == "gth_dip_reclaim_call"
     assert alert.title == "SPX 0DTE | CALL RECLAIM (60m)"
     assert "Desk View" in alert.detail
-    assert "Execution" in alert.detail
-    assert "Risk" in alert.detail
+    assert "仅记录形态" in alert.detail
+    assert "Execution" not in alert.detail
     assert signal["direction"] == "up"
     assert signal["drawdown_points"] == 14
     assert signal["schema_version"] == 3
@@ -80,7 +80,7 @@ def test_slow_es_dip_reclaim_confirms_without_spx() -> None:
     assert signal["coordinate"]["kind"] == "raw_es"
     assert signal["coordinate"]["instrument_id"] == "future:ES"
     assert signal["block_reasons"] == []
-    assert signal["entry_quality"]["mode"] == "shadow"
+    assert signal["entry_quality"]["mode"] == "decision_grade"
 
 
 def test_macro_pre_event_suppresses_confirmation_but_keeps_observation() -> None:
@@ -93,50 +93,73 @@ def test_macro_pre_event_suppresses_confirmation_but_keeps_observation() -> None
     assert state["pending"] is None
 
 
-def test_gth_trend_quality_is_shadow_only_and_point_in_time() -> None:
+def test_gth_trend_quality_is_decision_grade_and_point_in_time() -> None:
     result = _gth_trend_entry_quality(
         {
-            "session_id": "2026-07-14:globex",
+            "session_id": "2026-07-14:gth",
             "updated_at": (NOW - timedelta(seconds=30)).isoformat(),
             "regime": "bullish",
             "metrics": {
                 "return_15m_points": 3.0,
-                "return_60m_points": -4.0,
+                "return_60m_points": 4.0,
             },
         },
         session_date="2026-07-14",
         at=NOW,
         max_age_seconds=90.0,
     )
-    assert result["mode"] == "shadow"
+    assert result["mode"] == "decision_grade"
     assert result["verdict"] == "pass"
     assert result["features"]["return_15m_points"] == 3.0
+    assert result["features"]["expected_session_id"] == "2026-07-14:gth"
+
+
+def test_gth_trend_quality_blocks_the_july_29_bad_call_context() -> None:
+    result = _gth_trend_entry_quality(
+        {
+            "session_id": "2026-07-14:gth",
+            "updated_at": (NOW - timedelta(seconds=19)).isoformat(),
+            "regime": "bullish",
+            "metrics": {
+                "return_15m_points": 3.375,
+                "return_60m_points": -10.125,
+                "return_180m_points": None,
+            },
+        },
+        session_date="2026-07-14",
+        at=NOW,
+        max_age_seconds=90.0,
+    )
+
+    assert result["mode"] == "decision_grade"
+    assert result["verdict"] == "blocked"
+    assert "trend_60m_not_positive" in result["block_reasons"]
 
 
 @pytest.mark.parametrize(
     ("session_id", "updated_at", "regime", "reason"),
     (
         (
-            "2026-07-13:globex",
+            "2026-07-13:gth",
             NOW.isoformat(),
             "bullish",
             "trend_session_mismatch",
         ),
         (
-            "2026-07-14:globex",
+            "2026-07-14:gth",
             (NOW - timedelta(seconds=91)).isoformat(),
             "bullish",
             "trend_context_stale",
         ),
         (
-            "2026-07-14:globex",
+            "2026-07-14:gth",
             NOW.isoformat(),
             "bearish",
             "trend_not_bullish",
         ),
     ),
 )
-def test_gth_trend_quality_blocks_bad_context_in_shadow(
+def test_gth_trend_quality_blocks_bad_context(
     session_id: str,
     updated_at: str,
     regime: str,
@@ -148,7 +171,7 @@ def test_gth_trend_quality_blocks_bad_context_in_shadow(
         at=NOW,
         max_age_seconds=90.0,
     )
-    assert result["mode"] == "shadow"
+    assert result["mode"] == "decision_grade"
     assert result["verdict"] == "blocked"
     assert reason in result["block_reasons"]
 
@@ -349,8 +372,24 @@ def test_corrupt_frozen_spread_restarts_instead_of_crashing_confirmation() -> No
 
 def confirmed_signal_state():
     state = None
+    entry_quality = {
+        "mode": "decision_grade",
+        "policy_version": "gth_trend_alignment_live_v2",
+        "verdict": "pass",
+        "block_reasons": [],
+        "features": {
+            "session_id": "2026-07-14:gth",
+            "return_15m_points": 3.0,
+            "return_60m_points": 4.0,
+        },
+    }
     for minute, es in ((0, 7560), (5, 7554), (10, 7546), (12, 7551), (13, 7552)):
-        state, alert, signal = advance(state, minute, es)
+        state, alert, signal = advance(
+            state,
+            minute,
+            es,
+            entry_quality=entry_quality,
+        )
     assert alert is not None
     return state, alert
 
@@ -616,24 +655,25 @@ def test_signal_spread_anchors_to_structure_wall() -> None:
     assert signal["spread"]["long_strike"] == 7505
     assert signal["spread"]["short_strike"] == 7530
     assert signal["spread"]["target_wall_kind"] == "flip_high"
-    assert "7530C" in alert.detail
+    assert "7530C" not in alert.detail
+    assert "不生成合约或操作指令" in alert.detail
 
 
-def test_alert_renders_spread_strikes_and_exit_window() -> None:
+def test_source_alert_waits_for_green_card_without_leaking_execution_legs() -> None:
     _, alert = confirmed_signal_state()
-    assert "买 SPXW 0DTE 7505C / 卖 7545C" in alert.detail
-    assert "宽 40 点" in alert.detail
-    assert "出场窗口：美东 04:30–09:45（北京 16:30–21:45）分批止盈" in alert.detail
-    assert "最迟 13:45 UTC 离场" in alert.detail
-    assert "Risk：ES 跌破 7546.00 即撤销；自动下单关闭，数量人工定。" in alert.detail
+    assert "方向门已通过" in alert.detail
+    assert "只有随后绿色 MANUAL READY 卡可操作" in alert.detail
+    assert "7505C" not in alert.detail
+    assert "7545C" not in alert.detail
+    assert "Execution" not in alert.detail
     assert len(alert.detail) <= 600
 
 
-def test_signal_alert_without_spread_keeps_legacy_text() -> None:
+def test_signal_alert_without_spread_still_waits_for_green_card() -> None:
     state, _ = confirmed_signal_state()
     signal = {key: value for key, value in state["last_signal"].items() if key != "spread"}
     alert = _signal_alert(signal)
-    assert "仅在新鲜 SPXW NBBO 通过门控后建立 TradeReady" in alert.detail
+    assert "只有随后绿色 MANUAL READY 卡可操作" in alert.detail
     assert "借记价差埋伏" not in alert.detail
 
 
@@ -648,12 +688,16 @@ def test_spread_is_suppressed_at_or_after_expiry_exit() -> None:
     assert spread(at=datetime(2026, 7, 14, 13, 45, tzinfo=timezone.utc)) is None
 
 
-def qualified_level_shadow(*, at: datetime = NOW) -> dict[str, object]:
+def qualified_level_shadow(
+    *,
+    at: datetime = NOW,
+    expiry: str = "20260714",
+) -> dict[str, object]:
     return {
         "updated_at": at.isoformat(),
         "structure": {
             "session_date": "2026-07-14",
-            "expiry": "2026-07-14",
+            "expiry": expiry,
             "last_confirmed_at": at.isoformat(),
             "levels": {"flip_high": 7530.0, "call_wall": 7560.0},
         },
@@ -664,9 +708,10 @@ def qualified_level_shadow(*, at: datetime = NOW) -> dict[str, object]:
     }
 
 
-def test_gth_spread_inputs_require_same_session_fresh_quality() -> None:
+@pytest.mark.parametrize("expiry", ("20260714", "2026-07-14"))
+def test_gth_spread_inputs_require_same_session_fresh_quality(expiry: str) -> None:
     levels, basis = _gth_spread_inputs(
-        qualified_level_shadow(),
+        qualified_level_shadow(expiry=expiry),
         session_date="2026-07-14",
         at=NOW,
         max_age_seconds=90.0,
@@ -675,13 +720,27 @@ def test_gth_spread_inputs_require_same_session_fresh_quality() -> None:
     assert basis == 45.0
 
 
-@pytest.mark.parametrize("failure", ("stale", "wrong_session", "bad_quality", "no_basis"))
+@pytest.mark.parametrize(
+    "failure",
+    (
+        "stale",
+        "wrong_session",
+        "wrong_expiry",
+        "malformed_expiry",
+        "bad_quality",
+        "no_basis",
+    ),
+)
 def test_gth_spread_inputs_fail_closed(failure: str) -> None:
     payload = qualified_level_shadow()
     if failure == "stale":
         payload["structure"]["last_confirmed_at"] = (NOW - timedelta(seconds=91)).isoformat()
     elif failure == "wrong_session":
         payload["structure"]["session_date"] = "2026-07-13"
+    elif failure == "wrong_expiry":
+        payload["structure"]["expiry"] = "20260715"
+    elif failure == "malformed_expiry":
+        payload["structure"]["expiry"] = "not-an-expiry"
     elif failure == "bad_quality":
         payload["latest_observation"]["quality_ok"] = False
     else:
@@ -693,6 +752,19 @@ def test_gth_spread_inputs_fail_closed(failure: str) -> None:
         at=NOW,
         max_age_seconds=90.0,
     ) == (None, None)
+
+
+def test_missing_spread_inputs_do_not_claim_confirmation_progress() -> None:
+    state = None
+    for minute, es in ((0, 7560), (5, 7554), (10, 7546), (12, 7551)):
+        state, alert, signal = advance(state, minute, es, es_spx_basis=None)
+
+    assert alert is None
+    assert signal is None
+    assert state["status"] == "spread_inputs_unavailable"
+    assert state["pending"]["confirm_count"] == 0
+    assert state["pending"]["confirm_started_at"] is None
+    assert state["pending"]["spread"] is None
 
 
 def test_only_existing_two_leg_shadow_suppresses_gth() -> None:

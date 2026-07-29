@@ -167,10 +167,10 @@ WINDOWS: tuple[AlertWindow, ...] = (
         name="afterhours_one_hour",
         start_et=time(16, 0),
         stop_et=time(17, 0),
-        priority="high",
+        priority="off",
         user_unattended=True,
         cadence_seconds=15,
-        summary_cadence_seconds=300,
+        summary_cadence_seconds=3600,
         spxw_sampling_mode="off",
         primary_sources=("ibkr_etf", "ibkr_futures", "hyperliquid", "polymarket"),
         required_instruments=("equity:SPY", "equity:QQQ"),
@@ -181,12 +181,10 @@ WINDOWS: tuple[AlertWindow, ...] = (
         name="afterhours_second_hour",
         start_et=time(17, 0),
         stop_et=time(18, 0),
-        # Same notify weight as RTH/high off-hours: overnight handoff still
-        # needs parity with the regular session for price/vol pushes.
-        priority="high",
+        priority="off",
         user_unattended=True,
         cadence_seconds=30,
-        summary_cadence_seconds=900,
+        summary_cadence_seconds=3600,
         spxw_sampling_mode="off",
         primary_sources=("ibkr_futures", "hyperliquid", "polymarket"),
         required_instruments=("crypto_perp:xyz:SP500",),
@@ -198,7 +196,7 @@ WINDOWS: tuple[AlertWindow, ...] = (
     # skeleton, so off-hours moves here deserve the same attention as RTH.
     AlertWindow(
         name="beijing_morning_globex_watch",
-        start_et=time(20, 30),
+        start_et=time(20, 15),
         stop_et=time(2, 0),
         priority="high",
         user_unattended=False,
@@ -215,14 +213,13 @@ WINDOWS: tuple[AlertWindow, ...] = (
 QUIET_WINDOW = AlertWindow(
     name="quiet_futures_context",
     start_et=time(18, 0),
-    stop_et=time(20, 30),
-    # ET 18:00-20:30 = Beijing ~06:00-08:30. Name stays "quiet" for the thin
-    # Globex tape, but notify priority matches RTH so off-hours moves are not
-    # filtered below the delivery floor.
-    priority="high",
+    stop_et=time(20, 15),
+    # Human delivery is hard-silent until the next SPX GTH open. Collectors
+    # and state machines keep calculating and persisting for the opening brief.
+    priority="off",
     user_unattended=True,
     cadence_seconds=30,
-    summary_cadence_seconds=900,
+    summary_cadence_seconds=3600,
     spxw_sampling_mode="off",
     primary_sources=("hyperliquid", "polymarket", "ibkr_futures"),
     required_instruments=("crypto_perp:xyz:SP500",),

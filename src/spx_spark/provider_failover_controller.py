@@ -12,7 +12,14 @@ from pathlib import Path
 
 from spx_spark.config import StorageSettings, env_bool, env_float, env_int
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
-from spx_spark.marketdata import MarketDataQuality, Provider, ProviderStatus, Quote, as_utc
+from spx_spark.marketdata import (
+    MarketDataQuality,
+    Provider,
+    ProviderStatus,
+    Quote,
+    as_utc,
+    instrument_matches_id,
+)
 from spx_spark.provider_failover import (
     FailoverMode,
     FailoverObservation,
@@ -269,13 +276,13 @@ def provider_health(
     if latest_provider_state is not None:
         provider_state_age = (state.as_of - latest_provider_state.checked_at).total_seconds()
         if 0 <= provider_state_age <= provider_state_max_age_seconds and (
-            latest_provider_state.status == ProviderStatus.UNAVAILABLE
-            or (
-                latest_provider_state.status == ProviderStatus.DEGRADED
-                and latest_provider_state.connected is False
-            )
+            latest_provider_state.status
+            in {ProviderStatus.DEGRADED, ProviderStatus.UNAVAILABLE}
         ):
-            return ProviderHealth(False, latest_provider_state.reason or "provider unavailable")
+            return ProviderHealth(
+                False,
+                latest_provider_state.reason or "provider degraded or unavailable",
+            )
 
     missing: list[str] = []
     rejected: list[str] = []
@@ -319,7 +326,8 @@ def latest_quote_for_provider(
     matches = [
         quote
         for quote in state.quotes
-        if quote.instrument.canonical_id == instrument_id and quote.provider == provider
+        if instrument_matches_id(quote.instrument, instrument_id)
+        and quote.provider == provider
     ]
     if not matches:
         return None

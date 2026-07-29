@@ -8,10 +8,10 @@ from enum import StrEnum
 from typing import Mapping
 
 from spx_spark.analytics.options.models import OptionsMap
-from spx_spark.analytics.options.pricing import finite_float
+from spx_spark.application.order_map.spot import actionable_live_price
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 from spx_spark.options_map import actionable_chain_implied_spot
-from spx_spark.storage import LatestState, configured_quote_use_decision
+from spx_spark.storage import LatestState
 
 
 class TriggerCoordinateKind(StrEnum):
@@ -123,9 +123,4 @@ def resolve_trigger_coordinate(
 
 
 def _actionable_price(state: LatestState, instrument_id: str, *, now: datetime) -> float | None:
-    quote = state.best_quote(instrument_id)
-    if quote is None:
-        return None
-    decision = configured_quote_use_decision(quote, as_of=now)
-    price = finite_float(quote.effective_price)
-    return price if decision.pricing_allowed and price is not None and price > 0 else None
+    return actionable_live_price(state, instrument_id, as_of=now)

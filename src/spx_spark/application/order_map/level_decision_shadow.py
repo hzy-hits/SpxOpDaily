@@ -23,6 +23,7 @@ from spx_spark.application.order_map.level_decision_records import (
     build_transition_record,
 )
 from spx_spark.application.order_map.trigger_coordinates import resolve_trigger_coordinate
+from spx_spark.application.order_map.spot import actionable_live_price
 from spx_spark.application.order_map.stable_structure import advance_stable_structure
 from spx_spark.config import NotificationSettings, StorageSettings
 from spx_spark.domain.analytics import AnalyticsStatus
@@ -32,14 +33,13 @@ from spx_spark.ibkr.atm_reference import (
     BASIS_MIN_SAMPLES,
 )
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR, ET
-from spx_spark.marketdata import MarketDataQuality
 from spx_spark.notifier.dispatcher import enqueue_notification
 from spx_spark.notifier.receipts import NotificationEnvelope
 from spx_spark.options_map import build_options_map
 from spx_spark.schwab.symbols import active_quarterly_contract_month
 from spx_spark.settings.level_decision import LevelDecisionPolicy
 from spx_spark.state_io import atomic_write_json_secure, exclusive_state_lock
-from spx_spark.storage import LatestStateStore, configured_quote_use_decision
+from spx_spark.storage import LatestStateStore
 
 if TYPE_CHECKING:
     from spx_spark.application.realtime.contracts import EngineTick
@@ -126,6 +126,7 @@ def run_level_decision_shadow(
             tick,
             now=now,
             session_date=session or _research_session_date(now),
+            session_mode="rth" if session is not None else "globex",
             frozen_structure=(frozen_structure if isinstance(frozen_structure, Mapping) else None),
             max_frozen_structure_age_sessions=policy.max_frozen_structure_age_sessions,
             active_decision=previous if isinstance(previous, Mapping) else None,
@@ -165,6 +166,7 @@ def run_level_decision_shadow(
                 "trigger_basis_points": observation.trigger_basis_points,
                 "spx_levels": dict(observation.spx_levels or {}),
                 "spx_spot": observation.spx_spot,
+                "session_mode": observation.session_mode,
                 "structure_change_pending": structure_change_pending,
                 "new_arm_blocked": structure_pending_blocks_new_arm,
             },
@@ -230,6 +232,7 @@ def run_level_decision_shadow(
             "trigger_basis_points": observation.trigger_basis_points,
             "spx_levels": dict(observation.spx_levels or {}),
             "spx_spot": observation.spx_spot,
+            "session_mode": observation.session_mode,
             "structure_change_pending": structure_change_pending,
             "new_arm_blocked": structure_pending_blocks_new_arm,
         },
@@ -305,6 +308,7 @@ def _observation(
     *,
     now: datetime,
     session_date: str,
+    session_mode: str,
     frozen_structure: Mapping[str, object] | None = None,
     max_frozen_structure_age_sessions: int = 1,
     active_decision: Mapping[str, object] | None = None,
@@ -321,13 +325,16 @@ def _observation(
         quality_reasons.append("frozen_structure_session_ttl_expired")
     state = LatestStateStore(storage).load(now=now)
     es_quote = state.best_quote("future:ES")
-    es = _positive_float(es_quote.effective_price) if es_quote is not None else None
+    es = actionable_live_price(
+        state,
+        "future:ES",
+        as_of=now,
+        settings=storage,
+    )
     if es_quote is None:
         quality_reasons.append("es_unavailable")
-    else:
-        decision = configured_quote_use_decision(es_quote, as_of=now, settings=storage)
-        if not decision.alert_allowed or decision.feed_mode is not MarketDataQuality.LIVE:
-            quality_reasons.append("es_not_live")
+    elif es is None:
+        quality_reasons.append("es_not_live")
     basis = _qualified_es_basis(storage, now=now)
     try:
         options_map = build_options_map(state)
@@ -385,6 +392,7 @@ def _observation(
         quality_ok=not quality_reasons,
         quality_reason=";".join(dict.fromkeys(quality_reasons)) or None,
         session_date=session_date,
+        session_mode=session_mode,
         spot_source=spot_source,
         level_source=level_source,
         spx_levels=spx_levels,

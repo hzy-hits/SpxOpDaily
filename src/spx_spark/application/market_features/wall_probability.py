@@ -545,7 +545,13 @@ def _wall_probabilities(
 
         tau_years = horizon / (365.0 * 24.0 * 60.0)
         for level_name, level in levels.items():
-            terminal, touch, source_strike, source_delta = probability_for_level(
+            (
+                terminal,
+                touch,
+                source_strike,
+                source_delta,
+                probability_method,
+            ) = probability_for_level(
                 level,
                 underlier=underlier,
                 pairs=pairs,
@@ -564,7 +570,7 @@ def _wall_probabilities(
                 if source_quote is not None
                 else None
             )
-            valid = all(
+            valid = probability_method.value == "risk_neutral_nd2" and all(
                 value is not None
                 for value in (terminal, touch, source_strike, source_delta, source_iv)
             )
@@ -609,6 +615,7 @@ def _wall_probabilities(
                 "expiry_close_at": expiry_close.isoformat(),
                 "holding_window_valid": True,
                 "method": "risk_neutral_nd2_and_2x_reflection",
+                "probability_method": probability_method.value,
                 "probability_semantics": PROBABILITY_SEMANTICS,
                 "touch_probability_semantics": TOUCH_PROBABILITY_SEMANTICS,
                 "delta_role": "anchor_selection_only_not_probability",

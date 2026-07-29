@@ -26,6 +26,20 @@ from spx_spark.settings import DEFAULT_ALERT_SETTINGS
 from spx_spark.storage import LatestState, configured_quote_use_decision
 
 
+PROVIDER_INCIDENT_NOTIFY_SECONDS = 300.0
+PROVIDER_RECOVERY_NOTIFY_SECONDS = 180.0
+_PROVIDER_INCIDENT_STATE_KEYS = (
+    "provider_incident_candidate_id",
+    "provider_incident_candidate_mode",
+    "provider_incident_candidate_since",
+    "provider_incident_alerted_id",
+    "provider_incident_alerted_mode",
+    "provider_incident_alerted_at",
+    "provider_recovery_candidate_id",
+    "provider_recovery_candidate_since",
+)
+
+
 def hyperliquid_proxy_gate(market_context: dict[str, object] | None) -> dict[str, object]:
     if not isinstance(market_context, dict):
         return {}
@@ -158,6 +172,23 @@ def build_system_event_state_payload(
     }
 
 
+def _merge_state_patch(
+    payload: dict[str, object],
+    patch: dict[str, object | None],
+) -> None:
+    for key, value in patch.items():
+        if value is None:
+            payload.pop(key, None)
+        else:
+            payload[key] = value
+
+
+def _provider_failover_context() -> str:
+    settings = ProviderFailoverSettings.from_env()
+    raw = load_failover_control(settings.state_path)
+    return str(raw.get("monitoring_context") or "closed").lower()
+
+
 def persist_system_event_state(state: LatestState) -> None:
     state_path = system_event_state_path()
     previous = load_system_event_state(state_path)
@@ -183,8 +214,14 @@ def persist_system_event_state(state: LatestState) -> None:
         ):
             payload.pop(key, None)
     failover_state = load_provider_failover_state(now=state.as_of)
-    if failover_state is not None and failover_state.transition is not None:
-        payload["provider_failover_transition_id"] = failover_state.transition.transition_id
+    if failover_state is not None:
+        _, patch = provider_failover_incident_evaluation(
+            failover_state,
+            previous=previous,
+            now=state.as_of,
+            monitoring_context=_provider_failover_context(),
+        )
+        _merge_state_patch(payload, patch)
         payload["provider_failover_mode"] = failover_state.mode.value
     if payload != previous:
         save_system_event_state(state_path, payload)
@@ -293,9 +330,14 @@ def provider_failover_event_alert(
     failover_state: FailoverState,
     *,
     previous_transition_id: str | None,
+    monitoring_context: str | None = None,
 ) -> Alert | None:
     transition = failover_state.transition
     if transition is None or transition.transition_id == previous_transition_id:
+        return None
+    if monitoring_context == "gth" and transition.mode == FailoverMode.IBKR_FALLBACK:
+        # IBKR is the configured GTH option primary.  Entering this mode is
+        # session selection, not a Schwab outage or a human incident.
         return None
     gth_option_gap = any(
         "GTH " in str(reason or "")
@@ -329,17 +371,24 @@ def provider_failover_event_alert(
             dedup_group=transition.transition_id,
         )
     if transition.mode == FailoverMode.BOTH_UNAVAILABLE:
-        title = (
-            "Schwab/IBKR 的 GTH SPXW 报价均不可用"
-            if gth_option_gap
-            else "Schwab 与 IBKR 直接行情均不可用"
-        )
-        detail = (
-            "ES 连续行情可能仍正常，但两个来源都未提供足够的新鲜 SPXW call/put 对；"
-            "期权定价和新开仓闸门关闭，只允许核对已有仓位。"
-            if gth_option_gap
-            else "两个直接行情源均未通过健康门；禁止新开仓，只允许人工核对和已有仓位处置。"
-        )
+        if monitoring_context == "gth":
+            title = "GTH 执行行情持续不可用"
+            detail = (
+                "IBKR 主 GTH SPXW 报价或 ES 锚连续五分钟未通过健康门；"
+                "新开仓闸门关闭，只允许核对已有仓位。"
+            )
+        else:
+            title = (
+                "Schwab/IBKR 的 GTH SPXW 报价均不可用"
+                if gth_option_gap
+                else "Schwab 与 IBKR 直接行情均不可用"
+            )
+            detail = (
+                "ES 连续行情可能仍正常，但两个来源都未提供足够的新鲜 SPXW call/put 对；"
+                "期权定价和新开仓闸门关闭，只允许核对已有仓位。"
+                if gth_option_gap
+                else "两个直接行情源均未通过健康门；禁止新开仓，只允许人工核对和已有仓位处置。"
+            )
         return Alert(
             severity="critical",
             kind="market_data_all_providers_unavailable",
@@ -386,6 +435,123 @@ def provider_failover_event_alert(
     return None
 
 
+def provider_failover_incident_evaluation(
+    failover_state: FailoverState,
+    *,
+    previous: dict[str, object],
+    now: datetime,
+    monitoring_context: str,
+) -> tuple[Alert | None, dict[str, object | None]]:
+    """Debounce provider control transitions into one human incident lifecycle."""
+
+    now = as_utc(now)
+    patch: dict[str, object | None] = {}
+    transition = failover_state.transition
+    context = monitoring_context.lower()
+
+    # The post-RTH/pre-GTH control loop keeps calculating, but it owns no human
+    # incident lifecycle.  Normal GTH IBKR-primary selection is also silent.
+    if context not in {"rth", "gth"} or (
+        context == "gth" and failover_state.mode == FailoverMode.IBKR_FALLBACK
+    ):
+        for key in _PROVIDER_INCIDENT_STATE_KEYS:
+            patch[key] = None
+        return None, patch
+
+    outage_mode = failover_state.mode in {
+        FailoverMode.IBKR_FALLBACK,
+        FailoverMode.BOTH_UNAVAILABLE,
+    }
+    if outage_mode:
+        candidate_id = str(previous.get("provider_incident_candidate_id") or "")
+        candidate_mode = str(previous.get("provider_incident_candidate_mode") or "")
+        if transition is not None and (
+            candidate_id != transition.transition_id
+            or candidate_mode != failover_state.mode.value
+        ):
+            candidate_id = transition.transition_id
+            candidate_mode = failover_state.mode.value
+            candidate_since = transition.occurred_at
+            patch.update(
+                {
+                    "provider_incident_candidate_id": candidate_id,
+                    "provider_incident_candidate_mode": candidate_mode,
+                    "provider_incident_candidate_since": candidate_since.isoformat(),
+                }
+            )
+        else:
+            candidate_since = parse_timestamp(
+                previous.get("provider_incident_candidate_since")
+            )
+        for key in ("provider_recovery_candidate_id", "provider_recovery_candidate_since"):
+            patch[key] = None
+        if not candidate_id or candidate_since is None:
+            return None, patch
+        if (now - as_utc(candidate_since)).total_seconds() < PROVIDER_INCIDENT_NOTIFY_SECONDS:
+            return None, patch
+        if str(previous.get("provider_incident_alerted_id") or "") == candidate_id:
+            return None, patch
+        alert = provider_failover_event_alert(
+            failover_state,
+            previous_transition_id=None,
+            monitoring_context=context,
+        )
+        if alert is None:
+            return None, patch
+        patch.update(
+            {
+                "provider_incident_alerted_id": candidate_id,
+                "provider_incident_alerted_mode": candidate_mode,
+                "provider_incident_alerted_at": now.isoformat(),
+            }
+        )
+        return alert, patch
+
+    for key in (
+        "provider_incident_candidate_id",
+        "provider_incident_candidate_mode",
+        "provider_incident_candidate_since",
+    ):
+        patch[key] = None
+    alerted_id = str(previous.get("provider_incident_alerted_id") or "")
+    if not alerted_id:
+        for key in (
+            "provider_recovery_candidate_id",
+            "provider_recovery_candidate_since",
+        ):
+            patch[key] = None
+        return None, patch
+    if transition is None:
+        return None, patch
+    recovery_id = str(previous.get("provider_recovery_candidate_id") or "")
+    if recovery_id != transition.transition_id:
+        recovery_since = transition.occurred_at
+        patch.update(
+            {
+                "provider_recovery_candidate_id": transition.transition_id,
+                "provider_recovery_candidate_since": recovery_since.isoformat(),
+            }
+        )
+    else:
+        recovery_since = parse_timestamp(
+            previous.get("provider_recovery_candidate_since")
+        )
+    if recovery_since is None or (
+        now - as_utc(recovery_since)
+    ).total_seconds() < PROVIDER_RECOVERY_NOTIFY_SECONDS:
+        return None, patch
+    alert = provider_failover_event_alert(
+        failover_state,
+        previous_transition_id=None,
+        monitoring_context=context,
+    )
+    if alert is None:
+        return None, patch
+    for key in _PROVIDER_INCIDENT_STATE_KEYS:
+        patch[key] = None
+    return alert, patch
+
+
 def ibkr_broker_session_supervision_enabled() -> bool:
     execution_mode = os.getenv(
         "IBKR_EXECUTION_MODE",
@@ -415,13 +581,11 @@ def system_event_alerts(state: LatestState, *, persist: bool = True) -> list[Ale
     alerts: list[Alert] = []
     failover_state = load_provider_failover_state(now=state.as_of)
     if failover_state is not None:
-        failover_alert = provider_failover_event_alert(
+        failover_alert, _ = provider_failover_incident_evaluation(
             failover_state,
-            previous_transition_id=(
-                str(previous.get("provider_failover_transition_id"))
-                if previous.get("provider_failover_transition_id")
-                else None
-            ),
+            previous=previous,
+            now=state.as_of,
+            monitoring_context=_provider_failover_context(),
         )
         if failover_alert is not None:
             alerts.append(failover_alert)

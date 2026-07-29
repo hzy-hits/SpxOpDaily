@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from spx_spark.analytics.options.pricing import finite_float
+from spx_spark.analytics.options.probability import ProbabilityMethod
 from spx_spark.application.order_map.models import (
     LEVEL_DECISION_PLAYS,
     PLAY_ORDER,
@@ -219,7 +220,13 @@ def _build_candidate(
     model_projected, projection_model, bs_projection = _project(level)
     if projection_model == "taylor_fallback":
         warnings.append(f"taylor_fallback_for_{target_strike}{right}")
-    prob_close, prob_touch, _source_strike, _source_delta = probability_for_level(
+    (
+        prob_close,
+        prob_touch,
+        _source_strike,
+        _source_delta,
+        probability_method,
+    ) = probability_for_level(
         level,
         underlier=spot,
         pairs=pairs,
@@ -231,21 +238,25 @@ def _build_candidate(
     frontrun_projected = None
     frontrun_limit = None
     frontrun_prob_touch = None
+    frontrun_probability_method = None
     if frontrun_level is not None:
         frontrun_projected, _, _ = _project(frontrun_level)
         frontrun_limit = round_to_tick(frontrun_projected)
-        _, frontrun_prob_touch, _, _ = probability_for_level(
+        _, frontrun_prob_touch, _, _, frontrun_method = probability_for_level(
             frontrun_level,
             underlier=spot,
             pairs=pairs,
             strike_step=strike_step,
             tau_years=tau_now_years,
         )
+        frontrun_probability_method = frontrun_method.value
 
     # Every price here is conditional on the underlier reaching ``level`` at
     # an estimated future time. A naked option limit can fill on theta or IV
     # before that happens, even when the projected premium is below spot-mid.
-    order_style = "underlier_triggered_limit" if quote_gate.executable else "range_only"
+    probability_actionable = probability_method is ProbabilityMethod.RISK_NEUTRAL_ND2
+    candidate_actionable = quote_gate.executable and probability_actionable
+    order_style = "underlier_triggered_limit" if candidate_actionable else "range_only"
     eta_minutes = touch_eta_minutes(abs(level - spot), em_points, tau_now_years, policy=policy)
 
     strike_value = int(round(finite_float(quote.instrument.strike) or target_strike))
@@ -257,17 +268,19 @@ def _build_candidate(
         strike=strike_value,
         right=right,
         current_mid=mid,
-        projected_mid=model_projected if quote_gate.executable else None,
-        limit_aggressive=round_to_tick(model_projected) if quote_gate.executable else None,
+        projected_mid=model_projected if candidate_actionable else None,
+        limit_aggressive=round_to_tick(model_projected) if candidate_actionable else None,
         limit_conservative=(
             round_to_tick(model_projected * policy.conservative_limit_multiplier)
-            if quote_gate.executable
+            if candidate_actionable
             else None
         ),
         prob_touch=prob_touch,
         prob_close_beyond=prob_close,
         delta=delta,
         gamma=gamma,
+        probability_method=probability_method.value,
+        frontrun_probability_method=frontrun_probability_method,
         frontrun_level=frontrun_level,
         frontrun_projected_mid=frontrun_projected,
         frontrun_limit=frontrun_limit,

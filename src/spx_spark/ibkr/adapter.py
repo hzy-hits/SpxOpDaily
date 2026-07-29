@@ -102,17 +102,27 @@ def instrument_from_ibkr_label(
 def is_close_only_live_row(row: Any, quote_time: datetime | None) -> bool:
     """Detect farm half-recovery rows that only carry a prior close under mdt=1."""
 
+    del quote_time
     try:
         market_data_type = int(get_value(row, "market_data_type"))
     except (TypeError, ValueError):
         return False
-    if market_data_type != 1 or quote_time is not None:
+    if market_data_type != 1:
         return False
-    bid = clean_float(get_value(row, "bid"))
-    ask = clean_float(get_value(row, "ask"))
-    last = clean_float(get_value(row, "last"))
+    # IBKR uses -1 sentinels for absent fields and can stamp ticker_time while
+    # replaying only the previous cash close.  A fresh transport clock does not
+    # turn that close-only row into a live price.
+    bid = _positive_price(get_value(row, "bid"))
+    ask = _positive_price(get_value(row, "ask"))
+    last = _positive_price(get_value(row, "last"))
     close = clean_float(get_value(row, "close"))
-    return close is not None and bid is None and ask is None and last is None
+    valid_mid = bid is not None and ask is not None and ask >= bid
+    return close is not None and close > 0 and last is None and not valid_mid
+
+
+def _positive_price(value: object) -> float | None:
+    parsed = clean_float(value)
+    return parsed if parsed is not None and parsed > 0 else None
 
 
 def quote_from_ibkr_row(

@@ -701,6 +701,390 @@ def test_same_time_baseline_updates_current_session_once_per_slot() -> None:
     current = [row for row in rows if row["trading_date_et"] == "2026-07-24"]
     assert len(current) == 1
     assert current[0]["source"] == "live_es_5m_ohlc"
+    assert current[0]["dip_atr_30m"] == pytest.approx(0.166667)
+    assert current[0]["rally_atr_30m"] == pytest.approx(5.0)
+    assert second["rolling_path_window_minutes"] == 30
+
+
+def test_rolling_path_percentiles_emit_low_confidence_at_five_prior_sessions() -> None:
+    history = [
+        {
+            "trading_date_et": f"2026-06-{index + 1:02d}",
+            "range_points": 31.0,
+            "dip_atr_30m": 0.1,
+            "rally_atr_30m": 1.0,
+        }
+        for index in range(5)
+    ]
+
+    derived = build_market_state_5m_inputs(
+        bars=trending_bars(),
+        market_samples=market_samples(),
+        range_baselines={
+            "schema_version": "market_state_5m_range_baselines.v1",
+            "slots": {"10:00": history},
+        },
+        now=DAY,
+    )
+
+    rolling = derived["diagnostics"]["rolling_path_percentiles"]
+    assert rolling["status"] == "provisional"
+    assert rolling["confidence"] == "low"
+    assert rolling["sample_count"] == 5
+    assert rolling["minimum_sessions"] == 5
+    assert rolling["target_sessions"] == 20
+    assert rolling["dip"]["raw_percentile"] == pytest.approx(0.916667)
+    assert rolling["dip"]["shrunk_percentile"] == pytest.approx(0.604167)
+    assert rolling["rally"]["raw_percentile"] == pytest.approx(0.916667)
+    assert rolling["rally"]["shrunk_percentile"] == pytest.approx(0.604167)
+    assert rolling["probability_semantics"] == "historical_rank_not_forward_probability"
+    assert rolling["action_authority"] == "none"
+
+
+def test_rolling_path_percentiles_are_medium_and_exclude_current_or_future_dates() -> None:
+    prior = [
+        {
+            "trading_date_et": f"2026-06-{index + 1:02d}",
+            "range_points": 31.0,
+            "dip_atr_30m": 0.0,
+            "rally_atr_30m": 0.0,
+        }
+        for index in range(10)
+    ]
+    non_causal = [
+        {
+            "trading_date_et": trading_date,
+            "range_points": 1.0,
+            "dip_atr_30m": 999.0,
+            "rally_atr_30m": 999.0,
+        }
+        for trading_date in ("2026-07-24", "2026-07-25")
+    ]
+
+    derived = build_market_state_5m_inputs(
+        bars=trending_bars(),
+        market_samples=market_samples(),
+        range_baselines={
+            "schema_version": "market_state_5m_range_baselines.v1",
+            "slots": {"10:00": [*prior, *non_causal]},
+        },
+        now=DAY,
+    )
+
+    rolling = derived["diagnostics"]["rolling_path_percentiles"]
+    assert rolling["status"] == "provisional"
+    assert rolling["confidence"] == "medium"
+    assert rolling["sample_count"] == 10
+    assert rolling["dip"]["sample_count"] == 10
+    assert rolling["rally"]["sample_count"] == 10
+    assert rolling["dip"]["raw_percentile"] == pytest.approx(0.954545)
+    assert rolling["rally"]["raw_percentile"] == pytest.approx(0.954545)
+    assert rolling["dip"]["shrunk_percentile"] == pytest.approx(0.727273)
+    assert rolling["rally"]["shrunk_percentile"] == pytest.approx(0.727273)
+
+
+def test_rolling_path_percentiles_count_each_prior_session_once() -> None:
+    rows = []
+    for index in range(5):
+        row = {
+            "trading_date_et": f"2026-06-{index + 1:02d}",
+            "range_points": 31.0,
+            "dip_atr_30m": 0.1 + index,
+            "rally_atr_30m": 1.0 + index,
+        }
+        rows.extend([row, {**row}])
+
+    derived = build_market_state_5m_inputs(
+        bars=trending_bars(),
+        market_samples=market_samples(),
+        range_baselines={
+            "schema_version": "market_state_5m_range_baselines.v1",
+            "slots": {"10:00": rows},
+        },
+        now=DAY,
+    )
+
+    rolling = derived["diagnostics"]["rolling_path_percentiles"]
+    assert rolling["sample_count"] == 5
+    assert rolling["dip"]["sample_count"] == 5
+    assert rolling["rally"]["sample_count"] == 5
+
+
+def test_rolling_path_recovers_after_an_earlier_rth_gap() -> None:
+    rows = trending_bars()
+    rth_start = DAY.replace(hour=9, minute=30)
+    price = 7430.0
+    for index in range(6, 13):
+        start = rth_start + timedelta(minutes=5 * index)
+        rows.append(
+            bar(
+                start,
+                open_=price,
+                high=price + 3.0,
+                low=price - 1.0,
+                close=price + 2.0,
+                segment="rth",
+            )
+        )
+        price += 2.0
+    rows = [
+        row
+        for row in rows
+        if row["bar_start"] != (rth_start + timedelta(minutes=10)).isoformat()
+    ]
+    now = DAY.replace(hour=10, minute=35)
+    history = [
+        {
+            "trading_date_et": f"2026-06-{index + 1:02d}",
+            "dip_atr_30m": 0.2,
+            "rally_atr_30m": 1.0,
+        }
+        for index in range(5)
+    ]
+    prior = {
+        "schema_version": "market_state_5m_range_baselines.v1",
+        "slots": {"10:35": history},
+    }
+
+    derived = build_market_state_5m_inputs(
+        bars=rows,
+        market_samples=[],
+        range_baselines=prior,
+        now=now,
+    )
+    rolling = derived["diagnostics"]["rolling_path_percentiles"]
+
+    assert derived["values"]["same_time_range_ratio"] is None
+    assert rolling["status"] == "provisional"
+    assert rolling["slot_et"] == "10:35"
+    assert rolling["sample_count"] == 5
+
+    updated = update_same_time_range_baselines(prior, bars=rows, now=now)
+    current = [
+        row
+        for row in updated["slots"]["10:35"]
+        if row["trading_date_et"] == "2026-07-24"
+    ]
+    assert len(current) == 1
+    assert "range_points" not in current[0]
+    assert current[0]["dip_atr_30m"] >= 0
+    assert current[0]["rally_atr_30m"] >= 0
+
+
+def test_rolling_path_keeps_mild_partial_bar_as_low_confidence_shadow_only() -> None:
+    rows = trending_bars()
+    rows[-1].update(
+        {
+            "quality": "partial",
+            "sample_count": 47,
+            "max_sample_gap_seconds": 31.915,
+            "leading_edge_gap_seconds": 1.875,
+            "trailing_edge_gap_seconds": 2.625,
+            "contract_identity_ambiguous": False,
+        }
+    )
+    history = [
+        {
+            "trading_date_et": f"2026-06-{index + 1:02d}",
+            "dip_atr_30m": 0.1,
+            "rally_atr_30m": 1.0,
+        }
+        for index in range(13)
+    ]
+
+    derived = build_market_state_5m_inputs(
+        bars=rows,
+        market_samples=market_samples(),
+        range_baselines={
+            "schema_version": "market_state_5m_range_baselines.v1",
+            "slots": {"10:00": history},
+        },
+        now=DAY,
+    )
+    rolling = derived["diagnostics"]["rolling_path_percentiles"]
+
+    assert derived["values"]["price_vs_vwap"] is None
+    assert derived["values"]["market_structure"] is None
+    assert derived["values"]["efficiency_ratio"] is None
+    assert derived["values"]["same_time_range_ratio"] is None
+    assert rolling["status"] == "provisional"
+    assert rolling["slot_et"] == "10:00"
+    assert rolling["sample_count"] == 13
+    assert rolling["historical_sample_confidence"] == "medium"
+    assert rolling["confidence"] == "low"
+    assert rolling["confidence_cap_reason"] == "mild_partial_bar_observed_shadow_only"
+    assert rolling["input_quality"] == "degraded"
+    assert rolling["partial_bar_count"] == 1
+    assert rolling["atr_source"] == "degraded_observed_rth_true_range"
+    assert rolling["degraded_bar_policy"]["missing_prices_filled"] is False
+    assert rolling["action_authority"] == "none"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("sample_count", 29),
+        ("max_sample_gap_seconds", -0.001),
+        ("max_sample_gap_seconds", 45.001),
+        ("leading_edge_gap_seconds", 30.001),
+        ("trailing_edge_gap_seconds", 30.001),
+    ),
+)
+def test_rolling_path_rejects_materially_incomplete_partial_bar(
+    field: str,
+    value: float,
+) -> None:
+    rows = trending_bars()
+    rows[-1].update(
+        {
+            "quality": "partial",
+            "sample_count": 47,
+            "max_sample_gap_seconds": 31.915,
+            "leading_edge_gap_seconds": 1.875,
+            "trailing_edge_gap_seconds": 2.625,
+            "contract_identity_ambiguous": False,
+            field: value,
+        }
+    )
+
+    derived = build_market_state_5m_inputs(
+        bars=rows,
+        market_samples=market_samples(),
+        range_baselines=baselines(),
+        now=DAY,
+    )
+    rolling = derived["diagnostics"]["rolling_path_percentiles"]
+
+    assert rolling["status"] == "warming"
+    assert rolling["sample_count"] == 0
+    assert rolling["action_authority"] == "none"
+
+
+def test_rolling_path_rejects_non_five_minute_bar_contract() -> None:
+    rows = trending_bars()
+    end = datetime.fromisoformat(str(rows[-1]["bar_end"]))
+    rows[-1]["bar_end"] = (end + timedelta(seconds=1)).isoformat()
+
+    derived = build_market_state_5m_inputs(
+        bars=rows,
+        market_samples=market_samples(),
+        range_baselines=baselines(),
+        now=end + timedelta(seconds=1),
+    )
+    rolling = derived["diagnostics"]["rolling_path_percentiles"]
+
+    assert rolling["status"] == "warming"
+    assert rolling["reason"] == "rolling_path_requires_six_contiguous_observed_bars"
+    assert rolling["action_authority"] == "none"
+
+
+def test_rolling_path_rejects_second_partial_or_contract_change() -> None:
+    mild_partial = {
+        "quality": "partial",
+        "sample_count": 47,
+        "max_sample_gap_seconds": 31.915,
+        "leading_edge_gap_seconds": 4.291387,
+        "trailing_edge_gap_seconds": 3.25,
+        "contract_identity_ambiguous": False,
+    }
+    for mutation in ("second_partial", "contract_change"):
+        rows = trending_bars()
+        rows[-1].update(mild_partial)
+        if mutation == "second_partial":
+            rows[-2].update(mild_partial)
+        else:
+            rows[-1]["contract_identity"] = "ES:202612"
+
+        derived = build_market_state_5m_inputs(
+            bars=rows,
+            market_samples=market_samples(),
+            range_baselines=baselines(),
+            now=DAY,
+        )
+        rolling = derived["diagnostics"]["rolling_path_percentiles"]
+
+        assert rolling["status"] == "warming"
+        assert rolling["sample_count"] == 0
+        assert rolling["action_authority"] == "none"
+
+
+def test_rolling_path_reproduces_july_29_boundary_partial_without_polluting_baseline() -> None:
+    starts = [
+        datetime(2026, 7, 29, 9, 45, tzinfo=ET),
+        datetime(2026, 7, 29, 9, 50, tzinfo=ET),
+        datetime(2026, 7, 29, 9, 55, tzinfo=ET),
+        datetime(2026, 7, 29, 10, 0, tzinfo=ET),
+        datetime(2026, 7, 29, 10, 5, tzinfo=ET),
+        datetime(2026, 7, 29, 10, 10, tzinfo=ET),
+    ]
+    prices = [
+        (7455.375, 7458.125, 7445.875, 7448.125),
+        (7448.125, 7448.125, 7430.625, 7434.125),
+        (7431.375, 7432.375, 7422.375, 7430.375),
+        (7431.125, 7436.125, 7429.875, 7433.375),
+        (7434.125, 7438.375, 7423.625, 7425.125),
+        (7421.875, 7425.875, 7407.125, 7409.375),
+    ]
+    rows = [
+        bar(
+            start,
+            open_=open_,
+            high=high,
+            low=low,
+            close=close,
+            segment="rth",
+        )
+        for start, (open_, high, low, close) in zip(starts, prices, strict=True)
+    ]
+    rows[-1].update(
+        {
+            "quality": "partial",
+            "sample_count": 47,
+            "max_sample_gap_seconds": 31.915,
+            "leading_edge_gap_seconds": 4.291387,
+            "trailing_edge_gap_seconds": 3.25,
+            "contract_identity_ambiguous": False,
+        }
+    )
+    history = [
+        {
+            "trading_date_et": f"2026-06-{index + 1:02d}",
+            "dip_atr_30m": 0.1,
+            "rally_atr_30m": 1.0,
+        }
+        for index in range(13)
+    ]
+    baseline = {
+        "schema_version": "market_state_5m_range_baselines.v1",
+        "slots": {"10:15": history},
+    }
+    now = datetime(2026, 7, 29, 10, 15, tzinfo=ET)
+
+    derived = build_market_state_5m_inputs(
+        bars=rows,
+        market_samples=[],
+        range_baselines=baseline,
+        now=now,
+    )
+    rolling = derived["diagnostics"]["rolling_path_percentiles"]
+
+    assert derived["values"]["efficiency_ratio"] is None
+    assert derived["values"]["market_structure"] is None
+    assert rolling["slot_et"] == "10:15"
+    assert rolling["latest_bar_end"] == now.isoformat()
+    assert rolling["close"] == 7409.375
+    assert rolling["rolling_high"] == 7458.125
+    assert rolling["rolling_low"] == 7407.125
+    assert rolling["dip_points"] == 48.75
+    assert rolling["rally_points"] == 2.25
+    assert rolling["atr_5m"] == pytest.approx(13.541667)
+    assert rolling["input_quality"] == "degraded"
+    assert rolling["confidence"] == "low"
+    assert rolling["sample_count"] == 13
+    assert rolling["action_authority"] == "none"
+
+    updated = update_same_time_range_baselines(baseline, bars=rows, now=now)
+    assert updated == baseline
 
 
 def test_future_dated_quotes_and_range_rows_cannot_leak_into_state() -> None:

@@ -39,6 +39,7 @@ def compact_convexity_idea_radar(value: object) -> dict[str, Any] | None:
             "put": option_evidence.get("put"),
         },
         "hypotheses": value.get("hypotheses"),
+        "opportunity_board": value.get("opportunity_board"),
         "tensions": value.get("tensions"),
         "data_quality": value.get("data_quality"),
         "semantics": value.get("semantics"),
@@ -64,6 +65,7 @@ def render_convexity_idea_radar_lines(payload: Mapping[str, Any]) -> list[str]:
     ]
     if radar.get("status") in {"closed", "inactive"}:
         lines.append("凸性雷达已停止新想法；不延用上下分支、skew 证据或旧合约。")
+        lines.extend(render_convexity_opportunity_lines(radar))
         return lines
 
     destination = _mapping(radar.get("destination_map"))
@@ -116,6 +118,83 @@ def render_convexity_idea_radar_lines(payload: Mapping[str, Any]) -> list[str]:
         f"Put {_evidence_text(_mapping(evidence.get('put')))}；"
         "无局部 skew 边际不等于没有方向机会"
     )
+    lines.extend(render_convexity_opportunity_lines(radar))
+    return lines
+
+
+def render_convexity_opportunity_lines(radar: Mapping[str, Any]) -> list[str]:
+    """Render three stable Shadow rows without implying execution authority."""
+
+    board = _mapping(radar.get("opportunity_board"))
+    if not board:
+        return []
+    path = _mapping(board.get("path_percentiles"))
+    dip = _mapping(path.get("dip"))
+    rally = _mapping(path.get("rally"))
+    target = path.get("target_sessions")
+    sample = path.get("sample_count")
+    lag = path.get("source_lag_seconds")
+    lag_text = (
+        f" · lag={float(lag):.0f}s"
+        if isinstance(lag, int | float) and not isinstance(lag, bool)
+        else ""
+    )
+    path_line = (
+        f"30m路径分位@{path.get('slot_et') or '-'} ET  "
+        f"Dip {_percent(dip.get('raw_percentile'))}→"
+        f"{_percent(dip.get('shrunk_percentile'))} / "
+        f"Rally {_percent(rally.get('raw_percentile'))}→"
+        f"{_percent(rally.get('shrunk_percentile'))} · "
+        f"n={int(sample or 0)}/{int(target or 20)} · "
+        f"{path.get('confidence') or 'unavailable'} · "
+        f"input={path.get('input_quality') or 'unavailable'}{lag_text} · "
+        "小样本向50%收缩；历史排名非预测概率"
+    )
+    lanes = _mapping(board.get("lanes"))
+    lines = [path_line]
+    for key, label in (
+        ("call", "Call"),
+        ("put", "Put"),
+        ("vol_range", "Vol/Range"),
+    ):
+        lane = _mapping(lanes.get(key))
+        execution = _mapping(lane.get("execution"))
+        blocked = execution.get("block_reasons")
+        reason = (
+            str(blocked[0])
+            if isinstance(blocked, list) and blocked
+            else "shadow_only"
+        )
+        signal_name = (
+            f"WALL_SIGNAL={lane.get('wall_signal') or '-'}"
+            if key != "vol_range"
+            else f"VOL_SIGNAL={lane.get('volatility_signal') or '-'}"
+        )
+        structures = lane.get("structure_rank")
+        structure_text = (
+            "/".join(str(item) for item in structures[:2])
+            if isinstance(structures, list)
+            else "-"
+        )
+        closed = lane.get("status") == "closed"
+        priority_text = (
+            "N/A"
+            if closed
+            else (
+                f"{lane.get('priority') or 'WATCH'}"
+                f"({int(lane.get('priority_score') or 0)}/10)"
+            )
+        )
+        if closed:
+            structure_text = "-"
+        lines.append(
+            f"机会[{label}] STATUS={str(lane.get('status') or 'unknown').upper()} · "
+            f"{signal_name} · "
+            f"EDGE_STATUS={lane.get('edge_status') or 'unknown'} · "
+            f"DATA_QUALITY={str(lane.get('data_quality_status') or 'unknown').upper()} · "
+            f"PRIORITY={priority_text} · "
+            f"EXECUTION_ELIGIBLE=NO({reason}) · 结构={structure_text}"
+        )
     return lines
 
 
@@ -186,6 +265,11 @@ def _dash(value: object) -> str:
 
 def _bool_text(value: object) -> str:
     return "是" if value is True else "否" if value is False else "-"
+
+
+def _percent(value: object) -> str:
+    number = _number(value)
+    return f"{number * 100:.2f}%" if number is not None else "-"
 
 
 def _wall_probability_text(

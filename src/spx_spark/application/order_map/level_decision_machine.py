@@ -56,6 +56,7 @@ class LevelObservation:
     quality_ok: bool
     quality_reason: str | None = None
     session_date: str = ""
+    session_mode: str = "unknown"
     spot_source: str = "unknown"
     level_source: str = "unknown"
     spx_levels: Mapping[str, float] | None = None
@@ -108,6 +109,9 @@ def advance_level_decision(
     if not observation.quality_ok or observation.spot is None or observation.es is None:
         return _handle_bad_quality(state, phase, observation, settings=settings)
     state.pop("quality_failed_at", None)
+
+    if _session_boundary_changed(state, phase, observation):
+        return _to_far(state, phase, now, "session_boundary_reset")
 
     if phase is LevelPhase.FAR:
         if not observation.arm_allowed:
@@ -169,11 +173,13 @@ def advance_level_decision(
     if phase is LevelPhase.TESTING:
         if outside_move >= settings.break_buffer_points:
             state["thesis"] = LevelThesis.BREAKOUT.value
+            _latch_confirmation_start(state, observation)
             return _transition(
                 state, phase, LevelPhase.BREAK_PENDING, now, "crossed_outside_buffer"
             )
         if inside_move >= settings.reject_points:
             state["thesis"] = LevelThesis.FADE.value
+            _latch_confirmation_start(state, observation)
             return _transition(state, phase, LevelPhase.REJECT_PENDING, now, "rejected_from_level")
         return _update_extreme(state, phase, observation, "testing_continues")
 
@@ -217,6 +223,9 @@ def advance_level_decision(
             state, observation, desired_direction, settings
         ):
             state["confirmed_at"] = now.isoformat()
+            state["expires_at"] = (
+                now + timedelta(seconds=settings.event_ttl_seconds)
+            ).isoformat()
             state["direction"] = "up" if desired_direction > 0 else "down"
             decision_spot = _spx_decision_spot(observation)
             if decision_spot is not None:
@@ -264,6 +273,8 @@ def _arm_nearest_level(
         "expires_at": (now + timedelta(seconds=settings.event_ttl_seconds)).isoformat(),
         "start_spot": spot,
         "start_es": float(observation.es or 0.0),
+        "session_date": observation.session_date,
+        "session_mode": observation.session_mode,
         "last_spot": spot,
         "last_es": float(observation.es or 0.0),
         "updated_at": now.isoformat(),
@@ -311,19 +322,52 @@ def _structure_drifted(
     )
 
 
+def _session_boundary_changed(
+    state: Mapping[str, object],
+    phase: LevelPhase,
+    observation: LevelObservation,
+) -> bool:
+    prior_mode = str(state.get("session_mode") or "")
+    current_mode = str(observation.session_mode or "")
+    if (
+        prior_mode
+        and current_mode not in {"", "unknown"}
+        and prior_mode != current_mode
+    ):
+        return True
+    if phase not in TERMINAL_PHASES or current_mode != "rth":
+        return False
+    prior_coordinate = str(state.get("trigger_coordinate_kind") or "")
+    return (
+        observation.trigger_coordinate_kind == "official_spx"
+        and prior_coordinate in {"chain_implied_spx", "es_equivalent"}
+    )
+
+
 def _es_confirms(
     state: Mapping[str, object],
     observation: LevelObservation,
     direction: int,
     settings: LevelDecisionSettings,
 ) -> bool:
-    start_es = float(state.get("start_es") or 0.0)
-    start_spot = float(state.get("start_spot") or 0.0)
+    start_es = float(state.get("confirmation_start_es") or state.get("start_es") or 0.0)
+    start_spot = float(
+        state.get("confirmation_start_spot") or state.get("start_spot") or 0.0
+    )
     if not start_es or observation.es is None or observation.spot is None:
         return False
     es_move = direction * (float(observation.es) - start_es)
     spx_move = abs(float(observation.spot) - start_spot)
     return es_move >= max(spx_move * settings.es_confirm_ratio, 0.25)
+
+
+def _latch_confirmation_start(
+    state: dict[str, object],
+    observation: LevelObservation,
+) -> None:
+    state["confirmation_start_spot"] = observation.spot
+    state["confirmation_start_es"] = observation.es
+    state["confirmation_started_at"] = _utc(observation.at).isoformat()
 
 
 def _update_extreme(

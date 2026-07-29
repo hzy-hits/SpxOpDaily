@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from spx_spark.alert_model import Alert
+from spx_spark.application.shock.evaluator import live_es_sample
 from spx_spark.intraday_shock import (
     RECLAIM_KIND,
     SHOCK_KIND,
@@ -403,12 +404,77 @@ def _quote(
         provider=provider,
         provider_symbol=instrument.canonical_id,
         received_at=at,
+        last_update_at=at,
         quote_time=at,
         quality=quality,
-        mark=price,
+        bid=price - 0.25,
+        ask=price + 0.25,
         market_data_type=1 if quality == MarketDataQuality.LIVE else 3,
         sampling_mode=sampling_mode,
     )
+
+
+def test_live_es_sample_rejects_close_only_and_matches_expiring_future(
+    tmp_path,
+) -> None:
+    cfg = settings(tmp_path)
+    now = datetime(2026, 7, 10, 14, 0, tzinfo=UTC)
+    expiring = _quote(
+        InstrumentId.future("ES", expiry="202609"),
+        price=7550.0,
+        at=now,
+    )
+    state = LatestState(now, now, (expiring,), (expiring,))
+
+    sample_value, reason = live_es_sample(state, cfg)
+
+    assert reason is None
+    assert sample_value is not None
+    assert sample_value[1] == 7550.0
+
+    close_only = replace(
+        expiring,
+        bid=None,
+        ask=None,
+        close=9001.0,
+    )
+    sample_value, reason = live_es_sample(
+        LatestState(now, now, (close_only,), (close_only,)),
+        cfg,
+    )
+    assert sample_value is None
+    assert reason == "non_live_or_stale_es"
+
+
+def test_live_es_sample_rejects_future_field_clock(tmp_path) -> None:
+    cfg = settings(tmp_path)
+    now = datetime(2026, 7, 10, 14, 0, tzinfo=UTC)
+    future_es = replace(
+        _quote(InstrumentId.future("ES"), price=7550.0, at=now),
+        quote_time=now + timedelta(seconds=30),
+    )
+    state = LatestState(now, now, (future_es,), (future_es,))
+
+    sample_value, reason = live_es_sample(state, cfg)
+
+    assert sample_value is None
+    assert reason == "future_es_anchor"
+
+
+def test_synchronized_sample_rejects_future_field_clock(tmp_path) -> None:
+    cfg = settings(tmp_path)
+    now = datetime(2026, 7, 10, 14, 0, tzinfo=UTC)
+    spx = _quote(InstrumentId.index("SPX"), price=7500.0, at=now)
+    future_es = replace(
+        _quote(InstrumentId.future("ES"), price=7550.0, at=now),
+        quote_time=now + timedelta(seconds=30),
+    )
+    state = LatestState(now, now, (spx, future_es), (spx, future_es))
+
+    result, reason = synchronized_live_sample(state, cfg)
+
+    assert result is None
+    assert reason == "future_es_anchor"
 
 
 def test_synchronized_sample_rejects_stale_or_delayed_anchor(tmp_path) -> None:

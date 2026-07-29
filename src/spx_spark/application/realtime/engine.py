@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 import uuid
+from dataclasses import replace
 from datetime import datetime, timezone
 
 from spx_spark.application.realtime.contracts import (
@@ -24,18 +25,36 @@ from spx_spark.domain.events import DomainEvent
 from spx_spark.domain.health import EngineHealth, EngineMode
 from spx_spark.domain.market import MarketSnapshot
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
+from spx_spark.marketdata import (
+    FUTURE_TIMESTAMP_TOLERANCE_SECONDS,
+    as_utc,
+    instrument_matches_id,
+)
+
+
+DEFAULT_ANCHOR_MAX_AGE_SECONDS = 15.0
 
 
 def _default_tick_id(now: datetime) -> str:
     return f"tick:{now.strftime('%Y%m%dT%H%M%S')}:{uuid.uuid4().hex[:8]}"
 
 
-def snapshot_has_tradfi_anchor(snapshot: MarketSnapshot) -> bool:
+def snapshot_has_tradfi_anchor(
+    snapshot: MarketSnapshot,
+    *,
+    now: datetime | None = None,
+    max_age_seconds: float = DEFAULT_ANCHOR_MAX_AGE_SECONDS,
+) -> bool:
     """True when at least one direct TradFi SPX-style underlier quote is present."""
 
+    as_of = now or snapshot.as_of
     for quote in snapshot.quotes:
         quality = str(getattr(quote.quality, "value", quote.quality)).lower()
-        price = getattr(quote, "effective_price", None)
+        price = _field_clocked_price(
+            quote,
+            as_of=as_of,
+            max_age_seconds=max_age_seconds,
+        )
         if quality != "live" or price is None or price <= 0:
             continue
         instrument = quote.instrument
@@ -68,15 +87,72 @@ def analytics_result_ok(result: AnalyticsResult | None) -> bool:
     return result is not None and result.status is AnalyticsStatus.SUCCESS
 
 
-def snapshot_has_live_es(snapshot: MarketSnapshot) -> bool:
+def snapshot_has_live_es(
+    snapshot: MarketSnapshot,
+    *,
+    now: datetime | None = None,
+    max_age_seconds: float = DEFAULT_ANCHOR_MAX_AGE_SECONDS,
+) -> bool:
+    as_of = now or snapshot.as_of
     for quote in snapshot.quotes:
-        if quote.instrument.canonical_id != "future:ES":
+        if not instrument_matches_id(quote.instrument, "future:ES"):
             continue
         quality = str(getattr(quote.quality, "value", quote.quality)).lower()
-        price = getattr(quote, "effective_price", None)
+        price = _field_clocked_price(
+            quote,
+            as_of=as_of,
+            max_age_seconds=max_age_seconds,
+        )
         if quality == "live" and price is not None and price > 0:
             return True
     return False
+
+
+def _field_clocked_price(
+    quote: object,
+    *,
+    as_of: datetime,
+    max_age_seconds: float,
+) -> float | None:
+    bid = getattr(quote, "bid", None)
+    ask = getattr(quote, "ask", None)
+    mid = getattr(quote, "mid", None)
+    if (
+        isinstance(bid, int | float)
+        and isinstance(mid, int | float)
+        and isinstance(ask, int | float)
+        and 0 < bid <= mid <= ask
+        and getattr(quote, "quote_time", None) is not None
+    ):
+        price = float(mid)
+        source_at = getattr(quote, "quote_time")
+    else:
+        last = getattr(quote, "last", None)
+        if not (
+            isinstance(last, int | float)
+            and last > 0
+            and getattr(quote, "trade_time", None) is not None
+        ):
+            return None
+        price = float(last)
+        source_at = getattr(quote, "trade_time")
+    transport_at = getattr(quote, "last_update_at", None) or getattr(
+        quote,
+        "received_at",
+        None,
+    )
+    if transport_at is None:
+        return None
+    source_age = (as_utc(as_of) - as_utc(source_at)).total_seconds()
+    transport_age = (as_utc(as_of) - as_utc(transport_at)).total_seconds()
+    if (
+        source_age < -FUTURE_TIMESTAMP_TOLERANCE_SECONDS
+        or transport_age < -FUTURE_TIMESTAMP_TOLERANCE_SECONDS
+        or source_age > max_age_seconds
+        or transport_age > max_age_seconds
+    ):
+        return None
+    return price
 
 
 class RealtimeEngine:
@@ -105,10 +181,20 @@ class RealtimeEngine:
         self.chain_thresholds = chain_thresholds or ChainFreshnessThresholds()
         self.warmed_up = warmed_up
         self._mode = EngineMode.STARTING
+        self._outbox_append_failure_latched = False
+        self._outbox_append_failure_count = 0
 
     @property
     def mode(self) -> EngineMode:
         return self._mode
+
+    @property
+    def outbox_append_failure_latched(self) -> bool:
+        return self._outbox_append_failure_latched
+
+    @property
+    def outbox_append_failure_count(self) -> int:
+        return self._outbox_append_failure_count
 
     def tick(self, *, now: datetime | None = None) -> EngineTick:
         started = time.perf_counter()
@@ -123,13 +209,25 @@ class RealtimeEngine:
             source_snapshot_id = snapshot.snapshot_id
             analytics_result = self.analytics.compute(snapshot, now=now)
             events = self.alerts.evaluate(snapshot, analytics_result, now=now)
+            append_failed = False
             if events:
-                self.outbox.append(events)
+                try:
+                    append_result = self.outbox.append(events)
+                    append_failed = (
+                        not append_result.writable
+                        or append_result.accepted + append_result.duplicate != len(events)
+                    )
+                except Exception:  # noqa: BLE001
+                    append_failed = True
+                if append_failed:
+                    self._outbox_append_failure_latched = True
+                    self._outbox_append_failure_count += 1
             health = self._health(
                 snapshot=snapshot,
                 analytics_result=analytics_result,
                 now=now,
                 engine_failed=False,
+                append_failed=append_failed,
             )
             tick = EngineTick(
                 tick_id=_default_tick_id(now),
@@ -184,13 +282,31 @@ class RealtimeEngine:
         analytics_result: AnalyticsResult | None,
         now: datetime,
         engine_failed: bool,
+        append_failed: bool = False,
     ) -> EngineHealth:
         try:
-            outbox_writable = self.outbox.writable()
+            write_barrier_succeeded = self.outbox.writable()
         except Exception:  # noqa: BLE001
-            outbox_writable = False
-        return evaluate_engine_health(
-            tradfi_anchor_usable=snapshot_has_tradfi_anchor(snapshot),
+            write_barrier_succeeded = False
+        if (
+            not append_failed
+            and self._outbox_append_failure_latched
+            and write_barrier_succeeded
+        ):
+            # A later successful durability barrier is the only event that
+            # clears a prior append failure.
+            self._outbox_append_failure_latched = False
+        outbox_writable = (
+            write_barrier_succeeded
+            and not append_failed
+            and not self._outbox_append_failure_latched
+        )
+        health = evaluate_engine_health(
+            tradfi_anchor_usable=snapshot_has_tradfi_anchor(
+                snapshot,
+                now=now,
+                max_age_seconds=self.chain_thresholds.max_age_seconds,
+            ),
             front_chain_fresh=(
                 snapshot_has_fresh_spxw_chain(
                     snapshot, now=now, thresholds=self.chain_thresholds
@@ -209,6 +325,18 @@ class RealtimeEngine:
             gth_option_session_open=DEFAULT_MARKET_CALENDAR.is_spx_gth_open(now),
             globex_context_usable=(
                 DEFAULT_MARKET_CALENDAR.is_globex_open(now)
-                and snapshot_has_live_es(snapshot)
+                and snapshot_has_live_es(
+                    snapshot,
+                    now=now,
+                    max_age_seconds=self.chain_thresholds.max_age_seconds,
+                )
             ),
         )
+        if append_failed:
+            return replace(
+                health,
+                reasons=tuple(
+                    dict.fromkeys([*health.reasons, "outbox_append_failed"])
+                ),
+            )
+        return health

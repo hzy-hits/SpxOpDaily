@@ -19,6 +19,7 @@ from spx_spark.application.runtime.market_features_hot_worker import (
     run_worker_loop,
 )
 from spx_spark.application.runtime.settings import ServiceLoopSettings
+from spx_spark.config import StorageSettings
 from spx_spark.settings import load_app_settings
 
 
@@ -80,6 +81,12 @@ def run(argv: list[str] | None = None) -> int:
     )
     lock_path = args.lock_path or default_lock_path()
     stop_event = threading.Event()
+    storage = StorageSettings.from_env()
+    lease_path = (
+        Path(storage.data_root)
+        / "latest"
+        / "intraday_shock_hot_worker.lease.json"
+    )
     install_stop_handlers(stop_event)
 
     try:
@@ -101,6 +108,7 @@ def run(argv: list[str] | None = None) -> int:
                 max_consecutive_failures=args.max_consecutive_failures,
                 max_cycles=1 if args.once else None,
                 task_name="intraday_shock_hot_worker",
+                lease_path=lease_path,
             )
     except ProcessLockUnavailable as exc:
         print_event(

@@ -240,6 +240,7 @@ def test_iv_surface_snapshot_round_trips_symmetric_25d_skew_fields(tmp_path) -> 
     front = snapshot.expiries[0]
     assert front.put_skew_25d is not None
     assert front.call_skew_25d is not None
+    assert front.skew_method == "delta_25"
 
     write_snapshot(settings, snapshot)
     loaded = load_latest_snapshot(settings.latest_surface_path)
@@ -249,6 +250,7 @@ def test_iv_surface_snapshot_round_trips_symmetric_25d_skew_fields(tmp_path) -> 
     assert loaded_front.put_skew_25d_change_5m == front.put_skew_25d_change_5m
     assert loaded_front.call_skew_25d == front.call_skew_25d
     assert loaded_front.call_skew_25d_change_5m == front.call_skew_25d_change_5m
+    assert loaded_front.skew_method == "delta_25"
 
     bid_call_25d = replace(
         call_25d,

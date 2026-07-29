@@ -257,22 +257,56 @@ def control_allows_new_entries(
     now: datetime,
     max_age_seconds: float,
 ) -> bool:
-    """Fail closed unless a fresh RTH control state explicitly permits entries."""
+    """Fail closed unless a fresh control state explicitly permits entries."""
 
+    return bool(
+        new_entry_control_decision(
+            raw,
+            now=now,
+            max_age_seconds=max_age_seconds,
+        )["allowed"]
+    )
+
+
+def new_entry_control_decision(
+    raw: dict[str, Any],
+    *,
+    now: datetime,
+    max_age_seconds: float,
+) -> dict[str, object]:
+    """Return an auditable fail-closed decision for every entry boundary."""
+
+    mode = str(raw.get("mode") or "")
+    updated_at = parse_timestamp(raw.get("updated_at"))
+    age_seconds = (
+        (as_utc(now) - updated_at).total_seconds()
+        if updated_at is not None
+        else None
+    )
+    reason = "allowed"
     if raw.get("monitoring_active") is not True:
-        return False
-    if raw.get("new_entries_allowed") is not True:
-        return False
-    if raw.get("mode") not in {
+        reason = "monitoring_inactive"
+    elif raw.get("new_entries_allowed") is not True:
+        reason = "entries_not_explicitly_allowed"
+    elif mode not in {
         FailoverMode.SCHWAB_PRIMARY.value,
         FailoverMode.IBKR_FALLBACK.value,
     }:
-        return False
-    updated_at = parse_timestamp(raw.get("updated_at"))
-    if updated_at is None:
-        return False
-    age_seconds = (as_utc(now) - updated_at).total_seconds()
-    return 0 <= age_seconds <= max_age_seconds
+        reason = "unsafe_failover_mode"
+    elif updated_at is None:
+        reason = "control_timestamp_missing"
+    elif age_seconds is None or age_seconds < 0:
+        reason = "control_timestamp_in_future"
+    elif age_seconds > max_age_seconds:
+        reason = "control_state_stale"
+    return {
+        "allowed": reason == "allowed",
+        "reason": reason,
+        "mode": mode or None,
+        "updated_at": updated_at.isoformat() if updated_at is not None else None,
+        "age_seconds": age_seconds,
+        "max_age_seconds": max_age_seconds,
+    }
 
 
 def _optional_text(value: object) -> str | None:

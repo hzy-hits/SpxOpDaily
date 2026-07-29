@@ -227,6 +227,8 @@ class Trade:
     h60_ret: float | None
     h300_ret: float | None
     h900_ret: float | None
+    long_provider: str | None = None
+    short_provider: str | None = None
 
 
 @dataclass(frozen=True)

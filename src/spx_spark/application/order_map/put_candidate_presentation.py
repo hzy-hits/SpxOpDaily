@@ -6,6 +6,11 @@ from collections.abc import Mapping
 from typing import Any
 
 from spx_spark.analytics.options.pricing import finite_float
+from spx_spark.application.market_features.trade_intent import (
+    FLIP_LOW_BREAKDOWN_PUT_MANUAL_LANE,
+    UPPER_REJECTION_PUT_MANUAL_LANE,
+    live_trade_intent_authority_issues,
+)
 
 
 SCHEMA_VERSION = "put_candidate_report.v1"
@@ -97,19 +102,35 @@ def put_wall_breakdown_report_disabled(payload: Mapping[str, Any]) -> bool:
 
 
 def presentable_plan_candidates(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
-    """Return only live-authority plans; every current Put lane is shadow-only."""
+    """Return plans backed by a supported live-authority TradeIntent."""
 
     if put_wall_breakdown_report_disabled(payload):
         return []
     rows = payload.get("plan_candidates")
     if not isinstance(rows, list):
         return []
+    intent = _mapping(payload.get("trade_intent"))
+    put_authorized = not live_trade_intent_authority_issues(intent)
     return [
-        dict(row) for row in rows if isinstance(row, Mapping) and not _shadow_only_put_plan(row)
+        dict(row)
+        for row in rows
+        if isinstance(row, Mapping)
+        and not _put_wall_plan(row)
+        and (not _put_plan(row) or put_authorized)
     ]
 
 
-def _shadow_only_put_plan(candidate: Mapping[str, Any]) -> bool:
+def _put_wall_plan(candidate: Mapping[str, Any]) -> bool:
+    level_kind = str(candidate.get("level_kind") or "").strip().lower()
+    level_label = str(candidate.get("level_label") or "").strip().lower()
+    return bool(
+        level_kind == "put_wall"
+        or level_label == "put_wall"
+        or level_label.startswith("put_wall ")
+    )
+
+
+def _put_plan(candidate: Mapping[str, Any]) -> bool:
     right = str(candidate.get("right") or "").upper()
     play = str(candidate.get("play") or "")
     return bool(
@@ -259,30 +280,40 @@ def _execution_eligibility(
     if phase != "confirmed":
         return False, "wall_signal_not_confirmed"
     status = str(intent.get("status") or "unavailable").lower()
-    if status == "trade_ready":
-        return False, "put_lane_shadow_only"
-    if status != "shadow_ready":
+    if status != "trade_ready":
         reasons = intent.get("block_reasons")
         if isinstance(reasons, list):
             first = next((str(reason) for reason in reasons if str(reason)), None)
             if first:
                 return False, first
         return False, f"trade_intent_{status}"
-    if intent.get("shadow_mode") is not True:
-        return False, "shadow_mode_contract_missing"
-    if intent.get("execution_eligible") is not False:
-        return False, "shadow_execution_authority_violation"
-    if intent.get("quote_observation_eligible") is not True:
-        return False, "shadow_quote_observation_ineligible"
+    if intent.get("shadow_mode") is not False:
+        return False, "trade_intent_shadow_mode"
+    if intent.get("execution_eligible") is not True:
+        return False, "trade_intent_execution_authority_missing"
+    if intent.get("quote_observation_eligible") is not False:
+        return False, "trade_intent_quote_observation_only"
+    if intent.get("automatic_ordering") is not False:
+        return False, "trade_intent_automatic_ordering_contract_invalid"
     if str(intent.get("direction") or "").lower() != "down":
         return False, "intent_direction_mismatch"
     if str(intent.get("play") or "") != spec["expected_play"]:
         return False, "intent_play_mismatch"
+    expected_lane = (
+        FLIP_LOW_BREAKDOWN_PUT_MANUAL_LANE
+        if spec["setup"] == "flip_low_breakdown"
+        else UPPER_REJECTION_PUT_MANUAL_LANE
+    )
+    if str(intent.get("strategy_lane") or "") != expected_lane:
+        return False, "intent_strategy_lane_mismatch"
+    authority_issues = live_trade_intent_authority_issues(intent)
+    if authority_issues:
+        return False, authority_issues[0]
     decision_event = str(decision.get("event_id") or "")
     intent_event = str(intent.get("event_id") or "")
     if not decision_event or intent_event != decision_event:
         return False, "intent_event_mismatch"
-    return False, "shadow_quote_observation_eligible"
+    return True, "manual_ready_exact_quote"
 
 
 def _priority(

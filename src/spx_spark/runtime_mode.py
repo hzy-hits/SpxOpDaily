@@ -10,6 +10,7 @@ from typing import Any
 
 from spx_spark.config import RuntimePolicySettings
 from spx_spark.provider_failover import control_requires_ibkr_market_data
+from spx_spark.state_io import atomic_write_json_secure
 
 
 VALID_MODES = {"auto", "protected", "ibkr_on", "ibkr_off"}
@@ -65,8 +66,15 @@ def load_override(path: str | os.PathLike[str], now: datetime | None = None) -> 
     override_path = Path(path)
     if not override_path.exists():
         return None
-    with override_path.open(encoding="utf-8") as handle:
-        override = RuntimeModeOverride.from_dict(json.load(handle))
+    try:
+        override = _read_override(override_path)
+    except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+        try:
+            override = _read_override(_last_good_path(override_path))
+        except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+            return _protected_corrupt_override(now)
+        if override.is_expired(now):
+            return _protected_corrupt_override(now)
     if override.is_expired(now):
         return None
     return override
@@ -93,17 +101,40 @@ def write_override(
         expires_at=expires_at,
     )
     override_path = Path(path)
-    override_path.parent.mkdir(parents=True, exist_ok=True)
-    with override_path.open("w", encoding="utf-8") as handle:
-        json.dump(override.to_dict(), handle, indent=2, sort_keys=True)
-        handle.write("\n")
+    payload = override.to_dict()
+    # Validate the complete payload before either atomic replacement.
+    RuntimeModeOverride.from_dict(payload)
+    atomic_write_json_secure(_last_good_path(override_path), payload)
+    atomic_write_json_secure(override_path, payload)
     return override
 
 
 def clear_override(path: str | os.PathLike[str]) -> None:
     override_path = Path(path)
-    if override_path.exists():
-        override_path.unlink()
+    override_path.unlink(missing_ok=True)
+    _last_good_path(override_path).unlink(missing_ok=True)
+
+
+def _last_good_path(path: Path) -> Path:
+    return path.with_name(f"{path.name}.last-good")
+
+
+def _read_override(path: Path) -> RuntimeModeOverride:
+    with path.open(encoding="utf-8") as handle:
+        payload = json.load(handle)
+    if not isinstance(payload, dict):
+        raise ValueError("runtime mode root is not an object")
+    return RuntimeModeOverride.from_dict(payload)
+
+
+def _protected_corrupt_override(now: datetime | None) -> RuntimeModeOverride:
+    created_at = (now or datetime.now(tz=UTC)).astimezone(UTC)
+    return RuntimeModeOverride(
+        mode="protected",
+        reason="runtime_mode_corrupt_fail_closed",
+        created_at=created_at,
+        expires_at=None,
+    )
 
 
 def ibkr_allowed(

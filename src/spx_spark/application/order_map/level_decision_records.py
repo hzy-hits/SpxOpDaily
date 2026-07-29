@@ -88,7 +88,7 @@ def build_health_record(
         "record_key": timestamp,
         "at": timestamp,
         "session_date": observation.session_date,
-        "session_mode": "rth" if rth else "globex",
+        "session_mode": observation.session_mode or ("rth" if rth else "globex"),
         "tick_id": getattr(tick, "tick_id", None),
         "source_snapshot_id": getattr(tick, "source_snapshot_id", None),
         "spot": observation.spot,

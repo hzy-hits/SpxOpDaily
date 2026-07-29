@@ -53,6 +53,7 @@ CREATE TABLE IF NOT EXISTS notification_delivery_events (
     kind TEXT NOT NULL,
     lane TEXT NOT NULL,
     occurred_at TEXT NOT NULL,
+    expires_at TEXT,
     title TEXT NOT NULL,
     text TEXT NOT NULL,
     feishu_text TEXT,
@@ -178,6 +179,17 @@ class NotificationDeliveryOutbox:
                     "ALTER TABLE notification_delivery_targets "
                     "ADD COLUMN acknowledged_at TEXT"
                 )
+            event_columns = {
+                str(row["name"])
+                for row in connection.execute(
+                    "PRAGMA table_info(notification_delivery_events)"
+                )
+            }
+            if "expires_at" not in event_columns:
+                connection.execute(
+                    "ALTER TABLE notification_delivery_events "
+                    "ADD COLUMN expires_at TEXT"
+                )
 
     def writable(self) -> bool:
         try:
@@ -226,9 +238,10 @@ class NotificationDeliveryOutbox:
                 cursor = connection.execute(
                     """
                     INSERT OR IGNORE INTO notification_delivery_events (
-                        event_id, source, kind, lane, occurred_at, title, text,
-                        feishu_text, friend, status, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        event_id, source, kind, lane, occurred_at, expires_at,
+                        title, text, feishu_text, friend, status, created_at,
+                        updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         envelope.event_id,
@@ -236,6 +249,7 @@ class NotificationDeliveryOutbox:
                         envelope.kind,
                         envelope.lane,
                         _iso(envelope.occurred_at),
+                        _iso(envelope.expires_at) if envelope.expires_at else None,
                         title,
                         text,
                         feishu_text,
@@ -249,8 +263,8 @@ class NotificationDeliveryOutbox:
                 if not accepted:
                     existing = connection.execute(
                         """
-                        SELECT source, kind, lane, occurred_at, title, text,
-                               feishu_text, friend
+                        SELECT source, kind, lane, occurred_at, expires_at,
+                               title, text, feishu_text, friend
                         FROM notification_delivery_events WHERE event_id = ?
                         """,
                         (envelope.event_id,),
@@ -260,6 +274,7 @@ class NotificationDeliveryOutbox:
                         envelope.kind,
                         envelope.lane,
                         _iso(envelope.occurred_at),
+                        _iso(envelope.expires_at) if envelope.expires_at else None,
                         title,
                         text,
                         feishu_text,
@@ -346,6 +361,7 @@ class NotificationDeliveryOutbox:
             connection.execute("BEGIN IMMEDIATE")
             try:
                 self._requeue_stale_claims(connection, now=now)
+                self._expire_due_targets(connection, now=now)
                 params: list[object] = [DeliveryStatus.PENDING.value, now_text]
                 event_clause = ""
                 if event_id is not None:
@@ -355,7 +371,8 @@ class NotificationDeliveryOutbox:
                 rows = connection.execute(
                     f"""
                     SELECT t.event_id, t.sink, e.source, e.kind, e.lane,
-                           e.occurred_at, e.title, e.text, e.feishu_text, e.friend
+                           e.occurred_at, e.expires_at, e.title, e.text,
+                           e.feishu_text, e.friend
                     FROM notification_delivery_targets AS t
                     JOIN notification_delivery_events AS e USING (event_id)
                     WHERE t.status = ? AND t.next_attempt_at <= ?{event_clause}
@@ -407,6 +424,11 @@ class NotificationDeliveryOutbox:
                         kind=str(first["kind"]),
                         lane=str(first["lane"]),
                         occurred_at=_parse(first["occurred_at"]),
+                        expires_at=(
+                            _parse(first["expires_at"])
+                            if first["expires_at"] is not None
+                            else None
+                        ),
                     ),
                     title=str(first["title"]),
                     text=str(first["text"]),
@@ -420,6 +442,50 @@ class NotificationDeliveryOutbox:
                 )
             )
         return jobs
+
+    def _expire_due_targets(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        now: datetime,
+    ) -> int:
+        """Settle expired pending work without performing network delivery."""
+
+        now_text = _iso(now)
+        rows = connection.execute(
+            """
+            SELECT DISTINCT t.event_id
+            FROM notification_delivery_targets AS t
+            JOIN notification_delivery_events AS e USING (event_id)
+            WHERE t.status = ? AND e.expires_at IS NOT NULL
+              AND e.expires_at <= ?
+            """,
+            (DeliveryStatus.PENDING.value, now_text),
+        ).fetchall()
+        cursor = connection.execute(
+            """
+            UPDATE notification_delivery_targets
+            SET status = ?, next_attempt_at = ?, claimed_by = NULL,
+                claimed_at = NULL,
+                last_error = 'notification_expired_before_delivery',
+                acknowledged_at = ?, updated_at = ?
+            WHERE status = ? AND event_id IN (
+                SELECT event_id FROM notification_delivery_events
+                WHERE expires_at IS NOT NULL AND expires_at <= ?
+            )
+            """,
+            (
+                DeliveryStatus.DEAD_LETTER.value,
+                now_text,
+                now_text,
+                now_text,
+                DeliveryStatus.PENDING.value,
+                now_text,
+            ),
+        )
+        for row in rows:
+            self._refresh_event_status(connection, str(row["event_id"]), now_text)
+        return cursor.rowcount
 
     def settle_target(
         self,
@@ -624,6 +690,49 @@ class NotificationDeliveryOutbox:
                 (DeliveryStatus.DEAD_LETTER.value,),
             ).fetchone()
         return int(row["count"])
+
+    def cancel_event(
+        self,
+        event_id: str,
+        *,
+        reason: str,
+        now: datetime | None = None,
+    ) -> int:
+        """Terminally settle undelivered targets after their source invalidates."""
+
+        now_text = _iso(_utc(now))
+        error = (reason or "notification_cancelled_before_delivery")[:1000]
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                cursor = connection.execute(
+                    """
+                    UPDATE notification_delivery_targets
+                    SET status = ?, next_attempt_at = ?, claimed_by = NULL,
+                        claimed_at = NULL, last_error = ?, acknowledged_at = ?,
+                        updated_at = ?
+                    WHERE event_id = ? AND status IN (?, ?)
+                    """,
+                    (
+                        DeliveryStatus.DEAD_LETTER.value,
+                        now_text,
+                        error,
+                        now_text,
+                        now_text,
+                        event_id,
+                        DeliveryStatus.PENDING.value,
+                        DeliveryStatus.CLAIMED.value,
+                    ),
+                )
+                cancelled = cursor.rowcount
+                if cancelled:
+                    self._refresh_event_status(connection, event_id, now_text)
+                connection.execute("COMMIT")
+            except Exception:
+                if connection.in_transaction:
+                    connection.execute("ROLLBACK")
+                raise
+        return cancelled
 
     def replay_dead_letter(self, event_id: str, *, now: datetime | None = None) -> int:
         """Reset one event's dead-letter targets to pending with a fresh budget.

@@ -12,10 +12,9 @@ from spx_spark.analytics.options.quote_policy import ANALYTICAL_CORE_LANE
 from spx_spark.features.exposure_schema import ExposureInputRow
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR, ET
 
-_MIN_TIME_TO_EXPIRY_YEARS = 15.0 / (60.0 * 24.0 * 365.0)
-
-
 def tau_is_floored(expiry: str, as_of: datetime) -> bool:
+    """Compatibility name: true only when no positive expiry time remains."""
+
     expiry_date = datetime.strptime(expiry, "%Y%m%d").date()
     session = DEFAULT_MARKET_CALENDAR.session(expiry_date)
     if session is None:
@@ -23,8 +22,7 @@ def tau_is_floored(expiry: str, as_of: datetime) -> bool:
     delta_seconds = (session.close_at - as_of.astimezone(session.close_at.tzinfo)).total_seconds()
     if delta_seconds <= 0:
         return True
-    years = delta_seconds / (365.0 * 24.0 * 3600.0)
-    return years < _MIN_TIME_TO_EXPIRY_YEARS
+    return False
 
 
 def determine_oi_quality(rows: tuple[ExposureInputRow, ...]) -> str:
@@ -33,11 +31,12 @@ def determine_oi_quality(rows: tuple[ExposureInputRow, ...]) -> str:
     positive = [row for row in rows if row.open_interest > 0]
     if not positive:
         return "stale_or_zero"
-    providers = Counter(row.open_interest_provider for row in positive)
-    dominant = providers.most_common(1)[0][0]
-    if dominant == "schwab":
+    providers = {str(row.open_interest_provider or "").lower() for row in positive}
+    if providers == {"ibkr"}:
+        return "ibkr_ok"
+    if "schwab" in providers:
         return "schwab_unverified"
-    return "ibkr_ok"
+    return "unverified_provider"
 
 
 def determine_iv_source(rows: tuple[ExposureInputRow, ...]) -> str:

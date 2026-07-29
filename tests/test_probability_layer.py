@@ -65,7 +65,7 @@ def test_probability_for_level_uses_call_delta_above_underlier() -> None:
         make_quote(strike=7500, right="C", delta=0.50, now=now),
     ]
     pairs = pair_by_strike(quotes)
-    prob_close, prob_touch, source_strike, _source_delta = probability_for_level(
+    prob_close, prob_touch, source_strike, _source_delta, method = probability_for_level(
         7550,
         underlier=7500,
         pairs=pairs,
@@ -74,6 +74,7 @@ def test_probability_for_level_uses_call_delta_above_underlier() -> None:
     assert prob_close == 0.20
     assert prob_touch == 0.40
     assert source_strike == 7550
+    assert method.value == "delta_d1_fallback"
 
 
 def test_probability_for_level_uses_put_delta_below_underlier() -> None:
@@ -83,7 +84,7 @@ def test_probability_for_level_uses_put_delta_below_underlier() -> None:
         make_quote(strike=7500, right="P", delta=-0.50, now=now),
     ]
     pairs = pair_by_strike(quotes)
-    prob_close, prob_touch, source_strike, _source_delta = probability_for_level(
+    prob_close, prob_touch, source_strike, _source_delta, method = probability_for_level(
         7450,
         underlier=7500,
         pairs=pairs,
@@ -92,6 +93,7 @@ def test_probability_for_level_uses_put_delta_below_underlier() -> None:
     assert prob_close == 0.25
     assert prob_touch == 0.50
     assert source_strike == 7450
+    assert method.value == "delta_d1_fallback"
 
 
 def test_probability_for_level_refuses_far_strike() -> None:
@@ -104,7 +106,8 @@ def test_probability_for_level_refuses_far_strike() -> None:
         pairs=pairs,
         strike_step=5.0,
     )
-    assert result == (None, None, None, None)
+    assert result[:4] == (None, None, None, None)
+    assert result[4].value == "unavailable"
 
 
 def test_probability_for_level_prefers_nd2_when_iv_and_tau_available() -> None:
@@ -116,7 +119,7 @@ def test_probability_for_level_prefers_nd2_when_iv_and_tau_available() -> None:
         make_quote(strike=7500, right="C", delta=0.50, now=now),
     ]
     pairs = pair_by_strike(quotes)
-    prob_close, prob_touch, source_strike, source_delta = probability_for_level(
+    prob_close, prob_touch, source_strike, source_delta, method = probability_for_level(
         7550,
         underlier=7500,
         pairs=pairs,
@@ -131,6 +134,7 @@ def test_probability_for_level_prefers_nd2_when_iv_and_tau_available() -> None:
     # The delta anchor N(d1) overstates the OTM side versus the N(d2) target.
     assert prob_close < source_delta
     assert source_strike == 7550
+    assert method.value == "risk_neutral_nd2"
 
 
 def test_probability_for_level_nd2_put_side() -> None:
@@ -142,7 +146,7 @@ def test_probability_for_level_nd2_put_side() -> None:
         make_quote(strike=7500, right="P", delta=-0.50, now=now),
     ]
     pairs = pair_by_strike(quotes)
-    prob_close, prob_touch, source_strike, source_delta = probability_for_level(
+    prob_close, prob_touch, source_strike, source_delta, method = probability_for_level(
         7450,
         underlier=7500,
         pairs=pairs,
@@ -156,13 +160,14 @@ def test_probability_for_level_nd2_put_side() -> None:
     assert prob_touch == pytest.approx(min(1.0, 2 * expected))
     assert prob_close < abs(source_delta)
     assert source_strike == 7450
+    assert method.value == "risk_neutral_nd2"
 
 
 def test_probability_for_level_falls_back_to_delta_without_iv() -> None:
     now = datetime(2026, 7, 6, 14, 0, tzinfo=timezone.utc)
     quotes = [make_quote(strike=7550, right="C", delta=0.20, iv=None, now=now)]
     pairs = pair_by_strike(quotes)
-    prob_close, prob_touch, source_strike, _source_delta = probability_for_level(
+    prob_close, prob_touch, source_strike, _source_delta, method = probability_for_level(
         7550,
         underlier=7500,
         pairs=pairs,
@@ -172,6 +177,7 @@ def test_probability_for_level_falls_back_to_delta_without_iv() -> None:
     assert prob_close == 0.20
     assert prob_touch == 0.40
     assert source_strike == 7550
+    assert method.value == "delta_d1_fallback"
 
 
 def test_expiry_map_populates_level_probabilities_and_flip_zone() -> None:

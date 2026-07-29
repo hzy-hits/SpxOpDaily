@@ -29,8 +29,17 @@ def interpolate_zero(left: StrikeGex, right: StrikeGex) -> float | None:
     return left.strike + weight * (right.strike - left.strike)
 
 
-def gex_weight(quote: Quote, *, intraday: bool) -> float | None:
-    open_interest = finite_float(quote.open_interest) or 0.0
+def gex_weight(
+    quote: Quote,
+    *,
+    intraday: bool,
+    include_open_interest: bool = True,
+) -> float | None:
+    open_interest = (
+        finite_float(quote.open_interest) or 0.0
+        if include_open_interest
+        else 0.0
+    )
     volume = finite_float(quote.volume) or 0.0
     if intraday:
         weight = open_interest + volume
@@ -42,10 +51,20 @@ def gex_weight(quote: Quote, *, intraday: bool) -> float | None:
 
 
 def signed_gex(
-    quote: Quote, *, sign: float, underlier: float, intraday: bool = False
+    quote: Quote,
+    *,
+    sign: float,
+    underlier: float,
+    as_of: datetime,
+    intraday: bool = False,
+    include_open_interest: bool = True,
 ) -> float | None:
-    gamma = option_gamma_structural(quote)
-    weight = gex_weight(quote, intraday=intraday)
+    gamma = option_gamma_structural(quote, as_of=as_of)
+    weight = gex_weight(
+        quote,
+        intraday=intraday,
+        include_open_interest=include_open_interest,
+    )
     if gamma is None or weight is None:
         return None
     return sign * gamma * weight * 100.0 * underlier * underlier * 0.01
@@ -55,19 +74,35 @@ def build_gex_by_strike(
     pairs: dict[float, dict[Any, Quote]],
     *,
     underlier: float,
+    as_of: datetime,
     intraday: bool = False,
+    include_open_interest: bool = True,
 ) -> list[StrikeGex]:
     rows: list[StrikeGex] = []
     for strike, pair in sorted(pairs.items()):
         call = pair.get(OptionRight.CALL)
         put = pair.get(OptionRight.PUT)
         call_gex = (
-            signed_gex(call, sign=1.0, underlier=underlier, intraday=intraday)
+            signed_gex(
+                call,
+                sign=1.0,
+                underlier=underlier,
+                as_of=as_of,
+                intraday=intraday,
+                include_open_interest=include_open_interest,
+            )
             if call is not None
             else None
         )
         put_gex = (
-            signed_gex(put, sign=-1.0, underlier=underlier, intraday=intraday)
+            signed_gex(
+                put,
+                sign=-1.0,
+                underlier=underlier,
+                as_of=as_of,
+                intraday=intraday,
+                include_open_interest=include_open_interest,
+            )
             if put is not None
             else None
         )
@@ -198,6 +233,8 @@ def zero_gamma_spot_scan(
     strikes = sorted(pairs)
     step = min(median_strike_step(strikes), 5.0)
     t_years = time_to_expiry_years(expiry, as_of=as_of)
+    if t_years <= 0:
+        return (None, None, "expiry_elapsed")
 
     def net_gex_at(spot: float) -> float:
         total = 0.0

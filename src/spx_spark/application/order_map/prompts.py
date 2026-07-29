@@ -595,6 +595,87 @@ def render_status_template(
     return "\n".join(lines)
 
 
+def render_operator_status_brief(
+    payload: dict[str, Any],
+    changes: list[str],
+    now_utc: datetime,
+) -> str:
+    """Render the scheduled status as a bounded operator card.
+
+    Full analytics remain in the persisted pricing audit.  The scheduled push
+    only carries facts that can change the immediate watch/no-trade decision;
+    event-driven GTH and TradeReady notifications use separate realtime lanes.
+    """
+
+    beijing = now_utc.astimezone(SHANGHAI_TZ)
+    phase = _session_phase_of(payload, now_utc)
+    expiry = str(payload.get("expiry") or "-")
+    expiry_text = f"{expiry[4:6]}-{expiry[6:8]}" if len(expiry) == 8 else expiry
+    lines = [
+        (
+            f"【SPX 状态 · {beijing.strftime('%H:%M')} · "
+            f"0DTE {expiry_text} · {phase.get('name_cn')}】"
+        ),
+        *_operator_decision_card_lines(payload, now_utc=now_utc),
+        "",
+        _compact_price_line(payload),
+        (
+            f"结构  {_gamma_label(payload.get('gamma_state'))}　"
+            f"{_compact_level_line(payload)}　EM ±{_dash(payload.get('expected_move_points'))}"
+        ),
+    ]
+    radar_lines = render_convexity_idea_radar_lines(payload)
+    lines.extend(
+        line
+        for line in radar_lines
+        if line.startswith(("30m路径分位", "机会["))
+    )
+    for line in (
+        _compact_decision_line(payload),
+        _compact_flow_line(payload) or _es_volume_line(payload),
+    ):
+        if line:
+            lines.append(line)
+    warnings = payload.get("warnings")
+    warning_text = (
+        f" · 数据 {warnings[0]}" if isinstance(warnings, list) and warnings else ""
+    )
+    if changes:
+        change_text = "；".join(changes[:2])
+        if len(changes) > 2:
+            change_text += f"；另 {len(changes) - 2} 项"
+        lines.append(f"变化  {change_text}{warning_text}")
+    else:
+        lines.append(f"变化  无实质变化{warning_text}")
+    return "\n".join(lines)
+
+
+def _operator_decision_card_lines(
+    payload: dict[str, Any],
+    *,
+    now_utc: datetime,
+) -> list[str]:
+    del now_utc
+    guidance = guidance_module.build_decision_guidance(payload)
+    if guidance.action is guidance_module.GuidanceAction.TRADE_READY:
+        return [
+            "🔴 状态快照 · 本卡不执行",
+            f"方向  {guidance.bias}（仅结构背景）",
+            "等待  已通过的实时执行意图必须以独立 MANUAL READY 卡为准",
+            f"证伪  {guidance.invalidation_text}",
+            "合约  本状态卡不承载合约、报价或下单权限",
+            "解释  状态心跳不绕过实时重验，也不复制可能过期的执行字段",
+        ]
+    return [
+        "🔴 只观察",
+        f"方向  {guidance.bias}（仅结构背景）",
+        f"等待  {guidance.trigger_text}",
+        f"证伪  {guidance.invalidation_text}",
+        "合约  当前没有可执行合约",
+        f"解释  {guidance.action_text}",
+    ]
+
+
 def _detail_candidate_lines(payload: dict[str, Any]) -> list[str]:
     if put_wall_breakdown_report_disabled(payload):
         return []

@@ -15,7 +15,15 @@ from spx_spark.application.market_features.models import (
     MinuteMarketFrame,
 )
 from spx_spark.config import NY_TZ
-from spx_spark.marketdata import InstrumentType, MarketDataQuality, Provider, Quote, as_utc
+from spx_spark.marketdata import (
+    FUTURE_TIMESTAMP_TOLERANCE_SECONDS,
+    InstrumentType,
+    MarketDataQuality,
+    Provider,
+    Quote,
+    as_utc,
+    instrument_matches_id,
+)
 from spx_spark.settings.market_features import MarketFeatureSettings
 from spx_spark.storage import LatestState
 
@@ -105,21 +113,22 @@ def freshest_quote(
 ) -> Quote | None:
     eligible: list[Quote] = []
     for quote in quotes:
-        if quote.instrument.canonical_id != instrument_id:
+        if not instrument_matches_id(quote.instrument, instrument_id):
             continue
         if provider is not None and quote.provider is not provider:
             continue
-        if quote.quality is not MarketDataQuality.LIVE or quote.effective_price is None:
+        observation = _live_price_observation(quote)
+        if quote.quality is not MarketDataQuality.LIVE or observation is None:
             continue
-        source_at = quote_source_at(quote)
+        _price, source_at, _price_kind = observation
         transport_at = as_utc(quote.last_update_at or quote.received_at)
-        if (
-            max(
-                (as_utc(now) - source_at).total_seconds(),
-                (as_utc(now) - transport_at).total_seconds(),
-            )
-            > policy.max_quote_age_seconds
-        ):
+        ages = (
+            (as_utc(now) - source_at).total_seconds(),
+            (as_utc(now) - transport_at).total_seconds(),
+        )
+        if min(ages) < -FUTURE_TIMESTAMP_TOLERANCE_SECONDS or max(
+            ages
+        ) > policy.max_quote_age_seconds:
             continue
         eligible.append(quote)
     if not eligible:
@@ -127,7 +136,10 @@ def freshest_quote(
     priority = {Provider.SCHWAB: 1, Provider.IBKR: 0}
     return max(
         eligible,
-        key=lambda quote: (quote_source_at(quote), -priority.get(quote.provider, 9)),
+        key=lambda quote: (
+            _live_price_observation(quote)[1],
+            -priority.get(quote.provider, 9),
+        ),
     )
 
 
@@ -138,12 +150,19 @@ def quote_source_at(quote: Quote) -> datetime:
 def normalized_quote(quote: Quote) -> dict[str, Any]:
     provider_symbol = quote.provider_symbol or quote.instrument.provider_symbol
     contract_identity = _future_contract_identity(quote, provider_symbol)
+    observation = _live_price_observation(quote)
+    price, source_at, price_kind = (
+        observation
+        if observation is not None
+        else (None, quote_source_at(quote), None)
+    )
     return {
-        "price": quote.effective_price,
+        "price": price,
+        "price_kind": price_kind,
         "provider": quote.provider.value,
         "provider_symbol": provider_symbol,
         "contract_identity": contract_identity,
-        "source_at": quote_source_at(quote).isoformat(),
+        "source_at": source_at.isoformat(),
         "transport_at": as_utc(quote.last_update_at or quote.received_at).isoformat(),
         "bid": quote.bid,
         "ask": quote.ask,
@@ -152,6 +171,22 @@ def normalized_quote(quote: Quote) -> dict[str, Any]:
         "volume": quote.volume,
         "quality": quote.quality.value,
     }
+
+
+def _live_price_observation(
+    quote: Quote,
+) -> tuple[float, datetime, str] | None:
+    if (
+        quote.bid is not None
+        and quote.mid is not None
+        and quote.ask is not None
+        and 0 < quote.bid <= quote.mid <= quote.ask
+        and quote.quote_time is not None
+    ):
+        return float(quote.mid), as_utc(quote.quote_time), "mid"
+    if quote.last is not None and quote.last > 0 and quote.trade_time is not None:
+        return float(quote.last), as_utc(quote.trade_time), "last"
+    return None
 
 
 def _future_contract_identity(quote: Quote, provider_symbol: str | None) -> str | None:

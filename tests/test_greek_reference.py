@@ -590,6 +590,36 @@ def test_chain_anchor_requires_call_put_source_time_cofreshness() -> None:
     assert payload["model"]["spot_source"] == "spxw_model_underlier_median"
 
 
+def test_actionable_chain_anchor_never_uses_trade_clock_for_nbbo() -> None:
+    now = datetime(2026, 7, 10, 19, 0, tzinfo=timezone.utc)
+    quotes = tuple(
+        replace(
+            make_quote(now=now, strike=strike, right=right),
+            quote_time=None,
+            trade_time=now,
+            last_update_at=now,
+            received_at=now,
+        )
+        for strike in (5995.0, 6000.0, 6005.0)
+        for right in ("C", "P")
+    )
+    state = LatestState(
+        created_at=now,
+        as_of=now,
+        quotes=quotes,
+        best_quotes=quotes,
+    )
+
+    assert (
+        actionable_chain_implied_spot(
+            state,
+            expiry="20260710",
+            as_of=now,
+        )
+        is None
+    )
+
+
 def test_snapshot_persistence_and_session_summary(tmp_path) -> None:
     now = datetime(2026, 7, 10, 19, 0, tzinfo=timezone.utc)
     quotes = tuple(

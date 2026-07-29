@@ -304,6 +304,17 @@ def load_settings(
         max_quote_age_seconds=float(get("globex_trend.max_quote_age_seconds")),
         retention_hours=int(get("globex_trend.retention_hours")),
         pending_event_ttl_seconds=int(get("globex_trend.pending_event_ttl_seconds")),
+        continuation_step_points=float(get("globex_trend.continuation_step_points")),
+        continuation_confirmation_observations=int(
+            get("globex_trend.continuation_confirmation_observations")
+        ),
+        continuation_cooldown_seconds=int(
+            get("globex_trend.continuation_cooldown_seconds")
+        ),
+        continuation_max_milestones_per_transition=int(
+            get("globex_trend.continuation_max_milestones_per_transition")
+        ),
+        continuation_session_budget=int(get("globex_trend.continuation_session_budget")),
     )
     market_features = MarketFeatureSettings(
         enabled=bool(get("market_features.enabled")),
@@ -352,6 +363,42 @@ def load_settings(
         trade_min_target_room_points=float(get("market_features.trade_min_target_room_points")),
         trade_min_reward_risk=float(get("market_features.trade_min_reward_risk")),
         trade_time_stop_minutes=int(get("market_features.trade_time_stop_minutes")),
+        gth_manual_candidate_enabled=bool(
+            get("market_features.gth_manual_candidate_enabled")
+        ),
+        gth_manual_candidate_quote_max_age_seconds=float(
+            get("market_features.gth_manual_candidate_quote_max_age_seconds")
+        ),
+        gth_manual_candidate_ttl_seconds=float(
+            get("market_features.gth_manual_candidate_ttl_seconds")
+        ),
+        gth_manual_candidate_max_debit_fraction=float(
+            get("market_features.gth_manual_candidate_max_debit_fraction")
+        ),
+        gth_manual_candidate_max_net_spread_fraction=float(
+            get("market_features.gth_manual_candidate_max_net_spread_fraction")
+        ),
+        gth_manual_candidate_min_parity_pairs=int(
+            get("market_features.gth_manual_candidate_min_parity_pairs")
+        ),
+        gth_manual_candidate_max_parity_dispersion_points=float(
+            get("market_features.gth_manual_candidate_max_parity_dispersion_points")
+        ),
+        gth_manual_candidate_max_parity_interval_points=float(
+            get("market_features.gth_manual_candidate_max_parity_interval_points")
+        ),
+        gth_manual_candidate_target_room_buffer_points=float(
+            get("market_features.gth_manual_candidate_target_room_buffer_points")
+        ),
+        gth_manual_candidate_close_buffer_seconds=float(
+            get("market_features.gth_manual_candidate_close_buffer_seconds")
+        ),
+        gth_manual_candidate_max_reclaim_age_seconds=float(
+            get("market_features.gth_manual_candidate_max_reclaim_age_seconds")
+        ),
+        gth_manual_candidate_min_reward_risk=float(
+            get("market_features.gth_manual_candidate_min_reward_risk")
+        ),
         session_episode_enabled=bool(get("market_features.session_episode_enabled")),
         session_break_buffer_points=float(get("market_features.session_break_buffer_points")),
         session_extreme_extension_points=float(

@@ -7,6 +7,7 @@ ibkr.position_alerts) and consumers can import it without layering cycles.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -26,9 +27,13 @@ class Alert:
     event_id: str | None = None
     source_at: str | None = None
     source_event_key: str | None = None
+    audit_context: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, object]:
-        return asdict(self)
+        payload = asdict(self)
+        if self.audit_context is None:
+            payload.pop("audit_context")
+        return payload
 
 
 def severity_for_priority(priority: str) -> str:

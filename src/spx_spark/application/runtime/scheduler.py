@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import json
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timezone
+from pathlib import Path
 
 from spx_spark.application.runtime.health import (
     CRITICAL_FAILURE_EXIT_CODE,
@@ -17,7 +18,11 @@ from spx_spark.application.runtime.health import (
 from spx_spark.application.runtime.registry import ServiceTask
 from spx_spark.application.runtime.runner import run_task
 from spx_spark.application.runtime.settings import DEFAULT_MAX_CONCURRENT_TASKS
+from spx_spark.application.runtime.tasks import TaskRuntimeState
 from spx_spark.domain.health import EngineMode
+from spx_spark.domain.health import TaskCriticality, TaskMode
+from spx_spark.marketdata import parse_timestamp
+from spx_spark.state_io import read_json_object
 
 
 def print_event(event: dict[str, object]) -> None:
@@ -125,6 +130,7 @@ def run_loop(
     *,
     heartbeat_seconds: int,
     max_concurrent_tasks: int = DEFAULT_MAX_CONCURRENT_TASKS,
+    external_lease_paths: Mapping[str, tuple[Path, float]] | None = None,
 ) -> int:
     """Concurrent scheduler: one slow task no longer delays every other task.
 
@@ -154,11 +160,18 @@ def run_loop(
             for event in drain_finished_tasks(tasks, in_flight):
                 print_event(event)
 
+            checked_at = datetime.now(tz=timezone.utc)
             states = [task.runtime for task in tasks if task.runtime is not None]
+            states.extend(
+                external_lease_states(
+                    external_lease_paths or {},
+                    checked_at=checked_at,
+                )
+            )
             if any_critical_unrecoverable(states):
                 health = aggregate_runtime_health(
                     states,
-                    checked_at=datetime.now(tz=timezone.utc),
+                    checked_at=checked_at,
                 )
                 print_event(
                     {
@@ -174,7 +187,6 @@ def run_loop(
                 return CRITICAL_FAILURE_EXIT_CODE
 
             if now - last_heartbeat >= heartbeat_seconds:
-                checked_at = datetime.now(tz=timezone.utc)
                 health = aggregate_runtime_health(states, checked_at=checked_at)
                 print_event(
                     build_heartbeat_event(
@@ -191,3 +203,37 @@ def run_loop(
             time.sleep(0.5)
     finally:
         executor.shutdown(wait=False, cancel_futures=True)
+
+
+def external_lease_states(
+    paths: Mapping[str, tuple[Path, float]],
+    *,
+    checked_at: datetime,
+) -> list[TaskRuntimeState]:
+    """Project independently supervised hot-worker leases into readiness."""
+
+    states: list[TaskRuntimeState] = []
+    for name, (path, max_age_seconds) in paths.items():
+        raw = read_json_object(path)
+        finished_at = parse_timestamp(raw.get("finished_at"))
+        age_seconds = (
+            (checked_at - finished_at).total_seconds()
+            if finished_at is not None
+            else None
+        )
+        fresh = (
+            raw.get("ok") is True
+            and age_seconds is not None
+            and 0 <= age_seconds <= max_age_seconds
+        )
+        state = TaskRuntimeState(
+            name=name,
+            criticality=TaskCriticality.IMPORTANT,
+            readiness_required=True,
+            mode=TaskMode.IDLE if fresh else TaskMode.UNHEALTHY,
+            last_success_at=finished_at if fresh else checked_at,
+            last_finished_at=finished_at,
+            last_error=None if fresh else "external_worker_lease_missing_stale_or_failed",
+        )
+        states.append(state)
+    return states

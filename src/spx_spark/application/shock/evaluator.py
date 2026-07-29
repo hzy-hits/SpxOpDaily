@@ -7,11 +7,30 @@ from datetime import datetime
 from spx_spark.application.shock.models import IntradayShockSettings, PriceSample
 from spx_spark.config import NY_TZ
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
-from spx_spark.marketdata import MarketDataQuality, Provider, Quote, as_utc
+from spx_spark.marketdata import (
+    FUTURE_TIMESTAMP_TOLERANCE_SECONDS,
+    MarketDataQuality,
+    Provider,
+    Quote,
+    as_utc,
+    instrument_matches_id,
+)
 from spx_spark.storage import LatestState, configured_quote_use_decision
 
-def _quote_source_at(quote: Quote) -> datetime:
-    return as_utc(quote.quote_time or quote.trade_time or quote.received_at)
+def _live_price_observation(
+    quote: Quote,
+) -> tuple[float, datetime, str] | None:
+    if (
+        quote.bid is not None
+        and quote.mid is not None
+        and quote.ask is not None
+        and 0 < quote.bid <= quote.mid <= quote.ask
+        and quote.quote_time is not None
+    ):
+        return float(quote.mid), as_utc(quote.quote_time), "mid"
+    if quote.last is not None and quote.last > 0 and quote.trade_time is not None:
+        return float(quote.last), as_utc(quote.trade_time), "last"
+    return None
 
 
 def synchronized_live_sample(
@@ -68,17 +87,20 @@ def live_es_sample(
             first_rejection = first_rejection or "schwab_es_not_streaming"
             continue
         decision = configured_quote_use_decision(es, as_of=state.as_of)
-        source_at = _quote_source_at(es)
-        price = es.effective_price
+        observation = _live_price_observation(es)
         if (
             not decision.alert_allowed
             or decision.feed_mode != MarketDataQuality.LIVE
-            or price is None
-            or price <= 0
+            or observation is None
         ):
             first_rejection = first_rejection or "non_live_or_stale_es"
             continue
-        if (as_utc(state.as_of) - source_at).total_seconds() > settings.max_es_age_seconds:
+        price, source_at, _price_kind = observation
+        source_age = (as_utc(state.as_of) - source_at).total_seconds()
+        if source_age < -FUTURE_TIMESTAMP_TOLERANCE_SECONDS:
+            first_rejection = first_rejection or "future_es_anchor"
+            continue
+        if source_age > settings.max_es_age_seconds:
             first_rejection = first_rejection or "stale_es_anchor"
             continue
         return (source_at, float(price), provider.value), None
@@ -93,7 +115,8 @@ def _latest_provider_quote(
     matches = [
         quote
         for quote in state.quotes
-        if quote.instrument.canonical_id == instrument_id and quote.provider == provider
+        if instrument_matches_id(quote.instrument, instrument_id)
+        and quote.provider == provider
     ]
     if not matches:
         return None
@@ -116,15 +139,21 @@ def _validated_anchor_pair(
         or es_decision.feed_mode != MarketDataQuality.LIVE
     ):
         return None, "non_live_or_stale_anchor"
-    spx_price = spx.effective_price
-    es_price = es.effective_price
-    if spx_price is None or es_price is None or spx_price <= 0 or es_price <= 0:
+    spx_observation = _live_price_observation(spx)
+    es_observation = _live_price_observation(es)
+    if spx_observation is None or es_observation is None:
         return None, "missing_anchor_price"
-    spx_at = _quote_source_at(spx)
-    es_at = _quote_source_at(es)
-    if (as_utc(state.as_of) - spx_at).total_seconds() > settings.max_spx_age_seconds:
+    spx_price, spx_at, _spx_kind = spx_observation
+    es_price, es_at, _es_kind = es_observation
+    spx_age = (as_utc(state.as_of) - spx_at).total_seconds()
+    es_age = (as_utc(state.as_of) - es_at).total_seconds()
+    if spx_age < -FUTURE_TIMESTAMP_TOLERANCE_SECONDS:
+        return None, "future_spx_anchor"
+    if es_age < -FUTURE_TIMESTAMP_TOLERANCE_SECONDS:
+        return None, "future_es_anchor"
+    if spx_age > settings.max_spx_age_seconds:
         return None, "stale_spx_anchor"
-    if (as_utc(state.as_of) - es_at).total_seconds() > settings.max_es_age_seconds:
+    if es_age > settings.max_es_age_seconds:
         return None, "stale_es_anchor"
     if abs((spx_at - es_at).total_seconds()) > settings.max_anchor_skew_seconds:
         return None, "anchor_timestamp_skew"

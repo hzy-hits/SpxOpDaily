@@ -6,22 +6,20 @@ import hashlib
 from spx_spark.config import NotificationSettings
 from spx_spark.notifier.deepseek import deepseek_usage_limited, run_deepseek_reviewer
 from spx_spark.notifier.dispatcher import dispatch_notification, enqueue_notification
-from spx_spark.notifier.llm_writer import generate_push_text, load_previous_push, record_push
+from spx_spark.notifier.llm_writer import load_previous_push, record_push
 from spx_spark.notifier.model import CommandRunner, NotificationResult, SinkResult, default_runner
 from spx_spark.notifier.policy import (
     alert_key,
-    alerts_are_latency_critical,
     alerts_are_market_signals,
-    codex_message_respects_desk_style,
     codex_message_delivery_verdict,
     codex_message_respects_human_scope,
     context_only_alerts,
     direct_push_alerts,
     is_review_failure_failopen_alert,
     split_time_sensitive_review_candidates,
-    strip_delivery_protocol_cue,
 )
 from spx_spark.notifier.pipeline_support import (
+    notification_handled as _notification_handled,
     record_delivered_event_ids as _record_delivered_event_ids,
     scope_sink as _scope_sink,
     scope_sinks as _scope_sinks,
@@ -29,16 +27,11 @@ from spx_spark.notifier.pipeline_support import (
     successful_delivery_outcome as _successful_delivery_outcome,
     telemetry_alert_key as _telemetry_alert_key,
 )
-from spx_spark.notifier.prompts import (
-    build_codex_prompt,
-    build_direct_push_prompt,
-    format_alert_message,
-)
+from spx_spark.notifier.prompts import build_codex_prompt, format_alert_message
 from spx_spark.notifier.receipts import NotificationEnvelope, notification_event_id
 from spx_spark.notifier.format_push import push_lane_for_alerts
 from spx_spark.notifier.review_audit import append_review_audit
 from spx_spark.notifier.sinks import (
-    any_delivery_ok,
     bark_title_for_alerts,
     run_codex_exec,
     run_openclaw_agent,
@@ -77,10 +70,18 @@ def _dispatch_alerts(
             occurred_at=occurred_at,
             identity=identity,
         )
-    if lane in {"ops", "mixed"}:
+    alert_kinds = {str(alert.get("kind") or "") for alert in alerts}
+    if alert_kinds and alert_kinds <= {"ibkr_session_interrupted"}:
+        receipt_lane = "execution_safety"
+    elif lane in {"ops", "mixed"}:
         receipt_lane = "ops_transition"
     elif all(str(alert.get("source_gate") or "") == "ibkr_positions" for alert in alerts):
         receipt_lane = "position_safety"
+    elif alert_kinds and alert_kinds <= {
+        "gth_directional_advisory",
+        "gth_advisory_management",
+    }:
+        receipt_lane = "gth_directional_advisory"
     else:
         receipt_lane = "market_warning"
     envelope = NotificationEnvelope(
@@ -99,6 +100,16 @@ def _dispatch_alerts(
             friend=friend,
             enqueued_at=now,
         )
+        if enqueued.outcome == "quiet_window_suppressed":
+            return [
+                SinkResult(
+                    sink="quiet_window_policy",
+                    attempted=False,
+                    ok=True,
+                    error="suppressed from RTH close until the next SPX GTH open",
+                    verdict="suppressed",
+                )
+            ]
         if not enqueued.targets:
             return [
                 SinkResult(
@@ -217,7 +228,7 @@ def _failopen_safety_alerts(
         failopen_alerts,
     )
     sinks.extend(delivery_sinks)
-    if any_delivery_ok(delivery_sinks):
+    if _notification_handled(delivery_sinks):
         alerts_marked_sent.extend(failopen_alerts)
         _record_delivered_event_ids(failopen_alerts, acknowledged_event_ids)
         return handled_alerts, delivery_sinks, suppressed
@@ -305,7 +316,7 @@ def _deliver_review_message(
                 "invalid_parser_pending"
                 if remaining
                 else "invalid_parser_correlated_suppressed"
-                if suppressed and not any_delivery_ok(delivery_sinks)
+                if suppressed and not _notification_handled(delivery_sinks)
                 else "invalid_parser_failopen_delivered"
             ),
             reviewer_sink=reviewer_sink,
@@ -341,9 +352,10 @@ def _deliver_review_message(
                 return []
             if suppressed:
                 message = format_alert_message(payload, delivery_candidates)
-            human_message = strip_delivery_protocol_cue(message)
-            if not codex_message_respects_desk_style(message):
-                human_message = format_alert_message(payload, delivery_candidates)
+            # The model may classify delivery, but it may not author market
+            # facts.  Render the human message only from deterministic
+            # candidates so a reviewer cannot invent prices, levels, or P/L.
+            human_message = format_alert_message(payload, delivery_candidates)
             lane = push_lane_for_alerts(delivery_candidates)
             friend = lane == "trade" and alerts_are_market_signals(delivery_candidates)
             delivery_sinks = _scope_sinks(
@@ -362,7 +374,7 @@ def _deliver_review_message(
                 delivery_candidates,
             )
             sinks.extend(delivery_sinks)
-            if any_delivery_ok(delivery_sinks):
+            if _notification_handled(delivery_sinks):
                 alerts_marked_sent.extend(delivery_candidates)
                 _record_delivered_event_ids(delivery_candidates, acknowledged_event_ids)
                 record_push("intraday_alert", human_message, at=now_utc.isoformat())
@@ -422,7 +434,7 @@ def _deliver_review_message(
                 "scope_blocked_pending"
                 if remaining
                 else "scope_blocked_correlated_suppressed"
-                if suppressed and not any_delivery_ok(delivery_sinks)
+                if suppressed and not _notification_handled(delivery_sinks)
                 else "scope_blocked_failopen_delivered"
             ),
             reviewer_sink=reviewer_sink,
@@ -508,7 +520,7 @@ def _handle_reviewer_failure(
             "review_failed_pending"
             if remaining
             else "review_failed_correlated_suppressed"
-            if suppressed and not any_delivery_ok(failopen_sinks)
+            if suppressed and not _notification_handled(failopen_sinks)
             else "review_failed_failopen_delivered"
         ),
         reviewer_sink=result,
@@ -565,6 +577,13 @@ def notify_payload(
     review_attempted = False
     alerts_marked_sent: list[dict[str, object]] = []
     acknowledged_event_ids: set[str] = set()
+    bypass_alerts, _correlated_bypass = _filter_recent_shock_correlations(
+        bypass_alerts,
+        settings=settings,
+        now_utc=now_utc,
+        alerts_marked_sent=alerts_marked_sent,
+        sinks=sinks,
+    )
 
     if context_alerts:
         alerts_marked_sent.extend(context_alerts)
@@ -614,7 +633,7 @@ def notify_payload(
             bypass_alerts,
         )
         sinks.extend(delivery_sinks)
-        if any_delivery_ok(delivery_sinks):
+        if _notification_handled(delivery_sinks):
             alerts_marked_sent.extend(bypass_alerts)
             _record_delivered_event_ids(bypass_alerts, acknowledged_event_ids)
         append_review_audit(
@@ -627,22 +646,16 @@ def notify_payload(
             scope_ok=None,
             outcome=(
                 _successful_delivery_outcome(delivery_sinks)
-                if any_delivery_ok(delivery_sinks)
+                if _notification_handled(delivery_sinks)
                 else "delivery_failed_pending"
             ),
             delivery_sinks=delivery_sinks,
         )
     elif bypass_alerts:
+        # Direct events use the deterministic formatter verbatim.  An LLM may
+        # decide whether reviewed alerts are delivered, but it may never
+        # rewrite market facts, prices, sizes, or execution language.
         bypass_message = format_alert_message(payload, bypass_alerts)
-        if settings.direct_push_llm_enabled and not alerts_are_latency_critical(bypass_alerts):
-            # Writer, not reviewer: the push decision is already made. Any
-            # failure falls back to the raw template so events are never lost.
-            bypass_message, _writer = generate_push_text(
-                bypass_message,
-                build_direct_push_prompt(payload, bypass_alerts),
-                settings,
-                runner=runner,
-            )
         lane = push_lane_for_alerts(bypass_alerts)
         friend = lane == "trade" and alerts_are_market_signals(bypass_alerts)
         delivery_sinks = _scope_sinks(
@@ -661,7 +674,7 @@ def notify_payload(
             bypass_alerts,
         )
         sinks.extend(delivery_sinks)
-        if any_delivery_ok(delivery_sinks):
+        if _notification_handled(delivery_sinks):
             alerts_marked_sent.extend(bypass_alerts)
             _record_delivered_event_ids(bypass_alerts, acknowledged_event_ids)
             record_push("direct_event", bypass_message, at=now_utc.isoformat())
@@ -675,7 +688,7 @@ def notify_payload(
             scope_ok=None,
             outcome=(
                 _successful_delivery_outcome(delivery_sinks)
-                if any_delivery_ok(delivery_sinks)
+                if _notification_handled(delivery_sinks)
                 else "delivery_failed_pending"
             ),
             delivery_sinks=delivery_sinks,

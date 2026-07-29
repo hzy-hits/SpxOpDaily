@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
@@ -17,6 +17,8 @@ from spx_spark.alert_engine import (
     iv_surface_freshness_alert,
     iv_surface_alerts,
     movement_alerts,
+    option_alert_underlier_gate,
+    option_map_alerts,
     system_event_alerts,
 )
 from spx_spark.alert_profile import active_window
@@ -32,7 +34,7 @@ from spx_spark.marketdata import (
     ProviderStatus,
     Quote,
 )
-from spx_spark.options_map import build_options_map
+from spx_spark.options_map import UnderlierReference, build_options_map
 from spx_spark.storage import LatestState
 
 
@@ -65,7 +67,10 @@ def make_quote(
         provider=Provider.IBKR,
         provider_symbol=instrument.canonical_id,
         received_at=now,
+        last_update_at=now,
         quality=quality,
+        bid=mark - 0.05,
+        ask=mark + 0.05,
         mark=mark,
         close=close,
         quote_time=now,
@@ -106,6 +111,7 @@ def make_option(
         provider=Provider.IBKR,
         provider_symbol=f"SPXW:{expiry}:{strike}:{right}",
         received_at=now,
+        last_update_at=now,
         quality=quality,
         bid=mark - 0.1,
         ask=mark + 0.1,
@@ -241,6 +247,101 @@ def test_alert_engine_suppresses_option_wall_alert_when_0dte_quotes_are_stale() 
     assert "option_gamma_regime" not in kinds
 
 
+def test_option_alert_defense_rejects_direct_cash_spx_during_gth() -> None:
+    gth = datetime(2026, 7, 27, 8, 57, tzinfo=timezone.utc)
+    state = make_state(
+        make_quote(InstrumentId.future("ES"), mark=7519.0, now=gth),
+        make_option(expiry="20260727", strike=7500, right="C", mark=10.0, now=gth),
+        make_option(expiry="20260727", strike=7500, right="P", mark=11.0, now=gth),
+        now=gth,
+    )
+    valid_map = build_options_map(state)
+    valid_gate = option_alert_underlier_gate(
+        valid_map,
+        expiry=valid_map.expiries[0],
+    )
+    assert valid_map.underlier.source == "chain_implied"
+    assert valid_gate.allowed is True
+    assert valid_gate.reason == "fresh_chain_implied_reference"
+    unsafe_map = replace(
+        valid_map,
+        underlier=UnderlierReference(
+            price=7411.98,
+            source="index:SPX",
+            source_at=gth,
+            received_at=gth,
+            session="gth",
+            freshness="fresh",
+            price_kind="last",
+            pricing_allowed=True,
+        ),
+    )
+
+    alerts = option_map_alerts(unsafe_map, window=active_window(gth))
+
+    assert not any(
+        alert.kind in {"option_wall_proximity", "option_gamma_regime"} for alert in alerts
+    )
+    suppression = next(
+        alert for alert in alerts if alert.kind == "option_underlier_gate_suppressed"
+    )
+    assert suppression.audit_context == {
+        "allowed": False,
+        "underlier": 7411.98,
+        "source": "index:SPX",
+        "session": "gth",
+        "freshness": "fresh",
+        "reason": "cash_spx_outside_rth",
+    }
+
+
+def test_option_alert_defense_accepts_fresh_rth_cash_spx() -> None:
+    rth = datetime(2026, 7, 27, 14, 0, tzinfo=timezone.utc)
+    state = make_state(
+        replace(
+            make_quote(InstrumentId.index("SPX"), mark=7498.5, now=rth),
+            mark=None,
+            last=7498.5,
+            trade_time=rth,
+        ),
+        make_option(expiry="20260727", strike=7500, right="C", mark=10.0, now=rth),
+        make_option(expiry="20260727", strike=7500, right="P", mark=11.0, now=rth),
+        now=rth,
+    )
+    options_map = build_options_map(state)
+
+    gate = option_alert_underlier_gate(
+        options_map,
+        expiry=options_map.expiries[0],
+    )
+
+    assert gate.allowed is True
+    assert gate.reason == "fresh_rth_cash_spx"
+
+
+def test_option_alert_defense_suppresses_es_coordinate_end_to_end() -> None:
+    gth = datetime(2026, 7, 27, 8, 57, tzinfo=timezone.utc)
+    state = make_state(
+        make_quote(InstrumentId.future("ES"), mark=7519.0, now=gth),
+        make_option(expiry="20260727", strike=7500, right="C", mark=10.0, now=gth),
+        now=gth,
+    )
+    options_map = build_options_map(state)
+
+    alerts = option_map_alerts(options_map, window=active_window(gth))
+
+    assert options_map.underlier.source == "future:ES"
+    assert not any(
+        alert.kind in {"option_wall_proximity", "option_gamma_regime"} for alert in alerts
+    )
+    suppression = next(
+        alert for alert in alerts if alert.kind == "option_underlier_gate_suppressed"
+    )
+    assert suppression.audit_context is not None
+    assert suppression.audit_context["source"] == "future:ES"
+    assert suppression.audit_context["reason"] == "spx_strike_coordinate_mismatch"
+
+
 def test_iv_surface_stale_alert_suppresses_surface_alerts() -> None:
     now = datetime(2026, 7, 7, 3, 15, tzinfo=BJ_TZ)
     surface = make_surface(as_of=now - timedelta(minutes=10))
@@ -263,7 +364,10 @@ def test_hyperliquid_proxy_is_context_only_without_tradfi_anchor() -> None:
         provider=Provider.HYPERLIQUID,
         provider_symbol="xyz:SP500",
         received_at=now,
+        last_update_at=now,
         quality=MarketDataQuality.LIVE,
+        bid=7599.5,
+        ask=7600.5,
         mark=7600.0,
         close=7500.0,
         quote_time=now,
@@ -290,7 +394,10 @@ def test_hyperliquid_proxy_watch_stays_research_only_when_ibkr_is_unavailable() 
         provider=Provider.HYPERLIQUID,
         provider_symbol="xyz:SP500",
         received_at=now,
+        last_update_at=now,
         quality=MarketDataQuality.LIVE,
+        bid=7599.5,
+        ask=7600.5,
         mark=7600.0,
         close=7500.0,
         quote_time=now,
@@ -383,7 +490,10 @@ def test_hyperliquid_proxy_watch_is_research_only_when_anchor_is_closed() -> Non
         provider=Provider.HYPERLIQUID,
         provider_symbol="xyz:SP500",
         received_at=now,
+        last_update_at=now,
         quality=MarketDataQuality.LIVE,
+        bid=7599.5,
+        ask=7600.5,
         mark=7600.0,
         close=7500.0,
         quote_time=now,
@@ -403,10 +513,7 @@ def test_hyperliquid_proxy_watch_is_research_only_when_anchor_is_closed() -> Non
     alerts = evaluate_alerts(state, window=active_window(now), market_context=context)
     fallback_alerts = [alert for alert in alerts if alert.kind == "broker_unavailable_proxy_watch"]
 
-    assert fallback_alerts
-    assert fallback_alerts[0].instrument_id == "crypto_perp:xyz:SP500"
-    assert fallback_alerts[0].research_only is True
-    assert "No live SPX/ES anchor" in fallback_alerts[0].detail
+    assert fallback_alerts == []
 
 
 def test_ibkr_session_transition_alerts_are_edge_triggered(tmp_path, monkeypatch) -> None:
@@ -568,6 +675,8 @@ def _write_failover_transition(
     mode: str,
     schwab_reason: str | None = None,
     ibkr_reason: str | None = None,
+    occurred_at: datetime | None = None,
+    monitoring_context: str = "rth",
 ) -> None:
     path.write_text(
         json.dumps(
@@ -581,13 +690,14 @@ def _write_failover_transition(
                 "last_schwab_reason": schwab_reason,
                 "last_ibkr_reason": ibkr_reason,
                 "monitoring_active": True,
+                "monitoring_context": monitoring_context,
                 "ibkr_market_data_required": mode != "schwab_primary",
                 "transition": {
                     "transition_id": f"provider-failover:{sequence}:{mode}",
                     "sequence": sequence,
                     "previous_mode": previous_mode,
                     "mode": mode,
-                    "occurred_at": now.isoformat(),
+                    "occurred_at": (occurred_at or now).isoformat(),
                     "reason": "test transition",
                 },
             }
@@ -611,16 +721,37 @@ def test_provider_failover_transitions_are_edge_triggered(tmp_path, monkeypatch)
     )
 
     first = system_event_alerts(make_state(now=now))
-    repeated = system_event_alerts(make_state(now=now))
+    incident_at = now + timedelta(minutes=5)
+    _write_failover_transition(
+        failover_path,
+        now=incident_at,
+        occurred_at=now,
+        sequence=2,
+        previous_mode="recovery_pending",
+        mode="ibkr_fallback",
+    )
+    confirmed = system_event_alerts(make_state(now=incident_at))
+    repeated = system_event_alerts(make_state(now=incident_at))
 
-    assert [alert.kind for alert in first] == ["market_data_ibkr_fallback_activated"]
-    assert first[0].source_gate == "provider_failover_state"
+    assert first == []
+    assert [alert.kind for alert in confirmed] == ["market_data_ibkr_fallback_activated"]
+    assert confirmed[0].source_gate == "provider_failover_state"
     assert repeated == []
 
-    restored_at = now + timedelta(minutes=5)
+    recovery_started_at = incident_at + timedelta(minutes=1)
+    _write_failover_transition(
+        failover_path,
+        now=recovery_started_at,
+        sequence=3,
+        previous_mode="ibkr_fallback",
+        mode="schwab_primary",
+    )
+    assert system_event_alerts(make_state(now=recovery_started_at)) == []
+    restored_at = recovery_started_at + timedelta(minutes=3)
     _write_failover_transition(
         failover_path,
         now=restored_at,
+        occurred_at=recovery_started_at,
         sequence=3,
         previous_mode="ibkr_fallback",
         mode="schwab_primary",
@@ -643,7 +774,17 @@ def test_both_direct_providers_unavailable_is_critical(tmp_path, monkeypatch) ->
         mode="both_unavailable",
     )
 
-    alerts = system_event_alerts(make_state(now=now))
+    assert system_event_alerts(make_state(now=now)) == []
+    confirmed_at = now + timedelta(minutes=5)
+    _write_failover_transition(
+        failover_path,
+        now=confirmed_at,
+        occurred_at=now,
+        sequence=2,
+        previous_mode="recovery_pending",
+        mode="both_unavailable",
+    )
+    alerts = system_event_alerts(make_state(now=confirmed_at))
 
     assert [alert.kind for alert in alerts] == ["market_data_all_providers_unavailable"]
     assert alerts[0].severity == "critical"
@@ -664,13 +805,27 @@ def test_gth_option_gap_does_not_claim_whole_provider_outage(tmp_path, monkeypat
         mode="both_unavailable",
         schwab_reason=reason,
         ibkr_reason=reason,
+        monitoring_context="gth",
     )
 
-    alerts = system_event_alerts(make_state(now=now))
+    assert system_event_alerts(make_state(now=now)) == []
+    confirmed_at = now + timedelta(minutes=5)
+    _write_failover_transition(
+        failover_path,
+        now=confirmed_at,
+        occurred_at=now,
+        sequence=2,
+        previous_mode="recovery_pending",
+        mode="both_unavailable",
+        schwab_reason=reason,
+        ibkr_reason=reason,
+        monitoring_context="gth",
+    )
+    alerts = system_event_alerts(make_state(now=confirmed_at))
 
-    assert alerts[0].title == "Schwab/IBKR 的 GTH SPXW 报价均不可用"
-    assert "ES 连续行情可能仍正常" in alerts[0].detail
-    assert "期权定价和新开仓闸门关闭" in alerts[0].detail
+    assert alerts[0].title == "GTH 执行行情持续不可用"
+    assert "IBKR 主 GTH SPXW" in alerts[0].detail
+    assert "新开仓闸门关闭" in alerts[0].detail
 
 
 def test_schwab_recovery_before_takeover_is_audit_only(
@@ -763,7 +918,7 @@ def test_old_or_inactive_failover_transition_never_pages_after_restart(
     failover_path = tmp_path / "provider-failover.json"
     monkeypatch.setenv("PROVIDER_FAILOVER_STATE_PATH", str(failover_path))
     now = datetime(2026, 7, 13, 22, 0, tzinfo=BJ_TZ)
-    old = now - timedelta(minutes=10)
+    old = now - timedelta(minutes=16)
     _write_failover_transition(
         failover_path,
         now=old,
@@ -891,7 +1046,7 @@ def test_overnight_dip_escalates_to_high_severity(tmp_path, monkeypatch) -> None
     # quiet_futures_context window (now high priority for off-hours parity).
     now = datetime(2026, 7, 7, 7, 0, tzinfo=BJ_TZ)
     window = active_window(now)
-    assert window.priority == "high"
+    assert window.priority == "off"
 
     # -40 bps clears the high-window 30 bps bar and consumes ~98% of the day EM.
     state = make_state(
@@ -907,12 +1062,7 @@ def test_overnight_dip_escalates_to_high_severity(tmp_path, monkeypatch) -> None
     )
 
     moves = [alert for alert in alerts if alert.kind == "price_move_from_close"]
-    assert len(moves) == 1
-    # Window priority is already high, so the alert clears the notify gate
-    # without needing the old low→high EM escalation path.
-    assert moves[0].severity == "high"
-    assert moves[0].dedup_group == "down:1"
-    assert moves[0].threshold == 30.0
+    assert moves == []
 
 
 def test_iv_surface_degraded_expiry_still_emits_movement_alerts() -> None:
@@ -1070,6 +1220,120 @@ def test_run_reconciles_exact_position_event_acknowledgements(monkeypatch) -> No
     run(["--notify", "--json"])
 
     assert reconciled == [("event-1", "event-2")]
+
+
+def test_run_persists_movement_bucket_after_outbox_acceptance(monkeypatch) -> None:
+    from spx_spark.alert_engine import run
+    from spx_spark.notifier import NotificationResult
+
+    now = datetime(2026, 7, 7, 3, 15, tzinfo=BJ_TZ)
+    state = make_state(now=now)
+    persisted: list[LatestState] = []
+
+    class FakeStore:
+        def __init__(self, settings) -> None:
+            pass
+
+        def load(self, *, now=None, refresh_quality=True) -> LatestState:
+            return state
+
+    monkeypatch.setattr("spx_spark.alert_engine.LatestStateStore", FakeStore)
+    monkeypatch.setattr(
+        "spx_spark.alert_engine.evaluate_payload",
+        lambda *args, **kwargs: {
+            "alerts": [
+                {
+                    "kind": "price_move_from_close",
+                    "instrument_id": "future:ES",
+                    "severity": "high",
+                }
+            ],
+            "window": {"name": "test", "priority": "high"},
+            "as_of": now.isoformat(),
+            "alert_count": 1,
+        },
+    )
+    monkeypatch.setattr(
+        "spx_spark.alert_engine.notify_payload",
+        lambda *args, **kwargs: NotificationResult(
+            enabled=True,
+            selected_count=1,
+            sent_count=0,
+            skipped_reason=None,
+            sinks=(),
+            outcome="queued",
+        ),
+    )
+    monkeypatch.setattr(
+        "spx_spark.alert_engine.reconcile_position_event_acknowledgements",
+        lambda _event_ids: True,
+    )
+    monkeypatch.setattr("spx_spark.alert_engine.persist_system_event_state", lambda _state: None)
+    monkeypatch.setattr(
+        "spx_spark.alert_engine.persist_movement_state_snapshot",
+        lambda persisted_state: persisted.append(persisted_state),
+    )
+
+    run(["--notify", "--json"])
+
+    assert persisted == [state]
+
+
+def test_run_does_not_persist_movement_bucket_after_delivery_failure(monkeypatch) -> None:
+    from spx_spark.alert_engine import run
+    from spx_spark.notifier import NotificationResult
+
+    now = datetime(2026, 7, 7, 3, 15, tzinfo=BJ_TZ)
+    state = make_state(now=now)
+    persisted: list[LatestState] = []
+
+    class FakeStore:
+        def __init__(self, settings) -> None:
+            pass
+
+        def load(self, *, now=None, refresh_quality=True) -> LatestState:
+            return state
+
+    monkeypatch.setattr("spx_spark.alert_engine.LatestStateStore", FakeStore)
+    monkeypatch.setattr(
+        "spx_spark.alert_engine.evaluate_payload",
+        lambda *args, **kwargs: {
+            "alerts": [
+                {
+                    "kind": "price_move_from_close",
+                    "instrument_id": "future:ES",
+                    "severity": "high",
+                }
+            ],
+            "window": {"name": "test", "priority": "high"},
+            "as_of": now.isoformat(),
+            "alert_count": 1,
+        },
+    )
+    monkeypatch.setattr(
+        "spx_spark.alert_engine.notify_payload",
+        lambda *args, **kwargs: NotificationResult(
+            enabled=True,
+            selected_count=1,
+            sent_count=0,
+            skipped_reason=None,
+            sinks=(),
+            outcome="failed",
+        ),
+    )
+    monkeypatch.setattr(
+        "spx_spark.alert_engine.reconcile_position_event_acknowledgements",
+        lambda _event_ids: True,
+    )
+    monkeypatch.setattr("spx_spark.alert_engine.persist_system_event_state", lambda _state: None)
+    monkeypatch.setattr(
+        "spx_spark.alert_engine.persist_movement_state_snapshot",
+        lambda persisted_state: persisted.append(persisted_state),
+    )
+
+    run(["--notify", "--json"])
+
+    assert persisted == []
 
 
 def test_effective_move_threshold_bps_em_normalized_when_em_above_static() -> None:

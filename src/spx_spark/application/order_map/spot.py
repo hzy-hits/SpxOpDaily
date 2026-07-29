@@ -8,10 +8,15 @@ from datetime import datetime, timezone
 
 from spx_spark.analytics.options.pricing import finite_float
 from spx_spark.application.order_map.models import HL_SP500_PROXY_ID, SpotResolution
+from spx_spark.config import StorageSettings
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 from spx_spark.market_context import build_market_context
+from spx_spark.marketdata import FUTURE_TIMESTAMP_TOLERANCE_SECONDS, as_utc
 from spx_spark.options_map import OptionsMap, actionable_chain_implied_spot
-from spx_spark.storage import LatestState, configured_quote_use_decision
+from spx_spark.storage import (
+    LatestState,
+    configured_quote_use_decision,
+)
 
 
 def spx_cash_session_open(now_utc: datetime) -> bool:
@@ -41,14 +46,12 @@ def report_trigger_coordinate(
     """Return the level-compatible price coordinate used by report triggers."""
 
     if DEFAULT_MARKET_CALENDAR.is_rth_open(now):
-        quote = state.best_quote("index:SPX")
-        if quote is not None and configured_quote_use_decision(
-            quote, as_of=now
-        ).pricing_allowed:
+        price = actionable_live_price(state, "index:SPX", as_of=now)
+        if price is not None:
             return {
                 "kind": "official_spx",
                 "instrument_id": "index:SPX",
-                "observed_value": quote.effective_price,
+                "observed_value": price,
                 "source": "index:SPX",
             }
         return {
@@ -96,14 +99,55 @@ def _actionable_tradfi_spot(
     # Only cash SPX is level-compatible with SPXW option repricing. ES/MES
     # remain independent liveness/basis anchors; SPY*10 is an ATM fallback.
     for instrument_id, multiplier in (("index:SPX", 1.0),):
-        quote = state.best_quote(instrument_id)
-        if quote is None:
-            continue
-        decision = configured_quote_use_decision(quote, as_of=as_of)
-        price = finite_float(quote.effective_price)
-        if decision.pricing_allowed and price is not None and price > 0:
+        price = actionable_live_price(state, instrument_id, as_of=as_of)
+        if price is not None:
             return price * multiplier, instrument_id
     return None, None
+
+
+def actionable_live_price(
+    state: LatestState,
+    instrument_id: str,
+    *,
+    as_of: datetime,
+    settings: StorageSettings | None = None,
+) -> float | None:
+    """Actionable mid/last with its own field clock; never mark or close."""
+
+    settings = settings or StorageSettings.from_env()
+    quote = state.best_quote(instrument_id)
+    if quote is None or not configured_quote_use_decision(
+        quote,
+        as_of=as_of,
+        settings=settings,
+    ).pricing_allowed:
+        return None
+    if (
+        quote.bid is not None
+        and quote.mid is not None
+        and quote.ask is not None
+        and 0 < quote.bid <= quote.mid <= quote.ask
+        and quote.quote_time is not None
+    ):
+        price = float(quote.mid)
+        source_at = quote.quote_time
+    elif quote.last is not None and quote.last > 0 and quote.trade_time is not None:
+        price = float(quote.last)
+        source_at = quote.trade_time
+    else:
+        return None
+    max_age = (
+        settings.slow_index_stale_after_seconds
+        if instrument_id in settings.slow_index_labels
+        else settings.latest_stale_after_seconds
+    )
+    source_age = (as_utc(as_of) - as_utc(source_at)).total_seconds()
+    if (
+        source_age < -FUTURE_TIMESTAMP_TOLERANCE_SECONDS
+        or source_age > max_age
+    ):
+        return None
+    return price
 
 
 def _hl_basis_thresholds(pricing_source: str | None) -> tuple[float, float]:

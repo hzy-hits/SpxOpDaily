@@ -315,6 +315,28 @@ def test_provider_health_tolerates_scheduler_jitter_but_rejects_delayed_feed() -
     assert delayed.healthy is False
 
 
+def test_provider_health_matches_expiry_qualified_future_family() -> None:
+    now = datetime(2026, 7, 13, 14, 0, tzinfo=UTC)
+    spx = quote(InstrumentId.index("SPX"), Provider.IBKR, now)
+    es = quote(
+        InstrumentId.future("ES", expiry="20260918"),
+        Provider.IBKR,
+        now,
+    )
+
+    health = provider_health(
+        latest(now, spx, es),
+        Provider.IBKR,
+        required_instruments=("index:SPX", "future:ES"),
+        provider_state_max_age_seconds=45.0,
+        quote_max_age_seconds=30.0,
+    )
+
+    assert es.instrument.canonical_id == "future:ES:20260918"
+    assert health.healthy is True
+    assert latest(now, es).best_quote("future:ES") is es
+
+
 def test_provider_health_rejects_close_only_anchor() -> None:
     now = datetime(2026, 7, 13, 14, 0, tzinfo=UTC)
     close_only_spx = Quote(

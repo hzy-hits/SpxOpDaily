@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -15,6 +16,8 @@ from spx_spark.alert_model import Alert, severity_for_priority
 from spx_spark.alert_profile import AlertWindow
 from spx_spark.config import env_bool, env_float
 from spx_spark.iv_surface import IvSurfaceSnapshot
+from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
+from spx_spark.marketdata import FUTURE_TIMESTAMP_TOLERANCE_SECONDS, as_utc
 from spx_spark.options_map import OptionsMap
 from spx_spark.settings import DEFAULT_ALERT_SETTINGS, AlertSettings
 
@@ -144,6 +147,7 @@ def option_map_alerts(
 ) -> list[Alert]:
     alerts: list[Alert] = []
     underlier = options_map.underlier.price
+    gate_alert_added = False
     wall_threshold = max(
         settings.wall_proximity_min_points,
         (
@@ -155,6 +159,33 @@ def option_map_alerts(
     for expiry in options_map.expiries:
         if not option_coverage_is_fresh(expiry, settings=settings):
             alerts.append(option_freshness_alert(expiry, window=window, settings=settings))
+            continue
+        underlier_gate = option_alert_underlier_gate(
+            options_map,
+            expiry=expiry,
+            settings=settings,
+        )
+        if not underlier_gate.allowed:
+            if not gate_alert_added:
+                alerts.append(
+                    Alert(
+                        severity="low",
+                        kind="option_underlier_gate_suppressed",
+                        instrument_id=f"option_map:SPXW:{expiry.expiry}",
+                        title="SPXW strike-coordinate alerts suppressed",
+                        detail=(
+                            "Wall/gamma alert gate closed: "
+                            f"{underlier_gate.reason}."
+                        ),
+                        quality=underlier_gate.freshness,
+                        value=underlier_gate.underlier,
+                        research_only=True,
+                        source_gate="options_map_underlier_gate",
+                        dedup_group=underlier_gate.reason,
+                        audit_context=underlier_gate.to_dict(),
+                    )
+                )
+                gate_alert_added = True
             continue
         if expiry.gamma_state in OPTION_GAMMA_ALERT_STATES and gamma_regime_observation_stable(
             expiry.expiry,
@@ -176,6 +207,7 @@ def option_map_alerts(
                     title=f"SPXW {expiry.expiry} {expiry.gamma_state}",
                     detail=gamma_detail,
                     value=expiry.net_gamma_ratio,
+                    source_gate=f"options_map_underlier:{options_map.underlier.source}",
                     dedup_group=expiry.gamma_state,
                 )
             )
@@ -209,6 +241,7 @@ def option_map_alerts(
                         detail=wall_detail,
                         value=expiry.nearest_wall_distance_points,
                         threshold=wall_threshold,
+                        source_gate=f"options_map_underlier:{options_map.underlier.source}",
                         dedup_group=wall_dedup_band(
                             expiry.nearest_wall,
                             settings.wall_dedup_band_points,
@@ -216,6 +249,104 @@ def option_map_alerts(
                     )
                 )
     return alerts
+
+
+@dataclass(frozen=True)
+class OptionUnderlierGate:
+    allowed: bool
+    underlier: float | None
+    source: str | None
+    session: str
+    freshness: str
+    reason: str
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "allowed": self.allowed,
+            "underlier": self.underlier,
+            "source": self.source,
+            "session": self.session,
+            "freshness": self.freshness,
+            "reason": self.reason,
+        }
+
+
+def _options_map_session(as_of: datetime) -> str:
+    if DEFAULT_MARKET_CALENDAR.is_rth_open(as_of):
+        return "rth"
+    if DEFAULT_MARKET_CALENDAR.is_spx_gth_open(as_of):
+        return "gth"
+    return "closed"
+
+
+def option_alert_underlier_gate(
+    options_map: OptionsMap,
+    *,
+    expiry: object | None = None,
+    settings: AlertSettings = DEFAULT_ALERT_SETTINGS,
+) -> OptionUnderlierGate:
+    """Defense-in-depth gate for strike-coordinate alerts.
+
+    GTH permits only a parity-derived SPX coordinate.  Direct cash SPX is
+    accepted only during RTH; ES/SPY/MES references remain mismatch context.
+    The reference must also carry independently auditable source and receipt
+    freshness established by options-map orchestration.
+    """
+
+    reference = options_map.underlier
+    price = reference.price
+    source = reference.source
+    session = _options_map_session(options_map.as_of)
+    freshness = reference.freshness or "unverified"
+
+    def result(allowed: bool, reason: str, *, state: str | None = None) -> OptionUnderlierGate:
+        return OptionUnderlierGate(
+            allowed=allowed,
+            underlier=price,
+            source=source,
+            session=session,
+            freshness=state or freshness,
+            reason=reason,
+        )
+
+    if price is None or price <= 0:
+        return result(False, "missing_or_nonpositive_underlier", state="missing")
+    if reference.session != session:
+        return result(False, "session_unverified_or_mismatch")
+    if reference.pricing_allowed is not True:
+        return result(False, "pricing_not_allowed")
+    if freshness != "fresh":
+        return result(False, "underlier_not_fresh")
+    if reference.source_at is None or reference.received_at is None:
+        return result(False, "freshness_clock_missing", state="unverified")
+    source_age = (as_utc(options_map.as_of) - as_utc(reference.source_at)).total_seconds()
+    received_age = (as_utc(options_map.as_of) - as_utc(reference.received_at)).total_seconds()
+    max_age = 90.0
+    if not (
+        -FUTURE_TIMESTAMP_TOLERANCE_SECONDS <= source_age <= max_age
+        and -FUTURE_TIMESTAMP_TOLERANCE_SECONDS <= received_age <= max_age
+    ):
+        return result(False, "freshness_clock_out_of_range", state="stale")
+    if source == "chain_implied":
+        if reference.price_kind != "chain_implied":
+            return result(False, "chain_implied_provenance_missing")
+        if expiry is None or not option_coverage_is_fresh(expiry, settings=settings):
+            return result(False, "chain_implied_option_coverage_not_fresh", state="stale")
+        return result(True, "fresh_chain_implied_reference")
+    if source == "index:SPX":
+        if session != "rth":
+            return result(False, "cash_spx_outside_rth")
+        if reference.price_kind not in {"last", "mid"}:
+            return result(False, "cash_spx_price_kind_not_live")
+        return result(True, "fresh_rth_cash_spx")
+    return result(False, "spx_strike_coordinate_mismatch")
+
+
+def option_alert_underlier_is_actionable(options_map: OptionsMap) -> bool:
+    """Compatibility boolean; new callers should retain the structured gate."""
+
+    expiry = options_map.expiries[0] if options_map.expiries else None
+    return option_alert_underlier_gate(options_map, expiry=expiry).allowed
 
 
 def iv_surface_freshness_alert(surface: IvSurfaceSnapshot, *, now: datetime) -> Alert | None:
@@ -362,6 +493,8 @@ def iv_surface_alerts(
             settings.skew_25d_threshold,
         )
         if (
+            expiry.skew_method == "delta_25"
+            and
             expiry.put_skew_25d_change_5m is not None
             and expiry.put_skew_25d_change_5m >= skew_25d_threshold
         ):
@@ -526,4 +659,3 @@ def iv_surface_alerts(
                         )
                     )
     return alerts
-

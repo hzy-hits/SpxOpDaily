@@ -7,7 +7,6 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
-
 class Provider(str, Enum):
     IBKR = "ibkr"
     SCHWAB = "schwab"
@@ -88,18 +87,10 @@ QUALITY_RANK: dict[MarketDataQuality, int] = {
 }
 
 
-# Structural default kept in L0 so marketdata stays stdlib-only. Runtime
-# overrides flow through StorageSettings.provider_priority / choose_best_quote.
 DEFAULT_PROVIDER_PRIORITY: tuple[Provider, ...] = (
-    Provider.SCHWAB,
-    Provider.IBKR,
-    Provider.HYPERLIQUID,
-    Provider.POLYMARKET,
-    Provider.INTERNAL,
-    Provider.MOCK,
-    Provider.UNKNOWN,
+    Provider.SCHWAB, Provider.IBKR, Provider.HYPERLIQUID, Provider.POLYMARKET,
+    Provider.INTERNAL, Provider.MOCK, Provider.UNKNOWN,
 )
-
 
 @dataclass(frozen=True)
 class InstrumentId:
@@ -234,11 +225,16 @@ class InstrumentId:
             return f"{self.instrument_type.value}:{self.symbol}:{self.expiry}"
         return f"{self.instrument_type.value}:{self.symbol}"
 
+    @property
+    def family_id(self) -> str:
+        return f"future:{self.symbol}" if self.instrument_type == InstrumentType.FUTURE else self.canonical_id
+
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
         payload["instrument_type"] = self.instrument_type.value
         payload["right"] = self.right.value if self.right else None
         payload["canonical_id"] = self.canonical_id
+        payload["family_id"] = self.family_id
         return payload
 
 
@@ -609,7 +605,9 @@ class NormalizedSnapshot:
     provider_states: tuple[ProviderState, ...] = ()
 
     def quotes_for(self, instrument_id: str) -> tuple[Quote, ...]:
-        return tuple(quote for quote in self.quotes if quote.instrument.canonical_id == instrument_id)
+        return tuple(
+            quote for quote in self.quotes if instrument_matches_id(quote.instrument, instrument_id)
+        )
 
     def best_quote(
         self,
@@ -625,6 +623,16 @@ class NormalizedSnapshot:
             "quotes": [quote.to_dict() for quote in self.quotes],
             "provider_states": [state.to_dict() for state in self.provider_states],
         }
+
+
+def instrument_matches_id(instrument: Any, requested_id: str) -> bool:
+    canonical_id = str(getattr(instrument, "canonical_id", ""))
+    instrument_type = getattr(instrument, "instrument_type", InstrumentType.UNKNOWN)
+    kind = str(getattr(instrument_type, "value", instrument_type)).lower()
+    family_id = getattr(instrument, "family_id", f"{kind}:{getattr(instrument, 'symbol', '')}")
+    return canonical_id == requested_id or (
+        kind == InstrumentType.FUTURE.value and family_id == requested_id
+    )
 
 
 def instrument_from_dict(payload: Mapping[str, Any]) -> InstrumentId:

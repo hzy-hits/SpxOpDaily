@@ -481,7 +481,7 @@ def _gate_reasons(
     else:
         if str(expiry_row.get("quality") or "") in {"", "unavailable", "no_open_interest"}:
             reasons.append("exposure_quality_unavailable")
-        if str(expiry_row.get("oi_quality") or "") in {"", "missing", "stale_or_zero"}:
+        if str(expiry_row.get("oi_quality") or "") != "ibkr_ok":
             reasons.append("open_interest_quality_unavailable")
         if finite_float(_child(expiry_row, "oi_weighted").get("net_gamma_ratio")) is None:
             reasons.append("net_gamma_ratio_unavailable")

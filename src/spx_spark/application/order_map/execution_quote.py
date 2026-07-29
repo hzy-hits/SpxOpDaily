@@ -12,6 +12,9 @@ from spx_spark.settings.order_map import DEFAULT_ORDER_MAP_POLICY, OrderMapPolic
 from spx_spark.storage import configured_quote_use_decision
 
 
+MAX_FUTURE_TIMESTAMP_SKEW_SECONDS = 5.0
+
+
 class ExecutionQuoteStatus(StrEnum):
     EXECUTABLE = "executable"
     RANGE_ONLY = "range_only"
@@ -82,13 +85,17 @@ def evaluate_execution_quote(
         reasons.append("spread_percentile_exceeded")
 
     transport_at = quote.last_update_at or quote.received_at
-    source_at = quote.quote_time or quote.trade_time
+    source_at = quote.quote_time
     transport_age = _age_seconds(as_of, transport_at)
     source_age = _age_seconds(as_of, source_at)
     if transport_age is None or transport_age > policy.execution_max_quote_age_seconds:
         reasons.append("transport_quote_stale")
+    elif transport_age < -MAX_FUTURE_TIMESTAMP_SKEW_SECONDS:
+        reasons.append("execution_quote_transport_timestamp_in_future")
     if source_age is None or source_age > policy.execution_max_source_age_seconds:
         reasons.append("source_quote_stale_or_unverified")
+    elif source_age < -MAX_FUTURE_TIMESTAMP_SKEW_SECONDS:
+        reasons.append("execution_quote_source_timestamp_in_future")
 
     provider_mids: dict[str, float] = {}
     excluded_providers: list[str] = []
@@ -133,7 +140,7 @@ def _age_seconds(as_of: datetime, value: datetime | None) -> float | None:
     if value is None:
         return None
     now = _utc(as_of)
-    return max((now - _utc(value)).total_seconds(), 0.0)
+    return (now - _utc(value)).total_seconds()
 
 
 def _provider_quote_exclusion(
@@ -147,10 +154,12 @@ def _provider_quote_exclusion(
 
     if not configured_quote_use_decision(quote, as_of=as_of).pricing_allowed:
         return "quote_not_actionable"
-    source_at = quote.quote_time or quote.trade_time
+    source_at = quote.quote_time
     source_age = _age_seconds(as_of, source_at)
     if source_age is None or source_age > policy.execution_max_source_age_seconds:
         return "source_stale_or_unverified"
+    if source_age < -MAX_FUTURE_TIMESTAMP_SKEW_SECONDS:
+        return "source_timestamp_in_future"
     reference_underlier = _greeks_underlier(reference)
     quote_underlier = _greeks_underlier(quote)
     if (

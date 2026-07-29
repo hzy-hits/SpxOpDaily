@@ -101,6 +101,7 @@ def pricing_provider_priority(
     *,
     as_of: datetime,
     configured: Iterable[Provider | str],
+    failover_mode: str | None = None,
 ) -> tuple[Provider | str, ...]:
     """Apply the SPXW session provider policy before configured fallback order."""
 
@@ -108,11 +109,19 @@ def pricing_provider_priority(
     is_spxw = (instrument.trading_class or "").upper() == "SPXW"
     if not is_spxw:
         return priority
+    controlled = _controlled_spxw_provider(failover_mode)
+    if controlled is not None:
+        return _provider_first(controlled, priority)
     preferred = _preferred_spxw_provider(as_of)
     return _provider_first(preferred, priority) if preferred is not None else priority
 
 
-def pricing_candidates(quotes: Iterable[Quote], *, as_of: datetime) -> tuple[Quote, ...]:
+def pricing_candidates(
+    quotes: Iterable[Quote],
+    *,
+    as_of: datetime,
+    failover_mode: str | None = None,
+) -> tuple[Quote, ...]:
     """Fail closed for SPXW GTH instead of silently selecting Schwab frozen rows."""
 
     candidates = tuple(quotes)
@@ -120,10 +129,25 @@ def pricing_candidates(quotes: Iterable[Quote], *, as_of: datetime) -> tuple[Quo
         return ()
     instrument = candidates[0].instrument
     is_spxw = (instrument.trading_class or "").upper() == "SPXW"
+    if is_spxw and failover_mode in {"recovery_pending", "both_unavailable", "blocked"}:
+        return ()
+    controlled = _controlled_spxw_provider(failover_mode)
+    if is_spxw and controlled is not None:
+        candidates = tuple(
+            quote for quote in candidates if quote.provider is controlled
+        )
     is_gth_only = _preferred_spxw_provider(as_of) is Provider.IBKR
     if not is_spxw or not is_gth_only:
         return candidates
     return tuple(quote for quote in candidates if quote.provider is Provider.IBKR)
+
+
+def _controlled_spxw_provider(failover_mode: str | None) -> Provider | None:
+    if failover_mode == "schwab_primary":
+        return Provider.SCHWAB
+    if failover_mode == "ibkr_fallback":
+        return Provider.IBKR
+    return None
 
 
 def _preferred_spxw_provider(as_of: datetime) -> Provider | None:

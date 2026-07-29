@@ -23,6 +23,7 @@ from spx_spark.options_map import (
     gex_weight,
     interpolated_atm_iv,
     pair_by_strike,
+    select_underlier,
     signed_gex,
     structure_quality_ok,
     time_to_expiry_years,
@@ -79,12 +80,68 @@ def test_time_to_expiry_uses_early_close_session() -> None:
     assert years == pytest.approx(1.0 / (365.0 * 24.0))
 
 
+def test_underlier_last_never_uses_quote_clock_and_falls_back_to_mid() -> None:
+    now = datetime(2026, 7, 27, 14, 0, tzinfo=timezone.utc)
+    quote = Quote(
+        instrument=InstrumentId.index("SPX"),
+        provider=Provider.SCHWAB,
+        received_at=now,
+        last_update_at=now,
+        quote_time=now,
+        trade_time=None,
+        quality=MarketDataQuality.LIVE,
+        last=7000.0,
+        bid=5999.0,
+        ask=6001.0,
+    )
+    state = LatestState(now, now, (quote,), (quote,))
+
+    reference = select_underlier(state)
+
+    assert reference.price == 6000.0
+    assert reference.price_kind == "mid"
+
+
+@pytest.mark.parametrize("minutes", (16, 15, 5, 1))
+def test_time_to_expiry_uses_actual_final_minutes(minutes: int) -> None:
+    close = datetime(2026, 7, 6, 20, 0, tzinfo=timezone.utc)
+
+    years = time_to_expiry_years(
+        "20260706",
+        as_of=close - timedelta(minutes=minutes),
+    )
+
+    assert years == pytest.approx(minutes / (365.0 * 24.0 * 60.0))
+
+
+def test_time_to_expiry_is_zero_at_and_after_close() -> None:
+    close = datetime(2026, 7, 6, 20, 0, tzinfo=timezone.utc)
+
+    assert time_to_expiry_years("20260706", as_of=close) == 0.0
+    assert (
+        time_to_expiry_years(
+            "20260706",
+            as_of=close + timedelta(seconds=1),
+        )
+        == 0.0
+    )
+
+
 def make_state(*quotes: Quote, now: datetime) -> LatestState:
+    normalized = tuple(
+        replace(quote, trade_time=quote.quote_time)
+        if quote.instrument.canonical_id == "index:SPX"
+        and quote.last is not None
+        and quote.trade_time is None
+        and quote.quote_time is not None
+        else quote
+        for quote in quotes
+    )
     return LatestState(
         created_at=now,
         as_of=now,
-        quotes=tuple(quotes),
-        best_quotes=tuple(quotes),
+        quotes=normalized,
+        best_quotes=normalized,
     )
 
 
@@ -96,7 +153,7 @@ def test_options_map_builds_atm_straddle_iv_skew_and_walls() -> None:
         provider_symbol="index:SPX",
         received_at=now,
         quality=MarketDataQuality.LIVE,
-        mark=7500.0,
+        last=7500.0,
         quote_time=now,
     )
     state = make_state(
@@ -205,7 +262,10 @@ def test_structure_quality_tolerates_recent_stale_but_not_hard_bad() -> None:
         received_at=now - timedelta(minutes=5),
     )
     assert structure_quality_ok(recent_stale, as_of=now) is True
-    assert signed_gex(recent_stale, sign=-1.0, underlier=7438.0) is not None
+    assert (
+        signed_gex(recent_stale, sign=-1.0, underlier=7438.0, as_of=now)
+        is not None
+    )
 
     # Too old: excluded.
     old_stale = dc_replace(
@@ -253,7 +313,7 @@ def test_walls_come_from_ladder_and_respect_spot_side() -> None:
         provider_symbol="index:SPX",
         received_at=now,
         quality=MarketDataQuality.LIVE,
-        mark=7500.0,
+        last=7500.0,
         quote_time=now,
     )
     state = make_state(
@@ -392,7 +452,7 @@ def test_options_map_warns_when_open_interest_missing() -> None:
         provider_symbol="index:SPX",
         received_at=now,
         quality=MarketDataQuality.LIVE,
-        mark=7500.0,
+        last=7500.0,
         quote_time=now,
     )
     state = make_state(
@@ -425,7 +485,7 @@ def test_options_map_excludes_stale_quotes_from_iv_and_gex() -> None:
         provider_symbol="index:SPX",
         received_at=now,
         quality=MarketDataQuality.LIVE,
-        mark=7500.0,
+        last=7500.0,
         quote_time=now,
     )
     stale_call = replace(
@@ -461,7 +521,8 @@ def test_options_map_excludes_stale_quotes_from_iv_and_gex() -> None:
     assert expiry.atm_call_mid is None
     assert expiry.atm_iv == 0.22
     assert expiry.call_wall is None
-    assert expiry.put_wall == 7500
+    assert expiry.put_wall is None
+    assert expiry.wall_method == "unavailable"
 
 
 def test_options_map_underlier_mismatch_when_spx_missing_falls_back_to_es() -> None:
@@ -586,7 +647,7 @@ def test_options_map_excludes_delayed_quotes_from_iv_and_gex() -> None:
         provider_symbol="index:SPX",
         received_at=now,
         quality=MarketDataQuality.LIVE,
-        mark=7500.0,
+        last=7500.0,
         quote_time=now,
     )
     delayed_call = replace(
@@ -622,7 +683,8 @@ def test_options_map_excludes_delayed_quotes_from_iv_and_gex() -> None:
     assert expiry.atm_call_mid is None
     assert expiry.atm_iv == 0.22
     assert expiry.call_wall is None
-    assert expiry.put_wall == 7500
+    assert expiry.put_wall is None
+    assert expiry.wall_method == "unavailable"
 
 
 def test_strike_gex_open_interest_defaults_to_zero_when_missing() -> None:
@@ -649,7 +711,7 @@ def test_strike_gex_open_interest_defaults_to_zero_when_missing() -> None:
     )
     pairs = {7500.0: {OptionRight.CALL: call, OptionRight.PUT: put}}
 
-    rows = build_gex_by_strike(pairs, underlier=7500.0)
+    rows = build_gex_by_strike(pairs, underlier=7500.0, as_of=now)
 
     assert len(rows) == 1
     assert rows[0].call_open_interest == 0.0
@@ -671,8 +733,20 @@ def test_gex_weight_intraday_uses_oi_plus_volume() -> None:
         ),
         volume=400,
     )
-    oi_only = signed_gex(quote, sign=1.0, underlier=7500.0, intraday=False)
-    intraday = signed_gex(quote, sign=1.0, underlier=7500.0, intraday=True)
+    oi_only = signed_gex(
+        quote,
+        sign=1.0,
+        underlier=7500.0,
+        as_of=now,
+        intraday=False,
+    )
+    intraday = signed_gex(
+        quote,
+        sign=1.0,
+        underlier=7500.0,
+        as_of=now,
+        intraday=True,
+    )
     assert oi_only is not None
     assert intraday is not None
     assert intraday == pytest.approx(oi_only * 5.0)
@@ -705,7 +779,7 @@ def test_volume_only_intraday_gex_is_not_labeled_open_interest() -> None:
         received_at=now,
         quote_time=now,
         quality=MarketDataQuality.LIVE,
-        mark=7500.0,
+        last=7500.0,
     )
     rows = tuple(
         replace(
@@ -729,6 +803,199 @@ def test_volume_only_intraday_gex_is_not_labeled_open_interest() -> None:
     assert expiry.net_gex is not None
     assert expiry.gex_quality == "no_open_interest_gex"
     assert expiry.wall_method == "volume_fallback"
+
+
+def test_partial_open_interest_coverage_cannot_publish_oi_walls() -> None:
+    now = datetime(2026, 7, 6, 14, 0, tzinfo=timezone.utc)
+    underlier = Quote(
+        instrument=InstrumentId.index("SPX"),
+        provider=Provider.IBKR,
+        received_at=now,
+        quote_time=now,
+        quality=MarketDataQuality.LIVE,
+        last=7500.0,
+    )
+    rows = [
+        make_option(
+            expiry="20260706",
+            strike=strike,
+            right=right,
+            mark=10.0,
+            iv=0.20,
+            gamma=0.003,
+            open_interest=100.0 if strike == 7450 and right == "P" else None,
+            now=now,
+        )
+        for strike, right in ((7450, "P"), (7500, "C"), (7500, "P"), (7550, "C"))
+    ]
+
+    expiry = build_options_map(make_state(underlier, *rows, now=now)).expiries[0]
+
+    assert expiry.gex_quality == "no_open_interest_gex"
+    assert expiry.wall_method == "unavailable"
+    assert any(
+        "oi_contract_coverage_below_threshold" in warning
+        for warning in expiry.warnings
+    )
+
+
+def test_single_strike_open_interest_cannot_publish_oi_walls() -> None:
+    now = datetime(2026, 7, 6, 14, 0, tzinfo=timezone.utc)
+    underlier = Quote(
+        instrument=InstrumentId.index("SPX"),
+        provider=Provider.IBKR,
+        received_at=now,
+        quote_time=now,
+        quality=MarketDataQuality.LIVE,
+        last=7500.0,
+    )
+    rows = [
+        make_option(
+            expiry="20260706",
+            strike=7500.0,
+            right=right,
+            mark=10.0,
+            iv=0.20,
+            gamma=0.003,
+            open_interest=100.0,
+            now=now,
+        )
+        for right in ("C", "P")
+    ]
+
+    expiry = build_options_map(make_state(underlier, *rows, now=now)).expiries[0]
+
+    assert expiry.gex_quality == "no_open_interest_gex"
+    assert expiry.wall_method != "oi_gex"
+    assert any(
+        "oi_strike_coverage_below_threshold" in warning
+        for warning in expiry.warnings
+    )
+
+
+def test_schwab_open_interest_cannot_publish_oi_walls() -> None:
+    now = datetime(2026, 7, 6, 14, 0, tzinfo=timezone.utc)
+    underlier = Quote(
+        instrument=InstrumentId.index("SPX"),
+        provider=Provider.SCHWAB,
+        received_at=now,
+        quote_time=now,
+        quality=MarketDataQuality.LIVE,
+        last=7500.0,
+    )
+    rows = [
+        replace(
+            make_option(
+                expiry="20260706",
+                strike=strike,
+                right=right,
+                mark=10.0,
+                iv=0.20,
+                gamma=0.003,
+                open_interest=100.0,
+                now=now,
+            ),
+            provider=Provider.SCHWAB,
+        )
+        for strike, right in (
+            (7450.0, "P"),
+            (7450.0, "C"),
+            (7500.0, "P"),
+            (7500.0, "C"),
+            (7550.0, "P"),
+            (7550.0, "C"),
+        )
+    ]
+
+    expiry = build_options_map(make_state(underlier, *rows, now=now)).expiries[0]
+
+    assert expiry.gex_quality == "no_open_interest_gex"
+    assert expiry.wall_method != "oi_gex"
+    assert any(
+        "oi_contract_coverage_below_threshold" in warning
+        for warning in expiry.warnings
+    )
+
+
+def test_minority_untrusted_open_interest_is_removed_after_coverage_passes() -> None:
+    now = datetime(2026, 7, 6, 14, 0, tzinfo=timezone.utc)
+    underlier = Quote(
+        instrument=InstrumentId.index("SPX"),
+        provider=Provider.IBKR,
+        received_at=now,
+        quote_time=now,
+        quality=MarketDataQuality.LIVE,
+        last=7500.0,
+    )
+    rows = [
+        make_option(
+            expiry="20260706",
+            strike=strike,
+            right=right,
+            mark=10.0,
+            iv=0.20,
+            gamma=0.003,
+            open_interest=100.0,
+            now=now,
+        )
+        for strike, right in (
+            (7450.0, "P"),
+            (7450.0, "C"),
+            (7500.0, "P"),
+            (7500.0, "C"),
+            (7550.0, "P"),
+            (7550.0, "C"),
+        )
+    ]
+    rows[3] = replace(
+        rows[3],
+        open_interest=10_000.0,
+        raw={"open_interest_provider": "schwab"},
+    )
+
+    expiry = build_options_map(make_state(underlier, *rows, now=now)).expiries[0]
+    atm = next(row for row in expiry.top_gex_strikes if row.strike == 7500.0)
+
+    assert expiry.wall_method == "oi_gex"
+    assert expiry.gex_quality == "open_interest_gex"
+    assert atm.call_open_interest == 0.0
+    assert atm.put_open_interest == 100.0
+
+
+def test_non_front_partial_open_interest_cannot_publish_oi_walls() -> None:
+    now = datetime(2026, 7, 6, 14, 0, tzinfo=timezone.utc)
+    underlier = Quote(
+        instrument=InstrumentId.index("SPX"),
+        provider=Provider.IBKR,
+        received_at=now,
+        quote_time=now,
+        quality=MarketDataQuality.LIVE,
+        last=7500.0,
+    )
+    rows = [
+        replace(
+            make_option(
+                expiry="20260707",
+                strike=strike,
+                right=right,
+                mark=10.0,
+                iv=0.20,
+                gamma=0.003,
+                open_interest=100.0 if strike == 7450 and right == "P" else None,
+                now=now,
+            ),
+            volume=100.0,
+        )
+        for strike, right in ((7450, "P"), (7500, "C"), (7500, "P"), (7550, "C"))
+    ]
+
+    expiry = build_options_map(make_state(underlier, *rows, now=now)).expiries[0]
+
+    assert expiry.expiry == "20260707"
+    assert expiry.gex_quality == "no_open_interest_gex"
+    assert expiry.wall_method == "unavailable"
+    assert expiry.call_wall is None
+    assert expiry.put_wall is None
 
 
 def test_bs_gamma_hand_computed_smoke_value() -> None:
@@ -863,6 +1130,91 @@ def test_zero_gamma_spot_scan_falls_back_when_iv_missing() -> None:
     assert method == "insufficient_iv"
 
 
+def test_zero_gamma_spot_scan_is_unavailable_at_expiry_close() -> None:
+    close = datetime(2026, 7, 6, 20, 0, tzinfo=timezone.utc)
+    pairs = {
+        strike: {
+            OptionRight.CALL: make_option(
+                expiry="20260706",
+                strike=strike,
+                right="C",
+                mark=10.0,
+                iv=0.20,
+                gamma=0.001,
+                open_interest=100,
+                now=close,
+            ),
+            OptionRight.PUT: make_option(
+                expiry="20260706",
+                strike=strike,
+                right="P",
+                mark=10.0,
+                iv=0.20,
+                gamma=0.001,
+                open_interest=100,
+                now=close,
+            ),
+        }
+        for strike in (5975.0, 6000.0, 6025.0)
+    }
+
+    zero, flip_zone, method = zero_gamma_spot_scan(
+        pairs,
+        underlier=6000.0,
+        expiry="20260706",
+        as_of=close,
+        intraday=True,
+    )
+
+    assert zero is None
+    assert flip_zone is None
+    assert method == "expiry_elapsed"
+
+
+@pytest.mark.parametrize(
+    "as_of",
+    (
+        datetime(2026, 7, 6, 20, 0, tzinfo=timezone.utc),
+        datetime(2026, 7, 6, 20, 0, 1, tzinfo=timezone.utc),
+    ),
+)
+def test_options_map_does_not_restore_zero_gamma_after_expiry(as_of: datetime) -> None:
+    underlier = Quote(
+        instrument=InstrumentId.index("SPX"),
+        provider=Provider.IBKR,
+        received_at=as_of,
+        quote_time=as_of,
+        quality=MarketDataQuality.LIVE,
+        last=6000.0,
+    )
+    rows = [
+        make_option(
+            expiry="20260706",
+            strike=strike,
+            right=right,
+            mark=10.0,
+            iv=0.20,
+            gamma=gamma,
+            open_interest=100,
+            now=as_of,
+        )
+        for strike, right, gamma in (
+            (5975.0, "C", 0.001),
+            (5975.0, "P", 0.003),
+            (6000.0, "C", 0.002),
+            (6000.0, "P", 0.002),
+            (6025.0, "C", 0.003),
+            (6025.0, "P", 0.001),
+        )
+    ]
+
+    expiry = build_options_map(make_state(underlier, *rows, now=as_of)).expiries[0]
+
+    assert expiry.zero_gamma is None
+    assert expiry.gamma_flip_zone is None
+    assert expiry.zero_gamma_method == "expiry_elapsed"
+
+
 def test_build_expiry_map_skew_uses_moneyness_fallback_without_delta() -> None:
     now = datetime(2026, 7, 6, 14, 0, tzinfo=timezone.utc)
     underlier = Quote(
@@ -871,7 +1223,7 @@ def test_build_expiry_map_skew_uses_moneyness_fallback_without_delta() -> None:
         provider_symbol="index:SPX",
         received_at=now,
         quality=MarketDataQuality.LIVE,
-        mark=7500.0,
+        last=7500.0,
         quote_time=now,
     )
     state = make_state(

@@ -21,6 +21,7 @@ from spx_spark.notifier.missed_queue import (
     load_missed,
 )
 from spx_spark.notifier.model import CommandRunner, SinkResult, default_runner
+from spx_spark.notifier.human_policy import quiet_window_suppresses
 from spx_spark.notifier.receipts import NotificationEnvelope, record_delivery_receipt
 from spx_spark.notifier.sinks import (
     any_delivery_ok,
@@ -70,6 +71,41 @@ class _JobResult:
 
 
 ASYNC_CLAIM_TARGET_LIMIT = 1
+QUIET_WINDOW_SINK = "quiet_window_policy"
+
+
+def _quiet_window_sink() -> SinkResult:
+    return SinkResult(
+        sink=QUIET_WINDOW_SINK,
+        attempted=False,
+        ok=True,
+        error="suppressed from RTH close until the next SPX GTH open",
+        verdict="suppressed",
+    )
+
+
+def _quiet_dispatch_result(
+    settings: NotificationSettings,
+    envelope: NotificationEnvelope,
+    *,
+    attempted_at: datetime,
+) -> DispatchResult:
+    sink = _quiet_window_sink()
+    record_delivery_receipt(
+        settings.delivery_receipt_path,
+        envelope,
+        sinks=(sink,),
+        outcome="quiet_window_suppressed",
+        queued_for_recovery=False,
+        attempted_at=attempted_at,
+    )
+    return DispatchResult(
+        envelope=envelope,
+        sinks=(sink,),
+        outcome="quiet_window_suppressed",
+        delivered=True,
+        queued_for_recovery=False,
+    )
 
 
 def _delivery_outbox(settings: NotificationSettings) -> NotificationDeliveryOutbox:
@@ -84,6 +120,42 @@ def _delivery_outbox(settings: NotificationSettings) -> NotificationDeliveryOutb
 
 def _transport_lane(envelope: NotificationEnvelope) -> str:
     return "ops" if envelope.lane == "ops_transition" else "trade"
+
+
+def cancel_pending_notification(
+    settings: NotificationSettings,
+    event_id: str,
+    *,
+    now: datetime,
+    reason: str,
+) -> int:
+    """Cancel a durable notification whose source lifecycle is no longer valid."""
+
+    if (
+        not getattr(settings, "delivery_outbox_enabled", False)
+        or not getattr(settings, "delivery_outbox_path", "")
+    ):
+        return 0
+    outbox = _delivery_outbox(settings)
+    cancelled = outbox.cancel_event(event_id, reason=reason, now=now)
+    if cancelled:
+        ack_missed_event_ids(settings.missed_queue_path, frozenset({event_id}))
+    return cancelled
+
+
+def notification_event_exists(
+    settings: NotificationSettings,
+    event_id: str,
+) -> bool:
+    """Read-only reconciliation hook for producer state-ack crash recovery."""
+
+    if (
+        not event_id
+        or not getattr(settings, "delivery_outbox_enabled", False)
+        or not getattr(settings, "delivery_outbox_path", "")
+    ):
+        return False
+    return _delivery_outbox(settings).contains(event_id)
 
 
 def enqueue_notification(
@@ -110,6 +182,26 @@ def enqueue_notification(
 
     envelope.validate()
     at = enqueued_at or datetime.now(tz=timezone.utc)
+    if quiet_window_suppresses(envelope, now=at):
+        sink = _quiet_window_sink()
+        record_delivery_receipt(
+            settings.delivery_receipt_path,
+            envelope,
+            sinks=(sink,),
+            outcome="quiet_window_suppressed",
+            queued_for_recovery=False,
+            attempted_at=at,
+        )
+        return EnqueueResult(
+            envelope=envelope,
+            targets=(QUIET_WINDOW_SINK,),
+            outcome="quiet_window_suppressed",
+            accepted=True,
+            inserted=False,
+            duplicate=False,
+            delivered=True,
+            queued_for_recovery=False,
+        )
     if not settings.delivery_outbox_enabled or not settings.delivery_outbox_path:
         return EnqueueResult(
             envelope=envelope,
@@ -182,6 +274,56 @@ def _deliver_claimed_job(
     runner: CommandRunner,
     completion_clock: Callable[[], datetime],
 ) -> _JobResult:
+    policy_at = completion_clock()
+    if quiet_window_suppresses(job.envelope, now=policy_at):
+        suppressed_sinks: list[SinkResult] = []
+        delivered_targets = 0
+        dead_lettered_targets = 0
+        lost_claim_targets = 0
+        for target in job.targets:
+            sink = SinkResult(
+                sink=target,
+                attempted=False,
+                ok=True,
+                error="suppressed from RTH close until the next SPX GTH open",
+                verdict="suppressed",
+            )
+            suppressed_sinks.append(sink)
+            try:
+                status = outbox.settle_target(
+                    job.envelope.event_id,
+                    target,
+                    worker_id=worker_id,
+                    ok=True,
+                    error=sink.error,
+                    permanent=False,
+                    now=policy_at,
+                )
+            except DeliveryClaimLost:
+                lost_claim_targets += 1
+                continue
+            delivered_targets += 1
+            dead_lettered_targets += int(status is DeliveryStatus.DEAD_LETTER)
+        summary = outbox.summary(job.envelope.event_id)
+        if summary is None:
+            raise RuntimeError(f"delivery event disappeared: {job.envelope.event_id}")
+        pending = summary.pending_targets + summary.claimed_targets
+        record_delivery_receipt(
+            settings.delivery_receipt_path,
+            job.envelope,
+            sinks=suppressed_sinks,
+            outcome="quiet_window_suppressed",
+            queued_for_recovery=pending > 0,
+            attempted_at=policy_at,
+        )
+        return _JobResult(
+            sinks=tuple(suppressed_sinks),
+            status=summary.status,
+            delivered_targets=delivered_targets,
+            pending_targets=pending,
+            dead_lettered_targets=dead_lettered_targets,
+            lost_claim_targets=lost_claim_targets,
+        )
     sinks = deliver_trade_push(
         settings,
         title=job.title,
@@ -604,6 +746,12 @@ def dispatch_notification(
 
     envelope.validate()
     attempted_at = attempted_at or datetime.now(tz=timezone.utc)
+    if quiet_window_suppresses(envelope, now=attempted_at):
+        return _quiet_dispatch_result(
+            settings,
+            envelope,
+            attempted_at=attempted_at,
+        )
     if settings.delivery_outbox_enabled and settings.delivery_outbox_path:
         return _dispatch_via_outbox(
             settings,

@@ -98,6 +98,29 @@ def test_worker_exits_after_repeated_cycle_failures() -> None:
     assert events[-1]["error"] == "RuntimeError:broken cycle"
 
 
+def test_worker_writes_atomic_readiness_lease(tmp_path: Path) -> None:
+    clock = FakeClock()
+    stop = FakeStopEvent(clock)
+    lease_path = tmp_path / "worker.lease.json"
+
+    result = hot_worker.run_worker_loop(
+        lambda: 0,
+        interval_seconds=1.0,
+        stop_event=stop,
+        max_cycles=1,
+        monotonic=clock.monotonic,
+        utcnow=clock.utcnow,
+        emit=lambda _event: None,
+        lease_path=lease_path,
+    )
+
+    lease = json.loads(lease_path.read_text(encoding="utf-8"))
+    assert result == 0
+    assert lease["ok"] is True
+    assert lease["finished_at"] == clock.base.isoformat()
+    assert lease["consecutive_failures"] == 0
+
+
 def test_process_lock_rejects_a_second_owner(tmp_path: Path) -> None:
     lock_path = tmp_path / "hot-worker.lock"
     first = hot_worker.ProcessLock(lock_path)

@@ -162,6 +162,13 @@ def test_gth_spread_and_exit_clock_settings_load() -> None:
     assert settings.market_features.virtual_gth_time_stop_minutes == 810
     assert settings.market_features.virtual_gth_exit_clock_et == "09:45"
     assert settings.market_features.virtual_gth_spread_saturation_fraction == 0.85
+    assert settings.market_features.gth_manual_candidate_enabled is True
+    assert (
+        settings.market_features.gth_manual_candidate_quote_max_age_seconds
+        == 15.0
+    )
+    assert settings.market_features.gth_manual_candidate_ttl_seconds == 20.0
+    assert settings.market_features.gth_manual_candidate_min_parity_pairs == 3
     assert settings.market_features.virtual_gth_exit_clock_et == settings.shock.gth_exit_clock_et
 
 

@@ -24,7 +24,18 @@ from spx_spark.storage import LatestState, configured_quote_use_decision
 
 
 def move_from_close_bps(quote: Quote) -> float | None:
-    price = quote.effective_price
+    if (
+        quote.bid is not None
+        and quote.mid is not None
+        and quote.ask is not None
+        and 0 < quote.bid <= quote.mid <= quote.ask
+        and quote.quote_time is not None
+    ):
+        price = quote.mid
+    elif quote.last is not None and quote.last > 0 and quote.trade_time is not None:
+        price = quote.last
+    else:
+        price = None
     close = quote.close
     if price is None or close is None or close <= 0:
         return None
@@ -279,5 +290,4 @@ def movement_alerts(
             },
         )
     return alerts
-
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -24,6 +24,9 @@ from spx_spark.application.market_features.es_bar_state import (
     completed_es_bars,
 )
 from spx_spark.application.market_features.greek_decision import build_greek_decision
+from spx_spark.application.market_features.gth_manual_candidate import (
+    process_gth_manual_candidate,
+)
 from spx_spark.application.market_features.market import (
     build_minute_market_frame,
     merge_minute_sample,
@@ -104,6 +107,11 @@ from spx_spark.options_map import (
     build_options_map,
     group_spxw_option_quotes,
 )
+from spx_spark.provider_failover import new_entry_control_decision
+from spx_spark.provider_failover_controller import (
+    ProviderFailoverSettings,
+    load_failover_control,
+)
 from spx_spark.settings import load_app_settings
 from spx_spark.settings.market_features import MarketFeatureSettings
 from spx_spark.storage import LatestStateStore
@@ -138,6 +146,11 @@ def run(
         return 0
 
     storage = StorageSettings.from_env()
+    failover_settings = ProviderFailoverSettings.from_env()
+    provider_entry_control = _provider_entry_control(
+        failover_settings,
+        now=evaluation_now,
+    )
     play_stats_provider = PlayOutcomeStatsProvider(
         Path(storage.data_root) / "features",
         settings=policy,
@@ -326,6 +339,10 @@ def run(
         order_policy=app.order_map,
         play_stats=play_stats,
     )
+    trade_intent = _apply_provider_entry_control(
+        trade_intent,
+        provider_entry_control,
+    )
     trade_candidate = advance_trade_candidate(
         storage,
         latest,
@@ -404,20 +421,45 @@ def run(
     # lifecycle episode from the evaluation clock or the earlier quote snapshot.
     action_now = as_utc(resolved_action_clock())
     action_latest = LatestStateStore(storage).load(now=action_now)
+    action_macro_event = macro_event_state(action_now)
+    action_provider_entry_control = _provider_entry_control(
+        failover_settings,
+        now=action_now,
+    )
     gth_signal = load_json(Path(storage.data_root) / "latest" / "gth_dip_reclaim_signal.json")
+    gth_manual_candidate = process_gth_manual_candidate(
+        storage,
+        action_latest,
+        gth_signal,
+        macro_event=action_macro_event,
+        now=action_now,
+        policy=policy,
+        new_entries_allowed=action_provider_entry_control["allowed"] is True,
+        new_entries_block_reason=str(
+            action_provider_entry_control.get("reason") or "unknown"
+        ),
+    )
     virtual_strategy = process_virtual_strategy(
         storage,
         action_latest,
         trade_intent=virtual_entry_intent(trade_candidate),
         gth_signal=gth_signal,
         option_structure=option_frame.structure,
-        macro_event=macro_event,
+        macro_event=action_macro_event,
         greek_decision=greek_decision,
         now=action_now,
         policy=policy,
         expected_trade_intent_policy_version=expected_trade_intent_policy_version,
+        new_entries_allowed=action_provider_entry_control["allowed"] is True,
+        new_entries_block_reason=str(
+            action_provider_entry_control.get("reason") or "unknown"
+        ),
     )
-    context = replace(context, virtual_strategy=virtual_strategy)
+    context = replace(
+        context,
+        virtual_strategy=virtual_strategy,
+        gth_manual_candidate=gth_manual_candidate,
+    )
     previous_context = _dict(persisted.get("last_decision_context"))
     audit = build_decision_audit(context, previous=previous_context or None)
     projections = projection_paths(storage.data_root)
@@ -463,17 +505,68 @@ def run(
             "evaluation_at": evaluation_now.isoformat(),
             "action_revalidated_at": action_now.isoformat(),
             "action_quote_state_created_at": action_latest.created_at.isoformat(),
+            "action_macro_event": action_macro_event,
+            "action_provider_entry_control": action_provider_entry_control,
             "trade_candidate": trade_candidate,
             "put_shadow_exact": put_shadow_exact,
             "confirmed_gate": confirmed_gate,
             "level_decision_refresh_error": level_decision_refresh_error,
             "virtual_strategy": virtual_strategy,
+            "gth_manual_candidate": gth_manual_candidate,
             "spring_gamma_v3_shadow": spring_gamma_v3,
         }
     )
     if args.json:
         print(json.dumps(output, sort_keys=True))
     return 0
+
+
+def _provider_entry_control(
+    settings: ProviderFailoverSettings,
+    *,
+    now: datetime,
+) -> dict[str, object]:
+    if settings.enabled:
+        return new_entry_control_decision(
+            load_failover_control(settings.state_path),
+            now=now,
+            max_age_seconds=settings.control_state_max_age_seconds,
+        )
+    return {
+        "allowed": True,
+        "reason": "provider_failover_disabled",
+        "mode": None,
+        "updated_at": None,
+        "age_seconds": None,
+        "max_age_seconds": settings.control_state_max_age_seconds,
+    }
+
+
+def _apply_provider_entry_control(
+    trade_intent: Mapping[str, object],
+    control: Mapping[str, object],
+) -> dict[str, object]:
+    """Bind the durable provider control to candidate creation and delivery."""
+
+    result = {**trade_intent, "provider_failover_control": dict(control)}
+    if control.get("allowed") is True or result.get("status") not in {
+        "trade_ready",
+        "shadow_ready",
+    }:
+        return result
+    reasons = [
+        str(item)
+        for item in result.get("block_reasons") or []
+        if str(item)
+    ]
+    if "provider_failover_new_entries_blocked" not in reasons:
+        reasons.append("provider_failover_new_entries_blocked")
+    return {
+        **result,
+        "status": "blocked",
+        "execution_eligible": False,
+        "block_reasons": reasons,
+    }
 
 
 def _process_spring_gamma_v3_shadow(

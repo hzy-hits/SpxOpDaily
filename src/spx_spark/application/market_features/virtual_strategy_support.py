@@ -12,8 +12,10 @@ from typing import Mapping
 
 from spx_spark.config import StorageSettings
 from spx_spark.greek_reference import calculate_contract_reference, inputs_from_quote
+from spx_spark.application.order_map.spot import actionable_live_price
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR, ET
-from spx_spark.marketdata import InstrumentId
+from spx_spark.marketdata import InstrumentId, Provider
+from spx_spark.options_map import actionable_chain_implied_reference
 from spx_spark.settings.market_features import MarketFeatureSettings
 from spx_spark.storage import LatestState, configured_quote_use_decision
 from spx_spark.strategy_contract import (
@@ -307,22 +309,26 @@ def _exit_decision(
         stop = min(stop, hard_exit) if stop is not None else hard_exit
     if stop is not None and now >= stop:
         return "time_stop", "exit"
-    if not current:
-        return None, None
-    spx = _spx_reference(latest, current)
-    es_quote = latest.best_quote("future:ES")
-    es = _number(es_quote.effective_price) if es_quote is not None else None
+    spx = _spx_reference(latest, current, active=active, now=now)
+    es = _direct_reference(latest, "future:ES", as_of=now)
     invalidation_spx = _number(active.get("invalidation_spx"))
     invalidation_es = _number(active.get("invalidation_es"))
     direction = str(active.get("direction") or "")
-    if invalidation_spx is not None and spx is not None:
+    if invalidation_spx is not None:
+        if spx is None:
+            return "underlier_data_unavailable", "exit_or_verify"
         invalidated = (direction == "up" and spx <= invalidation_spx) or (
             direction == "down" and spx >= invalidation_spx
         )
         if invalidated:
             return "strategy_invalidation", "exit"
-    if invalidation_es is not None and es is not None and es <= invalidation_es:
-        return "gth_dip_low_broken", "exit"
+    if invalidation_es is not None:
+        if es is None:
+            return "underlier_data_unavailable", "exit_or_verify"
+        if es <= invalidation_es:
+            return "gth_dip_low_broken", "exit"
+    if not current:
+        return "option_mark_unavailable", "exit_or_verify"
     mid = _number(current.get("mid"))
     if active.get("position_type") == "call_debit_spread":
         width = _number(active.get("spread_width_points"))
@@ -533,13 +539,13 @@ def _contract_snapshot(
     latest: LatestState, contract_id: str, *, now: datetime
 ) -> dict[str, object]:
     quote = latest.best_quote(contract_id)
-    if quote is None or quote.mid is None:
+    if quote is None or quote.mid is None or quote.quote_time is None:
         return {}
     inputs, _quality = inputs_from_quote(quote, as_of=now)
     if inputs is None:
         return {}
     reference = calculate_contract_reference(inputs)
-    source_at = quote.quote_time or quote.trade_time
+    source_at = quote.quote_time
     transport_at = quote.last_update_at or quote.received_at
     return {
         "at": now.isoformat(),
@@ -561,11 +567,116 @@ def _contract_snapshot(
     }
 
 
-def _spx_reference(latest: LatestState, current: Mapping[str, object]) -> float | None:
-    quote = latest.best_quote("index:SPX")
-    if quote is not None:
-        decision = configured_quote_use_decision(quote, as_of=latest.as_of)
-        price = _number(quote.effective_price)
-        if decision.pricing_allowed and price is not None:
-            return price
-    return _number(current.get("underlier"))
+def _action_underlier_snapshot(
+    latest: LatestState,
+    *,
+    instrument_id: str,
+    now: datetime,
+    max_quote_age_seconds: float,
+    future_tolerance_seconds: float,
+) -> tuple[dict[str, object], list[str]]:
+    """Return one fresh action-time underlier with a matching field clock."""
+
+    quote = latest.best_quote(instrument_id)
+    if quote is None:
+        return {}, [f"action_underlier_unavailable:{instrument_id}"]
+    if (
+        quote.bid is not None
+        and quote.mid is not None
+        and quote.ask is not None
+        and 0 < quote.bid <= quote.mid <= quote.ask
+        and quote.quote_time is not None
+    ):
+        price = float(quote.mid)
+        price_kind = "mid"
+        source_at = quote.quote_time
+    elif quote.last is not None and quote.last > 0 and quote.trade_time is not None:
+        price = float(quote.last)
+        price_kind = "last"
+        source_at = quote.trade_time
+    else:
+        return {}, [f"action_underlier_source_time_unavailable:{instrument_id}"]
+    transport_at = quote.last_update_at or quote.received_at
+    source_age = (_utc(now) - _utc(source_at)).total_seconds()
+    transport_age = (_utc(now) - _utc(transport_at)).total_seconds()
+    tolerance = max(0.0, future_tolerance_seconds)
+    reasons: list[str] = []
+    if source_age < -tolerance:
+        reasons.append(f"action_underlier_source_in_future:{instrument_id}")
+    elif source_age > max_quote_age_seconds:
+        reasons.append(f"action_underlier_source_stale:{instrument_id}")
+    if transport_age < -tolerance:
+        reasons.append(f"action_underlier_transport_in_future:{instrument_id}")
+    elif transport_age > max_quote_age_seconds:
+        reasons.append(f"action_underlier_transport_stale:{instrument_id}")
+    if reasons:
+        return {}, reasons
+    use = configured_quote_use_decision(quote, as_of=_utc(now))
+    if not use.pricing_allowed:
+        return {}, [f"action_underlier_not_pricing_allowed:{instrument_id}"]
+    return (
+        {
+            "instrument_id": instrument_id,
+            "price": price,
+            "price_kind": price_kind,
+            "provider": quote.provider.value,
+            "source_at": _utc(source_at).isoformat(),
+            "transport_at": _utc(transport_at).isoformat(),
+            "source_age_seconds": source_age,
+            "transport_age_seconds": transport_age,
+        },
+        [],
+    )
+
+
+def _spx_reference(
+    latest: LatestState,
+    current: Mapping[str, object],
+    *,
+    active: Mapping[str, object] | None = None,
+    now: datetime | None = None,
+) -> float | None:
+    for field in ("chain_implied_spx", "action_spx_underlier"):
+        reference = current.get(field)
+        if isinstance(reference, Mapping):
+            price = _number(reference.get("price"))
+            if reference.get("kind") == "chain_implied_spx" and price is not None:
+                return price
+    if (
+        isinstance(active, Mapping)
+        and active.get("source_kind") == "gth_dip_reclaim_call"
+        and not DEFAULT_MARKET_CALENDAR.is_rth_open(now or latest.as_of)
+    ):
+        return None
+    return _direct_reference(latest, "index:SPX", as_of=now)
+
+
+def _gth_chain_reference(
+    latest: LatestState,
+    *,
+    now: datetime,
+    expiry: str,
+    policy: MarketFeatureSettings,
+) -> dict[str, object] | None:
+    if not expiry:
+        return None
+    return actionable_chain_implied_reference(
+        latest,
+        expiry=expiry,
+        as_of=now,
+        required_provider=Provider.IBKR,
+        max_age_seconds=policy.gth_manual_candidate_quote_max_age_seconds,
+        max_leg_skew_seconds=policy.provider_sync_tolerance_seconds,
+        min_pair_count=policy.gth_manual_candidate_min_parity_pairs,
+        max_dispersion_points=policy.gth_manual_candidate_max_parity_dispersion_points,
+        max_pair_interval_points=policy.gth_manual_candidate_max_parity_interval_points,
+    )
+
+
+def _direct_reference(
+    latest: LatestState,
+    instrument_id: str,
+    *,
+    as_of: datetime,
+) -> float | None:
+    return actionable_live_price(latest, instrument_id, as_of=as_of)

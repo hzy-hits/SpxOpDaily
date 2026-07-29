@@ -39,6 +39,8 @@ from spx_spark.marketdata import (
     Provider,
     ProviderStatus,
     Quote,
+    as_utc,
+    instrument_matches_id,
 )
 from spx_spark.options_map.orchestration import select_underlier
 from spx_spark.settings.analytics import AnalyticsSettings
@@ -72,13 +74,19 @@ def snapshot_to_latest_state(
         "internal",
         "mock",
     )
-    best = select_best_quotes(quotes, as_of=snapshot.as_of, provider_priority=provider_priority)
+    best = select_best_quotes(
+        quotes,
+        as_of=snapshot.as_of,
+        provider_priority=provider_priority,
+        failover_mode=snapshot.failover_mode,
+    )
     return LatestState(
         created_at=snapshot.received_at,
         as_of=snapshot.as_of,
         quotes=quotes,
         best_quotes=best,
         provider_states=tuple(snapshot.provider_states),
+        failover_mode=snapshot.failover_mode,
     )
 
 
@@ -88,10 +96,7 @@ def _ibkr_down(state: LatestState) -> bool:
             continue
         if provider_state.status == ProviderStatus.UNAVAILABLE:
             return True
-        if (
-            provider_state.status == ProviderStatus.DEGRADED
-            and provider_state.connected is not True
-        ):
+        if provider_state.status == ProviderStatus.DEGRADED:
             return True
     return False
 
@@ -120,6 +125,7 @@ def build_options_map_from_snapshot(
             candidates,
             as_of=state.as_of,
             provider_priority=policy.provider_priority,
+            failover_mode=state.failover_mode,
         ),
         structural_candidates,
     )
@@ -289,6 +295,14 @@ def evaluate_front_chain_fresh(
     )
     fresh_quotes: list[Quote] = []
     for quote in by_expiry[front_expiry]:
+        if (
+            quote.bid is None
+            or quote.mid is None
+            or quote.ask is None
+            or not 0 < quote.bid <= quote.mid <= quote.ask
+            or quote.quote_time is None
+        ):
+            continue
         analytical_quote = gth_analytical_quote(
             quote,
             as_of=now,
@@ -296,26 +310,39 @@ def evaluate_front_chain_fresh(
         )
         if analytical_quote.quality in BAD_QUALITIES:
             continue
-        age_ms = quote.quote_age_ms(now)
+        source_age = (as_utc(now) - as_utc(quote.quote_time)).total_seconds()
+        transport_at = quote.last_update_at or quote.received_at
+        transport_age = (as_utc(now) - as_utc(transport_at)).total_seconds()
         if (
-            age_ms is None
-            or age_ms / 1000.0 > max_age_seconds
-            or age_ms < -FUTURE_TIMESTAMP_TOLERANCE_SECONDS * 1000.0
+            source_age > max_age_seconds
+            or transport_age > max_age_seconds
+            or source_age < -FUTURE_TIMESTAMP_TOLERANCE_SECONDS
+            or transport_age < -FUTURE_TIMESTAMP_TOLERANCE_SECONDS
         ):
             continue
         fresh_quotes.append(analytical_quote)
     if not fresh_quotes:
         return False
-    liveish = list(select_best_quotes(fresh_quotes, as_of=now))
+    liveish = list(
+        select_best_quotes(
+            fresh_quotes,
+            as_of=now,
+            failover_mode=snapshot.failover_mode,
+        )
+    )
     underlier_price = None
     for instrument_id, multiplier in UNDERLIER_CANDIDATES:
         for quote in _as_quotes(snapshot):
-            if quote.instrument.canonical_id != instrument_id:
+            if not instrument_matches_id(quote.instrument, instrument_id):
                 continue
             if quote.quality in BAD_QUALITIES:
                 continue
-            price = quote.effective_price
-            if price is not None and price > 0:
+            price = _field_clocked_underlier_price(
+                quote,
+                as_of=now,
+                max_age_seconds=max_age_seconds,
+            )
+            if price is not None:
                 underlier_price = price * multiplier
                 break
         if underlier_price is not None:
@@ -334,6 +361,39 @@ def evaluate_front_chain_fresh(
     ):
         return False
     return True
+
+
+def _field_clocked_underlier_price(
+    quote: Quote,
+    *,
+    as_of: datetime,
+    max_age_seconds: float,
+) -> float | None:
+    if (
+        quote.bid is not None
+        and quote.mid is not None
+        and quote.ask is not None
+        and 0 < quote.bid <= quote.mid <= quote.ask
+        and quote.quote_time is not None
+    ):
+        price = float(quote.mid)
+        source_at = quote.quote_time
+    elif quote.last is not None and quote.last > 0 and quote.trade_time is not None:
+        price = float(quote.last)
+        source_at = quote.trade_time
+    else:
+        return None
+    transport_at = quote.last_update_at or quote.received_at
+    source_age = (as_utc(as_of) - as_utc(source_at)).total_seconds()
+    transport_age = (as_utc(as_of) - as_utc(transport_at)).total_seconds()
+    if (
+        source_age < -FUTURE_TIMESTAMP_TOLERANCE_SECONDS
+        or transport_age < -FUTURE_TIMESTAMP_TOLERANCE_SECONDS
+        or source_age > max_age_seconds
+        or transport_age > max_age_seconds
+    ):
+        return None
+    return price
 
 
 @dataclass

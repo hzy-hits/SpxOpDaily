@@ -356,6 +356,12 @@ def test_snapshot_rows_advances_last_update_only_when_ticker_changes() -> None:
     assert first_update is not None
     assert row.last_update_at == first_update
 
+    ticker.time = ticker.time + timedelta(seconds=15)
+    snapshot_rows(subscriptions, 15.0, now=now + timedelta(seconds=15))
+
+    assert row.ticker_time == ticker.time.isoformat()
+    assert row.last_update_at == first_update
+
     ticker.last = 7500.75
     snapshot_rows(subscriptions, 15.0, now=now + timedelta(seconds=20))
 

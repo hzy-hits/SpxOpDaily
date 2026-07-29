@@ -156,8 +156,8 @@ def test_replay_keeps_pre_roll_before_start_for_shock_baseline(tmp_path: Path) -
         received_at=shock_at,
         spx_source_at=shock_at,
         es_source_at=shock_at,
-        spx=7480.0,
-        es=7528.0,
+        spx=7475.0,
+        es=7520.0,
     )
 
     payload = run_replay(tmp_path, rows, "--start", start.isoformat())

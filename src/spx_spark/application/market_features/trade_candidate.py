@@ -16,10 +16,14 @@ from spx_spark.application.market_features.trade_intent import (
     TRADE_INTENT_CONTRACT_VERSION,
     live_trade_intent_authority_issues,
 )
+from spx_spark.application.market_features.trade_candidate_quote import (
+    candidate_displayed_quote_decision,
+)
+from spx_spark.application.order_map.spot import actionable_live_price
 from spx_spark.config import StorageSettings
 from spx_spark.marketdata import Quote, quote_use_decision
 from spx_spark.state_io import atomic_write_json_secure, exclusive_state_lock, read_json_object
-from spx_spark.storage import LatestState, configured_quote_use_decision
+from spx_spark.storage import LatestState
 from spx_spark.strategy_contract import (
     STRATEGY_EVENT_SCHEMA_VERSION,
     actionable_strategy_contract_issues,
@@ -59,6 +63,7 @@ PUT_SHADOW_EXACT_QUOTE_POLICY_VERSION = "put_shadow_exact_quote.v1"
 PUT_SHADOW_EXACT_QUOTE_MAX_AGE_SECONDS = 15.0
 PUT_SHADOW_CANDIDATE_CONTRACT_VERSION = "put_shadow_candidate_lifecycle.v2"
 PUT_SHADOW_STATE_SCHEMA_VERSION = 2
+LEGACY_PUT_SHADOW_SOURCE_CONTRACT_VERSION = "rth_lanes_0945_1300_put_shadow.v1"
 _PUT_SHADOW_CONSUMED_IDENTITY_LIMIT = 1_000
 _PUT_SHADOW_LANE_CONTRACTS: dict[str, tuple[str, str, frozenset[str]]] = {
     "long_0dte_rth_flip_low_breakdown_put_shadow": (
@@ -568,10 +573,13 @@ def _advance_active(
                 now=now,
             )
         else:
-            use = configured_quote_use_decision(quote, as_of=now)
-            quote_allowed = use.pricing_allowed
-            quote_reason = use.reason
-            quote_contract = {}
+            quote_allowed, quote_reason, quote_contract = (
+                candidate_displayed_quote_decision(
+                    quote,
+                    now=now,
+                    max_age_seconds=PUT_SHADOW_EXACT_QUOTE_MAX_AGE_SECONDS,
+                )
+            )
         observation.update(
             {
                 "provider": quote.provider.value,
@@ -580,11 +588,10 @@ def _advance_active(
                 "mid": quote.mid,
                 "quote_quality": quote.quality.value,
                 "quote_source_at": (
-                    quote.quote_time
-                    or quote.trade_time
-                    or quote.last_update_at
-                    or quote.received_at
-                ).isoformat(),
+                    quote.quote_time.isoformat()
+                    if quote.quote_time is not None
+                    else None
+                ),
                 "quote_transport_at": (quote.last_update_at or quote.received_at).isoformat(),
                 "quote_received_at": quote.received_at.isoformat(),
                 "quote_pricing_allowed": quote_allowed,
@@ -653,11 +660,7 @@ def _level_reached(
 
 
 def _usable_price(latest: LatestState, instrument_id: str, *, now: datetime) -> float | None:
-    quote = latest.best_quote(instrument_id)
-    if quote is None:
-        return None
-    decision = configured_quote_use_decision(quote, as_of=now)
-    return _number(quote.effective_price) if decision.pricing_allowed else None
+    return actionable_live_price(latest, instrument_id, as_of=now)
 
 
 def _append_audit(storage: StorageSettings, now: datetime, payload: Mapping[str, object]) -> None:
@@ -788,7 +791,10 @@ def _put_shadow_window_contract_valid(
 
 
 def _put_shadow_window_fields_valid(payload: Mapping[str, object]) -> bool:
-    if payload.get("trade_intent_contract_version") != TRADE_INTENT_CONTRACT_VERSION:
+    if payload.get("trade_intent_contract_version") not in {
+        LEGACY_PUT_SHADOW_SOURCE_CONTRACT_VERSION,
+        TRADE_INTENT_CONTRACT_VERSION,
+    }:
         return False
     entry_window_start_at = parse_aware_time(payload.get("entry_window_start_at"))
     hard_exit_at = parse_aware_time(payload.get("hard_exit_at"))
@@ -880,7 +886,7 @@ def _put_shadow_exact_quote_decision(
     *,
     now: datetime,
 ) -> tuple[bool, str, dict[str, object]]:
-    source_at = quote.quote_time or quote.trade_time
+    source_at = quote.quote_time
     transport_at = quote.last_update_at or quote.received_at
     source_age = (_utc(now) - _utc(source_at)).total_seconds() if source_at is not None else None
     transport_age = (_utc(now) - _utc(transport_at)).total_seconds()

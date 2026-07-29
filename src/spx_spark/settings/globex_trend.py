@@ -21,6 +21,11 @@ class GlobexTrendSettings:
     max_quote_age_seconds: float = 90.0
     retention_hours: int = 18
     pending_event_ttl_seconds: int = 300
+    continuation_step_points: float = 10.0
+    continuation_confirmation_observations: int = 2
+    continuation_cooldown_seconds: int = 1800
+    continuation_max_milestones_per_transition: int = 2
+    continuation_session_budget: int = 3
 
     def __post_init__(self) -> None:
         positive = (
@@ -37,6 +42,11 @@ class GlobexTrendSettings:
             self.max_quote_age_seconds,
             self.retention_hours,
             self.pending_event_ttl_seconds,
+            self.continuation_step_points,
+            self.continuation_confirmation_observations,
+            self.continuation_cooldown_seconds,
+            self.continuation_max_milestones_per_transition,
+            self.continuation_session_budget,
         )
         if any(value <= 0 for value in positive):
             raise ValueError("globex trend settings must be positive")

@@ -544,7 +544,7 @@ def _wall_ladder_payload(
                 "execution_quote_excluded_providers": (),
             }
             if spot is not None:
-                _, prob_touch, _, _ = probability_for_level(
+                _, prob_touch, _, _, probability_method = probability_for_level(
                     wall.strike,
                     underlier=spot,
                     pairs=pairs,
@@ -564,6 +564,7 @@ def _wall_ladder_payload(
                     as_of=now_utc,
                     policy=policy,
                 )
+                option_ref["probability_method"] = probability_method.value
             ladder[key].append(
                 {
                     "strike": wall.strike,

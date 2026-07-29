@@ -90,7 +90,7 @@ def count_gth_exact_entries(
         for record in records
         if record.source == "virtual_strategy"
         and record.payload.get("event") == "virtual_entry_decision"
-        and record.payload.get("status") == "trade_ready"
+        and _gth_virtual_decision_ready(record.payload)
         and record.payload.get("terminal") is True
     ]
     opens_by_source: dict[str, ReadinessRecord] = {}
@@ -361,13 +361,27 @@ def _exact_gth_structure(payload: Mapping[str, object]) -> bool:
 def _exact_spread_decision(payload: Mapping[str, object]) -> bool:
     snapshot = payload.get("exact_spread_snapshot")
     return bool(
-        payload.get("status") == "trade_ready"
+        _gth_virtual_decision_ready(payload)
         and payload.get("terminal") is True
         and payload.get("position_type") == "call_debit_spread"
         and _nonempty_string(payload.get("source_signal_id"))
         and _nonempty_string(payload.get("episode_id"))
         and isinstance(snapshot, Mapping)
         and _exact_spread_snapshot(snapshot, at=_event_at(payload))
+    )
+
+
+def _gth_virtual_decision_ready(payload: Mapping[str, object]) -> bool:
+    status = payload.get("status")
+    if status == "trade_ready":
+        # Backward compatibility for already persisted GTH virtual decisions.
+        return True
+    return bool(
+        status == "virtual_ready"
+        and payload.get("source_kind") == "gth_dip_reclaim_call"
+        and payload.get("simulation_only") is True
+        and payload.get("execution_eligible") is False
+        and payload.get("automatic_ordering") is False
     )
 
 

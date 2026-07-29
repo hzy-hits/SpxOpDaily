@@ -15,9 +15,9 @@ class ShockSettings:
     provider_switch_reset_seconds: int = 30
     one_minute_seconds: int = 60
     three_minute_seconds: int = 180
-    one_minute_threshold_bps: float = 20.0
-    three_minute_threshold_bps: float = 35.0
-    es_confirm_ratio: float = 0.5
+    one_minute_threshold_bps: float = 30.0
+    three_minute_threshold_bps: float = 50.0
+    es_confirm_ratio: float = 0.8
     max_spx_age_seconds: float = 15.0
     max_es_age_seconds: float = 10.0
     max_anchor_skew_seconds: float = 5.0

@@ -199,6 +199,33 @@ def test_utc_rollover_tracks_et_across_daylight_saving_change() -> None:
     )
 
 
+def test_post_rth_pre_gth_quiet_window_tracks_dst_and_weekends() -> None:
+    # EDT: 16:00 ET = 20:00 UTC, 20:15 ET = 00:15 UTC next day.
+    assert CALENDAR.is_post_rth_pre_gth_quiet(
+        datetime(2026, 7, 17, 19, 59, tzinfo=timezone.utc)
+    ) is False
+    assert CALENDAR.is_post_rth_pre_gth_quiet(
+        datetime(2026, 7, 17, 20, 0, tzinfo=timezone.utc)
+    ) is True
+    assert CALENDAR.is_post_rth_pre_gth_quiet(
+        datetime(2026, 7, 19, 23, 59, tzinfo=timezone.utc)
+    ) is True
+    assert CALENDAR.is_post_rth_pre_gth_quiet(
+        datetime(2026, 7, 20, 0, 15, tzinfo=timezone.utc)
+    ) is False
+
+    # EST: 16:00 ET = 21:00 UTC, 20:15 ET = 01:15 UTC next day.
+    assert CALENDAR.is_post_rth_pre_gth_quiet(
+        datetime(2026, 12, 7, 20, 59, tzinfo=timezone.utc)
+    ) is False
+    assert CALENDAR.is_post_rth_pre_gth_quiet(
+        datetime(2026, 12, 7, 21, 0, tzinfo=timezone.utc)
+    ) is True
+    assert CALENDAR.is_post_rth_pre_gth_quiet(
+        datetime(2026, 12, 8, 1, 15, tzinfo=timezone.utc)
+    ) is False
+
+
 def test_saturday_new_year_has_no_prior_friday_observance() -> None:
     assert CALENDAR.is_trading_day(date(2027, 12, 31)) is True
     assert CALENDAR.is_trading_day(date(2028, 1, 1)) is False

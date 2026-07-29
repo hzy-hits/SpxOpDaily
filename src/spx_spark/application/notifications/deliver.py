@@ -27,7 +27,9 @@ def _payload_dict(event: DomainEvent) -> dict[str, object]:
 def notification_settled(result: NotificationResult) -> bool:
     """True when the outbox may ack a terminal policy or delivery outcome."""
 
-    if result.outcome in {"disabled", "filtered", "delivered", "consumed"}:
+    # Once the durable delivery outbox accepted the notification, the outer
+    # domain event must ack. Releasing it would enqueue the same alert again.
+    if result.outcome in {"disabled", "filtered", "delivered", "consumed", "queued"}:
         return True
     if result.outcome in {"pending", "failed", "no_sink"}:
         return False

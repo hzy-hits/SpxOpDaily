@@ -41,6 +41,7 @@ class NotificationEnvelope:
     kind: str
     lane: str
     occurred_at: datetime
+    expires_at: datetime | None = None
 
     def validate(self) -> None:
         for label, value in (
@@ -53,6 +54,11 @@ class NotificationEnvelope:
                 raise ValueError(f"{label} is required")
         if self.occurred_at.tzinfo is None:
             raise ValueError("occurred_at must be timezone-aware")
+        if self.expires_at is not None:
+            if self.expires_at.tzinfo is None:
+                raise ValueError("expires_at must be timezone-aware")
+            if self.expires_at <= self.occurred_at:
+                raise ValueError("expires_at must be after occurred_at")
 
 
 def notification_event_id(

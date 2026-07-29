@@ -75,8 +75,10 @@ def run(argv: list[str] | None = None) -> int:
         notification_result = ae.notify_payload(payload, settings=notification_settings)
         ae.reconcile_position_event_acknowledgements(notification_result.acknowledged_event_ids)
         payload["notification"] = notification_result.to_dict()
-    notified = notification_result is not None and notification_result.sent_count > 0
-    settled = not notification_settings.enabled or notified
+    settled = not notification_settings.enabled or (
+        notification_result is not None
+        and notification_result.outcome in {"consumed", "delivered", "queued"}
+    )
     if not system_event_pending or settled:
         ae.persist_system_event_state(state)
     if not movement_pending or settled:

@@ -38,7 +38,7 @@ _MD_HEADING_RE = re.compile(r"^#{1,3}\s+")
 _MD_BOLD_RE = re.compile(r"\*\*(.+?)\*\*")
 _MD_CODE_RE = re.compile(r"`([^`]+)`")
 _MD_BULLET_RE = re.compile(r"^[-*]\s+")
-_SPX_STATUS_HEADER_RE = re.compile(r"^【(SPX 15m · .+)】$")
+_SPX_STATUS_HEADER_RE = re.compile(r"^【(SPX (?:15m|状态) · .+)】$")
 _STATUS_PLAN_RE = re.compile(r"^(计划\d+\s*·\s*\S+)\s{2}(.*)$")
 _TABLE_SEPARATOR_CELL_RE = re.compile(r"^:?-{3,}:?$")
 _WALL_LAYOUT_HEADERS = ["SPX 墙位", "结构", "合约", "当前 mid", "触位情景", "触发后参考"]
@@ -72,6 +72,10 @@ _COLLAPSED_STATUS_SECTIONS = frozenset(
 
 
 def _status_card_template(text: str) -> str:
+    if "🟢 MANUAL READY" in text:
+        return "green"
+    if "🔴 只观察" in text or "🔴 状态快照" in text:
+        return "grey"
     if "CONFIRMED" in text:
         return "green"
     if any(
@@ -104,6 +108,23 @@ def _format_status_line(line: str) -> str:
         "ES确认",
         "波动",
         "执行",
+        "方向",
+        "等待",
+        "证伪",
+        "合约",
+        "类型",
+        "买入",
+        "卖出",
+        "NBBO",
+        "限价",
+        "触发",
+        "止损",
+        "目标",
+        "退出",
+        "有效",
+        "风险",
+        "解释",
+        "权限",
         "变化",
         "数据",
     ):

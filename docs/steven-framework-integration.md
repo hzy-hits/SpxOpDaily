@@ -75,7 +75,8 @@ ExpiryExposure
 ├─ direction: str                             # 常量 "unknown"
 ├─ model: str                                 # 常量 "bs_r0_q0"
 └─ warnings: tuple[str, ...]                  # "schwab_oi_unverified" / "low_delta_coverage" /
-                                              # "early_session_low_volume" / "tau_floored:<contract_id>" …
+                                              # "early_session_low_volume" /
+                                              # "tau_floored:<contract_id>"（兼容名，仅 τ≤0）…
 
 StrikeExposure                                 # 每 strike 一行，call/put 合并
 ├─ strike: float

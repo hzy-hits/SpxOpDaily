@@ -3,10 +3,17 @@
 from __future__ import annotations
 
 import math
+from enum import StrEnum
 
 from spx_spark.analytics.greeks.black_scholes import d1, normal_cdf
 from spx_spark.analytics.options.pricing import option_iv, usable_delta
 from spx_spark.marketdata import OptionRight, Quote
+
+
+class ProbabilityMethod(StrEnum):
+    RISK_NEUTRAL_ND2 = "risk_neutral_nd2"
+    DELTA_D1_FALLBACK = "delta_d1_fallback"
+    UNAVAILABLE = "unavailable"
 
 
 def probability_for_level(
@@ -16,7 +23,13 @@ def probability_for_level(
     pairs: dict[float, dict[OptionRight, Quote]],
     strike_step: float,
     tau_years: float | None = None,
-) -> tuple[float | None, float | None, float | None, float | None]:
+) -> tuple[
+    float | None,
+    float | None,
+    float | None,
+    float | None,
+    ProbabilityMethod,
+]:
     """Probability that the underlier closes beyond / touches ``level``.
 
     The anchor is the strike nearest to ``level`` (within 2 * strike_step)
@@ -42,10 +55,12 @@ def probability_for_level(
             continue
         candidates.append((strike, abs(strike - level), delta))
     if not candidates:
-        return (None, None, None, None)
+        return (None, None, None, None, ProbabilityMethod.UNAVAILABLE)
     source_strike, distance, source_delta = min(candidates, key=lambda item: item[1])
     if distance > 2 * strike_step:
-        return (None, None, None, None)
+        return (None, None, None, None, ProbabilityMethod.UNAVAILABLE)
+    if tau_years is not None and tau_years <= 0:
+        return (None, None, source_strike, source_delta, ProbabilityMethod.UNAVAILABLE)
     prob_close_beyond = _prob_close_beyond_nd2(
         level,
         underlier=underlier,
@@ -58,9 +73,12 @@ def probability_for_level(
         prob_close_beyond = max(
             0.0, min(1.0, source_delta if right == OptionRight.CALL else abs(source_delta))
         )
+        method = ProbabilityMethod.DELTA_D1_FALLBACK
+    else:
+        method = ProbabilityMethod.RISK_NEUTRAL_ND2
     # Zero-drift reflection heuristic: first-passage probability ~ 2x terminal.
     prob_touch = min(1.0, 2 * prob_close_beyond)
-    return (prob_close_beyond, prob_touch, source_strike, source_delta)
+    return (prob_close_beyond, prob_touch, source_strike, source_delta, method)
 
 
 def _prob_close_beyond_nd2(

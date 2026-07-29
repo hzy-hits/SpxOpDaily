@@ -6,7 +6,7 @@ from datetime import datetime
 
 from spx_spark.application.realtime.health import evaluate_engine_health
 from spx_spark.application.runtime.tasks import TaskRuntimeState
-from spx_spark.domain.health import EngineHealth, EngineMode, TaskCriticality
+from spx_spark.domain.health import EngineHealth, TaskCriticality, TaskMode
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 
 
@@ -19,13 +19,14 @@ _FAIL_CLOSED_FACTORS = frozenset(
         "tradfi_anchor",
         "front_chain_fresh",
         "analytics_ok",
+        "globex_context_usable",
     }
 )
 
 
 def critical_tasks_healthy(states: list[TaskRuntimeState]) -> bool:
     for state in states:
-        if state.criticality is TaskCriticality.CRITICAL and not state.healthy:
+        if state.readiness_required and not state.healthy:
             return False
     return True
 
@@ -33,14 +34,14 @@ def critical_tasks_healthy(states: list[TaskRuntimeState]) -> bool:
 def critical_tasks_warmed(states: list[TaskRuntimeState]) -> bool:
     """True only when every critical task has succeeded at least once."""
 
-    critical = [state for state in states if state.criticality is TaskCriticality.CRITICAL]
+    critical = [state for state in states if state.readiness_required]
     if not critical:
         return True
     return all(state.last_success_at is not None for state in critical)
 
 
 def any_critical_task_succeeded(states: list[TaskRuntimeState]) -> bool:
-    critical = [state for state in states if state.criticality is TaskCriticality.CRITICAL]
+    critical = [state for state in states if state.readiness_required]
     if not critical:
         return True
     return any(state.last_success_at is not None for state in critical)
@@ -63,15 +64,26 @@ def aggregate_runtime_health(
     front_chain_fresh: bool | None = None,
     analytics_succeeded: bool | None = None,
     outbox_writable: bool | None = None,
+    realtime_health_max_age_seconds: float = 60.0,
 ) -> EngineHealth:
-    realtime_health = next(
+    realtime_state = next(
         (
-            state.last_engine_health
+            state
             for state in states
-            if state.name == "realtime_engine" and state.last_engine_health is not None
+            if state.name == "realtime_engine"
         ),
         None,
     )
+    realtime_health = None
+    if (
+        realtime_state is not None
+        and realtime_state.mode not in {TaskMode.BACKOFF, TaskMode.UNHEALTHY}
+        and realtime_state.last_success_at is not None
+        and 0
+        <= (checked_at - realtime_state.last_success_at).total_seconds()
+        <= realtime_health_max_age_seconds
+    ):
+        realtime_health = realtime_state.last_engine_health
     factors = realtime_health.get("factors", {}) if realtime_health else {}
     if not isinstance(factors, dict):
         factors = {}
@@ -104,6 +116,8 @@ def aggregate_runtime_health(
         warmed_up=warmed,
         any_critical_success=any_success,
         cash_session_open=DEFAULT_MARKET_CALENDAR.is_rth_open(checked_at),
+        globex_context_usable=resolved(None, "globex_context_usable"),
+        gth_option_session_open=DEFAULT_MARKET_CALENDAR.is_spx_gth_open(checked_at),
     )
 
 
@@ -119,7 +133,7 @@ def build_heartbeat_event(
 
     return {
         "task": "heartbeat",
-        "ok": health.mode is EngineMode.READY,
+        "ok": health.ok,
         "mode": health.mode.value,
         "health": health.to_dict(),
         "finished_at": finished_at.isoformat(),

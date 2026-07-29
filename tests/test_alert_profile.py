@@ -57,7 +57,7 @@ def test_friday_evening_et_stays_quiet_for_weekend_beijing_morning() -> None:
     window = active_window(datetime(2026, 7, 11, 9, 30, tzinfo=BJ_TZ))
 
     assert window.name == "quiet_futures_context"
-    assert window.priority == "high"
+    assert window.priority == "off"
 
 
 def test_weekend_before_futures_reopen_is_maintenance() -> None:
@@ -77,6 +77,7 @@ def test_market_holiday_and_early_close_disable_spxw_action_windows() -> None:
     )
 
     assert holiday.name == "quiet_futures_context"
+    assert holiday.priority == "off"
     assert holiday.spxw_sampling_mode == "off"
     assert early_close.name == "quiet_futures_context"
     assert early_close.spxw_sampling_mode == "off"

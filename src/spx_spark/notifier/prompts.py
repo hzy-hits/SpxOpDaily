@@ -2,6 +2,11 @@ from __future__ import annotations
 
 import json
 
+from spx_spark.notifier.policy import (
+    is_position_holding_alert,
+    is_system_event_alert,
+)
+
 # Shared Micopedia + Steven observe-only doctrine for every human-facing prompt.
 # Keep wording short: writers must not invent execution authority or vendor DEX.
 FRAMEWORK_GUARDRAILS = (
@@ -45,26 +50,94 @@ def format_alert_message(payload: dict[str, object], alerts: list[dict[str, obje
         window_name = str(window.get("name") or "unknown")
         priority = str(window.get("priority") or "unknown")
 
-    lines = [f"**{direct_push_header(alerts)}**", "## Desk View"]
+    if alerts and all(is_system_event_alert(alert) for alert in alerts):
+        return _format_system_alert(payload, alerts, window_name, priority)
+    if alerts and all(is_position_holding_alert(alert) for alert in alerts):
+        return _format_position_alert(payload, alerts, window_name, priority)
+
+    kinds = {str(alert.get("kind") or "") for alert in alerts}
+    management_only = bool(kinds) and kinds <= {"gth_advisory_management"}
+    badge = "🟠 只管理 · 不开新仓" if management_only else "🔴 只观察"
+    lines = [badge, f"方向  {_direct_alert_direction(alerts)}"]
+    if management_only:
+        lines.append("动作  仅管理已人工参与的前序机会；未验证持仓时不操作")
+    else:
+        lines.append("等待  对应关键位确认，并由执行层生成精确 SPXW 合约与新鲜报价")
+    lines.append("合约  当前没有可执行合约")
     for alert in alerts[:6]:
         title = alert.get("title")
         detail = alert.get("detail")
-        lines.append(f"- {title}")
+        lines.append(f"事件  {title}")
         if detail:
-            lines.append(f"  {detail}")
+            lines.append(f"解释  {detail}")
     if len(alerts) > 6:
-        lines.append(f"- 其余 {len(alerts) - 6} 个低优先级事件留存审计。")
-    lines.extend(
-        (
-            "## Data Quality",
-            f"- as_of={payload.get('as_of')} · window={window_name} · priority={priority}",
-        )
+        lines.append(f"审计  另有 {len(alerts) - 6} 个低优先级事件")
+    lines.append(
+        f"数据  as_of={payload.get('as_of')} · window={window_name} · priority={priority}"
     )
     return "\n".join(lines)
 
 
+def _format_system_alert(
+    payload: dict[str, object],
+    alerts: list[dict[str, object]],
+    window_name: str,
+    priority: str,
+) -> str:
+    lines = ["⚠️ 系统状态"]
+    for alert in alerts[:6]:
+        lines.append(f"状态  {alert.get('title')}")
+        if alert.get("detail"):
+            lines.append(f"影响  {alert.get('detail')}")
+    lines.append("交易  本条不是 Call/Put 信号")
+    lines.append(
+        f"数据  as_of={payload.get('as_of')} · window={window_name} · priority={priority}"
+    )
+    return "\n".join(lines)
+
+
+def _format_position_alert(
+    payload: dict[str, object],
+    alerts: list[dict[str, object]],
+    window_name: str,
+    priority: str,
+) -> str:
+    lines = ["🟠 持仓事件"]
+    for alert in alerts[:6]:
+        lines.append(f"状态  {alert.get('title')}")
+        if alert.get("detail"):
+            lines.append(f"动作  {alert.get('detail')}")
+    lines.append(
+        f"数据  as_of={payload.get('as_of')} · window={window_name} · priority={priority}"
+    )
+    return "\n".join(lines)
+
+
+def _direct_alert_direction(alerts: list[dict[str, object]]) -> str:
+    for alert in alerts:
+        context = alert.get("audit_context")
+        context = context if isinstance(context, dict) else {}
+        right = str(context.get("option_right") or "").upper()
+        direction = str(context.get("direction") or "").lower()
+        kind = str(alert.get("kind") or "").lower()
+        title = str(alert.get("title") or "").lower()
+        if right == "C" or direction in {"up", "bullish"} or kind.endswith("_call"):
+            return "偏多（仅事件背景，不是入场授权）"
+        if right == "P" or direction in {"down", "bearish"}:
+            return "偏空（仅事件背景，不是入场授权）"
+        if any(token in title for token in ("bullish", "多头", "偏多", "call")):
+            return "偏多（仅事件背景，不是入场授权）"
+        if any(token in title for token in ("bearish", "空头", "偏空", "put")):
+            return "偏空（仅事件背景，不是入场授权）"
+    return "未定（仅事件背景，不是入场授权）"
+
+
 def direct_push_category(alerts: list[dict[str, object]]) -> str:
     kinds = {str(alert.get("kind") or "") for alert in alerts}
+    if "gth_directional_advisory" in kinds:
+        return "GTH Call/Put 方向提示"
+    if "gth_advisory_management" in kinds:
+        return "GTH 机会管理"
     if any(kind.startswith("spxw_position_") for kind in kinds):
         return "持仓事件"
     if kinds & {
@@ -82,6 +155,12 @@ def direct_push_category(alerts: list[dict[str, object]]) -> str:
 
 def direct_push_header(alerts: list[dict[str, object]]) -> str:
     kinds = {str(alert.get("kind") or "") for alert in alerts}
+    if "gth_directional_advisory" in kinds:
+        right = _gth_advisory_right(alerts)
+        return f"SPX GTH | {right} ADVISORY"
+    if "gth_advisory_management" in kinds:
+        right = _gth_advisory_right(alerts)
+        return f"SPX GTH | {right} MANAGEMENT"
     if "gth_dip_reclaim_call" in kinds:
         return "SPX 0DTE | CALL RECLAIM"
     if kinds & {"flip_reclaim_call", "call_wall_breakout_call"}:
@@ -100,6 +179,18 @@ def direct_push_header(alerts: list[dict[str, object]]) -> str:
     if kinds & {"put_skew_steepening_5m", "atm_iv_jump_5m"}:
         return "SPX 0DTE | VOLATILITY"
     return "SPX 0DTE | TACTICAL UPDATE"
+
+
+def _gth_advisory_right(alerts: list[dict[str, object]]) -> str:
+    for alert in alerts:
+        context = alert.get("audit_context")
+        if isinstance(context, dict):
+            right = str(context.get("option_right") or "").upper()
+            if right == "C":
+                return "CALL"
+            if right == "P":
+                return "PUT"
+    return "DIRECTIONAL"
 
 
 def build_direct_push_prompt(payload: dict[str, object], alerts: list[dict[str, object]]) -> str:
@@ -134,6 +225,7 @@ def build_direct_push_prompt(payload: dict[str, object], alerts: list[dict[str, 
             "- 系统事件(IBKR 会话中断/恢复)：行情数据和已挂限价单受不受影响，他要做什么——多数时候是知悉即可，需要检查挂单就直说；",
             "- 盘外波动率信号(skew 急陡/ATM IV 跳升)：只写观测到的曲面变化、相对历史幅度及价格/VIX确认；不得推断是谁在买保护——信号≠行动；",
             "- 0DTE Call 结构确认：写清收复 flip 或突破 call wall、首选执行区间和失效线；注明 SPX/ES 确认状态与自动下单关闭；",
+            "- GTH 方向提示：m1 只写 Call/Put 方向机会并明确无合约、无限价、不可执行；m2 只写前序机会的条件式止盈/抬止损，禁止写成新入场；",
             "只用 JSON 里的事实，数字不编不改；数据 degraded 时如实说明。",
             "不要输出 JSON、系统思考或索取更多数据。",
             "greeks_reference_0dte 是严格 SPXW 当日到期的只读情景层；position_sign/direction 为 unknown 时，负 gamma 只表示潜在放大，绝不等于看跌或自动买 put。",

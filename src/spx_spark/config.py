@@ -349,6 +349,8 @@ class StorageSettings:
             ]
         )
     )
+    provider_failover_state_path: str = ""
+    provider_failover_control_max_age_seconds: float = 60.0
 
     def __post_init__(self) -> None:
         if not self.provider_priority:
@@ -369,6 +371,9 @@ class StorageSettings:
             "MARKET_DATA_DATA_ROOT",
             env_str("MAINTENANCE_DATA_ROOT", str(settings_value("maintenance.data_root"))),
         )
+        configured_failover_path = str(
+            settings_value("provider_failover.state_path")
+        ).strip()
         return cls(
             data_root=data_root,
             latest_state_path=env_str(
@@ -414,6 +419,15 @@ class StorageSettings:
                     "MARKET_DATA_PROVIDER_PRIORITY",
                     settings_csv("market_data.provider_priority"),
                 )
+            ),
+            provider_failover_state_path=env_str(
+                "PROVIDER_FAILOVER_STATE_PATH",
+                configured_failover_path
+                or f"{data_root.rstrip('/')}/latest/provider_failover_state.json",
+            ),
+            provider_failover_control_max_age_seconds=env_float(
+                "PROVIDER_FAILOVER_CONTROL_STATE_MAX_AGE_SECONDS",
+                float(settings_value("provider_failover.control_state_max_age_seconds")),
             ),
         )
 

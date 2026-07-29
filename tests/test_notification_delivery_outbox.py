@@ -115,6 +115,63 @@ def test_duplicate_event_id_requires_identical_payload(tmp_path) -> None:
         )
 
 
+def test_expired_event_is_settled_without_delivery_claim(tmp_path) -> None:
+    outbox = _outbox(tmp_path)
+    envelope = NotificationEnvelope(
+        event_id="short-lived",
+        source="test",
+        kind="gth_candidate",
+        lane="gth_manual_candidate",
+        occurred_at=NOW,
+        expires_at=NOW + timedelta(seconds=20),
+    )
+    assert outbox.enqueue(
+        envelope,
+        title="manual candidate",
+        text="short lived",
+        feishu_text=None,
+        friend=False,
+        targets=("bark", "feishu"),
+        now=NOW,
+    )
+
+    assert outbox.claim_due(
+        worker_id="late",
+        limit_targets=10,
+        now=NOW + timedelta(seconds=21),
+    ) == []
+    summary = outbox.summary("short-lived")
+    assert summary is not None
+    assert summary.status is DeliveryStatus.DEAD_LETTER
+    assert summary.dead_letter_targets == 2
+    assert outbox.count_unacknowledged_dead_letters() == 0
+    assert {
+        row["last_error"] for row in outbox.list_dead_letters()
+    } == {"notification_expired_before_delivery"}
+
+
+def test_source_invalidation_cancels_claimed_and_pending_targets(tmp_path) -> None:
+    outbox = _outbox(tmp_path)
+    _enqueue(outbox)
+    claimed = outbox.claim_due(worker_id="worker", limit_targets=1, now=NOW)
+
+    assert claimed and len(claimed[0].targets) == 1
+    assert outbox.cancel_event(
+        "event-1",
+        reason="source_candidate_no_longer_manual_ready",
+        now=NOW + timedelta(seconds=1),
+    ) == 2
+
+    summary = outbox.summary("event-1")
+    assert summary is not None
+    assert summary.status is DeliveryStatus.DEAD_LETTER
+    assert summary.dead_letter_targets == 2
+    assert outbox.count_unacknowledged_dead_letters() == 0
+    assert {
+        row["last_error"] for row in outbox.list_dead_letters()
+    } == {"source_candidate_no_longer_manual_ready"}
+
+
 def test_retry_exhaustion_dead_letters_only_failed_target(tmp_path) -> None:
     outbox = _outbox(tmp_path, max_attempts=2)
     _enqueue(outbox)

@@ -7,8 +7,8 @@ location as an immediate trade trigger. It observes one nearest frozen level at
 a time, makes breakout and fade mutually exclusive, and records outcomes without
 changing orders by itself. State transitions remain in the append-only audit.
 Low-level transition pushes are optional and disabled in the production profile;
-user-facing execution notification remains reserved for the reviewed Call
-TradeReady lane.
+user-facing execution notification is limited to the reviewed Call and Put
+manual-ready lanes.
 
 The same machine supports two deployment modes. With
 `formal_signal_enabled=false`, every public result carries `mode=shadow` and
@@ -18,25 +18,27 @@ No mode submits an order automatically.
 
 ## Reviewed RTH TradeIntent lanes
 
-The explicit override exposes three deliberately separate lanes:
+The explicit override exposes three deliberately separate manual-ready lanes
+plus one explicitly disabled structural path:
 
 | Wall path | Lane | Runtime authority |
 | --- | --- | --- |
 | Upside breakout | `long_0dte_rth_upside_breakout_pilot` | Existing Call `trade_ready` canary |
-| `flip_low` breakdown | `long_0dte_rth_flip_low_breakdown_put_shadow` | Put `shadow_ready`; exact displayed-quote observation only |
-| `call_wall` / `flip_high` rejection | `long_0dte_rth_upper_rejection_put_shadow` | Independent Put `shadow_ready`; exact displayed-quote observation only |
+| `flip_low` breakdown | `long_0dte_rth_flip_low_breakdown_put_manual` | Put `trade_ready`; exact selected-contract quote and human action only |
+| `call_wall` / `flip_high` rejection | `long_0dte_rth_upper_rejection_put_manual` | Independent Put `trade_ready`; exact selected-contract quote and human action only |
 | `put_wall` breakdown | `long_0dte_rth_put_wall_breakdown_disabled` | Disabled and unsupported |
 
 The two Put lanes have separate persisted lifecycle state and cannot supersede
 each other or the Call canary. Repeated evaluations of the same level event are
 deduplicated by `candidate_id=intent_id|event_id`; after the price leaves the
-reset band, a new level event may create a new candidate at the same wall. A Put
-`quote_reached_entry` record means that a qualifying, synchronized SPXW Put ask
-was displayed at or below the deterministic limit. It is not a fill, alert,
-broker order, or permission to trade:
-`execution_eligible=false`, `quote_observation_eligible=true`,
-`automatic_ordering=false`, `broker_order_state=not_connected`, and
-`execution_claim=none` are retained in the record.
+reset band, a new level event may create a new candidate at the same wall.
+Manual-ready Put intents require the same exact selected-contract quote contract
+as the Call lane and may create a human notification, but never submit a broker
+order: `execution_eligible=true`, `quote_observation_eligible=false`, and
+`automatic_ordering=false`. A candidate `quote_reached_entry` record only means
+that a qualifying, synchronized SPXW Put ask was displayed at or below the
+deterministic limit; it is not a fill or broker-order claim, and retains
+`broker_order_state=not_connected`.
 The collector accepts only canonical `option:SPX:SPXW:<session>:<strike>:P`
 identities with a positive strike and expiry equal to both `session_id` and the
 ET entry-window date; wrong-expiry SPXW contracts and SPX monthly-class

@@ -103,7 +103,8 @@ def make_golden_state(*, as_of: datetime = AS_OF) -> LatestState:
         provider_symbol="index:SPX",
         received_at=as_of,
         quality=MarketDataQuality.LIVE,
-        mark=SPOT,
+        last=SPOT,
+        trade_time=as_of,
         quote_time=as_of,
     )
     quotes = [
@@ -208,13 +209,26 @@ def test_intraday_oi_plus_volume_weight_preserved() -> None:
     )
     assert gex_weight(quote, intraday=True) == 150.0
     assert gex_weight(quote, intraday=False) == 100.0
-    intraday = signed_gex(quote, sign=1.0, underlier=7500.0, intraday=True)
-    oi_only = signed_gex(quote, sign=1.0, underlier=7500.0, intraday=False)
+    intraday = signed_gex(
+        quote,
+        sign=1.0,
+        underlier=7500.0,
+        as_of=AS_OF,
+        intraday=True,
+    )
+    oi_only = signed_gex(
+        quote,
+        sign=1.0,
+        underlier=7500.0,
+        as_of=AS_OF,
+        intraday=False,
+    )
     assert intraday == pytest.approx((oi_only or 0.0) * 1.5, rel=1e-9)
 
 
 def test_exposure_map_oi_and_volume_weighted_coexist() -> None:
     exposure = build_exposure_map(make_golden_state())
+    json.dumps(exposure.to_dict())
     expiry = exposure.expiries[0]
     assert expiry.oi_weighted.net_gex is not None
     assert expiry.volume_weighted.net_gex is not None
@@ -448,13 +462,30 @@ def test_bs_edge_cases_return_none() -> None:
     assert bs_charm_per_minute(SPOT, 7500.0, 0, TAU) is None
 
 
-def test_tau_floored_contract_excluded_from_cex() -> None:
+def test_actual_final_minutes_support_cex_without_tau_floor() -> None:
     as_of = datetime(2026, 7, 13, 19, 50, tzinfo=timezone.utc)
     exposure = build_exposure_map(make_golden_state(as_of=as_of))
     expiry = exposure.expiries[0]
-    assert any(warning.startswith("tau_floored:") for warning in expiry.warnings)
-    assert expiry.oi_weighted.cex_proxy is None
-    assert expiry.volume_weighted.cex_proxy is None
+    assert not any(warning.startswith("tau_floored:") for warning in expiry.warnings)
+    assert expiry.oi_weighted.cex_proxy is not None
+    assert expiry.volume_weighted.cex_proxy is not None
+
+
+@pytest.mark.parametrize(
+    "as_of",
+    (
+        datetime(2026, 7, 13, 20, 0, tzinfo=timezone.utc),
+        datetime(2026, 7, 13, 20, 0, 1, tzinfo=timezone.utc),
+    ),
+)
+def test_exposure_map_does_not_restore_zero_gamma_after_expiry(
+    as_of: datetime,
+) -> None:
+    expiry = build_exposure_map(make_golden_state(as_of=as_of)).expiries[0]
+
+    assert expiry.zero_gamma is None
+    assert expiry.gamma_flip_zone is None
+    assert expiry.zero_gamma_method == "expiry_elapsed"
 
 
 def test_missing_oi_disables_oi_weighted_only() -> None:
@@ -523,7 +554,11 @@ def test_schwab_oi_flags_unverified_warning() -> None:
     )
     expiry = exposure.expiries[0]
     assert expiry.oi_quality == "schwab_unverified"
-    assert expiry.oi_weighted.net_gex is not None
+    assert expiry.quality == "no_open_interest"
+    assert expiry.oi_weighted.net_gex is None
+    assert expiry.walls.wall_method != "oi_gex"
+    assert expiry.zero_gamma is None
+    assert expiry.zero_gamma_method == "unavailable_schwab_unverified"
     assert "schwab_oi_unverified" in expiry.warnings
 
 

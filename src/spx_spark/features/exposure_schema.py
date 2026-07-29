@@ -211,7 +211,7 @@ def exposure_map_to_dict(exposure: ExposureMap) -> dict[str, Any]:
     return {
         "created_at": exposure.created_at.isoformat(),
         "as_of": exposure.as_of.isoformat(),
-        "underlier": asdict(exposure.underlier),
+        "underlier": exposure.underlier.to_dict(),
         "expiries": expiries_payload,
         "warnings": list(exposure.warnings),
     }

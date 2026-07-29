@@ -48,6 +48,7 @@ def _payload() -> dict[str, object]:
         "spring_gamma_v3_shadow": {
             "status": "ready",
             "as_of": datetime(2026, 7, 24, 10, 0, tzinfo=ET).isoformat(),
+            "session_id": "2026-07-24",
             "expiry": "20260724",
             "calibration_status": "warming",
             "direction": {
@@ -70,6 +71,41 @@ def _payload() -> dict[str, object]:
                 },
                 "input_lineage": {
                     "diagnostics": {
+                        "rolling_path_percentiles": {
+                            "status": "provisional",
+                            "slot_et": "10:00",
+                            "window_minutes": 30,
+                            "sample_count": 12,
+                            "latest_bar_end": datetime(
+                                2026,
+                                7,
+                                24,
+                                10,
+                                0,
+                                tzinfo=ET,
+                            ).isoformat(),
+                            "minimum_sessions": 5,
+                            "target_sessions": 20,
+                            "confidence": "medium",
+                            "dip": {
+                                "value_atr": 0.55,
+                                "raw_percentile": 0.75,
+                                "shrunk_percentile": 0.65,
+                                "sample_count": 12,
+                            },
+                            "rally": {
+                                "value_atr": 0.25,
+                                "raw_percentile": 0.25,
+                                "shrunk_percentile": 0.35,
+                                "sample_count": 12,
+                            },
+                            "signed_path_bias": -0.30,
+                            "shrinkage": "linear_to_50pct_until_20_prior_sessions",
+                            "probability_semantics": (
+                                "historical_rank_not_forward_probability"
+                            ),
+                            "action_authority": "none",
+                        },
                         "moving_averages": {
                             "status": "ready",
                             "price": 7454.9,
@@ -252,6 +288,194 @@ def test_radar_keeps_both_boundaries_and_both_option_sides_before_exit() -> None
     assert probability["to_1300"]["status"] == "not_calculated"
 
 
+def test_radar_always_emits_three_non_executable_opportunity_lanes() -> None:
+    radar = build_convexity_idea_radar(
+        _payload(),
+        now=datetime(2026, 7, 24, 10, 0, tzinfo=ET),
+    )
+
+    board = radar["opportunity_board"]
+    assert board["status"] == "observing"
+    assert set(board["lanes"]) == {"call", "put", "vol_range"}
+    assert set(board["rank_order"]) == {"call", "put", "vol_range"}
+    assert board["action_authority"] == "none"
+    assert board["actionable"] is False
+    assert board["automatic_ordering"] is False
+    for name, lane in board["lanes"].items():
+        assert lane["lane"] == name
+        assert lane["execution"]["eligible"] is False
+        assert "dense_shadow_no_execution_authority" in (
+            lane["execution"]["block_reasons"]
+        )
+        assert lane["action_authority"] == "none"
+        assert lane["actionable"] is False
+        assert lane["automatic_ordering"] is False
+
+
+def test_radar_renders_small_sample_path_rank_and_all_three_lanes() -> None:
+    radar = build_convexity_idea_radar(
+        _payload(),
+        now=datetime(2026, 7, 24, 10, 0, tzinfo=ET),
+    )
+
+    board = radar["opportunity_board"]
+    assert board["sample_policy"] == {
+        "minimum_prior_sessions": 5,
+        "target_prior_sessions": 20,
+        "below_target_behavior": "emit_shrunk_low_confidence_shadow",
+        "execution_gate_affected": False,
+    }
+    assert board["path_percentiles"]["status"] == "provisional"
+    assert board["path_percentiles"]["confidence"] == "medium"
+    assert board["path_percentiles"]["sample_count"] == 12
+    assert board["path_percentiles"]["dip"]["raw_percentile"] == 0.75
+    assert board["path_percentiles"]["dip"]["shrunk_percentile"] == 0.65
+    assert board["path_percentiles"]["rally"]["raw_percentile"] == 0.25
+    assert board["path_percentiles"]["rally"]["shrunk_percentile"] == 0.35
+
+    lines = render_convexity_idea_radar_lines({"convexity_idea_radar": radar})
+    path_lines = [line for line in lines if line.startswith("30m路径分位")]
+    opportunity_lines = [line for line in lines if line.startswith("机会[")]
+
+    assert len(path_lines) == 1
+    assert "75.00%→65.00%" in path_lines[0]
+    assert "25.00%→35.00%" in path_lines[0]
+    assert "n=12/20" in path_lines[0]
+    assert "medium" in path_lines[0]
+    assert "历史排名非预测概率" in path_lines[0]
+    assert len(opportunity_lines) == 3
+    assert {line.split("]", 1)[0] + "]" for line in opportunity_lines} == {
+        "机会[Call]",
+        "机会[Put]",
+        "机会[Vol/Range]",
+    }
+    assert all("EXECUTION_ELIGIBLE=NO" in line for line in opportunity_lines)
+
+
+def test_radar_accepts_only_identity_matched_causal_path_fallback() -> None:
+    payload = _payload()
+    current = payload["spring_gamma_v3_shadow"]["rth_market_state"]["input_lineage"][
+        "diagnostics"
+    ]["rolling_path_percentiles"]
+    current.clear()
+    current.update(
+        {
+            "status": "warming",
+            "sample_count": 0,
+            "confidence": "unavailable",
+            "action_authority": "none",
+        }
+    )
+    source_as_of = datetime(2026, 7, 24, 9, 56, tzinfo=ET)
+    latest_bar_end = datetime(2026, 7, 24, 9, 55, tzinfo=ET)
+    payload["spring_gamma_v3_path_fallback"] = {
+        "schema_version": "spring_gamma_v3_path_fallback.v1",
+        "session_id": "2026-07-24",
+        "expiry": "20260724",
+        "source_as_of": source_as_of.isoformat(),
+        "source_latest_bar_end": latest_bar_end.isoformat(),
+        "maximum_age_seconds": 900.0,
+        "rolling_path_percentiles": {
+            "status": "provisional",
+            "slot_et": "09:55",
+            "sample_count": 13,
+            "target_sessions": 20,
+            "confidence": "low",
+            "input_quality": "stale_fallback",
+            "latest_bar_end": latest_bar_end.isoformat(),
+            "source_latest_bar_end": latest_bar_end.isoformat(),
+            "source_lag_seconds": 300.0,
+            "dip": {"shrunk_percentile": 0.76},
+            "rally": {"shrunk_percentile": 0.29},
+            "signed_path_bias": -0.47,
+            "action_authority": "none",
+        },
+        "action_authority": "none",
+        "actionable": False,
+        "automatic_ordering": False,
+    }
+
+    radar = build_convexity_idea_radar(
+        payload,
+        now=datetime(2026, 7, 24, 10, 0, tzinfo=ET),
+    )
+
+    path = radar["opportunity_board"]["path_percentiles"]
+    assert path["input_quality"] == "stale_fallback"
+    assert path["confidence"] == "low"
+    assert path["signed_path_bias"] == -0.47
+    assert path["source_lag_seconds"] == 300.0
+
+
+def test_radar_rejects_stale_current_path_and_future_fallback_modifier() -> None:
+    payload = _payload()
+    current = payload["spring_gamma_v3_shadow"]["rth_market_state"]["input_lineage"][
+        "diagnostics"
+    ]["rolling_path_percentiles"]
+    current["latest_bar_end"] = datetime(
+        2026,
+        7,
+        24,
+        9,
+        39,
+        tzinfo=ET,
+    ).isoformat()
+    payload["spring_gamma_v3_path_fallback"] = {
+        "schema_version": "spring_gamma_v3_path_fallback.v1",
+        "session_id": "2026-07-24",
+        "expiry": "20260724",
+        "source_as_of": datetime(
+            2026,
+            7,
+            24,
+            10,
+            0,
+            1,
+            tzinfo=ET,
+        ).isoformat(),
+        "source_latest_bar_end": datetime(
+            2026,
+            7,
+            24,
+            10,
+            0,
+            tzinfo=ET,
+        ).isoformat(),
+        "rolling_path_percentiles": {
+            **current,
+            "confidence": "low",
+            "input_quality": "stale_fallback",
+            "source_latest_bar_end": datetime(
+                2026,
+                7,
+                24,
+                10,
+                0,
+                tzinfo=ET,
+            ).isoformat(),
+        },
+        "action_authority": "none",
+        "actionable": False,
+        "automatic_ordering": False,
+    }
+
+    radar = build_convexity_idea_radar(
+        payload,
+        now=datetime(2026, 7, 24, 10, 0, tzinfo=ET),
+    )
+
+    path = radar["opportunity_board"]["path_percentiles"]
+    assert path["status"] == "unavailable"
+    assert path["reason"] == "rolling_path_freshness_or_identity_invalid"
+    for lane in ("call", "put"):
+        assert all(
+            row["feature"] != "rolling_path_bias"
+            for row in radar["opportunity_board"]["lanes"][lane][
+                "score_contributions"
+            ]
+        )
+
+
 def test_radar_separates_risk_neutral_destination_from_physical_probability() -> None:
     radar = build_convexity_idea_radar(
         _payload(),
@@ -381,6 +605,14 @@ def test_radar_closes_new_ideas_at_hard_exit() -> None:
     assert radar["mandate"]["new_idea_generation_allowed"] is False
     assert radar["mandate"]["position_must_be_flat"] is True
     assert {row["status"] for row in radar["hypotheses"]} == {"closed"}
+    assert radar["opportunity_board"]["status"] == "closed"
+    assert set(radar["opportunity_board"]["lanes"]) == {
+        "call",
+        "put",
+        "vol_range",
+    }
+    lines = render_convexity_idea_radar_lines({"convexity_idea_radar": radar})
+    assert len([line for line in lines if line.startswith("机会[")]) == 3
 
 
 def test_radar_waits_until_0945_after_open() -> None:
@@ -442,6 +674,14 @@ def test_weekend_is_inactive_not_an_artificial_multi_day_gth_window() -> None:
     assert radar["mandate"]["minutes_to_hard_exit"] is None
     assert radar["mandate"]["new_idea_generation_allowed"] is False
     assert {row["status"] for row in radar["hypotheses"]} == {"closed"}
+    assert radar["opportunity_board"]["status"] == "inactive"
+    assert set(radar["opportunity_board"]["lanes"]) == {
+        "call",
+        "put",
+        "vol_range",
+    }
+    lines = render_convexity_idea_radar_lines({"convexity_idea_radar": radar})
+    assert len([line for line in lines if line.startswith("机会[")]) == 3
 
 
 def test_actual_sunday_evening_gth_prepares_monday_session() -> None:
@@ -628,6 +868,7 @@ def test_compact_writer_packet_preserves_two_sided_context() -> None:
     writer = _status_writer_payload(payload)["convexity_idea_radar"]
 
     assert compact is not None
+    assert compact["opportunity_board"] == radar["opportunity_board"]
     assert compact["boundary_tests"]["lower"]["level"] == 7395.0
     assert compact["boundary_tests"]["upper"]["level"] == 7410.0
     moving = compact["market_state"]["moving_averages"]
@@ -636,6 +877,7 @@ def test_compact_writer_packet_preserves_two_sided_context() -> None:
     assert moving["ma200_structure_confluence"]["decision_zone"] is True
     assert writer["option_evidence"]["call"]["edge_status"] == "observed_local_skew_edge"
     assert writer["option_evidence"]["put"]["edge_status"] == "not_observed"
+    assert writer["opportunity_board"] == radar["opportunity_board"]
 
 
 def test_pricing_audit_persists_the_exact_radar_for_forward_validation() -> None:

@@ -44,6 +44,7 @@ class IvSurfaceExpiry:
     put_skew_25d_change_5m: float | None = None
     call_skew_25d: float | None = None
     call_skew_25d_change_5m: float | None = None
+    skew_method: str = "moneyness_fallback"
 
 
 @dataclass(frozen=True)
@@ -156,15 +157,18 @@ def build_expiry_surface(
         avg_spread_bps=expiry_map.coverage.avg_spread_bps,
         warnings=expiry_map.warnings,
         put_skew_25d=expiry_map.put_skew_25d,
-        put_skew_25d_change_5m=subtract(
-            expiry_map.put_skew_25d,
-            previous.put_skew_25d if previous else None,
+        put_skew_25d_change_5m=(
+            subtract(expiry_map.put_skew_25d, previous.put_skew_25d)
+            if previous is not None and previous.skew_method == expiry_map.skew_method
+            else None
         ),
         call_skew_25d=expiry_map.call_skew_25d,
-        call_skew_25d_change_5m=subtract(
-            expiry_map.call_skew_25d,
-            previous.call_skew_25d if previous else None,
+        call_skew_25d_change_5m=(
+            subtract(expiry_map.call_skew_25d, previous.call_skew_25d)
+            if previous is not None and previous.skew_method == expiry_map.skew_method
+            else None
         ),
+        skew_method=expiry_map.skew_method,
     )
 
 
@@ -239,6 +243,7 @@ def snapshot_from_dict(payload: dict[str, Any]) -> IvSurfaceSnapshot:
             put_skew_25d_change_5m=item.get("put_skew_25d_change_5m"),
             call_skew_25d=item.get("call_skew_25d"),
             call_skew_25d_change_5m=item.get("call_skew_25d_change_5m"),
+            skew_method=str(item.get("skew_method") or "moneyness_fallback"),
         )
         for item in payload.get("expiries", ())
         if isinstance(item, dict)

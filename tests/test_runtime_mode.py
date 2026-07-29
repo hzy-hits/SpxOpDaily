@@ -2,6 +2,7 @@ from datetime import UTC, datetime, time, timedelta
 
 from spx_spark.config import RuntimePolicySettings
 from spx_spark.runtime_mode import (
+    clear_override,
     ibkr_allowed,
     ibkr_market_data_allowed,
     load_override,
@@ -65,6 +66,42 @@ def test_expired_override_is_ignored(tmp_path):
     write_override(path, "ibkr-on", ttl_minutes=1, reason="test", now=now)
 
     assert load_override(path, now=datetime(2026, 7, 4, 18, 2, tzinfo=UTC)) is None
+
+
+def test_corrupt_live_override_uses_last_good(tmp_path):
+    now = datetime(2026, 7, 4, 18, 0, tzinfo=UTC)
+    path = tmp_path / "mode.json"
+    write_override(path, "ibkr-on", ttl_minutes=60, reason="test", now=now)
+    path.write_text("{", encoding="utf-8")
+
+    recovered = load_override(path, now=now)
+
+    assert recovered is not None
+    assert recovered.mode == "ibkr_on"
+    assert recovered.reason == "test"
+
+
+def test_corrupt_live_and_last_good_fail_closed(tmp_path):
+    now = datetime(2026, 7, 4, 18, 0, tzinfo=UTC)
+    path = tmp_path / "mode.json"
+    path.write_text("{", encoding="utf-8")
+
+    protected = load_override(path, now=now)
+
+    assert protected is not None
+    assert protected.mode == "protected"
+    assert protected.reason == "runtime_mode_corrupt_fail_closed"
+
+
+def test_clear_override_removes_live_and_last_good(tmp_path):
+    now = datetime(2026, 7, 4, 18, 0, tzinfo=UTC)
+    path = tmp_path / "mode.json"
+    write_override(path, "protected", ttl_minutes=60, reason="test", now=now)
+
+    clear_override(path)
+
+    assert not path.exists()
+    assert not path.with_name("mode.json.last-good").exists()
 
 
 def test_ibkr_on_override_can_allow_weekend(tmp_path):

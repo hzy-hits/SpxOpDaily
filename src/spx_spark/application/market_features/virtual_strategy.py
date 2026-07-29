@@ -6,12 +6,14 @@ import hashlib
 import json
 import math
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Mapping
 
 from spx_spark.application.market_features.trade_intent import (
     live_trade_intent_authority_issues,
 )
 from spx_spark.application.market_features.virtual_strategy_support import (
+    _action_underlier_snapshot,
     _append_audit,
     _cap_rth_trade_episode,
     _contract_snapshot,
@@ -20,6 +22,7 @@ from spx_spark.application.market_features.virtual_strategy_support import (
     _exit_clock as _exit_clock,
     _exit_decision,
     _fmt as _fmt,
+    _gth_chain_reference,
     _gth_signal_age_seconds,
     _gth_spread_contract_ids,
     _gth_time_stop,
@@ -37,11 +40,20 @@ from spx_spark.application.market_features.virtual_strategy_support import (
     _trim_entry_decisions,
     _utc,
 )
+from spx_spark.application.market_features.virtual_strategy_spread import (
+    spread_snapshot as _spread_snapshot_impl,
+    spread_snapshot_decision as _spread_snapshot_decision_impl,
+)
+from spx_spark.application.market_features.virtual_strategy_state import (
+    consumed_signal_state as _consumed_signal_state,
+    flush_pending_notifications as _flush_pending_notifications_impl,
+    load_consumed_signals as _load_consumed_signals,
+    mark_signal_consumed as _mark_signal_consumed,
+)
 from spx_spark.config import NotificationSettings, StorageSettings
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 from spx_spark.notifier.dispatcher import enqueue_notification
 from spx_spark.notifier.model import CommandRunner, default_runner
-from spx_spark.notifier.receipts import NotificationEnvelope
 from spx_spark.settings.market_features import MarketFeatureSettings
 from spx_spark.state_io import atomic_write_json_secure, exclusive_state_lock, read_json_object
 from spx_spark.storage import LatestState, configured_quote_use_decision
@@ -52,6 +64,66 @@ from spx_spark.strategy_contract import (
     policy_version,
     strategy_event_fields,
 )
+
+
+def _flush_pending_notifications(
+    state_path: Path,
+    *,
+    settings: NotificationSettings,
+    now: datetime,
+    only_event_id: str | None = None,
+) -> dict[str, object]:
+    return _flush_pending_notifications_impl(
+        state_path,
+        settings=settings,
+        now=now,
+        only_event_id=only_event_id,
+        enqueue=enqueue_notification,
+    )
+
+
+def _spread_snapshot(
+    latest: LatestState,
+    *,
+    long_contract_id: str,
+    short_contract_id: str,
+    now: datetime,
+    max_quote_age_seconds: float,
+    max_quote_skew_seconds: float,
+    required_provider: str | None = None,
+) -> dict[str, object]:
+    return _spread_snapshot_impl(
+        latest,
+        long_contract_id=long_contract_id,
+        short_contract_id=short_contract_id,
+        now=now,
+        max_quote_age_seconds=max_quote_age_seconds,
+        max_quote_skew_seconds=max_quote_skew_seconds,
+        required_provider=required_provider,
+        contract_snapshot=_contract_snapshot,
+    )
+
+
+def _spread_snapshot_decision(
+    latest: LatestState,
+    *,
+    long_contract_id: str,
+    short_contract_id: str,
+    now: datetime,
+    max_quote_age_seconds: float,
+    max_quote_skew_seconds: float,
+    required_provider: str | None = None,
+) -> tuple[dict[str, object], list[str]]:
+    return _spread_snapshot_decision_impl(
+        latest,
+        long_contract_id=long_contract_id,
+        short_contract_id=short_contract_id,
+        now=now,
+        max_quote_age_seconds=max_quote_age_seconds,
+        max_quote_skew_seconds=max_quote_skew_seconds,
+        required_provider=required_provider,
+        contract_snapshot=_contract_snapshot,
+    )
 
 
 def process_virtual_strategy(
@@ -65,6 +137,8 @@ def process_virtual_strategy(
     greek_decision: Mapping[str, object],
     now: datetime,
     policy: MarketFeatureSettings,
+    new_entries_allowed: bool,
+    new_entries_block_reason: str,
     expected_trade_intent_policy_version: str | None = None,
     notification: NotificationSettings | None = None,
     runner: CommandRunner = default_runner,
@@ -72,22 +146,36 @@ def process_virtual_strategy(
     """Open/update/close one virtual episode; never reads or writes broker positions."""
 
     now = _utc(now)
-    if not policy.virtual_strategy_enabled:
-        return {"status": "disabled", "notification_attempted": False}
+    settings = notification or NotificationSettings.from_env()
+    provider_entry_control = {
+        "allowed": new_entries_allowed,
+        "reason": new_entries_block_reason,
+    }
     state_path = _state_path(storage)
+    recovery = _flush_pending_notifications(
+        state_path,
+        settings=settings,
+        now=now,
+    )
+    if not policy.virtual_strategy_enabled:
+        return {
+            "status": "disabled",
+            "notification_attempted": bool(recovery.get("attempted")),
+            "notification_recovery": recovery,
+        }
     with exclusive_state_lock(state_path):
         state = read_json_object(state_path)
         active = _cap_rth_trade_episode(
             dict(state.get("active") or {}),
             now=now,
         )
-        consumed = set(str(item) for item in state.get("consumed_signal_ids") or [])
+        consumed_signals, consumed = _load_consumed_signals(state)
         entry_decisions = {
             str(key): dict(value)
             for key, value in dict(state.get("entry_decisions") or {}).items()
             if isinstance(value, Mapping)
         }
-        if _should_replace_with_gth_spread(active, gth_signal):
+        if new_entries_allowed and _should_replace_with_gth_spread(active, gth_signal):
             replacement, entry_decision = _evaluate_gth_spread_entry(
                 latest,
                 gth_signal=gth_signal,
@@ -117,14 +205,22 @@ def process_virtual_strategy(
                 )
                 active = replacement
                 signal_id = str(active.get("source_signal_id") or "")
-                if signal_id:
-                    consumed.add(signal_id)
+                _mark_signal_consumed(
+                    consumed_signals,
+                    consumed,
+                    signal_id=signal_id,
+                    now=now,
+                )
                 _append_audit(storage, now, {"event": "virtual_opened", **active})
             elif entry_decision.get("terminal") is True:
                 source_id = str(entry_decision.get("source_signal_id") or "")
-                if source_id:
-                    consumed.add(source_id)
-        if not active:
+                _mark_signal_consumed(
+                    consumed_signals,
+                    consumed,
+                    signal_id=source_id,
+                    now=now,
+                )
+        if not active and new_entries_allowed:
             active, entry_decision = _new_episode(
                 latest,
                 trade_intent=trade_intent,
@@ -143,25 +239,41 @@ def process_virtual_strategy(
                 )
                 if entry_decision.get("terminal") is True and not active:
                     source_id = str(entry_decision.get("source_signal_id") or "")
-                    if source_id:
-                        consumed.add(source_id)
+                    _mark_signal_consumed(
+                        consumed_signals,
+                        consumed,
+                        signal_id=source_id,
+                        now=now,
+                    )
             if active:
                 signal_id = str(active.get("source_signal_id") or "")
-                if signal_id:
-                    consumed.add(signal_id)
+                _mark_signal_consumed(
+                    consumed_signals,
+                    consumed,
+                    signal_id=signal_id,
+                    now=now,
+                )
                 _append_audit(storage, now, {"event": "virtual_opened", **active})
         if not active:
             state.update(
                 {
-                    "schema_version": 1,
+                    "schema_version": 2,
                     "updated_at": now.isoformat(),
                     "active": None,
-                    "consumed_signal_ids": sorted(consumed)[-200:],
+                    **_consumed_signal_state(consumed_signals),
                     "entry_decisions": _trim_entry_decisions(entry_decisions),
+                    "provider_entry_control": provider_entry_control,
                 }
             )
             atomic_write_json_secure(state_path, state)
-            return {"status": "observing", "notification_attempted": False}
+            return {
+                "status": "observing",
+                "notification_attempted": False,
+                "new_entries_allowed": new_entries_allowed,
+                "new_entries_block_reason": (
+                    None if new_entries_allowed else new_entries_block_reason
+                ),
+            }
 
         current = _active_snapshot(latest, active, now=now, policy=policy)
         exit_reason, action = _exit_decision(
@@ -191,11 +303,12 @@ def process_virtual_strategy(
         if exit_reason is None:
             state.update(
                 {
-                    "schema_version": 1,
+                    "schema_version": 2,
                     "updated_at": now.isoformat(),
                     "active": active,
-                    "consumed_signal_ids": sorted(consumed)[-200:],
+                    **_consumed_signal_state(consumed_signals),
                     "entry_decisions": _trim_entry_decisions(entry_decisions),
+                    "provider_entry_control": provider_entry_control,
                 }
             )
             atomic_write_json_secure(state_path, state)
@@ -204,6 +317,7 @@ def process_virtual_strategy(
                 "episode_id": active.get("episode_id"),
                 "contract_id": active.get("contract_id"),
                 "notification_attempted": False,
+                "new_entries_allowed": new_entries_allowed,
             }
 
         closed = {
@@ -215,51 +329,64 @@ def process_virtual_strategy(
             "exit_action": action,
             "exit_snapshot": current,
         }
+        text = _render_exit(closed)
+        notification_event_id = f"{closed['episode_id']}:{exit_reason}"
+        pending_notifications = [
+            dict(item)
+            for item in state.get("pending_notifications") or []
+            if isinstance(item, Mapping)
+            and str(item.get("event_id") or "") != notification_event_id
+        ]
+        pending_notifications.append(
+            {
+                "event_id": notification_event_id,
+                "source": "virtual_strategy",
+                "kind": "virtual_strategy_exit",
+                "lane": "strategy_lifecycle",
+                "occurred_at": now.isoformat(),
+                "title": "SPX VIRTUAL STRATEGY EXIT",
+                "text": text,
+                "friend": True,
+                "feishu_text": text,
+                "enqueued_at": now.isoformat(),
+            }
+        )
         state.update(
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "updated_at": now.isoformat(),
                 "active": None,
                 "last_closed": closed,
-                "consumed_signal_ids": sorted(consumed)[-200:],
+                **_consumed_signal_state(consumed_signals),
                 "entry_decisions": _trim_entry_decisions(entry_decisions),
+                "provider_entry_control": provider_entry_control,
+                "pending_notifications": pending_notifications,
             }
         )
         atomic_write_json_secure(state_path, state)
         _append_audit(storage, now, {"event": "virtual_closed", **closed})
 
-    settings = notification or NotificationSettings.from_env()
-    text = _render_exit(closed)
-    enqueued_at = now
-    result = enqueue_notification(
-        settings,
-        NotificationEnvelope(
-            event_id=f"{closed['episode_id']}:{exit_reason}",
-            source="virtual_strategy",
-            kind="virtual_strategy_exit",
-            lane="strategy_lifecycle",
-            occurred_at=now,
-        ),
-        title="SPX VIRTUAL STRATEGY EXIT",
-        text=text,
-        friend=True,
-        feishu_text=text,
-        enqueued_at=enqueued_at,
+    notification_result = _flush_pending_notifications(
+        state_path,
+        settings=settings,
+        now=now,
+        only_event_id=notification_event_id,
     )
     return {
         "status": "closed",
         "episode_id": closed.get("episode_id"),
         "exit_reason": exit_reason,
         "exit_action": action,
-        "notification_attempted": True,
-        "notification_accepted": result.accepted,
-        "notification_inserted": result.inserted,
-        "notification_duplicate": result.duplicate,
-        "notification_delivered": result.delivered,
-        "notification_queued": result.queued_for_recovery,
-        "notification_outcome": result.outcome,
-        "notification_enqueued_at": enqueued_at.isoformat(),
-        "targets": list(result.targets),
+        "notification_attempted": bool(notification_result.get("attempted")),
+        "notification_accepted": bool(notification_result.get("accepted")),
+        "notification_inserted": bool(notification_result.get("inserted")),
+        "notification_duplicate": bool(notification_result.get("duplicate")),
+        "notification_delivered": bool(notification_result.get("delivered")),
+        "notification_queued": bool(notification_result.get("queued_for_recovery")),
+        "notification_outcome": notification_result.get("outcome"),
+        "notification_enqueued_at": now.isoformat(),
+        "targets": list(notification_result.get("targets") or []),
+        "new_entries_allowed": new_entries_allowed,
     }
 
 
@@ -488,7 +615,9 @@ def _trade_intent_action_snapshot(
     ask = _number(quote.ask)
     if bid is None or mid is None or ask is None or not 0 <= bid <= mid <= ask:
         return {}, ["action_quote_nbbo_invalid"]
-    source_at = quote.quote_time or quote.trade_time
+    # This decision consumes bid/ask, so only the NBBO's own quote clock can
+    # authorize freshness. A new last trade cannot freshen the displayed ask.
+    source_at = quote.quote_time
     transport_at = quote.last_update_at or quote.received_at
     if source_at is None:
         return {}, ["action_quote_source_time_unavailable"]
@@ -530,55 +659,6 @@ def _trade_intent_action_snapshot(
 def _entry_observed_at(trade_intent: Mapping[str, object]) -> object:
     observation = trade_intent.get("entry_observation")
     return observation.get("at") if isinstance(observation, Mapping) else None
-
-
-def _action_underlier_snapshot(
-    latest: LatestState,
-    *,
-    instrument_id: str,
-    now: datetime,
-    max_quote_age_seconds: float,
-    future_tolerance_seconds: float,
-) -> tuple[dict[str, object], list[str]]:
-    """Return one fresh action-time underlier observation without clock fallbacks."""
-
-    quote = latest.best_quote(instrument_id)
-    if quote is None:
-        return {}, [f"action_underlier_unavailable:{instrument_id}"]
-    source_at = quote.quote_time or quote.trade_time
-    if source_at is None:
-        return {}, [f"action_underlier_source_time_unavailable:{instrument_id}"]
-    transport_at = quote.last_update_at or quote.received_at
-    source_age = (_utc(now) - _utc(source_at)).total_seconds()
-    transport_age = (_utc(now) - _utc(transport_at)).total_seconds()
-    tolerance = max(0.0, future_tolerance_seconds)
-    reasons: list[str] = []
-    if source_age < -tolerance:
-        reasons.append(f"action_underlier_source_in_future:{instrument_id}")
-    elif source_age > max_quote_age_seconds:
-        reasons.append(f"action_underlier_source_stale:{instrument_id}")
-    if transport_age < -tolerance:
-        reasons.append(f"action_underlier_transport_in_future:{instrument_id}")
-    elif transport_age > max_quote_age_seconds:
-        reasons.append(f"action_underlier_transport_stale:{instrument_id}")
-    if reasons:
-        return {}, reasons
-    use = configured_quote_use_decision(quote, as_of=_utc(now))
-    price = _number(quote.effective_price)
-    if not use.pricing_allowed or price is None:
-        return {}, [f"action_underlier_not_pricing_allowed:{instrument_id}"]
-    return (
-        {
-            "instrument_id": instrument_id,
-            "price": price,
-            "provider": quote.provider.value,
-            "source_at": _utc(source_at).isoformat(),
-            "transport_at": _utc(transport_at).isoformat(),
-            "source_age_seconds": source_age,
-            "transport_age_seconds": transport_age,
-        },
-        [],
-    )
 
 
 def _level_reached(
@@ -637,7 +717,7 @@ def _evaluate_gth_spread_entry(
         coordinate = dict(raw_coordinate) if isinstance(raw_coordinate, Mapping) else None
         valid_until = parse_aware_time(gth_signal.get("valid_until"))
         normalized = normalize_block_reasons(reasons)
-        status = "trade_ready" if episode else "blocked" if terminal else "observing"
+        status = "virtual_ready" if episode else "blocked" if terminal else "observing"
         token = (
             source_id
             or hashlib.sha256(
@@ -665,6 +745,9 @@ def _evaluate_gth_spread_entry(
             "status": status,
             "terminal": bool(terminal or episode),
             "position_type": "call_debit_spread",
+            "simulation_only": True,
+            "execution_eligible": False,
+            "broker_position_effect": "none",
             "exact_spread_snapshot": dict(snapshot) if snapshot else None,
             "episode_id": episode.get("episode_id") if episode else None,
             "automatic_ordering": False,
@@ -735,15 +818,18 @@ def _evaluate_gth_spread_entry(
         return result(["spread_debit_not_below_width"], terminal=False, snapshot=snapshot)
     target_spx = _number(spread.get("target_wall"))
     if target_spx is not None:
-        spx_underlier, underlier_reasons = _action_underlier_snapshot(
+        spx_underlier = _gth_chain_reference(
             latest,
-            instrument_id="index:SPX",
             now=now,
-            max_quote_age_seconds=policy.trade_quote_max_age_seconds,
-            future_tolerance_seconds=policy.provider_sync_tolerance_seconds,
+            expiry=session_date.replace("-", ""),
+            policy=policy,
         )
         if not spx_underlier:
-            return result(underlier_reasons, terminal=False, snapshot=snapshot)
+            return result(
+                ["chain_implied_target_unavailable"],
+                terminal=False,
+                snapshot=snapshot,
+            )
         snapshot["action_spx_underlier"] = spx_underlier
         if _level_reached(
             _number(spx_underlier.get("price")),
@@ -753,8 +839,19 @@ def _evaluate_gth_spread_entry(
         ):
             return result(["target_reached_before_entry_quote"], terminal=True, snapshot=snapshot)
     invalidation_es = _number(spread.get("invalidation_es"))
+    signal_trough = _number(gth_signal.get("trough"))
     if invalidation_es is None:
-        invalidation_es = _number(gth_signal.get("trough"))
+        invalidation_es = signal_trough
+    elif signal_trough is not None and not math.isclose(
+        invalidation_es,
+        signal_trough,
+        abs_tol=1e-9,
+    ):
+        return result(
+            ["gth_invalidation_contract_mismatch"],
+            terminal=True,
+            snapshot=snapshot,
+        )
     if invalidation_es is None:
         return result(["gth_invalidation_unavailable"], terminal=True, snapshot=snapshot)
     es_underlier, underlier_reasons = _action_underlier_snapshot(
@@ -825,7 +922,7 @@ def _active_snapshot(
     policy: MarketFeatureSettings,
 ) -> dict[str, object]:
     if active.get("position_type") == "call_debit_spread":
-        return _spread_snapshot(
+        snapshot = _spread_snapshot(
             latest,
             long_contract_id=str(active.get("long_contract_id") or ""),
             short_contract_id=str(active.get("short_contract_id") or ""),
@@ -836,165 +933,15 @@ def _active_snapshot(
                 "ibkr" if active.get("source_kind") == "gth_dip_reclaim_call" else None
             ),
         )
+        if active.get("source_kind") == "gth_dip_reclaim_call":
+            session_date = str(active.get("session_id") or "")
+            reference = _gth_chain_reference(
+                latest,
+                now=now,
+                expiry=session_date.replace("-", ""),
+                policy=policy,
+            )
+            if reference is not None:
+                snapshot["chain_implied_spx"] = reference
+        return snapshot
     return _contract_snapshot(latest, str(active.get("contract_id") or ""), now=now)
-
-
-def _spread_snapshot(
-    latest: LatestState,
-    *,
-    long_contract_id: str,
-    short_contract_id: str,
-    now: datetime,
-    max_quote_age_seconds: float,
-    max_quote_skew_seconds: float,
-    required_provider: str | None = None,
-) -> dict[str, object]:
-    """Mark a 1x/-1x debit spread from two simultaneously usable leg snapshots."""
-
-    snapshot, _reasons = _spread_snapshot_decision(
-        latest,
-        long_contract_id=long_contract_id,
-        short_contract_id=short_contract_id,
-        now=now,
-        max_quote_age_seconds=max_quote_age_seconds,
-        max_quote_skew_seconds=max_quote_skew_seconds,
-        required_provider=required_provider,
-    )
-    return snapshot
-
-
-def _spread_snapshot_decision(
-    latest: LatestState,
-    *,
-    long_contract_id: str,
-    short_contract_id: str,
-    now: datetime,
-    max_quote_age_seconds: float,
-    max_quote_skew_seconds: float,
-    required_provider: str | None = None,
-) -> tuple[dict[str, object], list[str]]:
-    """Return an exact two-leg snapshot or stable, auditable rejection reasons."""
-
-    if not long_contract_id or not short_contract_id:
-        return {}, ["spread_contract_id_unavailable"]
-    long = _contract_snapshot(latest, long_contract_id, now=now)
-    short = _contract_snapshot(latest, short_contract_id, now=now)
-    missing_reasons = []
-    if not long:
-        missing_reasons.append("long_leg_quote_unavailable")
-    if not short:
-        missing_reasons.append("short_leg_quote_unavailable")
-    if missing_reasons:
-        return {}, missing_reasons
-    long_provider = str(long.get("provider") or "")
-    short_provider = str(short.get("provider") or "")
-    if not long_provider or not short_provider:
-        return {}, ["spread_leg_provider_unavailable"]
-    if long_provider != short_provider:
-        return {}, ["spread_leg_provider_mismatch"]
-    if required_provider and long_provider != required_provider:
-        return {}, ["spread_provider_not_ibkr"]
-    long_bid = _number(long.get("bid"))
-    long_mid = _number(long.get("mid"))
-    long_ask = _number(long.get("ask"))
-    short_bid = _number(short.get("bid"))
-    short_mid = _number(short.get("mid"))
-    short_ask = _number(short.get("ask"))
-    if (
-        long_bid is None
-        or long_mid is None
-        or long_ask is None
-        or short_bid is None
-        or short_mid is None
-        or short_ask is None
-        or not 0 <= long_bid <= long_mid <= long_ask
-        or not 0 <= short_bid <= short_mid <= short_ask
-    ):
-        return {}, ["spread_leg_nbbo_invalid"]
-    long_source_at = _time(long.get("source_at"))
-    short_source_at = _time(short.get("source_at"))
-    if long_source_at is None or short_source_at is None:
-        return {}, ["spread_leg_source_time_unavailable"]
-    long_transport_at = _time(long.get("transport_at"))
-    short_transport_at = _time(short.get("transport_at"))
-    if long_transport_at is None or short_transport_at is None:
-        return {}, ["spread_leg_transport_time_unavailable"]
-    long_age = (now - long_source_at).total_seconds()
-    short_age = (now - short_source_at).total_seconds()
-    long_transport_age = (now - long_transport_at).total_seconds()
-    short_transport_age = (now - short_transport_at).total_seconds()
-    source_skew = abs((long_source_at - short_source_at).total_seconds())
-    transport_skew = abs((long_transport_at - short_transport_at).total_seconds())
-    time_reasons: list[str] = []
-    if long_age < -1.0:
-        time_reasons.append("long_leg_quote_in_future")
-    elif long_age > max_quote_age_seconds:
-        time_reasons.append("long_leg_quote_stale")
-    if short_age < -1.0:
-        time_reasons.append("short_leg_quote_in_future")
-    elif short_age > max_quote_age_seconds:
-        time_reasons.append("short_leg_quote_stale")
-    if long_transport_age < -1.0:
-        time_reasons.append("long_leg_transport_in_future")
-    elif long_transport_age > max_quote_age_seconds:
-        time_reasons.append("long_leg_transport_stale")
-    if short_transport_age < -1.0:
-        time_reasons.append("short_leg_transport_in_future")
-    elif short_transport_age > max_quote_age_seconds:
-        time_reasons.append("short_leg_transport_stale")
-    if source_skew > max_quote_skew_seconds:
-        time_reasons.append("spread_leg_source_timestamp_skew")
-    if transport_skew > max_quote_skew_seconds:
-        time_reasons.append("spread_leg_transport_timestamp_skew")
-    if time_reasons:
-        return {}, time_reasons
-    net_bid = long_bid - short_ask
-    net_mid = long_mid - short_mid
-    net_ask = long_ask - short_bid
-    if net_mid <= 0 or net_ask <= 0 or not net_bid <= net_mid <= net_ask:
-        return {}, ["spread_net_debit_invalid"]
-
-    long_quality = long.get("quality") if isinstance(long.get("quality"), Mapping) else {}
-    short_quality = short.get("quality") if isinstance(short.get("quality"), Mapping) else {}
-    quality_ok = long_quality.get("status") == "ok" and short_quality.get("status") == "ok"
-    if not quality_ok:
-        return {}, ["spread_leg_quality_blocked"]
-    result: dict[str, object] = {
-        "at": now.isoformat(),
-        "mid": net_mid,
-        "bid": net_bid,
-        "ask": net_ask,
-        "iv": long.get("iv"),
-        "underlier": long.get("underlier"),
-        "long_quote_age_seconds": long_age,
-        "short_quote_age_seconds": short_age,
-        "long_transport_age_seconds": long_transport_age,
-        "short_transport_age_seconds": short_transport_age,
-        "leg_source_skew_seconds": source_skew,
-        "leg_transport_skew_seconds": transport_skew,
-        "quality": {
-            "status": "ok",
-            "long": dict(long_quality),
-            "short": dict(short_quality),
-        },
-        "long": long,
-        "short": short,
-    }
-    for field in (
-        "delta",
-        "gamma_per_point",
-        "color_gamma_per_minute",
-        "speed_gamma_per_point",
-        "theta_per_minute",
-        "vanna_delta_per_vol_point",
-    ):
-        result[field] = _spread_quote_value(long.get(field), short.get(field))
-    return result, []
-
-
-def _spread_quote_value(long_value: object, short_value: object) -> float | None:
-    long_number = _number(long_value)
-    short_number = _number(short_value)
-    if long_number is None or short_number is None:
-        return None
-    return long_number - short_number

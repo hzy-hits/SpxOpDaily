@@ -27,7 +27,7 @@ def macro_event_state(
     except (OSError, yaml.YAMLError) as exc:
         return {
             "mode": "unavailable",
-            "entry_allowed": True,
+            "entry_allowed": False,
             "reason": f"macro_calendar_unavailable:{type(exc).__name__}",
             "as_of": now.isoformat(),
         }

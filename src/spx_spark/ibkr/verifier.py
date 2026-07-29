@@ -498,10 +498,13 @@ def snapshot_rows(
 
 
 def normalized_row_fingerprint(row: VerifyRow) -> tuple[object, ...]:
-    """Fields whose advancement proves that the persistent ticker changed."""
+    """Market values whose change proves real data-plane progress.
+
+    IBKR may advance ``ticker.time`` while replaying an identical payload, so
+    transport time is deliberately excluded from the liveness fingerprint.
+    """
 
     return (
-        row.ticker_time,
         row.bid,
         row.ask,
         row.last,

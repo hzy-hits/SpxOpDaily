@@ -52,6 +52,18 @@ class MarketFeatureSettings:
     trade_min_target_room_points: float = 3.0
     trade_min_reward_risk: float = 0.25
     trade_time_stop_minutes: int = 15
+    gth_manual_candidate_enabled: bool = True
+    gth_manual_candidate_quote_max_age_seconds: float = 15.0
+    gth_manual_candidate_ttl_seconds: float = 20.0
+    gth_manual_candidate_max_debit_fraction: float = 0.65
+    gth_manual_candidate_max_net_spread_fraction: float = 0.20
+    gth_manual_candidate_min_parity_pairs: int = 3
+    gth_manual_candidate_max_parity_dispersion_points: float = 5.0
+    gth_manual_candidate_max_parity_interval_points: float = 5.0
+    gth_manual_candidate_target_room_buffer_points: float = 1.0
+    gth_manual_candidate_close_buffer_seconds: float = 30.0
+    gth_manual_candidate_max_reclaim_age_seconds: float = 1200.0
+    gth_manual_candidate_min_reward_risk: float = 1.0
     session_episode_enabled: bool = True
     session_break_buffer_points: float = 2.0
     session_extreme_extension_points: float = 5.0
@@ -116,6 +128,17 @@ class MarketFeatureSettings:
             self.trade_min_target_room_points,
             self.trade_min_reward_risk,
             self.trade_time_stop_minutes,
+            self.gth_manual_candidate_quote_max_age_seconds,
+            self.gth_manual_candidate_ttl_seconds,
+            self.gth_manual_candidate_max_debit_fraction,
+            self.gth_manual_candidate_max_net_spread_fraction,
+            self.gth_manual_candidate_min_parity_pairs,
+            self.gth_manual_candidate_max_parity_dispersion_points,
+            self.gth_manual_candidate_max_parity_interval_points,
+            self.gth_manual_candidate_target_room_buffer_points,
+            self.gth_manual_candidate_close_buffer_seconds,
+            self.gth_manual_candidate_max_reclaim_age_seconds,
+            self.gth_manual_candidate_min_reward_risk,
             self.session_break_buffer_points,
             self.session_extreme_extension_points,
             self.session_reclaim_hold_seconds,
@@ -164,6 +187,8 @@ class MarketFeatureSettings:
             self.trade_follow_through_em_fraction,
             self.trade_entry_spread_fraction,
             self.trade_target_em_fraction,
+            self.gth_manual_candidate_max_debit_fraction,
+            self.gth_manual_candidate_max_net_spread_fraction,
             self.session_recovery_ratio,
             self.greek_decision_min_coverage,
             self.greek_max_theta_15m_loss_fraction,

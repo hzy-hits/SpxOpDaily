@@ -25,6 +25,7 @@ from spx_spark.marketdata import (
     QuoteUseDecision,
     as_utc,
     choose_best_quote,
+    instrument_matches_id,
     parse_timestamp,
     provider_state_from_dict,
     quality_from_market_data_type,
@@ -52,10 +53,11 @@ class LatestState:
     quotes: tuple[Quote, ...]
     best_quotes: tuple[Quote, ...]
     provider_states: tuple[ProviderState, ...] = ()
+    failover_mode: str | None = None
 
     def best_quote(self, instrument_id: str) -> Quote | None:
         for quote in self.best_quotes:
-            if quote.instrument.canonical_id == instrument_id:
+            if instrument_matches_id(quote.instrument, instrument_id):
                 return quote
         return None
 
@@ -66,6 +68,7 @@ class LatestState:
             "quotes": [quote.to_dict() for quote in self.quotes],
             "best_quotes": [quote.to_dict() for quote in self.best_quotes],
             "provider_states": [state.to_dict() for state in self.provider_states],
+            "failover_mode": self.failover_mode,
         }
 
 
@@ -187,6 +190,11 @@ class LatestStateStore:
         as_of = now if refresh_quality else (
             as_utc_from_payload(payload.get("as_of")) if isinstance(payload, dict) else now
         )
+        failover_mode = (
+            self._provider_failover_mode(now=as_of)
+            if refresh_quality
+            else str(payload.get("failover_mode") or "") or None
+        )
         if refresh_quality:
             quotes = tuple(
                 degrade_stale_quote(
@@ -204,6 +212,7 @@ class LatestStateStore:
                 quotes,
                 as_of=as_of,
                 provider_priority=self.settings.provider_priority,
+                failover_mode=failover_mode,
             )
         return LatestState(
             created_at=created_at,
@@ -211,6 +220,7 @@ class LatestStateStore:
             quotes=quotes,
             best_quotes=best_quotes,
             provider_states=provider_states,
+            failover_mode=failover_mode,
         )
 
     def _quarantine_corrupt_state(self, *, now: datetime) -> Path | None:
@@ -261,6 +271,7 @@ class LatestStateStore:
                 aged_quotes,
                 as_of=now,
                 provider_priority=self.settings.provider_priority,
+                failover_mode=(failover_mode := self._provider_failover_mode(now=now)),
             )
             state = LatestState(
                 created_at=datetime.now(tz=timezone.utc),
@@ -270,6 +281,7 @@ class LatestStateStore:
                     sorted(best_quotes, key=lambda quote: quote.instrument.canonical_id)
                 ),
                 provider_states=provider_states_latest,
+                failover_mode=failover_mode,
             )
             self.write(state)
         return LatestUpdateResult(
@@ -295,6 +307,7 @@ class LatestStateStore:
                 remaining_quotes,
                 as_of=now,
                 provider_priority=self.settings.provider_priority,
+                failover_mode=(failover_mode := self._provider_failover_mode(now=now)),
             )
             state = LatestState(
                 created_at=datetime.now(tz=timezone.utc),
@@ -304,6 +317,7 @@ class LatestStateStore:
                     sorted(best_quotes, key=lambda quote: quote.instrument.canonical_id)
                 ),
                 provider_states=existing_state.provider_states,
+                failover_mode=failover_mode,
             )
             self.write(state)
         return LatestUpdateResult(
@@ -322,6 +336,48 @@ class LatestStateStore:
             os.fsync(handle.fileno())
         temp_path.replace(self.path)
         _fsync_directory(self.path.parent)
+
+    def _provider_failover_mode(self, *, now: datetime) -> str | None:
+        """Resolve fresh control state; fail closed during monitored sessions."""
+
+        configured_path = self.settings.provider_failover_state_path.strip()
+        if not configured_path:
+            return None
+        monitored_session = (
+            DEFAULT_MARKET_CALENDAR.is_rth_open(now)
+            or DEFAULT_MARKET_CALENDAR.is_spx_gth_open(now)
+        )
+        try:
+            raw = json.loads(Path(configured_path).read_text(encoding="utf-8"))
+        except (OSError, ValueError, json.JSONDecodeError):
+            return "blocked" if monitored_session else None
+        if not isinstance(raw, dict):
+            return "blocked" if monitored_session else None
+        updated_at = parse_timestamp(raw.get("updated_at"))
+        age_seconds = (
+            (as_utc(now) - updated_at).total_seconds()
+            if updated_at is not None
+            else None
+        )
+        fresh = (
+            age_seconds is not None
+            and 0 <= age_seconds
+            <= self.settings.provider_failover_control_max_age_seconds
+        )
+        mode = str(raw.get("mode") or "")
+        if (
+            raw.get("monitoring_active") is True
+            and fresh
+            and mode
+            in {
+                "schwab_primary",
+                "ibkr_fallback",
+                "recovery_pending",
+                "both_unavailable",
+            }
+        ):
+            return mode
+        return "blocked" if monitored_session else None
 
 
 class LatestMarketProjectionStore(LatestStateStore):
@@ -580,6 +636,7 @@ def select_best_quotes(
     *,
     as_of: datetime | None = None,
     provider_priority: Iterable[Provider | str] = DEFAULT_PROVIDER_PRIORITY,
+    failover_mode: str | None = None,
 ) -> tuple[Quote, ...]:
     grouped: dict[str, list[Quote]] = defaultdict(list)
     for quote in quotes:
@@ -589,7 +646,11 @@ def select_best_quotes(
     configured_priority = tuple(provider_priority)
     best: list[Quote] = []
     for instrument_id in sorted(grouped):
-        candidates = pricing_candidates(grouped[instrument_id], as_of=selection_time)
+        candidates = pricing_candidates(
+            grouped[instrument_id],
+            as_of=selection_time,
+            failover_mode=failover_mode,
+        )
         if not candidates:
             continue
         quote = choose_best_quote(
@@ -599,6 +660,7 @@ def select_best_quotes(
                 candidates[0].instrument,
                 as_of=selection_time,
                 configured=configured_priority,
+                failover_mode=failover_mode,
             ),
         )
         if quote is not None:

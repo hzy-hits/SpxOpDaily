@@ -254,6 +254,16 @@ def test_option_failure_does_not_erase_ready_rth_market_state() -> None:
     assert "option_frame_unavailable" in result["option_overlay"]["reasons"]
 
 
+def test_unverified_open_interest_fails_closed_at_spring_gate() -> None:
+    inputs = _inputs()
+    inputs[3]["expiries"][0]["oi_quality"] = "schwab_unverified"
+
+    result = _build(inputs)
+
+    assert result["status"] == "abstain"
+    assert "open_interest_quality_unavailable" in result["option_overlay"]["reasons"]
+
+
 def test_incomplete_rth_state_is_visible_but_cannot_veto_legacy_shadow() -> None:
     inputs = _inputs()
     _attach_rth_market_state(inputs[0], "UNCERTAIN", direction_score=4)

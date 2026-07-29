@@ -77,7 +77,7 @@ def test_identical_ibkr_fields_keep_their_original_observation_clocks() -> None:
     snapshot_rows(subscriptions, 15.0, option_stale_after_seconds=90.0, now=later)
     second = quote_from_ibkr_row(row, received_at=later)
 
-    assert option_field_observed_at(second, field="pricing") == later
+    assert option_field_observed_at(second, field="pricing") == START
     assert option_field_observed_at(second, field="greeks") == START
     assert option_field_observed_at(second, field="open_interest") == START
     assert option_field_age_seconds(second, as_of=later, field="greeks") == 60.0

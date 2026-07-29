@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from datetime import datetime
 
 from spx_spark.analytics.options.chain import is_spy_option, pair_by_strike
 from spx_spark.analytics.options.exposure import build_gex_by_strike
@@ -38,6 +39,7 @@ def build_spy_confluence(
     quotes: Sequence[Quote],
     front_spxw: ExpiryOptionsMap | None,
     *,
+    as_of: datetime,
     spy_underlier: float | None = None,
     spx_underlier: float | None = None,
 ) -> WallConfluence:
@@ -78,7 +80,11 @@ def build_spy_confluence(
         quote for quote in spy_quotes if (quote.instrument.expiry or "unknown") == front_expiry
     ]
     pairs = pair_by_strike(front_quotes)
-    gex_rows = build_gex_by_strike(pairs, underlier=spy_underlier)
+    gex_rows = build_gex_by_strike(
+        pairs,
+        underlier=spy_underlier,
+        as_of=as_of,
+    )
     call_wall_row = max(gex_rows, key=lambda row: row.call_gex) if gex_rows else None
     put_wall_row = min(gex_rows, key=lambda row: row.put_gex) if gex_rows else None
     spy_call_wall = call_wall_row.strike if call_wall_row and call_wall_row.call_gex > 0 else None

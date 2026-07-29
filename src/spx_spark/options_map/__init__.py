@@ -10,6 +10,7 @@ from spx_spark.analytics.options import *  # noqa: F403
 from spx_spark.analytics.options import __all__ as _ANALYTICS_ALL
 from spx_spark.options_map.cli import main, parse_args, run
 from spx_spark.options_map.orchestration import (
+    actionable_chain_implied_reference,
     actionable_chain_implied_spot,
     build_options_map,
     group_spxw_option_quotes,
@@ -21,6 +22,7 @@ from spx_spark.options_map.render import format_number, print_options_map
 __all__ = [
     *_ANALYTICS_ALL,
     "actionable_chain_implied_spot",
+    "actionable_chain_implied_reference",
     "build_options_map",
     "format_number",
     "group_spxw_option_quotes",

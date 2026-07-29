@@ -27,6 +27,7 @@ def observation(
     trigger_coordinate_kind: str = "unknown",
     trigger_basis_points: float | None = None,
     spx_spot: float | None = None,
+    session_mode: str = "rth",
 ) -> LevelObservation:
     return LevelObservation(
         at=NOW + timedelta(seconds=seconds),
@@ -36,6 +37,7 @@ def observation(
         quality_ok=quality_ok,
         quality_reason=None if quality_ok else "stale_chain",
         session_date="2026-07-13",
+        session_mode=session_mode,
         trigger_coordinate_kind=trigger_coordinate_kind,
         trigger_basis_points=trigger_basis_points,
         spx_spot=spx_spot,
@@ -72,6 +74,22 @@ def test_breakout_requires_acceptance_retest_and_confirmation_hold() -> None:
     confirmed = advance(holding.state, 56, spot=94.0, es=4994.0)
     assert confirmed.current_phase is LevelPhase.CONFIRMED
     assert confirmed.state["direction"] == "down"
+    assert confirmed.state["expires_at"] == (
+        NOW + timedelta(seconds=56 + SETTINGS.event_ttl_seconds)
+    ).isoformat()
+
+
+def test_es_confirmation_is_latched_when_thesis_starts_after_a_long_approach() -> None:
+    armed = advance(None, 0, spot=95.0, es=5000.0)
+    testing = advance(armed.state, 250, spot=99.0, es=5050.0)
+    pending = advance(testing.state, 255, spot=96.0, es=5049.0)
+
+    accepted = advance(pending.state, 276, spot=95.0, es=5047.0)
+
+    assert pending.state["confirmation_start_es"] == 5049.0
+    assert pending.state["confirmation_start_spot"] == 96.0
+    assert accepted.current_phase is LevelPhase.ACCEPTED
+    assert accepted.reason == "direction_accepted"
 
 
 def test_confirmed_path_invalidates_when_price_reclaims_the_level() -> None:
@@ -217,6 +235,37 @@ def test_pending_structure_blocks_terminal_rearm() -> None:
     assert blocked.current_phase is LevelPhase.EXPIRED
     assert blocked.changed is False
     assert blocked.reason == "structure_change_pending_new_arm_blocked"
+
+
+def test_session_boundary_resets_terminal_event_even_when_new_arm_is_blocked() -> None:
+    armed = advance(
+        None,
+        0,
+        spot=95.0,
+        es=5000.0,
+        session_mode="globex",
+        trigger_coordinate_kind="chain_implied_spx",
+    )
+    terminal = {
+        **armed.state,
+        "phase": LevelPhase.EXPIRED.value,
+        "phase_at": NOW.isoformat(),
+    }
+
+    reset = advance(
+        terminal,
+        31,
+        spot=99.0,
+        es=5000.0,
+        session_mode="rth",
+        trigger_coordinate_kind="official_spx",
+        arm_allowed=False,
+        arm_block_reason="structure_change_pending_new_arm_blocked",
+    )
+
+    assert reset.current_phase is LevelPhase.FAR
+    assert reset.changed is True
+    assert reset.reason == "session_boundary_reset"
 
 
 def test_pending_structure_does_not_pause_active_phase_timeout() -> None:

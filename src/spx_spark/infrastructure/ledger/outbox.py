@@ -59,6 +59,10 @@ CREATE TABLE IF NOT EXISTS domain_event_outbox (
 );
 CREATE INDEX IF NOT EXISTS idx_outbox_status_available
     ON domain_event_outbox(status, available_at);
+CREATE TABLE IF NOT EXISTS domain_event_outbox_health (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    checked_at TEXT NOT NULL
+);
 """
 
 
@@ -174,11 +178,33 @@ class SqliteEventOutbox:
                 """,
                 (OutboxStatus.ACKED.value,),
             )
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO domain_event_outbox_health(singleton, checked_at)
+                VALUES (1, ?)
+                """,
+                (_iso(_utc_now()),),
+            )
 
     def writable(self) -> bool:
+        """Exercise the same SQLite write/commit path required by append."""
+
         try:
             with self._connect() as connection:
-                connection.execute("SELECT 1 FROM domain_event_outbox LIMIT 1")
+                connection.execute("BEGIN IMMEDIATE")
+                try:
+                    connection.execute(
+                        """
+                        UPDATE domain_event_outbox_health
+                        SET checked_at = ?
+                        WHERE singleton = 1
+                        """,
+                        (_iso(_utc_now()),),
+                    )
+                    connection.execute("COMMIT")
+                except Exception:
+                    connection.execute("ROLLBACK")
+                    raise
             return True
         except sqlite3.Error:
             return False
@@ -420,22 +446,45 @@ class SqliteEventOutbox:
         cutoff = _iso(
             datetime.fromtimestamp(now.timestamp() - older_than_seconds, tz=timezone.utc)
         )
+        now_text = _iso(now)
         with self._connect() as connection:
-            cursor = connection.execute(
-                """
-                UPDATE domain_event_outbox
-                SET status = ?, claimed_by = NULL, claimed_at = NULL, updated_at = ?
-                WHERE status = ? AND claimed_at IS NOT NULL AND claimed_at <= ?
-                  AND attempts < max_attempts
-                """,
-                (
-                    OutboxStatus.PENDING.value,
-                    _iso(now),
-                    OutboxStatus.CLAIMED.value,
-                    cutoff,
-                ),
-            )
-            return cursor.rowcount
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                requeued = connection.execute(
+                    """
+                    UPDATE domain_event_outbox
+                    SET status = ?, claimed_by = NULL, claimed_at = NULL, updated_at = ?
+                    WHERE status = ? AND claimed_at IS NOT NULL AND claimed_at <= ?
+                      AND attempts < max_attempts
+                    """,
+                    (
+                        OutboxStatus.PENDING.value,
+                        now_text,
+                        OutboxStatus.CLAIMED.value,
+                        cutoff,
+                    ),
+                ).rowcount
+                dead_lettered = connection.execute(
+                    """
+                    UPDATE domain_event_outbox
+                    SET status = ?, claimed_by = NULL, claimed_at = NULL,
+                        last_error = ?, updated_at = ?
+                    WHERE status = ? AND claimed_at IS NOT NULL AND claimed_at <= ?
+                      AND attempts >= max_attempts
+                    """,
+                    (
+                        OutboxStatus.DEAD_LETTER.value,
+                        "claim_expired_after_final_attempt",
+                        now_text,
+                        OutboxStatus.CLAIMED.value,
+                        cutoff,
+                    ),
+                ).rowcount
+                connection.execute("COMMIT")
+                return requeued + dead_lettered
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
 
     def purge_acked_older_than(
         self,

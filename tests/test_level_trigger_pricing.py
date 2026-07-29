@@ -15,6 +15,7 @@ from spx_spark.application.order_map.pricing import (
     parity_forward,
 )
 from spx_spark.application.order_map.pricing_outcomes import advance_pricing_outcomes
+from spx_spark.application.order_map.spot import actionable_live_price
 from spx_spark.application.order_map.touch_time_model import estimate_touch_time
 from spx_spark.application.order_map.trigger_coordinates import (
     TriggerCoordinateKind,
@@ -105,6 +106,19 @@ def test_execution_quote_gate_ignores_provider_with_stale_source_timestamp() -> 
     assert gate.provider_mid_divergence_bps is None
 
 
+def test_execution_nbbo_cannot_be_freshened_by_trade_clock() -> None:
+    quote = replace(
+        _option(bid=9.99, ask=10.01),
+        quote_time=None,
+        trade_time=NOW,
+    )
+
+    gate = evaluate_execution_quote(quote, (quote,), as_of=NOW)
+
+    assert gate.executable is False
+    assert "source_quote_stale_or_unverified" in gate.reasons
+
+
 def test_execution_quote_gate_excludes_provider_with_stale_model_underlier() -> None:
     schwab = _option(bid=12.2, ask=12.4, provider=Provider.SCHWAB)
     schwab = replace(
@@ -123,6 +137,24 @@ def test_execution_quote_gate_excludes_provider_with_stale_model_underlier() -> 
     assert gate.providers == ("schwab",)
     assert gate.provider_mid_divergence_bps is None
     assert gate.excluded_providers == ("ibkr:model_underlier_divergence",)
+
+
+def test_execution_quote_gate_rejects_future_source_and_transport_timestamps() -> None:
+    future = NOW + timedelta(seconds=30)
+    quote = replace(
+        _option(),
+        received_at=future,
+        last_update_at=future,
+        quote_time=future,
+    )
+
+    gate = evaluate_execution_quote(quote, (quote,), as_of=NOW)
+
+    assert gate.executable is False
+    assert gate.transport_age_seconds == -30.0
+    assert gate.source_age_seconds == -30.0
+    assert "execution_quote_transport_timestamp_in_future" in gate.reasons
+    assert "execution_quote_source_timestamp_in_future" in gate.reasons
 
 
 def test_parity_forward_and_black76_projection_expose_scenario_range() -> None:
@@ -209,6 +241,56 @@ def test_trigger_coordinate_uses_official_rth_chain_gth_then_es(monkeypatch) -> 
     assert equivalent.kind is TriggerCoordinateKind.ES_EQUIVALENT
     assert equivalent.observed_value == pytest.approx(6050.0)
     assert equivalent.trigger_level(6000.0) == pytest.approx(6050.0)
+
+
+def test_rth_trigger_coordinate_rejects_close_only_spx(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    close_only = Quote(
+        instrument=InstrumentId.index("SPX"),
+        provider=Provider.SCHWAB,
+        provider_symbol="$SPX",
+        received_at=NOW,
+        last_update_at=NOW,
+        quote_time=NOW,
+        quality=MarketDataQuality.LIVE,
+        close=5900.0,
+    )
+    monkeypatch.setattr(
+        "spx_spark.application.order_map.trigger_coordinates.DEFAULT_MARKET_CALENDAR.is_rth_open",
+        lambda _now: True,
+    )
+
+    coordinate = resolve_trigger_coordinate(
+        _state(close_only),
+        None,
+        now=NOW,
+        qualified_es_basis=None,
+    )
+
+    assert coordinate.kind is TriggerCoordinateKind.UNAVAILABLE
+    assert coordinate.observed_value is None
+
+
+def test_actionable_live_price_rejects_close_only_es() -> None:
+    close_only = Quote(
+        instrument=InstrumentId.future("ES"),
+        provider=Provider.IBKR,
+        received_at=NOW,
+        last_update_at=NOW,
+        quote_time=NOW,
+        quality=MarketDataQuality.LIVE,
+        close=6000.0,
+    )
+
+    assert (
+        actionable_live_price(
+            _state(close_only),
+            "future:ES",
+            as_of=NOW,
+        )
+        is None
+    )
 
 
 def test_pricing_outcome_auto_fills_touch_prefill_and_horizons(tmp_path: Path) -> None:

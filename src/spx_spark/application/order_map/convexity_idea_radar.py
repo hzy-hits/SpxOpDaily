@@ -16,6 +16,10 @@ from spx_spark.analytics.options.pricing import finite_float
 from spx_spark.application.order_map.convexity_idea_inputs import (
     build_volatility_context,
 )
+from spx_spark.application.order_map.convexity_path_modifier import select_rolling_path_modifier
+from spx_spark.application.order_map.convexity_opportunity_board import (
+    build_dense_opportunity_board,
+)
 from spx_spark.application.order_map.convexity_idea_quality import (
     build_quality_summary,
     build_wall_probability_context,
@@ -50,7 +54,7 @@ def build_convexity_idea_radar(
     lower_test = _boundary(levels, side="lower", spot=spot)
     upper_test = _boundary(levels, side="upper", spot=spot)
     destination = _destination_map(payload, now=now, mandate=mandate)
-    market_state = _market_state(payload, levels=levels)
+    market_state = _market_state(payload, levels=levels, now=now)
     wall_probabilities = build_wall_probability_context(
         payload,
         mandate=mandate,
@@ -58,6 +62,16 @@ def build_convexity_idea_radar(
     )
     call_evidence = _option_evidence(payload, right="C", level=_number(lower_test.get("level")))
     put_evidence = _option_evidence(payload, right="P", level=_number(upper_test.get("level")))
+    lower_put_evidence = _option_evidence(
+        payload,
+        right="P",
+        level=_number(lower_test.get("level")),
+    )
+    upper_call_evidence = _option_evidence(
+        payload,
+        right="C",
+        level=_number(upper_test.get("level")),
+    )
     quality = build_quality_summary(
         payload,
         destination=destination,
@@ -101,9 +115,7 @@ def build_convexity_idea_radar(
             direction="down",
             required_path="ACCEPTED→RETEST→CONFIRMED",
             falsifier="lower_boundary_reclaimed",
-            option_evidence=_option_evidence(
-                payload, right="P", level=_number(lower_test.get("level"))
-            ),
+            option_evidence=lower_put_evidence,
             idea_generation_allowed=bool(mandate["new_idea_generation_allowed"]),
         ),
         _hypothesis(
@@ -123,12 +135,32 @@ def build_convexity_idea_radar(
             direction="up",
             required_path="ACCEPTED→RETEST→CONFIRMED",
             falsifier="upper_boundary_lost",
-            option_evidence=_option_evidence(
-                payload, right="C", level=_number(upper_test.get("level"))
-            ),
+            option_evidence=upper_call_evidence,
             idea_generation_allowed=bool(mandate["new_idea_generation_allowed"]),
         ),
     ]
+    volatility_context = build_volatility_context(
+        payload,
+        market_state=market_state,
+    )
+    boundary_tests = {
+        "lower": lower_test,
+        "upper": upper_test,
+        "active_event": _active_event(payload),
+        "risk_neutral_wall_probabilities": wall_probabilities,
+    }
+    opportunity_board = build_dense_opportunity_board(
+        mandate=mandate,
+        market_state=market_state,
+        boundary_tests=boundary_tests,
+        option_evidence={
+            "call": _preferred_evidence(call_evidence, upper_call_evidence),
+            "put": _preferred_evidence(put_evidence, lower_put_evidence),
+        },
+        volatility_context=volatility_context,
+        data_quality=quality,
+        hypotheses=hypotheses,
+    )
 
     return {
         "schema_version": SCHEMA_VERSION,
@@ -155,22 +187,15 @@ def build_convexity_idea_radar(
         },
         "destination_map": destination,
         "market_state": market_state,
-        "volatility_context": build_volatility_context(
-            payload,
-            market_state=market_state,
-        ),
+        "volatility_context": volatility_context,
         "levels": {key: _rounded(value) for key, value in levels.items()},
-        "boundary_tests": {
-            "lower": lower_test,
-            "upper": upper_test,
-            "active_event": _active_event(payload),
-            "risk_neutral_wall_probabilities": wall_probabilities,
-        },
+        "boundary_tests": boundary_tests,
         "option_evidence": {
             "call": call_evidence,
             "put": put_evidence,
         },
         "hypotheses": hypotheses,
+        "opportunity_board": opportunity_board,
         "tensions": _tensions(payload, market_state=market_state),
         "data_quality": quality,
         "semantics": {
@@ -378,6 +403,7 @@ def _market_state(
     payload: Mapping[str, Any],
     *,
     levels: Mapping[str, float],
+    now: datetime,
 ) -> dict[str, Any]:
     shadow = _mapping(payload.get("spring_gamma_v3_shadow"))
     state = _mapping(shadow.get("rth_market_state"))
@@ -388,6 +414,14 @@ def _market_state(
     lineage = _mapping(state.get("input_lineage"))
     diagnostics = _mapping(lineage.get("diagnostics"))
     same_time = _mapping(diagnostics.get("same_time_range"))
+    current_path = _mapping(diagnostics.get("rolling_path_percentiles"))
+    fallback = _mapping(payload.get("spring_gamma_v3_path_fallback"))
+    rolling_path = select_rolling_path_modifier(
+        current=current_path,
+        fallback=fallback,
+        shadow=shadow,
+        now=now,
+    )
     return {
         "state": state.get("state"),
         "status": state.get("status"),
@@ -401,6 +435,7 @@ def _market_state(
         "input_required_count": availability.get("required_count"),
         "current_range_points": _number(same_time.get("current_range_points")),
         "same_time_median_range_points": _number(same_time.get("median_range_points")),
+        "rolling_path_percentiles": rolling_path,
         "uncalibrated_direction": {
             "decision": direction.get("decision"),
             "diagnostic_es_direction": direction.get("diagnostic_es_direction"),
@@ -417,6 +452,21 @@ def _market_state(
         ),
         "action_authority": "none",
     }
+
+
+def _preferred_evidence(
+    first: Mapping[str, Any],
+    second: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    rank = {
+        "observed_local_skew_edge": 2,
+        "not_observed": 1,
+        "unknown": 0,
+    }
+    return max(
+        (first, second),
+        key=lambda row: rank.get(str(row.get("edge_status") or "unknown"), 0),
+    )
 
 
 def _level_map(payload: Mapping[str, Any]) -> dict[str, float]:

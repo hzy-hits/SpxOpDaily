@@ -80,3 +80,37 @@ def test_spxw_rth_uses_ibkr_when_schwab_is_absent() -> None:
     )
 
     assert selected[0].provider is Provider.IBKR
+
+
+def test_spxw_rth_failover_mode_is_authoritative() -> None:
+    observed_at = datetime(2026, 7, 14, 14, 0, tzinfo=timezone.utc)
+    rows = (_spxw(Provider.SCHWAB, observed_at), _spxw(Provider.IBKR, observed_at))
+
+    fallback = select_best_quotes(
+        rows,
+        as_of=observed_at,
+        provider_priority=(Provider.SCHWAB, Provider.IBKR),
+        failover_mode="ibkr_fallback",
+    )
+    unsafe = select_best_quotes(
+        rows,
+        as_of=observed_at,
+        provider_priority=(Provider.SCHWAB, Provider.IBKR),
+        failover_mode="recovery_pending",
+    )
+
+    assert [quote.provider for quote in fallback] == [Provider.IBKR]
+    assert unsafe == ()
+
+
+def test_spxw_gth_does_not_use_schwab_primary_control() -> None:
+    observed_at = datetime(2026, 7, 14, 2, 0, tzinfo=timezone.utc)
+
+    selected = select_best_quotes(
+        (_spxw(Provider.SCHWAB, observed_at), _spxw(Provider.IBKR, observed_at)),
+        as_of=observed_at,
+        provider_priority=(Provider.SCHWAB, Provider.IBKR),
+        failover_mode="schwab_primary",
+    )
+
+    assert selected == ()

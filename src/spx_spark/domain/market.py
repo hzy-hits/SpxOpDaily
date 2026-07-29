@@ -39,6 +39,19 @@ def _canonical_id(instrument: _InstrumentLike) -> str:
     return f"{kind}:{instrument.symbol}"
 
 
+def _matches_id(instrument: _InstrumentLike, requested_id: str) -> bool:
+    canonical_id = _canonical_id(instrument)
+    if canonical_id.upper() == requested_id.upper():
+        return True
+    kind = str(
+        getattr(instrument.instrument_type, "value", instrument.instrument_type)
+    ).lower()
+    return (
+        kind == "future"
+        and f"future:{instrument.symbol}".upper() == requested_id.upper()
+    )
+
+
 def _provider_value(provider: Any) -> str:
     return str(getattr(provider, "value", provider))
 
@@ -54,6 +67,7 @@ class MarketSnapshot:
     quotes: tuple[Any, ...]
     provider_states: tuple[Any, ...]
     source_batch_ids: tuple[str, ...]
+    failover_mode: str | None = None
 
     def validate(self) -> None:
         if self.schema_version < 1:
@@ -78,7 +92,7 @@ class MarketSnapshot:
         return tuple(
             quote
             for quote in self.quotes
-            if _canonical_id(quote.instrument).upper() == needle
+            if _matches_id(quote.instrument, needle)
             or quote.instrument.symbol.upper() == needle
         )
 

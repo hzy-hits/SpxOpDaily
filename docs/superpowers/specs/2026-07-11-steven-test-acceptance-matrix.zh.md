@@ -52,7 +52,7 @@ golden 文件生成流程（写进 PR 描述）：在抽取 commit 之前的工�
 | `test_vex_proxy_matches_golden` | strike 级 4 个值 + expiry 级 oi≈19742.461368、volume≈65807.505536（§6 golden 表） |
 | `test_cex_proxy_matches_golden` | strike 级 4 个值 + expiry 级 oi≈−37.5617605944、volume≈−125.2045386903（§7 golden 表） |
 | `test_bs_edge_cases_return_none` | σ=0 / τ=0 / K=0 / S=0 时 vanna、charm 为 None，该合约不进 vex/cex 聚合且不抛异常 |
-| `test_tau_floored_contract_excluded_from_cex` | as_of 距 session close < 15 分钟（τ 触 `_MIN_TIME_TO_EXPIRY_YEARS` floor）→ 该合约带 `tau_floored:` warning 且 cex_proxy 聚合不含它 |
+| `test_actual_final_minutes_support_cex_without_tau_floor` | 距 session close 仍有 10 分钟时使用真实正 τ，cex_proxy 继续可用；仅在 close/after（τ≤0）以兼容 warning `tau_floored:` 标记并停止 cex 聚合 |
 
 实现提示：测试里构造 Quote 时 `OptionGreeks(implied_vol=0.20, delta=<表值>, gamma=<表值>)`，
 `time_to_expiry_years` 用 monkeypatch 或选取 as_of 使 τ 恰为 0.01 年不可行——**规格决定**：

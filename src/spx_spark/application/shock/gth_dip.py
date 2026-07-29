@@ -196,6 +196,9 @@ def advance_gth_dip(
             "max_signals_per_session": max_signals_per_session,
             "cooldown_seconds": cooldown_seconds,
             "signal_expiry_seconds": signal_expiry_seconds,
+            "entry_quality_policy_version": str(
+                (entry_quality or {}).get("policy_version") or ""
+            ),
             "spread_selection_semantics": "first_valid_pending_frozen.v1",
             "spread_min_width_points": spread_min_width_points,
             "spread_max_width_points": spread_max_width_points,
@@ -223,20 +226,13 @@ def advance_gth_dip(
         default_width_points=spread_default_width_points,
         exit_clock_et=exit_clock_et,
     )
-    same_pending = (
+    same_event = (
         prior_pending.get("event_id") == event_id
         and prior_pending.get("provider") == provider
         and prior_pending.get("policy_version") == detector_policy_version
         and prior_pending.get("spread_policy_version") == spread_policy_version
-        and prior_spread_valid
     )
-    if same_pending:
-        count = int(prior_pending.get("confirm_count") or 0) + (1 if enqueued else 0)
-    else:
-        count = 1
-    confirm_started_at = (
-        prior_pending.get("confirm_started_at") if same_pending else now.isoformat()
-    )
+    same_pending = same_event and prior_spread_valid
     frozen_spread = (
         dict(prior_pending["spread"])
         if same_pending and isinstance(prior_pending.get("spread"), Mapping)
@@ -259,6 +255,21 @@ def advance_gth_dip(
             default_width_points=spread_default_width_points,
             exit_clock_et=exit_clock_et,
         )
+    spread_ready = frozen_spread is not None
+    if spread_ready:
+        count = (
+            int(prior_pending.get("confirm_count") or 0) + (1 if enqueued else 0)
+            if same_pending
+            else 1
+        )
+        confirm_started_at = (
+            prior_pending.get("confirm_started_at") if same_pending else now.isoformat()
+        )
+    else:
+        # Preserve the event candidate so confirmation can begin when stable
+        # SPX coordinates arrive, but do not bank count or hold time beforehand.
+        count = 0
+        confirm_started_at = None
     pending = {
         **chosen,
         **strategy_event_fields(
@@ -287,6 +298,9 @@ def advance_gth_dip(
         "automatic_ordering": False,
     }
     state["pending"] = pending
+    if not spread_ready:
+        state["status"] = "spread_inputs_unavailable"
+        return state, None, None
     state["status"] = "confirming"
     confirm_started = _time(confirm_started_at) or now
     if (
@@ -338,8 +352,8 @@ def _frozen_entry_quality(value: Mapping[str, object] | None) -> dict[str, objec
     if value is not None:
         return dict(value)
     return {
-        "mode": "shadow",
-        "policy_version": "gth_trend_alignment_shadow_v1",
+        "mode": "decision_grade",
+        "policy_version": "gth_trend_alignment_live_v2",
         "verdict": "blocked",
         "block_reasons": ["trend_context_unavailable"],
         "features": {},
@@ -361,26 +375,32 @@ def _signal_alert(signal: Mapping[str, object]) -> Alert:
     """Rebuild the confirmed-signal alert so a redelivery stays identical."""
 
     event_id = str(signal["event_id"])
+    entry_quality = signal.get("entry_quality")
+    entry_quality = entry_quality if isinstance(entry_quality, Mapping) else {}
+    quality_passed = bool(
+        entry_quality.get("mode") == "decision_grade"
+        and entry_quality.get("verdict") == "pass"
+        and not entry_quality.get("block_reasons")
+    )
     desk_view = (
         f"Desk View：ES 自 {float(signal['peak']):.2f} 回落至 {float(signal['trough']):.2f} 后"
         f"回升至 {float(signal['es']):.2f}，回撤 {float(signal['drawdown_points']):.2f} 点并收复"
-        f" {float(signal['recovery_fraction']):.0%}；Call 方向进入执行评估。"
+        f" {float(signal['recovery_fraction']):.0%}。"
     )
-    spread = signal.get("spread")
-    if isinstance(spread, Mapping):
+    if quality_passed:
         detail = (
             desk_view
-            + f"Execution：买 SPXW 0DTE {int(spread['long_strike'])}C / 卖 "
-            + f"{int(spread['short_strike'])}C（宽 {int(spread['width_points'])} 点，借记价差埋伏）；"
-            + f"出场窗口：{spread['exit_window_note']}，"
-            + f"最迟 {spread['exit_by_utc']} UTC 离场。"
-            + f"Risk：ES 跌破 {float(spread['invalidation_es']):.2f} 即撤销；自动下单关闭，数量人工定。"
+            + "方向门已通过；正在核验精确 SPXW 双腿、parity、赔率和报价时效。"
+            + "只有随后绿色 MANUAL READY 卡可操作；本事件卡本身不得下单。"
         )
     else:
+        reasons = ",".join(
+            str(item) for item in entry_quality.get("block_reasons") or ()
+        )
         detail = (
             desk_view
-            + "Execution：仅在新鲜 SPXW NBBO 通过门控后建立 TradeReady。"
-            + "Risk：ES 跌破本次低点即撤销 Call 判断；自动下单关闭。"
+            + "方向门未通过，仅记录形态，不生成合约或操作指令。"
+            + (f"阻断：{reasons}。" if reasons else "")
         )
     return Alert(
         severity="high",

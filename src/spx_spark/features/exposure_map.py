@@ -648,7 +648,7 @@ def _build_expiry_exposure(
     unavailable = not any(row.analytical_allowed for row in rows)
     if unavailable:
         quality = "unavailable"
-    elif oi_quality in {"stale_or_zero", "missing"}:
+    elif oi_quality != "ibkr_ok":
         quality = "no_open_interest"
 
     iv_missing = iv_source == "missing"
@@ -673,7 +673,7 @@ def _build_expiry_exposure(
     if unavailable:
         strike_rows = [_nullify_all(strike) for strike in strike_rows]
     else:
-        if oi_quality in {"stale_or_zero", "missing"}:
+        if oi_quality != "ibkr_ok":
             strike_rows = [_nullify_oi_weighted(strike) for strike in strike_rows]
         if iv_missing:
             strike_rows = [_nullify_vanna_family(strike) for strike in strike_rows]
@@ -748,7 +748,7 @@ def _build_expiry_exposure(
     if oi_weighted.net_gamma_ratio is not None and volume_weighted.net_gamma_ratio is not None:
         divergence = volume_weighted.net_gamma_ratio - oi_weighted.net_gamma_ratio
 
-    wall_method = "oi_gex"
+    wall_method = "unavailable"
     call_walls: tuple[WallLevel, ...] = ()
     put_walls: tuple[WallLevel, ...] = ()
     pin_candidate: float | None = None
@@ -772,9 +772,10 @@ def _build_expiry_exposure(
             for strike in strike_rows
             if strike.oi_weighted.call_gex is not None or strike.oi_weighted.put_gex is not None
         ]
-        if not gex_rows and strike_rows:
-            wall_method = "volume_fallback"
-            gex_rows = [
+        if gex_rows:
+            wall_method = "oi_gex"
+        elif strike_rows:
+            volume_rows = [
                 StrikeGex(
                     strike=strike.strike,
                     call_gex=strike.volume_weighted.call_gex or 0.0,
@@ -790,6 +791,9 @@ def _build_expiry_exposure(
                 if strike.volume_weighted.call_gex is not None
                 or strike.volume_weighted.put_gex is not None
             ]
+            if volume_rows:
+                wall_method = "volume_fallback"
+                gex_rows = volume_rows
         if gex_rows:
             strike_step = median_strike_step([row.strike for row in gex_rows])
             call_walls, put_walls = build_wall_ladder(
@@ -814,21 +818,30 @@ def _build_expiry_exposure(
         pairs = pair_by_strike(
             [quote for quote in quotes if quote.instrument.canonical_id in accepted_contract_ids]
         )
-        zg_scan, flip_scan, scan_method = zero_gamma_spot_scan(
-            pairs,
-            underlier=spot,
-            expiry=expiry,
-            as_of=as_of,
-            intraday=False,
-        )
-        if zg_scan is not None:
-            zero_gamma = zg_scan
-            gamma_flip_zone = flip_scan
-            zero_gamma_method = scan_method
-        elif gex_rows:
-            zero_gamma = nearest_zero(gex_rows, spot)
-            gamma_flip_zone = zero_gamma_bracket(gex_rows, spot)
-            zero_gamma_method = f"strike_profile_fallback_{scan_method}"
+        if oi_quality != "ibkr_ok":
+            zero_gamma = None
+            gamma_flip_zone = None
+            zero_gamma_method = f"unavailable_{oi_quality}"
+        else:
+            zg_scan, flip_scan, scan_method = zero_gamma_spot_scan(
+                pairs,
+                underlier=spot,
+                expiry=expiry,
+                as_of=as_of,
+                intraday=False,
+            )
+            if scan_method == "expiry_elapsed":
+                zero_gamma = None
+                gamma_flip_zone = None
+                zero_gamma_method = scan_method
+            elif zg_scan is not None:
+                zero_gamma = zg_scan
+                gamma_flip_zone = flip_scan
+                zero_gamma_method = scan_method
+            elif gex_rows:
+                zero_gamma = nearest_zero(gex_rows, spot)
+                gamma_flip_zone = zero_gamma_bracket(gex_rows, spot)
+                zero_gamma_method = f"strike_profile_fallback_{scan_method}"
 
     return ExpiryExposure(
         expiry=expiry,

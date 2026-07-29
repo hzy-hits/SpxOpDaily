@@ -83,7 +83,11 @@ def live_two_sided(
 
 
 def quote_age_seconds(quote: Quote, *, now: datetime) -> float | None:
-    source_at = quote.quote_time or quote.trade_time or quote.received_at
+    # This policy consumes displayed bid/ask, so freshness belongs to the
+    # quote clock only. Last-trade and receipt clocks cannot freshen NBBO.
+    source_at = quote.quote_time
+    if source_at is None:
+        return None
     transport_at = quote.last_update_at or quote.received_at
     try:
         source_age = (as_utc(now) - as_utc(source_at)).total_seconds()

@@ -98,6 +98,8 @@ class OrderCandidate:
     prob_close_beyond: float | None
     delta: float
     gamma: float
+    probability_method: str = "unavailable"
+    frontrun_probability_method: str | None = None
     frontrun_level: float | None = None
     frontrun_projected_mid: float | None = None
     frontrun_limit: float | None = None

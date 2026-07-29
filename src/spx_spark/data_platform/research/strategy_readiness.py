@@ -787,6 +787,7 @@ def _record_role(record: _Record) -> str | None:
     if row.get("event") == "virtual_entry_decision" and row.get("status") in {
         "blocked",
         "trade_ready",
+        "virtual_ready",
     }:
         return "virtual_entry_decision"
     if row.get("event") in {"virtual_opened", "virtual_closed"}:
@@ -826,7 +827,10 @@ def _material_contract_issues(record: _Record, *, role: str) -> tuple[str, ...]:
             role == "trade_intent"
             and record.payload.get("status") in {"shadow_ready", "trade_ready"}
         )
-        or (role == "virtual_entry_decision" and record.payload.get("status") == "trade_ready")
+        or (
+            role == "virtual_entry_decision"
+            and record.payload.get("status") in {"trade_ready", "virtual_ready"}
+        )
         or (role == "virtual_lifecycle" and record.payload.get("event") == "virtual_opened")
         or (role == "trade_candidate" and record.payload.get("event") == "candidate_armed")
     )

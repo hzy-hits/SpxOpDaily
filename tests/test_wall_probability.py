@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from dataclasses import replace
 from datetime import datetime, timedelta
 from statistics import NormalDist
 from zoneinfo import ZoneInfo
@@ -11,6 +12,9 @@ from spx_spark.application.market_features.wall_probability import (
     POLICY_STATUS,
     PROBABILITY_SEMANTICS,
     build_wall_probability_tenor_shadow,
+)
+from spx_spark.application.market_features.wall_probability_policy import (
+    live_two_sided,
 )
 from spx_spark.marketdata import (
     InstrumentId,
@@ -67,6 +71,19 @@ def make_quote(
             model="test",
         ),
     )
+
+
+def test_live_two_sided_requires_nbbo_quote_clock() -> None:
+    now = datetime(2026, 7, 23, 10, 0, tzinfo=ET)
+    quote = make_quote(
+        expiry=FRONT,
+        strike=7500.0,
+        right="C",
+        now=now,
+    )
+    quote = replace(quote, quote_time=None, trade_time=now)
+
+    assert live_two_sided(quote, now=now, max_age_seconds=15.0) is False
 
 
 def complete_quotes(

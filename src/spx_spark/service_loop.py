@@ -124,7 +124,12 @@ def run(argv: list[str] | None = None) -> int:
 
     app_settings = load_app_settings()
     settings = ServiceLoopSettings.from_app_settings(app_settings)
-    tasks = exclude_tasks(build_tasks(settings), args.exclude_task)
+    configured_tasks = build_tasks(settings)
+    tasks = exclude_tasks(configured_tasks, args.exclude_task)
+    external_leases = _external_hot_worker_leases(
+        excluded_names=set(args.exclude_task),
+        settings=settings,
+    )
     if args.print_config:
         print(
             json.dumps(
@@ -150,7 +155,36 @@ def run(argv: list[str] | None = None) -> int:
         tasks,
         heartbeat_seconds=settings.heartbeat_seconds,
         max_concurrent_tasks=settings.max_concurrent_tasks,
+        external_lease_paths=external_leases,
     )
+
+
+def _external_hot_worker_leases(
+    *,
+    excluded_names: set[str],
+    settings: ServiceLoopSettings,
+):
+    from pathlib import Path
+
+    from spx_spark.config import StorageSettings
+
+    root = Path(StorageSettings.from_env().data_root) / "latest"
+    result = {}
+    for name, interval, filename in (
+        (
+            "market_features",
+            settings.market_features_interval_seconds,
+            "market_features_hot_worker.lease.json",
+        ),
+        (
+            "intraday_shock",
+            settings.intraday_shock_interval_seconds,
+            "intraday_shock_hot_worker.lease.json",
+        ),
+    ):
+        if name in excluded_names:
+            result[name] = (root / filename, max(float(interval) * 3.0, 30.0))
+    return result
 
 
 def main() -> None:

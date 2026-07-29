@@ -116,6 +116,15 @@ def test_notification_settled_semantics() -> None:
         outcome="consumed",
     )
     assert notification_settled(consumed) is True
+    queued = NotificationResult(
+        enabled=True,
+        selected_count=1,
+        sent_count=0,
+        skipped_reason=None,
+        sinks=(),
+        outcome="queued",
+    )
+    assert notification_settled(queued) is True
     no_sink = NotificationResult(
         enabled=True,
         selected_count=1,

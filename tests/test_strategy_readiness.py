@@ -18,12 +18,14 @@ from spx_spark.data_platform.research.strategy_readiness import (
     _exact_spread_snapshot,
     _material_contract_issues,
     _put_shadow_record,
+    _record_role,
     _select_policy_bundle,
     build_strategy_readiness,
     measure_session_completeness,
     validate_strategy_contract,
 )
 from spx_spark.data_platform.research.strategy_readiness_evidence import (
+    _exact_spread_decision,
     _exact_put_shadow_entry,
     count_put_exact_entries,
     duplicate_audit,
@@ -43,6 +45,43 @@ ROLE_POLICIES = {
     "virtual_lifecycle": "virtual_lifecycle_v3_frozen",
 }
 PUT_SHADOW_WINDOW_CONTRACT_VERSION = "rth_lanes_0945_1300_put_shadow.v1"
+
+
+@pytest.mark.parametrize("status", ("trade_ready", "virtual_ready"))
+def test_gth_virtual_entry_decision_dual_reads_legacy_and_new_status(
+    status: str,
+) -> None:
+    at = datetime(2026, 7, 15, 3, 0, tzinfo=timezone.utc)
+    payload = {
+        **_envelope(
+            at,
+            role="virtual_entry_decision",
+            kind="option_spread",
+            instrument_id="option:SPX:SPXW:20260715:7500:C|-option:SPX:SPXW:20260715:7520:C",
+        ),
+        "event": "virtual_entry_decision",
+        "decision_id": f"virtual-entry:{status}",
+        "source_signal_id": f"gth:{status}",
+        "source_kind": "gth_dip_reclaim_call",
+        "evaluated_at": at.isoformat(),
+        "status": status,
+        "terminal": True,
+        "position_type": "call_debit_spread",
+        "exact_spread_snapshot": _spread_snapshot(at),
+        "episode_id": f"virtual:{status}",
+        "automatic_ordering": False,
+    }
+    if status == "virtual_ready":
+        payload.update(
+            {
+                "simulation_only": True,
+                "execution_eligible": False,
+            }
+        )
+    record = SimpleNamespace(source="virtual_strategy", payload=payload)
+
+    assert _record_role(record) == "virtual_entry_decision"
+    assert _exact_spread_decision(payload)
 
 
 def _write_rows(path: Path, rows: list[dict[str, object]]) -> None:

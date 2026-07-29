@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -10,6 +10,7 @@ from spx_spark.application.realtime.contracts import EngineTick
 from spx_spark.application.realtime.engine import (
     RealtimeEngine,
     snapshot_has_fresh_spxw_chain,
+    snapshot_has_live_es,
     snapshot_has_tradfi_anchor,
 )
 from spx_spark.domain.analytics import AnalyticsDiagnostics, AnalyticsResult, AnalyticsStatus
@@ -21,28 +22,43 @@ from spx_spark.marketdata import InstrumentId, MarketDataQuality, Provider, Quot
 NOW = datetime(2026, 7, 13, 15, 0, tzinfo=timezone.utc)
 
 
-def _quote(symbol: str = "SPX", kind: str = "index") -> SimpleNamespace:
+def _quote(
+    symbol: str = "SPX",
+    kind: str = "index",
+    *,
+    expiry: str | None = None,
+    at: datetime = NOW,
+) -> SimpleNamespace:
+    canonical_id = f"future:{symbol}" if kind == "future" else f"index:{symbol}"
+    if kind == "future" and expiry:
+        canonical_id = f"{canonical_id}:{expiry}"
     return SimpleNamespace(
         instrument=SimpleNamespace(
-            canonical_id=f"future:{symbol}" if kind == "future" else f"index:{symbol}",
+            canonical_id=canonical_id,
             symbol=symbol,
             instrument_type=SimpleNamespace(value=kind),
             underlier=None,
-            expiry=None,
+            expiry=expiry,
         ),
         provider=SimpleNamespace(value="schwab"),
-        received_at=NOW,
+        received_at=at,
+        last_update_at=at,
         quality=SimpleNamespace(value="live"),
-        effective_price=6500.0,
+        bid=6499.0,
+        mid=6500.0,
+        ask=6501.0,
+        quote_time=at,
+        last=None,
+        trade_time=None,
     )
 
 
-def _snapshot(*, quotes=()) -> MarketSnapshot:
+def _snapshot(*, quotes=(), at: datetime = NOW) -> MarketSnapshot:
     return MarketSnapshot(
         schema_version=1,
         snapshot_id="snap-1",
-        as_of=NOW,
-        received_at=NOW,
+        as_of=at,
+        received_at=at,
         quotes=tuple(quotes),
         provider_states=(),
         source_batch_ids=("batch-1",),
@@ -124,11 +140,27 @@ def test_snapshot_has_tradfi_anchor() -> None:
     assert snapshot_has_tradfi_anchor(_snapshot(quotes=[])) is False
 
 
+def test_snapshot_has_live_es_matches_expiry_qualified_contract() -> None:
+    assert snapshot_has_live_es(
+        _snapshot(quotes=[_quote(symbol="ES", kind="future", expiry="20260918")])
+    )
+
+
+def test_realtime_anchor_health_rejects_stale_source_and_transport() -> None:
+    stale_at = NOW - timedelta(hours=1)
+    stale_spx = _quote(at=stale_at)
+    stale_es = _quote(symbol="ES", kind="future", expiry="20260918", at=stale_at)
+    snapshot = _snapshot(quotes=[stale_spx, stale_es])
+
+    assert snapshot_has_tradfi_anchor(snapshot) is False
+    assert snapshot_has_live_es(snapshot) is False
+
+
 def test_realtime_engine_uses_globex_context_when_cash_analytics_are_unavailable() -> None:
     globex_now = datetime(2026, 7, 13, 1, 30, tzinfo=timezone.utc)
-    es = _quote(symbol="ES", kind="future")
+    es = _quote(symbol="ES", kind="future", at=globex_now)
     engine = RealtimeEngine(
-        snapshots=FakeSnapshotSource(_snapshot(quotes=[es])),
+        snapshots=FakeSnapshotSource(_snapshot(quotes=[es], at=globex_now)),
         analytics=FakeAnalytics(status=AnalyticsStatus.DEGRADED),
         alerts=FakeAlerts(),
         projections=FakeProjection(),
@@ -144,11 +176,11 @@ def test_realtime_engine_uses_globex_context_when_cash_analytics_are_unavailable
     assert tick.health.factors["globex_context_usable"] is True
 
 
-def test_realtime_engine_is_ready_with_live_gth_option_analytics() -> None:
+def test_realtime_engine_keeps_live_gth_option_analytics_advisory_only() -> None:
     globex_now = datetime(2026, 7, 13, 1, 30, tzinfo=timezone.utc)
-    es = _quote(symbol="ES", kind="future")
+    es = _quote(symbol="ES", kind="future", at=globex_now)
     engine = RealtimeEngine(
-        snapshots=FakeSnapshotSource(_snapshot(quotes=[es])),
+        snapshots=FakeSnapshotSource(_snapshot(quotes=[es], at=globex_now)),
         analytics=FakeAnalytics(status=AnalyticsStatus.SUCCESS),
         alerts=FakeAlerts(),
         projections=FakeProjection(),
@@ -158,9 +190,11 @@ def test_realtime_engine_is_ready_with_live_gth_option_analytics() -> None:
 
     tick = engine.tick(now=globex_now)
 
-    assert tick.health.mode is EngineMode.READY
-    assert tick.health.actionable is True
-    assert tick.health.reasons == ("cash_session_closed_live_option_chain",)
+    assert tick.health.mode is EngineMode.GLOBEX_CONTEXT
+    assert tick.health.actionable is False
+    assert tick.health.reasons == (
+        "cash_session_closed_live_option_chain_advisory_only",
+    )
 
 
 def test_realtime_engine_tick_ready() -> None:
@@ -206,6 +240,51 @@ def test_realtime_engine_blocks_on_outbox_failure() -> None:
     assert tick.health.mode is EngineMode.BLOCKED
     assert tick.health.ok is False
     assert "outbox_writable_failed" in tick.health.reasons
+
+
+def test_realtime_engine_latches_partial_append_until_write_barrier() -> None:
+    event = DomainEvent(
+        schema_version=1,
+        event_id="append-failure",
+        kind=EventKind.ALERT_CANDIDATE,
+        source_at=NOW,
+        available_at=NOW,
+        aggregate_id="spx",
+        sequence=1,
+        payload={"play": "test"},
+    )
+
+    class PartialAppendOutbox(FakeOutbox):
+        fail_append = True
+
+        def append(self, events):  # noqa: ANN001
+            self.appended.extend(events)
+            if self.fail_append:
+                return AppendResult(accepted=0, writable=False)
+            return AppendResult(accepted=len(events), writable=True)
+
+    outbox = PartialAppendOutbox(writable_flag=True)
+    alerts = FakeAlerts(events=(event,))
+    engine = RealtimeEngine(
+        snapshots=FakeSnapshotSource(_snapshot(quotes=[_quote()])),
+        analytics=FakeAnalytics(),
+        alerts=alerts,
+        projections=FakeProjection(),
+        outbox=outbox,
+        front_chain_fresh=True,
+    )
+
+    failed = engine.tick(now=NOW)
+    assert failed.health.mode is EngineMode.BLOCKED
+    assert "outbox_append_failed" in failed.health.reasons
+    assert engine.outbox_append_failure_latched is True
+    assert engine.outbox_append_failure_count == 1
+
+    outbox.fail_append = False
+    alerts.events = ()
+    recovered = engine.tick(now=NOW + timedelta(seconds=1))
+    assert recovered.health.mode is EngineMode.READY
+    assert engine.outbox_append_failure_latched is False
 
 
 def test_realtime_engine_failed_on_analytics_exception() -> None:
@@ -299,6 +378,70 @@ def test_front_chain_freshness_ignores_stale_provider_rows_when_live_fallback_ex
             )
 
     assert snapshot_has_fresh_spxw_chain(_snapshot(quotes=quotes), now=NOW) is True
+
+
+def test_front_chain_freshness_requires_option_transport_and_underlier_clocks() -> None:
+    underlier = Quote(
+        instrument=InstrumentId.index("SPX"),
+        provider=Provider.IBKR,
+        received_at=NOW,
+        last_update_at=NOW,
+        quality=MarketDataQuality.LIVE,
+        bid=7499.0,
+        ask=7501.0,
+        quote_time=NOW,
+    )
+    fresh_options: list[Quote] = []
+    stale_transport_options: list[Quote] = []
+    for strike in range(7440, 7565, 5):
+        for right in ("C", "P"):
+            instrument = InstrumentId.option(
+                "SPX",
+                expiry="20260713",
+                strike=strike,
+                right=right,
+                trading_class="SPXW",
+            )
+            fresh = Quote(
+                instrument=instrument,
+                provider=Provider.IBKR,
+                received_at=NOW,
+                last_update_at=NOW,
+                quality=MarketDataQuality.LIVE,
+                bid=1.0,
+                ask=1.2,
+                quote_time=NOW,
+            )
+            fresh_options.append(fresh)
+            stale_transport_options.append(
+                replace(
+                    fresh,
+                    received_at=NOW - timedelta(hours=1),
+                    last_update_at=NOW - timedelta(hours=1),
+                )
+            )
+
+    assert (
+        snapshot_has_fresh_spxw_chain(
+            _snapshot(quotes=[underlier, *stale_transport_options]),
+            now=NOW,
+        )
+        is False
+    )
+
+    stale_underlier = replace(
+        underlier,
+        received_at=NOW - timedelta(hours=1),
+        last_update_at=NOW - timedelta(hours=1),
+        quote_time=NOW - timedelta(hours=1),
+    )
+    assert (
+        snapshot_has_fresh_spxw_chain(
+            _snapshot(quotes=[stale_underlier, *fresh_options]),
+            now=NOW,
+        )
+        is False
+    )
 
 
 def test_gth_front_chain_accepts_live_ibkr_rotation_rows_within_analytical_age() -> None:

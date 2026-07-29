@@ -1722,15 +1722,16 @@ def test_resolve_spx_spot_keeps_hl_research_separate_from_chain_pricing() -> Non
             mark=7520.0,
             quote_time=rth,
         ),
-        Quote(
-            instrument=InstrumentId.index("SPX"),
-            provider=Provider.IBKR,
-            provider_symbol="index:SPX",
-            received_at=rth,
-            quality=MarketDataQuality.LIVE,
-            mark=7532.0,
-            quote_time=rth,
-        ),
+            Quote(
+                instrument=InstrumentId.index("SPX"),
+                provider=Provider.IBKR,
+                provider_symbol="index:SPX",
+                received_at=rth,
+                quality=MarketDataQuality.LIVE,
+                last=7532.0,
+                trade_time=rth,
+                quote_time=rth,
+            ),
         make_option(
             expiry="20260707",
             strike=7525,
@@ -2146,7 +2147,7 @@ def test_research_observed_quotes_apply_freshness_and_label_stale_rows(
     assert "[stale/stale]" in render_template(payload)
 
 
-def test_globex_status_uses_writer_and_trade_delivery(monkeypatch, tmp_path) -> None:
+def test_globex_status_delivers_deterministic_operator_brief(monkeypatch, tmp_path) -> None:
     import spx_spark.application.order_map.service as order_map_module
 
     payload = {
@@ -2169,13 +2170,8 @@ def test_globex_status_uses_writer_and_trade_delivery(monkeypatch, tmp_path) -> 
     )
     monkeypatch.setattr(
         order_map_module,
-        "render_feishu_delivery_text",
-        lambda *args: "detailed feishu status",
-    )
-    monkeypatch.setattr(
-        order_map_module,
-        "generate_push_text",
-        lambda *args, **kwargs: ("written globex context", "deepseek"),
+        "render_operator_status_brief",
+        lambda *args: "bounded operator status",
     )
     monkeypatch.setattr(
         order_map_module.NotificationSettings,
@@ -2218,12 +2214,12 @@ def test_globex_status_uses_writer_and_trade_delivery(monkeypatch, tmp_path) -> 
 
     assert result == 0
     assert captured == {
-        "title": "SPX 15分钟市场状态",
-        "text": "written globex context",
+        "title": "SPX 市场状态（非信号）",
+        "text": "bounded operator status",
         "kind": "status",
         "lane": "scheduled_report",
         "friend": True,
-        "feishu_text": "detailed feishu status",
+        "feishu_text": "bounded operator status",
     }
 
 
@@ -2711,7 +2707,7 @@ def test_chain_implied_spot_matches_parity_forward_median() -> None:
 
 
 def test_build_candidates_skips_missing_greeks_with_warning() -> None:
-    now = datetime(2026, 7, 7, 6, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 7, 15, 0, tzinfo=timezone.utc)
     quote_no_greeks = Quote(
         instrument=InstrumentId.option(
             "SPX",
@@ -2736,7 +2732,8 @@ def test_build_candidates_skips_missing_greeks_with_warning() -> None:
         provider_symbol="index:SPX",
         received_at=now,
         quality=MarketDataQuality.LIVE,
-        mark=7569.0,
+        last=7569.0,
+        trade_time=now,
         quote_time=now,
     )
     state = make_state(underlier, quote_no_greeks, now=now)
@@ -3246,8 +3243,8 @@ def test_status_delivery_gate_suppresses_unchanged_scheduled_report(
     monkeypatch.setattr(order_map_module, "_has_open_position_risk", lambda settings: False)
     monkeypatch.setattr(
         order_map_module,
-        "generate_push_text",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("writer called")),
+        "render_operator_status_brief",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("brief rendered")),
     )
 
     result = order_map_module.run_status(
@@ -3360,7 +3357,7 @@ def test_status_delivery_gate_allows_material_and_one_shot_key_windows() -> None
     )
 
 
-def test_status_delivery_gate_sends_quarter_hour_gth_heartbeat_without_trade_intent() -> None:
+def test_status_delivery_gate_sends_hourly_gth_summary_without_trade_intent() -> None:
     from spx_spark.application.order_map.service import _status_delivery_reason
 
     now = datetime(2026, 7, 15, 4, 14, tzinfo=timezone.utc)
@@ -3370,7 +3367,7 @@ def test_status_delivery_gate_sends_quarter_hour_gth_heartbeat_without_trade_int
         "last_status_at": now.timestamp() - 13 * 60,
         "status_fingerprint": fingerprint,
     }
-    due = {**recent, "last_status_at": now.timestamp() - 15 * 60}
+    due = {**recent, "last_status_at": now.timestamp() - 61 * 60}
 
     assert (
         _status_delivery_reason(
@@ -3392,11 +3389,11 @@ def test_status_delivery_gate_sends_quarter_hour_gth_heartbeat_without_trade_int
             trading_date="2026-07-15",
             position_risk=False,
         )
-        == "gth_quarter_hour_heartbeat:asia_globex"
+        == "gth_hourly_summary:asia_globex"
     )
 
 
-def test_status_delivery_gate_sends_every_rth_slot_and_dedupes_same_slot() -> None:
+def test_status_delivery_gate_sends_rth_quarter_hour_heartbeat() -> None:
     from spx_spark.application.order_map.service import _status_delivery_reason
 
     current = datetime(2026, 7, 24, 13, 30, 8, tzinfo=ZoneInfo("America/New_York"))
@@ -3425,6 +3422,18 @@ def test_status_delivery_gate_sends_every_rth_slot_and_dedupes_same_slot() -> No
             position_risk=False,
         )
         == "rth_quarter_hour_heartbeat:2026-07-24:13:30"
+    )
+    hourly = datetime(2026, 7, 24, 14, 0, 8, tzinfo=ZoneInfo("America/New_York"))
+    assert (
+        _status_delivery_reason(
+            previous_slot,
+            fingerprint,
+            [],
+            now=hourly,
+            trading_date="2026-07-24",
+            position_risk=False,
+        )
+        == "rth_quarter_hour_heartbeat:2026-07-24:14:00"
     )
     assert (
         _status_delivery_reason(
@@ -4004,15 +4013,16 @@ def test_send_order_map_queues_on_feishu_failure(tmp_path: Path, monkeypatch) ->
         make_state(
             Quote(
                 instrument=InstrumentId.index("SPX"),
-                provider=Provider.IBKR,
-                provider_symbol="index:SPX",
-                received_at=datetime(2026, 7, 7, 6, 0, tzinfo=timezone.utc),
-                quality=MarketDataQuality.LIVE,
-                mark=7569.0,
-                quote_time=datetime(2026, 7, 7, 6, 0, tzinfo=timezone.utc),
-            ),
-            now=datetime(2026, 7, 7, 6, 0, tzinfo=timezone.utc),
-        )
+                    provider=Provider.IBKR,
+                    provider_symbol="index:SPX",
+                    received_at=datetime(2026, 7, 7, 15, 0, tzinfo=timezone.utc),
+                    quality=MarketDataQuality.LIVE,
+                    last=7569.0,
+                    trade_time=datetime(2026, 7, 7, 15, 0, tzinfo=timezone.utc),
+                    quote_time=datetime(2026, 7, 7, 15, 0, tzinfo=timezone.utc),
+                ),
+                now=datetime(2026, 7, 7, 15, 0, tzinfo=timezone.utc),
+            )
     )
     template = render_template(payload)
     missed_path = str(tmp_path / "missed.jsonl")

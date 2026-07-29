@@ -91,6 +91,27 @@ def test_consumer_crash_before_ack_can_reclaim(tmp_path) -> None:
     assert again[0].event_id == "crash-1"
 
 
+def test_expired_final_claim_is_dead_lettered_not_orphaned(tmp_path) -> None:
+    outbox = SqliteEventOutbox(tmp_path / "outbox.sqlite", max_attempts=1)
+    outbox.append([_event("final-claim")])
+    assert [event.event_id for event in outbox.claim(consumer_id="worker-a", now=NOW)] == [
+        "final-claim"
+    ]
+
+    transitioned = outbox.requeue_stale_claims(
+        older_than_seconds=30,
+        now=NOW + timedelta(seconds=60),
+    )
+
+    assert transitioned == 1
+    counts = outbox.count_by_status()
+    assert counts.get(OutboxStatus.CLAIMED.value, 0) == 0
+    assert counts[OutboxStatus.DEAD_LETTER.value] == 1
+    record = outbox.dead_letters()[0]
+    assert record.event_id == "final-claim"
+    assert record.last_error == "claim_expired_after_final_attempt"
+
+
 def test_retry_exhaustion_dead_letters(tmp_path) -> None:
     outbox = SqliteEventOutbox(tmp_path / "outbox.sqlite", max_attempts=2)
     outbox.append([_event("dlq-1")])

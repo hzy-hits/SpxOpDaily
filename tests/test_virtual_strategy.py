@@ -15,6 +15,8 @@ from spx_spark.application.market_features.virtual_strategy import (
     _exit_decision,
     _gth_spread_contract_ids,
     _gth_time_stop,
+    _load_consumed_signals,
+    _mark_signal_consumed,
     _new_gth_spread_episode,
     _record_entry_decision,
     _rth_trade_hard_exit,
@@ -30,6 +32,24 @@ from spx_spark.settings.market_features import MarketFeatureSettings
 
 UTC = timezone.utc
 NOW = datetime(2026, 7, 15, 15, 50, tzinfo=UTC)
+
+
+def _latest_spx(price: float, *, at: datetime = NOW) -> SimpleNamespace:
+    spx = Quote(
+        instrument=InstrumentId.index("SPX"),
+        provider=Provider.SCHWAB,
+        provider_symbol="SPX",
+        received_at=at,
+        quote_time=at,
+        last_update_at=at,
+        quality=MarketDataQuality.LIVE,
+        bid=price - 0.5,
+        ask=price + 0.5,
+    )
+    return SimpleNamespace(
+        best_quote=lambda instrument_id: spx if instrument_id == "index:SPX" else None,
+        as_of=at,
+    )
 
 
 def test_trade_episode_preserves_put_direction() -> None:
@@ -50,6 +70,33 @@ def test_trade_episode_preserves_put_direction() -> None:
     assert episode["execution_assumption"] == "none"
 
 
+def test_consumed_signals_evict_by_consumption_order_not_lexical_order() -> None:
+    observations, consumed = _load_consumed_signals(
+        {"schema_version": 1, "consumed_signal_ids": ["z-old"]}
+    )
+    for index in range(199):
+        _mark_signal_consumed(
+            observations,
+            consumed,
+            signal_id=f"m-{index:03d}",
+            now=NOW + timedelta(seconds=index),
+        )
+    _mark_signal_consumed(
+        observations,
+        consumed,
+        signal_id="a-new",
+        now=NOW + timedelta(seconds=200),
+    )
+
+    assert len(observations) == 200
+    assert "z-old" not in consumed
+    assert "a-new" in consumed
+    assert observations[-1] == {
+        "id": "a-new",
+        "consumed_at": (NOW + timedelta(seconds=200)).isoformat(),
+    }
+
+
 def test_long_put_uses_downside_target_and_upside_invalidation() -> None:
     active = {
         "direction": "down",
@@ -59,9 +106,7 @@ def test_long_put_uses_downside_target_and_upside_invalidation() -> None:
         "target_spx": 7550.0,
         "time_stop_at": (NOW + timedelta(minutes=15)).isoformat(),
     }
-    latest = SimpleNamespace(best_quote=lambda _instrument_id: None, as_of=NOW)
     common = {
-        "latest": latest,
         "option_structure": {"call_wall": 7560.0},
         "macro_event": {},
         "greek_decision": {},
@@ -69,15 +114,30 @@ def test_long_put_uses_downside_target_and_upside_invalidation() -> None:
         "policy": MarketFeatureSettings(),
     }
 
-    assert _exit_decision(active, {"mid": 14.7, "underlier": 7551.0}, **common) == (
+    assert _exit_decision(
+        active,
+        {"mid": 14.7, "underlier": 9999.0},
+        latest=_latest_spx(7551.0),
+        **common,
+    ) == (
         None,
         None,
     )
-    assert _exit_decision(active, {"mid": 14.7, "underlier": 7563.0}, **common) == (
+    assert _exit_decision(
+        active,
+        {"mid": 14.7, "underlier": 1.0},
+        latest=_latest_spx(7563.0),
+        **common,
+    ) == (
         "strategy_invalidation",
         "exit",
     )
-    assert _exit_decision(active, {"mid": 14.7, "underlier": 7549.0}, **common) == (
+    assert _exit_decision(
+        active,
+        {"mid": 14.7, "underlier": 9999.0},
+        latest=_latest_spx(7549.0),
+        **common,
+    ) == (
         "underlier_target_reached",
         "take_profit",
     )
@@ -92,9 +152,7 @@ def test_long_call_keeps_upside_target_and_downside_invalidation() -> None:
         "target_spx": 7575.0,
         "time_stop_at": (NOW + timedelta(minutes=15)).isoformat(),
     }
-    latest = SimpleNamespace(best_quote=lambda _instrument_id: None, as_of=NOW)
     common = {
-        "latest": latest,
         "option_structure": {"call_wall": 7550.0},
         "macro_event": {},
         "greek_decision": {},
@@ -102,11 +160,21 @@ def test_long_call_keeps_upside_target_and_downside_invalidation() -> None:
         "policy": MarketFeatureSettings(),
     }
 
-    assert _exit_decision(active, {"mid": 10.0, "underlier": 7547.0}, **common) == (
+    assert _exit_decision(
+        active,
+        {"mid": 10.0, "underlier": 9999.0},
+        latest=_latest_spx(7547.0),
+        **common,
+    ) == (
         "strategy_invalidation",
         "exit",
     )
-    assert _exit_decision(active, {"mid": 10.0, "underlier": 7575.0}, **common) == (
+    assert _exit_decision(
+        active,
+        {"mid": 10.0, "underlier": 1.0},
+        latest=_latest_spx(7575.0),
+        **common,
+    ) == (
         "underlier_target_reached",
         "take_profit",
     )
@@ -164,19 +232,19 @@ def test_rth_trade_hard_exit_is_half_open_and_does_not_change_gth() -> None:
 
     assert _exit_decision(
         rth,
-        {},
+        {"mid": 1.0},
         now=datetime(2026, 7, 15, 16, 59, 59, tzinfo=UTC),
         **common,
     ) == (None, None)
     assert _exit_decision(
         rth,
-        {},
+        {"mid": 1.0},
         now=datetime(2026, 7, 15, 17, 0, tzinfo=UTC),
         **common,
     ) == ("time_stop", "exit")
     assert _exit_decision(
         gth,
-        {},
+        {"mid": 1.0},
         now=datetime(2026, 7, 15, 17, 0, tzinfo=UTC),
         **common,
     ) == (None, None)
@@ -254,6 +322,8 @@ def test_persisted_legacy_rth_episode_is_closed_at_1300_et(
         greek_decision={},
         now=now,
         policy=MarketFeatureSettings(),
+        new_entries_allowed=True,
+        new_entries_block_reason="allowed",
         notification=SimpleNamespace(),
     )
 
@@ -267,6 +337,78 @@ def test_persisted_legacy_rth_episode_is_closed_at_1300_et(
     assert state["last_closed"]["valid_until"] == now.isoformat()
     assert state["last_closed"]["pre_hard_exit_time_stop_at"] == "2026-07-15T20:00:00+00:00"
     assert state["last_closed"]["time_stop_policy"] == "rth_trade_intent_1300_et_cap"
+
+
+def test_closed_episode_notification_recovers_after_enqueue_crash(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 7, 15, 17, 0, tzinfo=UTC)
+    state_path = tmp_path / "latest" / "virtual_strategy_state.json"
+    state_path.parent.mkdir(parents=True)
+    state_path.write_text(
+        json.dumps(
+            {
+                "active": {
+                    "episode_id": "episode:notification-recovery",
+                    "source_kind": "trade_intent",
+                    "session_id": "2026-07-15",
+                    "direction": "up",
+                    "contract_id": "option:SPX:SPXW:20260715:7550:C",
+                    "entry_mid": 10.0,
+                    "opened_at": (now - timedelta(minutes=10)).isoformat(),
+                    "time_stop_at": now.isoformat(),
+                    "valid_until": now.isoformat(),
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    attempts = 0
+
+    def enqueue(*_args, **_kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("simulated producer crash")
+        return SimpleNamespace(
+            accepted=True,
+            inserted=True,
+            duplicate=False,
+            delivered=False,
+            queued_for_recovery=True,
+            outcome="pending",
+            targets=("test",),
+        )
+
+    monkeypatch.setattr(virtual_strategy, "enqueue_notification", enqueue)
+    common = {
+        "storage": SimpleNamespace(data_root=str(tmp_path)),
+        "latest": SimpleNamespace(best_quote=lambda _instrument_id: None, created_at=now),
+        "trade_intent": {},
+        "gth_signal": {},
+        "option_structure": {},
+        "macro_event": {},
+        "greek_decision": {},
+        "policy": MarketFeatureSettings(),
+        "notification": SimpleNamespace(),
+        "new_entries_allowed": False,
+        "new_entries_block_reason": "test_block",
+    }
+
+    closed = process_virtual_strategy(now=now, **common)
+    after_crash = json.loads(state_path.read_text(encoding="utf-8"))
+    assert closed["status"] == "closed"
+    assert closed["notification_accepted"] is False
+    assert [item["event_id"] for item in after_crash["pending_notifications"]] == [
+        "episode:notification-recovery:time_stop"
+    ]
+
+    observing = process_virtual_strategy(now=now + timedelta(seconds=1), **common)
+    recovered = json.loads(state_path.read_text(encoding="utf-8"))
+    assert observing["status"] == "observing"
+    assert attempts == 2
+    assert recovered["pending_notifications"] == []
 
 
 def test_gth_time_stop_uses_summer_dst_exit_clock() -> None:
@@ -652,6 +794,61 @@ def test_rth_action_snapshot_rechecks_fresh_quote_and_entry_limit(
     assert snapshot == {}
     assert reasons == ["action_entry_limit_not_reached"]
 
+    unclocked_nbbo = replace(quote, quote_time=None, trade_time=NOW)
+    snapshot, reasons = _trade_intent_action_snapshot(
+        SimpleNamespace(best_quote=lambda _contract_id: unclocked_nbbo),
+        trade_intent=intent,
+        now=NOW,
+        max_quote_age_seconds=5.0,
+        future_tolerance_seconds=1.0,
+    )
+    assert snapshot == {}
+    assert reasons == ["action_quote_source_time_unavailable"]
+
+
+def test_action_underlier_price_uses_matching_field_clock() -> None:
+    quote = Quote(
+        instrument=InstrumentId.future("ES"),
+        provider=Provider.IBKR,
+        received_at=NOW,
+        last_update_at=NOW,
+        quote_time=None,
+        trade_time=NOW,
+        quality=MarketDataQuality.LIVE,
+        bid=7549.0,
+        ask=7551.0,
+    )
+    latest = SimpleNamespace(best_quote=lambda _instrument_id: quote)
+
+    snapshot, reasons = virtual_strategy._action_underlier_snapshot(
+        latest,
+        instrument_id="future:ES",
+        now=NOW,
+        max_quote_age_seconds=5.0,
+        future_tolerance_seconds=1.0,
+    )
+
+    assert snapshot == {}
+    assert reasons == ["action_underlier_source_time_unavailable:future:ES"]
+
+    last_only = replace(
+        quote,
+        bid=None,
+        ask=None,
+        last=7550.0,
+        trade_time=NOW,
+    )
+    snapshot, reasons = virtual_strategy._action_underlier_snapshot(
+        SimpleNamespace(best_quote=lambda _instrument_id: last_only),
+        instrument_id="future:ES",
+        now=NOW,
+        max_quote_age_seconds=5.0,
+        future_tolerance_seconds=1.0,
+    )
+    assert reasons == []
+    assert snapshot["price"] == 7550.0
+    assert snapshot["price_kind"] == "last"
+
 
 def test_gth_episode_uses_exact_debit_spread_and_net_entry(
     monkeypatch: pytest.MonkeyPatch,
@@ -683,6 +880,14 @@ def test_gth_episode_uses_exact_debit_spread_and_net_entry(
             },
             [],
         ),
+    )
+    monkeypatch.setattr(
+        virtual_strategy,
+        "_gth_chain_reference",
+        lambda *_args, **_kwargs: {
+            "kind": "chain_implied_spx",
+            "price": 7530.0,
+        },
     )
     episode = _new_gth_spread_episode(
         SimpleNamespace(),
@@ -723,6 +928,107 @@ def test_gth_episode_uses_exact_debit_spread_and_net_entry(
     assert episode["short_contract_id"].endswith(":7545:C")
     assert episode["target_spx"] == 7545.0
     assert episode["time_stop_at"] == "2026-07-15T13:45:00+00:00"
+
+
+def test_gth_entry_decision_is_virtual_ready_not_trade_ready(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        virtual_strategy,
+        "_spread_snapshot_decision",
+        lambda *_args, **_kwargs: (
+            {"mid": 12.0, "bid": 11.0, "ask": 13.0},
+            [],
+        ),
+    )
+    monkeypatch.setattr(
+        virtual_strategy,
+        "_action_underlier_snapshot",
+        lambda _latest, *, instrument_id, **_kwargs: (
+            {
+                "instrument_id": instrument_id,
+                "price": 7530.0 if instrument_id == "index:SPX" else 7552.0,
+            },
+            [],
+        ),
+    )
+    monkeypatch.setattr(
+        virtual_strategy,
+        "_gth_chain_reference",
+        lambda *_args, **_kwargs: {
+            "kind": "chain_implied_spx",
+            "price": 7530.0,
+        },
+    )
+    signal = {
+        **_gth_contract(),
+        "kind": "gth_dip_reclaim_call",
+        "event_id": "gth-dip:virtual-only",
+        "session_date": "2026-07-15",
+        "confirmed_at": "2026-07-15T02:59:30+00:00",
+        "trough": 7546.0,
+        "spread": {
+            "right": "C",
+            "expiry_date": "2026-07-15",
+            "long_strike": 7505,
+            "short_strike": 7545,
+            "width_points": 40,
+            "target_wall": 7545.0,
+        },
+    }
+
+    episode, decision = _evaluate_gth_spread_entry(
+        SimpleNamespace(created_at=datetime(2026, 7, 15, 3, 0, tzinfo=UTC)),
+        gth_signal=signal,
+        now=datetime(2026, 7, 15, 3, 0, tzinfo=UTC),
+        policy=MarketFeatureSettings(),
+    )
+
+    assert episode
+    assert decision["status"] == "virtual_ready"
+    assert decision["simulation_only"] is True
+    assert decision["execution_eligible"] is False
+    assert decision["automatic_ordering"] is False
+
+
+def test_gth_virtual_entry_cannot_weaken_source_invalidation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        virtual_strategy,
+        "_spread_snapshot_decision",
+        lambda *_args, **_kwargs: (
+            {"mid": 12.0, "bid": 11.0, "ask": 13.0},
+            [],
+        ),
+    )
+    signal = {
+        **_gth_contract(),
+        "kind": "gth_dip_reclaim_call",
+        "event_id": "gth-dip:weak-invalidation",
+        "session_date": "2026-07-15",
+        "confirmed_at": "2026-07-15T02:59:30+00:00",
+        "trough": 7546.0,
+        "spread": {
+            "right": "C",
+            "expiry_date": "2026-07-15",
+            "long_strike": 7505,
+            "short_strike": 7545,
+            "width_points": 40,
+            "invalidation_es": 7000.0,
+        },
+    }
+
+    episode, decision = _evaluate_gth_spread_entry(
+        SimpleNamespace(created_at=datetime(2026, 7, 15, 3, 0, tzinfo=UTC)),
+        gth_signal=signal,
+        now=datetime(2026, 7, 15, 3, 0, tzinfo=UTC),
+        policy=MarketFeatureSettings(),
+    )
+
+    assert episode == {}
+    assert decision["terminal"] is True
+    assert decision["block_reasons"] == ["gth_invalidation_contract_mismatch"]
 
 
 @pytest.mark.parametrize(
@@ -830,6 +1136,14 @@ def test_gth_action_underlier_guard_is_terminal_before_episode(
             {"instrument_id": instrument_id, "price": spx if instrument_id == "index:SPX" else es},
             [],
         ),
+    )
+    monkeypatch.setattr(
+        virtual_strategy,
+        "_gth_chain_reference",
+        lambda *_args, **_kwargs: {
+            "kind": "chain_implied_spx",
+            "price": spx,
+        },
     )
 
     episode, decision = _evaluate_gth_spread_entry(
@@ -958,6 +1272,55 @@ def test_gth_spread_exits_at_eighty_five_percent_of_width() -> None:
         "spread_value_saturation",
         "take_profit_or_exit",
     )
+
+
+def test_gth_lifecycle_never_falls_back_to_cash_spx_coordinate() -> None:
+    now = datetime(2026, 7, 15, 3, 0, tzinfo=UTC)
+    active = {
+        "direction": "up",
+        "source_kind": "gth_dip_reclaim_call",
+        "position_type": "call_debit_spread",
+        "invalidation_spx": 7500.0,
+        "time_stop_at": (now + timedelta(minutes=15)).isoformat(),
+    }
+    latest = _latest_spx(7490.0, at=now)
+
+    decision = _exit_decision(
+        active,
+        {"mid": 10.0},
+        latest=latest,
+        option_structure={},
+        macro_event={},
+        greek_decision={},
+        now=now,
+        policy=MarketFeatureSettings(),
+    )
+
+    assert decision == ("underlier_data_unavailable", "exit_or_verify")
+
+
+def test_gth_lifecycle_closed_gap_never_falls_back_to_cash_spx() -> None:
+    now = datetime(2026, 7, 15, 13, 27, tzinfo=UTC)
+    active = {
+        "direction": "up",
+        "source_kind": "gth_dip_reclaim_call",
+        "position_type": "call_debit_spread",
+        "invalidation_spx": 7500.0,
+        "time_stop_at": (now + timedelta(minutes=15)).isoformat(),
+    }
+
+    decision = _exit_decision(
+        active,
+        {"mid": 10.0},
+        latest=_latest_spx(7490.0, at=now),
+        option_structure={},
+        macro_event={},
+        greek_decision={},
+        now=now,
+        policy=MarketFeatureSettings(),
+    )
+
+    assert decision == ("underlier_data_unavailable", "exit_or_verify")
 
 
 def test_gth_entry_decision_records_quote_blockers_then_terminal_expiry(tmp_path) -> None:

@@ -101,6 +101,7 @@ def market_snapshot_from_projection(
         quotes=tuple(state.quotes),
         provider_states=tuple(state.provider_states),
         source_batch_ids=(f"latest:{store.path}",),
+        failover_mode=state.failover_mode,
     )
 
 

@@ -99,3 +99,75 @@ def test_expiry_rollover_promotes_new_structure_immediately() -> None:
     assert stable["expiry"] == "20260715"
     assert stable["levels"]["put_wall"] == 7525
     assert state["promotion_reason"] == "expiry_rollover"
+
+
+def test_stale_unconfirmed_candidate_expires_when_live_structure_disappears() -> None:
+    state, _stable = advance_stable_structure(
+        None,
+        structure(7500, 7600),
+        now=NOW,
+        interval_seconds=900,
+        required_confirmations=2,
+        band_half_width_points=5,
+        switch_min_points=10,
+    )
+    state, stable = advance_stable_structure(
+        state,
+        structure(7475, 7600),
+        now=NOW + timedelta(minutes=15),
+        interval_seconds=900,
+        required_confirmations=2,
+        band_half_width_points=5,
+        switch_min_points=10,
+    )
+    assert state["candidate"]["confirmation_count"] == 1
+
+    state, stable = advance_stable_structure(
+        state,
+        None,
+        now=NOW + timedelta(minutes=32),
+        interval_seconds=900,
+        required_confirmations=2,
+        band_half_width_points=5,
+        switch_min_points=10,
+    )
+
+    assert stable["levels"]["put_wall"] == 7500
+    assert state["candidate"] is None
+    assert state["candidate_expiry_reason"] == "confirmation_timeout"
+    assert state["candidate_ttl_seconds"] == 960
+
+
+def test_live_structure_after_candidate_timeout_starts_fresh_confirmation() -> None:
+    state, _stable = advance_stable_structure(
+        None,
+        structure(7500, 7600),
+        now=NOW,
+        interval_seconds=900,
+        required_confirmations=2,
+        band_half_width_points=5,
+        switch_min_points=10,
+    )
+    state, _stable = advance_stable_structure(
+        state,
+        structure(7475, 7600),
+        now=NOW + timedelta(minutes=15),
+        interval_seconds=900,
+        required_confirmations=2,
+        band_half_width_points=5,
+        switch_min_points=10,
+    )
+
+    state, stable = advance_stable_structure(
+        state,
+        structure(7475, 7600),
+        now=NOW + timedelta(minutes=32),
+        interval_seconds=900,
+        required_confirmations=2,
+        band_half_width_points=5,
+        switch_min_points=10,
+    )
+
+    assert stable["levels"]["put_wall"] == 7500
+    assert state["candidate"]["confirmation_count"] == 1
+    assert state["candidate"]["first_seen_at"] == (NOW + timedelta(minutes=32)).isoformat()

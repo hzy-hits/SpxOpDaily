@@ -36,7 +36,6 @@ from spx_spark.application.order_map.decision_consistency import (
 from spx_spark.application.order_map.delivery import send_order_map
 from spx_spark.application.order_map.es_volume_attach import attach_es_volume_signal
 from spx_spark.application.order_map.frozen_structure import attach_frozen_option_structure
-from spx_spark.application.order_map.guidance import STATUS_BRIEF_SYSTEM_PROMPT
 from spx_spark.application.order_map.hl_volume import (
     attach_hl_volume_signal,
     default_hl_volume_sample_path,
@@ -49,11 +48,7 @@ from spx_spark.application.order_map.level_trigger_repricing import (
 )
 from spx_spark.application.order_map.models import SHANGHAI_TZ
 from spx_spark.application.order_map.prompts import (
-    GLOBEX_CONTEXT_SYSTEM_PROMPT,
-    actionable_writer_output_valid,
-    build_status_prompt,
-    globex_writer_output_valid,
-    render_feishu_delivery_text,
+    render_operator_status_brief,
     render_status_template,
 )
 from spx_spark.application.order_map.render import (
@@ -101,7 +96,7 @@ from spx_spark.intraday_strategy import signed_gex_sign_method
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 from spx_spark.macro_event_clock import macro_event_state
 from spx_spark.notifier.dispatcher import dispatch_notification
-from spx_spark.notifier.llm_writer import generate_push_text, load_previous_push, record_push
+from spx_spark.notifier.llm_writer import load_previous_push, record_push
 from spx_spark.notifier.model import CommandRunner, default_runner
 from spx_spark.notifier.receipts import NotificationEnvelope, notification_event_id
 from spx_spark.options_map import build_options_map
@@ -115,7 +110,8 @@ STATUS_KEY_WINDOW_PHASES = frozenset(
     ("europe_session", "us_data_hour", "us_open_hour", "us_midday_confirmation")
 )
 GTH_STATUS_PHASES = frozenset({"asia_globex", "europe_session", "us_data_hour"})
-GTH_STATUS_CADENCE_SECONDS = 15.0 * 60.0
+STATUS_SUMMARY_CADENCE_SECONDS = 60.0 * 60.0
+RTH_SLOT_LOOKBACK_GRACE_SECONDS = 15.0 * 60.0 - 0.001
 
 
 def build_order_payload(
@@ -631,13 +627,15 @@ def _status_delivery_reason(
         previous_rth_slot = (
             rth_report_slot(
                 datetime.fromtimestamp(last_status_at, tz=timezone.utc),
-                start_grace_seconds=GTH_STATUS_CADENCE_SECONDS - 0.001,
+                start_grace_seconds=RTH_SLOT_LOOKBACK_GRACE_SECONDS,
             )
             if last_status_at is not None
             else None
         )
         if previous_rth_slot is not None and previous_rth_slot.key == current_rth_slot.key:
             return None
+        if changes:
+            return "material_changes"
         return f"rth_quarter_hour_heartbeat:{current_rth_slot.key}"
     phase = str(fingerprint.get("status_phase") or "")
     previous_fingerprint = previous.get("status_fingerprint") or previous.get("fingerprint")
@@ -649,7 +647,12 @@ def _status_delivery_reason(
     if phase in STATUS_KEY_WINDOW_PHASES and previous_phase != phase:
         return f"key_window:{phase}"
     if position_risk:
-        return "open_position_risk"
+        last_status_at = finite_float(previous.get("last_status_at"))
+        if last_status_at is None or (
+            now.timestamp() - last_status_at
+        ) >= STATUS_SUMMARY_CADENCE_SECONDS:
+            return "open_position_risk"
+        return None
     if phase in GTH_STATUS_PHASES:
         prior_intent = (
             str(previous_fingerprint.get("trade_intent_id") or "")
@@ -658,14 +661,18 @@ def _status_delivery_reason(
         )
         current_intent = str(fingerprint.get("trade_intent_id") or "")
         if not prior_intent and not current_intent:
-            structural_changes = [change for change in changes if not change.startswith("决策剧本")]
+            structural_changes = [
+                change for change in changes if not change.startswith("决策剧本")
+            ]
             if structural_changes:
                 return "material_changes"
             last_status_at = finite_float(previous.get("last_status_at"))
-            if last_status_at is None or int(now.timestamp() // GTH_STATUS_CADENCE_SECONDS) > int(
-                last_status_at // GTH_STATUS_CADENCE_SECONDS
+            if last_status_at is None or int(
+                now.timestamp() // STATUS_SUMMARY_CADENCE_SECONDS
+            ) > int(
+                last_status_at // STATUS_SUMMARY_CADENCE_SECONDS
             ):
-                return f"gth_quarter_hour_heartbeat:{phase}"
+                return f"gth_hourly_summary:{phase}"
             return None
     if changes:
         return "material_changes"
@@ -704,7 +711,8 @@ def run_status(
     template = render_status_template(payload, changes, now)
 
     if args.dry_run:
-        print(template)
+        operator_brief = render_operator_status_brief(payload, changes, now)
+        print(operator_brief)
         print(json.dumps({"dry_run": True, "changes": changes}, ensure_ascii=False))
         return 0
 
@@ -724,24 +732,11 @@ def run_status(
         print(json.dumps({"skipped": True, "reason": "no_material_changes"}))
         return 0
 
+    operator_brief = render_operator_status_brief(payload, changes, now)
     settings = NotificationSettings.from_env()
-    research_only = payload.get("research_only") is True
-    text, writer = generate_push_text(
-        template,
-        build_status_prompt(payload, template, load_previous_push()),
-        settings,
-        runner=runner,
-        system=GLOBEX_CONTEXT_SYSTEM_PROMPT if research_only else STATUS_BRIEF_SYSTEM_PROMPT,
-    )
-    if writer != "template":
-        valid = (
-            globex_writer_output_valid(text, template)
-            if research_only
-            else actionable_writer_output_valid(text, template)
-        )
-        if not valid:
-            text, writer = template, "template_validation_fallback"
-    feishu_text = render_feishu_delivery_text(payload, changes, now, text)
+    text = operator_brief
+    writer = "deterministic_operator_brief"
+    feishu_text = operator_brief
     report_occurred_at = current_rth_slot.slot_at if current_rth_slot is not None else now
     event_identity = (
         f"rth_slot:{current_rth_slot.key}"
@@ -760,10 +755,14 @@ def run_status(
             event_id=event_id,
             source="order_map_status",
             kind="status",
-            lane="scheduled_report",
+            lane=(
+                "position_safety"
+                if delivery_reason == "open_position_risk"
+                else "scheduled_report"
+            ),
             occurred_at=report_occurred_at,
         ),
-        title="SPX 15分钟市场状态",
+        title="SPX 市场状态（非信号）",
         text=text,
         friend=True,
         feishu_text=feishu_text,

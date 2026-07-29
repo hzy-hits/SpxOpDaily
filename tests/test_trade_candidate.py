@@ -97,6 +97,36 @@ def test_displayed_call_ask_reaching_limit_is_quote_observation_not_fill(tmp_pat
     assert adapted["execution_assumption"] == "displayed_quote_only_no_broker_fill"
 
 
+def test_displayed_call_ask_without_quote_clock_remains_armed(tmp_path) -> None:
+    storage = SimpleNamespace(data_root=str(tmp_path))
+    advance_trade_candidate(
+        storage,
+        _latest(NOW, spx=7551.08, bid=14.6, ask=14.8),
+        _call_intent(),
+        now=NOW,
+    )
+    observed_at = NOW + timedelta(seconds=10)
+
+    active = advance_trade_candidate(
+        storage,
+        _latest(
+            observed_at,
+            spx=7551.5,
+            bid=14.5,
+            ask=14.6,
+            option_source_age_seconds=None,
+        ),
+        {"status": "observing"},
+        now=observed_at,
+    )
+
+    assert active["phase"] == "armed"
+    assert active["last_observation"]["quote_pricing_allowed"] is False
+    assert active["last_observation"]["quote_quality_reason"] == (
+        "candidate_quote_source_timestamp_unavailable"
+    )
+
+
 def test_approved_call_terminal_can_be_adapted_for_virtual_entry() -> None:
     source = {
         **_intent(),
@@ -910,8 +940,9 @@ def _latest(
         received_at=now,
         last_update_at=now,
         quote_time=now,
+        trade_time=now,
         quality=MarketDataQuality.LIVE,
-        mark=spx,
+        last=spx,
     )
     option_quote = Quote(
         instrument=InstrumentId.option(

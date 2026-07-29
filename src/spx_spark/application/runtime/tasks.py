@@ -33,6 +33,11 @@ class TaskRuntimeState:
     last_error: str | None = None
     in_flight_since_monotonic: float | None = None
     last_engine_health: dict[str, object] | None = None
+    readiness_required: bool = False
+
+    def __post_init__(self) -> None:
+        if self.criticality is TaskCriticality.CRITICAL or self.name == "realtime_engine":
+            self.readiness_required = True
 
     def record_success(self, *, finished_at: datetime) -> None:
         self.consecutive_failures = 0
@@ -46,6 +51,7 @@ class TaskRuntimeState:
         self.consecutive_failures += 1
         self.last_finished_at = finished_at
         self.last_error = error
+        self.last_engine_health = None
         self.in_flight_since_monotonic = None
         if self.consecutive_failures >= self.max_consecutive_failures:
             self.mode = TaskMode.UNHEALTHY
@@ -82,6 +88,7 @@ class TaskRuntimeState:
             "last_error": self.last_error,
             "in_flight_age_seconds": in_flight_age,
             "healthy": self.healthy,
+            "readiness_required": self.readiness_required,
             "last_engine_health": self.last_engine_health,
         }
 

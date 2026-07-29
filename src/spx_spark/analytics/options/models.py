@@ -52,6 +52,20 @@ class DensityDiagnostics:
 class UnderlierReference:
     price: float | None
     source: str | None
+    source_at: datetime | None = None
+    received_at: datetime | None = None
+    session: str | None = None
+    freshness: str | None = None
+    price_kind: str | None = None
+    pricing_allowed: bool | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = asdict(self)
+        for field in ("source_at", "received_at"):
+            value = payload.get(field)
+            if isinstance(value, datetime):
+                payload[field] = value.isoformat()
+        return {key: value for key, value in payload.items() if value is not None}
 
 
 @dataclass(frozen=True)
@@ -81,6 +95,7 @@ class LevelProbability:
     prob_touch: float | None
     source_strike: float | None
     source_delta: float | None
+    probability_method: str = "unavailable"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -209,6 +224,7 @@ class OptionsMap:
         payload = asdict(self)
         payload["created_at"] = self.created_at.isoformat()
         payload["as_of"] = self.as_of.isoformat()
+        payload["underlier"] = self.underlier.to_dict()
         for index, expiry in enumerate(self.expiries):
             if expiry.rn_density is not None:
                 payload["expiries"][index]["rn_density"] = expiry.rn_density.to_dict()

@@ -67,7 +67,22 @@ def stable_notification_time(
 
 
 def successful_delivery_outcome(sinks: list[SinkResult]) -> str:
+    if any(sink.ok and sink.verdict == "suppressed" for sink in sinks):
+        return "consumed"
     return "queued" if any(sink.ok and sink.verdict == "queued" for sink in sinks) else "delivered"
+
+
+def notification_handled(sinks: list[SinkResult]) -> bool:
+    """Return true for human delivery or intentional final-policy consumption."""
+
+    return any(
+        sink.ok
+        and (
+            (sink.sink in {"feishu", "bark"} and sink.attempted)
+            or sink.verdict == "suppressed"
+        )
+        for sink in sinks
+    )
 
 
 def record_delivered_event_ids(

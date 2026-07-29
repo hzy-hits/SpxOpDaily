@@ -17,6 +17,7 @@ from spx_spark.application.market_features.decision_filters import (
 )
 from spx_spark.application.market_features.market import (
     build_minute_market_frame,
+    freshest_quote,
     normalized_quote,
     session_segment,
 )
@@ -91,6 +92,32 @@ def test_normalized_future_quote_exposes_only_specific_contract_identity() -> No
     assert normalized_quote(explicit_expiry)["contract_identity"] == "ES:202609"
     assert normalized_quote(generic)["contract_identity"] is None
     assert normalized_quote(unverified_label)["contract_identity"] is None
+
+
+def test_normalized_es_uses_mid_clock_and_matches_expiring_future_family() -> None:
+    at = datetime(2026, 7, 24, 14, 0, tzinfo=UTC)
+    quote = Quote(
+        instrument=InstrumentId.future("ES", expiry="202609"),
+        provider=Provider.IBKR,
+        received_at=at,
+        last_update_at=at,
+        quote_time=at,
+        quality=MarketDataQuality.LIVE,
+        bid=7499.0,
+        ask=7501.0,
+        mark=7000.0,
+    )
+
+    selected = freshest_quote(
+        (quote,),
+        instrument_id="future:ES",
+        now=at,
+        policy=MarketFeatureSettings(),
+    )
+
+    assert selected is quote
+    assert normalized_quote(selected)["price"] == 7500.0
+    assert normalized_quote(selected)["price_kind"] == "mid"
 
 
 def test_option_volatility_features_keep_both_expiry_contexts() -> None:
@@ -525,6 +552,73 @@ def test_gth_hot_option_quotes_use_ibkr_even_when_schwab_is_newer() -> None:
 
     assert len(selected) == 1
     assert selected[0].provider is Provider.IBKR
+
+
+def test_fresh_front_quotes_require_nbbo_quote_clock() -> None:
+    now = datetime(2026, 7, 14, 0, 30, tzinfo=UTC)
+    instrument = InstrumentId.option(
+        "SPX",
+        expiry="20260714",
+        strike=7550,
+        right="C",
+        trading_class="SPXW",
+    )
+    unclocked = replace(
+        _option_quote(
+            instrument,
+            Provider.IBKR,
+            now,
+            bid=10.1,
+            ask=10.3,
+        ),
+        quote_time=None,
+        trade_time=now,
+    )
+    state = LatestState(now, now, (unclocked,), (unclocked,))
+
+    assert (
+        _fresh_front_quotes(
+            state,
+            expiry="20260714",
+            now=now,
+            policy=MarketFeatureSettings(),
+        )
+        == []
+    )
+
+
+def test_fresh_front_quotes_require_fresh_transport_clock() -> None:
+    now = datetime(2026, 7, 14, 0, 30, tzinfo=UTC)
+    instrument = InstrumentId.option(
+        "SPX",
+        expiry="20260714",
+        strike=7550,
+        right="C",
+        trading_class="SPXW",
+    )
+    stale_transport = replace(
+        _option_quote(
+            instrument,
+            Provider.IBKR,
+            now,
+            bid=10.1,
+            ask=10.3,
+        ),
+        received_at=now - timedelta(hours=1),
+        last_update_at=now - timedelta(hours=1),
+        quote_time=now,
+    )
+    state = LatestState(now, now, (stale_transport,), (stale_transport,))
+
+    assert (
+        _fresh_front_quotes(
+            state,
+            expiry="20260714",
+            now=now,
+            policy=MarketFeatureSettings(),
+        )
+        == []
+    )
 
 
 def test_decision_context_audit_only_changes_on_meaningful_state() -> None:

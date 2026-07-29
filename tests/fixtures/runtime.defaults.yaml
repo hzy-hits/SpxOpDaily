@@ -72,6 +72,11 @@ globex_trend:
   max_quote_age_seconds: {value: 90.0, description: Maximum ES transport age accepted by the trend machine.}
   retention_hours: {value: 18, description: Rolling ES path retained for indicators and audit.}
   pending_event_ttl_seconds: {value: 300, description: Retry lifetime for an unacknowledged confirmed transition notification.}
+  continuation_step_points: {value: 10.0, description: ES points per deterministic trend-continuation milestone.}
+  continuation_confirmation_observations: {value: 2, description: Consecutive one-minute samples required beyond a continuation milestone.}
+  continuation_cooldown_seconds: {value: 1800, description: Minimum spacing between continuation advisories in one trend context.}
+  continuation_max_milestones_per_transition: {value: 2, description: Maximum m1/m2 continuation milestones for one confirmed trend leg.}
+  continuation_session_budget: {value: 3, description: Maximum continuation advisories per GTH or Globex trend context.}
 
 market_features:
   enabled: {value: true, description: Builds unified feature frames.}
@@ -95,7 +100,7 @@ market_features:
   trade_follow_through_seconds: {value: 15.0, description: Follow-through hold.}
   trade_follow_through_min_points: {value: 2.0, description: Fixed follow-through distance.}
   trade_follow_through_em_fraction: {value: 0.05, description: EM follow-through fraction.}
-  trade_confirmed_pilot_enabled: {value: true, description: Enables the reviewed 09:45-13:00 ET lane set; upside breakouts retain the Call TradeReady canary, flip-low breakdowns and call-wall/flip-high rejections produce exact-quote Put shadows only, and put-wall breakdowns remain disabled.}
+  trade_confirmed_pilot_enabled: {value: true, description: Enables the reviewed 09:45-13:00 ET manual-ready lane set for upside Call breakouts plus Flip Low breakdown and call-wall/flip-high rejection Puts; Put Wall breakdown remains disabled and automatic broker ordering remains disabled.}
   trade_repricing_max_age_seconds: {value: 90.0, description: Repricing freshness.}
   trade_quote_max_age_seconds: {value: 15.0, description: Exact selected-contract quote freshness for the reviewed pilot.}
   trade_market_anchor_max_age_seconds: {value: 20.0, description: Trade market-anchor freshness.}
@@ -108,6 +113,18 @@ market_features:
   trade_min_target_room_points: {value: 3.0, description: Minimum remaining SPX target room.}
   trade_min_reward_risk: {value: 0.25, description: Minimum target-room to invalidation-distance ratio.}
   trade_time_stop_minutes: {value: 15, description: Default time stop, capped at the 13:00 ET RTH hard exit for reviewed TradeIntent lanes.}
+  gth_manual_candidate_enabled: {value: true, description: Enables the isolated manual-only GTH exact-spread candidate lane.}
+  gth_manual_candidate_quote_max_age_seconds: {value: 15.0, description: Maximum GTH manual candidate quote age.}
+  gth_manual_candidate_ttl_seconds: {value: 20.0, description: Maximum GTH manual candidate lifetime.}
+  gth_manual_candidate_max_debit_fraction: {value: 0.65, description: Maximum GTH manual candidate debit fraction of spread width.}
+  gth_manual_candidate_max_net_spread_fraction: {value: 0.20, description: Maximum GTH manual candidate net market width fraction.}
+  gth_manual_candidate_min_parity_pairs: {value: 3, description: Minimum cofresh parity pairs for a GTH target coordinate.}
+  gth_manual_candidate_max_parity_dispersion_points: {value: 5.0, description: Maximum parity dispersion for a GTH target coordinate.}
+  gth_manual_candidate_max_parity_interval_points: {value: 5.0, description: Maximum parity interval width for each GTH call-put pair.}
+  gth_manual_candidate_target_room_buffer_points: {value: 1.0, description: Additional room beyond parity uncertainty before a candidate can be manual-ready.}
+  gth_manual_candidate_close_buffer_seconds: {value: 30.0, description: Candidate cutoff buffer before the 09:25 ET GTH close.}
+  gth_manual_candidate_max_reclaim_age_seconds: {value: 1200.0, description: Maximum trough-to-evaluation age for a GTH manual candidate.}
+  gth_manual_candidate_min_reward_risk: {value: 1.0, description: Minimum maximum-profit to maximum-loss ratio for a GTH manual candidate.}
   session_episode_enabled: {value: true, description: Enables the session structural episode.}
   session_break_buffer_points: {value: 2.0, description: Structural break and reclaim buffer.}
   session_extreme_extension_points: {value: 5.0, description: Extreme extension distance.}
@@ -173,8 +190,8 @@ provider_failover:
     value: 60.0
     description: Maximum failover control-state age accepted by the IBKR stream before it fails closed to standby.
   transition_alert_max_age_seconds:
-    value: 300.0
-    description: Maximum age of a provider transition that may create a human notification after a process restart.
+    value: 900.0
+    description: Maximum transition age retained for the five-minute incident and three-minute recovery notification lifecycle.
   interval_seconds:
     value: 15
     description: Cadence for provider-health observations and failover state persistence.
@@ -1496,14 +1513,14 @@ intraday_shock:
     value: 180
     description: Longer shock horizon in seconds.
   one_minute_threshold_bps:
-    value: 20.0
-    description: SPX move threshold in basis points for the short shock horizon.
+    value: 30.0
+    description: SPX move threshold retained for structured shock audit on the short horizon; raw threshold crossings never push directly.
   three_minute_threshold_bps:
-    value: 35.0
-    description: SPX move threshold in basis points for the longer shock horizon.
+    value: 50.0
+    description: SPX move threshold retained for structured shock audit on the longer horizon; raw threshold crossings never push directly.
   es_confirm_ratio:
-    value: 0.5
-    description: Minimum ES same-direction move fraction required to confirm an SPX shock.
+    value: 0.8
+    description: Minimum ES same-direction move fraction required before a shock may feed the persistent wall/flip structure machine.
   max_spx_age_seconds:
     value: 15.0
     description: Maximum SPX quote age in seconds for shock-monitor samples.

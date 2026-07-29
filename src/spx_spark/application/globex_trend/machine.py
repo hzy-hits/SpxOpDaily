@@ -10,9 +10,12 @@ from spx_spark.application.globex_trend.models import GlobexTrendRegime
 from spx_spark.settings.globex_trend import GlobexTrendSettings
 
 
+GTH_DIRECTIONAL_ADVISORY_CONTRACT_VERSION = "gth_directional_advisory.v1"
+
+
 def initial_state(session_id: str) -> dict[str, Any]:
     return {
-        "version": 1,
+        "version": 2,
         "session_id": session_id,
         "regime": GlobexTrendRegime.NEUTRAL.value,
         "candidate_regime": None,
@@ -25,6 +28,18 @@ def initial_state(session_id: str) -> dict[str, Any]:
         "metrics": {},
         "last_transition": None,
         "pending_event": None,
+        "continuation_milestone_index": 0,
+        "continuation_candidate_index": None,
+        "continuation_candidate_observations": 0,
+        "continuation_candidate_provider": None,
+        "continuation_events_in_context": 0,
+        "last_continuation_at": None,
+        "last_continuation": None,
+        "pending_directional_advisory_id": None,
+        "active_directional_advisory_id": None,
+        "active_directional_advisory_accepted_at": None,
+        "continuation_migration_budget_consumed": False,
+        "continuation_suppressed_reason": None,
         "updated_at": None,
     }
 
@@ -38,8 +53,10 @@ def advance_trend_state(
     provider: str,
     source_at: datetime,
     policy: GlobexTrendSettings,
+    continuation_allowed: bool = True,
 ) -> tuple[dict[str, Any], dict[str, Any] | None]:
     current = deepcopy(state) if state.get("session_id") == session_id else initial_state(session_id)
+    _migrate_continuation_state(current, policy=policy)
     samples = _samples(current)
     if samples:
         if str(samples[-1].get("source_at")) == source_at.isoformat():
@@ -50,6 +67,7 @@ def advance_trend_state(
             current["updated_at"] = at.isoformat()
             return current, None
 
+    provider_changed = bool(samples and str(samples[-1].get("provider")) != provider)
     samples.append(
         {
             "at": at.isoformat(),
@@ -79,8 +97,20 @@ def advance_trend_state(
     if target is None or target is regime:
         current["candidate_regime"] = None
         current["candidate_observations"] = 0
-        return current, None
+        event = _advance_continuation(
+            current,
+            at=at,
+            price=float(price),
+            provider=provider,
+            source_at=source_at,
+            regime=regime,
+            provider_changed=provider_changed,
+            allowed=continuation_allowed,
+            policy=policy,
+        )
+        return current, event
 
+    _reset_continuation_candidate(current)
     if current.get("candidate_regime") == target.value:
         observations = int(current.get("candidate_observations") or 0) + 1
     else:
@@ -91,7 +121,11 @@ def advance_trend_state(
         return current, None
 
     sequence = int(current.get("transition_sequence") or 0) + 1
+    invalidated_advisory_id = str(
+        current.get("active_directional_advisory_id") or ""
+    ) or None
     event = {
+        "event_type": "transition",
         "event_id": f"globex-trend:{session_id}:{sequence}:{target.value}",
         "session_id": session_id,
         "sequence": sequence,
@@ -103,6 +137,12 @@ def advance_trend_state(
         "price": float(price),
         "provider": provider,
         "metrics": metrics,
+        "automatic_ordering": False,
+        "operator_action": "observe_only",
+        "invalidated_advisory_id": invalidated_advisory_id,
+        "advisory_lifecycle_action": (
+            "invalidated" if invalidated_advisory_id is not None else None
+        ),
     }
     current["regime"] = target.value
     current["candidate_regime"] = None
@@ -113,7 +153,228 @@ def advance_trend_state(
     current["regime_low"] = float(price)
     current["last_transition"] = event
     current["pending_event"] = event
+    current["continuation_milestone_index"] = 0
+    _reset_continuation_candidate(current)
+    current["last_continuation_at"] = None
+    current["pending_directional_advisory_id"] = None
+    current["active_directional_advisory_id"] = None
+    current["active_directional_advisory_accepted_at"] = None
+    if current.get("continuation_migration_budget_consumed") is True:
+        current["continuation_events_in_context"] = 0
+        current["continuation_migration_budget_consumed"] = False
+    current["continuation_suppressed_reason"] = None
     return current, event
+
+
+def _migrate_continuation_state(
+    state: dict[str, Any],
+    *,
+    policy: GlobexTrendSettings,
+) -> None:
+    if "continuation_milestone_index" in state:
+        state.setdefault("last_continuation", None)
+        state.setdefault("pending_directional_advisory_id", None)
+        state.setdefault("active_directional_advisory_id", None)
+        state.setdefault("active_directional_advisory_accepted_at", None)
+        state.setdefault(
+            "continuation_migration_budget_consumed",
+            bool(
+                state.get("continuation_suppressed_reason")
+                == "legacy_active_context_no_hindsight"
+                and int(state.get("continuation_events_in_context") or 0)
+                >= policy.continuation_session_budget
+            ),
+        )
+        return
+    # Deployment must not emit a hindsight continuation for a trend that was
+    # already extended before this policy existed.  Consume the legacy active
+    # context; the next formal transition/session starts cleanly.
+    active = (
+        state.get("regime") in {
+            GlobexTrendRegime.BULLISH.value,
+            GlobexTrendRegime.BEARISH.value,
+        }
+        and isinstance(state.get("last_transition"), dict)
+    )
+    consumed = policy.continuation_session_budget if active else 0
+    state.update(
+        {
+            "version": 2,
+            "continuation_milestone_index": consumed,
+            "continuation_candidate_index": None,
+            "continuation_candidate_observations": 0,
+            "continuation_candidate_provider": None,
+            "continuation_events_in_context": consumed,
+            "last_continuation_at": None,
+            "last_continuation": None,
+            "pending_directional_advisory_id": None,
+            "active_directional_advisory_id": None,
+            "active_directional_advisory_accepted_at": None,
+            "continuation_migration_budget_consumed": active,
+            "continuation_suppressed_reason": (
+                "legacy_active_context_no_hindsight" if active else None
+            ),
+        }
+    )
+
+
+def _advance_continuation(
+    state: dict[str, Any],
+    *,
+    at: datetime,
+    price: float,
+    provider: str,
+    source_at: datetime,
+    regime: GlobexTrendRegime,
+    provider_changed: bool,
+    allowed: bool,
+    policy: GlobexTrendSettings,
+) -> dict[str, Any] | None:
+    transition = state.get("last_transition")
+    if (
+        regime is GlobexTrendRegime.NEUTRAL
+        or not isinstance(transition, dict)
+        or int(state.get("continuation_events_in_context") or 0)
+        >= policy.continuation_session_budget
+        or int(state.get("continuation_milestone_index") or 0)
+        >= policy.continuation_max_milestones_per_transition
+    ):
+        _reset_continuation_candidate(state)
+        return None
+    anchor = transition.get("price")
+    sequence = transition.get("sequence")
+    if not isinstance(anchor, int | float) or not isinstance(sequence, int):
+        _reset_continuation_candidate(state)
+        return None
+
+    milestone_index = int(state.get("continuation_milestone_index") or 0) + 1
+    direction = "up" if regime is GlobexTrendRegime.BULLISH else "down"
+    signed_extension = (
+        price - float(anchor)
+        if regime is GlobexTrendRegime.BULLISH
+        else float(anchor) - price
+    )
+    crossed = signed_extension >= policy.continuation_step_points * milestone_index
+    if not crossed or provider_changed:
+        _reset_continuation_candidate(state)
+        return None
+
+    last_at_raw = state.get("last_continuation_at")
+    if isinstance(last_at_raw, str):
+        try:
+            last_at = datetime.fromisoformat(last_at_raw)
+        except ValueError:
+            last_at = None
+        if (
+            last_at is not None
+            and (at - last_at).total_seconds() < policy.continuation_cooldown_seconds
+        ):
+            _reset_continuation_candidate(state)
+            return None
+
+    if not allowed:
+        state["continuation_milestone_index"] = milestone_index
+        state["continuation_suppressed_reason"] = "continuation_gate_closed"
+        _reset_continuation_candidate(state)
+        return None
+
+    same_candidate = (
+        state.get("continuation_candidate_index") == milestone_index
+        and state.get("continuation_candidate_provider") == provider
+    )
+    observations = (
+        int(state.get("continuation_candidate_observations") or 0) + 1
+        if same_candidate
+        else 1
+    )
+    state["continuation_candidate_index"] = milestone_index
+    state["continuation_candidate_observations"] = observations
+    state["continuation_candidate_provider"] = provider
+    if observations < policy.continuation_confirmation_observations:
+        return None
+
+    option_right = "C" if direction == "up" else "P"
+    advisory_id = (
+        f"gth-advisory:{state['session_id']}:{sequence}:{direction}"
+    )
+    if milestone_index == 1:
+        signal_stage = "entry_advisory"
+        operator_action = "evaluate_call_setup" if option_right == "C" else "evaluate_put_setup"
+        parent_advisory_id = None
+    else:
+        parent_advisory_id = str(
+            state.get("active_directional_advisory_id") or ""
+        ) or None
+        if parent_advisory_id is None:
+            state["continuation_suppressed_reason"] = (
+                "management_without_accepted_entry_advisory"
+            )
+            _reset_continuation_candidate(state)
+            return None
+        signal_stage = "opportunity_management"
+        operator_action = "conditional_take_profit_or_raise_stop"
+
+    event = {
+        "event_type": "continuation",
+        "event_id": (
+            f"globex-cont:{state['session_id']}:{sequence}:"
+            f"{direction}:m{milestone_index}"
+        ),
+        "session_id": state["session_id"],
+        "sequence": sequence,
+        "regime": regime.value,
+        "direction": direction,
+        "milestone_index": milestone_index,
+        "anchor_price": float(anchor),
+        "extension_points": signed_extension,
+        "threshold_points": policy.continuation_step_points * milestone_index,
+        "at": at.isoformat(),
+        "source_at": source_at.isoformat(),
+        "price": price,
+        "provider": provider,
+        "metrics": dict(state.get("metrics") or {}),
+        "advisory_contract_version": GTH_DIRECTIONAL_ADVISORY_CONTRACT_VERSION,
+        "advisory_id": advisory_id,
+        "advisory_status": "advisory_ready",
+        "signal_stage": signal_stage,
+        "option_right": option_right,
+        "direction_source": "direct_live_es",
+        "signal_coordinate": {
+            "kind": "future",
+            "instrument_id": "future:ES",
+        },
+        "option_coordinate_status": "not_authorized_from_es_direction",
+        "quote_attachment_status": "direction_only",
+        "parent_advisory_id": parent_advisory_id,
+        "contract_id": None,
+        "entry_limit": None,
+        "execution_eligible": False,
+        "automatic_ordering": False,
+        "operator_action": operator_action,
+        "execution_block_reasons": [
+            "gth_directional_advisory_only",
+            "exact_same_coordinate_option_expression_required",
+            "rth_trade_ready_authority_not_reused",
+        ],
+    }
+    if milestone_index == 1:
+        state["pending_directional_advisory_id"] = advisory_id
+    state["continuation_milestone_index"] = milestone_index
+    state["continuation_events_in_context"] = (
+        int(state.get("continuation_events_in_context") or 0) + 1
+    )
+    state["last_continuation_at"] = at.isoformat()
+    state["last_continuation"] = event
+    state["continuation_suppressed_reason"] = None
+    state["pending_event"] = event
+    _reset_continuation_candidate(state)
+    return event
+
+
+def _reset_continuation_candidate(state: dict[str, Any]) -> None:
+    state["continuation_candidate_index"] = None
+    state["continuation_candidate_observations"] = 0
+    state["continuation_candidate_provider"] = None
 
 
 def compute_metrics(

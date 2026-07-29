@@ -343,6 +343,365 @@ def test_future_clock_tolerance_and_durable_rth_state_window_are_auditable(
     )
 
 
+def test_report_uses_latest_durable_causal_shadow_when_worker_clock_advances(
+    tmp_path,
+) -> None:
+    latest = tmp_path / "latest"
+    latest.mkdir()
+    causal = {
+        **_shadow(),
+        "as_of": (NOW - timedelta(seconds=12)).isoformat(),
+        "prediction_id": "causal-before-report-clock",
+        "input_fingerprint": "causal-before-report-clock",
+    }
+    future = {
+        **_shadow(),
+        "as_of": (NOW + timedelta(seconds=45)).isoformat(),
+        "prediction_id": "worker-advanced-after-report-start",
+        "input_fingerprint": "worker-advanced-after-report-start",
+    }
+    raw = tmp_path / "features" / "spring_gamma_v3" / "date=2026-07-24" / "predictions.jsonl"
+    raw.parent.mkdir(parents=True)
+    raw.write_text(json.dumps(causal) + "\n", encoding="utf-8")
+    (latest / "spring_gamma_v3_shadow.json").write_text(
+        json.dumps(future),
+        encoding="utf-8",
+    )
+    payload: dict[str, object] = {
+        "expiry": "20260724",
+        "trading_date": "2026-07-24",
+        "minute_market_frame": {
+            "session_id": "2026-07-24",
+            "diagnostics": {"segment": "rth"},
+        },
+    }
+
+    _attach(payload, tmp_path, report_enabled=True)
+
+    assert payload["spring_gamma_v3_shadow"] == causal
+    diagnostic = payload["spring_gamma_v3_projection_diagnostic"]
+    assert diagnostic["status"] == "attached"
+    assert diagnostic["reason"] == "projection_durable_causal_fallback"
+    assert diagnostic["selection_source"] == "durable_causal_fallback"
+    assert diagnostic["shadow_as_of"] == causal["as_of"]
+    assert diagnostic["latest_shadow_as_of"] == future["as_of"]
+    assert diagnostic["age_seconds"] == 12.0
+
+
+def test_durable_causal_shadow_never_selects_archive_row_after_report_clock(
+    tmp_path,
+) -> None:
+    latest = tmp_path / "latest"
+    latest.mkdir()
+    causal = {
+        **_shadow(),
+        "as_of": (NOW - timedelta(seconds=12)).isoformat(),
+        "prediction_id": "causal-before-report-clock",
+        "input_fingerprint": "causal-before-report-clock",
+    }
+    future_archive = {
+        **_shadow(),
+        "as_of": (NOW + timedelta(seconds=2)).isoformat(),
+        "prediction_id": "future-within-general-clock-tolerance",
+        "input_fingerprint": "future-within-general-clock-tolerance",
+    }
+    future_latest = {
+        **_shadow(),
+        "as_of": (NOW + timedelta(seconds=45)).isoformat(),
+        "prediction_id": "worker-advanced-after-report-start",
+        "input_fingerprint": "worker-advanced-after-report-start",
+    }
+    raw = tmp_path / "features" / "spring_gamma_v3" / "date=2026-07-24" / "predictions.jsonl"
+    raw.parent.mkdir(parents=True)
+    raw.write_text(
+        json.dumps(causal) + "\n" + json.dumps(future_archive) + "\n",
+        encoding="utf-8",
+    )
+    (latest / "spring_gamma_v3_shadow.json").write_text(
+        json.dumps(future_latest),
+        encoding="utf-8",
+    )
+    payload: dict[str, object] = {
+        "expiry": "20260724",
+        "trading_date": "2026-07-24",
+        "minute_market_frame": {
+            "session_id": "2026-07-24",
+            "diagnostics": {"segment": "rth"},
+        },
+    }
+
+    _attach(payload, tmp_path, report_enabled=True)
+
+    assert payload["spring_gamma_v3_shadow"] == causal
+    diagnostic = payload["spring_gamma_v3_projection_diagnostic"]
+    assert diagnostic["selection_source"] == "durable_causal_fallback"
+    assert diagnostic["shadow_as_of"] == causal["as_of"]
+
+
+def test_future_latest_still_rejects_when_no_identity_matched_causal_shadow(
+    tmp_path,
+) -> None:
+    latest = tmp_path / "latest"
+    latest.mkdir()
+    wrong_expiry = {
+        **_shadow(),
+        "as_of": (NOW - timedelta(seconds=12)).isoformat(),
+        "expiry": "20260727",
+        "prediction_id": "wrong-expiry",
+        "input_fingerprint": "wrong-expiry",
+    }
+    future = {
+        **_shadow(),
+        "as_of": (NOW + timedelta(seconds=45)).isoformat(),
+        "prediction_id": "worker-advanced-after-report-start",
+        "input_fingerprint": "worker-advanced-after-report-start",
+    }
+    raw = tmp_path / "features" / "spring_gamma_v3" / "date=2026-07-24" / "predictions.jsonl"
+    raw.parent.mkdir(parents=True)
+    raw.write_text(json.dumps(wrong_expiry) + "\n", encoding="utf-8")
+    (latest / "spring_gamma_v3_shadow.json").write_text(
+        json.dumps(future),
+        encoding="utf-8",
+    )
+    payload: dict[str, object] = {
+        "expiry": "20260724",
+        "trading_date": "2026-07-24",
+        "minute_market_frame": {
+            "session_id": "2026-07-24",
+            "diagnostics": {"segment": "rth"},
+        },
+    }
+
+    _attach(payload, tmp_path, report_enabled=True)
+
+    assert "spring_gamma_v3_shadow" not in payload
+    diagnostic = payload["spring_gamma_v3_projection_diagnostic"]
+    assert diagnostic["status"] == "rejected"
+    assert diagnostic["reason"] == "projection_future_beyond_tolerance"
+
+
+def test_current_shadow_retains_recent_causal_path_as_read_only_fallback(
+    tmp_path,
+) -> None:
+    latest = tmp_path / "latest"
+    latest.mkdir()
+    prior = {
+        **_shadow(),
+        "as_of": (NOW - timedelta(minutes=4)).isoformat(),
+        "prediction_id": "prior-path",
+        "input_fingerprint": "prior-path",
+        "rth_market_state": {
+            "schema_version": "market_state_5m.v1",
+            "input_lineage": {
+                "diagnostics": {
+                    "rolling_path_percentiles": {
+                        "status": "provisional",
+                        "confidence": "medium",
+                        "input_quality": "degraded",
+                        "sample_count": 13,
+                        "latest_bar_end": (NOW - timedelta(minutes=5)).isoformat(),
+                        "dip": {"shrunk_percentile": 0.76},
+                        "rally": {"shrunk_percentile": 0.29},
+                        "signed_path_bias": -0.47,
+                        "action_authority": "none",
+                    }
+                }
+            },
+            "action_authority": "none",
+            "actionable": False,
+        },
+    }
+    current = {
+        **_shadow(status="abstain", decision="abstain"),
+        "as_of": NOW.isoformat(),
+        "prediction_id": "current-path-unavailable",
+        "input_fingerprint": "current-path-unavailable",
+        "rth_market_state": {
+            "schema_version": "market_state_5m.v1",
+            "input_lineage": {
+                "diagnostics": {
+                    "rolling_path_percentiles": {
+                        "status": "warming",
+                        "confidence": "unavailable",
+                        "sample_count": 0,
+                        "reason": "rolling_path_requires_six_contiguous_observed_bars",
+                        "action_authority": "none",
+                    }
+                }
+            },
+            "action_authority": "none",
+            "actionable": False,
+        },
+    }
+    raw = tmp_path / "features" / "spring_gamma_v3" / "date=2026-07-24" / "predictions.jsonl"
+    raw.parent.mkdir(parents=True)
+    raw.write_text(json.dumps(prior) + "\n", encoding="utf-8")
+    (latest / "spring_gamma_v3_shadow.json").write_text(
+        json.dumps(current),
+        encoding="utf-8",
+    )
+    payload: dict[str, object] = {
+        "expiry": "20260724",
+        "trading_date": "2026-07-24",
+        "minute_market_frame": {
+            "session_id": "2026-07-24",
+            "diagnostics": {"segment": "rth"},
+        },
+    }
+
+    _attach(payload, tmp_path, report_enabled=True)
+
+    assert payload["spring_gamma_v3_shadow"] == current
+    fallback = payload["spring_gamma_v3_path_fallback"]
+    assert fallback["schema_version"] == "spring_gamma_v3_path_fallback.v1"
+    assert fallback["action_authority"] == "none"
+    assert fallback["actionable"] is False
+    assert fallback["automatic_ordering"] is False
+    path = fallback["rolling_path_percentiles"]
+    assert path["confidence"] == "low"
+    assert path["input_quality"] == "stale_fallback"
+    assert path["source_input_quality"] == "degraded"
+    assert path["source_shadow_lag_seconds"] == 240.0
+    assert path["source_bar_lag_seconds"] == 300.0
+    assert path["source_lag_seconds"] == 300.0
+    assert path["source_latest_bar_end"] == (NOW - timedelta(minutes=5)).isoformat()
+    assert path["signed_path_bias"] == -0.47
+
+
+def test_path_fallback_rejects_recent_shadow_with_stale_embedded_bar(
+    tmp_path,
+) -> None:
+    latest = tmp_path / "latest"
+    latest.mkdir()
+    prior = {
+        **_shadow(),
+        "as_of": (NOW - timedelta(minutes=1)).isoformat(),
+        "prediction_id": "recent-shadow-stale-bar",
+        "input_fingerprint": "recent-shadow-stale-bar",
+        "rth_market_state": {
+            "schema_version": "market_state_5m.v1",
+            "input_lineage": {
+                "diagnostics": {
+                    "rolling_path_percentiles": {
+                        "status": "provisional",
+                        "confidence": "medium",
+                        "input_quality": "strict",
+                        "sample_count": 13,
+                        "latest_bar_end": (NOW - timedelta(minutes=20)).isoformat(),
+                        "dip": {"shrunk_percentile": 0.76},
+                        "rally": {"shrunk_percentile": 0.29},
+                        "action_authority": "none",
+                    }
+                }
+            },
+            "action_authority": "none",
+            "actionable": False,
+        },
+    }
+    current = {
+        **_shadow(status="abstain", decision="abstain"),
+        "rth_market_state": {
+            "schema_version": "market_state_5m.v1",
+            "input_lineage": {
+                "diagnostics": {
+                    "rolling_path_percentiles": {
+                        "status": "warming",
+                        "sample_count": 0,
+                        "action_authority": "none",
+                    }
+                }
+            },
+            "action_authority": "none",
+            "actionable": False,
+        },
+    }
+    raw = tmp_path / "features" / "spring_gamma_v3" / "date=2026-07-24" / "predictions.jsonl"
+    raw.parent.mkdir(parents=True)
+    raw.write_text(json.dumps(prior) + "\n", encoding="utf-8")
+    (latest / "spring_gamma_v3_shadow.json").write_text(
+        json.dumps(current),
+        encoding="utf-8",
+    )
+    payload: dict[str, object] = {
+        "expiry": "20260724",
+        "trading_date": "2026-07-24",
+        "minute_market_frame": {
+            "session_id": "2026-07-24",
+            "diagnostics": {"segment": "rth"},
+        },
+    }
+
+    _attach(payload, tmp_path, report_enabled=True)
+
+    assert "spring_gamma_v3_path_fallback" not in payload
+
+
+def test_path_fallback_expires_after_fifteen_minutes(tmp_path) -> None:
+    latest = tmp_path / "latest"
+    latest.mkdir()
+    prior = {
+        **_shadow(),
+        "as_of": (NOW - timedelta(minutes=15, seconds=1)).isoformat(),
+        "prediction_id": "stale-prior-path",
+        "input_fingerprint": "stale-prior-path",
+        "rth_market_state": {
+            "schema_version": "market_state_5m.v1",
+            "input_lineage": {
+                "diagnostics": {
+                    "rolling_path_percentiles": {
+                        "status": "provisional",
+                        "sample_count": 13,
+                        "latest_bar_end": (
+                            NOW - timedelta(minutes=20)
+                        ).isoformat(),
+                        "dip": {"shrunk_percentile": 0.76},
+                        "rally": {"shrunk_percentile": 0.29},
+                        "action_authority": "none",
+                    }
+                }
+            },
+            "action_authority": "none",
+            "actionable": False,
+        },
+    }
+    current = {
+        **_shadow(status="abstain", decision="abstain"),
+        "rth_market_state": {
+            "schema_version": "market_state_5m.v1",
+            "input_lineage": {
+                "diagnostics": {
+                    "rolling_path_percentiles": {
+                        "status": "warming",
+                        "sample_count": 0,
+                        "action_authority": "none",
+                    }
+                }
+            },
+            "action_authority": "none",
+            "actionable": False,
+        },
+    }
+    raw = tmp_path / "features" / "spring_gamma_v3" / "date=2026-07-24" / "predictions.jsonl"
+    raw.parent.mkdir(parents=True)
+    raw.write_text(json.dumps(prior) + "\n", encoding="utf-8")
+    (latest / "spring_gamma_v3_shadow.json").write_text(
+        json.dumps(current),
+        encoding="utf-8",
+    )
+    payload: dict[str, object] = {
+        "expiry": "20260724",
+        "trading_date": "2026-07-24",
+        "minute_market_frame": {
+            "session_id": "2026-07-24",
+            "diagnostics": {"segment": "rth"},
+        },
+    }
+
+    _attach(payload, tmp_path, report_enabled=True)
+
+    assert "spring_gamma_v3_path_fallback" not in payload
+
+
 def test_state_window_uses_precise_causal_boundary_not_minute_bucket(
     tmp_path,
 ) -> None:
