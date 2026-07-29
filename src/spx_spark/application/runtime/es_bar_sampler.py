@@ -48,7 +48,16 @@ STATE_FILE_NAME = "es_bars_5m.json"
 LEASE_FILE_NAME = "es_bar_sampler.lease.json"
 TASK_NAME = "es_bar_sampler"
 LEASE_SCHEMA_VERSION = "es_bar_sampler_lease.v2"
-_TRANSIENT_REJECTIONS = frozenset({"es_source_timestamp_duplicate_or_out_of_order"})
+_TRANSIENT_REJECTIONS = frozenset(
+    {
+        "es_source_timestamp_duplicate_or_out_of_order",
+        # A provider projection can omit one observation timestamp while the
+        # last accepted ES sample remains fresh. Preserve the prior fenced
+        # state for that bounded gap; readiness still fails once either the
+        # acceptance or source age exceeds max_source_age_seconds.
+        "es_source_timestamp_missing",
+    }
+)
 _SAMPLE_TIMING_FIELDS = (
     "latest_state_load_ms",
     "canonical_cycle_ms",

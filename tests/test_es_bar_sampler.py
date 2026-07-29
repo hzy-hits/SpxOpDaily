@@ -282,6 +282,56 @@ def test_sampler_lease_fails_closed_for_no_es_data(tmp_path: Path) -> None:
     assert lease["writer_has_accepted"] is False
 
 
+def test_one_missing_timestamp_keeps_a_fresh_accepted_fence_healthy() -> None:
+    at = datetime(2026, 7, 30, 13, 30, tzinfo=UTC)
+    emitted: list[dict[str, object]] = []
+    observations = iter(
+        (
+            {
+                "accepted": True,
+                "source_at": at.isoformat(),
+                "rejection": None,
+                "writer_instance_id": "writer-a",
+            },
+            {
+                "accepted": False,
+                "source_at": at.isoformat(),
+                "rejection": "es_source_timestamp_missing",
+                "writer_instance_id": "writer-a",
+            },
+        )
+    )
+    times = iter(
+        (
+            at,
+            at + timedelta(milliseconds=10),
+            at + timedelta(seconds=5),
+            at + timedelta(seconds=5, milliseconds=10),
+        )
+    )
+    ticks = iter((10.0, 10.01, 15.0, 15.01))
+
+    es_bar_sampler.run_es_bar_sampler_loop(
+        lambda: next(observations),
+        interval_seconds=0.1,
+        stop_event=threading.Event(),
+        writer_instance_id="writer-a",
+        max_source_age_seconds=15.0,
+        max_cycles=2,
+        monotonic=lambda: next(ticks),
+        utcnow=lambda: next(times),
+        emit=emitted.append,
+    )
+
+    assert emitted[0]["data_healthy"] is True
+    assert emitted[1]["accepted"] is False
+    assert emitted[1]["rejection"] == "es_source_timestamp_missing"
+    assert emitted[1]["last_accepted_age_seconds"] == 5.0
+    assert emitted[1]["last_accepted_source_age_seconds"] == 5.01
+    assert emitted[1]["data_healthy"] is True
+    assert emitted[1]["ok"] is True
+
+
 def test_sampler_lease_rejects_stale_source_and_slow_cycle(tmp_path: Path) -> None:
     storage = _storage(tmp_path)
     source_at = datetime(2026, 7, 30, 13, 29, 40, tzinfo=UTC)
