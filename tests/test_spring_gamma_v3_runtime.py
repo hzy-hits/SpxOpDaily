@@ -73,24 +73,38 @@ def test_runtime_persists_one_isolated_shadow_bucket(tmp_path, monkeypatch) -> N
     result = _run(tmp_path)
 
     latest = json.loads(
-        (tmp_path / "latest" / "spring_gamma_v3_shadow.json").read_text(
-            encoding="utf-8"
-        )
+        (tmp_path / "latest" / "spring_gamma_v3_shadow.json").read_text(encoding="utf-8")
     )
     assert result["status"] == "ready"
     assert result["appended"] is True
-    assert latest["prediction_id"].startswith(
-        "spring-gamma-v3:2026-07-24:20260724:"
-    )
+    assert latest["prediction_id"].startswith("spring-gamma-v3:2026-07-24:20260724:")
     assert latest["direction_authority"] == "none"
     assert latest["actionable"] is False
     assert latest["wall_probability"]["status"] == "ready"
     assert latest["direction_input_fingerprint"] == "a" * 64
 
 
-def test_runtime_failure_is_persisted_as_non_actionable_abstain(
-    tmp_path, monkeypatch
-) -> None:
+def test_runtime_skips_all_shadow_work_when_disabled(tmp_path, monkeypatch) -> None:
+    def should_not_run(**_: object) -> dict[str, object]:
+        raise AssertionError("disabled Spring must not enter the hot calculation")
+
+    monkeypatch.setattr(service, "build_spring_gamma_v3_shadow", should_not_run)
+
+    result = _run(
+        tmp_path,
+        settings=SpringGammaV3Settings(enabled=False, report_enabled=False),
+    )
+
+    assert result == {
+        "evaluated": False,
+        "status": "disabled",
+        "prediction_id": None,
+        "reason": "shadow_disabled",
+    }
+    assert not (tmp_path / "latest" / "spring_gamma_v3_shadow.json").exists()
+
+
+def test_runtime_failure_is_persisted_as_non_actionable_abstain(tmp_path, monkeypatch) -> None:
     def fail(**_: object) -> dict[str, object]:
         raise RuntimeError("research broke")
 
@@ -99,9 +113,7 @@ def test_runtime_failure_is_persisted_as_non_actionable_abstain(
     result = _run(tmp_path)
 
     latest = json.loads(
-        (tmp_path / "latest" / "spring_gamma_v3_shadow.json").read_text(
-            encoding="utf-8"
-        )
+        (tmp_path / "latest" / "spring_gamma_v3_shadow.json").read_text(encoding="utf-8")
     )
     assert result["status"] == "failed"
     assert latest["status"] == "failed"
@@ -111,9 +123,7 @@ def test_runtime_failure_is_persisted_as_non_actionable_abstain(
     assert latest["automatic_ordering"] is False
 
 
-def test_runtime_does_not_recompute_inside_existing_minute_bucket(
-    tmp_path, monkeypatch
-) -> None:
+def test_runtime_does_not_recompute_inside_existing_minute_bucket(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(service, "build_spring_gamma_v3_shadow", lambda **_: _record())
     monkeypatch.setattr(service, "group_spxw_option_quotes", lambda *_, **__: {})
     monkeypatch.setattr(
@@ -177,9 +187,7 @@ def test_runtime_converts_nested_authority_violation_to_persisted_failure(
 
     result = _run(tmp_path)
     latest = json.loads(
-        (tmp_path / "latest" / "spring_gamma_v3_shadow.json").read_text(
-            encoding="utf-8"
-        )
+        (tmp_path / "latest" / "spring_gamma_v3_shadow.json").read_text(encoding="utf-8")
     )
 
     assert result["status"] == "failed"
@@ -189,9 +197,7 @@ def test_runtime_converts_nested_authority_violation_to_persisted_failure(
     assert latest["actionable"] is False
 
 
-def test_runtime_does_not_reuse_future_cross_expiry_or_unsafe_latest(
-    tmp_path, monkeypatch
-) -> None:
+def test_runtime_does_not_reuse_future_cross_expiry_or_unsafe_latest(tmp_path, monkeypatch) -> None:
     latest_path = tmp_path / "latest" / "spring_gamma_v3_shadow.json"
     latest_path.parent.mkdir(parents=True)
     recomputations = 0
@@ -234,9 +240,7 @@ def test_invalid_shadow_interval_cannot_break_the_production_loop(tmp_path) -> N
         settings=SimpleNamespace(prediction_interval_seconds=0),
     )
     latest = json.loads(
-        (tmp_path / "latest" / "spring_gamma_v3_shadow.json").read_text(
-            encoding="utf-8"
-        )
+        (tmp_path / "latest" / "spring_gamma_v3_shadow.json").read_text(encoding="utf-8")
     )
 
     assert result["status"] == "failed"

@@ -9,10 +9,15 @@ import os
 
 from spx_spark.config import NotificationSettings
 from spx_spark.notifier.delivery_outbox import (
-    DeliveryClaimLost,
-    DeliveryJob,
+    DeliveryCancelled,
+    DeliveryEventInspection,
     DeliveryStatus,
     NotificationDeliveryOutbox,
+    TerminalDeliveryReceipt,
+    delivery_payload_fingerprint,
+)
+from spx_spark.notifier.delivery_executor import (
+    deliver_claimed_job as _deliver_claimed_job,
 )
 from spx_spark.notifier.missed_queue import (
     ack_missed_event_ids,
@@ -22,7 +27,14 @@ from spx_spark.notifier.missed_queue import (
 )
 from spx_spark.notifier.model import CommandRunner, SinkResult, default_runner
 from spx_spark.notifier.human_policy import quiet_window_suppresses
-from spx_spark.notifier.receipts import NotificationEnvelope, record_delivery_receipt
+from spx_spark.notifier.receipts import (
+    NotificationEnvelope,
+    record_delivery_receipt,
+)
+from spx_spark.notifier.receipt_mirror import (
+    ReceiptMirrorSync as _ReceiptMirrorSync,
+    sync_terminal_receipts as _sync_receipt_mirrors,
+)
 from spx_spark.notifier.sinks import (
     any_delivery_ok,
     deliver_trade_push,
@@ -58,16 +70,6 @@ class EnqueueResult:
     duplicate: bool
     delivered: bool
     queued_for_recovery: bool
-
-
-@dataclass(frozen=True)
-class _JobResult:
-    sinks: tuple[SinkResult, ...]
-    status: DeliveryStatus
-    delivered_targets: int
-    pending_targets: int
-    dead_lettered_targets: int
-    lost_claim_targets: int
 
 
 ASYNC_CLAIM_TARGET_LIMIT = 1
@@ -118,6 +120,22 @@ def _delivery_outbox(settings: NotificationSettings) -> NotificationDeliveryOutb
     )
 
 
+def _sync_terminal_receipts(
+    settings: NotificationSettings,
+    outbox: NotificationDeliveryOutbox,
+    *,
+    now: datetime,
+) -> _ReceiptMirrorSync:
+    """Mirror atomic outbox terminal audit rows into the standard receipt DB."""
+
+    return _sync_receipt_mirrors(
+        settings,
+        outbox,
+        now=now,
+        recorder=record_delivery_receipt,
+    )
+
+
 def _transport_lane(envelope: NotificationEnvelope) -> str:
     return "ops" if envelope.lane == "ops_transition" else "trade"
 
@@ -131,15 +149,21 @@ def cancel_pending_notification(
 ) -> int:
     """Cancel a durable notification whose source lifecycle is no longer valid."""
 
-    if (
-        not getattr(settings, "delivery_outbox_enabled", False)
-        or not getattr(settings, "delivery_outbox_path", "")
+    if not getattr(settings, "delivery_outbox_enabled", False) or not getattr(
+        settings, "delivery_outbox_path", ""
     ):
         return 0
     outbox = _delivery_outbox(settings)
-    cancelled = outbox.cancel_event(event_id, reason=reason, now=now)
-    if cancelled:
-        ack_missed_event_ids(settings.missed_queue_path, frozenset({event_id}))
+    terminal_receipts = outbox.cancel_event_with_receipts(
+        event_id,
+        reason=reason,
+        now=now,
+    )
+    if not outbox.cancellation_exists(event_id):
+        raise RuntimeError(f"cancellation fence missing for {event_id}")
+    cancelled = len(terminal_receipts)
+    _sync_terminal_receipts(settings, outbox, now=now)
+    ack_missed_event_ids(settings.missed_queue_path, frozenset({event_id}))
     return cancelled
 
 
@@ -156,6 +180,84 @@ def notification_event_exists(
     ):
         return False
     return _delivery_outbox(settings).contains(event_id)
+
+
+def inspect_notification_event(
+    settings: NotificationSettings,
+    envelope: NotificationEnvelope,
+    *,
+    title: str,
+    text: str,
+    friend: bool = False,
+    feishu_text: str | None = None,
+    expected_payload_fingerprint: str | None = None,
+    expected_targets: tuple[str, ...] | None = None,
+) -> DeliveryEventInspection:
+    """Reconcile one producer event against its exact durable outbox contract."""
+
+    _payload_fingerprint, configured_targets = notification_event_contract(
+        settings,
+        envelope,
+        title=title,
+        text=text,
+        friend=friend,
+        feishu_text=feishu_text,
+    )
+    targets = configured_targets if expected_targets is None else expected_targets
+    if not getattr(settings, "delivery_outbox_enabled", False) or not getattr(
+        settings, "delivery_outbox_path", ""
+    ):
+        return DeliveryEventInspection(
+            event_id=envelope.event_id,
+            exists=False,
+            cancelled=False,
+            payload_matches=False,
+            targets_match=False,
+            event_status=None,
+            target_statuses=(),
+            reason="outbox_unavailable",
+        )
+    return _delivery_outbox(settings).inspect_event(
+        envelope,
+        title=title,
+        text=text,
+        feishu_text=feishu_text,
+        friend=friend,
+        targets=targets,
+        expected_payload_fingerprint=expected_payload_fingerprint,
+    )
+
+
+def notification_event_contract(
+    settings: NotificationSettings,
+    envelope: NotificationEnvelope,
+    *,
+    title: str,
+    text: str,
+    friend: bool = False,
+    feishu_text: str | None = None,
+) -> tuple[str, tuple[str, ...]]:
+    """Return the immutable payload and exact configured-target identities."""
+
+    targets = tuple(
+        sorted(
+            delivery_target_names(
+                settings,
+                lane=_transport_lane(envelope),
+                friend=friend,
+            )
+        )
+    )
+    return (
+        delivery_payload_fingerprint(
+            envelope,
+            title=title,
+            text=text,
+            feishu_text=feishu_text,
+            friend=friend,
+        ),
+        targets,
+    )
 
 
 def enqueue_notification(
@@ -175,9 +277,10 @@ def enqueue_notification(
     or Feishu connection.  ``consume_pending_notifications`` owns all claims,
     delivery attempts and retries.
 
-    Replaying the same ``event_id`` and identical payload is successful and
-    reported as ``duplicate=True``.  Reusing an ``event_id`` for different
-    content remains a hard collision in ``NotificationDeliveryOutbox``.
+    Replaying the same ``event_id``, payload and exact sink set is successful
+    and reported as ``duplicate=True``. Reusing an ``event_id`` for different
+    content or targets remains a hard collision in
+    ``NotificationDeliveryOutbox``.
     """
 
     envelope.validate()
@@ -232,15 +335,27 @@ def enqueue_notification(
         )
 
     outbox = _delivery_outbox(settings)
-    inserted = outbox.enqueue(
-        envelope,
-        title=title,
-        text=text,
-        feishu_text=feishu_text,
-        friend=friend,
-        targets=targets,
-        now=at,
-    )
+    try:
+        inserted = outbox.enqueue(
+            envelope,
+            title=title,
+            text=text,
+            feishu_text=feishu_text,
+            friend=friend,
+            targets=targets,
+            now=at,
+        )
+    except DeliveryCancelled:
+        return EnqueueResult(
+            envelope=envelope,
+            targets=tuple(targets),
+            outcome="cancelled_before_enqueue",
+            accepted=False,
+            inserted=False,
+            duplicate=False,
+            delivered=False,
+            queued_for_recovery=False,
+        )
     summary = outbox.summary(envelope.event_id)
     if summary is None:  # Defensive: enqueue and summary share one durable DB.
         raise RuntimeError(f"delivery event disappeared: {envelope.event_id}")
@@ -262,139 +377,6 @@ def enqueue_notification(
         duplicate=not inserted,
         delivered=summary.delivered_targets > 0,
         queued_for_recovery=queued,
-    )
-
-
-def _deliver_claimed_job(
-    settings: NotificationSettings,
-    outbox: NotificationDeliveryOutbox,
-    job: DeliveryJob,
-    *,
-    worker_id: str,
-    runner: CommandRunner,
-    completion_clock: Callable[[], datetime],
-) -> _JobResult:
-    policy_at = completion_clock()
-    if quiet_window_suppresses(job.envelope, now=policy_at):
-        suppressed_sinks: list[SinkResult] = []
-        delivered_targets = 0
-        dead_lettered_targets = 0
-        lost_claim_targets = 0
-        for target in job.targets:
-            sink = SinkResult(
-                sink=target,
-                attempted=False,
-                ok=True,
-                error="suppressed from RTH close until the next SPX GTH open",
-                verdict="suppressed",
-            )
-            suppressed_sinks.append(sink)
-            try:
-                status = outbox.settle_target(
-                    job.envelope.event_id,
-                    target,
-                    worker_id=worker_id,
-                    ok=True,
-                    error=sink.error,
-                    permanent=False,
-                    now=policy_at,
-                )
-            except DeliveryClaimLost:
-                lost_claim_targets += 1
-                continue
-            delivered_targets += 1
-            dead_lettered_targets += int(status is DeliveryStatus.DEAD_LETTER)
-        summary = outbox.summary(job.envelope.event_id)
-        if summary is None:
-            raise RuntimeError(f"delivery event disappeared: {job.envelope.event_id}")
-        pending = summary.pending_targets + summary.claimed_targets
-        record_delivery_receipt(
-            settings.delivery_receipt_path,
-            job.envelope,
-            sinks=suppressed_sinks,
-            outcome="quiet_window_suppressed",
-            queued_for_recovery=pending > 0,
-            attempted_at=policy_at,
-        )
-        return _JobResult(
-            sinks=tuple(suppressed_sinks),
-            status=summary.status,
-            delivered_targets=delivered_targets,
-            pending_targets=pending,
-            dead_lettered_targets=dead_lettered_targets,
-            lost_claim_targets=lost_claim_targets,
-        )
-    sinks = deliver_trade_push(
-        settings,
-        title=job.title,
-        text=job.text,
-        kind=job.envelope.kind,
-        lane=_transport_lane(job.envelope),
-        friend=job.friend,
-        feishu_text=job.feishu_text,
-        runner=runner,
-        targets=frozenset(job.targets),
-    )
-    sinks_by_name = {sink.sink: sink for sink in sinks}
-    normalized_sinks = list(sinks)
-    delivered_targets = 0
-    dead_lettered_targets = 0
-    lost_claim_targets = 0
-    receipt_at: datetime | None = None
-    for target in job.targets:
-        sink = sinks_by_name.get(target)
-        if sink is None:
-            sink = SinkResult(
-                sink=target,
-                attempted=False,
-                ok=False,
-                error="configured delivery target is currently unavailable",
-            )
-            normalized_sinks.append(sink)
-        receipt_at = completion_clock()
-        try:
-            status = outbox.settle_target(
-                job.envelope.event_id,
-                target,
-                worker_id=worker_id,
-                ok=sink.ok,
-                error=sink.error,
-                permanent=sink.permanent,
-                now=receipt_at,
-            )
-        except DeliveryClaimLost:
-            # The new lease owner is authoritative. The external request may
-            # already have completed, so record the race without overwriting
-            # the newer claim or restarting this consumer.
-            lost_claim_targets += 1
-            continue
-        delivered_targets += int(sink.ok)
-        dead_lettered_targets += int(status is DeliveryStatus.DEAD_LETTER)
-
-    summary = outbox.summary(job.envelope.event_id)
-    if summary is None:
-        raise RuntimeError(f"delivery event disappeared: {job.envelope.event_id}")
-    pending = summary.pending_targets + summary.claimed_targets
-    if summary.status is DeliveryStatus.DELIVERED:
-        ack_missed_event_ids(
-            settings.missed_queue_path,
-            frozenset({job.envelope.event_id}),
-        )
-    record_delivery_receipt(
-        settings.delivery_receipt_path,
-        job.envelope,
-        sinks=normalized_sinks,
-        outcome=summary.status.value,
-        queued_for_recovery=pending > 0,
-        attempted_at=receipt_at or completion_clock(),
-    )
-    return _JobResult(
-        sinks=tuple(normalized_sinks),
-        status=summary.status,
-        delivered_targets=delivered_targets,
-        pending_targets=pending,
-        dead_lettered_targets=dead_lettered_targets,
-        lost_claim_targets=lost_claim_targets,
     )
 
 
@@ -520,16 +502,19 @@ def consume_pending_notifications(
     outbox = _delivery_outbox(settings)
     imported = _migrate_legacy_queue(settings, outbox, now=now)
     worker_id = worker_id or f"notification-recovery:{os.getpid()}"
+    terminal_receipts: list[TerminalDeliveryReceipt] = []
     jobs = outbox.claim_due(
         worker_id=worker_id,
         # Reserving a backlog lets later targets outlive the claim while the
         # sinks block. The next poll immediately claims the next due target.
         limit_targets=ASYNC_CLAIM_TARGET_LIMIT,
         now=now,
+        terminal_receipts=terminal_receipts,
     )
     attempted_targets = 0
     delivered_targets = 0
-    dead_lettered = 0
+    expired_targets = len(terminal_receipts)
+    dead_lettered = expired_targets
     lost_claim_targets = 0
     for job in jobs:
         result = _deliver_claimed_job(
@@ -539,24 +524,33 @@ def consume_pending_notifications(
             worker_id=worker_id,
             runner=runner,
             completion_clock=completion_clock,
+            deliver=deliver_trade_push,
         )
-        attempted_targets += len(job.targets)
+        attempted_targets += result.attempted_targets
         delivered_targets += result.delivered_targets
         dead_lettered += result.dead_lettered_targets
         lost_claim_targets += result.lost_claim_targets
+        expired_targets += result.expired_targets
+    receipt_sync = _sync_terminal_receipts(
+        settings,
+        outbox,
+        now=completion_clock(),
+    )
     counts = outbox.count_targets()
     dead_letter_total = counts.get(DeliveryStatus.DEAD_LETTER.value, 0)
     dead_letter_notified = (
-        _notify_dead_letters(settings, outbox, runner=runner, now=now)
-        if notify_dead_letters
-        else 0
+        _notify_dead_letters(settings, outbox, runner=runner, now=now) if notify_dead_letters else 0
     )
     # Health is judged only by dead letters nobody has reviewed yet; history
     # alone must not fail the task forever.
     dead_letter_unacknowledged = outbox.count_unacknowledged_dead_letters()
     pruned_shadow = _prune_terminal_shadow_entries(settings, outbox)
     return {
-        "ok": dead_letter_unacknowledged == 0,
+        "ok": (
+            dead_letter_unacknowledged == 0
+            and receipt_sync.pending == 0
+            and receipt_sync.inspection.ok
+        ),
         "imported_legacy": imported,
         "jobs": len(jobs),
         "attempted_targets": attempted_targets,
@@ -564,10 +558,20 @@ def consume_pending_notifications(
         "pending_targets": counts.get(DeliveryStatus.PENDING.value, 0),
         "claimed_targets": counts.get(DeliveryStatus.CLAIMED.value, 0),
         "dead_lettered": dead_lettered,
+        "expired_targets": expired_targets,
         "lost_claim_targets": lost_claim_targets,
         "dead_letter_total": dead_letter_total,
         "dead_letter_unacknowledged": dead_letter_unacknowledged,
         "dead_letter_notified": dead_letter_notified,
+        "terminal_receipts_recorded": receipt_sync.recorded,
+        "terminal_receipts_pending": receipt_sync.pending,
+        "terminal_receipts_repaired": receipt_sync.repaired,
+        "receipt_store_ok": receipt_sync.inspection.ok,
+        "receipt_store_quick_check": receipt_sync.inspection.quick_check,
+        "receipt_store_journal_mode": receipt_sync.inspection.journal_mode,
+        "receipt_store_synchronous": receipt_sync.inspection.synchronous,
+        "receipt_store_schema_present": receipt_sync.inspection.schema_present,
+        "receipt_store_missing_mirror_ids": len(receipt_sync.inspection.missing_mirror_ids),
         "pruned_shadow": pruned_shadow,
     }
 
@@ -634,13 +638,16 @@ def _dispatch_via_outbox(
         now=attempted_at,
     )
     worker_id = f"notification-inline:{os.getpid()}"
+    terminal_receipts: list[TerminalDeliveryReceipt] = []
     jobs = outbox.claim_due(
         worker_id=worker_id,
         limit_targets=len(targets),
         now=attempted_at,
         event_id=envelope.event_id,
+        terminal_receipts=terminal_receipts,
     )
     sinks: tuple[SinkResult, ...] = ()
+    job_expired_targets = 0
     if jobs:
         result = _deliver_claimed_job(
             settings,
@@ -649,8 +656,12 @@ def _dispatch_via_outbox(
             worker_id=worker_id,
             runner=runner,
             completion_clock=lambda: attempted_at,
+            deliver=deliver_trade_push,
         )
         sinks = result.sinks
+        job_expired_targets = result.expired_targets
+    if terminal_receipts or jobs or job_expired_targets:
+        _sync_terminal_receipts(settings, outbox, now=attempted_at)
     summary = outbox.summary(envelope.event_id)
     if summary is None:
         raise RuntimeError(f"delivery event disappeared: {envelope.event_id}")

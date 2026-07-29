@@ -15,11 +15,7 @@ from spx_spark.config import NY_TZ
 
 
 UTC = timezone.utc
-SCRIPT = (
-    Path(__file__).resolve().parents[1]
-    / "scripts"
-    / "warm_market_state_ma_history.py"
-)
+SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "warm_market_state_ma_history.py"
 
 
 def _script() -> dict[str, Any]:
@@ -34,12 +30,8 @@ def _session_rows(
     start = datetime.combine(trading_day, time(9, 30), tzinfo=NY_TZ)
     return [
         {
-            "bar_start": (start + timedelta(minutes=5 * index))
-            .astimezone(UTC)
-            .isoformat(),
-            "bar_end": (start + timedelta(minutes=5 * (index + 1)))
-            .astimezone(UTC)
-            .isoformat(),
+            "bar_start": (start + timedelta(minutes=5 * index)).astimezone(UTC).isoformat(),
+            "bar_end": (start + timedelta(minutes=5 * (index + 1))).astimezone(UTC).isoformat(),
             "interval_seconds": 300,
             "open": 7400.0 + index / 10,
             "high": 7401.0 + index / 10,
@@ -370,12 +362,12 @@ def test_worker_must_be_exactly_inactive(
             namespace["_assert_worker_inactive"]("worker.service")
 
 
-def test_stopped_worker_guard_uses_fixed_unit_and_process_lock(
+def test_stopped_sampler_guard_uses_fixed_unit_and_process_lock(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     namespace = _script()
-    script_globals = namespace["_stopped_hot_worker_guard"].__wrapped__.__globals__
+    script_globals = namespace["_stopped_sampler_guard"].__wrapped__.__globals__
     lock_path = tmp_path / "hot-worker.lock"
     observed: list[str] = []
     monkeypatch.setitem(script_globals, "default_lock_path", lambda: lock_path)
@@ -385,17 +377,17 @@ def test_stopped_worker_guard_uses_fixed_unit_and_process_lock(
         lambda unit: observed.append(unit),
     )
 
-    with namespace["_stopped_hot_worker_guard"]():
+    with namespace["_stopped_sampler_guard"]():
         assert lock_path.exists()
 
     assert observed == [
-        "spx-spark-market-features-hot.service",
-        "spx-spark-market-features-hot.service",
+        "spx-spark-es-bar-sampler.service",
+        "spx-spark-es-bar-sampler.service",
     ]
 
     with namespace["ProcessLock"](lock_path):
         with pytest.raises(RuntimeError, match="process_lock_is_held"):
-            with namespace["_stopped_hot_worker_guard"]():
+            with namespace["_stopped_sampler_guard"]():
                 pass
 
 
@@ -432,11 +424,7 @@ def test_apply_restores_exact_original_when_post_write_validation_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     namespace = _script()
-    rows = [
-        row
-        for day in (20, 21, 22, 23, 24)
-        for row in _session_rows(date(2026, 7, day))
-    ]
+    rows = [row for day in (20, 21, 22, 23, 24) for row in _session_rows(date(2026, 7, day))]
     state = {
         "schema_version": "es_5m_bar_state.v1",
         "interval_seconds": 300,
@@ -522,7 +510,7 @@ def test_apply_restores_exact_original_when_post_write_validation_fails(
     )
     monkeypatch.setitem(
         script_globals,
-        "_stopped_hot_worker_guard",
+        "_stopped_sampler_guard",
         lambda: nullcontext(),
     )
     monkeypatch.setitem(script_globals, "_assert_ready", fail_second_ready)

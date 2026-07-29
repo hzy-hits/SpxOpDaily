@@ -12,6 +12,24 @@ _LEVEL_KEYS = ("put_wall", "flip_low", "flip_high", "call_wall")
 _SHADOW_MAX_AGE_SECONDS = 120.0
 
 
+def select_rth_market_state(
+    payload: Mapping[str, Any],
+) -> tuple[Mapping[str, Any], str | None]:
+    """Prefer the production minute frame and retain Spring as legacy fallback."""
+
+    market_frame = _mapping(payload.get("minute_market_frame"))
+    diagnostics = _mapping(market_frame.get("diagnostics"))
+    direct = _mapping(diagnostics.get("rth_market_state"))
+    if direct:
+        return direct, "minute_market_frame.diagnostics.rth_market_state"
+
+    shadow = _mapping(payload.get("spring_gamma_v3_shadow"))
+    fallback = _mapping(shadow.get("rth_market_state"))
+    if fallback:
+        return fallback, "spring_gamma_v3_shadow.rth_market_state"
+    return {}, None
+
+
 def build_wall_probability_context(
     payload: Mapping[str, Any],
     *,
@@ -28,11 +46,7 @@ def build_wall_probability_context(
     phase = str(mandate.get("phase") or "")
     quote_max_age = 90.0 if phase == "gth_preparation" else 15.0
     observed_at = _datetime(source.get("as_of") or shadow.get("as_of"))
-    shadow_age = (
-        (evaluated_at - observed_at).total_seconds()
-        if observed_at is not None
-        else None
-    )
+    shadow_age = (evaluated_at - observed_at).total_seconds() if observed_at is not None else None
     expected_expiry = str(mandate.get("trading_date") or "").replace("-", "")
     source_expiry = str(source.get("expiry") or shadow.get("expiry") or "")
     source_reasons: list[str] = []
@@ -114,8 +128,7 @@ def build_wall_probability_context(
         "maximum_shadow_age_seconds": _SHADOW_MAX_AGE_SECONDS,
         "maximum_quote_age_seconds": quote_max_age,
         "source_gate_reasons": list(dict.fromkeys(source_reasons)),
-        "probability_semantics": source.get("probability_semantics")
-        or "risk_neutral_not_physical",
+        "probability_semantics": source.get("probability_semantics") or "risk_neutral_not_physical",
         "touch_probability_semantics": source.get("touch_probability_semantics")
         or "reflection_heuristic_not_calibrated_or_physical",
         "horizons": horizons,
@@ -137,7 +150,7 @@ def build_quality_summary(
 
     coverage = _mapping(payload.get("strike_price_coverage"))
     shadow = _mapping(payload.get("spring_gamma_v3_shadow"))
-    market_state = _mapping(shadow.get("rth_market_state"))
+    market_state, market_state_source = select_rth_market_state(payload)
     availability = _mapping(market_state.get("input_availability"))
     overlay = _mapping(shadow.get("option_overlay"))
     pricing = _mapping(payload.get("pricing_reference"))
@@ -148,24 +161,20 @@ def build_quality_summary(
     available_inputs = _number(availability.get("available_count"))
     required_inputs = _number(availability.get("required_count"))
     expiry = str(payload.get("expiry") or "")
-    frame_expiry = str(
-        _mapping(payload.get("option_structure_frame")).get("front_expiry") or ""
-    )
+    frame_expiry = str(_mapping(payload.get("option_structure_frame")).get("front_expiry") or "")
     rth = mandate.get("phase") in {"rth_warmup", "rth_active"}
     reasons: list[str] = []
     if destination.get("status") != "ready":
-        gate = destination.get("gate_reasons") or [
-            destination.get("quality") or "unavailable"
-        ]
+        gate = destination.get("gate_reasons") or [destination.get("quality") or "unavailable"]
         reasons.append("destination:" + ",".join(str(item) for item in gate))
-    if (rth and overlay.get("status") != "ready") or (
-        not rth and overlay.get("status") not in {"ready", None}
-    ):
-        overlay_reasons = [
-            f"option_overlay:{reason}" for reason in overlay.get("reasons") or []
-        ][:4]
-        reasons.extend(overlay_reasons or ["option_overlay_unavailable"])
-    if rth and str(market_state.get("status") or "").lower() != "ready":
+    market_state_status = str(market_state.get("status") or "").lower()
+    market_state_token = str(
+        market_state.get("state") or market_state.get("market_state") or ""
+    ).upper()
+    valid_market_state_status = market_state_status == "ready" or (
+        market_state_status == "uncertain" and market_state_token == "UNCERTAIN"
+    )
+    if rth and not valid_market_state_status:
         reasons.append("rth_market_state_not_ready")
     if rth and (
         required_inputs is None
@@ -202,7 +211,9 @@ def build_quality_summary(
         "pricing_allowed": pricing.get("pricing_allowed"),
         "pricing_gate_state": pricing.get("gate_state"),
         "option_overlay_status": overlay.get("status"),
+        "option_overlay_quality_gate": False,
         "market_state_status": market_state.get("status"),
+        "market_state_source": market_state_source,
         "market_state_available_count": available_inputs,
         "market_state_required_count": required_inputs,
         "complete_pair_count": complete_pairs,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import datetime, timedelta
 
 from spx_spark.application.order_map.convexity_idea_radar import (
@@ -104,9 +105,7 @@ def _payload() -> dict[str, object]:
                             },
                             "signed_path_bias": -0.30,
                             "shrinkage": "linear_to_50pct_until_20_prior_sessions",
-                            "probability_semantics": (
-                                "historical_rank_not_forward_probability"
-                            ),
+                            "probability_semantics": ("historical_rank_not_forward_probability"),
                             "action_authority": "none",
                         },
                         "moving_averages": {
@@ -134,16 +133,14 @@ def _payload() -> dict[str, object]:
                             "cross_fresh": False,
                             "regime_state": "REGIME_TRANSITION",
                             "regime_direction": "up",
-                            "same_direction_convexity": (
-                                "wait_for_wall_confirmation"
-                            ),
+                            "same_direction_convexity": ("wait_for_wall_confirmation"),
                             "relation": "price_above_sma50_below_sma200",
                             "spx_equivalent_sma20": 7407.0,
                             "spx_equivalent_sma50": 7403.0,
                             "spx_equivalent_sma200": 7410.2,
                             "basis_contract_identity_matches_sma": True,
                             "action_authority": "none",
-                        }
+                        },
                     }
                 },
             },
@@ -161,9 +158,7 @@ def _payload() -> dict[str, object]:
                             "prob_touch": 0.24,
                             "source_iv": 0.19,
                             "source_quote_age_seconds": 1.25,
-                            "planned_exit_at": datetime(
-                                2026, 7, 24, 10, 15, tzinfo=ET
-                            ).isoformat(),
+                            "planned_exit_at": datetime(2026, 7, 24, 10, 15, tzinfo=ET).isoformat(),
                         }
                     },
                     "30m": {
@@ -174,9 +169,7 @@ def _payload() -> dict[str, object]:
                             "prob_touch": 0.08,
                             "source_iv": 0.20,
                             "source_quote_age_seconds": 1.75,
-                            "planned_exit_at": datetime(
-                                2026, 7, 24, 10, 30, tzinfo=ET
-                            ).isoformat(),
+                            "planned_exit_at": datetime(2026, 7, 24, 10, 30, tzinfo=ET).isoformat(),
                         }
                     },
                 },
@@ -263,9 +256,7 @@ def test_radar_keeps_both_boundaries_and_both_option_sides_before_exit() -> None
     assert radar["gth_prior"]["status"] == "unavailable"
     assert radar["boundary_tests"]["lower"]["name"] == "flip_low"
     assert radar["boundary_tests"]["upper"]["name"] == "flip_high"
-    assert {
-        row["scenario"] for row in radar["hypotheses"]
-    } == {
+    assert {row["scenario"] for row in radar["hypotheses"]} == {
         "lower_rejection_call",
         "lower_acceptance_put",
         "upper_rejection_put",
@@ -307,9 +298,7 @@ def test_radar_always_emits_three_non_executable_opportunity_lanes() -> None:
     for name, lane in board["lanes"].items():
         assert lane["lane"] == name
         assert lane["execution"]["eligible"] is False
-        assert "dense_shadow_no_execution_authority" in (
-            lane["execution"]["block_reasons"]
-        )
+        assert "dense_shadow_no_execution_authority" in (lane["execution"]["block_reasons"])
         assert lane["action_authority"] == "none"
         assert lane["actionable"] is False
         assert lane["automatic_ordering"] is False
@@ -357,9 +346,9 @@ def test_radar_renders_small_sample_path_rank_and_all_three_lanes() -> None:
 
 def test_radar_accepts_only_identity_matched_causal_path_fallback() -> None:
     payload = _payload()
-    current = payload["spring_gamma_v3_shadow"]["rth_market_state"]["input_lineage"][
-        "diagnostics"
-    ]["rolling_path_percentiles"]
+    current = payload["spring_gamma_v3_shadow"]["rth_market_state"]["input_lineage"]["diagnostics"][
+        "rolling_path_percentiles"
+    ]
     current.clear()
     current.update(
         {
@@ -412,9 +401,9 @@ def test_radar_accepts_only_identity_matched_causal_path_fallback() -> None:
 
 def test_radar_rejects_stale_current_path_and_future_fallback_modifier() -> None:
     payload = _payload()
-    current = payload["spring_gamma_v3_shadow"]["rth_market_state"]["input_lineage"][
-        "diagnostics"
-    ]["rolling_path_percentiles"]
+    current = payload["spring_gamma_v3_shadow"]["rth_market_state"]["input_lineage"]["diagnostics"][
+        "rolling_path_percentiles"
+    ]
     current["latest_bar_end"] = datetime(
         2026,
         7,
@@ -473,9 +462,7 @@ def test_radar_rejects_stale_current_path_and_future_fallback_modifier() -> None
     for lane in ("call", "put"):
         assert all(
             row["feature"] != "rolling_path_bias"
-            for row in radar["opportunity_board"]["lanes"][lane][
-                "score_contributions"
-            ]
+            for row in radar["opportunity_board"]["lanes"][lane]["score_contributions"]
         )
 
 
@@ -503,33 +490,28 @@ def test_radar_separates_risk_neutral_destination_from_physical_probability() ->
     assert "MA50/200背景  REGIME_TRANSITION/up" in rendered
     assert "必须等待wall/flip接受或拒绝确认" in rendered
     assert (
-        "MA200×结构位  SPX基差投影邻近 Flip High 7410.00 · "
-        "距离 0.20点/0.02ATR · 决策区 是"
+        "MA200×结构位  SPX基差投影邻近 Flip High 7410.00 · 距离 0.20点/0.02ATR · 决策区 是"
     ) in rendered
     assert "不生成方向/入场（非SPX自身MA200）" in rendered
 
 
 def test_radar_ma200_wall_confluence_is_explicitly_unavailable_without_atr() -> None:
     payload = _payload()
-    moving = payload["spring_gamma_v3_shadow"]["rth_market_state"]["input_lineage"][
-        "diagnostics"
-    ]["moving_averages"]
+    moving = payload["spring_gamma_v3_shadow"]["rth_market_state"]["input_lineage"]["diagnostics"][
+        "moving_averages"
+    ]
     moving["atr_5m"] = None
 
     radar = build_convexity_idea_radar(
         payload,
         now=datetime(2026, 7, 24, 10, 0, tzinfo=ET),
     )
-    confluence = radar["market_state"]["moving_averages"][
-        "ma200_structure_confluence"
-    ]
+    confluence = radar["market_state"]["moving_averages"]["ma200_structure_confluence"]
 
     assert confluence["status"] == "unavailable"
     assert confluence["reason"] == "atr_5m_unavailable"
     assert confluence["decision_zone"] is None
-    rendered = "\n".join(
-        render_convexity_idea_radar_lines({"convexity_idea_radar": radar})
-    )
+    rendered = "\n".join(render_convexity_idea_radar_lines({"convexity_idea_radar": radar}))
     assert "MA200×结构位  unavailable（atr_5m_unavailable）" in rendered
     assert "不得补算共振或方向" in rendered
 
@@ -561,9 +543,7 @@ def test_radar_gives_llm_iv_skew_and_realized_range_without_direction_authority(
             "term_gap": -0.0122,
         },
     }
-    payload["spring_gamma_v3_shadow"]["rth_market_state"]["V"][
-        "same_time_range_ratio"
-    ] = 1.34
+    payload["spring_gamma_v3_shadow"]["rth_market_state"]["V"]["same_time_range_ratio"] = 1.34
 
     radar = build_convexity_idea_radar(
         payload,
@@ -646,6 +626,54 @@ def test_radar_cannot_be_ready_with_warming_or_incomplete_market_state() -> None
     assert "rth_market_state_inputs_incomplete" in radar["data_quality"]["reasons"]
 
 
+def test_radar_uses_direct_minute_state_and_spring_absence_is_non_gating() -> None:
+    payload = _payload()
+    direct = deepcopy(payload["spring_gamma_v3_shadow"]["rth_market_state"])
+    direct["status"] = "uncertain"
+    payload["minute_market_frame"] = {"diagnostics": {"rth_market_state": direct}}
+    payload.pop("spring_gamma_v3_shadow")
+
+    radar = build_convexity_idea_radar(
+        payload,
+        now=datetime(2026, 7, 24, 10, 0, tzinfo=ET),
+    )
+
+    assert radar["status"] == "ready"
+    assert radar["market_state"]["source"] == "minute_market_frame.diagnostics.rth_market_state"
+    assert radar["data_quality"]["market_state_source"] == radar["market_state"]["source"]
+    assert radar["data_quality"]["option_overlay_status"] is None
+    assert radar["data_quality"]["option_overlay_quality_gate"] is False
+    assert radar["boundary_tests"]["risk_neutral_wall_probabilities"]["status"] == "unavailable"
+
+
+def test_failed_spring_overlay_cannot_degrade_direct_market_state() -> None:
+    payload = _payload()
+    direct = deepcopy(payload["spring_gamma_v3_shadow"]["rth_market_state"])
+    direct["status"] = "uncertain"
+    payload["minute_market_frame"] = {"diagnostics": {"rth_market_state": direct}}
+    shadow = payload["spring_gamma_v3_shadow"]
+    shadow["status"] = "failed"
+    shadow["rth_market_state"] = {
+        "state": "UNCERTAIN",
+        "status": "warming",
+        "input_availability": {"available_count": 0, "required_count": 8},
+    }
+    shadow["option_overlay"] = {
+        "status": "unavailable",
+        "reasons": ["research_overlay_failed"],
+    }
+
+    radar = build_convexity_idea_radar(
+        payload,
+        now=datetime(2026, 7, 24, 10, 0, tzinfo=ET),
+    )
+
+    assert radar["status"] == "ready"
+    assert radar["data_quality"]["market_state_source"].startswith("minute_market_frame")
+    assert radar["data_quality"]["option_overlay_status"] == "unavailable"
+    assert not any("overlay" in reason for reason in radar["data_quality"]["reasons"])
+
+
 def test_radar_selects_true_nearest_levels_on_each_side_of_spot() -> None:
     payload = _payload()
     payload["underlier"] = {"price": 7470.0, "source": "index:SPX"}
@@ -658,10 +686,7 @@ def test_radar_selects_true_nearest_levels_on_each_side_of_spot() -> None:
     assert radar["boundary_tests"]["lower"]["name"] == "call_wall"
     assert radar["boundary_tests"]["lower"]["level"] == 7465.0
     assert radar["boundary_tests"]["upper"]["status"] == "unavailable"
-    assert (
-        radar["boundary_tests"]["upper"]["reason"]
-        == "no_structure_level_on_upper_side_of_spot"
-    )
+    assert radar["boundary_tests"]["upper"]["reason"] == "no_structure_level_on_upper_side_of_spot"
 
 
 def test_weekend_is_inactive_not_an_artificial_multi_day_gth_window() -> None:
@@ -696,12 +721,8 @@ def test_actual_sunday_evening_gth_prepares_monday_session() -> None:
     shadow["as_of"] = gth.isoformat()
     shadow["expiry"] = "20260727"
     wall = shadow["wall_probability"]["wall_probabilities"]
-    wall["15m"]["flip_high"]["planned_exit_at"] = (
-        gth.replace(minute=45).isoformat()
-    )
-    wall["30m"]["call_wall"]["planned_exit_at"] = (
-        gth.replace(hour=21, minute=0).isoformat()
-    )
+    wall["15m"]["flip_high"]["planned_exit_at"] = gth.replace(minute=45).isoformat()
+    wall["30m"]["call_wall"]["planned_exit_at"] = gth.replace(hour=21, minute=0).isoformat()
 
     radar = build_convexity_idea_radar(payload, now=gth)
 
@@ -789,11 +810,11 @@ def test_wall_probability_requires_fresh_shadow_and_unexpired_horizon() -> None:
     payload["as_of"] = now.isoformat()
 
     stale = build_convexity_idea_radar(payload, now=now)
-    stale_row = stale["boundary_tests"]["risk_neutral_wall_probabilities"][
-        "horizons"
-    ]["15m"]["flip_high"]
+    stale_row = stale["boundary_tests"]["risk_neutral_wall_probabilities"]["horizons"]["15m"][
+        "flip_high"
+    ]
 
-    assert stale["status"] == "partial"
+    assert stale["status"] == "ready"
     assert stale_row["strategy_usable"] is False
     assert stale_row["prob_touch"] is None
     assert "spring_shadow_stale_or_future" in stale_row["strategy_gate_reasons"]
@@ -803,9 +824,9 @@ def test_wall_probability_requires_fresh_shadow_and_unexpired_horizon() -> None:
     payload["as_of"] = now.isoformat()
     payload["spring_gamma_v3_shadow"]["as_of"] = now.isoformat()
     expired = build_convexity_idea_radar(payload, now=now)
-    expired_row = expired["boundary_tests"]["risk_neutral_wall_probabilities"][
-        "horizons"
-    ]["15m"]["flip_high"]
+    expired_row = expired["boundary_tests"]["risk_neutral_wall_probabilities"]["horizons"]["15m"][
+        "flip_high"
+    ]
 
     assert expired_row["strategy_usable"] is False
     assert expired_row["prob_touch"] is None
@@ -858,9 +879,7 @@ def test_wall_probability_horizon_cannot_cross_1300_hard_exit() -> None:
 
     radar = build_convexity_idea_radar(payload, now=now)
 
-    row = radar["boundary_tests"]["risk_neutral_wall_probabilities"]["horizons"]["60m"][
-        "call_wall"
-    ]
+    row = radar["boundary_tests"]["risk_neutral_wall_probabilities"]["horizons"]["60m"]["call_wall"]
     assert row["status"] == "outside_1300_hard_exit"
     assert row["prob_touch"] is None
     compact = compact_convexity_idea_radar(radar)
@@ -891,8 +910,8 @@ def test_radar_quality_uses_dependencies_not_unrelated_global_warnings() -> None
     assert missing_coverage["status"] == "partial"
     assert "complete_cp_pairs_unavailable" in missing_coverage["data_quality"]["reasons"]
     assert "target_cp_pair_count_invalid" in missing_coverage["data_quality"]["reasons"]
-    assert "nbbo_interpolation_not_explicitly_false" in (
-        missing_coverage["data_quality"]["reasons"]
+    assert (
+        "nbbo_interpolation_not_explicitly_false" in (missing_coverage["data_quality"]["reasons"])
     )
 
     payload = _payload()
@@ -904,9 +923,7 @@ def test_radar_quality_uses_dependencies_not_unrelated_global_warnings() -> None
     )
     assert thin_coverage["status"] == "partial"
     assert "target_cp_pair_count_invalid" in thin_coverage["data_quality"]["reasons"]
-    assert "minimum_complete_cp_pairs_not_met" in (
-        thin_coverage["data_quality"]["reasons"]
-    )
+    assert "minimum_complete_cp_pairs_not_met" in (thin_coverage["data_quality"]["reasons"])
 
     payload = _payload()
     payload["strike_price_coverage"]["nbbo_interpolation"] = True
@@ -915,8 +932,8 @@ def test_radar_quality_uses_dependencies_not_unrelated_global_warnings() -> None
         now=datetime(2026, 7, 24, 10, 0, tzinfo=ET),
     )
     assert interpolated_nbbo["status"] == "partial"
-    assert "nbbo_interpolation_not_explicitly_false" in (
-        interpolated_nbbo["data_quality"]["reasons"]
+    assert (
+        "nbbo_interpolation_not_explicitly_false" in (interpolated_nbbo["data_quality"]["reasons"])
     )
 
     payload = _payload()

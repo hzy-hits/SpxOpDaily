@@ -6,19 +6,35 @@ from dataclasses import replace
 from datetime import date, datetime, time, timedelta, timezone
 
 from spx_spark.application.order_map.rth_daily_acceptance import (
-    build_rth_daily_acceptance,
+    build_rth_daily_acceptance as _build_rth_daily_acceptance,
     enqueue_degraded_acceptance,
     write_rth_daily_acceptance,
 )
-from spx_spark.notifier.dispatcher import EnqueueResult
+from spx_spark.application.market_features.trade_intent_runtime import (
+    _trade_ready_delivery_event_id,
+)
+from spx_spark.config import NotificationSettings
+from spx_spark.notifier.dispatcher import EnqueueResult, _sync_terminal_receipts
 from spx_spark.notifier.receipts import NotificationEnvelope
-from spx_spark.notifier.receipts import notification_event_id
+from spx_spark.notifier.receipts import (
+    notification_event_id,
+    prepare_delivery_receipt_store,
+)
 from spx_spark.market_calendar import ET, MarketCalendar
 from spx_spark.notifier.delivery_outbox import NotificationDeliveryOutbox
 from spx_spark.settings.level_decision import LevelDecisionPolicy
 
 
 TRADING_DATE = date(2026, 7, 6)
+
+
+def _receipt_path(tmp_path):
+    return tmp_path / "notification-receipts.sqlite"
+
+
+def build_rth_daily_acceptance(data_root, **kwargs):
+    kwargs.setdefault("receipt_path", _receipt_path(data_root))
+    return _build_rth_daily_acceptance(data_root, **kwargs)
 
 
 def _write_jsonl(path, rows) -> None:
@@ -35,6 +51,7 @@ def _write_json(path, payload) -> None:
 
 
 def _outbox(tmp_path):
+    assert prepare_delivery_receipt_store(_receipt_path(tmp_path))
     return NotificationDeliveryOutbox(
         tmp_path / "notification.sqlite",
         max_attempts=3,
@@ -42,6 +59,16 @@ def _outbox(tmp_path):
         dead_letter_after_seconds=60.0,
         claim_stale_after_seconds=10.0,
     )
+
+
+def _sync_receipts(tmp_path, outbox, *, now: datetime) -> None:
+    settings = replace(
+        NotificationSettings.from_env(),
+        delivery_receipt_path=str(_receipt_path(tmp_path)),
+    )
+    result = _sync_terminal_receipts(settings, outbox, now=now)
+    assert result.pending == 0
+    assert result.inspection.ok is True
 
 
 def _enqueue_report_targets(
@@ -80,8 +107,7 @@ def _enqueue_report_targets(
 def _deliver_all_targets(outbox) -> None:
     with sqlite3.connect(outbox.path) as connection:
         connection.execute(
-            "UPDATE notification_delivery_targets "
-            "SET status='delivered', delivered_at=updated_at"
+            "UPDATE notification_delivery_targets SET status='delivered', delivered_at=updated_at"
         )
 
 
@@ -152,6 +178,29 @@ def _full_day_rows(session, *, report_lag_seconds: int = 8):
     return spring, reports
 
 
+def _producer_heartbeat_rows(session):
+    rows = []
+    for index in range(session.expected_five_minute_buckets):
+        slot_start = session.open_at + timedelta(minutes=5 * index)
+        slot_id = f"{TRADING_DATE.isoformat()}:rth:{index:03d}"
+        rows.append(
+            {
+                "schema_version": "trade_intent_producer_ledger.v1",
+                "record_type": "rth_5m_heartbeat",
+                "record_id": f"heartbeat:{slot_id}",
+                "observed_at": slot_start.isoformat(),
+                "trading_date_et": TRADING_DATE.isoformat(),
+                "slot_id": slot_id,
+                "slot_index": index,
+                "slot_start": slot_start.isoformat(),
+                "slot_end": (slot_start + timedelta(minutes=5)).isoformat(),
+                "trade_intent_status": "observing",
+                "intent_event_id": None,
+            }
+        )
+    return rows
+
+
 def _seed_complete_day(tmp_path, *, calendar=None, report_lag_seconds: int = 8):
     calendar = calendar or MarketCalendar()
     session = calendar.session(TRADING_DATE)
@@ -181,6 +230,22 @@ def _seed_complete_day(tmp_path, *, calendar=None, report_lag_seconds: int = 8):
         / "review.json",
         {"verdict": {"status": "complete"}},
     )
+    _write_jsonl(
+        tmp_path
+        / "features"
+        / "trade_intent_producer_ledger"
+        / f"date={TRADING_DATE.isoformat()}"
+        / "events.jsonl",
+        _producer_heartbeat_rows(session),
+    )
+    _write_jsonl(
+        tmp_path
+        / "features"
+        / "trade_intents"
+        / f"date={TRADING_DATE.isoformat()}"
+        / "events.jsonl",
+        [{"status": "observing", "event_id": "daily-heartbeat"}],
+    )
     return calendar, session
 
 
@@ -208,6 +273,442 @@ def test_complete_day_uses_one_et_clock_contract_and_writes_both_projections(tmp
     assert historical.exists()
     assert latest.exists()
     assert (tmp_path / "latest" / "level_decision_acceptance.json").exists()
+
+
+def test_disabled_spring_is_not_an_operational_acceptance_dependency(tmp_path) -> None:
+    calendar, session = _seed_complete_day(tmp_path)
+    outbox = _outbox(tmp_path)
+    _enqueue_report_targets(outbox, session)
+    _deliver_all_targets(outbox)
+
+    report = build_rth_daily_acceptance(
+        tmp_path,
+        trading_date=TRADING_DATE,
+        level_policy=LevelDecisionPolicy(),
+        outbox_path=outbox.path,
+        now=datetime(2026, 7, 6, 22, 0, tzinfo=timezone.utc),
+        calendar=calendar,
+        spring_required=False,
+    )
+
+    assert report["status"] == "complete"
+    assert report["spring_required"] is False
+    assert report["session_clock"]["expected_spring_minutes"] == 0
+    assert not any(
+        name.startswith("spring_") or "spring_" in name for name in report["failed_checks"]
+    )
+    assert {row["name"] for row in report["checks"]}.isdisjoint(
+        {
+            "spring_rth_minute_coverage",
+            "spring_option_overlay_ready_ratio",
+            "rth_report_spring_projection_coverage",
+            "rth_report_state_window_coverage",
+        }
+    )
+
+
+def test_trade_ready_intent_requires_fully_delivered_outbox_event(tmp_path) -> None:
+    calendar, session = _seed_complete_day(tmp_path)
+    outbox = _outbox(tmp_path)
+    _enqueue_report_targets(outbox, session)
+    _deliver_all_targets(outbox)
+    intent = {
+        "status": "trade_ready",
+        "intent_id": "intent:daily-acceptance",
+        "event_id": "level:daily-acceptance",
+        "semantic_key": "2026-07-06|breakout|up|7500|SPXW-7500C",
+    }
+    _write_jsonl(
+        tmp_path
+        / "features"
+        / "trade_intents"
+        / f"date={TRADING_DATE.isoformat()}"
+        / "events.jsonl",
+        [intent, intent],
+    )
+    delivery_event_id = _trade_ready_delivery_event_id(intent)
+    producer_path = (
+        tmp_path
+        / "features"
+        / "trade_intent_producer_ledger"
+        / f"date={TRADING_DATE.isoformat()}"
+        / "events.jsonl"
+    )
+    producer_rows = [
+        json.loads(line) for line in producer_path.read_text(encoding="utf-8").splitlines()
+    ]
+    producer_rows.append(
+        {
+            "schema_version": "trade_intent_producer_ledger.v1",
+            "record_type": "trade_ready_delivery_expectation",
+            "record_id": f"expectation:{delivery_event_id}",
+            "observed_at": session.open_at.isoformat(),
+            "trading_date_et": TRADING_DATE.isoformat(),
+            "slot_id": f"{TRADING_DATE.isoformat()}:rth:000",
+            "semantic_key": intent["semantic_key"],
+            "delivery_event_id": delivery_event_id,
+            "intent_id": intent["intent_id"],
+            "intent_event_id": intent["event_id"],
+        }
+    )
+    _write_jsonl(producer_path, producer_rows)
+
+    missing = build_rth_daily_acceptance(
+        tmp_path,
+        trading_date=TRADING_DATE,
+        level_policy=LevelDecisionPolicy(),
+        outbox_path=outbox.path,
+        now=datetime(2026, 7, 6, 22, 0, tzinfo=timezone.utc),
+        calendar=calendar,
+    )
+    missing_check = next(
+        row for row in missing["checks"] if row["name"] == "trade_ready_notification_delivery"
+    )
+
+    assert "trade_ready_notification_delivery" in missing["failed_checks"]
+    assert missing_check["measured"]["ready_rows"] == 2
+    assert missing_check["measured"]["expected_semantics"] == 1
+    assert missing_check["measured"]["timely_delivered_events"] == 0
+
+    expires_at = session.open_at + timedelta(seconds=20)
+    outbox.enqueue(
+        NotificationEnvelope(
+            event_id=delivery_event_id,
+            source="trade_intent",
+            kind="trade_intent",
+            lane="trade_ready",
+            occurred_at=session.open_at,
+            expires_at=expires_at,
+        ),
+        title="SPX TRADE READY",
+        text="ticket",
+        feishu_text="ticket",
+        friend=True,
+        targets=("bark", "feishu"),
+        now=session.open_at,
+    )
+    delivered_at = session.open_at + timedelta(seconds=2)
+    with sqlite3.connect(outbox.path) as connection:
+        targets = [
+            str(row[0])
+            for row in connection.execute(
+                "SELECT sink FROM notification_delivery_targets WHERE event_id=? ORDER BY sink",
+                (delivery_event_id,),
+            )
+        ]
+        connection.execute(
+            "UPDATE notification_delivery_targets "
+            "SET status='delivered', delivered_at=?, updated_at=? "
+            "WHERE event_id=?",
+            (
+                delivered_at.isoformat(),
+                delivered_at.isoformat(),
+                delivery_event_id,
+            ),
+        )
+        connection.execute(
+            "UPDATE notification_delivery_events "
+            "SET status='delivered', updated_at=? WHERE event_id=?",
+            (delivered_at.isoformat(), delivery_event_id),
+        )
+        for sink in targets:
+            connection.execute(
+                "INSERT INTO notification_delivery_terminal_receipts ("
+                "receipt_id, event_id, sink, outcome, reason, terminal_at, "
+                "attempted, ok, queued_for_recovery, recorded_at"
+                ") VALUES (?, ?, ?, 'delivered', 'delivery_succeeded', ?, 1, 1, 0, NULL)",
+                (
+                    f"success:{delivery_event_id}:{sink}",
+                    delivery_event_id,
+                    sink,
+                    delivered_at.isoformat(),
+                ),
+            )
+    _sync_receipts(tmp_path, outbox, now=delivered_at)
+
+    delivered = build_rth_daily_acceptance(
+        tmp_path,
+        trading_date=TRADING_DATE,
+        level_policy=LevelDecisionPolicy(),
+        outbox_path=outbox.path,
+        now=datetime(2026, 7, 6, 22, 0, tzinfo=timezone.utc),
+        calendar=calendar,
+    )
+    delivered_check = next(
+        row for row in delivered["checks"] if row["name"] == "trade_ready_notification_delivery"
+    )
+
+    assert "trade_ready_notification_delivery" not in delivered["failed_checks"]
+    assert delivered_check["passed"] is True
+    assert delivered_check["measured"]["timely_delivered_events"] == 1
+    assert delivered_check["measured"]["delivered_semantics"] == 1
+
+    with sqlite3.connect(_receipt_path(tmp_path)) as connection:
+        connection.execute(
+            "DELETE FROM notification_delivery_receipts WHERE event_id=?",
+            (delivery_event_id,),
+        )
+    missing_real_receipt = build_rth_daily_acceptance(
+        tmp_path,
+        trading_date=TRADING_DATE,
+        level_policy=LevelDecisionPolicy(),
+        outbox_path=outbox.path,
+        now=datetime(2026, 7, 6, 22, 0, tzinfo=timezone.utc),
+        calendar=calendar,
+    )
+    missing_real_checks = {row["name"]: row for row in missing_real_receipt["checks"]}
+    missing_real_event = missing_real_checks["trade_ready_notification_delivery"]["measured"][
+        "event_diagnostics"
+    ]["events"][delivery_event_id]
+
+    assert missing_real_checks["trade_ready_notification_delivery"]["passed"] is False
+    assert missing_real_event["reasons"] == ["success_receipt_missing_or_unmirrored"]
+    assert missing_real_checks["notification_receipt_integrity"]["passed"] is False
+    assert (
+        len(missing_real_checks["notification_receipt_integrity"]["measured"]["missing_mirror_ids"])
+        == 2
+    )
+
+    _sync_receipts(
+        tmp_path,
+        outbox,
+        now=delivered_at + timedelta(seconds=1),
+    )
+    late_at = session.open_at + timedelta(seconds=6)
+    with sqlite3.connect(outbox.path) as connection:
+        connection.execute(
+            "UPDATE notification_delivery_targets "
+            "SET delivered_at=?, updated_at=? WHERE event_id=?",
+            (late_at.isoformat(), late_at.isoformat(), delivery_event_id),
+        )
+    late = build_rth_daily_acceptance(
+        tmp_path,
+        trading_date=TRADING_DATE,
+        level_policy=LevelDecisionPolicy(),
+        outbox_path=outbox.path,
+        now=datetime(2026, 7, 6, 22, 0, tzinfo=timezone.utc),
+        calendar=calendar,
+    )
+    late_check = next(
+        row for row in late["checks"] if row["name"] == "trade_ready_notification_delivery"
+    )
+    diagnostics = late_check["measured"]["event_diagnostics"]["events"]
+
+    assert "trade_ready_notification_delivery" in late["failed_checks"]
+    assert diagnostics[delivery_event_id]["reasons"] == ["first_delivery_slo_breached"]
+
+
+def test_rearmed_same_semantic_requires_each_delivery_event_outcome(
+    tmp_path,
+) -> None:
+    calendar, session = _seed_complete_day(tmp_path)
+    outbox = _outbox(tmp_path)
+    _enqueue_report_targets(outbox, session)
+    _deliver_all_targets(outbox)
+    semantic_key = "2026-07-06|breakout|up|7500|SPXW-7500C"
+    intents = [
+        {
+            "status": "trade_ready",
+            "intent_id": "intent:daily-acceptance-rearm",
+            "event_id": event_id,
+            "semantic_key": semantic_key,
+        }
+        for event_id in ("level:first-episode", "level:rearmed-episode")
+    ]
+    delivery_event_ids = [_trade_ready_delivery_event_id(intent) for intent in intents]
+    assert len(set(delivery_event_ids)) == 2
+    _write_jsonl(
+        tmp_path
+        / "features"
+        / "trade_intents"
+        / f"date={TRADING_DATE.isoformat()}"
+        / "events.jsonl",
+        intents,
+    )
+    producer_path = (
+        tmp_path
+        / "features"
+        / "trade_intent_producer_ledger"
+        / f"date={TRADING_DATE.isoformat()}"
+        / "events.jsonl"
+    )
+    producer_rows = [
+        json.loads(line) for line in producer_path.read_text(encoding="utf-8").splitlines()
+    ]
+    producer_rows.extend(
+        {
+            "schema_version": "trade_intent_producer_ledger.v1",
+            "record_type": "trade_ready_delivery_expectation",
+            "record_id": f"expectation:{delivery_event_id}",
+            "observed_at": session.open_at.isoformat(),
+            "trading_date_et": TRADING_DATE.isoformat(),
+            "slot_id": f"{TRADING_DATE.isoformat()}:rth:000",
+            "semantic_key": semantic_key,
+            "delivery_event_id": delivery_event_id,
+            "intent_id": intent["intent_id"],
+            "intent_event_id": intent["event_id"],
+        }
+        for intent, delivery_event_id in zip(
+            intents,
+            delivery_event_ids,
+            strict=True,
+        )
+    )
+    _write_jsonl(producer_path, producer_rows)
+
+    first_event_id = delivery_event_ids[0]
+    expires_at = session.open_at + timedelta(seconds=20)
+    outbox.enqueue(
+        NotificationEnvelope(
+            event_id=first_event_id,
+            source="trade_intent",
+            kind="trade_intent",
+            lane="trade_ready",
+            occurred_at=session.open_at,
+            expires_at=expires_at,
+        ),
+        title="SPX TRADE READY",
+        text="first ticket",
+        feishu_text="first ticket",
+        friend=True,
+        targets=("bark", "feishu"),
+        now=session.open_at,
+    )
+    delivered_at = session.open_at + timedelta(seconds=2)
+    with sqlite3.connect(outbox.path) as connection:
+        sinks = [
+            str(row[0])
+            for row in connection.execute(
+                "SELECT sink FROM notification_delivery_targets WHERE event_id=? ORDER BY sink",
+                (first_event_id,),
+            )
+        ]
+        connection.execute(
+            "UPDATE notification_delivery_targets "
+            "SET status='delivered', delivered_at=?, updated_at=? "
+            "WHERE event_id=?",
+            (
+                delivered_at.isoformat(),
+                delivered_at.isoformat(),
+                first_event_id,
+            ),
+        )
+        connection.execute(
+            "UPDATE notification_delivery_events "
+            "SET status='delivered', updated_at=? WHERE event_id=?",
+            (delivered_at.isoformat(), first_event_id),
+        )
+        for sink in sinks:
+            connection.execute(
+                "INSERT INTO notification_delivery_terminal_receipts ("
+                "receipt_id, event_id, sink, outcome, reason, terminal_at, "
+                "attempted, ok, queued_for_recovery, recorded_at"
+                ") VALUES (?, ?, ?, 'delivered', 'delivery_succeeded', ?, 1, 1, 0, NULL)",
+                (
+                    f"success:{first_event_id}:{sink}",
+                    first_event_id,
+                    sink,
+                    delivered_at.isoformat(),
+                ),
+            )
+    _sync_receipts(tmp_path, outbox, now=delivered_at)
+
+    one_of_two = build_rth_daily_acceptance(
+        tmp_path,
+        trading_date=TRADING_DATE,
+        level_policy=LevelDecisionPolicy(),
+        outbox_path=outbox.path,
+        now=datetime(2026, 7, 6, 22, 0, tzinfo=timezone.utc),
+        calendar=calendar,
+    )
+    one_of_two_check = next(
+        row for row in one_of_two["checks"] if row["name"] == "trade_ready_notification_delivery"
+    )
+
+    assert one_of_two_check["passed"] is False
+    assert one_of_two_check["measured"]["expected_semantics"] == 1
+    assert one_of_two_check["measured"]["expected_events"] == 2
+    assert one_of_two_check["measured"]["timely_delivered_events"] == 1
+    assert one_of_two_check["measured"]["missing_delivery_events"] == [delivery_event_ids[1]]
+    assert one_of_two_check["measured"]["missing_delivery_semantics"] == [semantic_key]
+
+    second_event_id = delivery_event_ids[1]
+    outbox.enqueue(
+        NotificationEnvelope(
+            event_id=second_event_id,
+            source="trade_intent",
+            kind="trade_intent",
+            lane="trade_ready",
+            occurred_at=session.open_at,
+            expires_at=expires_at,
+        ),
+        title="SPX TRADE READY",
+        text="rearmed ticket",
+        feishu_text="rearmed ticket",
+        friend=True,
+        targets=("bark", "feishu"),
+        now=session.open_at,
+    )
+    cancelled_at = session.open_at + timedelta(seconds=3)
+    assert (
+        outbox.cancel_event(
+            second_event_id,
+            reason="source_lifecycle_invalidated",
+            now=cancelled_at,
+        )
+        == 2
+    )
+    _sync_receipts(tmp_path, outbox, now=cancelled_at)
+
+    settled = build_rth_daily_acceptance(
+        tmp_path,
+        trading_date=TRADING_DATE,
+        level_policy=LevelDecisionPolicy(),
+        outbox_path=outbox.path,
+        now=datetime(2026, 7, 6, 22, 0, tzinfo=timezone.utc),
+        calendar=calendar,
+    )
+    settled_check = next(
+        row for row in settled["checks"] if row["name"] == "trade_ready_notification_delivery"
+    )
+
+    assert settled_check["passed"] is True
+    assert settled_check["measured"]["accepted_events"] == 2
+    assert settled_check["measured"]["explicitly_terminal_events"] == 1
+    assert settled_check["measured"]["terminally_settled_semantics"] == 1
+    assert settled_check["measured"]["missing_delivery_events"] == []
+
+
+def test_missing_producer_heartbeat_fails_closed_even_with_zero_ready(tmp_path) -> None:
+    calendar, session = _seed_complete_day(tmp_path)
+    outbox = _outbox(tmp_path)
+    _enqueue_report_targets(outbox, session)
+    _deliver_all_targets(outbox)
+    producer_path = (
+        tmp_path
+        / "features"
+        / "trade_intent_producer_ledger"
+        / f"date={TRADING_DATE.isoformat()}"
+        / "events.jsonl"
+    )
+    rows = [json.loads(line) for line in producer_path.read_text(encoding="utf-8").splitlines()][
+        :-1
+    ]
+    _write_jsonl(producer_path, rows)
+
+    report = build_rth_daily_acceptance(
+        tmp_path,
+        trading_date=TRADING_DATE,
+        level_policy=LevelDecisionPolicy(),
+        outbox_path=outbox.path,
+        now=datetime(2026, 7, 6, 22, 0, tzinfo=timezone.utc),
+        calendar=calendar,
+    )
+    check = next(row for row in report["checks"] if row["name"] == "trade_intent_producer_coverage")
+
+    assert check["passed"] is False
+    assert check["measured"]["observed_slots"] == 77
+    assert "trade_intent_producer_coverage" in report["failed_checks"]
 
 
 def test_formal_level_signal_without_evidence_fails_daily_acceptance(tmp_path) -> None:
@@ -529,6 +1030,87 @@ def test_acknowledged_dead_letter_does_not_poison_future_acceptance(tmp_path) ->
         calendar=calendar,
     )
     assert "notification_outbox_integrity" in unacknowledged["failed_checks"]
+
+
+def test_unmirrored_ordinary_delivery_receipt_fails_outbox_integrity(
+    tmp_path,
+) -> None:
+    calendar, session = _seed_complete_day(tmp_path)
+    outbox = _outbox(tmp_path)
+    _enqueue_report_targets(outbox, session)
+    _deliver_all_targets(outbox)
+    event_id = "delivered-before-receipt-mirror"
+    outbox.enqueue(
+        NotificationEnvelope(
+            event_id=event_id,
+            source="test",
+            kind="test",
+            lane="ops_transition",
+            occurred_at=session.close_at,
+        ),
+        title="test",
+        text="test",
+        feishu_text=None,
+        friend=False,
+        targets=("bark",),
+        now=session.close_at,
+    )
+    claimed = outbox.claim_due(
+        worker_id="daily-acceptance-test",
+        limit_targets=1,
+        now=session.close_at,
+        event_id=event_id,
+    )
+    assert claimed[0].targets == ("bark",)
+    outbox.settle_target(
+        event_id,
+        "bark",
+        worker_id="daily-acceptance-test",
+        ok=True,
+        error=None,
+        now=session.close_at,
+    )
+
+    report = build_rth_daily_acceptance(
+        tmp_path,
+        trading_date=TRADING_DATE,
+        level_policy=LevelDecisionPolicy(),
+        outbox_path=outbox.path,
+        now=datetime(2026, 7, 6, 22, 0, tzinfo=timezone.utc),
+        calendar=calendar,
+    )
+    checks = {row["name"]: row for row in report["checks"]}
+
+    integrity = checks["notification_outbox_integrity"]
+    assert integrity["measured"]["terminal_receipt_schema_present"] is True
+    assert integrity["measured"]["terminal_receipts_pending"] == 1
+    assert integrity["passed"] is False
+    assert "notification_outbox_integrity" in report["failed_checks"]
+
+
+def test_missing_real_receipt_store_fails_daily_integrity(tmp_path) -> None:
+    calendar, session = _seed_complete_day(tmp_path)
+    outbox = _outbox(tmp_path)
+    _enqueue_report_targets(outbox, session)
+    _deliver_all_targets(outbox)
+    _receipt_path(tmp_path).unlink()
+
+    report = build_rth_daily_acceptance(
+        tmp_path,
+        trading_date=TRADING_DATE,
+        level_policy=LevelDecisionPolicy(),
+        outbox_path=outbox.path,
+        now=datetime(2026, 7, 6, 22, 0, tzinfo=timezone.utc),
+        calendar=calendar,
+    )
+    receipt_check = next(
+        row for row in report["checks"] if row["name"] == "notification_receipt_integrity"
+    )
+
+    assert receipt_check["passed"] is False
+    assert receipt_check["measured"]["exists"] is False
+    assert receipt_check["measured"]["quick_check"] == "missing"
+    assert "notification_receipt_integrity" in report["failed_checks"]
 
 
 def test_degraded_acceptance_alert_uses_stable_close_clock_and_ops_lane() -> None:

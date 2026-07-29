@@ -10,6 +10,7 @@ from spx_spark.config import NotificationSettings
 from spx_spark.notifier.delivery_outbox import DeliveryStatus
 from spx_spark.notifier.dispatcher import (
     _delivery_outbox,
+    cancel_pending_notification,
     consume_pending_notifications,
     enqueue_notification,
 )
@@ -181,6 +182,36 @@ def test_enqueue_rejects_event_id_collision_without_delivery(tmp_path, monkeypat
         )
 
 
+def test_zero_row_cancellation_durably_rejects_late_enqueue(tmp_path) -> None:
+    settings = _settings(tmp_path)
+    envelope = _envelope("cancel-before-enqueue")
+
+    assert (
+        cancel_pending_notification(
+            settings,
+            envelope.event_id,
+            now=NOW,
+            reason="source_invalidated_before_enqueue",
+        )
+        == 0
+    )
+
+    late = enqueue_notification(
+        settings,
+        envelope,
+        title="SPX TRADE READY",
+        text="stale immutable ticket",
+        enqueued_at=NOW + timedelta(seconds=1),
+    )
+
+    assert late.accepted is False
+    assert late.inserted is False
+    assert late.outcome == "cancelled_before_enqueue"
+    outbox = _delivery_outbox(settings)
+    assert outbox.cancellation_exists(envelope.event_id) is True
+    assert outbox.summary(envelope.event_id) is None
+
+
 def test_delivery_worker_owns_delivery_but_not_fast_loop_dead_letter_alerts(
     tmp_path,
     monkeypatch,
@@ -279,11 +310,14 @@ def test_retry_delay_is_anchored_at_delivery_completion(tmp_path, monkeypatch) -
 
     assert consumed["attempted_targets"] == 1
     outbox = _delivery_outbox(settings)
-    assert outbox.claim_due(
-        worker_id="too-early",
-        limit_targets=1,
-        now=NOW + timedelta(seconds=24),
-    ) == []
+    assert (
+        outbox.claim_due(
+            worker_id="too-early",
+            limit_targets=1,
+            now=NOW + timedelta(seconds=24),
+        )
+        == []
+    )
     due = outbox.claim_due(
         worker_id="on-time",
         limit_targets=1,
@@ -331,6 +365,205 @@ def test_lost_claim_is_recorded_without_crashing_consumer(tmp_path, monkeypatch)
     assert consumed["lost_claim_targets"] == 1
     assert consumed["delivered_targets"] == 0
     assert consumed["claimed_targets"] == 1
+
+
+def test_cancellation_after_claim_is_rejected_before_transport(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from spx_spark.notifier import dispatcher
+
+    settings = replace(
+        _settings(tmp_path),
+        feishu_enabled=False,
+        feishu_webhook_url="",
+    )
+    envelope = _envelope("cancelled-after-claim")
+    enqueue_notification(
+        settings,
+        envelope,
+        title="SPX TRADE READY",
+        text="must be fenced before transport",
+        enqueued_at=NOW,
+    )
+    transport_calls = 0
+    real_deliver_claimed_job = dispatcher._deliver_claimed_job
+
+    def cancel_then_deliver(settings_arg, outbox, job, **kwargs):
+        assert outbox.cancel_event_with_receipts(
+            job.envelope.event_id,
+            reason="source_invalidated_after_claim",
+            now=NOW + timedelta(seconds=1),
+        )
+        return real_deliver_claimed_job(
+            settings_arg,
+            outbox,
+            job,
+            **kwargs,
+        )
+
+    def forbidden_transport(*_args, **_kwargs):
+        nonlocal transport_calls
+        transport_calls += 1
+        raise AssertionError("cancelled claim must not invoke a transport")
+
+    monkeypatch.setattr(
+        dispatcher,
+        "_deliver_claimed_job",
+        cancel_then_deliver,
+    )
+    monkeypatch.setattr(dispatcher, "deliver_trade_push", forbidden_transport)
+
+    consumed = consume_pending_notifications(
+        settings,
+        now=NOW,
+        notify_dead_letters=False,
+        worker_id="delivery:A",
+        completion_clock=lambda: NOW + timedelta(seconds=2),
+    )
+
+    assert transport_calls == 0
+    assert consumed["attempted_targets"] == 0
+    assert consumed["delivered_targets"] == 0
+    assert consumed["lost_claim_targets"] == 1
+    assert consumed["dead_letter_total"] == 1
+    receipts = _delivery_outbox(settings).list_terminal_receipts(event_id=envelope.event_id)
+    assert [(receipt.outcome, receipt.attempted) for receipt in receipts] == [
+        ("cancelled_before_delivery", False)
+    ]
+
+
+def test_reclaimed_target_is_rejected_before_transport(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from spx_spark.notifier import dispatcher
+
+    settings = replace(
+        _settings(tmp_path),
+        feishu_enabled=False,
+        feishu_webhook_url="",
+    )
+    envelope = _envelope("reclaimed-before-transport")
+    enqueue_notification(
+        settings,
+        envelope,
+        title="SPX TRADE READY",
+        text="old owner must not send",
+        enqueued_at=NOW,
+    )
+    real_deliver_claimed_job = dispatcher._deliver_claimed_job
+
+    def reclaim_then_deliver(settings_arg, outbox, job, **kwargs):
+        reclaimed = outbox.claim_due(
+            worker_id="delivery:B",
+            limit_targets=1,
+            now=NOW + timedelta(seconds=181),
+        )
+        assert reclaimed[0].targets == ("bark",)
+        return real_deliver_claimed_job(
+            settings_arg,
+            outbox,
+            job,
+            **kwargs,
+        )
+
+    monkeypatch.setattr(
+        dispatcher,
+        "_deliver_claimed_job",
+        reclaim_then_deliver,
+    )
+    monkeypatch.setattr(
+        dispatcher,
+        "deliver_trade_push",
+        lambda *_args, **_kwargs: pytest.fail(
+            "a claim owned by another worker must not invoke transport"
+        ),
+    )
+
+    consumed = consume_pending_notifications(
+        settings,
+        now=NOW,
+        notify_dead_letters=False,
+        worker_id="delivery:A",
+        completion_clock=lambda: NOW + timedelta(seconds=182),
+    )
+
+    assert consumed["attempted_targets"] == 0
+    assert consumed["delivered_targets"] == 0
+    assert consumed["lost_claim_targets"] == 1
+    assert consumed["claimed_targets"] == 1
+    receipts = _delivery_outbox(settings).list_terminal_receipts(event_id=envelope.event_id)
+    assert len(receipts) == 1
+    assert receipts[0].outcome == "delivery_claim_invalid_before_transport"
+    assert receipts[0].attempted is False
+    assert receipts[0].queued_for_recovery is True
+
+
+def test_short_ttl_trade_signal_preempts_old_multi_sink_reports(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    settings = _settings(tmp_path)
+    outbox = _delivery_outbox(settings)
+    for ordinal in range(2):
+        assert outbox.enqueue(
+            NotificationEnvelope(
+                event_id=f"old-report-{ordinal}",
+                source="report_scheduler",
+                kind="spx_15m_report",
+                lane="scheduled_report",
+                occurred_at=NOW - timedelta(hours=1, minutes=ordinal),
+            ),
+            title="SPX 15m",
+            text=f"old scheduled report {ordinal}",
+            feishu_text=None,
+            friend=False,
+            targets=("bark", "feishu"),
+            now=NOW - timedelta(hours=1, minutes=ordinal),
+        )
+    urgent = NotificationEnvelope(
+        event_id="short-ttl-trade-ready",
+        source="trade_intent",
+        kind="trade_intent",
+        lane="trade_ready",
+        occurred_at=NOW,
+        expires_at=NOW + timedelta(seconds=20),
+    )
+    assert outbox.enqueue(
+        urgent,
+        title="SPX TRADE READY",
+        text="short ttl signal",
+        feishu_text="short ttl signal",
+        friend=False,
+        targets=("bark", "feishu"),
+        now=NOW,
+    )
+    deliveries: list[tuple[str, frozenset[str]]] = []
+
+    def deliver(_settings, **kwargs):
+        targets = frozenset(kwargs["targets"])
+        deliveries.append((str(kwargs["text"]), targets))
+        return [SinkResult(sink=target, attempted=True, ok=True) for target in targets]
+
+    monkeypatch.setattr(
+        "spx_spark.notifier.dispatcher.deliver_trade_push",
+        deliver,
+    )
+
+    consumed = consume_pending_notifications(
+        settings,
+        now=NOW,
+        notify_dead_letters=False,
+        completion_clock=lambda: NOW,
+    )
+
+    assert consumed["jobs"] == 1
+    assert deliveries == [("short ttl signal", frozenset({"bark"}))]
+    for ordinal in range(2):
+        summary = outbox.summary(f"old-report-{ordinal}")
+        assert summary is not None
+        assert summary.pending_targets == 2
 
 
 def test_delivery_worker_stops_after_current_single_target(tmp_path, monkeypatch) -> None:

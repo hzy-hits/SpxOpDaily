@@ -18,20 +18,70 @@ allowlists; their union must never consume the reviewer lane.
 
 ## Delivery lifecycle
 
-All human-facing paths call `dispatch_notification()`. It owns:
+Every human-facing producer persists a final notification through
+`enqueue_notification()` before returning. It owns:
 
 1. a durable SQLite enqueue before any network I/O;
-2. immediate Feishu/Bark fan-out for the newly enqueued event;
+2. an immutable semantic event ID and payload for idempotent producer replay;
 3. independent acknowledgement and retry state for every sink, so a delivered
    Bark target is never resent while Feishu is recovering;
 4. a content-free SQLite receipt containing semantic event ID, source, lane,
    outcome and per-sink status.
 
-The delivery state machine is `pending -> claimed -> delivered`; failures use
-the configured 15/60/300/900-second schedule and become `dead_letter` after
-attempt or age exhaustion. The 24-hour loop runs `notification_recovery` every
-60 seconds, so recovery does not depend on a later market alert. Shock events
-still enqueue and attempt delivery inline, keeping the fast path synchronous.
+The independent delivery worker polls the outbox every 0.5 seconds and owns all
+Feishu/Bark network I/O. The delivery state machine is
+`pending -> claimed -> delivered`; failures use the configured
+15/60/300/900-second schedule and become `dead_letter` after attempt or age
+exhaustion. The 24-hour loop also runs `notification_recovery` every 60 seconds,
+so recovery does not depend on a later market alert. Shock events are the sole
+latency-critical exception: they still enqueue before attempting delivery
+inline.
+
+Claim order is explicit: position/execution safety first, then expiring
+`trade_ready` and `gth_manual_candidate` work, market warnings, operations, and
+scheduled reports. Within a lane, the earliest expiry wins. Immediately before
+transport, the worker atomically rechecks claim ownership, cancellation and
+expiry; a rejected claim cannot call Bark or Feishu.
+
+The healthy-path service objectives are at most one second from a confirmed
+signal to durable outbox presence and at most five seconds from enqueue to the
+first transport result. Every event must end with either a delivered receipt or
+an explicit terminal receipt. Expiry immediately before claim or network I/O is
+recorded as `expired_before_delivery`; source invalidation is recorded as
+`cancelled_before_delivery`. Expired work is not automatically acknowledged,
+and an unmirrored terminal receipt keeps operational health degraded.
+
+Every per-sink delivery result first appends a content-free receipt intent in
+the same outbox transaction that settles the target. Mirroring that intent into
+the receipt database is idempotent and retryable; a mirror backlog fails both
+worker health and the daily outbox-integrity check. Source cancellation also
+persists a tombstone when no outbox row exists yet, so a concurrent late
+enqueue is rejected atomically instead of reviving an invalidated signal.
+
+The receipt database also uses rollback-journal `DELETE` mode with
+`synchronous=FULL`. Health is based on its real `quick_check`, schema and exact
+receipt-ID mirror rows—not merely the outbox's `recorded_at` projection. New
+receipt intents are checked every worker cycle; historical mirrors are
+reconciled at startup, after a receipt-file identity change, and at a bounded
+60-second cadence.
+
+For `trade_ready`, a fresh, executable final quote may move normally between
+decision and enqueue without suppressing the signal. The notification retains
+the immutable decision NBBO, entry limit and risk plan; the later quote is
+audit-only and tells the receiver to requote. Stale, crossed, excessively wide
+or otherwise unexecutable quotes still fail closed.
+
+The producer-side inflight lease is bounded by the remaining signal lifetime.
+If a process stops between local acceptance and durable enqueue, the short
+lease permits an in-lifetime retry. Startup reconciliation repairs either
+direction: an outbox row restores missing local acceptance, while local
+acceptance without its outbox row is cleared and the exact immutable event is
+re-enqueued. Reconciliation compares the persisted payload fingerprint, exact
+sink set and live/delivered target states; matching an event ID alone cannot
+restore producer acceptance, and cancelled or dead-lettered rows fail closed.
+Both `invalidated` and `expired` end the old lifecycle, persist a cancellation
+fence, clear semantic dedupe for a later rearm, and keep the old event ID
+terminal so replay remains idempotent.
 
 The human-notification outbox uses SQLite rollback-journal (`DELETE`) mode with
 `synchronous=FULL`. It intentionally does not use WAL: notifications have
@@ -63,6 +113,6 @@ before periodic outbox evaluation, but it uses the same cooldown state,
 dispatcher, receipt store and sink policy. The later periodic candidate is
 therefore deduplicated without creating a second human push.
 
-The exchange-local heartbeat, cross-process Spring projection and post-close
+The exchange-local heartbeat, isolated research projection and post-close
 operational gates are specified in
 [RTH runtime clock and end-to-end acceptance](rth-runtime-clock-and-acceptance.md).

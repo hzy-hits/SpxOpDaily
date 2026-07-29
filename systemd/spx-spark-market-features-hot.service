@@ -1,7 +1,7 @@
 [Unit]
 Description=SPX Spark persistent market-feature hot worker
-After=network-online.target spx-spark-schwab-marketdata.service spx-spark-ibkr-stream.service
-Wants=network-online.target spx-spark-schwab-marketdata.service spx-spark-ibkr-stream.service
+After=network-online.target spx-spark-schwab-marketdata.service spx-spark-ibkr-stream.service spx-spark-es-bar-sampler.service
+Wants=network-online.target spx-spark-schwab-marketdata.service spx-spark-ibkr-stream.service spx-spark-es-bar-sampler.service
 
 [Service]
 Type=simple

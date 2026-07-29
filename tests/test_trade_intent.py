@@ -37,6 +37,7 @@ from spx_spark.application.market_features.trade_intent_runtime import (
 from spx_spark.config import NotificationSettings
 from spx_spark.marketdata import InstrumentId, MarketDataQuality, Provider, Quote
 from spx_spark.notifier.dispatcher import consume_pending_notifications
+from spx_spark.notifier.model import SinkResult
 from spx_spark.settings.market_features import MarketFeatureSettings
 from spx_spark.settings.order_map import OrderMapPolicy
 from spx_spark.storage import LatestState
@@ -1249,8 +1250,7 @@ def test_enqueue_ack_crash_replays_immutable_trade_ready_payload(
     assert delivery_event_id in state["accepted"]
     with sqlite3.connect(settings.delivery_outbox_path) as connection:
         rows = connection.execute(
-            "SELECT event_id, occurred_at, expires_at, text "
-            "FROM notification_delivery_events"
+            "SELECT event_id, occurred_at, expires_at, text FROM notification_delivery_events"
         ).fetchall()
     assert len(rows) == 1
     assert rows[0][0] == delivery_event_id
@@ -1291,9 +1291,7 @@ def test_enqueue_ack_crash_then_invalidation_cancels_stale_ready(
         "status": "trade_ready",
         "intent_id": "intent:crash-invalidation",
         "semantic_scope": semantic_scope,
-        "semantic_key": (
-            f"{semantic_scope}|option:SPX:SPXW:20260714:7550:C"
-        ),
+        "semantic_key": (f"{semantic_scope}|option:SPX:SPXW:20260714:7550:C"),
         "event_id": "level:crash-invalidation:first",
         "evaluated_at": NOW.isoformat(),
         "phase": "confirmed",
@@ -1364,18 +1362,16 @@ def test_enqueue_ack_crash_then_invalidation_cancels_stale_ready(
 
     delivery_event_id = _trade_ready_delivery_event_id(intent)
     crashed_state = json.loads(
-        (
-            tmp_path / "latest" / "trade_intent_delivery_state.json"
-        ).read_text()
+        (tmp_path / "latest" / "trade_intent_delivery_state.json").read_text()
     )
     assert crashed_state["accepted"] == {}
-    assert crashed_state["delivery_lifecycle_events"] == [
-        {
-            "event_id": delivery_event_id,
-            "semantic_key": intent["semantic_key"],
-            "semantic_scope": semantic_scope,
-        }
-    ]
+    assert len(crashed_state["delivery_lifecycle_events"]) == 1
+    lifecycle = crashed_state["delivery_lifecycle_events"][0]
+    assert lifecycle["event_id"] == delivery_event_id
+    assert lifecycle["semantic_key"] == intent["semantic_key"]
+    assert lifecycle["semantic_scope"] == semantic_scope
+    assert lifecycle["targets"] == ["feishu"]
+    assert len(lifecycle["payload_fingerprint"]) == 64
 
     invalidated = process_trade_intent(
         storage,
@@ -1399,8 +1395,7 @@ def test_enqueue_ack_crash_then_invalidation_cancels_stale_ready(
     assert consumed["delivered_targets"] == 0
     with sqlite3.connect(settings.delivery_outbox_path) as connection:
         old_status = connection.execute(
-            "SELECT status FROM notification_delivery_events "
-            "WHERE event_id = ?",
+            "SELECT status FROM notification_delivery_events WHERE event_id = ?",
             (delivery_event_id,),
         ).fetchone()
     assert old_status == ("dead_letter",)
@@ -1419,9 +1414,7 @@ def test_enqueue_ack_crash_then_invalidation_cancels_stale_ready(
         settings=settings,
         feature_policy=MarketFeatureSettings(),
     )
-    rearmed_delivery_event_id = _trade_ready_delivery_event_id(
-        rearmed_intent
-    )
+    rearmed_delivery_event_id = _trade_ready_delivery_event_id(rearmed_intent)
 
     assert rearmed["accepted"] is True
     assert rearmed_delivery_event_id != delivery_event_id
@@ -1447,9 +1440,7 @@ def test_failed_rth_cancellation_blocks_rearmed_lifecycle(
         "status": "trade_ready",
         "intent_id": "intent:cancellation-gate",
         "semantic_scope": semantic_scope,
-        "semantic_key": (
-            f"{semantic_scope}|option:SPX:SPXW:20260714:7550:C"
-        ),
+        "semantic_key": (f"{semantic_scope}|option:SPX:SPXW:20260714:7550:C"),
         "event_id": "level:cancellation-gate:first",
         "evaluated_at": NOW.isoformat(),
         "phase": "confirmed",
@@ -1502,9 +1493,7 @@ def test_failed_rth_cancellation_blocks_rearmed_lifecycle(
     monkeypatch.setattr(
         trade_intent_runtime,
         "cancel_pending_notification",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            RuntimeError("outbox unavailable")
-        ),
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("outbox unavailable")),
     )
 
     process_trade_intent(
@@ -1531,22 +1520,14 @@ def test_failed_rth_cancellation_blocks_rearmed_lifecycle(
         settings=settings,
         feature_policy=MarketFeatureSettings(),
     )
-    state = json.loads(
-        (
-            tmp_path / "latest" / "trade_intent_delivery_state.json"
-        ).read_text()
-    )
+    state = json.loads((tmp_path / "latest" / "trade_intent_delivery_state.json").read_text())
 
     first_delivery_event_id = _trade_ready_delivery_event_id(intent)
     assert first["accepted"] is True
     assert rearmed["reason"] == "lifecycle_cancellation_pending"
-    assert state["pending_delivery_cancellation_event_ids"] == [
-        first_delivery_event_id
-    ]
+    assert state["pending_delivery_cancellation_event_ids"] == [first_delivery_event_id]
     with sqlite3.connect(settings.delivery_outbox_path) as connection:
-        rows = connection.execute(
-            "SELECT event_id FROM notification_delivery_events"
-        ).fetchall()
+        rows = connection.execute("SELECT event_id FROM notification_delivery_events").fetchall()
     assert rows == [(first_delivery_event_id,)]
 
 
@@ -1685,7 +1666,9 @@ def test_legacy_v1_trade_ready_is_no_longer_execution_authority(tmp_path) -> Non
     }
 
 
-def test_action_revalidation_reloads_quote_and_recomputes_limit(monkeypatch) -> None:
+def test_action_revalidation_audits_moving_live_quote_without_blocking(
+    monkeypatch,
+) -> None:
     market, options, latest, context, repricing = _ready_inputs()
     policy = MarketFeatureSettings()
     intent = evaluate_trade_intent(
@@ -1733,10 +1716,650 @@ def test_action_revalidation_reloads_quote_and_recomputes_limit(monkeypatch) -> 
         expected_policy_version=str(intent["policy_version"]),
     )
 
-    assert reason == "action_entry_limit_changed"
+    assert reason is None
     assert evidence["entry_limit"] == pytest.approx(10.1)
     assert evidence["recomputed_entry_limit"] == pytest.approx(10.3)
+    assert evidence["entry_limit_changed"] is True
+    assert evidence["entry_limit_policy"] == "immutable_decision_limit"
+    assert evidence["reason"] is None
     assert evidence["quote_state_created_at"] == changed_latest.created_at.isoformat()
+
+
+def test_moving_live_quote_enqueues_immutable_trade_ready_card_once(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    market, options, latest, context, repricing = _ready_inputs()
+    policy = MarketFeatureSettings()
+    intent = evaluate_trade_intent(
+        context,
+        market,
+        options,
+        latest,
+        repricing,
+        now=NOW,
+        feature_policy=policy,
+        order_policy=OrderMapPolicy(),
+    )
+    action_at = NOW + timedelta(seconds=1)
+    moving_quote = replace(
+        latest.best_quotes[0],
+        received_at=action_at,
+        last_update_at=action_at,
+        quote_time=action_at,
+        bid=10.2,
+        ask=10.6,
+    )
+    moving_latest = LatestState(
+        created_at=action_at,
+        as_of=action_at,
+        quotes=(moving_quote,),
+        best_quotes=(moving_quote,),
+    )
+
+    class Store:
+        def __init__(self, _storage) -> None:
+            pass
+
+        def load(self, *, now):
+            assert now == action_at
+            return moving_latest
+
+    monkeypatch.setattr(
+        "spx_spark.application.market_features.trade_intent_runtime.LatestStateStore",
+        Store,
+    )
+    storage = SimpleNamespace(data_root=str(tmp_path))
+    settings = _outbox_notification_settings(tmp_path)
+
+    first = process_trade_intent(
+        storage,
+        intent,
+        now=NOW,
+        action_now=action_at,
+        settings=settings,
+        feature_policy=policy,
+        order_policy=OrderMapPolicy(),
+        expected_policy_version=str(intent["policy_version"]),
+    )
+    second = process_trade_intent(
+        storage,
+        intent,
+        now=NOW + timedelta(seconds=2),
+        action_now=NOW + timedelta(seconds=2),
+        settings=settings,
+        feature_policy=policy,
+        order_policy=OrderMapPolicy(),
+        expected_policy_version=str(intent["policy_version"]),
+    )
+
+    assert first["accepted"] is True
+    assert second["reason"] == "outbox_event_reconciled"
+    with sqlite3.connect(settings.delivery_outbox_path) as connection:
+        rows = connection.execute("SELECT text FROM notification_delivery_events").fetchall()
+    assert len(rows) == 1
+    assert "NBBO  10.00 / 10.40（决策快照）" in rows[0][0]
+    assert "限价  ≤ 10.10" in rows[0][0]
+    assert "类型  单腿 · 仅人工提交" in rows[0][0]
+    state = json.loads((tmp_path / "latest" / "trade_intent_delivery_state.json").read_text())
+    audit = state["last_action_revalidation"]
+    assert audit["entry_limit"] == pytest.approx(10.1)
+    assert audit["recomputed_entry_limit"] == pytest.approx(10.3)
+    assert audit["entry_limit_changed"] is True
+    assert audit["entry_limit_policy"] == "immutable_decision_limit"
+
+
+def test_trade_ready_producer_worker_receipt_end_to_end_is_idempotent(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    market, options, latest, context, repricing = _ready_inputs()
+    policy = MarketFeatureSettings()
+    intent = evaluate_trade_intent(
+        context,
+        market,
+        options,
+        latest,
+        repricing,
+        now=NOW,
+        feature_policy=policy,
+        order_policy=OrderMapPolicy(),
+    )
+    action_at = NOW + timedelta(seconds=1)
+    action_quote = replace(
+        latest.best_quotes[0],
+        received_at=action_at,
+        last_update_at=action_at,
+        quote_time=action_at,
+    )
+    action_latest = LatestState(
+        created_at=action_at,
+        as_of=action_at,
+        quotes=(action_quote,),
+        best_quotes=(action_quote,),
+    )
+
+    class Store:
+        def __init__(self, _storage) -> None:
+            pass
+
+        def load(self, *, now):
+            assert now == action_at
+            return action_latest
+
+    deliveries: list[frozenset[str]] = []
+
+    def fake_sink_success(_settings, **kwargs):
+        targets = frozenset(kwargs["targets"])
+        deliveries.append(targets)
+        return [SinkResult(sink=target, attempted=True, ok=True) for target in targets]
+
+    monkeypatch.setattr(
+        "spx_spark.application.market_features.trade_intent_runtime.LatestStateStore",
+        Store,
+    )
+    monkeypatch.setattr(
+        "spx_spark.notifier.dispatcher.deliver_trade_push",
+        fake_sink_success,
+    )
+    storage = SimpleNamespace(data_root=str(tmp_path))
+    settings = _outbox_notification_settings(tmp_path)
+
+    produced = process_trade_intent(
+        storage,
+        intent,
+        now=NOW,
+        action_now=action_at,
+        settings=settings,
+        feature_policy=policy,
+        order_policy=OrderMapPolicy(),
+        expected_policy_version=str(intent["policy_version"]),
+    )
+    event_id = _trade_ready_delivery_event_id(intent)
+    consumed = consume_pending_notifications(
+        replace(settings),
+        now=action_at,
+        notify_dead_letters=False,
+        worker_id="rth-e2e-consumer:new-instance",
+        completion_clock=lambda: action_at,
+    )
+    duplicate_consumer = consume_pending_notifications(
+        replace(settings),
+        now=action_at + timedelta(seconds=1),
+        notify_dead_letters=False,
+        worker_id="rth-e2e-consumer:duplicate",
+        completion_clock=lambda: action_at + timedelta(seconds=1),
+    )
+    duplicate_tick = process_trade_intent(
+        storage,
+        intent,
+        now=NOW + timedelta(seconds=2),
+        action_now=NOW + timedelta(seconds=2),
+        settings=settings,
+        feature_policy=policy,
+        order_policy=OrderMapPolicy(),
+        expected_policy_version=str(intent["policy_version"]),
+    )
+
+    assert produced["accepted"] is True
+    assert produced["inserted"] is True
+    assert consumed["jobs"] == 1
+    assert consumed["delivered_targets"] == 1
+    assert duplicate_consumer["jobs"] == 0
+    assert duplicate_tick["reason"] == "outbox_event_reconciled"
+    assert deliveries == [frozenset({"feishu"})]
+
+    with sqlite3.connect(settings.delivery_outbox_path) as connection:
+        outbox_event = connection.execute(
+            "SELECT event_id, source, kind, lane, status FROM notification_delivery_events"
+        ).fetchone()
+        outbox_targets = connection.execute(
+            "SELECT event_id, sink, status FROM notification_delivery_targets"
+        ).fetchall()
+    with sqlite3.connect(settings.delivery_receipt_path) as connection:
+        receipts = connection.execute(
+            "SELECT event_id, source, kind, lane, outcome, sinks_json "
+            "FROM notification_delivery_receipts"
+        ).fetchall()
+
+    assert outbox_event == (
+        event_id,
+        "trade_intent",
+        "trade_intent",
+        "trade_ready",
+        "delivered",
+    )
+    assert outbox_targets == [(event_id, "feishu", "delivered")]
+    assert len(receipts) == 1
+    receipt_event_id, source, kind, lane, outcome, sinks_json = receipts[0]
+    assert receipt_event_id == event_id
+    assert (source, kind, lane, outcome) == (
+        "trade_intent",
+        "trade_intent",
+        "trade_ready",
+        "delivered",
+    )
+    assert json.loads(sinks_json) == [
+        {
+            "sink": "feishu",
+            "attempted": True,
+            "ok": True,
+            "error": None,
+            "verdict": "delivered",
+        }
+    ]
+
+
+def test_producer_outbox_e2e_reconciles_both_state_divergence_directions(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    market, options, latest, context, repricing = _ready_inputs()
+    policy = MarketFeatureSettings()
+    intent = evaluate_trade_intent(
+        context,
+        market,
+        options,
+        latest,
+        repricing,
+        now=NOW,
+        feature_policy=policy,
+        order_policy=OrderMapPolicy(),
+    )
+    monkeypatch.setattr(
+        trade_intent_runtime,
+        "_action_revalidation",
+        lambda *_args, **_kwargs: (
+            None,
+            {"quote_revalidation": "test_stub"},
+        ),
+    )
+    storage = SimpleNamespace(data_root=str(tmp_path))
+    settings = _outbox_notification_settings(tmp_path)
+    state_path = tmp_path / "latest" / "trade_intent_delivery_state.json"
+    delivery_event_id = _trade_ready_delivery_event_id(intent)
+
+    first = process_trade_intent(
+        storage,
+        intent,
+        now=NOW,
+        action_now=NOW,
+        settings=settings,
+        feature_policy=policy,
+        expected_policy_version=str(intent["policy_version"]),
+    )
+
+    assert first["accepted"] is True
+    assert first["inserted"] is True
+    with sqlite3.connect(settings.delivery_outbox_path) as connection:
+        original_rows = connection.execute(
+            "SELECT event_id, text FROM notification_delivery_events"
+        ).fetchall()
+    assert len(original_rows) == 1
+    assert original_rows[0][0] == delivery_event_id
+    assert "限价  ≤ 10.10" in original_rows[0][1]
+
+    # Outbox durable, local acknowledgement missing: restore local acceptance
+    # without creating a second outbox row.
+    local_state = json.loads(state_path.read_text())
+    local_state["accepted"] = {}
+    local_state["semantic_keys"] = {}
+    local_state["inflight"] = {}
+    state_path.write_text(json.dumps(local_state), encoding="utf-8")
+    restored = process_trade_intent(
+        storage,
+        intent,
+        now=NOW + timedelta(seconds=1),
+        action_now=NOW + timedelta(seconds=1),
+        settings=settings,
+        feature_policy=policy,
+        expected_policy_version=str(intent["policy_version"]),
+    )
+
+    assert restored["reason"] == "outbox_event_reconciled"
+    assert restored["accepted"] is True
+    restored_state = json.loads(state_path.read_text())
+    assert delivery_event_id in restored_state["accepted"]
+    assert restored_state["last_delivery_reconciliation"]["action"] == "restore_local_acceptance"
+
+    # Local acknowledgement durable, outbox row missing: clear the stale
+    # projection and re-enqueue the exact immutable event before expiry.
+    with sqlite3.connect(settings.delivery_outbox_path) as connection:
+        connection.execute(
+            "DELETE FROM notification_delivery_targets WHERE event_id = ?",
+            (delivery_event_id,),
+        )
+        connection.execute(
+            "DELETE FROM notification_delivery_events WHERE event_id = ?",
+            (delivery_event_id,),
+        )
+    retried = process_trade_intent(
+        storage,
+        intent,
+        now=NOW + timedelta(seconds=2),
+        action_now=NOW + timedelta(seconds=2),
+        settings=settings,
+        feature_policy=policy,
+        expected_policy_version=str(intent["policy_version"]),
+    )
+
+    assert retried["accepted"] is True
+    assert retried["inserted"] is True
+    retried_state = json.loads(state_path.read_text())
+    assert (
+        retried_state["last_delivery_reconciliation"]["status"] == "local_accepted_outbox_missing"
+    )
+    with sqlite3.connect(settings.delivery_outbox_path) as connection:
+        retried_rows = connection.execute(
+            "SELECT event_id, text FROM notification_delivery_events"
+        ).fetchall()
+    assert retried_rows == original_rows
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected_reason"),
+    (
+        ("payload", "outbox_reconciliation_payload_mismatch"),
+        ("targets", "outbox_reconciliation_target_mismatch"),
+        ("dead_letter", "outbox_reconciliation_terminal_or_invalid_status"),
+        ("cancelled", "outbox_reconciliation_cancelled"),
+    ),
+)
+def test_trade_ready_reconciliation_rejects_mutated_outbox_contract(
+    tmp_path,
+    monkeypatch,
+    mutation,
+    expected_reason,
+) -> None:
+    market, options, latest, context, repricing = _ready_inputs()
+    policy = MarketFeatureSettings()
+    intent = evaluate_trade_intent(
+        context,
+        market,
+        options,
+        latest,
+        repricing,
+        now=NOW,
+        feature_policy=policy,
+        order_policy=OrderMapPolicy(),
+    )
+    monkeypatch.setattr(
+        trade_intent_runtime,
+        "_action_revalidation",
+        lambda *_args, **_kwargs: (
+            None,
+            {"quote_revalidation": "test_stub"},
+        ),
+    )
+    storage = SimpleNamespace(data_root=str(tmp_path))
+    settings = _outbox_notification_settings(tmp_path)
+    event_id = _trade_ready_delivery_event_id(intent)
+    first = process_trade_intent(
+        storage,
+        intent,
+        now=NOW,
+        action_now=NOW,
+        settings=settings,
+        feature_policy=policy,
+        expected_policy_version=str(intent["policy_version"]),
+    )
+    assert first["accepted"] is True
+
+    with sqlite3.connect(settings.delivery_outbox_path) as connection:
+        if mutation == "payload":
+            connection.execute(
+                "UPDATE notification_delivery_events SET text = ? WHERE event_id = ?",
+                ("mutated ticket", event_id),
+            )
+        elif mutation == "targets":
+            connection.execute(
+                "UPDATE notification_delivery_targets SET sink = ? WHERE event_id = ?",
+                ("bark", event_id),
+            )
+        elif mutation == "dead_letter":
+            connection.execute(
+                "UPDATE notification_delivery_targets SET status = ? WHERE event_id = ?",
+                ("dead_letter", event_id),
+            )
+            connection.execute(
+                "UPDATE notification_delivery_events SET status = ? WHERE event_id = ?",
+                ("dead_letter", event_id),
+            )
+        else:
+            connection.execute(
+                """
+                INSERT INTO notification_delivery_cancellations (
+                    event_id, reason, cancelled_at
+                ) VALUES (?, ?, ?)
+                """,
+                (event_id, "source_invalidated", NOW.isoformat()),
+            )
+
+    replay = process_trade_intent(
+        storage,
+        intent,
+        now=NOW + timedelta(seconds=1),
+        action_now=NOW + timedelta(seconds=1),
+        settings=settings,
+        feature_policy=policy,
+        expected_policy_version=str(intent["policy_version"]),
+    )
+
+    assert replay["accepted"] is False
+    assert replay["reason"] == expected_reason
+    state = json.loads((tmp_path / "latest" / "trade_intent_delivery_state.json").read_text())
+    assert state["last_delivery_reconciliation"]["action"] == "hard_fault"
+
+
+def test_local_acceptance_without_outbox_reconciliation_is_hard_fault(
+    tmp_path,
+) -> None:
+    market, options, latest, context, repricing = _ready_inputs()
+    policy = MarketFeatureSettings()
+    intent = evaluate_trade_intent(
+        context,
+        market,
+        options,
+        latest,
+        repricing,
+        now=NOW,
+        feature_policy=policy,
+        order_policy=OrderMapPolicy(),
+    )
+    delivery_event_id = _trade_ready_delivery_event_id(intent)
+    state_path = tmp_path / "latest" / "trade_intent_delivery_state.json"
+    state_path.parent.mkdir(parents=True)
+    state_path.write_text(
+        json.dumps(
+            {
+                "accepted": {delivery_event_id: NOW.isoformat()},
+                "semantic_keys": {
+                    delivery_event_id: str(intent["semantic_key"]),
+                },
+                "inflight": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = process_trade_intent(
+        SimpleNamespace(data_root=str(tmp_path)),
+        intent,
+        now=NOW + timedelta(seconds=1),
+        settings=_notification_settings(tmp_path),
+        feature_policy=policy,
+        expected_policy_version=str(intent["policy_version"]),
+    )
+
+    assert result == {
+        "attempted": False,
+        "delivered": False,
+        "accepted": False,
+        "reason": "accepted_outbox_reconciliation_unavailable",
+    }
+    state = json.loads(state_path.read_text())
+    assert state["last_delivery_reconciliation"]["action"] == "hard_fault"
+
+
+def test_enqueue_exception_releases_lease_and_next_tick_retries(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    market, options, latest, context, repricing = _ready_inputs()
+    policy = MarketFeatureSettings()
+    intent = evaluate_trade_intent(
+        context,
+        market,
+        options,
+        latest,
+        repricing,
+        now=NOW,
+        feature_policy=policy,
+        order_policy=OrderMapPolicy(),
+    )
+    monkeypatch.setattr(
+        trade_intent_runtime,
+        "_action_revalidation",
+        lambda *_args, **_kwargs: (
+            None,
+            {"quote_revalidation": "test_stub"},
+        ),
+    )
+    real_enqueue = trade_intent_runtime.enqueue_notification
+    enqueue_calls = 0
+
+    def flaky_enqueue(*args, **kwargs):
+        nonlocal enqueue_calls
+        enqueue_calls += 1
+        if enqueue_calls == 1:
+            raise RuntimeError("simulated enqueue outage")
+        return real_enqueue(*args, **kwargs)
+
+    monkeypatch.setattr(
+        trade_intent_runtime,
+        "enqueue_notification",
+        flaky_enqueue,
+    )
+    storage = SimpleNamespace(data_root=str(tmp_path))
+    settings = _outbox_notification_settings(tmp_path)
+    state_path = tmp_path / "latest" / "trade_intent_delivery_state.json"
+
+    with pytest.raises(RuntimeError, match="simulated enqueue outage"):
+        process_trade_intent(
+            storage,
+            intent,
+            now=NOW,
+            action_now=NOW,
+            settings=settings,
+            feature_policy=policy,
+            expected_policy_version=str(intent["policy_version"]),
+        )
+
+    failed_state = json.loads(state_path.read_text())
+    assert failed_state["inflight"] == {}
+    assert failed_state["last_action_revalidation"]["reason"] == "notification_enqueue_exception"
+    assert failed_state["last_action_revalidation"]["enqueue_exception_type"] == "RuntimeError"
+
+    retried = process_trade_intent(
+        storage,
+        intent,
+        now=NOW + timedelta(seconds=1),
+        action_now=NOW + timedelta(seconds=1),
+        settings=settings,
+        feature_policy=policy,
+        expected_policy_version=str(intent["policy_version"]),
+    )
+
+    assert retried["accepted"] is True
+    assert retried["inserted"] is True
+    assert enqueue_calls == 2
+    with sqlite3.connect(settings.delivery_outbox_path) as connection:
+        row_count = connection.execute(
+            "SELECT COUNT(*) FROM notification_delivery_events"
+        ).fetchone()[0]
+    assert row_count == 1
+
+
+def test_orphaned_inflight_lease_expires_before_signal_ttl(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    market, options, latest, context, repricing = _ready_inputs()
+    policy = MarketFeatureSettings()
+    intent = evaluate_trade_intent(
+        context,
+        market,
+        options,
+        latest,
+        repricing,
+        now=NOW,
+        feature_policy=policy,
+        order_policy=OrderMapPolicy(),
+    )
+
+    class SimulatedProcessCrash(BaseException):
+        pass
+
+    revalidation_calls = 0
+
+    def crash_once(*_args, **_kwargs):
+        nonlocal revalidation_calls
+        revalidation_calls += 1
+        if revalidation_calls == 1:
+            raise SimulatedProcessCrash
+        return None, {"quote_revalidation": "test_stub"}
+
+    monkeypatch.setattr(
+        trade_intent_runtime,
+        "_action_revalidation",
+        crash_once,
+    )
+    storage = SimpleNamespace(data_root=str(tmp_path))
+    settings = _outbox_notification_settings(tmp_path)
+    state_path = tmp_path / "latest" / "trade_intent_delivery_state.json"
+    delivery_event_id = _trade_ready_delivery_event_id(intent)
+
+    with pytest.raises(SimulatedProcessCrash):
+        process_trade_intent(
+            storage,
+            intent,
+            now=NOW,
+            action_now=NOW,
+            settings=settings,
+            feature_policy=policy,
+            expected_policy_version=str(intent["policy_version"]),
+        )
+
+    crashed_state = json.loads(state_path.read_text())
+    lease = crashed_state["inflight"][delivery_event_id]
+    assert datetime.fromisoformat(lease["expires_at"]) == NOW + timedelta(seconds=5)
+    assert datetime.fromisoformat(lease["expires_at"]) < datetime.fromisoformat(
+        str(intent["valid_until"])
+    )
+
+    still_leased = process_trade_intent(
+        storage,
+        intent,
+        now=NOW + timedelta(seconds=4),
+        action_now=NOW + timedelta(seconds=4),
+        settings=settings,
+        feature_policy=policy,
+        expected_policy_version=str(intent["policy_version"]),
+    )
+    recovered = process_trade_intent(
+        storage,
+        intent,
+        now=NOW + timedelta(seconds=6),
+        action_now=NOW + timedelta(seconds=6),
+        settings=settings,
+        feature_policy=policy,
+        expected_policy_version=str(intent["policy_version"]),
+    )
+
+    assert still_leased["reason"] == "delivery_in_progress"
+    assert recovered["accepted"] is True
+    assert recovered["inserted"] is True
+    assert revalidation_calls == 2
 
 
 @pytest.mark.parametrize(
@@ -1843,6 +2466,75 @@ def test_action_revalidation_rejects_spread_deterioration_even_if_limit_is_uncha
     assert reason == "action_execution_quote_spread_points_exceeded"
     assert evidence["entry_limit"] == pytest.approx(10.1)
     assert evidence["execution_quote_gate"]["spread_points"] == pytest.approx(3.1)
+
+
+def test_unexecutable_action_quote_is_blocked_before_enqueue(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    market, options, latest, context, repricing = _ready_inputs()
+    feature_policy = MarketFeatureSettings()
+    order_policy = OrderMapPolicy()
+    intent = evaluate_trade_intent(
+        context,
+        market,
+        options,
+        latest,
+        repricing,
+        now=NOW,
+        feature_policy=feature_policy,
+        order_policy=order_policy,
+    )
+    action_at = NOW + timedelta(seconds=1)
+    wide_quote = replace(
+        latest.best_quotes[0],
+        received_at=action_at,
+        last_update_at=action_at,
+        quote_time=action_at,
+        bid=9.05,
+        ask=12.15,
+    )
+    wide_latest = LatestState(
+        created_at=action_at,
+        as_of=action_at,
+        quotes=(wide_quote,),
+        best_quotes=(wide_quote,),
+    )
+
+    class Store:
+        def __init__(self, _storage) -> None:
+            pass
+
+        def load(self, *, now):
+            assert now == action_at
+            return wide_latest
+
+    monkeypatch.setattr(
+        "spx_spark.application.market_features.trade_intent_runtime.LatestStateStore",
+        Store,
+    )
+    monkeypatch.setattr(
+        "spx_spark.application.market_features.trade_intent_runtime.enqueue_notification",
+        lambda *_args, **_kwargs: pytest.fail("unexecutable action quote must not enqueue"),
+    )
+
+    result = process_trade_intent(
+        SimpleNamespace(data_root=str(tmp_path)),
+        intent,
+        now=NOW,
+        action_now=action_at,
+        settings=_notification_settings(tmp_path),
+        feature_policy=feature_policy,
+        order_policy=order_policy,
+        expected_policy_version=str(intent["policy_version"]),
+    )
+
+    assert result["reason"] == "action_execution_quote_spread_points_exceeded"
+    state = json.loads((tmp_path / "latest" / "trade_intent_delivery_state.json").read_text())
+    assert state["last_action_revalidation"]["execution_quote_gate"][
+        "spread_points"
+    ] == pytest.approx(3.1)
+    assert state["inflight"] == {}
 
 
 def test_ready_action_revalidation_requires_feature_policy() -> None:
@@ -2082,6 +2774,137 @@ def test_invalidation_explicitly_rearms_semantic_delivery(tmp_path, monkeypatch)
     assert len(calls) == 2
 
 
+def test_expiry_terminally_cancels_and_rearms_semantic_delivery(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    semantic_scope = "2026-07-14|level_breakout_call|7550.0000"
+    intent = {
+        **_runtime_contract(NOW + timedelta(minutes=5)),
+        "status": "trade_ready",
+        "intent_id": "intent:expiry-rearm",
+        "semantic_scope": semantic_scope,
+        "semantic_key": (f"{semantic_scope}|option:SPX:SPXW:20260714:7550:C"),
+        "event_id": "level:expiry-rearm:first",
+        "evaluated_at": NOW.isoformat(),
+        "phase": "confirmed",
+        "direction": "up",
+        "thesis": "breakout",
+        "contract_label": "SPXW 7550C",
+        "decision_bid": 10.0,
+        "decision_ask": 10.4,
+        "entry_limit": 10.1,
+        "provider": "ibkr",
+        "quote_source_at": NOW.isoformat(),
+        "spx_spot": 7554.0,
+        "trigger_level": 7550.0,
+        "invalidation_spx": 7547.0,
+        "target_spx": 7575.0,
+        "max_loss_per_contract": 1010.0,
+        "expires_at": (NOW + timedelta(minutes=5)).isoformat(),
+        "time_stop_at": (NOW + timedelta(minutes=15)).isoformat(),
+    }
+    monkeypatch.setattr(
+        trade_intent_runtime,
+        "_action_revalidation",
+        lambda *_args, **_kwargs: (
+            None,
+            {"quote_revalidation": "test_stub"},
+        ),
+    )
+    storage = SimpleNamespace(data_root=str(tmp_path))
+    settings = _outbox_notification_settings(tmp_path)
+
+    first = process_trade_intent(
+        storage,
+        intent,
+        now=NOW,
+        action_now=NOW,
+        settings=settings,
+    )
+    terminal = {
+        "status": "observing",
+        "phase": "expired",
+        "event_id": intent["event_id"],
+        "semantic_scope": semantic_scope,
+    }
+    expired = process_trade_intent(
+        storage,
+        terminal,
+        now=NOW + timedelta(seconds=1),
+        settings=settings,
+    )
+    expired_replay = process_trade_intent(
+        storage,
+        terminal,
+        now=NOW + timedelta(seconds=2),
+        settings=settings,
+    )
+    same_event_replay = process_trade_intent(
+        storage,
+        intent,
+        now=NOW + timedelta(seconds=3),
+        action_now=NOW + timedelta(seconds=3),
+        settings=settings,
+    )
+    rearmed_intent = {
+        **intent,
+        "event_id": "level:expiry-rearm:second",
+        "evaluated_at": (NOW + timedelta(seconds=4)).isoformat(),
+        "quote_source_at": (NOW + timedelta(seconds=4)).isoformat(),
+    }
+    rearmed = process_trade_intent(
+        storage,
+        rearmed_intent,
+        now=NOW + timedelta(seconds=4),
+        action_now=NOW + timedelta(seconds=4),
+        settings=settings,
+    )
+
+    first_delivery_id = _trade_ready_delivery_event_id(intent)
+    second_delivery_id = _trade_ready_delivery_event_id(rearmed_intent)
+    assert first["accepted"] is True
+    assert expired["reason"] == "observing"
+    assert expired_replay["reason"] == "observing"
+    assert same_event_replay["reason"] == "already_accepted"
+    assert rearmed["accepted"] is True
+    assert first_delivery_id != second_delivery_id
+
+    state = json.loads((tmp_path / "latest" / "trade_intent_delivery_state.json").read_text())
+    assert state["semantic_keys"] == {
+        second_delivery_id: intent["semantic_key"],
+    }
+    assert state["terminal_delivery_event_ids"] == [first_delivery_id]
+    assert state["pending_delivery_cancellation_event_ids"] == []
+    assert state["pending_delivery_cancellation_reasons"] == {}
+    assert [row["event_id"] for row in state["delivery_lifecycle_events"]] == [second_delivery_id]
+
+    with sqlite3.connect(settings.delivery_outbox_path) as connection:
+        statuses = dict(
+            connection.execute(
+                "SELECT event_id, status FROM notification_delivery_events"
+            ).fetchall()
+        )
+        cancellations = connection.execute(
+            "SELECT event_id, reason FROM notification_delivery_cancellations"
+        ).fetchall()
+    assert statuses == {
+        first_delivery_id: "dead_letter",
+        second_delivery_id: "pending",
+    }
+    assert cancellations == [
+        (first_delivery_id, "trade_intent_lifecycle_expired"),
+    ]
+
+    with sqlite3.connect(settings.delivery_receipt_path) as connection:
+        terminal_receipts = connection.execute(
+            "SELECT event_id, outcome FROM notification_delivery_receipts"
+        ).fetchall()
+    assert terminal_receipts == [
+        (first_delivery_id, "cancelled_before_delivery"),
+    ]
+
+
 def test_rearmed_semantic_intent_uses_distinct_durable_delivery_event(
     tmp_path,
     monkeypatch,
@@ -2175,8 +2998,7 @@ def test_rearmed_semantic_intent_uses_distinct_durable_delivery_event(
     assert first_delivery_id != second_delivery_id
     with sqlite3.connect(settings.delivery_outbox_path) as connection:
         rows = connection.execute(
-            "SELECT event_id, status, text "
-            "FROM notification_delivery_events ORDER BY event_id"
+            "SELECT event_id, status, text FROM notification_delivery_events ORDER BY event_id"
         ).fetchall()
     assert {row[0] for row in rows} == {first_delivery_id, second_delivery_id}
     statuses = {row[0]: row[1] for row in rows}
@@ -2489,4 +3311,20 @@ def _notification_settings(tmp_path):
         bark_enabled=False,
         bark_friend_enabled=False,
         missed_queue_path=str(tmp_path / "missed.jsonl"),
+    )
+
+
+def _outbox_notification_settings(tmp_path) -> NotificationSettings:
+    return replace(
+        NotificationSettings.from_env(),
+        enabled=True,
+        feishu_enabled=True,
+        feishu_webhook_url="https://open.feishu.cn/test",
+        bark_enabled=False,
+        bark_friend_enabled=False,
+        missed_queue_path=str(tmp_path / "missed.jsonl"),
+        delivery_receipt_path=str(tmp_path / "receipts.sqlite"),
+        delivery_outbox_enabled=True,
+        delivery_outbox_path=str(tmp_path / "delivery-outbox.sqlite"),
+        delivery_outbox_legacy_shadow_enabled=False,
     )

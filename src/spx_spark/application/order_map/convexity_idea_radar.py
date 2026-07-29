@@ -26,6 +26,7 @@ from spx_spark.application.order_map.convexity_opportunity_board import (
 from spx_spark.application.order_map.convexity_idea_quality import (
     build_quality_summary,
     build_wall_probability_context,
+    select_rth_market_state,
 )
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR, ET
 
@@ -105,11 +106,7 @@ def build_convexity_idea_radar(
         status = "warming"
     elif not levels:
         status = "unavailable"
-    elif (
-        quality["status"] == "degraded"
-        or destination["status"] == "unavailable"
-        or wall_probabilities["status"] != "ready"
-    ):
+    elif quality["status"] == "degraded" or destination["status"] == "unavailable":
         status = "partial"
     elif mandate["phase"] == "gth_preparation":
         status = "preparation"
@@ -242,10 +239,7 @@ def build_convexity_idea_radar(
 def _mandate(now: datetime) -> dict[str, Any]:
     at = _utc(now)
     local = at.astimezone(ET)
-    trading_date = DEFAULT_MARKET_CALENDAR.spx_session_date_for(
-        at,
-        retain_completed=False,
-    )
+    trading_date = DEFAULT_MARKET_CALENDAR.spx_session_date_for(at, retain_completed=False)
     in_session_window = trading_date is not None
     target_date = trading_date or DEFAULT_MARKET_CALENDAR.research_expiry(at)
     session = DEFAULT_MARKET_CALENDAR.session(target_date)
@@ -344,9 +338,7 @@ def _destination_map(
     expected_expiry = str(mandate.get("trading_date") or "").replace("-", "")
     payload_expiry = str(payload.get("expiry") or "")
     observed_at = _datetime(source_as_of)
-    age_seconds = (
-        (_utc(now) - observed_at).total_seconds() if observed_at is not None else None
-    )
+    age_seconds = (_utc(now) - observed_at).total_seconds() if observed_at is not None else None
     phase = str(mandate.get("phase") or "")
     max_age_seconds = 90.0 if phase == "gth_preparation" else 15.0
     gate_reasons: list[str] = []
@@ -360,9 +352,7 @@ def _destination_map(
         gate_reasons.append("payload_expiry_mismatch")
     if observed_at is None:
         gate_reasons.append("density_as_of_missing")
-    elif age_seconds is not None and (
-        age_seconds < -2.0 or age_seconds > max_age_seconds
-    ):
+    elif age_seconds is not None and (age_seconds < -2.0 or age_seconds > max_age_seconds):
         gate_reasons.append("density_stale_or_future")
     complete = all(value is not None for value in (p10, median, p90))
     if not complete:
@@ -376,16 +366,8 @@ def _destination_map(
         expected_move = None
     p25 = _number(row.get("p25")) if identity_and_freshness_ok else None
     p75 = _number(row.get("p75")) if identity_and_freshness_ok else None
-    prob_below = (
-        _number(row.get("prob_below_put_wall"))
-        if identity_and_freshness_ok
-        else None
-    )
-    prob_above = (
-        _number(row.get("prob_above_call_wall"))
-        if identity_and_freshness_ok
-        else None
-    )
+    prob_below = _number(row.get("prob_below_put_wall")) if identity_and_freshness_ok else None
+    prob_above = _number(row.get("prob_above_call_wall")) if identity_and_freshness_ok else None
     day_move = _mapping(payload.get("day_move"))
     terminal_time = str(mandate.get("terminal_time_et") or "")
     return {
@@ -406,9 +388,7 @@ def _destination_map(
         "prob_below_put_wall": _rounded(prob_below, 4),
         "prob_above_call_wall": _rounded(prob_above, 4),
         "expected_move_points_to_settlement": _rounded(expected_move),
-        "gth_expected_move_used_fraction": _rounded(
-            _number(day_move.get("em_used_fraction")), 4
-        ),
+        "gth_expected_move_used_fraction": _rounded(_number(day_move.get("em_used_fraction")), 4),
         "probability_semantics": "risk_neutral_terminal_not_physical",
         "terminal_time_et": terminal_time or None,
         "strategy_exit_time_et": "13:00",
@@ -430,7 +410,7 @@ def _market_state(
     now: datetime,
 ) -> dict[str, Any]:
     shadow = _mapping(payload.get("spring_gamma_v3_shadow"))
-    state = _mapping(shadow.get("rth_market_state"))
+    state, state_source = select_rth_market_state(payload)
     quality = _mapping(state.get("Q"))
     volatility = _mapping(state.get("V"))
     availability = _mapping(state.get("input_availability"))
@@ -447,6 +427,7 @@ def _market_state(
         now=now,
     )
     return {
+        "source": state_source,
         "state": state.get("state"),
         "status": state.get("status"),
         "D": _number(state.get("D")),
@@ -487,10 +468,12 @@ def _level_map(payload: Mapping[str, Any]) -> dict[str, float]:
     decision = _mapping(payload.get("level_decision"))
     sources = [
         _mapping(decision.get("levels")),
-        _mapping(_mapping(_mapping(payload.get("spring_gamma_v3_shadow")).get(
-            "wall_probability"
-        )).get("stable_levels")),
         _mapping(_mapping(payload.get("option_structure_frame")).get("structure")),
+        _mapping(
+            _mapping(_mapping(payload.get("spring_gamma_v3_shadow")).get("wall_probability")).get(
+                "stable_levels"
+            )
+        ),
     ]
     result: dict[str, float] = {}
     for source in sources:
@@ -548,11 +531,7 @@ def _boundary(
             "side": side,
         }
     if spot is None:
-        fallback_names = (
-            ("put_wall", "flip_low")
-            if side == "lower"
-            else ("flip_high", "call_wall")
-        )
+        fallback_names = ("put_wall", "flip_low") if side == "lower" else ("flip_high", "call_wall")
         filtered = [row for row in candidates if row[0] in fallback_names]
         if not filtered:
             return {
@@ -571,9 +550,7 @@ def _boundary(
         distance = None
     else:
         filtered = [
-            row
-            for row in candidates
-            if (row[1] <= spot if side == "lower" else row[1] >= spot)
+            row for row in candidates if (row[1] <= spot if side == "lower" else row[1] >= spot)
         ]
         if not filtered:
             return {
@@ -592,9 +569,7 @@ def _boundary(
         )
         distance = level - spot
     names_at_level = [
-        candidate_name
-        for candidate_name, candidate_level in candidates
-        if candidate_level == level
+        candidate_name for candidate_name, candidate_level in candidates if candidate_level == level
     ]
     return {
         "status": "available",

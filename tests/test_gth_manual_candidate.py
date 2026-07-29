@@ -37,6 +37,7 @@ from spx_spark.notifier.dispatcher import (
     consume_pending_notifications,
     enqueue_notification,
 )
+from spx_spark.notifier.model import SinkResult
 from spx_spark.settings.market_features import MarketFeatureSettings
 from spx_spark.storage import LatestState
 
@@ -78,12 +79,9 @@ def test_manual_candidate_is_ready_without_cash_spx(
     assert candidate["current_parity_spx"] == 7530.0
     assert candidate["invalidation_coordinate"]["kind"] == "raw_es"
     assert candidate["block_reasons"] == []
-    assert "trade_intent_not_trade_ready" in live_trade_intent_authority_issues(
+    assert "trade_intent_not_trade_ready" in live_trade_intent_authority_issues(candidate)
+    assert "trade_intent_execution_authority_missing" in live_trade_intent_authority_issues(
         candidate
-    )
-    assert (
-        "trade_intent_execution_authority_missing"
-        in live_trade_intent_authority_issues(candidate)
     )
 
 
@@ -252,10 +250,7 @@ def test_target_wall_and_parity_uncertainty_fail_closed(
     )
 
     assert too_close["status"] == "blocked"
-    assert (
-        "target_room_below_parity_uncertainty_bound"
-        in too_close["block_reasons"]
-    )
+    assert "target_room_below_parity_uncertainty_bound" in too_close["block_reasons"]
     assert no_target["status"] == "blocked"
     assert "target_wall_unavailable" in no_target["block_reasons"]
 
@@ -438,6 +433,150 @@ def test_candidate_notification_is_durable_and_idempotent(
     assert len(state["accepted_notification_event_ids"]) == 1
 
 
+def test_manual_ready_outbox_consumer_receipt_end_to_end_is_idempotent(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_ready_market(monkeypatch, now=NOW)
+    settings = replace(
+        NotificationSettings.from_env(),
+        enabled=True,
+        feishu_enabled=True,
+        feishu_webhook_url="https://open.feishu.cn/test",
+        bark_enabled=False,
+        bark_friend_enabled=False,
+        missed_queue_path=str(tmp_path / "missed.jsonl"),
+        delivery_receipt_path=str(tmp_path / "receipts.sqlite"),
+        delivery_outbox_enabled=True,
+        delivery_outbox_path=str(tmp_path / "delivery-outbox.sqlite"),
+        delivery_outbox_legacy_shadow_enabled=False,
+    )
+    deliveries: list[frozenset[str]] = []
+
+    def fake_sink_success(_settings, **kwargs):
+        targets = frozenset(kwargs["targets"])
+        deliveries.append(targets)
+        return [SinkResult(sink=target, attempted=True, ok=True) for target in targets]
+
+    monkeypatch.setattr(
+        "spx_spark.notifier.dispatcher.deliver_trade_push",
+        fake_sink_success,
+    )
+    storage = SimpleNamespace(data_root=str(tmp_path))
+    kwargs = {
+        "macro_event": {"mode": "normal", "entry_allowed": True},
+        "now": NOW,
+        "policy": MarketFeatureSettings(),
+        "new_entries_allowed": True,
+        "new_entries_block_reason": "allowed",
+        "notification": settings,
+    }
+    signal = _signal(NOW)
+
+    produced = process_gth_manual_candidate(
+        storage,
+        object(),
+        signal,
+        **kwargs,
+    )
+    duplicate_tick = process_gth_manual_candidate(
+        storage,
+        object(),
+        signal,
+        **kwargs,
+    )
+    event_id = f"{produced['candidate_id']}:ready"
+    state = candidate_module.read_json_object(
+        tmp_path / "latest" / "gth_manual_candidate_state.json"
+    )
+
+    assert produced["status"] == "manual_ready"
+    assert produced["notification_accepted"] is True
+    assert duplicate_tick["notification_attempted"] is False
+    assert state["accepted_notification_event_ids"] == [event_id]
+    assert state["notification_lifecycle_events"] == [
+        {
+            "event_id": event_id,
+            "source_signal_id": produced["source_signal_id"],
+        }
+    ]
+
+    consumed = consume_pending_notifications(
+        replace(settings),
+        now=NOW + timedelta(seconds=1),
+        notify_dead_letters=False,
+        worker_id="gth-e2e-consumer:new-instance",
+        completion_clock=lambda: NOW + timedelta(seconds=1),
+    )
+    duplicate_consumer = consume_pending_notifications(
+        replace(settings),
+        now=NOW + timedelta(seconds=2),
+        notify_dead_letters=False,
+        worker_id="gth-e2e-consumer:duplicate",
+        completion_clock=lambda: NOW + timedelta(seconds=2),
+    )
+    duplicate_after_delivery = process_gth_manual_candidate(
+        storage,
+        object(),
+        signal,
+        **kwargs,
+    )
+    final_consumer = consume_pending_notifications(
+        replace(settings),
+        now=NOW + timedelta(seconds=3),
+        notify_dead_letters=False,
+        worker_id="gth-e2e-consumer:final",
+        completion_clock=lambda: NOW + timedelta(seconds=3),
+    )
+
+    assert consumed["jobs"] == 1
+    assert consumed["delivered_targets"] == 1
+    assert duplicate_consumer["jobs"] == 0
+    assert final_consumer["jobs"] == 0
+    assert duplicate_after_delivery["notification_attempted"] is False
+    assert deliveries == [frozenset({"feishu"})]
+
+    with sqlite3.connect(settings.delivery_outbox_path) as connection:
+        outbox_event = connection.execute(
+            "SELECT event_id, source, kind, lane, status FROM notification_delivery_events"
+        ).fetchone()
+        outbox_targets = connection.execute(
+            "SELECT event_id, sink, status FROM notification_delivery_targets"
+        ).fetchall()
+    with sqlite3.connect(settings.delivery_receipt_path) as connection:
+        receipts = connection.execute(
+            "SELECT event_id, source, kind, lane, outcome, sinks_json "
+            "FROM notification_delivery_receipts"
+        ).fetchall()
+
+    assert outbox_event == (
+        event_id,
+        "gth_manual_candidate",
+        "gth_spxw_manual_spread_candidate",
+        "gth_manual_candidate",
+        "delivered",
+    )
+    assert outbox_targets == [(event_id, "feishu", "delivered")]
+    assert len(receipts) == 1
+    receipt_event_id, source, kind, lane, outcome, sinks_json = receipts[0]
+    assert {event_id, outbox_event[0], receipt_event_id} == {event_id}
+    assert (source, kind, lane, outcome) == (
+        "gth_manual_candidate",
+        "gth_spxw_manual_spread_candidate",
+        "gth_manual_candidate",
+        "delivered",
+    )
+    assert json.loads(sinks_json) == [
+        {
+            "sink": "feishu",
+            "attempted": True,
+            "ok": True,
+            "error": None,
+            "verdict": "delivered",
+        }
+    ]
+
+
 def test_declared_spread_width_cannot_expand_risk_budget(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -603,11 +742,14 @@ def test_nbbo_coordinates_require_quote_clock_not_fresh_trade_clock() -> None:
         )
         is None
     )
-    assert _contract_snapshot(
-        state,
-        quotes[0].instrument.canonical_id,
-        now=NOW,
-    ) == {}
+    assert (
+        _contract_snapshot(
+            state,
+            quotes[0].instrument.canonical_id,
+            now=NOW,
+        )
+        == {}
+    )
 
 
 def test_es_reference_does_not_freshen_stale_last_with_quote_clock() -> None:
@@ -883,9 +1025,7 @@ def test_accepted_ready_is_cancelled_before_blocked_card_can_deliver(
         now=NOW,
         **common,
     )
-    state_path = (
-        tmp_path / "latest" / "gth_manual_candidate_state.json"
-    )
+    state_path = tmp_path / "latest" / "gth_manual_candidate_state.json"
     accepted_state = candidate_module.read_json_object(state_path)
     event_id = f"{ready['candidate_id']}:ready"
     assert ready["notification_accepted"] is True
@@ -958,9 +1098,7 @@ def test_failed_cancellation_blocks_a_new_gth_ready_lifecycle(
     monkeypatch.setattr(
         candidate_module,
         "cancel_pending_notification",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            RuntimeError("outbox unavailable")
-        ),
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("outbox unavailable")),
     )
 
     process_gth_manual_candidate(
@@ -991,9 +1129,7 @@ def test_failed_cancellation_blocks_a_new_gth_ready_lifecycle(
         f"{first['candidate_id']}:ready"
     ]
     with sqlite3.connect(settings.delivery_outbox_path) as connection:
-        rows = connection.execute(
-            "SELECT event_id FROM notification_delivery_events"
-        ).fetchall()
+        rows = connection.execute("SELECT event_id FROM notification_delivery_events").fetchall()
     assert rows == [(f"{first['candidate_id']}:ready",)]
 
 

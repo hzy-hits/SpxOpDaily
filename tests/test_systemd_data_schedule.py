@@ -70,7 +70,7 @@ def test_main_installer_refuses_non_master_dirty_or_unpushed_deployments() -> No
 
     assert "fetch --quiet origin master" in installer
     assert '[[ "$DEPLOY_BRANCH" != "master" ]]' in installer
-    assert 'status --porcelain=v1' in installer
+    assert "status --porcelain=v1" in installer
     assert '[[ "$DEPLOY_HEAD" != "$DEPLOY_ORIGIN_MASTER" ]]' in installer
     assert "uv sync --frozen" in installer
 
@@ -92,24 +92,12 @@ def test_order_map_status_timer_covers_full_exchange_local_rth() -> None:
     timer = read("systemd/spx-spark-order-map-status.timer")
     installer = read("scripts/install-spx-spark-services.sh")
 
-    assert (
-        "OnCalendar=Mon..Fri *-*-* 09:00,15,30,45:00 America/New_York"
-        in timer
-    )
-    assert (
-        "OnCalendar=Mon..Fri *-*-* 10..15:00,15,30,45:00 America/New_York"
-        in timer
-    )
+    assert "OnCalendar=Mon..Fri *-*-* 09:00,15,30,45:00 America/New_York" in timer
+    assert "OnCalendar=Mon..Fri *-*-* 10..15:00,15,30,45:00 America/New_York" in timer
     assert "AccuracySec=1s" in timer
     assert "Asia/Shanghai" not in timer
-    assert (
-        'ln -sfn "$ROOT/systemd/spx-spark-order-map-status.service"'
-        in installer
-    )
-    assert (
-        'ln -sfn "$ROOT/systemd/spx-spark-order-map-status.timer"'
-        in installer
-    )
+    assert 'ln -sfn "$ROOT/systemd/spx-spark-order-map-status.service"' in installer
+    assert 'ln -sfn "$ROOT/systemd/spx-spark-order-map-status.timer"' in installer
     assert "enable --now spx-spark-order-map-status.timer" in installer
     assert "restart spx-spark-order-map-status.timer" in installer
 
@@ -134,6 +122,31 @@ def test_market_features_hot_worker_is_a_dedicated_single_owner_service() -> Non
     assert installer.index("restart spx-spark-24h.service") < installer.index(
         "restart spx-spark-market-features-hot.service"
     )
+
+
+def test_es_bar_sampler_is_the_canonical_writer_with_safe_deploy_order() -> None:
+    sampler_service = read("systemd/spx-spark-es-bar-sampler.service")
+    feature_service = read("systemd/spx-spark-market-features-hot.service")
+    runner = read("scripts/run-es-bar-sampler.sh")
+    installer = read("scripts/install-spx-spark-services.sh")
+
+    assert "scripts/run-es-bar-sampler.sh" in sampler_service
+    assert "--mark-starting" in sampler_service
+    assert "--interval-seconds=5" in sampler_service
+    assert "--lock-path=%t/spx-spark-es-bar-sampler.lock" in sampler_service
+    assert "Restart=always" in sampler_service
+    assert "RestartSec=2" in sampler_service
+    assert "spx-spark-es-bar-sampler.service" in feature_service
+    assert 'exec "$ENTRYPOINT" "$@"' in runner
+    assert "spx_spark.application.runtime.es_bar_sampler" in runner
+    assert "enable spx-spark-es-bar-sampler.service" in installer
+
+    stop_writer = installer.index("stop spx-spark-market-features-hot.service")
+    start_sampler = installer.index("restart spx-spark-es-bar-sampler.service")
+    start_reader = installer.index("restart spx-spark-market-features-hot.service")
+    assert stop_writer < start_sampler < start_reader
+    assert "is-active --quiet spx-spark-es-bar-sampler.service" in installer
+    assert "--check-ready" in installer
 
 
 def test_intraday_shock_hot_worker_is_a_dedicated_single_owner_service() -> None:

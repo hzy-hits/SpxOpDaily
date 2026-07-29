@@ -100,6 +100,27 @@ def test_put_report_keeps_supported_hypotheses_separate_and_put_wall_disabled() 
     assert "PRIORITY=UNSUPPORTED" in lines[2]
 
 
+def test_put_priority_prefers_direct_minute_market_state_over_spring() -> None:
+    payload = _payload()
+    payload["minute_market_frame"] = {
+        "diagnostics": {
+            "rth_market_state": {
+                "state": "LOW_VOL_RANGE",
+                "D": 0,
+                "Q": {"quality": "low"},
+            }
+        }
+    }
+
+    flip = _candidate(build_put_candidate_report(payload), "flip_low_breakdown")
+
+    assert flip["priority"] == {
+        "status": "LOW",
+        "reason": "dqv_low_vol_range",
+        "authority": "soft_report_priority_only",
+    }
+
+
 def test_extended_down_is_reported_as_no_chase_without_hiding_wall_signal() -> None:
     payload = _payload()
     payload["trade_intent"]["moving_average_context"] = {

@@ -97,7 +97,10 @@ def _has_activity(summary: dict[str, object]) -> bool:
             "attempted_targets",
             "delivered_targets",
             "dead_lettered",
+            "expired_targets",
             "dead_letter_notified",
+            "terminal_receipts_recorded",
+            "terminal_receipts_repaired",
             "pruned_shadow",
         )
     )

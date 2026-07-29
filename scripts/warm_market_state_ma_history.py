@@ -2,7 +2,7 @@
 """Warm production ES MA history from one qualified IBKR futures contract.
 
 The command is read-only unless ``--apply`` is present. Applying is restricted
-to a stopped market-feature worker and performs a locked, compare-and-swap,
+to a stopped canonical ES bar sampler and performs a locked, compare-and-swap,
 backed-up atomic state migration. It never writes historical bars into the hot
 ``closed_bars`` collection.
 """
@@ -34,7 +34,7 @@ from spx_spark.application.market_features.es_bar_state import (
 from spx_spark.application.market_features.moving_average_context import (
     moving_average_diagnostics,
 )
-from spx_spark.application.runtime.market_features_hot_worker import (
+from spx_spark.application.runtime.es_bar_sampler import (
     ProcessLock,
     ProcessLockUnavailable,
     default_lock_path,
@@ -48,7 +48,7 @@ from spx_spark.state_io import (
 
 
 UTC = timezone.utc
-DEFAULT_SERVICE_UNIT = "spx-spark-market-features-hot.service"
+DEFAULT_SERVICE_UNIT = "spx-spark-es-bar-sampler.service"
 MIN_APPLY_OVERLAP_BARS = 6
 MAX_APPLY_OVERLAP_CLOSE_DIFFERENCE = 2.0
 FUTURES_RTH_POST_CASH_CLOSE = time(17, 0)
@@ -110,9 +110,7 @@ def _qualified_es_contract(
         or str(getattr(contract, "secType", "")) != "FUT"
         or str(getattr(contract, "symbol", "")) != "ES"
         or str(getattr(contract, "exchange", "")) != "CME"
-        or not str(getattr(contract, "lastTradeDateOrContractMonth", "")).startswith(
-            expiry
-        )
+        or not str(getattr(contract, "lastTradeDateOrContractMonth", "")).startswith(expiry)
     ):
         raise RuntimeError("ibkr_qualified_contract_identity_mismatch")
     return contract
@@ -156,16 +154,10 @@ def _request_exact_rth_bars(
             # (including equity early-close days). Exclude only that known CME
             # tail from a prior session; a cutoff-day tail already failed the
             # end-at check above. Every other off-window row fails closed.
-            if not (
-                session.close_at <= local
-                and local.time() < FUTURES_RTH_POST_CASH_CLOSE
-            ):
+            if not (session.close_at <= local and local.time() < FUTURES_RTH_POST_CASH_CLOSE):
                 raise RuntimeError("ibkr_historical_bar_outside_requested_rth")
             continue
-        prices = {
-            key: _finite(getattr(item, key))
-            for key in ("open", "high", "low", "close")
-        }
+        prices = {key: _finite(getattr(item, key)) for key in ("open", "high", "low", "close")}
         if any(value is None or value <= 0 for value in prices.values()):
             raise RuntimeError("ibkr_historical_bar_price_invalid")
         open_px = float(prices["open"])
@@ -186,10 +178,7 @@ def _request_exact_rth_bars(
                 "low": low,
                 "close": close,
                 "quality": "ok",
-                "gap_before": (
-                    previous is not None
-                    and start != previous + timedelta(minutes=5)
-                ),
+                "gap_before": (previous is not None and start != previous + timedelta(minutes=5)),
                 "segment": "rth",
                 "trading_date_et": trading_day,
                 "contract_identity": contract_identity,
@@ -234,14 +223,12 @@ def _assert_worker_inactive(unit: str) -> None:
     status = result.stdout.strip()
     if status != "inactive" or result.returncode != 3:
         observed = status or result.stderr.strip() or f"exit_{result.returncode}"
-        raise RuntimeError(
-            f"{unit}_must_be_inactive_before_apply:observed={observed}"
-        )
+        raise RuntimeError(f"{unit}_must_be_inactive_before_apply:observed={observed}")
 
 
 @contextmanager
-def _stopped_hot_worker_guard() -> Iterator[None]:
-    """Prove the fixed unit is stopped and exclude every lock-aware worker."""
+def _stopped_sampler_guard() -> Iterator[None]:
+    """Prove the canonical writer is stopped and exclude another sampler."""
 
     _assert_worker_inactive(DEFAULT_SERVICE_UNIT)
     try:
@@ -249,7 +236,7 @@ def _stopped_hot_worker_guard() -> Iterator[None]:
             _assert_worker_inactive(DEFAULT_SERVICE_UNIT)
             yield
     except ProcessLockUnavailable as exc:
-        raise RuntimeError("market_features_hot_worker_process_lock_is_held") from exc
+        raise RuntimeError("es_bar_sampler_process_lock_is_held") from exc
 
 
 def _parse_timestamp(value: object) -> datetime | None:
@@ -316,18 +303,12 @@ def _audit_overlap(
         or max_close_difference > MAX_APPLY_OVERLAP_CLOSE_DIFFERENCE
     ):
         raise RuntimeError("live_seed_overlap_close_difference_limit_invalid")
-    seed_by_start = {
-        str(row["bar_start"]): row for row in rows[-MAX_RTH_MA_BARS:]
-    }
+    seed_by_start = {str(row["bar_start"]): row for row in rows[-MAX_RTH_MA_BARS:]}
     closed = state.get("closed_bars")
     if not isinstance(closed, list):
         raise RuntimeError("live_state_closed_bars_unavailable")
     live_rth = sorted(
-        (
-            value
-            for value in closed
-            if isinstance(value, dict) and value.get("segment") == "rth"
-        ),
+        (value for value in closed if isinstance(value, dict) and value.get("segment") == "rth"),
         key=lambda value: str(value.get("bar_start") or ""),
     )
     session_day = cutoff.astimezone(NY_TZ).date()
@@ -335,15 +316,9 @@ def _audit_overlap(
     if session is None or session.close_at.astimezone(UTC) != cutoff:
         raise RuntimeError("warm_start_cutoff_session_invalid")
     expected = session.expected_five_minute_buckets
-    seed_session = [
-        row
-        for row in rows
-        if row.get("trading_date_et") == session_day.isoformat()
-    ]
+    seed_session = [row for row in rows if row.get("trading_date_et") == session_day.isoformat()]
     live_session = [
-        row
-        for row in live_rth
-        if row.get("trading_date_et") == session_day.isoformat()
+        row for row in live_rth if row.get("trading_date_et") == session_day.isoformat()
     ]
     if len(seed_session) != expected:
         raise RuntimeError("ibkr_cutoff_session_bucket_count_incomplete")
@@ -424,8 +399,7 @@ def _assert_ready(
         or any(diagnostics.get(key) is None for key in required)
     ):
         raise RuntimeError(
-            "rth_ma_warm_start_diagnostics_not_ready:"
-            + json.dumps(diagnostics, sort_keys=True)
+            "rth_ma_warm_start_diagnostics_not_ready:" + json.dumps(diagnostics, sort_keys=True)
         )
     return diagnostics
 
@@ -498,14 +472,11 @@ def _default_state_path() -> Path:
 def main() -> int:
     args = parse_args()
     if args.min_overlap_bars < MIN_APPLY_OVERLAP_BARS:
-        raise SystemExit(
-            f"--min-overlap-bars must be at least {MIN_APPLY_OVERLAP_BARS}"
-        )
+        raise SystemExit(f"--min-overlap-bars must be at least {MIN_APPLY_OVERLAP_BARS}")
     if (
         not math.isfinite(args.max_overlap_close_difference)
         or args.max_overlap_close_difference < 0
-        or args.max_overlap_close_difference
-        > MAX_APPLY_OVERLAP_CLOSE_DIFFERENCE
+        or args.max_overlap_close_difference > MAX_APPLY_OVERLAP_CLOSE_DIFFERENCE
     ):
         raise SystemExit(
             "--max-overlap-close-difference must be finite and between "
@@ -567,9 +538,7 @@ def main() -> int:
             "rth_ma_seed_cutoff": cutoff.isoformat(),
             "rth_ma_seed_source_row_count": len(rows),
             "rth_ma_seed_overlap_count": overlap["count"],
-            "rth_ma_seed_overlap_max_close_difference": overlap[
-                "max_close_difference"
-            ],
+            "rth_ma_seed_overlap_max_close_difference": overlap["max_close_difference"],
             "rth_ma_seed_original_state_sha256": original_sha,
         }
     )
@@ -608,7 +577,7 @@ def main() -> int:
         "original_state_sha256": original_sha,
     }
     if args.apply:
-        with _stopped_hot_worker_guard(), exclusive_state_lock(state_path):
+        with _stopped_sampler_guard(), exclusive_state_lock(state_path):
             current_bytes, current_state = _strict_state_snapshot(state_path)
             if _sha256(current_bytes) != original_sha:
                 raise RuntimeError("rth_ma_warm_start_state_changed_after_validation")
@@ -636,18 +605,13 @@ def main() -> int:
                 try:
                     _atomic_write_bytes_secure(state_path, current_bytes)
                     restored_bytes, restored = _strict_state_snapshot(state_path)
-                    if (
-                        _sha256(restored_bytes) != original_sha
-                        or restored != original_state
-                    ):
+                    if _sha256(restored_bytes) != original_sha or restored != original_state:
                         raise RuntimeError("rth_ma_warm_start_restore_mismatch")
                 except Exception as restore_exc:
                     raise RuntimeError(
                         "rth_ma_warm_start_write_failed_and_restore_failed"
                     ) from restore_exc
-                raise RuntimeError(
-                    "rth_ma_warm_start_write_failed_original_restored"
-                ) from exc
+                raise RuntimeError("rth_ma_warm_start_write_failed_original_restored") from exc
         result["applied"] = True
         result["backup_path"] = str(backup)
         result["new_state_sha256"] = _sha256(persisted_bytes)

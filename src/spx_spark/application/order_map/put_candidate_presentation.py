@@ -11,6 +11,9 @@ from spx_spark.application.market_features.trade_intent import (
     UPPER_REJECTION_PUT_MANUAL_LANE,
     live_trade_intent_authority_issues,
 )
+from spx_spark.application.order_map.convexity_idea_quality import (
+    select_rth_market_state,
+)
 
 
 SCHEMA_VERSION = "put_candidate_report.v1"
@@ -124,9 +127,7 @@ def _put_wall_plan(candidate: Mapping[str, Any]) -> bool:
     level_kind = str(candidate.get("level_kind") or "").strip().lower()
     level_label = str(candidate.get("level_label") or "").strip().lower()
     return bool(
-        level_kind == "put_wall"
-        or level_label == "put_wall"
-        or level_label.startswith("put_wall ")
+        level_kind == "put_wall" or level_label == "put_wall" or level_label.startswith("put_wall ")
     )
 
 
@@ -361,8 +362,8 @@ def _priority(
 
 
 def _rth_market_state(payload: Mapping[str, Any]) -> Mapping[str, Any]:
-    shadow = _mapping(payload.get("spring_gamma_v3_shadow"))
-    return _mapping(shadow.get("rth_market_state"))
+    state, _source = select_rth_market_state(payload)
+    return state
 
 
 def _moving_average_context(

@@ -26,10 +26,11 @@ efficiency and structure inputs. On a regular day the earliest causal 8/8
 state therefore follows the 10:00 ET bar close; 09:45 ET is not a valid 8/8
 acceptance target.
 
-Spring Gamma produces one shadow observation per minute. The 15-minute report
-summarizes durable Spring observations in its preceding 15-minute window, so a
-short `TREND_UP`, `TREND_DOWN` or range state cannot disappear merely because
-the report instant lands on `UNCERTAIN`.
+The production 5-minute state is attached directly from
+`minute_market_frame.diagnostics.rth_market_state`. Spring Gamma computation
+and report projection are disabled in production: the research shadow cannot
+gate TradeReady, option-structure quality, the opportunity radar or report
+delivery.
 
 The report clock is defined by
 `application/order_map/report_clock.py`:
@@ -43,18 +44,36 @@ RTH slots are heartbeats. `no_material_changes` and a temporarily thin
 snapshot cannot suppress them; a thin heartbeat is delivered with an explicit
 degraded warning.
 
-## Cross-process projection
+## ES five-minute bar ownership
 
-The report accepts a Spring projection up to five seconds ahead of the
-report's frozen construction clock. This tolerance covers atomic file writes
-completed by the minute worker while the report is being assembled. Larger
-future skew, stale data, expiry mismatch, session mismatch and invalid segment
-remain fail-closed.
+`spx-spark-es-bar-sampler.service` is the sole writer of
+`latest/es_bars_5m.json`. It observes one real, provider-qualified ES source
+timestamp every five seconds, rejects duplicate, out-of-order, future and
+contract-conflicted observations, and never interpolates or fills a missed
+bucket. A partial bar remains partial; it cannot be promoted merely to restore
+an 8/8 state.
 
-Every decision is persisted in
+The heavy market-feature worker only reads the sampler's last atomic snapshot,
+so ES observation is no longer serialized behind option-chain, Greek and
+report computation. Shared-host I/O can still affect the sampler, so
+`latest/es_bar_sampler.lease.json` records every cycle, including duration,
+overrun and consecutive failures. The 24-hour supervisor treats a stale lease
+as a data-plane fault even when systemd still reports the process as active.
+
+## Research-only Spring projection
+
+If Spring computation and projection are explicitly re-enabled for research,
+the report accepts a Spring projection up to five seconds ahead of the report's
+frozen construction clock. This tolerance covers atomic file writes completed
+by the minute worker while the report is being assembled. Larger future skew,
+stale data, expiry mismatch, session mismatch and invalid segment remain
+fail-closed for that research attachment only.
+
+Every enabled research decision is persisted in
 `spring_gamma_v3_projection_diagnostic` with a machine-readable reason. The
 report audit also stores `spring_gamma_v3_state_window`, including sample and
-5-minute-slot counts, state counts, latest state and maximum future skew.
+5-minute-slot counts, state counts, latest state and maximum future skew. When
+disabled, no Spring persistence or rolling-window attachment is required.
 
 ## Option quote time
 
@@ -97,17 +116,35 @@ At 17:30 ET on each trading day,
 - `latest/rth_daily_acceptance.json`;
 - a freshly recomputed `latest/level_decision_acceptance.json`.
 
-The operational verdict checks:
+The operational verdict always checks:
 
-- at least 95% of expected Spring RTH minute slots;
-- at least 75% ready option overlays;
 - 100% of expected RTH report and delivery slots;
-- at least 95% Spring projection and rolling-window attachment;
+- 100% of the expected five-minute TradeIntent producer-heartbeat slots, plus
+  parseable producer-ledger and TradeIntent audit records;
+- every unique persisted `trade_ready` intent has a durable Outbox event with
+  the exact semantic identity, at least one target, all targets delivered
+  before signal expiry, first delivery within five seconds, and a mirrored
+  success receipt for every target; each rearmed delivery event is checked
+  independently, while a source-terminal cancellation/expiry is accepted only
+  with an explicit mirrored receipt for every target; zero ready intents passes
+  only when the producer-heartbeat and audit-integrity checks pass;
 - the post-close raw market-data completeness verdict;
 - notification Outbox `quick_check=ok`, rollback journal mode, zero pending or
-  claimed targets, zero unacknowledged dead letters and no unknown status;
+  claimed targets, zero unacknowledged dead letters, no unknown status, and
+  zero terminal receipts awaiting receipt-store mirroring;
+- notification receipt-store `quick_check=ok`, rollback journal mode,
+  `synchronous=FULL`, exact schema, and a real mirror row for every Outbox
+  receipt ID;
 - formal level-decision authority is either disabled or backed by passed
   statistical acceptance gates.
+
+Spring is an isolated research dependency. When either Spring computation or
+report projection is enabled, acceptance additionally requires at least 95%
+of its expected RTH minute slots, at least 75% ready option overlays, and at
+least 95% report projection and rolling-window attachment. When both
+production flags are disabled, those Spring-only checks are omitted; they
+cannot degrade the live data, opportunity, report-delivery, or TradeReady
+verdicts.
 
 A historical replay from an intermediate quote-clock implementation is not a
 daily acceptance result. In particular, the 2026-07-24 `269/390` replay

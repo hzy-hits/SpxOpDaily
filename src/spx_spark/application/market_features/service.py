@@ -19,9 +19,13 @@ from spx_spark.application.market_features.composition import (
 from spx_spark.application.market_features.confirmed_gate_audit import (
     reconcile_confirmed_gate,
 )
-from spx_spark.application.market_features.es_bar_state import (
-    advance_es_bar_state,
-    completed_es_bars,
+from spx_spark.application.market_features.es_bar_consumer import (
+    load_consumable_es_bars,
+)
+from spx_spark.application.market_features.es_bar_consumer_fence import (
+    fence_rth_market_state as _fence_rth_market_state,
+    fence_rth_market_state_inputs as _fence_rth_market_state_inputs,
+    fence_rth_trade_intent_authority as _fence_rth_trade_intent_authority,
 )
 from spx_spark.application.market_features.greek_decision import build_greek_decision
 from spx_spark.application.market_features.gth_manual_candidate import (
@@ -85,6 +89,10 @@ from spx_spark.application.market_features.trade_intent import (
     evaluate_trade_intent,
     trade_intent_policy_version,
 )
+from spx_spark.application.market_features.trade_intent_producer_ledger import (
+    record_trade_intent_producer_observation,
+    trade_intent_deadline_diagnostics,
+)
 from spx_spark.application.market_features.trade_intent_runtime import process_trade_intent
 from spx_spark.application.market_features.virtual_strategy import process_virtual_strategy
 from spx_spark.application.order_map.level_decision_shadow import (
@@ -96,7 +104,6 @@ from spx_spark.application.order_map.models import level_decision_play
 from spx_spark.application.order_map.level_trigger_repricing import (
     default_level_trigger_repricing_path,
 )
-from spx_spark.state_io import exclusive_state_lock
 from spx_spark.config import StorageSettings
 from spx_spark.features.exposure_map import build_exposure_map
 from spx_spark.greek_reference import build_zero_dte_greeks_reference
@@ -178,16 +185,13 @@ def run(
         last_usable_option_frame = option_frame.to_dict()
     sample = normalized_market_sample(latest, now=evaluation_now, policy=policy)
     latest_root = Path(storage.data_root) / "latest"
-    es_bar_path = latest_root / "es_bars_5m.json"
-    with exclusive_state_lock(es_bar_path):
-        es_bar_state = advance_es_bar_state(
-            load_json(es_bar_path),
-            sample,
-            now=evaluation_now,
-            policy=policy,
-        )
-        save_json(es_bar_path, es_bar_state)
-    es_bars = completed_es_bars(es_bar_state)
+    # The independent sampler publishes state before its v2 lease. The
+    # consumer exposes bars only when the lease, writer fence, accepted marker,
+    # and source timestamps all describe one fresh publication.
+    es_bars, es_bar_consumer = load_consumable_es_bars(
+        storage,
+        now=evaluation_now,
+    )
     existing_samples = _dict_list(persisted.get("market_samples"))
     if len(existing_samples) < 5:
         existing_samples = _seed_samples_from_trend(trend, policy)
@@ -201,17 +205,23 @@ def run(
         samples if samples and samples[-1].get("at") == sample.get("at") else [*samples, sample]
     )
     range_baseline_path = latest_root / "market_state_5m_range_baselines.json"
-    range_baselines = update_same_time_range_baselines(
-        load_json(range_baseline_path),
-        bars=es_bars,
-        now=evaluation_now,
-    )
-    save_json(range_baseline_path, range_baselines)
+    range_baselines = load_json(range_baseline_path)
+    if es_bar_consumer["ready"] is True:
+        range_baselines = update_same_time_range_baselines(
+            range_baselines,
+            bars=es_bars,
+            now=evaluation_now,
+        )
+        save_json(range_baseline_path, range_baselines)
     market_state_inputs = build_market_state_5m_inputs(
         bars=es_bars,
         market_samples=frame_samples,
         range_baselines=range_baselines,
         now=evaluation_now,
+    )
+    market_state_inputs = _fence_rth_market_state_inputs(
+        market_state_inputs,
+        es_bar_consumer=es_bar_consumer,
     )
     market_state_values = _dict(market_state_inputs.get("values"))
     rth_market_state = score_market_state_5m(
@@ -232,6 +242,10 @@ def run(
         ),
         same_time_range_ratio=_number(market_state_values.get("same_time_range_ratio")),
         breadth_above_vwap=_number(market_state_values.get("breadth_above_vwap")),
+    )
+    rth_market_state = _fence_rth_market_state(
+        rth_market_state,
+        es_bar_consumer=es_bar_consumer,
     )
     volume_baselines = _dict(persisted.get("volume_baselines"))
     expected_move = option_frame.volatility.get("expected_move_points_0dte")
@@ -272,6 +286,7 @@ def run(
         market_frame,
         diagnostics={
             **market_frame.diagnostics,
+            "es_bar_consumer": es_bar_consumer,
             "rth_market_state": rth_market_state,
         },
     )
@@ -339,6 +354,10 @@ def run(
         order_policy=app.order_map,
         play_stats=play_stats,
     )
+    trade_intent = _fence_rth_trade_intent_authority(
+        trade_intent,
+        es_bar_consumer=es_bar_consumer,
+    )
     trade_intent = _apply_provider_entry_control(
         trade_intent,
         provider_entry_control,
@@ -363,6 +382,23 @@ def run(
         trade_intent,
         now=evaluation_now,
     )
+    expected_trade_intent_policy_version = trade_intent_policy_version(policy, app.order_map)
+    producer_ledger, intent_delivery = _record_and_process_trade_intent(
+        storage,
+        trade_intent,
+        now=evaluation_now,
+        feature_policy=policy,
+        order_policy=app.order_map,
+        expected_policy_version=expected_trade_intent_policy_version,
+        action_clock=resolved_action_clock,
+    )
+    producer_deadline = _dict(producer_ledger.get("deadline"))
+    delivery_action_now = as_utc(
+        datetime.fromisoformat(str(producer_deadline["action_revalidation_at"]))
+    )
+
+    # Research overlays enrich the persisted/output context only. They run
+    # after the trade-critical producer ledger and durable delivery attempt.
     contract_id = str(trade_intent.get("contract_id") or "")
     focused = build_zero_dte_greeks_reference(
         latest,
@@ -406,17 +442,6 @@ def run(
         trade_candidate=trade_candidate,
         confirmed_gate=confirmed_gate,
     )
-    expected_trade_intent_policy_version = trade_intent_policy_version(policy, app.order_map)
-    delivery_action_now = as_utc(resolved_action_clock())
-    intent_delivery = process_trade_intent(
-        storage,
-        trade_intent,
-        now=evaluation_now,
-        feature_policy=policy,
-        order_policy=app.order_map,
-        expected_policy_version=expected_trade_intent_policy_version,
-        action_now=delivery_action_now,
-    )
     # Delivery may cross a process/network boundary.  Never open or close a
     # lifecycle episode from the evaluation clock or the earlier quote snapshot.
     action_now = as_utc(resolved_action_clock())
@@ -435,9 +460,7 @@ def run(
         now=action_now,
         policy=policy,
         new_entries_allowed=action_provider_entry_control["allowed"] is True,
-        new_entries_block_reason=str(
-            action_provider_entry_control.get("reason") or "unknown"
-        ),
+        new_entries_block_reason=str(action_provider_entry_control.get("reason") or "unknown"),
     )
     virtual_strategy = process_virtual_strategy(
         storage,
@@ -451,9 +474,7 @@ def run(
         policy=policy,
         expected_trade_intent_policy_version=expected_trade_intent_policy_version,
         new_entries_allowed=action_provider_entry_control["allowed"] is True,
-        new_entries_block_reason=str(
-            action_provider_entry_control.get("reason") or "unknown"
-        ),
+        new_entries_block_reason=str(action_provider_entry_control.get("reason") or "unknown"),
     )
     context = replace(
         context,
@@ -501,9 +522,17 @@ def run(
             "decision_context_id": context.context_id,
             "audit_appended": audit is not None,
             "trade_intent_status": trade_intent.get("status"),
+            "trade_intent_producer_ledger": producer_ledger,
+            "trade_intent_deadline": producer_deadline,
+            "trade_intent_evaluation_to_action_revalidation_ms": (
+                producer_deadline.get("evaluation_to_action_revalidation_ms")
+            ),
+            "trade_intent_action_revalidation_exceeded_ttl": (
+                producer_deadline.get("action_revalidation_exceeded_ttl")
+            ),
             "trade_intent_delivery": intent_delivery,
             "evaluation_at": evaluation_now.isoformat(),
-            "action_revalidated_at": action_now.isoformat(),
+            "action_revalidated_at": delivery_action_now.isoformat(),
             "action_quote_state_created_at": action_latest.created_at.isoformat(),
             "action_macro_event": action_macro_event,
             "action_provider_entry_control": action_provider_entry_control,
@@ -519,6 +548,59 @@ def run(
     if args.json:
         print(json.dumps(output, sort_keys=True))
     return 0
+
+
+def _record_and_process_trade_intent(
+    storage: StorageSettings,
+    trade_intent: Mapping[str, object],
+    *,
+    now: datetime,
+    feature_policy: MarketFeatureSettings,
+    order_policy: Any,
+    expected_policy_version: str,
+    action_now: datetime | None = None,
+    action_clock: Callable[[], datetime] | None = None,
+) -> tuple[dict[str, object], dict[str, object]]:
+    """Persist producer evidence, then clock and perform action revalidation."""
+
+    try:
+        producer_ledger = record_trade_intent_producer_observation(
+            storage,
+            trade_intent,
+            now=now,
+        )
+    except Exception as exc:  # noqa: BLE001 - diagnostics must not suppress delivery
+        producer_ledger = {
+            "ok": False,
+            "observed_at": as_utc(now).isoformat(),
+            "heartbeat": "write_failed",
+            "delivery_expectation": (
+                "write_failed" if trade_intent.get("status") == "trade_ready" else "not_trade_ready"
+            ),
+            "error": f"{type(exc).__name__}:{exc}",
+        }
+    revalidation_now = as_utc(
+        action_clock()
+        if action_clock is not None
+        else action_now
+        if action_now is not None
+        else now
+    )
+    producer_ledger["deadline"] = trade_intent_deadline_diagnostics(
+        trade_intent,
+        evaluation_now=now,
+        action_now=revalidation_now,
+    )
+    delivery = process_trade_intent(
+        storage,
+        trade_intent,
+        now=now,
+        feature_policy=feature_policy,
+        order_policy=order_policy,
+        expected_policy_version=expected_policy_version,
+        action_now=revalidation_now,
+    )
+    return producer_ledger, delivery
 
 
 def _provider_entry_control(
@@ -554,11 +636,7 @@ def _apply_provider_entry_control(
         "shadow_ready",
     }:
         return result
-    reasons = [
-        str(item)
-        for item in result.get("block_reasons") or []
-        if str(item)
-    ]
+    reasons = [str(item) for item in result.get("block_reasons") or [] if str(item)]
     if "provider_failover_new_entries_blocked" not in reasons:
         reasons.append("provider_failover_new_entries_blocked")
     return {
@@ -583,6 +661,19 @@ def _process_spring_gamma_v3_shadow(
     settings: object,
 ) -> dict[str, object]:
     """Evaluate and persist the isolated research shadow without failing the hot loop."""
+
+    enabled = (
+        settings.get("enabled", True)
+        if isinstance(settings, Mapping)
+        else getattr(settings, "enabled", True)
+    )
+    if enabled is False:
+        return {
+            "evaluated": False,
+            "status": "disabled",
+            "prediction_id": None,
+            "reason": "shadow_disabled",
+        }
 
     interval = 900
     session_id = "unknown"

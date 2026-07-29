@@ -137,7 +137,12 @@ def test_external_hot_worker_leases_are_wired_when_in_process_tasks_are_disabled
         settings=settings,
     )
 
-    assert set(leases) == {"market_features", "intraday_shock"}
+    assert set(leases) == {
+        "es_bar_sampler",
+        "market_features",
+        "intraday_shock",
+    }
+    assert leases["es_bar_sampler"][1] == 30.0
     assert leases["market_features"][1] == 30.0
     assert leases["intraday_shock"][1] == 30.0
 

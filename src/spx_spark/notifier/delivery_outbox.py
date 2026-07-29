@@ -2,108 +2,55 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import sqlite3
-from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
-from enum import Enum
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Iterable, Sequence
 
+from spx_spark.notifier.delivery_outbox_claims import (
+    DeliveryOutboxClaimMixin,
+)
+from spx_spark.notifier.delivery_outbox_contract import (
+    CLAIM_PRIORITY_SQL as _CLAIM_PRIORITY_SQL,
+    DELIVERY_SINKS,
+    SCHEMA as _SCHEMA,
+    DeliveryCancelled,
+    DeliveryClaimLost,
+    DeliveryEventInspection,
+    DeliveryJob,
+    DeliveryStatus,
+    DeliverySummary,
+    TerminalDeliveryReceipt,
+    delivery_payload_fingerprint,
+    iso as _iso,
+    parse as _parse,
+    utc as _utc,
+)
+from spx_spark.notifier.delivery_outbox_read_model import (
+    DeliveryOutboxReadModelMixin,
+)
 from spx_spark.notifier.receipts import NotificationEnvelope
 
 
-class DeliveryStatus(str, Enum):
-    PENDING = "pending"
-    CLAIMED = "claimed"
-    DELIVERED = "delivered"
-    DEAD_LETTER = "dead_letter"
+__all__ = [
+    "DeliveryCancelled",
+    "DeliveryClaimLost",
+    "DeliveryEventInspection",
+    "DeliveryJob",
+    "DeliveryStatus",
+    "DeliverySummary",
+    "NotificationDeliveryOutbox",
+    "TerminalDeliveryReceipt",
+    "delivery_payload_fingerprint",
+]
 
 
-class DeliveryClaimLost(ValueError):
-    """The target lease moved to another consumer before settlement."""
-
-
-DELIVERY_SINKS = frozenset({"bark", "feishu", "bark_friend"})
-
-
-@dataclass(frozen=True)
-class DeliveryJob:
-    envelope: NotificationEnvelope
-    title: str
-    text: str
-    feishu_text: str | None
-    friend: bool
-    targets: tuple[str, ...]
-
-
-@dataclass(frozen=True)
-class DeliverySummary:
-    status: DeliveryStatus
-    delivered_targets: int
-    pending_targets: int
-    claimed_targets: int
-    dead_letter_targets: int
-
-
-_SCHEMA = """
-CREATE TABLE IF NOT EXISTS notification_delivery_events (
-    event_id TEXT PRIMARY KEY,
-    source TEXT NOT NULL,
-    kind TEXT NOT NULL,
-    lane TEXT NOT NULL,
-    occurred_at TEXT NOT NULL,
-    expires_at TEXT,
-    title TEXT NOT NULL,
-    text TEXT NOT NULL,
-    feishu_text TEXT,
-    friend INTEGER NOT NULL,
-    status TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_notification_events_status
-    ON notification_delivery_events(status, updated_at);
-
-CREATE TABLE IF NOT EXISTS notification_delivery_targets (
-    event_id TEXT NOT NULL,
-    sink TEXT NOT NULL,
-    status TEXT NOT NULL,
-    attempts INTEGER NOT NULL DEFAULT 0,
-    max_attempts INTEGER NOT NULL,
-    next_attempt_at TEXT NOT NULL,
-    claimed_by TEXT,
-    claimed_at TEXT,
-    delivered_at TEXT,
-    last_error TEXT,
-    acknowledged_at TEXT,
-    updated_at TEXT NOT NULL,
-    PRIMARY KEY (event_id, sink),
-    FOREIGN KEY (event_id) REFERENCES notification_delivery_events(event_id)
-        ON DELETE CASCADE
-);
-CREATE INDEX IF NOT EXISTS idx_notification_targets_due
-    ON notification_delivery_targets(status, next_attempt_at);
-"""
-
-
-def _utc(value: datetime | None = None) -> datetime:
-    value = value or datetime.now(tz=timezone.utc)
-    if value.tzinfo is None:
-        value = value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc)
-
-
-def _iso(value: datetime) -> str:
-    return _utc(value).isoformat(timespec="microseconds")
-
-
-def _parse(value: object) -> datetime:
-    parsed = datetime.fromisoformat(str(value))
-    return _utc(parsed)
-
-
-class NotificationDeliveryOutbox:
+class NotificationDeliveryOutbox(
+    DeliveryOutboxClaimMixin,
+    DeliveryOutboxReadModelMixin,
+):
     """SQLite outbox with independent acknowledgement for every sink."""
 
     def __init__(
@@ -170,26 +117,32 @@ class NotificationDeliveryOutbox:
             connection.executescript(_SCHEMA)
             columns = {
                 str(row["name"])
-                for row in connection.execute(
-                    "PRAGMA table_info(notification_delivery_targets)"
-                )
+                for row in connection.execute("PRAGMA table_info(notification_delivery_targets)")
             }
             if "acknowledged_at" not in columns:
                 connection.execute(
-                    "ALTER TABLE notification_delivery_targets "
-                    "ADD COLUMN acknowledged_at TEXT"
+                    "ALTER TABLE notification_delivery_targets ADD COLUMN acknowledged_at TEXT"
                 )
             event_columns = {
                 str(row["name"])
-                for row in connection.execute(
-                    "PRAGMA table_info(notification_delivery_events)"
-                )
+                for row in connection.execute("PRAGMA table_info(notification_delivery_events)")
             }
             if "expires_at" not in event_columns:
                 connection.execute(
-                    "ALTER TABLE notification_delivery_events "
-                    "ADD COLUMN expires_at TEXT"
+                    "ALTER TABLE notification_delivery_events ADD COLUMN expires_at TEXT"
                 )
+            receipt_columns = {
+                str(row["name"])
+                for row in connection.execute(
+                    "PRAGMA table_info(notification_delivery_terminal_receipts)"
+                )
+            }
+            for column in ("attempted", "ok", "queued_for_recovery"):
+                if column not in receipt_columns:
+                    connection.execute(
+                        "ALTER TABLE notification_delivery_terminal_receipts "
+                        f"ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0"
+                    )
 
     def writable(self) -> bool:
         try:
@@ -211,6 +164,104 @@ class NotificationDeliveryOutbox:
                 ).fetchone()
                 is not None
             )
+
+    def cancellation_exists(self, event_id: str) -> bool:
+        with self._connect() as connection:
+            return (
+                connection.execute(
+                    """
+                    SELECT 1 FROM notification_delivery_cancellations
+                    WHERE event_id = ?
+                    """,
+                    (event_id,),
+                ).fetchone()
+                is not None
+            )
+
+    @staticmethod
+    def _terminal_receipt(
+        row: sqlite3.Row,
+        *,
+        outcome: str,
+        reason: str,
+        terminal_at: datetime,
+        attempted: bool = False,
+        ok: bool = False,
+        queued_for_recovery: bool = False,
+    ) -> TerminalDeliveryReceipt:
+        terminal_text = _iso(terminal_at)
+        attempt_ordinal = str(row["attempts"]) if "attempts" in row.keys() else ""
+        receipt_id = hashlib.sha256(
+            (
+                f"{row['event_id']}|{row['sink']}|{outcome}|"
+                f"{reason}|{terminal_text}|{int(attempted)}|{int(ok)}|"
+                f"{attempt_ordinal}"
+            ).encode("utf-8")
+        ).hexdigest()
+        return TerminalDeliveryReceipt(
+            receipt_id=receipt_id,
+            envelope=NotificationEnvelope(
+                event_id=str(row["event_id"]),
+                source=str(row["source"]),
+                kind=str(row["kind"]),
+                lane=str(row["lane"]),
+                occurred_at=_parse(row["occurred_at"]),
+                expires_at=(_parse(row["expires_at"]) if row["expires_at"] is not None else None),
+            ),
+            sink=str(row["sink"]),
+            outcome=outcome,
+            reason=reason,
+            terminal_at=_utc(terminal_at),
+            attempted=attempted,
+            ok=ok,
+            queued_for_recovery=queued_for_recovery,
+        )
+
+    def _record_terminal_receipts(
+        self,
+        connection: sqlite3.Connection,
+        rows: Sequence[sqlite3.Row],
+        *,
+        outcome: str,
+        reason: str,
+        terminal_at: datetime,
+        attempted: bool = False,
+        ok: bool = False,
+        queued_for_recovery: bool = False,
+    ) -> tuple[TerminalDeliveryReceipt, ...]:
+        receipts = tuple(
+            self._terminal_receipt(
+                row,
+                outcome=outcome,
+                reason=reason,
+                terminal_at=terminal_at,
+                attempted=attempted,
+                ok=ok,
+                queued_for_recovery=queued_for_recovery,
+            )
+            for row in rows
+        )
+        for receipt in receipts:
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO notification_delivery_terminal_receipts (
+                    receipt_id, event_id, sink, outcome, reason, terminal_at,
+                    attempted, ok, queued_for_recovery
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    receipt.receipt_id,
+                    receipt.envelope.event_id,
+                    receipt.sink,
+                    receipt.outcome,
+                    receipt.reason,
+                    _iso(receipt.terminal_at),
+                    int(receipt.attempted),
+                    int(receipt.ok),
+                    int(receipt.queued_for_recovery),
+                ),
+            )
+        return receipts
 
     def enqueue(
         self,
@@ -235,6 +286,19 @@ class NotificationDeliveryOutbox:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
+                if (
+                    connection.execute(
+                        """
+                    SELECT 1 FROM notification_delivery_cancellations
+                    WHERE event_id = ?
+                    """,
+                        (envelope.event_id,),
+                    ).fetchone()
+                    is not None
+                ):
+                    raise DeliveryCancelled(
+                        f"notification event {envelope.event_id} is cancellation-fenced"
+                    )
                 cursor = connection.execute(
                     """
                     INSERT OR IGNORE INTO notification_delivery_events (
@@ -281,26 +345,39 @@ class NotificationDeliveryOutbox:
                         int(friend),
                     )
                     if existing is None or tuple(existing) != expected:
-                        raise ValueError(
-                            f"notification event_id collision for {envelope.event_id}"
-                        )
-                for target in normalized_targets:
-                    connection.execute(
-                        """
-                        INSERT OR IGNORE INTO notification_delivery_targets (
-                            event_id, sink, status, attempts, max_attempts,
-                            next_attempt_at, updated_at
-                        ) VALUES (?, ?, ?, 0, ?, ?, ?)
-                        """,
-                        (
-                            envelope.event_id,
-                            target,
-                            DeliveryStatus.PENDING.value,
-                            self.max_attempts,
-                            now_text,
-                            now_text,
-                        ),
+                        raise ValueError(f"notification event_id collision for {envelope.event_id}")
+                    existing_targets = tuple(
+                        str(row["sink"])
+                        for row in connection.execute(
+                            """
+                            SELECT sink FROM notification_delivery_targets
+                            WHERE event_id = ? ORDER BY sink
+                            """,
+                            (envelope.event_id,),
+                        ).fetchall()
                     )
+                    if existing_targets != tuple(sorted(normalized_targets)):
+                        raise ValueError(
+                            f"notification event_id target collision for {envelope.event_id}"
+                        )
+                else:
+                    for target in normalized_targets:
+                        connection.execute(
+                            """
+                            INSERT INTO notification_delivery_targets (
+                                event_id, sink, status, attempts, max_attempts,
+                                next_attempt_at, updated_at
+                            ) VALUES (?, ?, ?, 0, ?, ?, ?)
+                            """,
+                            (
+                                envelope.event_id,
+                                target,
+                                DeliveryStatus.PENDING.value,
+                                self.max_attempts,
+                                now_text,
+                                now_text,
+                            ),
+                        )
                 self._refresh_event_status(connection, envelope.event_id, now_text)
                 connection.execute("COMMIT")
             except Exception:
@@ -351,17 +428,19 @@ class NotificationDeliveryOutbox:
         limit_targets: int,
         now: datetime | None = None,
         event_id: str | None = None,
+        terminal_receipts: list[TerminalDeliveryReceipt] | None = None,
     ) -> list[DeliveryJob]:
         if limit_targets < 1:
             return []
         now = _utc(now)
         now_text = _iso(now)
         claimed_rows: list[sqlite3.Row] = []
+        expired_receipts: tuple[TerminalDeliveryReceipt, ...] = ()
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
                 self._requeue_stale_claims(connection, now=now)
-                self._expire_due_targets(connection, now=now)
+                expired_receipts = self._expire_due_targets(connection, now=now)
                 params: list[object] = [DeliveryStatus.PENDING.value, now_text]
                 event_clause = ""
                 if event_id is not None:
@@ -376,7 +455,19 @@ class NotificationDeliveryOutbox:
                     FROM notification_delivery_targets AS t
                     JOIN notification_delivery_events AS e USING (event_id)
                     WHERE t.status = ? AND t.next_attempt_at <= ?{event_clause}
-                    ORDER BY t.next_attempt_at, e.created_at, t.sink
+                      AND NOT EXISTS (
+                          SELECT 1 FROM notification_delivery_cancellations AS c
+                          WHERE c.event_id = t.event_id
+                      )
+                    -- Strict lane priority protects expiring safety/trade
+                    -- cards from old report fan-out. Within a lane, the
+                    -- earliest expiry and retry due time retain FIFO order.
+                    ORDER BY {_CLAIM_PRIORITY_SQL},
+                             CASE WHEN e.expires_at IS NULL THEN 1 ELSE 0 END,
+                             e.expires_at,
+                             t.next_attempt_at,
+                             e.created_at,
+                             t.sink
                     LIMIT ?
                     """,
                     tuple(params),
@@ -410,6 +501,8 @@ class NotificationDeliveryOutbox:
                 if connection.in_transaction:
                     connection.execute("ROLLBACK")
                 raise
+        if terminal_receipts is not None:
+            terminal_receipts.extend(expired_receipts)
         grouped: dict[str, list[sqlite3.Row]] = {}
         for row in claimed_rows:
             grouped.setdefault(str(row["event_id"]), []).append(row)
@@ -425,17 +518,13 @@ class NotificationDeliveryOutbox:
                         lane=str(first["lane"]),
                         occurred_at=_parse(first["occurred_at"]),
                         expires_at=(
-                            _parse(first["expires_at"])
-                            if first["expires_at"] is not None
-                            else None
+                            _parse(first["expires_at"]) if first["expires_at"] is not None else None
                         ),
                     ),
                     title=str(first["title"]),
                     text=str(first["text"]),
                     feishu_text=(
-                        str(first["feishu_text"])
-                        if first["feishu_text"] is not None
-                        else None
+                        str(first["feishu_text"]) if first["feishu_text"] is not None else None
                     ),
                     friend=bool(first["friend"]),
                     targets=tuple(str(row["sink"]) for row in rows),
@@ -448,27 +537,31 @@ class NotificationDeliveryOutbox:
         connection: sqlite3.Connection,
         *,
         now: datetime,
-    ) -> int:
+    ) -> tuple[TerminalDeliveryReceipt, ...]:
         """Settle expired pending work without performing network delivery."""
 
         now_text = _iso(now)
         rows = connection.execute(
             """
-            SELECT DISTINCT t.event_id
+            SELECT t.event_id, t.sink, e.source, e.kind, e.lane,
+                   e.occurred_at, e.expires_at
             FROM notification_delivery_targets AS t
             JOIN notification_delivery_events AS e USING (event_id)
             WHERE t.status = ? AND e.expires_at IS NOT NULL
               AND e.expires_at <= ?
+            ORDER BY t.event_id, t.sink
             """,
             (DeliveryStatus.PENDING.value, now_text),
         ).fetchall()
-        cursor = connection.execute(
+        if not rows:
+            return ()
+        connection.execute(
             """
             UPDATE notification_delivery_targets
             SET status = ?, next_attempt_at = ?, claimed_by = NULL,
                 claimed_at = NULL,
                 last_error = 'notification_expired_before_delivery',
-                acknowledged_at = ?, updated_at = ?
+                acknowledged_at = NULL, updated_at = ?
             WHERE status = ? AND event_id IN (
                 SELECT event_id FROM notification_delivery_events
                 WHERE expires_at IS NOT NULL AND expires_at <= ?
@@ -478,14 +571,96 @@ class NotificationDeliveryOutbox:
                 DeliveryStatus.DEAD_LETTER.value,
                 now_text,
                 now_text,
-                now_text,
                 DeliveryStatus.PENDING.value,
                 now_text,
             ),
         )
-        for row in rows:
-            self._refresh_event_status(connection, str(row["event_id"]), now_text)
-        return cursor.rowcount
+        receipts = self._record_terminal_receipts(
+            connection,
+            rows,
+            outcome="expired_before_delivery",
+            reason="notification_expired_before_delivery",
+            terminal_at=now,
+        )
+        for event_id in {str(row["event_id"]) for row in rows}:
+            self._refresh_event_status(connection, event_id, now_text)
+        return receipts
+
+    def expire_claimed_targets(
+        self,
+        event_id: str,
+        targets: Iterable[str],
+        *,
+        worker_id: str,
+        now: datetime | None = None,
+    ) -> tuple[TerminalDeliveryReceipt, ...]:
+        """Atomically settle an expired lease immediately before network I/O."""
+
+        normalized_targets = tuple(dict.fromkeys(str(target) for target in targets))
+        if not normalized_targets:
+            return ()
+        now = _utc(now)
+        now_text = _iso(now)
+        placeholders = ",".join("?" for _ in normalized_targets)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                rows = connection.execute(
+                    f"""
+                    SELECT t.event_id, t.sink, e.source, e.kind, e.lane,
+                           e.occurred_at, e.expires_at
+                    FROM notification_delivery_targets AS t
+                    JOIN notification_delivery_events AS e USING (event_id)
+                    WHERE t.event_id = ? AND t.sink IN ({placeholders})
+                      AND t.status = ? AND t.claimed_by = ?
+                      AND e.expires_at IS NOT NULL AND e.expires_at <= ?
+                    ORDER BY t.sink
+                    """,
+                    (
+                        event_id,
+                        *normalized_targets,
+                        DeliveryStatus.CLAIMED.value,
+                        worker_id,
+                        now_text,
+                    ),
+                ).fetchall()
+                if not rows:
+                    connection.execute("COMMIT")
+                    return ()
+                connection.execute(
+                    f"""
+                    UPDATE notification_delivery_targets
+                    SET status = ?, next_attempt_at = ?, claimed_by = NULL,
+                        claimed_at = NULL,
+                        last_error = 'notification_expired_before_delivery',
+                        acknowledged_at = NULL, updated_at = ?
+                    WHERE event_id = ? AND sink IN ({placeholders})
+                      AND status = ? AND claimed_by = ?
+                    """,
+                    (
+                        DeliveryStatus.DEAD_LETTER.value,
+                        now_text,
+                        now_text,
+                        event_id,
+                        *normalized_targets,
+                        DeliveryStatus.CLAIMED.value,
+                        worker_id,
+                    ),
+                )
+                receipts = self._record_terminal_receipts(
+                    connection,
+                    rows,
+                    outcome="expired_before_delivery",
+                    reason="notification_expired_before_delivery",
+                    terminal_at=now,
+                )
+                self._refresh_event_status(connection, event_id, now_text)
+                connection.execute("COMMIT")
+            except Exception:
+                if connection.in_transaction:
+                    connection.execute("ROLLBACK")
+                raise
+        return receipts
 
     def settle_target(
         self,
@@ -496,6 +671,8 @@ class NotificationDeliveryOutbox:
         ok: bool,
         error: str | None,
         permanent: bool = False,
+        attempted: bool = True,
+        receipt_outcome: str | None = None,
         now: datetime | None = None,
     ) -> DeliveryStatus:
         now = _utc(now)
@@ -505,7 +682,9 @@ class NotificationDeliveryOutbox:
             try:
                 row = connection.execute(
                     """
-                    SELECT t.attempts, t.max_attempts, e.created_at
+                    SELECT t.event_id, t.sink, t.attempts, t.max_attempts,
+                           e.source, e.kind, e.lane, e.occurred_at,
+                           e.expires_at, e.created_at
                     FROM notification_delivery_targets AS t
                     JOIN notification_delivery_events AS e USING (event_id)
                     WHERE t.event_id = ? AND t.sink = ? AND t.status = ?
@@ -560,6 +739,20 @@ class NotificationDeliveryOutbox:
                     ),
                 )
                 self._refresh_event_status(connection, event_id, now_text)
+                self._record_terminal_receipts(
+                    connection,
+                    (row,),
+                    outcome=receipt_outcome or status.value,
+                    reason=(
+                        (error or "delivery failed")[:1000]
+                        if not ok
+                        else (error or "delivery_succeeded")[:1000]
+                    ),
+                    terminal_at=now,
+                    attempted=attempted,
+                    ok=ok,
+                    queued_for_recovery=status is DeliveryStatus.PENDING,
+                )
                 connection.execute("COMMIT")
             except Exception:
                 if connection.in_transaction:
@@ -567,145 +760,101 @@ class NotificationDeliveryOutbox:
                 raise
         return status
 
-    def _refresh_event_status(
+    def record_unsettled_attempt(
         self,
-        connection: sqlite3.Connection,
         event_id: str,
-        now_text: str,
-    ) -> DeliveryStatus:
-        counts = {
-            str(row["status"]): int(row["count"])
-            for row in connection.execute(
-                """
-                SELECT status, COUNT(*) AS count
-                FROM notification_delivery_targets
-                WHERE event_id = ? GROUP BY status
-                """,
-                (event_id,),
-            )
-        }
-        if counts.get(DeliveryStatus.CLAIMED.value, 0):
-            status = DeliveryStatus.CLAIMED
-        elif counts.get(DeliveryStatus.PENDING.value, 0):
-            status = DeliveryStatus.PENDING
-        elif counts.get(DeliveryStatus.DEAD_LETTER.value, 0):
-            status = DeliveryStatus.DEAD_LETTER
-        else:
-            status = DeliveryStatus.DELIVERED
-        connection.execute(
-            """
-            UPDATE notification_delivery_events
-            SET status = ?, updated_at = ? WHERE event_id = ?
-            """,
-            (status.value, now_text, event_id),
-        )
-        return status
-
-    def summary(self, event_id: str) -> DeliverySummary | None:
-        with self._connect() as connection:
-            event = connection.execute(
-                "SELECT status FROM notification_delivery_events WHERE event_id = ?",
-                (event_id,),
-            ).fetchone()
-            if event is None:
-                return None
-            counts = {
-                str(row["status"]): int(row["count"])
-                for row in connection.execute(
-                    """
-                    SELECT status, COUNT(*) AS count
-                    FROM notification_delivery_targets
-                    WHERE event_id = ? GROUP BY status
-                    """,
-                    (event_id,),
-                )
-            }
-        return DeliverySummary(
-            status=DeliveryStatus(str(event["status"])),
-            delivered_targets=counts.get(DeliveryStatus.DELIVERED.value, 0),
-            pending_targets=counts.get(DeliveryStatus.PENDING.value, 0),
-            claimed_targets=counts.get(DeliveryStatus.CLAIMED.value, 0),
-            dead_letter_targets=counts.get(DeliveryStatus.DEAD_LETTER.value, 0),
-        )
-
-    def count_targets(self) -> dict[str, int]:
-        with self._connect() as connection:
-            return {
-                str(row["status"]): int(row["count"])
-                for row in connection.execute(
-                    """
-                    SELECT status, COUNT(*) AS count
-                    FROM notification_delivery_targets GROUP BY status
-                    """
-                )
-            }
-
-    def list_dead_letters(
-        self,
+        sink: str,
         *,
-        unacknowledged_only: bool = False,
-    ) -> list[dict[str, object]]:
-        """Dead-letter targets joined with their event, oldest update first."""
+        attempted: bool,
+        ok: bool,
+        error: str | None,
+        now: datetime | None = None,
+    ) -> tuple[TerminalDeliveryReceipt, ...]:
+        """Audit a completed network attempt whose delivery claim was lost."""
 
-        query = """
-            SELECT t.event_id, t.sink, t.attempts, t.max_attempts, t.last_error,
-                   t.updated_at, t.acknowledged_at, e.title, e.kind, e.lane
-            FROM notification_delivery_targets AS t
-            JOIN notification_delivery_events AS e USING (event_id)
-            WHERE t.status = ?
-        """
-        if unacknowledged_only:
-            query += " AND t.acknowledged_at IS NULL"
-        query += " ORDER BY t.updated_at, t.event_id, t.sink"
+        now = _utc(now)
         with self._connect() as connection:
-            rows = connection.execute(
-                query,
-                (DeliveryStatus.DEAD_LETTER.value,),
-            ).fetchall()
-        return [
-            {
-                "event_id": str(row["event_id"]),
-                "sink": str(row["sink"]),
-                "title": str(row["title"]),
-                "kind": str(row["kind"]),
-                "lane": str(row["lane"]),
-                "attempts": int(row["attempts"]),
-                "max_attempts": int(row["max_attempts"]),
-                "last_error": row["last_error"],
-                "updated_at": str(row["updated_at"]),
-                "acknowledged": row["acknowledged_at"] is not None,
-            }
-            for row in rows
-        ]
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                row = connection.execute(
+                    """
+                    SELECT t.event_id, t.sink, t.status, t.attempts,
+                           e.source, e.kind, e.lane, e.occurred_at,
+                           e.expires_at
+                    FROM notification_delivery_targets AS t
+                    JOIN notification_delivery_events AS e USING (event_id)
+                    WHERE t.event_id = ? AND t.sink = ?
+                    """,
+                    (event_id, sink),
+                ).fetchone()
+                if row is None:
+                    connection.execute("COMMIT")
+                    return ()
+                receipts = self._record_terminal_receipts(
+                    connection,
+                    (row,),
+                    outcome="delivery_claim_lost",
+                    reason=(error or "delivery claim lost")[:1000],
+                    terminal_at=now,
+                    attempted=attempted,
+                    ok=ok,
+                    queued_for_recovery=(
+                        str(row["status"])
+                        in {
+                            DeliveryStatus.PENDING.value,
+                            DeliveryStatus.CLAIMED.value,
+                        }
+                    ),
+                )
+                connection.execute("COMMIT")
+            except Exception:
+                if connection.in_transaction:
+                    connection.execute("ROLLBACK")
+                raise
+        return receipts
 
-    def count_unacknowledged_dead_letters(self) -> int:
-        """Dead letters no operator has reviewed yet; drives recovery health."""
-
-        with self._connect() as connection:
-            row = connection.execute(
-                """
-                SELECT COUNT(*) AS count FROM notification_delivery_targets
-                WHERE status = ? AND acknowledged_at IS NULL
-                """,
-                (DeliveryStatus.DEAD_LETTER.value,),
-            ).fetchone()
-        return int(row["count"])
-
-    def cancel_event(
+    def cancel_event_with_receipts(
         self,
         event_id: str,
         *,
         reason: str,
         now: datetime | None = None,
-    ) -> int:
-        """Terminally settle undelivered targets after their source invalidates."""
+    ) -> tuple[TerminalDeliveryReceipt, ...]:
+        """Cancel undelivered targets and atomically append terminal audit rows."""
 
-        now_text = _iso(_utc(now))
+        now = _utc(now)
+        now_text = _iso(now)
         error = (reason or "notification_cancelled_before_delivery")[:1000]
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
-                cursor = connection.execute(
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO notification_delivery_cancellations (
+                        event_id, reason, cancelled_at
+                    ) VALUES (?, ?, ?)
+                    """,
+                    (event_id, error, now_text),
+                )
+                rows = connection.execute(
+                    """
+                    SELECT t.event_id, t.sink, e.source, e.kind, e.lane,
+                           e.occurred_at, e.expires_at
+                    FROM notification_delivery_targets AS t
+                    JOIN notification_delivery_events AS e USING (event_id)
+                    WHERE t.event_id = ? AND t.status IN (?, ?)
+                    ORDER BY t.sink
+                    """,
+                    (
+                        event_id,
+                        DeliveryStatus.PENDING.value,
+                        DeliveryStatus.CLAIMED.value,
+                    ),
+                ).fetchall()
+                if not rows:
+                    connection.execute("COMMIT")
+                    return ()
+                connection.execute(
                     """
                     UPDATE notification_delivery_targets
                     SET status = ?, next_attempt_at = ?, claimed_by = NULL,
@@ -724,15 +873,31 @@ class NotificationDeliveryOutbox:
                         DeliveryStatus.CLAIMED.value,
                     ),
                 )
-                cancelled = cursor.rowcount
-                if cancelled:
-                    self._refresh_event_status(connection, event_id, now_text)
+                receipts = self._record_terminal_receipts(
+                    connection,
+                    rows,
+                    outcome="cancelled_before_delivery",
+                    reason=error,
+                    terminal_at=now,
+                )
+                self._refresh_event_status(connection, event_id, now_text)
                 connection.execute("COMMIT")
             except Exception:
                 if connection.in_transaction:
                     connection.execute("ROLLBACK")
                 raise
-        return cancelled
+        return receipts
+
+    def cancel_event(
+        self,
+        event_id: str,
+        *,
+        reason: str,
+        now: datetime | None = None,
+    ) -> int:
+        """Terminally settle undelivered targets after their source invalidates."""
+
+        return len(self.cancel_event_with_receipts(event_id, reason=reason, now=now))
 
     def replay_dead_letter(self, event_id: str, *, now: datetime | None = None) -> int:
         """Reset one event's dead-letter targets to pending with a fresh budget.
@@ -752,6 +917,10 @@ class NotificationDeliveryOutbox:
                         claimed_by = NULL, claimed_at = NULL, last_error = NULL,
                         acknowledged_at = NULL, updated_at = ?
                     WHERE event_id = ? AND status = ?
+                      AND NOT EXISTS (
+                          SELECT 1 FROM notification_delivery_cancellations
+                          WHERE event_id = ?
+                      )
                     """,
                     (
                         DeliveryStatus.PENDING.value,
@@ -759,6 +928,7 @@ class NotificationDeliveryOutbox:
                         now_text,
                         event_id,
                         DeliveryStatus.DEAD_LETTER.value,
+                        event_id,
                     ),
                 )
                 replayed = cursor.rowcount

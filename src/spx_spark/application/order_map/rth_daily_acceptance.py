@@ -1,9 +1,9 @@
 """Post-close operational acceptance for the complete RTH data path.
 
-The regular post-close review validates market-data completeness.  This
+The regular post-close review validates market-data completeness. This
 projection adds the cross-process contracts that unit tests cannot observe:
-minute Spring production, quarter-hour report delivery, report projection
-attachment, the rolling state summary, and the human-notification outbox.
+five-minute TradeIntent producer coverage, quarter-hour report delivery,
+per-event notification settlement, and the outbox/receipt durability chain.
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ import argparse
 import json
 import math
 import sqlite3
-from dataclasses import asdict, dataclass
+from dataclasses import asdict
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Iterable, Mapping
@@ -25,6 +25,20 @@ from spx_spark.application.order_map.report_clock import (
     RTH_REPORT_START_GRACE_SECONDS,
     rth_report_schedule_for_session,
     rth_report_slot_for_session,
+)
+from spx_spark.application.order_map.rth_daily_acceptance_support import (
+    KNOWN_MARKET_STATES,
+    MARKET_STATE_RULE,
+    MARKET_STATE_SCHEMA,
+    TRADE_INTENT_PRODUCER_LEDGER_SCHEMA,
+    OperationalCheck,
+    fully_delivered_event_ids as _fully_delivered_event_ids,
+    read_json_object as _read_json_object,
+    read_jsonl as _read_jsonl,
+    read_jsonl_with_integrity as _read_jsonl_with_integrity,
+    receipt_store_check as _receipt_store_check,
+    report_event_id as _report_event_id,
+    trade_ready_delivery_check as _trade_ready_delivery_check,
 )
 from spx_spark.config import NotificationSettings, StorageSettings
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR, MarketCalendar, MarketSession
@@ -41,27 +55,6 @@ MIN_SPRING_MINUTE_COVERAGE = 0.95
 MIN_REPORT_SLOT_COVERAGE = 1.0
 MIN_REPORT_PROJECTION_COVERAGE = 0.95
 MIN_OPTION_OVERLAY_READY_RATIO = 0.75
-MARKET_STATE_SCHEMA = "market_state_5m.v1"
-MARKET_STATE_RULE = "market_state_5m_eight_variable_rules.v2"
-KNOWN_MARKET_STATES = frozenset(
-    {
-        "TREND_UP",
-        "TREND_DOWN",
-        "LOW_VOL_RANGE",
-        "HIGH_VOL_CHOP",
-        "LOW_VOL_PIN",
-        "UNCERTAIN",
-    }
-)
-
-
-@dataclass(frozen=True, slots=True)
-class OperationalCheck:
-    name: str
-    measured: object
-    threshold: object
-    passed: bool
-    reason: str
 
 
 def build_rth_daily_acceptance(
@@ -70,8 +63,10 @@ def build_rth_daily_acceptance(
     trading_date: date,
     level_policy: LevelDecisionPolicy,
     outbox_path: str | Path | None = None,
+    receipt_path: str | Path | None = None,
     now: datetime | None = None,
     calendar: MarketCalendar = DEFAULT_MARKET_CALENDAR,
+    spring_required: bool = True,
 ) -> dict[str, object]:
     """Build one deterministic, fail-closed daily operational verdict."""
 
@@ -90,16 +85,51 @@ def build_rth_daily_acceptance(
     report_rows = _read_jsonl(
         root / "audit" / "order_map_pricing" / f"date={trading_date.isoformat()}" / "reports.jsonl"
     )
+    trade_intent_path = (
+        root / "features" / "trade_intents" / f"date={trading_date.isoformat()}" / "events.jsonl"
+    )
+    trade_intent_rows, trade_intent_integrity = _read_jsonl_with_integrity(trade_intent_path)
+    producer_ledger_path = (
+        root
+        / "features"
+        / "trade_intent_producer_ledger"
+        / f"date={trading_date.isoformat()}"
+        / "events.jsonl"
+    )
+    producer_ledger_rows, producer_ledger_integrity = _read_jsonl_with_integrity(
+        producer_ledger_path
+    )
     post_close_review = _read_json_object(
         root / "reports" / "spx_options_review" / f"date={trading_date.isoformat()}" / "review.json"
     )
     level_report = build_acceptance_report(root, policy=level_policy, now=generated_at)
     level_path = write_acceptance_report(root, level_report)
     checks = [
-        *_spring_checks(session, spring_rows),
-        *_report_checks(session, report_rows, outbox_path=outbox_path),
+        *(_spring_checks(session, spring_rows) if spring_required else ()),
+        *_report_checks(
+            session,
+            report_rows,
+            outbox_path=outbox_path,
+            spring_required=spring_required,
+        ),
+        _trade_intent_producer_coverage_check(
+            session,
+            producer_ledger_rows,
+            integrity=producer_ledger_integrity,
+        ),
+        _trade_intent_audit_integrity_check(
+            trade_intent_rows,
+            integrity=trade_intent_integrity,
+        ),
+        _trade_ready_delivery_check(
+            producer_ledger_rows,
+            trade_intent_rows=trade_intent_rows,
+            outbox_path=outbox_path,
+            receipt_path=receipt_path,
+        ),
         _post_close_review_check(post_close_review),
         _outbox_check(outbox_path),
+        _receipt_store_check(outbox_path, receipt_path),
         _level_decision_signal_check(level_report),
     ]
     passed = all(check.passed for check in checks)
@@ -108,12 +138,13 @@ def build_rth_daily_acceptance(
         "generated_at": generated_at.isoformat(),
         "trading_date": trading_date.isoformat(),
         "status": "complete" if passed else "degraded",
+        "spring_required": spring_required,
         "session_clock": {
             "timezone": str(session.open_at.tzinfo),
             "open_at": session.open_at.isoformat(),
             "close_at": session.close_at.isoformat(),
             "expected_five_minute_bars": session.expected_five_minute_buckets,
-            "expected_spring_minutes": _expected_minute_count(session),
+            "expected_spring_minutes": (_expected_minute_count(session) if spring_required else 0),
             "expected_report_slots": len(_expected_report_slots(session)),
             "report_scheduler_tolerance_seconds": RTH_REPORT_START_GRACE_SECONDS,
         },
@@ -260,6 +291,7 @@ def _report_checks(
     rows: Iterable[Mapping[str, object]],
     *,
     outbox_path: str | Path | None,
+    spring_required: bool = True,
 ) -> tuple[OperationalCheck, ...]:
     expected_slots = _expected_report_slots(session)
     by_slot: dict[datetime, Mapping[str, object]] = {}
@@ -280,13 +312,12 @@ def _report_checks(
         event_ids_by_slot.values(),
     )
     delivered = sum(
-        slot in by_slot and event_ids_by_slot[slot] in fully_delivered
-        for slot in expected_slots
+        slot in by_slot and event_ids_by_slot[slot] in fully_delivered for slot in expected_slots
     )
     projected = sum(_has_spring_projection(by_slot.get(slot)) for slot in expected_slots)
     summarized = sum(_has_state_window(by_slot.get(slot)) for slot in expected_slots)
     total = len(expected_slots)
-    return (
+    delivery_checks = (
         _ratio_operational_check(
             "rth_report_slot_coverage",
             present,
@@ -301,6 +332,11 @@ def _report_checks(
             MIN_REPORT_SLOT_COVERAGE,
             "delivered scheduled RTH reports",
         ),
+    )
+    if not spring_required:
+        return delivery_checks
+    return (
+        *delivery_checks,
         _ratio_operational_check(
             "rth_report_spring_projection_coverage",
             projected,
@@ -314,6 +350,109 @@ def _report_checks(
             total,
             MIN_REPORT_PROJECTION_COVERAGE,
             "reports carrying the prior 15-minute state window",
+        ),
+    )
+
+
+def _trade_intent_producer_coverage_check(
+    session: MarketSession,
+    rows: Iterable[Mapping[str, object]],
+    *,
+    integrity: Mapping[str, object],
+) -> OperationalCheck:
+    expected_slots = {
+        f"{session.trading_date.isoformat()}:rth:{index:03d}"
+        for index in range(session.expected_five_minute_buckets)
+    }
+    observed_slots: set[str] = set()
+    record_ids: set[str] = set()
+    duplicate_record_ids: set[str] = set()
+    malformed_rows = 0
+    unexpected_record_types: set[str] = set()
+    for row in rows:
+        record_id = str(row.get("record_id") or "")
+        if record_id in record_ids:
+            duplicate_record_ids.add(record_id)
+        elif record_id:
+            record_ids.add(record_id)
+        if (
+            row.get("schema_version") != TRADE_INTENT_PRODUCER_LEDGER_SCHEMA
+            or str(row.get("trading_date_et") or "") != session.trading_date.isoformat()
+            or not record_id
+        ):
+            malformed_rows += 1
+            continue
+        record_type = str(row.get("record_type") or "")
+        if record_type == "rth_5m_heartbeat":
+            slot_id = str(row.get("slot_id") or "")
+            if slot_id not in expected_slots:
+                malformed_rows += 1
+            else:
+                observed_slots.add(slot_id)
+        elif record_type == "trade_ready_delivery_expectation":
+            if not str(row.get("semantic_key") or "") or not str(
+                row.get("delivery_event_id") or ""
+            ):
+                malformed_rows += 1
+        else:
+            unexpected_record_types.add(record_type or "<missing>")
+
+    missing_slots = sorted(expected_slots - observed_slots)
+    parser_ok = (
+        integrity.get("exists") is True
+        and int(integrity.get("malformed_lines") or 0) == 0
+        and int(integrity.get("valid_rows") or 0) > 0
+    )
+    passed = (
+        parser_ok
+        and malformed_rows == 0
+        and not duplicate_record_ids
+        and not unexpected_record_types
+        and not missing_slots
+    )
+    return OperationalCheck(
+        name="trade_intent_producer_coverage",
+        measured={
+            **dict(integrity),
+            "expected_slots": len(expected_slots),
+            "observed_slots": len(observed_slots),
+            "missing_slots": missing_slots,
+            "malformed_rows": malformed_rows,
+            "duplicate_record_ids": sorted(duplicate_record_ids),
+            "unexpected_record_types": sorted(unexpected_record_types),
+        },
+        threshold=(
+            "strict JSONL, exact schema/date, and one durable producer "
+            "heartbeat in every RTH five-minute slot"
+        ),
+        passed=passed,
+        reason=(
+            f"TradeIntent producer slots {len(observed_slots)}/"
+            f"{len(expected_slots)}; malformed rows {malformed_rows}; "
+            f"parse errors {int(integrity.get('malformed_lines') or 0)}"
+        ),
+    )
+
+
+def _trade_intent_audit_integrity_check(
+    rows: Iterable[Mapping[str, object]],
+    *,
+    integrity: Mapping[str, object],
+) -> OperationalCheck:
+    row_count = sum(1 for _row in rows)
+    passed = (
+        integrity.get("exists") is True
+        and int(integrity.get("malformed_lines") or 0) == 0
+        and row_count > 0
+    )
+    return OperationalCheck(
+        name="trade_intent_audit_integrity",
+        measured={**dict(integrity), "rows": row_count},
+        threshold="present, non-empty, and every JSONL line parses to an object",
+        passed=passed,
+        reason=(
+            f"TradeIntent audit rows {row_count}; parse errors "
+            f"{int(integrity.get('malformed_lines') or 0)}"
         ),
     )
 
@@ -364,14 +503,12 @@ def _outbox_check(path: str | Path | None) -> OperationalCheck:
             )
             pending_targets = int(
                 connection.execute(
-                    "SELECT COUNT(*) FROM notification_delivery_targets "
-                    "WHERE status = 'pending'"
+                    "SELECT COUNT(*) FROM notification_delivery_targets WHERE status = 'pending'"
                 ).fetchone()[0]
             )
             claimed_targets = int(
                 connection.execute(
-                    "SELECT COUNT(*) FROM notification_delivery_targets "
-                    "WHERE status = 'claimed'"
+                    "SELECT COUNT(*) FROM notification_delivery_targets WHERE status = 'claimed'"
                 ).fetchone()[0]
             )
             unknown_targets = int(
@@ -379,6 +516,24 @@ def _outbox_check(path: str | Path | None) -> OperationalCheck:
                     "SELECT COUNT(*) FROM notification_delivery_targets "
                     "WHERE status NOT IN ('pending', 'claimed', 'delivered', 'dead_letter')"
                 ).fetchone()[0]
+            )
+            terminal_receipt_schema_present = (
+                connection.execute(
+                    "SELECT 1 FROM sqlite_master "
+                    "WHERE type = 'table' "
+                    "AND name = 'notification_delivery_terminal_receipts'"
+                ).fetchone()
+                is not None
+            )
+            terminal_receipts_pending = (
+                int(
+                    connection.execute(
+                        "SELECT COUNT(*) FROM notification_delivery_terminal_receipts "
+                        "WHERE recorded_at IS NULL"
+                    ).fetchone()[0]
+                )
+                if terminal_receipt_schema_present
+                else 0
             )
     except (OSError, sqlite3.Error) as exc:
         return OperationalCheck(
@@ -395,6 +550,8 @@ def _outbox_check(path: str | Path | None) -> OperationalCheck:
         and claimed_targets == 0
         and dead_letters == 0
         and unknown_targets == 0
+        and terminal_receipt_schema_present
+        and terminal_receipts_pending == 0
     )
     return OperationalCheck(
         name="notification_outbox_integrity",
@@ -405,6 +562,8 @@ def _outbox_check(path: str | Path | None) -> OperationalCheck:
             "claimed_targets": claimed_targets,
             "dead_letter_targets": dead_letters,
             "unknown_targets": unknown_targets,
+            "terminal_receipt_schema_present": terminal_receipt_schema_present,
+            "terminal_receipts_pending": terminal_receipts_pending,
         },
         threshold={
             "quick_check": "ok",
@@ -413,12 +572,16 @@ def _outbox_check(path: str | Path | None) -> OperationalCheck:
             "claimed_targets": 0,
             "dead_letter_targets": 0,
             "unknown_targets": 0,
+            "terminal_receipt_schema_present": True,
+            "terminal_receipts_pending": 0,
         },
         passed=passed,
         reason=(
             f"outbox quick_check={quick_check}, journal_mode={journal_mode}, "
             f"pending_targets={pending_targets}, claimed_targets={claimed_targets}, "
-            f"dead_letter_targets={dead_letters}, unknown_targets={unknown_targets}"
+            f"dead_letter_targets={dead_letters}, unknown_targets={unknown_targets}, "
+            f"terminal_receipt_schema_present={terminal_receipt_schema_present}, "
+            f"terminal_receipts_pending={terminal_receipts_pending}"
         ),
     )
 
@@ -445,51 +608,6 @@ def _level_decision_signal_check(
             else "formal signal is enabled before statistical gates pass"
         ),
     )
-
-
-def _report_event_id(
-    row: Mapping[str, object] | None,
-    *,
-    session: MarketSession,
-    slot: datetime,
-) -> str:
-    if isinstance(row, Mapping):
-        persisted = row.get("notification_event_id")
-        if isinstance(persisted, str) and persisted:
-            return persisted
-    slot_key = f"{session.trading_date.isoformat()}:{slot.strftime('%H:%M')}"
-    return notification_event_id(
-        "status",
-        source="order_map_status",
-        occurred_at=slot,
-        identity=f"rth_slot:{slot_key}",
-    )
-
-
-def _fully_delivered_event_ids(
-    path: str | Path | None,
-    event_ids: Iterable[str],
-) -> frozenset[str]:
-    requested = tuple(dict.fromkeys(str(value) for value in event_ids if value))
-    if path is None or not str(path) or not requested:
-        return frozenset()
-    database = Path(path)
-    if not database.exists():
-        return frozenset()
-    placeholders = ",".join("?" for _ in requested)
-    try:
-        with sqlite3.connect(f"file:{database}?mode=ro", uri=True) as connection:
-            rows = connection.execute(
-                "SELECT event_id FROM notification_delivery_targets "
-                f"WHERE event_id IN ({placeholders}) "
-                "GROUP BY event_id "
-                "HAVING COUNT(*) > 0 "
-                "AND SUM(CASE WHEN status = 'delivered' THEN 0 ELSE 1 END) = 0",
-                requested,
-            ).fetchall()
-    except (OSError, sqlite3.Error):
-        return frozenset()
-    return frozenset(str(row[0]) for row in rows)
 
 
 def _ratio_operational_check(
@@ -682,30 +800,6 @@ def _as_utc(value: datetime) -> datetime:
     return value.astimezone(timezone.utc)
 
 
-def _read_jsonl(path: Path) -> tuple[dict[str, object], ...]:
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return ()
-    rows: list[dict[str, object]] = []
-    for line in lines:
-        try:
-            row = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(row, dict):
-            rows.append(row)
-    return tuple(rows)
-
-
-def _read_json_object(path: Path) -> dict[str, object]:
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    return dict(payload) if isinstance(payload, dict) else {}
-
-
 def _resolve_trading_date(value: str, *, now: datetime) -> date:
     if value.lower() == "auto":
         return DEFAULT_MARKET_CALENDAR.completed_review_date(now)
@@ -725,12 +819,17 @@ def main(argv: list[str] | None = None) -> int:
     now = datetime.now(tz=timezone.utc)
     storage = StorageSettings.from_env()
     notification = NotificationSettings.from_env()
+    app_settings = load_app_settings()
+    spring_settings = app_settings.spring_gamma_v3
+    spring_required = bool(spring_settings.enabled or spring_settings.report_enabled)
     report = build_rth_daily_acceptance(
         storage.data_root,
         trading_date=_resolve_trading_date(args.date, now=now),
-        level_policy=load_app_settings().level_decision,
+        level_policy=app_settings.level_decision,
         outbox_path=notification.delivery_outbox_path,
+        receipt_path=notification.delivery_receipt_path,
         now=now,
+        spring_required=spring_required,
     )
     session = DEFAULT_MARKET_CALENDAR.session(date.fromisoformat(str(report["trading_date"])))
     if session is None:  # build_rth_daily_acceptance already validated this date.

@@ -100,7 +100,9 @@ __all__ = [
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the SPX Spark 24h service loop.")
     parser.add_argument("--once", action="store_true", help="Run each enabled task once and exit.")
-    parser.add_argument("--print-config", action="store_true", help="Print resolved service settings.")
+    parser.add_argument(
+        "--print-config", action="store_true", help="Print resolved service settings."
+    )
     parser.add_argument(
         "--exclude-task",
         action="append",
@@ -169,7 +171,12 @@ def _external_hot_worker_leases(
     from spx_spark.config import StorageSettings
 
     root = Path(StorageSettings.from_env().data_root) / "latest"
-    result = {}
+    result = {
+        "es_bar_sampler": (
+            root / "es_bar_sampler.lease.json",
+            30.0,
+        )
+    }
     for name, interval, filename in (
         (
             "market_features",

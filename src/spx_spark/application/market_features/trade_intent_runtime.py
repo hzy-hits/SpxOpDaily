@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 import math
-import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Mapping
@@ -15,20 +12,44 @@ from spx_spark.application.order_map.pricing import round_to_tick
 from spx_spark.application.market_features.trade_intent import (
     live_trade_intent_authority_issues,
 )
+from spx_spark.application.market_features.trade_intent_runtime_support import (
+    DELIVERY_LEASE_SECONDS as DELIVERY_LEASE_SECONDS,
+    DELIVERY_LEASE_TTL_FRACTION as DELIVERY_LEASE_TTL_FRACTION,
+    TRADE_INTENT_SYSTEM_PROMPT as TRADE_INTENT_SYSTEM_PROMPT,
+    _accepted_events as _accepted_events,
+    _append_jsonl as _append_jsonl,
+    _audit_path as _audit_path,
+    _datetime as _datetime,
+    _delivery_lease as _delivery_lease,
+    _delivery_lease_seconds as _delivery_lease_seconds,
+    _fmt as _fmt,
+    _fmt_fixed as _fmt_fixed,
+    _intent_occurred_at as _intent_occurred_at,
+    _latest_path as _latest_path,
+    _lease_is_live as _lease_is_live,
+    _number as _number,
+    _operator_explanation as _operator_explanation,
+    _operator_invalidation as _operator_invalidation,
+    _operator_trigger as _operator_trigger,
+    _signature as _signature,
+    _state_path as _state_path,
+    _trade_ready_delivery_event_id as _trade_ready_delivery_event_id,
+    _utc as _utc,
+    _writer_output_valid as _writer_output_valid,
+    _writer_prompt as _writer_prompt,
+    render_trade_intent as render_trade_intent,
+)
 from spx_spark.config import NotificationSettings, StorageSettings
 from spx_spark.notifier.dispatcher import (
     cancel_pending_notification,
     enqueue_notification,
-    notification_event_exists,
+    notification_event_contract,
+    inspect_notification_event,
 )
 from spx_spark.notifier.model import CommandRunner, default_runner
 from spx_spark.notifier.operator_cards import (
-    beijing_time,
-    decision_now,
-    option_contract_label,
     option_contract_right,
     parse_time,
-    remaining_seconds,
 )
 from spx_spark.notifier.receipts import NotificationEnvelope
 from spx_spark.settings.market_features import MarketFeatureSettings
@@ -41,16 +62,7 @@ from spx_spark.strategy_contract import (
 )
 
 
-DELIVERY_LEASE_SECONDS = 120.0
-
-
-TRADE_INTENT_SYSTEM_PROMPT = """你是 SPX 指数期权自营台的 execution trader，只负责排版一条已经通过代码硬门槛的 0DTE 交易意图。
-写成机构级 execution ticket，不是散户喊单、币圈频道、财经播报或情绪鼓动。
-不得改变方向、合约、NBBO、入场上限、失效位、目标位、有效期或最大亏损；不得补造数据。
-TradeReady 只是未连接券商订单的行情候选告警，不得写成已挂单、已成交、已持仓或已撤单。
-输出简短 Markdown，固定使用 Desk View、Execution、Risk、Targets、Timing 五部分。
-只给一个主方向；相反方向只能作为当前交易的失效条件。禁用『需要看盘、半路、不追、剧本、砸、抢、扛、顶上』等口语。
-决断体现在价格纪律和失效纪律，不得用夸张措辞制造确定性。"""
+TERMINAL_REARM_PHASES = frozenset({"expired", "invalidated"})
 
 
 def process_trade_intent(
@@ -75,10 +87,9 @@ def process_trade_intent(
     ready = intent.get("status") == "trade_ready"
     delivery_event_id = _trade_ready_delivery_event_id(intent) if ready else ""
     notification = settings or NotificationSettings.from_env()
-    durable_event_exists = bool(
-        ready
-        and delivery_event_id
-        and notification_event_exists(notification, delivery_event_id)
+    outbox_configured = bool(
+        getattr(notification, "delivery_outbox_enabled", False)
+        and getattr(notification, "delivery_outbox_path", "")
     )
     expiry_reason = (
         _ready_contract_reason(
@@ -89,6 +100,34 @@ def process_trade_intent(
         if ready
         else None
     )
+    event_occurred_at = _intent_occurred_at(intent) if ready else None
+    prepared_text = render_trade_intent(intent) if ready else ""
+    prepared_envelope = (
+        NotificationEnvelope(
+            event_id=delivery_event_id,
+            source="trade_intent",
+            kind="trade_intent",
+            lane="trade_ready",
+            occurred_at=event_occurred_at,
+            expires_at=parse_time(intent.get("valid_until") or intent.get("expires_at")),
+        )
+        if ready and delivery_event_id and event_occurred_at is not None
+        else None
+    )
+    prepared_payload_fingerprint = ""
+    prepared_targets: tuple[str, ...] = ()
+    if prepared_envelope is not None and outbox_configured:
+        prepared_payload_fingerprint, prepared_targets = notification_event_contract(
+            notification,
+            prepared_envelope,
+            title="SPX TRADE READY",
+            text=prepared_text,
+            friend=True,
+            feishu_text=prepared_text,
+        )
+    reconciliation = None
+    reconciliation_fault_reason: str | None = None
+    durable_event_exists = False
     with exclusive_state_lock(state_path):
         state = read_json_object(state_path)
         accepted = _accepted_events(state)
@@ -96,100 +135,235 @@ def process_trade_intent(
             str(key): str(value) for key, value in dict(state.get("semantic_keys") or {}).items()
         }
         semantic_key = str(intent.get("semantic_key") or "")
-        semantic_dedupe_key = semantic_key or (
-            f"intent:{intent_id}" if intent_id else ""
-        )
+        semantic_dedupe_key = semantic_key or (f"intent:{intent_id}" if intent_id else "")
         semantic_scope = str(intent.get("semantic_scope") or "")
         lifecycle_events = {
             str(item.get("event_id") or ""): {
                 "semantic_key": str(item.get("semantic_key") or ""),
                 "semantic_scope": str(item.get("semantic_scope") or ""),
+                "payload_fingerprint": str(item.get("payload_fingerprint") or ""),
+                "targets": tuple(
+                    sorted(str(target) for target in item.get("targets") or () if target)
+                )
+                if isinstance(item.get("targets"), (list, tuple))
+                else (),
             }
             for item in state.get("delivery_lifecycle_events") or []
             if isinstance(item, Mapping) and item.get("event_id")
         }
         cancellation_pending = {
-            str(item)
-            for item in state.get(
-                "pending_delivery_cancellation_event_ids"
-            )
-            or []
-            if item
+            str(item) for item in state.get("pending_delivery_cancellation_event_ids") or [] if item
         }
-        if ready and delivery_event_id:
+        cancellation_reasons = {
+            str(key): str(value)
+            for key, value in dict(state.get("pending_delivery_cancellation_reasons") or {}).items()
+            if key and value
+        }
+        for key in cancellation_pending:
+            # Before this reason map existed, only invalidation could create a
+            # pending lifecycle cancellation.
+            cancellation_reasons.setdefault(
+                key,
+                "trade_intent_lifecycle_invalidated",
+            )
+        terminal_delivery_event_ids = {
+            str(item) for item in state.get("terminal_delivery_event_ids") or [] if item
+        }
+        if ready and delivery_event_id and delivery_event_id not in terminal_delivery_event_ids:
             lifecycle_events.setdefault(
                 delivery_event_id,
                 {
                     "semantic_key": semantic_dedupe_key,
                     "semantic_scope": semantic_scope,
+                    "payload_fingerprint": prepared_payload_fingerprint,
+                    "targets": prepared_targets,
                 },
             )
         inflight = {
             key: value
             for key, value in dict(state.get("inflight") or {}).items()
-            if _lease_is_live(value, now=now)
+            if _lease_is_live(
+                value,
+                now=now,
+                max_seconds=(
+                    _delivery_lease_seconds(intent, now=now)
+                    if key == delivery_event_id
+                    else DELIVERY_LEASE_SECONDS
+                ),
+            )
         }
-        if intent.get("phase") == "invalidated":
-            invalidated_ids = {
+        terminal_phase = str(intent.get("phase") or "")
+        if terminal_phase in TERMINAL_REARM_PHASES:
+            ending_delivery_event_ids = {
                 key
                 for key, value in semantic_keys.items()
                 if not semantic_scope
                 or value == semantic_scope
                 or value.startswith(f"{semantic_scope}|")
             }
-            invalidated_ids.update(
+            ending_delivery_event_ids.update(
                 event_id
                 for event_id, lifecycle in lifecycle_events.items()
                 if not semantic_scope
                 or lifecycle["semantic_scope"] == semantic_scope
                 or lifecycle["semantic_key"] == semantic_scope
-                or lifecycle["semantic_key"].startswith(
-                    f"{semantic_scope}|"
-                )
+                or lifecycle["semantic_key"].startswith(f"{semantic_scope}|")
             )
             # Migrate a v2 producer that crashed after enqueue but before it
             # could persist the v3 lifecycle registry.
-            invalidated_ids.update(inflight)
-            cancellation_pending.update(invalidated_ids)
+            ending_delivery_event_ids.update(inflight)
+            terminal_delivery_event_ids.update(ending_delivery_event_ids)
+            cancellation_pending.update(ending_delivery_event_ids)
+            cancellation_reasons.update(
+                {
+                    event_id: f"trade_intent_lifecycle_{terminal_phase}"
+                    for event_id in ending_delivery_event_ids
+                }
+            )
         for key in sorted(cancellation_pending):
             try:
                 cancel_pending_notification(
                     notification,
                     key,
                     now=now,
-                    reason="trade_intent_lifecycle_invalidated",
+                    reason=cancellation_reasons.get(
+                        key,
+                        "trade_intent_lifecycle_terminal",
+                    ),
                 )
             except Exception:
                 # The lifecycle record makes this cancellation replayable even
                 # if the outbox enqueue succeeded before producer state-ack.
                 continue
             cancellation_pending.discard(key)
+            cancellation_reasons.pop(key, None)
             accepted.pop(key, None)
             semantic_keys.pop(key, None)
             lifecycle_events.pop(key, None)
             inflight.pop(key, None)
+        if (
+            ready
+            and not expiry_reason
+            and prepared_envelope is not None
+            and outbox_configured
+            and delivery_event_id not in terminal_delivery_event_ids
+        ):
+            lifecycle = lifecycle_events[delivery_event_id]
+            expected_payload_fingerprint = str(
+                lifecycle.get("payload_fingerprint") or prepared_payload_fingerprint
+            )
+            stored_targets = lifecycle.get("targets")
+            expected_targets = (
+                tuple(str(target) for target in stored_targets)
+                if isinstance(stored_targets, (list, tuple)) and stored_targets
+                else prepared_targets
+            )
+            try:
+                reconciliation = inspect_notification_event(
+                    notification,
+                    prepared_envelope,
+                    title="SPX TRADE READY",
+                    text=prepared_text,
+                    friend=True,
+                    feishu_text=prepared_text,
+                    expected_payload_fingerprint=expected_payload_fingerprint,
+                    expected_targets=expected_targets,
+                )
+            except Exception as error:
+                # Persist the ready decision below before surfacing a transient
+                # reconciliation fault; otherwise a short-lived signal can
+                # vanish from both the outbox and the producer audit.
+                reconciliation_fault_reason = (
+                    f"outbox_reconciliation_exception:{type(error).__name__}"
+                )
+            else:
+                durable_event_exists = reconciliation.acceptable
+                if reconciliation.reason == "missing":
+                    # No immutable outbox row exists yet, so the current
+                    # decision snapshot becomes the contract for the enqueue
+                    # that follows this state commit.
+                    lifecycle["payload_fingerprint"] = prepared_payload_fingerprint
+                    lifecycle["targets"] = prepared_targets
+                elif reconciliation.acceptable:
+                    # Backfill state written by a pre-contract runtime only
+                    # after the current snapshot exactly matched the outbox.
+                    lifecycle["payload_fingerprint"] = expected_payload_fingerprint
+                    lifecycle["targets"] = expected_targets
+        local_event_accepted = bool(
+            delivery_event_id
+            and (delivery_event_id in accepted or delivery_event_id in semantic_keys)
+        )
+        if ready and reconciliation is None and reconciliation_fault_reason is not None:
+            state["last_delivery_reconciliation"] = {
+                "event_id": delivery_event_id,
+                "status": reconciliation_fault_reason,
+                "action": "hard_fault",
+                "reconciled_at": now.isoformat(),
+            }
+        if (
+            ready
+            and reconciliation is not None
+            and reconciliation.reason not in {"accepted", "missing"}
+        ):
+            reconciliation_fault_reason = f"outbox_reconciliation_{reconciliation.reason}"
+            state["last_delivery_reconciliation"] = {
+                "event_id": delivery_event_id,
+                "status": reconciliation_fault_reason,
+                "action": "hard_fault",
+                "event_status": reconciliation.event_status,
+                "target_statuses": list(reconciliation.target_statuses),
+                "reconciled_at": now.isoformat(),
+            }
+        if ready and local_event_accepted and not durable_event_exists:
+            if (
+                outbox_configured
+                and reconciliation is not None
+                and reconciliation.reason == "missing"
+                and reconciliation_fault_reason is None
+            ):
+                # Local acceptance is only a projection of durable outbox
+                # state. If the durable row disappeared (for example after an
+                # outbox restore), remove the stale projection and retry the
+                # exact immutable event while it is still valid.
+                accepted.pop(delivery_event_id, None)
+                semantic_keys.pop(delivery_event_id, None)
+                state["last_delivery_reconciliation"] = {
+                    "event_id": delivery_event_id,
+                    "status": "local_accepted_outbox_missing",
+                    "action": "retry",
+                    "reconciled_at": now.isoformat(),
+                }
+            elif reconciliation_fault_reason is None:
+                reconciliation_fault_reason = "accepted_outbox_reconciliation_unavailable"
+                state["last_delivery_reconciliation"] = {
+                    "event_id": delivery_event_id,
+                    "status": reconciliation_fault_reason,
+                    "action": "hard_fault",
+                    "reconciled_at": now.isoformat(),
+                }
         if durable_event_exists and delivery_event_id:
+            if delivery_event_id not in accepted:
+                state["last_delivery_reconciliation"] = {
+                    "event_id": delivery_event_id,
+                    "status": "outbox_event_local_acceptance_missing",
+                    "action": "restore_local_acceptance",
+                    "reconciled_at": now.isoformat(),
+                }
             accepted.setdefault(delivery_event_id, now.isoformat())
             if semantic_dedupe_key:
                 semantic_keys[delivery_event_id] = semantic_dedupe_key
-        delivery_blocked_by_cancellation = bool(
-            ready and cancellation_pending
-        )
+        delivery_blocked_by_cancellation = bool(ready and cancellation_pending)
         duplicate = bool(
             delivery_event_id
             and (
                 delivery_event_id in accepted
-                or (
-                    semantic_dedupe_key
-                    and semantic_dedupe_key in semantic_keys.values()
-                )
+                or delivery_event_id in terminal_delivery_event_ids
+                or (semantic_dedupe_key and semantic_dedupe_key in semantic_keys.values())
             )
         )
         if durable_event_exists:
             inflight.pop(delivery_event_id, None)
-        delivery_in_progress = bool(
-            delivery_event_id and delivery_event_id in inflight
-        )
+        delivery_in_progress = bool(delivery_event_id and delivery_event_id in inflight)
         if (
             ready
             and not expiry_reason
@@ -198,7 +372,7 @@ def process_trade_intent(
             and not delivery_blocked_by_cancellation
             and not delivery_in_progress
         ):
-            inflight[delivery_event_id] = now.isoformat()
+            inflight[delivery_event_id] = _delivery_lease(intent, now=now)
         atomic_write_json_secure(latest_path, dict(intent))
         if signature != state.get("last_signature"):
             _append_jsonl(_audit_path(storage, now), dict(intent))
@@ -218,13 +392,15 @@ def process_trade_intent(
                         "event_id": event_id,
                         **lifecycle,
                     }
-                    for event_id, lifecycle in sorted(
-                        lifecycle_events.items()
-                    )[-200:]
+                    for event_id, lifecycle in sorted(lifecycle_events.items())[-200:]
                 ],
-                "pending_delivery_cancellation_event_ids": sorted(
-                    cancellation_pending
-                )[-200:],
+                "pending_delivery_cancellation_event_ids": sorted(cancellation_pending)[-200:],
+                "pending_delivery_cancellation_reasons": {
+                    key: cancellation_reasons[key]
+                    for key in sorted(cancellation_pending)[-200:]
+                    if key in cancellation_reasons
+                },
+                "terminal_delivery_event_ids": sorted(terminal_delivery_event_ids)[-200:],
             }
         )
         state.pop("delivered", None)
@@ -251,6 +427,13 @@ def process_trade_intent(
             "attempted": False,
             "delivered": False,
             "reason": "lifecycle_cancellation_pending",
+        }
+    if reconciliation_fault_reason:
+        return {
+            "attempted": False,
+            "delivered": False,
+            "accepted": False,
+            "reason": reconciliation_fault_reason,
         }
     if duplicate:
         if durable_event_exists:
@@ -318,8 +501,7 @@ def process_trade_intent(
             "reason": card_reason,
             "action_revalidated_at": action_now.isoformat(),
         }
-    event_occurred_at = _intent_occurred_at(intent)
-    if event_occurred_at is None:
+    if event_occurred_at is None or prepared_envelope is None:
         action_evidence["reason"] = "intent_occurred_at_unavailable"
         _record_action_revalidation(
             state_path,
@@ -339,23 +521,38 @@ def process_trade_intent(
     # the durable notification payload must remain the immutable decision
     # snapshot. Otherwise a crash between enqueue and state acknowledgement can
     # turn a harmless quote refresh into an event-id collision on replay.
-    text = render_trade_intent(intent)
-    enqueued = enqueue_notification(
-        notification,
-        NotificationEnvelope(
-            event_id=delivery_event_id,
-            source="trade_intent",
-            kind="trade_intent",
-            lane="trade_ready",
-            occurred_at=event_occurred_at,
-            expires_at=parse_time(intent.get("valid_until") or intent.get("expires_at")),
-        ),
-        title="SPX TRADE READY",
-        text=text,
-        friend=True,
-        feishu_text=text,
-        enqueued_at=action_now,
-    )
+    text = prepared_text
+    enqueue_completed = False
+    try:
+        enqueued = enqueue_notification(
+            notification,
+            prepared_envelope,
+            title="SPX TRADE READY",
+            text=text,
+            friend=True,
+            feishu_text=text,
+            enqueued_at=action_now,
+        )
+        enqueue_completed = True
+    except Exception as error:
+        action_evidence["reason"] = "notification_enqueue_exception"
+        action_evidence["enqueue_exception_type"] = type(error).__name__
+        _record_action_revalidation(
+            state_path,
+            delivery_event_id,
+            now=action_now,
+            evidence=action_evidence,
+        )
+        raise
+    finally:
+        # This also runs for KeyboardInterrupt/SystemExit. SIGKILL cannot run
+        # cleanup, so the signal-bounded lease remains the final crash guard.
+        if not enqueue_completed:
+            _release_delivery_lease(
+                state_path,
+                delivery_event_id,
+                now=action_now,
+            )
     if enqueued.accepted:
         with exclusive_state_lock(state_path):
             state = read_json_object(state_path)
@@ -371,9 +568,7 @@ def process_trade_intent(
                 if key in accepted
             }
             semantic_key = str(intent.get("semantic_key") or "")
-            semantic_dedupe_key = semantic_key or (
-                f"intent:{intent_id}" if intent_id else ""
-            )
+            semantic_dedupe_key = semantic_key or (f"intent:{intent_id}" if intent_id else "")
             if semantic_dedupe_key:
                 semantic_keys[delivery_event_id] = semantic_dedupe_key
             state["semantic_keys"] = semantic_keys
@@ -403,153 +598,6 @@ def process_trade_intent(
         "targets": list(enqueued.targets),
         "action_revalidated_at": action_now.isoformat(),
     }
-
-
-def render_trade_intent(intent: Mapping[str, object]) -> str:
-    """Render the complete manual ticket before any analytical context."""
-
-    direction = str(intent.get("direction") or "")
-    right = "CALL" if direction == "up" else "PUT"
-    valid_until = intent.get("valid_until") or intent.get("expires_at")
-    # Keep the durable payload byte-identical across outbox crash replays.
-    # The action boundary independently revalidates current quote/expiry.
-    render_now = decision_now(intent)
-    ttl = remaining_seconds(valid_until, now=render_now)
-    ttl_text = f"剩余 {ttl} 秒" if ttl is not None else "时效未知"
-    contract = option_contract_label(
-        intent.get("contract_id"),
-        fallback=intent.get("contract_label"),
-    )
-    return "\n".join(
-        (
-            f"🟢 MANUAL READY · {right}",
-            "类型  单腿 · 仅人工提交",
-            f"买入  {contract}",
-            f"NBBO  {_fmt_fixed(intent.get('decision_bid'))} / "
-            f"{_fmt_fixed(intent.get('decision_ask'))}（决策快照）",
-            f"限价  ≤ {_fmt_fixed(intent.get('entry_limit'))}",
-            f"触发  {_operator_trigger(intent)}",
-            f"止损  {_operator_invalidation(intent)}",
-            f"目标  SPX {_fmt_fixed(intent.get('target_spx'))}",
-            f"退出  {beijing_time(intent.get('time_stop_at'))}",
-            f"有效  决策时{ttl_text}（至 {beijing_time(valid_until, seconds=True)}）；"
-            "提交前重新报价",
-            f"风险  单张最大权利金 ${_fmt_fixed(intent.get('max_loss_per_contract'))}；"
-            "数量由人工确认",
-            f"解释  {_operator_explanation(intent)}",
-            "权限  自动下单关闭；未连接真实订单、成交或持仓状态",
-        )
-    )
-
-
-def _operator_trigger(intent: Mapping[str, object]) -> str:
-    level = _fmt_fixed(intent.get("trigger_level"))
-    direction = str(intent.get("direction") or "")
-    thesis = str(intent.get("thesis") or "")
-    if thesis == "fade":
-        condition = "拒绝下破并确认" if direction == "up" else "拒绝上破并确认"
-    else:
-        condition = "突破并保持" if direction == "up" else "跌破并保持"
-    return (
-        f"SPX {level} {condition}；现价 {_fmt_fixed(intent.get('spx_spot'))}"
-    )
-
-
-def _operator_invalidation(intent: Mapping[str, object]) -> str:
-    relation = "跌回" if intent.get("direction") == "up" else "收回"
-    return f"SPX {relation} {_fmt_fixed(intent.get('invalidation_spx'))}"
-
-
-def _operator_explanation(intent: Mapping[str, object]) -> str:
-    direction = str(intent.get("direction") or "")
-    thesis = str(intent.get("thesis") or "")
-    if thesis == "fade":
-        return (
-            "关键位拒绝下破已确认，执行反弹 Call"
-            if direction == "up"
-            else "关键位拒绝上破已确认，执行回落 Put"
-        )
-    return (
-        "关键位向上接受已确认，执行突破 Call"
-        if direction == "up"
-        else "关键位向下接受已确认，执行跌破 Put"
-    )
-
-
-def _writer_prompt(intent: Mapping[str, object], template: str) -> str:
-    return (
-        "把下面已经通过确定性门控的交易意图排成易扫读飞书消息。只做解释和排版，不重新判断。\n"
-        "MA50/MA200及交叉只作只读背景：不得仅凭金叉/死叉生成Call/Put、改变墙位方向或"
-        "覆盖wall/flip确认；TREND_EXTENDED必须写明禁止追同向凸性，"
-        "REGIME_TRANSITION/MIXED必须写明等待wall/flip接受或拒绝确认。\n"
-        f"事实 JSON:\n{json.dumps(dict(intent), ensure_ascii=False, sort_keys=True)}\n"
-        f"确定性模板:\n{template}"
-    )
-
-
-def _writer_output_valid(text: str, intent: Mapping[str, object]) -> bool:
-    required = [
-        option_contract_label(
-            intent.get("contract_id"),
-            fallback=intent.get("contract_label"),
-        ),
-        _fmt_fixed(intent.get("decision_bid")),
-        _fmt_fixed(intent.get("decision_ask")),
-        _fmt(intent.get("entry_limit")),
-        _fmt(intent.get("invalidation_spx")),
-        _fmt(intent.get("target_spx")),
-        "MANUAL READY",
-        "提交前重新报价",
-        "自动下单关闭",
-    ]
-    forbidden_ma_triggers = (
-        "金叉买Call",
-        "金叉买 Call",
-        "死叉买Put",
-        "死叉买 Put",
-        "交叉即买",
-        "仅凭金叉",
-        "仅凭死叉",
-    )
-    if any(token in text for token in forbidden_ma_triggers):
-        return False
-    return bool(text.strip()) and all(token and token in text for token in required)
-
-
-def _signature(intent: Mapping[str, object]) -> str:
-    material = {
-        key: intent.get(key)
-        for key in (
-            "status",
-            "event_id",
-            "play",
-            "contract_id",
-            "entry_limit",
-            "invalidation_spx",
-            "target_spx",
-            "block_reasons",
-            "schema_version",
-            "policy_version",
-            "valid_until",
-            "coordinate",
-        )
-    }
-    return hashlib.sha256(
-        json.dumps(material, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()[:24]
-
-
-def _trade_ready_delivery_event_id(intent: Mapping[str, object]) -> str:
-    """Separate stable strategy identity from one confirmed lifecycle delivery."""
-
-    intent_id = str(intent.get("intent_id") or "")
-    lifecycle_event_id = str(intent.get("event_id") or "")
-    if not intent_id or not lifecycle_event_id:
-        return ""
-    digest = hashlib.sha256(
-        f"trade_ready_notification.v2|{intent_id}|{lifecycle_event_id}".encode()
-    ).hexdigest()[:20]
-    return f"{intent_id}:notify:{digest}"
 
 
 def _ready_contract_reason(
@@ -692,11 +740,20 @@ def _action_revalidation(
                 else:
                     action_limit = round_to_tick(min(mid, bid + entry_fraction * (ask - bid)))
                     evidence["recomputed_entry_limit"] = action_limit
-                    reason = (
-                        None
-                        if math.isclose(action_limit, entry_limit, abs_tol=1e-9)
-                        else "action_entry_limit_changed"
+                    # A TradeReady card is an immutable, manual decision
+                    # snapshot, not an order priced from this later quote.  A
+                    # normally moving live market must therefore remain
+                    # deliverable while the action-time quote is still fresh
+                    # and executable.  Preserve the original entry limit and
+                    # risk on the card; retain the recomputed limit only as
+                    # audit evidence.
+                    evidence["entry_limit_changed"] = not math.isclose(
+                        action_limit,
+                        entry_limit,
+                        abs_tol=1e-9,
                     )
+                    evidence["entry_limit_policy"] = "immutable_decision_limit"
+                    reason = None
     evidence["reason"] = reason
     return reason, evidence
 
@@ -802,107 +859,6 @@ def _record_action_revalidation(
         state["last_action_revalidation"] = dict(evidence)
         state["updated_at"] = now.isoformat()
         atomic_write_json_secure(state_path, state)
-
-
-def _intent_occurred_at(intent: Mapping[str, object]) -> datetime | None:
-    """Return an immutable timestamp for idempotent outbox replays."""
-
-    coordinate = intent.get("coordinate")
-    coordinate_as_of = coordinate.get("as_of") if isinstance(coordinate, Mapping) else None
-    for value in (
-        intent.get("evaluated_at"),
-        coordinate_as_of,
-        intent.get("quote_source_at"),
-        intent.get("valid_until"),
-        intent.get("expires_at"),
-    ):
-        parsed = _datetime(value)
-        if parsed is not None:
-            return parsed
-    return None
-
-
-def _accepted_events(state: Mapping[str, object]) -> dict[str, str]:
-    """Migrate the v1 ``delivered`` projection to v2 durable acceptance."""
-
-    legacy = dict(state.get("delivered") or {})
-    current = dict(state.get("accepted") or {})
-    return {
-        str(key): str(value)
-        for key, value in {**legacy, **current}.items()
-        if str(key) and str(value)
-    }
-
-
-def _fmt(value: object) -> str:
-    if not isinstance(value, int | float):
-        return "-"
-    return f"{float(value):.2f}".rstrip("0").rstrip(".")
-
-
-def _fmt_fixed(value: object) -> str:
-    return f"{float(value):.2f}" if isinstance(value, int | float) else "-"
-
-
-def _number(value: object) -> float | None:
-    if isinstance(value, bool) or not isinstance(value, int | float):
-        return None
-    parsed = float(value)
-    return parsed if math.isfinite(parsed) else None
-
-
-def _state_path(storage: StorageSettings) -> Path:
-    return Path(storage.data_root) / "latest" / "trade_intent_delivery_state.json"
-
-
-def _latest_path(storage: StorageSettings) -> Path:
-    return Path(storage.data_root) / "latest" / "trade_intent.json"
-
-
-def _audit_path(storage: StorageSettings, now: datetime) -> Path:
-    return (
-        Path(storage.data_root)
-        / "features"
-        / "trade_intents"
-        / f"date={now.date().isoformat()}"
-        / "events.jsonl"
-    )
-
-
-def _append_jsonl(path: Path, payload: Mapping[str, object]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor = os.open(path, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600)
-    try:
-        os.write(
-            descriptor,
-            (json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n").encode(),
-        )
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
-
-
-def _utc(value: datetime) -> datetime:
-    if value.tzinfo is None:
-        return value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc)
-
-
-def _datetime(value: object) -> datetime | None:
-    if not isinstance(value, str):
-        return None
-    try:
-        return _utc(datetime.fromisoformat(value))
-    except ValueError:
-        return None
-
-
-def _lease_is_live(value: object, *, now: datetime) -> bool:
-    started_at = _datetime(value)
-    return bool(
-        started_at is not None
-        and 0.0 <= (now - started_at).total_seconds() < DELIVERY_LEASE_SECONDS
-    )
 
 
 def _release_delivery_lease(state_path: Path, intent_id: str, *, now: datetime) -> None:
