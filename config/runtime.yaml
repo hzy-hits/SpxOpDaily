@@ -105,7 +105,7 @@ market_features:
   trade_quote_max_age_seconds: {value: 15.0, description: Maximum transport and source age for the exact selected-contract quote used by an RTH manual signal; the limit-order window and enqueue-time quote revalidation remain mandatory.}
   trade_market_anchor_max_age_seconds: {value: 20.0, description: Maximum observation, source and transport age for the ES anchor and level observation used by a trade-ready intent.}
   trade_structure_drift_points: {value: 10.0, description: Diagnostic live-versus-frozen wall drift threshold; an active event remains anchored to its frozen trigger instead of being cancelled by incomplete intraday OI.}
-  trade_entry_spread_fraction: {value: 0.35, description: Fraction of the live bid-ask spread used for the initial buy limit, capped at mid.}
+  trade_entry_spread_fraction: {value: 1.0, description: Fraction of the live bid-ask spread used for the initial manual buy limit; 1.0 is the current natural ask.}
   trade_intent_ttl_seconds: {value: 90.0, description: Lifetime of a newly emitted trade intent before it must be recalculated.}
   trade_entry_window_seconds: {value: 20.0, description: Maximum time an alert candidate may wait for the displayed ask to reach its entry limit; this is not a broker order TTL.}
   trade_invalidation_buffer_points: {value: 3.0, description: SPX reclaim distance beyond the trigger level that invalidates a trade intent.}

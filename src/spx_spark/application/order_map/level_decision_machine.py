@@ -113,6 +113,9 @@ def advance_level_decision(
     if _session_boundary_changed(state, phase, observation):
         return _to_far(state, phase, now, "session_boundary_reset")
 
+    if _can_upgrade_rth_trigger_coordinate(state, phase, observation):
+        _upgrade_rth_trigger_coordinate(state, observation, now=now)
+
     if phase is LevelPhase.FAR:
         if not observation.arm_allowed:
             return _unchanged(
@@ -339,6 +342,54 @@ def _structure_drifted(
         current is None
         or abs(float(current) - float(state["level"])) > settings.structure_drift_points
     )
+
+
+def _can_upgrade_rth_trigger_coordinate(
+    state: Mapping[str, object],
+    phase: LevelPhase,
+    observation: LevelObservation,
+) -> bool:
+    """Promote an active RTH proxy lifecycle when cash SPX recovers."""
+
+    return (
+        phase is not LevelPhase.FAR
+        and phase not in TERMINAL_PHASES
+        and str(state.get("session_mode") or "") == "rth"
+        and observation.session_mode == "rth"
+        and str(state.get("trigger_coordinate_kind") or "") == "es_equivalent"
+        and observation.trigger_coordinate_kind == "official_spx"
+    )
+
+
+def _upgrade_rth_trigger_coordinate(
+    state: dict[str, object],
+    observation: LevelObservation,
+    *,
+    now: datetime,
+) -> None:
+    """Rebase one active event to SPX without resetting its confirmation clock."""
+
+    basis = state.get("trigger_basis_points")
+    prior_basis = float(basis) if isinstance(basis, int | float) else None
+    frozen_spx_level = state.get("spx_level")
+    if isinstance(frozen_spx_level, int | float):
+        state["level"] = float(frozen_spx_level)
+    elif prior_basis is not None and isinstance(state.get("level"), int | float):
+        state["level"] = float(state["level"]) - prior_basis
+
+    if prior_basis is not None:
+        for field in ("start_spot", "last_spot", "confirmation_start_spot"):
+            value = state.get(field)
+            if isinstance(value, int | float):
+                state[field] = float(value) - prior_basis
+
+    state["spx_level"] = float(state["level"])
+    state["trigger_coordinate_kind"] = "official_spx"
+    state["trigger_instrument_id"] = observation.trigger_instrument_id or "index:SPX"
+    state["trigger_basis_points"] = observation.trigger_basis_points
+    state["coordinate_upgraded_at"] = now.isoformat()
+    state["coordinate_upgraded_from"] = "es_equivalent"
+    state["coordinate_upgraded_basis_points"] = prior_basis
 
 
 def _session_boundary_changed(

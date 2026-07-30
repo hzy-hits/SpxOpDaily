@@ -16,6 +16,10 @@ from spx_spark.application.order_map.level_decision_shadow import (
     load_level_decision_shadow,
     run_level_decision_shadow,
 )
+from spx_spark.application.order_map.trigger_coordinates import (
+    TriggerCoordinate,
+    TriggerCoordinateKind,
+)
 from spx_spark.settings.level_decision import LevelDecisionPolicy
 
 
@@ -61,6 +65,68 @@ def test_pending_structure_gate_applies_only_before_a_new_arm() -> None:
             {"phase": phase.value},
             structure_change_pending=False,
         )
+
+
+def test_rth_observation_releases_es_latch_when_official_spx_recovers(
+    tmp_path, monkeypatch
+) -> None:
+    storage = SimpleNamespace(data_root=str(tmp_path))
+    state = SimpleNamespace(best_quote=lambda instrument_id: object())
+
+    class Store:
+        def __init__(self, _storage) -> None:
+            pass
+
+        def load(self, *, now):
+            assert now == NOW
+            return state
+
+    monkeypatch.setattr(shadow_service, "LatestStateStore", Store)
+    monkeypatch.setattr(
+        shadow_service,
+        "actionable_live_price",
+        lambda *_args, **_kwargs: 7420.0,
+    )
+    monkeypatch.setattr(shadow_service, "_qualified_es_basis", lambda *_args, **_kwargs: 40.0)
+    monkeypatch.setattr(shadow_service, "build_options_map", lambda _state: None)
+    monkeypatch.setattr(
+        shadow_service,
+        "resolve_trigger_coordinate",
+        lambda *_args, **_kwargs: TriggerCoordinate(
+            kind=TriggerCoordinateKind.OFFICIAL_SPX,
+            instrument_id="index:SPX",
+            observed_value=7380.0,
+            spx_observed_value=7380.0,
+            basis_points=None,
+            source="index:SPX",
+            as_of=NOW,
+            reason="rth_official_spx",
+        ),
+    )
+
+    result = shadow_service._observation(
+        storage,
+        SimpleNamespace(),
+        now=NOW,
+        session_date="2026-07-13",
+        session_mode="rth",
+        frozen_structure=_stable_structure(NOW, put_wall=7375.0, call_wall=7450.0),
+        active_decision={
+            "phase": LevelPhase.BREAK_PENDING.value,
+            "trigger_coordinate_kind": "es_equivalent",
+            "trigger_instrument_id": "future:ES",
+            "trigger_basis_points": 40.0,
+        },
+    )
+
+    assert result.quality_ok is True
+    assert result.trigger_coordinate_kind == "official_spx"
+    assert result.trigger_instrument_id == "index:SPX"
+    assert result.spot == 7380.0
+    assert result.spx_spot == 7380.0
+    assert result.levels == {"put_wall": 7375.0, "call_wall": 7450.0}
+    assert result.trigger_basis_points == 40.0
+    assert result.spot_source == "index:SPX"
 
 
 def test_pending_structure_keeps_active_lifecycle_on_frozen_stable_levels(

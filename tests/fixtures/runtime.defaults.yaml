@@ -105,7 +105,7 @@ market_features:
   trade_quote_max_age_seconds: {value: 15.0, description: Exact selected-contract quote freshness for the reviewed pilot.}
   trade_market_anchor_max_age_seconds: {value: 20.0, description: Trade market-anchor freshness.}
   trade_structure_drift_points: {value: 10.0, description: Maximum live-frame decision drift for the reviewed pilot.}
-  trade_entry_spread_fraction: {value: 0.35, description: Initial entry spread fraction.}
+  trade_entry_spread_fraction: {value: 1.0, description: Initial manual entry spread fraction; 1.0 is natural ask.}
   trade_intent_ttl_seconds: {value: 90.0, description: Trade intent TTL.}
   trade_entry_window_seconds: {value: 20.0, description: Alert candidate entry observation window.}
   trade_invalidation_buffer_points: {value: 3.0, description: SPX invalidation buffer.}

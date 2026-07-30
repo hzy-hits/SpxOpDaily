@@ -29,6 +29,7 @@ from spx_spark.application.market_features.trade_intent import (
 )
 from spx_spark.application.market_features.trade_intent_runtime import (
     _action_revalidation,
+    _ready_contract_reason,
     _trade_ready_delivery_event_id,
     _writer_output_valid,
     process_trade_intent,
@@ -62,7 +63,7 @@ def test_trade_intent_policy_hash_is_stable_and_resets_for_lane_clock_contract()
         },
     )
 
-    assert TRADE_INTENT_CONTRACT_VERSION == "rth_manual_levels_0930_1530.v4"
+    assert TRADE_INTENT_CONTRACT_VERSION == "rth_manual_levels_0930_1530.v5"
     assert current == repeated
     assert current.startswith("rth_trade_intent.v3+sha256:")
     assert current != legacy
@@ -91,7 +92,9 @@ def test_confirmed_path_requires_all_gates_before_trade_ready() -> None:
     assert intent["contract_label"] == "SPXW 7550C"
     assert intent["decision_bid"] == 10.0
     assert intent["decision_ask"] == 10.4
-    assert intent["entry_limit"] == pytest.approx(10.1)
+    assert intent["entry_limit"] == pytest.approx(10.4)
+    assert intent["entry_rule"] == "bid_plus_spread_fraction_to_ask"
+    assert intent["entry_spread_fraction"] == 1.0
     assert intent["invalidation_spx"] == 7547.0
     assert intent["target_spx"] == 7575.0
     assert intent["remaining_target_room_points"] == 21.0
@@ -103,6 +106,90 @@ def test_confirmed_path_requires_all_gates_before_trade_ready() -> None:
     assert intent["quote_observation_eligible"] is False
     assert intent["priority"] == "high"
     assert intent["shadow_mode"] is False
+
+
+def test_july_30_manual_limit_uses_natural_ask_instead_of_passive_mid() -> None:
+    market, options, latest, context, repricing = _ready_inputs()
+    quote = replace(latest.best_quotes[0], bid=21.1, ask=21.2)
+    latest = replace(latest, quotes=(quote,), best_quotes=(quote,))
+
+    intent = evaluate_trade_intent(
+        context,
+        market,
+        options,
+        latest,
+        repricing,
+        now=NOW,
+        feature_policy=MarketFeatureSettings(),
+        order_policy=OrderMapPolicy(),
+    )
+
+    assert intent["status"] == "trade_ready"
+    assert intent["decision_bid"] == 21.1
+    assert intent["decision_ask"] == 21.2
+    assert intent["entry_limit"] == pytest.approx(21.2)
+    assert intent["max_loss_per_contract"] == 2120.0
+
+
+def test_qualified_rth_es_coordinate_is_valid_manual_delivery_authority() -> None:
+    market, options, latest, context, repricing = _ready_inputs()
+    level = {
+        **context.level_decision,
+        "trigger_coordinate": {
+            "kind": "es_equivalent",
+            "instrument_id": "future:ES",
+            "observed_value": 7581.955,
+            "target_value": 7577.955,
+            "spx_level": 7550.0,
+            "spx_observed_value": 7554.0,
+            "basis_points": 27.955,
+            "as_of": NOW.isoformat(),
+        },
+    }
+    context = replace(context, level_decision=level)
+    policy = MarketFeatureSettings()
+    intent = evaluate_trade_intent(
+        context,
+        market,
+        options,
+        latest,
+        repricing,
+        now=NOW,
+        feature_policy=policy,
+        order_policy=OrderMapPolicy(),
+    )
+
+    assert intent["status"] == "trade_ready"
+    assert intent["coordinate"]["kind"] == "es_equivalent"
+    assert (
+        _ready_contract_reason(
+            intent,
+            now=NOW,
+            expected_policy_version=str(intent["policy_version"]),
+        )
+        is None
+    )
+
+
+def test_incoherent_rth_es_coordinate_is_rejected_before_delivery() -> None:
+    intent = {
+        **_runtime_contract(NOW + timedelta(seconds=20)),
+        "spx_spot": 7381.92,
+        "trigger_level": 7390.0,
+        "coordinate": {
+            "kind": "es_equivalent",
+            "instrument_id": "future:ES",
+            "observed_value": 7409.875,
+            "target_value": 7417.955,
+            "spx_level": 7390.0,
+            "basis_points": 10.0,
+        },
+    }
+
+    assert (
+        _ready_contract_reason(intent, now=NOW)
+        == "source_es_coordinate_spot_incoherent"
+    )
 
 
 def test_provider_failover_control_is_diagnostic_for_exact_manual_quote() -> None:
@@ -1762,8 +1849,8 @@ def test_action_revalidation_audits_moving_live_quote_without_blocking(
     )
 
     assert reason is None
-    assert evidence["entry_limit"] == pytest.approx(10.1)
-    assert evidence["recomputed_entry_limit"] == pytest.approx(10.3)
+    assert evidence["entry_limit"] == pytest.approx(10.4)
+    assert evidence["recomputed_entry_limit"] == pytest.approx(10.6)
     assert evidence["entry_limit_changed"] is True
     assert evidence["entry_limit_policy"] == "immutable_decision_limit"
     assert evidence["reason"] is None
@@ -1844,12 +1931,12 @@ def test_moving_live_quote_enqueues_immutable_trade_ready_card_once(
         rows = connection.execute("SELECT text FROM notification_delivery_events").fetchall()
     assert len(rows) == 1
     assert "NBBO  10.00 / 10.40（决策快照）" in rows[0][0]
-    assert "限价  ≤ 10.10" in rows[0][0]
+    assert "限价  ≤ 10.40" in rows[0][0]
     assert "类型  单腿 · 仅人工提交" in rows[0][0]
     state = json.loads((tmp_path / "latest" / "trade_intent_delivery_state.json").read_text())
     audit = state["last_action_revalidation"]
-    assert audit["entry_limit"] == pytest.approx(10.1)
-    assert audit["recomputed_entry_limit"] == pytest.approx(10.3)
+    assert audit["entry_limit"] == pytest.approx(10.4)
+    assert audit["recomputed_entry_limit"] == pytest.approx(10.6)
     assert audit["entry_limit_changed"] is True
     assert audit["entry_limit_policy"] == "immutable_decision_limit"
 
@@ -2042,7 +2129,7 @@ def test_producer_outbox_e2e_reconciles_both_state_divergence_directions(
         ).fetchall()
     assert len(original_rows) == 1
     assert original_rows[0][0] == delivery_event_id
-    assert "限价  ≤ 10.10" in original_rows[0][1]
+    assert "限价  ≤ 10.40" in original_rows[0][1]
 
     # Outbox durable, local acknowledgement missing: restore local acceptance
     # without creating a second outbox row.
@@ -2509,7 +2596,7 @@ def test_action_revalidation_rejects_spread_deterioration_even_if_limit_is_uncha
     )
 
     assert reason == "action_execution_quote_spread_points_exceeded"
-    assert evidence["entry_limit"] == pytest.approx(10.1)
+    assert evidence["entry_limit"] == pytest.approx(10.4)
     assert evidence["execution_quote_gate"]["spread_points"] == pytest.approx(3.1)
 
 

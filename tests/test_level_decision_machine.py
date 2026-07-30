@@ -27,6 +27,7 @@ def observation(
     trigger_coordinate_kind: str = "unknown",
     trigger_basis_points: float | None = None,
     spx_spot: float | None = None,
+    spx_levels: dict[str, float] | None = None,
     session_mode: str = "rth",
 ) -> LevelObservation:
     return LevelObservation(
@@ -38,6 +39,7 @@ def observation(
         quality_reason=None if quality_ok else "stale_chain",
         session_date="2026-07-13",
         session_mode=session_mode,
+        spx_levels=spx_levels,
         trigger_coordinate_kind=trigger_coordinate_kind,
         trigger_basis_points=trigger_basis_points,
         spx_spot=spx_spot,
@@ -441,3 +443,86 @@ def test_confirmation_persists_spx_coordinate_decision_spot() -> None:
     )
     assert confirmed.current_phase is LevelPhase.CONFIRMED
     assert confirmed.state["decision_spot"] == 95.0
+
+
+def test_active_rth_es_event_upgrades_to_official_spx_without_reset() -> None:
+    proxy = {
+        "trigger_coordinate_kind": "es_equivalent",
+        "trigger_basis_points": 40.0,
+        "spx_spot": 7388.0,
+        "spx_levels": {"flip_low": 7390.0},
+    }
+    armed = advance(
+        None,
+        0,
+        spot=7428.0,
+        es=7428.0,
+        levels={"flip_low": 7430.0},
+        **proxy,
+    )
+    event_id = armed.state["event_id"]
+
+    upgraded = advance(
+        armed.state,
+        5,
+        spot=7387.0,
+        es=7427.0,
+        levels={"flip_low": 7390.0},
+        trigger_coordinate_kind="official_spx",
+        trigger_basis_points=40.0,
+        spx_spot=7387.0,
+        spx_levels={"flip_low": 7390.0},
+    )
+
+    assert upgraded.current_phase is LevelPhase.BREAK_PENDING
+    assert upgraded.reason == "crossed_outside_buffer"
+    assert upgraded.state["event_id"] == event_id
+    assert upgraded.state["trigger_coordinate_kind"] == "official_spx"
+    assert upgraded.state["trigger_instrument_id"] == "index:SPX"
+    assert upgraded.state["level"] == 7390.0
+    assert upgraded.state["start_spot"] == 7388.0
+    assert upgraded.state["coordinate_upgraded_from"] == "es_equivalent"
+    assert upgraded.state["coordinate_upgraded_basis_points"] == 40.0
+
+
+def test_confirmed_rth_es_event_remains_confirmed_after_official_spx_recovers() -> None:
+    proxy = {
+        "trigger_coordinate_kind": "es_equivalent",
+        "trigger_basis_points": 40.0,
+        "spx_levels": {"flip_low": 7390.0},
+    }
+    armed = advance(
+        None,
+        0,
+        spot=7428.0,
+        es=7428.0,
+        levels={"flip_low": 7430.0},
+        spx_spot=7388.0,
+        **proxy,
+    )
+    confirmed_state = {
+        **armed.state,
+        "phase": LevelPhase.CONFIRMED.value,
+        "thesis": LevelThesis.BREAKOUT.value,
+        "direction": "down",
+        "decision_spot": 7381.92,
+        "phase_at": (NOW + timedelta(seconds=1)).isoformat(),
+    }
+
+    upgraded = advance(
+        confirmed_state,
+        5,
+        spot=7381.8,
+        es=7421.8,
+        levels={"flip_low": 7390.0},
+        trigger_coordinate_kind="official_spx",
+        trigger_basis_points=40.0,
+        spx_spot=7381.8,
+        spx_levels={"flip_low": 7390.0},
+    )
+
+    assert upgraded.current_phase is LevelPhase.CONFIRMED
+    assert upgraded.reason == "no_transition"
+    assert upgraded.state["event_id"] == armed.state["event_id"]
+    assert upgraded.state["trigger_coordinate_kind"] == "official_spx"
+    assert upgraded.state["decision_spot"] == 7381.92

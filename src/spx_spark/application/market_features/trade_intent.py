@@ -55,7 +55,7 @@ HARD_CONTEXT_INVALIDATIONS = frozenset(
 )
 
 ET = ZoneInfo("America/New_York")
-TRADE_INTENT_CONTRACT_VERSION = "rth_manual_levels_0930_1530.v4"
+TRADE_INTENT_CONTRACT_VERSION = "rth_manual_levels_0930_1530.v5"
 
 
 def live_trade_intent_authority_issues(
@@ -117,6 +117,10 @@ def trade_intent_policy_version(
                 "manual_ready_execution_eligible": True,
                 "manual_ready_quote_observation_eligible": False,
                 "automatic_ordering": False,
+                "coordinate_authority": (
+                    "official_spx",
+                    "qualified_rth_es_equivalent",
+                ),
             },
         },
     )
@@ -217,7 +221,7 @@ def evaluate_trade_intent(
             "hard_gates": [
                 "confirmed_directional_source",
                 "rth_session",
-                "official_spx_coordinate",
+                "official_or_qualified_es_basis_coordinate",
                 "fresh_exact_spxw_quote",
                 "coherent_risk_geometry",
                 "signal_ttl",
@@ -450,7 +454,7 @@ def evaluate_trade_intent(
     if bid is None or ask is None or mid is None:
         return {**base, "status": "blocked", "block_reasons": ["not_two_sided"]}
     entry_limit = round_to_tick(
-        min(mid, bid + feature_policy.trade_entry_spread_fraction * (ask - bid))
+        bid + feature_policy.trade_entry_spread_fraction * (ask - bid)
     )
     assert invalidation is not None
     assert target is not None
@@ -500,7 +504,7 @@ def evaluate_trade_intent(
         "decision_ask": ask,
         "decision_mid": mid,
         "entry_limit": entry_limit,
-        "entry_rule": "bid_plus_spread_fraction_capped_at_mid",
+        "entry_rule": "bid_plus_spread_fraction_to_ask",
         "entry_spread_fraction": feature_policy.trade_entry_spread_fraction,
         "spx_spot": spot,
         "trigger_level": trigger_level,

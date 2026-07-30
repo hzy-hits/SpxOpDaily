@@ -39,6 +39,7 @@ from spx_spark.application.market_features.trade_intent_runtime_support import (
     _writer_prompt as _writer_prompt,
     render_trade_intent as render_trade_intent,
 )
+from spx_spark.ibkr.atm_reference import BASIS_MAX_ABS_POINTS
 from spx_spark.config import NotificationSettings, StorageSettings
 from spx_spark.notifier.dispatcher import (
     cancel_pending_notification,
@@ -624,11 +625,55 @@ def _ready_contract_reason(
             return "source_policy_incompatible"
         if expected_policy_version and source_policy != expected_policy_version:
             return "source_policy_version_drift"
-        coordinate = intent.get("coordinate")
-        if not isinstance(coordinate, Mapping) or coordinate.get("kind") != "official_spx":
-            return "source_coordinate_mismatch"
+        coordinate_reason = _delivery_coordinate_reason(intent)
+        if coordinate_reason:
+            return coordinate_reason
         return None
     return "strategy_schema_unsupported"
+
+
+def _delivery_coordinate_reason(intent: Mapping[str, object]) -> str | None:
+    """Authorize cash SPX or one internally qualified ES-equivalent RTH lifecycle."""
+
+    coordinate = intent.get("coordinate")
+    if not isinstance(coordinate, Mapping):
+        return "source_coordinate_unavailable"
+    kind = str(coordinate.get("kind") or "")
+    if kind == "official_spx":
+        return None
+    if kind != "es_equivalent":
+        return "source_coordinate_mismatch"
+    if coordinate.get("instrument_id") != "future:ES":
+        return "source_es_coordinate_instrument_mismatch"
+
+    basis = _number(coordinate.get("basis_points"))
+    observed = _number(coordinate.get("observed_value"))
+    target = _number(coordinate.get("target_value"))
+    coordinate_spx_level = _number(coordinate.get("spx_level"))
+    intent_spx_spot = _number(intent.get("spx_spot"))
+    intent_trigger = _number(intent.get("trigger_level"))
+    if basis is None or abs(basis) > BASIS_MAX_ABS_POINTS:
+        return "source_es_coordinate_basis_invalid"
+    if (
+        observed is None
+        or observed <= 0
+        or target is None
+        or target <= 0
+        or coordinate_spx_level is None
+        or coordinate_spx_level <= 0
+        or intent_spx_spot is None
+        or intent_spx_spot <= 0
+        or intent_trigger is None
+        or intent_trigger <= 0
+    ):
+        return "source_es_coordinate_fields_incomplete"
+    if not math.isclose(observed - basis, intent_spx_spot, abs_tol=0.1):
+        return "source_es_coordinate_spot_incoherent"
+    if not math.isclose(target - basis, intent_trigger, abs_tol=0.1):
+        return "source_es_coordinate_target_incoherent"
+    if not math.isclose(coordinate_spx_level, intent_trigger, abs_tol=0.1):
+        return "source_es_coordinate_level_incoherent"
+    return None
 
 
 def _action_revalidation(
@@ -754,7 +799,7 @@ def _action_revalidation(
                 if not execution_gate.executable:
                     reason = f"action_execution_quote_{execution_gate.reasons[0]}"
                 else:
-                    action_limit = round_to_tick(min(mid, bid + entry_fraction * (ask - bid)))
+                    action_limit = round_to_tick(bid + entry_fraction * (ask - bid))
                     evidence["recomputed_entry_limit"] = action_limit
                     # A TradeReady card is an immutable, manual decision
                     # snapshot, not an order priced from this later quote.  A

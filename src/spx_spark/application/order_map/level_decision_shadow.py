@@ -152,6 +152,7 @@ def run_level_decision_shadow(
             "structure": frozen_structure,
             "structure_stability": stability_state,
             "latest_observation": {
+                "observed_at": _utc(now).isoformat(),
                 "spot": observation.spot,
                 "es": observation.es,
                 "quality_ok": observation.quality_ok,
@@ -218,6 +219,7 @@ def run_level_decision_shadow(
         structure=frozen_structure if isinstance(frozen_structure, Mapping) else None,
         structure_stability=stability_state,
         latest_observation={
+            "observed_at": _utc(now).isoformat(),
             "spot": observation.spot,
             "es": observation.es,
             "quality_ok": observation.quality_ok,
@@ -352,7 +354,16 @@ def _observation(
     active_phase = str((active_decision or {}).get("phase") or "far")
     active_basis = _positive_or_negative_float((active_decision or {}).get("trigger_basis_points"))
     if active_phase not in {"far", "invalidated", "expired"} and es is not None:
-        if active_kind == "es_equivalent" and active_basis is not None:
+        official_spx_recovered = (
+            session_mode == "rth"
+            and active_kind == "es_equivalent"
+            and coordinate_kind == "official_spx"
+        )
+        if (
+            active_kind == "es_equivalent"
+            and active_basis is not None
+            and not official_spx_recovered
+        ):
             levels = {name: value + active_basis for name, value in spx_levels.items()}
             spot = es
             spx_spot = es - active_basis
@@ -584,9 +595,11 @@ def _public_state(
             "observed_value": trigger_value,
             "target_value": state.get("level"),
             "spx_level": state.get("spx_level", state.get("level")),
+            "spx_observed_value": spot,
             "basis_points": observation.get(
                 "trigger_basis_points", state.get("trigger_basis_points")
             ),
+            "as_of": observation.get("observed_at", state.get("updated_at")),
         },
         "es_basis_points": es_basis,
         "es_equivalent_levels": es_equivalent_levels,

@@ -44,7 +44,7 @@ class MarketFeatureSettings:
     trade_quote_max_age_seconds: float = 5.0
     trade_market_anchor_max_age_seconds: float = 20.0
     trade_structure_drift_points: float = 5.0
-    trade_entry_spread_fraction: float = 0.35
+    trade_entry_spread_fraction: float = 1.0
     trade_intent_ttl_seconds: float = 90.0
     trade_entry_window_seconds: float = 20.0
     trade_invalidation_buffer_points: float = 3.0
