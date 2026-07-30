@@ -537,6 +537,7 @@ def test_option_tick_and_round_to_tick() -> None:
     assert option_tick(3.2) == 0.10
     assert round_to_tick(3.2) == pytest.approx(3.2)
     assert round_to_tick(3.27) == pytest.approx(3.2)
+    assert round_to_tick(16.9) == 16.9
 
 
 def test_project_option_price_call_and_put() -> None:

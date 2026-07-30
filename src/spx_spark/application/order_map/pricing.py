@@ -68,7 +68,7 @@ def option_tick(premium: float) -> float:
 def round_to_tick(premium: float) -> float:
     """Round DOWN to tick (limit buy: 挂低一格比挂高一格好)."""
     tick = option_tick(premium)
-    return math.floor(premium / tick + 1e-12) * tick
+    return round(math.floor(premium / tick + 1e-12) * tick, 2)
 
 
 def project_option_price(
