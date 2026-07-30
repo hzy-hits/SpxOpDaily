@@ -32,6 +32,7 @@ from spx_spark.application.market_features.options import (
     _wall_rank_persistence,
     build_option_structure_frame,
     imbalance,
+    level_decision_live_structure,
     option_volatility_features,
     provider_mid_divergences,
 )
@@ -218,6 +219,66 @@ def test_missing_live_chain_retains_same_expiry_structure_without_pricing() -> N
     assert frame.volatility["atm_iv_0dte"] is None
     assert frame.l1.quality is FrameQuality.UNAVAILABLE
     assert contracts == {}
+
+
+def test_verified_option_frame_projects_live_walls_into_level_lifecycle() -> None:
+    at = datetime(2026, 7, 30, 16, 30, tzinfo=UTC)
+    frame = replace(
+        _decision_option_frame(
+            abs_gex=2e9,
+            wall_gex=1e9,
+            next_wall_distance=25.0,
+            gamma_top_share=0.5,
+            oi_dex_ratio=1.0,
+            volume_dex_ratio=1.0,
+        ),
+        as_of=at,
+        front_expiry="20260730",
+        l1=L1MicrostructureFrame(
+            quality=FrameQuality.READY,
+            expiry="20260730",
+            contract_count=10,
+            metrics={"liquidity_score": 90.0},
+            diagnostics={"fresh_candidate_count": 10},
+        ),
+        structure={
+            "put_wall": 7400.0,
+            "call_wall": 7425.0,
+            "flip_zone": [7405.0, 7410.0],
+            "gex_quality": "open_interest_gex",
+            "wall_method": "oi_gex",
+        },
+    )
+
+    projected = level_decision_live_structure(frame)
+
+    assert projected == {
+        "levels": {
+            "put_wall": 7400.0,
+            "flip_low": 7405.0,
+            "flip_high": 7410.0,
+            "call_wall": 7425.0,
+        },
+        "expiry": "20260730",
+        "source": "live_oi_gex_option_frame",
+        "observed_at": at.isoformat(),
+        "session_date": "2026-07-30",
+    }
+    assert (
+        level_decision_live_structure(
+            replace(
+                frame,
+                structure={**frame.structure, "wall_method": "volume_fallback"},
+            )
+        )
+        is None
+    )
+    assert (
+        level_decision_live_structure(
+            replace(frame, structure={**frame.structure, "frozen": True})
+        )
+        is None
+    )
 
 
 def test_missing_chain_does_not_carry_prior_expiry_structure() -> None:

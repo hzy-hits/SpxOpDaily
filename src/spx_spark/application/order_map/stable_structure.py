@@ -1,4 +1,4 @@
-"""Fifteen-minute hysteresis for OI/GEX wall structure.
+"""Intraday hysteresis for OI/GEX wall structure.
 
 Raw chain analytics remain available for audit. This module owns the stable
 decision surface so a small OI/GEX reshuffle cannot move an active wall on
@@ -201,7 +201,7 @@ def _promoted(source: Mapping[str, object], *, now: datetime, band: float) -> di
         "last_confirmed_at": now.isoformat(),
         "confirmation_count": int(source.get("confirmation_count") or 1),
         "duration_seconds": 0.0,
-        "source": "stable_15m_oi_gex",
+        "source": "stable_intraday_oi_gex",
     }
 
 

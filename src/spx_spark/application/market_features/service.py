@@ -52,6 +52,7 @@ from spx_spark.application.market_features.market_sample_seed import (
 )
 from spx_spark.application.market_features.options import (
     build_option_structure_frame,
+    level_decision_live_structure,
     merge_option_history,
     option_frame_has_usable_live_structure,
 )
@@ -327,6 +328,7 @@ def run(
             now=evaluation_now,
             policy=app.level_decision,
             notifications_enabled=True,
+            live_structure=level_decision_live_structure(option_frame),
         )
     except Exception as exc:  # The last durable decision remains usable on refresh failure.
         level_decision_refresh_error = f"{type(exc).__name__}:{exc}"

@@ -10,7 +10,7 @@ def structure(put: float, call: float) -> dict[str, object]:
     return {"levels": {"put_wall": put, "call_wall": call}, "expiry": "20260714"}
 
 
-def test_wall_switch_requires_distinct_fifteen_minute_confirmations() -> None:
+def test_wall_switch_requires_distinct_time_bucket_confirmations() -> None:
     state, stable = advance_stable_structure(
         None,
         structure(7500, 7600),

@@ -5,7 +5,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Mapping
 
@@ -83,6 +83,7 @@ def run_level_decision_shadow(
     now: datetime,
     policy: LevelDecisionPolicy | None = None,
     notifications_enabled: bool = False,
+    live_structure: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     policy = policy or LevelDecisionPolicy()
     if not policy.enabled:
@@ -93,12 +94,16 @@ def run_level_decision_shadow(
     state_path = default_level_decision_state_path(storage)
     with exclusive_state_lock(state_path):
         persisted = _load_state(state_path)
-        live_structure = _live_structure(tick, now=now)
+        current_live_structure = (
+            _normalized_live_structure(live_structure, now=now)
+            if live_structure is not None
+            else _live_structure(tick, now=now)
+        )
         stability_state, promoted_structure = advance_stable_structure(
             persisted.get("structure_stability")
             if isinstance(persisted.get("structure_stability"), Mapping)
             else {"stable": persisted.get("structure")},
-            live_structure,
+            current_live_structure,
             now=now,
             interval_seconds=policy.structure_interval_seconds,
             required_confirmations=policy.structure_required_confirmations,
@@ -442,6 +447,26 @@ def _live_structure(tick: EngineTick | None, *, now: datetime) -> dict[str, obje
         "source": "live_oi_gex",
         "observed_at": _utc(now).isoformat(),
         "session_date": _research_session_date(now),
+    }
+
+
+def _normalized_live_structure(
+    value: Mapping[str, object],
+    *,
+    now: datetime,
+) -> dict[str, object] | None:
+    levels = _structure_levels(value)
+    expiry = str(value.get("expiry") or "")
+    if not levels or not expiry:
+        return None
+    observed_at = _optional_datetime(value.get("observed_at"))
+    if observed_at is None or observed_at > _utc(now) + timedelta(seconds=1):
+        return None
+    return {
+        **dict(value),
+        "levels": levels,
+        "expiry": expiry,
+        "observed_at": observed_at.isoformat(),
     }
 
 

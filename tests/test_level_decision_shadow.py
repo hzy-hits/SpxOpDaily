@@ -247,6 +247,53 @@ def test_pending_structure_blocks_new_arm_until_promotion(tmp_path, monkeypatch)
     assert result["quality_reason"] is None
 
 
+def test_direct_live_structure_refreshes_walls_without_realtime_engine_tick(
+    tmp_path, monkeypatch
+) -> None:
+    storage = SimpleNamespace(data_root=str(tmp_path))
+    stable = _stable_structure(NOW, put_wall=100.0, call_wall=120.0)
+    _write_shadow_state(tmp_path, decision=None, stable=stable)
+
+    def fake_observation(_storage, _tick, *, now, frozen_structure, **kwargs):
+        blocks_arm = kwargs["structure_pending_blocks_new_arm"]
+        return _level_observation(
+            now,
+            spot=100.0,
+            levels=shadow_service._structure_levels(frozen_structure),
+            arm_allowed=not blocks_arm,
+            arm_block_reason=(
+                "structure_change_pending_new_arm_blocked" if blocks_arm else None
+            ),
+        )
+
+    monkeypatch.setattr(shadow_service, "_observation", fake_observation)
+    monkeypatch.setattr(
+        shadow_service,
+        "_live_structure",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("tick-derived structure must not be used")
+        ),
+    )
+
+    result = run_level_decision_shadow(
+        storage,
+        None,
+        now=NOW + timedelta(seconds=5),
+        live_structure=_live_structure(
+            NOW + timedelta(seconds=5),
+            put_wall=110.0,
+            call_wall=130.0,
+        ),
+    )
+
+    assert result["structure_change_pending"] is True
+    assert result["structure_candidate"]["levels"] == {
+        "put_wall": 110.0,
+        "call_wall": 130.0,
+    }
+    assert result["new_arm_blocked"] is True
+
+
 def test_promoted_structure_still_runs_machine_drift_validation(
     tmp_path, monkeypatch
 ) -> None:
@@ -619,7 +666,7 @@ def _stable_structure(
     return {
         "levels": {"put_wall": put_wall, "call_wall": call_wall},
         "expiry": "20260713",
-        "source": "stable_15m_oi_gex",
+        "source": "stable_intraday_oi_gex",
         "observed_at": at.isoformat(),
         "session_date": "2026-07-13",
         "promoted_at": at.isoformat(),

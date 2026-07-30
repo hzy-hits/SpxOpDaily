@@ -118,6 +118,7 @@ def frozen_structure_for_session(
             "flip_zone",
             "gamma_state",
             "gex_quality",
+            "wall_method",
             "net_gex",
             "abs_gex",
             "net_gamma_ratio",
@@ -152,6 +153,42 @@ def option_frame_has_usable_live_structure(frame: OptionStructureFrame) -> bool:
         and frame.l1.contract_count > 0
         and frame.l1.diagnostics.get("fresh_candidate_count", 0) > 0
     )
+
+
+def level_decision_live_structure(
+    frame: OptionStructureFrame,
+) -> dict[str, object] | None:
+    """Project a verified live OI/GEX frame into the wall lifecycle."""
+
+    structure = frame.structure
+    if (
+        not option_frame_has_usable_live_structure(frame)
+        or structure.get("frozen") is True
+        or structure.get("gex_quality") != "open_interest_gex"
+        or structure.get("wall_method") != "oi_gex"
+    ):
+        return None
+    levels: dict[str, float] = {}
+    put_wall = _number(structure.get("put_wall"))
+    call_wall = _number(structure.get("call_wall"))
+    if put_wall is not None:
+        levels["put_wall"] = put_wall
+    flip = structure.get("flip_zone")
+    if isinstance(flip, list | tuple) and len(flip) >= 2:
+        ordered = sorted(value for item in flip[:2] if (value := _number(item)) is not None)
+        if len(ordered) == 2:
+            levels["flip_low"], levels["flip_high"] = ordered
+    if call_wall is not None:
+        levels["call_wall"] = call_wall
+    if not levels:
+        return None
+    return {
+        "levels": levels,
+        "expiry": frame.front_expiry,
+        "source": "live_oi_gex_option_frame",
+        "observed_at": frame.as_of.isoformat(),
+        "session_date": DEFAULT_MARKET_CALENDAR.research_expiry(frame.as_of).isoformat(),
+    }
 
 
 def _structure_has_levels(structure: dict[str, Any]) -> bool:
@@ -242,6 +279,7 @@ def structure_features(
         ),
         "gamma_state": front.gamma_state,
         "gex_quality": front.gex_quality,
+        "wall_method": front.wall_method,
         "net_gex": front.net_gex,
         "abs_gex": front.abs_gex,
         "net_gamma_ratio": front.net_gamma_ratio,
@@ -710,6 +748,8 @@ def _empty_structure() -> dict[str, Any]:
         "distance_to_call_wall": None,
         "distance_to_zero_gamma": None,
         "max_pain": None,
+        "gex_quality": None,
+        "wall_method": None,
         "net_gex": None,
         "abs_gex": None,
         "net_gamma_ratio": None,
