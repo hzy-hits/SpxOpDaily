@@ -47,6 +47,9 @@ from spx_spark.application.order_map.status_prompt_payload import (
     build_status_writer_payload as _status_writer_payload,
     status_guidance_lines as _status_guidance_lines,
 )
+from spx_spark.application.order_map.status_explanation import (
+    humanize_operator_trigger,
+)
 from spx_spark.application.order_map.state import _session_phase_of
 from spx_spark.application.order_map.strike_coverage_presentation import (
     strike_price_coverage_line as _strike_price_coverage_line,
@@ -74,7 +77,6 @@ GLOBEX_CONTEXT_SYSTEM_PROMPT = "\n".join(
         "输出简洁中文，先结论，再位置，再双向条件，最后写数据限制。数字逐字引用，不改写。",
     )
 )
-
 
 def build_order_prompt(
     payload: dict[str, Any],
@@ -214,6 +216,70 @@ def _compact_level_line(payload: dict[str, Any]) -> str:
     return (
         f"Put {_dash(put_wall)}　Flip {_dash(flip_low)}–{_dash(flip_high)}　Call {_dash(call_wall)}"
     )
+
+
+def _operator_structure_line(payload: dict[str, Any]) -> str:
+    """Label frozen event levels and current map levels instead of mixing them."""
+
+    decision = payload.get("level_decision")
+    decision = decision if isinstance(decision, dict) else {}
+    frozen = decision.get("levels") if isinstance(decision.get("levels"), dict) else {}
+    by_play = _candidate_by_play(payload)
+    flip_zone = payload.get("flip_zone")
+    live_flip = flip_zone if isinstance(flip_zone, list) and len(flip_zone) >= 2 else ()
+
+    def candidate_level(play: str) -> object:
+        candidate = by_play.get(play)
+        return candidate.get("level") if isinstance(candidate, dict) else None
+
+    live = {
+        "put_wall": candidate_level("put_wall_bounce_call"),
+        "flip_low": live_flip[0] if live_flip else None,
+        "flip_high": live_flip[1] if live_flip else None,
+        "call_wall": candidate_level("call_wall_fade_put"),
+    }
+
+    def values_text(levels: dict[str, Any]) -> str:
+        return (
+            f"Put {_dash(levels.get('put_wall'))} / "
+            f"Flip {_dash(levels.get('flip_low'))}–{_dash(levels.get('flip_high'))} / "
+            f"Call {_dash(levels.get('call_wall'))}"
+        )
+
+    frozen_text = values_text(frozen) if frozen else "未冻结"
+    live_text = values_text(live)
+    if frozen and all(
+        finite_float(frozen.get(key)) == finite_float(live.get(key))
+        for key in ("put_wall", "flip_low", "flip_high", "call_wall")
+    ):
+        return f"结构  事件与实时一致：{frozen_text}"
+    return f"结构  事件冻结：{frozen_text}；实时地图：{live_text}"
+
+
+def _operator_reason_line(payload: dict[str, Any]) -> str:
+    warnings = [str(item) for item in payload.get("warnings") or ()]
+    underlier = payload.get("underlier")
+    underlier = underlier if isinstance(underlier, dict) else {}
+    decision = payload.get("level_decision")
+    decision = decision if isinstance(decision, dict) else {}
+    intent = payload.get("trade_intent")
+    intent = intent if isinstance(intent, dict) else {}
+    reasons: list[str] = []
+    if any("no open interest" in item for item in warnings):
+        reasons.append("当日 OI 不完整，实时墙位不能触发交易")
+    if underlier.get("price") is None:
+        reasons.append("可靠 SPX 坐标暂不可用")
+    elif underlier.get("source") != "index:SPX":
+        reasons.append("SPX 使用期权隐含坐标")
+    if decision.get("structure_change_pending") is True:
+        reasons.append("新结构仍在确认")
+    if str(decision.get("phase") or "far").lower() == "far":
+        reasons.append("尚无关键位测试")
+    if intent.get("status") == "blocked":
+        reasons.append("执行门未通过")
+    if not reasons:
+        reasons.append("等待状态机确认和可执行报价")
+    return "原因  " + "；".join(dict.fromkeys(reasons[:3]))
 
 
 def _compact_structure_candidate_line(payload: dict[str, Any]) -> str | None:
@@ -611,40 +677,44 @@ def render_operator_status_brief(
     phase = _session_phase_of(payload, now_utc)
     expiry = str(payload.get("expiry") or "-")
     expiry_text = f"{expiry[4:6]}-{expiry[6:8]}" if len(expiry) == 8 else expiry
+    guidance = guidance_module.build_decision_guidance(payload)
+    manual_ready = any(
+        isinstance(candidate, dict) and candidate.get("status") == "manual_ready"
+        for candidate in (
+            payload.get("gth_manual_candidate"),
+            payload.get("gth_level_manual_candidate"),
+        )
+    )
+    trade_ready = (
+        guidance.action is guidance_module.GuidanceAction.TRADE_READY
+        or manual_ready
+    )
+    badge = (
+        "🔴 状态快照 · 执行以独立 MANUAL READY 卡为准"
+        if trade_ready
+        else "🔴 只观察 · 当前无可执行合约"
+    )
+    underlier = payload.get("underlier")
+    underlier = underlier if isinstance(underlier, dict) else {}
+    source = underlier.get("source")
+    spx_text = _dash(underlier.get("price"))
+    if source and source != "index:SPX":
+        spx_text += f"（{underlier_source_label(source)}）"
     lines = [
         (
             f"【SPX 状态 · {beijing.strftime('%H:%M')} · "
             f"0DTE {expiry_text} · {phase.get('name_cn')}】"
         ),
-        *_operator_decision_card_lines(payload, now_utc=now_utc),
-        "",
-        _compact_price_line(payload),
+        badge,
         (
-            f"结构  {_gamma_label(payload.get('gamma_state'))}　"
-            f"{_compact_level_line(payload)}　EM ±{_dash(payload.get('expected_move_points'))}"
+            f"市场  SPX {spx_text} · ES {_dash(payload.get('es_last'))} · "
+            f"{guidance.bias}仅作背景"
         ),
+        f"触发  {humanize_operator_trigger(guidance.trigger_text)}",
+        f"证伪  {guidance.invalidation_text}",
+        _operator_structure_line(payload),
+        _operator_reason_line(payload),
     ]
-    radar_lines = render_convexity_idea_radar_lines(payload)
-    lines.extend(
-        line
-        for line in radar_lines
-        if line.startswith(("30m路径分位", "GTH方向观察", "GTH路径rank", "机会["))
-    )
-    for line in (
-        _compact_decision_line(payload),
-        _compact_flow_line(payload) or _es_volume_line(payload),
-    ):
-        if line:
-            lines.append(line)
-    warnings = payload.get("warnings")
-    warning_text = f" · 数据 {warnings[0]}" if isinstance(warnings, list) and warnings else ""
-    if changes:
-        change_text = "；".join(changes[:2])
-        if len(changes) > 2:
-            change_text += f"；另 {len(changes) - 2} 项"
-        lines.append(f"变化  {change_text}{warning_text}")
-    else:
-        lines.append(f"变化  无实质变化{warning_text}")
     return "\n".join(lines)
 
 

@@ -3232,6 +3232,69 @@ def test_status_fingerprint_tracks_trade_intent_identity() -> None:
     assert _status_material_changes(baseline, changed) == ["执行意图更新 7500P→7495P"]
 
 
+def test_status_fingerprint_does_not_push_background_regime_flips() -> None:
+    from spx_spark.application.order_map.service import (
+        _status_fingerprint,
+        _status_material_changes,
+    )
+
+    payload = {
+        "expiry": "20260714",
+        "expected_move_points": 40.0,
+        "flip_zone": [7500.0, 7505.0],
+        "candidates": [
+            {"play": "put_wall_bounce_call", "level": 7490.0},
+            {"play": "call_wall_fade_put", "level": 7520.0},
+        ],
+        "plan_candidates": [],
+        "regime_decision": {"mode": "trending", "direction": "down"},
+        "session_phase": {"name": "asia_globex"},
+    }
+    baseline = _status_fingerprint(payload)
+    payload["regime_decision"] = {"mode": "trending", "direction": "up"}
+    changed = _status_fingerprint(payload)
+
+    assert baseline["decision_thesis"] == ""
+    assert changed["decision_thesis"] == ""
+    assert _status_material_changes(baseline, changed) == []
+
+
+def test_gth_status_fingerprint_uses_frozen_levels_not_live_map_flaps() -> None:
+    from spx_spark.application.order_map.service import (
+        _status_fingerprint,
+        _status_material_changes,
+    )
+
+    payload = {
+        "expiry": "20260714",
+        "expected_move_points": 40.0,
+        "flip_zone": [7510.0, 7515.0],
+        "candidates": [
+            {"play": "put_wall_bounce_call", "level": 7495.0},
+            {"play": "call_wall_fade_put", "level": 7530.0},
+        ],
+        "level_decision": {
+            "levels": {
+                "put_wall": 7490.0,
+                "flip_low": 7500.0,
+                "flip_high": 7505.0,
+                "call_wall": 7520.0,
+            }
+        },
+        "plan_candidates": [],
+        "session_phase": {"name": "asia_globex"},
+    }
+    baseline = _status_fingerprint(payload)
+    payload["flip_zone"] = [7520.0, 7525.0]
+    payload["candidates"] = []
+    changed = _status_fingerprint(payload)
+
+    assert baseline["put_wall"] == changed["put_wall"] == 7490.0
+    assert baseline["flip_low"] == changed["flip_low"] == 7500.0
+    assert baseline["call_wall"] == changed["call_wall"] == 7520.0
+    assert _status_material_changes(baseline, changed) == []
+
+
 def test_status_candidate_presentation_labels_unapproved_sides_as_observation() -> None:
     payload = {
         "expiry": "20260714",
@@ -3431,7 +3494,7 @@ def test_status_delivery_gate_allows_material_and_one_shot_key_windows() -> None
     )
 
 
-def test_status_delivery_gate_sends_gth_quarter_hour_heartbeat() -> None:
+def test_status_delivery_gate_sends_gth_hourly_summary() -> None:
     from spx_spark.application.order_map.service import _status_delivery_reason
 
     now = datetime(2026, 7, 15, 4, 14, tzinfo=timezone.utc)
@@ -3441,7 +3504,7 @@ def test_status_delivery_gate_sends_gth_quarter_hour_heartbeat() -> None:
         "last_status_at": now.timestamp() - 13 * 60,
         "status_fingerprint": fingerprint,
     }
-    due = {**recent, "last_status_at": now.timestamp() - 16 * 60}
+    due = {**recent, "last_status_at": now.timestamp() - 61 * 60}
 
     assert (
         _status_delivery_reason(
@@ -3474,7 +3537,7 @@ def test_status_delivery_gate_sends_gth_quarter_hour_heartbeat() -> None:
             trading_date="2026-07-15",
             position_risk=False,
         )
-        == "gth_quarter_hour_heartbeat:asia_globex"
+        == "gth_hourly_summary:asia_globex"
     )
 
 

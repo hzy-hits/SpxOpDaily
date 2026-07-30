@@ -31,6 +31,9 @@ from spx_spark.application.market_features.greek_decision import build_greek_dec
 from spx_spark.application.market_features.gth_manual_candidate import (
     process_gth_manual_candidate,
 )
+from spx_spark.application.market_features.gth_level_manual_candidate import (
+    process_gth_level_manual_candidate,
+)
 from spx_spark.application.market_features.market import (
     build_minute_market_frame,
     merge_minute_sample,
@@ -462,6 +465,16 @@ def run(
         new_entries_allowed=action_provider_entry_control["allowed"] is True,
         new_entries_block_reason=str(action_provider_entry_control.get("reason") or "unknown"),
     )
+    gth_level_manual_candidate = process_gth_level_manual_candidate(
+        storage,
+        action_latest,
+        raw_level_decision,
+        macro_event=action_macro_event,
+        now=action_now,
+        policy=policy,
+        new_entries_allowed=action_provider_entry_control["allowed"] is True,
+        new_entries_block_reason=str(action_provider_entry_control.get("reason") or "unknown"),
+    )
     virtual_strategy = process_virtual_strategy(
         storage,
         action_latest,
@@ -480,6 +493,7 @@ def run(
         context,
         virtual_strategy=virtual_strategy,
         gth_manual_candidate=gth_manual_candidate,
+        gth_level_manual_candidate=gth_level_manual_candidate,
     )
     previous_context = _dict(persisted.get("last_decision_context"))
     audit = build_decision_audit(context, previous=previous_context or None)
@@ -542,6 +556,7 @@ def run(
             "level_decision_refresh_error": level_decision_refresh_error,
             "virtual_strategy": virtual_strategy,
             "gth_manual_candidate": gth_manual_candidate,
+            "gth_level_manual_candidate": gth_level_manual_candidate,
             "spring_gamma_v3_shadow": spring_gamma_v3,
         }
     )

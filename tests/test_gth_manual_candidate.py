@@ -9,11 +9,16 @@ from types import SimpleNamespace
 import pytest
 
 import spx_spark.application.market_features.gth_manual_candidate as candidate_module
+import spx_spark.application.market_features.gth_level_manual_candidate as level_candidate_module
 from spx_spark.application.market_features.gth_manual_candidate import (
     _direct_es_reference,
     _notification_intent,
     evaluate_gth_manual_candidate,
     process_gth_manual_candidate,
+)
+from spx_spark.application.market_features.gth_level_manual_candidate import (
+    evaluate_gth_level_manual_candidate,
+    process_gth_level_manual_candidate,
 )
 from spx_spark.application.market_features.trade_intent import (
     live_trade_intent_authority_issues,
@@ -83,6 +88,129 @@ def test_manual_candidate_is_ready_without_cash_spx(
     assert "trade_intent_execution_authority_missing" in live_trade_intent_authority_issues(
         candidate
     )
+
+
+def test_confirmed_gth_flip_low_breakdown_builds_put_manual_ready(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_ready_market(monkeypatch, now=NOW, parity_price=7368.0, es_price=7398.0)
+
+    candidate = evaluate_gth_level_manual_candidate(
+        object(),
+        _level_signal(NOW, direction="down", level_kind="flip_low", level=7375.0),
+        macro_event={"entry_allowed": True},
+        now=NOW,
+        policy=MarketFeatureSettings(),
+        new_entries_allowed=True,
+        new_entries_block_reason="allowed",
+    )
+
+    assert candidate["status"] == "manual_ready"
+    assert candidate["path_kind"] == "flip_low_breakdown_put"
+    assert candidate["position_type"] == "put_debit_spread"
+    assert candidate["long_contract_id"].endswith(":7375:P")
+    assert candidate["short_contract_id"].endswith(":7335:P")
+    assert candidate["decision_bid"] == 10.0
+    assert candidate["decision_ask"] == 12.0
+    assert candidate["entry_limit"] == 12.0
+    assert candidate["entry_rule"] == "manual_debit_limit_at_or_below_decision_ask"
+    assert candidate["invalidation_spx"] == 7383.0
+    assert candidate["invalidation_es"] == 7413.0
+    assert candidate["target_spx"] == 7300.0
+    assert candidate["automatic_ordering"] is False
+    assert candidate["execution_eligible"] is False
+    assert candidate["broker_submission_allowed"] is False
+    card = _notification_intent(candidate, event_id="put-ready", now=NOW)
+    assert "🟢 MANUAL READY · PUT SPREAD" in card["text"]
+    assert "买入  SPXW 07-15 7375P" in card["text"]
+    assert "卖出  SPXW 07-15 7335P" in card["text"]
+    assert "NBBO  10.00 / 12.00" in card["text"]
+    assert "限价  净借记 ≤ 12.00" in card["text"]
+    assert "触发  SPX 跌破 Flip Low 7375.00 并确认" in card["text"]
+    assert "止损  SPX 收回 7383.00；ES 升至 7413.00" in card["text"]
+    assert "目标  SPX 7300.00（Put Wall）" in card["text"]
+    assert "退出  " in card["text"]
+    assert "有效  剩余 " in card["text"]
+    assert "自动下单关闭" in card["text"]
+    assert card["lane"] == "gth_level_manual_candidate"
+
+
+@pytest.mark.parametrize("level_kind", ("flip_high", "call_wall"))
+def test_confirmed_gth_upper_acceptance_builds_call_manual_ready(
+    monkeypatch: pytest.MonkeyPatch,
+    level_kind: str,
+) -> None:
+    trigger = 7380.0 if level_kind == "flip_high" else 7450.0
+    parity = 7390.0 if level_kind == "flip_high" else 7458.0
+    es = parity + 30.0
+    _patch_ready_market(monkeypatch, now=NOW, parity_price=parity, es_price=es)
+
+    candidate = evaluate_gth_level_manual_candidate(
+        object(),
+        _level_signal(NOW, direction="up", level_kind=level_kind, level=trigger),
+        macro_event={"entry_allowed": True},
+        now=NOW,
+        policy=MarketFeatureSettings(),
+        new_entries_allowed=True,
+        new_entries_block_reason="allowed",
+    )
+
+    assert candidate["status"] == "manual_ready"
+    assert candidate["path_kind"] == "upper_acceptance_call"
+    assert candidate["position_type"] == "call_debit_spread"
+    assert candidate["long_contract_id"].endswith(f":{int(trigger)}:C")
+    assert candidate["entry_limit"] == 12.0
+    assert candidate["automatic_ordering"] is False
+
+
+def test_confirmed_gth_lower_rejection_builds_call_manual_ready(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_ready_market(monkeypatch, now=NOW, parity_price=7310.0, es_price=7340.0)
+
+    candidate = evaluate_gth_level_manual_candidate(
+        object(),
+        _level_signal(
+            NOW,
+            thesis="fade",
+            direction="up",
+            level_kind="put_wall",
+            level=7300.0,
+        ),
+        macro_event={"entry_allowed": True},
+        now=NOW,
+        policy=MarketFeatureSettings(),
+        new_entries_allowed=True,
+        new_entries_block_reason="allowed",
+    )
+
+    assert candidate["status"] == "manual_ready"
+    assert candidate["path_kind"] == "lower_rejection_call"
+    assert candidate["position_type"] == "call_debit_spread"
+    assert candidate["target_spx"] == 7375.0
+    assert candidate["target_wall_kind"] == "flip_low"
+    assert candidate["invalidation_spx"] == 7297.0
+    assert candidate["automatic_ordering"] is False
+
+
+def test_gth_put_wall_breakdown_remains_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_ready_market(monkeypatch, now=NOW, parity_price=7290.0, es_price=7320.0)
+
+    candidate = evaluate_gth_level_manual_candidate(
+        object(),
+        _level_signal(NOW, direction="down", level_kind="put_wall", level=7300.0),
+        macro_event={"entry_allowed": True},
+        now=NOW,
+        policy=MarketFeatureSettings(),
+        new_entries_allowed=True,
+        new_entries_block_reason="allowed",
+    )
+
+    assert candidate["status"] == "blocked"
+    assert candidate["manual_action_eligible"] is False
+    assert "unsupported_gth_level_path" in candidate["block_reasons"]
 
 
 def test_gth_manual_candidate_uses_fresh_bbo_without_vendor_greeks(
@@ -433,6 +561,58 @@ def test_candidate_notification_is_durable_and_idempotent(
     assert len(state["accepted_notification_event_ids"]) == 1
 
 
+def test_level_candidate_notification_is_durable_and_idempotent(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_ready_market(monkeypatch, now=NOW, parity_price=7368.0, es_price=7398.0)
+    pending_counts: list[int] = []
+
+    def fake_flush(path, **_kwargs):
+        state = candidate_module.read_json_object(path)
+        pending = list(state.get("pending_notifications") or [])
+        pending_counts.append(len(pending))
+        if not pending:
+            return {"attempted": False, "accepted": False}
+        state["pending_notifications"] = []
+        state["accepted_notification_event_ids"] = [pending[0]["event_id"]]
+        candidate_module.atomic_write_json_secure(path, state)
+        return {"attempted": True, "accepted": True, "outcome": "queued"}
+
+    monkeypatch.setattr(
+        level_candidate_module,
+        "flush_pending_notifications",
+        fake_flush,
+    )
+    storage = SimpleNamespace(data_root=str(tmp_path))
+    kwargs = {
+        "macro_event": {"entry_allowed": True},
+        "now": NOW,
+        "policy": MarketFeatureSettings(),
+        "new_entries_allowed": True,
+        "new_entries_block_reason": "allowed",
+        "notification": SimpleNamespace(),
+    }
+    signal = _level_signal(
+        NOW,
+        direction="down",
+        level_kind="flip_low",
+        level=7375.0,
+    )
+
+    first = process_gth_level_manual_candidate(storage, object(), signal, **kwargs)
+    second = process_gth_level_manual_candidate(storage, object(), signal, **kwargs)
+
+    assert first["notification_accepted"] is True
+    assert second["notification_attempted"] is False
+    assert pending_counts == [1, 0]
+    state = candidate_module.read_json_object(
+        tmp_path / "latest" / "gth_level_manual_candidate_state.json"
+    )
+    assert state["pending_notifications"] == []
+    assert len(state["accepted_notification_event_ids"]) == 1
+
+
 def test_manual_ready_outbox_consumer_receipt_end_to_end_is_idempotent(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
@@ -657,7 +837,6 @@ def test_net_debit_limit_must_round_to_positive_five_cent_increment(
             [],
         ),
     )
-
     candidate = evaluate_gth_manual_candidate(
         object(),
         _signal(NOW),
@@ -794,7 +973,7 @@ def test_notification_labels_wall_and_synthetic_quote() -> None:
     assert "🟢 MANUAL READY · CALL SPREAD" in intent["text"]
     assert "买入  SPXW 07-15 7505C" in intent["text"]
     assert "卖出  SPXW 07-15 7545C" in intent["text"]
-    assert "目标  SPX 7545.00（call_wall）" in intent["text"]
+    assert "目标  SPX 7545.00（Call Wall）" in intent["text"]
     assert "SPX parity 7530.00" in intent["text"]
     assert "退出  12:00 北京时间" in intent["text"]
     assert "不是交易所原生组合 BBO" in intent["text"]
@@ -1159,6 +1338,11 @@ def _patch_ready_market(
         ),
     )
     monkeypatch.setattr(
+        level_candidate_module,
+        "spread_snapshot_decision",
+        candidate_module.spread_snapshot_decision,
+    )
+    monkeypatch.setattr(
         candidate_module,
         "actionable_chain_implied_reference",
         lambda *_args, **_kwargs: {
@@ -1177,6 +1361,11 @@ def _patch_ready_market(
         },
     )
     monkeypatch.setattr(
+        level_candidate_module,
+        "actionable_chain_implied_reference",
+        candidate_module.actionable_chain_implied_reference,
+    )
+    monkeypatch.setattr(
         candidate_module,
         "_direct_es_reference",
         lambda *_args, **_kwargs: {
@@ -1187,6 +1376,11 @@ def _patch_ready_market(
             "source_at": now.isoformat(),
             "transport_at": now.isoformat(),
         },
+    )
+    monkeypatch.setattr(
+        level_candidate_module,
+        "_direct_es_reference",
+        candidate_module._direct_es_reference,
     )
 
 
@@ -1235,6 +1429,45 @@ def _signal(now: datetime) -> dict[str, object]:
             "target_wall_kind": "call_wall",
             "invalidation_es": 7546.0,
             "exit_at": (now + timedelta(hours=10)).isoformat(),
+        },
+    }
+
+
+def _level_signal(
+    now: datetime,
+    *,
+    thesis: str = "breakout",
+    direction: str,
+    level_kind: str,
+    level: float,
+) -> dict[str, object]:
+    expiry = DEFAULT_MARKET_CALENDAR.research_expiry(now).strftime("%Y%m%d")
+    return {
+        "formal_signal": True,
+        "phase": "confirmed",
+        "quality_ok": True,
+        "structure_change_pending": False,
+        "event_id": f"level:{direction}:{level_kind}:{now.isoformat()}",
+        "expires_at": (now + timedelta(minutes=10)).isoformat(),
+        "expiry": expiry,
+        "thesis": thesis,
+        "direction": direction,
+        "level_kind": level_kind,
+        "level": level,
+        "levels": {
+            "put_wall": 7300.0,
+            "flip_low": 7375.0,
+            "flip_high": 7380.0,
+            "call_wall": 7450.0,
+        },
+        "spot": level - 7.0 if direction == "down" else level + 8.0,
+        "es": level + 23.0 if direction == "down" else level + 38.0,
+        "es_basis_points": 30.0,
+        "trigger_coordinate": {
+            "kind": "chain_implied_spx",
+            "instrument_id": "synthetic:SPXW_PARITY",
+            "observed_value": level - 7.0 if direction == "down" else level + 8.0,
+            "target_value": level,
         },
     }
 

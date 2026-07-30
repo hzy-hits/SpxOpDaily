@@ -51,6 +51,15 @@ from spx_spark.application.order_map.prompts import (
     render_operator_status_brief,
     render_status_template,
 )
+from spx_spark.application.order_map.status_explanation import (
+    STATUS_EXPLANATION_SYSTEM_PROMPT,
+    build_status_explanation_prompt,
+    status_explanation_output_valid,
+)
+from spx_spark.application.order_map.status_delivery import (
+    GTH_STATUS_PHASES,
+    status_delivery_reason as _status_delivery_reason,
+)
 from spx_spark.application.order_map.render import (
     render_template,
 )
@@ -96,7 +105,7 @@ from spx_spark.intraday_strategy import signed_gex_sign_method
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 from spx_spark.macro_event_clock import macro_event_state
 from spx_spark.notifier.dispatcher import dispatch_notification
-from spx_spark.notifier.llm_writer import load_previous_push, record_push
+from spx_spark.notifier.llm_writer import generate_push_text, load_previous_push, record_push
 from spx_spark.notifier.model import CommandRunner, default_runner
 from spx_spark.notifier.receipts import NotificationEnvelope, notification_event_id
 from spx_spark.options_map import build_options_map
@@ -104,15 +113,6 @@ from spx_spark.ibkr.position_watcher import default_positions_path, load_snapsho
 from spx_spark.storage import LatestState, LatestStateStore
 from spx_spark.settings import load_app_settings
 from spx_spark.settings.order_map import DEFAULT_ORDER_MAP_POLICY, OrderMapPolicy
-
-
-STATUS_KEY_WINDOW_PHASES = frozenset(
-    ("europe_session", "us_data_hour", "us_open_hour", "us_midday_confirmation")
-)
-GTH_STATUS_PHASES = frozenset({"asia_globex", "europe_session", "us_data_hour"})
-STATUS_SUMMARY_CADENCE_SECONDS = 60.0 * 60.0
-GTH_STATUS_SUMMARY_CADENCE_SECONDS = 15.0 * 60.0
-RTH_SLOT_LOOKBACK_GRACE_SECONDS = 15.0 * 60.0 - 0.001
 
 
 def build_order_payload(
@@ -434,6 +434,11 @@ def build_order_payload_with_retry(
         payload["gth_manual_candidate"] = load_json(
             Path(storage_settings.data_root) / "latest" / "gth_manual_candidate.json"
         )
+        payload["gth_level_manual_candidate"] = load_json(
+            Path(storage_settings.data_root)
+            / "latest"
+            / "gth_level_manual_candidate.json"
+        )
         payload["minute_market_frame"] = market_frame
         _apply_gth_em_usage(payload, market_frame)
         payload["option_structure_frame"] = option_frame
@@ -526,7 +531,20 @@ def _apply_gth_em_usage(
 def _status_fingerprint(payload: dict[str, Any]) -> dict[str, Any]:
     fingerprint = payload_fingerprint(payload)
     phase = payload.get("session_phase")
-    fingerprint["status_phase"] = str(phase.get("name") or "") if isinstance(phase, dict) else ""
+    status_phase = str(phase.get("name") or "") if isinstance(phase, dict) else ""
+    fingerprint["status_phase"] = status_phase
+    decision = payload.get("level_decision")
+    frozen_levels = (
+        decision.get("levels")
+        if isinstance(decision, dict) and isinstance(decision.get("levels"), dict)
+        else {}
+    )
+    for key in ("put_wall", "flip_low", "flip_high", "call_wall"):
+        frozen_value = finite_float(frozen_levels.get(key))
+        if frozen_value is not None:
+            fingerprint[key] = frozen_value
+    if status_phase in GTH_STATUS_PHASES:
+        fingerprint["skew_spread_shadow_id"] = ""
     fingerprint["decision_thesis"] = _decision_thesis(payload)
     plans = payload.get("plan_candidates")
     plan = plans[0] if isinstance(plans, list) and len(plans) == 1 else None
@@ -546,12 +564,16 @@ def _decision_thesis(payload: dict[str, Any]) -> str:
     if isinstance(plans, list) and len(plans) == 1 and isinstance(plans[0], dict):
         plan = plans[0]
         return f"plan:{plan.get('play') or '-'}@{finite_float(plan.get('level'))}"
-    regime = payload.get("regime_decision")
-    if isinstance(regime, dict):
-        mode = str(regime.get("mode") or "unknown")
-        direction = str(regime.get("direction") or "unknown")
-        if mode != "unknown" or direction != "unknown":
-            return f"regime:{mode}:{direction}"
+    decision = payload.get("level_decision")
+    if isinstance(decision, dict) and decision.get("formal_signal") is True:
+        return "|".join(
+            (
+                "level",
+                str(decision.get("event_id") or "-"),
+                str(decision.get("thesis") or "-"),
+                str(decision.get("direction") or "-"),
+            )
+        )
     return ""
 
 
@@ -617,63 +639,6 @@ def _has_open_position_risk(storage_settings: StorageSettings) -> bool:
     return bool(snapshot and any(position.qty != 0 for position in snapshot.positions))
 
 
-def _status_delivery_reason(
-    previous: dict[str, Any],
-    fingerprint: dict[str, Any],
-    changes: list[str],
-    *,
-    now: datetime,
-    trading_date: str,
-    position_risk: bool,
-) -> str | None:
-    if previous.get("last_status_date") != trading_date:
-        return "initial_status"
-    current_rth_slot = rth_report_slot(now)
-    if current_rth_slot is not None:
-        last_status_at = finite_float(previous.get("last_status_at"))
-        previous_rth_slot = (
-            rth_report_slot(
-                datetime.fromtimestamp(last_status_at, tz=timezone.utc),
-                start_grace_seconds=RTH_SLOT_LOOKBACK_GRACE_SECONDS,
-            )
-            if last_status_at is not None
-            else None
-        )
-        if previous_rth_slot is not None and previous_rth_slot.key == current_rth_slot.key:
-            return None
-        if changes:
-            return "material_changes"
-        return f"rth_quarter_hour_heartbeat:{current_rth_slot.key}"
-    phase = str(fingerprint.get("status_phase") or "")
-    previous_fingerprint = previous.get("status_fingerprint") or previous.get("fingerprint")
-    previous_phase = (
-        str(previous_fingerprint.get("status_phase") or "")
-        if isinstance(previous_fingerprint, dict)
-        else ""
-    )
-    if phase in STATUS_KEY_WINDOW_PHASES and previous_phase != phase:
-        return f"key_window:{phase}"
-    if position_risk:
-        last_status_at = finite_float(previous.get("last_status_at"))
-        if last_status_at is None or (
-            now.timestamp() - last_status_at
-        ) >= STATUS_SUMMARY_CADENCE_SECONDS:
-            return "open_position_risk"
-        return None
-    if phase in GTH_STATUS_PHASES:
-        if changes:
-            return "material_changes"
-        last_status_at = finite_float(previous.get("last_status_at"))
-        if last_status_at is None or int(
-            now.timestamp() // GTH_STATUS_SUMMARY_CADENCE_SECONDS
-        ) > int(last_status_at // GTH_STATUS_SUMMARY_CADENCE_SECONDS):
-            return f"gth_quarter_hour_heartbeat:{phase}"
-        return None
-    if changes:
-        return "material_changes"
-    return None
-
-
 def run_status(
     args: argparse.Namespace,
     *,
@@ -727,10 +692,32 @@ def run_status(
         print(json.dumps({"skipped": True, "reason": "no_material_changes"}))
         return 0
 
-    operator_brief = render_operator_status_brief(payload, changes, now)
     settings = NotificationSettings.from_env()
+    operator_brief = render_operator_status_brief(payload, changes, now)
+    brief_lines = operator_brief.splitlines()
+    deterministic_reason = brief_lines[-1]
+    reason_writer = "template"
+    if len(brief_lines) >= 2 and deterministic_reason.startswith("原因  "):
+        translated_reason, reason_writer = generate_push_text(
+            deterministic_reason,
+            build_status_explanation_prompt(payload, deterministic_reason),
+            settings,
+            runner=runner,
+            system=STATUS_EXPLANATION_SYSTEM_PROMPT,
+        )
+        if reason_writer != "template" and status_explanation_output_valid(
+            translated_reason
+        ):
+            brief_lines[-1] = translated_reason.strip()
+            operator_brief = "\n".join(brief_lines)
+        elif reason_writer != "template":
+            reason_writer = "template_validation_fallback"
     text = operator_brief
-    writer = "deterministic_operator_brief"
+    writer = (
+        "deterministic_operator_brief"
+        if reason_writer == "template"
+        else f"deterministic_operator_brief+{reason_writer}_reason"
+    )
     feishu_text = operator_brief
     report_occurred_at = current_rth_slot.slot_at if current_rth_slot is not None else now
     event_identity = (

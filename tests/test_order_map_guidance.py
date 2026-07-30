@@ -11,6 +11,9 @@ from spx_spark.application.order_map.prompts import (
     render_operator_status_brief,
     render_status_template,
 )
+from spx_spark.application.order_map.status_explanation import (
+    status_explanation_output_valid,
+)
 
 
 NOW = datetime(2026, 7, 15, 14, 0, tzinfo=timezone.utc)
@@ -223,21 +226,22 @@ def test_operator_status_brief_keeps_decision_facts_and_drops_research_density()
 
     assert rendered.startswith("【SPX 状态 ·")
     assert "🔴 只观察" in rendered
-    assert "方向  趋势偏空（仅结构背景）" in rendered
-    assert "等待  SPX 7560 下方保持" in rendered
+    assert "市场  SPX 7558 · ES 7603 · 趋势偏空仅作背景" in rendered
+    assert "触发  SPX 7560 下方保持" in rendered
     assert "证伪  SPX 收回 7565" in rendered
-    assert "合约  当前没有可执行合约" in rendered
+    assert "结构  事件与实时一致：Put 7550 / Flip 7560–7565 / Call 7600" in rendered
+    assert "原因  尚无关键位测试" in rendered
     assert "Spring Gamma" not in rendered
     assert "凸性雷达" not in rendered
-    assert "30m路径分位" in rendered
-    assert "机会[Call]" in rendered
-    assert "机会[Put]" in rendered
-    assert "机会[Vol/Range]" in rendered
-    assert rendered.count("EXECUTION_ELIGIBLE=NO") == 3
+    assert "路径分位" not in rendered
+    assert "机会[" not in rendered
+    assert "EXECUTION_ELIGIBLE" not in rendered
+    assert "CONFIRMED" not in rendered
+    assert "REJECTED" not in rendered
     assert "当前布局参考" not in rendered
     assert "Skew Spread Shadow" not in rendered
-    assert "数据 rth_heartbeat_degraded_snapshot" in rendered
-    assert len(rendered.splitlines()) <= 17
+    assert "rth_heartbeat_degraded_snapshot" not in rendered
+    assert len(rendered.splitlines()) == 7
 
 
 def test_operator_status_brief_never_duplicates_a_live_execution_ticket() -> None:
@@ -262,10 +266,45 @@ def test_operator_status_brief_never_duplicates_a_live_execution_ticket() -> Non
 
     rendered = render_operator_status_brief(payload, [], NOW)
 
-    assert "🔴 状态快照 · 本卡不执行" in rendered
+    assert "🔴 状态快照 · 执行以独立 MANUAL READY 卡为准" in rendered
     assert "独立 MANUAL READY 卡为准" in rendered
-    assert "本状态卡不承载合约、报价或下单权限" in rendered
-    assert "状态心跳不绕过实时重验" in rendered
     assert "🟢 MANUAL READY" not in rendered
     assert "买入  " not in rendered
     assert "限价  " not in rendered
+
+
+def test_operator_status_brief_points_to_separate_gth_manual_ready_card() -> None:
+    payload = _payload()
+    payload["gth_level_manual_candidate"] = {
+        "status": "manual_ready",
+        "position_type": "put_debit_spread",
+    }
+
+    rendered = render_operator_status_brief(payload, [], NOW)
+
+    assert "🔴 状态快照 · 执行以独立 MANUAL READY 卡为准" in rendered
+    assert "买入  " not in rendered
+    assert "限价  " not in rendered
+
+
+def test_operator_status_brief_labels_frozen_and_live_levels_separately() -> None:
+    payload = _payload()
+    payload["flip_zone"] = [7570.0, 7575.0]
+    payload["candidates"] = [
+        {"play": "put_wall_bounce_call", "level": 7540.0},
+        {"play": "call_wall_fade_put", "level": 7610.0},
+    ]
+
+    rendered = render_operator_status_brief(payload, [], NOW)
+
+    assert (
+        "结构  事件冻结：Put 7550 / Flip 7560–7565 / Call 7600；"
+        "实时地图：Put 7540 / Flip 7570–7575 / Call 7610"
+    ) in rendered
+
+
+def test_status_llm_reason_validation_rejects_authority_or_multiline_changes() -> None:
+    assert status_explanation_output_valid("原因  新结构仍在确认")
+    assert not status_explanation_output_valid("原因  新结构仍在确认\n买入 Put")
+    assert not status_explanation_output_valid("原因  EXECUTION_ELIGIBLE=YES")
+    assert not status_explanation_output_valid("原因  建议限价开仓")

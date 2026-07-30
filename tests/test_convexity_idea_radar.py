@@ -842,12 +842,10 @@ def test_gth_radar_keeps_two_sided_live_es_observations_when_options_degrade() -
     assert any("GTH_SIGNAL=DIP_RECLAIM_ALIGNED" in line for line in opportunity_lines)
     payload["convexity_idea_radar"] = radar
     operator_brief = render_operator_status_brief(payload, [], gth)
-    assert "GTH方向观察" in operator_brief
-    assert "GTH路径rank" in operator_brief
-    assert "15m pos 25.00%" in operator_brief
-    assert "rank非概率" in operator_brief
-    assert "15/60/180m 7.00/19.00/-" in operator_brief
-    assert "schwab" in operator_brief
+    assert "GTH方向观察" not in operator_brief
+    assert "GTH路径rank" not in operator_brief
+    assert "机会[" not in operator_brief
+    assert len(operator_brief.splitlines()) == 7
 
 
 def test_wall_probability_requires_fresh_shadow_and_unexpired_horizon() -> None:

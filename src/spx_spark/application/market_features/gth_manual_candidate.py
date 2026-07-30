@@ -772,35 +772,91 @@ def _notification_intent(
     short_label = option_contract_label(short_id)
     ttl = remaining_seconds(candidate.get("valid_until"), now=now)
     ttl_text = f"剩余 {ttl} 秒" if ttl is not None else "时效未知"
+    is_put = str(candidate.get("position_type") or "").startswith("put_")
+    level_path = str(candidate.get("path_kind") or "")
+    side = "PUT" if is_put else "CALL"
+    structure = "Put 借记价差" if is_put else "Call 借记价差"
+    if level_path == "flip_low_breakdown_put":
+        trigger_text = (
+            f"SPX 跌破 Flip Low {float(candidate['trigger_level']):.2f} 并确认；"
+            f"当前隐含 SPX {float(candidate['current_parity_spx']):.2f}"
+        )
+        explanation = "Flip Low 向下路径已确认，用限定亏损的 Put 借记价差表达"
+    elif level_path == "lower_rejection_call":
+        trigger_text = (
+            f"SPX 拒绝下沿并收复 {float(candidate['trigger_level']):.2f}；"
+            f"当前隐含 SPX {float(candidate['current_parity_spx']):.2f}"
+        )
+        explanation = "下沿拒绝与收复已确认，用限定亏损的 Call 借记价差表达"
+    elif level_path == "upper_acceptance_call":
+        trigger_text = (
+            f"SPX 接受上沿 {float(candidate['trigger_level']):.2f} 并确认；"
+            f"当前隐含 SPX {float(candidate['current_parity_spx']):.2f}"
+        )
+        explanation = "上沿接受路径已确认，用限定亏损的 Call 借记价差表达"
+    else:
+        trigger_text = (
+            "GTH Dip-Reclaim 已确认；"
+            f"SPX parity {float(candidate['current_parity_spx']):.2f}"
+        )
+        explanation = "夜盘回收结构已确认，用限定亏损的 Call 借记价差表达向上机会"
+    invalidation_text = (
+        f"止损  SPX {'收回' if is_put else '跌回'} "
+        f"{float(candidate['invalidation_spx']):.2f}；"
+        f"ES {'升至' if is_put else '跌至'} "
+        f"{float(candidate['invalidation_es']):.2f}"
+        if candidate.get("invalidation_spx") is not None
+        else f"止损  ES 跌至或低于 {float(candidate['invalidation_es']):.2f}"
+    )
+    target_label = {
+        "put_wall": "Put Wall",
+        "call_wall": "Call Wall",
+        "flip_low": "Flip Low",
+        "time_stop": "时间退出",
+    }.get(
+        str(candidate.get("target_wall_kind") or ""),
+        "结构目标",
+    )
     text = "\n".join(
         (
-            "🟢 MANUAL READY · CALL SPREAD",
-            "类型  Call 借记价差 · 仅人工提交",
+            f"🟢 MANUAL READY · {side} SPREAD",
+            f"类型  {structure} · 仅人工提交",
             f"买入  {long_label}",
             f"卖出  {short_label}",
             f"NBBO  {float(candidate['decision_bid']):.2f} / "
             f"{float(candidate['decision_ask']):.2f}；"
             "两腿合成，不是交易所原生组合 BBO",
             f"限价  净借记 ≤ {float(candidate['entry_limit']):.2f}",
-            "触发  GTH Dip-Reclaim 已确认；"
-            f"SPX parity {float(candidate['current_parity_spx']):.2f}",
-            f"止损  ES 跌至或低于 {float(candidate['invalidation_es']):.2f}",
+            f"触发  {trigger_text}",
+            invalidation_text,
             f"目标  SPX {float(candidate['target_spx']):.2f}"
-            f"（{candidate['target_wall_kind']}）",
+            f"（{target_label}）",
             f"退出  {beijing_time(candidate.get('exit_at'))}",
             f"有效  {ttl_text}（至 "
             f"{beijing_time(candidate.get('valid_until'), seconds=True)}）；提交前重新报价",
             f"风险  每组最大损失 ${float(candidate['max_loss_per_spread']):.0f}；"
             "数量由人工确认",
-            "解释  夜盘回收结构已确认，用限定亏损的 Call 借记价差表达向上机会",
+            f"解释  {explanation}",
             "权限  自动下单关闭；账户 GTH 权限未验证；禁止市价提交",
         )
     )
+    level_lane = bool(level_path)
     return {
         "event_id": event_id,
-        "source": "gth_manual_candidate",
-        "kind": "gth_spxw_manual_spread_candidate",
-        "lane": "gth_manual_candidate",
+        "source": (
+            "gth_level_manual_candidate"
+            if level_lane
+            else "gth_manual_candidate"
+        ),
+        "kind": str(
+            candidate.get("kind")
+            or "gth_spxw_manual_spread_candidate"
+        ),
+        "lane": (
+            "gth_level_manual_candidate"
+            if level_lane
+            else "gth_manual_candidate"
+        ),
         "occurred_at": now.isoformat(),
         "expires_at": str(candidate["valid_until"]),
         "candidate_id": candidate["candidate_id"],
