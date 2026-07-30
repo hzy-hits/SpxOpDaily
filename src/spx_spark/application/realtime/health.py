@@ -44,6 +44,7 @@ def evaluate_engine_health(
         HealthFactor.CRITICAL_TASKS_OK.value: critical_tasks_healthy,
         HealthFactor.CASH_SESSION_OPEN.value: cash_session_open,
         HealthFactor.GLOBEX_CONTEXT_USABLE.value: globex_context_usable,
+        HealthFactor.GTH_OPTION_SESSION_OPEN.value: gth_option_session_open,
     }
     readiness_factors = {
         name: factors[name]
@@ -90,7 +91,7 @@ def evaluate_engine_health(
         return EngineHealth(
             mode=EngineMode.GLOBEX_CONTEXT,
             factors=factors,
-            reasons=("cash_session_closed_live_option_chain_advisory_only",),
+            reasons=(),
             checked_at=checked_at,
         )
 

@@ -184,7 +184,7 @@ def test_globex_context_is_formal_non_actionable_engine_mode() -> None:
     assert health.reasons == ("cash_session_closed", "options_analytics_non_authoritative")
 
 
-def test_live_gth_option_chain_is_advisory_only_outside_cash_session() -> None:
+def test_live_gth_option_chain_is_actionable_outside_cash_session() -> None:
     health = evaluate_engine_health(
         tradfi_anchor_usable=True,
         front_chain_fresh=True,
@@ -199,8 +199,8 @@ def test_live_gth_option_chain_is_advisory_only_outside_cash_session() -> None:
 
     assert health.mode is EngineMode.GLOBEX_CONTEXT
     assert health.ok is True
-    assert health.actionable is False
-    assert health.reasons == ("cash_session_closed_live_option_chain_advisory_only",)
+    assert health.actionable is True
+    assert health.reasons == ()
 
 
 def test_gth_option_clock_without_live_es_context_is_not_ready() -> None:

@@ -55,6 +55,7 @@ class HealthFactor(str, Enum):
     CRITICAL_TASKS_OK = "critical_tasks_ok"
     CASH_SESSION_OPEN = "cash_session_open"
     GLOBEX_CONTEXT_USABLE = "globex_context_usable"
+    GTH_OPTION_SESSION_OPEN = "gth_option_session_open"
 
 
 @dataclass(frozen=True)
@@ -75,8 +76,23 @@ class EngineHealth:
 
     @property
     def actionable(self) -> bool:
-        """True only when authoritative pricing/executable output is allowed."""
-        return self.mode is EngineMode.READY
+        """True when the active session has authoritative executable pricing."""
+        if self.mode is EngineMode.READY:
+            return True
+        if self.mode is not EngineMode.GLOBEX_CONTEXT:
+            return False
+        return all(
+            self.factors.get(factor, False)
+            for factor in (
+                HealthFactor.TRADFI_ANCHOR.value,
+                HealthFactor.FRONT_CHAIN_FRESH.value,
+                HealthFactor.ANALYTICS_OK.value,
+                HealthFactor.OUTBOX_WRITABLE.value,
+                HealthFactor.CRITICAL_TASKS_OK.value,
+                HealthFactor.GLOBEX_CONTEXT_USABLE.value,
+                HealthFactor.GTH_OPTION_SESSION_OPEN.value,
+            )
+        )
 
     def to_dict(self) -> dict[str, object]:
         return {

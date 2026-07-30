@@ -194,8 +194,9 @@ def test_gth_heartbeat_preserves_live_realtime_context() -> None:
 
     assert health.mode is EngineMode.GLOBEX_CONTEXT
     assert health.factors["globex_context_usable"] is True
-    assert health.actionable is False
-    assert health.reasons == ("cash_session_closed_live_option_chain_advisory_only",)
+    assert health.factors["gth_option_session_open"] is True
+    assert health.actionable is True
+    assert health.reasons == ()
     event = build_heartbeat_event(
         states,
         health=health,

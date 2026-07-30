@@ -176,7 +176,7 @@ def test_realtime_engine_uses_globex_context_when_cash_analytics_are_unavailable
     assert tick.health.factors["globex_context_usable"] is True
 
 
-def test_realtime_engine_keeps_live_gth_option_analytics_advisory_only() -> None:
+def test_realtime_engine_marks_live_gth_option_analytics_actionable() -> None:
     globex_now = datetime(2026, 7, 13, 1, 30, tzinfo=timezone.utc)
     es = _quote(symbol="ES", kind="future", at=globex_now)
     engine = RealtimeEngine(
@@ -191,10 +191,8 @@ def test_realtime_engine_keeps_live_gth_option_analytics_advisory_only() -> None
     tick = engine.tick(now=globex_now)
 
     assert tick.health.mode is EngineMode.GLOBEX_CONTEXT
-    assert tick.health.actionable is False
-    assert tick.health.reasons == (
-        "cash_session_closed_live_option_chain_advisory_only",
-    )
+    assert tick.health.actionable is True
+    assert tick.health.reasons == ()
 
 
 def test_realtime_engine_tick_ready() -> None:
