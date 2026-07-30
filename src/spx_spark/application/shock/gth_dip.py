@@ -15,6 +15,9 @@ from spx_spark.application.shock.gth_path_history import (
     path_window_summary as _path_window_summary,
     window_rows as _window_rows,
 )
+from spx_spark.application.shock.gth_provider_continuity import (
+    evaluate_provider_switch,
+)
 from spx_spark.market_calendar import ET
 from spx_spark.marketdata import MarketDataQuality
 from spx_spark.strategy_contract import policy_version, strategy_event_fields
@@ -54,6 +57,7 @@ def advance_gth_dip(
     entry_allowed: bool,
     delivery_retry_seconds: int = 30,
     signal_expiry_seconds: int = 600,
+    provider_switch_hold_seconds: int = 30,
     structure_levels: Mapping[str, float] | None = None,
     es_spx_basis: float | None = None,
     spread_min_width_points: float = 15.0,
@@ -102,7 +106,24 @@ def advance_gth_dip(
         if samples
         else str(state.get("continuous_provider") or "")
     )
-    provider_changed = bool(previous_provider and previous_provider != provider)
+    provider_decision = evaluate_provider_switch(
+        state.get("provider_switch_candidate"),
+        active_provider=previous_provider,
+        incoming_provider=provider,
+        at=now,
+        hold_seconds=provider_switch_hold_seconds,
+    )
+    state["provider_switch_candidate"] = provider_decision["candidate"]
+    if provider_decision["status"] == "holding":
+        state["provider_changed"] = False
+        state["status"] = "provider_switch_hysteresis"
+        state["last_ignored_provider"] = provider
+        state["last_ignored_provider_sample_at"] = now.isoformat()
+        state["ignored_provider_sample_count"] = (
+            int(state.get("ignored_provider_sample_count") or 0) + 1
+        )
+        return state, None, None
+    provider_changed = provider_decision["switch"] is True
     if provider_changed:
         # Provider price bases and timestamps are not interchangeable.  A
         # switch starts a new continuous observation window; retaining the old
@@ -348,6 +369,7 @@ def advance_gth_dip(
             "max_signals_per_session": max_signals_per_session,
             "cooldown_seconds": cooldown_seconds,
             "signal_expiry_seconds": signal_expiry_seconds,
+            "provider_switch_hold_seconds": provider_switch_hold_seconds,
             "entry_quality_policy_version": str((entry_quality or {}).get("policy_version") or ""),
             "spread_selection_semantics": "first_valid_pending_frozen.v1",
             "spread_min_width_points": spread_min_width_points,

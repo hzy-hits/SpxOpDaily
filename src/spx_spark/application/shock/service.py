@@ -545,6 +545,7 @@ def _run_gth_dip_reclaim(
             cooldown_seconds=settings.gth_cooldown_seconds,
             delivery_retry_seconds=settings.retry_seconds,
             signal_expiry_seconds=settings.event_expiry_seconds,
+            provider_switch_hold_seconds=settings.provider_switch_reset_seconds,
             structure_levels=structure_levels,
             es_spx_basis=es_spx_basis,
             spread_min_width_points=settings.gth_spread_min_width_points,
@@ -577,7 +578,7 @@ def _run_gth_dip_reclaim(
         storage_settings,
         at=datetime.now(tz=timezone.utc),
         session_date=session_date,
-        provider=provider,
+        provider=str(gth_state.get("continuous_provider") or provider),
         gth_state=gth_state,
         virtual_active=virtual_active,
     )

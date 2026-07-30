@@ -26,6 +26,7 @@ def advance(
     es: float,
     *,
     allowed: bool = True,
+    provider: str = "schwab",
     seconds: int = 0,
     retry_seconds: int = 30,
     expiry_seconds: int = 600,
@@ -38,7 +39,7 @@ def advance(
         session_date="2026-07-14",
         at=NOW + timedelta(minutes=minute, seconds=seconds),
         es=es,
-        provider="schwab",
+        provider=provider,
         expected_move_points=80,
         short_horizon_seconds=900,
         long_horizon_seconds=3600,
@@ -397,6 +398,7 @@ def test_provider_switch_resets_pending_confirmation() -> None:
         cooldown_seconds=900,
         entry_allowed=True,
         es_spx_basis=45.0,
+        provider_switch_hold_seconds=0,
     )
     assert alert is None
     assert signal is None
@@ -444,6 +446,7 @@ def test_equal_timestamp_provider_switch_cannot_relabel_pending() -> None:
         cooldown_seconds=900,
         entry_allowed=True,
         es_spx_basis=45.0,
+        provider_switch_hold_seconds=0,
     )
 
     assert alert is None
@@ -451,6 +454,55 @@ def test_equal_timestamp_provider_switch_cannot_relabel_pending() -> None:
     assert state["provider_changed"] is True
     assert state["pending"] is None
     assert {row["provider"] for row in state["samples"]} == {"ibkr"}
+
+
+def test_transient_provider_fallback_does_not_reset_continuous_window() -> None:
+    state = None
+    for minute, es in ((0, 7560), (5, 7554), (10, 7546), (15, 7551)):
+        state, _alert, _signal = advance(state, minute, es)
+    samples = list(state["samples"])
+    continuous_started_at = state["continuous_started_at"]
+
+    state, alert, signal = advance(state, 16, 7552, provider="ibkr")
+
+    assert alert is None and signal is None
+    assert state["status"] == "provider_switch_hysteresis"
+    assert state["provider_changed"] is False
+    assert state["continuous_provider"] == "schwab"
+    assert state["samples"] == samples
+    assert state["pending"] is not None
+    assert state["provider_switch_candidate"]["provider"] == "ibkr"
+
+    state, _alert, _signal = advance(state, 17, 7553, provider="schwab")
+
+    assert state["provider_changed"] is False
+    assert state["provider_switch_candidate"] is None
+    assert state["continuous_provider"] == "schwab"
+    assert state["continuous_started_at"] == continuous_started_at
+    assert {row["provider"] for row in state["samples"]} == {"schwab"}
+
+
+def test_persistent_provider_fallback_switches_after_hysteresis() -> None:
+    state = None
+    for minute, es in ((0, 7560), (5, 7554), (10, 7546), (15, 7551)):
+        state, _alert, _signal = advance(state, minute, es)
+
+    state, _, _ = advance(state, 16, 7552, provider="ibkr")
+    state, alert, signal = advance(
+        state,
+        16,
+        7553,
+        provider="ibkr",
+        seconds=31,
+    )
+
+    assert alert is None and signal is None
+    assert state["provider_changed"] is True
+    assert state["provider_switch_candidate"] is None
+    assert state["continuous_provider"] == "ibkr"
+    assert state["pending"] is None
+    assert {row["provider"] for row in state["samples"]} == {"ibkr"}
+    assert state["horizon_readiness"]["900"]["ready"] is False
 
 
 def test_persisted_mixed_provider_history_uses_only_contiguous_suffix() -> None:
