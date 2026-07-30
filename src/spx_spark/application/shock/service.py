@@ -28,6 +28,9 @@ from spx_spark.application.shock.evaluator import (
     synchronized_live_sample,
 )
 from spx_spark.application.shock.gth_dip import advance_gth_dip, mark_gth_delivery
+from spx_spark.application.shock.gth_path_projection import (
+    build_gth_path_rank_projection,
+)
 from spx_spark.application.shock.level_projection import project_level_decision_machine
 from spx_spark.application.shock.machine import (
     _strategy_alert,
@@ -90,6 +93,7 @@ from spx_spark.strategy.steven import (
     annotate_alerts_with_steven_context,
     load_steven_state_for_alerts,
 )
+
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the lightweight SPX/ES shock monitor.")
@@ -175,10 +179,7 @@ def run(argv: list[str] | None = None) -> int:
                 )
                 alerts = [
                     *price_alerts,
-                    *(
-                        _strategy_alert(row, provider=sample.provider)
-                        for row in strategy_signals
-                    ),
+                    *(_strategy_alert(row, provider=sample.provider) for row in strategy_signals),
                 ]
                 raw_price_alerts = tuple(price_alerts)
                 if alerts and notify_enabled:
@@ -286,8 +287,7 @@ def run(argv: list[str] | None = None) -> int:
                 delivered_alerts = [
                     alert
                     for alert in alerts
-                    if alert.dedup_group is not None
-                    and str(alert.dedup_group) in acknowledged
+                    if alert.dedup_group is not None and str(alert.dedup_group) in acknowledged
                 ]
                 if delivered_alerts:
                     with exclusive_state_lock(state_path):
@@ -322,12 +322,16 @@ def run(argv: list[str] | None = None) -> int:
                     if notification_result is not None:
                         selected_keys = set(notification_result.selected_alert_keys)
                         alert_rows = payload.get("alerts")
-                        selected_rows = tuple(
-                            row
-                            for row in alert_rows
-                            if isinstance(row, dict)
-                            and str(row.get("decision_id") or alert_key(row)) in selected_keys
-                        ) if isinstance(alert_rows, list) else ()
+                        selected_rows = (
+                            tuple(
+                                row
+                                for row in alert_rows
+                                if isinstance(row, dict)
+                                and str(row.get("decision_id") or alert_key(row)) in selected_keys
+                            )
+                            if isinstance(alert_rows, list)
+                            else ()
+                        )
                         record_notification_result(
                             payload=payload,
                             selected_alerts=selected_rows,
@@ -355,9 +359,7 @@ def run(argv: list[str] | None = None) -> int:
                 )
                 active_event = monitor_state.get("active_event")
                 market_direction = (
-                    str(active_event.get("direction"))
-                    if isinstance(active_event, dict)
-                    else "down"
+                    str(active_event.get("direction")) if isinstance(active_event, dict) else "down"
                 )
                 for alert in outcome_alerts:
                     if not alert.event_id:
@@ -371,9 +373,7 @@ def run(argv: list[str] | None = None) -> int:
                     else:
                         phase = "strategy"
                         direction = "up"
-                    research_link = research_link_by_alert.get(
-                        (alert.kind, str(alert.event_id))
-                    )
+                    research_link = research_link_by_alert.get((alert.kind, str(alert.event_id)))
                     if direction in {"up", "down"}:
                         tracker.observe_event(
                             event_id=str(alert.event_id),
@@ -405,9 +405,7 @@ def run(argv: list[str] | None = None) -> int:
                 if not event_greek_shadow_due(monitor_state, alert):
                     continue
                 trigger_kind = "shock" if alert.kind == SHOCK_KIND else "reclaim"
-                research_link = research_link_by_alert.get(
-                    (alert.kind, str(alert.event_id or ""))
-                )
+                research_link = research_link_by_alert.get((alert.kind, str(alert.event_id or "")))
                 result = sample_zero_dte_greeks_shadow(
                     latest,
                     data_root=storage_settings.data_root,
@@ -465,9 +463,7 @@ def _run_gth_dip_reclaim(
         Path(storage_settings.data_root) / "latest" / "virtual_strategy_state.json"
     )
     virtual_active = (
-        virtual_state.get("active")
-        if isinstance(virtual_state.get("active"), Mapping)
-        else None
+        virtual_state.get("active") if isinstance(virtual_state.get("active"), Mapping) else None
     )
     sample, sample_error = live_es_sample(latest, settings)
     payload: dict[str, Any] = {
@@ -516,9 +512,7 @@ def _run_gth_dip_reclaim(
         max_age_seconds=settings.gth_structure_max_age_seconds,
     )
     trend_quality = _gth_trend_entry_quality(
-        read_json_object(
-            Path(storage_settings.data_root) / "latest" / "globex_trend_state.json"
-        ),
+        read_json_object(Path(storage_settings.data_root) / "latest" / "globex_trend_state.json"),
         session_date=session_date,
         at=sample_at,
         max_age_seconds=settings.gth_structure_max_age_seconds,
@@ -558,13 +552,16 @@ def _run_gth_dip_reclaim(
             spread_default_width_points=settings.gth_spread_default_width_points,
             exit_clock_et=settings.gth_exit_clock_et,
             entry_quality=trend_quality,
-            entry_allowed=(
-                macro.get("entry_allowed") is True and not virtual_strategy_blocks_gth
-            ),
+            entry_allowed=(macro.get("entry_allowed") is True and not virtual_strategy_blocks_gth),
         )
         monitor_state["gth_dip"] = gth_state
-        monitor_state["updated_at"] = sample_at.isoformat()
+        monitor_state["updated_at"] = str(gth_state.get("updated_at") or sample_at.isoformat())
         atomic_write_json_secure(state_path, monitor_state)
+        path_rank_projection = build_gth_path_rank_projection(gth_state)
+        atomic_write_json_secure(
+            Path(storage_settings.data_root) / "latest" / "gth_path_ranks.json",
+            path_rank_projection,
+        )
         if signal is not None and not signal.get("delivery_retry"):
             atomic_write_json_secure(
                 Path(storage_settings.data_root) / "latest" / "gth_dip_reclaim_signal.json",
@@ -585,25 +582,25 @@ def _run_gth_dip_reclaim(
         virtual_active=virtual_active,
     )
 
-    _append_gth_detector_health(
-        storage_settings,
-        sample_at,
-        {
-            "schema_version": 1,
-            "policy_version": policy_version("gth_detector_runtime.v4", settings),
-            "record_key": sample_at.isoformat(),
-            "at": sample_at.isoformat(),
-            "session_date": session_date,
-            "provider": provider,
-            "es": es,
-            "detector_status": gth_state.get("status"),
-            "entry_allowed": macro.get("entry_allowed") is True
-            and not virtual_strategy_blocks_gth,
-            "macro_mode": macro.get("mode"),
-            "coordinate_kind": "raw_es",
-            "instrument_id": "future:ES",
-        },
-    )
+    detector_health: dict[str, object] = {
+        "schema_version": 1,
+        "policy_version": policy_version("gth_detector_runtime.v5", settings),
+        "record_key": sample_at.isoformat(),
+        "at": sample_at.isoformat(),
+        "session_date": session_date,
+        "provider": provider,
+        "es": es,
+        "detector_status": gth_state.get("status"),
+        "entry_allowed": macro.get("entry_allowed") is True and not virtual_strategy_blocks_gth,
+        "macro_mode": macro.get("mode"),
+        "coordinate_kind": "raw_es",
+        "instrument_id": "future:ES",
+    }
+    if int(sample_at.timestamp()) % 60 < 5:
+        # Five-second raw observations remain the replay source.  Persist the
+        # larger rank view once per minute; latest always stays current.
+        detector_health["path_ranks"] = path_rank_projection
+    _append_gth_detector_health(storage_settings, sample_at, detector_health)
 
     notify_settings = replace(
         NotificationSettings.from_env(),
@@ -620,7 +617,9 @@ def _run_gth_dip_reclaim(
         with exclusive_state_lock(state_path):
             monitor_state = load_monitor_state(settings.state_path, session_date=session_date)
             gth = mark_gth_delivery(
-                monitor_state.get("gth_dip") if isinstance(monitor_state.get("gth_dip"), dict) else {},
+                monitor_state.get("gth_dip")
+                if isinstance(monitor_state.get("gth_dip"), dict)
+                else {},
                 event_id=str(alert.event_id),
                 at=sample_at,
             )
@@ -671,7 +670,9 @@ def _run_gth_dip_reclaim(
             with exclusive_state_lock(state_path):
                 monitor_state = load_monitor_state(settings.state_path, session_date=session_date)
                 monitor_state["gth_dip"] = mark_gth_delivery(
-                    monitor_state.get("gth_dip") if isinstance(monitor_state.get("gth_dip"), dict) else {},
+                    monitor_state.get("gth_dip")
+                    if isinstance(monitor_state.get("gth_dip"), dict)
+                    else {},
                     event_id=str(alert.event_id),
                     at=sample_at,
                 )
@@ -773,10 +774,7 @@ def _gth_trend_entry_quality(
     elif not _fresh_at(updated_at, now=now, max_age_seconds=max_age_seconds):
         reasons.append("trend_context_stale")
     expected_session_id = trend_context_id(at)
-    if (
-        not expected_session_id.startswith(f"{session_date}:")
-        or session_id != expected_session_id
-    ):
+    if not expected_session_id.startswith(f"{session_date}:") or session_id != expected_session_id:
         reasons.append("trend_session_mismatch")
     if regime != "bullish":
         reasons.append("trend_not_bullish")

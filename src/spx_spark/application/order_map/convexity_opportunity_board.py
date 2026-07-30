@@ -136,9 +136,7 @@ def _directional_lane(
     gth: Mapping[str, Any],
 ) -> dict[str, Any]:
     quality_status = str(data_quality.get("status") or "unknown")
-    quality_reasons = [
-        str(reason) for reason in data_quality.get("reasons") or []
-    ][:4]
+    quality_reasons = [str(reason) for reason in data_quality.get("reasons") or []][:4]
     if not observation_allowed:
         return {
             "lane": side,
@@ -186,9 +184,7 @@ def _directional_lane(
     if d_score is not None and d_score * sign > 0:
         points = min(max(int(abs(d_score) // 3), 1), 3)
         score += points
-        contributions.append(
-            {"feature": "direction_score", "points": points, "value": d_score}
-        )
+        contributions.append({"feature": "direction_score", "points": points, "value": d_score})
 
     path_rank_usable = (
         str(path.get("status") or "") in {"ready", "provisional"}
@@ -213,25 +209,15 @@ def _directional_lane(
 
     breadth = _number(market_state.get("breadth_above_vwap"))
     if breadth is not None and (
-        (direction == "up" and breadth >= 0.55)
-        or (direction == "down" and breadth <= 0.45)
+        (direction == "up" and breadth >= 0.55) or (direction == "down" and breadth <= 0.45)
     ):
         score += 1
-        contributions.append(
-            {"feature": "breadth_alignment", "points": 1, "value": breadth}
-        )
+        contributions.append({"feature": "breadth_alignment", "points": 1, "value": breadth})
 
     efficiency = _number(market_state.get("efficiency_ratio"))
-    if (
-        efficiency is not None
-        and efficiency >= 0.45
-        and d_score is not None
-        and d_score * sign > 0
-    ):
+    if efficiency is not None and efficiency >= 0.45 and d_score is not None and d_score * sign > 0:
         score += 1
-        contributions.append(
-            {"feature": "path_efficiency", "points": 1, "value": efficiency}
-        )
+        contributions.append({"feature": "path_efficiency", "points": 1, "value": efficiency})
 
     event = _mapping(boundary_tests.get("active_event"))
     event_phase = str(event.get("phase") or "").lower()
@@ -265,10 +251,7 @@ def _directional_lane(
         )
 
     skew_rank_eligible = not gth_mode or evidence.get("rank_eligible") is True
-    if (
-        skew_rank_eligible
-        and evidence.get("edge_status") == "observed_local_skew_edge"
-    ):
+    if skew_rank_eligible and evidence.get("edge_status") == "observed_local_skew_edge":
         score += 1
         contributions.append(
             {
@@ -277,9 +260,7 @@ def _directional_lane(
                 "value": "not_boundary_specific",
             }
         )
-    elif gth_mode and (
-        event.get("rank_gate_reasons") or evidence.get("rank_gate_reasons")
-    ):
+    elif gth_mode and (event.get("rank_gate_reasons") or evidence.get("rank_gate_reasons")):
         contributions.append(
             {
                 "feature": "gth_stale_structure_modifiers_blocked",
@@ -305,8 +286,18 @@ def _directional_lane(
             }
         )
 
-    gth_direct_es_ready = (
-        gth_mode and _mapping(gth.get("trend")).get("status") == "ready"
+    path_context = _mapping(gth.get("path_ranks"))
+    path_horizons = _mapping(path_context.get("horizons"))
+    gth_direct_es_ready = gth_mode and (
+        _mapping(gth.get("trend")).get("status") == "ready"
+        or (
+            path_context.get("status") == "ready"
+            and any(
+                row.get("ready") is True and row.get("decision_usable") is True
+                for row in path_horizons.values()
+                if isinstance(row, Mapping)
+            )
+        )
     )
     if quality_status == "degraded" and not gth_direct_es_ready:
         score = min(score, 2)
@@ -338,8 +329,7 @@ def _directional_lane(
     relevant = [
         dict(row)
         for row in hypotheses
-        if str(row.get("option_right") or "").upper()
-        == ("C" if side == "call" else "P")
+        if str(row.get("option_right") or "").upper() == ("C" if side == "call" else "P")
         and not (
             side == "put"
             and str(row.get("scenario") or "") == "lower_acceptance_put"
@@ -425,9 +415,7 @@ def _volatility_range_lane(
     path: Mapping[str, Any],
 ) -> dict[str, Any]:
     quality_status = str(data_quality.get("status") or "unknown")
-    quality_reasons = [
-        str(reason) for reason in data_quality.get("reasons") or []
-    ][:4]
+    quality_reasons = [str(reason) for reason in data_quality.get("reasons") or []][:4]
     if not observation_allowed:
         return {
             "lane": "vol_range",
@@ -463,12 +451,7 @@ def _volatility_range_lane(
     efficiency = _number(market_state.get("efficiency_ratio"))
     d_score = _number(market_state.get("D"))
     crosses = market_state.get("vwap_cross_count")
-    if (
-        ratio is not None
-        and ratio < 0.75
-        and d_score is not None
-        and abs(d_score) <= 2
-    ):
+    if ratio is not None and ratio < 0.75 and d_score is not None and abs(d_score) <= 2:
         signal = "COMPRESSION"
         score = 4
         structures = [
@@ -533,16 +516,11 @@ def _wall_signal(
     raw_phase = str(event.get("phase") or "")
     phase = raw_phase.upper()
     event_direction = str(event.get("direction") or "").lower()
-    if (
-        event_direction == direction
-        and raw_phase.lower() in _ACTIVE_EVENT_PHASES
-    ):
+    if event_direction == direction and raw_phase.lower() in _ACTIVE_EVENT_PHASES:
         kind = str(event.get("level_kind") or "-")
         return f"{phase}:{kind}"
     scenarios = [
-        str(row.get("scenario") or "")
-        for row in hypotheses
-        if row.get("status") == "available"
+        str(row.get("scenario") or "") for row in hypotheses if row.get("status") == "available"
     ]
     return "WATCH:" + "|".join(scenarios) if scenarios else "UNAVAILABLE"
 
@@ -586,9 +564,7 @@ def _gth_direction_points(
         )
         if aligned:
             points += 2
-            contributions.append(
-                {"feature": "gth_direct_es_regime", "points": 2, "value": regime}
-            )
+            contributions.append({"feature": "gth_direct_es_regime", "points": 2, "value": regime})
         aligned_returns = sum(
             1
             for field in (
@@ -608,6 +584,9 @@ def _gth_direction_points(
                     "value": aligned_returns,
                 }
             )
+    path_points, path_contributions = _gth_path_direction_points(gth, side=side)
+    points += path_points
+    contributions.extend(path_contributions)
     if side == "call":
         dip = _mapping(gth.get("dip_reclaim_call"))
         if dip.get("status") == "active":
@@ -622,10 +601,7 @@ def _gth_direction_points(
                 }
             )
         manual = _mapping(gth.get("manual_candidate"))
-        if (
-            manual.get("status") == "manual_ready"
-            and manual.get("manual_action_eligible") is True
-        ):
+        if manual.get("status") == "manual_ready" and manual.get("manual_action_eligible") is True:
             points += 1
             contributions.append(
                 {
@@ -637,17 +613,116 @@ def _gth_direction_points(
     return points, contributions
 
 
+def _gth_path_direction_points(
+    gth: Mapping[str, Any],
+    *,
+    side: str,
+) -> tuple[int, list[dict[str, Any]]]:
+    """Convert causal ranks into bounded modifiers, never execution gates."""
+
+    path = _mapping(gth.get("path_ranks"))
+    if path.get("status") != "ready":
+        return 0, []
+    ready: list[tuple[str, Mapping[str, Any]]] = [
+        (name, row)
+        for name in ("15m", "60m")
+        if (row := _mapping(_mapping(path.get("horizons")).get(name))).get("decision_usable")
+        is True
+        and row.get("ready") is True
+    ]
+    if not ready:
+        return 0, []
+
+    if side == "call":
+        position_matches = [
+            (name, value)
+            for name, row in ready
+            if (value := _number(row.get("position_percentile"))) is not None and value <= 35.0
+        ]
+        shape_matches = [
+            (
+                name,
+                _number(row.get("drawdown_rank_percentile")),
+                _number(row.get("recovery_rank_percentile")),
+            )
+            for name, row in ready
+            if _gth_shape_rank_supported(row)
+            and (_number(row.get("drawdown_rank_percentile")) or -1.0) >= 60.0
+            and (_number(row.get("recovery_rank_percentile")) or -1.0) >= 50.0
+        ]
+        position_feature = "gth_low_position_rank"
+        shape_feature = "gth_dip_recovery_rank"
+    else:
+        position_matches = [
+            (name, value)
+            for name, row in ready
+            if (value := _number(row.get("position_percentile"))) is not None and value >= 65.0
+        ]
+        shape_matches = [
+            (
+                name,
+                _number(row.get("rally_rank_percentile")),
+                _number(row.get("pullback_rank_percentile")),
+            )
+            for name, row in ready
+            if _gth_shape_rank_supported(row)
+            and (_number(row.get("rally_rank_percentile")) or -1.0) >= 60.0
+            and (_number(row.get("pullback_rank_percentile")) or -1.0) >= 50.0
+        ]
+        position_feature = "gth_high_position_rank"
+        shape_feature = "gth_rally_pullback_rank"
+
+    contributions: list[dict[str, Any]] = []
+    if position_matches:
+        contributions.append(
+            {
+                "feature": position_feature,
+                "points": 1,
+                "value": [
+                    {"horizon": name, "percentile": value} for name, value in position_matches
+                ],
+                "semantics": "causal_rank_not_probability",
+            }
+        )
+    if shape_matches:
+        contributions.append(
+            {
+                "feature": shape_feature,
+                "points": 1,
+                "value": [
+                    {
+                        "horizon": name,
+                        "excursion_percentile": excursion,
+                        "retracement_percentile": retracement,
+                    }
+                    for name, excursion, retracement in shape_matches
+                ],
+                "semantics": "causal_rank_not_probability",
+            }
+        )
+    return len(contributions), contributions
+
+
 def _gth_signal(gth: Mapping[str, Any], *, side: str) -> str:
     labels: list[str] = []
     trend = _mapping(gth.get("trend"))
     regime = str(trend.get("regime") or "")
+    path = _mapping(gth.get("path_ranks"))
+    path_horizons = _mapping(path.get("horizons"))
+    ready_paths = (
+        [
+            (name, _mapping(path_horizons.get(name)))
+            for name in ("15m", "60m")
+            if _mapping(path_horizons.get(name)).get("ready") is True
+            and _mapping(path_horizons.get(name)).get("decision_usable") is True
+        ]
+        if path.get("status") == "ready"
+        else []
+    )
     if side == "call":
         manual = _mapping(gth.get("manual_candidate"))
         dip = _mapping(gth.get("dip_reclaim_call"))
-        if (
-            manual.get("status") == "manual_ready"
-            and manual.get("manual_action_eligible") is True
-        ):
+        if manual.get("status") == "manual_ready" and manual.get("manual_action_eligible") is True:
             labels.append("MANUAL_READY_SEPARATE_CARD")
         if dip.get("status") == "active":
             labels.append(
@@ -663,15 +738,43 @@ def _gth_signal(gth: Mapping[str, Any], *, side: str) -> str:
                 if regime == "bearish"
                 else "TREND_NEUTRAL"
             )
-    elif trend.get("status") == "ready":
-        labels.append(
-            "TREND_BEARISH"
-            if regime == "bearish"
-            else "COUNTER_TREND"
-            if regime == "bullish"
-            else "TREND_NEUTRAL"
-        )
+        if any(
+            value is not None and value <= 35.0
+            for _, row in ready_paths
+            for value in (_number(row.get("position_percentile")),)
+        ):
+            labels.append("PATH_LOW")
+        if any(
+            _gth_shape_rank_supported(row)
+            and (_number(row.get("drawdown_rank_percentile")) or -1.0) >= 60.0
+            and (_number(row.get("recovery_rank_percentile")) or -1.0) >= 50.0
+            for _, row in ready_paths
+        ):
+            labels.append("DIP_RECOVERY_RANK")
+    else:
+        if trend.get("status") == "ready":
+            labels.append(
+                "TREND_BEARISH"
+                if regime == "bearish"
+                else "COUNTER_TREND"
+                if regime == "bullish"
+                else "TREND_NEUTRAL"
+            )
+        if any((_number(row.get("position_percentile")) or -1.0) >= 65.0 for _, row in ready_paths):
+            labels.append("PATH_HIGH")
+        if any(
+            _gth_shape_rank_supported(row)
+            and (_number(row.get("rally_rank_percentile")) or -1.0) >= 60.0
+            and (_number(row.get("pullback_rank_percentile")) or -1.0) >= 50.0
+            for _, row in ready_paths
+        ):
+            labels.append("RALLY_PULLBACK_RANK")
     return "|".join(labels) if labels else "WATCH"
+
+
+def _gth_shape_rank_supported(row: Mapping[str, Any]) -> bool:
+    references = _number(row.get("effective_reference_windows"))
+    return references is not None and references >= 5
 
 
 def _priority(score: int) -> str:

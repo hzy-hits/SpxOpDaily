@@ -762,6 +762,44 @@ def test_gth_radar_keeps_two_sided_live_es_observations_when_options_degrade() -
             "block_reasons": [],
         },
     }
+    payload["gth_path_ranks"] = {
+        "schema_version": "gth_path_ranks.v1",
+        "session_date": "2026-07-27",
+        "updated_at": (gth - timedelta(seconds=5)).isoformat(),
+        "provider": "schwab",
+        "sampling_seconds": 5,
+        "rank_semantics": "empirical_cdf_midrank_not_probability",
+        "rank_method": "causal_non_overlapping_session_windows.v1",
+        "horizons": {
+            "15m": {
+                "horizon_seconds": 900,
+                "ready": True,
+                "status": "ready",
+                "coverage_ratio": 0.98,
+                "sample_count": 175,
+                "expected_sample_count": 181,
+                "max_sample_gap_seconds": 10.0,
+                "sampling_quality": "ready",
+                "minimum_decision_samples": 4,
+                "decision_usable": True,
+                "path_rank": {
+                    "position_percentile": 25.0,
+                    "drawdown_rank_percentile": 80.0,
+                    "recovery_rank_percentile": 60.0,
+                    "rally_rank_percentile": 40.0,
+                    "pullback_rank_percentile": 20.0,
+                    "effective_reference_windows": 5,
+                },
+            },
+            "60m": {
+                "horizon_seconds": 3600,
+                "ready": False,
+                "status": "collecting_full_window",
+                "seconds_until_ready": 1200.0,
+                "path_rank": {},
+            },
+        },
+    }
     payload["gth_manual_candidate"] = {
         "status": "blocked",
         "candidate_id": "gth-manual:live",
@@ -794,6 +832,11 @@ def test_gth_radar_keeps_two_sided_live_es_observations_when_options_degrade() -
 
     lines = render_convexity_idea_radar_lines({"convexity_idea_radar": radar})
     assert any(line.startswith("GTH方向观察") for line in lines)
+    path_line = next(line for line in lines if line.startswith("GTH路径rank"))
+    assert "15m pos 25.00%" in path_line
+    assert "modifier=on" in path_line
+    assert "60m collecting(1200s)" in path_line
+    assert "rank非概率" in path_line
     opportunity_lines = [line for line in lines if line.startswith("机会[")]
     assert len(opportunity_lines) == 3
     assert any("GTH_SIGNAL=DIP_RECLAIM_ALIGNED" in line for line in opportunity_lines)

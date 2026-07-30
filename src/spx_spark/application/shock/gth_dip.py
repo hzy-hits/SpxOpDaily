@@ -9,6 +9,12 @@ from typing import Mapping
 from zoneinfo import ZoneInfo
 
 from spx_spark.alert_model import Alert
+from spx_spark.application.shock.gth_path_history import (
+    PATH_SAMPLE_SECONDS,
+    advance_path_history as _advance_path_history,
+    path_window_summary as _path_window_summary,
+    window_rows as _window_rows,
+)
 from spx_spark.market_calendar import ET
 from spx_spark.marketdata import MarketDataQuality
 from spx_spark.strategy_contract import policy_version, strategy_event_fields
@@ -16,6 +22,11 @@ from spx_spark.strategy_contract import policy_version, strategy_event_fields
 
 GTH_DIP_RECLAIM_CALL_KIND = "gth_dip_reclaim_call"
 BEIJING = ZoneInfo("Asia/Shanghai")
+PATH_HISTORY_GRACE_SECONDS = 60
+PATH_DECISION_SAMPLE_SECONDS = 300
+PATH_DECISION_MAX_GAP_SECONDS = 600.0
+PATH_RANK_SEMANTICS = "empirical_cdf_midrank_not_probability"
+PATH_RANK_METHOD = "causal_non_overlapping_session_windows.v1"
 
 
 def advance_gth_dip(
@@ -55,20 +66,26 @@ def advance_gth_dip(
 
     now = _utc(at)
     state = dict(previous or {})
+    if state.get("session_date") == session_date:
+        prior_updated_at = _time(state.get("updated_at"))
+        if prior_updated_at is not None and now < prior_updated_at:
+            state["status"] = "non_monotonic_sample_ignored"
+            state["last_ignored_sample_at"] = now.isoformat()
+            state["ignored_sample_count"] = int(state.get("ignored_sample_count") or 0) + 1
+            return state, None, None
     if state.get("session_date") != session_date:
         state = {
             "schema_version": 1,
             "session_date": session_date,
             "samples": [],
             "first_sample_at": now.isoformat(),
+            "continuous_started_at": _sample_at(now).isoformat(),
+            "continuous_provider": provider,
+            "path_history": {},
+            "path_history_progress": {},
             "signal_count": 0,
         }
-    samples = [
-        dict(item)
-        for item in state.get("samples") or []
-        if isinstance(item, Mapping)
-        and (_time(item.get("at")) or now) >= now - timedelta(seconds=long_horizon_seconds)
-    ]
+    samples = _normalized_samples(state.get("samples"), at=now)
     if samples:
         # Persisted pre-v4 state may already contain mixed-provider history.
         # Keep only the latest provider-continuous suffix before computing any
@@ -80,7 +97,11 @@ def advance_gth_dip(
                 break
             suffix.append(item)
         samples = list(reversed(suffix))
-    previous_provider = str(samples[-1].get("provider") or "") if samples else ""
+    previous_provider = (
+        str(samples[-1].get("provider") or "")
+        if samples
+        else str(state.get("continuous_provider") or "")
+    )
     provider_changed = bool(previous_provider and previous_provider != provider)
     if provider_changed:
         # Provider price bases and timestamps are not interchangeable.  A
@@ -89,12 +110,130 @@ def advance_gth_dip(
         # coordinate event.  This also catches equal-timestamp failovers.
         samples = []
         state["pending"] = None
-    enqueued = not samples or _time(samples[-1].get("at")) != now
+        state["path_history"] = {}
+        state["path_history_progress"] = {}
+        state["continuous_started_at"] = _sample_at(now).isoformat()
+    elif state.get("continuous_provider") and state.get("continuous_provider") != provider:
+        # A persisted compact history belongs to exactly one provider price
+        # coordinate even when its raw suffix was already pruned.
+        state["path_history"] = {}
+        state["path_history_progress"] = {}
+        state["continuous_started_at"] = _sample_at(now).isoformat()
+    sample_at = _sample_at(now)
+    enqueued = not samples or _time(samples[-1].get("at")) != sample_at
+    current_sample = {
+        "at": sample_at.isoformat(),
+        "es": float(es),
+        "provider": provider,
+    }
     if enqueued:
-        samples.append({"at": now.isoformat(), "es": float(es), "provider": provider})
+        samples.append(current_sample)
+    else:
+        # One deterministic observation per five-second bucket prevents a
+        # faster polling loop from manufacturing confidence.  The latest real
+        # price replaces the bucket value without advancing confirmation.
+        samples[-1] = current_sample
+    continuous_started_at = _time(state.get("continuous_started_at"))
+    if continuous_started_at is None:
+        continuous_started_at = (_time(samples[0].get("at")) if samples else None) or sample_at
+    if provider_changed:
+        continuous_started_at = sample_at
+    state["continuous_started_at"] = continuous_started_at.isoformat()
+    state["continuous_provider"] = provider
+    horizons = tuple(sorted({short_horizon_seconds, long_horizon_seconds}))
+    history, progress = _advance_path_history(
+        state.get("path_history"),
+        state.get("path_history_progress"),
+        samples=samples,
+        continuous_started_at=continuous_started_at,
+        now=now,
+        horizons=horizons,
+    )
+    state["path_history"] = history
+    state["path_history_progress"] = progress
+    retention_seconds = max(horizons) + PATH_HISTORY_GRACE_SECONDS
+    samples = [
+        row
+        for row in samples
+        if (_time(row.get("at")) or now) >= now - timedelta(seconds=retention_seconds)
+    ]
+    max_raw_samples = min(
+        10_000,
+        math.ceil(retention_seconds / PATH_SAMPLE_SECONDS) + 4,
+    )
+    samples = samples[-max_raw_samples:]
     state["samples"] = samples
     state["updated_at"] = now.isoformat()
     state["provider_changed"] = provider_changed
+    state["path_sampling_seconds"] = PATH_SAMPLE_SECONDS
+    state["path_rank_semantics"] = PATH_RANK_SEMANTICS
+    state["path_rank_method"] = PATH_RANK_METHOD
+    state["legacy_session_warmup_seconds"] = session_warmup_seconds
+
+    readiness: dict[str, dict[str, object]] = {}
+    current_windows: dict[int, list[dict[str, object]]] = {}
+    for horizon in horizons:
+        window_start = now - timedelta(seconds=horizon)
+        window = _window_rows(
+            samples,
+            window_start=window_start,
+            window_end=now,
+        )
+        current_windows[horizon] = window
+        summary = _path_window_summary(
+            window,
+            window_start=window_start,
+            window_end=now,
+            require_full_window=True,
+        )
+        ready = summary is not None and continuous_started_at <= window_start
+        observed_span = _observed_span_seconds(window)
+        expected_sample_count = math.floor(horizon / PATH_SAMPLE_SECONDS) + 1
+        coverage_ratio = min(1.0, len(window) / expected_sample_count)
+        max_sample_gap_seconds = (
+            float(summary["max_sample_gap_seconds"])
+            if summary is not None
+            else _max_sample_gap_seconds(window)
+        )
+        minimum_decision_samples = max(
+            3,
+            math.floor(horizon / PATH_DECISION_SAMPLE_SECONDS) + 1,
+        )
+        decision_usable = bool(
+            ready
+            and len(window) >= minimum_decision_samples
+            and max_sample_gap_seconds <= PATH_DECISION_MAX_GAP_SECONDS
+        )
+        rank = (
+            _path_rank_summary(
+                summary,
+                history.get(str(horizon)),
+                current_window_start=window_start,
+                horizon_seconds=horizon,
+            )
+            if ready and summary is not None
+            else None
+        )
+        readiness[str(horizon)] = {
+            "horizon_seconds": horizon,
+            "ready": ready,
+            "status": "ready" if ready else "collecting_full_window",
+            "observed_span_seconds": observed_span,
+            "seconds_until_ready": max(0.0, horizon - observed_span),
+            "sample_count": len(window),
+            "expected_sample_count": expected_sample_count,
+            "coverage_ratio": coverage_ratio,
+            "max_sample_gap_seconds": max_sample_gap_seconds,
+            "sampling_quality": _sampling_quality(
+                ready=ready,
+                coverage_ratio=coverage_ratio,
+                max_sample_gap_seconds=max_sample_gap_seconds,
+            ),
+            "minimum_decision_samples": minimum_decision_samples,
+            "decision_usable": decision_usable,
+            "path_rank": rank,
+        }
+    state["horizon_readiness"] = readiness
 
     # Redelivery mirrors the RTH shock path: re-emit an unacknowledged signal
     # on the retry interval (same event_id, idempotent downstream) until the
@@ -105,15 +244,14 @@ def advance_gth_dip(
         confirmed_at = _time(last_signal.get("confirmed_at"))
         valid_until = _time(last_signal.get("valid_until"))
         attempt_at = _time(last_signal.get("last_delivery_attempt_at"))
-        expired = confirmed_at is None or (
-            valid_until is not None and now >= valid_until
-        ) or (
-            valid_until is None
-            and (now - confirmed_at).total_seconds() > signal_expiry_seconds
+        expired = (
+            confirmed_at is None
+            or (valid_until is not None and now >= valid_until)
+            or (
+                valid_until is None and (now - confirmed_at).total_seconds() > signal_expiry_seconds
+            )
         )
-        due = attempt_at is None or (
-            now - attempt_at
-        ).total_seconds() >= delivery_retry_seconds
+        due = attempt_at is None or (now - attempt_at).total_seconds() >= delivery_retry_seconds
         if not expired and due:
             last_signal["last_delivery_attempt_at"] = now.isoformat()
             state["last_signal"] = last_signal
@@ -121,10 +259,6 @@ def advance_gth_dip(
             retry_signal = {**last_signal, "delivery_retry": True}
             return state, _signal_alert(last_signal), retry_signal
 
-    first_sample_at = _time(state.get("first_sample_at")) or now
-    if (now - first_sample_at).total_seconds() < session_warmup_seconds:
-        state["status"] = "session_warmup"
-        return state, None, None
     if int(state.get("signal_count") or 0) >= max_signals_per_session:
         state["status"] = "session_signal_limit"
         return state, None, None
@@ -140,7 +274,10 @@ def advance_gth_dip(
         (short_horizon_seconds, short_min_drawdown_points, short_min_descent_seconds),
         (long_horizon_seconds, long_min_drawdown_points, long_min_descent_seconds),
     ):
-        window = [row for row in samples if (_time(row.get("at")) or now) >= now - timedelta(seconds=horizon)]
+        horizon_state = readiness[str(horizon)]
+        if not horizon_state["decision_usable"]:
+            continue
+        window = current_windows[horizon]
         candidate = _dip_candidate(
             window,
             horizon_seconds=horizon,
@@ -150,18 +287,26 @@ def advance_gth_dip(
             min_descent_seconds=min_descent,
         )
         if candidate:
+            candidate["path_rank"] = horizon_state["path_rank"]
             candidates.append(candidate)
     if not candidates:
         state["pending"] = None
-        state["status"] = "observing"
+        state["status"] = (
+            "observing" if any(item["ready"] for item in readiness.values()) else "session_warmup"
+        )
         return state, None, None
 
-    chosen = max(candidates, key=lambda row: (float(row["drawdown_points"]), int(row["horizon_seconds"])))
+    chosen = max(
+        candidates,
+        key=lambda row: (
+            float(row["drawdown_points"]),
+            int(row["horizon_seconds"]),
+        ),
+    )
     token = "|".join(
         (
             session_date,
             str(chosen["horizon_seconds"]),
-            str(chosen["peak_at"]),
             str(chosen["trough_at"]),
         )
     )
@@ -193,12 +338,17 @@ def advance_gth_dip(
             "confirm_samples": confirm_samples,
             "confirm_hold_seconds": confirm_hold_seconds,
             "session_warmup_seconds": session_warmup_seconds,
+            "warmup_semantics": "independent_full_horizon_window.v1",
+            "path_sampling_seconds": PATH_SAMPLE_SECONDS,
+            "path_rank_semantics": PATH_RANK_SEMANTICS,
+            "path_rank_method": PATH_RANK_METHOD,
+            "path_decision_minimum_cadence_seconds": PATH_DECISION_SAMPLE_SECONDS,
+            "path_decision_max_gap_seconds": PATH_DECISION_MAX_GAP_SECONDS,
+            "event_identity_semantics": "session_horizon_trough.v1",
             "max_signals_per_session": max_signals_per_session,
             "cooldown_seconds": cooldown_seconds,
             "signal_expiry_seconds": signal_expiry_seconds,
-            "entry_quality_policy_version": str(
-                (entry_quality or {}).get("policy_version") or ""
-            ),
+            "entry_quality_policy_version": str((entry_quality or {}).get("policy_version") or ""),
             "spread_selection_semantics": "first_valid_pending_frozen.v1",
             "spread_min_width_points": spread_min_width_points,
             "spread_max_width_points": spread_max_width_points,
@@ -279,8 +429,7 @@ def advance_gth_dip(
                 "kind": "raw_es",
                 "instrument_id": "future:ES",
                 "observed_value": float(es),
-                "target_value": float(chosen["trough"])
-                + float(chosen["required_recovery_points"]),
+                "target_value": float(chosen["trough"]) + float(chosen["required_recovery_points"]),
                 "spx_observed_value": None,
                 "basis_points": 0.0,
                 "as_of": now,
@@ -303,10 +452,7 @@ def advance_gth_dip(
         return state, None, None
     state["status"] = "confirming"
     confirm_started = _time(confirm_started_at) or now
-    if (
-        count < confirm_samples
-        or (now - confirm_started).total_seconds() < confirm_hold_seconds
-    ):
+    if count < confirm_samples or (now - confirm_started).total_seconds() < confirm_hold_seconds:
         return state, None, None
 
     valid_until = now + timedelta(seconds=signal_expiry_seconds)
@@ -387,6 +533,19 @@ def _signal_alert(signal: Mapping[str, object]) -> Alert:
         f"回升至 {float(signal['es']):.2f}，回撤 {float(signal['drawdown_points']):.2f} 点并收复"
         f" {float(signal['recovery_fraction']):.0%}。"
     )
+    rank = signal.get("path_rank")
+    rank = rank if isinstance(rank, Mapping) else {}
+    rank_n = int(rank.get("effective_reference_windows") or 0)
+    position_rank = _finite_number(rank.get("position_percentile"))
+    drawdown_rank = _finite_number(rank.get("drawdown_rank_percentile"))
+    recovery_rank = _finite_number(rank.get("recovery_rank_percentile"))
+    if position_rank is not None:
+        rank_detail = f"窗内位置rank {position_rank:.0f}%"
+        if drawdown_rank is not None and recovery_rank is not None:
+            rank_detail += (
+                f"，回撤/收复历史rank {drawdown_rank:.0f}%/{recovery_rank:.0f}%（有效n={rank_n}）"
+            )
+        desk_view += rank_detail + "；rank仅为因果经验排序，不是概率。"
     if quality_passed:
         detail = (
             desk_view
@@ -394,9 +553,7 @@ def _signal_alert(signal: Mapping[str, object]) -> Alert:
             + "只有随后绿色 MANUAL READY 卡可操作；本事件卡本身不得下单。"
         )
     else:
-        reasons = ",".join(
-            str(item) for item in entry_quality.get("block_reasons") or ()
-        )
+        reasons = ",".join(str(item) for item in entry_quality.get("block_reasons") or ())
         detail = (
             desk_view
             + "方向门未通过，仅记录形态，不生成合约或操作指令。"
@@ -515,11 +672,7 @@ def _spread_matches_policy(
     expected_exit = _gth_exit_context(session_date, exit_clock_et=exit_clock_et)
     raw_exit_at = value.get("exit_at")
     try:
-        exit_at = (
-            datetime.fromisoformat(raw_exit_at)
-            if isinstance(raw_exit_at, str)
-            else None
-        )
+        exit_at = datetime.fromisoformat(raw_exit_at) if isinstance(raw_exit_at, str) else None
     except ValueError:
         exit_at = None
     anchor = value.get("anchor")
@@ -546,14 +699,10 @@ def _spread_matches_policy(
                 and target_wall_kind in {"flip_high", "call_wall"}
                 and target_wall > long_strike
                 and target_wall - long_strike >= min_width_points
-                and short_strike
-                == min(target_wall, long_strike + int(max_width_points))
+                and short_strike == min(target_wall, long_strike + int(max_width_points))
             )
         )
-        and (
-            anchor == "structure_wall"
-            or (target_wall is None and target_wall_kind is None)
-        )
+        and (anchor == "structure_wall" or (target_wall is None and target_wall_kind is None))
         and invalidation == expected_trough
         and basis is not None
         and spx_equiv is not None
@@ -614,6 +763,158 @@ def _finite_number(value: object) -> float | None:
     return parsed if math.isfinite(parsed) else None
 
 
+def _sample_at(value: datetime) -> datetime:
+    """Normalize polling to one deterministic five-second observation bucket."""
+
+    current = _utc(value)
+    epoch = math.floor(current.timestamp() / PATH_SAMPLE_SECONDS) * PATH_SAMPLE_SECONDS
+    return datetime.fromtimestamp(epoch, tz=timezone.utc)
+
+
+def _normalized_samples(value: object, *, at: datetime) -> list[dict[str, object]]:
+    """Migrate persisted raw observations into ordered five-second buckets."""
+
+    if not isinstance(value, list):
+        return []
+    buckets: dict[datetime, dict[str, object]] = {}
+    for item in value:
+        if not isinstance(item, Mapping):
+            continue
+        observed_at = _time(item.get("at"))
+        price = _finite_number(item.get("es"))
+        provider = str(item.get("provider") or "")
+        if observed_at is None or observed_at > at or price is None or not provider:
+            continue
+        bucket_at = _sample_at(observed_at)
+        buckets[bucket_at] = {
+            "at": bucket_at.isoformat(),
+            "es": price,
+            "provider": provider,
+        }
+    return [buckets[key] for key in sorted(buckets)]
+
+
+def _path_rank_summary(
+    current: Mapping[str, object],
+    raw_history: object,
+    *,
+    current_window_start: datetime,
+    horizon_seconds: int,
+) -> dict[str, object]:
+    """Rank the current path only against completed, earlier session windows."""
+
+    history = raw_history if isinstance(raw_history, list) else []
+    references = [
+        item
+        for item in history
+        if isinstance(item, Mapping)
+        and (_time(item.get("window_ended_at")) or current_window_start) <= current_window_start
+    ]
+    drawdown = _finite_number(current.get("drawdown_points")) or 0.0
+    recovery = _finite_number(current.get("recovery_points")) or 0.0
+    rally = _finite_number(current.get("rally_points")) or 0.0
+    pullback = _finite_number(current.get("pullback_points")) or 0.0
+    reference_drawdowns = [
+        value
+        for item in references
+        if (value := _finite_number(item.get("drawdown_points"))) is not None
+    ]
+    reference_recoveries = [
+        value
+        for item in references
+        if (value := _finite_number(item.get("recovery_points"))) is not None
+    ]
+    reference_rallies = [
+        value
+        for item in references
+        if (value := _finite_number(item.get("rally_points"))) is not None
+    ]
+    reference_pullbacks = [
+        value
+        for item in references
+        if (value := _finite_number(item.get("pullback_points"))) is not None
+    ]
+    effective_n = min(
+        len(reference_drawdowns),
+        len(reference_recoveries),
+        len(reference_rallies),
+        len(reference_pullbacks),
+    )
+    sample_count = int(current.get("sample_count") or 0)
+    expected_sample_count = math.floor(horizon_seconds / PATH_SAMPLE_SECONDS) + 1
+    coverage_ratio = min(1.0, sample_count / expected_sample_count)
+    max_sample_gap_seconds = _finite_number(current.get("max_sample_gap_seconds")) or 0.0
+    rank_status = (
+        "unavailable" if effective_n == 0 else "small_sample" if effective_n < 5 else "descriptive"
+    )
+    return {
+        "horizon_seconds": horizon_seconds,
+        "rank_semantics": PATH_RANK_SEMANTICS,
+        "reference_method": PATH_RANK_METHOD,
+        "reference_overlap": False,
+        "position_sampling_seconds": PATH_SAMPLE_SECONDS,
+        "position_sample_count": sample_count,
+        "expected_sample_count": expected_sample_count,
+        "coverage_ratio": coverage_ratio,
+        "max_sample_gap_seconds": max_sample_gap_seconds,
+        "sampling_quality": _sampling_quality(
+            ready=True,
+            coverage_ratio=coverage_ratio,
+            max_sample_gap_seconds=max_sample_gap_seconds,
+        ),
+        "position_percentile": _finite_number(current.get("position_percentile")),
+        "drawdown_points": drawdown,
+        "drawdown_rank_percentile": _empirical_rank(drawdown, reference_drawdowns),
+        "recovery_points": recovery,
+        "recovery_rank_percentile": _empirical_rank(recovery, reference_recoveries),
+        "rally_points": rally,
+        "rally_rank_percentile": _empirical_rank(rally, reference_rallies),
+        "pullback_points": pullback,
+        "pullback_rank_percentile": _empirical_rank(pullback, reference_pullbacks),
+        "effective_reference_windows": effective_n,
+        "rank_status": rank_status,
+    }
+
+
+def _empirical_rank(value: float, references: list[float]) -> float | None:
+    if not references:
+        return None
+    less = sum(reference < value for reference in references)
+    equal = sum(reference == value for reference in references)
+    return 100.0 * (less + 0.5 * equal) / len(references)
+
+
+def _observed_span_seconds(rows: list[dict[str, object]]) -> float:
+    if len(rows) < 2:
+        return 0.0
+    first = _time(rows[0].get("at"))
+    last = _time(rows[-1].get("at"))
+    if first is None or last is None:
+        return 0.0
+    return max(0.0, (last - first).total_seconds())
+
+
+def _max_sample_gap_seconds(rows: list[dict[str, object]]) -> float:
+    timestamps = [observed_at for row in rows if (observed_at := _time(row.get("at"))) is not None]
+    return max(
+        ((right - left).total_seconds() for left, right in zip(timestamps, timestamps[1:])),
+        default=0.0,
+    )
+
+
+def _sampling_quality(
+    *,
+    ready: bool,
+    coverage_ratio: float,
+    max_sample_gap_seconds: float,
+) -> str:
+    if not ready:
+        return "collecting"
+    if coverage_ratio >= 0.8 and max_sample_gap_seconds <= 30.0:
+        return "dense"
+    return "usable_sparse"
+
+
 def _dip_candidate(
     rows: list[dict[str, object]],
     *,
@@ -626,9 +927,7 @@ def _dip_candidate(
     if len(rows) < 3:
         return None
     peak_index = max(range(len(rows) - 1), key=lambda index: float(rows[index]["es"]))
-    trough_index = min(
-        range(peak_index + 1, len(rows)), key=lambda index: float(rows[index]["es"])
-    )
+    trough_index = min(range(peak_index + 1, len(rows)), key=lambda index: float(rows[index]["es"]))
     if trough_index >= len(rows) - 1:
         return None
     peak = float(rows[peak_index]["es"])

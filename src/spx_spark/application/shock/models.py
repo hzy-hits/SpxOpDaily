@@ -56,7 +56,7 @@ class IntradayShockSettings:
     gth_min_reclaim_points: float = 5.0
     gth_confirm_samples: int = 2
     gth_confirm_hold_seconds: int = 60
-    gth_session_warmup_seconds: int = 3600
+    gth_session_warmup_seconds: int = 0
     gth_max_signals_per_session: int = 3
     gth_cooldown_seconds: int = 3600
     gth_spread_min_width_points: float = 15.0

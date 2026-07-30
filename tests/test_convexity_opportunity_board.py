@@ -43,11 +43,7 @@ def _board(
         volatility_context={},
         data_quality={
             "status": quality_status,
-            "reasons": (
-                ["complete_cp_pairs_unavailable"]
-                if quality_status == "degraded"
-                else []
-            ),
+            "reasons": (["complete_cp_pairs_unavailable"] if quality_status == "degraded" else []),
         },
         hypotheses=[
             {
@@ -82,6 +78,32 @@ def _board(
     )
 
 
+def _gth_path_board(path_ranks: dict[str, Any]) -> dict[str, Any]:
+    return build_dense_opportunity_board(
+        mandate={"phase": "gth_preparation"},
+        market_state={
+            "D": None,
+            "moving_averages": {},
+            "rolling_path_percentiles": {},
+            "gth_observation": {
+                "status": "ready",
+                "trend": {"status": "unavailable"},
+                "path_ranks": path_ranks,
+                "dip_reclaim_call": {"status": "unavailable"},
+                "manual_candidate": {"status": "blocked"},
+            },
+        },
+        boundary_tests={"active_event": {}},
+        option_evidence={
+            "call": {"edge_status": "unknown"},
+            "put": {"edge_status": "unknown"},
+        },
+        volatility_context={},
+        data_quality={"status": "degraded", "reasons": ["option_overlay_unavailable"]},
+        hypotheses=[],
+    )
+
+
 def test_put_wall_breakdown_is_explicitly_disabled_and_cannot_rank_high() -> None:
     board = _board(
         market_state={
@@ -111,13 +133,9 @@ def test_put_wall_breakdown_is_explicitly_disabled_and_cannot_rank_high() -> Non
     assert put["priority"] == "WATCH"
     assert put["priority_score"] <= 2
     assert put["structure_rank"] == ["put_wall_breakdown_disabled"]
+    assert all(path["scenario"] != "lower_acceptance_put" for path in put["trigger_paths"])
     assert all(
-        path["scenario"] != "lower_acceptance_put"
-        for path in put["trigger_paths"]
-    )
-    assert all(
-        contribution["feature"] != "wall_lifecycle"
-        for contribution in put["score_contributions"]
+        contribution["feature"] != "wall_lifecycle" for contribution in put["score_contributions"]
     )
     assert put["execution"]["eligible"] is False
 
@@ -136,9 +154,7 @@ def test_expired_put_wall_event_does_not_hide_upper_rejection_put_watch() -> Non
     put = board["lanes"]["put"]
     assert put["wall_signal"] == "WATCH:upper_rejection_put"
     assert put["structure_rank"] != ["put_wall_breakdown_disabled"]
-    assert [path["scenario"] for path in put["trigger_paths"]] == [
-        "upper_rejection_put"
-    ]
+    assert [path["scenario"] for path in put["trigger_paths"]] == ["upper_rejection_put"]
 
 
 def test_degraded_data_caps_priority_and_exposes_the_quality_reason() -> None:
@@ -338,6 +354,189 @@ def test_gth_bearish_trend_keeps_call_and_put_but_ranks_put_higher() -> None:
     assert put["priority"] == "MEDIUM"
     assert put["priority_score"] > call["priority_score"]
     assert put["execution"]["eligible"] is False
+
+
+def test_gth_causal_path_ranks_add_two_sided_modifiers_without_execution() -> None:
+    board = build_dense_opportunity_board(
+        mandate={"phase": "gth_preparation"},
+        market_state={
+            "D": None,
+            "moving_averages": {},
+            "rolling_path_percentiles": {},
+            "gth_observation": {
+                "status": "ready",
+                "trend": {"status": "unavailable"},
+                "path_ranks": {
+                    "status": "ready",
+                    "rank_is_probability": False,
+                    "horizons": {
+                        "15m": {
+                            "ready": True,
+                            "decision_usable": True,
+                            "position_percentile": 25.0,
+                            "drawdown_rank_percentile": 80.0,
+                            "recovery_rank_percentile": 60.0,
+                            "rally_rank_percentile": 30.0,
+                            "pullback_rank_percentile": 20.0,
+                            "effective_reference_windows": 5,
+                        },
+                        "60m": {
+                            "ready": True,
+                            "decision_usable": True,
+                            "position_percentile": 75.0,
+                            "drawdown_rank_percentile": 30.0,
+                            "recovery_rank_percentile": 20.0,
+                            "rally_rank_percentile": 90.0,
+                            "pullback_rank_percentile": 70.0,
+                            "effective_reference_windows": 5,
+                        },
+                    },
+                },
+                "dip_reclaim_call": {"status": "unavailable"},
+                "manual_candidate": {"status": "blocked"},
+            },
+        },
+        boundary_tests={"active_event": {}},
+        option_evidence={
+            "call": {"edge_status": "unknown"},
+            "put": {"edge_status": "unknown"},
+        },
+        volatility_context={},
+        data_quality={
+            "status": "degraded",
+            "reasons": ["option_overlay_unavailable"],
+        },
+        hypotheses=[],
+    )
+
+    call = board["lanes"]["call"]
+    put = board["lanes"]["put"]
+    assert "PATH_LOW" in call["gth_signal"]
+    assert "DIP_RECOVERY_RANK" in call["gth_signal"]
+    assert "PATH_HIGH" in put["gth_signal"]
+    assert "RALLY_PULLBACK_RANK" in put["gth_signal"]
+    assert {
+        "gth_low_position_rank",
+        "gth_dip_recovery_rank",
+    } <= {row["feature"] for row in call["score_contributions"]}
+    assert {
+        "gth_high_position_rank",
+        "gth_rally_pullback_rank",
+    } <= {row["feature"] for row in put["score_contributions"]}
+    assert call["priority_score"] == put["priority_score"] == 2
+    for lane in (call, put):
+        assert lane["status"] == "observed"
+        assert lane["execution"]["eligible"] is False
+        assert lane["action_authority"] == "none"
+        assert lane["automatic_ordering"] is False
+
+
+def test_gth_sparse_path_rank_stays_visible_without_direction_points() -> None:
+    board = build_dense_opportunity_board(
+        mandate={"phase": "gth_preparation"},
+        market_state={
+            "D": None,
+            "moving_averages": {},
+            "rolling_path_percentiles": {},
+            "gth_observation": {
+                "status": "ready",
+                "trend": {"status": "unavailable"},
+                "path_ranks": {
+                    "status": "ready",
+                    "horizons": {
+                        "15m": {
+                            "ready": True,
+                            "decision_usable": False,
+                            "sampling_quality": "usable_sparse",
+                            "position_percentile": 0.0,
+                            "drawdown_rank_percentile": 100.0,
+                            "recovery_rank_percentile": 100.0,
+                            "rally_rank_percentile": 100.0,
+                            "pullback_rank_percentile": 100.0,
+                        }
+                    },
+                },
+                "dip_reclaim_call": {"status": "unavailable"},
+                "manual_candidate": {"status": "blocked"},
+            },
+        },
+        boundary_tests={"active_event": {}},
+        option_evidence={
+            "call": {"edge_status": "unknown"},
+            "put": {"edge_status": "unknown"},
+        },
+        volatility_context={},
+        data_quality={"status": "degraded", "reasons": ["option_overlay_unavailable"]},
+        hypotheses=[],
+    )
+
+    for side in ("call", "put"):
+        lane = board["lanes"][side]
+        assert lane["status"] == "observed"
+        assert lane["priority_score"] == 0
+        assert lane["gth_signal"] == "WATCH"
+        assert "degraded_data_priority_cap" in {
+            row["feature"] for row in lane["score_contributions"]
+        }
+        assert not any(
+            str(row["feature"]).startswith("gth_")
+            and row["feature"] != "gth_stale_structure_modifiers_blocked"
+            for row in lane["score_contributions"]
+        )
+
+
+def test_gth_unavailable_path_context_cannot_leak_ready_row_into_rank() -> None:
+    board = _gth_path_board(
+        {
+            "status": "unavailable",
+            "horizons": {
+                "15m": {
+                    "ready": True,
+                    "decision_usable": True,
+                    "position_percentile": 0.0,
+                    "drawdown_rank_percentile": 100.0,
+                    "recovery_rank_percentile": 100.0,
+                }
+            },
+        }
+    )
+
+    for side in ("call", "put"):
+        lane = board["lanes"][side]
+        assert lane["priority_score"] == 0
+        assert lane["gth_signal"] == "WATCH"
+        assert "degraded_data_priority_cap" in {
+            row["feature"] for row in lane["score_contributions"]
+        }
+
+
+def test_gth_small_sample_shape_rank_does_not_add_direction_points() -> None:
+    board = _gth_path_board(
+        {
+            "status": "ready",
+            "horizons": {
+                "15m": {
+                    "ready": True,
+                    "decision_usable": True,
+                    "position_percentile": 50.0,
+                    "drawdown_rank_percentile": 100.0,
+                    "recovery_rank_percentile": 100.0,
+                    "rally_rank_percentile": 100.0,
+                    "pullback_rank_percentile": 100.0,
+                    "effective_reference_windows": 1,
+                }
+            },
+        }
+    )
+
+    for side in ("call", "put"):
+        lane = board["lanes"][side]
+        assert lane["priority_score"] == 0
+        assert lane["gth_signal"] == "WATCH"
+        assert not any(
+            row["feature"] in {"gth_dip_recovery_rank", "gth_rally_pullback_rank"}
+            for row in lane["score_contributions"]
+        )
 
 
 def test_stale_gth_wall_and_skew_cannot_elevate_fresh_direct_es_rank() -> None:

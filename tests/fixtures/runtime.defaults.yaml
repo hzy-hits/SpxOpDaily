@@ -1575,7 +1575,7 @@ intraday_shock:
   gth_min_reclaim_points: {value: 5.0, description: Required GTH absolute rebound.}
   gth_confirm_samples: {value: 2, description: GTH reclaim confirmation samples.}
   gth_confirm_hold_seconds: {value: 60, description: GTH reclaim confirmation hold.}
-  gth_session_warmup_seconds: {value: 3600, description: Initial GTH history warmup.}
+  gth_session_warmup_seconds: {value: 0, description: Legacy global warmup disabled; per-horizon full-window readiness is authoritative.}
   gth_max_signals_per_session: {value: 3, description: Maximum GTH signals per session.}
   gth_cooldown_seconds: {value: 3600, description: GTH signal cooldown seconds.}
   gth_spread_min_width_points: {value: 15.0, description: GTH debit-spread minimum width points.}

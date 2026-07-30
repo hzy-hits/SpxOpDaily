@@ -59,10 +59,7 @@ def render_convexity_idea_radar_lines(payload: Mapping[str, Any]) -> list[str]:
         if mandate.get("phase") == "rth_active" and isinstance(remaining, int | float)
         else str(mandate.get("phase") or "-")
     )
-    lines = [
-        f"凸性雷达  0DTE Call/Put · 13:00 ET 硬退出 · {clock} · "
-        "只读假设，不是方向信号"
-    ]
+    lines = [f"凸性雷达  0DTE Call/Put · 13:00 ET 硬退出 · {clock} · 只读假设，不是方向信号"]
     if radar.get("status") in {"closed", "inactive"}:
         lines.append("凸性雷达已停止新想法；不延用上下分支、skew 证据或旧合约。")
         lines.extend(render_convexity_opportunity_lines(radar))
@@ -87,9 +84,7 @@ def render_convexity_idea_radar_lines(payload: Mapping[str, Any]) -> list[str]:
         lines.append(f"波动估值  {volatility_text}；Greeks/IV 不是方向 Alpha")
 
     lines.extend(
-        _moving_average_lines(
-            _mapping(_mapping(radar.get("market_state")).get("moving_averages"))
-        )
+        _moving_average_lines(_mapping(_mapping(radar.get("market_state")).get("moving_averages")))
     )
 
     tests = _mapping(radar.get("boundary_tests"))
@@ -165,6 +160,8 @@ def render_convexity_opportunity_lines(radar: Mapping[str, Any]) -> list[str]:
     )
     lanes = _mapping(board.get("lanes"))
     lines = [gth_line if gth_mode else path_line]
+    if gth_mode:
+        lines.append(_gth_path_rank_line(_mapping(gth.get("path_ranks"))))
     for key, label in (
         ("call", "Call"),
         ("put", "Put"),
@@ -173,11 +170,7 @@ def render_convexity_opportunity_lines(radar: Mapping[str, Any]) -> list[str]:
         lane = _mapping(lanes.get(key))
         execution = _mapping(lane.get("execution"))
         blocked = execution.get("block_reasons")
-        reason = (
-            str(blocked[0])
-            if isinstance(blocked, list) and blocked
-            else "shadow_only"
-        )
+        reason = str(blocked[0]) if isinstance(blocked, list) and blocked else "shadow_only"
         signal_name = (
             f"WALL_SIGNAL={lane.get('wall_signal') or '-'}"
             if key != "vol_range"
@@ -187,18 +180,13 @@ def render_convexity_opportunity_lines(radar: Mapping[str, Any]) -> list[str]:
             signal_name += f" · GTH_SIGNAL={lane.get('gth_signal') or 'WATCH'}"
         structures = lane.get("structure_rank")
         structure_text = (
-            "/".join(str(item) for item in structures[:2])
-            if isinstance(structures, list)
-            else "-"
+            "/".join(str(item) for item in structures[:2]) if isinstance(structures, list) else "-"
         )
         closed = lane.get("status") == "closed"
         priority_text = (
             "N/A"
             if closed
-            else (
-                f"{lane.get('priority') or 'WATCH'}"
-                f"({int(lane.get('priority_score') or 0)}/10)"
-            )
+            else (f"{lane.get('priority') or 'WATCH'}({int(lane.get('priority_score') or 0)}/10)")
         )
         if closed:
             structure_text = "-"
@@ -211,6 +199,44 @@ def render_convexity_opportunity_lines(radar: Mapping[str, Any]) -> list[str]:
             f"EXECUTION_ELIGIBLE=NO({reason}) · 结构={structure_text}"
         )
     return lines
+
+
+def _gth_path_rank_line(path: Mapping[str, Any]) -> str:
+    if not path or path.get("status") not in {"ready", "collecting"}:
+        return "GTH路径rank  unavailable；5秒采样路径与期权执行门分离"
+    horizons = _mapping(path.get("horizons"))
+    parts: list[str] = []
+    for name in ("15m", "60m"):
+        row = _mapping(horizons.get(name))
+        if row.get("ready") is not True:
+            seconds = _number(row.get("seconds_until_ready"))
+            parts.append(
+                f"{name} collecting" + (f"({seconds:.0f}s)" if seconds is not None else "")
+            )
+            continue
+        n = int(_number(row.get("effective_reference_windows")) or 0)
+        coverage = _number(row.get("coverage_ratio"))
+        gap = _number(row.get("max_sample_gap_seconds"))
+        quality = str(row.get("sampling_quality") or "-")
+        modifier = "on" if row.get("decision_usable") is True else "off"
+        detail = (
+            f"{name} pos {_rank_percent(row.get('position_percentile'))} · "
+            f"D/R {_rank_percent(row.get('drawdown_rank_percentile'))}/"
+            f"{_rank_percent(row.get('recovery_rank_percentile'))} · "
+            f"U/P {_rank_percent(row.get('rally_rank_percentile'))}/"
+            f"{_rank_percent(row.get('pullback_rank_percentile'))} · n={n}"
+        )
+        if coverage is not None:
+            detail += f" · cov={coverage * 100:.2f}%"
+        if gap is not None:
+            detail += f" · gap={gap:.0f}s"
+        parts.append(detail + f" · {quality} · modifier={modifier}")
+    sampling = _number(path.get("sampling_seconds"))
+    cadence = f"{sampling:.0f}s" if sampling is not None else "近tick"
+    return (
+        f"GTH路径rank  {'；'.join(parts) if parts else 'collecting'} · "
+        f"{cadence}采样；同日因果窗口，rank非概率"
+    )
 
 
 def _moving_average_lines(value: Mapping[str, Any]) -> list[str]:
@@ -287,6 +313,11 @@ def _percent(value: object) -> str:
     return f"{number * 100:.2f}%" if number is not None else "-"
 
 
+def _rank_percent(value: object) -> str:
+    number = _number(value)
+    return f"{number:.2f}%" if number is not None else "-"
+
+
 def _wall_probability_text(
     horizons: Mapping[str, Any],
     *,
@@ -324,8 +355,7 @@ def _volatility_text(value: Mapping[str, Any]) -> str | None:
     parts: list[str] = []
     if iv_0dte is not None or iv_1dte is not None:
         parts.append(
-            "ATM IV 0/1DTE "
-            f"{iv_0dte * 100:.2f}%" if iv_0dte is not None else "ATM IV 0/1DTE -"
+            f"ATM IV 0/1DTE {iv_0dte * 100:.2f}%" if iv_0dte is not None else "ATM IV 0/1DTE -"
         )
         parts[-1] += f"/{iv_1dte * 100:.2f}%" if iv_1dte is not None else "/-"
     if put_skew is not None or call_skew is not None:

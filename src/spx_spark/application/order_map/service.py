@@ -428,6 +428,9 @@ def build_order_payload_with_retry(
         payload["gth_dip_reclaim_signal"] = load_json(
             Path(storage_settings.data_root) / "latest" / "gth_dip_reclaim_signal.json"
         )
+        payload["gth_path_ranks"] = load_json(
+            Path(storage_settings.data_root) / "latest" / "gth_path_ranks.json"
+        )
         payload["gth_manual_candidate"] = load_json(
             Path(storage_settings.data_root) / "latest" / "gth_manual_candidate.json"
         )

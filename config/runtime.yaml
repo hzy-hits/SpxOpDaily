@@ -1660,8 +1660,8 @@ intraday_shock:
     value: 60
     description: Minimum continuous time the ES reclaim must hold before confirmation, avoiding a two-tick V-reversal false positive.
   gth_session_warmup_seconds:
-    value: 3600
-    description: Initial GTH history collection period before signals are allowed, so fifteen- and sixty-minute context is not built from a partial window.
+    value: 0
+    description: Legacy global GTH delay, disabled; each 15- and 60-minute channel now becomes eligible only after its own complete causal window is available.
   gth_max_signals_per_session:
     value: 3
     description: Hard upper bound on GTH dip-reclaim advisories per SPX trading session; the virtual lifecycle normally keeps the practical count lower.

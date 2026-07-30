@@ -110,6 +110,113 @@ def test_gth_stale_sources_are_unavailable_without_becoming_authority() -> None:
     assert context["automatic_ordering"] is False
 
 
+def test_gth_causal_path_rank_is_fresh_two_sided_observation_without_trend() -> None:
+    payload = {
+        "gth_path_ranks": {
+            "schema_version": "gth_path_ranks.v1",
+            "session_date": "2026-07-29",
+            "updated_at": (NOW - timedelta(seconds=5)).isoformat(),
+            "provider": "ibkr",
+            "sampling_seconds": 5,
+            "rank_semantics": "empirical_cdf_midrank_not_probability",
+            "rank_method": "causal_non_overlapping_session_windows.v1",
+            "horizons": {
+                "15m": {
+                    "horizon_seconds": 900,
+                    "ready": True,
+                    "status": "ready",
+                    "sample_count": 175,
+                    "expected_sample_count": 181,
+                    "coverage_ratio": 0.9669,
+                    "max_sample_gap_seconds": 15.0,
+                    "sampling_quality": "usable_with_gaps",
+                    "minimum_decision_samples": 4,
+                    "decision_usable": True,
+                    "path_rank": {
+                        "position_percentile": 22.5,
+                        "drawdown_points": 13.0,
+                        "drawdown_rank_percentile": 80.0,
+                        "recovery_points": 7.0,
+                        "recovery_rank_percentile": 60.0,
+                        "rally_points": 9.0,
+                        "rally_rank_percentile": 40.0,
+                        "pullback_points": 2.0,
+                        "pullback_rank_percentile": 20.0,
+                        "effective_reference_windows": 5,
+                        "rank_status": "descriptive",
+                    },
+                },
+                "60m": {
+                    "horizon_seconds": 3600,
+                    "ready": False,
+                    "status": "collecting_full_window",
+                    "seconds_until_ready": 1200.0,
+                    "path_rank": {},
+                },
+            },
+            "action_authority": "none",
+            "actionable": False,
+            "automatic_ordering": False,
+        }
+    }
+
+    context = build_gth_observation_context(
+        payload,
+        mandate={
+            "phase": "gth_preparation",
+            "trading_date": "2026-07-29",
+        },
+        now=NOW,
+    )
+
+    path = context["path_ranks"]
+    assert context["status"] == "ready"
+    assert path["status"] == "ready"
+    assert path["ready_horizon_count"] == 1
+    assert path["horizons"]["15m"]["position_percentile"] == 22.5
+    assert path["horizons"]["15m"]["rank_is_probability"] is False
+    assert path["horizons"]["15m"]["decision_usable"] is True
+    assert path["horizons"]["60m"]["ready"] is False
+    assert path["action_authority"] == "none"
+    assert path["automatic_ordering"] is False
+
+
+def test_gth_path_rank_rejects_stale_or_wrong_session_projection() -> None:
+    context = build_gth_observation_context(
+        {
+            "gth_path_ranks": {
+                "schema_version": "gth_path_ranks.v1",
+                "session_date": "2026-07-28",
+                "updated_at": (NOW - timedelta(minutes=10)).isoformat(),
+                "provider": "ibkr",
+                "sampling_seconds": 5,
+                "rank_semantics": "empirical_cdf_midrank_not_probability",
+                "rank_method": "causal_non_overlapping_session_windows.v1",
+                "horizons": {
+                    "15m": {
+                        "ready": True,
+                        "decision_usable": True,
+                        "path_rank": {"position_percentile": 10.0},
+                    }
+                },
+            }
+        },
+        mandate={
+            "phase": "gth_preparation",
+            "trading_date": "2026-07-29",
+        },
+        now=NOW,
+    )
+
+    path = context["path_ranks"]
+    assert path["status"] == "unavailable"
+    assert "gth_path_rank_session_mismatch" in path["reasons"]
+    assert "gth_path_rank_stale_or_future" in path["reasons"]
+    assert path["horizons"]["15m"]["ready"] is False
+    assert path["horizons"]["15m"]["decision_usable"] is False
+    assert context["action_authority"] == "none"
+
+
 def test_gth_manual_ready_requires_active_matching_source_and_live_ttl() -> None:
     source_id = "gth-dip:ready"
     payload = {
@@ -257,8 +364,6 @@ def test_gth_manual_projection_requires_exact_active_source_identity() -> None:
 
     manual = context["manual_candidate"]
     assert manual["status"] == "blocked"
-    assert manual["projection_reasons"] == [
-        "gth_manual_candidate_source_mismatch"
-    ]
+    assert manual["projection_reasons"] == ["gth_manual_candidate_source_mismatch"]
     assert manual["manual_action_eligible"] is False
     assert manual["action_authority"] == "none"
