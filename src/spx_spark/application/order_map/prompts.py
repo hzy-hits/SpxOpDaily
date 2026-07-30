@@ -628,7 +628,7 @@ def render_operator_status_brief(
     lines.extend(
         line
         for line in radar_lines
-        if line.startswith(("30m路径分位", "GTH方向观察", "机会["))
+        if line.startswith(("30m路径分位", "GTH方向观察", "GTH路径rank", "机会["))
     )
     for line in (
         _compact_decision_line(payload),
@@ -637,9 +637,7 @@ def render_operator_status_brief(
         if line:
             lines.append(line)
     warnings = payload.get("warnings")
-    warning_text = (
-        f" · 数据 {warnings[0]}" if isinstance(warnings, list) and warnings else ""
-    )
+    warning_text = f" · 数据 {warnings[0]}" if isinstance(warnings, list) and warnings else ""
     if changes:
         change_text = "；".join(changes[:2])
         if len(changes) > 2:
