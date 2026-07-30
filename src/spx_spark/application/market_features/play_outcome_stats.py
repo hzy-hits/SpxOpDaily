@@ -34,6 +34,45 @@ class PlayOutcomeStats:
     as_of: str
 
 
+def play_stats_payload(stats: PlayOutcomeStats) -> dict[str, object]:
+    """Serialize quote-outcome evidence without implying live-fill probabilities."""
+
+    try:
+        horizon_seconds: object = int(stats.horizon)
+    except (TypeError, ValueError):
+        horizon_seconds = stats.horizon
+    return {
+        "play": stats.play,
+        "level_kind": stats.level_kind,
+        "semantics": "matched_touch_quote_outcomes_not_live_fills",
+        "window_days": stats.window_days,
+        "horizon_seconds": horizon_seconds,
+        "sample_count": stats.sample_count,
+        "winrate": round(stats.winrate, 4),
+        "avg_return_fraction": round(stats.avg_return, 6),
+        "median_return_fraction": round(stats.median_return, 6),
+    }
+
+
+def historical_edge_blockers(
+    stats: PlayOutcomeStats | None,
+    *,
+    minimum_winrate: float,
+) -> list[str]:
+    """Reject a sampled lane whose touch-quote outcomes have no edge."""
+
+    if stats is None:
+        return []
+    reasons: list[str] = []
+    if stats.winrate < minimum_winrate:
+        reasons.append("historical_winrate_below_floor")
+    if stats.avg_return <= 0:
+        reasons.append("historical_average_return_non_positive")
+    if stats.median_return <= 0:
+        reasons.append("historical_median_return_non_positive")
+    return reasons
+
+
 def load_play_outcome_stats(
     features_root: Path,
     *,

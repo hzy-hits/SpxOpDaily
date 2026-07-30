@@ -17,11 +17,16 @@ from spx_spark.application.market_features.gth_manual_candidate import (
     _notification_intent,
     _quote_remaining_seconds,
 )
-from spx_spark.application.market_features.spring_gamma_operator import (
-    spring_gamma_operator_view,
+from spx_spark.application.market_features.play_outcome_stats import (
+    PlayOutcomeStats,
+    historical_edge_blockers,
+    play_stats_payload,
 )
 from spx_spark.application.market_features.prior_rth_context import (
     prior_session_signal_view,
+)
+from spx_spark.application.market_features.spring_gamma_operator import (
+    spring_gamma_operator_view,
 )
 from spx_spark.application.market_features.virtual_strategy_spread import (
     spread_snapshot_decision,
@@ -69,15 +74,16 @@ def evaluate_gth_level_manual_candidate(
     new_entries_block_reason: str,
     prior_session: Mapping[str, object] | None = None,
     gth_position_fraction: float | None = None,
+    play_stats: PlayOutcomeStats | None = None,
 ) -> dict[str, object]:
     """Build one GTH manual vertical from a confirmed Gamma level path."""
 
     now = _utc(now)
-    # Direct ES trend events are context, not entry locations. Promoting them
-    # here created late chase cards and alternating Call/Put notifications.
-    # Keep the argument for call compatibility, but require a confirmed wall
-    # or flip lifecycle for every MANUAL READY card.
-    del trend_state
+    # Direct ES trend events are context, not entry locations. They may veto a
+    # breakout that fights the established multi-horizon regime, but can never
+    # create a candidate without a confirmed wall/flip lifecycle.
+    trend_state = trend_state if isinstance(trend_state, Mapping) else {}
+    trend_regime = str(trend_state.get("regime") or "unknown")
     level_source_expiry = _time(level_decision.get("expires_at"))
     level_source_ready = bool(
         level_decision.get("formal_signal") is True
@@ -132,6 +138,7 @@ def evaluate_gth_level_manual_candidate(
         "account_gth_permission_status": "unverified",
         "quantity": None,
         "quantity_policy": "operator_selected",
+        "trend_regime": trend_regime,
         "block_reasons": [],
         "signal_absence_reason": (None if source_id else "no_level_or_trend_source_signal"),
         "gate_contract": {
@@ -142,6 +149,10 @@ def evaluate_gth_level_manual_candidate(
                 "fresh_ibkr_spxw_two_leg_quote",
                 "usable_spx_or_es_basis_coordinate",
                 "coherent_risk_geometry",
+                "gth_breakout_trend_alignment",
+                "positive_historical_edge_when_sampled",
+                "minimum_spread_reward_risk",
+                "prior_session_chase_control",
                 "signal_ttl",
             ],
             "hard_block_reasons": [],
@@ -165,6 +176,19 @@ def evaluate_gth_level_manual_candidate(
     thesis = str(level_decision.get("thesis") or "")
     direction = str(level_decision.get("direction") or "")
     level_kind = str(level_decision.get("level_kind") or "")
+    if thesis == "breakout" and (
+        (direction == "down" and trend_regime == "bullish")
+        or (direction == "up" and trend_regime == "bearish")
+    ):
+        reasons.append("gth_trend_regime_opposes_breakout")
+    reasons.extend(
+        historical_edge_blockers(
+            play_stats,
+            minimum_winrate=policy.play_stats_min_winrate,
+        )
+    )
+    if play_stats is not None:
+        base["play_stats"] = play_stats_payload(play_stats)
     if (
         thesis == "breakout"
         and direction == "down"
@@ -325,7 +349,7 @@ def evaluate_gth_level_manual_candidate(
             target_spx
             >= float(parity["lower_bound"]) - policy.gth_manual_candidate_target_room_buffer_points
         ):
-            ranking_diagnostics.append("target_room_below_parity_uncertainty_bound")
+            reasons.append("target_room_below_parity_uncertainty_bound")
         if float(parity["upper_bound"]) >= invalidation_spx:
             reasons.append("invalidation_reached_before_candidate")
     else:
@@ -333,7 +357,7 @@ def evaluate_gth_level_manual_candidate(
             target_spx
             <= float(parity["upper_bound"]) + policy.gth_manual_candidate_target_room_buffer_points
         ):
-            ranking_diagnostics.append("target_room_below_parity_uncertainty_bound")
+            reasons.append("target_room_below_parity_uncertainty_bound")
         if float(parity["lower_bound"]) <= invalidation_spx:
             reasons.append("invalidation_reached_before_candidate")
 
@@ -371,17 +395,17 @@ def evaluate_gth_level_manual_candidate(
     if reward_risk is None:
         reasons.append("spread_reward_risk_unavailable")
     elif reward_risk < policy.gth_manual_candidate_min_reward_risk:
-        ranking_diagnostics.append("spread_reward_risk_insufficient")
+        reasons.append("spread_reward_risk_insufficient")
     prior_session_view = prior_session_signal_view(
         prior_session,
         direction=direction,
         gth_position_fraction=gth_position_fraction,
     )
-    if prior_session_view.get("chase_risk") in {"high", "elevated"}:
-        ranking_diagnostics.append(
-            f"prior_session_same_direction_chase_risk_"
-            f"{prior_session_view['chase_risk']}"
-        )
+    chase_risk = str(prior_session_view.get("chase_risk") or "")
+    if chase_risk == "high":
+        reasons.append("prior_session_same_direction_chase_risk_high")
+    elif chase_risk == "elevated":
+        ranking_diagnostics.append("prior_session_same_direction_chase_risk_elevated")
     base["ranking_diagnostics"] = list(dict.fromkeys(ranking_diagnostics))
     base["gate_contract"] = {
         **base["gate_contract"],
@@ -520,6 +544,7 @@ def process_gth_level_manual_candidate(
     new_entries_block_reason: str,
     prior_session: Mapping[str, object] | None = None,
     gth_position_fraction: float | None = None,
+    play_stats: PlayOutcomeStats | None = None,
     notification: NotificationSettings | None = None,
 ) -> dict[str, object]:
     candidate = evaluate_gth_level_manual_candidate(
@@ -534,6 +559,7 @@ def process_gth_level_manual_candidate(
         new_entries_block_reason=new_entries_block_reason,
         prior_session=prior_session,
         gth_position_fraction=gth_position_fraction,
+        play_stats=play_stats,
     )
     return _persist_candidate(
         storage,

@@ -49,14 +49,25 @@ def load_consumable_es_bars(
     """
 
     checked_at = as_utc(now)
-    lease = read_json_object(lease_path(storage))
-    state = read_json_object(canonical_state_path(storage))
-    readiness = evaluate_es_bar_consumer_readiness(
-        lease=lease,
-        state=state,
-        now=checked_at,
-        max_age_seconds=max_age_seconds,
-    )
+    state: Mapping[str, object] = {}
+    readiness: dict[str, object] = {}
+    # The writer atomically replaces state and then lease. A reader can land
+    # between those two publishes and observe an old lease with a new state.
+    # Re-collect immediately instead of converting that harmless race into a
+    # five-second RTH execution outage. Every attempt still validates the exact
+    # writer/source fence and freshness; no stale grace is introduced.
+    for attempt in range(1, 4):
+        lease = read_json_object(lease_path(storage))
+        state = read_json_object(canonical_state_path(storage))
+        readiness = evaluate_es_bar_consumer_readiness(
+            lease=lease,
+            state=state,
+            now=checked_at,
+            max_age_seconds=max_age_seconds,
+        )
+        readiness["publication_read_attempts"] = attempt
+        if readiness["ready"] is True:
+            break
     bars = completed_es_bars(state) if readiness["ready"] is True else []
     return bars, readiness
 

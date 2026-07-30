@@ -503,6 +503,7 @@ def run(
         new_entries_block_reason=str(action_provider_entry_control.get("reason") or "unknown"),
         prior_session=prior_session,
         gth_position_fraction=current_gth_position,
+        play_stats=play_stats,
     )
     virtual_strategy = process_virtual_strategy(
         storage,

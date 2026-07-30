@@ -56,6 +56,7 @@ def render_trade_intent(intent: Mapping[str, object]) -> str:
         if isinstance(spring_gamma, Mapping)
         else None
     )
+    play_stats_line = _play_stats_line(intent.get("play_stats"))
     return "\n".join(
         (
             f"🟢 MANUAL READY · {right}",
@@ -68,6 +69,8 @@ def render_trade_intent(intent: Mapping[str, object]) -> str:
             *([spring_gamma_line] if spring_gamma_line else []),
             f"止损  {_operator_invalidation(intent)}",
             f"目标  SPX {_fmt_fixed(intent.get('target_spx'))}",
+            f"赔率  剩余目标/止损距离 {_fmt_ratio(intent.get('remaining_reward_risk'))}",
+            *([play_stats_line] if play_stats_line else []),
             f"退出  {beijing_time(intent.get('time_stop_at'))}",
             f"有效  决策时{ttl_text}（至 {beijing_time(valid_until, seconds=True)}）；"
             "提交前重新报价",
@@ -76,6 +79,28 @@ def render_trade_intent(intent: Mapping[str, object]) -> str:
             f"解释  {_operator_explanation(intent)}",
             "权限  自动下单关闭；未连接真实订单、成交或持仓状态",
         )
+    )
+
+
+def _play_stats_line(value: object) -> str | None:
+    if not isinstance(value, Mapping):
+        return None
+    sample_count = value.get("sample_count")
+    winrate = _number(value.get("winrate"))
+    average = _number(value.get("avg_return_fraction"))
+    median = _number(value.get("median_return_fraction"))
+    horizon = value.get("horizon_seconds")
+    if (
+        not isinstance(sample_count, int)
+        or winrate is None
+        or average is None
+        or median is None
+    ):
+        return None
+    horizon_text = f"{int(horizon) // 60}分钟" if isinstance(horizon, int | float) else "固定窗口"
+    return (
+        f"历史  同类触位报价 {sample_count} 笔 · {horizon_text}正收益率 {winrate:.1%} · "
+        f"平均 {average:+.1%} · 中位 {median:+.1%}（非实盘胜率）"
     )
 
 
@@ -123,6 +148,7 @@ def _writer_prompt(intent: Mapping[str, object], template: str) -> str:
 
 
 def _writer_output_valid(text: str, intent: Mapping[str, object]) -> bool:
+    play_stats_line = _play_stats_line(intent.get("play_stats"))
     required = [
         option_contract_label(
             intent.get("contract_id"),
@@ -133,6 +159,8 @@ def _writer_output_valid(text: str, intent: Mapping[str, object]) -> bool:
         _fmt(intent.get("entry_limit")),
         _fmt(intent.get("invalidation_spx")),
         _fmt(intent.get("target_spx")),
+        _fmt_ratio(intent.get("remaining_reward_risk")),
+        *(["正收益率", "非实盘胜率"] if play_stats_line else []),
         "MANUAL READY",
         "提交前重新报价",
         "自动下单关闭",
@@ -225,6 +253,11 @@ def _fmt(value: object) -> str:
 
 def _fmt_fixed(value: object) -> str:
     return f"{float(value):.2f}" if isinstance(value, int | float) else "-"
+
+
+def _fmt_ratio(value: object) -> str:
+    parsed = _number(value)
+    return f"{parsed:.2f}:1" if parsed is not None else "-"
 
 
 def _number(value: object) -> float | None:

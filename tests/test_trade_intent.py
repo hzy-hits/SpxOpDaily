@@ -63,7 +63,7 @@ def test_trade_intent_policy_hash_is_stable_and_resets_for_lane_clock_contract()
         },
     )
 
-    assert TRADE_INTENT_CONTRACT_VERSION == "rth_manual_levels_0930_1530.v5"
+    assert TRADE_INTENT_CONTRACT_VERSION == "rth_manual_levels_0930_1530.v6"
     assert current == repeated
     assert current.startswith("rth_trade_intent.v3+sha256:")
     assert current != legacy
@@ -297,7 +297,7 @@ def test_joint_immediate_reversal_is_diagnostic_after_level_confirmation() -> No
     assert "es_1m_5m_jointly_oppose_direction" in intent["pilot_diagnostics"]
 
 
-def test_breakout_filter_block_is_diagnostic_after_level_confirmation() -> None:
+def test_breakout_filter_block_vetoes_manual_entry_after_level_confirmation() -> None:
     market, options, latest, context, repricing = _ready_inputs()
     context = replace(
         context,
@@ -319,8 +319,8 @@ def test_breakout_filter_block_is_diagnostic_after_level_confirmation() -> None:
         order_policy=OrderMapPolicy(),
     )
 
-    assert intent["status"] == "trade_ready"
-    assert "breakout_filter_blocked" not in intent["block_reasons"]
+    assert intent["status"] == "blocked"
+    assert "breakout_filter_blocked" in intent["block_reasons"]
     assert "breakout_filter_blocked" in intent["pilot_diagnostics"]
 
 
@@ -741,6 +741,7 @@ def test_trade_ready_includes_play_stats_when_provided() -> None:
     assert intent["play_stats"] == {
         "play": "level_breakout_call",
         "level_kind": "call_wall",
+        "semantics": "matched_touch_quote_outcomes_not_live_fills",
         "window_days": 20,
         "horizon_seconds": 300,
         "sample_count": 23,
@@ -768,7 +769,7 @@ def test_trade_ready_omits_play_stats_when_unavailable() -> None:
     assert "play_stats" not in intent
 
 
-def test_render_trade_intent_keeps_research_stats_out_of_action_card() -> None:
+def test_render_trade_intent_shows_historical_edge_beside_trade_odds() -> None:
     intent = {
         **_render_intent(),
         "play_stats": {
@@ -786,9 +787,12 @@ def test_render_trade_intent_keeps_research_stats_out_of_action_card() -> None:
     text = render_trade_intent(intent)
 
     assert "🟢 MANUAL READY · PUT" in text
-    assert "同类信号" not in text
     assert "level_fade_put@call_wall" not in text
     assert "买入  SPXW 07-15 7550P" in text
+    assert "赔率  剩余目标/止损距离 3.00:1" in text
+    assert "历史  同类触位报价 23 笔" in text
+    assert "5分钟正收益率 61.0%" in text
+    assert "非实盘胜率" in text
 
 
 def test_render_trade_intent_keeps_diagnostics_out_of_action_card() -> None:
@@ -1039,7 +1043,7 @@ def test_live_structure_drift_does_not_cancel_frozen_event() -> None:
     assert "trigger_structure_drift" not in intent["block_reasons"]
 
 
-def test_remaining_target_room_and_reward_risk_are_diagnostics() -> None:
+def test_remaining_target_room_and_reward_risk_are_hard_entry_gates() -> None:
     market, options, latest, context, repricing = _ready_inputs()
     context = DecisionContext(
         **{
@@ -1059,13 +1063,11 @@ def test_remaining_target_room_and_reward_risk_are_diagnostics() -> None:
         order_policy=OrderMapPolicy(),
     )
 
-    assert intent["status"] == "trade_ready"
+    assert intent["status"] == "blocked"
     assert intent["remaining_target_room_points"] == 1.0
     assert intent["remaining_reward_risk"] == pytest.approx(1.0 / 27.0)
-    assert "remaining_target_room_insufficient" in intent["pilot_diagnostics"]
-    assert "remaining_reward_risk_insufficient" in intent["pilot_diagnostics"]
-    assert "remaining_target_room_insufficient" not in intent["block_reasons"]
-    assert "remaining_reward_risk_insufficient" not in intent["block_reasons"]
+    assert "remaining_target_room_insufficient" in intent["block_reasons"]
+    assert "remaining_reward_risk_insufficient" in intent["block_reasons"]
 
 
 def test_default_reward_risk_floor_retains_observed_sub_one_rth_opportunity() -> None:
@@ -1090,6 +1092,41 @@ def test_default_reward_risk_floor_retains_observed_sub_one_rth_opportunity() ->
     assert intent["remaining_reward_risk"] == pytest.approx(0.75)
     assert intent["status"] == "trade_ready"
     assert "remaining_reward_risk_insufficient" not in intent["block_reasons"]
+
+
+def test_sufficiently_sampled_negative_historical_edge_blocks_manual_entry() -> None:
+    market, options, latest, context, repricing = _ready_inputs()
+    stats = PlayOutcomeStats(
+        play="level_breakout_call",
+        level_kind="call_wall",
+        sample_count=54,
+        winrate=0.3889,
+        avg_return=-0.02161,
+        median_return=-0.018245,
+        window_days=20,
+        horizon="300",
+        as_of=NOW.isoformat(),
+    )
+
+    intent = evaluate_trade_intent(
+        context,
+        market,
+        options,
+        latest,
+        repricing,
+        now=NOW,
+        feature_policy=MarketFeatureSettings(),
+        order_policy=OrderMapPolicy(),
+        play_stats=stats,
+    )
+
+    assert intent["status"] == "blocked"
+    assert {
+        "historical_winrate_below_floor",
+        "historical_average_return_non_positive",
+        "historical_median_return_non_positive",
+    }.issubset(intent["block_reasons"])
+    assert intent["play_stats"]["sample_count"] == 54
 
 
 def test_rth_intent_policy_blocks_premarket_trade_ready() -> None:

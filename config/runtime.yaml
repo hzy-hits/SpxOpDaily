@@ -110,8 +110,8 @@ market_features:
   trade_entry_window_seconds: {value: 20.0, description: Maximum time an alert candidate may wait for the displayed ask to reach its entry limit; this is not a broker order TTL.}
   trade_invalidation_buffer_points: {value: 3.0, description: SPX reclaim distance beyond the trigger level that invalidates a trade intent.}
   trade_target_em_fraction: {value: 0.15, description: Expected-move fraction used for a fallback SPX target when no outward structure exists.}
-  trade_min_target_room_points: {value: 3.0, description: RTH ranking threshold for remaining SPX points to the deterministic target; a shortfall is diagnostic and does not suppress a manual signal.}
-  trade_min_reward_risk: {value: 0.25, description: RTH ranking threshold for target distance divided by invalidation distance; a shortfall is diagnostic while session, exact quote, risk geometry, and signal TTL remain mandatory.}
+  trade_min_target_room_points: {value: 3.0, description: Hard RTH minimum remaining SPX distance to the deterministic target; a smaller gap means the move has already arrived.}
+  trade_min_reward_risk: {value: 0.40, description: Hard RTH floor for remaining target distance divided by invalidation distance; signals below it are already too late to justify a new manual entry.}
   trade_time_stop_minutes: {value: 15, description: Default maximum holding time for an unextended 0DTE trade intent; new entries stop at 15:30 ET and every time stop is capped at the 15:45 ET hard exit.}
   gth_manual_candidate_enabled: {value: true, description: Enables runtime-gated manual-only GTH exact-spread signals; offline readiness remains evidence and does not suppress valid live operator signals, while broker submission stays disabled.}
   gth_manual_candidate_quote_max_age_seconds: {value: 15.0, description: Maximum source and transport age for exact legs, parity pairs, and direct ES invalidation quotes used by a GTH manual candidate.}
@@ -121,10 +121,10 @@ market_features:
   gth_manual_candidate_min_parity_pairs: {value: 3, description: Minimum cofresh same-provider SPXW call-put pairs required for the GTH target coordinate.}
   gth_manual_candidate_max_parity_dispersion_points: {value: 5.0, description: Maximum dispersion across tight put-call parity references allowed to authorize a GTH target coordinate.}
   gth_manual_candidate_max_parity_interval_points: {value: 5.0, description: Maximum bid-ask parity interval width for each call-put pair used by a GTH target coordinate.}
-  gth_manual_candidate_target_room_buffer_points: {value: 1.0, description: GTH ranking buffer beyond the parity uncertainty bound; insufficient room is diagnostic and does not suppress a manual signal.}
+  gth_manual_candidate_target_room_buffer_points: {value: 1.0, description: Hard GTH target-room buffer beyond the parity uncertainty bound; a candidate cannot be READY when uncertainty already overlaps its target.}
   gth_manual_candidate_close_buffer_seconds: {value: 30.0, description: Stops new manual candidates before the 09:25 ET GTH close so an operator is never handed a candidate at the exchange boundary.}
   gth_manual_candidate_max_reclaim_age_seconds: {value: 1200.0, description: Maximum seconds from the detected ES trough to manual-ready evaluation; older reclaims remain observable but cannot become operator signals.}
-  gth_manual_candidate_min_reward_risk: {value: 1.0, description: GTH ranking threshold for vertical maximum-profit to maximum-loss at the displayed debit; a shortfall is diagnostic.}
+  gth_manual_candidate_min_reward_risk: {value: 1.0, description: Hard GTH floor for vertical maximum-profit to maximum-loss at the displayed debit; lower-odds spreads cannot become MANUAL READY.}
   session_episode_enabled: {value: true, description: Maintains one session-level structural path above individual wall and flip events.}
   session_break_buffer_points: {value: 2.0, description: SPX distance beyond a frozen structural level required to record a session break or reclaim.}
   session_extreme_extension_points: {value: 5.0, description: Minimum extension beyond the broken level before the session path is classified as an extreme.}
@@ -143,10 +143,11 @@ market_features:
   virtual_wall_touch_points: {value: 5.0, description: SPX distance from the promoted Call Wall treated as a profit-taking touch.}
   virtual_gth_time_stop_minutes: {value: 810, description: Backstop maximum lifetime from the 20:15 ET GTH open through the shared 09:45 ET exit clock.}
   virtual_gth_spread_saturation_fraction: {value: 0.85, description: Fraction of the listed debit-spread width treated as value saturation for the GTH two-leg virtual take-profit.}
-  play_stats_enabled: {value: true, description: Enriches trade-ready alerts with semantically deduplicated rolling outcome stats; the execution gate remains independent and fails open when the outcome store is unavailable.}
+  play_stats_enabled: {value: true, description: Enriches alerts and hard-vetoes sufficiently sampled negative cohorts; the gate fails open when the outcome store is unavailable or below the minimum sample count.}
   play_stats_window_days: {value: 20, description: Rolling lookback window in days over completed pricing outcomes feeding the same-signal statistics block.}
   play_stats_horizon: {value: "300", description: Outcome horizon key in seconds whose return_fraction defines a win (return_fraction > 0).}
-  play_stats_min_samples: {value: 10, description: Minimum matched outcomes before play stats are attached; below this the alert omits the block entirely.}
+  play_stats_min_samples: {value: 30, description: Minimum matched two-sided touch-quote outcomes before historical evidence can authorize or veto a manual signal; these observations are not live fills.}
+  play_stats_min_winrate: {value: 0.45, description: Hard historical 5-minute win-rate floor once the matched cohort reaches the minimum sample count; average and median returns must also remain positive.}
   play_stats_refresh_seconds: {value: 900.0, description: Minimum seconds between reloads of the pricing-outcomes store by the realtime play-stats provider.}
 
 provider_failover:
@@ -1772,11 +1773,11 @@ level_decision_shadow:
     value: 30.0
     description: Neutral delay after a terminal event before the nearest level may arm again.
   structure_interval_seconds:
-    value: 900
-    description: Distinct observation bucket size for the stable OI/GEX map; 900 seconds keeps the map on a fifteen-minute terrain cadence.
+    value: 300
+    description: Distinct observation bucket size for the stable OI/GEX map; five-minute buckets preserve hysteresis without leaving 0DTE walls stale for fifteen minutes.
   structure_required_confirmations:
     value: 2
-    description: Number of distinct fifteen-minute buckets required before a materially different wall structure replaces the promoted map; 2 accepts a wall migration in about fifteen minutes, which a 6.5-hour 0DTE session can actually use.
+    description: Number of distinct five-minute buckets required before a materially different wall structure replaces the promoted map; 2 accepts a sustained migration in about five minutes while rejecting one-tick reshuffles.
   structure_band_half_width_points:
     value: 5.0
     description: Half-width in SPX points used to publish each promoted wall as a range instead of a false-precision single tick.

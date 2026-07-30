@@ -300,7 +300,7 @@ def evaluate_gth_manual_candidate(
     if reward_risk is None:
         reasons.append("spread_reward_risk_unavailable")
     elif reward_risk < policy.gth_manual_candidate_min_reward_risk:
-        ranking_diagnostics.append("spread_reward_risk_insufficient")
+        reasons.append("spread_reward_risk_insufficient")
 
     if reasons or bid is None or mid is None or ask is None or width is None or entry_limit is None:
         return _blocked(
@@ -810,6 +810,11 @@ def _notification_intent(
         ticket_side=side,
     )
     prior_session_line = prior_session_operator_line(candidate.get("prior_session"))
+    reward_risk = _number(candidate.get("reward_risk_at_limit"))
+    reward_risk_line = (
+        f"赔率  最大收益/最大亏损 {reward_risk:.2f}" if reward_risk is not None else None
+    )
+    play_stats_line = _play_stats_line(candidate.get("play_stats"))
     text = "\n".join(
         (
             f"🟢 MANUAL READY · {side} SPREAD",
@@ -826,6 +831,8 @@ def _notification_intent(
             invalidation_text,
             *([replacement_line] if replacement_line else []),
             f"目标  SPX {float(candidate['target_spx']):.2f}（{target_label}）",
+            *([reward_risk_line] if reward_risk_line else []),
+            *([play_stats_line] if play_stats_line else []),
             f"退出  {beijing_time(candidate.get('exit_at'))}",
             f"有效  {ttl_text}（至 "
             f"{beijing_time(candidate.get('valid_until'), seconds=True)}）；提交前重新报价",
@@ -850,3 +857,20 @@ def _notification_intent(
         "feishu_text": text,
         "enqueued_at": now.isoformat(),
     }
+
+
+def _play_stats_line(value: object) -> str | None:
+    if not isinstance(value, Mapping):
+        return None
+    samples = _number(value.get("sample_count"))
+    winrate = _number(value.get("winrate"))
+    average = _number(value.get("avg_return_fraction"))
+    median = _number(value.get("median_return_fraction"))
+    horizon_seconds = _number(value.get("horizon_seconds"))
+    if None in {samples, winrate, average, median, horizon_seconds}:
+        return None
+    horizon_minutes = horizon_seconds / 60.0
+    return (
+        f"历史  同类触位报价 {int(samples)}笔 · {horizon_minutes:g}分钟正收益率 "
+        f"{winrate:.1%} · 平均 {average:.1%} · 中位 {median:.1%}（非实盘胜率）"
+    )

@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+import spx_spark.application.market_features.es_bar_consumer as consumer_module
 from spx_spark.application.market_features import service
 from spx_spark.application.market_features.es_bar_consumer import (
     evaluate_es_bar_consumer_readiness,
@@ -112,6 +113,30 @@ def test_fresh_matching_lease_exposes_canonical_bars(tmp_path: Path) -> None:
     assert readiness["reasons"] == []
     assert len(bars) == 1
     assert bars[0]["close"] == 7401.0
+
+
+def test_publication_race_is_recollected_without_weakening_fence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage = _storage(tmp_path)
+    old_at = NOW - timedelta(seconds=2)
+    new_at = NOW - timedelta(seconds=1)
+    reads = iter(
+        (
+            _lease(source_at=old_at, writer="writer-current"),
+            _state(source_at=new_at, writer="writer-current"),
+            _lease(source_at=new_at, writer="writer-current"),
+            _state(source_at=new_at, writer="writer-current"),
+        )
+    )
+    monkeypatch.setattr(consumer_module, "read_json_object", lambda _path: next(reads))
+
+    bars, readiness = load_consumable_es_bars(storage, now=NOW)
+
+    assert readiness["ready"] is True
+    assert readiness["publication_read_attempts"] == 2
+    assert len(bars) == 1
 
 
 def test_stale_lease_and_last_accepted_source_hide_old_bars(tmp_path: Path) -> None:

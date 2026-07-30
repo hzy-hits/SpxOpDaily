@@ -24,6 +24,7 @@ from spx_spark.application.market_features.gth_level_manual_candidate import (
     evaluate_gth_level_manual_candidate,
     process_gth_level_manual_candidate,
 )
+from spx_spark.application.market_features.play_outcome_stats import PlayOutcomeStats
 from spx_spark.application.market_features.trade_intent import (
     live_trade_intent_authority_issues,
 )
@@ -129,7 +130,7 @@ def test_confirmed_gth_flip_low_breakdown_builds_put_manual_ready(
             "close_zone": "lower",
             "path_class": "shock_down_close_low",
         },
-        gth_position_fraction=0.02,
+        gth_position_fraction=0.25,
     )
 
     assert candidate["status"] == "manual_ready"
@@ -147,8 +148,8 @@ def test_confirmed_gth_flip_low_breakdown_builds_put_manual_ready(
     assert candidate["automatic_ordering"] is False
     assert candidate["execution_eligible"] is False
     assert candidate["broker_submission_allowed"] is False
-    assert candidate["prior_session"]["chase_risk"] == "high"
-    assert "prior_session_same_direction_chase_risk_high" in candidate[
+    assert candidate["prior_session"]["chase_risk"] == "elevated"
+    assert "prior_session_same_direction_chase_risk_elevated" in candidate[
         "ranking_diagnostics"
     ]
     assert candidate["block_reasons"] == []
@@ -160,13 +161,136 @@ def test_confirmed_gth_flip_low_breakdown_builds_put_manual_ready(
     assert "限价  净借记 ≤ 12.00" in card["text"]
     assert "触发  SPX 跌破 Flip Low 7375.00 并确认" in card["text"]
     assert "前日  -1.52%" in card["text"]
-    assert "本票同向追单风险高" in card["text"]
+    assert "本票同向追单风险偏高" in card["text"]
     assert "止损  SPX 收回 7383.00；ES 升至 7413.00" in card["text"]
     assert "目标  SPX 7300.00（Put Wall）" in card["text"]
+    assert "赔率  最大收益/最大亏损" in card["text"]
     assert "退出  " in card["text"]
     assert "有效  剩余 " in card["text"]
     assert "自动下单关闭" in card["text"]
     assert card["lane"] == "gth_level_manual_candidate"
+
+
+def test_prior_down_shock_blocks_floor_chasing_put(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_ready_market(monkeypatch, now=NOW, parity_price=7368.0, es_price=7398.0)
+
+    candidate = evaluate_gth_level_manual_candidate(
+        object(),
+        _level_signal(NOW, direction="down", level_kind="flip_low", level=7375.0),
+        macro_event={"entry_allowed": True},
+        now=NOW,
+        policy=MarketFeatureSettings(),
+        new_entries_allowed=True,
+        new_entries_block_reason="allowed",
+        prior_session={
+            "status": "ready",
+            "session_date": "2026-07-14",
+            "return_fraction": -0.0152,
+            "return_points": -112.63,
+            "close_location_fraction": 0.02,
+            "tail_return_fraction": -0.004,
+            "shock_direction": "down",
+            "close_zone": "lower",
+            "path_class": "shock_down_close_low",
+        },
+        gth_position_fraction=0.02,
+    )
+
+    assert candidate["status"] == "blocked"
+    assert "prior_session_same_direction_chase_risk_high" in candidate["block_reasons"]
+
+
+def test_confirmed_gth_breakout_cannot_fight_established_es_regime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_ready_market(monkeypatch, now=NOW, parity_price=7368.0, es_price=7398.0)
+
+    candidate = evaluate_gth_level_manual_candidate(
+        object(),
+        _level_signal(NOW, direction="down", level_kind="flip_low", level=7375.0),
+        trend_state={"regime": "bullish"},
+        macro_event={"entry_allowed": True},
+        now=NOW,
+        policy=MarketFeatureSettings(),
+        new_entries_allowed=True,
+        new_entries_block_reason="allowed",
+    )
+
+    assert candidate["status"] == "blocked"
+    assert candidate["trend_regime"] == "bullish"
+    assert "gth_trend_regime_opposes_breakout" in candidate["block_reasons"]
+
+
+def test_confirmed_gth_level_requires_positive_sampled_quote_outcomes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_ready_market(monkeypatch, now=NOW, parity_price=7368.0, es_price=7398.0)
+    stats = PlayOutcomeStats(
+        play="level_breakout_put",
+        level_kind="flip_low",
+        sample_count=40,
+        winrate=0.4,
+        avg_return=-0.02,
+        median_return=-0.01,
+        window_days=20,
+        horizon="300",
+        as_of=NOW.isoformat(),
+    )
+
+    candidate = evaluate_gth_level_manual_candidate(
+        object(),
+        _level_signal(NOW, direction="down", level_kind="flip_low", level=7375.0),
+        macro_event={"entry_allowed": True},
+        now=NOW,
+        policy=MarketFeatureSettings(),
+        new_entries_allowed=True,
+        new_entries_block_reason="allowed",
+        play_stats=stats,
+    )
+
+    assert candidate["status"] == "blocked"
+    assert candidate["play_stats"]["semantics"] == (
+        "matched_touch_quote_outcomes_not_live_fills"
+    )
+    assert "historical_winrate_below_floor" in candidate["block_reasons"]
+    assert "historical_average_return_non_positive" in candidate["block_reasons"]
+    assert "historical_median_return_non_positive" in candidate["block_reasons"]
+
+
+def test_gth_ready_card_labels_quote_outcomes_as_not_live_winrate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_ready_market(monkeypatch, now=NOW, parity_price=7368.0, es_price=7398.0)
+    stats = PlayOutcomeStats(
+        play="level_breakout_put",
+        level_kind="flip_low",
+        sample_count=40,
+        winrate=0.55,
+        avg_return=0.03,
+        median_return=0.01,
+        window_days=20,
+        horizon="300",
+        as_of=NOW.isoformat(),
+    )
+
+    candidate = evaluate_gth_level_manual_candidate(
+        object(),
+        _level_signal(NOW, direction="down", level_kind="flip_low", level=7375.0),
+        macro_event={"entry_allowed": True},
+        now=NOW,
+        policy=MarketFeatureSettings(),
+        new_entries_allowed=True,
+        new_entries_block_reason="allowed",
+        play_stats=stats,
+    )
+    card = _notification_intent(candidate, event_id="put-ready", now=NOW)
+
+    assert candidate["status"] == "manual_ready"
+    assert "历史  同类触位报价 40笔" in card["text"]
+    assert "5分钟正收益率 55.0%" in card["text"]
+    assert "非实盘胜率" in card["text"]
 
 
 def test_rearmed_same_gamma_path_keeps_one_semantic_candidate_id(
@@ -595,7 +719,7 @@ def test_blocked_or_shadow_source_cannot_become_manual_ready(
     assert "source_entry_quality_blocked" in candidate["block_reasons"]
 
 
-def test_old_reclaim_is_hard_but_subminimum_reward_risk_is_diagnostic(
+def test_old_reclaim_and_subminimum_reward_risk_are_hard(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _patch_ready_market(monkeypatch, now=NOW)
@@ -626,8 +750,8 @@ def test_old_reclaim_is_hard_but_subminimum_reward_risk_is_diagnostic(
     )
 
     assert "gth_reclaim_too_old" in stale["block_reasons"]
-    assert poor_reward_risk["status"] == "manual_ready"
-    assert "spread_reward_risk_insufficient" in (poor_reward_risk["ranking_diagnostics"])
+    assert poor_reward_risk["status"] == "blocked"
+    assert "spread_reward_risk_insufficient" in poor_reward_risk["block_reasons"]
 
 
 def test_qualified_parity_reference_requires_three_cofresh_ibkr_pairs() -> None:

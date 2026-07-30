@@ -30,7 +30,11 @@ from spx_spark.application.market_features.manual_signal_contract import (
 from spx_spark.application.market_features.session_quote_selection import (
     rth_execution_quote,
 )
-from spx_spark.application.market_features.play_outcome_stats import PlayOutcomeStats
+from spx_spark.application.market_features.play_outcome_stats import (
+    PlayOutcomeStats,
+    historical_edge_blockers,
+    play_stats_payload,
+)
 from spx_spark.application.order_map.execution_quote import evaluate_execution_quote
 from spx_spark.application.order_map.models import level_decision_play
 from spx_spark.application.order_map.pricing import expiry_close_utc, round_to_tick
@@ -55,7 +59,7 @@ HARD_CONTEXT_INVALIDATIONS = frozenset(
 )
 
 ET = ZoneInfo("America/New_York")
-TRADE_INTENT_CONTRACT_VERSION = "rth_manual_levels_0930_1530.v5"
+TRADE_INTENT_CONTRACT_VERSION = "rth_manual_levels_0930_1530.v6"
 
 
 def live_trade_intent_authority_issues(
@@ -224,6 +228,8 @@ def evaluate_trade_intent(
                 "official_or_qualified_es_basis_coordinate",
                 "fresh_exact_spxw_quote",
                 "coherent_risk_geometry",
+                "minimum_remaining_reward_risk",
+                "positive_historical_edge_when_sampled",
                 "signal_ttl",
             ],
             "hard_block_reasons": [],
@@ -309,13 +315,20 @@ def evaluate_trade_intent(
     )
     if context.macro_event.get("entry_allowed") is not True:
         pilot_diagnostics.append("macro_event_entry_warning")
-    pilot_diagnostics.extend(
-        _direction_blockers(
-            context,
-            market,
-            thesis=thesis,
-            direction=direction,
-            pilot_enabled=True,
+    direction_diagnostics = _direction_blockers(
+        context,
+        market,
+        thesis=thesis,
+        direction=direction,
+        pilot_enabled=True,
+    )
+    pilot_diagnostics.extend(direction_diagnostics)
+    if "breakout_filter_blocked" in direction_diagnostics:
+        reasons.append("breakout_filter_blocked")
+    reasons.extend(
+        historical_edge_blockers(
+            play_stats,
+            minimum_winrate=feature_policy.play_stats_min_winrate,
         )
     )
     pilot_diagnostics = list(dict.fromkeys(pilot_diagnostics))
@@ -416,16 +429,16 @@ def evaluate_trade_intent(
     if target_room is None:
         reasons.append("target_room_unavailable")
     elif target_room < feature_policy.trade_min_target_room_points:
-        pilot_diagnostics.append("remaining_target_room_insufficient")
+        reasons.append("remaining_target_room_insufficient")
     if invalidation_distance is None or invalidation_distance <= 0:
         reasons.append("invalidation_distance_unavailable")
     elif reward_risk is None or reward_risk < feature_policy.trade_min_reward_risk:
-        pilot_diagnostics.append("remaining_reward_risk_insufficient")
+        reasons.append("remaining_reward_risk_insufficient")
     pilot_diagnostics = list(dict.fromkeys(pilot_diagnostics))
 
     unique_reasons = list(dict.fromkeys(reasons))
     if unique_reasons or candidate is None or quote is None or quote_gate is None:
-        return {
+        blocked_payload = {
             **base,
             "status": "blocked",
             "play": play,
@@ -447,6 +460,9 @@ def evaluate_trade_intent(
                 "diagnostics": pilot_diagnostics,
             },
         }
+        if play_stats is not None:
+            blocked_payload["play_stats"] = play_stats_payload(play_stats)
+        return blocked_payload
 
     bid = quote_gate.bid
     ask = quote_gate.ask
@@ -534,7 +550,7 @@ def evaluate_trade_intent(
         },
     }
     if play_stats is not None:
-        payload["play_stats"] = _play_stats_payload(play_stats)
+        payload["play_stats"] = play_stats_payload(play_stats)
     return payload
 
 
@@ -922,23 +938,6 @@ def _contract_label(candidate: Mapping[str, object]) -> str:
     return (
         f"SPXW {strike:g}{right}" if strike is not None and right else str(candidate["contract_id"])
     )
-
-
-def _play_stats_payload(stats: PlayOutcomeStats) -> dict[str, object]:
-    try:
-        horizon_seconds: object = int(stats.horizon)
-    except (TypeError, ValueError):
-        horizon_seconds = stats.horizon
-    return {
-        "play": stats.play,
-        "level_kind": stats.level_kind,
-        "window_days": stats.window_days,
-        "horizon_seconds": horizon_seconds,
-        "sample_count": stats.sample_count,
-        "winrate": round(stats.winrate, 4),
-        "avg_return_fraction": round(stats.avg_return, 6),
-        "median_return_fraction": round(stats.median_return, 6),
-    }
 
 
 def _evidence(context: DecisionContext) -> list[str]:

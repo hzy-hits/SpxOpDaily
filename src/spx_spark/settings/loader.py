@@ -432,6 +432,7 @@ def load_settings(
         play_stats_window_days=int(get("market_features.play_stats_window_days")),
         play_stats_horizon=str(get("market_features.play_stats_horizon")),
         play_stats_min_samples=int(get("market_features.play_stats_min_samples")),
+        play_stats_min_winrate=float(get("market_features.play_stats_min_winrate")),
         play_stats_refresh_seconds=float(get("market_features.play_stats_refresh_seconds")),
     )
 

@@ -50,7 +50,7 @@ class MarketFeatureSettings:
     trade_invalidation_buffer_points: float = 3.0
     trade_target_em_fraction: float = 0.15
     trade_min_target_room_points: float = 3.0
-    trade_min_reward_risk: float = 0.25
+    trade_min_reward_risk: float = 0.40
     trade_time_stop_minutes: int = 15
     gth_manual_candidate_enabled: bool = True
     gth_manual_candidate_quote_max_age_seconds: float = 15.0
@@ -86,7 +86,8 @@ class MarketFeatureSettings:
     play_stats_enabled: bool = True
     play_stats_window_days: int = 20
     play_stats_horizon: str = "300"
-    play_stats_min_samples: int = 10
+    play_stats_min_samples: int = 30
+    play_stats_min_winrate: float = 0.45
     play_stats_refresh_seconds: float = 900.0
 
     def __post_init__(self) -> None:
@@ -127,6 +128,7 @@ class MarketFeatureSettings:
             self.trade_target_em_fraction,
             self.trade_min_target_room_points,
             self.trade_min_reward_risk,
+            self.play_stats_min_winrate,
             self.trade_time_stop_minutes,
             self.gth_manual_candidate_quote_max_age_seconds,
             self.gth_manual_candidate_ttl_seconds,
@@ -206,6 +208,8 @@ class MarketFeatureSettings:
             raise ValueError("virtual GTH exit clock must be after 04:30 ET")
         if self.play_stats_window_days <= 0 or self.play_stats_min_samples <= 0:
             raise ValueError("play stats window and minimum samples must be positive")
+        if not 0 < self.play_stats_min_winrate < 1:
+            raise ValueError("play stats minimum win rate must be within (0, 1)")
         if self.play_stats_refresh_seconds < 0:
             raise ValueError("play stats refresh seconds must be non-negative")
         try:
