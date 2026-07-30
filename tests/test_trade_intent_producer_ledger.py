@@ -303,9 +303,18 @@ def test_trade_critical_delivery_precedes_greek_and_spring_research() -> None:
     producer_delivery = source.index(
         "producer_ledger, intent_delivery = _record_and_process_trade_intent"
     )
+    spring_ticket_context = source.index(
+        '"spring_gamma": spring_gamma_operator.spring_gamma_operator_view'
+    )
     greek_research = source.index("focused = build_zero_dte_greeks_reference")
     spring_research = source.index("spring_gamma_v3 = _process_spring_gamma_v3_shadow")
 
-    assert confirmed_gate < producer_delivery < greek_research < spring_research
+    assert (
+        confirmed_gate
+        < spring_ticket_context
+        < producer_delivery
+        < greek_research
+        < spring_research
+    )
     assert "trade_intent_evaluation_to_action_revalidation_ms" in source
     assert "trade_intent_action_revalidation_exceeded_ttl" in source

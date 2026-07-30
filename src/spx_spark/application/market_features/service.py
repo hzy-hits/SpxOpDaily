@@ -79,6 +79,7 @@ from spx_spark.application.market_features.spring_gamma_v3_io import (
     spring_gamma_v3_prediction_due,
     validate_spring_gamma_v3_shadow,
 )
+from spx_spark.application.market_features import spring_gamma_operator
 from spx_spark.application.market_features.wall_probability import (
     build_wall_probability_tenor_shadow,
 )
@@ -377,6 +378,15 @@ def run(
         trade_intent,
         now=evaluation_now,
     )
+    if trade_intent.get("status") == "trade_ready":
+        trade_intent = {
+            **trade_intent,
+            "spring_gamma": spring_gamma_operator.spring_gamma_operator_view(
+                load_json(latest_spring_gamma_v3_shadow_path(storage.data_root)),
+                now=evaluation_now,
+                expected_expiry=str(option_frame.front_expiry or ""),
+            ),
+        }
     expected_trade_intent_policy_version = trade_intent_policy_version(policy, app.order_map)
     producer_ledger, intent_delivery = _record_and_process_trade_intent(
         storage,

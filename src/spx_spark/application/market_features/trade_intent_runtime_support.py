@@ -10,6 +10,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Mapping
 
+from spx_spark.application.market_features.spring_gamma_operator import (
+    spring_gamma_operator_line,
+)
 from spx_spark.config import StorageSettings
 from spx_spark.notifier.operator_cards import (
     beijing_time,
@@ -47,6 +50,12 @@ def render_trade_intent(intent: Mapping[str, object]) -> str:
         intent.get("contract_id"),
         fallback=intent.get("contract_label"),
     )
+    spring_gamma = intent.get("spring_gamma")
+    spring_gamma_line = (
+        spring_gamma_operator_line(spring_gamma, ticket_side=right)
+        if isinstance(spring_gamma, Mapping)
+        else None
+    )
     return "\n".join(
         (
             f"🟢 MANUAL READY · {right}",
@@ -56,6 +65,7 @@ def render_trade_intent(intent: Mapping[str, object]) -> str:
             f"{_fmt_fixed(intent.get('decision_ask'))}（决策快照）",
             f"限价  ≤ {_fmt_fixed(intent.get('entry_limit'))}",
             f"触发  {_operator_trigger(intent)}",
+            *([spring_gamma_line] if spring_gamma_line else []),
             f"止损  {_operator_invalidation(intent)}",
             f"目标  SPX {_fmt_fixed(intent.get('target_spx'))}",
             f"退出  {beijing_time(intent.get('time_stop_at'))}",

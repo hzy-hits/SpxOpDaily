@@ -763,6 +763,25 @@ def test_render_trade_intent_hides_play_stats_when_absent() -> None:
     assert "## 同类信号" not in text
 
 
+def test_render_trade_intent_shows_spring_gamma_without_making_it_a_gate() -> None:
+    text = render_trade_intent(
+        {
+            **_render_intent(),
+            "spring_gamma": {
+                "status": "ready",
+                "preferred_side": "CALL",
+                "score": 0.63,
+                "non_blocking": True,
+                "execution_authority": False,
+            },
+        }
+    )
+
+    assert "Spring Gamma 偏多（0.63）" in text
+    assert "与本卡背离" in text
+    assert "只作排序，不作门禁" in text
+
+
 def test_llm_writer_output_must_preserve_action_ticket_fields() -> None:
     intent = {
         **_render_intent(),
