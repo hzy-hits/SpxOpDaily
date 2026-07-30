@@ -28,9 +28,6 @@ from spx_spark.application.market_features.es_bar_consumer_fence import (
     fence_rth_trade_intent_authority as _fence_rth_trade_intent_authority,
 )
 from spx_spark.application.market_features.greek_decision import build_greek_decision
-from spx_spark.application.market_features.gth_manual_candidate import (
-    process_gth_manual_candidate,
-)
 from spx_spark.application.market_features.gth_level_manual_candidate import (
     process_gth_level_manual_candidate,
 )
@@ -447,16 +444,6 @@ def run(
         now=action_now,
     )
     gth_signal = load_json(Path(storage.data_root) / "latest" / "gth_dip_reclaim_signal.json")
-    gth_manual_candidate = process_gth_manual_candidate(
-        storage,
-        action_latest,
-        gth_signal,
-        macro_event=action_macro_event,
-        now=action_now,
-        policy=policy,
-        new_entries_allowed=action_provider_entry_control["allowed"] is True,
-        new_entries_block_reason=str(action_provider_entry_control.get("reason") or "unknown"),
-    )
     gth_level_manual_candidate = process_gth_level_manual_candidate(
         storage,
         action_latest,
@@ -485,7 +472,10 @@ def run(
     context = replace(
         context,
         virtual_strategy=virtual_strategy,
-        gth_manual_candidate=gth_manual_candidate,
+        # Retire the standalone dip-reclaim execution lane.  The signal remains
+        # available to research/virtual accounting, while all operator actions
+        # flow through the unified level/trend manual-live contract below.
+        gth_manual_candidate={},
         gth_level_manual_candidate=gth_level_manual_candidate,
     )
     previous_context = _dict(persisted.get("last_decision_context"))
@@ -547,7 +537,6 @@ def run(
             "confirmed_gate": confirmed_gate,
             "level_decision_refresh_error": level_decision_refresh_error,
             "virtual_strategy": virtual_strategy,
-            "gth_manual_candidate": gth_manual_candidate,
             "gth_level_manual_candidate": gth_level_manual_candidate,
             "spring_gamma_v3_shadow": spring_gamma_v3,
         }

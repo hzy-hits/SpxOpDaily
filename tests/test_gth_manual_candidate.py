@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 import sqlite3
 from dataclasses import replace
@@ -10,6 +11,8 @@ import pytest
 
 import spx_spark.application.market_features.gth_manual_candidate as candidate_module
 import spx_spark.application.market_features.gth_level_manual_candidate as level_candidate_module
+import spx_spark.application.market_features.service as market_feature_service
+import spx_spark.application.order_map.service as order_map_service
 from spx_spark.application.market_features.gth_manual_candidate import (
     _direct_es_reference,
     _notification_intent,
@@ -49,6 +52,17 @@ from spx_spark.storage import LatestState
 
 UTC = timezone.utc
 NOW = datetime(2026, 7, 15, 3, 0, tzinfo=UTC)
+
+
+def test_runtime_only_consumes_unified_gth_manual_candidate() -> None:
+    market_source = inspect.getsource(market_feature_service.run)
+    order_map_source = inspect.getsource(order_map_service.build_order_payload_with_retry)
+
+    assert "process_gth_manual_candidate(" not in market_source
+    assert "process_gth_level_manual_candidate(" in market_source
+    assert '"gth_manual_candidate": gth_manual_candidate' not in market_source
+    assert '"gth_manual_candidate"' not in order_map_source
+    assert '"gth_level_manual_candidate"' in order_map_source
 
 
 def test_manual_candidate_is_ready_without_cash_spx(

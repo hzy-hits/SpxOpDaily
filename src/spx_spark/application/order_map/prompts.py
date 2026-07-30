@@ -654,12 +654,10 @@ def render_operator_status_brief(
     expiry = str(payload.get("expiry") or "-")
     expiry_text = f"{expiry[4:6]}-{expiry[6:8]}" if len(expiry) == 8 else expiry
     guidance = guidance_module.build_decision_guidance(payload)
-    manual_ready = any(
-        isinstance(candidate, dict) and candidate.get("status") == "manual_ready"
-        for candidate in (
-            payload.get("gth_manual_candidate"),
-            payload.get("gth_level_manual_candidate"),
-        )
+    manual_candidate = payload.get("gth_level_manual_candidate")
+    manual_ready = (
+        isinstance(manual_candidate, dict)
+        and manual_candidate.get("status") == "manual_ready"
     )
     trade_ready = guidance.action is guidance_module.GuidanceAction.TRADE_READY or manual_ready
     badge = (

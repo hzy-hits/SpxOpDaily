@@ -273,8 +273,9 @@ def test_unhealthy_sampler_only_fences_rth_state_inputs() -> None:
         "advance_trade_candidate"
     )
     assert source.count("_fence_rth_trade_intent_authority(") == 1
+    assert "process_gth_manual_candidate(" not in source
     assert source.index("_fence_rth_trade_intent_authority") < source.index(
-        "process_gth_manual_candidate"
+        "process_gth_level_manual_candidate"
     )
 
 
