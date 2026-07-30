@@ -41,9 +41,9 @@ analytics:
   underlier_reference_tolerance_fraction: {value: 0.02, description: Maximum chain-implied versus proxy underlier divergence.}
 
 spring_gamma_v3:
-  enabled: {value: false, description: Keeps Spring Gamma v3 computation disabled in production; research replay may enable it explicitly without production decision authority.}
-  report_enabled: {value: false, description: Keeps Spring Gamma v3 projections out of production reports so research availability cannot gate live opportunity surfaces.}
-  prediction_interval_seconds: {value: 60, description: Minute cadence for durable Spring Gamma v3 shadow snapshots; evaluation remains shadow-only and report delivery remains fifteen-minute.}
+  enabled: {value: true, description: Runs Spring Gamma v3 every minute as a non-blocking model overlay for Gamma preparation and confirmed manual cards; it has no order authority.}
+  report_enabled: {value: true, description: Makes the current Spring Gamma v3 diagnostic available to detailed reports and event-driven operator cards without gating a live opportunity.}
+  prediction_interval_seconds: {value: 60, description: Minute cadence for durable Spring Gamma v3 model snapshots; the model may rank a Gamma path but cannot suppress a confirmed manual signal.}
   horizons_minutes: {value: [15, 30, 60], description: Forward return horizons evaluated by the shadow predictor.}
   rth_greek_max_age_seconds: {value: 15.0, description: Maximum RTH Greek-reference age accepted by the shadow predictor.}
   rth_iv_max_age_seconds: {value: 15.0, description: Maximum RTH IV-surface age accepted by the shadow predictor.}

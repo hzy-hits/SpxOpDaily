@@ -426,6 +426,9 @@ def run(
         now=evaluation_now,
         settings=app.spring_gamma_v3,
     )
+    spring_gamma_snapshot = load_json(
+        latest_spring_gamma_v3_shadow_path(storage.data_root)
+    )
     if contract_id:
         score = greek_decision.get("contract_scores", {}).get(contract_id)
         if isinstance(score, dict):
@@ -451,6 +454,7 @@ def run(
         repricing,
         raw_level_decision,
         now=action_now,
+        spring_gamma=spring_gamma_snapshot,
     )
     gth_signal = load_json(Path(storage.data_root) / "latest" / "gth_dip_reclaim_signal.json")
     gth_level_manual_candidate = process_gth_level_manual_candidate(
@@ -458,6 +462,7 @@ def run(
         action_latest,
         raw_level_decision,
         trend_state=trend,
+        spring_gamma=spring_gamma_snapshot,
         macro_event=action_macro_event,
         now=action_now,
         policy=policy,

@@ -20,6 +20,7 @@ def test_market_feature_runtime_processes_gamma_prearm_before_ready_candidate() 
     assert source.index("process_gamma_prearm_plan(") < source.index(
         "process_gth_level_manual_candidate("
     )
+    assert source.count("spring_gamma=spring_gamma_snapshot") == 2
 
 
 def test_approaching_gamma_level_builds_two_sided_prearm_plan() -> None:
@@ -27,6 +28,7 @@ def test_approaching_gamma_level_builds_two_sided_prearm_plan() -> None:
         _repricing(),
         _level_decision(),
         now=NOW,
+        spring_gamma=_spring_gamma(),
     )
 
     assert "approaching" in REPRICING_PHASES
@@ -37,12 +39,16 @@ def test_approaching_gamma_level_builds_two_sided_prearm_plan() -> None:
     assert plan["level"] == 7375.0
     assert plan["distance_points"] == 15.0
     assert [item["side"] for item in plan["paths"]] == ["CALL", "PUT"]
+    assert plan["spring_gamma"]["preferred_side"] == "CALL"
 
     card = _notification_intent(plan, event_id="gamma-plan:ready", now=NOW)
     assert "🎯 GAMMA 伏击计划 · 先准备，未触发不下单" in card["text"]
     assert "Flip Low 7375.00" in card["text"]
     assert "下沿拒绝并收复：CALL" in card["text"]
     assert "向下接受并保持：PUT" in card["text"]
+    assert "Spring Gamma 偏多（0.67）" in card["text"]
+    assert "CALL 路径优先" in card["text"]
+    assert "只作排序，不作门禁" in card["text"]
     assert "现在不追" in card["text"]
     assert "预埋计划不是方向信号" in card["text"]
 
@@ -138,4 +144,19 @@ def _repricing(
                 "execution_quote_provider": "ibkr",
             },
         ],
+    }
+
+
+def _spring_gamma() -> dict[str, object]:
+    return {
+        "status": "ready",
+        "as_of": NOW.isoformat(),
+        "expiry": "20260730",
+        "actionable": False,
+        "automatic_ordering": False,
+        "action_authority": "none",
+        "direction": {
+            "decision": "up",
+            "composite_score": 0.67,
+        },
     }

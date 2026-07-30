@@ -17,6 +17,9 @@ from spx_spark.application.market_features.gth_manual_candidate import (
     _notification_intent,
     _quote_remaining_seconds,
 )
+from spx_spark.application.market_features.spring_gamma_operator import (
+    spring_gamma_operator_view,
+)
 from spx_spark.application.market_features.virtual_strategy_spread import (
     spread_snapshot_decision,
 )
@@ -55,6 +58,7 @@ def evaluate_gth_level_manual_candidate(
     level_decision: Mapping[str, object],
     *,
     trend_state: Mapping[str, object] | None = None,
+    spring_gamma: Mapping[str, object] | None = None,
     macro_event: Mapping[str, object],
     now: datetime,
     policy: MarketFeatureSettings,
@@ -182,6 +186,11 @@ def evaluate_gth_level_manual_candidate(
 
     session_date = DEFAULT_MARKET_CALENDAR.research_expiry(now)
     expiry = str(level_decision.get("expiry") or "")
+    spring_gamma_view = spring_gamma_operator_view(
+        spring_gamma,
+        now=now,
+        expected_expiry=expiry,
+    )
     if expiry != session_date.strftime("%Y%m%d"):
         reasons.append("signal_session_mismatch")
     source_expires_at = _time(level_decision.get("expires_at"))
@@ -471,6 +480,7 @@ def evaluate_gth_level_manual_candidate(
         "invalidation_coordinate": es_reference,
         "exit_at": exit_at.isoformat(),
         "exact_spread_snapshot": snapshot,
+        "spring_gamma": spring_gamma_view,
         "block_reasons": [],
         "signal_absence_reason": None,
         "gate_contract": {
@@ -486,6 +496,7 @@ def process_gth_level_manual_candidate(
     level_decision: Mapping[str, object],
     *,
     trend_state: Mapping[str, object] | None = None,
+    spring_gamma: Mapping[str, object] | None = None,
     macro_event: Mapping[str, object],
     now: datetime,
     policy: MarketFeatureSettings,
@@ -497,6 +508,7 @@ def process_gth_level_manual_candidate(
         latest,
         level_decision,
         trend_state=trend_state,
+        spring_gamma=spring_gamma,
         macro_event=macro_event,
         now=now,
         policy=policy,

@@ -15,6 +15,9 @@ from spx_spark.analytics.options.quote_policy import (
 from spx_spark.application.market_features.virtual_strategy_spread import (
     spread_snapshot_decision,
 )
+from spx_spark.application.market_features.spring_gamma_operator import (
+    spring_gamma_operator_line,
+)
 from spx_spark.application.market_features.virtual_strategy_state import (
     flush_pending_notifications,
 )
@@ -799,6 +802,10 @@ def _notification_intent(
         if replacement_reason
         else None
     )
+    spring_gamma_line = spring_gamma_operator_line(
+        candidate.get("spring_gamma"),
+        ticket_side=side,
+    )
     text = "\n".join(
         (
             f"🟢 MANUAL READY · {side} SPREAD",
@@ -810,6 +817,7 @@ def _notification_intent(
             "两腿合成，不是交易所原生组合 BBO",
             f"限价  净借记 ≤ {float(candidate['entry_limit']):.2f}",
             f"触发  {trigger_text}",
+            spring_gamma_line,
             invalidation_text,
             *([replacement_line] if replacement_line else []),
             f"目标  SPX {float(candidate['target_spx']):.2f}（{target_label}）",

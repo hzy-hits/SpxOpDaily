@@ -8,6 +8,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Mapping
 
+from spx_spark.application.market_features.spring_gamma_operator import (
+    spring_gamma_operator_line,
+    spring_gamma_operator_view,
+)
 from spx_spark.application.market_features.virtual_strategy_state import (
     flush_pending_notifications,
 )
@@ -30,6 +34,7 @@ def evaluate_gamma_prearm_plan(
     level_decision: Mapping[str, object],
     *,
     now: datetime,
+    spring_gamma: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     """Build one conditional plan before price reaches a frozen Gamma level."""
 
@@ -95,6 +100,11 @@ def evaluate_gamma_prearm_plan(
         )
     )
     plan_id = "gamma-prearm:" + hashlib.sha256(identity.encode()).hexdigest()[:24]
+    spring_gamma_view = spring_gamma_operator_view(
+        spring_gamma,
+        now=now,
+        expected_expiry=expiry,
+    )
     return {
         **base,
         "status": "prearm_ready",
@@ -115,6 +125,7 @@ def evaluate_gamma_prearm_plan(
             if isinstance(repricing.get("touch_time_estimate"), Mapping)
             else {}
         ),
+        "spring_gamma": spring_gamma_view,
         "block_reasons": [],
     }
 
@@ -125,12 +136,18 @@ def process_gamma_prearm_plan(
     level_decision: Mapping[str, object],
     *,
     now: datetime,
+    spring_gamma: Mapping[str, object] | None = None,
     notification: NotificationSettings | None = None,
 ) -> dict[str, object]:
     """Persist and deliver a Gamma preparation plan once per semantic level."""
 
     now = _utc(now)
-    plan = evaluate_gamma_prearm_plan(repricing, level_decision, now=now)
+    plan = evaluate_gamma_prearm_plan(
+        repricing,
+        level_decision,
+        now=now,
+        spring_gamma=spring_gamma,
+    )
     state_path = Path(storage.data_root) / "latest" / "gamma_prearm_plan_state.json"
     projection_path = Path(storage.data_root) / "latest" / "gamma_prearm_plan.json"
     event_id = (
@@ -246,6 +263,7 @@ def _notification_intent(
             f"路径{index}  {item['condition']}：{item['side']} · "
             f"{option_contract_label(str(item['contract_id']))} · 到位参考 {price_range}"
         )
+    lines.append(spring_gamma_operator_line(plan.get("spring_gamma")))
     lines.extend(
         (
             "动作  现在不追；只准备订单，价格到 Gamma 位并确认对应路径后再提交",
