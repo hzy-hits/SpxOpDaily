@@ -113,6 +113,7 @@ class DecisionContext:
     trade_intent: dict[str, Any] = field(default_factory=dict)
     gth_manual_candidate: dict[str, Any] = field(default_factory=dict)
     gth_level_manual_candidate: dict[str, Any] = field(default_factory=dict)
+    prior_session: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)

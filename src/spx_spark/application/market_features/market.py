@@ -159,6 +159,9 @@ def normalized_quote(quote: Quote) -> dict[str, Any]:
     return {
         "price": price,
         "price_kind": price_kind,
+        # Preserve the provider's official prior close so the completed RTH
+        # path can be carried causally into the following GTH session.
+        "reference_close": quote.close,
         "provider": quote.provider.value,
         "provider_symbol": provider_symbol,
         "contract_identity": contract_identity,

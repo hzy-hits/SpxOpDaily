@@ -29,6 +29,8 @@ def test_approaching_gamma_level_builds_two_sided_prearm_plan() -> None:
         _level_decision(),
         now=NOW,
         spring_gamma=_spring_gamma(),
+        prior_session=_prior_session(),
+        gth_position_fraction=0.05,
     )
 
     assert "approaching" in REPRICING_PHASES
@@ -40,6 +42,7 @@ def test_approaching_gamma_level_builds_two_sided_prearm_plan() -> None:
     assert plan["distance_points"] == 15.0
     assert [item["side"] for item in plan["paths"]] == ["CALL", "PUT"]
     assert plan["spring_gamma"]["preferred_side"] == "CALL"
+    assert plan["paths"][1]["prior_session_chase_risk"] == "high"
 
     card = _notification_intent(plan, event_id="gamma-plan:ready", now=NOW)
     assert "🎯 GAMMA 伏击计划 · 先准备，未触发不下单" in card["text"]
@@ -49,6 +52,8 @@ def test_approaching_gamma_level_builds_two_sided_prearm_plan() -> None:
     assert "Spring Gamma 偏多（0.67）" in card["text"]
     assert "CALL 路径优先" in card["text"]
     assert "只作排序，不作门禁" in card["text"]
+    assert "前日  -1.52%" in card["text"]
+    assert "PUT 同向极值追单需等待墙位接受" in card["text"]
     assert "现在不追" in card["text"]
     assert "预埋计划不是方向信号" in card["text"]
 
@@ -159,4 +164,18 @@ def _spring_gamma() -> dict[str, object]:
             "decision": "up",
             "composite_score": 0.67,
         },
+    }
+
+
+def _prior_session() -> dict[str, object]:
+    return {
+        "status": "ready",
+        "session_date": "2026-07-29",
+        "return_fraction": -0.0152,
+        "return_points": -112.63,
+        "close_location_fraction": 0.02,
+        "tail_return_fraction": -0.004,
+        "shock_direction": "down",
+        "close_zone": "lower",
+        "path_class": "shock_down_close_low",
     }

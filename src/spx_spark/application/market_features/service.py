@@ -38,7 +38,6 @@ from spx_spark.application.market_features.market import (
     build_minute_market_frame,
     merge_minute_sample,
     normalized_market_sample,
-    session_segment,
     update_volume_baselines,
 )
 from spx_spark.application.market_features.models import DecisionContext
@@ -48,6 +47,9 @@ from spx_spark.application.market_features.market_state_5m_inputs import (
     project_spx_equivalent_moving_averages,
     update_same_time_range_baselines,
 )
+from spx_spark.application.market_features.market_sample_seed import (
+    seed_samples_from_trend,
+)
 from spx_spark.application.market_features.options import (
     build_option_structure_frame,
     merge_option_history,
@@ -56,6 +58,10 @@ from spx_spark.application.market_features.options import (
 from spx_spark.application.market_features.play_outcome_stats import (
     PlayOutcomeStats,
     PlayOutcomeStatsProvider,
+)
+from spx_spark.application.market_features.prior_rth_context import (
+    gth_position_fraction,
+    process_prior_rth_context,
 )
 from spx_spark.application.market_features.state import (
     append_audit,
@@ -197,7 +203,7 @@ def run(
     )
     existing_samples = _dict_list(persisted.get("market_samples"))
     if len(existing_samples) < 5:
-        existing_samples = _seed_samples_from_trend(trend, policy)
+        existing_samples = seed_samples_from_trend(trend, policy)
     samples = merge_minute_sample(
         existing_samples,
         sample,
@@ -293,6 +299,20 @@ def run(
             "rth_market_state": rth_market_state,
         },
     )
+    prior_session = process_prior_rth_context(
+        storage.data_root,
+        frame_samples,
+        latest,
+        now=evaluation_now,
+    )
+    market_frame = replace(
+        market_frame,
+        diagnostics={
+            **market_frame.diagnostics,
+            "prior_rth_context": prior_session,
+        },
+    )
+    current_gth_position = gth_position_fraction(market_frame.es)
     option_history = merge_option_history(option_history, option_frame, policy=policy)
     volume_baselines = update_volume_baselines(
         volume_baselines,
@@ -342,6 +362,7 @@ def run(
         level_decision=level_decision,
         macro_event=macro_event,
         session_episode=session_episode,
+        prior_session=prior_session,
         policy=policy,
     )
     repricing = load_json(default_level_trigger_repricing_path(storage))
@@ -465,6 +486,8 @@ def run(
         raw_level_decision,
         now=action_now,
         spring_gamma=spring_gamma_snapshot,
+        prior_session=prior_session,
+        gth_position_fraction=current_gth_position,
     )
     gth_signal = load_json(Path(storage.data_root) / "latest" / "gth_dip_reclaim_signal.json")
     gth_level_manual_candidate = process_gth_level_manual_candidate(
@@ -478,6 +501,8 @@ def run(
         policy=policy,
         new_entries_allowed=action_provider_entry_control["allowed"] is True,
         new_entries_block_reason=str(action_provider_entry_control.get("reason") or "unknown"),
+        prior_session=prior_session,
+        gth_position_fraction=current_gth_position,
     )
     virtual_strategy = process_virtual_strategy(
         storage,
@@ -946,43 +971,6 @@ def _dict_list(value: object) -> list[dict[str, Any]]:
 
 def _number(value: object) -> float | None:
     return float(value) if isinstance(value, int | float) else None
-
-
-def _seed_samples_from_trend(
-    trend: dict[str, Any],
-    policy: MarketFeatureSettings,
-) -> list[dict[str, Any]]:
-    session_id = str(trend.get("session_id") or "").split(":", 1)[0]
-    rows: list[dict[str, Any]] = []
-    for item in trend.get("samples") or []:
-        if not isinstance(item, dict):
-            continue
-        at = item.get("at")
-        price = item.get("price")
-        if not isinstance(at, str) or not isinstance(price, int | float):
-            continue
-        try:
-            observed_at = as_utc(datetime.fromisoformat(at))
-        except ValueError:
-            continue
-        rows.append(
-            {
-                "at": observed_at.isoformat(),
-                "session_id": session_id,
-                "segment": session_segment(observed_at, policy=policy),
-                "instruments": {
-                    "future:ES": {
-                        "price": float(price),
-                        "provider": item.get("provider"),
-                        "source_at": item.get("source_at") or at,
-                        "volume": None,
-                        "quality": "live",
-                    }
-                },
-                "es_by_provider": {},
-            }
-        )
-    return rows
 
 
 def main() -> None:

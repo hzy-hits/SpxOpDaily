@@ -677,13 +677,34 @@ def render_operator_status_brief(
             f"0DTE {expiry_text} · {phase.get('name_cn')}】"
         ),
         badge,
-        (f"市场  SPX {spx_text} · ES {_dash(payload.get('es_last'))} · {guidance.bias}仅作背景"),
+        (
+            f"市场  SPX {spx_text} · ES {_dash(payload.get('es_last'))} · "
+            f"{guidance.bias}仅作背景{_operator_prior_session_suffix(payload)}"
+        ),
         f"触发  {humanize_operator_trigger(guidance.trigger_text)}",
         f"证伪  {guidance.invalidation_text}",
         _operator_structure_line(payload),
         operator_reason_line(payload),
     ]
     return "\n".join(lines)
+
+
+def _operator_prior_session_suffix(payload: dict[str, Any]) -> str:
+    context = payload.get("decision_context")
+    context = context if isinstance(context, dict) else {}
+    prior = context.get("prior_session")
+    prior = prior if isinstance(prior, dict) else {}
+    if prior.get("status") not in {"ready", "partial"}:
+        return ""
+    change = finite_float(prior.get("return_fraction"))
+    location = finite_float(prior.get("close_location_fraction"))
+    tail = finite_float(prior.get("tail_return_fraction"))
+    fields = [
+        f"前日 {change:+.2%}" if change is not None else None,
+        f"收{location:.0%}" if location is not None else None,
+        f"尾盘{tail:+.2%}" if tail is not None else None,
+    ]
+    return " · " + "/".join(field for field in fields if field)
 
 
 def _operator_decision_card_lines(

@@ -12,6 +12,10 @@ from spx_spark.application.market_features.spring_gamma_operator import (
     spring_gamma_operator_line,
     spring_gamma_operator_view,
 )
+from spx_spark.application.market_features.prior_rth_context import (
+    prior_session_operator_line,
+    prior_session_signal_view,
+)
 from spx_spark.application.market_features.virtual_strategy_state import (
     flush_pending_notifications,
 )
@@ -35,6 +39,8 @@ def evaluate_gamma_prearm_plan(
     *,
     now: datetime,
     spring_gamma: Mapping[str, object] | None = None,
+    prior_session: Mapping[str, object] | None = None,
+    gth_position_fraction: float | None = None,
 ) -> dict[str, object]:
     """Build one conditional plan before price reaches a frozen Gamma level."""
 
@@ -105,6 +111,21 @@ def evaluate_gamma_prearm_plan(
         now=now,
         expected_expiry=expiry,
     )
+    paths = [
+        {
+            **item,
+            "prior_session_chase_risk": prior_session_signal_view(
+                prior_session,
+                direction="up" if item["side"] == "CALL" else "down",
+                gth_position_fraction=gth_position_fraction,
+            ).get("chase_risk"),
+        }
+        for item in paths
+    ]
+    prior_session_view = prior_session_signal_view(
+        prior_session,
+        gth_position_fraction=gth_position_fraction,
+    )
     return {
         **base,
         "status": "prearm_ready",
@@ -126,6 +147,7 @@ def evaluate_gamma_prearm_plan(
             else {}
         ),
         "spring_gamma": spring_gamma_view,
+        "prior_session": prior_session_view,
         "block_reasons": [],
     }
 
@@ -137,6 +159,8 @@ def process_gamma_prearm_plan(
     *,
     now: datetime,
     spring_gamma: Mapping[str, object] | None = None,
+    prior_session: Mapping[str, object] | None = None,
+    gth_position_fraction: float | None = None,
     notification: NotificationSettings | None = None,
 ) -> dict[str, object]:
     """Persist and deliver a Gamma preparation plan once per semantic level."""
@@ -147,6 +171,8 @@ def process_gamma_prearm_plan(
         level_decision,
         now=now,
         spring_gamma=spring_gamma,
+        prior_session=prior_session,
+        gth_position_fraction=gth_position_fraction,
     )
     state_path = Path(storage.data_root) / "latest" / "gamma_prearm_plan_state.json"
     projection_path = Path(storage.data_root) / "latest" / "gamma_prearm_plan.json"
@@ -264,6 +290,7 @@ def _notification_intent(
             f"{option_contract_label(str(item['contract_id']))} · 到位参考 {price_range}"
         )
     lines.append(spring_gamma_operator_line(plan.get("spring_gamma")))
+    lines.append(_prior_session_plan_line(plan))
     lines.extend(
         (
             "动作  现在不追；只准备订单，价格到 Gamma 位并确认对应路径后再提交",
@@ -304,6 +331,19 @@ def _price_range(path: Mapping[str, object]) -> str:
         return f"{low:.2f}–{high:.2f}"
     limit = _number(path.get("limit_conservative"))
     return f"≤ {limit:.2f}" if limit is not None else "触位时重算"
+
+
+def _prior_session_plan_line(plan: Mapping[str, object]) -> str:
+    line = prior_session_operator_line(plan.get("prior_session"))
+    high_risk_sides = [
+        str(item.get("side") or "")
+        for item in plan.get("paths") or ()
+        if isinstance(item, Mapping)
+        and item.get("prior_session_chase_risk") == "high"
+    ]
+    if not high_risk_sides:
+        return line
+    return f"{line}；{'/'.join(high_risk_sides)} 同向极值追单需等待墙位接受，不能直接追"
 
 
 def _number(value: object) -> float | None:

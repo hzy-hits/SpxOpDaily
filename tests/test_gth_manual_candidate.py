@@ -118,6 +118,18 @@ def test_confirmed_gth_flip_low_breakdown_builds_put_manual_ready(
         policy=MarketFeatureSettings(),
         new_entries_allowed=True,
         new_entries_block_reason="allowed",
+        prior_session={
+            "status": "ready",
+            "session_date": "2026-07-14",
+            "return_fraction": -0.0152,
+            "return_points": -112.63,
+            "close_location_fraction": 0.02,
+            "tail_return_fraction": -0.004,
+            "shock_direction": "down",
+            "close_zone": "lower",
+            "path_class": "shock_down_close_low",
+        },
+        gth_position_fraction=0.02,
     )
 
     assert candidate["status"] == "manual_ready"
@@ -135,6 +147,11 @@ def test_confirmed_gth_flip_low_breakdown_builds_put_manual_ready(
     assert candidate["automatic_ordering"] is False
     assert candidate["execution_eligible"] is False
     assert candidate["broker_submission_allowed"] is False
+    assert candidate["prior_session"]["chase_risk"] == "high"
+    assert "prior_session_same_direction_chase_risk_high" in candidate[
+        "ranking_diagnostics"
+    ]
+    assert candidate["block_reasons"] == []
     card = _notification_intent(candidate, event_id="put-ready", now=NOW)
     assert "🟢 MANUAL READY · PUT SPREAD" in card["text"]
     assert "买入  SPXW 07-15 7375P" in card["text"]
@@ -142,6 +159,8 @@ def test_confirmed_gth_flip_low_breakdown_builds_put_manual_ready(
     assert "NBBO  10.00 / 12.00" in card["text"]
     assert "限价  净借记 ≤ 12.00" in card["text"]
     assert "触发  SPX 跌破 Flip Low 7375.00 并确认" in card["text"]
+    assert "前日  -1.52%" in card["text"]
+    assert "本票同向追单风险高" in card["text"]
     assert "止损  SPX 收回 7383.00；ES 升至 7413.00" in card["text"]
     assert "目标  SPX 7300.00（Put Wall）" in card["text"]
     assert "退出  " in card["text"]

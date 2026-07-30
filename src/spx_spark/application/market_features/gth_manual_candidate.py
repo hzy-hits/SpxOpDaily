@@ -27,6 +27,9 @@ from spx_spark.application.market_features.virtual_strategy_support import (
     _time,
     _utc,
 )
+from spx_spark.application.market_features.prior_rth_context import (
+    prior_session_operator_line,
+)
 from spx_spark.config import NotificationSettings, StorageSettings
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR, ET
 from spx_spark.marketdata import (
@@ -806,6 +809,7 @@ def _notification_intent(
         candidate.get("spring_gamma"),
         ticket_side=side,
     )
+    prior_session_line = prior_session_operator_line(candidate.get("prior_session"))
     text = "\n".join(
         (
             f"🟢 MANUAL READY · {side} SPREAD",
@@ -818,6 +822,7 @@ def _notification_intent(
             f"限价  净借记 ≤ {float(candidate['entry_limit']):.2f}",
             f"触发  {trigger_text}",
             spring_gamma_line,
+            prior_session_line,
             invalidation_text,
             *([replacement_line] if replacement_line else []),
             f"目标  SPX {float(candidate['target_spx']):.2f}（{target_label}）",

@@ -20,6 +20,9 @@ from spx_spark.application.market_features.gth_manual_candidate import (
 from spx_spark.application.market_features.spring_gamma_operator import (
     spring_gamma_operator_view,
 )
+from spx_spark.application.market_features.prior_rth_context import (
+    prior_session_signal_view,
+)
 from spx_spark.application.market_features.virtual_strategy_spread import (
     spread_snapshot_decision,
 )
@@ -64,6 +67,8 @@ def evaluate_gth_level_manual_candidate(
     policy: MarketFeatureSettings,
     new_entries_allowed: bool,
     new_entries_block_reason: str,
+    prior_session: Mapping[str, object] | None = None,
+    gth_position_fraction: float | None = None,
 ) -> dict[str, object]:
     """Build one GTH manual vertical from a confirmed Gamma level path."""
 
@@ -367,6 +372,16 @@ def evaluate_gth_level_manual_candidate(
         reasons.append("spread_reward_risk_unavailable")
     elif reward_risk < policy.gth_manual_candidate_min_reward_risk:
         ranking_diagnostics.append("spread_reward_risk_insufficient")
+    prior_session_view = prior_session_signal_view(
+        prior_session,
+        direction=direction,
+        gth_position_fraction=gth_position_fraction,
+    )
+    if prior_session_view.get("chase_risk") in {"high", "elevated"}:
+        ranking_diagnostics.append(
+            f"prior_session_same_direction_chase_risk_"
+            f"{prior_session_view['chase_risk']}"
+        )
     base["ranking_diagnostics"] = list(dict.fromkeys(ranking_diagnostics))
     base["gate_contract"] = {
         **base["gate_contract"],
@@ -481,6 +496,7 @@ def evaluate_gth_level_manual_candidate(
         "exit_at": exit_at.isoformat(),
         "exact_spread_snapshot": snapshot,
         "spring_gamma": spring_gamma_view,
+        "prior_session": prior_session_view,
         "block_reasons": [],
         "signal_absence_reason": None,
         "gate_contract": {
@@ -502,6 +518,8 @@ def process_gth_level_manual_candidate(
     policy: MarketFeatureSettings,
     new_entries_allowed: bool,
     new_entries_block_reason: str,
+    prior_session: Mapping[str, object] | None = None,
+    gth_position_fraction: float | None = None,
     notification: NotificationSettings | None = None,
 ) -> dict[str, object]:
     candidate = evaluate_gth_level_manual_candidate(
@@ -514,6 +532,8 @@ def process_gth_level_manual_candidate(
         policy=policy,
         new_entries_allowed=new_entries_allowed,
         new_entries_block_reason=new_entries_block_reason,
+        prior_session=prior_session,
+        gth_position_fraction=gth_position_fraction,
     )
     return _persist_candidate(
         storage,

@@ -29,6 +29,7 @@ def build_decision_context(
     level_decision: dict[str, Any],
     macro_event: dict[str, Any] | None = None,
     session_episode: dict[str, Any] | None = None,
+    prior_session: dict[str, Any] | None = None,
     policy: MarketFeatureSettings | None = None,
 ) -> DecisionContext:
     policy = policy or MarketFeatureSettings()
@@ -106,6 +107,7 @@ def build_decision_context(
         breakout_filter=breakout_filter,
         macro_event=dict(macro_event or {}),
         session_episode=dict(session_episode or {}),
+        prior_session=dict(prior_session or {}),
     )
 
 
@@ -121,6 +123,9 @@ def decision_signature(context: dict[str, Any]) -> tuple[object, ...]:
     session_episode = (
         context.get("session_episode") if isinstance(context.get("session_episode"), dict) else {}
     )
+    prior_session = (
+        context.get("prior_session") if isinstance(context.get("prior_session"), dict) else {}
+    )
     return (
         trend.get("regime"),
         level.get("event_id"),
@@ -132,6 +137,8 @@ def decision_signature(context: dict[str, Any]) -> tuple[object, ...]:
         confirmations.get("breakout_verdict"),
         session_episode.get("episode_id"),
         session_episode.get("phase"),
+        prior_session.get("session_date"),
+        prior_session.get("path_class"),
         trade_intent.get("status"),
         trade_intent.get("intent_id"),
         tuple(trade_intent.get("block_reasons") or ()),
