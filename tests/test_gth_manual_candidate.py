@@ -193,7 +193,66 @@ def test_confirmed_gth_lower_rejection_builds_call_manual_ready(
     assert candidate["automatic_ordering"] is False
 
 
-def test_gth_put_wall_breakdown_remains_disabled(
+def test_gth_es_continuation_binds_ibkr_spxw_put_manual_ready(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_ready_market(monkeypatch, now=NOW, parity_price=7337.0, es_price=7367.0)
+    level_context = {
+        "formal_signal": True,
+        "phase": "confirmed",
+        "quality_ok": True,
+        "event_id": "level:stale-event",
+        "expires_at": (NOW - timedelta(seconds=1)).isoformat(),
+        "expiry": "20260715",
+        "spot": 7337.0,
+        "es": 7367.0,
+        "es_basis_points": 30.0,
+        "levels": {
+            "put_wall": 7300.0,
+            "flip_low": 7375.0,
+            "flip_high": 7380.0,
+            "call_wall": 7450.0,
+        },
+        "trigger_coordinate": {
+            "kind": "chain_implied_spx",
+            "instrument_id": "synthetic:SPXW_PARITY",
+            "observed_value": 7337.0,
+        },
+    }
+    trend_state = {
+        "last_continuation": {
+            "event_type": "continuation",
+            "event_id": "globex-cont:2026-07-15:gth:3:down:m1",
+            "session_id": "2026-07-15:gth",
+            "signal_stage": "entry_advisory",
+            "advisory_status": "advisory_ready",
+            "direction": "down",
+            "anchor_price": 7378.0,
+            "at": NOW.isoformat(),
+        }
+    }
+
+    candidate = evaluate_gth_level_manual_candidate(
+        object(),
+        level_context,
+        trend_state=trend_state,
+        macro_event={"entry_allowed": True},
+        now=NOW,
+        policy=MarketFeatureSettings(),
+        new_entries_allowed=True,
+        new_entries_block_reason="allowed",
+    )
+
+    assert candidate["status"] == "manual_ready"
+    assert candidate["source_kind"] == "gth_es_trend_continuation"
+    assert candidate["path_kind"] == "trend_continuation_put"
+    assert candidate["long_contract_id"].endswith(":7335:P")
+    assert candidate["short_contract_id"].endswith(":7300:P")
+    assert candidate["invalidation_spx"] == 7351.0
+    assert candidate["invalidation_es"] == 7381.0
+
+
+def test_gth_put_wall_breakdown_is_manual_ready(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _patch_ready_market(monkeypatch, now=NOW, parity_price=7290.0, es_price=7320.0)
@@ -208,9 +267,9 @@ def test_gth_put_wall_breakdown_remains_disabled(
         new_entries_block_reason="allowed",
     )
 
-    assert candidate["status"] == "blocked"
-    assert candidate["manual_action_eligible"] is False
-    assert "unsupported_gth_level_path" in candidate["block_reasons"]
+    assert candidate["status"] == "manual_ready"
+    assert candidate["manual_action_eligible"] is True
+    assert candidate["path_kind"] == "put_wall_breakdown_put"
 
 
 def test_gth_manual_candidate_uses_fresh_bbo_without_vendor_greeks(
@@ -348,7 +407,7 @@ def test_manual_candidate_respects_gth_open_and_close_buffer(
         )
 
 
-def test_target_wall_and_parity_uncertainty_fail_closed(
+def test_target_wall_is_hard_but_parity_room_is_diagnostic(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _patch_ready_market(monkeypatch, now=NOW, parity_price=7543.5)
@@ -377,8 +436,8 @@ def test_target_wall_and_parity_uncertainty_fail_closed(
         new_entries_block_reason="allowed",
     )
 
-    assert too_close["status"] == "blocked"
-    assert "target_room_below_parity_uncertainty_bound" in too_close["block_reasons"]
+    assert too_close["status"] == "manual_ready"
+    assert "target_room_below_parity_uncertainty_bound" in (too_close["ranking_diagnostics"])
     assert no_target["status"] == "blocked"
     assert "target_wall_unavailable" in no_target["block_reasons"]
 
@@ -400,7 +459,7 @@ def test_macro_provider_and_es_invalidation_remain_hard_gates(
 
     assert candidate["status"] == "blocked"
     assert "macro_entry_blocked" in candidate["block_reasons"]
-    assert "provider_entry_blocked:ibkr_unhealthy" in candidate["block_reasons"]
+    assert candidate["provider_incident_warning"] == "ibkr_unhealthy"
     assert "invalidation_reached_before_candidate" in candidate["block_reasons"]
 
 
@@ -432,7 +491,7 @@ def test_blocked_or_shadow_source_cannot_become_manual_ready(
     assert "source_entry_quality_blocked" in candidate["block_reasons"]
 
 
-def test_old_reclaim_and_subminimum_reward_risk_fail_closed(
+def test_old_reclaim_is_hard_but_subminimum_reward_risk_is_diagnostic(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _patch_ready_market(monkeypatch, now=NOW)
@@ -463,7 +522,8 @@ def test_old_reclaim_and_subminimum_reward_risk_fail_closed(
     )
 
     assert "gth_reclaim_too_old" in stale["block_reasons"]
-    assert "spread_reward_risk_insufficient" in poor_reward_risk["block_reasons"]
+    assert poor_reward_risk["status"] == "manual_ready"
+    assert "spread_reward_risk_insufficient" in (poor_reward_risk["ranking_diagnostics"])
 
 
 def test_qualified_parity_reference_requires_three_cofresh_ibkr_pairs() -> None:
@@ -611,6 +671,17 @@ def test_level_candidate_notification_is_durable_and_idempotent(
     )
     assert state["pending_notifications"] == []
     assert len(state["accepted_notification_event_ids"]) == 1
+    gate_rows = [
+        json.loads(line)
+        for line in (
+            tmp_path / "features" / "gth_manual_signal_gates" / "date=2026-07-15" / "events.jsonl"
+        )
+        .read_text()
+        .splitlines()
+    ]
+    assert len(gate_rows) == 1
+    assert gate_rows[0]["status"] == "manual_ready"
+    assert gate_rows[0]["gate_contract"]["hard_block_reasons"] == []
 
 
 def test_manual_ready_outbox_consumer_receipt_end_to_end_is_idempotent(

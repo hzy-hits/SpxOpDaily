@@ -10,18 +10,34 @@ from pathlib import Path
 from typing import Mapping
 
 from spx_spark.application.market_features.trade_intent import (
-    ENTRY_WINDOW_START_ET,
     ET,
-    HARD_EXIT_ET,
     TRADE_INTENT_CONTRACT_VERSION,
     live_trade_intent_authority_issues,
+)
+from spx_spark.application.market_features.put_shadow_contract import (
+    LEGACY_PUT_SHADOW_SOURCE_CONTRACT_VERSION,
+    PUT_SHADOW_CANDIDATE_CONTRACT_VERSION,
+    PUT_SHADOW_CONSUMED_IDENTITY_LIMIT,
+    PUT_SHADOW_ENTRY_WINDOW_START_ET,
+    PUT_SHADOW_EXACT_QUOTE_MAX_AGE_SECONDS,
+    PUT_SHADOW_EXACT_QUOTE_POLICY_VERSION,
+    PUT_SHADOW_HARD_EXIT_ET,
+    PUT_SHADOW_LANE_CONTRACTS,
+    PUT_SHADOW_LANES,
+    PUT_SHADOW_STATE_SCHEMA_VERSION,
 )
 from spx_spark.application.market_features.trade_candidate_quote import (
     candidate_displayed_quote_decision,
 )
 from spx_spark.application.order_map.spot import actionable_live_price
 from spx_spark.config import StorageSettings
-from spx_spark.marketdata import Quote, quote_use_decision
+from spx_spark.marketdata import (
+    Provider,
+    Quote,
+    choose_best_quote,
+    instrument_matches_id,
+    quote_use_decision,
+)
 from spx_spark.state_io import atomic_write_json_secure, exclusive_state_lock, read_json_object
 from spx_spark.storage import LatestState
 from spx_spark.strategy_contract import (
@@ -52,31 +68,6 @@ TERMINAL_PHASES = frozenset(
         CandidatePhase.SUPERSEDED,
     }
 )
-
-PUT_SHADOW_LANES = frozenset(
-    {
-        "long_0dte_rth_flip_low_breakdown_put_shadow",
-        "long_0dte_rth_upper_rejection_put_shadow",
-    }
-)
-PUT_SHADOW_EXACT_QUOTE_POLICY_VERSION = "put_shadow_exact_quote.v1"
-PUT_SHADOW_EXACT_QUOTE_MAX_AGE_SECONDS = 15.0
-PUT_SHADOW_CANDIDATE_CONTRACT_VERSION = "put_shadow_candidate_lifecycle.v2"
-PUT_SHADOW_STATE_SCHEMA_VERSION = 2
-LEGACY_PUT_SHADOW_SOURCE_CONTRACT_VERSION = "rth_lanes_0945_1300_put_shadow.v1"
-_PUT_SHADOW_CONSUMED_IDENTITY_LIMIT = 1_000
-_PUT_SHADOW_LANE_CONTRACTS: dict[str, tuple[str, str, frozenset[str]]] = {
-    "long_0dte_rth_flip_low_breakdown_put_shadow": (
-        "level_breakout_put",
-        "breakout",
-        frozenset({"flip_low"}),
-    ),
-    "long_0dte_rth_upper_rejection_put_shadow": (
-        "level_fade_put",
-        "fade",
-        frozenset({"call_wall", "flip_high"}),
-    ),
-}
 
 
 def advance_trade_candidate(
@@ -368,7 +359,7 @@ def advance_put_shadow_candidates(
                 "completed_candidate_ids": sorted(item for item in completed if item)[-500:],
                 "completed_candidates": _trim_completed(completed_candidates),
                 "consumed_identity_keys": consumed_identity_order[
-                    -_PUT_SHADOW_CONSUMED_IDENTITY_LIMIT:
+                    -PUT_SHADOW_CONSUMED_IDENTITY_LIMIT:
                 ],
             }
         )
@@ -564,7 +555,27 @@ def _advance_active(
             observation,
         )
     contract_id = str(active.get("contract_id") or "")
-    quote = latest.best_quote(contract_id) if contract_id else None
+    source_intent = active.get("source_intent")
+    source_intent = source_intent if isinstance(source_intent, Mapping) else {}
+    provider_name = str(source_intent.get("provider") or "")
+    provider = (
+        Provider(provider_name) if provider_name in {item.value for item in Provider} else None
+    )
+    quote = (
+        choose_best_quote(
+            (
+                item
+                for item in latest.quotes
+                if item.provider is provider and instrument_matches_id(item.instrument, contract_id)
+            ),
+            provider_priority=(provider,),
+            as_of=now,
+        )
+        if contract_id and provider is not None
+        else latest.best_quote(contract_id)
+        if contract_id
+        else None
+    )
     entry_limit = _number(active.get("entry_limit"))
     if quote is not None:
         if enforced_put_shadow or active.get("shadow_mode") is True:
@@ -573,12 +584,10 @@ def _advance_active(
                 now=now,
             )
         else:
-            quote_allowed, quote_reason, quote_contract = (
-                candidate_displayed_quote_decision(
-                    quote,
-                    now=now,
-                    max_age_seconds=PUT_SHADOW_EXACT_QUOTE_MAX_AGE_SECONDS,
-                )
+            quote_allowed, quote_reason, quote_contract = candidate_displayed_quote_decision(
+                quote,
+                now=now,
+                max_age_seconds=PUT_SHADOW_EXACT_QUOTE_MAX_AGE_SECONDS,
             )
         observation.update(
             {
@@ -588,9 +597,7 @@ def _advance_active(
                 "mid": quote.mid,
                 "quote_quality": quote.quality.value,
                 "quote_source_at": (
-                    quote.quote_time.isoformat()
-                    if quote.quote_time is not None
-                    else None
+                    quote.quote_time.isoformat() if quote.quote_time is not None else None
                 ),
                 "quote_transport_at": (quote.last_update_at or quote.received_at).isoformat(),
                 "quote_received_at": quote.received_at.isoformat(),
@@ -743,7 +750,7 @@ def _put_shadow_identity_keys(payload: Mapping[str, object]) -> tuple[str, ...]:
 
 def _put_shadow_lane_contract_valid(intent: Mapping[str, object]) -> bool:
     lane = str(intent.get("strategy_lane") or "")
-    contract = _PUT_SHADOW_LANE_CONTRACTS.get(lane)
+    contract = PUT_SHADOW_LANE_CONTRACTS.get(lane)
     if contract is None:
         return False
     play, thesis, level_kinds = contract
@@ -802,12 +809,16 @@ def _put_shadow_window_fields_valid(payload: Mapping[str, object]) -> bool:
     if entry_window_start_at is None or hard_exit_at is None or valid_until is None:
         return False
     session_day = entry_window_start_at.astimezone(ET).date()
-    expected_start = datetime.combine(session_day, ENTRY_WINDOW_START_ET, tzinfo=ET).astimezone(
-        timezone.utc
-    )
-    expected_hard_exit = datetime.combine(session_day, HARD_EXIT_ET, tzinfo=ET).astimezone(
-        timezone.utc
-    )
+    expected_start = datetime.combine(
+        session_day,
+        PUT_SHADOW_ENTRY_WINDOW_START_ET,
+        tzinfo=ET,
+    ).astimezone(timezone.utc)
+    expected_hard_exit = datetime.combine(
+        session_day,
+        PUT_SHADOW_HARD_EXIT_ET,
+        tzinfo=ET,
+    ).astimezone(timezone.utc)
     return bool(
         entry_window_start_at == expected_start
         and hard_exit_at == expected_hard_exit

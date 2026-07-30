@@ -1722,16 +1722,16 @@ def test_resolve_spx_spot_keeps_hl_research_separate_from_chain_pricing() -> Non
             mark=7520.0,
             quote_time=rth,
         ),
-            Quote(
-                instrument=InstrumentId.index("SPX"),
-                provider=Provider.IBKR,
-                provider_symbol="index:SPX",
-                received_at=rth,
-                quality=MarketDataQuality.LIVE,
-                last=7532.0,
-                trade_time=rth,
-                quote_time=rth,
-            ),
+        Quote(
+            instrument=InstrumentId.index("SPX"),
+            provider=Provider.IBKR,
+            provider_symbol="index:SPX",
+            received_at=rth,
+            quality=MarketDataQuality.LIVE,
+            last=7532.0,
+            trade_time=rth,
+            quote_time=rth,
+        ),
         make_option(
             expiry="20260707",
             strike=7525,
@@ -2251,9 +2251,7 @@ def test_gth_status_delivers_degraded_heartbeat_instead_of_skipping_thin_snapsho
     monkeypatch.setattr(
         order_map_module,
         "render_operator_status_brief",
-        lambda value, *args: (
-            captured.update(warnings=list(value["warnings"])) or "operator status"
-        ),
+        lambda value, *args: captured.update(warnings=list(value["warnings"])) or "operator status",
     )
     monkeypatch.setattr(
         order_map_module.NotificationSettings,
@@ -2438,7 +2436,7 @@ def test_prompts_include_previous_push() -> None:
     assert "不是 ES 期货自身的 GEX/DEX" in order_prompt
     assert "Radar 必须分别保留最佳 Call/Put" in order_prompt
     assert "生产计划仍最多一条" in order_prompt
-    assert "13:00 ET 后停止新想法" in order_prompt
+    assert "15:30 ET 后停止新入场" in order_prompt
     assert "只能称结构集中带" in order_prompt
     assert "不是到达时钟或自动撤单依据" in order_prompt
     assert "卖腿放 80% 区间外沿附近最划算" not in order_prompt
@@ -4161,16 +4159,16 @@ def test_send_order_map_queues_on_feishu_failure(tmp_path: Path, monkeypatch) ->
         make_state(
             Quote(
                 instrument=InstrumentId.index("SPX"),
-                    provider=Provider.IBKR,
-                    provider_symbol="index:SPX",
-                    received_at=datetime(2026, 7, 7, 15, 0, tzinfo=timezone.utc),
-                    quality=MarketDataQuality.LIVE,
-                    last=7569.0,
-                    trade_time=datetime(2026, 7, 7, 15, 0, tzinfo=timezone.utc),
-                    quote_time=datetime(2026, 7, 7, 15, 0, tzinfo=timezone.utc),
-                ),
-                now=datetime(2026, 7, 7, 15, 0, tzinfo=timezone.utc),
-            )
+                provider=Provider.IBKR,
+                provider_symbol="index:SPX",
+                received_at=datetime(2026, 7, 7, 15, 0, tzinfo=timezone.utc),
+                quality=MarketDataQuality.LIVE,
+                last=7569.0,
+                trade_time=datetime(2026, 7, 7, 15, 0, tzinfo=timezone.utc),
+                quote_time=datetime(2026, 7, 7, 15, 0, tzinfo=timezone.utc),
+            ),
+            now=datetime(2026, 7, 7, 15, 0, tzinfo=timezone.utc),
+        )
     )
     template = render_template(payload)
     missed_path = str(tmp_path / "missed.jsonl")

@@ -18,6 +18,7 @@ QUIET_WINDOW_EXCEPTION_LANES = frozenset(
         "execution_safety",
         "trade_ready",
         "gth_manual_candidate",
+        "gth_level_manual_candidate",
     }
 )
 

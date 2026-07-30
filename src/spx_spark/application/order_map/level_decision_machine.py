@@ -209,6 +209,25 @@ def advance_level_decision(
         if abs(spot - level) <= settings.retest_points:
             state.pop("confirm_started_at", None)
             return _transition(state, phase, LevelPhase.RETEST, now, "returned_for_retest")
+        # Acceptance/rejection already requires a sustained move and
+        # same-direction ES confirmation.  A second touch of the level is a
+        # useful path when it occurs, but making that touch mandatory causes a
+        # clean one-way move to expire without ever becoming actionable.
+        # Confirm uninterrupted follow-through after one additional short hold.
+        if (
+            desired_move >= settings.confirm_move_points
+            and _phase_age(state, now) >= settings.confirm_hold_seconds
+            and _es_confirms(state, observation, desired_direction, settings)
+        ):
+            return _confirmed_transition(
+                state,
+                phase,
+                observation,
+                now=now,
+                desired_direction=desired_direction,
+                settings=settings,
+                reason="accepted_follow_through_confirmed",
+            )
         return _update_extreme(state, phase, observation, "waiting_for_retest")
 
     if phase is LevelPhase.RETEST:
@@ -222,15 +241,15 @@ def advance_level_decision(
         if (now - started).total_seconds() >= settings.confirm_hold_seconds and _es_confirms(
             state, observation, desired_direction, settings
         ):
-            state["confirmed_at"] = now.isoformat()
-            state["expires_at"] = (
-                now + timedelta(seconds=settings.event_ttl_seconds)
-            ).isoformat()
-            state["direction"] = "up" if desired_direction > 0 else "down"
-            decision_spot = _spx_decision_spot(observation)
-            if decision_spot is not None:
-                state["decision_spot"] = decision_spot
-            return _transition(state, phase, LevelPhase.CONFIRMED, now, "retest_confirmed")
+            return _confirmed_transition(
+                state,
+                phase,
+                observation,
+                now=now,
+                desired_direction=desired_direction,
+                settings=settings,
+                reason="retest_confirmed",
+            )
         return _update_extreme(state, phase, observation, "confirmation_hold")
 
     return _unchanged(state, phase, now, "no_transition")
@@ -329,19 +348,15 @@ def _session_boundary_changed(
 ) -> bool:
     prior_mode = str(state.get("session_mode") or "")
     current_mode = str(observation.session_mode or "")
-    if (
-        prior_mode
-        and current_mode not in {"", "unknown"}
-        and prior_mode != current_mode
-    ):
+    if prior_mode and current_mode not in {"", "unknown"} and prior_mode != current_mode:
         return True
     if phase not in TERMINAL_PHASES or current_mode != "rth":
         return False
     prior_coordinate = str(state.get("trigger_coordinate_kind") or "")
-    return (
-        observation.trigger_coordinate_kind == "official_spx"
-        and prior_coordinate in {"chain_implied_spx", "es_equivalent"}
-    )
+    return observation.trigger_coordinate_kind == "official_spx" and prior_coordinate in {
+        "chain_implied_spx",
+        "es_equivalent",
+    }
 
 
 def _es_confirms(
@@ -351,9 +366,7 @@ def _es_confirms(
     settings: LevelDecisionSettings,
 ) -> bool:
     start_es = float(state.get("confirmation_start_es") or state.get("start_es") or 0.0)
-    start_spot = float(
-        state.get("confirmation_start_spot") or state.get("start_spot") or 0.0
-    )
+    start_spot = float(state.get("confirmation_start_spot") or state.get("start_spot") or 0.0)
     if not start_es or observation.es is None or observation.spot is None:
         return False
     es_move = direction * (float(observation.es) - start_es)
@@ -395,6 +408,25 @@ def _transition(
     state["reason"] = reason
     state["transition_count"] = int(state.get("transition_count") or 0) + 1
     return LevelTransition(previous, current, state, previous is not current, reason)
+
+
+def _confirmed_transition(
+    state: dict[str, object],
+    previous: LevelPhase,
+    observation: LevelObservation,
+    *,
+    now: datetime,
+    desired_direction: int,
+    settings: LevelDecisionSettings,
+    reason: str,
+) -> LevelTransition:
+    state["confirmed_at"] = now.isoformat()
+    state["expires_at"] = (now + timedelta(seconds=settings.event_ttl_seconds)).isoformat()
+    state["direction"] = "up" if desired_direction > 0 else "down"
+    decision_spot = _spx_decision_spot(observation)
+    if decision_spot is not None:
+        state["decision_spot"] = decision_spot
+    return _transition(state, previous, LevelPhase.CONFIRMED, now, reason)
 
 
 def _to_far(

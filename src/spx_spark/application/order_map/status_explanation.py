@@ -6,6 +6,8 @@ import json
 import re
 from typing import Any
 
+from spx_spark.analytics.options.pricing import finite_float
+
 
 STATUS_EXPLANATION_SYSTEM_PROMPT = "\n".join(
     (
@@ -64,3 +66,62 @@ def humanize_operator_trigger(text: str) -> str:
     ):
         value = value.replace(internal, human)
     return value
+
+
+def operator_reason_line(payload: dict[str, Any]) -> str:
+    """Render the one deterministic reason line shown on compact status cards."""
+
+    underlier = payload.get("underlier")
+    underlier = underlier if isinstance(underlier, dict) else {}
+    decision = payload.get("level_decision")
+    decision = decision if isinstance(decision, dict) else {}
+    intent = payload.get("trade_intent")
+    intent = intent if isinstance(intent, dict) else {}
+    gth = str(decision.get("session_mode") or "") == "globex"
+    decision_spot = finite_float(decision.get("spot"))
+    decision_es = finite_float(decision.get("es"))
+    reasons: list[str] = []
+    if (
+        underlier.get("price") is None
+        and decision_spot is None
+        and not (gth and decision_es is not None)
+    ):
+        reasons.append("可靠 SPX 坐标暂不可用")
+    if decision.get("structure_change_pending") is True:
+        reasons.append("新结构仍在确认")
+    if str(decision.get("phase") or "far").lower() == "far":
+        reasons.append("当前未触发关键位，趋势信号继续独立评估")
+    if intent.get("status") == "blocked":
+        blocked = [
+            _humanize_internal_reason(str(item))
+            for item in intent.get("block_reasons") or ()
+            if str(item)
+        ]
+        reasons.append(blocked[0] if blocked else "实时合约报价尚未就绪")
+    if not reasons:
+        reasons.append("等待下一次方向触发和实时合约报价")
+    return "原因  " + "；".join(dict.fromkeys(reasons[:3]))
+
+
+def _humanize_internal_reason(value: str) -> str:
+    reason = str(value or "").strip()
+    exact = {
+        "source_signal_unavailable": "尚未出现方向触发",
+        "exact_option_quote_unavailable": "实时合约报价尚未就绪",
+        "exact_option_contract_unavailable": "尚未找到满足条件的实时合约",
+        "pricing_gate_failed": "实时合约报价尚未就绪",
+        "session_not_gth": "当前不在夜盘交易时段",
+        "session_not_rth": "当前不在日盘交易时段",
+        "event_expired": "方向触发已经过期",
+        "insufficient_reward_to_risk": "当前收益风险比不足",
+        "entry_deadline_expired": "当前入场有效期已过",
+    }
+    if reason in exact:
+        return exact[reason]
+    if "quote" in reason or "pricing" in reason:
+        return "实时合约报价尚未就绪"
+    if "source" in reason or "signal" in reason:
+        return "尚未出现方向触发"
+    if "expired" in reason or "stale" in reason:
+        return "方向或报价已经过期"
+    return "执行条件尚未完整"

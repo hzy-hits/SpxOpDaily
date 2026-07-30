@@ -35,6 +35,7 @@ from spx_spark.notifier.dispatcher import cancel_pending_notification
 from spx_spark.options_map import actionable_chain_implied_reference
 from spx_spark.settings.market_features import MarketFeatureSettings
 from spx_spark.state_io import (
+    append_jsonl_secure,
     atomic_write_json_secure,
     exclusive_state_lock,
     read_json_object,
@@ -47,35 +48,51 @@ CONTRACT_VERSION = "gth_level_manual_candidate.v1"
 SPREAD_MIN_WIDTH_POINTS = 5.0
 SPREAD_DEFAULT_WIDTH_POINTS = 25.0
 SPREAD_MAX_WIDTH_POINTS = 40.0
+TREND_SOURCE_TTL_SECONDS = 120.0
 
 
 def evaluate_gth_level_manual_candidate(
     latest: LatestState,
     level_decision: Mapping[str, object],
     *,
+    trend_state: Mapping[str, object] | None = None,
     macro_event: Mapping[str, object],
     now: datetime,
     policy: MarketFeatureSettings,
     new_entries_allowed: bool,
     new_entries_block_reason: str,
 ) -> dict[str, object]:
-    """Build a manual-only vertical from a confirmed GTH level lifecycle."""
+    """Build one GTH manual vertical from a level path or ES continuation."""
 
     now = _utc(now)
-    source_id = str(level_decision.get("event_id") or "")
+    level_source_expiry = _time(level_decision.get("expires_at"))
+    level_source_ready = bool(
+        level_decision.get("formal_signal") is True
+        and str(level_decision.get("phase") or "") == "confirmed"
+        and level_decision.get("quality_ok") is True
+        and level_source_expiry is not None
+        and level_source_expiry > now
+    )
+    trend_event = _current_trend_entry_event(trend_state, now=now)
+    source_mode = "level" if level_source_ready else "trend" if trend_event else "none"
+    source = level_decision if source_mode == "level" else trend_event or {}
+    source_id = str(source.get("event_id") or "")
+    source_kind = (
+        "gth_confirmed_level_path"
+        if source_mode == "level"
+        else "gth_es_trend_continuation"
+        if source_mode == "trend"
+        else None
+    )
     candidate_policy_version = policy_version(
         CONTRACT_VERSION,
         {
             "quote_max_age_seconds": policy.gth_manual_candidate_quote_max_age_seconds,
             "ttl_seconds": policy.gth_manual_candidate_ttl_seconds,
             "max_debit_fraction": policy.gth_manual_candidate_max_debit_fraction,
-            "max_net_spread_fraction": (
-                policy.gth_manual_candidate_max_net_spread_fraction
-            ),
+            "max_net_spread_fraction": (policy.gth_manual_candidate_max_net_spread_fraction),
             "min_parity_pairs": policy.gth_manual_candidate_min_parity_pairs,
-            "target_room_buffer_points": (
-                policy.gth_manual_candidate_target_room_buffer_points
-            ),
+            "target_room_buffer_points": (policy.gth_manual_candidate_target_room_buffer_points),
             "min_reward_risk": policy.gth_manual_candidate_min_reward_risk,
             "invalidation_buffer_points": policy.trade_invalidation_buffer_points,
             "time_stop_minutes": policy.trade_time_stop_minutes,
@@ -93,10 +110,10 @@ def evaluate_gth_level_manual_candidate(
         "candidate_id": None,
         "policy_version": candidate_policy_version,
         "source_signal_id": source_id or None,
-        "source_kind": "gth_confirmed_level_path",
+        "source_kind": source_kind,
         "evaluated_at": now.isoformat(),
         "status": "observing",
-        "candidate_scope": "manual_live_experiment",
+        "candidate_scope": "manual_live",
         "execution_mode": "manual_only",
         "manual_action_eligible": False,
         "execution_eligible": False,
@@ -110,6 +127,20 @@ def evaluate_gth_level_manual_candidate(
         "quantity": None,
         "quantity_policy": "operator_selected",
         "block_reasons": [],
+        "signal_absence_reason": (None if source_id else "no_level_or_trend_source_signal"),
+        "gate_contract": {
+            "version": "manual_signal_gate.v1",
+            "hard_gates": [
+                "confirmed_directional_source",
+                "gth_session",
+                "fresh_ibkr_spxw_two_leg_quote",
+                "usable_spx_or_es_basis_coordinate",
+                "coherent_risk_geometry",
+                "signal_ttl",
+            ],
+            "hard_block_reasons": [],
+            "diagnostics": [],
+        },
     }
     if not policy.gth_manual_candidate_enabled:
         return {**base, "status": "disabled", "block_reasons": ["disabled"]}
@@ -117,41 +148,44 @@ def evaluate_gth_level_manual_candidate(
         return _blocked(base, ["source_signal_unavailable"])
 
     reasons: list[str] = []
+    ranking_diagnostics: list[str] = []
     if not DEFAULT_MARKET_CALENDAR.is_spx_gth_open(now):
         reasons.append("spx_gth_session_required")
-    if level_decision.get("formal_signal") is not True:
-        reasons.append("formal_level_signal_required")
-    if str(level_decision.get("phase") or "") != "confirmed":
-        reasons.append("confirmed_level_phase_required")
-    if level_decision.get("quality_ok") is not True:
-        reasons.append("level_signal_quality_blocked")
-    if level_decision.get("structure_change_pending") is True:
-        reasons.append("structure_change_pending")
     if macro_event.get("entry_allowed") is not True:
-        reasons.append("macro_entry_blocked")
+        base["macro_event_warning"] = str(macro_event.get("mode") or "entry_not_allowed")
     if not new_entries_allowed:
-        reasons.append(f"provider_entry_blocked:{new_entries_block_reason}")
+        base["provider_incident_warning"] = new_entries_block_reason
 
-    thesis = str(level_decision.get("thesis") or "")
-    direction = str(level_decision.get("direction") or "")
-    level_kind = str(level_decision.get("level_kind") or "")
-    if thesis == "breakout" and direction == "down" and level_kind == "flip_low":
-        right, position_type = "P", "put_debit_spread"
-        path_kind = "flip_low_breakdown_put"
-    elif (
-        thesis == "fade"
-        and direction == "up"
-        and level_kind in {"put_wall", "flip_low"}
+    thesis = str(level_decision.get("thesis") or "") if source_mode == "level" else "breakout"
+    direction = (
+        str(level_decision.get("direction") or "")
+        if source_mode == "level"
+        else str(source.get("direction") or "")
+    )
+    level_kind = str(level_decision.get("level_kind") or "") if source_mode == "level" else "trend"
+    if (
+        thesis == "breakout"
+        and direction == "down"
+        and level_kind in {"flip_low", "put_wall", "trend"}
     ):
+        right, position_type = "P", "put_debit_spread"
+        path_kind = (
+            "trend_continuation_put"
+            if source_mode == "trend"
+            else "flip_low_breakdown_put"
+            if level_kind == "flip_low"
+            else "put_wall_breakdown_put"
+        )
+    elif thesis == "fade" and direction == "up" and level_kind in {"put_wall", "flip_low"}:
         right, position_type = "C", "call_debit_spread"
         path_kind = "lower_rejection_call"
     elif (
         thesis == "breakout"
         and direction == "up"
-        and level_kind in {"flip_high", "call_wall"}
+        and level_kind in {"flip_high", "call_wall", "trend"}
     ):
         right, position_type = "C", "call_debit_spread"
-        path_kind = "upper_acceptance_call"
+        path_kind = "trend_continuation_call" if source_mode == "trend" else "upper_acceptance_call"
     else:
         return _blocked(base, [*reasons, "unsupported_gth_level_path"])
 
@@ -159,7 +193,11 @@ def evaluate_gth_level_manual_candidate(
     expiry = str(level_decision.get("expiry") or "")
     if expiry != session_date.strftime("%Y%m%d"):
         reasons.append("signal_session_mismatch")
-    source_expires_at = _time(level_decision.get("expires_at"))
+    source_expires_at = (
+        _time(level_decision.get("expires_at"))
+        if source_mode == "level"
+        else _trend_source_expiry(source)
+    )
     if source_expires_at is None:
         reasons.append("source_expiry_unavailable")
     elif source_expires_at <= now:
@@ -167,7 +205,11 @@ def evaluate_gth_level_manual_candidate(
 
     levels = level_decision.get("levels")
     levels = levels if isinstance(levels, Mapping) else {}
-    trigger_level = _number(level_decision.get("level"))
+    trigger_level = (
+        _number(level_decision.get("level"))
+        if source_mode == "level"
+        else _number(level_decision.get("spot"))
+    )
     if trigger_level is None:
         trigger_level = _number(levels.get(level_kind))
     if trigger_level is None or trigger_level <= 0:
@@ -186,9 +228,14 @@ def evaluate_gth_level_manual_candidate(
         )
         if short_strike >= long_strike:
             short_strike = long_strike - SPREAD_MIN_WIDTH_POINTS
+        trend_anchor_es = _number(source.get("anchor_price"))
+        basis = _number(level_decision.get("es_basis_points"))
         invalidation_spx = (
-            _number(levels.get("flip_high")) or trigger_level
-        ) + policy.trade_invalidation_buffer_points
+            trend_anchor_es - basis + policy.trade_invalidation_buffer_points
+            if source_mode == "trend" and trend_anchor_es is not None and basis is not None
+            else (_number(levels.get("flip_high")) or trigger_level)
+            + policy.trade_invalidation_buffer_points
+        )
         width = long_strike - short_strike
         target_wall_kind = "put_wall" if structural_target is not None else "time_stop"
     else:
@@ -208,8 +255,12 @@ def evaluate_gth_level_manual_candidate(
         )
         if short_strike <= long_strike:
             short_strike = long_strike + SPREAD_MIN_WIDTH_POINTS
+        trend_anchor_es = _number(source.get("anchor_price"))
+        basis = _number(level_decision.get("es_basis_points"))
         invalidation_anchor = (
-            trigger_level
+            trend_anchor_es - basis
+            if source_mode == "trend" and trend_anchor_es is not None and basis is not None
+            else trigger_level
             if path_kind == "lower_rejection_call"
             else _number(levels.get("flip_low")) or trigger_level
         )
@@ -237,9 +288,7 @@ def evaluate_gth_level_manual_candidate(
             short_contract_id,
         )
     )
-    base["candidate_id"] = (
-        "gth-level-manual:" + hashlib.sha256(identity.encode()).hexdigest()[:24]
-    )
+    base["candidate_id"] = "gth-level-manual:" + hashlib.sha256(identity.encode()).hexdigest()[:24]
     snapshot, quote_reasons = spread_snapshot_decision(
         latest,
         long_contract_id=long_contract_id,
@@ -262,8 +311,7 @@ def evaluate_gth_level_manual_candidate(
         if ask - bid > width * policy.gth_manual_candidate_max_net_spread_fraction:
             reasons.append("spread_net_market_too_wide")
     entry_limit = (
-        math.ceil(ask / NET_DEBIT_PRICE_INCREMENT - 1e-12)
-        * NET_DEBIT_PRICE_INCREMENT
+        math.ceil(ask / NET_DEBIT_PRICE_INCREMENT - 1e-12) * NET_DEBIT_PRICE_INCREMENT
         if ask is not None
         else None
     )
@@ -286,19 +334,17 @@ def evaluate_gth_level_manual_candidate(
     elif right == "P":
         if (
             target_spx
-            >= float(parity["lower_bound"])
-            - policy.gth_manual_candidate_target_room_buffer_points
+            >= float(parity["lower_bound"]) - policy.gth_manual_candidate_target_room_buffer_points
         ):
-            reasons.append("target_room_below_parity_uncertainty_bound")
+            ranking_diagnostics.append("target_room_below_parity_uncertainty_bound")
         if float(parity["upper_bound"]) >= invalidation_spx:
             reasons.append("invalidation_reached_before_candidate")
     else:
         if (
             target_spx
-            <= float(parity["upper_bound"])
-            + policy.gth_manual_candidate_target_room_buffer_points
+            <= float(parity["upper_bound"]) + policy.gth_manual_candidate_target_room_buffer_points
         ):
-            reasons.append("target_room_below_parity_uncertainty_bound")
+            ranking_diagnostics.append("target_room_below_parity_uncertainty_bound")
         if float(parity["lower_bound"]) <= invalidation_spx:
             reasons.append("invalidation_reached_before_candidate")
 
@@ -336,7 +382,20 @@ def evaluate_gth_level_manual_candidate(
     if reward_risk is None:
         reasons.append("spread_reward_risk_unavailable")
     elif reward_risk < policy.gth_manual_candidate_min_reward_risk:
-        reasons.append("spread_reward_risk_insufficient")
+        ranking_diagnostics.append("spread_reward_risk_insufficient")
+    base["ranking_diagnostics"] = list(dict.fromkeys(ranking_diagnostics))
+    base["gate_contract"] = {
+        **base["gate_contract"],
+        "diagnostics": [
+            *base["ranking_diagnostics"],
+            *(
+                [str(base["provider_incident_warning"])]
+                if base.get("provider_incident_warning")
+                else []
+            ),
+            *([str(base["macro_event_warning"])] if base.get("macro_event_warning") else []),
+        ],
+    }
     if (
         reasons
         or bid is None
@@ -438,6 +497,11 @@ def evaluate_gth_level_manual_candidate(
         "exit_at": exit_at.isoformat(),
         "exact_spread_snapshot": snapshot,
         "block_reasons": [],
+        "signal_absence_reason": None,
+        "gate_contract": {
+            **base["gate_contract"],
+            "hard_block_reasons": [],
+        },
     }
 
 
@@ -446,6 +510,7 @@ def process_gth_level_manual_candidate(
     latest: LatestState,
     level_decision: Mapping[str, object],
     *,
+    trend_state: Mapping[str, object] | None = None,
     macro_event: Mapping[str, object],
     now: datetime,
     policy: MarketFeatureSettings,
@@ -456,6 +521,7 @@ def process_gth_level_manual_candidate(
     candidate = evaluate_gth_level_manual_candidate(
         latest,
         level_decision,
+        trend_state=trend_state,
         macro_event=macro_event,
         now=now,
         policy=policy,
@@ -470,6 +536,38 @@ def process_gth_level_manual_candidate(
     )
 
 
+def _current_trend_entry_event(
+    trend_state: Mapping[str, object] | None,
+    *,
+    now: datetime,
+) -> Mapping[str, object] | None:
+    if not isinstance(trend_state, Mapping):
+        return None
+    event = trend_state.get("last_continuation")
+    if not isinstance(event, Mapping):
+        return None
+    if (
+        event.get("event_type") != "continuation"
+        or event.get("signal_stage") != "entry_advisory"
+        or event.get("advisory_status") != "advisory_ready"
+        or str(event.get("direction") or "") not in {"up", "down"}
+        or not str(event.get("session_id") or "").endswith(":gth")
+    ):
+        return None
+    at = _time(event.get("at"))
+    if at is None:
+        return None
+    age = (now - at).total_seconds()
+    if age < -1.0 or age > TREND_SOURCE_TTL_SECONDS:
+        return None
+    return event
+
+
+def _trend_source_expiry(source: Mapping[str, object]) -> datetime | None:
+    at = _time(source.get("at"))
+    return at + timedelta(seconds=TREND_SOURCE_TTL_SECONDS) if at is not None else None
+
+
 def _persist_candidate(
     storage: StorageSettings,
     candidate: Mapping[str, object],
@@ -480,13 +578,21 @@ def _persist_candidate(
     state_path = Path(storage.data_root) / "latest" / "gth_level_manual_candidate_state.json"
     projection_path = Path(storage.data_root) / "latest" / "gth_level_manual_candidate.json"
     notification_event_id = (
-        f"{candidate['candidate_id']}:ready"
-        if candidate.get("status") == "manual_ready"
-        else None
+        f"{candidate['candidate_id']}:ready" if candidate.get("status") == "manual_ready" else None
     )
     settings = notification or NotificationSettings.from_env()
     with exclusive_state_lock(state_path):
         state = read_json_object(state_path)
+        gate_record_key, gate_record = _gate_record(candidate, now=now)
+        if state.get("last_gate_record_key") != gate_record_key:
+            append_jsonl_secure(
+                Path(storage.data_root)
+                / "features"
+                / "gth_manual_signal_gates"
+                / f"date={now.date().isoformat()}"
+                / "events.jsonl",
+                gate_record,
+            )
         accepted = {
             str(item)
             for item in (
@@ -495,11 +601,7 @@ def _persist_candidate(
             )
             if item
         }
-        settled = {
-            str(item)
-            for item in state.get("settled_notification_event_ids") or []
-            if item
-        }
+        settled = {str(item) for item in state.get("settled_notification_event_ids") or [] if item}
         pending = [
             dict(item)
             for item in state.get("pending_notifications") or []
@@ -508,9 +610,7 @@ def _persist_candidate(
         lifecycle_events = {
             str(item.get("event_id") or ""): str(item.get("source_signal_id") or "")
             for item in state.get("notification_lifecycle_events") or []
-            if isinstance(item, Mapping)
-            and item.get("event_id")
-            and item.get("source_signal_id")
+            if isinstance(item, Mapping) and item.get("event_id") and item.get("source_signal_id")
         }
         cancellation_pending = {
             str(item)
@@ -549,11 +649,7 @@ def _persist_candidate(
             settled.add(event_id)
             accepted.discard(event_id)
             lifecycle_events.pop(event_id, None)
-            pending = [
-                item
-                for item in pending
-                if str(item.get("event_id") or "") != event_id
-            ]
+            pending = [item for item in pending if str(item.get("event_id") or "") != event_id]
         pending_ids = {str(item.get("event_id") or "") for item in pending}
         if (
             notification_event_id
@@ -573,6 +669,7 @@ def _persist_candidate(
             {
                 "schema_version": 1,
                 "updated_at": now.isoformat(),
+                "last_gate_record_key": gate_record_key,
                 "last_candidate": dict(candidate),
                 "accepted_notification_event_ids": sorted(accepted)[-200:],
                 "settled_notification_event_ids": sorted(settled)[-200:],
@@ -581,9 +678,7 @@ def _persist_candidate(
                     {"event_id": event_id, "source_signal_id": source_id}
                     for event_id, source_id in sorted(lifecycle_events.items())[-200:]
                 ],
-                "pending_notification_cancellation_event_ids": sorted(
-                    cancellation_pending
-                )[-200:],
+                "pending_notification_cancellation_event_ids": sorted(cancellation_pending)[-200:],
             }
         )
         atomic_write_json_secure(state_path, state)
@@ -601,6 +696,42 @@ def _persist_candidate(
         "notification_attempted": bool(result.get("attempted")),
         "notification_accepted": bool(result.get("accepted")),
         "notification_outcome": result.get("outcome"),
+    }
+
+
+def _gate_record(
+    candidate: Mapping[str, object],
+    *,
+    now: datetime,
+) -> tuple[str, dict[str, object]]:
+    identity = "|".join(
+        (
+            now.date().isoformat(),
+            str(candidate.get("source_signal_id") or "none"),
+            str(candidate.get("candidate_id") or "none"),
+            str(candidate.get("status") or "unknown"),
+            str(candidate.get("path_kind") or "none"),
+            ",".join(str(item) for item in candidate.get("block_reasons") or ()),
+        )
+    )
+    digest = hashlib.sha256(identity.encode()).hexdigest()[:24]
+    gate_contract = candidate.get("gate_contract")
+    return digest, {
+        "schema_version": 1,
+        "record_id": f"gth-manual-gate:{digest}",
+        "recorded_at": now.isoformat(),
+        "source_signal_id": candidate.get("source_signal_id"),
+        "source_kind": candidate.get("source_kind"),
+        "candidate_id": candidate.get("candidate_id"),
+        "status": candidate.get("status"),
+        "path_kind": candidate.get("path_kind"),
+        "direction": candidate.get("direction"),
+        "long_contract_id": candidate.get("long_contract_id"),
+        "short_contract_id": candidate.get("short_contract_id"),
+        "signal_absence_reason": candidate.get("signal_absence_reason"),
+        "block_reasons": list(candidate.get("block_reasons") or ()),
+        "gate_contract": (dict(gate_contract) if isinstance(gate_contract, Mapping) else None),
+        "session_quote_provider": "ibkr",
     }
 
 

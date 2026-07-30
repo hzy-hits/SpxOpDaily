@@ -83,7 +83,6 @@ from spx_spark.application.market_features.wall_probability import (
     build_wall_probability_tenor_shadow,
 )
 from spx_spark.application.market_features.trade_candidate import (
-    advance_put_shadow_candidates,
     advance_trade_candidate,
     gate_trade_intent,
     virtual_entry_intent,
@@ -371,14 +370,7 @@ def run(
         trade_intent,
         now=evaluation_now,
     )
-    put_shadow_exact = advance_put_shadow_candidates(
-        storage,
-        latest,
-        trade_intent,
-        now=evaluation_now,
-    )
     trade_intent = gate_trade_intent(trade_intent, trade_candidate)
-    trade_intent = {**trade_intent, "put_shadow_exact": put_shadow_exact}
     confirmed_gate = reconcile_confirmed_gate(
         storage,
         raw_level_decision,
@@ -469,6 +461,7 @@ def run(
         storage,
         action_latest,
         raw_level_decision,
+        trend_state=trend,
         macro_event=action_macro_event,
         now=action_now,
         policy=policy,
@@ -551,7 +544,6 @@ def run(
             "action_macro_event": action_macro_event,
             "action_provider_entry_control": action_provider_entry_control,
             "trade_candidate": trade_candidate,
-            "put_shadow_exact": put_shadow_exact,
             "confirmed_gate": confirmed_gate,
             "level_decision_refresh_error": level_decision_refresh_error,
             "virtual_strategy": virtual_strategy,
@@ -643,23 +635,17 @@ def _apply_provider_entry_control(
     trade_intent: Mapping[str, object],
     control: Mapping[str, object],
 ) -> dict[str, object]:
-    """Bind the durable provider control to candidate creation and delivery."""
+    """Attach provider incident telemetry without vetoing a valid manual card.
+
+    The exact session-authoritative SPXW quote is revalidated by the intent
+    contract itself.  A separate failover lifecycle must not overrule that
+    fresher, instrument-specific evidence for a manual-only notification.
+    """
 
     result = {**trade_intent, "provider_failover_control": dict(control)}
-    if control.get("allowed") is True or result.get("status") not in {
-        "trade_ready",
-        "shadow_ready",
-    }:
-        return result
-    reasons = [str(item) for item in result.get("block_reasons") or [] if str(item)]
-    if "provider_failover_new_entries_blocked" not in reasons:
-        reasons.append("provider_failover_new_entries_blocked")
-    return {
-        **result,
-        "status": "blocked",
-        "execution_eligible": False,
-        "block_reasons": reasons,
-    }
+    if control.get("allowed") is not True and result.get("status") == "trade_ready":
+        result["provider_incident_warning"] = str(control.get("reason") or "provider_incident")
+    return result
 
 
 def _process_spring_gamma_v3_shadow(

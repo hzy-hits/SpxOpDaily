@@ -97,22 +97,22 @@ market_features:
   min_l1_two_sided_ratio: {value: 0.65, description: Minimum fraction of selected hot options with two-sided quotes for the L1 frame to be READY; 0.75 was calibrated to RTH liquidity and is unreachable in GTH.}
   l1_spread_p50_limit_bps: {value: 500.0, description: Median spread ceiling used to score whether hot-option L1 quotes are executable.}
   l1_spread_p90_limit_bps: {value: 1500.0, description: Tail spread ceiling used to score whether hot-option L1 quotes are executable.}
-  trade_follow_through_seconds: {value: 15.0, description: Minimum time a confirmed path must remain outside its level before becoming trade-ready; 15s matches 0DTE holding horizons.}
-  trade_follow_through_min_points: {value: 2.0, description: Minimum additional movement beyond the confirmed level required for trade readiness.}
-  trade_follow_through_em_fraction: {value: 0.05, description: Expected-move fraction used when it exceeds the fixed follow-through threshold.}
-  trade_confirmed_pilot_enabled: {value: true, description: Enables the reviewed 09:45-13:00 ET manual-ready lane set for upside Call breakouts plus Flip Low breakdown and call-wall/flip-high rejection Puts. Put Wall breakdown remains disabled. Formal confirmation, official SPX coordinates, exact selected-contract NBBO, target room, and reward/risk remain mandatory; automatic broker ordering remains disabled.}
+  trade_follow_through_seconds: {value: 15.0, description: Diagnostic follow-through horizon recorded after a confirmed path; it no longer duplicates the state-machine hold as a second trading veto.}
+  trade_follow_through_min_points: {value: 2.0, description: Diagnostic fixed follow-through distance recorded on each manual signal.}
+  trade_follow_through_em_fraction: {value: 0.05, description: Diagnostic expected-move fraction used to contextualize follow-through.}
+  trade_confirmed_pilot_enabled: {value: true, description: Deprecated compatibility setting; confirmed RTH level paths use the unified 09:30-15:30 ET MANUAL READY contract regardless of this legacy flag. All supported Call/Put level paths are enabled while automatic broker ordering remains disabled.}
   trade_repricing_max_age_seconds: {value: 90.0, description: Maximum age of the matching realtime option repricing record.}
-  trade_quote_max_age_seconds: {value: 15.0, description: Maximum transport and source age for the exact selected-contract quote used in the reviewed RTH pilot; the limit-order window and enqueue-time quote revalidation remain mandatory.}
+  trade_quote_max_age_seconds: {value: 15.0, description: Maximum transport and source age for the exact selected-contract quote used by an RTH manual signal; the limit-order window and enqueue-time quote revalidation remain mandatory.}
   trade_market_anchor_max_age_seconds: {value: 20.0, description: Maximum observation, source and transport age for the ES anchor and level observation used by a trade-ready intent.}
-  trade_structure_drift_points: {value: 10.0, description: Maximum live-versus-frozen wall drift for the reviewed RTH pilot; the event remains anchored to its frozen trigger and larger migration still blocks the intent.}
+  trade_structure_drift_points: {value: 10.0, description: Diagnostic live-versus-frozen wall drift threshold; an active event remains anchored to its frozen trigger instead of being cancelled by incomplete intraday OI.}
   trade_entry_spread_fraction: {value: 0.35, description: Fraction of the live bid-ask spread used for the initial buy limit, capped at mid.}
   trade_intent_ttl_seconds: {value: 90.0, description: Lifetime of a newly emitted trade intent before it must be recalculated.}
   trade_entry_window_seconds: {value: 20.0, description: Maximum time an alert candidate may wait for the displayed ask to reach its entry limit; this is not a broker order TTL.}
   trade_invalidation_buffer_points: {value: 3.0, description: SPX reclaim distance beyond the trigger level that invalidates a trade intent.}
   trade_target_em_fraction: {value: 0.15, description: Expected-move fraction used for a fallback SPX target when no outward structure exists.}
-  trade_min_target_room_points: {value: 3.0, description: Minimum remaining SPX points from the evaluated spot to the deterministic target.}
-  trade_min_reward_risk: {value: 0.25, description: Minimum remaining target distance divided by distance to the SPX invalidation level; retained at 0.25 because the 1.0 risk-off experiment removed every historical RTH TradeReady opportunity without improving the direction cohort. RTH, target-room, ES-confirmation and exact quote gates remain mandatory.}
-  trade_time_stop_minutes: {value: 15, description: Default maximum holding time for an unextended 0DTE trade intent; every intent and time stop is capped at the 13:00 ET hard exit.}
+  trade_min_target_room_points: {value: 3.0, description: RTH ranking threshold for remaining SPX points to the deterministic target; a shortfall is diagnostic and does not suppress a manual signal.}
+  trade_min_reward_risk: {value: 0.25, description: RTH ranking threshold for target distance divided by invalidation distance; a shortfall is diagnostic while session, exact quote, risk geometry, and signal TTL remain mandatory.}
+  trade_time_stop_minutes: {value: 15, description: Default maximum holding time for an unextended 0DTE trade intent; new entries stop at 15:30 ET and every time stop is capped at the 15:45 ET hard exit.}
   gth_manual_candidate_enabled: {value: true, description: Enables runtime-gated manual-only GTH exact-spread signals; offline readiness remains evidence and does not suppress valid live operator signals, while broker submission stays disabled.}
   gth_manual_candidate_quote_max_age_seconds: {value: 15.0, description: Maximum source and transport age for exact legs, parity pairs, and direct ES invalidation quotes used by a GTH manual candidate.}
   gth_manual_candidate_ttl_seconds: {value: 20.0, description: Maximum lifetime of a manual GTH candidate before every quote must be recalculated.}
@@ -121,10 +121,10 @@ market_features:
   gth_manual_candidate_min_parity_pairs: {value: 3, description: Minimum cofresh same-provider SPXW call-put pairs required for the GTH target coordinate.}
   gth_manual_candidate_max_parity_dispersion_points: {value: 5.0, description: Maximum dispersion across tight put-call parity references allowed to authorize a GTH target coordinate.}
   gth_manual_candidate_max_parity_interval_points: {value: 5.0, description: Maximum bid-ask parity interval width for each call-put pair used by a GTH target coordinate.}
-  gth_manual_candidate_target_room_buffer_points: {value: 1.0, description: Additional SPX room required beyond the parity uncertainty bound before a Call candidate may become manual-ready.}
+  gth_manual_candidate_target_room_buffer_points: {value: 1.0, description: GTH ranking buffer beyond the parity uncertainty bound; insufficient room is diagnostic and does not suppress a manual signal.}
   gth_manual_candidate_close_buffer_seconds: {value: 30.0, description: Stops new manual candidates before the 09:25 ET GTH close so an operator is never handed a candidate at the exchange boundary.}
   gth_manual_candidate_max_reclaim_age_seconds: {value: 1200.0, description: Maximum seconds from the detected ES trough to manual-ready evaluation; older reclaims remain observable but cannot become operator signals.}
-  gth_manual_candidate_min_reward_risk: {value: 1.0, description: Minimum vertical maximum-profit to maximum-loss ratio at the displayed debit limit for a GTH manual-ready signal.}
+  gth_manual_candidate_min_reward_risk: {value: 1.0, description: GTH ranking threshold for vertical maximum-profit to maximum-loss at the displayed debit; a shortfall is diagnostic.}
   session_episode_enabled: {value: true, description: Maintains one session-level structural path above individual wall and flip events.}
   session_break_buffer_points: {value: 2.0, description: SPX distance beyond a frozen structural level required to record a session break or reclaim.}
   session_extreme_extension_points: {value: 5.0, description: Minimum extension beyond the broken level before the session path is classified as an extreme.}
@@ -1722,13 +1722,13 @@ intraday_strategy:
 level_decision_shadow:
   enabled:
     value: true
-    description: Runs the mutually-exclusive wall/flip decision state machine as an input to the deterministic TradeReady gate.
+    description: Legacy key name for the live mutually-exclusive wall/flip decision state machine used by the unified manual signal contract.
   notify_transitions:
     value: false
     description: Keeps every wall/flip transition in the audit but suppresses broad PATH CONFIRMED pushes; the reviewed upside pilot notifies only after its narrower TradeReady gate passes.
   formal_signal_enabled:
     value: true
-    description: Explicit operator override enabling deterministic RTH TradeReady evaluation after the point-in-time historical control replay; the acceptance report must continue to distinguish this pilot from an exact end-to-end replay or statistically completed promotion, and no broker order is submitted automatically.
+    description: Enables deterministic manual signal evaluation from confirmed paths; acceptance reports are diagnostics only and no broker order is submitted automatically.
   approach_points:
     value: 20.0
     description: Distance from the nearest frozen wall or flip boundary that arms an approach; 20 points keeps 0DTE setups observable instead of locking the machine in FAR between widely spaced walls.
@@ -1746,13 +1746,13 @@ level_decision_shadow:
     description: Continuous hold required before a break or rejection is accepted.
   retest_points:
     value: 4.0
-    description: Distance from the frozen level treated as a retest.
+    description: Distance from the frozen level treated as an optional retest; uninterrupted accepted follow-through can also confirm.
   confirm_move_points:
     value: 4.0
     description: Move away from the retest required to begin final confirmation.
   confirm_hold_seconds:
     value: 10.0
-    description: Hold after a successful retest required for shadow confirmation.
+    description: Additional hold required after direction acceptance or a successful retest.
   phase_timeout_seconds:
     value: 90.0
     description: Maximum time allowed in a pending acceptance or retest phase.

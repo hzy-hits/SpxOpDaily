@@ -52,6 +52,7 @@ from spx_spark.notifier.operator_cards import (
     parse_time,
 )
 from spx_spark.notifier.receipts import NotificationEnvelope
+from spx_spark.marketdata import Provider, choose_best_quote, instrument_matches_id
 from spx_spark.settings.market_features import MarketFeatureSettings
 from spx_spark.settings.order_map import DEFAULT_ORDER_MAP_POLICY, OrderMapPolicy
 from spx_spark.state_io import atomic_write_json_secure, exclusive_state_lock, read_json_object
@@ -671,7 +672,23 @@ def _action_revalidation(
     evidence["quote_revalidation"] = "performed"
     evidence["quote_state_created_at"] = latest.created_at.isoformat()
     contract_id = str(intent.get("contract_id") or "")
-    quote = latest.best_quote(contract_id) if contract_id else None
+    intent_provider = str(intent.get("provider") or "")
+    provider = (
+        Provider(intent_provider) if intent_provider in {item.value for item in Provider} else None
+    )
+    quote = (
+        choose_best_quote(
+            (
+                item
+                for item in latest.quotes
+                if item.provider is provider and instrument_matches_id(item.instrument, contract_id)
+            ),
+            provider_priority=(provider,),
+            as_of=now,
+        )
+        if contract_id and provider is not None
+        else None
+    )
     if quote is None:
         reason = "action_quote_unavailable"
         evidence["reason"] = reason
@@ -695,7 +712,6 @@ def _action_revalidation(
             "entry_limit": entry_limit,
         }
     )
-    intent_provider = str(intent.get("provider") or "")
     if not intent_provider:
         reason = "action_quote_provider_unavailable"
     elif intent_provider != quote.provider.value:

@@ -61,9 +61,7 @@ def load_level_decision_shadow(storage: StorageSettings) -> dict[str, object]:
         return _public_state(empty_level_state(datetime.now(tz=timezone.utc)))
     decision = payload.get("decision") if isinstance(payload, dict) else None
     structure = payload.get("structure") if isinstance(payload, dict) else None
-    structure_stability = (
-        payload.get("structure_stability") if isinstance(payload, dict) else None
-    )
+    structure_stability = payload.get("structure_stability") if isinstance(payload, dict) else None
     latest_observation = payload.get("latest_observation") if isinstance(payload, dict) else None
     return _public_state(
         decision if isinstance(decision, Mapping) else {},
@@ -110,8 +108,7 @@ def run_level_decision_shadow(
         frozen_structure = promoted_structure or persisted.get("structure")
         structure_candidate = stability_state.get("candidate")
         structure_change_pending = bool(
-            isinstance(structure_candidate, Mapping)
-            and _structure_levels(structure_candidate)
+            isinstance(structure_candidate, Mapping) and _structure_levels(structure_candidate)
         )
         previous = persisted.get("decision")
         # A candidate is telemetry, not a decision structure, until promotion.
@@ -290,9 +287,7 @@ def _structure_pending_blocks_new_arm(
     if not structure_change_pending:
         return False
     try:
-        phase = LevelPhase(
-            str((active_decision or {}).get("phase") or LevelPhase.FAR.value)
-        )
+        phase = LevelPhase(str((active_decision or {}).get("phase") or LevelPhase.FAR.value))
     except ValueError:
         phase = LevelPhase.FAR
     return phase in {
@@ -402,9 +397,7 @@ def _observation(
         spx_spot=spx_spot,
         arm_allowed=not structure_pending_blocks_new_arm,
         arm_block_reason=(
-            "structure_change_pending_new_arm_blocked"
-            if structure_pending_blocks_new_arm
-            else None
+            "structure_change_pending_new_arm_blocked" if structure_pending_blocks_new_arm else None
         ),
     )
 
@@ -526,9 +519,7 @@ def _public_state(
         if es_basis is not None and isinstance(value, int | float)
     }
     structure_candidate = (
-        structure_stability.get("candidate")
-        if isinstance(structure_stability, Mapping)
-        else None
+        structure_stability.get("candidate") if isinstance(structure_stability, Mapping) else None
     )
     public_candidate = (
         {
@@ -544,12 +535,10 @@ def _public_state(
     )
     observed_pending = observation.get("structure_change_pending")
     structure_change_pending = (
-        observed_pending
-        if isinstance(observed_pending, bool)
-        else public_candidate is not None
+        observed_pending if isinstance(observed_pending, bool) else public_candidate is not None
     )
     return {
-        "mode": "live" if formal_signal_enabled else "shadow",
+        "mode": "live" if formal_signal_enabled else "disabled",
         "formal_signal_enabled": formal_signal_enabled,
         "formal_signal": formal_signal,
         "level_path_confirmed": formal_signal,
@@ -602,6 +591,7 @@ def _public_state(
         "es_basis_points": es_basis,
         "es_equivalent_levels": es_equivalent_levels,
         "level_source": observation.get("level_source", (structure or {}).get("source")),
+        "session_mode": observation.get("session_mode"),
         "quality_ok": observation.get("quality_ok"),
         "quality_reason": observation.get("quality_reason"),
         "updated_at": state.get("updated_at"),

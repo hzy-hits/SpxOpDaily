@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import math
-from datetime import datetime, time, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Mapping
 from zoneinfo import ZoneInfo
 
@@ -13,6 +13,22 @@ from spx_spark.application.market_features.models import (
     FrameQuality,
     MinuteMarketFrame,
     OptionStructureFrame,
+)
+from spx_spark.application.market_features.manual_signal_contract import (
+    APPROVED_MANUAL_LANE_CONTRACTS,
+    CALL_BREAKOUT_MANUAL_LANE,
+    ENTRY_WINDOW_END_ET,
+    ENTRY_WINDOW_START_ET,
+    FLIP_LOW_BREAKDOWN_PUT_MANUAL_LANE,
+    HARD_EXIT_ET,
+    LEGACY_PUT_SHADOW_LANES,
+    LOWER_REJECTION_CALL_MANUAL_LANE,
+    PUT_WALL_BREAKDOWN_PUT_MANUAL_LANE,
+    UPPER_REJECTION_PUT_MANUAL_LANE,
+    manual_lane_scope,
+)
+from spx_spark.application.market_features.session_quote_selection import (
+    rth_execution_quote,
 )
 from spx_spark.application.market_features.play_outcome_stats import PlayOutcomeStats
 from spx_spark.application.order_map.execution_quote import evaluate_execution_quote
@@ -39,26 +55,7 @@ HARD_CONTEXT_INVALIDATIONS = frozenset(
 )
 
 ET = ZoneInfo("America/New_York")
-ENTRY_WINDOW_START_ET = time(9, 45)
-HARD_EXIT_ET = time(13, 0)
-CALL_BREAKOUT_PILOT_LANE = "long_0dte_rth_upside_breakout_pilot"
-FLIP_LOW_BREAKDOWN_PUT_MANUAL_LANE = "long_0dte_rth_flip_low_breakdown_put_manual"
-UPPER_REJECTION_PUT_MANUAL_LANE = "long_0dte_rth_upper_rejection_put_manual"
-PUT_WALL_BREAKDOWN_DISABLED_LANE = "long_0dte_rth_put_wall_breakdown_disabled"
-LEGACY_PUT_SHADOW_LANES = frozenset(
-    {
-        "long_0dte_rth_flip_low_breakdown_put_shadow",
-        "long_0dte_rth_upper_rejection_put_shadow",
-        "long_0dte_rth_put_wall_breakdown_disabled",
-    }
-)
-APPROVED_MANUAL_LANE_CONTRACTS = {
-    CALL_BREAKOUT_PILOT_LANE: ("up", "C"),
-    FLIP_LOW_BREAKDOWN_PUT_MANUAL_LANE: ("down", "P"),
-    UPPER_REJECTION_PUT_MANUAL_LANE: ("down", "P"),
-    "rth_confirmed_level": ("up", "C"),
-}
-TRADE_INTENT_CONTRACT_VERSION = "rth_manual_lanes_0945_1300.v2"
+TRADE_INTENT_CONTRACT_VERSION = "rth_manual_levels_0930_1530.v4"
 
 
 def live_trade_intent_authority_issues(
@@ -106,16 +103,16 @@ def trade_intent_policy_version(
             "decision_contract": {
                 "version": TRADE_INTENT_CONTRACT_VERSION,
                 "entry_window_start_et": ENTRY_WINDOW_START_ET.isoformat(timespec="minutes"),
-                "entry_window_end_et": HARD_EXIT_ET.isoformat(timespec="minutes"),
+                "entry_window_end_et": ENTRY_WINDOW_END_ET.isoformat(timespec="minutes"),
                 "entry_window_end_inclusive": False,
                 "hard_exit_et": HARD_EXIT_ET.isoformat(timespec="minutes"),
-                "call_trade_ready_lane": CALL_BREAKOUT_PILOT_LANE,
-                "put_manual_ready_lanes": (
+                "manual_ready_lanes": (
+                    CALL_BREAKOUT_MANUAL_LANE,
+                    LOWER_REJECTION_CALL_MANUAL_LANE,
                     FLIP_LOW_BREAKDOWN_PUT_MANUAL_LANE,
                     UPPER_REJECTION_PUT_MANUAL_LANE,
+                    PUT_WALL_BREAKDOWN_PUT_MANUAL_LANE,
                 ),
-                "put_wall_breakdown_lane": PUT_WALL_BREAKDOWN_DISABLED_LANE,
-                "put_wall_breakdown_enabled": False,
                 "manual_ready_status": "trade_ready",
                 "manual_ready_execution_eligible": True,
                 "manual_ready_quote_observation_eligible": False,
@@ -141,7 +138,10 @@ def evaluate_trade_intent(
 
     now = _utc(now)
     level = context.level_decision
-    pilot_enabled = feature_policy.trade_confirmed_pilot_enabled
+    # Manual signals are the production contract.  The legacy pilot flag is
+    # retained in settings only for configuration compatibility and no longer
+    # suppresses otherwise valid level paths.
+    manual_enabled = True
     event_id = str(level.get("event_id") or "")
     phase = str(level.get("phase") or "far")
     thesis = str(level.get("thesis") or "none")
@@ -149,10 +149,12 @@ def evaluate_trade_intent(
     level_kind = str(level.get("level_kind") or "")
     trigger_level = _number(level.get("level"))
     event_expires_at = _datetime(level.get("expires_at"))
-    entry_window_start_at, hard_exit_at = _strategy_window(now)
-    valid_until = min(event_expires_at, hard_exit_at) if event_expires_at is not None else None
-    strategy_lane, put_shadow_lane, priority, pilot_scope_blocker = _pilot_scope(
-        pilot_enabled=pilot_enabled,
+    entry_window_start_at, entry_window_end_at, hard_exit_at = _strategy_window(now)
+    valid_until = (
+        min(event_expires_at, entry_window_end_at) if event_expires_at is not None else None
+    )
+    strategy_lane, put_shadow_lane, priority, pilot_scope_blocker = manual_lane_scope(
+        enabled=manual_enabled,
         thesis=thesis,
         direction=direction,
         level_kind=level_kind,
@@ -186,7 +188,8 @@ def evaluate_trade_intent(
         "evaluated_at": now.isoformat(),
         "block_reasons": [],
         "strategy_lane": strategy_lane,
-        "pilot_mode": pilot_enabled,
+        "pilot_mode": False,
+        "manual_mode": True,
         "shadow_mode": put_shadow_lane,
         "wall_signal": (
             "present"
@@ -199,8 +202,29 @@ def evaluate_trade_intent(
         "priority": priority,
         "trade_intent_contract_version": TRADE_INTENT_CONTRACT_VERSION,
         "entry_window_start_at": entry_window_start_at.isoformat(),
+        "entry_window_end_at": entry_window_end_at.isoformat(),
         "hard_exit_at": hard_exit_at.isoformat(),
         "moving_average_context": moving_average_context,
+        "signal_absence_reason": (
+            None
+            if event_id and phase == "confirmed" and thesis in {"breakout", "fade"}
+            else "no_level_event"
+            if not event_id
+            else f"level_phase:{phase}"
+        ),
+        "gate_contract": {
+            "version": "manual_signal_gate.v1",
+            "hard_gates": [
+                "confirmed_directional_source",
+                "rth_session",
+                "official_spx_coordinate",
+                "fresh_exact_spxw_quote",
+                "coherent_risk_geometry",
+                "signal_ttl",
+            ],
+            "hard_block_reasons": [],
+            "diagnostics": [],
+        },
     }
     if not event_id or phase != "confirmed" or thesis not in {"breakout", "fade"}:
         return base
@@ -210,7 +234,7 @@ def evaluate_trade_intent(
         reasons.append("rth_session_required")
     if now < entry_window_start_at:
         reasons.append("strategy_entry_window_not_open")
-    elif now >= hard_exit_at:
+    elif now >= entry_window_end_at:
         reasons.append("strategy_entry_window_closed")
     if level.get("formal_signal_enabled") is not True:
         reasons.append("formal_signal_disabled")
@@ -240,8 +264,6 @@ def evaluate_trade_intent(
         if not DEFAULT_MARKET_CALENDAR.is_rth_open(confirmed_at):
             reasons.append("rth_confirmation_required")
         confirmation_age = max((now - confirmed_at).total_seconds(), 0.0)
-        if confirmation_age < feature_policy.trade_follow_through_seconds:
-            reasons.append("follow_through_hold_pending")
 
     if event_expires_at is None:
         reasons.append("level_event_expiry_unavailable")
@@ -255,14 +277,11 @@ def evaluate_trade_intent(
             options,
             now=now,
             policy=feature_policy,
-            pilot_enabled=pilot_enabled,
         )
     )
 
     spot = _number(level.get("spot"))
     expected_move = _number(options.volatility.get("expected_move_points_0dte"))
-    if expected_move is None and not pilot_enabled:
-        reasons.append("expected_move_unavailable")
     expiry_close_at = expiry_close_utc(options.front_expiry or "")
     if expiry_close_at is None:
         reasons.append("expiry_close_unavailable")
@@ -277,43 +296,25 @@ def evaluate_trade_intent(
         if spot is not None and trigger_level is not None
         else None
     )
-    if follow_move is None:
-        reasons.append("follow_through_price_unavailable")
-    elif follow_move < follow_threshold:
-        reasons.append("follow_through_distance_pending")
-
-    hard_invalidations = (
-        HARD_CONTEXT_INVALIDATIONS - {"es_spy_direction_divergent", "hot_option_liquidity_low"}
-        if pilot_enabled
-        else HARD_CONTEXT_INVALIDATIONS
+    pilot_diagnostics = _pilot_diagnostics(
+        context,
+        market,
+        options,
+        thesis=thesis,
+        direction=direction,
     )
-    reasons.extend(item for item in context.invalidations if item in hard_invalidations)
     if context.macro_event.get("entry_allowed") is not True:
-        reasons.append(
-            "macro_event_pre_release_entry_block"
-            if context.macro_event.get("mode") == "pre_event"
-            else "macro_event_unavailable_entry_block"
-        )
-    reasons.extend(
+        pilot_diagnostics.append("macro_event_entry_warning")
+    pilot_diagnostics.extend(
         _direction_blockers(
             context,
             market,
             thesis=thesis,
             direction=direction,
-            pilot_enabled=pilot_enabled,
+            pilot_enabled=True,
         )
     )
-    pilot_diagnostics = (
-        _pilot_diagnostics(
-            context,
-            market,
-            options,
-            thesis=thesis,
-            direction=direction,
-        )
-        if pilot_enabled
-        else []
-    )
+    pilot_diagnostics = list(dict.fromkeys(pilot_diagnostics))
 
     candidate = _matching_candidate(
         repricing,
@@ -329,9 +330,17 @@ def evaluate_trade_intent(
     quote_gate = None
     if candidate is not None:
         contract_id = str(candidate.get("contract_id") or "")
-        quote = latest.best_quote(contract_id) if contract_id else None
+        quote = (
+            rth_execution_quote(
+                latest,
+                contract_id,
+                now=now,
+            )
+            if contract_id
+            else None
+        )
         if quote is None:
-            reasons.append("execution_quote_unavailable")
+            reasons.append("rth_schwab_execution_quote_unavailable")
         else:
             quote_gate = evaluate_execution_quote(
                 quote,
@@ -403,11 +412,12 @@ def evaluate_trade_intent(
     if target_room is None:
         reasons.append("target_room_unavailable")
     elif target_room < feature_policy.trade_min_target_room_points:
-        reasons.append("remaining_target_room_insufficient")
+        pilot_diagnostics.append("remaining_target_room_insufficient")
     if invalidation_distance is None or invalidation_distance <= 0:
         reasons.append("invalidation_distance_unavailable")
     elif reward_risk is None or reward_risk < feature_policy.trade_min_reward_risk:
-        reasons.append("remaining_reward_risk_insufficient")
+        pilot_diagnostics.append("remaining_reward_risk_insufficient")
+    pilot_diagnostics = list(dict.fromkeys(pilot_diagnostics))
 
     unique_reasons = list(dict.fromkeys(reasons))
     if unique_reasons or candidate is None or quote is None or quote_gate is None:
@@ -427,6 +437,11 @@ def evaluate_trade_intent(
             "remaining_reward_risk": reward_risk,
             "pilot_diagnostics": pilot_diagnostics,
             "block_reasons": unique_reasons or ["candidate_unavailable"],
+            "gate_contract": {
+                **base["gate_contract"],
+                "hard_block_reasons": unique_reasons or ["candidate_unavailable"],
+                "diagnostics": pilot_diagnostics,
+            },
         }
 
     bid = quote_gate.bid
@@ -449,6 +464,7 @@ def evaluate_trade_intent(
         intent_expires_at = min(intent_expires_at, event_expires_at)
     assert expiry_close_at is not None
     intent_expires_at = min(intent_expires_at, expiry_close_at)
+    intent_expires_at = min(intent_expires_at, entry_window_end_at)
     intent_expires_at = min(intent_expires_at, hard_exit_at)
     time_stop_at = min(
         now + timedelta(minutes=feature_policy.trade_time_stop_minutes),
@@ -470,9 +486,9 @@ def evaluate_trade_intent(
             coordinate=coordinate,
             block_reasons=(),
         ),
-        "status": "shadow_ready" if put_shadow_lane else "trade_ready",
-        "execution_eligible": not put_shadow_lane,
-        "quote_observation_eligible": put_shadow_lane,
+        "status": "trade_ready",
+        "execution_eligible": True,
+        "quote_observation_eligible": False,
         "intent_id": intent_id,
         "semantic_key": semantic_key,
         "play": play,
@@ -502,10 +518,16 @@ def evaluate_trade_intent(
         "quantity": None,
         "quantity_policy": "operator_selected",
         "automatic_ordering": False,
-        "promotion_status": "collecting_shadow" if put_shadow_lane else "reviewed_pilot",
+        "promotion_status": "manual_live",
         "pilot_diagnostics": pilot_diagnostics,
         "evidence": _evidence(context),
         "block_reasons": [],
+        "signal_absence_reason": None,
+        "gate_contract": {
+            **base["gate_contract"],
+            "hard_block_reasons": [],
+            "diagnostics": pilot_diagnostics,
+        },
     }
     if play_stats is not None:
         payload["play_stats"] = _play_stats_payload(play_stats)
@@ -637,28 +659,20 @@ def _market_anchor_blockers(
     *,
     now: datetime,
     policy: MarketFeatureSettings,
-    pilot_enabled: bool = False,
 ) -> list[str]:
     reasons: list[str] = []
-    if market.quality is not FrameQuality.READY:
-        reasons.append("market_frame_not_ready")
-    if options.quality is not FrameQuality.READY:
-        reasons.append("option_structure_not_ready")
-    if options.l1.quality is not FrameQuality.READY and not pilot_enabled:
-        reasons.append("option_l1_not_ready")
     expected_expiry = context.session_id.replace("-", "")
     level_expiry = str(context.level_decision.get("expiry") or "")
     if options.front_expiry != expected_expiry or level_expiry != expected_expiry:
         reasons.append("decision_session_expiry_mismatch")
     if market.session_id != context.session_id:
         reasons.append("market_session_mismatch")
-    level_kind = str(context.level_decision.get("level_kind") or "")
+    # The event's level is frozen when the lifecycle arms.  Intraday OI can be
+    # absent or unchanged without invalidating that event; a replacement map is
+    # telemetry until it is promoted by the separate stability process.
     frozen_level = _number(context.level_decision.get("level"))
-    live_level = _current_structure_level(options, level_kind)
-    if frozen_level is None or live_level is None:
-        reasons.append("current_trigger_level_unavailable")
-    elif abs(live_level - frozen_level) > policy.trade_structure_drift_points:
-        reasons.append("trigger_structure_drift")
+    if frozen_level is None:
+        reasons.append("frozen_trigger_level_unavailable")
     reasons.extend(
         _timestamp_blockers(
             source_at=_datetime(market.es.get("source_at")),
@@ -746,47 +760,17 @@ def _pilot_diagnostics(
     return list(dict.fromkeys(diagnostics))
 
 
-def _pilot_scope(
-    *,
-    pilot_enabled: bool,
-    thesis: str,
-    direction: str,
-    level_kind: str,
-) -> tuple[str, bool, str, str | None]:
-    if thesis == "breakout" and direction == "down" and level_kind == "flip_low":
-        return (
-            FLIP_LOW_BREAKDOWN_PUT_MANUAL_LANE,
-            False,
-            "normal" if pilot_enabled else "disabled",
-            None if pilot_enabled else "reviewed_pilot_disabled",
-        )
-    if thesis == "fade" and direction == "down" and level_kind in {"call_wall", "flip_high"}:
-        return (
-            UPPER_REJECTION_PUT_MANUAL_LANE,
-            False,
-            "normal" if pilot_enabled else "disabled",
-            None if pilot_enabled else "reviewed_pilot_disabled",
-        )
-    if thesis == "breakout" and direction == "down" and level_kind == "put_wall":
-        return (
-            PUT_WALL_BREAKDOWN_DISABLED_LANE,
-            False,
-            "disabled",
-            "put_wall_breakdown_disabled",
-        )
-    if not pilot_enabled:
-        return "rth_confirmed_level", False, "normal", None
-    if thesis == "breakout" and direction == "up":
-        return CALL_BREAKOUT_PILOT_LANE, False, "high", None
-    return CALL_BREAKOUT_PILOT_LANE, False, "disabled", "pilot_scope_upside_breakout_only"
-
-
-def _strategy_window(now: datetime) -> tuple[datetime, datetime]:
+def _strategy_window(now: datetime) -> tuple[datetime, datetime, datetime]:
     local = _utc(now).astimezone(ET)
     session_day = DEFAULT_MARKET_CALENDAR.research_expiry(local)
     start = datetime.combine(session_day, ENTRY_WINDOW_START_ET, tzinfo=ET)
+    end = datetime.combine(session_day, ENTRY_WINDOW_END_ET, tzinfo=ET)
     hard_exit = datetime.combine(session_day, HARD_EXIT_ET, tzinfo=ET)
-    return start.astimezone(timezone.utc), hard_exit.astimezone(timezone.utc)
+    return (
+        start.astimezone(timezone.utc),
+        end.astimezone(timezone.utc),
+        hard_exit.astimezone(timezone.utc),
+    )
 
 
 def _moving_average_context(market: MinuteMarketFrame) -> dict[str, object]:

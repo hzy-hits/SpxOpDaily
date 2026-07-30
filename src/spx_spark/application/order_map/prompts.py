@@ -49,6 +49,7 @@ from spx_spark.application.order_map.status_prompt_payload import (
 )
 from spx_spark.application.order_map.status_explanation import (
     humanize_operator_trigger,
+    operator_reason_line,
 )
 from spx_spark.application.order_map.state import _session_phase_of
 from spx_spark.application.order_map.strike_coverage_presentation import (
@@ -77,6 +78,7 @@ GLOBEX_CONTEXT_SYSTEM_PROMPT = "\n".join(
         "输出简洁中文，先结论，再位置，再双向条件，最后写数据限制。数字逐字引用，不改写。",
     )
 )
+
 
 def build_order_prompt(
     payload: dict[str, Any],
@@ -134,7 +136,7 @@ def build_order_prompt(
             "不是 Gamma 猜方向；confirmed 时优先讲对应 call 的回踩位与失效线，watch/neutral 不新增动作。",
             "convexity_idea_radar 是独立双向灵感板：生产计划仍最多一条，但 Radar 必须分别保留最佳 Call/Put 的"
             "触发、反证和不交易条件。只有 observed_local_skew_edge 可称局部 skew 证据；风险中性目的地图不是"
-            "13:00 物理区间，gth_prior 未冻结就明确缺失。13:00 ET 后停止新想法，本策略 0DTE 必须清零。",
+            "15:45 物理区间，gth_prior 未冻结就明确缺失。15:30 ET 后停止新入场，15:45 ET 前退出。",
             "",
             "然后逐条处理 plan_candidates（最多 1 条）；只有这里的条目可称为计划。"
             "order_style=live_nbbo_limit 表示 TradeReady：必须逐字保留 NBBO、买入上限、失效位、目标和意图到期时间，"
@@ -157,7 +159,7 @@ def build_order_prompt(
             "hl_volume(HL SP500 永续，24/7 薄代理)只当次级证据：与 ES 同向加一分确认，分歧提示 crypto 侧先动或噪声；"
             "aggressor_buy_ratio/book_imbalance 是 ES 没有的方向色彩；ES 停盘/周末时它是唯一量价源，但绝不单独确认破位。",
             "touch_eta_minutes 是布朗缩放启发，不是到达时钟或自动撤单依据；只能说明时间风险。任何 horizon/ETA"
-            "跨过 13:00 ET 都不可用于本策略，新意图停止且持仓必须清零。",
+            "跨过 15:45 ET 都不可用于本策略；15:30 ET 后新意图停止，15:45 ET 前退出。",
             "session_phase 是搭档的时钟：这张图会跨欧盘、美盘数据小时和开盘使用，建议要写清哪些单是欧盘就能成交的埋伏、"
             "哪些要等美盘数据落地校准后才算数；不许把『等开盘』当默认建议。",
             "day_move.em_used_fraction ≥ 0.7 时只报告从当日 GTH 开始已使用预期波幅的比例；不得据此补算剩余空间、尾部概率或胜率。",
@@ -254,32 +256,6 @@ def _operator_structure_line(payload: dict[str, Any]) -> str:
     ):
         return f"结构  事件与实时一致：{frozen_text}"
     return f"结构  事件冻结：{frozen_text}；实时地图：{live_text}"
-
-
-def _operator_reason_line(payload: dict[str, Any]) -> str:
-    warnings = [str(item) for item in payload.get("warnings") or ()]
-    underlier = payload.get("underlier")
-    underlier = underlier if isinstance(underlier, dict) else {}
-    decision = payload.get("level_decision")
-    decision = decision if isinstance(decision, dict) else {}
-    intent = payload.get("trade_intent")
-    intent = intent if isinstance(intent, dict) else {}
-    reasons: list[str] = []
-    if any("no open interest" in item for item in warnings):
-        reasons.append("当日 OI 不完整，实时墙位不能触发交易")
-    if underlier.get("price") is None:
-        reasons.append("可靠 SPX 坐标暂不可用")
-    elif underlier.get("source") != "index:SPX":
-        reasons.append("SPX 使用期权隐含坐标")
-    if decision.get("structure_change_pending") is True:
-        reasons.append("新结构仍在确认")
-    if str(decision.get("phase") or "far").lower() == "far":
-        reasons.append("尚无关键位测试")
-    if intent.get("status") == "blocked":
-        reasons.append("执行门未通过")
-    if not reasons:
-        reasons.append("等待状态机确认和可执行报价")
-    return "原因  " + "；".join(dict.fromkeys(reasons[:3]))
 
 
 def _compact_structure_candidate_line(payload: dict[str, Any]) -> str | None:
@@ -685,10 +661,7 @@ def render_operator_status_brief(
             payload.get("gth_level_manual_candidate"),
         )
     )
-    trade_ready = (
-        guidance.action is guidance_module.GuidanceAction.TRADE_READY
-        or manual_ready
-    )
+    trade_ready = guidance.action is guidance_module.GuidanceAction.TRADE_READY or manual_ready
     badge = (
         "🔴 状态快照 · 执行以独立 MANUAL READY 卡为准"
         if trade_ready
@@ -706,14 +679,11 @@ def render_operator_status_brief(
             f"0DTE {expiry_text} · {phase.get('name_cn')}】"
         ),
         badge,
-        (
-            f"市场  SPX {spx_text} · ES {_dash(payload.get('es_last'))} · "
-            f"{guidance.bias}仅作背景"
-        ),
+        (f"市场  SPX {spx_text} · ES {_dash(payload.get('es_last'))} · {guidance.bias}仅作背景"),
         f"触发  {humanize_operator_trigger(guidance.trigger_text)}",
         f"证伪  {guidance.invalidation_text}",
         _operator_structure_line(payload),
-        _operator_reason_line(payload),
+        operator_reason_line(payload),
     ]
     return "\n".join(lines)
 

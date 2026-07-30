@@ -21,8 +21,8 @@ FRAMEWORK_GUARDRAILS = (
     "若 JSON 含 steven / steven_context：只作 observe_only 附注，不得抬 severity、不得改成买卖指令。",
     "严格按 as_of 判断会话：09:30-16:00 ET 是 SPX RTH，此时 ES 只能称 RTH/日内路径，"
     "不得称 GTH 或用夜盘薄流动性解释；GTH 是 SPX 期权的现金盘外时段，ES 自身是 Globex。",
-    "12:00-13:00 ET 是本策略 0DTE 的午盘确认与退出窗：用完整上午路径决定退出，撤销未成交意图并在"
-    "13:00 ET 前清空；不得建议带保护继续持有。硬止损、结构失效和风险上限始终优先。",
+    "13:00-15:30 ET 仍允许新的 MANUAL READY；15:30 后停止新入场，撤销未成交意图并在"
+    "15:45 ET 前退出。硬止损、结构失效和风险上限始终优先。",
 )
 
 # Shared voice for every human-facing market message.  The delivery protocol
@@ -72,9 +72,7 @@ def format_alert_message(payload: dict[str, object], alerts: list[dict[str, obje
             lines.append(f"解释  {detail}")
     if len(alerts) > 6:
         lines.append(f"审计  另有 {len(alerts) - 6} 个低优先级事件")
-    lines.append(
-        f"数据  as_of={payload.get('as_of')} · window={window_name} · priority={priority}"
-    )
+    lines.append(f"数据  as_of={payload.get('as_of')} · window={window_name} · priority={priority}")
     return "\n".join(lines)
 
 
@@ -90,9 +88,7 @@ def _format_system_alert(
         if alert.get("detail"):
             lines.append(f"影响  {alert.get('detail')}")
     lines.append("交易  本条不是 Call/Put 信号")
-    lines.append(
-        f"数据  as_of={payload.get('as_of')} · window={window_name} · priority={priority}"
-    )
+    lines.append(f"数据  as_of={payload.get('as_of')} · window={window_name} · priority={priority}")
     return "\n".join(lines)
 
 
@@ -107,9 +103,7 @@ def _format_position_alert(
         lines.append(f"状态  {alert.get('title')}")
         if alert.get("detail"):
             lines.append(f"动作  {alert.get('detail')}")
-    lines.append(
-        f"数据  as_of={payload.get('as_of')} · window={window_name} · priority={priority}"
-    )
+    lines.append(f"数据  as_of={payload.get('as_of')} · window={window_name} · priority={priority}")
     return "\n".join(lines)
 
 

@@ -273,7 +273,7 @@ def test_bullish_continuation_emits_two_confirmed_ten_point_milestones() -> None
     assert all(event["automatic_ordering"] is False for event in events)
 
 
-def test_continuation_confirmation_resets_on_provider_switch() -> None:
+def test_continuation_confirmation_survives_provider_switch() -> None:
     policy = GlobexTrendSettings()
     start = datetime(2026, 7, 27, 1, 41, tzinfo=UTC)
     state = _active_trend_state(
@@ -304,7 +304,7 @@ def test_continuation_confirmation_resets_on_provider_switch() -> None:
             events.append(event)
 
     assert len(events) == 1
-    assert events[0]["at"] == (start + timedelta(minutes=4)).isoformat()
+    assert events[0]["at"] == (start + timedelta(minutes=2)).isoformat()
     assert events[0]["provider"] == "ibkr"
 
 
@@ -456,10 +456,7 @@ def test_m2_is_suppressed_when_m1_was_blocked() -> None:
         assert event is None
 
     assert state["active_directional_advisory_id"] is None
-    assert (
-        state["continuation_suppressed_reason"]
-        == "management_without_accepted_entry_advisory"
-    )
+    assert state["continuation_suppressed_reason"] == "management_without_accepted_entry_advisory"
 
 
 def test_m2_waits_for_m1_durable_acceptance() -> None:
@@ -496,10 +493,7 @@ def test_m2_waits_for_m1_durable_acceptance() -> None:
     assert state["active_directional_advisory_id"] is None
     assert state["pending_directional_advisory_id"] == events[0]["advisory_id"]
     assert state["continuation_milestone_index"] == 1
-    assert (
-        state["continuation_suppressed_reason"]
-        == "management_without_accepted_entry_advisory"
-    )
+    assert state["continuation_suppressed_reason"] == "management_without_accepted_entry_advisory"
 
 
 def test_persisted_notification_ack_reconciles_pending_m1_after_restart() -> None:
@@ -552,12 +546,15 @@ def test_expired_m1_delivery_clears_pending_parent() -> None:
             policy=policy,
         )
     assert event is not None
-    assert pending_event(
-        state,
-        now=datetime.fromisoformat(str(event["at"]))
-        + timedelta(seconds=policy.pending_event_ttl_seconds + 1),
-        policy=policy,
-    ) is None
+    assert (
+        pending_event(
+            state,
+            now=datetime.fromisoformat(str(event["at"]))
+            + timedelta(seconds=policy.pending_event_ttl_seconds + 1),
+            policy=policy,
+        )
+        is None
+    )
     assert state["pending_directional_advisory_id"] is None
     assert state["continuation_suppressed_reason"] == "entry_advisory_delivery_expired"
 
@@ -709,9 +706,7 @@ def test_runtime_delivers_confirmed_transition_once(tmp_path, monkeypatch) -> No
         globex_service,
         "NotificationSettings",
         SimpleNamespace(
-            from_env=lambda: SimpleNamespace(
-                state_path=str(tmp_path / "notification-state.json")
-            )
+            from_env=lambda: SimpleNamespace(state_path=str(tmp_path / "notification-state.json"))
         ),
     )
 

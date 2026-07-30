@@ -114,12 +114,8 @@ def select_live_es(
         transport_age = (now - transport_at).total_seconds()
         source_age = (now - source_at).total_seconds()
         if (
-            -FUTURE_TIMESTAMP_TOLERANCE_SECONDS
-            <= transport_age
-            <= policy.max_quote_age_seconds
-            and -FUTURE_TIMESTAMP_TOLERANCE_SECONDS
-            <= source_age
-            <= policy.max_quote_age_seconds
+            -FUTURE_TIMESTAMP_TOLERANCE_SECONDS <= transport_age <= policy.max_quote_age_seconds
+            and -FUTURE_TIMESTAMP_TOLERANCE_SECONDS <= source_age <= policy.max_quote_age_seconds
         ):
             matches.append(
                 LiveEsObservation(
@@ -131,6 +127,18 @@ def select_live_es(
             )
     if not matches:
         return None
+    preferred = (
+        Provider.IBKR
+        if DEFAULT_MARKET_CALENDAR.is_spx_gth_open(now)
+        else Provider.SCHWAB
+        if DEFAULT_MARKET_CALENDAR.is_rth_open(now)
+        else None
+    )
+    preferred_matches = [
+        observation for observation in matches if observation.provider is preferred
+    ]
+    if preferred_matches:
+        matches = preferred_matches
     return max(
         matches,
         key=lambda observation: (
@@ -190,11 +198,7 @@ def alert_from_event(event: dict[str, Any]) -> Alert:
         )
     return Alert(
         severity="high",
-        kind=(
-            "gth_advisory_invalidated"
-            if invalidated_advisory_id
-            else "globex_trend_transition"
-        ),
+        kind=("gth_advisory_invalidated" if invalidated_advisory_id else "globex_trend_transition"),
         instrument_id="future:ES",
         title=f"ES {session_label} {REGIME_LABELS_CN.get(target, target)}确认",
         detail=detail,
@@ -229,10 +233,7 @@ def continuation_alert_from_event(event: dict[str, Any]) -> Alert:
     label = REGIME_LABELS_CN.get(regime, regime)
     extension = float(event["extension_points"])
     milestone = int(event["milestone_index"])
-    option_right = str(
-        event.get("option_right")
-        or ("C" if regime == "bullish" else "P")
-    ).upper()
+    option_right = str(event.get("option_right") or ("C" if regime == "bullish" else "P")).upper()
     option_label = "CALL" if option_right == "C" else "PUT"
     signal_stage = str(
         event.get("signal_stage")
@@ -362,14 +363,12 @@ def run(
                     "metrics": state.get("metrics"),
                     "transition": (
                         event
-                        if isinstance(event, dict)
-                        and event.get("event_type") != "continuation"
+                        if isinstance(event, dict) and event.get("event_type") != "continuation"
                         else None
                     ),
                     "continuation": (
                         event
-                        if isinstance(event, dict)
-                        and event.get("event_type") == "continuation"
+                        if isinstance(event, dict) and event.get("event_type") == "continuation"
                         else None
                     ),
                     "provider": observation.provider.value,
@@ -444,15 +443,10 @@ def acknowledge_advisory_delivery(
     if event.get("signal_stage") != "entry_advisory":
         return
     advisory_id = str(event.get("advisory_id") or "")
-    if (
-        advisory_id
-        and state.get("pending_directional_advisory_id") == advisory_id
-    ):
+    if advisory_id and state.get("pending_directional_advisory_id") == advisory_id:
         state["pending_directional_advisory_id"] = None
         state["active_directional_advisory_id"] = advisory_id
-        state["active_directional_advisory_accepted_at"] = as_utc(
-            accepted_at
-        ).isoformat()
+        state["active_directional_advisory_accepted_at"] = as_utc(accepted_at).isoformat()
 
 
 def reconcile_acknowledged_advisory(
@@ -488,9 +482,7 @@ def expire_pending_advisory(
         and state.get("pending_directional_advisory_id") == advisory_id
     ):
         state["pending_directional_advisory_id"] = None
-        state["continuation_suppressed_reason"] = (
-            "entry_advisory_delivery_expired"
-        )
+        state["continuation_suppressed_reason"] = "entry_advisory_delivery_expired"
 
 
 def main() -> None:

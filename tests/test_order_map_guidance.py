@@ -184,9 +184,7 @@ def test_operator_status_brief_keeps_decision_facts_and_drops_research_density()
                             "structure_rank": ["long_call_watch"],
                             "execution": {
                                 "eligible": False,
-                                "block_reasons": [
-                                    "dense_shadow_no_execution_authority"
-                                ],
+                                "block_reasons": ["dense_shadow_no_execution_authority"],
                             },
                         },
                         "put": {
@@ -197,9 +195,7 @@ def test_operator_status_brief_keeps_decision_facts_and_drops_research_density()
                             "structure_rank": ["long_put_watch"],
                             "execution": {
                                 "eligible": False,
-                                "block_reasons": [
-                                    "dense_shadow_no_execution_authority"
-                                ],
+                                "block_reasons": ["dense_shadow_no_execution_authority"],
                             },
                         },
                         "vol_range": {
@@ -210,9 +206,7 @@ def test_operator_status_brief_keeps_decision_facts_and_drops_research_density()
                             "structure_rank": ["no_structure_until_remaining_vol_edge"],
                             "execution": {
                                 "eligible": False,
-                                "block_reasons": [
-                                    "remaining_vol_edge_not_calibrated"
-                                ],
+                                "block_reasons": ["remaining_vol_edge_not_calibrated"],
                             },
                         },
                     },
@@ -230,7 +224,7 @@ def test_operator_status_brief_keeps_decision_facts_and_drops_research_density()
     assert "触发  SPX 7560 下方保持" in rendered
     assert "证伪  SPX 收回 7565" in rendered
     assert "结构  事件与实时一致：Put 7550 / Flip 7560–7565 / Call 7600" in rendered
-    assert "原因  尚无关键位测试" in rendered
+    assert "原因  当前未触发关键位，趋势信号继续独立评估" in rendered
     assert "Spring Gamma" not in rendered
     assert "凸性雷达" not in rendered
     assert "路径分位" not in rendered

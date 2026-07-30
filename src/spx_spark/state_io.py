@@ -67,6 +67,33 @@ def atomic_write_json_secure(path: Path, payload: Mapping[str, object]) -> None:
         temp_path.unlink(missing_ok=True)
 
 
+def append_jsonl_secure(path: Path, payload: Mapping[str, object]) -> None:
+    """Append one durable, process-safe JSON record."""
+
+    rendered = (
+        json.dumps(
+            payload,
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        + "\n"
+    ).encode()
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(path, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        offset = 0
+        while offset < len(rendered):
+            offset += os.write(descriptor, rendered[offset:])
+        os.fsync(descriptor)
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+
+
 def _flock_with_timeout(file_descriptor: int, lock_path: Path, timeout_seconds: float) -> None:
     deadline = time.monotonic() + max(timeout_seconds, 0.0)
     delay_seconds = 0.05

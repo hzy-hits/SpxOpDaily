@@ -1886,9 +1886,7 @@ def test_intraday_shock_is_audit_only_and_records_ack(tmp_path) -> None:
     assert entries[-1]["outcome"] == "context_only_consumed"
 
 
-def test_intraday_shock_audit_does_not_enqueue_on_hot_path(
-    tmp_path, monkeypatch
-) -> None:
+def test_intraday_shock_audit_does_not_enqueue_on_hot_path(tmp_path, monkeypatch) -> None:
     source_at = datetime(2026, 7, 10, 14, 32, tzinfo=timezone.utc)
     payload = make_payload()
     payload["alerts"] = [
@@ -1961,6 +1959,7 @@ def test_async_alert_without_source_event_id_keeps_stable_outbox_identity(tmp_pa
         delivery_outbox_path=str(outbox_path),
         delivery_outbox_legacy_shadow_enabled=False,
     )
+
     def runner(*_args, **_kwargs) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess([], 0, "", "")
 
@@ -2485,18 +2484,9 @@ def test_bark_title_maps_kinds_to_chinese_categories() -> None:
     )
     assert bark_title_for_alerts([{"kind": "price_move_from_close"}]) == "SPX 价格异动"
     assert bark_title_for_alerts([{"kind": "globex_trend_transition"}]) == "SPX 价格异动"
-    assert (
-        bark_title_for_alerts([{"kind": "globex_trend_continuation"}])
-        == "SPX GTH 方向提示"
-    )
-    assert (
-        bark_title_for_alerts([{"kind": "gth_directional_advisory"}])
-        == "SPX GTH 方向提示"
-    )
-    assert (
-        bark_title_for_alerts([{"kind": "gth_advisory_management"}])
-        == "SPX GTH 机会管理"
-    )
+    assert bark_title_for_alerts([{"kind": "globex_trend_continuation"}]) == "SPX GTH 方向提示"
+    assert bark_title_for_alerts([{"kind": "gth_directional_advisory"}]) == "SPX GTH 方向提示"
+    assert bark_title_for_alerts([{"kind": "gth_advisory_management"}]) == "SPX GTH 机会管理"
     assert bark_title_for_alerts([{"kind": "gth_dip_reclaim_call"}]) == "SPX 0DTE | CALL RECLAIM"
     assert bark_title_for_alerts([{"kind": "option_wall_proximity"}]) == "SPX 结构信号"
     assert (
@@ -2521,7 +2511,7 @@ def test_codex_prompt_hides_non_focus_market_context() -> None:
     assert "net_dex_proxy" in prompt
     assert "Hyperliquid" in prompt
     assert "09:30-16:00 ET 是 SPX RTH" in prompt
-    assert "12:00-13:00 ET" in prompt
+    assert "13:00-15:30 ET" in prompt
     assert "不下单授权" in prompt or "不是下单授权" in prompt
     assert "机构自营台" in prompt
     assert "## Desk View" in prompt
@@ -2547,22 +2537,28 @@ def test_direct_push_and_agent_prompts_carry_steven_micopedia_guardrails() -> No
         assert "Hyperliquid" in prompt
         assert "不是下单授权" in prompt or "不下单指令" in prompt
     assert direct_push_header([{"kind": "gth_dip_reclaim_call"}]) == ("SPX 0DTE | CALL RECLAIM")
-    assert direct_push_header(
-        [
-            {
-                "kind": "gth_directional_advisory",
-                "audit_context": {"option_right": "C"},
-            }
-        ]
-    ) == "SPX GTH | CALL ADVISORY"
-    assert direct_push_header(
-        [
-            {
-                "kind": "gth_advisory_management",
-                "audit_context": {"option_right": "P"},
-            }
-        ]
-    ) == "SPX GTH | PUT MANAGEMENT"
+    assert (
+        direct_push_header(
+            [
+                {
+                    "kind": "gth_directional_advisory",
+                    "audit_context": {"option_right": "C"},
+                }
+            ]
+        )
+        == "SPX GTH | CALL ADVISORY"
+    )
+    assert (
+        direct_push_header(
+            [
+                {
+                    "kind": "gth_advisory_management",
+                    "audit_context": {"option_right": "P"},
+                }
+            ]
+        )
+        == "SPX GTH | PUT MANAGEMENT"
+    )
     assert direct_push_header([{"kind": "ibkr_session_restored"}]) == ("SPX | SYSTEM STATUS")
 
 
@@ -2632,7 +2628,7 @@ def test_llm_prompts_do_not_infer_participant_causality_from_public_options_data
     assert "带保护继续持有" not in DEFAULT_SYSTEM_PROMPT
     assert "持仓带什么 bracket" not in DEFAULT_SYSTEM_PROMPT
     assert "不得建议 bracket" in DEFAULT_SYSTEM_PROMPT
-    assert "13:00 ET 前清空" in DEFAULT_SYSTEM_PROMPT
+    assert "15:45 ET 前退出" in DEFAULT_SYSTEM_PROMPT
     assert "最佳 Call 与一条最佳 Put" in DEFAULT_SYSTEM_PROMPT
     assert "结构测试临近但接受/拒绝尚未确认" in prompts[3]
     assert "15m 风险中性墙触达启发约 24%" in prompts[3]

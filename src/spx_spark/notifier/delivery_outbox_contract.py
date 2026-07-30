@@ -103,7 +103,7 @@ CLAIM_PRIORITY_SQL = """
 CASE
     WHEN e.lane = 'position_safety' THEN 0
     WHEN e.lane = 'execution_safety' THEN 1
-    WHEN e.lane IN ('trade_ready', 'gth_manual_candidate') THEN 2
+    WHEN e.lane IN ('trade_ready', 'gth_manual_candidate', 'gth_level_manual_candidate') THEN 2
     WHEN e.lane = 'market_warning' THEN 3
     WHEN e.lane IN ('ops', 'ops_transition') THEN 4
     WHEN e.lane = 'scheduled_report' THEN 5

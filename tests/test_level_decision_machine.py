@@ -74,9 +74,10 @@ def test_breakout_requires_acceptance_retest_and_confirmation_hold() -> None:
     confirmed = advance(holding.state, 56, spot=94.0, es=4994.0)
     assert confirmed.current_phase is LevelPhase.CONFIRMED
     assert confirmed.state["direction"] == "down"
-    assert confirmed.state["expires_at"] == (
-        NOW + timedelta(seconds=56 + SETTINGS.event_ttl_seconds)
-    ).isoformat()
+    assert (
+        confirmed.state["expires_at"]
+        == (NOW + timedelta(seconds=56 + SETTINGS.event_ttl_seconds)).isoformat()
+    )
 
 
 def test_es_confirmation_is_latched_when_thesis_starts_after_a_long_approach() -> None:
@@ -90,6 +91,19 @@ def test_es_confirmation_is_latched_when_thesis_starts_after_a_long_approach() -
     assert pending.state["confirmation_start_spot"] == 96.0
     assert accepted.current_phase is LevelPhase.ACCEPTED
     assert accepted.reason == "direction_accepted"
+
+
+def test_accepted_one_way_breakout_confirms_without_mandatory_retest() -> None:
+    armed = advance(None, 0, spot=95.0, es=5000.0)
+    testing = advance(armed.state, 5, spot=99.0, es=5000.0)
+    pending = advance(testing.state, 10, spot=96.0, es=4999.0)
+    accepted = advance(pending.state, 31, spot=95.0, es=4997.0)
+
+    confirmed = advance(accepted.state, 42, spot=94.0, es=4995.0)
+
+    assert confirmed.current_phase is LevelPhase.CONFIRMED
+    assert confirmed.reason == "accepted_follow_through_confirmed"
+    assert confirmed.state["direction"] == "down"
 
 
 def test_confirmed_path_invalidates_when_price_reclaims_the_level() -> None:
@@ -421,9 +435,7 @@ def test_confirmation_persists_spx_coordinate_decision_spot() -> None:
     retest = advance(
         accepted.state, 40, spot=144.0, es=4998.0, levels={"put_wall": 145.0}, **kwargs
     )
-    holding = advance(
-        retest.state, 45, spot=140.0, es=4996.0, levels={"put_wall": 145.0}, **kwargs
-    )
+    holding = advance(retest.state, 45, spot=140.0, es=4996.0, levels={"put_wall": 145.0}, **kwargs)
     confirmed = advance(
         holding.state, 56, spot=139.0, es=4994.0, levels={"put_wall": 145.0}, **kwargs
     )

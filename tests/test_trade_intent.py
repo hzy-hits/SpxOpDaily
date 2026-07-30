@@ -62,7 +62,7 @@ def test_trade_intent_policy_hash_is_stable_and_resets_for_lane_clock_contract()
         },
     )
 
-    assert TRADE_INTENT_CONTRACT_VERSION == "rth_manual_lanes_0945_1300.v2"
+    assert TRADE_INTENT_CONTRACT_VERSION == "rth_manual_levels_0930_1530.v4"
     assert current == repeated
     assert current.startswith("rth_trade_intent.v3+sha256:")
     assert current != legacy
@@ -101,11 +101,11 @@ def test_confirmed_path_requires_all_gates_before_trade_ready() -> None:
     assert intent["wall_signal"] == "present"
     assert intent["execution_eligible"] is True
     assert intent["quote_observation_eligible"] is False
-    assert intent["priority"] == "normal"
+    assert intent["priority"] == "high"
     assert intent["shadow_mode"] is False
 
 
-def test_provider_failover_control_blocks_ready_intent_at_entry_boundary() -> None:
+def test_provider_failover_control_is_diagnostic_for_exact_manual_quote() -> None:
     intent = {
         "status": "trade_ready",
         "execution_eligible": True,
@@ -117,12 +117,13 @@ def test_provider_failover_control_blocks_ready_intent_at_entry_boundary() -> No
         "mode": "ibkr_fallback",
     }
 
-    blocked = _apply_provider_entry_control(intent, control)
+    observed = _apply_provider_entry_control(intent, control)
 
-    assert blocked["status"] == "blocked"
-    assert blocked["execution_eligible"] is False
-    assert blocked["block_reasons"] == ["provider_failover_new_entries_blocked"]
-    assert blocked["provider_failover_control"] == control
+    assert observed["status"] == "trade_ready"
+    assert observed["execution_eligible"] is True
+    assert observed["block_reasons"] == []
+    assert observed["provider_incident_warning"] == "control_state_stale"
+    assert observed["provider_failover_control"] == control
 
 
 def test_reviewed_pilot_keeps_exact_quote_but_softens_redundant_context_gates() -> None:
@@ -164,8 +165,8 @@ def test_reviewed_pilot_keeps_exact_quote_but_softens_redundant_context_gates() 
     )
 
     assert intent["status"] == "trade_ready"
-    assert intent["strategy_lane"] == "long_0dte_rth_upside_breakout_pilot"
-    assert intent["pilot_mode"] is True
+    assert intent["strategy_lane"] == "long_0dte_rth_upper_breakout_call_manual"
+    assert intent["pilot_mode"] is False
     assert intent["wall_signal"] == "present"
     assert intent["execution_eligible"] is True
     assert intent["quote_observation_eligible"] is False
@@ -183,7 +184,7 @@ def test_reviewed_pilot_keeps_exact_quote_but_softens_redundant_context_gates() 
     }
 
 
-def test_reviewed_pilot_blocks_joint_immediate_reversal() -> None:
+def test_joint_immediate_reversal_is_diagnostic_after_level_confirmation() -> None:
     market, options, latest, context, repricing = _ready_inputs()
     market = replace(
         market,
@@ -205,11 +206,11 @@ def test_reviewed_pilot_blocks_joint_immediate_reversal() -> None:
         order_policy=OrderMapPolicy(),
     )
 
-    assert intent["status"] == "blocked"
-    assert "es_1m_5m_jointly_oppose_direction" in intent["block_reasons"]
+    assert intent["status"] == "trade_ready"
+    assert "es_1m_5m_jointly_oppose_direction" in intent["pilot_diagnostics"]
 
 
-def test_reviewed_pilot_keeps_explicit_breakout_block_as_hard_gate() -> None:
+def test_breakout_filter_block_is_diagnostic_after_level_confirmation() -> None:
     market, options, latest, context, repricing = _ready_inputs()
     context = replace(
         context,
@@ -231,8 +232,8 @@ def test_reviewed_pilot_keeps_explicit_breakout_block_as_hard_gate() -> None:
         order_policy=OrderMapPolicy(),
     )
 
-    assert intent["status"] == "blocked"
-    assert "breakout_filter_blocked" in intent["block_reasons"]
+    assert intent["status"] == "trade_ready"
+    assert "breakout_filter_blocked" not in intent["block_reasons"]
     assert "breakout_filter_blocked" in intent["pilot_diagnostics"]
 
 
@@ -258,10 +259,10 @@ def test_reviewed_pilot_is_upside_breakout_only() -> None:
     )
 
     assert intent["status"] == "blocked"
-    assert "pilot_scope_upside_breakout_only" in intent["block_reasons"]
+    assert "unsupported_level_path" in intent["block_reasons"]
 
 
-def test_reviewed_pilot_does_not_emit_trade_ready_after_1300_et() -> None:
+def test_manual_signal_does_not_emit_trade_ready_after_1530_et() -> None:
     late = datetime(2026, 7, 14, 19, 50, tzinfo=UTC)
     market, options, latest, context, repricing = _retimed_inputs(late)
 
@@ -281,9 +282,30 @@ def test_reviewed_pilot_does_not_emit_trade_ready_after_1300_et() -> None:
     assert "strategy_entry_window_closed" in intent["block_reasons"]
 
 
-def test_trade_ready_intent_and_time_stop_are_capped_at_1300_et() -> None:
-    at = datetime(2026, 7, 14, 16, 59, 50, tzinfo=UTC)
-    hard_exit = datetime(2026, 7, 14, 17, 0, tzinfo=UTC)
+def test_confirmed_level_remains_manual_ready_after_1300_et() -> None:
+    afternoon = datetime(2026, 7, 14, 17, 25, tzinfo=UTC)
+    market, options, latest, context, repricing = _retimed_inputs(afternoon)
+
+    intent = evaluate_trade_intent(
+        context,
+        market,
+        options,
+        latest,
+        repricing,
+        now=afternoon,
+        feature_policy=MarketFeatureSettings(trade_confirmed_pilot_enabled=True),
+        order_policy=OrderMapPolicy(),
+    )
+
+    assert intent["status"] == "trade_ready"
+    assert "strategy_entry_window_closed" not in intent["block_reasons"]
+
+
+def test_trade_ready_entry_and_time_stop_respect_close_buffers() -> None:
+    at = datetime(2026, 7, 14, 19, 29, 50, tzinfo=UTC)
+    entry_end = datetime(2026, 7, 14, 19, 30, tzinfo=UTC)
+    time_stop = datetime(2026, 7, 14, 19, 44, 50, tzinfo=UTC)
+    hard_exit = datetime(2026, 7, 14, 19, 45, tzinfo=UTC)
     market, options, latest, context, repricing = _retimed_inputs(at)
 
     intent = evaluate_trade_intent(
@@ -298,9 +320,10 @@ def test_trade_ready_intent_and_time_stop_are_capped_at_1300_et() -> None:
     )
 
     assert intent["status"] == "trade_ready"
-    assert intent["expires_at"] == hard_exit.isoformat()
-    assert intent["valid_until"] == hard_exit.isoformat()
-    assert intent["time_stop_at"] == hard_exit.isoformat()
+    assert intent["expires_at"] == entry_end.isoformat()
+    assert intent["valid_until"] == entry_end.isoformat()
+    assert intent["time_stop_at"] == time_stop.isoformat()
+    assert intent["entry_window_end_at"] == entry_end.isoformat()
     assert intent["hard_exit_at"] == hard_exit.isoformat()
 
 
@@ -308,11 +331,11 @@ def test_trade_ready_intent_and_time_stop_are_capped_at_1300_et() -> None:
     ("at", "reason"),
     [
         (
-            datetime(2026, 7, 14, 13, 44, 59, tzinfo=UTC),
+            datetime(2026, 7, 14, 13, 29, 59, tzinfo=UTC),
             "strategy_entry_window_not_open",
         ),
         (
-            datetime(2026, 7, 14, 17, 0, tzinfo=UTC),
+            datetime(2026, 7, 14, 19, 30, tzinfo=UTC),
             "strategy_entry_window_closed",
         ),
     ],
@@ -335,8 +358,8 @@ def test_strategy_entry_window_is_half_open(at: datetime, reason: str) -> None:
     assert reason in intent["block_reasons"]
 
 
-def test_strategy_entry_window_opens_at_exactly_0945_et() -> None:
-    at = datetime(2026, 7, 14, 13, 45, tzinfo=UTC)
+def test_strategy_entry_window_opens_during_first_two_rth_minutes() -> None:
+    at = datetime(2026, 7, 14, 13, 31, tzinfo=UTC)
     market, options, latest, context, repricing = _retimed_inputs(at)
 
     intent = evaluate_trade_intent(
@@ -351,7 +374,7 @@ def test_strategy_entry_window_opens_at_exactly_0945_et() -> None:
     )
 
     assert intent["status"] == "trade_ready"
-    assert intent["entry_window_start_at"] == at.isoformat()
+    assert intent["entry_window_start_at"] == "2026-07-14T13:30:00+00:00"
 
 
 def test_evening_gth_uses_next_trading_session_window() -> None:
@@ -370,8 +393,9 @@ def test_evening_gth_uses_next_trading_session_window() -> None:
     )
 
     assert intent["status"] == "blocked"
-    assert intent["entry_window_start_at"] == "2026-07-27T13:45:00+00:00"
-    assert intent["hard_exit_at"] == "2026-07-27T17:00:00+00:00"
+    assert intent["entry_window_start_at"] == "2026-07-27T13:30:00+00:00"
+    assert intent["entry_window_end_at"] == "2026-07-27T19:30:00+00:00"
+    assert intent["hard_exit_at"] == "2026-07-27T19:45:00+00:00"
     assert intent["valid_until"] == (at + timedelta(minutes=3)).isoformat()
     assert intent["execution_eligible"] is False
     assert "rth_session_required" in intent["block_reasons"]
@@ -405,7 +429,7 @@ def test_flip_low_breakdown_put_is_exact_quote_manual_ready() -> None:
     assert intent["quote_observation_eligible"] is False
     assert intent["priority"] == "normal"
     assert intent["shadow_mode"] is False
-    assert intent["promotion_status"] == "reviewed_pilot"
+    assert intent["promotion_status"] == "manual_live"
     assert intent["automatic_ordering"] is False
 
 
@@ -494,7 +518,7 @@ def test_put_manual_ready_keeps_opposing_regime_as_diagnostic() -> None:
     assert "regime_direction_conflict" in intent["pilot_diagnostics"]
 
 
-def test_put_wall_breakdown_is_explicitly_disabled() -> None:
+def test_put_wall_breakdown_is_manual_ready() -> None:
     market, options, latest, context, repricing = _put_shadow_inputs(
         thesis="breakout",
         level_kind="put_wall",
@@ -512,18 +536,18 @@ def test_put_wall_breakdown_is_explicitly_disabled() -> None:
         order_policy=OrderMapPolicy(),
     )
 
-    assert intent["status"] == "blocked"
-    assert intent["strategy_lane"] == "long_0dte_rth_put_wall_breakdown_disabled"
+    assert intent["status"] == "trade_ready"
+    assert intent["strategy_lane"] == "long_0dte_rth_put_wall_breakdown_put_manual"
     assert intent["wall_signal"] == "present"
-    assert intent["execution_eligible"] is False
+    assert intent["execution_eligible"] is True
     assert intent["quote_observation_eligible"] is False
-    assert intent["priority"] == "disabled"
+    assert intent["priority"] == "normal"
     assert intent["shadow_mode"] is False
-    assert "put_wall_breakdown_disabled" in intent["block_reasons"]
+    assert intent["block_reasons"] == []
     assert intent["automatic_ordering"] is False
 
 
-def test_put_manual_lanes_fail_closed_when_reviewed_pilot_flag_is_off() -> None:
+def test_legacy_pilot_flag_no_longer_suppresses_manual_lanes() -> None:
     market, options, latest, context, repricing = _put_shadow_inputs(
         thesis="breakout",
         level_kind="put_wall",
@@ -541,11 +565,11 @@ def test_put_manual_lanes_fail_closed_when_reviewed_pilot_flag_is_off() -> None:
         order_policy=OrderMapPolicy(),
     )
 
-    assert disabled["status"] == "blocked"
-    assert disabled["strategy_lane"] == "long_0dte_rth_put_wall_breakdown_disabled"
-    assert disabled["execution_eligible"] is False
+    assert disabled["status"] == "trade_ready"
+    assert disabled["strategy_lane"] == "long_0dte_rth_put_wall_breakdown_put_manual"
+    assert disabled["execution_eligible"] is True
     assert disabled["quote_observation_eligible"] is False
-    assert "put_wall_breakdown_disabled" in disabled["block_reasons"]
+    assert disabled["block_reasons"] == []
 
     flip_market, flip_options, flip_latest, flip_context, flip_repricing = _put_shadow_inputs(
         thesis="breakout",
@@ -563,12 +587,12 @@ def test_put_manual_lanes_fail_closed_when_reviewed_pilot_flag_is_off() -> None:
         order_policy=OrderMapPolicy(),
     )
 
-    assert blocked["status"] == "blocked"
+    assert blocked["status"] == "trade_ready"
     assert blocked["strategy_lane"] == "long_0dte_rth_flip_low_breakdown_put_manual"
-    assert blocked["execution_eligible"] is False
+    assert blocked["execution_eligible"] is True
     assert blocked["quote_observation_eligible"] is False
     assert blocked["shadow_mode"] is False
-    assert "reviewed_pilot_disabled" in blocked["block_reasons"]
+    assert blocked["block_reasons"] == []
 
 
 def test_put_manual_ready_has_human_notification_authority(tmp_path) -> None:
@@ -777,7 +801,7 @@ def test_llm_writer_rejects_ma_cross_as_standalone_trade_trigger() -> None:
     assert not _writer_output_valid(unsafe, intent)
 
 
-def test_pending_filter_and_opposing_regime_fail_closed() -> None:
+def test_pending_filter_and_opposing_regime_are_diagnostics() -> None:
     market, options, latest, context, repricing = _ready_inputs()
     context = DecisionContext(
         **{
@@ -806,12 +830,12 @@ def test_pending_filter_and_opposing_regime_fail_closed() -> None:
         order_policy=OrderMapPolicy(),
     )
 
-    assert intent["status"] == "blocked"
-    assert "breakout_filter_not_supported" in intent["block_reasons"]
-    assert "regime_direction_conflict" in intent["block_reasons"]
+    assert intent["status"] == "trade_ready"
+    assert "breakout_filter_not_supported" in intent["pilot_diagnostics"]
+    assert "regime_direction_conflict" in intent["pilot_diagnostics"]
 
 
-def test_confirmed_session_recovery_blocks_opposite_single_level_signal() -> None:
+def test_confirmed_session_recovery_is_a_diagnostic() -> None:
     market, options, latest, context, repricing = _ready_inputs()
     context = DecisionContext(
         **{
@@ -835,8 +859,8 @@ def test_confirmed_session_recovery_blocks_opposite_single_level_signal() -> Non
         order_policy=OrderMapPolicy(),
     )
 
-    assert intent["status"] == "blocked"
-    assert "session_episode_direction_conflict" in intent["block_reasons"]
+    assert intent["status"] == "trade_ready"
+    assert "session_episode_direction_conflict" in intent["pilot_diagnostics"]
 
 
 def test_stale_es_anchor_fails_closed() -> None:
@@ -885,7 +909,7 @@ def test_future_repricing_timestamp_fails_closed() -> None:
     assert "repricing_timestamp_in_future" in intent["block_reasons"]
 
 
-def test_live_structure_drift_from_frozen_event_fails_closed() -> None:
+def test_live_structure_drift_does_not_cancel_frozen_event() -> None:
     market, options, latest, context, repricing = _ready_inputs()
     options = OptionStructureFrame(
         **{
@@ -905,11 +929,11 @@ def test_live_structure_drift_from_frozen_event_fails_closed() -> None:
         order_policy=OrderMapPolicy(),
     )
 
-    assert intent["status"] == "blocked"
-    assert "trigger_structure_drift" in intent["block_reasons"]
+    assert intent["status"] == "trade_ready"
+    assert "trigger_structure_drift" not in intent["block_reasons"]
 
 
-def test_remaining_target_room_and_reward_risk_fail_closed() -> None:
+def test_remaining_target_room_and_reward_risk_are_diagnostics() -> None:
     market, options, latest, context, repricing = _ready_inputs()
     context = DecisionContext(
         **{
@@ -929,11 +953,13 @@ def test_remaining_target_room_and_reward_risk_fail_closed() -> None:
         order_policy=OrderMapPolicy(),
     )
 
-    assert intent["status"] == "blocked"
+    assert intent["status"] == "trade_ready"
     assert intent["remaining_target_room_points"] == 1.0
     assert intent["remaining_reward_risk"] == pytest.approx(1.0 / 27.0)
-    assert "remaining_target_room_insufficient" in intent["block_reasons"]
-    assert "remaining_reward_risk_insufficient" in intent["block_reasons"]
+    assert "remaining_target_room_insufficient" in intent["pilot_diagnostics"]
+    assert "remaining_reward_risk_insufficient" in intent["pilot_diagnostics"]
+    assert "remaining_target_room_insufficient" not in intent["block_reasons"]
+    assert "remaining_reward_risk_insufficient" not in intent["block_reasons"]
 
 
 def test_default_reward_risk_floor_retains_observed_sub_one_rth_opportunity() -> None:
