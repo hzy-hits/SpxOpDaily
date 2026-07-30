@@ -785,6 +785,20 @@ def _notification_intent(
         str(candidate.get("target_wall_kind") or ""),
         "结构目标",
     )
+    replacement = candidate.get("replaces_prior_plan")
+    replacement = dict(replacement) if isinstance(replacement, Mapping) else {}
+    replacement_reason = {
+        "prior_put_invalidated": "前一 Put 计划已被止损位证伪",
+        "prior_put_target_reached": "前一 Put 计划已到达目标",
+        "prior_call_invalidated": "前一 Call 计划已被止损位证伪",
+        "prior_call_target_reached": "前一 Call 计划已到达目标",
+        "time_exit_elapsed": "前一计划已到时间退出",
+    }.get(str(replacement.get("release_reason") or ""))
+    replacement_line = (
+        f"切换  {replacement_reason}，本卡才允许转为 {side}"
+        if replacement_reason
+        else None
+    )
     text = "\n".join(
         (
             f"🟢 MANUAL READY · {side} SPREAD",
@@ -797,6 +811,7 @@ def _notification_intent(
             f"限价  净借记 ≤ {float(candidate['entry_limit']):.2f}",
             f"触发  {trigger_text}",
             invalidation_text,
+            *([replacement_line] if replacement_line else []),
             f"目标  SPX {float(candidate['target_spx']):.2f}（{target_label}）",
             f"退出  {beijing_time(candidate.get('exit_at'))}",
             f"有效  {ttl_text}（至 "

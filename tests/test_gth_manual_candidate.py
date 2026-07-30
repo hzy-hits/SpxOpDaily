@@ -20,6 +20,7 @@ from spx_spark.application.market_features.gth_manual_candidate import (
     process_gth_manual_candidate,
 )
 from spx_spark.application.market_features.gth_level_manual_candidate import (
+    _apply_active_plan_coherence,
     evaluate_gth_level_manual_candidate,
     process_gth_level_manual_candidate,
 )
@@ -149,6 +150,80 @@ def test_confirmed_gth_flip_low_breakdown_builds_put_manual_ready(
     assert card["lane"] == "gth_level_manual_candidate"
 
 
+def test_rearmed_same_gamma_path_keeps_one_semantic_candidate_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_ready_market(monkeypatch, now=NOW, parity_price=7368.0, es_price=7398.0)
+    first_level = _level_signal(
+        NOW,
+        direction="down",
+        level_kind="flip_low",
+        level=7375.0,
+    )
+    rearmed_level = {**first_level, "event_id": "level:rearmed:same-flip-low"}
+
+    first = evaluate_gth_level_manual_candidate(
+        object(),
+        first_level,
+        macro_event={"entry_allowed": True},
+        now=NOW,
+        policy=MarketFeatureSettings(),
+        new_entries_allowed=True,
+        new_entries_block_reason="allowed",
+    )
+    rearmed = evaluate_gth_level_manual_candidate(
+        object(),
+        rearmed_level,
+        macro_event={"entry_allowed": True},
+        now=NOW,
+        policy=MarketFeatureSettings(),
+        new_entries_allowed=True,
+        new_entries_block_reason="allowed",
+    )
+
+    assert first["status"] == rearmed["status"] == "manual_ready"
+    assert first["candidate_id"] == rearmed["candidate_id"]
+    assert first["source_signal_id"] != rearmed["source_signal_id"]
+
+
+def test_opposite_gamma_signal_waits_for_prior_plan_invalidation() -> None:
+    active_put = {
+        "candidate_id": "prior-put",
+        "direction": "down",
+        "invalidation_spx": 7383.0,
+        "target_spx": 7300.0,
+        "exit_at": (NOW + timedelta(minutes=15)).isoformat(),
+    }
+    call_candidate = {
+        "candidate_id": "new-call",
+        "status": "manual_ready",
+        "manual_action_eligible": True,
+        "direction": "up",
+        "current_parity_spx": 7371.0,
+        "block_reasons": [],
+        "gate_contract": {"hard_block_reasons": []},
+    }
+
+    blocked, still_active = _apply_active_plan_coherence(
+        call_candidate,
+        active_put,
+        now=NOW,
+    )
+    released, cleared = _apply_active_plan_coherence(
+        {**call_candidate, "current_parity_spx": 7384.0},
+        active_put,
+        now=NOW,
+    )
+
+    assert blocked["status"] == "blocked"
+    assert blocked["signal_absence_reason"] == "active_manual_plan_not_invalidated"
+    assert blocked["block_reasons"] == ["opposite_signal_conflicts_with_active_plan"]
+    assert still_active == active_put
+    assert released["status"] == "manual_ready"
+    assert released["replaces_prior_plan"]["release_reason"] == "prior_put_invalidated"
+    assert cleared == {}
+
+
 @pytest.mark.parametrize("level_kind", ("flip_high", "call_wall"))
 def test_confirmed_gth_upper_acceptance_builds_call_manual_ready(
     monkeypatch: pytest.MonkeyPatch,
@@ -207,7 +282,7 @@ def test_confirmed_gth_lower_rejection_builds_call_manual_ready(
     assert candidate["automatic_ordering"] is False
 
 
-def test_gth_es_continuation_binds_ibkr_spxw_put_manual_ready(
+def test_gth_es_continuation_does_not_create_a_chase_card(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _patch_ready_market(monkeypatch, now=NOW, parity_price=7337.0, es_price=7367.0)
@@ -257,13 +332,9 @@ def test_gth_es_continuation_binds_ibkr_spxw_put_manual_ready(
         new_entries_block_reason="allowed",
     )
 
-    assert candidate["status"] == "manual_ready"
-    assert candidate["source_kind"] == "gth_es_trend_continuation"
-    assert candidate["path_kind"] == "trend_continuation_put"
-    assert candidate["long_contract_id"].endswith(":7335:P")
-    assert candidate["short_contract_id"].endswith(":7300:P")
-    assert candidate["invalidation_spx"] == 7351.0
-    assert candidate["invalidation_es"] == 7381.0
+    assert candidate["status"] == "blocked"
+    assert candidate["source_kind"] is None
+    assert candidate["block_reasons"] == ["source_signal_unavailable"]
 
 
 def test_gth_put_wall_breakdown_is_manual_ready(

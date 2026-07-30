@@ -642,7 +642,7 @@ def build_level_trigger_candidates(
         path_directions = [("breakout", outside)]
     elif thesis == "fade":
         path_directions = [("fade", -outside)]
-    elif phase == "testing":
+    elif phase in {"approaching", "testing"}:
         path_directions = [("breakout", outside), ("fade", -outside)]
     else:
         return [], [*warnings, "phase_has_no_pricing_path"]

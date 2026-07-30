@@ -48,7 +48,6 @@ CONTRACT_VERSION = "gth_level_manual_candidate.v1"
 SPREAD_MIN_WIDTH_POINTS = 5.0
 SPREAD_DEFAULT_WIDTH_POINTS = 25.0
 SPREAD_MAX_WIDTH_POINTS = 40.0
-TREND_SOURCE_TTL_SECONDS = 120.0
 
 
 def evaluate_gth_level_manual_candidate(
@@ -62,9 +61,14 @@ def evaluate_gth_level_manual_candidate(
     new_entries_allowed: bool,
     new_entries_block_reason: str,
 ) -> dict[str, object]:
-    """Build one GTH manual vertical from a level path or ES continuation."""
+    """Build one GTH manual vertical from a confirmed Gamma level path."""
 
     now = _utc(now)
+    # Direct ES trend events are context, not entry locations. Promoting them
+    # here created late chase cards and alternating Call/Put notifications.
+    # Keep the argument for call compatibility, but require a confirmed wall
+    # or flip lifecycle for every MANUAL READY card.
+    del trend_state
     level_source_expiry = _time(level_decision.get("expires_at"))
     level_source_ready = bool(
         level_decision.get("formal_signal") is True
@@ -73,17 +77,10 @@ def evaluate_gth_level_manual_candidate(
         and level_source_expiry is not None
         and level_source_expiry > now
     )
-    trend_event = _current_trend_entry_event(trend_state, now=now)
-    source_mode = "level" if level_source_ready else "trend" if trend_event else "none"
-    source = level_decision if source_mode == "level" else trend_event or {}
+    source_mode = "level" if level_source_ready else "none"
+    source = level_decision if source_mode == "level" else {}
     source_id = str(source.get("event_id") or "")
-    source_kind = (
-        "gth_confirmed_level_path"
-        if source_mode == "level"
-        else "gth_es_trend_continuation"
-        if source_mode == "trend"
-        else None
-    )
+    source_kind = "gth_confirmed_level_path" if source_mode == "level" else None
     candidate_policy_version = policy_version(
         CONTRACT_VERSION,
         {
@@ -156,23 +153,17 @@ def evaluate_gth_level_manual_candidate(
     if not new_entries_allowed:
         base["provider_incident_warning"] = new_entries_block_reason
 
-    thesis = str(level_decision.get("thesis") or "") if source_mode == "level" else "breakout"
-    direction = (
-        str(level_decision.get("direction") or "")
-        if source_mode == "level"
-        else str(source.get("direction") or "")
-    )
-    level_kind = str(level_decision.get("level_kind") or "") if source_mode == "level" else "trend"
+    thesis = str(level_decision.get("thesis") or "")
+    direction = str(level_decision.get("direction") or "")
+    level_kind = str(level_decision.get("level_kind") or "")
     if (
         thesis == "breakout"
         and direction == "down"
-        and level_kind in {"flip_low", "put_wall", "trend"}
+        and level_kind in {"flip_low", "put_wall"}
     ):
         right, position_type = "P", "put_debit_spread"
         path_kind = (
-            "trend_continuation_put"
-            if source_mode == "trend"
-            else "flip_low_breakdown_put"
+            "flip_low_breakdown_put"
             if level_kind == "flip_low"
             else "put_wall_breakdown_put"
         )
@@ -182,10 +173,10 @@ def evaluate_gth_level_manual_candidate(
     elif (
         thesis == "breakout"
         and direction == "up"
-        and level_kind in {"flip_high", "call_wall", "trend"}
+        and level_kind in {"flip_high", "call_wall"}
     ):
         right, position_type = "C", "call_debit_spread"
-        path_kind = "trend_continuation_call" if source_mode == "trend" else "upper_acceptance_call"
+        path_kind = "upper_acceptance_call"
     else:
         return _blocked(base, [*reasons, "unsupported_gth_level_path"])
 
@@ -193,11 +184,7 @@ def evaluate_gth_level_manual_candidate(
     expiry = str(level_decision.get("expiry") or "")
     if expiry != session_date.strftime("%Y%m%d"):
         reasons.append("signal_session_mismatch")
-    source_expires_at = (
-        _time(level_decision.get("expires_at"))
-        if source_mode == "level"
-        else _trend_source_expiry(source)
-    )
+    source_expires_at = _time(level_decision.get("expires_at"))
     if source_expires_at is None:
         reasons.append("source_expiry_unavailable")
     elif source_expires_at <= now:
@@ -205,11 +192,7 @@ def evaluate_gth_level_manual_candidate(
 
     levels = level_decision.get("levels")
     levels = levels if isinstance(levels, Mapping) else {}
-    trigger_level = (
-        _number(level_decision.get("level"))
-        if source_mode == "level"
-        else _number(level_decision.get("spot"))
-    )
+    trigger_level = _number(level_decision.get("level"))
     if trigger_level is None:
         trigger_level = _number(levels.get(level_kind))
     if trigger_level is None or trigger_level <= 0:
@@ -228,12 +211,9 @@ def evaluate_gth_level_manual_candidate(
         )
         if short_strike >= long_strike:
             short_strike = long_strike - SPREAD_MIN_WIDTH_POINTS
-        trend_anchor_es = _number(source.get("anchor_price"))
         basis = _number(level_decision.get("es_basis_points"))
         invalidation_spx = (
-            trend_anchor_es - basis + policy.trade_invalidation_buffer_points
-            if source_mode == "trend" and trend_anchor_es is not None and basis is not None
-            else (_number(levels.get("flip_high")) or trigger_level)
+            (_number(levels.get("flip_high")) or trigger_level)
             + policy.trade_invalidation_buffer_points
         )
         width = long_strike - short_strike
@@ -255,12 +235,8 @@ def evaluate_gth_level_manual_candidate(
         )
         if short_strike <= long_strike:
             short_strike = long_strike + SPREAD_MIN_WIDTH_POINTS
-        trend_anchor_es = _number(source.get("anchor_price"))
-        basis = _number(level_decision.get("es_basis_points"))
         invalidation_anchor = (
-            trend_anchor_es - basis
-            if source_mode == "trend" and trend_anchor_es is not None and basis is not None
-            else trigger_level
+            trigger_level
             if path_kind == "lower_rejection_call"
             else _number(levels.get("flip_low")) or trigger_level
         )
@@ -282,7 +258,6 @@ def evaluate_gth_level_manual_candidate(
         (
             CONTRACT_VERSION,
             candidate_policy_version,
-            source_id,
             path_kind,
             long_contract_id,
             short_contract_id,
@@ -536,38 +511,6 @@ def process_gth_level_manual_candidate(
     )
 
 
-def _current_trend_entry_event(
-    trend_state: Mapping[str, object] | None,
-    *,
-    now: datetime,
-) -> Mapping[str, object] | None:
-    if not isinstance(trend_state, Mapping):
-        return None
-    event = trend_state.get("last_continuation")
-    if not isinstance(event, Mapping):
-        return None
-    if (
-        event.get("event_type") != "continuation"
-        or event.get("signal_stage") != "entry_advisory"
-        or event.get("advisory_status") != "advisory_ready"
-        or str(event.get("direction") or "") not in {"up", "down"}
-        or not str(event.get("session_id") or "").endswith(":gth")
-    ):
-        return None
-    at = _time(event.get("at"))
-    if at is None:
-        return None
-    age = (now - at).total_seconds()
-    if age < -1.0 or age > TREND_SOURCE_TTL_SECONDS:
-        return None
-    return event
-
-
-def _trend_source_expiry(source: Mapping[str, object]) -> datetime | None:
-    at = _time(source.get("at"))
-    return at + timedelta(seconds=TREND_SOURCE_TTL_SECONDS) if at is not None else None
-
-
 def _persist_candidate(
     storage: StorageSettings,
     candidate: Mapping[str, object],
@@ -577,12 +520,26 @@ def _persist_candidate(
 ) -> dict[str, object]:
     state_path = Path(storage.data_root) / "latest" / "gth_level_manual_candidate_state.json"
     projection_path = Path(storage.data_root) / "latest" / "gth_level_manual_candidate.json"
-    notification_event_id = (
-        f"{candidate['candidate_id']}:ready" if candidate.get("status") == "manual_ready" else None
-    )
+    candidate = dict(candidate)
+    notification_event_id: str | None = None
     settings = notification or NotificationSettings.from_env()
     with exclusive_state_lock(state_path):
         state = read_json_object(state_path)
+        active_plan = (
+            dict(state.get("active_manual_plan"))
+            if isinstance(state.get("active_manual_plan"), Mapping)
+            else {}
+        )
+        candidate, active_plan = _apply_active_plan_coherence(
+            candidate,
+            active_plan,
+            now=now,
+        )
+        notification_event_id = (
+            f"{candidate['candidate_id']}:ready"
+            if candidate.get("status") == "manual_ready"
+            else None
+        )
         gate_record_key, gate_record = _gate_record(candidate, now=now)
         if state.get("last_gate_record_key") != gate_record_key:
             append_jsonl_secure(
@@ -679,6 +636,7 @@ def _persist_candidate(
                     for event_id, source_id in sorted(lifecycle_events.items())[-200:]
                 ],
                 "pending_notification_cancellation_event_ids": sorted(cancellation_pending)[-200:],
+                "active_manual_plan": active_plan,
             }
         )
         atomic_write_json_secure(state_path, state)
@@ -691,12 +649,110 @@ def _persist_candidate(
             now=now,
             only_event_id=notification_event_id,
         )
+    if notification_event_id and result.get("accepted") is True:
+        with exclusive_state_lock(state_path):
+            state = read_json_object(state_path)
+            state["active_manual_plan"] = {
+                "candidate_id": candidate.get("candidate_id"),
+                "direction": candidate.get("direction"),
+                "path_kind": candidate.get("path_kind"),
+                "invalidation_spx": candidate.get("invalidation_spx"),
+                "target_spx": candidate.get("target_spx"),
+                "exit_at": candidate.get("exit_at"),
+                "activated_at": now.isoformat(),
+            }
+            atomic_write_json_secure(state_path, state)
     return {
         **candidate,
         "notification_attempted": bool(result.get("attempted")),
         "notification_accepted": bool(result.get("accepted")),
         "notification_outcome": result.get("outcome"),
     }
+
+
+def _apply_active_plan_coherence(
+    candidate: Mapping[str, object],
+    active_plan: Mapping[str, object],
+    *,
+    now: datetime,
+) -> tuple[dict[str, object], dict[str, object]]:
+    """Prevent an opposite card until the prior operator plan is resolved."""
+
+    candidate = dict(candidate)
+    active = dict(active_plan)
+    if candidate.get("status") != "manual_ready" or not active:
+        return candidate, active
+    direction = str(candidate.get("direction") or "")
+    active_direction = str(active.get("direction") or "")
+    if direction not in {"up", "down"} or active_direction not in {"up", "down"}:
+        return candidate, active
+    if direction == active_direction:
+        return candidate, active
+    release_reason = _active_plan_release_reason(
+        active,
+        current_spx=_number(candidate.get("current_parity_spx")),
+        now=now,
+    )
+    if release_reason is None:
+        reasons = [
+            *[str(item) for item in candidate.get("block_reasons") or ()],
+            "opposite_signal_conflicts_with_active_plan",
+        ]
+        gate_contract = candidate.get("gate_contract")
+        gate_contract = dict(gate_contract) if isinstance(gate_contract, Mapping) else {}
+        return (
+            {
+                **candidate,
+                "status": "blocked",
+                "manual_action_eligible": False,
+                "signal_absence_reason": "active_manual_plan_not_invalidated",
+                "block_reasons": list(dict.fromkeys(reasons)),
+                "active_manual_plan": active,
+                "gate_contract": {
+                    **gate_contract,
+                    "hard_block_reasons": list(dict.fromkeys(reasons)),
+                },
+            },
+            active,
+        )
+    return (
+        {
+            **candidate,
+            "replaces_prior_plan": {
+                "candidate_id": active.get("candidate_id"),
+                "direction": active_direction,
+                "release_reason": release_reason,
+            },
+        },
+        {},
+    )
+
+
+def _active_plan_release_reason(
+    active_plan: Mapping[str, object],
+    *,
+    current_spx: float | None,
+    now: datetime,
+) -> str | None:
+    exit_at = _time(active_plan.get("exit_at"))
+    if exit_at is not None and now >= exit_at:
+        return "time_exit_elapsed"
+    if current_spx is None:
+        return None
+    direction = str(active_plan.get("direction") or "")
+    invalidation = _number(active_plan.get("invalidation_spx"))
+    target = _number(active_plan.get("target_spx"))
+    if direction == "down":
+        if invalidation is not None and current_spx >= invalidation:
+            return "prior_put_invalidated"
+        if target is not None and current_spx <= target:
+            return "prior_put_target_reached"
+    elif direction == "up":
+        if invalidation is not None and current_spx <= invalidation:
+            return "prior_call_invalidated"
+        if target is not None and current_spx >= target:
+            return "prior_call_target_reached"
+    return None
 
 
 def _gate_record(

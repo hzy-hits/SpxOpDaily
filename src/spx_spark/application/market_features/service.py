@@ -28,6 +28,9 @@ from spx_spark.application.market_features.es_bar_consumer_fence import (
     fence_rth_trade_intent_authority as _fence_rth_trade_intent_authority,
 )
 from spx_spark.application.market_features.greek_decision import build_greek_decision
+from spx_spark.application.market_features.gamma_prearm_plan import (
+    process_gamma_prearm_plan,
+)
 from spx_spark.application.market_features.gth_level_manual_candidate import (
     process_gth_level_manual_candidate,
 )
@@ -443,6 +446,12 @@ def run(
         failover_settings,
         now=action_now,
     )
+    gamma_prearm_plan = process_gamma_prearm_plan(
+        storage,
+        repricing,
+        raw_level_decision,
+        now=action_now,
+    )
     gth_signal = load_json(Path(storage.data_root) / "latest" / "gth_dip_reclaim_signal.json")
     gth_level_manual_candidate = process_gth_level_manual_candidate(
         storage,
@@ -537,6 +546,7 @@ def run(
             "confirmed_gate": confirmed_gate,
             "level_decision_refresh_error": level_decision_refresh_error,
             "virtual_strategy": virtual_strategy,
+            "gamma_prearm_plan": gamma_prearm_plan,
             "gth_level_manual_candidate": gth_level_manual_candidate,
             "spring_gamma_v3_shadow": spring_gamma_v3,
         }

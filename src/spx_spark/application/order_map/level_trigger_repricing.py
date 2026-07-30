@@ -21,6 +21,7 @@ from spx_spark.storage import LatestStateStore
 
 REPRICING_PHASES = frozenset(
     {
+        "approaching",
         "testing",
         "break_pending",
         "reject_pending",

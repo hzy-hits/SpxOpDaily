@@ -1,0 +1,141 @@
+from __future__ import annotations
+
+import inspect
+from datetime import datetime, timedelta, timezone
+
+import spx_spark.application.market_features.service as market_feature_service
+from spx_spark.application.market_features.gamma_prearm_plan import (
+    _notification_intent,
+    evaluate_gamma_prearm_plan,
+)
+from spx_spark.application.order_map.level_trigger_repricing import REPRICING_PHASES
+
+
+NOW = datetime(2026, 7, 30, 12, 0, tzinfo=timezone.utc)
+
+
+def test_market_feature_runtime_processes_gamma_prearm_before_ready_candidate() -> None:
+    source = inspect.getsource(market_feature_service.run)
+
+    assert source.index("process_gamma_prearm_plan(") < source.index(
+        "process_gth_level_manual_candidate("
+    )
+
+
+def test_approaching_gamma_level_builds_two_sided_prearm_plan() -> None:
+    plan = evaluate_gamma_prearm_plan(
+        _repricing(),
+        _level_decision(),
+        now=NOW,
+    )
+
+    assert "approaching" in REPRICING_PHASES
+    assert plan["status"] == "prearm_ready"
+    assert plan["execution_eligible"] is False
+    assert plan["automatic_ordering"] is False
+    assert plan["level_kind"] == "flip_low"
+    assert plan["level"] == 7375.0
+    assert plan["distance_points"] == 15.0
+    assert [item["side"] for item in plan["paths"]] == ["CALL", "PUT"]
+
+    card = _notification_intent(plan, event_id="gamma-plan:ready", now=NOW)
+    assert "🎯 GAMMA 伏击计划 · 先准备，未触发不下单" in card["text"]
+    assert "Flip Low 7375.00" in card["text"]
+    assert "下沿拒绝并收复：CALL" in card["text"]
+    assert "向下接受并保持：PUT" in card["text"]
+    assert "现在不追" in card["text"]
+    assert "预埋计划不是方向信号" in card["text"]
+
+
+def test_prearm_plan_identity_is_semantic_across_rearmed_events() -> None:
+    first = evaluate_gamma_prearm_plan(_repricing(), _level_decision(), now=NOW)
+    rearmed = evaluate_gamma_prearm_plan(
+        _repricing(event_id="level:rearmed"),
+        _level_decision(event_id="level:rearmed"),
+        now=NOW,
+    )
+
+    assert first["plan_id"] == rearmed["plan_id"]
+    assert first["source_event_id"] != rearmed["source_event_id"]
+
+
+def test_prearm_plan_requires_fresh_approaching_repricing() -> None:
+    stale = evaluate_gamma_prearm_plan(
+        _repricing(as_of=NOW - timedelta(minutes=2)),
+        _level_decision(),
+        now=NOW,
+    )
+    testing = evaluate_gamma_prearm_plan(
+        {**_repricing(), "phase": "testing"},
+        {**_level_decision(), "phase": "testing"},
+        now=NOW,
+    )
+
+    assert stale["status"] == "blocked"
+    assert stale["block_reasons"] == ["approach_repricing_stale"]
+    assert testing["status"] == "inactive"
+    assert testing["block_reasons"] == ["level_not_approaching"]
+
+
+def _level_decision(event_id: str = "level:flip-low-approach") -> dict[str, object]:
+    return {
+        "phase": "approaching",
+        "event_id": event_id,
+        "level_kind": "flip_low",
+        "level": 7375.0,
+    }
+
+
+def _repricing(
+    *,
+    event_id: str = "level:flip-low-approach",
+    as_of: datetime = NOW,
+) -> dict[str, object]:
+    return {
+        "status": "repriced",
+        "phase": "approaching",
+        "event_id": event_id,
+        "as_of": as_of.isoformat(),
+        "expiry": "20260730",
+        "level_kind": "flip_low",
+        "spx_level": 7375.0,
+        "pricing_spot": 7390.0,
+        "trigger_coordinate": {
+            "kind": "chain_implied_spx",
+            "observed_value": 7390.0,
+            "target_value": 7375.0,
+        },
+        "touch_time_estimate": {"base_minutes": 12.0},
+        "candidates": [
+            {
+                "play": "level_breakout_put",
+                "right": "P",
+                "contract_id": "option:SPX:SPXW:20260730:7375:P",
+                "execution_quote_status": "executable",
+                "projection_range_low": 12.2,
+                "projected_mid": 12.5,
+                "projection_range_high": 12.8,
+                "limit_conservative": 12.2,
+                "limit_aggressive": 12.8,
+                "frontrun_level": 7373.0,
+                "frontrun_limit": 12.0,
+                "touch_eta_minutes": 12.0,
+                "execution_quote_provider": "ibkr",
+            },
+            {
+                "play": "level_fade_call",
+                "right": "C",
+                "contract_id": "option:SPX:SPXW:20260730:7375:C",
+                "execution_quote_status": "executable",
+                "projection_range_low": 13.1,
+                "projected_mid": 13.4,
+                "projection_range_high": 13.7,
+                "limit_conservative": 13.1,
+                "limit_aggressive": 13.7,
+                "frontrun_level": 7377.0,
+                "frontrun_limit": 13.0,
+                "touch_eta_minutes": 12.0,
+                "execution_quote_provider": "ibkr",
+            },
+        ],
+    }
