@@ -192,6 +192,43 @@ def test_incoherent_rth_es_coordinate_is_rejected_before_delivery() -> None:
     )
 
 
+def test_coherent_chain_implied_coordinate_is_valid_manual_delivery_authority() -> None:
+    market, options, latest, context, repricing = _ready_inputs()
+    policy = MarketFeatureSettings()
+    intent = evaluate_trade_intent(
+        context,
+        market,
+        options,
+        latest,
+        repricing,
+        now=NOW,
+        feature_policy=policy,
+        order_policy=OrderMapPolicy(),
+    )
+    intent = {
+        **intent,
+        "coordinate": {
+            "kind": "chain_implied_spx",
+            "instrument_id": "synthetic:SPXW_PARITY",
+            "observed_value": intent["spx_spot"],
+            "target_value": intent["trigger_level"],
+            "spx_level": intent["trigger_level"],
+            "spx_observed_value": intent["spx_spot"],
+            "basis_points": None,
+            "as_of": NOW.isoformat(),
+        },
+    }
+
+    assert (
+        _ready_contract_reason(
+            intent,
+            now=NOW,
+            expected_policy_version=str(intent["policy_version"]),
+        )
+        is None
+    )
+
+
 def test_provider_failover_control_is_diagnostic_for_exact_manual_quote() -> None:
     intent = {
         "status": "trade_ready",
@@ -1811,6 +1848,24 @@ def test_mislabeled_put_trade_ready_is_rejected_before_notification(
         "delivered": False,
         "reason": "put_lane_live_execution_forbidden",
     }
+    persisted = json.loads(
+        (tmp_path / "latest" / "trade_intent.json").read_text(encoding="utf-8")
+    )
+    assert persisted["signal_status"] == "trade_ready"
+    assert persisted["status"] == "delivery_blocked"
+    assert persisted["notification_status"] == "blocked"
+    audit_path = (
+        tmp_path
+        / "features"
+        / "trade_intents"
+        / f"date={NOW.date().isoformat()}"
+        / "events.jsonl"
+    )
+    audit = [
+        json.loads(line)
+        for line in audit_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert all(row["status"] != "trade_ready" for row in audit)
 
 
 def test_forged_put_wall_trade_ready_is_rejected_before_notification(
@@ -2007,6 +2062,18 @@ def test_moving_live_quote_enqueues_immutable_trade_ready_card_once(
     assert audit["recomputed_entry_limit"] == pytest.approx(10.6)
     assert audit["entry_limit_changed"] is True
     assert audit["entry_limit_policy"] == "immutable_decision_limit"
+    intent_audit_path = (
+        tmp_path
+        / "features"
+        / "trade_intents"
+        / f"date={NOW.date().isoformat()}"
+        / "events.jsonl"
+    )
+    persisted_statuses = [
+        json.loads(line)["status"]
+        for line in intent_audit_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert persisted_statuses == ["ready_pending_delivery", "trade_ready"]
 
 
 def test_trade_ready_producer_worker_receipt_end_to_end_is_idempotent(

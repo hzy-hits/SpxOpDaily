@@ -99,6 +99,9 @@ from spx_spark.application.market_features.trade_intent import (
     evaluate_trade_intent,
     trade_intent_policy_version,
 )
+from spx_spark.application.market_features.trade_intent_delivery_contract import (
+    apply_trade_intent_delivery_result,
+)
 from spx_spark.application.market_features.trade_intent_producer_ledger import (
     record_trade_intent_producer_observation,
     trade_intent_deadline_diagnostics,
@@ -396,12 +399,6 @@ def run(
         now=evaluation_now,
     )
     trade_intent = gate_trade_intent(trade_intent, trade_candidate)
-    confirmed_gate = reconcile_confirmed_gate(
-        storage,
-        raw_level_decision,
-        trade_intent,
-        now=evaluation_now,
-    )
     if trade_intent.get("status") == "trade_ready":
         trade_intent = {
             **trade_intent,
@@ -420,6 +417,16 @@ def run(
         order_policy=app.order_map,
         expected_policy_version=expected_trade_intent_policy_version,
         action_clock=resolved_action_clock,
+    )
+    trade_intent = apply_trade_intent_delivery_result(
+        trade_intent,
+        intent_delivery,
+    )
+    confirmed_gate = reconcile_confirmed_gate(
+        storage,
+        raw_level_decision,
+        trade_intent,
+        now=evaluation_now,
     )
     producer_deadline = _dict(producer_ledger.get("deadline"))
     delivery_action_now = as_utc(

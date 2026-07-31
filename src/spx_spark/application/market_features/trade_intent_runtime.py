@@ -4,13 +4,20 @@ from __future__ import annotations
 
 import math
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Mapping
 
 from spx_spark.application.order_map.execution_quote import evaluate_execution_quote
 from spx_spark.application.order_map.pricing import round_to_tick
 from spx_spark.application.market_features.trade_intent import (
     live_trade_intent_authority_issues,
+)
+from spx_spark.application.market_features.trade_intent_delivery_contract import (
+    apply_trade_intent_delivery_result as apply_trade_intent_delivery_result,
+    delivery_coordinate_reason as _delivery_coordinate_reason,
+    delivery_projection as _delivery_projection,
+    persist_delivery_projection as _persist_delivery_projection,
+    record_action_revalidation as _record_action_revalidation,
+    release_delivery_lease as _release_delivery_lease,
 )
 from spx_spark.application.market_features.trade_intent_runtime_support import (
     DELIVERY_LEASE_SECONDS as DELIVERY_LEASE_SECONDS,
@@ -39,7 +46,6 @@ from spx_spark.application.market_features.trade_intent_runtime_support import (
     _writer_prompt as _writer_prompt,
     render_trade_intent as render_trade_intent,
 )
-from spx_spark.ibkr.atm_reference import BASIS_MAX_ABS_POINTS
 from spx_spark.config import NotificationSettings, StorageSettings
 from spx_spark.notifier.dispatcher import (
     cancel_pending_notification,
@@ -84,7 +90,6 @@ def process_trade_intent(
     now = _utc(now)
     state_path = _state_path(storage)
     latest_path = _latest_path(storage)
-    signature = _signature(intent)
     intent_id = str(intent.get("intent_id") or "")
     ready = intent.get("status") == "trade_ready"
     delivery_event_id = _trade_ready_delivery_event_id(intent) if ready else ""
@@ -375,14 +380,39 @@ def process_trade_intent(
             and not delivery_in_progress
         ):
             inflight[delivery_event_id] = _delivery_lease(intent, now=now)
-        atomic_write_json_secure(latest_path, dict(intent))
-        if signature != state.get("last_signature"):
-            _append_jsonl(_audit_path(storage, now), dict(intent))
+        if ready:
+            if durable_event_exists:
+                persisted_intent = _delivery_projection(
+                    intent,
+                    delivery_event_id=delivery_event_id,
+                    notification_status="outbox_accepted",
+                    reason="outbox_event_reconciled",
+                )
+            elif expiry_reason:
+                persisted_intent = _delivery_projection(
+                    intent,
+                    delivery_event_id=delivery_event_id,
+                    notification_status="blocked",
+                    reason=expiry_reason,
+                )
+            else:
+                persisted_intent = _delivery_projection(
+                    intent,
+                    delivery_event_id=delivery_event_id,
+                    notification_status="pending",
+                    reason="awaiting_outbox_acceptance",
+                )
+        else:
+            persisted_intent = dict(intent)
+        persisted_signature = _signature(persisted_intent)
+        atomic_write_json_secure(latest_path, persisted_intent)
+        if persisted_signature != state.get("last_signature"):
+            _append_jsonl(_audit_path(storage, now), persisted_intent)
         state.update(
             {
                 "schema_version": 3,
-                "last_signature": signature,
-                "last_status": intent.get("status"),
+                "last_signature": persisted_signature,
+                "last_status": persisted_intent.get("status"),
                 "last_event_id": intent.get("event_id"),
                 "last_delivery_event_id": delivery_event_id or None,
                 "updated_at": now.isoformat(),
@@ -415,22 +445,57 @@ def process_trade_intent(
             "reason": str(intent.get("status") or "observing"),
         }
     if expiry_reason:
+        _persist_delivery_projection(
+            storage,
+            intent,
+            now=now,
+            delivery_event_id=delivery_event_id,
+            reason=expiry_reason,
+        )
         return {"attempted": False, "delivered": False, "reason": expiry_reason}
     if not intent_id:
+        _persist_delivery_projection(
+            storage,
+            intent,
+            now=now,
+            delivery_event_id=delivery_event_id,
+            reason="intent_id_unavailable",
+        )
         return {"attempted": False, "delivered": False, "reason": "intent_id_unavailable"}
     if not delivery_event_id:
+        _persist_delivery_projection(
+            storage,
+            intent,
+            now=now,
+            delivery_event_id=delivery_event_id,
+            reason="notification_event_id_unavailable",
+        )
         return {
             "attempted": False,
             "delivered": False,
             "reason": "notification_event_id_unavailable",
         }
     if delivery_blocked_by_cancellation:
+        _persist_delivery_projection(
+            storage,
+            intent,
+            now=now,
+            delivery_event_id=delivery_event_id,
+            reason="lifecycle_cancellation_pending",
+        )
         return {
             "attempted": False,
             "delivered": False,
             "reason": "lifecycle_cancellation_pending",
         }
     if reconciliation_fault_reason:
+        _persist_delivery_projection(
+            storage,
+            intent,
+            now=now,
+            delivery_event_id=delivery_event_id,
+            reason=reconciliation_fault_reason,
+        )
         return {
             "attempted": False,
             "delivered": False,
@@ -447,18 +512,46 @@ def process_trade_intent(
                 "duplicate": True,
                 "reason": "outbox_event_reconciled",
             }
+        _persist_delivery_projection(
+            storage,
+            intent,
+            now=now,
+            delivery_event_id=delivery_event_id,
+            reason="accepted_outbox_reconciliation_unavailable",
+        )
         return {"attempted": False, "delivered": False, "reason": "already_accepted"}
     if delivery_in_progress:
+        _persist_delivery_projection(
+            storage,
+            intent,
+            now=now,
+            delivery_event_id=delivery_event_id,
+            reason="delivery_in_progress",
+        )
         return {"attempted": False, "delivered": False, "reason": "delivery_in_progress"}
 
     if not getattr(notification, "enabled", True):
         _release_delivery_lease(state_path, delivery_event_id, now=now)
+        _persist_delivery_projection(
+            storage,
+            intent,
+            now=now,
+            delivery_event_id=delivery_event_id,
+            reason="notification_disabled",
+        )
         return {"attempted": False, "delivered": False, "reason": "notification_disabled"}
     if not any(
         bool(getattr(notification, field, False))
         for field in ("feishu_enabled", "bark_enabled", "bark_friend_enabled")
     ):
         _release_delivery_lease(state_path, delivery_event_id, now=now)
+        _persist_delivery_projection(
+            storage,
+            intent,
+            now=now,
+            delivery_event_id=delivery_event_id,
+            reason="no_delivery_sink",
+        )
         return {"attempted": False, "delivered": False, "reason": "no_delivery_sink"}
     # The producer path is deterministic and local.  Re-read the wall clock
     # and latest-state projection immediately before the durable enqueue.
@@ -479,6 +572,13 @@ def process_trade_intent(
             evidence=action_evidence,
         )
         _release_delivery_lease(state_path, delivery_event_id, now=action_now)
+        _persist_delivery_projection(
+            storage,
+            intent,
+            now=action_now,
+            delivery_event_id=delivery_event_id,
+            reason=action_reason,
+        )
         return {
             "attempted": False,
             "delivered": False,
@@ -496,6 +596,13 @@ def process_trade_intent(
             evidence=action_evidence,
         )
         _release_delivery_lease(state_path, delivery_event_id, now=action_now)
+        _persist_delivery_projection(
+            storage,
+            intent,
+            now=action_now,
+            delivery_event_id=delivery_event_id,
+            reason=card_reason,
+        )
         return {
             "attempted": False,
             "delivered": False,
@@ -512,6 +619,13 @@ def process_trade_intent(
             evidence=action_evidence,
         )
         _release_delivery_lease(state_path, delivery_event_id, now=action_now)
+        _persist_delivery_projection(
+            storage,
+            intent,
+            now=action_now,
+            delivery_event_id=delivery_event_id,
+            reason="intent_occurred_at_unavailable",
+        )
         return {
             "attempted": False,
             "delivered": False,
@@ -578,6 +692,18 @@ def process_trade_intent(
             inflight.pop(delivery_event_id, None)
             state["inflight"] = inflight
             state["last_action_revalidation"] = action_evidence
+            persisted_intent = _delivery_projection(
+                intent,
+                delivery_event_id=delivery_event_id,
+                notification_status="outbox_accepted",
+                reason="outbox_enqueue_accepted",
+            )
+            persisted_signature = _signature(persisted_intent)
+            atomic_write_json_secure(latest_path, persisted_intent)
+            if persisted_signature != state.get("last_signature"):
+                _append_jsonl(_audit_path(storage, action_now), persisted_intent)
+            state["last_signature"] = persisted_signature
+            state["last_status"] = persisted_intent["status"]
             state["updated_at"] = action_now.isoformat()
             atomic_write_json_secure(state_path, state)
     else:
@@ -588,6 +714,13 @@ def process_trade_intent(
             evidence=action_evidence,
         )
         _release_delivery_lease(state_path, delivery_event_id, now=action_now)
+        _persist_delivery_projection(
+            storage,
+            intent,
+            now=action_now,
+            delivery_event_id=delivery_event_id,
+            reason=f"outbox_enqueue_{enqueued.outcome}",
+        )
     return {
         "attempted": True,
         "accepted": enqueued.accepted,
@@ -630,50 +763,6 @@ def _ready_contract_reason(
             return coordinate_reason
         return None
     return "strategy_schema_unsupported"
-
-
-def _delivery_coordinate_reason(intent: Mapping[str, object]) -> str | None:
-    """Authorize cash SPX or one internally qualified ES-equivalent RTH lifecycle."""
-
-    coordinate = intent.get("coordinate")
-    if not isinstance(coordinate, Mapping):
-        return "source_coordinate_unavailable"
-    kind = str(coordinate.get("kind") or "")
-    if kind == "official_spx":
-        return None
-    if kind != "es_equivalent":
-        return "source_coordinate_mismatch"
-    if coordinate.get("instrument_id") != "future:ES":
-        return "source_es_coordinate_instrument_mismatch"
-
-    basis = _number(coordinate.get("basis_points"))
-    observed = _number(coordinate.get("observed_value"))
-    target = _number(coordinate.get("target_value"))
-    coordinate_spx_level = _number(coordinate.get("spx_level"))
-    intent_spx_spot = _number(intent.get("spx_spot"))
-    intent_trigger = _number(intent.get("trigger_level"))
-    if basis is None or abs(basis) > BASIS_MAX_ABS_POINTS:
-        return "source_es_coordinate_basis_invalid"
-    if (
-        observed is None
-        or observed <= 0
-        or target is None
-        or target <= 0
-        or coordinate_spx_level is None
-        or coordinate_spx_level <= 0
-        or intent_spx_spot is None
-        or intent_spx_spot <= 0
-        or intent_trigger is None
-        or intent_trigger <= 0
-    ):
-        return "source_es_coordinate_fields_incomplete"
-    if not math.isclose(observed - basis, intent_spx_spot, abs_tol=0.1):
-        return "source_es_coordinate_spot_incoherent"
-    if not math.isclose(target - basis, intent_trigger, abs_tol=0.1):
-        return "source_es_coordinate_target_incoherent"
-    if not math.isclose(coordinate_spx_level, intent_trigger, abs_tol=0.1):
-        return "source_es_coordinate_level_incoherent"
-    return None
 
 
 def _action_revalidation(
@@ -906,27 +995,3 @@ def _manual_card_contract_reason(
 
 def _action_now() -> datetime:
     return datetime.now(tz=timezone.utc)
-
-
-def _record_action_revalidation(
-    state_path: Path,
-    intent_id: str,
-    *,
-    now: datetime,
-    evidence: Mapping[str, object],
-) -> None:
-    with exclusive_state_lock(state_path):
-        state = read_json_object(state_path)
-        state["last_action_revalidation"] = dict(evidence)
-        state["updated_at"] = now.isoformat()
-        atomic_write_json_secure(state_path, state)
-
-
-def _release_delivery_lease(state_path: Path, intent_id: str, *, now: datetime) -> None:
-    with exclusive_state_lock(state_path):
-        state = read_json_object(state_path)
-        inflight = dict(state.get("inflight") or {})
-        inflight.pop(intent_id, None)
-        state["inflight"] = inflight
-        state["updated_at"] = now.isoformat()
-        atomic_write_json_secure(state_path, state)

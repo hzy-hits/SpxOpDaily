@@ -310,9 +310,9 @@ def test_trade_critical_delivery_precedes_greek_and_spring_research() -> None:
     spring_research = source.index("spring_gamma_v3 = _process_spring_gamma_v3_shadow")
 
     assert (
-        confirmed_gate
-        < spring_ticket_context
+        spring_ticket_context
         < producer_delivery
+        < confirmed_gate
         < greek_research
         < spring_research
     )

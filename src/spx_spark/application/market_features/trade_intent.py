@@ -125,6 +125,7 @@ def trade_intent_policy_version(
                 "automatic_ordering": False,
                 "coordinate_authority": (
                     "official_spx",
+                    "qualified_chain_implied_spx",
                     "qualified_rth_es_equivalent",
                 ),
             },
