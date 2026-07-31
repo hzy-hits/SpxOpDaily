@@ -10,15 +10,20 @@ wall change only after three distinct 15-minute buckets agree on a materially
 different structure.  Promoted Put Wall, flip and Call Wall values are
 published as configurable bands, together with promotion time, duration and
 confirmation count.  Active level events keep their frozen coordinate and ES
-basis so a returning SPX/parity quote cannot invalidate a valid path merely by
-changing the price source.
+basis so a price-source change cannot invalidate a valid path merely by
+changing coordinates.  During RTH, a live proxy lifecycle may be atomically
+rebased to official SPX without resetting its event or confirmation clock.
 
 ## ES-led GTH dip reclaim
 
 The GTH fast lane needs a fresh live ES quote but does not require a direct
 overnight SPX print.  It evaluates 15- and 60-minute peak-to-trough paths,
 requires a minimum descent duration, a configured recovery fraction and a
-60-second hold.  It also has a one-hour session warmup, one-hour cooldown and a
+60-second hold.  Five-second deterministic buckets feed independent causal
+15- and 60-minute windows: each horizon becomes usable when its own window is
+complete, rather than waiting for a global one-hour warmup.  A 30-second
+provider-switch debounce prevents one transient Schwab/IBKR fallback tick from
+discarding the active window.  The detector retains the one-hour cooldown and
 hard three-signal session ceiling.  A macro pre-event window or an already
 active two-leg GTH virtual spread suppresses a new entry advisory.
 
@@ -47,6 +52,20 @@ Order-map presentation exposes either one TradeReady plan or one observation
 strategy.  A candidate in the opposite direction is reduced to an invalidation
 condition; it is never rendered as a concurrent plan.  Full raw candidates are
 retained for research and replay.
+
+## Durable TradeReady publication
+
+`trade_ready` is externally visible only after the immutable notification
+event has been accepted by the durable outbox.  An internally qualified signal
+is persisted as `ready_pending_delivery` while a transient enqueue or
+reconciliation attempt is outstanding, and as `delivery_blocked` after a
+terminal notification-contract failure.  Both states keep
+`signal_status=trade_ready` for diagnostic research, but neither grants
+execution eligibility.  The Confirmed Gate stays pending for the transient
+state, finalizes the terminal state as blocked, and finalizes `trade_ready`
+only after durable acceptance.  A notification failure therefore cannot be
+reported as an actionable signal and cannot terminate the market-feature
+evaluation loop.
 
 ## Greeks boundary
 

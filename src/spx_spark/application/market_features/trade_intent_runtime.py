@@ -12,10 +12,12 @@ from spx_spark.application.market_features.trade_intent import (
     live_trade_intent_authority_issues,
 )
 from spx_spark.application.market_features.trade_intent_delivery_contract import (
+    acknowledge_trade_intent_enqueue as _acknowledge_trade_intent_enqueue,
     apply_trade_intent_delivery_result as apply_trade_intent_delivery_result,
     delivery_coordinate_reason as _delivery_coordinate_reason,
     delivery_projection as _delivery_projection,
     persist_delivery_projection as _persist_delivery_projection,
+    reconciled_delivery_result as _reconciled_delivery_result,
     record_action_revalidation as _record_action_revalidation,
     release_delivery_lease as _release_delivery_lease,
 )
@@ -199,6 +201,7 @@ def process_trade_intent(
                 ),
             )
         }
+        delivery_lease_owned_elsewhere = bool(delivery_event_id and delivery_event_id in inflight)
         terminal_phase = str(intent.get("phase") or "")
         if terminal_phase in TERMINAL_REARM_PHASES:
             ending_delivery_event_ids = {
@@ -285,7 +288,7 @@ def process_trade_intent(
                 )
             else:
                 durable_event_exists = reconciliation.acceptable
-                if reconciliation.reason == "missing":
+                if reconciliation.reason == "missing" and not delivery_lease_owned_elsewhere:
                     # No immutable outbox row exists yet, so the current
                     # decision snapshot becomes the contract for the enqueue
                     # that follows this state commit.
@@ -378,6 +381,7 @@ def process_trade_intent(
             and not duplicate
             and not delivery_blocked_by_cancellation
             and not delivery_in_progress
+            and reconciliation_fault_reason is None
         ):
             inflight[delivery_event_id] = _delivery_lease(intent, now=now)
         if ready:
@@ -504,14 +508,7 @@ def process_trade_intent(
         }
     if duplicate:
         if durable_event_exists:
-            return {
-                "attempted": False,
-                "delivered": False,
-                "accepted": True,
-                "inserted": False,
-                "duplicate": True,
-                "reason": "outbox_event_reconciled",
-            }
+            return _reconciled_delivery_result()
         _persist_delivery_projection(
             storage,
             intent,
@@ -521,13 +518,16 @@ def process_trade_intent(
         )
         return {"attempted": False, "delivered": False, "reason": "already_accepted"}
     if delivery_in_progress:
-        _persist_delivery_projection(
+        projection_persisted = _persist_delivery_projection(
             storage,
             intent,
             now=now,
             delivery_event_id=delivery_event_id,
             reason="delivery_in_progress",
+            preserve_accepted=True,
         )
+        if not projection_persisted:
+            return _reconciled_delivery_result()
         return {"attempted": False, "delivered": False, "reason": "delivery_in_progress"}
 
     if not getattr(notification, "enabled", True):
@@ -639,6 +639,7 @@ def process_trade_intent(
     # turn a harmless quote refresh into an event-id collision on replay.
     text = prepared_text
     enqueue_completed = False
+    enqueue_exception_type: str | None = None
     try:
         enqueued = enqueue_notification(
             notification,
@@ -652,60 +653,57 @@ def process_trade_intent(
         enqueue_completed = True
     except Exception as error:
         action_evidence["reason"] = "notification_enqueue_exception"
-        action_evidence["enqueue_exception_type"] = type(error).__name__
+        enqueue_exception_type = type(error).__name__
+        action_evidence["enqueue_exception_type"] = enqueue_exception_type
         _record_action_revalidation(
             state_path,
             delivery_event_id,
             now=action_now,
             evidence=action_evidence,
         )
-        raise
     finally:
         # This also runs for KeyboardInterrupt/SystemExit. SIGKILL cannot run
         # cleanup, so the signal-bounded lease remains the final crash guard.
         if not enqueue_completed:
-            _release_delivery_lease(
-                state_path,
-                delivery_event_id,
-                now=action_now,
-            )
+            _release_delivery_lease(state_path, delivery_event_id, now=action_now)
+    if enqueue_exception_type is not None:
+        _persist_delivery_projection(
+            storage,
+            intent,
+            now=action_now,
+            delivery_event_id=delivery_event_id,
+            reason="notification_enqueue_exception",
+        )
+        return {
+            "attempted": True,
+            "accepted": False,
+            "delivered": False,
+            "reason": "notification_enqueue_exception",
+            "enqueue_exception_type": enqueue_exception_type,
+            "action_revalidated_at": action_now.isoformat(),
+        }
     if enqueued.accepted:
-        with exclusive_state_lock(state_path):
-            state = read_json_object(state_path)
-            accepted = _accepted_events(state)
-            accepted[delivery_event_id] = action_now.isoformat()
-            if len(accepted) > 200:
-                accepted = dict(sorted(accepted.items(), key=lambda item: item[1])[-200:])
-            state["accepted"] = accepted
-            state.pop("delivered", None)
-            semantic_keys = {
-                str(key): str(value)
-                for key, value in dict(state.get("semantic_keys") or {}).items()
-                if key in accepted
+        accepted_after_ack, acknowledgement_reason = _acknowledge_trade_intent_enqueue(
+            storage,
+            intent,
+            now=action_now,
+            delivery_event_id=delivery_event_id,
+            notification=notification,
+            envelope=prepared_envelope,
+            text=text,
+            payload_fingerprint=prepared_payload_fingerprint,
+            targets=prepared_targets,
+            action_evidence=action_evidence,
+            outbox_configured=outbox_configured,
+        )
+        if not accepted_after_ack:
+            return {
+                "accepted": False,
+                "attempted": True,
+                "delivered": False,
+                "reason": acknowledgement_reason,
+                "action_revalidated_at": action_now.isoformat(),
             }
-            semantic_key = str(intent.get("semantic_key") or "")
-            semantic_dedupe_key = semantic_key or (f"intent:{intent_id}" if intent_id else "")
-            if semantic_dedupe_key:
-                semantic_keys[delivery_event_id] = semantic_dedupe_key
-            state["semantic_keys"] = semantic_keys
-            inflight = dict(state.get("inflight") or {})
-            inflight.pop(delivery_event_id, None)
-            state["inflight"] = inflight
-            state["last_action_revalidation"] = action_evidence
-            persisted_intent = _delivery_projection(
-                intent,
-                delivery_event_id=delivery_event_id,
-                notification_status="outbox_accepted",
-                reason="outbox_enqueue_accepted",
-            )
-            persisted_signature = _signature(persisted_intent)
-            atomic_write_json_secure(latest_path, persisted_intent)
-            if persisted_signature != state.get("last_signature"):
-                _append_jsonl(_audit_path(storage, action_now), persisted_intent)
-            state["last_signature"] = persisted_signature
-            state["last_status"] = persisted_intent["status"]
-            state["updated_at"] = action_now.isoformat()
-            atomic_write_json_secure(state_path, state)
     else:
         _record_action_revalidation(
             state_path,

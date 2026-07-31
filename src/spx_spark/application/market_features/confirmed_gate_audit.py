@@ -21,6 +21,9 @@ from spx_spark.strategy_contract import (
 
 
 TERMINAL_LEVEL_PHASES = frozenset({"invalidated", "expired"})
+READY_GATE_STATUSES = frozenset({"trade_ready", "shadow_ready"})
+PENDING_DELIVERY_STATUS = "ready_pending_delivery"
+BLOCKED_DELIVERY_STATUS = "delivery_blocked"
 
 
 def reconcile_confirmed_gate(
@@ -64,14 +67,24 @@ def reconcile_confirmed_gate(
                 pending = _pending(level_decision, intent, now=now)
             evaluated_event = str(intent.get("event_id") or "")
             evaluated_status = str(intent.get("status") or "observing")
-            if evaluated_event == event_id and evaluated_status in {
-                "trade_ready",
-                "shadow_ready",
-            }:
+            if evaluated_event == event_id and evaluated_status in READY_GATE_STATUSES:
                 finalized = _finalize(
                     pending,
                     status=evaluated_status,
                     reasons=[],
+                    now=now,
+                    intent=intent,
+                )
+                _record_once(storage, finalized, completed=completed, now=now)
+                pending = {}
+            elif evaluated_event == event_id and evaluated_status == BLOCKED_DELIVERY_STATUS:
+                reasons = [str(item) for item in intent.get("block_reasons") or []]
+                if not reasons:
+                    reasons.append("trade_gate_status_delivery_blocked")
+                finalized = _finalize(
+                    pending,
+                    status="blocked",
+                    reasons=reasons,
                     now=now,
                     intent=intent,
                 )
@@ -84,6 +97,8 @@ def reconcile_confirmed_gate(
                     quality_reason = level_decision.get("quality_reason")
                     if quality_reason:
                         reasons.append(str(quality_reason))
+                elif evaluated_status == PENDING_DELIVERY_STATUS:
+                    reasons.append("trade_gate_status_ready_pending_delivery")
                 elif evaluated_status != "blocked":
                     reasons.append(f"trade_gate_status_{evaluated_status}")
                 pending.update(
@@ -187,9 +202,7 @@ def _finalize(
     if not coordinate or coordinate.get("kind") == "unavailable":
         source_issues.append("source_coordinate_unavailable")
     normalized_reasons = normalize_block_reasons([*reasons, *source_issues])
-    effective_status = (
-        "blocked" if status in {"trade_ready", "shadow_ready"} and source_issues else status
-    )
+    effective_status = "blocked" if status in READY_GATE_STATUSES and source_issues else status
     gate_policy_version = str(pending.get("policy_version") or "") or policy_version(
         "confirmed_gate.v3",
         {"source_policy_version": pending.get("source_policy_version") or "unavailable"},

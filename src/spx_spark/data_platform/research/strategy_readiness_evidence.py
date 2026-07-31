@@ -8,7 +8,7 @@ opportunity detection and exact quote/spread joins used by the frozen cohorts.
 from __future__ import annotations
 
 import math
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
 from datetime import date, datetime, time, timezone
 from typing import Any, Protocol
@@ -35,6 +35,7 @@ _PUT_SHADOW_LANE_POLICIES = {
     ),
 }
 PUT_SHADOW_LANES = frozenset(_PUT_SHADOW_LANE_POLICIES)
+TRADE_READY_DELIVERY_DIAGNOSTIC_STATUSES = frozenset({"ready_pending_delivery", "delivery_blocked"})
 
 
 class ReadinessRecord(Protocol):
@@ -71,6 +72,44 @@ def duplicate_audit(records: Sequence[ReadinessRecord]) -> dict[str, Any]:
         "duplicate_records": duplicate_records,
         "keys": duplicate_keys,
         "sessions": sessions,
+    }
+
+
+def is_trade_ready_delivery_diagnostic(payload: Mapping[str, object]) -> bool:
+    """Identify an internal TradeReady signal that never gained execution authority."""
+
+    return bool(
+        payload.get("signal_status") == "trade_ready"
+        and payload.get("status") in TRADE_READY_DELIVERY_DIAGNOSTIC_STATUSES
+    )
+
+
+def trade_ready_delivery_diagnostic_summary(
+    records: Sequence[ReadinessRecord],
+    compliant_records: Sequence[ReadinessRecord],
+) -> dict[str, object]:
+    """Summarize non-executable internal signals retained for diagnostics."""
+
+    statuses = Counter(
+        str(record.payload.get("status") or "")
+        for record in records
+        if is_trade_ready_delivery_diagnostic(record.payload)
+    )
+    compliant_statuses = Counter(
+        str(record.payload.get("status") or "")
+        for record in compliant_records
+        if is_trade_ready_delivery_diagnostic(record.payload)
+    )
+    return {
+        "total": sum(statuses.values()),
+        "compliant": sum(compliant_statuses.values()),
+        "by_status": dict(sorted(statuses.items())),
+        "compliant_by_status": dict(sorted(compliant_statuses.items())),
+        "executable_samples": 0,
+        "rule": (
+            "signal_status=trade_ready delivery projections remain diagnostic evidence; "
+            "only status=trade_ready can enter an executable cohort"
+        ),
     }
 
 
@@ -317,6 +356,10 @@ def _semantic_record_key(record: ReadinessRecord) -> str | None:
     if record.source == "trade_intents" and row.get("status") == "shadow_ready":
         # A shadow-ready row is a repeated detector evaluation, not a second
         # opportunity.  The consumed candidate lifecycle is audited below.
+        return None
+    if record.source == "trade_intents" and is_trade_ready_delivery_diagnostic(row):
+        # Delivery projections are retained for diagnostic/contract evidence,
+        # but they are not executable opportunities and cannot create a sample.
         return None
     if record.source == "trade_intents" and row.get("status") == "trade_ready":
         intent_id = row.get("intent_id")

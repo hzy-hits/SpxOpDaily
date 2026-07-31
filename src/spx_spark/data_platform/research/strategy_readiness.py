@@ -29,6 +29,8 @@ from .strategy_readiness_evidence import (
     count_gth_exact_entries,
     count_put_exact_entries,
     duplicate_audit,
+    is_trade_ready_delivery_diagnostic,
+    trade_ready_delivery_diagnostic_summary,
 )
 from .strategy_readiness_sessions import measure_session_completeness
 
@@ -711,6 +713,10 @@ def _contract_audit(
             "by_source": dict(sorted(policy_telemetry.items())),
             "rule": "health samples declare policy continuity but are not decision telemetry",
         },
+        "trade_ready_delivery_diagnostics": trade_ready_delivery_diagnostic_summary(
+            records,
+            compliant,
+        ),
         "legacy_exclusion": {
             "total": sum(legacy.values()),
             "by_source": dict(sorted(legacy.items())),
@@ -768,6 +774,7 @@ def _record_role(record: _Record) -> str | None:
         return "gth_signal"
     if record.source == "trade_intents" and (
         row.get("status") in {"blocked", "shadow_ready", "trade_ready"}
+        or is_trade_ready_delivery_diagnostic(row)
         or _unregistered_put_shadow_record(record)
     ):
         return "trade_intent"

@@ -535,6 +535,90 @@ def test_version_three_contract_requires_all_five_fields() -> None:
     assert validate_strategy_contract(terminal, event_at=at) == ()
 
 
+def test_trade_ready_delivery_diagnostics_are_retained_but_not_executable() -> None:
+    day = date(2026, 7, 15)
+    at = datetime(2026, 7, 15, 14, 0, tzinfo=timezone.utc)
+    contract = "option:SPX:SPXW:20260715:7500:P"
+    base = {
+        **_envelope(
+            at,
+            role="trade_intent",
+            kind="official_spx",
+            instrument_id="index:SPX",
+        ),
+        "signal_status": "trade_ready",
+        "intent_id": "intent:delivery-diagnostic",
+        "event_id": "level:delivery-diagnostic",
+        "semantic_key": f"{day.isoformat()}|level_breakout_put|7500|{contract}",
+        "session_id": day.isoformat(),
+        "evaluated_at": at.isoformat(),
+        "direction": "down",
+        "contract_id": contract,
+        "execution_eligible": False,
+    }
+    records = [
+        _readiness_record(
+            "trade_intents",
+            {
+                **base,
+                "status": "ready_pending_delivery",
+                "notification_status": "pending",
+                "block_reasons": ["notification:delivery_in_progress"],
+            },
+            line=1,
+            at=at,
+        ),
+        _readiness_record(
+            "trade_intents",
+            {
+                **base,
+                "status": "delivery_blocked",
+                "notification_status": "blocked",
+                "block_reasons": ["notification:source_coordinate_unavailable"],
+            },
+            line=2,
+            at=at,
+        ),
+    ]
+
+    assert [_record_role(record) for record in records] == ["trade_intent", "trade_intent"]
+    audit = _contract_audit(
+        records,
+        selected_policies={"trade_intent": ROLE_POLICIES["trade_intent"]},
+        cohort_start_session=day,
+        policy_start_session=day,
+        rollout_boundary_at=at - timedelta(minutes=1),
+    )
+    exact = count_put_exact_entries(records, eligible_sessions={day.isoformat()})
+
+    assert audit["forward_records"] == 2
+    assert audit["compliant_records_count"] == 2
+    assert audit["trade_ready_delivery_diagnostics"] == {
+        "total": 2,
+        "compliant": 2,
+        "by_status": {"delivery_blocked": 1, "ready_pending_delivery": 1},
+        "compliant_by_status": {
+            "delivery_blocked": 1,
+            "ready_pending_delivery": 1,
+        },
+        "executable_samples": 0,
+        "rule": (
+            "signal_status=trade_ready delivery projections remain diagnostic evidence; "
+            "only status=trade_ready can enter an executable cohort"
+        ),
+    }
+    assert duplicate_audit(audit["compliant_records"])["duplicate_records"] == 0
+    assert exact == {
+        "count": 0,
+        "eligible_trade_ready_puts": 0,
+        "eligible_shadow_ready_puts": 0,
+        "exact_virtual_opens": 0,
+        "exact_shadow_quote_entries": 0,
+        "unmatched_or_inexact_puts": 0,
+        "excluded_incomplete_session": 0,
+    }
+
+
 def test_exact_spread_rejects_stale_and_skewed_leg_quotes() -> None:
     at = datetime(2026, 7, 15, 14, 0, tzinfo=timezone.utc)
     stale = _spread_snapshot(at)

@@ -54,13 +54,10 @@ def test_pending_structure_gate_applies_only_before_a_new_arm() -> None:
         structure_change_pending=True,
     )
     for phase in LevelPhase:
-        assert (
-            shadow_service._structure_pending_blocks_new_arm(
-                {"phase": phase.value},
-                structure_change_pending=True,
-            )
-            is (phase in terminal)
-        )
+        assert shadow_service._structure_pending_blocks_new_arm(
+            {"phase": phase.value},
+            structure_change_pending=True,
+        ) is (phase in terminal)
         assert not shadow_service._structure_pending_blocks_new_arm(
             {"phase": phase.value},
             structure_change_pending=False,
@@ -129,6 +126,69 @@ def test_rth_observation_releases_es_latch_when_official_spx_recovers(
     assert result.spot_source == "index:SPX"
 
 
+def test_rth_observation_releases_chain_latch_when_official_spx_recovers(
+    tmp_path, monkeypatch
+) -> None:
+    storage = SimpleNamespace(data_root=str(tmp_path))
+    state = SimpleNamespace(best_quote=lambda instrument_id: object())
+
+    class Store:
+        def __init__(self, _storage) -> None:
+            pass
+
+        def load(self, *, now):
+            assert now == NOW
+            return state
+
+    monkeypatch.setattr(shadow_service, "LatestStateStore", Store)
+    monkeypatch.setattr(
+        shadow_service,
+        "actionable_live_price",
+        lambda *_args, **_kwargs: 7420.0,
+    )
+    monkeypatch.setattr(shadow_service, "_qualified_es_basis", lambda *_args, **_kwargs: 40.0)
+    monkeypatch.setattr(shadow_service, "build_options_map", lambda _state: None)
+    monkeypatch.setattr(
+        shadow_service,
+        "resolve_trigger_coordinate",
+        lambda *_args, **_kwargs: TriggerCoordinate(
+            kind=TriggerCoordinateKind.OFFICIAL_SPX,
+            instrument_id="index:SPX",
+            observed_value=7380.0,
+            spx_observed_value=7380.0,
+            basis_points=None,
+            source="index:SPX",
+            as_of=NOW,
+            reason="rth_official_spx",
+        ),
+    )
+
+    result = shadow_service._observation(
+        storage,
+        SimpleNamespace(),
+        now=NOW,
+        session_date="2026-07-13",
+        session_mode="rth",
+        frozen_structure=_stable_structure(NOW, put_wall=7375.0, call_wall=7450.0),
+        active_decision={
+            "phase": LevelPhase.BREAK_PENDING.value,
+            "session_mode": "rth",
+            "trigger_coordinate_kind": "chain_implied_spx",
+            "trigger_instrument_id": "synthetic:SPXW_PARITY",
+            "trigger_basis_points": 40.0,
+        },
+    )
+
+    assert result.quality_ok is True
+    assert result.trigger_coordinate_kind == "official_spx"
+    assert result.trigger_instrument_id == "index:SPX"
+    assert result.spot == 7380.0
+    assert result.spx_spot == 7380.0
+    assert result.levels == {"put_wall": 7375.0, "call_wall": 7450.0}
+    assert result.trigger_basis_points == 40.0
+    assert result.spot_source == "index:SPX"
+
+
 def test_pending_structure_keeps_active_lifecycle_on_frozen_stable_levels(
     tmp_path, monkeypatch
 ) -> None:
@@ -159,9 +219,7 @@ def test_pending_structure_keeps_active_lifecycle_on_frozen_stable_levels(
             spot=96.0,
             levels=levels,
             arm_allowed=not blocks_arm,
-            arm_block_reason=(
-                "structure_change_pending_new_arm_blocked" if blocks_arm else None
-            ),
+            arm_block_reason=("structure_change_pending_new_arm_blocked" if blocks_arm else None),
         )
 
     monkeypatch.setattr(shadow_service, "_observation", fake_observation)
@@ -182,24 +240,12 @@ def test_pending_structure_keeps_active_lifecycle_on_frozen_stable_levels(
         "blocks_arm": False,
         "levels": {"put_wall": 100.0, "call_wall": 120.0},
     }
-    health = (
-        tmp_path
-        / "features"
-        / "level_decision_health"
-        / "date=2026-07-13"
-        / "samples.jsonl"
-    )
+    health = tmp_path / "features" / "level_decision_health" / "date=2026-07-13" / "samples.jsonl"
     sample = json.loads(health.read_text().splitlines()[-1])
     assert sample["structure_change_pending"] is True
     assert sample["new_arm_blocked"] is False
     assert sample["levels"]["put_wall"] == 100.0
-    audit = (
-        tmp_path
-        / "features"
-        / "level_decision_audit"
-        / "date=2026-07-13"
-        / "transitions.jsonl"
-    )
+    audit = tmp_path / "features" / "level_decision_audit" / "date=2026-07-13" / "transitions.jsonl"
     transition = json.loads(audit.read_text().splitlines()[-1])
     assert transition["structure_change_pending"] is True
     assert transition["new_arm_blocked"] is False
@@ -226,9 +272,7 @@ def test_pending_structure_blocks_new_arm_until_promotion(tmp_path, monkeypatch)
             spot=100.0,
             levels=shadow_service._structure_levels(frozen_structure),
             arm_allowed=not blocks_arm,
-            arm_block_reason=(
-                "structure_change_pending_new_arm_blocked" if blocks_arm else None
-            ),
+            arm_block_reason=("structure_change_pending_new_arm_blocked" if blocks_arm else None),
         )
 
     monkeypatch.setattr(shadow_service, "_observation", fake_observation)
@@ -261,9 +305,7 @@ def test_direct_live_structure_refreshes_walls_without_realtime_engine_tick(
             spot=100.0,
             levels=shadow_service._structure_levels(frozen_structure),
             arm_allowed=not blocks_arm,
-            arm_block_reason=(
-                "structure_change_pending_new_arm_blocked" if blocks_arm else None
-            ),
+            arm_block_reason=("structure_change_pending_new_arm_blocked" if blocks_arm else None),
         )
 
     monkeypatch.setattr(shadow_service, "_observation", fake_observation)
@@ -294,9 +336,7 @@ def test_direct_live_structure_refreshes_walls_without_realtime_engine_tick(
     assert result["new_arm_blocked"] is True
 
 
-def test_promoted_structure_still_runs_machine_drift_validation(
-    tmp_path, monkeypatch
-) -> None:
+def test_promoted_structure_still_runs_machine_drift_validation(tmp_path, monkeypatch) -> None:
     storage = SimpleNamespace(data_root=str(tmp_path))
     stable = _stable_structure(NOW, put_wall=100.0, call_wall=120.0)
     armed = advance_level_decision(
@@ -345,9 +385,7 @@ def test_promoted_structure_still_runs_machine_drift_validation(
             spot=96.0,
             levels=shadow_service._structure_levels(frozen_structure),
             arm_allowed=not blocks_arm,
-            arm_block_reason=(
-                "structure_change_pending_new_arm_blocked" if blocks_arm else None
-            ),
+            arm_block_reason=("structure_change_pending_new_arm_blocked" if blocks_arm else None),
         )
 
     monkeypatch.setattr(shadow_service, "_observation", fake_observation)
@@ -417,13 +455,7 @@ def test_shadow_persists_mutually_exclusive_state_and_transition_audit(
     assert [row["current_phase"] for row in rows] == ["approaching", "testing"]
     assert len({row["record_key"] for row in rows}) == 2
 
-    health = (
-        tmp_path
-        / "features"
-        / "level_decision_health"
-        / "date=2026-07-13"
-        / "samples.jsonl"
-    )
+    health = tmp_path / "features" / "level_decision_health" / "date=2026-07-13" / "samples.jsonl"
     samples = [json.loads(line) for line in health.read_text().splitlines()]
     latest = samples[-1]
     assert latest["schema_version"] == 2

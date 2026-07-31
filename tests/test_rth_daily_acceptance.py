@@ -10,6 +10,9 @@ from spx_spark.application.order_map.rth_daily_acceptance import (
     enqueue_degraded_acceptance,
     write_rth_daily_acceptance,
 )
+from spx_spark.application.order_map.rth_daily_acceptance_support import (
+    trade_ready_delivery_check,
+)
 from spx_spark.application.market_features.trade_intent_runtime import (
     _trade_ready_delivery_event_id,
 )
@@ -496,6 +499,54 @@ def test_trade_ready_intent_requires_fully_delivered_outbox_event(tmp_path) -> N
 
     assert "trade_ready_notification_delivery" in late["failed_checks"]
     assert diagnostics[delivery_event_id]["reasons"] == ["first_delivery_slo_breached"]
+
+
+def test_delivery_projection_is_audited_but_never_executable() -> None:
+    base = {
+        "intent_id": "intent:diagnostic",
+        "event_id": "level:diagnostic",
+        "semantic_key": "2026-07-06|breakout|up|7500|SPXW-7500C",
+        "signal_status": "trade_ready",
+        "execution_eligible": False,
+    }
+    delivery_event_id = _trade_ready_delivery_event_id(base)
+    expectation = {
+        "record_type": "trade_ready_delivery_expectation",
+        "semantic_key": base["semantic_key"],
+        "delivery_event_id": delivery_event_id,
+    }
+
+    check = trade_ready_delivery_check(
+        [expectation],
+        trade_intent_rows=[
+            {
+                **base,
+                "status": "ready_pending_delivery",
+                "notification_status": "pending",
+            },
+            {
+                **base,
+                "status": "delivery_blocked",
+                "notification_status": "blocked",
+            },
+        ],
+        outbox_path=None,
+        receipt_path=None,
+    )
+
+    assert check.passed is False
+    assert check.measured["signal_rows"] == 2
+    assert check.measured["ready_rows"] == 0
+    assert check.measured["diagnostic_signal_rows"] == 2
+    assert check.measured["signal_events"] == 1
+    assert check.measured["executable_ready_events"] == 0
+    assert check.measured["diagnostic_only_event_ids"] == [delivery_event_id]
+    assert check.measured["diagnostic_status_counts"] == {
+        "delivery_blocked": 1,
+        "ready_pending_delivery": 1,
+    }
+    assert check.measured["expectation_without_audit_events"] == []
+    assert check.measured["missing_delivery_events"] == [delivery_event_id]
 
 
 def test_rearmed_same_semantic_requires_each_delivery_event_outcome(

@@ -361,7 +361,7 @@ def _observation(
     if active_phase not in {"far", "invalidated", "expired"} and es is not None:
         official_spx_recovered = (
             session_mode == "rth"
-            and active_kind == "es_equivalent"
+            and active_kind in {"chain_implied_spx", "es_equivalent"}
             and coordinate_kind == "official_spx"
         )
         if (
@@ -377,7 +377,9 @@ def _observation(
             coordinate_instrument = "future:ES"
             coordinate_basis = active_basis
         elif (
-            active_kind in {"official_spx", "chain_implied_spx"} and coordinate_kind != active_kind
+            not official_spx_recovered
+            and active_kind in {"official_spx", "chain_implied_spx"}
+            and coordinate_kind != active_kind
         ):
             if active_basis is not None:
                 levels = dict(spx_levels)

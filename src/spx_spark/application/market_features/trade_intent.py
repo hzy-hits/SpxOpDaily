@@ -125,7 +125,6 @@ def trade_intent_policy_version(
                 "automatic_ordering": False,
                 "coordinate_authority": (
                     "official_spx",
-                    "qualified_chain_implied_spx",
                     "qualified_rth_es_equivalent",
                 ),
             },
@@ -483,9 +482,7 @@ def evaluate_trade_intent(
     mid = quote_gate.mid
     if bid is None or ask is None or mid is None:
         return {**base, "status": "blocked", "block_reasons": ["not_two_sided"]}
-    entry_limit = round_to_tick(
-        bid + feature_policy.trade_entry_spread_fraction * (ask - bid)
-    )
+    entry_limit = round_to_tick(bid + feature_policy.trade_entry_spread_fraction * (ask - bid))
     assert invalidation is not None
     assert target is not None
     intent_expires_at = now + timedelta(

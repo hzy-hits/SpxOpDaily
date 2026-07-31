@@ -467,9 +467,7 @@ def run(
         now=evaluation_now,
         settings=app.spring_gamma_v3,
     )
-    spring_gamma_snapshot = load_json(
-        latest_spring_gamma_v3_shadow_path(storage.data_root)
-    )
+    spring_gamma_snapshot = load_json(latest_spring_gamma_v3_shadow_path(storage.data_root))
     if contract_id:
         score = greek_decision.get("contract_scores", {}).get(contract_id)
         if isinstance(score, dict):

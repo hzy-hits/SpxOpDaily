@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import spx_spark.application.market_features.trade_intent_delivery_contract as trade_intent_delivery_contract
 import spx_spark.application.market_features.trade_intent_runtime as trade_intent_runtime
 from spx_spark.application.market_features.models import (
     DecisionContext,
@@ -186,13 +187,10 @@ def test_incoherent_rth_es_coordinate_is_rejected_before_delivery() -> None:
         },
     }
 
-    assert (
-        _ready_contract_reason(intent, now=NOW)
-        == "source_es_coordinate_spot_incoherent"
-    )
+    assert _ready_contract_reason(intent, now=NOW) == "source_es_coordinate_spot_incoherent"
 
 
-def test_coherent_chain_implied_coordinate_is_valid_manual_delivery_authority() -> None:
+def test_chain_implied_coordinate_is_not_rth_manual_delivery_authority() -> None:
     market, options, latest, context, repricing = _ready_inputs()
     policy = MarketFeatureSettings()
     intent = evaluate_trade_intent(
@@ -225,7 +223,7 @@ def test_coherent_chain_implied_coordinate_is_valid_manual_delivery_authority() 
             now=NOW,
             expected_policy_version=str(intent["policy_version"]),
         )
-        is None
+        == "source_coordinate_mismatch"
     )
 
 
@@ -1452,6 +1450,11 @@ def test_enqueue_ack_crash_replays_immutable_trade_ready_payload(
         "atomic_write_json_secure",
         crash_after_first_enqueue,
     )
+    monkeypatch.setattr(
+        trade_intent_delivery_contract,
+        "atomic_write_json_secure",
+        crash_after_first_enqueue,
+    )
     storage = SimpleNamespace(data_root=str(tmp_path))
 
     with pytest.raises(RuntimeError, match="simulated crash"):
@@ -1582,6 +1585,11 @@ def test_enqueue_ack_crash_then_invalidation_cancels_stale_ready(
 
     monkeypatch.setattr(
         trade_intent_runtime,
+        "atomic_write_json_secure",
+        crash_after_enqueue,
+    )
+    monkeypatch.setattr(
+        trade_intent_delivery_contract,
         "atomic_write_json_secure",
         crash_after_enqueue,
     )
@@ -1848,23 +1856,14 @@ def test_mislabeled_put_trade_ready_is_rejected_before_notification(
         "delivered": False,
         "reason": "put_lane_live_execution_forbidden",
     }
-    persisted = json.loads(
-        (tmp_path / "latest" / "trade_intent.json").read_text(encoding="utf-8")
-    )
+    persisted = json.loads((tmp_path / "latest" / "trade_intent.json").read_text(encoding="utf-8"))
     assert persisted["signal_status"] == "trade_ready"
     assert persisted["status"] == "delivery_blocked"
     assert persisted["notification_status"] == "blocked"
     audit_path = (
-        tmp_path
-        / "features"
-        / "trade_intents"
-        / f"date={NOW.date().isoformat()}"
-        / "events.jsonl"
+        tmp_path / "features" / "trade_intents" / f"date={NOW.date().isoformat()}" / "events.jsonl"
     )
-    audit = [
-        json.loads(line)
-        for line in audit_path.read_text(encoding="utf-8").splitlines()
-    ]
+    audit = [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()]
     assert all(row["status"] != "trade_ready" for row in audit)
 
 
@@ -2063,11 +2062,7 @@ def test_moving_live_quote_enqueues_immutable_trade_ready_card_once(
     assert audit["entry_limit_changed"] is True
     assert audit["entry_limit_policy"] == "immutable_decision_limit"
     intent_audit_path = (
-        tmp_path
-        / "features"
-        / "trade_intents"
-        / f"date={NOW.date().isoformat()}"
-        / "events.jsonl"
+        tmp_path / "features" / "trade_intents" / f"date={NOW.date().isoformat()}" / "events.jsonl"
     )
     persisted_statuses = [
         json.loads(line)["status"]
@@ -2416,6 +2411,287 @@ def test_trade_ready_reconciliation_rejects_mutated_outbox_contract(
     assert replay["reason"] == expected_reason
     state = json.loads((tmp_path / "latest" / "trade_intent_delivery_state.json").read_text())
     assert state["last_delivery_reconciliation"]["action"] == "hard_fault"
+    projection = json.loads((tmp_path / "latest" / "trade_intent.json").read_text())
+    assert projection["status"] == "delivery_blocked"
+    assert projection["notification_status"] == "blocked"
+
+
+def test_reconciliation_exception_does_not_acquire_lease_and_next_tick_retries(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    market, options, latest, context, repricing = _ready_inputs()
+    policy = MarketFeatureSettings()
+    intent = evaluate_trade_intent(
+        context,
+        market,
+        options,
+        latest,
+        repricing,
+        now=NOW,
+        feature_policy=policy,
+        order_policy=OrderMapPolicy(),
+    )
+    monkeypatch.setattr(
+        trade_intent_runtime,
+        "_action_revalidation",
+        lambda *_args, **_kwargs: (None, {"quote_revalidation": "test_stub"}),
+    )
+    real_inspect = trade_intent_runtime.inspect_notification_event
+    inspections = 0
+
+    def fail_first_inspection(*args, **kwargs):
+        nonlocal inspections
+        inspections += 1
+        if inspections == 1:
+            raise sqlite3.OperationalError("database is busy")
+        return real_inspect(*args, **kwargs)
+
+    monkeypatch.setattr(
+        trade_intent_runtime,
+        "inspect_notification_event",
+        fail_first_inspection,
+    )
+    storage = SimpleNamespace(data_root=str(tmp_path))
+    settings = _outbox_notification_settings(tmp_path)
+    state_path = tmp_path / "latest" / "trade_intent_delivery_state.json"
+
+    failed = process_trade_intent(
+        storage,
+        intent,
+        now=NOW,
+        action_now=NOW,
+        settings=settings,
+        feature_policy=policy,
+        expected_policy_version=str(intent["policy_version"]),
+    )
+
+    assert failed["reason"] == "outbox_reconciliation_exception:OperationalError"
+    assert json.loads(state_path.read_text())["inflight"] == {}
+    projection = json.loads((tmp_path / "latest" / "trade_intent.json").read_text())
+    assert projection["status"] == "ready_pending_delivery"
+    assert projection["notification_status"] == "pending"
+
+    retried = process_trade_intent(
+        storage,
+        intent,
+        now=NOW + timedelta(seconds=1),
+        action_now=NOW + timedelta(seconds=1),
+        settings=settings,
+        feature_policy=policy,
+        expected_policy_version=str(intent["policy_version"]),
+    )
+
+    assert retried["accepted"] is True
+    assert retried["inserted"] is True
+    assert json.loads(state_path.read_text())["inflight"] == {}
+
+
+def test_live_lease_owner_freezes_lifecycle_payload_contract(tmp_path, monkeypatch) -> None:
+    market, options, latest, context, repricing = _ready_inputs()
+    policy = MarketFeatureSettings()
+    intent = evaluate_trade_intent(
+        context,
+        market,
+        options,
+        latest,
+        repricing,
+        now=NOW,
+        feature_policy=policy,
+        order_policy=OrderMapPolicy(),
+    )
+
+    class SimulatedOwnerCrash(BaseException):
+        pass
+
+    revalidations = 0
+
+    def crash_owner(*_args, **_kwargs):
+        nonlocal revalidations
+        revalidations += 1
+        raise SimulatedOwnerCrash
+
+    monkeypatch.setattr(trade_intent_runtime, "_action_revalidation", crash_owner)
+    storage = SimpleNamespace(data_root=str(tmp_path))
+    settings = _outbox_notification_settings(tmp_path)
+    state_path = tmp_path / "latest" / "trade_intent_delivery_state.json"
+
+    with pytest.raises(SimulatedOwnerCrash):
+        process_trade_intent(
+            storage,
+            intent,
+            now=NOW,
+            action_now=NOW,
+            settings=settings,
+            feature_policy=policy,
+            expected_policy_version=str(intent["policy_version"]),
+        )
+
+    owner_state = json.loads(state_path.read_text())
+    event_id = _trade_ready_delivery_event_id(intent)
+    owner_lifecycle = next(
+        item for item in owner_state["delivery_lifecycle_events"] if item["event_id"] == event_id
+    )
+    mutated_intent = {**intent, "target_spx": float(intent["target_spx"]) + 5.0}
+    assert render_trade_intent(mutated_intent) != render_trade_intent(intent)
+
+    contender = process_trade_intent(
+        storage,
+        mutated_intent,
+        now=NOW + timedelta(seconds=1),
+        action_now=NOW + timedelta(seconds=1),
+        settings=settings,
+        feature_policy=policy,
+        expected_policy_version=str(intent["policy_version"]),
+    )
+
+    assert contender["reason"] == "delivery_in_progress"
+    contender_state = json.loads(state_path.read_text())
+    contender_lifecycle = next(
+        item
+        for item in contender_state["delivery_lifecycle_events"]
+        if item["event_id"] == event_id
+    )
+    assert contender_lifecycle["payload_fingerprint"] == owner_lifecycle["payload_fingerprint"]
+    assert revalidations == 1
+
+
+@pytest.mark.parametrize(
+    ("race", "expected_reason"),
+    (
+        ("outbox_cancellation", "outbox_ack_cancelled"),
+        ("lifecycle_terminal", "lifecycle_terminal_before_delivery_ack"),
+    ),
+)
+def test_cancellation_or_terminal_after_enqueue_never_promotes_trade_ready(
+    tmp_path,
+    monkeypatch,
+    race,
+    expected_reason,
+) -> None:
+    market, options, latest, context, repricing = _ready_inputs()
+    policy = MarketFeatureSettings()
+    intent = evaluate_trade_intent(
+        context,
+        market,
+        options,
+        latest,
+        repricing,
+        now=NOW,
+        feature_policy=policy,
+        order_policy=OrderMapPolicy(),
+    )
+    monkeypatch.setattr(
+        trade_intent_runtime,
+        "_action_revalidation",
+        lambda *_args, **_kwargs: (None, {"quote_revalidation": "test_stub"}),
+    )
+    storage = SimpleNamespace(data_root=str(tmp_path))
+    settings = _outbox_notification_settings(tmp_path)
+    real_enqueue = trade_intent_runtime.enqueue_notification
+
+    def enqueue_then_invalidate(settings_arg, envelope, **kwargs):
+        enqueued = real_enqueue(settings_arg, envelope, **kwargs)
+        if race == "outbox_cancellation":
+            trade_intent_runtime.cancel_pending_notification(
+                settings_arg,
+                envelope.event_id,
+                now=kwargs["enqueued_at"],
+                reason="concurrent_source_invalidation",
+            )
+        else:
+            process_trade_intent(
+                storage,
+                {
+                    "status": "observing",
+                    "phase": "invalidated",
+                    "event_id": intent["event_id"],
+                    "semantic_scope": intent["semantic_scope"],
+                },
+                now=kwargs["enqueued_at"],
+                settings=settings_arg,
+            )
+        return enqueued
+
+    monkeypatch.setattr(trade_intent_runtime, "enqueue_notification", enqueue_then_invalidate)
+    result = process_trade_intent(
+        storage,
+        intent,
+        now=NOW,
+        action_now=NOW,
+        settings=settings,
+        feature_policy=policy,
+        expected_policy_version=str(intent["policy_version"]),
+    )
+
+    assert result["accepted"] is False
+    assert result["reason"] == expected_reason
+    state = json.loads((tmp_path / "latest" / "trade_intent_delivery_state.json").read_text())
+    event_id = _trade_ready_delivery_event_id(intent)
+    assert event_id not in state.get("accepted", {})
+    projection = json.loads((tmp_path / "latest" / "trade_intent.json").read_text())
+    assert projection["status"] == "delivery_blocked"
+    assert projection["notification_status"] == "blocked"
+    audit_path = (
+        tmp_path / "features" / "trade_intents" / f"date={NOW.date().isoformat()}" / "events.jsonl"
+    )
+    assert all(
+        json.loads(row)["status"] != "trade_ready" for row in audit_path.read_text().splitlines()
+    )
+    with sqlite3.connect(settings.delivery_outbox_path) as connection:
+        outbox_status = connection.execute(
+            "SELECT status FROM notification_delivery_events WHERE event_id = ?",
+            (event_id,),
+        ).fetchone()
+    assert outbox_status == ("dead_letter",)
+
+
+def test_stale_pending_projection_cannot_overwrite_durable_acceptance(tmp_path) -> None:
+    market, options, latest, context, repricing = _ready_inputs()
+    intent = evaluate_trade_intent(
+        context,
+        market,
+        options,
+        latest,
+        repricing,
+        now=NOW,
+        feature_policy=MarketFeatureSettings(),
+        order_policy=OrderMapPolicy(),
+    )
+    storage = SimpleNamespace(data_root=str(tmp_path))
+    state_path = tmp_path / "latest" / "trade_intent_delivery_state.json"
+    latest_path = tmp_path / "latest" / "trade_intent.json"
+    state_path.parent.mkdir(parents=True)
+    event_id = _trade_ready_delivery_event_id(intent)
+    accepted_projection = trade_intent_delivery_contract.delivery_projection(
+        intent,
+        delivery_event_id=event_id,
+        notification_status="outbox_accepted",
+        reason="outbox_enqueue_accepted",
+    )
+    state_path.write_text(
+        json.dumps(
+            {
+                "accepted": {event_id: NOW.isoformat()},
+                "last_status": "trade_ready",
+                "last_signature": "accepted-signature",
+            }
+        )
+    )
+    latest_path.write_text(json.dumps(accepted_projection))
+
+    persisted = trade_intent_delivery_contract.persist_delivery_projection(
+        storage,
+        intent,
+        now=NOW + timedelta(seconds=1),
+        delivery_event_id=event_id,
+        reason="delivery_in_progress",
+        preserve_accepted=True,
+    )
+
+    assert persisted is False
+    assert json.loads(latest_path.read_text())["status"] == "trade_ready"
+    assert json.loads(state_path.read_text())["last_status"] == "trade_ready"
 
 
 def test_local_acceptance_without_outbox_reconciliation_is_hard_fault(
@@ -2511,21 +2787,26 @@ def test_enqueue_exception_releases_lease_and_next_tick_retries(
     settings = _outbox_notification_settings(tmp_path)
     state_path = tmp_path / "latest" / "trade_intent_delivery_state.json"
 
-    with pytest.raises(RuntimeError, match="simulated enqueue outage"):
-        process_trade_intent(
-            storage,
-            intent,
-            now=NOW,
-            action_now=NOW,
-            settings=settings,
-            feature_policy=policy,
-            expected_policy_version=str(intent["policy_version"]),
-        )
+    failed = process_trade_intent(
+        storage,
+        intent,
+        now=NOW,
+        action_now=NOW,
+        settings=settings,
+        feature_policy=policy,
+        expected_policy_version=str(intent["policy_version"]),
+    )
 
+    assert failed["accepted"] is False
+    assert failed["reason"] == "notification_enqueue_exception"
+    assert failed["enqueue_exception_type"] == "RuntimeError"
     failed_state = json.loads(state_path.read_text())
     assert failed_state["inflight"] == {}
     assert failed_state["last_action_revalidation"]["reason"] == "notification_enqueue_exception"
     assert failed_state["last_action_revalidation"]["enqueue_exception_type"] == "RuntimeError"
+    failed_projection = json.loads((tmp_path / "latest" / "trade_intent.json").read_text())
+    assert failed_projection["status"] == "ready_pending_delivery"
+    assert failed_projection["notification_status"] == "pending"
 
     retried = process_trade_intent(
         storage,

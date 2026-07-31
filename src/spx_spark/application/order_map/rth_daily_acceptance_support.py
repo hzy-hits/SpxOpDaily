@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -478,30 +479,44 @@ def trade_ready_delivery_check(
         expectations_by_event[event_id] = semantic
         events_by_semantic.setdefault(semantic, set()).add(event_id)
 
-    ready_rows = tuple(row for row in trade_intent_rows if row.get("status") == "trade_ready")
-    audited_by_event: dict[str, str] = {}
+    signal_rows = tuple(row for row in trade_intent_rows if _is_trade_ready_signal(row))
+    ready_rows = tuple(row for row in signal_rows if row.get("status") == "trade_ready")
+    diagnostic_rows = tuple(row for row in signal_rows if row.get("status") != "trade_ready")
+    signaled_by_event: dict[str, str] = {}
     audit_conflicts: set[str] = set()
+    malformed_signal_rows = 0
     malformed_ready_rows = 0
-    for row in ready_rows:
+    for row in signal_rows:
         semantic = str(row.get("semantic_key") or "")
         event_id = _trade_ready_delivery_event_id(row)
         if not semantic or not event_id:
-            malformed_ready_rows += 1
+            malformed_signal_rows += 1
+            if row.get("status") == "trade_ready":
+                malformed_ready_rows += 1
             continue
-        previous = audited_by_event.get(event_id)
+        previous = signaled_by_event.get(event_id)
         if previous is not None and previous != semantic:
             audit_conflicts.add(event_id)
             continue
-        audited_by_event[event_id] = semantic
+        signaled_by_event[event_id] = semantic
+
+    executable_by_event = {
+        event_id: semantic
+        for row in ready_rows
+        if (event_id := _trade_ready_delivery_event_id(row))
+        and (semantic := str(row.get("semantic_key") or ""))
+    }
 
     expected_ids = set(expectations_by_event)
-    audited_ids = set(audited_by_event)
-    missing_expectation_events = sorted(audited_ids - expected_ids)
-    expectation_without_audit_events = sorted(expected_ids - audited_ids)
+    signaled_ids = set(signaled_by_event)
+    executable_ids = set(executable_by_event)
+    diagnostic_only_ids = signaled_ids - executable_ids
+    missing_expectation_events = sorted(signaled_ids - expected_ids)
+    expectation_without_audit_events = sorted(expected_ids - signaled_ids)
     semantic_mismatch_events = sorted(
         event_id
-        for event_id in expected_ids & audited_ids
-        if expectations_by_event[event_id] != audited_by_event[event_id]
+        for event_id in expected_ids & signaled_ids
+        if expectations_by_event[event_id] != signaled_by_event[event_id]
     )
     delivered, delivery_diagnostics = timely_delivered_event_ids(
         outbox_path,
@@ -531,7 +546,7 @@ def trade_ready_delivery_check(
     passed = not any(
         (
             malformed_expectations,
-            malformed_ready_rows,
+            malformed_signal_rows,
             expectation_conflicts,
             audit_conflicts,
             missing_expectation_events,
@@ -542,13 +557,13 @@ def trade_ready_delivery_check(
     )
     reason = (
         "producer coverage is evaluated separately; no TradeReady delivery was expected"
-        if not expectations_by_event and not ready_rows
+        if not expectations_by_event and not signal_rows
         else (
             f"settled TradeReady delivery events "
             f"{len(accepted_ids)}/{len(expectations_by_event)} "
             f"(delivered {len(delivered)}, source-terminal {len(terminal)}); "
             f"malformed expectations {malformed_expectations}; "
-            f"malformed ready audit rows {malformed_ready_rows}"
+            f"malformed signal audit rows {malformed_signal_rows}"
         )
     )
     return OperationalCheck(
@@ -557,8 +572,19 @@ def trade_ready_delivery_check(
             "expectation_rows": len(expectation_rows),
             "expected_semantics": len(events_by_semantic),
             "expected_events": len(expectations_by_event),
+            "signal_rows": len(signal_rows),
             "ready_rows": len(ready_rows),
-            "audited_events": len(audited_by_event),
+            "diagnostic_signal_rows": len(diagnostic_rows),
+            "audited_events": len(signaled_by_event),
+            "signal_events": len(signaled_by_event),
+            "executable_ready_events": len(executable_by_event),
+            "diagnostic_only_events": len(diagnostic_only_ids),
+            "diagnostic_only_event_ids": sorted(diagnostic_only_ids),
+            "diagnostic_status_counts": dict(
+                sorted(
+                    Counter(str(row.get("status") or "unknown") for row in diagnostic_rows).items()
+                )
+            ),
             "candidate_events": len(expected_ids),
             "timely_delivered_events": len(delivered),
             "explicitly_terminal_events": len(terminal),
@@ -566,6 +592,7 @@ def trade_ready_delivery_check(
             "delivered_semantics": len(delivered_semantics),
             "terminally_settled_semantics": len(terminal_semantics),
             "malformed_expectations": malformed_expectations,
+            "malformed_signal_rows": malformed_signal_rows,
             "malformed_ready_rows": malformed_ready_rows,
             "expectation_identity_conflicts": sorted(expectation_conflicts),
             "audit_identity_conflicts": sorted(audit_conflicts),
@@ -578,13 +605,25 @@ def trade_ready_delivery_check(
             "terminal_diagnostics": terminal_diagnostics,
         },
         threshold=(
-            "every unique TradeReady expectation event exactly matches an "
-            "audit event and is either fully delivered before expiry with "
+            "every unique TradeReady expectation event exactly matches a "
+            "signal audit event; only status=trade_ready is executable, and "
+            "each event is either fully delivered before expiry with "
             "first delivery <=5s and real receipt mirrors, or has explicit "
             "per-target cancellation/expiry receipt mirrors"
         ),
         passed=passed,
         reason=reason,
+    )
+
+
+def _is_trade_ready_signal(row: Mapping[str, object]) -> bool:
+    status = str(row.get("status") or "")
+    return bool(
+        status == "trade_ready"
+        or (
+            row.get("signal_status") == "trade_ready"
+            and status in {"ready_pending_delivery", "delivery_blocked"}
+        )
     )
 
 

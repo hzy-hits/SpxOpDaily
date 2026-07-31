@@ -95,6 +95,80 @@ def test_shadow_ready_finalizes_without_becoming_live_trade_ready(tmp_path) -> N
     assert len(_rows(tmp_path)) == 1
 
 
+def test_ready_pending_delivery_waits_for_durable_trade_ready(tmp_path) -> None:
+    storage = SimpleNamespace(data_root=str(tmp_path))
+    level = _confirmed("level:delivery-pending")
+    base = {
+        **_contract(),
+        "event_id": "level:delivery-pending",
+        "intent_id": "intent:delivery-pending",
+        "contract_id": "option:SPX:SPXW:20260715:7560:C",
+        "signal_status": "trade_ready",
+        "notification_event_id": "notify:delivery-pending",
+    }
+
+    pending = reconcile_confirmed_gate(
+        storage,
+        level,
+        {
+            **base,
+            "status": "ready_pending_delivery",
+            "notification_status": "pending",
+            "block_reasons": ["notification:delivery_in_progress"],
+        },
+        now=NOW,
+    )
+    accepted = reconcile_confirmed_gate(
+        storage,
+        level,
+        {
+            **base,
+            "status": "trade_ready",
+            "notification_status": "outbox_accepted",
+            "block_reasons": [],
+        },
+        now=NOW + timedelta(seconds=1),
+    )
+
+    assert pending["status"] == "pending"
+    assert pending["last_trade_status"] == "ready_pending_delivery"
+    assert pending["last_block_reasons"] == [
+        "notification:delivery_in_progress",
+        "trade_gate_status_ready_pending_delivery",
+    ]
+    assert accepted["status"] == "trade_ready"
+    assert accepted["intent_id"] == "intent:delivery-pending"
+    assert accepted["block_reasons"] == []
+    assert len(_rows(tmp_path)) == 1
+
+
+def test_delivery_blocked_terminalizes_confirmation_without_execution(tmp_path) -> None:
+    storage = SimpleNamespace(data_root=str(tmp_path))
+    result = reconcile_confirmed_gate(
+        storage,
+        _confirmed("level:delivery-blocked"),
+        {
+            **_contract(),
+            "status": "delivery_blocked",
+            "signal_status": "trade_ready",
+            "event_id": "level:delivery-blocked",
+            "intent_id": "intent:delivery-blocked",
+            "contract_id": "option:SPX:SPXW:20260715:7560:C",
+            "notification_status": "blocked",
+            "block_reasons": ["notification:source_coordinate_unavailable"],
+            "execution_eligible": False,
+        },
+        now=NOW,
+    )
+
+    assert result["status"] == "blocked"
+    assert result["terminal"] is True
+    assert result["intent_id"] == "intent:delivery-blocked"
+    assert result["contract_id"] == "option:SPX:SPXW:20260715:7560:C"
+    assert result["block_reasons"] == ["notification:source_coordinate_unavailable"]
+    assert len(_rows(tmp_path)) == 1
+
+
 def test_projection_gap_is_preserved_as_final_block_reason(tmp_path) -> None:
     storage = SimpleNamespace(data_root=str(tmp_path))
     reconcile_confirmed_gate(
