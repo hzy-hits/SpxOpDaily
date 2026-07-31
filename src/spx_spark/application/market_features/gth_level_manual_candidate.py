@@ -139,6 +139,7 @@ def evaluate_gth_level_manual_candidate(
         "quantity": None,
         "quantity_policy": "operator_selected",
         "trend_regime": trend_regime,
+        "historical_edge_authority": "diagnostic_only",
         "block_reasons": [],
         "signal_absence_reason": (None if source_id else "no_level_or_trend_source_signal"),
         "gate_contract": {
@@ -150,7 +151,6 @@ def evaluate_gth_level_manual_candidate(
                 "usable_spx_or_es_basis_coordinate",
                 "coherent_risk_geometry",
                 "gth_breakout_trend_alignment",
-                "positive_historical_edge_when_sampled",
                 "minimum_spread_reward_risk",
                 "prior_session_chase_control",
                 "signal_ttl",
