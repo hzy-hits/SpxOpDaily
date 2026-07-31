@@ -223,7 +223,7 @@ def test_confirmed_gth_breakout_cannot_fight_established_es_regime(
     assert "gth_trend_regime_opposes_breakout" in candidate["block_reasons"]
 
 
-def test_confirmed_gth_level_requires_positive_sampled_quote_outcomes(
+def test_confirmed_gth_level_keeps_touch_quote_outcomes_diagnostic(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _patch_ready_market(monkeypatch, now=NOW, parity_price=7368.0, es_price=7398.0)
@@ -250,13 +250,18 @@ def test_confirmed_gth_level_requires_positive_sampled_quote_outcomes(
         play_stats=stats,
     )
 
-    assert candidate["status"] == "blocked"
+    assert candidate["status"] == "manual_ready"
     assert candidate["play_stats"]["semantics"] == (
         "matched_touch_quote_outcomes_not_live_fills"
     )
-    assert "historical_winrate_below_floor" in candidate["block_reasons"]
-    assert "historical_average_return_non_positive" in candidate["block_reasons"]
-    assert "historical_median_return_non_positive" in candidate["block_reasons"]
+    assert "historical_winrate_below_floor" in candidate["historical_edge_diagnostics"]
+    assert "historical_average_return_non_positive" in candidate[
+        "historical_edge_diagnostics"
+    ]
+    assert "historical_median_return_non_positive" in candidate[
+        "historical_edge_diagnostics"
+    ]
+    assert candidate["block_reasons"] == []
 
 
 def test_gth_ready_card_labels_quote_outcomes_as_not_live_winrate(

@@ -360,6 +360,9 @@ def load_settings(
             get("market_features.trade_invalidation_buffer_points")
         ),
         trade_target_em_fraction=float(get("market_features.trade_target_em_fraction")),
+        trade_confirmation_slippage_points=float(
+            get("market_features.trade_confirmation_slippage_points")
+        ),
         trade_min_target_room_points=float(get("market_features.trade_min_target_room_points")),
         trade_min_reward_risk=float(get("market_features.trade_min_reward_risk")),
         trade_time_stop_minutes=int(get("market_features.trade_time_stop_minutes")),
@@ -429,6 +432,9 @@ def load_settings(
             get("market_features.virtual_gth_spread_saturation_fraction")
         ),
         play_stats_enabled=bool(get("market_features.play_stats_enabled")),
+        play_stats_hard_gate_enabled=bool(
+            get("market_features.play_stats_hard_gate_enabled")
+        ),
         play_stats_window_days=int(get("market_features.play_stats_window_days")),
         play_stats_horizon=str(get("market_features.play_stats_horizon")),
         play_stats_min_samples=int(get("market_features.play_stats_min_samples")),

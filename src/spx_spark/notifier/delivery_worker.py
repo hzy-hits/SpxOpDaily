@@ -66,6 +66,19 @@ def run(
             notify_dead_letters=False,
             worker_id=worker_id,
         )
+        if int(summary.get("dead_lettered") or 0) > 0:
+            # A READY target that exhausts or expires must not wait for the
+            # minute-scale recovery task before raising ready_without_receipt.
+            reconciled = consume_pending_notifications(
+                settings,
+                notify_dead_letters=True,
+                worker_id=worker_id,
+            )
+            summary["dead_letter_notified"] = reconciled["dead_letter_notified"]
+            summary["dead_letter_unacknowledged"] = reconciled[
+                "dead_letter_unacknowledged"
+            ]
+            summary["ok"] = reconciled["ok"]
         if args.once or _has_activity(summary):
             print(json.dumps(summary, sort_keys=True), flush=True)
         if args.once:

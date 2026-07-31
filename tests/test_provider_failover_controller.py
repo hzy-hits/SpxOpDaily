@@ -122,6 +122,23 @@ def test_controller_activates_ibkr_after_confirmed_schwab_failure(tmp_path) -> N
     assert control_allows_new_entries(raw, now=later, max_age_seconds=60.0)
 
 
+def test_controller_records_dual_anchor_outage_after_fifteen_seconds(tmp_path) -> None:
+    cfg = settings(tmp_path)
+    now = datetime(2026, 7, 13, 14, 0, tzinfo=UTC)
+
+    evaluate_and_persist(latest(now), cfg)
+    pending = json.loads((tmp_path / "failover.json").read_text(encoding="utf-8"))
+    evaluate_and_persist(latest(now + timedelta(seconds=16)), cfg)
+    active = json.loads((tmp_path / "failover.json").read_text(encoding="utf-8"))
+
+    assert pending["dual_source_incident"]["status"] == "pending"
+    assert active["dual_source_incident"]["status"] == "active"
+    assert active["dual_source_incident"]["duration_seconds"] == 16.0
+    assert active["dual_source_incident"]["price_fill_policy"] == (
+        "no_manual_or_synthetic_fill"
+    )
+
+
 def test_controller_never_activates_ibkr_outside_rth(tmp_path) -> None:
     cfg = settings(tmp_path)
     saturday = datetime(2026, 7, 11, 14, 0, tzinfo=UTC)

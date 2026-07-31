@@ -381,6 +381,8 @@ def run_realtime_engine_cycle(
             level_shadow,
             now=projection_now,
             policy=settings.order_map,
+            feature_policy=settings.market_features,
+            level_policy=settings.level_decision,
         )
     except Exception as exc:  # noqa: BLE001 - expose failure without stopping collection
         level_repricing = {

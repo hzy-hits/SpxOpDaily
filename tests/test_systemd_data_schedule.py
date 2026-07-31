@@ -149,6 +149,19 @@ def test_es_bar_sampler_is_the_canonical_writer_with_safe_deploy_order() -> None
     assert "--check-ready" in installer
 
 
+def test_official_spx_sampler_is_independent_and_rth_only() -> None:
+    sampler_service = read("systemd/spx-spark-spx-minute-sampler.service")
+    feature_service = read("systemd/spx-spark-market-features-hot.service")
+    runner = read("scripts/run-spx-minute-sampler.sh")
+    installer = read("scripts/install-spx-spark-services.sh")
+
+    assert "scripts/run-spx-minute-sampler.sh" in sampler_service
+    assert "spx_spark.application.runtime.spx_minute_sampler" in runner
+    assert "--lock-path=%t/spx-spark-spx-minute-sampler.lock" in sampler_service
+    assert "spx-spark-spx-minute-sampler.service" in feature_service
+    assert "enable spx-spark-spx-minute-sampler.service" in installer
+
+
 def test_intraday_shock_hot_worker_is_a_dedicated_single_owner_service() -> None:
     hot_service = read("systemd/spx-spark-intraday-shock-hot.service")
     shared_service = read("systemd/spx-spark-24h.service")

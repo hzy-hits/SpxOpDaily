@@ -30,6 +30,7 @@ uv sync --frozen
 mkdir -p "$USER_UNIT_DIR"
 ln -sfn "$ROOT/systemd/spx-spark-24h.service" "$USER_UNIT_DIR/spx-spark-24h.service"
 ln -sfn "$ROOT/systemd/spx-spark-es-bar-sampler.service" "$USER_UNIT_DIR/spx-spark-es-bar-sampler.service"
+ln -sfn "$ROOT/systemd/spx-spark-spx-minute-sampler.service" "$USER_UNIT_DIR/spx-spark-spx-minute-sampler.service"
 ln -sfn "$ROOT/systemd/spx-spark-market-features-hot.service" "$USER_UNIT_DIR/spx-spark-market-features-hot.service"
 ln -sfn "$ROOT/systemd/spx-spark-intraday-shock-hot.service" "$USER_UNIT_DIR/spx-spark-intraday-shock-hot.service"
 ln -sfn "$ROOT/systemd/spx-spark-notification-delivery.service" "$USER_UNIT_DIR/spx-spark-notification-delivery.service"
@@ -74,6 +75,7 @@ done
 systemctl --user daemon-reload
 systemctl --user enable spx-spark-24h.service
 systemctl --user enable spx-spark-es-bar-sampler.service
+systemctl --user enable spx-spark-spx-minute-sampler.service
 systemctl --user enable spx-spark-market-features-hot.service
 systemctl --user enable spx-spark-intraday-shock-hot.service
 systemctl --user enable spx-spark-notification-delivery.service
@@ -93,6 +95,7 @@ systemctl --user enable --now spx-spark-backtest-weekly.timer
 echo "Installed user services:"
 echo "  spx-spark-24h.service"
 echo "  spx-spark-es-bar-sampler.service"
+echo "  spx-spark-spx-minute-sampler.service"
 echo "  spx-spark-market-features-hot.service"
 echo "  spx-spark-intraday-shock-hot.service"
 echo "  spx-spark-notification-delivery.service"
@@ -122,6 +125,7 @@ if [[ "${1:-}" == "--now" ]]; then
   systemctl --user stop spx-spark-market-features-hot.service
   systemctl --user restart spx-spark-ibkr-stream.service
   systemctl --user restart spx-spark-es-bar-sampler.service
+  systemctl --user restart spx-spark-spx-minute-sampler.service
   SAMPLER_READY_TIMEOUT_SECONDS="${SPX_SPARK_ES_BAR_READY_TIMEOUT_SECONDS:-45}"
   if [[ ! "$SAMPLER_READY_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
     echo "Invalid SPX_SPARK_ES_BAR_READY_TIMEOUT_SECONDS: $SAMPLER_READY_TIMEOUT_SECONDS" >&2
@@ -150,5 +154,5 @@ if [[ "${1:-}" == "--now" ]]; then
   systemctl --user restart spx-spark-order-map.timer
   systemctl --user restart spx-spark-order-map-status.timer
   "$ROOT/scripts/install-spxw-surface-live-service.sh" --now
-  systemctl --user status spx-spark-24h.service spx-spark-es-bar-sampler.service spx-spark-market-features-hot.service spx-spark-intraday-shock-hot.service spx-spark-notification-delivery.service spx-spark-surface-dashboard.service spx-spark-surface-live.service spx-spark-ibkr-stream.service spx-spark-rth-daily-acceptance.timer spx-spark-order-map.timer spx-spark-order-map-status.timer --no-pager
+  systemctl --user status spx-spark-24h.service spx-spark-es-bar-sampler.service spx-spark-spx-minute-sampler.service spx-spark-market-features-hot.service spx-spark-intraday-shock-hot.service spx-spark-notification-delivery.service spx-spark-surface-dashboard.service spx-spark-surface-live.service spx-spark-ibkr-stream.service spx-spark-rth-daily-acceptance.timer spx-spark-order-map.timer spx-spark-order-map-status.timer --no-pager
 fi

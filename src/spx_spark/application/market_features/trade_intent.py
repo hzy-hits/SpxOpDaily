@@ -30,6 +30,7 @@ from spx_spark.application.market_features.manual_signal_contract import (
 from spx_spark.application.market_features.session_quote_selection import (
     rth_execution_quote,
 )
+from spx_spark.application.market_features.trade_geometry import confirmation_geometry
 from spx_spark.application.market_features.play_outcome_stats import (
     PlayOutcomeStats,
     historical_edge_blockers,
@@ -39,6 +40,7 @@ from spx_spark.application.order_map.execution_quote import evaluate_execution_q
 from spx_spark.application.order_map.models import level_decision_play
 from spx_spark.application.order_map.pricing import expiry_close_utc, round_to_tick
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
+from spx_spark.settings.level_decision import LevelDecisionPolicy
 from spx_spark.settings.market_features import MarketFeatureSettings
 from spx_spark.settings.order_map import OrderMapPolicy
 from spx_spark.storage import LatestState
@@ -140,6 +142,7 @@ def evaluate_trade_intent(
     now: datetime,
     feature_policy: MarketFeatureSettings,
     order_policy: OrderMapPolicy,
+    level_policy: LevelDecisionPolicy = LevelDecisionPolicy(),
     play_stats: PlayOutcomeStats | None = None,
 ) -> dict[str, object]:
     """Fail closed unless the signal, direction and live option quote all agree."""
@@ -229,7 +232,6 @@ def evaluate_trade_intent(
                 "fresh_exact_spxw_quote",
                 "coherent_risk_geometry",
                 "minimum_remaining_reward_risk",
-                "positive_historical_edge_when_sampled",
                 "signal_ttl",
             ],
             "hard_block_reasons": [],
@@ -325,12 +327,13 @@ def evaluate_trade_intent(
     pilot_diagnostics.extend(direction_diagnostics)
     if "breakout_filter_blocked" in direction_diagnostics:
         reasons.append("breakout_filter_blocked")
-    reasons.extend(
-        historical_edge_blockers(
-            play_stats,
-            minimum_winrate=feature_policy.play_stats_min_winrate,
-        )
+    historical_diagnostics = historical_edge_blockers(
+        play_stats,
+        minimum_winrate=feature_policy.play_stats_min_winrate,
     )
+    pilot_diagnostics.extend(historical_diagnostics)
+    if feature_policy.play_stats_hard_gate_enabled:
+        reasons.extend(historical_diagnostics)
     pilot_diagnostics = list(dict.fromkeys(pilot_diagnostics))
 
     candidate = _matching_candidate(
@@ -399,18 +402,27 @@ def evaluate_trade_intent(
         if trigger_level is not None
         else None
     )
-    target = (
-        _target_spx(
-            options,
-            spot=spot,
+    geometry = (
+        confirmation_geometry(
             trigger_level=trigger_level,
             direction=direction_sign,
-            expected_move=expected_move,
-            policy=feature_policy,
+            thesis=thesis,
+            walls=[
+                row
+                for row in options.structure.get(
+                    "call_walls" if direction_sign > 0 else "put_walls"
+                )
+                or ()
+                if isinstance(row, Mapping)
+            ],
+            expected_move_points=expected_move,
+            feature_policy=feature_policy,
+            level_policy=level_policy,
         )
-        if spot is not None and trigger_level is not None
+        if trigger_level is not None
         else None
     )
+    target = geometry.target_spx if geometry is not None else None
     target_room = (
         direction_sign * (target - spot) if target is not None and spot is not None else None
     )
@@ -452,6 +464,7 @@ def evaluate_trade_intent(
             "remaining_target_room_points": target_room,
             "invalidation_distance_points": invalidation_distance,
             "remaining_reward_risk": reward_risk,
+            "confirmation_geometry": geometry.to_dict() if geometry is not None else None,
             "pilot_diagnostics": pilot_diagnostics,
             "block_reasons": unique_reasons or ["candidate_unavailable"],
             "gate_contract": {
@@ -519,6 +532,25 @@ def evaluate_trade_intent(
         "decision_bid": bid,
         "decision_ask": ask,
         "decision_mid": mid,
+        "outcome_baselines": {
+            "confirmation_time": {
+                "at": level.get("phase_at"),
+                "spx_spot": spot,
+                "semantics": "state_machine_confirmation_coordinate",
+            },
+            "displayed_ask": {
+                "at": _utc(source_at).isoformat(),
+                "bid": bid,
+                "ask": ask,
+                "mid": mid,
+                "entry_limit": entry_limit,
+                "semantics": "decision_time_two_sided_quote_not_fill",
+            },
+            "quote_reached": {
+                "source": "trade_candidate_entry_observation",
+                "semantics": "displayed_ask_reached_limit_not_broker_fill",
+            },
+        },
         "entry_limit": entry_limit,
         "entry_rule": "bid_plus_spread_fraction_to_ask",
         "entry_spread_fraction": feature_policy.trade_entry_spread_fraction,
@@ -529,6 +561,7 @@ def evaluate_trade_intent(
         "remaining_target_room_points": target_room,
         "invalidation_distance_points": invalidation_distance,
         "remaining_reward_risk": reward_risk,
+        "confirmation_geometry": geometry.to_dict() if geometry is not None else None,
         "confirmation_age_seconds": confirmation_age,
         "follow_through_points": follow_move,
         "follow_through_required_points": follow_threshold,
@@ -907,29 +940,6 @@ def _single_timestamp_blockers(
     if age < -future_tolerance_seconds:
         return [f"{prefix}_timestamp_in_future"]
     return []
-
-
-def _target_spx(
-    options: OptionStructureFrame,
-    *,
-    spot: float,
-    trigger_level: float,
-    direction: int,
-    expected_move: float | None,
-    policy: MarketFeatureSettings,
-) -> float:
-    key = "call_walls" if direction > 0 else "put_walls"
-    outward: list[float] = []
-    for row in options.structure.get(key) or []:
-        if not isinstance(row, Mapping):
-            continue
-        strike = _number(row.get("strike"))
-        if strike is not None and direction * (strike - trigger_level) > 0:
-            outward.append(strike)
-    if outward:
-        return min(outward, key=lambda value: direction * (value - trigger_level))
-    distance = max(5.0, (expected_move or 0.0) * policy.trade_target_em_fraction)
-    return spot + direction * distance
 
 
 def _contract_label(candidate: Mapping[str, object]) -> str:

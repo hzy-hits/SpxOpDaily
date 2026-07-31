@@ -224,6 +224,7 @@ class SchwabStreamSettings:
     option_plan_max_age_seconds: float
     validation_future_symbols: tuple[str, ...] = ()
     futures_option_probe_symbol: str = ""
+    stale_reconnect_seconds: float = 0.0
 
     def __post_init__(self) -> None:
         if self.mode not in {"off", "shadow", "live"}:
@@ -242,6 +243,8 @@ class SchwabStreamSettings:
             raise ValueError("SCHWAB_STREAM_RECONNECT_MAX_SECONDS cannot be below minimum")
         if self.websocket_open_timeout_seconds <= 0:
             raise ValueError("SCHWAB_STREAM_OPEN_TIMEOUT_SECONDS must be positive")
+        if self.stale_reconnect_seconds < 0:
+            raise ValueError("SCHWAB_STREAM_STALE_RECONNECT_SECONDS cannot be negative")
         if self.option_hot_symbol_limit <= 0:
             raise ValueError("SCHWAB_STREAM_OPTION_HOT_SYMBOL_LIMIT must be positive")
         if self.option_symbol_refresh_seconds <= 0:
@@ -294,6 +297,10 @@ class SchwabStreamSettings:
             websocket_open_timeout_seconds=env_float(
                 "SCHWAB_STREAM_OPEN_TIMEOUT_SECONDS",
                 float(settings_value("schwab.streaming.websocket_open_timeout_seconds")),
+            ),
+            stale_reconnect_seconds=env_float(
+                "SCHWAB_STREAM_STALE_RECONNECT_SECONDS",
+                float(settings_value("schwab.streaming.stale_reconnect_seconds")),
             ),
             shadow_latest_path=os.getenv("SCHWAB_STREAM_SHADOW_LATEST_PATH")
             or configured_shadow_path

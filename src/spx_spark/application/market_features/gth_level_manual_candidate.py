@@ -181,12 +181,13 @@ def evaluate_gth_level_manual_candidate(
         or (direction == "up" and trend_regime == "bearish")
     ):
         reasons.append("gth_trend_regime_opposes_breakout")
-    reasons.extend(
-        historical_edge_blockers(
-            play_stats,
-            minimum_winrate=policy.play_stats_min_winrate,
-        )
+    historical_diagnostics = historical_edge_blockers(
+        play_stats,
+        minimum_winrate=policy.play_stats_min_winrate,
     )
+    base["historical_edge_diagnostics"] = historical_diagnostics
+    if policy.play_stats_hard_gate_enabled:
+        reasons.extend(historical_diagnostics)
     if play_stats is not None:
         base["play_stats"] = play_stats_payload(play_stats)
     if (
@@ -494,6 +495,25 @@ def evaluate_gth_level_manual_candidate(
         "decision_bid": bid,
         "decision_mid": mid,
         "decision_ask": ask,
+        "outcome_baselines": {
+            "confirmation_time": {
+                "at": level_decision.get("phase_at"),
+                "parity_spx": float(parity["price"]),
+                "semantics": "state_machine_confirmation_coordinate",
+            },
+            "displayed_ask": {
+                "at": now.isoformat(),
+                "bid": bid,
+                "mid": mid,
+                "ask": ask,
+                "entry_limit": entry_limit,
+                "semantics": "synthetic_leg_nbbo_not_native_combo_fill",
+            },
+            "quote_reached": {
+                "source": "gth_candidate_entry_observation",
+                "semantics": "displayed_synthetic_ask_reached_limit_not_broker_fill",
+            },
+        },
         "spread_width_points": width,
         "max_loss_per_spread": round(max_loss, 2),
         "max_profit_per_spread": round(max_profit, 2),

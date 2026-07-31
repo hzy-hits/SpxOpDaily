@@ -88,6 +88,42 @@ def test_prearm_plan_requires_fresh_approaching_repricing() -> None:
     assert testing["block_reasons"] == ["level_not_approaching"]
 
 
+def test_break_pending_emits_one_sided_human_conditional_card() -> None:
+    level = {
+        **_level_decision(),
+        "phase": "break_pending",
+        "thesis": "breakout",
+        "direction": "down",
+    }
+    repricing = {
+        **_repricing(),
+        "phase": "break_pending",
+        "path_geometries": {
+            "level_breakout_put": {
+                "target_spx": 7365.0,
+                "feasible": True,
+            }
+        },
+    }
+    repricing["candidates"][0]["execution_bid"] = 12.1
+    repricing["candidates"][0]["execution_ask"] = 12.3
+
+    plan = evaluate_gamma_prearm_plan(repricing, level, now=NOW)
+    card = _notification_intent(
+        plan,
+        event_id=f"{plan['plan_id']}:break_pending",
+        now=NOW,
+    )
+
+    assert plan["notification_stage"] == "break_pending"
+    assert [item["side"] for item in plan["paths"]] == ["PUT"]
+    assert "🟡 条件准备卡 · 已发生突破/拒绝，等确认" in card["text"]
+    assert "现价 12.10/12.30" in card["text"]
+    assert "状态机 CONFIRMED 后才入场" in card["text"]
+    assert "失效 SPX 收回 7378.00" in card["text"]
+    assert "下一有效结构目标 7365.00" in card["text"]
+
+
 def _level_decision(event_id: str = "level:flip-low-approach") -> dict[str, object]:
     return {
         "phase": "approaching",

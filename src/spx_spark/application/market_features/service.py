@@ -378,6 +378,7 @@ def run(
         now=evaluation_now,
         feature_policy=policy,
         order_policy=app.order_map,
+        level_policy=app.level_decision,
         play_stats=play_stats,
     )
     trade_intent = _fence_rth_trade_intent_authority(
@@ -490,6 +491,7 @@ def run(
         spring_gamma=spring_gamma_snapshot,
         prior_session=prior_session,
         gth_position_fraction=current_gth_position,
+        invalidation_buffer_points=policy.trade_invalidation_buffer_points,
     )
     gth_signal = load_json(Path(storage.data_root) / "latest" / "gth_dip_reclaim_signal.json")
     gth_level_manual_candidate = process_gth_level_manual_candidate(

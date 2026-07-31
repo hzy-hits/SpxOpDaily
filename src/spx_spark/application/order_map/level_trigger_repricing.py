@@ -10,10 +10,13 @@ from pathlib import Path
 from typing import Mapping
 from zoneinfo import ZoneInfo
 
+from spx_spark.application.market_features.trade_geometry import confirmation_geometry
 from spx_spark.application.order_map.candidates import build_level_trigger_candidates
 from spx_spark.application.order_map.touch_time_model import estimate_touch_time
 from spx_spark.config import StorageSettings
 from spx_spark.options_map import build_options_map
+from spx_spark.settings.level_decision import LevelDecisionPolicy
+from spx_spark.settings.market_features import MarketFeatureSettings
 from spx_spark.settings.order_map import DEFAULT_ORDER_MAP_POLICY, OrderMapPolicy
 from spx_spark.state_io import atomic_write_json_secure, exclusive_state_lock
 from spx_spark.storage import LatestStateStore
@@ -39,6 +42,8 @@ def run_level_trigger_repricing(
     *,
     now: datetime,
     policy: OrderMapPolicy = DEFAULT_ORDER_MAP_POLICY,
+    feature_policy: MarketFeatureSettings = MarketFeatureSettings(),
+    level_policy: LevelDecisionPolicy = LevelDecisionPolicy(),
 ) -> dict[str, object]:
     """Reprice active state-machine paths from the latest option quotes."""
 
@@ -100,6 +105,34 @@ def run_level_trigger_repricing(
         empirical_touch_fractions=empirical_fractions,
         touch_time_model_source=touch_estimate.source,
     )
+    front = options_map.expiries[0] if options_map.expiries else None
+    geometry_by_play: dict[str, dict[str, object]] = {}
+    actionable_plays: set[str] = set()
+    for candidate in candidates:
+        direction_sign = 1 if candidate.right == "C" else -1
+        candidate_thesis = "breakout" if "breakout" in candidate.play else "fade"
+        walls = (
+            front.call_walls
+            if front is not None and direction_sign > 0
+            else front.put_walls
+            if front is not None
+            else ()
+        )
+        geometry = confirmation_geometry(
+            trigger_level=level,
+            direction=direction_sign,
+            thesis=candidate_thesis,
+            walls=[wall.to_dict() for wall in walls],
+            expected_move_points=expected_move,
+            feature_policy=feature_policy,
+            level_policy=level_policy,
+        )
+        geometry_by_play[candidate.play] = geometry.to_dict()
+        if geometry.feasible:
+            actionable_plays.add(candidate.play)
+        else:
+            warnings.append(f"{candidate.play}:confirmation_geometry_infeasible")
+    candidates = [candidate for candidate in candidates if candidate.play in actionable_plays]
     payload: dict[str, object] = {
         "schema_version": 1,
         "kind": "level_trigger_repricing",
@@ -119,6 +152,7 @@ def run_level_trigger_repricing(
             options_map.expiries[0].expected_move_points if options_map.expiries else None
         ),
         "pricing_spot": options_map.underlier.price,
+        "path_geometries": geometry_by_play,
         "trend_regime": feature_context.get("trend_regime"),
         "volatility_regime": feature_context.get("volatility_regime"),
         "candidates": [asdict(candidate) for candidate in candidates],

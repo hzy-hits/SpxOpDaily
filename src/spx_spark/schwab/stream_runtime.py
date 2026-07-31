@@ -16,7 +16,7 @@ from typing import Any
 from schwab.streaming import StreamClient
 
 from spx_spark.config import SchwabStreamSettings, StorageSettings
-from spx_spark.market_calendar import ET
+from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR, ET
 from spx_spark.provider_adapter import ProviderSnapshot, persist_provider_snapshot
 from spx_spark.schwab.gateway import SchwabSessionManager
 from spx_spark.schwab.collector_state import collector_state_path, load_collector_budget_state
@@ -206,6 +206,7 @@ class SchwabStreamRuntime:
         )
         self.monotonic = monotonic
         self._stop = threading.Event()
+        self._last_stream_activity_monotonic: float | None = None
         self.telemetry = SchwabStreamTelemetry(mode=settings.mode)
 
     def health(self) -> dict[str, Any]:
@@ -311,6 +312,8 @@ class SchwabStreamRuntime:
                     "Schwab streaming symbol list resolved to no supported instruments"
                 )
             self.telemetry.connected()
+            if self.settings.stale_reconnect_seconds > 0:
+                self._last_stream_activity_monotonic = self.monotonic()
             print(
                 json.dumps(
                     {
@@ -338,6 +341,16 @@ class SchwabStreamRuntime:
                 if listener.done():
                     listener.result()
                 clock_now = self.monotonic()
+                if (
+                    DEFAULT_MARKET_CALENDAR.is_globex_open(
+                        datetime.now(tz=timezone.utc)
+                    )
+                    and self.settings.stale_reconnect_seconds > 0
+                    and self._last_stream_activity_monotonic is not None
+                    and clock_now - self._last_stream_activity_monotonic
+                    >= self.settings.stale_reconnect_seconds
+                ):
+                    raise TimeoutError("Schwab stream watchdog detected a stalled feed")
                 if clock_now >= next_symbol_refresh_at:
                     refreshed_equities, refreshed_futures = self.symbol_resolver(
                         configured_symbols
@@ -424,6 +437,8 @@ class SchwabStreamRuntime:
         assembler: SchwabStreamQuoteAssembler,
         message: dict[str, Any],
     ) -> int:
+        if self.settings.stale_reconnect_seconds > 0:
+            self._last_stream_activity_monotonic = self.monotonic()
         accepted = assembler.ingest(message)
         service = str(message.get("service") or "UNKNOWN").upper()
         content = message.get("content")

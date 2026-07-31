@@ -123,6 +123,9 @@ class OrderCandidate:
     projection_pricing_kernel: str | None = None
     execution_quote_status: str = "range_only"
     execution_quote_reasons: tuple[str, ...] = ()
+    execution_bid: float | None = None
+    execution_ask: float | None = None
+    execution_quote_provider: str | None = None
     execution_quote_spread_bps: float | None = None
     execution_quote_spread_percentile: float | None = None
     execution_quote_source_age_seconds: float | None = None

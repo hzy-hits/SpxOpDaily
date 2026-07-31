@@ -49,6 +49,7 @@ class MarketFeatureSettings:
     trade_entry_window_seconds: float = 20.0
     trade_invalidation_buffer_points: float = 3.0
     trade_target_em_fraction: float = 0.15
+    trade_confirmation_slippage_points: float = 1.0
     trade_min_target_room_points: float = 3.0
     trade_min_reward_risk: float = 0.40
     trade_time_stop_minutes: int = 15
@@ -84,6 +85,7 @@ class MarketFeatureSettings:
     virtual_gth_exit_clock_et: str = "09:45"
     virtual_gth_spread_saturation_fraction: float = 0.85
     play_stats_enabled: bool = True
+    play_stats_hard_gate_enabled: bool = False
     play_stats_window_days: int = 20
     play_stats_horizon: str = "300"
     play_stats_min_samples: int = 30
@@ -126,6 +128,7 @@ class MarketFeatureSettings:
             self.trade_entry_window_seconds,
             self.trade_invalidation_buffer_points,
             self.trade_target_em_fraction,
+            self.trade_confirmation_slippage_points,
             self.trade_min_target_room_points,
             self.trade_min_reward_risk,
             self.play_stats_min_winrate,

@@ -221,6 +221,7 @@ def save_failover_state(
     monitoring_active: bool,
     monitoring_context: str = "closed",
     health_dimensions: dict[str, object] | None = None,
+    extra_control: dict[str, object] | None = None,
 ) -> None:
     payload = state.to_dict()
     payload["monitoring_active"] = monitoring_active
@@ -242,6 +243,8 @@ def save_failover_state(
     )
     if health_dimensions is not None:
         payload["health_dimensions"] = health_dimensions
+    if extra_control is not None:
+        payload.update(extra_control)
     atomic_write_json_secure(Path(path), payload)
 
 
@@ -496,6 +499,14 @@ def evaluate_and_persist(
         ),
         settings.thresholds,
     )
+    dual_source_incident = _dual_source_incident(
+        persisted_control.get("dual_source_incident"),
+        now=latest.as_of,
+        schwab_healthy=schwab_anchors.healthy,
+        ibkr_healthy=ibkr_anchors.healthy,
+        schwab_reason=schwab_anchors.reason,
+        ibkr_reason=ibkr_anchors.reason,
+    )
     save_failover_state(
         settings.state_path,
         updated,
@@ -519,8 +530,55 @@ def evaluate_and_persist(
                 ),
             },
         },
+        extra_control={"dual_source_incident": dual_source_incident},
     )
     return updated
+
+
+def _dual_source_incident(
+    previous: object,
+    *,
+    now: datetime,
+    schwab_healthy: bool,
+    ibkr_healthy: bool,
+    schwab_reason: str,
+    ibkr_reason: str,
+) -> dict[str, object]:
+    """Persist a 15-second dual-anchor outage without inventing a price."""
+
+    now = as_utc(now)
+    prior = previous if isinstance(previous, dict) else {}
+    started_at = None
+    raw_started = prior.get("started_at")
+    if isinstance(raw_started, str):
+        try:
+            started_at = as_utc(datetime.fromisoformat(raw_started))
+        except ValueError:
+            started_at = None
+    if not schwab_healthy and not ibkr_healthy:
+        started_at = started_at or now
+        duration = max((now - started_at).total_seconds(), 0.0)
+        return {
+            "status": "active" if duration >= 15.0 else "pending",
+            "incident_id": f"dual-source:{started_at.strftime('%Y%m%dT%H%M%SZ')}",
+            "started_at": started_at.isoformat(),
+            "duration_seconds": round(duration, 3),
+            "recording_threshold_seconds": 15.0,
+            "schwab_reason": schwab_reason,
+            "ibkr_reason": ibkr_reason,
+            "ibkr_competing_session": (
+                "10197" in ibkr_reason or "competing session" in ibkr_reason.lower()
+            ),
+            "price_fill_policy": "no_manual_or_synthetic_fill",
+        }
+    if prior.get("status") in {"pending", "active"} and started_at is not None:
+        return {
+            **prior,
+            "status": "recovered",
+            "recovered_at": now.isoformat(),
+            "duration_seconds": round(max((now - started_at).total_seconds(), 0.0), 3),
+        }
+    return {"status": "inactive", "recording_threshold_seconds": 15.0}
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:

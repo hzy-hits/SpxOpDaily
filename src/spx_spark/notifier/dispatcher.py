@@ -440,10 +440,39 @@ def _notify_dead_letters(
     dead_letters = outbox.list_dead_letters(unacknowledged_only=True)
     if not dead_letters:
         return 0
+    ready_lanes = {
+        "trade_ready",
+        "gth_manual_candidate",
+        "gth_level_manual_candidate",
+    }
+    ready_without_receipt = sorted(
+        {
+            str(entry["event_id"])
+            for entry in dead_letters
+            if str(entry.get("lane") or "") in ready_lanes
+            and (
+                (summary := outbox.summary(str(entry["event_id"]))) is None
+                or summary.delivered_targets == 0
+            )
+        }
+    )
+    ready_line = (
+        f"\nready_without_receipt={len(ready_without_receipt)}："
+        + "、".join(ready_without_receipt[:3])
+        if ready_without_receipt
+        else ""
+    )
     sinks = deliver_trade_push(
         settings,
-        title="SPX 投递死信告警",
-        text=f"{len(dead_letters)} 条告警投递死信，请检查投递链路。",
+        title=(
+            "SPX READY 未送达告警"
+            if ready_without_receipt
+            else "SPX 投递死信告警"
+        ),
+        text=(
+            f"{len(dead_letters)} 个投递目标进入死信；outbox 已完成重试与对账。"
+            f"{ready_line}"
+        ),
         kind="status",
         lane="ops",
         friend=False,

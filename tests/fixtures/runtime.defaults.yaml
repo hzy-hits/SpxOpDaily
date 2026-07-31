@@ -110,6 +110,7 @@ market_features:
   trade_entry_window_seconds: {value: 20.0, description: Alert candidate entry observation window.}
   trade_invalidation_buffer_points: {value: 3.0, description: SPX invalidation buffer.}
   trade_target_em_fraction: {value: 0.15, description: Fallback target EM fraction.}
+  trade_confirmation_slippage_points: {value: 1.0, description: Confirmation-to-target slippage allowance.}
   trade_min_target_room_points: {value: 3.0, description: Hard RTH target-room floor.}
   trade_min_reward_risk: {value: 0.40, description: Hard RTH reward-risk floor.}
   trade_time_stop_minutes: {value: 15, description: Default time stop; new entries stop at 15:30 ET and all reviewed TradeIntent lanes hard-exit by 15:45 ET.}
@@ -144,6 +145,7 @@ market_features:
   virtual_gth_time_stop_minutes: {value: 810, description: GTH virtual strategy backstop from the 20:15 ET open through the shared 09:45 ET exit clock.}
   virtual_gth_spread_saturation_fraction: {value: 0.85, description: GTH two-leg virtual spread value-saturation exit fraction.}
   play_stats_enabled: {value: true, description: Enables fail-open rolling win-rate stats on trade-ready alerts.}
+  play_stats_hard_gate_enabled: {value: false, description: Keeps touch-quote history diagnostic until fill-aligned validation is complete.}
   play_stats_window_days: {value: 20, description: Rolling lookback window in days for pricing outcomes.}
   play_stats_horizon: {value: "300", description: Outcome horizon key in seconds defining a win.}
   play_stats_min_samples: {value: 30, description: Minimum matched outcomes before historical edge gates a signal.}
@@ -337,6 +339,9 @@ schwab:
     websocket_open_timeout_seconds:
       value: 10.0
       description: Timeout passed to the WebSocket connection handshake.
+    stale_reconnect_seconds:
+      value: 45.0
+      description: Schwab open-session no-message reconnect watchdog.
     shadow_latest_path:
       value: ""
       description: Optional shadow latest-state path; empty uses schwab_stream_shadow.json under the configured data latest directory.

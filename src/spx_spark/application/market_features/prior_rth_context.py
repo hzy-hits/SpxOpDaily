@@ -13,13 +13,17 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from spx_spark.application.market_features.state import load_json, save_json
+from spx_spark.application.market_features.spx_standardized import (
+    load_standardized_spx_samples,
+)
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 from spx_spark.marketdata import as_utc
 from spx_spark.storage import LatestState
 
 
 SCHEMA_VERSION = "prior_rth_context.v1"
-MINUTE_COVERAGE_REQUIRED = 0.70
+MINUTE_COVERAGE_READY = 0.95
+MINUTE_COVERAGE_PARTIAL = 0.70
 SESSION_EDGE_TOLERANCE = timedelta(minutes=10)
 SHOCK_RETURN_FRACTION = 0.01
 EXTREME_LOCATION_FRACTION = 0.20
@@ -84,7 +88,7 @@ def build_prior_rth_context(
     open_lag = points[0][0] - session.open_at
     close_lag = session.close_at - points[-1][0]
     quality_reasons: list[str] = []
-    if coverage < MINUTE_COVERAGE_REQUIRED:
+    if coverage < MINUTE_COVERAGE_READY:
         quality_reasons.append("prior_rth_minute_coverage_low")
     if open_lag > SESSION_EDGE_TOLERANCE:
         quality_reasons.append("prior_rth_open_missing")
@@ -226,11 +230,30 @@ def process_prior_rth_context(
         return current
     quote = latest.best_quote("index:SPX")
     official_close = _number(quote.close) if quote is not None else None
+    canonical_samples = load_standardized_spx_samples(data_root)
+    source_samples = canonical_samples or list(samples)
     built = build_prior_rth_context(
-        samples,
+        source_samples,
         now=now,
         official_close=official_close,
     )
+    if (
+        built.get("status") == "partial"
+        and _number_signed(built.get("minute_coverage")) is not None
+        and float(built["minute_coverage"]) < MINUTE_COVERAGE_PARTIAL
+    ):
+        built = {
+            **built,
+            "status": "unavailable",
+            "reasons": list(
+                dict.fromkeys(
+                    [
+                        *(str(item) for item in built.get("reasons") or ()),
+                        "prior_rth_minute_coverage_unusable",
+                    ]
+                )
+            ),
+        }
     if built.get("status") in {"ready", "partial"}:
         save_json(path, built)
         return built

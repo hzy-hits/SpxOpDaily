@@ -91,6 +91,36 @@ def test_prior_down_shock_marks_only_lower_extreme_put_as_chase_risk() -> None:
     assert "本票同向追单风险高" in prior_session_operator_line(floor_put)
 
 
+def test_seventy_seven_percent_spx_path_is_partial_not_ready() -> None:
+    session = DEFAULT_MARKET_CALENDAR.session(
+        DEFAULT_MARKET_CALENDAR.previous_trading_day(
+            DEFAULT_MARKET_CALENDAR.research_expiry(NOW)
+        )
+    )
+    assert session is not None
+    minutes = [session.open_at + timedelta(minutes=index) for index in range(300)]
+    minutes.append(session.close_at)
+    samples = [
+        {
+            "at": at.isoformat(),
+            "instruments": {
+                "index:SPX": {
+                    "price": 7400.0 + index / 10.0,
+                    "reference_close": 7390.0,
+                }
+            },
+        }
+        for index, at in enumerate(minutes)
+    ]
+
+    context = build_prior_rth_context(samples, now=NOW)
+
+    assert context["minute_coverage"] == pytest.approx(301 / 390)
+    assert context["status"] == "partial"
+    assert "prior_rth_minute_coverage_low" in context["reasons"]
+    assert context["execution_gate"] is False
+
+
 def test_gth_position_fraction_is_bounded_and_requires_a_range() -> None:
     assert gth_position_fraction(
         {"price": 7355.25, "session_low": 7354.5, "session_high": 7392.5}

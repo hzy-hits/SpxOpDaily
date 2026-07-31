@@ -1094,7 +1094,7 @@ def test_default_reward_risk_floor_retains_observed_sub_one_rth_opportunity() ->
     assert "remaining_reward_risk_insufficient" not in intent["block_reasons"]
 
 
-def test_sufficiently_sampled_negative_historical_edge_blocks_manual_entry() -> None:
+def test_sufficiently_sampled_negative_historical_edge_is_diagnostic_by_default() -> None:
     market, options, latest, context, repricing = _ready_inputs()
     stats = PlayOutcomeStats(
         play="level_breakout_call",
@@ -1120,13 +1120,44 @@ def test_sufficiently_sampled_negative_historical_edge_blocks_manual_entry() -> 
         play_stats=stats,
     )
 
-    assert intent["status"] == "blocked"
+    assert intent["status"] == "trade_ready"
     assert {
         "historical_winrate_below_floor",
         "historical_average_return_non_positive",
         "historical_median_return_non_positive",
-    }.issubset(intent["block_reasons"])
+    }.issubset(intent["pilot_diagnostics"])
+    assert intent["block_reasons"] == []
     assert intent["play_stats"]["sample_count"] == 54
+
+
+def test_historical_edge_can_be_restored_as_an_explicit_hard_gate() -> None:
+    market, options, latest, context, repricing = _ready_inputs()
+    stats = PlayOutcomeStats(
+        play="level_breakout_call",
+        level_kind="call_wall",
+        sample_count=54,
+        winrate=0.3889,
+        avg_return=-0.02161,
+        median_return=-0.018245,
+        window_days=20,
+        horizon="300",
+        as_of=NOW.isoformat(),
+    )
+
+    intent = evaluate_trade_intent(
+        context,
+        market,
+        options,
+        latest,
+        repricing,
+        now=NOW,
+        feature_policy=MarketFeatureSettings(play_stats_hard_gate_enabled=True),
+        order_policy=OrderMapPolicy(),
+        play_stats=stats,
+    )
+
+    assert intent["status"] == "blocked"
+    assert "historical_winrate_below_floor" in intent["block_reasons"]
 
 
 def test_rth_intent_policy_blocks_premarket_trade_ready() -> None:

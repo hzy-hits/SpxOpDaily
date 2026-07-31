@@ -31,6 +31,7 @@ from spx_spark.state_io import (
 CONTRACT_VERSION = "gamma_prearm_plan.v1"
 REPRICING_MAX_AGE_SECONDS = 45.0
 DELIVERY_TTL_SECONDS = 90.0
+PREPARATION_PHASES = frozenset({"approaching", "break_pending", "reject_pending"})
 
 
 def evaluate_gamma_prearm_plan(
@@ -41,6 +42,7 @@ def evaluate_gamma_prearm_plan(
     spring_gamma: Mapping[str, object] | None = None,
     prior_session: Mapping[str, object] | None = None,
     gth_position_fraction: float | None = None,
+    invalidation_buffer_points: float = 3.0,
 ) -> dict[str, object]:
     """Build one conditional plan before price reaches a frozen Gamma level."""
 
@@ -61,12 +63,22 @@ def evaluate_gamma_prearm_plan(
         "operator_action": "prepare_only",
         "block_reasons": [],
     }
-    if phase != "approaching":
+    if phase not in PREPARATION_PHASES:
         return {**base, "block_reasons": ["level_not_approaching"]}
-    if repricing.get("status") != "repriced" or repricing.get("phase") != "approaching":
-        return {**base, "status": "blocked", "block_reasons": ["approach_repricing_unavailable"]}
+    if repricing.get("status") != "repriced" or repricing.get("phase") != phase:
+        reason = (
+            "approach_repricing_unavailable"
+            if phase == "approaching"
+            else "preparation_repricing_unavailable"
+        )
+        return {**base, "status": "blocked", "block_reasons": [reason]}
     if str(repricing.get("event_id") or "") != source_event_id:
-        return {**base, "status": "blocked", "block_reasons": ["approach_event_mismatch"]}
+        reason = (
+            "approach_event_mismatch"
+            if phase == "approaching"
+            else "preparation_event_mismatch"
+        )
+        return {**base, "status": "blocked", "block_reasons": [reason]}
     repriced_at = _time(repricing.get("as_of"))
     age_seconds = (now - repriced_at).total_seconds() if repriced_at is not None else None
     if (
@@ -74,13 +86,29 @@ def evaluate_gamma_prearm_plan(
         or age_seconds < -1.0
         or age_seconds > REPRICING_MAX_AGE_SECONDS
     ):
-        return {**base, "status": "blocked", "block_reasons": ["approach_repricing_stale"]}
+        reason = (
+            "approach_repricing_stale"
+            if phase == "approaching"
+            else "preparation_repricing_stale"
+        )
+        return {**base, "status": "blocked", "block_reasons": [reason]}
 
+    active_play = _active_play(level_decision) if phase != "approaching" else None
     candidates = [
-        _plan_path(item)
+        _plan_path(
+            item,
+            level=_number(repricing.get("spx_level")),
+            invalidation_buffer_points=invalidation_buffer_points,
+            geometry=(
+                repricing.get("path_geometries", {}).get(str(item.get("play") or ""))
+                if isinstance(repricing.get("path_geometries"), Mapping)
+                else None
+            ),
+        )
         for item in repricing.get("candidates") or []
         if isinstance(item, Mapping)
         and item.get("execution_quote_status") == "executable"
+        and (active_play is None or item.get("play") == active_play)
     ]
     paths = sorted(
         (item for item in candidates if item is not None),
@@ -129,6 +157,7 @@ def evaluate_gamma_prearm_plan(
     return {
         **base,
         "status": "prearm_ready",
+        "notification_stage": phase,
         "plan_id": plan_id,
         "level_kind": level_kind,
         "level": level,
@@ -161,6 +190,7 @@ def process_gamma_prearm_plan(
     spring_gamma: Mapping[str, object] | None = None,
     prior_session: Mapping[str, object] | None = None,
     gth_position_fraction: float | None = None,
+    invalidation_buffer_points: float = 3.0,
     notification: NotificationSettings | None = None,
 ) -> dict[str, object]:
     """Persist and deliver a Gamma preparation plan once per semantic level."""
@@ -173,11 +203,14 @@ def process_gamma_prearm_plan(
         spring_gamma=spring_gamma,
         prior_session=prior_session,
         gth_position_fraction=gth_position_fraction,
+        invalidation_buffer_points=invalidation_buffer_points,
     )
     state_path = Path(storage.data_root) / "latest" / "gamma_prearm_plan_state.json"
     projection_path = Path(storage.data_root) / "latest" / "gamma_prearm_plan.json"
     event_id = (
-        f"{plan['plan_id']}:ready" if plan.get("status") == "prearm_ready" else None
+        f"{plan['plan_id']}:{plan.get('notification_stage')}"
+        if plan.get("status") == "prearm_ready"
+        else None
     )
     settings = notification or NotificationSettings.from_env()
     with exclusive_state_lock(state_path):
@@ -233,7 +266,13 @@ def process_gamma_prearm_plan(
     }
 
 
-def _plan_path(candidate: Mapping[str, object]) -> dict[str, object] | None:
+def _plan_path(
+    candidate: Mapping[str, object],
+    *,
+    level: float | None,
+    invalidation_buffer_points: float,
+    geometry: object = None,
+) -> dict[str, object] | None:
     play = str(candidate.get("play") or "")
     contract_id = str(candidate.get("contract_id") or "")
     side = str(candidate.get("right") or "")
@@ -249,6 +288,8 @@ def _plan_path(candidate: Mapping[str, object]) -> dict[str, object] | None:
         "side": "CALL" if side == "C" else "PUT",
         "contract_id": contract_id,
         "condition": _condition(play),
+        "decision_bid": _number(candidate.get("execution_bid")),
+        "decision_ask": _number(candidate.get("execution_ask")),
         "projected_low": _number(candidate.get("projection_range_low")),
         "projected_mid": _number(candidate.get("projected_mid")),
         "projected_high": _number(candidate.get("projection_range_high")),
@@ -258,6 +299,17 @@ def _plan_path(candidate: Mapping[str, object]) -> dict[str, object] | None:
         "frontrun_limit": _number(candidate.get("frontrun_limit")),
         "touch_eta_minutes": _number(candidate.get("touch_eta_minutes")),
         "quote_provider": candidate.get("execution_quote_provider"),
+        "invalidation_spx": (
+            round(
+                level - invalidation_buffer_points
+                if side == "C"
+                else level + invalidation_buffer_points,
+                2,
+            )
+            if level is not None
+            else None
+        ),
+        "confirmation_geometry": dict(geometry) if isinstance(geometry, Mapping) else None,
     }
 
 
@@ -273,8 +325,16 @@ def _notification_intent(
         "flip_high": "Flip High",
         "call_wall": "Call Wall",
     }.get(str(plan.get("level_kind") or ""), "Gamma 位")
+    pending = str(plan.get("notification_stage") or "") in {
+        "break_pending",
+        "reject_pending",
+    }
     lines = [
-        "🎯 GAMMA 伏击计划 · 先准备，未触发不下单",
+        (
+            "🟡 条件准备卡 · 已发生突破/拒绝，等确认"
+            if pending
+            else "🎯 GAMMA 伏击计划 · 先准备，未触发不下单"
+        ),
         (
             f"区域  {level_label} {float(plan['level']):.2f} · "
             f"当前 SPX {float(plan['current_spx']):.2f} · "
@@ -287,13 +347,29 @@ def _notification_intent(
         price_range = _price_range(item)
         lines.append(
             f"路径{index}  {item['condition']}：{item['side']} · "
-            f"{option_contract_label(str(item['contract_id']))} · 到位参考 {price_range}"
+            f"{option_contract_label(str(item['contract_id']))} · "
+            f"现价 {_quote_range(item)} · 最高参考 {price_range}"
         )
+        invalidation = _number(item.get("invalidation_spx"))
+        target = _geometry_target(item.get("confirmation_geometry"))
+        lines.append(
+            f"触发  状态机 CONFIRMED 后才入场 · "
+            f"失效 SPX {'跌回' if item['side'] == 'CALL' else '收回'} "
+            f"{invalidation:.2f}"
+            if invalidation is not None
+            else "触发  状态机 CONFIRMED 后才入场"
+        )
+        if target is not None:
+            lines.append(f"空间  下一有效结构目标 {target:.2f}，READY 时重算盈亏比")
     lines.append(spring_gamma_operator_line(plan.get("spring_gamma")))
     lines.append(_prior_session_plan_line(plan))
     lines.extend(
         (
-            "动作  现在不追；只准备订单，价格到 Gamma 位并确认对应路径后再提交",
+            (
+                "动作  条件已出现；预填订单，只有 CONFIRMED 且重新报价通过后才提交"
+                if pending
+                else "动作  现在不追；只准备订单，价格到 Gamma 位并确认对应路径后再提交"
+            ),
             "失效  Gamma 结构位变化、状态机离开本事件，或出现相反路径确认",
             "权限  预埋计划不是方向信号；自动下单关闭",
         )
@@ -307,7 +383,11 @@ def _notification_intent(
         "lane": "gamma_prearm_plan",
         "occurred_at": now.isoformat(),
         "expires_at": expires_at.isoformat(),
-        "title": "SPX GAMMA 伏击计划 · 等触发",
+        "title": (
+            "SPX 条件准备卡 · 等最终确认"
+            if pending
+            else "SPX GAMMA 伏击计划 · 等触发"
+        ),
         "text": text,
         "friend": True,
         "feishu_text": text,
@@ -331,6 +411,29 @@ def _price_range(path: Mapping[str, object]) -> str:
         return f"{low:.2f}–{high:.2f}"
     limit = _number(path.get("limit_conservative"))
     return f"≤ {limit:.2f}" if limit is not None else "触位时重算"
+
+
+def _quote_range(path: Mapping[str, object]) -> str:
+    bid = _number(path.get("decision_bid"))
+    ask = _number(path.get("decision_ask"))
+    if bid is not None and ask is not None:
+        return f"{bid:.2f}/{ask:.2f}"
+    return "重新报价"
+
+
+def _geometry_target(value: object) -> float | None:
+    return _number(value.get("target_spx")) if isinstance(value, Mapping) else None
+
+
+def _active_play(level_decision: Mapping[str, object]) -> str | None:
+    thesis = str(level_decision.get("thesis") or "")
+    direction = str(level_decision.get("direction") or "")
+    return {
+        ("breakout", "up"): "level_breakout_call",
+        ("breakout", "down"): "level_breakout_put",
+        ("fade", "up"): "level_fade_call",
+        ("fade", "down"): "level_fade_put",
+    }.get((thesis, direction))
 
 
 def _prior_session_plan_line(plan: Mapping[str, object]) -> str:
