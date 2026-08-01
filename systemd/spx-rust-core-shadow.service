@@ -12,7 +12,9 @@ User=ubuntu
 Group=ubuntu
 UMask=0077
 RuntimeDirectory=spx-spark-core-shadow
+RuntimeDirectoryMode=0700
 StateDirectory=spx-spark-core-shadow
+StateDirectoryMode=0700
 ConfigurationDirectory=spx-spark-core-shadow
 ConfigurationDirectoryMode=0750
 Environment=RUST_LOG=info

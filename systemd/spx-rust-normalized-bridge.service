@@ -15,6 +15,7 @@ User=ubuntu
 Group=ubuntu
 UMask=0077
 StateDirectory=spx-spark-bridge-shadow
+StateDirectoryMode=0700
 ConfigurationDirectory=spx-spark-core-shadow
 ConfigurationDirectoryMode=0750
 Environment=RUST_LOG=info
