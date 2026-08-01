@@ -8,7 +8,7 @@ from spx_spark.ibkr.collector import (
     has_competing_session_error,
     provider_error_count,
 )
-from spx_spark.config import IbkrSettings
+from spx_spark.config import IbkrSettings, StorageSettings
 from spx_spark.ibkr.verifier import (
     IbkrError,
     VerifyRow,
@@ -16,7 +16,16 @@ from spx_spark.ibkr.verifier import (
     estimate_atm_reference,
     parse_index_spec,
 )
-from spx_spark.marketdata import InstrumentType, MarketDataQuality, Provider, ProviderStatus
+from spx_spark.marketdata import (
+    InstrumentType,
+    MarketDataQuality,
+    Provider,
+    ProviderStatus,
+    QuoteMarketSession,
+    quote_from_dict,
+)
+from spx_spark.provider_adapter import persist_provider_snapshot
+from spx_spark.storage import LatestStateStore
 
 
 def make_settings(**overrides) -> IbkrSettings:
@@ -104,6 +113,139 @@ def test_quotes_from_rows_normalizes_ibkr_verify_rows():
     assert quotes[0].provider == Provider.IBKR
     assert quotes[0].quality == MarketDataQuality.LIVE
     assert quotes[0].effective_price == 7500.5
+
+
+def _spxw_row(*, ticker_time: str | None) -> VerifyRow:
+    return VerifyRow(
+        label="option:SPXW:20260803:6300:C",
+        kind="option",
+        symbol="SPX",
+        market_data_type=1,
+        bid=5.0,
+        ask=5.2,
+        market_price=5.1,
+        ticker_time=ticker_time,
+    )
+
+
+def test_ibkr_spxw_market_session_comes_from_source_timestamp() -> None:
+    gth_source = datetime(2026, 8, 3, 12, 0, tzinfo=timezone.utc)
+    rth_source = datetime(2026, 8, 3, 14, 0, tzinfo=timezone.utc)
+    next_gth_receipt = datetime(2026, 8, 4, 1, 0, tzinfo=timezone.utc)
+
+    gth_quote = quotes_from_rows(
+        [_spxw_row(ticker_time=gth_source.isoformat())],
+        received_at=gth_source,
+        stale_after_seconds=15.0,
+    )[0]
+    old_rth_quote = quotes_from_rows(
+        [_spxw_row(ticker_time=rth_source.isoformat())],
+        received_at=next_gth_receipt,
+        stale_after_seconds=15.0,
+    )[0]
+
+    assert gth_quote.market_session is QuoteMarketSession.GTH
+    assert old_rth_quote.market_session is QuoteMarketSession.REGULAR
+    assert quote_from_dict(gth_quote.to_dict()).market_session is QuoteMarketSession.GTH
+
+
+def test_ibkr_spx_session_fails_closed_outside_trading_segments() -> None:
+    gap_source = datetime(2026, 8, 3, 13, 27, tzinfo=timezone.utc)
+    weekend_source = datetime(2026, 8, 1, 14, 0, tzinfo=timezone.utc)
+
+    for source in (gap_source, weekend_source):
+        quote = quotes_from_rows(
+            [_spxw_row(ticker_time=source.isoformat())],
+            received_at=source,
+            stale_after_seconds=15.0,
+        )[0]
+        assert quote.market_session is None
+
+    missing_source = quotes_from_rows(
+        [_spxw_row(ticker_time=None)],
+        received_at=datetime(2026, 8, 3, 12, 0, tzinfo=timezone.utc),
+        stale_after_seconds=15.0,
+    )[0]
+    assert missing_source.market_session is None
+
+
+def test_ibkr_spx_session_does_not_relabel_cash_index_or_es_as_gth() -> None:
+    gth_source = datetime(2026, 8, 3, 12, 0, tzinfo=timezone.utc)
+    rows = [
+        VerifyRow(
+            label="index:SPX",
+            kind="index",
+            symbol="SPX",
+            market_data_type=1,
+            last=6300.0,
+            ticker_time=gth_source.isoformat(),
+        ),
+        VerifyRow(
+            label="future:ES",
+            kind="future",
+            symbol="ES",
+            market_data_type=1,
+            last=6310.0,
+            ticker_time=gth_source.isoformat(),
+        ),
+    ]
+
+    spx, es = quotes_from_rows(
+        rows,
+        received_at=gth_source,
+        stale_after_seconds=15.0,
+    )
+
+    assert spx.market_session is None
+    assert es.market_session is None
+
+
+def test_ibkr_cash_spx_is_regular_during_rth() -> None:
+    rth_source = datetime(2026, 8, 3, 14, 0, tzinfo=timezone.utc)
+    row = VerifyRow(
+        label="index:SPX",
+        kind="index",
+        symbol="SPX",
+        market_data_type=1,
+        last=6300.0,
+        ticker_time=rth_source.isoformat(),
+    )
+
+    quote = quotes_from_rows(
+        [row],
+        received_at=rth_source,
+        stale_after_seconds=15.0,
+    )[0]
+
+    assert quote.market_session is QuoteMarketSession.REGULAR
+
+
+def test_ibkr_spxw_market_session_survives_latest_state_persistence(tmp_path) -> None:
+    gth_source = datetime(2026, 8, 3, 12, 0, tzinfo=timezone.utc)
+    snapshot = snapshot_from_rows(
+        [_spxw_row(ticker_time=gth_source.isoformat())],
+        received_at=gth_source,
+        stale_after_seconds=15.0,
+        connected=True,
+        authenticated=True,
+        latency_ms=None,
+        replace_provider_quotes=True,
+    )
+    settings = StorageSettings(
+        data_root=str(tmp_path / "data"),
+        latest_state_path=str(tmp_path / "data" / "latest" / "state.json"),
+        raw_file_name="quotes.jsonl",
+        include_raw_payload=False,
+        latest_stale_after_seconds=15.0,
+        slow_index_stale_after_seconds=300.0,
+        slow_index_labels=frozenset({"index:SKEW", "index:VVIX"}),
+    )
+
+    persist_provider_snapshot(snapshot, settings)
+    persisted = LatestStateStore(settings).load(now=gth_source)
+
+    assert len(persisted.quotes) == 1
+    assert persisted.quotes[0].market_session is QuoteMarketSession.GTH
 
 
 def test_quotes_from_rows_preserves_non_cboe_index_exchange():

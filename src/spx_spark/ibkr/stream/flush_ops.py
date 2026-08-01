@@ -9,6 +9,7 @@ from spx_spark.ibkr.stream import deps as stream_deps
 from spx_spark.ibkr.stream.models import lifecycle_has_qualification_budget
 from spx_spark.ibkr.verifier import VerifyRow
 from spx_spark.config import default_spxw_expiry
+from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 from spx_spark.marketdata import MarketDataQuality, ProviderStatus
 
 decide_after_flush = stream_deps.decide_after_flush
@@ -120,6 +121,7 @@ class FlushOps:
             reason=outage_reason,
             replace_provider_quotes=True,
             source_session=source_session,
+            market_calendar=getattr(self, "market_calendar", DEFAULT_MARKET_CALENDAR),
         )
         write_result = persist_provider_snapshot(snapshot, self.storage_settings)
         fresh_quote_count = sum(

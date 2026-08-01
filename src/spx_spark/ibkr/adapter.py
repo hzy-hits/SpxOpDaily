@@ -10,6 +10,7 @@ from collections.abc import Mapping
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
+from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR, MarketCalendar
 from spx_spark.marketdata import (
     InstrumentId,
     InstrumentType,
@@ -18,6 +19,7 @@ from spx_spark.marketdata import (
     Provider,
     ProviderState,
     Quote,
+    QuoteMarketSession,
     as_utc,
     classify_quote_quality,
     clean_float,
@@ -125,12 +127,48 @@ def _positive_price(value: object) -> float | None:
     return parsed if parsed is not None and parsed > 0 else None
 
 
+def _spx_market_session_for_quote(
+    instrument: InstrumentId,
+    quote_time: datetime | None,
+    *,
+    market_calendar: MarketCalendar,
+) -> QuoteMarketSession | None:
+    """Classify SPX decision quotes from the provider's source timestamp.
+
+    SPXW options can trade in GTH and RTH.  The cash SPX index is accepted
+    only in RTH, while ES and every other IBKR instrument remain unlabelled by
+    this SPX-specific contract.  Missing timestamps and scheduled gaps fail
+    closed instead of inheriting the collector receipt time.
+    """
+
+    is_spxw_option = (
+        instrument.instrument_type is InstrumentType.OPTION
+        and instrument.underlier == "SPX"
+        and instrument.trading_class == "SPXW"
+    )
+    is_spx_index = (
+        instrument.instrument_type is InstrumentType.INDEX and instrument.symbol == "SPX"
+    )
+    if quote_time is None or not (is_spxw_option or is_spx_index):
+        return None
+
+    trading_date = market_calendar.spx_session_date_for(quote_time)
+    window = market_calendar.spx_session_window(trading_date) if trading_date is not None else None
+    segment = window.segment_at(quote_time) if window is not None else None
+    if segment == "rth":
+        return QuoteMarketSession.REGULAR
+    if segment == "gth" and is_spxw_option:
+        return QuoteMarketSession.GTH
+    return None
+
+
 def quote_from_ibkr_row(
     row: Any,
     *,
     received_at: datetime | None = None,
     stale_after_seconds: float = 15.0,
     source_session: str | None = None,
+    market_calendar: MarketCalendar = DEFAULT_MARKET_CALENDAR,
 ) -> Quote:
     received_at = as_utc(received_at or datetime.now(tz=timezone.utc))
     label = str(get_value(row, "label", "") or "")
@@ -236,6 +274,11 @@ def quote_from_ibkr_row(
             else None
         ),
         source_session=source_session,
+        market_session=_spx_market_session_for_quote(
+            instrument,
+            quote_time,
+            market_calendar=market_calendar,
+        ),
         error=str(error) if error else None,
         raw=raw or None,
     )
@@ -247,6 +290,7 @@ def quotes_from_rows(
     received_at: datetime,
     stale_after_seconds: float,
     source_session: str | None = None,
+    market_calendar: MarketCalendar = DEFAULT_MARKET_CALENDAR,
 ) -> tuple[Quote, ...]:
     return tuple(
         quote_from_ibkr_row(
@@ -254,6 +298,7 @@ def quotes_from_rows(
             received_at=received_at,
             stale_after_seconds=stale_after_seconds,
             source_session=source_session,
+            market_calendar=market_calendar,
         )
         for row in rows
     )
@@ -296,12 +341,14 @@ def snapshot_from_rows(
     reason: str | None = None,
     replace_provider_quotes: bool = False,
     source_session: str | None = None,
+    market_calendar: MarketCalendar = DEFAULT_MARKET_CALENDAR,
 ) -> ProviderSnapshot:
     quotes = quotes_from_rows(
         rows,
         received_at=received_at,
         stale_after_seconds=stale_after_seconds,
         source_session=source_session,
+        market_calendar=market_calendar,
     )
     state = provider_state_from_quotes(
         quotes,
