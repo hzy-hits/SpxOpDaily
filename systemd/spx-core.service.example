@@ -1,0 +1,40 @@
+# EXAMPLE ONLY. This unit has not been installed or enabled.
+[Unit]
+Description=SPX Spark Rust manual-advisory core (example)
+After=local-fs.target
+ConditionPathExists=/opt/spx-spark-core/bin/spx-core
+ConditionPathExists=/etc/spx-spark-core/core.toml
+
+[Service]
+Type=simple
+User=spx-spark
+Group=spx-spark
+UMask=0077
+RuntimeDirectory=spx-spark-core
+StateDirectory=spx-spark-core
+ConfigurationDirectory=spx-spark-core
+Environment=RUST_LOG=info
+ExecStart=/opt/spx-spark-core/bin/spx-core serve --config /etc/spx-spark-core/core.toml
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateNetwork=true
+PrivateTmp=true
+ProtectClock=true
+ProtectControlGroups=true
+ProtectHome=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectSystem=strict
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+CapabilityBoundingSet=
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

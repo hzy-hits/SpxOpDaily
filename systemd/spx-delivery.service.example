@@ -1,0 +1,42 @@
+# EXAMPLE ONLY. This unit has not been installed or enabled. The checked-in
+# TOML keeps network_enabled=false, so this unit cannot send until separately
+# authorized configuration also enables the second network gate.
+[Unit]
+Description=SPX Spark isolated notification delivery worker (example)
+After=network-online.target spx-core.service
+Wants=network-online.target
+ConditionPathExists=/opt/spx-spark-core/bin/spx-delivery
+ConditionPathExists=/etc/spx-spark-core/delivery.toml
+
+[Service]
+Type=simple
+User=spx-spark
+Group=spx-spark
+UMask=0077
+StateDirectory=spx-spark-core
+ConfigurationDirectory=spx-spark-core
+Environment=RUST_LOG=info
+EnvironmentFile=/etc/spx-spark-core/delivery.env
+ExecStart=/opt/spx-spark-core/bin/spx-delivery run --config /etc/spx-spark-core/delivery.toml --allow-network
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectClock=true
+ProtectControlGroups=true
+ProtectHome=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectSystem=strict
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+CapabilityBoundingSet=
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

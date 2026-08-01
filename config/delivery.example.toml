@@ -1,0 +1,21 @@
+# Runnable contract example, intentionally network-disabled. Do not install or
+# enable it without separate deployment and outbound-delivery authorization.
+# Secret values are resolved from the named environment variables at runtime.
+
+ledger_path = "/var/lib/spx-spark-core/ledger/operations.sqlite"
+network_enabled = false
+poll_interval_millis = 1000
+owner_lease_seconds = 60
+claim_lease_seconds = 30
+request_timeout_seconds = 10
+retry_schedule_seconds = [15, 60, 300, 900]
+
+[[targets]]
+type = "bark"
+key = "bark-primary"
+endpoint_env = "SPX_DELIVERY_BARK_ENDPOINT"
+
+[[targets]]
+type = "feishu"
+key = "feishu-primary"
+endpoint_env = "SPX_DELIVERY_FEISHU_ENDPOINT"
