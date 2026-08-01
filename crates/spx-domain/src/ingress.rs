@@ -3,8 +3,118 @@ use serde::{Deserialize, Serialize};
 
 use crate::validation::require_schema;
 use crate::{
-    DomainError, EvaluationRequestV1, INGRESS_SCHEMA_VERSION, QuoteBatchV1, Token, Validate,
+    CORE_ACK_SCHEMA_VERSION, DomainError, EvaluationRequestV1, INGRESS_SCHEMA_VERSION,
+    QuoteBatchV1, Token, Validate,
 };
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AckStatus {
+    Accepted,
+    Rejected,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CoreAckReason {
+    Accepted,
+    InvalidContractJson,
+    InvalidFrameSize,
+    ProcessingRejected,
+    ServerBusy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CoreAckDisposition {
+    Applied,
+    DuplicateBatch,
+    StaleBatch,
+    DuplicateIngress,
+    DecisionAccepted,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CoreAckV1 {
+    pub schema_version: String,
+    pub status: AckStatus,
+    pub message_id: Option<Token>,
+    pub decision_id: Option<Token>,
+    pub reason_code: CoreAckReason,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disposition: Option<CoreAckDisposition>,
+}
+
+impl CoreAckV1 {
+    pub fn accepted(
+        message_id: Token,
+        disposition: CoreAckDisposition,
+        decision_id: Option<Token>,
+    ) -> Self {
+        Self {
+            schema_version: CORE_ACK_SCHEMA_VERSION.to_owned(),
+            status: AckStatus::Accepted,
+            message_id: Some(message_id),
+            decision_id,
+            reason_code: CoreAckReason::Accepted,
+            disposition: Some(disposition),
+        }
+    }
+
+    pub fn rejected(message_id: Option<Token>, reason_code: CoreAckReason) -> Self {
+        Self {
+            schema_version: CORE_ACK_SCHEMA_VERSION.to_owned(),
+            status: AckStatus::Rejected,
+            message_id,
+            decision_id: None,
+            reason_code,
+            disposition: None,
+        }
+    }
+}
+
+impl Validate for CoreAckV1 {
+    fn validate(&self) -> Result<(), DomainError> {
+        require_schema(
+            &self.schema_version,
+            CORE_ACK_SCHEMA_VERSION,
+            "core acknowledgement",
+        )?;
+        match self.status {
+            AckStatus::Accepted => {
+                if self.message_id.is_none()
+                    || self.reason_code != CoreAckReason::Accepted
+                    || self.disposition.is_none()
+                {
+                    return Err(DomainError::Invalid {
+                        field: "core acknowledgement",
+                        reason: "accepted acknowledgement requires message, accepted reason, and disposition",
+                    });
+                }
+                let is_decision = self.disposition == Some(CoreAckDisposition::DecisionAccepted);
+                if is_decision != self.decision_id.is_some() {
+                    return Err(DomainError::Invalid {
+                        field: "core acknowledgement decision",
+                        reason: "decision id must exist only for an accepted decision",
+                    });
+                }
+            }
+            AckStatus::Rejected => {
+                if self.reason_code == CoreAckReason::Accepted
+                    || self.decision_id.is_some()
+                    || self.disposition.is_some()
+                {
+                    return Err(DomainError::Invalid {
+                        field: "core acknowledgement",
+                        reason: "rejected acknowledgement cannot contain accepted outcome fields",
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(
@@ -70,5 +180,57 @@ mod tests {
             "message":{"kind":"future_kind","payload":{}}
         }"#;
         assert!(serde_json::from_str::<IngressEnvelopeV1>(payload).is_err());
+    }
+
+    #[test]
+    fn typed_ack_round_trips_for_bridge_clients() {
+        let ack = CoreAckV1::accepted(
+            Token::new("message-1", "message_id").unwrap(),
+            CoreAckDisposition::Applied,
+            None,
+        );
+        ack.validate().unwrap();
+        let encoded = serde_json::to_vec(&ack).unwrap();
+        let decoded: CoreAckV1 = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(decoded, ack);
+    }
+
+    #[test]
+    fn rejected_ack_keeps_existing_reason_code_wire_value() {
+        let ack = CoreAckV1::rejected(None, CoreAckReason::InvalidFrameSize);
+        ack.validate().unwrap();
+        assert_eq!(
+            serde_json::to_value(ack).unwrap(),
+            serde_json::json!({
+                "schema_version": "spx_core_ack.v1",
+                "status": "rejected",
+                "message_id": null,
+                "decision_id": null,
+                "reason_code": "invalid_frame_size"
+            })
+        );
+    }
+
+    #[test]
+    fn ack_unknown_fields_and_invalid_shapes_fail_closed() {
+        let unknown = r#"{
+            "schema_version":"spx_core_ack.v1",
+            "status":"rejected",
+            "message_id":null,
+            "decision_id":null,
+            "reason_code":"processing_rejected",
+            "future":true
+        }"#;
+        assert!(serde_json::from_str::<CoreAckV1>(unknown).is_err());
+
+        let invalid = CoreAckV1 {
+            schema_version: CORE_ACK_SCHEMA_VERSION.to_owned(),
+            status: AckStatus::Accepted,
+            message_id: Some(Token::new("message-1", "message_id").unwrap()),
+            decision_id: None,
+            reason_code: CoreAckReason::ProcessingRejected,
+            disposition: Some(CoreAckDisposition::Applied),
+        };
+        assert!(invalid.validate().is_err());
     }
 }

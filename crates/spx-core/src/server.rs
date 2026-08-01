@@ -9,8 +9,7 @@ use std::thread;
 use std::time::Duration;
 
 use chrono::Utc;
-use serde::Serialize;
-use spx_domain::IngressEnvelopeV1;
+use spx_domain::{CoreAckDisposition, CoreAckReason, CoreAckV1, IngressEnvelopeV1, Token};
 use thiserror::Error;
 use tracing::{error, info};
 
@@ -26,22 +25,6 @@ pub enum ServerError {
     Poisoned,
     #[error("core engine failed: {0}")]
     Engine(#[from] crate::CoreError),
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum AckStatus {
-    Accepted,
-    Rejected,
-}
-
-#[derive(Debug, Serialize)]
-struct CoreAckV1 {
-    schema_version: &'static str,
-    status: AckStatus,
-    message_id: Option<String>,
-    decision_id: Option<String>,
-    reason_code: &'static str,
 }
 
 /// Serves strict length-prefixed ingress frames over a permission-restricted Unix socket.
@@ -81,13 +64,7 @@ pub fn serve_unix(
                         .and_then(|()| {
                             write_ack(
                                 &mut stream,
-                                &CoreAckV1 {
-                                    schema_version: "spx_core_ack.v1",
-                                    status: AckStatus::Rejected,
-                                    message_id: None,
-                                    decision_id: None,
-                                    reason_code: "server_busy",
-                                },
+                                &CoreAckV1::rejected(None, CoreAckReason::ServerBusy),
                             )
                         });
                     if let Err(failure) = rejection {
@@ -224,13 +201,7 @@ fn handle_connection(
         if length == 0 || length > max_frame_bytes {
             write_ack(
                 &mut stream,
-                &CoreAckV1 {
-                    schema_version: "spx_core_ack.v1",
-                    status: AckStatus::Rejected,
-                    message_id: None,
-                    decision_id: None,
-                    reason_code: "invalid_frame_size",
-                },
+                &CoreAckV1::rejected(None, CoreAckReason::InvalidFrameSize),
             )?;
             return Ok(());
         }
@@ -241,38 +212,20 @@ fn handle_connection(
         let Ok(envelope) = serde_json::from_slice::<IngressEnvelopeV1>(&payload) else {
             write_ack(
                 &mut stream,
-                &CoreAckV1 {
-                    schema_version: "spx_core_ack.v1",
-                    status: AckStatus::Rejected,
-                    message_id: None,
-                    decision_id: None,
-                    reason_code: "invalid_contract_json",
-                },
+                &CoreAckV1::rejected(None, CoreAckReason::InvalidContractJson),
             )?;
             continue;
         };
-        let message_id = envelope.message_id.to_string();
+        let message_id = envelope.message_id.clone();
         let outcome = engine
             .lock()
             .map_err(|_| ServerError::Poisoned)?
             .process(envelope, Utc::now());
         let ack = match outcome {
-            Ok(outcome) => CoreAckV1 {
-                schema_version: "spx_core_ack.v1",
-                status: AckStatus::Accepted,
-                message_id: Some(message_id),
-                decision_id: decision_id(&outcome),
-                reason_code: "accepted",
-            },
+            Ok(outcome) => accepted_ack(message_id, &outcome),
             Err(failure) => {
                 error!(error = %failure, "ingress message rejected");
-                CoreAckV1 {
-                    schema_version: "spx_core_ack.v1",
-                    status: AckStatus::Rejected,
-                    message_id: Some(message_id),
-                    decision_id: None,
-                    reason_code: "processing_rejected",
-                }
+                CoreAckV1::rejected(Some(message_id), CoreAckReason::ProcessingRejected)
             }
         };
         write_ack(&mut stream, &ack)?;
@@ -305,11 +258,23 @@ fn read_exact_until_stopped(
     Ok(true)
 }
 
-fn decision_id(outcome: &CoreOutcome) -> Option<String> {
-    match outcome {
-        CoreOutcome::Decision { decision, .. } => Some(decision.decision_id.to_string()),
-        CoreOutcome::Duplicate { .. } | CoreOutcome::QuoteBatch { .. } => None,
-    }
+fn accepted_ack(message_id: Token, outcome: &CoreOutcome) -> CoreAckV1 {
+    let (disposition, decision_id) = match outcome {
+        CoreOutcome::Duplicate { .. } => (CoreAckDisposition::DuplicateIngress, None),
+        CoreOutcome::QuoteBatch { disposition, .. } => (
+            match disposition {
+                crate::QuoteDisposition::Applied => CoreAckDisposition::Applied,
+                crate::QuoteDisposition::DuplicateBatch => CoreAckDisposition::DuplicateBatch,
+                crate::QuoteDisposition::StaleBatch => CoreAckDisposition::StaleBatch,
+            },
+            None,
+        ),
+        CoreOutcome::Decision { decision, .. } => (
+            CoreAckDisposition::DecisionAccepted,
+            Some(decision.decision_id.clone()),
+        ),
+    };
+    CoreAckV1::accepted(message_id, disposition, decision_id)
 }
 
 fn write_ack(stream: &mut UnixStream, ack: &CoreAckV1) -> Result<(), std::io::Error> {
@@ -324,6 +289,9 @@ fn write_ack(stream: &mut UnixStream, ack: &CoreAckV1) -> Result<(), std::io::Er
 #[cfg(test)]
 mod tests {
     use super::*;
+    use spx_domain::{CoreAckDisposition, StrategyDecisionV1, Validate};
+
+    use crate::{PersistDisposition, QuoteDisposition};
 
     #[test]
     fn connection_permits_enforce_and_release_capacity() {
@@ -332,5 +300,58 @@ mod tests {
         assert!(ConnectionPermit::acquire(&active, 1).is_none());
         drop(first);
         assert!(ConnectionPermit::acquire(&active, 1).is_some());
+    }
+
+    #[test]
+    fn quote_and_duplicate_outcomes_have_typed_bridge_dispositions() {
+        let message_id = Token::new("message:ack", "message_id").unwrap();
+        for (quote_disposition, expected) in [
+            (QuoteDisposition::Applied, CoreAckDisposition::Applied),
+            (
+                QuoteDisposition::DuplicateBatch,
+                CoreAckDisposition::DuplicateBatch,
+            ),
+            (QuoteDisposition::StaleBatch, CoreAckDisposition::StaleBatch),
+        ] {
+            let outcome = CoreOutcome::QuoteBatch {
+                message_id: message_id.clone(),
+                disposition: quote_disposition,
+            };
+            let ack = accepted_ack(message_id.clone(), &outcome);
+            ack.validate().unwrap();
+            assert_eq!(ack.disposition, Some(expected));
+            let decoded: CoreAckV1 =
+                serde_json::from_slice(&serde_json::to_vec(&ack).unwrap()).unwrap();
+            assert_eq!(decoded, ack);
+        }
+
+        let duplicate = CoreOutcome::Duplicate {
+            message_id: message_id.clone(),
+        };
+        assert_eq!(
+            accepted_ack(message_id, &duplicate).disposition,
+            Some(CoreAckDisposition::DuplicateIngress)
+        );
+    }
+
+    #[test]
+    fn accepted_decision_ack_contains_decision_id() {
+        let decision: StrategyDecisionV1 = serde_json::from_str(include_str!(
+            "../../../fixtures/domain/v1/strategy_decision_no_trade.json"
+        ))
+        .unwrap();
+        let expected_decision_id = decision.decision_id.clone();
+        let message_id = Token::new("message:decision-ack", "message_id").unwrap();
+        let outcome = CoreOutcome::Decision {
+            message_id: message_id.clone(),
+            decision: Box::new(decision),
+            notification_enqueued: false,
+            persist_disposition: PersistDisposition::Inserted,
+        };
+
+        let ack = accepted_ack(message_id, &outcome);
+        ack.validate().unwrap();
+        assert_eq!(ack.disposition, Some(CoreAckDisposition::DecisionAccepted));
+        assert_eq!(ack.decision_id, Some(expected_decision_id));
     }
 }

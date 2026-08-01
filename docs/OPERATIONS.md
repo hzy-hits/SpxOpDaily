@@ -1,7 +1,8 @@
 # Operations guide
 
-Status: pre-deployment operating contract. The services described below have
-not been installed, enabled, started or connected to production by this work.
+Status: operating contract. The isolated Oracle core has been installed without
+network delivery; bridge activation is bounded to normalized quote mirror
+ownership until live-session acceptance is complete.
 
 ## Local validation
 
@@ -13,6 +14,7 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-features
 cargo run -p spx-core -- check-config --config config/core.example.toml
 cargo run -p spx-delivery -- check-config --config config/delivery.example.toml
+cargo run -p spx-bridge -- check-config --config config/bridge.example.toml
 ```
 
 The examples under `config/` and `systemd/` are templates. Keep the `.example`
@@ -24,9 +26,16 @@ Phase-1 Oracle overlay. They deliberately use independent `*-shadow` paths,
 run as the same non-root `ubuntu` identity as the future local mirror bridge,
 and retain `PrivateNetwork=true`. The socket is mode `0600`, so this shared
 identity is required until a separately tested group-access contract exists.
-The shadow unit may be started for acceptance but must not be enabled for
-unattended operation before the normalized bridge and raw-log retention guard
-exist.
+Oracle raw frames live under
+`/srv/data/spx-spark/rust-core-shadow/frames`, not the nearly full root
+filesystem. Before every guarded append, core verifies that the write would
+leave the configured 20 GiB reserve; an unavailable or exhausted filesystem
+stops ingress instead of consuming the host's last bytes.
+`config/oracle-shadow-bridge.toml` and
+`systemd/spx-rust-normalized-bridge.service` add the read-only normalized
+sidecar. The sidecar and core may be enabled for unattended quote mirroring only
+after bridge state is explicitly initialized, real source inspection fits the
+frame bound, and raw-log retention/free-space monitoring is active.
 
 `config/oracle-shadow-delivery.toml` exists only for the read-only `health`
 command. Phase 1 does not install or start a delivery unit, does not create a
@@ -43,13 +52,25 @@ work or create a claim/restart loop.
 ```text
 /opt/spx-spark-core/bin/                 immutable release binaries
 /etc/spx-spark-core/core.toml            non-secret core configuration
+/etc/spx-spark-core/bridge.toml          non-secret normalized source configuration
 /etc/spx-spark-core/delivery.toml        non-secret delivery configuration
 /etc/spx-spark-core/delivery.env         root-owned secret environment, mode 0600
 /run/spx-spark-core/core.sock            local ingress socket
 /var/lib/spx-spark-core/ledger/          single SQLite/WAL operational ledger
 /var/lib/spx-spark-core/frames/          bounded *.NNNN.ndjson frame segments
 /var/lib/spx-spark-core/latest/          replaceable health/projection files
+/var/lib/spx-spark-bridge/state.json     durable cursor and exact pending frame
+/var/lib/spx-spark-bridge/health.json    replaceable bridge health projection
 ```
+
+The Oracle overlay replaces the generic frame path with
+`/srv/data/spx-spark/rust-core-shadow/frames`. Its
+`spx-rust-frame-retention.timer` runs hourly with a seven-completed-day policy
+and a 40 GiB cap. The retention command considers only strict
+`YYYY-MM-DD.NNNN.ndjson` regular files in the configured directory, never
+follows symlinks, and never deletes the current or a future UTC date. If those
+protected files alone exceed the cap, the timer fails visibly and the append
+reserve remains the final fail-closed guard.
 
 Never put broker tokens, API credentials, notification endpoints or private keys
 in TOML, systemd units, command lines, logs or replay artifacts. The delivery
@@ -76,10 +97,24 @@ Network delivery still requires both `network_enabled = true` in TOML and
 `--allow-network` on `run` or `once`. The example TOML intentionally leaves the
 first gate false.
 
-Both long-running binaries handle `SIGINT`/`SIGTERM`, stop accepting new work,
+The long-running binaries handle `SIGINT`/`SIGTERM`, stop accepting new work,
 and release their generation-fenced owner tombstone. A crash still recovers by
 lease expiry. Core Unix ingress has a configured connection cap; excess clients
 receive `server_busy` instead of creating unbounded threads.
+
+`spx-bridge` provides `check-config`, `inspect`, `init-state`, and `run`.
+`inspect` is read-only and prints only source counts, mapping/drop counters,
+provider state and encoded frame sizes. `init-state` is explicit and refuses to
+overwrite an existing cursor. `run` refuses missing or corrupt state and
+persists an exact pending envelope before socket I/O. An adjacent advisory lock
+fences a second bridge process, and the bridge's systemd sandbox can write only
+its separate state directory, not the core ledger, projection or raw frames.
+
+Treat the core binary, core TOML and systemd unit as one release during
+rollback. Stop and disable the bridge first, restore the previous config/unit,
+run `systemctl daemon-reload`, then switch the core release and restart it. Do
+not point an older strict-config binary at a newer TOML: it will refuse unknown
+fields instead of silently ignoring them.
 
 Configuration validation caps owner leases at one hour, delivery claim leases
 at five minutes, request timeouts at two minutes, and each of at most ten retry
@@ -98,6 +133,8 @@ After a separately authorized installation, verify more than process liveness:
 6. a GTH snapshot refuses Schwab and requires fresh IBKR exact legs;
 7. decisions are only `NO_TRADE` or `MANUAL_CANDIDATE`;
 8. notification receipt state agrees with the external target.
+9. bridge health is `ready`, both provider ACK IDs match, and no frame is pending;
+10. mapping counters explain every dropped stale, unsupported or session-unknown quote.
 
 Read-only diagnostics after authorization may use:
 
@@ -106,6 +143,12 @@ systemctl status spx-core.service --no-pager
 journalctl -u spx-core.service -n 100 --no-pager
 test -S /run/spx-spark-core/core.sock
 /opt/spx-spark-core/bin/spx-delivery health --config /etc/spx-spark-core/delivery.toml
+/opt/spx-spark-core/bin/spx-bridge inspect --config /etc/spx-spark-core/bridge.toml
+/opt/spx-spark-core-shadow/current/bin/spx-core prune-frames \
+  --config /etc/spx-spark-core-shadow/core.toml --keep-completed-days 7 \
+  --max-total-bytes 42949672960 --dry-run
+systemctl status spx-rust-frame-retention.timer --no-pager
+journalctl -u spx-rust-frame-retention.service -n 20 --no-pager
 ```
 
 Do not log full ingress payloads if they can contain notification endpoints or

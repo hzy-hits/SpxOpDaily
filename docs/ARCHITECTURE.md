@@ -15,10 +15,9 @@ It never places, changes, or cancels an order. The only strategy actions are
 not an executable order.
 
 ```text
-Python Schwab bridge -----------+
-                                 +--> Unix socket --> spx-core
-Python IBKR bridge -------------+                       |
-                                                        +--> append-only
+Python normalized state --> spx-bridge --> Unix socket --> spx-core
+                              |                              |
+                              +-- no broker/session owner    +--> append-only
                                                         |    normalized frames
                                                         |
                                                         +--> one SQLite/WAL ledger
@@ -32,7 +31,8 @@ append-only frames + ledger decisions
 ```
 
 The bridge boundary is intentional. The first migration phase does not connect
-Rust directly to IB Gateway or Schwab. A bridge owns provider SDK behavior and
+Rust directly to IB Gateway or Schwab. Python retains provider SDK/session
+ownership; `spx-bridge` reads only the atomic normalized projection and
 translates it into the closed, versioned contracts in `spx-domain`.
 
 Session, provider, readiness and delivery lifecycle semantics are frozen in the
@@ -45,6 +45,7 @@ contains only SPX `GTH` and `RTH`; CME `Globex` metadata and the independent
 | Component | Owns | Must not own |
 |---|---|---|
 | `spx-domain` | Versioned wire types, enums, validation and canonical hashes | I/O, settings, broker SDKs |
+| `spx-bridge` | Bounded source reads, provider mapping, durable generation/sequence/pending frame, typed ACK and health | Broker SDKs, strategy generation, notifications, research |
 | `spx-core` | Unix ingress, quote book, decision snapshot, readiness, deterministic policy, health projection and append log | Network delivery, research fitting, orders |
 | `spx-ledger` | The single SQLite/WAL database, owner fencing and legal state transitions | Analytical history or provider connections |
 | `spx-delivery` | Claim, atomic `InFlight` transition, rendering, transport, retry, receipts, uncertain outcome and DLQ | Strategy decisions or a second outbox database |
@@ -79,6 +80,15 @@ compete with the user's trading session. During this state:
 - TCP reconnection or a running Gateway does not prove recovery;
 - only a fresh usable provider flush may return the data plane to live.
 
+The legacy `state.json` is a replaceable projection, not an event queue. The
+bridge sends one complete provider snapshot in one frame using
+`replace_provider_snapshot`; the core removes all prior quotes for that provider
+before installing the accepted replacement. If the frame is rejected, the
+bridge leaves the exact payload pending, exits readiness, and cannot submit an
+evaluation. Zero or negative sides become missing, crossed books lose both NBBO
+sides, and source timestamps are never replaced with file mtime or heartbeat
+time.
+
 ## State and durability
 
 There is exactly one mutable operational database. It contains ingress
@@ -90,7 +100,10 @@ Large market history does not belong in SQLite. Intraday normalized frames are
 append-only and immutable. Daily NDJSON is split into size-bounded numbered
 segments. Quote batches use ordinary appends; an evaluation frame is durably
 synced before its decision is processed, and rotation syncs the segment being
-closed. The live quote book is also bounded by age and entry count, while a
+closed. A configured filesystem reserve is checked before every production
+append. Retention deletes only strict regular segments from completed UTC days,
+oldest first, while the current UTC day is protected. The live quote book is
+also bounded by age and entry count, while a
 separate bounded identity cache continues to reject conflicting recent batch
 IDs. After the session, a Python job turns the bounded frames and decision
 lineage into a versioned replay artifact and Parquet. The

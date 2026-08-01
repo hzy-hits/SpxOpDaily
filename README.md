@@ -2,18 +2,17 @@
 
 Clean-room Rust production runtime for SPX Spark.
 
-> **Status:** implemented and locally verified migration candidate. It has not
-> been deployed, is not connected to production brokers, and has no
-> order-placement authority.
+> **Status:** the isolated core is deployed on Oracle; the normalized mirror
+> bridge is implemented and in Phase-1 production-data validation. Rust does
+> not connect to a broker and has no order-placement authority.
 
 The project deliberately implements a small production boundary:
 
 ```text
-Schwab bridge -----------+
-                         +--> spx-core --> SQLite decision/outbox ledger
-IBKR Python bridge ------+                     |
-                                               v
-                                         spx-delivery
+Python normalized state --> spx-bridge --> spx-core --> SQLite decision/outbox ledger
+                                                    |
+                                                    v
+                                              spx-delivery
 
 append-only market frames --> Python research / Parquet / DuckDB / replay
 ```
@@ -38,6 +37,7 @@ This repository does **not**:
 | Crate | Responsibility |
 |---|---|
 | `spx-domain` | Strict versioned contracts and invariants |
+| `spx-bridge` | Fail-closed JSON mapping, durable cursor and typed ACK client |
 | `spx-core` | Ingress, quote book, snapshot, readiness, policy, health |
 | `spx-ledger` | SQLite/WAL decisions, intents, target state, receipts, DLQ |
 | `spx-delivery` | Deterministic renderers and isolated HTTP delivery worker |
@@ -46,12 +46,25 @@ This repository does **not**:
 contains `network_enabled = true` and the command includes `--allow-network`.
 The checked-in example keeps networking disabled.
 
+The bridge consumes only Python's normalized current-state projection. It does
+not open Schwab or IBKR sessions, and it cannot increase the IBKR ticker count.
+Each provider update is a bounded, atomic `replace_provider_snapshot` frame;
+missing, zero, crossed, stale or session-unknown quotes cannot leave an older
+exact leg silently authoritative.
+
+The current Python production strategies are not yet semantically replaceable
+by Rust `EvaluationRequestV1`: RTH can produce a single-leg contract and the GTH
+level lane uses dynamic 5–40 point verticals, while Rust v1 deliberately accepts
+exactly two legs and a 10-point vertical. Quote mirroring may run in production
+while Python remains the sole strategy and notification owner.
+
 ## Development
 
 ```bash
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-features
+cargo run -p spx-bridge -- check-config --config config/bridge.example.toml
 ```
 
 CI runs the same locked workspace on native Ubuntu x86-64 and ARM64 runners;

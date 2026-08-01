@@ -1,0 +1,49 @@
+[Unit]
+Description=SPX Spark normalized Python to Rust mirror bridge
+Requires=spx-rust-core-shadow.service
+After=local-fs.target spx-rust-core-shadow.service
+RequiresMountsFor=/srv/data/spx-spark/data/latest
+ConditionPathExists=/opt/spx-spark-core-shadow/current/bin/spx-bridge
+ConditionPathExists=/etc/spx-spark-core-shadow/bridge.toml
+ConditionPathExists=/var/lib/spx-spark-bridge-shadow/state.json
+StartLimitIntervalSec=60s
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+UMask=0077
+StateDirectory=spx-spark-bridge-shadow
+ConfigurationDirectory=spx-spark-core-shadow
+ConfigurationDirectoryMode=0750
+Environment=RUST_LOG=info
+ExecStartPre=/opt/spx-spark-core-shadow/current/bin/spx-bridge check-config --config /etc/spx-spark-core-shadow/bridge.toml
+ExecStart=/opt/spx-spark-core-shadow/current/bin/spx-bridge run --config /etc/spx-spark-core-shadow/bridge.toml
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateNetwork=true
+PrivateTmp=true
+ProtectClock=true
+ProtectControlGroups=true
+ProtectHome=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectSystem=strict
+ReadOnlyPaths=/srv/data/spx-spark/data/latest
+ReadWritePaths=/var/lib/spx-spark-bridge-shadow
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+CapabilityBoundingSet=
+SystemCallArchitectures=native
+MemoryMax=256M
+TasksMax=32
+
+[Install]
+WantedBy=multi-user.target

@@ -12,6 +12,8 @@ pub enum ConfigError {
     Toml(#[from] toml::de::Error),
     #[error("invalid environment override {name}: {value}")]
     Environment { name: &'static str, value: String },
+    #[error("environment override {0} is forbidden for destructive maintenance")]
+    ForbiddenEnvironment(&'static str),
     #[error("invalid config: {0}")]
     Invalid(&'static str),
 }
@@ -26,6 +28,7 @@ pub struct CoreConfig {
     pub max_frame_bytes: usize,
     pub max_connections: usize,
     pub raw_segment_max_bytes: u64,
+    pub raw_log_min_free_bytes: u64,
     pub quote_cache_retention_seconds: u32,
     pub quote_cache_max_entries: usize,
     pub batch_identity_cache_max_entries: usize,
@@ -59,17 +62,41 @@ impl CoreConfig {
     ///
     /// Returns an error when the file, TOML, environment, or resulting invariants are invalid.
     pub fn load(path: impl AsRef<Path>) -> Result<Self, ConfigError> {
+        Self::load_inner(path, true)
+    }
+
+    /// Loads configuration for raw-log pruning without permitting a target override.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `SPX_CORE_RAW_LOG_DIR` is present or the config is invalid.
+    pub fn load_for_prune(path: impl AsRef<Path>) -> Result<Self, ConfigError> {
+        Self::load_inner(path, false)
+    }
+
+    fn load_inner(
+        path: impl AsRef<Path>,
+        allow_raw_log_environment: bool,
+    ) -> Result<Self, ConfigError> {
         let contents = std::fs::read_to_string(path)?;
         let mut config: Self = toml::from_str(&contents)?;
         override_path("SPX_CORE_SOCKET_PATH", &mut config.socket_path);
         override_path("SPX_CORE_LEDGER_PATH", &mut config.ledger_path);
-        override_path("SPX_CORE_RAW_LOG_DIR", &mut config.raw_log_dir);
+        if allow_raw_log_environment {
+            override_path("SPX_CORE_RAW_LOG_DIR", &mut config.raw_log_dir);
+        } else if std::env::var_os("SPX_CORE_RAW_LOG_DIR").is_some() {
+            return Err(ConfigError::ForbiddenEnvironment("SPX_CORE_RAW_LOG_DIR"));
+        }
         override_path("SPX_CORE_PROJECTION_PATH", &mut config.projection_path);
         override_usize("SPX_CORE_MAX_FRAME_BYTES", &mut config.max_frame_bytes)?;
         override_usize("SPX_CORE_MAX_CONNECTIONS", &mut config.max_connections)?;
         override_u64(
             "SPX_CORE_RAW_SEGMENT_MAX_BYTES",
             &mut config.raw_segment_max_bytes,
+        )?;
+        override_u64(
+            "SPX_CORE_RAW_LOG_MIN_FREE_BYTES",
+            &mut config.raw_log_min_free_bytes,
         )?;
         override_u32(
             "SPX_CORE_QUOTE_CACHE_RETENTION_SECONDS",
@@ -189,6 +216,13 @@ impl CoreConfig {
         {
             return Err(ConfigError::Invalid("runtime paths must be non-empty"));
         }
+        if !self.socket_path.is_absolute()
+            || !self.ledger_path.is_absolute()
+            || !self.raw_log_dir.is_absolute()
+            || !self.projection_path.is_absolute()
+        {
+            return Err(ConfigError::Invalid("runtime paths must be absolute"));
+        }
         if self.max_frame_bytes == 0 || self.max_frame_bytes > 16 * 1024 * 1024 {
             return Err(ConfigError::Invalid(
                 "max_frame_bytes must be within 1..=16777216",
@@ -208,6 +242,13 @@ impl CoreConfig {
         {
             return Err(ConfigError::Invalid(
                 "raw_segment_max_bytes must cover max_frame_bytes plus 4096 bytes and be <= 1 GiB",
+            ));
+        }
+        if self.raw_log_min_free_bytes < self.raw_segment_max_bytes
+            || self.raw_log_min_free_bytes > 10 * 1024 * 1024 * 1024 * 1024
+        {
+            return Err(ConfigError::Invalid(
+                "raw_log_min_free_bytes must cover one maximum segment and be <= 10 TiB",
             ));
         }
         if !(60..=3600).contains(&self.quote_cache_retention_seconds) {
@@ -311,6 +352,7 @@ mod tests {
             max_frame_bytes: 1_048_576,
             max_connections: 8,
             raw_segment_max_bytes: 64 * 1024 * 1024,
+            raw_log_min_free_bytes: 64 * 1024 * 1024,
             quote_cache_retention_seconds: 300,
             quote_cache_max_entries: 4096,
             batch_identity_cache_max_entries: 4096,
@@ -341,6 +383,23 @@ mod tests {
     }
 
     #[test]
+    fn runtime_paths_must_be_absolute() {
+        for update in [
+            |config: &mut CoreConfig| config.socket_path = "run/core.sock".into(),
+            |config: &mut CoreConfig| config.ledger_path = "state/core.sqlite".into(),
+            |config: &mut CoreConfig| config.raw_log_dir = "frames".into(),
+            |config: &mut CoreConfig| config.projection_path = "latest/core.json".into(),
+        ] {
+            let mut config = valid_config();
+            update(&mut config);
+            assert!(matches!(
+                config.validate(),
+                Err(ConfigError::Invalid("runtime paths must be absolute"))
+            ));
+        }
+    }
+
+    #[test]
     fn raw_segment_must_cover_largest_frame_and_record_overhead() {
         let mut config = valid_config();
         config.raw_segment_max_bytes = config.max_frame_bytes as u64 + 4095;
@@ -348,6 +407,27 @@ mod tests {
             config.validate(),
             Err(ConfigError::Invalid(
                 "raw_segment_max_bytes must cover max_frame_bytes plus 4096 bytes and be <= 1 GiB"
+            ))
+        ));
+    }
+
+    #[test]
+    fn raw_log_free_space_reserve_is_bounded() {
+        let mut config = valid_config();
+        config.raw_log_min_free_bytes = config.raw_segment_max_bytes - 1;
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigError::Invalid(
+                "raw_log_min_free_bytes must cover one maximum segment and be <= 10 TiB"
+            ))
+        ));
+
+        let mut config = valid_config();
+        config.raw_log_min_free_bytes = 10 * 1024 * 1024 * 1024 * 1024 + 1;
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigError::Invalid(
+                "raw_log_min_free_bytes must cover one maximum segment and be <= 10 TiB"
             ))
         ));
     }

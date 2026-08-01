@@ -3,7 +3,8 @@ use std::collections::BTreeMap;
 use chrono::{DateTime, TimeDelta, Utc};
 use spx_domain::{
     ANALYTICAL_SNAPSHOT_SCHEMA_VERSION, AnalyticalOptionSnapshotV1, DomainError, MarketSession,
-    Provider, ProviderStateV1, QuoteBatchV1, QuoteV1, Token, Validate, canonical_json_hash,
+    Provider, ProviderStateV1, QuoteBatchMode, QuoteBatchV1, QuoteV1, Token, Validate,
+    canonical_json_hash,
 };
 use thiserror::Error;
 
@@ -54,7 +55,7 @@ struct SeenBatch {
 pub struct QuoteBook {
     cursors: BTreeMap<Provider, Cursor>,
     provider_states: BTreeMap<Provider, ProviderStateV1>,
-    quotes: BTreeMap<(Provider, String), StoredQuote>,
+    quotes: BTreeMap<(Provider, MarketSession, String), StoredQuote>,
     seen_batches: BTreeMap<Token, SeenBatch>,
     watermark: Option<DateTime<Utc>>,
     retention: TimeDelta,
@@ -137,6 +138,7 @@ impl QuoteBook {
         }
         let connection_generation = batch.provider_state.connection_generation;
         let provider_live = batch.provider_state.is_live();
+        let replaces_provider_snapshot = batch.mode == QuoteBatchMode::ReplaceProviderSnapshot;
         let mut generation_advanced = false;
         if let Some(cursor) = self.cursors.get(&batch.provider) {
             if connection_generation < cursor.connection_generation {
@@ -164,9 +166,9 @@ impl QuoteBook {
             }
         }
         self.advance_watermark_and_prune(received_at);
-        if generation_advanced || !provider_live {
+        if generation_advanced || !provider_live || replaces_provider_snapshot {
             self.quotes
-                .retain(|(provider, _), _| *provider != batch.provider);
+                .retain(|(provider, _, _), _| *provider != batch.provider);
         }
         if provider_live {
             for quote in batch.quotes {
@@ -176,7 +178,7 @@ impl QuoteBook {
                     .as_str()
                     .to_owned();
                 self.quotes.insert(
-                    (batch.provider, identity),
+                    (batch.provider, quote.market_session, identity),
                     StoredQuote {
                         connection_generation,
                         source_batch_id: batch.batch_id.clone(),

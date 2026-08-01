@@ -1,15 +1,15 @@
 use chrono::{DateTime, NaiveDate, TimeDelta, Utc};
 use spx_core::{
-    ApplyBatch, CoreConfig, CoreEngine, CoreOutcome, NotificationTargetConfig, QuoteBook,
-    QuoteBookError, ReadinessConfig,
+    ApplyBatch, CoreConfig, CoreEngine, CoreError, CoreOutcome, NotificationTargetConfig,
+    QuoteBook, QuoteBookError, ReadinessConfig,
 };
 use spx_domain::{
     AuthenticationState, BookSideV1, CalendarState, CandidateDirection, DeliveryChannel,
     EntitlementState, EvaluationRequestV1, INGRESS_SCHEMA_VERSION, IngressEnvelopeV1,
     IngressMessageV1, InstrumentKind, MacroPermission, MarketSession, OperationalState,
     OptionContractV1, OptionRight, PROVIDER_STATE_SCHEMA_VERSION, PlanState, PositiveF64, Provider,
-    ProviderReasonCode, ProviderStateV1, QUOTE_BATCH_SCHEMA_VERSION, QuoteBatchV1, QuoteQuality,
-    QuoteV1, StrategyAction, StrategyBlockReason, Token, TransportState,
+    ProviderReasonCode, ProviderStateV1, QUOTE_BATCH_SCHEMA_VERSION, QuoteBatchMode, QuoteBatchV1,
+    QuoteQuality, QuoteV1, StrategyAction, StrategyBlockReason, Token, TransportState,
 };
 use spx_ledger::Ledger;
 use tempfile::TempDir;
@@ -35,6 +35,7 @@ fn config(temp: &TempDir) -> CoreConfig {
         max_frame_bytes: 1_048_576,
         max_connections: 8,
         raw_segment_max_bytes: 64 * 1024 * 1024,
+        raw_log_min_free_bytes: 64 * 1024 * 1024,
         quote_cache_retention_seconds: 300,
         quote_cache_max_entries: 4096,
         batch_identity_cache_max_entries: 4096,
@@ -144,6 +145,7 @@ fn quote_envelope(
             schema_version: QUOTE_BATCH_SCHEMA_VERSION.to_owned(),
             batch_id: token(format!("batch:{provider:?}:{sequence}")),
             provider,
+            mode: QuoteBatchMode::Incremental,
             sequence,
             received_at,
             provider_state: provider_state(provider, quote_at, operational),
@@ -521,6 +523,139 @@ fn quote_book_prunes_by_watermark_and_entry_limit() {
 }
 
 #[test]
+fn same_provider_contract_is_isolated_by_market_session() {
+    let now = at("2026-07-31T08:30:00Z");
+    let mut book = QuoteBook::default();
+    apply_quote_batch(
+        &mut book,
+        quote_envelope(
+            "message:quotes:session-gth",
+            Provider::Ibkr,
+            MarketSession::Gth,
+            OperationalState::Live,
+            1,
+            now,
+        ),
+        1,
+        true,
+    );
+    apply_quote_batch(
+        &mut book,
+        quote_envelope(
+            "message:quotes:session-rth",
+            Provider::Ibkr,
+            MarketSession::Rth,
+            OperationalState::Live,
+            2,
+            now + TimeDelta::seconds(1),
+        ),
+        1,
+        true,
+    );
+
+    let built_at = now + TimeDelta::seconds(2);
+    let gth = book.snapshot(MarketSession::Gth, built_at).unwrap();
+    let rth = book.snapshot(MarketSession::Rth, built_at).unwrap();
+    assert_eq!(gth.quotes.len(), 2);
+    assert_eq!(rth.quotes.len(), 2);
+    assert!(
+        gth.quotes
+            .iter()
+            .all(|quote| quote.market_session == MarketSession::Gth)
+    );
+    assert!(
+        rth.quotes
+            .iter()
+            .all(|quote| quote.market_session == MarketSession::Rth)
+    );
+}
+
+#[test]
+fn replace_provider_snapshot_removes_omitted_quotes_and_accepts_empty_live_snapshot() {
+    let now = at("2026-07-31T14:30:00Z");
+    let mut book = QuoteBook::default();
+    let IngressMessageV1::QuoteBatch(mut initial) = quote_envelope(
+        "message:quotes:replace-initial",
+        Provider::Schwab,
+        MarketSession::Rth,
+        OperationalState::Live,
+        1,
+        now,
+    )
+    .message
+    else {
+        panic!("test envelope must contain a quote batch");
+    };
+    initial.mode = QuoteBatchMode::ReplaceProviderSnapshot;
+    assert_eq!(book.apply(initial).unwrap(), ApplyBatch::Applied);
+
+    let IngressMessageV1::QuoteBatch(gth_incremental) = quote_envelope(
+        "message:quotes:replace-gth-incremental",
+        Provider::Schwab,
+        MarketSession::Gth,
+        OperationalState::Live,
+        2,
+        now + TimeDelta::seconds(1),
+    )
+    .message
+    else {
+        panic!("test envelope must contain a quote batch");
+    };
+    assert_eq!(book.apply(gth_incremental).unwrap(), ApplyBatch::Applied);
+
+    let IngressMessageV1::QuoteBatch(mut replacement) = quote_envelope(
+        "message:quotes:replace-one",
+        Provider::Schwab,
+        MarketSession::Rth,
+        OperationalState::Live,
+        3,
+        now + TimeDelta::seconds(2),
+    )
+    .message
+    else {
+        panic!("test envelope must contain a quote batch");
+    };
+    replacement.mode = QuoteBatchMode::ReplaceProviderSnapshot;
+    replacement.quotes.truncate(1);
+    assert_eq!(book.apply(replacement).unwrap(), ApplyBatch::Applied);
+    assert_eq!(
+        book.snapshot(MarketSession::Rth, now + TimeDelta::seconds(3))
+            .unwrap()
+            .quotes
+            .len(),
+        1
+    );
+    assert!(
+        book.snapshot(MarketSession::Gth, now + TimeDelta::seconds(3))
+            .unwrap()
+            .quotes
+            .is_empty()
+    );
+
+    let IngressMessageV1::QuoteBatch(mut empty) = quote_envelope(
+        "message:quotes:replace-empty",
+        Provider::Schwab,
+        MarketSession::Rth,
+        OperationalState::Live,
+        4,
+        now + TimeDelta::seconds(3),
+    )
+    .message
+    else {
+        panic!("test envelope must contain a quote batch");
+    };
+    empty.mode = QuoteBatchMode::ReplaceProviderSnapshot;
+    empty.quotes.clear();
+    assert_eq!(book.apply(empty).unwrap(), ApplyBatch::Applied);
+    assert!(
+        book.snapshot(MarketSession::Rth, now + TimeDelta::seconds(4))
+            .unwrap()
+            .quotes
+            .is_empty()
+    );
+}
+
+#[test]
 fn delayed_evaluation_is_no_trade_even_if_decision_time_quotes_were_fresh() {
     let temp = TempDir::new().expect("temp directory");
     let now = at("2026-07-31T14:30:00Z");
@@ -606,6 +741,71 @@ fn graceful_engine_shutdown_allows_immediate_replacement() {
     let mut first = CoreEngine::open(config.clone(), now).unwrap();
     first.shutdown().unwrap();
     CoreEngine::open(config, now + TimeDelta::seconds(1)).unwrap();
+}
+
+#[test]
+fn restart_deduplicates_old_ingress_and_new_generation_full_resync_rebuilds_quotes() {
+    let temp = TempDir::new().expect("temp directory");
+    let core_config = config(&temp);
+    let opened_at = at("2026-07-31T14:30:00Z");
+    let old_batch = quote_envelope(
+        "message:quotes:before-restart",
+        Provider::Schwab,
+        MarketSession::Rth,
+        OperationalState::Live,
+        1,
+        opened_at - TimeDelta::seconds(1),
+    );
+    let mut first = CoreEngine::open(core_config.clone(), opened_at).expect("open first core");
+    first
+        .process(old_batch.clone(), opened_at)
+        .expect("accept initial quote batch");
+    first.shutdown().expect("release first core owner");
+    drop(first);
+
+    let restarted_at = opened_at + TimeDelta::seconds(2);
+    let mut restarted = CoreEngine::open(core_config, restarted_at).expect("open replacement core");
+    assert!(matches!(
+        restarted
+            .process(old_batch, restarted_at)
+            .expect("old ingress is an exact duplicate"),
+        CoreOutcome::Duplicate { .. }
+    ));
+
+    let evaluation = evaluation_envelope(
+        "message:evaluate:after-restart",
+        MarketSession::Rth,
+        restarted_at,
+    );
+    assert!(matches!(
+        restarted.process(evaluation.clone(), restarted_at),
+        Err(CoreError::QuoteBook(QuoteBookError::Empty))
+    ));
+
+    let mut full_resync = quote_envelope(
+        "message:quotes:full-resync-generation-two",
+        Provider::Schwab,
+        MarketSession::Rth,
+        OperationalState::Live,
+        1,
+        restarted_at - TimeDelta::seconds(1),
+    );
+    let IngressMessageV1::QuoteBatch(batch) = &mut full_resync.message else {
+        panic!("test envelope must contain a quote batch");
+    };
+    batch.batch_id = token("batch:Schwab:generation-2:1");
+    batch.provider_state.connection_generation = 2;
+    batch.mode = QuoteBatchMode::ReplaceProviderSnapshot;
+    restarted
+        .process(full_resync, restarted_at)
+        .expect("fresh full snapshot rebuilds the hot quote book");
+
+    let decision = decision(
+        restarted
+            .process(evaluation, restarted_at)
+            .expect("evaluation succeeds after full resync"),
+    );
+    assert_eq!(decision.action, StrategyAction::ManualCandidate);
 }
 
 #[test]

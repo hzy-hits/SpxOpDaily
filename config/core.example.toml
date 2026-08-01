@@ -10,6 +10,9 @@ max_connections = 8
 # Raw frames rotate before a segment exceeds 64 MiB. A single record may be no
 # larger than this bound.
 raw_segment_max_bytes = 67108864
+# Refuse an append before the filesystem would fall below this reserve. Keep at
+# least one full maximum segment available; production should reserve more.
+raw_log_min_free_bytes = 5368709120
 # The in-memory book is deliberately hot and bounded; replay history belongs in
 # the append-only frame segments, not in the live decision process.
 quote_cache_retention_seconds = 300

@@ -7,7 +7,7 @@ use chrono::Utc;
 use clap::{Parser, Subcommand};
 use signal_hook::consts::{SIGINT, SIGTERM};
 use signal_hook::flag;
-use spx_core::{CoreConfig, CoreEngine, serve_unix};
+use spx_core::{CoreConfig, CoreEngine, prune_raw_log, serve_unix};
 use spx_domain::IngressEnvelopeV1;
 use tracing_subscriber::EnvFilter;
 
@@ -36,6 +36,16 @@ enum Command {
         input: PathBuf,
         #[arg(long)]
         use_emitted_at: bool,
+    },
+    PruneFrames {
+        #[arg(long, default_value = "config/core.toml")]
+        config: PathBuf,
+        #[arg(long)]
+        keep_completed_days: u32,
+        #[arg(long)]
+        max_total_bytes: u64,
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 
@@ -81,6 +91,31 @@ fn main() -> anyhow::Result<()> {
             let outcome = engine.process(envelope, processing_at)?;
             engine.shutdown()?;
             println!("{}", serde_json::to_string_pretty(&outcome)?);
+        }
+        Command::PruneFrames {
+            config,
+            keep_completed_days,
+            max_total_bytes,
+            dry_run,
+        } => {
+            let config = CoreConfig::load_for_prune(&config)
+                .with_context(|| format!("failed to load {}", config.display()))?;
+            anyhow::ensure!(
+                max_total_bytes >= config.raw_segment_max_bytes,
+                "max_total_bytes must be at least raw_segment_max_bytes"
+            );
+            let report = prune_raw_log(
+                &config.raw_log_dir,
+                Utc::now().date_naive(),
+                keep_completed_days,
+                max_total_bytes,
+                dry_run,
+            )?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            anyhow::ensure!(
+                report.limit_satisfied_after_plan,
+                "raw log size cap cannot be met without deleting current or future UTC segments"
+            );
         }
     }
     Ok(())

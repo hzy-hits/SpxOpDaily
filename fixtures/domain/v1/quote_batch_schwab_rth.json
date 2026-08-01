@@ -2,6 +2,7 @@
   "schema_version": "quote_batch.v1",
   "batch_id": "batch:schwab:rth:2026-07-31T14:30:00Z:42",
   "provider": "schwab",
+  "mode": "incremental",
   "sequence": 42,
   "received_at": "2026-07-31T14:30:00Z",
   "provider_state": {

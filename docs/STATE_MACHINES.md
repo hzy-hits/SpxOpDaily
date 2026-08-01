@@ -52,6 +52,34 @@ Provider generation and availability are hard cache boundaries:
 - returning to `live` without a fresh usable quote flush does not restore
   readiness.
 
+## Normalized bridge transitions
+
+```text
+BOOT -> SOCKET_SYNC_FENCE -> SNAPSHOT_SYNC -> READY
+  ^             |                 |             |
+  +-------------+-----------------+-- transport uncertainty
+                                      -> DEGRADED -> reconnect + exact retry
+
+contract poison | stale cursor | state rollback -> HALTED
+```
+
+Only one frame is in flight. Before transport, the exact envelope, ID,
+generation and sequence are durably stored. EOF or timeout therefore retries
+the same bytes after reconnect. A matching typed ACK advances the cursor; an
+ACK for another ID is invalid. `replace_provider_snapshot` is a single-frame
+commit, so omitted, invalid or zero-price legs remove older cached values rather
+than silently inheriting them. `READY` is reached only after both provider
+frames receive non-stale accepted ACKs.
+
+The bridge maps explicit `regular/rth` and `gth` quote labels. Schwab is an
+explicitly configured SPX/SPXW RTH-only provider, so a genuinely missing
+session field may use that provider policy; an explicit unknown label is never
+rewritten. Python `globex` remains ES venue metadata, and a session-less IBKR
+option is dropped until the normalized producer supplies an auditable SPX
+decision session. A process-lifetime state lock fences a second producer, while
+source-read failures durably track both provider-clear ACKs and force a full
+snapshot resync on recovery even when the restored file has the old fingerprint.
+
 ## Delivery target transitions
 
 The outbox has one closed set of legal status transitions:

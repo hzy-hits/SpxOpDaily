@@ -21,6 +21,8 @@ queries, or real-order execution.
 ## Architecture boundary
 
 - `spx-domain`: versioned wire and domain contracts; no I/O.
+- `spx-bridge`: read-only adapter for the legacy normalized JSON projection;
+  no broker SDK, candidate generation, notification delivery, or research.
 - `spx-core`: quote book, snapshot, readiness, deterministic policy, health,
   raw append log, and Unix socket ingress.
 - `spx-ledger`: the single SQLite/WAL operational ledger and legal transitions.
@@ -28,8 +30,10 @@ queries, or real-order execution.
   receipt, and DLQ.
 - Python research owns HMM training, replay, backtests, DuckDB, and Parquet.
 
-No crate may import code or runtime files from the legacy Python repository.
-Compatibility is proven with sanitized fixtures and differential tests.
+No crate may import Python source code or read broker/notification secrets. The
+bridge may read only the explicitly configured normalized projection and typed
+provider-health files. Compatibility is proven with sanitized fixtures, live
+read-only inspection, and differential tests.
 
 ## Validation
 

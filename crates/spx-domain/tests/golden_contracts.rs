@@ -6,8 +6,9 @@ use serde::de::DeserializeOwned;
 use spx_domain::{
     CandidateDirection, DeliveryChannel, DeliveryReceiptV1, DomainError, EntitlementState,
     IngressEnvelopeV1, MarketSession, NotificationIntentV1, OperationalState, OptionRight,
-    Provider, ProviderReasonCode, ProviderStateV1, QuoteBatchV1, QuoteQuality, ReceiptOutcome,
-    StrategyAction, StrategyBlockReason, StrategyDecisionV1, Validate, canonical_json_hash,
+    Provider, ProviderReasonCode, ProviderStateV1, QuoteBatchMode, QuoteBatchV1, QuoteQuality,
+    ReceiptOutcome, StrategyAction, StrategyBlockReason, StrategyDecisionV1, Validate,
+    canonical_json_hash,
 };
 
 fn fixture_path(name: &str) -> PathBuf {
@@ -42,10 +43,11 @@ where
 fn schwab_rth_quote_batch_is_valid_and_canonical() {
     let batch: QuoteBatchV1 = decode_valid_canonical(
         "quote_batch_schwab_rth.json",
-        "b3e5b9485501115113f3ee5dc4f64f4d962d52972c740c3766fd7d5d894a2490",
+        "426c7c0c638af65011de0065eed24c27c19f2498582412b78f2ef60b3f32a328",
     );
 
     assert_eq!(batch.provider, Provider::Schwab);
+    assert_eq!(batch.mode, QuoteBatchMode::Incremental);
     assert!(batch.provider_state.is_live());
     assert!(
         batch
@@ -60,10 +62,11 @@ fn schwab_rth_quote_batch_is_valid_and_canonical() {
 fn ibkr_gth_quote_batch_is_valid_and_canonical() {
     let batch: QuoteBatchV1 = decode_valid_canonical(
         "quote_batch_ibkr_gth.json",
-        "9b534738542692a1a03e859d3e25d00667d9fc414d43bb409258b7b487542825",
+        "d16936ac54946440084fbf8409c367d55b488e0e80bce67b390e5dc6c17a00d6",
     );
 
     assert_eq!(batch.provider, Provider::Ibkr);
+    assert_eq!(batch.mode, QuoteBatchMode::Incremental);
     assert!(batch.provider_state.is_live());
     assert!(
         batch
@@ -207,6 +210,23 @@ fn provider_mismatch_is_rejected_during_validation() {
             .expect("provider mismatch fixture must decode before validation");
 
     assert_eq!(batch.validate(), Err(DomainError::ProviderMismatch));
+}
+
+#[test]
+fn duplicate_exact_identity_in_one_provider_session_is_rejected() {
+    let mut batch: QuoteBatchV1 =
+        serde_json::from_str(&fixture_text("quote_batch_schwab_rth.json"))
+            .expect("valid quote fixture must decode");
+    let mut duplicate = batch.quotes[1].clone();
+    duplicate.quote_id = spx_domain::Token::new("quote:duplicate-identity", "quote_id").unwrap();
+    batch.quotes.push(duplicate);
+
+    assert_eq!(
+        batch.validate(),
+        Err(DomainError::Duplicate(
+            "quote identity within provider session"
+        ))
+    );
 }
 
 #[test]

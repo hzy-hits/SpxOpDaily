@@ -50,4 +50,5 @@ jobs:
       - name: Validate example TOML
         run: |
           cargo run --locked -p spx-core -- check-config --config config/core.example.toml
+          cargo run --locked -p spx-bridge -- check-config --config config/bridge.example.toml
           cargo run --locked -p spx-delivery -- check-config --config config/delivery.example.toml

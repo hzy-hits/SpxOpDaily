@@ -14,7 +14,7 @@ pub enum Provider {
     Ibkr,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 /// SPX/SPXW decision window, not a provider venue-session label.
 ///
@@ -23,6 +23,13 @@ pub enum Provider {
 pub enum MarketSession {
     Rth,
     Gth,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QuoteBatchMode {
+    Incremental,
+    ReplaceProviderSnapshot,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -290,6 +297,7 @@ pub struct QuoteBatchV1 {
     pub schema_version: String,
     pub batch_id: Token,
     pub provider: Provider,
+    pub mode: QuoteBatchMode,
     pub sequence: u64,
     pub received_at: DateTime<Utc>,
     pub provider_state: ProviderStateV1,
@@ -318,11 +326,20 @@ impl Validate for QuoteBatchV1 {
             .map(|quote| quote.quote_id.clone())
             .collect();
         unique_tokens(&quote_ids, "quote_id")?;
+        let mut quote_identities = Vec::with_capacity(self.quotes.len());
         for quote in &self.quotes {
             quote.validate()?;
             if quote.provider != self.provider {
                 return Err(DomainError::ProviderMismatch);
             }
+            quote_identities.push((
+                quote.provider,
+                quote.market_session,
+                quote
+                    .exact_contract_id()
+                    .unwrap_or(&quote.instrument_id)
+                    .clone(),
+            ));
             for side in [&quote.bid, &quote.ask, &quote.last].into_iter().flatten() {
                 if side.received_at > self.received_at {
                     return Err(DomainError::TimeOrder(
@@ -330,6 +347,13 @@ impl Validate for QuoteBatchV1 {
                     ));
                 }
             }
+        }
+        quote_identities.sort();
+        quote_identities.dedup();
+        if quote_identities.len() != self.quotes.len() {
+            return Err(DomainError::Duplicate(
+                "quote identity within provider session",
+            ));
         }
         Ok(())
     }

@@ -1,5 +1,5 @@
 [Unit]
-Description=SPX Spark Rust normalized-data shadow core
+Description=SPX Spark Rust raw-frame retention
 After=local-fs.target
 RequiresMountsFor=/srv/data/spx-spark/rust-core-shadow/frames
 ConditionPathExists=/opt/spx-spark-core-shadow/current/bin/spx-core
@@ -7,19 +7,11 @@ ConditionPathExists=/etc/spx-spark-core-shadow/core.toml
 ConditionPathIsDirectory=/srv/data/spx-spark/rust-core-shadow/frames
 
 [Service]
-Type=simple
+Type=oneshot
 User=ubuntu
 Group=ubuntu
 UMask=0077
-RuntimeDirectory=spx-spark-core-shadow
-StateDirectory=spx-spark-core-shadow
-ConfigurationDirectory=spx-spark-core-shadow
-ConfigurationDirectoryMode=0750
-Environment=RUST_LOG=info
-ExecStartPre=/opt/spx-spark-core-shadow/current/bin/spx-core check-config --config /etc/spx-spark-core-shadow/core.toml
-ExecStart=/opt/spx-spark-core-shadow/current/bin/spx-core serve --config /etc/spx-spark-core-shadow/core.toml
-Restart=on-failure
-RestartSec=5s
+ExecStart=/opt/spx-spark-core-shadow/current/bin/spx-core prune-frames --config /etc/spx-spark-core-shadow/core.toml --keep-completed-days 7 --max-total-bytes 42949672960
 NoNewPrivileges=true
 PrivateDevices=true
 PrivateNetwork=true
@@ -39,6 +31,3 @@ LockPersonality=true
 MemoryDenyWriteExecute=true
 CapabilityBoundingSet=
 SystemCallArchitectures=native
-
-[Install]
-WantedBy=multi-user.target

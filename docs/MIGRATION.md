@@ -35,19 +35,33 @@ and example units are not evidence of deployment readiness.
 
 ## Phase 1: normalized bridge shadow
 
-Python bridges emit sanitized, versioned envelopes to a local Unix socket while
-the existing production writers remain authoritative. Rust writes only its own
-isolated append log, projection and new SQLite ledger. Delivery stays disabled.
+`spx-bridge` reads Python's sanitized normalized projection and emits versioned
+provider-replacement envelopes to a local Unix socket while the existing
+production strategy and notification writers remain authoritative. Rust writes
+only its own isolated append log, projection and new SQLite ledger. Delivery
+stays disabled.
 
 Required evidence:
 
 - Schwab and IBKR timestamps, quality and entitlement survive normalization;
 - quote batches are monotonic and idempotent;
-- the total IBKR ticker budget remains owned by the bridge;
+- the total IBKR ticker budget remains owned by the Python collector/supervisor;
 - `10197` backs off without Gateway restart or session eviction;
 - no dual writer touches the same operational database or projection.
 
-Rollback: stop the shadow process. The existing Python runtime is unchanged.
+Implemented safeguards include a durable monotonic cursor, exact pending-frame
+retry, typed ACK/disposition, atomic full-provider replacement, session-aware
+quote identity, bounded source/frame sizes, and a read-only inspection command.
+The Oracle frame store also has an append-time free-space reserve and a bounded
+completed-day retention timer; exhaustion fails ingress closed without touching
+the Python runtime.
+Phase 1 still requires live RTH and GTH evidence; a weekend stale snapshot proves
+fail-closed behavior but not live parity.
+
+Rollback: stop the bridge first. The existing Python runtime is unchanged. If
+the core binary is also rolled back, restore the matching core TOML and unit
+from the same release backup before restarting it; strict older binaries reject
+newer configuration fields such as the raw-log free-space reserve.
 
 ## Phase 2: differential replay
 
@@ -78,6 +92,13 @@ and rollback rehearsal. A service being `active` is not sufficient evidence.
 Rollback: disable the Rust producer and delivery owner together, preserve the
 ledger and append log, and restore the previously designated single writer. Do
 not delete or rewrite evidence during rollback.
+
+The existing Python lane cannot be renamed as Rust v1 parity: its RTH terminal
+record may contain one leg and its GTH level strategy selects 5–40 point
+verticals. Rust v1 accepts only a two-leg 10-point vertical. Before Phase 3,
+either version and port those existing contracts exactly, or introduce a
+separately named fixed-10-point advisory lane with independent evidence and a
+lane-specific Python notification-owner switch.
 
 ## Phase 4: bounded production ownership
 

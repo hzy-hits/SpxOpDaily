@@ -97,7 +97,11 @@ impl CoreEngine {
             .map_err(|_| CoreError::OwnerLeaseConfiguration)?;
         let ledger = Ledger::open(&config.ledger_path)?;
         ledger.quick_check()?;
-        let raw_log = RawLog::new(&config.raw_log_dir, config.raw_segment_max_bytes)?;
+        let raw_log = RawLog::with_min_free_bytes(
+            &config.raw_log_dir,
+            config.raw_segment_max_bytes,
+            config.raw_log_min_free_bytes,
+        )?;
         let projection = ProjectionStore::new(&config.projection_path);
         let quote_book = QuoteBook::new(
             config.quote_cache_retention_seconds,

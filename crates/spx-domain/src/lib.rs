@@ -10,11 +10,13 @@ pub use delivery::{
     DeliveryChannel, DeliveryReceiptV1, DeskMessageV1, NotificationIntentV1, NotificationTargetV1,
     ReceiptOutcome,
 };
-pub use ingress::{IngressEnvelopeV1, IngressMessageV1};
+pub use ingress::{
+    AckStatus, CoreAckDisposition, CoreAckReason, CoreAckV1, IngressEnvelopeV1, IngressMessageV1,
+};
 pub use market::{
     AnalyticalOptionSnapshotV1, AuthenticationState, BookSideV1, EntitlementState, InstrumentKind,
     MarketSession, OperationalState, OptionContractV1, OptionRight, Provider, ProviderReasonCode,
-    ProviderStateV1, QuoteBatchV1, QuoteQuality, QuoteV1, TransportState,
+    ProviderStateV1, QuoteBatchMode, QuoteBatchV1, QuoteQuality, QuoteV1, TransportState,
 };
 pub use strategy::{
     CalendarState, CandidateDirection, EvaluationRequestV1, ExactLegEvidenceV1, MacroPermission,
@@ -25,6 +27,7 @@ pub use validation::{
 };
 
 pub const INGRESS_SCHEMA_VERSION: &str = "spx_ingress.v1";
+pub const CORE_ACK_SCHEMA_VERSION: &str = "spx_core_ack.v1";
 pub const QUOTE_BATCH_SCHEMA_VERSION: &str = "quote_batch.v1";
 pub const ANALYTICAL_SNAPSHOT_SCHEMA_VERSION: &str = "analytical_option_snapshot.v1";
 pub const PROVIDER_STATE_SCHEMA_VERSION: &str = "provider_state.v1";
