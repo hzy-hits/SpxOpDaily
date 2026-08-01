@@ -19,6 +19,19 @@ The examples under `config/` and `systemd/` are templates. Keep the `.example`
 suffix in development. Creating production files or enabling services requires
 separate, explicit authorization.
 
+`config/oracle-shadow.toml` and `systemd/spx-rust-core-shadow.service` are the
+Phase-1 Oracle overlay. They deliberately use independent `*-shadow` paths,
+run as the same non-root `ubuntu` identity as the future local mirror bridge,
+and retain `PrivateNetwork=true`. The socket is mode `0600`, so this shared
+identity is required until a separately tested group-access contract exists.
+The shadow unit may be started for acceptance but must not be enabled for
+unattended operation before the normalized bridge and raw-log retention guard
+exist.
+
+`config/oracle-shadow-delivery.toml` exists only for the read-only `health`
+command. Phase 1 does not install or start a delivery unit, does not create a
+delivery secret environment, and keeps `network_enabled=false`.
+
 The target key/channel pairs allowed by `core.toml` must exactly match active
 targets in `delivery.toml`. Core turns an unconfigured request target into
 `NO_TRADE`; delivery also dead-letters a missing or channel-mismatched queued
