@@ -1,0 +1,51 @@
+{
+  "schema_version": "quote_batch.v1",
+  "batch_id": "batch:ibkr:gth:2026-07-31T08:00:00Z:108",
+  "provider": "ibkr",
+  "sequence": 108,
+  "received_at": "2026-07-31T08:00:00Z",
+  "provider_state": {
+    "schema_version": "provider_state.v1",
+    "provider": "ibkr",
+    "observed_at": "2026-07-31T07:59:59.900Z",
+    "operational": "live",
+    "transport": "connected",
+    "authentication": "authenticated",
+    "entitlement": "live",
+    "reason_codes": [
+      "healthy"
+    ],
+    "latency_ms": 18.0,
+    "connection_generation": 4
+  },
+  "quotes": [
+    {
+      "quote_id": "quote:ibkr:SPXW:20260731:6360:P:2026-07-31T07:59:59.850Z",
+      "provider": "ibkr",
+      "instrument_id": "option:SPXW:20260731:6360:P",
+      "instrument_kind": "option",
+      "market_session": "gth",
+      "quality": "live",
+      "option": {
+        "contract_id": "SPXW  260731P06360000",
+        "underlier": "SPX",
+        "trading_class": "SPXW",
+        "expiry": "2026-07-31",
+        "strike": 6360.0,
+        "right": "P",
+        "multiplier": 100
+      },
+      "bid": {
+        "price": 19.8,
+        "source_at": "2026-07-31T07:59:59.850Z",
+        "received_at": "2026-07-31T07:59:59.940Z"
+      },
+      "ask": {
+        "price": 20.2,
+        "source_at": "2026-07-31T07:59:59.850Z",
+        "received_at": "2026-07-31T07:59:59.940Z"
+      },
+      "last": null
+    }
+  ]
+}

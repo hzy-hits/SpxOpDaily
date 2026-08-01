@@ -1,0 +1,14 @@
+{
+  "schema_version": "provider_state.v1",
+  "provider": "ibkr",
+  "observed_at": "2026-07-31T08:00:00Z",
+  "operational": "live",
+  "transport": "connected",
+  "authentication": "authenticated",
+  "entitlement": "realtime",
+  "reason_codes": [
+    "healthy"
+  ],
+  "latency_ms": 15.0,
+  "connection_generation": 1
+}

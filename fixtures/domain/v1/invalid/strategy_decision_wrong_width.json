@@ -1,0 +1,30 @@
+{
+  "schema_version": "strategy_decision.v1",
+  "decision_id": "decision:rth:wrong-width:2026-07-31T14:30:05Z",
+  "request_id": "request:rth:wrong-width:2026-07-31T14:30:04Z",
+  "strategy_id": "spring_gamma_v3",
+  "policy_version": "spring_gamma_v3.contract.v1",
+  "snapshot_id": "snapshot:rth:2026-07-31T14:30:00Z",
+  "action": "manual_candidate",
+  "direction": "call_vertical10",
+  "evaluated_at": "2026-07-31T14:30:05Z",
+  "valid_until": "2026-07-31T14:31:05Z",
+  "block_reasons": [],
+  "exact_legs": {
+    "provider": "schwab",
+    "long_contract_id": "SPXW  260731C06360000",
+    "short_contract_id": "SPXW  260731C06375000",
+    "right": "C",
+    "long_strike": 6360.0,
+    "short_strike": 6375.0,
+    "long_bid": 12.4,
+    "long_ask": 12.6,
+    "short_bid": 6.2,
+    "short_ask": 6.4,
+    "max_age_seconds": 0.15,
+    "max_skew_seconds": 0.02,
+    "observed_at": "2026-07-31T14:30:04.950Z"
+  },
+  "evidence_hash": "84062d6b14811aa7261b18f5e6c557623626f17087d248210c0f9a10ecfe154a",
+  "automatic_ordering": false
+}

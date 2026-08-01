@@ -1,0 +1,23 @@
+{
+  "schema_version": "quote_batch.v1",
+  "batch_id": "batch:schwab:rth:unknown-field",
+  "provider": "schwab",
+  "sequence": 1,
+  "received_at": "2026-07-31T14:30:00Z",
+  "provider_state": {
+    "schema_version": "provider_state.v1",
+    "provider": "schwab",
+    "observed_at": "2026-07-31T14:30:00Z",
+    "operational": "live",
+    "transport": "connected",
+    "authentication": "authenticated",
+    "entitlement": "live",
+    "reason_codes": [
+      "healthy"
+    ],
+    "latency_ms": 10.0,
+    "connection_generation": 1
+  },
+  "quotes": [],
+  "unexpected_provider_override": "ibkr"
+}

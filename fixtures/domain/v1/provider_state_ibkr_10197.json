@@ -1,0 +1,14 @@
+{
+  "schema_version": "provider_state.v1",
+  "provider": "ibkr",
+  "observed_at": "2026-07-31T08:00:05Z",
+  "operational": "external_session_owns",
+  "transport": "connected",
+  "authentication": "authenticated",
+  "entitlement": "missing",
+  "reason_codes": [
+    "competing_session10197"
+  ],
+  "latency_ms": null,
+  "connection_generation": 5
+}
