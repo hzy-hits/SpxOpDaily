@@ -8,6 +8,16 @@ def read(relative: str) -> str:
     return (ROOT / relative).read_text(encoding="utf-8")
 
 
+def test_realtime_regime_signal_is_installed_as_an_independent_advisory_worker() -> None:
+    service = read("systemd/spx-spark-market-regime-signal.service")
+    installer = read("scripts/install-spx-spark-services.sh")
+
+    assert "After=spx-spark-market-features-hot.service" in service
+    assert ".venv/bin/spx-spark-market-regime-signal --interval-seconds=5" in service
+    assert "Restart=always" in service
+    assert "spx-spark-market-regime-signal.service" in installer
+
+
 def test_weekend_bulk_compaction_is_bounded_low_priority_and_persistent() -> None:
     service = read("systemd/spx-spark-data-compact-weekend.service")
     timer = read("systemd/spx-spark-data-compact-weekend.timer")
