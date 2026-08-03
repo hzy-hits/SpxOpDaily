@@ -11,7 +11,10 @@ from spx_spark.application.order_map.prompts import (
     render_operator_status_brief,
     render_status_template,
 )
-from spx_spark.application.order_map.operator_status import build_desk_map_projection
+from spx_spark.application.order_map.operator_status import (
+    build_desk_map_projection,
+    build_desk_message_sections,
+)
 from spx_spark.application.order_map.status_explanation import (
     status_explanation_output_valid,
 )
@@ -185,14 +188,46 @@ def test_operator_status_brief_keeps_decision_facts_and_drops_research_density()
             "call_wall": 7600.0,
             "expected_move_points": 28.1,
             "minute_market_frame": {
+                "quality": "ready",
                 "es": {
                     "return_15m_points": -2.0,
                     "return_60m_points": -7.0,
+                    "vwap": 7607.0,
                     "vwap_distance_points": -4.0,
                 },
                 "volume": {"price_volume_alignment_5m": "price_volume_aligned"},
                 "cross_asset": {"es_spy_direction_confirmation_15m": "confirmed"},
+                "volatility": {"vix1d": 17.2, "vix": 18.5},
+                "diagnostics": {
+                    "rth_market_state": {
+                        "input_lineage": {
+                            "values": {"opening_range_state": "above_orh_confirmed"},
+                            "diagnostics": {
+                                "opening_range": {
+                                    "status": "ready",
+                                    "orh": 7595.0,
+                                    "orl": 7578.0,
+                                },
+                                "same_time_range": {"current_range_points": 18.0},
+                            },
+                        }
+                    }
+                },
             },
+            "option_structure_frame": {
+                "quality": "ready",
+                "volatility": {
+                    "atm_iv_0dte": 0.182,
+                    "atm_iv_change_5m": 0.004,
+                    "atm_iv_change_15m": 0.008,
+                    "atm_iv_change_60m": 0.012,
+                },
+                "structure": {"gex_quality": "open_interest_gex"},
+                "density": {"clipped_mass_fraction": 0.01},
+                "exposure": {"oi_quality": "ibkr_ok"},
+                "l1": {"quality": "ready"},
+            },
+            "day_move": {"em_used_fraction": 0.64},
             "spring_gamma_v3_shadow": {"status": "abstain"},
             "convexity_idea_radar": {
                 "status": "ready",
@@ -256,12 +291,21 @@ def test_operator_status_brief_keeps_decision_facts_and_drops_research_density()
     assert rendered.startswith("【SPX Desk Map ·")
     assert "Desk View  NO SETUP · 趋势偏空（context） · OBSERVING" in rendered
     assert "Location  SPX 7558 · ES 7603" in rendered
+    assert "ES VWAP 7607（偏离 -4pt）" in rendered
+    assert "OR 上沿上方确认（ORL 7578 / ORH 7595）" in rendered
+    assert "EM ±28.1pt · GTH 已用 64%" in rendered
     assert "Primary  SPX 7560 下方保持" in rendered
+    assert "ES动量 15m -2pt / 60m -7pt" in rendered
+    assert "量价 同向确认 · ES/SPY 同向确认" in rendered
     assert "Alternative  SPX 收回 7565" in rendered
     assert "Structure  Put/Flip/Call 7550 / 7560–7565 / 7600 · frozen=live" in rendered
     assert "Targets  downside Put 7550 · upside Call 7600" in rendered
     assert "Execution  WAIT · 尚无确定性结构入场" in rendered
     assert "Data Quality  DEGRADED · rth_heartbeat_degraded_snapshot" in rendered
+    assert "ATM IV 0DTE 18.20%" in rendered
+    assert "IVΔ 5/15/60m +0.40vol/+0.80vol/+1.20vol" in rendered
+    assert "VIX1D/VIX 17.2/18.5" in rendered
+    assert "Frames market=READY · options=READY · L1=READY" in rendered
     assert "原因  当前未触发关键位，趋势信号继续独立评估" in rendered
     assert "Spring Gamma" not in rendered
     assert "凸性雷达" not in rendered
@@ -273,6 +317,87 @@ def test_operator_status_brief_keeps_decision_facts_and_drops_research_density()
     assert "当前布局参考" not in rendered
     assert "Skew Spread Shadow" not in rendered
     assert len(rendered.splitlines()) == 10
+
+
+def test_desk_sections_make_unavailable_market_facts_explicit() -> None:
+    sections = build_desk_message_sections(_payload(), NOW)
+
+    assert "ES VWAP unavailable" in sections.location
+    assert "OR unavailable" in sections.location
+    assert "EM unavailable" in sections.location
+    assert "ES动量 15m unavailable / 60m unavailable" in sections.primary_path
+    assert "量价 unavailable · ES/SPY unavailable" in sections.primary_path
+    assert "Vol/IV unavailable" in sections.data_quality
+    assert "Frames market=UNAVAILABLE · options=UNAVAILABLE · L1=UNAVAILABLE" in (
+        sections.data_quality
+    )
+
+
+def test_desk_sections_do_not_invent_opening_range_levels_from_state() -> None:
+    payload = _payload()
+    payload["minute_market_frame"] = {
+        "quality": "ready",
+        "diagnostics": {
+            "rth_market_state": {
+                "input_lineage": {
+                    "values": {"opening_range_state": "inside"},
+                }
+            }
+        },
+    }
+
+    sections = build_desk_message_sections(payload, NOW)
+
+    assert "OR 区间内（区间值 unavailable）" in sections.location
+    assert "ORL" not in sections.location
+    assert "ORH" not in sections.location
+
+
+def test_desk_data_quality_keeps_every_warning_and_frame_reason() -> None:
+    payload = _payload()
+    payload.update(
+        {
+            "minute_market_frame": {"quality": "degraded"},
+            "option_structure_frame": {
+                "quality": "degraded",
+                "diagnostics": {"warnings": ["schwab_unverified"]},
+                "structure": {
+                    "gex_quality": "no_open_interest_gex",
+                    "warnings": ["wall_source_frozen"],
+                },
+                "density": {"clipped_mass_fraction": 0.284},
+                "exposure": {
+                    "oi_quality": "missing",
+                    "warnings": ["exposure_coverage_low"],
+                },
+                "l1": {
+                    "quality": "degraded",
+                    "diagnostics": {"warnings": ["nbbo_sparse"]},
+                },
+            },
+            "warnings": [f"payload_warning_{index}" for index in range(1, 7)],
+        }
+    )
+
+    projection = build_desk_map_projection(payload)
+    sections = build_desk_message_sections(payload, NOW)
+
+    expected = {
+        "market_frame:degraded",
+        "option_frame:degraded",
+        "option_l1:degraded",
+        "oi:missing",
+        "gex:no_open_interest_gex",
+        "density_clipped:28%",
+        "schwab_unverified",
+        "wall_source_frozen",
+        "exposure_coverage_low",
+        "nbbo_sparse",
+        *(f"payload_warning_{index}" for index in range(1, 7)),
+    }
+    assert expected.issubset(set(projection.quality_reasons))
+    for reason in expected:
+        assert reason in sections.data_quality
 
 
 def test_operator_status_brief_never_duplicates_a_live_execution_ticket() -> None:
@@ -330,10 +455,7 @@ def test_operator_status_brief_labels_frozen_and_live_levels_separately() -> Non
 
     rendered = render_operator_status_brief(payload, [], NOW)
 
-    assert (
-        "Structure  event 7550 / 7560–7565 / 7600 · "
-        "live 7540 / 7570–7575 / 7610"
-    ) in rendered
+    assert ("Structure  event 7550 / 7560–7565 / 7600 · live 7540 / 7570–7575 / 7610") in rendered
 
 
 def test_status_llm_reason_validation_rejects_authority_or_multiline_changes() -> None:

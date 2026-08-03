@@ -41,6 +41,10 @@ from spx_spark.application.order_map.decision_consistency import (
     apply_decision_projections,
 )
 from spx_spark.application.order_map.delivery import send_order_map
+from spx_spark.application.order_map.desk_projection_export import (
+    persist_desk_map_projection,
+    rust_report_owner_enabled,
+)
 from spx_spark.application.order_map.es_volume_attach import attach_es_volume_signal
 from spx_spark.application.order_map.frozen_structure import attach_frozen_option_structure
 from spx_spark.application.order_map.hl_volume import (
@@ -569,6 +573,15 @@ def run_status(
         print(json.dumps({"dry_run": True, "changes": changes}, ensure_ascii=False))
         return 0
 
+    rust_owner = rust_report_owner_enabled()
+    rust_projection = persist_desk_map_projection(
+        payload,
+        [] if rust_owner else changes,
+        now=now,
+        trading_date=trading_date,
+        storage=storage_settings,
+        published_at=datetime.now(timezone.utc),
+    )
     # The quarter-hour timer remains the standardized snapshot recorder.  Human
     # delivery is a separate material-change/desk-map decision below.
     delivery_reason = (
@@ -604,8 +617,6 @@ def run_status(
         print(json.dumps(snapshot_result, ensure_ascii=False))
         return 0
 
-    operator_brief = render_operator_status_brief(payload, changes, now)
-    settings = NotificationSettings.from_env()
     semantic = order_map_status_semantic(
         trading_date=trading_date,
         now=now,
@@ -613,6 +624,32 @@ def run_status(
         current_rth_slot=current_rth_slot,
         fingerprint=fingerprint,
     )
+    if rust_owner and semantic.lane == "scheduled_report":
+        mirrored_result = {
+            "skipped": True,
+            "reason": "rust_report_owner",
+            "accepted": False,
+            "mirrored": True,
+            "projection_id": rust_projection["projection_id"],
+            "text": "",
+            "writer": "rust_report_owner",
+            "delivery_outcome": "rust_projection_persisted",
+            "changes": changes,
+            "report_slot_key": rust_projection["source_slot"],
+        }
+        persist_order_map_pricing_audit(
+            payload,
+            storage_settings,
+            now=now,
+            report_kind="status_snapshot",
+            template=template,
+            result=mirrored_result,
+        )
+        print(json.dumps(mirrored_result, ensure_ascii=False))
+        return 0
+
+    operator_brief = render_operator_status_brief(payload, changes, now)
+    settings = NotificationSettings.from_env()
     text = operator_brief
     writer = "deterministic_desk_map"
     status_title = (

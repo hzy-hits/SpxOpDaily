@@ -2431,6 +2431,14 @@ def test_rth_status_reconciliation_never_acks_an_inexact_or_terminal_event(
     monkeypatch.setattr(order_map_module, "render_status_template", lambda *_args: "template")
     monkeypatch.setattr(
         order_map_module,
+        "persist_desk_map_projection",
+        lambda *_args, **_kwargs: {
+            "projection_id": "desk-map:test-reconciliation",
+            "source_slot": "2026-07-15:09:30",
+        },
+    )
+    monkeypatch.setattr(
+        order_map_module,
         "render_operator_status_brief",
         lambda *_args: "exact operator brief",
     )
