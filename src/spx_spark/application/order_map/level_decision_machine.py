@@ -91,6 +91,7 @@ def empty_level_state(now: datetime) -> dict[str, object]:
         "schema_version": 1,
         "phase": LevelPhase.FAR.value,
         "thesis": LevelThesis.NONE.value,
+        "next_reentry_generation": 0,
         "updated_at": _utc(now).isoformat(),
     }
 
@@ -108,7 +109,13 @@ def advance_level_decision(
 
     if not observation.quality_ok or observation.spot is None or observation.es is None:
         return _handle_bad_quality(state, phase, observation, settings=settings)
-    state.pop("quality_failed_at", None)
+    for key in (
+        "quality_failed_at",
+        "quality_degraded_at",
+        "quality_status",
+        "quality_reason",
+    ):
+        state.pop(key, None)
 
     if _session_boundary_changed(state, phase, observation):
         return _to_far(state, phase, now, "session_boundary_reset")
@@ -124,7 +131,11 @@ def advance_level_decision(
                 now,
                 observation.arm_block_reason or "new_arm_blocked",
             )
-        return _arm_nearest_level(observation, settings=settings)
+        return _arm_nearest_level(
+            observation,
+            settings=settings,
+            reentry_generation=_generation(state, "next_reentry_generation"),
+        )
     if phase in TERMINAL_PHASES:
         if not observation.arm_allowed:
             return _unchanged(
@@ -262,6 +273,7 @@ def _arm_nearest_level(
     observation: LevelObservation,
     *,
     settings: LevelDecisionSettings,
+    reentry_generation: int = 0,
 ) -> LevelTransition:
     now = _utc(observation.at)
     spot = float(observation.spot or 0.0)
@@ -272,6 +284,7 @@ def _arm_nearest_level(
     ]
     if not eligible:
         state = empty_level_state(now)
+        state["next_reentry_generation"] = reentry_generation
         return LevelTransition(LevelPhase.FAR, LevelPhase.FAR, state, False, "no_near_level")
     _distance, kind, level = min(eligible, key=lambda row: (row[0], row[1]))
     event_id = _event_id(observation.session_date, kind, level, now)
@@ -281,6 +294,7 @@ def _arm_nearest_level(
     state: dict[str, object] = {
         "schema_version": 1,
         "event_id": event_id,
+        "reentry_generation": reentry_generation,
         "phase": phase.value,
         "thesis": LevelThesis.NONE.value,
         "level_kind": kind,
@@ -314,21 +328,19 @@ def _handle_bad_quality(
     settings: LevelDecisionSettings,
 ) -> LevelTransition:
     now = _utc(observation.at)
+    quality_reason = observation.quality_reason or "market_data_unavailable"
+    state["quality_status"] = "degraded"
+    state["quality_reason"] = quality_reason
+    state.setdefault("quality_degraded_at", now.isoformat())
     if phase in TERMINAL_PHASES or phase is LevelPhase.FAR:
-        return _unchanged(state, phase, now, observation.quality_reason or "data_blocked")
+        return _unchanged(state, phase, now, quality_reason)
     failed_at = _optional_datetime(state.get("quality_failed_at"))
     if failed_at is None:
         state["quality_failed_at"] = now.isoformat()
-        return _unchanged(state, phase, now, observation.quality_reason or "data_grace_started")
+        return _unchanged(state, phase, now, quality_reason)
     if (now - failed_at).total_seconds() >= settings.data_grace_seconds:
-        return _transition(
-            state,
-            phase,
-            LevelPhase.INVALIDATED,
-            now,
-            observation.quality_reason or "data_quality_timeout",
-        )
-    return _unchanged(state, phase, now, observation.quality_reason or "data_grace")
+        state["quality_status"] = "degraded"
+    return _unchanged(state, phase, now, quality_reason)
 
 
 def _structure_drifted(
@@ -490,6 +502,12 @@ def _to_far(
     state: dict[str, object], previous: LevelPhase, now: datetime, reason: str
 ) -> LevelTransition:
     new_state = empty_level_state(now)
+    current_generation = _generation(state, "reentry_generation")
+    if reason == "session_boundary_reset":
+        current_generation = 0
+    elif previous in TERMINAL_PHASES:
+        current_generation += 1
+    new_state["next_reentry_generation"] = current_generation
     new_state["reason"] = reason
     return LevelTransition(previous, LevelPhase.FAR, new_state, True, reason)
 
@@ -544,7 +562,11 @@ def _handle_terminal_rearm(
         and abs(float(current_level) - float(old_level)) > settings.structure_drift_points
     )
     if kind_removed or kind_migrated:
-        armed = _arm_nearest_level(observation, settings=settings)
+        armed = _arm_nearest_level(
+            observation,
+            settings=settings,
+            reentry_generation=_generation(state, "reentry_generation") + 1,
+        )
         if armed.current_phase is not LevelPhase.FAR:
             return LevelTransition(
                 phase,
@@ -586,6 +608,11 @@ def _optional_datetime(value: object) -> datetime | None:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return _utc(parsed)
+
+
+def _generation(state: Mapping[str, object], field: str) -> int:
+    value = state.get(field)
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
 
 
 def _utc(value: datetime) -> datetime:

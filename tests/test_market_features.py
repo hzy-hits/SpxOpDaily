@@ -18,6 +18,7 @@ from spx_spark.application.market_features.decision_filters import (
 from spx_spark.application.market_features.market import (
     build_minute_market_frame,
     freshest_quote,
+    normalized_market_sample,
     normalized_quote,
     session_segment,
 )
@@ -119,6 +120,46 @@ def test_normalized_es_uses_mid_clock_and_matches_expiring_future_family() -> No
     assert selected is quote
     assert normalized_quote(selected)["price"] == 7500.0
     assert normalized_quote(selected)["price_kind"] == "mid"
+
+
+def test_normalized_sample_retains_all_four_schwab_cash_indices() -> None:
+    at = datetime(2026, 8, 3, 15, 0, tzinfo=UTC)
+    quotes = tuple(
+        Quote(
+            instrument=InstrumentId.index(symbol),
+            provider=Provider.SCHWAB,
+            received_at=at,
+            last_update_at=at,
+            trade_time=at,
+            quality=MarketDataQuality.LIVE,
+            last=price,
+            close=price - 10.0,
+        )
+        for symbol, price in (
+            ("SPX", 6_300.0),
+            ("NDX", 23_000.0),
+            ("DJI", 44_000.0),
+            ("RUT", 2_250.0),
+        )
+    )
+    state = LatestState(at, at, quotes, quotes)
+
+    sample = normalized_market_sample(
+        state,
+        now=at,
+        policy=MarketFeatureSettings(),
+    )
+
+    assert set(sample["instruments"]) >= {
+        "index:SPX",
+        "index:NDX",
+        "index:DJI",
+        "index:RUT",
+    }
+    assert {
+        sample["instruments"][instrument_id]["price_kind"]
+        for instrument_id in ("index:SPX", "index:NDX", "index:DJI", "index:RUT")
+    } == {"last"}
 
 
 def test_option_volatility_features_keep_both_expiry_contexts() -> None:
@@ -274,9 +315,7 @@ def test_verified_option_frame_projects_live_walls_into_level_lifecycle() -> Non
         is None
     )
     assert (
-        level_decision_live_structure(
-            replace(frame, structure={**frame.structure, "frozen": True})
-        )
+        level_decision_live_structure(replace(frame, structure={**frame.structure, "frozen": True}))
         is None
     )
 
@@ -323,6 +362,9 @@ def test_minute_frame_calculates_path_volume_cross_asset_and_volatility() -> Non
             qqq=600.0 + minute / 8,
             rsp=200.0 + minute / 25,
             spx=7450.0 + minute,
+            ndx=22_000.0 + minute * 2.0,
+            dji=44_000.0 + minute * 0.5,
+            rut=2_200.0 + minute * 0.2,
             vix=15.0 + minute / 100,
             vvix=80.0 + minute / 10,
         )
@@ -358,9 +400,119 @@ def test_minute_frame_calculates_path_volume_cross_asset_and_volatility() -> Non
     assert frame.cross_asset["es_spx_basis_points"] == pytest.approx(50.0)
     assert frame.cross_asset["es_spx_basis_deviation_points"] == pytest.approx(0.0)
     assert frame.cross_asset["es_spy_direction_confirmation_15m"] == "confirmed"
+    cash_index = frame.cross_asset["cash_index"]
+    assert cash_index["status"] == "degraded"
+    assert cash_index["missing_instruments"] == []
+    assert cash_index["source_skew_seconds"] == 0.0
+    assert cash_index["cash_session_open"] is False
+    assert cash_index["dispersion_15m_bps"] is None
+    assert cash_index["relative_to_spx_15m_bps"]["index:SPX"] is None
+    assert cash_index["reason_codes"] == ["cash_index_cash_session_closed"]
+    assert cash_index["semantics"] == ("observed_cash_index_price_regime_not_market_maker_behavior")
     assert frame.volatility["vix1d_vix_ratio"] is None
     assert frame.volatility["es_realized_vol_60m_annualized"] is not None
     assert frame.volatility["atm_iv_minus_es_realized_vol"] is not None
+
+
+def test_cash_index_features_publish_synchronized_rth_relative_strength_and_dispersion() -> None:
+    start = datetime(2026, 8, 3, 14, 45, tzinfo=UTC)
+    now = start + timedelta(minutes=15)
+    session_id = globex_session_id(now)
+    samples = [
+        _market_sample(
+            start + timedelta(minutes=minute),
+            session_id=session_id,
+            es=6_350.0 + minute,
+            volume=1_000.0 + minute,
+            spx=6_300.0 + minute,
+            ndx=23_000.0 + minute * 2.0,
+            dji=44_000.0 + minute * 0.5,
+            rut=2_200.0 + minute * 0.2,
+        )
+        for minute in range(16)
+    ]
+
+    frame = build_minute_market_frame(
+        samples,
+        now=now,
+        expected_move_points=None,
+        atm_iv=None,
+        structural_levels={},
+        volume_baselines={},
+        policy=MarketFeatureSettings(),
+    )
+
+    cash_index = frame.cross_asset["cash_index"]
+    assert cash_index["status"] == "ready"
+    assert cash_index["cash_session_open"] is True
+    assert cash_index["missing_instruments"] == []
+    assert cash_index["source_skew_seconds"] == 0.0
+    assert cash_index["dispersion_15m_bps"] > 0.0
+    assert cash_index["relative_to_spx_15m_bps"]["index:SPX"] == 0.0
+    assert cash_index["reason_codes"] == []
+
+    samples[-1]["instruments"]["index:RUT"]["source_at"] = (now - timedelta(seconds=6)).isoformat()
+    skewed = build_minute_market_frame(
+        samples,
+        now=now,
+        expected_move_points=None,
+        atm_iv=None,
+        structural_levels={},
+        volume_baselines={},
+        policy=MarketFeatureSettings(),
+    ).cross_asset["cash_index"]
+    assert skewed["status"] == "degraded"
+    assert skewed["source_skew_seconds"] == 6.0
+    assert skewed["dispersion_15m_bps"] is None
+    assert skewed["reason_codes"] == ["cash_index_source_skew_exceeded"]
+
+
+def test_cash_index_features_keep_missing_index_explicit_and_suppress_dispersion() -> None:
+    start = datetime(2026, 8, 3, 14, 45, tzinfo=UTC)
+    now = start + timedelta(minutes=15)
+    session_id = globex_session_id(now)
+    samples = [
+        _market_sample(
+            start + timedelta(minutes=minute),
+            session_id=session_id,
+            es=6_350.0 + minute,
+            volume=1_000.0 + minute,
+            spx=6_300.0 + minute,
+            ndx=23_000.0 + minute,
+            dji=44_000.0 + minute,
+            rut=2_200.0 + minute if minute < 15 else None,
+        )
+        for minute in range(16)
+    ]
+
+    frame = build_minute_market_frame(
+        samples,
+        now=now,
+        expected_move_points=None,
+        atm_iv=None,
+        structural_levels={},
+        volume_baselines={},
+        policy=MarketFeatureSettings(),
+    )
+
+    cash_index = frame.cross_asset["cash_index"]
+    assert cash_index["status"] == "degraded"
+    assert cash_index["missing_instruments"] == ["index:RUT"]
+    assert cash_index["observations"]["index:RUT"] == {
+        "status": "missing",
+        "price": None,
+        "reference_close": None,
+        "price_kind": None,
+        "provider": None,
+        "quality": "missing",
+        "source_at": None,
+        "missing_reason": "fresh_quote_unavailable",
+    }
+    assert cash_index["relative_to_spx_15m_bps"]["index:NDX"] is None
+    assert cash_index["dispersion_15m_bps"] is None
+    assert cash_index["return_15m_available_count"] == 3
+    assert frame.cross_asset["returns"]["index:RUT"]["return_15m_pct"] is None
+    assert cash_index["reason_codes"] == ["cash_index_missing:index:RUT"]
 
 
 def test_gth_expected_move_starts_at_2015_et_and_resets_with_session() -> None:
@@ -1102,6 +1254,9 @@ def _market_sample(
     qqq: float | None = None,
     rsp: float | None = None,
     spx: float | None = None,
+    ndx: float | None = None,
+    dji: float | None = None,
+    rut: float | None = None,
     vix: float | None = None,
     vvix: float | None = None,
 ) -> dict[str, object]:
@@ -1113,6 +1268,9 @@ def _market_sample(
         ("equity:QQQ", qqq),
         ("equity:RSP", rsp),
         ("index:SPX", spx),
+        ("index:NDX", ndx),
+        ("index:DJI", dji),
+        ("index:RUT", rut),
         ("index:VIX", vix),
         ("index:VVIX", vvix),
     ):

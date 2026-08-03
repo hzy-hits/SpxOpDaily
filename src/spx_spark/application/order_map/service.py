@@ -15,6 +15,13 @@ from spx_spark.analytics.options.pricing import finite_float
 from spx_spark.application.globex_trend.state import load_trend_state, trend_state_path
 from spx_spark.application.market_features.greek_decision import build_greek_decision
 from spx_spark.application.market_features.state import load_json, projection_paths
+from spx_spark.application.notifications.report_enqueue import (
+    daily_report_semantic,
+    enqueue_order_map_status,
+    material_report_identity,
+    order_map_status_semantic,
+    stable_report_slot,
+)
 from spx_spark.application.order_map.audit_persistence import (
     persist_order_map_pricing_audit,
     persist_zero_dte_greeks_reference as _persist_zero_dte_greeks_reference,
@@ -48,16 +55,14 @@ from spx_spark.application.order_map.level_trigger_repricing import (
 )
 from spx_spark.application.order_map.models import SHANGHAI_TZ
 from spx_spark.application.order_map.prompts import (
+    render_feishu_delivery_text,
     render_operator_status_brief,
     render_status_template,
 )
-from spx_spark.application.order_map.status_explanation import (
-    STATUS_EXPLANATION_SYSTEM_PROMPT,
-    build_status_explanation_prompt,
-    status_explanation_output_valid,
-)
 from spx_spark.application.order_map.status_delivery import (
     GTH_STATUS_PHASES,
+    _status_fingerprint,
+    _status_material_changes,
     status_delivery_reason as _status_delivery_reason,
 )
 from spx_spark.application.order_map.render import (
@@ -86,7 +91,6 @@ from spx_spark.application.order_map.state import (
     default_state_path,
     load_order_map_state,
     mark_sent,
-    material_changes,
     payload_fingerprint,
     session_phase,
     within_refresh_window,
@@ -104,9 +108,9 @@ from spx_spark.greek_reference import (
 from spx_spark.intraday_strategy import signed_gex_sign_method
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 from spx_spark.macro_event_clock import macro_event_state
-from spx_spark.notifier.dispatcher import dispatch_notification
-from spx_spark.notifier.llm_writer import generate_push_text, load_previous_push, record_push
+from spx_spark.notifier.llm_writer import load_previous_push, record_push
 from spx_spark.notifier.model import CommandRunner, default_runner
+from spx_spark.notifier.dispatcher import inspect_notification_event, notification_event_exists
 from spx_spark.notifier.receipts import NotificationEnvelope, notification_event_id
 from spx_spark.options_map import build_options_map
 from spx_spark.ibkr.position_watcher import default_positions_path, load_snapshot
@@ -432,9 +436,7 @@ def build_order_payload_with_retry(
             Path(storage_settings.data_root) / "latest" / "gth_path_ranks.json"
         )
         payload["gth_level_manual_candidate"] = load_json(
-            Path(storage_settings.data_root)
-            / "latest"
-            / "gth_level_manual_candidate.json"
+            Path(storage_settings.data_root) / "latest" / "gth_level_manual_candidate.json"
         )
         payload["minute_market_frame"] = market_frame
         _apply_gth_em_usage(payload, market_frame)
@@ -525,112 +527,6 @@ def _apply_gth_em_usage(
     )
 
 
-def _status_fingerprint(payload: dict[str, Any]) -> dict[str, Any]:
-    fingerprint = payload_fingerprint(payload)
-    phase = payload.get("session_phase")
-    status_phase = str(phase.get("name") or "") if isinstance(phase, dict) else ""
-    fingerprint["status_phase"] = status_phase
-    decision = payload.get("level_decision")
-    frozen_levels = (
-        decision.get("levels")
-        if isinstance(decision, dict) and isinstance(decision.get("levels"), dict)
-        else {}
-    )
-    for key in ("put_wall", "flip_low", "flip_high", "call_wall"):
-        frozen_value = finite_float(frozen_levels.get(key))
-        if frozen_value is not None:
-            fingerprint[key] = frozen_value
-    if status_phase in GTH_STATUS_PHASES:
-        fingerprint["skew_spread_shadow_id"] = ""
-    fingerprint["decision_thesis"] = _decision_thesis(payload)
-    plans = payload.get("plan_candidates")
-    plan = plans[0] if isinstance(plans, list) and len(plans) == 1 else None
-    if isinstance(plan, dict):
-        fingerprint["trade_intent_id"] = str(plan.get("intent_id") or "")
-        strike = finite_float(plan.get("strike"))
-        right = str(plan.get("right") or "")
-        fingerprint["trade_contract"] = f"{strike:g}{right}" if strike is not None else ""
-    else:
-        fingerprint["trade_intent_id"] = ""
-        fingerprint["trade_contract"] = ""
-    return fingerprint
-
-
-def _decision_thesis(payload: dict[str, Any]) -> str:
-    plans = payload.get("plan_candidates")
-    if isinstance(plans, list) and len(plans) == 1 and isinstance(plans[0], dict):
-        plan = plans[0]
-        return f"plan:{plan.get('play') or '-'}@{finite_float(plan.get('level'))}"
-    decision = payload.get("level_decision")
-    if isinstance(decision, dict) and decision.get("formal_signal") is True:
-        return "|".join(
-            (
-                "level",
-                str(decision.get("event_id") or "-"),
-                str(decision.get("thesis") or "-"),
-                str(decision.get("direction") or "-"),
-            )
-        )
-    return ""
-
-
-def _status_material_changes(
-    previous: dict[str, Any] | None,
-    current: dict[str, Any],
-) -> list[str]:
-    changes = material_changes(previous, current)
-    if not isinstance(previous, dict):
-        return changes
-    prior_thesis = str(previous.get("decision_thesis") or "")
-    current_thesis = str(current.get("decision_thesis") or "")
-    if prior_thesis != current_thesis and (prior_thesis or current_thesis):
-        if prior_thesis and current_thesis:
-            changes.append(
-                f"决策剧本 {_thesis_label(prior_thesis)}→{_thesis_label(current_thesis)}"
-            )
-        elif current_thesis:
-            changes.append(f"决策剧本建立 {_thesis_label(current_thesis)}")
-        else:
-            changes.append(f"决策剧本失效 {_thesis_label(prior_thesis)}")
-    prior_intent = str(previous.get("trade_intent_id") or "")
-    current_intent = str(current.get("trade_intent_id") or "")
-    if prior_thesis == current_thesis and prior_intent != current_intent:
-        prior_contract = str(previous.get("trade_contract") or "-")
-        current_contract = str(current.get("trade_contract") or "-")
-        if prior_intent and current_intent:
-            changes.append(f"执行意图更新 {prior_contract}→{current_contract}")
-        elif current_intent:
-            changes.append(f"执行意图建立 {current_contract}")
-        elif prior_intent:
-            changes.append(f"执行意图失效 {prior_contract}")
-    return changes
-
-
-def _thesis_label(value: str) -> str:
-    if value.startswith("plan:"):
-        play_and_level = value.removeprefix("plan:")
-        play, _, level = play_and_level.partition("@")
-        label = {
-            "level_breakout_call": "向上突破",
-            "level_breakout_put": "向下突破",
-            "level_fade_call": "下破拒绝",
-            "level_fade_put": "上破拒绝",
-        }.get(play, play)
-        return f"{label}@{level}" if level else label
-    if value.startswith("regime:"):
-        _, mode, direction = (value.split(":", 2) + ["unknown", "unknown"])[:3]
-        mode_label = {
-            "trending": "趋势",
-            "mean_reverting": "均值回归",
-            "transition": "过渡",
-        }.get(mode, mode)
-        direction_label = {"up": "偏多", "down": "偏空", "neutral": "中性"}.get(
-            direction, direction
-        )
-        return f"{mode_label}{direction_label}"
-    return value
-
-
 def _has_open_position_risk(storage_settings: StorageSettings) -> bool:
     snapshot = load_snapshot(default_positions_path(storage_settings))
     return bool(snapshot and any(position.qty != 0 for position in snapshot.positions))
@@ -673,6 +569,8 @@ def run_status(
         print(json.dumps({"dry_run": True, "changes": changes}, ensure_ascii=False))
         return 0
 
+    # The quarter-hour timer remains the standardized snapshot recorder.  Human
+    # delivery is a separate material-change/desk-map decision below.
     delivery_reason = (
         "forced"
         if args.force
@@ -686,107 +584,133 @@ def run_status(
         )
     )
     if delivery_reason is None:
-        print(json.dumps({"skipped": True, "reason": "no_material_changes"}))
+        snapshot_result = {
+            "skipped": True,
+            "reason": "snapshot_only_no_material_changes",
+            "text": "",
+            "writer": "deterministic_snapshot_only",
+            "delivery_outcome": "suppressed_snapshot_only",
+            "changes": changes,
+            "report_slot_key": current_rth_slot.key if current_rth_slot is not None else None,
+        }
+        persist_order_map_pricing_audit(
+            payload,
+            storage_settings,
+            now=now,
+            report_kind="status_snapshot",
+            template=template,
+            result=snapshot_result,
+        )
+        print(json.dumps(snapshot_result, ensure_ascii=False))
         return 0
 
-    settings = NotificationSettings.from_env()
     operator_brief = render_operator_status_brief(payload, changes, now)
-    brief_lines = operator_brief.splitlines()
-    deterministic_reason = brief_lines[-1]
-    reason_writer = "template"
-    if len(brief_lines) >= 2 and deterministic_reason.startswith("原因  "):
-        translated_reason, reason_writer = generate_push_text(
-            deterministic_reason,
-            build_status_explanation_prompt(payload, deterministic_reason),
-            settings,
-            runner=runner,
-            system=STATUS_EXPLANATION_SYSTEM_PROMPT,
-        )
-        if reason_writer != "template" and status_explanation_output_valid(
-            translated_reason
-        ):
-            brief_lines[-1] = translated_reason.strip()
-            operator_brief = "\n".join(brief_lines)
-        elif reason_writer != "template":
-            reason_writer = "template_validation_fallback"
+    settings = NotificationSettings.from_env()
+    semantic = order_map_status_semantic(
+        trading_date=trading_date,
+        now=now,
+        delivery_reason=delivery_reason,
+        current_rth_slot=current_rth_slot,
+        fingerprint=fingerprint,
+    )
     text = operator_brief
-    writer = (
-        "deterministic_operator_brief"
-        if reason_writer == "template"
-        else f"deterministic_operator_brief+{reason_writer}_reason"
-    )
-    feishu_text = operator_brief
-    report_occurred_at = current_rth_slot.slot_at if current_rth_slot is not None else now
-    event_identity = (
-        f"rth_slot:{current_rth_slot.key}"
-        if current_rth_slot is not None
-        else json.dumps(fingerprint, sort_keys=True, separators=(",", ":"))
-    )
-    event_id = notification_event_id(
-        "status",
-        source="order_map_status",
-        occurred_at=report_occurred_at,
-        identity=event_identity,
-    )
+    writer = "deterministic_desk_map"
     status_title = (
-        "SPX GTH 方向观察（不可执行）"
-        if str(fingerprint.get("status_phase") or "") in GTH_STATUS_PHASES
-        else "SPX 市场状态（非信号）"
+        "SPX GTH Desk Map（条件观察）"
+        if payload.get("research_only") is True
+        or str(fingerprint.get("status_phase") or "") in GTH_STATUS_PHASES
+        else "SPX Desk Map"
     )
-    dispatch = dispatch_notification(
+    feishu_text = render_feishu_delivery_text(payload, changes, now, text)
+    if notification_event_exists(settings, semantic.event_id):
+        inspection = inspect_notification_event(
+            settings,
+            NotificationEnvelope(
+                event_id=semantic.event_id,
+                source="order_map_status",
+                kind="status",
+                lane=semantic.lane,
+                occurred_at=semantic.occurred_at,
+                expires_at=semantic.expires_at,
+            ),
+            title=status_title,
+            text=text,
+            friend=True,
+            feishu_text=feishu_text,
+        )
+        if not inspection.acceptable:
+            rejected_result = {
+                "skipped": False,
+                "reason": f"outbox_reconciliation_failed:{inspection.reason}",
+                "accepted": False,
+                "duplicate": False,
+                "notification_event_id": semantic.event_id,
+                "text": text,
+                "writer": writer,
+                "delivery_outcome": "reconciliation_rejected",
+                "changes": changes,
+                "occurred_at": semantic.occurred_at.isoformat(),
+                "report_slot_key": semantic.slot_key,
+                "payload_matches": inspection.payload_matches,
+                "targets_match": inspection.targets_match,
+                "event_status": inspection.event_status,
+            }
+            persist_order_map_pricing_audit(
+                payload,
+                storage_settings,
+                now=now,
+                report_kind="status",
+                template=template,
+                result=rejected_result,
+            )
+            print(json.dumps(rejected_result, ensure_ascii=False))
+            return 1
+        mark_sent(state_path, trading_date, fingerprint=fingerprint, now=now, kind="status")
+        duplicate_result = {
+            "skipped": True,
+            "reason": "outbox_already_accepted",
+            "accepted": True,
+            "duplicate": True,
+            "notification_event_id": semantic.event_id,
+            "text": operator_brief,
+            "writer": "deterministic_desk_map",
+            "delivery_outcome": "duplicate_already_accepted",
+            "changes": changes,
+            "occurred_at": semantic.occurred_at.isoformat(),
+            "report_slot_key": semantic.slot_key,
+        }
+        persist_order_map_pricing_audit(
+            payload,
+            storage_settings,
+            now=now,
+            report_kind="status",
+            template=template,
+            result=duplicate_result,
+        )
+        print(json.dumps(duplicate_result, ensure_ascii=False))
+        return 0
+    result = enqueue_order_map_status(
         settings,
-        NotificationEnvelope(
-            event_id=event_id,
-            source="order_map_status",
-            kind="status",
-            lane=(
-                "position_safety"
-                if delivery_reason == "open_position_risk"
-                else "scheduled_report"
-            ),
-            occurred_at=report_occurred_at,
-            expires_at=(
-                None
-                if delivery_reason == "open_position_risk"
-                else report_occurred_at + timedelta(minutes=15)
-            ),
-        ),
-        title=status_title,
         text=text,
-        friend=True,
         feishu_text=feishu_text,
-        runner=runner,
-        attempted_at=now,
+        title=status_title,
+        trading_date=trading_date,
+        now=now,
+        delivery_reason=delivery_reason,
+        current_rth_slot=current_rth_slot,
+        fingerprint=fingerprint,
     )
-    delivery_sinks = list(dispatch.sinks)
-    delivered_ok = dispatch.delivered
-    im_ok = any(s.sink == "feishu" and s.ok for s in delivery_sinks)
-    bark_ok = any(s.sink == "bark" and s.ok for s in delivery_sinks)
-    feishu_ok = any(s.sink == "feishu" and s.ok for s in delivery_sinks)
-
-    if delivered_ok:
+    accepted = bool(result["accepted"])
+    if accepted:
         persist_zero_dte_greeks_reference(payload, storage_settings)
         mark_sent(state_path, trading_date, fingerprint=fingerprint, now=now, kind="status")
         record_push("market_status", text, at=now.isoformat())
-    result = {
-        "text": text,
-        "writer": writer,
-        "im_ok": im_ok,
-        "bark_ok": bark_ok,
-        "feishu_ok": feishu_ok,
-        "delivered_ok": delivered_ok,
-        "notification_event_id": event_id,
-        "delivery_outcome": getattr(
-            dispatch,
-            "outcome",
-            "delivered" if delivered_ok else "pending",
-        ),
-        "queued_for_recovery": bool(getattr(dispatch, "queued_for_recovery", False)),
-        "occurred_at": report_occurred_at.isoformat(),
-        "report_slot_key": current_rth_slot.key if current_rth_slot is not None else None,
-        "changes": changes,
-        "delivery_reason": delivery_reason,
-    }
+    result.update(
+        text=text,
+        writer=writer,
+        changes=changes,
+        delivery_reason=delivery_reason,
+    )
     persist_order_map_pricing_audit(
         payload,
         storage_settings,
@@ -796,7 +720,7 @@ def run_status(
         result=result,
     )
     print(json.dumps(result, ensure_ascii=False))
-    if not delivered_ok:
+    if not accepted:
         return 1
     return 0
 
@@ -869,8 +793,41 @@ def run_refresh(
         return 0
 
     settings = NotificationSettings.from_env()
+    refresh_occurred_at = stable_report_slot(now, cadence_minutes=30)
+    refresh_identity = material_report_identity(
+        "order_map_refresh",
+        trading_date=trading_date,
+        occurred_at=refresh_occurred_at,
+        fingerprint=fingerprint,
+    )
+    refresh_event_id = notification_event_id(
+        "order_map",
+        source="order_map",
+        occurred_at=refresh_occurred_at,
+        identity=refresh_identity,
+    )
+    if notification_event_exists(settings, refresh_event_id):
+        mark_sent(state_path, trading_date, fingerprint=fingerprint, now=now, kind="map")
+        print(
+            json.dumps(
+                {
+                    "skipped": True,
+                    "reason": "outbox_already_accepted",
+                    "accepted": True,
+                    "duplicate": True,
+                    "notification_event_id": refresh_event_id,
+                }
+            )
+        )
+        return 0
     result = send_order_map(
-        payload, settings, now=now, extra_header=header, previous_push=load_previous_push()
+        payload,
+        settings,
+        now=now,
+        extra_header=header,
+        previous_push=load_previous_push(),
+        event_identity=refresh_identity,
+        occurred_at=refresh_occurred_at,
     )
     persist_order_map_pricing_audit(
         payload,
@@ -880,23 +837,14 @@ def run_refresh(
         template="\n".join((header, render_template(payload))),
         result=result,
     )
-    if (
-        result.get("delivered_ok")
-        or result["im_ok"]
-        or result["bark_ok"]
-        or result.get("feishu_ok")
-    ):
+    accepted = bool(result.get("accepted"))
+    if accepted:
         persist_zero_dte_greeks_reference(payload, storage_settings)
         mark_sent(state_path, trading_date, fingerprint=fingerprint, now=now, kind="map")
         record_push("order_map_refresh", result["text"], at=now.isoformat())
     result["changes"] = changes
     print(json.dumps(result, ensure_ascii=False))
-    if not (
-        result.get("delivered_ok")
-        or result["im_ok"]
-        or result["bark_ok"]
-        or result.get("feishu_ok")
-    ):
+    if not accepted:
         return 1
     return 0
 
@@ -934,6 +882,33 @@ def run(argv: list[str] | None = None, *, now: datetime | None = None) -> int:
         return 0
 
     settings = NotificationSettings.from_env()
+    semantic = daily_report_semantic(
+        payload,
+        now=now,
+        kind="order_map",
+        source="order_map",
+        identity_label="baseline_trading_date",
+    )
+    if notification_event_exists(settings, semantic.event_id):
+        mark_sent(
+            state_path,
+            trading_date,
+            fingerprint=_status_fingerprint(payload),
+            now=now,
+            kind="map",
+        )
+        print(
+            json.dumps(
+                {
+                    "skipped": True,
+                    "reason": "outbox_already_accepted",
+                    "accepted": True,
+                    "duplicate": True,
+                    "notification_event_id": semantic.event_id,
+                }
+            )
+        )
+        return 0
     result = send_order_map(payload, settings, now=now, previous_push=load_previous_push())
     persist_order_map_pricing_audit(
         payload,
@@ -943,12 +918,8 @@ def run(argv: list[str] | None = None, *, now: datetime | None = None) -> int:
         template=template,
         result=result,
     )
-    if (
-        result.get("delivered_ok")
-        or result["im_ok"]
-        or result["bark_ok"]
-        or result.get("feishu_ok")
-    ):
+    accepted = bool(result.get("accepted"))
+    if accepted:
         persist_zero_dte_greeks_reference(payload, storage_settings)
         mark_sent(
             state_path,
@@ -959,12 +930,7 @@ def run(argv: list[str] | None = None, *, now: datetime | None = None) -> int:
         )
         record_push("order_map", result["text"], at=now.isoformat())
     print(json.dumps(result, ensure_ascii=False))
-    if not (
-        result.get("delivered_ok")
-        or result["im_ok"]
-        or result["bark_ok"]
-        or result.get("feishu_ok")
-    ):
+    if not accepted:
         return 1
     return 0
 

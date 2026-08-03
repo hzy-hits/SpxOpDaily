@@ -112,7 +112,7 @@ market_features:
   trade_target_em_fraction: {value: 0.15, description: Expected-move fraction used for a fallback SPX target when no outward structure exists.}
   trade_confirmation_slippage_points: {value: 1.0, description: SPX-point allowance reserved between state-machine confirmation and the next executable structural target.}
   trade_min_target_room_points: {value: 3.0, description: Hard RTH minimum remaining SPX distance to the deterministic target; a smaller gap means the move has already arrived.}
-  trade_min_reward_risk: {value: 0.40, description: Hard RTH floor for remaining target distance divided by invalidation distance; signals below it are already too late to justify a new manual entry.}
+  trade_min_reward_risk: {value: 1.0, description: Provisional RTH late-entry floor for remaining target distance divided by invalidation distance; this is underlier geometry, not option-economic reward/risk.}
   trade_time_stop_minutes: {value: 15, description: Default maximum holding time for an unextended 0DTE trade intent; new entries stop at 15:30 ET and every time stop is capped at the 15:45 ET hard exit.}
   gth_manual_candidate_enabled: {value: true, description: Enables runtime-gated manual-only GTH exact-spread signals; offline readiness remains evidence and does not suppress valid live operator signals, while broker submission stays disabled.}
   gth_manual_candidate_quote_max_age_seconds: {value: 15.0, description: Maximum source and transport age for exact legs, parity pairs, and direct ES invalidation quotes used by a GTH manual candidate.}
@@ -1730,8 +1730,8 @@ level_decision_shadow:
     value: true
     description: Legacy key name for the live mutually-exclusive wall/flip decision state machine used by the unified manual signal contract.
   notify_transitions:
-    value: false
-    description: Keeps every wall/flip transition in the audit but suppresses broad PATH CONFIRMED pushes; the reviewed upside pilot notifies only after its narrower TradeReady gate passes.
+    value: true
+    description: Enqueues idempotent setup-transition cards for APPROACHING, TESTING, pending break or rejection, RETEST, CONFIRMED and terminal phases; execution remains gated by an independent TradeReady card.
   formal_signal_enabled:
     value: true
     description: Enables deterministic manual signal evaluation from confirmed paths; acceptance reports are diagnostics only and no broker order is submitted automatically.

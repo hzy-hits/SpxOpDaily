@@ -85,6 +85,8 @@ def test_confirmed_path_requires_all_gates_before_trade_ready() -> None:
     )
 
     assert intent["status"] == "trade_ready"
+    assert intent["opportunity_id"] == intent["intent_id"]
+    assert intent["reentry_generation"] == 0
     assert intent["schema_version"] == 3
     assert str(intent["policy_version"]).startswith("rth_trade_intent.v3+sha256:")
     assert intent["valid_until"] == intent["expires_at"]
@@ -102,6 +104,9 @@ def test_confirmed_path_requires_all_gates_before_trade_ready() -> None:
     assert intent["remaining_reward_risk"] == 3.0
     assert intent["expires_at"] == (NOW + timedelta(seconds=20)).isoformat()
     assert intent["automatic_ordering"] is False
+    assert intent["strategy_id"] == "rth_level_manual"
+    assert intent["lifecycle_status"] == "legacy_production"
+    assert intent["runtime_status"] == "production_runtime"
     assert intent["wall_signal"] == "present"
     assert intent["execution_eligible"] is True
     assert intent["quote_observation_eligible"] is False
@@ -282,7 +287,10 @@ def test_reviewed_pilot_keeps_exact_quote_but_softens_redundant_context_gates() 
         latest,
         repricing,
         now=NOW,
-        feature_policy=MarketFeatureSettings(trade_confirmed_pilot_enabled=True),
+        feature_policy=MarketFeatureSettings(
+            trade_confirmed_pilot_enabled=True,
+            trade_min_reward_risk=0.4,
+        ),
         order_policy=OrderMapPolicy(),
     )
 
@@ -324,7 +332,10 @@ def test_joint_immediate_reversal_is_diagnostic_after_level_confirmation() -> No
         latest,
         repricing,
         now=NOW,
-        feature_policy=MarketFeatureSettings(trade_confirmed_pilot_enabled=True),
+        feature_policy=MarketFeatureSettings(
+            trade_confirmed_pilot_enabled=True,
+            trade_min_reward_risk=0.4,
+        ),
         order_policy=OrderMapPolicy(),
     )
 
@@ -539,7 +550,10 @@ def test_flip_low_breakdown_put_is_exact_quote_manual_ready() -> None:
         latest,
         repricing,
         now=NOW,
-        feature_policy=MarketFeatureSettings(trade_confirmed_pilot_enabled=True),
+        feature_policy=MarketFeatureSettings(
+            trade_confirmed_pilot_enabled=True,
+            trade_min_reward_risk=0.4,
+        ),
         order_policy=OrderMapPolicy(),
     )
 
@@ -573,7 +587,10 @@ def test_upper_rejection_put_is_exact_quote_manual_ready(
         latest,
         repricing,
         now=NOW,
-        feature_policy=MarketFeatureSettings(trade_confirmed_pilot_enabled=True),
+        feature_policy=MarketFeatureSettings(
+            trade_confirmed_pilot_enabled=True,
+            trade_min_reward_risk=0.4,
+        ),
         order_policy=OrderMapPolicy(),
     )
 
@@ -605,7 +622,10 @@ def test_upper_rejection_put_treats_bearish_regime_as_priority_not_hard_gate() -
         latest,
         repricing,
         now=NOW,
-        feature_policy=MarketFeatureSettings(trade_confirmed_pilot_enabled=True),
+        feature_policy=MarketFeatureSettings(
+            trade_confirmed_pilot_enabled=True,
+            trade_min_reward_risk=0.4,
+        ),
         order_policy=OrderMapPolicy(),
     )
 
@@ -631,7 +651,10 @@ def test_put_manual_ready_keeps_opposing_regime_as_diagnostic() -> None:
         latest,
         repricing,
         now=NOW,
-        feature_policy=MarketFeatureSettings(trade_confirmed_pilot_enabled=True),
+        feature_policy=MarketFeatureSettings(
+            trade_confirmed_pilot_enabled=True,
+            trade_min_reward_risk=0.4,
+        ),
         order_policy=OrderMapPolicy(),
     )
 
@@ -654,7 +677,10 @@ def test_put_wall_breakdown_is_manual_ready() -> None:
         latest,
         repricing,
         now=NOW,
-        feature_policy=MarketFeatureSettings(trade_confirmed_pilot_enabled=True),
+        feature_policy=MarketFeatureSettings(
+            trade_confirmed_pilot_enabled=True,
+            trade_min_reward_risk=0.4,
+        ),
         order_policy=OrderMapPolicy(),
     )
 
@@ -683,7 +709,10 @@ def test_legacy_pilot_flag_no_longer_suppresses_manual_lanes() -> None:
         latest,
         repricing,
         now=NOW,
-        feature_policy=MarketFeatureSettings(trade_confirmed_pilot_enabled=False),
+        feature_policy=MarketFeatureSettings(
+            trade_confirmed_pilot_enabled=False,
+            trade_min_reward_risk=0.4,
+        ),
         order_policy=OrderMapPolicy(),
     )
 
@@ -705,7 +734,10 @@ def test_legacy_pilot_flag_no_longer_suppresses_manual_lanes() -> None:
         flip_latest,
         flip_repricing,
         now=NOW,
-        feature_policy=MarketFeatureSettings(trade_confirmed_pilot_enabled=False),
+        feature_policy=MarketFeatureSettings(
+            trade_confirmed_pilot_enabled=False,
+            trade_min_reward_risk=0.4,
+        ),
         order_policy=OrderMapPolicy(),
     )
 
@@ -730,7 +762,10 @@ def test_put_manual_ready_has_human_notification_authority(tmp_path) -> None:
         latest,
         repricing,
         now=NOW,
-        feature_policy=MarketFeatureSettings(trade_confirmed_pilot_enabled=True),
+        feature_policy=MarketFeatureSettings(
+            trade_confirmed_pilot_enabled=True,
+            trade_min_reward_risk=0.4,
+        ),
         order_policy=OrderMapPolicy(),
     )
 
@@ -1105,7 +1140,7 @@ def test_remaining_target_room_and_reward_risk_are_hard_entry_gates() -> None:
     assert "remaining_reward_risk_insufficient" in intent["block_reasons"]
 
 
-def test_default_reward_risk_floor_retains_observed_sub_one_rth_opportunity() -> None:
+def test_default_reward_risk_floor_demotes_sub_one_rth_late_entry() -> None:
     market, options, latest, context, repricing = _ready_inputs()
     context = replace(
         context,
@@ -1125,8 +1160,11 @@ def test_default_reward_risk_floor_retains_observed_sub_one_rth_opportunity() ->
 
     assert intent["remaining_target_room_points"] == 12.0
     assert intent["remaining_reward_risk"] == pytest.approx(0.75)
-    assert intent["status"] == "trade_ready"
-    assert "remaining_reward_risk_insufficient" not in intent["block_reasons"]
+    assert intent["reward_risk_kind"] == "underlier_remaining_distance"
+    assert intent["reward_risk_threshold"] == 1.0
+    assert intent["opportunity_disposition"] == "late_chase_observation"
+    assert intent["status"] == "blocked"
+    assert "remaining_reward_risk_insufficient" in intent["block_reasons"]
 
 
 def test_sufficiently_sampled_negative_historical_edge_is_diagnostic_by_default() -> None:
@@ -1266,7 +1304,11 @@ def test_intent_identity_is_semantic_across_rearmed_event_ids() -> None:
         feature_policy=MarketFeatureSettings(),
         order_policy=OrderMapPolicy(),
     )
-    rearmed_level = {**context.level_decision, "event_id": "level:rearmed"}
+    rearmed_level = {
+        **context.level_decision,
+        "event_id": "level:rearmed",
+        "reentry_generation": 1,
+    }
     rearmed_context = DecisionContext(
         **{
             **context.__dict__,
@@ -1293,6 +1335,8 @@ def test_intent_identity_is_semantic_across_rearmed_event_ids() -> None:
     assert second["status"] == "trade_ready"
     assert first["intent_id"] == second["intent_id"]
     assert first["semantic_key"] == second["semantic_key"]
+    assert first["reentry_generation"] == 0
+    assert second["reentry_generation"] == 1
 
 
 def test_trade_ready_delivery_is_semantically_deduplicated(tmp_path, monkeypatch) -> None:
@@ -1647,6 +1691,7 @@ def test_enqueue_ack_crash_then_invalidation_cancels_stale_ready(
 
     rearmed_intent = {
         **intent,
+        "reentry_generation": 1,
         "event_id": "level:crash-invalidation:second",
         "evaluated_at": (NOW + timedelta(seconds=3)).isoformat(),
         "quote_source_at": (NOW + timedelta(seconds=3)).isoformat(),
@@ -1756,6 +1801,7 @@ def test_failed_rth_cancellation_blocks_rearmed_lifecycle(
         storage,
         {
             **intent,
+            "reentry_generation": 1,
             "event_id": "level:cancellation-gate:second",
             "evaluated_at": (NOW + timedelta(seconds=2)).isoformat(),
             "quote_source_at": (NOW + timedelta(seconds=2)).isoformat(),
@@ -3240,7 +3286,7 @@ def test_disabled_notification_does_not_run_writer_or_hold_delivery_lease(
     assert state["inflight"] == {}
 
 
-def test_invalidation_explicitly_rearms_semantic_delivery(tmp_path, monkeypatch) -> None:
+def test_explicit_reentry_generation_rearms_after_invalidation(tmp_path, monkeypatch) -> None:
     intent = {
         **_runtime_contract(NOW + timedelta(minutes=5)),
         "status": "trade_ready",
@@ -3311,7 +3357,7 @@ def test_invalidation_explicitly_rearms_semantic_delivery(tmp_path, monkeypatch)
     )
     rearmed = process_trade_intent(
         storage,
-        {**intent, "event_id": "level:second"},
+        {**intent, "event_id": "level:second", "reentry_generation": 1},
         now=NOW + timedelta(minutes=2),
         settings=settings,
     )
@@ -3322,7 +3368,7 @@ def test_invalidation_explicitly_rearms_semantic_delivery(tmp_path, monkeypatch)
     assert len(calls) == 2
 
 
-def test_expiry_terminally_cancels_and_rearms_semantic_delivery(
+def test_expiry_cancels_occurrence_without_rearming_same_opportunity(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -3415,17 +3461,17 @@ def test_expiry_terminally_cancels_and_rearms_semantic_delivery(
     assert expired["reason"] == "observing"
     assert expired_replay["reason"] == "observing"
     assert same_event_replay["reason"] == "already_accepted"
-    assert rearmed["accepted"] is True
+    assert rearmed["reason"] == "already_accepted"
     assert first_delivery_id != second_delivery_id
 
     state = json.loads((tmp_path / "latest" / "trade_intent_delivery_state.json").read_text())
     assert state["semantic_keys"] == {
-        second_delivery_id: intent["semantic_key"],
+        first_delivery_id: intent["semantic_key"],
     }
     assert state["terminal_delivery_event_ids"] == [first_delivery_id]
     assert state["pending_delivery_cancellation_event_ids"] == []
     assert state["pending_delivery_cancellation_reasons"] == {}
-    assert [row["event_id"] for row in state["delivery_lifecycle_events"]] == [second_delivery_id]
+    assert state["delivery_lifecycle_events"] == []
 
     with sqlite3.connect(settings.delivery_outbox_path) as connection:
         statuses = dict(
@@ -3438,7 +3484,6 @@ def test_expiry_terminally_cancels_and_rearms_semantic_delivery(
         ).fetchall()
     assert statuses == {
         first_delivery_id: "dead_letter",
-        second_delivery_id: "pending",
     }
     assert cancellations == [
         (first_delivery_id, "trade_intent_lifecycle_expired"),
@@ -3523,6 +3568,7 @@ def test_rearmed_semantic_intent_uses_distinct_durable_delivery_event(
     )
     rearmed_intent = {
         **intent,
+        "reentry_generation": 1,
         "event_id": "level:second",
         "evaluated_at": (NOW + timedelta(minutes=2)).isoformat(),
         "quote_source_at": (NOW + timedelta(minutes=2)).isoformat(),

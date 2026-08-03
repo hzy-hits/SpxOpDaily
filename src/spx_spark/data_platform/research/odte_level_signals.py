@@ -26,9 +26,10 @@ from spx_spark.strategy_contract import (
 logger = logging.getLogger(__name__)
 SET_CONFIRMED = "confirmed"
 SET_PREFILL = "prefill"
+SET_GTH_LEVEL_CANDIDATE = "gth_level_manual_candidate"
 SET_GTH_DIP = "gth_dip"
 SET_TRADE_READY = "trade_ready"
-SET_ORDER = (SET_CONFIRMED, SET_PREFILL, SET_GTH_DIP, SET_TRADE_READY)
+SET_ORDER = (SET_CONFIRMED, SET_PREFILL, SET_GTH_LEVEL_CANDIDATE, SET_TRADE_READY)
 
 VARIANT_NAKED = "naked"
 VARIANT_SPREAD5 = "spread5"
@@ -108,7 +109,7 @@ PROFILE_SAT85 = "sat85"
 PROFILE_TRAIL33 = "trail33"
 PROFILE_CLOCK = "clock"
 PROFILE_RTH_1300 = "rth_1300"
-_GTH_EVAL_SETS = (SET_CONFIRMED, SET_GTH_DIP)
+_GTH_EVAL_SETS = (SET_CONFIRMED, SET_GTH_LEVEL_CANDIDATE)
 PROFILES = (
     Profile(name=PROFILE_BASELINE),
     Profile(name=PROFILE_WIDE_INVALIDATION, invalidation_em_fraction=WIDE_INVALIDATION_EM_FRACTION),
@@ -180,6 +181,9 @@ class Signal:
     entry_limit: float | None = None  # persisted production limit; fill only at ask <= limit
     entry_expires_at: datetime | None = None  # exclusive production entry-window end
     entry_provider: str | None = None  # persisted provider; never re-selected with hindsight
+    decision_bid: float | None = None  # frozen net spread bid at decision time
+    decision_ask: float | None = None  # frozen net spread ask at decision time
+    decision_leg_sides: tuple[float, float, float, float] | None = None
     decision_spot: float | None = None  # persisted point-in-time spot at evaluation
     target_level: float | None = None  # exact persisted production target
     recorded_time_stop_at: datetime | None = None
@@ -229,6 +233,8 @@ class Trade:
     h900_ret: float | None
     long_provider: str | None = None
     short_provider: str | None = None
+    entry_latency_seconds: int = 0
+    executable_sides: tuple[float | None, float | None, float | None, float | None] | None = None
 
 
 @dataclass(frozen=True)
@@ -843,6 +849,11 @@ def trade_intent_coverage(
             "non-decision telemetry; excluded from pass/block rates and from trade PnL"
         ),
     }
+
+
+def load_gth_level_candidate_signals(features_root: Path) -> list[Signal]:
+    from .odte_level_gth_candidates import load_gth_level_candidate_signals as load
+    return load(features_root)
 
 
 def load_gth_dip_signals(features_root: Path) -> list[Signal]:

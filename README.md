@@ -18,6 +18,7 @@ Current architecture and refactor execution documents:
 - `docs/refactor-architecture-acceptance-plan.md` - complete target and acceptance specification.
 - `docs/pre-rth-refactor-implementation-plan.md` - implementation order before the first RTH session.
 - `docs/schwab-wide-chain-hot-lane-design.md` - Schwab wide-chain, 500-symbol hot lane, and IBKR validation design.
+- `docs/structure-signal-vnext.md` - event-driven Desk Map, setup lifecycle, opportunity replay, and HMM shadow contract.
 
 ## Quick Start
 

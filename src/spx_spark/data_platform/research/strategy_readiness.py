@@ -4,6 +4,8 @@ The module deliberately separates elapsed, well-observed market sessions from
 strategy opportunities.  A session can therefore count even when no signal
 fires, while a signal or virtual execution can count only when it uses the
 version-three common contract and belongs to a contract-consistent session.
+Deprecated dip-reclaim signals and their virtual lifecycle remain visible only
+as ``legacy_research`` metrics; they cannot satisfy the current GTH lane.
 
 This is a review gate, not a promotion mechanism.  ``automatic_promotion`` is
 always false and insufficient evidence is represented as ``collecting``.
@@ -15,22 +17,40 @@ import json
 from collections import Counter, defaultdict
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
-
-from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 
 from .strategy_readiness_evidence import (
     PUT_SHADOW_LANES,
     _exact_spread_snapshot,
     cohort_result,
     count_exact_spread_exits,
-    count_gth_exact_entries,
+    count_legacy_gth_exact_entries,
     count_put_exact_entries,
     duplicate_audit,
     is_trade_ready_delivery_diagnostic,
     trade_ready_delivery_diagnostic_summary,
+)
+from .strategy_readiness_gth import (
+    count_runtime_gth_exact_evidence,
+    gth_runtime_identity_issues,
+    summarize_gth_strategy_lanes,
+)
+from .strategy_readiness_support import (
+    detector_health_start as _detector_health_start,
+    detector_health_start_at as _detector_health_start_at,
+    event_at as _event_at,
+    latest_date as _latest_date,
+    next_trading_day as _next_trading_day,
+    nonempty_string as _nonempty_string,
+    parse_time as _parse_time,
+    partition_date as _partition_date,
+    policy_bundle_start_at as _policy_bundle_start_at,
+    record_session as _record_session,
+    research_session as _research_session,
+    unique as _unique,
+    utc as _utc,
 )
 from .strategy_readiness_sessions import measure_session_completeness
 
@@ -92,6 +112,7 @@ class _Record:
 _EVENT_DATASETS = {
     "gth_detector_health": "gth_detector_health/date=*/*.jsonl",
     "gth_dip_reclaim": "gth_dip_reclaim/date=*/*.jsonl",
+    "gth_level_manual_candidates": "gth_level_manual_candidates/date=*/*.jsonl",
     "confirmed_gate_results": "confirmed_gate_results/date=*/*.jsonl",
     "trade_intents": "trade_intents/date=*/*.jsonl",
     "trade_candidates": "trade_candidates/date=*/*.jsonl",
@@ -100,12 +121,16 @@ _EVENT_DATASETS = {
 
 REQUIRED_POLICY_ROLES = (
     "gth_detector_runtime",
-    "gth_signal",
     "trade_intent",
     "virtual_entry_decision",
     "virtual_lifecycle",
 )
-OPTIONAL_POLICY_ROLES = ("confirmed_gate", "trade_candidate")
+OPTIONAL_POLICY_ROLES = (
+    "confirmed_gate",
+    "trade_candidate",
+    "gth_runtime_candidate",
+    "gth_signal",  # accepted for frozen report compatibility; no current record owns this role
+)
 POLICY_ROLES = (*REQUIRED_POLICY_ROLES, *OPTIONAL_POLICY_ROLES)
 PUT_POLICY_ROLES = ("trade_intent", "trade_candidate")
 
@@ -200,17 +225,31 @@ def build_strategy_readiness(
     ]
     put_consistent_set = set(put_consistent_sessions)
 
-    compliant = contract["compliant_records"]
-    gth = count_gth_exact_entries(compliant, eligible_sessions=consistent_set)
+    legacy_gth = count_legacy_gth_exact_entries(records, eligible_sessions=consistent_set)
+    runtime_gth_evidence = count_runtime_gth_exact_evidence(
+        records,
+        eligible_sessions=consistent_set,
+    )
+    gth_lanes = summarize_gth_strategy_lanes(
+        records,
+        eligible_sessions=consistent_set,
+        exact_entry_target=thresholds.gth_exact_entries,
+        exact_evidence=runtime_gth_evidence,
+    )
     put = count_put_exact_entries(
         put_contract["compliant_records"],
         eligible_sessions=put_consistent_set,
     )
-    exits = count_exact_spread_exits(
-        compliant,
+    legacy_exits = count_exact_spread_exits(
+        records,
         eligible_sessions=consistent_set,
-        successful_gth_episodes=set(gth["episode_ids"]),
+        successful_gth_episodes=set(legacy_gth["episode_ids"]),
     )
+    runtime_gth = gth_lanes["runtime"]
+    legacy_lane = gth_lanes["legacy_research"]
+    assert isinstance(runtime_gth, dict) and isinstance(legacy_lane, dict)
+    legacy_lane["exact_entries"] = legacy_gth["count"]
+    legacy_lane["exact_spread_complete_exits"] = legacy_exits["count"]
 
     common_blockers = list(policy["blockers"])
     if detector_start_session is None:
@@ -227,6 +266,7 @@ def build_strategy_readiness(
         common_blockers.append("duplicate_forward_samples_present")
     if cohort_start_session is None:
         common_blockers.append("forward_v3_contract_unavailable")
+    common_blockers.extend(str(item) for item in runtime_gth["blockers"])
     common_blockers = _unique(common_blockers)
 
     put_blockers = list(put_policy["blockers"])
@@ -246,15 +286,16 @@ def build_strategy_readiness(
 
     cohorts = {
         "gth_exact_entry": cohort_result(
-            count=int(gth["count"]),
+            count=int(runtime_gth["exact_entry_count"]),
             target=thresholds.gth_exact_entries,
             count_blocker="gth_exact_entries_below_20",
             common_blockers=common_blockers,
             details={
-                "eligible_signals": gth["eligible_signals"],
-                "signals_with_exact_structure": gth["signals_with_exact_structure"],
-                "unmatched_or_inexact_signals": gth["unmatched_or_inexact_signals"],
-                "excluded_incomplete_session": gth["excluded_incomplete_session"],
+                "strategy_id": runtime_gth["strategy_id"],
+                "lifecycle_status": runtime_gth["lifecycle_status"],
+                "eligible_manual_ready_candidates": runtime_gth["eligible_manual_ready_candidates"],
+                "replay_migrated": runtime_gth["replay_migrated"],
+                "legacy_research_exact_entries_excluded": legacy_gth["count"],
             },
         ),
         "put_exact_entry": cohort_result(
@@ -272,14 +313,15 @@ def build_strategy_readiness(
             },
         ),
         "exact_spread_complete_exit": cohort_result(
-            count=int(exits["count"]),
+            count=int(runtime_gth["exact_exit_count"]),
             target=thresholds.exact_spread_exits,
             count_blocker="exact_spread_complete_exits_below_20",
             common_blockers=common_blockers,
             details={
-                "eligible_exact_entries": len(gth["episode_ids"]),
-                "unmatched_or_inexact_exits": exits["unmatched_or_inexact_exits"],
-                "excluded_incomplete_session": exits["excluded_incomplete_session"],
+                "eligible_exact_entries": runtime_gth["exact_entry_count"],
+                "unmatched_or_inexact_exits": runtime_gth["unmatched_or_inexact_exits"],
+                "excluded_incomplete_session": runtime_gth_evidence["excluded_incomplete_session"],
+                "legacy_research_complete_exits_excluded": legacy_exits["count"],
             },
         ),
     }
@@ -342,7 +384,7 @@ def build_strategy_readiness(
         session_details.append(detail)
 
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "generated_at": generated.isoformat(),
         "cutoff_at": cutoff.isoformat(),
         "mode": "forward_shadow_readiness",
@@ -419,6 +461,7 @@ def build_strategy_readiness(
         },
         "contract": public_contract,
         "cohort_contracts": {"put_exact_entry": public_put_contract},
+        "gth_lanes": gth_lanes,
         "legacy_exclusion": contract["legacy_exclusion"],
         "cohorts": cohorts,
         "blockers": all_blockers,
@@ -770,8 +813,12 @@ def _put_shadow_strategy_lane(record: _Record) -> str:
 
 def _record_role(record: _Record) -> str | None:
     row = record.payload
-    if record.source == "gth_dip_reclaim":
-        return "gth_signal"
+    if (
+        record.source == "gth_level_manual_candidates"
+        and _nonempty_string(row.get("source_signal_id"))
+        and row.get("status") in {"blocked", "manual_ready"}
+    ):
+        return "gth_runtime_candidate"
     if record.source == "trade_intents" and (
         row.get("status") in {"blocked", "shadow_ready", "trade_ready"}
         or is_trade_ready_delivery_diagnostic(row)
@@ -791,6 +838,8 @@ def _record_role(record: _Record) -> str | None:
         return "trade_candidate"
     if record.source != "virtual_strategy":
         return None
+    if row.get("source_kind") == "gth_dip_reclaim_call":
+        return None
     if row.get("event") == "virtual_entry_decision" and row.get("status") in {
         "blocked",
         "trade_ready",
@@ -805,8 +854,15 @@ def _record_role(record: _Record) -> str | None:
 def _policy_role(record: _Record) -> str | None:
     if record.source == "gth_detector_health":
         return "gth_detector_runtime"
+    if record.source == "gth_level_manual_candidates":
+        return "gth_runtime_candidate"
     if record.source == "trade_intents":
         return "trade_intent"
+    if (
+        record.source == "virtual_strategy"
+        and record.payload.get("source_kind") == "gth_dip_reclaim_call"
+    ):
+        return None
     if (
         record.source == "virtual_strategy"
         and record.payload.get("event") == "virtual_entry_decision"
@@ -823,6 +879,8 @@ def _declares_policy_version(record: _Record, *, role: str) -> bool:
 
 def _material_contract_issues(record: _Record, *, role: str) -> tuple[str, ...]:
     issues = list(validate_strategy_contract(record.payload, event_at=record.at))
+    if role == "gth_runtime_candidate":
+        issues.extend(gth_runtime_identity_issues(record.payload))
     if _unregistered_put_shadow_record(record):
         issues.append("put_shadow_lane_unregistered")
     valid_until = _parse_time(record.payload.get("valid_until"))
@@ -830,6 +888,7 @@ def _material_contract_issues(record: _Record, *, role: str) -> tuple[str, ...]:
         issues.append("entry_decision_not_terminal")
     requires_live_ttl = (
         role == "gth_signal"
+        or (role == "gth_runtime_candidate" and record.payload.get("status") == "manual_ready")
         or (
             role == "trade_intent"
             and record.payload.get("status") in {"shadow_ready", "trade_ready"}
@@ -859,133 +918,3 @@ def _record_sort_key(record: _Record) -> tuple[datetime, str, int]:
         record.path,
         record.line_number,
     )
-
-
-def _event_at(payload: Mapping[str, object]) -> datetime | None:
-    event = payload.get("event")
-    fields = {
-        "virtual_closed": ("closed_at",),
-        "virtual_opened": ("opened_at",),
-        "virtual_horizon_outcome": ("observed_at",),
-    }.get(str(event), ())
-    for field in (
-        *fields,
-        "evaluated_at",
-        "terminal_at",
-        "armed_at",
-        "confirmed_at",
-        "closed_at",
-        "opened_at",
-        "observed_at",
-        "at",
-        "updated_at",
-    ):
-        parsed = _parse_time(payload.get(field))
-        if parsed is not None:
-            return parsed
-    return None
-
-
-def _record_session(
-    payload: Mapping[str, object],
-    *,
-    at: datetime | None,
-    fallback: date | None,
-) -> date | None:
-    for field in ("session_date", "session_id"):
-        parsed = _parse_date(payload.get(field))
-        if parsed is not None:
-            return parsed
-    return _research_session(at) if at is not None else fallback
-
-
-def _research_session(at: datetime | None) -> date | None:
-    return DEFAULT_MARKET_CALENDAR.research_expiry(at) if at is not None else None
-
-
-def _partition_date(path: Path) -> date | None:
-    for parent in path.parents:
-        if parent.name.startswith("date="):
-            return _parse_date(parent.name.removeprefix("date="))
-    return None
-
-
-def _parse_time(value: object) -> datetime | None:
-    if not isinstance(value, str):
-        return None
-    try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if parsed.tzinfo is None or parsed.utcoffset() is None:
-        return None
-    return parsed.astimezone(timezone.utc)
-
-
-def _parse_date(value: object) -> date | None:
-    if not isinstance(value, str):
-        return None
-    try:
-        return date.fromisoformat(value)
-    except ValueError:
-        return None
-
-
-def _nonempty_string(value: object) -> bool:
-    return isinstance(value, str) and bool(value.strip())
-
-
-def _unique(values: Sequence[str]) -> list[str]:
-    return list(dict.fromkeys(values))
-
-
-def _detector_health_start(rows: Sequence[Mapping[str, object]]) -> date | None:
-    starts = [
-        parsed
-        for row in rows
-        if (parsed := _parse_date(row.get("gth_detector_health_started_session"))) is not None
-    ]
-    return min(starts, default=None)
-
-
-def _detector_health_start_at(rows: Sequence[Mapping[str, object]]) -> datetime | None:
-    times = [
-        parsed
-        for row in rows
-        if (parsed := _parse_time(row.get("gth_detector_health_started_at"))) is not None
-    ]
-    return min(times, default=None)
-
-
-def _policy_bundle_start_at(
-    bundle: Mapping[str, object],
-    *,
-    roles: Sequence[str],
-) -> datetime | None:
-    starts = bundle.get("role_started_at")
-    if not isinstance(starts, Mapping):
-        return None
-    parsed = [_parse_time(starts.get(role)) for role in roles]
-    if any(started_at is None for started_at in parsed):
-        return None
-    return max(parsed, default=None)
-
-
-def _latest_date(*values: object) -> date | None:
-    dates = [value for value in values if isinstance(value, date)]
-    return max(dates, default=None)
-
-
-def _next_trading_day(value: object) -> date | None:
-    if not isinstance(value, date):
-        return None
-    candidate = value + timedelta(days=1)
-    while not DEFAULT_MARKET_CALENDAR.is_trading_day(candidate):
-        candidate += timedelta(days=1)
-    return candidate
-
-
-def _utc(value: datetime) -> datetime:
-    if value.tzinfo is None or value.utcoffset() is None:
-        raise ValueError("readiness timestamps must be timezone-aware")
-    return value.astimezone(timezone.utc)

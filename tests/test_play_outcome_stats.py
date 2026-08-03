@@ -18,6 +18,19 @@ UTC = timezone.utc
 NOW = datetime(2026, 7, 14, 15, 0, tzinfo=UTC)
 
 
+@pytest.fixture(autouse=True)
+def _freeze_provider_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep provider refresh tests independent of the wall-clock test date."""
+
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz: timezone | None = None) -> FrozenDateTime:
+            current = NOW if tz is None else NOW.astimezone(tz)
+            return cls.fromtimestamp(current.timestamp(), tz=current.tzinfo)
+
+    monkeypatch.setattr(play_outcome_stats, "datetime", FrozenDateTime)
+
+
 def test_loader_aggregates_touched_outcomes_within_window(tmp_path: Path) -> None:
     rows = [
         _row("level_fade_put", "call_wall", 0.05, days_ago=1),

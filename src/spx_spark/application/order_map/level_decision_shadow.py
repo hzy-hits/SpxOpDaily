@@ -22,10 +22,15 @@ from spx_spark.application.order_map.level_decision_records import (
     build_health_record,
     build_transition_record,
 )
+from spx_spark.application.order_map.level_transition_delivery import (
+    flush_pending_level_transition_notifications,
+    merge_pending_level_transition,
+    prepare_level_transition_delivery,
+)
 from spx_spark.application.order_map.trigger_coordinates import resolve_trigger_coordinate
 from spx_spark.application.order_map.spot import actionable_live_price
 from spx_spark.application.order_map.stable_structure import advance_stable_structure
-from spx_spark.config import NotificationSettings, StorageSettings
+from spx_spark.config import StorageSettings
 from spx_spark.domain.analytics import AnalyticsStatus
 from spx_spark.ibkr.atm_reference import (
     BASIS_MAX_ABS_POINTS,
@@ -33,8 +38,6 @@ from spx_spark.ibkr.atm_reference import (
     BASIS_MIN_SAMPLES,
 )
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR, ET
-from spx_spark.notifier.dispatcher import enqueue_notification
-from spx_spark.notifier.receipts import NotificationEnvelope
 from spx_spark.options_map import build_options_map
 from spx_spark.schwab.symbols import active_quarterly_contract_month
 from spx_spark.settings.level_decision import LevelDecisionPolicy
@@ -148,6 +151,28 @@ def run_level_decision_shadow(
             confirmed_now=confirmed_now,
             settings=_outcome_settings(policy),
         )
+        delivery, notification_intent = prepare_level_transition_delivery(
+            transition,
+            observation,
+            now=now,
+            notify_transitions=policy.notify_transitions,
+            formal_signal_enabled=policy.formal_signal_enabled,
+            notifications_enabled=notifications_enabled,
+        )
+        pending_notifications, accepted_notification_event_ids = (
+            merge_pending_level_transition(persisted, notification_intent)
+        )
+        if notification_intent is not None and str(
+            notification_intent.get("event_id") or ""
+        ) in accepted_notification_event_ids:
+            assert delivery is not None
+            delivery.update(
+                {
+                    "reason": "setup_transition_already_accepted",
+                    "accepted": True,
+                    "duplicate": True,
+                }
+            )
         payload = {
             "schema_version": 1,
             "mode": "live" if policy.formal_signal_enabled else "shadow",
@@ -173,6 +198,8 @@ def run_level_decision_shadow(
                 "structure_change_pending": structure_change_pending,
                 "new_arm_blocked": structure_pending_blocks_new_arm,
             },
+            "pending_notifications": pending_notifications,
+            "accepted_notification_event_ids": accepted_notification_event_ids,
             "updated_at": _utc(now).isoformat(),
         }
         atomic_write_json_secure(state_path, payload)
@@ -207,16 +234,20 @@ def run_level_decision_shadow(
         for row in completed:
             _append_unique(_outcome_path(storage, now), row)
 
-    delivery = _deliver_transition(
-        transition,
-        observation,
-        storage=storage,
-        now=now,
-        notify_transitions=policy.notify_transitions,
-        formal_signal_enabled=policy.formal_signal_enabled,
-        invalidation_buffer_points=policy.break_buffer_points,
-        notifications_enabled=notifications_enabled,
+    recovery = (
+        flush_pending_level_transition_notifications(state_path, now=now)
+        if notifications_enabled
+        else None
     )
+    if recovery is not None:
+        if delivery is None or recovery.get("notification_event_id") == delivery.get(
+            "notification_event_id"
+        ):
+            delivery = recovery
+        else:
+            _append_unique(_delivery_audit_path(storage, now), recovery)
+    if delivery is not None:
+        _append_unique(_delivery_audit_path(storage, now), delivery)
 
     public = _public_state(
         transition.state,
@@ -636,118 +667,6 @@ def _public_state(
         "quality_reason": observation.get("quality_reason"),
         "updated_at": state.get("updated_at"),
     }
-
-
-def _deliver_transition(
-    transition,
-    observation: LevelObservation,
-    *,
-    storage: StorageSettings,
-    now: datetime,
-    notify_transitions: bool,
-    formal_signal_enabled: bool,
-    invalidation_buffer_points: float,
-    notifications_enabled: bool,
-) -> dict[str, object] | None:
-    del invalidation_buffer_points
-    if not transition.changed:
-        return None
-    state = transition.state
-    level_confirmed = formal_signal_enabled and transition.current_phase is LevelPhase.CONFIRMED
-    result = {
-        "record_key": (
-            f"{state.get('event_id') or 'far'}:"
-            f"{state.get('transition_count') or 0}:{transition.current_phase.value}"
-        ),
-        "at": _utc(now).isoformat(),
-        "event_id": state.get("event_id"),
-        "phase": transition.current_phase.value,
-        "formal_signal": level_confirmed,
-        "actionable": False,
-        "notify_transitions_configured": notify_transitions,
-        "delivery_gate": "trade_intent_required",
-        "reason": "observation_only",
-        "sinks": [],
-        "accepted": False,
-        "queued": False,
-        "delivered": False,
-    }
-    if level_confirmed and notify_transitions and notifications_enabled:
-        notification = NotificationSettings.from_env()
-        if not notification.enabled:
-            result["reason"] = "notification_disabled"
-        elif not any(
-            bool(getattr(notification, field, False))
-            for field in ("feishu_enabled", "bark_enabled", "bark_friend_enabled")
-        ):
-            result["reason"] = "no_delivery_sink"
-        else:
-            event_id = f"level-path:{state.get('event_id')}:confirmed"
-            text = _confirmed_path_message(state, observation)
-            try:
-                enqueued = enqueue_notification(
-                    notification,
-                    NotificationEnvelope(
-                        event_id=event_id,
-                        source="level_decision",
-                        kind="level_path_confirmed",
-                        lane="market_warning",
-                        occurred_at=_utc(now),
-                    ),
-                    title="SPX PATH CONFIRMED",
-                    text=text,
-                    friend=True,
-                    feishu_text=text,
-                    enqueued_at=_utc(now),
-                )
-            except Exception as exc:  # Delivery failure must not roll back the state machine.
-                result["reason"] = f"delivery_error:{type(exc).__name__}"
-            else:
-                result.update(
-                    {
-                        "notification_event_id": event_id,
-                        "reason": "confirmed_market_warning",
-                        "targets": list(enqueued.targets),
-                        "accepted": enqueued.accepted,
-                        "inserted": enqueued.inserted,
-                        "duplicate": enqueued.duplicate,
-                        "queued": enqueued.queued_for_recovery,
-                        # Delivery belongs to the independent outbox consumer.
-                        "delivered": enqueued.delivered,
-                    }
-                )
-    _append_unique(_delivery_audit_path(storage, now), result)
-    return result
-
-
-def _confirmed_path_message(
-    state: Mapping[str, object],
-    observation: LevelObservation,
-) -> str:
-    thesis = str(state.get("thesis") or "none")
-    direction = str(state.get("direction") or "")
-    path = {
-        ("breakout", "up"): "向上突破",
-        ("breakout", "down"): "向下突破",
-        ("fade", "up"): "下破拒绝后向上收复",
-        ("fade", "down"): "上破拒绝后向下回落",
-    }.get((thesis, direction), "关键位路径")
-    spx_level = _positive_float(state.get("spx_level", state.get("level")))
-    spx_spot = observation.spx_spot
-    coordinate = str(state.get("trigger_coordinate_kind") or "unknown")
-    spot_label = "SPX" if coordinate == "official_spx" else "SPX代理"
-    expires_at = str(state.get("expires_at") or "-")
-    return "\n".join(
-        (
-            f"SPX 路径确认 · {path}",
-            f"关键位  {_level_kind_label(state.get('level_kind'))} {_format_level(spx_level)}",
-            f"位置    {spot_label} {_format_level(spx_spot)}，ES {_format_level(observation.es)}",
-            "状态    回踩与方向保持已经确认，路径有效",
-            "执行    尚未通过实时 NBBO、目标空间和收益风险门控；等待 TRADE READY",
-            f"时效    {expires_at}",
-            "本提醒不连接真实订单、成交或持仓状态。",
-        )
-    )
 
 
 def _level_structure_summary(levels: Mapping[str, float]) -> str:

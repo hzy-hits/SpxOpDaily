@@ -140,7 +140,10 @@ def flush_pending_notifications(
                 "accepted": result.accepted,
                 "inserted": result.inserted,
                 "duplicate": result.duplicate,
-                "delivered": result.delivered,
+                # Quiet-window suppression is an accepted terminal policy
+                # outcome, not a transport delivery.
+                "delivered": result.delivered and result.outcome == "delivered",
+                "suppressed": result.outcome == "quiet_window_suppressed",
                 "queued_for_recovery": result.queued_for_recovery,
                 "outcome": result.outcome,
                 "targets": list(result.targets),

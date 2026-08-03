@@ -11,6 +11,7 @@ from spx_spark.application.order_map.prompts import (
     render_operator_status_brief,
     render_status_template,
 )
+from spx_spark.application.order_map.operator_status import build_desk_map_projection
 from spx_spark.application.order_map.status_explanation import (
     status_explanation_output_valid,
 )
@@ -77,6 +78,40 @@ def test_guidance_translates_joined_quality_failures() -> None:
     assert "ES 行情不满足实时门槛" in guidance.action_text
     assert "SPX 触发坐标不可用" in guidance.action_text
     assert "Put Wall、Flip 或 Call Wall 不完整" in guidance.action_text
+
+
+def test_unknown_level_phase_is_visible_as_degraded_data_quality() -> None:
+    payload = _payload()
+    payload["level_decision"] = {
+        **payload["level_decision"],  # type: ignore[dict-item]
+        "phase": "typo_phase",
+    }
+
+    projection = build_desk_map_projection(payload)
+    rendered = render_operator_status_brief(payload, [], NOW)
+
+    assert projection.data_quality == "DEGRADED"
+    assert "unknown_level_phase" in projection.quality_reasons
+    assert "Data Quality  DEGRADED · unknown_level_phase" in rendered
+
+
+def test_terminal_level_phase_never_renders_as_a_fresh_observing_setup() -> None:
+    payload = _payload()
+    payload["level_decision"] = {
+        **payload["level_decision"],  # type: ignore[dict-item]
+        "phase": "expired",
+        "thesis": "breakout",
+        "direction": "up",
+        "level_kind": "call_wall",
+        "level": 7600.0,
+    }
+
+    projection = build_desk_map_projection(payload)
+    rendered = render_operator_status_brief(payload, [], NOW)
+
+    assert projection.stage.value == "EXPIRED"
+    assert "Desk View  NO ACTIVE SETUP · EXPIRED · EXPIRED" in rendered
+    assert "Execution  CLOSED · EXPIRED · 等待离开 reset band 后重新武装" in rendered
 
 
 def test_guidance_emits_one_trade_ready_plan() -> None:
@@ -218,12 +253,15 @@ def test_operator_status_brief_keeps_decision_facts_and_drops_research_density()
 
     rendered = render_operator_status_brief(payload, [], NOW)
 
-    assert rendered.startswith("【SPX 状态 ·")
-    assert "🔴 只观察" in rendered
-    assert "市场  SPX 7558 · ES 7603 · 趋势偏空仅作背景" in rendered
-    assert "触发  SPX 7560 下方保持" in rendered
-    assert "证伪  SPX 收回 7565" in rendered
-    assert "结构  事件与实时一致：Put 7550 / Flip 7560–7565 / Call 7600" in rendered
+    assert rendered.startswith("【SPX Desk Map ·")
+    assert "Desk View  NO SETUP · 趋势偏空（context） · OBSERVING" in rendered
+    assert "Location  SPX 7558 · ES 7603" in rendered
+    assert "Primary  SPX 7560 下方保持" in rendered
+    assert "Alternative  SPX 收回 7565" in rendered
+    assert "Structure  Put/Flip/Call 7550 / 7560–7565 / 7600 · frozen=live" in rendered
+    assert "Targets  downside Put 7550 · upside Call 7600" in rendered
+    assert "Execution  WAIT · 尚无确定性结构入场" in rendered
+    assert "Data Quality  DEGRADED · rth_heartbeat_degraded_snapshot" in rendered
     assert "原因  当前未触发关键位，趋势信号继续独立评估" in rendered
     assert "Spring Gamma" not in rendered
     assert "凸性雷达" not in rendered
@@ -234,8 +272,7 @@ def test_operator_status_brief_keeps_decision_facts_and_drops_research_density()
     assert "REJECTED" not in rendered
     assert "当前布局参考" not in rendered
     assert "Skew Spread Shadow" not in rendered
-    assert "rth_heartbeat_degraded_snapshot" not in rendered
-    assert len(rendered.splitlines()) == 7
+    assert len(rendered.splitlines()) == 10
 
 
 def test_operator_status_brief_never_duplicates_a_live_execution_ticket() -> None:
@@ -243,6 +280,7 @@ def test_operator_status_brief_never_duplicates_a_live_execution_ticket() -> Non
     payload["trade_intent"] = {"status": "trade_ready"}
     payload["plan_candidates"] = [
         {
+            "play": "level_breakout_call",
             "contract_id": "option:SPX:SPXW:20260715:7575:C",
             "strike": 7575.0,
             "right": "C",
@@ -260,8 +298,8 @@ def test_operator_status_brief_never_duplicates_a_live_execution_ticket() -> Non
 
     rendered = render_operator_status_brief(payload, [], NOW)
 
-    assert "🔴 状态快照 · 执行以独立 MANUAL READY 卡为准" in rendered
-    assert "独立 MANUAL READY 卡为准" in rendered
+    assert "Desk View  CALL BREAKOUT · READY" in rendered
+    assert "Execution  READY · 独立 MANUAL READY 卡承载实时合约与报价" in rendered
     assert "🟢 MANUAL READY" not in rendered
     assert "买入  " not in rendered
     assert "限价  " not in rendered
@@ -276,7 +314,8 @@ def test_operator_status_brief_points_to_separate_gth_manual_ready_card() -> Non
 
     rendered = render_operator_status_brief(payload, [], NOW)
 
-    assert "🔴 状态快照 · 执行以独立 MANUAL READY 卡为准" in rendered
+    assert "· READY ·" in rendered
+    assert "Execution  READY · 独立 MANUAL READY 卡承载实时合约与报价" in rendered
     assert "买入  " not in rendered
     assert "限价  " not in rendered
 
@@ -292,8 +331,8 @@ def test_operator_status_brief_labels_frozen_and_live_levels_separately() -> Non
     rendered = render_operator_status_brief(payload, [], NOW)
 
     assert (
-        "结构  事件冻结：Put 7550 / Flip 7560–7565 / Call 7600；"
-        "实时地图：Put 7540 / Flip 7570–7575 / Call 7610"
+        "Structure  event 7550 / 7560–7565 / 7600 · "
+        "live 7540 / 7570–7575 / 7610"
     ) in rendered
 
 

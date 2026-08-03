@@ -5,6 +5,10 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
+from spx_spark.application.notifications.report_enqueue import (
+    daily_report_semantic,
+    enqueue_report_notification,
+)
 from spx_spark.application.order_map.prompts import (
     GLOBEX_CONTEXT_SYSTEM_PROMPT,
     actionable_writer_output_valid,
@@ -13,12 +17,10 @@ from spx_spark.application.order_map.prompts import (
 )
 from spx_spark.application.order_map.render import render_template
 from spx_spark.config import NotificationSettings
-from spx_spark.notifier.dispatcher import dispatch_notification
 from spx_spark.notifier.llm_writer import (
     generate_push_text,
 )
 from spx_spark.notifier.model import CommandRunner, default_runner
-from spx_spark.notifier.receipts import NotificationEnvelope, notification_event_id
 
 
 def send_order_map(
@@ -29,6 +31,8 @@ def send_order_map(
     now: datetime | None = None,
     extra_header: str | None = None,
     previous_push: dict[str, Any] | None = None,
+    event_identity: str | None = None,
+    occurred_at: datetime | None = None,
 ) -> dict[str, Any]:
     now = now or datetime.now(tz=timezone.utc)
     template = render_template(payload)
@@ -52,36 +56,42 @@ def send_order_map(
             text, writer = template, "template_validation_fallback"
 
     kind = "status" if research_only else "order_map"
-    event_id = notification_event_id(
-        kind,
-        source="order_map",
-        occurred_at=now,
-        identity=str(payload.get("trading_date") or payload.get("as_of") or now.date()),
-    )
-    dispatch = dispatch_notification(
-        settings,
-        NotificationEnvelope(
-            event_id=event_id,
+    daily_semantic = (
+        daily_report_semantic(
+            payload,
+            now=now,
+            kind="order_map",
             source="order_map",
-            kind=kind,
-            lane="scheduled_report",
-            occurred_at=now,
-        ),
+            identity_label="baseline_trading_date",
+        )
+        if not research_only and not extra_header
+        else None
+    )
+    if (research_only or extra_header) and (occurred_at is None or event_identity is None):
+        raise ValueError("status/refresh delivery requires an explicit stable semantic identity")
+    if occurred_at is None:
+        assert daily_semantic is not None
+        occurred_at = daily_semantic.occurred_at
+    if event_identity is None:
+        assert daily_semantic is not None
+        event_identity = daily_semantic.identity
+    enqueue = enqueue_report_notification(
+        settings,
+        source="order_map",
+        kind=kind,
+        lane="scheduled_report",
+        occurred_at=occurred_at,
+        identity=event_identity,
         title="市场状态" if research_only else "条件交易地图",
         text=text,
         friend=True,
-        runner=runner,
-        attempted_at=now,
+        enqueued_at=now,
     )
-    delivery_sinks = list(dispatch.sinks)
-    delivered_ok = dispatch.delivered
 
     return {
         "text": text,
         "writer": writer,
         "used_agent": writer in {"grok_cli", "deepseek", "openclaw_agent"},
-        "im_ok": any(s.sink == "feishu" and s.ok for s in delivery_sinks),
-        "bark_ok": any(s.sink == "bark" and s.ok for s in delivery_sinks),
-        "feishu_ok": any(s.sink == "feishu" and s.ok for s in delivery_sinks),
-        "delivered_ok": delivered_ok,
+        "occurred_at": occurred_at.isoformat(),
+        **enqueue,
     }

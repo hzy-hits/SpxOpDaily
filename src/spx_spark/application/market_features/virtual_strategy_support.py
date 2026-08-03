@@ -25,20 +25,39 @@ from spx_spark.strategy_contract import (
     strategy_event_fields,
 )
 
+_TERMINAL_EXIT_ACTIONS = {
+    "time_stop": "exit",
+    "strategy_invalidation": "exit",
+    "gth_dip_low_broken": "exit",
+    "spread_value_saturation": "take_profit_or_exit",
+    "premium_profit_target": "take_profit_or_reduce",
+    "underlier_target_reached": "take_profit",
+    "call_wall_touched": "take_profit_or_reduce",
+    "delta_saturated": "reduce",
+    "post_event_iv_crush_vanna_drag": "take_profit_or_exit",
+    "gamma_convexity_decayed": "exit",
+}
+
 
 def _render_exit(closed: Mapping[str, object]) -> str:
-    snapshot = (
-        closed.get("exit_snapshot") if isinstance(closed.get("exit_snapshot"), Mapping) else {}
-    )
     contracts = str(closed.get("contract_id") or "-")
     if closed.get("position_type") == "call_debit_spread":
         contracts = f"{closed.get('long_contract_id')} / 卖 {closed.get('short_contract_id')}"
+    exit_bid = _number(closed.get("exit_bid"))
+    exit_price_line = (
+        f"虚拟入场 {_fmt(closed.get('entry_mid'))}，可执行退出 bid {_fmt(exit_bid)}，"
+        f"MFE {_pct(closed.get('mfe_fraction'))} / MAE {_pct(closed.get('mae_fraction'))}。"
+        if exit_bid is not None
+        else f"虚拟入场 {_fmt(closed.get('entry_mid'))}，可执行退出价不可用；"
+        f"本次不计算退出收益，MFE {_pct(closed.get('mfe_fraction'))} / "
+        f"MAE {_pct(closed.get('mae_fraction'))}。"
+    )
     return "\n".join(
         (
             f"虚拟策略｜{closed.get('exit_action')}",
             f"主策略 `{closed.get('source_kind')}`，组合 `{contracts}`。",
             f"原因：`{closed.get('exit_reason')}`。",
-            f"虚拟入场 {_fmt(closed.get('entry_mid'))}，当前 {_fmt(snapshot.get('mid'))}，MFE {_pct(closed.get('mfe_fraction'))} / MAE {_pct(closed.get('mae_fraction'))}。",
+            exit_price_line,
             "这是显示报价路径的影子生命周期，不读取 IBKR 仓位、不假设成交，也不自动下单。",
         )
     )
@@ -284,6 +303,7 @@ def _episode(
         "invalidation_es": invalidation_es,
         "mfe_fraction": 0.0,
         "mae_fraction": 0.0,
+        "health_status": "healthy",
         "automatic_ordering": False,
         "account_position_source": "none",
         "entry_basis": "decision_quote_snapshot",
@@ -307,28 +327,50 @@ def _exit_decision(
     hard_exit = _rth_trade_hard_exit(active, now=now)
     if hard_exit is not None:
         stop = min(stop, hard_exit) if stop is not None else hard_exit
+    pending_reason = _locked_pending_reason(active)
+    if pending_reason is not None:
+        pending_action = str(active.get("close_pending_action") or "") or _terminal_exit_action(
+            pending_reason
+        )
+        if _number(current.get("bid")) is not None:
+            return pending_reason, pending_action
+        censor_at = (
+            _episode_censor_at(active, stop=stop, policy=policy)
+            if pending_reason == "time_stop" and stop is not None
+            else _locked_exit_censor_at(active, stop=stop)
+        )
+        if censor_at is not None and now >= censor_at:
+            return pending_reason, "censor"
+        return pending_reason, "close_pending"
     if stop is not None and now >= stop:
-        return "time_stop", "exit"
+        if _number(current.get("bid")) is not None:
+            return "time_stop", "exit"
+        censor_at = _episode_censor_at(active, stop=stop, policy=policy)
+        if censor_at is not None and now >= censor_at:
+            return "time_stop", "censor"
+        return "time_stop", "close_pending"
     spx = _spx_reference(latest, current, active=active, now=now)
     es = _direct_reference(latest, "future:ES", as_of=now)
     invalidation_spx = _number(active.get("invalidation_spx"))
+    target_spx = _number(active.get("target_spx"))
     invalidation_es = _number(active.get("invalidation_es"))
     direction = str(active.get("direction") or "")
+    if (invalidation_spx is not None or target_spx is not None) and spx is None:
+        return "underlier_data_unavailable", "exit_or_verify"
     if invalidation_spx is not None:
-        if spx is None:
-            return "underlier_data_unavailable", "exit_or_verify"
         invalidated = (direction == "up" and spx <= invalidation_spx) or (
             direction == "down" and spx >= invalidation_spx
         )
         if invalidated:
-            return "strategy_invalidation", "exit"
+            return _terminal_exit(current, reason="strategy_invalidation", action="exit")
     if invalidation_es is not None:
         if es is None:
             return "underlier_data_unavailable", "exit_or_verify"
-        if es <= invalidation_es:
-            return "gth_dip_low_broken", "exit"
-    if not current:
-        return "option_mark_unavailable", "exit_or_verify"
+        invalidated = (direction == "up" and es <= invalidation_es) or (
+            direction == "down" and es >= invalidation_es
+        )
+        if invalidated:
+            return _terminal_exit(current, reason="gth_dip_low_broken", action="exit")
     mid = _number(current.get("mid"))
     if active.get("position_type") == "call_debit_spread":
         width = _number(active.get("spread_width_points"))
@@ -337,7 +379,11 @@ def _exit_decision(
             and mid is not None
             and mid >= width * policy.virtual_gth_spread_saturation_fraction
         ):
-            return "spread_value_saturation", "take_profit_or_exit"
+            return _terminal_exit(
+                current,
+                reason="spread_value_saturation",
+                action="take_profit_or_exit",
+            )
     else:
         entry_mid = _number(active.get("entry_mid"))
         if (
@@ -345,14 +391,21 @@ def _exit_decision(
             and mid is not None
             and mid / entry_mid - 1.0 >= policy.virtual_profit_take_fraction
         ):
-            return "premium_profit_target", "take_profit_or_reduce"
-    target_spx = _number(active.get("target_spx"))
+            return _terminal_exit(
+                current,
+                reason="premium_profit_target",
+                action="take_profit_or_reduce",
+            )
     if target_spx is not None and spx is not None:
         target_reached = (direction == "up" and spx >= target_spx) or (
             direction == "down" and spx <= target_spx
         )
         if target_reached:
-            return "underlier_target_reached", "take_profit"
+            return _terminal_exit(
+                current,
+                reason="underlier_target_reached",
+                action="take_profit",
+            )
     call_wall = _number(option_structure.get("call_wall"))
     if (
         active.get("source_kind") == "gth_dip_reclaim_call"
@@ -360,14 +413,18 @@ def _exit_decision(
         and spx is not None
         and spx >= call_wall - policy.virtual_wall_touch_points
     ):
-        return "call_wall_touched", "take_profit_or_reduce"
+        return _terminal_exit(
+            current,
+            reason="call_wall_touched",
+            action="take_profit_or_reduce",
+        )
     quality = current.get("quality") if isinstance(current.get("quality"), Mapping) else {}
     greek_exit_allowed = bool(
         greek_decision.get("mode") == "decision_grade" and quality.get("status") == "ok"
     )
     delta = abs(_number(current.get("delta")) or 0.0)
     if greek_exit_allowed and delta >= policy.greek_delta_saturation:
-        return "delta_saturated", "reduce"
+        return _terminal_exit(current, reason="delta_saturated", action="reduce")
     entry_iv = _number(active.get("entry_iv"))
     iv = _number(current.get("iv"))
     vanna = _number(current.get("vanna_delta_per_vol_point"))
@@ -380,7 +437,11 @@ def _exit_decision(
         and vanna is not None
         and vanna > 0
     ):
-        return "post_event_iv_crush_vanna_drag", "take_profit_or_exit"
+        return _terminal_exit(
+            current,
+            reason="post_event_iv_crush_vanna_drag",
+            action="take_profit_or_exit",
+        )
     entry_gamma = _number(active.get("entry_gamma"))
     gamma = _number(current.get("gamma_per_point"))
     color = _number(current.get("color_gamma_per_minute"))
@@ -393,8 +454,37 @@ def _exit_decision(
         and color is not None
         and color < 0
     ):
-        return "gamma_convexity_decayed", "exit"
+        return _terminal_exit(current, reason="gamma_convexity_decayed", action="exit")
+    # Market-data degradation must not erase a terminal trigger already
+    # observed from the underlier, a wall, or a valid Greek input.  Those
+    # reasons are evaluated first and become CLOSE_PENDING when bid is absent.
+    if not current or mid is None:
+        return "option_mark_unavailable", "exit_or_verify"
     return None, None
+
+
+def _terminal_exit(
+    current: Mapping[str, object],
+    *,
+    reason: str,
+    action: str,
+) -> tuple[str, str]:
+    if _number(current.get("bid")) is None:
+        return reason, "close_pending"
+    return reason, action
+
+
+def _terminal_exit_action(reason: str) -> str:
+    return _TERMINAL_EXIT_ACTIONS.get(reason, "exit")
+
+
+def _locked_pending_reason(active: Mapping[str, object]) -> str | None:
+    if active.get("status") != "close_pending":
+        return None
+    reason = str(active.get("close_pending_reason") or "").strip()
+    if reason == "time_stop_exit_bid_unavailable":
+        return "time_stop"
+    return reason or None
 
 
 def _rth_trade_hard_exit(
@@ -450,6 +540,155 @@ def _session_day(value: object) -> date | None:
         return datetime.strptime(normalized, "%Y%m%d").date()
     except ValueError:
         return None
+
+
+def _episode_censor_at(
+    active: Mapping[str, object],
+    *,
+    stop: datetime,
+    policy: MarketFeatureSettings,
+) -> datetime | None:
+    """Bound a missing time-stop bid by typed quote grace and expiry close."""
+
+    grace_deadline = _utc(stop) + timedelta(
+        seconds=max(0.0, policy.trade_quote_max_age_seconds)
+    )
+    session_close = _episode_session_close(active)
+    return min(grace_deadline, session_close) if session_close is not None else grace_deadline
+
+
+def _locked_exit_censor_at(
+    active: Mapping[str, object],
+    *,
+    stop: datetime | None,
+) -> datetime | None:
+    """End a previously triggered exit no later than its lifecycle/session boundary."""
+
+    deadlines = [deadline for deadline in (stop, _episode_session_close(active)) if deadline]
+    return min(deadlines) if deadlines else None
+
+
+def _episode_session_close(active: Mapping[str, object]) -> datetime | None:
+    session_day = _session_day(active.get("session_id"))
+    if session_day is None:
+        opened_at = _time(active.get("opened_at"))
+        if opened_at is not None:
+            session_day = opened_at.astimezone(ET).date()
+    if session_day is None:
+        return None
+    session = DEFAULT_MARKET_CALENDAR.session(session_day)
+    if session is None:
+        return None
+    return _utc(session.close_at)
+
+
+def _mark_episode_degraded(
+    active: dict[str, object],
+    *,
+    reason: str,
+    now: datetime,
+    close_pending: bool,
+) -> bool:
+    """Persist non-terminal data health while preserving the first exit trigger."""
+
+    transitioned = active.get("health_status") != "degraded"
+    active["status"] = "close_pending" if close_pending else "active"
+    active["health_status"] = "degraded"
+    active["health_reason"] = f"{reason}_exit_bid_unavailable" if close_pending else reason
+    if transitioned or _time(active.get("health_since")) is None:
+        active["health_since"] = _utc(now).isoformat()
+    if transitioned:
+        active.pop("health_recovered_at", None)
+    active["last_health_observed_at"] = _utc(now).isoformat()
+    if close_pending:
+        if _time(active.get("close_pending_since")) is None:
+            active["close_pending_since"] = _utc(now).isoformat()
+        if not str(active.get("close_pending_reason") or "").strip():
+            active["close_pending_reason"] = reason
+        if not str(active.get("close_pending_action") or "").strip():
+            active["close_pending_action"] = _terminal_exit_action(reason)
+    return transitioned
+
+
+def _recover_episode_health(active: dict[str, object], *, now: datetime) -> bool:
+    """Clear transient degradation after all data needed by the observation recovers."""
+
+    recovered = active.get("health_status") == "degraded"
+    active["status"] = "active"
+    active["health_status"] = "healthy"
+    if recovered:
+        active["health_recovered_at"] = _utc(now).isoformat()
+    active.pop("health_reason", None)
+    active.pop("health_since", None)
+    active.pop("last_health_observed_at", None)
+    active.pop("close_pending_since", None)
+    active.pop("close_pending_reason", None)
+    active.pop("close_pending_action", None)
+    return recovered
+
+
+def _lifecycle_transition(
+    active: dict[str, object],
+    current: Mapping[str, object],
+    *,
+    exit_reason: str | None,
+    action: str | None,
+    now: datetime,
+) -> dict[str, object]:
+    """Apply health/exit monotonicity and return persistence-ready evidence."""
+
+    reason = str(exit_reason or "market_data_unavailable")
+    if action in {"exit_or_verify", "close_pending"}:
+        transitioned = _mark_episode_degraded(
+            active,
+            reason=reason,
+            now=now,
+            close_pending=action == "close_pending",
+        )
+        audit = None
+        if transitioned:
+            audit = {
+                "event": "virtual_degraded",
+                "episode_id": active.get("episode_id"),
+                "health_status": active.get("health_status"),
+                "health_since": active.get("health_since"),
+                "health_reason": active.get("health_reason"),
+                **_event_contract(active, block_reasons=(reason,)),
+            }
+        return {"kind": "degraded", "audit": audit}
+    if action == "censor":
+        censored = {
+            **active,
+            **_event_contract(active, block_reasons=(str(exit_reason or "exit_price_unavailable"),)),
+            "status": "censored",
+            "censored_at": now.isoformat(),
+            "censor_reason": exit_reason,
+            "censor_detail": "exit_bid_unavailable",
+            "censor_snapshot": current or None,
+            "exit_bid": None,
+            "pnl_status": "censored",
+        }
+        return {"kind": "censored", "episode": censored}
+    pending_context = {
+        field: active.get(field)
+        for field in ("close_pending_since", "close_pending_reason", "close_pending_action")
+        if active.get(field) is not None
+    }
+    recovered = _recover_episode_health(active, now=now)
+    recovery_audit = None
+    if recovered:
+        recovery_audit = {
+            "event": "virtual_health_recovered",
+            "episode_id": active.get("episode_id"),
+            "health_status": active.get("health_status"),
+            "health_recovered_at": active.get("health_recovered_at"),
+            **_event_contract(active, block_reasons=()),
+        }
+    return {
+        "kind": "ready",
+        "pending_exit_context": pending_context,
+        "audit": recovery_audit,
+    }
 
 
 def _record_due_horizons(
@@ -627,6 +866,42 @@ def _action_underlier_snapshot(
         },
         [],
     )
+
+
+def _active_snapshot_impl(
+    latest: LatestState,
+    active: Mapping[str, object],
+    *,
+    now: datetime,
+    policy: MarketFeatureSettings,
+    spread_snapshot,
+) -> dict[str, object]:
+    """Build one active mark while preserving legacy GTH exact-spread semantics."""
+
+    if active.get("position_type") == "call_debit_spread":
+        snapshot = spread_snapshot(
+            latest,
+            long_contract_id=str(active.get("long_contract_id") or ""),
+            short_contract_id=str(active.get("short_contract_id") or ""),
+            now=now,
+            max_quote_age_seconds=policy.trade_quote_max_age_seconds,
+            max_quote_skew_seconds=policy.provider_sync_tolerance_seconds,
+            required_provider=(
+                "ibkr" if active.get("source_kind") == "gth_dip_reclaim_call" else None
+            ),
+        )
+        if active.get("source_kind") == "gth_dip_reclaim_call":
+            session_date = str(active.get("session_id") or "")
+            reference = _gth_chain_reference(
+                latest,
+                now=now,
+                expiry=session_date.replace("-", ""),
+                policy=policy,
+            )
+            if reference is not None:
+                snapshot["chain_implied_spx"] = reference
+        return snapshot
+    return _contract_snapshot(latest, str(active.get("contract_id") or ""), now=now)
 
 
 def _spx_reference(

@@ -113,10 +113,10 @@ def trade_ready_delivery_diagnostic_summary(
     }
 
 
-def count_gth_exact_entries(
+def count_legacy_gth_exact_entries(
     records: Sequence[ReadinessRecord], *, eligible_sessions: set[str]
 ) -> dict[str, Any]:
-    """Count one exact call-spread entry per eligible GTH signal."""
+    """Count deprecated dip-reclaim entries for legacy research reporting only."""
 
     signals = [record for record in records if record.source == "gth_dip_reclaim"]
     opens = [
@@ -737,7 +737,7 @@ def _put_candidate_evidence_id(payload: Mapping[str, object]) -> str:
 
 
 def _exact_spread_close(payload: Mapping[str, object]) -> bool:
-    if payload.get("position_type") != "call_debit_spread":
+    if payload.get("position_type") not in {"call_debit_spread", "put_debit_spread"}:
         return False
     opened_at = _parse_time(payload.get("opened_at"))
     closed_at = _parse_time(payload.get("closed_at"))

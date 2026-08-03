@@ -10,6 +10,7 @@ import 前先对照本文分层规则与 `tests/architecture/test_module_registr
 - 验收计划: `docs/refactor-architecture-acceptance-plan.md`
 - 首个 RTH 前实施计划: `docs/pre-rth-refactor-implementation-plan.md`
 - Schwab 宽链与 hot lane: `docs/schwab-wide-chain-hot-lane-design.md`
+- 结构化信号与机会回放: `docs/structure-signal-vnext.md`
 - 进度清单: `artifacts/refactor-acceptance/inventory/report.json`
 
 ## 1. 分层总览（低层在下，依赖只允许指向同层或更低层）
@@ -50,7 +51,8 @@ L0 foundation      marketdata, market_calendar, alert_model, runtime_config,
 ## 2. 各层职责与当前包布局
 
 ### L0 foundation
-- `domain/` — 有界上下文枚举（SignalMode / DeliveryMode / ReplanMode 等）
+- `domain/` — 有界上下文枚举与研究输入合同（SignalMode / DeliveryMode /
+  ReplanMode / cross-index research context 等）
 - `settings/` — composition-root 类型化设置（stdlib/YAML only）
 - `marketdata.py`、`market_calendar.py`、`alert_model.py`、`runtime_config.py`
 
@@ -78,15 +80,16 @@ L0 foundation      marketdata, market_calendar, alert_model, runtime_config,
 - `alert_engine/` — constants / rules_* / evaluator / cli（候选评估；投递分离）
 - `notifier/` — model / policy / state / prompts / sinks / pipeline
 - `position_alerts.py`、`alert_profile.py`
-- `data_platform/`、`greek_shadow.py`、`intraday_event_outcomes.py`
+- `data_platform/`（含 opportunity-level replay/cost scenarios）、
+  `greek_shadow.py`、`intraday_event_outcomes.py`
 - `infrastructure/` — ledger / outbox / projection adapters
 
 ### L5 orchestration / application
 - `application/realtime/` — RealtimeEngine、`OptionsAnalyticsKernel`、composition、
   alert evaluator、health（STARTING/WARMING/READY fail-closed）
-- `application/notifications/` — outbox consumer、deliver、settlement
+- `application/notifications/` — outbox producer/consumer、deliver、settlement
 - `application/order_map/` — models / pricing / spot / candidates / machines /
-  render / delivery / service；`order_map.py` 为门面
+  operator status / transition / render / delivery / service；`order_map.py` 为门面
 - `application/shock/` — models / machine / evaluator / delivery / service；
   `intraday_shock.py` 为门面（保留 `shock_direct_delivery_enabled` 快路径）
 - `application/morning_map/` — build / render / delivery / state / service；

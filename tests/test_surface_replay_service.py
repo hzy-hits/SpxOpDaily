@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import socket
 import stat
+import tempfile
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -494,7 +495,7 @@ def test_http_server_returns_stable_redacted_source_error(
         server.server_close()
         thread.join(timeout=2)
 
-    assert b"422 Unprocessable Entity" in response
+    assert response.startswith(b"HTTP/1.0 422 ")
     assert b'"error":"replay_frame_source_rejected"' in response
     assert b"/secret/path" not in response
 
@@ -560,33 +561,35 @@ def test_frame_etag_revalidation_occurs_after_current_source_validation(
 
 def test_unix_http_server_sets_mode_serves_health_and_cleans_up(
     catalog: ReplayCatalog,
-    tmp_path: Path,
 ) -> None:
-    socket_path = tmp_path / "runtime" / "replay-api.sock"
-    server = ReplayUnixHTTPServer(socket_path, ReplayAPI(catalog), mode=0o660)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        assert stat.S_ISSOCK(socket_path.lstat().st_mode)
-        assert stat.S_IMODE(socket_path.lstat().st_mode) == 0o660
-        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        client.settimeout(2)
-        client.connect(str(socket_path))
-        with client:
-            client.sendall(
-                b"GET /healthz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
-            )
-            response = b""
-            while chunk := client.recv(65536):
-                response += chunk
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=2)
+    # AF_UNIX has a small platform-dependent path limit; pytest's nested temp
+    # root may exceed it even though the production runtime path is short.
+    with tempfile.TemporaryDirectory(prefix="spx-replay-", dir="/tmp") as short_root:
+        socket_path = Path(short_root) / "replay-api.sock"
+        server = ReplayUnixHTTPServer(socket_path, ReplayAPI(catalog), mode=0o660)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            assert stat.S_ISSOCK(socket_path.lstat().st_mode)
+            assert stat.S_IMODE(socket_path.lstat().st_mode) == 0o660
+            client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            client.settimeout(2)
+            client.connect(str(socket_path))
+            with client:
+                client.sendall(
+                    b"GET /healthz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+                )
+                response = b""
+                while chunk := client.recv(65536):
+                    response += chunk
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
 
-    assert b"200 OK" in response
-    assert b'"service":"spxw-surface-replay"' in response
-    assert not socket_path.exists()
+        assert b"200 OK" in response
+        assert b'"service":"spxw-surface-replay"' in response
+        assert not socket_path.exists()
 
 
 def test_unix_http_server_refuses_to_replace_regular_file(

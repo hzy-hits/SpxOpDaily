@@ -22,6 +22,7 @@ from spx_spark.config import NY_TZ, StorageSettings
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 from spx_spark.application.order_map.render import _candidate_by_play, _dash
 from spx_spark.application.order_map.report_clock import rth_report_slot
+from spx_spark.state_io import atomic_write_json_secure, exclusive_state_lock
 
 
 def default_state_path(settings: StorageSettings) -> str:
@@ -361,23 +362,25 @@ def mark_sent(
 ) -> None:
     path = Path(state_path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    # Merge into existing state: map pushes and status reports interleave on
-    # separate cadences, so one must not wipe the other's timestamp.
-    payload = load_order_map_state(state_path)
-    payload["last_sent_date"] = trading_date
-    if kind:
-        payload[f"last_{kind}_date"] = trading_date
-    if fingerprint is not None:
+    # Map pushes and status reports are separate timers sharing one JSON file.
+    # Hold one process-wide lock across the complete merge and atomically replace
+    # the projection so simultaneous acknowledgements cannot lose one another.
+    with exclusive_state_lock(path):
+        payload = load_order_map_state(state_path)
+        payload["last_sent_date"] = trading_date
         if kind:
-            payload[f"{kind}_fingerprint"] = fingerprint
-            # Preserve the first legacy fingerprint for old readers. New
-            # runners use kind-specific keys, so interleaved sends cannot
-            # replace one another's dedupe baseline.
-            payload.setdefault("fingerprint", fingerprint)
-        else:
-            payload["fingerprint"] = fingerprint
-    if now is not None:
-        payload["last_sent_at"] = now.timestamp()
-        if kind:
-            payload[f"last_{kind}_at"] = now.timestamp()
-    path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            payload[f"last_{kind}_date"] = trading_date
+        if fingerprint is not None:
+            if kind:
+                payload[f"{kind}_fingerprint"] = fingerprint
+                # Preserve the first legacy fingerprint for old readers. New
+                # runners use kind-specific keys, so interleaved sends cannot
+                # replace one another's dedupe baseline.
+                payload.setdefault("fingerprint", fingerprint)
+            else:
+                payload["fingerprint"] = fingerprint
+        if now is not None:
+            payload["last_sent_at"] = now.timestamp()
+            if kind:
+                payload[f"last_{kind}_at"] = now.timestamp()
+        atomic_write_json_secure(path, payload)

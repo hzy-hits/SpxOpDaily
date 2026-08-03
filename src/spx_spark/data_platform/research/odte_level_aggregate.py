@@ -10,6 +10,10 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Mapping, Sequence
 
+from .odte_level_opportunities import (
+    REFERENCE_SLIPPAGE_PER_LEG_SIDE_POINTS,
+    SLIPPAGE_PER_LEG_SIDE_POINTS,
+)
 from .odte_level_report import _render_report
 from .odte_level_signals import (
     DEFAULT_BASIS_POINTS,
@@ -29,7 +33,7 @@ from .odte_level_signals import (
     PROFILES,
     PROFIT_TARGET_MULTIPLE,
     SET_CONFIRMED,
-    SET_GTH_DIP,
+    SET_GTH_LEVEL_CANDIDATE,
     SET_ORDER,
     SET_PREFILL,
     SET_TRADE_READY,
@@ -177,6 +181,7 @@ def build_artifact(
     trades: Sequence[Trade],
     skips: Sequence[Skip],
     strategy_readiness: Mapping[str, object],
+    opportunities: Sequence[Mapping[str, object]],
 ) -> dict:
     """Build the versioned backtest artifact from evaluated signals."""
     profile_configs = [
@@ -235,15 +240,23 @@ def build_artifact(
                 ),
                 "invalidation_spx": signal.invalidation_level,
                 "target_spx": signal.target_level,
-                "execution_result": "filled" if trade is not None else "skipped",
+                "execution_result": "quote_reached" if trade is not None else "not_reached",
                 "skip_reason": skip.reason if skip is not None else None,
                 "entry_time": trade.entry_time if trade is not None else None,
                 "entry_px": trade.entry_px if trade is not None else None,
                 "pnl_usd": trade.pnl_usd if trade is not None else None,
             }
         )
+    slippage_sensitivity = {
+        "unit": "SPX_option_premium_points_per_contract_leg_side",
+        "unit_definition": "1.00 option point = 100 USD per contract",
+        "per_leg_side_points": list(SLIPPAGE_PER_LEG_SIDE_POINTS),
+        "reference_per_leg_side_points": REFERENCE_SLIPPAGE_PER_LEG_SIDE_POINTS,
+        "single_total_slippage_formula": "2 * per_leg_side_points",
+        "vertical_total_slippage_formula": "4 * per_leg_side_points",
+    }
     return {
-        "schema_version": 6,
+        "schema_version": 7,
         "generated_at": generated_at.isoformat(),
         "features_root": str(features_root),
         "data_root": str(data_root),
@@ -263,12 +276,22 @@ def build_artifact(
         "strategy_readiness": dict(strategy_readiness),
         "trade_intent_coverage": intent_coverage,
         "trade_ready_decisions": trade_ready_decisions,
+        "opportunity_summary": {
+            "opportunities": len(opportunities),
+            "quote_reached_at_zero_latency": sum(
+                row.get("baseline_status") == "quote_reached" for row in opportunities
+            ),
+            "latency_sensitivity_seconds": [0, 5, 10, 20, 30],
+            "slippage_sensitivity": slippage_sensitivity,
+            "execution_claim": "displayed_nbbo_shadow_no_fill_claim",
+        },
+        "opportunities": [dict(row) for row in opportunities],
         "production_strategy_total": {
             "set_name": SET_TRADE_READY,
             "profile": PROFILES[0].name,
             "variant": VARIANT_NAKED,
             "result": production_total,
-            "excluded_sets": [SET_CONFIRMED, SET_PREFILL, SET_GTH_DIP],
+            "excluded_sets": [SET_CONFIRMED, SET_PREFILL, SET_GTH_LEVEL_CANDIDATE],
         },
         "profile_configs": profile_configs,
         "method": {
@@ -277,7 +300,7 @@ def build_artifact(
             "set_roles": {
                 SET_CONFIRMED: "control_proxy_fsm_confirmed",
                 SET_PREFILL: "follow_through_only_observational_proxy",
-                SET_GTH_DIP: "gth_confirmation_proxy",
+                SET_GTH_LEVEL_CANDIDATE: "current_gth_runtime_candidate",
                 SET_TRADE_READY: "production_entry_decisions",
             },
             "session_cohort": (
@@ -297,11 +320,17 @@ def build_artifact(
                 "expected_move_fraction": FT_GATE_EM_FRACTION,
                 "distance_anchor": "spot_minus_trigger_level",
             },
-            "s3_spread_wall": "exact persisted production long/short strikes; no delta rebuild",
+            "gth_spread_wall": (
+                "current runtime candidate with frozen IBKR decision Ask-Bid, provider, "
+                "entry TTL, and exact long/short strikes"
+            ),
             "trade_ready_entry": {
                 "execution": "naked only",
                 "window_end": "exclusive expires_at",
-                "fill": "first recorded-provider lake ask at or below recorded entry_limit",
+                "quote_reached": (
+                    "first recorded-provider lake ask at or below recorded entry_limit; "
+                    "this is displayed top-of-book evidence, not a fill claim"
+                ),
                 "pre_entry": (
                     "skip if recorded target/invalidation is reached before fill; "
                     "missing/stale underlier fails closed"
@@ -313,6 +342,21 @@ def build_artifact(
                 "control/proxy: earliest executable entry quote only (long ask / short bid); "
                 "trade_ready: exact persisted provider"
             ),
+            "opportunity_replay": {
+                "identity": "one production signal identity across repeated occurrences",
+                "entry": "single long ask; vertical long ask minus short bid",
+                "exit": "single long bid; vertical long bid minus short ask",
+                "latency_sensitivity_seconds": [0, 5, 10, 20, 30],
+                "status": "quote_reached means displayed NBBO was reachable; never filled",
+                "costs": {
+                    "commission": "fixed per contract side; see opportunity cost_model",
+                    "slippage_sensitivity": slippage_sensitivity,
+                    "net_results": (
+                        "each grid row reports net_points, net_pnl_usd and "
+                        "net_return_fraction"
+                    ),
+                },
+            },
             "gth_session_clock": {
                 "exit_clock": "expiry-date 09:45 America/New_York",
                 "latest_hold": "expiry-date 16:00 America/New_York",
@@ -342,14 +386,15 @@ def build_artifact(
         "skipped_detail": [asdict(skip) for skip in skips],
         "limitations": [
             "small_sample",
-            "fills_assume_full_size_at_top_of_book",
-            "commissions_slippage_queue_partial_fills_and_market_impact_not_modeled",
+            "displayed_top_of_book_does_not_prove_fill_or_queue_priority",
+            "opportunity_costs_use_fixed_commission_and_versioned_slippage_sensitivity_grid",
+            "partial_fills_queue_priority_and_market_impact_not_modeled",
             "gth_underlier_uses_es_minus_fixed_basis",
             "readiness_cohort_complete_sessions_only",
             "legacy_gth_without_recorded_spread_has_no_spread_wall_trade",
             "prefill_is_follow_through_only_observational_proxy",
             "trade_ready_sample_is_not_an_out_of_sample_edge_claim",
-            "trade_ready_replay_uses_stored_window_and_does_not_model_operator_alert_latency",
+            "trade_ready_replay_uses_stored_window; latency_sensitivity_is_scenario_not_receipt",
         ],
     }
 
@@ -366,6 +411,9 @@ def write_outputs(output_dir: Path, artifact: dict, trades: Sequence[Trade]) -> 
         encoding="utf-8",
     )
     (target / "report.md").write_text(_render_report(artifact, trades), encoding="utf-8")
+    with (target / "opportunities.jsonl").open("w", encoding="utf-8") as handle:
+        for opportunity in artifact.get("opportunities") or []:
+            handle.write(json.dumps(opportunity, sort_keys=True) + "\n")
     fieldnames = [field.name for field in fields(Trade)]
     with (target / "trades.csv").open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)

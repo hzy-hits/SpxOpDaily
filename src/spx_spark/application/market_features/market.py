@@ -9,6 +9,10 @@ from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
 
 from spx_spark.application.globex_trend.service import globex_session_id
+from spx_spark.application.market_features.market_cross_asset import (
+    cross_asset_features,
+    direction_confirmation,
+)
 from spx_spark.application.market_features.models import (
     FrameQuality,
     MarketSessionSegment,
@@ -31,6 +35,9 @@ from spx_spark.storage import LatestState
 TRACKED_INSTRUMENTS = (
     "future:ES",
     "index:SPX",
+    "index:NDX",
+    "index:DJI",
+    "index:RUT",
     "equity:SPY",
     "equity:QQQ",
     "equity:RSP",
@@ -126,9 +133,10 @@ def freshest_quote(
             (as_utc(now) - source_at).total_seconds(),
             (as_utc(now) - transport_at).total_seconds(),
         )
-        if min(ages) < -FUTURE_TIMESTAMP_TOLERANCE_SECONDS or max(
-            ages
-        ) > policy.max_quote_age_seconds:
+        if (
+            min(ages) < -FUTURE_TIMESTAMP_TOLERANCE_SECONDS
+            or max(ages) > policy.max_quote_age_seconds
+        ):
             continue
         eligible.append(quote)
     if not eligible:
@@ -152,9 +160,7 @@ def normalized_quote(quote: Quote) -> dict[str, Any]:
     contract_identity = _future_contract_identity(quote, provider_symbol)
     observation = _live_price_observation(quote)
     price, source_at, price_kind = (
-        observation
-        if observation is not None
-        else (None, quote_source_at(quote), None)
+        observation if observation is not None else (None, quote_source_at(quote), None)
     )
     return {
         "price": price,
@@ -491,85 +497,6 @@ def volume_features(
     }
 
 
-def cross_asset_features(
-    samples: list[dict[str, Any]],
-    *,
-    now: datetime,
-    policy: MarketFeatureSettings,
-) -> dict[str, Any]:
-    returns: dict[str, dict[str, float | None]] = {}
-    for instrument_id in ("future:ES", "equity:SPY", "equity:QQQ", "equity:RSP"):
-        points = _instrument_points(samples, instrument_id)
-        returns[instrument_id] = {
-            f"return_{minutes}m_pct": _percent_return(points, now, minutes)
-            for minutes in (5, 15, 60)
-        }
-    latest = samples[-1] if samples else {}
-    es = _instrument(latest, "future:ES")
-    spx = _instrument(latest, "index:SPX")
-    basis = None
-    basis_source_skew = None
-    if es and spx:
-        es_at = _parse_at(es.get("source_at"))
-        spx_at = _parse_at(spx.get("source_at"))
-        if es_at and spx_at:
-            basis_source_skew = abs((es_at - spx_at).total_seconds())
-            if basis_source_skew <= policy.provider_sync_tolerance_seconds:
-                es_price, spx_price = _number(es.get("price")), _number(spx.get("price"))
-                if es_price is not None and spx_price is not None:
-                    basis = es_price - spx_price
-    basis_history: list[float] = []
-    for row in samples:
-        row_es, row_spx = _instrument(row, "future:ES"), _instrument(row, "index:SPX")
-        if not row_es or not row_spx:
-            continue
-        es_price, spx_price = _number(row_es.get("price")), _number(row_spx.get("price"))
-        es_at, spx_at = _parse_at(row_es.get("source_at")), _parse_at(row_spx.get("source_at"))
-        if (
-            es_price is not None
-            and spx_price is not None
-            and es_at is not None
-            and spx_at is not None
-            and abs((es_at - spx_at).total_seconds()) <= policy.provider_sync_tolerance_seconds
-        ):
-            basis_history.append(es_price - spx_price)
-    providers = (
-        latest.get("es_by_provider") if isinstance(latest.get("es_by_provider"), dict) else {}
-    )
-    schwab, ibkr = providers.get("schwab"), providers.get("ibkr")
-    divergence = _provider_divergence(schwab, ibkr, policy=policy)
-    previous_provider = None
-    for row in reversed(samples[:-1]):
-        quote = _instrument(row, "future:ES")
-        if quote and quote.get("provider"):
-            previous_provider = quote["provider"]
-            break
-    current_provider = es.get("provider") if es else None
-    es_15 = returns["future:ES"]["return_15m_pct"]
-    spy_15 = returns["equity:SPY"]["return_15m_pct"]
-    confirmation = _direction_confirmation(es_15, spy_15)
-    rolling_basis = statistics.median(basis_history) if basis_history else None
-    return {
-        "returns": returns,
-        "es_spx_basis_points": basis,
-        "es_spx_basis_rolling_median": rolling_basis,
-        "es_spx_basis_deviation_points": _difference(basis, rolling_basis),
-        "basis_source_skew_seconds": basis_source_skew,
-        "es_spy_direction_confirmation_15m": confirmation,
-        "relative_strength_15m": {
-            "qqq_minus_spy_pct": _difference(returns["equity:QQQ"]["return_15m_pct"], spy_15),
-            "rsp_minus_spy_pct": _difference(returns["equity:RSP"]["return_15m_pct"], spy_15),
-        },
-        "es_provider_divergence": divergence,
-        "selected_es_provider": current_provider,
-        "source_switch": (
-            {"from": previous_provider, "to": current_provider}
-            if previous_provider and current_provider and previous_provider != current_provider
-            else None
-        ),
-    }
-
-
 def volatility_features(
     samples: list[dict[str, Any]], *, now: datetime, atm_iv: float | None
 ) -> dict[str, Any]:
@@ -586,7 +513,7 @@ def volatility_features(
         **values,
         "vix1d_vix_ratio": vix1d / vix if vix1d and vix else None,
         "vix_vix3m_ratio": vix / vix3m if vix and vix3m else None,
-        "vix_vvix_direction_confirmation_15m": _direction_confirmation(vix_return, vvix_return),
+        "vix_vvix_direction_confirmation_15m": direction_confirmation(vix_return, vvix_return),
         "vix_return_15m_pct": vix_return,
         "vvix_return_15m_pct": vvix_return,
         "skew_change_60m": _return(_instrument_points(samples, "index:SKEW"), now, 60),
@@ -879,43 +806,12 @@ def _segment_range(
     return _range_payload(points, price)
 
 
-def _provider_divergence(
-    schwab: object, ibkr: object, *, policy: MarketFeatureSettings
-) -> dict[str, Any]:
-    if not isinstance(schwab, dict) or not isinstance(ibkr, dict):
-        return {"available": False, "price_points": None, "source_skew_seconds": None}
-    schwab_at, ibkr_at = _parse_at(schwab.get("source_at")), _parse_at(ibkr.get("source_at"))
-    schwab_price, ibkr_price = _number(schwab.get("price")), _number(ibkr.get("price"))
-    if None in {schwab_at, ibkr_at, schwab_price, ibkr_price}:
-        return {"available": False, "price_points": None, "source_skew_seconds": None}
-    skew = abs((schwab_at - ibkr_at).total_seconds())  # type: ignore[operator]
-    return {
-        "available": skew <= policy.provider_sync_tolerance_seconds,
-        "price_points": schwab_price - ibkr_price
-        if skew <= policy.provider_sync_tolerance_seconds
-        else None,  # type: ignore[operator]
-        "source_skew_seconds": skew,
-    }
-
-
-def _direction_confirmation(first: float | None, second: float | None) -> str:
-    if first is None or second is None:
-        return "unavailable"
-    if math.isclose(first, 0.0) or math.isclose(second, 0.0):
-        return "neutral"
-    return "confirmed" if first * second > 0 else "divergent"
-
-
 def _alignment(price_delta: float | None, volume_delta: float | None) -> str:
     if price_delta is None or volume_delta is None:
         return "unavailable"
     if abs(price_delta) < 0.5:
         return "volume_without_price_progress" if volume_delta > 0 else "flat"
     return "price_volume_aligned" if volume_delta > 0 else "price_without_volume_confirmation"
-
-
-def _difference(first: float | None, second: float | None) -> float | None:
-    return first - second if first is not None and second is not None else None
 
 
 def _parse_at(value: object) -> datetime | None:

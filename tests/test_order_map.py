@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import math
+import threading
+import time
 from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -89,7 +91,7 @@ def make_settings(
     bark_enabled: bool = False,
     feishu_enabled: bool = True,
 ) -> NotificationSettings:
-    return NotificationSettings(
+    settings = NotificationSettings(
         enabled=True,
         min_severity="high",
         cooldown_seconds=300,
@@ -130,6 +132,13 @@ def make_settings(
         feishu_secret="",
         feishu_timeout_seconds=10.0,
         missed_queue_path=missed_queue_path,
+    )
+    return replace(
+        settings,
+        delivery_receipt_path=f"{state_path}.receipts.sqlite",
+        delivery_outbox_enabled=True,
+        delivery_outbox_path=f"{state_path}.delivery.sqlite",
+        delivery_outbox_legacy_shadow_enabled=False,
     )
 
 
@@ -2162,8 +2171,8 @@ def test_globex_status_delivers_deterministic_operator_brief(monkeypatch, tmp_pa
         "build_order_payload_with_retry",
         lambda *args, **kwargs: payload,
     )
-    monkeypatch.setattr(order_map_module, "payload_fingerprint", lambda value: {})
-    monkeypatch.setattr(order_map_module, "material_changes", lambda *args: [])
+    monkeypatch.setattr(order_map_module, "_status_fingerprint", lambda value: {})
+    monkeypatch.setattr(order_map_module, "_status_material_changes", lambda *args: [])
     monkeypatch.setattr(
         order_map_module,
         "render_status_template",
@@ -2180,25 +2189,11 @@ def test_globex_status_delivers_deterministic_operator_brief(monkeypatch, tmp_pa
         classmethod(lambda cls: object()),
     )
 
-    def deliver(settings, envelope, *, title, text, friend, feishu_text, runner, **kwargs):
-        captured.update(
-            title=title,
-            text=text,
-            kind=envelope.kind,
-            lane=envelope.lane,
-            expires_at=envelope.expires_at,
-            friend=friend,
-            feishu_text=feishu_text,
-        )
-        return SimpleNamespace(
-            sinks=(
-                SimpleNamespace(sink="bark", ok=True, attempted=True),
-                SimpleNamespace(sink="feishu", ok=True, attempted=True),
-            ),
-            delivered=True,
-        )
+    def enqueue_status(settings, **kwargs):
+        captured.update(kwargs)
+        return {"accepted": True, "delivered_ok": False, "queued": True}
 
-    monkeypatch.setattr(order_map_module, "dispatch_notification", deliver)
+    monkeypatch.setattr(order_map_module, "enqueue_order_map_status", enqueue_status)
     monkeypatch.setattr(order_map_module, "mark_sent", lambda *args, **kwargs: None)
     monkeypatch.setattr(order_map_module, "record_push", lambda *args, **kwargs: None)
     monkeypatch.setattr(
@@ -2215,15 +2210,14 @@ def test_globex_status_delivers_deterministic_operator_brief(monkeypatch, tmp_pa
     )
 
     assert result == 0
-    assert captured == {
-        "title": "SPX 市场状态（非信号）",
-        "text": "bounded operator status",
-        "kind": "status",
-        "lane": "scheduled_report",
-        "expires_at": datetime(2026, 7, 7, 6, 15, tzinfo=timezone.utc),
-        "friend": True,
-        "feishu_text": "bounded operator status",
-    }
+    assert captured["title"] == "SPX GTH Desk Map（条件观察）"
+    assert captured["text"] == "bounded operator status"
+    assert str(captured["feishu_text"]).startswith("【SPX 15m")
+    assert captured["trading_date"] == "2026-07-07"
+    assert captured["now"] == datetime(2026, 7, 7, 6, 0, tzinfo=timezone.utc)
+    assert captured["delivery_reason"] == "forced"
+    assert captured["current_rth_slot"] is None
+    assert captured["fingerprint"] == {}
 
 
 def test_gth_status_delivers_degraded_heartbeat_instead_of_skipping_thin_snapshot(
@@ -2260,24 +2254,21 @@ def test_gth_status_delivers_degraded_heartbeat_instead_of_skipping_thin_snapsho
         classmethod(lambda cls: object()),
     )
 
-    def deliver(settings, envelope, **kwargs):
-        captured.update(
-            lane=envelope.lane,
-            expires_at=envelope.expires_at,
-            title=kwargs["title"],
-            text=kwargs["text"],
-        )
-        return SimpleNamespace(
-            sinks=(SimpleNamespace(sink="feishu", ok=True, attempted=True),),
-            delivered=True,
-        )
+    def enqueue_status(settings, **kwargs):
+        captured.update(kwargs)
+        return {"accepted": True, "delivered_ok": False, "queued": True}
 
-    monkeypatch.setattr(order_map_module, "dispatch_notification", deliver)
+    monkeypatch.setattr(order_map_module, "enqueue_order_map_status", enqueue_status)
     monkeypatch.setattr(order_map_module, "mark_sent", lambda *args, **kwargs: None)
     monkeypatch.setattr(order_map_module, "record_push", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         order_map_module,
         "persist_zero_dte_greeks_reference",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        order_map_module,
+        "persist_order_map_pricing_audit",
         lambda *args, **kwargs: None,
     )
 
@@ -2290,10 +2281,222 @@ def test_gth_status_delivers_degraded_heartbeat_instead_of_skipping_thin_snapsho
 
     assert result == 0
     assert captured["warnings"] == ["gth_heartbeat_degraded_snapshot"]
-    assert captured["lane"] == "scheduled_report"
-    assert captured["expires_at"] == now + timedelta(minutes=15)
-    assert captured["title"] == "SPX GTH 方向观察（不可执行）"
+    assert captured["title"] == "SPX GTH Desk Map（条件观察）"
     assert captured["text"] == "operator status"
+    assert captured["delivery_reason"] == "initial_status"
+    assert captured["current_rth_slot"] is None
+    assert captured["fingerprint"]["status_phase"] == "asia_globex"
+
+
+def test_gth_status_same_slot_replay_and_material_change_have_distinct_semantic_ids(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from spx_spark.application.notifications.report_enqueue import (
+        enqueue_order_map_status,
+    )
+
+    monkeypatch.setattr(
+        "spx_spark.notifier.sinks.post_feishu",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("transport called")),
+    )
+    settings = make_settings(str(tmp_path / "notify-state.json"))
+    now = datetime(2026, 7, 15, 4, 31, tzinfo=timezone.utc)
+    first = enqueue_order_map_status(
+        settings,
+        text="GTH status A",
+        title="SPX GTH 方向观察（不可执行）",
+        trading_date="2026-07-15",
+        now=now,
+        delivery_reason="material_changes",
+        current_rth_slot=None,
+        fingerprint={"status_phase": "asia_globex", "put_wall": 7500.0},
+    )
+    replay = enqueue_order_map_status(
+        settings,
+        text="GTH status A",
+        title="SPX GTH 方向观察（不可执行）",
+        trading_date="2026-07-15",
+        now=now + timedelta(minutes=4),
+        delivery_reason="material_changes",
+        current_rth_slot=None,
+        fingerprint={"put_wall": 7500.0, "status_phase": "asia_globex"},
+    )
+    changed = enqueue_order_map_status(
+        settings,
+        text="GTH status B",
+        title="SPX GTH 方向观察（不可执行）",
+        trading_date="2026-07-15",
+        now=now + timedelta(minutes=5),
+        delivery_reason="material_changes",
+        current_rth_slot=None,
+        fingerprint={"status_phase": "asia_globex", "put_wall": 7490.0},
+    )
+
+    assert replay["notification_event_id"] == first["notification_event_id"]
+    assert replay["duplicate"] is True
+    assert changed["notification_event_id"] != first["notification_event_id"]
+    assert changed["inserted"] is True
+
+
+def test_rth_status_same_slot_replay_and_material_change_have_distinct_semantic_ids(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from spx_spark.application.notifications.report_enqueue import (
+        enqueue_order_map_status,
+    )
+    from spx_spark.application.order_map.report_clock import rth_report_slot
+
+    monkeypatch.setattr(
+        "spx_spark.notifier.sinks.post_feishu",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("transport called")),
+    )
+    settings = make_settings(str(tmp_path / "notify-state.json"))
+    now = datetime(2026, 7, 15, 13, 30, 30, tzinfo=timezone.utc)
+    slot = rth_report_slot(now)
+    assert slot is not None
+    first = enqueue_order_map_status(
+        settings,
+        text="RTH status A",
+        title="SPX Desk Map",
+        trading_date="2026-07-15",
+        now=now,
+        delivery_reason="material_changes",
+        current_rth_slot=slot,
+        fingerprint={"status_phase": "us_open_hour", "put_wall": 7500.0},
+    )
+    replay = enqueue_order_map_status(
+        settings,
+        text="RTH status A",
+        title="SPX Desk Map",
+        trading_date="2026-07-15",
+        now=now + timedelta(seconds=20),
+        delivery_reason="material_changes",
+        current_rth_slot=slot,
+        fingerprint={"put_wall": 7500.0, "status_phase": "us_open_hour"},
+    )
+    changed = enqueue_order_map_status(
+        settings,
+        text="RTH status B",
+        title="SPX Desk Map",
+        trading_date="2026-07-15",
+        now=now + timedelta(seconds=40),
+        delivery_reason="material_changes",
+        current_rth_slot=slot,
+        fingerprint={"status_phase": "us_open_hour", "put_wall": 7490.0},
+    )
+
+    assert replay["notification_event_id"] == first["notification_event_id"]
+    assert replay["duplicate"] is True
+    assert changed["notification_event_id"] != first["notification_event_id"]
+    assert changed["inserted"] is True
+
+
+@pytest.mark.parametrize(
+    "reconciliation_reason",
+    ["payload_mismatch", "target_mismatch", "terminal_or_invalid_status", "cancelled"],
+)
+def test_rth_status_reconciliation_never_acks_an_inexact_or_terminal_event(
+    reconciliation_reason, monkeypatch, tmp_path, capsys
+) -> None:
+    import spx_spark.application.order_map.service as order_map_module
+
+    now = datetime(2026, 7, 15, 13, 30, 30, tzinfo=timezone.utc)
+    payload = {
+        "research_only": False,
+        "underlier": {"price": 7510.0},
+        "candidates": [{"play": "put_wall_bounce_call", "level": 7500.0}],
+        "warnings": [],
+    }
+    fingerprint = {"status_phase": "us_open_hour", "put_wall": 7500.0}
+    settings = object()
+    monkeypatch.setattr(
+        order_map_module.StorageSettings,
+        "from_env",
+        classmethod(lambda cls: object()),
+    )
+    monkeypatch.setattr(
+        order_map_module.NotificationSettings,
+        "from_env",
+        classmethod(lambda cls: settings),
+    )
+    monkeypatch.setattr(order_map_module, "load_order_map_state", lambda _path: {})
+    monkeypatch.setattr(
+        order_map_module,
+        "build_order_payload_with_retry",
+        lambda *_args, **_kwargs: payload,
+    )
+    monkeypatch.setattr(order_map_module, "_payload_is_thin", lambda _payload: False)
+    monkeypatch.setattr(order_map_module, "_status_fingerprint", lambda _payload: fingerprint)
+    monkeypatch.setattr(order_map_module, "_status_material_changes", lambda *_args: ["change"])
+    monkeypatch.setattr(order_map_module, "render_status_template", lambda *_args: "template")
+    monkeypatch.setattr(
+        order_map_module,
+        "render_operator_status_brief",
+        lambda *_args: "exact operator brief",
+    )
+    monkeypatch.setattr(
+        order_map_module,
+        "render_feishu_delivery_text",
+        lambda *_args: "exact feishu payload",
+    )
+    monkeypatch.setattr(order_map_module, "notification_event_exists", lambda *_args: True)
+
+    def inspect(_settings, envelope, **kwargs):
+        assert envelope.source == "order_map_status"
+        assert envelope.kind == "status"
+        assert envelope.lane == "scheduled_report"
+        assert kwargs == {
+            "title": "SPX Desk Map",
+            "text": "exact operator brief",
+            "friend": True,
+            "feishu_text": "exact feishu payload",
+        }
+        return SimpleNamespace(
+            acceptable=False,
+            reason=reconciliation_reason,
+            payload_matches=reconciliation_reason != "payload_mismatch",
+            targets_match=reconciliation_reason != "target_mismatch",
+            event_status=(
+                "dead_letter"
+                if reconciliation_reason == "terminal_or_invalid_status"
+                else "pending"
+            ),
+        )
+
+    monkeypatch.setattr(order_map_module, "inspect_notification_event", inspect)
+    monkeypatch.setattr(
+        order_map_module,
+        "mark_sent",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("inexact outbox event acknowledged")
+        ),
+    )
+    monkeypatch.setattr(
+        order_map_module,
+        "enqueue_order_map_status",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("colliding outbox event regenerated")
+        ),
+    )
+    audits: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        order_map_module,
+        "persist_order_map_pricing_audit",
+        lambda *_args, **kwargs: audits.append(kwargs),
+    )
+
+    result = order_map_module.run_status(
+        SimpleNamespace(force=True, dry_run=False),
+        now=now,
+        state_path=str(tmp_path / "state.json"),
+        trading_date="2026-07-15",
+    )
+    output = json.loads(capsys.readouterr().out)
+
+    assert result == 1
+    assert output["reason"] == f"outbox_reconciliation_failed:{reconciliation_reason}"
+    assert output["accepted"] is False
+    assert audits[0]["result"]["delivery_outcome"] == "reconciliation_rejected"
 
 
 def test_force_cannot_bypass_research_only_direct_map_gate(
@@ -2945,6 +3148,79 @@ def test_mark_sent_merges_kinds_without_clobbering(tmp_path: Path) -> None:
     assert state["fingerprint"] == {"put_wall": 7500}
 
 
+def test_mark_sent_serializes_simultaneous_map_and_status_acknowledgements(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import spx_spark.application.order_map.state as order_map_state
+
+    state_path = str(tmp_path / "state.json")
+    real_atomic_write = order_map_state.atomic_write_json_secure
+    counter_lock = threading.Lock()
+    active_writers = 0
+    max_active_writers = 0
+
+    def delayed_atomic_write(path, payload):
+        nonlocal active_writers, max_active_writers
+        with counter_lock:
+            active_writers += 1
+            max_active_writers = max(max_active_writers, active_writers)
+        try:
+            time.sleep(0.05)
+            real_atomic_write(path, payload)
+        finally:
+            with counter_lock:
+                active_writers -= 1
+
+    monkeypatch.setattr(order_map_state, "atomic_write_json_secure", delayed_atomic_write)
+    start = threading.Barrier(3)
+    failures: list[BaseException] = []
+
+    def acknowledge(kind: str, fingerprint: dict[str, object], at: datetime) -> None:
+        try:
+            start.wait()
+            mark_sent(
+                state_path,
+                "2026-07-08",
+                fingerprint=fingerprint,
+                now=at,
+                kind=kind,
+            )
+        except BaseException as exc:  # Surface worker failures in the test thread.
+            failures.append(exc)
+
+    map_thread = threading.Thread(
+        target=acknowledge,
+        args=(
+            "map",
+            {"put_wall": 7500},
+            datetime(2026, 7, 8, 6, 0, tzinfo=timezone.utc),
+        ),
+    )
+    status_thread = threading.Thread(
+        target=acknowledge,
+        args=(
+            "status",
+            {"status_phase": "rth_open"},
+            datetime(2026, 7, 8, 6, 0, 1, tzinfo=timezone.utc),
+        ),
+    )
+    map_thread.start()
+    status_thread.start()
+    start.wait()
+    map_thread.join(timeout=5)
+    status_thread.join(timeout=5)
+
+    assert failures == []
+    assert not map_thread.is_alive()
+    assert not status_thread.is_alive()
+    assert max_active_writers == 1
+    state = json.loads(Path(state_path).read_text(encoding="utf-8"))
+    assert state["map_fingerprint"] == {"put_wall": 7500}
+    assert state["status_fingerprint"] == {"status_phase": "rth_open"}
+    assert state["last_map_date"] == "2026-07-08"
+    assert state["last_status_date"] == "2026-07-08"
+
+
 def test_status_push_does_not_mask_missing_baseline(tmp_path: Path) -> None:
     state_path = str(tmp_path / "state.json")
     # Only a status report went out today; the baseline map push failed.
@@ -3382,6 +3658,12 @@ def test_status_delivery_gate_suppresses_unchanged_scheduled_report(
         "render_operator_status_brief",
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("brief rendered")),
     )
+    audits: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        order_map_module,
+        "persist_order_map_pricing_audit",
+        lambda *args, **kwargs: audits.append(kwargs),
+    )
 
     result = order_map_module.run_status(
         SimpleNamespace(force=False, dry_run=False),
@@ -3391,7 +3673,11 @@ def test_status_delivery_gate_suppresses_unchanged_scheduled_report(
     )
 
     assert result == 0
-    assert json.loads(capsys.readouterr().out)["reason"] == "no_material_changes"
+    assert json.loads(capsys.readouterr().out)["reason"] == (
+        "snapshot_only_no_material_changes"
+    )
+    assert audits[0]["report_kind"] == "status_snapshot"
+    assert audits[0]["result"]["delivery_outcome"] == "suppressed_snapshot_only"
 
 
 def test_map_refresh_suppresses_unchanged_fingerprint(monkeypatch, tmp_path, capsys) -> None:
@@ -3540,7 +3826,7 @@ def test_status_delivery_gate_sends_gth_hourly_summary() -> None:
     )
 
 
-def test_status_delivery_gate_sends_rth_quarter_hour_heartbeat() -> None:
+def test_status_delivery_gate_sends_rth_structure_aware_desk_map_cadence() -> None:
     from spx_spark.application.order_map.service import _status_delivery_reason
 
     current = datetime(2026, 7, 24, 13, 30, 8, tzinfo=ZoneInfo("America/New_York"))
@@ -3568,9 +3854,21 @@ def test_status_delivery_gate_sends_rth_quarter_hour_heartbeat() -> None:
             trading_date="2026-07-24",
             position_risk=False,
         )
-        == "rth_quarter_hour_heartbeat:2026-07-24:13:30"
+        == "rth_desk_map:2026-07-24:13:30"
     )
-    hourly = datetime(2026, 7, 24, 14, 0, 8, tzinfo=ZoneInfo("America/New_York"))
+    non_summary = datetime(2026, 7, 24, 14, 0, 8, tzinfo=ZoneInfo("America/New_York"))
+    assert (
+        _status_delivery_reason(
+            previous_slot,
+            fingerprint,
+            [],
+            now=non_summary,
+            trading_date="2026-07-24",
+            position_risk=False,
+        )
+        is None
+    )
+    hourly = datetime(2026, 7, 24, 14, 30, 8, tzinfo=ZoneInfo("America/New_York"))
     assert (
         _status_delivery_reason(
             previous_slot,
@@ -3580,7 +3878,7 @@ def test_status_delivery_gate_sends_rth_quarter_hour_heartbeat() -> None:
             trading_date="2026-07-24",
             position_risk=False,
         )
-        == "rth_quarter_hour_heartbeat:2026-07-24:14:00"
+        == "rth_desk_map:2026-07-24:14:30"
     )
     assert (
         _status_delivery_reason(
@@ -4150,11 +4448,11 @@ def test_gth_em_usage_uses_session_open_instead_of_prior_close() -> None:
     assert payload["day_move"]["em_used_fraction"] is None
 
 
-def test_send_order_map_queues_on_feishu_failure(tmp_path: Path, monkeypatch) -> None:
+def test_send_order_map_only_enqueues_without_calling_feishu(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("SPX_PUSH_LLM_ENABLED", "false")
     monkeypatch.setattr(
         "spx_spark.notifier.sinks.post_feishu",
-        lambda url, payload, timeout: {"code": 19001, "msg": "fail"},
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("transport called")),
     )
     payload = build_order_payload(
         make_state(
@@ -4175,14 +4473,153 @@ def test_send_order_map_queues_on_feishu_failure(tmp_path: Path, monkeypatch) ->
     missed_path = str(tmp_path / "missed.jsonl")
     settings = make_settings(str(tmp_path / "notify-state.json"), missed_queue_path=missed_path)
 
-    result = send_order_map(payload, settings)
+    result = send_order_map(
+        payload,
+        settings,
+        now=datetime(2026, 7, 7, 15, 0, tzinfo=timezone.utc),
+    )
     assert result["im_ok"] is False
     assert result["text"] == template
-    lines = Path(missed_path).read_text(encoding="utf-8").splitlines()
-    assert len(lines) == 1
-    entry = json.loads(lines[0])
-    assert entry["kind"] == "order_map"
-    assert entry["message"] == template
+    assert result["accepted"] is True
+    assert result["inserted"] is True
+    assert result["outcome"] == "pending"
+    assert result["targets"] == ["feishu"]
+    assert result["queued"] is True
+    assert result["delivered_ok"] is False
+    assert not Path(missed_path).exists()
+
+
+def test_order_map_refresh_same_slot_replay_and_material_change_have_stable_ids(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from spx_spark.application.notifications.report_enqueue import (
+        material_report_identity,
+    )
+
+    monkeypatch.setenv("SPX_PUSH_LLM_ENABLED", "false")
+    monkeypatch.setattr(
+        "spx_spark.notifier.sinks.post_feishu",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("transport called")),
+    )
+    now = datetime(2026, 7, 7, 15, 5, tzinfo=timezone.utc)
+    slot = now.replace(minute=0, second=0, microsecond=0)
+    settings = make_settings(str(tmp_path / "notify-state.json"))
+    payload = build_order_payload(
+        make_state(
+            Quote(
+                instrument=InstrumentId.index("SPX"),
+                provider=Provider.IBKR,
+                provider_symbol="index:SPX",
+                received_at=now,
+                quality=MarketDataQuality.LIVE,
+                last=7569.0,
+                trade_time=now,
+                quote_time=now,
+            ),
+            now=now,
+        )
+    )
+    identity = material_report_identity(
+        "order_map_refresh",
+        trading_date="2026-07-07",
+        occurred_at=slot,
+        fingerprint={"put_wall": 7500.0, "call_wall": 7600.0},
+    )
+    first = send_order_map(
+        payload,
+        settings,
+        now=now,
+        extra_header="【条件交易地图·更新】变化: put wall",
+        event_identity=identity,
+        occurred_at=slot,
+    )
+    replay = send_order_map(
+        payload,
+        settings,
+        now=now + timedelta(minutes=10),
+        extra_header="【条件交易地图·更新】变化: put wall",
+        event_identity=identity,
+        occurred_at=slot,
+    )
+
+    changed_payload = dict(payload)
+    changed_payload["expected_move_points"] = 55.0
+    changed_identity = material_report_identity(
+        "order_map_refresh",
+        trading_date="2026-07-07",
+        occurred_at=slot,
+        fingerprint={"put_wall": 7490.0, "call_wall": 7600.0},
+    )
+    changed = send_order_map(
+        changed_payload,
+        settings,
+        now=now + timedelta(minutes=12),
+        extra_header="【条件交易地图·更新】变化: put wall",
+        event_identity=changed_identity,
+        occurred_at=slot,
+    )
+
+    assert replay["notification_event_id"] == first["notification_event_id"]
+    assert replay["duplicate"] is True
+    assert changed["notification_event_id"] != first["notification_event_id"]
+    assert changed["inserted"] is True
+
+
+def test_order_map_run_reconciles_outbox_after_enqueue_before_state_crash(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import spx_spark.application.order_map.service as order_map_module
+
+    monkeypatch.setenv("SPX_PUSH_LLM_ENABLED", "false")
+    now = datetime(2026, 7, 7, 15, 0, tzinfo=timezone.utc)
+    payload = build_order_payload(
+        make_state(
+            Quote(
+                instrument=InstrumentId.index("SPX"),
+                provider=Provider.IBKR,
+                provider_symbol="index:SPX",
+                received_at=now,
+                quality=MarketDataQuality.LIVE,
+                last=7569.0,
+                trade_time=now,
+                quote_time=now,
+            ),
+            now=now,
+        )
+    )
+    settings = make_settings(str(tmp_path / "notify-state.json"))
+    accepted = send_order_map(payload, settings, now=now)
+    assert accepted["accepted"] is True
+
+    state_path = tmp_path / "order-map-state.json"
+    monkeypatch.setenv("SPX_ORDER_MAP_STATE_PATH", str(state_path))
+    monkeypatch.setattr(
+        order_map_module.StorageSettings,
+        "from_env",
+        classmethod(lambda cls: object()),
+    )
+    monkeypatch.setattr(
+        order_map_module.NotificationSettings,
+        "from_env",
+        classmethod(lambda cls: settings),
+    )
+    monkeypatch.setattr(
+        order_map_module,
+        "build_order_payload_with_retry",
+        lambda *args, **kwargs: payload,
+    )
+    monkeypatch.setattr(
+        order_map_module,
+        "send_order_map",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("report regenerated after durable acceptance")
+        ),
+    )
+
+    result = order_map_module.run(["--force"], now=now + timedelta(minutes=20))
+
+    assert result == 0
+    assert already_sent(str(state_path), "2026-07-07") is True
 
 
 def test_build_order_payload_shape() -> None:

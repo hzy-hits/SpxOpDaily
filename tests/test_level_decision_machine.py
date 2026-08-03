@@ -58,6 +58,7 @@ def advance(state, seconds: int, *, spot: float, es: float, **kwargs):
 
 def test_breakout_requires_acceptance_retest_and_confirmation_hold() -> None:
     armed = advance(None, 0, spot=95.0, es=5000.0)
+    assert armed.state["reentry_generation"] == 0
     assert armed.current_phase is LevelPhase.APPROACHING
     assert armed.state["level_kind"] == "put_wall"
 
@@ -166,7 +167,7 @@ def test_nearest_level_is_the_only_active_level() -> None:
     assert "active_levels" not in result.state
 
 
-def test_sustained_bad_quality_invalidates_active_decision() -> None:
+def test_sustained_bad_quality_degrades_without_reversing_active_decision() -> None:
     armed = advance(None, 0, spot=95.0, es=5000.0)
     grace = advance(
         armed.state,
@@ -178,7 +179,7 @@ def test_sustained_bad_quality_invalidates_active_decision() -> None:
         arm_block_reason="structure_change_pending_new_arm_blocked",
     )
     assert grace.current_phase is LevelPhase.APPROACHING
-    invalid = advance(
+    degraded = advance(
         grace.state,
         36,
         spot=95.0,
@@ -187,8 +188,18 @@ def test_sustained_bad_quality_invalidates_active_decision() -> None:
         arm_allowed=False,
         arm_block_reason="structure_change_pending_new_arm_blocked",
     )
-    assert invalid.current_phase is LevelPhase.INVALIDATED
-    assert invalid.reason == "stale_chain"
+    assert degraded.current_phase is LevelPhase.APPROACHING
+    assert degraded.changed is False
+    assert degraded.reason == "stale_chain"
+    assert degraded.state["quality_status"] == "degraded"
+    assert degraded.state["quality_reason"] == "stale_chain"
+    assert degraded.state["quality_failed_at"] == grace.state["quality_failed_at"]
+
+    recovered = advance(degraded.state, 37, spot=95.0, es=5000.0)
+    assert recovered.current_phase is LevelPhase.APPROACHING
+    assert "quality_status" not in recovered.state
+    assert "quality_reason" not in recovered.state
+    assert "quality_failed_at" not in recovered.state
 
 
 def test_pending_structure_blocks_new_arm_without_failing_data_quality() -> None:
@@ -350,11 +361,13 @@ def test_expired_event_must_exit_reset_band_before_rearming_same_level() -> None
     exited = advance(waiting.state, 32, spot=87.0, es=4992.0)
     assert exited.current_phase is LevelPhase.FAR
     assert exited.reason == "terminal_level_exited"
+    assert exited.state["next_reentry_generation"] == 1
 
     rearmed = advance(exited.state, 33, spot=95.0, es=5000.0)
     assert rearmed.current_phase is LevelPhase.APPROACHING
     assert rearmed.reason == "nearest_level_armed"
     assert rearmed.state["event_id"] != armed.state["event_id"]
+    assert rearmed.state["reentry_generation"] == 1
 
 
 def test_terminal_structure_promotion_can_rearm_without_old_level_exit() -> None:
@@ -374,6 +387,7 @@ def test_terminal_structure_promotion_can_rearm_without_old_level_exit() -> None
     assert promoted.current_phase is LevelPhase.TESTING
     assert promoted.reason == "stable_structure_promoted_rearm"
     assert promoted.state["level"] == 107.0
+    assert promoted.state["reentry_generation"] == 1
 
 
 def test_terminal_removed_level_kind_clears_phantom_reset_band() -> None:

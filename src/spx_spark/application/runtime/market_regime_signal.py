@@ -1,10 +1,4 @@
-"""Experimental real-time regime and same-day range projection.
-
-The producer is deliberately advisory-only.  It reads existing normalized
-latest projections, advances a deterministic three-state online HMM, and
-atomically publishes one small JSON document.  It never selects a direction,
-contract, order, or notification target.
-"""
+"""Publish advisory-only online regime and same-day range research context."""
 
 from __future__ import annotations
 
@@ -16,20 +10,32 @@ import signal
 import threading
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from time import monotonic
 
 from spx_spark.config import StorageSettings
+from spx_spark.application.runtime.market_regime_context import (
+    build_research_context_document,
+)
+from spx_spark.application.runtime.market_regime_observation import (
+    CROSS_INDEX_FEATURE_SET_VERSION,
+    ES_FEATURE_WEIGHTS,
+    FEATURE_SCHEMA_VERSION,
+    OBSERVATION_COMPONENT_WEIGHTS,
+    build_feature_observation,
+)
+from spx_spark.application.runtime.market_regime_range import (
+    build_intraday_extreme_ranges,
+)
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 from spx_spark.state_io import atomic_write_json_secure, exclusive_state_lock, read_json_object
 
 
 UTC = timezone.utc
-SCHEMA_VERSION = "market_regime_signal.experimental.v1"
-FEATURE_SCHEMA_VERSION = "market_regime_features.v1"
-MODEL_SCHEMA_VERSION = "online_gaussian_hmm_3state.v1"
-RANGE_SCHEMA_VERSION = "same_day_range.experimental.v1"
+SCHEMA_VERSION = "market_regime_signal.experimental.v2"
+MODEL_SCHEMA_VERSION = "online_gaussian_hmm_3state_cross_index.v2"
+RANGE_SCHEMA_VERSION = "same_day_range.experimental.v2"
 STATE_NAMES = ("state_00", "state_01", "state_02")
 STATE_HINTS = {
     "state_00": "down_pressure",
@@ -43,12 +49,6 @@ TRANSITION = (
 )
 EMISSION_MEANS = (-0.75, 0.0, 0.75)
 EMISSION_SIGMAS = (0.55, 0.45, 0.55)
-FEATURE_WEIGHTS = {
-    "return_15m_points": 0.30,
-    "return_60m_points": 0.40,
-    "vwap_distance_points": 0.20,
-    "vwap_slope_15m_points": 0.10,
-}
 P10_Z = 1.2815515655446004
 FUTURE_TOLERANCE_SECONDS = 2.0
 HMM_CLOSE_SHIFT_FRACTION = 0.25
@@ -61,14 +61,24 @@ _MODEL_SPEC = {
     "emission_means": EMISSION_MEANS,
     "emission_sigmas": EMISSION_SIGMAS,
     "feature_schema_version": FEATURE_SCHEMA_VERSION,
-    "feature_weights": FEATURE_WEIGHTS,
+    "feature_weights": ES_FEATURE_WEIGHTS,
+    "observation_component_weights": OBSERVATION_COMPONENT_WEIGHTS,
+    "cash_index_features": (
+        "relative_to_spx_15m_bps",
+        "dispersion_15m_bps",
+        "breadth_15m",
+    ),
+    "prior_rth_schema_version": "prior_rth_context.v2",
     "parameter_mode": "fixed_bootstrap",
     "inference": "causal_forward_filter",
     "observation_cadence": "one_update_per_market_frame_id",
 }
-MODEL_VERSION = "sha256:" + hashlib.sha256(
-    json.dumps(_MODEL_SPEC, sort_keys=True, separators=(",", ":")).encode()
-).hexdigest()
+MODEL_VERSION = (
+    "sha256:"
+    + hashlib.sha256(
+        json.dumps(_MODEL_SPEC, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,59 +155,13 @@ def _expected_move(options: Mapping[str, object]) -> float | None:
     return value if value is not None and value > 0.0 else None
 
 
-def _feature_observation(
-    market: Mapping[str, object],
-    options: Mapping[str, object],
-) -> dict[str, object] | None:
-    es = _mapping(market.get("es"))
-    expected_move = _expected_move(options)
-    raw = {name: _number(es.get(name)) for name in FEATURE_WEIGHTS}
-    available = {name: value for name, value in raw.items() if value is not None}
-    if not available:
-        return None
-    fallback_scale = max(
-        10.0,
-        abs(available.get("return_60m_points", 0.0)),
-        2.0 * abs(available.get("return_15m_points", 0.0)),
-        2.0 * abs(available.get("vwap_distance_points", 0.0)),
-    )
-    scale = expected_move or fallback_scale
-    total_weight = sum(FEATURE_WEIGHTS[name] for name in available)
-    score = sum(
-        FEATURE_WEIGHTS[name] * max(-2.0, min(2.0, value / scale))
-        for name, value in available.items()
-    ) / total_weight
-    efficiency = _number(es.get("trend_efficiency_60m"))
-    if efficiency is not None:
-        score *= 0.75 + 0.5 * max(0.0, min(1.0, efficiency))
-    score = max(-2.0, min(2.0, score))
-    payload: dict[str, object] = {
-        "feature_schema_version": FEATURE_SCHEMA_VERSION,
-        "direction_score": round(score, 10),
-        "scale_points": round(scale, 10),
-        "scale_source": "expected_move_points_0dte" if expected_move else "bounded_local_fallback",
-        "values": {name: raw[name] for name in FEATURE_WEIGHTS},
-        "trend_efficiency_60m": efficiency,
-    }
-    frame_identity = market.get("frame_id") or market.get("as_of")
-    payload["observation_id"] = _canonical_hash(
-        {
-            "feature_schema_version": FEATURE_SCHEMA_VERSION,
-            "market_frame_identity": frame_identity,
-        }
-    )
-    return payload
-
-
 def _online_posterior(score: float, prior: Sequence[float]) -> tuple[float, float, float]:
     predicted = tuple(
         sum(float(prior[source]) * TRANSITION[source][target] for source in range(3))
         for target in range(3)
     )
     log_weights = []
-    for probability, mean, sigma in zip(
-        predicted, EMISSION_MEANS, EMISSION_SIGMAS, strict=True
-    ):
+    for probability, mean, sigma in zip(predicted, EMISSION_MEANS, EMISSION_SIGMAS, strict=True):
         log_likelihood = -math.log(sigma) - 0.5 * ((score - mean) / sigma) ** 2
         log_weights.append(math.log(max(probability, 1e-15)) + log_likelihood)
     maximum = max(log_weights)
@@ -223,12 +187,18 @@ def _regime_projection(
     *,
     market: Mapping[str, object],
     options: Mapping[str, object],
+    prior_rth_context: Mapping[str, object],
     previous: Mapping[str, object],
     now: datetime,
     max_input_age_seconds: float,
     session_day: date | None,
 ) -> tuple[dict[str, object], dict[str, object]]:
-    observation = _feature_observation(market, options)
+    observation = build_feature_observation(
+        market,
+        options,
+        prior_rth_context,
+        session_day=session_day,
+    )
     market_as_of = _parse_at(market.get("as_of"))
     previous_state = _mapping(previous.get("online_state"))
     retained_state: dict[str, object] = {
@@ -321,12 +291,17 @@ def _regime_projection(
         "dominant_state": dominant,
         "dwell_observations": max(dwell, 1),
     }
-    quality = "ready" if market.get("quality") == "ready" and _expected_move(options) else "degraded"
+    observation_reasons = observation.get("degradation_reasons")
+    reasons = ["fixed_bootstrap_parameters_unvalidated"]
+    if isinstance(observation_reasons, list):
+        reasons.extend(str(value) for value in observation_reasons if isinstance(value, str))
+    if market.get("quality") != "ready":
+        reasons.append("market_frame_degraded")
     return (
         {
             "status": "available",
-            "quality": quality,
-            "reasons": [] if quality == "ready" else ["fallback_feature_scale_or_degraded_frame"],
+            "quality": "degraded",
+            "reasons": sorted(set(reasons)),
             "model_schema_version": MODEL_SCHEMA_VERSION,
             "model_version": MODEL_VERSION,
             "parameter_mode": "fixed_bootstrap",
@@ -387,7 +362,9 @@ def _live_es_price_and_close(
             and age_seconds is not None
             and -FUTURE_TOLERANCE_SECONDS <= age_seconds <= max_input_age_seconds
         ):
-            candidates.append((1 if row.get("provider") == "ibkr" else 0, observed_at, price, close))
+            candidates.append(
+                (1 if row.get("provider") == "ibkr" else 0, observed_at, price, close)
+            )
     if not candidates:
         return None, None
     _, _, price, close = max(candidates)
@@ -418,9 +395,15 @@ def _observed_edge(
     candidates.sort()
     if edge == "open":
         at, price = candidates[0]
-        return (price, at) if abs((at - session.open_at.astimezone(UTC)).total_seconds()) <= 120 else None
+        return (
+            (price, at)
+            if abs((at - session.open_at.astimezone(UTC)).total_seconds()) <= 120
+            else None
+        )
     at, price = candidates[-1]
-    return (price, at) if abs((at - session.close_at.astimezone(UTC)).total_seconds()) <= 120 else None
+    return (
+        (price, at) if abs((at - session.close_at.astimezone(UTC)).total_seconds()) <= 120 else None
+    )
 
 
 def _unavailable_range(reason: str, *, target_at: datetime | None) -> dict[str, object]:
@@ -469,7 +452,14 @@ def _range_projection(
 ) -> dict[str, object]:
     if session_day is None:
         missing = _unavailable_range("session_date_unavailable", target_at=None)
-        return {"schema_version": RANGE_SCHEMA_VERSION, "session_date": None, "open": missing, "close": missing}
+        return {
+            "schema_version": RANGE_SCHEMA_VERSION,
+            "session_date": None,
+            "open": missing,
+            "close": missing,
+            "high": missing,
+            "low": missing,
+        }
     session = DEFAULT_MARKET_CALENDAR.session(session_day)
     assert session is not None
     observed_open = _observed_edge(spx_minutes, session_day=session_day, edge="open")
@@ -574,16 +564,29 @@ def _range_projection(
                 "expected_move_points": _expected_move(options),
             }
         else:
-            reason = "front_expiry_mismatch" if not expiry_ok else "fresh_risk_neutral_density_unavailable"
+            reason = (
+                "front_expiry_mismatch"
+                if not expiry_ok
+                else "fresh_risk_neutral_density_unavailable"
+            )
             close_range = _unavailable_range(
                 reason,
                 target_at=session.close_at.astimezone(UTC),
             )
+    high_range, low_range = build_intraday_extreme_ranges(
+        options=options,
+        spx_minutes=spx_minutes,
+        session_day=session_day,
+        now=now,
+        max_input_age_seconds=max_input_age_seconds,
+    )
     return {
         "schema_version": RANGE_SCHEMA_VERSION,
         "session_date": session_day.isoformat(),
         "open": open_range,
         "close": close_range,
+        "high": high_range,
+        "low": low_range,
     }
 
 
@@ -605,6 +608,7 @@ def build_signal(
     regime, online_state = _regime_projection(
         market=market,
         options=options,
+        prior_rth_context=prior_rth_context,
         previous=previous,
         now=now,
         max_input_age_seconds=max_input_age_seconds,
@@ -661,166 +665,6 @@ def build_signal(
     }
 
 
-def _wire_range(
-    *,
-    kind: str,
-    values: Mapping[str, object],
-    feature_set_version: str,
-    model_version: str,
-    distribution: str,
-    session: str,
-    observed_through: datetime,
-    available_at: datetime,
-    lineage_suffix: str,
-) -> dict[str, object] | None:
-    lower = _number(values.get("p10"))
-    median = _number(values.get("p50"))
-    upper = _number(values.get("p90"))
-    target_at = _parse_at(values.get("target_at"))
-    if (
-        lower is None
-        or median is None
-        or upper is None
-        or not lower < median < upper
-        or target_at is None
-        or target_at <= available_at
-        or observed_through > available_at
-    ):
-        return None
-    valid_until = min(available_at + timedelta(seconds=60), target_at)
-    return {
-        "forecast_id": f"range:{kind.replace('_', '-')}:{lineage_suffix}",
-        "forecast_kind": kind,
-        "feature_set_version": feature_set_version,
-        "model_version": model_version,
-        "lineage_id": f"lineage:{kind}:{lineage_suffix}",
-        "session": session,
-        "observed_through": observed_through.isoformat(),
-        "available_at": available_at.isoformat(),
-        "valid_until": valid_until.isoformat(),
-        "target_at": target_at.isoformat(),
-        "distribution": distribution,
-        "use_scope": "experimental",
-        "lower_probability": 0.1,
-        "lower": lower,
-        "median": median,
-        "upper_probability": 0.9,
-        "upper": upper,
-    }
-
-
-def _wire_document(signal: Mapping[str, object], *, available_at: datetime) -> dict[str, object] | None:
-    fingerprint = str(signal.get("input_fingerprint") or "")
-    suffix = fingerprint.removeprefix("sha256:")[:24]
-    if not suffix:
-        return None
-    session = (
-        "rth"
-        if DEFAULT_MARKET_CALENDAR.is_rth_open(available_at)
-        else "gth"
-    )
-    regime = _mapping(signal.get("regime"))
-    market_regime: dict[str, object] | None = None
-    regime_as_of = _parse_at(regime.get("as_of"))
-    posterior = _mapping(regime.get("posterior"))
-    if regime.get("status") == "available" and regime_as_of is not None and regime_as_of <= available_at:
-        ordered = [
-            {"state_id": state, "probability": _number(posterior.get(state))}
-            for state in STATE_NAMES
-        ]
-        if all(row["probability"] is not None for row in ordered):
-            market_regime = {
-                "signal_id": f"regime:{suffix}",
-                "feature_set_version": FEATURE_SCHEMA_VERSION,
-                "model_version": MODEL_VERSION,
-                "lineage_id": f"lineage:regime:{suffix}",
-                "session": session,
-                "observed_through": regime_as_of.isoformat(),
-                "available_at": available_at.isoformat(),
-                "valid_until": (available_at + timedelta(seconds=60)).isoformat(),
-                "inference_semantics": "causal_filtered",
-                "use_scope": "experimental",
-                "posterior": ordered,
-                "posterior_entropy": _number(regime.get("entropy_nats")),
-                "observation_count": int(regime.get("observation_count") or 1),
-            }
-
-    ranges = _mapping(signal.get("today_range"))
-    observed_through = _parse_at(signal.get("as_of"))
-    forecasts: list[dict[str, object]] = []
-    if observed_through is not None and observed_through <= available_at:
-        open_values = _mapping(ranges.get("open"))
-        if open_values.get("status") == "available":
-            projected_open = _wire_range(
-                kind="projected_open",
-                values=open_values,
-                feature_set_version="overnight-es-gap-em:v1",
-                model_version="projected-open-normal:v1",
-                distribution="experimental_heuristic",
-                session=session,
-                observed_through=observed_through,
-                available_at=available_at,
-                lineage_suffix=suffix,
-            )
-            if projected_open is not None:
-                forecasts.append(projected_open)
-        close_values = _mapping(ranges.get("close"))
-        if close_values.get("status") == "available":
-            risk_neutral = _wire_range(
-                kind="risk_neutral_close",
-                values=close_values,
-                feature_set_version="option-implied-range:v1",
-                model_version="risk-neutral-density:v1",
-                distribution="risk_neutral",
-                session=session,
-                observed_through=observed_through,
-                available_at=available_at,
-                lineage_suffix=suffix,
-            )
-            if risk_neutral is not None:
-                forecasts.append(risk_neutral)
-                if market_regime is not None:
-                    probability_by_state = {
-                        str(row["state_id"]): float(row["probability"])
-                        for row in market_regime["posterior"]  # type: ignore[index]
-                    }
-                    expected_move = _number(close_values.get("expected_move_points"))
-                    if expected_move is None:
-                        lower = _number(close_values.get("p10"))
-                        upper = _number(close_values.get("p90"))
-                        assert lower is not None and upper is not None
-                        expected_move = (upper - lower) / (2.0 * P10_Z)
-                    shift = HMM_CLOSE_SHIFT_FRACTION * expected_move * (
-                        probability_by_state["state_02"] - probability_by_state["state_00"]
-                    )
-                    adjusted_values = dict(close_values)
-                    for key in ("p10", "p50", "p90"):
-                        adjusted_values[key] = float(adjusted_values[key]) + shift
-                    adjusted = _wire_range(
-                        kind="hmm_adjusted_close",
-                        values=adjusted_values,
-                        feature_set_version="option-range-plus-regime:v1",
-                        model_version=HMM_ADJUSTED_RANGE_VERSION,
-                        distribution="experimental_heuristic",
-                        session=session,
-                        observed_through=observed_through,
-                        available_at=available_at,
-                        lineage_suffix=suffix,
-                    )
-                    if adjusted is not None:
-                        forecasts.append(adjusted)
-    if market_regime is None and not forecasts:
-        return None
-    return {
-        "schema_version": "experimental_research_signals.v1",
-        "document_id": f"research:{suffix}",
-        "generated_at": available_at.isoformat(),
-        "market_regime": market_regime,
-        "range_forecasts": forecasts,
-        "automatic_ordering": False,
-    }
-
-
 def produce_once(
     *,
     paths: SignalPaths,
@@ -843,9 +687,12 @@ def produce_once(
                 "prior_rth_context": prior_rth_context,
             }
         )
-        if previous.get("input_fingerprint") == fingerprint:
+        if (
+            previous.get("schema_version") == "research_context.state.v2"
+            and previous.get("input_fingerprint") == fingerprint
+        ):
             cached = _mapping(previous.get("wire_document"))
-            if cached:
+            if cached.get("schema_version") == "research_context.v2":
                 if read_json_object(paths.output) != cached:
                     atomic_write_json_secure(paths.output, cached)
                 return cached
@@ -859,22 +706,28 @@ def produce_once(
             now=now,
             max_input_age_seconds=max_input_age_seconds,
         )
-        wire = _wire_document(payload, available_at=now.astimezone(UTC))
+        wire = build_research_context_document(
+            signal=payload,
+            market=market,
+            prior_rth_context=prior_rth_context,
+            available_at=now.astimezone(UTC),
+            regime_feature_set_version=FEATURE_SCHEMA_VERSION,
+            cross_index_feature_set_version=CROSS_INDEX_FEATURE_SET_VERSION,
+            model_version=MODEL_VERSION,
+            state_names=STATE_NAMES,
+            hmm_adjusted_model_version=HMM_ADJUSTED_RANGE_VERSION,
+            hmm_close_shift_fraction=HMM_CLOSE_SHIFT_FRACTION,
+            p10_z=P10_Z,
+        )
         state_payload = {
-            "schema_version": "experimental_research_signals.state.v1",
+            "schema_version": "research_context.state.v2",
             "input_fingerprint": payload["input_fingerprint"],
             "online_state": payload["online_state"],
             "wire_document": wire,
         }
         atomic_write_json_secure(paths.state, state_payload)
-        if wire is not None:
-            atomic_write_json_secure(paths.output, wire)
-            return wire
-        return {
-            "schema_version": "experimental_research_signals.unavailable.v1",
-            "generated_at": now.astimezone(UTC).isoformat(),
-            "reasons": ["no_valid_research_signal"],
-        }
+        atomic_write_json_secure(paths.output, wire)
+        return wire
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:

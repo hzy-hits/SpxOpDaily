@@ -14,6 +14,7 @@ from spx_spark.application.market_features.trade_intent import (
 )
 from spx_spark.application.market_features.virtual_strategy_support import (
     _action_underlier_snapshot,
+    _active_snapshot_impl,
     _append_audit,
     _cap_rth_trade_episode,
     _contract_snapshot,
@@ -27,6 +28,7 @@ from spx_spark.application.market_features.virtual_strategy_support import (
     _gth_spread_contract_ids,
     _gth_time_stop,
     _latest_created_at,
+    _lifecycle_transition,
     _number,
     _pct as _pct,
     _record_entry_decision,
@@ -300,6 +302,61 @@ def process_virtual_strategy(
                     float(active.get("mae_fraction", 0.0)), return_fraction
                 )
                 _record_due_horizons(storage, active, current, now=now)
+        transition = _lifecycle_transition(
+            active,
+            current,
+            exit_reason=exit_reason,
+            action=action,
+            now=now,
+        )
+        transition_audit = transition.get("audit")
+        if isinstance(transition_audit, Mapping):
+            _append_audit(storage, now, transition_audit)
+        if transition["kind"] == "degraded":
+            state.update(
+                {
+                    "schema_version": 2,
+                    "updated_at": now.isoformat(),
+                    "active": active,
+                    **_consumed_signal_state(consumed_signals),
+                    "entry_decisions": _trim_entry_decisions(entry_decisions),
+                    "provider_entry_control": provider_entry_control,
+                }
+            )
+            atomic_write_json_secure(state_path, state)
+            return {
+                "status": active.get("status"),
+                "episode_id": active.get("episode_id"),
+                "contract_id": active.get("contract_id"),
+                "health_status": active.get("health_status"),
+                "health_reason": active.get("health_reason"),
+                "health_since": active.get("health_since"),
+                "notification_attempted": False,
+                "new_entries_allowed": new_entries_allowed,
+            }
+        if transition["kind"] == "censored":
+            censored = dict(transition["episode"])
+            state.update(
+                {
+                    "schema_version": 2,
+                    "updated_at": now.isoformat(),
+                    "active": None,
+                    "last_censored": censored,
+                    **_consumed_signal_state(consumed_signals),
+                    "entry_decisions": _trim_entry_decisions(entry_decisions),
+                    "provider_entry_control": provider_entry_control,
+                }
+            )
+            atomic_write_json_secure(state_path, state)
+            _append_audit(storage, now, {"event": "virtual_censored", **censored})
+            return {
+                "status": "censored",
+                "episode_id": censored.get("episode_id"),
+                "censor_reason": exit_reason,
+                "notification_attempted": False,
+                "new_entries_allowed": new_entries_allowed,
+            }
+        pending_exit_context = dict(transition.get("pending_exit_context") or {})
         if exit_reason is None:
             state.update(
                 {
@@ -322,12 +379,22 @@ def process_virtual_strategy(
 
         closed = {
             **active,
+            **pending_exit_context,
             **_event_contract(active, block_reasons=()),
             "status": "closed",
             "closed_at": now.isoformat(),
             "exit_reason": exit_reason,
             "exit_action": action,
             "exit_snapshot": current,
+            "exit_bid": _number(current.get("bid")),
+            "exit_price_basis": (
+                "executable_bid" if _number(current.get("bid")) is not None else None
+            ),
+            "pnl_status": (
+                "executable_quote_observed"
+                if _number(current.get("bid")) is not None
+                else "unavailable"
+            ),
         }
         text = _render_exit(closed)
         notification_event_id = f"{closed['episode_id']}:{exit_reason}"
@@ -921,27 +988,10 @@ def _active_snapshot(
     now: datetime,
     policy: MarketFeatureSettings,
 ) -> dict[str, object]:
-    if active.get("position_type") == "call_debit_spread":
-        snapshot = _spread_snapshot(
-            latest,
-            long_contract_id=str(active.get("long_contract_id") or ""),
-            short_contract_id=str(active.get("short_contract_id") or ""),
-            now=now,
-            max_quote_age_seconds=policy.trade_quote_max_age_seconds,
-            max_quote_skew_seconds=policy.provider_sync_tolerance_seconds,
-            required_provider=(
-                "ibkr" if active.get("source_kind") == "gth_dip_reclaim_call" else None
-            ),
-        )
-        if active.get("source_kind") == "gth_dip_reclaim_call":
-            session_date = str(active.get("session_id") or "")
-            reference = _gth_chain_reference(
-                latest,
-                now=now,
-                expiry=session_date.replace("-", ""),
-                policy=policy,
-            )
-            if reference is not None:
-                snapshot["chain_implied_spx"] = reference
-        return snapshot
-    return _contract_snapshot(latest, str(active.get("contract_id") or ""), now=now)
+    return _active_snapshot_impl(
+        latest,
+        active,
+        now=now,
+        policy=policy,
+        spread_snapshot=_spread_snapshot,
+    )

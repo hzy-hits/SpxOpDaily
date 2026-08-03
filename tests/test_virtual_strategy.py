@@ -3,11 +3,13 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 import spx_spark.application.market_features.virtual_strategy as virtual_strategy
+import spx_spark.application.market_features.virtual_strategy_state as virtual_strategy_state
 from spx_spark.application.market_features.virtual_strategy import (
     _episode,
     _evaluate_gth_spread_entry,
@@ -49,6 +51,57 @@ def _latest_spx(price: float, *, at: datetime = NOW) -> SimpleNamespace:
     return SimpleNamespace(
         best_quote=lambda instrument_id: spx if instrument_id == "index:SPX" else None,
         as_of=at,
+    )
+
+
+def _write_active_episode(
+    tmp_path,
+    *,
+    opened_at: datetime,
+    time_stop_at: datetime,
+    episode_id: str,
+) -> Path:
+    state_path = tmp_path / "latest" / "virtual_strategy_state.json"
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    state_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "active": {
+                    "episode_id": episode_id,
+                    "status": "active",
+                    "source_signal_id": f"intent:{episode_id}",
+                    "source_kind": "trade_intent",
+                    "session_id": "2026-07-15",
+                    "direction": "up",
+                    "contract_id": "option:SPX:SPXW:20260715:7550:C",
+                    "opened_at": opened_at.isoformat(),
+                    "time_stop_at": time_stop_at.isoformat(),
+                    "valid_until": time_stop_at.isoformat(),
+                    "entry_mid": 10.0,
+                    "invalidation_spx": 7547.0,
+                    "target_spx": 7575.0,
+                    "mfe_fraction": 0.0,
+                    "mae_fraction": 0.0,
+                    "automatic_ordering": False,
+                },
+                "consumed_signal_ids": [f"intent:{episode_id}"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    return state_path
+
+
+def _accepted_notification_result() -> SimpleNamespace:
+    return SimpleNamespace(
+        accepted=True,
+        inserted=True,
+        duplicate=False,
+        delivered=False,
+        queued_for_recovery=True,
+        outcome="pending",
+        targets=("test",),
     )
 
 
@@ -125,7 +178,7 @@ def test_long_put_uses_downside_target_and_upside_invalidation() -> None:
     )
     assert _exit_decision(
         active,
-        {"mid": 14.7, "underlier": 1.0},
+        {"bid": 14.6, "mid": 14.7, "underlier": 1.0},
         latest=_latest_spx(7563.0),
         **common,
     ) == (
@@ -134,7 +187,7 @@ def test_long_put_uses_downside_target_and_upside_invalidation() -> None:
     )
     assert _exit_decision(
         active,
-        {"mid": 14.7, "underlier": 9999.0},
+        {"bid": 14.6, "mid": 14.7, "underlier": 9999.0},
         latest=_latest_spx(7549.0),
         **common,
     ) == (
@@ -162,7 +215,7 @@ def test_long_call_keeps_upside_target_and_downside_invalidation() -> None:
 
     assert _exit_decision(
         active,
-        {"mid": 10.0, "underlier": 9999.0},
+        {"bid": 9.9, "mid": 10.0, "underlier": 9999.0},
         latest=_latest_spx(7547.0),
         **common,
     ) == (
@@ -171,12 +224,30 @@ def test_long_call_keeps_upside_target_and_downside_invalidation() -> None:
     )
     assert _exit_decision(
         active,
-        {"mid": 10.0, "underlier": 1.0},
+        {"bid": 9.9, "mid": 10.0, "underlier": 1.0},
         latest=_latest_spx(7575.0),
         **common,
     ) == (
         "underlier_target_reached",
         "take_profit",
+    )
+    assert _exit_decision(
+        active,
+        {},
+        latest=_latest_spx(7547.0),
+        **common,
+    ) == (
+        "strategy_invalidation",
+        "close_pending",
+    )
+    assert _exit_decision(
+        active,
+        {},
+        latest=_latest_spx(7575.0),
+        **common,
+    ) == (
+        "underlier_target_reached",
+        "close_pending",
     )
 
 
@@ -238,7 +309,7 @@ def test_rth_trade_hard_exit_is_half_open_and_does_not_change_gth() -> None:
     ) == (None, None)
     assert _exit_decision(
         rth,
-        {"mid": 1.0},
+        {"bid": 0.9, "mid": 1.0},
         now=datetime(2026, 7, 15, 17, 0, tzinfo=UTC),
         **common,
     ) == ("time_stop", "exit")
@@ -311,6 +382,11 @@ def test_persisted_legacy_rth_episode_is_closed_at_1300_et(
         "enqueue_notification",
         lambda *_args, **_kwargs: notification_result,
     )
+    monkeypatch.setattr(
+        virtual_strategy,
+        "_active_snapshot",
+        lambda *_args, **_kwargs: {"bid": 9.4, "mid": 9.5, "ask": 9.6},
+    )
 
     result = process_virtual_strategy(
         SimpleNamespace(data_root=str(tmp_path)),
@@ -382,6 +458,11 @@ def test_closed_episode_notification_recovers_after_enqueue_crash(
         )
 
     monkeypatch.setattr(virtual_strategy, "enqueue_notification", enqueue)
+    monkeypatch.setattr(
+        virtual_strategy,
+        "_active_snapshot",
+        lambda *_args, **_kwargs: {"bid": 9.4, "mid": 9.5, "ask": 9.6},
+    )
     common = {
         "storage": SimpleNamespace(data_root=str(tmp_path)),
         "latest": SimpleNamespace(best_quote=lambda _instrument_id: None, created_at=now),
@@ -409,6 +490,347 @@ def test_closed_episode_notification_recovers_after_enqueue_crash(
     assert observing["status"] == "observing"
     assert attempts == 2
     assert recovered["pending_notifications"] == []
+
+
+def test_virtual_notification_quiet_window_is_suppressed_not_delivered(tmp_path) -> None:
+    state_path = tmp_path / "latest" / "virtual_strategy_state.json"
+    state_path.parent.mkdir(parents=True)
+    event_id = "episode:quiet-window:time_stop"
+    state_path.write_text(
+        json.dumps(
+            {
+                "pending_notifications": [
+                    {
+                        "event_id": event_id,
+                        "source": "virtual_strategy",
+                        "kind": "virtual_strategy_exit",
+                        "lane": "strategy_lifecycle",
+                        "occurred_at": NOW.isoformat(),
+                        "title": "SPX VIRTUAL STRATEGY EXIT",
+                        "text": "quiet window exit",
+                        "friend": True,
+                        "feishu_text": "quiet window exit",
+                        "enqueued_at": NOW.isoformat(),
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = virtual_strategy_state.flush_pending_notifications(
+        state_path,
+        settings=SimpleNamespace(),
+        now=NOW,
+        enqueue=lambda *_args, **_kwargs: SimpleNamespace(
+            accepted=True,
+            inserted=False,
+            duplicate=False,
+            delivered=True,
+            queued_for_recovery=False,
+            outcome="quiet_window_suppressed",
+            targets=("quiet_window_policy",),
+        ),
+    )
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))
+
+    assert result["accepted"] is True
+    assert result["delivered"] is False
+    assert result["suppressed"] is True
+    assert result["outcome"] == "quiet_window_suppressed"
+    assert persisted["pending_notifications"] == []
+    assert persisted["accepted_notification_event_ids"] == [event_id]
+
+
+def test_underlier_gap_is_degraded_then_recovery_closes_once(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gap_at = datetime(2026, 7, 15, 15, 50, tzinfo=UTC)
+    state_path = _write_active_episode(
+        tmp_path,
+        opened_at=gap_at - timedelta(minutes=5),
+        time_stop_at=gap_at + timedelta(hours=1),
+        episode_id="virtual:health-recovery",
+    )
+    monkeypatch.setattr(
+        virtual_strategy,
+        "_active_snapshot",
+        lambda *_args, **_kwargs: {"bid": 9.4, "mid": 9.5, "ask": 9.6},
+    )
+    enqueued: list[str] = []
+
+    def enqueue(*args, **_kwargs):
+        enqueued.append(str(args[1].event_id))
+        return _accepted_notification_result()
+
+    monkeypatch.setattr(virtual_strategy, "enqueue_notification", enqueue)
+    common = {
+        "storage": SimpleNamespace(data_root=str(tmp_path)),
+        "trade_intent": {},
+        "gth_signal": {},
+        "option_structure": {},
+        "macro_event": {},
+        "greek_decision": {},
+        "policy": MarketFeatureSettings(),
+        "notification": SimpleNamespace(),
+        "new_entries_allowed": False,
+        "new_entries_block_reason": "test_block",
+    }
+    missing = SimpleNamespace(
+        best_quote=lambda _instrument_id: None,
+        created_at=gap_at,
+        as_of=gap_at,
+    )
+
+    degraded = process_virtual_strategy(latest=missing, now=gap_at, **common)
+
+    assert degraded["status"] == "active"
+    assert degraded["health_status"] == "degraded"
+    assert degraded["health_reason"] == "underlier_data_unavailable"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert state["active"]["health_since"] == gap_at.isoformat()
+    assert "last_closed" not in state
+    assert enqueued == []
+
+    recovered_at = gap_at + timedelta(seconds=1)
+    recovered = process_virtual_strategy(
+        latest=_latest_spx(7550.0, at=recovered_at),
+        now=recovered_at,
+        **common,
+    )
+    assert recovered["status"] == "active"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert state["active"]["health_status"] == "healthy"
+
+    invalidated_at = gap_at + timedelta(seconds=2)
+    closed = process_virtual_strategy(
+        latest=_latest_spx(7546.0, at=invalidated_at),
+        now=invalidated_at,
+        **common,
+    )
+    repeated = process_virtual_strategy(
+        latest=_latest_spx(7546.0, at=invalidated_at + timedelta(seconds=1)),
+        now=invalidated_at + timedelta(seconds=1),
+        **common,
+    )
+
+    assert closed["status"] == "closed"
+    assert repeated["status"] == "observing"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert state["last_closed"]["exit_bid"] == 9.4
+    assert state["last_closed"]["exit_price_basis"] == "executable_bid"
+    assert state["last_closed"]["pnl_status"] == "executable_quote_observed"
+    assert enqueued == ["virtual:health-recovery:strategy_invalidation"]
+
+
+def test_terminal_without_bid_locks_reason_until_bid_recovers(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    triggered_at = datetime(2026, 7, 15, 15, 50, tzinfo=UTC)
+    recovered_at = triggered_at + timedelta(seconds=1)
+    bid_at = triggered_at + timedelta(seconds=2)
+    state_path = _write_active_episode(
+        tmp_path,
+        opened_at=triggered_at - timedelta(minutes=5),
+        time_stop_at=triggered_at + timedelta(hours=1),
+        episode_id="virtual:locked-invalidation",
+    )
+
+    def snapshot(_latest, _active, *, now, policy):
+        del policy
+        return (
+            {"bid": 9.3, "mid": 9.4, "ask": 9.5}
+            if now >= bid_at
+            else {}
+        )
+
+    monkeypatch.setattr(virtual_strategy, "_active_snapshot", snapshot)
+    enqueued: list[str] = []
+
+    def enqueue(*args, **_kwargs):
+        enqueued.append(str(args[1].event_id))
+        return _accepted_notification_result()
+
+    monkeypatch.setattr(virtual_strategy, "enqueue_notification", enqueue)
+    common = {
+        "storage": SimpleNamespace(data_root=str(tmp_path)),
+        "trade_intent": {},
+        "gth_signal": {},
+        "option_structure": {},
+        "macro_event": {},
+        "greek_decision": {},
+        "policy": MarketFeatureSettings(),
+        "notification": SimpleNamespace(),
+        "new_entries_allowed": False,
+        "new_entries_block_reason": "test_block",
+    }
+
+    pending = process_virtual_strategy(
+        latest=_latest_spx(7546.0, at=triggered_at),
+        now=triggered_at,
+        **common,
+    )
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert pending["status"] == "close_pending"
+    assert pending["health_reason"] == "strategy_invalidation_exit_bid_unavailable"
+    assert state["active"]["close_pending_reason"] == "strategy_invalidation"
+    assert state["active"]["close_pending_action"] == "exit"
+    assert state["active"]["close_pending_since"] == triggered_at.isoformat()
+
+    still_pending = process_virtual_strategy(
+        latest=_latest_spx(7550.0, at=recovered_at),
+        now=recovered_at,
+        **common,
+    )
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert still_pending["status"] == "close_pending"
+    assert state["active"]["close_pending_reason"] == "strategy_invalidation"
+    assert state["active"]["close_pending_since"] == triggered_at.isoformat()
+    assert enqueued == []
+
+    closed = process_virtual_strategy(
+        latest=_latest_spx(7550.0, at=bid_at),
+        now=bid_at,
+        **common,
+    )
+    repeated = process_virtual_strategy(
+        latest=_latest_spx(7550.0, at=bid_at + timedelta(seconds=1)),
+        now=bid_at + timedelta(seconds=1),
+        **common,
+    )
+    assert closed["status"] == "closed"
+    assert closed["exit_reason"] == "strategy_invalidation"
+    assert repeated["status"] == "observing"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert state["last_closed"]["close_pending_reason"] == "strategy_invalidation"
+    assert state["last_closed"]["close_pending_since"] == triggered_at.isoformat()
+    assert state["last_closed"]["exit_bid"] == 9.3
+    assert enqueued == ["virtual:locked-invalidation:strategy_invalidation"]
+
+
+def test_missing_option_mark_is_degraded_and_recovers_without_exit(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed_at = datetime(2026, 7, 15, 15, 50, tzinfo=UTC)
+    state_path = _write_active_episode(
+        tmp_path,
+        opened_at=observed_at - timedelta(minutes=5),
+        time_stop_at=observed_at + timedelta(hours=1),
+        episode_id="virtual:mark-recovery",
+    )
+
+    def snapshot(_latest, _active, *, now, policy):
+        del policy
+        return {} if now == observed_at else {"bid": 9.4, "mid": 9.5, "ask": 9.6}
+
+    monkeypatch.setattr(virtual_strategy, "_active_snapshot", snapshot)
+    common = {
+        "storage": SimpleNamespace(data_root=str(tmp_path)),
+        "trade_intent": {},
+        "gth_signal": {},
+        "option_structure": {},
+        "macro_event": {},
+        "greek_decision": {},
+        "policy": MarketFeatureSettings(),
+        "notification": SimpleNamespace(),
+        "new_entries_allowed": False,
+        "new_entries_block_reason": "test_block",
+    }
+
+    degraded = process_virtual_strategy(
+        latest=_latest_spx(7550.0, at=observed_at),
+        now=observed_at,
+        **common,
+    )
+    recovered = process_virtual_strategy(
+        latest=_latest_spx(7550.0, at=observed_at + timedelta(seconds=1)),
+        now=observed_at + timedelta(seconds=1),
+        **common,
+    )
+    assert degraded["status"] == "active"
+    assert degraded["health_reason"] == "option_mark_unavailable"
+    assert recovered["status"] == "active"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert state["active"]["health_status"] == "healthy"
+    assert "last_closed" not in state
+    assert state.get("pending_notifications", []) == []
+
+
+def test_time_stop_without_bid_becomes_censored_without_pnl_or_notification(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stop_at = datetime(2026, 7, 15, 17, 0, tzinfo=UTC)
+    state_path = _write_active_episode(
+        tmp_path,
+        opened_at=stop_at - timedelta(minutes=10),
+        time_stop_at=stop_at,
+        episode_id="virtual:censored-time-stop",
+    )
+    monkeypatch.setattr(
+        virtual_strategy,
+        "_active_snapshot",
+        lambda *_args, **_kwargs: {"mid": 9.5, "ask": 9.6},
+    )
+    enqueued: list[str] = []
+
+    def enqueue(*args, **_kwargs):
+        enqueued.append(str(args[1].event_id))
+        return _accepted_notification_result()
+
+    monkeypatch.setattr(virtual_strategy, "enqueue_notification", enqueue)
+    common = {
+        "storage": SimpleNamespace(data_root=str(tmp_path)),
+        "latest": SimpleNamespace(
+            best_quote=lambda _instrument_id: None,
+            created_at=stop_at,
+            as_of=stop_at,
+        ),
+        "trade_intent": {},
+        "gth_signal": {},
+        "option_structure": {},
+        "macro_event": {},
+        "greek_decision": {},
+        "policy": MarketFeatureSettings(),
+        "notification": SimpleNamespace(),
+        "new_entries_allowed": False,
+        "new_entries_block_reason": "test_block",
+    }
+
+    pending = process_virtual_strategy(now=stop_at, **common)
+    assert pending["status"] == "close_pending"
+    assert pending["health_reason"] == "time_stop_exit_bid_unavailable"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert state["active"]["close_pending_reason"] == "time_stop"
+    assert state.get("pending_notifications", []) == []
+
+    censor_at = stop_at + timedelta(
+        seconds=MarketFeatureSettings().trade_quote_max_age_seconds
+    )
+    censored = process_virtual_strategy(now=censor_at, **common)
+    assert censored["status"] == "censored"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert state["active"] is None
+    assert "last_closed" not in state
+    assert state["last_censored"]["censor_reason"] == "time_stop"
+    assert state["last_censored"]["exit_bid"] is None
+    assert state["last_censored"]["pnl_status"] == "censored"
+    assert "exit_return_fraction" not in state["last_censored"]
+    assert state.get("pending_notifications", []) == []
+    assert enqueued == []
+    audit_path = (
+        tmp_path
+        / "features"
+        / "virtual_strategy"
+        / "date=2026-07-15"
+        / "events.jsonl"
+    )
+    events = [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()]
+    assert sum(event["event"] == "virtual_censored" for event in events) == 1
+    assert all(event["event"] != "virtual_closed" for event in events)
 
 
 def test_gth_time_stop_uses_summer_dst_exit_clock() -> None:
@@ -1268,7 +1690,7 @@ def test_gth_spread_exits_at_eighty_five_percent_of_width() -> None:
     }
 
     assert _exit_decision(active, {"mid": 33.9}, **common) == (None, None)
-    assert _exit_decision(active, {"mid": 34.0}, **common) == (
+    assert _exit_decision(active, {"bid": 33.8, "mid": 34.0}, **common) == (
         "spread_value_saturation",
         "take_profit_or_exit",
     )

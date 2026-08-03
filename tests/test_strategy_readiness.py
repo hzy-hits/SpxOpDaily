@@ -39,6 +39,7 @@ from spx_spark.strategy_contract import policy_version
 ROLE_POLICIES = {
     "gth_detector_runtime": "gth_detector_runtime_v3_frozen",
     "gth_signal": "gth_signal_v3_frozen",
+    "gth_runtime_candidate": "gth_level_manual_candidate.v1+sha256:test",
     "trade_intent": "trade_intent_v3_frozen",
     "trade_candidate": "trade_candidate_v3_frozen",
     "virtual_entry_decision": "virtual_entry_decision_v3_frozen",
@@ -48,7 +49,7 @@ PUT_SHADOW_WINDOW_CONTRACT_VERSION = "rth_lanes_0945_1300_put_shadow.v1"
 
 
 @pytest.mark.parametrize("status", ("trade_ready", "virtual_ready"))
-def test_gth_virtual_entry_decision_dual_reads_legacy_and_new_status(
+def test_legacy_gth_virtual_entry_is_exact_research_but_has_no_current_role(
     status: str,
 ) -> None:
     at = datetime(2026, 7, 15, 3, 0, tzinfo=timezone.utc)
@@ -80,7 +81,7 @@ def test_gth_virtual_entry_decision_dual_reads_legacy_and_new_status(
         )
     record = SimpleNamespace(source="virtual_strategy", payload=payload)
 
-    assert _record_role(record) == "virtual_entry_decision"
+    assert _record_role(record) is None
     assert _exact_spread_decision(payload)
 
 
@@ -191,6 +192,7 @@ def _leg_snapshot(at: datetime, *, bid: float, mid: float, ask: float) -> dict[s
         "mid": mid,
         "ask": ask,
         "source_at": (at - timedelta(seconds=1)).isoformat(),
+        "transport_at": (at - timedelta(seconds=1)).isoformat(),
         "quality": {"status": "ok"},
     }
 
@@ -206,6 +208,16 @@ def _spread_snapshot(at: datetime, *, bid: float = 4.0, mid: float = 5.0) -> dic
         "long": _leg_snapshot(at, bid=10.0, mid=10.5, ask=11.0),
         "short": _leg_snapshot(at, bid=5.0, mid=5.5, ask=6.0),
     }
+
+
+def _ibkr_spread_snapshot(at: datetime, *, bid: float = 4.0, mid: float = 5.0) -> dict[str, object]:
+    snapshot = _spread_snapshot(at, bid=bid, mid=mid)
+    snapshot["provider"] = "ibkr"
+    for leg_name in ("long", "short"):
+        leg = snapshot[leg_name]
+        assert isinstance(leg, dict)
+        leg["provider"] = "ibkr"
+    return snapshot
 
 
 def _single_snapshot(at: datetime) -> dict[str, object]:
@@ -1368,7 +1380,7 @@ def _readiness_record(
     )
 
 
-def test_twenty_clean_forward_sessions_and_exact_entries_are_review_ready(
+def test_legacy_gth_exact_entries_cannot_make_runtime_lane_review_ready(
     tmp_path: Path,
 ) -> None:
     days = _trading_days(date(2026, 6, 22), DEFAULT_THRESHOLDS.complete_sessions)
@@ -1381,17 +1393,291 @@ def test_twenty_clean_forward_sessions_and_exact_entries_are_review_ready(
         generated_at=cutoff,
     )
 
-    assert result["status"] == "ready_for_review"
+    assert result["schema_version"] == 3
+    assert result["status"] == "collecting"
     assert result["automatic_promotion"] is False
     assert result["sessions"]["health_complete"] == 20
     assert result["sessions"]["contract_consistent_complete"] == 20
     assert result["contract"]["coverage_ratio"] == 1.0
     assert result["contract"]["invalid_records"] == 0
     assert result["contract"]["duplicate_records"] == 0
-    assert result["cohorts"]["gth_exact_entry"]["count"] == 20
+    assert result["cohorts"]["gth_exact_entry"]["count"] == 0
     assert result["cohorts"]["put_exact_entry"]["count"] == 20
-    assert result["cohorts"]["exact_spread_complete_exit"]["count"] == 20
-    assert result["blockers"] == []
+    assert result["cohorts"]["exact_spread_complete_exit"]["count"] == 0
+    assert result["gth_lanes"]["runtime"]["records"] == 0
+    assert result["gth_lanes"]["runtime"]["exact_entry_count"] == 0
+    assert result["gth_lanes"]["legacy_research"] == {
+        "strategy_id": "gth_dip_reclaim",
+        "source": "gth_dip_reclaim",
+        "lifecycle_status": "legacy_research",
+        "records": 20,
+        "unique_signals": 20,
+        "declared_legacy_research_records": 0,
+        "excluded_from_runtime_readiness": True,
+        "exact_entries": 20,
+        "exact_spread_complete_exits": 20,
+    }
+    assert "gth_runtime_exact_entry_replay_not_migrated" in result["blockers"]
+
+
+def test_readiness_loads_current_gth_runtime_candidate_separately(
+    tmp_path: Path,
+) -> None:
+    days = _trading_days(date(2026, 6, 22), DEFAULT_THRESHOLDS.complete_sessions)
+    cutoff = _write_complete_forward_cohort(tmp_path, days)
+    day = days[-1]
+    signal_at = (_health_window(day)[0] + timedelta(minutes=90)).astimezone(timezone.utc)
+    candidate = {
+        **_envelope(
+            signal_at,
+            role="gth_runtime_candidate",
+            kind="chain_implied_spx",
+            instrument_id="synthetic:SPXW_PARITY",
+        ),
+        "event": "gth_level_manual_candidate_evaluated",
+        "candidate_id": "gth-level-manual:runtime-test",
+        "source_signal_id": "level:runtime-test",
+        "strategy_id": "gth_level_manual_candidate",
+        "strategy_lane": "gth_level_manual_candidate",
+        "lifecycle_status": "legacy_production",
+        "runtime_status": "production_runtime",
+        "status": "manual_ready",
+        "session_date": day.isoformat(),
+        "evaluated_at": signal_at.isoformat(),
+    }
+    _write_rows(
+        tmp_path / "gth_level_manual_candidates" / f"date={day.isoformat()}" / "events.jsonl",
+        [candidate],
+    )
+
+    result = build_strategy_readiness(
+        tmp_path,
+        cutoff_at=cutoff,
+        policy_versions=ROLE_POLICIES,
+        generated_at=cutoff,
+    )
+
+    runtime = result["gth_lanes"]["runtime"]
+    assert runtime["records"] == 1
+    assert runtime["contract_compliant_records"] == 1
+    assert runtime["manual_ready_candidates"] == 1
+    assert runtime["eligible_manual_ready_candidates"] == 1
+    assert runtime["policy_versions"] == [ROLE_POLICIES["gth_runtime_candidate"]]
+    assert runtime["replay_migrated"] is False
+    assert result["cohorts"]["gth_exact_entry"]["count"] == 0
+    assert result["cohorts"]["gth_exact_entry"]["legacy_research_exact_entries_excluded"] == 20
+
+
+def test_current_gth_full_exact_virtual_chain_migrates_replay(
+    tmp_path: Path,
+) -> None:
+    days = _trading_days(date(2026, 6, 22), DEFAULT_THRESHOLDS.complete_sessions)
+    cutoff = _write_complete_forward_cohort(tmp_path, days)
+    day = days[-1]
+    signal_at = (_health_window(day)[0] + timedelta(minutes=90)).astimezone(timezone.utc)
+    opened_at = signal_at + timedelta(seconds=1)
+    closed_at = signal_at + timedelta(minutes=10)
+    expiry = day.strftime("%Y%m%d")
+    candidate_id = "gth-level-manual:runtime-full-chain"
+    episode_id = "virtual:gth-level-manual:runtime-full-chain"
+    long_contract = f"option:SPX:SPXW:{expiry}:7500:C"
+    short_contract = f"option:SPX:SPXW:{expiry}:7520:C"
+    combined_contract = f"{long_contract}|-{short_contract}"
+    candidate_snapshot = _ibkr_spread_snapshot(signal_at)
+    entry_snapshot = _ibkr_spread_snapshot(opened_at)
+    exit_snapshot = _ibkr_spread_snapshot(closed_at)
+    candidate = {
+        **_envelope(
+            signal_at,
+            role="gth_runtime_candidate",
+            kind="chain_implied_spx",
+            instrument_id="synthetic:SPXW_PARITY",
+            valid_for=timedelta(minutes=2),
+        ),
+        "event": "gth_level_manual_candidate_evaluated",
+        "kind": "gth_spxw_level_manual_spread_candidate",
+        "candidate_id": candidate_id,
+        "source_signal_id": "level:runtime-full-chain",
+        "strategy_id": "gth_level_manual_candidate",
+        "strategy_lane": "gth_level_manual_candidate",
+        "lifecycle_status": "legacy_production",
+        "runtime_status": "production_runtime",
+        "status": "manual_ready",
+        "session_date": day.isoformat(),
+        "evaluated_at": signal_at.isoformat(),
+        "direction": "up",
+        "position_type": "call_debit_spread",
+        "contract_id": combined_contract,
+        "long_contract_id": long_contract,
+        "short_contract_id": short_contract,
+        "spread_width_points": 20.0,
+        "decision_bid": 4.0,
+        "decision_mid": 5.0,
+        "decision_ask": 6.0,
+        "entry_limit": 7.0,
+        "target_spx": 7525.0,
+        "invalidation_spx": 7485.0,
+        "invalidation_es": 7515.0,
+        "exit_at": (signal_at + timedelta(minutes=20)).isoformat(),
+        "exact_spread_snapshot": candidate_snapshot,
+        "manual_action_eligible": True,
+        "execution_eligible": False,
+        "broker_submission_allowed": False,
+        "automatic_ordering": False,
+    }
+    decision = {
+        **_envelope(
+            opened_at,
+            role="virtual_entry_decision",
+            kind="option_spread",
+            instrument_id=combined_contract,
+        ),
+        "event": "virtual_entry_decision",
+        "decision_id": f"virtual-entry:{candidate_id}",
+        "source_signal_id": candidate_id,
+        "source_kind": "gth_spxw_level_manual_spread_candidate",
+        "source_policy_version": ROLE_POLICIES["gth_runtime_candidate"],
+        "strategy_id": "gth_level_manual_candidate",
+        "lifecycle_status": "legacy_production",
+        "runtime_status": "production_runtime",
+        "session_id": day.isoformat(),
+        "evaluated_at": opened_at.isoformat(),
+        "status": "virtual_ready",
+        "terminal": True,
+        "position_type": "call_debit_spread",
+        "exact_spread_snapshot": entry_snapshot,
+        "episode_id": episode_id,
+        "simulation_only": True,
+        "execution_eligible": False,
+        "automatic_ordering": False,
+    }
+    opened = {
+        **_envelope(
+            opened_at,
+            role="virtual_lifecycle",
+            kind="option_spread",
+            instrument_id=combined_contract,
+        ),
+        "event": "virtual_opened",
+        "episode_id": episode_id,
+        "source_signal_id": candidate_id,
+        "source_kind": "gth_spxw_level_manual_spread_candidate",
+        "source_policy_version": ROLE_POLICIES["gth_runtime_candidate"],
+        "strategy_id": "gth_level_manual_candidate",
+        "lifecycle_status": "legacy_production",
+        "runtime_status": "production_runtime",
+        "session_date": day.isoformat(),
+        "opened_at": opened_at.isoformat(),
+        "direction": "up",
+        "position_type": "call_debit_spread",
+        "contract_id": combined_contract,
+        "long_contract_id": long_contract,
+        "short_contract_id": short_contract,
+        "spread_width_points": 20.0,
+        "entry_bid": 4.0,
+        "entry_mid": 5.0,
+        "entry_ask": 6.0,
+        "entry_snapshot": entry_snapshot,
+        "last": entry_snapshot,
+        "automatic_ordering": False,
+    }
+    closed = {
+        **_envelope(
+            closed_at,
+            role="virtual_lifecycle",
+            kind="option_spread",
+            instrument_id=combined_contract,
+            valid_until=closed_at,
+        ),
+        **{
+            key: value
+            for key, value in opened.items()
+            if key
+            not in {
+                "schema_version",
+                "policy_version",
+                "valid_until",
+                "coordinate",
+                "block_reasons",
+                "event",
+                "last",
+            }
+        },
+        "event": "virtual_closed",
+        "closed_at": closed_at.isoformat(),
+        "exit_reason": "time_stop",
+        "exit_snapshot": exit_snapshot,
+        "last": exit_snapshot,
+    }
+    _write_rows(
+        tmp_path / "gth_level_manual_candidates" / f"date={day.isoformat()}" / "events.jsonl",
+        [candidate],
+    )
+    virtual_path = tmp_path / "virtual_strategy" / f"date={day.isoformat()}" / "events.jsonl"
+    existing = _read_rows(virtual_path)
+    _write_rows(virtual_path, [*existing, decision, opened, closed])
+
+    result = build_strategy_readiness(
+        tmp_path,
+        cutoff_at=cutoff,
+        policy_versions=ROLE_POLICIES,
+        generated_at=cutoff,
+    )
+
+    runtime = result["gth_lanes"]["runtime"]
+    assert runtime["exact_entry_count"] == 1
+    assert runtime["exact_exit_count"] == 1
+    assert runtime["unmatched_or_inexact_entries"] == 0
+    assert runtime["unmatched_or_inexact_exits"] == 0
+    assert runtime["replay_migrated"] is True
+    assert runtime["readiness_authority"] == "candidate_virtual_exact_nbbo_replay"
+    assert result["cohorts"]["gth_exact_entry"]["count"] == 1
+    assert result["cohorts"]["exact_spread_complete_exit"]["count"] == 1
+    assert "gth_runtime_exact_entry_replay_not_migrated" not in result["blockers"]
+    assert result["gth_lanes"]["legacy_research"]["exact_entries"] == 20
+
+
+def test_runtime_candidate_with_legacy_identity_fails_current_contract(
+    tmp_path: Path,
+) -> None:
+    days = _trading_days(date(2026, 6, 22), DEFAULT_THRESHOLDS.complete_sessions)
+    cutoff = _write_complete_forward_cohort(tmp_path, days)
+    day = days[-1]
+    signal_at = (_health_window(day)[0] + timedelta(minutes=90)).astimezone(timezone.utc)
+    candidate = {
+        **_envelope(
+            signal_at,
+            role="gth_runtime_candidate",
+            kind="chain_implied_spx",
+            instrument_id="synthetic:SPXW_PARITY",
+        ),
+        "event": "gth_level_manual_candidate_evaluated",
+        "candidate_id": "gth-level-manual:wrong-lifecycle",
+        "source_signal_id": "level:wrong-lifecycle",
+        "strategy_id": "gth_level_manual_candidate",
+        "lifecycle_status": "legacy_research",
+        "runtime_status": "production_runtime",
+        "status": "manual_ready",
+        "session_date": day.isoformat(),
+        "evaluated_at": signal_at.isoformat(),
+    }
+    _write_rows(
+        tmp_path / "gth_level_manual_candidates" / f"date={day.isoformat()}" / "events.jsonl",
+        [candidate],
+    )
+
+    result = build_strategy_readiness(
+        tmp_path,
+        cutoff_at=cutoff,
+        policy_versions=ROLE_POLICIES,
+        generated_at=cutoff,
+    )
+
+    runtime = result["gth_lanes"]["runtime"]
+    assert runtime["contract_compliant_records"] == 0
+    assert runtime["contract_issues"] == {"runtime_lifecycle_status_mismatch": 1}
+    assert "gth_runtime_lane_contract_anomalies_present" in runtime["blockers"]
+    assert result["contract"]["issues"]["runtime_lifecycle_status_mismatch"] == 1
 
 
 def test_put_readiness_uses_rth_only_while_overall_waits_for_gth(
@@ -1636,7 +1922,7 @@ def test_candidate_terminal_cannot_roll_back_latest_armed_policy() -> None:
     )
 
 
-def test_legacy_is_excluded_but_forward_invalid_and_duplicate_rows_block(
+def test_legacy_gth_is_outside_current_contract_while_forward_invalid_blocks(
     tmp_path: Path,
 ) -> None:
     day = date(2026, 7, 15)
@@ -1730,18 +2016,21 @@ def test_legacy_is_excluded_but_forward_invalid_and_duplicate_rows_block(
         generated_at=cutoff,
     )
 
-    assert result["legacy_exclusion"]["total"] == 1
-    assert result["legacy_exclusion"]["other_policy_before_cohort"] == 1
-    assert result["contract"]["forward_records"] == 3
+    assert result["legacy_exclusion"]["total"] == 0
+    assert result["legacy_exclusion"]["other_policy_before_cohort"] == 0
+    assert result["contract"]["forward_records"] == 1
     assert result["contract"]["telemetry_excluded"]["total"] == 1
-    assert result["contract"]["compliant_records_count"] == 2
+    assert result["contract"]["compliant_records_count"] == 0
     assert result["contract"]["invalid_records"] == 1
-    assert result["contract"]["coverage_ratio"] == 0.666667
-    assert result["contract"]["duplicate_records"] == 1
+    assert result["contract"]["coverage_ratio"] == 0.0
+    assert result["contract"]["duplicate_records"] == 0
+    assert result["gth_lanes"]["legacy_research"]["records"] == 4
+    assert result["gth_lanes"]["legacy_research"]["unique_signals"] == 3
+    assert result["gth_lanes"]["legacy_research"]["excluded_from_runtime_readiness"] is True
     assert result["sessions"]["health_complete"] == 1
     assert result["sessions"]["contract_consistent_complete"] == 0
     assert "contract_compliance_below_100_percent" in result["blockers"]
-    assert "duplicate_forward_samples_present" in result["blockers"]
+    assert "duplicate_forward_samples_present" not in result["blockers"]
 
 
 def test_observing_policy_declaration_reopens_auto_cohort_and_explicit_drift_blocks(

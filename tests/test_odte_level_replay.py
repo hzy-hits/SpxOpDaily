@@ -4,12 +4,16 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from spx_spark.data_platform.research.odte_level_replay import (
+    Fill,
     RuleExit,
     SpreadRound,
+    _point_in_time_provider_pair,
+    _round_id,
     next_replay_exit_clock,
     pair_spread_rounds,
     parse_statement_fills,
     render_replay_report,
+    replay_round,
     replay_expiry_close,
     replay_spread_rule,
     replay_spread_rule_attempt,
@@ -102,8 +106,91 @@ def test_pair_spread_rounds_credit_kind(tmp_path: Path) -> None:
     assert rounds[0].width == 15.0
 
 
+def test_round_id_is_stable_and_distinguishes_same_timestamp_structures() -> None:
+    opening_fill = Fill(
+        expiry=ENTRY.date(),
+        strike=7480.0,
+        right="C",
+        at=ENTRY,
+        qty=1,
+        price=25.0,
+        proceeds=-2500.0,
+        commission=-1.25,
+        realized=0.0,
+        flags="O",
+    )
+    base = {
+        "open_at": ENTRY,
+        "expiry": ENTRY.date(),
+        "right": "C",
+        "kind": "debit",
+        "pos_strike": 7480.0,
+        "neg_strike": 7540.0,
+        "units": 1,
+        "entry_per_unit": 21.5,
+        "fills": [opening_fill],
+    }
+    first = _round_id(base)
+    assert _round_id(dict(base)) == first
+    assert _round_id({**base, "neg_strike": 7550.0}) != first
+
+
 def _tick(at: datetime, bid: float, ask: float) -> OptionTick:
     return OptionTick(at=at, bid=bid, ask=ask, mid=(bid + ask) / 2)
+
+
+class _ProviderStore:
+    def __init__(self, rows: dict[tuple[str, float], list[OptionTick]]) -> None:
+        self.rows = rows
+
+    def option_series(self, *, provider: str, strike: float, **_kwargs) -> list[OptionTick]:
+        return self.rows.get((provider, strike), [])
+
+
+def test_provider_pair_selects_one_coherent_provider_for_both_legs() -> None:
+    store = _ProviderStore(
+        {
+            ("schwab", 7480.0): [_tick(ENTRY, 24.8, 25.0)],
+            ("schwab", 7540.0): [_tick(ENTRY - timedelta(seconds=31), 3.9, 4.0)],
+            ("ibkr", 7480.0): [_tick(ENTRY - timedelta(seconds=1), 24.7, 25.1)],
+            ("ibkr", 7540.0): [_tick(ENTRY - timedelta(seconds=1), 3.8, 4.1)],
+        }
+    )
+    selected = _point_in_time_provider_pair(
+        store,  # type: ignore[arg-type]
+        expiry=ENTRY.date(),
+        long_strike=7480.0,
+        short_strike=7540.0,
+        right="C",
+        entry_at=ENTRY,
+        end=ENTRY + timedelta(hours=1),
+        max_entry_quote_age=timedelta(seconds=30),
+        max_leg_skew=timedelta(seconds=5),
+    )
+    assert selected is not None
+    provider, long_series, short_series = selected
+    assert provider == "ibkr"
+    assert long_series == store.rows[("ibkr", 7480.0)]
+    assert short_series == store.rows[("ibkr", 7540.0)]
+
+
+def test_replay_round_fails_closed_when_no_atomic_provider_pair() -> None:
+    store = _ProviderStore(
+        {
+            ("schwab", 7500.0): [_tick(ENTRY, 10.0, 10.2)],
+            ("ibkr", 7550.0): [_tick(ENTRY, 2.0, 2.2)],
+        }
+    )
+    exits, skips = replay_round(
+        store,  # type: ignore[arg-type]
+        _spread_round(round_id="atomic", open_at=ENTRY, actual_pnl=0.0, commissions=0.0),
+    )
+    assert exits == {}
+    assert skips == {
+        "sat85": "provider_pair_unavailable",
+        "trail33": "provider_pair_unavailable",
+        "clock": "provider_pair_unavailable",
+    }
 
 
 def test_replay_sat85_triggers_for_debit_spread() -> None:

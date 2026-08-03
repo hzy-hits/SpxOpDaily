@@ -36,7 +36,9 @@ from spx_spark.application.market_features.trade_intent_runtime_support import (
     _intent_occurred_at as _intent_occurred_at,
     _latest_path as _latest_path,
     _lease_is_live as _lease_is_live,
+    _mark_terminal_deliveries as _mark_terminal_deliveries,
     _number as _number,
+    _opportunity_dedupe_key as _opportunity_dedupe_key,
     _operator_explanation as _operator_explanation,
     _operator_invalidation as _operator_invalidation,
     _operator_trigger as _operator_trigger,
@@ -72,7 +74,7 @@ from spx_spark.strategy_contract import (
 )
 
 
-TERMINAL_REARM_PHASES = frozenset({"expired", "invalidated"})
+TERMINAL_PHASES = frozenset({"expired", "invalidated"})
 
 
 def process_trade_intent(
@@ -143,8 +145,7 @@ def process_trade_intent(
         semantic_keys = {
             str(key): str(value) for key, value in dict(state.get("semantic_keys") or {}).items()
         }
-        semantic_key = str(intent.get("semantic_key") or "")
-        semantic_dedupe_key = semantic_key or (f"intent:{intent_id}" if intent_id else "")
+        semantic_dedupe_key = _opportunity_dedupe_key(intent)
         semantic_scope = str(intent.get("semantic_scope") or "")
         lifecycle_events = {
             str(item.get("event_id") or ""): {
@@ -178,7 +179,13 @@ def process_trade_intent(
         terminal_delivery_event_ids = {
             str(item) for item in state.get("terminal_delivery_event_ids") or [] if item
         }
-        if ready and delivery_event_id and delivery_event_id not in terminal_delivery_event_ids:
+        semantic_claimed = bool(semantic_dedupe_key) and semantic_dedupe_key in semantic_keys.values()
+        if (
+            ready
+            and delivery_event_id
+            and delivery_event_id not in terminal_delivery_event_ids
+            and not semantic_claimed
+        ):
             lifecycle_events.setdefault(
                 delivery_event_id,
                 {
@@ -203,32 +210,16 @@ def process_trade_intent(
         }
         delivery_lease_owned_elsewhere = bool(delivery_event_id and delivery_event_id in inflight)
         terminal_phase = str(intent.get("phase") or "")
-        if terminal_phase in TERMINAL_REARM_PHASES:
-            ending_delivery_event_ids = {
-                key
-                for key, value in semantic_keys.items()
-                if not semantic_scope
-                or value == semantic_scope
-                or value.startswith(f"{semantic_scope}|")
-            }
-            ending_delivery_event_ids.update(
-                event_id
-                for event_id, lifecycle in lifecycle_events.items()
-                if not semantic_scope
-                or lifecycle["semantic_scope"] == semantic_scope
-                or lifecycle["semantic_key"] == semantic_scope
-                or lifecycle["semantic_key"].startswith(f"{semantic_scope}|")
-            )
-            # Migrate a v2 producer that crashed after enqueue but before it
-            # could persist the v3 lifecycle registry.
-            ending_delivery_event_ids.update(inflight)
-            terminal_delivery_event_ids.update(ending_delivery_event_ids)
-            cancellation_pending.update(ending_delivery_event_ids)
-            cancellation_reasons.update(
-                {
-                    event_id: f"trade_intent_lifecycle_{terminal_phase}"
-                    for event_id in ending_delivery_event_ids
-                }
+        if terminal_phase in TERMINAL_PHASES:
+            _mark_terminal_deliveries(
+                terminal_phase,
+                semantic_scope,
+                semantic_keys,
+                lifecycle_events,
+                inflight,
+                terminal_delivery_event_ids,
+                cancellation_pending,
+                cancellation_reasons,
             )
         for key in sorted(cancellation_pending):
             try:
@@ -248,7 +239,6 @@ def process_trade_intent(
             cancellation_pending.discard(key)
             cancellation_reasons.pop(key, None)
             accepted.pop(key, None)
-            semantic_keys.pop(key, None)
             lifecycle_events.pop(key, None)
             inflight.pop(key, None)
         if (
@@ -257,6 +247,7 @@ def process_trade_intent(
             and prepared_envelope is not None
             and outbox_configured
             and delivery_event_id not in terminal_delivery_event_ids
+            and (not semantic_claimed or delivery_event_id in lifecycle_events)
         ):
             lifecycle = lifecycle_events[delivery_event_id]
             expected_payload_fingerprint = str(
@@ -301,7 +292,13 @@ def process_trade_intent(
                     lifecycle["targets"] = expected_targets
         local_event_accepted = bool(
             delivery_event_id
-            and (delivery_event_id in accepted or delivery_event_id in semantic_keys)
+            and (
+                delivery_event_id in accepted
+                or (
+                    delivery_event_id in semantic_keys
+                    and delivery_event_id not in terminal_delivery_event_ids
+                )
+            )
         )
         if ready and reconciliation is None and reconciliation_fault_reason is not None:
             state["last_delivery_reconciliation"] = {
@@ -337,6 +334,9 @@ def process_trade_intent(
                 # exact immutable event while it is still valid.
                 accepted.pop(delivery_event_id, None)
                 semantic_keys.pop(delivery_event_id, None)
+                semantic_claimed = bool(
+                    semantic_dedupe_key and semantic_dedupe_key in semantic_keys.values()
+                )
                 state["last_delivery_reconciliation"] = {
                     "event_id": delivery_event_id,
                     "status": "local_accepted_outbox_missing",
@@ -368,7 +368,7 @@ def process_trade_intent(
             and (
                 delivery_event_id in accepted
                 or delivery_event_id in terminal_delivery_event_ids
-                or (semantic_dedupe_key and semantic_dedupe_key in semantic_keys.values())
+                or semantic_claimed
             )
         )
         if durable_event_exists:

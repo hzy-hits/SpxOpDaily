@@ -15,17 +15,18 @@ from spx_spark.application.market_features.models import (
     OptionStructureFrame,
 )
 from spx_spark.application.market_features.manual_signal_contract import (
-    APPROVED_MANUAL_LANE_CONTRACTS,
     CALL_BREAKOUT_MANUAL_LANE,
     ENTRY_WINDOW_END_ET,
     ENTRY_WINDOW_START_ET,
     FLIP_LOW_BREAKDOWN_PUT_MANUAL_LANE,
     HARD_EXIT_ET,
-    LEGACY_PUT_SHADOW_LANES,
     LOWER_REJECTION_CALL_MANUAL_LANE,
     PUT_WALL_BREAKDOWN_PUT_MANUAL_LANE,
     UPPER_REJECTION_PUT_MANUAL_LANE,
     manual_lane_scope,
+)
+from spx_spark.application.market_features.trade_intent_authority import (
+    live_trade_intent_authority_issues as live_trade_intent_authority_issues,
 )
 from spx_spark.application.market_features.session_quote_selection import (
     rth_execution_quote,
@@ -62,37 +63,6 @@ HARD_CONTEXT_INVALIDATIONS = frozenset(
 
 ET = ZoneInfo("America/New_York")
 TRADE_INTENT_CONTRACT_VERSION = "rth_manual_levels_0930_1530.v6"
-
-
-def live_trade_intent_authority_issues(
-    intent: Mapping[str, object],
-) -> tuple[str, ...]:
-    """Return fail-closed reasons before any live-plan or virtual consumer."""
-
-    issues: list[str] = []
-    if intent.get("status") != "trade_ready":
-        issues.append("trade_intent_not_trade_ready")
-    if intent.get("execution_eligible") is not True:
-        issues.append("trade_intent_execution_authority_missing")
-    if intent.get("quote_observation_eligible") is not False:
-        issues.append("trade_intent_quote_observation_only")
-    if intent.get("shadow_mode") is not False:
-        issues.append("trade_intent_shadow_mode")
-    if intent.get("automatic_ordering") is not False:
-        issues.append("trade_intent_automatic_ordering_contract_invalid")
-    strategy_lane = str(intent.get("strategy_lane") or "")
-    if strategy_lane in LEGACY_PUT_SHADOW_LANES:
-        issues.append("put_lane_live_execution_forbidden")
-    approved_contract = APPROVED_MANUAL_LANE_CONTRACTS.get(strategy_lane)
-    if approved_contract is None:
-        issues.append("trade_intent_live_lane_not_approved")
-    else:
-        expected_direction, expected_right = approved_contract
-        if intent.get("direction") != expected_direction:
-            issues.append("trade_intent_live_direction_mismatch")
-        if not str(intent.get("contract_id") or "").endswith(f":{expected_right}"):
-            issues.append("trade_intent_live_contract_right_mismatch")
-    return tuple(dict.fromkeys(issues))
 
 
 def trade_intent_policy_version(
@@ -158,6 +128,12 @@ def evaluate_trade_intent(
     thesis = str(level.get("thesis") or "none")
     direction = str(level.get("direction") or "")
     level_kind = str(level.get("level_kind") or "")
+    generation_value = level.get("reentry_generation")
+    reentry_generation = (
+        generation_value
+        if isinstance(generation_value, int) and not isinstance(generation_value, bool)
+        else 0
+    )
     trigger_level = _number(level.get("level"))
     event_expires_at = _datetime(level.get("expires_at"))
     entry_window_start_at, entry_window_end_at, hard_exit_at = _strategy_window(now)
@@ -196,9 +172,13 @@ def evaluate_trade_intent(
         "direction": direction or None,
         "level_kind": level_kind or None,
         "semantic_scope": semantic_scope,
+        "reentry_generation": max(reentry_generation, 0),
         "evaluated_at": now.isoformat(),
         "block_reasons": [],
+        "strategy_id": "rth_level_manual",
         "strategy_lane": strategy_lane,
+        "lifecycle_status": "legacy_production",
+        "runtime_status": "production_runtime",
         "pilot_mode": False,
         "manual_mode": True,
         "shadow_mode": put_shadow_lane,
@@ -464,6 +444,13 @@ def evaluate_trade_intent(
             "remaining_target_room_points": target_room,
             "invalidation_distance_points": invalidation_distance,
             "remaining_reward_risk": reward_risk,
+            "reward_risk_kind": "underlier_remaining_distance",
+            "reward_risk_threshold": feature_policy.trade_min_reward_risk,
+            "opportunity_disposition": (
+                "late_chase_observation"
+                if "remaining_reward_risk_insufficient" in unique_reasons
+                else "blocked"
+            ),
             "confirmation_geometry": geometry.to_dict() if geometry is not None else None,
             "pilot_diagnostics": pilot_diagnostics,
             "block_reasons": unique_reasons or ["candidate_unavailable"],
@@ -521,6 +508,7 @@ def evaluate_trade_intent(
         "execution_eligible": True,
         "quote_observation_eligible": False,
         "intent_id": intent_id,
+        "opportunity_id": intent_id,
         "semantic_key": semantic_key,
         "play": play,
         "contract_id": contract_id,
@@ -559,6 +547,9 @@ def evaluate_trade_intent(
         "remaining_target_room_points": target_room,
         "invalidation_distance_points": invalidation_distance,
         "remaining_reward_risk": reward_risk,
+        "reward_risk_kind": "underlier_remaining_distance",
+        "reward_risk_threshold": feature_policy.trade_min_reward_risk,
+        "opportunity_disposition": "trade_ready",
         "confirmation_geometry": geometry.to_dict() if geometry is not None else None,
         "confirmation_age_seconds": confirmation_age,
         "follow_through_points": follow_move,

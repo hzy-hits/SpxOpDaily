@@ -20,6 +20,7 @@ from spx_spark.data_platform.research.odte_level_backtest import (
 from spx_spark.data_platform.research.odte_level_quotes import QuoteStore, pick_provider
 from spx_spark.data_platform.research.odte_level_signals import (
     PROFILES,
+    SET_GTH_LEVEL_CANDIDATE,
     SET_TRADE_READY,
     OptionTick,
     Signal,
@@ -31,6 +32,7 @@ from spx_spark.data_platform.research.odte_level_signals import (
     hour_bucket,
     load_confirmed_signals,
     load_gth_dip_signals,
+    load_gth_level_candidate_signals,
     load_prefill_signals,
     load_trade_ready_signals,
     nearest_wall,
@@ -448,6 +450,36 @@ def test_trade_ready_entry_window_end_is_exclusive() -> None:
     )
     assert isinstance(result, Skip)
     assert result.reason == "entry_limit_not_reached"
+
+
+def test_trade_ready_latency_sensitivity_respects_exclusive_ttl_and_records_sides() -> None:
+    long_series = [
+        _tick(T0, 10.0, 10.2),
+        _tick(T0 + timedelta(seconds=10), 9.8, 9.9),
+        *_flat_series(T0 + timedelta(seconds=30), 15 * 60, bid=10.8, ask=11.0),
+    ]
+    reached = simulate_trade(
+        _ready_signal(),
+        "naked",
+        sorted(long_series, key=lambda tick: tick.at),
+        None,
+        _flat_underlier(7552.0, start=T0),
+        entry_latency_seconds=5,
+    )
+    expired = simulate_trade(
+        _ready_signal(),
+        "naked",
+        sorted(long_series, key=lambda tick: tick.at),
+        None,
+        _flat_underlier(7552.0, start=T0),
+        entry_latency_seconds=20,
+    )
+    assert isinstance(reached, Trade)
+    assert reached.entry_latency_seconds == 5
+    assert reached.entry_time == (T0 + timedelta(seconds=10)).isoformat()
+    assert reached.executable_sides == (9.9, None, 10.8, None)
+    assert isinstance(expired, Skip)
+    assert expired.reason == "entry_window_expired"
 
 
 def test_trade_ready_target_before_fill_skips_without_pnl() -> None:
@@ -1481,65 +1513,182 @@ def test_load_gth_dip_signals_uses_trough_invalidation(tmp_path: Path) -> None:
     assert signal.level == 7621.75
 
 
-def test_gth_dip_uses_recorded_production_spread_without_delta_rebuild(
+def test_current_gth_candidate_replay_freezes_runtime_spread_and_decision_ask(
     tmp_path: Path,
 ) -> None:
     root = tmp_path / "features"
-    confirmed_at = datetime(2026, 7, 16, 6, 9, 55, tzinfo=timezone.utc)
+    evaluated_at = datetime(2026, 7, 16, 6, 9, 55, tzinfo=timezone.utc)
+    long_id = "option:SPX:SPXW:20260716:7575:C"
+    short_id = "option:SPX:SPXW:20260716:7615:C"
+    snapshot = {
+        "at": evaluated_at.isoformat(),
+        "bid": 7.7,
+        "mid": 7.85,
+        "ask": 8.0,
+        "quality": {"status": "ok"},
+        "long": {
+            "bid": 9.8,
+            "mid": 9.9,
+            "ask": 10.0,
+            "provider": "ibkr",
+            "source_at": evaluated_at.isoformat(),
+            "transport_at": evaluated_at.isoformat(),
+            "quality": {"status": "ok"},
+        },
+        "short": {
+            "bid": 2.0,
+            "mid": 2.05,
+            "ask": 2.1,
+            "provider": "ibkr",
+            "source_at": evaluated_at.isoformat(),
+            "transport_at": evaluated_at.isoformat(),
+            "quality": {"status": "ok"},
+        },
+    }
+    candidate = {
+        "schema_version": 3,
+        "policy_version": "gth_level_manual_candidate.v1+sha256:test",
+        "valid_until": (evaluated_at + timedelta(seconds=20)).isoformat(),
+        "coordinate": {
+            "kind": "chain_implied_spx",
+            "instrument_id": "synthetic:SPXW_PARITY",
+            "observed_value": 7608.25,
+            "target_value": 7640.0,
+            "spx_observed_value": 7608.25,
+            "basis_points": 0.0,
+            "as_of": evaluated_at.isoformat(),
+        },
+        "block_reasons": [],
+        "event": "gth_level_manual_candidate_evaluated",
+        "kind": "gth_spxw_level_manual_spread_candidate",
+        "candidate_id": "gth-level-manual:recorded",
+        "source_signal_id": "level:recorded",
+        "strategy_id": "gth_level_manual_candidate",
+        "strategy_lane": "gth_level_manual_candidate",
+        "lifecycle_status": "legacy_production",
+        "runtime_status": "production_runtime",
+        "status": "manual_ready",
+        "manual_action_eligible": True,
+        "execution_eligible": False,
+        "broker_submission_allowed": False,
+        "automatic_ordering": False,
+        "session_date": "2026-07-16",
+        "evaluated_at": evaluated_at.isoformat(),
+        "direction": "up",
+        "position_type": "call_debit_spread",
+        "path_kind": "upper_acceptance_call",
+        "long_contract_id": long_id,
+        "short_contract_id": short_id,
+        "contract_id": f"{long_id}|-{short_id}",
+        "spread_width_points": 40.0,
+        "decision_bid": 7.7,
+        "decision_mid": 7.85,
+        "decision_ask": 8.0,
+        "entry_limit": 8.0,
+        "trigger_level": 7621.75,
+        "target_spx": 7640.0,
+        "invalidation_spx": 7600.0,
+        "invalidation_es": 7613.5,
+        "exit_at": (evaluated_at + timedelta(minutes=15)).isoformat(),
+        "exact_spread_snapshot": snapshot,
+    }
+    expired = {
+        **candidate,
+        "candidate_id": "gth-level-manual:expired",
+        "valid_until": evaluated_at.isoformat(),
+    }
+    wrong_provider = {
+        **candidate,
+        "candidate_id": "gth-level-manual:wrong-provider",
+        "exact_spread_snapshot": {
+            **snapshot,
+            "long": {**snapshot["long"], "provider": "schwab"},
+        },
+    }
     _write_jsonl(
-        root / "gth_dip_reclaim/date=2026-07-16/events.jsonl",
-        [
-            {
-                "schema_version": 3,
-                "policy_version": "gth_dip_reclaim.v3+sha256:test",
-                "valid_until": (confirmed_at + timedelta(minutes=10)).isoformat(),
-                "coordinate": {
-                    "kind": "raw_es",
-                    "instrument_id": "future:ES",
-                    "observed_value": 7621.75,
-                    "target_value": 7619.5,
-                    "spx_observed_value": None,
-                    "basis_points": 0.0,
-                    "as_of": confirmed_at.isoformat(),
-                },
-                "block_reasons": [],
-                "confirmed_at": confirmed_at.isoformat(),
-                "direction": "up",
-                "es": 7621.75,
-                "event_id": "gth-dip:recorded",
-                "expected_move_points": 25.0,
-                "kind": "gth_dip_reclaim_call",
-                "session_date": "2026-07-16",
-                "trough": 7613.5,
-                "spread": {
-                    "right": "C",
-                    "long_strike": 7575,
-                    "short_strike": 7615,
-                    "width_points": 40,
-                },
-            }
-        ],
+        root / "gth_level_manual_candidates/date=2026-07-16/events.jsonl",
+        [candidate, expired, wrong_provider],
     )
-    signal = load_gth_dip_signals(root)[0]
-    assert signal.strike == 7575.0
+
+    loaded = load_gth_level_candidate_signals(root)
+    assert [signal.key for signal in loaded] == ["gth-level-manual:recorded"]
+    signal = loaded[0]
+    assert signal.set_name == SET_GTH_LEVEL_CANDIDATE
+    assert signal.contract_id == long_id
     assert signal.recorded_short_strike == 7615.0
-    assert signal.recorded_spread_width == 40.0
-    long_series = _flat_series(confirmed_at, 16 * 60, step=30, bid=9.8, ask=10.0)
-    short_series = _flat_series(confirmed_at, 16 * 60, step=30, bid=1.9, ask=2.0)
-    underlier = _flat_underlier(7621.75, start=confirmed_at, seconds=20 * 60, step=5)
+    assert signal.entry_provider == "ibkr"
+    assert signal.entry_px == signal.decision_ask == 8.0
+    assert signal.entry_expires_at == evaluated_at + timedelta(seconds=20)
+    long_series = _flat_series(evaluated_at, 16 * 60, step=30, bid=9.8, ask=10.0)
+    short_series = _flat_series(evaluated_at, 16 * 60, step=30, bid=1.9, ask=2.0)
+    underlier = _flat_underlier(7621.75, start=evaluated_at, seconds=20 * 60, step=5)
     store = _MemoryQuoteStore(
         {7575.0: long_series, 7615.0: short_series},
         underlier,
         delta_strike=7550.0,
     )
-    trades, _ = evaluate_signal(store, signal, profiles=[_profile("baseline")])
+
+    trades, skips = evaluate_signal(store, signal, profiles=[_profile("baseline")])
+
     spread_trade = next(row for row in trades if row.variant == "spread_wall")
     assert store.delta_select_calls == 0
-    assert spread_trade.contract_id == "option:SPX:SPXW:20260716:7575:C"
-    assert spread_trade.short_contract_id == "option:SPX:SPXW:20260716:7615:C"
+    assert spread_trade.contract_id == long_id
+    assert spread_trade.short_contract_id == short_id
+    assert spread_trade.entry_px == 8.0
+    assert {skip.reason for skip in skips} == {"not_applicable"}
 
 
-def test_legacy_gth_dip_does_not_reconstruct_production_spread(tmp_path: Path) -> None:
+def test_current_gth_candidate_latency_reprices_all_four_executable_sides() -> None:
+    evaluated_at = datetime(2026, 7, 16, 6, 9, 55, tzinfo=timezone.utc)
+    signal = Signal(
+        set_name=SET_GTH_LEVEL_CANDIDATE,
+        key="gth-level-manual:latency",
+        at=evaluated_at,
+        direction="up",
+        level=7621.75,
+        strike=7575.0,
+        expiry=date(2026, 7, 16),
+        entry_at=evaluated_at,
+        thesis="upper_acceptance_call",
+        entry_px=8.0,
+        entry_limit=8.0,
+        entry_expires_at=evaluated_at + timedelta(seconds=20),
+        entry_provider="ibkr",
+        decision_bid=7.7,
+        decision_ask=8.0,
+        decision_leg_sides=(9.8, 10.0, 2.0, 2.1),
+        target_level=7640.0,
+        invalidation_level=7600.0,
+        invalidation_buffer=0.0,
+        recorded_time_stop_at=evaluated_at + timedelta(minutes=15),
+        underlier_instrument="future:ES",
+        contract_id="option:SPX:SPXW:20260716:7575:C",
+        recorded_short_strike=7615.0,
+        recorded_spread_width=40.0,
+    )
+    long_series = _flat_series(evaluated_at, 16 * 60, step=30, bid=9.8, ask=10.0)
+    short_series = _flat_series(evaluated_at, 16 * 60, step=30, bid=2.0, ask=2.1)
+    result = simulate_trade(
+        signal,
+        "spread_wall",
+        long_series,
+        short_series,
+        _flat_underlier(7621.75, start=evaluated_at, seconds=20 * 60, step=5),
+        _profile("baseline"),
+        spread_width=40.0,
+        short_contract_id="option:SPX:SPXW:20260716:7615:C",
+        long_provider="ibkr",
+        short_provider="ibkr",
+        entry_latency_seconds=5,
+    )
+    assert isinstance(result, Trade)
+    assert result.entry_time == (evaluated_at + timedelta(seconds=5)).isoformat()
+    assert result.entry_px == 8.0
+    assert result.executable_sides == (10.0, 2.0, 9.8, 2.1)
+    assert result.entry_price_source == "lake_ibkr_long_ask_short_bid_after_latency"
+
+
+def test_legacy_gth_dip_is_excluded_from_current_runtime_spread_replay(tmp_path: Path) -> None:
     signal = _gth_signal(
         strike=None,
         contract_id=None,
@@ -1550,7 +1699,7 @@ def test_legacy_gth_dip_does_not_reconstruct_production_spread(tmp_path: Path) -
     underlier = _flat_underlier(7555.0, seconds=20 * 60, step=5)
     store = _MemoryQuoteStore({7550.0: long_series}, underlier)
     _, skips = evaluate_signal(store, signal, profiles=[_profile("baseline")])
-    assert ("spread_wall", "no_recorded_production_spread") in {
+    assert ("spread_wall", "not_applicable") in {
         (skip.variant, skip.reason) for skip in skips
     }
 
@@ -1909,7 +2058,7 @@ def test_run_as_of_uses_readiness_complete_sessions_and_keeps_partitions(
     artifact = json.loads((target / "artifact.json").read_text(encoding="utf-8"))
     persisted_readiness = json.loads((target / "readiness.json").read_text(encoding="utf-8"))
     report = (target / "report.md").read_text(encoding="utf-8")
-    assert artifact["schema_version"] == 6
+    assert artifact["schema_version"] == 7
     assert artifact["signal_counts"]["confirmed"] == 1
     assert artifact["window"]["complete_sessions"] == ["2026-07-15"]
     assert artifact["window"]["trading_days"] == 1
@@ -1938,9 +2087,39 @@ def test_run_as_of_uses_readiness_complete_sessions_and_keeps_partitions(
     assert artifact["production_strategy_total"]["excluded_sets"] == [
         "confirmed",
         "prefill",
-        "gth_dip",
+        "gth_level_manual_candidate",
     ]
     assert [row["intent_id"] for row in artifact["trade_ready_decisions"]] == ["intent:put-16"]
+    assert artifact["trade_ready_decisions"][0]["execution_result"] == "not_reached"
+    assert [row["opportunity_id"] for row in artifact["opportunities"]] == ["intent:put-16"]
+    opportunity_rows = [
+        json.loads(line)
+        for line in (target / "opportunities.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert opportunity_rows == artifact["opportunities"]
+    assert [
+        row["latency_seconds"]
+        for row in artifact["opportunities"][0]["latency_sensitivity"]
+    ] == [0, 5, 10, 20, 30]
+    expected_slippage_grid = {
+        "unit": "SPX_option_premium_points_per_contract_leg_side",
+        "unit_definition": "1.00 option point = 100 USD per contract",
+        "per_leg_side_points": [0.0, 0.05, 0.1, 0.2],
+        "reference_per_leg_side_points": 0.05,
+        "single_total_slippage_formula": "2 * per_leg_side_points",
+        "vertical_total_slippage_formula": "4 * per_leg_side_points",
+    }
+    assert artifact["opportunity_summary"]["slippage_sensitivity"] == (
+        expected_slippage_grid
+    )
+    assert artifact["method"]["opportunity_replay"]["costs"][
+        "slippage_sensitivity"
+    ] == expected_slippage_grid
+    assert (
+        "opportunity_costs_use_fixed_commission_and_versioned_slippage_sensitivity_grid"
+        in artifact["limitations"]
+    )
+    assert "filled" not in json.dumps(artifact["opportunities"])
     assert "expected_confirmed_signals" not in artifact
     assert "five_trading_days_small_sample" not in artifact["limitations"]
     assert "## 裁决冻结/样本就绪度" in report
@@ -1949,6 +2128,9 @@ def test_run_as_of_uses_readiness_complete_sessions_and_keeps_partitions(
     assert "| Put exact entries | 0 | 20 | collecting |" in report
     assert "| exact spread complete exits | 0 | 20 | collecting |" in report
     assert "| shadow_ready | 0 | 0 |" in report
+    assert "滑点采用每腿每侧 0/0.05/0.10/0.20 个期权点的版本化网格" in report
+    assert "单腿总滑点=2×s，vertical=4×s" in report
+    assert "0s 参考滑点(0.05/腿/侧)净 PnL$" in report
     assert "`automatic_promotion=false`" in report
 
 

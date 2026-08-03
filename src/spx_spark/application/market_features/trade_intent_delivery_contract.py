@@ -13,6 +13,7 @@ from spx_spark.application.market_features.trade_intent_runtime_support import (
     _audit_path,
     _latest_path,
     _number,
+    _opportunity_dedupe_key,
     _signature,
     _state_path,
     _trade_ready_delivery_event_id,
@@ -255,12 +256,8 @@ def acknowledge_trade_intent_enqueue(
             semantic_keys = {
                 str(key): str(value)
                 for key, value in dict(state.get("semantic_keys") or {}).items()
-                if key in accepted
             }
-            intent_id = str(intent.get("intent_id") or "")
-            semantic_key = str(intent.get("semantic_key") or "") or (
-                f"intent:{intent_id}" if intent_id else ""
-            )
+            semantic_key = _opportunity_dedupe_key(intent)
             if semantic_key:
                 semantic_keys[delivery_event_id] = semantic_key
             state["semantic_keys"] = semantic_keys

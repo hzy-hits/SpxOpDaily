@@ -310,7 +310,7 @@ def test_zero_dte_gate_relaxation_loads_from_runtime_defaults() -> None:
     assert mf.trade_quote_max_age_seconds == 15.0
     assert mf.trade_structure_drift_points == 10.0
     ld = settings.level_decision
-    assert ld.notify_transitions is False
+    assert ld.notify_transitions is True
     assert ld.formal_signal_enabled is True
     assert ld.approach_points == 20.0
     assert ld.structure_required_confirmations == 2

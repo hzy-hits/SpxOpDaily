@@ -14,6 +14,7 @@ from .odte_level_signals import (
     PROFILE_TRAIL33,
     PROFILE_TRAILING_TP,
     PROFILE_WIDE_INVALIDATION,
+    SET_GTH_LEVEL_CANDIDATE,
     SET_ORDER,
     SET_PREFILL,
     SET_TRADE_READY,
@@ -152,18 +153,26 @@ def _render_report(artifact: dict, trades: Sequence[Trade]) -> str:
     window = artifact["window"]
     intent_coverage = artifact.get("trade_intent_coverage") or {}
     trade_ready_decisions = artifact.get("trade_ready_decisions") or []
+    opportunities = artifact.get("opportunities") or []
+    opportunity_summary = artifact.get("opportunity_summary") or {}
+    slippage_summary = opportunity_summary.get("slippage_sensitivity") or {}
+    slippage_grid = slippage_summary.get("per_leg_side_points") or [0, 0.05, 0.10, 0.20]
+    slippage_grid_text = "/".join(
+        "0" if float(value) == 0 else f"{float(value):.2f}" for value in slippage_grid
+    )
+    reference_slippage = float(slippage_summary.get("reference_per_leg_side_points") or 0.05)
     production_total = artifact.get("production_strategy_total") or {}
     lines = [
         "# 0DTE 点位告警策略回测报告",
         "",
         "## 方法简述",
         "",
-        "- 三个 control/proxy 集:S1 confirmed 级别确认、S2 定价结果 prefill(touched 样本)、"
-        "S3 GTH 回踩确认;另列持久化的 production trade_ready 决策集。",
+        "- 两个 control/proxy 集:S1 confirmed 级别确认、S2 定价结果 prefill(touched 样本);"
+        "另列 current GTH level candidate 与持久化的 production trade_ready 决策集。",
         "- 只有 trade_ready × naked 计入 production strategy 口径。S2 只是"
         "follow-through-only observational proxy,不得并入生产策略总盈亏。",
         "- 四种执行:裸买 0DTE 期权(naked)、5 点/10 点垂直借记价差(spread5/spread10)、"
-        "墙锚定价差(spread_wall:S1 按结构推导;S3 仅复现事件中保存的生产两腿)。",
+        "墙锚定价差(spread_wall:S1 按结构推导;GTH current lane 仅复现事件中保存的两腿)。",
         "- 四个通用退出 profile:baseline(失效 level±3、1.3× 固定止盈、15 分钟时间止损)、"
         "wide_invalidation(失效缓冲 max(3, 0.15×EM))、"
         "trailing_tp(浮盈 +15% 激活、回撤峰值浮盈 1/3 按 bid 出场)、"
@@ -171,26 +180,33 @@ def _render_report(artifact: dict, trades: Sequence[Trade]) -> str:
         "- RTH 13:00 profile:rth_1300 只接收 09:45≤entry<13:00 ET；保留同一 exact "
         "contract 和入场 ask，继续执行失效/目标规则，不设固定止盈，并在 13:00 ET 后首个"
         "30 秒内新鲜 bid 强制退出。运行标准 backtest 命令即会在总体表生成该 profile。",
-        "- 三个 GTH 价差出场 profile(仅 S1 GTH + S3、仅价差执行,时钟锚定到期日 09:45 ET):"
+        "- 三个 GTH 价差出场 profile(仅 S1 GTH + current candidate、仅价差执行,"
+        "时钟锚定到期日 09:45 ET):"
         "sat85(价差价值 ≥85% 宽度按 bid 止盈)、trail33(≥50% 宽度激活、峰值浮盈回撤 "
         "1/3 止盈)、clock(只挂失效线 + 时钟)。",
-        "- 成交价:多头腿按 ask 进场、止损/到期按 bid 出场;价差腿按 long ask − short bid "
+        "- 报价回放:多头腿按 ask 记入、止损/到期按 bid 记出;价差腿按 long ask − short bid "
         "进、long bid − short ask 出;固定止盈按 mid 触发，但仍按当时可执行 bid"
         "(价差为 long bid − short ask)出场。双腿必须满足"
         "入场时效/时间偏差和逐笔 mark 新鲜度限制,不使用未来 short quote 或无限前填。",
-        "- 未建模佣金、显式滑点、队列顺序、部分成交和市场冲击；top-of-book 结果偏乐观。",
-        "- 退出规则按顺序:失效(标的反向破 level+缓冲,S3 为 ES 跌破 trough)、目标墙/"
+        f"- opportunity-level artifact 对 0/5/10/20/30 秒延迟分别重放；固定佣金之外，"
+        f"滑点采用每腿每侧 {slippage_grid_text} 个期权点的版本化网格"
+        "（1 点=$100/contract），单腿总滑点=2×s，vertical=4×s。每档分别输出成本后"
+        "净 PnL/收益；主汇总仍为报价毛值。队列优先级、部分成交和市场冲击未建模，"
+        "因此 quote_reached 绝不等同于 filled。",
+        "- 退出规则按顺序:失效(标的反向破 level+缓冲,GTH 使用事件冻结的 ES basis)、目标墙/"
         "公式目标、止盈(fixed/trailing/sat85/trail33)、时间止损、数据末端兜底。"
         "标的报价超过 30 秒不能触发墙/失效;计划退出附近没有新鲜可执行 mark 时跳过,"
-        "不把早期数据末端当成交。",
+        "不把早期数据末端当可执行报价。",
         "- S1 在信号后 15 秒跟进进场;S2 按首次触碰时间+合约+play 语义去重,在首次触碰后持有"
         "15 秒,按"
         "方向×(spot−trigger) ≥ max(2,0.05×EM) 过门后重新读取 ask,历史 prefill 不计入 PnL;"
-        "S3 有生产 spread 时直接使用保存的 long/short strike,不重新按 delta 选腿。",
+        "GTH current candidate 直接使用保存的 long/short strike,不重新按 delta 选腿。",
         "- trade_ready 仅回放记录的 provider/contract/evaluated_at/entry_limit/expires_at;"
-        "只有 entry window 内 ask≤limit 才成交。成交前先触及记录的 target/invalidation"
+        "只有 entry window 内 ask≤limit 才记为 quote_reached。报价可达前先触及记录的 "
+        "target/invalidation"
         "则跳过,标的路径缺失/陈旧也 fail closed;不使用 outcome horizons 判门。历史 runtime"
-        "通知延迟/TTL 漂移无法还原,窗口严格采用 stored expires_at,且未模拟人工反应延迟。",
+        "通知延迟/TTL 漂移无法还原,窗口严格采用 stored expires_at；人工反应仅用"
+        "0/5/10/20/30 秒敏感性场景表达。",
         "- Control/proxy 的 provider 仅按入场窗口内最早可执行报价选择(long ask / short "
         "bid),不使用未来路径覆盖度;trade_ready 固定使用决策中保存的 provider。所有 GTH "
         "持仓最迟在到期日 16:00 ET 截止。",
@@ -252,6 +268,37 @@ def _render_report(artifact: dict, trades: Sequence[Trade]) -> str:
                     f"{_fmt_money(decision['pnl_usd'])} |"
                 )
 
+    if opportunities:
+        lines.extend(
+            [
+                "",
+                "## Opportunity-level quote replay",
+                "",
+                "每行是一项经济机会，不把重复 evaluation、通知或 virtual episode 当成"
+                "独立样本。状态只说明对应延迟下显示 NBBO 是否达到策略限价；不声称成交。",
+                "",
+                "| opportunity | set | occurrences | delivery | virtual | 0s | 5s | 10s | "
+                f"20s | 30s | 0s 参考滑点({reference_slippage:.2f}/腿/侧)净 PnL$ |",
+                "|---|---|---:|---:|---:|---|---|---|---|---|---:|",
+            ]
+        )
+        for opportunity in opportunities:
+            latency_rows = {
+                int(row["latency_seconds"]): row
+                for row in opportunity.get("latency_sensitivity") or []
+            }
+            status_cells = [
+                str((latency_rows.get(seconds) or {}).get("status") or "not_evaluated")
+                for seconds in (0, 5, 10, 20, 30)
+            ]
+            baseline_cost = (latency_rows.get(0) or {}).get("cost") or {}
+            lines.append(
+                f"| {opportunity['opportunity_id']} | {opportunity['set_name']} | "
+                f"{opportunity['occurrence_count']} | {opportunity['delivery_event_count']} | "
+                f"{opportunity['virtual_episode_count']} | {' | '.join(status_cells)} | "
+                f"{_fmt_money(baseline_cost.get('net_pnl_usd'))} |"
+            )
+
     if production_total:
         result = production_total["result"]
         lines.extend(
@@ -259,8 +306,8 @@ def _render_report(artifact: dict, trades: Sequence[Trade]) -> str:
                 "",
                 "## Production strategy total（严格口径）",
                 "",
-                "此处只汇总 trade_ready × baseline × naked;confirmed、prefill、gth_dip "
-                "均为 control/proxy,不加进这个总计。",
+                "此处只汇总 trade_ready × baseline × naked;confirmed、prefill 与独立的 "
+                "GTH current candidate 不加进这个总计。",
                 "",
                 "| 可执行 n | 跳过 | 胜率 | 平均盈亏$ | 总盈亏$ |",
                 "|---:|---:|---:|---:|---:|",
@@ -317,13 +364,12 @@ def _render_report(artifact: dict, trades: Sequence[Trade]) -> str:
             "",
             "## GTH 价差出场规则对比",
             "",
-            "以下均为 pre-v3 control/proxy 回放，不是新的 production exact-spread cohort；"
-            "当前 forward GTH exact entry 与完整 exit 都是 0/20，因此这些盈亏不得用于"
-            "晋级、禁用或调参。",
+            "以下包含 current GTH runtime candidate 的 exact-spread 回放与 S1 control；"
+            "readiness 仍以 contract-compliant forward evidence 为准，盈亏不得自动触发晋级。",
             "",
-            "评估集合:S3 gth_dip + S1 GTH confirmed;时钟锚定到期日 09:45 ET(DST-aware)。"
-            "中位持有时间为 exit−entry 分钟。历史 S3 若未保存生产两腿则不重建,"
-            "因此 spread_wall 行可能只来自 S1 的结构推导价差。",
+            "评估集合:current gth_level_manual_candidate + S1 GTH confirmed;"
+            "时钟锚定到期日 09:45 ET(DST-aware)。中位持有时间为 exit−entry 分钟。"
+            "current lane 固定使用保存的 IBKR provider、决策 Ask-Bid、TTL 与两腿。",
             "",
             "| 规则 | 执行 | n | 胜率 | 平均盈亏$ | 盈亏因子 | 中位持有分钟 |",
             "|---|---|---:|---:|---:|---:|---:|",
@@ -618,11 +664,13 @@ def _findings(
             else f"{', '.join(leaders)} 结果相同,本样本无法排序。"
         )
         bullets.append(f"(d) GTH 价差出场规则(spread_wall):{'；'.join(parts)}。{verdict}")
-    s3_wall = profile_sets[PROFILE_SAT85]["gth_dip"]["variants"][VARIANT_SPREAD_WALL]
-    if s3_wall["n"] == 0:
+    current_wall = profile_sets[PROFILE_SAT85][SET_GTH_LEVEL_CANDIDATE]["variants"][
+        VARIANT_SPREAD_WALL
+    ]
+    if current_wall["n"] == 0:
         bullets.append(
-            "历史 S3 事件未保存生产 exact spread 两腿,严格 spread_wall 可回放数为 0;"
-            "本轮不能验证生产 GTH sat85 出场。"
+            "current GTH 事件缺少 exact spread 两腿时严格回放数为 0;"
+            "不得用事后 delta/墙位重建后冒充 runtime 结构。"
         )
     if base_trades:
         tail = min(base_trades, key=lambda row: row.pnl_usd)

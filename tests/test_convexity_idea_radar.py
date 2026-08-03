@@ -845,7 +845,17 @@ def test_gth_radar_keeps_two_sided_live_es_observations_when_options_degrade() -
     assert "GTH方向观察" not in operator_brief
     assert "GTH路径rank" not in operator_brief
     assert "机会[" not in operator_brief
-    assert len(operator_brief.splitlines()) == 7
+    for section in (
+        "Desk View  ",
+        "Location  ",
+        "Structure  ",
+        "Primary  ",
+        "Alternative  ",
+        "Targets  ",
+        "Execution  ",
+        "Data Quality  ",
+    ):
+        assert any(line.startswith(section) for line in operator_brief.splitlines())
 
 
 def test_wall_probability_requires_fresh_shadow_and_unexpired_horizon() -> None:

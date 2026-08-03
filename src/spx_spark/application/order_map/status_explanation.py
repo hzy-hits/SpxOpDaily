@@ -77,10 +77,14 @@ def operator_reason_line(payload: dict[str, Any]) -> str:
     decision = decision if isinstance(decision, dict) else {}
     intent = payload.get("trade_intent")
     intent = intent if isinstance(intent, dict) else {}
+    manual = payload.get("gth_level_manual_candidate")
+    manual = manual if isinstance(manual, dict) else {}
     gth = str(decision.get("session_mode") or "") == "globex"
     decision_spot = finite_float(decision.get("spot"))
     decision_es = finite_float(decision.get("es"))
     reasons: list[str] = []
+    if intent.get("status") == "trade_ready" or manual.get("status") == "manual_ready":
+        return "原因  结构与执行门控已通过；实时报价以独立 MANUAL READY 卡为准"
     if (
         underlier.get("price") is None
         and decision_spot is None
@@ -98,8 +102,10 @@ def operator_reason_line(payload: dict[str, Any]) -> str:
             if str(item)
         ]
         reasons.append(blocked[0] if blocked else "实时合约报价尚未就绪")
+    if str(decision.get("phase") or "").lower() == "confirmed" and not reasons:
+        reasons.append("方向路径已确认，执行门控尚未完成")
     if not reasons:
-        reasons.append("等待下一次方向触发和实时合约报价")
+        reasons.append("当前结构阶段继续有效，等待下一个状态转换")
     return "原因  " + "；".join(dict.fromkeys(reasons[:3]))
 
 

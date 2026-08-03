@@ -8,6 +8,7 @@ chase risk instead of adding another global trade gate.
 from __future__ import annotations
 
 import math
+import statistics
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -16,12 +17,14 @@ from spx_spark.application.market_features.state import load_json, save_json
 from spx_spark.application.market_features.spx_standardized import (
     load_standardized_spx_samples,
 )
+from spx_spark.domain.research_context import CASH_INDEX_ORDER
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 from spx_spark.marketdata import as_utc
 from spx_spark.storage import LatestState
 
 
-SCHEMA_VERSION = "prior_rth_context.v1"
+SCHEMA_VERSION = "prior_rth_context.v2"
+CASH_INDEX_INSTRUMENTS = tuple(instrument.value for instrument in CASH_INDEX_ORDER)
 MINUTE_COVERAGE_READY = 0.95
 MINUTE_COVERAGE_PARTIAL = 0.70
 SESSION_EDGE_TOLERANCE = timedelta(minutes=10)
@@ -39,8 +42,9 @@ def build_prior_rth_context(
     *,
     now: datetime,
     official_close: float | None = None,
+    official_closes: Mapping[str, float] | None = None,
 ) -> dict[str, object]:
-    """Summarize the RTH session immediately preceding ``now``."""
+    """Summarize the four cash indices for the RTH session preceding ``now``."""
 
     now = as_utc(now)
     trading_date = DEFAULT_MARKET_CALENDAR.research_expiry(now)
@@ -57,43 +61,119 @@ def build_prior_rth_context(
         "reasons": [],
     }
     if session is None:
-        return {**base, "reasons": ["prior_rth_session_unavailable"]}
+        return {
+            **base,
+            "indices": {},
+            "cross_index": _unavailable_cross_index("prior_rth_session_unavailable"),
+            "reasons": ["prior_rth_session_unavailable"],
+        }
 
-    points: list[tuple[datetime, float, float | None]] = []
+    resolved_closes = {
+        instrument_id: value
+        for instrument_id, value in (official_closes or {}).items()
+        if instrument_id in CASH_INDEX_INSTRUMENTS and _number(value) is not None
+    }
+    if _number(official_close) is not None:
+        resolved_closes["index:SPX"] = float(official_close)
+    points_by_instrument: dict[
+        str,
+        list[tuple[datetime, float, float | None, Mapping[str, object]]],
+    ] = {instrument_id: [] for instrument_id in CASH_INDEX_INSTRUMENTS}
     for sample in samples:
         at = _time(sample.get("at"))
         if at is None or at < session.open_at or at > session.close_at:
             continue
         instruments = sample.get("instruments")
         instruments = instruments if isinstance(instruments, Mapping) else {}
-        spx = instruments.get("index:SPX")
-        spx = spx if isinstance(spx, Mapping) else {}
-        price = _number(spx.get("price"))
-        if price is None:
-            continue
-        points.append((at, price, _number(spx.get("reference_close"))))
-    points.sort(key=lambda item: item[0])
-    if not points:
-        return {**base, "reasons": ["prior_rth_spx_path_unavailable"]}
-
-    unique_minutes = {
-        at.replace(second=0, microsecond=0)
-        for at, _price, _reference_close in points
-    }
+        for instrument_id in CASH_INDEX_INSTRUMENTS:
+            quote = instruments.get(instrument_id)
+            quote = quote if isinstance(quote, Mapping) else {}
+            price = _number(quote.get("price"))
+            if price is not None:
+                points_by_instrument[instrument_id].append(
+                    (at, price, _number(quote.get("reference_close")), quote)
+                )
+    for points in points_by_instrument.values():
+        points.sort(key=lambda item: item[0])
     expected_minutes = max(
         int((session.close_at - session.open_at).total_seconds() // 60),
         1,
     )
+    indices = {
+        instrument_id: _summarize_index(
+            instrument_id,
+            points_by_instrument[instrument_id],
+            session_open_at=session.open_at,
+            session_close_at=session.close_at,
+            expected_minutes=expected_minutes,
+            official_close=resolved_closes.get(instrument_id),
+        )
+        for instrument_id in CASH_INDEX_INSTRUMENTS
+    }
+    spx = indices["index:SPX"]
+    cross_index = _cross_index_summary(indices)
+    if spx["status"] == "unavailable":
+        return {
+            **base,
+            "indices": indices,
+            "cross_index": cross_index,
+            "reasons": list(spx["reasons"]),
+        }
+    overall_status = (
+        "ready" if all(summary["status"] == "ready" for summary in indices.values()) else "partial"
+    )
+    legacy_spx = {
+        key: value
+        for key, value in spx.items()
+        if key not in {"instrument_id", "status", "reasons"}
+    }
+    return {
+        **base,
+        **legacy_spx,
+        "status": overall_status,
+        "source": "normalized_cash_index_minutes_with_standardized_spx_overlay",
+        "indices": indices,
+        "cross_index": cross_index,
+        "reasons": list(
+            dict.fromkeys(
+                [
+                    *(str(reason) for reason in spx["reasons"]),
+                    *(str(reason) for reason in cross_index["reason_codes"]),
+                ]
+            )
+        ),
+    }
+
+
+def _summarize_index(
+    instrument_id: str,
+    points: Sequence[tuple[datetime, float, float | None, Mapping[str, object]]],
+    *,
+    session_open_at: datetime,
+    session_close_at: datetime,
+    expected_minutes: int,
+    official_close: float | None,
+) -> dict[str, object]:
+    if not points:
+        return {
+            "instrument_id": instrument_id,
+            "status": "unavailable",
+            "sample_count": 0,
+            "minute_coverage": 0.0,
+            "lineage_id": f"prior-rth:{session_open_at.date()}:{instrument_id}",
+            "reasons": [f"prior_rth_index_path_unavailable:{instrument_id}"],
+        }
+    unique_minutes = {at.replace(second=0, microsecond=0) for at, *_rest in points}
     coverage = min(len(unique_minutes) / expected_minutes, 1.0)
-    open_lag = points[0][0] - session.open_at
-    close_lag = session.close_at - points[-1][0]
+    open_lag = points[0][0] - session_open_at
+    close_lag = session_close_at - points[-1][0]
     quality_reasons: list[str] = []
     if coverage < MINUTE_COVERAGE_READY:
-        quality_reasons.append("prior_rth_minute_coverage_low")
+        quality_reasons.append(f"prior_rth_minute_coverage_low:{instrument_id}")
     if open_lag > SESSION_EDGE_TOLERANCE:
-        quality_reasons.append("prior_rth_open_missing")
+        quality_reasons.append(f"prior_rth_open_missing:{instrument_id}")
     if close_lag > SESSION_EDGE_TOLERANCE:
-        quality_reasons.append("prior_rth_close_missing")
+        quality_reasons.append(f"prior_rth_close_missing:{instrument_id}")
 
     prices = [item[1] for item in points]
     open_price = prices[0]
@@ -110,30 +190,22 @@ def build_prior_rth_context(
     reference_close = next(
         (
             reference
-            for _at, _price, reference in points
+            for _at, _price, reference, _quote in points
             if reference is not None and reference > 0
         ),
         None,
     )
-    return_points = (
-        close_price - reference_close if reference_close is not None else None
-    )
+    return_points = close_price - reference_close if reference_close is not None else None
     return_fraction = (
-        return_points / reference_close
-        if return_points is not None and reference_close
-        else None
+        return_points / reference_close if return_points is not None and reference_close else None
     )
     close_location = (
-        min(max((close_price - low) / session_range, 0.0), 1.0)
-        if session_range > 0
-        else 0.5
+        min(max((close_price - low) / session_range, 0.0), 1.0) if session_range > 0 else 0.5
     )
     open_to_close = close_price - open_price
-    tail_start = session.close_at - timedelta(minutes=TAIL_WINDOW_MINUTES)
+    tail_start = session_close_at - timedelta(minutes=TAIL_WINDOW_MINUTES)
     tail_reference = _point_at_or_before(points, tail_start)
-    tail_return_points = (
-        close_price - tail_reference[1] if tail_reference is not None else None
-    )
+    tail_return_points = close_price - tail_reference[1] if tail_reference is not None else None
     tail_return_fraction = (
         tail_return_points / tail_reference[1]
         if tail_return_points is not None and tail_reference and tail_reference[1]
@@ -163,13 +235,31 @@ def build_prior_rth_context(
     )
     ready = not quality_reasons and reference_close is not None
     if reference_close is None:
-        quality_reasons.append("prior_reference_close_unavailable")
+        quality_reasons.append(f"prior_reference_close_unavailable:{instrument_id}")
+    source_times = [
+        source_at
+        for _at, _price, _reference, quote in points
+        if (source_at := _time(quote.get("source_at"))) is not None
+    ]
+    providers = sorted(
+        {
+            str(quote["provider"])
+            for _at, _price, _reference, quote in points
+            if quote.get("provider")
+        }
+    )
+    price_kinds = sorted(
+        {
+            str(quote["price_kind"])
+            for _at, _price, _reference, quote in points
+            if quote.get("price_kind")
+        }
+    )
     return {
-        **base,
+        "instrument_id": instrument_id,
         "status": "ready" if ready else "partial",
-        "source": "normalized_spx_minute_samples",
-        "session_open_at": session.open_at.isoformat(),
-        "session_close_at": session.close_at.isoformat(),
+        "session_open_at": session_open_at.isoformat(),
+        "session_close_at": session_close_at.isoformat(),
         "sample_count": len(points),
         "minute_coverage": round(coverage, 6),
         "open": round(open_price, 4),
@@ -177,36 +267,101 @@ def build_prior_rth_context(
         "low": round(low, 4),
         "close": round(close_price, 4),
         "sampled_close": round(sampled_close, 4),
-        "reference_close": (
-            round(reference_close, 4) if reference_close is not None else None
-        ),
+        "reference_close": (round(reference_close, 4) if reference_close is not None else None),
         "range_points": round(session_range, 4),
-        "return_points": (
-            round(return_points, 4) if return_points is not None else None
-        ),
-        "return_fraction": (
-            round(return_fraction, 8) if return_fraction is not None else None
-        ),
+        "return_points": (round(return_points, 4) if return_points is not None else None),
+        "return_fraction": (round(return_fraction, 8) if return_fraction is not None else None),
+        "return_bps": round(return_fraction * 10_000.0, 4) if return_fraction is not None else None,
         "open_to_close_points": round(open_to_close, 4),
         "close_location_fraction": round(close_location, 6),
         "tail_window_minutes": TAIL_WINDOW_MINUTES,
         "tail_return_points": (
-            round(tail_return_points, 4)
-            if tail_return_points is not None
-            else None
+            round(tail_return_points, 4) if tail_return_points is not None else None
         ),
         "tail_return_fraction": (
-            round(tail_return_fraction, 8)
-            if tail_return_fraction is not None
-            else None
+            round(tail_return_fraction, 8) if tail_return_fraction is not None else None
         ),
-        "path_efficiency": (
-            round(path_efficiency, 6) if path_efficiency is not None else None
-        ),
+        "path_efficiency": (round(path_efficiency, 6) if path_efficiency is not None else None),
         "shock_direction": shock_direction,
         "close_zone": close_zone,
         "path_class": path_class,
+        "providers": providers,
+        "price_kinds": price_kinds,
+        "first_source_at": min(source_times).isoformat() if source_times else None,
+        "last_source_at": max(source_times).isoformat() if source_times else None,
+        "lineage_id": f"prior-rth:{session_open_at.date()}:{instrument_id}",
         "reasons": list(dict.fromkeys(quality_reasons)),
+    }
+
+
+def _cross_index_summary(indices: Mapping[str, Mapping[str, object]]) -> dict[str, object]:
+    missing = [
+        instrument_id
+        for instrument_id in CASH_INDEX_INSTRUMENTS
+        if indices[instrument_id].get("status") == "unavailable"
+    ]
+    partial = [
+        instrument_id
+        for instrument_id in CASH_INDEX_INSTRUMENTS
+        if indices[instrument_id].get("status") == "partial"
+    ]
+    returns = {
+        instrument_id: _number_signed(indices[instrument_id].get("return_bps"))
+        for instrument_id in CASH_INDEX_INSTRUMENTS
+    }
+    spx_return = returns["index:SPX"]
+    available_returns = [value for value in returns.values() if value is not None]
+    reason_codes = [f"prior_rth_index_missing:{instrument_id}" for instrument_id in missing]
+    reason_codes.extend(f"prior_rth_index_partial:{instrument_id}" for instrument_id in partial)
+    status = (
+        "ready"
+        if not missing and not partial
+        else "partial"
+        if available_returns
+        else "unavailable"
+    )
+    return {
+        "status": status,
+        "required_instruments": list(CASH_INDEX_INSTRUMENTS),
+        "missing_instruments": missing,
+        "partial_instruments": partial,
+        "return_bps": returns,
+        "relative_to_spx_return_bps": {
+            instrument_id: (
+                round(value - spx_return, 4)
+                if value is not None and spx_return is not None
+                else None
+            )
+            for instrument_id, value in returns.items()
+        },
+        "return_dispersion_bps": (
+            round(statistics.pstdev(available_returns), 4) if len(available_returns) >= 2 else None
+        ),
+        "breadth": {
+            "available_count": len(available_returns),
+            "up_count": sum(value > 0.0 for value in available_returns),
+            "down_count": sum(value < 0.0 for value in available_returns),
+            "flat_count": sum(math.isclose(value, 0.0) for value in available_returns),
+        },
+        "reason_codes": sorted(reason_codes),
+        "semantics": "observed_prior_rth_cash_index_regime_not_market_maker_behavior",
+    }
+
+
+def _unavailable_cross_index(reason: str) -> dict[str, object]:
+    return {
+        "status": "unavailable",
+        "required_instruments": list(CASH_INDEX_INSTRUMENTS),
+        "missing_instruments": list(CASH_INDEX_INSTRUMENTS),
+        "partial_instruments": [],
+        "return_bps": {instrument_id: None for instrument_id in CASH_INDEX_INSTRUMENTS},
+        "relative_to_spx_return_bps": {
+            instrument_id: None for instrument_id in CASH_INDEX_INSTRUMENTS
+        },
+        "return_dispersion_bps": None,
+        "breadth": {"available_count": 0, "up_count": 0, "down_count": 0, "flat_count": 0},
+        "reason_codes": [reason],
+        "semantics": "observed_prior_rth_cash_index_regime_not_market_maker_behavior",
     }
 
 
@@ -224,18 +379,23 @@ def process_prior_rth_context(
     trading_date = DEFAULT_MARKET_CALENDAR.research_expiry(as_utc(now))
     prior_date = DEFAULT_MARKET_CALENDAR.previous_trading_day(trading_date)
     if (
-        current.get("session_date") == prior_date.isoformat()
+        current.get("schema_version") == SCHEMA_VERSION
+        and current.get("session_date") == prior_date.isoformat()
         and current.get("status") == "ready"
     ):
         return current
-    quote = latest.best_quote("index:SPX")
-    official_close = _number(quote.close) if quote is not None else None
+    official_closes = {
+        instrument_id: close
+        for instrument_id in CASH_INDEX_INSTRUMENTS
+        if (quote := latest.best_quote(instrument_id)) is not None
+        and (close := _number(quote.close)) is not None
+    }
     canonical_samples = load_standardized_spx_samples(data_root)
-    source_samples = canonical_samples or list(samples)
+    source_samples = _overlay_standardized_spx_samples(samples, canonical_samples)
     built = build_prior_rth_context(
         source_samples,
         now=now,
-        official_close=official_close,
+        official_closes=official_closes,
     )
     if (
         built.get("status") == "partial"
@@ -257,10 +417,55 @@ def process_prior_rth_context(
     if built.get("status") in {"ready", "partial"}:
         save_json(path, built)
         return built
-    if current.get("session_date") == prior_date.isoformat():
+    if (
+        current.get("schema_version") == SCHEMA_VERSION
+        and current.get("session_date") == prior_date.isoformat()
+    ):
         return current
     save_json(path, built)
     return built
+
+
+def _overlay_standardized_spx_samples(
+    samples: Sequence[Mapping[str, object]],
+    canonical_spx_samples: Sequence[Mapping[str, object]],
+) -> list[dict[str, object]]:
+    """Overlay canonical SPX rows without discarding NDX/DJI/RUT observations."""
+
+    by_at: dict[str, dict[str, object]] = {}
+    for sample in samples:
+        at = sample.get("at")
+        if not isinstance(at, str):
+            continue
+        instruments = sample.get("instruments")
+        by_at[at] = {
+            **sample,
+            "instruments": dict(instruments) if isinstance(instruments, Mapping) else {},
+        }
+    for sample in canonical_spx_samples:
+        at = sample.get("at")
+        instruments = sample.get("instruments")
+        spx = instruments.get("index:SPX") if isinstance(instruments, Mapping) else None
+        if not isinstance(at, str) or not isinstance(spx, Mapping):
+            continue
+        current = by_at.setdefault(
+            at,
+            {
+                "at": at,
+                "session_id": sample.get("session_id"),
+                "segment": sample.get("segment"),
+                "instruments": {},
+            },
+        )
+        current_instruments = current.get("instruments")
+        current_instruments = (
+            dict(current_instruments) if isinstance(current_instruments, Mapping) else {}
+        )
+        current_instruments["index:SPX"] = dict(spx)
+        current["instruments"] = current_instruments
+        if sample.get("spx_sampling") is not None:
+            current["spx_sampling"] = sample["spx_sampling"]
+    return [by_at[at] for at in sorted(by_at)]
 
 
 def prior_session_signal_view(
@@ -285,9 +490,7 @@ def prior_session_signal_view(
     close_zone = str(context.get("close_zone") or "middle")
     parsed_position = _bounded_fraction(gth_position_fraction)
     parsed_direction = direction if direction in {"up", "down"} else None
-    same_direction = bool(
-        parsed_direction is not None and parsed_direction == shock_direction
-    )
+    same_direction = bool(parsed_direction is not None and parsed_direction == shock_direction)
     at_directional_extreme = bool(
         parsed_position is not None
         and (
@@ -336,9 +539,7 @@ def prior_session_operator_line(view: Mapping[str, object] | None) -> str:
     tail_return = _number_signed(view.get("tail_return_fraction"))
     change = f"{return_fraction:+.2%}" if return_fraction is not None else "-"
     location = (
-        f"收于日内区间 {close_location:.0%}"
-        if close_location is not None
-        else "收盘位置未知"
+        f"收于日内区间 {close_location:.0%}" if close_location is not None else "收盘位置未知"
     )
     tail = f"尾盘30m {tail_return:+.2%}" if tail_return is not None else "尾盘未知"
     chase = {
@@ -416,9 +617,9 @@ def _path_efficiency(prices: Sequence[float]) -> float | None:
 
 
 def _point_at_or_before(
-    points: Sequence[tuple[datetime, float, float | None]],
+    points: Sequence[tuple[datetime, float, float | None, Mapping[str, object]]],
     target: datetime,
-) -> tuple[datetime, float, float | None] | None:
+) -> tuple[datetime, float, float | None, Mapping[str, object]] | None:
     candidates = [item for item in points if item[0] <= target]
     return candidates[-1] if candidates else None
 

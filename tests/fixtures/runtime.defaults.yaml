@@ -112,7 +112,7 @@ market_features:
   trade_target_em_fraction: {value: 0.15, description: Fallback target EM fraction.}
   trade_confirmation_slippage_points: {value: 1.0, description: Confirmation-to-target slippage allowance.}
   trade_min_target_room_points: {value: 3.0, description: Hard RTH target-room floor.}
-  trade_min_reward_risk: {value: 0.40, description: Hard RTH reward-risk floor.}
+  trade_min_reward_risk: {value: 1.0, description: Provisional RTH underlier-distance late-entry floor; not option-economic reward/risk.}
   trade_time_stop_minutes: {value: 15, description: Default time stop; new entries stop at 15:30 ET and all reviewed TradeIntent lanes hard-exit by 15:45 ET.}
   gth_manual_candidate_enabled: {value: true, description: Enables the isolated manual-only GTH exact-spread candidate lane.}
   gth_manual_candidate_quote_max_age_seconds: {value: 15.0, description: Maximum GTH manual candidate quote age.}
@@ -1630,8 +1630,8 @@ level_decision_shadow:
     value: true
     description: Runs the mutually-exclusive wall/flip decision state machine as an input to the deterministic TradeReady gate.
   notify_transitions:
-    value: false
-    description: Persists transition audit without broad PATH CONFIRMED pushes.
+    value: true
+    description: Enqueues idempotent operator-visible setup transitions while TradeReady remains an independent execution gate.
   formal_signal_enabled:
     value: true
     description: Explicit operator override allows CONFIRMED to enter deterministic TradeReady evaluation; it does not submit an order.

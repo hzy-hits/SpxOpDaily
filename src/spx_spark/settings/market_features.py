@@ -51,7 +51,7 @@ class MarketFeatureSettings:
     trade_target_em_fraction: float = 0.15
     trade_confirmation_slippage_points: float = 1.0
     trade_min_target_room_points: float = 3.0
-    trade_min_reward_risk: float = 0.40
+    trade_min_reward_risk: float = 1.0
     trade_time_stop_minutes: int = 15
     gth_manual_candidate_enabled: bool = True
     gth_manual_candidate_quote_max_age_seconds: float = 15.0

@@ -17,6 +17,9 @@ from spx_spark.application.order_map.convexity_idea_presentation import (
     render_convexity_idea_radar_lines,
 )
 from spx_spark.application.order_map.models import PLAY_ORDER, SHANGHAI_TZ
+from spx_spark.application.order_map.operator_status import (
+    render_operator_status_brief as render_operator_status_brief,
+)
 from spx_spark.application.order_map.exposure_presentation import exposure_strike_lines
 from spx_spark.application.order_map.render import (
     _candidate_by_play,
@@ -46,10 +49,6 @@ from spx_spark.application.order_map.spring_gamma_presentation import (
 from spx_spark.application.order_map.status_prompt_payload import (
     build_status_writer_payload as _status_writer_payload,
     status_guidance_lines as _status_guidance_lines,
-)
-from spx_spark.application.order_map.status_explanation import (
-    humanize_operator_trigger,
-    operator_reason_line,
 )
 from spx_spark.application.order_map.state import _session_phase_of
 from spx_spark.application.order_map.strike_coverage_presentation import (
@@ -218,44 +217,6 @@ def _compact_level_line(payload: dict[str, Any]) -> str:
     return (
         f"Put {_dash(put_wall)}　Flip {_dash(flip_low)}–{_dash(flip_high)}　Call {_dash(call_wall)}"
     )
-
-
-def _operator_structure_line(payload: dict[str, Any]) -> str:
-    """Label frozen event levels and current map levels instead of mixing them."""
-
-    decision = payload.get("level_decision")
-    decision = decision if isinstance(decision, dict) else {}
-    frozen = decision.get("levels") if isinstance(decision.get("levels"), dict) else {}
-    by_play = _candidate_by_play(payload)
-    flip_zone = payload.get("flip_zone")
-    live_flip = flip_zone if isinstance(flip_zone, list) and len(flip_zone) >= 2 else ()
-
-    def candidate_level(play: str) -> object:
-        candidate = by_play.get(play)
-        return candidate.get("level") if isinstance(candidate, dict) else None
-
-    live = {
-        "put_wall": candidate_level("put_wall_bounce_call"),
-        "flip_low": live_flip[0] if live_flip else None,
-        "flip_high": live_flip[1] if live_flip else None,
-        "call_wall": candidate_level("call_wall_fade_put"),
-    }
-
-    def values_text(levels: dict[str, Any]) -> str:
-        return (
-            f"Put {_dash(levels.get('put_wall'))} / "
-            f"Flip {_dash(levels.get('flip_low'))}–{_dash(levels.get('flip_high'))} / "
-            f"Call {_dash(levels.get('call_wall'))}"
-        )
-
-    frozen_text = values_text(frozen) if frozen else "未冻结"
-    live_text = values_text(live)
-    if frozen and all(
-        finite_float(frozen.get(key)) == finite_float(live.get(key))
-        for key in ("put_wall", "flip_low", "flip_high", "call_wall")
-    ):
-        return f"结构  事件与实时一致：{frozen_text}"
-    return f"结构  事件冻结：{frozen_text}；实时地图：{live_text}"
 
 
 def _compact_structure_candidate_line(payload: dict[str, Any]) -> str | None:
@@ -635,102 +596,6 @@ def render_status_template(
     if isinstance(warnings, list) and warnings:
         lines.append(f"数据  {'；'.join(str(item) for item in warnings)}")
     return "\n".join(lines)
-
-
-def render_operator_status_brief(
-    payload: dict[str, Any],
-    changes: list[str],
-    now_utc: datetime,
-) -> str:
-    """Render the scheduled status as a bounded operator card.
-
-    Full analytics remain in the persisted pricing audit.  The scheduled push
-    only carries facts that can change the immediate watch/no-trade decision;
-    event-driven GTH and TradeReady notifications use separate realtime lanes.
-    """
-
-    beijing = now_utc.astimezone(SHANGHAI_TZ)
-    phase = _session_phase_of(payload, now_utc)
-    expiry = str(payload.get("expiry") or "-")
-    expiry_text = f"{expiry[4:6]}-{expiry[6:8]}" if len(expiry) == 8 else expiry
-    guidance = guidance_module.build_decision_guidance(payload)
-    manual_candidate = payload.get("gth_level_manual_candidate")
-    manual_ready = (
-        isinstance(manual_candidate, dict)
-        and manual_candidate.get("status") == "manual_ready"
-    )
-    trade_ready = guidance.action is guidance_module.GuidanceAction.TRADE_READY or manual_ready
-    badge = (
-        "🔴 状态快照 · 执行以独立 MANUAL READY 卡为准"
-        if trade_ready
-        else "🔴 只观察 · 当前无可执行合约"
-    )
-    underlier = payload.get("underlier")
-    underlier = underlier if isinstance(underlier, dict) else {}
-    source = underlier.get("source")
-    spx_text = _dash(underlier.get("price"))
-    if source and source != "index:SPX":
-        spx_text += f"（{underlier_source_label(source)}）"
-    lines = [
-        (
-            f"【SPX 状态 · {beijing.strftime('%H:%M')} · "
-            f"0DTE {expiry_text} · {phase.get('name_cn')}】"
-        ),
-        badge,
-        (
-            f"市场  SPX {spx_text} · ES {_dash(payload.get('es_last'))} · "
-            f"{guidance.bias}仅作背景{_operator_prior_session_suffix(payload)}"
-        ),
-        f"触发  {humanize_operator_trigger(guidance.trigger_text)}",
-        f"证伪  {guidance.invalidation_text}",
-        _operator_structure_line(payload),
-        operator_reason_line(payload),
-    ]
-    return "\n".join(lines)
-
-
-def _operator_prior_session_suffix(payload: dict[str, Any]) -> str:
-    context = payload.get("decision_context")
-    context = context if isinstance(context, dict) else {}
-    prior = context.get("prior_session")
-    prior = prior if isinstance(prior, dict) else {}
-    if prior.get("status") not in {"ready", "partial"}:
-        return ""
-    change = finite_float(prior.get("return_fraction"))
-    location = finite_float(prior.get("close_location_fraction"))
-    tail = finite_float(prior.get("tail_return_fraction"))
-    fields = [
-        f"前日 {change:+.2%}" if change is not None else None,
-        f"收{location:.0%}" if location is not None else None,
-        f"尾盘{tail:+.2%}" if tail is not None else None,
-    ]
-    return " · " + "/".join(field for field in fields if field)
-
-
-def _operator_decision_card_lines(
-    payload: dict[str, Any],
-    *,
-    now_utc: datetime,
-) -> list[str]:
-    del now_utc
-    guidance = guidance_module.build_decision_guidance(payload)
-    if guidance.action is guidance_module.GuidanceAction.TRADE_READY:
-        return [
-            "🔴 状态快照 · 本卡不执行",
-            f"方向  {guidance.bias}（仅结构背景）",
-            "等待  已通过的实时执行意图必须以独立 MANUAL READY 卡为准",
-            f"证伪  {guidance.invalidation_text}",
-            "合约  本状态卡不承载合约、报价或下单权限",
-            "解释  状态心跳不绕过实时重验，也不复制可能过期的执行字段",
-        ]
-    return [
-        "🔴 只观察",
-        f"方向  {guidance.bias}（仅结构背景）",
-        f"等待  {guidance.trigger_text}",
-        f"证伪  {guidance.invalidation_text}",
-        "合约  当前没有可执行合约",
-        f"解释  {guidance.action_text}",
-    ]
 
 
 def _detail_candidate_lines(payload: dict[str, Any]) -> list[str]:

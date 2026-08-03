@@ -215,6 +215,56 @@ def _trade_ready_delivery_event_id(intent: Mapping[str, object]) -> str:
     return f"{intent_id}:notify:{digest}"
 
 
+def _opportunity_dedupe_key(intent: Mapping[str, object]) -> str:
+    """Return one stable economic opportunity key per explicit re-entry generation."""
+
+    intent_id = str(intent.get("intent_id") or "")
+    semantic_key = str(intent.get("semantic_key") or "") or (
+        f"intent:{intent_id}" if intent_id else ""
+    )
+    if not semantic_key:
+        return ""
+    value = intent.get("reentry_generation")
+    generation = value if isinstance(value, int) and not isinstance(value, bool) else 0
+    return semantic_key if generation <= 0 else f"{semantic_key}|reentry:{generation}"
+
+
+def _mark_terminal_deliveries(
+    terminal_phase: str,
+    semantic_scope: str,
+    semantic_keys: Mapping[str, str],
+    lifecycle_events: Mapping[str, Mapping[str, object]],
+    inflight: Mapping[str, object],
+    terminal_event_ids: set[str],
+    cancellation_pending: set[str],
+    cancellation_reasons: dict[str, str],
+) -> None:
+    """Cancel active occurrences while retaining opportunity-level dedupe claims."""
+
+    ending = {
+        event_id
+        for event_id, value in semantic_keys.items()
+        if not semantic_scope
+        or value == semantic_scope
+        or value.startswith(f"{semantic_scope}|")
+    }
+    ending.update(
+        event_id
+        for event_id, lifecycle in lifecycle_events.items()
+        if not semantic_scope
+        or lifecycle.get("semantic_scope") == semantic_scope
+        or lifecycle.get("semantic_key") == semantic_scope
+        or str(lifecycle.get("semantic_key") or "").startswith(f"{semantic_scope}|")
+    )
+    ending.update(inflight)
+    ending.difference_update(terminal_event_ids)
+    terminal_event_ids.update(ending)
+    cancellation_pending.update(ending)
+    cancellation_reasons.update(
+        {event_id: f"trade_intent_lifecycle_{terminal_phase}" for event_id in ending}
+    )
+
+
 def _intent_occurred_at(intent: Mapping[str, object]) -> datetime | None:
     """Return an immutable timestamp for idempotent outbox replays."""
 

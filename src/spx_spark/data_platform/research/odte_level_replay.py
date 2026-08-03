@@ -13,6 +13,7 @@ line because the statement records no per-round trough.
 from __future__ import annotations
 
 import csv
+import hashlib
 import logging
 import re
 from bisect import bisect_left
@@ -284,7 +285,7 @@ def _finalize(rounds: list[SpreadRound], open_round: dict) -> bool:
     actual = sum(fill.realized for fill in fills)
     rounds.append(
         SpreadRound(
-            round_id=f"{open_round['open_at']:%Y%m%d%H%M%S}:{open_round['expiry']:%Y%m%d}",
+            round_id=_round_id(open_round),
             expiry=open_round["expiry"],
             right=open_round["right"],
             kind=open_round["kind"],
@@ -301,6 +302,41 @@ def _finalize(rounds: list[SpreadRound], open_round: dict) -> bool:
         )
     )
     return True
+
+
+def _round_id(open_round: dict) -> str:
+    """Stable opening identity without timestamp/expiry collisions."""
+    opening_fills = tuple(
+        sorted(
+            (
+                fill.strike,
+                fill.right,
+                fill.qty,
+                fill.price,
+                fill.proceeds,
+                fill.commission,
+                fill.flags,
+            )
+            for fill in open_round["fills"]
+            if fill.at == open_round["open_at"]
+        )
+    )
+    identity = (
+        open_round["open_at"].isoformat(),
+        open_round["expiry"].isoformat(),
+        open_round["right"],
+        open_round["kind"],
+        open_round["pos_strike"],
+        open_round["neg_strike"],
+        open_round["units"],
+        open_round["entry_per_unit"],
+        opening_fills,
+    )
+    digest = hashlib.sha256(repr(identity).encode("utf-8")).hexdigest()[:16]
+    return (
+        f"{open_round['open_at']:%Y%m%dT%H%M%S%fZ}:"
+        f"{open_round['expiry']:%Y%m%d}:{digest}"
+    )
 
 
 def _mid(tick: OptionTick) -> float | None:
@@ -549,35 +585,64 @@ def _rule_exit(
     return RuleExit(rule=rule, exit_at=exit_at, pnl_per_unit=pnl, reason=reason)
 
 
-def _point_in_time_provider_series(
+def _point_in_time_provider_pair(
     store: QuoteStore,
     *,
     expiry: date,
-    strike: float,
+    long_strike: float,
+    short_strike: float,
     right: str,
     entry_at: datetime,
     end: datetime,
-) -> list[OptionTick]:
-    """Choose a provider using only its latest priced quote at/before entry."""
+    max_entry_quote_age: timedelta,
+    max_leg_skew: timedelta,
+) -> tuple[str, list[OptionTick], list[OptionTick]] | None:
+    """Choose one coherent provider for both legs using entry-time knowledge only."""
     start = entry_at - timedelta(minutes=5)
-    chosen: list[OptionTick] = []
-    chosen_entry_at: datetime | None = None
+    chosen: tuple[str, list[OptionTick], list[OptionTick]] | None = None
+    chosen_pair_at: datetime | None = None
     for provider in PROVIDERS:
-        candidate = store.option_series(
+        long_candidate = store.option_series(
             provider=provider,
             expiry=expiry,
-            strike=strike,
+            strike=long_strike,
             right=right,
             start=start,
             end=end,
         )
-        times = [tick.at for tick in candidate]
-        entry_tick = _tick_at_or_before(candidate, times, entry_at)
-        if entry_tick is None or _mid(entry_tick) is None:
+        short_candidate = store.option_series(
+            provider=provider,
+            expiry=expiry,
+            strike=short_strike,
+            right=right,
+            start=start,
+            end=end,
+        )
+        if _entry_quote_gate(
+            entry_at=entry_at,
+            long_series=long_candidate,
+            short_series=short_candidate,
+            max_entry_quote_age=max_entry_quote_age,
+            max_leg_skew=max_leg_skew,
+        ) is not None:
             continue
-        if chosen_entry_at is None or entry_tick.at > chosen_entry_at:
-            chosen = candidate
-            chosen_entry_at = entry_tick.at
+        long_tick = _tick_at_or_before(
+            long_candidate,
+            [tick.at for tick in long_candidate],
+            entry_at,
+        )
+        short_tick = _tick_at_or_before(
+            short_candidate,
+            [tick.at for tick in short_candidate],
+            entry_at,
+        )
+        if long_tick is None or short_tick is None:  # guarded above; keeps typing explicit
+            continue
+        pair_at = min(long_tick.at, short_tick.at)
+        # PROVIDERS order is the deterministic priority when pair freshness ties.
+        if chosen_pair_at is None or pair_at > chosen_pair_at:
+            chosen = provider, long_candidate, short_candidate
+            chosen_pair_at = pair_at
     return chosen
 
 
@@ -590,22 +655,24 @@ def replay_round(
     max_leg_skew: timedelta = MAX_LEG_SKEW,
 ) -> tuple[dict[str, RuleExit], dict[str, str]]:
     """Run all three rules for one round; returns (exits, skip_reasons)."""
-    long_leg = (spread_round.expiry, spread_round.pos_strike, spread_round.right)
-    short_leg = (spread_round.expiry, spread_round.neg_strike, spread_round.right)
     clock_stop = min(
         next_replay_exit_clock(spread_round.open_at),
         replay_expiry_close(spread_round.expiry),
     )
-    series: dict[tuple[date, float, str], list[OptionTick]] = {}
-    for leg in (long_leg, short_leg):
-        series[leg] = _point_in_time_provider_series(
-            store,
-            expiry=leg[0],
-            strike=leg[1],
-            right=leg[2],
-            entry_at=spread_round.open_at,
-            end=clock_stop + timedelta(minutes=20),
-        )
+    provider_pair = _point_in_time_provider_pair(
+        store,
+        expiry=spread_round.expiry,
+        long_strike=spread_round.pos_strike,
+        short_strike=spread_round.neg_strike,
+        right=spread_round.right,
+        entry_at=spread_round.open_at,
+        end=clock_stop + timedelta(minutes=20),
+        max_entry_quote_age=max_entry_quote_age,
+        max_leg_skew=max_leg_skew,
+    )
+    if provider_pair is None:
+        return {}, {rule: "provider_pair_unavailable" for rule in RULES}
+    _provider, long_series, short_series = provider_pair
     exits: dict[str, RuleExit] = {}
     skips: dict[str, str] = {}
     for rule in RULES:
@@ -616,8 +683,8 @@ def replay_round(
             entry_per_unit=spread_round.entry_per_unit,
             entry_at=spread_round.open_at,
             stop_at=clock_stop,
-            long_series=series[long_leg],
-            short_series=series[short_leg],
+            long_series=long_series,
+            short_series=short_series,
             max_entry_quote_age=max_entry_quote_age,
             max_mark_quote_age=max_mark_quote_age,
             max_leg_skew=max_leg_skew,
