@@ -64,6 +64,7 @@ _MODEL_SPEC = {
     "feature_weights": FEATURE_WEIGHTS,
     "parameter_mode": "fixed_bootstrap",
     "inference": "causal_forward_filter",
+    "observation_cadence": "one_update_per_market_frame_id",
 }
 MODEL_VERSION = "sha256:" + hashlib.sha256(
     json.dumps(_MODEL_SPEC, sort_keys=True, separators=(",", ":")).encode()
@@ -178,11 +179,11 @@ def _feature_observation(
         "values": {name: raw[name] for name in FEATURE_WEIGHTS},
         "trend_efficiency_60m": efficiency,
     }
+    frame_identity = market.get("frame_id") or market.get("as_of")
     payload["observation_id"] = _canonical_hash(
         {
-            "market_frame_id": market.get("frame_id"),
-            "market_as_of": market.get("as_of"),
-            "observation": payload,
+            "feature_schema_version": FEATURE_SCHEMA_VERSION,
+            "market_frame_identity": frame_identity,
         }
     )
     return payload

@@ -141,6 +141,20 @@ def test_live_shape_advances_deterministic_forward_filter_and_writes_rust_wire(
     assert state["online_state"]["observation_count"] == 1
     assert "online_state" not in first
 
+    # Other five-second inputs may move inside the same minute frame. They
+    # refresh the ranges but must not count the overlapping 15m/60m features
+    # as an independent HMM observation.
+    options = json.loads(paths.options.read_text(encoding="utf-8"))
+    options["density"]["median"] = 7543.2
+    _write(paths.options, options)
+    same_frame = produce_once(
+        paths=paths,
+        now=datetime(2026, 8, 3, 5, 4, 43, tzinfo=UTC),
+        max_input_age_seconds=90.0,
+    )
+    assert same_frame["market_regime"]["observation_count"] == 1
+    assert _forecasts(same_frame)["risk_neutral_close"]["median"] == 7543.2
+
     market = json.loads(paths.market.read_text(encoding="utf-8"))
     market["frame_id"] = "market:2026-08-03:20260803T0504"
     market["as_of"] = "2026-08-03T05:04:45+00:00"
