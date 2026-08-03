@@ -47,6 +47,8 @@ pub enum TargetConfig {
     Feishu {
         key: String,
         endpoint_env: String,
+        #[serde(default)]
+        secret_env: Option<String>,
     },
     Webhook {
         key: String,
@@ -86,6 +88,16 @@ impl TargetConfig {
         {
             return Err(ConfigError::Invalid(
                 "webhook bearer_token_env must be an environment variable name",
+            ));
+        }
+        if let Self::Feishu {
+            secret_env: Some(name),
+            ..
+        } = self
+            && !valid_environment_name(name)
+        {
+            return Err(ConfigError::Invalid(
+                "feishu secret_env must be an environment variable name",
             ));
         }
         Ok(())
@@ -160,6 +172,15 @@ impl DeliveryConfig {
         {
             return Err(ConfigError::Invalid(
                 "retry schedule delays must be within 1..=86400 seconds",
+            ));
+        }
+        if self
+            .retry_schedule_seconds
+            .windows(2)
+            .any(|window| window[0] >= window[1])
+        {
+            return Err(ConfigError::Invalid(
+                "retry schedule delays must strictly increase",
             ));
         }
         let mut keys = HashSet::new();
@@ -268,6 +289,47 @@ mod tests {
             config.validate(),
             Err(ConfigError::Invalid(
                 "retry schedule delays must be within 1..=86400 seconds"
+            ))
+        ));
+
+        config.retry_schedule_seconds = vec![60, 15];
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigError::Invalid(
+                "retry schedule delays must strictly increase"
+            ))
+        ));
+
+        config.retry_schedule_seconds = vec![15, 15];
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigError::Invalid(
+                "retry schedule delays must strictly increase"
+            ))
+        ));
+
+        config.retry_schedule_seconds = vec![15, 60];
+        config.validate().unwrap();
+    }
+
+    #[test]
+    fn feishu_secret_reference_must_be_an_environment_name() {
+        let config: DeliveryConfig = toml::from_str(
+            r#"
+                ledger_path = "/tmp/ledger.sqlite"
+
+                [[targets]]
+                type = "feishu"
+                key = "primary"
+                endpoint_env = "SPX_FEISHU_ENDPOINT"
+                secret_env = "not-valid"
+            "#,
+        )
+        .unwrap();
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigError::Invalid(
+                "feishu secret_env must be an environment variable name"
             ))
         ));
     }

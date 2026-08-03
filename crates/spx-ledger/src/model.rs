@@ -2,11 +2,12 @@ use std::fmt::{Display, Formatter};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use spx_domain::{DeliveryChannel, NotificationIntentV1, Token};
+use spx_domain::{DeliveryChannel, NotificationIntentV1, NotificationIntentV2, Token};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OwnerRole {
     Core,
+    Report,
     Delivery,
 }
 
@@ -14,6 +15,7 @@ impl OwnerRole {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Core => "core",
+            Self::Report => "report",
             Self::Delivery => "delivery",
         }
     }
@@ -94,9 +96,24 @@ impl ClaimHandle {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub enum ClaimedNotificationIntent {
+    TradeReady(NotificationIntentV1),
+    ScheduledReport(NotificationIntentV2),
+}
+
+impl ClaimedNotificationIntent {
+    pub const fn intent_id(&self) -> &Token {
+        match self {
+            Self::TradeReady(intent) => &intent.intent_id,
+            Self::ScheduledReport(intent) => &intent.intent_id,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct ClaimedDelivery {
     pub handle: ClaimHandle,
-    pub intent: NotificationIntentV1,
+    pub intent: ClaimedNotificationIntent,
     pub target_key: Token,
     pub channel: DeliveryChannel,
     pub attempt_no: u32,

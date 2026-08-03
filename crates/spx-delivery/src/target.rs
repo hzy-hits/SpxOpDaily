@@ -23,6 +23,7 @@ pub struct BarkTarget {
 pub struct FeishuTarget {
     pub key: Token,
     pub endpoint_env: String,
+    pub secret_env: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,12 +85,15 @@ impl TargetRegistry {
                     key: Token::new(key.clone(), "bark target key")?,
                     endpoint_env: endpoint_env.clone(),
                 }),
-                TargetConfig::Feishu { key, endpoint_env } => {
-                    DeliveryTarget::Feishu(FeishuTarget {
-                        key: Token::new(key.clone(), "feishu target key")?,
-                        endpoint_env: endpoint_env.clone(),
-                    })
-                }
+                TargetConfig::Feishu {
+                    key,
+                    endpoint_env,
+                    secret_env,
+                } => DeliveryTarget::Feishu(FeishuTarget {
+                    key: Token::new(key.clone(), "feishu target key")?,
+                    endpoint_env: endpoint_env.clone(),
+                    secret_env: secret_env.clone(),
+                }),
                 TargetConfig::Webhook {
                     key,
                     endpoint_env,
@@ -133,6 +137,7 @@ mod tests {
             TargetConfig::Feishu {
                 key: "feishu-primary".to_owned(),
                 endpoint_env: "SPX_FEISHU_ENDPOINT".to_owned(),
+                secret_env: Some("SPX_FEISHU_SECRET".to_owned()),
             },
             TargetConfig::Webhook {
                 key: "audit-webhook".to_owned(),

@@ -14,9 +14,10 @@ use tracing::{error, info, warn};
 
 use crate::BridgeConfig;
 use crate::client::{ClientError, CoreClient};
-use crate::health::{BridgeHealth, BridgePhase};
+use crate::health::{BridgeHealth, BridgePhase, DeskMapLaneStatus, ResearchLaneStatus};
 use crate::legacy::{
-    LegacyDocument, LegacyIbkrHealth, read_ibkr_health, read_research_signals, read_snapshot,
+    LegacyDocument, LegacyError, LegacyIbkrHealth, read_desk_map_projection, read_ibkr_health,
+    read_research_signals, read_snapshot,
 };
 use crate::mapper::{
     MapError, MappingStats, map_provider_batch, map_source_failure_batch, semantic_hash,
@@ -53,6 +54,8 @@ pub struct BridgeRuntime {
     next_connect_not_before: Option<Instant>,
     last_research_fingerprint: Option<String>,
     last_research_error: Option<String>,
+    last_desk_map_fingerprint: Option<String>,
+    last_desk_map_error: Option<String>,
     _runtime_lock: RuntimeLock,
 }
 
@@ -68,7 +71,13 @@ impl BridgeRuntime {
         state.begin_boot()?;
         state.persist(&config.state_path)?;
         let now = Utc::now();
-        let health = BridgeHealth::new(&config.source_snapshot_path, &state, now);
+        let health = BridgeHealth::new(
+            &config.source_snapshot_path,
+            config.research_signal_path.as_deref(),
+            config.desk_map_projection_path.as_deref(),
+            &state,
+            now,
+        );
         health.persist(&config.health_path)?;
         Ok(Self {
             config,
@@ -80,6 +89,8 @@ impl BridgeRuntime {
             next_connect_not_before: None,
             last_research_fingerprint: None,
             last_research_error: None,
+            last_desk_map_fingerprint: None,
+            last_desk_map_error: None,
             _runtime_lock: runtime_lock,
         })
     }
@@ -98,7 +109,7 @@ impl BridgeRuntime {
                 return self.halt(failure);
             }
         }
-        self.health.phase = BridgePhase::Degraded;
+        self.health.set_quote_phase(BridgePhase::Degraded);
         self.health.socket_connected = false;
         self.health.last_error = Some("bridge stopped by signal".to_owned());
         self.persist_health();
@@ -121,50 +132,84 @@ impl BridgeRuntime {
                 }
             }
         }
-        let document = match read_snapshot(
+        let quote_result = match read_snapshot(
             &self.config.source_snapshot_path,
             self.config.source_max_bytes,
         ) {
-            Ok(document) => document,
-            Err(failure) => {
-                self.handle_source_failure(&failure.to_string())?;
-                Self::sleep(self.config.poll_interval_ms, stop);
-                return Ok(());
-            }
+            Ok(document) => self.handle_document(document),
+            Err(failure) => self.handle_source_failure(&failure.to_string()),
         };
-        self.handle_document(document)?;
-        self.handle_research_source();
+        let research_result = self.handle_research_source();
+        let desk_map_result = self.handle_desk_map_source();
+        quote_result?;
+        research_result?;
+        desk_map_result?;
         Self::sleep(self.config.poll_interval_ms, stop);
         Ok(())
     }
 
-    fn handle_research_source(&mut self) {
-        let Some(path) = self.config.research_signal_path.as_ref() else {
-            return;
+    fn handle_research_source(&mut self) -> Result<(), RuntimeError> {
+        let Some(path) = self.config.research_signal_path.clone() else {
+            return Ok(());
         };
-        let (signals, fingerprint) = match read_research_signals(
-            path,
+        let document = match read_research_signals(
+            &path,
             self.config.source_max_bytes.min(1_048_576),
         ) {
             Ok(value) => value,
             Err(failure) => {
                 let description = failure.to_string();
+                let status = match &failure {
+                    LegacyError::Metadata(error)
+                        if error.kind() == std::io::ErrorKind::NotFound =>
+                    {
+                        ResearchLaneStatus::Missing
+                    }
+                    _ => ResearchLaneStatus::Rejected,
+                };
+                self.health
+                    .reject_research_source(status, description.clone(), Utc::now());
+                self.persist_health();
                 if self.last_research_error.as_deref() != Some(description.as_str()) {
                     warn!(error = %failure, path = %path.display(), "experimental research source rejected; quote mirror continues");
                     self.last_research_error = Some(description);
                 }
-                return;
+                return Ok(());
             }
         };
-        self.last_research_error = None;
-        if self.last_research_fingerprint.as_deref() == Some(fingerprint.as_str()) {
-            return;
-        }
+        let signals = document.signals;
+        let fingerprint = document.fingerprint;
         let now = Utc::now();
-        if signals.generated_at > now {
-            warn!(path = %path.display(), "future-dated experimental research source rejected");
-            return;
+        let already_acknowledged =
+            self.last_research_fingerprint.as_deref() == Some(fingerprint.as_str());
+        self.health.observe_research_source(
+            signals.schema_version.clone(),
+            fingerprint.clone(),
+            signals.generated_at,
+            document.byte_len,
+            already_acknowledged,
+            now,
+        );
+        if already_acknowledged {
+            self.last_research_error = None;
+            self.persist_health();
+            return Ok(());
         }
+        if signals.generated_at > now {
+            let description = "future-dated experimental research source".to_owned();
+            self.health.reject_research_source(
+                ResearchLaneStatus::Rejected,
+                description.clone(),
+                now,
+            );
+            self.persist_health();
+            if self.last_research_error.as_deref() != Some(description.as_str()) {
+                warn!(path = %path.display(), "future-dated experimental research source rejected");
+                self.last_research_error = Some(description);
+            }
+            return Ok(());
+        }
+        self.last_research_error = None;
         let envelope = match Token::new(
             format!("message:research:{}", &fingerprint[..24]),
             "message_id",
@@ -176,29 +221,257 @@ impl BridgeRuntime {
                 message: IngressMessageV1::ResearchSignals(signals),
             },
             Err(failure) => {
+                self.health.reject_research_source(
+                    ResearchLaneStatus::Rejected,
+                    failure.to_string(),
+                    now,
+                );
+                self.persist_health();
                 warn!(error = %failure, "experimental research message identity rejected");
-                return;
+                return Ok(());
             }
         };
+        self.send_research_envelope(&envelope, fingerprint)
+    }
+
+    fn send_research_envelope(
+        &mut self,
+        envelope: &IngressEnvelopeV1,
+        fingerprint: String,
+    ) -> Result<(), RuntimeError> {
         let Some(client) = self.client.as_mut() else {
-            return;
+            return Ok(());
         };
-        match client.send(&envelope) {
+        match client.send(envelope) {
             Ok(ack) if ack.status == AckStatus::Accepted => {
-                self.last_research_fingerprint = Some(fingerprint);
-                self.health.counters.accepted_frames =
-                    self.health.counters.accepted_frames.saturating_add(1);
+                let disposition = ack
+                    .disposition
+                    .expect("validated accepted acknowledgement has disposition");
+                let accepted_research_disposition = matches!(
+                    disposition,
+                    CoreAckDisposition::ResearchUpdated
+                        | CoreAckDisposition::ResearchUnchanged
+                        | CoreAckDisposition::ResearchStale
+                        | CoreAckDisposition::DuplicateIngress
+                );
+                self.health.acknowledge_research(
+                    ack.message_id
+                        .as_ref()
+                        .expect("validated accepted acknowledgement has message id")
+                        .to_string(),
+                    disposition,
+                    Utc::now(),
+                );
+                if accepted_research_disposition {
+                    self.last_research_fingerprint = Some(fingerprint);
+                    self.health.counters.accepted_frames =
+                        self.health.counters.accepted_frames.saturating_add(1);
+                } else {
+                    self.health.counters.rejected_acks =
+                        self.health.counters.rejected_acks.saturating_add(1);
+                }
                 self.persist_health();
+                Ok(())
             }
             Ok(ack) => {
                 self.health.counters.rejected_acks =
                     self.health.counters.rejected_acks.saturating_add(1);
+                self.health.reject_research_ack(
+                    format!("core rejected research ingress: {:?}", ack.reason_code),
+                    Utc::now(),
+                );
                 warn!(reason = ?ack.reason_code, "experimental research frame rejected; quote mirror continues");
                 self.persist_health();
+                Ok(())
+            }
+            Err(failure) if failure.is_preflight_failure() => {
+                let description = failure.to_string();
+                self.health.reject_research_source(
+                    ResearchLaneStatus::Rejected,
+                    description,
+                    Utc::now(),
+                );
+                self.persist_health();
+                error!(error = %failure, "experimental research ingress is permanently invalid; bridge will halt");
+                Err(RuntimeError::LocalIngress(failure))
             }
             Err(failure) => {
+                self.health
+                    .mark_research_transport_unknown(failure.to_string(), Utc::now());
                 warn!(error = %failure, "experimental research ingress outcome unknown; deterministic frame will retry");
                 self.disconnect(&failure.to_string());
+                Ok(())
+            }
+        }
+    }
+
+    fn handle_desk_map_source(&mut self) -> Result<(), RuntimeError> {
+        let Some(path) = self.config.desk_map_projection_path.clone() else {
+            return Ok(());
+        };
+        let document = match read_desk_map_projection(
+            &path,
+            self.config.source_max_bytes.min(1_048_576),
+        ) {
+            Ok(value) => value,
+            Err(failure) => {
+                let description = failure.to_string();
+                let status = match &failure {
+                    LegacyError::Metadata(error)
+                        if error.kind() == std::io::ErrorKind::NotFound =>
+                    {
+                        DeskMapLaneStatus::Missing
+                    }
+                    _ => DeskMapLaneStatus::Rejected,
+                };
+                self.health
+                    .reject_desk_map_source(status, description.clone(), Utc::now());
+                self.persist_health();
+                if self.last_desk_map_error.as_deref() != Some(description.as_str()) {
+                    warn!(error = %failure, path = %path.display(), "desk map projection source rejected; quote mirror continues");
+                    self.last_desk_map_error = Some(description);
+                }
+                return Ok(());
+            }
+        };
+        let projection = document.projection;
+        let fingerprint = document.fingerprint;
+        let now = Utc::now();
+        let already_acknowledged =
+            self.last_desk_map_fingerprint.as_deref() == Some(fingerprint.as_str());
+        self.health.observe_desk_map_source(
+            projection.schema_version.clone(),
+            fingerprint.clone(),
+            projection.available_at,
+            document.byte_len,
+            already_acknowledged,
+            now,
+        );
+        if projection.available_at > now {
+            let description = "future-dated desk map projection source".to_owned();
+            self.health.reject_desk_map_source(
+                DeskMapLaneStatus::Rejected,
+                description.clone(),
+                now,
+            );
+            self.persist_health();
+            if self.last_desk_map_error.as_deref() != Some(description.as_str()) {
+                warn!(path = %path.display(), "future-dated desk map projection source rejected");
+                self.last_desk_map_error = Some(description);
+            }
+            return Ok(());
+        }
+        if projection.valid_until <= now {
+            let description = "expired desk map projection source".to_owned();
+            self.health.reject_desk_map_source(
+                DeskMapLaneStatus::Expired,
+                description.clone(),
+                now,
+            );
+            self.persist_health();
+            if self.last_desk_map_error.as_deref() != Some(description.as_str()) {
+                warn!(path = %path.display(), "expired desk map projection source rejected");
+                self.last_desk_map_error = Some(description);
+            }
+            return Ok(());
+        }
+        if already_acknowledged {
+            self.last_desk_map_error = None;
+            self.persist_health();
+            return Ok(());
+        }
+        self.last_desk_map_error = None;
+        let envelope = match Token::new(
+            format!("message:desk-map:{}", &fingerprint[..24]),
+            "message_id",
+        ) {
+            Ok(message_id) => IngressEnvelopeV1 {
+                schema_version: INGRESS_SCHEMA_VERSION.to_owned(),
+                message_id,
+                emitted_at: projection.available_at,
+                message: IngressMessageV1::DeskMapProjection(Box::new(projection)),
+            },
+            Err(failure) => {
+                self.health.reject_desk_map_source(
+                    DeskMapLaneStatus::Rejected,
+                    failure.to_string(),
+                    now,
+                );
+                self.persist_health();
+                warn!(error = %failure, "desk map projection message identity rejected");
+                return Ok(());
+            }
+        };
+        self.send_desk_map_envelope(&envelope, fingerprint)
+    }
+
+    fn send_desk_map_envelope(
+        &mut self,
+        envelope: &IngressEnvelopeV1,
+        fingerprint: String,
+    ) -> Result<(), RuntimeError> {
+        let Some(client) = self.client.as_mut() else {
+            return Ok(());
+        };
+        match client.send(envelope) {
+            Ok(ack) if ack.status == AckStatus::Accepted => {
+                let disposition = ack
+                    .disposition
+                    .expect("validated accepted acknowledgement has disposition");
+                let accepted_desk_map_disposition = matches!(
+                    disposition,
+                    CoreAckDisposition::DeskMapUpdated
+                        | CoreAckDisposition::DeskMapUnchanged
+                        | CoreAckDisposition::DeskMapStale
+                        | CoreAckDisposition::DuplicateIngress
+                );
+                self.health.acknowledge_desk_map(
+                    ack.message_id
+                        .as_ref()
+                        .expect("validated accepted acknowledgement has message id")
+                        .to_string(),
+                    disposition,
+                    Utc::now(),
+                );
+                if accepted_desk_map_disposition {
+                    self.last_desk_map_fingerprint = Some(fingerprint);
+                    self.health.counters.accepted_frames =
+                        self.health.counters.accepted_frames.saturating_add(1);
+                } else {
+                    self.health.counters.rejected_acks =
+                        self.health.counters.rejected_acks.saturating_add(1);
+                }
+                self.persist_health();
+                Ok(())
+            }
+            Ok(ack) => {
+                self.health.counters.rejected_acks =
+                    self.health.counters.rejected_acks.saturating_add(1);
+                self.health.reject_desk_map_ack(
+                    format!("core rejected desk map ingress: {:?}", ack.reason_code),
+                    Utc::now(),
+                );
+                warn!(reason = ?ack.reason_code, "desk map projection frame rejected; quote mirror continues");
+                self.persist_health();
+                Ok(())
+            }
+            Err(failure) if failure.is_preflight_failure() => {
+                let description = failure.to_string();
+                self.health.reject_desk_map_source(
+                    DeskMapLaneStatus::Rejected,
+                    description,
+                    Utc::now(),
+                );
+                self.persist_health();
+                error!(error = %failure, "desk map projection ingress is permanently invalid; bridge will halt");
+                Err(RuntimeError::LocalIngress(failure))
+            }
+            Err(failure) => {
+                self.health
+                    .mark_desk_map_transport_unknown(failure.to_string(), Utc::now());
+                warn!(error = %failure, "desk map projection ingress outcome unknown; deterministic frame will retry");
+                self.disconnect(&failure.to_string());
+                Ok(())
             }
         }
     }
@@ -208,10 +481,20 @@ impl BridgeRuntime {
             Ok(value) => value,
             Err(failure) => return self.handle_source_failure(&failure.to_string()),
         };
+        let now = Utc::now();
+        if source_at > now {
+            self.health.observe_source(
+                document.fingerprint.clone(),
+                source_at,
+                document.byte_len,
+                now,
+            );
+            return self.handle_source_failure("future-dated normalized source timestamp");
+        }
         let unchanged =
             self.state.last_completed_source_fingerprint.as_deref() == Some(&document.fingerprint);
         if unchanged && !self.needs_resync && self.state.active_source_failure.is_none() {
-            self.health.phase = BridgePhase::Ready;
+            self.health.set_quote_phase(BridgePhase::Ready);
             self.health.socket_connected = true;
             self.health.observe_source(
                 document.fingerprint,
@@ -230,11 +513,11 @@ impl BridgeRuntime {
             return Err(RuntimeError::SourceTimeRegression);
         }
         let ibkr_health = self.read_ibkr_health_fail_closed();
-        self.health.phase = if self.needs_resync {
+        self.health.set_quote_phase(if self.needs_resync {
             BridgePhase::SocketSyncFence
         } else {
             BridgePhase::SnapshotSync
-        };
+        });
         self.health.socket_connected = true;
         self.health.counters.source_documents =
             self.health.counters.source_documents.saturating_add(1);
@@ -277,7 +560,7 @@ impl BridgeRuntime {
             .complete_source(document.fingerprint.clone(), source_at);
         self.state.persist(&self.config.state_path)?;
         self.needs_resync = false;
-        self.health.phase = BridgePhase::Ready;
+        self.health.set_quote_phase(BridgePhase::Ready);
         self.health.last_error = None;
         self.health.last_resync_at = Some(Utc::now());
         self.health
@@ -287,7 +570,7 @@ impl BridgeRuntime {
     }
 
     fn connect(&mut self, stop: &AtomicBool) -> Result<(), RuntimeError> {
-        self.health.phase = BridgePhase::SocketSyncFence;
+        self.health.set_quote_phase(BridgePhase::SocketSyncFence);
         if let Some(not_before) = self.next_connect_not_before {
             Self::sleep_duration(not_before.saturating_duration_since(Instant::now()), stop);
             if stop.load(Ordering::Relaxed) {
@@ -314,7 +597,7 @@ impl BridgeRuntime {
                 info!(path = %self.config.socket_path.display(), "normalized bridge connected to core");
             }
             Err(failure) => {
-                self.health.phase = BridgePhase::Degraded;
+                self.health.set_quote_phase(BridgePhase::Degraded);
                 self.health.socket_connected = false;
                 self.health.last_error = Some(failure.to_string());
                 self.persist_health();
@@ -498,7 +781,7 @@ impl BridgeRuntime {
     }
 
     fn handle_source_failure(&mut self, reason: &str) -> Result<(), RuntimeError> {
-        self.health.phase = BridgePhase::Degraded;
+        self.health.set_quote_phase(BridgePhase::Degraded);
         self.health.counters.source_errors = self.health.counters.source_errors.saturating_add(1);
         self.health.last_error = Some(reason.to_owned());
         self.persist_health();
@@ -546,7 +829,7 @@ impl BridgeRuntime {
     fn disconnect(&mut self, reason: &str) {
         self.client = None;
         self.needs_resync = true;
-        self.health.phase = BridgePhase::Degraded;
+        self.health.set_quote_phase(BridgePhase::Degraded);
         self.health.socket_connected = false;
         self.health.last_error = Some(reason.to_owned());
         self.schedule_reconnect();
@@ -558,7 +841,7 @@ impl BridgeRuntime {
     }
 
     fn halt<T>(&mut self, failure: RuntimeError) -> Result<T, RuntimeError> {
-        self.health.phase = BridgePhase::Halted;
+        self.health.set_quote_phase(BridgePhase::Halted);
         self.health.socket_connected = self.client.is_some();
         self.health.last_error = Some(failure.to_string());
         self.health
@@ -656,6 +939,7 @@ mod tests {
         BridgeConfig {
             source_snapshot_path: temp.path().join("state.json"),
             research_signal_path: None,
+            desk_map_projection_path: None,
             ibkr_health_path: temp.path().join("ibkr.json"),
             socket_path: temp.path().join("core.sock"),
             state_path: temp.path().join("bridge-state.json"),
@@ -712,6 +996,27 @@ mod tests {
         )
         .unwrap();
         snapshot
+    }
+
+    fn write_research_fixture(path: &std::path::Path) {
+        std::fs::write(
+            path,
+            include_bytes!("../../../fixtures/domain/v1/experimental_research_signals.json"),
+        )
+        .unwrap();
+    }
+
+    fn write_current_desk_map_fixture(path: &std::path::Path) -> serde_json::Value {
+        let now = Utc::now();
+        let mut fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../fixtures/domain/v1/desk_map_projection.json"
+        ))
+        .unwrap();
+        fixture["observed_through"] = serde_json::json!(now - TimeDelta::seconds(2));
+        fixture["available_at"] = serde_json::json!(now - TimeDelta::seconds(1));
+        fixture["valid_until"] = serde_json::json!(now + TimeDelta::minutes(20));
+        std::fs::write(path, serde_json::to_vec(&fixture).unwrap()).unwrap();
+        fixture
     }
 
     #[test]
@@ -786,5 +1091,313 @@ mod tests {
                 .iter()
                 .all(|(_, state)| *state != OperationalState::Unavailable)
         );
+    }
+
+    #[test]
+    fn invalid_research_source_degrades_health_without_hiding_quote_readiness() {
+        let temp = TempDir::new().unwrap();
+        let mut config = config(&temp);
+        let research_path = temp.path().join("research.json");
+        config.research_signal_path = Some(research_path.clone());
+        std::fs::write(&research_path, b"{\"schema_version\":\"unknown\"}").unwrap();
+        BridgeState::initialize(&config.state_path).unwrap();
+        let mut runtime = BridgeRuntime::open(config.clone()).unwrap();
+        runtime.health.set_quote_phase(BridgePhase::Ready);
+
+        runtime.handle_research_source().unwrap();
+
+        assert_eq!(runtime.health.phase, BridgePhase::Degraded);
+        assert_eq!(runtime.health.research.status, ResearchLaneStatus::Rejected);
+        let persisted: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(&config.health_path).expect("persisted bridge health"),
+        )
+        .unwrap();
+        assert_eq!(
+            persisted["schema_version"],
+            "spx_normalized_bridge_health.v2"
+        );
+        assert_eq!(persisted["phase"], "degraded");
+        assert_eq!(persisted["research"]["status"], "rejected");
+        assert!(persisted["research"]["last_error"].is_string());
+    }
+
+    #[test]
+    fn invalid_desk_map_source_degrades_health_without_hiding_quote_readiness() {
+        let temp = TempDir::new().unwrap();
+        let mut config = config(&temp);
+        let desk_map_path = temp.path().join("desk-map.json");
+        config.desk_map_projection_path = Some(desk_map_path.clone());
+        std::fs::write(&desk_map_path, b"{\"schema_version\":\"unknown\"}").unwrap();
+        BridgeState::initialize(&config.state_path).unwrap();
+        let mut runtime = BridgeRuntime::open(config.clone()).unwrap();
+        runtime.health.set_quote_phase(BridgePhase::Ready);
+
+        runtime.handle_desk_map_source().unwrap();
+
+        assert_eq!(runtime.health.phase, BridgePhase::Degraded);
+        assert_eq!(runtime.health.desk_map.status, DeskMapLaneStatus::Rejected);
+        let persisted: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(&config.health_path).expect("persisted bridge health"),
+        )
+        .unwrap();
+        assert_eq!(persisted["phase"], "degraded");
+        assert_eq!(persisted["desk_map"]["status"], "rejected");
+        assert!(persisted["desk_map"]["last_error"].is_string());
+    }
+
+    #[test]
+    fn python_desk_map_fixture_receives_typed_bridge_ack() {
+        let temp = TempDir::new().unwrap();
+        let mut config = config(&temp);
+        let desk_map_path = temp.path().join("desk-map.json");
+        config.desk_map_projection_path = Some(desk_map_path.clone());
+        let fixture = write_current_desk_map_fixture(&desk_map_path);
+        let expected_projection_id = fixture["projection_id"]
+            .as_str()
+            .expect("fixture projection_id")
+            .to_owned();
+        BridgeState::initialize(&config.state_path).unwrap();
+
+        let listener = UnixListener::bind(&config.socket_path).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut length = [0_u8; 4];
+            stream.read_exact(&mut length).unwrap();
+            let mut bytes = vec![0_u8; u32::from_be_bytes(length) as usize];
+            stream.read_exact(&mut bytes).unwrap();
+            let envelope: IngressEnvelopeV1 = serde_json::from_slice(&bytes).unwrap();
+            let IngressMessageV1::DeskMapProjection(projection) = &envelope.message else {
+                panic!("bridge sent a non-desk-map ingress message");
+            };
+            assert_eq!(projection.schema_version, "desk_map_projection.v1");
+            assert_eq!(projection.projection_id.as_str(), expected_projection_id);
+            let research_context = projection
+                .research_context
+                .as_ref()
+                .expect("bridge must transmit the embedded research context");
+            assert_eq!(research_context.schema_version, "research_context.v2");
+            assert_eq!(
+                Some(&research_context.document_id),
+                projection.research_context_document_id.as_ref()
+            );
+            let ack = CoreAckV1::accepted(
+                envelope.message_id,
+                CoreAckDisposition::DeskMapUpdated,
+                None,
+            );
+            let encoded = serde_json::to_vec(&ack).unwrap();
+            stream
+                .write_all(&u32::try_from(encoded.len()).unwrap().to_be_bytes())
+                .unwrap();
+            stream.write_all(&encoded).unwrap();
+        });
+
+        let mut runtime = BridgeRuntime::open(config.clone()).unwrap();
+        runtime.client = Some(
+            CoreClient::connect(&config.socket_path, Duration::from_secs(1), 1_048_576).unwrap(),
+        );
+        runtime.health.socket_connected = true;
+        runtime.health.set_quote_phase(BridgePhase::Ready);
+        runtime.handle_desk_map_source().unwrap();
+
+        assert_eq!(runtime.health.phase, BridgePhase::Ready);
+        assert_eq!(runtime.health.desk_map.status, DeskMapLaneStatus::Accepted);
+        assert_eq!(
+            runtime.health.desk_map.last_ack_disposition,
+            Some(CoreAckDisposition::DeskMapUpdated)
+        );
+        assert!(runtime.last_desk_map_fingerprint.is_some());
+        drop(runtime);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn quote_source_read_failure_does_not_skip_research_or_desk_map_lanes() {
+        let temp = TempDir::new().unwrap();
+        let mut config = config(&temp);
+        let research_path = temp.path().join("research.json");
+        let desk_map_path = temp.path().join("desk-map.json");
+        config.research_signal_path = Some(research_path.clone());
+        config.desk_map_projection_path = Some(desk_map_path.clone());
+        write_research_fixture(&research_path);
+        write_current_desk_map_fixture(&desk_map_path);
+        BridgeState::initialize(&config.state_path).unwrap();
+
+        let listener = UnixListener::bind(&config.socket_path).unwrap();
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let server_observed = Arc::clone(&observed);
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            for _ in 0..4 {
+                let mut length = [0_u8; 4];
+                stream.read_exact(&mut length).unwrap();
+                let mut bytes = vec![0_u8; u32::from_be_bytes(length) as usize];
+                stream.read_exact(&mut bytes).unwrap();
+                let envelope: IngressEnvelopeV1 = serde_json::from_slice(&bytes).unwrap();
+                let (kind, disposition) = match &envelope.message {
+                    IngressMessageV1::QuoteBatch(_) => ("quote", CoreAckDisposition::Applied),
+                    IngressMessageV1::ResearchSignals(_) => {
+                        ("research", CoreAckDisposition::ResearchUpdated)
+                    }
+                    IngressMessageV1::DeskMapProjection(_) => {
+                        ("desk_map", CoreAckDisposition::DeskMapUpdated)
+                    }
+                    IngressMessageV1::Evaluate(_) => panic!("unexpected evaluation ingress"),
+                };
+                server_observed.lock().unwrap().push(kind);
+                let ack = CoreAckV1::accepted(envelope.message_id, disposition, None);
+                let encoded = serde_json::to_vec(&ack).unwrap();
+                stream
+                    .write_all(&u32::try_from(encoded.len()).unwrap().to_be_bytes())
+                    .unwrap();
+                stream.write_all(&encoded).unwrap();
+            }
+        });
+
+        let mut runtime = BridgeRuntime::open(config).unwrap();
+        runtime.tick(&AtomicBool::new(false)).unwrap();
+
+        assert_eq!(runtime.health.phase, BridgePhase::Degraded);
+        assert_eq!(runtime.health.research.status, ResearchLaneStatus::Accepted);
+        assert_eq!(runtime.health.desk_map.status, DeskMapLaneStatus::Accepted);
+        assert_eq!(
+            observed.lock().unwrap().as_slice(),
+            ["quote", "quote", "research", "desk_map"]
+        );
+        drop(runtime);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn expired_desk_map_source_is_rejected_and_never_marked_accepted() {
+        let temp = TempDir::new().unwrap();
+        let mut config = config(&temp);
+        let desk_map_path = temp.path().join("desk-map.json");
+        config.desk_map_projection_path = Some(desk_map_path.clone());
+        let mut fixture = write_current_desk_map_fixture(&desk_map_path);
+        let now = Utc::now();
+        fixture["observed_through"] = serde_json::json!(now - TimeDelta::minutes(31));
+        fixture["available_at"] = serde_json::json!(now - TimeDelta::minutes(30));
+        fixture["valid_until"] = serde_json::json!(now - TimeDelta::seconds(1));
+        std::fs::write(&desk_map_path, serde_json::to_vec(&fixture).unwrap()).unwrap();
+        BridgeState::initialize(&config.state_path).unwrap();
+        let mut runtime = BridgeRuntime::open(config.clone()).unwrap();
+        runtime.health.set_quote_phase(BridgePhase::Ready);
+        let fingerprint = read_desk_map_projection(&desk_map_path, config.source_max_bytes)
+            .unwrap()
+            .fingerprint;
+        runtime.last_desk_map_fingerprint = Some(fingerprint);
+        runtime.health.acknowledge_desk_map(
+            "message:desk-map:previously-accepted".to_owned(),
+            CoreAckDisposition::DeskMapUpdated,
+            now,
+        );
+        assert_eq!(runtime.health.desk_map.status, DeskMapLaneStatus::Accepted);
+
+        runtime.handle_desk_map_source().unwrap();
+
+        assert_eq!(runtime.health.phase, BridgePhase::Degraded);
+        assert_eq!(runtime.health.desk_map.status, DeskMapLaneStatus::Expired);
+        assert!(runtime.last_desk_map_fingerprint.is_some());
+        let persisted: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&config.health_path).unwrap()).unwrap();
+        assert_eq!(persisted["desk_map"]["status"], "expired");
+    }
+
+    #[test]
+    fn future_quote_source_enters_durable_source_failure_fence() {
+        let temp = TempDir::new().unwrap();
+        let config = config(&temp);
+        let future = Utc::now() + TimeDelta::minutes(5);
+        std::fs::write(
+            &config.source_snapshot_path,
+            serde_json::to_vec(&serde_json::json!({
+                "created_at": future,
+                "as_of": future,
+                "quotes": [],
+                "provider_states": []
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        BridgeState::initialize(&config.state_path).unwrap();
+        let document =
+            read_snapshot(&config.source_snapshot_path, config.source_max_bytes).unwrap();
+        let mut runtime = BridgeRuntime::open(config).unwrap();
+
+        runtime.handle_document(document).unwrap();
+
+        let failure = runtime
+            .state
+            .active_source_failure
+            .as_ref()
+            .expect("future source must create a durable failure fence");
+        assert_eq!(
+            failure.fingerprint,
+            failure_fingerprint("future-dated normalized source timestamp")
+        );
+        assert_eq!(
+            runtime
+                .state
+                .pending
+                .as_ref()
+                .map(|pending| pending.purpose),
+            Some(PendingPurpose::SourceFailure)
+        );
+        assert!(runtime.state.last_completed_source_at.is_none());
+        assert_eq!(runtime.health.phase, BridgePhase::Degraded);
+        assert_eq!(runtime.health.source_at, Some(future));
+        assert!(runtime.health.source_age_seconds.is_none());
+    }
+
+    #[test]
+    fn advisory_lane_preflight_failures_are_fatal_without_reconnect_loop() {
+        let temp = TempDir::new().unwrap();
+        let mut config = config(&temp);
+        let research_path = temp.path().join("research.json");
+        let desk_map_path = temp.path().join("desk-map.json");
+        config.research_signal_path = Some(research_path.clone());
+        config.desk_map_projection_path = Some(desk_map_path.clone());
+        config.max_frame_bytes = 64;
+        write_research_fixture(&research_path);
+        write_current_desk_map_fixture(&desk_map_path);
+        BridgeState::initialize(&config.state_path).unwrap();
+
+        let listener = UnixListener::bind(&config.socket_path).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut byte = [0_u8; 1];
+            let _ = stream.read(&mut byte);
+        });
+        let mut runtime = BridgeRuntime::open(config.clone()).unwrap();
+        runtime.client = Some(
+            CoreClient::connect(
+                &config.socket_path,
+                Duration::from_secs(1),
+                config.max_frame_bytes,
+            )
+            .unwrap(),
+        );
+
+        let research_error = runtime.handle_research_source().unwrap_err();
+        assert!(matches!(
+            research_error,
+            RuntimeError::LocalIngress(ClientError::FrameTooLarge)
+        ));
+        assert_eq!(runtime.health.research.status, ResearchLaneStatus::Rejected);
+        assert!(runtime.client.is_some());
+        assert!(runtime.next_connect_not_before.is_none());
+
+        let desk_map_error = runtime.handle_desk_map_source().unwrap_err();
+        assert!(matches!(
+            desk_map_error,
+            RuntimeError::LocalIngress(ClientError::FrameTooLarge)
+        ));
+        assert_eq!(runtime.health.desk_map.status, DeskMapLaneStatus::Rejected);
+        assert!(runtime.client.is_some());
+        assert!(runtime.next_connect_not_before.is_none());
+
+        drop(runtime);
+        server.join().unwrap();
     }
 }

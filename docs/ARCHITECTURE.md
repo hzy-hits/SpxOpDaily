@@ -1,40 +1,47 @@
 # SPX Spark Core architecture
 
-Status: implemented and locally verified migration candidate. Nothing in this
-repository is deployed by the presence of these files.
+Status: the isolated core and normalized bridge run as Oracle system services;
+the report/delivery ownership change remains a separately verified cutover.
+Nothing is deployed merely because a config or unit exists in this repository.
 
 ## Objective
 
-The Rust workspace owns a deliberately small production boundary: accept
-already-normalized market-data envelopes, build one decision-time snapshot,
-apply deterministic readiness rules, persist a manual advisory decision, and
-deliver its notification through one auditable ledger.
+The Rust workspace owns the production control plane: accept already-normalized
+market-data and advisory projections, build one decision-time snapshot, apply
+deterministic readiness rules, schedule the half-hour RTH Desk Map, persist
+manual-advisory and scheduled-report intents, and deliver them through one
+auditable ledger. Python retains provider SDKs and research computation, but it
+does not own report timing, report writing, outbox state or delivery after the
+report-owner switch.
 
 It never places, changes, or cancels an order. The only strategy actions are
 `NO_TRADE` and `MANUAL_CANDIDATE`; `MANUAL_CANDIDATE` is an advisory for a human,
 not an executable order.
 
 ```text
-Python normalized state --> spx-bridge --> Unix socket --> spx-core
-Python research artifact --> spx-bridge --> Unix socket --> spx-core research projection
-                              |                              |
-                              +-- no broker/session owner    +--> append-only
-                                                        |    normalized frames
-                                                        |
-                                                        +--> one SQLite/WAL ledger
-                                                                   |
-                                                                   v
-                                                             spx-delivery
+Python provider sessions / research
+        |
+        +--> atomic normalized state --------+
+        +--> atomic research_context.v2 ------+--> spx-bridge --> spx-core
+        +--> atomic desk_map_projection.v1 ---+                    |
+                                                                   +--> latest projections
+                                                                   +--> append-only frames
+                                                                   +--> SQLite/WAL ledger
+                                                                            ^
+RTH :00/:30 ET --> spx-report --> DeepSeek full eight-section report --------+
+                                                                            |
+                                                                            v
+                                                                      spx-delivery
 
-append-only frames + ledger decisions
-        --> post-close artifact --> Parquet --> Python research
-                                              (DuckDB/HMM/replay)
+append-only frames + ledger lineage
+        --> post-close Replay artifact --> Parquet --> Python/DuckDB/HMM research
 ```
 
-The bridge boundary is intentional. The first migration phase does not connect
-Rust directly to IB Gateway or Schwab. Python retains provider SDK/session
-ownership; `spx-bridge` reads only the atomic normalized projection and
-translates it into the closed, versioned contracts in `spx-domain`.
+The bridge boundary is intentional. Rust does not connect directly to IB
+Gateway or Schwab. Python retains provider SDK/session ownership and writes
+bounded atomic projections; `spx-bridge` translates only those files into the
+closed, versioned contracts in `spx-domain`. It does not import Python modules,
+call a broker, compose a report or enqueue a notification.
 
 Session, provider, readiness and delivery lifecycle semantics are frozen in the
 [state-machine contract](STATE_MACHINES.md). In particular, `MarketSession`
@@ -49,12 +56,43 @@ contains only SPX `GTH` and `RTH`; CME `Globex` metadata and the independent
 | `spx-bridge` | Bounded source reads, provider mapping, durable generation/sequence/pending frame, typed ACK and health | Broker SDKs, strategy generation, notifications, research |
 | `spx-core` | Unix ingress, quote book, decision snapshot, readiness, deterministic policy, health projection and append log | Network delivery, research fitting, orders |
 | `spx-ledger` | The single SQLite/WAL database, owner fencing and legal state transitions | Analytical history or provider connections |
+| `spx-report` | RTH `:00`/`:30` ET schedule, durable desk-map read, DeepSeek writer, full report validation and scheduled-report intent | Provider sessions, HMM fitting, trade decisions, delivery transport |
 | `spx-delivery` | Claim, atomic `InFlight` transition, rendering, transport, retry, receipts, uncertain outcome and DLQ | Strategy decisions or a second outbox database |
-| Python research | Post-close artifacts, Parquet, DuckDB, HMM, replay and backtests | Production readiness overrides or notification delivery |
+| Python provider/research | Broker SDK sessions, atomic normalized/desk/research projections, post-close artifacts, Parquet, DuckDB, HMM, replay and backtests | Report schedule, live report writer, Rust ledger/outbox or notification delivery |
 
-`spx-delivery` is runnable, but outbound I/O is guarded by two independent
-permissions: typed configuration and an explicit CLI flag. Examples remain
-disabled and are not deployment authority.
+`spx-report` and `spx-delivery` each guard outbound I/O with two independent
+permissions: typed configuration and an explicit CLI flag. Checked-in examples
+remain disabled and are not deployment authority.
+
+## Half-hour Desk Map ownership
+
+Python continuously publishes one complete `desk_map_projection.v1` by atomic
+replace. The projection contains typed lifecycle, level, direction, thesis,
+quality and optional embedded `research_context.v2`, plus a deterministic
+eight-section source message. It carries `action_authority=none` and
+`automatic_ordering=false`.
+
+The bridge validates and mirrors that projection into core's durable latest
+file. During RTH, `spx-report` alone owns the `:00` and `:30` ET slots. It reads
+only a fresh, still-valid core projection, checks the stable slot in the ledger
+before a model call, and uses a generation-fenced `report` owner lease. A report
+is stored as `notification_intent.v2` with `scheduled_report` lineage keyed by
+source projection and ET slot; it never invents a trade decision ID.
+
+The writer is fixed to `deepseek-v4-flash` with thinking enabled,
+`reasoning_effort=max`, and provider JSON Output (`response_format=json_object`).
+`flash-max` is an operating mode, not a separate model
+identifier. The provider must return one strict JSON object containing the
+title and all eight non-empty sections: Desk View, Location, Structure, Primary
+Path, Alternative Path, Targets, Execution and Data Quality. Neither the writer
+nor delivery slices by characters or lines. A provider response with
+`finish_reason=length`, missing sections or unknown fields fails closed and is
+not persisted as a completed report.
+
+The old Python timer remains useful after cutover because it refreshes the
+atomic projection. `SPX_RUST_REPORT_OWNER=true` changes only scheduled-report
+ownership: Python persists the projection but does not enqueue the legacy
+report. This is the single-writer fence between the two implementations.
 
 ## Provider and session policy
 
@@ -128,6 +166,11 @@ an explicit replay. Historical attempts and receipts remain immutable. The
 target key and delivery channel are frozen together when the intent enters the
 ledger; changing a same-named runtime adapter cannot reroute old work.
 
+`spx-delivery` claims both decision-linked v1 intents and scheduled-report v2
+intents from the same ledger. For v2 it renders the complete title and eight
+sections; transport limits produce an explicit delivery outcome rather than a
+silently shortened message.
+
 ## Security boundary
 
 - Core accepts local Unix-socket ingress only.
@@ -138,5 +181,8 @@ ledger; changing a same-named runtime adapter cannot reroute old work.
 - Unknown schema versions, enum values and provider states fail closed.
 - Exposure metrics derived from OI or volume remain labeled proxies. The system
   does not claim to know dealer or market-maker inventory.
+- HMM/regime/range content in a Desk Map is labeled advisory context. It may
+  change explanatory text, but cannot create `TradeReady`, bypass readiness,
+  select a contract, or grant order authority.
 - No production deployment, service enablement or network change is authorized
   by this architecture document.

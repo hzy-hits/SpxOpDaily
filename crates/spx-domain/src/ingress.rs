@@ -3,8 +3,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::validation::require_schema;
 use crate::{
-    CORE_ACK_SCHEMA_VERSION, DomainError, EvaluationRequestV1, INGRESS_SCHEMA_VERSION,
-    QuoteBatchV1, ResearchSignalsV1, Token, Validate,
+    CORE_ACK_SCHEMA_VERSION, DeskMapProjectionV1, DomainError, EvaluationRequestV1,
+    INGRESS_SCHEMA_VERSION, QuoteBatchV1, ResearchSignalsV1, Token, Validate,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -35,6 +35,9 @@ pub enum CoreAckDisposition {
     ResearchUpdated,
     ResearchUnchanged,
     ResearchStale,
+    DeskMapUpdated,
+    DeskMapUnchanged,
+    DeskMapStale,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -130,6 +133,7 @@ pub enum IngressMessageV1 {
     QuoteBatch(QuoteBatchV1),
     Evaluate(EvaluationRequestV1),
     ResearchSignals(ResearchSignalsV1),
+    DeskMapProjection(Box<DeskMapProjectionV1>),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -172,6 +176,15 @@ impl Validate for IngressEnvelopeV1 {
                 if signals.generated_at > self.emitted_at {
                     return Err(DomainError::TimeOrder(
                         "research generated_at is after envelope emitted_at",
+                    ));
+                }
+                Ok(())
+            }
+            IngressMessageV1::DeskMapProjection(projection) => {
+                projection.validate()?;
+                if projection.available_at > self.emitted_at {
+                    return Err(DomainError::TimeOrder(
+                        "desk map available_at is after envelope emitted_at",
                     ));
                 }
                 Ok(())

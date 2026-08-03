@@ -1,6 +1,11 @@
 use std::time::Duration;
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use chrono::Utc;
+use hmac::{Hmac, KeyInit as _, Mac as _};
 use serde::{Deserialize, Serialize};
+use sha2::Sha256;
 use spx_domain::DeliveryChannel;
 
 use crate::{DeliveryTarget, RenderedMessage};
@@ -49,7 +54,10 @@ impl Transport for HttpTransport {
         if !endpoint.starts_with("https://") {
             return permanent("endpoint_must_use_https");
         }
-        let payload = payload_for(target, request);
+        let payload = match payload_for(target, request, Utc::now().timestamp()) {
+            Ok(payload) => payload,
+            Err(result) => return result,
+        };
         let mut builder = self
             .agent
             .post(endpoint)
@@ -104,6 +112,10 @@ enum Payload<'a> {
     Feishu {
         msg_type: &'static str,
         content: FeishuContent,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        timestamp: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        sign: Option<String>,
     },
     Webhook {
         event_id: &'a str,
@@ -163,26 +175,50 @@ impl ProviderCode {
     }
 }
 
-fn payload_for<'a>(target: &DeliveryTarget, request: &'a TransportRequest) -> Payload<'a> {
-    match target {
+fn payload_for<'a>(
+    target: &DeliveryTarget,
+    request: &'a TransportRequest,
+    timestamp: i64,
+) -> Result<Payload<'a>, TransportResult> {
+    Ok(match target {
         DeliveryTarget::Bark(_) => Payload::Bark {
             title: &request.message.title,
             body: &request.message.body,
             group: "SPX Spark",
         },
-        DeliveryTarget::Feishu(_) => Payload::Feishu {
-            msg_type: "text",
-            content: FeishuContent {
-                text: format!("{}\n\n{}", request.message.title, request.message.body),
-            },
-        },
+        DeliveryTarget::Feishu(target) => {
+            let (timestamp, sign) = if let Some(secret_env) = &target.secret_env {
+                let secret = std::env::var(secret_env)
+                    .map_err(|_| permanent("feishu_secret_unavailable"))?;
+                let timestamp_text = timestamp.to_string();
+                let signature = feishu_signature(&secret, timestamp)
+                    .map_err(|()| permanent("feishu_signing_failed"))?;
+                (Some(timestamp_text), Some(signature))
+            } else {
+                (None, None)
+            };
+            Payload::Feishu {
+                msg_type: "text",
+                content: FeishuContent {
+                    text: format!("{}\n\n{}", request.message.title, request.message.body),
+                },
+                timestamp,
+                sign,
+            }
+        }
         DeliveryTarget::Webhook(_) => Payload::Webhook {
             event_id: &request.event_id,
             idempotency_key: &request.idempotency_key,
             title: &request.message.title,
             body: &request.message.body,
         },
-    }
+    })
+}
+
+fn feishu_signature(secret: &str, timestamp: i64) -> Result<String, ()> {
+    let string_to_sign = format!("{timestamp}\n{secret}");
+    let mac = Hmac::<Sha256>::new_from_slice(string_to_sign.as_bytes()).map_err(|_| ())?;
+    Ok(BASE64_STANDARD.encode(mac.finalize().into_bytes()))
 }
 
 fn classify_error(error: &ureq::Error) -> TransportResult {
@@ -279,6 +315,14 @@ mod tests {
         assert_eq!(
             missing.outcome(DeliveryChannel::Bark),
             ProviderAckOutcome::Missing
+        );
+    }
+
+    #[test]
+    fn feishu_signature_matches_the_existing_production_contract() {
+        assert_eq!(
+            feishu_signature("secret", 1_700_000_000).unwrap(),
+            "fiWS2+gh28DOydAv7hzONH/mDn9+b1Y4Y5ivXWXy8vA="
         );
     }
 }

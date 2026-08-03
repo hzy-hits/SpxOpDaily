@@ -12,6 +12,9 @@ use spx_ledger::{
 use thiserror::Error;
 use uuid::Uuid;
 
+use crate::desk_map_projection::{
+    DeskMapDisposition, DeskMapProjectionError, DeskMapProjectionStore,
+};
 use crate::projection::{ProjectionError, ProjectionStore};
 use crate::quote_book::{ApplyBatch, QuoteBook, QuoteBookError};
 use crate::raw_log::{AppendDurability, RawLog, RawLogError};
@@ -35,6 +38,8 @@ pub enum CoreError {
     Projection(#[from] ProjectionError),
     #[error("research projection error: {0}")]
     ResearchProjection(#[from] ResearchProjectionError),
+    #[error("desk map projection error: {0}")]
+    DeskMapProjection(#[from] DeskMapProjectionError),
     #[error("invalid owner lease configuration")]
     OwnerLeaseConfiguration,
 }
@@ -58,6 +63,10 @@ pub enum CoreOutcome {
     ResearchSignals {
         message_id: Token,
         disposition: ResearchDisposition,
+    },
+    DeskMapProjection {
+        message_id: Token,
+        disposition: DeskMapDisposition,
     },
 }
 
@@ -92,6 +101,7 @@ pub struct CoreEngine {
     raw_log: RawLog,
     projection: ProjectionStore,
     research_projection: ResearchProjectionStore,
+    desk_map_projection: DeskMapProjectionStore,
     owner_released: bool,
 }
 
@@ -114,6 +124,7 @@ impl CoreEngine {
         )?;
         let projection = ProjectionStore::new(&config.projection_path);
         let research_projection = ResearchProjectionStore::open(&config.research_projection_path)?;
+        let desk_map_projection = DeskMapProjectionStore::open(&config.desk_map_projection_path)?;
         let quote_book = QuoteBook::new(
             config.quote_cache_retention_seconds,
             config.quote_cache_max_entries,
@@ -134,6 +145,7 @@ impl CoreEngine {
             raw_log,
             projection,
             research_projection,
+            desk_map_projection,
             owner_released: false,
         })
     }
@@ -152,9 +164,9 @@ impl CoreEngine {
         self.renew_owner_if_needed(processing_at)?;
         let durability = match &envelope.message {
             IngressMessageV1::QuoteBatch(_) => AppendDurability::Buffered,
-            IngressMessageV1::Evaluate(_) | IngressMessageV1::ResearchSignals(_) => {
-                AppendDurability::Durable
-            }
+            IngressMessageV1::Evaluate(_)
+            | IngressMessageV1::ResearchSignals(_)
+            | IngressMessageV1::DeskMapProjection(_) => AppendDurability::Durable,
         };
         let payload_sha256 = self.raw_log.append(&envelope, processing_at, durability)?;
         if envelope.emitted_at > processing_at {
@@ -195,6 +207,17 @@ impl CoreEngine {
                     self.research_projection
                         .apply(message_id.clone(), signals, processing_at)?;
                 CoreOutcome::ResearchSignals {
+                    message_id,
+                    disposition,
+                }
+            }
+            IngressMessageV1::DeskMapProjection(projection) => {
+                let disposition = self.desk_map_projection.apply(
+                    message_id.clone(),
+                    *projection,
+                    processing_at,
+                )?;
+                CoreOutcome::DeskMapProjection {
                     message_id,
                     disposition,
                 }

@@ -19,6 +19,8 @@ pub struct BridgeConfig {
     pub source_snapshot_path: PathBuf,
     #[serde(default)]
     pub research_signal_path: Option<PathBuf>,
+    #[serde(default)]
+    pub desk_map_projection_path: Option<PathBuf>,
     pub ibkr_health_path: PathBuf,
     pub socket_path: PathBuf,
     pub state_path: PathBuf,
@@ -68,6 +70,13 @@ impl BridgeConfig {
         {
             return Err(ConfigError::Invalid("all runtime paths must be absolute"));
         }
+        if self
+            .desk_map_projection_path
+            .as_ref()
+            .is_some_and(|path| !path.is_absolute())
+        {
+            return Err(ConfigError::Invalid("all runtime paths must be absolute"));
+        }
         if self.state_path == self.health_path
             || self.state_path == self.source_snapshot_path
             || self.health_path == self.source_snapshot_path
@@ -75,6 +84,12 @@ impl BridgeConfig {
                 path == &self.source_snapshot_path
                     || path == &self.state_path
                     || path == &self.health_path
+            })
+            || self.desk_map_projection_path.as_ref().is_some_and(|path| {
+                path == &self.source_snapshot_path
+                    || path == &self.state_path
+                    || path == &self.health_path
+                    || self.research_signal_path.as_ref() == Some(path)
             })
         {
             return Err(ConfigError::Invalid(
@@ -123,6 +138,7 @@ mod tests {
         BridgeConfig {
             source_snapshot_path: "/source/state.json".into(),
             research_signal_path: Some("/source/research.json".into()),
+            desk_map_projection_path: Some("/source/desk-map.json".into()),
             ibkr_health_path: "/source/ibkr.json".into(),
             socket_path: "/run/core.sock".into(),
             state_path: "/state/bridge.json".into(),

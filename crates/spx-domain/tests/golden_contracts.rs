@@ -171,11 +171,11 @@ fn experimental_research_signals_are_valid_and_canonical() {
         "experimental_research_signals.json",
         "eafe338f1f4adb1029252cedc2f94383012f55aef15a7e2852503ec3abf927c1",
     );
-    assert!(signals.market_regime.is_some());
-    assert_eq!(signals.range_forecasts.len(), 3);
+    assert!(signals.market_regime().is_some());
+    assert_eq!(signals.range_forecasts().len(), 3);
     assert_eq!(
         signals
-            .range_forecasts
+            .range_forecasts()
             .iter()
             .map(|forecast| forecast.forecast_kind)
             .collect::<Vec<_>>(),
@@ -184,6 +184,86 @@ fn experimental_research_signals_are_valid_and_canonical() {
             RangeForecastKind::RiskNeutralClose,
             RangeForecastKind::HmmAdjustedClose,
         ]
+    );
+}
+
+#[test]
+fn oracle_research_context_v2_is_strict_and_valid() {
+    let raw = include_str!("../../../fixtures/domain/v2/research_context.json");
+    let signals: ResearchSignalsV1 = serde_json::from_str(raw).expect("v2 fixture must decode");
+    signals.validate().expect("v2 fixture must validate");
+    assert!(signals.context_v2().is_some());
+    assert!(signals.market_regime().is_none());
+    assert!(signals.range_forecasts().is_empty());
+
+    let mut unknown: serde_json::Value = serde_json::from_str(raw).unwrap();
+    unknown["cross_index_frame"]["unexpected"] = serde_json::json!(true);
+    let error = serde_json::from_value::<ResearchSignalsV1>(unknown)
+        .expect_err("unknown nested v2 fields must fail closed");
+    assert!(error.to_string().contains("did not match any variant"));
+
+    let mut missing_nullable: serde_json::Value = serde_json::from_str(raw).unwrap();
+    missing_nullable.as_object_mut().unwrap().remove("regime");
+    serde_json::from_value::<ResearchSignalsV1>(missing_nullable)
+        .expect_err("required nullable v2 fields must remain explicit");
+
+    let mut degraded_complete: serde_json::Value = serde_json::from_str(raw).unwrap();
+    let returns = degraded_complete["prior_rth_context"]["return_bps"]
+        .as_object_mut()
+        .unwrap();
+    for value in returns.values_mut() {
+        if value.is_null() {
+            *value = serde_json::json!(0.0);
+        }
+    }
+    let degraded_complete: ResearchSignalsV1 =
+        serde_json::from_value(degraded_complete).expect("complete partial context must decode");
+    degraded_complete
+        .validate()
+        .expect("partial can represent quality degradation even with four observed returns");
+}
+
+#[test]
+fn research_context_v2_rejects_cross_session_subcontext_dates() {
+    let raw = include_str!("../../../fixtures/domain/v2/research_context.json");
+
+    let mut mismatched_prior: serde_json::Value = serde_json::from_str(raw).unwrap();
+    mismatched_prior["prior_rth_context"]["for_trading_date"] = serde_json::json!("2026-08-04");
+    let mismatched_prior: ResearchSignalsV1 =
+        serde_json::from_value(mismatched_prior).expect("date remains syntactically valid");
+    assert_eq!(
+        mismatched_prior.validate(),
+        Err(DomainError::Invalid {
+            field: "prior RTH for_trading_date",
+            reason: "does not match the cross-index trading_date_et",
+        })
+    );
+
+    let mut mismatched_regime: serde_json::Value = serde_json::from_str(raw).unwrap();
+    mismatched_regime["regime"]["trading_date_et"] = serde_json::json!("2026-08-02");
+    let mismatched_regime: ResearchSignalsV1 =
+        serde_json::from_value(mismatched_regime).expect("date remains syntactically valid");
+    assert_eq!(
+        mismatched_regime.validate(),
+        Err(DomainError::Invalid {
+            field: "filtered regime trading_date_et",
+            reason: "does not match the cross-index trading_date_et",
+        })
+    );
+
+    let mut mismatched_targets: serde_json::Value = serde_json::from_str(raw).unwrap();
+    for forecast in mismatched_targets["forecasts"].as_array_mut().unwrap() {
+        forecast["target_at"] = serde_json::json!("2026-08-04T20:00:00Z");
+    }
+    mismatched_targets["close_location"]["target_at"] = serde_json::json!("2026-08-04T20:00:00Z");
+    let mismatched_targets: ResearchSignalsV1 =
+        serde_json::from_value(mismatched_targets).expect("timestamps remain syntactically valid");
+    assert_eq!(
+        mismatched_targets.validate(),
+        Err(DomainError::Invalid {
+            field: "research forecast target_at",
+            reason: "does not match the cross-index RTH trading_date_et",
+        })
     );
 }
 

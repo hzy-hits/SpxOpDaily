@@ -26,6 +26,7 @@ pub struct CoreConfig {
     pub raw_log_dir: PathBuf,
     pub projection_path: PathBuf,
     pub research_projection_path: PathBuf,
+    pub desk_map_projection_path: PathBuf,
     pub max_frame_bytes: usize,
     pub max_connections: usize,
     pub raw_segment_max_bytes: u64,
@@ -92,6 +93,10 @@ impl CoreConfig {
         override_path(
             "SPX_CORE_RESEARCH_PROJECTION_PATH",
             &mut config.research_projection_path,
+        );
+        override_path(
+            "SPX_CORE_DESK_MAP_PROJECTION_PATH",
+            &mut config.desk_map_projection_path,
         );
         override_usize("SPX_CORE_MAX_FRAME_BYTES", &mut config.max_frame_bytes)?;
         override_usize("SPX_CORE_MAX_CONNECTIONS", &mut config.max_connections)?;
@@ -219,6 +224,7 @@ impl CoreConfig {
             || self.raw_log_dir.as_os_str().is_empty()
             || self.projection_path.as_os_str().is_empty()
             || self.research_projection_path.as_os_str().is_empty()
+            || self.desk_map_projection_path.as_os_str().is_empty()
         {
             return Err(ConfigError::Invalid("runtime paths must be non-empty"));
         }
@@ -227,12 +233,16 @@ impl CoreConfig {
             || !self.raw_log_dir.is_absolute()
             || !self.projection_path.is_absolute()
             || !self.research_projection_path.is_absolute()
+            || !self.desk_map_projection_path.is_absolute()
         {
             return Err(ConfigError::Invalid("runtime paths must be absolute"));
         }
-        if self.projection_path == self.research_projection_path {
+        if self.projection_path == self.research_projection_path
+            || self.projection_path == self.desk_map_projection_path
+            || self.research_projection_path == self.desk_map_projection_path
+        {
             return Err(ConfigError::Invalid(
-                "core and research projection paths must differ",
+                "core, research, and desk map projection paths must differ",
             ));
         }
         if self.max_frame_bytes == 0 || self.max_frame_bytes > 16 * 1024 * 1024 {
@@ -362,6 +372,7 @@ mod tests {
             raw_log_dir: "/tmp/spx-core-raw".into(),
             projection_path: "/tmp/spx-core-latest.json".into(),
             research_projection_path: "/tmp/spx-core-research.json".into(),
+            desk_map_projection_path: "/tmp/spx-core-desk-map.json".into(),
             max_frame_bytes: 1_048_576,
             max_connections: 8,
             raw_segment_max_bytes: 64 * 1024 * 1024,

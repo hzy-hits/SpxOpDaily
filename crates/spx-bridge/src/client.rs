@@ -123,6 +123,15 @@ fn ack_disposition_matches(
                     | CoreAckDisposition::DuplicateIngress
             )
         ),
+        IngressMessageV1::DeskMapProjection(_) => matches!(
+            disposition,
+            Some(
+                CoreAckDisposition::DeskMapUpdated
+                    | CoreAckDisposition::DeskMapUnchanged
+                    | CoreAckDisposition::DeskMapStale
+                    | CoreAckDisposition::DuplicateIngress
+            )
+        ),
     }
 }
 

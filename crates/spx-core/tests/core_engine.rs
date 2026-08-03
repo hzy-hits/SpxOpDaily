@@ -5,12 +5,12 @@ use spx_core::{
 };
 use spx_domain::{
     AuthenticationState, BookSideV1, CalendarState, CandidateDirection, DeliveryChannel,
-    EntitlementState, EvaluationRequestV1, INGRESS_SCHEMA_VERSION, IngressEnvelopeV1,
-    IngressMessageV1, InstrumentKind, MacroPermission, MarketSession, OperationalState,
-    OptionContractV1, OptionRight, PROVIDER_STATE_SCHEMA_VERSION, PlanState, PositiveF64, Provider,
-    ProviderReasonCode, ProviderStateV1, QUOTE_BATCH_SCHEMA_VERSION, QuoteBatchMode, QuoteBatchV1,
-    QuoteQuality, QuoteV1, ResearchSignalsV1, StrategyAction, StrategyBlockReason, Token,
-    TransportState,
+    DeskMapProjectionV1, EntitlementState, EvaluationRequestV1, INGRESS_SCHEMA_VERSION,
+    IngressEnvelopeV1, IngressMessageV1, InstrumentKind, MacroPermission, MarketSession,
+    OperationalState, OptionContractV1, OptionRight, PROVIDER_STATE_SCHEMA_VERSION, PlanState,
+    PositiveF64, Provider, ProviderReasonCode, ProviderStateV1, QUOTE_BATCH_SCHEMA_VERSION,
+    QuoteBatchMode, QuoteBatchV1, QuoteQuality, QuoteV1, ResearchSignalsV1, StrategyAction,
+    StrategyBlockReason, Token, TransportState,
 };
 use spx_ledger::Ledger;
 use tempfile::TempDir;
@@ -34,6 +34,7 @@ fn config(temp: &TempDir) -> CoreConfig {
         raw_log_dir: temp.path().join("raw"),
         projection_path: temp.path().join("projection/latest.json"),
         research_projection_path: temp.path().join("projection/research.json"),
+        desk_map_projection_path: temp.path().join("projection/desk-map.json"),
         max_frame_bytes: 1_048_576,
         max_connections: 8,
         raw_segment_max_bytes: 64 * 1024 * 1024,
@@ -1349,6 +1350,110 @@ fn experimental_research_updates_only_the_durable_research_projection() {
     assert!(raw.contains("\"kind\":\"research_signals\""));
 
     engine.shutdown().expect("release core owner");
+    let health = Ledger::open(&core_config.ledger_path)
+        .expect("open ledger")
+        .health()
+        .expect("ledger health");
+    assert_eq!(health, spx_ledger::LedgerHealth::default());
+}
+
+#[test]
+fn research_context_v2_updates_and_reopens_the_durable_projection() {
+    let temp = TempDir::new().expect("temp directory");
+    let core_config = config(&temp);
+    let signals: ResearchSignalsV1 = serde_json::from_str(include_str!(
+        "../../../fixtures/domain/v2/research_context.json"
+    ))
+    .expect("research context v2 fixture");
+    let processing_at = signals.generated_at + TimeDelta::seconds(1);
+    let envelope = IngressEnvelopeV1 {
+        schema_version: INGRESS_SCHEMA_VERSION.to_owned(),
+        message_id: token("message:research:v2-test"),
+        emitted_at: signals.generated_at,
+        message: IngressMessageV1::ResearchSignals(signals),
+    };
+    let mut engine = CoreEngine::open(core_config.clone(), processing_at).expect("open core");
+    assert!(matches!(
+        engine
+            .process(envelope, processing_at)
+            .expect("research context v2 accepted"),
+        CoreOutcome::ResearchSignals {
+            disposition: spx_core::ResearchDisposition::Updated,
+            ..
+        }
+    ));
+    engine.shutdown().expect("release core owner");
+    drop(engine);
+
+    let projection: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(&core_config.research_projection_path).expect("research projection"),
+    )
+    .expect("valid research projection");
+    assert_eq!(
+        projection["schema_version"],
+        "spx_latest_research_projection.v1"
+    );
+    assert_eq!(
+        projection["signals"]["schema_version"],
+        "research_context.v2"
+    );
+    assert_eq!(
+        projection["signals"]["document_id"],
+        "research-context:35b62b513a9e9327cab0e069"
+    );
+
+    CoreEngine::open(core_config, processing_at + TimeDelta::seconds(1))
+        .expect("core reopens a persisted v2 research projection");
+}
+
+#[test]
+fn desk_map_projection_updates_only_the_rust_report_source_projection() {
+    let temp = TempDir::new().expect("temp directory");
+    let core_config = config(&temp);
+    let projection: DeskMapProjectionV1 = serde_json::from_str(include_str!(
+        "../../../fixtures/domain/v1/desk_map_projection.json"
+    ))
+    .expect("desk map fixture");
+    let expected_projection_id = projection.projection_id.as_str().to_owned();
+    let processing_at = projection.available_at + TimeDelta::seconds(1);
+    let envelope = IngressEnvelopeV1 {
+        schema_version: INGRESS_SCHEMA_VERSION.to_owned(),
+        message_id: token("message:desk-map:test"),
+        emitted_at: projection.available_at,
+        message: IngressMessageV1::DeskMapProjection(Box::new(projection)),
+    };
+    let mut engine = CoreEngine::open(core_config.clone(), processing_at).expect("open core");
+    assert!(matches!(
+        engine
+            .process(envelope, processing_at)
+            .expect("desk map accepted"),
+        CoreOutcome::DeskMapProjection {
+            disposition: spx_core::DeskMapDisposition::Updated,
+            ..
+        }
+    ));
+    engine.shutdown().expect("release core owner");
+    drop(engine);
+
+    let latest: spx_core::LatestDeskMapProjectionV1 = serde_json::from_slice(
+        &std::fs::read(&core_config.desk_map_projection_path).expect("desk map projection"),
+    )
+    .expect("valid latest desk map projection");
+    latest.validate().expect("latest projection validates");
+    assert_eq!(
+        latest.projection.projection_id.as_str(),
+        expected_projection_id
+    );
+    let research_context = latest
+        .projection
+        .research_context
+        .as_ref()
+        .expect("core must persist the embedded research context atomically");
+    assert_eq!(research_context.schema_version, "research_context.v2");
+    assert_eq!(
+        Some(&research_context.document_id),
+        latest.projection.research_context_document_id.as_ref()
+    );
     let health = Ledger::open(&core_config.ledger_path)
         .expect("open ledger")
         .health()

@@ -1,13 +1,16 @@
 use chrono::{DateTime, TimeDelta, Utc};
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
-use spx_domain::{DeliveryChannel, NotificationIntentV1, Token, Validate};
+use spx_domain::{
+    DeliveryChannel, NotificationIntentV1, NotificationIntentV2, NotificationLineageV2, Token,
+    Validate,
+};
 use uuid::Uuid;
 
 use crate::db::micros;
 use crate::receipt::{Receipt, insert_receipt};
 use crate::{
-    BeginTransport, ClaimHandle, ClaimedDelivery, Ledger, LedgerError, OwnerLease, OwnerRole,
-    RecoverySummary,
+    BeginTransport, ClaimHandle, ClaimedDelivery, ClaimedNotificationIntent, Ledger, LedgerError,
+    OwnerLease, OwnerRole, RecoverySummary,
 };
 
 impl Ledger {
@@ -116,7 +119,7 @@ impl Ledger {
         let selected = transaction
             .query_row(
                 "SELECT t.target_id, t.event_id, t.target_key, t.channel, t.attempt_count,
-                        t.replay_generation, e.payload_json
+                        e.lane, e.payload_json
                  FROM notification_targets t
                  JOIN notification_events e ON e.event_id = t.event_id
                  WHERE t.status = 'pending'
@@ -133,13 +136,13 @@ impl Ledger {
                         row.get::<_, String>(2)?,
                         row.get::<_, String>(3)?,
                         row.get::<_, i64>(4)?,
-                        row.get::<_, i64>(5)?,
+                        row.get::<_, String>(5)?,
                         row.get::<_, String>(6)?,
                     ))
                 },
             )
             .optional()?;
-        let Some((target_id, event_id, target_key, channel, attempt_count, _, payload_json)) =
+        let Some((target_id, event_id, target_key, channel, attempt_count, lane, payload_json)) =
             selected
         else {
             transaction.commit()?;
@@ -170,8 +173,7 @@ impl Ledger {
         if changed != 1 {
             return Err(LedgerError::ClaimLost(target_id));
         }
-        let intent: NotificationIntentV1 = serde_json::from_str(&payload_json)?;
-        intent.validate()?;
+        let intent = parse_claimed_intent(&lane, &payload_json)?;
         let target_key = Token::new(target_key, "target_key")?;
         let channel = parse_channel(&channel)?;
         let handle = ClaimHandle {
@@ -203,27 +205,45 @@ impl Ledger {
         lease: &OwnerLease,
         claimed: &ClaimedDelivery,
         now: DateTime<Utc>,
+        transport_lease_duration: TimeDelta,
     ) -> Result<BeginTransport, LedgerError> {
+        let transport_lease_until = now
+            .checked_add_signed(transport_lease_duration)
+            .ok_or(LedgerError::InvalidTimestamp)?;
+        if transport_lease_until <= now {
+            return Err(LedgerError::InvalidValue("transport lease duration"));
+        }
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         Self::require_owner_in_transaction(&transaction, lease, OwnerRole::Delivery, now)?;
-        Self::require_claim_in_transaction(&transaction, lease, &claimed.handle, now)?;
-        let state = transaction.query_row(
-            "SELECT e.event_id, e.expires_at_us,
+        if claimed.handle.owner_generation != lease.generation {
+            return Err(LedgerError::ClaimLost(claimed.handle.target_id.clone()));
+        }
+        let state = transaction
+            .query_row(
+                "SELECT t.status, e.expires_at_us,
                     EXISTS(SELECT 1 FROM notification_cancellations c WHERE c.event_id = e.event_id)
              FROM notification_targets t
              JOIN notification_events e ON e.event_id = t.event_id
              WHERE t.target_id = ?1",
-            [&claimed.handle.target_id],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, bool>(2)?,
-                ))
-            },
-        )?;
-        let outcome = if state.2 {
+                [&claimed.handle.target_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, bool>(2)?,
+                    ))
+                },
+            )
+            .optional()?
+            .ok_or_else(|| LedgerError::ClaimLost(claimed.handle.target_id.clone()))?;
+        let outcome = if state.0 == "cancelled" {
+            BeginTransport::Cancelled
+        } else if state.0 == "expired" {
+            BeginTransport::Expired
+        } else if state.0 != "claimed" {
+            return Err(LedgerError::ClaimLost(claimed.handle.target_id.clone()));
+        } else if state.2 {
             terminal_without_transport(
                 &transaction,
                 &claimed.handle,
@@ -246,46 +266,9 @@ impl Ledger {
             )?;
             BeginTransport::Expired
         } else {
-            let attempt_id = Uuid::now_v7().to_string();
-            let changed = transaction.execute(
-                "UPDATE notification_targets SET
-                    status = 'in_flight', attempt_count = attempt_count + 1,
-                    current_attempt_id = ?2, updated_at_us = ?1
-                 WHERE target_id = ?3 AND status = 'claimed'
-                   AND claim_token = ?4 AND lease_sequence = ?5
-                   AND attempt_count + 1 = ?6 AND attempt_count < max_attempts",
-                params![
-                    micros(now),
-                    attempt_id,
-                    claimed.handle.target_id,
-                    claimed.handle.claim_token,
-                    claimed.handle.lease_sequence,
-                    i64::from(claimed.attempt_no)
-                ],
-            )?;
-            if changed != 1 {
-                return Err(LedgerError::ClaimLost(claimed.handle.target_id.clone()));
-            }
-            let inserted = transaction.execute(
-                "INSERT INTO delivery_attempts (
-                    attempt_id, target_id, channel, claim_token, owner_generation,
-                    replay_generation, attempt_no, lease_sequence, idempotency_key, started_at_us
-                 ) SELECT ?1, target_id, channel, ?2, ?3, replay_generation, ?4, ?5, ?6, ?7
-                   FROM notification_targets WHERE target_id = ?8 AND status = 'in_flight'",
-                params![
-                    attempt_id,
-                    claimed.handle.claim_token,
-                    lease.generation,
-                    i64::from(claimed.attempt_no),
-                    claimed.handle.lease_sequence,
-                    claimed.idempotency_key,
-                    micros(now),
-                    claimed.handle.target_id
-                ],
-            )?;
-            if inserted != 1 {
-                return Err(LedgerError::ClaimLost(claimed.handle.target_id.clone()));
-            }
+            Self::require_claim_in_transaction(&transaction, lease, &claimed.handle, now)?;
+            let attempt_id =
+                start_transport_attempt(&transaction, lease, claimed, now, transport_lease_until)?;
             BeginTransport::Started { attempt_id }
         };
         transaction.commit()?;
@@ -392,6 +375,57 @@ impl Ledger {
     }
 }
 
+fn start_transport_attempt(
+    transaction: &Transaction<'_>,
+    lease: &OwnerLease,
+    claimed: &ClaimedDelivery,
+    now: DateTime<Utc>,
+    transport_lease_until: DateTime<Utc>,
+) -> Result<String, LedgerError> {
+    let attempt_id = Uuid::now_v7().to_string();
+    let changed = transaction.execute(
+        "UPDATE notification_targets SET
+            status = 'in_flight', attempt_count = attempt_count + 1,
+            current_attempt_id = ?2, lease_until_us = ?3, updated_at_us = ?1
+         WHERE target_id = ?4 AND status = 'claimed'
+           AND claim_token = ?5 AND lease_sequence = ?6
+           AND attempt_count + 1 = ?7 AND attempt_count < max_attempts",
+        params![
+            micros(now),
+            attempt_id,
+            micros(transport_lease_until),
+            claimed.handle.target_id,
+            claimed.handle.claim_token,
+            claimed.handle.lease_sequence,
+            i64::from(claimed.attempt_no)
+        ],
+    )?;
+    if changed != 1 {
+        return Err(LedgerError::ClaimLost(claimed.handle.target_id.clone()));
+    }
+    let inserted = transaction.execute(
+        "INSERT INTO delivery_attempts (
+            attempt_id, target_id, channel, claim_token, owner_generation,
+            replay_generation, attempt_no, lease_sequence, idempotency_key, started_at_us
+         ) SELECT ?1, target_id, channel, ?2, ?3, replay_generation, ?4, ?5, ?6, ?7
+           FROM notification_targets WHERE target_id = ?8 AND status = 'in_flight'",
+        params![
+            attempt_id,
+            claimed.handle.claim_token,
+            lease.generation,
+            i64::from(claimed.attempt_no),
+            claimed.handle.lease_sequence,
+            claimed.idempotency_key,
+            micros(now),
+            claimed.handle.target_id
+        ],
+    )?;
+    if inserted != 1 {
+        return Err(LedgerError::ClaimLost(claimed.handle.target_id.clone()));
+    }
+    Ok(attempt_id)
+}
+
 fn expire_due(transaction: &Transaction<'_>, now: DateTime<Utc>) -> Result<(), LedgerError> {
     let targets = {
         let mut statement = transaction.prepare(
@@ -463,5 +497,32 @@ fn parse_channel(channel: &str) -> Result<DeliveryChannel, LedgerError> {
         "feishu" => Ok(DeliveryChannel::Feishu),
         "webhook" => Ok(DeliveryChannel::Webhook),
         _ => Err(LedgerError::InvalidValue("delivery channel")),
+    }
+}
+
+fn parse_claimed_intent(
+    lane: &str,
+    payload_json: &str,
+) -> Result<ClaimedNotificationIntent, LedgerError> {
+    match lane {
+        "trade_ready" => {
+            let intent: NotificationIntentV1 = serde_json::from_str(payload_json)?;
+            intent.validate()?;
+            Ok(ClaimedNotificationIntent::TradeReady(intent))
+        }
+        "scheduled_report" => {
+            let intent: NotificationIntentV2 = serde_json::from_str(payload_json)?;
+            intent.validate()?;
+            if !matches!(
+                &intent.lineage,
+                NotificationLineageV2::ScheduledReport { .. }
+            ) {
+                return Err(LedgerError::InvalidValue(
+                    "scheduled report payload lineage",
+                ));
+            }
+            Ok(ClaimedNotificationIntent::ScheduledReport(intent))
+        }
+        _ => Err(LedgerError::InvalidValue("unsupported notification lane")),
     }
 }

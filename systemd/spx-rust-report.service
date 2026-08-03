@@ -1,0 +1,52 @@
+[Unit]
+Description=SPX Spark Rust half-hour RTH desk report writer
+Requires=spx-rust-core-shadow.service
+After=network-online.target spx-rust-core-shadow.service
+Wants=network-online.target
+ConditionPathExists=/opt/spx-spark-core-shadow/current/bin/spx-report
+ConditionPathExists=/etc/spx-spark-core-shadow/report.toml
+ConditionPathExists=/etc/spx-spark-core-shadow/report.env
+ConditionPathExists=/etc/spx-spark-core-shadow/rust-report-owner.enabled
+StartLimitIntervalSec=60s
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+UMask=0077
+StateDirectory=spx-spark-report-shadow
+StateDirectoryMode=0700
+ConfigurationDirectory=spx-spark-core-shadow
+ConfigurationDirectoryMode=0750
+Environment=RUST_LOG=info
+EnvironmentFile=/etc/spx-spark-core-shadow/report.env
+ExecStartPre=/opt/spx-spark-core-shadow/current/bin/spx-report check-config --config /etc/spx-spark-core-shadow/report.toml
+ExecStart=/opt/spx-spark-core-shadow/current/bin/spx-report run --config /etc/spx-spark-core-shadow/report.toml --allow-network
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectClock=true
+ProtectControlGroups=true
+ProtectHome=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectSystem=strict
+ReadOnlyPaths=/var/lib/spx-spark-core-shadow/latest
+ReadWritePaths=/var/lib/spx-spark-core-shadow/ledger /var/lib/spx-spark-report-shadow
+InaccessiblePaths=/run/spx-spark-core-shadow
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+CapabilityBoundingSet=
+SystemCallArchitectures=native
+MemoryMax=512M
+TasksMax=32
+
+[Install]
+WantedBy=multi-user.target

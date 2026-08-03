@@ -1,5 +1,6 @@
 source_snapshot_path = "/srv/data/spx-spark/data/latest/state.json"
 research_signal_path = "/srv/data/spx-spark/data/latest/experimental_research_signals.json"
+desk_map_projection_path = "/srv/data/spx-spark/data/latest/desk_map_projection.json"
 ibkr_health_path = "/srv/data/spx-spark/data/latest/ibkr_stream_health.json"
 socket_path = "/run/spx-spark-core/core.sock"
 state_path = "/var/lib/spx-spark-bridge/state.json"

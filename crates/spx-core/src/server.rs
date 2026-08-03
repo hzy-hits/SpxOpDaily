@@ -281,6 +281,14 @@ fn accepted_ack(message_id: Token, outcome: &CoreOutcome) -> CoreAckV1 {
             },
             None,
         ),
+        CoreOutcome::DeskMapProjection { disposition, .. } => (
+            match disposition {
+                crate::DeskMapDisposition::Updated => CoreAckDisposition::DeskMapUpdated,
+                crate::DeskMapDisposition::Unchanged => CoreAckDisposition::DeskMapUnchanged,
+                crate::DeskMapDisposition::Stale => CoreAckDisposition::DeskMapStale,
+            },
+            None,
+        ),
     };
     CoreAckV1::accepted(message_id, disposition, decision_id)
 }

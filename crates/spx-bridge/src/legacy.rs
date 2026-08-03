@@ -6,7 +6,7 @@ use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use spx_domain::{ResearchSignalsV1, Validate};
+use spx_domain::{DeskDataQuality, DeskMapProjectionV1, ResearchSignalsV1, Token, Validate};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -26,6 +26,20 @@ pub enum LegacyError {
 #[derive(Debug, Clone)]
 pub struct LegacyDocument {
     pub snapshot: LegacySnapshot,
+    pub fingerprint: String,
+    pub byte_len: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct LegacyResearchDocument {
+    pub signals: ResearchSignalsV1,
+    pub fingerprint: String,
+    pub byte_len: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct LegacyDeskMapDocument {
+    pub projection: DeskMapProjectionV1,
     pub fingerprint: String,
     pub byte_len: usize,
 }
@@ -141,7 +155,7 @@ pub fn read_ibkr_health(path: &Path, maximum: u64) -> Result<LegacyIbkrHealth, L
 pub fn read_research_signals(
     path: &Path,
     maximum: u64,
-) -> Result<(ResearchSignalsV1, String), LegacyError> {
+) -> Result<LegacyResearchDocument, LegacyError> {
     let metadata = std::fs::metadata(path).map_err(LegacyError::Metadata)?;
     if metadata.len() > maximum {
         return Err(LegacyError::Oversized);
@@ -160,7 +174,88 @@ pub fn read_research_signals(
             error,
         )))
     })?;
-    Ok((signals, hex_digest(&bytes)))
+    Ok(LegacyResearchDocument {
+        signals,
+        fingerprint: hex_digest(&bytes),
+        byte_len: bytes.len(),
+    })
+}
+
+pub fn read_desk_map_projection(
+    path: &Path,
+    maximum: u64,
+) -> Result<LegacyDeskMapDocument, LegacyError> {
+    let metadata = std::fs::metadata(path).map_err(LegacyError::Metadata)?;
+    if metadata.len() > maximum {
+        return Err(LegacyError::Oversized);
+    }
+    let mut bytes = Vec::with_capacity(usize::try_from(metadata.len()).unwrap_or(0));
+    File::open(path)
+        .and_then(|file| file.take(maximum.saturating_add(1)).read_to_end(&mut bytes))
+        .map_err(LegacyError::Read)?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > maximum {
+        return Err(LegacyError::Oversized);
+    }
+    let projection = decode_desk_map_projection(&bytes)?;
+    Ok(LegacyDeskMapDocument {
+        projection,
+        fingerprint: hex_digest(&bytes),
+        byte_len: bytes.len(),
+    })
+}
+
+fn decode_desk_map_projection(bytes: &[u8]) -> Result<DeskMapProjectionV1, LegacyError> {
+    let mut raw: Value = serde_json::from_slice(bytes)?;
+    match decode_and_validate_desk_map(raw.clone()) {
+        Ok(projection) => Ok(projection),
+        Err(original) => {
+            let Some(document) = raw.as_object_mut() else {
+                return Err(original);
+            };
+            let research_field_present = document.contains_key("research_context");
+            let embedded_research = document
+                .get("research_context")
+                .is_some_and(|value| !value.is_null())
+                || document
+                    .get("research_context_document_id")
+                    .is_some_and(|value| !value.is_null());
+            if !research_field_present || !embedded_research {
+                return Err(original);
+            }
+
+            document.insert("research_context".to_owned(), Value::Null);
+            document.insert("research_context_document_id".to_owned(), Value::Null);
+            let mut projection = decode_and_validate_desk_map(raw)?;
+            projection.research_context = None;
+            projection.research_context_document_id = None;
+            if projection.quality == DeskDataQuality::Ready {
+                projection.quality = DeskDataQuality::Degraded;
+            }
+            let reason = Token::new(
+                "research_context_contract_invalid",
+                "desk map quality reason",
+            )
+            .map_err(domain_as_json)?;
+            if !projection.quality_reasons.contains(&reason) {
+                projection.quality_reasons.push(reason);
+            }
+            projection.validate().map_err(domain_as_json)?;
+            Ok(projection)
+        }
+    }
+}
+
+fn decode_and_validate_desk_map(raw: Value) -> Result<DeskMapProjectionV1, LegacyError> {
+    let projection: DeskMapProjectionV1 = serde_json::from_value(raw)?;
+    projection.validate().map_err(domain_as_json)?;
+    Ok(projection)
+}
+
+fn domain_as_json(error: spx_domain::DomainError) -> LegacyError {
+    LegacyError::Json(serde_json::Error::io(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        error,
+    )))
 }
 
 fn hex_digest(bytes: &[u8]) -> String {
@@ -208,9 +303,120 @@ mod tests {
             "../../../fixtures/domain/v1/experimental_research_signals.json"
         ))
         .unwrap();
-        let (signals, fingerprint) = read_research_signals(file.path(), 1_048_576).unwrap();
-        assert!(signals.market_regime.is_some());
-        assert_eq!(signals.range_forecasts.len(), 3);
-        assert_eq!(fingerprint.len(), 64);
+        let document = read_research_signals(file.path(), 1_048_576).unwrap();
+        assert!(document.signals.market_regime().is_some());
+        assert_eq!(document.signals.range_forecasts().len(), 3);
+        assert_eq!(document.fingerprint.len(), 64);
+        assert_eq!(
+            document.byte_len,
+            usize::try_from(file.as_file().metadata().unwrap().len()).unwrap()
+        );
+    }
+
+    #[test]
+    fn oracle_research_context_v2_is_bounded_and_validated() {
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(include_bytes!(
+            "../../../fixtures/domain/v2/research_context.json"
+        ))
+        .unwrap();
+        let document = read_research_signals(file.path(), 1_048_576).unwrap();
+        assert_eq!(document.signals.schema_version, "research_context.v2");
+        assert!(document.signals.context_v2().is_some());
+    }
+
+    #[test]
+    fn desk_map_projection_is_bounded_and_validated() {
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(include_bytes!(
+            "../../../fixtures/domain/v1/desk_map_projection.json"
+        ))
+        .unwrap();
+        let document = read_desk_map_projection(file.path(), 1_048_576).unwrap();
+        assert_eq!(document.projection.schema_version, "desk_map_projection.v1");
+        let research_context = document
+            .projection
+            .research_context
+            .as_ref()
+            .expect("desk map fixture embeds its research context atomically");
+        assert_eq!(research_context.schema_version, "research_context.v2");
+        assert_eq!(
+            Some(&research_context.document_id),
+            document.projection.research_context_document_id.as_ref()
+        );
+        assert_eq!(document.fingerprint.len(), 64);
+        assert_eq!(
+            document.byte_len,
+            usize::try_from(file.as_file().metadata().unwrap().len()).unwrap()
+        );
+    }
+
+    #[test]
+    fn invalid_optional_research_degrades_without_poisoning_valid_desk_facts() {
+        let mut value: Value = serde_json::from_str(include_str!(
+            "../../../fixtures/domain/v1/desk_map_projection.json"
+        ))
+        .unwrap();
+        value["research_context"]["regime"]["posterior"][0]["probability"] = serde_json::json!(0.9);
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(serde_json::to_string(&value).unwrap().as_bytes())
+            .unwrap();
+
+        let document = read_desk_map_projection(file.path(), 1_048_576).unwrap();
+
+        assert!(document.projection.research_context.is_none());
+        assert!(document.projection.research_context_document_id.is_none());
+        assert_eq!(document.projection.quality, DeskDataQuality::Degraded);
+        assert!(
+            document
+                .projection
+                .quality_reasons
+                .iter()
+                .any(|reason| { reason.as_str() == "research_context_contract_invalid" })
+        );
+    }
+
+    #[test]
+    fn invalid_desk_fact_still_fails_when_optional_research_is_invalid() {
+        let mut value: Value = serde_json::from_str(include_str!(
+            "../../../fixtures/domain/v1/desk_map_projection.json"
+        ))
+        .unwrap();
+        value["research_context"]["regime"]["posterior"][0]["probability"] = serde_json::json!(0.9);
+        value["message"]["execution"] = Value::Null;
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(serde_json::to_string(&value).unwrap().as_bytes())
+            .unwrap();
+
+        assert!(matches!(
+            read_desk_map_projection(file.path(), 1_048_576),
+            Err(LegacyError::Json(_))
+        ));
+    }
+
+    #[test]
+    fn dangling_optional_research_id_degrades_but_missing_field_still_fails() {
+        let mut dangling: Value = serde_json::from_str(include_str!(
+            "../../../fixtures/domain/v1/desk_map_projection.json"
+        ))
+        .unwrap();
+        dangling["research_context"] = Value::Null;
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(serde_json::to_string(&dangling).unwrap().as_bytes())
+            .unwrap();
+
+        let document = read_desk_map_projection(file.path(), 1_048_576).unwrap();
+        assert!(document.projection.research_context.is_none());
+        assert!(document.projection.research_context_document_id.is_none());
+        assert_eq!(document.projection.quality, DeskDataQuality::Degraded);
+
+        dangling.as_object_mut().unwrap().remove("research_context");
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(serde_json::to_string(&dangling).unwrap().as_bytes())
+            .unwrap();
+        assert!(matches!(
+            read_desk_map_projection(file.path(), 1_048_576),
+            Err(LegacyError::Json(_))
+        ));
     }
 }

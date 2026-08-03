@@ -5,14 +5,14 @@ use std::time::Duration;
 use chrono::{DateTime, TimeDelta, Utc};
 use serde::Serialize;
 use spx_ledger::{
-    BeginTransport, ClaimedDelivery, Ledger, LedgerError, LedgerHealth, OwnerLease, OwnerRole,
-    RecoverySummary, Settlement, SettlementWrite,
+    BeginTransport, ClaimedDelivery, ClaimedNotificationIntent, Ledger, LedgerError, LedgerHealth,
+    OwnerLease, OwnerRole, RecoverySummary, Settlement, SettlementWrite,
 };
 use thiserror::Error;
 
 use crate::{
     ConfigError, DeliveryConfig, TargetError, TargetRegistry, Transport, TransportRequest,
-    TransportResult, render_desk_message, transport::HttpTransport,
+    TransportResult, render_desk_message, render_desk_message_v2, transport::HttpTransport,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -258,12 +258,20 @@ impl<T: Transport> DeliveryWorker<T> {
             summary.dead_letter = 1;
             return Ok(summary);
         }
-        let rendered = render_desk_message(&claimed.intent.message);
+        let rendered = match &claimed.intent {
+            ClaimedNotificationIntent::TradeReady(intent) => render_desk_message(&intent.message),
+            ClaimedNotificationIntent::ScheduledReport(intent) => {
+                render_desk_message_v2(&intent.message)
+            }
+        };
         let begin_at = boundary_override.map_or_else(Utc::now, |times| times.0);
-        let attempt_id = match self
-            .ledger
-            .begin_transport(&self.owner, claimed, begin_at)?
-        {
+        let transport_lease_duration = TimeDelta::seconds(self.config.claim_lease_seconds);
+        let attempt_id = match self.ledger.begin_transport(
+            &self.owner,
+            claimed,
+            begin_at,
+            transport_lease_duration,
+        )? {
             BeginTransport::Cancelled => {
                 summary.cancelled = 1;
                 return Ok(summary);
@@ -275,7 +283,7 @@ impl<T: Transport> DeliveryWorker<T> {
             BeginTransport::Started { attempt_id } => attempt_id,
         };
         let request = TransportRequest {
-            event_id: claimed.intent.intent_id.as_str().to_owned(),
+            event_id: claimed.intent.intent_id().as_str().to_owned(),
             idempotency_key: claimed.idempotency_key.clone(),
             message: rendered,
         };
@@ -360,14 +368,16 @@ fn summary_with_recovery(recovery: RecoverySummary) -> WorkerSummary {
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
+    use std::path::PathBuf;
     use std::sync::Mutex;
 
     use chrono::TimeZone;
     use spx_domain::{
-        CandidateDirection, DECISION_SCHEMA_VERSION, DeskMessageV1, ExactLegEvidenceV1,
-        NOTIFICATION_INTENT_SCHEMA_VERSION, NonNegativeF64, NotificationIntentV1,
-        NotificationTargetV1, OptionRight, PositiveF64, Provider, StrategyAction,
-        StrategyDecisionV1, Token,
+        CandidateDirection, DECISION_SCHEMA_VERSION, DeskMessageV1, DeskMessageV2,
+        ExactLegEvidenceV1, NOTIFICATION_INTENT_SCHEMA_VERSION,
+        NOTIFICATION_INTENT_V2_SCHEMA_VERSION, NonNegativeF64, NotificationIntentV1,
+        NotificationIntentV2, NotificationLineageV2, NotificationTargetV1, OptionRight,
+        PositiveF64, Provider, StrategyAction, StrategyDecisionV1, Token,
     };
     use spx_ledger::PersistWrite;
     use tempfile::TempDir;
@@ -438,19 +448,7 @@ mod tests {
                 .unwrap(),
             PersistWrite::Inserted
         );
-        let config = DeliveryConfig {
-            ledger_path,
-            network_enabled: true,
-            poll_interval_millis: 1,
-            owner_lease_seconds: 60,
-            claim_lease_seconds: 20,
-            request_timeout_seconds: 5,
-            retry_schedule_seconds: vec![15, 60],
-            targets: vec![crate::TargetConfig::Bark {
-                key: "bark-primary".to_owned(),
-                endpoint_env: "SPX_TEST_BARK_ENDPOINT".to_owned(),
-            }],
-        };
+        let config = delivery_config(ledger_path);
         let worker = DeliveryWorker::open(
             config,
             true,
@@ -463,6 +461,53 @@ mod tests {
             _temp: temp,
             worker,
             now,
+        }
+    }
+
+    fn scheduled_fixture(result: TransportResult) -> Fixture {
+        let temp = TempDir::new().unwrap();
+        let now = Utc.timestamp_opt(1_785_590_400, 0).unwrap();
+        let ledger_path = temp.path().join("ledger.sqlite");
+        let ledger = Ledger::open(&ledger_path).unwrap();
+        let report_owner = ledger
+            .acquire_owner(
+                OwnerRole::Report,
+                "report-owner-delivery-test",
+                now,
+                TimeDelta::seconds(60),
+            )
+            .unwrap();
+        ledger
+            .persist_scheduled_report(&report_owner, &scheduled_intent(now), now)
+            .unwrap();
+        let worker = DeliveryWorker::open(
+            delivery_config(ledger_path),
+            true,
+            "delivery-owner-test-0001",
+            now,
+            MockTransport::new(result),
+        )
+        .unwrap();
+        Fixture {
+            _temp: temp,
+            worker,
+            now,
+        }
+    }
+
+    fn delivery_config(ledger_path: PathBuf) -> DeliveryConfig {
+        DeliveryConfig {
+            ledger_path,
+            network_enabled: true,
+            poll_interval_millis: 1,
+            owner_lease_seconds: 60,
+            claim_lease_seconds: 20,
+            request_timeout_seconds: 5,
+            retry_schedule_seconds: vec![15, 60],
+            targets: vec![crate::TargetConfig::Bark {
+                key: "bark-primary".to_owned(),
+                endpoint_env: "SPX_TEST_BARK_ENDPOINT".to_owned(),
+            }],
         }
     }
 
@@ -523,6 +568,36 @@ mod tests {
         }
     }
 
+    fn scheduled_intent(now: DateTime<Utc>) -> NotificationIntentV2 {
+        NotificationIntentV2 {
+            schema_version: NOTIFICATION_INTENT_V2_SCHEMA_VERSION.to_owned(),
+            intent_id: token("report-event-1000-et"),
+            semantic_id: token("desk-map-1000-et"),
+            lineage: NotificationLineageV2::ScheduledReport {
+                source_projection_id: token("projection-095959-et"),
+                slot: token("2026-08-04:10:00"),
+            },
+            created_at: now,
+            expires_at: now + TimeDelta::seconds(30),
+            message: DeskMessageV2 {
+                title: token("SPX RTH Desk Map · 10:00 ET"),
+                desk_view: token("Bullish  above VWAP"),
+                location: token("SPX 7568 | OR15 7565"),
+                structure: token("Put 7525 | Flip 7550 | Call 7580"),
+                primary_path: token(&format!("Hold 7565\n{} tail", "x".repeat(3_500))),
+                alternative_path: token("Lose VWAP and rotate to 7550"),
+                targets: token("7580 / 7595"),
+                execution: token("Wait for retest; no chase"),
+                data_quality: token("DEGRADED: clipped mass 28.4%"),
+            },
+            targets: vec![NotificationTargetV1 {
+                key: token("bark-primary"),
+                channel: spx_domain::DeliveryChannel::Bark,
+            }],
+            max_attempts: 5,
+        }
+    }
+
     #[test]
     fn delivered_mock_settles_once_with_deterministic_render() {
         let mut fixture = fixture(TransportResult::Delivered {
@@ -531,9 +606,61 @@ mod tests {
         let summary = fixture.worker.run_once_at(fixture.now).unwrap();
         assert_eq!(summary.delivered, 1);
         assert_eq!(fixture.worker.health().unwrap().delivered, 1);
+        let second = fixture
+            .worker
+            .run_once_at(fixture.now + TimeDelta::seconds(1))
+            .unwrap();
+        assert_eq!(second.claimed, 0);
+        assert_eq!(fixture.worker.transport.calls(), 1);
         let requests = fixture.worker.transport.requests.lock().unwrap();
         assert_eq!(requests.len(), 1);
         assert!(requests[0].message.body.starts_with("Desk View\n"));
+    }
+
+    #[test]
+    fn scheduled_report_is_claimed_rendered_in_full_and_sent_once() {
+        let mut fixture = scheduled_fixture(TransportResult::Delivered {
+            provider_message_id: Some("provider-report-1".to_owned()),
+        });
+        let summary = fixture.worker.run_once_at(fixture.now).unwrap();
+        assert_eq!(summary.delivered, 1);
+        assert_eq!(fixture.worker.health().unwrap().delivered, 1);
+        let second = fixture
+            .worker
+            .run_once_at(fixture.now + TimeDelta::seconds(1))
+            .unwrap();
+        assert_eq!(second.claimed, 0);
+        assert_eq!(fixture.worker.transport.calls(), 1);
+        let requests = fixture.worker.transport.requests.lock().unwrap();
+        let [request] = requests.as_slice() else {
+            panic!("exactly one scheduled report must be sent");
+        };
+        assert_eq!(request.event_id, "report-event-1000-et");
+        assert_eq!(request.message.title, "SPX RTH Desk Map · 10:00 ET");
+        assert!(
+            request
+                .message
+                .body
+                .contains("Desk View\nBullish  above VWAP")
+        );
+        assert!(
+            request
+                .message
+                .body
+                .contains("Location\nSPX 7568 | OR15 7565")
+        );
+        assert!(request.message.body.contains("Structure\nPut 7525"));
+        assert!(request.message.body.contains("Primary Path\nHold 7565\n"));
+        assert!(request.message.body.contains(&"x".repeat(3_500)));
+        assert!(request.message.body.contains("Alternative Path\nLose VWAP"));
+        assert!(request.message.body.contains("Targets\n7580 / 7595"));
+        assert!(request.message.body.contains("Execution\nWait for retest"));
+        assert!(
+            request
+                .message
+                .body
+                .ends_with("Data Quality\nDEGRADED: clipped mass 28.4%")
+        );
     }
 
     #[test]
@@ -619,6 +746,57 @@ mod tests {
     }
 
     #[test]
+    fn cancellation_after_claim_does_not_fail_or_call_transport() {
+        let fixture = fixture(TransportResult::Delivered {
+            provider_message_id: None,
+        });
+        let claimed = fixture
+            .worker
+            .ledger
+            .claim_next(
+                &fixture.worker.owner,
+                fixture.now,
+                TimeDelta::seconds(fixture.worker.config.claim_lease_seconds),
+            )
+            .unwrap()
+            .unwrap();
+        let core = fixture
+            .worker
+            .ledger
+            .acquire_owner(
+                OwnerRole::Core,
+                "core-owner-delivery-test",
+                fixture.now + TimeDelta::seconds(1),
+                TimeDelta::seconds(60),
+            )
+            .unwrap();
+        fixture
+            .worker
+            .ledger
+            .cancel_event(
+                &core,
+                claimed.intent.intent_id().as_str(),
+                "source_cancelled",
+                fixture.now + TimeDelta::seconds(1),
+            )
+            .unwrap();
+
+        let summary = fixture
+            .worker
+            .process_claimed_at(
+                &claimed,
+                Some((
+                    fixture.now + TimeDelta::seconds(2),
+                    fixture.now + TimeDelta::seconds(2),
+                )),
+                RecoverySummary::default(),
+            )
+            .unwrap();
+        assert_eq!(summary.cancelled, 1);
+        assert_eq!(fixture.worker.transport.calls(), 0);
+    }
+
+    #[test]
     fn graceful_shutdown_releases_owner_for_immediate_replacement() {
         let mut fixture = fixture(TransportResult::Delivered {
             provider_message_id: None,
@@ -659,6 +837,7 @@ mod tests {
         fixture.worker.targets = TargetRegistry::new(&[crate::TargetConfig::Feishu {
             key: "bark-primary".to_owned(),
             endpoint_env: "SPX_TEST_FEISHU_ENDPOINT".to_owned(),
+            secret_env: None,
         }])
         .unwrap();
 

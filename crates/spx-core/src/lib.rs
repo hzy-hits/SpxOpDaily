@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 mod config;
+mod desk_map_projection;
 mod engine;
 mod projection;
 mod quote_book;
@@ -10,6 +11,9 @@ mod research_projection;
 mod server;
 
 pub use config::{CoreConfig, NotificationTargetConfig, ReadinessConfig};
+pub use desk_map_projection::{
+    DeskMapDisposition, LATEST_DESK_MAP_PROJECTION_SCHEMA_VERSION, LatestDeskMapProjectionV1,
+};
 pub use engine::{CoreEngine, CoreError, CoreOutcome, PersistDisposition, QuoteDisposition};
 pub use quote_book::{ApplyBatch, QuoteBook, QuoteBookError};
 pub use raw_log::{RawLogPruneReport, prune_raw_log};

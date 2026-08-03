@@ -9,9 +9,12 @@ use rusqlite::{Connection, OpenFlags, TransactionBehavior, params};
 use spx_domain::canonical_json_hash;
 
 use crate::LedgerError;
-use crate::schema::{MIGRATION_1, MIGRATION_BOOTSTRAP};
+use crate::schema::{MIGRATION_1, MIGRATION_2, MIGRATION_BOOTSTRAP};
 
-const MIGRATION_VERSION: i64 = 1;
+const MIGRATION_1_VERSION: i64 = 1;
+const MIGRATION_2_VERSION: i64 = 2;
+const MIGRATION_1_NAME: &str = "initial_operational_ledger";
+const MIGRATION_2_NAME: &str = "scheduled_report_lineage";
 
 #[derive(Debug, Clone)]
 pub struct Ledger {
@@ -58,22 +61,13 @@ impl Ledger {
     fn migrate(&self) -> Result<(), LedgerError> {
         let mut connection = self.connection()?;
         connection.execute_batch(MIGRATION_BOOTSTRAP)?;
-        let expected_checksum = expected_migration_checksum()?;
-        let migrations = read_migrations(&connection)?;
-        if migrations.is_empty() {
-            let transaction =
-                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            transaction.execute_batch(MIGRATION_1)?;
-            transaction.execute(
-                "INSERT INTO schema_migrations(
-                    version, name, checksum_sha256, applied_at_us
-                 ) VALUES (?1, 'initial_operational_ledger', ?2, ?3)",
-                params![MIGRATION_VERSION, expected_checksum, micros(Utc::now())],
-            )?;
-            transaction.commit()?;
-        } else {
-            verify_migrations(&migrations, &expected_checksum)?;
+        let expected = expected_migrations()?;
+        let applied = read_migrations(&connection)?;
+        verify_migration_prefix(&applied, &expected)?;
+        for migration in expected.iter().skip(applied.len()) {
+            apply_migration(&mut connection, migration)?;
         }
+        verify_current_migrations(&read_migrations(&connection)?, &expected)?;
         Ok(())
     }
 
@@ -110,8 +104,7 @@ impl LedgerReader {
         let reader = Self { path };
         let connection = reader.connection()?;
         let migrations = read_migrations(&connection)?;
-        let expected_checksum = expected_migration_checksum()?;
-        verify_migrations(&migrations, &expected_checksum)?;
+        verify_current_migrations(&migrations, &expected_migrations()?)?;
         Ok(reader)
     }
 
@@ -152,8 +145,32 @@ fn quick_check_connection(connection: &Connection) -> Result<(), LedgerError> {
     }
 }
 
-fn expected_migration_checksum() -> Result<String, LedgerError> {
-    Ok(canonical_json_hash(&MIGRATION_1)?)
+#[derive(Debug)]
+struct Migration {
+    version: i64,
+    name: &'static str,
+    sql: &'static str,
+    checksum: String,
+    rebuilds_foreign_key_parent: bool,
+}
+
+fn expected_migrations() -> Result<Vec<Migration>, LedgerError> {
+    Ok(vec![
+        Migration {
+            version: MIGRATION_1_VERSION,
+            name: MIGRATION_1_NAME,
+            sql: MIGRATION_1,
+            checksum: canonical_json_hash(&MIGRATION_1)?,
+            rebuilds_foreign_key_parent: false,
+        },
+        Migration {
+            version: MIGRATION_2_VERSION,
+            name: MIGRATION_2_NAME,
+            sql: MIGRATION_2,
+            checksum: canonical_json_hash(&MIGRATION_2)?,
+            rebuilds_foreign_key_parent: true,
+        },
+    ])
 }
 
 fn read_migrations(connection: &Connection) -> Result<Vec<(i64, String, String)>, LedgerError> {
@@ -170,21 +187,78 @@ fn read_migrations(connection: &Connection) -> Result<Vec<(i64, String, String)>
         .collect::<Result<Vec<_>, _>>()?)
 }
 
-fn verify_migrations(
-    migrations: &[(i64, String, String)],
-    expected_checksum: &str,
+fn verify_migration_prefix(
+    applied: &[(i64, String, String)],
+    expected: &[Migration],
 ) -> Result<(), LedgerError> {
-    if migrations
-        == [(
-            MIGRATION_VERSION,
-            "initial_operational_ledger".to_owned(),
-            expected_checksum.to_owned(),
-        )]
+    if applied.len() > expected.len()
+        || !applied.iter().zip(expected).all(|(actual, expected)| {
+            actual.0 == expected.version
+                && actual.1 == expected.name
+                && actual.2 == expected.checksum
+        })
     {
+        Err(LedgerError::MigrationDrift)
+    } else {
+        Ok(())
+    }
+}
+
+fn verify_current_migrations(
+    applied: &[(i64, String, String)],
+    expected: &[Migration],
+) -> Result<(), LedgerError> {
+    verify_migration_prefix(applied, expected)?;
+    if applied.len() == expected.len() {
         Ok(())
     } else {
         Err(LedgerError::MigrationDrift)
     }
+}
+
+fn apply_migration(connection: &mut Connection, migration: &Migration) -> Result<(), LedgerError> {
+    if migration.rebuilds_foreign_key_parent {
+        connection.execute_batch("PRAGMA foreign_keys = OFF;")?;
+    }
+
+    let result = (|| {
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        transaction.execute_batch(migration.sql)?;
+        if migration.rebuilds_foreign_key_parent {
+            let violations: i64 = transaction.query_row(
+                "SELECT COUNT(*) FROM pragma_foreign_key_check",
+                [],
+                |row| row.get(0),
+            )?;
+            if violations != 0 {
+                return Err(LedgerError::InvalidValue(
+                    "foreign key violation after migration",
+                ));
+            }
+        }
+        transaction.execute(
+            "INSERT INTO schema_migrations(
+                version, name, checksum_sha256, applied_at_us
+             ) VALUES (?1, ?2, ?3, ?4)",
+            params![
+                migration.version,
+                migration.name,
+                migration.checksum,
+                micros(Utc::now())
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    })();
+
+    let restore_foreign_keys = if migration.rebuilds_foreign_key_parent {
+        connection.execute_batch("PRAGMA foreign_keys = ON;")
+    } else {
+        Ok(())
+    };
+    result?;
+    restore_foreign_keys?;
+    Ok(())
 }
 
 pub(crate) fn micros(value: DateTime<Utc>) -> i64 {

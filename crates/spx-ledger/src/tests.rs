@@ -1,8 +1,9 @@
 use chrono::{DateTime, TimeDelta, TimeZone, Utc};
 use spx_domain::{
-    DECISION_SCHEMA_VERSION, DeliveryChannel, DeskMessageV1, NOTIFICATION_INTENT_SCHEMA_VERSION,
-    NotificationIntentV1, NotificationTargetV1, StrategyAction, StrategyBlockReason,
-    StrategyDecisionV1, Token,
+    DECISION_SCHEMA_VERSION, DeliveryChannel, DeskMessageV1, DeskMessageV2,
+    NOTIFICATION_INTENT_SCHEMA_VERSION, NOTIFICATION_INTENT_V2_SCHEMA_VERSION,
+    NotificationIntentV1, NotificationIntentV2, NotificationLineageV2, NotificationTargetV1,
+    StrategyAction, StrategyBlockReason, StrategyDecisionV1, Token, Validate, canonical_json_hash,
 };
 use tempfile::TempDir;
 
@@ -81,6 +82,100 @@ fn intent(now: DateTime<Utc>) -> NotificationIntentV1 {
     }
 }
 
+fn scheduled_report(now: DateTime<Utc>) -> NotificationIntentV2 {
+    NotificationIntentV2 {
+        schema_version: NOTIFICATION_INTENT_V2_SCHEMA_VERSION.to_owned(),
+        intent_id: token("report-event-2026-08-04-1000-et"),
+        semantic_id: token("desk-map-2026-08-04-1000-et"),
+        lineage: NotificationLineageV2::ScheduledReport {
+            source_projection_id: token("projection-2026-08-04-095959-et"),
+            slot: token("2026-08-04:10:00"),
+        },
+        created_at: now,
+        expires_at: now + TimeDelta::minutes(20),
+        message: DeskMessageV2 {
+            title: token("SPX RTH Desk Map · 10:00 ET"),
+            desk_view: token("Bullish above VWAP; neutral inside the opening range."),
+            location: token("SPX 7568; OR15 high 7565; VWAP 7558."),
+            structure: token("Call wall 7580; gamma flip 7550; put wall 7525."),
+            primary_path: token(&"Hold 7565, retest, then probe 7580. ".repeat(90)),
+            alternative_path: token("Lose 7558 and accept below VWAP, then rotate toward 7550."),
+            targets: token("Upside 7580/7595; downside 7550/7525."),
+            execution: token("Observe the retest; no automatic order and no chase."),
+            data_quality: token("Schwab RTH live; surface quality degraded by clipped mass."),
+        },
+        targets: vec![NotificationTargetV1 {
+            key: token("bark-primary"),
+            channel: DeliveryChannel::Bark,
+        }],
+        max_attempts: 3,
+    }
+}
+
+fn create_v1_ledger_with_outbox(path: &std::path::Path) {
+    let connection = rusqlite::Connection::open(path).unwrap();
+    connection
+        .execute_batch(
+            "PRAGMA foreign_keys = ON;
+             PRAGMA trusted_schema = OFF;",
+        )
+        .unwrap();
+    connection
+        .execute_batch(crate::schema::MIGRATION_BOOTSTRAP)
+        .unwrap();
+    connection
+        .execute_batch(crate::schema::MIGRATION_1)
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO schema_migrations (
+                version, name, checksum_sha256, applied_at_us
+             ) VALUES (1, 'initial_operational_ledger', ?1, ?2)",
+            rusqlite::params![
+                canonical_json_hash(&crate::schema::MIGRATION_1).unwrap(),
+                at(0).timestamp_micros()
+            ],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO decisions (
+                decision_id, request_id, action, policy_version, snapshot_id,
+                evaluated_at_us, valid_until_us, payload_json, payload_sha256,
+                writer_generation, created_at_us
+             ) VALUES (
+                'legacy-decision', 'legacy-request', 'manual_candidate', 'policy-v1',
+                'snapshot-v1', 1, 2, '{}', ?1, 1, 1
+             )",
+            ["0".repeat(64)],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO notification_events (
+                event_id, semantic_id, decision_id, lane, occurred_at_us, expires_at_us,
+                payload_json, payload_sha256, target_set_sha256, writer_generation, created_at_us
+             ) VALUES (
+                'legacy-event', 'legacy-semantic', 'legacy-decision', 'trade_ready', 1, 2,
+                '{}', ?1, ?2, 1, 1
+             )",
+            rusqlite::params!["1".repeat(64), "2".repeat(64)],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO notification_targets (
+                target_id, event_id, target_key, channel, status, attempt_count,
+                max_attempts, replay_generation, lease_sequence, next_attempt_at_us, updated_at_us
+             ) VALUES (
+                'legacy-target', 'legacy-event', 'bark-primary', 'bark', 'pending', 0,
+                3, 0, 0, 1, 1
+             )",
+            [],
+        )
+        .unwrap();
+}
+
 fn manual_decision(now: DateTime<Utc>) -> StrategyDecisionV1 {
     let mut decision = decision(now, true);
     decision.direction = Some(spx_domain::CandidateDirection::CallVertical10);
@@ -131,7 +226,10 @@ fn start_transport(
     claimed: &ClaimedDelivery,
     now: DateTime<Utc>,
 ) -> String {
-    match ledger.begin_transport(delivery, claimed, now).unwrap() {
+    match ledger
+        .begin_transport(delivery, claimed, now, TimeDelta::seconds(10))
+        .unwrap()
+    {
         BeginTransport::Started { attempt_id } => attempt_id,
         BeginTransport::Cancelled | BeginTransport::Expired => {
             panic!("seeded live claim must enter transport")
@@ -441,6 +539,255 @@ fn duplicate_decision_and_targets_are_idempotent() {
 }
 
 #[test]
+fn scheduled_report_persists_full_v2_body_without_a_fake_decision() {
+    let temp = TempDir::new().unwrap();
+    let ledger = Ledger::open(temp.path().join("ledger.sqlite")).unwrap();
+    let now = at(0);
+    let core = ledger
+        .acquire_owner(
+            OwnerRole::Core,
+            "core-owner-00000001",
+            now,
+            TimeDelta::minutes(30),
+        )
+        .unwrap();
+    let owner = ledger
+        .acquire_owner(
+            OwnerRole::Report,
+            "report-owner-00001",
+            now,
+            TimeDelta::minutes(30),
+        )
+        .unwrap();
+    let delivery = ledger
+        .acquire_owner(
+            OwnerRole::Delivery,
+            "delivery-owner-0001",
+            now,
+            TimeDelta::minutes(30),
+        )
+        .unwrap();
+    assert_eq!(core.role(), OwnerRole::Core);
+    assert_eq!(owner.role(), OwnerRole::Report);
+    assert_eq!(delivery.role(), OwnerRole::Delivery);
+    let report = scheduled_report(now);
+    report.validate().unwrap();
+
+    assert_eq!(
+        ledger
+            .persist_scheduled_report(&owner, &report, now)
+            .unwrap(),
+        PersistWrite::Inserted
+    );
+    assert!(matches!(
+        ledger.persist_scheduled_report(&core, &report, now),
+        Err(LedgerError::OwnerRoleMismatch {
+            expected: OwnerRole::Report,
+            actual: OwnerRole::Core
+        })
+    ));
+    assert_eq!(
+        ledger
+            .persist_scheduled_report(&owner, &report, now)
+            .unwrap(),
+        PersistWrite::Duplicate
+    );
+
+    let connection = ledger.connection().unwrap();
+    let (decision_id, projection_id, slot, lane, payload_json): (
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        String,
+        String,
+    ) = connection
+        .query_row(
+            "SELECT decision_id, source_projection_id, report_slot, lane, payload_json
+             FROM notification_events WHERE event_id = ?1",
+            [report.intent_id.as_str()],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert!(decision_id.is_none());
+    assert_eq!(
+        projection_id.as_deref(),
+        Some("projection-2026-08-04-095959-et")
+    );
+    assert_eq!(slot.as_deref(), Some("2026-08-04:10:00"));
+    assert_eq!(lane, "scheduled_report");
+    assert_eq!(payload_json, serde_json::to_string(&report).unwrap());
+    let persisted: NotificationIntentV2 = serde_json::from_str(&payload_json).unwrap();
+    assert_eq!(persisted, report);
+    assert!(persisted.message.primary_path.as_str().len() > 3_000);
+    assert_eq!(ledger.health().unwrap().pending, 1);
+
+    let claimed = ledger
+        .claim_next(&delivery, now, TimeDelta::seconds(10))
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        claimed.intent,
+        ClaimedNotificationIntent::ScheduledReport(_)
+    ));
+}
+
+#[test]
+fn fresh_ledger_installs_both_forward_migrations() {
+    let temp = TempDir::new().unwrap();
+    let ledger = Ledger::open(temp.path().join("ledger.sqlite")).unwrap();
+    let migration_count: i64 = ledger
+        .connection()
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(migration_count, 2);
+}
+
+#[test]
+fn scheduled_report_semantic_id_and_et_slot_are_collision_safe() {
+    let temp = TempDir::new().unwrap();
+    let ledger = Ledger::open(temp.path().join("ledger.sqlite")).unwrap();
+    let now = at(0);
+    let owner = ledger
+        .acquire_owner(
+            OwnerRole::Report,
+            "report-owner-00001",
+            now,
+            TimeDelta::minutes(30),
+        )
+        .unwrap();
+    let report = scheduled_report(now);
+    assert!(
+        !ledger
+            .scheduled_report_exists(&owner, report.lineage.slot().unwrap(), now)
+            .unwrap()
+    );
+    ledger
+        .persist_scheduled_report(&owner, &report, now)
+        .unwrap();
+    assert!(
+        ledger
+            .scheduled_report_exists(&owner, report.lineage.slot().unwrap(), now)
+            .unwrap()
+    );
+
+    let mut same_slot = report.clone();
+    same_slot.intent_id = token("different-event-same-slot");
+    same_slot.semantic_id = token("different-semantic-same-slot");
+    assert!(matches!(
+        ledger.persist_scheduled_report(&owner, &same_slot, now),
+        Err(LedgerError::IdentityCollision(_))
+    ));
+
+    let mut same_semantic = report;
+    same_semantic.intent_id = token("different-event-same-semantic");
+    same_semantic.lineage = NotificationLineageV2::ScheduledReport {
+        source_projection_id: token("another-projection"),
+        slot: token("2026-08-04:10:30"),
+    };
+    assert!(matches!(
+        ledger.persist_scheduled_report(&owner, &same_semantic, now),
+        Err(LedgerError::IdentityCollision(_))
+    ));
+    let event_count: i64 = ledger
+        .connection()
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM notification_events", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(event_count, 1);
+}
+
+#[test]
+fn v2_lineage_rejects_missing_lane_specific_source_ids() {
+    let report = scheduled_report(at(0));
+    let mut value = serde_json::to_value(&report).unwrap();
+    value["lineage"]
+        .as_object_mut()
+        .unwrap()
+        .remove("source_projection_id");
+    assert!(serde_json::from_value::<NotificationIntentV2>(value).is_err());
+
+    let mut value = serde_json::to_value(&report).unwrap();
+    value["lineage"]["lane"] = serde_json::json!("trade_ready");
+    value["lineage"]
+        .as_object_mut()
+        .unwrap()
+        .remove("source_projection_id");
+    value["lineage"].as_object_mut().unwrap().remove("slot");
+    assert!(serde_json::from_value::<NotificationIntentV2>(value).is_err());
+
+    let trade_ready = NotificationLineageV2::TradeReady {
+        decision_id: token("decision-manual"),
+    };
+    assert_eq!(trade_ready.lane(), "trade_ready");
+    assert_eq!(
+        trade_ready.decision_id().map(Token::as_str),
+        Some("decision-manual")
+    );
+    assert!(trade_ready.source_projection_id().is_none());
+    assert!(trade_ready.slot().is_none());
+}
+
+#[test]
+fn sqlite_rejects_lane_source_mismatches_even_when_api_is_bypassed() {
+    let temp = TempDir::new().unwrap();
+    let ledger = Ledger::open(temp.path().join("ledger.sqlite")).unwrap();
+    let connection = ledger.connection().unwrap();
+    let trade_ready_error = connection
+        .execute(
+            "INSERT INTO notification_events (
+                event_id, semantic_id, decision_id, source_projection_id, report_slot, lane,
+                occurred_at_us, expires_at_us, payload_json, payload_sha256, target_set_sha256,
+                writer_generation, created_at_us
+             ) VALUES (
+                'invalid-trade-event', 'invalid-trade-semantic', NULL, NULL, NULL,
+                'trade_ready', 1, 2, '{}', ?1, ?2, 1, 1
+             )",
+            rusqlite::params!["0".repeat(64), "1".repeat(64)],
+        )
+        .unwrap_err();
+    assert!(trade_ready_error.to_string().contains("CHECK"));
+
+    let mut report = scheduled_report(at(0));
+    report.intent_id = token("invalid-report-event");
+    report.semantic_id = token("invalid-report-semantic");
+    let payload_json = serde_json::to_string(&report).unwrap();
+    let payload_hash = canonical_json_hash(&report).unwrap();
+    let scheduled_error = connection
+        .execute(
+            "INSERT INTO notification_events (
+                event_id, semantic_id, decision_id, source_projection_id, report_slot, lane,
+                occurred_at_us, expires_at_us, payload_json, payload_sha256, target_set_sha256,
+                writer_generation, created_at_us
+             ) VALUES (
+                ?1, ?2, NULL, NULL, ?3, 'scheduled_report', 1, 2, ?4, ?5, ?6, 1, 1
+             )",
+            rusqlite::params![
+                report.intent_id.as_str(),
+                report.semantic_id.as_str(),
+                report.lineage.slot().unwrap().as_str(),
+                payload_json,
+                payload_hash,
+                "2".repeat(64)
+            ],
+        )
+        .unwrap_err();
+    assert!(scheduled_error.to_string().contains("CHECK"));
+}
+
+#[test]
 fn intent_lifetime_cannot_outlive_its_decision() {
     let temp = TempDir::new().unwrap();
     let ledger = Ledger::open(temp.path().join("ledger.sqlite")).unwrap();
@@ -527,13 +874,138 @@ fn stale_claim_after_transport_start_becomes_uncertain() {
         .claim_next(&delivery, now, TimeDelta::seconds(2))
         .unwrap()
         .unwrap();
-    start_transport(&ledger, &delivery, &claimed, now + TimeDelta::seconds(1));
+    match ledger
+        .begin_transport(
+            &delivery,
+            &claimed,
+            now + TimeDelta::seconds(1),
+            TimeDelta::seconds(2),
+        )
+        .unwrap()
+    {
+        BeginTransport::Started { .. } => {}
+        BeginTransport::Cancelled | BeginTransport::Expired => {
+            panic!("seeded live claim must enter transport")
+        }
+    }
     assert_eq!(ledger.health().unwrap().in_flight, 1);
     let recovered = ledger
         .recover_stale_claims(&delivery, now + TimeDelta::seconds(3))
         .unwrap();
     assert_eq!(recovered.uncertain, 1);
     assert_eq!(ledger.health().unwrap().uncertain, 1);
+}
+
+#[test]
+fn begin_transport_renews_the_lease_for_the_transport_window() {
+    let temp = TempDir::new().unwrap();
+    let ledger = Ledger::open(temp.path().join("ledger.sqlite")).unwrap();
+    let now = at(0);
+    let (_, delivery) = seed_manual_notification(&ledger, now);
+    let claimed = ledger
+        .claim_next(&delivery, now, TimeDelta::seconds(5))
+        .unwrap()
+        .unwrap();
+    let begin_at = now + TimeDelta::seconds(4);
+    let attempt_id = match ledger
+        .begin_transport(&delivery, &claimed, begin_at, TimeDelta::seconds(5))
+        .unwrap()
+    {
+        BeginTransport::Started { attempt_id } => attempt_id,
+        BeginTransport::Cancelled | BeginTransport::Expired => {
+            panic!("seeded live claim must enter transport")
+        }
+    };
+
+    let lease_until_us: i64 = ledger
+        .connection()
+        .unwrap()
+        .query_row(
+            "SELECT lease_until_us FROM notification_targets WHERE target_id = ?1",
+            [claimed.handle.target_id()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        lease_until_us,
+        (begin_at + TimeDelta::seconds(5)).timestamp_micros()
+    );
+    assert_eq!(
+        ledger
+            .recover_stale_claims(&delivery, now + TimeDelta::seconds(6))
+            .unwrap(),
+        RecoverySummary::default()
+    );
+    assert_eq!(
+        ledger
+            .settle(
+                &delivery,
+                &claimed.handle,
+                &attempt_id,
+                &Settlement::Delivered {
+                    provider_message_id: None,
+                },
+                now + TimeDelta::seconds(8),
+            )
+            .unwrap(),
+        SettlementWrite::Delivered
+    );
+}
+
+#[test]
+fn cancellation_after_claim_is_a_normal_begin_transport_outcome() {
+    let temp = TempDir::new().unwrap();
+    let ledger = Ledger::open(temp.path().join("ledger.sqlite")).unwrap();
+    let now = at(0);
+    let (core, delivery) = seed_manual_notification(&ledger, now);
+    let claimed = ledger
+        .claim_next(&delivery, now, TimeDelta::seconds(10))
+        .unwrap()
+        .unwrap();
+    ledger
+        .cancel_event(
+            &core,
+            "intent-manual",
+            "source_cancelled",
+            now + TimeDelta::seconds(1),
+        )
+        .unwrap();
+
+    assert_eq!(
+        ledger
+            .begin_transport(
+                &delivery,
+                &claimed,
+                now + TimeDelta::seconds(2),
+                TimeDelta::seconds(10),
+            )
+            .unwrap(),
+        BeginTransport::Cancelled
+    );
+}
+
+#[test]
+fn expiry_after_claim_is_a_normal_outcome_after_the_claim_lease_elapsed() {
+    let temp = TempDir::new().unwrap();
+    let ledger = Ledger::open(temp.path().join("ledger.sqlite")).unwrap();
+    let now = at(0);
+    let (_, delivery) = seed_manual_notification(&ledger, now);
+    let claimed = ledger
+        .claim_next(&delivery, now, TimeDelta::seconds(2))
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(
+        ledger
+            .begin_transport(
+                &delivery,
+                &claimed,
+                now + TimeDelta::seconds(31),
+                TimeDelta::seconds(10),
+            )
+            .unwrap(),
+        BeginTransport::Expired
+    );
 }
 
 #[test]
@@ -831,6 +1303,51 @@ fn migration_checksum_drift_refuses_to_open() {
         Ledger::open(path),
         Err(LedgerError::MigrationDrift)
     ));
+}
+
+#[test]
+fn v1_ledger_upgrades_to_v2_without_losing_existing_outbox_rows() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("ledger.sqlite");
+    create_v1_ledger_with_outbox(&path);
+
+    let ledger = Ledger::open(&path).unwrap();
+    let connection = ledger.connection().unwrap();
+    let migrations: i64 = connection
+        .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(migrations, 2);
+    let lineage: (Option<String>, Option<String>, Option<String>) = connection
+        .query_row(
+            "SELECT decision_id, source_projection_id, report_slot
+             FROM notification_events WHERE event_id = 'legacy-event'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(lineage.0.as_deref(), Some("legacy-decision"));
+    assert!(lineage.1.is_none());
+    assert!(lineage.2.is_none());
+    let preserved_target: i64 = connection
+        .query_row(
+            "SELECT COUNT(*)
+             FROM notification_targets t
+             JOIN notification_events e ON e.event_id = t.event_id
+             WHERE t.target_id = 'legacy-target' AND e.event_id = 'legacy-event'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(preserved_target, 1);
+    let foreign_key_violations: i64 = connection
+        .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(foreign_key_violations, 0);
+    LedgerReader::open_existing(path).unwrap();
 }
 
 #[test]
