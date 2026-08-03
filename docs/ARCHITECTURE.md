@@ -16,6 +16,7 @@ not an executable order.
 
 ```text
 Python normalized state --> spx-bridge --> Unix socket --> spx-core
+Python research artifact --> spx-bridge --> Unix socket --> spx-core research projection
                               |                              |
                               +-- no broker/session owner    +--> append-only
                                                         |    normalized frames

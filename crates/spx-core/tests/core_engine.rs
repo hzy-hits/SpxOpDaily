@@ -9,7 +9,8 @@ use spx_domain::{
     IngressMessageV1, InstrumentKind, MacroPermission, MarketSession, OperationalState,
     OptionContractV1, OptionRight, PROVIDER_STATE_SCHEMA_VERSION, PlanState, PositiveF64, Provider,
     ProviderReasonCode, ProviderStateV1, QUOTE_BATCH_SCHEMA_VERSION, QuoteBatchMode, QuoteBatchV1,
-    QuoteQuality, QuoteV1, StrategyAction, StrategyBlockReason, Token, TransportState,
+    QuoteQuality, QuoteV1, ResearchSignalsV1, StrategyAction, StrategyBlockReason, Token,
+    TransportState,
 };
 use spx_ledger::Ledger;
 use tempfile::TempDir;
@@ -32,6 +33,7 @@ fn config(temp: &TempDir) -> CoreConfig {
         ledger_path: temp.path().join("state/spx-ledger.sqlite"),
         raw_log_dir: temp.path().join("raw"),
         projection_path: temp.path().join("projection/latest.json"),
+        research_projection_path: temp.path().join("projection/research.json"),
         max_frame_bytes: 1_048_576,
         max_connections: 8,
         raw_segment_max_bytes: 64 * 1024 * 1024,
@@ -1283,4 +1285,73 @@ fn provider_state_after_decision_time_is_a_typed_abstention() {
         decision.block_reasons,
         [StrategyBlockReason::ProviderNotReady]
     );
+}
+
+#[test]
+fn experimental_research_updates_only_the_durable_research_projection() {
+    let temp = TempDir::new().expect("temp directory");
+    let core_config = config(&temp);
+    let signals: ResearchSignalsV1 = serde_json::from_str(include_str!(
+        "../../../fixtures/domain/v1/experimental_research_signals.json"
+    ))
+    .expect("research fixture");
+    let processing_at = signals.generated_at + TimeDelta::seconds(1);
+    let envelope = IngressEnvelopeV1 {
+        schema_version: INGRESS_SCHEMA_VERSION.to_owned(),
+        message_id: token("message:research:test"),
+        emitted_at: signals.generated_at,
+        message: IngressMessageV1::ResearchSignals(signals),
+    };
+    let mut engine = CoreEngine::open(core_config.clone(), processing_at).expect("open core");
+    let outcome = engine
+        .process(envelope.clone(), processing_at)
+        .expect("research frame accepted");
+    assert!(matches!(
+        outcome,
+        CoreOutcome::ResearchSignals {
+            disposition: spx_core::ResearchDisposition::Updated,
+            ..
+        }
+    ));
+    assert!(matches!(
+        engine
+            .process(envelope, processing_at + TimeDelta::milliseconds(1))
+            .expect("duplicate research frame"),
+        CoreOutcome::Duplicate { .. }
+    ));
+
+    let projection: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(&core_config.research_projection_path).expect("research projection"),
+    )
+    .expect("valid research projection");
+    assert_eq!(
+        projection["schema_version"],
+        "spx_latest_research_projection.v1"
+    );
+    assert_eq!(
+        projection["signals"]["range_forecasts"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3
+    );
+    let raw = std::fs::read_dir(&core_config.raw_log_dir)
+        .expect("raw log directory")
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .path()
+                .extension()
+                .is_some_and(|value| value == "ndjson")
+        })
+        .map(|entry| std::fs::read_to_string(entry.path()).expect("raw segment"))
+        .collect::<String>();
+    assert!(raw.contains("\"kind\":\"research_signals\""));
+
+    engine.shutdown().expect("release core owner");
+    let health = Ledger::open(&core_config.ledger_path)
+        .expect("open ledger")
+        .health()
+        .expect("ledger health");
+    assert_eq!(health, spx_ledger::LedgerHealth::default());
 }

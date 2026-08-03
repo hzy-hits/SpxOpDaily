@@ -12,6 +12,8 @@ pub enum DomainError {
     NotPositive { field: &'static str },
     #[error("{field} must be finite and non-negative")]
     Negative { field: &'static str },
+    #[error("{field} must be finite and within 0..=1")]
+    NotProbability { field: &'static str },
     #[error("schema mismatch for {kind}: expected {expected}, got {actual}")]
     SchemaMismatch {
         kind: &'static str,
@@ -181,6 +183,46 @@ impl<'de> Deserialize<'de> for NonNegativeF64 {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
+pub struct ProbabilityF64(f64);
+
+impl ProbabilityF64 {
+    /// Creates a finite probability within the closed unit interval.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DomainError`] for values outside `0..=1`, NaN, or infinity.
+    pub fn new(value: f64, field: &'static str) -> Result<Self, DomainError> {
+        if !value.is_finite() || !(0.0..=1.0).contains(&value) {
+            return Err(DomainError::NotProbability { field });
+        }
+        Ok(Self(value))
+    }
+
+    pub const fn get(self) -> f64 {
+        self.0
+    }
+}
+
+impl Serialize for ProbabilityF64 {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_f64(self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for ProbabilityF64 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = f64::deserialize(deserializer)?;
+        Self::new(value, "probability").map_err(D::Error::custom)
+    }
+}
+
 /// Hashes a contract's deterministic serde JSON encoding with SHA-256.
 ///
 /// # Errors
@@ -232,5 +274,23 @@ mod tests {
                 reason: "must not exceed 4096 UTF-8 bytes"
             })
         ));
+    }
+
+    #[test]
+    fn probability_is_finite_and_bounded() {
+        assert_eq!(
+            ProbabilityF64::new(0.0, "test").unwrap().get().to_bits(),
+            0.0_f64.to_bits()
+        );
+        assert_eq!(
+            ProbabilityF64::new(1.0, "test").unwrap().get().to_bits(),
+            1.0_f64.to_bits()
+        );
+        for invalid in [-0.01, 1.01, f64::NAN, f64::INFINITY] {
+            assert!(matches!(
+                ProbabilityF64::new(invalid, "test"),
+                Err(DomainError::NotProbability { field: "test" })
+            ));
+        }
     }
 }

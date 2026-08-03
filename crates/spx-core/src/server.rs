@@ -273,6 +273,14 @@ fn accepted_ack(message_id: Token, outcome: &CoreOutcome) -> CoreAckV1 {
             CoreAckDisposition::DecisionAccepted,
             Some(decision.decision_id.clone()),
         ),
+        CoreOutcome::ResearchSignals { disposition, .. } => (
+            match disposition {
+                crate::ResearchDisposition::Updated => CoreAckDisposition::ResearchUpdated,
+                crate::ResearchDisposition::Unchanged => CoreAckDisposition::ResearchUnchanged,
+                crate::ResearchDisposition::Stale => CoreAckDisposition::ResearchStale,
+            },
+            None,
+        ),
     };
     CoreAckV1::accepted(message_id, disposition, decision_id)
 }

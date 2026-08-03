@@ -15,7 +15,9 @@ use tracing::{error, info, warn};
 use crate::BridgeConfig;
 use crate::client::{ClientError, CoreClient};
 use crate::health::{BridgeHealth, BridgePhase};
-use crate::legacy::{LegacyDocument, LegacyIbkrHealth, read_ibkr_health, read_snapshot};
+use crate::legacy::{
+    LegacyDocument, LegacyIbkrHealth, read_ibkr_health, read_research_signals, read_snapshot,
+};
 use crate::mapper::{
     MapError, MappingStats, map_provider_batch, map_source_failure_batch, semantic_hash,
 };
@@ -49,6 +51,8 @@ pub struct BridgeRuntime {
     client: Option<CoreClient>,
     needs_resync: bool,
     next_connect_not_before: Option<Instant>,
+    last_research_fingerprint: Option<String>,
+    last_research_error: Option<String>,
     _runtime_lock: RuntimeLock,
 }
 
@@ -74,6 +78,8 @@ impl BridgeRuntime {
             client: None,
             needs_resync: true,
             next_connect_not_before: None,
+            last_research_fingerprint: None,
+            last_research_error: None,
             _runtime_lock: runtime_lock,
         })
     }
@@ -127,8 +133,74 @@ impl BridgeRuntime {
             }
         };
         self.handle_document(document)?;
+        self.handle_research_source();
         Self::sleep(self.config.poll_interval_ms, stop);
         Ok(())
+    }
+
+    fn handle_research_source(&mut self) {
+        let Some(path) = self.config.research_signal_path.as_ref() else {
+            return;
+        };
+        let (signals, fingerprint) = match read_research_signals(
+            path,
+            self.config.source_max_bytes.min(1_048_576),
+        ) {
+            Ok(value) => value,
+            Err(failure) => {
+                let description = failure.to_string();
+                if self.last_research_error.as_deref() != Some(description.as_str()) {
+                    warn!(error = %failure, path = %path.display(), "experimental research source rejected; quote mirror continues");
+                    self.last_research_error = Some(description);
+                }
+                return;
+            }
+        };
+        self.last_research_error = None;
+        if self.last_research_fingerprint.as_deref() == Some(fingerprint.as_str()) {
+            return;
+        }
+        let now = Utc::now();
+        if signals.generated_at > now {
+            warn!(path = %path.display(), "future-dated experimental research source rejected");
+            return;
+        }
+        let envelope = match Token::new(
+            format!("message:research:{}", &fingerprint[..24]),
+            "message_id",
+        ) {
+            Ok(message_id) => IngressEnvelopeV1 {
+                schema_version: INGRESS_SCHEMA_VERSION.to_owned(),
+                message_id,
+                emitted_at: signals.generated_at,
+                message: IngressMessageV1::ResearchSignals(signals),
+            },
+            Err(failure) => {
+                warn!(error = %failure, "experimental research message identity rejected");
+                return;
+            }
+        };
+        let Some(client) = self.client.as_mut() else {
+            return;
+        };
+        match client.send(&envelope) {
+            Ok(ack) if ack.status == AckStatus::Accepted => {
+                self.last_research_fingerprint = Some(fingerprint);
+                self.health.counters.accepted_frames =
+                    self.health.counters.accepted_frames.saturating_add(1);
+                self.persist_health();
+            }
+            Ok(ack) => {
+                self.health.counters.rejected_acks =
+                    self.health.counters.rejected_acks.saturating_add(1);
+                warn!(reason = ?ack.reason_code, "experimental research frame rejected; quote mirror continues");
+                self.persist_health();
+            }
+            Err(failure) => {
+                warn!(error = %failure, "experimental research ingress outcome unknown; deterministic frame will retry");
+                self.disconnect(&failure.to_string());
+            }
+        }
     }
 
     fn handle_document(&mut self, document: LegacyDocument) -> Result<(), RuntimeError> {
@@ -583,6 +655,7 @@ mod tests {
     fn config(temp: &TempDir) -> BridgeConfig {
         BridgeConfig {
             source_snapshot_path: temp.path().join("state.json"),
+            research_signal_path: None,
             ibkr_health_path: temp.path().join("ibkr.json"),
             socket_path: temp.path().join("core.sock"),
             state_path: temp.path().join("bridge-state.json"),

@@ -100,3 +100,19 @@ month looks better. Promotion requires:
 
 Until all gates pass, research output remains shadow-only and cannot create a
 human notification or change a production decision.
+
+## Experimental live projection
+
+The optional `experimental_research_signals.v1` boundary is observational only.
+Its atomic document contains a causal filtered regime posterior and zero or one
+range for each typed head: `projected_open`, `risk_neutral_close`, and
+`hmm_adjusted_close`. `projected_open` may be omitted after the opening target;
+range levels must remain strictly ordered and may not be collapsed to a point.
+An HMM-adjusted bootstrap range is labeled `experimental_heuristic`, not a
+calibrated physical distribution.
+
+`spx-bridge` validates and forwards the document without fitting or interpreting
+the model. `spx-core` durably appends the ingress frame and atomically replaces a
+separate latest research projection. This path does not call readiness,
+candidate generation, the decision ledger, notification intents, or the outbox.
+No statistical promotion threshold is encoded in this experimental contract.

@@ -114,6 +114,15 @@ fn ack_disposition_matches(
             disposition,
             Some(CoreAckDisposition::DecisionAccepted | CoreAckDisposition::DuplicateIngress)
         ),
+        IngressMessageV1::ResearchSignals(_) => matches!(
+            disposition,
+            Some(
+                CoreAckDisposition::ResearchUpdated
+                    | CoreAckDisposition::ResearchUnchanged
+                    | CoreAckDisposition::ResearchStale
+                    | CoreAckDisposition::DuplicateIngress
+            )
+        ),
     }
 }
 

@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use crate::validation::require_schema;
 use crate::{
     CORE_ACK_SCHEMA_VERSION, DomainError, EvaluationRequestV1, INGRESS_SCHEMA_VERSION,
-    QuoteBatchV1, Token, Validate,
+    QuoteBatchV1, ResearchSignalsV1, Token, Validate,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -32,6 +32,9 @@ pub enum CoreAckDisposition {
     StaleBatch,
     DuplicateIngress,
     DecisionAccepted,
+    ResearchUpdated,
+    ResearchUnchanged,
+    ResearchStale,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -126,6 +129,7 @@ impl Validate for CoreAckV1 {
 pub enum IngressMessageV1 {
     QuoteBatch(QuoteBatchV1),
     Evaluate(EvaluationRequestV1),
+    ResearchSignals(ResearchSignalsV1),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -159,6 +163,15 @@ impl Validate for IngressEnvelopeV1 {
                 if request.decision_at > self.emitted_at {
                     return Err(DomainError::TimeOrder(
                         "decision_at is after envelope emitted_at",
+                    ));
+                }
+                Ok(())
+            }
+            IngressMessageV1::ResearchSignals(signals) => {
+                signals.validate()?;
+                if signals.generated_at > self.emitted_at {
+                    return Err(DomainError::TimeOrder(
+                        "research generated_at is after envelope emitted_at",
                     ));
                 }
                 Ok(())

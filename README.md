@@ -10,6 +10,7 @@ The project deliberately implements a small production boundary:
 
 ```text
 Python normalized state --> spx-bridge --> spx-core --> SQLite decision/outbox ledger
+Python research artifact --> spx-bridge --> durable raw log + latest research projection
                                                     |
                                                     v
                                               spx-delivery
@@ -31,6 +32,12 @@ This repository does **not**:
 - query DuckDB in a live path;
 - place real or paper orders;
 - treat OI/volume exposure proxies as actual dealer positions.
+
+The optional experimental research lane accepts a strict atomic
+`experimental_research_signals.v1` file. It carries a causal HMM posterior and
+typed `projected_open`, `risk_neutral_close`, and `hmm_adjusted_close` ranges.
+The core durably audits it and updates a separate latest projection; it cannot
+create a decision, notification intent, outbox target, or order.
 
 ## Workspace
 

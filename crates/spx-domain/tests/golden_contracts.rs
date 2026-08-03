@@ -7,8 +7,8 @@ use spx_domain::{
     CandidateDirection, DeliveryChannel, DeliveryReceiptV1, DomainError, EntitlementState,
     IngressEnvelopeV1, MarketSession, NotificationIntentV1, OperationalState, OptionRight,
     Provider, ProviderReasonCode, ProviderStateV1, QuoteBatchMode, QuoteBatchV1, QuoteQuality,
-    ReceiptOutcome, StrategyAction, StrategyBlockReason, StrategyDecisionV1, Validate,
-    canonical_json_hash,
+    RangeForecastKind, ReceiptOutcome, ResearchSignalsV1, StrategyAction, StrategyBlockReason,
+    StrategyDecisionV1, Validate, canonical_json_hash,
 };
 
 fn fixture_path(name: &str) -> PathBuf {
@@ -163,6 +163,28 @@ fn delivery_receipt_is_valid_and_canonical() {
     assert_eq!(receipt.outcome, ReceiptOutcome::Delivered);
     assert!(receipt.provider_message_id.is_some());
     assert!(receipt.error_code.is_none());
+}
+
+#[test]
+fn experimental_research_signals_are_valid_and_canonical() {
+    let signals: ResearchSignalsV1 = decode_valid_canonical(
+        "experimental_research_signals.json",
+        "eafe338f1f4adb1029252cedc2f94383012f55aef15a7e2852503ec3abf927c1",
+    );
+    assert!(signals.market_regime.is_some());
+    assert_eq!(signals.range_forecasts.len(), 3);
+    assert_eq!(
+        signals
+            .range_forecasts
+            .iter()
+            .map(|forecast| forecast.forecast_kind)
+            .collect::<Vec<_>>(),
+        vec![
+            RangeForecastKind::ProjectedOpen,
+            RangeForecastKind::RiskNeutralClose,
+            RangeForecastKind::HmmAdjustedClose,
+        ]
+    );
 }
 
 #[test]

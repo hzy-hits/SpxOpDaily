@@ -25,6 +25,7 @@ pub struct CoreConfig {
     pub ledger_path: PathBuf,
     pub raw_log_dir: PathBuf,
     pub projection_path: PathBuf,
+    pub research_projection_path: PathBuf,
     pub max_frame_bytes: usize,
     pub max_connections: usize,
     pub raw_segment_max_bytes: u64,
@@ -88,6 +89,10 @@ impl CoreConfig {
             return Err(ConfigError::ForbiddenEnvironment("SPX_CORE_RAW_LOG_DIR"));
         }
         override_path("SPX_CORE_PROJECTION_PATH", &mut config.projection_path);
+        override_path(
+            "SPX_CORE_RESEARCH_PROJECTION_PATH",
+            &mut config.research_projection_path,
+        );
         override_usize("SPX_CORE_MAX_FRAME_BYTES", &mut config.max_frame_bytes)?;
         override_usize("SPX_CORE_MAX_CONNECTIONS", &mut config.max_connections)?;
         override_u64(
@@ -213,6 +218,7 @@ impl CoreConfig {
             || self.ledger_path.as_os_str().is_empty()
             || self.raw_log_dir.as_os_str().is_empty()
             || self.projection_path.as_os_str().is_empty()
+            || self.research_projection_path.as_os_str().is_empty()
         {
             return Err(ConfigError::Invalid("runtime paths must be non-empty"));
         }
@@ -220,8 +226,14 @@ impl CoreConfig {
             || !self.ledger_path.is_absolute()
             || !self.raw_log_dir.is_absolute()
             || !self.projection_path.is_absolute()
+            || !self.research_projection_path.is_absolute()
         {
             return Err(ConfigError::Invalid("runtime paths must be absolute"));
+        }
+        if self.projection_path == self.research_projection_path {
+            return Err(ConfigError::Invalid(
+                "core and research projection paths must differ",
+            ));
         }
         if self.max_frame_bytes == 0 || self.max_frame_bytes > 16 * 1024 * 1024 {
             return Err(ConfigError::Invalid(
@@ -349,6 +361,7 @@ mod tests {
             ledger_path: "/tmp/spx-core.sqlite".into(),
             raw_log_dir: "/tmp/spx-core-raw".into(),
             projection_path: "/tmp/spx-core-latest.json".into(),
+            research_projection_path: "/tmp/spx-core-research.json".into(),
             max_frame_bytes: 1_048_576,
             max_connections: 8,
             raw_segment_max_bytes: 64 * 1024 * 1024,
@@ -389,6 +402,9 @@ mod tests {
             |config: &mut CoreConfig| config.ledger_path = "state/core.sqlite".into(),
             |config: &mut CoreConfig| config.raw_log_dir = "frames".into(),
             |config: &mut CoreConfig| config.projection_path = "latest/core.json".into(),
+            |config: &mut CoreConfig| {
+                config.research_projection_path = "latest/research.json".into();
+            },
         ] {
             let mut config = valid_config();
             update(&mut config);

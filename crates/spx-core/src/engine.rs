@@ -16,6 +16,9 @@ use crate::projection::{ProjectionError, ProjectionStore};
 use crate::quote_book::{ApplyBatch, QuoteBook, QuoteBookError};
 use crate::raw_log::{AppendDurability, RawLog, RawLogError};
 use crate::readiness::assess_readiness;
+use crate::research_projection::{
+    ResearchDisposition, ResearchProjectionError, ResearchProjectionStore,
+};
 use crate::{CoreConfig, ReadinessAssessment};
 
 #[derive(Debug, Error)]
@@ -30,6 +33,8 @@ pub enum CoreError {
     RawLog(#[from] RawLogError),
     #[error("projection error: {0}")]
     Projection(#[from] ProjectionError),
+    #[error("research projection error: {0}")]
+    ResearchProjection(#[from] ResearchProjectionError),
     #[error("invalid owner lease configuration")]
     OwnerLeaseConfiguration,
 }
@@ -49,6 +54,10 @@ pub enum CoreOutcome {
         decision: Box<StrategyDecisionV1>,
         notification_enqueued: bool,
         persist_disposition: PersistDisposition,
+    },
+    ResearchSignals {
+        message_id: Token,
+        disposition: ResearchDisposition,
     },
 }
 
@@ -82,6 +91,7 @@ pub struct CoreEngine {
     quote_book: QuoteBook,
     raw_log: RawLog,
     projection: ProjectionStore,
+    research_projection: ResearchProjectionStore,
     owner_released: bool,
 }
 
@@ -103,6 +113,7 @@ impl CoreEngine {
             config.raw_log_min_free_bytes,
         )?;
         let projection = ProjectionStore::new(&config.projection_path);
+        let research_projection = ResearchProjectionStore::open(&config.research_projection_path)?;
         let quote_book = QuoteBook::new(
             config.quote_cache_retention_seconds,
             config.quote_cache_max_entries,
@@ -122,6 +133,7 @@ impl CoreEngine {
             quote_book,
             raw_log,
             projection,
+            research_projection,
             owner_released: false,
         })
     }
@@ -140,7 +152,9 @@ impl CoreEngine {
         self.renew_owner_if_needed(processing_at)?;
         let durability = match &envelope.message {
             IngressMessageV1::QuoteBatch(_) => AppendDurability::Buffered,
-            IngressMessageV1::Evaluate(_) => AppendDurability::Durable,
+            IngressMessageV1::Evaluate(_) | IngressMessageV1::ResearchSignals(_) => {
+                AppendDurability::Durable
+            }
         };
         let payload_sha256 = self.raw_log.append(&envelope, processing_at, durability)?;
         if envelope.emitted_at > processing_at {
@@ -175,6 +189,15 @@ impl CoreEngine {
             }
             IngressMessageV1::Evaluate(request) => {
                 self.evaluate(message_id, &request, processing_at)?
+            }
+            IngressMessageV1::ResearchSignals(signals) => {
+                let disposition =
+                    self.research_projection
+                        .apply(message_id.clone(), signals, processing_at)?;
+                CoreOutcome::ResearchSignals {
+                    message_id,
+                    disposition,
+                }
             }
         };
         self.publish(&outcome, processing_at)?;

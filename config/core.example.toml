@@ -5,6 +5,7 @@ socket_path = "/run/spx-spark-core/core.sock"
 ledger_path = "/var/lib/spx-spark-core/ledger/operations.sqlite"
 raw_log_dir = "/var/lib/spx-spark-core/frames"
 projection_path = "/var/lib/spx-spark-core/latest/core.json"
+research_projection_path = "/var/lib/spx-spark-core/latest/research.json"
 max_frame_bytes = 1048576
 max_connections = 8
 # Raw frames rotate before a segment exceeds 64 MiB. A single record may be no

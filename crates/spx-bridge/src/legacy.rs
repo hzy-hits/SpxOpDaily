@@ -6,6 +6,7 @@ use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use spx_domain::{ResearchSignalsV1, Validate};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -137,6 +138,31 @@ pub fn read_ibkr_health(path: &Path, maximum: u64) -> Result<LegacyIbkrHealth, L
     Ok(serde_json::from_slice(&bytes)?)
 }
 
+pub fn read_research_signals(
+    path: &Path,
+    maximum: u64,
+) -> Result<(ResearchSignalsV1, String), LegacyError> {
+    let metadata = std::fs::metadata(path).map_err(LegacyError::Metadata)?;
+    if metadata.len() > maximum {
+        return Err(LegacyError::Oversized);
+    }
+    let mut bytes = Vec::with_capacity(usize::try_from(metadata.len()).unwrap_or(0));
+    File::open(path)
+        .and_then(|file| file.take(maximum.saturating_add(1)).read_to_end(&mut bytes))
+        .map_err(LegacyError::Read)?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > maximum {
+        return Err(LegacyError::Oversized);
+    }
+    let signals: ResearchSignalsV1 = serde_json::from_slice(&bytes)?;
+    signals.validate().map_err(|error| {
+        LegacyError::Json(serde_json::Error::io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            error,
+        )))
+    })?;
+    Ok((signals, hex_digest(&bytes)))
+}
+
 fn hex_digest(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
     let mut output = String::with_capacity(digest.len() * 2);
@@ -173,5 +199,18 @@ mod tests {
             read_snapshot(file.path(), 1_024),
             Err(LegacyError::Json(_))
         ));
+    }
+
+    #[test]
+    fn typed_research_artifact_is_bounded_and_validated() {
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(include_bytes!(
+            "../../../fixtures/domain/v1/experimental_research_signals.json"
+        ))
+        .unwrap();
+        let (signals, fingerprint) = read_research_signals(file.path(), 1_048_576).unwrap();
+        assert!(signals.market_regime.is_some());
+        assert_eq!(signals.range_forecasts.len(), 3);
+        assert_eq!(fingerprint.len(), 64);
     }
 }
