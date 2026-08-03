@@ -26,6 +26,7 @@ def test_load_settings_from_fixture_is_stable(
 
     assert isinstance(settings, AppSettings)
     assert settings.market_data.provider_priority[:2] == ("schwab", "ibkr")
+    assert settings.market_data.standardized_minute_max_age_seconds == 90.0
     assert settings.ibkr.account_read_enabled is False
     assert settings.alerts.steven_enabled is False
     assert settings.runtime.control_ibkr_stream_enabled is False
@@ -52,10 +53,12 @@ def test_environment_overrides_defaults(monkeypatch: pytest.MonkeyPatch) -> None
         environ={
             "SPX_STEVEN_ENABLED": "true",
             "MARKET_DATA_PROVIDER_PRIORITY": "ibkr,schwab",
+            "SPX_STANDARDIZED_MINUTE_MAX_AGE_SECONDS": "120",
         },
     )
     assert settings.alerts.steven_enabled is True
     assert settings.market_data.provider_priority == ("ibkr", "schwab")
+    assert settings.market_data.standardized_minute_max_age_seconds == 120.0
     assert settings.sources["steven.enabled"].origin == "environment"
     assert settings.sources["market_data.provider_priority"].origin == "environment"
 

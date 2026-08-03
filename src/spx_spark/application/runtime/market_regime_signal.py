@@ -10,7 +10,7 @@ import signal
 import threading
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from time import monotonic
 
@@ -26,9 +26,12 @@ from spx_spark.application.runtime.market_regime_observation import (
     build_feature_observation,
 )
 from spx_spark.application.runtime.market_regime_range import (
+    MarketRegimeFreshnessPolicy,
     build_intraday_extreme_ranges,
+    causal_spx_session_minutes,
 )
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
+from spx_spark.settings import current_app_settings
 from spx_spark.state_io import atomic_write_json_secure, exclusive_state_lock, read_json_object
 
 
@@ -138,6 +141,51 @@ def _canonical_hash(value: object) -> str:
     return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
+def _local_frame_freshness(
+    value: Mapping[str, object],
+    *,
+    now: datetime,
+    max_age_seconds: float,
+    label: str,
+) -> tuple[bool, str | None]:
+    as_of = _parse_at(value.get("as_of"))
+    if as_of is None:
+        return False, f"{label}_as_of_missing"
+    age_seconds = (now - as_of).total_seconds()
+    if age_seconds < 0.0:
+        return False, f"{label}_from_future"
+    if age_seconds > max_age_seconds:
+        return False, f"{label}_stale"
+    return True, None
+
+
+def _causal_prior_rth_context(
+    prior: Mapping[str, object],
+    *,
+    now: datetime,
+) -> Mapping[str, object]:
+    as_of = _parse_at(prior.get("as_of"))
+    if as_of is not None and as_of <= now:
+        return prior
+    reason = (
+        "prior_rth_context_as_of_missing"
+        if as_of is None
+        else "prior_rth_context_from_future"
+    )
+    return {
+        "schema_version": prior.get("schema_version"),
+        "status": "unavailable",
+        "as_of": prior.get("as_of"),
+        "for_trading_date": prior.get("for_trading_date"),
+        "session_date": prior.get("session_date"),
+        "reasons": [reason],
+        "cross_index": {
+            "status": "unavailable",
+            "reason_codes": [reason],
+        },
+    }
+
+
 def _session_date(market: Mapping[str, object], now: datetime) -> date | None:
     raw = market.get("session_id")
     if isinstance(raw, str):
@@ -193,12 +241,23 @@ def _regime_projection(
     max_input_age_seconds: float,
     session_day: date | None,
 ) -> tuple[dict[str, object], dict[str, object]]:
+    option_frame_fresh, option_frame_reason = _local_frame_freshness(
+        options,
+        now=now,
+        max_age_seconds=max_input_age_seconds,
+        label="option_frame",
+    )
     observation = build_feature_observation(
         market,
-        options,
+        options if option_frame_fresh else {},
         prior_rth_context,
         session_day=session_day,
     )
+    if observation is not None and option_frame_reason is not None:
+        degradation_reasons = list(observation.get("degradation_reasons") or ())
+        observation["degradation_reasons"] = sorted(
+            set([*degradation_reasons, option_frame_reason])
+        )
     market_as_of = _parse_at(market.get("as_of"))
     previous_state = _mapping(previous.get("online_state"))
     retained_state: dict[str, object] = {
@@ -216,7 +275,7 @@ def _regime_projection(
         reasons.append("market_as_of_missing")
     elif (now - market_as_of).total_seconds() > max_input_age_seconds:
         reasons.append("market_frame_stale")
-    elif (market_as_of - now).total_seconds() > FUTURE_TOLERANCE_SECONDS:
+    elif market_as_of > now:
         reasons.append("market_frame_from_future")
     if str(market.get("quality") or "unavailable") == "unavailable":
         reasons.append("market_frame_unavailable")
@@ -347,23 +406,34 @@ def _live_es_price_and_close(
             continue
         price = _number(row.get("mid")) or _number(row.get("effective_price"))
         close = _number(row.get("close"))
-        observed_at = (
+        source_at = (
             _parse_at(row.get("quote_time"))
             or _parse_at(row.get("trade_time"))
-            or _parse_at(row.get("last_update_at"))
         )
-        age_seconds = (now - observed_at).total_seconds() if observed_at is not None else None
+        transport_at = _parse_at(row.get("last_update_at")) or _parse_at(
+            row.get("received_at")
+        )
+        source_age_seconds = (now - source_at).total_seconds() if source_at is not None else None
+        transport_age_seconds = (
+            (now - transport_at).total_seconds() if transport_at is not None else None
+        )
         if (
             price is not None
             and price > 0.0
             and close is not None
             and close > 0.0
-            and observed_at is not None
-            and age_seconds is not None
-            and -FUTURE_TOLERANCE_SECONDS <= age_seconds <= max_input_age_seconds
+            and source_at is not None
+            and transport_at is not None
+            and source_age_seconds is not None
+            and transport_age_seconds is not None
+            and -FUTURE_TOLERANCE_SECONDS
+            <= source_age_seconds
+            <= max_input_age_seconds
+            and 0.0 <= transport_age_seconds <= max_input_age_seconds
+            and source_at <= transport_at + timedelta(seconds=FUTURE_TOLERANCE_SECONDS)
         ):
             candidates.append(
-                (1 if row.get("provider") == "ibkr" else 0, observed_at, price, close)
+                (1 if row.get("provider") == "ibkr" else 0, source_at, price, close)
             )
     if not candidates:
         return None, None
@@ -376,33 +446,30 @@ def _observed_edge(
     *,
     session_day: date,
     edge: str,
+    now: datetime,
 ) -> tuple[float, datetime] | None:
     session = DEFAULT_MARKET_CALENDAR.session(session_day)
-    rows = spx_minutes.get("rows")
-    if session is None or not isinstance(rows, list):
+    if session is None:
         return None
-    candidates: list[tuple[datetime, float]] = []
-    for value in rows:
-        row = _mapping(value)
-        if row.get("session_date") != session_day.isoformat():
-            continue
-        at = _parse_at(row.get("minute"))
-        price = _selected_price(row)
-        if at is not None and price is not None:
-            candidates.append((at, price))
+    candidates = causal_spx_session_minutes(
+        spx_minutes,
+        session_day=session_day,
+        now=now,
+    )
     if not candidates:
         return None
-    candidates.sort()
     if edge == "open":
-        at, price = candidates[0]
+        sample = candidates[0]
         return (
-            (price, at)
-            if abs((at - session.open_at.astimezone(UTC)).total_seconds()) <= 120
+            (sample.price, sample.minute)
+            if abs((sample.minute - session.open_at.astimezone(UTC)).total_seconds()) <= 120
             else None
         )
-    at, price = candidates[-1]
+    sample = candidates[-1]
     return (
-        (price, at) if abs((at - session.close_at.astimezone(UTC)).total_seconds()) <= 120 else None
+        (sample.price, sample.minute)
+        if abs((sample.minute - session.close_at.astimezone(UTC)).total_seconds()) <= 120
+        else None
     )
 
 
@@ -448,7 +515,7 @@ def _range_projection(
     prior_rth_context: Mapping[str, object],
     session_day: date | None,
     now: datetime,
-    max_input_age_seconds: float,
+    freshness_policy: MarketRegimeFreshnessPolicy,
 ) -> dict[str, object]:
     if session_day is None:
         missing = _unavailable_range("session_date_unavailable", target_at=None)
@@ -462,8 +529,18 @@ def _range_projection(
         }
     session = DEFAULT_MARKET_CALENDAR.session(session_day)
     assert session is not None
-    observed_open = _observed_edge(spx_minutes, session_day=session_day, edge="open")
-    observed_close = _observed_edge(spx_minutes, session_day=session_day, edge="close")
+    observed_open = _observed_edge(
+        spx_minutes,
+        session_day=session_day,
+        edge="open",
+        now=now,
+    )
+    observed_close = _observed_edge(
+        spx_minutes,
+        session_day=session_day,
+        edge="close",
+        now=now,
+    )
     if observed_open is not None:
         price, at = observed_open
         open_range = {
@@ -485,7 +562,7 @@ def _range_projection(
         es_price, es_close = _live_es_price_and_close(
             latest_state,
             now=now,
-            max_input_age_seconds=max_input_age_seconds,
+            max_input_age_seconds=freshness_policy.live_input_max_age_seconds,
         )
         prior_spx_close = _number(prior_rth_context.get("close"))
         prior_for_date = prior_rth_context.get("for_trading_date")
@@ -499,7 +576,16 @@ def _range_projection(
             )
             else None
         )
-        expected_move = _expected_move(options)
+        option_fresh, _option_reason = _local_frame_freshness(
+            options,
+            now=now,
+            max_age_seconds=freshness_policy.live_input_max_age_seconds,
+            label="option_frame",
+        )
+        option_expiry_ok = options.get("front_expiry") == session_day.strftime("%Y%m%d")
+        expected_move = (
+            _expected_move(options) if option_fresh and option_expiry_ok else None
+        )
         if es_gap_anchor is None or expected_move is None:
             open_range = _unavailable_range(
                 "open_proxy_inputs_missing",
@@ -531,10 +617,11 @@ def _range_projection(
         }
     else:
         option_as_of = _parse_at(options.get("as_of"))
-        option_fresh = option_as_of is not None and (
-            -FUTURE_TOLERANCE_SECONDS
-            <= (now - option_as_of).total_seconds()
-            <= max_input_age_seconds
+        option_fresh, _option_reason = _local_frame_freshness(
+            options,
+            now=now,
+            max_age_seconds=freshness_policy.live_input_max_age_seconds,
+            label="option_frame",
         )
         expiry = str(options.get("front_expiry") or "")
         expiry_ok = bool(expiry) and expiry == session_day.strftime("%Y%m%d")
@@ -578,7 +665,7 @@ def _range_projection(
         spx_minutes=spx_minutes,
         session_day=session_day,
         now=now,
-        max_input_age_seconds=max_input_age_seconds,
+        freshness_policy=freshness_policy,
     )
     return {
         "schema_version": RANGE_SCHEMA_VERSION,
@@ -599,19 +686,23 @@ def build_signal(
     prior_rth_context: Mapping[str, object],
     previous: Mapping[str, object],
     now: datetime,
-    max_input_age_seconds: float,
+    freshness_policy: MarketRegimeFreshnessPolicy,
 ) -> dict[str, object]:
     if now.tzinfo is None or now.utcoffset() is None:
         raise ValueError("now must be timezone-aware")
     now = now.astimezone(UTC)
     session_day = _session_date(market, now)
+    causal_prior_rth_context = _causal_prior_rth_context(
+        prior_rth_context,
+        now=now,
+    )
     regime, online_state = _regime_projection(
         market=market,
         options=options,
-        prior_rth_context=prior_rth_context,
+        prior_rth_context=causal_prior_rth_context,
         previous=previous,
         now=now,
-        max_input_age_seconds=max_input_age_seconds,
+        max_input_age_seconds=freshness_policy.live_input_max_age_seconds,
         session_day=session_day,
     )
     ranges = _range_projection(
@@ -619,10 +710,10 @@ def build_signal(
         options=options,
         spx_minutes=spx_minutes,
         latest_state=latest_state,
-        prior_rth_context=prior_rth_context,
+        prior_rth_context=causal_prior_rth_context,
         session_day=session_day,
         now=now,
-        max_input_age_seconds=max_input_age_seconds,
+        freshness_policy=freshness_policy,
     )
     source_times = [
         parsed
@@ -669,8 +760,11 @@ def produce_once(
     *,
     paths: SignalPaths,
     now: datetime,
-    max_input_age_seconds: float,
+    freshness_policy: MarketRegimeFreshnessPolicy,
 ) -> dict[str, object]:
+    if now.tzinfo is None or now.utcoffset() is None:
+        raise ValueError("now must be timezone-aware")
+    evaluated_at = now.astimezone(UTC)
     market = read_json_object(paths.market)
     options = read_json_object(paths.options)
     spx_minutes = read_json_object(paths.spx_minutes)
@@ -687,9 +781,30 @@ def produce_once(
                 "prior_rth_context": prior_rth_context,
             }
         )
+        evaluation_fingerprint = _canonical_hash(
+            {
+                "input_fingerprint": fingerprint,
+                "evaluated_at": evaluated_at.isoformat(),
+                "freshness_policy": {
+                    "live_input_max_age_seconds": (
+                        freshness_policy.live_input_max_age_seconds
+                    ),
+                    "standardized_spx_minute_max_age_seconds": (
+                        freshness_policy.standardized_spx_minute_max_age_seconds
+                    ),
+                },
+                "evaluator_versions": {
+                    "signal_schema": SCHEMA_VERSION,
+                    "model": MODEL_VERSION,
+                    "range_schema": RANGE_SCHEMA_VERSION,
+                    "research_context_schema": "research_context.v2",
+                    "hmm_adjusted_range": HMM_ADJUSTED_RANGE_VERSION,
+                },
+            }
+        )
         if (
             previous.get("schema_version") == "research_context.state.v2"
-            and previous.get("input_fingerprint") == fingerprint
+            and previous.get("evaluation_fingerprint") == evaluation_fingerprint
         ):
             cached = _mapping(previous.get("wire_document"))
             if cached.get("schema_version") == "research_context.v2":
@@ -703,14 +818,15 @@ def produce_once(
             latest_state=latest_state,
             prior_rth_context=prior_rth_context,
             previous=previous,
-            now=now,
-            max_input_age_seconds=max_input_age_seconds,
+            now=evaluated_at,
+            freshness_policy=freshness_policy,
         )
+        payload["evaluation_fingerprint"] = evaluation_fingerprint
         wire = build_research_context_document(
             signal=payload,
             market=market,
             prior_rth_context=prior_rth_context,
-            available_at=now.astimezone(UTC),
+            available_at=evaluated_at,
             regime_feature_set_version=FEATURE_SCHEMA_VERSION,
             cross_index_feature_set_version=CROSS_INDEX_FEATURE_SET_VERSION,
             model_version=MODEL_VERSION,
@@ -718,10 +834,14 @@ def produce_once(
             hmm_adjusted_model_version=HMM_ADJUSTED_RANGE_VERSION,
             hmm_close_shift_fraction=HMM_CLOSE_SHIFT_FRACTION,
             p10_z=P10_Z,
+            market_frame_max_age_seconds=(
+                freshness_policy.live_input_max_age_seconds
+            ),
         )
         state_payload = {
             "schema_version": "research_context.state.v2",
             "input_fingerprint": payload["input_fingerprint"],
+            "evaluation_fingerprint": evaluation_fingerprint,
             "online_state": payload["online_state"],
             "wire_document": wire,
         }
@@ -742,6 +862,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--state-path", type=Path)
     parser.add_argument("--interval-seconds", type=float, default=5.0)
     parser.add_argument("--max-input-age-seconds", type=float)
+    parser.add_argument("--spx-minute-max-age-seconds", type=float)
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--now", help="Aware ISO timestamp for deterministic --once replay.")
     parser.add_argument("--json", action="store_true", help="Print each produced projection.")
@@ -751,6 +872,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def run(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     storage = StorageSettings.from_env()
+    market_data_settings = current_app_settings().market_data
     defaults = SignalPaths.from_data_root(args.data_root or storage.data_root)
     paths = SignalPaths(
         market=args.market_path or defaults.market,
@@ -770,6 +892,17 @@ def run(argv: list[str] | None = None) -> int:
     )
     if max_input_age_seconds <= 0:
         raise ValueError("--max-input-age-seconds must be positive")
+    spx_minute_max_age_seconds = (
+        float(args.spx_minute_max_age_seconds)
+        if args.spx_minute_max_age_seconds is not None
+        else market_data_settings.standardized_minute_max_age_seconds
+    )
+    if spx_minute_max_age_seconds <= 0:
+        raise ValueError("--spx-minute-max-age-seconds must be positive")
+    freshness_policy = MarketRegimeFreshnessPolicy(
+        live_input_max_age_seconds=max_input_age_seconds,
+        standardized_spx_minute_max_age_seconds=spx_minute_max_age_seconds,
+    )
     fixed_now = _parse_at(args.now) if args.now else None
     if args.now and fixed_now is None:
         raise ValueError("--now must be an aware ISO-8601 timestamp")
@@ -783,7 +916,7 @@ def run(argv: list[str] | None = None) -> int:
         payload = produce_once(
             paths=paths,
             now=fixed_now or datetime.now(tz=UTC),
-            max_input_age_seconds=max_input_age_seconds,
+            freshness_policy=freshness_policy,
         )
         if args.json:
             print(json.dumps(payload, allow_nan=False, sort_keys=True), flush=True)

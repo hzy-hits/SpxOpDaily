@@ -159,6 +159,9 @@ def _env_override(dotted_path: str, environ: Mapping[str, str]) -> Any | None:
     """Map a small set of documented environment overrides into settings paths."""
     env_map = {
         "market_data.provider_priority": "MARKET_DATA_PROVIDER_PRIORITY",
+        "market_data.standardized_minute_max_age_seconds": (
+            "SPX_STANDARDIZED_MINUTE_MAX_AGE_SECONDS"
+        ),
         "ibkr_broker.account_read_enabled": "IBKR_BROKER_ACCOUNT_READ_ENABLED",
         "steven.enabled": "SPX_STEVEN_ENABLED",
         "steven.alert_context_enabled": "SPX_STEVEN_ALERT_CONTEXT_ENABLED",
@@ -255,6 +258,9 @@ def load_settings(
         known_providers=_as_str_tuple(get("market_data.known_providers")),
         provider_priority=_as_str_tuple(get("market_data.provider_priority")),
         latest_stale_after_seconds=float(get("market_data.latest_stale_after_seconds")),
+        standardized_minute_max_age_seconds=float(
+            get("market_data.standardized_minute_max_age_seconds")
+        ),
         delayed_stale_after_seconds=float(get("market_data.delayed_stale_after_seconds")),
     )
     if not market_data.provider_priority:

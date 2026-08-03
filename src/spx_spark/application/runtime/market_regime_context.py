@@ -51,15 +51,19 @@ def build_research_context_document(
     hmm_adjusted_model_version: str,
     hmm_close_shift_fraction: float,
     p10_z: float,
+    market_frame_max_age_seconds: float,
 ) -> dict[str, object]:
     available_at = _aware_utc(available_at, "available_at")
-    fingerprint = str(signal.get("input_fingerprint") or "")
+    fingerprint = str(
+        signal.get("evaluation_fingerprint") or signal.get("input_fingerprint") or ""
+    )
     suffix = fingerprint.removeprefix("sha256:")[:24] or _canonical_hash(signal)[7:31]
     trading_date = _trading_date(signal, available_at)
     frame = _cross_index_frame(
         market,
         trading_date=trading_date,
         available_at=available_at,
+        market_frame_max_age_seconds=market_frame_max_age_seconds,
         feature_set_version=cross_index_feature_set_version,
         lineage_suffix=suffix,
     )
@@ -113,6 +117,7 @@ def _cross_index_frame(
     *,
     trading_date: date,
     available_at: datetime,
+    market_frame_max_age_seconds: float,
     feature_set_version: str,
     lineage_suffix: str,
 ) -> CrossIndexFrame:
@@ -120,6 +125,13 @@ def _cross_index_frame(
     observed_through = (
         market_as_of if market_as_of is not None and market_as_of <= available_at else available_at
     )
+    frame_missing_reason = None
+    if market_as_of is None:
+        frame_missing_reason = "market_frame_as_of_missing"
+    elif market_as_of > available_at:
+        frame_missing_reason = "market_frame_from_future"
+    elif (available_at - market_as_of).total_seconds() > market_frame_max_age_seconds:
+        frame_missing_reason = "market_frame_stale"
     cross_asset = _mapping(market.get("cross_asset"))
     cash_index = _mapping(cross_asset.get("cash_index"))
     raw_observations = _mapping(cash_index.get("observations"))
@@ -129,6 +141,7 @@ def _cross_index_frame(
             instrument,
             _mapping(raw_observations.get(instrument.value)),
             cash_session_open=cash_session_open,
+            frame_missing_reason=frame_missing_reason,
             observed_through=observed_through,
             available_at=available_at,
             lineage_suffix=lineage_suffix,
@@ -156,6 +169,7 @@ def _index_observation(
     raw: Mapping[str, object],
     *,
     cash_session_open: bool,
+    frame_missing_reason: str | None,
     observed_through: datetime,
     available_at: datetime,
     lineage_suffix: str,
@@ -167,7 +181,9 @@ def _index_observation(
     quality = _quality(raw.get("quality"))
     price_kind = _price_kind(raw.get("price_kind"))
     reason = None
-    if not cash_session_open:
+    if frame_missing_reason is not None:
+        reason = frame_missing_reason
+    elif not cash_session_open:
         reason = "cash_index_cash_session_closed"
     elif raw.get("status") != "available":
         reason = str(raw.get("missing_reason") or "fresh_cash_index_quote_unavailable")

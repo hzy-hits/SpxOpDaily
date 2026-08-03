@@ -18,6 +18,9 @@ market_data:
   latest_stale_after_seconds:
     value: 15
     description: Maximum age of a normal live quote before storage marks it stale.
+  standardized_minute_max_age_seconds:
+    value: 90
+    description: Maximum source and transport age of the latest causally available SPX standardized minute observation used by intraday range research; it is separate from the stricter live-frame gate because the sampler publishes one completed observation near each minute end.
   delayed_stale_after_seconds:
     value: 60
     description: Maximum age allowed for a quote explicitly labelled delayed.

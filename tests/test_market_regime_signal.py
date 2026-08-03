@@ -12,7 +12,12 @@ from spx_spark.application.runtime.market_regime_signal import (
     MODEL_VERSION,
     SignalPaths,
     build_signal,
+    parse_args,
     produce_once,
+)
+from spx_spark.application.runtime.market_regime_range import (
+    MarketRegimeFreshnessPolicy,
+    causal_spx_session_minutes,
 )
 
 
@@ -25,11 +30,29 @@ INDEX_PRICES = {
     "index:DJI": (44_000.0, 43_950.0),
     "index:RUT": (2_250.0, 2_240.0),
 }
+DEFAULT_FRESHNESS = MarketRegimeFreshnessPolicy(
+    live_input_max_age_seconds=90.0,
+    standardized_spx_minute_max_age_seconds=90.0,
+)
 
 
 def _write(path: Path, payload: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _spx_minute_row(minute: str, price: float) -> dict[str, object]:
+    at = datetime.fromisoformat(minute).astimezone(UTC)
+    return {
+        "session_date": "2026-08-03",
+        "minute": at.isoformat(),
+        "observed_at": at.replace(second=40).isoformat(),
+        "selected": {
+            "price": price,
+            "source_at": at.replace(second=39).isoformat(),
+            "transport_at": at.replace(second=39, microsecond=500_000).isoformat(),
+        },
+    }
 
 
 def _read(path: Path) -> dict[str, object]:
@@ -165,6 +188,8 @@ def _seed_premarket(paths: SignalPaths) -> None:
                     "mid": 7_564.125,
                     "close": 7_519.25,
                     "quote_time": "2026-08-03T05:04:40.118908+00:00",
+                    "last_update_at": "2026-08-03T05:04:40.500000+00:00",
+                    "received_at": "2026-08-03T05:04:40.500000+00:00",
                 }
             ],
         },
@@ -182,11 +207,7 @@ def _seed_rth(paths: SignalPaths) -> None:
         {
             "as_of": "2026-08-03T15:04:00+00:00",
             "rows": [
-                {
-                    "session_date": "2026-08-03",
-                    "minute": minute,
-                    "selected": {"price": price},
-                }
+                _spx_minute_row(minute, price)
                 for minute, price in (
                     ("2026-08-03T14:30:00+00:00", 6_300.0),
                     ("2026-08-03T15:00:00+00:00", 6_312.0),
@@ -224,7 +245,7 @@ def _build_from_paths(
         prior_rth_context=prior or _read(paths.prior_rth_context),
         previous={},
         now=now,
-        max_input_age_seconds=90.0,
+        freshness_policy=DEFAULT_FRESHNESS,
     )
 
 
@@ -234,7 +255,7 @@ def test_v2_document_is_advisory_explicit_and_same_frame_does_not_repeat(
     paths = SignalPaths.from_data_root(tmp_path)
     _seed_premarket(paths)
 
-    first = produce_once(paths=paths, now=PREMARKET_NOW, max_input_age_seconds=90.0)
+    first = produce_once(paths=paths, now=PREMARKET_NOW, freshness_policy=DEFAULT_FRESHNESS)
 
     assert first["schema_version"] == "research_context.v2"
     assert set(first) == {
@@ -282,7 +303,11 @@ def test_v2_document_is_advisory_explicit_and_same_frame_does_not_repeat(
     assert paths.output.stat().st_mode & 0o777 == 0o600
 
     inode = paths.output.stat().st_ino
-    assert produce_once(paths=paths, now=PREMARKET_NOW, max_input_age_seconds=90.0) == first
+    assert produce_once(
+        paths=paths,
+        now=PREMARKET_NOW,
+        freshness_policy=DEFAULT_FRESHNESS,
+    ) == first
     assert paths.output.stat().st_ino == inode
 
     options = _read(paths.options)
@@ -291,7 +316,7 @@ def test_v2_document_is_advisory_explicit_and_same_frame_does_not_repeat(
     same_frame = produce_once(
         paths=paths,
         now=datetime(2026, 8, 3, 5, 4, 43, tzinfo=UTC),
-        max_input_age_seconds=90.0,
+        freshness_policy=DEFAULT_FRESHNESS,
     )
     assert same_frame["regime"]["update_index"] == 1
     assert _posterior(same_frame["regime"]) == pytest.approx(posterior)
@@ -309,7 +334,7 @@ def test_v2_document_is_advisory_explicit_and_same_frame_does_not_repeat(
     next_frame = produce_once(
         paths=paths,
         now=datetime(2026, 8, 3, 5, 4, 50, tzinfo=UTC),
-        max_input_age_seconds=90.0,
+        freshness_policy=DEFAULT_FRESHNESS,
     )
     assert next_frame["regime"]["update_index"] == 2
     assert _read(paths.state)["online_state"]["observation_count"] == 2
@@ -321,7 +346,7 @@ def test_rth_cross_index_prior_context_and_intraday_ranges_feed_realtime_output(
     paths = SignalPaths.from_data_root(tmp_path)
     _seed_rth(paths)
 
-    payload = produce_once(paths=paths, now=RTH_NOW, max_input_age_seconds=90.0)
+    payload = produce_once(paths=paths, now=RTH_NOW, freshness_policy=DEFAULT_FRESHNESS)
 
     frame = payload["cross_index_frame"]
     assert frame["status"] == "ready"
@@ -372,6 +397,330 @@ def test_rth_cross_index_prior_context_and_intraday_ranges_feed_realtime_output(
     assert prior_score != pytest.approx(base_score)
 
 
+def test_completed_minute_freshness_is_separate_from_live_option_freshness(
+    tmp_path: Path,
+) -> None:
+    paths = SignalPaths.from_data_root(tmp_path)
+    _seed_rth(paths)
+
+    payload = produce_once(
+        paths=paths,
+        now=RTH_NOW,
+        freshness_policy=MarketRegimeFreshnessPolicy(
+            live_input_max_age_seconds=15.0,
+            standardized_spx_minute_max_age_seconds=90.0,
+        ),
+    )
+
+    forecasts = _forecasts(payload)
+    assert forecasts["session_high"]["status"] == "available"
+    assert forecasts["session_low"]["status"] == "available"
+    assert payload["close_location"]["status"] == "available"
+
+    options = _read(paths.options)
+    options["as_of"] = "2026-08-03T15:04:20+00:00"
+    _write(paths.options, options)
+    stale_option = produce_once(
+        paths=paths,
+        now=RTH_NOW,
+        freshness_policy=MarketRegimeFreshnessPolicy(
+            live_input_max_age_seconds=15.0,
+            standardized_spx_minute_max_age_seconds=90.0,
+        ),
+    )
+    assert _forecasts(stale_option)["session_high"]["reason_codes"] == [
+        "same_day_expected_move_stale"
+    ]
+
+    _seed_rth(paths)
+    stale_minute = produce_once(
+        paths=paths,
+        now=datetime(2026, 8, 3, 15, 6, 11, tzinfo=UTC),
+        freshness_policy=MarketRegimeFreshnessPolicy(
+            live_input_max_age_seconds=120.0,
+            standardized_spx_minute_max_age_seconds=90.0,
+        ),
+    )
+    assert _forecasts(stale_minute)["session_high"]["reason_codes"] == [
+        "fresh_spx_intraday_path_unavailable"
+    ]
+
+
+def test_standardized_minutes_use_availability_and_quote_clocks_not_bucket_start(
+    tmp_path: Path,
+) -> None:
+    paths = SignalPaths.from_data_root(tmp_path)
+    _seed_rth(paths)
+    minutes = _read(paths.spx_minutes)
+
+    before_latest_was_observed = causal_spx_session_minutes(
+        minutes,
+        session_day=RTH_NOW.date(),
+        now=datetime(2026, 8, 3, 15, 4, 39, 500_000, tzinfo=UTC),
+    )
+    assert before_latest_was_observed[-1].minute == datetime(
+        2026, 8, 3, 15, 0, tzinfo=UTC
+    )
+
+    available = causal_spx_session_minutes(
+        minutes,
+        session_day=RTH_NOW.date(),
+        now=RTH_NOW,
+    )
+    assert available[-1].minute == datetime(2026, 8, 3, 15, 4, tzinfo=UTC)
+    assert available[-1].source_at == datetime(2026, 8, 3, 15, 4, 39, tzinfo=UTC)
+
+    latest = minutes["rows"][-1]
+    latest["observed_at"] = "2026-08-03T15:04:35+00:00"
+    assert causal_spx_session_minutes(
+        minutes,
+        session_day=RTH_NOW.date(),
+        now=RTH_NOW,
+    )[-1].minute == datetime(2026, 8, 3, 15, 0, tzinfo=UTC)
+
+
+def test_future_open_row_is_not_visible_to_causal_replay(tmp_path: Path) -> None:
+    paths = SignalPaths.from_data_root(tmp_path)
+    _seed_rth(paths)
+    replay_now = datetime(2026, 8, 3, 13, 30, 10, tzinfo=UTC)
+    market = _read(paths.market)
+    market["as_of"] = "2026-08-03T13:30:09+00:00"
+    options = _options(as_of="2026-08-03T13:30:09+00:00")
+    spx_minutes = {"rows": [_spx_minute_row("2026-08-03T13:30:00+00:00", 6_300.0)]}
+
+    before_available = build_signal(
+        market=market,
+        options=options,
+        spx_minutes=spx_minutes,
+        latest_state=_read(paths.latest_state),
+        prior_rth_context=_read(paths.prior_rth_context),
+        previous={},
+        now=replay_now,
+        freshness_policy=DEFAULT_FRESHNESS,
+    )
+    assert before_available["today_range"]["open"]["status"] == "unavailable"
+    assert before_available["today_range"]["open"]["reason"] == (
+        "official_rth_open_observation_missing"
+    )
+
+    after_available = build_signal(
+        market=market,
+        options=options,
+        spx_minutes=spx_minutes,
+        latest_state=_read(paths.latest_state),
+        prior_rth_context=_read(paths.prior_rth_context),
+        previous={},
+        now=datetime(2026, 8, 3, 13, 30, 41, tzinfo=UTC),
+        freshness_policy=DEFAULT_FRESHNESS,
+    )
+    assert after_available["today_range"]["open"]["status"] == "observed"
+
+
+def test_local_market_and_option_frames_have_no_future_clock_tolerance(
+    tmp_path: Path,
+) -> None:
+    paths = SignalPaths.from_data_root(tmp_path)
+    _seed_rth(paths)
+    now = datetime(2026, 8, 3, 15, 4, 39, tzinfo=UTC)
+
+    future_options = _read(paths.options)
+    future_options["as_of"] = "2026-08-03T15:04:40+00:00"
+    option_signal = build_signal(
+        market={**_read(paths.market), "as_of": now.isoformat()},
+        options=future_options,
+        spx_minutes=_read(paths.spx_minutes),
+        latest_state=_read(paths.latest_state),
+        prior_rth_context=_read(paths.prior_rth_context),
+        previous={},
+        now=now,
+        freshness_policy=DEFAULT_FRESHNESS,
+    )
+    assert option_signal["today_range"]["close"]["status"] == "unavailable"
+    assert option_signal["today_range"]["high"]["reason"] == (
+        "same_day_expected_move_stale"
+    )
+    assert "option_frame_from_future" in option_signal["regime"]["reasons"]
+
+    future_market = _read(paths.market)
+    future_market["as_of"] = "2026-08-03T15:04:40+00:00"
+    market_signal = build_signal(
+        market=future_market,
+        options={**_read(paths.options), "as_of": now.isoformat()},
+        spx_minutes=_read(paths.spx_minutes),
+        latest_state=_read(paths.latest_state),
+        prior_rth_context=_read(paths.prior_rth_context),
+        previous={},
+        now=now,
+        freshness_policy=DEFAULT_FRESHNESS,
+    )
+    assert market_signal["regime"]["status"] == "unavailable"
+    assert "market_frame_from_future" in market_signal["regime"]["reasons"]
+
+
+def test_premarket_open_proxy_requires_received_es_quote(
+    tmp_path: Path,
+) -> None:
+    paths = SignalPaths.from_data_root(tmp_path)
+    _seed_premarket(paths)
+    baseline = _build_from_paths(paths, now=PREMARKET_NOW)
+    assert baseline["today_range"]["open"]["status"] == "available"
+
+    latest = _read(paths.latest_state)
+    quote = latest["best_quotes"][0]
+    quote["last_update_at"] = "2026-08-03T05:04:42+00:00"
+    quote["received_at"] = "2026-08-03T05:04:42+00:00"
+    _write(paths.latest_state, latest)
+    future_transport = _build_from_paths(paths, now=PREMARKET_NOW)
+    assert future_transport["today_range"]["open"]["status"] == "unavailable"
+
+    quote["last_update_at"] = "2026-08-03T05:02:00+00:00"
+    quote["received_at"] = "2026-08-03T05:02:00+00:00"
+    _write(paths.latest_state, latest)
+    stale_transport = _build_from_paths(paths, now=PREMARKET_NOW)
+    assert stale_transport["today_range"]["open"]["status"] == "unavailable"
+
+
+def test_premarket_open_and_hmm_reject_future_or_stale_local_context(
+    tmp_path: Path,
+) -> None:
+    paths = SignalPaths.from_data_root(tmp_path)
+    _seed_premarket(paths)
+
+    options = _read(paths.options)
+    options["as_of"] = "2026-08-03T05:04:42+00:00"
+    _write(paths.options, options)
+    future_options = _build_from_paths(paths, now=PREMARKET_NOW)
+    assert future_options["today_range"]["open"]["status"] == "unavailable"
+    assert "option_frame_from_future" in future_options["regime"]["reasons"]
+
+    options["as_of"] = "2026-08-03T05:02:00+00:00"
+    _write(paths.options, options)
+    stale_options = _build_from_paths(paths, now=PREMARKET_NOW)
+    assert stale_options["today_range"]["open"]["status"] == "unavailable"
+    assert "option_frame_stale" in stale_options["regime"]["reasons"]
+
+    _seed_premarket(paths)
+    prior = _read(paths.prior_rth_context)
+    prior["as_of"] = "2026-08-03T05:04:42+00:00"
+    _write(paths.prior_rth_context, prior)
+    future_prior = _build_from_paths(paths, now=PREMARKET_NOW)
+    assert future_prior["today_range"]["open"]["status"] == "unavailable"
+    prior_component = future_prior["regime"]["observation"]["components"]["prior_rth"]
+    assert prior_component["status"] == "degraded"
+    assert "prior_rth_context_from_future" in prior_component["reason_codes"]
+
+
+def test_recently_persisted_row_with_stale_quote_clocks_is_unavailable(
+    tmp_path: Path,
+) -> None:
+    paths = SignalPaths.from_data_root(tmp_path)
+    _seed_rth(paths)
+    minutes = _read(paths.spx_minutes)
+    for row in minutes["rows"]:
+        row["selected"]["source_at"] = "2026-08-03T15:02:00+00:00"
+        row["selected"]["transport_at"] = "2026-08-03T15:02:01+00:00"
+    _write(paths.spx_minutes, minutes)
+
+    payload = produce_once(
+        paths=paths,
+        now=RTH_NOW,
+        freshness_policy=DEFAULT_FRESHNESS,
+    )
+
+    assert _forecasts(payload)["session_high"]["reason_codes"] == [
+        "fresh_spx_intraday_path_unavailable"
+    ]
+
+
+def test_unchanged_inputs_recompute_freshness_without_advancing_hmm(
+    tmp_path: Path,
+) -> None:
+    paths = SignalPaths.from_data_root(tmp_path)
+    _seed_rth(paths)
+    policy = MarketRegimeFreshnessPolicy(
+        live_input_max_age_seconds=300.0,
+        standardized_spx_minute_max_age_seconds=90.0,
+    )
+
+    available = produce_once(paths=paths, now=RTH_NOW, freshness_policy=policy)
+    stale = produce_once(
+        paths=paths,
+        now=datetime(2026, 8, 3, 15, 6, 11, tzinfo=UTC),
+        freshness_policy=policy,
+    )
+
+    assert _forecasts(available)["session_high"]["status"] == "available"
+    assert _forecasts(stale)["session_high"]["reason_codes"] == [
+        "fresh_spx_intraday_path_unavailable"
+    ]
+    assert stale["generated_at"] != available["generated_at"]
+    assert stale["document_id"] != available["document_id"]
+    assert stale["regime"]["update_index"] == available["regime"]["update_index"]
+
+
+def test_stale_market_frame_degrades_typed_cross_index_context(
+    tmp_path: Path,
+) -> None:
+    paths = SignalPaths.from_data_root(tmp_path)
+    _seed_rth(paths)
+    stale = produce_once(
+        paths=paths,
+        now=datetime(2026, 8, 3, 15, 6, 11, tzinfo=UTC),
+        freshness_policy=DEFAULT_FRESHNESS,
+    )
+
+    assert stale["cross_index_frame"]["status"] == "degraded"
+    assert {
+        row["missing_reason"] for row in stale["cross_index_frame"]["observations"]
+    } == {"market_frame_stale"}
+    assert "market_frame_stale" in stale["regime_reason_codes"]
+
+
+def test_evaluator_version_change_invalidates_same_time_cache(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = SignalPaths.from_data_root(tmp_path)
+    _seed_rth(paths)
+    first = produce_once(paths=paths, now=RTH_NOW, freshness_policy=DEFAULT_FRESHNESS)
+
+    monkeypatch.setattr(
+        "spx_spark.application.runtime.market_regime_signal.MODEL_VERSION",
+        "sha256:test-model-upgrade",
+    )
+    upgraded = produce_once(
+        paths=paths,
+        now=RTH_NOW,
+        freshness_policy=DEFAULT_FRESHNESS,
+    )
+
+    assert upgraded["document_id"] != first["document_id"]
+    assert upgraded["regime"]["model_version"] == "sha256:test-model-upgrade"
+
+
+@pytest.mark.parametrize("value", [0.0, -1.0, float("nan"), float("inf"), -float("inf")])
+def test_market_regime_freshness_policy_rejects_invalid_values(value: float) -> None:
+    with pytest.raises(ValueError, match="finite and positive"):
+        MarketRegimeFreshnessPolicy(
+            live_input_max_age_seconds=15.0,
+            standardized_spx_minute_max_age_seconds=value,
+        )
+
+
+def test_cli_keeps_live_and_standardized_minute_freshness_separate() -> None:
+    args = parse_args(
+        [
+            "--max-input-age-seconds",
+            "15",
+            "--spx-minute-max-age-seconds",
+            "120",
+        ]
+    )
+
+    assert args.max_input_age_seconds == 15.0
+    assert args.spx_minute_max_age_seconds == 120.0
+
+
 def test_missing_cash_index_is_explicit_and_degrades_without_blocking_advisory_regime(
     tmp_path: Path,
 ) -> None:
@@ -391,7 +740,7 @@ def test_missing_cash_index_is_explicit_and_degrades_without_blocking_advisory_r
     cash["reason_codes"] = ["cash_index_missing:index:RUT"]
     _write(paths.market, market)
 
-    payload = produce_once(paths=paths, now=RTH_NOW, max_input_age_seconds=90.0)
+    payload = produce_once(paths=paths, now=RTH_NOW, freshness_policy=DEFAULT_FRESHNESS)
 
     frame = payload["cross_index_frame"]
     assert frame["status"] == "degraded"
@@ -411,7 +760,7 @@ def test_incomplete_prior_rth_four_index_context_is_explicitly_degraded(
     prior["cross_index"]["return_bps"]["index:RUT"] = None
     _write(paths.prior_rth_context, prior)
 
-    payload = produce_once(paths=paths, now=RTH_NOW, max_input_age_seconds=90.0)
+    payload = produce_once(paths=paths, now=RTH_NOW, freshness_policy=DEFAULT_FRESHNESS)
 
     assert payload["prior_rth_context"]["status"] == "partial"
     assert "prior_rth_returns_incomplete" in payload["prior_rth_context"]["reason_codes"]
@@ -433,7 +782,7 @@ def test_missing_inputs_return_complete_fail_closed_v2_shape(tmp_path: Path) -> 
     payload = produce_once(
         paths=paths,
         now=PREMARKET_NOW,
-        max_input_age_seconds=90.0,
+        freshness_policy=DEFAULT_FRESHNESS,
     )
 
     assert payload["schema_version"] == "research_context.v2"
@@ -456,7 +805,7 @@ def test_missing_front_expiry_keeps_explicit_unavailable_close(tmp_path: Path) -
     payload = produce_once(
         paths=paths,
         now=PREMARKET_NOW,
-        max_input_age_seconds=90.0,
+        freshness_policy=DEFAULT_FRESHNESS,
     )
 
     close = _forecasts(payload)["rth_close"]
@@ -478,7 +827,7 @@ def test_missing_expected_move_or_stale_spx_path_degrades_intraday_extremes(
     options["volatility"] = {}
     _write(paths.options, options)
 
-    missing_em = produce_once(paths=paths, now=RTH_NOW, max_input_age_seconds=90.0)
+    missing_em = produce_once(paths=paths, now=RTH_NOW, freshness_policy=DEFAULT_FRESHNESS)
     forecasts = _forecasts(missing_em)
     assert forecasts["session_high"]["reason_codes"] == ["same_day_expected_move_unavailable"]
     assert forecasts["session_low"]["reason_codes"] == ["same_day_expected_move_unavailable"]
@@ -488,7 +837,7 @@ def test_missing_expected_move_or_stale_spx_path_degrades_intraday_extremes(
     minutes = _read(paths.spx_minutes)
     minutes["rows"] = minutes["rows"][:1]
     _write(paths.spx_minutes, minutes)
-    stale = produce_once(paths=paths, now=RTH_NOW, max_input_age_seconds=90.0)
+    stale = produce_once(paths=paths, now=RTH_NOW, freshness_policy=DEFAULT_FRESHNESS)
     assert _forecasts(stale)["session_high"]["reason_codes"] == [
         "fresh_spx_intraday_path_unavailable"
     ]
@@ -514,7 +863,7 @@ def test_corrupt_persisted_posterior_reinitializes_instead_of_crashing(
     payload = produce_once(
         paths=paths,
         now=PREMARKET_NOW,
-        max_input_age_seconds=90.0,
+        freshness_policy=DEFAULT_FRESHNESS,
     )
 
     assert payload["regime"]["update_index"] == 1
