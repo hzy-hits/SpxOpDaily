@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import time
 
+import pytest
+
 from spx_spark.ibkr.farm_health import (
     FarmHealthTracker,
     FarmLinkStatus,
@@ -178,7 +180,7 @@ def test_data_flow_silence_marks_farm_broken_and_live_clears() -> None:
 
     # Repeated detections do not spam events, and duration accumulates.
     assert tracker.mark_data_flow_silent("no ES ticks for 160s", now=now + 10) is None
-    assert tracker.broken_duration(now=now + 181) == 181
+    assert tracker.broken_duration(now=now + 181) == pytest.approx(181.0)
     assert tracker.should_restart_gateway(now=now + 181) is True
 
     tracker.mark_data_flow_live()
