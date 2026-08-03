@@ -10,6 +10,9 @@ Type=simple
 WorkingDirectory=/home/ubuntu/spx-spark
 EnvironmentFile=-/home/ubuntu/spx-spark/.env
 Environment=PATH=/home/ubuntu/.local/bin:/home/ubuntu/.cargo/bin:/usr/local/bin:/usr/bin:/bin
+# Safety boundary: a stale machine-local .env must not restore the former
+# five-second competing-session loop.
+Environment=IBKR_CONFLICT_PROBE_SECONDS=60
 ExecStart=/home/ubuntu/spx-spark/scripts/run-ibkr-stream.sh --force
 Restart=always
 RestartSec=15
