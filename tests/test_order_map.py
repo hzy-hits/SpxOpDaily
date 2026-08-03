@@ -3534,6 +3534,41 @@ def test_status_fingerprint_does_not_push_background_regime_flips() -> None:
     assert _status_material_changes(baseline, changed) == []
 
 
+def test_rth_status_fingerprint_does_not_push_skew_shadow_rotation() -> None:
+    from spx_spark.application.order_map.service import (
+        _status_fingerprint,
+        _status_material_changes,
+    )
+
+    payload = {
+        "expiry": "20260714",
+        "expected_move_points": 40.0,
+        "flip_zone": [7500.0, 7505.0],
+        "candidates": [
+            {"play": "put_wall_bounce_call", "level": 7490.0},
+            {"play": "call_wall_fade_put", "level": 7520.0},
+        ],
+        "call_skew_spread_shadow": {
+            "status": "candidate",
+            "candidate": {
+                "long": {"contract_id": "SPXW-7500-C"},
+                "short": {"contract_id": "SPXW-7510-C"},
+            },
+        },
+        "plan_candidates": [],
+        "session_phase": {"name": "us_midday_confirmation"},
+    }
+    baseline = _status_fingerprint(payload)
+    payload["call_skew_spread_shadow"]["candidate"] = {
+        "long": {"contract_id": "SPXW-7510-C"},
+        "short": {"contract_id": "SPXW-7520-C"},
+    }
+    changed = _status_fingerprint(payload)
+
+    assert baseline["skew_spread_shadow_id"] == changed["skew_spread_shadow_id"] == ""
+    assert _status_material_changes(baseline, changed) == []
+
+
 def test_gth_status_fingerprint_uses_frozen_levels_not_live_map_flaps() -> None:
     from spx_spark.application.order_map.service import (
         _status_fingerprint,

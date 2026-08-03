@@ -70,8 +70,10 @@ def _status_fingerprint(payload: dict[str, Any]) -> dict[str, Any]:
                 ),
             }
         )
-    if status_phase in GTH_STATUS_PHASES:
-        fingerprint["skew_spread_shadow_id"] = ""
+    # Skew-spread candidates are research observations that rotate with quote
+    # microstructure.  Their churn must never turn a 15-minute snapshot into a
+    # human Desk Map; dedicated setup/trade transitions own executable changes.
+    fingerprint["skew_spread_shadow_id"] = ""
     fingerprint["decision_thesis"] = _decision_thesis(payload)
     plans = payload.get("plan_candidates")
     plan = plans[0] if isinstance(plans, list) and len(plans) == 1 else None
