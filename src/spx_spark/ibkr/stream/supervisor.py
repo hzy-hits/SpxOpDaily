@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
 from spx_spark.config import IbkrStreamSettings, RuntimePolicySettings, StorageSettings
 from spx_spark.ibkr.stream import deps as stream_deps
@@ -14,6 +15,7 @@ from spx_spark.ibkr.stream.models import (
     StreamAction,
     effective_hot_flush_sleep_seconds,
 )
+from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 
 classify_connect_failure = stream_deps.classify_connect_failure
 connected_state = stream_deps.connected_state
@@ -64,6 +66,7 @@ class StreamRuntime:
         self.competing_session_circuit = CompetingSessionCircuit(
             min_seconds=conflict_min,
             max_seconds=conflict_max,
+            recovery_seconds=conflict_max,
         )
 
     def expired(self) -> bool:
@@ -199,6 +202,7 @@ class StreamRuntime:
                     )
                     log_event({"task": "ibkr_stream", "event": "session_error", "error": str(exc)})
             finally:
+                self.competing_session_circuit.interrupt_recovery()
                 self.collector.teardown()
             if self.session_had_healthy_flush:
                 self.reconnect.reset()
@@ -352,7 +356,24 @@ class StreamRuntime:
                 )
                 if data_plane_healthy:
                     self.session_had_healthy_flush = True
-                    self.competing_session_circuit.close()
+                    fresh_spxw_quotes = int(
+                        event.get("fresh_spxw_quotes", event.get("fresh_quotes", 0)) or 0
+                    )
+                    circuit_recovered = False
+                    if fresh_spxw_quotes > 0:
+                        circuit_recovered = self.competing_session_circuit.observe_healthy(
+                            now_monotonic=time.monotonic()
+                        )
+                    else:
+                        self.competing_session_circuit.interrupt_recovery()
+                    if circuit_recovered:
+                        log_event(
+                            {
+                                "task": "ibkr_stream",
+                                "event": "competing_session_recovered",
+                                "stable_seconds": self.competing_session_circuit.recovery_seconds,
+                            }
+                        )
                     clear_conflict = getattr(
                         self.collector,
                         "clear_market_data_conflict",
@@ -360,6 +381,8 @@ class StreamRuntime:
                     )
                     if callable(clear_conflict):
                         clear_conflict()
+                else:
+                    self.competing_session_circuit.interrupt_recovery()
                 self._publish_health(
                     data_plane_healthy=data_plane_healthy,
                     policy_blocked=False,
@@ -461,7 +484,16 @@ class StreamRuntime:
     def _should_restart_gateway(self) -> bool:
         if not self.stream_settings.auto_restart_gateway_on_farm_broken:
             return False
+        # Error 10197 is an entitlement-owner conflict, not a broken Gateway.
+        # Restarting while the conflict circuit is open/recovering can overlap
+        # the old and new broker sessions and make the handoff worse. Wait for
+        # continuously fresh SPXW data to close the circuit first.
+        if self.competing_session_circuit.failures > 0:
+            return False
         if runtime_blocks_gateway_restart(self.runtime_policy, force=self.collector.force):
+            return False
+        calendar = getattr(self.collector, "market_calendar", DEFAULT_MARKET_CALENDAR)
+        if not calendar.is_globex_open(datetime.now(tz=timezone.utc)):
             return False
         if not self.collector.farm_health.should_restart_gateway():
             return False

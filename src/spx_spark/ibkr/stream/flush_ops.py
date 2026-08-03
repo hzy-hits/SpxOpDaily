@@ -129,6 +129,13 @@ class FlushOps:
             for quote in snapshot.quotes
             if quote.is_usable and quote.quality is MarketDataQuality.LIVE
         )
+        fresh_spxw_quote_count = sum(
+            1
+            for quote in snapshot.quotes
+            if quote.is_usable
+            and quote.quality is MarketDataQuality.LIVE
+            and (quote.instrument.trading_class or "").upper() == "SPXW"
+        )
         data_plane_healthy = bool(
             fresh_quote_count > 0
             and self.farm_health.market_data_ready()
@@ -146,6 +153,7 @@ class FlushOps:
             "quotes": snapshot.quote_count,
             "best_quotes": write_result.best_quote_count,
             "fresh_quotes": fresh_quote_count,
+            "fresh_spxw_quotes": fresh_spxw_quote_count,
             "data_plane_healthy": data_plane_healthy,
             "provider_status": (
                 snapshot.provider_state.status.value if snapshot.provider_state else "unknown"

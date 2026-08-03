@@ -129,8 +129,20 @@ What happens when a phone/desktop login preempts the automated session:
    the human.
 3. When the manual session ends, the next attempt logs in and the API port
    comes back.
-4. The collector probe (`IBKR_CONFLICT_PROBE_SECONDS=60`) notices IBKR is
-   available again and collection resumes on the primary source.
+4. The collector recovery attempt (`IBKR_CONFLICT_PROBE_SECONDS=60`) rebuilds
+   the read-only market-data subscriptions. Repeated 10197 responses back off
+   exponentially to five minutes.
+
+A brief usable flush starts recovery but does not erase the conflict history.
+The circuit closes only after five continuous minutes of fresh live SPXW data.
+While it is open or recovering, farm-health automation must not restart IB
+Gateway: 10197 is an entitlement-owner conflict, and a second Gateway restart
+during the broker-session handoff can make the overlap worse.
+
+Farm-health restart automation is also disabled while the regular ES Globex
+session is closed. The daily IBC autorestart intentionally runs in that quiet
+window; stale farm flags there are not evidence that a second Gateway restart
+would restore market data.
 
 For the failure mode where the Gateway process stays alive but the API is dead
 (stuck login dialog, silent session loss), a watchdog timer checks the API port

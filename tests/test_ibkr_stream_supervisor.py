@@ -218,7 +218,7 @@ def test_repeated_competing_sessions_use_bounded_exponential_cooldown(
     assert runtime.competing_session_circuit.state(now_monotonic=55.0) == "half_open"
 
 
-def test_healthy_data_flush_closes_competing_session_circuit(
+def test_brief_healthy_flush_preserves_competing_session_backoff_history(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     clock = FakeClock()
@@ -246,7 +246,7 @@ def test_healthy_data_flush_closes_competing_session_circuit(
     assert runtime.session_loop() is True
 
     assert clear_calls == [1.0]
-    assert runtime.competing_session_circuit.failures == 0
+    assert runtime.competing_session_circuit.failures == 2
     assert runtime.session_had_healthy_flush is True
 
 
@@ -263,6 +263,62 @@ def test_non_competing_subscription_failure_does_not_open_conflict_circuit(
     assert runtime.competing_session_circuit.failures == 0
     assert any(event.get("event") == "subscription_health_reconnect" for event in events)
     assert not any(event.get("event") == "competing_session" for event in events)
+
+
+def test_open_conflict_circuit_blocks_gateway_restart(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = FakeClock()
+    collector = FakeCollector(clock)
+    collector.force = False  # type: ignore[attr-defined]
+    collector.farm_health = SimpleNamespace(  # type: ignore[attr-defined]
+        should_restart_gateway=lambda: True,
+    )
+    runtime, _events = make_runtime(
+        monkeypatch,
+        collector,
+        auto_restart_gateway_on_farm_broken=True,
+    )
+    monkeypatch.setattr(
+        supervisor_module,
+        "runtime_blocks_gateway_restart",
+        lambda *_args, **_kwargs: False,
+    )
+    runtime.competing_session_circuit.open(now_monotonic=clock.now)
+
+    assert runtime._should_restart_gateway() is False
+
+
+@pytest.mark.parametrize(
+    ("globex_open", "expected"),
+    [(False, False), (True, True)],
+)
+def test_gateway_restart_requires_open_es_session(
+    monkeypatch: pytest.MonkeyPatch,
+    globex_open: bool,
+    expected: bool,
+) -> None:
+    clock = FakeClock()
+    collector = FakeCollector(clock)
+    collector.force = False  # type: ignore[attr-defined]
+    collector.market_calendar = SimpleNamespace(  # type: ignore[attr-defined]
+        is_globex_open=lambda _now: globex_open,
+    )
+    collector.farm_health = SimpleNamespace(  # type: ignore[attr-defined]
+        should_restart_gateway=lambda: True,
+    )
+    runtime, _events = make_runtime(
+        monkeypatch,
+        collector,
+        auto_restart_gateway_on_farm_broken=True,
+    )
+    monkeypatch.setattr(
+        supervisor_module,
+        "runtime_blocks_gateway_restart",
+        lambda *_args, **_kwargs: False,
+    )
+
+    assert runtime._should_restart_gateway() is expected
 
 
 def test_health_projection_validity_tracks_policy_heartbeat(

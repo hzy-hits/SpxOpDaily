@@ -35,20 +35,26 @@ class CompetingSessionCircuit:
 
     The circuit never preempts another IBKR session.  It only controls when
     this collector may make its next ordinary, read-only market-data attempt.
-    A genuinely healthy data flush closes the circuit; merely reconnecting the
-    socket does not.
+    A healthy probe starts a recovery window; it does not erase conflict
+    history immediately. Only continuously healthy data for
+    ``recovery_seconds`` closes the circuit, so an intermittent entitlement
+    owner cannot keep every retry at the minimum delay.
     """
 
     min_seconds: float
     max_seconds: float
+    recovery_seconds: float = 300.0
     failures: int = 0
     retry_not_before: float = 0.0
+    recovery_started_at: float | None = None
 
     def __post_init__(self) -> None:
         if self.min_seconds <= 0:
             raise ValueError("competing-session cooldown minimum must be positive")
         if self.max_seconds < self.min_seconds:
             raise ValueError("competing-session cooldown maximum cannot be below minimum")
+        if self.recovery_seconds <= 0:
+            raise ValueError("competing-session recovery window must be positive")
 
     def open(self, *, now_monotonic: float) -> float:
         max_doublings = max(ceil(log2(self.max_seconds / self.min_seconds)), 0)
@@ -56,7 +62,30 @@ class CompetingSessionCircuit:
         delay = min(self.min_seconds * (2**exponent), self.max_seconds)
         self.failures += 1
         self.retry_not_before = now_monotonic + delay
+        self.recovery_started_at = None
         return delay
+
+    def observe_healthy(self, *, now_monotonic: float) -> bool:
+        """Close only after usable data remains stable for the recovery window.
+
+        Returns ``True`` exactly when this observation closes a previously
+        opened circuit.
+        """
+
+        if self.failures == 0:
+            return False
+        if self.recovery_started_at is None:
+            self.recovery_started_at = now_monotonic
+            return False
+        if now_monotonic - self.recovery_started_at < self.recovery_seconds:
+            return False
+        self.close()
+        return True
+
+    def interrupt_recovery(self) -> None:
+        """Restart the stability window without erasing conflict history."""
+
+        self.recovery_started_at = None
 
     def remaining_seconds(self, *, now_monotonic: float) -> float:
         return max(self.retry_not_before - now_monotonic, 0.0)
@@ -66,11 +95,14 @@ class CompetingSessionCircuit:
             return "closed"
         if self.remaining_seconds(now_monotonic=now_monotonic) > 0:
             return "open"
+        if self.recovery_started_at is not None:
+            return "recovering"
         return "half_open"
 
     def close(self) -> None:
         self.failures = 0
         self.retry_not_before = 0.0
+        self.recovery_started_at = None
 
 
 @dataclass

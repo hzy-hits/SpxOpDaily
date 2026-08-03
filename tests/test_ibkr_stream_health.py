@@ -15,7 +15,11 @@ from spx_spark.ibkr.stream.models import CompetingSessionCircuit
 
 
 def test_competing_session_circuit_exponentially_backs_off_and_closes() -> None:
-    circuit = CompetingSessionCircuit(min_seconds=5.0, max_seconds=20.0)
+    circuit = CompetingSessionCircuit(
+        min_seconds=5.0,
+        max_seconds=20.0,
+        recovery_seconds=30.0,
+    )
 
     assert circuit.open(now_monotonic=100.0) == 5.0
     assert circuit.state(now_monotonic=104.0) == "open"
@@ -39,6 +43,7 @@ def test_competing_session_circuit_stays_bounded_after_many_failures() -> None:
     circuit = CompetingSessionCircuit(
         min_seconds=5.0,
         max_seconds=300.0,
+        recovery_seconds=300.0,
         failures=10_000,
     )
 
@@ -120,3 +125,38 @@ def test_competing_session_circuit_rejects_invalid_bounds(
 ) -> None:
     with pytest.raises(ValueError):
         CompetingSessionCircuit(min_seconds=minimum, max_seconds=maximum)
+
+
+def test_competing_session_circuit_preserves_backoff_during_brief_recovery() -> None:
+    circuit = CompetingSessionCircuit(
+        min_seconds=5.0,
+        max_seconds=20.0,
+        recovery_seconds=30.0,
+    )
+
+    assert circuit.open(now_monotonic=0.0) == 5.0
+    assert circuit.observe_healthy(now_monotonic=6.0) is False
+    assert circuit.state(now_monotonic=6.0) == "recovering"
+
+    assert circuit.open(now_monotonic=20.0) == 10.0
+    assert circuit.failures == 2
+    assert circuit.observe_healthy(now_monotonic=31.0) is False
+    assert circuit.observe_healthy(now_monotonic=60.9) is False
+    assert circuit.observe_healthy(now_monotonic=61.0) is True
+    assert circuit.state(now_monotonic=61.0) == "closed"
+
+
+def test_competing_session_circuit_requires_continuous_recovery() -> None:
+    circuit = CompetingSessionCircuit(
+        min_seconds=5.0,
+        max_seconds=20.0,
+        recovery_seconds=30.0,
+    )
+    circuit.open(now_monotonic=0.0)
+    circuit.observe_healthy(now_monotonic=6.0)
+
+    circuit.interrupt_recovery()
+
+    assert circuit.observe_healthy(now_monotonic=40.0) is False
+    assert circuit.observe_healthy(now_monotonic=69.9) is False
+    assert circuit.observe_healthy(now_monotonic=70.0) is True

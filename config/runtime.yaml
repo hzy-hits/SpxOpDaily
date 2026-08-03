@@ -823,8 +823,8 @@ service_loop:
     value: 60
     description: Delay before retrying an unavailable IBKR snapshot connection.
   ibkr_conflict_probe_seconds:
-    value: 5
-    description: Delay before a read-only probe after an IBKR live/paper market-data conflict; short enough to recover promptly after the live user logs out.
+    value: 60
+    description: Delay before the first read-only collection attempt after an IBKR live/paper market-data conflict; repeated attempts rebuild subscriptions and back off to the configured maximum.
   max_concurrent_tasks:
     value: 4
     description: Maximum child tasks executed concurrently by the service loop.
@@ -1005,11 +1005,11 @@ runtime_policy:
     value: 1
     description: Minutes before an active reclaim attempt after an IBKR live/paper conflict.
   ibkr_conflict_probe_seconds:
-    value: 5
-    description: Initial seconds before a non-invasive probe after an IBKR live/paper market-data conflict.
+    value: 60
+    description: Initial seconds before rebuilding read-only market-data subscriptions after an IBKR live/paper conflict.
   ibkr_conflict_probe_max_seconds:
     value: 300
-    description: Maximum exponential cooldown between non-invasive probes after repeated IBKR 10197 conflicts.
+    description: Maximum exponential cooldown between full market-data recovery attempts after repeated IBKR 10197 conflicts.
   ibkr_fallback_provider:
     value: schwab
     description: Provider name used when IBKR is unavailable or intentionally disabled.
