@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+import pytest
+
 from spx_spark.application.order_map.guidance import (
     GuidanceAction,
     build_decision_guidance,
@@ -36,6 +38,7 @@ def _payload() -> dict[str, object]:
             "mean_reversion_score": 45.0,
         },
         "level_decision": {
+            "event_id": "level:test-current",
             "phase": "far",
             "quality_ok": True,
             "snapshot_consistent": True,
@@ -46,6 +49,8 @@ def _payload() -> dict[str, object]:
                 "call_wall": 7600.0,
             },
         },
+        "minute_market_frame": {"quality": "ready"},
+        "option_structure_frame": {"quality": "ready", "l1": {"quality": "ready"}},
         "trade_intent": {"status": "observing"},
         "plan_candidates": [],
         "candidates": [
@@ -95,7 +100,8 @@ def test_unknown_level_phase_is_visible_as_degraded_data_quality() -> None:
 
     assert projection.data_quality == "DEGRADED"
     assert "unknown_level_phase" in projection.quality_reasons
-    assert "Data Quality  DEGRADED · unknown_level_phase" in rendered
+    assert "主要影响：状态机阶段非法" in rendered
+    assert "审计码：unknown_level_phase" in rendered
 
 
 def test_terminal_level_phase_never_renders_as_a_fresh_observing_setup() -> None:
@@ -113,7 +119,7 @@ def test_terminal_level_phase_never_renders_as_a_fresh_observing_setup() -> None
     rendered = render_operator_status_brief(payload, [], NOW)
 
     assert projection.stage.value == "EXPIRED"
-    assert "Desk View  NO ACTIVE SETUP · EXPIRED · EXPIRED" in rendered
+    assert "Desk View  NO TRADE · 原路径已结束 · 状态：已过期（已过期）" in rendered
     assert "Execution  CLOSED · EXPIRED · 等待离开 reset band 后重新武装" in rendered
 
 
@@ -289,19 +295,25 @@ def test_operator_status_brief_keeps_decision_facts_and_drops_research_density()
     rendered = render_operator_status_brief(payload, [], NOW)
 
     assert rendered.startswith("【SPX Desk Map ·")
-    assert "Desk View  NO SETUP · 趋势偏空（context） · OBSERVING" in rendered
+    assert "Desk View  NO TRADE · 趋势偏空仅作背景，尚无价格触发 · 状态：观察中（尚未触发）" in rendered
     assert "Location  SPX 7558 · ES 7603" in rendered
+    assert "Gamma位置 Flip 下方 2.0pt · ZG unavailable" in rendered
     assert "ES VWAP 7607（偏离 -4pt）" in rendered
     assert "OR 上沿上方确认（ORL 7578 / ORH 7595）" in rendered
     assert "EM ±28.1pt · GTH 已用 64%" in rendered
-    assert "Primary  SPX 7560 下方保持" in rendered
-    assert "ES动量 15m -2pt / 60m -7pt" in rendered
+    assert "Primary  方向来源  尚无价格接受/拒绝确认；趋势偏空仅为 ES/量价背景" in rendered
+    assert "下一触发  等待当前 Flip 7560–7565 的接受或拒绝；确认前 NO TRADE" in rendered
+    assert "流确认  ES 15m -2pt / 60m -7pt" in rendered
     assert "量价 同向确认 · ES/SPY 同向确认" in rendered
-    assert "Alternative  SPX 收回 7565" in rendered
-    assert "Structure  Put/Flip/Call 7550 / 7560–7565 / 7600 · frozen=live" in rendered
-    assert "Targets  downside Put 7550 · upside Call 7600" in rendered
+    assert "Alternative  尚无单边方向；当前不存在交易失效位" in rendered
+    assert "Structure  Put/Flip/Call 7550 / 7560–7565 / 7600 · event=live" in rendered
+    assert "Gamma职责  Gamma 过渡" in rendered
+    assert "dealer sign unknown" in rendered
+    assert "价格选边前 NO TRADE" in rendered
+    assert "Targets  当前无交易目标 · 实时结构 Put 7550 / Call 7600" in rendered
     assert "Execution  WAIT · 尚无确定性结构入场" in rendered
-    assert "Data Quality  DEGRADED · rth_heartbeat_degraded_snapshot" in rendered
+    assert "Data Quality  DEGRADED · 主要影响：rth heartbeat degraded snapshot" in rendered
+    assert "审计码：rth_heartbeat_degraded_snapshot" in rendered
     assert "ATM IV 0DTE 18.20%" in rendered
     assert "IVΔ 5/15/60m +0.40vol/+0.80vol/+1.20vol" in rendered
     assert "VIX1D/VIX 17.2/18.5" in rendered
@@ -316,7 +328,7 @@ def test_operator_status_brief_keeps_decision_facts_and_drops_research_density()
     assert "REJECTED" not in rendered
     assert "当前布局参考" not in rendered
     assert "Skew Spread Shadow" not in rendered
-    assert len(rendered.splitlines()) == 10
+    assert "Gamma 不给" not in rendered  # transition has no inferred direction at all
 
 
 def test_desk_sections_make_unavailable_market_facts_explicit() -> None:
@@ -325,12 +337,320 @@ def test_desk_sections_make_unavailable_market_facts_explicit() -> None:
     assert "ES VWAP unavailable" in sections.location
     assert "OR unavailable" in sections.location
     assert "EM unavailable" in sections.location
-    assert "ES动量 15m unavailable / 60m unavailable" in sections.primary_path
+    assert "流确认  ES 15m unavailable / 60m unavailable" in sections.primary_path
     assert "量价 unavailable · ES/SPY unavailable" in sections.primary_path
     assert "Vol/IV unavailable" in sections.data_quality
-    assert "Frames market=UNAVAILABLE · options=UNAVAILABLE · L1=UNAVAILABLE" in (
-        sections.data_quality
+    assert "Frames market=READY · options=READY · L1=READY" in sections.data_quality
+
+
+def test_market_bias_never_becomes_a_typed_direction_without_a_price_path() -> None:
+    payload = _payload()
+    payload["regime_decision"] = {"mode": "trending", "direction": "up"}
+
+    projection = build_desk_map_projection(payload)
+    sections = build_desk_message_sections(payload, NOW)
+
+    assert projection.direction == "none"
+    assert sections.desk_view.startswith("NO TRADE")
+    assert "尚无价格接受/拒绝确认" in sections.primary_path
+
+
+@pytest.mark.parametrize(
+    ("gamma_state", "expected"),
+    [
+        ("positive_gamma_pin", "反馈偏压制/回归"),
+        ("negative_gamma_acceleration", "反馈偏放大"),
+        ("zero_gamma_transition", "价格选边前 NO TRADE"),
+    ],
+)
+def test_gamma_is_a_conditional_feedback_mechanism_not_direction(
+    gamma_state: str,
+    expected: str,
+) -> None:
+    payload = _payload()
+    payload["option_structure_frame"] = {
+        "quality": "ready",
+        "structure": {
+            "gamma_state": gamma_state,
+            "gex_quality": "open_interest_gex",
+            "net_gamma_ratio": 0.61,
+            "zero_gamma": 7495.0,
+            "flip_zone": [7490.0, 7510.0],
+            "put_wall": 7450.0,
+            "call_wall": 7550.0,
+        },
+        "exposure": {"oi_quality": "ibkr_ok"},
+        "l1": {"quality": "ready"},
+    }
+
+    sections = build_desk_message_sections(payload, NOW)
+
+    assert expected in sections.structure
+    assert "dealer sign unknown" in sections.structure
+    assert "做市商买" not in sections.structure
+    assert "做市商卖" not in sections.structure
+
+
+def test_confirmed_direction_names_price_path_as_authority() -> None:
+    payload = _payload()
+    payload["level_decision"] = {
+        **payload["level_decision"],  # type: ignore[dict-item]
+        "phase": "confirmed",
+        "thesis": "fade",
+        "direction": "up",
+        "level_kind": "put_wall",
+        "level": 7550.0,
+    }
+    payload["option_structure_frame"] = {
+        "quality": "ready",
+        "structure": {
+            "gamma_state": "positive_gamma_pin",
+            "gex_quality": "open_interest_gex",
+            "put_wall": 7550.0,
+            "call_wall": 7600.0,
+            "flip_zone": [7560.0, 7565.0],
+        },
+        "exposure": {"oi_quality": "ibkr_ok"},
+        "l1": {"quality": "ready"},
+    }
+
+    projection = build_desk_map_projection(payload)
+    sections = build_desk_message_sections(payload, NOW)
+
+    assert projection.direction == "up"
+    assert "LONG / CALL FADE" in sections.desk_view
+    assert "LONG 来自 Put Wall 7550 的价格拒绝回归" in sections.primary_path
+    assert "Gamma 不提供第一步方向" in sections.primary_path
+
+
+def test_observing_report_does_not_reuse_old_event_targets() -> None:
+    payload = _payload()
+    payload["underlier"] = {"price": 7608.0, "source": "index:SPX"}
+    payload["flip_zone"] = [7510.0, 7515.0]
+    payload["level_decision"] = {
+        **payload["level_decision"],  # type: ignore[dict-item]
+        "phase": "approaching",
+        "level_kind": "put_wall",
+        "level": 7600.0,
+    }
+    payload["candidates"] = [
+        {"play": "put_wall_bounce_call", "level": 7600.0},
+        {"play": "call_wall_fade_put", "level": 7610.0},
+    ]
+    payload["plan_candidates"] = [{"target_spx": 7999.0}]
+
+    sections = build_desk_message_sections(payload, NOW)
+
+    assert "7510" not in sections.primary_path
+    assert "观察当前 Put Wall 7600 的接受或拒绝" in sections.primary_path
+    assert "当前不存在交易失效位" in sections.alternative_path
+    assert "当前无交易目标 · 实时结构 Put 7600 / Call 7610" == sections.targets
+    assert "7550" not in sections.targets
+    assert "7999" not in sections.targets
+
+
+def test_stale_ready_card_cannot_override_current_path_or_quality() -> None:
+    payload = _payload()
+    payload["level_decision"] = {
+        **payload["level_decision"],  # type: ignore[dict-item]
+        "phase": "approaching",
+        "snapshot_consistent": False,
+        "thesis": "none",
+        "direction": "none",
+        "level_kind": "put_wall",
+        "level": 7550.0,
+    }
+    payload["trade_intent"] = {"status": "trade_ready"}
+    payload["plan_candidates"] = [
+        {
+            "play": "level_breakout_call",
+            "right": "C",
+            "target_spx": 7999.0,
+        }
+    ]
+
+    projection = build_desk_map_projection(payload)
+    sections = build_desk_message_sections(payload, NOW)
+
+    assert projection.stage.value == "PAUSED"
+    assert projection.direction == "none"
+    assert "ready_without_current_confirmed_path" in projection.quality_reasons
+    assert sections.desk_view.startswith("NO TRADE")
+    assert "禁止使用旧机会或旧目标" in sections.execution
+    assert "7999" not in sections.targets
+
+
+def test_new_confirmed_event_rejects_old_ready_opportunity_and_target() -> None:
+    payload = _payload()
+    payload["level_decision"] = {
+        **payload["level_decision"],  # type: ignore[dict-item]
+        "event_id": "level:current",
+        "phase": "confirmed",
+        "direction": "down",
+        "thesis": "breakout",
+        "level_kind": "put_wall",
+        "level": 7550.0,
+    }
+    payload["trade_intent"] = {
+        "status": "trade_ready",
+        "event_id": "level:old",
+        "intent_id": "intent:old",
+        "contract_id": "option:SPX:SPXW:20260715:7500:P",
+    }
+    payload["plan_candidates"] = [
+        {
+            "intent_id": "intent:old",
+            "contract_id": "option:SPX:SPXW:20260715:7500:P",
+            "right": "P",
+            "target_spx": 7999.0,
+        }
+    ]
+
+    projection = build_desk_map_projection(payload)
+    sections = build_desk_message_sections(payload, NOW)
+
+    assert projection.stage.value == "PAUSED"
+    assert "ready_opportunity_mismatch" in projection.quality_reasons
+    assert sections.desk_view.startswith("NO TRADE")
+    assert "READY 不属于当前价格事件" in sections.execution
+    assert "7999" not in sections.targets
+    assert "intent:old" not in sections.execution
+
+
+def test_rth_ready_requires_one_current_plan() -> None:
+    payload = _payload()
+    payload["level_decision"] = {
+        **payload["level_decision"],  # type: ignore[dict-item]
+        "phase": "confirmed",
+        "direction": "up",
+        "thesis": "breakout",
+        "level_kind": "flip_high",
+        "level": 7565.0,
+    }
+    payload["trade_intent"] = {
+        "status": "trade_ready",
+        "event_id": "level:test-current",
+        "intent_id": "intent:test-current",
+        "contract_id": "option:SPX:SPXW:20260715:7575:C",
+    }
+
+    projection = build_desk_map_projection(payload)
+    sections = build_desk_message_sections(payload, NOW)
+
+    assert projection.stage.value == "PAUSED"
+    assert "ready_opportunity_mismatch" in projection.quality_reasons
+    assert sections.desk_view.startswith("NO TRADE")
+    assert "禁止使用旧机会或旧目标" in sections.execution
+
+
+def test_gth_ready_requires_current_source_signal() -> None:
+    payload = _payload()
+    payload["level_decision"] = {
+        **payload["level_decision"],  # type: ignore[dict-item]
+        "event_id": "level:current-gth",
+        "phase": "confirmed",
+        "direction": "down",
+        "thesis": "breakout",
+        "level_kind": "put_wall",
+        "level": 7550.0,
+    }
+    payload["gth_level_manual_candidate"] = {
+        "status": "manual_ready",
+        "source_signal_id": "level:old-gth",
+        "candidate_id": "gth:old",
+        "direction": "down",
+        "thesis": "breakout",
+        "target_spx": 7500.0,
+    }
+
+    projection = build_desk_map_projection(payload)
+    sections = build_desk_message_sections(payload, NOW)
+
+    assert projection.stage.value == "PAUSED"
+    assert "ready_opportunity_mismatch" in projection.quality_reasons
+    assert sections.desk_view.startswith("NO TRADE")
+    assert "gth:old" not in sections.execution
+    assert "7500" not in sections.targets
+
+
+def test_confirmed_path_holds_for_execution_gate_and_does_not_reuse_trigger_as_target() -> None:
+    payload = _payload()
+    payload["underlier"] = {"price": 7637.0, "source": "index:SPX"}
+    payload["level_decision"] = {
+        **payload["level_decision"],  # type: ignore[dict-item]
+        "phase": "confirmed",
+        "direction": "up",
+        "thesis": "breakout",
+        "level_kind": "call_wall",
+        "level": 7630.0,
+        "levels": {
+            "put_wall": 7600.0,
+            "flip_low": 7610.0,
+            "flip_high": 7615.0,
+            "call_wall": 7630.0,
+        },
+    }
+
+    sections = build_desk_message_sections(payload, NOW)
+
+    assert sections.desk_view.startswith("HOLD · LONG / CALL BREAKOUT")
+    assert "尚不可入场" in sections.desk_view
+    assert "当前路径已确认；等待实时合约、报价与盈亏比" in sections.primary_path
+    assert "需完成" not in sections.primary_path
+    assert sections.targets == "当前无可执行目标 · 等待当前机会生成并校验有效目标位"
+
+
+def test_missing_required_frames_cannot_report_ready_data_quality() -> None:
+    payload = _payload()
+    payload.pop("minute_market_frame")
+    payload.pop("option_structure_frame")
+
+    projection = build_desk_map_projection(payload)
+    sections = build_desk_message_sections(payload, NOW)
+
+    assert projection.data_quality == "DEGRADED"
+    assert projection.quality_reasons[:3] == (
+        "market_frame:unavailable",
+        "option_frame:unavailable",
+        "option_l1:unavailable",
     )
+    assert sections.data_quality.startswith("DEGRADED")
+    assert "Frames market=UNAVAILABLE · options=UNAVAILABLE · L1=UNAVAILABLE" in sections.data_quality
+
+
+def test_current_ready_is_paused_when_required_frames_are_missing() -> None:
+    payload = _payload()
+    payload.pop("minute_market_frame")
+    payload.pop("option_structure_frame")
+    payload["level_decision"] = {
+        **payload["level_decision"],  # type: ignore[dict-item]
+        "phase": "confirmed",
+        "direction": "up",
+        "thesis": "breakout",
+        "level_kind": "flip_high",
+        "level": 7565.0,
+    }
+    payload["trade_intent"] = {
+        "status": "trade_ready",
+        "event_id": "level:test-current",
+        "intent_id": "intent:test-current",
+        "contract_id": "option:SPX:SPXW:20260715:7575:C",
+    }
+    payload["plan_candidates"] = [
+        {
+            "intent_id": "intent:test-current",
+            "contract_id": "option:SPX:SPXW:20260715:7575:C",
+        }
+    ]
+
+    projection = build_desk_map_projection(payload)
+    sections = build_desk_message_sections(payload, NOW)
+
+    assert projection.stage.value == "PAUSED"
+    assert "ready_required_frame_unavailable" in projection.quality_reasons
+    assert sections.desk_view.startswith("NO TRADE")
+    assert "ready_required_frame_unavailable" in sections.data_quality
+    assert "禁止执行 READY" in sections.execution
 
 
 def test_desk_sections_do_not_invent_opening_range_levels_from_state() -> None:
@@ -402,10 +722,20 @@ def test_desk_data_quality_keeps_every_warning_and_frame_reason() -> None:
 
 def test_operator_status_brief_never_duplicates_a_live_execution_ticket() -> None:
     payload = _payload()
-    payload["trade_intent"] = {"status": "trade_ready"}
+    payload["level_decision"] = {
+        **payload["level_decision"],  # type: ignore[dict-item]
+        "phase": "confirmed",
+    }
+    payload["trade_intent"] = {
+        "status": "trade_ready",
+        "event_id": "level:test-current",
+        "intent_id": "intent:test-current",
+        "contract_id": "option:SPX:SPXW:20260715:7575:C",
+    }
     payload["plan_candidates"] = [
         {
             "play": "level_breakout_call",
+            "intent_id": "intent:test-current",
             "contract_id": "option:SPX:SPXW:20260715:7575:C",
             "strike": 7575.0,
             "right": "C",
@@ -423,7 +753,7 @@ def test_operator_status_brief_never_duplicates_a_live_execution_ticket() -> Non
 
     rendered = render_operator_status_brief(payload, [], NOW)
 
-    assert "Desk View  CALL BREAKOUT · READY" in rendered
+    assert "Desk View  READY · LONG / CALL BREAKOUT · 状态：执行候选已就绪（已确认）" in rendered
     assert "Execution  READY · 独立 MANUAL READY 卡承载实时合约与报价" in rendered
     assert "🟢 MANUAL READY" not in rendered
     assert "买入  " not in rendered
@@ -432,14 +762,21 @@ def test_operator_status_brief_never_duplicates_a_live_execution_ticket() -> Non
 
 def test_operator_status_brief_points_to_separate_gth_manual_ready_card() -> None:
     payload = _payload()
+    payload["level_decision"] = {
+        **payload["level_decision"],  # type: ignore[dict-item]
+        "phase": "confirmed",
+    }
     payload["gth_level_manual_candidate"] = {
         "status": "manual_ready",
+        "source_signal_id": "level:test-current",
         "position_type": "put_debit_spread",
+        "direction": "down",
+        "thesis": "breakout",
     }
 
     rendered = render_operator_status_brief(payload, [], NOW)
 
-    assert "· READY ·" in rendered
+    assert "Desk View  READY · SHORT / PUT BREAKOUT · 状态：执行候选已就绪" in rendered
     assert "Execution  READY · 独立 MANUAL READY 卡承载实时合约与报价" in rendered
     assert "买入  " not in rendered
     assert "限价  " not in rendered

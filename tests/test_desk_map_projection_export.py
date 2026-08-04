@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -61,6 +62,8 @@ def _payload() -> dict[str, object]:
                 "call_wall": 7550.0,
             },
         },
+        "minute_market_frame": {"quality": "ready"},
+        "option_structure_frame": {"quality": "ready", "l1": {"quality": "ready"}},
         "warnings": [],
     }
 
@@ -157,6 +160,53 @@ def test_projection_is_versioned_complete_and_never_truncates_changes(tmp_path: 
         "execution",
         "data_quality",
     }
+    assert "方向来源" in wire["message"]["primary_path"]
+    assert "Gamma职责" in wire["message"]["structure"]
+    assert "dealer sign unknown" in wire["message"]["structure"]
+
+
+def test_gamma_or_iv_change_updates_the_projection_fingerprint(tmp_path: Path) -> None:
+    first_payload = _payload()
+    first_payload["option_structure_frame"] = {
+        "quality": "ready",
+        "structure": {
+            "gamma_state": "positive_gamma_pin",
+            "gex_quality": "open_interest_gex",
+            "net_gamma_ratio": 0.61,
+            "zero_gamma": 7495.0,
+            "put_wall": 7450.0,
+            "call_wall": 7550.0,
+            "flip_zone": [7490.0, 7510.0],
+        },
+        "volatility": {"atm_iv_change_15m": 0.01},
+        "exposure": {"oi_quality": "ibkr_ok"},
+        "l1": {"quality": "ready"},
+    }
+    second_payload = copy.deepcopy(first_payload)
+    second_payload["option_structure_frame"]["structure"][  # type: ignore[index]
+        "gamma_state"
+    ] = "negative_gamma_acceleration"
+    second_payload["option_structure_frame"]["volatility"][  # type: ignore[index]
+        "atm_iv_change_15m"
+    ] = 0.02
+
+    first = build_desk_map_wire(
+        first_payload,
+        [],
+        now=datetime(2026, 8, 4, 14, 0, tzinfo=timezone.utc),
+        trading_date="2026-08-04",
+        storage=_storage(tmp_path),
+    )
+    second = build_desk_map_wire(
+        second_payload,
+        [],
+        now=datetime(2026, 8, 4, 14, 0, tzinfo=timezone.utc),
+        trading_date="2026-08-04",
+        storage=_storage(tmp_path),
+    )
+
+    assert first["structure_fingerprint"] != second["structure_fingerprint"]
+    assert first["projection_id"] != second["projection_id"]
 
 
 def test_projection_write_is_atomic_and_private(tmp_path: Path) -> None:
@@ -393,7 +443,18 @@ def test_projection_closes_unknown_direction_and_thesis_values(tmp_path: Path) -
 
 def test_trade_ready_without_closed_semantics_is_degraded_not_ready(tmp_path: Path) -> None:
     payload = _payload()
-    payload["trade_intent"] = {"status": "trade_ready"}
+    payload["trade_intent"] = {
+        "status": "trade_ready",
+        "event_id": "level-event-1",
+        "intent_id": "intent:closed-semantics",
+        "contract_id": "option:SPX:SPXW:20260804:7510:C",
+    }
+    payload["plan_candidates"] = [
+        {
+            "intent_id": "intent:closed-semantics",
+            "contract_id": "option:SPX:SPXW:20260804:7510:C",
+        }
+    ]
     payload["level_decision"] = {
         **payload["level_decision"],  # type: ignore[dict-item]
         "direction": "unknown",

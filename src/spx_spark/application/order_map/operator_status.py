@@ -118,9 +118,13 @@ def build_desk_message_sections(
         desk_view=_without_prefix(_desk_view_line(projection, guidance), "Desk View  "),
         location=_without_prefix(_location_line(payload, projection), "Location  "),
         structure=_without_prefix(_structure_line(payload), "Structure  "),
-        primary_path=_primary_path(payload, guidance),
-        alternative_path=guidance.invalidation_text,
-        targets=_without_prefix(_targets_line(payload), "Targets  "),
+        primary_path=_primary_path(payload, guidance, projection),
+        alternative_path=(
+            guidance.invalidation_text
+            if projection.direction in {"up", "down"}
+            else "尚无单边方向；当前不存在交易失效位，任一实时结构形成接受/拒绝后重算"
+        ),
+        targets=_without_prefix(_targets_line(payload, projection), "Targets  "),
         execution=_without_prefix(
             _execution_line(payload, projection, guidance),
             "Execution  ",
@@ -150,8 +154,47 @@ def build_desk_map_projection(payload: Mapping[str, Any]) -> DeskMapProjection:
         decision,
         invalid_phase=invalid_phase,
     )
-    ready = intent.get("status") == "trade_ready" or manual.get("status") == "manual_ready"
-    if ready:
+    intent_ready, manual_ready, current_plan = _current_ready_sources(
+        decision,
+        intent,
+        manual,
+        plans,
+    )
+    raw_ready = intent.get("status") == "trade_ready" or manual.get("status") == "manual_ready"
+    current_ready = intent_ready or manual_ready
+    current_path_ready = bool(
+        phase is LevelPhase.CONFIRMED
+        and decision.get("snapshot_consistent") is not False
+        and decision.get("quality_ok") is not False
+    )
+    required_frame_unavailable = any(
+        reason
+        in {
+            "market_frame:unavailable",
+            "option_frame:unavailable",
+            "option_l1:unavailable",
+        }
+        for reason in quality_reasons
+    )
+    ready = current_ready and current_path_ready and not required_frame_unavailable
+    if raw_ready and not current_ready:
+        quality = "DEGRADED"
+        quality_reasons = tuple(
+            dict.fromkeys((*quality_reasons, "ready_opportunity_mismatch"))
+        )
+    if raw_ready and not current_path_ready:
+        quality = "DEGRADED"
+        quality_reasons = tuple(
+            dict.fromkeys((*quality_reasons, "ready_without_current_confirmed_path"))
+        )
+    if current_ready and current_path_ready and required_frame_unavailable:
+        quality = "DEGRADED"
+        quality_reasons = tuple(
+            dict.fromkeys((*quality_reasons, "ready_required_frame_unavailable"))
+        )
+    if raw_ready and not ready:
+        stage = DeskStage.PAUSED
+    elif ready:
         stage = DeskStage.READY
     elif guidance.action is guidance_module.GuidanceAction.PAUSED:
         stage = DeskStage.PAUSED
@@ -168,21 +211,25 @@ def build_desk_map_projection(payload: Mapping[str, Any]) -> DeskMapProjection:
     else:
         stage = DeskStage.OBSERVING
     decision_direction = _closed_direction(decision.get("direction"))
+    thesis = _closed_thesis(decision.get("thesis"))
     direction = (
         decision_direction
         if decision_direction in {"up", "down"}
-        else _closed_direction(guidance.bias_direction)
+        and thesis in {"breakout", "fade"}
+        and phase in {*_ARMED_PHASES, LevelPhase.CONFIRMED}
+        else "none"
     )
-    thesis = _closed_thesis(decision.get("thesis"))
-    if ready and len(plans) == 1:
+    if ready and current_plan is not None:
         if decision_direction not in {"up", "down"}:
-            direction = {"C": "up", "P": "down"}.get(str(plans[0].get("right") or ""), direction)
-        play = str(plans[0].get("play") or "")
+            direction = {"C": "up", "P": "down"}.get(
+                str(current_plan.get("right") or ""), direction
+            )
+        play = str(current_plan.get("play") or "")
         if thesis not in {"breakout", "fade"}:
             thesis = "breakout" if "breakout" in play else "fade" if "fade" in play else thesis
-    if ready and direction not in {"up", "down"}:
+    if ready and manual_ready and direction not in {"up", "down"}:
         direction = _closed_direction(manual.get("direction"))
-    if ready and thesis not in {"breakout", "fade"}:
+    if ready and manual_ready and thesis not in {"breakout", "fade"}:
         thesis = _closed_thesis(manual.get("thesis"))
     level_kind = str(decision.get("level_kind") or "")
     level = finite_float(decision.get("level"))
@@ -201,28 +248,79 @@ def build_desk_map_projection(payload: Mapping[str, Any]) -> DeskMapProjection:
     )
 
 
+def _current_ready_sources(
+    decision: Mapping[str, Any],
+    intent: Mapping[str, Any],
+    manual: Mapping[str, Any],
+    plans: list[Mapping[str, Any]],
+) -> tuple[bool, bool, Mapping[str, Any] | None]:
+    """Bind READY authority and any displayed plan to the current level event."""
+
+    decision_event_id = str(decision.get("event_id") or "").strip()
+    intent_event_id = str(intent.get("event_id") or "").strip()
+    intent_ready = bool(
+        intent.get("status") == "trade_ready"
+        and decision_event_id
+        and intent_event_id == decision_event_id
+    )
+    current_plan: Mapping[str, Any] | None = None
+    if intent_ready:
+        intent_id = str(intent.get("intent_id") or "").strip()
+        contract_id = str(intent.get("contract_id") or "").strip()
+        if len(plans) == 1:
+            plan = plans[0]
+            plan_intent_id = str(plan.get("intent_id") or "").strip()
+            plan_contract_id = str(plan.get("contract_id") or "").strip()
+            if (
+                intent_id
+                and plan_intent_id == intent_id
+                and (not contract_id or plan_contract_id == contract_id)
+            ):
+                current_plan = plan
+            else:
+                intent_ready = False
+        else:
+            intent_ready = False
+
+    manual_source_id = str(manual.get("source_signal_id") or "").strip()
+    manual_ready = bool(
+        manual.get("status") == "manual_ready"
+        and decision_event_id
+        and manual_source_id == decision_event_id
+    )
+    return intent_ready, manual_ready, current_plan
+
+
 def _desk_view_line(
     projection: DeskMapProjection,
     guidance: guidance_module.DecisionGuidance,
 ) -> str:
     if projection.stage is DeskStage.PAUSED:
-        signal = "PAUSED"
+        signal = "NO TRADE · 数据或执行门控暂停"
     elif projection.stage in {DeskStage.INVALIDATED, DeskStage.EXPIRED}:
-        signal = "NO ACTIVE SETUP"
-    elif projection.direction == "up" and projection.thesis in {"breakout", "fade"}:
-        signal = f"CALL {_thesis_label(projection.thesis)}"
-    elif projection.direction == "down" and projection.thesis in {"breakout", "fade"}:
-        signal = f"PUT {_thesis_label(projection.thesis)}"
+        signal = "NO TRADE · 原路径已结束"
+    elif projection.direction in {"up", "down"} and projection.thesis in {
+        "breakout",
+        "fade",
+    }:
+        side = "LONG / CALL" if projection.direction == "up" else "SHORT / PUT"
+        path = f"{side} {_thesis_label(projection.thesis)}"
+        if projection.stage is DeskStage.READY:
+            signal = f"READY · {path}"
+        elif projection.stage is DeskStage.CONFIRMED:
+            signal = f"HOLD · {path} · 方向已确认，尚不可入场"
+        else:
+            signal = f"WATCH · {path} · 条件路径，尚不可入场"
     elif projection.stage is DeskStage.OBSERVING:
-        signal = f"NO SETUP · {guidance.bias}（context）"
+        signal = f"NO TRADE · {guidance.bias}仅作背景，尚无价格触发"
     else:
-        signal = "STRUCTURE PENDING"
+        signal = "NO TRADE · 等待价格接受或拒绝"
     phase_label = (
-        "CONFIRMED"
+        "已确认"
         if projection.stage is DeskStage.READY and projection.phase is LevelPhase.FAR
         else _phase_label(projection.phase)
     )
-    return f"Desk View  {signal} · {projection.stage.value} · {phase_label}"
+    return f"Desk View  {signal} · 状态：{_stage_label(projection.stage)}（{phase_label}）"
 
 
 def _location_line(payload: Mapping[str, Any], projection: DeskMapProjection) -> str:
@@ -257,7 +355,8 @@ def _location_line(payload: Mapping[str, Any], projection: DeskMapProjection) ->
         vwap_text += "（偏离 unavailable）"
     return (
         f"Location  SPX {spx_text} · ES {_available_number(es_last)}"
-        f"{level_text} · {vwap_text} · {_opening_range_text(payload)} · "
+        f"{level_text} · {_gamma_location_text(payload, spx)} · {vwap_text} · "
+        f"{_opening_range_text(payload)} · "
         f"{_expected_move_text(payload)}"
     )
 
@@ -265,59 +364,237 @@ def _location_line(payload: Mapping[str, Any], projection: DeskMapProjection) ->
 def _primary_path(
     payload: Mapping[str, Any],
     guidance: guidance_module.DecisionGuidance,
+    projection: DeskMapProjection,
 ) -> str:
     market = _mapping(payload.get("minute_market_frame"))
     es = _mapping(market.get("es"))
     volume = _mapping(market.get("volume"))
     cross_asset = _mapping(market.get("cross_asset"))
-    return (
-        f"{humanize_operator_trigger(guidance.trigger_text)} · "
-        f"ES动量 15m {_signed_points(es.get('return_15m_points'))} / "
+    if projection.direction in {"up", "down"} and projection.level is not None:
+        direction = "LONG" if projection.direction == "up" else "SHORT"
+        path = "价格接受突破" if projection.thesis == "breakout" else "价格拒绝回归"
+        basis = (
+            f"方向来源  {direction} 来自 {_level_kind_label(projection.level_kind)} "
+            f"{projection.level:g} 的{path}；Gamma 不提供第一步方向"
+        )
+        if projection.stage is DeskStage.READY:
+            trigger = "当前路径已确认；执行仅以独立 MANUAL READY 卡的实时合约与报价为准"
+        elif projection.stage is DeskStage.CONFIRMED:
+            trigger = "当前路径已确认；等待实时合约、报价与盈亏比通过执行门控"
+        else:
+            trigger = humanize_operator_trigger(guidance.trigger_text)
+    else:
+        basis = f"方向来源  尚无价格接受/拒绝确认；{guidance.bias}仅为 ES/量价背景"
+        trigger = _observing_trigger(payload)
+    flow = (
+        f"流确认  ES 15m {_signed_points(es.get('return_15m_points'))} / "
         f"60m {_signed_points(es.get('return_60m_points'))} · "
         f"量价 {_volume_alignment_text(volume.get('price_volume_alignment_5m'))} · "
         "ES/SPY "
         f"{_cross_asset_confirmation_text(cross_asset.get('es_spy_direction_confirmation_15m'))}"
     )
+    return f"{basis}\n下一触发  {trigger}\n{flow}"
 
 
 def _structure_line(payload: Mapping[str, Any]) -> str:
     decision = _mapping(payload.get("level_decision"))
     frozen = _mapping(decision.get("levels"))
-    by_play = _candidate_by_play(dict(payload))
-    flip_zone = payload.get("flip_zone")
-    live_flip = flip_zone if isinstance(flip_zone, list) and len(flip_zone) >= 2 else ()
-
-    def candidate_level(play: str) -> object:
-        candidate = by_play.get(play)
-        return candidate.get("level") if isinstance(candidate, dict) else None
-
-    live = {
-        "put_wall": candidate_level("put_wall_bounce_call"),
-        "flip_low": live_flip[0] if live_flip else None,
-        "flip_high": live_flip[1] if live_flip else None,
-        "call_wall": candidate_level("call_wall_fade_put"),
-    }
+    live = _live_levels(payload)
     frozen_text = _levels_text(frozen) if frozen else "unavailable"
     live_text = _levels_text(live)
     same = bool(frozen) and all(
         finite_float(frozen.get(key)) == finite_float(live.get(key))
         for key in ("put_wall", "flip_low", "flip_high", "call_wall")
     )
-    if same:
-        return f"Structure  Put/Flip/Call {frozen_text} · frozen=live"
-    return f"Structure  event {frozen_text} · live {live_text}"
-
-
-def _targets_line(payload: Mapping[str, Any]) -> str:
-    plans = [row for row in payload.get("plan_candidates") or () if isinstance(row, Mapping)]
-    if len(plans) == 1 and finite_float(plans[0].get("target_spx")) is not None:
-        return f"Targets  primary {finite_float(plans[0].get('target_spx')):g}"
-    decision = _mapping(payload.get("level_decision"))
-    levels = _mapping(decision.get("levels"))
-    return (
-        f"Targets  downside Put {_dash(levels.get('put_wall'))} · "
-        f"upside Call {_dash(levels.get('call_wall'))}"
+    levels = (
+        f"Put/Flip/Call {frozen_text} · event=live"
+        if same
+        else f"event {frozen_text} · live {live_text}"
     )
+    return f"Structure  {levels}\nGamma职责  {_gamma_feedback_text(payload)}"
+
+
+def _live_levels(payload: Mapping[str, Any]) -> dict[str, object]:
+    frame_structure = _mapping(_mapping(payload.get("option_structure_frame")).get("structure"))
+    frame_flip = frame_structure.get("flip_zone")
+    if isinstance(frame_flip, list | tuple) and len(frame_flip) >= 2:
+        flip_low, flip_high = frame_flip[:2]
+    else:
+        raw_flip = payload.get("flip_zone")
+        flip_low, flip_high = (
+            raw_flip[:2]
+            if isinstance(raw_flip, list | tuple) and len(raw_flip) >= 2
+            else (None, None)
+        )
+    by_play = _candidate_by_play(dict(payload))
+
+    def candidate_level(play: str) -> object:
+        candidate = by_play.get(play)
+        return candidate.get("level") if isinstance(candidate, dict) else None
+
+    return {
+        "put_wall": frame_structure.get("put_wall")
+        if finite_float(frame_structure.get("put_wall")) is not None
+        else candidate_level("put_wall_bounce_call"),
+        "flip_low": flip_low,
+        "flip_high": flip_high,
+        "call_wall": frame_structure.get("call_wall")
+        if finite_float(frame_structure.get("call_wall")) is not None
+        else candidate_level("call_wall_fade_put"),
+    }
+
+
+def _gamma_feedback_text(payload: Mapping[str, Any]) -> str:
+    frame = _mapping(payload.get("option_structure_frame"))
+    structure = _mapping(frame.get("structure"))
+    proxy = _mapping(payload.get("signed_gex_proxy"))
+    state = str(
+        structure.get("gamma_state")
+        or proxy.get("gamma_state")
+        or payload.get("gamma_state")
+        or "unknown"
+    )
+    frame_quality = str(frame.get("quality") or "").lower()
+    gex_quality = str(structure.get("gex_quality") or payload.get("gex_quality") or "")
+    if frame and (frame_quality != "ready" or gex_quality not in {"", "open_interest_gex"}):
+        state = "unknown"
+    assumption = "Call+/Put− OI proxy；dealer sign unknown"
+    ratio = finite_float(structure.get("net_gamma_ratio"))
+    if ratio is None:
+        ratio = finite_float(proxy.get("net_gamma_ratio"))
+    ratio_text = f"；净比 {ratio:+.2f}" if ratio is not None else ""
+    if state == "positive_gamma_pin":
+        return (
+            f"代理正 Gamma（{assumption}{ratio_text}）· 反馈偏压制/回归；"
+            "只有价格拒绝后才支持反向，Gamma 不给 LONG/SHORT"
+        )
+    if state in {"negative_gamma_acceleration", "negative_gamma_expansion", "negative_gamma"}:
+        return (
+            f"代理负 Gamma（{assumption}{ratio_text}）· 反馈偏放大；"
+            "只有价格接受后才支持顺势，Gamma 不给第一步方向"
+        )
+    if state == "zero_gamma_transition":
+        return (
+            f"Gamma 过渡（{assumption}{ratio_text}）· 情景敏感；"
+            "价格选边前 NO TRADE"
+        )
+    return f"Gamma unavailable（{assumption}）· 不参与方向"
+
+
+def _gamma_location_text(payload: Mapping[str, Any], spot: float | None) -> str:
+    structure = _mapping(_mapping(payload.get("option_structure_frame")).get("structure"))
+    live = _live_levels(payload)
+    low = finite_float(live.get("flip_low"))
+    high = finite_float(live.get("flip_high"))
+    zero = finite_float(structure.get("zero_gamma"))
+    if zero is None:
+        zero = finite_float(payload.get("zero_gamma"))
+    parts: list[str] = []
+    if spot is not None and low is not None and high is not None:
+        low, high = sorted((low, high))
+        if spot < low:
+            parts.append(f"Flip 下方 {low - spot:.1f}pt")
+        elif spot > high:
+            parts.append(f"Flip 上方 {spot - high:.1f}pt")
+        else:
+            parts.append(f"Flip 区间内 {low:g}–{high:g}")
+    else:
+        parts.append("Flip 位置 unavailable")
+    if spot is not None and zero is not None:
+        relation = "上方" if spot >= zero else "下方"
+        parts.append(f"ZG {zero:g} {relation} {abs(spot - zero):.1f}pt")
+    else:
+        parts.append("ZG unavailable")
+    return "Gamma位置 " + " · ".join(parts)
+
+
+def _observing_trigger(payload: Mapping[str, Any]) -> str:
+    decision = _mapping(payload.get("level_decision"))
+    phase = str(decision.get("phase") or "far").lower()
+    event_level = finite_float(decision.get("level"))
+    event_kind = str(decision.get("level_kind") or "")
+    if (
+        phase
+        in {
+            LevelPhase.APPROACHING.value,
+            LevelPhase.TESTING.value,
+            *[item.value for item in _ARMED_PHASES],
+        }
+        and event_level is not None
+        and event_kind
+    ):
+        return (
+            f"观察当前 {_level_kind_label(event_kind)} {event_level:g} 的接受或拒绝；"
+            "当前事件确认前 NO TRADE"
+        )
+    live = _live_levels(payload)
+    put_wall = finite_float(live.get("put_wall"))
+    call_wall = finite_float(live.get("call_wall"))
+    low = finite_float(live.get("flip_low"))
+    high = finite_float(live.get("flip_high"))
+    underlier = _mapping(payload.get("underlier"))
+    spot = finite_float(underlier.get("price"))
+    if spot is None:
+        spot = finite_float(_mapping(payload.get("level_decision")).get("spot"))
+    flip_distance = (
+        min(abs(spot - low), abs(spot - high))
+        if spot is not None and low is not None and high is not None
+        else None
+    )
+    wall_distances = [
+        abs(spot - level)
+        for level in (put_wall, call_wall)
+        if spot is not None and level is not None
+    ]
+    nearest_wall_distance = min(wall_distances) if wall_distances else None
+    if low is not None and high is not None and (
+        spot is None
+        or min(low, high) <= spot <= max(low, high)
+        or nearest_wall_distance is None
+        or (flip_distance is not None and flip_distance <= nearest_wall_distance)
+    ):
+        return (
+            f"等待当前 Flip {min(low, high):g}–{max(low, high):g} 的接受或拒绝；"
+            "确认前 NO TRADE"
+        )
+    if put_wall is not None or call_wall is not None:
+        return (
+            f"等待当前 Put {_available_number(put_wall)} / Call "
+            f"{_available_number(call_wall)} 的接受或拒绝；确认前 NO TRADE"
+        )
+    return "等待实时关键位与价格接受/拒绝同时可用；当前 NO TRADE"
+
+
+def _targets_line(payload: Mapping[str, Any], projection: DeskMapProjection) -> str:
+    plans = [row for row in payload.get("plan_candidates") or () if isinstance(row, Mapping)]
+    if projection.direction not in {"up", "down"} or projection.stage not in {
+        DeskStage.CONFIRMED,
+        DeskStage.READY,
+    }:
+        live = _live_levels(payload)
+        return (
+            "Targets  当前无交易目标 · 实时结构 "
+            f"Put {_available_number(live.get('put_wall'))} / "
+            f"Call {_available_number(live.get('call_wall'))}"
+        )
+    decision = _mapping(payload.get("level_decision"))
+    intent = _mapping(payload.get("trade_intent"))
+    manual = _mapping(payload.get("gth_level_manual_candidate"))
+    intent_ready, manual_ready, current_plan = _current_ready_sources(
+        decision,
+        intent,
+        manual,
+        plans,
+    )
+    if projection.stage is DeskStage.READY and intent_ready and current_plan is not None:
+        target = finite_float(current_plan.get("target_spx"))
+        if target is not None:
+            return f"Targets  primary {target:g}"
+    if projection.stage is DeskStage.READY and manual_ready:
+        target = finite_float(manual.get("target_spx"))
+        if target is not None:
+            return f"Targets  primary {target:g}"
+    return "Targets  当前无可执行目标 · 等待当前机会生成并校验有效目标位"
 
 
 def _execution_line(
@@ -329,10 +606,17 @@ def _execution_line(
     plans = [row for row in payload.get("plan_candidates") or () if isinstance(row, Mapping)]
     if projection.stage is DeskStage.READY:
         manual = _mapping(payload.get("gth_level_manual_candidate"))
+        decision = _mapping(payload.get("level_decision"))
+        intent_ready, manual_ready, _ = _current_ready_sources(
+            decision,
+            intent,
+            manual,
+            plans,
+        )
         key = str(
-            intent.get("semantic_key")
-            or intent.get("intent_id")
-            or manual.get("candidate_id")
+            (intent.get("semantic_key") if intent_ready else None)
+            or (intent.get("intent_id") if intent_ready else None)
+            or (manual.get("candidate_id") if manual_ready else None)
             or (plans[0].get("contract_id") if len(plans) == 1 else None)
             or "-"
         )
@@ -343,6 +627,12 @@ def _execution_line(
     if projection.stage is DeskStage.CONFIRMED:
         return "Execution  HOLD · 方向已确认，执行门控未完成"
     if projection.stage is DeskStage.PAUSED:
+        if "ready_opportunity_mismatch" in projection.quality_reasons:
+            return "Execution  PAUSED · READY 不属于当前价格事件，禁止使用旧机会或旧目标"
+        if "ready_required_frame_unavailable" in projection.quality_reasons:
+            return "Execution  PAUSED · 市场、期权结构或 L1 帧缺失，禁止执行 READY"
+        if "ready_without_current_confirmed_path" in projection.quality_reasons:
+            return "Execution  PAUSED · 执行卡与当前价格路径不一致，禁止使用旧 READY"
         return f"Execution  PAUSED · {guidance.action_text}"
     if projection.stage in {DeskStage.INVALIDATED, DeskStage.EXPIRED}:
         return f"Execution  CLOSED · {projection.stage.value} · 等待离开 reset band 后重新武装"
@@ -367,7 +657,11 @@ def _data_quality(
 
     market = _mapping(payload.get("minute_market_frame"))
     market_quality = str(market.get("quality") or "").lower()
-    if market_quality and market_quality != "ready":
+    if not market:
+        reasons.append("market_frame:unavailable")
+    elif not market_quality:
+        reasons.append("market_frame:unavailable")
+    elif market_quality != "ready":
         reasons.append(f"market_frame:{market_quality}")
     market_diagnostics = _mapping(market.get("diagnostics"))
     market_state = _mapping(market_diagnostics.get("rth_market_state"))
@@ -377,14 +671,22 @@ def _data_quality(
 
     frame = _mapping(payload.get("option_structure_frame"))
     frame_quality = str(frame.get("quality") or "").lower()
-    if frame_quality and frame_quality != "ready":
+    if not frame:
+        reasons.append("option_frame:unavailable")
+    elif not frame_quality:
+        reasons.append("option_frame:unavailable")
+    elif frame_quality != "ready":
         reasons.append(f"option_frame:{frame_quality}")
     exposure = _mapping(frame.get("exposure"))
     structure = _mapping(frame.get("structure"))
     density = _mapping(frame.get("density"))
     l1 = _mapping(frame.get("l1"))
     l1_quality = str(l1.get("quality") or "").lower()
-    if l1_quality and l1_quality != "ready":
+    if not l1:
+        reasons.append("option_l1:unavailable")
+    elif not l1_quality:
+        reasons.append("option_l1:unavailable")
+    elif l1_quality != "ready":
         reasons.append(f"option_l1:{l1_quality}")
     oi_quality = str(exposure.get("oi_quality") or "")
     if oi_quality and oi_quality != "ibkr_ok":
@@ -416,10 +718,54 @@ def _data_quality_line(
     if not projection.quality_reasons:
         status = "READY · 决策坐标与结构快照可用"
     else:
-        status = f"{projection.data_quality} · {'; '.join(projection.quality_reasons)}"
+        primary = _quality_reason_text(projection.quality_reasons[0])
+        audit = "; ".join(projection.quality_reasons)
+        status = f"{projection.data_quality} · 主要影响：{primary} · 审计码：{audit}"
     return (
-        f"Data Quality  {status} · {_volatility_iv_text(payload)} · {_frame_quality_text(payload)}"
+        f"Data Quality  {status} · {_volatility_iv_text(payload)} · "
+        f"{_frame_quality_text(payload)} · {_higher_greeks_text(payload)}"
     )
+
+
+def _quality_reason_text(reason: str) -> str:
+    labels = {
+        "spx_price_unavailable": "SPX 触发坐标不可用，不能确认方向",
+        "option_frame:unavailable": "期权结构帧不可用，Gamma 与墙位不可靠",
+        "option_frame:degraded": "期权结构帧降级",
+        "option_l1:unavailable": "SPXW 双边报价不可用",
+        "option_l1:degraded": "SPXW 报价覆盖降级",
+        "oi:missing": "OI 不可用，Gamma 代理失效",
+        "oi:schwab_unverified": "Schwab OI 未验证，Gamma 代理仅供审计",
+        "gex:no_open_interest_gex": "缺少 OI-GEX，不能解释 Gamma 机制",
+        "decision_snapshot_inconsistent": "旧事件与当前结构不一致",
+        "unknown_level_phase": "状态机阶段非法",
+        "market_frame:unavailable": "市场帧不可用，ES 流确认不能验证",
+        "ready_opportunity_mismatch": "READY 不属于当前价格事件，旧机会与旧目标已禁用",
+        "ready_required_frame_unavailable": "必需数据帧缺失，READY 已暂停",
+        "ready_without_current_confirmed_path": "旧 READY 与当前价格路径不一致，已禁止执行",
+    }
+    if reason.startswith("density_clipped:"):
+        return f"概率密度裁剪偏高（{reason.partition(':')[2]}）"
+    if reason.startswith("underlier_mismatch:"):
+        return "标的坐标不匹配，墙位与 Gamma 告警已抑制"
+    return labels.get(reason, reason.replace("_", " "))
+
+
+def _higher_greeks_text(payload: Mapping[str, Any]) -> str:
+    reference = _mapping(payload.get("spxw_0dte_greeks_reference"))
+    aggregate = _mapping(reference.get("aggregate"))
+    values = (
+        aggregate.get("gross_charm_5m_abs"),
+        aggregate.get("gross_charm_abs"),
+        aggregate.get("gross_vanna_1vol_abs"),
+        aggregate.get("gross_vanna_abs"),
+    )
+    if any(finite_float(value) is not None for value in values):
+        return (
+            "Vanna/Charm 绝对敏感度可用；position sign unknown，"
+            "仅作情景风险，不生成方向"
+        )
+    return "Vanna/Charm unavailable；不用于方向"
 
 
 def _opening_range_text(payload: Mapping[str, Any]) -> str:
@@ -626,15 +972,28 @@ def _level_kind_label(value: str) -> str:
 
 def _phase_label(phase: LevelPhase) -> str:
     return {
-        LevelPhase.FAR: "NO SETUP",
-        LevelPhase.APPROACHING: "APPROACHING",
-        LevelPhase.TESTING: "TESTING",
-        LevelPhase.BREAK_PENDING: "BREAK PENDING",
-        LevelPhase.REJECT_PENDING: "REJECT PENDING",
-        LevelPhase.ACCEPTED: "ACCEPTED",
-        LevelPhase.REJECTED: "REJECTED",
-        LevelPhase.RETEST: "RETEST",
-        LevelPhase.CONFIRMED: "CONFIRMED",
-        LevelPhase.INVALIDATED: "INVALIDATED",
-        LevelPhase.EXPIRED: "EXPIRED",
+        LevelPhase.FAR: "尚未触发",
+        LevelPhase.APPROACHING: "接近关键位",
+        LevelPhase.TESTING: "测试关键位",
+        LevelPhase.BREAK_PENDING: "突破待确认",
+        LevelPhase.REJECT_PENDING: "拒绝待确认",
+        LevelPhase.ACCEPTED: "已接受，等待回踩",
+        LevelPhase.REJECTED: "已拒绝，等待回踩",
+        LevelPhase.RETEST: "回踩确认中",
+        LevelPhase.CONFIRMED: "已确认",
+        LevelPhase.INVALIDATED: "已失效",
+        LevelPhase.EXPIRED: "已过期",
     }[phase]
+
+
+def _stage_label(stage: DeskStage) -> str:
+    return {
+        DeskStage.OBSERVING: "观察中",
+        DeskStage.WATCHING: "接近结构",
+        DeskStage.ARMED: "条件形成中",
+        DeskStage.CONFIRMED: "方向已确认",
+        DeskStage.READY: "执行候选已就绪",
+        DeskStage.INVALIDATED: "已失效",
+        DeskStage.EXPIRED: "已过期",
+        DeskStage.PAUSED: "已暂停",
+    }[stage]

@@ -283,6 +283,16 @@ def _structure_fingerprint(
     projection: object,
     slot_key: str,
 ) -> str:
+    option_frame = payload.get("option_structure_frame")
+    option_frame = option_frame if isinstance(option_frame, Mapping) else {}
+    option_structure = option_frame.get("structure")
+    option_structure = option_structure if isinstance(option_structure, Mapping) else {}
+    option_volatility = option_frame.get("volatility")
+    option_volatility = option_volatility if isinstance(option_volatility, Mapping) else {}
+    greek_reference = payload.get("spxw_0dte_greeks_reference")
+    greek_reference = greek_reference if isinstance(greek_reference, Mapping) else {}
+    greek_aggregate = greek_reference.get("aggregate")
+    greek_aggregate = greek_aggregate if isinstance(greek_aggregate, Mapping) else {}
     source = {
         "slot": slot_key,
         "stage": getattr(getattr(projection, "stage"), "value"),
@@ -296,6 +306,20 @@ def _structure_fingerprint(
         "underlier": payload.get("underlier"),
         "es_last": payload.get("es_last"),
         "flip_zone": payload.get("flip_zone"),
+        "gamma_context": {
+            "gamma_state": option_structure.get("gamma_state")
+            or payload.get("gamma_state"),
+            "zero_gamma": option_structure.get("zero_gamma") or payload.get("zero_gamma"),
+            "net_gamma_ratio": option_structure.get("net_gamma_ratio"),
+            "gex_quality": option_structure.get("gex_quality"),
+            "wall_rank_persistence": option_structure.get("wall_rank_persistence"),
+            "atm_iv_change_5m": option_volatility.get("atm_iv_change_5m"),
+            "atm_iv_change_15m": option_volatility.get("atm_iv_change_15m"),
+            "atm_iv_change_60m": option_volatility.get("atm_iv_change_60m"),
+            "gross_charm_5m_abs": greek_aggregate.get("gross_charm_5m_abs"),
+            "gross_vanna_1vol_abs": greek_aggregate.get("gross_vanna_1vol_abs"),
+            "dealer_position_sign": "unknown",
+        },
     }
     return _sha256(source)
 

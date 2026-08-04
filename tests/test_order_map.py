@@ -4290,7 +4290,7 @@ def test_render_status_keeps_stable_and_candidate_structures_explicit() -> None:
         datetime(2026, 7, 14, 5, 20, tzinfo=timezone.utc),
     )
 
-    assert "结构  ZeroGamma过渡　Put 7500　Flip 7510–7515　Call 7550" in text
+    assert "结构  Gamma过渡（选边前不交易）　Put 7500　Flip 7510–7515　Call 7550" in text
     assert "结构更新  新链 Put 7500　Flip 7520–7525　Call 7550　稳定确认 2/3，旧结构暂停" in text
     assert "动作  暂停新开仓：当前 OI/GEX 结构正在切换确认" in text
     assert "状态  INVALIDATED（已失效）　事件位 Flip上沿 7515" in text
