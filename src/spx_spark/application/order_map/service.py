@@ -889,6 +889,25 @@ def run_refresh(
 def run(argv: list[str] | None = None, *, now: datetime | None = None) -> int:
     args = parse_args(argv)
     now = now or datetime.now(tz=timezone.utc)
+
+    # The status lane must keep publishing the normalized desk-map projection,
+    # but every legacy baseline/refresh path writes a scheduled report.  Fence
+    # those paths before loading data or constructing an outbox event once Rust
+    # owns the report lane.  --force must never bypass single-writer ownership.
+    if not args.status and not args.dry_run and rust_report_owner_enabled():
+        print(
+            json.dumps(
+                {
+                    "skipped": True,
+                    "reason": "rust_report_owner",
+                    "accepted": False,
+                    "writer": "rust_report_owner",
+                    "delivery_outcome": "suppressed_legacy_scheduled_report",
+                }
+            )
+        )
+        return 0
+
     storage_settings = StorageSettings.from_env()
     state_path = default_state_path(storage_settings)
     trading_date = DEFAULT_MARKET_CALENDAR.research_expiry(now).isoformat()

@@ -2548,6 +2548,56 @@ def test_force_cannot_bypass_research_only_direct_map_gate(
     ]
 
 
+@pytest.mark.parametrize(
+    "argv",
+    [[], ["--force"], ["--refresh"], ["--refresh", "--force"]],
+)
+def test_rust_report_owner_fences_every_legacy_scheduled_report_path(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    argv: list[str],
+) -> None:
+    import spx_spark.application.order_map.service as order_map_module
+
+    monkeypatch.setenv("SPX_RUST_REPORT_OWNER", "true")
+    monkeypatch.setattr(
+        order_map_module.StorageSettings,
+        "from_env",
+        classmethod(
+            lambda cls: (_ for _ in ()).throw(
+                AssertionError("legacy writer loaded production data")
+            )
+        ),
+    )
+
+    assert (
+        order_map_module.run(
+            argv,
+            now=datetime(2026, 8, 4, 6, 30, tzinfo=timezone.utc),
+        )
+        == 0
+    )
+    assert json.loads(capsys.readouterr().out) == {
+        "skipped": True,
+        "reason": "rust_report_owner",
+        "accepted": False,
+        "writer": "rust_report_owner",
+        "delivery_outcome": "suppressed_legacy_scheduled_report",
+    }
+
+
+def test_direct_legacy_delivery_fails_closed_under_rust_report_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SPX_RUST_REPORT_OWNER", "true")
+
+    with pytest.raises(
+        RuntimeError,
+        match="legacy scheduled-report writer is fenced while Rust owns reports",
+    ):
+        send_order_map({}, object())  # type: ignore[arg-type]
+
+
 def test_push_context_roundtrip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from spx_spark.notifier.llm_writer import load_previous_push, record_push
 
