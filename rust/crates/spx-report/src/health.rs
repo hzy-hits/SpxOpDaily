@@ -79,6 +79,36 @@ impl ReportHealth {
         }
     }
 
+    /// Starts fresh runtime state while carrying forward only historical diagnostics.
+    ///
+    /// A missing file is the first-start case. Malformed or incompatible health is preserved and
+    /// returned as an error instead of being silently overwritten.
+    pub(crate) fn start_from_persisted(
+        health_path: &Path,
+        projection_path: &Path,
+        network_authorized: bool,
+        now: DateTime<Utc>,
+    ) -> Result<Self, HealthError> {
+        let mut health = Self::new(projection_path, network_authorized, now);
+        let persisted = match Self::load(health_path) {
+            Ok(persisted) => persisted,
+            Err(HealthError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(health);
+            }
+            Err(error) => return Err(error),
+        };
+
+        health.last_projection_id = persisted.last_projection_id;
+        health.last_persisted_at = persisted.last_persisted_at;
+        health.last_error_code = persisted.last_error_code;
+        health.last_response_model = persisted.last_response_model;
+        health.last_finish_reason = persisted.last_finish_reason;
+        health.last_visible_content_bytes = persisted.last_visible_content_bytes;
+        health.last_response_sha256 = persisted.last_response_sha256;
+        health.counters = persisted.counters;
+        Ok(health)
+    }
+
     /// Atomically publishes non-sensitive report service health.
     ///
     /// # Errors

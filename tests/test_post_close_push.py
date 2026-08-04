@@ -124,6 +124,39 @@ def test_push_review_respects_disabled_env(monkeypatch: pytest.MonkeyPatch) -> N
     assert calls == []
 
 
+def test_rust_report_owner_suppresses_post_close_push_before_llm_and_outbox(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SPX_REVIEW_PUSH_ENABLED", "true")
+    monkeypatch.setenv("SPX_RUST_REPORT_OWNER", "true")
+    monkeypatch.setattr(
+        "spx_spark.post_close_review.NotificationSettings.from_env",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("notification settings must not load")
+        ),
+    )
+    monkeypatch.setattr(
+        "spx_spark.post_close_runtime.generate_push_text",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("push LLM must not run")
+        ),
+    )
+    monkeypatch.setattr(
+        "spx_spark.post_close_runtime.dispatch_notification",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("legacy outbox must not run")
+        ),
+    )
+
+    result = push_review(sample_payload(), latest_markdown_path="/tmp/review.md")
+
+    assert result["skipped"] is True
+    assert result["reason"] == "rust_report_owner"
+    assert result["accepted"] is False
+    assert result["writer"] == "rust_report_owner"
+    assert result["delivery_outcome"] == "suppressed_legacy_scheduled_report"
+
+
 def test_push_review_agent_fallback(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("SPX_REVIEW_PUSH_ENABLED", raising=False)
     payload = sample_payload()

@@ -243,7 +243,12 @@ impl<W: DeskMessageWriter, L: ScheduledReportStore> ReportService<W, L> {
         if !gate.authorized() {
             return Err(ReportServiceError::NetworkNotAuthorized);
         }
-        let health = ReportHealth::new(&config.projection_path, true, now);
+        let health = ReportHealth::start_from_persisted(
+            &config.health_path,
+            &config.projection_path,
+            gate.authorized(),
+            now,
+        )?;
         health.persist(&config.health_path)?;
         Ok(Self {
             config,

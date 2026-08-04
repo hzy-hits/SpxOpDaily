@@ -13,6 +13,9 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from spx_spark.application.order_map.desk_projection_export import (
+    rust_report_owner_enabled,
+)
 from spx_spark.config import NotificationSettings, StorageSettings, env_bool, load_dotenv
 from spx_spark.notifier.dispatcher import dispatch_notification
 from spx_spark.notifier.llm_writer import DEFAULT_SYSTEM_PROMPT, generate_push_text
@@ -514,6 +517,20 @@ def push_review(
     now = now or datetime.now(tz=timezone.utc)
     if not env_bool("SPX_REVIEW_PUSH_ENABLED", bool(settings_value("review.push_enabled"))):
         return {"skipped": True, "reason": "push_disabled"}
+    if rust_report_owner_enabled():
+        return {
+            "skipped": True,
+            "reason": "rust_report_owner",
+            "accepted": False,
+            "text": "",
+            "writer": "rust_report_owner",
+            "used_agent": False,
+            "delivery_outcome": "suppressed_legacy_scheduled_report",
+            "im_ok": False,
+            "bark_ok": False,
+            "feishu_ok": False,
+            "delivered_ok": False,
+        }
 
     settings = NotificationSettings.from_env()
     summary = build_push_summary(payload, latest_markdown_path=latest_markdown_path)

@@ -28,7 +28,7 @@ Dealer sign is unknown. Do not claim that market makers are buying, selling, for
 Preserve exact semantic markers in their operator-facing fields: 方向来源 in primary_path; Gamma职责 and dealer sign unknown in structure; NO TRADE in desk_view.
 When typed direction is none, title, desk_view, and execution must not say LONG, SHORT, 做多, or 做空. When an up source contains LONG / CALL, or a down source contains SHORT / PUT, preserve that exact label in desk_view.
 Preserve every ASCII numeric fact in the corresponding source field. Preserve READY, HOLD, PAUSED, WAIT, and CLOSED from source execution in output execution.
-You may reorganize, clarify, and make wording more concise for readability, but do not omit or contradict decision-relevant facts or required semantic markers.
+You may reorganize and clarify wording for readability, but every output field must contain at least as many UTF-8 bytes as its corresponding source message field. Never compress a field or omit or contradict decision-relevant facts or required semantic markers.
 Lead with the human decision and its reason. Translate lifecycle and quality into plain language; do not expose schema names, raw field names, hashes, internal identifiers, action_authority, automatic_ordering, or raw enum dumps unless they change what the operator may safely do.
 In data_quality, state the single most important human impact first. Raw reason codes may appear only as a trailing audit detail, never as the headline.
 Do not collapse the report into a generic notification card. Do not invent orders, fills, positions, probabilities, or market-maker behavior.";
@@ -462,6 +462,32 @@ impl<T: Transport> ReportWriterClient<T> {
                 output.metadata.clone(),
             )
         })?;
+        if projection.research_context.is_none()
+            && !message
+                .data_quality
+                .as_str()
+                .contains(RESEARCH_UNAVAILABLE_DISCLOSURE)
+        {
+            message.data_quality = Token::new(
+                format!(
+                    "{}\n{RESEARCH_UNAVAILABLE_DISCLOSURE}",
+                    message.data_quality
+                ),
+                "desk report data_quality",
+            )
+            .map_err(|_| {
+                ReportWriterError::with_metadata(
+                    ReportWriterErrorCode::ResearchDisclosureFailed,
+                    output.metadata.clone(),
+                )
+            })?;
+        }
+        if message_field_is_utf8_byte_compressed(&message, &projection.message) {
+            return Err(ReportWriterError::with_metadata(
+                ReportWriterErrorCode::OutputCompressed,
+                output.metadata,
+            ));
+        }
         if semantic_marker_field_mismatch(&message, &projection.message) {
             return Err(ReportWriterError::with_metadata(
                 ReportWriterErrorCode::SemanticMarkerFieldMismatch,
@@ -493,26 +519,6 @@ impl<T: Transport> ReportWriterClient<T> {
                 ReportWriterErrorCode::ExecutionStateMarkerMissing,
                 output.metadata,
             ));
-        }
-        if projection.research_context.is_none()
-            && !message
-                .data_quality
-                .as_str()
-                .contains(RESEARCH_UNAVAILABLE_DISCLOSURE)
-        {
-            message.data_quality = Token::new(
-                format!(
-                    "{}\n{RESEARCH_UNAVAILABLE_DISCLOSURE}",
-                    message.data_quality
-                ),
-                "desk report data_quality",
-            )
-            .map_err(|_| {
-                ReportWriterError::with_metadata(
-                    ReportWriterErrorCode::ResearchDisclosureFailed,
-                    output.metadata.clone(),
-                )
-            })?;
         }
         Ok(DeskReportOutput {
             message,
@@ -614,6 +620,13 @@ fn message_field_values(message: &DeskMessageV2) -> [&str; 9] {
         message.execution.as_str(),
         message.data_quality.as_str(),
     ]
+}
+
+fn message_field_is_utf8_byte_compressed(actual: &DeskMessageV2, source: &DeskMessageV2) -> bool {
+    message_field_values(source)
+        .into_iter()
+        .zip(message_field_values(actual))
+        .any(|(source_field, actual_field)| actual_field.len() < source_field.len())
 }
 
 fn contains_ascii_word(text: &str, expected: &str) -> bool {

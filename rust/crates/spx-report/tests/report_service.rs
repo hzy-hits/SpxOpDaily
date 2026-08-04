@@ -7,10 +7,10 @@ use spx_core::{LATEST_DESK_MAP_PROJECTION_SCHEMA_VERSION, LatestDeskMapProjectio
 use spx_domain::{DeskMapProjectionV1, MarketSession, NotificationIntentV2, Token, Validate};
 use spx_ledger::{LedgerError, LedgerReader, PersistWrite};
 use spx_report::{
-    DEEPSEEK_MODEL_ID, DeskMessageWriter, DeskReportOutput, OwnedReportLedger,
+    DEEPSEEK_MODEL_ID, DeskMessageWriter, DeskReportOutput, HealthError, OwnedReportLedger,
     ProjectionEligibility, RESEARCH_UNAVAILABLE_DISCLOSURE, ReportHealth, ReportPersistDisposition,
-    ReportService, ReportServiceConfig, ReportTick, ReportWriterErrorCode, ResponseMetadata,
-    ScheduledReportStore,
+    ReportPhase, ReportService, ReportServiceConfig, ReportServiceError, ReportTick,
+    ReportWriterErrorCode, ResponseMetadata, ScheduledReportStore,
 };
 use tempfile::TempDir;
 
@@ -442,4 +442,108 @@ fn existing_slot_and_network_gates_prevent_model_calls() {
         denied.to_string(),
         "report network is not authorized by both config and caller"
     );
+}
+
+#[test]
+fn service_restart_restores_diagnostics_without_restoring_runtime_state() {
+    let temp = TempDir::new().unwrap();
+    let config = config(&temp, true, &[5]);
+    let prior_at = ten_am();
+    let restart_at = prior_at + TimeDelta::minutes(5);
+    let mut prior = ReportHealth::new(
+        std::path::Path::new("/retired/desk-map.json"),
+        false,
+        prior_at,
+    );
+    prior.phase = ReportPhase::Generating;
+    prior.last_projection_id = Some("desk-map:before-restart".to_owned());
+    prior.active_slot = Some("2026-08-04T10:00:00-04:00".to_owned());
+    prior.last_persisted_at = Some(prior_at - TimeDelta::minutes(30));
+    prior.next_attempt_at = Some(prior_at + TimeDelta::seconds(5));
+    prior.consecutive_generation_failures = 2;
+    prior.last_error_code = Some("provider_rate_limited".to_owned());
+    prior.last_response_model = Some(DEEPSEEK_MODEL_ID.to_owned());
+    prior.last_finish_reason = Some("stop".to_owned());
+    prior.last_visible_content_bytes = Some(3_782);
+    prior.last_response_sha256 = Some("b".repeat(64));
+    prior.counters.ticks = 11;
+    prior.counters.persisted_reports = 3;
+    prior.persist(&config.health_path).unwrap();
+
+    let service = ReportService::open(
+        config.clone(),
+        true,
+        FakeWriter::new([]),
+        MemoryStore::default(),
+        restart_at,
+    )
+    .unwrap();
+    let health = service.health();
+    assert_eq!(health.updated_at, restart_at);
+    assert_eq!(health.phase, ReportPhase::Starting);
+    assert!(health.network_authorized);
+    assert_eq!(
+        health.projection_path,
+        config.projection_path.display().to_string()
+    );
+    assert!(health.active_slot.is_none());
+    assert!(health.next_attempt_at.is_none());
+    assert_eq!(health.consecutive_generation_failures, 0);
+    assert_eq!(health.last_projection_id, prior.last_projection_id);
+    assert_eq!(health.last_persisted_at, prior.last_persisted_at);
+    assert_eq!(health.last_error_code, prior.last_error_code);
+    assert_eq!(health.last_response_model, prior.last_response_model);
+    assert_eq!(health.last_finish_reason, prior.last_finish_reason);
+    assert_eq!(
+        health.last_visible_content_bytes,
+        prior.last_visible_content_bytes
+    );
+    assert_eq!(health.last_response_sha256, prior.last_response_sha256);
+    assert_eq!(health.counters, prior.counters);
+    assert_eq!(ReportHealth::load(&config.health_path).unwrap(), *health);
+}
+
+#[test]
+fn corrupt_or_incompatible_health_prevents_service_start_without_overwrite() {
+    let temp = TempDir::new().unwrap();
+    let config = config(&temp, true, &[5]);
+    let now = ten_am();
+    std::fs::create_dir_all(config.health_path.parent().unwrap()).unwrap();
+
+    let corrupt = b"{not-json".to_vec();
+    std::fs::write(&config.health_path, &corrupt).unwrap();
+    let error = ReportService::open(
+        config.clone(),
+        true,
+        FakeWriter::new([]),
+        MemoryStore::default(),
+        now,
+    )
+    .err()
+    .unwrap();
+    assert!(matches!(
+        error,
+        ReportServiceError::Health(HealthError::Json(_))
+    ));
+    assert_eq!(std::fs::read(&config.health_path).unwrap(), corrupt);
+
+    let mut incompatible =
+        serde_json::to_value(ReportHealth::new(&config.projection_path, true, now)).unwrap();
+    incompatible["schema_version"] = serde_json::json!("spx_report_health.v2");
+    let incompatible = serde_json::to_vec_pretty(&incompatible).unwrap();
+    std::fs::write(&config.health_path, &incompatible).unwrap();
+    let error = ReportService::open(
+        config.clone(),
+        true,
+        FakeWriter::new([]),
+        MemoryStore::default(),
+        now,
+    )
+    .err()
+    .unwrap();
+    assert!(matches!(
+        error,
+        ReportServiceError::Health(HealthError::SchemaMismatch)
+    ));
+    assert_eq!(std::fs::read(&config.health_path).unwrap(), incompatible);
 }

@@ -6,11 +6,15 @@ from datetime import datetime, timezone
 from typing import Any
 
 from spx_spark.application.morning_map.render import build_map_prompt, render_template
+from spx_spark.application.order_map.desk_projection_export import (
+    rust_report_owner_enabled,
+)
 from spx_spark.config import NotificationSettings
 from spx_spark.notifier.dispatcher import dispatch_notification
 from spx_spark.notifier.llm_writer import generate_push_text
 from spx_spark.notifier.model import CommandRunner, default_runner
 from spx_spark.notifier.receipts import NotificationEnvelope, notification_event_id
+
 
 def send_morning_map(
     payload: dict[str, Any],
@@ -20,6 +24,20 @@ def send_morning_map(
     now: datetime | None = None,
     previous_push: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    if rust_report_owner_enabled():
+        return {
+            "skipped": True,
+            "reason": "rust_report_owner",
+            "accepted": False,
+            "text": "",
+            "writer": "rust_report_owner",
+            "used_agent": False,
+            "delivery_outcome": "suppressed_legacy_scheduled_report",
+            "im_ok": False,
+            "bark_ok": False,
+            "feishu_ok": False,
+            "delivered_ok": False,
+        }
     now = now or datetime.now(tz=timezone.utc)
     template = render_template(payload)
     text, writer = generate_push_text(

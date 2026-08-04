@@ -14,6 +14,9 @@ from spx_spark.application.morning_map.state import (
     mark_sent,
     within_send_window,
 )
+from spx_spark.application.order_map.desk_projection_export import (
+    rust_report_owner_enabled,
+)
 from spx_spark.config import StorageSettings
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 from spx_spark.notifier.llm_writer import generate_push_text, record_push
@@ -50,6 +53,19 @@ def run(argv: list[str] | None = None, *, now: datetime | None = None) -> int:
     payload = mm.build_morning_payload_with_retry(storage_settings, now=now)
     if _morning_payload_is_thin(payload) and not args.force and not args.dry_run:
         print(json.dumps({"skipped": True, "reason": "thin_snapshot_sampling_gap"}))
+        return 0
+    if not args.dry_run and rust_report_owner_enabled():
+        print(
+            json.dumps(
+                {
+                    "skipped": True,
+                    "reason": "rust_report_owner",
+                    "accepted": False,
+                    "writer": "rust_report_owner",
+                    "delivery_outcome": "suppressed_legacy_scheduled_report",
+                }
+            )
+        )
         return 0
     template = render_template(payload)
 

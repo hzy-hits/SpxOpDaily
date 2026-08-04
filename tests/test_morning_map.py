@@ -224,6 +224,79 @@ def test_send_morning_map_queues_on_feishu_failure(
     assert entry["message"] == template
 
 
+def test_rust_report_owner_suppresses_morning_push_before_llm_and_outbox(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SPX_RUST_REPORT_OWNER", "true")
+    monkeypatch.setattr(
+        "spx_spark.application.morning_map.delivery.generate_push_text",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("push LLM must not run")
+        ),
+    )
+    monkeypatch.setattr(
+        "spx_spark.application.morning_map.delivery.dispatch_notification",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("legacy outbox must not run")
+        ),
+    )
+
+    result = send_morning_map(sample_payload(), object())  # type: ignore[arg-type]
+
+    assert result["skipped"] is True
+    assert result["reason"] == "rust_report_owner"
+    assert result["accepted"] is False
+    assert result["writer"] == "rust_report_owner"
+    assert result["delivery_outcome"] == "suppressed_legacy_scheduled_report"
+
+
+def test_morning_service_keeps_payload_generation_but_skips_legacy_push(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("SPX_RUST_REPORT_OWNER", "true")
+    monkeypatch.setenv(
+        "SPX_MORNING_MAP_STATE_PATH",
+        str(tmp_path / "morning-state.json"),
+    )
+    built: list[datetime] = []
+
+    def build_payload(_settings, *, now):
+        built.append(now)
+        return sample_payload()
+
+    monkeypatch.setattr(
+        "spx_spark.morning_map.build_morning_payload_with_retry",
+        build_payload,
+    )
+    monkeypatch.setattr(
+        "spx_spark.morning_map.NotificationSettings.from_env",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("notification settings must not load")
+        ),
+    )
+    monkeypatch.setattr(
+        "spx_spark.morning_map.send_morning_map",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("legacy push must not run")
+        ),
+    )
+    now = datetime(2026, 7, 7, 13, 0, tzinfo=timezone.utc)
+
+    assert run(["--force"], now=now) == 0
+
+    assert built == [now]
+    assert json.loads(capsys.readouterr().out) == {
+        "skipped": True,
+        "reason": "rust_report_owner",
+        "accepted": False,
+        "writer": "rust_report_owner",
+        "delivery_outcome": "suppressed_legacy_scheduled_report",
+    }
+    assert not (tmp_path / "morning-state.json").exists()
+
+
 def test_run_skips_outside_window(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

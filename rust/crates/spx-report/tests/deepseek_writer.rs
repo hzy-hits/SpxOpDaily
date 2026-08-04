@@ -182,6 +182,31 @@ fn numeric_message_value() -> Value {
     })
 }
 
+const MESSAGE_FIELDS: [&str; 9] = [
+    "title",
+    "desk_view",
+    "location",
+    "structure",
+    "primary_path",
+    "alternative_path",
+    "targets",
+    "execution",
+    "data_quality",
+];
+
+fn pad_fields_to_source_bytes(actual: &mut Value, source: &Value) {
+    for field in MESSAGE_FIELDS {
+        let source_bytes = source[field].as_str().unwrap().len();
+        let actual_text = actual[field].as_str().unwrap();
+        if actual_text.len() < source_bytes {
+            actual[field] = json!(format!(
+                "{actual_text}{}",
+                " ".repeat(source_bytes - actual_text.len())
+            ));
+        }
+    }
+}
+
 #[test]
 fn request_contract_is_fixed_to_flash_max_reasoning_and_non_streaming() {
     let transport = RecordingTransport::new(TransportResponse::new(200, response("desk", "stop")));
@@ -352,7 +377,7 @@ fn desk_map_writer_sends_the_complete_projection_and_accepts_a_long_canonical_me
     assert!(system_prompt.contains("READY, HOLD, PAUSED, WAIT, and CLOSED"));
     assert!(system_prompt.contains("do not expose schema names, raw field names, hashes"));
     assert!(system_prompt.contains("single most important human impact first"));
-    assert!(!system_prompt.contains("at least as many UTF-8 bytes"));
+    assert!(system_prompt.contains("at least as many UTF-8 bytes"));
     for marker in ["方向来源", "Gamma职责", "dealer sign unknown", "NO TRADE"] {
         assert!(system_prompt.contains(marker));
     }
@@ -370,6 +395,151 @@ fn desk_map_writer_sends_the_complete_projection_and_accepts_a_long_canonical_me
     );
     assert!(research_block.starts_with("unavailable\n"));
     assert!(research_block.contains(RESEARCH_UNAVAILABLE_DISCLOSURE));
+}
+
+#[test]
+fn every_message_field_fails_closed_when_its_utf8_byte_length_is_shorter() {
+    let mut source = message_value();
+    source["data_quality"] = json!("source-quality-detail ".repeat(20));
+    let projection = projection_with_message(&source);
+
+    for field in MESSAGE_FIELDS {
+        let mut compressed = source.clone();
+        compressed[field] = json!("x");
+        assert!(compressed[field].as_str().unwrap().len() < source[field].as_str().unwrap().len());
+        let visible_content = serde_json::to_string(&compressed).unwrap();
+        let raw_response = response(&visible_content, "stop");
+        let expected_hash = hex::encode(Sha256::digest(raw_response.as_bytes()));
+        let client = ReportWriterClient::new(
+            config(true, 12_800),
+            true,
+            RecordingTransport::new(TransportResponse::new(200, raw_response.clone())),
+        )
+        .unwrap();
+
+        let error = client.write_desk_map(&projection).unwrap_err();
+
+        assert_eq!(
+            error.code(),
+            ReportWriterErrorCode::OutputCompressed,
+            "shorter {field} must fail closed"
+        );
+        let metadata = error.metadata().unwrap();
+        assert_eq!(metadata.raw_response_bytes, raw_response.len());
+        assert_eq!(metadata.raw_response_sha256, expected_hash);
+        assert_eq!(metadata.response_model.as_deref(), Some(DEEPSEEK_MODEL_ID));
+        assert_eq!(metadata.finish_reason.as_deref(), Some("stop"));
+        assert_eq!(metadata.visible_content_bytes, Some(visible_content.len()));
+    }
+}
+
+#[test]
+fn compression_uses_utf8_bytes_instead_of_character_count() {
+    let mut source = message_value();
+    source["desk_view"] = json!("中文");
+    let projection = projection_with_message(&source);
+    let mut compressed = source.clone();
+    compressed["desk_view"] = json!("abcd");
+    assert!(
+        compressed["desk_view"].as_str().unwrap().chars().count()
+            > source["desk_view"].as_str().unwrap().chars().count()
+    );
+    assert!(
+        compressed["desk_view"].as_str().unwrap().len()
+            < source["desk_view"].as_str().unwrap().len()
+    );
+    let visible_content = serde_json::to_string(&compressed).unwrap();
+    let client = ReportWriterClient::new(
+        config(true, 12_800),
+        true,
+        RecordingTransport::new(TransportResponse::new(
+            200,
+            response(&visible_content, "stop"),
+        )),
+    )
+    .unwrap();
+
+    let error = client.write_desk_map(&projection).unwrap_err();
+
+    assert_eq!(error.code(), ReportWriterErrorCode::OutputCompressed);
+    assert_eq!(
+        error.metadata().unwrap().visible_content_bytes,
+        Some(visible_content.len())
+    );
+}
+
+#[test]
+fn equal_or_longer_message_fields_pass_the_no_compression_boundary() {
+    let source = message_value();
+    let projection = projection_with_message(&source);
+    let mut same_length = source.clone();
+    same_length["title"] = json!("ABCDEFGHIJKL");
+    assert_eq!(
+        same_length["title"].as_str().unwrap().len(),
+        source["title"].as_str().unwrap().len()
+    );
+    let mut longer = source.clone();
+    for field in MESSAGE_FIELDS {
+        longer[field] = json!(format!("{} expanded", longer[field].as_str().unwrap()));
+    }
+
+    for accepted in [same_length, longer] {
+        let visible_content = serde_json::to_string(&accepted).unwrap();
+        let client = ReportWriterClient::new(
+            config(true, 12_800),
+            true,
+            RecordingTransport::new(TransportResponse::new(
+                200,
+                response(&visible_content, "stop"),
+            )),
+        )
+        .unwrap();
+
+        let output = client.write_desk_map(&projection).unwrap();
+
+        assert_eq!(output.visible_content, visible_content);
+        assert_eq!(
+            output.metadata.visible_content_bytes,
+            Some(visible_content.len())
+        );
+    }
+}
+
+#[test]
+fn required_research_disclosure_is_added_before_the_data_quality_byte_floor() {
+    let source = message_value();
+    let projection = projection_with_message(&source);
+    let mut raw_output = source.clone();
+    raw_output["data_quality"] = json!("x");
+    assert!(
+        raw_output["data_quality"].as_str().unwrap().len()
+            < source["data_quality"].as_str().unwrap().len()
+    );
+    let visible_content = serde_json::to_string(&raw_output).unwrap();
+    let client = ReportWriterClient::new(
+        config(true, 12_800),
+        true,
+        RecordingTransport::new(TransportResponse::new(
+            200,
+            response(&visible_content, "stop"),
+        )),
+    )
+    .unwrap();
+
+    let output = client.write_desk_map(&projection).unwrap();
+
+    assert_eq!(output.visible_content, visible_content);
+    assert!(
+        output.message.data_quality.as_str().len()
+            >= projection.message.data_quality.as_str().len()
+    );
+    assert!(
+        output
+            .message
+            .data_quality
+            .as_str()
+            .contains(RESEARCH_UNAVAILABLE_DISCLOSURE)
+    );
 }
 
 #[test]
@@ -458,6 +628,7 @@ fn moving_semantic_markers_to_the_wrong_fields_fails_closed() {
     misplaced["structure"] = json!("NO TRADE remains visible");
     misplaced["primary_path"] = json!("WAIT for price confirmation");
     misplaced["alternative_path"] = json!("方向来源 remains visible here");
+    pad_fields_to_source_bytes(&mut misplaced, &source);
     let visible_content = serde_json::to_string(&misplaced).unwrap();
     let client = ReportWriterClient::new(
         config(true, 12_800),
@@ -521,6 +692,7 @@ fn typed_direction_label_cannot_move_out_of_desk_view() {
         let mut moved = source.clone();
         moved["title"] = json!(format!("SPX Desk Map {label}"));
         moved["desk_view"] = json!("Confirmed price trigger");
+        pad_fields_to_source_bytes(&mut moved, &source);
         let visible_content = serde_json::to_string(&moved).unwrap();
         let client = ReportWriterClient::new(
             config(true, 12_800),
@@ -628,7 +800,7 @@ fn execution_state_markers_cannot_move_out_of_execution() {
 }
 
 #[test]
-fn concise_reorganization_is_allowed_when_contract_and_semantic_markers_survive() {
+fn concise_reorganization_is_rejected_even_when_contract_and_semantic_markers_survive() {
     let source = semantic_message_value();
     let projection = projection_with_direction(&source, "none");
     let concise = concise_semantic_message_value();
@@ -644,12 +816,10 @@ fn concise_reorganization_is_allowed_when_contract_and_semantic_markers_survive(
     )
     .unwrap();
 
-    let output = client.write_desk_map(&projection).unwrap();
+    let error = client.write_desk_map(&projection).unwrap_err();
 
-    assert_eq!(output.visible_content, concise_content);
-    for marker in ["方向来源", "Gamma职责", "dealer sign unknown", "NO TRADE"] {
-        assert!(output.visible_content.contains(marker));
-    }
+    assert_eq!(error.code(), ReportWriterErrorCode::OutputCompressed);
+    assert!(error.metadata().is_some());
 }
 
 #[test]
@@ -680,11 +850,8 @@ fn generic_short_card_without_source_semantics_is_rejected() {
 
     let error = client.write_desk_map(&projection).unwrap_err();
 
-    assert_eq!(
-        error.code(),
-        ReportWriterErrorCode::SemanticMarkerFieldMismatch
-    );
-    assert_eq!(error.to_string(), "semantic_marker_field_mismatch");
+    assert_eq!(error.code(), ReportWriterErrorCode::OutputCompressed);
+    assert_eq!(error.to_string(), "output_compressed");
     assert!(!format!("{error:?}").contains("Bullish context only"));
 }
 
