@@ -242,6 +242,7 @@ def test_gth_projection_does_not_relabel_prior_rth_research_as_current(tmp_path:
     )
 
     assert wire["session"] == "gth"
+    assert wire["source_slot"] == "2026-08-05:gth:20:30"
     assert wire["research_context_document_id"] is None
     assert wire["research_context"] is None
 

@@ -312,7 +312,7 @@ def _sha256(value: object) -> str:
 
 
 def _projection_slot_key(now: datetime, trading_date: str, session: str) -> str:
-    return f"{trading_date}:{session}:{now.strftime('%H:%M')}"
+    return f"{trading_date}:{session}:{now.astimezone(ET).strftime('%H:%M')}"
 
 
 __all__ = [

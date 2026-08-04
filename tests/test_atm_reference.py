@@ -242,7 +242,7 @@ def test_non_stale_spx_modes_cannot_use_stale_bootstrap(freshness: str) -> None:
     assert result.candidate is None
 
 
-def test_accepted_atm_is_reused_only_for_expiry_rollover(tmp_path) -> None:
+def test_accepted_atm_is_not_reused_without_explicit_recovery(tmp_path) -> None:
     state_path = tmp_path / "atm-state.json"
     controller = AtmReferenceController(state_path)
     initial = resolve(controller, ibus500=quote(7512))
@@ -259,6 +259,24 @@ def test_accepted_atm_is_reused_only_for_expiry_rollover(tmp_path) -> None:
     assert rollover.candidate.rounded_strike == 7510
     assert restarted.stable_atm is not None
     assert restarted.stable_atm.expiry == "20260709"
+
+
+def test_accepted_atm_can_restore_same_expiry_plan_after_restart(tmp_path) -> None:
+    state_path = tmp_path / "atm-state.json"
+    controller = AtmReferenceController(state_path)
+    initial = resolve(controller, ibus500=quote(7512))
+    assert initial.candidate is not None
+    controller.record_accepted(initial.candidate, expiry="20260709")
+
+    recovered = resolve(
+        AtmReferenceController(state_path),
+        stable_atm_recovery=True,
+    )
+
+    assert recovered.candidate is not None
+    assert recovered.candidate.source == "stable_atm"
+    assert recovered.candidate.rounded_strike == 7510
+    assert recovered.candidate.reason == "same_expiry_stable_atm_recovery"
 
 
 def test_controller_persists_basis_atomically_with_owner_only_mode(tmp_path) -> None:

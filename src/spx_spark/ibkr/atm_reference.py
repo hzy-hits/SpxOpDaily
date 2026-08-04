@@ -209,6 +209,7 @@ class AtmReferenceController:
         es: ReferenceQuote | None = None,
         spy: ReferenceQuote | None = None,
         expiry_rollover: bool = False,
+        stable_atm_recovery: bool = False,
     ) -> AtmReferenceResult:
         if strike_step <= 0:
             raise ValueError("strike_step must be positive")
@@ -273,6 +274,19 @@ class AtmReferenceController:
                 basis_as_of=None,
                 basis_contract=None,
                 reason="expiry_rollover_stable_atm",
+            )
+        elif stable_atm_recovery and self.stable_atm is not None:
+            stable = self.stable_atm
+            candidate = AtmReferenceCandidate(
+                value=float(stable.rounded_strike),
+                rounded_strike=stable.rounded_strike,
+                source="stable_atm",
+                observed_at=stable.observed_at,
+                freshness="stable",
+                basis_value=None,
+                basis_as_of=None,
+                basis_contract=None,
+                reason="same_expiry_stable_atm_recovery",
             )
         elif (
             self.stable_atm is None

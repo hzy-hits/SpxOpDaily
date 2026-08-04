@@ -213,6 +213,11 @@ class OptionSubscriptionOps:
             self.option_replan_controller.accepted_expiry is not None
             and self.option_replan_controller.accepted_expiry != today
         )
+        stable_atm_recovery = bool(
+            self.option_replan_controller.accepted_atm is None
+            and stable is not None
+            and stable.expiry == today
+        )
         atm_result = self.atm_reference_controller.resolve(
             strike_step=max(int(self.sampling_settings.strike_step), 1),
             is_rth=self.market_calendar.is_rth_open(decision_at),
@@ -227,6 +232,7 @@ class OptionSubscriptionOps:
             ),
             spy=reference_quote_from_row(by_label.get("stock:SPY"), as_of=decision_at),
             expiry_rollover=expiry_rollover,
+            stable_atm_recovery=stable_atm_recovery,
         )
         candidate = atm_result.candidate
         decision = self.option_replan_controller.observe(
