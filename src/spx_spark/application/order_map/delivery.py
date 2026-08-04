@@ -15,6 +15,9 @@ from spx_spark.application.order_map.prompts import (
     build_order_prompt,
     globex_writer_output_valid,
 )
+from spx_spark.application.order_map.desk_projection_export import (
+    rust_report_owner_enabled,
+)
 from spx_spark.application.order_map.render import render_template
 from spx_spark.config import NotificationSettings
 from spx_spark.notifier.llm_writer import (
@@ -34,6 +37,10 @@ def send_order_map(
     event_identity: str | None = None,
     occurred_at: datetime | None = None,
 ) -> dict[str, Any]:
+    if rust_report_owner_enabled():
+        raise RuntimeError(
+            "legacy scheduled-report writer is fenced while Rust owns reports"
+        )
     now = now or datetime.now(tz=timezone.utc)
     template = render_template(payload)
     if extra_header:
