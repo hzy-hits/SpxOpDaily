@@ -938,7 +938,7 @@ def test_render_trade_intent_shows_spring_gamma_without_making_it_a_gate() -> No
         }
     )
 
-    assert "Spring Gamma 偏多（0.63）" in text
+    assert "方向模型  Spring v3（ES）偏多（0.63）" in text
     assert "与本卡背离" in text
     assert "只作排序，不作门禁" in text
 

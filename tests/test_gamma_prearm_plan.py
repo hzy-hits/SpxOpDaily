@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 import spx_spark.application.market_features.service as market_feature_service
 from spx_spark.application.market_features.gamma_prearm_plan import (
     _notification_intent,
+    _notification_event_id,
     evaluate_gamma_prearm_plan,
 )
 from spx_spark.application.order_map.level_trigger_repricing import REPRICING_PHASES
@@ -45,17 +46,22 @@ def test_approaching_gamma_level_builds_two_sided_prearm_plan() -> None:
     assert plan["paths"][1]["prior_session_chase_risk"] == "high"
 
     card = _notification_intent(plan, event_id="gamma-plan:ready", now=NOW)
-    assert "🎯 GAMMA 伏击计划 · 先准备，未触发不下单" in card["text"]
+    assert card["title"] == "SPX 结构观察 · 等价格选边"
+    assert "🟡 结构观察 · NO TRADE · 等价格选边" in card["text"]
     assert "Flip Low 7375.00" in card["text"]
-    assert "下沿拒绝并收复：CALL" in card["text"]
-    assert "向下接受并保持：PUT" in card["text"]
-    assert "Spring Gamma 偏多（0.67）" in card["text"]
+    assert "Gamma职责  代理正 Gamma" in card["text"]
+    assert "dealer sign unknown" in card["text"]
+    assert "LONG条件  下沿拒绝并收复" in card["text"]
+    assert "SHORT条件  向下接受并保持" in card["text"]
+    assert "SPXW 7375" not in card["text"]
+    assert "当前报价" not in card["text"]
+    assert "Spring v3（ES）偏多（0.67）" in card["text"]
     assert "CALL 路径优先" in card["text"]
     assert "只作排序，不作门禁" in card["text"]
     assert "前日  -1.52%" in card["text"]
     assert "PUT 同向极值追单需等待墙位接受" in card["text"]
-    assert "现在不追" in card["text"]
-    assert "预埋计划不是方向信号" in card["text"]
+    assert "只观察结构，不展示合约" in card["text"]
+    assert "结构观察不是交易信号" in card["text"]
 
 
 def test_prearm_plan_identity_is_semantic_across_rearmed_events() -> None:
@@ -68,6 +74,17 @@ def test_prearm_plan_identity_is_semantic_across_rearmed_events() -> None:
 
     assert first["plan_id"] == rearmed["plan_id"]
     assert first["source_event_id"] != rearmed["source_event_id"]
+    assert _notification_event_id(first) != _notification_event_id(rearmed)
+
+    one_sided_repricing = _repricing()
+    one_sided_repricing["candidates"] = one_sided_repricing["candidates"][:1]
+    one_sided = evaluate_gamma_prearm_plan(
+        one_sided_repricing,
+        _level_decision(),
+        now=NOW,
+    )
+    assert first["plan_id"] == one_sided["plan_id"]
+    assert _notification_event_id(first) == _notification_event_id(one_sided)
 
 
 def test_prearm_plan_requires_fresh_approaching_repricing() -> None:
@@ -117,11 +134,31 @@ def test_break_pending_emits_one_sided_human_conditional_card() -> None:
 
     assert plan["notification_stage"] == "break_pending"
     assert [item["side"] for item in plan["paths"]] == ["PUT"]
-    assert "🟡 条件准备卡 · 已发生突破/拒绝，等确认" in card["text"]
-    assert "现价 12.10/12.30" in card["text"]
+    assert card["title"] == "SPX SHORT / PUT 候选 · 等最终确认"
+    assert "🟠 SHORT / PUT 候选 · 价格条件已出现，尚未确认" in card["text"]
+    assert "方向来源  SHORT / PUT 来自价格向下接受并保持" in card["text"]
+    assert "当前报价 12.10/12.30" in card["text"]
     assert "状态机 CONFIRMED 后才入场" in card["text"]
     assert "失效 SPX 收回 7378.00" in card["text"]
     assert "下一有效结构目标 7365.00" in card["text"]
+
+
+def test_pending_card_explicitly_blocks_a_quote_above_touch_reference() -> None:
+    level = {
+        **_level_decision(),
+        "phase": "break_pending",
+        "thesis": "breakout",
+        "direction": "down",
+    }
+    repricing = {**_repricing(), "phase": "break_pending"}
+    repricing["candidates"][0]["execution_bid"] = 13.8
+    repricing["candidates"][0]["execution_ask"] = 14.0
+
+    plan = evaluate_gamma_prearm_plan(repricing, level, now=NOW)
+    card = _notification_intent(plan, event_id="gamma-plan:over-reference", now=NOW)
+
+    assert "当前 ask 高于触位参考上限" in card["text"]
+    assert "不得按现价追入" in card["text"]
 
 
 def _level_decision(event_id: str = "level:flip-low-approach") -> dict[str, object]:
@@ -153,6 +190,15 @@ def _repricing(
             "target_value": 7375.0,
         },
         "touch_time_estimate": {"base_minutes": 12.0},
+        "gamma_context": {
+            "state": "positive_gamma_pin",
+            "zero_gamma": 7360.0,
+            "net_gamma_ratio": 0.61,
+            "weighting": "oi",
+            "sign_method": "call_positive_put_negative_oi_proxy_not_dealer_position",
+            "dealer_position_sign": "unknown",
+            "direction": "unknown",
+        },
         "candidates": [
             {
                 "play": "level_breakout_put",

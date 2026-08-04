@@ -130,7 +130,6 @@ def evaluate_gamma_prearm_plan(
             expiry,
             level_kind,
             f"{level:.4f}",
-            *(f"{item['play']}:{item['contract_id']}" for item in paths),
         )
     )
     plan_id = "gamma-prearm:" + hashlib.sha256(identity.encode()).hexdigest()[:24]
@@ -154,6 +153,7 @@ def evaluate_gamma_prearm_plan(
         prior_session,
         gth_position_fraction=gth_position_fraction,
     )
+    gamma_context = repricing.get("gamma_context")
     return {
         **base,
         "status": "prearm_ready",
@@ -176,6 +176,9 @@ def evaluate_gamma_prearm_plan(
             else {}
         ),
         "spring_gamma": spring_gamma_view,
+        "gamma_context": (
+            dict(gamma_context) if isinstance(gamma_context, Mapping) else {}
+        ),
         "prior_session": prior_session_view,
         "block_reasons": [],
     }
@@ -207,11 +210,7 @@ def process_gamma_prearm_plan(
     )
     state_path = Path(storage.data_root) / "latest" / "gamma_prearm_plan_state.json"
     projection_path = Path(storage.data_root) / "latest" / "gamma_prearm_plan.json"
-    event_id = (
-        f"{plan['plan_id']}:{plan.get('notification_stage')}"
-        if plan.get("status") == "prearm_ready"
-        else None
-    )
+    event_id = _notification_event_id(plan)
     settings = notification or NotificationSettings.from_env()
     with exclusive_state_lock(state_path):
         state = read_json_object(state_path)
@@ -329,32 +328,51 @@ def _notification_intent(
         "break_pending",
         "reject_pending",
     }
+    paths = [item for item in plan.get("paths") or () if isinstance(item, Mapping)]
+    selected = paths[0] if pending and len(paths) == 1 else None
+    selected_side = str(selected.get("side") or "") if selected is not None else ""
+    decision = (
+        "LONG / CALL"
+        if selected_side == "CALL"
+        else "SHORT / PUT"
+        if selected_side == "PUT"
+        else "DIRECTION UNKNOWN"
+    )
     lines = [
         (
-            "🟡 条件准备卡 · 已发生突破/拒绝，等确认"
+            f"🟠 {decision} 候选 · 价格条件已出现，尚未确认"
             if pending
-            else "🎯 GAMMA 伏击计划 · 先准备，未触发不下单"
+            else "🟡 结构观察 · NO TRADE · 等价格选边"
         ),
         (
             f"区域  {level_label} {float(plan['level']):.2f} · "
             f"当前 SPX {float(plan['current_spx']):.2f} · "
             f"距离 {float(plan['distance_points']):.2f} 点"
         ),
+        _gamma_feedback_line(plan),
     ]
-    for index, item in enumerate(plan.get("paths") or (), start=1):
-        if not isinstance(item, Mapping):
-            continue
-        price_range = _price_range(item)
+    if not pending:
+        lines.append("方向来源  尚无价格接受/拒绝确认；Gamma 不提供第一步方向")
+        for item in paths:
+            direction = "LONG" if item.get("side") == "CALL" else "SHORT"
+            lines.append(f"{direction}条件  {item['condition']}；发生后再生成单一路径执行卡")
+    elif selected is not None:
         lines.append(
-            f"路径{index}  {item['condition']}：{item['side']} · "
-            f"{option_contract_label(str(item['contract_id']))} · "
-            f"现价 {_quote_range(item)} · 最高参考 {price_range}"
+            f"方向来源  {decision} 来自价格{selected['condition']}；"
+            "Gamma 只解释该路径可能被压制或放大"
         )
-        invalidation = _number(item.get("invalidation_spx"))
-        target = _geometry_target(item.get("confirmation_geometry"))
+        price_range = _price_range(selected)
+        lines.append(
+            f"合约  {option_contract_label(str(selected['contract_id']))} · "
+            f"当前报价 {_quote_range(selected)} · 触发后参考 {price_range} · 提交前重报"
+        )
+        if _quote_above_reference(selected):
+            lines.append("追价限制  当前 ask 高于触位参考上限；即使确认也不得按现价追入")
+        invalidation = _number(selected.get("invalidation_spx"))
+        target = _geometry_target(selected.get("confirmation_geometry"))
         lines.append(
             f"触发  状态机 CONFIRMED 后才入场 · "
-            f"失效 SPX {'跌回' if item['side'] == 'CALL' else '收回'} "
+            f"失效 SPX {'跌回' if selected_side == 'CALL' else '收回'} "
             f"{invalidation:.2f}"
             if invalidation is not None
             else "触发  状态机 CONFIRMED 后才入场"
@@ -368,10 +386,10 @@ def _notification_intent(
             (
                 "动作  条件已出现；预填订单，只有 CONFIRMED 且重新报价通过后才提交"
                 if pending
-                else "动作  现在不追；只准备订单，价格到 Gamma 位并确认对应路径后再提交"
+                else "动作  只观察结构，不展示合约；价格选出单一路径后再评估执行"
             ),
-            "失效  Gamma 结构位变化、状态机离开本事件，或出现相反路径确认",
-            "权限  预埋计划不是方向信号；自动下单关闭",
+            "失效  结构位变化、状态机离开本事件，或出现相反路径确认",
+            "权限  结构观察不是交易信号；自动下单关闭",
         )
     )
     text = "\n".join(lines)
@@ -384,15 +402,27 @@ def _notification_intent(
         "occurred_at": now.isoformat(),
         "expires_at": expires_at.isoformat(),
         "title": (
-            "SPX 条件准备卡 · 等最终确认"
+            f"SPX {decision} 候选 · 等最终确认"
             if pending
-            else "SPX GAMMA 伏击计划 · 等触发"
+            else "SPX 结构观察 · 等价格选边"
         ),
         "text": text,
         "friend": True,
         "feishu_text": text,
         "enqueued_at": now.isoformat(),
     }
+
+
+def _notification_event_id(plan: Mapping[str, object]) -> str | None:
+    if plan.get("status") != "prearm_ready":
+        return None
+    plan_id = str(plan.get("plan_id") or "")
+    source_event_id = str(plan.get("source_event_id") or "")
+    stage = str(plan.get("notification_stage") or "")
+    if not plan_id or not source_event_id or not stage:
+        return None
+    lifecycle = hashlib.sha256(source_event_id.encode()).hexdigest()[:12]
+    return f"{plan_id}:{lifecycle}:{stage}"
 
 
 def _condition(play: str) -> str:
@@ -419,6 +449,32 @@ def _quote_range(path: Mapping[str, object]) -> str:
     if bid is not None and ask is not None:
         return f"{bid:.2f}/{ask:.2f}"
     return "重新报价"
+
+
+def _quote_above_reference(path: Mapping[str, object]) -> bool:
+    ask = _number(path.get("decision_ask"))
+    high = _number(path.get("projected_high"))
+    return ask is not None and high is not None and ask > high
+
+
+def _gamma_feedback_line(plan: Mapping[str, object]) -> str:
+    context = plan.get("gamma_context")
+    context = context if isinstance(context, Mapping) else {}
+    state = str(context.get("state") or "unknown")
+    assumption = "Call+/Put− OI proxy；dealer sign unknown"
+    if state == "positive_gamma_pin":
+        return (
+            f"Gamma职责  代理正 Gamma（{assumption}）· 偏压制/回归；"
+            "拒绝路径优先，突破必须额外确认，不给涨跌方向"
+        )
+    if state in {"negative_gamma_acceleration", "negative_gamma_expansion", "negative_gamma"}:
+        return (
+            f"Gamma职责  代理负 Gamma（{assumption}）· 放大已确认方向；"
+            "价格接受前不选 LONG/SHORT"
+        )
+    if state == "zero_gamma_transition":
+        return f"Gamma职责  过渡区（{assumption}）· 情景敏感；价格选边前 NO TRADE"
+    return f"Gamma职责  unavailable（{assumption}）· 不参与方向"
 
 
 def _geometry_target(value: object) -> float | None:

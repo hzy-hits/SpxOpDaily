@@ -19,7 +19,7 @@ def test_fresh_direction_ranks_but_does_not_gate_gamma_path() -> None:
     assert view["non_blocking"] is True
     assert view["execution_authority"] is False
     assert spring_gamma_operator_line(view) == (
-        "模型  Spring Gamma 偏空（-0.62） · PUT 路径优先 · 只作排序，不作门禁"
+        "方向模型  Spring v3（ES）偏空（-0.62） · PUT 路径优先 · 只作排序，不作门禁"
     )
     assert "与本卡背离" in spring_gamma_operator_line(view, ticket_side="CALL")
 
@@ -33,7 +33,7 @@ def test_abstain_does_not_change_confirmed_gamma_trigger() -> None:
 
     assert view["status"] == "abstain"
     assert spring_gamma_operator_line(view) == (
-        "模型  Spring Gamma 暂无方向 · 不改变 Gamma 触发"
+        "方向模型  Spring v3（ES）弃权 · 不改变价格触发"
     )
 
 
@@ -62,7 +62,7 @@ def test_model_cannot_acquire_execution_authority_through_card_overlay() -> None
 
     assert view["status"] == "unsafe"
     assert view["execution_authority"] is False
-    assert "不阻断 Gamma 计划" in spring_gamma_operator_line(view)
+    assert "不阻断结构观察" in spring_gamma_operator_line(view)
 
 
 def _shadow(*, as_of: datetime = NOW) -> dict[str, object]:

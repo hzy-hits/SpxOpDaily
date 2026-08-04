@@ -333,9 +333,10 @@ def _compact_clock_line(phase: dict[str, Any]) -> str | None:
 
 def _gamma_label(value: Any) -> str:
     return {
-        "positive_gamma_pin": "正Gamma",
-        "negative_gamma_expansion": "负Gamma",
-        "zero_gamma_transition": "ZeroGamma过渡",
+        "positive_gamma_pin": "代理正Gamma（偏压制/回归，不给方向）",
+        "negative_gamma_acceleration": "代理负Gamma（放大已确认方向）",
+        "negative_gamma_expansion": "代理负Gamma（放大已确认方向）",
+        "zero_gamma_transition": "Gamma过渡（选边前不交易）",
     }.get(str(value or ""), str(value or "-"))
 
 

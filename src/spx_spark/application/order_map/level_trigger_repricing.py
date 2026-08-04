@@ -14,6 +14,7 @@ from spx_spark.application.market_features.trade_geometry import confirmation_ge
 from spx_spark.application.order_map.candidates import build_level_trigger_candidates
 from spx_spark.application.order_map.touch_time_model import estimate_touch_time
 from spx_spark.config import StorageSettings
+from spx_spark.intraday_strategy import signed_gex_sign_method
 from spx_spark.options_map import build_options_map
 from spx_spark.settings.level_decision import LevelDecisionPolicy
 from spx_spark.settings.market_features import MarketFeatureSettings
@@ -155,6 +156,17 @@ def run_level_trigger_repricing(
         "path_geometries": geometry_by_play,
         "trend_regime": feature_context.get("trend_regime"),
         "volatility_regime": feature_context.get("volatility_regime"),
+        "gamma_context": {
+            "state": front.gamma_state if front is not None else "unknown",
+            "zero_gamma": front.zero_gamma if front is not None else None,
+            "net_gamma_ratio": front.net_gamma_ratio if front is not None else None,
+            "weighting": front.gex_weighting if front is not None else None,
+            "sign_method": signed_gex_sign_method(
+                front.gex_weighting if front is not None else None
+            ),
+            "dealer_position_sign": "unknown",
+            "direction": "unknown",
+        },
         "candidates": [asdict(candidate) for candidate in candidates],
         "warnings": warnings,
         "executable_candidate_count": sum(

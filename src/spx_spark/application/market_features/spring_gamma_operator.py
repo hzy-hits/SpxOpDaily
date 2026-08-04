@@ -86,10 +86,10 @@ def spring_gamma_operator_line(
             relation = "与本卡同向" if ticket_side == preferred else "与本卡背离"
         else:
             relation = f"{preferred} 路径优先"
-        return f"模型  Spring Gamma {bias}{score_text} · {relation} · 只作排序，不作门禁"
+        return f"方向模型  Spring v3（ES）{bias}{score_text} · {relation} · 只作排序，不作门禁"
     if model.get("status") == "abstain":
-        return "模型  Spring Gamma 暂无方向 · 不改变 Gamma 触发"
-    return "模型  Spring Gamma 数据未就绪 · 不阻断 Gamma 计划"
+        return "方向模型  Spring v3（ES）弃权 · 不改变价格触发"
+    return "方向模型  Spring v3（ES）数据未就绪 · 不阻断结构观察"
 
 
 def _number(value: object) -> float | None:
