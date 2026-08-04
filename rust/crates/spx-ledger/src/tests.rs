@@ -1306,6 +1306,26 @@ fn migration_checksum_drift_refuses_to_open() {
 }
 
 #[test]
+fn known_migration_prefix_accepts_a_forward_compatible_tail() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("ledger.sqlite");
+    let ledger = Ledger::open(&path).unwrap();
+    ledger
+        .connection()
+        .unwrap()
+        .execute(
+            "INSERT INTO schema_migrations (
+                version, name, checksum_sha256, applied_at_us
+             ) VALUES (3, 'future_backward_compatible_extension', ?1, ?2)",
+            rusqlite::params!["f".repeat(64), at(1).timestamp_micros()],
+        )
+        .unwrap();
+
+    Ledger::open(&path).unwrap();
+    LedgerReader::open_existing(&path).unwrap();
+}
+
+#[test]
 fn v1_ledger_upgrades_to_v2_without_losing_existing_outbox_rows() {
     let temp = TempDir::new().unwrap();
     let path = temp.path().join("ledger.sqlite");

@@ -191,16 +191,15 @@ fn verify_migration_prefix(
     applied: &[(i64, String, String)],
     expected: &[Migration],
 ) -> Result<(), LedgerError> {
-    if applied.len() > expected.len()
-        || !applied.iter().zip(expected).all(|(actual, expected)| {
-            actual.0 == expected.version
-                && actual.1 == expected.name
-                && actual.2 == expected.checksum
-        })
-    {
-        Err(LedgerError::MigrationDrift)
-    } else {
+    // A release may open a ledger with a newer, backward-compatible tail so a
+    // binary rollback does not require restoring an older database snapshot.
+    // Every migration known to this release still has to match exactly.
+    if applied.iter().zip(expected).all(|(actual, expected)| {
+        actual.0 == expected.version && actual.1 == expected.name && actual.2 == expected.checksum
+    }) {
         Ok(())
+    } else {
+        Err(LedgerError::MigrationDrift)
     }
 }
 
@@ -209,7 +208,7 @@ fn verify_current_migrations(
     expected: &[Migration],
 ) -> Result<(), LedgerError> {
     verify_migration_prefix(applied, expected)?;
-    if applied.len() == expected.len() {
+    if applied.len() >= expected.len() {
         Ok(())
     } else {
         Err(LedgerError::MigrationDrift)
