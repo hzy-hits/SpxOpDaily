@@ -1,0 +1,29 @@
+# Oracle Phase-1 shadow configuration. This runtime has no broker or delivery
+# authority. Ledger/projection state remains isolated under /var/lib; bounded
+# raw frames use the larger /srv/data filesystem in a Rust-only directory.
+
+socket_path = "/run/spx-spark-core-shadow/core.sock"
+ledger_path = "/var/lib/spx-spark-core-shadow/ledger/operations.sqlite"
+raw_log_dir = "/srv/data/spx-spark/rust-core-shadow/frames"
+projection_path = "/var/lib/spx-spark-core-shadow/latest/core.json"
+research_projection_path = "/var/lib/spx-spark-core-shadow/latest/research.json"
+desk_map_projection_path = "/var/lib/spx-spark-core-shadow/latest/desk-map.json"
+max_frame_bytes = 1048576
+max_connections = 8
+raw_segment_max_bytes = 67108864
+raw_log_min_free_bytes = 21474836480
+quote_cache_retention_seconds = 300
+quote_cache_max_entries = 4096
+batch_identity_cache_max_entries = 4096
+owner_lease_seconds = 30
+delivery_max_attempts = 5
+notification_targets = [
+  { key = "shadow-audit", channel = "webhook" },
+]
+decision_max_ttl_seconds = 120
+evaluation_max_delay_seconds = 2.0
+
+[readiness]
+quote_max_age_seconds = 5.0
+max_side_skew_seconds = 2.0
+allow_rth_ibkr_fallback = false

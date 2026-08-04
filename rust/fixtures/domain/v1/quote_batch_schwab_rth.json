@@ -1,0 +1,76 @@
+{
+  "schema_version": "quote_batch.v1",
+  "batch_id": "batch:schwab:rth:2026-07-31T14:30:00Z:42",
+  "provider": "schwab",
+  "mode": "incremental",
+  "sequence": 42,
+  "received_at": "2026-07-31T14:30:00Z",
+  "provider_state": {
+    "schema_version": "provider_state.v1",
+    "provider": "schwab",
+    "observed_at": "2026-07-31T14:29:59.950Z",
+    "operational": "live",
+    "transport": "connected",
+    "authentication": "authenticated",
+    "entitlement": "live",
+    "reason_codes": [
+      "healthy"
+    ],
+    "latency_ms": 12.5,
+    "connection_generation": 7
+  },
+  "quotes": [
+    {
+      "quote_id": "quote:schwab:SPX:2026-07-31T14:29:59.900Z",
+      "provider": "schwab",
+      "instrument_id": "index:SPX",
+      "instrument_kind": "index",
+      "market_session": "rth",
+      "quality": "live",
+      "option": null,
+      "bid": {
+        "price": 6360.0,
+        "source_at": "2026-07-31T14:29:59.900Z",
+        "received_at": "2026-07-31T14:29:59.970Z"
+      },
+      "ask": {
+        "price": 6360.5,
+        "source_at": "2026-07-31T14:29:59.900Z",
+        "received_at": "2026-07-31T14:29:59.970Z"
+      },
+      "last": {
+        "price": 6360.25,
+        "source_at": "2026-07-31T14:29:59.850Z",
+        "received_at": "2026-07-31T14:29:59.970Z"
+      }
+    },
+    {
+      "quote_id": "quote:schwab:SPXW:20260731:6360:C:2026-07-31T14:29:59.920Z",
+      "provider": "schwab",
+      "instrument_id": "option:SPXW:20260731:6360:C",
+      "instrument_kind": "option",
+      "market_session": "rth",
+      "quality": "live",
+      "option": {
+        "contract_id": "SPXW  260731C06360000",
+        "underlier": "SPX",
+        "trading_class": "SPXW",
+        "expiry": "2026-07-31",
+        "strike": 6360.0,
+        "right": "C",
+        "multiplier": 100
+      },
+      "bid": {
+        "price": 12.4,
+        "source_at": "2026-07-31T14:29:59.920Z",
+        "received_at": "2026-07-31T14:29:59.980Z"
+      },
+      "ask": {
+        "price": 12.6,
+        "source_at": "2026-07-31T14:29:59.920Z",
+        "received_at": "2026-07-31T14:29:59.980Z"
+      },
+      "last": null
+    }
+  ]
+}

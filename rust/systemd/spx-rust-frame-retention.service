@@ -1,0 +1,33 @@
+[Unit]
+Description=SPX Spark Rust raw-frame retention
+After=local-fs.target
+RequiresMountsFor=/srv/data/spx-spark/rust-core-shadow/frames
+ConditionPathExists=/opt/spx-spark-core-shadow/current/bin/spx-core
+ConditionPathExists=/etc/spx-spark-core-shadow/core.toml
+ConditionPathIsDirectory=/srv/data/spx-spark/rust-core-shadow/frames
+
+[Service]
+Type=oneshot
+User=ubuntu
+Group=ubuntu
+UMask=0077
+ExecStart=/opt/spx-spark-core-shadow/current/bin/spx-core prune-frames --config /etc/spx-spark-core-shadow/core.toml --keep-completed-days 7 --max-total-bytes 42949672960
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateNetwork=true
+PrivateTmp=true
+ProtectClock=true
+ProtectControlGroups=true
+ProtectHome=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectSystem=strict
+ReadWritePaths=/srv/data/spx-spark/rust-core-shadow/frames
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+CapabilityBoundingSet=
+SystemCallArchitectures=native

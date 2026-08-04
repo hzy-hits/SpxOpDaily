@@ -1,0 +1,12 @@
+{
+  "schema_version": "delivery_receipt.v1",
+  "receipt_id": "receipt:bark:decision-rth-call-vertical:1",
+  "target_id": "target:intent-call-vertical:bark-primary",
+  "intent_id": "intent:decision:rth:call-vertical:2026-07-31T14:30:05Z",
+  "target_key": "bark:desk-primary",
+  "channel": "bark",
+  "outcome": "delivered",
+  "attempted_at": "2026-07-31T14:30:07Z",
+  "provider_message_id": "bark-message-20260731-143007-1",
+  "error_code": null
+}

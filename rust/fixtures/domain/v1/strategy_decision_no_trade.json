@@ -1,0 +1,18 @@
+{
+  "schema_version": "strategy_decision.v1",
+  "decision_id": "decision:gth:10197:2026-07-31T08:00:06Z",
+  "request_id": "request:gth:2026-07-31T08:00:06Z",
+  "strategy_id": "spring_gamma_v3",
+  "policy_version": "spring_gamma_v3.contract.v1",
+  "snapshot_id": "snapshot:gth:2026-07-31T08:00:05Z",
+  "action": "no_trade",
+  "direction": null,
+  "evaluated_at": "2026-07-31T08:00:06Z",
+  "valid_until": "2026-07-31T08:01:06Z",
+  "block_reasons": [
+    "provider_external_session_owns"
+  ],
+  "exact_legs": null,
+  "evidence_hash": "892c726d46cee8c2a4f6b9e8c2a46ec0e4dfc2f8460a1620a5d442f5cdcd9a8c",
+  "automatic_ordering": false
+}
