@@ -1001,7 +1001,9 @@ mod tests {
     fn write_research_fixture(path: &std::path::Path) {
         std::fs::write(
             path,
-            include_bytes!("../../../fixtures/domain/v1/experimental_research_signals.json"),
+            include_bytes!(
+                "../../../../contracts/golden/domain/v1/experimental_research_signals.json"
+            ),
         )
         .unwrap();
     }
@@ -1009,7 +1011,7 @@ mod tests {
     fn write_current_desk_map_fixture(path: &std::path::Path) -> serde_json::Value {
         let now = Utc::now();
         let mut fixture: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../fixtures/domain/v1/desk_map_projection.json"
+            "../../../../contracts/golden/domain/v1/desk_map_projection.json"
         ))
         .unwrap();
         fixture["observed_through"] = serde_json::json!(now - TimeDelta::seconds(2));

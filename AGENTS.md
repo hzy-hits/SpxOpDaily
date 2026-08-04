@@ -74,6 +74,7 @@ git@github-spxopdaily:hzy-hits/SpxOpDaily.git
 ```text
 src/spx_spark/     Python 应用、provider、分析、策略、通知和运行编排
 rust/              Rust typed core、bridge、ledger、report 和 delivery
+contracts/golden/  Python/Rust 共用的版本化 wire contract fixtures
 tests/             单元、架构、契约、状态机、集成和端到端测试
 config/            默认配置与部署配置样例
 systemd/           生产 user service/timer 定义

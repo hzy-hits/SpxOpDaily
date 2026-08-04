@@ -378,7 +378,7 @@ fn every_title_and_section_has_an_independent_no_compression_floor() {
 #[test]
 fn embedded_research_context_is_sent_as_a_complete_second_fact_input() {
     let projection: DeskMapProjectionV1 = serde_json::from_str(include_str!(
-        "../../../fixtures/domain/v1/desk_map_projection.json"
+        "../../../../contracts/golden/domain/v1/desk_map_projection.json"
     ))
     .unwrap();
     projection.validate().unwrap();

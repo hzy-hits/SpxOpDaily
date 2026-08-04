@@ -300,7 +300,7 @@ mod tests {
     fn typed_research_artifact_is_bounded_and_validated() {
         let mut file = NamedTempFile::new().unwrap();
         file.write_all(include_bytes!(
-            "../../../fixtures/domain/v1/experimental_research_signals.json"
+            "../../../../contracts/golden/domain/v1/experimental_research_signals.json"
         ))
         .unwrap();
         let document = read_research_signals(file.path(), 1_048_576).unwrap();
@@ -317,7 +317,7 @@ mod tests {
     fn oracle_research_context_v2_is_bounded_and_validated() {
         let mut file = NamedTempFile::new().unwrap();
         file.write_all(include_bytes!(
-            "../../../fixtures/domain/v2/research_context.json"
+            "../../../../contracts/golden/domain/v2/research_context.json"
         ))
         .unwrap();
         let document = read_research_signals(file.path(), 1_048_576).unwrap();
@@ -329,7 +329,7 @@ mod tests {
     fn desk_map_projection_is_bounded_and_validated() {
         let mut file = NamedTempFile::new().unwrap();
         file.write_all(include_bytes!(
-            "../../../fixtures/domain/v1/desk_map_projection.json"
+            "../../../../contracts/golden/domain/v1/desk_map_projection.json"
         ))
         .unwrap();
         let document = read_desk_map_projection(file.path(), 1_048_576).unwrap();
@@ -354,7 +354,7 @@ mod tests {
     #[test]
     fn invalid_optional_research_degrades_without_poisoning_valid_desk_facts() {
         let mut value: Value = serde_json::from_str(include_str!(
-            "../../../fixtures/domain/v1/desk_map_projection.json"
+            "../../../../contracts/golden/domain/v1/desk_map_projection.json"
         ))
         .unwrap();
         value["research_context"]["regime"]["posterior"][0]["probability"] = serde_json::json!(0.9);
@@ -379,7 +379,7 @@ mod tests {
     #[test]
     fn invalid_desk_fact_still_fails_when_optional_research_is_invalid() {
         let mut value: Value = serde_json::from_str(include_str!(
-            "../../../fixtures/domain/v1/desk_map_projection.json"
+            "../../../../contracts/golden/domain/v1/desk_map_projection.json"
         ))
         .unwrap();
         value["research_context"]["regime"]["posterior"][0]["probability"] = serde_json::json!(0.9);
@@ -397,7 +397,7 @@ mod tests {
     #[test]
     fn dangling_optional_research_id_degrades_but_missing_field_still_fails() {
         let mut dangling: Value = serde_json::from_str(include_str!(
-            "../../../fixtures/domain/v1/desk_map_projection.json"
+            "../../../../contracts/golden/domain/v1/desk_map_projection.json"
         ))
         .unwrap();
         dangling["research_context"] = Value::Null;

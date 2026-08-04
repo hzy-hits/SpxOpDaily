@@ -73,6 +73,8 @@ sections are persisted and rendered without line or character truncation.
 The bridge consumes only Python's bounded atomic normalized, research-context
 and desk-map projections. It does not open Schwab or IBKR sessions, and it
 cannot increase the IBKR ticker count.
+Versioned wire fixtures are shared at `../contracts/golden/`; their ownership
+and producer/consumer roles are recorded in `../contracts/README.md`.
 Each provider update is a bounded, atomic `replace_provider_snapshot` frame;
 missing, zero, crossed, stale or session-unknown quotes cannot leave an older
 exact leg silently authoritative.

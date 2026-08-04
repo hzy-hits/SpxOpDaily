@@ -353,7 +353,7 @@ mod tests {
     #[test]
     fn accepted_decision_ack_contains_decision_id() {
         let decision: StrategyDecisionV1 = serde_json::from_str(include_str!(
-            "../../../fixtures/domain/v1/strategy_decision_no_trade.json"
+            "../../../../contracts/golden/domain/v1/strategy_decision_no_trade.json"
         ))
         .unwrap();
         let expected_decision_id = decision.decision_id.clone();

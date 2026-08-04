@@ -32,6 +32,7 @@ remain auditable under `rust/`.
 |---|---|
 | `src/spx_spark/` | Provider sessions, normalization, HMM/research, DuckDB, replay, and strategy iteration |
 | `rust/` | Strict wire/domain contracts, append-only frames, SQLite ledger, half-hour report, outbox, and delivery coordination |
+| `contracts/golden/` | Versioned cross-runtime wire examples and fail-closed fixtures |
 | `tests/` | Python application, architecture, replay, and provider tests |
 | `rust/crates/*/tests/` | Rust contract, state-machine, ledger, report, and delivery tests |
 

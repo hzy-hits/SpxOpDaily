@@ -221,7 +221,7 @@ mod tests {
 
     fn valid_projection() -> DeskMapProjectionV1 {
         let research_context: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../fixtures/domain/v2/research_context.json"
+            "../../../../contracts/golden/domain/v2/research_context.json"
         ))
         .unwrap();
         serde_json::from_value(serde_json::json!({
@@ -333,7 +333,7 @@ mod tests {
     #[test]
     fn rejects_legacy_v1_research_context() {
         let legacy: ResearchSignalsV1 = serde_json::from_str(include_str!(
-            "../../../fixtures/domain/v1/experimental_research_signals.json"
+            "../../../../contracts/golden/domain/v1/experimental_research_signals.json"
         ))
         .unwrap();
         let mut projection = valid_projection();
@@ -366,7 +366,7 @@ mod tests {
     #[test]
     fn requires_explicit_nullable_research_context_field() {
         let mut projection: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../fixtures/domain/v1/desk_map_projection.json"
+            "../../../../contracts/golden/domain/v1/desk_map_projection.json"
         ))
         .unwrap();
         projection

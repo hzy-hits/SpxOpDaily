@@ -1293,7 +1293,7 @@ fn experimental_research_updates_only_the_durable_research_projection() {
     let temp = TempDir::new().expect("temp directory");
     let core_config = config(&temp);
     let signals: ResearchSignalsV1 = serde_json::from_str(include_str!(
-        "../../../fixtures/domain/v1/experimental_research_signals.json"
+        "../../../../contracts/golden/domain/v1/experimental_research_signals.json"
     ))
     .expect("research fixture");
     let processing_at = signals.generated_at + TimeDelta::seconds(1);
@@ -1362,7 +1362,7 @@ fn research_context_v2_updates_and_reopens_the_durable_projection() {
     let temp = TempDir::new().expect("temp directory");
     let core_config = config(&temp);
     let signals: ResearchSignalsV1 = serde_json::from_str(include_str!(
-        "../../../fixtures/domain/v2/research_context.json"
+        "../../../../contracts/golden/domain/v2/research_context.json"
     ))
     .expect("research context v2 fixture");
     let processing_at = signals.generated_at + TimeDelta::seconds(1);
@@ -1411,7 +1411,7 @@ fn desk_map_projection_updates_only_the_rust_report_source_projection() {
     let temp = TempDir::new().expect("temp directory");
     let core_config = config(&temp);
     let projection: DeskMapProjectionV1 = serde_json::from_str(include_str!(
-        "../../../fixtures/domain/v1/desk_map_projection.json"
+        "../../../../contracts/golden/domain/v1/desk_map_projection.json"
     ))
     .expect("desk map fixture");
     let expected_projection_id = projection.projection_id.as_str().to_owned();

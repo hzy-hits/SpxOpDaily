@@ -15,8 +15,8 @@ SPX Spark
 ├── rust/                Rust operational core workspace
 │   ├── crates/          domain, bridge, core, ledger, report, delivery
 │   ├── config/          non-secret examples and deployment overlays
-│   ├── fixtures/        versioned Rust wire-contract fixtures
 │   └── systemd/         Rust system-service templates and Oracle overlays
+├── contracts/golden/    versioned cross-runtime wire-contract fixtures
 ├── config/              Python tracked defaults and deployment examples
 ├── systemd/             Python user-service units
 └── docs/                shared and Python-side architecture/operations evidence
@@ -75,6 +75,13 @@ The only active GitHub Actions workflow is the root `.github/workflows/ci.yml`.
 It runs Python tests plus the locked Rust workspace on native x86-64 and ARM64.
 A workflow under `rust/.github/` would be ignored by GitHub and must not be
 reintroduced.
+
+Shared contract fixtures live under `contracts/golden/`, not inside either
+language workspace. Python and Rust must both validate the advisory
+`research_context.v2` and `desk_map_projection.v1` fixtures. Rust-only ingress,
+decision, intent, and receipt fixtures remain in the same registry with their
+producer/consumer ownership documented in `contracts/README.md`; location does
+not imply that Python produces those wire shapes.
 
 ```bash
 # Python

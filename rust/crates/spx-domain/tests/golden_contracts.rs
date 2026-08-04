@@ -13,7 +13,7 @@ use spx_domain::{
 
 fn fixture_path(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../fixtures/domain/v1")
+        .join("../../../contracts/golden/domain/v1")
         .join(name)
 }
 
@@ -189,7 +189,7 @@ fn experimental_research_signals_are_valid_and_canonical() {
 
 #[test]
 fn oracle_research_context_v2_is_strict_and_valid() {
-    let raw = include_str!("../../../fixtures/domain/v2/research_context.json");
+    let raw = include_str!("../../../../contracts/golden/domain/v2/research_context.json");
     let signals: ResearchSignalsV1 = serde_json::from_str(raw).expect("v2 fixture must decode");
     signals.validate().expect("v2 fixture must validate");
     assert!(signals.context_v2().is_some());
@@ -225,7 +225,7 @@ fn oracle_research_context_v2_is_strict_and_valid() {
 
 #[test]
 fn research_context_v2_rejects_cross_session_subcontext_dates() {
-    let raw = include_str!("../../../fixtures/domain/v2/research_context.json");
+    let raw = include_str!("../../../../contracts/golden/domain/v2/research_context.json");
 
     let mut mismatched_prior: serde_json::Value = serde_json::from_str(raw).unwrap();
     mismatched_prior["prior_rth_context"]["for_trading_date"] = serde_json::json!("2026-08-04");
