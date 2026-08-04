@@ -38,7 +38,7 @@ impl ReportTargetConfig {
     }
 }
 
-/// Complete configuration for the half-hour RTH report service.
+/// Complete configuration for the half-hour GTH/RTH report service.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReportServiceConfig {

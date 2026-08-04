@@ -8,7 +8,7 @@ Nothing is deployed merely because a config or unit exists in this repository.
 
 The Rust workspace owns the production control plane: accept already-normalized
 market-data and advisory projections, build one decision-time snapshot, apply
-deterministic readiness rules, schedule the half-hour RTH Desk Map, persist
+deterministic readiness rules, schedule the half-hour GTH/RTH Desk Map, persist
 manual-advisory and scheduled-report intents, and deliver them through one
 auditable ledger. Python retains provider SDKs and research computation, but it
 does not own report timing, report writing, outbox state or delivery after the
@@ -28,7 +28,7 @@ Python provider sessions / research
                                                                    +--> append-only frames
                                                                    +--> SQLite/WAL ledger
                                                                             ^
-RTH :00/:30 ET --> spx-report --> DeepSeek full eight-section report --------+
+GTH/RTH :00/:30 ET --> spx-report --> DeepSeek full eight-section report ----+
                                                                             |
                                                                             v
                                                                       spx-delivery
@@ -56,7 +56,7 @@ contains only SPX `GTH` and `RTH`; CME `Globex` metadata and the independent
 | `spx-bridge` | Bounded source reads, provider mapping, durable generation/sequence/pending frame, typed ACK and health | Broker SDKs, strategy generation, notifications, research |
 | `spx-core` | Unix ingress, quote book, decision snapshot, readiness, deterministic policy, health projection and append log | Network delivery, research fitting, orders |
 | `spx-ledger` | The single SQLite/WAL database, owner fencing and legal state transitions | Analytical history or provider connections |
-| `spx-report` | RTH `:00`/`:30` ET schedule, durable desk-map read, DeepSeek writer, full report validation and scheduled-report intent | Provider sessions, HMM fitting, trade decisions, delivery transport |
+| `spx-report` | GTH/RTH `:00`/`:30` ET schedule, durable desk-map read, DeepSeek writer, full report validation and scheduled-report intent | Provider sessions, HMM fitting, trade decisions, delivery transport |
 | `spx-delivery` | Claim, atomic `InFlight` transition, rendering, transport, retry, receipts, uncertain outcome and DLQ | Strategy decisions or a second outbox database |
 | Python provider/research | Broker SDK sessions, atomic normalized/desk/research projections, post-close artifacts, Parquet, DuckDB, HMM, replay and backtests | Report schedule, live report writer, Rust ledger/outbox or notification delivery |
 
@@ -73,7 +73,9 @@ eight-section source message. It carries `action_authority=none` and
 `automatic_ordering=false`.
 
 The bridge validates and mirrors that projection into core's durable latest
-file. During RTH, `spx-report` alone owns the `:00` and `:30` ET slots. It reads
+file. During active GTH and RTH segments, `spx-report` alone owns the `:00` and
+`:30` ET slots. GTH source-slot keys include the explicit `gth` session token
+and both sessions use ET wall time. The service reads
 only a fresh, still-valid core projection, checks the stable slot in the ledger
 before a model call, and uses a generation-fenced `report` owner lease. A report
 is stored as `notification_intent.v2` with `scheduled_report` lineage keyed by

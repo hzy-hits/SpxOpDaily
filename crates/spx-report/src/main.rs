@@ -15,7 +15,7 @@ use uuid::Uuid;
 
 #[derive(Debug, Parser)]
 #[command(name = "spx-report")]
-#[command(about = "Fenced SPX Spark RTH scheduled-report writer")]
+#[command(about = "Fenced SPX Spark GTH/RTH scheduled-report writer")]
 struct Cli {
     #[command(subcommand)]
     command: Command,

@@ -117,12 +117,27 @@ pub fn read_latest_projection(
 
 fn validate_source_slot(latest: &LatestDeskMapProjectionV1) -> Result<(), ProjectionSourceError> {
     let value = latest.projection.source_slot.as_str();
-    let parsed = NaiveDateTime::parse_from_str(value, "%Y-%m-%d:%H:%M")
-        .map_err(|_| ProjectionSourceError::InvalidSourceSlot)?;
-    if parsed.format("%Y-%m-%d:%H:%M").to_string() != value
-        || parsed.date() != latest.projection.trading_date_et
-    {
-        return Err(ProjectionSourceError::InvalidSourceSlot);
+    match latest.projection.session {
+        MarketSession::Rth => {
+            let parsed = NaiveDateTime::parse_from_str(value, "%Y-%m-%d:%H:%M")
+                .map_err(|_| ProjectionSourceError::InvalidSourceSlot)?;
+            if parsed.format("%Y-%m-%d:%H:%M").to_string() != value
+                || parsed.date() != latest.projection.trading_date_et
+                || !is_rth_time(parsed.time())
+            {
+                return Err(ProjectionSourceError::InvalidSourceSlot);
+            }
+        }
+        MarketSession::Gth => {
+            let expected_prefix = format!("{}:gth:", latest.projection.trading_date_et);
+            let time = value
+                .strip_prefix(&expected_prefix)
+                .and_then(|raw| NaiveTime::parse_from_str(raw, "%H:%M").ok())
+                .ok_or(ProjectionSourceError::InvalidSourceSlot)?;
+            if format!("{expected_prefix}{}", time.format("%H:%M")) != value || !is_gth_time(time) {
+                return Err(ProjectionSourceError::InvalidSourceSlot);
+            }
+        }
     }
     Ok(())
 }
@@ -132,6 +147,7 @@ pub struct ReportSlot {
     source_slot: String,
     ledger_slot: String,
     trading_date_et: NaiveDate,
+    session: MarketSession,
     starts_at: DateTime<Utc>,
     closes_at: DateTime<Utc>,
 }
@@ -149,6 +165,10 @@ impl ReportSlot {
         self.trading_date_et
     }
 
+    pub const fn session(&self) -> MarketSession {
+        self.session
+    }
+
     pub const fn starts_at(&self) -> DateTime<Utc> {
         self.starts_at
     }
@@ -158,19 +178,15 @@ impl ReportSlot {
     }
 }
 
-/// Returns the active ET half-hour slot only during its bounded grace window.
+/// Returns an active GTH or RTH ET half-hour slot during its bounded grace window.
 pub fn active_report_slot(now: DateTime<Utc>, grace_seconds: i64) -> Option<ReportSlot> {
     let now_et = now.with_timezone(&New_York);
-    if matches!(now_et.weekday(), Weekday::Sat | Weekday::Sun) {
-        return None;
-    }
     let boundary_minute = if now_et.minute() < 30 { 0 } else { 30 };
     let local = now_et
         .date_naive()
         .and_hms_opt(now_et.hour(), boundary_minute, 0)?;
-    if local.time() < NaiveTime::from_hms_opt(9, 30, 0)?
-        || local.time() >= NaiveTime::from_hms_opt(16, 0, 0)?
-    {
+    let (session, trading_date_et) = scheduled_session(local)?;
+    if scheduled_session(now_et.naive_local())? != (session, trading_date_et) {
         return None;
     }
     let slot_start_et = New_York.from_local_datetime(&local).single()?;
@@ -180,13 +196,52 @@ pub fn active_report_slot(now: DateTime<Utc>, grace_seconds: i64) -> Option<Repo
         return None;
     }
     let closes_at = starts_at.checked_add_signed(chrono::TimeDelta::seconds(grace_seconds))?;
+    let source_slot = match session {
+        MarketSession::Rth => local.format("%Y-%m-%d:%H:%M").to_string(),
+        MarketSession::Gth => format!("{trading_date_et}:gth:{}", local.time().format("%H:%M")),
+    };
     Some(ReportSlot {
-        source_slot: local.format("%Y-%m-%d:%H:%M").to_string(),
+        source_slot,
         ledger_slot: slot_start_et.to_rfc3339_opts(SecondsFormat::Secs, false),
-        trading_date_et: local.date(),
+        trading_date_et,
+        session,
         starts_at,
         closes_at,
     })
+}
+
+fn scheduled_session(local: NaiveDateTime) -> Option<(MarketSession, NaiveDate)> {
+    let date = local.date();
+    let time = local.time();
+    let weekday = date.weekday();
+    if is_weekday(weekday) && is_rth_time(time) {
+        return Some((MarketSession::Rth, date));
+    }
+    if is_weekday(weekday) && time < NaiveTime::from_hms_opt(9, 25, 0)? {
+        return Some((MarketSession::Gth, date));
+    }
+    if matches!(
+        weekday,
+        Weekday::Sun | Weekday::Mon | Weekday::Tue | Weekday::Wed | Weekday::Thu
+    ) && time >= NaiveTime::from_hms_opt(20, 15, 0)?
+    {
+        return Some((MarketSession::Gth, date.succ_opt()?));
+    }
+    None
+}
+
+fn is_weekday(weekday: Weekday) -> bool {
+    !matches!(weekday, Weekday::Sat | Weekday::Sun)
+}
+
+fn is_rth_time(time: NaiveTime) -> bool {
+    time >= NaiveTime::from_hms_opt(9, 30, 0).expect("valid RTH open")
+        && time < NaiveTime::from_hms_opt(16, 0, 0).expect("valid RTH close")
+}
+
+fn is_gth_time(time: NaiveTime) -> bool {
+    time < NaiveTime::from_hms_opt(9, 25, 0).expect("valid GTH close")
+        || time >= NaiveTime::from_hms_opt(20, 15, 0).expect("valid GTH open")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -194,7 +249,7 @@ pub fn active_report_slot(now: DateTime<Utc>, grace_seconds: i64) -> Option<Repo
 pub enum ProjectionEligibility {
     Eligible,
     AwaitingCurrentProjection,
-    NotRth,
+    SessionMismatch,
     NotYetAvailable,
     Expired,
 }
@@ -204,7 +259,7 @@ impl ProjectionEligibility {
         match self {
             Self::Eligible => "eligible",
             Self::AwaitingCurrentProjection => "awaiting_current_projection",
-            Self::NotRth => "not_rth",
+            Self::SessionMismatch => "session_mismatch",
             Self::NotYetAvailable => "not_yet_available",
             Self::Expired => "expired",
         }
@@ -217,8 +272,8 @@ pub fn projection_eligibility(
     now: DateTime<Utc>,
 ) -> ProjectionEligibility {
     let projection = &latest.projection;
-    if projection.session != MarketSession::Rth {
-        return ProjectionEligibility::NotRth;
+    if projection.session != slot.session() {
+        return ProjectionEligibility::SessionMismatch;
     }
     if projection.source_slot.as_str() != slot.source_slot()
         || projection.trading_date_et != slot.trading_date_et()
@@ -258,13 +313,30 @@ mod tests {
     }
 
     #[test]
-    fn does_not_schedule_outside_rth_or_on_weekends() {
-        let before_open = Utc.with_ymd_and_hms(2026, 8, 4, 13, 0, 30).unwrap();
+    fn does_not_schedule_during_session_gaps_or_on_weekends() {
+        let before_open = Utc.with_ymd_and_hms(2026, 8, 4, 13, 27, 30).unwrap();
         let at_close = Utc.with_ymd_and_hms(2026, 8, 4, 20, 0, 30).unwrap();
         let weekend = Utc.with_ymd_and_hms(2026, 8, 8, 14, 0, 30).unwrap();
         assert!(active_report_slot(before_open, 180).is_none());
         assert!(active_report_slot(at_close, 180).is_none());
         assert!(active_report_slot(weekend, 180).is_none());
+    }
+
+    #[test]
+    fn gth_slots_use_next_trading_date_and_explicit_session_key() {
+        let evening = Utc.with_ymd_and_hms(2026, 8, 4, 1, 30, 30).unwrap();
+        let slot = active_report_slot(evening, 180).unwrap();
+        assert_eq!(slot.session(), MarketSession::Gth);
+        assert_eq!(slot.trading_date_et().to_string(), "2026-08-04");
+        assert_eq!(slot.source_slot(), "2026-08-04:gth:21:30");
+        assert_eq!(slot.ledger_slot(), "2026-08-03T21:30:00-04:00");
+
+        let morning = Utc.with_ymd_and_hms(2026, 8, 4, 13, 0, 30).unwrap();
+        let slot = active_report_slot(morning, 180).unwrap();
+        assert_eq!(slot.source_slot(), "2026-08-04:gth:09:00");
+
+        let opening_gap = Utc.with_ymd_and_hms(2026, 8, 4, 0, 20, 0).unwrap();
+        assert!(active_report_slot(opening_gap, 180).is_none());
     }
 
     #[test]

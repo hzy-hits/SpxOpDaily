@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use chrono::{DateTime, TimeDelta, TimeZone as _, Utc};
 use sha2::{Digest as _, Sha256};
 use spx_core::{LATEST_DESK_MAP_PROJECTION_SCHEMA_VERSION, LatestDeskMapProjectionV1};
-use spx_domain::{DeskMapProjectionV1, NotificationIntentV2, Token, Validate};
+use spx_domain::{DeskMapProjectionV1, MarketSession, NotificationIntentV2, Token, Validate};
 use spx_ledger::{LedgerError, LedgerReader, PersistWrite};
 use spx_report::{
     DEEPSEEK_MODEL_ID, DeskMessageWriter, DeskReportOutput, OwnedReportLedger,
@@ -211,6 +211,19 @@ fn projection(
     .unwrap()
 }
 
+fn gth_projection(
+    projection_id: &str,
+    source_slot: &str,
+    available_at: DateTime<Utc>,
+) -> DeskMapProjectionV1 {
+    let mut projection = projection(projection_id, source_slot, available_at);
+    projection.session = MarketSession::Gth;
+    projection.source_slot = token(source_slot);
+    projection.valid_until = available_at + TimeDelta::minutes(65);
+    projection.message.title = token("SPX GTH Desk Map · 21:30 ET");
+    projection
+}
+
 fn write_latest(path: &std::path::Path, projection: DeskMapProjectionV1) {
     projection.validate().unwrap();
     let latest = LatestDeskMapProjectionV1 {
@@ -299,6 +312,45 @@ fn waits_for_current_slot_then_persists_once_through_real_ledger() {
     assert_eq!(health.last_finish_reason.as_deref(), Some("stop"));
     assert!(health.last_visible_content_bytes.unwrap() > 283);
     assert_eq!(health.last_response_sha256.as_deref().unwrap().len(), 64);
+}
+
+#[test]
+fn gth_half_hour_slot_persists_through_the_same_typed_outbox() {
+    let temp = TempDir::new().unwrap();
+    let config = config(&temp, true, &[5]);
+    let slot_start = Utc.with_ymd_and_hms(2026, 8, 4, 1, 30, 0).unwrap();
+    let available_at = slot_start + TimeDelta::seconds(1);
+    write_latest(
+        &config.projection_path,
+        gth_projection("desk-map:gth-2130", "2026-08-04:gth:21:30", available_at),
+    );
+    let writer = FakeWriter::new([WriterOutcome::Success]);
+    let store = MemoryStore::default();
+    let store_inspector = store.clone();
+    let mut service = ReportService::open(
+        config,
+        true,
+        writer,
+        store,
+        available_at + TimeDelta::seconds(1),
+    )
+    .unwrap();
+
+    assert_eq!(
+        service
+            .run_once_at(available_at + TimeDelta::seconds(1))
+            .unwrap(),
+        ReportTick::Persisted {
+            slot: "2026-08-03T21:30:00-04:00".to_owned(),
+            disposition: ReportPersistDisposition::Inserted,
+        }
+    );
+    let intents = store_inspector.intents();
+    assert_eq!(intents.len(), 1);
+    assert_eq!(
+        intents[0].lineage.slot().unwrap().as_str(),
+        "2026-08-03T21:30:00-04:00"
+    );
 }
 
 #[test]

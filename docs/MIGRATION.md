@@ -77,7 +77,7 @@ This lane can move independently of Rust strategy-policy parity:
    publishes `desk_map_projection.v1` plus optional embedded
    `research_context.v2`.
 2. Bridge/core validate, durably audit and expose the latest accepted desk map.
-3. `spx-report` owns only RTH `:00`/`:30` ET slots, calls the fixed
+3. `spx-report` owns active GTH/RTH `:00`/`:30` ET slots, calls the fixed
    `deepseek-v4-flash` model with thinking enabled and
    `reasoning_effort=max` plus JSON Output, validates the complete eight-section response, and
    persists one `scheduled_report` v2 intent per source projection/slot.
@@ -93,7 +93,7 @@ writer only when its environment contains `SPX_RUST_REPORT_OWNER=true`.
 
 - keep checked-in report and delivery network gates disabled;
 - prove Python projection ID equals bridge/core's accepted projection ID;
-- prove malformed, stale, non-RTH and expired projections do not call the
+- prove malformed, stale, session-mismatched and expired projections do not call the
   provider or create an intent;
 - prove duplicate polling and restarts produce one stable ET slot;
 - prove the slot grace bounds when generation may start; once started, a

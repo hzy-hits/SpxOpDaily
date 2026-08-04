@@ -100,7 +100,7 @@ in the protected environment file or an approved secret manager.
 
 - One bridge owner emits each provider stream.
 - One `spx-core` owner writes decisions and decision-linked intents.
-- One `spx-report` owner schedules each RTH `:00`/`:30` ET Desk Map and writes
+- One `spx-report` owner schedules each active GTH/RTH `:00`/`:30` ET Desk Map and writes
   `scheduled_report` intents.
 - One `spx-delivery` owner claims targets from the same ledger.
 - Python collectors/research write only bounded atomic source projections;
@@ -235,7 +235,7 @@ Accept the first live slot only when all of these agree:
 
 - the Python source, bridge ACK and core latest file have the same projection
   ID and the projection is still within `valid_until`;
-- report health records RTH `:00` or `:30` ET, the expected source projection,
+- report health records GTH/RTH `:00` or `:30` ET, the expected source projection,
   `deepseek-v4-flash`, a non-`length` finish reason, the full visible-body byte
   count and the provider-response hash;
 - the ledger has one `scheduled_report` v2 event for that source/slot, no fake
@@ -267,7 +267,7 @@ After a separately authorized installation, verify more than process liveness:
 5. an RTH snapshot selects Schwab first;
 6. a GTH snapshot refuses Schwab and requires fresh IBKR exact legs;
 7. decisions are only `NO_TRADE` or `MANUAL_CANDIDATE`;
-8. scheduled reports occur only at RTH `:00`/`:30` ET, bind to the accepted
+8. scheduled reports occur only in active GTH/RTH `:00`/`:30` ET slots, bind to the accepted
    source projection/slot and retain all eight message sections;
 9. notification receipt state agrees with the external target;
 10. bridge health reports quote, research and desk-map lanes independently,

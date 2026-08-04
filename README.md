@@ -16,7 +16,7 @@ Python normalized/research/desk projections --> spx-bridge --> spx-core
                                                                +--> append-only frames
                                                                +--> SQLite/WAL ledger
                                                                           ^
-RTH :00/:30 ET --> spx-report --> full DeepSeek desk report ---------------+
+GTH/RTH :00/:30 ET --> spx-report --> full DeepSeek desk report -----------+
                                                                           |
                                                                           v
                                                                     spx-delivery
@@ -26,7 +26,7 @@ append-only market frames --> Python research / Parquet / DuckDB / replay
 
 `spx-core` normalizes one accepted snapshot, applies provider and exact-leg
 readiness, produces only `NO_TRADE` or `MANUAL_CANDIDATE`, and stores durable
-latest projections. `spx-report` owns RTH `:00`/`:30` ET scheduling and persists
+latest projections. `spx-report` owns GTH/RTH `:00`/`:30` ET scheduling and persists
 a complete `scheduled_report` intent. `spx-delivery` is the only notification
 sender. Its worker owns claim, retry, receipts, uncertain outcomes, dead
 letters, and explicit operator acknowledgement/replay. TTL, cancellation and
@@ -55,7 +55,7 @@ lane may create an informational `scheduled_report` intent.
 | `spx-bridge` | Fail-closed JSON mapping, durable cursor and typed ACK client |
 | `spx-core` | Ingress, quote book, snapshot, readiness, policy, health |
 | `spx-ledger` | SQLite/WAL decisions, intents, target state, receipts, DLQ |
-| `spx-report` | Half-hour RTH schedule, DeepSeek writer, full report validation |
+| `spx-report` | Half-hour GTH/RTH schedule, DeepSeek writer, full report validation |
 | `spx-delivery` | Deterministic renderers and isolated HTTP delivery worker |
 
 `spx-report` and `spx-delivery` refuse outbound I/O unless both their TOML gate

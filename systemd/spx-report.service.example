@@ -2,7 +2,7 @@
 # TOML keeps writer.network_enabled=false, so --allow-network alone is not
 # enough to call DeepSeek.
 [Unit]
-Description=SPX Spark Rust half-hour RTH desk report writer (example)
+Description=SPX Spark Rust half-hour GTH/RTH desk report writer (example)
 Requires=spx-core.service
 After=network-online.target spx-core.service
 Wants=network-online.target

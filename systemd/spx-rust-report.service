@@ -1,5 +1,5 @@
 [Unit]
-Description=SPX Spark Rust half-hour RTH desk report writer
+Description=SPX Spark Rust half-hour GTH/RTH desk report writer
 Requires=spx-rust-core-shadow.service
 After=network-online.target spx-rust-core-shadow.service
 Wants=network-online.target
