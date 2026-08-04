@@ -1,6 +1,7 @@
 # SPX Spark Core collaboration guide
 
-This repository is the clean-room Rust production core for SPX Spark. It does
+This directory is the clean-room Rust production core within the SPX Spark
+monorepo. It does
 not contain broker credentials, research notebooks, HMM training, DuckDB
 queries, or real-order execution.
 
@@ -40,9 +41,10 @@ read-only inspection, and differential tests.
 Run, in order:
 
 ```bash
+cd rust  # when starting from the monorepo root
 cargo fmt --all --check
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace --all-features
+cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+cargo test --locked --workspace --all-targets --all-features
 git diff --check
 ```
 

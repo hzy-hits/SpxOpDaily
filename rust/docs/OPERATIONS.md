@@ -6,16 +6,17 @@ ownership until live-session acceptance is complete.
 
 ## Local validation
 
-Run from the repository root:
+Run from the Rust workspace. From the monorepo root, enter it first:
 
 ```bash
+cd rust
 cargo fmt --all --check
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace --all-features
-cargo run -p spx-core -- check-config --config config/core.example.toml
-cargo run -p spx-report -- check-config --config config/report.example.toml
-cargo run -p spx-delivery -- check-config --config config/delivery.example.toml
-cargo run -p spx-bridge -- check-config --config config/bridge.example.toml
+cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+cargo test --locked --workspace --all-targets --all-features
+cargo run --locked -p spx-core -- check-config --config config/core.example.toml
+cargo run --locked -p spx-report -- check-config --config config/report.example.toml
+cargo run --locked -p spx-delivery -- check-config --config config/delivery.example.toml
+cargo run --locked -p spx-bridge -- check-config --config config/bridge.example.toml
 ```
 
 The examples under `config/` and `systemd/` are templates. Keep the `.example`

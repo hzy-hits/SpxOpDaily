@@ -2,6 +2,11 @@
 
 Clean-room Rust production runtime for SPX Spark.
 
+This workspace now lives at `rust/` inside the SPX Spark monorepo. The monorepo
+is the source of truth; the former standalone repository is retained only as a
+read-only history source. The import preserved the original Rust commits
+without squashing.
+
 > **Status:** the isolated core and normalized mirror bridge run on Oracle.
 > Half-hour report/delivery ownership is implemented as a separate cutover lane
 > but is not changed merely by these checked-in files. Rust does not connect to
@@ -83,12 +88,15 @@ delivery.
 
 ## Development
 
+From the monorepo root, enter the Rust workspace first:
+
 ```bash
+cd rust
 cargo fmt --all --check
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace --all-features
-cargo run -p spx-bridge -- check-config --config config/bridge.example.toml
-cargo run -p spx-report -- check-config --config config/report.example.toml
+cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+cargo test --locked --workspace --all-targets --all-features
+cargo run --locked -p spx-bridge -- check-config --config config/bridge.example.toml
+cargo run --locked -p spx-report -- check-config --config config/report.example.toml
 ```
 
 CI runs the same locked workspace on native Ubuntu x86-64 and ARM64 runners;

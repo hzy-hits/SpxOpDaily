@@ -1,5 +1,19 @@
 # Notification architecture
 
+## Monorepo ownership overlay
+
+This document defines the Python notification lanes. Python continues to own
+operations, market-warning, trade-ready, position-safety, and legacy report
+delivery. The Rust workspace owns only the explicitly cut over half-hour
+`scheduled_report` lane, using its single SQLite/WAL ledger and receipted
+delivery worker as defined in `rust/docs/ARCHITECTURE.md`.
+
+The `SPX_RUST_REPORT_OWNER` fence selects exactly one half-hour report producer.
+When false, the Python contract below applies to that lane. When true, Python
+still publishes the atomic desk projection but must not enqueue the same slot;
+Rust report and delivery own it end to end. The two outboxes are not merged and
+must never both own the same economic slot.
+
 ## Contract
 
 Every human-facing message uses one of five lanes and the shared notifier dispatcher:

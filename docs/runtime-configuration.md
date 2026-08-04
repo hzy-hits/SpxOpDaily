@@ -6,6 +6,12 @@ typed `spx_spark.settings.load_settings()` (`AppSettings`). Secrets remain in
 `.env` and are never loaded during unit tests (`SPX_SPARK_DISABLE_DOTENV=1` plus
 `tests/fixtures/runtime.defaults.yaml`).
 
+This file describes Python configuration only. Rust has strict TOML examples
+and Oracle overlays under `rust/config/`; production Rust config and secrets
+remain outside the checkout as documented in `rust/docs/OPERATIONS.md`. The
+shared precedence `defaults < deployment < environment` does not permit Python
+YAML to silently override Rust TOML or vice versa.
+
 Each mutable value is represented as a `value` plus a human-readable
 `description`. Numeric settings therefore carry their unit and purpose beside
 the number instead of appearing as unexplained literals in collector code.

@@ -1,5 +1,10 @@
 # SPX Spark 模块架构与分层协议
 
+范围说明：本文的分层和 module registry 只约束 `src/spx_spark/` Python
+应用。`rust/` 是同一 monorepo 内独立的 typed operational workspace，遵守
+`rust/AGENTS.md` 与 `rust/docs/ARCHITECTURE.md`；跨语言所有权以
+`docs/monorepo-layout.md` 为准。
+
 状态: 2026-07-12 与 pre-RTH 实施计划对齐。本文档是模块划分的权威来源；新增模块或
 import 前先对照本文分层规则与 `tests/architecture/test_module_registry.py`。
 违反分层规则或遗漏模块登记会直接挂测试。
