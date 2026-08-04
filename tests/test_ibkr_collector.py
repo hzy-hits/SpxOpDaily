@@ -75,6 +75,20 @@ def test_competing_session_error_detection() -> None:
     )
 
 
+def test_rotation_scoped_competing_error_does_not_claim_session_conflict() -> None:
+    error = IbkrError(
+        req_id=41,
+        error_code=10197,
+        message="No market data during competing live session",
+        contract=None,
+        ts="2026-08-04T02:00:00+00:00",
+        subscription_lane="rotation",
+    )
+
+    assert has_competing_session_error([error]) is False
+    assert provider_error_count([error]) == 0
+
+
 def test_provider_error_count_ignores_farm_status_messages() -> None:
     errors = [
         IbkrError(1, 2119, "Market data farm is connecting", None, "2026-07-06T13:30:00+00:00"),

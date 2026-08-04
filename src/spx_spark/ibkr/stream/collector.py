@@ -101,6 +101,7 @@ class StreamCollector(
         self.subscription_rejection_log: list[tuple[int, IbkrError]] = []
         self.subscription_rows_by_req_id: dict[int, VerifyRow] = {}
         self.subscription_lane_by_req_id: dict[int, str] = {}
+        self._subscription_request_lane: str | None = None
         self.subscription_health_failed = False
         self.tws_connectivity_lost = False
         self.subscriptions_lost = False

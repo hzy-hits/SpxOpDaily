@@ -180,9 +180,9 @@ class SpyRotationOps:
         definitions = self._resolve_option_definitions(
             option_contracts_from_specs(eligible_specs)
         )
-        replacement = qualify_and_subscribe(
-            self.ib,
+        replacement = self._qualify_and_subscribe_for_lane(
             definitions,
+            lane="rotation",
             qualify=False,
         )
         if not self._subscription_batch_succeeded(
@@ -193,7 +193,10 @@ class SpyRotationOps:
             lane="rotation",
         ):
             self._cancel_batch(replacement)
-            self.rotation_retry_at = now_monotonic + OPTION_ROTATION_RETRY_SECONDS
+            self.rotation_retry_at = max(
+                getattr(self, "rotation_retry_at", 0.0),
+                now_monotonic + OPTION_ROTATION_RETRY_SECONDS,
+            )
             log_event(
                 {
                     "task": "ibkr_stream",

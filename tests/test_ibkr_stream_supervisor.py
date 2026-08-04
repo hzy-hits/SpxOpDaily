@@ -189,6 +189,44 @@ def test_competing_error_precedes_generic_subscription_health_reconnect(
     assert not any(event.get("event") == "subscription_health_reconnect" for event in events)
 
 
+def test_rotation_competing_error_keeps_healthy_session_running(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = FakeClock()
+    collector = FakeCollector(clock, disconnect_after_flushes=2)
+    rotation_conflict = IbkrError(
+        req_id=2262,
+        error_code=10197,
+        message="competing live session",
+        contract=None,
+        ts="2026-08-04T02:00:00+00:00",
+        subscription_lane="rotation",
+    )
+    drain_count = 0
+
+    def drain_errors() -> list[IbkrError]:
+        nonlocal drain_count
+        drain_count += 1
+        return [rotation_conflict] if drain_count == 1 else []
+
+    collector.drain_new_errors = drain_errors  # type: ignore[method-assign]
+    deferred: list[float] = []
+    collector.defer_market_data_after_conflict = (  # type: ignore[attr-defined]
+        lambda *, seconds: deferred.append(seconds)
+    )
+    collector.broker_settings = SimpleNamespace(  # type: ignore[attr-defined]
+        account_read_enabled=False
+    )
+    runtime, events = make_runtime(monkeypatch, collector)
+
+    assert runtime.session_loop() is True
+
+    assert len(collector.flush_times) == 2
+    assert deferred == []
+    assert runtime.competing_session_circuit.failures == 0
+    assert not any(event.get("event") == "competing_session" for event in events)
+
+
 def test_repeated_competing_sessions_use_bounded_exponential_cooldown(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

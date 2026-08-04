@@ -118,6 +118,7 @@ class IbkrError:
     message: str
     contract: str | None
     ts: str
+    subscription_lane: str | None = None
 
 
 def parse_index_spec(spec: str) -> tuple[str, str]:

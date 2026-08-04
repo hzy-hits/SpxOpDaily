@@ -675,6 +675,28 @@ class OptionSubscriptionOps:
             capacity_tracker.observe_success(active_lines=active_market_data_lines(self))
         return True
 
+    def _qualify_and_subscribe_for_lane(
+        self,
+        definitions: list[tuple[str, str, Any]],
+        *,
+        lane: str,
+        qualify: bool = False,
+    ) -> dict[str, tuple[Any, VerifyRow]]:
+        """Attach request ownership before IBKR can report async rejection."""
+
+        previous_lane = getattr(self, "_subscription_request_lane", None)
+        self._subscription_request_lane = lane
+        try:
+            subscriptions = qualify_and_subscribe(
+                self.ib,
+                definitions,
+                qualify=qualify,
+            )
+            self._register_subscription_rows(subscriptions, lane=lane)
+            return subscriptions
+        finally:
+            self._subscription_request_lane = previous_lane
+
     def _apply_subscription_rejections(
         self,
         subscriptions: dict[str, tuple[Any, VerifyRow]],

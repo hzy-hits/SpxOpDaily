@@ -68,11 +68,19 @@ def print_collector_summary(
 
 
 def has_competing_session_error(errors: list[IbkrError]) -> bool:
-    return any(error.error_code == 10197 for error in errors)
+    return any(
+        error.error_code == 10197 and error.subscription_lane != "rotation"
+        for error in errors
+    )
 
 
 def provider_error_count(errors: list[IbkrError]) -> int:
-    return sum(1 for error in errors if error.error_code not in NON_DEGRADING_ERROR_CODES)
+    return sum(
+        1
+        for error in errors
+        if error.error_code not in NON_DEGRADING_ERROR_CODES
+        and not (error.error_code == 10197 and error.subscription_lane == "rotation")
+    )
 
 
 def error_payload(errors: list[IbkrError]) -> list[dict[str, object]]:

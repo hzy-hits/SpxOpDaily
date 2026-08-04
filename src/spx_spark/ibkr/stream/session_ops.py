@@ -12,7 +12,11 @@ from spx_spark.ibkr.farm_health import (
 from spx_spark.ibkr.option_replan import OptionReplanController
 from spx_spark.ibkr.stream import deps as stream_deps
 from spx_spark.ibkr.stream.capacity_tracker import active_market_data_lines
-from spx_spark.ibkr.stream.models import MAX_TRACKED_ERRORS, SUBSCRIPTION_REJECTION_CODES
+from spx_spark.ibkr.stream.models import (
+    MAX_TRACKED_ERRORS,
+    OPTION_ROTATION_RETRY_SECONDS,
+    SUBSCRIPTION_REJECTION_CODES,
+)
 from spx_spark.ibkr.stream.models import replace_client_id
 from spx_spark.ibkr.verifier import IbkrError
 from spx_spark.config import env_bool
@@ -33,12 +37,16 @@ write_snapshot = stream_deps.write_snapshot
 
 class SessionOps:
     def _on_error(self, req_id: int, error_code: int, message: str, contract: Any) -> None:
+        subscription_lane = getattr(self, "subscription_lane_by_req_id", {}).get(req_id)
+        if subscription_lane is None and req_id >= 0:
+            subscription_lane = getattr(self, "_subscription_request_lane", None)
         error = IbkrError(
             req_id=req_id,
             error_code=error_code,
             message=message,
             contract=str(contract) if contract is not None else None,
             ts=datetime.now(tz=timezone.utc).isoformat(),
+            subscription_lane=subscription_lane,
         )
         self.errors.append(error)
         del self.errors[:-MAX_TRACKED_ERRORS]
@@ -64,9 +72,23 @@ class SessionOps:
 
         if error_code in SUBSCRIPTION_REJECTION_CODES:
             if error_code == 10197:
-                # Live/paper ownership conflicts affect the whole market-data
-                # session, including requests not registered locally yet.
-                self.subscription_health_failed = True
+                if subscription_lane == "rotation":
+                    self.rotation_retry_at = max(
+                        getattr(self, "rotation_retry_at", 0.0),
+                        time.monotonic() + OPTION_ROTATION_RETRY_SECONDS,
+                    )
+                    log_event(
+                        {
+                            "task": "ibkr_stream",
+                            "event": "rotation_competing_session_isolated",
+                            "request_id": req_id,
+                            "retry_in_seconds": OPTION_ROTATION_RETRY_SECONDS,
+                        }
+                    )
+                else:
+                    # Unscoped, base, hot, and exact-leg ownership conflicts
+                    # remain session-wide and fail closed.
+                    self.subscription_health_failed = True
             self.subscription_rejection_sequence += 1
             self.subscription_rejection_log.append((self.subscription_rejection_sequence, error))
             del self.subscription_rejection_log[:-MAX_TRACKED_ERRORS]
@@ -262,6 +284,7 @@ class SessionOps:
         self.errors = []
         self.subscription_rows_by_req_id = {}
         self.subscription_lane_by_req_id = {}
+        self._subscription_request_lane = None
         self.subscription_health_failed = False
         self.tws_connectivity_lost = False
         self.subscriptions_lost = False
