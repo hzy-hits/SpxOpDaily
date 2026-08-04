@@ -38,6 +38,12 @@ write_snapshot = stream_deps.write_snapshot
 class SessionOps:
     def _on_error(self, req_id: int, error_code: int, message: str, contract: Any) -> None:
         subscription_lane = getattr(self, "subscription_lane_by_req_id", {}).get(req_id)
+        if subscription_lane is None:
+            subscription_lane = getattr(
+                self,
+                "subscription_lane_history_by_req_id",
+                {},
+            ).get(req_id)
         if subscription_lane is None and req_id >= 0:
             subscription_lane = getattr(self, "_subscription_request_lane", None)
         error = IbkrError(
@@ -284,6 +290,7 @@ class SessionOps:
         self.errors = []
         self.subscription_rows_by_req_id = {}
         self.subscription_lane_by_req_id = {}
+        self.subscription_lane_history_by_req_id = {}
         self._subscription_request_lane = None
         self.subscription_health_failed = False
         self.tws_connectivity_lost = False

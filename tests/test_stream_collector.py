@@ -1261,6 +1261,46 @@ def test_rotation_competing_rejection_is_scoped_and_pauses_rotation(monkeypatch)
     assert collector.errors[-1].subscription_lane == "rotation"
 
 
+def test_late_rotation_rejection_keeps_lane_after_request_unregistration(
+    monkeypatch,
+) -> None:
+    collector = object.__new__(StreamCollector)
+    collector.errors = []
+    collector.subscription_rejection_sequence = 0
+    collector.subscription_rejection_log = []
+    collector.subscription_rows_by_req_id = {}
+    collector.subscription_lane_by_req_id = {}
+    collector.subscription_lane_history_by_req_id = {}
+    collector.subscription_health_failed = False
+    collector.qualified_option_contracts = {}
+    collector.rotation_retry_at = 0.0
+    collector.farm_health = SimpleNamespace(observe=lambda *args: None)
+    row = VerifyRow(
+        label="option:SPXW:20260804:7605:P",
+        kind="option",
+        symbol="SPX",
+        subscribed=True,
+        request_id=3433,
+    )
+    subscriptions = {row.label: (SimpleNamespace(contract=object()), row)}
+    collector._register_subscription_rows(subscriptions, lane="rotation")
+    collector._unregister_subscription_rows(subscriptions)
+    patch_stream(monkeypatch, "time", SimpleNamespace(monotonic=lambda: 300.0))
+
+    collector._on_error(
+        3433,
+        10197,
+        "No market data during competing live session",
+        None,
+    )
+
+    assert collector.subscription_lane_by_req_id == {}
+    assert collector.subscription_lane_history_by_req_id == {3433: "rotation"}
+    assert collector.subscription_health_failed is False
+    assert collector.rotation_retry_at == 330.0
+    assert collector.errors[-1].subscription_lane == "rotation"
+
+
 def test_rotation_batch_context_classifies_rejection_before_registration(
     monkeypatch,
 ) -> None:

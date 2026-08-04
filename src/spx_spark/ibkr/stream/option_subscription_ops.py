@@ -729,6 +729,7 @@ class OptionSubscriptionOps:
     ) -> None:
         tracked = getattr(self, "subscription_rows_by_req_id", None)
         lanes = getattr(self, "subscription_lane_by_req_id", None)
+        lane_history = getattr(self, "subscription_lane_history_by_req_id", None)
         contract_cache = getattr(self, "qualified_option_contracts", None)
         if tracked is None:
             return
@@ -737,6 +738,10 @@ class OptionSubscriptionOps:
                 tracked[row.request_id] = row
                 if lanes is not None:
                     lanes[row.request_id] = lane
+                if lane_history is not None:
+                    lane_history[row.request_id] = lane
+                    while len(lane_history) > 4096:
+                        lane_history.pop(next(iter(lane_history)))
             if contract_cache is not None and row.kind == "option":
                 contract = getattr(ticker, "contract", None)
                 if contract is not None:
