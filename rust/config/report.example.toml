@@ -1,0 +1,23 @@
+# Runnable contract example, intentionally network-disabled. The DeepSeek
+# endpoint, model, thinking mode and reasoning effort are fixed in Rust; only
+# the API-key environment-variable name is configured here.
+
+projection_path = "/var/lib/spx-spark-core/latest/desk-map.json"
+ledger_path = "/var/lib/spx-spark-core/ledger/operations.sqlite"
+health_path = "/var/lib/spx-spark-report/health.json"
+poll_interval_millis = 1000
+slot_grace_seconds = 180
+owner_lease_seconds = 180
+source_max_bytes = 4194304
+failure_backoff_seconds = [5, 15, 60, 300]
+max_attempts = 3
+targets = [
+  { key = "bark-primary", channel = "bark" },
+  { key = "feishu-primary", channel = "feishu" },
+]
+
+[writer]
+network_enabled = false
+api_key_env = "DEEPSEEK_API_KEY"
+max_tokens = 64000
+request_timeout_seconds = 90

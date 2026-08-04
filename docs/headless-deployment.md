@@ -2,6 +2,12 @@
 
 This project is designed to run on a Linux headless host.
 
+The Oracle checkout is now a monorepo: Python commands run from
+`/home/ubuntu/spx-spark`, while Cargo commands run from
+`/home/ubuntu/spx-spark/rust`. Rust system-service installation and report-owner
+cutover remain separate procedures in `rust/docs/OPERATIONS.md`; pulling one
+repository must not implicitly restart or transfer ownership between them.
+
 ## IBKR Runtime
 
 Use IB Gateway for unattended collection.

@@ -1,0 +1,16 @@
+# Read-only health configuration for the Oracle shadow ledger. No delivery
+# service is installed in Phase 1 and both network authorization gates remain
+# unavailable.
+
+ledger_path = "/var/lib/spx-spark-core-shadow/ledger/operations.sqlite"
+network_enabled = false
+poll_interval_millis = 1000
+owner_lease_seconds = 60
+claim_lease_seconds = 30
+request_timeout_seconds = 10
+retry_schedule_seconds = [15, 60, 300, 900]
+
+[[targets]]
+type = "webhook"
+key = "shadow-audit"
+endpoint_env = "SPX_SHADOW_DISABLED_ENDPOINT"

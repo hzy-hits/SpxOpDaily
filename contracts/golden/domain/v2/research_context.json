@@ -1,0 +1,219 @@
+{
+  "action_authority": "none",
+  "automatic_ordering": false,
+  "close_location": {
+    "available_at": "2026-08-03T19:15:46.748071+00:00",
+    "bucket_definition": "thirds_of_projected_session_low_to_high_range",
+    "distribution": "experimental_heuristic",
+    "evidence_status": "bootstrap_unvalidated",
+    "method_version": "filtered-bootstrap-regime-to-range-thirds:v1",
+    "observed_through": "2026-08-03T19:15:45.248284+00:00",
+    "probabilities": {
+      "lower_third": 0.0010154651000000002,
+      "middle_third": 0.15688696370000002,
+      "upper_third": 0.8420975712000001
+    },
+    "reason_codes": [
+      "latent_state_location_mapping_unvalidated"
+    ],
+    "status": "available",
+    "target_at": "2026-08-03T20:00:00+00:00",
+    "use_scope": "advisory"
+  },
+  "cross_index_frame": {
+    "available_at": "2026-08-03T19:15:46.748071+00:00",
+    "feature_set_version": "cash-index-rth-relative-breadth-dispersion:v1",
+    "frame_id": "market:2026-08-03:20260803T1915",
+    "missing_instruments": [],
+    "observations": [
+      {
+        "available_at": "2026-08-03T19:15:46.748071+00:00",
+        "instrument": "index:SPX",
+        "lineage_id": "cash-index:index:SPX:35b62b513a9e9327cab0e069",
+        "missing_reason": null,
+        "price": 7606.844999999999,
+        "price_kind": "mid",
+        "provider": "schwab",
+        "quality": "live",
+        "reference_close": 7489.72,
+        "return_bps": 156.3810129083576,
+        "source_as_of": "2026-08-03T19:15:36.057000+00:00",
+        "status": "available"
+      },
+      {
+        "available_at": "2026-08-03T19:15:46.748071+00:00",
+        "instrument": "index:NDX",
+        "lineage_id": "cash-index:index:NDX:35b62b513a9e9327cab0e069",
+        "missing_reason": null,
+        "price": 28784.9721,
+        "price_kind": "last",
+        "provider": "schwab",
+        "quality": "live",
+        "reference_close": 28274.1951,
+        "return_bps": 180.6512964183371,
+        "source_as_of": "2026-08-03T19:15:36.135000+00:00",
+        "status": "available"
+      },
+      {
+        "available_at": "2026-08-03T19:15:46.748071+00:00",
+        "instrument": "index:DJI",
+        "lineage_id": "cash-index:index:DJI:35b62b513a9e9327cab0e069",
+        "missing_reason": null,
+        "price": 53182.41,
+        "price_kind": "last",
+        "provider": "schwab",
+        "quality": "live",
+        "reference_close": 52485.03,
+        "return_bps": 132.8721732654059,
+        "source_as_of": "2026-08-03T19:15:36.073000+00:00",
+        "status": "available"
+      },
+      {
+        "available_at": "2026-08-03T19:15:46.748071+00:00",
+        "instrument": "index:RUT",
+        "lineage_id": "cash-index:index:RUT:35b62b513a9e9327cab0e069",
+        "missing_reason": null,
+        "price": 2980.5257,
+        "price_kind": "last",
+        "provider": "schwab",
+        "quality": "live",
+        "reference_close": 2931.33916,
+        "return_bps": 167.7954590556485,
+        "source_as_of": "2026-08-03T19:15:35.081000+00:00",
+        "status": "available"
+      }
+    ],
+    "observed_through": "2026-08-03T19:15:40.377705+00:00",
+    "session": "rth",
+    "source_skew_limit_seconds": 5.0,
+    "source_skew_seconds": 1.054,
+    "status": "ready",
+    "trading_date_et": "2026-08-03"
+  },
+  "document_id": "research-context:35b62b513a9e9327cab0e069",
+  "evidence_status": "bootstrap_unvalidated",
+  "forecasts": [
+    {
+      "available_at": "2026-08-03T19:15:46.748071+00:00",
+      "distribution": "experimental_heuristic",
+      "evidence_status": "bootstrap_unvalidated",
+      "forecast_id": "forecast:rth-close:35b62b513a9e9327cab0e069",
+      "model_version": "hmm-adjusted-close:k0p25:v1",
+      "observed_through": "2026-08-03T19:15:45.248284+00:00",
+      "quantiles": {
+        "p10": 7527.026442522671,
+        "p50": 7613.626442522671,
+        "p90": 7751.126442522671
+      },
+      "reason_codes": [
+        "fixed_bootstrap_hmm_shift_unvalidated",
+        "risk_neutral_source_not_physical"
+      ],
+      "status": "available",
+      "target": "rth_close",
+      "target_at": "2026-08-03T20:00:00+00:00",
+      "use_scope": "advisory"
+    },
+    {
+      "available_at": "2026-08-03T19:15:46.748071+00:00",
+      "distribution": "experimental_heuristic",
+      "evidence_status": "bootstrap_unvalidated",
+      "forecast_id": "forecast:session_high:35b62b513a9e9327cab0e069",
+      "model_version": "intraday-extreme-em-bootstrap:v1",
+      "observed_through": "2026-08-03T19:15:45.248284+00:00",
+      "quantiles": {
+        "p10": 7610.0002,
+        "p50": 7610.5212,
+        "p90": 7611.8235
+      },
+      "reason_codes": [
+        "expected_move_extreme_mapping_unvalidated"
+      ],
+      "status": "available",
+      "target": "session_high",
+      "target_at": "2026-08-03T20:00:00+00:00",
+      "use_scope": "advisory"
+    },
+    {
+      "available_at": "2026-08-03T19:15:46.748071+00:00",
+      "distribution": "experimental_heuristic",
+      "evidence_status": "bootstrap_unvalidated",
+      "forecast_id": "forecast:session_low:35b62b513a9e9327cab0e069",
+      "model_version": "intraday-extreme-em-bootstrap:v1",
+      "observed_through": "2026-08-03T19:15:45.248284+00:00",
+      "quantiles": {
+        "p10": 7518.2065,
+        "p50": 7519.5088,
+        "p90": 7520.0298
+      },
+      "reason_codes": [
+        "expected_move_extreme_mapping_unvalidated"
+      ],
+      "status": "available",
+      "target": "session_low",
+      "target_at": "2026-08-03T20:00:00+00:00",
+      "use_scope": "advisory"
+    }
+  ],
+  "generated_at": "2026-08-03T19:15:46.748071+00:00",
+  "prior_rth_context": {
+    "available_at": "2026-08-03T19:15:46.748071+00:00",
+    "context_id": "prior-rth:35b62b513a9e9327cab0e069",
+    "for_trading_date": "2026-08-03",
+    "reason_codes": [
+      "prior_rth_index_missing:index:DJI",
+      "prior_rth_index_missing:index:NDX",
+      "prior_rth_index_missing:index:RUT",
+      "prior_rth_index_partial:index:SPX",
+      "prior_rth_minute_coverage_low:index:SPX"
+    ],
+    "return_bps": {
+      "index:DJI": null,
+      "index:NDX": null,
+      "index:RUT": null,
+      "index:SPX": 70.0358
+    },
+    "schema_version": "prior_rth_context.v2",
+    "semantics": "observed_prior_rth_cash_index_regime_not_market_maker_behavior",
+    "session_date": "2026-07-31",
+    "source_as_of": "2026-08-03T19:15:40.377705+00:00",
+    "status": "partial"
+  },
+  "regime": {
+    "available_at": "2026-08-03T19:15:46.748071+00:00",
+    "evidence_status": "bootstrap_unvalidated",
+    "feature_set_version": "market_regime_features.cross_index.v2",
+    "frame_id": "market:2026-08-03:20260803T1915",
+    "inference": "filtered",
+    "model_version": "sha256:386c17e025f3b40bb94a555037426fd5289e8f51037f446275d2993d15a65f6b",
+    "observed_through": "2026-08-03T19:15:40.377705+00:00",
+    "parameter_mode": "fixed_bootstrap",
+    "posterior": [
+      {
+        "probability": 0.0010154651,
+        "state_id": "state_00"
+      },
+      {
+        "probability": 0.1568869637,
+        "state_id": "state_01"
+      },
+      {
+        "probability": 0.8420975712,
+        "state_id": "state_02"
+      }
+    ],
+    "posterior_entropy": 0.44231207140171974,
+    "sequence_id": "2026-08-03",
+    "signal_id": "regime:35b62b513a9e9327cab0e069",
+    "trading_date_et": "2026-08-03",
+    "trained_through_date": null,
+    "update_index": 103,
+    "use_scope": "advisory"
+  },
+  "regime_reason_codes": [
+    "fixed_bootstrap_parameters_unvalidated",
+    "prior_rth_component_unavailable"
+  ],
+  "schema_version": "research_context.v2",
+  "use_scope": "advisory"
+}

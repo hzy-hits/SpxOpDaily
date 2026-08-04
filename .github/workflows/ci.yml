@@ -22,3 +22,50 @@ jobs:
       - run: uv sync --locked --all-groups
       - run: uv run ruff check .
       - run: uv run pytest -q
+
+  rust:
+    name: rust (${{ matrix.runner }})
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.93.0
+        with:
+          components: clippy,rustfmt
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust -> target
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Run Clippy
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+
+      - name: Run tests
+        run: cargo test --locked --workspace --all-targets --all-features
+
+      - name: Audit locked dependencies
+        if: matrix.runner == 'ubuntu-24.04'
+        run: |
+          cargo install cargo-audit --locked --version 0.22.2
+          cargo audit
+
+      - name: Validate example TOML
+        run: |
+          cargo run --locked -p spx-core -- check-config --config config/core.example.toml
+          cargo run --locked -p spx-bridge -- check-config --config config/bridge.example.toml
+          cargo run --locked -p spx-report -- check-config --config config/report.example.toml
+          cargo run --locked -p spx-delivery -- check-config --config config/delivery.example.toml

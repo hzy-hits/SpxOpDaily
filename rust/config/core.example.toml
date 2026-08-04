@@ -1,0 +1,37 @@
+# Example only. Copy to an approved runtime location; do not place secrets here.
+# These fields match the current spx-core configuration contract.
+
+socket_path = "/run/spx-spark-core/core.sock"
+ledger_path = "/var/lib/spx-spark-core/ledger/operations.sqlite"
+raw_log_dir = "/var/lib/spx-spark-core/frames"
+projection_path = "/var/lib/spx-spark-core/latest/core.json"
+research_projection_path = "/var/lib/spx-spark-core/latest/research.json"
+desk_map_projection_path = "/var/lib/spx-spark-core/latest/desk-map.json"
+max_frame_bytes = 1048576
+max_connections = 8
+# Raw frames rotate before a segment exceeds 64 MiB. A single record may be no
+# larger than this bound.
+raw_segment_max_bytes = 67108864
+# Refuse an append before the filesystem would fall below this reserve. Keep at
+# least one full maximum segment available; production should reserve more.
+raw_log_min_free_bytes = 5368709120
+# The in-memory book is deliberately hot and bounded; replay history belongs in
+# the append-only frame segments, not in the live decision process.
+quote_cache_retention_seconds = 300
+quote_cache_max_entries = 4096
+batch_identity_cache_max_entries = 4096
+owner_lease_seconds = 30
+delivery_max_attempts = 5
+notification_targets = [
+  { key = "bark-primary", channel = "bark" },
+  { key = "feishu-primary", channel = "feishu" },
+]
+decision_max_ttl_seconds = 120
+evaluation_max_delay_seconds = 2.0
+
+[readiness]
+quote_max_age_seconds = 5.0
+max_side_skew_seconds = 2.0
+# RTH is Schwab-first. Keep fallback disabled until a separately approved
+# incident policy and differential evidence exist. GTH remains IBKR-only in code.
+allow_rth_ibkr_fallback = false

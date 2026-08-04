@@ -1,5 +1,10 @@
 # SPX Spark 工程化重构与验收规格
 
+> 历史范围说明：本文保留 2026-07-12 Python 重构的判断与验收证据，其中
+> “本轮不引入 Rust”只描述当时阶段，不再定义当前仓库所有权。现行 monorepo
+> 边界见 `docs/monorepo-layout.md`，Rust 运行时边界见
+> `rust/docs/ARCHITECTURE.md`。不要改写本文的历史阈值来伪造连续性。
+
 - 日期: 2026-07-12
 - 状态: In progress - pre-RTH remediation（Phase 1/2/5 NO-GO）
 - 范围: `src/spx_spark/`、`tests/`、`config/`、`systemd/`

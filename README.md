@@ -14,11 +14,32 @@ Current scope:
 
 Current architecture and refactor execution documents:
 
-- `module-architecture.md` - enforced module layers and dependency rules.
-- `docs/refactor-architecture-acceptance-plan.md` - complete target and acceptance specification.
+- `docs/monorepo-layout.md` - current Python/Rust ownership, history, CI, and deployment boundary.
+- `module-architecture.md` - enforced Python module layers and dependency rules.
+- `rust/docs/ARCHITECTURE.md` - typed Rust runtime, ledger, report, and delivery architecture.
+- `docs/refactor-architecture-acceptance-plan.md` - Python refactor evidence and acceptance specification.
 - `docs/pre-rth-refactor-implementation-plan.md` - implementation order before the first RTH session.
 - `docs/schwab-wide-chain-hot-lane-design.md` - Schwab wide-chain, 500-symbol hot lane, and IBKR validation design.
 - `docs/structure-signal-vnext.md` - event-driven Desk Map, setup lifecycle, opportunity replay, and HMM shadow contract.
+
+## Repository Layout
+
+This repository is the single source of truth for SPX Spark. The former
+standalone Rust history was imported without squashing, so its original commits
+remain auditable under `rust/`.
+
+| Path | Runtime ownership |
+|---|---|
+| `src/spx_spark/` | Provider sessions, normalization, HMM/research, DuckDB, replay, and strategy iteration |
+| `rust/` | Strict wire/domain contracts, append-only frames, SQLite ledger, half-hour report, outbox, and delivery coordination |
+| `contracts/golden/` | Versioned cross-runtime wire examples and fail-closed fixtures |
+| `tests/` | Python application, architecture, replay, and provider tests |
+| `rust/crates/*/tests/` | Rust contract, state-machine, ledger, report, and delivery tests |
+
+Python remains the owner of Schwab/IBKR sessions and experimental models. Rust
+does not connect to a broker or place orders. Cross-language changes now land in
+one commit and the root CI validates both workspaces. See
+[the monorepo contract](docs/monorepo-layout.md) for the exact boundary.
 
 ## Quick Start
 
@@ -27,6 +48,15 @@ cd /home/ubuntu/spx-spark
 cp .env.example .env
 uv sync
 scripts/run-ibkr-verifier.sh
+```
+
+Validate the Rust workspace from the same checkout:
+
+```bash
+cd /home/ubuntu/spx-spark/rust
+cargo fmt --all --check
+cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+cargo test --locked --workspace --all-targets --all-features
 ```
 
 IBKR requirements:
