@@ -1,0 +1,23 @@
+{
+  "schema_version": "operator_notification.v1",
+  "event_id": "event:rth:7565-call:trade-ready:0",
+  "semantic_id": "opportunity:rth:7565-call:0:trade-ready",
+  "opportunity_id": "opportunity:rth:7565-call",
+  "generation": 0,
+  "role": "trade_ready",
+  "occurred_at": "2026-08-04T14:30:05Z",
+  "expires_at": "2026-08-04T14:40:05Z",
+  "title": "SPX Trade Ready | 7565 CALL",
+  "body": "## Desk View\n7565 上方回踩确认，多头路径保持。\n\n## Execution\n仅人工限价执行；超过决策 ask 不追价。\n\n## Risk\n跌回 7560 下方失效；自动下单关闭。\n\n## Targets\n第一目标 7575，第二目标 7580。\n\n## Data Quality\nSchwab RTH live；精确合约双边 NBBO 已确认。",
+  "targets": [
+    {
+      "key": "bark:desk-primary",
+      "channel": "bark"
+    },
+    {
+      "key": "feishu:desk-primary",
+      "channel": "feishu"
+    }
+  ],
+  "automatic_ordering": false
+}

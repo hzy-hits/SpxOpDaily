@@ -5,6 +5,8 @@ import sqlite3
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from spx_spark.config import NotificationSettings
 from spx_spark.notifier.delivery_outbox import (
     DeliveryStatus,
@@ -67,6 +69,404 @@ def _outbox(settings: NotificationSettings) -> NotificationDeliveryOutbox:
         dead_letter_after_seconds=settings.delivery_outbox_dead_letter_after_seconds,
         claim_stale_after_seconds=settings.delivery_outbox_claim_stale_after_seconds,
     )
+
+
+def _rust_owner_settings(tmp_path) -> NotificationSettings:
+    return replace(
+        _settings(tmp_path),
+        bark_friend_enabled=True,
+        bark_friend_url="https://api.day.app/friend",
+        rust_trader_notification_owner=True,
+        rust_operator_notification_target_map=(
+            ("feishu", "feishu-primary", "feishu"),
+            ("bark", "bark-primary", "bark"),
+            ("bark_friend", "bark-friend", "bark"),
+        ),
+    )
+
+
+def _trade_ready_envelope(event_id: str) -> NotificationEnvelope:
+    return NotificationEnvelope(
+        event_id=event_id,
+        source="trade_intent",
+        kind="trade_intent",
+        lane="trade_ready",
+        occurred_at=NOW,
+        expires_at=NOW + timedelta(minutes=5),
+        operator_opportunity_id="level-opportunity-1",
+        operator_generation=2,
+    )
+
+
+def test_rust_owner_freezes_only_non_friend_intended_sinks(tmp_path) -> None:
+    settings = _rust_owner_settings(tmp_path)
+
+    result = enqueue_notification(
+        settings,
+        _trade_ready_envelope("rust-non-friend"),
+        title="SPX TRADE READY",
+        text="exact body",
+        friend=False,
+        enqueued_at=NOW,
+    )
+
+    assert result.targets == ("rust_ingress",)
+    job = _outbox(settings).claim_due(worker_id="inspect", limit_targets=1, now=NOW)[0]
+    assert job.envelope.operator_targets == (
+        ("bark-primary", "bark"),
+        ("feishu-primary", "feishu"),
+    )
+    assert job.envelope.operator_opportunity_id == "level-opportunity-1"
+    assert job.envelope.operator_generation == 2
+
+
+def test_rust_owner_friend_event_includes_friend_mapping(tmp_path) -> None:
+    settings = _rust_owner_settings(tmp_path)
+
+    result = enqueue_notification(
+        settings,
+        _trade_ready_envelope("rust-friend"),
+        title="SPX TRADE READY",
+        text="exact body",
+        friend=True,
+        enqueued_at=NOW,
+    )
+
+    assert result.accepted is True
+    job = _outbox(settings).claim_due(worker_id="inspect", limit_targets=1, now=NOW)[0]
+    assert job.envelope.operator_targets == (
+        ("bark-primary", "bark"),
+        ("bark-friend", "bark"),
+        ("feishu-primary", "feishu"),
+    )
+
+
+def test_rust_owner_ignores_mapping_for_disabled_sink(tmp_path) -> None:
+    settings = replace(
+        _rust_owner_settings(tmp_path),
+        feishu_enabled=False,
+        feishu_webhook_url="",
+    )
+
+    result = enqueue_notification(
+        settings,
+        _trade_ready_envelope("rust-disabled-feishu"),
+        title="SPX TRADE READY",
+        text="exact body",
+        friend=True,
+        enqueued_at=NOW,
+    )
+
+    assert result.accepted is True
+    job = _outbox(settings).claim_due(worker_id="inspect", limit_targets=1, now=NOW)[0]
+    assert job.envelope.operator_targets == (
+        ("bark-primary", "bark"),
+        ("bark-friend", "bark"),
+    )
+
+
+def test_rust_owner_missing_mapping_fails_closed_without_partial_enqueue(tmp_path) -> None:
+    settings = replace(
+        _rust_owner_settings(tmp_path),
+        rust_operator_notification_target_map=(
+            ("bark", "bark-primary", "bark"),
+        ),
+    )
+
+    result = enqueue_notification(
+        settings,
+        _trade_ready_envelope("rust-missing-map"),
+        title="SPX TRADE READY",
+        text="exact body",
+        friend=False,
+        enqueued_at=NOW,
+    )
+
+    assert result.outcome == "no_sink"
+    assert result.accepted is False
+    assert _outbox(settings).contains("rust-missing-map") is False
+
+
+def test_rust_owner_duplicate_mapping_fails_closed(tmp_path) -> None:
+    settings = replace(
+        _rust_owner_settings(tmp_path),
+        rust_operator_notification_target_map=(
+            ("feishu", "shared-key", "feishu"),
+            ("bark", "shared-key", "bark"),
+        ),
+    )
+
+    result = enqueue_notification(
+        settings,
+        _trade_ready_envelope("rust-duplicate-map"),
+        title="SPX TRADE READY",
+        text="exact body",
+        friend=False,
+        enqueued_at=NOW,
+    )
+
+    assert result.outcome == "no_sink"
+    assert result.accepted is False
+    assert _outbox(settings).contains("rust-duplicate-map") is False
+
+
+def test_delivery_worker_uses_rust_ingress_not_python_human_sinks(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from spx_spark.notifier import delivery_executor
+    from spx_spark.notifier.model import SinkResult
+
+    settings = _rust_owner_settings(tmp_path)
+    enqueue_notification(
+        settings,
+        _trade_ready_envelope("rust-worker"),
+        title="SPX TRADE READY",
+        text="exact body",
+        friend=True,
+        enqueued_at=NOW,
+    )
+    observed_targets: list[tuple[tuple[str, str], ...]] = []
+
+    def deliver_rust(_settings, job):
+        observed_targets.append(job.envelope.operator_targets)
+        return SinkResult(
+            sink="rust_ingress",
+            attempted=True,
+            ok=True,
+            verdict="operator_notification_accepted",
+        )
+
+    monkeypatch.setattr(
+        delivery_executor,
+        "deliver_operator_notification",
+        deliver_rust,
+    )
+    monkeypatch.setattr(
+        "spx_spark.notifier.dispatcher.deliver_trade_push",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("Python Bark/Feishu transport must not run")
+        ),
+    )
+
+    result = consume_pending_notifications(
+        settings,
+        now=NOW,
+        notify_dead_letters=False,
+        completion_clock=lambda: NOW,
+    )
+
+    assert result["delivered_targets"] == 0
+    assert result["forwarded_to_rust_targets"] == 1
+    assert result["rust_ingress_attempts"] == 1
+    assert result["pending_targets"] == 0
+    assert observed_targets == [
+        (
+            ("bark-primary", "bark"),
+            ("bark-friend", "bark"),
+            ("feishu-primary", "feishu"),
+        )
+    ]
+
+
+def test_rust_owner_fence_leaves_ops_and_position_safety_python_owned(tmp_path) -> None:
+    settings = _rust_owner_settings(tmp_path)
+    ops = enqueue_notification(
+        settings,
+        NotificationEnvelope(
+            event_id="ops-python-owned",
+            source="test",
+            kind="ibkr_session_interrupted",
+            lane="ops_transition",
+            occurred_at=NOW,
+        ),
+        title="IBKR session",
+        text="ops body",
+        friend=False,
+        enqueued_at=NOW,
+    )
+    safety = enqueue_notification(
+        settings,
+        NotificationEnvelope(
+            event_id="position-python-owned",
+            source="test",
+            kind="spxw_position_near_expiry",
+            lane="position_safety",
+            occurred_at=NOW,
+        ),
+        title="Position safety",
+        text="position body",
+        friend=False,
+        enqueued_at=NOW,
+    )
+    mismatched_trade_kind = enqueue_notification(
+        settings,
+        NotificationEnvelope(
+            event_id="mismatched-trade-kind",
+            source="test",
+            kind="trade_intent",
+            lane="position_safety",
+            occurred_at=NOW,
+        ),
+        title="Position safety",
+        text="position body",
+        friend=False,
+        enqueued_at=NOW,
+    )
+
+    assert ops.targets == ("bark",)
+    assert safety.targets == ("bark", "feishu")
+    assert mismatched_trade_kind.targets == ("bark", "feishu")
+
+
+def test_rust_cancellation_ack_precedes_local_outbox_mutation(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from spx_spark.notifier import dispatcher
+    from spx_spark.notifier.model import SinkResult
+
+    settings = _rust_owner_settings(tmp_path)
+    envelope = _trade_ready_envelope("rust-cancel-order")
+    assert enqueue_notification(
+        settings,
+        envelope,
+        title="SPX TRADE READY",
+        text="exact body",
+        friend=False,
+        enqueued_at=NOW,
+    ).accepted
+    monkeypatch.setattr(
+        dispatcher,
+        "deliver_operator_notification_cancellation",
+        lambda *_args, **_kwargs: SinkResult(
+            sink="rust_ingress",
+            attempted=True,
+            ok=False,
+            error="rust_ingress_cancellation_outcome_unknown:timeout",
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="outcome_unknown"):
+        cancel_pending_notification(
+            settings,
+            envelope.event_id,
+            now=NOW + timedelta(seconds=1),
+            reason="source_invalidated",
+        )
+
+    outbox = _outbox(settings)
+    assert outbox.cancellation_exists(envelope.event_id) is False
+    assert outbox.summary(envelope.event_id).status is DeliveryStatus.PENDING
+
+    monkeypatch.setattr(
+        dispatcher,
+        "deliver_operator_notification_cancellation",
+        lambda *_args, **_kwargs: SinkResult(
+            sink="rust_ingress",
+            attempted=True,
+            ok=True,
+            verdict=(
+                "rust_cancellation_fenced:"
+                "operator_notification_cancellation_accepted"
+            ),
+        ),
+    )
+    cancel_pending_notification(
+        settings,
+        envelope.event_id,
+        now=NOW + timedelta(seconds=1),
+        reason="source_invalidated",
+    )
+    assert outbox.cancellation_exists(envelope.event_id) is True
+    assert outbox.summary(envelope.event_id).status is DeliveryStatus.DEAD_LETTER
+
+
+def test_rust_cancellation_before_event_fences_later_enqueue(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from spx_spark.notifier import dispatcher
+    from spx_spark.notifier.model import SinkResult
+
+    settings = _rust_owner_settings(tmp_path)
+    monkeypatch.setattr(
+        dispatcher,
+        "deliver_operator_notification_cancellation",
+        lambda *_args, **_kwargs: SinkResult(
+            sink="rust_ingress",
+            attempted=True,
+            ok=True,
+            verdict="rust_cancellation_fenced:duplicate_ingress",
+        ),
+    )
+    event_id = "cancel-before-event"
+
+    assert cancel_pending_notification(
+        settings,
+        event_id,
+        now=NOW,
+        reason="source_invalidated",
+    ) == 0
+    result = enqueue_notification(
+        settings,
+        _trade_ready_envelope(event_id),
+        title="SPX TRADE READY",
+        text="must remain fenced",
+        friend=False,
+        enqueued_at=NOW + timedelta(seconds=1),
+    )
+
+    assert result.outcome == "cancelled_before_enqueue"
+    assert result.accepted is False
+
+
+def test_rust_event_still_cancels_after_owner_flag_is_rolled_back(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from spx_spark.notifier import dispatcher
+    from spx_spark.notifier.model import SinkResult
+
+    owner_settings = _rust_owner_settings(tmp_path)
+    event_id = "rust-owner-rollback"
+    assert enqueue_notification(
+        owner_settings,
+        _trade_ready_envelope(event_id),
+        title="SPX TRADE READY",
+        text="exact body",
+        friend=False,
+        enqueued_at=NOW,
+    ).accepted
+    calls: list[tuple[str, datetime, str]] = []
+
+    def cancel_rust(_settings, *, event_id, cancelled_at, reason_code):
+        calls.append((event_id, cancelled_at, reason_code))
+        return SinkResult(
+            sink="rust_ingress",
+            attempted=True,
+            ok=True,
+            verdict="rust_cancellation_fenced:duplicate_ingress",
+        )
+
+    monkeypatch.setattr(
+        dispatcher,
+        "deliver_operator_notification_cancellation",
+        cancel_rust,
+    )
+    rolled_back = replace(owner_settings, rust_trader_notification_owner=False)
+
+    cancel_pending_notification(
+        rolled_back,
+        event_id,
+        now=NOW + timedelta(seconds=1),
+        reason="source_invalidated",
+    )
+
+    assert calls == [
+        (event_id, NOW + timedelta(seconds=1), "source_invalidated")
+    ]
+    assert _outbox(rolled_back).cancellation_exists(event_id) is True
 
 
 def test_dispatch_records_receipt_and_queues_failed_feishu(tmp_path, monkeypatch) -> None:

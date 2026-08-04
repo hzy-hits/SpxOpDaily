@@ -686,21 +686,14 @@ def test_meaningful_level_path_transitions_send_idempotent_non_executable_cards(
     assert result["delivery"]["accepted"] is True
     assert result["delivery"]["queued"] is True
     assert result["delivery"]["delivered"] is False
-    assert len(enqueued) == 5
+    assert len(enqueued) == 1
     assert [envelope.kind for envelope, _text in enqueued] == [
-        "level_setup_transition",
-        "level_setup_transition",
-        "level_setup_transition",
-        "level_setup_transition",
         "level_setup_transition",
     ]
     assert [envelope.event_id.rsplit(":", 1)[-1] for envelope, _text in enqueued] == [
-        "approaching",
-        "testing",
-        "break_pending",
-        "retest",
         "confirmed",
     ]
+    assert enqueued[0][0].expires_at == NOW + timedelta(seconds=56, minutes=15)
     confirmed_text = enqueued[-1][1]
     assert "State  RETEST → CONFIRMED" in confirmed_text
     assert "继续等待合约、NBBO、R/R 与时效门控" in confirmed_text
@@ -764,19 +757,33 @@ def test_level_transition_notification_retries_after_state_commit_enqueue_crash(
         policy=policy,
         notifications_enabled=True,
     )
-    approaching_at = NOW + timedelta(seconds=5)
-    current["value"] = _level_observation(
-        approaching_at,
-        spot=99.0,
-        levels={"put_wall": 100.0, "call_wall": 120.0},
-    )
-    failed = run_level_decision_shadow(
-        storage,
-        None,
-        now=approaching_at,
-        policy=policy,
-        notifications_enabled=True,
-    )
+    failed = None
+    for seconds, spot, es in (
+        (5, 99.0, 5000.0),
+        (10, 96.0, 4999.0),
+        (31, 95.0, 4997.0),
+        (40, 99.0, 4998.0),
+        (45, 95.0, 4996.0),
+        (56, 94.0, 4994.0),
+    ):
+        at = NOW + timedelta(seconds=seconds)
+        current["value"] = LevelObservation(
+            at=at,
+            spot=spot,
+            es=es,
+            levels={"put_wall": 100.0, "call_wall": 120.0},
+            quality_ok=True,
+            session_date="2026-07-13",
+            spx_spot=spot,
+        )
+        failed = run_level_decision_shadow(
+            storage,
+            None,
+            now=at,
+            policy=policy,
+            notifications_enabled=True,
+        )
+    assert failed is not None
     state_path = tmp_path / "latest" / "level_decision_shadow_state.json"
     after_failure = json.loads(state_path.read_text(encoding="utf-8"))
 
@@ -786,7 +793,7 @@ def test_level_transition_notification_retries_after_state_commit_enqueue_crash(
     recovered = run_level_decision_shadow(
         storage,
         None,
-        now=approaching_at + timedelta(seconds=1),
+        now=NOW + timedelta(seconds=57),
         policy=policy,
         notifications_enabled=True,
     )
@@ -942,20 +949,34 @@ def test_level_transition_quiet_window_is_suppressed_not_delivered(
         policy=policy,
         notifications_enabled=True,
     )
-    current["value"] = _level_observation(
-        NOW + timedelta(seconds=5),
-        spot=99.0,
-        levels={"put_wall": 100.0, "call_wall": 120.0},
-    )
+    result = None
+    for seconds, spot, es in (
+        (5, 99.0, 5000.0),
+        (10, 96.0, 4999.0),
+        (31, 95.0, 4997.0),
+        (40, 99.0, 4998.0),
+        (45, 95.0, 4996.0),
+        (56, 94.0, 4994.0),
+    ):
+        at = NOW + timedelta(seconds=seconds)
+        current["value"] = LevelObservation(
+            at=at,
+            spot=spot,
+            es=es,
+            levels={"put_wall": 100.0, "call_wall": 120.0},
+            quality_ok=True,
+            session_date="2026-07-13",
+            spx_spot=spot,
+        )
+        result = run_level_decision_shadow(
+            storage,
+            None,
+            now=at,
+            policy=policy,
+            notifications_enabled=True,
+        )
 
-    result = run_level_decision_shadow(
-        storage,
-        None,
-        now=NOW + timedelta(seconds=5),
-        policy=policy,
-        notifications_enabled=True,
-    )
-
+    assert result is not None
     assert result["delivery"]["accepted"] is True
     assert result["delivery"]["delivered"] is False
     assert result["delivery"]["suppressed"] is True

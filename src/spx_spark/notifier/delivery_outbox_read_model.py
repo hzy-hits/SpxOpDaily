@@ -22,6 +22,19 @@ from spx_spark.notifier.receipts import NotificationEnvelope
 class DeliveryOutboxReadModelMixin:
     """Queries kept separate from the transactional delivery state machine."""
 
+    def event_targets(self, event_id: str) -> tuple[str, ...]:
+        """Return the immutable target set used when an event was enqueued."""
+
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT sink FROM notification_delivery_targets
+                WHERE event_id = ? ORDER BY sink
+                """,
+                (event_id,),
+            ).fetchall()
+        return tuple(str(row["sink"]) for row in rows)
+
     def inspect_event(
         self,
         envelope: NotificationEnvelope,
@@ -51,7 +64,8 @@ class DeliveryOutboxReadModelMixin:
             event = connection.execute(
                 """
                 SELECT source, kind, lane, occurred_at, expires_at, title, text,
-                       feishu_text, friend, status
+                       feishu_text, friend, operator_targets_json,
+                       operator_opportunity_id, operator_generation, status
                 FROM notification_delivery_events WHERE event_id = ?
                 """,
                 (envelope.event_id,),
@@ -82,6 +96,15 @@ class DeliveryOutboxReadModelMixin:
             lane=str(event["lane"]),
             occurred_at=parse(event["occurred_at"]),
             expires_at=(parse(event["expires_at"]) if event["expires_at"] is not None else None),
+            operator_targets=self._parse_operator_targets_json(
+                event["operator_targets_json"]
+            ),
+            operator_opportunity_id=(
+                str(event["operator_opportunity_id"])
+                if event["operator_opportunity_id"] is not None
+                else None
+            ),
+            operator_generation=int(event["operator_generation"]),
         )
         actual_fingerprint = delivery_payload_fingerprint(
             actual_envelope,
@@ -137,6 +160,22 @@ class DeliveryOutboxReadModelMixin:
             event_status=event_status,
             target_statuses=target_statuses,
             reason=reason,
+        )
+
+    @staticmethod
+    def _parse_operator_targets_json(value: object) -> tuple[tuple[str, str], ...]:
+        import json
+
+        try:
+            parsed = json.loads(str(value or "[]"))
+        except json.JSONDecodeError:
+            return ()
+        if not isinstance(parsed, list):
+            return ()
+        return tuple(
+            (str(item[0]), str(item[1]))
+            for item in parsed
+            if isinstance(item, list) and len(item) == 2
         )
 
     def _refresh_event_status(

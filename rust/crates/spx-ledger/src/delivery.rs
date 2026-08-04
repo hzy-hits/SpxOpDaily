@@ -1,8 +1,8 @@
 use chrono::{DateTime, TimeDelta, Utc};
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 use spx_domain::{
-    DeliveryChannel, NotificationIntentV1, NotificationIntentV2, NotificationLineageV2, Token,
-    Validate,
+    DeliveryChannel, NotificationIntentV1, NotificationIntentV2, NotificationLineageV2,
+    OperatorNotificationV1, Token, Validate,
 };
 use uuid::Uuid;
 
@@ -126,7 +126,18 @@ impl Ledger {
                    AND t.next_attempt_at_us <= ?1
                    AND t.attempt_count < t.max_attempts
                    AND e.expires_at_us > ?1
-                 ORDER BY e.expires_at_us ASC, e.occurred_at_us ASC, t.target_id ASC
+                 ORDER BY CASE
+                     WHEN e.lane = 'trader_event'
+                         AND json_extract(e.payload_json, '$.role') = 'exit' THEN 0
+                     WHEN e.lane = 'trade_ready'
+                         OR (e.lane = 'trader_event'
+                             AND json_extract(e.payload_json, '$.role') = 'trade_ready') THEN 1
+                     WHEN e.lane = 'trader_event'
+                         AND json_extract(e.payload_json, '$.role') = 'setup' THEN 2
+                     WHEN e.lane = 'scheduled_report' THEN 3
+                     ELSE 4
+                 END ASC,
+                 e.expires_at_us ASC, e.occurred_at_us ASC, t.target_id ASC
                  LIMIT 1",
                 [micros(now)],
                 |row| {
@@ -522,6 +533,11 @@ fn parse_claimed_intent(
                 ));
             }
             Ok(ClaimedNotificationIntent::ScheduledReport(intent))
+        }
+        "trader_event" => {
+            let notification: OperatorNotificationV1 = serde_json::from_str(payload_json)?;
+            notification.validate()?;
+            Ok(ClaimedNotificationIntent::TraderEvent(notification))
         }
         _ => Err(LedgerError::InvalidValue("unsupported notification lane")),
     }

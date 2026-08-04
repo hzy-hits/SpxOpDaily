@@ -3,6 +3,7 @@ use spx_domain::{
     DECISION_SCHEMA_VERSION, DeliveryChannel, DeskMessageV1, DeskMessageV2,
     NOTIFICATION_INTENT_SCHEMA_VERSION, NOTIFICATION_INTENT_V2_SCHEMA_VERSION,
     NotificationIntentV1, NotificationIntentV2, NotificationLineageV2, NotificationTargetV1,
+    OPERATOR_NOTIFICATION_SCHEMA_VERSION, OperatorNotificationRole, OperatorNotificationV1,
     StrategyAction, StrategyBlockReason, StrategyDecisionV1, Token, Validate, canonical_json_hash,
 };
 use tempfile::TempDir;
@@ -112,6 +113,32 @@ fn scheduled_report(now: DateTime<Utc>) -> NotificationIntentV2 {
     }
 }
 
+fn operator_notification(
+    now: DateTime<Utc>,
+    role: OperatorNotificationRole,
+) -> OperatorNotificationV1 {
+    let role_name = role.as_str();
+    OperatorNotificationV1 {
+        schema_version: OPERATOR_NOTIFICATION_SCHEMA_VERSION.to_owned(),
+        event_id: token(&format!("event-{role_name}")),
+        semantic_id: token(&format!("semantic-{role_name}")),
+        opportunity_id: token("opportunity-7565-call"),
+        generation: 0,
+        role,
+        occurred_at: now,
+        expires_at: now + TimeDelta::minutes(20),
+        title: token(&format!("SPX {role_name}")),
+        body: format!(
+            "## Desk View\n{role_name}\n\n## Execution\nmanual only\n\n## Risk\ndefined risk\n\n## Targets\nnext level\n\n## Data Quality\nlive"
+        ),
+        targets: vec![NotificationTargetV1 {
+            key: token("bark-primary"),
+            channel: DeliveryChannel::Bark,
+        }],
+        automatic_ordering: false,
+    }
+}
+
 fn create_v1_ledger_with_outbox(path: &std::path::Path) {
     let connection = rusqlite::Connection::open(path).unwrap();
     connection
@@ -172,6 +199,77 @@ fn create_v1_ledger_with_outbox(path: &std::path::Path) {
                 3, 0, 0, 1, 1
              )",
             [],
+        )
+        .unwrap();
+}
+
+fn add_v2_migration_and_scheduled_outbox(path: &std::path::Path, now: DateTime<Utc>) {
+    let connection = rusqlite::Connection::open(path).unwrap();
+    connection
+        .execute_batch("PRAGMA foreign_keys = OFF;")
+        .unwrap();
+    connection
+        .execute_batch(crate::schema::MIGRATION_2)
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO schema_migrations (
+                version, name, checksum_sha256, applied_at_us
+             ) VALUES (2, 'scheduled_report_lineage', ?1, ?2)",
+            rusqlite::params![
+                canonical_json_hash(&crate::schema::MIGRATION_2).unwrap(),
+                now.timestamp_micros()
+            ],
+        )
+        .unwrap();
+    connection
+        .execute_batch("PRAGMA foreign_keys = ON;")
+        .unwrap();
+
+    let report = scheduled_report(now);
+    let NotificationLineageV2::ScheduledReport {
+        source_projection_id,
+        slot,
+    } = &report.lineage
+    else {
+        unreachable!();
+    };
+    let payload_json = serde_json::to_string(&report).unwrap();
+    let payload_hash = canonical_json_hash(&report).unwrap();
+    let target_hash = canonical_json_hash(&vec![&report.targets[0]]).unwrap();
+    connection
+        .execute(
+            "INSERT INTO notification_events (
+                event_id, semantic_id, source_projection_id, report_slot, lane,
+                occurred_at_us, expires_at_us, payload_json, payload_sha256,
+                target_set_sha256, writer_generation, created_at_us
+             ) VALUES (?1, ?2, ?3, ?4, 'scheduled_report', ?5, ?6, ?7, ?8, ?9, 1, ?5)",
+            rusqlite::params![
+                report.intent_id.as_str(),
+                report.semantic_id.as_str(),
+                source_projection_id.as_str(),
+                slot.as_str(),
+                report.created_at.timestamp_micros(),
+                report.expires_at.timestamp_micros(),
+                payload_json,
+                payload_hash,
+                target_hash,
+            ],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO notification_targets (
+                target_id, event_id, target_key, channel, status, attempt_count,
+                max_attempts, replay_generation, lease_sequence, next_attempt_at_us,
+                updated_at_us
+             ) VALUES (?1, ?2, ?3, 'bark', 'pending', 0, 3, 0, 0, ?4, ?4)",
+            rusqlite::params![
+                format!("{}:bark-primary", report.intent_id),
+                report.intent_id.as_str(),
+                report.targets[0].key.as_str(),
+                report.created_at.timestamp_micros(),
+            ],
         )
         .unwrap();
 }
@@ -640,7 +738,513 @@ fn scheduled_report_persists_full_v2_body_without_a_fake_decision() {
 }
 
 #[test]
-fn fresh_ledger_installs_both_forward_migrations() {
+fn operator_lifecycle_allows_setups_then_exactly_one_trade_ready() {
+    let temp = TempDir::new().unwrap();
+    let ledger = Ledger::open(temp.path().join("ledger.sqlite")).unwrap();
+    let now = at(0);
+    let owner = ledger
+        .acquire_owner(
+            OwnerRole::Core,
+            "core-owner-operator-01",
+            now,
+            TimeDelta::minutes(30),
+        )
+        .unwrap();
+
+    let setup = operator_notification(now, OperatorNotificationRole::Setup);
+    assert_eq!(
+        ledger
+            .persist_operator_notification(&owner, &setup, 3, now)
+            .unwrap(),
+        OperatorNotificationWrite::Inserted
+    );
+    let mut second_setup = setup.clone();
+    second_setup.event_id = token("event-setup-second");
+    second_setup.semantic_id = token("semantic-setup-second");
+    second_setup.occurred_at += TimeDelta::seconds(1);
+    assert_eq!(
+        ledger
+            .persist_operator_notification(&owner, &second_setup, 3, now + TimeDelta::seconds(1),)
+            .unwrap(),
+        OperatorNotificationWrite::Inserted
+    );
+
+    let mut ready = operator_notification(now, OperatorNotificationRole::TradeReady);
+    ready.occurred_at += TimeDelta::seconds(2);
+    assert_eq!(
+        ledger
+            .persist_operator_notification(&owner, &ready, 3, now + TimeDelta::seconds(2))
+            .unwrap(),
+        OperatorNotificationWrite::Inserted
+    );
+    assert_eq!(
+        ledger
+            .persist_operator_notification(&owner, &ready, 3, now + TimeDelta::seconds(3))
+            .unwrap(),
+        OperatorNotificationWrite::Duplicate
+    );
+
+    let mut late_setup = setup.clone();
+    late_setup.event_id = token("event-setup-late");
+    late_setup.semantic_id = token("semantic-setup-late");
+    late_setup.occurred_at += TimeDelta::seconds(3);
+    assert_eq!(
+        ledger
+            .persist_operator_notification(&owner, &late_setup, 3, now + TimeDelta::seconds(3))
+            .unwrap(),
+        OperatorNotificationWrite::SemanticSuppressed
+    );
+
+    let mut second_ready = ready.clone();
+    second_ready.event_id = token("event-ready-second");
+    second_ready.semantic_id = token("semantic-ready-second");
+    assert_eq!(
+        ledger
+            .persist_operator_notification(&owner, &second_ready, 3, now + TimeDelta::seconds(3))
+            .unwrap(),
+        OperatorNotificationWrite::SemanticSuppressed
+    );
+}
+
+#[test]
+fn operator_exit_is_terminal_and_higher_generation_rearms() {
+    let temp = TempDir::new().unwrap();
+    let ledger = Ledger::open(temp.path().join("ledger.sqlite")).unwrap();
+    let now = at(0);
+    let owner = ledger
+        .acquire_owner(
+            OwnerRole::Core,
+            "core-owner-operator-01",
+            now,
+            TimeDelta::minutes(30),
+        )
+        .unwrap();
+    let setup = operator_notification(now, OperatorNotificationRole::Setup);
+    ledger
+        .persist_operator_notification(&owner, &setup, 3, now)
+        .unwrap();
+
+    let mut exit = operator_notification(now, OperatorNotificationRole::Exit);
+    exit.occurred_at += TimeDelta::seconds(1);
+    assert_eq!(
+        ledger
+            .persist_operator_notification(&owner, &exit, 3, now + TimeDelta::seconds(1))
+            .unwrap(),
+        OperatorNotificationWrite::Inserted
+    );
+    let mut after_exit = operator_notification(now, OperatorNotificationRole::TradeReady);
+    after_exit.event_id = token("event-after-exit");
+    after_exit.semantic_id = token("semantic-after-exit");
+    assert_eq!(
+        ledger
+            .persist_operator_notification(&owner, &after_exit, 3, now + TimeDelta::seconds(2))
+            .unwrap(),
+        OperatorNotificationWrite::SemanticSuppressed
+    );
+    let mut second_exit = exit.clone();
+    second_exit.event_id = token("event-exit-second");
+    second_exit.semantic_id = token("semantic-exit-second");
+    assert_eq!(
+        ledger
+            .persist_operator_notification(&owner, &second_exit, 3, now + TimeDelta::seconds(2))
+            .unwrap(),
+        OperatorNotificationWrite::SemanticSuppressed
+    );
+
+    let mut rearmed = setup.clone();
+    rearmed.event_id = token("event-setup-generation-1");
+    rearmed.semantic_id = token("semantic-setup-generation-1");
+    rearmed.generation = 1;
+    rearmed.occurred_at += TimeDelta::seconds(3);
+    assert_eq!(
+        ledger
+            .persist_operator_notification(&owner, &rearmed, 3, now + TimeDelta::seconds(3))
+            .unwrap(),
+        OperatorNotificationWrite::Inserted
+    );
+    assert_eq!(
+        ledger
+            .persist_operator_notification(&owner, &exit, 3, now + TimeDelta::seconds(4))
+            .unwrap(),
+        OperatorNotificationWrite::Duplicate
+    );
+    let mut generation_regression = setup;
+    generation_regression.event_id = token("event-generation-regression");
+    generation_regression.semantic_id = token("semantic-generation-regression");
+    assert_eq!(
+        ledger
+            .persist_operator_notification(
+                &owner,
+                &generation_regression,
+                3,
+                now + TimeDelta::seconds(4),
+            )
+            .unwrap(),
+        OperatorNotificationWrite::SemanticSuppressed
+    );
+}
+
+#[test]
+fn operator_event_has_no_fake_decision_or_report_lineage() {
+    let temp = TempDir::new().unwrap();
+    let ledger = Ledger::open(temp.path().join("ledger.sqlite")).unwrap();
+    let now = at(0);
+    let owner = ledger
+        .acquire_owner(
+            OwnerRole::Core,
+            "core-owner-operator-01",
+            now,
+            TimeDelta::minutes(30),
+        )
+        .unwrap();
+    ledger
+        .persist_operator_notification(
+            &owner,
+            &operator_notification(now, OperatorNotificationRole::TradeReady),
+            3,
+            now,
+        )
+        .unwrap();
+    let connection = ledger.connection().unwrap();
+    let (lane, decision_id, source_projection_id, report_slot): (
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    ) = connection
+        .query_row(
+            "SELECT lane, decision_id, source_projection_id, report_slot
+             FROM notification_events WHERE event_id = 'event-trade_ready'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(lane, "trader_event");
+    assert!(decision_id.is_none());
+    assert!(source_projection_id.is_none());
+    assert!(report_slot.is_none());
+}
+
+#[test]
+fn ready_and_exit_atomically_supersede_unsent_older_operator_targets() {
+    let temp = TempDir::new().unwrap();
+    let ledger = Ledger::open(temp.path().join("ledger.sqlite")).unwrap();
+    let now = at(0);
+    let core = ledger
+        .acquire_owner(
+            OwnerRole::Core,
+            "core-owner-supersession",
+            now,
+            TimeDelta::minutes(30),
+        )
+        .unwrap();
+    let delivery = ledger
+        .acquire_owner(
+            OwnerRole::Delivery,
+            "delivery-owner-supersession",
+            now,
+            TimeDelta::minutes(30),
+        )
+        .unwrap();
+    ledger
+        .persist_operator_notification(
+            &core,
+            &operator_notification(now, OperatorNotificationRole::Setup),
+            3,
+            now,
+        )
+        .unwrap();
+    let claimed_setup = ledger
+        .claim_next(&delivery, now, TimeDelta::seconds(10))
+        .unwrap()
+        .unwrap();
+
+    ledger
+        .persist_operator_notification(
+            &core,
+            &operator_notification(now, OperatorNotificationRole::TradeReady),
+            3,
+            now + TimeDelta::seconds(1),
+        )
+        .unwrap();
+    assert_eq!(
+        ledger
+            .begin_transport(
+                &delivery,
+                &claimed_setup,
+                now + TimeDelta::seconds(2),
+                TimeDelta::seconds(10),
+            )
+            .unwrap(),
+        BeginTransport::Cancelled
+    );
+    ledger
+        .persist_operator_notification(
+            &core,
+            &operator_notification(now, OperatorNotificationRole::Exit),
+            3,
+            now + TimeDelta::seconds(3),
+        )
+        .unwrap();
+
+    let health = ledger.health().unwrap();
+    assert_eq!(health.cancelled, 2);
+    assert_eq!(health.pending, 1);
+    let claimed_exit = ledger
+        .claim_next(
+            &delivery,
+            now + TimeDelta::seconds(4),
+            TimeDelta::seconds(10),
+        )
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        claimed_exit.intent,
+        ClaimedNotificationIntent::TraderEvent(OperatorNotificationV1 {
+            role: OperatorNotificationRole::Exit,
+            ..
+        })
+    ));
+    let cancellation_reasons: Vec<String> = ledger
+        .connection()
+        .unwrap()
+        .prepare(
+            "SELECT reason_code FROM delivery_receipts
+             WHERE outcome = 'cancelled_before_transport' ORDER BY reason_code",
+        )
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        cancellation_reasons,
+        vec![
+            "superseded_by_exit".to_owned(),
+            "superseded_by_trade_ready".to_owned()
+        ]
+    );
+}
+
+#[test]
+fn operator_supersession_does_not_claim_to_recall_in_flight_transport() {
+    let temp = TempDir::new().unwrap();
+    let ledger = Ledger::open(temp.path().join("ledger.sqlite")).unwrap();
+    let now = at(0);
+    let core = ledger
+        .acquire_owner(
+            OwnerRole::Core,
+            "core-owner-in-flight-supersession",
+            now,
+            TimeDelta::minutes(30),
+        )
+        .unwrap();
+    let delivery = ledger
+        .acquire_owner(
+            OwnerRole::Delivery,
+            "delivery-owner-in-flight-supersession",
+            now,
+            TimeDelta::minutes(30),
+        )
+        .unwrap();
+    ledger
+        .persist_operator_notification(
+            &core,
+            &operator_notification(now, OperatorNotificationRole::Setup),
+            3,
+            now,
+        )
+        .unwrap();
+    let claimed_setup = ledger
+        .claim_next(&delivery, now, TimeDelta::seconds(10))
+        .unwrap()
+        .unwrap();
+    let attempt_id = start_transport(
+        &ledger,
+        &delivery,
+        &claimed_setup,
+        now + TimeDelta::seconds(1),
+    );
+
+    ledger
+        .persist_operator_notification(
+            &core,
+            &operator_notification(now, OperatorNotificationRole::TradeReady),
+            3,
+            now + TimeDelta::seconds(2),
+        )
+        .unwrap();
+    let health = ledger.health().unwrap();
+    assert_eq!(health.in_flight, 1);
+    assert_eq!(health.pending, 1);
+    assert_eq!(health.cancelled, 0);
+
+    ledger
+        .settle(
+            &delivery,
+            &claimed_setup.handle,
+            &attempt_id,
+            &Settlement::Delivered {
+                provider_message_id: None,
+            },
+            now + TimeDelta::seconds(3),
+        )
+        .unwrap();
+    let health = ledger.health().unwrap();
+    assert_eq!(health.delivered, 1);
+    assert_eq!(health.pending, 1);
+    assert_eq!(health.cancelled, 0);
+}
+
+#[test]
+fn cancellation_before_operator_event_is_an_idempotent_durable_fence() {
+    let temp = TempDir::new().unwrap();
+    let ledger = Ledger::open(temp.path().join("ledger.sqlite")).unwrap();
+    let now = at(0);
+    let owner = ledger
+        .acquire_owner(
+            OwnerRole::Core,
+            "core-owner-cancel-fence",
+            now,
+            TimeDelta::minutes(30),
+        )
+        .unwrap();
+    let notification = operator_notification(now, OperatorNotificationRole::TradeReady);
+
+    assert_eq!(
+        ledger
+            .cancel_event_at(
+                &owner,
+                notification.event_id.as_str(),
+                "source_invalidated",
+                now,
+                now + TimeDelta::seconds(1),
+            )
+            .unwrap(),
+        PersistWrite::Inserted
+    );
+    assert_eq!(
+        ledger
+            .cancel_event_at(
+                &owner,
+                notification.event_id.as_str(),
+                "source_invalidated",
+                now,
+                now + TimeDelta::seconds(2),
+            )
+            .unwrap(),
+        PersistWrite::Duplicate
+    );
+    assert!(matches!(
+        ledger.cancel_event_at(
+            &owner,
+            notification.event_id.as_str(),
+            "different_reason",
+            now,
+            now + TimeDelta::seconds(2),
+        ),
+        Err(LedgerError::IdentityCollision(_))
+    ));
+    assert!(
+        ledger
+            .persist_operator_notification(&owner, &notification, 3, now + TimeDelta::seconds(3),)
+            .is_err()
+    );
+
+    let connection = ledger.connection().unwrap();
+    let cancellation: (String, i64) = connection
+        .query_row(
+            "SELECT reason_code, cancelled_at_us FROM notification_cancellations
+             WHERE event_id = ?1",
+            [notification.event_id.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        cancellation,
+        ("source_invalidated".to_owned(), now.timestamp_micros())
+    );
+    let event_count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM notification_events WHERE event_id = ?1",
+            [notification.event_id.as_str()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(event_count, 0);
+    assert_eq!(ledger.health().unwrap(), LedgerHealth::default());
+}
+
+#[test]
+fn claim_priority_is_exit_then_trade_ready_then_setup_then_scheduled_report() {
+    let temp = TempDir::new().unwrap();
+    let ledger = Ledger::open(temp.path().join("ledger.sqlite")).unwrap();
+    let now = at(0);
+    let core = ledger
+        .acquire_owner(
+            OwnerRole::Core,
+            "core-owner-priority-01",
+            now,
+            TimeDelta::minutes(30),
+        )
+        .unwrap();
+    let report_owner = ledger
+        .acquire_owner(
+            OwnerRole::Report,
+            "report-owner-priority",
+            now,
+            TimeDelta::minutes(30),
+        )
+        .unwrap();
+    let delivery = ledger
+        .acquire_owner(
+            OwnerRole::Delivery,
+            "delivery-owner-priority",
+            now,
+            TimeDelta::minutes(30),
+        )
+        .unwrap();
+    ledger
+        .persist_scheduled_report(&report_owner, &scheduled_report(now), now)
+        .unwrap();
+    for role in [
+        OperatorNotificationRole::Setup,
+        OperatorNotificationRole::TradeReady,
+        OperatorNotificationRole::Exit,
+    ] {
+        let mut notification = operator_notification(now, role);
+        notification.opportunity_id = token(&format!("priority-{}", role.as_str()));
+        ledger
+            .persist_operator_notification(&core, &notification, 3, now)
+            .unwrap();
+    }
+
+    for expected in [
+        Some(OperatorNotificationRole::Exit),
+        Some(OperatorNotificationRole::TradeReady),
+        Some(OperatorNotificationRole::Setup),
+        None,
+    ] {
+        let claimed = ledger
+            .claim_next(
+                &delivery,
+                now + TimeDelta::seconds(1),
+                TimeDelta::seconds(10),
+            )
+            .unwrap()
+            .unwrap();
+        match (expected, claimed.intent) {
+            (Some(expected), ClaimedNotificationIntent::TraderEvent(notification)) => {
+                assert_eq!(notification.role, expected);
+            }
+            (None, ClaimedNotificationIntent::ScheduledReport(_)) => {}
+            other => panic!("unexpected priority result: {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn fresh_ledger_installs_all_forward_migrations() {
     let temp = TempDir::new().unwrap();
     let ledger = Ledger::open(temp.path().join("ledger.sqlite")).unwrap();
     let migration_count: i64 = ledger
@@ -650,7 +1254,7 @@ fn fresh_ledger_installs_both_forward_migrations() {
             row.get(0)
         })
         .unwrap();
-    assert_eq!(migration_count, 2);
+    assert_eq!(migration_count, 3);
 }
 
 #[test]
@@ -1306,7 +1910,7 @@ fn migration_checksum_drift_refuses_to_open() {
 }
 
 #[test]
-fn known_migration_prefix_accepts_a_forward_compatible_tail() {
+fn known_migration_prefix_accepts_a_forward_compatible_tail_after_v3() {
     let temp = TempDir::new().unwrap();
     let path = temp.path().join("ledger.sqlite");
     let ledger = Ledger::open(&path).unwrap();
@@ -1316,7 +1920,7 @@ fn known_migration_prefix_accepts_a_forward_compatible_tail() {
         .execute(
             "INSERT INTO schema_migrations (
                 version, name, checksum_sha256, applied_at_us
-             ) VALUES (3, 'future_backward_compatible_extension', ?1, ?2)",
+             ) VALUES (4, 'future_backward_compatible_extension', ?1, ?2)",
             rusqlite::params!["f".repeat(64), at(1).timestamp_micros()],
         )
         .unwrap();
@@ -1326,7 +1930,7 @@ fn known_migration_prefix_accepts_a_forward_compatible_tail() {
 }
 
 #[test]
-fn v1_ledger_upgrades_to_v2_without_losing_existing_outbox_rows() {
+fn v1_ledger_upgrades_through_v3_without_losing_existing_outbox_rows() {
     let temp = TempDir::new().unwrap();
     let path = temp.path().join("ledger.sqlite");
     create_v1_ledger_with_outbox(&path);
@@ -1338,7 +1942,7 @@ fn v1_ledger_upgrades_to_v2_without_losing_existing_outbox_rows() {
             row.get(0)
         })
         .unwrap();
-    assert_eq!(migrations, 2);
+    assert_eq!(migrations, 3);
     let lineage: (Option<String>, Option<String>, Option<String>) = connection
         .query_row(
             "SELECT decision_id, source_projection_id, report_slot
@@ -1368,6 +1972,52 @@ fn v1_ledger_upgrades_to_v2_without_losing_existing_outbox_rows() {
         .unwrap();
     assert_eq!(foreign_key_violations, 0);
     LedgerReader::open_existing(path).unwrap();
+}
+
+#[test]
+fn v2_scheduled_outbox_upgrades_to_v3_and_remains_claimable() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("ledger.sqlite");
+    let now = at(0);
+    create_v1_ledger_with_outbox(&path);
+    add_v2_migration_and_scheduled_outbox(&path, now);
+
+    let ledger = Ledger::open(&path).unwrap();
+    let delivery = ledger
+        .acquire_owner(
+            OwnerRole::Delivery,
+            "delivery-owner-migration",
+            now,
+            TimeDelta::minutes(30),
+        )
+        .unwrap();
+    let migration_count: i64 = ledger
+        .connection()
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(migration_count, 3);
+    let scheduled_count: i64 = ledger
+        .connection()
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM notification_events
+             WHERE lane = 'scheduled_report' AND report_slot = '2026-08-04:10:00'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(scheduled_count, 1);
+    let claimed = ledger
+        .claim_next(&delivery, now, TimeDelta::seconds(10))
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        claimed.intent,
+        ClaimedNotificationIntent::ScheduledReport(_)
+    ));
 }
 
 #[test]

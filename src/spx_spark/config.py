@@ -609,6 +609,16 @@ class NotificationSettings:
     delivery_outbox_claim_stale_after_seconds: float = 180.0
     delivery_outbox_recovery_batch_size: int = 50
     delivery_outbox_legacy_shadow_enabled: bool = True
+    # When enabled, trader-facing setup/ready/exit cards are staged as one
+    # immutable Rust ingress target. Rust then owns target fan-out and receipts;
+    # Python continues to own producer durability and retry scheduling.
+    rust_trader_notification_owner: bool = False
+    rust_operator_notification_socket_path: str = "/run/spx-spark-core/core.sock"
+    rust_operator_notification_timeout_seconds: float = 5.0
+    rust_operator_notification_max_frame_bytes: int = 1_048_576
+    # (python sink, Rust target key, Rust delivery channel). The per-event
+    # intended Python sink set is resolved first; extra mappings are ignored.
+    rust_operator_notification_target_map: tuple[tuple[str, str, str], ...] = ()
     # Retry policy for non-terminal outbox outcomes such as reviewer timeouts.
     outbox_max_attempts: int = 5
     outbox_retry_base_seconds: float = 60.0

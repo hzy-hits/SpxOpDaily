@@ -25,7 +25,9 @@ from spx_spark.notifier.delivery_outbox_contract import (
     TerminalDeliveryReceipt,
     delivery_payload_fingerprint,
     iso as _iso,
+    operator_targets_json as _operator_targets_json,
     parse as _parse,
+    parse_operator_targets as _parse_operator_targets,
     utc as _utc,
 )
 from spx_spark.notifier.delivery_outbox_read_model import (
@@ -47,10 +49,7 @@ __all__ = [
 ]
 
 
-class NotificationDeliveryOutbox(
-    DeliveryOutboxClaimMixin,
-    DeliveryOutboxReadModelMixin,
-):
+class NotificationDeliveryOutbox(DeliveryOutboxClaimMixin, DeliveryOutboxReadModelMixin):
     """SQLite outbox with independent acknowledgement for every sink."""
 
     def __init__(
@@ -130,6 +129,21 @@ class NotificationDeliveryOutbox(
             if "expires_at" not in event_columns:
                 connection.execute(
                     "ALTER TABLE notification_delivery_events ADD COLUMN expires_at TEXT"
+                )
+            if "operator_targets_json" not in event_columns:
+                connection.execute(
+                    "ALTER TABLE notification_delivery_events "
+                    "ADD COLUMN operator_targets_json TEXT NOT NULL DEFAULT '[]'"
+                )
+            if "operator_opportunity_id" not in event_columns:
+                connection.execute(
+                    "ALTER TABLE notification_delivery_events "
+                    "ADD COLUMN operator_opportunity_id TEXT"
+                )
+            if "operator_generation" not in event_columns:
+                connection.execute(
+                    "ALTER TABLE notification_delivery_events "
+                    "ADD COLUMN operator_generation INTEGER NOT NULL DEFAULT 0"
                 )
             receipt_columns = {
                 str(row["name"])
@@ -303,9 +317,10 @@ class NotificationDeliveryOutbox(
                     """
                     INSERT OR IGNORE INTO notification_delivery_events (
                         event_id, source, kind, lane, occurred_at, expires_at,
-                        title, text, feishu_text, friend, status, created_at,
-                        updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        title, text, feishu_text, friend, operator_targets_json,
+                        operator_opportunity_id, operator_generation, status,
+                        created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         envelope.event_id,
@@ -318,6 +333,9 @@ class NotificationDeliveryOutbox(
                         text,
                         feishu_text,
                         int(friend),
+                        _operator_targets_json(envelope.operator_targets),
+                        envelope.operator_opportunity_id,
+                        envelope.operator_generation,
                         DeliveryStatus.PENDING.value,
                         now_text,
                         now_text,
@@ -328,7 +346,9 @@ class NotificationDeliveryOutbox(
                     existing = connection.execute(
                         """
                         SELECT source, kind, lane, occurred_at, expires_at,
-                               title, text, feishu_text, friend
+                               title, text, feishu_text, friend,
+                               operator_targets_json, operator_opportunity_id,
+                               operator_generation
                         FROM notification_delivery_events WHERE event_id = ?
                         """,
                         (envelope.event_id,),
@@ -343,6 +363,9 @@ class NotificationDeliveryOutbox(
                         text,
                         feishu_text,
                         int(friend),
+                        _operator_targets_json(envelope.operator_targets),
+                        envelope.operator_opportunity_id,
+                        envelope.operator_generation,
                     )
                     if existing is None or tuple(existing) != expected:
                         raise ValueError(f"notification event_id collision for {envelope.event_id}")
@@ -451,7 +474,8 @@ class NotificationDeliveryOutbox(
                     f"""
                     SELECT t.event_id, t.sink, e.source, e.kind, e.lane,
                            e.occurred_at, e.expires_at, e.title, e.text,
-                           e.feishu_text, e.friend
+                           e.feishu_text, e.friend, e.operator_targets_json,
+                           e.operator_opportunity_id, e.operator_generation
                     FROM notification_delivery_targets AS t
                     JOIN notification_delivery_events AS e USING (event_id)
                     WHERE t.status = ? AND t.next_attempt_at <= ?{event_clause}
@@ -520,6 +544,15 @@ class NotificationDeliveryOutbox(
                         expires_at=(
                             _parse(first["expires_at"]) if first["expires_at"] is not None else None
                         ),
+                        operator_targets=_parse_operator_targets(
+                            first["operator_targets_json"]
+                        ),
+                        operator_opportunity_id=(
+                            str(first["operator_opportunity_id"])
+                            if first["operator_opportunity_id"] is not None
+                            else None
+                        ),
+                        operator_generation=int(first["operator_generation"]),
                     ),
                     title=str(first["title"]),
                     text=str(first["text"]),

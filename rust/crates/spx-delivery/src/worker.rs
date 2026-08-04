@@ -263,6 +263,9 @@ impl<T: Transport> DeliveryWorker<T> {
             ClaimedNotificationIntent::ScheduledReport(intent) => {
                 render_desk_message_v2(&intent.message)
             }
+            ClaimedNotificationIntent::TraderEvent(notification) => {
+                crate::render_operator_notification(notification)
+            }
         };
         let begin_at = boundary_override.map_or_else(Utc::now, |times| times.0);
         let transport_lease_duration = TimeDelta::seconds(self.config.claim_lease_seconds);
@@ -376,8 +379,9 @@ mod tests {
         CandidateDirection, DECISION_SCHEMA_VERSION, DeskMessageV1, DeskMessageV2,
         ExactLegEvidenceV1, NOTIFICATION_INTENT_SCHEMA_VERSION,
         NOTIFICATION_INTENT_V2_SCHEMA_VERSION, NonNegativeF64, NotificationIntentV1,
-        NotificationIntentV2, NotificationLineageV2, NotificationTargetV1, OptionRight,
-        PositiveF64, Provider, StrategyAction, StrategyDecisionV1, Token,
+        NotificationIntentV2, NotificationLineageV2, NotificationTargetV1,
+        OPERATOR_NOTIFICATION_SCHEMA_VERSION, OperatorNotificationRole, OperatorNotificationV1,
+        OptionRight, PositiveF64, Provider, StrategyAction, StrategyDecisionV1, Token,
     };
     use spx_ledger::PersistWrite;
     use tempfile::TempDir;
@@ -495,6 +499,82 @@ mod tests {
         }
     }
 
+    fn operator_fixture(result: TransportResult) -> Fixture {
+        let temp = TempDir::new().unwrap();
+        let now = Utc.timestamp_opt(1_785_590_400, 0).unwrap();
+        let ledger_path = temp.path().join("ledger.sqlite");
+        let ledger = Ledger::open(&ledger_path).unwrap();
+        let core = ledger
+            .acquire_owner(
+                OwnerRole::Core,
+                "core-owner-operator-test",
+                now,
+                TimeDelta::seconds(60),
+            )
+            .unwrap();
+        ledger
+            .persist_operator_notification(&core, &operator_intent(now), 5, now)
+            .unwrap();
+        let worker = DeliveryWorker::open(
+            delivery_config(ledger_path),
+            true,
+            "delivery-owner-test-0001",
+            now,
+            MockTransport::new(result),
+        )
+        .unwrap();
+        Fixture {
+            _temp: temp,
+            worker,
+            now,
+        }
+    }
+
+    fn superseded_operator_fixture(result: TransportResult) -> Fixture {
+        let temp = TempDir::new().unwrap();
+        let now = Utc.timestamp_opt(1_785_590_400, 0).unwrap();
+        let ledger_path = temp.path().join("ledger.sqlite");
+        let ledger = Ledger::open(&ledger_path).unwrap();
+        let core = ledger
+            .acquire_owner(
+                OwnerRole::Core,
+                "core-owner-supersede-test",
+                now,
+                TimeDelta::seconds(60),
+            )
+            .unwrap();
+        for (offset, role) in [
+            OperatorNotificationRole::Setup,
+            OperatorNotificationRole::TradeReady,
+            OperatorNotificationRole::Exit,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            ledger
+                .persist_operator_notification(
+                    &core,
+                    &operator_intent_with_role(now, role),
+                    5,
+                    now + TimeDelta::seconds(i64::try_from(offset).unwrap()),
+                )
+                .unwrap();
+        }
+        let worker = DeliveryWorker::open(
+            delivery_config(ledger_path),
+            true,
+            "delivery-owner-test-0001",
+            now + TimeDelta::seconds(3),
+            MockTransport::new(result),
+        )
+        .unwrap();
+        Fixture {
+            _temp: temp,
+            worker,
+            now: now + TimeDelta::seconds(3),
+        }
+    }
+
     fn delivery_config(ledger_path: PathBuf) -> DeliveryConfig {
         DeliveryConfig {
             ledger_path,
@@ -507,6 +587,7 @@ mod tests {
             targets: vec![crate::TargetConfig::Bark {
                 key: "bark-primary".to_owned(),
                 endpoint_env: "SPX_TEST_BARK_ENDPOINT".to_owned(),
+                presentation: crate::BarkPresentation::Full,
             }],
         }
     }
@@ -598,6 +679,37 @@ mod tests {
         }
     }
 
+    fn operator_intent(now: DateTime<Utc>) -> OperatorNotificationV1 {
+        operator_intent_with_role(now, OperatorNotificationRole::TradeReady)
+    }
+
+    fn operator_intent_with_role(
+        now: DateTime<Utc>,
+        role: OperatorNotificationRole,
+    ) -> OperatorNotificationV1 {
+        let role_name = role.as_str();
+        OperatorNotificationV1 {
+            schema_version: OPERATOR_NOTIFICATION_SCHEMA_VERSION.to_owned(),
+            event_id: token(&format!("operator-event-{role_name}")),
+            semantic_id: token(&format!("operator-semantic-{role_name}")),
+            opportunity_id: token("operator-opportunity-delivery"),
+            generation: 0,
+            role,
+            occurred_at: now,
+            expires_at: now + TimeDelta::seconds(30),
+            title: token(&format!("SPX {role_name} · frozen")),
+            body: format!(
+                "## Desk View\n第一行  保留空格\n{}\n末尾  \n\n## Execution\nmanual only\n\n## Risk\ndefined risk\n\n## Targets\nnext level\n\n## Data Quality\nlive",
+                "结构正文；".repeat(1_000)
+            ),
+            targets: vec![NotificationTargetV1 {
+                key: token("bark-primary"),
+                channel: spx_domain::DeliveryChannel::Bark,
+            }],
+            automatic_ordering: false,
+        }
+    }
+
     #[test]
     fn delivered_mock_settles_once_with_deterministic_render() {
         let mut fixture = fixture(TransportResult::Delivered {
@@ -661,6 +773,59 @@ mod tests {
                 .body
                 .ends_with("Data Quality\nDEGRADED: clipped mass 28.4%")
         );
+    }
+
+    #[test]
+    fn operator_event_sends_the_frozen_title_and_body_once() {
+        let expected = operator_intent(Utc.timestamp_opt(1_785_590_400, 0).unwrap());
+        let mut fixture = operator_fixture(TransportResult::Delivered {
+            provider_message_id: Some("provider-operator-1".to_owned()),
+        });
+        assert_eq!(
+            fixture.worker.run_once_at(fixture.now).unwrap().delivered,
+            1
+        );
+        assert_eq!(
+            fixture
+                .worker
+                .run_once_at(fixture.now + TimeDelta::seconds(1))
+                .unwrap()
+                .claimed,
+            0
+        );
+        let requests = fixture.worker.transport.requests.lock().unwrap();
+        let [request] = requests.as_slice() else {
+            panic!("exactly one operator event must be sent");
+        };
+        assert_eq!(request.event_id, expected.event_id.as_str());
+        assert_eq!(request.message.title, expected.title.as_str());
+        assert_eq!(request.message.body, expected.body);
+    }
+
+    #[test]
+    fn ready_then_exit_before_delivery_sends_only_exit() {
+        let mut fixture = superseded_operator_fixture(TransportResult::Delivered {
+            provider_message_id: Some("provider-exit-1".to_owned()),
+        });
+        assert_eq!(fixture.worker.health().unwrap().cancelled, 2);
+        assert_eq!(
+            fixture.worker.run_once_at(fixture.now).unwrap().delivered,
+            1
+        );
+        assert_eq!(
+            fixture
+                .worker
+                .run_once_at(fixture.now + TimeDelta::seconds(1))
+                .unwrap()
+                .claimed,
+            0
+        );
+        let requests = fixture.worker.transport.requests.lock().unwrap();
+        let [request] = requests.as_slice() else {
+            panic!("only the terminal exit may be sent");
+        };
+        assert_eq!(request.event_id, "operator-event-exit");
+        assert_eq!(request.message.title, "SPX exit · frozen");
     }
 
     #[test]
@@ -876,6 +1041,7 @@ mod tests {
             targets: vec![crate::TargetConfig::Bark {
                 key: "bark-primary".to_owned(),
                 endpoint_env: "SPX_TEST_BARK_ENDPOINT".to_owned(),
+                presentation: crate::BarkPresentation::Full,
             }],
         };
         let result = DeliveryWorker::open(

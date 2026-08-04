@@ -1181,6 +1181,21 @@ notification:
   delivery_outbox_legacy_shadow_enabled:
     value: true
     description: Mirrors pending delivery event IDs to the legacy JSONL queue during the rollout window for rollback safety.
+  rust_trader_notification_owner:
+    value: false
+    description: Routes trader-facing setup, trade-ready, and exit cards through Rust.
+  rust_operator_notification_socket_path:
+    value: /run/spx-spark-core/core.sock
+    description: Unix socket for typed operator notification ingress.
+  rust_operator_notification_timeout_seconds:
+    value: 5.0
+    description: Timeout for one Rust ingress request and acknowledgement.
+  rust_operator_notification_max_frame_bytes:
+    value: 1048576
+    description: Maximum accepted Rust ingress acknowledgement frame size.
+  rust_operator_notification_target_map:
+    value: []
+    description: Explicit Python sink to Rust target key/channel mappings for operator notifications.
   openclaw_enabled:
     value: false
     description: Enables legacy OpenClaw command delivery path.

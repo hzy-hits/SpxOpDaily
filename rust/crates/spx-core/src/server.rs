@@ -258,6 +258,9 @@ fn read_exact_until_stopped(
     Ok(true)
 }
 
+/// Builds an acknowledgement only after `CoreEngine::process` has committed its ledger mutation.
+///
+/// Cancellation dispositions attest to a durable fence, not recall of an in-flight transport.
 fn accepted_ack(message_id: Token, outcome: &CoreOutcome) -> CoreAckV1 {
     let (disposition, decision_id) = match outcome {
         CoreOutcome::Duplicate { .. } => (CoreAckDisposition::DuplicateIngress, None),
@@ -286,6 +289,32 @@ fn accepted_ack(message_id: Token, outcome: &CoreOutcome) -> CoreAckV1 {
                 crate::DeskMapDisposition::Updated => CoreAckDisposition::DeskMapUpdated,
                 crate::DeskMapDisposition::Unchanged => CoreAckDisposition::DeskMapUnchanged,
                 crate::DeskMapDisposition::Stale => CoreAckDisposition::DeskMapStale,
+            },
+            None,
+        ),
+        CoreOutcome::OperatorNotification { disposition, .. } => (
+            match disposition {
+                crate::OperatorNotificationDisposition::Inserted
+                | crate::OperatorNotificationDisposition::Duplicate => {
+                    CoreAckDisposition::OperatorNotificationAccepted
+                }
+                crate::OperatorNotificationDisposition::SemanticSuppressed => {
+                    CoreAckDisposition::OperatorNotificationSemanticSuppressed
+                }
+            },
+            None,
+        ),
+        CoreOutcome::OperatorNotificationCancellation {
+            persist_disposition,
+            ..
+        } => (
+            match persist_disposition {
+                crate::PersistDisposition::Inserted => {
+                    CoreAckDisposition::OperatorNotificationCancellationAccepted
+                }
+                crate::PersistDisposition::Duplicate => {
+                    CoreAckDisposition::OperatorNotificationCancellationDuplicate
+                }
             },
             None,
         ),
@@ -369,5 +398,56 @@ mod tests {
         ack.validate().unwrap();
         assert_eq!(ack.disposition, Some(CoreAckDisposition::DecisionAccepted));
         assert_eq!(ack.decision_id, Some(expected_decision_id));
+    }
+
+    #[test]
+    fn operator_notification_ack_has_closed_disposition_and_no_decision() {
+        let message_id = Token::new("message:operator-ack", "message_id").unwrap();
+        for (disposition, expected) in [
+            (
+                crate::OperatorNotificationDisposition::Inserted,
+                CoreAckDisposition::OperatorNotificationAccepted,
+            ),
+            (
+                crate::OperatorNotificationDisposition::SemanticSuppressed,
+                CoreAckDisposition::OperatorNotificationSemanticSuppressed,
+            ),
+        ] {
+            let outcome = CoreOutcome::OperatorNotification {
+                message_id: message_id.clone(),
+                event_id: Token::new("event:operator", "event_id").unwrap(),
+                role: spx_domain::OperatorNotificationRole::Exit,
+                disposition,
+            };
+            let ack = accepted_ack(message_id.clone(), &outcome);
+            ack.validate().unwrap();
+            assert_eq!(ack.disposition, Some(expected));
+            assert!(ack.decision_id.is_none());
+        }
+    }
+
+    #[test]
+    fn cancellation_ack_distinguishes_applied_and_idempotent_duplicate() {
+        let message_id = Token::new("message:cancellation-ack", "message_id").unwrap();
+        for (persist_disposition, expected) in [
+            (
+                PersistDisposition::Inserted,
+                CoreAckDisposition::OperatorNotificationCancellationAccepted,
+            ),
+            (
+                PersistDisposition::Duplicate,
+                CoreAckDisposition::OperatorNotificationCancellationDuplicate,
+            ),
+        ] {
+            let outcome = CoreOutcome::OperatorNotificationCancellation {
+                message_id: message_id.clone(),
+                event_id: Token::new("event:cancelled", "event_id").unwrap(),
+                persist_disposition,
+            };
+            let ack = accepted_ack(message_id.clone(), &outcome);
+            ack.validate().unwrap();
+            assert_eq!(ack.disposition, Some(expected));
+            assert!(ack.decision_id.is_none());
+        }
     }
 }

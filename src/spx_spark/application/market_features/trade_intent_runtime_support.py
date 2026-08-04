@@ -18,7 +18,10 @@ from spx_spark.notifier.operator_cards import (
     beijing_time,
     decision_now,
     option_contract_label,
+    option_contract_right,
+    parse_time,
     remaining_seconds,
+    render_operator_card,
 )
 
 
@@ -30,7 +33,7 @@ TRADE_INTENT_SYSTEM_PROMPT = """你是 SPX 指数期权自营台的 execution tr
 写成机构级 execution ticket，不是散户喊单、币圈频道、财经播报或情绪鼓动。
 不得改变方向、合约、NBBO、入场上限、失效位、目标位、有效期或最大亏损；不得补造数据。
 TradeReady 只是未连接券商订单的行情候选告警，不得写成已挂单、已成交、已持仓或已撤单。
-输出简短 Markdown，固定使用 Desk View、Execution、Risk、Targets、Timing 五部分。
+输出简短 Markdown，固定使用 Desk View、Execution、Risk、Targets、Data Quality 五部分。
 只给一个主方向；相反方向只能作为当前交易的失效条件。禁用『需要看盘、半路、不追、剧本、砸、抢、扛、顶上』等口语。
 决断体现在价格纪律和失效纪律，不得用夸张措辞制造确定性。"""
 
@@ -57,29 +60,68 @@ def render_trade_intent(intent: Mapping[str, object]) -> str:
         else None
     )
     play_stats_line = _play_stats_line(intent.get("play_stats"))
-    return "\n".join(
+    desk_lines = [
+        f"🟢 MANUAL READY · {right}",
+        f"机会  {intent.get('event_id') or intent.get('intent_id') or '不可用'} · "
+        f"generation {_operator_generation_label(intent)}",
+        f"触发  {_operator_trigger(intent)}",
+        f"解释  {_operator_explanation(intent)}",
+    ]
+    if spring_gamma_line:
+        desk_lines.append(spring_gamma_line)
+    execution = "\n".join(
         (
             f"🟢 MANUAL READY · {right}",
             "类型  单腿 · 仅人工提交",
             f"买入  {contract}",
+            f"Provider  {intent.get('provider') or '不可用'}",
             f"NBBO  {_fmt_fixed(intent.get('decision_bid'))} / "
             f"{_fmt_fixed(intent.get('decision_ask'))}（决策快照）",
             f"限价  ≤ {_fmt_fixed(intent.get('entry_limit'))}",
-            f"触发  {_operator_trigger(intent)}",
-            *([spring_gamma_line] if spring_gamma_line else []),
-            f"止损  {_operator_invalidation(intent)}",
-            f"目标  SPX {_fmt_fixed(intent.get('target_spx'))}",
-            f"赔率  剩余目标/止损距离 {_fmt_ratio(intent.get('remaining_reward_risk'))}",
-            *([play_stats_line] if play_stats_line else []),
-            f"退出  {beijing_time(intent.get('time_stop_at'))}",
             f"有效  决策时{ttl_text}（至 {beijing_time(valid_until, seconds=True)}）；"
             "提交前重新报价",
-            f"风险  单张最大权利金 ${_fmt_fixed(intent.get('max_loss_per_contract'))}；"
-            "数量由人工确认",
-            f"解释  {_operator_explanation(intent)}",
-            "权限  自动下单关闭；未连接真实订单、成交或持仓状态",
+            "权限  仅人工提交；未连接券商订单、成交或持仓状态",
         )
     )
+    risk = "\n".join(
+        (
+            f"止损  {_operator_invalidation(intent)}",
+            f"退出  {beijing_time(intent.get('time_stop_at'))}",
+            f"风险  单张最大权利金 ${_fmt_fixed(intent.get('max_loss_per_contract'))}；"
+            "数量由人工确认",
+            "权限  自动下单关闭",
+        )
+    )
+    quality_lines = [
+        f"Provider  {intent.get('provider') or '不可用'} · "
+        f"quote source {intent.get('quote_source_at') or '不可用'}",
+        f"Coordinate  {_coordinate_label(intent.get('coordinate'))} · "
+        f"follow-through {_fmt_fixed(intent.get('follow_through_points'))} 点",
+        "NBBO 是决策快照，不代表挂单、成交或可复制收益；提交前必须重新报价。",
+    ]
+    if play_stats_line:
+        quality_lines.append(play_stats_line)
+    return render_operator_card(
+        desk_view="\n".join(desk_lines),
+        execution=execution,
+        risk=risk,
+        targets=(
+            f"目标  SPX {_fmt_fixed(intent.get('target_spx'))}\n"
+            f"赔率  剩余目标/止损距离 {_fmt_ratio(intent.get('remaining_reward_risk'))}"
+        ),
+        data_quality="\n".join(quality_lines),
+    )
+
+
+def _operator_generation_label(intent: Mapping[str, object]) -> int:
+    value = intent.get("reentry_generation", 0)
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+
+
+def _coordinate_label(value: object) -> str:
+    if not isinstance(value, Mapping):
+        return "不可用"
+    return f"{value.get('kind') or '不可用'} {_fmt_fixed(value.get('price'))}"
 
 
 def _play_stats_line(value: object) -> str | None:
@@ -315,6 +357,91 @@ def _number(value: object) -> float | None:
         return None
     parsed = float(value)
     return parsed if math.isfinite(parsed) else None
+
+
+def _manual_card_contract_reason(
+    intent: Mapping[str, object],
+    *,
+    now: datetime,
+) -> str | None:
+    """Reject a green card unless every operator field is complete and coherent."""
+
+    direction = str(intent.get("direction") or "")
+    if direction not in {"up", "down"}:
+        return "manual_card_direction_invalid"
+    thesis = str(intent.get("thesis") or "")
+    if thesis not in {"breakout", "fade"}:
+        return "manual_card_thesis_invalid"
+    right = option_contract_right(intent.get("contract_id"))
+    expected_right = "C" if direction == "up" else "P"
+    if right is None:
+        return "manual_card_exact_contract_unavailable"
+    if right != expected_right:
+        return "manual_card_contract_direction_mismatch"
+
+    numeric_fields = (
+        "decision_bid",
+        "decision_ask",
+        "entry_limit",
+        "trigger_level",
+        "spx_spot",
+        "invalidation_spx",
+        "target_spx",
+        "max_loss_per_contract",
+    )
+    values: dict[str, float] = {}
+    for field in numeric_fields:
+        value = _number(intent.get(field))
+        if value is None:
+            return f"manual_card_field_missing:{field}"
+        values[field] = value
+    bid = values["decision_bid"]
+    ask = values["decision_ask"]
+    entry = values["entry_limit"]
+    if bid < 0 or ask <= 0 or bid > ask:
+        return "manual_card_nbbo_invalid"
+    if entry <= 0 or not bid <= entry <= ask:
+        return "manual_card_entry_limit_outside_nbbo"
+    if any(
+        values[field] <= 0
+        for field in ("trigger_level", "spx_spot", "invalidation_spx", "target_spx")
+    ):
+        return "manual_card_spx_coordinate_invalid"
+    if values["max_loss_per_contract"] <= 0 or not math.isclose(
+        values["max_loss_per_contract"],
+        entry * 100.0,
+        abs_tol=0.01,
+    ):
+        return "manual_card_max_loss_inconsistent"
+
+    trigger = values["trigger_level"]
+    spot = values["spx_spot"]
+    invalidation = values["invalidation_spx"]
+    target = values["target_spx"]
+    if direction == "up" and not invalidation < trigger < target:
+        return "manual_card_risk_coordinates_incoherent"
+    if direction == "down" and not target < trigger < invalidation:
+        return "manual_card_risk_coordinates_incoherent"
+    if direction == "up" and not invalidation < spot < target:
+        return "manual_card_spot_outside_risk_bounds"
+    if direction == "down" and not target < spot < invalidation:
+        return "manual_card_spot_outside_risk_bounds"
+
+    if not str(intent.get("provider") or ""):
+        return "action_quote_provider_unavailable"
+    if parse_time(intent.get("quote_source_at")) is None:
+        return "action_quote_source_time_unavailable"
+    valid_until = parse_time(intent.get("valid_until") or intent.get("expires_at"))
+    if valid_until is None:
+        return "manual_card_expiry_unavailable"
+    if valid_until <= _utc(now):
+        return "manual_card_expired"
+    time_stop = parse_time(intent.get("time_stop_at"))
+    if time_stop is None:
+        return "manual_card_time_stop_unavailable"
+    if time_stop <= _utc(now):
+        return "manual_card_time_stop_elapsed"
+    return None
 
 
 def _state_path(storage: StorageSettings) -> Path:

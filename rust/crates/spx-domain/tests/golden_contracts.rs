@@ -5,10 +5,11 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use spx_domain::{
     CandidateDirection, DeliveryChannel, DeliveryReceiptV1, DomainError, EntitlementState,
-    IngressEnvelopeV1, MarketSession, NotificationIntentV1, OperationalState, OptionRight,
-    Provider, ProviderReasonCode, ProviderStateV1, QuoteBatchMode, QuoteBatchV1, QuoteQuality,
-    RangeForecastKind, ReceiptOutcome, ResearchSignalsV1, StrategyAction, StrategyBlockReason,
-    StrategyDecisionV1, Validate, canonical_json_hash,
+    IngressEnvelopeV1, MarketSession, NotificationIntentV1, OperationalState,
+    OperatorNotificationRole, OperatorNotificationV1, OptionRight, Provider, ProviderReasonCode,
+    ProviderStateV1, QuoteBatchMode, QuoteBatchV1, QuoteQuality, RangeForecastKind, ReceiptOutcome,
+    ResearchSignalsV1, StrategyAction, StrategyBlockReason, StrategyDecisionV1, Validate,
+    canonical_json_hash,
 };
 
 fn fixture_path(name: &str) -> PathBuf {
@@ -150,6 +151,20 @@ fn notification_intent_is_valid_and_canonical() {
             .contains("Manual review only")
     );
     assert!(intent.message.data_quality.as_str().contains("Schwab RTH"));
+}
+
+#[test]
+fn operator_notification_is_valid_canonical_and_strictly_sectioned() {
+    let notification: OperatorNotificationV1 = decode_valid_canonical(
+        "operator_notification.json",
+        "d5c69ed87b5044d80ace880a91ce8a26a77d28518dbc51bc52c797ac48137464",
+    );
+
+    assert_eq!(notification.role, OperatorNotificationRole::TradeReady);
+    assert_eq!(notification.targets.len(), 2);
+    assert!(notification.body.starts_with("## Desk View\n"));
+    assert!(notification.body.ends_with("精确合约双边 NBBO 已确认。"));
+    assert!(!notification.automatic_ordering);
 }
 
 #[test]

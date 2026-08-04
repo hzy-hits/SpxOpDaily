@@ -15,6 +15,7 @@ from spx_spark.application.market_features.gth_manual_candidate import (
     _gth_bbo_contract_snapshot,
     _gth_end,
     _notification_intent,
+    _operator_generation,
     _quote_remaining_seconds,
 )
 from spx_spark.application.market_features.play_outcome_stats import (
@@ -95,6 +96,7 @@ def evaluate_gth_level_manual_candidate(
     source_mode = "level" if level_source_ready else "none"
     source = level_decision if source_mode == "level" else {}
     source_id = str(source.get("event_id") or "")
+    generation = _operator_generation(source)
     source_kind = "gth_confirmed_level_path" if source_mode == "level" else None
     candidate_policy_version = policy_version(
         CONTRACT_VERSION,
@@ -122,6 +124,7 @@ def evaluate_gth_level_manual_candidate(
         "candidate_id": None,
         "policy_version": candidate_policy_version,
         "source_signal_id": source_id or None,
+        "reentry_generation": generation,
         "source_kind": source_kind,
         "evaluated_at": now.isoformat(),
         "status": "observing",
@@ -652,6 +655,13 @@ def _persist_candidate(
             for item in state.get("pending_notification_cancellation_event_ids") or []
             if item
         }
+        cancellation_times = {
+            str(key): parsed
+            for key, value in dict(
+                state.get("pending_notification_cancellation_at") or {}
+            ).items()
+            if key and (parsed := _time(value)) is not None
+        }
         previous = state.get("last_candidate")
         if isinstance(previous, Mapping):
             candidate_id = str(previous.get("candidate_id") or "")
@@ -670,17 +680,29 @@ def _persist_candidate(
             )
         if candidate.get("status") != "manual_ready":
             cancellation_pending.update(lifecycle_events)
+        for event_id in cancellation_pending:
+            cancellation_times.setdefault(event_id, now)
+        if cancellation_pending:
+            state["pending_notification_cancellation_event_ids"] = sorted(
+                cancellation_pending
+            )[-200:]
+            state["pending_notification_cancellation_at"] = {
+                event_id: cancellation_times[event_id].isoformat()
+                for event_id in sorted(cancellation_pending)[-200:]
+            }
+            atomic_write_json_secure(state_path, state)
         for event_id in sorted(cancellation_pending):
             try:
                 cancel_pending_notification(
                     settings,
                     event_id,
-                    now=now,
+                    now=cancellation_times[event_id],
                     reason="source_candidate_no_longer_manual_ready",
                 )
             except Exception:
                 continue
             cancellation_pending.discard(event_id)
+            cancellation_times.pop(event_id, None)
             settled.add(event_id)
             accepted.discard(event_id)
             lifecycle_events.pop(event_id, None)
@@ -714,6 +736,11 @@ def _persist_candidate(
                     for event_id, source_id in sorted(lifecycle_events.items())[-200:]
                 ],
                 "pending_notification_cancellation_event_ids": sorted(cancellation_pending)[-200:],
+                "pending_notification_cancellation_at": {
+                    event_id: cancellation_times[event_id].isoformat()
+                    for event_id in sorted(cancellation_pending)[-200:]
+                    if event_id in cancellation_times
+                },
                 "active_manual_plan": active_plan,
             }
         )

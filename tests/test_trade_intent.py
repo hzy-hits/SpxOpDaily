@@ -1780,10 +1780,16 @@ def test_failed_rth_cancellation_blocks_rearmed_lifecycle(
         settings=settings,
         feature_policy=MarketFeatureSettings(),
     )
+    cancellation_times: list[datetime] = []
+
+    def fail_cancellation(*_args, **kwargs):
+        cancellation_times.append(kwargs["now"])
+        raise RuntimeError("outbox unavailable")
+
     monkeypatch.setattr(
         trade_intent_runtime,
         "cancel_pending_notification",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("outbox unavailable")),
+        fail_cancellation,
     )
 
     process_trade_intent(
@@ -1817,6 +1823,13 @@ def test_failed_rth_cancellation_blocks_rearmed_lifecycle(
     assert first["accepted"] is True
     assert rearmed["reason"] == "lifecycle_cancellation_pending"
     assert state["pending_delivery_cancellation_event_ids"] == [first_delivery_event_id]
+    assert state["pending_delivery_cancellation_at"] == {
+        first_delivery_event_id: (NOW + timedelta(seconds=1)).isoformat()
+    }
+    assert cancellation_times == [
+        NOW + timedelta(seconds=1),
+        NOW + timedelta(seconds=1),
+    ]
     with sqlite3.connect(settings.delivery_outbox_path) as connection:
         rows = connection.execute("SELECT event_id FROM notification_delivery_events").fetchall()
     assert rows == [(first_delivery_event_id,)]

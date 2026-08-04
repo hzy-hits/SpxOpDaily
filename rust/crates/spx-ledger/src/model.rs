@@ -2,7 +2,9 @@ use std::fmt::{Display, Formatter};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use spx_domain::{DeliveryChannel, NotificationIntentV1, NotificationIntentV2, Token};
+use spx_domain::{
+    DeliveryChannel, NotificationIntentV1, NotificationIntentV2, OperatorNotificationV1, Token,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OwnerRole {
@@ -99,6 +101,7 @@ impl ClaimHandle {
 pub enum ClaimedNotificationIntent {
     TradeReady(NotificationIntentV1),
     ScheduledReport(NotificationIntentV2),
+    TraderEvent(OperatorNotificationV1),
 }
 
 impl ClaimedNotificationIntent {
@@ -106,6 +109,7 @@ impl ClaimedNotificationIntent {
         match self {
             Self::TradeReady(intent) => &intent.intent_id,
             Self::ScheduledReport(intent) => &intent.intent_id,
+            Self::TraderEvent(notification) => &notification.event_id,
         }
     }
 }
@@ -136,6 +140,13 @@ pub enum IngressCheck {
 pub enum PersistWrite {
     Inserted,
     Duplicate,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OperatorNotificationWrite {
+    Inserted,
+    Duplicate,
+    SemanticSuppressed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

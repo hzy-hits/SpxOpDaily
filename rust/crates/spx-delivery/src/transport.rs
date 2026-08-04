@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use spx_domain::DeliveryChannel;
 
-use crate::{DeliveryTarget, RenderedMessage};
+use crate::{BarkPresentation, DeliveryTarget, RenderedMessage};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TransportRequest {
@@ -106,7 +106,7 @@ impl Transport for HttpTransport {
 enum Payload<'a> {
     Bark {
         title: &'a str,
-        body: &'a str,
+        body: String,
         group: &'static str,
     },
     Feishu {
@@ -181,9 +181,12 @@ fn payload_for<'a>(
     timestamp: i64,
 ) -> Result<Payload<'a>, TransportResult> {
     Ok(match target {
-        DeliveryTarget::Bark(_) => Payload::Bark {
+        DeliveryTarget::Bark(target) => Payload::Bark {
             title: &request.message.title,
-            body: &request.message.body,
+            body: match target.presentation {
+                BarkPresentation::Full => bark_full_body(&request.message.body),
+                BarkPresentation::Summary => bark_lockscreen_summary(&request.message.body),
+            },
             group: "SPX Spark",
         },
         DeliveryTarget::Feishu(target) => {
@@ -213,6 +216,75 @@ fn payload_for<'a>(
             body: &request.message.body,
         },
     })
+}
+
+const BARK_SUMMARY_MAX_LINES: usize = 4;
+const BARK_BODY_MAX_CHARS: usize = 1_500;
+const BARK_BODY_MAX_BYTES: usize = 4_096;
+const ELLIPSIS: char = '…';
+
+fn bark_lockscreen_summary(body: &str) -> String {
+    let plain = strip_markdown_light(body);
+    let lines: Vec<_> = plain
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .take(BARK_SUMMARY_MAX_LINES)
+        .collect();
+    let summary = if lines.is_empty() {
+        plain
+    } else {
+        lines.join("\n").trim().to_owned()
+    };
+    truncate_unicode_with_ellipsis(&summary, BARK_BODY_MAX_CHARS, BARK_BODY_MAX_BYTES)
+}
+
+fn bark_full_body(body: &str) -> String {
+    truncate_unicode_with_ellipsis(body, BARK_BODY_MAX_CHARS, BARK_BODY_MAX_BYTES)
+}
+
+fn strip_markdown_light(body: &str) -> String {
+    body.lines()
+        .map(|raw| {
+            let trimmed_start = raw.trim_start();
+            let without_heading = trimmed_start
+                .strip_prefix('#')
+                .map_or(trimmed_start, |rest| {
+                    rest.trim_start_matches('#').trim_start()
+                });
+            let bullet = without_heading
+                .strip_prefix("- ")
+                .or_else(|| without_heading.strip_prefix("* "));
+            let line =
+                bullet.map_or_else(|| without_heading.to_owned(), |rest| format!("• {rest}"));
+            line.replace("**", "")
+                .replace('`', "")
+                .trim_end()
+                .to_owned()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_owned()
+}
+
+fn truncate_unicode_with_ellipsis(value: &str, max_chars: usize, max_bytes: usize) -> String {
+    if value.chars().count() <= max_chars && value.len() <= max_bytes {
+        return value.to_owned();
+    }
+    let mut output = String::new();
+    for (chars, character) in value.chars().enumerate() {
+        if chars + 1 >= max_chars
+            || output.len() + character.len_utf8() + ELLIPSIS.len_utf8() > max_bytes
+        {
+            break;
+        }
+        output.push(character);
+    }
+    while output.chars().last().is_some_and(char::is_whitespace) {
+        output.pop();
+    }
+    output.push(ELLIPSIS);
+    output
 }
 
 fn feishu_signature(secret: &str, timestamp: i64) -> Result<String, ()> {
@@ -265,6 +337,19 @@ fn uncertain(code: &str) -> TransportResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{BarkTarget, FeishuTarget};
+    use spx_domain::Token;
+
+    fn request(body: String) -> TransportRequest {
+        TransportRequest {
+            event_id: "event-1".to_owned(),
+            idempotency_key: "event-1:target-1".to_owned(),
+            message: RenderedMessage {
+                title: "SPX 交易机会".to_owned(),
+                body,
+            },
+        }
+    }
 
     #[test]
     fn only_explicit_pre_transport_throttling_is_retryable() {
@@ -323,6 +408,70 @@ mod tests {
         assert_eq!(
             feishu_signature("secret", 1_700_000_000).unwrap(),
             "fiWS2+gh28DOydAv7hzONH/mDn9+b1Y4Y5ivXWXy8vA="
+        );
+    }
+
+    #[test]
+    fn bark_summary_is_unicode_safe_bounded_and_feishu_keeps_full_body() {
+        let mode_body = "## 结论\n**顺势做多**：等待 `7565` 回踩\n\n## 执行\n风险边界清晰\n第五行只在完整模式出现";
+        let full = DeliveryTarget::Bark(BarkTarget {
+            key: Token::new("bark-primary", "target key").unwrap(),
+            endpoint_env: "SPX_BARK_ENDPOINT".to_owned(),
+            presentation: BarkPresentation::Full,
+        });
+        let Payload::Bark { body, .. } =
+            payload_for(&full, &request(mode_body.to_owned()), 1).unwrap()
+        else {
+            panic!("expected full bark payload");
+        };
+        assert_eq!(body, mode_body);
+        assert!(body.contains("第五行只在完整模式出现"));
+
+        let summary = DeliveryTarget::Bark(BarkTarget {
+            key: Token::new("bark-friend", "target key").unwrap(),
+            endpoint_env: "SPX_BARK_FRIEND_ENDPOINT".to_owned(),
+            presentation: BarkPresentation::Summary,
+        });
+        let Payload::Bark { body, .. } =
+            payload_for(&summary, &request(mode_body.to_owned()), 1).unwrap()
+        else {
+            panic!("expected summary bark payload");
+        };
+        assert!(body.contains("顺势做多"));
+        assert!(!body.contains("**"));
+        assert!(!body.contains('`'));
+        assert!(!body.contains("第五行只在完整模式出现"));
+
+        let full_body = format!(
+            "## 结论\n**顺势做多**：等待 `7565` 回踩\n\n## 执行\n{}\n完整飞书结尾",
+            "风险边界清晰；".repeat(800)
+        );
+        let request = request(full_body.clone());
+        let bark = DeliveryTarget::Bark(BarkTarget {
+            key: Token::new("bark-primary", "target key").unwrap(),
+            endpoint_env: "SPX_BARK_ENDPOINT".to_owned(),
+            presentation: BarkPresentation::Full,
+        });
+        let Payload::Bark { body, .. } = payload_for(&bark, &request, 1).unwrap() else {
+            panic!("expected bark payload");
+        };
+        assert!(body.contains("**顺势做多**"));
+        assert!(body.chars().count() <= BARK_BODY_MAX_CHARS);
+        assert!(body.len() <= BARK_BODY_MAX_BYTES);
+        assert!(body.ends_with('…'));
+        assert!(std::str::from_utf8(body.as_bytes()).is_ok());
+
+        let feishu = DeliveryTarget::Feishu(FeishuTarget {
+            key: Token::new("feishu-primary", "target key").unwrap(),
+            endpoint_env: "SPX_FEISHU_ENDPOINT".to_owned(),
+            secret_env: None,
+        });
+        let Payload::Feishu { content, .. } = payload_for(&feishu, &request, 1).unwrap() else {
+            panic!("expected feishu payload");
+        };
+        assert_eq!(
+            content.text,
+            format!("{}\n\n{full_body}", request.message.title)
         );
     }
 }

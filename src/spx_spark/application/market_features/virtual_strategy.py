@@ -19,6 +19,7 @@ from spx_spark.application.market_features.virtual_strategy_support import (
     _cap_rth_trade_episode,
     _contract_snapshot,
     _episode,
+    _entry_observed_at,
     _event_contract,
     _exit_clock as _exit_clock,
     _exit_decision,
@@ -28,12 +29,12 @@ from spx_spark.application.market_features.virtual_strategy_support import (
     _gth_spread_contract_ids,
     _gth_time_stop,
     _latest_created_at,
+    _level_reached,
     _lifecycle_transition,
     _number,
     _pct as _pct,
     _record_entry_decision,
     _record_due_horizons,
-    _render_exit,
     _rth_trade_hard_exit as _rth_trade_hard_exit,
     _should_replace_with_gth_spread,
     _spx_reference as _spx_reference,
@@ -41,6 +42,9 @@ from spx_spark.application.market_features.virtual_strategy_support import (
     _time,
     _trim_entry_decisions,
     _utc,
+)
+from spx_spark.application.market_features.virtual_strategy_render import (
+    render_virtual_strategy_exit as _render_exit,
 )
 from spx_spark.application.market_features.virtual_strategy_spread import (
     spread_snapshot as _spread_snapshot_impl,
@@ -56,6 +60,10 @@ from spx_spark.config import NotificationSettings, StorageSettings
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 from spx_spark.notifier.dispatcher import enqueue_notification
 from spx_spark.notifier.model import CommandRunner, default_runner
+from spx_spark.notifier.operator_contract import (
+    operator_generation,
+    operator_opportunity_id,
+)
 from spx_spark.settings.market_features import MarketFeatureSettings
 from spx_spark.state_io import atomic_write_json_secure, exclusive_state_lock, read_json_object
 from spx_spark.storage import LatestState, configured_quote_use_decision
@@ -411,6 +419,14 @@ def process_virtual_strategy(
                 "kind": "virtual_strategy_exit",
                 "lane": "strategy_lifecycle",
                 "occurred_at": now.isoformat(),
+                "expires_at": (now + timedelta(minutes=15)).isoformat(),
+                "operator_opportunity_id": operator_opportunity_id(
+                    closed,
+                    "operator_opportunity_id",
+                    "source_signal_id",
+                    fallback=closed["episode_id"],
+                ),
+                "operator_generation": operator_generation(closed),
                 "title": "SPX VIRTUAL STRATEGY EXIT",
                 "text": text,
                 "friend": True,
@@ -721,25 +737,6 @@ def _trade_intent_action_snapshot(
         }
     )
     return snapshot, []
-
-
-def _entry_observed_at(trade_intent: Mapping[str, object]) -> object:
-    observation = trade_intent.get("entry_observation")
-    return observation.get("at") if isinstance(observation, Mapping) else None
-
-
-def _level_reached(
-    price: float | None,
-    level: float | None,
-    *,
-    direction: str,
-    target: bool,
-) -> bool:
-    if price is None or level is None or direction not in {"up", "down"}:
-        return False
-    if target:
-        return price >= level if direction == "up" else price <= level
-    return price <= level if direction == "up" else price >= level
 
 
 def _new_gth_spread_episode(

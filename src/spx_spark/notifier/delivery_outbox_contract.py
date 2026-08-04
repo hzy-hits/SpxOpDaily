@@ -26,7 +26,7 @@ class DeliveryCancelled(ValueError):
     """A durable cancellation fence rejected a later enqueue."""
 
 
-DELIVERY_SINKS = frozenset({"bark", "feishu", "bark_friend"})
+DELIVERY_SINKS = frozenset({"bark", "feishu", "bark_friend", "rust_ingress"})
 
 
 @dataclass(frozen=True)
@@ -124,6 +124,9 @@ CREATE TABLE IF NOT EXISTS notification_delivery_events (
     text TEXT NOT NULL,
     feishu_text TEXT,
     friend INTEGER NOT NULL,
+    operator_targets_json TEXT NOT NULL DEFAULT '[]',
+    operator_opportunity_id TEXT,
+    operator_generation INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
@@ -196,6 +199,25 @@ def parse(value: object) -> datetime:
     return utc(parsed)
 
 
+def operator_targets_json(targets: tuple[tuple[str, str], ...]) -> str:
+    return json.dumps(targets, ensure_ascii=False, separators=(",", ":"))
+
+
+def parse_operator_targets(value: object) -> tuple[tuple[str, str], ...]:
+    try:
+        parsed = json.loads(str(value or "[]"))
+    except json.JSONDecodeError as exc:
+        raise ValueError("invalid persisted operator targets") from exc
+    if not isinstance(parsed, list):
+        raise ValueError("persisted operator targets must be a list")
+    targets: list[tuple[str, str]] = []
+    for item in parsed:
+        if not isinstance(item, list) or len(item) != 2:
+            raise ValueError("persisted operator target must contain key and channel")
+        targets.append((str(item[0]), str(item[1])))
+    return tuple(targets)
+
+
 def delivery_payload_fingerprint(
     envelope: NotificationEnvelope,
     *,
@@ -204,7 +226,7 @@ def delivery_payload_fingerprint(
     feishu_text: str | None,
     friend: bool,
 ) -> str:
-    payload = (
+    payload: tuple[object, ...] = (
         envelope.source,
         envelope.kind,
         envelope.lane,
@@ -215,6 +237,19 @@ def delivery_payload_fingerprint(
         feishu_text,
         int(friend),
     )
+    # Preserve the historical fingerprint for existing Python-owned rows.
+    # Rust-only metadata is versioned into the hash only after ownership has
+    # actually selected and frozen operator targets.
+    if (
+        envelope.operator_targets
+        or envelope.operator_opportunity_id is not None
+        or envelope.operator_generation != 0
+    ):
+        payload += (
+            envelope.operator_targets,
+            envelope.operator_opportunity_id,
+            envelope.operator_generation,
+        )
     return hashlib.sha256(
         json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     ).hexdigest()

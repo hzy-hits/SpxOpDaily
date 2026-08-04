@@ -37,6 +37,7 @@ from spx_spark.application.market_features.trade_intent_runtime_support import (
     _latest_path as _latest_path,
     _lease_is_live as _lease_is_live,
     _mark_terminal_deliveries as _mark_terminal_deliveries,
+    _manual_card_contract_reason as _manual_card_contract_reason,
     _number as _number,
     _opportunity_dedupe_key as _opportunity_dedupe_key,
     _operator_explanation as _operator_explanation,
@@ -58,8 +59,11 @@ from spx_spark.notifier.dispatcher import (
     inspect_notification_event,
 )
 from spx_spark.notifier.model import CommandRunner, default_runner
+from spx_spark.notifier.operator_contract import (
+    operator_generation,
+    operator_opportunity_id,
+)
 from spx_spark.notifier.operator_cards import (
-    option_contract_right,
     parse_time,
 )
 from spx_spark.notifier.receipts import NotificationEnvelope
@@ -121,6 +125,10 @@ def process_trade_intent(
             lane="trade_ready",
             occurred_at=event_occurred_at,
             expires_at=parse_time(intent.get("valid_until") or intent.get("expires_at")),
+            operator_opportunity_id=operator_opportunity_id(
+                intent, "event_id", fallback=intent_id
+            ),
+            operator_generation=operator_generation(intent),
         )
         if ready and delivery_event_id and event_occurred_at is not None
         else None
@@ -168,6 +176,13 @@ def process_trade_intent(
             str(key): str(value)
             for key, value in dict(state.get("pending_delivery_cancellation_reasons") or {}).items()
             if key and value
+        }
+        cancellation_times = {
+            str(key): parsed
+            for key, value in dict(
+                state.get("pending_delivery_cancellation_at") or {}
+            ).items()
+            if key and (parsed := _datetime(value)) is not None
         }
         for key in cancellation_pending:
             # Before this reason map existed, only invalidation could create a
@@ -221,12 +236,27 @@ def process_trade_intent(
                 cancellation_pending,
                 cancellation_reasons,
             )
+        for key in cancellation_pending:
+            cancellation_times.setdefault(key, now)
+        if cancellation_pending:
+            state["pending_delivery_cancellation_event_ids"] = sorted(
+                cancellation_pending
+            )[-200:]
+            state["pending_delivery_cancellation_reasons"] = {
+                key: cancellation_reasons[key]
+                for key in sorted(cancellation_pending)[-200:]
+            }
+            state["pending_delivery_cancellation_at"] = {
+                key: cancellation_times[key].isoformat()
+                for key in sorted(cancellation_pending)[-200:]
+            }
+            atomic_write_json_secure(state_path, state)
         for key in sorted(cancellation_pending):
             try:
                 cancel_pending_notification(
                     notification,
                     key,
-                    now=now,
+                    now=cancellation_times[key],
                     reason=cancellation_reasons.get(
                         key,
                         "trade_intent_lifecycle_terminal",
@@ -238,6 +268,7 @@ def process_trade_intent(
                 continue
             cancellation_pending.discard(key)
             cancellation_reasons.pop(key, None)
+            cancellation_times.pop(key, None)
             accepted.pop(key, None)
             lifecycle_events.pop(key, None)
             inflight.pop(key, None)
@@ -435,6 +466,11 @@ def process_trade_intent(
                     key: cancellation_reasons[key]
                     for key in sorted(cancellation_pending)[-200:]
                     if key in cancellation_reasons
+                },
+                "pending_delivery_cancellation_at": {
+                    key: cancellation_times[key].isoformat()
+                    for key in sorted(cancellation_pending)[-200:]
+                    if key in cancellation_times
                 },
                 "terminal_delivery_event_ids": sorted(terminal_delivery_event_ids)[-200:],
             }
@@ -904,91 +940,6 @@ def _action_revalidation(
                     reason = None
     evidence["reason"] = reason
     return reason, evidence
-
-
-def _manual_card_contract_reason(
-    intent: Mapping[str, object],
-    *,
-    now: datetime,
-) -> str | None:
-    """Reject a green card unless every operator field is complete and coherent."""
-
-    direction = str(intent.get("direction") or "")
-    if direction not in {"up", "down"}:
-        return "manual_card_direction_invalid"
-    thesis = str(intent.get("thesis") or "")
-    if thesis not in {"breakout", "fade"}:
-        return "manual_card_thesis_invalid"
-    right = option_contract_right(intent.get("contract_id"))
-    expected_right = "C" if direction == "up" else "P"
-    if right is None:
-        return "manual_card_exact_contract_unavailable"
-    if right != expected_right:
-        return "manual_card_contract_direction_mismatch"
-
-    numeric_fields = (
-        "decision_bid",
-        "decision_ask",
-        "entry_limit",
-        "trigger_level",
-        "spx_spot",
-        "invalidation_spx",
-        "target_spx",
-        "max_loss_per_contract",
-    )
-    values: dict[str, float] = {}
-    for field in numeric_fields:
-        value = _number(intent.get(field))
-        if value is None:
-            return f"manual_card_field_missing:{field}"
-        values[field] = value
-    bid = values["decision_bid"]
-    ask = values["decision_ask"]
-    entry = values["entry_limit"]
-    if bid < 0 or ask <= 0 or bid > ask:
-        return "manual_card_nbbo_invalid"
-    if entry <= 0 or not bid <= entry <= ask:
-        return "manual_card_entry_limit_outside_nbbo"
-    if any(
-        values[field] <= 0
-        for field in ("trigger_level", "spx_spot", "invalidation_spx", "target_spx")
-    ):
-        return "manual_card_spx_coordinate_invalid"
-    if values["max_loss_per_contract"] <= 0 or not math.isclose(
-        values["max_loss_per_contract"],
-        entry * 100.0,
-        abs_tol=0.01,
-    ):
-        return "manual_card_max_loss_inconsistent"
-
-    trigger = values["trigger_level"]
-    spot = values["spx_spot"]
-    invalidation = values["invalidation_spx"]
-    target = values["target_spx"]
-    if direction == "up" and not invalidation < trigger < target:
-        return "manual_card_risk_coordinates_incoherent"
-    if direction == "down" and not target < trigger < invalidation:
-        return "manual_card_risk_coordinates_incoherent"
-    if direction == "up" and not invalidation < spot < target:
-        return "manual_card_spot_outside_risk_bounds"
-    if direction == "down" and not target < spot < invalidation:
-        return "manual_card_spot_outside_risk_bounds"
-
-    if not str(intent.get("provider") or ""):
-        return "action_quote_provider_unavailable"
-    if parse_time(intent.get("quote_source_at")) is None:
-        return "action_quote_source_time_unavailable"
-    valid_until = parse_time(intent.get("valid_until") or intent.get("expires_at"))
-    if valid_until is None:
-        return "manual_card_expiry_unavailable"
-    if valid_until <= _utc(now):
-        return "manual_card_expired"
-    time_stop = parse_time(intent.get("time_stop_at"))
-    if time_stop is None:
-        return "manual_card_time_stop_unavailable"
-    if time_stop <= _utc(now):
-        return "manual_card_time_stop_elapsed"
-    return None
 
 
 def _action_now() -> datetime:

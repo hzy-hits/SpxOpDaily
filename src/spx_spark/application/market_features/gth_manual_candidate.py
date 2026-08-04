@@ -43,6 +43,7 @@ from spx_spark.notifier.operator_cards import (
     beijing_time,
     option_contract_label,
     remaining_seconds,
+    render_operator_card,
 )
 from spx_spark.options_map import actionable_chain_implied_reference
 from spx_spark.settings.market_features import MarketFeatureSettings
@@ -77,6 +78,7 @@ def evaluate_gth_manual_candidate(
 
     now = _utc(now)
     source_id = str(gth_signal.get("event_id") or "")
+    generation = _operator_generation(gth_signal)
     candidate_policy_version = policy_version(
         CONTRACT_VERSION,
         {
@@ -102,6 +104,7 @@ def evaluate_gth_manual_candidate(
         "candidate_id": None,
         "policy_version": candidate_policy_version,
         "source_signal_id": source_id or None,
+        "reentry_generation": generation,
         "source_kind": str(gth_signal.get("kind") or "") or None,
         "evaluated_at": now.isoformat(),
         "status": "observing",
@@ -443,6 +446,13 @@ def process_gth_manual_candidate(
             for item in state.get("pending_notification_cancellation_event_ids") or []
             if item
         }
+        cancellation_times = {
+            str(key): parsed
+            for key, value in dict(
+                state.get("pending_notification_cancellation_at") or {}
+            ).items()
+            if key and (parsed := _time(value)) is not None
+        }
         previous_candidate = state.get("last_candidate")
         if isinstance(previous_candidate, Mapping):
             previous_candidate_id = str(previous_candidate.get("candidate_id") or "")
@@ -467,12 +477,23 @@ def process_gth_manual_candidate(
             # Losing/replacing the source signal must revoke every still-live
             # green card, including one whose new evaluation has no source id.
             cancellation_pending.update(lifecycle_events)
+        for event_id in cancellation_pending:
+            cancellation_times.setdefault(event_id, now)
+        if cancellation_pending:
+            state["pending_notification_cancellation_event_ids"] = sorted(
+                cancellation_pending
+            )[-200:]
+            state["pending_notification_cancellation_at"] = {
+                event_id: cancellation_times[event_id].isoformat()
+                for event_id in sorted(cancellation_pending)[-200:]
+            }
+            atomic_write_json_secure(state_path, state)
         for event_id in sorted(cancellation_pending):
             try:
                 cancel_pending_notification(
                     notification_settings,
                     event_id,
-                    now=now,
+                    now=cancellation_times[event_id],
                     reason="source_candidate_no_longer_manual_ready",
                 )
             except Exception:
@@ -480,6 +501,7 @@ def process_gth_manual_candidate(
                 # acknowledgement removed the original pending notification.
                 continue
             cancellation_pending.discard(event_id)
+            cancellation_times.pop(event_id, None)
             settled.add(event_id)
             accepted.discard(event_id)
             lifecycle_events.pop(event_id, None)
@@ -515,6 +537,11 @@ def process_gth_manual_candidate(
                     for event_id, source_signal_id in sorted(lifecycle_events.items())[-200:]
                 ],
                 "pending_notification_cancellation_event_ids": sorted(cancellation_pending)[-200:],
+                "pending_notification_cancellation_at": {
+                    event_id: cancellation_times[event_id].isoformat()
+                    for event_id in sorted(cancellation_pending)[-200:]
+                    if event_id in cancellation_times
+                },
             }
         )
         atomic_write_json_secure(state_path, state)
@@ -815,7 +842,16 @@ def _notification_intent(
         f"赔率  最大收益/最大亏损 {reward_risk:.2f}" if reward_risk is not None else None
     )
     play_stats_line = _play_stats_line(candidate.get("play_stats"))
-    text = "\n".join(
+    desk_lines = [
+        f"🟢 MANUAL READY · {side} SPREAD",
+        f"路径  {level_path or 'gth_dip_reclaim'} · {explanation}",
+        f"触发  {trigger_text}",
+        spring_gamma_line,
+        prior_session_line,
+    ]
+    if replacement_line:
+        desk_lines.append(replacement_line)
+    execution = "\n".join(
         (
             f"🟢 MANUAL READY · {side} SPREAD",
             f"类型  {structure} · 仅人工提交",
@@ -825,21 +861,34 @@ def _notification_intent(
             f"{float(candidate['decision_ask']):.2f}；"
             "两腿合成，不是交易所原生组合 BBO",
             f"限价  净借记 ≤ {float(candidate['entry_limit']):.2f}",
-            f"触发  {trigger_text}",
-            spring_gamma_line,
-            prior_session_line,
-            invalidation_text,
-            *([replacement_line] if replacement_line else []),
-            f"目标  SPX {float(candidate['target_spx']):.2f}（{target_label}）",
-            *([reward_risk_line] if reward_risk_line else []),
-            *([play_stats_line] if play_stats_line else []),
-            f"退出  {beijing_time(candidate.get('exit_at'))}",
             f"有效  {ttl_text}（至 "
             f"{beijing_time(candidate.get('valid_until'), seconds=True)}）；提交前重新报价",
-            f"风险  每组最大损失 ${float(candidate['max_loss_per_spread']):.0f}；数量由人工确认",
-            f"解释  {explanation}",
-            "权限  自动下单关闭；账户 GTH 权限未验证；禁止市价提交",
+            "提交  仅允许人工限价；禁止市价提交",
         )
+    )
+    risk = "\n".join(
+        (
+            invalidation_text,
+            f"退出  {beijing_time(candidate.get('exit_at'))}",
+            f"风险  每组最大损失 ${float(candidate['max_loss_per_spread']):.0f}；数量由人工确认",
+            "权限  自动下单关闭；账户 GTH 权限未验证",
+        )
+    )
+    quality_lines = [_gth_spread_quality_line(candidate, ttl_text)]
+    if play_stats_line:
+        quality_lines.append(play_stats_line)
+    quality_lines.append("两腿 NBBO 为 IBKR SPXW 合成快照，不是交易所原生组合 BBO。")
+    text = render_operator_card(
+        desk_view="\n".join(desk_lines),
+        execution=execution,
+        risk=risk,
+        targets="\n".join(
+            (
+                f"目标  SPX {float(candidate['target_spx']):.2f}（{target_label}）",
+                reward_risk_line or "最大收益/最大亏损  不可用",
+            )
+        ),
+        data_quality="\n".join(quality_lines),
     )
     level_lane = bool(level_path)
     return {
@@ -851,12 +900,35 @@ def _notification_intent(
         "expires_at": str(candidate["valid_until"]),
         "candidate_id": candidate["candidate_id"],
         "source_signal_id": candidate["source_signal_id"],
+        "operator_opportunity_id": str(candidate.get("source_signal_id") or event_id),
+        "operator_generation": _operator_generation(candidate),
         "title": "SPX GTH OPERATOR CANDIDATE · MANUAL ONLY",
         "text": text,
         "friend": True,
         "feishu_text": text,
         "enqueued_at": now.isoformat(),
     }
+
+
+def _gth_spread_quality_line(candidate: Mapping[str, object], ttl_text: str) -> str:
+    snapshot = candidate.get("exact_spread_snapshot")
+    snapshot = snapshot if isinstance(snapshot, Mapping) else {}
+    long_quote = snapshot.get("long")
+    long_quote = long_quote if isinstance(long_quote, Mapping) else {}
+    provider = str(long_quote.get("provider") or "IBKR")
+    quality = snapshot.get("quality")
+    quality = quality if isinstance(quality, Mapping) else {}
+    greeks = "可用" if _number(snapshot.get("gamma_per_point")) is not None else "不可用"
+    return (
+        f"GTH SPXW 数据源  {provider} · quality {quality.get('status') or '不可用'} · "
+        f"long/short quote age {_fmt_age(snapshot.get('long_quote_age_seconds'))} / "
+        f"{_fmt_age(snapshot.get('short_quote_age_seconds'))} · Greeks {greeks} · {ttl_text}"
+    )
+
+
+def _fmt_age(value: object) -> str:
+    number = _number(value)
+    return f"{number:.1f}s" if number is not None else "不可用"
 
 
 def _play_stats_line(value: object) -> str | None:
@@ -874,3 +946,10 @@ def _play_stats_line(value: object) -> str | None:
         f"历史  同类触位报价 {int(samples)}笔 · {horizon_minutes:g}分钟正收益率 "
         f"{winrate:.1%} · 平均 {average:.1%} · 中位 {median:.1%}（非实盘胜率）"
     )
+
+
+def _operator_generation(value: Mapping[str, object]) -> int:
+    generation = value.get("reentry_generation", 0)
+    if isinstance(generation, int) and not isinstance(generation, bool):
+        return max(generation, 0)
+    return 0

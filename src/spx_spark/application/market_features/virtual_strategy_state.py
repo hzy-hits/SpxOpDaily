@@ -125,6 +125,12 @@ def flush_pending_notifications(
                     lane=str(item.get("lane") or "strategy_lifecycle"),
                     occurred_at=occurred_at,
                     expires_at=expires_at,
+                    operator_opportunity_id=(
+                        str(item.get("operator_opportunity_id"))
+                        if item.get("operator_opportunity_id")
+                        else None
+                    ),
+                    operator_generation=_operator_generation(item),
                 ),
                 title=str(item.get("title") or "SPX VIRTUAL STRATEGY EXIT"),
                 text=str(item.get("text") or ""),
@@ -177,3 +183,10 @@ def flush_pending_notifications(
             state["settled_notification_event_ids"] = sorted(settled)[-200:]
             atomic_write_json_secure(state_path, state)
     return last_result
+
+
+def _operator_generation(value: Mapping[str, object]) -> int:
+    generation = value.get("operator_generation", 0)
+    if isinstance(generation, int) and not isinstance(generation, bool):
+        return max(generation, 0)
+    return 0

@@ -15,6 +15,34 @@ _OPTION_ID_RE = re.compile(
     re.IGNORECASE,
 )
 
+OPERATOR_SECTION_TITLES = (
+    "Desk View",
+    "Execution",
+    "Risk",
+    "Targets",
+    "Data Quality",
+)
+
+
+def render_operator_card(
+    *,
+    desk_view: str,
+    execution: str,
+    risk: str,
+    targets: str,
+    data_quality: str,
+) -> str:
+    """Render the one deterministic section contract used by trader pushes."""
+
+    sections = (desk_view, execution, risk, targets, data_quality)
+    normalized: list[str] = []
+    for title, content in zip(OPERATOR_SECTION_TITLES, sections, strict=True):
+        body = content.strip()
+        if not body:
+            raise ValueError(f"operator section {title!r} must be non-empty")
+        normalized.append(f"## {title}\n{body}")
+    return "\n\n".join(normalized)
+
 
 def option_contract_label(
     contract_id: object,

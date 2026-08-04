@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Mapping
 
@@ -13,17 +13,13 @@ from spx_spark.application.order_map.level_decision_machine import (
 )
 from spx_spark.config import NotificationSettings
 from spx_spark.notifier.dispatcher import enqueue_notification
+from spx_spark.notifier.operator_cards import render_operator_card
 from spx_spark.notifier.receipts import NotificationEnvelope
 from spx_spark.state_io import atomic_write_json_secure, exclusive_state_lock, read_json_object
 
 
 OPERATOR_TRANSITION_PHASES = frozenset(
     {
-        LevelPhase.APPROACHING,
-        LevelPhase.TESTING,
-        LevelPhase.BREAK_PENDING,
-        LevelPhase.REJECT_PENDING,
-        LevelPhase.RETEST,
         LevelPhase.CONFIRMED,
         LevelPhase.INVALIDATED,
         LevelPhase.EXPIRED,
@@ -76,12 +72,24 @@ def prepare_level_transition_delivery(
         and notify_transitions
         and notifications_enabled
     ):
+        if phase in {LevelPhase.TESTING, LevelPhase.RETEST}:
+            result["reason"] = "audit_only_phase"
+        elif phase in {
+            LevelPhase.APPROACHING,
+            LevelPhase.BREAK_PENDING,
+            LevelPhase.REJECT_PENDING,
+        }:
+            result["reason"] = "gamma_prearm_owned_phase"
         return result, None
     notification = NotificationSettings.from_env()
     if not notification.enabled:
         result["reason"] = "notification_disabled"
         return result, None
-    if not any(
+    rust_route_ready = bool(
+        getattr(notification, "rust_trader_notification_owner", False)
+        and getattr(notification, "rust_operator_notification_target_map", ())
+    )
+    if not rust_route_ready and not any(
         bool(getattr(notification, field, False))
         for field in ("feishu_enabled", "bark_enabled", "bark_friend_enabled")
     ):
@@ -89,6 +97,12 @@ def prepare_level_transition_delivery(
         return result, None
 
     event_id = f"level-path:{state.get('event_id')}:{phase.value}"
+    generation_value = state.get("reentry_generation")
+    generation = (
+        generation_value
+        if isinstance(generation_value, int) and not isinstance(generation_value, bool)
+        else 0
+    )
     text = render_level_transition(transition, observation)
     result.update(
         {
@@ -102,6 +116,9 @@ def prepare_level_transition_delivery(
         "kind": "level_setup_transition",
         "lane": "market_warning",
         "occurred_at": _utc(now).isoformat(),
+        "expires_at": (_utc(now) + timedelta(minutes=15)).isoformat(),
+        "operator_opportunity_id": str(state.get("event_id") or event_id),
+        "operator_generation": max(generation, 0),
         "title": "SPX SETUP TRANSITION",
         "text": text,
         "friend": True,
@@ -184,7 +201,11 @@ def flush_pending_level_transition_notifications(
         if not notification.enabled:
             last_result["reason"] = "notification_disabled"
             continue
-        if not any(
+        rust_route_ready = bool(
+            getattr(notification, "rust_trader_notification_owner", False)
+            and getattr(notification, "rust_operator_notification_target_map", ())
+        )
+        if not rust_route_ready and not any(
             bool(getattr(notification, field, False))
             for field in ("feishu_enabled", "bark_enabled", "bark_friend_enabled")
         ):
@@ -199,6 +220,13 @@ def flush_pending_level_transition_notifications(
                     kind=str(item.get("kind") or "level_setup_transition"),
                     lane=str(item.get("lane") or "market_warning"),
                     occurred_at=occurred_at,
+                    expires_at=_parse_aware(item.get("expires_at")),
+                    operator_opportunity_id=(
+                        str(item.get("operator_opportunity_id"))
+                        if item.get("operator_opportunity_id")
+                        else None
+                    ),
+                    operator_generation=_operator_generation(item),
                 ),
                 title=str(item.get("title") or "SPX SETUP TRANSITION"),
                 text=str(item.get("text") or ""),
@@ -264,9 +292,8 @@ def render_level_transition(
     spot_label = "SPX" if coordinate == "official_spx" else "SPX代理"
     generation = state.get("reentry_generation", 0)
     quality = str(state.get("quality_status") or "ready").upper()
-    return "\n".join(
+    desk_view = "\n".join(
         (
-            f"SPX Setup Transition · {phase.value.upper()}",
             f"Opportunity  {state.get('event_id') or '-'} · generation {generation}",
             (
                 f"State  {transition.previous_phase.value.upper()} → {phase.value.upper()}"
@@ -280,10 +307,31 @@ def render_level_transition(
                 f"Location  {spot_label} {_format_level(observation.spx_spot)}"
                 f" · ES {_format_level(observation.es)}"
             ),
-            f"Next  {_phase_instruction(phase)}",
-            f"Data Quality  {quality}",
-            "Authority  仅结构状态；执行必须等待独立 MANUAL READY，不连接订单或成交。",
         )
+    )
+    execution = "\n".join(
+        (
+            f"SPX Setup Transition · {phase.value.upper()}",
+            f"Next  {_phase_instruction(phase)}",
+            "执行  尚未生成精确合约、NBBO 与入场上限；仅人工执行，等待独立 MANUAL READY。",
+        )
+    )
+    risk = "\n".join(
+        (
+            "失效  状态机离开本事件、本代过期或结构 reset 后，本机会不可继续执行。",
+            "期权风险  尚未生成；不得把结构确认当作已挂单、已成交或已持仓。",
+        )
+    )
+    return render_operator_card(
+        desk_view=desk_view,
+        execution=execution,
+        risk=risk,
+        targets="尚未生成结构目标；关键触发位不是获利目标。",
+        data_quality=(
+            f"状态  {quality} · 坐标 {coordinate} · "
+            f"{spot_label} {_format_level(observation.spx_spot)} · "
+            f"ES {_format_level(observation.es)}"
+        ),
     )
 
 
@@ -326,6 +374,13 @@ def _number(value: object) -> float | None:
 
 def _format_level(value: float | None) -> str:
     return f"{value:.2f}" if value is not None else "-"
+
+
+def _operator_generation(value: Mapping[str, object]) -> int:
+    generation = value.get("operator_generation", 0)
+    if isinstance(generation, int) and not isinstance(generation, bool):
+        return max(generation, 0)
+    return 0
 
 
 def _utc(value: datetime) -> datetime:

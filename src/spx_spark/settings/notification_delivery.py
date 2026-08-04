@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import os
+from typing import Mapping
 
 from spx_spark.settings.loader import settings_value
 
@@ -42,6 +44,37 @@ def _schedule(name: str, default: object) -> tuple[float, ...]:
     return parsed
 
 
+def _target_map(name: str, default: object) -> tuple[tuple[str, str, str], ...]:
+    raw = _env(name)
+    values = json.loads(raw) if raw else default
+    if not isinstance(values, (list, tuple)):
+        raise ValueError(f"{name} must be a JSON list of target objects")
+    targets: list[tuple[str, str, str]] = []
+    seen_sinks: set[str] = set()
+    seen_keys: set[str] = set()
+    for item in values:
+        if not isinstance(item, Mapping):
+            raise ValueError(f"{name} entries must contain sink, key, and channel")
+        sink = str(item.get("sink") or "").strip()
+        key = str(item.get("key") or "").strip()
+        channel = str(item.get("channel") or "").strip()
+        expected_channel = {
+            "feishu": "feishu",
+            "bark": "bark",
+            "bark_friend": "bark",
+        }.get(sink)
+        if not key or expected_channel is None or channel != expected_channel:
+            raise ValueError(f"{name} contains an invalid target")
+        if sink in seen_sinks:
+            raise ValueError(f"{name} contains duplicate sink {sink!r}")
+        if key in seen_keys:
+            raise ValueError(f"{name} contains duplicate key {key!r}")
+        seen_sinks.add(sink)
+        seen_keys.add(key)
+        targets.append((sink, key, channel))
+    return tuple(targets)
+
+
 def notification_delivery_settings(data_root: str) -> dict[str, object]:
     """Return kwargs consumed by ``NotificationSettings.from_env``."""
 
@@ -76,5 +109,29 @@ def notification_delivery_settings(data_root: str) -> dict[str, object]:
         "delivery_outbox_legacy_shadow_enabled": _bool(
             "ALERT_NOTIFY_DELIVERY_OUTBOX_LEGACY_SHADOW_ENABLED",
             bool(settings_value("notification.delivery_outbox_legacy_shadow_enabled")),
+        ),
+        "rust_trader_notification_owner": _bool(
+            "SPX_RUST_TRADER_NOTIFICATION_OWNER",
+            bool(settings_value("notification.rust_trader_notification_owner")),
+        ),
+        "rust_operator_notification_socket_path": (
+            _env("SPX_RUST_OPERATOR_NOTIFICATION_SOCKET_PATH")
+            or str(settings_value("notification.rust_operator_notification_socket_path"))
+        ),
+        "rust_operator_notification_timeout_seconds": _float(
+            "SPX_RUST_OPERATOR_NOTIFICATION_TIMEOUT_SECONDS",
+            float(
+                settings_value(
+                    "notification.rust_operator_notification_timeout_seconds"
+                )
+            ),
+        ),
+        "rust_operator_notification_max_frame_bytes": _int(
+            "SPX_RUST_OPERATOR_NOTIFICATION_MAX_FRAME_BYTES",
+            int(settings_value("notification.rust_operator_notification_max_frame_bytes")),
+        ),
+        "rust_operator_notification_target_map": _target_map(
+            "SPX_RUST_OPERATOR_NOTIFICATION_TARGET_MAP_JSON",
+            settings_value("notification.rust_operator_notification_target_map"),
         ),
     }

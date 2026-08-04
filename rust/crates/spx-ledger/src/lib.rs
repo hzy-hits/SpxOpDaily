@@ -15,8 +15,8 @@ pub use db::{Ledger, LedgerReader};
 pub use error::LedgerError;
 pub use model::{
     BeginTransport, ClaimHandle, ClaimedDelivery, ClaimedNotificationIntent, IngressCheck,
-    IngressWrite, LedgerHealth, OperatorWrite, OwnerLease, OwnerRole, PersistWrite,
-    RecoverySummary, Settlement, SettlementWrite, TargetStatus,
+    IngressWrite, LedgerHealth, OperatorNotificationWrite, OperatorWrite, OwnerLease, OwnerRole,
+    PersistWrite, RecoverySummary, Settlement, SettlementWrite, TargetStatus,
 };
 
 #[cfg(test)]

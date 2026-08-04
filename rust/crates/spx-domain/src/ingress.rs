@@ -4,7 +4,8 @@ use serde::{Deserialize, Serialize};
 use crate::validation::require_schema;
 use crate::{
     CORE_ACK_SCHEMA_VERSION, DeskMapProjectionV1, DomainError, EvaluationRequestV1,
-    INGRESS_SCHEMA_VERSION, QuoteBatchV1, ResearchSignalsV1, Token, Validate,
+    INGRESS_SCHEMA_VERSION, OperatorNotificationCancellationV1, OperatorNotificationV1,
+    QuoteBatchV1, ResearchSignalsV1, Token, Validate,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -38,6 +39,12 @@ pub enum CoreAckDisposition {
     DeskMapUpdated,
     DeskMapUnchanged,
     DeskMapStale,
+    OperatorNotificationAccepted,
+    OperatorNotificationSemanticSuppressed,
+    /// The durable fence was committed; an already in-flight transport is not recalled.
+    OperatorNotificationCancellationAccepted,
+    /// The same durable fence already existed; an already in-flight transport is not recalled.
+    OperatorNotificationCancellationDuplicate,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -134,6 +141,8 @@ pub enum IngressMessageV1 {
     Evaluate(EvaluationRequestV1),
     ResearchSignals(ResearchSignalsV1),
     DeskMapProjection(Box<DeskMapProjectionV1>),
+    OperatorNotification(Box<OperatorNotificationV1>),
+    OperatorNotificationCancellation(OperatorNotificationCancellationV1),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -185,6 +194,24 @@ impl Validate for IngressEnvelopeV1 {
                 if projection.available_at > self.emitted_at {
                     return Err(DomainError::TimeOrder(
                         "desk map available_at is after envelope emitted_at",
+                    ));
+                }
+                Ok(())
+            }
+            IngressMessageV1::OperatorNotification(notification) => {
+                notification.validate()?;
+                if notification.occurred_at > self.emitted_at {
+                    return Err(DomainError::TimeOrder(
+                        "operator notification occurred_at is after envelope emitted_at",
+                    ));
+                }
+                Ok(())
+            }
+            IngressMessageV1::OperatorNotificationCancellation(cancellation) => {
+                cancellation.validate()?;
+                if cancellation.cancelled_at > self.emitted_at {
+                    return Err(DomainError::TimeOrder(
+                        "operator notification cancelled_at is after envelope emitted_at",
                     ));
                 }
                 Ok(())
@@ -258,5 +285,28 @@ mod tests {
             disposition: Some(CoreAckDisposition::Applied),
         };
         assert!(invalid.validate().is_err());
+    }
+
+    #[test]
+    fn cancellation_must_not_occur_after_envelope_emission() {
+        let payload = r#"{
+            "schema_version":"spx_ingress.v1",
+            "message_id":"cancel-message-1",
+            "emitted_at":"2026-08-04T14:00:00Z",
+            "message":{
+                "kind":"operator_notification_cancellation",
+                "payload":{
+                    "schema_version":"operator_notification_cancellation.v1",
+                    "event_id":"event-1",
+                    "cancelled_at":"2026-08-04T14:00:01Z",
+                    "reason_code":"source_invalidated"
+                }
+            }
+        }"#;
+        let envelope: IngressEnvelopeV1 = serde_json::from_str(payload).unwrap();
+        assert!(matches!(
+            envelope.validate(),
+            Err(DomainError::TimeOrder(_))
+        ));
     }
 }

@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use spx_domain::{DeliveryChannel, DomainError, Token};
 use thiserror::Error;
 
-use crate::TargetConfig;
+use crate::{BarkPresentation, TargetConfig};
 
 #[derive(Debug, Error)]
 pub enum TargetError {
@@ -17,6 +17,7 @@ pub enum TargetError {
 pub struct BarkTarget {
     pub key: Token,
     pub endpoint_env: String,
+    pub presentation: BarkPresentation,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,9 +82,14 @@ impl TargetRegistry {
         let mut targets = HashMap::with_capacity(configs.len());
         for config in configs {
             let target = match config {
-                TargetConfig::Bark { key, endpoint_env } => DeliveryTarget::Bark(BarkTarget {
+                TargetConfig::Bark {
+                    key,
+                    endpoint_env,
+                    presentation,
+                } => DeliveryTarget::Bark(BarkTarget {
                     key: Token::new(key.clone(), "bark target key")?,
                     endpoint_env: endpoint_env.clone(),
+                    presentation: *presentation,
                 }),
                 TargetConfig::Feishu {
                     key,
@@ -133,6 +139,7 @@ mod tests {
             TargetConfig::Bark {
                 key: "bark-primary".to_owned(),
                 endpoint_env: "SPX_BARK_ENDPOINT".to_owned(),
+                presentation: BarkPresentation::Full,
             },
             TargetConfig::Feishu {
                 key: "feishu-primary".to_owned(),

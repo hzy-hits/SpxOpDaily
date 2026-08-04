@@ -16,6 +16,7 @@ from spx_spark.notifier.delivery_outbox import (
 from spx_spark.notifier.human_policy import quiet_window_suppresses
 from spx_spark.notifier.missed_queue import ack_missed_event_ids
 from spx_spark.notifier.model import CommandRunner, SinkResult
+from spx_spark.notifier.rust_ingress import deliver_operator_notification
 
 
 @dataclass(frozen=True)
@@ -24,6 +25,8 @@ class DeliveryJobResult:
     status: DeliveryStatus
     attempted_targets: int
     delivered_targets: int
+    rust_ingress_attempts: int
+    forwarded_to_rust_targets: int
     pending_targets: int
     dead_lettered_targets: int
     lost_claim_targets: int
@@ -78,12 +81,15 @@ def deliver_claimed_job(
             status=summary.status,
             attempted_targets=0,
             delivered_targets=0,
+            rust_ingress_attempts=0,
+            forwarded_to_rust_targets=0,
             pending_targets=summary.pending_targets + summary.claimed_targets,
             dead_lettered_targets=preflight_dead_letters,
             lost_claim_targets=preflight_lost_targets,
             expired_targets=expired_targets,
         )
     if quiet_window_suppresses(job.envelope, now=policy_at):
+        rust_owned = authorized_targets == ("rust_ingress",)
         delivered_targets = 0
         dead_lettered_targets = preflight_dead_letters
         lost_claim_targets = preflight_lost_targets
@@ -111,14 +117,16 @@ def deliver_claimed_job(
             except DeliveryClaimLost:
                 lost_claim_targets += 1
                 continue
-            delivered_targets += 1
+            delivered_targets += int(not rust_owned)
             dead_lettered_targets += int(status is DeliveryStatus.DEAD_LETTER)
         summary = _summary(outbox, job)
         return DeliveryJobResult(
             sinks=tuple(rejected_sinks),
             status=summary.status,
-            attempted_targets=len(authorized_targets),
+            attempted_targets=0 if rust_owned else len(authorized_targets),
             delivered_targets=delivered_targets,
+            rust_ingress_attempts=0,
+            forwarded_to_rust_targets=0,
             pending_targets=summary.pending_targets + summary.claimed_targets,
             dead_lettered_targets=dead_lettered_targets,
             lost_claim_targets=lost_claim_targets,
@@ -127,20 +135,25 @@ def deliver_claimed_job(
 
     # This call is the transport-start linearization point. Cancellation or
     # expiry committed before the atomic preflight cannot reach this boundary.
-    sinks = deliver(
-        settings,
-        title=job.title,
-        text=job.text,
-        kind=job.envelope.kind,
-        lane=transport_lane(job),
-        friend=job.friend,
-        feishu_text=job.feishu_text,
-        runner=runner,
-        targets=frozenset(authorized_targets),
-    )
+    rust_owned = authorized_targets == ("rust_ingress",)
+    if rust_owned:
+        sinks = (deliver_operator_notification(settings, job),)
+    else:
+        sinks = deliver(
+            settings,
+            title=job.title,
+            text=job.text,
+            kind=job.envelope.kind,
+            lane=transport_lane(job),
+            friend=job.friend,
+            feishu_text=job.feishu_text,
+            runner=runner,
+            targets=frozenset(authorized_targets),
+        )
     sinks_by_name = {sink.sink: sink for sink in sinks}
     normalized_sinks = [*rejected_sinks, *sinks]
     delivered_targets = 0
+    forwarded_to_rust_targets = 0
     dead_lettered_targets = preflight_dead_letters
     lost_claim_targets = preflight_lost_targets
     for target in authorized_targets:
@@ -163,6 +176,9 @@ def deliver_claimed_job(
                 error=sink.error,
                 permanent=sink.permanent,
                 attempted=sink.attempted,
+                receipt_outcome=(
+                    "forwarded_to_rust" if rust_owned and sink.ok else None
+                ),
                 now=receipt_at,
             )
         except DeliveryClaimLost:
@@ -178,7 +194,8 @@ def deliver_claimed_job(
             )
             lost_claim_targets += 1
             continue
-        delivered_targets += int(sink.ok)
+        delivered_targets += int(sink.ok and not rust_owned)
+        forwarded_to_rust_targets += int(sink.ok and rust_owned)
         dead_lettered_targets += int(status is DeliveryStatus.DEAD_LETTER)
 
     summary = _summary(outbox, job)
@@ -190,8 +207,10 @@ def deliver_claimed_job(
     return DeliveryJobResult(
         sinks=tuple(normalized_sinks),
         status=summary.status,
-        attempted_targets=len(authorized_targets),
+        attempted_targets=0 if rust_owned else len(authorized_targets),
         delivered_targets=delivered_targets,
+        rust_ingress_attempts=len(authorized_targets) if rust_owned else 0,
+        forwarded_to_rust_targets=forwarded_to_rust_targets,
         pending_targets=summary.pending_targets + summary.claimed_targets,
         dead_lettered_targets=dead_lettered_targets,
         lost_claim_targets=lost_claim_targets,

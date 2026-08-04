@@ -1245,6 +1245,12 @@ mod tests {
                         ("desk_map", CoreAckDisposition::DeskMapUpdated)
                     }
                     IngressMessageV1::Evaluate(_) => panic!("unexpected evaluation ingress"),
+                    IngressMessageV1::OperatorNotification(_) => {
+                        panic!("unexpected operator notification ingress")
+                    }
+                    IngressMessageV1::OperatorNotificationCancellation(_) => {
+                        panic!("unexpected operator notification cancellation ingress")
+                    }
                 };
                 server_observed.lock().unwrap().push(kind);
                 let ack = CoreAckV1::accepted(envelope.message_id, disposition, None);

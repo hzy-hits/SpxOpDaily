@@ -132,6 +132,22 @@ fn ack_disposition_matches(
                     | CoreAckDisposition::DuplicateIngress
             )
         ),
+        IngressMessageV1::OperatorNotification(_) => matches!(
+            disposition,
+            Some(
+                CoreAckDisposition::OperatorNotificationAccepted
+                    | CoreAckDisposition::OperatorNotificationSemanticSuppressed
+                    | CoreAckDisposition::DuplicateIngress
+            )
+        ),
+        IngressMessageV1::OperatorNotificationCancellation(_) => matches!(
+            disposition,
+            Some(
+                CoreAckDisposition::OperatorNotificationCancellationAccepted
+                    | CoreAckDisposition::OperatorNotificationCancellationDuplicate
+                    | CoreAckDisposition::DuplicateIngress
+            )
+        ),
     }
 }
 

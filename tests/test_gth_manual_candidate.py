@@ -1578,10 +1578,16 @@ def test_failed_cancellation_blocks_a_new_gth_ready_lifecycle(
         now=NOW,
         **common,
     )
+    cancellation_times: list[datetime] = []
+
+    def fail_cancellation(*_args, **kwargs):
+        cancellation_times.append(kwargs["now"])
+        raise RuntimeError("outbox unavailable")
+
     monkeypatch.setattr(
         candidate_module,
         "cancel_pending_notification",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("outbox unavailable")),
+        fail_cancellation,
     )
 
     process_gth_manual_candidate(
@@ -1610,6 +1616,15 @@ def test_failed_cancellation_blocks_a_new_gth_ready_lifecycle(
     assert rearmed["notification_attempted"] is False
     assert state["pending_notification_cancellation_event_ids"] == [
         f"{first['candidate_id']}:ready"
+    ]
+    assert state["pending_notification_cancellation_at"] == {
+        f"{first['candidate_id']}:ready": (
+            NOW + timedelta(milliseconds=500)
+        ).isoformat()
+    }
+    assert cancellation_times == [
+        NOW + timedelta(milliseconds=500),
+        NOW + timedelta(milliseconds=500),
     ]
     with sqlite3.connect(settings.delivery_outbox_path) as connection:
         rows = connection.execute("SELECT event_id FROM notification_delivery_events").fetchall()

@@ -20,7 +20,10 @@ from spx_spark.application.market_features.virtual_strategy_state import (
     flush_pending_notifications,
 )
 from spx_spark.config import NotificationSettings, StorageSettings
-from spx_spark.notifier.operator_cards import option_contract_label
+from spx_spark.notifier.operator_cards import (
+    option_contract_label,
+    render_operator_card,
+)
 from spx_spark.state_io import (
     atomic_write_json_secure,
     exclusive_state_lock,
@@ -49,6 +52,7 @@ def evaluate_gamma_prearm_plan(
     now = _utc(now)
     phase = str(level_decision.get("phase") or "")
     source_event_id = str(level_decision.get("event_id") or "")
+    generation = _generation(level_decision)
     base: dict[str, object] = {
         "schema_version": 1,
         "contract_version": CONTRACT_VERSION,
@@ -56,6 +60,7 @@ def evaluate_gamma_prearm_plan(
         "status": "inactive",
         "plan_id": None,
         "source_event_id": source_event_id or None,
+        "reentry_generation": generation,
         "evaluated_at": now.isoformat(),
         "execution_eligible": False,
         "automatic_ordering": False,
@@ -338,7 +343,7 @@ def _notification_intent(
         if selected_side == "PUT"
         else "DIRECTION UNKNOWN"
     )
-    lines = [
+    desk_view = [
         (
             f"🟠 {decision} 候选 · 价格条件已出现，尚未确认"
             if pending
@@ -351,48 +356,66 @@ def _notification_intent(
         ),
         _gamma_feedback_line(plan),
     ]
+    execution: list[str] = []
+    risk = [
+        "失效  结构位变化、状态机离开本事件，或出现相反路径确认",
+        "权限  结构观察不是交易信号；自动下单关闭",
+    ]
+    targets: list[str] = []
     if not pending:
-        lines.append("方向来源  尚无价格接受/拒绝确认；Gamma 不提供第一步方向")
+        desk_view.append("方向来源  尚无价格接受/拒绝确认；Gamma 不提供第一步方向")
         for item in paths:
             direction = "LONG" if item.get("side") == "CALL" else "SHORT"
-            lines.append(f"{direction}条件  {item['condition']}；发生后再生成单一路径执行卡")
+            desk_view.append(
+                f"{direction}条件  {item['condition']}；发生后再生成单一路径执行卡"
+            )
+        execution.append("动作  只观察结构，不展示合约；价格选出单一路径后再评估执行。")
+        targets.append("结构目标不可用；进入 READY 时再计算目标与盈亏比。")
     elif selected is not None:
-        lines.append(
+        desk_view.append(
             f"方向来源  {decision} 来自价格{selected['condition']}；"
             "Gamma 只解释该路径可能被压制或放大"
         )
         price_range = _price_range(selected)
-        lines.append(
+        execution.append(
             f"合约  {option_contract_label(str(selected['contract_id']))} · "
             f"当前报价 {_quote_range(selected)} · 触发后参考 {price_range} · 提交前重报"
         )
         if _quote_above_reference(selected):
-            lines.append("追价限制  当前 ask 高于触位参考上限；即使确认也不得按现价追入")
+            execution.append("追价限制  当前 ask 高于触位参考上限；即使确认也不得按现价追入")
         invalidation = _number(selected.get("invalidation_spx"))
         target = _geometry_target(selected.get("confirmation_geometry"))
-        lines.append(
-            f"触发  状态机 CONFIRMED 后才入场 · "
+        execution.append("触发  状态机 CONFIRMED 后才入场；重新报价通过后才允许人工提交。")
+        risk.append(
             f"失效 SPX {'跌回' if selected_side == 'CALL' else '收回'} "
             f"{invalidation:.2f}"
             if invalidation is not None
-            else "触发  状态机 CONFIRMED 后才入场"
+            else "SPX 失效位不可用；不得进入 READY"
         )
         if target is not None:
-            lines.append(f"空间  下一有效结构目标 {target:.2f}，READY 时重算盈亏比")
-    lines.append(spring_gamma_operator_line(plan.get("spring_gamma")))
-    lines.append(_prior_session_plan_line(plan))
-    lines.extend(
-        (
-            (
-                "动作  条件已出现；预填订单，只有 CONFIRMED 且重新报价通过后才提交"
-                if pending
-                else "动作  只观察结构，不展示合约；价格选出单一路径后再评估执行"
-            ),
-            "失效  结构位变化、状态机离开本事件，或出现相反路径确认",
-            "权限  结构观察不是交易信号；自动下单关闭",
-        )
+            targets.append(f"下一有效结构目标 {target:.2f}；READY 时重算盈亏比。")
+        else:
+            targets.append("结构目标不可用；进入 READY 时再计算目标与盈亏比。")
+    desk_view.append(spring_gamma_operator_line(plan.get("spring_gamma")))
+    desk_view.append(_prior_session_plan_line(plan))
+    provider = str(selected.get("quote_provider") or "不可用") if selected else "不可用"
+    quote_status = (
+        "bid/ask 可用"
+        if selected
+        and _number(selected.get("decision_bid")) is not None
+        and _number(selected.get("decision_ask")) is not None
+        else "精确报价不可用"
     )
-    text = "\n".join(lines)
+    text = render_operator_card(
+        desk_view="\n".join(desk_view),
+        execution="\n".join(execution),
+        risk="\n".join(risk),
+        targets="\n".join(targets),
+        data_quality=(
+            f"报价源  {provider} · {quote_status} · 卡片 TTL {int(DELIVERY_TTL_SECONDS)} 秒\n"
+            "Gamma/OI 仅为结构代理；dealer 持仓方向未知，不用 Gamma 猜第一步方向。"
+        ),
+    )
     expires_at = now + timedelta(seconds=DELIVERY_TTL_SECONDS)
     return {
         "event_id": event_id,
@@ -401,6 +424,8 @@ def _notification_intent(
         "lane": "gamma_prearm_plan",
         "occurred_at": now.isoformat(),
         "expires_at": expires_at.isoformat(),
+        "operator_opportunity_id": str(plan.get("source_event_id") or event_id),
+        "operator_generation": _generation(plan),
         "title": (
             f"SPX {decision} 候选 · 等最终确认"
             if pending
@@ -423,6 +448,13 @@ def _notification_event_id(plan: Mapping[str, object]) -> str | None:
         return None
     lifecycle = hashlib.sha256(source_event_id.encode()).hexdigest()[:12]
     return f"{plan_id}:{lifecycle}:{stage}"
+
+
+def _generation(value: Mapping[str, object]) -> int:
+    generation = value.get("reentry_generation", 0)
+    if isinstance(generation, int) and not isinstance(generation, bool):
+        return max(generation, 0)
+    return 0
 
 
 def _condition(play: str) -> str:

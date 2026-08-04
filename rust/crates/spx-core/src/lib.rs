@@ -14,7 +14,10 @@ pub use config::{CoreConfig, NotificationTargetConfig, ReadinessConfig};
 pub use desk_map_projection::{
     DeskMapDisposition, LATEST_DESK_MAP_PROJECTION_SCHEMA_VERSION, LatestDeskMapProjectionV1,
 };
-pub use engine::{CoreEngine, CoreError, CoreOutcome, PersistDisposition, QuoteDisposition};
+pub use engine::{
+    CoreEngine, CoreError, CoreOutcome, OperatorNotificationDisposition, PersistDisposition,
+    QuoteDisposition,
+};
 pub use quote_book::{ApplyBatch, QuoteBook, QuoteBookError};
 pub use raw_log::{RawLogPruneReport, prune_raw_log};
 pub use readiness::{ReadinessAssessment, assess_readiness};

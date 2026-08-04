@@ -3,11 +3,13 @@ use serde::Serialize;
 use spx_domain::{
     DECISION_SCHEMA_VERSION, DeskMessageV1, DomainError, EvaluationRequestV1, IngressEnvelopeV1,
     IngressMessageV1, NOTIFICATION_INTENT_SCHEMA_VERSION, NotificationIntentV1,
-    NotificationTargetV1, StrategyAction, StrategyBlockReason, StrategyDecisionV1, Token, Validate,
-    canonical_json_hash,
+    NotificationTargetV1, OperatorNotificationCancellationV1, OperatorNotificationRole,
+    OperatorNotificationV1, StrategyAction, StrategyBlockReason, StrategyDecisionV1, Token,
+    Validate, canonical_json_hash,
 };
 use spx_ledger::{
-    IngressCheck, IngressWrite, Ledger, LedgerError, OwnerLease, OwnerRole, PersistWrite,
+    IngressCheck, IngressWrite, Ledger, LedgerError, OperatorNotificationWrite, OwnerLease,
+    OwnerRole, PersistWrite,
 };
 use thiserror::Error;
 use uuid::Uuid;
@@ -68,6 +70,17 @@ pub enum CoreOutcome {
         message_id: Token,
         disposition: DeskMapDisposition,
     },
+    OperatorNotification {
+        message_id: Token,
+        event_id: Token,
+        role: OperatorNotificationRole,
+        disposition: OperatorNotificationDisposition,
+    },
+    OperatorNotificationCancellation {
+        message_id: Token,
+        event_id: Token,
+        persist_disposition: PersistDisposition,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -83,6 +96,14 @@ pub enum QuoteDisposition {
 pub enum PersistDisposition {
     Inserted,
     Duplicate,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OperatorNotificationDisposition {
+    Inserted,
+    Duplicate,
+    SemanticSuppressed,
 }
 
 #[derive(Debug, Serialize)]
@@ -166,7 +187,9 @@ impl CoreEngine {
             IngressMessageV1::QuoteBatch(_) => AppendDurability::Buffered,
             IngressMessageV1::Evaluate(_)
             | IngressMessageV1::ResearchSignals(_)
-            | IngressMessageV1::DeskMapProjection(_) => AppendDurability::Durable,
+            | IngressMessageV1::DeskMapProjection(_)
+            | IngressMessageV1::OperatorNotification(_)
+            | IngressMessageV1::OperatorNotificationCancellation(_) => AppendDurability::Durable,
         };
         let payload_sha256 = self.raw_log.append(&envelope, processing_at, durability)?;
         if envelope.emitted_at > processing_at {
@@ -221,6 +244,12 @@ impl CoreEngine {
                     message_id,
                     disposition,
                 }
+            }
+            IngressMessageV1::OperatorNotification(notification) => {
+                self.persist_operator_notification(message_id, &notification, processing_at)?
+            }
+            IngressMessageV1::OperatorNotificationCancellation(cancellation) => {
+                self.cancel_operator_notification(message_id, &cancellation, processing_at)?
             }
         };
         self.publish(&outcome, processing_at)?;
@@ -340,6 +369,75 @@ impl CoreEngine {
         };
         self.projection.publish(&projection)?;
         Ok(())
+    }
+
+    fn persist_operator_notification(
+        &self,
+        message_id: Token,
+        notification: &OperatorNotificationV1,
+        processing_at: DateTime<Utc>,
+    ) -> Result<CoreOutcome, CoreError> {
+        if notification.expires_at <= processing_at {
+            return Err(DomainError::TimeOrder("operator notification is expired").into());
+        }
+        if notification.targets.iter().any(|target| {
+            !self.config.notification_targets.iter().any(|configured| {
+                configured.key == target.key && configured.channel == target.channel
+            })
+        }) {
+            return Err(DomainError::Invalid {
+                field: "operator notification target",
+                reason: "target key and channel must match configured delivery target",
+            }
+            .into());
+        }
+        let persist = self.ledger.persist_operator_notification(
+            &self.owner,
+            notification,
+            self.config.delivery_max_attempts,
+            processing_at,
+        )?;
+        Ok(CoreOutcome::OperatorNotification {
+            message_id,
+            event_id: notification.event_id.clone(),
+            role: notification.role,
+            disposition: match persist {
+                OperatorNotificationWrite::Inserted => OperatorNotificationDisposition::Inserted,
+                OperatorNotificationWrite::Duplicate => OperatorNotificationDisposition::Duplicate,
+                OperatorNotificationWrite::SemanticSuppressed => {
+                    OperatorNotificationDisposition::SemanticSuppressed
+                }
+            },
+        })
+    }
+
+    fn cancel_operator_notification(
+        &self,
+        message_id: Token,
+        cancellation: &OperatorNotificationCancellationV1,
+        processing_at: DateTime<Utc>,
+    ) -> Result<CoreOutcome, CoreError> {
+        if cancellation.cancelled_at > processing_at {
+            return Err(DomainError::TimeOrder(
+                "operator notification cancelled_at is after processing_at",
+            )
+            .into());
+        }
+        let persist = self.ledger.cancel_event_at(
+            &self.owner,
+            cancellation.event_id.as_str(),
+            cancellation.reason_code.as_str(),
+            cancellation.cancelled_at,
+            processing_at,
+        )?;
+        Ok(CoreOutcome::OperatorNotificationCancellation {
+            message_id,
+            event_id: cancellation.event_id.clone(),
+            persist_disposition: match persist {
+                PersistWrite::Inserted => PersistDisposition::Inserted,
+                PersistWrite::Duplicate => PersistDisposition::Duplicate,
+            },
+        })
     }
 
     fn renew_owner_if_needed(&mut self, now: DateTime<Utc>) -> Result<(), CoreError> {

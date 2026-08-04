@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 import os
 
@@ -35,6 +35,10 @@ from spx_spark.notifier.receipt_mirror import (
     ReceiptMirrorSync as _ReceiptMirrorSync,
     sync_terminal_receipts as _sync_receipt_mirrors,
 )
+from spx_spark.notifier.rust_ingress import (
+    deliver_operator_notification_cancellation,
+    operator_notification_role,
+)
 from spx_spark.notifier.sinks import (
     any_delivery_ok,
     deliver_trade_push,
@@ -51,6 +55,7 @@ class DispatchResult:
     delivered: bool
     queued_for_recovery: bool
     recovery_sink: SinkResult | None = None
+    forwarded_to_rust: bool = False
 
 
 @dataclass(frozen=True)
@@ -70,6 +75,7 @@ class EnqueueResult:
     duplicate: bool
     delivered: bool
     queued_for_recovery: bool
+    forwarded_to_rust: bool = False
 
 
 ASYNC_CLAIM_TARGET_LIMIT = 1
@@ -140,6 +146,49 @@ def _transport_lane(envelope: NotificationEnvelope) -> str:
     return "ops" if envelope.lane == "ops_transition" else "trade"
 
 
+def _delivery_route(
+    settings: NotificationSettings,
+    envelope: NotificationEnvelope,
+    *,
+    friend: bool,
+) -> tuple[NotificationEnvelope, tuple[str, ...]]:
+    """Freeze either direct Python sinks or one Rust-owned staging target."""
+
+    intended_targets = tuple(
+        sorted(
+            delivery_target_names(
+                settings,
+                lane=_transport_lane(envelope),
+                friend=friend,
+            )
+        )
+    )
+    if (
+        settings.rust_trader_notification_owner
+        and operator_notification_role(envelope) is not None
+    ):
+        entries = tuple(settings.rust_operator_notification_target_map)
+        mapped_sinks = tuple(entry[0] for entry in entries)
+        mapped_keys = tuple(entry[1] for entry in entries)
+        if (
+            not intended_targets
+            or len(set(mapped_sinks)) != len(mapped_sinks)
+            or len(set(mapped_keys)) != len(mapped_keys)
+        ):
+            return envelope, ()
+        mapping = {sink: (key, channel) for sink, key, channel in entries}
+        if any(sink not in mapping for sink in intended_targets):
+            return envelope, ()
+        operator_targets = tuple(mapping[sink] for sink in intended_targets)
+        return replace(envelope, operator_targets=operator_targets), ("rust_ingress",)
+    return replace(
+        envelope,
+        operator_targets=(),
+        operator_opportunity_id=None,
+        operator_generation=0,
+    ), intended_targets
+
+
 def cancel_pending_notification(
     settings: NotificationSettings,
     event_id: str,
@@ -149,11 +198,28 @@ def cancel_pending_notification(
 ) -> int:
     """Cancel a durable notification whose source lifecycle is no longer valid."""
 
-    if not getattr(settings, "delivery_outbox_enabled", False) or not getattr(
-        settings, "delivery_outbox_path", ""
-    ):
+    outbox = (
+        _delivery_outbox(settings)
+        if getattr(settings, "delivery_outbox_enabled", False)
+        and getattr(settings, "delivery_outbox_path", "")
+        else None
+    )
+    rust_owned = getattr(settings, "rust_trader_notification_owner", False) or (
+        outbox is not None and "rust_ingress" in outbox.event_targets(event_id)
+    )
+    if rust_owned:
+        cancellation = deliver_operator_notification_cancellation(
+            settings,
+            event_id=event_id,
+            cancelled_at=now,
+            reason_code=reason,
+        )
+        if not cancellation.ok:
+            raise RuntimeError(
+                cancellation.error or "rust operator cancellation was not accepted"
+            )
+    if outbox is None:
         return 0
-    outbox = _delivery_outbox(settings)
     terminal_receipts = outbox.cancel_event_with_receipts(
         event_id,
         reason=reason,
@@ -195,13 +261,18 @@ def inspect_notification_event(
 ) -> DeliveryEventInspection:
     """Reconcile one producer event against its exact durable outbox contract."""
 
-    _payload_fingerprint, configured_targets = notification_event_contract(
+    payload_fingerprint, configured_targets = notification_event_contract(
         settings,
         envelope,
         title=title,
         text=text,
         friend=friend,
         feishu_text=feishu_text,
+    )
+    routed_envelope, _routed_targets = _delivery_route(
+        settings,
+        envelope,
+        friend=friend,
     )
     targets = configured_targets if expected_targets is None else expected_targets
     if not getattr(settings, "delivery_outbox_enabled", False) or not getattr(
@@ -218,13 +289,15 @@ def inspect_notification_event(
             reason="outbox_unavailable",
         )
     return _delivery_outbox(settings).inspect_event(
-        envelope,
+        routed_envelope,
         title=title,
         text=text,
         feishu_text=feishu_text,
         friend=friend,
         targets=targets,
-        expected_payload_fingerprint=expected_payload_fingerprint,
+        expected_payload_fingerprint=(
+            expected_payload_fingerprint or payload_fingerprint
+        ),
     )
 
 
@@ -239,18 +312,10 @@ def notification_event_contract(
 ) -> tuple[str, tuple[str, ...]]:
     """Return the immutable payload and exact configured-target identities."""
 
-    targets = tuple(
-        sorted(
-            delivery_target_names(
-                settings,
-                lane=_transport_lane(envelope),
-                friend=friend,
-            )
-        )
-    )
+    routed_envelope, targets = _delivery_route(settings, envelope, friend=friend)
     return (
         delivery_payload_fingerprint(
-            envelope,
+            routed_envelope,
             title=title,
             text=text,
             feishu_text=feishu_text,
@@ -317,14 +382,10 @@ def enqueue_notification(
             queued_for_recovery=False,
         )
 
-    targets = delivery_target_names(
-        settings,
-        lane=_transport_lane(envelope),
-        friend=friend,
-    )
+    routed_envelope, targets = _delivery_route(settings, envelope, friend=friend)
     if not targets:
         return EnqueueResult(
-            envelope=envelope,
+            envelope=routed_envelope,
             targets=(),
             outcome="no_sink",
             accepted=False,
@@ -337,7 +398,7 @@ def enqueue_notification(
     outbox = _delivery_outbox(settings)
     try:
         inserted = outbox.enqueue(
-            envelope,
+            routed_envelope,
             title=title,
             text=text,
             feishu_text=feishu_text,
@@ -369,14 +430,19 @@ def enqueue_notification(
             event_id=envelope.event_id,
         )
     return EnqueueResult(
-        envelope=envelope,
+        envelope=routed_envelope,
         targets=tuple(targets),
         outcome=summary.status.value,
         accepted=summary.status is not DeliveryStatus.DEAD_LETTER,
         inserted=inserted,
         duplicate=not inserted,
-        delivered=summary.delivered_targets > 0,
+        delivered=(
+            summary.delivered_targets > 0 and "rust_ingress" not in targets
+        ),
         queued_for_recovery=queued,
+        forwarded_to_rust=(
+            summary.delivered_targets > 0 and targets == ("rust_ingress",)
+        ),
     )
 
 
@@ -542,6 +608,8 @@ def consume_pending_notifications(
     )
     attempted_targets = 0
     delivered_targets = 0
+    rust_ingress_attempts = 0
+    forwarded_to_rust_targets = 0
     expired_targets = len(terminal_receipts)
     dead_lettered = expired_targets
     lost_claim_targets = 0
@@ -557,6 +625,8 @@ def consume_pending_notifications(
         )
         attempted_targets += result.attempted_targets
         delivered_targets += result.delivered_targets
+        rust_ingress_attempts += result.rust_ingress_attempts
+        forwarded_to_rust_targets += result.forwarded_to_rust_targets
         dead_lettered += result.dead_lettered_targets
         lost_claim_targets += result.lost_claim_targets
         expired_targets += result.expired_targets
@@ -584,6 +654,8 @@ def consume_pending_notifications(
         "jobs": len(jobs),
         "attempted_targets": attempted_targets,
         "delivered_targets": delivered_targets,
+        "rust_ingress_attempts": rust_ingress_attempts,
+        "forwarded_to_rust_targets": forwarded_to_rust_targets,
         "pending_targets": counts.get(DeliveryStatus.PENDING.value, 0),
         "claimed_targets": counts.get(DeliveryStatus.CLAIMED.value, 0),
         "dead_lettered": dead_lettered,
@@ -633,12 +705,7 @@ def _dispatch_via_outbox(
     runner: CommandRunner,
     attempted_at: datetime,
 ) -> DispatchResult:
-    transport_lane = _transport_lane(envelope)
-    targets = delivery_target_names(
-        settings,
-        lane=transport_lane,
-        friend=friend,
-    )
+    envelope, targets = _delivery_route(settings, envelope, friend=friend)
     if not targets:
         record_delivery_receipt(
             settings.delivery_receipt_path,
@@ -709,11 +776,15 @@ def _dispatch_via_outbox(
         envelope=envelope,
         sinks=sinks,
         outcome=summary.status.value,
-        # Preserve existing call-site semantics: one successful human sink is
-        # enough to mark the source alert handled, while the outbox continues
-        # retrying any other target independently.
-        delivered=summary.delivered_targets > 0,
+        # Rust ACK only proves durable forwarding into the core. Human delivery
+        # is measured from Rust target receipts, never this staging target.
+        delivered=(
+            summary.delivered_targets > 0 and "rust_ingress" not in targets
+        ),
         queued_for_recovery=queued,
+        forwarded_to_rust=(
+            summary.delivered_targets > 0 and targets == ("rust_ingress",)
+        ),
     )
 
 

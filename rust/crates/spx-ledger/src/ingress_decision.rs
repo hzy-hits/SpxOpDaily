@@ -2,12 +2,16 @@ use chrono::{DateTime, Utc};
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 use spx_domain::{
     NotificationIntentV1, NotificationIntentV2, NotificationLineageV2, NotificationTargetV1,
-    StrategyAction, StrategyDecisionV1, Token, Validate, canonical_json_hash,
+    OperatorNotificationRole, OperatorNotificationV1, StrategyAction, StrategyDecisionV1, Token,
+    Validate, canonical_json_hash,
 };
 
 use crate::db::micros;
 use crate::receipt::{Receipt, insert_receipt};
-use crate::{IngressCheck, IngressWrite, Ledger, LedgerError, OwnerLease, OwnerRole, PersistWrite};
+use crate::{
+    IngressCheck, IngressWrite, Ledger, LedgerError, OperatorNotificationWrite, OwnerLease,
+    OwnerRole, PersistWrite,
+};
 
 impl Ledger {
     /// Records successful ingress processing with collision-safe idempotency.
@@ -253,6 +257,96 @@ impl Ledger {
         Ok(outcome)
     }
 
+    /// Atomically stores one operator lifecycle event and its explicitly configured targets.
+    ///
+    /// This lane is independent of strategy decisions and cannot carry broker authority. A READY
+    /// or EXIT transition atomically supersedes older pending or claimed targets for the same
+    /// opportunity generation. An in-flight transport has crossed the irreversible boundary and
+    /// cannot be recalled by a later transition.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid contract, attempt bound, lost ownership, identity
+    /// collision, or storage failure.
+    pub fn persist_operator_notification(
+        &self,
+        lease: &OwnerLease,
+        notification: &OperatorNotificationV1,
+        max_attempts: u32,
+        now: DateTime<Utc>,
+    ) -> Result<OperatorNotificationWrite, LedgerError> {
+        notification.validate()?;
+        if !(1..=10).contains(&max_attempts) {
+            return Err(LedgerError::InvalidValue("max_attempts"));
+        }
+
+        let payload_json = serde_json::to_string(notification)?;
+        let payload_hash = canonical_json_hash(notification)?;
+        let targets = sorted_targets(&notification.targets);
+        let target_hash = canonical_json_hash(&targets)?;
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        Self::require_owner_in_transaction(&transaction, lease, OwnerRole::Core, now)?;
+        let existing = matching_operator_notifications(&transaction, notification)?;
+
+        let outcome = match existing.as_slice() {
+            [] => {
+                if enforce_operator_lifecycle(&transaction, notification)?
+                    == OperatorLifecycleDecision::Suppress
+                {
+                    transaction.commit()?;
+                    return Ok(OperatorNotificationWrite::SemanticSuppressed);
+                }
+                supersede_prior_operator_targets(&transaction, notification, now)?;
+                transaction.execute(
+                    "INSERT INTO notification_events (
+                        event_id, semantic_id, decision_id, source_projection_id, report_slot,
+                        lane, occurred_at_us, expires_at_us, payload_json, payload_sha256,
+                        target_set_sha256, writer_generation, created_at_us
+                     ) VALUES (?1, ?2, NULL, NULL, NULL, 'trader_event', ?3, ?4, ?5, ?6,
+                        ?7, ?8, ?9)",
+                    params![
+                        notification.event_id.as_str(),
+                        notification.semantic_id.as_str(),
+                        micros(notification.occurred_at),
+                        micros(notification.expires_at),
+                        payload_json,
+                        payload_hash,
+                        target_hash,
+                        lease.generation,
+                        micros(now)
+                    ],
+                )?;
+                insert_targets(
+                    &transaction,
+                    notification.event_id.as_str(),
+                    &targets,
+                    max_attempts,
+                    notification.occurred_at,
+                )?;
+                OperatorNotificationWrite::Inserted
+            }
+            [stored] if stored.matches_exact(notification, &payload_hash, &target_hash) => {
+                insert_targets(
+                    &transaction,
+                    notification.event_id.as_str(),
+                    &targets,
+                    max_attempts,
+                    notification.occurred_at,
+                )?;
+                OperatorNotificationWrite::Duplicate
+            }
+            _ => {
+                return Err(LedgerError::IdentityCollision(format!(
+                    "trader_event:{}/{}",
+                    notification.event_id, notification.semantic_id
+                )));
+            }
+        };
+        transaction.commit()?;
+        Ok(outcome)
+    }
+
     /// Checks whether the stable ET report slot is already present without mutating the outbox.
     ///
     /// # Errors
@@ -279,7 +373,8 @@ impl Ledger {
     /// Establishes a cancellation fence and safely terminates unsent targets.
     ///
     /// An in-flight target is irreversible and remains in flight until its response settles or
-    /// its lease is recovered as uncertain.
+    /// its lease is recovered as uncertain. Success therefore means the durable fence exists; it
+    /// does not claim that an already started transport was recalled.
     ///
     /// # Errors
     ///
@@ -290,18 +385,42 @@ impl Ledger {
         event_id: &str,
         reason_code: &str,
         now: DateTime<Utc>,
-    ) -> Result<(), LedgerError> {
+    ) -> Result<PersistWrite, LedgerError> {
+        self.cancel_event_at(lease, event_id, reason_code, now, now)
+    }
+
+    /// Establishes a cancellation fence with separate causal and processing timestamps.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid input, lost ownership, identity collision, or storage failure.
+    pub fn cancel_event_at(
+        &self,
+        lease: &OwnerLease,
+        event_id: &str,
+        reason_code: &str,
+        cancelled_at: DateTime<Utc>,
+        processing_at: DateTime<Utc>,
+    ) -> Result<PersistWrite, LedgerError> {
         if event_id.trim().is_empty() || reason_code.trim().is_empty() {
             return Err(LedgerError::InvalidValue("cancellation"));
         }
+        if cancelled_at > processing_at {
+            return Err(LedgerError::InvalidValue("cancellation timestamp"));
+        }
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        Self::require_owner_in_transaction(&transaction, lease, OwnerRole::Core, now)?;
+        Self::require_owner_in_transaction(&transaction, lease, OwnerRole::Core, processing_at)?;
         let inserted = transaction.execute(
             "INSERT OR IGNORE INTO notification_cancellations (
                 event_id, reason_code, cancelled_at_us, writer_generation
              ) VALUES (?1, ?2, ?3, ?4)",
-            params![event_id, reason_code, micros(now), lease.generation],
+            params![
+                event_id,
+                reason_code,
+                micros(cancelled_at),
+                lease.generation
+            ],
         )?;
         if inserted == 0 {
             let existing_reason: String = transaction.query_row(
@@ -335,16 +454,25 @@ impl Ledger {
                     terminal_at_us = ?1, updated_at_us = ?1,
                     last_error_code = ?2
                  WHERE target_id = ?3 AND status = ?4",
-                params![micros(now), reason_code, target_id, previous_status],
+                params![
+                    micros(processing_at),
+                    reason_code,
+                    target_id,
+                    previous_status
+                ],
             )?;
             if changed != 1 {
                 return Err(LedgerError::InvalidValue("cancellation target transition"));
             }
             let receipt = Receipt::CancelledBeforeTransport { reason_code };
-            insert_receipt(&transaction, &target_id, &receipt, now)?;
+            insert_receipt(&transaction, &target_id, &receipt, processing_at)?;
         }
         transaction.commit()?;
-        Ok(())
+        Ok(if inserted == 1 {
+            PersistWrite::Inserted
+        } else {
+            PersistWrite::Duplicate
+        })
     }
 
     fn insert_intent(
@@ -412,6 +540,189 @@ struct StoredScheduledReport {
     lane: String,
     payload_hash: String,
     target_hash: String,
+}
+
+struct StoredOperatorNotification {
+    event_id: String,
+    semantic_id: String,
+    decision_id: Option<String>,
+    source_projection_id: Option<String>,
+    slot: Option<String>,
+    lane: String,
+    payload_hash: String,
+    target_hash: String,
+}
+
+impl StoredOperatorNotification {
+    fn matches_exact(
+        &self,
+        notification: &OperatorNotificationV1,
+        payload_hash: &str,
+        target_hash: &str,
+    ) -> bool {
+        self.event_id == notification.event_id.as_str()
+            && self.semantic_id == notification.semantic_id.as_str()
+            && self.decision_id.is_none()
+            && self.source_projection_id.is_none()
+            && self.slot.is_none()
+            && self.lane == "trader_event"
+            && self.payload_hash == payload_hash
+            && self.target_hash == target_hash
+    }
+}
+
+fn matching_operator_notifications(
+    transaction: &Transaction<'_>,
+    notification: &OperatorNotificationV1,
+) -> Result<Vec<StoredOperatorNotification>, LedgerError> {
+    let mut statement = transaction.prepare(
+        "SELECT event_id, semantic_id, decision_id, source_projection_id,
+                report_slot, lane, payload_sha256, target_set_sha256
+         FROM notification_events
+         WHERE event_id = ?1 OR semantic_id = ?2
+         ORDER BY event_id
+         LIMIT 2",
+    )?;
+    Ok(statement
+        .query_map(
+            params![
+                notification.event_id.as_str(),
+                notification.semantic_id.as_str()
+            ],
+            |row| {
+                Ok(StoredOperatorNotification {
+                    event_id: row.get(0)?,
+                    semantic_id: row.get(1)?,
+                    decision_id: row.get(2)?,
+                    source_projection_id: row.get(3)?,
+                    slot: row.get(4)?,
+                    lane: row.get(5)?,
+                    payload_hash: row.get(6)?,
+                    target_hash: row.get(7)?,
+                })
+            },
+        )?
+        .collect::<Result<Vec<_>, _>>()?)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OperatorLifecycleDecision {
+    Persist,
+    Suppress,
+}
+
+fn enforce_operator_lifecycle(
+    transaction: &Transaction<'_>,
+    notification: &OperatorNotificationV1,
+) -> Result<OperatorLifecycleDecision, LedgerError> {
+    let existing = {
+        let mut statement = transaction.prepare(
+            "SELECT event_id,
+                    CAST(json_extract(payload_json, '$.generation') AS INTEGER),
+                    json_extract(payload_json, '$.role')
+             FROM notification_events
+             WHERE lane = 'trader_event'
+               AND json_extract(payload_json, '$.opportunity_id') = ?1
+             ORDER BY occurred_at_us, event_id",
+        )?;
+        statement
+            .query_map([notification.opportunity_id.as_str()], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    let incoming_generation = i64::from(notification.generation);
+    if existing
+        .iter()
+        .any(|(_, generation, _)| *generation > incoming_generation)
+    {
+        return Ok(OperatorLifecycleDecision::Suppress);
+    }
+    let same_generation: Vec<_> = existing
+        .iter()
+        .filter(|(_, generation, _)| *generation == incoming_generation)
+        .collect();
+    if same_generation.iter().any(|(_, _, role)| role == "exit") {
+        return Ok(OperatorLifecycleDecision::Suppress);
+    }
+    match notification.role {
+        OperatorNotificationRole::Setup
+            if same_generation
+                .iter()
+                .any(|(_, _, role)| role == "trade_ready") =>
+        {
+            Ok(OperatorLifecycleDecision::Suppress)
+        }
+        OperatorNotificationRole::TradeReady
+            if same_generation
+                .iter()
+                .any(|(_, _, role)| role == "trade_ready") =>
+        {
+            Ok(OperatorLifecycleDecision::Suppress)
+        }
+        _ => Ok(OperatorLifecycleDecision::Persist),
+    }
+}
+
+fn supersede_prior_operator_targets(
+    transaction: &Transaction<'_>,
+    notification: &OperatorNotificationV1,
+    now: DateTime<Utc>,
+) -> Result<(), LedgerError> {
+    let (include_trade_ready, reason_code) = match notification.role {
+        OperatorNotificationRole::Setup => return Ok(()),
+        OperatorNotificationRole::TradeReady => (false, "superseded_by_trade_ready"),
+        OperatorNotificationRole::Exit => (true, "superseded_by_exit"),
+    };
+    let targets = {
+        let mut statement = transaction.prepare(
+            "SELECT t.target_id, t.status
+             FROM notification_targets t
+             JOIN notification_events e ON e.event_id = t.event_id
+             WHERE e.lane = 'trader_event'
+               AND json_extract(e.payload_json, '$.opportunity_id') = ?1
+               AND CAST(json_extract(e.payload_json, '$.generation') AS INTEGER) = ?2
+               AND (
+                    json_extract(e.payload_json, '$.role') = 'setup'
+                    OR (?3 = 1 AND json_extract(e.payload_json, '$.role') = 'trade_ready')
+               )
+               AND t.status IN ('pending', 'claimed')
+             ORDER BY t.target_id",
+        )?;
+        statement
+            .query_map(
+                params![
+                    notification.opportunity_id.as_str(),
+                    i64::from(notification.generation),
+                    include_trade_ready
+                ],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    for (target_id, previous_status) in targets {
+        let changed = transaction.execute(
+            "UPDATE notification_targets SET
+                status = 'cancelled', next_attempt_at_us = NULL,
+                claim_owner_id = NULL, claim_owner_generation = NULL, claim_token = NULL,
+                claimed_at_us = NULL, lease_until_us = NULL, current_attempt_id = NULL,
+                terminal_at_us = ?1, updated_at_us = ?1, last_error_code = ?2
+             WHERE target_id = ?3 AND status = ?4",
+            params![micros(now), reason_code, target_id, previous_status],
+        )?;
+        if changed != 1 {
+            return Err(LedgerError::InvalidValue(
+                "operator supersession target transition",
+            ));
+        }
+        let receipt = Receipt::CancelledBeforeTransport { reason_code };
+        insert_receipt(transaction, &target_id, &receipt, now)?;
+    }
+    Ok(())
 }
 
 impl StoredScheduledReport {

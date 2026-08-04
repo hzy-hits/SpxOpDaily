@@ -37,12 +37,24 @@ pub struct DeliveryConfig {
     pub targets: Vec<TargetConfig>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BarkPresentation {
+    /// Backward-compatible body presentation: preserve every line up to the safe transport cap.
+    #[default]
+    Full,
+    /// Compact lock-screen presentation: first four non-empty, lightly normalized lines.
+    Summary,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TargetConfig {
     Bark {
         key: String,
         endpoint_env: String,
+        #[serde(default)]
+        presentation: BarkPresentation,
     },
     Feishu {
         key: String,
@@ -249,6 +261,61 @@ mod tests {
         .unwrap();
         assert!(!config.network_enabled);
         config.validate().unwrap();
+    }
+
+    #[test]
+    fn bark_presentation_is_typed_and_legacy_config_defaults_to_full() {
+        let legacy: DeliveryConfig = toml::from_str(
+            r#"
+                ledger_path = "/tmp/ledger.sqlite"
+
+                [[targets]]
+                type = "bark"
+                key = "bark-primary"
+                endpoint_env = "SPX_BARK_ENDPOINT"
+            "#,
+        )
+        .unwrap();
+        assert!(matches!(
+            legacy.targets.as_slice(),
+            [TargetConfig::Bark {
+                presentation: BarkPresentation::Full,
+                ..
+            }]
+        ));
+
+        let summary: DeliveryConfig = toml::from_str(
+            r#"
+                ledger_path = "/tmp/ledger.sqlite"
+
+                [[targets]]
+                type = "bark"
+                key = "bark-friend"
+                endpoint_env = "SPX_BARK_FRIEND_ENDPOINT"
+                presentation = "summary"
+            "#,
+        )
+        .unwrap();
+        assert!(matches!(
+            summary.targets.as_slice(),
+            [TargetConfig::Bark {
+                presentation: BarkPresentation::Summary,
+                ..
+            }]
+        ));
+        assert!(
+            toml::from_str::<DeliveryConfig>(
+                r#"
+                ledger_path = "/tmp/ledger.sqlite"
+                [[targets]]
+                type = "bark"
+                key = "bad"
+                endpoint_env = "SPX_BARK_ENDPOINT"
+                presentation = "key_name_magic"
+            "#
+            )
+            .is_err()
+        );
     }
 
     #[test]

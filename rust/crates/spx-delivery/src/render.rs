@@ -1,4 +1,4 @@
-use spx_domain::{DeskMessageV1, DeskMessageV2};
+use spx_domain::{DeskMessageV1, DeskMessageV2, OperatorNotificationV1};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RenderedMessage {
@@ -37,13 +37,25 @@ pub fn render_desk_message_v2(message: &DeskMessageV2) -> RenderedMessage {
     }
 }
 
+/// Returns the exact title and body frozen at ingress time.
+pub fn render_operator_notification(notification: &OperatorNotificationV1) -> RenderedMessage {
+    RenderedMessage {
+        title: notification.title.as_str().to_owned(),
+        body: notification.body.clone(),
+    }
+}
+
 fn normalize(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 #[cfg(test)]
 mod tests {
-    use spx_domain::Token;
+    use chrono::{TimeDelta, Utc};
+    use spx_domain::{
+        DeliveryChannel, NotificationTargetV1, OPERATOR_NOTIFICATION_SCHEMA_VERSION,
+        OperatorNotificationRole, OperatorNotificationV1, Token,
+    };
 
     use super::*;
 
@@ -99,6 +111,39 @@ mod tests {
             rendered
                 .body
                 .ends_with("Data Quality\nDEGRADED: clipped mass 28.4%")
+        );
+    }
+
+    #[test]
+    fn operator_notification_render_is_byte_for_byte_frozen() {
+        let now = Utc::now();
+        let body = format!(
+            "## Desk View\n前导  {}\n末尾  \n\n## Execution\nmanual only\n\n## Risk\ndefined risk\n\n## Targets\nnext level\n\n## Data Quality\nlive",
+            "x".repeat(8_000)
+        );
+        let notification = OperatorNotificationV1 {
+            schema_version: OPERATOR_NOTIFICATION_SCHEMA_VERSION.to_owned(),
+            event_id: token("event-1"),
+            semantic_id: token("semantic-1"),
+            opportunity_id: token("opportunity-1"),
+            generation: 0,
+            role: OperatorNotificationRole::Setup,
+            occurred_at: now,
+            expires_at: now + TimeDelta::minutes(10),
+            title: token(" SPX Setup  "),
+            body: body.clone(),
+            targets: vec![NotificationTargetV1 {
+                key: token("primary"),
+                channel: DeliveryChannel::Bark,
+            }],
+            automatic_ordering: false,
+        };
+        assert_eq!(
+            render_operator_notification(&notification),
+            RenderedMessage {
+                title: " SPX Setup  ".to_owned(),
+                body,
+            }
         );
     }
 }

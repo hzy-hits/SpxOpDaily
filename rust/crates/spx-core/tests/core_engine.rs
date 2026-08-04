@@ -7,16 +7,24 @@ use spx_domain::{
     AuthenticationState, BookSideV1, CalendarState, CandidateDirection, DeliveryChannel,
     DeskMapProjectionV1, EntitlementState, EvaluationRequestV1, INGRESS_SCHEMA_VERSION,
     IngressEnvelopeV1, IngressMessageV1, InstrumentKind, MacroPermission, MarketSession,
-    OperationalState, OptionContractV1, OptionRight, PROVIDER_STATE_SCHEMA_VERSION, PlanState,
-    PositiveF64, Provider, ProviderReasonCode, ProviderStateV1, QUOTE_BATCH_SCHEMA_VERSION,
-    QuoteBatchMode, QuoteBatchV1, QuoteQuality, QuoteV1, ResearchSignalsV1, StrategyAction,
-    StrategyBlockReason, Token, TransportState,
+    NotificationTargetV1, OPERATOR_NOTIFICATION_CANCELLATION_SCHEMA_VERSION,
+    OPERATOR_NOTIFICATION_SCHEMA_VERSION, OperationalState, OperatorNotificationCancellationV1,
+    OperatorNotificationRole, OperatorNotificationV1, OptionContractV1, OptionRight,
+    PROVIDER_STATE_SCHEMA_VERSION, PlanState, PositiveF64, Provider, ProviderReasonCode,
+    ProviderStateV1, QUOTE_BATCH_SCHEMA_VERSION, QuoteBatchMode, QuoteBatchV1, QuoteQuality,
+    QuoteV1, ResearchSignalsV1, StrategyAction, StrategyBlockReason, Token, TransportState,
 };
 use spx_ledger::Ledger;
 use tempfile::TempDir;
 
 fn token(value: impl Into<String>) -> Token {
     Token::new(value, "test token").expect("test token must be valid")
+}
+
+fn operator_body(desk_view: &str) -> String {
+    format!(
+        "## Desk View\n{desk_view}\n\n## Execution\nmanual only\n\n## Risk\ndefined risk\n\n## Targets\nnext level\n\n## Data Quality\nlive"
+    )
 }
 
 fn at(value: &str) -> DateTime<Utc> {
@@ -1459,4 +1467,307 @@ fn desk_map_projection_updates_only_the_rust_report_source_projection() {
         .health()
         .expect("ledger health");
     assert_eq!(health, spx_ledger::LedgerHealth::default());
+}
+
+#[test]
+fn operator_notification_ingress_persists_once_and_rejects_target_drift() {
+    let temp = TempDir::new().expect("temp directory");
+    let core_config = config(&temp);
+    let now = at("2026-08-04T14:30:00Z");
+    let notification = OperatorNotificationV1 {
+        schema_version: OPERATOR_NOTIFICATION_SCHEMA_VERSION.to_owned(),
+        event_id: token("operator-event-ready-1"),
+        semantic_id: token("operator-semantic-ready-1"),
+        opportunity_id: token("opportunity-7565-call"),
+        generation: 0,
+        role: OperatorNotificationRole::TradeReady,
+        occurred_at: now,
+        expires_at: now + TimeDelta::minutes(10),
+        title: token("SPX Trade Ready"),
+        body: operator_body(&"x".repeat(8_000)),
+        targets: vec![NotificationTargetV1 {
+            key: token("desk-bark"),
+            channel: DeliveryChannel::Bark,
+        }],
+        automatic_ordering: false,
+    };
+    let envelope = IngressEnvelopeV1 {
+        schema_version: INGRESS_SCHEMA_VERSION.to_owned(),
+        message_id: token("message-operator-ready-1"),
+        emitted_at: now,
+        message: IngressMessageV1::OperatorNotification(Box::new(notification.clone())),
+    };
+    let mut engine = CoreEngine::open(core_config.clone(), now).expect("open core");
+    assert!(matches!(
+        engine
+            .process(envelope.clone(), now + TimeDelta::seconds(1))
+            .expect("operator notification accepted"),
+        CoreOutcome::OperatorNotification {
+            role: OperatorNotificationRole::TradeReady,
+            disposition: spx_core::OperatorNotificationDisposition::Inserted,
+            ..
+        }
+    ));
+    assert!(matches!(
+        engine
+            .process(envelope, now + TimeDelta::seconds(2))
+            .expect("exact ingress duplicate accepted"),
+        CoreOutcome::Duplicate { .. }
+    ));
+    assert_eq!(
+        Ledger::open(&core_config.ledger_path)
+            .expect("open ledger")
+            .health()
+            .expect("ledger health")
+            .pending,
+        1
+    );
+
+    let mut mismatched = notification;
+    mismatched.event_id = token("operator-event-target-drift");
+    mismatched.semantic_id = token("operator-semantic-target-drift");
+    mismatched.targets[0].channel = DeliveryChannel::Feishu;
+    let failure = engine
+        .process(
+            IngressEnvelopeV1 {
+                schema_version: INGRESS_SCHEMA_VERSION.to_owned(),
+                message_id: token("message-operator-target-drift"),
+                emitted_at: now + TimeDelta::seconds(2),
+                message: IngressMessageV1::OperatorNotification(Box::new(mismatched)),
+            },
+            now + TimeDelta::seconds(3),
+        )
+        .expect_err("target drift must fail closed");
+    assert!(matches!(failure, CoreError::Domain(_)));
+}
+
+#[test]
+fn late_setup_after_ready_or_exit_is_accepted_but_semantically_suppressed() {
+    for leading_role in [
+        OperatorNotificationRole::TradeReady,
+        OperatorNotificationRole::Exit,
+    ] {
+        let temp = TempDir::new().expect("temp directory");
+        let core_config = config(&temp);
+        let now = at("2026-08-04T14:30:00Z");
+        let mut engine = CoreEngine::open(core_config.clone(), now).expect("open core");
+        let leading_name = leading_role.as_str();
+        let leading = OperatorNotificationV1 {
+            schema_version: OPERATOR_NOTIFICATION_SCHEMA_VERSION.to_owned(),
+            event_id: token(format!("event-leading-{leading_name}")),
+            semantic_id: token(format!("semantic-leading-{leading_name}")),
+            opportunity_id: token("opportunity-out-of-order"),
+            generation: 0,
+            role: leading_role,
+            occurred_at: now,
+            expires_at: now + TimeDelta::minutes(10),
+            title: token(format!("SPX {leading_name}")),
+            body: operator_body(leading_name),
+            targets: vec![NotificationTargetV1 {
+                key: token("desk-bark"),
+                channel: DeliveryChannel::Bark,
+            }],
+            automatic_ordering: false,
+        };
+        engine
+            .process(
+                IngressEnvelopeV1 {
+                    schema_version: INGRESS_SCHEMA_VERSION.to_owned(),
+                    message_id: token(format!("message-leading-{leading_name}")),
+                    emitted_at: now,
+                    message: IngressMessageV1::OperatorNotification(Box::new(leading)),
+                },
+                now + TimeDelta::seconds(1),
+            )
+            .expect("leading transition accepted");
+
+        let late_setup = OperatorNotificationV1 {
+            schema_version: OPERATOR_NOTIFICATION_SCHEMA_VERSION.to_owned(),
+            event_id: token(format!("event-late-setup-{leading_name}")),
+            semantic_id: token(format!("semantic-late-setup-{leading_name}")),
+            opportunity_id: token("opportunity-out-of-order"),
+            generation: 0,
+            role: OperatorNotificationRole::Setup,
+            occurred_at: now - TimeDelta::seconds(1),
+            expires_at: now + TimeDelta::minutes(10),
+            title: token("SPX late setup"),
+            body: operator_body("late setup"),
+            targets: vec![NotificationTargetV1 {
+                key: token("desk-bark"),
+                channel: DeliveryChannel::Bark,
+            }],
+            automatic_ordering: false,
+        };
+        let outcome = engine
+            .process(
+                IngressEnvelopeV1 {
+                    schema_version: INGRESS_SCHEMA_VERSION.to_owned(),
+                    message_id: token(format!("message-late-setup-{leading_name}")),
+                    emitted_at: now + TimeDelta::seconds(1),
+                    message: IngressMessageV1::OperatorNotification(Box::new(late_setup)),
+                },
+                now + TimeDelta::seconds(2),
+            )
+            .expect("late setup is accepted as semantic suppression");
+        assert!(matches!(
+            outcome,
+            CoreOutcome::OperatorNotification {
+                disposition: spx_core::OperatorNotificationDisposition::SemanticSuppressed,
+                ..
+            }
+        ));
+        let health = Ledger::open(&core_config.ledger_path)
+            .expect("open ledger")
+            .health()
+            .expect("ledger health");
+        assert_eq!(health.pending, 1);
+        assert_eq!(health.cancelled, 0);
+    }
+}
+
+#[test]
+fn cancellation_ingress_fences_a_later_operator_event_and_is_idempotent() {
+    let temp = TempDir::new().expect("temp directory");
+    let core_config = config(&temp);
+    let now = at("2026-08-04T14:30:00Z");
+    let cancellation = OperatorNotificationCancellationV1 {
+        schema_version: OPERATOR_NOTIFICATION_CANCELLATION_SCHEMA_VERSION.to_owned(),
+        event_id: token("operator-event-cancelled-before-insert"),
+        cancelled_at: now,
+        reason_code: token("source_invalidated"),
+    };
+    let envelope = IngressEnvelopeV1 {
+        schema_version: INGRESS_SCHEMA_VERSION.to_owned(),
+        message_id: token("message-operator-cancel-1"),
+        emitted_at: now,
+        message: IngressMessageV1::OperatorNotificationCancellation(cancellation.clone()),
+    };
+    let mut engine = CoreEngine::open(core_config.clone(), now).expect("open core");
+    assert!(matches!(
+        engine
+            .process(envelope.clone(), now + TimeDelta::seconds(1))
+            .expect("cancellation accepted"),
+        CoreOutcome::OperatorNotificationCancellation {
+            persist_disposition: spx_core::PersistDisposition::Inserted,
+            ..
+        }
+    ));
+    assert!(matches!(
+        engine
+            .process(envelope, now + TimeDelta::seconds(2))
+            .expect("same ingress id is idempotent"),
+        CoreOutcome::Duplicate { .. }
+    ));
+    assert!(matches!(
+        engine
+            .process(
+                IngressEnvelopeV1 {
+                    schema_version: INGRESS_SCHEMA_VERSION.to_owned(),
+                    message_id: token("message-operator-cancel-2"),
+                    emitted_at: now,
+                    message: IngressMessageV1::OperatorNotificationCancellation(cancellation),
+                },
+                now + TimeDelta::seconds(3),
+            )
+            .expect("same cancellation under a new ingress id is idempotent"),
+        CoreOutcome::OperatorNotificationCancellation {
+            persist_disposition: spx_core::PersistDisposition::Duplicate,
+            ..
+        }
+    ));
+
+    let notification = OperatorNotificationV1 {
+        schema_version: OPERATOR_NOTIFICATION_SCHEMA_VERSION.to_owned(),
+        event_id: token("operator-event-cancelled-before-insert"),
+        semantic_id: token("operator-semantic-cancelled-before-insert"),
+        opportunity_id: token("opportunity-cancelled-before-insert"),
+        generation: 0,
+        role: OperatorNotificationRole::TradeReady,
+        occurred_at: now,
+        expires_at: now + TimeDelta::minutes(10),
+        title: token("SPX Trade Ready"),
+        body: operator_body("Cancelled source must never deliver"),
+        targets: vec![NotificationTargetV1 {
+            key: token("desk-bark"),
+            channel: DeliveryChannel::Bark,
+        }],
+        automatic_ordering: false,
+    };
+    let failure = engine
+        .process(
+            IngressEnvelopeV1 {
+                schema_version: INGRESS_SCHEMA_VERSION.to_owned(),
+                message_id: token("message-operator-after-cancel"),
+                emitted_at: now + TimeDelta::seconds(3),
+                message: IngressMessageV1::OperatorNotification(Box::new(notification)),
+            },
+            now + TimeDelta::seconds(4),
+        )
+        .expect_err("durable cancellation fence must reject later event");
+    assert!(matches!(failure, CoreError::Ledger(_)));
+    assert_eq!(
+        Ledger::open(&core_config.ledger_path)
+            .expect("open ledger")
+            .health()
+            .expect("ledger health"),
+        spx_ledger::LedgerHealth::default()
+    );
+}
+
+#[test]
+fn committed_cancellation_without_ingress_record_replays_as_fence_duplicate() {
+    let temp = TempDir::new().expect("temp directory");
+    let core_config = config(&temp);
+    let now = at("2026-08-04T14:30:00Z");
+    let ledger = Ledger::open(&core_config.ledger_path).expect("open ledger");
+    let owner = ledger
+        .acquire_owner(
+            spx_ledger::OwnerRole::Core,
+            "core-owner-crash-window",
+            now,
+            TimeDelta::seconds(30),
+        )
+        .expect("acquire core owner");
+    assert_eq!(
+        ledger
+            .cancel_event_at(
+                &owner,
+                "operator-event-crash-window",
+                "source_invalidated",
+                now,
+                now,
+            )
+            .expect("commit fence without ingress record"),
+        spx_ledger::PersistWrite::Inserted
+    );
+    ledger.release_owner(&owner).expect("release core owner");
+
+    let cancellation = OperatorNotificationCancellationV1 {
+        schema_version: OPERATOR_NOTIFICATION_CANCELLATION_SCHEMA_VERSION.to_owned(),
+        event_id: token("operator-event-crash-window"),
+        cancelled_at: now,
+        reason_code: token("source_invalidated"),
+    };
+    let envelope = IngressEnvelopeV1 {
+        schema_version: INGRESS_SCHEMA_VERSION.to_owned(),
+        message_id: token("message-cancel-crash-window"),
+        emitted_at: now,
+        message: IngressMessageV1::OperatorNotificationCancellation(cancellation),
+    };
+    let mut engine = CoreEngine::open(core_config, now + TimeDelta::seconds(1)).expect("open core");
+    assert!(matches!(
+        engine
+            .process(envelope.clone(), now + TimeDelta::seconds(1))
+            .expect("replay commits missing ingress identity"),
+        CoreOutcome::OperatorNotificationCancellation {
+            persist_disposition: spx_core::PersistDisposition::Duplicate,
+            ..
+        }
+    ));
+    assert!(matches!(
+        engine
+            .process(envelope, now + TimeDelta::seconds(2))
+            .expect("recorded ingress now short-circuits safely"),
+        CoreOutcome::Duplicate { .. }
+    ));
 }

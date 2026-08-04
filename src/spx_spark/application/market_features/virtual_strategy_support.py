@@ -39,30 +39,6 @@ _TERMINAL_EXIT_ACTIONS = {
 }
 
 
-def _render_exit(closed: Mapping[str, object]) -> str:
-    contracts = str(closed.get("contract_id") or "-")
-    if closed.get("position_type") == "call_debit_spread":
-        contracts = f"{closed.get('long_contract_id')} / 卖 {closed.get('short_contract_id')}"
-    exit_bid = _number(closed.get("exit_bid"))
-    exit_price_line = (
-        f"虚拟入场 {_fmt(closed.get('entry_mid'))}，可执行退出 bid {_fmt(exit_bid)}，"
-        f"MFE {_pct(closed.get('mfe_fraction'))} / MAE {_pct(closed.get('mae_fraction'))}。"
-        if exit_bid is not None
-        else f"虚拟入场 {_fmt(closed.get('entry_mid'))}，可执行退出价不可用；"
-        f"本次不计算退出收益，MFE {_pct(closed.get('mfe_fraction'))} / "
-        f"MAE {_pct(closed.get('mae_fraction'))}。"
-    )
-    return "\n".join(
-        (
-            f"虚拟策略｜{closed.get('exit_action')}",
-            f"主策略 `{closed.get('source_kind')}`，组合 `{contracts}`。",
-            f"原因：`{closed.get('exit_reason')}`。",
-            exit_price_line,
-            "这是显示报价路径的影子生命周期，不读取 IBKR 仓位、不假设成交，也不自动下单。",
-        )
-    )
-
-
 def _event_contract(
     source: Mapping[str, object], *, block_reasons: tuple[str, ...] | list[str]
 ) -> dict[str, object]:
@@ -169,6 +145,25 @@ def _time(value: object) -> datetime | None:
         return None
 
 
+def _entry_observed_at(trade_intent: Mapping[str, object]) -> object:
+    observation = trade_intent.get("entry_observation")
+    return observation.get("at") if isinstance(observation, Mapping) else None
+
+
+def _level_reached(
+    price: float | None,
+    level: float | None,
+    *,
+    direction: str,
+    target: bool,
+) -> bool:
+    if price is None or level is None or direction not in {"up", "down"}:
+        return False
+    if target:
+        return price >= level if direction == "up" else price <= level
+    return price <= level if direction == "up" else price >= level
+
+
 def _fmt(value: object) -> str:
     return f"{float(value):.2f}" if isinstance(value, int | float) else "-"
 
@@ -262,6 +257,17 @@ def _episode(
         return {}
     episode_id = "virtual:" + hashlib.sha256(f"{source_id}|{contract_id}".encode()).hexdigest()[:24]
     source = dict(source_contract or {})
+    operator_opportunity_id = str(
+        source.get("operator_opportunity_id")
+        or source.get("event_id")
+        or source_id
+    )
+    generation_value = source.get("reentry_generation", 0)
+    reentry_generation = (
+        generation_value
+        if isinstance(generation_value, int) and not isinstance(generation_value, bool)
+        else 0
+    )
     raw_coordinate = source.get("coordinate")
     coordinate = dict(raw_coordinate) if isinstance(raw_coordinate, Mapping) else None
     lifecycle_policy_version = policy_version(
@@ -282,6 +288,8 @@ def _episode(
         "episode_id": episode_id,
         "status": "active",
         "source_signal_id": source_id,
+        "operator_opportunity_id": operator_opportunity_id,
+        "reentry_generation": max(reentry_generation, 0),
         "source_kind": source_kind,
         "source_schema_version": source.get("schema_version"),
         "source_policy_version": source.get("policy_version"),
