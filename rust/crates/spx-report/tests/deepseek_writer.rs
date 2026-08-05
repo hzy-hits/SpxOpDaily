@@ -394,7 +394,7 @@ fn desk_map_writer_sends_the_complete_projection_and_accepts_a_long_canonical_me
 }
 
 #[test]
-fn shorter_operator_message_is_accepted_when_required_semantics_survive() {
+fn shorter_operator_message_is_rejected_even_when_required_semantics_survive() {
     let mut source = semantic_message_value();
     for field in [
         "title",
@@ -427,16 +427,15 @@ fn shorter_operator_message_is_accepted_when_required_semantics_survive() {
     )
     .unwrap();
 
-    let output = client.write_desk_map(&projection).unwrap();
-
-    assert_eq!(output.visible_content, visible_content);
-    assert!(output.message.desk_view.as_str().contains("NO TRADE"));
-    assert!(output.message.primary_path.as_str().contains("方向来源"));
-    assert!(output.message.execution.as_str().contains("WAIT"));
+    let error = client.write_desk_map(&projection).unwrap_err();
+    assert_eq!(
+        error.code(),
+        ReportWriterErrorCode::FieldCompressionDetected
+    );
 }
 
 #[test]
-fn field_by_field_ascii_numeric_copy_is_not_an_acceptance_gate() {
+fn rewritten_message_below_a_source_field_floor_is_rejected() {
     let source = numeric_message_value();
     let mut projection = projection_with_message(&source);
     projection.level_kind = None;
@@ -459,9 +458,11 @@ fn field_by_field_ascii_numeric_copy_is_not_an_acceptance_gate() {
     )
     .unwrap();
 
-    let output = client.write_desk_map(&projection).unwrap();
-
-    assert_eq!(output.visible_content, visible_content);
+    let error = client.write_desk_map(&projection).unwrap_err();
+    assert_eq!(
+        error.code(),
+        ReportWriterErrorCode::FieldCompressionDetected
+    );
 }
 
 #[test]
@@ -565,6 +566,7 @@ fn source_research_base_case_cannot_disappear_from_the_visible_desk_view() {
     projection_value["message"]["desk_view"] = json!(
         "NO TRADE\n研究视角（HMM未校准，仅咨询；夜盘ES）：基线=区间/中位收盘 · HMM映射后的主导收盘桶模型权重 90%；不改变价格方向、触发或READY"
     );
+    let source_message = projection_value["message"].clone();
     let projection: DeskMapProjectionV1 = serde_json::from_value(projection_value).unwrap();
     projection.validate().unwrap();
 
@@ -585,6 +587,7 @@ fn source_research_base_case_cannot_disappear_from_the_visible_desk_view() {
     visible["desk_view"] =
         json!("NO TRADE · 未校准HMM研究 Base Case：区间/中位收盘 · 模型权重 90%");
     visible["data_quality"] = json!("Ready · 未校准研究不产生交易方向或授权 READY");
+    pad_message_fields_to_source_floor(&mut visible, &source_message);
     let client = ReportWriterClient::new(
         config(true, 64_000),
         true,
@@ -683,6 +686,30 @@ fn p_vs_q_evidence_cannot_disappear_or_change_in_the_visible_desk_view() {
     assert!(output.message.desk_view.as_str().contains("P 62%"));
     assert!(output.message.desk_view.as_str().contains("Q代理 49%"));
     assert!(output.message.desk_view.as_str().contains("P−Q +13pp"));
+}
+
+#[test]
+fn every_visible_field_must_keep_the_source_byte_floor() {
+    let mut source = semantic_message_value();
+    source["location"] = json!("SPX 7500 · ES 7510 · 价格定位完整");
+    let projection = projection_with_direction(&source, "none");
+    let mut compressed = source.clone();
+    compressed["location"] = json!("SPX 7500 · ES 7510");
+    let client = ReportWriterClient::new(
+        config(true, 64_000),
+        true,
+        RecordingTransport::new(TransportResponse::new(
+            200,
+            response(&serde_json::to_string(&compressed).unwrap(), "stop"),
+        )),
+    )
+    .unwrap();
+
+    let error = client.write_desk_map(&projection).unwrap_err();
+    assert_eq!(
+        error.code(),
+        ReportWriterErrorCode::FieldCompressionDetected
+    );
 }
 
 #[test]
@@ -928,7 +955,7 @@ fn execution_state_markers_cannot_move_out_of_execution() {
 }
 
 #[test]
-fn concise_reorganization_is_accepted_when_contract_and_semantic_markers_survive() {
+fn concise_reorganization_is_rejected_when_any_field_is_shorter() {
     let source = semantic_message_value();
     let projection = projection_with_direction(&source, "none");
     let concise = concise_semantic_message_value();
@@ -944,11 +971,11 @@ fn concise_reorganization_is_accepted_when_contract_and_semantic_markers_survive
     )
     .unwrap();
 
-    let output = client.write_desk_map(&projection).unwrap();
-
-    assert_eq!(output.visible_content, concise_content);
-    assert!(concise_content.len() > 283);
-    assert_eq!(output.message.execution.as_str(), "WAIT");
+    let error = client.write_desk_map(&projection).unwrap_err();
+    assert_eq!(
+        error.code(),
+        ReportWriterErrorCode::FieldCompressionDetected
+    );
 }
 
 #[test]
@@ -1049,12 +1076,14 @@ fn unvalidated_hmm_probability_can_inform_base_case_but_cannot_authorize_ready()
     projection_value["direction"] = json!("none");
     projection_value["thesis"] = json!("none");
     projection_value["message"] = semantic_message_value();
+    let source_message = projection_value["message"].clone();
     let projection: DeskMapProjectionV1 = serde_json::from_value(projection_value).unwrap();
     projection.validate().unwrap();
     let mut advisory = concise_semantic_message_value();
     advisory["desk_view"] =
         json!("NO TRADE · 未校准研究观点：RTH 收盘处于上区概率 84.20975712%，仅作 Base Case");
     advisory["execution"] = json!("WAIT · 研究观点不产生价格触发或操作授权");
+    pad_message_fields_to_source_floor(&mut advisory, &source_message);
     let visible_content = serde_json::to_string(&advisory).unwrap();
     let client = ReportWriterClient::new(
         config(true, 64_000),
@@ -1097,6 +1126,27 @@ fn unvalidated_hmm_probability_can_inform_base_case_but_cannot_authorize_ready()
         error.code(),
         ReportWriterErrorCode::DirectionAuthorityViolation
     );
+}
+
+fn pad_message_fields_to_source_floor(actual: &mut Value, source: &Value) {
+    for field in [
+        "title",
+        "desk_view",
+        "location",
+        "structure",
+        "primary_path",
+        "alternative_path",
+        "targets",
+        "execution",
+        "data_quality",
+    ] {
+        let required = source[field].as_str().unwrap().len();
+        let mut value = actual[field].as_str().unwrap().to_owned();
+        while value.len() < required {
+            value.push('。');
+        }
+        actual[field] = json!(value);
+    }
 }
 
 #[test]

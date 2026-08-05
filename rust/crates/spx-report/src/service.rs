@@ -59,6 +59,7 @@ impl DeskMessageWriteFailure {
                 | ReportWriterErrorCode::DirectionLabelMissing
                 | ReportWriterErrorCode::ExecutionStateMarkerMissing
                 | ReportWriterErrorCode::CriticalFactMissing
+                | ReportWriterErrorCode::FieldCompressionDetected
                 | ReportWriterErrorCode::InternalDetailLeak
                 | ReportWriterErrorCode::ResearchAdvisoryMissing
                 | ReportWriterErrorCode::ResearchDisclosureFailed
@@ -728,6 +729,7 @@ mod tests {
             ReportWriterErrorCode::DirectionLabelMissing,
             ReportWriterErrorCode::ExecutionStateMarkerMissing,
             ReportWriterErrorCode::CriticalFactMissing,
+            ReportWriterErrorCode::FieldCompressionDetected,
             ReportWriterErrorCode::InternalDetailLeak,
             ReportWriterErrorCode::ResearchAdvisoryMissing,
             ReportWriterErrorCode::ResearchDisclosureFailed,

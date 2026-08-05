@@ -227,6 +227,7 @@ pub enum ReportWriterErrorCode {
     DirectionLabelMissing,
     ExecutionStateMarkerMissing,
     CriticalFactMissing,
+    FieldCompressionDetected,
     InternalDetailLeak,
     ResearchAdvisoryMissing,
     ResearchDisclosureFailed,
@@ -255,6 +256,7 @@ impl ReportWriterErrorCode {
             Self::DirectionLabelMissing => "direction_label_missing",
             Self::ExecutionStateMarkerMissing => "execution_state_marker_missing",
             Self::CriticalFactMissing => "critical_fact_missing",
+            Self::FieldCompressionDetected => "field_compression_detected",
             Self::InternalDetailLeak => "internal_detail_leak",
             Self::ResearchAdvisoryMissing => "research_advisory_missing",
             Self::ResearchDisclosureFailed => "research_disclosure_failed",
@@ -536,6 +538,8 @@ fn validate_rendered_message(
         Some(ReportWriterErrorCode::ResearchAdvisoryMissing)
     } else if visible_internal_detail_leaked(message, projection) {
         Some(ReportWriterErrorCode::InternalDetailLeak)
+    } else if message_field_is_compressed(message, &projection.message) {
+        Some(ReportWriterErrorCode::FieldCompressionDetected)
     } else {
         None
     };
@@ -543,6 +547,22 @@ fn validate_rendered_message(
         Some(code) => Err(ReportWriterError::with_metadata(code, metadata.clone())),
         None => Ok(()),
     }
+}
+
+fn message_field_is_compressed(actual: &DeskMessageV2, source: &DeskMessageV2) -> bool {
+    [
+        (&actual.title, &source.title),
+        (&actual.desk_view, &source.desk_view),
+        (&actual.location, &source.location),
+        (&actual.structure, &source.structure),
+        (&actual.primary_path, &source.primary_path),
+        (&actual.alternative_path, &source.alternative_path),
+        (&actual.targets, &source.targets),
+        (&actual.execution, &source.execution),
+        (&actual.data_quality, &source.data_quality),
+    ]
+    .into_iter()
+    .any(|(actual_field, source_field)| actual_field.as_str().len() < source_field.as_str().len())
 }
 
 fn semantic_marker_field_mismatch(actual: &DeskMessageV2, source: &DeskMessageV2) -> bool {
