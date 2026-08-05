@@ -92,6 +92,7 @@ from spx_spark.application.order_map.spring_gamma_projection import (
 from spx_spark.application.order_map.state import (
     REFRESH_COOLDOWN_SECONDS_DEFAULT,
     already_sent,
+    current_session_is_gth,
     default_state_path,
     load_order_map_state,
     mark_sent,
@@ -347,20 +348,23 @@ def persist_zero_dte_greeks_reference(
 
 def _payload_is_thin(payload: dict[str, Any]) -> bool:
     """True when the snapshot caught a mid-rotation flush (missing spot/OI/plays)."""
-    research_reference = (
-        payload.get("research_reference")
-        if isinstance(payload.get("research_reference"), dict)
-        else {}
-    )
+    research_reference = payload.get("research_reference")
+    if not isinstance(research_reference, dict):
+        research_reference = {}
     if payload.get("research_only") is True and research_reference.get("price") is not None:
         return False
     underlier = payload.get("underlier") if isinstance(payload.get("underlier"), dict) else {}
     if underlier.get("price") is None:
         return True
+    warnings = payload.get("warnings")
+    no_open_interest = isinstance(warnings, list) and any(
+        "no open interest" in str(item) for item in warnings
+    )
+    if no_open_interest and current_session_is_gth(payload, {}):
+        return False
     if not payload.get("candidates"):
         return True
-    warnings = payload.get("warnings")
-    if isinstance(warnings, list) and any("no open interest" in str(item) for item in warnings):
+    if no_open_interest:
         return True
     fingerprint = payload_fingerprint(payload)
     if (

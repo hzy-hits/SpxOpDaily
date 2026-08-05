@@ -2288,6 +2288,48 @@ def test_gth_status_delivers_degraded_heartbeat_instead_of_skipping_thin_snapsho
     assert captured["fingerprint"]["status_phase"] == "asia_globex"
 
 
+def test_gth_no_open_interest_is_a_local_gamma_limit_not_a_thin_snapshot() -> None:
+    import spx_spark.application.order_map.service as order_map_module
+
+    payload = {
+        "research_only": False,
+        "session_phase": {"name": "asia_globex"},
+        "underlier": {"price": 7759.9, "source": "chain_implied"},
+        "candidates": [],
+        "warnings": ["gex:no_open_interest_gex", "no open interest; walls unavailable"],
+    }
+
+    assert order_map_module._payload_is_thin(payload) is False
+
+
+def test_rth_no_open_interest_remains_a_thin_snapshot() -> None:
+    import spx_spark.application.order_map.service as order_map_module
+
+    payload = {
+        "research_only": False,
+        "session_phase": {"name": "us_midday_confirmation"},
+        "underlier": {"price": 7759.9, "source": "index:SPX"},
+        "candidates": [],
+        "warnings": ["gex:no_open_interest_gex", "no open interest; walls unavailable"],
+    }
+
+    assert order_map_module._payload_is_thin(payload) is True
+
+
+def test_gth_missing_underlier_remains_a_thin_snapshot_even_without_oi() -> None:
+    import spx_spark.application.order_map.service as order_map_module
+
+    payload = {
+        "research_only": False,
+        "session_phase": {"name": "asia_globex"},
+        "underlier": {"price": None, "source": None},
+        "candidates": [],
+        "warnings": ["gex:no_open_interest_gex", "no open interest; walls unavailable"],
+    }
+
+    assert order_map_module._payload_is_thin(payload) is True
+
+
 def test_gth_status_same_slot_replay_and_material_change_have_distinct_semantic_ids(
     tmp_path: Path, monkeypatch
 ) -> None:
