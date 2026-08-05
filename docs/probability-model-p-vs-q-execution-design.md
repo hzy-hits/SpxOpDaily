@@ -95,7 +95,16 @@ P(T_{fill}\le h\mid X_t,\ell)
 =1-\exp\left(-\int_0^h\lambda_{fill}(u\mid X_t,\ell)du\right)
 \]
 
-其中 $h$ 是允许等待时间，$\ell$ 是限价相对 NBBO/mid 的位置。实现分两级：
+其中 $h$ 是允许等待时间，$\ell$ 是限价相对 NBBO/mid 的位置。这个等式只适用于
+`fill` 是唯一终止原因的单一 hazard。若撤单、超时、追价和被动成交互相竞争，则必须使用
+competing-risk 累计发生率：
+
+\[
+S(u)=\exp\left(-\int_0^u\sum_k\lambda_k(v)dv\right),\qquad
+F_{fill}(h)=\int_0^h S(u)\lambda_{fill}(u)du
+\]
+
+实现分两级：
 
 - 固定 2/5/10/30/60 秒 horizon 的 Logistic Regression 与 LightGBM，建立容易审计
   的概率基线；
@@ -113,11 +122,12 @@ P(T_{fill}\le h\mid X_t,\ell)
 
 ### 正式决策函数
 
-令 $Y_j$ 为策略 $j$ 的净收益，定义正数形式的左尾损失：
+令 $Y_j$ 为策略 $j$ 的净收益。为正确处理未成交为零、vertical 最大亏损等离散概率
+原子，使用分位数积分定义正数形式的左尾损失：
 
 \[
 TailLoss_{\alpha,j}
-=\max\left(0,-E[Y_j\mid Y_j\le Q_\alpha(Y_j)]\right)
+=\max\left(0,-\frac{1}{\alpha}\int_0^\alpha Q_u(Y_j)du\right)
 \]
 
 则：
@@ -148,6 +158,22 @@ shadow manual candidate。否则必须输出明确原因，例如：
 - `surface_or_exact_quote_degraded`。
 
 `NoTrade` 不是模型报错、缺省值或“没有想法”，而是可被回测、计数和归因的正式策略。
+
+## 当前 Oracle 数据允许我们声称什么
+
+2026-08-05 的冻结审计快照显示：98 个独立方向事件覆盖 14 个交易日，在
+30/60/180/300 秒 horizon 上有 388 个完整 outcome；但真实 `orders_at_risk=0`，当前
+policy 的严格净 PnL 训练样本也是 0。displayed quote-reach 只有 13 个无冲突样本，覆盖
+6 个交易日。
+
+因此当前只允许发布“未校准 physical follow-through shadow”：
+
+- 98 个事件不能当作 388 个独立样本；重叠 horizon 与同日事件必须聚类并 purge；
+- 当前 terminal direction 标签不能冒充 `target_first/stop_first/neither`；
+- quote reached 不能冒充 actual fill；
+- 没有真实成交样本时，不训练 fill survival、净 PnL quantile 或 ES selector；
+- 当前 notebook 是冻结 JSON 的可执行一致性检查，不等同于可从 Oracle 原始表重建的完整
+  lineage 审计；正式训练前需固定查询、输入清单及 hash，并按日期/session 分层。
 
 ## P 与 Q 的正确关系
 
@@ -339,9 +365,15 @@ markout/realized_spread at 1s/5s/60s
 
 \[
 Y_j=
-\mathbf 1_{\text{fill}}\left(\Pi_j(Path)-Premium_j^{exec}-Fees_j\right)
--\mathbf 1_{\text{no fill}}OpportunityCost_j
+\sum_{\ell=1}^{m_j}q_{j\ell}^{filled}
+\left(\Pi_{j\ell}(Path)-Premium_{j\ell}^{exec}\right)
+-Fees_j-LeggingCost_j
+-\mathbf 1_{\text{no strategy fill}}OpportunityCost_j
 \]
+
+其中 $q_{j\ell}^{filled}$ 是每条腿真实带符号成交数量，而不是整单二元
+`1_fill`。模型必须保留 partial fill、多腿不同步、撤单后追价和 legging exposure；只有
+所有这些状态都可观测时，才可以把策略级 fill 和净收益作为训练标签。
 
 `OpportunityCost` 必须按策略研究问题定义：如果研究“真实账户 PnL”，未成交通常是 0；
 如果研究“下单 policy 相对立即跨价差”，它才是与 benchmark 的差值。不能为提高回测结果
@@ -421,8 +453,10 @@ effective sample size 和明确的 `research_unvalidated` 状态。
 
 ## Python/Rust 契约与实现边界
 
-建议新增完整 Python 研究 artifact `strategy_distribution_forecast.v1`，不要把所有密度
-网格塞进现有 `research_context.v2`：
+生产当前已有精简 `strategy_distribution_forecast.v1`，只承载同一事件的 P/Q 基线、正式
+`NoTrade` 与只读安全边界。完整分布、执行和候选策略合同应新增为
+`strategy_distribution_forecast.v2`，不要静默改变 v1，也不要把所有密度网格塞进现有
+`research_context.v2`：
 
 ```text
 identity
