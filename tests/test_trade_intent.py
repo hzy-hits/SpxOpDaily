@@ -102,7 +102,7 @@ def test_confirmed_path_requires_all_gates_before_trade_ready() -> None:
     assert intent["target_spx"] == 7575.0
     assert intent["remaining_target_room_points"] == 21.0
     assert intent["remaining_reward_risk"] == 3.0
-    assert intent["expires_at"] == (NOW + timedelta(seconds=20)).isoformat()
+    assert intent["expires_at"] == (NOW + timedelta(minutes=5)).isoformat()
     assert intent["automatic_ordering"] is False
     assert intent["strategy_id"] == "rth_level_manual"
     assert intent["lifecycle_status"] == "legacy_production"
@@ -2939,7 +2939,7 @@ def test_orphaned_inflight_lease_expires_before_signal_ttl(
 
     crashed_state = json.loads(state_path.read_text())
     lease = crashed_state["inflight"][delivery_event_id]
-    assert datetime.fromisoformat(lease["expires_at"]) == NOW + timedelta(seconds=5)
+    assert datetime.fromisoformat(lease["expires_at"]) == NOW + timedelta(seconds=75)
     assert datetime.fromisoformat(lease["expires_at"]) < datetime.fromisoformat(
         str(intent["valid_until"])
     )
@@ -2947,8 +2947,8 @@ def test_orphaned_inflight_lease_expires_before_signal_ttl(
     still_leased = process_trade_intent(
         storage,
         intent,
-        now=NOW + timedelta(seconds=4),
-        action_now=NOW + timedelta(seconds=4),
+        now=NOW + timedelta(seconds=74),
+        action_now=NOW + timedelta(seconds=74),
         settings=settings,
         feature_policy=policy,
         expected_policy_version=str(intent["policy_version"]),
@@ -2956,8 +2956,8 @@ def test_orphaned_inflight_lease_expires_before_signal_ttl(
     recovered = process_trade_intent(
         storage,
         intent,
-        now=NOW + timedelta(seconds=6),
-        action_now=NOW + timedelta(seconds=6),
+        now=NOW + timedelta(seconds=76),
+        action_now=NOW + timedelta(seconds=76),
         settings=settings,
         feature_policy=policy,
         expected_policy_version=str(intent["policy_version"]),
@@ -3236,7 +3236,7 @@ def test_stale_action_quote_is_blocked_before_enqueue(tmp_path, monkeypatch) -> 
         feature_policy=policy,
         order_policy=OrderMapPolicy(),
     )
-    action_now = NOW + timedelta(seconds=6)
+    action_now = NOW + timedelta(seconds=16)
 
     class Store:
         def __init__(self, _storage) -> None:
@@ -3271,8 +3271,12 @@ def test_stale_action_quote_is_blocked_before_enqueue(tmp_path, monkeypatch) -> 
     assert result["reason"] == "action_quote_source_stale"
     assert result["action_revalidated_at"] == action_now.isoformat()
     state = json.loads((tmp_path / "latest" / "trade_intent_delivery_state.json").read_text())
-    assert state["last_action_revalidation"]["source_age_seconds"] == 6.0
+    assert state["last_action_revalidation"]["source_age_seconds"] == 16.0
     assert state["inflight"] == {}
+    projection = json.loads((tmp_path / "latest" / "trade_intent.json").read_text())
+    assert projection["status"] == "ready_pending_delivery"
+    assert projection["signal_status"] == "trade_ready"
+    assert projection["notification_reason"] == "action_quote_source_stale"
 
 
 def test_disabled_notification_does_not_run_writer_or_hold_delivery_lease(
@@ -3691,7 +3695,7 @@ def _ready_inputs():
         "event_id": "level:test",
         "phase": "confirmed",
         "phase_at": (NOW - timedelta(seconds=60)).isoformat(),
-        "expires_at": (NOW + timedelta(minutes=3)).isoformat(),
+        "expires_at": (NOW + timedelta(minutes=10)).isoformat(),
         "updated_at": NOW.isoformat(),
         "expiry": "20260714",
         "thesis": "breakout",

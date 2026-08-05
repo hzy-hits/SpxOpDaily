@@ -53,6 +53,26 @@ strategy.  A candidate in the opposite direction is reduced to an invalidation
 condition; it is never rendered as a concurrent plan.  Full raw candidates are
 retained for research and replay.
 
+The human action window for one confirmed economic opportunity is five minutes
+by default and may be configured only within five to ten minutes. Exact option
+quotes have a separate 10--15 second freshness contract. A stale quote pauses
+delivery until a fresh executable re-quote passes validation; quote staleness
+alone does not mark the economic opportunity expired. Structural invalidation,
+the session entry cutoff and the hard exit clock remain terminal boundaries.
+The opportunity clock is anchored when the price event is confirmed; an earlier
+pending/setup timeout cannot immediately expire the newly confirmed event.
+Within that window, a stale exact quote changes publication to "wait for fresh
+NBBO", not to a new opportunity generation. A new generation requires the old
+structure to terminate and the reset/rearm conditions to be satisfied.
+
+Human delivery is role-specific. `setup` means `WATCH` and carries only the
+structure plus the condition needed for confirmation. `trade_ready` is the one
+manual action card: it carries the exact contract or spread, executable NBBO
+and limit, validity, invalidation, bounded risk, target and reward/risk. `exit`
+closes that same opportunity generation. A half-hour report that encounters a
+terminal source state is separate from those roles and becomes a deterministic
+neutral `STANDBY`; it cannot repeat the prior direction, contract or trigger.
+
 ## Durable TradeReady publication
 
 `trade_ready` is externally visible only after the immutable notification

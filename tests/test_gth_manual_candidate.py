@@ -106,6 +106,26 @@ def test_manual_candidate_is_ready_without_cash_spx(
     )
 
 
+def test_gth_signal_candidate_keeps_five_minute_opportunity_near_quote_age_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    quote_at = NOW - timedelta(seconds=14.9)
+    _patch_ready_market(monkeypatch, now=quote_at)
+
+    candidate = evaluate_gth_manual_candidate(
+        object(),
+        _signal(NOW),
+        macro_event={"mode": "normal", "entry_allowed": True},
+        now=NOW,
+        policy=MarketFeatureSettings(),
+        new_entries_allowed=True,
+        new_entries_block_reason="allowed",
+    )
+
+    assert candidate["status"] == "manual_ready"
+    assert candidate["valid_until"] == (NOW + timedelta(minutes=5)).isoformat()
+
+
 def test_confirmed_gth_flip_low_breakdown_builds_put_manual_ready(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -169,6 +189,31 @@ def test_confirmed_gth_flip_low_breakdown_builds_put_manual_ready(
     assert "有效  剩余 " in card["text"]
     assert "自动下单关闭" in card["text"]
     assert card["lane"] == "gth_level_manual_candidate"
+
+
+def test_gth_level_candidate_keeps_five_minute_opportunity_near_quote_age_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    quote_at = NOW - timedelta(seconds=14.9)
+    _patch_ready_market(
+        monkeypatch,
+        now=quote_at,
+        parity_price=7368.0,
+        es_price=7398.0,
+    )
+
+    candidate = evaluate_gth_level_manual_candidate(
+        object(),
+        _level_signal(NOW, direction="down", level_kind="flip_low", level=7375.0),
+        macro_event={"entry_allowed": True},
+        now=NOW,
+        policy=MarketFeatureSettings(),
+        new_entries_allowed=True,
+        new_entries_block_reason="allowed",
+    )
+
+    assert candidate["status"] == "manual_ready"
+    assert candidate["valid_until"] == (NOW + timedelta(minutes=5)).isoformat()
 
 
 def test_prior_down_shock_blocks_floor_chasing_put(
@@ -308,7 +353,11 @@ def test_rearmed_same_gamma_path_keeps_one_semantic_candidate_id(
         level_kind="flip_low",
         level=7375.0,
     )
-    rearmed_level = {**first_level, "event_id": "level:rearmed:same-flip-low"}
+    rearmed_level = {
+        **first_level,
+        "event_id": "level:rearmed:same-flip-low",
+        "reentry_generation": 0,
+    }
 
     first = evaluate_gth_level_manual_candidate(
         object(),
@@ -867,8 +916,10 @@ def test_level_candidate_notification_is_durable_and_idempotent(
         pending_counts.append(len(pending))
         if not pending:
             return {"attempted": False, "accepted": False}
+        accepted = set(state.get("accepted_notification_event_ids") or [])
+        accepted.add(str(pending[0]["event_id"]))
         state["pending_notifications"] = []
-        state["accepted_notification_event_ids"] = [pending[0]["event_id"]]
+        state["accepted_notification_event_ids"] = sorted(accepted)
         candidate_module.atomic_write_json_secure(path, state)
         return {"attempted": True, "accepted": True, "outcome": "queued"}
 
@@ -895,15 +946,40 @@ def test_level_candidate_notification_is_durable_and_idempotent(
 
     first = process_gth_level_manual_candidate(storage, object(), signal, **kwargs)
     second = process_gth_level_manual_candidate(storage, object(), signal, **kwargs)
+    reentry_signal = {
+        **signal,
+        "event_id": "level:down:flip_low:reentry:1",
+        "reentry_generation": 1,
+    }
+    reentry = process_gth_level_manual_candidate(
+        storage,
+        object(),
+        reentry_signal,
+        **kwargs,
+    )
+    duplicate_reentry = process_gth_level_manual_candidate(
+        storage,
+        object(),
+        reentry_signal,
+        **kwargs,
+    )
 
     assert first["notification_accepted"] is True
     assert second["notification_attempted"] is False
-    assert pending_counts == [1, 0]
+    assert reentry["notification_accepted"] is True
+    assert duplicate_reentry["notification_attempted"] is False
+    assert reentry["candidate_id"] != first["candidate_id"]
+    assert pending_counts == [1, 0, 1, 0]
     state = candidate_module.read_json_object(
         tmp_path / "latest" / "gth_level_manual_candidate_state.json"
     )
     assert state["pending_notifications"] == []
-    assert len(state["accepted_notification_event_ids"]) == 1
+    assert state["accepted_notification_event_ids"] == sorted(
+        (
+            f"{first['candidate_id']}:ready",
+            f"{reentry['candidate_id']}:ready",
+        )
+    )
     gate_rows = [
         json.loads(line)
         for line in (
@@ -912,9 +988,13 @@ def test_level_candidate_notification_is_durable_and_idempotent(
         .read_text()
         .splitlines()
     ]
-    assert len(gate_rows) == 1
-    assert gate_rows[0]["status"] == "manual_ready"
-    assert gate_rows[0]["gate_contract"]["hard_block_reasons"] == []
+    assert len(gate_rows) == 2
+    assert {row["candidate_id"] for row in gate_rows} == {
+        first["candidate_id"],
+        reentry["candidate_id"],
+    }
+    assert all(row["status"] == "manual_ready" for row in gate_rows)
+    assert all(row["gate_contract"]["hard_block_reasons"] == [] for row in gate_rows)
 
 
 def test_manual_ready_outbox_consumer_receipt_end_to_end_is_idempotent(

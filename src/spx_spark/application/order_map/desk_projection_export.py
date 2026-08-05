@@ -393,15 +393,14 @@ def _research_advisory_summary(
             break
     if not facts:
         return (
-            f"研究视角（HMM未校准，仅咨询；{basis}）："
-            f"基线={research_view} · 可靠性=低 · 主要限制={primary_limitation}；"
-            "不改变价格方向、触发或READY"
+            "研究（HMM未校准，不改变价格方向、触发或READY）："
+            f"基线={research_view} · 可靠性=低（{basis}） · 主要限制={primary_limitation}"
         )
     return (
-        f"研究视角（HMM未校准，仅咨询；{basis}）："
-        f"基线={research_view} · 可靠性=低 · "
-        + " · ".join(facts)
-        + f" · 主要限制={primary_limitation}；不改变价格方向、触发或READY"
+        "研究（HMM未校准，不改变价格方向、触发或READY）："
+        f"基线={research_view} · "
+        + " · ".join(facts[:2])
+        + f" · 可靠性=低（{basis}） · 主要限制={primary_limitation}"
     )
 
 
@@ -496,7 +495,10 @@ def _strategy_distribution_summary(
         else "NO TRADE"
     )
     if p_probability is None and q_probability is None:
-        return f"P/Q研究（未校准）：当前没有可比较的同一方向事件，不产生交易方向 → {action}"
+        # An unavailable comparison is audit metadata, not a human decision.
+        # Omitting it prevents every NO TRADE map from repeating another
+        # content-free NO TRADE line.
+        return None
     facts: list[str] = []
     if p_probability is not None:
         sample_count = _positive_int_or_none(p_event.get("sample_count"))

@@ -120,8 +120,8 @@ market_features:
   trade_market_anchor_max_age_seconds: {value: 20.0, description: Maximum observation, source and transport age for the ES anchor and level observation used by a trade-ready intent.}
   trade_structure_drift_points: {value: 10.0, description: Diagnostic live-versus-frozen wall drift threshold; an active event remains anchored to its frozen trigger instead of being cancelled by incomplete intraday OI.}
   trade_entry_spread_fraction: {value: 1.0, description: Fraction of the live bid-ask spread used for the initial manual buy limit; 1.0 is the current natural ask.}
-  trade_intent_ttl_seconds: {value: 90.0, description: Lifetime of a newly emitted trade intent before it must be recalculated.}
-  trade_entry_window_seconds: {value: 20.0, description: Maximum time an alert candidate may wait for the displayed ask to reach its entry limit; this is not a broker order TTL.}
+  trade_intent_ttl_seconds: {value: 300.0, description: Five-minute lifetime of one confirmed economic opportunity; bounded typed configuration permits 300-600 seconds and remains independent of quote freshness.}
+  trade_entry_window_seconds: {value: 300.0, description: Human action window for one confirmed opportunity; a stale displayed quote requires re-quote and revalidation but does not by itself expire the opportunity.}
   trade_invalidation_buffer_points: {value: 3.0, description: SPX reclaim distance beyond the trigger level that invalidates a trade intent.}
   trade_target_em_fraction: {value: 0.15, description: Expected-move fraction used for a fallback SPX target when no outward structure exists.}
   trade_confirmation_slippage_points: {value: 1.0, description: SPX-point allowance reserved between state-machine confirmation and the next executable structural target.}
@@ -130,7 +130,7 @@ market_features:
   trade_time_stop_minutes: {value: 15, description: Default maximum holding time for an unextended 0DTE trade intent; new entries stop at 15:30 ET and every time stop is capped at the 15:45 ET hard exit.}
   gth_manual_candidate_enabled: {value: true, description: Enables runtime-gated manual-only GTH exact-spread signals; offline readiness remains evidence and does not suppress valid live operator signals, while broker submission stays disabled.}
   gth_manual_candidate_quote_max_age_seconds: {value: 15.0, description: Maximum source and transport age for exact legs, parity pairs, and direct ES invalidation quotes used by a GTH manual candidate.}
-  gth_manual_candidate_ttl_seconds: {value: 20.0, description: Maximum lifetime of a manual GTH candidate before every quote must be recalculated.}
+  gth_manual_candidate_ttl_seconds: {value: 300.0, description: Five-minute human action window for a GTH manual candidate; exact-leg quotes must still pass the independent 15-second freshness gate.}
   gth_manual_candidate_max_debit_fraction: {value: 0.65, description: Maximum candidate debit as a fraction of vertical width, evaluated at the synthetic natural ask.}
   gth_manual_candidate_max_net_spread_fraction: {value: 0.20, description: Maximum synthetic net bid-ask width as a fraction of vertical width.}
   gth_manual_candidate_min_parity_pairs: {value: 3, description: Minimum cofresh same-provider SPXW call-put pairs required for the GTH target coordinate.}
@@ -1805,7 +1805,7 @@ level_decision_shadow:
     description: Minimum same-direction ES move relative to the observed SPX move.
   terminal_rearm_seconds:
     value: 30.0
-    description: Neutral delay after a terminal event before the nearest level may arm again.
+    description: Neutral delay after a terminal event; the old generation clears after price leaves the rejection/retest reset band, while the wider approach radius may then arm a fresh opportunity.
   structure_interval_seconds:
     value: 300
     description: Distinct observation bucket size for the stable OI/GEX map; five-minute buckets preserve hysteresis without leaving 0DTE walls stale for fifteen minutes.

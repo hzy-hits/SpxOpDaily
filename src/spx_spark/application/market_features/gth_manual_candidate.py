@@ -318,21 +318,8 @@ def evaluate_gth_manual_candidate(
             reasons,
         )
 
-    quote_remaining = _quote_remaining_seconds(
-        snapshot,
-        parity=parity,
-        es_reference=es_reference,
-        now=now,
-        max_age_seconds=policy.gth_manual_candidate_quote_max_age_seconds,
-    )
     valid_until_candidates = [
-        now
-        + timedelta(
-            seconds=min(
-                policy.gth_manual_candidate_ttl_seconds,
-                quote_remaining,
-            )
-        ),
+        now + timedelta(seconds=policy.gth_manual_candidate_ttl_seconds),
         signal_valid_until,
         candidate_cutoff,
     ]
@@ -720,34 +707,6 @@ def _quote_from_provider(
 def _gth_end(now: datetime) -> datetime | None:
     session_day = DEFAULT_MARKET_CALENDAR.research_expiry(now)
     return datetime.combine(session_day, time(9, 25), tzinfo=ET).astimezone(timezone.utc)
-
-
-def _quote_remaining_seconds(
-    snapshot: Mapping[str, object],
-    *,
-    parity: Mapping[str, object] | None,
-    es_reference: Mapping[str, object] | None,
-    now: datetime,
-    max_age_seconds: float,
-) -> float:
-    ages = [
-        _number(snapshot.get(field))
-        for field in (
-            "long_quote_age_seconds",
-            "short_quote_age_seconds",
-            "long_transport_age_seconds",
-            "short_transport_age_seconds",
-        )
-    ]
-    for reference in (parity, es_reference):
-        if not isinstance(reference, Mapping):
-            continue
-        for field in ("source_at", "transport_at"):
-            observed_at = _time(reference.get(field))
-            if observed_at is not None:
-                ages.append((now - observed_at).total_seconds())
-    finite_ages = [max(float(age), 0.0) for age in ages if age is not None]
-    return max(max_age_seconds - max(finite_ages or [max_age_seconds]), 0.0)
 
 
 def _notification_intent(

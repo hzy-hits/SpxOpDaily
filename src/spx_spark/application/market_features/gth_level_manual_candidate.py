@@ -16,7 +16,6 @@ from spx_spark.application.market_features.gth_manual_candidate import (
     _gth_end,
     _notification_intent,
     _operator_generation,
-    _quote_remaining_seconds,
 )
 from spx_spark.application.market_features.play_outcome_stats import (
     PlayOutcomeStats,
@@ -296,15 +295,19 @@ def evaluate_gth_level_manual_candidate(
 
     long_contract_id = _contract_id(expiry, long_strike, right)
     short_contract_id = _contract_id(expiry, short_strike, right)
-    identity = "|".join(
-        (
-            CONTRACT_VERSION,
-            candidate_policy_version,
-            path_kind,
-            long_contract_id,
-            short_contract_id,
-        )
-    )
+    identity_parts = [
+        CONTRACT_VERSION,
+        candidate_policy_version,
+        path_kind,
+        long_contract_id,
+        short_contract_id,
+    ]
+    # Preserve generation-zero event IDs for durable replay compatibility.
+    # A state-machine re-entry is a new economic opportunity and must not be
+    # suppressed by the settled notification ID from the prior generation.
+    if generation > 0:
+        identity_parts.extend(("reentry", str(generation), source_id))
+    identity = "|".join(identity_parts)
     base["candidate_id"] = "gth-level-manual:" + hashlib.sha256(identity.encode()).hexdigest()[:24]
     snapshot, quote_reasons = spread_snapshot_decision(
         latest,
@@ -448,23 +451,10 @@ def evaluate_gth_level_manual_candidate(
             reasons,
         )
 
-    quote_remaining = _quote_remaining_seconds(
-        snapshot,
-        parity=parity,
-        es_reference=es_reference,
-        now=now,
-        max_age_seconds=policy.gth_manual_candidate_quote_max_age_seconds,
-    )
     valid_until = min(
         item
         for item in (
-            now
-            + timedelta(
-                seconds=min(
-                    policy.gth_manual_candidate_ttl_seconds,
-                    quote_remaining,
-                )
-            ),
+            now + timedelta(seconds=policy.gth_manual_candidate_ttl_seconds),
             source_expires_at,
             candidate_cutoff,
         )

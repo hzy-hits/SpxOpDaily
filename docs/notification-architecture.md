@@ -83,7 +83,27 @@ For `trade_ready`, a fresh, executable final quote may move normally between
 decision and enqueue without suppressing the signal. The notification retains
 the immutable decision NBBO, entry limit and risk plan; the later quote is
 audit-only and tells the receiver to requote. Stale, crossed, excessively wide
-or otherwise unexecutable quotes still fail closed.
+or otherwise unexecutable quotes still fail closed for that delivery attempt.
+They remain transient re-quote conditions inside the five-minute default
+economic-opportunity window, not lifecycle expiry. Quote freshness remains an
+independent 10--15 second gate, while typed configuration bounds the human
+opportunity window to five--ten minutes.
+
+Operator notification roles have different human projections while the ledger
+keeps the complete immutable ingress payload. `setup` is delivered as a compact
+`WATCH`: it may show the live structure and the condition that would confirm
+it, but it must not look like an entry card or surface an exact contract.
+`trade_ready` is the compact manual action card and must retain the opportunity
+identity, exact contract or spread, decision NBBO, limit, validity, invalidation,
+risk, target and reward/risk. `exit` retains the terminal lifecycle account.
+Research prose is audit context and cannot displace those operational fields.
+
+The half-hour `scheduled_report` is not a lifecycle notification. If its source
+projection is already `invalidated` or `expired`, Rust emits a deterministic
+neutral `STANDBY` status. Its current location and reference structure come
+from the original typed projection, and its next trigger is fixed to waiting
+for a new price event. A model-written title, old LONG/CALL direction, or old
+event trigger is never reused in that terminal standing message.
 
 The producer-side inflight lease is bounded by the remaining signal lifetime.
 If a process stops between local acceptance and durable enqueue, the short

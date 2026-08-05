@@ -400,8 +400,7 @@ def test_unavailable_p_and_q_are_one_formal_no_trade_line_not_a_diagnostic_dump(
         storage=storage,
     )
 
-    line = wire["message"]["desk_view"].splitlines()[-1]
-    assert line == ("P/Q研究（未校准）：当前没有可比较的同一方向事件，不产生交易方向 → NO TRADE")
+    assert "P/Q研究" not in wire["message"]["desk_view"]
     assert "model_input_unavailable" not in wire["message"]["desk_view"]
 
 

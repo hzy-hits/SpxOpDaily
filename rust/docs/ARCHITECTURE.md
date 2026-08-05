@@ -86,8 +86,13 @@ The writer is fixed to `deepseek-v4-flash` with thinking enabled,
 `flash-max` is an operating mode, not a separate model
 identifier. The provider must return one strict JSON object containing the
 title and all eight non-empty sections: Desk View, Location, Structure, Primary
-Path, Alternative Path, Targets, Execution and Data Quality. Neither the writer
-nor delivery slices by characters or lines. A provider response with
+Path, Alternative Path, Targets, Execution and Data Quality. Non-terminal
+scheduled reports preserve that validated message without generic character
+truncation. If the typed source projection is terminal, `spx-report` ignores
+the writer's presentation and creates a deterministic neutral `STANDBY` from
+the original projection's current location and reference structure. Its title
+is neutral, its trigger always waits for a new price event, and no old
+LONG/CALL direction or trigger can survive. A provider response with
 `finish_reason=length`, missing sections or unknown fields fails closed and is
 not persisted as a completed report.
 
@@ -172,6 +177,22 @@ ledger; changing a same-named runtime adapter cannot reroute old work.
 intents from the same ledger. For v2 it renders the complete title and eight
 sections; transport limits produce an explicit delivery outcome rather than a
 silently shortened message.
+
+For decision-linked operator notifications the ledger retains the complete,
+immutable ingress payload, while delivery applies a deterministic role
+projection. `setup` becomes a compact `WATCH` without an exact-contract entry
+instruction; `trade_ready` retains the opportunity identity, exact contract or
+spread, decision NBBO, limit, validity, invalidation, risk, target and
+reward/risk; `exit` preserves the terminal lifecycle account. Research context
+cannot crowd those fields out of the human action card.
+
+The economic-opportunity lifetime and quote lifetime are independent. A
+confirmed opportunity is actionable for five minutes by default, configurable
+only within five to ten minutes, while an executable option quote must normally
+be no more than 10--15 seconds old. Quote staleness pauses that delivery attempt
+until a fresh re-quote passes validation; it does not by itself expire or create
+a new opportunity. Structural invalidation, the entry cutoff and the hard exit
+clock remain terminal.
 
 ## Security boundary
 

@@ -201,7 +201,11 @@ def advance_level_decision(
     desired_move = desired_direction * (spot - level)
     if desired_move <= -settings.break_buffer_points:
         return _transition(state, phase, LevelPhase.INVALIDATED, now, "crossed_invalidation")
-    if _phase_timed_out(state, now, settings):
+    # The short phase timeout protects incomplete acceptance/retest paths.  A
+    # CONFIRMED opportunity has its own explicit event TTL and must remain
+    # available for the configured human action window instead of being cut
+    # back to ninety seconds by the pending-phase clock.
+    if phase is not LevelPhase.CONFIRMED and _phase_timed_out(state, now, settings):
         return _transition(state, phase, LevelPhase.EXPIRED, now, "phase_timeout")
 
     if phase in {LevelPhase.BREAK_PENDING, LevelPhase.REJECT_PENDING}:
@@ -589,7 +593,15 @@ def _handle_terminal_rearm(
         return _to_far(state, phase, now, "stable_structure_promoted")
     level = state.get("level")
     if isinstance(level, int | float) and observation.spot is not None:
-        if abs(float(observation.spot) - float(level)) <= settings.approach_points:
+        # The approach radius is intentionally wide so that a new wall/flip
+        # test can be observed before price arrives.  It is not the reset band:
+        # using it here can pin one EXPIRED event for hours while price has
+        # already moved far enough away to form a new economic opportunity.
+        # A terminal event is cleared after price leaves the actual
+        # rejection/retest band; the next tick may then arm a fresh generation
+        # inside the wider approach radius.
+        reset_band_points = max(settings.retest_points, settings.reject_points)
+        if abs(float(observation.spot) - float(level)) <= reset_band_points:
             return _unchanged(state, phase, now, "terminal_waiting_for_level_exit")
     return _to_far(state, phase, now, "terminal_level_exited")
 

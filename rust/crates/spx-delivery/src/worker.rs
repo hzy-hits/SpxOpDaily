@@ -798,8 +798,9 @@ mod tests {
             panic!("exactly one operator event must be sent");
         };
         assert_eq!(request.event_id, expected.event_id.as_str());
-        assert_eq!(request.message.title, expected.title.as_str());
-        assert_eq!(request.message.body, expected.body);
+        let rendered = crate::render_operator_notification(&expected);
+        assert_eq!(request.message.title, rendered.title);
+        assert_eq!(request.message.body, rendered.body);
     }
 
     #[test]

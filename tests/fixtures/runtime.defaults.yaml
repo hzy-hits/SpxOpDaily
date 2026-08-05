@@ -120,8 +120,8 @@ market_features:
   trade_market_anchor_max_age_seconds: {value: 20.0, description: Trade market-anchor freshness.}
   trade_structure_drift_points: {value: 10.0, description: Maximum live-frame decision drift for the reviewed pilot.}
   trade_entry_spread_fraction: {value: 1.0, description: Initial manual entry spread fraction; 1.0 is natural ask.}
-  trade_intent_ttl_seconds: {value: 90.0, description: Trade intent TTL.}
-  trade_entry_window_seconds: {value: 20.0, description: Alert candidate entry observation window.}
+  trade_intent_ttl_seconds: {value: 300.0, description: Trade opportunity TTL.}
+  trade_entry_window_seconds: {value: 300.0, description: Human opportunity action window.}
   trade_invalidation_buffer_points: {value: 3.0, description: SPX invalidation buffer.}
   trade_target_em_fraction: {value: 0.15, description: Fallback target EM fraction.}
   trade_confirmation_slippage_points: {value: 1.0, description: Confirmation-to-target slippage allowance.}
@@ -130,7 +130,7 @@ market_features:
   trade_time_stop_minutes: {value: 15, description: Default time stop; new entries stop at 15:30 ET and all reviewed TradeIntent lanes hard-exit by 15:45 ET.}
   gth_manual_candidate_enabled: {value: true, description: Enables the isolated manual-only GTH exact-spread candidate lane.}
   gth_manual_candidate_quote_max_age_seconds: {value: 15.0, description: Maximum GTH manual candidate quote age.}
-  gth_manual_candidate_ttl_seconds: {value: 20.0, description: Maximum GTH manual candidate lifetime.}
+  gth_manual_candidate_ttl_seconds: {value: 300.0, description: Maximum GTH manual opportunity lifetime.}
   gth_manual_candidate_max_debit_fraction: {value: 0.65, description: Maximum GTH manual candidate debit fraction of spread width.}
   gth_manual_candidate_max_net_spread_fraction: {value: 0.20, description: Maximum GTH manual candidate net market width fraction.}
   gth_manual_candidate_min_parity_pairs: {value: 3, description: Minimum cofresh parity pairs for a GTH target coordinate.}
@@ -1703,7 +1703,7 @@ level_decision_shadow:
   es_confirm_ratio:
     value: 0.25
     description: Minimum same-direction ES move relative to the observed SPX move.
-  terminal_rearm_seconds: {value: 30.0, description: Terminal event rearm delay.}
+  terminal_rearm_seconds: {value: 30.0, description: Terminal event rearm delay after price leaves the rejection/retest reset band.}
   structure_interval_seconds: {value: 300, description: Stable structure observation bucket seconds.}
   structure_required_confirmations: {value: 2, description: Distinct buckets required for wall replacement.}
   structure_band_half_width_points: {value: 5.0, description: Published wall range half width.}

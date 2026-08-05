@@ -110,7 +110,7 @@ def test_unknown_level_phase_is_visible_as_degraded_data_quality() -> None:
     assert "unknown_level_phase" not in rendered
 
 
-def test_terminal_level_phase_never_renders_as_a_fresh_observing_setup() -> None:
+def test_terminal_level_phase_renders_as_current_standby_not_a_repeated_old_path() -> None:
     payload = _payload()
     payload["level_decision"] = {
         **payload["level_decision"],  # type: ignore[dict-item]
@@ -124,9 +124,13 @@ def test_terminal_level_phase_never_renders_as_a_fresh_observing_setup() -> None
     projection = build_desk_map_projection(payload)
     rendered = render_operator_status_brief(payload, [], NOW)
 
-    assert projection.stage.value == "EXPIRED"
-    assert "Desk View  NO TRADE · 原路径已结束 · 状态：已过期（已过期）" in rendered
-    assert "Execution  CLOSED · EXPIRED · 等待离开 reset band 后重新武装" in rendered
+    assert projection.stage.value == "OBSERVING"
+    assert projection.phase.value == "expired"
+    assert "NO TRADE · STANDBY · 当前没有有效机会" in rendered
+    assert "原因  旧事件已经结束，当前没有活跃交易路径" in rendered
+    assert "Execution  WAIT · 当前没有可执行机会" in rendered
+    assert "已过期（已过期）" not in rendered
+    assert "当前结构阶段继续有效" not in rendered
 
 
 def test_guidance_emits_one_trade_ready_plan() -> None:

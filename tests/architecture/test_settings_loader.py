@@ -180,7 +180,7 @@ def test_gth_spread_and_exit_clock_settings_load() -> None:
         settings.market_features.gth_manual_candidate_quote_max_age_seconds
         == 15.0
     )
-    assert settings.market_features.gth_manual_candidate_ttl_seconds == 20.0
+    assert settings.market_features.gth_manual_candidate_ttl_seconds == 300.0
     assert settings.market_features.gth_manual_candidate_min_parity_pairs == 3
     assert settings.market_features.virtual_gth_exit_clock_et == settings.shock.gth_exit_clock_et
 
@@ -216,6 +216,40 @@ def test_shock_rejects_invalid_gth_spread_policy(
 def test_virtual_gth_exit_clock_rejects_non_wall_clock() -> None:
     with pytest.raises(ValueError, match="invalid ET clock"):
         replace(MarketFeatureSettings(), virtual_gth_exit_clock_et="09:45:30")
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    (
+        {"trade_quote_max_age_seconds": 9.9},
+        {"trade_quote_max_age_seconds": 15.1},
+        {"gth_manual_candidate_quote_max_age_seconds": 9.9},
+        {"gth_manual_candidate_quote_max_age_seconds": 15.1},
+    ),
+)
+def test_market_feature_settings_bound_execution_quote_freshness(
+    overrides: dict[str, object],
+) -> None:
+    with pytest.raises(ValueError, match="10 to 15 seconds"):
+        replace(MarketFeatureSettings(), **overrides)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    (
+        {"trade_intent_ttl_seconds": 299.9},
+        {"trade_intent_ttl_seconds": 600.1},
+        {"trade_entry_window_seconds": 299.9},
+        {"trade_entry_window_seconds": 600.1},
+        {"gth_manual_candidate_ttl_seconds": 299.9},
+        {"gth_manual_candidate_ttl_seconds": 600.1},
+    ),
+)
+def test_market_feature_settings_bound_manual_opportunity_windows(
+    overrides: dict[str, object],
+) -> None:
+    with pytest.raises(ValueError, match="5 to 10 minutes"):
+        replace(MarketFeatureSettings(), **overrides)
 
 
 @pytest.mark.parametrize(

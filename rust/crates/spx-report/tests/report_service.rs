@@ -461,7 +461,7 @@ fn stop_semantic_failure_also_uses_the_projection_message_fallback() {
 }
 
 #[test]
-fn omitted_p_vs_q_evidence_uses_the_uncompressed_projection_fallback() {
+fn omitted_p_vs_q_diagnostics_persist_the_compact_writer_message() {
     let temp = TempDir::new().unwrap();
     let config = config(&temp, true, &[5]);
     let now = ten_am() + TimeDelta::seconds(10);
@@ -469,7 +469,6 @@ fn omitted_p_vs_q_evidence_uses_the_uncompressed_projection_fallback() {
     source.message.desk_view = token(
         "NO TRADE\nP/Q研究（未校准，不产生方向） 5分钟上行终值跟随：P 62%（前日止，n=98/14日，区间52%–71%） · Q代理 49% · P−Q +13pp；未扣点差/滑点，真实成交与净收益标签尚不可用 → NO TRADE",
     );
-    let expected_message = source.message.clone();
     let mut compressed = source.message.clone();
     compressed.desk_view = token("NO TRADE · wait for the next price trigger");
     write_latest(&config.projection_path, source);
@@ -491,15 +490,15 @@ fn omitted_p_vs_q_evidence_uses_the_uncompressed_projection_fallback() {
     ));
     let intents = store_inspector.intents();
     assert_eq!(intents.len(), 1);
-    assert_eq!(intents[0].message, expected_message);
-    assert!(intents[0].message.desk_view.as_str().contains("n=98/14日"));
-    assert!(intents[0].message.desk_view.as_str().contains("P−Q +13pp"));
-    let health = ReportHealth::load(&config.health_path).unwrap();
     assert_eq!(
-        health.last_fallback_reason.as_deref(),
-        Some("research_advisory_missing")
+        intents[0].message.desk_view.as_str(),
+        "NO TRADE · wait for the next price trigger"
     );
-    assert_eq!(health.counters.projection_message_fallbacks, 1);
+    assert!(!intents[0].message.desk_view.as_str().contains("P/Q"));
+    assert!(!intents[0].message.desk_view.as_str().contains("P−Q"));
+    let health = ReportHealth::load(&config.health_path).unwrap();
+    assert!(health.last_fallback_reason.is_none());
+    assert_eq!(health.counters.projection_message_fallbacks, 0);
 }
 
 #[test]

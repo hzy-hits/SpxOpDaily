@@ -6,8 +6,9 @@ use chrono::{DateTime, TimeDelta, Utc};
 use serde::Serialize;
 use sha2::{Digest as _, Sha256};
 use spx_domain::{
-    DeskMapProjectionV1, NOTIFICATION_INTENT_V2_SCHEMA_VERSION, NotificationIntentV2,
-    NotificationLineageV2, Token, Validate,
+    DeskDataQuality, DeskLevelPhase, DeskMapProjectionV1, DeskMessageV2, DeskStage,
+    NOTIFICATION_INTENT_V2_SCHEMA_VERSION, NotificationIntentV2, NotificationLineageV2, Token,
+    Validate,
 };
 use spx_ledger::{Ledger, LedgerError, OwnerLease, OwnerRole, PersistWrite};
 use thiserror::Error;
@@ -523,6 +524,7 @@ impl<W: DeskMessageWriter, L: ScheduledReportStore> ReportService<W, L> {
                 }
             }
         };
+        let message = scheduled_operator_projection(projection, message)?;
         self.record_response_metadata(&response_metadata);
         self.health.last_fallback_reason = fallback_reason.map(|reason| reason.as_str().to_owned());
         if fallback_reason.is_some() {
@@ -670,6 +672,71 @@ fn build_intent(
     Ok(intent)
 }
 
+fn scheduled_operator_projection(
+    projection: &DeskMapProjectionV1,
+    writer_message: DeskMessageV2,
+) -> Result<DeskMessageV2, spx_domain::DomainError> {
+    if !standing_status_required(projection) {
+        return Ok(writer_message);
+    }
+
+    let source = &projection.message;
+    let location = source
+        .location
+        .as_str()
+        .lines()
+        .next()
+        .unwrap_or(source.location.as_str())
+        .split('·')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .take(2)
+        .collect::<Vec<_>>()
+        .join(" · ");
+    let data_quality = match projection.quality {
+        DeskDataQuality::Ready => "READY · 行情仅用于等待下一结构",
+        DeskDataQuality::Degraded => "DEGRADED · 数据降级，保持 NO TRADE",
+        DeskDataQuality::Unavailable => "UNAVAILABLE · 行情不足，保持 NO TRADE",
+    };
+    let structure = source
+        .structure
+        .as_str()
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("当前结构不可用");
+    let standing = DeskMessageV2 {
+        title: Token::new("SPX Desk Map · STANDBY", "standing title")?,
+        desk_view: Token::new("NO TRADE · 当前无有效机会", "standing desk view")?,
+        location: Token::new(
+            if location.is_empty() {
+                "当前坐标不可用".to_owned()
+            } else {
+                location
+            },
+            "standing location",
+        )?,
+        structure: Token::new(format!("参考结构 · {structure}"), "standing structure")?,
+        primary_path: Token::new("方向来源：暂无；等待新的价格事件确认", "standing trigger")?,
+        alternative_path: Token::new("新结构形成后重新计算", "standing invalidation")?,
+        targets: Token::new("无有效交易目标", "standing targets")?,
+        execution: Token::new("WAIT · 当前无人工操作", "standing execution")?,
+        data_quality: Token::new(data_quality, "standing data quality")?,
+    };
+    standing.validate()?;
+    Ok(standing)
+}
+
+fn standing_status_required(projection: &DeskMapProjectionV1) -> bool {
+    matches!(
+        projection.stage,
+        DeskStage::Exit | DeskStage::Invalidated | DeskStage::Expired
+    ) || matches!(
+        projection.phase,
+        DeskLevelPhase::Invalidated | DeskLevelPhase::Expired
+    )
+}
+
 fn sleep_interruptibly(milliseconds: u64, stop: &AtomicBool) {
     let mut remaining = milliseconds;
     while remaining > 0 && !stop.load(Ordering::Relaxed) {
@@ -692,8 +759,9 @@ mod tests {
 
     use super::{
         DEEPSEEK_MODEL_ID, DeskMessageWriteFailure, ReportWriterErrorCode, ResponseMetadata,
-        projection_expired_after_generation,
+        projection_expired_after_generation, scheduled_operator_projection,
     };
+    use spx_domain::{DeskDirection, DeskLevelPhase, DeskMapProjectionV1, DeskStage, Token};
 
     #[test]
     fn slot_grace_limits_generation_start_not_valid_completion() {
@@ -774,5 +842,112 @@ mod tests {
                 .is_none()
             );
         }
+    }
+
+    #[test]
+    fn expired_projection_becomes_a_short_standing_status() {
+        let mut projection: DeskMapProjectionV1 = serde_json::from_str(include_str!(
+            "../../../../contracts/golden/domain/v1/desk_map_projection.json"
+        ))
+        .unwrap();
+        projection.stage = DeskStage::Expired;
+        projection.phase = DeskLevelPhase::Expired;
+        projection.direction = DeskDirection::None;
+        let source = projection.message.clone();
+
+        let standing = scheduled_operator_projection(&projection, source).unwrap();
+
+        assert_eq!(standing.desk_view.as_str(), "NO TRADE · 当前无有效机会");
+        assert_eq!(standing.title.as_str(), "SPX Desk Map · STANDBY");
+        assert_eq!(standing.execution.as_str(), "WAIT · 当前无人工操作");
+        assert_eq!(standing.targets.as_str(), "无有效交易目标");
+        assert!(standing.structure.as_str().starts_with("参考结构 · "));
+        assert!(
+            standing
+                .primary_path
+                .as_str()
+                .starts_with("方向来源：暂无；")
+        );
+        let visible = serde_json::to_string(&standing).unwrap();
+        assert!(!visible.contains("原路径已结束"));
+        assert!(!visible.contains("已过期"));
+        assert!(!visible.contains("模型权重"));
+        assert!(!visible.contains("P−Q"));
+    }
+
+    #[test]
+    fn terminal_projection_ignores_hostile_writer_direction_title_and_old_trigger() {
+        let mut projection: DeskMapProjectionV1 = serde_json::from_str(include_str!(
+            "../../../../contracts/golden/domain/v1/desk_map_projection.json"
+        ))
+        .unwrap();
+        projection.stage = DeskStage::Expired;
+        projection.phase = DeskLevelPhase::Expired;
+        projection.direction = DeskDirection::Up;
+        projection.message.location =
+            Token::new("SPX 7762.30 · ES 7790.88 · Flip 7760", "source location").unwrap();
+        projection.message.structure = Token::new(
+            "Put/Flip/Call 7700 / 7740–7760 / 7780\nGamma 不参与方向",
+            "source structure",
+        )
+        .unwrap();
+
+        let mut hostile_writer = projection.message.clone();
+        hostile_writer.title = Token::new("SPX LONG / CALL READY", "hostile title").unwrap();
+        hostile_writer.location = Token::new("LLM old location 7000", "hostile location").unwrap();
+        hostile_writer.structure =
+            Token::new("LLM old structure 7000", "hostile structure").unwrap();
+        hostile_writer.primary_path = Token::new(
+            "方向来源 LONG / CALL\n下一触发 复用旧事件 7760",
+            "hostile trigger",
+        )
+        .unwrap();
+
+        let standing = scheduled_operator_projection(&projection, hostile_writer).unwrap();
+
+        assert_eq!(standing.title.as_str(), "SPX Desk Map · STANDBY");
+        assert_eq!(standing.location.as_str(), "SPX 7762.30 · ES 7790.88");
+        assert_eq!(
+            standing.structure.as_str(),
+            "参考结构 · Put/Flip/Call 7700 / 7740–7760 / 7780"
+        );
+        assert_eq!(
+            standing.primary_path.as_str(),
+            "方向来源：暂无；等待新的价格事件确认"
+        );
+        let visible = serde_json::to_string(&standing).unwrap();
+        assert!(!visible.contains("LONG"));
+        assert!(!visible.contains("CALL"));
+        assert!(!visible.contains("复用旧事件"));
+        assert!(!visible.contains("LLM old"));
+    }
+
+    #[test]
+    fn actionable_projection_keeps_the_writer_message() {
+        let projection: DeskMapProjectionV1 = serde_json::from_str(include_str!(
+            "../../../../contracts/golden/domain/v1/desk_map_projection.json"
+        ))
+        .unwrap();
+        let source = projection.message.clone();
+
+        let projected = scheduled_operator_projection(&projection, source.clone()).unwrap();
+
+        assert_eq!(projected, source);
+    }
+
+    #[test]
+    fn directionless_watching_projection_keeps_its_specific_trigger() {
+        let mut projection: DeskMapProjectionV1 = serde_json::from_str(include_str!(
+            "../../../../contracts/golden/domain/v1/desk_map_projection.json"
+        ))
+        .unwrap();
+        projection.stage = DeskStage::Watching;
+        projection.phase = DeskLevelPhase::Testing;
+        projection.direction = DeskDirection::None;
+        let source = projection.message.clone();
+
+        let projected = scheduled_operator_projection(&projection, source.clone()).unwrap();
+
+        assert_eq!(projected, source);
     }
 }

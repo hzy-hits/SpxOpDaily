@@ -134,11 +134,16 @@ def test_confirmed_path_expires_instead_of_remaining_valid_indefinitely() -> Non
     holding = advance(retest.state, 45, spot=95.0, es=4996.0)
     confirmed = advance(holding.state, 56, spot=94.0, es=4994.0)
 
-    expired = advance(confirmed.state, 147, spot=94.0, es=4994.0)
+    still_confirmed = advance(confirmed.state, 147, spot=94.0, es=4994.0)
+
+    assert still_confirmed.current_phase is LevelPhase.CONFIRMED
+    assert still_confirmed.reason == "no_transition"
+
+    expired = advance(still_confirmed.state, 357, spot=94.0, es=4994.0)
 
     assert expired.previous_phase is LevelPhase.CONFIRMED
     assert expired.current_phase is LevelPhase.EXPIRED
-    assert expired.reason == "phase_timeout"
+    assert expired.reason == "confirmed_ttl_elapsed"
 
 
 def test_fade_and_breakout_are_mutually_exclusive_for_one_frozen_level() -> None:
@@ -392,6 +397,27 @@ def test_expired_event_must_exit_reset_band_before_rearming_same_level() -> None
     assert rearmed.current_phase is LevelPhase.APPROACHING
     assert rearmed.reason == "nearest_level_armed"
     assert rearmed.state["event_id"] != armed.state["event_id"]
+    assert rearmed.state["reentry_generation"] == 1
+
+
+def test_expired_event_clears_outside_reset_band_even_inside_approach_radius() -> None:
+    armed = advance(None, 0, spot=95.0, es=5000.0)
+    expired = {
+        **armed.state,
+        "phase": LevelPhase.EXPIRED.value,
+        "phase_at": NOW.isoformat(),
+    }
+
+    # put_wall=100: seven points is outside the six-point reset band but still
+    # inside the twelve-point approach radius.
+    reset = advance(expired, 31, spot=93.0, es=4998.0)
+
+    assert reset.current_phase is LevelPhase.FAR
+    assert reset.reason == "terminal_level_exited"
+    assert reset.state["next_reentry_generation"] == 1
+
+    rearmed = advance(reset.state, 32, spot=93.0, es=4998.0)
+    assert rearmed.current_phase is LevelPhase.APPROACHING
     assert rearmed.state["reentry_generation"] == 1
 
 

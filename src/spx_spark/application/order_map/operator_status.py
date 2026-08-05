@@ -199,10 +199,12 @@ def build_desk_map_projection(payload: Mapping[str, Any]) -> DeskMapProjection:
         stage = DeskStage.ARMED
     elif phase in {LevelPhase.APPROACHING, LevelPhase.TESTING}:
         stage = DeskStage.WATCHING
-    elif phase is LevelPhase.INVALIDATED:
-        stage = DeskStage.INVALIDATED
-    elif phase is LevelPhase.EXPIRED:
-        stage = DeskStage.EXPIRED
+    elif phase in {LevelPhase.INVALIDATED, LevelPhase.EXPIRED}:
+        # Terminal transitions are delivered once by the lifecycle lane.  A
+        # scheduled Desk Map describes the current operating posture, so an
+        # old terminal event is STANDBY/OBSERVING rather than a current expired
+        # path that gets repeated every half hour.
+        stage = DeskStage.OBSERVING
     else:
         stage = DeskStage.OBSERVING
     decision_direction = _closed_direction(decision.get("direction"))
@@ -290,10 +292,13 @@ def _desk_view_line(
     projection: DeskMapProjection,
     guidance: guidance_module.DecisionGuidance,
 ) -> str:
+    if projection.phase in {LevelPhase.INVALIDATED, LevelPhase.EXPIRED}:
+        return (
+            "Desk View  NO TRADE · STANDBY · 当前没有有效机会；"
+            "旧事件已结束，等待新的价格触发"
+        )
     if projection.stage is DeskStage.PAUSED:
         signal = "NO TRADE · 数据或执行门控暂停"
-    elif projection.stage in {DeskStage.INVALIDATED, DeskStage.EXPIRED}:
-        signal = "NO TRADE · 原路径已结束"
     elif projection.direction in {"up", "down"} and projection.thesis in {
         "breakout",
         "fade",
@@ -665,8 +670,8 @@ def _execution_line(
         if "ready_without_current_confirmed_path" in projection.quality_reasons:
             return "Execution  PAUSED · 执行卡与当前价格路径不一致，禁止使用旧 READY"
         return f"Execution  PAUSED · {guidance.action_text}"
-    if projection.stage in {DeskStage.INVALIDATED, DeskStage.EXPIRED}:
-        return f"Execution  CLOSED · {projection.stage.value} · 等待离开 reset band 后重新武装"
+    if projection.phase in {LevelPhase.INVALIDATED, LevelPhase.EXPIRED}:
+        return "Execution  WAIT · 当前没有可执行机会；新事件确认后再评估"
     return "Execution  WAIT · 尚无确定性结构入场"
 
 

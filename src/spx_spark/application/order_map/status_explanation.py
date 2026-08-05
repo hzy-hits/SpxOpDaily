@@ -93,7 +93,10 @@ def operator_reason_line(payload: dict[str, Any]) -> str:
         reasons.append("可靠 SPX 坐标暂不可用")
     if decision.get("structure_change_pending") is True:
         reasons.append("新结构仍在确认")
-    if str(decision.get("phase") or "far").lower() == "far":
+    phase = str(decision.get("phase") or "far").lower()
+    if phase in {"invalidated", "expired"}:
+        reasons.append("旧事件已经结束，当前没有活跃交易路径")
+    if phase == "far":
         reasons.append("当前未触发关键位，趋势信号继续独立评估")
     if intent.get("status") == "blocked":
         blocked = [
@@ -102,7 +105,7 @@ def operator_reason_line(payload: dict[str, Any]) -> str:
             if str(item)
         ]
         reasons.append(blocked[0] if blocked else "实时合约报价尚未就绪")
-    if str(decision.get("phase") or "").lower() == "confirmed" and not reasons:
+    if phase == "confirmed" and not reasons:
         reasons.append("方向路径已确认，执行门控尚未完成")
     if not reasons:
         reasons.append("当前结构阶段继续有效，等待下一个状态转换")

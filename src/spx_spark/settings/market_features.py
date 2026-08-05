@@ -6,6 +6,12 @@ from dataclasses import dataclass
 from datetime import time
 
 
+MIN_MANUAL_OPPORTUNITY_SECONDS = 300.0
+MAX_MANUAL_OPPORTUNITY_SECONDS = 600.0
+MIN_EXECUTION_QUOTE_FRESHNESS_SECONDS = 10.0
+MAX_EXECUTION_QUOTE_FRESHNESS_SECONDS = 15.0
+
+
 @dataclass(frozen=True)
 class MarketFeatureSettings:
     enabled: bool = True
@@ -41,12 +47,12 @@ class MarketFeatureSettings:
     trade_follow_through_em_fraction: float = 0.05
     trade_confirmed_pilot_enabled: bool = False
     trade_repricing_max_age_seconds: float = 90.0
-    trade_quote_max_age_seconds: float = 5.0
+    trade_quote_max_age_seconds: float = 15.0
     trade_market_anchor_max_age_seconds: float = 20.0
     trade_structure_drift_points: float = 5.0
     trade_entry_spread_fraction: float = 1.0
-    trade_intent_ttl_seconds: float = 90.0
-    trade_entry_window_seconds: float = 20.0
+    trade_intent_ttl_seconds: float = 300.0
+    trade_entry_window_seconds: float = 300.0
     trade_invalidation_buffer_points: float = 3.0
     trade_target_em_fraction: float = 0.15
     trade_confirmation_slippage_points: float = 1.0
@@ -55,7 +61,7 @@ class MarketFeatureSettings:
     trade_time_stop_minutes: int = 15
     gth_manual_candidate_enabled: bool = True
     gth_manual_candidate_quote_max_age_seconds: float = 15.0
-    gth_manual_candidate_ttl_seconds: float = 20.0
+    gth_manual_candidate_ttl_seconds: float = 300.0
     gth_manual_candidate_max_debit_fraction: float = 0.65
     gth_manual_candidate_max_net_spread_fraction: float = 0.20
     gth_manual_candidate_min_parity_pairs: int = 3
@@ -188,6 +194,29 @@ class MarketFeatureSettings:
         )
         if any(value > 100 for value in score_fields):
             raise ValueError("market feature score thresholds cannot exceed 100")
+        quote_freshness_fields = (
+            self.trade_quote_max_age_seconds,
+            self.gth_manual_candidate_quote_max_age_seconds,
+        )
+        if any(
+            not MIN_EXECUTION_QUOTE_FRESHNESS_SECONDS
+            <= value
+            <= MAX_EXECUTION_QUOTE_FRESHNESS_SECONDS
+            for value in quote_freshness_fields
+        ):
+            raise ValueError("execution quote freshness must be within 10 to 15 seconds")
+        opportunity_window_fields = (
+            self.trade_intent_ttl_seconds,
+            self.trade_entry_window_seconds,
+            self.gth_manual_candidate_ttl_seconds,
+        )
+        if any(
+            not MIN_MANUAL_OPPORTUNITY_SECONDS
+            <= value
+            <= MAX_MANUAL_OPPORTUNITY_SECONDS
+            for value in opportunity_window_fields
+        ):
+            raise ValueError("manual opportunity windows must be within 5 to 10 minutes")
         fractions = (
             self.trade_follow_through_em_fraction,
             self.trade_entry_spread_fraction,

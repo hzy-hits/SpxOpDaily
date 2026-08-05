@@ -21,23 +21,22 @@ The object must contain exactly these string fields:
 title, desk_view, location, structure, primary_path, alternative_path, targets, execution, data_quality.
 Every field must be non-empty. Do not add, remove, rename, or nest fields.
 Use the complete desk_map_projection.v1 JSON and explicit research-context status supplied by the user as the sole factual authority.
-Write an operator-facing compact report, not a transcript of the source object. Synthesize repeated facts and omit internal detail that does not change the human decision. Do not collapse the result into a generic 283-character notification.
+Write an operator-facing compact report, not a transcript of the source object. Synthesize repeated facts and omit internal detail that does not change the human decision.
 Use the fixed fields as this presentation contract: desk_view is Base Case and the current human decision; location plus structure explain Why; primary_path is the next Trigger; alternative_path is Invalidation or the genuinely distinct alternative; targets contains only active structural or trade targets; execution states exactly what the operator may do; data_quality states the Primary Data Impact.
 Preserve decision-critical conditions, lifecycle state, current location, active level, trigger, invalidation, target, exact-leg ask cap, TTL, and R/R when they exist. Do not repeat every timestamp, diagnostic count, unavailable component, or numeric value merely because it appears in the source.
 Embedded research_context.v2 is bootstrap-unvalidated advisory evidence with no action authority. When a usable advisory forecast is present, integrate one decision-relevant horizon into Base Case and label it 未校准研究观点. A source-supplied forecast probability may be shown only as 未校准研究概率; never invent, calibrate, round into false certainty, or present a latent state as market-maker behavior. Research may inform Base Case but must never create trade direction, READY, a trigger, or an order.
-When desk_view contains a P/Q研究 line, preserve its P, Q代理, P−Q, sample count, interval, horizon, and NO TRADE conclusion exactly. Keep the labels 未校准 and 不产生方向, and do not rename P−Q as edge because execution costs and net-PnL labels are not yet available.
+When research is present, keep at most one short research-background line. Label it 未校准 and 不产生方向. HMM state weights, P/Q diagnostics, Gamma and model internals belong to research evidence, not to the human action or execution fields. Never rename P−Q as edge because execution costs and net-PnL labels are not yet available.
 research_context_status=embedded_contract_valid means only that the wire contract passed; nested availability remains authoritative. Summarize the one most useful available research result instead of dumping every posterior, quantile, state ID, model version, or reason code.
 When research_context_status is unavailable, data_quality must explicitly say research is unavailable and must make no HMM, range, or close-location claim.
 Direction may come only from an explicit price trigger confirmed by ES flow in the source projection. Gamma describes only the feedback mechanism that may suppress or amplify an already observed move; Gamma must never be presented as the source of an up or down direction.
 Dealer sign is unknown. Do not claim that market makers are buying, selling, forced to hedge, or causing a directional move.
-Preserve exact semantic markers in their operator-facing fields: 方向来源 in primary_path; Gamma职责 and dealer sign unknown in structure; NO TRADE in desk_view.
+Preserve 方向来源 in primary_path and NO TRADE in desk_view when the source contains them. Do not require Gamma, dealer-sign, HMM or P/Q prose in the visible report.
 When typed direction is none, title, desk_view, and execution must not say LONG, SHORT, 做多, or 做空, and execution must not say READY. An unvalidated research bias may still be stated as advisory context when it is clearly separated from trade direction. When an up source contains LONG / CALL, or a down source contains SHORT / PUT, preserve that exact label in desk_view.
-Preserve READY, HOLD, PAUSED, WAIT, and CLOSED from source execution in output execution. You may shorten every source field; there is no per-field byte or numeric-copy floor. Omit repetition while never contradicting decision-relevant facts or required semantic markers.
+Preserve READY, HOLD, PAUSED, WAIT, and CLOSED from source execution in output execution. Shorten source fields aggressively when doing so does not remove an active trigger, invalidation, target, exact-leg limit, TTL or R/R.
 Lead with the human decision and its reason. Translate lifecycle and quality into plain language; do not expose schema names, raw field names, hashes, internal identifiers, action_authority, automatic_ordering, or raw enum dumps unless they change what the operator may safely do.
 In data_quality, state the single most important human impact first. Never expose raw audit codes or reason-code lists in any visible field; they remain in the source artifact for audit.
 Keep one useful sentence in each section and enough concrete evidence to support the Base Case. Do not invent orders, fills, positions, probabilities, or market-maker behavior.";
 
-const STRUCTURE_SEMANTIC_MARKERS: [&str; 2] = ["Gamma职责", "dealer sign unknown"];
 const EXECUTION_STATE_MARKERS: [&str; 5] = ["READY", "HOLD", "PAUSED", "WAIT", "CLOSED"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -532,14 +531,8 @@ fn validate_rendered_message(
         Some(ReportWriterErrorCode::ExecutionStateMarkerMissing)
     } else if critical_numeric_fact_is_missing(message, projection) {
         Some(ReportWriterErrorCode::CriticalFactMissing)
-    } else if research_advisory_is_missing(message, &projection.message)
-        || probability_advisory_is_missing(message, &projection.message)
-    {
-        Some(ReportWriterErrorCode::ResearchAdvisoryMissing)
     } else if visible_internal_detail_leaked(message, projection) {
         Some(ReportWriterErrorCode::InternalDetailLeak)
-    } else if message_field_is_compressed(message, &projection.message) {
-        Some(ReportWriterErrorCode::FieldCompressionDetected)
     } else {
         None
     };
@@ -549,30 +542,11 @@ fn validate_rendered_message(
     }
 }
 
-fn message_field_is_compressed(actual: &DeskMessageV2, source: &DeskMessageV2) -> bool {
-    [
-        (&actual.title, &source.title),
-        (&actual.desk_view, &source.desk_view),
-        (&actual.location, &source.location),
-        (&actual.structure, &source.structure),
-        (&actual.primary_path, &source.primary_path),
-        (&actual.alternative_path, &source.alternative_path),
-        (&actual.targets, &source.targets),
-        (&actual.execution, &source.execution),
-        (&actual.data_quality, &source.data_quality),
-    ]
-    .into_iter()
-    .any(|(actual_field, source_field)| actual_field.as_str().len() < source_field.as_str().len())
-}
-
 fn semantic_marker_field_mismatch(actual: &DeskMessageV2, source: &DeskMessageV2) -> bool {
     (message_contains_marker(source, "方向来源")
         && !actual.primary_path.as_str().contains("方向来源"))
         || (message_contains_marker(source, "NO TRADE")
             && !actual.desk_view.as_str().contains("NO TRADE"))
-        || STRUCTURE_SEMANTIC_MARKERS.into_iter().any(|marker| {
-            message_contains_marker(source, marker) && !actual.structure.as_str().contains(marker)
-        })
 }
 
 fn message_contains_marker(message: &DeskMessageV2, marker: &str) -> bool {
@@ -602,62 +576,6 @@ fn research_advisory_is_disclosed(message: &DeskMessageV2) -> bool {
         || text.contains("不授权 READY")
         || text.contains("不改变价格触发或READY");
     explicitly_uncalibrated && explicitly_non_actionable
-}
-
-fn research_advisory_is_missing(actual: &DeskMessageV2, source: &DeskMessageV2) -> bool {
-    let source_text = source.desk_view.as_str();
-    if !source_text.contains("研究视角（HMM未校准") {
-        return false;
-    }
-    let actual_text = actual.desk_view.as_str();
-    let uncalibrated_view = actual_text.contains("未校准")
-        && (actual_text.contains("HMM") || actual_text.contains("研究"));
-    let baseline = source_text
-        .split_once("基线=")
-        .map(|(_, remainder)| remainder)
-        .and_then(|remainder| remainder.split(['·', '；', '\n']).next())
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    let baseline_missing = baseline.is_none_or(|value| !actual_text.contains(value));
-    let model_weight_missing =
-        first_numeric_after(source_text, "模型权重").is_some_and(|required| {
-            first_numeric_after(actual_text, "模型权重")
-                .is_none_or(|actual_weight| actual_weight != required)
-        });
-    !uncalibrated_view || baseline_missing || model_weight_missing
-}
-
-fn probability_advisory_is_missing(actual: &DeskMessageV2, source: &DeskMessageV2) -> bool {
-    let source_text = source.desk_view.as_str();
-    let Some(source_line) = source_text
-        .lines()
-        .find(|line| line.contains("P/Q研究（未校准"))
-    else {
-        return false;
-    };
-    let Some(actual_line) = actual
-        .desk_view
-        .as_str()
-        .lines()
-        .find(|line| line.contains("P/Q"))
-    else {
-        return true;
-    };
-    let boundary_missing = !actual_line.contains("未校准")
-        || !(actual_line.contains("不产生方向") || actual_line.contains("不改变价格方向"));
-    let required_labels_missing = ["P ", "Q代理", "P−Q", "n=", "区间", "NO TRADE"]
-        .into_iter()
-        .any(|label| source_line.contains(label) && !actual_line.contains(label));
-    let actual_numbers = numeric_atoms(actual_line);
-    let required_numbers_missing = numeric_atoms(source_line)
-        .into_iter()
-        .any(|required| !actual_numbers.contains(&required));
-    boundary_missing || required_labels_missing || required_numbers_missing
-}
-
-fn first_numeric_after(text: &str, marker: &str) -> Option<u64> {
-    text.split_once(marker)
-        .and_then(|(_, remainder)| numeric_atoms(remainder).into_iter().next())
 }
 
 fn none_direction_has_actionable_language(message: &DeskMessageV2) -> bool {

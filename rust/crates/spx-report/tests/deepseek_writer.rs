@@ -206,9 +206,8 @@ fn assert_compact_prompt_contract(system_prompt: &str) {
         "do not expose schema names, raw field names, hashes",
         "single most important human impact first",
         "Never expose raw audit codes",
-        "no per-field byte or numeric-copy floor",
-        "Gamma职责",
-        "dealer sign unknown",
+        "at most one short research-background line",
+        "Do not require Gamma",
     ] {
         assert!(system_prompt.contains(required), "missing {required}");
     }
@@ -394,7 +393,7 @@ fn desk_map_writer_sends_the_complete_projection_and_accepts_a_long_canonical_me
 }
 
 #[test]
-fn shorter_operator_message_is_rejected_even_when_required_semantics_survive() {
+fn shorter_operator_message_is_accepted_when_required_semantics_survive() {
     let mut source = semantic_message_value();
     for field in [
         "title",
@@ -427,15 +426,13 @@ fn shorter_operator_message_is_rejected_even_when_required_semantics_survive() {
     )
     .unwrap();
 
-    let error = client.write_desk_map(&projection).unwrap_err();
-    assert_eq!(
-        error.code(),
-        ReportWriterErrorCode::FieldCompressionDetected
-    );
+    let output = client.write_desk_map(&projection).unwrap();
+    assert_eq!(output.message.desk_view.as_str(), "NO TRADE");
+    assert_eq!(output.message.execution.as_str(), "WAIT");
 }
 
 #[test]
-fn rewritten_message_below_a_source_field_floor_is_rejected() {
+fn rewritten_message_may_omit_inactive_source_numbers() {
     let source = numeric_message_value();
     let mut projection = projection_with_message(&source);
     projection.level_kind = None;
@@ -458,10 +455,22 @@ fn rewritten_message_below_a_source_field_floor_is_rejected() {
     )
     .unwrap();
 
-    let error = client.write_desk_map(&projection).unwrap_err();
-    assert_eq!(
-        error.code(),
-        ReportWriterErrorCode::FieldCompressionDetected
+    let output = client.write_desk_map(&projection).unwrap();
+    let expected: DeskMessageV2 = serde_json::from_value(rewritten).unwrap();
+    assert_eq!(output.message.title, expected.title);
+    assert_eq!(output.message.desk_view, expected.desk_view);
+    assert_eq!(output.message.location, expected.location);
+    assert_eq!(output.message.structure, expected.structure);
+    assert_eq!(output.message.primary_path, expected.primary_path);
+    assert_eq!(output.message.alternative_path, expected.alternative_path);
+    assert_eq!(output.message.targets, expected.targets);
+    assert_eq!(output.message.execution, expected.execution);
+    assert!(
+        output
+            .message
+            .data_quality
+            .as_str()
+            .starts_with(expected.data_quality.as_str())
     );
 }
 
@@ -555,7 +564,7 @@ fn visible_internal_contract_ids_hashes_and_raw_reason_codes_fail_closed() {
 }
 
 #[test]
-fn source_research_base_case_cannot_disappear_from_the_visible_desk_view() {
+fn source_research_base_case_may_be_reduced_to_a_boundary_disclosure() {
     let mut projection_value: Value = serde_json::from_str(include_str!(
         "../../../../contracts/golden/domain/v1/desk_map_projection.json"
     ))
@@ -566,7 +575,6 @@ fn source_research_base_case_cannot_disappear_from_the_visible_desk_view() {
     projection_value["message"]["desk_view"] = json!(
         "NO TRADE\n研究视角（HMM未校准，仅咨询；夜盘ES）：基线=区间/中位收盘 · HMM映射后的主导收盘桶模型权重 90%；不改变价格方向、触发或READY"
     );
-    let source_message = projection_value["message"].clone();
     let projection: DeskMapProjectionV1 = serde_json::from_value(projection_value).unwrap();
     projection.validate().unwrap();
 
@@ -580,30 +588,20 @@ fn source_research_base_case_cannot_disappear_from_the_visible_desk_view() {
         )),
     )
     .unwrap();
-    let error = client.write_desk_map(&projection).unwrap_err();
-    assert_eq!(error.code(), ReportWriterErrorCode::ResearchAdvisoryMissing);
-
-    let mut visible = concise_semantic_message_value();
-    visible["desk_view"] =
-        json!("NO TRADE · 未校准HMM研究 Base Case：区间/中位收盘 · 模型权重 90%");
-    visible["data_quality"] = json!("Ready · 未校准研究不产生交易方向或授权 READY");
-    pad_message_fields_to_source_floor(&mut visible, &source_message);
-    let client = ReportWriterClient::new(
-        config(true, 64_000),
-        true,
-        RecordingTransport::new(TransportResponse::new(
-            200,
-            response(&serde_json::to_string(&visible).unwrap(), "stop"),
-        )),
-    )
-    .unwrap();
-
     let output = client.write_desk_map(&projection).unwrap();
-    assert!(output.message.desk_view.as_str().contains("模型权重 90%"));
+    assert_eq!(output.message.desk_view.as_str(), "NO TRADE");
+    assert!(!output.message.desk_view.as_str().contains("模型权重"));
+    assert!(
+        output
+            .message
+            .data_quality
+            .as_str()
+            .contains(RESEARCH_ADVISORY_DISCLOSURE)
+    );
 }
 
 #[test]
-fn p_vs_q_evidence_cannot_disappear_or_change_in_the_visible_desk_view() {
+fn p_vs_q_diagnostics_may_be_omitted_from_the_operator_report() {
     let mut source = semantic_message_value();
     source["desk_view"] = json!(
         "NO TRADE\nP/Q研究（未校准，不产生方向） 5分钟上行终值跟随：P 62%（前日止，n=98/14日，区间52%–71%） · Q代理 49% · P−Q +13pp；未扣点差/滑点，真实成交与净收益标签尚不可用 → NO TRADE"
@@ -623,73 +621,13 @@ fn p_vs_q_evidence_cannot_disappear_or_change_in_the_visible_desk_view() {
         )),
     )
     .unwrap();
-    let error = client.write_desk_map(&projection).unwrap_err();
-    assert_eq!(error.code(), ReportWriterErrorCode::ResearchAdvisoryMissing);
-
-    for (original, changed) in [
-        ("Q代理 49%", "Q代理 59%"),
-        ("n=98/14日", "n=8/4日"),
-        ("区间52%–71%", "区间52%–70%"),
-    ] {
-        let mut changed_probability = source.clone();
-        changed_probability["desk_view"] = json!(
-            source["desk_view"]
-                .as_str()
-                .unwrap()
-                .replace(original, changed)
-        );
-        let client = ReportWriterClient::new(
-            config(true, 64_000),
-            true,
-            RecordingTransport::new(TransportResponse::new(
-                200,
-                response(
-                    &serde_json::to_string(&changed_probability).unwrap(),
-                    "stop",
-                ),
-            )),
-        )
-        .unwrap();
-        let error = client.write_desk_map(&projection).unwrap_err();
-        assert_eq!(error.code(), ReportWriterErrorCode::ResearchAdvisoryMissing);
-    }
-
-    let mut relocated_probability = source.clone();
-    relocated_probability["desk_view"] = json!(
-        "NO TRADE · 5 62 98 14 52 71 49 13\nP/Q研究（未校准，不产生方向） · 等待价格确认 → NO TRADE"
-    );
-    let client = ReportWriterClient::new(
-        config(true, 64_000),
-        true,
-        RecordingTransport::new(TransportResponse::new(
-            200,
-            response(
-                &serde_json::to_string(&relocated_probability).unwrap(),
-                "stop",
-            ),
-        )),
-    )
-    .unwrap();
-    let error = client.write_desk_map(&projection).unwrap_err();
-    assert_eq!(error.code(), ReportWriterErrorCode::ResearchAdvisoryMissing);
-
-    let client = ReportWriterClient::new(
-        config(true, 64_000),
-        true,
-        RecordingTransport::new(TransportResponse::new(
-            200,
-            response(&serde_json::to_string(&source).unwrap(), "stop"),
-        )),
-    )
-    .unwrap();
     let output = client.write_desk_map(&projection).unwrap();
-    assert!(output.message.desk_view.as_str().contains("P 62%"));
-    assert!(output.message.desk_view.as_str().contains("Q代理 49%"));
-    assert!(output.message.desk_view.as_str().contains("P−Q +13pp"));
+    assert_eq!(output.message.desk_view.as_str(), "NO TRADE");
+    assert!(!output.message.desk_view.as_str().contains("P/Q"));
 }
 
 #[test]
-fn every_visible_field_must_keep_the_source_byte_floor() {
+fn visible_fields_may_be_shorter_than_source_transcript_fields() {
     let mut source = semantic_message_value();
     source["location"] = json!("SPX 7500 · ES 7510 · 价格定位完整");
     let projection = projection_with_direction(&source, "none");
@@ -705,11 +643,8 @@ fn every_visible_field_must_keep_the_source_byte_floor() {
     )
     .unwrap();
 
-    let error = client.write_desk_map(&projection).unwrap_err();
-    assert_eq!(
-        error.code(),
-        ReportWriterErrorCode::FieldCompressionDetected
-    );
+    let output = client.write_desk_map(&projection).unwrap();
+    assert_eq!(output.message.location.as_str(), "SPX 7500 · ES 7510");
 }
 
 #[test]
@@ -776,11 +711,11 @@ fn semantic_markers_are_preserved_when_the_source_contains_them() {
 }
 
 #[test]
-fn dropping_any_source_semantic_marker_fails_closed() {
+fn dropping_direction_or_no_trade_semantic_markers_fails_closed() {
     let source = semantic_message_value();
     let projection = projection_with_direction(&source, "none");
 
-    for marker in ["方向来源", "Gamma职责", "dealer sign unknown", "NO TRADE"] {
+    for marker in ["方向来源", "NO TRADE"] {
         let mut rewritten = source.clone();
         for field in [
             "title",
@@ -821,6 +756,29 @@ fn dropping_any_source_semantic_marker_fails_closed() {
         assert!(error.metadata().is_some());
         assert!(!format!("{error:?}").contains("required semantic marker deliberately omitted"));
     }
+}
+
+#[test]
+fn gamma_and_dealer_research_markers_may_be_omitted() {
+    let source = semantic_message_value();
+    let projection = projection_with_direction(&source, "none");
+    let mut rewritten = source;
+    rewritten["structure"] = json!("等待价格形成新的可交易结构");
+    let client = ReportWriterClient::new(
+        config(true, 12_800),
+        true,
+        RecordingTransport::new(TransportResponse::new(
+            200,
+            response(&serde_json::to_string(&rewritten).unwrap(), "stop"),
+        )),
+    )
+    .unwrap();
+
+    let output = client.write_desk_map(&projection).unwrap();
+    assert_eq!(
+        output.message.structure.as_str(),
+        "等待价格形成新的可交易结构"
+    );
 }
 
 #[test]
@@ -955,7 +913,7 @@ fn execution_state_markers_cannot_move_out_of_execution() {
 }
 
 #[test]
-fn concise_reorganization_is_rejected_when_any_field_is_shorter() {
+fn concise_reorganization_is_accepted_when_active_semantics_remain() {
     let source = semantic_message_value();
     let projection = projection_with_direction(&source, "none");
     let concise = concise_semantic_message_value();
@@ -971,11 +929,9 @@ fn concise_reorganization_is_rejected_when_any_field_is_shorter() {
     )
     .unwrap();
 
-    let error = client.write_desk_map(&projection).unwrap_err();
-    assert_eq!(
-        error.code(),
-        ReportWriterErrorCode::FieldCompressionDetected
-    );
+    let output = client.write_desk_map(&projection).unwrap();
+    assert_eq!(output.message.desk_view.as_str(), "NO TRADE");
+    assert_eq!(output.message.execution.as_str(), "WAIT");
 }
 
 #[test]
