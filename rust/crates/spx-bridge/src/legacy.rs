@@ -6,7 +6,9 @@ use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use spx_domain::{DeskMapProjectionV1, ResearchSignalsV1, Validate};
+use spx_domain::{
+    DeskMapProjectionV1, ResearchSignalsV1, StrategyDistributionForecastV1, Validate,
+};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -40,6 +42,13 @@ pub struct LegacyResearchDocument {
 #[derive(Debug, Clone)]
 pub struct LegacyDeskMapDocument {
     pub projection: DeskMapProjectionV1,
+    pub fingerprint: String,
+    pub byte_len: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct LegacyStrategyDistributionDocument {
+    pub forecast: StrategyDistributionForecastV1,
     pub fingerprint: String,
     pub byte_len: usize,
 }
@@ -204,6 +213,30 @@ pub fn read_desk_map_projection(
     })
 }
 
+pub fn read_strategy_distribution_forecast(
+    path: &Path,
+    maximum: u64,
+) -> Result<LegacyStrategyDistributionDocument, LegacyError> {
+    let metadata = std::fs::metadata(path).map_err(LegacyError::Metadata)?;
+    if metadata.len() > maximum {
+        return Err(LegacyError::Oversized);
+    }
+    let mut bytes = Vec::with_capacity(usize::try_from(metadata.len()).unwrap_or(0));
+    File::open(path)
+        .and_then(|file| file.take(maximum.saturating_add(1)).read_to_end(&mut bytes))
+        .map_err(LegacyError::Read)?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > maximum {
+        return Err(LegacyError::Oversized);
+    }
+    let forecast: StrategyDistributionForecastV1 = serde_json::from_slice(&bytes)?;
+    forecast.validate().map_err(domain_as_json)?;
+    Ok(LegacyStrategyDistributionDocument {
+        forecast,
+        fingerprint: hex_digest(&bytes),
+        byte_len: bytes.len(),
+    })
+}
+
 fn decode_desk_map_projection(bytes: &[u8]) -> Result<DeskMapProjectionV1, LegacyError> {
     let mut raw: Value = serde_json::from_slice(bytes)?;
     match decode_and_validate_desk_map(raw.clone()) {
@@ -355,6 +388,30 @@ mod tests {
             Some(&research_context.document_id),
             document.projection.research_context_document_id.as_ref()
         );
+        assert_eq!(document.fingerprint.len(), 64);
+        assert_eq!(
+            document.byte_len,
+            usize::try_from(file.as_file().metadata().unwrap().len()).unwrap()
+        );
+    }
+
+    #[test]
+    fn strategy_distribution_forecast_is_bounded_and_validated() {
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(include_bytes!(
+            "../../../../contracts/golden/domain/v1/strategy_distribution_forecast.json"
+        ))
+        .unwrap();
+        let document = read_strategy_distribution_forecast(file.path(), 1_048_576).unwrap();
+        assert_eq!(
+            document.forecast.schema_version,
+            "strategy_distribution_forecast.v1"
+        );
+        assert_eq!(
+            document.forecast.document_id.as_str(),
+            "strategy-distribution:2026-08-05:143000:1"
+        );
+        assert!(!document.forecast.automatic_ordering);
         assert_eq!(document.fingerprint.len(), 64);
         assert_eq!(
             document.byte_len,

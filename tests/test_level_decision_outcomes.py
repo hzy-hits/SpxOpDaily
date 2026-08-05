@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 from spx_spark.application.order_map.level_decision_outcomes import (
+    LevelOutcomeSettings,
     advance_level_outcomes,
 )
 
@@ -76,3 +77,30 @@ def test_unconfirmed_decision_does_not_create_outcome_observation() -> None:
     )
     assert rows == ()
     assert state["observations"] == {}
+
+
+def test_thirty_minute_outcome_keeps_the_full_path_for_mfe_and_mae() -> None:
+    settings = LevelOutcomeSettings(horizons_seconds=(1800,))
+    state, _ = advance_level_outcomes(
+        None,
+        decision=DECISION,
+        spot=6000.0,
+        at=NOW,
+        confirmed_now=True,
+        settings=settings,
+    )
+    for seconds in range(5, 1801, 5):
+        spot = 6012.0 if seconds == 600 else 5997.0 if seconds == 1200 else 6001.0
+        state, rows = advance_level_outcomes(
+            state,
+            decision=DECISION,
+            spot=spot,
+            at=NOW + timedelta(seconds=seconds),
+            confirmed_now=False,
+            settings=settings,
+        )
+
+    assert len(rows) == 1
+    assert rows[0]["horizon_seconds"] == 1800
+    assert rows[0]["mfe_bps"] == 20.0
+    assert rows[0]["mae_bps"] == -5.0

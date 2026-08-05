@@ -64,6 +64,10 @@ from spx_spark.application.market_features.prior_rth_context import (
     gth_position_fraction,
     process_prior_rth_context,
 )
+from spx_spark.application.market_features.provider_entry_control import (
+    apply_provider_entry_control as _apply_provider_entry_control,
+    provider_entry_control as _provider_entry_control,
+)
 from spx_spark.application.market_features.state import (
     append_audit,
     feature_state_path,
@@ -85,6 +89,9 @@ from spx_spark.application.market_features.spring_gamma_v3_io import (
     persist_spring_gamma_v3_shadow,
     spring_gamma_v3_prediction_due,
     validate_spring_gamma_v3_shadow,
+)
+from spx_spark.application.market_features.strategy_distribution_forecast import (
+    process_strategy_distribution_forecast,
 )
 from spx_spark.application.market_features import spring_gamma_operator
 from spx_spark.application.market_features.wall_probability import (
@@ -127,11 +134,7 @@ from spx_spark.options_map import (
     build_options_map,
     group_spxw_option_quotes,
 )
-from spx_spark.provider_failover import new_entry_control_decision
-from spx_spark.provider_failover_controller import (
-    ProviderFailoverSettings,
-    load_failover_control,
-)
+from spx_spark.provider_failover_controller import ProviderFailoverSettings
 from spx_spark.settings import load_app_settings
 from spx_spark.settings.market_features import MarketFeatureSettings
 from spx_spark.storage import LatestStateStore
@@ -488,6 +491,22 @@ def run(
         failover_settings,
         now=action_now,
     )
+    strategy_distribution_forecast: dict[str, object] = {}
+    strategy_distribution_forecast_error: str | None = None
+    try:
+        strategy_distribution_forecast = process_strategy_distribution_forecast(
+            data_root=storage.data_root,
+            action_state=action_latest,
+            option_frame=option_frame,
+            raw_level_decision=raw_level_decision,
+            now=action_now,
+            settings=app.strategy_distribution,
+        )
+    except Exception as exc:
+        # This lane is an append-only research projection.  A model or IO
+        # failure must remain visible without interrupting the price-confirmed
+        # manual signal lifecycle that was durably processed above.
+        strategy_distribution_forecast_error = f"{type(exc).__name__}:{exc}"
     gamma_prearm_plan = process_gamma_prearm_plan(
         storage,
         repricing,
@@ -599,6 +618,8 @@ def run(
             "gamma_prearm_plan": gamma_prearm_plan,
             "gth_level_manual_candidate": gth_level_manual_candidate,
             "spring_gamma_v3_shadow": spring_gamma_v3,
+            "strategy_distribution_forecast": strategy_distribution_forecast,
+            "strategy_distribution_forecast_error": strategy_distribution_forecast_error,
         }
     )
     if args.json:
@@ -657,44 +678,6 @@ def _record_and_process_trade_intent(
         action_now=revalidation_now,
     )
     return producer_ledger, delivery
-
-
-def _provider_entry_control(
-    settings: ProviderFailoverSettings,
-    *,
-    now: datetime,
-) -> dict[str, object]:
-    if settings.enabled:
-        return new_entry_control_decision(
-            load_failover_control(settings.state_path),
-            now=now,
-            max_age_seconds=settings.control_state_max_age_seconds,
-        )
-    return {
-        "allowed": True,
-        "reason": "provider_failover_disabled",
-        "mode": None,
-        "updated_at": None,
-        "age_seconds": None,
-        "max_age_seconds": settings.control_state_max_age_seconds,
-    }
-
-
-def _apply_provider_entry_control(
-    trade_intent: Mapping[str, object],
-    control: Mapping[str, object],
-) -> dict[str, object]:
-    """Attach provider incident telemetry without vetoing a valid manual card.
-
-    The exact session-authoritative SPXW quote is revalidated by the intent
-    contract itself.  A separate failover lifecycle must not overrule that
-    fresher, instrument-specific evidence for a manual-only notification.
-    """
-
-    result = {**trade_intent, "provider_failover_control": dict(control)}
-    if control.get("allowed") is not True and result.get("status") == "trade_ready":
-        result["provider_incident_warning"] = str(control.get("reason") or "provider_incident")
-    return result
 
 
 def _process_spring_gamma_v3_shadow(

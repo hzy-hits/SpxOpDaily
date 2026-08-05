@@ -13,10 +13,74 @@ use spx_ledger::{Ledger, LedgerError, OwnerLease, OwnerRole, PersistWrite};
 use thiserror::Error;
 
 use crate::{
-    DeskReportOutput, HealthError, ProjectionEligibility, ProjectionSourceErrorCode, ReportHealth,
-    ReportPhase, ReportServiceConfig, ReportWriterClient, ReportWriterErrorCode,
-    ServiceConfigError, Transport, active_report_slot, read_latest_projection,
+    DEEPSEEK_MODEL_ID, DeskReportOutput, HealthError, ProjectionEligibility,
+    ProjectionSourceErrorCode, ReportHealth, ReportPhase, ReportServiceConfig, ReportWriterClient,
+    ReportWriterError, ReportWriterErrorCode, ResponseMetadata, ServiceConfigError, Transport,
+    active_report_slot, read_latest_projection,
 };
+
+/// One strict-writer failure with optional non-sensitive provider audit metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeskMessageWriteFailure {
+    code: ReportWriterErrorCode,
+    metadata: Option<ResponseMetadata>,
+}
+
+impl DeskMessageWriteFailure {
+    pub const fn new(code: ReportWriterErrorCode) -> Self {
+        Self {
+            code,
+            metadata: None,
+        }
+    }
+
+    pub const fn with_metadata(code: ReportWriterErrorCode, metadata: ResponseMetadata) -> Self {
+        Self {
+            code,
+            metadata: Some(metadata),
+        }
+    }
+
+    pub const fn code(&self) -> ReportWriterErrorCode {
+        self.code
+    }
+
+    pub const fn metadata(&self) -> Option<&ResponseMetadata> {
+        self.metadata.as_ref()
+    }
+
+    fn projection_fallback_metadata(&self) -> Option<&ResponseMetadata> {
+        let validation_failed = matches!(
+            self.code,
+            ReportWriterErrorCode::DeskMessageInvalidJson
+                | ReportWriterErrorCode::DeskMessageInvalidContract
+                | ReportWriterErrorCode::SemanticMarkerFieldMismatch
+                | ReportWriterErrorCode::DirectionAuthorityViolation
+                | ReportWriterErrorCode::DirectionLabelMissing
+                | ReportWriterErrorCode::ExecutionStateMarkerMissing
+                | ReportWriterErrorCode::CriticalFactMissing
+                | ReportWriterErrorCode::InternalDetailLeak
+                | ReportWriterErrorCode::ResearchAdvisoryMissing
+                | ReportWriterErrorCode::ResearchDisclosureFailed
+        );
+        self.metadata.as_ref().filter(|metadata| {
+            validation_failed
+                && (200..300).contains(&metadata.http_status)
+                && metadata.response_model.as_deref() == Some(DEEPSEEK_MODEL_ID)
+                && metadata.finish_reason.as_deref() == Some("stop")
+                && metadata.visible_content_bytes.is_some()
+        })
+    }
+}
+
+impl From<ReportWriterError> for DeskMessageWriteFailure {
+    fn from(error: ReportWriterError) -> Self {
+        Self {
+            code: error.code(),
+            metadata: error.metadata().cloned(),
+        }
+    }
+}
 
 pub trait DeskMessageWriter: Send + Sync {
     /// Produces one fully validated, operator-facing canonical desk message.
@@ -27,16 +91,15 @@ pub trait DeskMessageWriter: Send + Sync {
     fn write_message(
         &self,
         projection: &DeskMapProjectionV1,
-    ) -> Result<DeskReportOutput, ReportWriterErrorCode>;
+    ) -> Result<DeskReportOutput, DeskMessageWriteFailure>;
 }
 
 impl<T: Transport> DeskMessageWriter for ReportWriterClient<T> {
     fn write_message(
         &self,
         projection: &DeskMapProjectionV1,
-    ) -> Result<DeskReportOutput, ReportWriterErrorCode> {
-        self.write_desk_map(projection)
-            .map_err(|error| error.code())
+    ) -> Result<DeskReportOutput, DeskMessageWriteFailure> {
+        self.write_desk_map(projection).map_err(Into::into)
     }
 }
 
@@ -433,23 +496,41 @@ impl<W: DeskMessageWriter, L: ScheduledReportStore> ReportService<W, L> {
         let result = self.writer.write_message(projection);
         let completed_at = completion_clock();
         self.health.updated_at = completed_at;
-        let output = match result {
-            Ok(output) => output,
-            Err(error_code) => {
-                let next_attempt_at = self.record_generation_failure(
-                    &projection_id,
-                    error_code,
-                    completed_at,
-                    slot.closes_at(),
-                )?;
-                self.persist_health()?;
-                return Ok(ReportTick::Backoff {
-                    error_code,
-                    next_attempt_at,
-                });
+        let (message, response_metadata, fallback_reason) = match result {
+            Ok(output) => (output.message, output.metadata, None),
+            Err(failure) => {
+                if let Some(metadata) = failure.projection_fallback_metadata().cloned() {
+                    projection.message.validate()?;
+                    (projection.message.clone(), metadata, Some(failure.code()))
+                } else {
+                    if let Some(metadata) = failure.metadata() {
+                        self.record_response_metadata(metadata);
+                    }
+                    let error_code = failure.code();
+                    self.health.last_fallback_reason = None;
+                    let next_attempt_at = self.record_generation_failure(
+                        &projection_id,
+                        error_code,
+                        completed_at,
+                        slot.closes_at(),
+                    )?;
+                    self.persist_health()?;
+                    return Ok(ReportTick::Backoff {
+                        error_code,
+                        next_attempt_at,
+                    });
+                }
             }
         };
-        self.record_response_metadata(&output.metadata);
+        self.record_response_metadata(&response_metadata);
+        self.health.last_fallback_reason = fallback_reason.map(|reason| reason.as_str().to_owned());
+        if fallback_reason.is_some() {
+            self.health.counters.projection_message_fallbacks = self
+                .health
+                .counters
+                .projection_message_fallbacks
+                .saturating_add(1);
+        }
 
         if projection_expired_after_generation(completed_at, projection.valid_until) {
             self.backoff = None;
@@ -476,7 +557,7 @@ impl<W: DeskMessageWriter, L: ScheduledReportStore> ReportService<W, L> {
         let intent = build_intent(
             projection,
             &slot_token,
-            output.message,
+            message,
             self.config.domain_targets()?,
             self.config.max_attempts,
             completed_at,
@@ -608,7 +689,10 @@ fn projection_expired_after_generation(
 mod tests {
     use chrono::{TimeDelta, TimeZone as _};
 
-    use super::projection_expired_after_generation;
+    use super::{
+        DEEPSEEK_MODEL_ID, DeskMessageWriteFailure, ReportWriterErrorCode, ResponseMetadata,
+        projection_expired_after_generation,
+    };
 
     #[test]
     fn slot_grace_limits_generation_start_not_valid_completion() {
@@ -624,5 +708,69 @@ mod tests {
             projection_valid_until,
             projection_valid_until
         ));
+    }
+
+    #[test]
+    fn projection_fallback_requires_stop_and_a_message_validation_error() {
+        let metadata = ResponseMetadata {
+            http_status: 200,
+            raw_response_bytes: 512,
+            raw_response_sha256: "a".repeat(64),
+            response_model: Some(DEEPSEEK_MODEL_ID.to_owned()),
+            finish_reason: Some("stop".to_owned()),
+            visible_content_bytes: Some(128),
+        };
+        let validation_codes = [
+            ReportWriterErrorCode::DeskMessageInvalidJson,
+            ReportWriterErrorCode::DeskMessageInvalidContract,
+            ReportWriterErrorCode::SemanticMarkerFieldMismatch,
+            ReportWriterErrorCode::DirectionAuthorityViolation,
+            ReportWriterErrorCode::DirectionLabelMissing,
+            ReportWriterErrorCode::ExecutionStateMarkerMissing,
+            ReportWriterErrorCode::CriticalFactMissing,
+            ReportWriterErrorCode::InternalDetailLeak,
+            ReportWriterErrorCode::ResearchAdvisoryMissing,
+            ReportWriterErrorCode::ResearchDisclosureFailed,
+        ];
+        for code in validation_codes {
+            assert!(
+                DeskMessageWriteFailure::with_metadata(code, metadata.clone())
+                    .projection_fallback_metadata()
+                    .is_some(),
+                "{code} should permit the deterministic projection fallback"
+            );
+        }
+
+        for code in [
+            ReportWriterErrorCode::Transport,
+            ReportWriterErrorCode::HttpStatus,
+            ReportWriterErrorCode::UnexpectedModel,
+            ReportWriterErrorCode::RejectedFinishReason,
+            ReportWriterErrorCode::MissingContent,
+        ] {
+            assert!(
+                DeskMessageWriteFailure::with_metadata(code, metadata.clone())
+                    .projection_fallback_metadata()
+                    .is_none(),
+                "{code} must remain fail closed"
+            );
+        }
+
+        let mut http_failure = metadata.clone();
+        http_failure.http_status = 503;
+        let mut model_failure = metadata.clone();
+        model_failure.response_model = Some("deepseek-other".to_owned());
+        let mut finish_failure = metadata;
+        finish_failure.finish_reason = Some("length".to_owned());
+        for invalid_metadata in [http_failure, model_failure, finish_failure] {
+            assert!(
+                DeskMessageWriteFailure::with_metadata(
+                    ReportWriterErrorCode::DeskMessageInvalidJson,
+                    invalid_metadata,
+                )
+                .projection_fallback_metadata()
+                .is_none()
+            );
+        }
     }
 }

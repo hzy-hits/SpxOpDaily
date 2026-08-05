@@ -193,6 +193,98 @@ impl DeskMapLaneHealth {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StrategyDistributionLaneStatus {
+    Disabled,
+    AwaitingSource,
+    AwaitingAck,
+    Accepted,
+    Unchanged,
+    Stale,
+    Expired,
+    Missing,
+    Rejected,
+    TransportUnknown,
+}
+
+impl StrategyDistributionLaneStatus {
+    fn degrades_bridge(self) -> bool {
+        !matches!(
+            self,
+            Self::Disabled
+                | Self::AwaitingSource
+                | Self::AwaitingAck
+                | Self::Accepted
+                | Self::Unchanged
+                | Self::Missing
+        )
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct StrategyDistributionCounters {
+    pub source_documents: u64,
+    pub accepted_acks: u64,
+    pub unchanged_acks: u64,
+    pub stale_acks: u64,
+    pub rejected_acks: u64,
+    pub source_errors: u64,
+    pub transport_errors: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct StrategyDistributionLaneHealth {
+    pub configured: bool,
+    pub source_path: Option<String>,
+    pub status: StrategyDistributionLaneStatus,
+    pub source_schema_version: Option<String>,
+    pub source_document_id: Option<String>,
+    pub source_fingerprint: Option<String>,
+    pub source_available_at: Option<DateTime<Utc>>,
+    pub source_age_seconds: Option<f64>,
+    pub source_bytes: Option<usize>,
+    pub last_ack_message_id: Option<String>,
+    pub last_ack_disposition: Option<CoreAckDisposition>,
+    pub last_ack_at: Option<DateTime<Utc>>,
+    pub last_error: Option<String>,
+    pub counters: StrategyDistributionCounters,
+}
+
+#[derive(Debug, Clone)]
+pub struct StrategyDistributionSourceObservation {
+    pub schema_version: String,
+    pub document_id: String,
+    pub fingerprint: String,
+    pub available_at: DateTime<Utc>,
+    pub byte_len: usize,
+}
+
+impl StrategyDistributionLaneHealth {
+    fn new(source_path: Option<&Path>) -> Self {
+        Self {
+            configured: source_path.is_some(),
+            source_path: source_path.map(|path| path.display().to_string()),
+            status: if source_path.is_some() {
+                StrategyDistributionLaneStatus::AwaitingSource
+            } else {
+                StrategyDistributionLaneStatus::Disabled
+            },
+            source_schema_version: None,
+            source_document_id: None,
+            source_fingerprint: None,
+            source_available_at: None,
+            source_age_seconds: None,
+            source_bytes: None,
+            last_ack_message_id: None,
+            last_ack_disposition: None,
+            last_ack_at: None,
+            last_error: None,
+            counters: StrategyDistributionCounters::default(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct BridgeHealth {
     pub schema_version: &'static str,
@@ -211,6 +303,7 @@ pub struct BridgeHealth {
     pub providers: BTreeMap<Provider, ProviderHealth>,
     pub research: ResearchLaneHealth,
     pub desk_map: DeskMapLaneHealth,
+    pub strategy_distribution: StrategyDistributionLaneHealth,
     pub counters: BridgeCounters,
     pub last_error: Option<String>,
     #[serde(skip)]
@@ -222,6 +315,7 @@ impl BridgeHealth {
         source_path: &Path,
         research_source_path: Option<&Path>,
         desk_map_source_path: Option<&Path>,
+        strategy_distribution_source_path: Option<&Path>,
         state: &BridgeState,
         now: DateTime<Utc>,
     ) -> Self {
@@ -245,6 +339,9 @@ impl BridgeHealth {
             providers: provider_health(state, &BTreeMap::new()),
             research: ResearchLaneHealth::new(research_source_path),
             desk_map: DeskMapLaneHealth::new(desk_map_source_path),
+            strategy_distribution: StrategyDistributionLaneHealth::new(
+                strategy_distribution_source_path,
+            ),
             counters: BridgeCounters::default(),
             last_error: None,
             quote_phase: BridgePhase::Boot,
@@ -511,13 +608,159 @@ impl BridgeHealth {
         self.reconcile_phase();
     }
 
+    pub fn observe_strategy_distribution_source(
+        &mut self,
+        source: StrategyDistributionSourceObservation,
+        already_acknowledged: bool,
+        now: DateTime<Utc>,
+    ) {
+        self.updated_at = now;
+        if self.strategy_distribution.source_fingerprint.as_deref() != Some(&source.fingerprint) {
+            self.strategy_distribution.counters.source_documents = self
+                .strategy_distribution
+                .counters
+                .source_documents
+                .saturating_add(1);
+            self.strategy_distribution.status = StrategyDistributionLaneStatus::AwaitingAck;
+        } else if already_acknowledged {
+            self.strategy_distribution.status =
+                match self.strategy_distribution.last_ack_disposition {
+                    Some(CoreAckDisposition::StrategyDistributionStale) => {
+                        StrategyDistributionLaneStatus::Stale
+                    }
+                    Some(
+                        CoreAckDisposition::StrategyDistributionUnchanged
+                        | CoreAckDisposition::DuplicateIngress,
+                    ) => StrategyDistributionLaneStatus::Unchanged,
+                    _ => StrategyDistributionLaneStatus::Accepted,
+                };
+        }
+        self.strategy_distribution.source_schema_version = Some(source.schema_version);
+        self.strategy_distribution.source_document_id = Some(source.document_id);
+        self.strategy_distribution.source_fingerprint = Some(source.fingerprint);
+        self.strategy_distribution.source_available_at = Some(source.available_at);
+        self.strategy_distribution.source_age_seconds = (now >= source.available_at).then(|| {
+            (now - source.available_at)
+                .to_std()
+                .map_or(f64::INFINITY, |duration| duration.as_secs_f64())
+        });
+        self.strategy_distribution.source_bytes = Some(source.byte_len);
+        self.strategy_distribution.last_error = None;
+        self.reconcile_phase();
+    }
+
+    pub fn reject_strategy_distribution_source(
+        &mut self,
+        status: StrategyDistributionLaneStatus,
+        error: String,
+        now: DateTime<Utc>,
+    ) {
+        debug_assert!(matches!(
+            status,
+            StrategyDistributionLaneStatus::Expired
+                | StrategyDistributionLaneStatus::Missing
+                | StrategyDistributionLaneStatus::Rejected
+        ));
+        self.updated_at = now;
+        self.strategy_distribution.status = status;
+        self.strategy_distribution.last_error = Some(error);
+        self.strategy_distribution.counters.source_errors = self
+            .strategy_distribution
+            .counters
+            .source_errors
+            .saturating_add(1);
+        self.reconcile_phase();
+    }
+
+    pub fn acknowledge_strategy_distribution(
+        &mut self,
+        message_id: String,
+        disposition: CoreAckDisposition,
+        now: DateTime<Utc>,
+    ) {
+        self.updated_at = now;
+        self.strategy_distribution.last_ack_message_id = Some(message_id);
+        self.strategy_distribution.last_ack_disposition = Some(disposition);
+        self.strategy_distribution.last_ack_at = Some(now);
+        self.strategy_distribution.last_error = None;
+        match disposition {
+            CoreAckDisposition::StrategyDistributionUpdated => {
+                self.strategy_distribution.status = StrategyDistributionLaneStatus::Accepted;
+                self.strategy_distribution.counters.accepted_acks = self
+                    .strategy_distribution
+                    .counters
+                    .accepted_acks
+                    .saturating_add(1);
+            }
+            CoreAckDisposition::StrategyDistributionUnchanged
+            | CoreAckDisposition::DuplicateIngress => {
+                self.strategy_distribution.status = StrategyDistributionLaneStatus::Unchanged;
+                self.strategy_distribution.counters.unchanged_acks = self
+                    .strategy_distribution
+                    .counters
+                    .unchanged_acks
+                    .saturating_add(1);
+            }
+            CoreAckDisposition::StrategyDistributionStale => {
+                self.strategy_distribution.status = StrategyDistributionLaneStatus::Stale;
+                self.strategy_distribution.counters.stale_acks = self
+                    .strategy_distribution
+                    .counters
+                    .stale_acks
+                    .saturating_add(1);
+            }
+            _ => {
+                self.strategy_distribution.status = StrategyDistributionLaneStatus::Rejected;
+                self.strategy_distribution.last_error = Some(format!(
+                    "unexpected accepted strategy distribution disposition: {disposition:?}"
+                ));
+                self.strategy_distribution.counters.rejected_acks = self
+                    .strategy_distribution
+                    .counters
+                    .rejected_acks
+                    .saturating_add(1);
+            }
+        }
+        self.reconcile_phase();
+    }
+
+    pub fn reject_strategy_distribution_ack(&mut self, error: String, now: DateTime<Utc>) {
+        self.updated_at = now;
+        self.strategy_distribution.status = StrategyDistributionLaneStatus::Rejected;
+        self.strategy_distribution.last_error = Some(error);
+        self.strategy_distribution.counters.rejected_acks = self
+            .strategy_distribution
+            .counters
+            .rejected_acks
+            .saturating_add(1);
+        self.reconcile_phase();
+    }
+
+    pub fn mark_strategy_distribution_transport_unknown(
+        &mut self,
+        error: String,
+        now: DateTime<Utc>,
+    ) {
+        self.updated_at = now;
+        self.strategy_distribution.status = StrategyDistributionLaneStatus::TransportUnknown;
+        self.strategy_distribution.last_error = Some(error);
+        self.strategy_distribution.counters.transport_errors = self
+            .strategy_distribution
+            .counters
+            .transport_errors
+            .saturating_add(1);
+        self.reconcile_phase();
+    }
+
     pub fn persist(&self, path: &Path) -> Result<(), StateError> {
         atomic_write_json(path, self)
     }
 
     fn reconcile_phase(&mut self) {
         self.phase = if self.quote_phase == BridgePhase::Ready
-            && (self.research.status.degrades_bridge() || self.desk_map.status.degrades_bridge())
+            && (self.research.status.degrades_bridge()
+                || self.desk_map.status.degrades_bridge()
+                || self.strategy_distribution.status.degrades_bridge())
         {
             BridgePhase::Degraded
         } else {
@@ -566,6 +809,7 @@ mod tests {
             &temp.path().join("quotes.json"),
             Some(&research_path),
             None,
+            None,
             &state,
             now,
         );
@@ -612,6 +856,7 @@ mod tests {
             &temp.path().join("quotes.json"),
             Some(&research_path),
             None,
+            None,
             &state,
             now,
         );
@@ -651,6 +896,7 @@ mod tests {
             &temp.path().join("quotes.json"),
             None,
             Some(&desk_map_path),
+            None,
             &state,
             now,
         );
@@ -702,5 +948,91 @@ mod tests {
         health.set_quote_phase(BridgePhase::Ready);
         assert_eq!(health.phase, BridgePhase::Degraded);
         assert_eq!(health.desk_map.status, DeskMapLaneStatus::Rejected);
+    }
+
+    #[test]
+    fn strategy_distribution_ack_and_rejection_are_visible_without_quote_coupling() {
+        let temp = TempDir::new().unwrap();
+        let state = BridgeState::initialize(&temp.path().join("state.json")).unwrap();
+        let source_path = temp.path().join("strategy-distribution.json");
+        let now = Utc::now();
+        let mut health = BridgeHealth::new(
+            &temp.path().join("quotes.json"),
+            None,
+            None,
+            Some(&source_path),
+            &state,
+            now,
+        );
+
+        health.set_quote_phase(BridgePhase::Ready);
+        assert_eq!(health.phase, BridgePhase::Ready);
+        health.observe_strategy_distribution_source(
+            StrategyDistributionSourceObservation {
+                schema_version: "strategy_distribution_forecast.v1".to_owned(),
+                document_id: "strategy-distribution:test:1".to_owned(),
+                fingerprint: "c".repeat(64),
+                available_at: now,
+                byte_len: 1_024,
+            },
+            false,
+            now,
+        );
+        assert_eq!(
+            health.strategy_distribution.status,
+            StrategyDistributionLaneStatus::AwaitingAck
+        );
+        health.acknowledge_strategy_distribution(
+            "message:strategy-distribution:test".to_owned(),
+            CoreAckDisposition::StrategyDistributionUpdated,
+            now,
+        );
+        assert_eq!(health.phase, BridgePhase::Ready);
+        assert_eq!(
+            health.strategy_distribution.status,
+            StrategyDistributionLaneStatus::Accepted
+        );
+        assert_eq!(
+            health.strategy_distribution.source_document_id.as_deref(),
+            Some("strategy-distribution:test:1")
+        );
+        assert_eq!(health.strategy_distribution.counters.source_documents, 1);
+        assert_eq!(health.strategy_distribution.counters.accepted_acks, 1);
+
+        health.reject_strategy_distribution_source(
+            StrategyDistributionLaneStatus::Rejected,
+            "schema mismatch".to_owned(),
+            now,
+        );
+        health.set_quote_phase(BridgePhase::Ready);
+        assert_eq!(health.phase, BridgePhase::Degraded);
+        assert_eq!(
+            health.strategy_distribution.status,
+            StrategyDistributionLaneStatus::Rejected
+        );
+    }
+
+    #[test]
+    fn additive_strategy_distribution_health_keeps_v2_consumers_compatible() {
+        let temp = TempDir::new().unwrap();
+        let state = BridgeState::initialize(&temp.path().join("state.json")).unwrap();
+        let now = Utc::now();
+        let mut health = BridgeHealth::new(
+            &temp.path().join("quotes.json"),
+            None,
+            None,
+            None,
+            &state,
+            now,
+        );
+        health.set_quote_phase(BridgePhase::Ready);
+
+        let encoded = serde_json::to_value(&health).unwrap();
+        assert_eq!(encoded["schema_version"], "spx_normalized_bridge_health.v2");
+        assert!(encoded.get("research").is_some());
+        assert!(encoded.get("desk_map").is_some());
+        assert_eq!(encoded["strategy_distribution"]["configured"], false);
+        assert_eq!(encoded["strategy_distribution"]["status"], "disabled");
+        assert_eq!(health.phase, BridgePhase::Ready);
     }
 }

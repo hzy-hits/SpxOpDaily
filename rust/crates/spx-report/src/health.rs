@@ -33,6 +33,8 @@ pub struct ReportCounters {
     pub duplicate_slots: u64,
     pub generation_attempts: u64,
     pub generation_failures: u64,
+    #[serde(default)]
+    pub projection_message_fallbacks: u64,
     pub persisted_reports: u64,
 }
 
@@ -54,6 +56,8 @@ pub struct ReportHealth {
     pub last_finish_reason: Option<String>,
     pub last_visible_content_bytes: Option<usize>,
     pub last_response_sha256: Option<String>,
+    #[serde(default)]
+    pub last_fallback_reason: Option<String>,
     pub counters: ReportCounters,
 }
 
@@ -75,6 +79,7 @@ impl ReportHealth {
             last_finish_reason: None,
             last_visible_content_bytes: None,
             last_response_sha256: None,
+            last_fallback_reason: None,
             counters: ReportCounters::default(),
         }
     }
@@ -105,6 +110,7 @@ impl ReportHealth {
         health.last_finish_reason = persisted.last_finish_reason;
         health.last_visible_content_bytes = persisted.last_visible_content_bytes;
         health.last_response_sha256 = persisted.last_response_sha256;
+        health.last_fallback_reason = persisted.last_fallback_reason;
         health.counters = persisted.counters;
         Ok(health)
     }
@@ -197,5 +203,32 @@ mod tests {
         let raw = std::fs::read_to_string(path).unwrap();
         assert!(!raw.contains("desk_view"));
         assert!(!raw.contains("reasoning_content"));
+    }
+
+    #[test]
+    fn health_v1_without_fallback_fields_loads_with_zero_defaults() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("health/report.json");
+        let now = Utc.with_ymd_and_hms(2026, 8, 4, 14, 0, 0).unwrap();
+        let mut legacy = serde_json::to_value(ReportHealth::new(
+            Path::new("/core/desk-map.json"),
+            true,
+            now,
+        ))
+        .unwrap();
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("last_fallback_reason");
+        legacy["counters"]
+            .as_object_mut()
+            .unwrap()
+            .remove("projection_message_fallbacks");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, serde_json::to_vec_pretty(&legacy).unwrap()).unwrap();
+
+        let loaded = ReportHealth::load(&path).unwrap();
+        assert!(loaded.last_fallback_reason.is_none());
+        assert_eq!(loaded.counters.projection_message_fallbacks, 0);
     }
 }

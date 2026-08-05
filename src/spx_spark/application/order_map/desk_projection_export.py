@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
@@ -29,6 +30,7 @@ SCHEMA_VERSION = "desk_map_projection.v1"
 DEFAULT_RTH_TTL = timedelta(minutes=20)
 DEFAULT_GTH_TTL = timedelta(minutes=65)
 MAX_RESEARCH_CONTEXT_AGE = timedelta(minutes=5)
+STRATEGY_DISTRIBUTION_SCHEMA_VERSION = "strategy_distribution_forecast.v1"
 
 
 def rust_report_owner_enabled() -> bool:
@@ -111,9 +113,26 @@ def build_desk_map_wire(
     research_summary = _research_advisory_summary(research_context, session=session)
     if research_summary is not None:
         desk_view = f"{desk_view}\n{research_summary}"
+    distribution, distribution_reason = _strategy_distribution_forecast(
+        storage,
+        published_at,
+        trading_date=trading_date,
+        session=session,
+    )
+    distribution_summary = _strategy_distribution_summary(distribution)
+    if distribution_summary is not None:
+        desk_view = f"{desk_view}\n{distribution_summary}"
     data_quality = sections.data_quality
     if research_context_reason is not None:
-        data_quality = f"{data_quality}\n研究层：不可用（{research_context_reason}）；不影响执行数据评级"
+        data_quality = (
+            f"{data_quality}\n研究层：暂不可用（"
+            f"{_research_context_reason_text(research_context_reason)}）；不影响执行数据评级"
+        )
+    if distribution_reason is not None:
+        data_quality = (
+            f"{data_quality}\nP/Q实验：当前无新鲜结果（{distribution_reason}）；"
+            "不影响价格触发或执行数据评级"
+        )
 
     document: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
@@ -386,6 +405,192 @@ def _research_advisory_summary(
     )
 
 
+def _strategy_distribution_forecast(
+    storage: StorageSettings,
+    published_at: datetime,
+    *,
+    trading_date: str,
+    session: str,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Load one fresh advisory artifact without granting it decision authority."""
+
+    document = read_json_object(
+        Path(storage.data_root) / "latest" / "strategy_distribution_forecast.json"
+    )
+    if not document:
+        return None, None
+    if document.get("schema_version") != STRATEGY_DISTRIBUTION_SCHEMA_VERSION:
+        return None, "概率契约版本不匹配"
+    if document.get("trading_date_et") != trading_date or document.get("session") != session:
+        return None, "概率帧不属于当前交易时段"
+    if (
+        document.get("evidence_status") != "research_unvalidated"
+        or document.get("action_authority") != "none"
+        or document.get("automatic_ordering") is not False
+    ):
+        return None, "概率帧安全边界不合法"
+
+    try:
+        observed_through = _parse_aware_timestamp(document["observed_through"])
+        available_at = _parse_aware_timestamp(document["available_at"])
+        valid_until = _parse_aware_timestamp(document["valid_until"])
+    except (KeyError, TypeError, ValueError):
+        return None, "概率帧时间戳不合法"
+    if observed_through > available_at or available_at > published_at:
+        return None, "概率帧时间顺序不合法"
+    if published_at > valid_until:
+        return None, "概率帧已过期"
+
+    q_event = document.get("q_event")
+    p_event = document.get("p_event")
+    decision = document.get("shadow_decision")
+    candidates = document.get("strategy_candidates")
+    if (
+        not isinstance(q_event, Mapping)
+        or not isinstance(p_event, Mapping)
+        or not isinstance(decision, Mapping)
+        or not isinstance(candidates, list)
+        or not str(document.get("document_id") or "").strip()
+        or q_event.get("measure") != "risk_neutral"
+        or p_event.get("measure") != "physical"
+        or q_event.get("event") != p_event.get("event")
+        or decision.get("action") not in {"no_trade", "manual_candidate"}
+    ):
+        return None, "概率帧契约不完整"
+    for estimate in (q_event, p_event):
+        if not _valid_probability_estimate(estimate):
+            return None, "概率值或证据字段不合法"
+    return dict(document), None
+
+
+def _strategy_distribution_summary(
+    document: Mapping[str, Any] | None,
+) -> str | None:
+    """Render one bounded P-vs-Q line; never promote it into a direction gate."""
+
+    if document is None:
+        return None
+    q_event = document.get("q_event")
+    p_event = document.get("p_event")
+    decision = document.get("shadow_decision")
+    if not isinstance(q_event, Mapping) or not isinstance(p_event, Mapping):
+        return None
+    event = p_event.get("event")
+    event = event if isinstance(event, Mapping) else {}
+    kind = str(event.get("kind") or "")
+    label = {
+        "terminal_above": "上行终值跟随",
+        "terminal_below": "下行终值跟随",
+        "terminal_between": "区间终值",
+        "upper_first_touch": "先触上沿",
+        "lower_first_touch": "先触下沿",
+    }.get(kind, "同一事件")
+    horizon = _event_horizon_minutes(document, event)
+    horizon_text = f"{horizon:g}分钟{label}" if horizon is not None else label
+
+    p_probability = _probability_value(p_event)
+    q_probability = _probability_value(q_event)
+    action = (
+        str(decision.get("action") or "no_trade").upper().replace("_", " ")
+        if isinstance(decision, Mapping)
+        else "NO TRADE"
+    )
+    if p_probability is None and q_probability is None:
+        return f"P/Q研究（未校准）：当前没有可比较的同一方向事件，不产生交易方向 → {action}"
+    facts: list[str] = []
+    if p_probability is not None:
+        sample_count = _positive_int_or_none(p_event.get("sample_count"))
+        session_count = _positive_int_or_none(p_event.get("session_count"))
+        evidence = ""
+        if sample_count is not None and session_count is not None:
+            evidence = f"（前日止，n={sample_count}/{session_count}日"
+            low = _probability_or_none(p_event.get("interval_low"))
+            high = _probability_or_none(p_event.get("interval_high"))
+            if low is not None and high is not None and low <= high:
+                evidence += f"，区间{low:.0%}–{high:.0%}"
+            reasons = p_event.get("reason_codes")
+            if isinstance(reasons, list | tuple) and "physical_sample_below_minimum" in reasons:
+                evidence += "，样本不足"
+            if (
+                isinstance(reasons, list | tuple)
+                and "requested_cohort_below_minimum_using_global_baseline" in reasons
+            ):
+                evidence += "，使用全局确认事件基线"
+            evidence += "）"
+        facts.append(f"P {p_probability:.0%}{evidence}")
+    else:
+        facts.append("P 暂不可用")
+    if q_probability is not None:
+        facts.append(f"Q代理 {q_probability:.0%}")
+    else:
+        facts.append("Q代理暂不可用")
+    if p_probability is not None and q_probability is not None:
+        facts.append(f"P−Q {100.0 * (p_probability - q_probability):+.0f}pp")
+    return (
+        f"P/Q研究（未校准，不产生方向） {horizon_text}："
+        + " · ".join(facts)
+        + f"；未扣点差/滑点，真实成交与净收益标签尚不可用 → {action}"
+    )
+
+
+def _valid_probability_estimate(estimate: Mapping[str, Any]) -> bool:
+    status = estimate.get("status")
+    probability = estimate.get("probability")
+    if status == "unavailable":
+        return probability is None
+    if status != "available" or _probability_or_none(probability) is None:
+        return False
+    for key in ("interval_low", "interval_high"):
+        value = estimate.get(key)
+        if value is not None and _probability_or_none(value) is None:
+            return False
+    for key in ("sample_count", "session_count"):
+        value = estimate.get(key)
+        if value is not None and _positive_int_or_none(value) is None:
+            return False
+    return True
+
+
+def _event_horizon_minutes(
+    document: Mapping[str, Any],
+    event: Mapping[str, Any],
+) -> float | None:
+    try:
+        available_at = _parse_aware_timestamp(document["available_at"])
+        target = _parse_aware_timestamp(event["target_at"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    # The event horizon is defined when the forecast is built.  Source
+    # observations can legitimately precede that instant by a few seconds and
+    # must not turn a fixed five-minute contract into a noisy 5.x-minute label.
+    seconds = (target - available_at).total_seconds()
+    return seconds / 60.0 if seconds > 0.0 else None
+
+
+def _parse_aware_timestamp(value: object) -> datetime:
+    parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError("timestamp must be timezone-aware")
+    return parsed.astimezone(timezone.utc)
+
+
+def _probability_value(estimate: Mapping[str, Any]) -> float | None:
+    if estimate.get("status") != "available":
+        return None
+    return _probability_or_none(estimate.get("probability"))
+
+
+def _probability_or_none(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    parsed = float(value)
+    return parsed if math.isfinite(parsed) and 0.0 <= parsed <= 1.0 else None
+
+
+def _positive_int_or_none(value: object) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
+
+
 def _research_limitation(reason_code: str) -> str:
     return {
         "latent_state_location_mapping_unvalidated": "潜状态到收盘位置的映射未验证",
@@ -394,7 +599,17 @@ def _research_limitation(reason_code: str) -> str:
         "cash_index_component_unavailable": "现金跨指数确认不可用",
         "prior_rth_component_unavailable": "前日RTH上下文不可用",
         "es_path_component_unavailable": "夜盘ES路径不可用",
-    }.get(reason_code, reason_code)
+    }.get(reason_code, "研究输入仍需验证")
+
+
+def _research_context_reason_text(reason_code: str) -> str:
+    return {
+        "research_context_session_not_supported": "当前时段不支持该研究帧",
+        "research_context_contract_invalid": "研究帧契约不完整",
+        "research_context_trading_date_mismatch": "研究帧不属于当前交易日",
+        "research_context_from_future": "研究帧时间顺序异常",
+        "research_context_stale": "研究帧已过期",
+    }.get(reason_code, "研究帧校验失败")
 
 
 def _research_basis(
@@ -451,8 +666,7 @@ def _structure_fingerprint(
         "es_last": payload.get("es_last"),
         "flip_zone": payload.get("flip_zone"),
         "gamma_context": {
-            "gamma_state": option_structure.get("gamma_state")
-            or payload.get("gamma_state"),
+            "gamma_state": option_structure.get("gamma_state") or payload.get("gamma_state"),
             "zero_gamma": option_structure.get("zero_gamma") or payload.get("zero_gamma"),
             "net_gamma_ratio": option_structure.get("net_gamma_ratio"),
             "gex_quality": option_structure.get("gex_quality"),

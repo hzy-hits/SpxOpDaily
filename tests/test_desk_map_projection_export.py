@@ -133,6 +133,71 @@ def _valid_research_context() -> dict[str, object]:
     ).to_dict()
 
 
+def _valid_strategy_distribution_forecast() -> dict[str, object]:
+    event = {
+        "event_id": "level-event-1:terminal-above:300s",
+        "kind": "terminal_above",
+        "target_at": "2026-08-04T14:05:00+00:00",
+        "lower_level": 7500.0,
+        "upper_level": None,
+    }
+    return {
+        "schema_version": "strategy_distribution_forecast.v1",
+        "document_id": "strategy-distribution:fixture",
+        "source_snapshot_id": "snapshot:fixture",
+        "trading_date_et": "2026-08-04",
+        "session": "rth",
+        "observed_through": "2026-08-04T14:00:00+00:00",
+        "available_at": "2026-08-04T14:00:00+00:00",
+        "valid_until": "2026-08-04T14:01:30+00:00",
+        "model_version": "strategy-distribution:v1",
+        "feature_set_version": "confirmed-level:v1",
+        "calibration_status": "uncalibrated",
+        "calibration_version": None,
+        "policy_version": "fixed10-shadow:v1",
+        "evidence_status": "research_unvalidated",
+        "q_event": {
+            "measure": "risk_neutral",
+            "event": event,
+            "status": "available",
+            "quality": "degraded",
+            "probability": 0.49,
+            "method_version": "short-horizon-atm-nd2-proxy:v1",
+            "reason_codes": ["risk_neutral_density_not_yet_available"],
+            "sample_count": None,
+            "session_count": None,
+            "interval_low": None,
+            "interval_high": None,
+            "trained_through_date": None,
+        },
+        "p_event": {
+            "measure": "physical",
+            "event": event,
+            "status": "available",
+            "quality": "degraded",
+            "probability": 0.62,
+            "method_version": "physical-followthrough-beta-binomial:v1",
+            "reason_codes": ["research_unvalidated"],
+            "sample_count": 98,
+            "session_count": 14,
+            "interval_low": 0.52,
+            "interval_high": 0.71,
+            "trained_through_date": "2026-08-03",
+        },
+        "strategy_candidates": [],
+        "shadow_decision": {
+            "action": "no_trade",
+            "selected_candidate_id": None,
+            "score_threshold": 0.0,
+            "reason_codes": ["net_pnl_labels_unavailable"],
+        },
+        "quality": "degraded",
+        "quality_reason_codes": ["net_pnl_labels_unavailable"],
+        "action_authority": "none",
+        "automatic_ordering": False,
+    }
+
+
 def test_projection_is_versioned_complete_and_never_truncates_changes(tmp_path: Path) -> None:
     storage = _storage(tmp_path)
     long_change = "结构变化" * 3000
@@ -245,6 +310,101 @@ def test_projection_embeds_one_atomic_advisory_research_context(tmp_path: Path) 
     assert wire["research_context"] == context
 
 
+def test_projection_shows_bounded_fresh_p_vs_q_evidence_without_promoting_it(
+    tmp_path: Path,
+) -> None:
+    storage = _storage(tmp_path)
+    forecast = _valid_strategy_distribution_forecast()
+    forecast["observed_through"] = "2026-08-04T13:59:53+00:00"
+    path = tmp_path / "latest" / "strategy_distribution_forecast.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps(forecast), encoding="utf-8")
+
+    wire = build_desk_map_wire(
+        _payload(),
+        [],
+        now=datetime(2026, 8, 4, 14, 0, tzinfo=timezone.utc),
+        published_at=datetime(2026, 8, 4, 14, 0, 30, tzinfo=timezone.utc),
+        trading_date="2026-08-04",
+        storage=storage,
+    )
+
+    desk_view = wire["message"]["desk_view"]
+    assert "P/Q研究（未校准，不产生方向）" in desk_view
+    assert "5分钟上行终值跟随" in desk_view
+    assert "P 62%（前日止，n=98/14日，区间52%–71%）" in desk_view
+    assert "Q代理 49%" in desk_view
+    assert "P−Q +13pp" in desk_view
+    assert "真实成交与净收益标签尚不可用 → NO TRADE" in desk_view
+    assert wire["action_authority"] == "none"
+    assert wire["automatic_ordering"] is False
+
+
+def test_stale_probability_artifact_is_disclosed_but_does_not_degrade_execution(
+    tmp_path: Path,
+) -> None:
+    storage = _storage(tmp_path)
+    forecast = _valid_strategy_distribution_forecast()
+    path = tmp_path / "latest" / "strategy_distribution_forecast.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps(forecast), encoding="utf-8")
+
+    wire = build_desk_map_wire(
+        _payload(),
+        [],
+        now=datetime(2026, 8, 4, 14, 2, tzinfo=timezone.utc),
+        published_at=datetime(2026, 8, 4, 14, 2, tzinfo=timezone.utc),
+        trading_date="2026-08-04",
+        storage=storage,
+    )
+
+    assert "P/Q研究" not in wire["message"]["desk_view"]
+    assert "P/Q实验：当前无新鲜结果（概率帧已过期）" in wire["message"]["data_quality"]
+    assert "不影响价格触发或执行数据评级" in wire["message"]["data_quality"]
+    assert "概率帧已过期" not in wire["quality_reasons"]
+
+
+def test_unavailable_p_and_q_are_one_formal_no_trade_line_not_a_diagnostic_dump(
+    tmp_path: Path,
+) -> None:
+    storage = _storage(tmp_path)
+    forecast = _valid_strategy_distribution_forecast()
+    for key in ("q_event", "p_event"):
+        estimate = forecast[key]
+        assert isinstance(estimate, dict)
+        estimate.update(
+            {
+                "event": None,
+                "status": "unavailable",
+                "quality": "unavailable",
+                "probability": None,
+                "method_version": None,
+                "reason_codes": ["model_input_unavailable"],
+                "interval_low": None,
+                "interval_high": None,
+                "trained_through_date": None,
+            }
+        )
+    forecast["p_event"]["sample_count"] = 0  # type: ignore[index]
+    forecast["p_event"]["session_count"] = 0  # type: ignore[index]
+    path = tmp_path / "latest" / "strategy_distribution_forecast.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps(forecast), encoding="utf-8")
+
+    wire = build_desk_map_wire(
+        _payload(),
+        [],
+        now=datetime(2026, 8, 4, 14, 0, tzinfo=timezone.utc),
+        published_at=datetime(2026, 8, 4, 14, 0, 30, tzinfo=timezone.utc),
+        trading_date="2026-08-04",
+        storage=storage,
+    )
+
+    line = wire["message"]["desk_view"].splitlines()[-1]
+    assert line == ("P/Q研究（未校准）：当前没有可比较的同一方向事件，不产生交易方向 → NO TRADE")
+    assert "model_input_unavailable" not in wire["message"]["desk_view"]
+
+
 def test_invalid_nested_research_is_omitted_and_disclosed_without_poisoning_desk(
     tmp_path: Path,
 ) -> None:
@@ -267,7 +427,8 @@ def test_invalid_nested_research_is_omitted_and_disclosed_without_poisoning_desk
     assert wire["research_context_document_id"] is None
     assert wire["research_context"] is None
     assert "research_context_contract_invalid" not in wire["quality_reasons"]
-    assert "research_context_contract_invalid" in wire["message"]["data_quality"]
+    assert "研究层：暂不可用（研究帧契约不完整）" in wire["message"]["data_quality"]
+    assert "research_context_contract_invalid" not in wire["message"]["data_quality"]
     assert "不影响执行数据评级" in wire["message"]["data_quality"]
 
 

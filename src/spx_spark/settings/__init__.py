@@ -19,6 +19,7 @@ from spx_spark.settings.market_features import MarketFeatureSettings
 from spx_spark.settings.order_map import DEFAULT_ORDER_MAP_POLICY, OrderMapPolicy
 from spx_spark.settings.shock import DEFAULT_SHOCK_SETTINGS, ShockSettings
 from spx_spark.settings.spring_gamma_v3 import SpringGammaV3Settings
+from spx_spark.settings.strategy_distribution import StrategyDistributionSettings
 
 __all__ = [
     "AlertSettings",
@@ -32,6 +33,7 @@ __all__ = [
     "DEFAULT_SHOCK_SETTINGS",
     "ShockSettings",
     "SpringGammaV3Settings",
+    "StrategyDistributionSettings",
     "clear_settings_cache",
     "current_app_settings",
     "default_defaults_path",

@@ -8,6 +8,7 @@ raw_log_dir = "/srv/data/spx-spark/rust-core-shadow/frames"
 projection_path = "/var/lib/spx-spark-core-shadow/latest/core.json"
 research_projection_path = "/var/lib/spx-spark-core-shadow/latest/research.json"
 desk_map_projection_path = "/var/lib/spx-spark-core-shadow/latest/desk-map.json"
+strategy_distribution_projection_path = "/var/lib/spx-spark-core-shadow/latest/strategy-distribution.json"
 max_frame_bytes = 1048576
 max_connections = 8
 raw_segment_max_bytes = 67108864

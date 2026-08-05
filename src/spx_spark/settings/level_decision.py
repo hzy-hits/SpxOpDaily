@@ -29,7 +29,7 @@ class LevelDecisionPolicy:
     structure_band_half_width_points: float = 5.0
     structure_switch_min_points: float = 5.0
     max_frozen_structure_age_sessions: int = 1
-    outcome_horizons_seconds: tuple[int, ...] = (30, 60, 180, 300)
+    outcome_horizons_seconds: tuple[int, ...] = (30, 60, 180, 300, 900, 1800)
     outcome_sample_tolerance_seconds: float = 20.0
     outcome_no_follow_through_mfe_bps: float = 2.0
     outcome_false_confirmation_mae_bps: float = -5.0

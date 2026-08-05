@@ -1,0 +1,60 @@
+{
+  "schema_version": "probability_signal_data_quality.v1",
+  "authority": "oracle:129.146.3.211",
+  "observed_at": "2026-08-05T06:05:22Z",
+  "code_revision": "08485f4a80b520d17bde382745c4c039832c1468",
+  "quote_lake": {
+    "ibkr_rows": 111732600,
+    "ibkr_days": 31,
+    "schwab_rows": 104700024,
+    "schwab_days": 26,
+    "ibkr_same_day_spxw_rows": 68545811,
+    "ibkr_same_day_spxw_two_sided_rows": 61055149,
+    "schwab_same_day_spxw_rows": 70228643,
+    "schwab_same_day_spxw_two_sided_rows": 70228000
+  },
+  "physical_path_outcomes": {
+    "distinct_events": 98,
+    "trading_days": 14,
+    "horizons_seconds": [30, 60, 180, 300],
+    "complete_rows": 388,
+    "incomplete_rows": 4,
+    "recommended_label": "directional_terminal_return_bps_above_zero",
+    "recommended_first_horizon_seconds": 300
+  },
+  "displayed_quote_reach": {
+    "distinct_candidates": 15,
+    "trading_days": 6,
+    "clean_reached": 10,
+    "clean_not_reached": 3,
+    "runtime_lake_conflicts": 2,
+    "latest_policy_candidates": 6,
+    "latest_policy_days": 2,
+    "actual_fill_semantics": false
+  },
+  "broker_order_lifecycle": {
+    "orders_at_risk": 0,
+    "full_or_partial_fills": 0,
+    "cancels_or_true_no_fills": 0
+  },
+  "net_pnl": {
+    "closed_virtual_episodes": 13,
+    "episodes_with_entry_and_exit_nbbo": 5,
+    "degraded_underlier_closures": 4,
+    "valid_exact_quote_terminal_examples": 1,
+    "strict_current_policy_training_samples": 0
+  },
+  "research_history": {
+    "research_context_append_only": false,
+    "rust_research_projection_append_only": false,
+    "macro_event_days_configured": 1
+  },
+  "decision": {
+    "physical_followthrough": "shadow_production_eligible_uncalibrated",
+    "displayed_quote_reach": "insufficient_sample_rebuild_labels",
+    "actual_fill": "not_observed",
+    "net_pnl_quantiles": "unavailable_insufficient_labels",
+    "event_jump": "unavailable_insufficient_event_days",
+    "automatic_ordering": false
+  }
+}

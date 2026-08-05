@@ -12,7 +12,8 @@ use spx_domain::{
     OperatorNotificationRole, OperatorNotificationV1, OptionContractV1, OptionRight,
     PROVIDER_STATE_SCHEMA_VERSION, PlanState, PositiveF64, Provider, ProviderReasonCode,
     ProviderStateV1, QUOTE_BATCH_SCHEMA_VERSION, QuoteBatchMode, QuoteBatchV1, QuoteQuality,
-    QuoteV1, ResearchSignalsV1, StrategyAction, StrategyBlockReason, Token, TransportState,
+    QuoteV1, ResearchSignalsV1, StrategyAction, StrategyBlockReason,
+    StrategyDistributionForecastV1, Token, TransportState,
 };
 use spx_ledger::Ledger;
 use tempfile::TempDir;
@@ -43,6 +44,9 @@ fn config(temp: &TempDir) -> CoreConfig {
         projection_path: temp.path().join("projection/latest.json"),
         research_projection_path: temp.path().join("projection/research.json"),
         desk_map_projection_path: temp.path().join("projection/desk-map.json"),
+        strategy_distribution_projection_path: temp
+            .path()
+            .join("projection/strategy-distribution.json"),
         max_frame_bytes: 1_048_576,
         max_connections: 8,
         raw_segment_max_bytes: 64 * 1024 * 1024,
@@ -1462,6 +1466,73 @@ fn desk_map_projection_updates_only_the_rust_report_source_projection() {
         Some(&research_context.document_id),
         latest.projection.research_context_document_id.as_ref()
     );
+    let health = Ledger::open(&core_config.ledger_path)
+        .expect("open ledger")
+        .health()
+        .expect("ledger health");
+    assert_eq!(health, spx_ledger::LedgerHealth::default());
+}
+
+#[test]
+fn strategy_distribution_ingress_updates_only_its_durable_advisory_projection() {
+    let temp = TempDir::new().expect("temp directory");
+    let core_config = config(&temp);
+    let forecast: StrategyDistributionForecastV1 = serde_json::from_str(include_str!(
+        "../../../../contracts/golden/domain/v1/strategy_distribution_forecast.json"
+    ))
+    .expect("strategy distribution fixture");
+    let processing_at = forecast.available_at.with_timezone(&Utc) + TimeDelta::seconds(1);
+    let envelope = IngressEnvelopeV1 {
+        schema_version: INGRESS_SCHEMA_VERSION.to_owned(),
+        message_id: token("message:strategy-distribution:test"),
+        emitted_at: forecast.available_at.with_timezone(&Utc),
+        message: IngressMessageV1::StrategyDistributionForecast(Box::new(forecast.clone())),
+    };
+    let mut engine = CoreEngine::open(core_config.clone(), processing_at).expect("open core");
+    assert!(matches!(
+        engine
+            .process(envelope, processing_at)
+            .expect("strategy distribution accepted"),
+        CoreOutcome::StrategyDistributionForecast {
+            disposition: spx_core::StrategyDistributionDisposition::Updated,
+            ..
+        }
+    ));
+
+    let repeated = IngressEnvelopeV1 {
+        schema_version: INGRESS_SCHEMA_VERSION.to_owned(),
+        message_id: token("message:strategy-distribution:repeat"),
+        emitted_at: forecast.available_at.with_timezone(&Utc),
+        message: IngressMessageV1::StrategyDistributionForecast(Box::new(forecast)),
+    };
+    assert!(matches!(
+        engine
+            .process(repeated, processing_at + TimeDelta::milliseconds(1))
+            .expect("same document is unchanged"),
+        CoreOutcome::StrategyDistributionForecast {
+            disposition: spx_core::StrategyDistributionDisposition::Unchanged,
+            ..
+        }
+    ));
+    engine.shutdown().expect("release core owner");
+    drop(engine);
+
+    let latest: spx_core::LatestStrategyDistributionProjectionV1 = serde_json::from_slice(
+        &std::fs::read(&core_config.strategy_distribution_projection_path)
+            .expect("strategy distribution projection"),
+    )
+    .expect("valid latest strategy distribution projection");
+    latest.validate().expect("latest projection validates");
+    assert_eq!(
+        latest.forecast.document_id.as_str(),
+        "strategy-distribution:2026-08-05:143000:1"
+    );
+    assert_eq!(
+        latest.forecast.shadow_decision.action,
+        spx_domain::ShadowAction::NoTrade
+    );
+    assert!(!latest.forecast.automatic_ordering);
+
     let health = Ledger::open(&core_config.ledger_path)
         .expect("open ledger")
         .health()

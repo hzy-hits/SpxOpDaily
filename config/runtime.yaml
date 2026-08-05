@@ -60,6 +60,17 @@ spring_gamma_v3:
   min_probability: {value: 0.60, description: Minimum uncalibrated shadow probability proxy required to publish a research label; it is not a production probability.}
   min_margin: {value: 0.10, description: Minimum shadow probability-proxy margin over the competing direction required to publish a research label.}
 
+strategy_distribution:
+  enabled: {value: true, description: Publishes the independent advisory-only P-vs-Q strategy-distribution artifact without granting order authority.}
+  horizon_seconds: {value: 300, description: Initial causal physical follow-through horizon; five minutes matches the currently persisted production outcome labels.}
+  window_days: {value: 35, description: Rolling calendar-day lookback for completed physical outcome evidence.}
+  refresh_seconds: {value: 60.0, description: Minimum interval between rescans; kept shorter than the projection TTL so a normally running producer stays fresh.}
+  projection_ttl_seconds: {value: 90.0, description: Maximum live age of one advisory forecast projection before consumers must reject it.}
+  append_interval_seconds: {value: 60.0, description: Minimum interval between append-only decision-time forecast observations when the semantic document changes.}
+  minimum_physical_samples: {value: 30, description: Minimum unique completed event outcomes before the physical probability is labeled estimated rather than insufficient-sample.}
+  beta_prior_alpha: {value: 1.0, description: Alpha parameter of the transparent Beta prior used by the first physical follow-through baseline.}
+  beta_prior_beta: {value: 1.0, description: Beta parameter of the transparent Beta prior used by the first physical follow-through baseline.}
+
 globex_trend:
   enabled: {value: true, description: Runs the continuous ES session trend and reversal state machine, rendering Globex or RTH semantics from the event timestamp.}
   interval_seconds: {value: 30, description: Evaluation cadence in the 24h runtime.}
@@ -1811,8 +1822,8 @@ level_decision_shadow:
     value: 1
     description: Maximum trading-session age of a frozen OI/GEX wall structure; older levels fail closed.
   outcome_horizons_seconds:
-    value: [30, 60, 180, 300]
-    description: Post-confirmation attribution horizons.
+    value: [30, 60, 180, 300, 900, 1800]
+    description: Post-confirmation attribution horizons, including the 15m and 30m windows needed for forward probability validation.
   outcome_sample_tolerance_seconds:
     value: 20.0
     description: Maximum timestamp distance allowed for a complete outcome sample.

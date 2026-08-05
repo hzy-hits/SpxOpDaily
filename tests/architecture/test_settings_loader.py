@@ -7,7 +7,12 @@ import pytest
 import yaml
 
 from spx_spark.application.shock.models import IntradayShockSettings
-from spx_spark.settings import AppSettings, SpringGammaV3Settings, load_settings
+from spx_spark.settings import (
+    AppSettings,
+    SpringGammaV3Settings,
+    StrategyDistributionSettings,
+    load_settings,
+)
 from spx_spark.settings.market_features import MarketFeatureSettings
 from spx_spark.settings.shock import ShockSettings
 
@@ -45,6 +50,11 @@ def test_load_settings_from_fixture_is_stable(
     assert settings.spring_gamma_v3.gth_greek_max_age_seconds == 90.0
     assert settings.sources["spring_gamma_v3.enabled"].origin == "defaults"
     assert settings.sources["market_data.provider_priority"].origin == "defaults"
+    assert isinstance(settings.strategy_distribution, StrategyDistributionSettings)
+    assert settings.strategy_distribution.horizon_seconds == 300
+    assert settings.strategy_distribution.refresh_seconds == 60.0
+    assert settings.strategy_distribution.action_authority == "none"
+    assert settings.strategy_distribution.automatic_ordering is False
 
 
 def test_environment_overrides_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -248,3 +258,12 @@ def test_spring_gamma_v3_rejects_invalid_policy(
 ) -> None:
     with pytest.raises(ValueError):
         replace(SpringGammaV3Settings(), **overrides)
+
+
+def test_strategy_distribution_refresh_must_stay_inside_projection_ttl() -> None:
+    with pytest.raises(ValueError, match="shorter than projection TTL"):
+        replace(
+            StrategyDistributionSettings(),
+            refresh_seconds=90.0,
+            projection_ttl_seconds=90.0,
+        )

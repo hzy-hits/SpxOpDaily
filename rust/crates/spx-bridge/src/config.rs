@@ -21,6 +21,8 @@ pub struct BridgeConfig {
     pub research_signal_path: Option<PathBuf>,
     #[serde(default)]
     pub desk_map_projection_path: Option<PathBuf>,
+    #[serde(default)]
+    pub strategy_distribution_forecast_path: Option<PathBuf>,
     pub ibkr_health_path: PathBuf,
     pub socket_path: PathBuf,
     pub state_path: PathBuf,
@@ -77,6 +79,13 @@ impl BridgeConfig {
         {
             return Err(ConfigError::Invalid("all runtime paths must be absolute"));
         }
+        if self
+            .strategy_distribution_forecast_path
+            .as_ref()
+            .is_some_and(|path| !path.is_absolute())
+        {
+            return Err(ConfigError::Invalid("all runtime paths must be absolute"));
+        }
         if self.state_path == self.health_path
             || self.state_path == self.source_snapshot_path
             || self.health_path == self.source_snapshot_path
@@ -91,6 +100,16 @@ impl BridgeConfig {
                     || path == &self.health_path
                     || self.research_signal_path.as_ref() == Some(path)
             })
+            || self
+                .strategy_distribution_forecast_path
+                .as_ref()
+                .is_some_and(|path| {
+                    path == &self.source_snapshot_path
+                        || path == &self.state_path
+                        || path == &self.health_path
+                        || self.research_signal_path.as_ref() == Some(path)
+                        || self.desk_map_projection_path.as_ref() == Some(path)
+                })
         {
             return Err(ConfigError::Invalid(
                 "source, state and health paths must differ",
@@ -139,6 +158,7 @@ mod tests {
             source_snapshot_path: "/source/state.json".into(),
             research_signal_path: Some("/source/research.json".into()),
             desk_map_projection_path: Some("/source/desk-map.json".into()),
+            strategy_distribution_forecast_path: Some("/source/strategy-distribution.json".into()),
             ibkr_health_path: "/source/ibkr.json".into(),
             socket_path: "/run/core.sock".into(),
             state_path: "/state/bridge.json".into(),
@@ -169,5 +189,19 @@ mod tests {
         assert!(config.validate().is_err());
         config = valid();
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn legacy_config_without_strategy_distribution_lane_remains_valid() {
+        let encoded = toml::to_string(&valid()).unwrap();
+        let legacy = encoded
+            .lines()
+            .filter(|line| !line.starts_with("strategy_distribution_forecast_path ="))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let decoded: BridgeConfig = toml::from_str(&legacy).unwrap();
+
+        assert!(decoded.strategy_distribution_forecast_path.is_none());
+        decoded.validate().unwrap();
     }
 }

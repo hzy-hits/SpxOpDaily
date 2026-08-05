@@ -22,8 +22,8 @@ pub use health::{
     HealthError, REPORT_HEALTH_SCHEMA_VERSION, ReportCounters, ReportHealth, ReportPhase,
 };
 pub use service::{
-    DeskMessageWriter, OwnedReportLedger, ReportPersistDisposition, ReportService,
-    ReportServiceError, ReportTick, ScheduledReportStore,
+    DeskMessageWriteFailure, DeskMessageWriter, OwnedReportLedger, ReportPersistDisposition,
+    ReportService, ReportServiceError, ReportTick, ScheduledReportStore,
 };
 pub use service_config::{ReportServiceConfig, ReportTargetConfig, ServiceConfigError};
 pub use source::{

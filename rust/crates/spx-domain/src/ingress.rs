@@ -5,7 +5,7 @@ use crate::validation::require_schema;
 use crate::{
     CORE_ACK_SCHEMA_VERSION, DeskMapProjectionV1, DomainError, EvaluationRequestV1,
     INGRESS_SCHEMA_VERSION, OperatorNotificationCancellationV1, OperatorNotificationV1,
-    QuoteBatchV1, ResearchSignalsV1, Token, Validate,
+    QuoteBatchV1, ResearchSignalsV1, StrategyDistributionForecastV1, Token, Validate,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -39,6 +39,9 @@ pub enum CoreAckDisposition {
     DeskMapUpdated,
     DeskMapUnchanged,
     DeskMapStale,
+    StrategyDistributionUpdated,
+    StrategyDistributionUnchanged,
+    StrategyDistributionStale,
     OperatorNotificationAccepted,
     OperatorNotificationSemanticSuppressed,
     /// The durable fence was committed; an already in-flight transport is not recalled.
@@ -141,6 +144,7 @@ pub enum IngressMessageV1 {
     Evaluate(EvaluationRequestV1),
     ResearchSignals(ResearchSignalsV1),
     DeskMapProjection(Box<DeskMapProjectionV1>),
+    StrategyDistributionForecast(Box<StrategyDistributionForecastV1>),
     OperatorNotification(Box<OperatorNotificationV1>),
     OperatorNotificationCancellation(OperatorNotificationCancellationV1),
 }
@@ -194,6 +198,15 @@ impl Validate for IngressEnvelopeV1 {
                 if projection.available_at > self.emitted_at {
                     return Err(DomainError::TimeOrder(
                         "desk map available_at is after envelope emitted_at",
+                    ));
+                }
+                Ok(())
+            }
+            IngressMessageV1::StrategyDistributionForecast(forecast) => {
+                forecast.validate()?;
+                if forecast.available_at > self.emitted_at {
+                    return Err(DomainError::TimeOrder(
+                        "strategy distribution available_at is after envelope emitted_at",
                     ));
                 }
                 Ok(())

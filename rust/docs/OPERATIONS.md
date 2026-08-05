@@ -113,6 +113,13 @@ The core and bridge need only local filesystem and Unix-socket access.
 outbound HTTPS only for configured notification targets. The units isolate
 those two network-capable roles from the broker/session boundary.
 
+The optional strategy-distribution bridge lane strictly reads
+`data/latest/strategy_distribution_forecast.json` and publishes the latest
+accepted advisory document to `latest/strategy-distribution.json`. It is
+independent of quote, research and desk-map forwarding. Its source, contract or
+transport failures are visible in bridge health but cannot create an
+evaluation, decision, intent or order.
+
 `spx-report` provides `check-config`, `run`, `once`, and `health`. DeepSeek calls
 require both `writer.network_enabled=true` and `--allow-network`. The endpoint,
 model, thinking mode, reasoning effort and JSON output mode are fixed in the
@@ -176,8 +183,9 @@ read by `spx-report`.
 Before changing ownership:
 
 1. validate the exact release binaries and all four runtime configs;
-2. verify bridge health has independently accepted fresh quote, research and
-   desk-map lanes, and compare the Python and core projection IDs;
+2. verify bridge health has independently accepted fresh quote, research,
+   desk-map and strategy-distribution lanes, and compare each Python/core
+   document or projection ID;
 3. make report target keys/channels exactly match active delivery targets;
 4. place `DEEPSEEK_API_KEY` only in root-protected `report.env`, and delivery
    endpoints only in root-protected `delivery.env`; never put values in TOML;
@@ -271,8 +279,8 @@ After a separately authorized installation, verify more than process liveness:
 8. scheduled reports occur only in active GTH/RTH `:00`/`:30` ET slots, bind to the accepted
    source projection/slot and retain all eight message sections;
 9. notification receipt state agrees with the external target;
-10. bridge health reports quote, research and desk-map lanes independently,
-    accepted ACK IDs match, and no frame is pending;
+10. bridge health reports quote, research, desk-map and strategy-distribution
+    lanes independently, accepted ACK IDs match, and no frame is pending;
 11. mapping counters explain every dropped stale, unsupported or session-unknown quote.
 
 Read-only diagnostics after authorization may use:

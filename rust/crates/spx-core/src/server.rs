@@ -292,6 +292,20 @@ fn accepted_ack(message_id: Token, outcome: &CoreOutcome) -> CoreAckV1 {
             },
             None,
         ),
+        CoreOutcome::StrategyDistributionForecast { disposition, .. } => (
+            match disposition {
+                crate::StrategyDistributionDisposition::Updated => {
+                    CoreAckDisposition::StrategyDistributionUpdated
+                }
+                crate::StrategyDistributionDisposition::Unchanged => {
+                    CoreAckDisposition::StrategyDistributionUnchanged
+                }
+                crate::StrategyDistributionDisposition::Stale => {
+                    CoreAckDisposition::StrategyDistributionStale
+                }
+            },
+            None,
+        ),
         CoreOutcome::OperatorNotification { disposition, .. } => (
             match disposition {
                 crate::OperatorNotificationDisposition::Inserted

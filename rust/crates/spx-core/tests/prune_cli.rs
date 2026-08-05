@@ -20,6 +20,9 @@ fn config(temp: &TempDir, raw_log_dir: &std::path::Path) -> CoreConfig {
         projection_path: temp.path().join("latest/core.json"),
         research_projection_path: temp.path().join("latest/research.json"),
         desk_map_projection_path: temp.path().join("latest/desk-map.json"),
+        strategy_distribution_projection_path: temp
+            .path()
+            .join("latest/strategy-distribution.json"),
         max_frame_bytes: 1_048_576,
         max_connections: 8,
         raw_segment_max_bytes: 64 * 1024 * 1024,

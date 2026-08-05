@@ -132,6 +132,15 @@ fn ack_disposition_matches(
                     | CoreAckDisposition::DuplicateIngress
             )
         ),
+        IngressMessageV1::StrategyDistributionForecast(_) => matches!(
+            disposition,
+            Some(
+                CoreAckDisposition::StrategyDistributionUpdated
+                    | CoreAckDisposition::StrategyDistributionUnchanged
+                    | CoreAckDisposition::StrategyDistributionStale
+                    | CoreAckDisposition::DuplicateIngress
+            )
+        ),
         IngressMessageV1::OperatorNotification(_) => matches!(
             disposition,
             Some(

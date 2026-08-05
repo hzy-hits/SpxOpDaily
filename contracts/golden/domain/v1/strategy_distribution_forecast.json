@@ -1,0 +1,117 @@
+{
+  "schema_version": "strategy_distribution_forecast.v1",
+  "document_id": "strategy-distribution:2026-08-05:143000:1",
+  "source_snapshot_id": "analytical-option-snapshot:2026-08-05:143000",
+  "trading_date_et": "2026-08-05",
+  "session": "rth",
+  "observed_through": "2026-08-05T14:30:00+00:00",
+  "available_at": "2026-08-05T14:30:01+00:00",
+  "valid_until": "2026-08-05T14:31:31+00:00",
+  "model_version": "strategy-distribution:v1",
+  "feature_set_version": "decision-snapshot:v1",
+  "calibration_status": "uncalibrated",
+  "calibration_version": null,
+  "policy_version": "fixed10-shadow:v1",
+  "evidence_status": "research_unvalidated",
+  "q_event": {
+    "measure": "risk_neutral",
+    "event": {
+      "event_id": "event:spx-close-above-7760",
+      "kind": "terminal_above",
+      "target_at": "2026-08-05T20:00:00+00:00",
+      "lower_level": 7760.0,
+      "upper_level": null
+    },
+    "status": "available",
+    "quality": "ready",
+    "probability": 0.28,
+    "method_version": "q-density:bid-ask-constrained:v1",
+    "reason_codes": [],
+    "sample_count": null,
+    "session_count": null,
+    "interval_low": null,
+    "interval_high": null,
+    "trained_through_date": null
+  },
+  "p_event": {
+    "measure": "physical",
+    "event": {
+      "event_id": "event:spx-close-above-7760",
+      "kind": "terminal_above",
+      "target_at": "2026-08-05T20:00:00+00:00",
+      "lower_level": 7760.0,
+      "upper_level": null
+    },
+    "status": "available",
+    "quality": "ready",
+    "probability": 0.39,
+    "method_version": "p-terminal-offset:v1",
+    "reason_codes": [],
+    "sample_count": 40,
+    "session_count": 8,
+    "interval_low": 0.3,
+    "interval_high": 0.5,
+    "trained_through_date": "2026-08-04"
+  },
+  "strategy_candidates": [
+    {
+      "candidate_id": "candidate:call-7750-7760",
+      "probability_event_id": "event:spx-close-above-7760",
+      "direction": "call_vertical_10",
+      "expiry": "2026-08-05",
+      "long_contract_id": "SPXW:2026-08-05:C:7750",
+      "short_contract_id": "SPXW:2026-08-05:C:7760",
+      "long_strike": 7750.0,
+      "short_strike": 7760.0,
+      "execution": {
+        "status": "available",
+        "execution_semantics": "displayed_quote_reach_proxy",
+        "limit_debit_points": 2.1,
+        "wait_horizon_seconds": 10,
+        "quote_reach_probability": 0.62,
+        "actual_fill_probability": null,
+        "model_version": "displayed-quote-reach:logistic:v1",
+        "reason_codes": []
+      },
+      "net_pnl": {
+        "status": "unavailable",
+        "basis": "displayed_quote_reach_proxy",
+        "unit": "usd_per_one_spread",
+        "expected_net_pnl": null,
+        "p10_net_pnl": null,
+        "p50_net_pnl": null,
+        "p90_net_pnl": null,
+        "tail_loss_p10": null,
+        "model_version": null,
+        "reason_codes": [
+          "net_pnl_model_unavailable"
+        ]
+      },
+      "score": {
+        "status": "unavailable",
+        "tail_risk_penalty": null,
+        "model_uncertainty_penalty": null,
+        "liquidity_risk_penalty": null,
+        "total": null,
+        "reason_codes": [
+          "candidate_score_unavailable"
+        ]
+      },
+      "reason_codes": []
+    }
+  ],
+  "shadow_decision": {
+    "action": "no_trade",
+    "selected_candidate_id": null,
+    "score_threshold": 0.0,
+    "reason_codes": [
+      "net_pnl_model_unavailable"
+    ]
+  },
+  "quality": "degraded",
+  "quality_reason_codes": [
+    "net_pnl_model_unavailable"
+  ],
+  "action_authority": "none",
+  "automatic_ordering": false
+}

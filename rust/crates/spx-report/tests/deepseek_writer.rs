@@ -600,6 +600,92 @@ fn source_research_base_case_cannot_disappear_from_the_visible_desk_view() {
 }
 
 #[test]
+fn p_vs_q_evidence_cannot_disappear_or_change_in_the_visible_desk_view() {
+    let mut source = semantic_message_value();
+    source["desk_view"] = json!(
+        "NO TRADE\nP/Q研究（未校准，不产生方向） 5分钟上行终值跟随：P 62%（前日止，n=98/14日，区间52%–71%） · Q代理 49% · P−Q +13pp；未扣点差/滑点，真实成交与净收益标签尚不可用 → NO TRADE"
+    );
+    let projection = projection_with_direction(&source, "none");
+
+    let without_probability = concise_semantic_message_value();
+    let client = ReportWriterClient::new(
+        config(true, 64_000),
+        true,
+        RecordingTransport::new(TransportResponse::new(
+            200,
+            response(
+                &serde_json::to_string(&without_probability).unwrap(),
+                "stop",
+            ),
+        )),
+    )
+    .unwrap();
+    let error = client.write_desk_map(&projection).unwrap_err();
+    assert_eq!(error.code(), ReportWriterErrorCode::ResearchAdvisoryMissing);
+
+    for (original, changed) in [
+        ("Q代理 49%", "Q代理 59%"),
+        ("n=98/14日", "n=8/4日"),
+        ("区间52%–71%", "区间52%–70%"),
+    ] {
+        let mut changed_probability = source.clone();
+        changed_probability["desk_view"] = json!(
+            source["desk_view"]
+                .as_str()
+                .unwrap()
+                .replace(original, changed)
+        );
+        let client = ReportWriterClient::new(
+            config(true, 64_000),
+            true,
+            RecordingTransport::new(TransportResponse::new(
+                200,
+                response(
+                    &serde_json::to_string(&changed_probability).unwrap(),
+                    "stop",
+                ),
+            )),
+        )
+        .unwrap();
+        let error = client.write_desk_map(&projection).unwrap_err();
+        assert_eq!(error.code(), ReportWriterErrorCode::ResearchAdvisoryMissing);
+    }
+
+    let mut relocated_probability = source.clone();
+    relocated_probability["desk_view"] = json!(
+        "NO TRADE · 5 62 98 14 52 71 49 13\nP/Q研究（未校准，不产生方向） · 等待价格确认 → NO TRADE"
+    );
+    let client = ReportWriterClient::new(
+        config(true, 64_000),
+        true,
+        RecordingTransport::new(TransportResponse::new(
+            200,
+            response(
+                &serde_json::to_string(&relocated_probability).unwrap(),
+                "stop",
+            ),
+        )),
+    )
+    .unwrap();
+    let error = client.write_desk_map(&projection).unwrap_err();
+    assert_eq!(error.code(), ReportWriterErrorCode::ResearchAdvisoryMissing);
+
+    let client = ReportWriterClient::new(
+        config(true, 64_000),
+        true,
+        RecordingTransport::new(TransportResponse::new(
+            200,
+            response(&serde_json::to_string(&source).unwrap(), "stop"),
+        )),
+    )
+    .unwrap();
+    let output = client.write_desk_map(&projection).unwrap();
+    assert!(output.message.desk_view.as_str().contains("P 62%"));
+    assert!(output.message.desk_view.as_str().contains("Q代理 49%"));
+    assert!(output.message.desk_view.as_str().contains("P−Q +13pp"));
+}
+
+#[test]
 fn required_research_disclosure_is_added_without_a_data_quality_byte_floor() {
     let source = message_value();
     let projection = projection_with_message(&source);

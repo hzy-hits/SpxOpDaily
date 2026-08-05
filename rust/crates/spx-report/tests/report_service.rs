@@ -7,10 +7,11 @@ use spx_core::{LATEST_DESK_MAP_PROJECTION_SCHEMA_VERSION, LatestDeskMapProjectio
 use spx_domain::{DeskMapProjectionV1, MarketSession, NotificationIntentV2, Token, Validate};
 use spx_ledger::{LedgerError, LedgerReader, PersistWrite};
 use spx_report::{
-    DEEPSEEK_MODEL_ID, DeskMessageWriter, DeskReportOutput, HealthError, OwnedReportLedger,
-    ProjectionEligibility, RESEARCH_UNAVAILABLE_DISCLOSURE, ReportHealth, ReportPersistDisposition,
-    ReportPhase, ReportService, ReportServiceConfig, ReportServiceError, ReportTick,
-    ReportWriterErrorCode, ResponseMetadata, ScheduledReportStore,
+    DEEPSEEK_MODEL_ID, DeskMessageWriteFailure, DeskMessageWriter, DeskReportOutput, HealthError,
+    OwnedReportLedger, ProjectionEligibility, RESEARCH_UNAVAILABLE_DISCLOSURE, ReportHealth,
+    ReportPersistDisposition, ReportPhase, ReportService, ReportServiceConfig, ReportServiceError,
+    ReportTick, ReportWriterClient, ReportWriterErrorCode, ResponseMetadata, ScheduledReportStore,
+    Transport, TransportError, TransportRequest, TransportResponse,
 };
 use tempfile::TempDir;
 
@@ -43,13 +44,13 @@ impl DeskMessageWriter for FakeWriter {
     fn write_message(
         &self,
         projection: &DeskMapProjectionV1,
-    ) -> Result<DeskReportOutput, ReportWriterErrorCode> {
+    ) -> Result<DeskReportOutput, DeskMessageWriteFailure> {
         self.calls
             .lock()
             .unwrap()
             .push(projection.projection_id.as_str().to_owned());
         match self.outcomes.lock().unwrap().pop_front().unwrap() {
-            WriterOutcome::Failure(code) => Err(code),
+            WriterOutcome::Failure(code) => Err(DeskMessageWriteFailure::new(code)),
             WriterOutcome::Success => {
                 let mut message = projection.message.clone();
                 if projection.research_context.is_none() {
@@ -74,6 +75,32 @@ impl DeskMessageWriter for FakeWriter {
                 })
             }
         }
+    }
+}
+
+#[derive(Clone)]
+struct StaticTransport {
+    response: TransportResponse,
+    calls: Arc<Mutex<u64>>,
+}
+
+impl StaticTransport {
+    fn new(response: TransportResponse) -> Self {
+        Self {
+            response,
+            calls: Arc::new(Mutex::new(0)),
+        }
+    }
+
+    fn calls(&self) -> u64 {
+        *self.calls.lock().unwrap()
+    }
+}
+
+impl Transport for StaticTransport {
+    fn send(&self, _request: &TransportRequest) -> Result<TransportResponse, TransportError> {
+        *self.calls.lock().unwrap() += 1;
+        Ok(self.response.clone())
     }
 }
 
@@ -241,6 +268,25 @@ fn ten_am() -> DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 8, 4, 14, 0, 0).unwrap()
 }
 
+fn deepseek_response(
+    status: u16,
+    model: &str,
+    finish_reason: &str,
+    content: &str,
+) -> TransportResponse {
+    TransportResponse::new(
+        status,
+        serde_json::json!({
+            "model": model,
+            "choices": [{
+                "finish_reason": finish_reason,
+                "message": {"content": content}
+            }]
+        })
+        .to_string(),
+    )
+}
+
 #[test]
 fn waits_for_current_slot_then_persists_once_through_real_ledger() {
     let temp = TempDir::new().unwrap();
@@ -312,6 +358,182 @@ fn waits_for_current_slot_then_persists_once_through_real_ledger() {
     assert_eq!(health.last_finish_reason.as_deref(), Some("stop"));
     assert!(health.last_visible_content_bytes.unwrap() > 283);
     assert_eq!(health.last_response_sha256.as_deref().unwrap().len(), 64);
+}
+
+#[test]
+fn stop_validation_failure_persists_the_validated_projection_message_once() {
+    let temp = TempDir::new().unwrap();
+    let config = config(&temp, true, &[5]);
+    let now = ten_am() + TimeDelta::seconds(10);
+    let source = projection("desk-map:fallback", "2026-08-04:10:00", ten_am());
+    let expected_message = source.message.clone();
+    write_latest(&config.projection_path, source);
+
+    let transport = StaticTransport::new(deepseek_response(
+        200,
+        DEEPSEEK_MODEL_ID,
+        "stop",
+        "not a desk-message JSON object",
+    ));
+    let transport_inspector = transport.clone();
+    let writer = ReportWriterClient::new(config.writer.clone(), true, transport).unwrap();
+    let store = MemoryStore::default();
+    let store_inspector = store.clone();
+    let mut service = ReportService::open(config.clone(), true, writer, store, now).unwrap();
+
+    assert_eq!(
+        service.run_once_at(now).unwrap(),
+        ReportTick::Persisted {
+            slot: "2026-08-04T10:00:00-04:00".to_owned(),
+            disposition: ReportPersistDisposition::Inserted,
+        }
+    );
+    assert_eq!(transport_inspector.calls(), 1);
+    let intents = store_inspector.intents();
+    assert_eq!(intents.len(), 1);
+    assert_eq!(intents[0].message, expected_message);
+
+    let health = ReportHealth::load(&config.health_path).unwrap();
+    assert_eq!(health.phase, ReportPhase::Persisted);
+    assert_eq!(
+        health.last_fallback_reason.as_deref(),
+        Some("desk_message_invalid_json")
+    );
+    assert_eq!(health.counters.projection_message_fallbacks, 1);
+    assert_eq!(health.counters.generation_failures, 0);
+    assert_eq!(
+        health.last_response_model.as_deref(),
+        Some(DEEPSEEK_MODEL_ID)
+    );
+    assert_eq!(health.last_finish_reason.as_deref(), Some("stop"));
+    assert!(health.last_error_code.is_none());
+
+    assert!(matches!(
+        service.run_once_at(now).unwrap(),
+        ReportTick::Duplicate { .. }
+    ));
+    assert_eq!(transport_inspector.calls(), 1);
+    assert_eq!(
+        ReportHealth::load(&config.health_path)
+            .unwrap()
+            .counters
+            .projection_message_fallbacks,
+        1
+    );
+}
+
+#[test]
+fn stop_semantic_failure_also_uses_the_projection_message_fallback() {
+    let temp = TempDir::new().unwrap();
+    let config = config(&temp, true, &[5]);
+    let now = ten_am() + TimeDelta::seconds(10);
+    let source = projection("desk-map:semantic-fallback", "2026-08-04:10:00", ten_am());
+    let expected_message = source.message.clone();
+    let mut leaked_message = source.message.clone();
+    leaked_message.data_quality = token("schema_version=desk_map_projection.v1");
+    let leaked_content = serde_json::to_string(&leaked_message).unwrap();
+    write_latest(&config.projection_path, source);
+
+    let transport = StaticTransport::new(deepseek_response(
+        200,
+        DEEPSEEK_MODEL_ID,
+        "stop",
+        &leaked_content,
+    ));
+    let writer = ReportWriterClient::new(config.writer.clone(), true, transport).unwrap();
+    let store = MemoryStore::default();
+    let store_inspector = store.clone();
+    let mut service = ReportService::open(config.clone(), true, writer, store, now).unwrap();
+
+    assert!(matches!(
+        service.run_once_at(now).unwrap(),
+        ReportTick::Persisted { .. }
+    ));
+    let intents = store_inspector.intents();
+    assert_eq!(intents.len(), 1);
+    assert_eq!(intents[0].message, expected_message);
+    let health = ReportHealth::load(&config.health_path).unwrap();
+    assert_eq!(
+        health.last_fallback_reason.as_deref(),
+        Some("internal_detail_leak")
+    );
+    assert_eq!(health.counters.projection_message_fallbacks, 1);
+}
+
+#[test]
+fn omitted_p_vs_q_evidence_uses_the_uncompressed_projection_fallback() {
+    let temp = TempDir::new().unwrap();
+    let config = config(&temp, true, &[5]);
+    let now = ten_am() + TimeDelta::seconds(10);
+    let mut source = projection("desk-map:pq-fallback", "2026-08-04:10:00", ten_am());
+    source.message.desk_view = token(
+        "NO TRADE\nP/Q研究（未校准，不产生方向） 5分钟上行终值跟随：P 62%（前日止，n=98/14日，区间52%–71%） · Q代理 49% · P−Q +13pp；未扣点差/滑点，真实成交与净收益标签尚不可用 → NO TRADE",
+    );
+    let expected_message = source.message.clone();
+    let mut compressed = source.message.clone();
+    compressed.desk_view = token("NO TRADE · wait for the next price trigger");
+    write_latest(&config.projection_path, source);
+
+    let transport = StaticTransport::new(deepseek_response(
+        200,
+        DEEPSEEK_MODEL_ID,
+        "stop",
+        &serde_json::to_string(&compressed).unwrap(),
+    ));
+    let writer = ReportWriterClient::new(config.writer.clone(), true, transport).unwrap();
+    let store = MemoryStore::default();
+    let store_inspector = store.clone();
+    let mut service = ReportService::open(config.clone(), true, writer, store, now).unwrap();
+
+    assert!(matches!(
+        service.run_once_at(now).unwrap(),
+        ReportTick::Persisted { .. }
+    ));
+    let intents = store_inspector.intents();
+    assert_eq!(intents.len(), 1);
+    assert_eq!(intents[0].message, expected_message);
+    assert!(intents[0].message.desk_view.as_str().contains("n=98/14日"));
+    assert!(intents[0].message.desk_view.as_str().contains("P−Q +13pp"));
+    let health = ReportHealth::load(&config.health_path).unwrap();
+    assert_eq!(
+        health.last_fallback_reason.as_deref(),
+        Some("research_advisory_missing")
+    );
+    assert_eq!(health.counters.projection_message_fallbacks, 1);
+}
+
+#[test]
+fn non_stop_provider_completion_still_backs_off_without_fallback() {
+    let temp = TempDir::new().unwrap();
+    let config = config(&temp, true, &[5]);
+    let now = ten_am() + TimeDelta::seconds(10);
+    let source = projection("desk-map:truncated-provider", "2026-08-04:10:00", ten_am());
+    let content = serde_json::to_string(&source.message).unwrap();
+    write_latest(&config.projection_path, source);
+    let transport = StaticTransport::new(deepseek_response(
+        200,
+        DEEPSEEK_MODEL_ID,
+        "length",
+        &content,
+    ));
+    let writer = ReportWriterClient::new(config.writer.clone(), true, transport).unwrap();
+    let store = MemoryStore::default();
+    let store_inspector = store.clone();
+    let mut service = ReportService::open(config.clone(), true, writer, store, now).unwrap();
+
+    assert_eq!(
+        service.run_once_at(now).unwrap(),
+        ReportTick::Backoff {
+            error_code: ReportWriterErrorCode::OutputTruncated,
+            next_attempt_at: now + TimeDelta::seconds(5),
+        }
+    );
+    assert!(store_inspector.intents().is_empty());
+    let health = ReportHealth::load(&config.health_path).unwrap();
+    assert!(health.last_fallback_reason.is_none());
+    assert_eq!(health.counters.projection_message_fallbacks, 0);
+    assert_eq!(health.counters.generation_failures, 1);
+    assert_eq!(health.last_finish_reason.as_deref(), Some("length"));
 }
 
 #[test]
@@ -466,7 +688,9 @@ fn service_restart_restores_diagnostics_without_restoring_runtime_state() {
     prior.last_finish_reason = Some("stop".to_owned());
     prior.last_visible_content_bytes = Some(3_782);
     prior.last_response_sha256 = Some("b".repeat(64));
+    prior.last_fallback_reason = Some("critical_fact_missing".to_owned());
     prior.counters.ticks = 11;
+    prior.counters.projection_message_fallbacks = 2;
     prior.counters.persisted_reports = 3;
     prior.persist(&config.health_path).unwrap();
 
@@ -499,6 +723,7 @@ fn service_restart_restores_diagnostics_without_restoring_runtime_state() {
         prior.last_visible_content_bytes
     );
     assert_eq!(health.last_response_sha256, prior.last_response_sha256);
+    assert_eq!(health.last_fallback_reason, prior.last_fallback_reason);
     assert_eq!(health.counters, prior.counters);
     assert_eq!(ReportHealth::load(&config.health_path).unwrap(), *health);
 }

@@ -7,7 +7,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Mapping
 
 
-DEFAULT_HORIZONS_SECONDS = (30, 60, 180, 300)
+DEFAULT_HORIZONS_SECONDS = (30, 60, 180, 300, 900, 1800)
+MAX_ACTIVE_SAMPLES = 512
 
 
 @dataclass(frozen=True)
@@ -33,11 +34,15 @@ def advance_level_outcomes(
     now = _utc(at)
     state = dict(previous) if isinstance(previous, Mapping) else {}
     raw_observations = state.get("observations")
-    observations = {
-        str(key): dict(value)
-        for key, value in raw_observations.items()
-        if isinstance(key, str) and isinstance(value, Mapping)
-    } if isinstance(raw_observations, Mapping) else {}
+    observations = (
+        {
+            str(key): dict(value)
+            for key, value in raw_observations.items()
+            if isinstance(key, str) and isinstance(value, Mapping)
+        }
+        if isinstance(raw_observations, Mapping)
+        else {}
+    )
 
     event_id = str(decision.get("event_id") or "")
     if confirmed_now and event_id and spot is not None and event_id not in observations:
@@ -100,11 +105,16 @@ def _append_sample(observation: dict[str, object], *, spot: float | None, at: da
     if not isinstance(samples, list):
         samples = []
         observation["samples"] = samples
-    last_at = _parse_at(samples[-1].get("at")) if samples and isinstance(samples[-1], dict) else None
+    last_at = (
+        _parse_at(samples[-1].get("at")) if samples and isinstance(samples[-1], dict) else None
+    )
     if last_at is not None and at <= last_at:
         return
     samples.append({"at": at.isoformat(), "spot": float(spot)})
-    del samples[:-64]
+    # The hot worker runs every five seconds.  Keep enough path observations
+    # for an exact 30-minute MFE/MAE attribution instead of silently reducing
+    # the long horizon to the last five minutes.
+    del samples[:-MAX_ACTIVE_SAMPLES]
 
 
 def _complete_due(
@@ -145,14 +155,8 @@ def _complete_due(
         distance = abs((sample_at - target_at).total_seconds())
         returns = [_return_bps(price, start_spot) for _, price in path]
         directional = [sign * value for value in returns]
-        status = (
-            "complete"
-            if distance <= settings.sample_tolerance_seconds
-            else "incomplete"
-        )
-        end_return = (
-            round(_return_bps(end_spot, start_spot), 6) if status == "complete" else None
-        )
+        status = "complete" if distance <= settings.sample_tolerance_seconds else "incomplete"
+        end_return = round(_return_bps(end_spot, start_spot), 6) if status == "complete" else None
         mfe = round(max(directional), 6) if status == "complete" else None
         mae = round(min(directional), 6) if status == "complete" else None
         attribution = _attribution(
@@ -185,17 +189,20 @@ def _complete_due(
                 "direction": observation.get("direction"),
                 "confirmed_at": observation.get("confirmed_at"),
                 "horizon_seconds": raw["seconds"],
-                **{key: raw.get(key) for key in (
-                    "status",
-                    "sample_at",
-                    "sample_distance_seconds",
-                    "end_spot",
-                    "return_bps",
-                    "mfe_bps",
-                    "mae_bps",
-                    "attribution",
-                    "completed_at",
-                )},
+                **{
+                    key: raw.get(key)
+                    for key in (
+                        "status",
+                        "sample_at",
+                        "sample_distance_seconds",
+                        "end_spot",
+                        "return_bps",
+                        "mfe_bps",
+                        "mae_bps",
+                        "attribution",
+                        "completed_at",
+                    )
+                },
             }
         )
     return completed

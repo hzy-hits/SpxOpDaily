@@ -9,6 +9,7 @@ mod raw_log;
 mod readiness;
 mod research_projection;
 mod server;
+mod strategy_distribution_projection;
 
 pub use config::{CoreConfig, NotificationTargetConfig, ReadinessConfig};
 pub use desk_map_projection::{
@@ -24,3 +25,7 @@ pub use readiness::{ReadinessAssessment, assess_readiness};
 pub use research_projection::ResearchDisposition;
 pub use server::serve_unix;
 pub use spx_domain::{AckStatus, CoreAckDisposition, CoreAckReason, CoreAckV1};
+pub use strategy_distribution_projection::{
+    LATEST_STRATEGY_DISTRIBUTION_PROJECTION_SCHEMA_VERSION, LatestStrategyDistributionProjectionV1,
+    StrategyDistributionDisposition,
+};

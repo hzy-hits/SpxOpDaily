@@ -60,6 +60,17 @@ spring_gamma_v3:
   min_probability: {value: 0.60, description: Minimum uncalibrated directional probability proxy.}
   min_margin: {value: 0.10, description: Minimum directional probability-proxy margin.}
 
+strategy_distribution:
+  enabled: {value: true, description: Enables the advisory-only P-vs-Q strategy-distribution artifact.}
+  horizon_seconds: {value: 300, description: Physical outcome horizon in seconds.}
+  window_days: {value: 35, description: Rolling evidence window in days.}
+  refresh_seconds: {value: 60.0, description: Evidence refresh interval.}
+  projection_ttl_seconds: {value: 90.0, description: Advisory projection TTL.}
+  append_interval_seconds: {value: 60.0, description: Append-only observation cadence.}
+  minimum_physical_samples: {value: 30, description: Minimum physical outcome sample count.}
+  beta_prior_alpha: {value: 1.0, description: Transparent Beta prior alpha.}
+  beta_prior_beta: {value: 1.0, description: Transparent Beta prior beta.}
+
 globex_trend:
   enabled: {value: true, description: Runs the continuous ES session trend and reversal state machine, rendering Globex or RTH semantics from the event timestamp.}
   interval_seconds: {value: 30, description: Evaluation cadence in the 24h runtime.}
@@ -1698,7 +1709,7 @@ level_decision_shadow:
   structure_band_half_width_points: {value: 5.0, description: Published wall range half width.}
   structure_switch_min_points: {value: 5.0, description: Material wall-center displacement.}
   max_frozen_structure_age_sessions: {value: 1, description: Frozen structure session TTL.}
-  outcome_horizons_seconds: {value: [30, 60, 180, 300], description: Outcome horizons.}
+  outcome_horizons_seconds: {value: [30, 60, 180, 300, 900, 1800], description: Outcome horizons.}
   outcome_sample_tolerance_seconds: {value: 20.0, description: Outcome sample tolerance.}
   outcome_no_follow_through_mfe_bps: {value: 2.0, description: No-follow-through MFE threshold.}
   outcome_false_confirmation_mae_bps: {value: -5.0, description: False-confirmation MAE threshold.}

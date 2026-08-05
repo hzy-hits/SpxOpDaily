@@ -14,10 +14,13 @@ use tracing::{error, info, warn};
 
 use crate::BridgeConfig;
 use crate::client::{ClientError, CoreClient};
-use crate::health::{BridgeHealth, BridgePhase, DeskMapLaneStatus, ResearchLaneStatus};
+use crate::health::{
+    BridgeHealth, BridgePhase, DeskMapLaneStatus, ResearchLaneStatus,
+    StrategyDistributionLaneStatus, StrategyDistributionSourceObservation,
+};
 use crate::legacy::{
     LegacyDocument, LegacyError, LegacyIbkrHealth, read_desk_map_projection, read_ibkr_health,
-    read_research_signals, read_snapshot,
+    read_research_signals, read_snapshot, read_strategy_distribution_forecast,
 };
 use crate::mapper::{
     MapError, MappingStats, map_provider_batch, map_source_failure_batch, semantic_hash,
@@ -56,6 +59,8 @@ pub struct BridgeRuntime {
     last_research_error: Option<String>,
     last_desk_map_fingerprint: Option<String>,
     last_desk_map_error: Option<String>,
+    last_strategy_distribution_fingerprint: Option<String>,
+    last_strategy_distribution_error: Option<String>,
     _runtime_lock: RuntimeLock,
 }
 
@@ -75,6 +80,7 @@ impl BridgeRuntime {
             &config.source_snapshot_path,
             config.research_signal_path.as_deref(),
             config.desk_map_projection_path.as_deref(),
+            config.strategy_distribution_forecast_path.as_deref(),
             &state,
             now,
         );
@@ -91,6 +97,8 @@ impl BridgeRuntime {
             last_research_error: None,
             last_desk_map_fingerprint: None,
             last_desk_map_error: None,
+            last_strategy_distribution_fingerprint: None,
+            last_strategy_distribution_error: None,
             _runtime_lock: runtime_lock,
         })
     }
@@ -141,6 +149,7 @@ impl BridgeRuntime {
         };
         let research_result = self.handle_research_source();
         let desk_map_result = self.handle_desk_map_source();
+        self.handle_strategy_distribution_source();
         quote_result?;
         research_result?;
         desk_map_result?;
@@ -472,6 +481,189 @@ impl BridgeRuntime {
                 warn!(error = %failure, "desk map projection ingress outcome unknown; deterministic frame will retry");
                 self.disconnect(&failure.to_string());
                 Ok(())
+            }
+        }
+    }
+
+    fn handle_strategy_distribution_source(&mut self) {
+        let Some(path) = self.config.strategy_distribution_forecast_path.clone() else {
+            return;
+        };
+        let document = match read_strategy_distribution_forecast(
+            &path,
+            self.config.source_max_bytes.min(1_048_576),
+        ) {
+            Ok(value) => value,
+            Err(failure) => {
+                let description = failure.to_string();
+                let status = match &failure {
+                    LegacyError::Metadata(error)
+                        if error.kind() == std::io::ErrorKind::NotFound =>
+                    {
+                        StrategyDistributionLaneStatus::Missing
+                    }
+                    _ => StrategyDistributionLaneStatus::Rejected,
+                };
+                self.health.reject_strategy_distribution_source(
+                    status,
+                    description.clone(),
+                    Utc::now(),
+                );
+                self.persist_health();
+                if self.last_strategy_distribution_error.as_deref() != Some(description.as_str()) {
+                    warn!(error = %failure, path = %path.display(), "strategy distribution source rejected; other bridge lanes continue");
+                    self.last_strategy_distribution_error = Some(description);
+                }
+                return;
+            }
+        };
+        let forecast = document.forecast;
+        let fingerprint = document.fingerprint;
+        let now = Utc::now();
+        let available_at = forecast.available_at.with_timezone(&Utc);
+        let valid_until = forecast.valid_until.with_timezone(&Utc);
+        let already_acknowledged =
+            self.last_strategy_distribution_fingerprint.as_deref() == Some(fingerprint.as_str());
+        self.health.observe_strategy_distribution_source(
+            StrategyDistributionSourceObservation {
+                schema_version: forecast.schema_version.clone(),
+                document_id: forecast.document_id.to_string(),
+                fingerprint: fingerprint.clone(),
+                available_at,
+                byte_len: document.byte_len,
+            },
+            already_acknowledged,
+            now,
+        );
+        if available_at > now {
+            self.reject_strategy_distribution_time(
+                StrategyDistributionLaneStatus::Rejected,
+                "future-dated strategy distribution source",
+                &path,
+                now,
+            );
+            return;
+        }
+        if valid_until <= now {
+            self.reject_strategy_distribution_time(
+                StrategyDistributionLaneStatus::Expired,
+                "expired strategy distribution source",
+                &path,
+                now,
+            );
+            return;
+        }
+        if already_acknowledged {
+            self.last_strategy_distribution_error = None;
+            self.persist_health();
+            return;
+        }
+        self.last_strategy_distribution_error = None;
+        let envelope = match Token::new(
+            format!("message:strategy-distribution:{}", &fingerprint[..24]),
+            "message_id",
+        ) {
+            Ok(message_id) => IngressEnvelopeV1 {
+                schema_version: INGRESS_SCHEMA_VERSION.to_owned(),
+                message_id,
+                emitted_at: available_at,
+                message: IngressMessageV1::StrategyDistributionForecast(Box::new(forecast)),
+            },
+            Err(failure) => {
+                self.health.reject_strategy_distribution_source(
+                    StrategyDistributionLaneStatus::Rejected,
+                    failure.to_string(),
+                    now,
+                );
+                self.persist_health();
+                warn!(error = %failure, "strategy distribution message identity rejected; other bridge lanes continue");
+                return;
+            }
+        };
+        self.send_strategy_distribution_envelope(&envelope, fingerprint);
+    }
+
+    fn reject_strategy_distribution_time(
+        &mut self,
+        status: StrategyDistributionLaneStatus,
+        description: &str,
+        path: &std::path::Path,
+        now: chrono::DateTime<Utc>,
+    ) {
+        self.health
+            .reject_strategy_distribution_source(status, description.to_owned(), now);
+        self.persist_health();
+        if self.last_strategy_distribution_error.as_deref() != Some(description) {
+            warn!(path = %path.display(), reason = description, "strategy distribution source rejected by time boundary");
+            self.last_strategy_distribution_error = Some(description.to_owned());
+        }
+    }
+
+    fn send_strategy_distribution_envelope(
+        &mut self,
+        envelope: &IngressEnvelopeV1,
+        fingerprint: String,
+    ) {
+        let Some(client) = self.client.as_mut() else {
+            return;
+        };
+        match client.send(envelope) {
+            Ok(ack) if ack.status == AckStatus::Accepted => {
+                let disposition = ack
+                    .disposition
+                    .expect("validated accepted acknowledgement has disposition");
+                let accepted_disposition = matches!(
+                    disposition,
+                    CoreAckDisposition::StrategyDistributionUpdated
+                        | CoreAckDisposition::StrategyDistributionUnchanged
+                        | CoreAckDisposition::StrategyDistributionStale
+                        | CoreAckDisposition::DuplicateIngress
+                );
+                self.health.acknowledge_strategy_distribution(
+                    ack.message_id
+                        .as_ref()
+                        .expect("validated accepted acknowledgement has message id")
+                        .to_string(),
+                    disposition,
+                    Utc::now(),
+                );
+                if accepted_disposition {
+                    self.last_strategy_distribution_fingerprint = Some(fingerprint);
+                    self.health.counters.accepted_frames =
+                        self.health.counters.accepted_frames.saturating_add(1);
+                } else {
+                    self.health.counters.rejected_acks =
+                        self.health.counters.rejected_acks.saturating_add(1);
+                }
+                self.persist_health();
+            }
+            Ok(ack) => {
+                self.health.counters.rejected_acks =
+                    self.health.counters.rejected_acks.saturating_add(1);
+                self.health.reject_strategy_distribution_ack(
+                    format!(
+                        "core rejected strategy distribution ingress: {:?}",
+                        ack.reason_code
+                    ),
+                    Utc::now(),
+                );
+                warn!(reason = ?ack.reason_code, "strategy distribution frame rejected; other bridge lanes continue");
+                self.persist_health();
+            }
+            Err(failure) if failure.is_preflight_failure() => {
+                self.health.reject_strategy_distribution_source(
+                    StrategyDistributionLaneStatus::Rejected,
+                    failure.to_string(),
+                    Utc::now(),
+                );
+                self.persist_health();
+                warn!(error = %failure, "strategy distribution ingress is locally invalid; other bridge lanes continue");
+            }
+            Err(failure) => {
+                self.health
+                    .mark_strategy_distribution_transport_unknown(failure.to_string(), Utc::now());
+                warn!(error = %failure, "strategy distribution ingress outcome unknown; deterministic frame will retry");
+                self.disconnect(&failure.to_string());
             }
         }
     }
@@ -940,6 +1132,7 @@ mod tests {
             source_snapshot_path: temp.path().join("state.json"),
             research_signal_path: None,
             desk_map_projection_path: None,
+            strategy_distribution_forecast_path: None,
             ibkr_health_path: temp.path().join("ibkr.json"),
             socket_path: temp.path().join("core.sock"),
             state_path: temp.path().join("bridge-state.json"),
@@ -1023,6 +1216,40 @@ mod tests {
         // contract so the bridge must transmit, rather than strip, it.
         fixture["research_context"]["generated_at"] =
             serde_json::json!(now - TimeDelta::milliseconds(1_500));
+        std::fs::write(path, serde_json::to_vec(&fixture).unwrap()).unwrap();
+        fixture
+    }
+
+    fn write_current_strategy_distribution_fixture(path: &std::path::Path) -> serde_json::Value {
+        let now = Utc::now();
+        let trading_date = now.date_naive();
+        let target_at = now + TimeDelta::hours(1);
+        let mut fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../contracts/golden/domain/v1/strategy_distribution_forecast.json"
+        ))
+        .unwrap();
+        fixture["document_id"] = serde_json::json!(format!(
+            "strategy-distribution:test:{}",
+            now.timestamp_millis()
+        ));
+        fixture["source_snapshot_id"] = serde_json::json!(format!(
+            "analytical-option-snapshot:test:{}",
+            now.timestamp_millis()
+        ));
+        fixture["trading_date_et"] = serde_json::json!(trading_date);
+        fixture["observed_through"] = serde_json::json!(now - TimeDelta::seconds(2));
+        fixture["available_at"] = serde_json::json!(now - TimeDelta::seconds(1));
+        fixture["valid_until"] = serde_json::json!(now + TimeDelta::seconds(90));
+        fixture["q_event"]["event"]["target_at"] = serde_json::json!(target_at);
+        fixture["p_event"]["event"]["target_at"] = serde_json::json!(target_at);
+        fixture["p_event"]["trained_through_date"] =
+            serde_json::json!(trading_date - TimeDelta::days(1));
+        for candidate in fixture["strategy_candidates"]
+            .as_array_mut()
+            .expect("strategy candidates array")
+        {
+            candidate["expiry"] = serde_json::json!(trading_date);
+        }
         std::fs::write(path, serde_json::to_vec(&fixture).unwrap()).unwrap();
         fixture
     }
@@ -1220,15 +1447,79 @@ mod tests {
     }
 
     #[test]
-    fn quote_source_read_failure_does_not_skip_research_or_desk_map_lanes() {
+    fn python_strategy_distribution_fixture_receives_typed_bridge_ack() {
+        let temp = TempDir::new().unwrap();
+        let mut config = config(&temp);
+        let source_path = temp.path().join("strategy-distribution.json");
+        config.strategy_distribution_forecast_path = Some(source_path.clone());
+        let fixture = write_current_strategy_distribution_fixture(&source_path);
+        let expected_document_id = fixture["document_id"]
+            .as_str()
+            .expect("fixture document_id")
+            .to_owned();
+        BridgeState::initialize(&config.state_path).unwrap();
+
+        let listener = UnixListener::bind(&config.socket_path).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut length = [0_u8; 4];
+            stream.read_exact(&mut length).unwrap();
+            let mut bytes = vec![0_u8; u32::from_be_bytes(length) as usize];
+            stream.read_exact(&mut bytes).unwrap();
+            let envelope: IngressEnvelopeV1 = serde_json::from_slice(&bytes).unwrap();
+            let IngressMessageV1::StrategyDistributionForecast(forecast) = &envelope.message else {
+                panic!("bridge sent a non-strategy-distribution ingress message");
+            };
+            assert_eq!(forecast.schema_version, "strategy_distribution_forecast.v1");
+            assert_eq!(forecast.document_id.as_str(), expected_document_id);
+            assert!(!forecast.automatic_ordering);
+            let ack = CoreAckV1::accepted(
+                envelope.message_id,
+                CoreAckDisposition::StrategyDistributionUpdated,
+                None,
+            );
+            let encoded = serde_json::to_vec(&ack).unwrap();
+            stream
+                .write_all(&u32::try_from(encoded.len()).unwrap().to_be_bytes())
+                .unwrap();
+            stream.write_all(&encoded).unwrap();
+        });
+
+        let mut runtime = BridgeRuntime::open(config.clone()).unwrap();
+        runtime.client = Some(
+            CoreClient::connect(&config.socket_path, Duration::from_secs(1), 1_048_576).unwrap(),
+        );
+        runtime.health.socket_connected = true;
+        runtime.health.set_quote_phase(BridgePhase::Ready);
+        runtime.handle_strategy_distribution_source();
+
+        assert_eq!(runtime.health.phase, BridgePhase::Ready);
+        assert_eq!(
+            runtime.health.strategy_distribution.status,
+            StrategyDistributionLaneStatus::Accepted
+        );
+        assert_eq!(
+            runtime.health.strategy_distribution.last_ack_disposition,
+            Some(CoreAckDisposition::StrategyDistributionUpdated)
+        );
+        assert!(runtime.last_strategy_distribution_fingerprint.is_some());
+        drop(runtime);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn strategy_source_failure_does_not_skip_quote_research_or_desk_map_lanes() {
         let temp = TempDir::new().unwrap();
         let mut config = config(&temp);
         let research_path = temp.path().join("research.json");
         let desk_map_path = temp.path().join("desk-map.json");
+        let strategy_path = temp.path().join("strategy-distribution.json");
         config.research_signal_path = Some(research_path.clone());
         config.desk_map_projection_path = Some(desk_map_path.clone());
+        config.strategy_distribution_forecast_path = Some(strategy_path.clone());
         write_research_fixture(&research_path);
         write_current_desk_map_fixture(&desk_map_path);
+        std::fs::write(&strategy_path, b"{\"schema_version\":\"unknown\"}").unwrap();
         BridgeState::initialize(&config.state_path).unwrap();
 
         let listener = UnixListener::bind(&config.socket_path).unwrap();
@@ -1249,6 +1540,9 @@ mod tests {
                     }
                     IngressMessageV1::DeskMapProjection(_) => {
                         ("desk_map", CoreAckDisposition::DeskMapUpdated)
+                    }
+                    IngressMessageV1::StrategyDistributionForecast(_) => {
+                        panic!("invalid strategy source must not reach core")
                     }
                     IngressMessageV1::Evaluate(_) => panic!("unexpected evaluation ingress"),
                     IngressMessageV1::OperatorNotification(_) => {
@@ -1274,6 +1568,10 @@ mod tests {
         assert_eq!(runtime.health.phase, BridgePhase::Degraded);
         assert_eq!(runtime.health.research.status, ResearchLaneStatus::Accepted);
         assert_eq!(runtime.health.desk_map.status, DeskMapLaneStatus::Accepted);
+        assert_eq!(
+            runtime.health.strategy_distribution.status,
+            StrategyDistributionLaneStatus::Rejected
+        );
         assert_eq!(
             observed.lock().unwrap().as_slice(),
             ["quote", "quote", "research", "desk_map"]
@@ -1316,6 +1614,45 @@ mod tests {
         let persisted: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&config.health_path).unwrap()).unwrap();
         assert_eq!(persisted["desk_map"]["status"], "expired");
+    }
+
+    #[test]
+    fn expired_strategy_distribution_source_is_rejected_without_erasing_last_ack() {
+        let temp = TempDir::new().unwrap();
+        let mut config = config(&temp);
+        let source_path = temp.path().join("strategy-distribution.json");
+        config.strategy_distribution_forecast_path = Some(source_path.clone());
+        let mut fixture = write_current_strategy_distribution_fixture(&source_path);
+        let now = Utc::now();
+        fixture["observed_through"] = serde_json::json!(now - TimeDelta::seconds(3));
+        fixture["available_at"] = serde_json::json!(now - TimeDelta::seconds(2));
+        fixture["valid_until"] = serde_json::json!(now - TimeDelta::seconds(1));
+        std::fs::write(&source_path, serde_json::to_vec(&fixture).unwrap()).unwrap();
+        BridgeState::initialize(&config.state_path).unwrap();
+        let mut runtime = BridgeRuntime::open(config.clone()).unwrap();
+        runtime.health.set_quote_phase(BridgePhase::Ready);
+        let fingerprint =
+            read_strategy_distribution_forecast(&source_path, config.source_max_bytes)
+                .unwrap()
+                .fingerprint;
+        runtime.last_strategy_distribution_fingerprint = Some(fingerprint);
+        runtime.health.acknowledge_strategy_distribution(
+            "message:strategy-distribution:previously-accepted".to_owned(),
+            CoreAckDisposition::StrategyDistributionUpdated,
+            now,
+        );
+
+        runtime.handle_strategy_distribution_source();
+
+        assert_eq!(runtime.health.phase, BridgePhase::Degraded);
+        assert_eq!(
+            runtime.health.strategy_distribution.status,
+            StrategyDistributionLaneStatus::Expired
+        );
+        assert!(runtime.last_strategy_distribution_fingerprint.is_some());
+        let persisted: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&config.health_path).unwrap()).unwrap();
+        assert_eq!(persisted["strategy_distribution"]["status"], "expired");
     }
 
     #[test]
@@ -1365,16 +1702,19 @@ mod tests {
     }
 
     #[test]
-    fn advisory_lane_preflight_failures_are_fatal_without_reconnect_loop() {
+    fn strategy_preflight_is_isolated_while_existing_advisory_lanes_remain_fatal() {
         let temp = TempDir::new().unwrap();
         let mut config = config(&temp);
         let research_path = temp.path().join("research.json");
         let desk_map_path = temp.path().join("desk-map.json");
+        let strategy_path = temp.path().join("strategy-distribution.json");
         config.research_signal_path = Some(research_path.clone());
         config.desk_map_projection_path = Some(desk_map_path.clone());
+        config.strategy_distribution_forecast_path = Some(strategy_path.clone());
         config.max_frame_bytes = 64;
         write_research_fixture(&research_path);
         write_current_desk_map_fixture(&desk_map_path);
+        write_current_strategy_distribution_fixture(&strategy_path);
         BridgeState::initialize(&config.state_path).unwrap();
 
         let listener = UnixListener::bind(&config.socket_path).unwrap();
@@ -1408,6 +1748,14 @@ mod tests {
             RuntimeError::LocalIngress(ClientError::FrameTooLarge)
         ));
         assert_eq!(runtime.health.desk_map.status, DeskMapLaneStatus::Rejected);
+        assert!(runtime.client.is_some());
+        assert!(runtime.next_connect_not_before.is_none());
+
+        runtime.handle_strategy_distribution_source();
+        assert_eq!(
+            runtime.health.strategy_distribution.status,
+            StrategyDistributionLaneStatus::Rejected
+        );
         assert!(runtime.client.is_some());
         assert!(runtime.next_connect_not_before.is_none());
 

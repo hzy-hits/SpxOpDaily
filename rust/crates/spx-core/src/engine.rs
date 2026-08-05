@@ -24,6 +24,10 @@ use crate::readiness::assess_readiness;
 use crate::research_projection::{
     ResearchDisposition, ResearchProjectionError, ResearchProjectionStore,
 };
+use crate::strategy_distribution_projection::{
+    StrategyDistributionDisposition, StrategyDistributionProjectionError,
+    StrategyDistributionProjectionStore,
+};
 use crate::{CoreConfig, ReadinessAssessment};
 
 #[derive(Debug, Error)]
@@ -42,6 +46,8 @@ pub enum CoreError {
     ResearchProjection(#[from] ResearchProjectionError),
     #[error("desk map projection error: {0}")]
     DeskMapProjection(#[from] DeskMapProjectionError),
+    #[error("strategy distribution projection error: {0}")]
+    StrategyDistributionProjection(#[from] StrategyDistributionProjectionError),
     #[error("invalid owner lease configuration")]
     OwnerLeaseConfiguration,
 }
@@ -69,6 +75,10 @@ pub enum CoreOutcome {
     DeskMapProjection {
         message_id: Token,
         disposition: DeskMapDisposition,
+    },
+    StrategyDistributionForecast {
+        message_id: Token,
+        disposition: StrategyDistributionDisposition,
     },
     OperatorNotification {
         message_id: Token,
@@ -123,6 +133,7 @@ pub struct CoreEngine {
     projection: ProjectionStore,
     research_projection: ResearchProjectionStore,
     desk_map_projection: DeskMapProjectionStore,
+    strategy_distribution_projection: StrategyDistributionProjectionStore,
     owner_released: bool,
 }
 
@@ -146,6 +157,9 @@ impl CoreEngine {
         let projection = ProjectionStore::new(&config.projection_path);
         let research_projection = ResearchProjectionStore::open(&config.research_projection_path)?;
         let desk_map_projection = DeskMapProjectionStore::open(&config.desk_map_projection_path)?;
+        let strategy_distribution_projection = StrategyDistributionProjectionStore::open(
+            &config.strategy_distribution_projection_path,
+        )?;
         let quote_book = QuoteBook::new(
             config.quote_cache_retention_seconds,
             config.quote_cache_max_entries,
@@ -167,6 +181,7 @@ impl CoreEngine {
             projection,
             research_projection,
             desk_map_projection,
+            strategy_distribution_projection,
             owner_released: false,
         })
     }
@@ -188,6 +203,7 @@ impl CoreEngine {
             IngressMessageV1::Evaluate(_)
             | IngressMessageV1::ResearchSignals(_)
             | IngressMessageV1::DeskMapProjection(_)
+            | IngressMessageV1::StrategyDistributionForecast(_)
             | IngressMessageV1::OperatorNotification(_)
             | IngressMessageV1::OperatorNotificationCancellation(_) => AppendDurability::Durable,
         };
@@ -241,6 +257,17 @@ impl CoreEngine {
                     processing_at,
                 )?;
                 CoreOutcome::DeskMapProjection {
+                    message_id,
+                    disposition,
+                }
+            }
+            IngressMessageV1::StrategyDistributionForecast(forecast) => {
+                let disposition = self.strategy_distribution_projection.apply(
+                    message_id.clone(),
+                    *forecast,
+                    processing_at,
+                )?;
+                CoreOutcome::StrategyDistributionForecast {
                     message_id,
                     disposition,
                 }

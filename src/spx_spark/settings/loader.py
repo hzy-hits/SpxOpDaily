@@ -33,6 +33,7 @@ from spx_spark.settings.schwab import (
 from spx_spark.settings.shock import ShockSettings
 from spx_spark.settings.spring_gamma_v3 import SpringGammaV3Settings
 from spx_spark.settings.storage import StorageSettingsSlice
+from spx_spark.settings.strategy_distribution import StrategyDistributionSettings
 
 _SECRET_KEY_FRAGMENTS = (
     "secret",
@@ -294,6 +295,23 @@ def load_settings(
         min_paired_strikes=int(get("spring_gamma_v3.min_paired_strikes")),
         min_probability=float(get("spring_gamma_v3.min_probability")),
         min_margin=float(get("spring_gamma_v3.min_margin")),
+    )
+    strategy_distribution = StrategyDistributionSettings(
+        enabled=bool(get("strategy_distribution.enabled")),
+        horizon_seconds=int(get("strategy_distribution.horizon_seconds")),
+        window_days=int(get("strategy_distribution.window_days")),
+        refresh_seconds=float(get("strategy_distribution.refresh_seconds")),
+        projection_ttl_seconds=float(
+            get("strategy_distribution.projection_ttl_seconds")
+        ),
+        append_interval_seconds=float(
+            get("strategy_distribution.append_interval_seconds")
+        ),
+        minimum_physical_samples=int(
+            get("strategy_distribution.minimum_physical_samples")
+        ),
+        beta_prior_alpha=float(get("strategy_distribution.beta_prior_alpha")),
+        beta_prior_beta=float(get("strategy_distribution.beta_prior_beta")),
     )
     globex_trend = GlobexTrendSettings(
         enabled=bool(get("globex_trend.enabled")),
@@ -770,6 +788,7 @@ def load_settings(
         globex_trend=globex_trend,
         market_features=market_features,
         spring_gamma_v3=spring_gamma_v3,
+        strategy_distribution=strategy_distribution,
         alerts=alerts,
         runtime=runtime,
         shock=shock,

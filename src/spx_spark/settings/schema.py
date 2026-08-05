@@ -24,6 +24,7 @@ from spx_spark.settings.schwab import SchwabSettingsSlice
 from spx_spark.settings.shock import ShockSettings
 from spx_spark.settings.spring_gamma_v3 import SpringGammaV3Settings
 from spx_spark.settings.storage import StorageSettingsSlice
+from spx_spark.settings.strategy_distribution import StrategyDistributionSettings
 
 
 @dataclass(frozen=True)
@@ -43,6 +44,7 @@ class AppSettings:
     globex_trend: GlobexTrendSettings
     market_features: MarketFeatureSettings
     spring_gamma_v3: SpringGammaV3Settings
+    strategy_distribution: StrategyDistributionSettings
     alerts: AlertSettings
     runtime: RuntimeSettingsSlice
     shock: ShockSettings

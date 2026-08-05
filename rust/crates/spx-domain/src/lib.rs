@@ -7,6 +7,7 @@ mod operator_notification;
 mod report;
 mod research;
 mod strategy;
+mod strategy_distribution;
 mod validation;
 
 pub use delivery::{
@@ -36,6 +37,14 @@ pub use strategy::{
     CalendarState, CandidateDirection, EvaluationRequestV1, ExactLegEvidenceV1, MacroPermission,
     PlanState, StrategyAction, StrategyBlockReason, StrategyDecisionV1,
 };
+pub use strategy_distribution::{
+    CandidateScoreV1, DistributionActionAuthority, DistributionCalibrationStatus,
+    DistributionCandidateDirection, DistributionEvidenceStatus, DistributionForecastQuality,
+    EstimateQuality, EstimateStatus, ExecutionEstimateV1, ExecutionSemantics, NetPnlBasis,
+    NetPnlEstimateV1, NetPnlUnit, ProbabilityEstimateV1, ProbabilityEventDefinitionV1,
+    ProbabilityEventKind, ProbabilityMeasure, ShadowAction, ShadowDecisionV1,
+    StrategyDistributionCandidateV1, StrategyDistributionForecastV1,
+};
 pub use validation::{
     DomainError, NonNegativeF64, PositiveF64, ProbabilityF64, Token, Validate, canonical_json_hash,
 };
@@ -54,3 +63,4 @@ pub const OPERATOR_NOTIFICATION_CANCELLATION_SCHEMA_VERSION: &str =
     "operator_notification_cancellation.v1";
 pub const DELIVERY_RECEIPT_SCHEMA_VERSION: &str = "delivery_receipt.v1";
 pub const RESEARCH_SIGNALS_SCHEMA_VERSION: &str = "experimental_research_signals.v1";
+pub const STRATEGY_DISTRIBUTION_FORECAST_SCHEMA_VERSION: &str = "strategy_distribution_forecast.v1";
