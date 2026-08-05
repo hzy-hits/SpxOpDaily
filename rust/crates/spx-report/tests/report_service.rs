@@ -363,7 +363,7 @@ fn writer_failure_uses_memory_backoff_then_retries_without_persisting_failure() 
         projection("desk-map:backoff", "2026-08-04:10:00", ten_am()),
     );
     let writer = FakeWriter::new([
-        WriterOutcome::Failure(ReportWriterErrorCode::OutputCompressed),
+        WriterOutcome::Failure(ReportWriterErrorCode::SemanticMarkerFieldMismatch),
         WriterOutcome::Success,
     ]);
     let inspector = writer.clone();
@@ -374,7 +374,7 @@ fn writer_failure_uses_memory_backoff_then_retries_without_persisting_failure() 
     assert_eq!(
         service.run_once_at(now).unwrap(),
         ReportTick::Backoff {
-            error_code: ReportWriterErrorCode::OutputCompressed,
+            error_code: ReportWriterErrorCode::SemanticMarkerFieldMismatch,
             next_attempt_at: now + TimeDelta::seconds(5)
         }
     );
@@ -382,7 +382,7 @@ fn writer_failure_uses_memory_backoff_then_retries_without_persisting_failure() 
     assert_eq!(
         service.run_once_at(now + TimeDelta::seconds(4)).unwrap(),
         ReportTick::Backoff {
-            error_code: ReportWriterErrorCode::OutputCompressed,
+            error_code: ReportWriterErrorCode::SemanticMarkerFieldMismatch,
             next_attempt_at: now + TimeDelta::seconds(5)
         }
     );

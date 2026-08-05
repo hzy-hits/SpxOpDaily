@@ -159,6 +159,13 @@ impl Validate for DeskMapProjectionV1 {
                 reason: "ready stage requires direction and thesis",
             });
         }
+        self.validate_research_context()?;
+        self.message.validate()
+    }
+}
+
+impl DeskMapProjectionV1 {
+    fn validate_research_context(&self) -> Result<(), DomainError> {
         match (&self.research_context_document_id, &self.research_context) {
             (None, None) => {}
             (Some(document_id), Some(research_context)) => {
@@ -180,12 +187,17 @@ impl Validate for DeskMapProjectionV1 {
                         "research context generated_at is after desk map available_at",
                     ));
                 }
-                if self.session != MarketSession::Rth
-                    || context.cross_index_frame.trading_date_et != self.trading_date_et
+                if self.available_at - research_context.generated_at > chrono::TimeDelta::minutes(5)
                 {
                     return Err(DomainError::Invalid {
                         field: "research_context",
-                        reason: "must match the desk map RTH trading date",
+                        reason: "must be no more than five minutes old",
+                    });
+                }
+                if context.cross_index_frame.trading_date_et != self.trading_date_et {
+                    return Err(DomainError::Invalid {
+                        field: "research_context",
+                        reason: "must match the desk map trading date",
                     });
                 }
             }
@@ -196,7 +208,7 @@ impl Validate for DeskMapProjectionV1 {
                 });
             }
         }
-        self.message.validate()
+        Ok(())
     }
 }
 
@@ -308,24 +320,38 @@ mod tests {
     }
 
     #[test]
-    fn rejects_research_context_from_another_session_or_trading_date() {
+    fn rejects_stale_research_context() {
+        let mut projection = valid_projection();
+        let generated_at = projection.research_context.as_ref().unwrap().generated_at;
+        projection.available_at = generated_at + chrono::TimeDelta::minutes(6);
+        projection.valid_until = projection.available_at + chrono::TimeDelta::minutes(20);
+
+        assert_eq!(
+            projection.validate(),
+            Err(DomainError::Invalid {
+                field: "research_context",
+                reason: "must be no more than five minutes old",
+            })
+        );
+    }
+
+    #[test]
+    fn accepts_same_date_research_context_during_gth() {
+        let mut projection = valid_projection();
+        projection.session = MarketSession::Gth;
+
+        projection.validate().unwrap();
+    }
+
+    #[test]
+    fn rejects_research_context_from_another_trading_date() {
         let mut projection = valid_projection();
         projection.trading_date_et = chrono::NaiveDate::from_ymd_opt(2026, 8, 4).unwrap();
         assert_eq!(
             projection.validate(),
             Err(DomainError::Invalid {
                 field: "research_context",
-                reason: "must match the desk map RTH trading date",
-            })
-        );
-
-        let mut projection = valid_projection();
-        projection.session = MarketSession::Gth;
-        assert_eq!(
-            projection.validate(),
-            Err(DomainError::Invalid {
-                field: "research_context",
-                reason: "must match the desk map RTH trading date",
+                reason: "must match the desk map trading date",
             })
         );
     }

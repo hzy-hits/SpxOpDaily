@@ -13,9 +13,9 @@ mod source;
 mod transport;
 
 pub use client::{
-    DEEPSEEK_MODEL_ID, DeskReportOutput, RESEARCH_UNAVAILABLE_DISCLOSURE, ReasoningEffort,
-    ReportPrompt, ReportWriterClient, ReportWriterError, ReportWriterErrorCode, ReportWriterOutput,
-    ResponseMetadata, ThinkingMode,
+    DEEPSEEK_MODEL_ID, DeskReportOutput, RESEARCH_ADVISORY_DISCLOSURE,
+    RESEARCH_UNAVAILABLE_DISCLOSURE, ReasoningEffort, ReportPrompt, ReportWriterClient,
+    ReportWriterError, ReportWriterErrorCode, ReportWriterOutput, ResponseMetadata, ThinkingMode,
 };
 pub use config::{ApiKeyEnvironment, ConfigError, MaxTokens, ReportWriterConfig};
 pub use health::{

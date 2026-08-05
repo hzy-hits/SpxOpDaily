@@ -115,6 +115,37 @@ def test_fresh_matching_lease_exposes_canonical_bars(tmp_path: Path) -> None:
     assert bars[0]["close"] == 7401.0
 
 
+def test_bounded_future_publication_clock_skew_does_not_hide_rth_bars(
+    tmp_path: Path,
+) -> None:
+    storage = _storage(tmp_path)
+    published_at = NOW + timedelta(milliseconds=950)
+    _publish(
+        storage,
+        lease=_lease(source_at=published_at, writer="writer-current"),
+        state=_state(source_at=published_at, writer="writer-current"),
+    )
+
+    bars, readiness = load_consumable_es_bars(storage, now=NOW)
+
+    assert readiness["ready"] is True
+    assert readiness["last_accepted_age_seconds"] == pytest.approx(-0.95)
+    assert len(bars) == 1
+
+
+def test_future_publication_beyond_clock_tolerance_remains_fail_closed() -> None:
+    published_at = NOW + timedelta(seconds=6)
+
+    readiness = evaluate_es_bar_consumer_readiness(
+        lease=_lease(source_at=published_at, writer="writer-current"),
+        state=_state(source_at=published_at, writer="writer-current"),
+        now=NOW,
+    )
+
+    assert readiness["ready"] is False
+    assert "last_accept_stale" in readiness["reasons"]
+
+
 def test_publication_race_is_recollected_without_weakening_fence(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

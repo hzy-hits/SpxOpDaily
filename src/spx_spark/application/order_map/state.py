@@ -6,7 +6,7 @@ import json
 import os
 from datetime import datetime, time, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from spx_spark.application.order_map.models import (
     BJ_WINDOW_END,
@@ -221,6 +221,34 @@ SESSION_PHASES_ET: tuple[tuple[time, time, str, str, str], ...] = (
         "现金已收、期货重定价; 复盘与次日准备",
     ),
 )
+
+
+def current_session_is_gth(
+    payload: Mapping[str, Any],
+    decision: Mapping[str, Any],
+) -> bool:
+    """Prefer the current clock phase over a decision latched before a boundary."""
+
+    phase = payload.get("session_phase")
+    phase_name = str(phase.get("name") or "").strip() if isinstance(phase, Mapping) else ""
+    if phase_name in {
+        "asia_globex",
+        "europe_session",
+        "us_data_hour",
+        "post_close",
+        "market_closed",
+    }:
+        return True
+    if phase_name in {
+        "rth",
+        "us_open_hour",
+        "us_morning_battle",
+        "us_midday_confirmation",
+        "us_afternoon_unattended",
+    }:
+        return False
+    session_mode = str(decision.get("session_mode") or "").strip().lower()
+    return session_mode in {"gth", "globex"}
 
 
 def _phase_contains(start: time, stop: time, now_t: time) -> bool:

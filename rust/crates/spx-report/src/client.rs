@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use spx_domain::{DeskDirection, DeskMapProjectionV1, DeskMessageV2, Token, Validate};
+use spx_domain::{DeskDirection, DeskMapProjectionV1, DeskMessageV2, DeskStage, Token, Validate};
 
 use crate::{
     DeepSeekHttpTransport, ReportWriterConfig, Transport, TransportRequest, TransportResponse,
@@ -12,26 +12,29 @@ use crate::{
 pub const DEEPSEEK_MODEL_ID: &str = "deepseek-v4-flash";
 pub const RESEARCH_UNAVAILABLE_DISCLOSURE: &str =
     "Research context: unavailable; no HMM, range, close-location, or market-maker inference.";
+pub const RESEARCH_ADVISORY_DISCLOSURE: &str =
+    "研究：HMM/区间为未校准 advisory，仅辅助 Base Case，不产生交易方向或授权 READY。";
 
 const DESK_MESSAGE_SYSTEM_PROMPT: &str = r"You are the SPX desk report writer.
 Return exactly one JSON object and no surrounding prose or Markdown fence.
 The object must contain exactly these string fields:
 title, desk_view, location, structure, primary_path, alternative_path, targets, execution, data_quality.
 Every field must be non-empty. Do not add, remove, rename, or nest fields.
-Use the complete desk_map_projection.v1 JSON and explicit research-context block supplied by the user as the sole factual authority.
-Preserve every decision-relevant condition, level, lifecycle state, target, execution constraint, and data-quality limitation.
-Embedded research_context.v2 is bootstrap-unvalidated advisory evidence with no action authority; preserve its status and reason codes and never call a latent state market-maker behavior.
-research_context_status=embedded_contract_valid means only that the wire contract passed; every nested regime and forecast availability/status remains authoritative and any unavailable component must be disclosed.
+Use the complete desk_map_projection.v1 JSON and explicit research-context status supplied by the user as the sole factual authority.
+Write an operator-facing compact report, not a transcript of the source object. Synthesize repeated facts and omit internal detail that does not change the human decision. Do not collapse the result into a generic 283-character notification.
+Use the fixed fields as this presentation contract: desk_view is Base Case and the current human decision; location plus structure explain Why; primary_path is the next Trigger; alternative_path is Invalidation or the genuinely distinct alternative; targets contains only active structural or trade targets; execution states exactly what the operator may do; data_quality states the Primary Data Impact.
+Preserve decision-critical conditions, lifecycle state, current location, active level, trigger, invalidation, target, exact-leg ask cap, TTL, and R/R when they exist. Do not repeat every timestamp, diagnostic count, unavailable component, or numeric value merely because it appears in the source.
+Embedded research_context.v2 is bootstrap-unvalidated advisory evidence with no action authority. When a usable advisory forecast is present, integrate one decision-relevant horizon into Base Case and label it 未校准研究观点. A source-supplied forecast probability may be shown only as 未校准研究概率; never invent, calibrate, round into false certainty, or present a latent state as market-maker behavior. Research may inform Base Case but must never create trade direction, READY, a trigger, or an order.
+research_context_status=embedded_contract_valid means only that the wire contract passed; nested availability remains authoritative. Summarize the one most useful available research result instead of dumping every posterior, quantile, state ID, model version, or reason code.
 When research_context_status is unavailable, data_quality must explicitly say research is unavailable and must make no HMM, range, or close-location claim.
 Direction may come only from an explicit price trigger confirmed by ES flow in the source projection. Gamma describes only the feedback mechanism that may suppress or amplify an already observed move; Gamma must never be presented as the source of an up or down direction.
 Dealer sign is unknown. Do not claim that market makers are buying, selling, forced to hedge, or causing a directional move.
 Preserve exact semantic markers in their operator-facing fields: 方向来源 in primary_path; Gamma职责 and dealer sign unknown in structure; NO TRADE in desk_view.
-When typed direction is none, title, desk_view, and execution must not say LONG, SHORT, 做多, or 做空. When an up source contains LONG / CALL, or a down source contains SHORT / PUT, preserve that exact label in desk_view.
-Preserve every ASCII numeric fact in the corresponding source field. Preserve READY, HOLD, PAUSED, WAIT, and CLOSED from source execution in output execution.
-You may reorganize and clarify wording for readability, but every output field must contain at least as many UTF-8 bytes as its corresponding source message field. Never compress a field or omit or contradict decision-relevant facts or required semantic markers.
+When typed direction is none, title, desk_view, and execution must not say LONG, SHORT, 做多, or 做空, and execution must not say READY. An unvalidated research bias may still be stated as advisory context when it is clearly separated from trade direction. When an up source contains LONG / CALL, or a down source contains SHORT / PUT, preserve that exact label in desk_view.
+Preserve READY, HOLD, PAUSED, WAIT, and CLOSED from source execution in output execution. You may shorten every source field; there is no per-field byte or numeric-copy floor. Omit repetition while never contradicting decision-relevant facts or required semantic markers.
 Lead with the human decision and its reason. Translate lifecycle and quality into plain language; do not expose schema names, raw field names, hashes, internal identifiers, action_authority, automatic_ordering, or raw enum dumps unless they change what the operator may safely do.
-In data_quality, state the single most important human impact first. Raw reason codes may appear only as a trailing audit detail, never as the headline.
-Do not collapse the report into a generic notification card. Do not invent orders, fills, positions, probabilities, or market-maker behavior.";
+In data_quality, state the single most important human impact first. Never expose raw audit codes or reason-code lists in any visible field; they remain in the source artifact for audit.
+Keep one useful sentence in each section and enough concrete evidence to support the Base Case. Do not invent orders, fills, positions, probabilities, or market-maker behavior.";
 
 const STRUCTURE_SEMANTIC_MARKERS: [&str; 2] = ["Gamma职责", "dealer sign unknown"];
 const EXECUTION_STATE_MARKERS: [&str; 5] = ["READY", "HOLD", "PAUSED", "WAIT", "CLOSED"];
@@ -221,9 +224,10 @@ pub enum ReportWriterErrorCode {
     SemanticMarkerFieldMismatch,
     DirectionAuthorityViolation,
     DirectionLabelMissing,
-    NumericFactMissing,
     ExecutionStateMarkerMissing,
-    OutputCompressed,
+    CriticalFactMissing,
+    InternalDetailLeak,
+    ResearchAdvisoryMissing,
     ResearchDisclosureFailed,
 }
 
@@ -248,9 +252,10 @@ impl ReportWriterErrorCode {
             Self::SemanticMarkerFieldMismatch => "semantic_marker_field_mismatch",
             Self::DirectionAuthorityViolation => "direction_authority_violation",
             Self::DirectionLabelMissing => "direction_label_missing",
-            Self::NumericFactMissing => "numeric_fact_missing",
             Self::ExecutionStateMarkerMissing => "execution_state_marker_missing",
-            Self::OutputCompressed => "output_compressed",
+            Self::CriticalFactMissing => "critical_fact_missing",
+            Self::InternalDetailLeak => "internal_detail_leak",
+            Self::ResearchAdvisoryMissing => "research_advisory_missing",
             Self::ResearchDisclosureFailed => "research_disclosure_failed",
         }
     }
@@ -432,15 +437,8 @@ impl<T: Transport> ReportWriterClient<T> {
         let projection_json = serde_json::to_string_pretty(projection)
             .map_err(|_| ReportWriterError::new(ReportWriterErrorCode::RequestSerialization))?;
         let research_input = match &projection.research_context {
-            Some(research_context) => {
-                let research_json =
-                    serde_json::to_string_pretty(research_context).map_err(|_| {
-                        ReportWriterError::new(ReportWriterErrorCode::RequestSerialization)
-                    })?;
-                format!(
-                    "research_context_status=embedded_contract_valid\nresearch_context.v2 JSON follows:\n{research_json}"
-                )
-            }
+            Some(_) => "research_context_status=embedded_contract_valid\nThe complete research_context.v2 appears once inside desk_map_projection.v1; do not duplicate it in the report."
+                .to_owned(),
             None => format!(
                 "research_context_status=unavailable\nRequired data_quality disclosure: {RESEARCH_UNAVAILABLE_DISCLOSURE}"
             ),
@@ -462,64 +460,8 @@ impl<T: Transport> ReportWriterClient<T> {
                 output.metadata.clone(),
             )
         })?;
-        if projection.research_context.is_none()
-            && !message
-                .data_quality
-                .as_str()
-                .contains(RESEARCH_UNAVAILABLE_DISCLOSURE)
-        {
-            message.data_quality = Token::new(
-                format!(
-                    "{}\n{RESEARCH_UNAVAILABLE_DISCLOSURE}",
-                    message.data_quality
-                ),
-                "desk report data_quality",
-            )
-            .map_err(|_| {
-                ReportWriterError::with_metadata(
-                    ReportWriterErrorCode::ResearchDisclosureFailed,
-                    output.metadata.clone(),
-                )
-            })?;
-        }
-        if message_field_is_utf8_byte_compressed(&message, &projection.message) {
-            return Err(ReportWriterError::with_metadata(
-                ReportWriterErrorCode::OutputCompressed,
-                output.metadata,
-            ));
-        }
-        if semantic_marker_field_mismatch(&message, &projection.message) {
-            return Err(ReportWriterError::with_metadata(
-                ReportWriterErrorCode::SemanticMarkerFieldMismatch,
-                output.metadata,
-            ));
-        }
-        if projection.direction == DeskDirection::None
-            && none_direction_has_actionable_language(&message)
-        {
-            return Err(ReportWriterError::with_metadata(
-                ReportWriterErrorCode::DirectionAuthorityViolation,
-                output.metadata,
-            ));
-        }
-        if direction_label_is_missing(&message, projection) {
-            return Err(ReportWriterError::with_metadata(
-                ReportWriterErrorCode::DirectionLabelMissing,
-                output.metadata,
-            ));
-        }
-        if numeric_fact_is_missing(&message, &projection.message) {
-            return Err(ReportWriterError::with_metadata(
-                ReportWriterErrorCode::NumericFactMissing,
-                output.metadata,
-            ));
-        }
-        if execution_state_marker_is_missing(&message, &projection.message) {
-            return Err(ReportWriterError::with_metadata(
-                ReportWriterErrorCode::ExecutionStateMarkerMissing,
-                output.metadata,
-            ));
-        }
+        apply_research_disclosure(&mut message, projection, &output.metadata)?;
+        validate_rendered_message(&message, projection, &output.metadata)?;
         Ok(DeskReportOutput {
             message,
             visible_content: output.content,
@@ -535,6 +477,68 @@ impl<T: Transport> ReportWriterClient<T> {
                 ReportWriterErrorCode::NetworkNotAuthorized,
             ))
         }
+    }
+}
+
+fn apply_research_disclosure(
+    message: &mut DeskMessageV2,
+    projection: &DeskMapProjectionV1,
+    metadata: &ResponseMetadata,
+) -> Result<(), ReportWriterError> {
+    let disclosure = if projection.research_context.is_none()
+        && !message
+            .data_quality
+            .as_str()
+            .contains(RESEARCH_UNAVAILABLE_DISCLOSURE)
+    {
+        Some(RESEARCH_UNAVAILABLE_DISCLOSURE)
+    } else if projection.research_context.is_some() && !research_advisory_is_disclosed(message) {
+        Some(RESEARCH_ADVISORY_DISCLOSURE)
+    } else {
+        None
+    };
+    if let Some(disclosure) = disclosure {
+        message.data_quality = Token::new(
+            format!("{}\n{disclosure}", message.data_quality),
+            "desk report data_quality",
+        )
+        .map_err(|_| {
+            ReportWriterError::with_metadata(
+                ReportWriterErrorCode::ResearchDisclosureFailed,
+                metadata.clone(),
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn validate_rendered_message(
+    message: &DeskMessageV2,
+    projection: &DeskMapProjectionV1,
+    metadata: &ResponseMetadata,
+) -> Result<(), ReportWriterError> {
+    let code = if semantic_marker_field_mismatch(message, &projection.message) {
+        Some(ReportWriterErrorCode::SemanticMarkerFieldMismatch)
+    } else if projection.direction == DeskDirection::None
+        && none_direction_has_actionable_language(message)
+    {
+        Some(ReportWriterErrorCode::DirectionAuthorityViolation)
+    } else if direction_label_is_missing(message, projection) {
+        Some(ReportWriterErrorCode::DirectionLabelMissing)
+    } else if execution_state_marker_is_missing(message, &projection.message) {
+        Some(ReportWriterErrorCode::ExecutionStateMarkerMissing)
+    } else if critical_numeric_fact_is_missing(message, projection) {
+        Some(ReportWriterErrorCode::CriticalFactMissing)
+    } else if research_advisory_is_missing(message, &projection.message) {
+        Some(ReportWriterErrorCode::ResearchAdvisoryMissing)
+    } else if visible_internal_detail_leaked(message, projection) {
+        Some(ReportWriterErrorCode::InternalDetailLeak)
+    } else {
+        None
+    };
+    match code {
+        Some(code) => Err(ReportWriterError::with_metadata(code, metadata.clone())),
+        None => Ok(()),
     }
 }
 
@@ -564,8 +568,49 @@ fn message_contains_marker(message: &DeskMessageV2, marker: &str) -> bool {
     .any(|field| field.as_str().contains(marker))
 }
 
+fn research_advisory_is_disclosed(message: &DeskMessageV2) -> bool {
+    let text = message_text(message);
+    let explicitly_uncalibrated = text.contains("HMM未校准")
+        || text.contains("未校准研究")
+        || text.contains("未校准 advisory");
+    let explicitly_non_actionable = text.contains("不是上涨概率")
+        || text.contains("不产生交易方向")
+        || text.contains("不改变价格方向")
+        || text.contains("不授权 READY")
+        || text.contains("不改变价格触发或READY");
+    explicitly_uncalibrated && explicitly_non_actionable
+}
+
+fn research_advisory_is_missing(actual: &DeskMessageV2, source: &DeskMessageV2) -> bool {
+    let source_text = source.desk_view.as_str();
+    if !source_text.contains("研究视角（HMM未校准") {
+        return false;
+    }
+    let actual_text = actual.desk_view.as_str();
+    let uncalibrated_view = actual_text.contains("未校准")
+        && (actual_text.contains("HMM") || actual_text.contains("研究"));
+    let baseline = source_text
+        .split_once("基线=")
+        .map(|(_, remainder)| remainder)
+        .and_then(|remainder| remainder.split(['·', '；', '\n']).next())
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let baseline_missing = baseline.is_none_or(|value| !actual_text.contains(value));
+    let model_weight_missing =
+        first_numeric_after(source_text, "模型权重").is_some_and(|required| {
+            first_numeric_after(actual_text, "模型权重")
+                .is_none_or(|actual_weight| actual_weight != required)
+        });
+    !uncalibrated_view || baseline_missing || model_weight_missing
+}
+
+fn first_numeric_after(text: &str, marker: &str) -> Option<u64> {
+    text.split_once(marker)
+        .and_then(|(_, remainder)| numeric_atoms(remainder).into_iter().next())
+}
+
 fn none_direction_has_actionable_language(message: &DeskMessageV2) -> bool {
-    [&message.title, &message.desk_view, &message.execution]
+    let directional_language = [&message.title, &message.desk_view, &message.execution]
         .into_iter()
         .any(|field| {
             let text = field.as_str();
@@ -573,7 +618,8 @@ fn none_direction_has_actionable_language(message: &DeskMessageV2) -> bool {
                 || contains_ascii_word_ignore_case(text, "SHORT")
                 || text.contains("做多")
                 || text.contains("做空")
-        })
+        });
+    directional_language || contains_ascii_word(message.execution.as_str(), "READY")
 }
 
 fn direction_label_is_missing(actual: &DeskMessageV2, projection: &DeskMapProjectionV1) -> bool {
@@ -589,18 +635,6 @@ fn direction_label_is_missing(actual: &DeskMessageV2, projection: &DeskMapProjec
     required_label.is_some_and(|label| !actual.desk_view.as_str().contains(label))
 }
 
-fn numeric_fact_is_missing(actual: &DeskMessageV2, source: &DeskMessageV2) -> bool {
-    message_field_values(source)
-        .into_iter()
-        .zip(message_field_values(actual))
-        .any(|(source_field, actual_field)| {
-            let actual_tokens = ascii_numeric_tokens(actual_field);
-            ascii_numeric_tokens(source_field)
-                .into_iter()
-                .any(|token| !actual_tokens.contains(&token))
-        })
-}
-
 fn execution_state_marker_is_missing(actual: &DeskMessageV2, source: &DeskMessageV2) -> bool {
     EXECUTION_STATE_MARKERS.into_iter().any(|marker| {
         contains_ascii_word(source.execution.as_str(), marker)
@@ -608,25 +642,164 @@ fn execution_state_marker_is_missing(actual: &DeskMessageV2, source: &DeskMessag
     })
 }
 
-fn message_field_values(message: &DeskMessageV2) -> [&str; 9] {
+fn critical_numeric_fact_is_missing(
+    actual: &DeskMessageV2,
+    projection: &DeskMapProjectionV1,
+) -> bool {
+    if projection.level.is_some_and(|level| {
+        let level_context = format!(
+            "{}\n{}\n{}",
+            actual.location, actual.structure, actual.primary_path
+        );
+        !numeric_atoms(&level_context).contains(&normalized_number(level.get()))
+    }) {
+        return true;
+    }
+    if !matches!(projection.stage, DeskStage::Ready | DeskStage::Active) {
+        return false;
+    }
     [
-        message.title.as_str(),
-        message.desk_view.as_str(),
-        message.location.as_str(),
-        message.structure.as_str(),
-        message.primary_path.as_str(),
-        message.alternative_path.as_str(),
-        message.targets.as_str(),
-        message.execution.as_str(),
-        message.data_quality.as_str(),
+        (
+            projection.message.primary_path.as_str(),
+            actual.primary_path.as_str(),
+        ),
+        (
+            projection.message.alternative_path.as_str(),
+            actual.alternative_path.as_str(),
+        ),
+        (projection.message.targets.as_str(), actual.targets.as_str()),
+        (
+            projection.message.execution.as_str(),
+            actual.execution.as_str(),
+        ),
     ]
+    .into_iter()
+    .any(|(source, rendered)| {
+        let rendered_numbers = numeric_atoms(rendered);
+        numeric_atoms(source)
+            .into_iter()
+            .any(|required| !rendered_numbers.contains(&required))
+    })
 }
 
-fn message_field_is_utf8_byte_compressed(actual: &DeskMessageV2, source: &DeskMessageV2) -> bool {
-    message_field_values(source)
-        .into_iter()
-        .zip(message_field_values(actual))
-        .any(|(source_field, actual_field)| actual_field.len() < source_field.len())
+fn visible_internal_detail_leaked(
+    message: &DeskMessageV2,
+    projection: &DeskMapProjectionV1,
+) -> bool {
+    let text = message_text(message);
+    let normalized_text = text.to_ascii_lowercase();
+    if [
+        "schema_version",
+        "projection_id",
+        "source_snapshot_id",
+        "source_slot",
+        "structure_fingerprint",
+        "research_context_document_id",
+        "document_id",
+        "frame_id",
+        "lineage_id",
+        "observed_through",
+        "available_at",
+        "valid_until",
+        "quality_reasons",
+        "regime_reason_codes",
+        "reason_codes",
+        "state_id",
+        "model_version",
+        "parameter_mode",
+        "evidence_status",
+        "use_scope",
+        "posterior",
+        "action_authority",
+        "automatic_ordering",
+        "desk_map_projection.v1",
+        "research_context.v2",
+    ]
+    .into_iter()
+    .any(|forbidden| normalized_text.contains(forbidden))
+    {
+        return true;
+    }
+    if [
+        projection.projection_id.as_str(),
+        projection.source_snapshot_id.as_str(),
+    ]
+    .into_iter()
+    .any(|identifier| normalized_text.contains(&identifier.to_ascii_lowercase()))
+    {
+        return true;
+    }
+    if projection
+        .research_context_document_id
+        .as_ref()
+        .is_some_and(|identifier| {
+            normalized_text.contains(&identifier.as_str().to_ascii_lowercase())
+        })
+    {
+        return true;
+    }
+    if projection.quality_reasons.iter().any(|reason| {
+        let raw = reason.as_str();
+        (raw.contains('_') || raw.contains(':'))
+            && normalized_text.contains(&raw.to_ascii_lowercase())
+    }) {
+        return true;
+    }
+    text.split(|character: char| !character.is_ascii_hexdigit())
+        .any(|word| word.len() == 64 && word.bytes().all(|byte| byte.is_ascii_hexdigit()))
+}
+
+fn message_text(message: &DeskMessageV2) -> String {
+    [
+        &message.title,
+        &message.desk_view,
+        &message.location,
+        &message.structure,
+        &message.primary_path,
+        &message.alternative_path,
+        &message.targets,
+        &message.execution,
+        &message.data_quality,
+    ]
+    .into_iter()
+    .map(Token::as_str)
+    .collect::<Vec<_>>()
+    .join("\n")
+}
+
+fn numeric_atoms(text: &str) -> Vec<u64> {
+    let bytes = text.as_bytes();
+    let mut values = Vec::new();
+    let mut cursor = 0;
+    while cursor < bytes.len() {
+        let signed = matches!(bytes[cursor], b'+' | b'-')
+            && bytes.get(cursor + 1).is_some_and(u8::is_ascii_digit);
+        if !bytes[cursor].is_ascii_digit() && !signed {
+            cursor += 1;
+            continue;
+        }
+        let start = cursor;
+        cursor += usize::from(signed);
+        while cursor < bytes.len() && bytes[cursor].is_ascii_digit() {
+            cursor += 1;
+        }
+        if bytes.get(cursor) == Some(&b'.') && bytes.get(cursor + 1).is_some_and(u8::is_ascii_digit)
+        {
+            cursor += 1;
+            while cursor < bytes.len() && bytes[cursor].is_ascii_digit() {
+                cursor += 1;
+            }
+        }
+        if let Ok(value) = text[start..cursor].parse::<f64>() {
+            values.push(normalized_number(value));
+        }
+    }
+    values
+}
+
+fn normalized_number(value: f64) -> u64 {
+    let normalized = if value == 0.0 { 0.0_f64 } else { value };
+    normalized.to_bits()
 }
 
 fn contains_ascii_word(text: &str, expected: &str) -> bool {
@@ -637,42 +810,6 @@ fn contains_ascii_word(text: &str, expected: &str) -> bool {
 fn contains_ascii_word_ignore_case(text: &str, expected: &str) -> bool {
     text.split(|character: char| !character.is_ascii_alphanumeric())
         .any(|word| word.eq_ignore_ascii_case(expected))
-}
-
-fn ascii_numeric_tokens(text: &str) -> Vec<String> {
-    let bytes = text.as_bytes();
-    let mut tokens = Vec::new();
-    let mut cursor = 0;
-    while cursor < bytes.len() {
-        let starts_with_digit = bytes[cursor].is_ascii_digit();
-        let starts_with_sign = matches!(bytes[cursor], b'+' | b'-')
-            && bytes.get(cursor + 1).is_some_and(u8::is_ascii_digit);
-        if !starts_with_digit && !starts_with_sign {
-            cursor += 1;
-            continue;
-        }
-
-        let start = cursor;
-        cursor += 1;
-        while cursor < bytes.len() {
-            if bytes[cursor].is_ascii_digit() {
-                cursor += 1;
-                continue;
-            }
-            if matches!(bytes[cursor], b'.' | b':' | b'/' | b'-')
-                && bytes.get(cursor + 1).is_some_and(u8::is_ascii_digit)
-            {
-                cursor += 1;
-                continue;
-            }
-            if bytes[cursor] == b'%' {
-                cursor += 1;
-            }
-            break;
-        }
-        tokens.push(text[start..cursor].to_owned());
-    }
-    tokens
 }
 
 fn parse_response(response: TransportResponse) -> Result<ReportWriterOutput, ReportWriterError> {

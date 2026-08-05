@@ -90,6 +90,9 @@ def build_option_structure_frame(
             "warnings": list(options_map.warnings),
             "underlier": options_map.underlier.price,
             "underlier_source": options_map.underlier.source,
+            # Consumers use the same typed policy horizon to decide whether a
+            # persisted frame may still be called live.
+            "max_quote_age_seconds": policy.max_quote_age_seconds,
         },
         exposure=exposure,
     )

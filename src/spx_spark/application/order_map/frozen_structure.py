@@ -2,9 +2,31 @@
 
 from __future__ import annotations
 
-from typing import Any
+from datetime import datetime
+from typing import Any, Mapping
 
 from spx_spark.analytics.options.pricing import finite_float
+from spx_spark.marketdata import FUTURE_TIMESTAMP_TOLERANCE_SECONDS, as_utc
+
+
+def option_structure_frame_is_live(payload: Mapping[str, Any], *, now: datetime) -> bool:
+    """Require typed frame quality and bounded age before labeling structure live."""
+
+    frame = _mapping(payload.get("option_structure_frame"))
+    structure = _mapping(frame.get("structure"))
+    l1 = _mapping(frame.get("l1"))
+    if (
+        str(frame.get("quality") or "").lower() != "ready"
+        or str(l1.get("quality") or "").lower() != "ready"
+        or structure.get("frozen") is True
+    ):
+        return False
+    frame_as_of = _aware_datetime(frame.get("as_of"))
+    max_age_seconds = finite_float(_mapping(frame.get("diagnostics")).get("max_quote_age_seconds"))
+    if frame_as_of is None or max_age_seconds is None or max_age_seconds <= 0:
+        return False
+    age_seconds = (as_utc(now) - frame_as_of).total_seconds()
+    return -FUTURE_TIMESTAMP_TOLERANCE_SECONDS <= age_seconds <= max_age_seconds
 
 
 def attach_frozen_option_structure(
@@ -63,3 +85,22 @@ def _frozen_wall_rungs(value: object, *, right: str) -> list[dict[str, Any]]:
             }
         )
     return rows
+
+
+def _aware_datetime(value: object) -> datetime | None:
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str) and value:
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    else:
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    return as_utc(parsed)
+
+
+def _mapping(value: object) -> Mapping[str, Any]:
+    return value if isinstance(value, Mapping) else {}

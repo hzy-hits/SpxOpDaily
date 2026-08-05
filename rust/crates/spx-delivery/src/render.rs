@@ -21,7 +21,7 @@ pub fn render_desk_message(message: &DeskMessageV1) -> RenderedMessage {
 
 pub fn render_desk_message_v2(message: &DeskMessageV2) -> RenderedMessage {
     let body = format!(
-        "Desk View\n{}\n\nLocation\n{}\n\nStructure\n{}\n\nPrimary Path\n{}\n\nAlternative Path\n{}\n\nTargets\n{}\n\nExecution\n{}\n\nData Quality\n{}",
+        "Base Case\n{}\n\nWhy\nLocation · {}\nStructure · {}\n\nTrigger\n{}\n\nInvalidation\n{}\n\nTargets\n{}\n\nExecution\n{}\n\nPrimary Data Impact\n{}",
         message.desk_view.as_str(),
         message.location.as_str(),
         message.structure.as_str(),
@@ -81,7 +81,7 @@ mod tests {
     }
 
     #[test]
-    fn renders_complete_v2_sections_without_normalizing_or_truncating() {
+    fn renders_operator_facing_v2_sections_without_normalizing_or_truncating() {
         let long_primary = format!("first line\n{}  tail", "x".repeat(3_500));
         let rendered = render_desk_message_v2(&DeskMessageV2 {
             title: token("SPX RTH Desk Map · 10:00 ET"),
@@ -96,21 +96,22 @@ mod tests {
         });
 
         assert_eq!(rendered.title, "SPX RTH Desk Map · 10:00 ET");
-        assert!(rendered.body.contains("Desk View\nBullish  above VWAP"));
+        assert!(rendered.body.contains("Base Case\nBullish  above VWAP"));
         assert!(
             rendered
                 .body
-                .contains(&format!("Primary Path\n{long_primary}"))
+                .contains("Why\nLocation · SPX 7568 | OR15 7565\nStructure · Put 7525")
+        );
+        assert!(rendered.body.contains(&format!("Trigger\n{long_primary}")));
+        assert!(
+            rendered
+                .body
+                .contains("Invalidation\nLose VWAP\nand rotate to flip")
         );
         assert!(
             rendered
                 .body
-                .contains("Alternative Path\nLose VWAP\nand rotate to flip")
-        );
-        assert!(
-            rendered
-                .body
-                .ends_with("Data Quality\nDEGRADED: clipped mass 28.4%")
+                .ends_with("Primary Data Impact\nDEGRADED: clipped mass 28.4%")
         );
     }
 

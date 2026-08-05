@@ -202,6 +202,31 @@ def test_sustained_bad_quality_degrades_without_reversing_active_decision() -> N
     assert "quality_failed_at" not in recovered.state
 
 
+def test_bad_quality_cannot_keep_an_expired_event_alive_or_mutate_trade_ownership() -> None:
+    armed = advance(None, 0, spot=95.0, es=5000.0)
+    state = {
+        **armed.state,
+        # This is an opaque handoff marker for a separately owned trade
+        # lifecycle; the level machine must preserve it while expiring itself.
+        "active_trade_id": "trade:independent-owner",
+    }
+
+    expired = advance(
+        state,
+        301,
+        spot=95.0,
+        es=5000.0,
+        quality_ok=False,
+    )
+
+    assert expired.previous_phase is LevelPhase.APPROACHING
+    assert expired.current_phase is LevelPhase.EXPIRED
+    assert expired.changed is True
+    assert expired.reason == "event_ttl_elapsed_during_data_degradation"
+    assert expired.state["quality_status"] == "degraded"
+    assert expired.state["active_trade_id"] == "trade:independent-owner"
+
+
 def test_pending_structure_blocks_new_arm_without_failing_data_quality() -> None:
     blocked = advance(
         None,

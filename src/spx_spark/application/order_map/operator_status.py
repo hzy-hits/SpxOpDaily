@@ -9,6 +9,7 @@ from typing import Any, Mapping
 
 from spx_spark.analytics.options.pricing import finite_float
 from spx_spark.application.order_map import guidance as guidance_module
+from spx_spark.application.order_map.frozen_structure import option_structure_frame_is_live
 from spx_spark.application.order_map.level_decision_machine import LevelPhase
 from spx_spark.application.order_map.models import SHANGHAI_TZ
 from spx_spark.application.order_map.render import (
@@ -16,7 +17,7 @@ from spx_spark.application.order_map.render import (
     _dash,
     underlier_source_label,
 )
-from spx_spark.application.order_map.state import _session_phase_of
+from spx_spark.application.order_map.state import _session_phase_of, current_session_is_gth
 from spx_spark.application.order_map.status_explanation import (
     humanize_operator_trigger,
     operator_reason_line,
@@ -115,24 +116,18 @@ def build_desk_message_sections(
             f"【SPX Desk Map · {beijing.strftime('%H:%M')} · "
             f"0DTE {expiry_text} · {session.get('name_cn')}】"
         ),
-        desk_view=_without_prefix(_desk_view_line(projection, guidance), "Desk View  "),
-        location=_without_prefix(_location_line(payload, projection), "Location  "),
-        structure=_without_prefix(_structure_line(payload), "Structure  "),
+        desk_view=_desk_view_line(projection, guidance).removeprefix("Desk View  "),
+        location=_location_line(payload, projection).removeprefix("Location  "),
+        structure=_structure_line(payload, now=now_utc).removeprefix("Structure  "),
         primary_path=_primary_path(payload, guidance, projection),
         alternative_path=(
             guidance.invalidation_text
             if projection.direction in {"up", "down"}
             else "尚无单边方向；当前不存在交易失效位，任一实时结构形成接受/拒绝后重算"
         ),
-        targets=_without_prefix(_targets_line(payload, projection), "Targets  "),
-        execution=_without_prefix(
-            _execution_line(payload, projection, guidance),
-            "Execution  ",
-        ),
-        data_quality=_without_prefix(
-            _data_quality_line(payload, projection),
-            "Data Quality  ",
-        ),
+        targets=_targets_line(payload, projection).removeprefix("Targets  "),
+        execution=_execution_line(payload, projection, guidance).removeprefix("Execution  "),
+        data_quality=_data_quality_line(projection).removeprefix("Data Quality  "),
     )
 
 
@@ -326,16 +321,26 @@ def _desk_view_line(
 def _location_line(payload: Mapping[str, Any], projection: DeskMapProjection) -> str:
     underlier = _mapping(payload.get("underlier"))
     spx = finite_float(underlier.get("price"))
+    actionable_spx = spx
+    source = str(underlier.get("source") or "")
     if spx is None:
         decision = _mapping(payload.get("level_decision"))
         spx = finite_float(decision.get("spot"))
-    source = str(underlier.get("source") or "")
-    spx_text = _dash(spx)
-    if source and source != "index:SPX":
-        spx_text += f"（{underlier_source_label(source)}）"
+        spx_text = "unavailable"
+        if spx is not None:
+            spx_text += (
+                f" · reference {spx:g}（{_decision_spot_reference_label(decision)}；"
+                "latched/proxy，not actionable）"
+            )
+    else:
+        spx_text = _dash(spx)
+        if source and source != "index:SPX":
+            spx_text += f"（{underlier_source_label(source)}）"
     level_text = ""
     if projection.level is not None:
-        distance = abs(spx - projection.level) if spx is not None else None
+        distance = (
+            abs(actionable_spx - projection.level) if actionable_spx is not None else None
+        )
         level_text = f" · {_level_kind_label(projection.level_kind)} {projection.level:g}" + (
             f" · 距离 {distance:.1f}pt" if distance is not None else ""
         )
@@ -355,10 +360,29 @@ def _location_line(payload: Mapping[str, Any], projection: DeskMapProjection) ->
         vwap_text += "（偏离 unavailable）"
     return (
         f"Location  SPX {spx_text} · ES {_available_number(es_last)}"
-        f"{level_text} · {_gamma_location_text(payload, spx)} · {vwap_text} · "
+        f"{level_text} · {_gamma_location_text(payload, actionable_spx)} · {vwap_text} · "
         f"{_opening_range_text(payload)} · "
         f"{_expected_move_text(payload)}"
     )
+
+
+def _decision_spot_reference_label(decision: Mapping[str, Any]) -> str:
+    coordinate = str(decision.get("trigger_coordinate_kind") or "").strip().lower()
+    source = str(
+        decision.get("trigger_instrument_id")
+        or decision.get("spot_source")
+        or decision.get("level_source")
+        or ""
+    ).strip()
+    if coordinate == "official_spx":
+        return "official SPX reference"
+    if coordinate == "chain_implied_spx":
+        return "SPXW chain-implied proxy"
+    if coordinate == "es_equivalent":
+        return "ES-equivalent proxy"
+    if source:
+        return underlier_source_label(source)
+    return "decision-state reference"
 
 
 def _primary_path(
@@ -396,7 +420,7 @@ def _primary_path(
     return f"{basis}\n下一触发  {trigger}\n{flow}"
 
 
-def _structure_line(payload: Mapping[str, Any]) -> str:
+def _structure_line(payload: Mapping[str, Any], *, now: datetime) -> str:
     decision = _mapping(payload.get("level_decision"))
     frozen = _mapping(decision.get("levels"))
     live = _live_levels(payload)
@@ -406,11 +430,18 @@ def _structure_line(payload: Mapping[str, Any]) -> str:
         finite_float(frozen.get(key)) == finite_float(live.get(key))
         for key in ("put_wall", "flip_low", "flip_high", "call_wall")
     )
-    levels = (
-        f"Put/Flip/Call {frozen_text} · event=live"
-        if same
-        else f"event {frozen_text} · live {live_text}"
-    )
+    if option_structure_frame_is_live(payload, now=now):
+        levels = (
+            f"Put/Flip/Call {frozen_text} · event=live"
+            if same
+            else f"event {frozen_text} · live {live_text}"
+        )
+    else:
+        levels = (
+            f"Put/Flip/Call {frozen_text} · event=frozen/reference"
+            if same
+            else f"event {frozen_text} · reference {live_text}"
+        )
     return f"Structure  {levels}\nGamma职责  {_gamma_feedback_text(payload)}"
 
 
@@ -707,24 +738,25 @@ def _data_quality(
         _extend_reasons(reasons, _mapping(section).get("warnings"))
     warnings = payload.get("warnings")
     _extend_reasons(reasons, warnings)
+    if current_session_is_gth(payload, decision):
+        reasons = [reason for reason in reasons if not _rth_only_quality_reason(reason)]
     unique = tuple(dict.fromkeys(reason for reason in reasons if reason))
     return ("DEGRADED", unique) if unique else ("READY", ())
 
 
-def _data_quality_line(
-    payload: Mapping[str, Any],
-    projection: DeskMapProjection,
-) -> str:
+def _data_quality_line(projection: DeskMapProjection) -> str:
     if not projection.quality_reasons:
         status = "READY · 决策坐标与结构快照可用"
     else:
         primary = _quality_reason_text(projection.quality_reasons[0])
-        audit = "; ".join(projection.quality_reasons)
-        status = f"{projection.data_quality} · 主要影响：{primary} · 审计码：{audit}"
-    return (
-        f"Data Quality  {status} · {_volatility_iv_text(payload)} · "
-        f"{_frame_quality_text(payload)} · {_higher_greeks_text(payload)}"
-    )
+        count = len(projection.quality_reasons)
+        secondary = (
+            f" · 次要影响：{_quality_reason_text(projection.quality_reasons[1])}"
+            if count >= 2
+            else ""
+        )
+        status = f"{projection.data_quality} · 主要影响：{primary}{secondary} · 共 {count} 项"
+    return f"Data Quality  {status}"
 
 
 def _quality_reason_text(reason: str) -> str:
@@ -740,6 +772,7 @@ def _quality_reason_text(reason: str) -> str:
         "decision_snapshot_inconsistent": "旧事件与当前结构不一致",
         "unknown_level_phase": "状态机阶段非法",
         "market_frame:unavailable": "市场帧不可用，ES 流确认不能验证",
+        "market_frame:degraded": "市场帧降级，ES 流确认需谨慎",
         "ready_opportunity_mismatch": "READY 不属于当前价格事件，旧机会与旧目标已禁用",
         "ready_required_frame_unavailable": "必需数据帧缺失，READY 已暂停",
         "ready_without_current_confirmed_path": "旧 READY 与当前价格路径不一致，已禁止执行",
@@ -749,23 +782,6 @@ def _quality_reason_text(reason: str) -> str:
     if reason.startswith("underlier_mismatch:"):
         return "标的坐标不匹配，墙位与 Gamma 告警已抑制"
     return labels.get(reason, reason.replace("_", " "))
-
-
-def _higher_greeks_text(payload: Mapping[str, Any]) -> str:
-    reference = _mapping(payload.get("spxw_0dte_greeks_reference"))
-    aggregate = _mapping(reference.get("aggregate"))
-    values = (
-        aggregate.get("gross_charm_5m_abs"),
-        aggregate.get("gross_charm_abs"),
-        aggregate.get("gross_vanna_1vol_abs"),
-        aggregate.get("gross_vanna_abs"),
-    )
-    if any(finite_float(value) is not None for value in values):
-        return (
-            "Vanna/Charm 绝对敏感度可用；position sign unknown，"
-            "仅作情景风险，不生成方向"
-        )
-    return "Vanna/Charm unavailable；不用于方向"
 
 
 def _opening_range_text(payload: Mapping[str, Any]) -> str:
@@ -811,32 +827,29 @@ def _expected_move_text(payload: Mapping[str, Any]) -> str:
     if expected_move is None or expected_move <= 0:
         return "EM unavailable"
 
+    # A live 0DTE EM shrinks to expiry; publish usage only for an explicitly
+    # matching numerator/denominator horizon, never an earlier session range.
+    usage = _aligned_expected_move_usage(payload)
+    if usage is None:
+        return f"EM ±{expected_move:g}pt"
+    label, fraction = usage
+    return f"EM ±{expected_move:g}pt · {label} 已用 {fraction:.0%}"
+
+
+def _aligned_expected_move_usage(payload: Mapping[str, Any]) -> tuple[str, float] | None:
     day_move = _mapping(payload.get("day_move"))
-    used = finite_float(day_move.get("em_used_fraction"))
-    used_label = "GTH"
-    if used is None:
-        market = _mapping(payload.get("minute_market_frame"))
-        es = _mapping(market.get("es"))
-        used = finite_float(es.get("gth_expected_move_used"))
-    if used is None:
-        lineage = _mapping(_rth_market_state(payload).get("input_lineage"))
-        diagnostics = _mapping(lineage.get("diagnostics"))
-        same_time = _mapping(diagnostics.get("same_time_range"))
-        current_range = finite_float(same_time.get("current_range_points"))
-        if current_range is not None and current_range >= 0:
-            used = current_range / expected_move
-            used_label = "RTH range"
-    if used is None:
-        market = _mapping(payload.get("minute_market_frame"))
-        es = _mapping(market.get("es"))
-        used = finite_float(es.get("overnight_expected_move_used"))
-        used_label = "overnight range"
-    used_text = (
-        f"{used_label} 已用 {used:.0%}"
-        if used is not None and used >= 0
-        else "已用比例 unavailable"
-    )
-    return f"EM ±{expected_move:g}pt · {used_text}"
+    fraction = finite_float(day_move.get("em_used_fraction"))
+    numerator_horizon = str(day_move.get("em_numerator_horizon_id") or "").strip()
+    denominator_horizon = str(day_move.get("em_denominator_horizon_id") or "").strip()
+    if (
+        fraction is None
+        or fraction < 0
+        or not numerator_horizon
+        or numerator_horizon != denominator_horizon
+    ):
+        return None
+    label = str(day_move.get("em_usage_label") or "matched horizon").strip()
+    return label, fraction
 
 
 def _rth_market_state(payload: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -847,45 +860,6 @@ def _rth_market_state(payload: Mapping[str, Any]) -> Mapping[str, Any]:
         return direct
     shadow = _mapping(payload.get("spring_gamma_v3_shadow"))
     return _mapping(shadow.get("rth_market_state"))
-
-
-def _volatility_iv_text(payload: Mapping[str, Any]) -> str:
-    option_frame = _mapping(payload.get("option_structure_frame"))
-    option_volatility = _mapping(option_frame.get("volatility"))
-    market_frame = _mapping(payload.get("minute_market_frame"))
-    market_volatility = _mapping(market_frame.get("volatility"))
-    parts: list[str] = []
-    atm_iv = finite_float(option_volatility.get("atm_iv_0dte"))
-    if atm_iv is not None:
-        parts.append(f"ATM IV 0DTE {atm_iv * 100:.2f}%")
-    iv_changes = [
-        finite_float(option_volatility.get(f"atm_iv_change_{minutes}m")) for minutes in (5, 15, 60)
-    ]
-    if any(value is not None for value in iv_changes):
-        parts.append(
-            "IVΔ 5/15/60m "
-            + "/".join(
-                f"{value * 100:+.2f}vol" if value is not None else "unavailable"
-                for value in iv_changes
-            )
-        )
-    vix1d = finite_float(market_volatility.get("vix1d"))
-    vix = finite_float(market_volatility.get("vix"))
-    if vix1d is not None or vix is not None:
-        parts.append(f"VIX1D/VIX {_available_number(vix1d)}/{_available_number(vix)}")
-    return f"Vol/IV {' · '.join(parts)}" if parts else "Vol/IV unavailable"
-
-
-def _frame_quality_text(payload: Mapping[str, Any]) -> str:
-    market = _mapping(payload.get("minute_market_frame"))
-    options = _mapping(payload.get("option_structure_frame"))
-    l1 = _mapping(options.get("l1"))
-    return (
-        "Frames "
-        f"market={str(market.get('quality') or 'unavailable').upper()} · "
-        f"options={str(options.get('quality') or 'unavailable').upper()} · "
-        f"L1={str(l1.get('quality') or 'unavailable').upper()}"
-    )
 
 
 def _levels_text(levels: Mapping[str, Any]) -> str:
@@ -899,6 +873,13 @@ def _levels_text(levels: Mapping[str, Any]) -> str:
 
 def _mapping(value: object) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
+
+
+def _rth_only_quality_reason(reason: str) -> bool:
+    # These reasons come from rth_market_state and are expected N/A outside
+    # the cash session; they must not make an otherwise valid GTH frame look
+    # broken.  The structured wire still retains every applicable GTH reason.
+    return reason.startswith("market_state:") or reason == "rth_heartbeat_degraded_snapshot"
 
 
 def _extend_reasons(
@@ -951,10 +932,6 @@ def _closed_direction(value: object) -> str:
 def _closed_thesis(value: object) -> str:
     thesis = str(value or "none").lower()
     return thesis if thesis in {"breakout", "fade"} else "none"
-
-
-def _without_prefix(value: str, prefix: str) -> str:
-    return value.removeprefix(prefix)
 
 
 def _thesis_label(value: str) -> str:

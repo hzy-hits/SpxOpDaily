@@ -401,7 +401,7 @@ def sampler_readiness(
     if not _fresh_age(
         last_accepted_age_seconds,
         max_age_seconds=max_age_seconds,
-        future_tolerance_seconds=0.0,
+        future_tolerance_seconds=FUTURE_TOLERANCE_SECONDS,
     ):
         reasons.append("last_accept_stale")
     if not _fresh_age(source_age_seconds, max_age_seconds=max_age_seconds):

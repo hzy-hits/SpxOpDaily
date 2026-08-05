@@ -753,25 +753,25 @@ mod tests {
             request
                 .message
                 .body
-                .contains("Desk View\nBullish  above VWAP")
+                .contains("Base Case\nBullish  above VWAP")
         );
         assert!(
             request
                 .message
                 .body
-                .contains("Location\nSPX 7568 | OR15 7565")
+                .contains("Why\nLocation · SPX 7568 | OR15 7565")
         );
-        assert!(request.message.body.contains("Structure\nPut 7525"));
-        assert!(request.message.body.contains("Primary Path\nHold 7565\n"));
+        assert!(request.message.body.contains("Structure · Put 7525"));
+        assert!(request.message.body.contains("Trigger\nHold 7565\n"));
         assert!(request.message.body.contains(&"x".repeat(3_500)));
-        assert!(request.message.body.contains("Alternative Path\nLose VWAP"));
+        assert!(request.message.body.contains("Invalidation\nLose VWAP"));
         assert!(request.message.body.contains("Targets\n7580 / 7595"));
         assert!(request.message.body.contains("Execution\nWait for retest"));
         assert!(
             request
                 .message
                 .body
-                .ends_with("Data Quality\nDEGRADED: clipped mass 28.4%")
+                .ends_with("Primary Data Impact\nDEGRADED: clipped mass 28.4%")
         );
     }
 

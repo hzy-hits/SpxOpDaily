@@ -6,7 +6,7 @@ use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use spx_domain::{DeskDataQuality, DeskMapProjectionV1, ResearchSignalsV1, Token, Validate};
+use spx_domain::{DeskMapProjectionV1, ResearchSignalsV1, Validate};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -225,23 +225,34 @@ fn decode_desk_map_projection(bytes: &[u8]) -> Result<DeskMapProjectionV1, Legac
 
             document.insert("research_context".to_owned(), Value::Null);
             document.insert("research_context_document_id".to_owned(), Value::Null);
+            strip_research_advisory(document);
             let mut projection = decode_and_validate_desk_map(raw)?;
             projection.research_context = None;
             projection.research_context_document_id = None;
-            if projection.quality == DeskDataQuality::Ready {
-                projection.quality = DeskDataQuality::Degraded;
-            }
-            let reason = Token::new(
-                "research_context_contract_invalid",
-                "desk map quality reason",
-            )
-            .map_err(domain_as_json)?;
-            if !projection.quality_reasons.contains(&reason) {
-                projection.quality_reasons.push(reason);
-            }
             projection.validate().map_err(domain_as_json)?;
             Ok(projection)
         }
+    }
+}
+
+fn strip_research_advisory(document: &mut serde_json::Map<String, Value>) {
+    let Some(message) = document.get_mut("message").and_then(Value::as_object_mut) else {
+        return;
+    };
+    let Some(desk_view) = message
+        .get("desk_view")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+    else {
+        return;
+    };
+    let sanitized = desk_view
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("研究视角（HMM未校准"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if sanitized != desk_view {
+        message.insert("desk_view".to_owned(), Value::String(sanitized));
     }
 }
 
@@ -352,12 +363,15 @@ mod tests {
     }
 
     #[test]
-    fn invalid_optional_research_degrades_without_poisoning_valid_desk_facts() {
+    fn invalid_optional_research_is_stripped_without_poisoning_valid_desk_facts() {
         let mut value: Value = serde_json::from_str(include_str!(
             "../../../../contracts/golden/domain/v1/desk_map_projection.json"
         ))
         .unwrap();
         value["research_context"]["regime"]["posterior"][0]["probability"] = serde_json::json!(0.9);
+        value["message"]["desk_view"] = serde_json::json!(
+            "Call breakout confirmed\n研究视角（HMM未校准，仅咨询；夜盘ES）：基线=偏多"
+        );
         let mut file = NamedTempFile::new().unwrap();
         file.write_all(serde_json::to_string(&value).unwrap().as_bytes())
             .unwrap();
@@ -366,13 +380,14 @@ mod tests {
 
         assert!(document.projection.research_context.is_none());
         assert!(document.projection.research_context_document_id.is_none());
-        assert_eq!(document.projection.quality, DeskDataQuality::Degraded);
-        assert!(
-            document
-                .projection
-                .quality_reasons
-                .iter()
-                .any(|reason| { reason.as_str() == "research_context_contract_invalid" })
+        assert_eq!(
+            document.projection.quality,
+            spx_domain::DeskDataQuality::Ready
+        );
+        assert!(document.projection.quality_reasons.is_empty());
+        assert_eq!(
+            document.projection.message.desk_view.as_str(),
+            "Call breakout confirmed"
         );
     }
 
@@ -395,7 +410,7 @@ mod tests {
     }
 
     #[test]
-    fn dangling_optional_research_id_degrades_but_missing_field_still_fails() {
+    fn dangling_optional_research_id_is_stripped_but_missing_field_still_fails() {
         let mut dangling: Value = serde_json::from_str(include_str!(
             "../../../../contracts/golden/domain/v1/desk_map_projection.json"
         ))
@@ -408,7 +423,10 @@ mod tests {
         let document = read_desk_map_projection(file.path(), 1_048_576).unwrap();
         assert!(document.projection.research_context.is_none());
         assert!(document.projection.research_context_document_id.is_none());
-        assert_eq!(document.projection.quality, DeskDataQuality::Degraded);
+        assert_eq!(
+            document.projection.quality,
+            spx_domain::DeskDataQuality::Ready
+        );
 
         dangling.as_object_mut().unwrap().remove("research_context");
         let mut file = NamedTempFile::new().unwrap();

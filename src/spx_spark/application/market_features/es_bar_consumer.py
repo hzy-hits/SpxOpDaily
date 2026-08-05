@@ -138,7 +138,11 @@ def evaluate_es_bar_consumer_readiness(
     elif not _fresh(
         last_accept_age,
         max_age_seconds=max_age_seconds,
-        future_tolerance_seconds=0.0,
+        # The order-map evaluation clock can be captured just before the
+        # sampler atomically publishes its lease.  Accept the same bounded
+        # clock skew used for source timestamps instead of turning a harmless
+        # sub-second producer/consumer race into an RTH outage.
+        future_tolerance_seconds=FUTURE_TOLERANCE_SECONDS,
     ):
         reasons.append("last_accept_stale")
     if accepted_source_at is None:

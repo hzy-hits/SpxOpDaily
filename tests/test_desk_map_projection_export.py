@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from spx_spark.application.order_map.desk_projection_export import (
+    _research_advisory_summary,
     build_desk_map_wire,
     persist_desk_map_projection,
     rust_report_owner_enabled,
@@ -265,11 +266,12 @@ def test_invalid_nested_research_is_omitted_and_disclosed_without_poisoning_desk
 
     assert wire["research_context_document_id"] is None
     assert wire["research_context"] is None
-    assert "research_context_contract_invalid" in wire["quality_reasons"]
+    assert "research_context_contract_invalid" not in wire["quality_reasons"]
     assert "research_context_contract_invalid" in wire["message"]["data_quality"]
+    assert "不影响执行数据评级" in wire["message"]["data_quality"]
 
 
-def test_gth_projection_does_not_relabel_prior_rth_research_as_current(tmp_path: Path) -> None:
+def test_gth_projection_does_not_relabel_prior_date_research_as_current(tmp_path: Path) -> None:
     storage = _storage(tmp_path)
     context = {
         "schema_version": "research_context.v2",
@@ -295,6 +297,105 @@ def test_gth_projection_does_not_relabel_prior_rth_research_as_current(tmp_path:
     assert wire["source_slot"] == "2026-08-05:gth:20:30"
     assert wire["research_context_document_id"] is None
     assert wire["research_context"] is None
+
+
+def test_gth_projection_embeds_same_date_uncalibrated_research_context(tmp_path: Path) -> None:
+    storage = _storage(tmp_path)
+    context = _valid_research_context()
+    context["document_id"] = "research-context:gth-same-date"
+    context["generated_at"] = "2026-08-05T00:29:59+00:00"
+    context["cross_index_frame"]["trading_date_et"] = "2026-08-05"  # type: ignore[index]
+    context["prior_rth_context"]["for_trading_date"] = "2026-08-05"  # type: ignore[index]
+    context["regime_reason_codes"] = ["filtered_bootstrap_regime_unavailable"]
+    for forecast in context["forecasts"]:  # type: ignore[union-attr]
+        forecast["target_at"] = "2026-08-05T20:00:00+00:00"
+    context["close_location"]["target_at"] = "2026-08-05T20:00:00+00:00"  # type: ignore[index]
+    path = tmp_path / "latest" / "experimental_research_signals.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps(context), encoding="utf-8")
+
+    wire = build_desk_map_wire(
+        _payload(),
+        [],
+        now=datetime(2026, 8, 5, 0, 30, tzinfo=timezone.utc),
+        published_at=datetime(2026, 8, 5, 0, 30, tzinfo=timezone.utc),
+        trading_date="2026-08-05",
+        storage=storage,
+    )
+
+    assert wire["session"] == "gth"
+    assert wire["research_context_document_id"] == "research-context:gth-same-date"
+    assert wire["research_context"] == context
+    assert "夜盘ES为主（前日RTH不可用）" in wire["message"]["desk_view"]
+    assert "HMM未校准" in wire["message"]["desk_view"]
+    assert wire["action_authority"] == "none"
+    assert wire["automatic_ordering"] is False
+
+
+def test_research_summary_keeps_uncalibrated_hmm_visible_without_action_authority() -> None:
+    summary = _research_advisory_summary(
+        {
+            "regime": {
+                "posterior": [
+                    {"state_id": "state_00", "probability": 0.05},
+                    {"state_id": "state_01", "probability": 0.90},
+                    {"state_id": "state_02", "probability": 0.05},
+                ]
+            },
+            "forecasts": [
+                {
+                    "target": "rth_close",
+                    "status": "available",
+                    "quantiles": {"p10": 7700.123, "p50": 7750.456, "p90": 7800.789},
+                }
+            ],
+            "close_location": {
+                "status": "available",
+                "probabilities": {
+                    "lower_third": 0.05,
+                    "middle_third": 0.90,
+                    "upper_third": 0.05,
+                },
+                "reason_codes": ["latent_state_location_mapping_unvalidated"],
+            },
+            "prior_rth_context": {"status": "partial"},
+            "regime_reason_codes": [],
+        },
+        session="gth",
+    )
+
+    assert summary is not None
+    assert "基线=区间/中位收盘" in summary
+    assert "可靠性=低" in summary
+    assert "HMM映射后的主导收盘桶模型权重 90%" in summary
+    assert "HMM state_01" not in summary
+    assert "潜状态到收盘位置的映射未验证" in summary
+    assert "RTH收盘启发区间 7700.1/7750.5/7800.8" in summary
+    assert "不改变价格方向、触发或READY" in summary
+
+
+def test_gth_research_summary_does_not_claim_an_unavailable_prior_rth_input() -> None:
+    summary = _research_advisory_summary(
+        {
+            "regime": {
+                "posterior": [
+                    {"state_id": "state_00", "probability": 0.05},
+                    {"state_id": "state_01", "probability": 0.90},
+                    {"state_id": "state_02", "probability": 0.05},
+                ]
+            },
+            "regime_reason_codes": ["prior_rth_component_unavailable"],
+            "prior_rth_context": {"status": "partial"},
+            "forecasts": [],
+            "close_location": {"status": "unavailable", "probabilities": {}},
+        },
+        session="gth",
+    )
+
+    assert summary is not None
+    assert "夜盘ES为主（前日RTH不可用）" in summary
+    assert "主要限制=前日RTH上下文不可用" in summary
+    assert "前日RTH+夜盘ES" not in summary
 
 
 def test_rust_owner_persists_projection_and_never_enqueues_python_outbox(

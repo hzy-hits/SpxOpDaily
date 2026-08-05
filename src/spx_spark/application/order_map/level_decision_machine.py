@@ -334,6 +334,17 @@ def _handle_bad_quality(
     state.setdefault("quality_degraded_at", now.isoformat())
     if phase in TERMINAL_PHASES or phase is LevelPhase.FAR:
         return _unchanged(state, phase, now, quality_reason)
+    # Bad data pauses new conclusions, but it must not keep an old structure
+    # event alive forever.  The level lifecycle can expire safely while any
+    # separately accepted/active trade remains owned by its independent trade
+    # lifecycle and risk controls.
+    if _expired(state, now):
+        reason = (
+            "confirmed_ttl_elapsed_during_data_degradation"
+            if phase is LevelPhase.CONFIRMED
+            else "event_ttl_elapsed_during_data_degradation"
+        )
+        return _transition(state, phase, LevelPhase.EXPIRED, now, reason)
     failed_at = _optional_datetime(state.get("quality_failed_at"))
     if failed_at is None:
         state["quality_failed_at"] = now.isoformat()

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -50,7 +50,12 @@ def _payload() -> dict[str, object]:
             },
         },
         "minute_market_frame": {"quality": "ready"},
-        "option_structure_frame": {"quality": "ready", "l1": {"quality": "ready"}},
+        "option_structure_frame": {
+            "as_of": NOW.isoformat(),
+            "quality": "ready",
+            "l1": {"quality": "ready"},
+            "diagnostics": {"max_quote_age_seconds": 90.0},
+        },
         "trade_intent": {"status": "observing"},
         "plan_candidates": [],
         "candidates": [
@@ -101,7 +106,8 @@ def test_unknown_level_phase_is_visible_as_degraded_data_quality() -> None:
     assert projection.data_quality == "DEGRADED"
     assert "unknown_level_phase" in projection.quality_reasons
     assert "主要影响：状态机阶段非法" in rendered
-    assert "审计码：unknown_level_phase" in rendered
+    assert "共 1 项" in rendered
+    assert "unknown_level_phase" not in rendered
 
 
 def test_terminal_level_phase_never_renders_as_a_fresh_observing_setup() -> None:
@@ -221,6 +227,7 @@ def test_operator_status_brief_keeps_decision_facts_and_drops_research_density()
                 },
             },
             "option_structure_frame": {
+                "as_of": NOW.isoformat(),
                 "quality": "ready",
                 "volatility": {
                     "atm_iv_0dte": 0.182,
@@ -232,6 +239,7 @@ def test_operator_status_brief_keeps_decision_facts_and_drops_research_density()
                 "density": {"clipped_mass_fraction": 0.01},
                 "exposure": {"oi_quality": "ibkr_ok"},
                 "l1": {"quality": "ready"},
+                "diagnostics": {"max_quote_age_seconds": 90.0},
             },
             "day_move": {"em_used_fraction": 0.64},
             "spring_gamma_v3_shadow": {"status": "abstain"},
@@ -300,7 +308,8 @@ def test_operator_status_brief_keeps_decision_facts_and_drops_research_density()
     assert "Gamma位置 Flip 下方 2.0pt · ZG unavailable" in rendered
     assert "ES VWAP 7607（偏离 -4pt）" in rendered
     assert "OR 上沿上方确认（ORL 7578 / ORH 7595）" in rendered
-    assert "EM ±28.1pt · GTH 已用 64%" in rendered
+    assert "EM ±28.1pt" in rendered
+    assert "GTH 已用" not in rendered
     assert "Primary  方向来源  尚无价格接受/拒绝确认；趋势偏空仅为 ES/量价背景" in rendered
     assert "下一触发  等待当前 Flip 7560–7565 的接受或拒绝；确认前 NO TRADE" in rendered
     assert "流确认  ES 15m -2pt / 60m -7pt" in rendered
@@ -313,11 +322,12 @@ def test_operator_status_brief_keeps_decision_facts_and_drops_research_density()
     assert "Targets  当前无交易目标 · 实时结构 Put 7550 / Call 7600" in rendered
     assert "Execution  WAIT · 尚无确定性结构入场" in rendered
     assert "Data Quality  DEGRADED · 主要影响：rth heartbeat degraded snapshot" in rendered
-    assert "审计码：rth_heartbeat_degraded_snapshot" in rendered
-    assert "ATM IV 0DTE 18.20%" in rendered
-    assert "IVΔ 5/15/60m +0.40vol/+0.80vol/+1.20vol" in rendered
-    assert "VIX1D/VIX 17.2/18.5" in rendered
-    assert "Frames market=READY · options=READY · L1=READY" in rendered
+    assert "共 1 项" in rendered
+    assert "rth_heartbeat_degraded_snapshot" not in rendered
+    assert "ATM IV 0DTE" not in rendered
+    assert "IVΔ 5/15/60m" not in rendered
+    assert "VIX1D/VIX" not in rendered
+    assert "Frames market=" not in rendered
     assert "原因  当前未触发关键位，趋势信号继续独立评估" in rendered
     assert "Spring Gamma" not in rendered
     assert "凸性雷达" not in rendered
@@ -339,8 +349,124 @@ def test_desk_sections_make_unavailable_market_facts_explicit() -> None:
     assert "EM unavailable" in sections.location
     assert "流确认  ES 15m unavailable / 60m unavailable" in sections.primary_path
     assert "量价 unavailable · ES/SPY unavailable" in sections.primary_path
-    assert "Vol/IV unavailable" in sections.data_quality
-    assert "Frames market=READY · options=READY · L1=READY" in sections.data_quality
+    assert sections.data_quality == "READY · 决策坐标与结构快照可用"
+
+
+def test_missing_live_spx_labels_latched_decision_spot_as_non_actionable_reference() -> None:
+    payload = _payload()
+    payload["underlier"] = {"price": None, "source": None}
+    payload["level_decision"] = {
+        **payload["level_decision"],  # type: ignore[dict-item]
+        "spot": 7754.825,
+        "trigger_coordinate_kind": "es_equivalent",
+        "trigger_instrument_id": "future:ES",
+    }
+
+    sections = build_desk_message_sections(payload, NOW)
+
+    assert "SPX unavailable" in sections.location
+    assert "reference 7754.82（ES-equivalent proxy；latched/proxy，not actionable）" in (
+        sections.location
+    )
+    assert "SPX 7754.82 ·" not in sections.location
+    assert "距离" not in sections.location
+    assert "Gamma位置 Flip 位置 unavailable" in sections.location
+
+
+@pytest.mark.parametrize(
+    "frame_update",
+    (
+        {"quality": "unavailable"},
+        {"as_of": (NOW.replace(second=0) - timedelta(minutes=3)).isoformat()},
+        {"structure": {"frozen": True}},
+    ),
+)
+def test_non_live_option_structure_is_labeled_frozen_reference(
+    frame_update: dict[str, object],
+) -> None:
+    payload = _payload()
+    frame = dict(payload["option_structure_frame"])  # type: ignore[arg-type]
+    frame.update(frame_update)
+    payload["option_structure_frame"] = frame
+
+    sections = build_desk_message_sections(payload, NOW)
+
+    assert "event=frozen/reference" in sections.structure
+    assert "event=live" not in sections.structure
+
+
+def test_gth_omits_rth_only_market_state_failures_but_keeps_gth_failures() -> None:
+    payload = _payload()
+    payload["session_phase"] = {"name": "asia_globex", "name_cn": "亚盘夜盘"}
+    payload["level_decision"] = {
+        **payload["level_decision"],  # type: ignore[dict-item]
+        "session_mode": "globex",
+    }
+    payload["minute_market_frame"] = {
+        "quality": "ready",
+        "diagnostics": {
+            "rth_market_state": {
+                "status": "uncertain",
+                "reasons": [
+                    "outside_rth_session",
+                    "price_vs_vwap_missing",
+                    "classification_gate_failed",
+                ],
+            }
+        },
+    }
+    payload["warnings"] = ["rth_heartbeat_degraded_snapshot", "ibkr_feed_unavailable"]
+
+    projection = build_desk_map_projection(payload)
+
+    assert projection.quality_reasons == ("ibkr_feed_unavailable",)
+
+
+def test_current_rth_phase_overrides_latched_globex_decision_for_quality() -> None:
+    payload = _payload()
+    payload["session_phase"] = {"name": "us_open_hour", "name_cn": "开盘首小时"}
+    payload["level_decision"] = {
+        **payload["level_decision"],  # type: ignore[dict-item]
+        "session_mode": "globex",
+    }
+    payload["minute_market_frame"] = {
+        "quality": "degraded",
+        "diagnostics": {
+            "rth_market_state": {
+                "status": "uncertain",
+                "reasons": ["price_vs_vwap_missing", "classification_gate_failed"],
+            }
+        },
+    }
+    payload["warnings"] = ["rth_heartbeat_degraded_snapshot"]
+
+    projection = build_desk_map_projection(payload)
+
+    assert "market_state:price_vs_vwap_missing" in projection.quality_reasons
+    assert "market_state:classification_gate_failed" in projection.quality_reasons
+    assert "rth_heartbeat_degraded_snapshot" in projection.quality_reasons
+
+
+def test_expected_move_usage_requires_matching_horizon_contract() -> None:
+    payload = _payload()
+    payload["expected_move_points"] = 8.16
+    payload["day_move"] = {
+        "em_used_fraction": 17.05,
+        "em_baseline_source": "es_gth_open",
+    }
+
+    mismatched = build_desk_message_sections(payload, NOW)
+    assert "EM ±8.16pt" in mismatched.location
+    assert "1705%" not in mismatched.location
+
+    payload["day_move"] = {
+        "em_used_fraction": 0.64,
+        "em_numerator_horizon_id": "gth-session-2026-07-15",
+        "em_denominator_horizon_id": "gth-session-2026-07-15",
+        "em_usage_label": "GTH",
+    }
+    aligned = build_desk_message_sections(payload, NOW)
+    assert "EM ±8.16pt · GTH 已用 64%" in aligned.location
 
 
 def test_market_bias_never_becomes_a_typed_direction_without_a_price_path() -> None:
@@ -615,7 +741,7 @@ def test_missing_required_frames_cannot_report_ready_data_quality() -> None:
         "option_l1:unavailable",
     )
     assert sections.data_quality.startswith("DEGRADED")
-    assert "Frames market=UNAVAILABLE · options=UNAVAILABLE · L1=UNAVAILABLE" in sections.data_quality
+    assert "Frames market=" not in sections.data_quality
 
 
 def test_current_ready_is_paused_when_required_frames_are_missing() -> None:
@@ -649,7 +775,8 @@ def test_current_ready_is_paused_when_required_frames_are_missing() -> None:
     assert projection.stage.value == "PAUSED"
     assert "ready_required_frame_unavailable" in projection.quality_reasons
     assert sections.desk_view.startswith("NO TRADE")
-    assert "ready_required_frame_unavailable" in sections.data_quality
+    assert "ready_required_frame_unavailable" not in sections.data_quality
+    assert "共 4 项" in sections.data_quality
     assert "禁止执行 READY" in sections.execution
 
 
@@ -673,7 +800,7 @@ def test_desk_sections_do_not_invent_opening_range_levels_from_state() -> None:
     assert "ORH" not in sections.location
 
 
-def test_desk_data_quality_keeps_every_warning_and_frame_reason() -> None:
+def test_desk_data_quality_keeps_raw_reasons_in_projection_but_summarizes_human_text() -> None:
     payload = _payload()
     payload.update(
         {
@@ -716,8 +843,11 @@ def test_desk_data_quality_keeps_every_warning_and_frame_reason() -> None:
         *(f"payload_warning_{index}" for index in range(1, 7)),
     }
     assert expected.issubset(set(projection.quality_reasons))
-    for reason in expected:
-        assert reason in sections.data_quality
+    assert "主要影响：市场帧降级，ES 流确认需谨慎" in sections.data_quality
+    assert "次要影响：期权结构帧降级" in sections.data_quality
+    assert f"共 {len(projection.quality_reasons)} 项" in sections.data_quality
+    assert "payload_warning_6" not in sections.data_quality
+    assert "审计码" not in sections.data_quality
 
 
 def test_operator_status_brief_never_duplicates_a_live_execution_ticket() -> None:

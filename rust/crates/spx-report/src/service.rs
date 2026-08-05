@@ -19,7 +19,7 @@ use crate::{
 };
 
 pub trait DeskMessageWriter: Send + Sync {
-    /// Produces one fully validated, uncompressed canonical desk message.
+    /// Produces one fully validated, operator-facing canonical desk message.
     ///
     /// # Errors
     ///

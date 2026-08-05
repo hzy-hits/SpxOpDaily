@@ -1017,6 +1017,12 @@ mod tests {
         fixture["observed_through"] = serde_json::json!(now - TimeDelta::seconds(2));
         fixture["available_at"] = serde_json::json!(now - TimeDelta::seconds(1));
         fixture["valid_until"] = serde_json::json!(now + TimeDelta::minutes(20));
+        // This bridge fixture exercises a current publication envelope while
+        // retaining the golden research lineage. Keep the embedded document's
+        // publication clock inside the projection's five-minute freshness
+        // contract so the bridge must transmit, rather than strip, it.
+        fixture["research_context"]["generated_at"] =
+            serde_json::json!(now - TimeDelta::milliseconds(1_500));
         std::fs::write(path, serde_json::to_vec(&fixture).unwrap()).unwrap();
         fixture
     }
