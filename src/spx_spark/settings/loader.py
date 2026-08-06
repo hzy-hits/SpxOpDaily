@@ -481,6 +481,9 @@ def load_settings(
         play_stats_hard_gate_enabled=bool(
             get("market_features.play_stats_hard_gate_enabled")
         ),
+        gth_negative_play_stats_veto_enabled=bool(
+            get("market_features.gth_negative_play_stats_veto_enabled")
+        ),
         play_stats_window_days=int(get("market_features.play_stats_window_days")),
         play_stats_horizon=str(get("market_features.play_stats_horizon")),
         play_stats_min_samples=int(get("market_features.play_stats_min_samples")),

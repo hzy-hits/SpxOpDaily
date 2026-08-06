@@ -139,7 +139,7 @@ market_features:
   gth_manual_candidate_target_room_buffer_points: {value: 1.0, description: Hard GTH target-room buffer beyond parity uncertainty.}
   gth_manual_candidate_close_buffer_seconds: {value: 30.0, description: Candidate cutoff buffer before the 09:25 ET GTH close.}
   gth_manual_candidate_max_reclaim_age_seconds: {value: 1200.0, description: Maximum trough-to-evaluation age for a GTH manual candidate.}
-  gth_manual_candidate_min_reward_risk: {value: 1.0, description: Hard GTH maximum-profit to maximum-loss floor.}
+  gth_manual_candidate_min_reward_risk: {value: 1.0, description: Diagnostic GTH expiry maximum-profit to maximum-loss ratio floor; it never grants READY authority.}
   session_episode_enabled: {value: true, description: Enables the session structural episode.}
   session_break_buffer_points: {value: 2.0, description: Structural break and reclaim buffer.}
   session_extreme_extension_points: {value: 5.0, description: Extreme extension distance.}
@@ -162,6 +162,7 @@ market_features:
   virtual_gth_spread_saturation_fraction: {value: 0.85, description: GTH two-leg virtual spread value-saturation exit fraction.}
   play_stats_enabled: {value: true, description: Enables fail-open rolling win-rate stats on trade-ready alerts.}
   play_stats_hard_gate_enabled: {value: false, description: Keeps touch-quote history diagnostic until fill-aligned validation is complete.}
+  gth_negative_play_stats_veto_enabled: {value: true, description: Blocks sufficiently sampled GTH candidates whose average or median touch-quote return is non-positive.}
   play_stats_window_days: {value: 20, description: Rolling lookback window in days for pricing outcomes.}
   play_stats_horizon: {value: "300", description: Outcome horizon key in seconds defining a win.}
   play_stats_min_samples: {value: 30, description: Minimum matched outcomes before historical edge gates a signal.}
@@ -1686,13 +1687,13 @@ level_decision_shadow:
     description: Continuous hold required before a break or rejection is accepted.
   retest_points:
     value: 4.0
-    description: Distance from the frozen level treated as an optional retest.
+    description: Distance from the frozen level treated as a mandatory breakout retest; rejection paths may still confirm on sustained follow-through.
   confirm_move_points:
     value: 4.0
     description: Move away from the retest required to begin final confirmation.
   confirm_hold_seconds:
     value: 10.0
-    description: Additional hold after direction acceptance or retest.
+    description: Additional hold after a successful breakout retest or accepted rejection follow-through.
   phase_timeout_seconds:
     value: 90.0
     description: Maximum time allowed in a pending acceptance or retest phase during RTH or outside GTH.

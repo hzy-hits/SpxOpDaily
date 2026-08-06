@@ -274,6 +274,67 @@ fn add_v2_migration_and_scheduled_outbox(path: &std::path::Path, now: DateTime<U
         .unwrap();
 }
 
+fn add_v3_migration_and_operator_outbox(path: &std::path::Path, now: DateTime<Utc>) {
+    let connection = rusqlite::Connection::open(path).unwrap();
+    connection
+        .execute_batch("PRAGMA foreign_keys = OFF;")
+        .unwrap();
+    connection
+        .execute_batch(crate::schema::MIGRATION_3)
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO schema_migrations (
+                version, name, checksum_sha256, applied_at_us
+             ) VALUES (3, 'trader_event_notifications', ?1, ?2)",
+            rusqlite::params![
+                canonical_json_hash(&crate::schema::MIGRATION_3).unwrap(),
+                now.timestamp_micros()
+            ],
+        )
+        .unwrap();
+    connection
+        .execute_batch("PRAGMA foreign_keys = ON;")
+        .unwrap();
+
+    let notification = operator_notification(now, OperatorNotificationRole::TradeReady);
+    let payload_json = serde_json::to_string(&notification).unwrap();
+    let payload_hash = canonical_json_hash(&notification).unwrap();
+    let target_hash = canonical_json_hash(&notification.targets).unwrap();
+    connection
+        .execute(
+            "INSERT INTO notification_events (
+                event_id, semantic_id, lane, occurred_at_us, expires_at_us, payload_json,
+                payload_sha256, target_set_sha256, writer_generation, created_at_us
+             ) VALUES (?1, ?2, 'trader_event', ?3, ?4, ?5, ?6, ?7, 1, ?3)",
+            rusqlite::params![
+                notification.event_id.as_str(),
+                notification.semantic_id.as_str(),
+                notification.occurred_at.timestamp_micros(),
+                notification.expires_at.timestamp_micros(),
+                payload_json,
+                payload_hash,
+                target_hash,
+            ],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO notification_targets (
+                target_id, event_id, target_key, channel, status, attempt_count,
+                max_attempts, replay_generation, lease_sequence, next_attempt_at_us,
+                updated_at_us
+             ) VALUES (?1, ?2, ?3, 'bark', 'pending', 0, 3, 0, 0, ?4, ?4)",
+            rusqlite::params![
+                format!("{}:bark-primary", notification.event_id),
+                notification.event_id.as_str(),
+                notification.targets[0].key.as_str(),
+                notification.occurred_at.timestamp_micros(),
+            ],
+        )
+        .unwrap();
+}
+
 fn manual_decision(now: DateTime<Utc>) -> StrategyDecisionV1 {
     let mut decision = decision(now, true);
     decision.direction = Some(spx_domain::CandidateDirection::CallVertical10);
@@ -885,6 +946,245 @@ fn operator_exit_is_terminal_and_higher_generation_rearms() {
 }
 
 #[test]
+fn operator_cancel_closes_entry_but_allows_exactly_one_later_exit() {
+    let temp = TempDir::new().unwrap();
+    let ledger = Ledger::open(temp.path().join("ledger.sqlite")).unwrap();
+    let now = at(0);
+    let owner = ledger
+        .acquire_owner(
+            OwnerRole::Core,
+            "core-owner-operator-cancel",
+            now,
+            TimeDelta::minutes(30),
+        )
+        .unwrap();
+    let ready = operator_notification(now, OperatorNotificationRole::TradeReady);
+    assert_eq!(
+        ledger
+            .persist_operator_notification(&owner, &ready, 3, now)
+            .unwrap(),
+        OperatorNotificationWrite::Inserted
+    );
+    let mut cancel = operator_notification(now, OperatorNotificationRole::Cancel);
+    cancel.occurred_at += TimeDelta::seconds(1);
+    assert_eq!(
+        ledger
+            .persist_operator_notification(&owner, &cancel, 3, now + TimeDelta::seconds(1))
+            .unwrap(),
+        OperatorNotificationWrite::Inserted
+    );
+    assert_eq!(
+        ledger
+            .persist_operator_notification(&owner, &cancel, 3, now + TimeDelta::seconds(2))
+            .unwrap(),
+        OperatorNotificationWrite::Duplicate
+    );
+
+    let mut after_cancel = ready;
+    after_cancel.event_id = token("event-ready-after-cancel");
+    after_cancel.semantic_id = token("semantic-ready-after-cancel");
+    after_cancel.occurred_at += TimeDelta::seconds(2);
+    assert_eq!(
+        ledger
+            .persist_operator_notification(&owner, &after_cancel, 3, now + TimeDelta::seconds(2),)
+            .unwrap(),
+        OperatorNotificationWrite::SemanticSuppressed
+    );
+
+    let mut exit = operator_notification(now, OperatorNotificationRole::Exit);
+    exit.occurred_at += TimeDelta::seconds(3);
+    assert_eq!(
+        ledger
+            .persist_operator_notification(&owner, &exit, 3, now + TimeDelta::seconds(3))
+            .unwrap(),
+        OperatorNotificationWrite::Inserted
+    );
+    let mut second_exit = exit;
+    second_exit.event_id = token("event-exit-after-planned-exit");
+    second_exit.semantic_id = token("semantic-exit-after-planned-exit");
+    assert_eq!(
+        ledger
+            .persist_operator_notification(&owner, &second_exit, 3, now + TimeDelta::seconds(4),)
+            .unwrap(),
+        OperatorNotificationWrite::SemanticSuppressed
+    );
+}
+
+#[test]
+fn operator_exit_supersedes_pending_cancel_so_only_exit_is_claimable() {
+    let temp = TempDir::new().unwrap();
+    let ledger = Ledger::open(temp.path().join("ledger.sqlite")).unwrap();
+    let now = at(0);
+    let core = ledger
+        .acquire_owner(
+            OwnerRole::Core,
+            "core-owner-pending-cancel",
+            now,
+            TimeDelta::minutes(30),
+        )
+        .unwrap();
+    let delivery = ledger
+        .acquire_owner(
+            OwnerRole::Delivery,
+            "delivery-owner-pending-cancel",
+            now,
+            TimeDelta::minutes(30),
+        )
+        .unwrap();
+    for (offset, role) in [
+        (0, OperatorNotificationRole::TradeReady),
+        (1, OperatorNotificationRole::Cancel),
+        (2, OperatorNotificationRole::Exit),
+    ] {
+        let mut notification = operator_notification(now, role);
+        notification.occurred_at += TimeDelta::seconds(offset);
+        ledger
+            .persist_operator_notification(&core, &notification, 3, notification.occurred_at)
+            .unwrap();
+    }
+
+    let health = ledger.health().unwrap();
+    assert_eq!(health.cancelled, 2);
+    assert_eq!(health.pending, 1);
+    let claimed = ledger
+        .claim_next(
+            &delivery,
+            now + TimeDelta::seconds(2),
+            TimeDelta::seconds(10),
+        )
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        claimed.intent,
+        ClaimedNotificationIntent::TraderEvent(OperatorNotificationV1 {
+            role: OperatorNotificationRole::Exit,
+            ..
+        })
+    ));
+    assert!(
+        ledger
+            .claim_next(
+                &delivery,
+                now + TimeDelta::seconds(2),
+                TimeDelta::seconds(10)
+            )
+            .unwrap()
+            .is_none()
+    );
+    let cancel_terminal: (String, String) = ledger
+        .connection()
+        .unwrap()
+        .query_row(
+            "SELECT t.status, r.reason_code
+             FROM notification_targets t
+             JOIN delivery_receipts r USING (target_id)
+             WHERE t.event_id = 'event-cancel'
+               AND r.outcome = 'cancelled_before_transport'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(cancel_terminal.0, "cancelled");
+    assert_eq!(cancel_terminal.1, "superseded_by_exit");
+}
+
+#[test]
+fn operator_exit_preserves_an_already_delivered_cancel_and_its_receipt() {
+    let temp = TempDir::new().unwrap();
+    let ledger = Ledger::open(temp.path().join("ledger.sqlite")).unwrap();
+    let now = at(0);
+    let core = ledger
+        .acquire_owner(
+            OwnerRole::Core,
+            "core-owner-delivered-cancel",
+            now,
+            TimeDelta::minutes(30),
+        )
+        .unwrap();
+    let delivery = ledger
+        .acquire_owner(
+            OwnerRole::Delivery,
+            "delivery-owner-delivered-cancel",
+            now,
+            TimeDelta::minutes(30),
+        )
+        .unwrap();
+    ledger
+        .persist_operator_notification(
+            &core,
+            &operator_notification(now, OperatorNotificationRole::TradeReady),
+            3,
+            now,
+        )
+        .unwrap();
+    let mut cancel = operator_notification(now, OperatorNotificationRole::Cancel);
+    cancel.occurred_at += TimeDelta::seconds(1);
+    ledger
+        .persist_operator_notification(&core, &cancel, 3, now + TimeDelta::seconds(1))
+        .unwrap();
+    let claimed_cancel = ledger
+        .claim_next(
+            &delivery,
+            now + TimeDelta::seconds(2),
+            TimeDelta::seconds(10),
+        )
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        claimed_cancel.intent,
+        ClaimedNotificationIntent::TraderEvent(OperatorNotificationV1 {
+            role: OperatorNotificationRole::Cancel,
+            ..
+        })
+    ));
+    let attempt_id = start_transport(
+        &ledger,
+        &delivery,
+        &claimed_cancel,
+        now + TimeDelta::seconds(2),
+    );
+    ledger
+        .settle(
+            &delivery,
+            &claimed_cancel.handle,
+            &attempt_id,
+            &Settlement::Delivered {
+                provider_message_id: Some("cancel-provider-receipt".to_owned()),
+            },
+            now + TimeDelta::seconds(3),
+        )
+        .unwrap();
+
+    let mut exit = operator_notification(now, OperatorNotificationRole::Exit);
+    exit.occurred_at += TimeDelta::seconds(4);
+    ledger
+        .persist_operator_notification(&core, &exit, 3, now + TimeDelta::seconds(4))
+        .unwrap();
+
+    let cancel_state: (String, i64, String) = ledger
+        .connection()
+        .unwrap()
+        .query_row(
+            "SELECT t.status, COUNT(r.receipt_id), MIN(r.outcome)
+             FROM notification_targets t
+             JOIN delivery_receipts r USING (target_id)
+             WHERE t.event_id = 'event-cancel'
+             GROUP BY t.status",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        cancel_state,
+        ("delivered".to_owned(), 1, "delivered".to_owned())
+    );
+    let health = ledger.health().unwrap();
+    assert_eq!(health.cancelled, 1);
+    assert_eq!(health.delivered, 1);
+    assert_eq!(health.pending, 1);
+}
+
+#[test]
 fn operator_event_has_no_fake_decision_or_report_lineage() {
     let temp = TempDir::new().unwrap();
     let ledger = Ledger::open(temp.path().join("ledger.sqlite")).unwrap();
@@ -1176,7 +1476,7 @@ fn cancellation_before_operator_event_is_an_idempotent_durable_fence() {
 }
 
 #[test]
-fn claim_priority_is_exit_then_trade_ready_then_setup_then_scheduled_report() {
+fn claim_priority_is_exit_then_cancel_then_trade_ready_then_setup_then_report() {
     let temp = TempDir::new().unwrap();
     let ledger = Ledger::open(temp.path().join("ledger.sqlite")).unwrap();
     let now = at(0);
@@ -1210,6 +1510,7 @@ fn claim_priority_is_exit_then_trade_ready_then_setup_then_scheduled_report() {
     for role in [
         OperatorNotificationRole::Setup,
         OperatorNotificationRole::TradeReady,
+        OperatorNotificationRole::Cancel,
         OperatorNotificationRole::Exit,
     ] {
         let mut notification = operator_notification(now, role);
@@ -1221,6 +1522,7 @@ fn claim_priority_is_exit_then_trade_ready_then_setup_then_scheduled_report() {
 
     for expected in [
         Some(OperatorNotificationRole::Exit),
+        Some(OperatorNotificationRole::Cancel),
         Some(OperatorNotificationRole::TradeReady),
         Some(OperatorNotificationRole::Setup),
         None,
@@ -1254,7 +1556,7 @@ fn fresh_ledger_installs_all_forward_migrations() {
             row.get(0)
         })
         .unwrap();
-    assert_eq!(migration_count, 3);
+    assert_eq!(migration_count, 4);
 }
 
 #[test]
@@ -1910,7 +2212,7 @@ fn migration_checksum_drift_refuses_to_open() {
 }
 
 #[test]
-fn known_migration_prefix_accepts_a_forward_compatible_tail_after_v3() {
+fn known_migration_prefix_accepts_a_forward_compatible_tail_after_v4() {
     let temp = TempDir::new().unwrap();
     let path = temp.path().join("ledger.sqlite");
     let ledger = Ledger::open(&path).unwrap();
@@ -1920,7 +2222,7 @@ fn known_migration_prefix_accepts_a_forward_compatible_tail_after_v3() {
         .execute(
             "INSERT INTO schema_migrations (
                 version, name, checksum_sha256, applied_at_us
-             ) VALUES (4, 'future_backward_compatible_extension', ?1, ?2)",
+             ) VALUES (5, 'future_backward_compatible_extension', ?1, ?2)",
             rusqlite::params!["f".repeat(64), at(1).timestamp_micros()],
         )
         .unwrap();
@@ -1930,7 +2232,7 @@ fn known_migration_prefix_accepts_a_forward_compatible_tail_after_v3() {
 }
 
 #[test]
-fn v1_ledger_upgrades_through_v3_without_losing_existing_outbox_rows() {
+fn v1_ledger_upgrades_through_v4_without_losing_existing_outbox_rows() {
     let temp = TempDir::new().unwrap();
     let path = temp.path().join("ledger.sqlite");
     create_v1_ledger_with_outbox(&path);
@@ -1942,7 +2244,7 @@ fn v1_ledger_upgrades_through_v3_without_losing_existing_outbox_rows() {
             row.get(0)
         })
         .unwrap();
-    assert_eq!(migrations, 3);
+    assert_eq!(migrations, 4);
     let lineage: (Option<String>, Option<String>, Option<String>) = connection
         .query_row(
             "SELECT decision_id, source_projection_id, report_slot
@@ -1975,7 +2277,7 @@ fn v1_ledger_upgrades_through_v3_without_losing_existing_outbox_rows() {
 }
 
 #[test]
-fn v2_scheduled_outbox_upgrades_to_v3_and_remains_claimable() {
+fn v2_scheduled_outbox_upgrades_to_v4_and_remains_claimable() {
     let temp = TempDir::new().unwrap();
     let path = temp.path().join("ledger.sqlite");
     let now = at(0);
@@ -1998,7 +2300,7 @@ fn v2_scheduled_outbox_upgrades_to_v3_and_remains_claimable() {
             row.get(0)
         })
         .unwrap();
-    assert_eq!(migration_count, 3);
+    assert_eq!(migration_count, 4);
     let scheduled_count: i64 = ledger
         .connection()
         .unwrap()
@@ -2018,6 +2320,60 @@ fn v2_scheduled_outbox_upgrades_to_v3_and_remains_claimable() {
         claimed.intent,
         ClaimedNotificationIntent::ScheduledReport(_)
     ));
+}
+
+#[test]
+fn v3_trader_event_upgrades_to_v4_and_accepts_cancel_role() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("ledger.sqlite");
+    let now = at(0);
+    create_v1_ledger_with_outbox(&path);
+    add_v2_migration_and_scheduled_outbox(&path, now);
+    add_v3_migration_and_operator_outbox(&path, now);
+
+    let ledger = Ledger::open(&path).unwrap();
+    let connection = ledger.connection().unwrap();
+    let preserved: i64 = connection
+        .query_row(
+            "SELECT COUNT(*)
+             FROM notification_targets t
+             JOIN notification_events e ON e.event_id = t.event_id
+             WHERE e.event_id = 'event-trade_ready' AND t.status = 'pending'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(preserved, 1);
+    drop(connection);
+
+    let core = ledger
+        .acquire_owner(
+            OwnerRole::Core,
+            "core-owner-migration-v4",
+            now,
+            TimeDelta::minutes(30),
+        )
+        .unwrap();
+    let mut cancel = operator_notification(now, OperatorNotificationRole::Cancel);
+    cancel.occurred_at += TimeDelta::seconds(1);
+    cancel.expires_at += TimeDelta::seconds(1);
+    assert_eq!(
+        ledger
+            .persist_operator_notification(&core, &cancel, 3, now + TimeDelta::seconds(1))
+            .unwrap(),
+        OperatorNotificationWrite::Inserted
+    );
+    let stored_role: String = ledger
+        .connection()
+        .unwrap()
+        .query_row(
+            "SELECT json_extract(payload_json, '$.role')
+             FROM notification_events WHERE event_id = ?1",
+            [cancel.event_id.as_str()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(stored_role, "cancel");
 }
 
 #[test]

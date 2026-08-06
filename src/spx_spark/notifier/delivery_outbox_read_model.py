@@ -35,6 +35,22 @@ class DeliveryOutboxReadModelMixin:
             ).fetchall()
         return tuple(str(row["sink"]) for row in rows)
 
+    def event_operator_targets(self, event_id: str) -> tuple[tuple[str, str], ...]:
+        """Return the frozen Rust fan-out targets for an existing event."""
+
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT operator_targets_json
+                FROM notification_delivery_events
+                WHERE event_id = ?
+                """,
+                (event_id,),
+            ).fetchone()
+        if row is None:
+            return ()
+        return self._parse_operator_targets_json(row["operator_targets_json"])
+
     def inspect_event(
         self,
         envelope: NotificationEnvelope,

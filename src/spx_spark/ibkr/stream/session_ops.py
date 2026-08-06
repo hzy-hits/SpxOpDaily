@@ -95,6 +95,28 @@ class SessionOps:
                     # Unscoped, base, hot, and exact-leg ownership conflicts
                     # remain session-wide and fail closed.
                     self.subscription_health_failed = True
+                    invalidator = getattr(
+                        self,
+                        "competing_session_health_invalidator",
+                        None,
+                    )
+                    if callable(invalidator):
+                        try:
+                            invalidator(
+                                error_code=error_code,
+                                message=message,
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            # Broker callbacks must remain non-throwing. The
+                            # in-memory failure flag still stops lifecycle work,
+                            # while the failure is made visible for operations.
+                            log_event(
+                                {
+                                    "task": "ibkr_stream",
+                                    "event": "competing_health_invalidation_failed",
+                                    "error_type": type(exc).__name__,
+                                }
+                            )
             self.subscription_rejection_sequence += 1
             self.subscription_rejection_log.append((self.subscription_rejection_sequence, error))
             del self.subscription_rejection_log[:-MAX_TRACKED_ERRORS]

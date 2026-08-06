@@ -612,3 +612,140 @@ BEFORE UPDATE ON notification_events BEGIN SELECT RAISE(ABORT, 'event_immutable'
 CREATE TRIGGER events_immutable_delete
 BEFORE DELETE ON notification_events BEGIN SELECT RAISE(ABORT, 'event_immutable'); END;
 ";
+
+pub const MIGRATION_4: &str = r"
+DROP TRIGGER notification_events_cancellation_fence;
+DROP TRIGGER events_immutable_update;
+DROP TRIGGER events_immutable_delete;
+
+CREATE TABLE notification_events_v4 (
+    event_id TEXT PRIMARY KEY CHECK (length(trim(event_id)) > 0),
+    semantic_id TEXT NOT NULL UNIQUE CHECK (length(trim(semantic_id)) > 0),
+    decision_id TEXT REFERENCES decisions(decision_id) ON DELETE RESTRICT,
+    source_projection_id TEXT CHECK (
+        source_projection_id IS NULL OR length(trim(source_projection_id)) > 0
+    ),
+    report_slot TEXT CHECK (report_slot IS NULL OR length(trim(report_slot)) > 0),
+    lane TEXT NOT NULL CHECK (lane IN (
+        'position_safety', 'execution_safety', 'trade_ready',
+        'market_warning', 'ops_transition', 'scheduled_report', 'trader_event'
+    )),
+    occurred_at_us INTEGER NOT NULL CHECK (occurred_at_us > 0),
+    expires_at_us INTEGER NOT NULL CHECK (expires_at_us > occurred_at_us),
+    payload_json TEXT NOT NULL CHECK (
+        json_valid(payload_json) AND json_type(payload_json) = 'object'
+    ),
+    payload_sha256 TEXT NOT NULL CHECK (
+        length(payload_sha256) = 64
+        AND payload_sha256 NOT GLOB '*[^0-9a-f]*'
+    ),
+    target_set_sha256 TEXT NOT NULL CHECK (
+        length(target_set_sha256) = 64
+        AND target_set_sha256 NOT GLOB '*[^0-9a-f]*'
+    ),
+    writer_generation INTEGER NOT NULL CHECK (writer_generation > 0),
+    created_at_us INTEGER NOT NULL CHECK (created_at_us > 0),
+    CHECK (
+        (lane = 'scheduled_report'
+            AND decision_id IS NULL
+            AND source_projection_id IS NOT NULL
+            AND report_slot IS NOT NULL)
+        OR
+        (lane = 'trader_event'
+            AND decision_id IS NULL
+            AND source_projection_id IS NULL
+            AND report_slot IS NULL)
+        OR
+        (lane NOT IN ('scheduled_report', 'trader_event')
+            AND decision_id IS NOT NULL
+            AND source_projection_id IS NULL
+            AND report_slot IS NULL)
+    ),
+    CHECK (
+        lane != 'scheduled_report'
+        OR (
+            json_extract(payload_json, '$.schema_version') IS 'notification_intent.v2'
+            AND json_extract(payload_json, '$.intent_id') IS event_id
+            AND json_extract(payload_json, '$.semantic_id') IS semantic_id
+            AND json_extract(payload_json, '$.lineage.lane') IS 'scheduled_report'
+            AND json_extract(payload_json, '$.lineage.source_projection_id')
+                IS source_projection_id
+            AND json_extract(payload_json, '$.lineage.slot') IS report_slot
+            AND json_type(payload_json, '$.message.title') = 'text'
+            AND length(trim(json_extract(payload_json, '$.message.title'))) > 0
+            AND json_type(payload_json, '$.message.desk_view') = 'text'
+            AND length(trim(json_extract(payload_json, '$.message.desk_view'))) > 0
+            AND json_type(payload_json, '$.message.location') = 'text'
+            AND length(trim(json_extract(payload_json, '$.message.location'))) > 0
+            AND json_type(payload_json, '$.message.structure') = 'text'
+            AND length(trim(json_extract(payload_json, '$.message.structure'))) > 0
+            AND json_type(payload_json, '$.message.primary_path') = 'text'
+            AND length(trim(json_extract(payload_json, '$.message.primary_path'))) > 0
+            AND json_type(payload_json, '$.message.alternative_path') = 'text'
+            AND length(trim(json_extract(payload_json, '$.message.alternative_path'))) > 0
+            AND json_type(payload_json, '$.message.targets') = 'text'
+            AND length(trim(json_extract(payload_json, '$.message.targets'))) > 0
+            AND json_type(payload_json, '$.message.execution') = 'text'
+            AND length(trim(json_extract(payload_json, '$.message.execution'))) > 0
+            AND json_type(payload_json, '$.message.data_quality') = 'text'
+            AND length(trim(json_extract(payload_json, '$.message.data_quality'))) > 0
+        )
+    ),
+    CHECK (
+        lane != 'trader_event'
+        OR (
+            json_extract(payload_json, '$.schema_version') IS 'operator_notification.v1'
+            AND json_extract(payload_json, '$.event_id') IS event_id
+            AND json_extract(payload_json, '$.semantic_id') IS semantic_id
+            AND json_type(payload_json, '$.opportunity_id') = 'text'
+            AND length(trim(json_extract(payload_json, '$.opportunity_id'))) > 0
+            AND json_type(payload_json, '$.generation') = 'integer'
+            AND json_extract(payload_json, '$.generation') >= 0
+            AND json_extract(payload_json, '$.role') IN (
+                'setup', 'trade_ready', 'cancel', 'exit'
+            )
+            AND json_type(payload_json, '$.occurred_at') = 'text'
+            AND json_type(payload_json, '$.expires_at') = 'text'
+            AND json_type(payload_json, '$.title') = 'text'
+            AND length(trim(json_extract(payload_json, '$.title'))) > 0
+            AND json_type(payload_json, '$.body') = 'text'
+            AND length(trim(json_extract(payload_json, '$.body'))) > 0
+            AND json_type(payload_json, '$.targets') = 'array'
+            AND json_array_length(json_extract(payload_json, '$.targets')) > 0
+            AND json_extract(payload_json, '$.automatic_ordering') IS 0
+        )
+    )
+) STRICT;
+
+INSERT INTO notification_events_v4 (
+    event_id, semantic_id, decision_id, source_projection_id, report_slot, lane,
+    occurred_at_us, expires_at_us, payload_json, payload_sha256, target_set_sha256,
+    writer_generation, created_at_us
+)
+SELECT
+    event_id, semantic_id, decision_id, source_projection_id, report_slot, lane,
+    occurred_at_us, expires_at_us, payload_json, payload_sha256, target_set_sha256,
+    writer_generation, created_at_us
+FROM notification_events;
+
+DROP TABLE notification_events;
+ALTER TABLE notification_events_v4 RENAME TO notification_events;
+
+CREATE UNIQUE INDEX scheduled_report_slot_uidx
+ON notification_events(report_slot)
+WHERE lane = 'scheduled_report';
+
+CREATE TRIGGER notification_events_cancellation_fence
+BEFORE INSERT ON notification_events
+WHEN EXISTS (
+    SELECT 1 FROM notification_cancellations WHERE event_id = NEW.event_id
+)
+BEGIN
+    SELECT RAISE(ABORT, 'cancellation_fenced');
+END;
+
+CREATE TRIGGER events_immutable_update
+BEFORE UPDATE ON notification_events BEGIN SELECT RAISE(ABORT, 'event_immutable'); END;
+CREATE TRIGGER events_immutable_delete
+BEFORE DELETE ON notification_events BEGIN SELECT RAISE(ABORT, 'event_immutable'); END;
+";

@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
 
 import spx_spark.ibkr.stream.supervisor as supervisor_module
+from spx_spark.application.market_features.provider_entry_control import (
+    gth_ibkr_entry_control,
+)
+from spx_spark.ibkr.stream.health import persist_stream_health
+from spx_spark.ibkr.stream.session_ops import SessionOps
 from spx_spark.ibkr.stream.supervisor import StreamRuntime
 from spx_spark.ibkr.verifier import IbkrError
 
@@ -31,10 +37,18 @@ class FakeIb:
         return self.connected
 
 
-class FakeCollector:
+class FakeCollector(SessionOps):
     def __init__(self, clock: FakeClock, *, disconnect_after_flushes: int = 1) -> None:
         self.clock = clock
         self.ib = FakeIb(clock)
+        self.errors: list[IbkrError] = []
+        self.subscription_rejection_sequence = 0
+        self.subscription_rejection_log: list[tuple[int, IbkrError]] = []
+        self.subscription_rows_by_req_id = {}
+        self.subscription_lane_by_req_id = {}
+        self.subscription_lane_history_by_req_id = {}
+        self._subscription_request_lane = None
+        self.farm_health = SimpleNamespace(observe=lambda *_args: None)
         self.subscription_health_failed = False
         self.flush_times: list[float] = []
         self.demand_times: list[float] = []
@@ -54,7 +68,8 @@ class FakeCollector:
         del now_monotonic
 
     def drain_new_errors(self) -> list[IbkrError]:
-        return []
+        errors, self.errors = self.errors, []
+        return errors
 
     def market_data_allowed(self) -> bool:
         return True
@@ -95,6 +110,22 @@ def make_runtime(
     return runtime, events
 
 
+def _seed_healthy_stream_health(tmp_path) -> tuple[SimpleNamespace, datetime]:
+    storage = SimpleNamespace(data_root=str(tmp_path))
+    observed_at = datetime.now(tz=timezone.utc)
+    persist_stream_health(
+        storage,  # type: ignore[arg-type]
+        data_plane_healthy=True,
+        policy_blocked=False,
+        reason="healthy market-data flush",
+        connected=True,
+        circuit_state="closed",
+        conflict_count=0,
+        observed_at=observed_at,
+    )
+    return storage, observed_at
+
+
 def test_session_loop_polls_demand_with_bounded_slices_and_keeps_flush_cadence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -118,7 +149,7 @@ def test_session_loop_polls_demand_with_bounded_slices_and_keeps_flush_cadence(
     assert sum(event["event"] == "exact_leg_demand_polled" for event in events) == 8
 
 
-def test_session_loop_disabled_demand_uses_one_flush_sleep_and_never_reconciles(
+def test_session_loop_disabled_demand_uses_bounded_health_slices_and_never_reconciles(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     clock = FakeClock()
@@ -135,7 +166,8 @@ def test_session_loop_disabled_demand_uses_one_flush_sleep_and_never_reconciles(
     )
 
     assert runtime.session_loop() is True
-    assert collector.ib.sleep_calls == pytest.approx([1.0])
+    assert collector.ib.sleep_calls == pytest.approx([0.05] * 20)
+    assert all(0.0 < delay <= 0.05 for delay in collector.ib.sleep_calls)
     assert collector.flush_times == pytest.approx([1.0])
 
 
@@ -155,6 +187,123 @@ def test_zero_poll_setting_is_clamped_to_positive_sleep(
     assert collector.flush_times == pytest.approx([0.025])
     assert collector.ib.sleep_calls == pytest.approx([0.01, 0.01, 0.005])
     assert all(delay > 0.0 for delay in collector.ib.sleep_calls)
+
+
+def test_large_poll_cannot_delay_callback_durable_competing_gate(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = FakeClock()
+    collector = FakeCollector(clock, disconnect_after_flushes=99)
+    runtime, _events = make_runtime(
+        monkeypatch,
+        collector,
+        flush_interval_seconds=1.0,
+        quote_demand_poll_seconds=600.0,
+    )
+    storage, healthy_at = _seed_healthy_stream_health(tmp_path)
+    runtime.storage_settings = storage  # type: ignore[assignment]
+    runtime.runtime_policy = SimpleNamespace(ibkr_conflict_probe_seconds=5.0)
+    collector.broker_settings = SimpleNamespace(account_read_enabled=False)  # type: ignore[attr-defined]
+    collector.defer_market_data_after_conflict = lambda *, seconds: None  # type: ignore[method-assign]
+    original_sleep = collector.ib.sleep
+    callback_gate_results: list[dict[str, object]] = []
+
+    def sleep_and_receive_conflict(seconds: float) -> None:
+        collector._on_error(
+            -1,
+            10197,
+            "No market data during competing live session",
+            None,
+        )
+        callback_gate_results.append(
+            gth_ibkr_entry_control(
+                tmp_path,
+                now=datetime.now(tz=timezone.utc),
+            )
+        )
+        original_sleep(seconds)
+
+    collector.ib.sleep = sleep_and_receive_conflict  # type: ignore[method-assign]
+
+    assert gth_ibkr_entry_control(
+        tmp_path,
+        now=healthy_at,
+    )["allowed"] is True
+    assert runtime.session_loop() is False
+
+    assert collector.ib.sleep_calls == pytest.approx([0.05])
+    assert callback_gate_results[0]["allowed"] is False
+    assert callback_gate_results[0]["reason"] == "ibkr_competing_session"
+
+
+def test_callback_during_flush_latches_over_stale_healthy_publish(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = FakeClock()
+    collector = FakeCollector(clock, disconnect_after_flushes=99)
+    runtime, _events = make_runtime(
+        monkeypatch,
+        collector,
+        flush_interval_seconds=0.0,
+    )
+    storage, healthy_at = _seed_healthy_stream_health(tmp_path)
+    runtime.storage_settings = storage  # type: ignore[assignment]
+    runtime.runtime_policy = SimpleNamespace(ibkr_conflict_probe_seconds=5.0)
+    collector.broker_settings = SimpleNamespace(account_read_enabled=False)  # type: ignore[attr-defined]
+    collector.defer_market_data_after_conflict = lambda *, seconds: None  # type: ignore[method-assign]
+    callback_gate_results: list[dict[str, object]] = []
+
+    def flush_with_competing_callback() -> dict[str, object]:
+        collector.flush_times.append(clock.now)
+        collector._on_error(
+            -1,
+            10197,
+            "No market data during competing live session",
+            None,
+        )
+        callback_gate_results.append(
+            gth_ibkr_entry_control(
+                tmp_path,
+                now=datetime.now(tz=timezone.utc),
+            )
+        )
+        # Simulate an already-running flush trying to publish its stale
+        # pre-callback healthy result. The incident latch must win.
+        runtime._publish_health(
+            data_plane_healthy=True,
+            policy_blocked=False,
+            reason="stale in-flight healthy flush",
+        )
+        callback_gate_results.append(
+            gth_ibkr_entry_control(
+                tmp_path,
+                now=datetime.now(tz=timezone.utc),
+            )
+        )
+        return {
+            "task": "ibkr_stream",
+            "event": "flush",
+            "fresh_quotes": 10,
+            "fresh_spxw_quotes": 10,
+            "data_plane_healthy": True,
+            "provider_status": "available",
+        }
+
+    collector.flush = flush_with_competing_callback  # type: ignore[method-assign]
+
+    assert gth_ibkr_entry_control(
+        tmp_path,
+        now=healthy_at,
+    )["allowed"] is True
+    assert runtime.session_loop() is False
+
+    assert [row["allowed"] for row in callback_gate_results] == [False, False]
+    assert all(
+        row["reason"] == "ibkr_competing_session"
+        for row in callback_gate_results
+    )
 
 
 def test_competing_error_precedes_generic_subscription_health_reconnect(
@@ -187,6 +336,68 @@ def test_competing_error_precedes_generic_subscription_health_reconnect(
     assert deferred == [5.0]
     assert any(event.get("event") == "competing_session" for event in events)
     assert not any(event.get("event") == "subscription_health_reconnect" for event in events)
+
+
+def test_subscription_failure_during_wait_publishes_unhealthy_before_next_flush(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = FakeClock()
+    collector = FakeCollector(clock, disconnect_after_flushes=99)
+    original_sleep = collector.ib.sleep
+    conflict = IbkrError(
+        req_id=-1,
+        error_code=10197,
+        message="competing live session",
+        contract=None,
+        ts="2026-08-06T10:52:00+00:00",
+    )
+    errors_drained = False
+
+    def sleep_and_receive_conflict(seconds: float) -> None:
+        original_sleep(seconds)
+        collector.subscription_health_failed = True
+
+    def drain_errors() -> list[IbkrError]:
+        nonlocal errors_drained
+        if errors_drained:
+            return []
+        errors_drained = True
+        return [conflict]
+
+    collector.ib.sleep = sleep_and_receive_conflict  # type: ignore[method-assign]
+    collector.drain_new_errors = drain_errors  # type: ignore[method-assign]
+    deferred: list[float] = []
+    collector.defer_market_data_after_conflict = (  # type: ignore[attr-defined]
+        lambda *, seconds: deferred.append(seconds)
+    )
+    collector.broker_settings = SimpleNamespace(  # type: ignore[attr-defined]
+        account_read_enabled=False
+    )
+    runtime, _events = make_runtime(monkeypatch, collector)
+    runtime.runtime_policy = SimpleNamespace(ibkr_conflict_probe_seconds=5.0)
+    published: list[tuple[float, dict[str, object]]] = []
+    runtime._publish_health = (  # type: ignore[method-assign]
+        lambda **kwargs: published.append((clock.now, kwargs))
+    )
+
+    assert runtime.session_loop() is False
+
+    # The callback is classified after one bounded event-loop slice, not after
+    # the ordinary one-second flush (or a multi-second conflict probe window).
+    assert collector.ib.sleep_calls == pytest.approx([0.05])
+    assert collector.flush_times == pytest.approx([0.05])
+    assert published[0] == (
+        pytest.approx(0.05),
+        {
+            "data_plane_healthy": False,
+            "policy_blocked": False,
+            "reason": "subscription health failed; awaiting error classification",
+        },
+    )
+    assert published[-1][1]["data_plane_healthy"] is False
+    assert published[-1][1]["policy_blocked"] is True
+    assert "10197" in str(published[-1][1]["reason"])
+    assert deferred == [5.0]
 
 
 def test_rotation_competing_error_keeps_healthy_session_running(

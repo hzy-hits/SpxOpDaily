@@ -571,7 +571,7 @@ def _signal_alert(signal: Mapping[str, object]) -> Alert:
     if quality_passed:
         detail = (
             desk_view
-            + "方向门已通过；正在核验精确 SPXW 双腿、parity、赔率和报价时效。"
+            + "方向门已通过；正在核验精确 SPXW 双腿、parity、到期最大赔付比和报价时效。"
             + "只有随后绿色 MANUAL READY 卡可操作；本事件卡本身不得下单。"
         )
     else:

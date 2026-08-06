@@ -153,6 +153,9 @@ def run_level_decision_shadow(
             spot=observation.spot if observation.quality_ok else None,
             at=now,
             confirmed_now=confirmed_now,
+            trigger_coordinate_kind=observation.trigger_coordinate_kind,
+            trigger_instrument_id=observation.trigger_instrument_id,
+            trigger_basis_points=observation.trigger_basis_points,
             settings=_outcome_settings(policy),
         )
         delivery, notification_intent = prepare_level_transition_delivery(

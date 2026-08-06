@@ -22,6 +22,7 @@ const OPERATOR_BODY_SECTIONS: [&str; 5] = [
 pub enum OperatorNotificationRole {
     Setup,
     TradeReady,
+    Cancel,
     Exit,
 }
 
@@ -30,6 +31,7 @@ impl OperatorNotificationRole {
         match self {
             Self::Setup => "setup",
             Self::TradeReady => "trade_ready",
+            Self::Cancel => "cancel",
             Self::Exit => "exit",
         }
     }

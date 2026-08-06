@@ -586,8 +586,8 @@ def test_confirmed_shadow_emits_deduplicated_30_second_outcome(tmp_path, monkeyp
         lambda *_args, **_kwargs: current["value"],
     )
     path = (
-        (0, 95.0, 5000.0),
-        (5, 99.0, 5000.0),
+        (0, 107.0, 5000.0),
+        (5, 101.0, 5000.0),
         (10, 96.0, 4999.0),
         (31, 95.0, 4997.0),
         (40, 99.0, 4998.0),
@@ -605,6 +605,10 @@ def test_confirmed_shadow_emits_deduplicated_30_second_outcome(tmp_path, monkeyp
             levels={"put_wall": 100.0, "call_wall": 120.0},
             quality_ok=True,
             session_date="2026-07-13",
+            trigger_coordinate_kind="official_spx",
+            trigger_instrument_id="index:SPX",
+            trigger_basis_points=4905.0,
+            spx_spot=spot,
         )
         result = run_level_decision_shadow(storage, SimpleNamespace(), now=at)
     assert result is not None
@@ -617,6 +621,14 @@ def test_confirmed_shadow_emits_deduplicated_30_second_outcome(tmp_path, monkeyp
     assert len(rows) == 1
     assert rows[0]["horizon_seconds"] == 30
     assert rows[0]["attribution"] == "follow_through"
+    persisted = json.loads(
+        (tmp_path / "latest" / "level_decision_shadow_state.json").read_text()
+    )
+    observation = next(iter(persisted["outcomes"]["observations"].values()))
+    assert observation["trigger_coordinate_kind"] == "official_spx"
+    assert observation["trigger_instrument_id"] == "index:SPX"
+    assert observation["latched_basis_points"] == 4905.0
+    assert all(sample["trigger_coordinate_kind"] == "official_spx" for sample in observation["samples"])
 
 
 def test_operator_override_confirms_level_but_still_requires_trade_intent(
@@ -636,8 +648,8 @@ def test_operator_override_confirms_level_but_still_requires_trade_intent(
     )
     result = None
     for seconds, spot, es in (
-        (0, 95.0, 5000.0),
-        (5, 99.0, 5000.0),
+        (0, 107.0, 5000.0),
+        (5, 101.0, 5000.0),
         (10, 96.0, 4999.0),
         (31, 95.0, 4997.0),
         (40, 99.0, 4998.0),
@@ -712,8 +724,8 @@ def test_meaningful_level_path_transitions_send_idempotent_non_executable_cards(
     )
     result = None
     for seconds, spot, es in (
-        (0, 95.0, 5000.0),
-        (5, 99.0, 5000.0),
+        (0, 107.0, 5000.0),
+        (5, 101.0, 5000.0),
         (10, 96.0, 4999.0),
         (31, 95.0, 4997.0),
         (40, 99.0, 4998.0),
@@ -816,7 +828,7 @@ def test_level_transition_notification_retries_after_state_commit_enqueue_crash(
     )
     failed = None
     for seconds, spot, es in (
-        (5, 99.0, 5000.0),
+        (5, 101.0, 5000.0),
         (10, 96.0, 4999.0),
         (31, 95.0, 4997.0),
         (40, 99.0, 4998.0),
@@ -1008,7 +1020,7 @@ def test_level_transition_quiet_window_is_suppressed_not_delivered(
     )
     result = None
     for seconds, spot, es in (
-        (5, 99.0, 5000.0),
+        (5, 101.0, 5000.0),
         (10, 96.0, 4999.0),
         (31, 95.0, 4997.0),
         (40, 99.0, 4998.0),

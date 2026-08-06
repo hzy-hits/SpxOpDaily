@@ -832,12 +832,16 @@ def _persist_gth_quote_demand(
     forced_clear_reason: str | None = None,
 ) -> ExactLegQuoteDemand | None:
     path = quote_demand_path(storage.data_root)
+    manual_candidate_state = read_json_object(
+        Path(storage.data_root) / "latest" / "gth_level_manual_candidate_state.json"
+    )
     demand, reason = select_gth_quote_demand(
         at=at,
         session_date=session_date,
         provider=provider,
         gth_state=gth_state,
         virtual_active=virtual_active,
+        manual_candidate_state=manual_candidate_state,
         forced_clear_reason=forced_clear_reason,
     )
     previous, _ = load_exact_leg_quote_demand(path, now=at)

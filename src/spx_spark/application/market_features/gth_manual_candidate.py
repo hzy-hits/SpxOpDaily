@@ -739,6 +739,17 @@ def _notification_intent(
     event_id: str,
     now: datetime,
 ) -> dict[str, object]:
+    if (
+        candidate.get("status") != "manual_ready"
+        or candidate.get("manual_action_eligible") is not True
+    ):
+        raise ValueError("operator notification requires a manual-ready candidate")
+    if (
+        candidate.get("kind") == "gth_spxw_level_manual_spread_candidate"
+        and candidate.get("edge_authority")
+        != "validated_first_touch_time_stop_net_pnl"
+    ):
+        raise ValueError("operator notification requires validated edge authority")
     long_id = str(candidate["long_contract_id"])
     short_id = str(candidate["short_contract_id"])
     long_label = option_contract_label(long_id)
@@ -826,7 +837,9 @@ def _notification_intent(
     prior_session_line = prior_session_operator_line(candidate.get("prior_session"))
     reward_risk = _number(candidate.get("reward_risk_at_limit"))
     reward_risk_line = (
-        f"赔率  最大收益/最大亏损 {reward_risk:.2f}" if reward_risk is not None else None
+        f"到期最大赔付比  {reward_risk:.2f}（最大收益/最大亏损；非胜率或期望收益）"
+        if reward_risk is not None
+        else None
     )
     play_stats_line = _play_stats_line(candidate.get("play_stats"))
     desk_lines = [
@@ -872,7 +885,7 @@ def _notification_intent(
         targets="\n".join(
             (
                 f"目标  SPX {float(candidate['target_spx']):.2f}（{target_label}）",
-                reward_risk_line or "最大收益/最大亏损  不可用",
+                reward_risk_line or "到期最大赔付比  不可用（非胜率或期望收益）",
             )
         ),
         data_quality="\n".join(quality_lines),

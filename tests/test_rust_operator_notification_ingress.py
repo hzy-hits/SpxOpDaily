@@ -90,6 +90,13 @@ def test_setup_trade_ready_and_virtual_exit_share_lifecycle_identity() -> None:
         ),
         _job(),
         _job(
+            event_id="intent-1:cancel",
+            kind="virtual_strategy_exit",
+            lane="strategy_lifecycle",
+            opportunity_id=str(episode["operator_opportunity_id"]),
+            generation=int(episode["reentry_generation"]),
+        ),
+        _job(
             event_id=f"{episode['episode_id']}:target_reached",
             kind="virtual_strategy_exit",
             lane="strategy_lifecycle",
@@ -105,6 +112,7 @@ def test_setup_trade_ready_and_virtual_exit_share_lifecycle_identity() -> None:
     assert [payload["role"] for payload in payloads] == [
         "setup",
         "trade_ready",
+        "cancel",
         "exit",
     ]
     assert {payload["opportunity_id"] for payload in payloads} == {

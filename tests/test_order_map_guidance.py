@@ -903,6 +903,9 @@ def test_operator_status_brief_points_to_separate_gth_manual_ready_card() -> Non
     payload["gth_level_manual_candidate"] = {
         "status": "manual_ready",
         "source_signal_id": "level:test-current",
+        "manual_action_eligible": True,
+        "operator_notification_eligible": True,
+        "edge_authority": "validated_first_touch_time_stop_net_pnl",
         "position_type": "put_debit_spread",
         "direction": "down",
         "thesis": "breakout",
@@ -914,6 +917,109 @@ def test_operator_status_brief_points_to_separate_gth_manual_ready_card() -> Non
     assert "Execution  READY · 独立 MANUAL READY 卡承载实时合约与报价" in rendered
     assert "买入  " not in rendered
     assert "限价  " not in rendered
+
+
+@pytest.mark.parametrize(
+    "authority_fields",
+    (
+        {},
+        {
+            "manual_action_eligible": False,
+            "operator_notification_eligible": True,
+            "edge_authority": "validated_first_touch_time_stop_net_pnl",
+        },
+        {
+            "manual_action_eligible": True,
+            "operator_notification_eligible": False,
+            "edge_authority": "validated_first_touch_time_stop_net_pnl",
+        },
+        {
+            "manual_action_eligible": True,
+            "operator_notification_eligible": True,
+        },
+        {
+            "manual_action_eligible": True,
+            "operator_notification_eligible": True,
+            "edge_authority": "unvalidated_expiry_payoff_geometry",
+        },
+    ),
+    ids=(
+        "legacy",
+        "manual-action-false",
+        "notification-false",
+        "authority-missing",
+        "authority-malformed",
+    ),
+)
+def test_operator_status_rejects_unauthorized_manual_ready_projection(
+    authority_fields: dict[str, object],
+) -> None:
+    payload = _payload()
+    payload["level_decision"] = {
+        **payload["level_decision"],  # type: ignore[dict-item]
+        "phase": "confirmed",
+        "direction": "up",
+        "thesis": "breakout",
+    }
+    payload["gth_level_manual_candidate"] = {
+        "status": "manual_ready",
+        "source_signal_id": "level:test-current",
+        "candidate_id": "gth:unauthorized",
+        "direction": "up",
+        "thesis": "breakout",
+        **authority_fields,
+    }
+
+    projection = build_desk_map_projection(payload)
+    rendered = render_operator_status_brief(payload, [], NOW)
+
+    assert projection.stage.value == "PAUSED"
+    assert "ready_opportunity_mismatch" in projection.quality_reasons
+    assert "Execution  READY" not in rendered
+    assert "状态：执行候选已就绪" not in rendered
+    assert "结构与执行门控已通过" not in rendered
+    assert "GTH 手工候选执行权限契约不完整，已失效关闭" in rendered
+
+
+def test_operator_status_keeps_fully_quoted_structure_watch_out_of_ready() -> None:
+    payload = _payload()
+    payload["level_decision"] = {
+        **payload["level_decision"],  # type: ignore[dict-item]
+        "phase": "confirmed",
+        "thesis": "breakout",
+        "direction": "up",
+        "level_kind": "call_wall",
+        "level": 7730.0,
+    }
+    payload["gth_level_manual_candidate"] = {
+        "status": "structure_watch",
+        "source_signal_id": "level:test-current",
+        "manual_action_eligible": False,
+        "operator_notification_eligible": False,
+        "edge_authority": "none",
+        "edge_authority_reason": (
+            "first_touch_time_stop_net_pnl_authority_unavailable"
+        ),
+        "long_contract_id": "option:SPX:SPXW:20260715:7730:C",
+        "short_contract_id": "option:SPX:SPXW:20260715:7770:C",
+        "decision_bid": 15.20,
+        "decision_ask": 15.60,
+        "entry_limit": 15.60,
+        "target_spx": 7770.0,
+    }
+
+    projection = build_desk_map_projection(payload)
+    rendered = render_operator_status_brief(payload, [], NOW)
+
+    assert projection.stage.value == "CONFIRMED"
+    assert "Desk View  HOLD · LONG / CALL BREAKOUT" in rendered
+    assert "Execution  HOLD · 方向已确认，执行门控未完成" in rendered
+    assert "缺少经验证的首次触及/时间退出净收益权限" in rendered
+    assert "Execution  READY" not in rendered
+    assert "状态：执行候选已就绪" not in rendered
+    assert "MANUAL READY" not in rendered
+    assert "买入  SPXW" not in rendered
+    assert "限价  净借记" not in rendered
 
 
 def test_operator_status_brief_labels_frozen_and_live_levels_separately() -> None:

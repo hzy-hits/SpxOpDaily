@@ -9,14 +9,16 @@ use rusqlite::{Connection, OpenFlags, TransactionBehavior, params};
 use spx_domain::canonical_json_hash;
 
 use crate::LedgerError;
-use crate::schema::{MIGRATION_1, MIGRATION_2, MIGRATION_3, MIGRATION_BOOTSTRAP};
+use crate::schema::{MIGRATION_1, MIGRATION_2, MIGRATION_3, MIGRATION_4, MIGRATION_BOOTSTRAP};
 
 const MIGRATION_1_VERSION: i64 = 1;
 const MIGRATION_2_VERSION: i64 = 2;
 const MIGRATION_3_VERSION: i64 = 3;
+const MIGRATION_4_VERSION: i64 = 4;
 const MIGRATION_1_NAME: &str = "initial_operational_ledger";
 const MIGRATION_2_NAME: &str = "scheduled_report_lineage";
 const MIGRATION_3_NAME: &str = "trader_event_notifications";
+const MIGRATION_4_NAME: &str = "operator_notification_cancel_role";
 
 #[derive(Debug, Clone)]
 pub struct Ledger {
@@ -177,6 +179,13 @@ fn expected_migrations() -> Result<Vec<Migration>, LedgerError> {
             name: MIGRATION_3_NAME,
             sql: MIGRATION_3,
             checksum: canonical_json_hash(&MIGRATION_3)?,
+            rebuilds_foreign_key_parent: true,
+        },
+        Migration {
+            version: MIGRATION_4_VERSION,
+            name: MIGRATION_4_NAME,
+            sql: MIGRATION_4,
+            checksum: canonical_json_hash(&MIGRATION_4)?,
             rebuilds_foreign_key_parent: true,
         },
     ])

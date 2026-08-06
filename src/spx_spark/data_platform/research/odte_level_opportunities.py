@@ -329,7 +329,8 @@ def _load_gth_evidence(features_root: Path, buckets: dict, *, cutoff_at: datetim
         for record in _iter_jsonl(path):
             candidate_id = str(record.get("candidate_id") or "")
             identity = (SET_GTH_LEVEL_CANDIDATE, candidate_id)
-            if identity not in buckets or record.get("status") != "manual_ready":
+            status = str(record.get("status") or "")
+            if identity not in buckets or status not in {"manual_ready", "structure_watch"}:
                 continue
             observed_at = _first_time(record, "evaluated_at", "recorded_at")
             if observed_at is None or observed_at >= cutoff_at:
@@ -343,17 +344,18 @@ def _load_gth_evidence(features_root: Path, buckets: dict, *, cutoff_at: datetim
                     "event_id": event_id,
                     "candidate_id": candidate_id,
                     "observed_at": observed_at.isoformat(),
-                    "status": "manual_ready",
+                    "status": status,
                     "entry_limit": record.get("entry_limit"),
                 },
             )
-            _put_delivery(
-                buckets[identity],
-                f"{candidate_id}:ready",
-                event_id,
-                observed_at,
-                {"notification_status": "notification_intent"},
-            )
+            if status == "manual_ready":
+                _put_delivery(
+                    buckets[identity],
+                    f"{candidate_id}:ready",
+                    event_id,
+                    observed_at,
+                    {"notification_status": "notification_intent"},
+                )
 
 
 def _load_delivery_evidence(features_root: Path, buckets: dict, *, cutoff_at: datetime) -> None:

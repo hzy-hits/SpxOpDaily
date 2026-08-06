@@ -135,6 +135,16 @@ def advance_level_decision(
     if _can_upgrade_rth_trigger_coordinate(state, phase, observation):
         _upgrade_rth_trigger_coordinate(state, observation, now=now)
 
+    breakout_evidence_issue = _breakout_evidence_issue(state, phase)
+    if breakout_evidence_issue is not None:
+        return _transition(
+            state,
+            phase,
+            LevelPhase.INVALIDATED,
+            now,
+            breakout_evidence_issue,
+        )
+
     if phase is LevelPhase.FAR:
         if not observation.arm_allowed:
             return _unchanged(
@@ -200,6 +210,9 @@ def advance_level_decision(
     inside_move = -outside_move
     thesis = LevelThesis(str(state.get("thesis") or LevelThesis.NONE.value))
 
+    if phase in {LevelPhase.APPROACHING, LevelPhase.TESTING}:
+        _latch_breakout_inside_evidence(state, observation)
+
     if phase is LevelPhase.APPROACHING:
         if abs(spot - level) <= settings.test_points:
             return _transition(state, phase, LevelPhase.TESTING, now, "entered_test_zone")
@@ -208,11 +221,21 @@ def advance_level_decision(
         return _update_extreme(state, phase, observation, "approach_continues")
 
     if phase is LevelPhase.TESTING:
-        if outside_move >= settings.break_buffer_points:
+        if (
+            state.get("breakout_inside_seen_at") is not None
+            and outside_move >= settings.break_buffer_points
+        ):
             state["thesis"] = LevelThesis.BREAKOUT.value
             _latch_confirmation_start(state, observation)
             return _transition(
                 state, phase, LevelPhase.BREAK_PENDING, now, "crossed_outside_buffer"
+            )
+        if outside_move >= settings.break_buffer_points:
+            return _update_extreme(
+                state,
+                phase,
+                observation,
+                "breakout_blocked_no_inside_crossing",
             )
         if inside_move >= settings.reject_points:
             state["thesis"] = LevelThesis.FADE.value
@@ -243,18 +266,54 @@ def advance_level_decision(
             and _phase_age(state, now) >= settings.accept_hold_seconds
             and _es_confirms(state, observation, desired_direction, settings)
         ):
+            if (
+                thesis is LevelThesis.BREAKOUT
+                and desired_move
+                > max(settings.retest_points, settings.confirm_move_points)
+            ):
+                state["breakout_extension_seen_at"] = now.isoformat()
+                state["breakout_extension_seen_spot"] = spot
             return _transition(state, phase, target, now, "direction_accepted")
         return _update_extreme(state, phase, observation, "pending_acceptance")
 
     if phase in {LevelPhase.ACCEPTED, LevelPhase.REJECTED}:
+        if thesis is LevelThesis.BREAKOUT and state.get(
+            "breakout_extension_seen_at"
+        ) is None:
+            if desired_move > max(settings.retest_points, settings.confirm_move_points):
+                state["breakout_extension_seen_at"] = now.isoformat()
+                state["breakout_extension_seen_spot"] = spot
+                return _update_extreme(
+                    state,
+                    phase,
+                    observation,
+                    "breakout_extension_latched_before_retest",
+                )
+            return _update_extreme(
+                state,
+                phase,
+                observation,
+                "waiting_for_breakout_extension_before_retest",
+            )
         if abs(spot - level) <= settings.retest_points:
             state.pop("confirm_started_at", None)
+            if thesis is LevelThesis.BREAKOUT:
+                state["breakout_retest_seen_at"] = now.isoformat()
+                state["breakout_retest_seen_spot"] = spot
             return _transition(state, phase, LevelPhase.RETEST, now, "returned_for_retest")
-        # Acceptance/rejection already requires a sustained move and
-        # same-direction ES confirmation.  A second touch of the level is a
-        # useful path when it occurs, but making that touch mandatory causes a
-        # clean one-way move to expire without ever becoming actionable.
-        # Confirm uninterrupted follow-through after one additional short hold.
+        # A breakout must prove both a real inside-to-outside crossing and a
+        # subsequent retest before it may become actionable.  A move first
+        # observed outside the level, or uninterrupted continuation after
+        # acceptance, is not enough evidence for a breakout READY.
+        if thesis is LevelThesis.BREAKOUT:
+            return _update_extreme(
+                state,
+                phase,
+                observation,
+                "waiting_for_mandatory_breakout_retest",
+            )
+        # A rejection/fade already starts from the tested level and may still
+        # confirm on sustained follow-through when no second touch occurs.
         if (
             desired_move >= settings.confirm_move_points
             and _phase_age(state, now) >= settings.confirm_hold_seconds
@@ -344,6 +403,7 @@ def _arm_nearest_level(
         "transition_count": 1,
         "reason": "nearest_level_armed",
     }
+    _latch_breakout_inside_evidence(state, observation)
     return LevelTransition(LevelPhase.FAR, phase, state, True, "nearest_level_armed")
 
 
@@ -448,7 +508,14 @@ def _upgrade_rth_trigger_coordinate(
         state["level"] = float(state["level"]) - prior_basis
 
     if prior_kind == "es_equivalent" and prior_basis is not None:
-        for field in ("start_spot", "last_spot", "confirmation_start_spot"):
+        for field in (
+            "start_spot",
+            "last_spot",
+            "confirmation_start_spot",
+            "breakout_inside_seen_spot",
+            "breakout_extension_seen_spot",
+            "breakout_retest_seen_spot",
+        ):
             value = state.get(field)
             if isinstance(value, int | float):
                 state[field] = float(value) - prior_basis
@@ -511,6 +578,48 @@ def _latch_confirmation_start(
     state["confirmation_start_spot"] = observation.spot
     state["confirmation_start_es"] = observation.es
     state["confirmation_started_at"] = _utc(observation.at).isoformat()
+
+
+def _latch_breakout_inside_evidence(
+    state: dict[str, object],
+    observation: LevelObservation,
+) -> None:
+    """Persist the first observation on the inside of the frozen level."""
+
+    if state.get("breakout_inside_seen_at") is not None or observation.spot is None:
+        return
+    level = state.get("level")
+    outside = state.get("outside_direction")
+    if not isinstance(level, int | float) or not isinstance(outside, int):
+        return
+    spot = float(observation.spot)
+    if outside * (spot - float(level)) <= 0:
+        state["breakout_inside_seen_at"] = _utc(observation.at).isoformat()
+        state["breakout_inside_seen_spot"] = spot
+
+
+def _breakout_evidence_issue(
+    state: Mapping[str, object],
+    phase: LevelPhase,
+) -> str | None:
+    if str(state.get("thesis") or "") != LevelThesis.BREAKOUT.value:
+        return None
+    if phase in {
+        LevelPhase.BREAK_PENDING,
+        LevelPhase.ACCEPTED,
+        LevelPhase.RETEST,
+        LevelPhase.CONFIRMED,
+    } and state.get("breakout_inside_seen_at") is None:
+        return "breakout_inside_crossing_evidence_missing"
+    if phase in {LevelPhase.RETEST, LevelPhase.CONFIRMED} and state.get(
+        "breakout_extension_seen_at"
+    ) is None:
+        return "breakout_extension_evidence_missing"
+    if phase in {LevelPhase.RETEST, LevelPhase.CONFIRMED} and state.get(
+        "breakout_retest_seen_at"
+    ) is None:
+        return "breakout_retest_evidence_missing"
+    return None
 
 
 def _update_extreme(

@@ -452,7 +452,7 @@ def _candidate_decision_nbbo_matches(
 def _material_runtime_candidate(payload: Mapping[str, object]) -> bool:
     return bool(
         str(payload.get("source_signal_id") or "").strip()
-        and payload.get("status") in {"blocked", "manual_ready"}
+        and payload.get("status") in {"blocked", "manual_ready", "structure_watch"}
     )
 
 

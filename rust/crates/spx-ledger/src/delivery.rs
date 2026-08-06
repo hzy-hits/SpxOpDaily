@@ -129,13 +129,15 @@ impl Ledger {
                  ORDER BY CASE
                      WHEN e.lane = 'trader_event'
                          AND json_extract(e.payload_json, '$.role') = 'exit' THEN 0
+                     WHEN e.lane = 'trader_event'
+                         AND json_extract(e.payload_json, '$.role') = 'cancel' THEN 1
                      WHEN e.lane = 'trade_ready'
                          OR (e.lane = 'trader_event'
-                             AND json_extract(e.payload_json, '$.role') = 'trade_ready') THEN 1
+                             AND json_extract(e.payload_json, '$.role') = 'trade_ready') THEN 2
                      WHEN e.lane = 'trader_event'
-                         AND json_extract(e.payload_json, '$.role') = 'setup' THEN 2
-                     WHEN e.lane = 'scheduled_report' THEN 3
-                     ELSE 4
+                         AND json_extract(e.payload_json, '$.role') = 'setup' THEN 3
+                     WHEN e.lane = 'scheduled_report' THEN 4
+                     ELSE 5
                  END ASC,
                  e.expires_at_us ASC, e.occurred_at_us ASC, t.target_id ASC
                  LIMIT 1",

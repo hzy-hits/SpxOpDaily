@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from threading import RLock
 
 from spx_spark.config import IbkrStreamSettings, RuntimePolicySettings, StorageSettings
 from spx_spark.ibkr.stream import deps as stream_deps
@@ -43,8 +44,18 @@ class StreamRuntime:
     deadline: float | None = None
     last_gateway_restart_at: float | None = None
     session_had_healthy_flush: bool = False
+    _health_lock: RLock = field(init=False, repr=False)
+    _competing_health_latched_sequence: int | None = field(
+        init=False,
+        default=None,
+        repr=False,
+    )
 
     def __post_init__(self) -> None:
+        self._health_lock = RLock()
+        self.collector.competing_session_health_invalidator = (
+            self._invalidate_competing_session_health
+        )
         self.reconnect = ReconnectPolicy(
             min_seconds=self.stream_settings.reconnect_min_seconds,
             max_seconds=self.stream_settings.reconnect_max_seconds,
@@ -367,6 +378,7 @@ class StreamRuntime:
                     else:
                         self.competing_session_circuit.interrupt_recovery()
                     if circuit_recovered:
+                        self._clear_competing_session_health_latch()
                         log_event(
                             {
                                 "task": "ibkr_stream",
@@ -428,21 +440,41 @@ class StreamRuntime:
         demand_enabled = bool(
             getattr(self.stream_settings, "exact_leg_pin_enabled", False)
         )
-        poll_seconds = max(
-            float(getattr(self.stream_settings, "quote_demand_poll_seconds", 0.05)),
-            0.01,
+        poll_seconds = min(
+            max(
+                float(getattr(self.stream_settings, "quote_demand_poll_seconds", 0.05)),
+                0.01,
+            ),
+            0.05,
         )
         while not self.expired():
+            if getattr(self.collector, "subscription_health_failed", False):
+                self._publish_health(
+                    data_plane_healthy=False,
+                    policy_blocked=False,
+                    reason="subscription health failed; awaiting error classification",
+                )
+                return True
             remaining = next_flush_at - time.monotonic()
             if remaining <= 1e-9:
                 return True
-            sleep_seconds = min(remaining, poll_seconds) if demand_enabled else remaining
+            # Error callbacks run while ``ib.sleep`` services the event loop.
+            # Always use a bounded slice, even when exact-leg demand is off, so
+            # a session-wide 10197 cannot leave the prior healthy projection
+            # actionable until the next ordinary hot flush.
+            sleep_seconds = min(remaining, poll_seconds)
             self.collector.ib.sleep(sleep_seconds)
             if self.expired():
                 return False
+            if getattr(self.collector, "subscription_health_failed", False):
+                self._publish_health(
+                    data_plane_healthy=False,
+                    policy_blocked=False,
+                    reason="subscription health failed; awaiting error classification",
+                )
+                return True
             lifecycle_blocked = bool(
-                getattr(self.collector, "subscription_health_failed", False)
-                or getattr(self.collector, "tws_connectivity_lost", False)
+                getattr(self.collector, "tws_connectivity_lost", False)
                 or not self.collector.ib.isConnected()
             )
             if demand_enabled and not lifecycle_blocked:
@@ -547,6 +579,55 @@ class StreamRuntime:
 
         if not getattr(self.storage_settings, "data_root", None):
             return
+        with self._health_lock:
+            self._persist_health_locked(
+                data_plane_healthy=data_plane_healthy,
+                policy_blocked=policy_blocked,
+                reason=reason,
+                retry_in_seconds=retry_in_seconds,
+            )
+
+    def _invalidate_competing_session_health(
+        self,
+        *,
+        error_code: int,
+        message: str,
+    ) -> None:
+        """Durably close GTH entry authority from the broker error callback."""
+
+        del error_code, message
+        with self._health_lock:
+            self._competing_health_latched_sequence = (
+                (self._competing_health_latched_sequence or 0) + 1
+            )
+            if not getattr(self.storage_settings, "data_root", None):
+                return
+            self._persist_health_locked(
+                data_plane_healthy=False,
+                policy_blocked=True,
+                reason="competing session callback (IBKR 10197)",
+            )
+
+    def _clear_competing_session_health_latch(self) -> None:
+        """Release only the incident generation proven healthy by the circuit."""
+
+        with self._health_lock:
+            if (
+                self.competing_session_circuit.failures == 0
+                and not getattr(self.collector, "subscription_health_failed", False)
+            ):
+                self._competing_health_latched_sequence = None
+
+    def _persist_health_locked(
+        self,
+        *,
+        data_plane_healthy: bool,
+        policy_blocked: bool,
+        reason: str,
+        retry_in_seconds: float | None = None,
+    ) -> None:
+        """Write health while holding the callback/publisher ordering fence."""
+
         now_monotonic = time.monotonic()
         circuit_state = self.competing_session_circuit.state(
             now_monotonic=now_monotonic
@@ -554,7 +635,15 @@ class StreamRuntime:
         circuit_remaining = self.competing_session_circuit.remaining_seconds(
             now_monotonic=now_monotonic
         )
-        if circuit_state == "open":
+        conflict_count = self.competing_session_circuit.failures
+        if self._competing_health_latched_sequence is not None:
+            data_plane_healthy = False
+            policy_blocked = True
+            reason = "competing live session callback latched (IBKR 10197)"
+            conflict_count = max(conflict_count, 1)
+            if circuit_state == "closed":
+                circuit_state = "open"
+        elif circuit_state == "open":
             retry_in_seconds = circuit_remaining
             policy_blocked = True
             reason = "competing live session cooldown (IBKR 10197)"
@@ -569,7 +658,7 @@ class StreamRuntime:
                 reason=reason,
                 connected=connected,
                 circuit_state=circuit_state,
-                conflict_count=self.competing_session_circuit.failures,
+                conflict_count=conflict_count,
                 retry_in_seconds=retry_in_seconds,
                 connection_generation=getattr(
                     self.collector,

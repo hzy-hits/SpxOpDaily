@@ -130,11 +130,16 @@ def manual_source_path_fields(
 
 
 def source_policy_fields(source_mode: str) -> dict[str, str]:
-    if source_mode != "trend":
-        return {}
+    if source_mode == "trend":
+        return {
+            "directional_source": "confirmed_gth_trend_transition.v1",
+            "source_priority": "fresh_transition_then_level",
+        }
     return {
-        "directional_source": "confirmed_gth_trend_transition.v1",
-        "source_priority": "fresh_transition_then_level",
+        "directional_source": "confirmed_frozen_level_path.v2",
+        "breakout_crossing": "inside_to_outside_required",
+        "breakout_extension": "outside_retest_zone_before_return_required",
+        "breakout_retest": "required",
     }
 
 
@@ -156,7 +161,12 @@ def build_candidate_policy_version(
             "max_net_spread_fraction": policy.gth_manual_candidate_max_net_spread_fraction,
             "min_parity_pairs": policy.gth_manual_candidate_min_parity_pairs,
             "target_room_buffer_points": policy.gth_manual_candidate_target_room_buffer_points,
-            "min_reward_risk": policy.gth_manual_candidate_min_reward_risk,
+            "expiry_payoff_ratio_diagnostic_floor": (
+                policy.gth_manual_candidate_min_reward_risk
+            ),
+            "operator_edge_authority": "validated_first_touch_time_stop_net_pnl",
+            "negative_play_stats_veto_enabled": policy.gth_negative_play_stats_veto_enabled,
+            "play_stats_min_samples": policy.play_stats_min_samples,
             "invalidation_buffer_points": policy.trade_invalidation_buffer_points,
             "time_stop_minutes": policy.trade_time_stop_minutes,
             "spread_width_points": {
