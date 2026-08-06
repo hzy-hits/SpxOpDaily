@@ -19,10 +19,9 @@ from spx_spark.notifier.receipts import NotificationEnvelope
 _OPERATOR_SUCCESS_DISPOSITIONS = frozenset(
     {
         "operator_notification_accepted",
-        "operator_notification_semantic_suppressed",
-        "duplicate_ingress",
     }
 )
+_OPERATOR_SEMANTIC_SUPPRESSION = "operator_notification_semantic_suppressed"
 _CANCELLATION_SUCCESS_DISPOSITIONS = frozenset(
     {
         "operator_notification_cancellation_accepted",
@@ -356,17 +355,35 @@ def _ack_result(
     if acknowledged_id not in {None, message_id}:
         return _unknown_ack("acknowledgement message_id mismatch")
     if status == "accepted":
+        disposition = ack.get("disposition")
         if (
             acknowledged_id == message_id
             and ack.get("decision_id") is None
             and reason == "accepted"
-            and ack.get("disposition") in success_dispositions
+            and disposition in success_dispositions
         ):
             return SinkResult(
                 sink="rust_ingress",
                 attempted=True,
                 ok=True,
-                verdict=str(ack.get("disposition")),
+                verdict=str(disposition),
+            )
+        if (
+            acknowledged_id == message_id
+            and ack.get("decision_id") is None
+            and reason == "accepted"
+            and disposition == _OPERATOR_SEMANTIC_SUPPRESSION
+        ):
+            # Rust durably accepted the ingress frame but deliberately did not
+            # create targets.  Treating this as delivery success hides a
+            # lifecycle-generation bug and produces a false human receipt.
+            return SinkResult(
+                sink="rust_ingress",
+                attempted=True,
+                ok=False,
+                error="rust_ingress_semantic_suppressed",
+                verdict=str(disposition),
+                permanent=True,
             )
         return _unknown_ack("invalid accepted acknowledgement")
     if status != "rejected" or ack.get("decision_id") is not None:

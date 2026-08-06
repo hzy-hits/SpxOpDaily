@@ -152,6 +152,8 @@ market_features:
   greek_max_iv_crush_loss_fraction: {value: 0.45, description: Maximum modeled premium fraction lost under a three-vol-point IV decline before event-crush risk is penalized.}
   greek_delta_saturation: {value: 0.85, description: Absolute Delta at which a virtual strategy should consider reducing because convexity is largely monetized.}
   virtual_strategy_enabled: {value: true, description: Tracks the system's own 0DTE strategy episodes independently from any IBKR account or real position.}
+  virtual_shadow_fee_per_side_usd: {value: 1.0, description: Configured per-contract per-side fee proxy for receipt-aligned shadow PnL; this is not a broker statement.}
+  virtual_shadow_slippage_per_side_points: {value: 0.05, description: Configured per-side option-price slippage proxy deducted from receipt-aligned shadow PnL in addition to ask-entry and bid-exit.}
   virtual_profit_take_fraction: {value: 0.30, description: Virtual option premium gain that triggers an explicit take-profit advisory.}
   virtual_gamma_retention_fraction: {value: 0.60, description: Remaining contract Gamma fraction below which negative Color can trigger a convexity-decay exit.}
   virtual_iv_drop_vol_points: {value: 1.0, description: IV decline in volatility points that activates post-event Vanna-drag exit logic.}
@@ -1258,6 +1260,9 @@ notification:
   rust_operator_notification_socket_path:
     value: /run/spx-spark-core/core.sock
     description: Unix socket used by the Python delivery worker for typed operator_notification.v1 ingress.
+  rust_delivery_ledger_path:
+    value: ""
+    description: Optional read-only Rust operations.sqlite path used to prove Bark or Feishu delivery before RTH shadow execution begins; configure the production path in runtime.local or the environment.
   rust_operator_notification_timeout_seconds:
     value: 5.0
     description: End-to-end timeout for one framed Rust ingress request and typed acknowledgement.

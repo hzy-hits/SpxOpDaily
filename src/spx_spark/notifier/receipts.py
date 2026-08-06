@@ -134,6 +134,210 @@ class ReceiptStoreInspection:
     error: str | None = None
 
 
+@dataclass(frozen=True)
+class ExternalDeliveryReceipt:
+    """Earliest durable human-channel receipt for one immutable event.
+
+    A Python-to-Rust ingress acknowledgement is deliberately not an external
+    receipt.  Only a successful Bark or Feishu delivery can start a
+    receipt-aligned shadow execution observation.
+    """
+
+    event_id: str
+    receipt_id: str
+    delivered_at: datetime
+    sink: str
+    channel: str
+    ledger: str
+
+
+@dataclass(frozen=True)
+class ExternalDeliveryReceiptLookup:
+    """Separate a healthy no-receipt result from an unreadable ledger."""
+
+    observable: bool
+    receipt: ExternalDeliveryReceipt | None
+    error: str | None = None
+
+
+def find_external_delivery_receipt(
+    event_id: str,
+    *,
+    rust_owner: bool,
+    rust_ledger_path: str = "",
+    python_receipt_path: str = "",
+) -> ExternalDeliveryReceipt | None:
+    """Read the earliest proved Bark/Feishu receipt without mutating ledgers."""
+
+    return inspect_external_delivery_receipt(
+        event_id,
+        rust_owner=rust_owner,
+        rust_ledger_path=rust_ledger_path,
+        python_receipt_path=python_receipt_path,
+    ).receipt
+
+
+def inspect_external_delivery_receipt(
+    event_id: str,
+    *,
+    rust_owner: bool,
+    rust_ledger_path: str = "",
+    python_receipt_path: str = "",
+) -> ExternalDeliveryReceiptLookup:
+    """Inspect receipt evidence without converting ledger failure into no receipt."""
+
+    normalized = event_id.strip()
+    if not normalized:
+        return ExternalDeliveryReceiptLookup(
+            observable=False,
+            receipt=None,
+            error="external_delivery_event_id_unavailable",
+        )
+    if rust_owner:
+        return _inspect_rust_external_receipt(normalized, rust_ledger_path)
+    return _inspect_python_external_receipt(normalized, python_receipt_path)
+
+
+def _inspect_rust_external_receipt(
+    event_id: str,
+    path: str,
+) -> ExternalDeliveryReceiptLookup:
+    database = Path(path) if path else Path()
+    if not path:
+        return ExternalDeliveryReceiptLookup(
+            observable=False,
+            receipt=None,
+            error="rust_delivery_ledger_path_unavailable",
+        )
+    if not database.is_file():
+        return ExternalDeliveryReceiptLookup(
+            observable=False,
+            receipt=None,
+            error="rust_delivery_ledger_unavailable",
+        )
+    try:
+        with sqlite3.connect(
+            f"file:{database}?mode=ro",
+            uri=True,
+            timeout=1.0,
+        ) as connection:
+            connection.execute("PRAGMA query_only=ON")
+            connection.execute("PRAGMA busy_timeout=1000")
+            row = connection.execute(
+                """
+                SELECT r.receipt_id, r.target_key, r.channel, r.occurred_at_us
+                FROM delivery_receipts AS r
+                JOIN notification_events AS e ON e.event_id = r.intent_id
+                WHERE r.intent_id = ?
+                  AND r.outcome = 'delivered'
+                  AND r.attempted = 1
+                  AND r.ok = 1
+                  AND r.channel IN ('bark', 'feishu')
+                ORDER BY r.occurred_at_us, r.receipt_id
+                LIMIT 1
+                """,
+                (event_id,),
+            ).fetchone()
+    except (OSError, sqlite3.Error, ValueError):
+        return ExternalDeliveryReceiptLookup(
+            observable=False,
+            receipt=None,
+            error="rust_delivery_ledger_query_failed",
+        )
+    if row is None:
+        return ExternalDeliveryReceiptLookup(observable=True, receipt=None)
+    try:
+        delivered_at = datetime.fromtimestamp(int(row[3]) / 1_000_000, tz=timezone.utc)
+    except (OSError, OverflowError, TypeError, ValueError):
+        return ExternalDeliveryReceiptLookup(
+            observable=False,
+            receipt=None,
+            error="rust_delivery_receipt_timestamp_invalid",
+        )
+    return ExternalDeliveryReceiptLookup(
+        observable=True,
+        receipt=ExternalDeliveryReceipt(
+            event_id=event_id,
+            receipt_id=str(row[0]),
+            delivered_at=delivered_at,
+            sink=str(row[1]),
+            channel=str(row[2]),
+            ledger="rust_operations",
+        ),
+    )
+
+
+def _inspect_python_external_receipt(
+    event_id: str,
+    path: str,
+) -> ExternalDeliveryReceiptLookup:
+    database = Path(path) if path else Path()
+    if not path:
+        return ExternalDeliveryReceiptLookup(
+            observable=False,
+            receipt=None,
+            error="python_delivery_receipt_path_unavailable",
+        )
+    if not database.is_file():
+        return ExternalDeliveryReceiptLookup(
+            observable=False,
+            receipt=None,
+            error="python_delivery_receipt_ledger_unavailable",
+        )
+    try:
+        with sqlite3.connect(
+            f"file:{database}?mode=ro",
+            uri=True,
+            timeout=1.0,
+        ) as connection:
+            connection.execute("PRAGMA query_only=ON")
+            connection.execute("PRAGMA busy_timeout=1000")
+            rows = connection.execute(
+                """
+                SELECT attempt_id, attempted_at, sinks_json
+                FROM notification_delivery_receipts
+                WHERE event_id = ?
+                ORDER BY attempted_at, attempt_id
+                """,
+                (event_id,),
+            ).fetchall()
+    except (OSError, sqlite3.Error, ValueError):
+        return ExternalDeliveryReceiptLookup(
+            observable=False,
+            receipt=None,
+            error="python_delivery_receipt_query_failed",
+        )
+    for attempt_id, attempted_at, sinks_json in rows:
+        try:
+            sinks = json.loads(str(sinks_json))
+            delivered_at = datetime.fromisoformat(str(attempted_at))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if delivered_at.tzinfo is None:
+            continue
+        for sink in sinks if isinstance(sinks, list) else ():
+            if not isinstance(sink, dict):
+                continue
+            name = str(sink.get("sink") or "")
+            channel = "feishu" if name == "feishu" else "bark" if name in {
+                "bark",
+                "bark_friend",
+            } else ""
+            if channel and sink.get("attempted") is True and sink.get("ok") is True:
+                return ExternalDeliveryReceiptLookup(
+                    observable=True,
+                    receipt=ExternalDeliveryReceipt(
+                        event_id=event_id,
+                        receipt_id=str(attempt_id),
+                        delivered_at=delivered_at.astimezone(timezone.utc),
+                        sink=name,
+                        channel=channel,
+                        ledger="python_receipts",
+                    ),
+                )
+    return ExternalDeliveryReceiptLookup(observable=True, receipt=None)
+
+
 def notification_event_id(
     kind: str,
     *,

@@ -382,8 +382,12 @@ def advance_put_shadow_candidates(
     }
 
 
-def virtual_entry_intent(candidate: Mapping[str, object]) -> dict[str, object]:
-    """Return the source intent only after the displayed ask reached its limit."""
+def virtual_entry_intent(
+    candidate: Mapping[str, object],
+    *,
+    delivery_projection: Mapping[str, object] | None = None,
+) -> dict[str, object]:
+    """Return the quote-reached source with its immutable delivery identity."""
 
     if candidate.get("phase") != CandidatePhase.QUOTE_REACHED_ENTRY.value:
         return {}
@@ -392,12 +396,18 @@ def virtual_entry_intent(candidate: Mapping[str, object]) -> dict[str, object]:
         return {}
     if candidate.get("shadow_mode") is True or live_trade_intent_authority_issues(source):
         return {}
+    projected = delivery_projection if isinstance(delivery_projection, Mapping) else {}
+    if projected and projected.get("intent_id") != source.get("intent_id"):
+        projected = {}
     return {
         **dict(source),
         "status": "trade_ready",
         "source_intent_id": source.get("intent_id"),
         "intent_id": candidate.get("candidate_id"),
         "entry_observation": candidate.get("entry_observation"),
+        "notification_event_id": projected.get("notification_event_id"),
+        "notification_status": projected.get("notification_status"),
+        "notification_reason": projected.get("notification_reason"),
         "execution_assumption": "displayed_quote_only_no_broker_fill",
     }
 

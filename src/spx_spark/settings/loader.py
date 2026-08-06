@@ -444,6 +444,12 @@ def load_settings(
         ),
         greek_delta_saturation=float(get("market_features.greek_delta_saturation")),
         virtual_strategy_enabled=bool(get("market_features.virtual_strategy_enabled")),
+        virtual_shadow_fee_per_side_usd=float(
+            get("market_features.virtual_shadow_fee_per_side_usd")
+        ),
+        virtual_shadow_slippage_per_side_points=float(
+            get("market_features.virtual_shadow_slippage_per_side_points")
+        ),
         virtual_profit_take_fraction=float(get("market_features.virtual_profit_take_fraction")),
         virtual_gamma_retention_fraction=float(
             get("market_features.virtual_gamma_retention_fraction")

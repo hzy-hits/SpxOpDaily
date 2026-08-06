@@ -574,6 +574,14 @@ def _public_state(
     phase = str(state.get("phase") or LevelPhase.FAR.value)
     thesis = str(state.get("thesis") or "none")
     direction = str(state.get("direction") or "") or None
+    raw_generation = state.get("reentry_generation")
+    reentry_generation = (
+        raw_generation
+        if isinstance(raw_generation, int)
+        and not isinstance(raw_generation, bool)
+        and raw_generation >= 0
+        else 0
+    )
     formal_signal = formal_signal_enabled and phase == LevelPhase.CONFIRMED.value
     observation = latest_observation or {}
     levels = dict((structure or {}).get("levels") or {})
@@ -624,6 +632,10 @@ def _public_state(
         "thesis": thesis,
         "direction": direction,
         "event_id": state.get("event_id"),
+        # This lifecycle generation must cross the public projection boundary.
+        # TradeReady otherwise falls back to generation zero while the setup
+        # notification already occupies the real generation in Rust.
+        "reentry_generation": reentry_generation,
         "level_kind": state.get("level_kind"),
         "level": state.get("spx_level", state.get("level")),
         "trigger_level": state.get("level"),

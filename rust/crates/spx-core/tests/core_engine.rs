@@ -1583,7 +1583,11 @@ fn operator_notification_ingress_persists_once_and_rejects_target_drift() {
         engine
             .process(envelope, now + TimeDelta::seconds(2))
             .expect("exact ingress duplicate accepted"),
-        CoreOutcome::Duplicate { .. }
+        CoreOutcome::OperatorNotification {
+            role: OperatorNotificationRole::TradeReady,
+            disposition: spx_core::OperatorNotificationDisposition::Duplicate,
+            ..
+        }
     ));
     assert_eq!(
         Ledger::open(&core_config.ledger_path)
@@ -1669,19 +1673,26 @@ fn late_setup_after_ready_or_exit_is_accepted_but_semantically_suppressed() {
             }],
             automatic_ordering: false,
         };
+        let late_envelope = IngressEnvelopeV1 {
+            schema_version: INGRESS_SCHEMA_VERSION.to_owned(),
+            message_id: token(format!("message-late-setup-{leading_name}")),
+            emitted_at: now + TimeDelta::seconds(1),
+            message: IngressMessageV1::OperatorNotification(Box::new(late_setup)),
+        };
         let outcome = engine
-            .process(
-                IngressEnvelopeV1 {
-                    schema_version: INGRESS_SCHEMA_VERSION.to_owned(),
-                    message_id: token(format!("message-late-setup-{leading_name}")),
-                    emitted_at: now + TimeDelta::seconds(1),
-                    message: IngressMessageV1::OperatorNotification(Box::new(late_setup)),
-                },
-                now + TimeDelta::seconds(2),
-            )
+            .process(late_envelope.clone(), now + TimeDelta::seconds(2))
             .expect("late setup is accepted as semantic suppression");
         assert!(matches!(
             outcome,
+            CoreOutcome::OperatorNotification {
+                disposition: spx_core::OperatorNotificationDisposition::SemanticSuppressed,
+                ..
+            }
+        ));
+        assert!(matches!(
+            engine
+                .process(late_envelope, now + TimeDelta::seconds(3))
+                .expect("lost suppression acknowledgement replays suppression"),
             CoreOutcome::OperatorNotification {
                 disposition: spx_core::OperatorNotificationDisposition::SemanticSuppressed,
                 ..

@@ -118,6 +118,10 @@ def notification_delivery_settings(data_root: str) -> dict[str, object]:
             _env("SPX_RUST_OPERATOR_NOTIFICATION_SOCKET_PATH")
             or str(settings_value("notification.rust_operator_notification_socket_path"))
         ),
+        "rust_delivery_ledger_path": (
+            _env("SPX_RUST_DELIVERY_LEDGER_PATH")
+            or str(settings_value("notification.rust_delivery_ledger_path"))
+        ),
         "rust_operator_notification_timeout_seconds": _float(
             "SPX_RUST_OPERATOR_NOTIFICATION_TIMEOUT_SECONDS",
             float(

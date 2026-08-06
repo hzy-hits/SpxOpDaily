@@ -83,6 +83,8 @@ class MarketFeatureSettings:
     greek_max_iv_crush_loss_fraction: float = 0.45
     greek_delta_saturation: float = 0.85
     virtual_strategy_enabled: bool = True
+    virtual_shadow_fee_per_side_usd: float = 1.0
+    virtual_shadow_slippage_per_side_points: float = 0.05
     virtual_profit_take_fraction: float = 0.30
     virtual_gamma_retention_fraction: float = 0.60
     virtual_iv_drop_vol_points: float = 1.0
@@ -161,6 +163,8 @@ class MarketFeatureSettings:
             self.greek_max_iv_crush_loss_fraction,
             self.greek_delta_saturation,
             self.virtual_profit_take_fraction,
+            self.virtual_shadow_fee_per_side_usd,
+            self.virtual_shadow_slippage_per_side_points,
             self.virtual_gamma_retention_fraction,
             self.virtual_iv_drop_vol_points,
             self.virtual_wall_touch_points,

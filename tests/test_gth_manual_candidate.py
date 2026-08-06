@@ -35,6 +35,9 @@ from spx_spark.application.market_features.virtual_strategy_support import (
     _contract_snapshot,
 )
 from spx_spark.config import NotificationSettings
+from spx_spark.data_platform.research.odte_level_gth_candidates import (
+    load_gth_level_candidate_signals,
+)
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 from spx_spark.marketdata import (
     InstrumentId,
@@ -995,6 +998,67 @@ def test_level_candidate_notification_is_durable_and_idempotent(
     }
     assert all(row["status"] == "manual_ready" for row in gate_rows)
     assert all(row["gate_contract"]["hard_block_reasons"] == [] for row in gate_rows)
+    replay_rows = [
+        json.loads(line)
+        for line in (
+            tmp_path
+            / "features"
+            / "gth_level_manual_candidates"
+            / "date=2026-07-15"
+            / "events.jsonl"
+        )
+        .read_text()
+        .splitlines()
+    ]
+    assert len(replay_rows) == 2
+    assert {row["candidate_id"] for row in replay_rows} == {
+        first["candidate_id"],
+        reentry["candidate_id"],
+    }
+    assert all(row["schema_version"] == 3 for row in replay_rows)
+    assert all(row["event"] == "gth_level_manual_candidate_evaluated" for row in replay_rows)
+    assert all(row["coordinate"]["kind"] == "chain_implied_spx" for row in replay_rows)
+    assert all(row["coordinate"]["target_value"] == 7375.0 for row in replay_rows)
+    assert all(row["coordinate"]["basis_points"] == 0.0 for row in replay_rows)
+    loaded = load_gth_level_candidate_signals(tmp_path / "features")
+    assert {item.key for item in loaded} == {
+        first["candidate_id"],
+        reentry["candidate_id"],
+    }
+
+
+def test_blocked_level_candidate_is_gate_audit_not_replay_signal(
+    tmp_path,
+) -> None:
+    storage = SimpleNamespace(data_root=str(tmp_path))
+
+    candidate = process_gth_level_manual_candidate(
+        storage,
+        object(),
+        {},
+        macro_event={"entry_allowed": True},
+        now=NOW,
+        policy=MarketFeatureSettings(),
+        new_entries_allowed=True,
+        new_entries_block_reason="allowed",
+        notification=SimpleNamespace(),
+    )
+
+    assert candidate["status"] == "blocked"
+    gate_path = (
+        tmp_path / "features" / "gth_manual_signal_gates" / "date=2026-07-15" / "events.jsonl"
+    )
+    assert gate_path.exists()
+    assert json.loads(gate_path.read_text().strip())["status"] == "blocked"
+    replay_path = (
+        tmp_path
+        / "features"
+        / "gth_level_manual_candidates"
+        / "date=2026-07-15"
+        / "events.jsonl"
+    )
+    assert not replay_path.exists()
+    assert load_gth_level_candidate_signals(tmp_path / "features") == []
 
 
 def test_manual_ready_outbox_consumer_receipt_end_to_end_is_idempotent(
@@ -1723,15 +1787,33 @@ def _patch_ready_market(
         "spread_snapshot_decision",
         lambda *_args, **_kwargs: (
             {
+                "at": now.isoformat(),
                 "bid": 10.0,
                 "mid": 11.0,
                 "ask": 12.0,
+                "quality": {"status": "ok"},
                 "long_quote_age_seconds": 0.0,
                 "short_quote_age_seconds": 0.0,
                 "long_transport_age_seconds": 0.0,
                 "short_transport_age_seconds": 0.0,
-                "long": {"bid": 20.0, "mid": 20.5, "ask": 21.0},
-                "short": {"bid": 9.0, "mid": 9.5, "ask": 10.0},
+                "long": {
+                    "bid": 20.0,
+                    "mid": 20.5,
+                    "ask": 21.0,
+                    "provider": "ibkr",
+                    "source_at": now.isoformat(),
+                    "transport_at": now.isoformat(),
+                    "quality": {"status": "ok"},
+                },
+                "short": {
+                    "bid": 9.0,
+                    "mid": 9.5,
+                    "ask": 10.0,
+                    "provider": "ibkr",
+                    "source_at": now.isoformat(),
+                    "transport_at": now.isoformat(),
+                    "quality": {"status": "ok"},
+                },
             },
             [],
         ),

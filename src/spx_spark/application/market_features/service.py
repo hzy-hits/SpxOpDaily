@@ -536,7 +536,10 @@ def run(
     virtual_strategy = process_virtual_strategy(
         storage,
         action_latest,
-        trade_intent=virtual_entry_intent(trade_candidate),
+        trade_intent=virtual_entry_intent(
+            trade_candidate,
+            delivery_projection=trade_intent,
+        ),
         gth_signal=gth_signal,
         option_structure=option_frame.structure,
         macro_event=action_macro_event,

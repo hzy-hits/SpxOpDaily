@@ -29,6 +29,22 @@ from spx_spark.settings.level_decision import LevelDecisionPolicy
 NOW = datetime(2026, 7, 13, 14, 30, tzinfo=timezone.utc)
 
 
+def test_public_projection_preserves_reentry_generation() -> None:
+    projected = shadow_service._public_state(
+        {
+            "phase": "confirmed",
+            "event_id": "level:generation-five",
+            "reentry_generation": 5,
+            "thesis": "breakout",
+            "direction": "up",
+        },
+        formal_signal_enabled=True,
+    )
+
+    assert projected["event_id"] == "level:generation-five"
+    assert projected["reentry_generation"] == 5
+
+
 def test_frozen_structure_ttl_counts_trading_sessions() -> None:
     structure = {
         "session_date": "2026-07-10",

@@ -152,6 +152,8 @@ market_features:
   greek_max_iv_crush_loss_fraction: {value: 0.45, description: Maximum modeled three-vol IV crush loss.}
   greek_delta_saturation: {value: 0.85, description: Delta saturation exit threshold.}
   virtual_strategy_enabled: {value: true, description: Enables broker-independent virtual strategy tracking.}
+  virtual_shadow_fee_per_side_usd: {value: 1.0, description: Per-contract per-side fee proxy for receipt-aligned shadow PnL.}
+  virtual_shadow_slippage_per_side_points: {value: 0.05, description: Per-side option-price slippage proxy for receipt-aligned shadow PnL.}
   virtual_profit_take_fraction: {value: 0.30, description: Virtual take-profit premium fraction.}
   virtual_gamma_retention_fraction: {value: 0.60, description: Virtual Gamma retention exit fraction.}
   virtual_iv_drop_vol_points: {value: 1.0, description: Post-event IV decline threshold.}
@@ -1198,6 +1200,9 @@ notification:
   rust_operator_notification_socket_path:
     value: /run/spx-spark-core/core.sock
     description: Unix socket for typed operator notification ingress.
+  rust_delivery_ledger_path:
+    value: ""
+    description: Optional read-only Rust delivery ledger path for receipt-aligned shadow execution.
   rust_operator_notification_timeout_seconds:
     value: 5.0
     description: Timeout for one Rust ingress request and acknowledgement.

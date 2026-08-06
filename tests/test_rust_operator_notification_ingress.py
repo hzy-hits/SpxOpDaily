@@ -224,6 +224,51 @@ def test_typed_rejection_classifies_retryable_and_permanent(monkeypatch) -> None
     assert processing.error == "rust_ingress_outcome_unknown:rejected:processing_rejected"
 
 
+def test_semantic_suppression_is_not_reported_as_forwarded_delivery(monkeypatch) -> None:
+    settings = NotificationSettings.from_env()
+    message_id = str(build_operator_ingress_message(_job())["message_id"])
+    monkeypatch.setattr(
+        "spx_spark.notifier.rust_ingress._exchange",
+        lambda *_args, **_kwargs: {
+            "schema_version": "spx_core_ack.v1",
+            "status": "accepted",
+            "message_id": message_id,
+            "decision_id": None,
+            "reason_code": "accepted",
+            "disposition": "operator_notification_semantic_suppressed",
+        },
+    )
+
+    result = deliver_operator_notification(settings, _job())
+
+    assert result.ok is False
+    assert result.permanent is True
+    assert result.error == "rust_ingress_semantic_suppressed"
+    assert result.verdict == "operator_notification_semantic_suppressed"
+
+
+def test_generic_duplicate_ingress_cannot_hide_operator_suppression(monkeypatch) -> None:
+    settings = NotificationSettings.from_env()
+    message_id = str(build_operator_ingress_message(_job())["message_id"])
+    monkeypatch.setattr(
+        "spx_spark.notifier.rust_ingress._exchange",
+        lambda *_args, **_kwargs: {
+            "schema_version": "spx_core_ack.v1",
+            "status": "accepted",
+            "message_id": message_id,
+            "decision_id": None,
+            "reason_code": "accepted",
+            "disposition": "duplicate_ingress",
+        },
+    )
+
+    result = deliver_operator_notification(settings, _job())
+
+    assert result.ok is False
+    assert result.permanent is False
+    assert result.error == "rust_ingress_outcome_unknown:invalid accepted acknowledgement"
+
+
 def test_cancellation_envelope_is_stable_and_all_idempotent_acks_succeed(
     monkeypatch,
 ) -> None:

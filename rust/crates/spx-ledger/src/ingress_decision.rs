@@ -347,6 +347,46 @@ impl Ledger {
         Ok(outcome)
     }
 
+    /// Replays the original operator disposition after an exact ingress duplicate.
+    ///
+    /// The caller must first prove the ingress `message_id` and payload hash are an exact
+    /// duplicate. A stored immutable operator event means the first attempt was accepted; an
+    /// absent event means the first attempt completed as semantic suppression. This avoids
+    /// turning a lost suppression acknowledgement into a false delivery success.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid notification, lost ownership, or identity collision.
+    pub fn replay_operator_notification(
+        &self,
+        lease: &OwnerLease,
+        notification: &OperatorNotificationV1,
+        now: DateTime<Utc>,
+    ) -> Result<OperatorNotificationWrite, LedgerError> {
+        notification.validate()?;
+        let payload_hash = canonical_json_hash(notification)?;
+        let targets = sorted_targets(&notification.targets);
+        let target_hash = canonical_json_hash(&targets)?;
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction()?;
+        Self::require_owner_in_transaction(&transaction, lease, OwnerRole::Core, now)?;
+        let existing = matching_operator_notifications(&transaction, notification)?;
+        let outcome = match existing.as_slice() {
+            [] => OperatorNotificationWrite::SemanticSuppressed,
+            [stored] if stored.matches_exact(notification, &payload_hash, &target_hash) => {
+                OperatorNotificationWrite::Duplicate
+            }
+            _ => {
+                return Err(LedgerError::IdentityCollision(format!(
+                    "trader_event:{}/{}",
+                    notification.event_id, notification.semantic_id
+                )));
+            }
+        };
+        transaction.commit()?;
+        Ok(outcome)
+    }
+
     /// Checks whether the stable ET report slot is already present without mutating the outbox.
     ///
     /// # Errors

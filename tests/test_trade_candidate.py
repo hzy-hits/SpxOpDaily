@@ -152,6 +152,67 @@ def test_approved_call_terminal_can_be_adapted_for_virtual_entry() -> None:
     assert adapted["execution_assumption"] == "displayed_quote_only_no_broker_fill"
 
 
+def test_virtual_entry_keeps_matching_delivery_event_for_receipt_alignment() -> None:
+    source = {
+        **_intent(),
+        "intent_id": "intent:test-call",
+        "event_id": "level:test-call",
+        "direction": "up",
+        "play": "level_breakout_call",
+        "contract_id": "option:SPX:SPXW:20260715:7560:C",
+        "strategy_lane": "long_0dte_rth_upside_breakout_pilot",
+    }
+    terminal = {
+        **_armed_candidate(source, now=NOW),
+        "phase": "quote_reached_entry",
+        "entry_observation": {
+            "entry_condition": "displayed_ask_at_or_below_limit",
+        },
+    }
+
+    adapted = virtual_entry_intent(
+        terminal,
+        delivery_projection={
+            **source,
+            "notification_event_id": "trade-ready:durable-event",
+            "notification_status": "outbox_accepted",
+            "notification_reason": "accepted",
+        },
+    )
+
+    assert adapted["notification_event_id"] == "trade-ready:durable-event"
+    assert adapted["notification_status"] == "outbox_accepted"
+
+
+def test_virtual_entry_rejects_delivery_identity_from_another_intent() -> None:
+    source = {
+        **_intent(),
+        "intent_id": "intent:test-call",
+        "event_id": "level:test-call",
+        "direction": "up",
+        "play": "level_breakout_call",
+        "contract_id": "option:SPX:SPXW:20260715:7560:C",
+        "strategy_lane": "long_0dte_rth_upside_breakout_pilot",
+    }
+    terminal = {
+        **_armed_candidate(source, now=NOW),
+        "phase": "quote_reached_entry",
+        "entry_observation": {
+            "entry_condition": "displayed_ask_at_or_below_limit",
+        },
+    }
+
+    adapted = virtual_entry_intent(
+        terminal,
+        delivery_projection={
+            "intent_id": "intent:other",
+            "notification_event_id": "trade-ready:wrong-event",
+        },
+    )
+
+    assert adapted["notification_event_id"] is None
+
+
 def test_put_shadow_terminal_cannot_be_promoted_by_virtual_entry_adapter() -> None:
     source = _shadow_intent(
         lane="long_0dte_rth_flip_low_breakdown_put_shadow",

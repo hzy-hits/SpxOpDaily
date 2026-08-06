@@ -220,9 +220,7 @@ impl CoreEngine {
             processing_at,
         )? == IngressCheck::Duplicate
         {
-            return Ok(CoreOutcome::Duplicate {
-                message_id: envelope.message_id,
-            });
+            return self.replay_duplicate(envelope, processing_at);
         }
         let ingress_message_id = envelope.message_id.clone();
         let message_id = envelope.message_id;
@@ -292,6 +290,33 @@ impl CoreEngine {
             });
         }
         Ok(outcome)
+    }
+
+    fn replay_duplicate(
+        &self,
+        envelope: IngressEnvelopeV1,
+        processing_at: DateTime<Utc>,
+    ) -> Result<CoreOutcome, CoreError> {
+        let IngressMessageV1::OperatorNotification(notification) = &envelope.message else {
+            return Ok(CoreOutcome::Duplicate {
+                message_id: envelope.message_id,
+            });
+        };
+        let disposition =
+            self.ledger
+                .replay_operator_notification(&self.owner, notification, processing_at)?;
+        Ok(CoreOutcome::OperatorNotification {
+            message_id: envelope.message_id,
+            event_id: notification.event_id.clone(),
+            role: notification.role,
+            disposition: match disposition {
+                OperatorNotificationWrite::Inserted => OperatorNotificationDisposition::Inserted,
+                OperatorNotificationWrite::Duplicate => OperatorNotificationDisposition::Duplicate,
+                OperatorNotificationWrite::SemanticSuppressed => {
+                    OperatorNotificationDisposition::SemanticSuppressed
+                }
+            },
+        })
     }
 
     /// Releases the core owner fence so a replacement can start immediately.

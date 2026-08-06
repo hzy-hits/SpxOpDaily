@@ -9,8 +9,9 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Mapping
 
-from spx_spark.application.market_features.trade_intent import (
-    live_trade_intent_authority_issues,
+from spx_spark.application.market_features.virtual_strategy_rth import (
+    evaluate_trade_intent_entry as _evaluate_trade_intent_entry,
+    shadow_execution_costs as _shadow_execution_costs,
 )
 from spx_spark.application.market_features.virtual_strategy_support import (
     _action_underlier_snapshot,
@@ -64,9 +65,13 @@ from spx_spark.notifier.operator_contract import (
     operator_generation,
     operator_opportunity_id,
 )
+from spx_spark.notifier.receipts import (
+    ExternalDeliveryReceipt,
+    inspect_external_delivery_receipt,
+)
 from spx_spark.settings.market_features import MarketFeatureSettings
 from spx_spark.state_io import atomic_write_json_secure, exclusive_state_lock, read_json_object
-from spx_spark.storage import LatestState, configured_quote_use_decision
+from spx_spark.storage import LatestState
 from spx_spark.strategy_contract import (
     actionable_strategy_contract_issues,
     normalize_block_reasons,
@@ -185,6 +190,35 @@ def process_virtual_strategy(
             for key, value in dict(state.get("entry_decisions") or {}).items()
             if isinstance(value, Mapping)
         }
+        raw_pending_trade_intent = state.get("pending_trade_intent")
+        pending_trade_intent = (
+            dict(raw_pending_trade_intent)
+            if isinstance(raw_pending_trade_intent, Mapping)
+            else {}
+        )
+        if not active and pending_trade_intent and not new_entries_allowed:
+            pending_valid_until = parse_aware_time(pending_trade_intent.get("valid_until"))
+            if pending_valid_until is not None and now >= pending_valid_until:
+                censored = _pending_trade_intent_provider_censored_decision(
+                    pending_trade_intent,
+                    provider_reason=new_entries_block_reason,
+                    now=now,
+                    policy=policy,
+                )
+                _record_entry_decision(
+                    storage,
+                    censored,
+                    entry_decisions=entry_decisions,
+                    now=now,
+                )
+                pending_id = str(pending_trade_intent.get("intent_id") or "")
+                _mark_signal_consumed(
+                    consumed_signals,
+                    consumed,
+                    signal_id=pending_id,
+                    now=now,
+                )
+                pending_trade_intent = {}
         if new_entries_allowed and _should_replace_with_gth_spread(active, gth_signal):
             replacement, entry_decision = _evaluate_gth_spread_entry(
                 latest,
@@ -231,14 +265,67 @@ def process_virtual_strategy(
                     now=now,
                 )
         if not active and new_entries_allowed:
+            current_trade_intent = (
+                dict(trade_intent)
+                if trade_intent.get("status") == "trade_ready"
+                and str(trade_intent.get("intent_id") or "")
+                else {}
+            )
+            pending_id = str(pending_trade_intent.get("intent_id") or "")
+            current_id = str(current_trade_intent.get("intent_id") or "")
+            if pending_id and current_id and pending_id != current_id:
+                superseded = _pending_trade_intent_superseded_decision(
+                    pending_trade_intent,
+                    replacement=current_trade_intent,
+                    now=now,
+                    policy=policy,
+                )
+                _record_entry_decision(
+                    storage,
+                    superseded,
+                    entry_decisions=entry_decisions,
+                    now=now,
+                )
+                _mark_signal_consumed(
+                    consumed_signals,
+                    consumed,
+                    signal_id=pending_id,
+                    now=now,
+                )
+                pending_trade_intent = {}
+            candidate_trade_intent = (
+                pending_trade_intent or current_trade_intent or dict(trade_intent)
+            )
+            require_external_receipt = bool(
+                candidate_trade_intent.get("status") == "trade_ready"
+                and getattr(settings, "rust_trader_notification_owner", False)
+            )
+            external_receipt = None
+            external_receipt_observable = True
+            external_receipt_error = None
+            if require_external_receipt:
+                receipt_lookup = inspect_external_delivery_receipt(
+                    str(candidate_trade_intent.get("notification_event_id") or ""),
+                    rust_owner=True,
+                    rust_ledger_path=str(
+                        getattr(settings, "rust_delivery_ledger_path", "") or ""
+                    ),
+                )
+                external_receipt = receipt_lookup.receipt
+                external_receipt_observable = receipt_lookup.observable
+                external_receipt_error = receipt_lookup.error
             active, entry_decision = _new_episode(
                 latest,
-                trade_intent=trade_intent,
+                trade_intent=candidate_trade_intent,
                 gth_signal=gth_signal,
                 consumed=consumed,
                 now=now,
                 policy=policy,
                 expected_trade_intent_policy_version=expected_trade_intent_policy_version,
+                require_external_receipt=require_external_receipt,
+                external_receipt=external_receipt,
+                external_receipt_observable=external_receipt_observable,
+                external_receipt_error=external_receipt_error,
             )
             if entry_decision:
                 _record_entry_decision(
@@ -255,7 +342,14 @@ def process_virtual_strategy(
                         signal_id=source_id,
                         now=now,
                     )
+                if entry_decision.get("source_kind") == "trade_intent":
+                    pending_trade_intent = (
+                        {}
+                        if active or entry_decision.get("terminal") is True
+                        else dict(candidate_trade_intent)
+                    )
             if active:
+                pending_trade_intent = {}
                 signal_id = str(active.get("source_signal_id") or "")
                 _mark_signal_consumed(
                     consumed_signals,
@@ -270,6 +364,7 @@ def process_virtual_strategy(
                     "schema_version": 2,
                     "updated_at": now.isoformat(),
                     "active": None,
+                    "pending_trade_intent": pending_trade_intent or None,
                     **_consumed_signal_state(consumed_signals),
                     "entry_decisions": _trim_entry_decisions(entry_decisions),
                     "provider_entry_control": provider_entry_control,
@@ -284,6 +379,8 @@ def process_virtual_strategy(
                     None if new_entries_allowed else new_entries_block_reason
                 ),
             }
+
+        state["pending_trade_intent"] = None
 
         current = _active_snapshot(latest, active, now=now, policy=policy)
         exit_reason, action = _exit_decision(
@@ -385,6 +482,8 @@ def process_virtual_strategy(
                 "new_entries_allowed": new_entries_allowed,
             }
 
+        exit_bid = _number(current.get("bid"))
+        shadow_costs = _shadow_execution_costs(active, exit_bid=exit_bid)
         closed = {
             **active,
             **pending_exit_context,
@@ -394,7 +493,7 @@ def process_virtual_strategy(
             "exit_reason": exit_reason,
             "exit_action": action,
             "exit_snapshot": current,
-            "exit_bid": _number(current.get("bid")),
+            "exit_bid": exit_bid,
             "exit_price_basis": (
                 "executable_bid" if _number(current.get("bid")) is not None else None
             ),
@@ -403,6 +502,7 @@ def process_virtual_strategy(
                 if _number(current.get("bid")) is not None
                 else "unavailable"
             ),
+            **shadow_costs,
         }
         text = _render_exit(closed)
         notification_event_id = f"{closed['episode_id']}:{exit_reason}"
@@ -473,6 +573,102 @@ def process_virtual_strategy(
     }
 
 
+def _pending_trade_intent_superseded_decision(
+    pending: Mapping[str, object],
+    *,
+    replacement: Mapping[str, object],
+    now: datetime,
+    policy: MarketFeatureSettings,
+) -> dict[str, object]:
+    """Close one immutable waiting contract before accepting a new opportunity."""
+
+    source_id = str(pending.get("intent_id") or "")
+    replacement_id = str(replacement.get("intent_id") or "")
+    raw_coordinate = pending.get("coordinate")
+    coordinate = dict(raw_coordinate) if isinstance(raw_coordinate, Mapping) else None
+    reasons = ["superseded_by_new_trade_intent"]
+    return {
+        **strategy_event_fields(
+            policy_version_value=policy_version(
+                "virtual_rth_pending_supersession.v1",
+                policy,
+            ),
+            valid_until=parse_aware_time(pending.get("valid_until")),
+            coordinate=coordinate,
+            block_reasons=reasons,
+        ),
+        "event": "virtual_entry_decision",
+        "decision_id": f"virtual-entry:{source_id or 'unavailable'}",
+        "source_signal_id": source_id or None,
+        "source_kind": "trade_intent",
+        "source_schema_version": pending.get("schema_version"),
+        "source_policy_version": pending.get("policy_version"),
+        "source_evaluated_at": pending.get("evaluated_at"),
+        "entry_observed_at": _entry_observed_at(pending),
+        "action_revalidated_at": now.isoformat(),
+        "evaluated_at": now.isoformat(),
+        "status": "blocked",
+        "terminal": True,
+        "contract_id": pending.get("contract_id"),
+        "entry_limit": pending.get("entry_limit"),
+        "shadow_execution_label": "no_fill",
+        "superseded_by_source_signal_id": replacement_id or None,
+        "external_delivery_event_id": pending.get("notification_event_id"),
+        "external_delivery_receipt": None,
+        "broker_fill_status": "not_observed",
+        "broker_order_state": "not_connected",
+        "automatic_ordering": False,
+    }
+
+
+def _pending_trade_intent_provider_censored_decision(
+    pending: Mapping[str, object],
+    *,
+    provider_reason: str,
+    now: datetime,
+    policy: MarketFeatureSettings,
+) -> dict[str, object]:
+    """Terminate an expired waiter without claiming no-fill when quotes were gated."""
+
+    source_id = str(pending.get("intent_id") or "")
+    raw_coordinate = pending.get("coordinate")
+    coordinate = dict(raw_coordinate) if isinstance(raw_coordinate, Mapping) else None
+    reasons = ["provider_entry_control_blocked_until_expiry"]
+    return {
+        **strategy_event_fields(
+            policy_version_value=policy_version(
+                "virtual_rth_pending_provider_censor.v1",
+                policy,
+            ),
+            valid_until=parse_aware_time(pending.get("valid_until")),
+            coordinate=coordinate,
+            block_reasons=reasons,
+        ),
+        "event": "virtual_entry_decision",
+        "decision_id": f"virtual-entry:{source_id or 'unavailable'}",
+        "source_signal_id": source_id or None,
+        "source_kind": "trade_intent",
+        "source_schema_version": pending.get("schema_version"),
+        "source_policy_version": pending.get("policy_version"),
+        "source_evaluated_at": pending.get("evaluated_at"),
+        "entry_observed_at": _entry_observed_at(pending),
+        "action_revalidated_at": now.isoformat(),
+        "evaluated_at": now.isoformat(),
+        "status": "blocked",
+        "terminal": True,
+        "contract_id": pending.get("contract_id"),
+        "entry_limit": pending.get("entry_limit"),
+        "shadow_execution_label": "censored",
+        "censor_reason": "provider_entry_control_unavailable",
+        "provider_entry_control_reason": provider_reason,
+        "external_delivery_event_id": pending.get("notification_event_id"),
+        "external_delivery_receipt": None,
+        "broker_fill_status": "not_observed",
+        "broker_order_state": "not_connected",
+        "automatic_ordering": False,
+    }
+
+
 def _new_episode(
     latest: LatestState,
     *,
@@ -482,6 +678,10 @@ def _new_episode(
     now: datetime,
     policy: MarketFeatureSettings,
     expected_trade_intent_policy_version: str | None = None,
+    require_external_receipt: bool = False,
+    external_receipt: ExternalDeliveryReceipt | None = None,
+    external_receipt_observable: bool = True,
+    external_receipt_error: str | None = None,
 ) -> tuple[dict[str, object], dict[str, object] | None]:
     if trade_intent.get("status") == "trade_ready":
         source_id = str(trade_intent.get("intent_id") or "")
@@ -493,6 +693,10 @@ def _new_episode(
                 now=now,
                 policy=policy,
                 expected_policy_version=expected_trade_intent_policy_version,
+                require_external_receipt=require_external_receipt,
+                external_receipt=external_receipt,
+                external_receipt_observable=external_receipt_observable,
+                external_receipt_error=external_receipt_error,
             )
     if gth_signal.get("kind") != "gth_dip_reclaim_call":
         return {}, None
@@ -510,233 +714,6 @@ def _new_episode(
         now=now,
         policy=policy,
     )
-
-
-def _evaluate_trade_intent_entry(
-    latest: LatestState,
-    *,
-    trade_intent: Mapping[str, object],
-    now: datetime,
-    policy: MarketFeatureSettings,
-    expected_policy_version: str | None,
-) -> tuple[dict[str, object], dict[str, object]]:
-    """Revalidate a quote-reached RTH candidate immediately before virtual action."""
-
-    now = _utc(now)
-    source_id = str(trade_intent.get("intent_id") or "")
-    contract_id = str(trade_intent.get("contract_id") or "")
-    decision_policy = policy_version(
-        "virtual_rth_action_revalidation.v3",
-        {
-            "market_features": policy,
-            "expected_source_policy_version": expected_policy_version,
-        },
-    )
-
-    def result(
-        reasons: tuple[str, ...] | list[str],
-        *,
-        terminal: bool,
-        snapshot: Mapping[str, object] | None = None,
-        episode: Mapping[str, object] | None = None,
-    ) -> tuple[dict[str, object], dict[str, object]]:
-        raw_coordinate = trade_intent.get("coordinate")
-        coordinate = dict(raw_coordinate) if isinstance(raw_coordinate, Mapping) else None
-        normalized = normalize_block_reasons(reasons)
-        return dict(episode or {}), {
-            **strategy_event_fields(
-                policy_version_value=decision_policy,
-                valid_until=parse_aware_time(trade_intent.get("valid_until")),
-                coordinate=coordinate,
-                block_reasons=normalized,
-            ),
-            "event": "virtual_entry_decision",
-            "decision_id": f"virtual-entry:{source_id or 'unavailable'}",
-            "source_signal_id": source_id or None,
-            "source_kind": "trade_intent",
-            "source_schema_version": trade_intent.get("schema_version"),
-            "source_policy_version": trade_intent.get("policy_version"),
-            "source_evaluated_at": trade_intent.get("evaluated_at"),
-            "entry_observed_at": _entry_observed_at(trade_intent),
-            "action_revalidated_at": now.isoformat(),
-            "quote_state_created_at": _latest_created_at(latest),
-            "evaluated_at": now.isoformat(),
-            "status": "trade_ready" if episode else "blocked" if terminal else "observing",
-            "terminal": bool(terminal or episode),
-            "contract_id": contract_id or None,
-            "entry_limit": trade_intent.get("entry_limit"),
-            "action_quote_snapshot": dict(snapshot) if snapshot else None,
-            "episode_id": episode.get("episode_id") if episode else None,
-            "automatic_ordering": False,
-        }
-
-    if not source_id:
-        return result(["source_signal_id_unavailable"], terminal=True)
-    if not contract_id:
-        return result(["execution_contract_unavailable"], terminal=True)
-    authority_issues = live_trade_intent_authority_issues(trade_intent)
-    if authority_issues:
-        return result(authority_issues, terminal=True)
-    contract_issues = list(actionable_strategy_contract_issues(trade_intent, now=now))
-    if contract_issues:
-        reasons = [
-            "intent_expired" if issue == "strategy_event_expired" else issue
-            for issue in contract_issues
-        ]
-        return result(reasons, terminal=True)
-    source_policy = str(trade_intent.get("policy_version") or "")
-    if not source_policy.startswith("rth_trade_intent.v3+sha256:"):
-        return result(["source_policy_incompatible"], terminal=True)
-    if expected_policy_version and source_policy != expected_policy_version:
-        return result(["source_policy_version_drift"], terminal=True)
-    coordinate = trade_intent.get("coordinate")
-    if not isinstance(coordinate, Mapping) or coordinate.get("kind") != "official_spx":
-        return result(["source_coordinate_mismatch"], terminal=True)
-
-    snapshot, quote_reasons = _trade_intent_action_snapshot(
-        latest,
-        trade_intent=trade_intent,
-        now=now,
-        max_quote_age_seconds=policy.trade_quote_max_age_seconds,
-        future_tolerance_seconds=policy.provider_sync_tolerance_seconds,
-    )
-    if not snapshot:
-        return result(quote_reasons, terminal=False)
-    underlier, underlier_reasons = _action_underlier_snapshot(
-        latest,
-        instrument_id="index:SPX",
-        now=now,
-        max_quote_age_seconds=policy.trade_quote_max_age_seconds,
-        future_tolerance_seconds=policy.provider_sync_tolerance_seconds,
-    )
-    if not underlier:
-        return result(underlier_reasons, terminal=False, snapshot=snapshot)
-    direction = str(trade_intent.get("direction") or "")
-    target_spx = _number(trade_intent.get("target_spx"))
-    invalidation_spx = _number(trade_intent.get("invalidation_spx"))
-    if target_spx is None or invalidation_spx is None:
-        return result(["action_underlier_guard_unavailable"], terminal=True, snapshot=snapshot)
-    spx = _number(underlier.get("price"))
-    if _level_reached(spx, target_spx, direction=direction, target=True):
-        snapshot["action_underlier"] = underlier
-        return result(["target_reached_before_entry_quote"], terminal=True, snapshot=snapshot)
-    if _level_reached(spx, invalidation_spx, direction=direction, target=False):
-        snapshot["action_underlier"] = underlier
-        return result(["invalidation_reached_before_entry_quote"], terminal=True, snapshot=snapshot)
-    snapshot["action_underlier"] = underlier
-    stop = _time(trade_intent.get("time_stop_at")) or now + timedelta(
-        minutes=policy.trade_time_stop_minutes
-    )
-    if stop <= now:
-        return result(["trade_time_stop_elapsed"], terminal=True, snapshot=snapshot)
-    episode = _episode(
-        source_id=source_id,
-        source_kind="trade_intent",
-        direction=direction,
-        contract_id=contract_id,
-        snapshot=snapshot,
-        now=now,
-        stop=stop,
-        invalidation_spx=invalidation_spx,
-        target_spx=target_spx,
-        invalidation_es=None,
-        source_contract=trade_intent,
-        lifecycle_policy=policy,
-    )
-    if not episode:
-        return result(["trade_direction_invalid"], terminal=True, snapshot=snapshot)
-    episode.update(
-        {
-            "decision_evaluated_at": trade_intent.get("evaluated_at"),
-            "entry_observed_at": _entry_observed_at(trade_intent),
-            "action_revalidated_at": now.isoformat(),
-            "quote_state_created_at": _latest_created_at(latest),
-            "entry_limit": trade_intent.get("entry_limit"),
-            "entry_basis": "action_revalidated_quote_snapshot",
-        }
-    )
-    return result([], terminal=True, snapshot=snapshot, episode=episode)
-
-
-def _trade_intent_action_snapshot(
-    latest: LatestState,
-    *,
-    trade_intent: Mapping[str, object],
-    now: datetime,
-    max_quote_age_seconds: float,
-    future_tolerance_seconds: float,
-) -> tuple[dict[str, object], list[str]]:
-    """Reload-sensitive NBBO/limit check for the final virtual-entry boundary."""
-
-    now = _utc(now)
-    contract_id = str(trade_intent.get("contract_id") or "")
-    quote = latest.best_quote(contract_id) if contract_id else None
-    if quote is None:
-        return {}, ["action_quote_unavailable"]
-    entry_limit = _number(trade_intent.get("entry_limit"))
-    if entry_limit is None or entry_limit <= 0:
-        return {}, ["action_entry_limit_invalid"]
-    observation = trade_intent.get("entry_observation")
-    if not isinstance(observation, Mapping):
-        return {}, ["entry_observation_unavailable"]
-    observation_limit = _number(observation.get("entry_limit"))
-    if (
-        observation.get("entry_condition") != "displayed_ask_at_or_below_limit"
-        or str(observation.get("contract_id") or "") != contract_id
-        or observation_limit is None
-        or not math.isclose(observation_limit, entry_limit)
-    ):
-        return {}, ["entry_observation_contract_invalid"]
-
-    provider = str(trade_intent.get("provider") or "")
-    if not provider:
-        return {}, ["action_quote_provider_unavailable"]
-    if quote.provider.value != provider:
-        return {}, ["action_quote_provider_mismatch"]
-    bid = _number(quote.bid)
-    mid = _number(quote.mid)
-    ask = _number(quote.ask)
-    if bid is None or mid is None or ask is None or not 0 <= bid <= mid <= ask:
-        return {}, ["action_quote_nbbo_invalid"]
-    # This decision consumes bid/ask, so only the NBBO's own quote clock can
-    # authorize freshness. A new last trade cannot freshen the displayed ask.
-    source_at = quote.quote_time
-    transport_at = quote.last_update_at or quote.received_at
-    if source_at is None:
-        return {}, ["action_quote_source_time_unavailable"]
-    source_age = (now - _utc(source_at)).total_seconds()
-    transport_age = (now - _utc(transport_at)).total_seconds()
-    time_reasons: list[str] = []
-    tolerance = max(0.0, future_tolerance_seconds)
-    if source_age < -tolerance:
-        time_reasons.append("action_quote_source_in_future")
-    elif source_age > max_quote_age_seconds:
-        time_reasons.append("action_quote_source_stale")
-    if transport_age < -tolerance:
-        time_reasons.append("action_quote_transport_in_future")
-    elif transport_age > max_quote_age_seconds:
-        time_reasons.append("action_quote_transport_stale")
-    if time_reasons:
-        return {}, time_reasons
-    use = configured_quote_use_decision(quote, as_of=now)
-    if not use.pricing_allowed:
-        return {}, [f"action_quote_quality_{use.reason}"]
-    if ask > entry_limit:
-        return {}, ["action_entry_limit_not_reached"]
-
-    snapshot = _contract_snapshot(latest, contract_id, now=now)
-    if not snapshot:
-        return {}, ["action_contract_snapshot_unavailable"]
-    snapshot.update(
-        {
-            "action_revalidated_at": now.isoformat(),
-            "source_age_seconds": source_age,
-            "transport_age_seconds": transport_age,
-            "entry_limit": entry_limit,
-            "entry_limit_satisfied": True,
-        }
-    )
-    return snapshot, []
 
 
 def _new_gth_spread_episode(

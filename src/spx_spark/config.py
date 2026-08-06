@@ -614,6 +614,7 @@ class NotificationSettings:
     # Python continues to own producer durability and retry scheduling.
     rust_trader_notification_owner: bool = False
     rust_operator_notification_socket_path: str = "/run/spx-spark-core/core.sock"
+    rust_delivery_ledger_path: str = ""
     rust_operator_notification_timeout_seconds: float = 5.0
     rust_operator_notification_max_frame_bytes: int = 1_048_576
     # (python sink, Rust target key, Rust delivery channel). The per-event

@@ -52,7 +52,7 @@ from spx_spark.state_io import (
     read_json_object,
 )
 from spx_spark.storage import LatestState
-from spx_spark.strategy_contract import policy_version
+from spx_spark.strategy_contract import policy_version, strategy_event_fields
 
 
 CONTRACT_VERSION = "gth_level_manual_candidate.v1"
@@ -613,6 +613,16 @@ def _persist_candidate(
         )
         gate_record_key, gate_record = _gate_record(candidate, now=now)
         if state.get("last_gate_record_key") != gate_record_key:
+            replay_record = _replay_candidate_record(candidate, now=now)
+            if replay_record is not None:
+                append_jsonl_secure(
+                    Path(storage.data_root)
+                    / "features"
+                    / "gth_level_manual_candidates"
+                    / f"date={replay_record['session_date']}"
+                    / "events.jsonl",
+                    replay_record,
+                )
             append_jsonl_secure(
                 Path(storage.data_root)
                 / "features"
@@ -883,6 +893,52 @@ def _gate_record(
         "block_reasons": list(candidate.get("block_reasons") or ()),
         "gate_contract": (dict(gate_contract) if isinstance(gate_contract, Mapping) else None),
         "session_quote_provider": "ibkr",
+    }
+
+
+def _replay_candidate_record(
+    candidate: Mapping[str, object],
+    *,
+    now: datetime,
+) -> dict[str, object] | None:
+    """Build the complete replay event only for an actionable manual candidate.
+
+    The gate journal remains the audit source for blocked observations.  Keeping
+    them out of the candidate event lane prevents a blocked or coherence-
+    suppressed evaluation from becoming a replay signal.
+    """
+
+    if candidate.get("status") != "manual_ready":
+        return None
+    parity = candidate.get("target_coordinate")
+    parity = dict(parity) if isinstance(parity, Mapping) else {}
+    observed_spx = _number(candidate.get("current_parity_spx"))
+    trigger_level = _number(candidate.get("trigger_level"))
+    coordinate = {
+        "kind": "chain_implied_spx",
+        "instrument_id": "synthetic:SPXW_PARITY",
+        "observed_value": observed_spx,
+        "target_value": trigger_level,
+        "spx_observed_value": observed_spx,
+        # Chain parity is already an SPX-coordinate observation.  The separate
+        # invalidation_es field carries the ES/SPX basis for exit replay.
+        "basis_points": 0.0,
+        "as_of": parity.get("source_at") or candidate.get("evaluated_at"),
+    }
+    return {
+        **candidate,
+        **strategy_event_fields(
+            policy_version_value=str(candidate.get("policy_version") or ""),
+            valid_until=candidate.get("valid_until"),
+            coordinate=coordinate,
+            block_reasons=candidate.get("block_reasons") or (),
+        ),
+        "event": "gth_level_manual_candidate_evaluated",
+        "strategy_id": "gth_level_manual_candidate",
+        "strategy_lane": "gth_level_manual_candidate",
+        "lifecycle_status": "legacy_production",
+        "runtime_status": "production_runtime",
+        "session_date": DEFAULT_MARKET_CALENDAR.research_expiry(now).isoformat(),
     }
 
 

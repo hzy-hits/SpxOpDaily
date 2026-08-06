@@ -1605,9 +1605,22 @@ def test_current_gth_candidate_replay_freezes_runtime_spread_and_decision_ask(
             "long": {**snapshot["long"], "provider": "schwab"},
         },
     }
+    blocked = {
+        **candidate,
+        "candidate_id": "gth-level-manual:blocked",
+        "status": "blocked",
+        "manual_action_eligible": False,
+        "block_reasons": ["spread_reward_risk_insufficient"],
+    }
+    suppressed = {
+        **candidate,
+        "candidate_id": "gth-level-manual:suppressed",
+        "status": "suppressed",
+        "manual_action_eligible": False,
+    }
     _write_jsonl(
         root / "gth_level_manual_candidates/date=2026-07-16/events.jsonl",
-        [candidate, expired, wrong_provider],
+        [candidate, expired, wrong_provider, blocked, suppressed],
     )
 
     loaded = load_gth_level_candidate_signals(root)

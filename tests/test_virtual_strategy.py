@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -9,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 import spx_spark.application.market_features.virtual_strategy as virtual_strategy
+import spx_spark.application.market_features.virtual_strategy_rth as virtual_strategy_rth
 import spx_spark.application.market_features.virtual_strategy_state as virtual_strategy_state
 from spx_spark.application.market_features.virtual_strategy import (
     _episode,
@@ -23,10 +25,18 @@ from spx_spark.application.market_features.virtual_strategy import (
     _record_entry_decision,
     _rth_trade_hard_exit,
     _should_replace_with_gth_spread,
+    _shadow_execution_costs,
     _spread_snapshot,
     _spread_snapshot_decision,
-    _trade_intent_action_snapshot,
     process_virtual_strategy,
+)
+from spx_spark.application.market_features.virtual_strategy_rth import (
+    trade_intent_action_snapshot as _trade_intent_action_snapshot,
+)
+from spx_spark.notifier.receipts import (
+    ExternalDeliveryReceipt,
+    ExternalDeliveryReceiptLookup,
+    find_external_delivery_receipt,
 )
 from spx_spark.marketdata import InstrumentId, MarketDataQuality, Provider, Quote
 from spx_spark.settings.market_features import MarketFeatureSettings
@@ -1180,7 +1190,7 @@ def test_rth_action_snapshot_rechecks_fresh_quote_and_entry_limit(
         },
     }
     monkeypatch.setattr(
-        virtual_strategy,
+        virtual_strategy_rth,
         "_contract_snapshot",
         lambda *_args, **_kwargs: {
             "mid": 9.9,
@@ -1467,12 +1477,12 @@ def test_rth_action_underlier_guard_is_terminal_before_episode(
 ) -> None:
     intent = _rth_action_contract()
     monkeypatch.setattr(
-        virtual_strategy,
-        "_trade_intent_action_snapshot",
+        virtual_strategy_rth,
+        "trade_intent_action_snapshot",
         lambda *_args, **_kwargs: ({"mid": 10.0, "bid": 9.9, "ask": 10.1}, []),
     )
     monkeypatch.setattr(
-        virtual_strategy,
+        virtual_strategy_rth,
         "_action_underlier_snapshot",
         lambda *_args, **_kwargs: ({"instrument_id": "index:SPX", "price": spx}, []),
     )
@@ -1513,6 +1523,568 @@ def test_rth_virtual_entry_rejects_mislabeled_put_trade_ready() -> None:
     assert episode == {}
     assert decision["terminal"] is True
     assert decision["block_reasons"][0] == "trade_intent_execution_authority_missing"
+
+
+def test_rth_shadow_waits_for_external_receipt_and_records_no_fill_at_expiry(
+    tmp_path: Path,
+) -> None:
+    intent = {
+        **_rth_action_contract(),
+        "notification_event_id": "candidate:rth-action:notify:test",
+    }
+
+    episode, waiting = _evaluate_trade_intent_entry(
+        SimpleNamespace(created_at=NOW),
+        trade_intent=intent,
+        now=NOW,
+        policy=MarketFeatureSettings(),
+        expected_policy_version=str(intent["policy_version"]),
+        require_external_receipt=True,
+        external_receipt=None,
+    )
+
+    assert episode == {}
+    assert waiting["terminal"] is False
+    assert waiting["shadow_execution_label"] == "waiting_receipt"
+    assert waiting["block_reasons"] == ["external_delivery_receipt_pending"]
+    assert waiting["broker_fill_status"] == "not_observed"
+
+    episode, expired = _evaluate_trade_intent_entry(
+        SimpleNamespace(created_at=NOW),
+        trade_intent=intent,
+        now=NOW + timedelta(seconds=91),
+        policy=MarketFeatureSettings(),
+        expected_policy_version=str(intent["policy_version"]),
+        require_external_receipt=True,
+        external_receipt=None,
+    )
+
+    assert episode == {}
+    assert expired["terminal"] is True
+    assert expired["shadow_execution_label"] == "no_fill"
+    assert expired["block_reasons"] == [
+        "external_delivery_receipt_missing_before_expiry"
+    ]
+    decisions: dict[str, dict[str, object]] = {}
+    storage = SimpleNamespace(data_root=str(tmp_path))
+    _record_entry_decision(storage, waiting, entry_decisions=decisions, now=NOW)
+    _record_entry_decision(
+        storage,
+        expired,
+        entry_decisions=decisions,
+        now=NOW + timedelta(seconds=91),
+    )
+    audit = (
+        tmp_path
+        / "features"
+        / "virtual_strategy"
+        / "date=2026-07-15"
+        / "events.jsonl"
+    )
+    rows = [json.loads(line) for line in audit.read_text().splitlines()]
+    assert [row["shadow_execution_label"] for row in rows] == [
+        "waiting_receipt",
+        "no_fill",
+    ]
+
+
+def test_pending_rth_intent_censors_when_receipt_ledger_is_unobservable(
+    tmp_path: Path,
+) -> None:
+    intent = {
+        **_rth_action_contract(),
+        "notification_event_id": "candidate:rth-action:notify:persisted",
+    }
+    settings = SimpleNamespace(
+        rust_trader_notification_owner=True,
+        rust_delivery_ledger_path="",
+    )
+    common = {
+        "storage": SimpleNamespace(data_root=str(tmp_path)),
+        "gth_signal": {},
+        "option_structure": {},
+        "macro_event": {},
+        "greek_decision": {},
+        "policy": MarketFeatureSettings(),
+        "notification": settings,
+        "new_entries_allowed": True,
+        "new_entries_block_reason": "allowed",
+    }
+
+    first = process_virtual_strategy(
+        latest=SimpleNamespace(best_quote=lambda _key: None, created_at=NOW),
+        trade_intent=intent,
+        now=NOW,
+        **common,
+    )
+    state_path = tmp_path / "latest" / "virtual_strategy_state.json"
+    waiting_state = json.loads(state_path.read_text(encoding="utf-8"))
+
+    assert first["status"] == "observing"
+    assert waiting_state["pending_trade_intent"]["intent_id"] == intent["intent_id"]
+    assert waiting_state["pending_trade_intent"]["valid_until"] == intent["valid_until"]
+
+    expired_at = NOW + timedelta(seconds=91)
+    second = process_virtual_strategy(
+        latest=SimpleNamespace(best_quote=lambda _key: None, created_at=expired_at),
+        trade_intent={"status": "observing", "reason": "latest_projection_rolled_over"},
+        now=expired_at,
+        **common,
+    )
+    final_state = json.loads(state_path.read_text(encoding="utf-8"))
+    audit_path = (
+        tmp_path
+        / "features"
+        / "virtual_strategy"
+        / "date=2026-07-15"
+        / "events.jsonl"
+    )
+    rows = [json.loads(line) for line in audit_path.read_text().splitlines()]
+
+    assert second["status"] == "observing"
+    assert final_state["pending_trade_intent"] is None
+    assert intent["intent_id"] in final_state["consumed_signal_ids"]
+    assert [row["shadow_execution_label"] for row in rows] == [
+        "receipt_observation_degraded",
+        "censored",
+    ]
+    assert rows[-1]["block_reasons"] == [
+        "external_delivery_receipt_observation_unavailable"
+    ]
+    assert rows[-1]["external_delivery_receipt_error"] == (
+        "rust_delivery_ledger_path_unavailable"
+    )
+
+
+def test_expired_pending_intent_is_censored_while_provider_gate_stays_closed(
+    tmp_path: Path,
+) -> None:
+    intent = {
+        **_rth_action_contract(),
+        "notification_event_id": "notify:provider-censored",
+    }
+    common = {
+        "storage": SimpleNamespace(data_root=str(tmp_path)),
+        "latest": SimpleNamespace(best_quote=lambda _key: None, created_at=NOW),
+        "gth_signal": {},
+        "option_structure": {},
+        "macro_event": {},
+        "greek_decision": {},
+        "policy": MarketFeatureSettings(),
+        "notification": SimpleNamespace(
+            rust_trader_notification_owner=True,
+            rust_delivery_ledger_path="",
+        ),
+        "new_entries_block_reason": "ibkr_competing_session",
+    }
+
+    process_virtual_strategy(
+        trade_intent=intent,
+        now=NOW,
+        new_entries_allowed=True,
+        **common,
+    )
+    expired_at = NOW + timedelta(seconds=91)
+    process_virtual_strategy(
+        trade_intent={"status": "observing"},
+        now=expired_at,
+        new_entries_allowed=False,
+        **common,
+    )
+
+    state = json.loads(
+        (tmp_path / "latest" / "virtual_strategy_state.json").read_text()
+    )
+    rows = [
+        json.loads(line)
+        for line in (
+            tmp_path
+            / "features"
+            / "virtual_strategy"
+            / "date=2026-07-15"
+            / "events.jsonl"
+        )
+        .read_text()
+        .splitlines()
+    ]
+    assert state["pending_trade_intent"] is None
+    assert rows[-1]["shadow_execution_label"] == "censored"
+    assert rows[-1]["block_reasons"] == [
+        "provider_entry_control_blocked_until_expiry"
+    ]
+    assert rows[-1]["provider_entry_control_reason"] == "ibkr_competing_session"
+
+
+def test_new_rth_opportunity_explicitly_supersedes_persisted_waiter(
+    tmp_path: Path,
+) -> None:
+    first_intent = {
+        **_rth_action_contract(),
+        "notification_event_id": "notify:first",
+    }
+    second_intent = {
+        **_rth_action_contract(),
+        "intent_id": "candidate:rth-action:second",
+        "notification_event_id": "notify:second",
+    }
+    common = {
+        "storage": SimpleNamespace(data_root=str(tmp_path)),
+        "latest": SimpleNamespace(best_quote=lambda _key: None, created_at=NOW),
+        "gth_signal": {},
+        "option_structure": {},
+        "macro_event": {},
+        "greek_decision": {},
+        "policy": MarketFeatureSettings(),
+        "notification": SimpleNamespace(
+            rust_trader_notification_owner=True,
+            rust_delivery_ledger_path="",
+        ),
+        "new_entries_allowed": True,
+        "new_entries_block_reason": "allowed",
+    }
+
+    process_virtual_strategy(trade_intent=first_intent, now=NOW, **common)
+    process_virtual_strategy(
+        trade_intent=second_intent,
+        now=NOW + timedelta(seconds=5),
+        **common,
+    )
+
+    state_path = tmp_path / "latest" / "virtual_strategy_state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    audit_path = (
+        tmp_path
+        / "features"
+        / "virtual_strategy"
+        / "date=2026-07-15"
+        / "events.jsonl"
+    )
+    rows = [json.loads(line) for line in audit_path.read_text().splitlines()]
+
+    assert state["pending_trade_intent"]["intent_id"] == second_intent["intent_id"]
+    assert first_intent["intent_id"] in state["consumed_signal_ids"]
+    assert second_intent["intent_id"] not in state["consumed_signal_ids"]
+    superseded = [
+        row
+        for row in rows
+        if row.get("source_signal_id") == first_intent["intent_id"]
+        and row.get("shadow_execution_label") == "no_fill"
+    ]
+    assert len(superseded) == 1
+    assert superseded[0]["block_reasons"] == ["superseded_by_new_trade_intent"]
+    assert (
+        superseded[0]["superseded_by_source_signal_id"]
+        == second_intent["intent_id"]
+    )
+
+
+def test_pending_limit_waiter_uses_new_post_receipt_quote_after_latest_rollover(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    contract = InstrumentId.option(
+        "SPX",
+        trading_class="SPXW",
+        expiry="20260715",
+        strike=7550,
+        right="C",
+    )
+    intent = {
+        **_rth_action_contract(),
+        "contract_id": contract.canonical_id,
+        "entry_observation": {
+            "at": NOW.isoformat(),
+            "contract_id": contract.canonical_id,
+            "entry_limit": 10.1,
+            "entry_condition": "displayed_ask_at_or_below_limit",
+        },
+        "notification_event_id": "notify:limit-waiter",
+    }
+    receipt = ExternalDeliveryReceipt(
+        event_id="notify:limit-waiter",
+        receipt_id="receipt:limit-waiter",
+        delivered_at=NOW,
+        sink="feishu-primary",
+        channel="feishu",
+        ledger="rust_operations",
+    )
+    monkeypatch.setattr(
+        virtual_strategy,
+        "inspect_external_delivery_receipt",
+        lambda *_args, **_kwargs: ExternalDeliveryReceiptLookup(
+            observable=True,
+            receipt=receipt,
+        ),
+    )
+    monkeypatch.setattr(
+        virtual_strategy_rth,
+        "_contract_snapshot",
+        lambda latest, contract_id, *, now: {
+            "at": now.isoformat(),
+            "bid": latest.best_quote(contract_id).bid,
+            "mid": latest.best_quote(contract_id).mid,
+            "ask": latest.best_quote(contract_id).ask,
+        },
+    )
+    monkeypatch.setattr(
+        virtual_strategy_rth,
+        "_action_underlier_snapshot",
+        lambda *_args, **_kwargs: ({"instrument_id": "index:SPX", "price": 7554.0}, []),
+    )
+    monkeypatch.setattr(
+        virtual_strategy,
+        "_active_snapshot",
+        lambda *_args, **_kwargs: {"bid": 9.9, "mid": 10.0, "ask": 10.1},
+    )
+    monkeypatch.setattr(
+        virtual_strategy,
+        "_exit_decision",
+        lambda *_args, **_kwargs: (None, None),
+    )
+
+    def latest(at: datetime, *, ask: float) -> SimpleNamespace:
+        quote = Quote(
+            instrument=contract,
+            provider=Provider.IBKR,
+            provider_symbol="SPXW",
+            received_at=at,
+            last_update_at=at,
+            quote_time=at,
+            quality=MarketDataQuality.LIVE,
+            bid=ask - 0.2,
+            ask=ask,
+        )
+        return SimpleNamespace(
+            best_quote=lambda key: quote if key == contract.canonical_id else None,
+            created_at=at,
+        )
+
+    common = {
+        "storage": SimpleNamespace(data_root=str(tmp_path)),
+        "gth_signal": {},
+        "option_structure": {},
+        "macro_event": {},
+        "greek_decision": {},
+        "policy": MarketFeatureSettings(),
+        "notification": SimpleNamespace(
+            rust_trader_notification_owner=True,
+            rust_delivery_ledger_path="unused-in-test",
+        ),
+        "new_entries_allowed": True,
+        "new_entries_block_reason": "allowed",
+    }
+
+    waiting_at = NOW + timedelta(seconds=1)
+    process_virtual_strategy(
+        latest=latest(waiting_at, ask=10.5),
+        trade_intent=intent,
+        now=waiting_at,
+        **common,
+    )
+    entered_at = NOW + timedelta(seconds=10)
+    entered = process_virtual_strategy(
+        latest=latest(entered_at, ask=10.0),
+        trade_intent={"status": "observing"},
+        now=entered_at,
+        **common,
+    )
+    state = json.loads(
+        (tmp_path / "latest" / "virtual_strategy_state.json").read_text(
+            encoding="utf-8"
+        )
+    )
+
+    assert entered["status"] == "active"
+    assert state["pending_trade_intent"] is None
+    assert state["active"]["shadow_entry_ask"] == 10.0
+    assert state["active"]["action_revalidated_at"] == entered_at.isoformat()
+    assert state["active"]["broker_fill_status"] == "not_observed"
+
+
+def test_trade_intent_action_quote_must_arrive_after_external_receipt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    instrument = InstrumentId.option(
+        "SPX",
+        trading_class="SPXW",
+        expiry="20260715",
+        strike=7550,
+        right="C",
+    )
+    quote = Quote(
+        instrument=instrument,
+        provider=Provider.IBKR,
+        received_at=NOW - timedelta(seconds=1),
+        last_update_at=NOW - timedelta(seconds=1),
+        quote_time=NOW - timedelta(seconds=1),
+        quality=MarketDataQuality.LIVE,
+        bid=9.8,
+        ask=10.0,
+    )
+    intent = {
+        "contract_id": instrument.canonical_id,
+        "provider": "ibkr",
+        "entry_limit": 10.1,
+        "entry_observation": {
+            "contract_id": instrument.canonical_id,
+            "entry_limit": 10.1,
+            "entry_condition": "displayed_ask_at_or_below_limit",
+        },
+    }
+    monkeypatch.setattr(
+        virtual_strategy,
+        "_contract_snapshot",
+        lambda *_args, **_kwargs: {"mid": 9.9, "bid": 9.8, "ask": 10.0},
+    )
+
+    snapshot, reasons = _trade_intent_action_snapshot(
+        SimpleNamespace(best_quote=lambda _contract_id: quote),
+        trade_intent=intent,
+        now=NOW,
+        max_quote_age_seconds=15.0,
+        future_tolerance_seconds=1.0,
+        not_before=NOW,
+    )
+
+    assert snapshot == {}
+    assert reasons == ["action_quote_precedes_external_receipt"]
+
+
+def test_shadow_execution_costs_are_ask_to_bid_and_never_broker_fill() -> None:
+    costs = _shadow_execution_costs(
+        {
+            "shadow_execution_label": "ask_entry_observed",
+            "shadow_entry_ask": 17.7,
+            "shadow_fee_per_side_usd": 1.0,
+            "shadow_slippage_per_side_points": 0.05,
+        },
+        exit_bid=17.0,
+    )
+
+    assert costs["shadow_gross_pnl_usd"] == -70.0
+    assert costs["shadow_fee_cost_usd"] == 2.0
+    assert costs["shadow_slippage_cost_usd"] == 10.0
+    assert costs["shadow_net_pnl_usd"] == -82.0
+    assert costs["broker_fill_status"] == "not_observed"
+
+
+def test_rust_external_receipt_requires_joined_human_channel_delivery(tmp_path: Path) -> None:
+    ledger = tmp_path / "operations.sqlite"
+    with sqlite3.connect(ledger) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE notification_events (
+                event_id TEXT PRIMARY KEY,
+                semantic_id TEXT NOT NULL UNIQUE,
+                decision_id TEXT,
+                source_projection_id TEXT,
+                report_slot TEXT,
+                lane TEXT NOT NULL,
+                occurred_at_us INTEGER NOT NULL,
+                expires_at_us INTEGER NOT NULL,
+                payload_json TEXT NOT NULL,
+                payload_sha256 TEXT NOT NULL,
+                target_set_sha256 TEXT NOT NULL,
+                writer_generation INTEGER NOT NULL,
+                created_at_us INTEGER NOT NULL
+            );
+            CREATE TABLE delivery_receipts (
+                receipt_id TEXT PRIMARY KEY,
+                target_id TEXT NOT NULL,
+                intent_id TEXT NOT NULL,
+                target_key TEXT NOT NULL,
+                channel TEXT NOT NULL,
+                attempt_id TEXT,
+                outcome TEXT NOT NULL,
+                attempted INTEGER NOT NULL,
+                ok INTEGER NOT NULL,
+                queued_for_retry INTEGER NOT NULL,
+                reason_code TEXT NOT NULL,
+                provider_message_id TEXT,
+                occurred_at_us INTEGER NOT NULL,
+                payload_json TEXT NOT NULL
+            );
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO notification_events(
+                event_id, semantic_id, lane, occurred_at_us, expires_at_us,
+                payload_json, payload_sha256, target_set_sha256,
+                writer_generation, created_at_us
+            ) VALUES (?, ?, 'trader_event', ?, ?, '{}', ?, ?, 1, ?)
+            """,
+            (
+                "intent:ready:notify:one",
+                "intent:ready:semantic:one",
+                int(NOW.timestamp() * 1_000_000),
+                int((NOW + timedelta(minutes=5)).timestamp() * 1_000_000),
+                "0" * 64,
+                "1" * 64,
+                int(NOW.timestamp() * 1_000_000),
+            ),
+        )
+        # Rust ingress or a non-human channel must never authorize shadow entry.
+        connection.execute(
+            """
+            INSERT INTO delivery_receipts(
+                receipt_id, target_id, intent_id, target_key, channel,
+                attempt_id, outcome, attempted, ok, queued_for_retry,
+                reason_code, provider_message_id, occurred_at_us, payload_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '{}')
+            """,
+            (
+                "receipt-ingress",
+                "target-ingress",
+                "intent:ready:notify:one",
+                "rust-ingress",
+                "webhook",
+                "attempt-ingress",
+                "delivered",
+                1,
+                1,
+                0,
+                "delivered",
+                None,
+                int(NOW.timestamp() * 1_000_000),
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO delivery_receipts(
+                receipt_id, target_id, intent_id, target_key, channel,
+                attempt_id, outcome, attempted, ok, queued_for_retry,
+                reason_code, provider_message_id, occurred_at_us, payload_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '{}')
+            """,
+            (
+                "receipt-feishu",
+                "target-feishu",
+                "intent:ready:notify:one",
+                "feishu-primary",
+                "feishu",
+                "attempt-feishu",
+                "delivered",
+                1,
+                1,
+                0,
+                "delivered",
+                "provider-message",
+                int((NOW + timedelta(seconds=2)).timestamp() * 1_000_000),
+            ),
+        )
+
+    receipt = find_external_delivery_receipt(
+        "intent:ready:notify:one",
+        rust_owner=True,
+        rust_ledger_path=str(ledger),
+    )
+
+    assert receipt is not None
+    assert receipt.receipt_id == "receipt-feishu"
+    assert receipt.delivered_at == NOW + timedelta(seconds=2)
+    assert receipt.channel == "feishu"
+    assert receipt.ledger == "rust_operations"
 
 
 @pytest.mark.parametrize(
