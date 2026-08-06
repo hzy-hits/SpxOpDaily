@@ -7,6 +7,7 @@ from spx_spark.notifier.dispatcher import (
     EnqueueResult,
     consume_pending_notifications,
     dispatch_notification,
+    enqueue_linked_notification,
     enqueue_notification,
 )
 from spx_spark.notifier.model import (
@@ -69,6 +70,7 @@ __all__ = [
     "consume_pending_notifications",
     "default_runner",
     "dispatch_notification",
+    "enqueue_linked_notification",
     "direct_push_alerts",
     "enqueue_notification",
     "format_alert_message",

@@ -101,8 +101,9 @@ L0 foundation      marketdata, market_calendar, alert_model, runtime_config,
   `morning_map.py` 为门面
 - `application/runtime/` — service_loop settings / registry / runner / scheduler
 - `application/market_features/` — 实时特征编排、GTH 手工候选，以及独立的
-  current-session trend transition source 校验与候选生命周期分类；不持有
-  provider 原始字段
+  current-session trend transition source 校验与候选生命周期分类；其中
+  `gth_level_candidate_runtime.py` 负责候选持久化、投递回执对账、人工计划监控、
+  gate/replay 日志，候选评估模块仅保留决策与兼容门面；不持有 provider 原始字段
 - `service_loop.py`、`maintenance.py`、`post_close_review.py`、`latest_state.py`
 
 ## 3. 兼容门面预算

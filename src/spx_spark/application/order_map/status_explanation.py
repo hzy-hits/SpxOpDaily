@@ -19,6 +19,19 @@ STATUS_EXPLANATION_SYSTEM_PROMPT = "\n".join(
     )
 )
 
+GTH_OPERATOR_READY_EDGE_AUTHORITY = "validated_first_touch_time_stop_net_pnl"
+
+
+def manual_candidate_ready_authorized(manual: dict[str, Any]) -> bool:
+    """Fail closed when a persisted GTH READY projection is legacy or inconsistent."""
+
+    return bool(
+        manual.get("status") == "manual_ready"
+        and manual.get("manual_action_eligible") is True
+        and manual.get("operator_notification_eligible") is True
+        and manual.get("edge_authority") == GTH_OPERATOR_READY_EDGE_AUTHORITY
+    )
+
 
 def build_status_explanation_prompt(
     payload: dict[str, Any],
@@ -83,8 +96,15 @@ def operator_reason_line(payload: dict[str, Any]) -> str:
     decision_spot = finite_float(decision.get("spot"))
     decision_es = finite_float(decision.get("es"))
     reasons: list[str] = []
-    if intent.get("status") == "trade_ready" or manual.get("status") == "manual_ready":
+    if intent.get("status") == "trade_ready" or manual_candidate_ready_authorized(manual):
         return "原因  结构与执行门控已通过；实时报价以独立 MANUAL READY 卡为准"
+    if manual.get("status") == "manual_ready":
+        return "原因  GTH 手工候选执行权限契约不完整，已失效关闭"
+    if manual.get("status") == "structure_watch":
+        return (
+            "原因  结构与精确报价已记录；缺少经验证的首次触及/时间退出净收益权限，"
+            "仅供观察与回放，不可入场"
+        )
     if (
         underlier.get("price") is None
         and decision_spot is None

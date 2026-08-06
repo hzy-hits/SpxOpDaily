@@ -66,6 +66,7 @@ from spx_spark.application.market_features.prior_rth_context import (
 )
 from spx_spark.application.market_features.provider_entry_control import (
     apply_provider_entry_control as _apply_provider_entry_control,
+    gth_ibkr_entry_control as _gth_ibkr_entry_control,
     provider_entry_control as _provider_entry_control,
 )
 from spx_spark.application.market_features.state import (
@@ -130,10 +131,7 @@ from spx_spark.greek_reference import build_zero_dte_greeks_reference
 from spx_spark.macro_event_clock import macro_event_state
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 from spx_spark.marketdata import as_utc
-from spx_spark.options_map import (
-    build_options_map,
-    group_spxw_option_quotes,
-)
+from spx_spark.options_map import build_options_map, group_spxw_option_quotes
 from spx_spark.provider_failover_controller import ProviderFailoverSettings
 from spx_spark.settings import load_app_settings
 from spx_spark.settings.market_features import MarketFeatureSettings
@@ -491,6 +489,22 @@ def run(
         failover_settings,
         now=action_now,
     )
+    action_gth_ibkr_entry_control = _gth_ibkr_entry_control(
+        storage.data_root,
+        now=action_now,
+    )
+    gth_entries_allowed = bool(
+        action_provider_entry_control["allowed"] is True
+        and action_gth_ibkr_entry_control["allowed"] is True
+    )
+    gth_entry_block_reason = (
+        str(action_provider_entry_control.get("reason") or "provider_entry_control_blocked")
+        if action_provider_entry_control["allowed"] is not True
+        else str(
+            action_gth_ibkr_entry_control.get("reason")
+            or "ibkr_gth_entry_control_blocked"
+        )
+    )
     strategy_distribution_forecast: dict[str, object] = {}
     strategy_distribution_forecast_error: str | None = None
     try:
@@ -527,8 +541,8 @@ def run(
         macro_event=action_macro_event,
         now=action_now,
         policy=policy,
-        new_entries_allowed=action_provider_entry_control["allowed"] is True,
-        new_entries_block_reason=str(action_provider_entry_control.get("reason") or "unknown"),
+        new_entries_allowed=gth_entries_allowed,
+        new_entries_block_reason=gth_entry_block_reason,
         prior_session=prior_session,
         gth_position_fraction=current_gth_position,
         play_stats=play_stats,
@@ -614,6 +628,7 @@ def run(
             "action_quote_state_created_at": action_latest.created_at.isoformat(),
             "action_macro_event": action_macro_event,
             "action_provider_entry_control": action_provider_entry_control,
+            "action_gth_ibkr_entry_control": action_gth_ibkr_entry_control,
             "trade_candidate": trade_candidate,
             "confirmed_gate": confirmed_gate,
             "level_decision_refresh_error": level_decision_refresh_error,

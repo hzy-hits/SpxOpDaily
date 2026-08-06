@@ -94,6 +94,7 @@ class MarketFeatureSettings:
     virtual_gth_spread_saturation_fraction: float = 0.85
     play_stats_enabled: bool = True
     play_stats_hard_gate_enabled: bool = False
+    gth_negative_play_stats_veto_enabled: bool = True
     play_stats_window_days: int = 20
     play_stats_horizon: str = "300"
     play_stats_min_samples: int = 30

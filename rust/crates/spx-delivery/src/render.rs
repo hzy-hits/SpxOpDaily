@@ -51,7 +51,7 @@ pub fn render_operator_notification(notification: &OperatorNotificationV1) -> Re
             trade_ready_title(notification.title.as_str(), &notification.body),
             compact_trade_ready_body(&notification.body),
         ),
-        OperatorNotificationRole::Exit => (
+        OperatorNotificationRole::Cancel | OperatorNotificationRole::Exit => (
             notification.title.as_str().to_owned(),
             notification.body.clone(),
         ),

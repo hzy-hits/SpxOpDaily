@@ -5,25 +5,27 @@ from __future__ import annotations
 import hashlib
 import math
 from datetime import datetime, timedelta
-from pathlib import Path
 from typing import Mapping
 
+from spx_spark.application.market_features.gth_level_candidate_runtime import (
+    TERMINAL_RECEIPT_CHECK_MAX_SECONDS as TERMINAL_RECEIPT_CHECK_MAX_SECONDS,
+    TERMINAL_RECEIPT_CHECK_MIN_SECONDS as TERMINAL_RECEIPT_CHECK_MIN_SECONDS,
+    TERMINAL_RECEIPT_RECOVERY_MAX_SECONDS as TERMINAL_RECEIPT_RECOVERY_MAX_SECONDS,
+    _apply_active_plan_coherence as _apply_active_plan_coherence,
+    _external_ready_receipt as _external_ready_receipt,
+    _gate_record as _gate_record,
+    _replay_candidate_record as _replay_candidate_record,
+    persist_gth_level_manual_candidate,
+)
 from spx_spark.application.market_features.gth_manual_candidate import (
     NET_DEBIT_PRICE_INCREMENT,
     _blocked,
     _direct_es_reference,
     _gth_bbo_contract_snapshot,
     _gth_end,
-    _notification_intent,
 )
 from spx_spark.application.market_features.gth_candidate_lifecycle import (
-    active_manual_plan_snapshot,
-    cancellation_scope,
     classify_source_lifecycle,
-    mark_refresh_pending,
-    recover_active_manual_plan,
-    seed_replayed_candidate_ids,
-    unreplayed_candidate,
 )
 from spx_spark.application.market_features.gth_trend_entry_source import (
     build_candidate_policy_version,
@@ -64,19 +66,34 @@ from spx_spark.notifier.dispatcher import cancel_pending_notification
 from spx_spark.options_map import actionable_chain_implied_reference
 from spx_spark.settings.market_features import MarketFeatureSettings
 from spx_spark.state_io import (
-    append_jsonl_secure,
     atomic_write_json_secure,
-    exclusive_state_lock,
-    read_json_object,
+    read_json_object as _read_json_object,
 )
 from spx_spark.storage import LatestState
-from spx_spark.strategy_contract import strategy_event_fields
+
+
+read_json_object = _read_json_object
 
 
 CONTRACT_VERSION = "gth_level_manual_candidate.v1"
 SPREAD_MIN_WIDTH_POINTS = 5.0
 SPREAD_DEFAULT_WIDTH_POINTS = 25.0
 SPREAD_MAX_WIDTH_POINTS = 40.0
+EDGE_AUTHORITY_REQUIRED = "validated_first_touch_time_stop_net_pnl"
+EDGE_AUTHORITY_UNAVAILABLE_REASON = "first_touch_time_stop_net_pnl_authority_unavailable"
+
+
+def _operator_edge_authority() -> tuple[str, str | None]:
+    """Return the production authority for promoting a structure to operator READY.
+
+    Exact NBBO and expiry payoff geometry are observations, not evidence that a
+    15-minute plan has positive net expectancy.  This deliberately has no
+    config escape hatch: a future implementation must bind a validated,
+    causal first-touch/time-stop net-PnL artifact before returning the required
+    closed authority value.
+    """
+
+    return "none", EDGE_AUTHORITY_UNAVAILABLE_REASON
 
 
 def evaluate_gth_level_manual_candidate(
@@ -156,7 +173,15 @@ def evaluate_gth_level_manual_candidate(
                 "block_reasons": trend_source_reasons,
             }
         ),
-        "historical_edge_authority": "diagnostic_only",
+        "historical_edge_authority": (
+            "negative_safety_veto_only"
+            if policy.gth_negative_play_stats_veto_enabled
+            else "diagnostic_only"
+        ),
+        "edge_authority": "none",
+        "edge_authority_required": EDGE_AUTHORITY_REQUIRED,
+        "edge_authority_reason": EDGE_AUTHORITY_UNAVAILABLE_REASON,
+        "expiry_payoff_ratio_role": "diagnostic_only",
         "block_reasons": [],
         "signal_absence_reason": (None if source_id else "no_level_or_trend_source_signal"),
         "gate_contract": {
@@ -164,12 +189,16 @@ def evaluate_gth_level_manual_candidate(
             "hard_gates": [
                 "confirmed_directional_source",
                 "causal_current_session_directional_source",
+                "inside_to_outside_breakout_crossing",
+                "breakout_extension_before_retest",
+                "mandatory_breakout_retest",
                 "gth_session",
                 "fresh_ibkr_spxw_two_leg_quote",
                 "usable_spx_or_es_basis_coordinate",
                 "coherent_risk_geometry",
                 "gth_breakout_trend_alignment",
-                "minimum_spread_reward_risk",
+                "validated_first_touch_time_stop_net_pnl_edge_authority",
+                "sufficiently_sampled_negative_history_veto",
                 "prior_session_chase_control",
                 "signal_ttl",
             ],
@@ -190,9 +219,14 @@ def evaluate_gth_level_manual_candidate(
     if not new_entries_allowed:
         base["provider_incident_warning"] = new_entries_block_reason
         reasons.append("provider_entry_control_blocked")
-    thesis, direction, level_kind = manual_source_path_fields(
-        source_mode, level_decision, source
-    )
+    thesis, direction, level_kind = manual_source_path_fields(source_mode, level_decision, source)
+    if source_mode == "level" and thesis == "breakout":
+        if _time(source.get("breakout_inside_seen_at")) is None:
+            reasons.append("breakout_inside_crossing_evidence_missing")
+        if _time(source.get("breakout_extension_seen_at")) is None:
+            reasons.append("breakout_extension_evidence_missing")
+        if _time(source.get("breakout_retest_seen_at")) is None:
+            reasons.append("breakout_retest_evidence_missing")
     if (
         source_mode == "level"
         and thesis == "breakout"
@@ -207,6 +241,20 @@ def evaluate_gth_level_manual_candidate(
         minimum_winrate=policy.play_stats_min_winrate,
     )
     base["historical_edge_diagnostics"] = historical_diagnostics
+    if (
+        policy.gth_negative_play_stats_veto_enabled
+        and play_stats is not None
+        and play_stats.sample_count >= policy.play_stats_min_samples
+    ):
+        reasons.extend(
+            reason
+            for reason in historical_diagnostics
+            if reason
+            in {
+                "historical_average_return_non_positive",
+                "historical_median_return_non_positive",
+            }
+        )
     if policy.play_stats_hard_gate_enabled:
         reasons.extend(historical_diagnostics)
     if play_stats is not None:
@@ -472,7 +520,7 @@ def evaluate_gth_level_manual_candidate(
     if reward_risk is None:
         reasons.append("spread_reward_risk_unavailable")
     elif reward_risk < policy.gth_manual_candidate_min_reward_risk:
-        reasons.append("spread_reward_risk_insufficient")
+        ranking_diagnostics.append("expiry_payoff_ratio_below_diagnostic_floor")
     prior_session_view = prior_session_signal_view(
         prior_session,
         direction=direction,
@@ -534,10 +582,21 @@ def evaluate_gth_level_manual_candidate(
     exit_at = min(now + timedelta(minutes=policy.trade_time_stop_minutes), gth_end)
     max_loss = entry_limit * 100.0
     max_profit = (width - entry_limit) * 100.0
+    edge_authority, edge_authority_reason = _operator_edge_authority()
+    operator_ready = edge_authority == EDGE_AUTHORITY_REQUIRED and edge_authority_reason is None
     return {
         **base,
-        "status": "manual_ready",
-        "manual_action_eligible": True,
+        "status": "manual_ready" if operator_ready else "structure_watch",
+        "candidate_scope": "manual_live" if operator_ready else "research_watch",
+        "execution_mode": "manual_only" if operator_ready else "observe_only",
+        "manual_action_eligible": operator_ready,
+        "operator_action": "manual_limit_only" if operator_ready else "observe_only",
+        "operator_notification_eligible": operator_ready,
+        "edge_authority": edge_authority,
+        "edge_authority_required": EDGE_AUTHORITY_REQUIRED,
+        "edge_authority_reason": edge_authority_reason,
+        "expiry_payoff_ratio_role": "diagnostic_only",
+        "expiry": expiry,
         "valid_until": valid_until.isoformat(),
         "path_kind": path_kind,
         "direction": direction,
@@ -601,10 +660,11 @@ def evaluate_gth_level_manual_candidate(
         "spring_gamma": spring_gamma_view,
         "prior_session": prior_session_view,
         "block_reasons": [],
-        "signal_absence_reason": None,
+        "signal_absence_reason": None if operator_ready else edge_authority_reason,
         "gate_contract": {
             **base["gate_contract"],
             "hard_block_reasons": [],
+            "operator_ready_block_reasons": ([] if operator_ready else [edge_authority_reason]),
         },
     }
 
@@ -655,345 +715,14 @@ def _persist_candidate(
     now: datetime,
     notification: NotificationSettings | None,
 ) -> dict[str, object]:
-    state_path = Path(storage.data_root) / "latest" / "gth_level_manual_candidate_state.json"
-    projection_path = Path(storage.data_root) / "latest" / "gth_level_manual_candidate.json"
-    candidate = dict(candidate)
-    notification_event_id: str | None = None
-    settings = notification or NotificationSettings.from_env()
-    with exclusive_state_lock(state_path):
-        state = read_json_object(state_path)
-        candidate = mark_refresh_pending(candidate)
-        active_plan = recover_active_manual_plan(state, now=now)
-        candidate, active_plan = _apply_active_plan_coherence(candidate, active_plan, now=now)
-        notification_event_id = (
-            f"{candidate['candidate_id']}:ready" if candidate.get("status") == "manual_ready" else None
-        )
-        gate_record_key, gate_record = _gate_record(candidate, now=now)
-        replay_journal_path = (
-            Path(storage.data_root) / "features" / "gth_level_manual_candidates"
-            / f"date={DEFAULT_MARKET_CALENDAR.research_expiry(now).isoformat()}"
-            / "events.jsonl"
-        )
-        replayed_candidate_ids = seed_replayed_candidate_ids(
-            state,
-            replay_journal_path=replay_journal_path,
-        )
-        if state.get("last_gate_record_key") != gate_record_key:
-            replay_record = _replay_candidate_record(candidate, now=now)
-            replay_candidate_id = unreplayed_candidate(candidate, replayed_candidate_ids)
-            if replay_record is not None and replay_candidate_id is not None:
-                append_jsonl_secure(
-                    Path(storage.data_root)
-                    / "features"
-                    / "gth_level_manual_candidates"
-                    / f"date={replay_record['session_date']}"
-                    / "events.jsonl",
-                    replay_record,
-                )
-                replayed_candidate_ids.add(replay_candidate_id)
-            append_jsonl_secure(
-                Path(storage.data_root)
-                / "features"
-                / "gth_manual_signal_gates"
-                / f"date={now.date().isoformat()}"
-                / "events.jsonl",
-                gate_record,
-            )
-        accepted = {
-            str(item)
-            for item in (
-                list(state.get("accepted_notification_event_ids") or [])
-                + list(state.get("notified_event_ids") or [])
-            )
-            if item
-        }
-        settled = {str(item) for item in state.get("settled_notification_event_ids") or [] if item}
-        pending = [
-            dict(item)
-            for item in state.get("pending_notifications") or []
-            if isinstance(item, Mapping)
-        ]
-        lifecycle_events = {
-            str(item.get("event_id") or ""): str(item.get("source_signal_id") or "")
-            for item in state.get("notification_lifecycle_events") or []
-            if isinstance(item, Mapping) and item.get("event_id") and item.get("source_signal_id")
-        }
-        cancellation_pending = {
-            str(item)
-            for item in state.get("pending_notification_cancellation_event_ids") or []
-            if item
-        }
-        cancellation_times = {
-            str(key): parsed
-            for key, value in dict(
-                state.get("pending_notification_cancellation_at") or {}
-            ).items()
-            if key and (parsed := _time(value)) is not None
-        }
-        previous = state.get("last_candidate")
-        if isinstance(previous, Mapping):
-            candidate_id = str(previous.get("candidate_id") or "")
-            source_id = str(previous.get("source_signal_id") or "")
-            if candidate_id and source_id:
-                lifecycle_events.setdefault(f"{candidate_id}:ready", source_id)
-        for item in pending:
-            event_id = str(item.get("event_id") or "")
-            source_id = str(item.get("source_signal_id") or "")
-            if event_id and source_id:
-                lifecycle_events.setdefault(event_id, source_id)
-        if notification_event_id:
-            lifecycle_events.setdefault(
-                notification_event_id,
-                str(candidate.get("source_signal_id") or ""),
-            )
-        cancellation_pending.update(
-            cancellation_scope(candidate, lifecycle_events, now=now)
-        )
-        for event_id in cancellation_pending:
-            cancellation_times.setdefault(event_id, now)
-        if cancellation_pending:
-            state["pending_notification_cancellation_event_ids"] = sorted(
-                cancellation_pending
-            )[-200:]
-            state["pending_notification_cancellation_at"] = {
-                event_id: cancellation_times[event_id].isoformat()
-                for event_id in sorted(cancellation_pending)[-200:]
-            }
-            atomic_write_json_secure(state_path, state)
-        for event_id in sorted(cancellation_pending):
-            try:
-                cancel_pending_notification(
-                    settings,
-                    event_id,
-                    now=cancellation_times[event_id],
-                    reason="source_candidate_no_longer_manual_ready",
-                )
-            except Exception:
-                continue
-            cancellation_pending.discard(event_id)
-            cancellation_times.pop(event_id, None)
-            settled.add(event_id)
-            accepted.discard(event_id)
-            lifecycle_events.pop(event_id, None)
-            pending = [item for item in pending if str(item.get("event_id") or "") != event_id]
-        pending_ids = {str(item.get("event_id") or "") for item in pending}
-        if (
-            notification_event_id
-            and not cancellation_pending
-            and notification_event_id not in accepted
-            and notification_event_id not in settled
-            and notification_event_id not in pending_ids
-        ):
-            pending.append(
-                _notification_intent(
-                    candidate,
-                    event_id=notification_event_id,
-                    now=now,
-                )
-            )
-        state.update(
-            {
-                "schema_version": 1,
-                "updated_at": now.isoformat(),
-                "last_gate_record_key": gate_record_key,
-                "last_candidate": dict(candidate),
-                "replayed_candidate_ids": sorted(replayed_candidate_ids)[-500:],
-                "accepted_notification_event_ids": sorted(accepted)[-200:],
-                "settled_notification_event_ids": sorted(settled)[-200:],
-                "pending_notifications": pending,
-                "notification_lifecycle_events": [
-                    {"event_id": event_id, "source_signal_id": source_id}
-                    for event_id, source_id in sorted(lifecycle_events.items())[-200:]
-                ],
-                "pending_notification_cancellation_event_ids": sorted(cancellation_pending)[-200:],
-                "pending_notification_cancellation_at": {
-                    event_id: cancellation_times[event_id].isoformat()
-                    for event_id in sorted(cancellation_pending)[-200:]
-                    if event_id in cancellation_times
-                },
-                "active_manual_plan": active_plan,
-            }
-        )
-        atomic_write_json_secure(state_path, state)
-        atomic_write_json_secure(projection_path, candidate)
-    result = {"attempted": False, "accepted": False}
-    if notification_event_id:
-        result = flush_pending_notifications(
-            state_path,
-            settings=settings,
-            now=now,
-            only_event_id=notification_event_id,
-        )
-    if notification_event_id and result.get("accepted") is True:
-        with exclusive_state_lock(state_path):
-            state = read_json_object(state_path)
-            state["active_manual_plan"] = active_manual_plan_snapshot(
-                candidate,
-                activated_at=now.isoformat(),
-            )
-            atomic_write_json_secure(state_path, state)
-    return {
-        **candidate,
-        "notification_attempted": bool(result.get("attempted")),
-        "notification_accepted": bool(result.get("accepted")),
-        "notification_outcome": result.get("outcome"),
-    }
-
-
-def _apply_active_plan_coherence(
-    candidate: Mapping[str, object],
-    active_plan: Mapping[str, object],
-    *,
-    now: datetime,
-) -> tuple[dict[str, object], dict[str, object]]:
-    """Prevent an opposite card until the prior operator plan is resolved."""
-    candidate = dict(candidate)
-    active = dict(active_plan)
-    if candidate.get("status") != "manual_ready" or not active:
-        return candidate, active
-    direction = str(candidate.get("direction") or "")
-    active_direction = str(active.get("direction") or "")
-    if direction not in {"up", "down"} or active_direction not in {"up", "down"}:
-        return candidate, active
-    if direction == active_direction:
-        return candidate, active
-    release_reason = _active_plan_release_reason(
-        active,
-        current_spx=_number(candidate.get("current_parity_spx")),
+    """Compatibility facade for the durable candidate lifecycle runtime."""
+    return persist_gth_level_manual_candidate(
+        storage,
+        candidate,
         now=now,
+        notification=notification,
+        flush_pending_notifications_fn=flush_pending_notifications,
+        cancel_pending_notification_fn=cancel_pending_notification,
+        external_ready_receipt_fn=_external_ready_receipt,
+        atomic_write_json_secure_fn=atomic_write_json_secure,
     )
-    if release_reason is None:
-        reasons = [
-            *[str(item) for item in candidate.get("block_reasons") or ()],
-            "opposite_signal_conflicts_with_active_plan",
-        ]
-        gate_contract = candidate.get("gate_contract")
-        gate_contract = dict(gate_contract) if isinstance(gate_contract, Mapping) else {}
-        return (
-            {
-                **candidate,
-                "status": "blocked",
-                "manual_action_eligible": False,
-                "signal_absence_reason": "active_manual_plan_not_invalidated",
-                "block_reasons": list(dict.fromkeys(reasons)),
-                "active_manual_plan": active,
-                "gate_contract": {
-                    **gate_contract,
-                    "hard_block_reasons": list(dict.fromkeys(reasons)),
-                },
-            },
-            active,
-        )
-    return (
-        {
-            **candidate,
-            "replaces_prior_plan": {
-                "candidate_id": active.get("candidate_id"),
-                "direction": active_direction,
-                "release_reason": release_reason,
-            },
-        },
-        {},
-    )
-
-
-def _active_plan_release_reason(
-    active_plan: Mapping[str, object],
-    *,
-    current_spx: float | None,
-    now: datetime,
-) -> str | None:
-    exit_at = _time(active_plan.get("exit_at"))
-    if exit_at is not None and now >= exit_at:
-        return "time_exit_elapsed"
-    if current_spx is None:
-        return None
-    direction = str(active_plan.get("direction") or "")
-    invalidation = _number(active_plan.get("invalidation_spx"))
-    target = _number(active_plan.get("target_spx"))
-    if direction == "down":
-        if invalidation is not None and current_spx >= invalidation:
-            return "prior_put_invalidated"
-        if target is not None and current_spx <= target:
-            return "prior_put_target_reached"
-    elif direction == "up":
-        if invalidation is not None and current_spx <= invalidation:
-            return "prior_call_invalidated"
-        if target is not None and current_spx >= target:
-            return "prior_call_target_reached"
-    return None
-
-
-def _gate_record(
-    candidate: Mapping[str, object],
-    *,
-    now: datetime,
-) -> tuple[str, dict[str, object]]:
-    identity = "|".join(
-        (
-            now.date().isoformat(),
-            str(candidate.get("source_signal_id") or "none"),
-            str(candidate.get("candidate_id") or "none"),
-            str(candidate.get("status") or "unknown"),
-            str(candidate.get("path_kind") or "none"),
-            ",".join(str(item) for item in candidate.get("block_reasons") or ()),
-        )
-    )
-    digest = hashlib.sha256(identity.encode()).hexdigest()[:24]
-    gate_contract = candidate.get("gate_contract")
-    return digest, {
-        "schema_version": 1,
-        "record_id": f"gth-manual-gate:{digest}",
-        "recorded_at": now.isoformat(),
-        "source_signal_id": candidate.get("source_signal_id"),
-        "source_kind": candidate.get("source_kind"),
-        "candidate_id": candidate.get("candidate_id"),
-        "status": candidate.get("status"),
-        "path_kind": candidate.get("path_kind"),
-        "direction": candidate.get("direction"),
-        "long_contract_id": candidate.get("long_contract_id"),
-        "short_contract_id": candidate.get("short_contract_id"),
-        "signal_absence_reason": candidate.get("signal_absence_reason"),
-        "block_reasons": list(candidate.get("block_reasons") or ()),
-        "gate_contract": (dict(gate_contract) if isinstance(gate_contract, Mapping) else None),
-        "session_quote_provider": "ibkr",
-    }
-
-
-def _replay_candidate_record(
-    candidate: Mapping[str, object],
-    *,
-    now: datetime,
-) -> dict[str, object] | None:
-    """Build replay only for actionable cards; blocked states stay in the gate journal."""
-    if candidate.get("status") != "manual_ready":
-        return None
-    parity = candidate.get("target_coordinate")
-    parity = dict(parity) if isinstance(parity, Mapping) else {}
-    observed_spx = _number(candidate.get("current_parity_spx"))
-    trigger_level = _number(candidate.get("trigger_level"))
-    coordinate = {
-        "kind": "chain_implied_spx",
-        "instrument_id": "synthetic:SPXW_PARITY",
-        "observed_value": observed_spx,
-        "target_value": trigger_level,
-        "spx_observed_value": observed_spx,
-        # Parity is SPX-coordinate; invalidation_es separately carries ES/SPX basis.
-        "basis_points": 0.0,
-        "as_of": parity.get("source_at") or candidate.get("evaluated_at"),
-    }
-    return {
-        **candidate,
-        **strategy_event_fields(
-            policy_version_value=str(candidate.get("policy_version") or ""),
-            valid_until=candidate.get("valid_until"),
-            coordinate=coordinate,
-            block_reasons=candidate.get("block_reasons") or (),
-        ),
-        "event": "gth_level_manual_candidate_evaluated",
-        "strategy_id": "gth_level_manual_candidate",
-        "strategy_lane": "gth_level_manual_candidate",
-        "lifecycle_status": "legacy_production",
-        "runtime_status": "production_runtime",
-        "session_date": DEFAULT_MARKET_CALENDAR.research_expiry(now).isoformat(),
-    }

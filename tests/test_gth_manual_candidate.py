@@ -178,9 +178,7 @@ def test_confirmed_gth_flip_low_breakdown_builds_put_manual_ready(
     assert candidate["execution_eligible"] is False
     assert candidate["broker_submission_allowed"] is False
     assert candidate["prior_session"]["chase_risk"] == "elevated"
-    assert "prior_session_same_direction_chase_risk_elevated" in candidate[
-        "ranking_diagnostics"
-    ]
+    assert "prior_session_same_direction_chase_risk_elevated" in candidate["ranking_diagnostics"]
     assert candidate["block_reasons"] == []
     card = _notification_intent(candidate, event_id="put-ready", now=NOW)
     assert "🟢 MANUAL READY · PUT SPREAD" in card["text"]
@@ -193,7 +191,9 @@ def test_confirmed_gth_flip_low_breakdown_builds_put_manual_ready(
     assert "本票同向追单风险偏高" in card["text"]
     assert "止损  SPX 收回 7383.00；ES 升至 7413.00" in card["text"]
     assert "目标  SPX 7300.00（Put Wall）" in card["text"]
-    assert "赔率  最大收益/最大亏损" in card["text"]
+    assert "到期最大赔付比" in card["text"]
+    assert "非胜率或期望收益" in card["text"]
+    assert "赔率  最大收益/最大亏损" not in card["text"]
     assert "退出  " in card["text"]
     assert "有效  剩余 " in card["text"]
     assert "自动下单关闭" in card["text"]
@@ -277,7 +277,35 @@ def test_confirmed_gth_breakout_cannot_fight_established_es_regime(
     assert "gth_trend_regime_opposes_breakout" in candidate["block_reasons"]
 
 
-def test_confirmed_gth_level_keeps_touch_quote_outcomes_diagnostic(
+def test_confirmed_gth_breakout_without_crossing_or_retest_evidence_is_blocked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_ready_market(monkeypatch, now=NOW, parity_price=7384.3, es_price=7411.5)
+    level_signal = _level_signal(
+        NOW,
+        direction="up",
+        level_kind="flip_high",
+        level=7380.0,
+    )
+    level_signal.pop("breakout_inside_seen_at")
+    level_signal.pop("breakout_retest_seen_at")
+
+    candidate = evaluate_gth_level_manual_candidate(
+        object(),
+        level_signal,
+        macro_event={"entry_allowed": True},
+        now=NOW,
+        policy=MarketFeatureSettings(),
+        new_entries_allowed=True,
+        new_entries_block_reason="allowed",
+    )
+
+    assert candidate["status"] == "blocked"
+    assert "breakout_inside_crossing_evidence_missing" in candidate["block_reasons"]
+    assert "breakout_retest_evidence_missing" in candidate["block_reasons"]
+
+
+def test_confirmed_gth_level_blocks_sufficiently_sampled_negative_touch_quote_outcomes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _patch_ready_market(monkeypatch, now=NOW, parity_price=7368.0, es_price=7398.0)
@@ -304,17 +332,46 @@ def test_confirmed_gth_level_keeps_touch_quote_outcomes_diagnostic(
         play_stats=stats,
     )
 
-    assert candidate["status"] == "manual_ready"
-    assert candidate["play_stats"]["semantics"] == (
-        "matched_touch_quote_outcomes_not_live_fills"
-    )
+    assert candidate["status"] == "blocked"
+    assert candidate["historical_edge_authority"] == "negative_safety_veto_only"
+    assert candidate["play_stats"]["semantics"] == ("matched_touch_quote_outcomes_not_live_fills")
     assert "historical_winrate_below_floor" in candidate["historical_edge_diagnostics"]
-    assert "historical_average_return_non_positive" in candidate[
-        "historical_edge_diagnostics"
-    ]
-    assert "historical_median_return_non_positive" in candidate[
-        "historical_edge_diagnostics"
-    ]
+    assert "historical_average_return_non_positive" in candidate["historical_edge_diagnostics"]
+    assert "historical_median_return_non_positive" in candidate["historical_edge_diagnostics"]
+    assert "historical_average_return_non_positive" in candidate["block_reasons"]
+    assert "historical_median_return_non_positive" in candidate["block_reasons"]
+    assert "historical_winrate_below_floor" not in candidate["block_reasons"]
+
+
+def test_confirmed_gth_level_does_not_veto_negative_history_below_sample_floor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_ready_market(monkeypatch, now=NOW, parity_price=7368.0, es_price=7398.0)
+    stats = PlayOutcomeStats(
+        play="level_breakout_put",
+        level_kind="flip_low",
+        sample_count=29,
+        winrate=0.4,
+        avg_return=-0.02,
+        median_return=-0.01,
+        window_days=20,
+        horizon="300",
+        as_of=NOW.isoformat(),
+    )
+
+    candidate = evaluate_gth_level_manual_candidate(
+        object(),
+        _level_signal(NOW, direction="down", level_kind="flip_low", level=7375.0),
+        macro_event={"entry_allowed": True},
+        now=NOW,
+        policy=MarketFeatureSettings(),
+        new_entries_allowed=True,
+        new_entries_block_reason="allowed",
+        play_stats=stats,
+    )
+
+    assert candidate["status"] == "manual_ready"
+    assert candidate["historical_edge_diagnostics"]
     assert candidate["block_reasons"] == []
 
 
@@ -456,6 +513,85 @@ def test_confirmed_gth_upper_acceptance_builds_call_manual_ready(
     assert candidate["long_contract_id"].endswith(f":{int(trigger)}:C")
     assert candidate["entry_limit"] == 12.0
     assert candidate["automatic_ordering"] is False
+
+
+def test_expiry_payoff_geometry_without_time_stop_edge_authority_is_watch_only(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_ready_market(
+        monkeypatch,
+        now=NOW,
+        parity_price=7734.3,
+        es_price=7760.62,
+        spread_bid=15.20,
+        spread_mid=15.40,
+        spread_ask=15.60,
+        edge_authority=None,
+    )
+    source = _level_signal(
+        NOW,
+        direction="up",
+        level_kind="call_wall",
+        level=7730.0,
+    )
+    source["levels"] = {
+        **dict(source["levels"]),
+        "call_wall": 7770.0,
+    }
+    source["es_basis_points"] = 26.32
+
+    candidate = process_gth_level_manual_candidate(
+        SimpleNamespace(data_root=str(tmp_path)),
+        object(),
+        source,
+        macro_event={"entry_allowed": True},
+        now=NOW,
+        policy=MarketFeatureSettings(),
+        new_entries_allowed=True,
+        new_entries_block_reason="allowed",
+    )
+
+    assert candidate["status"] == "structure_watch"
+    assert candidate["manual_action_eligible"] is False
+    assert candidate["operator_notification_eligible"] is False
+    assert candidate["operator_action"] == "observe_only"
+    assert candidate["edge_authority"] == "none"
+    assert candidate["edge_authority_reason"] == (
+        "first_touch_time_stop_net_pnl_authority_unavailable"
+    )
+    assert candidate["expiry_payoff_ratio_role"] == "diagnostic_only"
+    assert candidate["reward_risk_at_limit"] == pytest.approx(1.5641)
+    assert candidate["trigger_level"] == 7730.0
+    assert candidate["current_parity_spx"] == 7734.3
+    assert candidate["decision_bid"] == 15.20
+    assert candidate["decision_ask"] == 15.60
+    assert candidate["entry_limit"] == pytest.approx(15.60)
+    assert candidate["target_spx"] == 7770.0
+    assert candidate["exit_at"] == (NOW + timedelta(minutes=15)).isoformat()
+    assert candidate["exact_spread_snapshot"]["quality"]["status"] == "ok"
+    assert candidate["automatic_ordering"] is False
+    assert candidate["broker_submission_allowed"] is False
+    with pytest.raises(ValueError, match="manual-ready candidate"):
+        _notification_intent(candidate, event_id="must-not-send", now=NOW)
+
+    state = json.loads((tmp_path / "latest" / "gth_level_manual_candidate_state.json").read_text())
+    assert state["pending_notifications"] == []
+    assert state["accepted_notification_event_ids"] == []
+    replay_path = (
+        tmp_path
+        / "features"
+        / "gth_level_manual_candidates"
+        / f"date={DEFAULT_MARKET_CALENDAR.research_expiry(NOW).isoformat()}"
+        / "events.jsonl"
+    )
+    replay = [json.loads(row) for row in replay_path.read_text().splitlines()]
+    assert len(replay) == 1
+    assert replay[0]["status"] == "structure_watch"
+    assert replay[0]["exact_spread_snapshot"]["ask"] == 15.60
+    loaded = load_gth_level_candidate_signals(tmp_path / "features")
+    assert len(loaded) == 1
+    assert loaded[0].entry_px == 15.60
 
 
 def test_confirmed_gth_lower_rejection_builds_call_manual_ready(
@@ -643,9 +779,7 @@ def test_gth_trend_quote_refresh_preserves_lifecycle_and_single_replay(
     }
 
     _patch_ready_market(monkeypatch, now=NOW, parity_price=7368.0, es_price=7398.0)
-    ready = process_gth_level_manual_candidate(
-        storage, object(), {}, now=NOW, **common
-    )
+    ready = process_gth_level_manual_candidate(storage, object(), {}, now=NOW, **common)
     monkeypatch.setattr(
         level_candidate_module,
         "spread_snapshot_decision",
@@ -777,6 +911,581 @@ def test_explicit_level_source_absence_cancels_prior_ready_lifecycle(
     assert cancellations == [event_id]
     assert event_id not in state["accepted_notification_event_ids"]
     assert event_id in state["settled_notification_event_ids"]
+
+
+@pytest.mark.parametrize(
+    ("source_updates", "visible_label", "terminal_suffix"),
+    [
+        (
+            {"phase": "invalidated", "formal_signal": False},
+            "EXIT REVIEW",
+            "exit",
+        ),
+        ({"quality_ok": False}, "READY CANCELLED", "cancel"),
+    ],
+)
+def test_delivered_level_ready_emits_one_external_terminal_lifecycle(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    source_updates: dict[str, object],
+    visible_label: str,
+    terminal_suffix: str,
+) -> None:
+    settings = replace(
+        NotificationSettings.from_env(),
+        enabled=True,
+        feishu_enabled=True,
+        feishu_webhook_url="https://open.feishu.cn/test",
+        bark_enabled=False,
+        bark_friend_enabled=False,
+        missed_queue_path=str(tmp_path / "missed.jsonl"),
+        delivery_receipt_path=str(tmp_path / "receipts.sqlite"),
+        delivery_outbox_enabled=True,
+        delivery_outbox_path=str(tmp_path / "delivery-outbox.sqlite"),
+        delivery_outbox_legacy_shadow_enabled=False,
+        rust_trader_notification_owner=False,
+    )
+    deliveries: list[frozenset[str]] = []
+
+    def fake_sink_success(_settings, **kwargs):
+        targets = frozenset(kwargs["targets"])
+        deliveries.append(targets)
+        return [SinkResult(sink=target, attempted=True, ok=True) for target in targets]
+
+    monkeypatch.setattr(
+        "spx_spark.notifier.dispatcher.deliver_trade_push",
+        fake_sink_success,
+    )
+    storage = SimpleNamespace(data_root=str(tmp_path))
+    source = _level_signal(
+        NOW,
+        direction="down",
+        level_kind="flip_low",
+        level=7375.0,
+    )
+    common = {
+        "macro_event": {"entry_allowed": True},
+        "policy": MarketFeatureSettings(),
+        "new_entries_allowed": True,
+        "new_entries_block_reason": "allowed",
+        "notification": settings,
+    }
+
+    _patch_ready_market(monkeypatch, now=NOW, parity_price=7368.0, es_price=7398.0)
+    ready = process_gth_level_manual_candidate(
+        storage,
+        object(),
+        source,
+        now=NOW,
+        **common,
+    )
+    ready_event_id = f"{ready['candidate_id']}:ready"
+    ready_state = level_candidate_module.read_json_object(
+        tmp_path / "latest" / "gth_level_manual_candidate_state.json"
+    )
+    active_plan = ready_state["active_manual_plan"]
+    assert active_plan["ready_event_id"] == ready_event_id
+    assert active_plan["long_contract_id"] == ready["long_contract_id"]
+    assert active_plan["short_contract_id"] == ready["short_contract_id"]
+    assert active_plan["expiry"] == ready["expiry"]
+    assert active_plan["invalidation_coordinate"] == ready["invalidation_coordinate"]
+    assert active_plan["automatic_ordering"] is False
+    consumed_ready = consume_pending_notifications(
+        settings,
+        now=NOW + timedelta(milliseconds=250),
+        notify_dead_letters=False,
+        completion_clock=lambda: NOW + timedelta(milliseconds=250),
+    )
+    ended_source = {**source, **source_updates}
+    ended = process_gth_level_manual_candidate(
+        storage,
+        object(),
+        ended_source,
+        now=NOW + timedelta(seconds=1),
+        **common,
+    )
+    terminal_event_id = f"{ready_event_id}:{terminal_suffix}"
+    consumed_terminal = consume_pending_notifications(
+        settings,
+        now=NOW + timedelta(seconds=2),
+        notify_dead_letters=False,
+        completion_clock=lambda: NOW + timedelta(seconds=2),
+    )
+    repeated = process_gth_level_manual_candidate(
+        storage,
+        object(),
+        ended_source,
+        now=NOW + timedelta(seconds=3),
+        **common,
+    )
+    duplicate_consumer = consume_pending_notifications(
+        settings,
+        now=NOW + timedelta(seconds=4),
+        notify_dead_letters=False,
+    )
+
+    assert consumed_ready["delivered_targets"] == 1
+    assert ended["terminal_notification_accepted"] is True
+    assert consumed_terminal["delivered_targets"] == 1
+    assert repeated["terminal_notification_attempted"] is False
+    assert duplicate_consumer["jobs"] == 0
+    assert deliveries == [frozenset({"feishu"}), frozenset({"feishu"})]
+    with sqlite3.connect(settings.delivery_outbox_path) as connection:
+        rows = connection.execute(
+            "SELECT event_id, kind, lane, status, title, text, operator_opportunity_id "
+            "FROM notification_delivery_events ORDER BY created_at"
+        ).fetchall()
+        cancellation = connection.execute(
+            "SELECT reason FROM notification_delivery_cancellations WHERE event_id = ?",
+            (ready_event_id,),
+        ).fetchone()
+    with sqlite3.connect(settings.delivery_receipt_path) as connection:
+        receipts = connection.execute(
+            "SELECT event_id, kind, lane, outcome FROM notification_delivery_receipts "
+            "ORDER BY attempted_at"
+        ).fetchall()
+    assert [row[0] for row in rows] == [ready_event_id, terminal_event_id]
+    assert rows[1][1:4] == ("virtual_strategy_exit", "strategy_lifecycle", "delivered")
+    assert visible_label in rows[1][4]
+    assert visible_label in rows[1][5]
+    assert f"原卡  {ready_event_id}" in rows[1][5]
+    assert "系统不知道你的成交状态" in rows[1][5]
+    assert "不代表订单已撤销、仓位已平仓" in rows[1][5]
+    assert rows[1][6] == ready["source_signal_id"]
+    assert receipts == [
+        (
+            ready_event_id,
+            "gth_spxw_level_manual_spread_candidate",
+            "gth_level_manual_candidate",
+            "delivered",
+        ),
+        (
+            terminal_event_id,
+            "virtual_strategy_exit",
+            "strategy_lifecycle",
+            "delivered",
+        ),
+    ]
+    assert cancellation == ("source_candidate_no_longer_manual_ready",)
+    state = level_candidate_module.read_json_object(
+        tmp_path / "latest" / "gth_level_manual_candidate_state.json"
+    )
+    assert state["active_manual_plan"] == {}
+    assert terminal_event_id in state["accepted_notification_event_ids"]
+    assert state["pending_terminal_receipt_checks"] == []
+
+
+def test_delayed_ready_receipt_emits_cancel_then_planned_exit_once(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = replace(
+        NotificationSettings.from_env(),
+        enabled=True,
+        feishu_enabled=True,
+        feishu_webhook_url="https://open.feishu.cn/test",
+        bark_enabled=False,
+        bark_friend_enabled=False,
+        missed_queue_path=str(tmp_path / "missed.jsonl"),
+        delivery_receipt_path=str(tmp_path / "receipts.sqlite"),
+        delivery_outbox_enabled=True,
+        delivery_outbox_path=str(tmp_path / "delivery-outbox.sqlite"),
+        delivery_outbox_legacy_shadow_enabled=False,
+        rust_trader_notification_owner=False,
+    )
+    deliveries: list[frozenset[str]] = []
+
+    def fake_sink_success(_settings, **kwargs):
+        targets = frozenset(kwargs["targets"])
+        deliveries.append(targets)
+        return [SinkResult(sink=target, attempted=True, ok=True) for target in targets]
+
+    monkeypatch.setattr(
+        "spx_spark.notifier.dispatcher.deliver_trade_push",
+        fake_sink_success,
+    )
+    storage = SimpleNamespace(data_root=str(tmp_path))
+    source = _level_signal(
+        NOW,
+        direction="down",
+        level_kind="flip_low",
+        level=7375.0,
+    )
+    common = {
+        "macro_event": {"entry_allowed": True},
+        "policy": MarketFeatureSettings(),
+        "new_entries_allowed": True,
+        "new_entries_block_reason": "allowed",
+        "notification": settings,
+    }
+
+    _patch_ready_market(monkeypatch, now=NOW, parity_price=7368.0, es_price=7398.0)
+    ready = process_gth_level_manual_candidate(
+        storage,
+        object(),
+        source,
+        now=NOW,
+        **common,
+    )
+    ready_event_id = f"{ready['candidate_id']}:ready"
+    consume_pending_notifications(
+        settings,
+        now=NOW + timedelta(milliseconds=250),
+        notify_dead_letters=False,
+        completion_clock=lambda: NOW + timedelta(milliseconds=250),
+    )
+    lookups = iter(
+        (
+            SimpleNamespace(observable=True, receipt=None),
+            SimpleNamespace(
+                observable=True,
+                receipt=SimpleNamespace(
+                    receipt_id="late-ready-receipt",
+                    delivered_at=NOW + timedelta(milliseconds=250),
+                ),
+            ),
+        )
+    )
+    monkeypatch.setattr(
+        level_candidate_module,
+        "_external_ready_receipt",
+        lambda _settings, _event_id: next(lookups),
+    )
+    ended_source = {**source, "quality_ok": False}
+
+    first_end = process_gth_level_manual_candidate(
+        storage,
+        object(),
+        ended_source,
+        now=NOW + timedelta(seconds=1),
+        **common,
+    )
+    waiting_state = level_candidate_module.read_json_object(
+        tmp_path / "latest" / "gth_level_manual_candidate_state.json"
+    )
+    check = waiting_state["pending_terminal_receipt_checks"][0]
+    check_until = datetime.fromisoformat(str(check["check_until"]))
+    assert first_end["terminal_notification_attempted"] is False
+    assert check["causation_event_id"] == ready_event_id
+    assert check_until >= NOW + timedelta(seconds=121)
+    assert check_until <= NOW + timedelta(seconds=601)
+
+    late_receipt = process_gth_level_manual_candidate(
+        storage,
+        object(),
+        ended_source,
+        now=NOW + timedelta(seconds=2),
+        **common,
+    )
+    cancel_event_id = f"{ready_event_id}:cancel"
+    assert late_receipt["terminal_notification_accepted"] is True
+    consume_pending_notifications(
+        settings,
+        now=NOW + timedelta(seconds=3),
+        notify_dead_letters=False,
+        completion_clock=lambda: NOW + timedelta(seconds=3),
+    )
+    cancelled_state = level_candidate_module.read_json_object(
+        tmp_path / "latest" / "gth_level_manual_candidate_state.json"
+    )
+    monitor = cancelled_state["manual_plan_monitors"][0]
+    assert monitor["ready_event_id"] == ready_event_id
+    assert monitor["active_plan"]["long_contract_id"] == ready["long_contract_id"]
+    assert monitor["active_plan"]["short_contract_id"] == ready["short_contract_id"]
+    assert monitor["ready_receipt_id"] == "late-ready-receipt"
+
+    exit_at = datetime.fromisoformat(str(ready["exit_at"]))
+    planned_exit = process_gth_level_manual_candidate(
+        storage,
+        object(),
+        ended_source,
+        now=exit_at + timedelta(seconds=1),
+        **common,
+    )
+    exit_event_id = f"{ready_event_id}:exit"
+    assert planned_exit["terminal_notification_accepted"] is True
+    consume_pending_notifications(
+        settings,
+        now=exit_at + timedelta(seconds=2),
+        notify_dead_letters=False,
+        completion_clock=lambda: exit_at + timedelta(seconds=2),
+    )
+    repeated = process_gth_level_manual_candidate(
+        storage,
+        object(),
+        ended_source,
+        now=exit_at + timedelta(seconds=3),
+        **common,
+    )
+    duplicate_consumer = consume_pending_notifications(
+        settings,
+        now=exit_at + timedelta(seconds=4),
+        notify_dead_letters=False,
+    )
+
+    assert repeated["terminal_notification_attempted"] is False
+    assert duplicate_consumer["jobs"] == 0
+    assert deliveries == [
+        frozenset({"feishu"}),
+        frozenset({"feishu"}),
+        frozenset({"feishu"}),
+    ]
+    with sqlite3.connect(settings.delivery_outbox_path) as connection:
+        events = connection.execute(
+            "SELECT event_id, status, text FROM notification_delivery_events ORDER BY created_at"
+        ).fetchall()
+    assert [row[0] for row in events] == [
+        ready_event_id,
+        cancel_event_id,
+        exit_event_id,
+    ]
+    assert [row[1] for row in events] == ["delivered", "delivered", "delivered"]
+    assert "READY CANCELLED" in events[1][2]
+    assert "EXIT REVIEW" in events[2][2]
+    assert "系统不知道你的成交状态" in events[2][2]
+    final_state = level_candidate_module.read_json_object(
+        tmp_path / "latest" / "gth_level_manual_candidate_state.json"
+    )
+    assert final_state["manual_plan_monitors"] == []
+    assert final_state["pending_terminal_receipt_checks"] == []
+
+
+def test_receipt_recovered_after_exit_emits_exit_without_stale_cancel_once(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = replace(
+        NotificationSettings.from_env(),
+        enabled=True,
+        feishu_enabled=True,
+        feishu_webhook_url="https://open.feishu.cn/test",
+        bark_enabled=False,
+        bark_friend_enabled=False,
+        missed_queue_path=str(tmp_path / "missed.jsonl"),
+        delivery_receipt_path=str(tmp_path / "receipts.sqlite"),
+        delivery_outbox_enabled=True,
+        delivery_outbox_path=str(tmp_path / "delivery-outbox.sqlite"),
+        delivery_outbox_legacy_shadow_enabled=False,
+        rust_trader_notification_owner=False,
+    )
+    deliveries: list[frozenset[str]] = []
+
+    def fake_sink_success(_settings, **kwargs):
+        targets = frozenset(kwargs["targets"])
+        deliveries.append(targets)
+        return [SinkResult(sink=target, attempted=True, ok=True) for target in targets]
+
+    monkeypatch.setattr(
+        "spx_spark.notifier.dispatcher.deliver_trade_push",
+        fake_sink_success,
+    )
+    storage = SimpleNamespace(data_root=str(tmp_path))
+    source = _level_signal(
+        NOW,
+        direction="down",
+        level_kind="flip_low",
+        level=7375.0,
+    )
+    common = {
+        "macro_event": {"entry_allowed": True},
+        "policy": MarketFeatureSettings(),
+        "new_entries_allowed": True,
+        "new_entries_block_reason": "allowed",
+        "notification": settings,
+    }
+
+    _patch_ready_market(monkeypatch, now=NOW, parity_price=7368.0, es_price=7398.0)
+    ready = process_gth_level_manual_candidate(
+        storage,
+        object(),
+        source,
+        now=NOW,
+        **common,
+    )
+    ready_event_id = f"{ready['candidate_id']}:ready"
+    consume_pending_notifications(
+        settings,
+        now=NOW + timedelta(milliseconds=250),
+        notify_dead_letters=False,
+        completion_clock=lambda: NOW + timedelta(milliseconds=250),
+    )
+    unavailable = SimpleNamespace(
+        observable=False,
+        receipt=None,
+        error="python_delivery_receipt_query_failed",
+    )
+    lookups = iter(
+        (
+            unavailable,
+            unavailable,
+            SimpleNamespace(
+                observable=True,
+                receipt=SimpleNamespace(
+                    receipt_id="recovered-ready-receipt",
+                    delivered_at=NOW + timedelta(milliseconds=250),
+                ),
+                error=None,
+            ),
+        )
+    )
+    monkeypatch.setattr(
+        level_candidate_module,
+        "_external_ready_receipt",
+        lambda _settings, _event_id: next(lookups),
+    )
+    # Quality loss would normally produce a pre-entry CANCEL.  Once receipt
+    # recovery happens after the plan's time stop, only EXIT remains current.
+    ended_source = {**source, "quality_ok": False}
+
+    first_end = process_gth_level_manual_candidate(
+        storage,
+        object(),
+        ended_source,
+        now=NOW + timedelta(seconds=1),
+        **common,
+    )
+    assert first_end["terminal_notification_attempted"] is False
+    degraded_state = level_candidate_module.read_json_object(
+        tmp_path / "latest" / "gth_level_manual_candidate_state.json"
+    )
+    degraded = degraded_state["pending_terminal_receipt_checks"][0]
+    assert degraded["receipt_lookup_status"] == "degraded_ledger_unavailable"
+    assert degraded["receipt_lookup_degraded"] is True
+    assert degraded["receipt_lookup_error"] == "python_delivery_receipt_query_failed"
+    assert degraded["receipt_lookup_attempts"] == 1
+
+    after_old_window = process_gth_level_manual_candidate(
+        storage,
+        object(),
+        ended_source,
+        now=NOW + timedelta(minutes=11),
+        **common,
+    )
+    assert after_old_window["terminal_notification_attempted"] is False
+    retained_state = level_candidate_module.read_json_object(
+        tmp_path / "latest" / "gth_level_manual_candidate_state.json"
+    )
+    retained = retained_state["pending_terminal_receipt_checks"][0]
+    assert datetime.fromisoformat(str(retained["check_until"])) < NOW + timedelta(minutes=11)
+    assert datetime.fromisoformat(str(retained["recovery_until"])) == NOW + timedelta(
+        seconds=1,
+        days=1,
+    )
+    assert retained["receipt_lookup_attempts"] == 2
+    assert retained_state["terminal_receipt_audit_failures"] == []
+
+    recovered = process_gth_level_manual_candidate(
+        storage,
+        object(),
+        ended_source,
+        now=NOW + timedelta(minutes=20),
+        **common,
+    )
+    terminal_event_id = f"{ready_event_id}:exit"
+    assert recovered["terminal_notification_accepted"] is True
+    consumed = consume_pending_notifications(
+        settings,
+        now=NOW + timedelta(minutes=20, seconds=1),
+        notify_dead_letters=False,
+        completion_clock=lambda: NOW + timedelta(minutes=20, seconds=1),
+    )
+    repeated = process_gth_level_manual_candidate(
+        storage,
+        object(),
+        ended_source,
+        now=NOW + timedelta(minutes=21),
+        **common,
+    )
+
+    assert consumed["delivered_targets"] == 1
+    assert repeated["terminal_notification_attempted"] is False
+    assert deliveries == [frozenset({"feishu"}), frozenset({"feishu"})]
+    with sqlite3.connect(settings.delivery_outbox_path) as connection:
+        terminal_events = connection.execute(
+            "SELECT event_id, status, occurred_at, expires_at "
+            "FROM notification_delivery_events "
+            "WHERE event_id != ? ORDER BY created_at",
+            (ready_event_id,),
+        ).fetchall()
+    assert len(terminal_events) == 1
+    terminal_id, terminal_status, occurred_at, expires_at = terminal_events[0]
+    assert (terminal_id, terminal_status) == (terminal_event_id, "delivered")
+    assert not terminal_id.endswith(":cancel")
+    assert datetime.fromisoformat(str(occurred_at)) == NOW + timedelta(seconds=1)
+    assert datetime.fromisoformat(str(expires_at)) == NOW + timedelta(minutes=35)
+    final_state = level_candidate_module.read_json_object(
+        tmp_path / "latest" / "gth_level_manual_candidate_state.json"
+    )
+    assert final_state["pending_terminal_receipt_checks"] == []
+    assert final_state["terminal_receipt_audit_failures"] == []
+
+
+def test_undelivered_level_ready_is_only_cancelled_internally(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = replace(
+        NotificationSettings.from_env(),
+        enabled=True,
+        feishu_enabled=True,
+        feishu_webhook_url="https://open.feishu.cn/test",
+        bark_enabled=False,
+        bark_friend_enabled=False,
+        missed_queue_path=str(tmp_path / "missed.jsonl"),
+        delivery_receipt_path=str(tmp_path / "receipts.sqlite"),
+        delivery_outbox_enabled=True,
+        delivery_outbox_path=str(tmp_path / "delivery-outbox.sqlite"),
+        delivery_outbox_legacy_shadow_enabled=False,
+        rust_trader_notification_owner=False,
+    )
+    storage = SimpleNamespace(data_root=str(tmp_path))
+    source = _level_signal(
+        NOW,
+        direction="down",
+        level_kind="flip_low",
+        level=7375.0,
+    )
+    common = {
+        "macro_event": {"entry_allowed": True},
+        "policy": MarketFeatureSettings(),
+        "new_entries_allowed": True,
+        "new_entries_block_reason": "allowed",
+        "notification": settings,
+    }
+
+    _patch_ready_market(monkeypatch, now=NOW, parity_price=7368.0, es_price=7398.0)
+    ready = process_gth_level_manual_candidate(
+        storage,
+        object(),
+        source,
+        now=NOW,
+        **common,
+    )
+    ready_event_id = f"{ready['candidate_id']}:ready"
+    ended = process_gth_level_manual_candidate(
+        storage,
+        object(),
+        {**source, "phase": "invalidated", "formal_signal": False},
+        now=NOW + timedelta(seconds=1),
+        **common,
+    )
+
+    assert ended["terminal_notification_attempted"] is False
+    with sqlite3.connect(settings.delivery_outbox_path) as connection:
+        events = connection.execute(
+            "SELECT event_id, status FROM notification_delivery_events"
+        ).fetchall()
+        targets = connection.execute(
+            "SELECT event_id, sink, status FROM notification_delivery_targets"
+        ).fetchall()
+    assert events == [(ready_event_id, "dead_letter")]
+    assert targets == [(ready_event_id, "feishu", "dead_letter")]
+    state = level_candidate_module.read_json_object(
+        tmp_path / "latest" / "gth_level_manual_candidate_state.json"
+    )
+    assert state["active_manual_plan"] == {}
+    assert state["pending_notifications"] == []
+    assert state["pending_terminal_receipt_checks"] == []
 
 
 def test_empty_source_frame_is_transient_and_preserves_prior_ready_lifecycle(
@@ -949,11 +1658,7 @@ def test_legacy_replay_journal_prevents_duplicate_ready_recovery(
     )
     assert replay_record is not None
     replay_path = (
-        tmp_path
-        / "features"
-        / "gth_level_manual_candidates"
-        / "date=2026-07-15"
-        / "events.jsonl"
+        tmp_path / "features" / "gth_level_manual_candidates" / "date=2026-07-15" / "events.jsonl"
     )
     replay_path.parent.mkdir(parents=True)
     replay_path.write_text(json.dumps(replay_record) + "\n", encoding="utf-8")
@@ -1202,7 +1907,7 @@ def test_expired_transition_falls_back_to_fresh_confirmed_level(
     assert candidate["source_signal_id"] == level["event_id"]
 
 
-def test_level_policy_hash_and_candidate_id_remain_on_legacy_inputs(
+def test_level_policy_hash_and_candidate_id_include_negative_history_veto(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     policy = MarketFeatureSettings()
@@ -1221,11 +1926,18 @@ def test_level_policy_hash_and_candidate_id_remain_on_legacy_inputs(
         {
             "quote_max_age_seconds": policy.gth_manual_candidate_quote_max_age_seconds,
             "ttl_seconds": policy.gth_manual_candidate_ttl_seconds,
+            "directional_source": "confirmed_frozen_level_path.v2",
+            "breakout_crossing": "inside_to_outside_required",
+            "breakout_extension": "outside_retest_zone_before_return_required",
+            "breakout_retest": "required",
             "max_debit_fraction": policy.gth_manual_candidate_max_debit_fraction,
             "max_net_spread_fraction": policy.gth_manual_candidate_max_net_spread_fraction,
             "min_parity_pairs": policy.gth_manual_candidate_min_parity_pairs,
             "target_room_buffer_points": policy.gth_manual_candidate_target_room_buffer_points,
-            "min_reward_risk": policy.gth_manual_candidate_min_reward_risk,
+            "expiry_payoff_ratio_diagnostic_floor": (policy.gth_manual_candidate_min_reward_risk),
+            "operator_edge_authority": "validated_first_touch_time_stop_net_pnl",
+            "negative_play_stats_veto_enabled": policy.gth_negative_play_stats_veto_enabled,
+            "play_stats_min_samples": policy.play_stats_min_samples,
             "invalidation_buffer_points": policy.trade_invalidation_buffer_points,
             "time_stop_minutes": policy.trade_time_stop_minutes,
             "spread_width_points": {"min": 5.0, "default": 25.0, "max": 40.0},
@@ -1266,9 +1978,7 @@ def test_gth_trend_transition_with_stale_confirmation_source_is_blocked(
     )
 
     assert candidate["status"] == "blocked"
-    assert candidate["block_reasons"] == [
-        "trend_transition_source_stale_at_confirmation"
-    ]
+    assert candidate["block_reasons"] == ["trend_transition_source_stale_at_confirmation"]
 
 
 def test_schwab_gth_trend_can_source_an_ibkr_executable_card(
@@ -1971,11 +2681,7 @@ def test_blocked_level_candidate_is_gate_audit_not_replay_signal(
     assert gate_path.exists()
     assert json.loads(gate_path.read_text().strip())["status"] == "blocked"
     replay_path = (
-        tmp_path
-        / "features"
-        / "gth_level_manual_candidates"
-        / "date=2026-07-15"
-        / "events.jsonl"
+        tmp_path / "features" / "gth_level_manual_candidates" / "date=2026-07-15" / "events.jsonl"
     )
     assert not replay_path.exists()
     assert load_gth_level_candidate_signals(tmp_path / "features") == []
@@ -2334,6 +3040,8 @@ def test_gth_es_reference_does_not_fallback_to_schwab() -> None:
 
 def test_notification_labels_wall_and_synthetic_quote() -> None:
     candidate = {
+        "status": "manual_ready",
+        "manual_action_eligible": True,
         "long_contract_id": "option:SPXW:20260715:7505:C",
         "short_contract_id": "option:SPXW:20260715:7545:C",
         "decision_bid": 10.0,
@@ -2698,9 +3406,7 @@ def test_failed_cancellation_blocks_a_new_gth_ready_lifecycle(
         f"{first['candidate_id']}:ready"
     ]
     assert state["pending_notification_cancellation_at"] == {
-        f"{first['candidate_id']}:ready": (
-            NOW + timedelta(milliseconds=500)
-        ).isoformat()
+        f"{first['candidate_id']}:ready": (NOW + timedelta(milliseconds=500)).isoformat()
     }
     assert cancellation_times == [
         NOW + timedelta(milliseconds=500),
@@ -2751,34 +3457,41 @@ def _patch_ready_market(
     now: datetime,
     parity_price: float = 7530.0,
     es_price: float = 7552.0,
+    spread_bid: float = 10.0,
+    spread_mid: float = 11.0,
+    spread_ask: float = 12.0,
+    edge_authority: bool | None = True,
 ) -> None:
+    short_bid = 9.0
+    short_ask = short_bid + min(1.0, (spread_ask - spread_bid) / 2.0)
+    short_mid = (short_bid + short_ask) / 2.0
     monkeypatch.setattr(
         candidate_module,
         "spread_snapshot_decision",
         lambda *_args, **_kwargs: (
             {
                 "at": now.isoformat(),
-                "bid": 10.0,
-                "mid": 11.0,
-                "ask": 12.0,
+                "bid": spread_bid,
+                "mid": spread_mid,
+                "ask": spread_ask,
                 "quality": {"status": "ok"},
                 "long_quote_age_seconds": 0.0,
                 "short_quote_age_seconds": 0.0,
                 "long_transport_age_seconds": 0.0,
                 "short_transport_age_seconds": 0.0,
                 "long": {
-                    "bid": 20.0,
-                    "mid": 20.5,
-                    "ask": 21.0,
+                    "bid": spread_bid + short_ask,
+                    "mid": spread_mid + short_mid,
+                    "ask": spread_ask + short_bid,
                     "provider": "ibkr",
                     "source_at": now.isoformat(),
                     "transport_at": now.isoformat(),
                     "quality": {"status": "ok"},
                 },
                 "short": {
-                    "bid": 9.0,
-                    "mid": 9.5,
-                    "ask": 10.0,
+                    "bid": short_bid,
+                    "mid": short_mid,
+                    "ask": short_ask,
                     "provider": "ibkr",
                     "source_at": now.isoformat(),
                     "transport_at": now.isoformat(),
@@ -2833,6 +3546,22 @@ def _patch_ready_market(
         "_direct_es_reference",
         candidate_module._direct_es_reference,
     )
+    if edge_authority is not None:
+        monkeypatch.setattr(
+            level_candidate_module,
+            "_operator_edge_authority",
+            lambda: (
+                (
+                    level_candidate_module.EDGE_AUTHORITY_REQUIRED,
+                    None,
+                )
+                if edge_authority
+                else (
+                    "none",
+                    level_candidate_module.EDGE_AUTHORITY_UNAVAILABLE_REASON,
+                )
+            ),
+        )
 
 
 def _signal(now: datetime) -> dict[str, object]:
@@ -2905,6 +3634,15 @@ def _level_signal(
         "direction": direction,
         "level_kind": level_kind,
         "level": level,
+        **(
+            {
+                "breakout_inside_seen_at": (now - timedelta(seconds=45)).isoformat(),
+                "breakout_extension_seen_at": (now - timedelta(seconds=30)).isoformat(),
+                "breakout_retest_seen_at": (now - timedelta(seconds=15)).isoformat(),
+            }
+            if thesis == "breakout"
+            else {}
+        ),
         "levels": {
             "put_wall": 7300.0,
             "flip_low": 7375.0,

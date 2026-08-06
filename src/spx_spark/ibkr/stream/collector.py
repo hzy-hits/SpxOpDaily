@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -104,6 +105,7 @@ class StreamCollector(
         self.subscription_lane_history_by_req_id: dict[int, str] = {}
         self._subscription_request_lane: str | None = None
         self.subscription_health_failed = False
+        self.competing_session_health_invalidator: Callable[..., None] | None = None
         self.tws_connectivity_lost = False
         self.subscriptions_lost = False
         self.tws_connectivity_loss_sequence = 0

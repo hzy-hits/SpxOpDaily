@@ -16,6 +16,7 @@ from spx_spark.notifier.dispatcher import (
     cancel_pending_notification,
     consume_pending_notifications,
     dispatch_notification,
+    enqueue_linked_notification,
     enqueue_notification,
     recover_pending_notifications,
 )
@@ -139,6 +140,61 @@ def test_rust_owner_friend_event_includes_friend_mapping(tmp_path) -> None:
         ("bark-friend", "bark"),
         ("feishu-primary", "feishu"),
     )
+
+
+def test_linked_lifecycle_event_inherits_frozen_rust_targets(tmp_path) -> None:
+    original = _rust_owner_settings(tmp_path)
+    cause_id = "rust-linked-ready"
+    assert enqueue_notification(
+        original,
+        _trade_ready_envelope(cause_id),
+        title="SPX TRADE READY",
+        text="exact body",
+        friend=True,
+        enqueued_at=NOW,
+    ).accepted
+    changed = replace(
+        original,
+        bark_friend_enabled=False,
+        rust_operator_notification_target_map=(
+            ("feishu", "replacement-feishu", "feishu"),
+        ),
+    )
+    terminal = NotificationEnvelope(
+        event_id=f"{cause_id}:cancel",
+        source="gth_level_manual_candidate",
+        kind="virtual_strategy_exit",
+        lane="strategy_lifecycle",
+        occurred_at=NOW + timedelta(seconds=1),
+        operator_opportunity_id="level-opportunity-1",
+        operator_generation=2,
+    )
+
+    result = enqueue_linked_notification(
+        changed,
+        terminal,
+        causation_event_id=cause_id,
+        title="SPX GTH READY CANCELLED",
+        text="cancel body",
+        friend=True,
+        enqueued_at=NOW + timedelta(seconds=1),
+    )
+
+    assert result.accepted is True
+    jobs = _outbox(changed).claim_due(
+        worker_id="inspect-linked",
+        limit_targets=2,
+        now=NOW + timedelta(seconds=1),
+    )
+    linked = next(job for job in jobs if job.envelope.event_id == terminal.event_id)
+    assert linked.targets == ("rust_ingress",)
+    assert linked.envelope.operator_targets == (
+        ("bark-primary", "bark"),
+        ("bark-friend", "bark"),
+        ("feishu-primary", "feishu"),
+    )
+    assert linked.envelope.operator_opportunity_id == "level-opportunity-1"
+    assert linked.envelope.operator_generation == 2
 
 
 def test_rust_owner_ignores_mapping_for_disabled_sink(tmp_path) -> None:

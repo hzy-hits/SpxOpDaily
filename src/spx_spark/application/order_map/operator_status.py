@@ -20,6 +20,7 @@ from spx_spark.application.order_map.render import (
 from spx_spark.application.order_map.state import _session_phase_of, current_session_is_gth
 from spx_spark.application.order_map.status_explanation import (
     humanize_operator_trigger,
+    manual_candidate_ready_authorized,
     operator_reason_line,
 )
 
@@ -281,7 +282,7 @@ def _current_ready_sources(
 
     manual_source_id = str(manual.get("source_signal_id") or "").strip()
     manual_ready = bool(
-        manual.get("status") == "manual_ready"
+        manual_candidate_ready_authorized(dict(manual))
         and decision_event_id
         and manual_source_id == decision_event_id
     )

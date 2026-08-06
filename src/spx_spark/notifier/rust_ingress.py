@@ -63,7 +63,7 @@ def operator_notification_role(envelope: NotificationEnvelope) -> str | None:
     }:
         return "trade_ready"
     if identity == ("virtual_strategy_exit", "strategy_lifecycle"):
-        return "exit"
+        return "cancel" if envelope.event_id.endswith(":cancel") else "exit"
     return None
 
 

@@ -8,7 +8,10 @@ from typing import Mapping
 
 from spx_spark.application.market_features.virtual_strategy_support import _time, _utc
 from spx_spark.config import NotificationSettings
-from spx_spark.notifier.dispatcher import enqueue_notification
+from spx_spark.notifier.dispatcher import (
+    enqueue_linked_notification,
+    enqueue_notification,
+)
 from spx_spark.notifier.receipts import NotificationEnvelope
 from spx_spark.state_io import atomic_write_json_secure, exclusive_state_lock, read_json_object
 
@@ -82,6 +85,7 @@ def flush_pending_notifications(
     now: datetime,
     only_event_id: str | None = None,
     enqueue=enqueue_notification,
+    enqueue_linked=enqueue_linked_notification,
 ) -> dict[str, object]:
     """Replay durable state intents into the idempotent notification outbox."""
 
@@ -116,27 +120,37 @@ def flush_pending_notifications(
             continue
         last_result = {"attempted": True, "accepted": False, "event_id": event_id}
         try:
-            result = enqueue(
-                settings,
-                NotificationEnvelope(
-                    event_id=event_id,
-                    source=str(item.get("source") or "virtual_strategy"),
-                    kind=str(item.get("kind") or "virtual_strategy_exit"),
-                    lane=str(item.get("lane") or "strategy_lifecycle"),
-                    occurred_at=occurred_at,
-                    expires_at=expires_at,
-                    operator_opportunity_id=(
-                        str(item.get("operator_opportunity_id"))
-                        if item.get("operator_opportunity_id")
-                        else None
-                    ),
-                    operator_generation=_operator_generation(item),
+            envelope = NotificationEnvelope(
+                event_id=event_id,
+                source=str(item.get("source") or "virtual_strategy"),
+                kind=str(item.get("kind") or "virtual_strategy_exit"),
+                lane=str(item.get("lane") or "strategy_lifecycle"),
+                occurred_at=occurred_at,
+                expires_at=expires_at,
+                operator_opportunity_id=(
+                    str(item.get("operator_opportunity_id"))
+                    if item.get("operator_opportunity_id")
+                    else None
                 ),
-                title=str(item.get("title") or "SPX VIRTUAL STRATEGY EXIT"),
-                text=str(item.get("text") or ""),
-                friend=item.get("friend") is True,
-                feishu_text=str(item.get("feishu_text") or item.get("text") or ""),
-                enqueued_at=_time(item.get("enqueued_at")) or now,
+                operator_generation=_operator_generation(item),
+            )
+            common = {
+                "title": str(item.get("title") or "SPX VIRTUAL STRATEGY EXIT"),
+                "text": str(item.get("text") or ""),
+                "friend": item.get("friend") is True,
+                "feishu_text": str(item.get("feishu_text") or item.get("text") or ""),
+                "enqueued_at": _time(item.get("enqueued_at")) or now,
+            }
+            causation_event_id = str(item.get("causation_event_id") or "")
+            result = (
+                enqueue_linked(
+                    settings,
+                    envelope,
+                    causation_event_id=causation_event_id,
+                    **common,
+                )
+                if causation_event_id
+                else enqueue(settings, envelope, **common)
             )
         except Exception as exc:  # The durable pending intent remains replayable.
             last_result["outcome"] = f"enqueue_error:{type(exc).__name__}"

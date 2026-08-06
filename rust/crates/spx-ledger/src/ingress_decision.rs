@@ -689,6 +689,11 @@ fn enforce_operator_lifecycle(
     if same_generation.iter().any(|(_, _, role)| role == "exit") {
         return Ok(OperatorLifecycleDecision::Suppress);
     }
+    if same_generation.iter().any(|(_, _, role)| role == "cancel")
+        && notification.role != OperatorNotificationRole::Exit
+    {
+        return Ok(OperatorLifecycleDecision::Suppress);
+    }
     match notification.role {
         OperatorNotificationRole::Setup
             if same_generation
@@ -704,6 +709,11 @@ fn enforce_operator_lifecycle(
         {
             Ok(OperatorLifecycleDecision::Suppress)
         }
+        OperatorNotificationRole::Cancel
+            if same_generation.iter().any(|(_, _, role)| role == "cancel") =>
+        {
+            Ok(OperatorLifecycleDecision::Suppress)
+        }
         _ => Ok(OperatorLifecycleDecision::Persist),
     }
 }
@@ -713,10 +723,11 @@ fn supersede_prior_operator_targets(
     notification: &OperatorNotificationV1,
     now: DateTime<Utc>,
 ) -> Result<(), LedgerError> {
-    let (include_trade_ready, reason_code) = match notification.role {
+    let (include_trade_ready, include_cancel, reason_code) = match notification.role {
         OperatorNotificationRole::Setup => return Ok(()),
-        OperatorNotificationRole::TradeReady => (false, "superseded_by_trade_ready"),
-        OperatorNotificationRole::Exit => (true, "superseded_by_exit"),
+        OperatorNotificationRole::TradeReady => (false, false, "superseded_by_trade_ready"),
+        OperatorNotificationRole::Cancel => (true, false, "superseded_by_cancel"),
+        OperatorNotificationRole::Exit => (true, true, "superseded_by_exit"),
     };
     let targets = {
         let mut statement = transaction.prepare(
@@ -729,6 +740,7 @@ fn supersede_prior_operator_targets(
                AND (
                     json_extract(e.payload_json, '$.role') = 'setup'
                     OR (?3 = 1 AND json_extract(e.payload_json, '$.role') = 'trade_ready')
+                    OR (?4 = 1 AND json_extract(e.payload_json, '$.role') = 'cancel')
                )
                AND t.status IN ('pending', 'claimed')
              ORDER BY t.target_id",
@@ -738,7 +750,8 @@ fn supersede_prior_operator_targets(
                 params![
                     notification.opportunity_id.as_str(),
                     i64::from(notification.generation),
-                    include_trade_ready
+                    include_trade_ready,
+                    include_cancel
                 ],
                 |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
             )?

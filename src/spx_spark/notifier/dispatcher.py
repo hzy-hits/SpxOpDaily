@@ -395,16 +395,116 @@ def enqueue_notification(
             queued_for_recovery=False,
         )
 
+    return _enqueue_with_frozen_route(
+        settings,
+        routed_envelope,
+        title=title,
+        text=text,
+        friend=friend,
+        feishu_text=feishu_text,
+        enqueued_at=at,
+        targets=targets,
+    )
+
+
+def enqueue_linked_notification(
+    settings: NotificationSettings,
+    envelope: NotificationEnvelope,
+    *,
+    causation_event_id: str,
+    title: str,
+    text: str,
+    friend: bool = False,
+    feishu_text: str | None = None,
+    enqueued_at: datetime | None = None,
+) -> EnqueueResult:
+    """Enqueue a lifecycle event to the exact route frozen by its cause.
+
+    A delivered READY may outlive a later configuration edit. Terminal risk
+    messages therefore inherit its immutable Python target set and, when Rust
+    owns fan-out, its immutable Bark/Feishu target identities.
+    """
+
+    envelope.validate()
+    at = enqueued_at or datetime.now(tz=timezone.utc)
+    if not settings.delivery_outbox_enabled or not settings.delivery_outbox_path:
+        return EnqueueResult(
+            envelope=envelope,
+            targets=(),
+            outcome="outbox_disabled",
+            accepted=False,
+            inserted=False,
+            duplicate=False,
+            delivered=False,
+            queued_for_recovery=False,
+        )
+    outbox = _delivery_outbox(settings)
+    targets = outbox.event_targets(causation_event_id)
+    if not targets:
+        return EnqueueResult(
+            envelope=envelope,
+            targets=(),
+            outcome="causation_event_missing",
+            accepted=False,
+            inserted=False,
+            duplicate=False,
+            delivered=False,
+            queued_for_recovery=False,
+        )
+    if targets == ("rust_ingress",):
+        operator_targets = outbox.event_operator_targets(causation_event_id)
+        if not operator_targets:
+            return EnqueueResult(
+                envelope=envelope,
+                targets=targets,
+                outcome="causation_operator_targets_missing",
+                accepted=False,
+                inserted=False,
+                duplicate=False,
+                delivered=False,
+                queued_for_recovery=False,
+            )
+        routed_envelope = replace(envelope, operator_targets=operator_targets)
+    else:
+        routed_envelope = replace(
+            envelope,
+            operator_targets=(),
+        )
+    return _enqueue_with_frozen_route(
+        settings,
+        routed_envelope,
+        title=title,
+        text=text,
+        friend=friend,
+        feishu_text=feishu_text,
+        enqueued_at=at,
+        targets=targets,
+    )
+
+
+def _enqueue_with_frozen_route(
+    settings: NotificationSettings,
+    envelope: NotificationEnvelope,
+    *,
+    title: str,
+    text: str,
+    friend: bool,
+    feishu_text: str | None,
+    enqueued_at: datetime,
+    targets: tuple[str, ...],
+) -> EnqueueResult:
+    """Persist one immutable payload against an already-resolved route."""
+
     outbox = _delivery_outbox(settings)
     try:
         inserted = outbox.enqueue(
-            routed_envelope,
+            envelope,
             title=title,
             text=text,
             feishu_text=feishu_text,
             friend=friend,
             targets=targets,
-            now=at,
+            now=enqueued_at,
         )
     except DeliveryCancelled:
         return EnqueueResult(
@@ -430,7 +530,7 @@ def enqueue_notification(
             event_id=envelope.event_id,
         )
     return EnqueueResult(
-        envelope=routed_envelope,
+        envelope=envelope,
         targets=tuple(targets),
         outcome=summary.status.value,
         accepted=summary.status is not DeliveryStatus.DEAD_LETTER,

@@ -66,12 +66,13 @@ def advance(
 
 
 def test_breakout_requires_acceptance_retest_and_confirmation_hold() -> None:
-    armed = advance(None, 0, spot=95.0, es=5000.0)
+    armed = advance(None, 0, spot=107.0, es=5000.0)
     assert armed.state["reentry_generation"] == 0
     assert armed.current_phase is LevelPhase.APPROACHING
     assert armed.state["level_kind"] == "put_wall"
+    assert armed.state["breakout_inside_seen_spot"] == 107.0
 
-    testing = advance(armed.state, 5, spot=99.0, es=5000.0)
+    testing = advance(armed.state, 5, spot=101.0, es=5000.0)
     pending = advance(testing.state, 10, spot=96.0, es=4999.0)
     assert pending.current_phase is LevelPhase.BREAK_PENDING
     assert pending.state["thesis"] == LevelThesis.BREAKOUT.value
@@ -93,8 +94,8 @@ def test_breakout_requires_acceptance_retest_and_confirmation_hold() -> None:
 
 
 def test_es_confirmation_is_latched_when_thesis_starts_after_a_long_approach() -> None:
-    armed = advance(None, 0, spot=95.0, es=5000.0)
-    testing = advance(armed.state, 250, spot=99.0, es=5050.0)
+    armed = advance(None, 0, spot=107.0, es=5000.0)
+    testing = advance(armed.state, 250, spot=101.0, es=5050.0)
     pending = advance(testing.state, 255, spot=96.0, es=5049.0)
 
     accepted = advance(pending.state, 276, spot=95.0, es=5047.0)
@@ -105,22 +106,64 @@ def test_es_confirmation_is_latched_when_thesis_starts_after_a_long_approach() -
     assert accepted.reason == "direction_accepted"
 
 
-def test_accepted_one_way_breakout_confirms_without_mandatory_retest() -> None:
-    armed = advance(None, 0, spot=95.0, es=5000.0)
-    testing = advance(armed.state, 5, spot=99.0, es=5000.0)
+def test_accepted_one_way_breakout_waits_for_mandatory_retest() -> None:
+    armed = advance(None, 0, spot=107.0, es=5000.0)
+    testing = advance(armed.state, 5, spot=101.0, es=5000.0)
     pending = advance(testing.state, 10, spot=96.0, es=4999.0)
     accepted = advance(pending.state, 31, spot=95.0, es=4997.0)
 
-    confirmed = advance(accepted.state, 42, spot=94.0, es=4995.0)
+    continued = advance(accepted.state, 42, spot=94.0, es=4995.0)
 
-    assert confirmed.current_phase is LevelPhase.CONFIRMED
-    assert confirmed.reason == "accepted_follow_through_confirmed"
-    assert confirmed.state["direction"] == "down"
+    assert continued.current_phase is LevelPhase.ACCEPTED
+    assert continued.reason == "waiting_for_mandatory_breakout_retest"
+    assert "direction" not in continued.state
+
+
+def test_outside_armed_upper_level_cannot_reproduce_7730_ready_incident() -> None:
+    levels = {
+        "put_wall": 7700.0,
+        "flip_low": 7725.0,
+        "flip_high": 7730.0,
+        "call_wall": 7770.0,
+    }
+    armed = advance(None, 0, spot=7734.85, es=7761.25, levels=levels, session_mode="gth")
+    testing = advance(
+        armed.state,
+        5,
+        spot=7733.95,
+        es=7760.375,
+        levels=levels,
+        session_mode="gth",
+    )
+    crossingless = advance(
+        testing.state,
+        10,
+        spot=7734.10,
+        es=7760.375,
+        levels=levels,
+        session_mode="gth",
+    )
+    later = advance(
+        crossingless.state,
+        42,
+        spot=7734.30,
+        es=7761.50,
+        levels=levels,
+        session_mode="gth",
+    )
+
+    assert armed.current_phase is LevelPhase.APPROACHING
+    assert testing.current_phase is LevelPhase.TESTING
+    assert crossingless.current_phase is LevelPhase.TESTING
+    assert crossingless.reason == "breakout_blocked_no_inside_crossing"
+    assert later.current_phase is LevelPhase.TESTING
+    assert "breakout_inside_seen_at" not in later.state
+    assert "confirmed_at" not in later.state
 
 
 def test_confirmed_path_invalidates_when_price_reclaims_the_level() -> None:
-    armed = advance(None, 0, spot=95.0, es=5000.0)
-    testing = advance(armed.state, 5, spot=99.0, es=5000.0)
+    armed = advance(None, 0, spot=107.0, es=5000.0)
+    testing = advance(armed.state, 5, spot=101.0, es=5000.0)
     pending = advance(testing.state, 10, spot=96.0, es=4999.0)
     accepted = advance(pending.state, 31, spot=95.0, es=4997.0)
     retest = advance(accepted.state, 40, spot=99.0, es=4998.0)
@@ -135,8 +178,8 @@ def test_confirmed_path_invalidates_when_price_reclaims_the_level() -> None:
 
 
 def test_confirmed_path_expires_instead_of_remaining_valid_indefinitely() -> None:
-    armed = advance(None, 0, spot=95.0, es=5000.0)
-    testing = advance(armed.state, 5, spot=99.0, es=5000.0)
+    armed = advance(None, 0, spot=107.0, es=5000.0)
+    testing = advance(armed.state, 5, spot=101.0, es=5000.0)
     pending = advance(testing.state, 10, spot=96.0, es=4999.0)
     accepted = advance(pending.state, 31, spot=95.0, es=4997.0)
     retest = advance(accepted.state, 40, spot=99.0, es=4998.0)
@@ -424,11 +467,11 @@ def test_same_mode_next_session_resets_stale_level_before_ttl_extension() -> Non
 
 
 def test_pending_structure_does_not_pause_active_phase_timeout() -> None:
-    armed = advance(None, 0, spot=95.0, es=5000.0)
+    armed = advance(None, 0, spot=107.0, es=5000.0)
     testing = advance(
         armed.state,
         5,
-        spot=99.0,
+        spot=101.0,
         es=5000.0,
         arm_allowed=False,
         arm_block_reason="structure_change_pending_new_arm_blocked",
@@ -457,8 +500,8 @@ def test_pending_structure_does_not_pause_active_phase_timeout() -> None:
 def test_rth_pending_phase_expires_after_ninety_seconds() -> None:
     settings = LevelDecisionSettings(event_ttl_seconds=600.0)
     rth = {"session_mode": "rth", "settings": settings}
-    armed = advance(None, 0, spot=95.0, es=5000.0, **rth)
-    testing = advance(armed.state, 5, spot=99.0, es=5000.0, **rth)
+    armed = advance(None, 0, spot=107.0, es=5000.0, **rth)
+    testing = advance(armed.state, 5, spot=101.0, es=5000.0, **rth)
     pending = advance(testing.state, 10, spot=96.0, es=4999.0, **rth)
 
     at_timeout = advance(pending.state, 100, spot=96.0, es=4999.0, **rth)
@@ -475,8 +518,8 @@ def test_gth_pending_phase_uses_five_minute_timeout() -> None:
         event_ttl_seconds=300.0,
     )
     gth = {"session_mode": "gth", "settings": settings}
-    armed = advance(None, 0, spot=95.0, es=5000.0, **gth)
-    testing = advance(armed.state, 5, spot=99.0, es=5000.0, **gth)
+    armed = advance(None, 0, spot=107.0, es=5000.0, **gth)
+    testing = advance(armed.state, 5, spot=101.0, es=5000.0, **gth)
     pending = advance(testing.state, 10, spot=96.0, es=4999.0, **gth)
 
     after_rth_timeout = advance(pending.state, 101, spot=96.0, es=4999.0, **gth)
@@ -498,8 +541,8 @@ def test_gth_pending_phase_uses_five_minute_timeout() -> None:
 
 
 def test_rth_pending_phase_times_out_while_data_is_degraded() -> None:
-    armed = advance(None, 0, spot=95.0, es=5000.0)
-    testing = advance(armed.state, 5, spot=99.0, es=5000.0)
+    armed = advance(None, 0, spot=107.0, es=5000.0)
+    testing = advance(armed.state, 5, spot=101.0, es=5000.0)
     pending = advance(testing.state, 10, spot=96.0, es=4999.0)
 
     timed_out = advance(
@@ -520,8 +563,8 @@ def test_late_gth_pending_gets_full_phase_window_during_data_degradation() -> No
         event_ttl_seconds=300.0,
     )
     gth = {"session_mode": "gth", "settings": settings}
-    armed = advance(None, 0, spot=95.0, es=5000.0, **gth)
-    testing = advance(armed.state, 285, spot=99.0, es=5000.0, **gth)
+    armed = advance(None, 0, spot=107.0, es=5000.0, **gth)
+    testing = advance(armed.state, 285, spot=101.0, es=5000.0, **gth)
     pending = advance(testing.state, 290, spot=96.0, es=4999.0, **gth)
 
     extended = advance(
@@ -682,8 +725,8 @@ def test_confirmation_persists_spx_coordinate_decision_spot() -> None:
         "trigger_basis_points": 45.0,
         "spx_spot": 95.0,
     }
-    armed = advance(None, 0, spot=140.0, es=5000.0, levels={"put_wall": 145.0}, **kwargs)
-    testing = advance(armed.state, 5, spot=144.0, es=5000.0, levels={"put_wall": 145.0}, **kwargs)
+    armed = advance(None, 0, spot=152.0, es=5000.0, levels={"put_wall": 145.0}, **kwargs)
+    testing = advance(armed.state, 5, spot=146.0, es=5000.0, levels={"put_wall": 145.0}, **kwargs)
     pending = advance(
         testing.state, 10, spot=141.0, es=4999.0, levels={"put_wall": 145.0}, **kwargs
     )
@@ -705,14 +748,14 @@ def test_active_rth_es_event_upgrades_to_official_spx_without_reset() -> None:
     proxy = {
         "trigger_coordinate_kind": "es_equivalent",
         "trigger_basis_points": 40.0,
-        "spx_spot": 7388.0,
+        "spx_spot": 7392.0,
         "spx_levels": {"flip_low": 7390.0},
     }
     armed = advance(
         None,
         0,
-        spot=7428.0,
-        es=7428.0,
+        spot=7432.0,
+        es=7432.0,
         levels={"flip_low": 7430.0},
         **proxy,
     )
@@ -736,7 +779,7 @@ def test_active_rth_es_event_upgrades_to_official_spx_without_reset() -> None:
     assert upgraded.state["trigger_coordinate_kind"] == "official_spx"
     assert upgraded.state["trigger_instrument_id"] == "index:SPX"
     assert upgraded.state["level"] == 7390.0
-    assert upgraded.state["start_spot"] == 7388.0
+    assert upgraded.state["start_spot"] == 7392.0
     assert upgraded.state["coordinate_upgraded_from"] == "es_equivalent"
     assert upgraded.state["coordinate_upgraded_basis_points"] == 40.0
 
@@ -762,6 +805,12 @@ def test_confirmed_rth_es_event_remains_confirmed_after_official_spx_recovers() 
         "thesis": LevelThesis.BREAKOUT.value,
         "direction": "down",
         "decision_spot": 7381.92,
+        "breakout_inside_seen_at": (NOW - timedelta(seconds=20)).isoformat(),
+        "breakout_inside_seen_spot": 7432.0,
+        "breakout_extension_seen_at": (NOW - timedelta(seconds=10)).isoformat(),
+        "breakout_extension_seen_spot": 7424.0,
+        "breakout_retest_seen_at": NOW.isoformat(),
+        "breakout_retest_seen_spot": 7429.0,
         "phase_at": (NOW + timedelta(seconds=1)).isoformat(),
     }
 
@@ -788,14 +837,14 @@ def test_active_rth_chain_event_upgrades_to_official_spx_without_reset_or_rebase
     chain = {
         "trigger_coordinate_kind": "chain_implied_spx",
         "trigger_basis_points": 40.0,
-        "spx_spot": 7388.0,
+        "spx_spot": 7392.0,
         "spx_levels": {"flip_low": 7390.0},
     }
     armed = advance(
         None,
         0,
-        spot=7388.0,
-        es=7428.0,
+        spot=7392.0,
+        es=7432.0,
         levels={"flip_low": 7390.0},
         **chain,
     )
@@ -819,7 +868,7 @@ def test_active_rth_chain_event_upgrades_to_official_spx_without_reset_or_rebase
     assert upgraded.state["trigger_coordinate_kind"] == "official_spx"
     assert upgraded.state["trigger_instrument_id"] == "index:SPX"
     assert upgraded.state["level"] == 7390.0
-    assert upgraded.state["start_spot"] == 7388.0
+    assert upgraded.state["start_spot"] == 7392.0
     assert upgraded.state["coordinate_upgraded_from"] == "chain_implied_spx"
     assert upgraded.state["coordinate_upgraded_basis_points"] == 40.0
 
@@ -845,6 +894,12 @@ def test_confirmed_rth_chain_event_remains_confirmed_after_official_spx_recovers
         "thesis": LevelThesis.BREAKOUT.value,
         "direction": "down",
         "decision_spot": 7381.92,
+        "breakout_inside_seen_at": (NOW - timedelta(seconds=20)).isoformat(),
+        "breakout_inside_seen_spot": 7392.0,
+        "breakout_extension_seen_at": (NOW - timedelta(seconds=10)).isoformat(),
+        "breakout_extension_seen_spot": 7384.0,
+        "breakout_retest_seen_at": NOW.isoformat(),
+        "breakout_retest_seen_spot": 7389.0,
         "confirmation_start_spot": 7384.0,
         "last_spot": 7382.0,
         "phase_at": (NOW + timedelta(seconds=1)).isoformat(),

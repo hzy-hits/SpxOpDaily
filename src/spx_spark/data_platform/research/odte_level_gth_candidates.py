@@ -27,7 +27,7 @@ _RUNTIME_STATUS = "production_runtime"
 
 
 def load_gth_level_candidate_signals(features_root: Path) -> list[Signal]:
-    """Load only contract-compliant ``manual_ready`` current-lane candidates."""
+    """Load fully quoted current-lane READY and non-actionable WATCH observations."""
 
     signals: list[Signal] = []
     seen: set[str] = set()
@@ -53,6 +53,23 @@ def _candidate_signal(
     valid_until = _parse_ts(record.get("valid_until"))
     exit_at = _parse_ts(record.get("exit_at"))
     session_date = _parse_session(record.get("session_date"))
+    status = str(record.get("status") or "")
+    authority_contract_ok = (
+        status == "manual_ready"
+        and record.get("manual_action_eligible") is True
+        # Preserve pre-authority READY rows for historical research only. New
+        # production generation cannot emit this status without the validated
+        # closed authority value, while the loader must not erase older quote
+        # observations merely because they predate the field.
+        and record.get("edge_authority")
+        in {None, "validated_first_touch_time_stop_net_pnl"}
+    ) or (
+        status == "structure_watch"
+        and record.get("manual_action_eligible") is False
+        and record.get("edge_authority") == "none"
+        and record.get("edge_authority_reason")
+        == "first_touch_time_stop_net_pnl_authority_unavailable"
+    )
     if (
         evaluated_at is None
         or valid_until is None
@@ -61,12 +78,11 @@ def _candidate_signal(
         or not evaluated_at < valid_until <= exit_at
         or record.get("event") != "gth_level_manual_candidate_evaluated"
         or record.get("kind") != _CANDIDATE_KIND
-        or record.get("status") != "manual_ready"
+        or not authority_contract_ok
         or record.get("strategy_id") != _STRATEGY_ID
         or record.get("strategy_lane") != _STRATEGY_ID
         or record.get("lifecycle_status") != _LIFECYCLE_STATUS
         or record.get("runtime_status") != _RUNTIME_STATUS
-        or record.get("manual_action_eligible") is not True
         or record.get("execution_eligible") is not False
         or record.get("broker_submission_allowed") is not False
         or record.get("automatic_ordering") is not False

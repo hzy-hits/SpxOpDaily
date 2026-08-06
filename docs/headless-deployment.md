@@ -127,6 +127,17 @@ the service failed and never logs back in.
 
 ## Session Recovery Chain
 
+### Exact-leg quote-demand contract rollout
+
+`ibkr_exact_leg_quote_demand` v2 adds an explicit `right` discriminator so the
+same typed wire contract can carry Call or Put debit spreads. Deploy this as a
+consumer-first rolling change: restart `spx-spark-ibkr-stream` with the v1/v2
+reader before restarting the shock/market-feature writer that emits v2. The new
+reader keeps existing v1 Call-only leases valid; an old reader intentionally
+rejects v2 and releases or refuses the pin rather than guessing the option
+right. Therefore reversing the order is fail-closed, but creates a temporary
+loss of exact-leg coverage and is not an accepted production rollout.
+
 What happens when a phone/desktop login preempts the automated session:
 
 1. Gateway detects the existing session and yields (`secondary`); IBC exits.
