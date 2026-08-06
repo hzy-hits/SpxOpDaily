@@ -1695,7 +1695,10 @@ level_decision_shadow:
     description: Additional hold after direction acceptance or retest.
   phase_timeout_seconds:
     value: 90.0
-    description: Maximum time allowed in a pending acceptance or retest phase.
+    description: Maximum time allowed in a pending acceptance or retest phase during RTH or outside GTH.
+  gth_phase_timeout_seconds:
+    value: 300.0
+    description: Maximum time allowed in a pending acceptance or retest phase during the actual SPX GTH window; does not change the RTH timeout.
   event_ttl_seconds:
     value: 300.0
     description: Maximum lifetime of one frozen-level decision event.

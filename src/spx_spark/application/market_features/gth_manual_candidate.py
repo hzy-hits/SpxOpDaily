@@ -34,6 +34,7 @@ from spx_spark.config import NotificationSettings, StorageSettings
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR, ET
 from spx_spark.marketdata import (
     Provider,
+    Quote,
     as_utc,
     choose_best_quote,
     instrument_matches_id,
@@ -635,17 +636,40 @@ def _direct_es_reference(
     *,
     now: datetime,
     max_age_seconds: float,
+    providers: tuple[Provider, ...] = (Provider.IBKR,),
 ) -> dict[str, object] | None:
-    quote = _quote_from_provider(
-        latest,
-        "future:ES",
-        provider=Provider.IBKR,
-        now=now,
-    )
-    if quote is None:
-        quote = latest.best_quote("future:ES")
-    if quote is None:
-        return None
+    quotes = [
+        quote
+        for provider in dict.fromkeys(providers)
+        if (
+            quote := _quote_from_provider(
+                latest,
+                "future:ES",
+                provider=provider,
+                now=now,
+            )
+        )
+        is not None
+    ]
+    if not DEFAULT_MARKET_CALENDAR.is_spx_gth_open(now):
+        if quote := latest.best_quote("future:ES"):
+            quotes.append(quote)
+    for quote in quotes:
+        if reference := _direct_es_quote_reference(
+            quote,
+            now=now,
+            max_age_seconds=max_age_seconds,
+        ):
+            return reference
+    return None
+
+
+def _direct_es_quote_reference(
+    quote: Quote,
+    *,
+    now: datetime,
+    max_age_seconds: float,
+) -> dict[str, object] | None:
     if (
         quote.bid is not None
         and quote.mid is not None
@@ -737,12 +761,16 @@ def _notification_intent(
             f"当前隐含 SPX {float(candidate['current_parity_spx']):.2f}"
         )
         explanation = "Put Wall 向下路径已确认，用限定亏损的 Put 借记价差表达"
-    elif level_path == "trend_continuation_put":
-        trigger_text = f"ES 空头趋势延续，隐含 SPX {float(candidate['current_parity_spx']):.2f}"
-        explanation = "ES 空头延续已确认，并已绑定实时 IBKR SPXW 限定亏损价差"
-    elif level_path == "trend_continuation_call":
-        trigger_text = f"ES 多头趋势延续，隐含 SPX {float(candidate['current_parity_spx']):.2f}"
-        explanation = "ES 多头延续已确认，并已绑定实时 IBKR SPXW 限定亏损价差"
+    elif level_path == "trend_transition_put":
+        trigger_text = (
+            f"ES 趋势已确认切换为空头，隐含 SPX {float(candidate['current_parity_spx']):.2f}"
+        )
+        explanation = "当前 GTH 空头切换已确认，并已绑定实时 IBKR SPXW 限定亏损价差"
+    elif level_path == "trend_transition_call":
+        trigger_text = (
+            f"ES 趋势已确认切换为多头，隐含 SPX {float(candidate['current_parity_spx']):.2f}"
+        )
+        explanation = "当前 GTH 多头切换已确认，并已绑定实时 IBKR SPXW 限定亏损价差"
     elif level_path == "lower_rejection_call":
         trigger_text = (
             f"SPX 拒绝下沿并收复 {float(candidate['trigger_level']):.2f}；"

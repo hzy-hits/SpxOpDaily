@@ -55,6 +55,8 @@ def test_load_settings_from_fixture_is_stable(
     assert settings.strategy_distribution.refresh_seconds == 60.0
     assert settings.strategy_distribution.action_authority == "none"
     assert settings.strategy_distribution.automatic_ordering is False
+    assert settings.level_decision.phase_timeout_seconds == 90.0
+    assert settings.level_decision.gth_phase_timeout_seconds == 300.0
 
 
 def test_environment_overrides_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -91,6 +93,53 @@ def test_deployment_overlay_beats_defaults(tmp_path: Path) -> None:
     )
     assert settings.alerts.steven_enabled is True
     assert settings.sources["steven.enabled"].origin == "deployment"
+
+
+def test_level_decision_gth_timeout_follows_typed_precedence(tmp_path: Path) -> None:
+    overlay = {
+        "level_decision_shadow": {
+            "gth_phase_timeout_seconds": {
+                "value": 240.0,
+            }
+        }
+    }
+    deployment = tmp_path / "deployment.yaml"
+    deployment.write_text(yaml.safe_dump(overlay), encoding="utf-8")
+
+    deployed = load_settings(
+        defaults_path=FIXTURE,
+        deployment_path=deployment,
+        environ={},
+    )
+    assert deployed.level_decision.phase_timeout_seconds == 90.0
+    assert deployed.level_decision.gth_phase_timeout_seconds == 240.0
+    assert (
+        deployed.sources["level_decision_shadow.gth_phase_timeout_seconds"].origin
+        == "deployment"
+    )
+
+    environment = load_settings(
+        defaults_path=FIXTURE,
+        deployment_path=deployment,
+        environ={"SPX_LEVEL_DECISION_GTH_PHASE_TIMEOUT_SECONDS": "275"},
+    )
+    assert environment.level_decision.phase_timeout_seconds == 90.0
+    assert environment.level_decision.gth_phase_timeout_seconds == 275.0
+    assert (
+        environment.sources["level_decision_shadow.gth_phase_timeout_seconds"].origin
+        == "environment"
+    )
+
+
+@pytest.mark.parametrize("value", ("true", "nan", "inf", "-inf"))
+def test_level_decision_gth_timeout_rejects_non_finite_or_boolean_environment(
+    value: str,
+) -> None:
+    with pytest.raises((TypeError, ValueError), match="finite number|must be finite"):
+        load_settings(
+            defaults_path=FIXTURE,
+            environ={"SPX_LEVEL_DECISION_GTH_PHASE_TIMEOUT_SECONDS": value},
+        )
 
 
 def test_spring_gamma_v3_deployment_overlay_remains_shadow_only(tmp_path: Path) -> None:

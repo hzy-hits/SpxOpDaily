@@ -23,10 +23,51 @@ from spx_spark.application.order_map.trigger_coordinates import (
     TriggerCoordinate,
     TriggerCoordinateKind,
 )
-from spx_spark.settings.level_decision import LevelDecisionPolicy
+from spx_spark.settings.level_decision import LevelDecisionPolicy, LevelDecisionSession
 
 
 NOW = datetime(2026, 7, 13, 14, 30, tzinfo=timezone.utc)
+
+
+@pytest.mark.parametrize(
+    ("at", "expected"),
+    (
+        ("2026-07-12T20:14:59-04:00", LevelDecisionSession.CLOSED),
+        ("2026-07-12T20:15:00-04:00", LevelDecisionSession.GTH),
+        ("2026-07-13T09:24:59-04:00", LevelDecisionSession.GTH),
+        ("2026-07-13T09:25:00-04:00", LevelDecisionSession.CLOSED),
+        ("2026-07-13T09:30:00-04:00", LevelDecisionSession.RTH),
+        ("2026-07-13T17:30:00-04:00", LevelDecisionSession.CLOSED),
+    ),
+)
+def test_level_decision_session_uses_strict_spx_windows(
+    at: str,
+    expected: LevelDecisionSession,
+) -> None:
+    assert shadow_service._level_decision_session(datetime.fromisoformat(at)) is expected
+
+
+def test_machine_settings_select_session_specific_timeout() -> None:
+    policy = LevelDecisionPolicy(
+        phase_timeout_seconds=90.0,
+        gth_phase_timeout_seconds=300.0,
+    )
+
+    assert (
+        shadow_service._machine_settings(
+            policy,
+            session=LevelDecisionSession.GTH,
+        ).phase_timeout_seconds
+        == 300.0
+    )
+    for session in (LevelDecisionSession.RTH, LevelDecisionSession.CLOSED):
+        assert (
+            shadow_service._machine_settings(
+                policy,
+                session=session,
+            ).phase_timeout_seconds
+            == 90.0
+        )
 
 
 def test_public_projection_preserves_reentry_generation() -> None:

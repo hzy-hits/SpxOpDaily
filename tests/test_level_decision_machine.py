@@ -29,6 +29,7 @@ def observation(
     spx_spot: float | None = None,
     spx_levels: dict[str, float] | None = None,
     session_mode: str = "rth",
+    session_date: str = "2026-07-13",
 ) -> LevelObservation:
     return LevelObservation(
         at=NOW + timedelta(seconds=seconds),
@@ -37,7 +38,7 @@ def observation(
         levels=levels or {"put_wall": 100.0, "call_wall": 120.0},
         quality_ok=quality_ok,
         quality_reason=None if quality_ok else "stale_chain",
-        session_date="2026-07-13",
+        session_date=session_date,
         session_mode=session_mode,
         spx_levels=spx_levels,
         trigger_coordinate_kind=trigger_coordinate_kind,
@@ -48,11 +49,19 @@ def observation(
     )
 
 
-def advance(state, seconds: int, *, spot: float, es: float, **kwargs):
+def advance(
+    state,
+    seconds: int,
+    *,
+    spot: float,
+    es: float,
+    settings: LevelDecisionSettings = SETTINGS,
+    **kwargs,
+):
     return advance_level_decision(
         state,
         observation(seconds, spot=spot, es=es, **kwargs),
-        settings=SETTINGS,
+        settings=settings,
     )
 
 
@@ -325,6 +334,95 @@ def test_session_boundary_resets_terminal_event_even_when_new_arm_is_blocked() -
     assert reset.reason == "session_boundary_reset"
 
 
+def test_session_boundary_resets_before_bad_quality_handling() -> None:
+    armed = advance(
+        None,
+        0,
+        spot=95.0,
+        es=5000.0,
+        session_mode="gth",
+    )
+
+    reset = advance(
+        armed.state,
+        5,
+        spot=95.0,
+        es=5000.0,
+        session_mode="closed",
+        quality_ok=False,
+        arm_allowed=False,
+        arm_block_reason="market_session_closed",
+    )
+
+    assert reset.current_phase is LevelPhase.FAR
+    assert reset.changed is True
+    assert reset.reason == "session_boundary_reset"
+
+
+def test_closed_session_cannot_arm_a_new_level() -> None:
+    blocked = advance(
+        None,
+        0,
+        spot=95.0,
+        es=5000.0,
+        session_mode="closed",
+        arm_allowed=False,
+        arm_block_reason="market_session_closed",
+    )
+
+    assert blocked.current_phase is LevelPhase.FAR
+    assert blocked.changed is False
+    assert blocked.reason == "market_session_closed"
+
+
+def test_legacy_globex_state_resets_once_when_typed_gth_session_starts() -> None:
+    legacy = advance(
+        None,
+        0,
+        spot=95.0,
+        es=5000.0,
+        session_mode="globex",
+    )
+
+    reset = advance(
+        legacy.state,
+        5,
+        spot=95.0,
+        es=5000.0,
+        session_mode="gth",
+    )
+
+    assert reset.current_phase is LevelPhase.FAR
+    assert reset.changed is True
+    assert reset.reason == "session_boundary_reset"
+
+
+def test_same_mode_next_session_resets_stale_level_before_ttl_extension() -> None:
+    prior = advance(
+        None,
+        0,
+        spot=95.0,
+        es=5000.0,
+        session_mode="gth",
+        session_date="2026-07-13",
+    )
+
+    reset = advance(
+        prior.state,
+        86_400,
+        spot=95.0,
+        es=5000.0,
+        levels={"put_wall": 110.0, "call_wall": 130.0},
+        session_mode="gth",
+        session_date="2026-07-14",
+    )
+
+    assert reset.current_phase is LevelPhase.FAR
+    assert reset.changed is True
+    assert reset.reason == "session_boundary_reset"
+    assert reset.state.get("event_id") is None
+
+
 def test_pending_structure_does_not_pause_active_phase_timeout() -> None:
     armed = advance(None, 0, spot=95.0, es=5000.0)
     testing = advance(
@@ -354,6 +452,99 @@ def test_pending_structure_does_not_pause_active_phase_timeout() -> None:
 
     assert timed_out.current_phase is LevelPhase.EXPIRED
     assert timed_out.reason == "phase_timeout"
+
+
+def test_rth_pending_phase_expires_after_ninety_seconds() -> None:
+    settings = LevelDecisionSettings(event_ttl_seconds=600.0)
+    rth = {"session_mode": "rth", "settings": settings}
+    armed = advance(None, 0, spot=95.0, es=5000.0, **rth)
+    testing = advance(armed.state, 5, spot=99.0, es=5000.0, **rth)
+    pending = advance(testing.state, 10, spot=96.0, es=4999.0, **rth)
+
+    at_timeout = advance(pending.state, 100, spot=96.0, es=4999.0, **rth)
+    assert at_timeout.current_phase is LevelPhase.BREAK_PENDING
+
+    timed_out = advance(at_timeout.state, 101, spot=96.0, es=4999.0, **rth)
+    assert timed_out.current_phase is LevelPhase.EXPIRED
+    assert timed_out.reason == "phase_timeout"
+
+
+def test_gth_pending_phase_uses_five_minute_timeout() -> None:
+    settings = LevelDecisionSettings(
+        phase_timeout_seconds=300.0,
+        event_ttl_seconds=300.0,
+    )
+    gth = {"session_mode": "gth", "settings": settings}
+    armed = advance(None, 0, spot=95.0, es=5000.0, **gth)
+    testing = advance(armed.state, 5, spot=99.0, es=5000.0, **gth)
+    pending = advance(testing.state, 10, spot=96.0, es=4999.0, **gth)
+
+    after_rth_timeout = advance(pending.state, 101, spot=96.0, es=4999.0, **gth)
+    assert after_rth_timeout.current_phase is LevelPhase.BREAK_PENDING
+    assert after_rth_timeout.reason == "pending_acceptance"
+
+    at_gth_timeout = advance(
+        after_rth_timeout.state,
+        310,
+        spot=96.0,
+        es=4999.0,
+        **gth,
+    )
+    assert at_gth_timeout.current_phase is LevelPhase.BREAK_PENDING
+
+    timed_out = advance(at_gth_timeout.state, 311, spot=96.0, es=4999.0, **gth)
+    assert timed_out.current_phase is LevelPhase.EXPIRED
+    assert timed_out.reason == "phase_timeout"
+
+
+def test_rth_pending_phase_times_out_while_data_is_degraded() -> None:
+    armed = advance(None, 0, spot=95.0, es=5000.0)
+    testing = advance(armed.state, 5, spot=99.0, es=5000.0)
+    pending = advance(testing.state, 10, spot=96.0, es=4999.0)
+
+    timed_out = advance(
+        pending.state,
+        101,
+        spot=96.0,
+        es=4999.0,
+        quality_ok=False,
+    )
+
+    assert timed_out.current_phase is LevelPhase.EXPIRED
+    assert timed_out.reason == "phase_timeout_during_data_degradation"
+
+
+def test_late_gth_pending_gets_full_phase_window_during_data_degradation() -> None:
+    settings = LevelDecisionSettings(
+        phase_timeout_seconds=300.0,
+        event_ttl_seconds=300.0,
+    )
+    gth = {"session_mode": "gth", "settings": settings}
+    armed = advance(None, 0, spot=95.0, es=5000.0, **gth)
+    testing = advance(armed.state, 285, spot=99.0, es=5000.0, **gth)
+    pending = advance(testing.state, 290, spot=96.0, es=4999.0, **gth)
+
+    extended = advance(
+        pending.state,
+        300,
+        spot=96.0,
+        es=4999.0,
+        quality_ok=False,
+        **gth,
+    )
+    assert extended.current_phase is LevelPhase.BREAK_PENDING
+    assert extended.reason == "stale_chain"
+
+    timed_out = advance(
+        extended.state,
+        591,
+        spot=96.0,
+        es=4999.0,
+        quality_ok=False,
+        **gth,
+    )
+    assert timed_out.current_phase is LevelPhase.EXPIRED
+    assert timed_out.reason == "phase_timeout_during_data_degradation"
 
 
 def test_structure_drift_invalidates_frozen_level() -> None:

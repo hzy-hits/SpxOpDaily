@@ -100,6 +100,9 @@ L0 foundation      marketdata, market_calendar, alert_model, runtime_config,
 - `application/morning_map/` — build / render / delivery / state / service；
   `morning_map.py` 为门面
 - `application/runtime/` — service_loop settings / registry / runner / scheduler
+- `application/market_features/` — 实时特征编排、GTH 手工候选，以及独立的
+  current-session trend transition source 校验与候选生命周期分类；不持有
+  provider 原始字段
 - `service_loop.py`、`maintenance.py`、`post_close_review.py`、`latest_state.py`
 
 ## 3. 兼容门面预算

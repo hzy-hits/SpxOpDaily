@@ -40,7 +40,7 @@ from spx_spark.ibkr.atm_reference import (
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR, ET
 from spx_spark.options_map import build_options_map
 from spx_spark.schwab.symbols import active_quarterly_contract_month
-from spx_spark.settings.level_decision import LevelDecisionPolicy
+from spx_spark.settings.level_decision import LevelDecisionPolicy, LevelDecisionSession
 from spx_spark.state_io import atomic_write_json_secure, exclusive_state_lock
 from spx_spark.storage import LatestStateStore
 
@@ -92,8 +92,12 @@ def run_level_decision_shadow(
     if not policy.enabled:
         return {"status": "disabled", "actionable": False}
     session = _rth_session(now)
+    policy_session = _level_decision_session(now)
 
-    settings = _machine_settings(policy)
+    settings = _machine_settings(
+        policy,
+        session=policy_session,
+    )
     state_path = default_level_decision_state_path(storage)
     with exclusive_state_lock(state_path):
         persisted = _load_state(state_path)
@@ -131,7 +135,7 @@ def run_level_decision_shadow(
             tick,
             now=now,
             session_date=session or _research_session_date(now),
-            session_mode="rth" if session is not None else "globex",
+            session_mode=policy_session.value,
             frozen_structure=(frozen_structure if isinstance(frozen_structure, Mapping) else None),
             max_frozen_structure_age_sessions=policy.max_frozen_structure_age_sessions,
             active_decision=previous if isinstance(previous, Mapping) else None,
@@ -287,7 +291,11 @@ def run_level_decision_shadow(
     return public
 
 
-def _machine_settings(policy: LevelDecisionPolicy) -> LevelDecisionSettings:
+def _machine_settings(
+    policy: LevelDecisionPolicy,
+    *,
+    session: LevelDecisionSession,
+) -> LevelDecisionSettings:
     return LevelDecisionSettings(
         approach_points=policy.approach_points,
         test_points=policy.test_points,
@@ -297,7 +305,7 @@ def _machine_settings(policy: LevelDecisionPolicy) -> LevelDecisionSettings:
         retest_points=policy.retest_points,
         confirm_move_points=policy.confirm_move_points,
         confirm_hold_seconds=policy.confirm_hold_seconds,
-        phase_timeout_seconds=policy.phase_timeout_seconds,
+        phase_timeout_seconds=policy.phase_timeout_for(session),
         event_ttl_seconds=policy.event_ttl_seconds,
         data_grace_seconds=policy.data_grace_seconds,
         structure_drift_points=policy.structure_drift_points,
@@ -444,9 +452,16 @@ def _observation(
         trigger_instrument_id=coordinate_instrument,
         trigger_basis_points=coordinate_basis,
         spx_spot=spx_spot,
-        arm_allowed=not structure_pending_blocks_new_arm,
+        arm_allowed=(
+            session_mode != LevelDecisionSession.CLOSED.value
+            and not structure_pending_blocks_new_arm
+        ),
         arm_block_reason=(
-            "structure_change_pending_new_arm_blocked" if structure_pending_blocks_new_arm else None
+            "market_session_closed"
+            if session_mode == LevelDecisionSession.CLOSED.value
+            else "structure_change_pending_new_arm_blocked"
+            if structure_pending_blocks_new_arm
+            else None
         ),
     )
 
@@ -830,6 +845,14 @@ def _rth_session(now: datetime) -> str | None:
     if session is None or not (session.open_at <= local < session.close_at):
         return None
     return session.trading_date.isoformat()
+
+
+def _level_decision_session(now: datetime) -> LevelDecisionSession:
+    if DEFAULT_MARKET_CALENDAR.is_rth_open(now):
+        return LevelDecisionSession.RTH
+    if DEFAULT_MARKET_CALENDAR.is_spx_gth_open(now):
+        return LevelDecisionSession.GTH
+    return LevelDecisionSession.CLOSED
 
 
 def _session_date(now: datetime) -> str:

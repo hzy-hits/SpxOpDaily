@@ -79,7 +79,7 @@ def operator_reason_line(payload: dict[str, Any]) -> str:
     intent = intent if isinstance(intent, dict) else {}
     manual = payload.get("gth_level_manual_candidate")
     manual = manual if isinstance(manual, dict) else {}
-    gth = str(decision.get("session_mode") or "") == "globex"
+    gth = str(decision.get("session_mode") or "") in {"gth", "globex"}
     decision_spot = finite_float(decision.get("spot"))
     decision_es = finite_float(decision.get("es"))
     reasons: list[str] = []

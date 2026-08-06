@@ -6,6 +6,7 @@ Secret values must never be written into SettingSource or logs.
 
 from __future__ import annotations
 
+import math
 import os
 from functools import lru_cache
 from pathlib import Path
@@ -175,6 +176,9 @@ def _env_override(dotted_path: str, environ: Mapping[str, str]) -> Any | None:
         ),
         "ibkr_stream.max_option_lines": "IBKR_STREAM_MAX_OPTION_LINES",
         "schwab.streaming.mode": "SCHWAB_STREAMING_MODE",
+        "level_decision_shadow.gth_phase_timeout_seconds": (
+            "SPX_LEVEL_DECISION_GTH_PHASE_TIMEOUT_SECONDS"
+        ),
     }
     env_name = env_map.get(dotted_path)
     if env_name is None:
@@ -223,6 +227,18 @@ def _resolve(
     if not _is_secret_path(dotted_path):
         sources[dotted_path] = SettingSource(path=dotted_path, origin=origin)
     return value
+
+
+def _finite_float(value: object, *, dotted_path: str) -> float:
+    if isinstance(value, bool):
+        raise TypeError(f"Runtime setting must be a finite number: {dotted_path}")
+    try:
+        result = float(value)
+    except (TypeError, ValueError) as exc:
+        raise TypeError(f"Runtime setting must be a finite number: {dotted_path}") from exc
+    if not math.isfinite(result):
+        raise ValueError(f"Runtime setting must be finite: {dotted_path}")
+    return result
 
 
 def _as_str_tuple(value: Any) -> tuple[str, ...]:
@@ -681,6 +697,10 @@ def load_settings(
         confirm_move_points=float(get("level_decision_shadow.confirm_move_points")),
         confirm_hold_seconds=float(get("level_decision_shadow.confirm_hold_seconds")),
         phase_timeout_seconds=float(get("level_decision_shadow.phase_timeout_seconds")),
+        gth_phase_timeout_seconds=_finite_float(
+            get("level_decision_shadow.gth_phase_timeout_seconds"),
+            dotted_path="level_decision_shadow.gth_phase_timeout_seconds",
+        ),
         event_ttl_seconds=float(get("level_decision_shadow.event_ttl_seconds")),
         data_grace_seconds=float(get("level_decision_shadow.data_grace_seconds")),
         structure_drift_points=float(get("level_decision_shadow.structure_drift_points")),

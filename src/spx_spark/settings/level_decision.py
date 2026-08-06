@@ -2,7 +2,15 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
+from enum import StrEnum
+
+
+class LevelDecisionSession(StrEnum):
+    GTH = "gth"
+    RTH = "rth"
+    CLOSED = "closed"
 
 
 @dataclass(frozen=True)
@@ -19,6 +27,7 @@ class LevelDecisionPolicy:
     confirm_move_points: float = 4.0
     confirm_hold_seconds: float = 10.0
     phase_timeout_seconds: float = 90.0
+    gth_phase_timeout_seconds: float = 300.0
     event_ttl_seconds: float = 300.0
     data_grace_seconds: float = 30.0
     structure_drift_points: float = 5.0
@@ -42,6 +51,11 @@ class LevelDecisionPolicy:
     acceptance_max_rth_gap_seconds: float = 45.0
     acceptance_expected_sample_seconds: float = 15.0
 
+    def phase_timeout_for(self, session: LevelDecisionSession) -> float:
+        if session is LevelDecisionSession.GTH:
+            return self.gth_phase_timeout_seconds
+        return self.phase_timeout_seconds
+
     def __post_init__(self) -> None:
         positive = (
             self.approach_points,
@@ -53,6 +67,7 @@ class LevelDecisionPolicy:
             self.confirm_move_points,
             self.confirm_hold_seconds,
             self.phase_timeout_seconds,
+            self.gth_phase_timeout_seconds,
             self.event_ttl_seconds,
             self.data_grace_seconds,
             self.structure_drift_points,
@@ -69,7 +84,12 @@ class LevelDecisionPolicy:
             self.acceptance_max_rth_gap_seconds,
             self.acceptance_expected_sample_seconds,
         )
-        if any(value <= 0 for value in positive):
+        if any(
+            isinstance(value, bool)
+            or not math.isfinite(float(value))
+            or float(value) <= 0
+            for value in positive
+        ):
             raise ValueError("level-decision policy thresholds must be positive")
         if self.outcome_false_confirmation_mae_bps >= 0:
             raise ValueError("false-confirmation MAE threshold must be negative")

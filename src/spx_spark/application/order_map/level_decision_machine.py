@@ -84,6 +84,15 @@ LEVEL_OUTSIDE_DIRECTION = {
     "call_wall": 1,
 }
 TERMINAL_PHASES = frozenset({LevelPhase.INVALIDATED, LevelPhase.EXPIRED})
+PHASE_TIMEOUT_PHASES = frozenset(
+    {
+        LevelPhase.BREAK_PENDING,
+        LevelPhase.REJECT_PENDING,
+        LevelPhase.ACCEPTED,
+        LevelPhase.REJECTED,
+        LevelPhase.RETEST,
+    }
+)
 
 
 def empty_level_state(now: datetime) -> dict[str, object]:
@@ -107,6 +116,12 @@ def advance_level_decision(
     state = dict(previous) if isinstance(previous, Mapping) else empty_level_state(now)
     phase = _phase(state)
 
+    # Session identity is authoritative even when the first observation in a
+    # new window has degraded market data.  Reset the prior lifecycle before
+    # bad-quality handling so CLOSED cannot preserve a GTH/RTH pending event.
+    if _session_boundary_changed(state, phase, observation):
+        return _to_far(state, phase, now, "session_boundary_reset")
+
     if not observation.quality_ok or observation.spot is None or observation.es is None:
         return _handle_bad_quality(state, phase, observation, settings=settings)
     for key in (
@@ -116,9 +131,6 @@ def advance_level_decision(
         "quality_reason",
     ):
         state.pop(key, None)
-
-    if _session_boundary_changed(state, phase, observation):
-        return _to_far(state, phase, now, "session_boundary_reset")
 
     if _can_upgrade_rth_trigger_coordinate(state, phase, observation):
         _upgrade_rth_trigger_coordinate(state, observation, now=now)
@@ -153,15 +165,26 @@ def advance_level_decision(
     if _expired(state, now):
         if phase is LevelPhase.CONFIRMED:
             return _transition(state, phase, LevelPhase.EXPIRED, now, "confirmed_ttl_elapsed")
-        level = state.get("level")
-        if (
-            isinstance(level, int | float)
-            and observation.spot is not None
-            and abs(float(observation.spot) - float(level)) <= settings.approach_points
-        ):
-            state["expires_at"] = (now + timedelta(seconds=settings.event_ttl_seconds)).isoformat()
-            return _unchanged(state, phase, now, "event_ttl_extended_near_level")
-        return _transition(state, phase, LevelPhase.EXPIRED, now, "event_ttl_elapsed")
+        phase_age = _phase_age(state, now)
+        if phase in PHASE_TIMEOUT_PHASES:
+            if phase_age <= settings.phase_timeout_seconds:
+                remaining = settings.phase_timeout_seconds - phase_age + 1.0
+                state["expires_at"] = (now + timedelta(seconds=remaining)).isoformat()
+            # Once the phase clock is over its limit, fall through to the
+            # phase-timeout transition below instead of extending a near-level
+            # event indefinitely.
+        else:
+            level = state.get("level")
+            if (
+                isinstance(level, int | float)
+                and observation.spot is not None
+                and abs(float(observation.spot) - float(level)) <= settings.approach_points
+            ):
+                state["expires_at"] = (
+                    now + timedelta(seconds=settings.event_ttl_seconds)
+                ).isoformat()
+                return _unchanged(state, phase, now, "event_ttl_extended_near_level")
+            return _transition(state, phase, LevelPhase.EXPIRED, now, "event_ttl_elapsed")
     if (
         str(state.get("trigger_coordinate_kind") or "unknown")
         != observation.trigger_coordinate_kind
@@ -201,10 +224,10 @@ def advance_level_decision(
     desired_move = desired_direction * (spot - level)
     if desired_move <= -settings.break_buffer_points:
         return _transition(state, phase, LevelPhase.INVALIDATED, now, "crossed_invalidation")
-    # The short phase timeout protects incomplete acceptance/retest paths.  A
+    # The session-specific phase timeout protects incomplete acceptance/retest paths.  A
     # CONFIRMED opportunity has its own explicit event TTL and must remain
     # available for the configured human action window instead of being cut
-    # back to ninety seconds by the pending-phase clock.
+    # back by the pending-phase clock.
     if phase is not LevelPhase.CONFIRMED and _phase_timed_out(state, now, settings):
         return _transition(state, phase, LevelPhase.EXPIRED, now, "phase_timeout")
 
@@ -338,6 +361,20 @@ def _handle_bad_quality(
     state.setdefault("quality_degraded_at", now.isoformat())
     if phase in TERMINAL_PHASES or phase is LevelPhase.FAR:
         return _unchanged(state, phase, now, quality_reason)
+    if phase in PHASE_TIMEOUT_PHASES:
+        phase_age = _phase_age(state, now)
+        if phase_age > settings.phase_timeout_seconds:
+            return _transition(
+                state,
+                phase,
+                LevelPhase.EXPIRED,
+                now,
+                "phase_timeout_during_data_degradation",
+            )
+        if _expired(state, now):
+            remaining = settings.phase_timeout_seconds - phase_age + 1.0
+            state["expires_at"] = (now + timedelta(seconds=remaining)).isoformat()
+        return _unchanged(state, phase, now, quality_reason)
     # Bad data pauses new conclusions, but it must not keep an old structure
     # event alive forever.  The level lifecycle can expire safely while any
     # separately accepted/active trade remains owned by its independent trade
@@ -433,6 +470,15 @@ def _session_boundary_changed(
     prior_mode = str(state.get("session_mode") or "")
     current_mode = str(observation.session_mode or "")
     if prior_mode and current_mode not in {"", "unknown"} and prior_mode != current_mode:
+        return True
+    prior_date = str(state.get("session_date") or "")
+    current_date = str(observation.session_date or "")
+    if (
+        phase is not LevelPhase.FAR
+        and prior_date
+        and current_date
+        and prior_date != current_date
+    ):
         return True
     if phase not in TERMINAL_PHASES or current_mode != "rth":
         return False

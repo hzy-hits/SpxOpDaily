@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import inspect
 import json
 import sqlite3
@@ -13,6 +14,10 @@ import spx_spark.application.market_features.gth_manual_candidate as candidate_m
 import spx_spark.application.market_features.gth_level_manual_candidate as level_candidate_module
 import spx_spark.application.market_features.service as market_feature_service
 import spx_spark.application.order_map.service as order_map_service
+from spx_spark.application.market_features.gth_candidate_lifecycle import (
+    cancellation_scope,
+    seed_replayed_candidate_ids,
+)
 from spx_spark.application.market_features.gth_manual_candidate import (
     _direct_es_reference,
     _notification_intent,
@@ -53,6 +58,7 @@ from spx_spark.notifier.dispatcher import (
 from spx_spark.notifier.model import SinkResult
 from spx_spark.settings.market_features import MarketFeatureSettings
 from spx_spark.storage import LatestState
+from spx_spark.strategy_contract import policy_version
 
 
 UTC = timezone.utc
@@ -482,48 +488,775 @@ def test_confirmed_gth_lower_rejection_builds_call_manual_ready(
     assert candidate["automatic_ordering"] is False
 
 
-def test_gth_es_continuation_does_not_create_a_chase_card(
+@pytest.mark.parametrize(
+    (
+        "direction",
+        "position_type",
+        "path_kind",
+        "right",
+        "target_spx",
+        "invalidation_spx",
+    ),
+    [
+        ("up", "call_debit_spread", "trend_transition_call", "C", 7393.0, 7365.0),
+        ("down", "put_debit_spread", "trend_transition_put", "P", 7343.0, 7371.0),
+    ],
+)
+def test_current_gth_trend_transition_builds_bounded_manual_card(
     monkeypatch: pytest.MonkeyPatch,
+    direction: str,
+    position_type: str,
+    path_kind: str,
+    right: str,
+    target_spx: float,
+    invalidation_spx: float,
 ) -> None:
-    _patch_ready_market(monkeypatch, now=NOW, parity_price=7337.0, es_price=7367.0)
-    level_context = {
-        "formal_signal": True,
-        "phase": "confirmed",
-        "quality_ok": True,
-        "event_id": "level:stale-event",
-        "expires_at": (NOW - timedelta(seconds=1)).isoformat(),
-        "expiry": "20260715",
-        "spot": 7337.0,
-        "es": 7367.0,
-        "es_basis_points": 30.0,
-        "levels": {
-            "put_wall": 7300.0,
-            "flip_low": 7375.0,
-            "flip_high": 7380.0,
-            "call_wall": 7450.0,
-        },
-        "trigger_coordinate": {
-            "kind": "chain_implied_spx",
-            "instrument_id": "synthetic:SPXW_PARITY",
-            "observed_value": 7337.0,
-        },
-    }
-    trend_state = {
-        "last_continuation": {
-            "event_type": "continuation",
-            "event_id": "globex-cont:2026-07-15:gth:3:down:m1",
-            "session_id": "2026-07-15:gth",
-            "signal_stage": "entry_advisory",
-            "advisory_status": "advisory_ready",
-            "direction": "down",
-            "anchor_price": 7378.0,
-            "at": NOW.isoformat(),
-        }
-    }
+    _patch_ready_market(monkeypatch, now=NOW, parity_price=7368.0, es_price=7398.0)
+    trend_state = _trend_transition_state(NOW, direction=direction)
 
     candidate = evaluate_gth_level_manual_candidate(
         object(),
-        level_context,
+        {},
+        trend_state=trend_state,
+        macro_event={"entry_allowed": True},
+        now=NOW,
+        policy=MarketFeatureSettings(),
+        new_entries_allowed=True,
+        new_entries_block_reason="allowed",
+    )
+
+    event = trend_state["last_transition"]
+    assert candidate["status"] == "manual_ready"
+    assert candidate["source_kind"] == "gth_es_trend_transition"
+    assert candidate["source_signal_id"] == event["event_id"]
+    assert candidate["source_event_id"] == event["event_id"]
+    assert candidate["position_type"] == position_type
+    assert candidate["path_kind"] == path_kind
+    assert candidate["long_contract_id"].endswith(f":{right}")
+    assert candidate["short_contract_id"].endswith(f":{right}")
+    assert candidate["execution_mode"] == "manual_only"
+    assert candidate["automatic_ordering"] is False
+    assert candidate["broker_submission_allowed"] is False
+    assert candidate["entry_limit"] == candidate["decision_ask"]
+    assert candidate["reward_risk_at_limit"] >= 1.0
+    assert candidate["outcome_baselines"]["confirmation_time"]["at"] == NOW.isoformat()
+    assert candidate["outcome_baselines"]["confirmation_time"]["parity_spx"] == 7368.0
+    assert candidate["target_spx"] == target_spx
+    assert candidate["invalidation_spx"] == invalidation_spx
+    assert candidate["valid_until"] == (NOW + timedelta(minutes=5)).isoformat()
+    card = _notification_intent(candidate, event_id="trend-ready", now=NOW)
+    assert f"ES 趋势已确认切换为{'多' if direction == 'up' else '空'}头" in card["text"]
+    assert "趋势延续" not in card["text"]
+
+
+def test_gth_trend_transition_rechecks_and_m1_do_not_rearm_the_same_event(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_ready_market(monkeypatch, now=NOW, parity_price=7368.0, es_price=7398.0)
+    pending_counts: list[int] = []
+
+    def fake_flush(path, **_kwargs):
+        state = candidate_module.read_json_object(path)
+        pending = list(state.get("pending_notifications") or [])
+        pending_counts.append(len(pending))
+        if not pending:
+            return {"attempted": False, "accepted": False}
+        accepted = set(state.get("accepted_notification_event_ids") or [])
+        accepted.add(str(pending[0]["event_id"]))
+        state["pending_notifications"] = []
+        state["accepted_notification_event_ids"] = sorted(accepted)
+        candidate_module.atomic_write_json_secure(path, state)
+        return {"attempted": True, "accepted": True, "outcome": "queued"}
+
+    monkeypatch.setattr(level_candidate_module, "flush_pending_notifications", fake_flush)
+    storage = SimpleNamespace(data_root=str(tmp_path))
+    trend_state = _trend_transition_state(NOW, direction="up")
+    common = {
+        "trend_state": trend_state,
+        "macro_event": {"entry_allowed": True},
+        "now": NOW,
+        "policy": MarketFeatureSettings(),
+        "new_entries_allowed": True,
+        "new_entries_block_reason": "allowed",
+        "notification": SimpleNamespace(),
+    }
+
+    first = process_gth_level_manual_candidate(storage, object(), {}, **common)
+    trend_state["last_continuation"] = {
+        "event_type": "continuation",
+        "event_id": "globex-cont:2026-07-15:gth:3:up:m1",
+        "session_id": "2026-07-15:gth",
+        "at": NOW.isoformat(),
+    }
+    replay = process_gth_level_manual_candidate(storage, object(), {}, **common)
+
+    assert first["candidate_id"] == replay["candidate_id"]
+    assert first["source_signal_id"] == replay["source_signal_id"]
+    assert first["notification_accepted"] is True
+    assert replay["notification_attempted"] is False
+    assert pending_counts == [1, 0]
+    gate_path = (
+        tmp_path / "features" / "gth_manual_signal_gates" / "date=2026-07-15" / "events.jsonl"
+    )
+    replay_path = (
+        tmp_path / "features" / "gth_level_manual_candidates" / "date=2026-07-15" / "events.jsonl"
+    )
+    assert len(gate_path.read_text().splitlines()) == 1
+    assert len(replay_path.read_text().splitlines()) == 1
+
+
+def test_gth_trend_quote_refresh_preserves_lifecycle_and_single_replay(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pending_counts: list[int] = []
+    cancellations: list[str] = []
+
+    def fake_flush(path, **_kwargs):
+        state = candidate_module.read_json_object(path)
+        pending = list(state.get("pending_notifications") or [])
+        pending_counts.append(len(pending))
+        if not pending:
+            return {"attempted": False, "accepted": False}
+        event_id = str(pending[0]["event_id"])
+        state["pending_notifications"] = []
+        state["accepted_notification_event_ids"] = [event_id]
+        candidate_module.atomic_write_json_secure(path, state)
+        return {"attempted": True, "accepted": True, "outcome": "queued"}
+
+    monkeypatch.setattr(level_candidate_module, "flush_pending_notifications", fake_flush)
+    monkeypatch.setattr(
+        level_candidate_module,
+        "cancel_pending_notification",
+        lambda _settings, event_id, **_kwargs: cancellations.append(event_id),
+    )
+    storage = SimpleNamespace(data_root=str(tmp_path))
+    trend_state = _trend_transition_state(NOW, direction="up")
+    common = {
+        "trend_state": trend_state,
+        "macro_event": {"entry_allowed": True},
+        "policy": MarketFeatureSettings(),
+        "new_entries_allowed": True,
+        "new_entries_block_reason": "allowed",
+        "notification": SimpleNamespace(),
+    }
+
+    _patch_ready_market(monkeypatch, now=NOW, parity_price=7368.0, es_price=7398.0)
+    ready = process_gth_level_manual_candidate(
+        storage, object(), {}, now=NOW, **common
+    )
+    monkeypatch.setattr(
+        level_candidate_module,
+        "spread_snapshot_decision",
+        lambda *_args, **_kwargs: (
+            {},
+            [
+                "long_leg_transport_stale",
+                "short_leg_transport_stale",
+                "long_leg_quote_unavailable",
+                "short_leg_quote_unavailable",
+            ],
+        ),
+    )
+    refresh = process_gth_level_manual_candidate(
+        storage,
+        object(),
+        {},
+        now=NOW + timedelta(seconds=1),
+        **common,
+    )
+    _patch_ready_market(
+        monkeypatch,
+        now=NOW + timedelta(seconds=2),
+        parity_price=7368.0,
+        es_price=7398.0,
+    )
+    recovered = process_gth_level_manual_candidate(
+        storage,
+        object(),
+        {},
+        now=NOW + timedelta(seconds=2),
+        **common,
+    )
+
+    event_id = f"{ready['candidate_id']}:ready"
+    state = candidate_module.read_json_object(
+        tmp_path / "latest" / "gth_level_manual_candidate_state.json"
+    )
+    replay_path = (
+        tmp_path / "features" / "gth_level_manual_candidates" / "date=2026-07-15" / "events.jsonl"
+    )
+    assert refresh["status"] == "refresh_pending"
+    assert refresh["source_lifecycle_class"] == "identified"
+    assert recovered["candidate_id"] == ready["candidate_id"]
+    assert recovered["notification_attempted"] is False
+    assert pending_counts == [1, 0]
+    assert cancellations == []
+    assert event_id in state["accepted_notification_event_ids"]
+    assert event_id not in state["settled_notification_event_ids"]
+    assert state["replayed_candidate_ids"] == [ready["candidate_id"]]
+    assert len(replay_path.read_text().splitlines()) == 1
+
+
+@pytest.mark.parametrize(
+    ("source_updates", "expected_reason"),
+    [
+        (
+            {"phase": "invalidated", "formal_signal": False},
+            "level_source_invalidated",
+        ),
+        ({"quality_ok": False}, "level_source_quality_invalid"),
+    ],
+)
+def test_explicit_level_source_absence_cancels_prior_ready_lifecycle(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    source_updates: dict[str, object],
+    expected_reason: str,
+) -> None:
+    cancellations: list[str] = []
+
+    def fake_flush(path, **_kwargs):
+        state = level_candidate_module.read_json_object(path)
+        pending = list(state.get("pending_notifications") or [])
+        if not pending:
+            return {"attempted": False, "accepted": False}
+        event_id = str(pending[0]["event_id"])
+        state["pending_notifications"] = []
+        state["accepted_notification_event_ids"] = [event_id]
+        level_candidate_module.atomic_write_json_secure(path, state)
+        return {"attempted": True, "accepted": True, "outcome": "queued"}
+
+    monkeypatch.setattr(level_candidate_module, "flush_pending_notifications", fake_flush)
+    monkeypatch.setattr(
+        level_candidate_module,
+        "cancel_pending_notification",
+        lambda _settings, event_id, **_kwargs: cancellations.append(event_id),
+    )
+    storage = SimpleNamespace(data_root=str(tmp_path))
+    source = _level_signal(
+        NOW,
+        direction="down",
+        level_kind="flip_low",
+        level=7375.0,
+    )
+    common = {
+        "macro_event": {"entry_allowed": True},
+        "policy": MarketFeatureSettings(),
+        "new_entries_allowed": True,
+        "new_entries_block_reason": "allowed",
+        "notification": SimpleNamespace(),
+    }
+
+    _patch_ready_market(monkeypatch, now=NOW, parity_price=7368.0, es_price=7398.0)
+    ready = process_gth_level_manual_candidate(
+        storage,
+        object(),
+        source,
+        now=NOW,
+        **common,
+    )
+    ended_source = {**source, **source_updates}
+    ended = process_gth_level_manual_candidate(
+        storage,
+        object(),
+        ended_source,
+        now=NOW + timedelta(seconds=1),
+        **common,
+    )
+
+    event_id = f"{ready['candidate_id']}:ready"
+    state = level_candidate_module.read_json_object(
+        tmp_path / "latest" / "gth_level_manual_candidate_state.json"
+    )
+    assert ended["status"] == "blocked"
+    assert ended["source_lifecycle_class"] == "explicit_absence"
+    assert ended["source_tombstone_id"] == source["event_id"]
+    assert expected_reason in ended["block_reasons"]
+    assert cancellations == [event_id]
+    assert event_id not in state["accepted_notification_event_ids"]
+    assert event_id in state["settled_notification_event_ids"]
+
+
+def test_empty_source_frame_is_transient_and_preserves_prior_ready_lifecycle(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cancellations: list[str] = []
+
+    def fake_flush(path, **_kwargs):
+        state = level_candidate_module.read_json_object(path)
+        pending = list(state.get("pending_notifications") or [])
+        if not pending:
+            return {"attempted": False, "accepted": False}
+        event_id = str(pending[0]["event_id"])
+        state["pending_notifications"] = []
+        state["accepted_notification_event_ids"] = [event_id]
+        level_candidate_module.atomic_write_json_secure(path, state)
+        return {"attempted": True, "accepted": True, "outcome": "queued"}
+
+    monkeypatch.setattr(level_candidate_module, "flush_pending_notifications", fake_flush)
+    monkeypatch.setattr(
+        level_candidate_module,
+        "cancel_pending_notification",
+        lambda _settings, event_id, **_kwargs: cancellations.append(event_id),
+    )
+    storage = SimpleNamespace(data_root=str(tmp_path))
+    source = _level_signal(
+        NOW,
+        direction="down",
+        level_kind="flip_low",
+        level=7375.0,
+    )
+    common = {
+        "macro_event": {"entry_allowed": True},
+        "policy": MarketFeatureSettings(),
+        "new_entries_allowed": True,
+        "new_entries_block_reason": "allowed",
+        "notification": SimpleNamespace(),
+    }
+
+    _patch_ready_market(monkeypatch, now=NOW, parity_price=7368.0, es_price=7398.0)
+    ready = process_gth_level_manual_candidate(
+        storage,
+        object(),
+        source,
+        now=NOW,
+        **common,
+    )
+    missing = process_gth_level_manual_candidate(
+        storage,
+        object(),
+        {},
+        now=NOW + timedelta(seconds=1),
+        **common,
+    )
+
+    event_id = f"{ready['candidate_id']}:ready"
+    state = level_candidate_module.read_json_object(
+        tmp_path / "latest" / "gth_level_manual_candidate_state.json"
+    )
+    assert missing["source_lifecycle_class"] == "transient_absence"
+    assert missing["source_tombstone_id"] is None
+    assert cancellations == []
+    assert event_id in state["accepted_notification_event_ids"]
+    assert event_id not in state["settled_notification_event_ids"]
+
+
+@pytest.mark.parametrize(
+    "reason",
+    ["level_source_invalidated", "level_source_not_confirmed"],
+)
+def test_level_tombstone_does_not_cancel_unrelated_trend_source(reason: str) -> None:
+    candidate = {
+        "status": "blocked",
+        "source_signal_id": None,
+        "source_tombstone_id": "level:down:flip_low:current",
+        "block_reasons": [reason],
+    }
+    lifecycle_events = {
+        "trend-candidate:ready": "globex-trend:2026-07-15:gth:3:bullish",
+        "level-candidate:ready": "level:down:flip_low:current",
+    }
+
+    cancelled = cancellation_scope(candidate, lifecycle_events, now=NOW)
+
+    assert cancelled == {"level-candidate:ready"}
+
+
+def test_session_boundary_tombstone_cancels_all_source_lifecycles() -> None:
+    candidate = {
+        "status": "blocked",
+        "source_signal_id": None,
+        "source_tombstone_id": None,
+        "block_reasons": ["trend_transition_session_mismatch"],
+    }
+    lifecycle_events = {
+        "trend-candidate:ready": "globex-trend:2026-07-14:gth:3:bullish",
+        "level-candidate:ready": "level:down:flip_low:prior",
+    }
+
+    cancelled = cancellation_scope(candidate, lifecycle_events, now=NOW)
+
+    assert cancelled == set(lifecycle_events)
+
+
+def test_legacy_replay_seed_uses_last_ready_candidate_and_existing_journal(
+    tmp_path,
+) -> None:
+    replay_path = tmp_path / "events.jsonl"
+    replay_path.write_text(
+        "\n".join(
+            (
+                json.dumps(
+                    {
+                        "status": "manual_ready",
+                        "candidate_id": "candidate:from-journal",
+                    }
+                ),
+                "{not-json",
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    replayed = seed_replayed_candidate_ids(
+        {
+            "last_candidate": {
+                "status": "manual_ready",
+                "candidate_id": "candidate:from-state",
+            }
+        },
+        replay_journal_path=replay_path,
+    )
+
+    assert replayed == {"candidate:from-journal", "candidate:from-state"}
+
+
+def test_legacy_replay_journal_prevents_duplicate_ready_recovery(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_ready_market(monkeypatch, now=NOW, parity_price=7368.0, es_price=7398.0)
+    monkeypatch.setattr(
+        level_candidate_module,
+        "flush_pending_notifications",
+        lambda *_args, **_kwargs: {"attempted": False, "accepted": False},
+    )
+    storage = SimpleNamespace(data_root=str(tmp_path))
+    source = _level_signal(
+        NOW,
+        direction="down",
+        level_kind="flip_low",
+        level=7375.0,
+    )
+    common = {
+        "macro_event": {"entry_allowed": True},
+        "policy": MarketFeatureSettings(),
+        "new_entries_allowed": True,
+        "new_entries_block_reason": "allowed",
+    }
+    legacy_ready = evaluate_gth_level_manual_candidate(
+        object(),
+        source,
+        now=NOW,
+        **common,
+    )
+    replay_record = level_candidate_module._replay_candidate_record(
+        legacy_ready,
+        now=NOW,
+    )
+    assert replay_record is not None
+    replay_path = (
+        tmp_path
+        / "features"
+        / "gth_level_manual_candidates"
+        / "date=2026-07-15"
+        / "events.jsonl"
+    )
+    replay_path.parent.mkdir(parents=True)
+    replay_path.write_text(json.dumps(replay_record) + "\n", encoding="utf-8")
+    state_path = tmp_path / "latest" / "gth_level_manual_candidate_state.json"
+    level_candidate_module.atomic_write_json_secure(
+        state_path,
+        {
+            "last_gate_record_key": "legacy-before-replayed-candidate-ids",
+            "last_candidate": {
+                "status": "blocked",
+                "candidate_id": legacy_ready["candidate_id"],
+            },
+        },
+    )
+
+    recovered = process_gth_level_manual_candidate(
+        storage,
+        object(),
+        source,
+        now=NOW,
+        notification=SimpleNamespace(),
+        **common,
+    )
+
+    state = level_candidate_module.read_json_object(state_path)
+    assert recovered["status"] == "manual_ready"
+    assert state["replayed_candidate_ids"] == [legacy_ready["candidate_id"]]
+    assert len(replay_path.read_text(encoding="utf-8").splitlines()) == 1
+
+
+def test_opposite_active_plan_conflict_does_not_cancel_prior_card(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cancellations: list[str] = []
+
+    def fake_flush(path, **_kwargs):
+        state = candidate_module.read_json_object(path)
+        pending = list(state.get("pending_notifications") or [])
+        if not pending:
+            return {"attempted": False, "accepted": False}
+        event_id = str(pending[0]["event_id"])
+        state["pending_notifications"] = []
+        state["accepted_notification_event_ids"] = [event_id]
+        candidate_module.atomic_write_json_secure(path, state)
+        return {"attempted": True, "accepted": True, "outcome": "queued"}
+
+    monkeypatch.setattr(level_candidate_module, "flush_pending_notifications", fake_flush)
+    monkeypatch.setattr(
+        level_candidate_module,
+        "cancel_pending_notification",
+        lambda _settings, event_id, **_kwargs: cancellations.append(event_id),
+    )
+    storage = SimpleNamespace(data_root=str(tmp_path))
+    common = {
+        "macro_event": {"entry_allowed": True},
+        "policy": MarketFeatureSettings(),
+        "new_entries_allowed": True,
+        "new_entries_block_reason": "allowed",
+        "notification": SimpleNamespace(),
+    }
+    _patch_ready_market(monkeypatch, now=NOW, parity_price=7368.0, es_price=7398.0)
+    active = process_gth_level_manual_candidate(
+        storage,
+        object(),
+        {},
+        trend_state=_trend_transition_state(NOW, direction="up", sequence=3),
+        now=NOW,
+        **common,
+    )
+    _patch_ready_market(
+        monkeypatch,
+        now=NOW + timedelta(seconds=1),
+        parity_price=7368.0,
+        es_price=7398.0,
+    )
+    opposite = process_gth_level_manual_candidate(
+        storage,
+        object(),
+        {},
+        trend_state=_trend_transition_state(
+            NOW + timedelta(seconds=1),
+            direction="down",
+            sequence=4,
+        ),
+        now=NOW + timedelta(seconds=1),
+        **common,
+    )
+
+    event_id = f"{active['candidate_id']}:ready"
+    state = candidate_module.read_json_object(
+        tmp_path / "latest" / "gth_level_manual_candidate_state.json"
+    )
+    assert opposite["status"] == "blocked"
+    assert "opposite_signal_conflicts_with_active_plan" in opposite["block_reasons"]
+    assert cancellations == []
+    assert event_id in state["accepted_notification_event_ids"]
+    assert state["active_manual_plan"]["candidate_id"] == active["candidate_id"]
+
+
+def test_accepted_card_recovers_active_plan_after_activation_write_crash(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_flush(path, **_kwargs):
+        state = candidate_module.read_json_object(path)
+        pending = list(state.get("pending_notifications") or [])
+        event_id = str(pending[0]["event_id"])
+        state["pending_notifications"] = []
+        state["accepted_notification_event_ids"] = [event_id]
+        candidate_module.atomic_write_json_secure(path, state)
+        return {"attempted": True, "accepted": True, "outcome": "queued"}
+
+    original_write = level_candidate_module.atomic_write_json_secure
+
+    def crash_on_activation_write(path, payload):
+        if payload.get("active_manual_plan"):
+            raise RuntimeError("simulated crash before active plan commit")
+        original_write(path, payload)
+
+    monkeypatch.setattr(level_candidate_module, "flush_pending_notifications", fake_flush)
+    monkeypatch.setattr(
+        level_candidate_module,
+        "atomic_write_json_secure",
+        crash_on_activation_write,
+    )
+    storage = SimpleNamespace(data_root=str(tmp_path))
+    common = {
+        "macro_event": {"entry_allowed": True},
+        "policy": MarketFeatureSettings(),
+        "new_entries_allowed": True,
+        "new_entries_block_reason": "allowed",
+        "notification": SimpleNamespace(),
+    }
+    _patch_ready_market(monkeypatch, now=NOW, parity_price=7368.0, es_price=7398.0)
+    bullish = _trend_transition_state(NOW, direction="up", sequence=3)
+
+    with pytest.raises(RuntimeError, match="active plan commit"):
+        process_gth_level_manual_candidate(
+            storage,
+            object(),
+            {},
+            trend_state=bullish,
+            now=NOW,
+            **common,
+        )
+
+    state_path = tmp_path / "latest" / "gth_level_manual_candidate_state.json"
+    crashed_state = candidate_module.read_json_object(state_path)
+    candidate_id = str(crashed_state["last_candidate"]["candidate_id"])
+    assert crashed_state["accepted_notification_event_ids"] == [f"{candidate_id}:ready"]
+    assert crashed_state["active_manual_plan"] == {}
+
+    monkeypatch.setattr(
+        level_candidate_module,
+        "atomic_write_json_secure",
+        original_write,
+    )
+    _patch_ready_market(
+        monkeypatch,
+        now=NOW + timedelta(seconds=1),
+        parity_price=7368.0,
+        es_price=7398.0,
+    )
+    opposite = process_gth_level_manual_candidate(
+        storage,
+        object(),
+        {},
+        trend_state=_trend_transition_state(
+            NOW + timedelta(seconds=1),
+            direction="down",
+            sequence=4,
+        ),
+        now=NOW + timedelta(seconds=1),
+        **common,
+    )
+    recovered_state = candidate_module.read_json_object(state_path)
+
+    assert opposite["status"] == "blocked"
+    assert "opposite_signal_conflicts_with_active_plan" in opposite["block_reasons"]
+    assert recovered_state["active_manual_plan"]["candidate_id"] == candidate_id
+    assert recovered_state["active_manual_plan"]["direction"] == "up"
+
+
+def test_static_gth_trend_regime_does_not_create_a_manual_card(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_ready_market(monkeypatch, now=NOW, parity_price=7368.0, es_price=7398.0)
+
+    candidate = evaluate_gth_level_manual_candidate(
+        object(),
+        {},
+        trend_state={"session_id": "2026-07-15:gth", "regime": "bullish"},
+        macro_event={"entry_allowed": True},
+        now=NOW,
+        policy=MarketFeatureSettings(),
+        new_entries_allowed=True,
+        new_entries_block_reason="allowed",
+    )
+
+    assert candidate["status"] == "blocked"
+    assert candidate["block_reasons"] == ["source_signal_unavailable"]
+
+
+def test_fresh_trend_transition_takes_priority_over_fresh_confirmed_level(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_ready_market(monkeypatch, now=NOW, parity_price=7458.0, es_price=7488.0)
+    level = _level_signal(NOW, direction="up", level_kind="call_wall", level=7450.0)
+
+    candidate = evaluate_gth_level_manual_candidate(
+        object(),
+        level,
+        trend_state=_trend_transition_state(NOW, direction="up", price=7488.0),
+        macro_event={"entry_allowed": True},
+        now=NOW,
+        policy=MarketFeatureSettings(),
+        new_entries_allowed=True,
+        new_entries_block_reason="allowed",
+    )
+
+    assert candidate["status"] == "manual_ready"
+    assert candidate["source_kind"] == "gth_es_trend_transition"
+    assert candidate["source_signal_id"] != level["event_id"]
+    assert candidate["path_kind"] == "trend_transition_call"
+
+
+def test_expired_transition_falls_back_to_fresh_confirmed_level(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_ready_market(monkeypatch, now=NOW, parity_price=7368.0, es_price=7398.0)
+    level = _level_signal(NOW, direction="down", level_kind="flip_low", level=7375.0)
+    candidate = evaluate_gth_level_manual_candidate(
+        object(),
+        level,
+        trend_state=_trend_transition_state(NOW - timedelta(seconds=301), direction="down"),
+        macro_event={"entry_allowed": True},
+        now=NOW,
+        policy=MarketFeatureSettings(),
+        new_entries_allowed=True,
+        new_entries_block_reason="allowed",
+    )
+
+    assert candidate["status"] == "manual_ready"
+    assert candidate["source_kind"] == "gth_confirmed_level_path"
+    assert candidate["source_signal_id"] == level["event_id"]
+
+
+def test_level_policy_hash_and_candidate_id_remain_on_legacy_inputs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = MarketFeatureSettings()
+    _patch_ready_market(monkeypatch, now=NOW, parity_price=7368.0, es_price=7398.0)
+    candidate = evaluate_gth_level_manual_candidate(
+        object(),
+        _level_signal(NOW, direction="down", level_kind="flip_low", level=7375.0),
+        macro_event={"entry_allowed": True},
+        now=NOW,
+        policy=policy,
+        new_entries_allowed=True,
+        new_entries_block_reason="allowed",
+    )
+    expected_policy = policy_version(
+        "gth_level_manual_candidate.v1",
+        {
+            "quote_max_age_seconds": policy.gth_manual_candidate_quote_max_age_seconds,
+            "ttl_seconds": policy.gth_manual_candidate_ttl_seconds,
+            "max_debit_fraction": policy.gth_manual_candidate_max_debit_fraction,
+            "max_net_spread_fraction": policy.gth_manual_candidate_max_net_spread_fraction,
+            "min_parity_pairs": policy.gth_manual_candidate_min_parity_pairs,
+            "target_room_buffer_points": policy.gth_manual_candidate_target_room_buffer_points,
+            "min_reward_risk": policy.gth_manual_candidate_min_reward_risk,
+            "invalidation_buffer_points": policy.trade_invalidation_buffer_points,
+            "time_stop_minutes": policy.trade_time_stop_minutes,
+            "spread_width_points": {"min": 5.0, "default": 25.0, "max": 40.0},
+        },
+    )
+    identity = "|".join(
+        (
+            "gth_level_manual_candidate.v1",
+            expected_policy,
+            "flip_low_breakdown_put",
+            "option:SPX:SPXW:20260715:7375:P",
+            "option:SPX:SPXW:20260715:7335:P",
+        )
+    )
+
+    assert candidate["policy_version"] == expected_policy
+    assert candidate["candidate_id"] == (
+        "gth-level-manual:" + hashlib.sha256(identity.encode()).hexdigest()[:24]
+    )
+
+
+def test_gth_trend_transition_with_stale_confirmation_source_is_blocked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_ready_market(monkeypatch, now=NOW, parity_price=7368.0, es_price=7398.0)
+    trend_state = _trend_transition_state(NOW, direction="up")
+    trend_state["last_transition"]["source_at"] = (NOW - timedelta(seconds=16)).isoformat()
+
+    candidate = evaluate_gth_level_manual_candidate(
+        object(),
+        {},
         trend_state=trend_state,
         macro_event={"entry_allowed": True},
         now=NOW,
@@ -533,8 +1266,195 @@ def test_gth_es_continuation_does_not_create_a_chase_card(
     )
 
     assert candidate["status"] == "blocked"
-    assert candidate["source_kind"] is None
-    assert candidate["block_reasons"] == ["source_signal_unavailable"]
+    assert candidate["block_reasons"] == [
+        "trend_transition_source_stale_at_confirmation"
+    ]
+
+
+def test_schwab_gth_trend_can_source_an_ibkr_executable_card(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_ready_market(monkeypatch, now=NOW, parity_price=7368.0, es_price=7398.0)
+    monkeypatch.setattr(
+        level_candidate_module,
+        "_direct_es_reference",
+        _direct_es_reference,
+    )
+    schwab_es = Quote(
+        instrument=InstrumentId.future("ES"),
+        provider=Provider.SCHWAB,
+        received_at=NOW,
+        last_update_at=NOW,
+        quote_time=NOW,
+        quality=MarketDataQuality.LIVE,
+        bid=7397.75,
+        ask=7398.25,
+    )
+    latest = LatestState(NOW, NOW, (schwab_es,), (schwab_es,))
+    candidate = evaluate_gth_level_manual_candidate(
+        latest,
+        {},
+        trend_state=_trend_transition_state(NOW, direction="up", provider="schwab"),
+        macro_event={"entry_allowed": True},
+        now=NOW,
+        policy=MarketFeatureSettings(),
+        new_entries_allowed=True,
+        new_entries_block_reason="allowed",
+    )
+
+    assert candidate["status"] == "manual_ready"
+    assert candidate["target_coordinate"]["provider"] == "ibkr"
+    assert candidate["invalidation_coordinate"]["provider"] == "schwab"
+    assert candidate["exact_spread_snapshot"]["long"]["provider"] == "ibkr"
+    assert candidate["exact_spread_snapshot"]["short"]["provider"] == "ibkr"
+
+
+def test_unsupported_gth_trend_provider_is_blocked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_ready_market(monkeypatch, now=NOW, parity_price=7368.0, es_price=7398.0)
+    candidate = evaluate_gth_level_manual_candidate(
+        object(),
+        {},
+        trend_state=_trend_transition_state(NOW, direction="up", provider="hyperliquid"),
+        macro_event={"entry_allowed": True},
+        now=NOW,
+        policy=MarketFeatureSettings(),
+        new_entries_allowed=True,
+        new_entries_block_reason="allowed",
+    )
+
+    assert candidate["status"] == "blocked"
+    assert candidate["block_reasons"] == ["trend_transition_provider_unsupported"]
+
+
+def test_gth_provider_control_is_a_hard_manual_card_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_ready_market(monkeypatch, now=NOW, parity_price=7368.0, es_price=7398.0)
+    candidate = evaluate_gth_level_manual_candidate(
+        object(),
+        {},
+        trend_state=_trend_transition_state(NOW, direction="up"),
+        macro_event={"entry_allowed": True},
+        now=NOW,
+        policy=MarketFeatureSettings(),
+        new_entries_allowed=False,
+        new_entries_block_reason="entries_not_explicitly_allowed",
+    )
+
+    assert candidate["status"] == "blocked"
+    assert "provider_entry_control_blocked" in candidate["block_reasons"]
+    assert candidate["provider_incident_warning"] == "entries_not_explicitly_allowed"
+
+
+@pytest.mark.parametrize(
+    ("es_price", "parity_price", "expected_reason"),
+    [
+        (7390.0, 7368.0, "invalidation_reached_before_candidate"),
+        (7430.0, 7400.0, "target_room_below_parity_uncertainty_bound"),
+    ],
+)
+def test_gth_call_transition_blocks_reversal_and_late_target(
+    monkeypatch: pytest.MonkeyPatch,
+    es_price: float,
+    parity_price: float,
+    expected_reason: str,
+) -> None:
+    _patch_ready_market(
+        monkeypatch,
+        now=NOW,
+        parity_price=parity_price,
+        es_price=es_price,
+    )
+    candidate = evaluate_gth_level_manual_candidate(
+        object(),
+        {},
+        trend_state=_trend_transition_state(NOW, direction="up"),
+        macro_event={"entry_allowed": True},
+        now=NOW,
+        policy=MarketFeatureSettings(),
+        new_entries_allowed=True,
+        new_entries_block_reason="allowed",
+    )
+
+    assert candidate["status"] == "blocked"
+    assert expected_reason in candidate["block_reasons"]
+
+
+def test_expired_gth_trend_transition_is_blocked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stale_at = NOW - timedelta(seconds=301)
+    _patch_ready_market(monkeypatch, now=NOW, parity_price=7368.0, es_price=7398.0)
+
+    candidate = evaluate_gth_level_manual_candidate(
+        object(),
+        {},
+        trend_state=_trend_transition_state(
+            stale_at,
+            direction="up",
+            session_id="2026-07-15:gth",
+        ),
+        macro_event={"entry_allowed": True},
+        now=NOW,
+        policy=MarketFeatureSettings(),
+        new_entries_allowed=True,
+        new_entries_block_reason="allowed",
+    )
+
+    assert candidate["status"] == "blocked"
+    assert "source_signal_expired" in candidate["block_reasons"]
+
+
+def test_wrong_session_gth_trend_transition_is_blocked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_ready_market(monkeypatch, now=NOW, parity_price=7368.0, es_price=7398.0)
+
+    candidate = evaluate_gth_level_manual_candidate(
+        object(),
+        {},
+        trend_state=_trend_transition_state(
+            NOW,
+            direction="up",
+            session_id="2026-07-14:gth",
+        ),
+        macro_event={"entry_allowed": True},
+        now=NOW,
+        policy=MarketFeatureSettings(),
+        new_entries_allowed=True,
+        new_entries_block_reason="allowed",
+    )
+
+    assert candidate["status"] == "blocked"
+    assert candidate["block_reasons"] == ["trend_transition_session_mismatch"]
+
+
+def test_gth_trend_transition_without_exact_leg_quote_is_blocked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_ready_market(monkeypatch, now=NOW, parity_price=7368.0, es_price=7398.0)
+    monkeypatch.setattr(
+        level_candidate_module,
+        "spread_snapshot_decision",
+        lambda *_args, **_kwargs: ({}, ["long_leg_quote_unavailable"]),
+    )
+
+    candidate = evaluate_gth_level_manual_candidate(
+        object(),
+        {},
+        trend_state=_trend_transition_state(NOW, direction="up"),
+        macro_event={"entry_allowed": True},
+        now=NOW,
+        policy=MarketFeatureSettings(),
+        new_entries_allowed=True,
+        new_entries_block_reason="allowed",
+    )
+
+    assert candidate["status"] == "blocked"
+    assert "long_leg_quote_unavailable" in candidate["block_reasons"]
+    assert candidate["manual_action_eligible"] is False
 
 
 def test_gth_put_wall_breakdown_is_manual_ready(
@@ -1396,6 +2316,22 @@ def test_es_reference_does_not_freshen_stale_last_with_quote_clock() -> None:
     assert _direct_es_reference(state, now=NOW, max_age_seconds=15.0) is None
 
 
+def test_gth_es_reference_does_not_fallback_to_schwab() -> None:
+    es = Quote(
+        instrument=InstrumentId.future("ES"),
+        provider=Provider.SCHWAB,
+        received_at=NOW,
+        last_update_at=NOW,
+        quote_time=NOW,
+        quality=MarketDataQuality.LIVE,
+        bid=7397.75,
+        ask=7398.25,
+    )
+    state = LatestState(NOW, NOW, (es,), (es,))
+
+    assert _direct_es_reference(state, now=NOW, max_age_seconds=15.0) is None
+
+
 def test_notification_labels_wall_and_synthetic_quote() -> None:
     candidate = {
         "long_contract_id": "option:SPXW:20260715:7505:C",
@@ -1773,6 +2709,40 @@ def test_failed_cancellation_blocks_a_new_gth_ready_lifecycle(
     with sqlite3.connect(settings.delivery_outbox_path) as connection:
         rows = connection.execute("SELECT event_id FROM notification_delivery_events").fetchall()
     assert rows == [(f"{first['candidate_id']}:ready",)]
+
+
+def _trend_transition_state(
+    at: datetime,
+    *,
+    direction: str,
+    session_id: str = "2026-07-15:gth",
+    provider: str = "ibkr",
+    price: float = 7398.0,
+    sequence: int = 3,
+) -> dict[str, object]:
+    regime = "bullish" if direction == "up" else "bearish"
+    return {
+        "version": 2,
+        "session_id": session_id,
+        "regime": regime,
+        "transition_sequence": sequence,
+        "last_transition": {
+            "event_type": "transition",
+            "event_id": f"globex-trend:{session_id}:{sequence}:{regime}",
+            "session_id": session_id,
+            "sequence": sequence,
+            "from_regime": "neutral",
+            "to_regime": regime,
+            "reason": "confirmed_multi_horizon_transition",
+            "at": at.isoformat(),
+            "source_at": at.isoformat(),
+            "price": price,
+            "provider": provider,
+            "metrics": {},
+            "operator_action": "observe_only",
+            "automatic_ordering": False,
+        },
+    }
 
 
 def _patch_ready_market(
