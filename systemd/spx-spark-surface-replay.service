@@ -10,6 +10,7 @@ Environment=PATH=/home/ubuntu/.local/bin:/home/ubuntu/.cargo/bin:/usr/local/bin:
 Environment=SPX_SPARK_DISABLE_DOTENV=1
 Environment=MARKET_DATA_DATA_ROOT=/srv/data/spx-spark/data
 Environment=SPX_SURFACE_REPLAY_FRAME_MINUTES=5
+Environment=SPX_CORE_SOCKET_PATH=/srv/data/spx-spark/data/published/spxw-surface/runtime/replay-api.sock
 ExecStartPre=/usr/bin/install -d -m 0700 /srv/data/spx-spark/data/published/spxw-surface/runtime
 ExecStart=/home/ubuntu/spx-spark/.venv/bin/uvicorn spx_spark.web.replay_api:create_default_app --factory --uds /srv/data/spx-spark/data/published/spxw-surface/runtime/replay-api.sock --no-access-log
 Restart=always

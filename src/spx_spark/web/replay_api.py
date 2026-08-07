@@ -5,7 +5,7 @@ from __future__ import annotations
 import hmac
 import logging
 import os
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import date, datetime, timezone
 
 from fastapi import FastAPI, Request
@@ -35,10 +35,13 @@ SECURITY_HEADERS = {
     "Content-Security-Policy": "default-src 'none'",
 }
 
-
-def create_app(catalog: ReplayCatalog) -> FastAPI:
+def create_app(
+    catalog: ReplayCatalog, *, lifespan=None,
+    health_payload: Callable[[], dict[str, object]] | None = None,
+) -> FastAPI:
     app = FastAPI(
-        title="SPX Spark Core API", docs_url=None, redoc_url=None, openapi_url=None
+        title="SPX Spark Core API", docs_url=None, redoc_url=None,
+        openapi_url=None, lifespan=lifespan,
     )
 
     @app.middleware("http")
@@ -50,6 +53,8 @@ def create_app(catalog: ReplayCatalog) -> FastAPI:
             )
         else:
             response = await call_next(request)
+        if socket_path := os.getenv("SPX_CORE_SOCKET_PATH"):
+            os.chmod(socket_path, 0o660)
         response.headers.update(SECURITY_HEADERS)
         return response
     @app.exception_handler(ReplayRequestError)
@@ -79,9 +84,9 @@ def create_app(catalog: ReplayCatalog) -> FastAPI:
     @app.api_route("/healthz", methods=["GET", "HEAD"])
     def health() -> Response:
         available = catalog.data_root.is_dir()
-        payload = {"status": "ok" if available else "unavailable", "service":
-                   "spxw-surface-replay", "schema_version": SERVICE_SCHEMA_VERSION}
-        return JSONResponse(payload, status_code=200 if available else 503,
+        payload = health_payload() if health_payload else {"status": "ok" if available else
+            "unavailable", "service": "spxw-surface-replay", "schema_version": SERVICE_SCHEMA_VERSION}
+        return JSONResponse(payload, status_code=200 if health_payload or available else 503,
                             headers={"Cache-Control": "no-store"})
     @app.api_route("/api/v1/replay/sessions", methods=["GET", "HEAD"])
     def sessions(request: Request) -> Response:
@@ -127,13 +132,11 @@ def create_app(catalog: ReplayCatalog) -> FastAPI:
 
     return app
 
-
 def create_default_app() -> FastAPI:
     settings = StorageSettings.from_env()
     catalog = ReplayCatalog(data_root=settings.data_root, storage_settings=settings, frame_minutes=int(
         os.getenv("SPX_SURFACE_REPLAY_FRAME_MINUTES", DEFAULT_FRAME_MINUTES)))
     return create_app(catalog)
-
 
 def _query(request: Request, *, required: set[str] | None = None,
            allowed: set[str] | None = None) -> dict[str, str]:
@@ -143,7 +146,6 @@ def _query(request: Request, *, required: set[str] | None = None,
     if len(pairs) > 8 or len(values) != len(pairs) or set(values) - allowed or not required <= set(values):
         raise ReplayRequestError("invalid_query")
     return values
-
 
 def _date(value: str) -> date:
     try:
@@ -185,9 +187,11 @@ def _integer(value: str, code: str) -> int:
         raise ReplayRequestError(code) from exc
 
 
-def _artifact(request: Request, payload: Mapping[str, object]) -> Response:
+def _artifact(request: Request, payload: Mapping[str, object], *,
+              cache_control: str = "private, no-cache",
+              extra_headers: Mapping[str, str] | None = None) -> Response:
     etag = f'"{payload["artifact_sha256"]}"'
-    headers = {"Cache-Control": "private, no-cache", "ETag": etag}
+    headers = {"Cache-Control": cache_control, "ETag": etag, **(extra_headers or {})}
     candidates = request.headers.get("if-none-match", "").split(",")
     if any(value.strip() == "*" or hmac.compare_digest(value.strip().removeprefix("W/"), etag)
            for value in candidates if value.strip()):

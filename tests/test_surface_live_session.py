@@ -4,15 +4,15 @@ import json
 import subprocess
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
-from http import HTTPStatus
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Iterable
 
 import pytest
+from fastapi.testclient import TestClient
 
 import spx_spark.surface_live_session_worker as live_worker
 from spx_spark.surface_artifact import canonical_sha256
-from spx_spark.surface_live_session_http import LiveAPI
 from spx_spark.surface_live_session_models import (
     LIVE_BUCKET_MINUTES,
     LiveSelector,
@@ -22,6 +22,7 @@ from spx_spark.surface_live_session_models import (
 )
 from spx_spark.surface_live_session_store import LiveSessionStateStore
 from spx_spark.surface_live_session_worker import LiveInput, LiveSessionAccumulator
+from spx_spark.web.live_api import create_app
 
 
 UTC = timezone.utc
@@ -942,20 +943,43 @@ def test_http_server_time_header_exactly_matches_signed_body(tmp_path: Path) -> 
     )
     request_at = _at(13, 34, 51, 123_456)
     clock.value = request_at
-    api = LiveAPI(accumulator, utcnow=clock)
-    response = api.dispatch(
-        "GET",
-        "/api/v1/live/session-surface"
-        "?role=front&weighting=oi_weighted&bucket_minutes=1&price_step=5",
-    )
+    catalog = SimpleNamespace(data_root=tmp_path, frame_minutes=5)
+    client = TestClient(create_app(catalog, accumulator))
+    target = ("/api/v1/live/session-surface?role=front&weighting=oi_weighted"
+              "&bucket_minutes=1&price_step=5")
+    response = client.get(target)
 
-    assert response.status == HTTPStatus.OK
-    headers = dict(response.headers)
-    assert headers["X-SPXW-Server-Time"] == response.payload["server_time"]
-    assert response.payload["created_at"] == response.payload["server_time"]
-    unsigned = dict(response.payload)
+    assert response.status_code == 200
+    payload = response.json()
+    assert response.headers["X-SPXW-Server-Time"] == payload["server_time"]
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.headers["cache-control"] == "private, no-store"
+    assert payload["created_at"] == payload["server_time"]
+    unsigned = dict(payload)
     artifact = unsigned.pop("artifact_sha256")
     assert artifact == canonical_sha256(unsigned)
+    assert client.head(target).content == b""
+    cached = client.get(target, headers={"If-None-Match": response.headers["etag"]})
+    assert cached.status_code == 304 and cached.content == b""
+    assert client.post(target).status_code == 405
+    health = client.get("/healthz")
+    assert health.status_code == 200
+    assert health.json()["service"] == "spxw-surface-live"
+
+
+def test_fastapi_lifespan_holds_single_owner_and_releases_it(tmp_path: Path) -> None:
+    clock = MutableClock(_at(13, 34, 50))
+    accumulator = _accumulator(tmp_path, clock)
+    catalog = SimpleNamespace(data_root=tmp_path, frame_minutes=5)
+
+    with TestClient(create_app(catalog, accumulator, poll_seconds=0.01)) as client:
+        assert client.get("/healthz").status_code == 200
+        with pytest.raises(TimeoutError):
+            with accumulator.store.owner_lock():
+                pass
+
+    with accumulator.store.owner_lock():
+        pass
 
 
 def _poll_snapshot(

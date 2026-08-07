@@ -36,10 +36,10 @@ def test_live_service_is_unix_socket_only_and_has_narrow_write_paths() -> None:
     assert 'runtime/live}' in runner
     assert 'live/policy=live-v2/bucket=1m}' in runner
     assert 'live-api.sock}' in runner
-    assert '--input-path "$LIVE_INPUT_PATH"' in runner
-    assert '--state-root "$LIVE_STATE_ROOT"' in runner
-    assert '--unix-socket "$LIVE_SOCKET_PATH"' in runner
-    assert "spx_spark.surface_live_session_http" in runner
+    assert ".venv/bin/uvicorn" in runner
+    assert "spx_spark.web.live_api:create_default_app" in runner
+    assert '--uds "$LIVE_SOCKET_PATH"' in runner
+    assert "--no-access-log" in runner
     assert "mkdir" not in runner
 
 

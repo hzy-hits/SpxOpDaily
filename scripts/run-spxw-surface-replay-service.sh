@@ -10,6 +10,7 @@ SOCKET_PATH="${SPX_SURFACE_REPLAY_SOCKET_PATH:-$RUNTIME_DIR/replay-api.sock}"
 
 mkdir -p "$RUNTIME_DIR"
 chmod 0700 "$RUNTIME_DIR"
+export SPX_CORE_SOCKET_PATH="$SOCKET_PATH"
 
 UVICORN="$ROOT/.venv/bin/uvicorn"
 if [[ ! -x "$UVICORN" ]]; then
