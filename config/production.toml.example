@@ -1,3 +1,5 @@
 # Copy to config/production.toml on the deployment host to override defaults.
+core_socket_path = "/run/user/1001/spx-core.sock"
+core_lock_root = "/run/user/1001"
 data_root = "/srv/data/spx-spark"
 log_level = "WARNING"

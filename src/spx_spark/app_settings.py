@@ -21,6 +21,8 @@ class AppSettings(BaseSettings):
 
     data_root: Path = Path("/srv/data/spx-spark")
     log_level: str = "INFO"
+    core_socket_path: Path = Path("/tmp/spx-core.sock")
+    core_lock_root: Path = Path("/tmp")
 
     @classmethod
     def settings_customise_sources(

@@ -526,12 +526,31 @@ def run(argv: list[str] | None = None) -> int:
         )
         return 0
 
-    app = load_app_settings()
-    policy = app.market_features
     stop_event = threading.Event()
-    lock_path = args.lock_path or default_lock_path()
-    writer_instance_id = uuid.uuid4().hex
     install_stop_handlers(stop_event)
+    return run_with_stop(
+        stop_event=stop_event,
+        interval_seconds=float(args.interval_seconds),
+        lock_path=args.lock_path,
+        max_source_age_seconds=float(args.max_source_age_seconds),
+        max_consecutive_failures=args.max_consecutive_failures,
+        max_cycles=1 if args.once else None,
+    )
+
+
+def run_with_stop(
+    *,
+    stop_event: threading.Event,
+    interval_seconds: float = DEFAULT_INTERVAL_SECONDS,
+    lock_path: Path | None = None,
+    max_source_age_seconds: float = DEFAULT_MAX_SOURCE_AGE_SECONDS,
+    max_consecutive_failures: int = DEFAULT_MAX_CONSECUTIVE_FAILURES,
+    max_cycles: int | None = None,
+) -> int:
+    storage = StorageSettings.from_env()
+    policy = load_app_settings().market_features
+    lock_path = lock_path or default_lock_path()
+    writer_instance_id = uuid.uuid4().hex
 
     def cycle() -> Mapping[str, object]:
         return run_es_bar_sample_cycle(
@@ -551,19 +570,19 @@ def run(argv: list[str] | None = None) -> int:
                     **starting_event,
                     "event": "started",
                     "pid": os.getpid(),
-                    "interval_seconds": float(args.interval_seconds),
+                    "interval_seconds": interval_seconds,
                     "lock_path": str(lock_path),
                     "state_path": str(canonical_state_path(storage)),
                 }
             )
             exit_code = run_es_bar_sampler_loop(
                 cycle,
-                interval_seconds=float(args.interval_seconds),
+                interval_seconds=interval_seconds,
                 stop_event=stop_event,
                 writer_instance_id=writer_instance_id,
-                max_source_age_seconds=float(args.max_source_age_seconds),
-                max_consecutive_failures=args.max_consecutive_failures,
-                max_cycles=1 if args.once else None,
+                max_source_age_seconds=max_source_age_seconds,
+                max_consecutive_failures=max_consecutive_failures,
+                max_cycles=max_cycles,
                 output_lease_path=lease_path(storage),
             )
     except ProcessLockUnavailable as exc:

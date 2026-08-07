@@ -319,6 +319,19 @@ def test_schwab_oauth_service_is_loopback_only_and_private_by_default() -> None:
     assert "chmod 600" in env_writer
 
 
+def test_core_service_is_installed_disabled_until_staging_cutover() -> None:
+    service = read("systemd/spx-core.service")
+    installer = read("scripts/install-spx-spark-services.sh")
+
+    assert ".venv/bin/spx core run" in service
+    assert "Restart=on-failure" in service
+    assert "PrivateNetwork=true" in service
+    assert "RestrictAddressFamilies=AF_UNIX" in service
+    assert 'ln -sfn "$ROOT/systemd/spx-core.service"' in installer
+    assert "enable spx-core.service" not in installer
+    assert "restart spx-core.service" not in installer
+
+
 def test_schwab_reauth_reminder_runs_each_sunday_in_beijing() -> None:
     service = read("systemd/spx-spark-schwab-reauth-reminder.service")
     timer = read("systemd/spx-spark-schwab-reauth-reminder.timer")

@@ -370,13 +370,27 @@ def run(
     lock_path: str | None = None,
     max_cycles: int | None = None,
 ) -> int:
-    settings = load_app_settings()
-    storage = StorageSettings.from_env()
-    policy = settings.market_features
-    instance_id = str(uuid.uuid4())
     stop = threading.Event()
     for signal_number in (signal.SIGTERM, signal.SIGINT):
         signal.signal(signal_number, lambda *_args: stop.set())
+    return run_with_stop(
+        stop_event=stop,
+        interval_seconds=interval_seconds,
+        lock_path=lock_path,
+        max_cycles=max_cycles,
+    )
+
+
+def run_with_stop(
+    *,
+    stop_event: threading.Event,
+    interval_seconds: float = DEFAULT_INTERVAL_SECONDS,
+    lock_path: str | None = None,
+    max_cycles: int | None = None,
+) -> int:
+    storage = StorageSettings.from_env()
+    policy = load_app_settings().market_features
+    instance_id = str(uuid.uuid4())
     lock_file = Path(lock_path or "/tmp/spx-spark-spx-minute-sampler.lock")
     lock_file.parent.mkdir(parents=True, exist_ok=True)
     with lock_file.open("a", encoding="utf-8") as handle:
@@ -385,7 +399,7 @@ def run(
         except BlockingIOError:
             return 73
         cycles = 0
-        while not stop.is_set():
+        while not stop_event.is_set():
             started = time.monotonic()
             result = sample_spx_minute_once(
                 storage=storage,
@@ -397,7 +411,7 @@ def run(
             cycles += 1
             if max_cycles is not None and cycles >= max_cycles:
                 break
-            stop.wait(max(interval_seconds - (time.monotonic() - started), 0.0))
+            stop_event.wait(max(interval_seconds - (time.monotonic() - started), 0.0))
     return 0
 
 

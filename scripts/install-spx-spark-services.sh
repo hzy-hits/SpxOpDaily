@@ -28,6 +28,7 @@ cd "$ROOT"
 uv sync --frozen
 
 mkdir -p "$USER_UNIT_DIR"
+ln -sfn "$ROOT/systemd/spx-core.service" "$USER_UNIT_DIR/spx-core.service"
 ln -sfn "$ROOT/systemd/spx-spark-24h.service" "$USER_UNIT_DIR/spx-spark-24h.service"
 ln -sfn "$ROOT/systemd/spx-spark-es-bar-sampler.service" "$USER_UNIT_DIR/spx-spark-es-bar-sampler.service"
 ln -sfn "$ROOT/systemd/spx-spark-spx-minute-sampler.service" "$USER_UNIT_DIR/spx-spark-spx-minute-sampler.service"
@@ -104,6 +105,7 @@ systemctl --user enable --now spx-spark-data-compact-weekend.timer
 systemctl --user enable --now spx-spark-backtest-weekly.timer
 
 echo "Installed user services:"
+echo "  spx-core.service (installed but disabled pending staging/cutover)"
 echo "  spx-spark-24h.service"
 echo "  spx-spark-es-bar-sampler.service"
 echo "  spx-spark-spx-minute-sampler.service"

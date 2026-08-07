@@ -1,0 +1,30 @@
+[Unit]
+Description=SPX Spark consolidated real-time Core
+After=network-online.target spx-spark-schwab-marketdata.service spx-spark-ibkr-stream.service
+Wants=network-online.target spx-spark-schwab-marketdata.service spx-spark-ibkr-stream.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/ubuntu/spx-spark
+EnvironmentFile=-/home/ubuntu/spx-spark/.env
+Environment=PATH=/home/ubuntu/spx-spark/.venv/bin:/usr/local/bin:/usr/bin:/bin
+Environment=SPX_CORE_SOCKET_PATH=%t/spx-core.sock
+Environment=SPX_CORE_LOCK_ROOT=%t
+ExecStart=/home/ubuntu/spx-spark/.venv/bin/spx core run
+Restart=on-failure
+RestartSec=2
+KillSignal=SIGTERM
+TimeoutStopSec=20
+UMask=0077
+NoNewPrivileges=true
+PrivateNetwork=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+RestrictAddressFamilies=AF_UNIX
+ReadWritePaths=/srv/data/spx-spark/data %t
+TasksMax=64
+MemoryMax=2G
+
+[Install]
+WantedBy=default.target
