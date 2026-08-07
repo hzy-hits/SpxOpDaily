@@ -8,7 +8,7 @@ from spx_spark.iv_surface import IvSurfaceSnapshot
 from spx_spark.market_context import build_market_context
 from spx_spark.marketdata import MarketDataQuality, Quote
 from spx_spark.options_map import ExpiryOptionsMap, OptionsMap
-from spx_spark.runtime_config import runtime_csv
+from spx_spark.settings import settings_csv
 from spx_spark.storage import LatestState, configured_quote_use_decision
 from spx_spark.strategy.micopedia import MicopediaInputs, build_micopedia_signal
 
@@ -222,7 +222,7 @@ def micopedia_context(
         gamma_state=gamma_state_for_micopedia(options_map),
         directional_bias=directional_bias,
         time_phase=time_phase_from_window(window),
-        event_tags=tuple(env_csv("MICOPEDIA_EVENT_TAGS", runtime_csv("human_focus.event_tags"))),
+        event_tags=tuple(env_csv("MICOPEDIA_EVENT_TAGS", settings_csv("human_focus.event_tags"))),
         key_levels=tuple(key_levels),
         has_option_chain=bool(options_map.expiries),
         has_es_data=has_es_data,

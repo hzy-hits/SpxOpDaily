@@ -9,8 +9,7 @@ from functools import lru_cache
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from spx_spark.settings import settings_value
-from spx_spark.runtime_config import runtime_instrument_rows
+from spx_spark.settings import current_app_settings, settings_value
 
 
 @dataclass(frozen=True)
@@ -39,8 +38,21 @@ def _optional_positive_int(raw: Any, *, field_name: str) -> int | None:
 
 @lru_cache(maxsize=1)
 def schwab_instruments() -> tuple[SchwabInstrumentConfig, ...]:
+    rows = current_app_settings().raw.get("schwab", {}).get("instruments")
+    if not isinstance(rows, list) or not rows:
+        raise ValueError("schwab.instruments must be a non-empty list")
     instruments: list[SchwabInstrumentConfig] = []
-    for row in runtime_instrument_rows():
+    seen: set[str] = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            raise TypeError("Each schwab.instruments row must be a mapping")
+        canonical_symbol = str(row.get("canonical_symbol", "")).strip().upper()
+        description = str(row.get("description", "")).strip()
+        if not canonical_symbol or not description:
+            raise ValueError("Each Schwab instrument needs canonical_symbol and description")
+        if canonical_symbol in seen:
+            raise ValueError(f"Duplicate Schwab canonical symbol: {canonical_symbol}")
+        seen.add(canonical_symbol)
         quote_symbol = str(row.get("quote_symbol", "")).strip().upper()
         chain_raw = str(row.get("option_chain_symbol", "")).strip().upper()
         trading_classes_raw = row.get("option_trading_classes", [])
@@ -50,7 +62,7 @@ def schwab_instruments() -> tuple[SchwabInstrumentConfig, ...]:
             raise TypeError("option_trading_classes must be a list")
         instruments.append(
             SchwabInstrumentConfig(
-                canonical_symbol=row["canonical_symbol"],
+                canonical_symbol=canonical_symbol,
                 instrument_type=str(row.get("instrument_type", "")).strip().lower(),
                 quote_symbol=quote_symbol,
                 option_chain_symbol=chain_raw or None,
@@ -60,7 +72,7 @@ def schwab_instruments() -> tuple[SchwabInstrumentConfig, ...]:
                 quote_symbol_mode=str(row.get("quote_symbol_mode", "static")).strip().lower(),
                 collect_quote=bool(row.get("collect_quote", False)),
                 collect_option_chain=bool(row.get("collect_option_chain", False)),
-                description=str(row["description"]).strip(),
+                description=description,
                 chain_interval_seconds=_optional_positive_int(
                     row.get("chain_interval_seconds"),
                     field_name="chain_interval_seconds",

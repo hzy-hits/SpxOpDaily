@@ -110,3 +110,22 @@ Ruff, Import Linter 2/2 and `git diff --check` passed.
   legacy commands; it adds no command registry, subprocess protocol or business owner.
 - Validation: Ruff passed; Import Linter kept 2/2 contracts; `git diff --check`
   passed; pytest 2,972 passed with two upstream deprecation warnings.
+
+## Legacy `runtime_config.py` deletion follow-up
+
+- User-visible goal: keep effective Schwab universes and human-focus defaults
+  unchanged while removing the second TOML loader.
+- Existing owner: `spx_spark.settings` remains the single AppSettings/TOML
+  composition root; `spx_spark.schwab.symbols` owns instrument validation.
+- Reuse: `current_app_settings`, `settings_value` and `settings_csv`; no new
+  dependency, module, database, service, timer, queue or config key.
+- Delete: `src/spx_spark/runtime_config.py` and its duplicate private-loader
+  tests. `config.py`, `human_focus.py` and `schwab/symbols.py` move to the
+  existing typed settings owner.
+- Acceptance: provider priority, Schwab quote/chain universes, overlay type
+  validation and pytest isolation remain unchanged; `rg runtime_config src
+  tests` returns zero production/test imports.
+- Complexity: production files +0/-1, production LOC +57/-208 (net -151);
+  dependencies, config keys, units, scripts and DB tables are unchanged.
+- Validation: 128 relevant tests passed; Ruff, Import Linter 2/2, tracked
+  production-config smoke and `git diff --check` passed.

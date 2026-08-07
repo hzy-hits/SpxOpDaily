@@ -15,13 +15,9 @@ from pathlib import Path
 
 SRC_ROOT = Path(__file__).resolve().parents[2] / "src" / "spx_spark"
 
-# Only settings loader / composition roots should read runtime config long-term.
-# Cleared this session (P1-C fold into settings_value / AppSettings):
-#   config.py, strategy/steven.py, post_close_review.py, position_alerts.py,
-#   provider_failover_controller.py, and remaining non-loader call sites.
-# Sole residual: runtime_config.runtime_value itself (definition body).
+# The legacy runtime_value helper is gone. Keep zero budgets for former callers
+# so it cannot reappear outside the typed settings composition root.
 RUNTIME_VALUE_CALL_BUDGET: dict[str, int] = {
-    "runtime_config.py": 1,
     # Zeroed — kept at 0 so regressions fail closed if reintroduced.
     "config.py": 0,
     "strategy/steven.py": 0,

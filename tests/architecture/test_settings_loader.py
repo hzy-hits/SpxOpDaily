@@ -188,6 +188,14 @@ def test_deployment_overlay_cannot_replace_descriptions(tmp_path: Path) -> None:
         load_settings(defaults_path=FIXTURE, deployment_path=deployment, environ={})
 
 
+def test_deployment_overlay_rejects_value_type_changes(tmp_path: Path) -> None:
+    deployment = tmp_path / "deployment.toml"
+    deployment.write_text('[steven.enabled]\nvalue = "true"\n', encoding="utf-8")
+
+    with pytest.raises(TypeError, match="must match bool"):
+        load_settings(defaults_path=FIXTURE, deployment_path=deployment, environ={})
+
+
 def test_missing_required_path_fails_fast(tmp_path: Path) -> None:
     broken = tmp_path / "broken.toml"
     broken.write_text(

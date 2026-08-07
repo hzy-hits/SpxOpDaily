@@ -1,12 +1,11 @@
 # Runtime configuration
 
-> **状态（2026-08-07）：旧 `runtime.yaml` 已机械迁为 `runtime.toml`，但 legacy settings loader 尚未退役。**
+> **状态（2026-08-08）：旧 `runtime.yaml` 已迁为 `runtime.toml`，重复的 `runtime_config.py` loader 已删除；legacy settings loader 与 `config.py` env helper 尚未完全退役。**
 > 这是 Phase 5 的过渡切片，不是配置简化的终点。新配置只允许进入最小
 > pydantic-settings `AppSettings`；不得向过渡 TOML 增加键、env helper 或 loader 兼容分支。
 
-Operational runtime defaults currently live in `config/runtime.toml`; legacy Python code loads
-them through `spx_spark.runtime_config` and, for new composition roots, through
-typed `spx_spark.settings.load_settings()` (`AppSettings`). Secrets remain in
+Operational runtime defaults currently live in `config/runtime.toml`; Python loads
+them through the typed `spx_spark.settings.load_settings()` (`AppSettings`) owner. Secrets remain in
 `.env` and are never loaded during unit tests (`SPX_SPARK_DISABLE_DOTENV=1` plus
 `tests/fixtures/runtime.defaults.toml`).
 

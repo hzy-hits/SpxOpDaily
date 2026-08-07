@@ -58,8 +58,8 @@ def default_defaults_path() -> Path:
     return Path(__file__).resolve().parents[3] / "config" / "runtime.toml"
 
 
-def _runtime_config_path() -> Path:
-    """Mirror ``runtime_config.runtime_config_path`` without importing L0 sibling."""
+def _selected_defaults_path() -> Path:
+    """Resolve the tracked defaults selected for this process."""
 
     override = os.getenv(_CONFIG_ENV_VAR, "").strip()
     if override:
@@ -70,8 +70,8 @@ def _runtime_config_path() -> Path:
     return default_defaults_path().resolve()
 
 
-def _runtime_overrides_path() -> Path | None:
-    """Mirror ``runtime_config.runtime_overrides_path`` without importing L0 sibling."""
+def _selected_deployment_path() -> Path | None:
+    """Resolve the optional machine-local deployment overlay."""
 
     explicit = os.getenv(_OVERRIDES_ENV_VAR, "").strip()
     if explicit:
@@ -137,6 +137,11 @@ def _merge_maps(
                 raise ValueError(
                     f"Deployment override for {child_path} must contain only a value field"
                 )
+            _validate_override_value(
+                base_value["value"],
+                value["value"],
+                dotted_path=child_path,
+            )
             merged[key] = {**base_value, "value": value["value"]}
         elif isinstance(base_value, dict) and isinstance(value, dict):
             merged[key] = _merge_maps(base_value, value, dotted_path=child_path)
@@ -145,6 +150,22 @@ def _merge_maps(
         else:
             raise TypeError(f"Deployment override type mismatch at {child_path}")
     return merged
+
+
+def _validate_override_value(base: Any, override: Any, *, dotted_path: str) -> None:
+    if isinstance(base, bool):
+        valid = isinstance(override, bool)
+    elif isinstance(base, int):
+        valid = isinstance(override, int) and not isinstance(override, bool)
+    elif isinstance(base, float):
+        valid = isinstance(override, int | float) and not isinstance(override, bool)
+    else:
+        valid = isinstance(override, type(base))
+    if not valid:
+        raise TypeError(
+            f"Deployment override for {dotted_path} must match {type(base).__name__}, "
+            f"got {type(override).__name__}"
+        )
 
 
 def _has_path(node: dict[str, Any], dotted_path: str) -> bool:
@@ -834,14 +855,14 @@ def load_app_settings(
 ) -> AppSettings:
     """Composition-root convenience: load documented runtime TOML (+ local overlay).
 
-    Path discovery mirrors ``runtime_config`` so ``SPX_SPARK_RUNTIME_CONFIG`` and
-    ``SPX_SPARK_RUNTIME_OVERRIDES`` / ``runtime.local.toml`` keep working.
+    ``SPX_SPARK_RUNTIME_CONFIG`` and ``SPX_SPARK_RUNTIME_OVERRIDES`` may select
+    the tracked defaults and machine-local deployment overlay.
     """
 
     if defaults_path is None:
-        defaults_path = _runtime_config_path()
+        defaults_path = _selected_defaults_path()
     if deployment_path is None:
-        deployment_path = _runtime_overrides_path()
+        deployment_path = _selected_deployment_path()
     return load_settings(
         defaults_path=defaults_path,
         deployment_path=deployment_path,
@@ -866,8 +887,8 @@ def clear_settings_cache() -> None:
 def current_app_settings() -> AppSettings:
     """Cached AppSettings for factory ``from_env`` helpers (settings-loader owned)."""
 
-    defaults = _runtime_config_path()
-    overrides = _runtime_overrides_path()
+    defaults = _selected_defaults_path()
+    overrides = _selected_deployment_path()
     return _cached_app_settings(
         str(defaults.resolve()),
         str(overrides.resolve()) if overrides is not None else "",

@@ -8,9 +8,9 @@ from spx_spark.market_calendar import ET as NY_TZ
 from spx_spark.market_calendar import default_spxw_expiry as _default_spxw_expiry
 from spx_spark.settings import settings_csv, settings_value
 from spx_spark.settings.notification_delivery import notification_delivery_settings
-from spx_spark.runtime_config import (
-    runtime_schwab_option_chain_underliers,
-    runtime_schwab_symbols_by_type,
+from spx_spark.schwab.symbols import (
+    schwab_option_chain_underliers,
+    schwab_symbols_by_type,
 )
 
 default_spxw_expiry = _default_spxw_expiry
@@ -156,19 +156,19 @@ class SchwabSettings:
             token_file=env_str("SCHWAB_TOKEN_FILE", str(settings_value("schwab.token_file"))),
             verify_indexes=env_csv(
                 "SCHWAB_VERIFY_INDEXES",
-                ",".join(runtime_schwab_symbols_by_type("index")),
+                ",".join(schwab_symbols_by_type("index")),
             ),
             verify_equities=env_csv(
                 "SCHWAB_VERIFY_EQUITIES",
-                ",".join(runtime_schwab_symbols_by_type("equity")),
+                ",".join(schwab_symbols_by_type("equity")),
             ),
             verify_futures=env_csv(
                 "SCHWAB_VERIFY_FUTURES",
-                ",".join(runtime_schwab_symbols_by_type("future")),
+                ",".join(schwab_symbols_by_type("future")),
             ),
             verify_option_chains=env_csv(
                 "SCHWAB_VERIFY_OPTION_CHAINS",
-                ",".join(runtime_schwab_option_chain_underliers()),
+                ",".join(schwab_option_chain_underliers()),
             ),
             option_chain_strike_count=env_int(
                 "SCHWAB_OPTION_CHAIN_STRIKE_COUNT",
