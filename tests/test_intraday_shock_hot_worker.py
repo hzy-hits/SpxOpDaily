@@ -90,6 +90,45 @@ def test_core_cycle_suppresses_legacy_full_json(
     assert calls == [[]]
 
 
+def test_embedded_cycle_reuses_snapshot_and_keeps_a_separate_lease(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    latest = object()
+    options = object()
+    calls: list[dict[str, object]] = []
+    monotonic = iter((100.0, 100.25))
+
+    def cycle(**kwargs) -> int:
+        calls.append(kwargs)
+        return 0
+
+    monkeypatch.setattr(hot_worker, "run_intraday_shock_cycle", cycle)
+    monkeypatch.setattr(hot_worker.time, "monotonic", lambda: next(monotonic))
+
+    hot_worker.run_embedded_intraday_shock_cycle(
+        latest,
+        options,
+        storage_settings=SimpleNamespace(data_root=str(tmp_path)),
+        emit_json=False,
+    )
+
+    assert calls == [
+        {"emit_json": False, "latest_state": latest, "options_map": options}
+    ]
+    lease = json.loads(
+        (tmp_path / "latest" / "intraday_shock_hot_worker.lease.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert lease["ok"] is True
+    assert lease["duration_ms"] == 250.0
+    assert lease["execution_mode"] == "embedded_direct_call"
+    emitted = json.loads(capsys.readouterr().out)
+    assert emitted == lease
+
+
 def test_cli_once_uses_the_service_loop_shock_cadence_and_one_lock(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

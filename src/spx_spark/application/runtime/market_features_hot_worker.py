@@ -11,14 +11,19 @@ import tempfile
 import threading
 import time
 from collections.abc import Callable, Mapping
+from contextlib import ExitStack
 from datetime import datetime, timezone
 from pathlib import Path
 from types import FrameType
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from spx_spark.settings import AppSettings, load_app_settings
 from spx_spark.config import StorageSettings
 from spx_spark.state_io import atomic_write_json_secure
+
+if TYPE_CHECKING:
+    from spx_spark.analytics.options.models import OptionsMap
+    from spx_spark.storage import LatestState
 
 
 DEFAULT_MAX_CONSECUTIVE_FAILURES = 5
@@ -101,6 +106,7 @@ def print_event(event: dict[str, object]) -> None:
 def run_market_features_cycle(
     on_frames: Callable[[Mapping[str, object], Mapping[str, object]], None] | None = None,
     *,
+    on_analytical_snapshot: Callable[[LatestState, OptionsMap], None] | None = None,
     emit_json: bool = True,
     app_settings: AppSettings | None = None,
     storage_settings: StorageSettings | None = None,
@@ -110,6 +116,8 @@ def run_market_features_cycle(
     from spx_spark.application.market_features import service
 
     kwargs: dict[str, object] = {"on_frames": on_frames}
+    if on_analytical_snapshot is not None:
+        kwargs["on_analytical_snapshot"] = on_analytical_snapshot
     if app_settings is not None:
         kwargs["app_settings"] = app_settings
     if storage_settings is not None:
@@ -289,10 +297,12 @@ def run_with_stop(
     *,
     stop_event: StopEvent,
     lock_path: str | os.PathLike[str],
+    additional_lock_path: str | os.PathLike[str] | None = None,
     interval_seconds: float | None = None,
     max_consecutive_failures: int = DEFAULT_MAX_CONSECUTIVE_FAILURES,
     max_cycles: int | None = None,
     on_frames: Callable[[Mapping[str, object], Mapping[str, object]], None] | None = None,
+    on_analytical_snapshot: Callable[[LatestState, OptionsMap], None] | None = None,
     emit_json: bool = True,
 ) -> int:
     app = load_app_settings()
@@ -306,12 +316,16 @@ def run_with_stop(
     def cycle() -> int:
         return run_market_features_cycle(
             on_frames,
+            on_analytical_snapshot=on_analytical_snapshot,
             emit_json=emit_json,
             app_settings=app,
             storage_settings=storage,
         )
     try:
-        with ProcessLock(lock_path):
+        with ExitStack() as locks:
+            locks.enter_context(ProcessLock(lock_path))
+            if additional_lock_path is not None:
+                locks.enter_context(ProcessLock(additional_lock_path))
             print_event(
                 {
                     "task": "market_features_hot_worker",

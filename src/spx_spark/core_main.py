@@ -109,13 +109,18 @@ async def main() -> None:
 
     for signum in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(signum, request_shutdown)
+    storage = StorageSettings.from_env()
     feature_runner = partial(
         market_features_hot_worker.run_with_stop,
         on_frames=_regime_publisher(),
-        emit_json=False,
-    )
-    shock_runner = partial(
-        intraday_shock_hot_worker.run_with_stop,
+        on_analytical_snapshot=partial(
+            intraday_shock_hot_worker.run_embedded_intraday_shock_cycle,
+            storage_settings=storage,
+            emit_json=False,
+        ),
+        additional_lock_path=str(
+            settings.core_lock_root / intraday_shock_hot_worker.LOCK_FILE_NAME
+        ),
         emit_json=False,
     )
     try:
@@ -132,10 +137,6 @@ async def main() -> None:
                 "market_features_hot_worker", feature_runner,
                 stop_event=stop_event, shutdown=shutdown,
                 lock_path=str(settings.core_lock_root / market_features_hot_worker.LOCK_FILE_NAME)))
-            tasks.create_task(_run_sampler(
-                "intraday_shock_hot_worker", shock_runner,
-                stop_event=stop_event, shutdown=shutdown,
-                lock_path=str(settings.core_lock_root / intraday_shock_hot_worker.LOCK_FILE_NAME)))
             tasks.create_task(_serve_api(settings, shutdown))
     finally:
         request_shutdown()

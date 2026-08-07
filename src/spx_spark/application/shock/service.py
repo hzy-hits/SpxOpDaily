@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from spx_spark.alert_model import Alert
+from spx_spark.analytics.options.models import OptionsMap
 from spx_spark.application.globex_trend.service import trend_context_id
 from spx_spark.application.order_map.level_decision_shadow import load_level_decision_shadow
 from spx_spark.application.shock.delivery import (
@@ -87,7 +88,7 @@ from spx_spark.state_io import (
     exclusive_state_lock,
     read_json_object,
 )
-from spx_spark.storage import LatestStateStore, parse_option_expiry_date
+from spx_spark.storage import LatestState, LatestStateStore, parse_option_expiry_date
 from spx_spark.strategy_contract import policy_version
 from spx_spark.strategy.steven import (
     annotate_alerts_with_steven_context,
@@ -102,7 +103,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def run(argv: list[str] | None = None) -> int:
+def run(
+    argv: list[str] | None = None,
+    *,
+    latest_state: LatestState | None = None,
+    options_map: OptionsMap | None = None,
+) -> int:
     args = parse_args(argv)
     settings = IntradayShockSettings.from_env()
     level_policy = load_app_settings().level_decision
@@ -113,7 +119,7 @@ def run(argv: list[str] | None = None) -> int:
         data_platform_settings = DataPlatformSettings.from_env()
     except Exception as exc:  # Optional research configuration is always fail-open.
         data_platform_config_error = f"{type(exc).__name__}:{exc}"
-    latest = LatestStateStore(storage_settings).load()
+    latest = latest_state or LatestStateStore(storage_settings).load()
     session_date = rth_session_date(latest.as_of)
     payload: dict[str, Any] = {
         "created_at": datetime.now(tz=timezone.utc).isoformat(),
@@ -132,16 +138,17 @@ def run(argv: list[str] | None = None) -> int:
                 storage_settings=storage_settings,
                 session_date=gth_date,
                 no_notify=args.no_notify,
+                options_map=options_map,
             )
     else:
         sample, sample_error = synchronized_live_sample(latest, settings)
         if sample is None:
             payload["skipped_reason"] = sample_error
         else:
-            options_map = None
             option_structure_error: str | None = None
             try:
-                options_map = build_options_map(latest)
+                if options_map is None:
+                    options_map = build_options_map(latest)
                 structure = structure_from_options_map(
                     options_map,
                     session_date=session_date,
@@ -458,6 +465,7 @@ def _run_gth_dip_reclaim(
     storage_settings: StorageSettings,
     session_date: str,
     no_notify: bool,
+    options_map: OptionsMap | None = None,
 ) -> dict[str, Any]:
     virtual_state = read_json_object(
         Path(storage_settings.data_root) / "latest" / "virtual_strategy_state.json"
@@ -493,7 +501,8 @@ def _run_gth_dip_reclaim(
     sample_at, es, provider = sample
     expected_move: float | None = None
     try:
-        options_map = build_options_map(latest)
+        if options_map is None:
+            options_map = build_options_map(latest)
         if options_map.expiries:
             raw_expected_move = options_map.expiries[0].expected_move_points
             if isinstance(raw_expected_move, int | float) and raw_expected_move > 0:
