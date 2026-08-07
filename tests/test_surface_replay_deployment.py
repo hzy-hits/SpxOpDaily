@@ -86,6 +86,8 @@ if url.endswith("/api/v1/replay/sessions"):
         {"session_date": "2026-07-17"},
         {"session_date": "2026-07-16"},
     ]}))
+elif url.endswith("/healthz"):
+    print(json.dumps({"status": "ok"}))
 elif "/timeline?" in url:
     session = url.split("/sessions/", 1)[1].split("/", 1)[0]
     surface_frames = (

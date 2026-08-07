@@ -21,6 +21,20 @@ if [[ ! -x "$PYTHON" ]]; then
   exit 1
 fi
 
+core_ready=false
+for _attempt in $(seq 1 30); do
+  if curl --silent --fail --max-time 2 \
+    --unix-socket "$SOCKET_PATH" http://localhost/healthz >/dev/null; then
+    core_ready=true
+    break
+  fi
+  sleep 2
+done
+if [[ "$core_ready" != true ]]; then
+  printf 'replay core socket not ready: %s\n' "$SOCKET_PATH" >&2
+  exit 7
+fi
+
 sessions_json="$(
   curl --silent --show-error --fail --max-time 10 \
     --unix-socket "$SOCKET_PATH" \
