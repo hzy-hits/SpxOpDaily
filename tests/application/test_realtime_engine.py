@@ -378,7 +378,7 @@ def test_front_chain_freshness_ignores_stale_provider_rows_when_live_fallback_ex
     assert snapshot_has_fresh_spxw_chain(_snapshot(quotes=quotes), now=NOW) is True
 
 
-def test_front_chain_freshness_uses_current_rest_observation_clock() -> None:
+def test_front_chain_freshness_uses_rest_observation_and_zero_bid_wings() -> None:
     underlier = Quote(
         instrument=InstrumentId.index("SPX"),
         provider=Provider.SCHWAB,
@@ -405,7 +405,7 @@ def test_front_chain_freshness_uses_current_rest_observation_clock() -> None:
                     received_at=NOW,
                     last_update_at=NOW,
                     quality=MarketDataQuality.STALE,
-                    bid=1.0,
+                    bid=0.0 if abs(strike - 7500) > 20 else 1.0,
                     ask=1.2,
                     quote_time=NOW - timedelta(minutes=5),
                     raw={

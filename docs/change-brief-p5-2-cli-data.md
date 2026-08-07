@@ -247,15 +247,18 @@ Ruff, Import Linter 2/2 and `git diff --check` passed.
 
 - User-visible behavior: an unchanged option price that Schwab has just
   re-observed in a current REST response contributes to analytical chain
-  readiness; a truly old provider observation, delayed entitlement, invalid
-  BBO, narrow chain or one-sided chain remains rejected.
+  readiness. A zero-bid/positive-ask far OTM wing may contribute to structural
+  coverage, but never becomes an exact-leg execution quote; a truly old
+  provider observation, delayed entitlement, invalid quote, narrow chain or
+  one-sided chain remains rejected.
 - Existing owner and reuse: `evaluate_front_chain_fresh` reuses the existing
   `analytical_option_quote` and `option_analytical_pricing_allowed` contract.
   That contract already separates exchange source time from provider
   observation time and never grants execution authority to the analytical
   clone.
 - Delete/add: remove the second, contradictory requirement that every option's
-  exchange price must have changed inside 15 seconds. Add no threshold,
+  exchange price must have changed inside 15 seconds, plus the duplicated
+  execution-only positive-bid test on analytical wing rows. Add no threshold,
   setting, file, dependency, service, queue, database or state machine.
 - Acceptance: the frozen stale-transport, GTH rotation, entitlement and chain
   structure tests remain green; a new RTH REST-reobservation case passes; on

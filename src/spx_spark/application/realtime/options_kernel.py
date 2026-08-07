@@ -298,13 +298,7 @@ def evaluate_front_chain_fresh(
     )
     fresh_quotes: list[Quote] = []
     for quote in by_expiry[front_expiry]:
-        if (
-            quote.bid is None
-            or quote.mid is None
-            or quote.ask is None
-            or not 0 < quote.bid <= quote.mid <= quote.ask
-            or quote.quote_time is None
-        ):
+        if quote.mid is None or quote.quote_time is None:
             continue
         analytical_quote = analytical_option_quote(
             quote,
