@@ -175,7 +175,8 @@ def test_core_cutover_retires_all_legacy_realtime_units() -> None:
 
     assert ".venv/bin/spx core run" in core
     assert "runtime/core-api.sock" in core
-    assert "enable --now spx-core.service" in installer
+    assert "enable spx-core.service" in installer
+    assert "restart spx-core.service" in installer
     for unit in (
         "spx-spark-24h.service",
         "spx-spark-es-bar-sampler.service",
@@ -251,7 +252,7 @@ def test_schwab_oauth_service_is_loopback_only_and_private_by_default() -> None:
     assert "chmod 600" in env_writer
 
 
-def test_core_service_is_installed_disabled_until_staging_cutover() -> None:
+def test_core_service_is_started_only_by_now_cutover() -> None:
     service = read("systemd/spx-core.service")
     installer = read("scripts/install-spx-spark-services.sh")
 
@@ -260,8 +261,9 @@ def test_core_service_is_installed_disabled_until_staging_cutover() -> None:
     assert "PrivateNetwork=true" in service
     assert "RestrictAddressFamilies=AF_UNIX" in service
     assert 'ln -sfn "$ROOT/systemd/spx-core.service"' in installer
-    assert "enable spx-core.service" not in installer
-    assert "restart spx-core.service" not in installer
+    cutover = installer[installer.index('if [[ "${1:-}" == "--now" ]]', installer.index("Installed user services:")) :]
+    assert "enable spx-core.service" in cutover
+    assert "restart spx-core.service" in cutover
 
 
 def test_schwab_reauth_reminder_is_owned_only_by_huey() -> None:

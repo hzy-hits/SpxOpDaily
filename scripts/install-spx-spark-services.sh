@@ -133,7 +133,8 @@ fi
 
 if [[ "${1:-}" == "--now" ]]; then
   systemctl --user restart spx-spark-ibkr-stream.service
-  systemctl --user enable --now spx-core.service
+  systemctl --user enable spx-core.service
+  systemctl --user restart spx-core.service
   systemctl --user restart spx-worker.service
   systemctl --user restart spx-spark-session-finalize.timer
   systemctl --user restart spx-spark-rth-daily-acceptance.timer
