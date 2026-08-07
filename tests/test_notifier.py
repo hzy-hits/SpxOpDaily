@@ -2629,7 +2629,8 @@ def test_llm_prompts_do_not_infer_participant_causality_from_public_options_data
     assert "持仓带什么 bracket" not in DEFAULT_SYSTEM_PROMPT
     assert "不得建议 bracket" in DEFAULT_SYSTEM_PROMPT
     assert "15:45 ET 前退出" in DEFAULT_SYSTEM_PROMPT
-    assert "最佳 Call 与一条最佳 Put" in DEFAULT_SYSTEM_PROMPT
+    assert "生产只保留一个最终候选" in DEFAULT_SYSTEM_PROMPT
+    assert "最佳 Call 与一条最佳 Put" not in DEFAULT_SYSTEM_PROMPT
     assert "结构测试临近但接受/拒绝尚未确认" in prompts[3]
     assert "15m 风险中性墙触达启发约 24%" in prompts[3]
     assert "只量化 EM 已使用比例" in prompts[1]

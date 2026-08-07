@@ -798,7 +798,7 @@ def build_status_prompt(
                 "用这些可见事实定义当前偏多/偏空/中性，并判断代理 SPX 在 Put Wall、Flip、Call Wall 的阶段。",
                 "必须给一个主情景，以及升级到 breakout/fade 所需的具体确认条件和证伪条件。结构若来自上一 RTH，要明确结构日期与质量，不得把旧 OI 当成今天新链。",
                 "夜盘可做方向与关键位准备，不许写『等开盘再说』。但现金 SPX 与新 0DTE 链不可用时，不得编造 Greeks、期权模型价、限价、触达概率、ETA 或直接下单指令。",
-                "convexity_idea_radar 是 13:00 ET 前强制退出的双向灵感板，不是执行裁决。必须区分 16:00 风险中性终值分布、"
+                "convexity_idea_radar 是可证伪的竞争假设，不是执行裁决。必须区分 16:00 风险中性终值分布、"
                 "尚未校准的 13:00 物理区间与真实胜率；"
                 "可同时保留上测/下测的 Call 与 Put 假设，但只能把 edge_status=observed_local_skew_edge 称为局部 skew 证据，"
                 "不得把 unknown/not_observed 改写为错误定价。",

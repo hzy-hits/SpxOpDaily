@@ -27,3 +27,15 @@ def test_distribution_forecast_is_observational_and_does_not_gate_manual_signal(
     assert "action_provider_entry_control" not in between
     assert "new_entries_allowed" not in between
     assert "trade_intent" not in between
+
+
+def test_unified_selector_is_the_only_hot_operator_candidate_owner() -> None:
+    source = inspect.getsource(service.run)
+    legacy_delivery = source.index("_record_and_process_trade_intent(")
+    gth_evidence = source.index("process_gth_level_manual_candidate(")
+    selector = source.index("build_strategy_decision(")
+    enqueue = source.index("enqueue_strategy_decision(")
+    assert legacy_delivery < gth_evidence < selector < enqueue
+    assert '"status": "selector_candidate"' in source
+    assert "operator_authority=False" in source
+    assert 'latest" / "strategy_decision.json"' in source

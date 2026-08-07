@@ -42,6 +42,7 @@ def build_status_writer_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "spring_gamma_v3_shadow",
         "spring_gamma_v3_state_window",
         "convexity_idea_radar",
+        "convexity_idea_critic",
         "warnings",
     )
     compact = {key: payload.get(key) for key in keys if key in payload}

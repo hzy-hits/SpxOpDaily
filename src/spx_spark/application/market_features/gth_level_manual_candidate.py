@@ -685,6 +685,7 @@ def process_gth_level_manual_candidate(
     gth_position_fraction: float | None = None,
     play_stats: PlayOutcomeStats | None = None,
     notification: NotificationSettings | None = None,
+    operator_authority: bool = True,
 ) -> dict[str, object]:
     candidate = evaluate_gth_level_manual_candidate(
         latest,
@@ -700,6 +701,17 @@ def process_gth_level_manual_candidate(
         gth_position_fraction=gth_position_fraction,
         play_stats=play_stats,
     )
+    if not operator_authority and candidate.get("status") == "manual_ready":
+        candidate = {
+            **candidate,
+            "status": "selector_candidate",
+            "selector_evidence_eligible": True,
+            "manual_action_eligible": False,
+            "operator_notification_eligible": False,
+            "execution_eligible": False,
+            "action_authority": "none",
+            "signal_absence_reason": "strategy_decision_is_final_candidate_owner",
+        }
     return _persist_candidate(
         storage,
         candidate,

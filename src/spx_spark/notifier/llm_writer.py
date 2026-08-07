@@ -10,11 +10,11 @@ from __future__ import annotations
 import json
 import os
 import sys
-import urllib.error
-import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from openai import OpenAI, OpenAIError
 
 from spx_spark.config import NotificationSettings, env_bool, load_dotenv
 from spx_spark.notifier.model import CommandRunner, default_runner
@@ -71,8 +71,7 @@ DEFAULT_SYSTEM_PROMPT = "\n".join(
         "",
         "══ 你这种徒弟最常犯的错，我点名，你自查 ══",
         "1. 把数据罗列当分析：报了十个数字没有一个判断。每个数字后面必须跟一个『所以』。",
-        "2. 生产计划仍只保留一个主方向、倾向与证伪位；但 Convexity Idea Radar 是明确例外，",
-        "   必须并列一条最佳 Call 与一条最佳 Put 条件假设，各自写触发、反证和不交易条件，且不升级为订单。",
+        "2. 生产只保留一个最终候选；竞争假设只写触发、反证与证伪，不做固定 Call/Put 排名，也不升级为订单。",
         "3. 把靠近结构档当确认：负 gamma/zero gamma 交叉区里，接近墙位本身既不确认支撑，也不确认危险；",
         "   必须等待价格接受/拒绝路径。",
         "4. 建议里没有时间的位置感：只说挂在哪，不说时间衰减在这单里帮谁、几点之后这单变质。",
@@ -196,6 +195,7 @@ def call_llm_writer(
     *,
     system: str = DEFAULT_SYSTEM_PROMPT,
     settings: LlmWriterSettings | None = None,
+    json_mode: bool = False,
 ) -> tuple[str | None, str | None]:
     """Return (text, error). Callers fall back to the deterministic template on error."""
     settings = settings or LlmWriterSettings.from_env()
@@ -204,40 +204,86 @@ def call_llm_writer(
     key = api_key(settings)
     if not key:
         return None, "missing DEEPSEEK_API_KEY"
-    body: dict[str, Any] = {
-        "model": settings.model,
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": prompt},
-        ],
-        "temperature": 0.3,
-        "max_tokens": settings.max_tokens,
-        "stream": False,
-    }
-    request = urllib.request.Request(
-        settings.url,
-        data=json.dumps(body).encode("utf-8"),
-        headers={
-            "Authorization": f"Bearer {key}",
-            "Content-Type": "application/json",
-        },
-        method="POST",
-    )
+    response_options: dict[str, object] = {}
+    if json_mode:
+        response_options["response_format"] = {"type": "json_object"}
     try:
-        with urllib.request.urlopen(request, timeout=settings.timeout_seconds) as response:
-            raw = response.read().decode("utf-8")
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")[:300]
-        return None, f"http={exc.code}: {detail}"
-    except OSError as exc:
+        response = OpenAI(
+            api_key=key,
+            base_url=settings.url.removesuffix("/v1/chat/completions").removesuffix(
+                "/chat/completions"
+            ),
+            timeout=settings.timeout_seconds,
+        ).chat.completions.create(
+            model=settings.model,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.3,
+            max_tokens=settings.max_tokens,
+            **response_options,
+        )
+    except OpenAIError as exc:
         return None, str(exc)
-    try:
-        content = json.loads(raw)["choices"][0]["message"]["content"].strip()
-    except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
-        return None, f"bad response shape: {exc}"
+    content = (response.choices[0].message.content or "").strip() if response.choices else ""
     if not content:
         return None, "empty response"
     return content, None
+
+
+def call_hypothesis_critic(
+    radar: dict[str, Any], settings: LlmWriterSettings | None = None
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Return only structured critique whose fact references exist in the deterministic packet."""
+
+    allowed_rows = {
+        str(row.get("scenario")): {
+            "facts": {
+                str(fact.get("ref"))
+                for fact in row.get("supporting_facts") or ()
+                if isinstance(fact, dict) and fact.get("ref")
+            },
+            "falsifiers": set(map(str, row.get("falsifiers") or ())),
+        }
+        for row in radar.get("hypotheses") or ()
+        if isinstance(row, dict) and row.get("scenario")
+    }
+    system = (
+        "You are a hypothesis critic. Output json only: "
+        '{"hypotheses":[{"kind":"...","supporting_fact_refs":["..."],'
+        '"contradictions":["..."],"falsifiers":["..."],'
+        '"eligible_expressions":["vertical|butterfly|no_trade"]}]}. '
+        "Never create prices, probabilities, utility, contracts, or execution authority."
+    )
+    text, error = call_llm_writer(
+        json.dumps(radar, ensure_ascii=False, separators=(",", ":")),
+        system=system,
+        settings=settings,
+        json_mode=True,
+    )
+    if text is None:
+        return None, error
+    try:
+        result = json.loads(text)
+        rows = result["hypotheses"]
+    except (KeyError, TypeError, json.JSONDecodeError) as exc:
+        return None, f"invalid_hypothesis_json:{exc}"
+    expressions = {"vertical", "butterfly", "no_trade"}
+    if not isinstance(rows, list) or any(
+        not isinstance(row, dict)
+        or str(row.get("kind")) not in allowed_rows
+        or not set(map(str, row.get("supporting_fact_refs") or ())).issubset(
+            allowed_rows.get(str(row.get("kind")), {}).get("facts", set())
+        )
+        or not set(map(str, row.get("falsifiers") or ())).issubset(
+            allowed_rows.get(str(row.get("kind")), {}).get("falsifiers", set())
+        )
+        or not set(map(str, row.get("eligible_expressions") or ())).issubset(expressions)
+        for row in rows
+    ):
+        return None, "hypothesis_fact_or_expression_validation_failed"
+    return result, None
 
 
 # --- push continuity: remember the last push so the next writer can say

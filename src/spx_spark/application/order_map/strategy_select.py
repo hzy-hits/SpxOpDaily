@@ -39,7 +39,8 @@ def build_strategy_decision(
             candidate, reasons = _select_butterfly(payload, facts, regime, latest, _utc(now))
         else:
             candidate, reasons = _select_vertical(
-                payload, facts, regime, now=_utc(now), policy=DEFAULT_STRATEGY_POLICY
+                payload, facts, regime, latest=latest, now=_utc(now),
+                policy=DEFAULT_STRATEGY_POLICY
             )
     if candidate:
         candidate, utility_reasons = _utility_gate(candidate, facts, regime)
@@ -110,10 +111,10 @@ def _gate_reasons(facts: Mapping[str, Any], regime: Mapping[str, Any]) -> list[s
 
 def _select_vertical(
     payload: Mapping[str, Any], facts: Mapping[str, Any], regime: Mapping[str, Any], *,
-    now: datetime, policy: StrategyPolicy,
+    latest: LatestState, now: datetime, policy: StrategyPolicy,
 ) -> tuple[dict[str, Any] | None, list[str]]:
     if DEFAULT_MARKET_CALENDAR.is_rth_open(now):
-        evidence, reasons = _rth_evidence(payload, facts, regime)
+        evidence, reasons = _rth_evidence(payload, facts, regime, latest)
     elif DEFAULT_MARKET_CALENDAR.is_spx_gth_open(now):
         evidence, reasons = _gth_evidence(facts)
     else:
@@ -186,7 +187,8 @@ def _select_vertical(
 
 
 def _rth_evidence(
-    payload: Mapping[str, Any], facts: Mapping[str, Any], regime: Mapping[str, Any]
+    payload: Mapping[str, Any], facts: Mapping[str, Any], regime: Mapping[str, Any],
+    latest: LatestState,
 ) -> tuple[dict[str, Any] | None, list[str]]:
     trigger = _map(facts.get("trigger"))
     direction, thesis = _direction(trigger.get("direction")), str(trigger.get("thesis") or "").lower()
@@ -201,7 +203,10 @@ def _rth_evidence(
     source = "call_skew_spread_shadow" if direction == "UP" else "put_skew_spread_shadow"
     shadow, spread = _map(payload.get(source)), _map(_map(payload.get(source)).get("candidate"))
     if shadow.get("status") != "candidate" or not spread:
-        return None, [f"vertical_quote_candidate_unavailable:{shadow.get('reason') or 'missing'}"]
+        spread = _intent_spread(payload.get("trade_intent"), latest)
+        source = "legacy_trade_intent_trigger_only"
+    if not spread:
+        return None, ["vertical_exact_spread_unavailable"]
     target, stop = _structural_geometry(facts, direction, _number(trigger.get("level")))
     if target is None or stop is None:
         return None, ["vertical_target_or_invalidation_unavailable"]
@@ -213,9 +218,27 @@ def _rth_evidence(
     }, []
 
 
+def _intent_spread(value: object, latest: LatestState) -> Mapping[str, Any]:
+    intent = _map(value)
+    if intent.get("status") != "trade_ready":
+        return {}
+    parts = str(intent.get("contract_id") or "").split(":")
+    if len(parts) < 6 or parts[-1] not in {"C", "P"}:
+        return {}
+    try:
+        strike = float(parts[-2])
+    except ValueError:
+        return {}
+    expiry, right = parts[-3], parts[-1]
+    short_strike = strike + 10.0 if right == "C" else strike - 10.0
+    long, short = _option_leg(latest, expiry, strike, right), _option_leg(latest, expiry, short_strike, right)
+    return {"long": long, "short": short} if long and short else {}
+
+
 def _gth_evidence(facts: Mapping[str, Any]) -> tuple[dict[str, Any] | None, list[str]]:
     evidence = _map(facts.get("gth_evidence"))
-    if evidence.get("status") != "manual_ready" or evidence.get("manual_action_eligible") is not True:
+    eligible = evidence.get("manual_action_eligible") is True or evidence.get("selector_evidence_eligible") is True
+    if evidence.get("status") not in {"manual_ready", "selector_candidate"} or not eligible:
         return None, list(map(str, evidence.get("block_reasons") or ())) or ["gth_confirmed_level_candidate_unavailable"]
     path_kind = str(evidence.get("path_kind") or "")
     if path_kind.startswith("trend_transition_"):

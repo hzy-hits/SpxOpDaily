@@ -19,10 +19,6 @@ from spx_spark.application.order_map.convexity_idea_inputs import (
     market_breadth,
 )
 from spx_spark.application.order_map.convexity_path_modifier import select_rolling_path_modifier
-from spx_spark.application.order_map.convexity_opportunity_board import (
-    build_dense_opportunity_board,
-    preferred_option_evidence,
-)
 from spx_spark.application.order_map.convexity_idea_quality import (
     build_quality_summary,
     build_wall_probability_context,
@@ -33,7 +29,7 @@ from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR, ET
 
 SCHEMA_VERSION = "convexity_idea_radar.v1"
 ANALYSIS_START_ET = time(9, 45)
-HARD_EXIT_ET = time(13, 0)
+HARD_EXIT_ET = time(16, 0)
 _LEVEL_KEYS = ("put_wall", "flip_low", "flip_high", "call_wall")
 
 
@@ -169,24 +165,11 @@ def build_convexity_idea_radar(
         ),
         "risk_neutral_wall_probabilities": wall_probabilities,
     }
-    opportunity_board = build_dense_opportunity_board(
-        mandate=mandate,
-        market_state=market_state,
-        boundary_tests=boundary_tests,
-        option_evidence={
-            "call": preferred_option_evidence(call_evidence, upper_call_evidence),
-            "put": preferred_option_evidence(put_evidence, lower_put_evidence),
-        },
-        volatility_context=volatility_context,
-        data_quality=quality,
-        hypotheses=hypotheses,
-    )
-
     return {
         "schema_version": SCHEMA_VERSION,
         "as_of": _utc(now).isoformat(),
         "status": status,
-        "mode": "discretionary_convexity_decision_support",
+        "mode": "deterministic_competing_hypotheses",
         "action_authority": "none",
         "actionable": False,
         "automatic_ordering": False,
@@ -215,7 +198,6 @@ def build_convexity_idea_radar(
             "put": put_evidence,
         },
         "hypotheses": hypotheses,
-        "opportunity_board": opportunity_board,
         "tensions": _tensions(payload, market_state=market_state),
         "data_quality": quality,
         "semantics": {
@@ -732,6 +714,21 @@ def _hypothesis(
     idea_generation_allowed: bool,
 ) -> dict[str, Any]:
     available = boundary.get("status") == "available"
+    supporting_facts = []
+    if available:
+        supporting_facts.append({
+            "ref": f"boundary_tests.{boundary.get('side')}.level",
+            "value": boundary.get("level"),
+        })
+    if option_evidence.get("edge_status") == "observed_local_skew_edge":
+        supporting_facts.append({
+            "ref": (
+                "option_evidence.call.edge_status"
+                if right == "C"
+                else "option_evidence.put.edge_status"
+            ),
+            "value": "observed_local_skew_edge",
+        })
     return {
         "scenario": scenario,
         "status": (
@@ -746,7 +743,10 @@ def _hypothesis(
         "boundary_name": boundary.get("name"),
         "boundary_level": boundary.get("level"),
         "required_path": required_path,
-        "falsifier": falsifier,
+        "falsifiers": [falsifier],
+        "supporting_facts": supporting_facts,
+        "contradictions": [],
+        "origin": "deterministic_fallback",
         "edge_status": option_evidence.get("edge_status"),
         "contract_reference": option_evidence.get("contract_reference"),
         "action_authority": "none",

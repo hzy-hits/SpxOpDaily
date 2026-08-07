@@ -689,7 +689,7 @@ def _replay_candidate_record(
     now: datetime,
 ) -> dict[str, object] | None:
     """Build replay for fully quoted READY or research WATCH candidates."""
-    if candidate.get("status") not in {"manual_ready", "structure_watch"}:
+    if candidate.get("status") not in {"manual_ready", "structure_watch", "selector_candidate"}:
         return None
     parity = candidate.get("target_coordinate")
     parity = dict(parity) if isinstance(parity, Mapping) else {}

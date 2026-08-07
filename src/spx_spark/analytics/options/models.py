@@ -128,6 +128,12 @@ class RnDensity:
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
         payload["quality"] = self.quality.value
+        # Preserve the pre-S3 wire shape for insufficient densities.  The new
+        # mode/local-mass research fields appear only when they were computed.
+        if self.mode is None:
+            payload.pop("mode")
+        if self.local_mass_5pt is None:
+            payload.pop("local_mass_5pt")
         return payload
 
 

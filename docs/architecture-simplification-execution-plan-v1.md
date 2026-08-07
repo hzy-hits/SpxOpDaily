@@ -616,3 +616,4 @@ def maintenance_daily() -> None:
 | 2026-08-07 | S2 | +2 / -0 | production +794 / -268（S-track 当前 979） | dev +1 / -0 | +0 / -0 | +0 / -0 | +0 / -0 | Vertical BBO/payoff/Anti-Chase/replay；18 sessions、12 可比机会；gate collecting，未切 owner |
 | 2026-08-07 | S3 | +0 / -0 | production +233 / -43（S-track 当前 1139） | +0 / -0 | +0 / -0 | +0 / -0 | +0 / -0 | Stable Pin/De-pin、Q mode/local mass、三腿 BBO；8/5 与 8/6 frozen cases PASS；未切 owner |
 | 2026-08-07 | S4 | +0 / -0 | production +188 / -133（S-track 当前 1194） | +2 / -0 | +0 / -0 | +0 / -0 | +0 / -0 | Nearest-neighbor P、SciPy 区间、向 Q 收缩、Utility/保守下界；158 tests + import contracts PASS；仍无 fill/完整 path 标签 |
+| 2026-08-07 | S5 | +0 / -2 | production +574 / -1472（S-track 当前 296） | +1 / -0 | +0 / -0 | +0 / -0 | +0 / -0 | 删除 fixed opportunity board；GTH/RTH 旧 READY 降为 selector evidence；统一决策接现有 outbox/Rust lane；官方 OpenAI-compatible SDK + 结构化事实校验；3045 tests + Ruff + import contracts PASS；待 Oracle 实际消息验收 |

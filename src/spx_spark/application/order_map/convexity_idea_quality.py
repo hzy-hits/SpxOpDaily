@@ -36,7 +36,7 @@ def build_wall_probability_context(
     mandate: Mapping[str, Any],
     now: datetime,
 ) -> dict[str, Any]:
-    """Keep only current-session horizons that remain usable before 13:00 ET."""
+    """Keep only current-session horizons that remain usable before session close."""
 
     evaluated_at = _utc(now)
     shadow = _mapping(payload.get("spring_gamma_v3_shadow"))

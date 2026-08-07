@@ -4,7 +4,7 @@ import json
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
-from spx_spark.application.market_features import service
+from spx_spark.application.market_features import spring_gamma_v3_io
 from spx_spark.settings.spring_gamma_v3 import SpringGammaV3Settings
 
 
@@ -46,7 +46,7 @@ def _record() -> dict[str, object]:
 
 def _run(tmp_path, **kwargs):
     settings = kwargs.pop("settings", SpringGammaV3Settings())
-    return service._process_spring_gamma_v3_shadow(
+    return spring_gamma_v3_io.process_spring_gamma_v3_shadow(
         storage=SimpleNamespace(data_root=str(tmp_path)),
         latest_state=SimpleNamespace(),
         options_map=Frame({"expiries": []}),
@@ -62,10 +62,12 @@ def _run(tmp_path, **kwargs):
 
 
 def test_runtime_persists_one_isolated_shadow_bucket(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(service, "build_spring_gamma_v3_shadow", lambda **_: _record())
-    monkeypatch.setattr(service, "group_spxw_option_quotes", lambda *_, **__: {})
     monkeypatch.setattr(
-        service,
+        spring_gamma_v3_io, "build_spring_gamma_v3_shadow", lambda **_: _record()
+    )
+    monkeypatch.setattr(spring_gamma_v3_io, "group_spxw_option_quotes", lambda *_, **__: {})
+    monkeypatch.setattr(
+        spring_gamma_v3_io,
         "build_wall_probability_tenor_shadow",
         lambda **_: {"status": "ready", "abstain_reasons": []},
     )
@@ -88,7 +90,7 @@ def test_runtime_skips_all_shadow_work_when_disabled(tmp_path, monkeypatch) -> N
     def should_not_run(**_: object) -> dict[str, object]:
         raise AssertionError("disabled Spring must not enter the hot calculation")
 
-    monkeypatch.setattr(service, "build_spring_gamma_v3_shadow", should_not_run)
+    monkeypatch.setattr(spring_gamma_v3_io, "build_spring_gamma_v3_shadow", should_not_run)
 
     result = _run(
         tmp_path,
@@ -108,7 +110,7 @@ def test_runtime_failure_is_persisted_as_non_actionable_abstain(tmp_path, monkey
     def fail(**_: object) -> dict[str, object]:
         raise RuntimeError("research broke")
 
-    monkeypatch.setattr(service, "build_spring_gamma_v3_shadow", fail)
+    monkeypatch.setattr(spring_gamma_v3_io, "build_spring_gamma_v3_shadow", fail)
 
     result = _run(tmp_path)
 
@@ -124,10 +126,12 @@ def test_runtime_failure_is_persisted_as_non_actionable_abstain(tmp_path, monkey
 
 
 def test_runtime_does_not_recompute_inside_existing_minute_bucket(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(service, "build_spring_gamma_v3_shadow", lambda **_: _record())
-    monkeypatch.setattr(service, "group_spxw_option_quotes", lambda *_, **__: {})
     monkeypatch.setattr(
-        service,
+        spring_gamma_v3_io, "build_spring_gamma_v3_shadow", lambda **_: _record()
+    )
+    monkeypatch.setattr(spring_gamma_v3_io, "group_spxw_option_quotes", lambda *_, **__: {})
+    monkeypatch.setattr(
+        spring_gamma_v3_io,
         "build_wall_probability_tenor_shadow",
         lambda **_: {"status": "ready", "abstain_reasons": []},
     )
@@ -136,7 +140,7 @@ def test_runtime_does_not_recompute_inside_existing_minute_bucket(tmp_path, monk
     def should_not_run(**_: object) -> dict[str, object]:
         raise AssertionError("same bucket must reuse durable shadow")
 
-    monkeypatch.setattr(service, "build_spring_gamma_v3_shadow", should_not_run)
+    monkeypatch.setattr(spring_gamma_v3_io, "build_spring_gamma_v3_shadow", should_not_run)
     second = _run(tmp_path)
 
     assert first["evaluated"] is True
@@ -148,7 +152,7 @@ def test_runtime_does_not_recompute_inside_existing_minute_bucket(tmp_path, monk
 
 
 def test_wall_shadow_can_only_downgrade_the_direction_shadow() -> None:
-    combined = service._attach_wall_probability_shadow(
+    combined = spring_gamma_v3_io.attach_wall_probability_shadow(
         _record(),
         {
             "status": "abstain",
@@ -173,10 +177,12 @@ def test_wall_shadow_can_only_downgrade_the_direction_shadow() -> None:
 def test_runtime_converts_nested_authority_violation_to_persisted_failure(
     tmp_path, monkeypatch
 ) -> None:
-    monkeypatch.setattr(service, "build_spring_gamma_v3_shadow", lambda **_: _record())
-    monkeypatch.setattr(service, "group_spxw_option_quotes", lambda *_, **__: {})
     monkeypatch.setattr(
-        service,
+        spring_gamma_v3_io, "build_spring_gamma_v3_shadow", lambda **_: _record()
+    )
+    monkeypatch.setattr(spring_gamma_v3_io, "group_spxw_option_quotes", lambda *_, **__: {})
+    monkeypatch.setattr(
+        spring_gamma_v3_io,
         "build_wall_probability_tenor_shadow",
         lambda **_: {
             "status": "ready",
@@ -209,10 +215,10 @@ def test_runtime_does_not_reuse_future_cross_expiry_or_unsafe_latest(tmp_path, m
         record["prediction_id"] = f"recomputed-{recomputations}"
         return record
 
-    monkeypatch.setattr(service, "build_spring_gamma_v3_shadow", build_direction)
-    monkeypatch.setattr(service, "group_spxw_option_quotes", lambda *_, **__: {})
+    monkeypatch.setattr(spring_gamma_v3_io, "build_spring_gamma_v3_shadow", build_direction)
+    monkeypatch.setattr(spring_gamma_v3_io, "group_spxw_option_quotes", lambda *_, **__: {})
     monkeypatch.setattr(
-        service,
+        spring_gamma_v3_io,
         "build_wall_probability_tenor_shadow",
         lambda **_: {"status": "ready", "abstain_reasons": []},
     )

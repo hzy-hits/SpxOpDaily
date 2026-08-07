@@ -96,3 +96,60 @@ negative {'decision_type': 'NO_TRADE', 'n_raw': 40, 'n_effective': 40.0, 'shrink
 158 passed in 3.83s
 Contracts: 2 kept, 0 broken.
 ```
+
+## S5 唯一候选 Owner 与 LLM Critic
+
+状态：**分支代码完成；Oracle 尚未部署，真实 Bark/飞书 receipt 仍是上线验收项。**
+
+- 删除 `convexity_opportunity_board.py` 和固定 Call/Put/Vol 最终排名；紧凑 radar 只保留可证伪竞争假设。
+- GTH `manual_ready` 和 RTH legacy `trade_ready` 在生产热路径统一降为 `selector_candidate`；它们只给 selector 提供触发证据，不能直接生成旧绿卡。
+- 一个热周期生成一个 `strategy_decision`；只有保守 Utility 和下界同时大于零的 manual candidate 才进入现有 `trade_ready` outbox。机会 ID 稳定，重复周期不重复入队，自动下单保持关闭。
+- 使用 provider 官方 OpenAI-compatible SDK；LLM 只在固定报告时点做结构化 hypothesis critic，不计算价格、P/Q、payoff、合约或 READY。支持事实引用、falsifier 和 expression 均须通过确定性 allowlist；失败时退回 deterministic hypotheses。
+- Spring Gamma 运行编排从 1033 行的 hot service 移入既有 `spring_gamma_v3_io.py`，两个 production service 分别为 787/1000 行；没有新增服务、DB、queue、状态机或 Rust 改动。
+
+S5 自检原始输出：
+
+```text
+$ rg -n 'convexity_opportunity_board' src tests
+[no output]
+
+$ rg -n 'operator_authority=False|strategy_decision_is_final_candidate_owner|selector_candidate|enqueue_strategy_decision' \
+  src/spx_spark/application/market_features/service.py \
+  src/spx_spark/application/market_features/gth_level_manual_candidate.py \
+  src/spx_spark/application/order_map/delivery.py
+src/spx_spark/application/order_map/delivery.py:32:def enqueue_strategy_decision(
+src/spx_spark/application/market_features/service.py:406:            "status": "selector_candidate",
+src/spx_spark/application/market_features/service.py:409:            "block_reasons": ["strategy_decision_is_final_candidate_owner"],
+src/spx_spark/application/market_features/service.py:548:        operator_authority=False,
+src/spx_spark/application/market_features/service.py:568:        strategy_delivery = enqueue_strategy_decision(strategy_decision, now=action_now)
+src/spx_spark/application/market_features/gth_level_manual_candidate.py:707:            "status": "selector_candidate",
+src/spx_spark/application/market_features/gth_level_manual_candidate.py:713:            "signal_absence_reason": "strategy_decision_is_final_candidate_owner",
+
+$ uv run lint-imports
+Contracts: 2 kept, 0 broken.
+
+$ uv run ruff check src tests scripts
+All checks passed!
+
+$ uv run pytest -q
+3045 passed, 1 warning in 75.43s
+```
+
+### v2 §25 完成定义核对
+
+| # | 定义 | 结果 |
+|---:|---|---|
+| 1 | 一个 Order Map 周期一个 `strategy_decision` | PASS（构造与 service integration） |
+| 2 | 明确 NoTrade | PASS |
+| 3 | 趋势正确但位置过晚拒绝 | PASS（Anti-Chase） |
+| 4 | Failed Break 独立生成 Vertical | PASS |
+| 5 | Stable Pin 生成 Top 3 中轴 | PASS |
+| 6 | Butterfly 三腿 conservative BBO | PASS |
+| 7 | 8 月 5 日 De-pin | PASS |
+| 8 | 8 月 6 日 7710 高质量中轴 | PASS |
+| 9 | 回放只读当时可见数据 | PASS |
+| 10 | 人工候选进入现有生产报告/通知 | CODE PASS；Oracle receipt PENDING |
+| 11 | 自动下单关闭 | PASS |
+| 12 | 旧最终候选 owner 删除或降级 | PASS |
+| 13 | 无新增 service/DB/Rust | PASS |
+| 14 | 预算 | PASS：S5 production net -898；S-track 当前净增 296 |

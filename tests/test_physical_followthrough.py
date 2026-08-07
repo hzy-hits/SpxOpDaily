@@ -71,14 +71,18 @@ def test_estimate_is_directional_deduplicated_and_prior_day_only(tmp_path: Path)
     )
 
     assert estimate.status == "estimated_uncalibrated"
-    assert estimate.sample_count == 3
-    assert estimate.success_count == 2
-    assert estimate.probability == pytest.approx(3 / 5)
+    # The v2 nearest-neighbour model keeps the opposite-direction observation
+    # with a lower similarity weight instead of hard-filtering it away.
+    assert estimate.sample_count == 4
+    assert estimate.success_count == 3
+    assert estimate.probability == pytest.approx(0.620798)
     assert estimate.trained_through_date == date(2026, 8, 4)
     assert estimate.session_count == 1
 
 
-def test_sparse_requested_cohort_falls_back_to_global_baseline(tmp_path: Path) -> None:
+def test_sparse_requested_cohort_stays_an_explicit_nearest_neighbor_estimate(
+    tmp_path: Path,
+) -> None:
     _write(
         tmp_path,
         "2026-08-04",
@@ -102,9 +106,10 @@ def test_sparse_requested_cohort_falls_back_to_global_baseline(tmp_path: Path) -
     )
 
     assert estimate.status == "insufficient_sample"
-    assert estimate.cohort == "all_confirmed_events"
+    assert estimate.cohort == "nearest_neighbors"
     assert estimate.sample_count == 2
-    assert "requested_cohort_below_minimum_using_global_baseline" in estimate.reason_codes
+    assert "nearest_neighbor_sparse_shrinkage_input" in estimate.reason_codes
+    assert "physical_sample_below_minimum" in estimate.reason_codes
 
 
 def test_missing_history_is_an_explicit_unavailable_result(tmp_path: Path) -> None:

@@ -51,9 +51,7 @@ from spx_spark.application.order_map.hl_volume import (
     attach_hl_volume_signal,
     default_hl_volume_sample_path,
 )
-from spx_spark.application.order_map.level_decision_shadow import (
-    load_level_decision_shadow,
-)
+from spx_spark.application.order_map.level_decision_shadow import load_level_decision_shadow
 from spx_spark.application.order_map.level_trigger_repricing import (
     default_level_trigger_repricing_path,
 )
@@ -69,9 +67,7 @@ from spx_spark.application.order_map.status_delivery import (
     _status_material_changes,
     status_delivery_reason as _status_delivery_reason,
 )
-from spx_spark.application.order_map.render import (
-    render_template,
-)
+from spx_spark.application.order_map.render import render_template
 from spx_spark.application.order_map.report_clock import rth_report_slot
 from spx_spark.application.order_map.research import (
     _index_value,
@@ -103,9 +99,7 @@ from spx_spark.application.order_map.state import (
     within_send_window,
     within_status_window,
 )
-from spx_spark.application.order_map.volume_machine import (
-    default_es_volume_sample_path,
-)
+from spx_spark.application.order_map.volume_machine import default_es_volume_sample_path
 from spx_spark.config import NotificationSettings, StorageSettings
 from spx_spark.greek_reference import (
     build_zero_dte_greeks_reference,

@@ -4659,6 +4659,38 @@ def test_send_order_map_only_enqueues_without_calling_feishu(tmp_path: Path, mon
     assert not Path(missed_path).exists()
 
 
+def test_unified_strategy_candidate_enqueues_once_on_trade_ready_lane(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from spx_spark.application.order_map.delivery import enqueue_strategy_decision
+
+    now = datetime(2026, 8, 7, 15, 0, tzinfo=timezone.utc)
+    settings = make_settings(str(tmp_path / "strategy.json"))
+    monkeypatch.setattr(NotificationSettings, "from_env", classmethod(lambda cls: settings))
+    decision = {
+        "decision_at": now.isoformat(), "action_authority": "manual",
+        "probability_evidence": {"q": 0.52, "n_raw": 12, "n_effective": 7.0,
+                                 "shrinkage_weight": 0.259259},
+        "candidate": {
+            "opportunity_id": "strategy-opportunity:test", "setup_kind": "TREND_PULLBACK",
+            "direction": "UP", "target_spx": 7730.0, "invalidation_spx": 7705.0,
+            "opportunity_valid_until": (now + timedelta(minutes=5)).isoformat(),
+            "long": {"contract_id": "option:SPX:SPXW:20260807:7710:C"},
+            "short": {"contract_id": "option:SPX:SPXW:20260807:7720:C"},
+            "quote": {"bid": 2.8, "ask": 3.0},
+            "economics": {"max_loss_points": 3.0},
+            "utility": {"event_probability": 0.61, "utility": 0.12,
+                        "conservative_lower_bound": 40.0},
+        },
+    }
+    first = enqueue_strategy_decision(decision, now=now)
+    second = enqueue_strategy_decision(decision, now=now + timedelta(seconds=1))
+    assert first["accepted"] is True and first["targets"] == ["feishu"]
+    assert second == {"accepted": True, "inserted": False, "duplicate": True,
+                      "outcome": "outbox_already_accepted",
+                      "event_id": "strategy-opportunity:test:ready"}
+
+
 def test_order_map_refresh_same_slot_replay_and_material_change_have_stable_ids(
     tmp_path: Path, monkeypatch
 ) -> None:
