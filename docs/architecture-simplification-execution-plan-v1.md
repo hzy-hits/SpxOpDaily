@@ -400,7 +400,7 @@ exhaustive = false
 
 - 新文件（封闭清单）：`src/spx_spark/web/__init__.py`、`src/spx_spark/web/replay_api.py`（≤200 行）、`tests/web/test_replay_api.py`。
 - 必须逐字保持的路由（来自现实现）：`/healthz`、`/api/v1/replay/sessions`、`/api/v1/replay/sessions/{date}/timeline`、`/api/v1/replay/sessions/{date}/trend`、`/api/v1/replay/sessions/{date}/session-surface`、`/api/v1/replay/sessions/{date}/frame`、`/api/v1/replay/frames/{ts}`（见 2.10：不改名）。
-- 委托对象：`surface_replay_service.py` 的 `ReplayCatalog`/`ReplaySession`；现 `surface_replay_http.py` 里的 hmac token 校验改写为一个 FastAPI dependency（一个函数，不是类）。
+- 委托对象：`surface_replay_service.py` 的 `ReplayCatalog`/`ReplaySession`。施工核查确认旧 transport 没有 hmac token 认证；`hmac.compare_digest` 只服务于弱 ETag 比较，因此新 route 保留 ETag 语义，不虚构认证 dependency。
 - 删除：`src/spx_spark/surface_replay_http.py` 全文件及其 console script。
 - 自检断言：`rg -c 'BaseHTTPRequestHandler|ThreadingHTTPServer' src/spx_spark/surface_replay_http.py` 报文件不存在；契约测试全绿。
 
@@ -617,3 +617,4 @@ def maintenance_daily() -> None:
 | 2026-08-07 | S3 | +0 / -0 | production +233 / -43（S-track 当前 1139） | +0 / -0 | +0 / -0 | +0 / -0 | +0 / -0 | Stable Pin/De-pin、Q mode/local mass、三腿 BBO；8/5 与 8/6 frozen cases PASS；未切 owner |
 | 2026-08-07 | S4 | +0 / -0 | production +188 / -133（S-track 当前 1194） | +2 / -0 | +0 / -0 | +0 / -0 | +0 / -0 | Nearest-neighbor P、SciPy 区间、向 Q 收缩、Utility/保守下界；158 tests + import contracts PASS；仍无 fill/完整 path 标签 |
 | 2026-08-07 | S5 | +0 / -2 | production +574 / -1472（S-track 当前 296） | +1 / -0 | +0 / -0 | +0 / -0 | +0 / -0 | 删除 fixed opportunity board；GTH/RTH 旧 READY 降为 selector evidence；统一决策接现有 outbox/Rust lane；官方 OpenAI-compatible SDK + 结构化事实校验；3045 tests + Ruff + import contracts PASS；待 Oracle 实际消息验收 |
+| 2026-08-07 | P2-1 | +3 / -1 | production +286 / -675 | +1 / -0 | +0 / -0（1 unit 改入口） | +0 / -1 | +0 / -0 | Replay 七条路由迁 FastAPI/Uvicorn UDS；删除 623 行手写 transport；131 tests + Ruff + import contracts PASS；实际 UDS health/security headers PASS；周末才允许切 owner |

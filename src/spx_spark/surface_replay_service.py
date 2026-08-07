@@ -35,29 +35,13 @@ from spx_spark.surface_dashboard_replay import (
     generate_replay,
     replay_id,
 )
-from spx_spark.surface_replay_http import (
-    APIResponse,
-    DEFAULT_BIND_HOST,
-    DEFAULT_BIND_PORT,
-    DEFAULT_FRAME_MINUTES,
-    MAX_REQUEST_TARGET_BYTES,
-    SERVICE_SCHEMA_VERSION,
-    ReplayAPI,
-    ReplayBusyError,
-    ReplayCacheError,
-    ReplayHTTPServer,
-    ReplayRequestError,
-    ReplayUnixHTTPServer,
-    _parse_replay_id,
-    main,
-    parse_args,
-    run,
-)
 from spx_spark.surface_replay_catalog_payload import (
+    SERVICE_SCHEMA_VERSION,
     SERVICE_KIND,
     SESSION_CLOSE_GRACE_POLICY,
     SESSION_CLOSE_GRACE_SECONDS,
     TIMELINE_POLICY_VERSION,
+    ReplayCacheError,
     build_sessions_payload,
     build_timeline_payload,
 )
@@ -82,14 +66,29 @@ from spx_spark.surface_replay_session_models import session_surface_window
 MAX_CACHE_ARTIFACT_BYTES = 32 * 1024 * 1024
 GENERATION_LOCK_TIMEOUT_SECONDS = 2.0
 MAX_VERIFIED_SOURCE_HASH_CONTEXTS = 32
+DEFAULT_FRAME_MINUTES = 5
 
 _SESSION_DATE_RE = re.compile(r"\A\d{4}-\d{2}-\d{2}\Z")
-__all__ = [
-    "APIResponse", "DEFAULT_BIND_HOST", "DEFAULT_BIND_PORT", "DEFAULT_FRAME_MINUTES",
-    "MAX_REQUEST_TARGET_BYTES", "ReplayAPI", "ReplayBusyError", "ReplayCacheError",
-    "ReplayCatalog", "ReplayHTTPServer", "ReplayRequestError", "ReplaySession",
-    "ReplayUnixHTTPServer", "main", "parse_args", "run",
-]
+
+
+class ReplayRequestError(ValueError):
+    def __init__(self, code: str, *, status: HTTPStatus = HTTPStatus.BAD_REQUEST) -> None:
+        super().__init__(code)
+        self.code = code
+        self.status = status
+
+
+class ReplayBusyError(RuntimeError):
+    pass
+
+
+def _parse_replay_id(value: str) -> datetime:
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{6}Z", value):
+        raise ReplayRequestError("invalid_replay_id")
+    try:
+        return datetime.strptime(value, "%Y-%m-%dT%H%M%SZ").replace(tzinfo=timezone.utc)
+    except ValueError as exc:
+        raise ReplayRequestError("invalid_replay_id") from exc
 
 
 @dataclass(frozen=True, slots=True)
@@ -974,7 +973,3 @@ class ReplayCatalog:
 
     def timeline_payload(self, session_date: date) -> dict[str, object]:
         return build_timeline_payload(self, session_date)
-
-
-if __name__ == "__main__":
-    main()

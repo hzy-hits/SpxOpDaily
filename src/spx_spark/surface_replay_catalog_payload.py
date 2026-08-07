@@ -9,17 +9,18 @@ from typing import Protocol
 from spx_spark.market_calendar import ET
 from spx_spark.marketdata import as_utc
 from spx_spark.surface_dashboard_replay import _canonical_sha256, replay_id
-from spx_spark.surface_replay_http import (
-    SERVICE_SCHEMA_VERSION,
-    ReplayCacheError,
-)
 from spx_spark.surface_replay_session_models import session_surface_window
 
 
+SERVICE_SCHEMA_VERSION = 1
 SERVICE_KIND = "spxw_surface_replay_catalog"
 TIMELINE_POLICY_VERSION = "spxw_surface_replay_timeline.event_driven.v2"
 SESSION_CLOSE_GRACE_SECONDS = 2 * 60 * 60
 SESSION_CLOSE_GRACE_POLICY = "session_close_plus_2h_grace"
+
+
+class ReplayCacheError(RuntimeError):
+    """A materialized replay failed its immutable artifact checks."""
 
 
 class _ReplaySessionView(Protocol):

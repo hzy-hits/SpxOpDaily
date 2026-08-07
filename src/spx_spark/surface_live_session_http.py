@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import argparse
+import hmac
 import json
 import logging
 import math
+import re
 import signal
+import socket
 import stat
 import threading
 from dataclasses import dataclass
@@ -29,14 +32,56 @@ from spx_spark.surface_live_session_worker import (
     DEFAULT_POLL_SECONDS,
     LiveSessionAccumulator,
 )
-from spx_spark.surface_replay_http import (
-    _if_none_match_matches,
-    _remove_stale_unix_socket,
-)
 
 
 LOGGER = logging.getLogger(__name__)
 MAX_REQUEST_TARGET_BYTES = 2_048
+_ENTITY_TAG_RE = re.compile(r'(?:W/)?"[!#-~]+"')
+
+
+def _if_none_match_matches(values: tuple[str, ...], current_etag: str) -> bool:
+    if not values or sum(len(value) for value in values) > 8_192:
+        return False
+    normalized = current_etag.removeprefix("W/")
+    for value in values:
+        for candidate in value.split(","):
+            candidate = candidate.strip()
+            if candidate == "*":
+                return True
+            if _ENTITY_TAG_RE.fullmatch(candidate) and hmac.compare_digest(
+                candidate.removeprefix("W/"), normalized
+            ):
+                return True
+    return False
+
+
+def _remove_stale_unix_socket(path: Path) -> None:
+    try:
+        existing = path.lstat()
+    except FileNotFoundError:
+        return
+    if not stat.S_ISSOCK(existing.st_mode):
+        raise OSError(f"refusing to replace non-socket path: {path}")
+    probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        probe.settimeout(0.25)
+        probe.connect(str(path))
+    except (ConnectionRefusedError, FileNotFoundError):
+        pass
+    except OSError as exc:
+        raise OSError(f"cannot prove Unix socket is stale: {path}") from exc
+    else:
+        raise OSError(f"Unix socket is already accepting connections: {path}")
+    finally:
+        probe.close()
+    current = path.lstat()
+    if (
+        not stat.S_ISSOCK(current.st_mode)
+        or current.st_dev != existing.st_dev
+        or current.st_ino != existing.st_ino
+    ):
+        raise OSError(f"Unix socket changed while checking staleness: {path}")
+    path.unlink()
 
 
 class LiveRequestError(ValueError):

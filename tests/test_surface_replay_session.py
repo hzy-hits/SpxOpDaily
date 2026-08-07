@@ -8,6 +8,7 @@ import time
 
 import duckdb
 import pytest
+from fastapi.testclient import TestClient
 
 import spx_spark.surface_dashboard_replay as replay_module
 import spx_spark.surface_replay_service as service_module
@@ -15,16 +16,15 @@ import spx_spark.surface_replay_session as session_module
 import spx_spark.surface_replay_session_data as session_data_module
 from spx_spark.surface_replay_session_models import _FrameState
 from spx_spark.surface_replay_service import (
-    ReplayAPI,
     ReplayCacheError,
     ReplayCatalog,
-    ReplayRequestError,
 )
 from spx_spark.surface_replay_session import (
     SESSION_SURFACE_CACHE_VERSION,
     SESSION_SURFACE_KIND,
     SESSION_SURFACE_POLICY_VERSION,
 )
+from spx_spark.web.replay_api import create_app
 from test_surface_dashboard_replay import AS_OF, storage_settings, write_quote_partition
 from test_surface_replay_service import EVENT_AS_OF
 
@@ -52,14 +52,14 @@ def _target(
 
 
 def _surface(catalog: ReplayCatalog, **kwargs: object) -> dict[str, object]:
-    return ReplayAPI(catalog).dispatch("GET", _target(**kwargs)).payload
+    return TestClient(create_app(catalog)).get(_target(**kwargs)).json()
 
 
 def test_session_surface_endpoint_builds_frontend_contract(
     catalog: ReplayCatalog,
 ) -> None:
-    response = ReplayAPI(catalog).dispatch("GET", _target())
-    payload = response.payload
+    response = TestClient(create_app(catalog)).get(_target())
+    payload = response.json()
 
     assert payload["schema_version"] == 2
     assert payload["kind"] == SESSION_SURFACE_KIND == "spxw_session_surface"
@@ -165,8 +165,8 @@ def test_session_surface_endpoint_builds_frontend_contract(
     artifact_hash = payload.pop("artifact_sha256")
     assert artifact_hash == replay_module._canonical_sha256(payload)
     payload["artifact_sha256"] = artifact_hash
-    assert ("Cache-Control", "private, no-cache") in response.headers
-    assert ("ETag", f'"{artifact_hash}"') in response.headers
+    assert response.headers["cache-control"] == "private, no-cache"
+    assert response.headers["etag"] == f'"{artifact_hash}"'
 
 
 def test_session_surface_is_causal_and_never_loads_future_frame(
@@ -805,11 +805,12 @@ def test_session_surface_rejects_missing_or_unsupported_query(
     catalog: ReplayCatalog,
     target: str,
 ) -> None:
-    with pytest.raises(
-        ReplayRequestError,
-        match="invalid_(query|session_surface_selector)",
-    ):
-        ReplayAPI(catalog).dispatch("GET", target)
+    response = TestClient(create_app(catalog)).get(target)
+    assert response.status_code == 400
+    assert response.json()["error"] in {
+        "invalid_query",
+        "invalid_session_surface_selector",
+    }
 
 
 def test_session_surface_file_cache_reuses_artifact_without_frames(

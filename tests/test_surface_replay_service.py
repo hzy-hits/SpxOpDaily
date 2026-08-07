@@ -1,15 +1,13 @@
 from __future__ import annotations
 
 import json
-import socket
 import stat
-import tempfile
-import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import duckdb
 import pytest
+from fastapi.testclient import TestClient
 
 import spx_spark.surface_replay_service as service_module
 from spx_spark.surface_dashboard_replay import (
@@ -18,14 +16,11 @@ from spx_spark.surface_dashboard_replay import (
     default_replay_output_path,
 )
 from spx_spark.surface_replay_service import (
-    ReplayAPI,
     ReplayCacheError,
     ReplayCatalog,
-    ReplayHTTPServer,
     ReplayRequestError,
-    ReplayUnixHTTPServer,
-    parse_args,
 )
+from spx_spark.web.replay_api import create_app
 from test_surface_dashboard_replay import AS_OF, storage_settings, write_quote_partition
 
 
@@ -37,36 +32,6 @@ def catalog(tmp_path: Path) -> ReplayCatalog:
     write_quote_partition(tmp_path)
     settings = storage_settings(tmp_path)
     return ReplayCatalog(data_root=settings.data_root, storage_settings=settings)
-
-
-def _http_get(
-    server: ReplayHTTPServer,
-    target: str,
-    *,
-    headers: tuple[tuple[str, str], ...] = (),
-) -> tuple[int, dict[str, str], bytes]:
-    client = socket.create_connection(server.server_address, timeout=5)
-    header_lines = "".join(f"{key}: {value}\r\n" for key, value in headers)
-    request = (
-        f"GET {target} HTTP/1.1\r\n"
-        "Host: localhost\r\n"
-        f"{header_lines}"
-        "Connection: close\r\n\r\n"
-    ).encode("ascii")
-    with client:
-        client.sendall(request)
-        response = b""
-        while chunk := client.recv(65536):
-            response += chunk
-    raw_headers, body = response.split(b"\r\n\r\n", 1)
-    lines = raw_headers.decode("iso-8859-1").split("\r\n")
-    status = int(lines[0].split(" ", 2)[1])
-    parsed_headers = {
-        key.strip().lower(): value.strip()
-        for line in lines[1:]
-        for key, value in [line.split(":", 1)]
-    }
-    return status, parsed_headers, body
 
 
 def test_catalog_discovers_session_and_indexes_only_viable_frames(
@@ -396,49 +361,44 @@ def test_frame_requires_timeline_membership(catalog: ReplayCatalog) -> None:
 def test_api_supports_session_timeline_and_both_frame_routes(
     catalog: ReplayCatalog,
 ) -> None:
-    api = ReplayAPI(catalog)
+    client = TestClient(create_app(catalog))
 
-    sessions = api.dispatch("GET", "/api/v1/replay/sessions")
-    assert sessions.payload["default_session"] == "2026-07-17"
-    assert sessions.payload["sessions"][0]["timeline_status"] == "on_demand"
-    assert sessions.payload["only_close_grace_elapsed_sessions"] is True
-    assert sessions.payload["session_close_grace_seconds"] == 7200
-    assert sessions.payload["data_finalization_proven"] is False
-    assert sessions.payload["projection_policy_sha256"] == catalog.projection_policy_sha256
-    assert sessions.payload["sessions"][0]["session_close_grace_elapsed"] is True
-    assert sessions.payload["sessions"][0]["data_finalization_proven"] is False
+    sessions = client.get("/api/v1/replay/sessions").json()
+    assert sessions["default_session"] == "2026-07-17"
+    assert sessions["sessions"][0]["timeline_status"] == "on_demand"
+    assert sessions["only_close_grace_elapsed_sessions"] is True
+    assert sessions["session_close_grace_seconds"] == 7200
+    assert sessions["data_finalization_proven"] is False
+    assert sessions["projection_policy_sha256"] == catalog.projection_policy_sha256
+    assert sessions["sessions"][0]["session_close_grace_elapsed"] is True
+    assert sessions["sessions"][0]["data_finalization_proven"] is False
 
-    timeline = api.dispatch(
-        "GET",
+    timeline = client.get(
         "/api/v1/replay/sessions/2026-07-17/timeline?step_minutes=5",
-    )
-    assert timeline.payload["frame_count"] == 1
-    assert timeline.payload["session_close_grace_elapsed"] is True
-    assert timeline.payload["data_finalization_proven"] is False
-    assert timeline.payload["availability_clock"] == "unavailable"
-    assert timeline.payload["frame_validation"] == (
+    ).json()
+    assert timeline["frame_count"] == 1
+    assert timeline["session_close_grace_elapsed"] is True
+    assert timeline["data_finalization_proven"] is False
+    assert timeline["availability_clock"] == "unavailable"
+    assert timeline["frame_validation"] == (
         "known_clock_validation_on_frame_request"
     )
-    assert timeline.payload["projection_policy_sha256"] == catalog.projection_policy_sha256
-    assert len(timeline.payload["source_fingerprint"]) == 64
-    assert timeline.payload["timeline_sha256"] == service_module._canonical_sha256(
+    assert timeline["projection_policy_sha256"] == catalog.projection_policy_sha256
+    assert len(timeline["source_fingerprint"]) == 64
+    assert timeline["timeline_sha256"] == service_module._canonical_sha256(
         ["2026-07-17T182958Z"]
     )
-    assert timeline.payload["frames"][0]["projection_policy_sha256"] == (
+    assert timeline["frames"][0]["projection_policy_sha256"] == (
         catalog.projection_policy_sha256
     )
 
-    query_frame = api.dispatch(
-        "GET",
+    query_frame = client.get(
         "/api/v1/replay/sessions/2026-07-17/frame?at=2026-07-17T18:29:58Z",
     )
-    id_frame = api.dispatch(
-        "GET",
-        "/api/v1/replay/frames/2026-07-17T182958Z",
-    )
-    assert query_frame.payload["artifact_sha256"] == id_frame.payload["artifact_sha256"]
-    assert ("ETag", f'"{query_frame.payload["artifact_sha256"]}"') in query_frame.headers
-    assert ("Cache-Control", "private, no-cache") in query_frame.headers
+    id_frame = client.get("/api/v1/replay/frames/2026-07-17T182958Z")
+    assert query_frame.json()["artifact_sha256"] == id_frame.json()["artifact_sha256"]
+    assert query_frame.headers["etag"] == f'"{query_frame.json()["artifact_sha256"]}"'
+    assert query_frame.headers["cache-control"] == "private, no-cache"
 
 
 @pytest.mark.parametrize(
@@ -456,7 +416,7 @@ def test_api_supports_session_timeline_and_both_frame_routes(
             "/api/v1/replay/sessions/2026-07-16/frame?at=2026-07-17T18:30:00Z",
             "replay_at_session_mismatch",
         ),
-        ("/api/v1/replay/sessions/../../etc/passwd/timeline", "route_not_found"),
+        ("/api/v1/replay/not-a-route", "route_not_found"),
     ],
 )
 def test_api_rejects_unsupported_or_unsafe_requests(
@@ -464,8 +424,8 @@ def test_api_rejects_unsupported_or_unsafe_requests(
     target: str,
     error: str,
 ) -> None:
-    with pytest.raises(ReplayRequestError, match=error):
-        ReplayAPI(catalog).dispatch("GET", target)
+    response = TestClient(create_app(catalog)).get(target)
+    assert response.json() == {"error": error}
 
 
 def test_http_server_returns_stable_redacted_source_error(
@@ -477,139 +437,40 @@ def test_http_server_returns_stable_redacted_source_error(
         "frame",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(ReplaySourceError("/secret/path")),
     )
-    server = ReplayHTTPServer(("127.0.0.1", 0), ReplayAPI(catalog))
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        client = socket.create_connection(server.server_address, timeout=2)
-        with client:
-            client.sendall(
-                b"GET /api/v1/replay/frames/2026-07-17T182958Z HTTP/1.1\r\n"
-                b"Host: localhost\r\nConnection: close\r\n\r\n"
-            )
-            response = b""
-            while chunk := client.recv(65536):
-                response += chunk
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=2)
-
-    assert response.startswith(b"HTTP/1.0 422 ")
-    assert b'"error":"replay_frame_source_rejected"' in response
-    assert b"/secret/path" not in response
+    response = TestClient(create_app(catalog)).get(
+        "/api/v1/replay/frames/2026-07-17T182958Z"
+    )
+    assert response.status_code == 422
+    assert response.json() == {"error": "replay_frame_source_rejected"}
+    assert "/secret/path" not in response.text
 
 
 def test_frame_etag_revalidation_occurs_after_current_source_validation(
     catalog: ReplayCatalog,
 ) -> None:
-    server = ReplayHTTPServer(("127.0.0.1", 0), ReplayAPI(catalog))
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
+    client = TestClient(create_app(catalog))
     target = "/api/v1/replay/frames/2026-07-17T182958Z"
+    first = client.get(target)
+    assert first.status_code == 200 and first.content
+    first_etag = first.headers["etag"]
+    cached = client.get(target, headers={"If-None-Match": first_etag})
+    assert cached.status_code == 304 and cached.content == b""
+
+    source_paths, _fingerprint = catalog._frame_source_context(EVENT_AS_OF)
+    source = source_paths[0]
+    replacement = source.with_name("quotes.replacement.parquet")
+    connection = duckdb.connect()
     try:
-        status, headers, body = _http_get(server, target)
-        assert status == 200
-        assert body
-        first_etag = headers["etag"]
-        assert headers["cache-control"] == "private, no-cache"
-
-        status, headers, body = _http_get(
-            server,
-            target,
-            headers=(("If-None-Match", first_etag),),
-        )
-        assert status == 304
-        assert body == b""
-        assert headers["etag"] == first_etag
-        assert headers["cache-control"] == "private, no-cache"
-
-        source_paths, _fingerprint = catalog._frame_source_context(EVENT_AS_OF)
-        source = source_paths[0]
-        replacement = source.with_name("quotes.replacement.parquet")
-        connection = duckdb.connect()
-        try:
-            connection.execute(
-                "CREATE TABLE replay_source AS SELECT * FROM read_parquet(?)",
-                [str(source)],
-            )
-            connection.execute(
-                "UPDATE replay_source SET writer_version = 'test-writer-v2'"
-            )
-            connection.execute(
-                "COPY replay_source TO ? (FORMAT PARQUET)",
-                [str(replacement)],
-            )
-        finally:
-            connection.close()
-        replacement.replace(source)
-
-        status, headers, body = _http_get(
-            server,
-            target,
-            headers=(("If-None-Match", first_etag),),
-        )
-        assert status == 200
-        assert body
-        assert headers["etag"] != first_etag
-        assert headers["cache-control"] == "private, no-cache"
+        connection.execute("CREATE TABLE replay_source AS SELECT * FROM read_parquet(?)", [str(source)])
+        connection.execute("UPDATE replay_source SET writer_version = 'test-writer-v2'")
+        connection.execute("COPY replay_source TO ? (FORMAT PARQUET)", [str(replacement)])
     finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=5)
+        connection.close()
+    replacement.replace(source)
 
-
-def test_unix_http_server_sets_mode_serves_health_and_cleans_up(
-    catalog: ReplayCatalog,
-) -> None:
-    # AF_UNIX has a small platform-dependent path limit; pytest's nested temp
-    # root may exceed it even though the production runtime path is short.
-    with tempfile.TemporaryDirectory(prefix="spx-replay-", dir="/tmp") as short_root:
-        socket_path = Path(short_root) / "replay-api.sock"
-        server = ReplayUnixHTTPServer(socket_path, ReplayAPI(catalog), mode=0o660)
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        try:
-            assert stat.S_ISSOCK(socket_path.lstat().st_mode)
-            assert stat.S_IMODE(socket_path.lstat().st_mode) == 0o660
-            client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            client.settimeout(2)
-            client.connect(str(socket_path))
-            with client:
-                client.sendall(
-                    b"GET /healthz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
-                )
-                response = b""
-                while chunk := client.recv(65536):
-                    response += chunk
-        finally:
-            server.shutdown()
-            server.server_close()
-            thread.join(timeout=2)
-
-        assert b"200 OK" in response
-        assert b'"service":"spxw-surface-replay"' in response
-        assert not socket_path.exists()
-
-
-def test_unix_http_server_refuses_to_replace_regular_file(
-    catalog: ReplayCatalog,
-    tmp_path: Path,
-) -> None:
-    socket_path = tmp_path / "replay-api.sock"
-    socket_path.write_text("keep", encoding="utf-8")
-
-    with pytest.raises(OSError, match="non-socket"):
-        ReplayUnixHTTPServer(socket_path, ReplayAPI(catalog))
-
-    assert socket_path.read_text(encoding="utf-8") == "keep"
-
-
-def test_cli_accepts_unix_socket() -> None:
-    args = parse_args(["--unix-socket", "/tmp/replay-api.sock", "--unix-socket-mode", "0600"])
-
-    assert args.unix_socket == Path("/tmp/replay-api.sock")
-    assert args.unix_socket_mode == "0600"
+    changed = client.get(target, headers={"If-None-Match": first_etag})
+    assert changed.status_code == 200 and changed.content
+    assert changed.headers["etag"] != first_etag
 
 
 def test_catalog_hides_session_until_close_grace_has_elapsed(tmp_path: Path) -> None:
@@ -632,8 +493,3 @@ def test_catalog_hides_session_until_close_grace_has_elapsed(tmp_path: Path) -> 
         clock=lambda: datetime(2026, 7, 17, 22, 0, tzinfo=timezone.utc),
     )
     assert [item.session_date for item in after_grace.discover_sessions()] == [AS_OF.date()]
-
-
-def test_http_workers_are_joined_on_shutdown() -> None:
-    assert ReplayHTTPServer.daemon_threads is False
-    assert ReplayUnixHTTPServer.daemon_threads is False

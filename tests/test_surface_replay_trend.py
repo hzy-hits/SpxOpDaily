@@ -6,13 +6,12 @@ from pathlib import Path
 
 import duckdb
 import pytest
+from fastapi.testclient import TestClient
 
 import spx_spark.surface_dashboard_replay as replay_module
 from spx_spark.surface_replay_service import (
-    ReplayAPI,
     ReplayCacheError,
     ReplayCatalog,
-    ReplayRequestError,
 )
 from spx_spark.surface_replay_trend import (
     FRAME_POLICY_VERSION,
@@ -20,6 +19,7 @@ from spx_spark.surface_replay_trend import (
     TREND_MODE,
     TREND_POLICY_VERSION,
 )
+from spx_spark.web.replay_api import create_app
 from test_surface_dashboard_replay import AS_OF, storage_settings, write_quote_partition
 from test_surface_replay_service import EVENT_AS_OF
 
@@ -221,18 +221,14 @@ def test_trend_cache_rejects_signed_source_contract_tampering(
 
 
 def test_api_serves_trend_with_private_etag(catalog: ReplayCatalog) -> None:
-    response = ReplayAPI(catalog).dispatch(
-        "GET",
+    response = TestClient(create_app(catalog)).get(
         "/api/v1/replay/sessions/2026-07-17/trend"
         "?role=front&weighting=oi_weighted&metric=signed_gamma",
     )
 
-    assert response.payload["kind"] == TREND_KIND
-    assert ("Cache-Control", "private, no-cache") in response.headers
-    assert (
-        "ETag",
-        f'"{response.payload["artifact_sha256"]}"',
-    ) in response.headers
+    assert response.json()["kind"] == TREND_KIND
+    assert response.headers["cache-control"] == "private, no-cache"
+    assert response.headers["etag"] == f'"{response.json()["artifact_sha256"]}"'
 
 
 @pytest.mark.parametrize(
@@ -290,5 +286,6 @@ def test_api_rejects_missing_duplicate_or_unsupported_trend_selectors(
     catalog: ReplayCatalog,
     target: str,
 ) -> None:
-    with pytest.raises(ReplayRequestError, match="invalid_(query|trend_selector)"):
-        ReplayAPI(catalog).dispatch("GET", target)
+    response = TestClient(create_app(catalog)).get(target)
+    assert response.status_code == 400
+    assert response.json()["error"] in {"invalid_query", "invalid_trend_selector"}

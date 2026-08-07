@@ -14,10 +14,12 @@ def read(relative: str) -> str:
 
 def test_replay_service_is_unix_socket_only_and_resource_bounded() -> None:
     unit = read("systemd/spx-spark-surface-replay.service")
-    runner = read("scripts/run-spxw-surface-replay-service.sh")
 
-    assert "--unix-socket \"$SOCKET_PATH\"" in runner
-    assert "--bind-host" not in runner
+    assert ".venv/bin/uvicorn spx_spark.web.replay_api:create_default_app" in unit
+    assert "--factory" in unit
+    assert "--uds /srv/data/spx-spark/data/published/spxw-surface/runtime/replay-api.sock" in unit
+    assert "--no-access-log" in unit
+    assert "ExecStartPre=/usr/bin/install -d -m 0700" in unit
     assert "Nice=10" in unit
     assert "IOSchedulingClass=idle" in unit
     assert "MemoryHigh=2G" in unit
@@ -153,9 +155,9 @@ else:
     assert "warmed 2 replay timelines and 4 session surface requests" in completed.stdout
 
 
-def test_only_canonical_service_module_is_directly_executable() -> None:
-    transport = read("src/spx_spark/surface_replay_http.py")
-    service = read("src/spx_spark/surface_replay_service.py")
+def test_replay_transport_has_one_fastapi_factory_and_no_console_script() -> None:
+    project = read("pyproject.toml")
+    api = read("src/spx_spark/web/replay_api.py")
 
-    assert 'if __name__ == "__main__"' not in transport
-    assert 'if __name__ == "__main__"' in service
+    assert "def create_app(" in api
+    assert "spx-spark-surface-replay-service" not in project
