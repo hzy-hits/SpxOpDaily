@@ -167,16 +167,29 @@ fn required_nullable_and_unknown_fields_fail_typed_decode() {
     serde_json::from_value::<StrategyDistributionForecastV1>(missing_sample_count)
         .expect_err("required nullable physical sample_count must be explicit");
 
-    let mut missing_n_effective = fixture_value();
-    missing_n_effective["p_event"]
-        .as_object_mut()
-        .expect("p_event is an object")
-        .remove("n_effective");
-    serde_json::from_value::<StrategyDistributionForecastV1>(missing_n_effective)
-        .expect_err("required nullable physical n_effective must be explicit");
-
     let mut unknown_nested = fixture_value();
     unknown_nested["p_event"]["confidence"] = json!("high");
     serde_json::from_value::<StrategyDistributionForecastV1>(unknown_nested)
         .expect_err("unknown nested fields must fail closed");
+}
+
+#[test]
+fn additive_neighbour_metadata_can_be_absent_in_a_persisted_v1_projection() {
+    let mut legacy = fixture_value();
+    for measure in ["q_event", "p_event"] {
+        let estimate = legacy[measure]
+            .as_object_mut()
+            .expect("probability estimate is an object");
+        estimate.remove("n_raw");
+        estimate.remove("n_effective");
+        estimate.remove("historical_sessions");
+    }
+    let forecast: StrategyDistributionForecastV1 = serde_json::from_value(legacy)
+        .expect("pre-metadata v1 projection must decode during rolling upgrade");
+    forecast
+        .validate()
+        .expect("pre-metadata v1 projection must remain valid");
+    assert!(forecast.p_event.n_raw.is_none());
+    assert!(forecast.p_event.n_effective.is_none());
+    assert!(forecast.p_event.historical_sessions.is_empty());
 }

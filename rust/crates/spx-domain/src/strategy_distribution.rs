@@ -181,10 +181,11 @@ pub struct ProbabilityEstimateV1 {
     pub interval_high: Option<ProbabilityF64>,
     #[serde(deserialize_with = "deserialize_required_option")]
     pub trained_through_date: Option<NaiveDate>,
-    #[serde(deserialize_with = "deserialize_required_option")]
+    #[serde(default)]
     pub n_raw: Option<u64>,
-    #[serde(deserialize_with = "deserialize_required_option")]
+    #[serde(default)]
     pub n_effective: Option<NonNegativeF64>,
+    #[serde(default)]
     pub historical_sessions: Vec<NaiveDate>,
 }
 
@@ -250,7 +251,7 @@ impl Validate for ProbabilityEstimateV1 {
 
 impl ProbabilityEstimateV1 {
     fn validate_evidence_metadata(&self) -> Result<(), DomainError> {
-        if self.n_raw != self.sample_count {
+        if self.n_raw.is_some() && self.n_raw != self.sample_count {
             return Err(DomainError::Invalid {
                 field: "probability n_raw",
                 reason: "must equal sample_count",
@@ -356,12 +357,6 @@ impl ProbabilityEstimateV1 {
                     return Err(DomainError::Invalid {
                         field: "available physical probability",
                         reason: "requires trained_through_date",
-                    });
-                }
-                if self.n_effective.is_none() {
-                    return Err(DomainError::Invalid {
-                        field: "available physical probability",
-                        reason: "requires n_effective",
                     });
                 }
             }
