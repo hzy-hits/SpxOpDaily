@@ -1,19 +1,20 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import hmac
 import json
+import signal
 import sys
 import threading
 import time
+from contextlib import nullcontext
 from dataclasses import dataclass
-from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from ipaddress import ip_address
 from pathlib import Path
-from types import TracebackType
 from typing import Any, Callable
 from urllib.error import URLError
-from urllib.parse import parse_qs, parse_qsl, urljoin, urlsplit
+from urllib.parse import parse_qs, urljoin, urlsplit
 from urllib.request import ProxyHandler, build_opener
 
 from schwab.auth import AuthContext, get_auth_context
@@ -24,12 +25,7 @@ from spx_spark.schwab.auth_storage import (
     ExclusiveLockUnavailable,
     token_owner_lock_path,
 )
-from spx_spark.schwab.gateway import (
-    ALLOWED_MARKET_DATA_PATHS,
-    SchwabGatewayRequestError,
-    SchwabGatewayUnavailable,
-    SchwabSessionManager,
-)
+from spx_spark.schwab.gateway import SchwabSessionManager
 
 
 class OAuthCallbackError(RuntimeError):
@@ -252,307 +248,6 @@ def is_loopback_host(host: str) -> bool:
         return False
 
 
-def callback_handler_factory(
-    coordinator: OAuthCoordinator,
-) -> type[BaseHTTPRequestHandler]:
-    callback_path = urlsplit(coordinator.settings.callback_url).path or "/"
-
-    class CallbackHandler(BaseHTTPRequestHandler):
-        server_version = "SPXSparkSchwabOAuth/1"
-
-        def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
-            target = urlsplit(self.path)
-            if target.path == "/healthz":
-                self._send_json(200, {"ok": True})
-                return
-            if target.path != callback_path:
-                self._send_json(404, {"ok": False, "error": "not_found"})
-                return
-            try:
-                coordinator.complete(target.query)
-            except OAuthCallbackError as exc:
-                self._send_html(exc.status, "Schwab authorization failed", str(exc))
-                print(
-                    json.dumps(
-                        {"event": "schwab_oauth_callback", "ok": False, "status": exc.status}
-                    ),
-                    file=sys.stderr,
-                    flush=True,
-                )
-                return
-
-            self._send_html(
-                200,
-                "Schwab authorization complete",
-                "The token was stored on Oracle. You may close this tab.",
-            )
-            print(
-                json.dumps({"event": "schwab_oauth_callback", "ok": True, "status": 200}),
-                flush=True,
-            )
-
-        def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
-            self._send_json(405, {"ok": False, "error": "method_not_allowed"})
-
-        def log_message(self, format: str, *args: Any) -> None:
-            del format, args
-            # BaseHTTPRequestHandler logs the full request target, including
-            # OAuth code and state. Structured status events above are enough.
-
-        def _send_json(self, status: int, payload: dict[str, Any]) -> None:
-            body = json.dumps(payload, sort_keys=True).encode("utf-8")
-            self._send(status, "application/json; charset=utf-8", body)
-
-        def _send_html(self, status: int, title: str, message: str) -> None:
-            body = (
-                "<!doctype html><html><head><meta charset='utf-8'>"
-                f"<title>{title}</title></head><body><h1>{title}</h1>"
-                f"<p>{message}</p></body></html>"
-            ).encode("utf-8")
-            self._send(status, "text/html; charset=utf-8", body)
-
-        def _send(self, status: int, content_type: str, body: bytes) -> None:
-            try:
-                self.send_response(status)
-                self.send_header("Content-Type", content_type)
-                self.send_header("Content-Length", str(len(body)))
-                self.send_header("Cache-Control", "no-store")
-                self.send_header("Pragma", "no-cache")
-                self.send_header("Referrer-Policy", "no-referrer")
-                self.send_header("X-Content-Type-Options", "nosniff")
-                self.send_header("X-Frame-Options", "DENY")
-                self.send_header(
-                    "Content-Security-Policy",
-                    "default-src 'none'; base-uri 'none'; "
-                    "frame-ancestors 'none'; form-action 'none'",
-                )
-                self.end_headers()
-                self.wfile.write(body)
-            except (BrokenPipeError, ConnectionResetError):
-                return
-
-    return CallbackHandler
-
-
-def gateway_handler_factory(
-    manager: SchwabSessionManager,
-    stream_health: Callable[[], dict[str, Any]] | None = None,
-) -> type[BaseHTTPRequestHandler]:
-    class GatewayHandler(BaseHTTPRequestHandler):
-        server_version = "SPXSparkSchwabGateway/1"
-
-        def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
-            if len(self.path) > 65_536:
-                self._send_json(414, {"ok": False, "error": "request_target_too_large"})
-                return
-            host = urlsplit(f"//{self.headers.get('Host', '')}").hostname or ""
-            if not is_loopback_host(host):
-                self._send_json(403, {"ok": False, "error": "loopback_host_required"})
-                return
-            target = urlsplit(self.path)
-            if target.path == "/livez":
-                self._send_json(200, {"ok": True})
-                return
-            if target.path == "/healthz":
-                health = manager.health()
-                payload = health.to_dict()
-                if stream_health is not None:
-                    payload["stream"] = stream_health()
-                self._send_json(200 if health.ready else 503, payload)
-                return
-            if target.path not in ALLOWED_MARKET_DATA_PATHS:
-                self._send_json(404, {"ok": False, "error": "not_found"})
-                return
-            try:
-                params = parse_qsl(target.query, keep_blank_values=True, max_num_fields=100)
-                response = manager.request(target.path, params)
-            except SchwabGatewayUnavailable:
-                self._send_json(503, {"ok": False, "error": "schwab_auth_not_ready"})
-                return
-            except SchwabGatewayRequestError as exc:
-                print(
-                    json.dumps(
-                        {
-                            "event": "schwab_gateway_request",
-                            "ok": False,
-                            "error_type": str(exc),
-                        },
-                        sort_keys=True,
-                    ),
-                    file=sys.stderr,
-                    flush=True,
-                )
-                self._send_json(502, {"ok": False, "error": "schwab_request_failed"})
-                return
-            except Exception as exc:  # noqa: BLE001 - never expose provider or token details
-                print(
-                    json.dumps(
-                        {
-                            "event": "schwab_gateway_request",
-                            "ok": False,
-                            "error_type": type(exc).__name__,
-                        },
-                        sort_keys=True,
-                    ),
-                    file=sys.stderr,
-                    flush=True,
-                )
-                self._send_json(502, {"ok": False, "error": "schwab_request_failed"})
-                return
-
-            if response.status == 401:
-                print(
-                    json.dumps(
-                        {
-                            "event": "schwab_reauthorization_required",
-                            "ok": False,
-                            "status": 401,
-                        },
-                        sort_keys=True,
-                    ),
-                    file=sys.stderr,
-                    flush=True,
-                )
-            try:
-                self.send_response(response.status)
-                self.send_header("Content-Type", response.content_type)
-                self.send_header("Content-Length", str(len(response.body)))
-                self.send_header("Cache-Control", "no-store")
-                self.send_header("X-Content-Type-Options", "nosniff")
-                self.end_headers()
-                self.wfile.write(response.body)
-            except (BrokenPipeError, ConnectionResetError):
-                return
-
-        def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
-            self._send_json(405, {"ok": False, "error": "method_not_allowed"})
-
-        def log_message(self, format: str, *args: Any) -> None:
-            del format, args
-
-        def _send_json(self, status: int, payload: dict[str, Any]) -> None:
-            body = json.dumps(payload, sort_keys=True).encode("utf-8")
-            try:
-                self.send_response(status)
-                self.send_header("Content-Type", "application/json; charset=utf-8")
-                self.send_header("Content-Length", str(len(body)))
-                self.send_header("Cache-Control", "no-store")
-                self.send_header("X-Content-Type-Options", "nosniff")
-                self.end_headers()
-                self.wfile.write(body)
-            except (BrokenPipeError, ConnectionResetError):
-                return
-
-    return GatewayHandler
-
-
-class RedactedHTTPServer(HTTPServer):
-    def handle_error(self, request: Any, client_address: Any) -> None:
-        del request, client_address
-        error_type = sys.exc_info()[0]
-        print(
-            json.dumps(
-                {
-                    "event": "schwab_http_handler_error",
-                    "error_type": error_type.__name__ if error_type else "unknown",
-                },
-                sort_keys=True,
-            ),
-            file=sys.stderr,
-            flush=True,
-        )
-
-
-class RedactedThreadingHTTPServer(ThreadingHTTPServer):
-    daemon_threads = True
-
-    def handle_error(self, request: Any, client_address: Any) -> None:
-        del request, client_address
-        error_type = sys.exc_info()[0]
-        print(
-            json.dumps(
-                {
-                    "event": "schwab_http_handler_error",
-                    "error_type": error_type.__name__ if error_type else "unknown",
-                },
-                sort_keys=True,
-            ),
-            file=sys.stderr,
-            flush=True,
-        )
-
-
-class OAuthServers:
-    def __init__(
-        self,
-        settings: SchwabSettings,
-        coordinator: OAuthCoordinator,
-        *,
-        auxiliary_runner: Callable[[], None] | None = None,
-        auxiliary_close: Callable[[], None] | None = None,
-        stream_health: Callable[[], dict[str, Any]] | None = None,
-    ) -> None:
-        self.callback_server = RedactedHTTPServer(
-            (settings.oauth_bind_host, settings.oauth_bind_port),
-            callback_handler_factory(coordinator),
-        )
-        self.gateway_server = RedactedThreadingHTTPServer(
-            (settings.gateway_bind_host, settings.gateway_bind_port),
-            gateway_handler_factory(coordinator.manager, stream_health),
-        )
-        self.critical_threads = [
-            threading.Thread(
-                target=self.callback_server.serve_forever,
-                name="schwab-oauth-callback",
-                daemon=True,
-            ),
-            threading.Thread(
-                target=self.gateway_server.serve_forever,
-                name="schwab-data-gateway",
-                daemon=True,
-            ),
-        ]
-        self.auxiliary_close = auxiliary_close
-        self.threads = list(self.critical_threads)
-        if auxiliary_runner is not None:
-            self.threads.append(
-                threading.Thread(
-                    target=auxiliary_runner,
-                    name="schwab-stream-supervisor",
-                    daemon=True,
-                )
-            )
-
-    def __enter__(self) -> "OAuthServers":
-        for thread in self.threads:
-            thread.start()
-        return self
-
-    def __exit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc: BaseException | None,
-        traceback: TracebackType | None,
-    ) -> None:
-        del exc_type, exc, traceback
-        self.close()
-
-    def serve_forever(self) -> None:
-        while all(thread.is_alive() for thread in self.critical_threads):
-            for thread in self.critical_threads:
-                thread.join(timeout=1)
-
-    def close(self) -> None:
-        if self.auxiliary_close is not None:
-            self.auxiliary_close()
-        self.callback_server.shutdown()
-        self.gateway_server.shutdown()
-        self.callback_server.server_close()
-        self.gateway_server.server_close()
-        for thread in self.threads:
-            thread.join(timeout=5)
-
-
 def status_payload(coordinator: OAuthCoordinator) -> dict[str, Any]:
     pending = coordinator.pending()
     token_created_at: int | None = None
@@ -640,6 +335,63 @@ def initialize_optional_stream_runtime(
         return None, "disabled_error"
 
 
+def serve_fastapi(
+    settings: SchwabSettings,
+    coordinator: OAuthCoordinator,
+    *,
+    auxiliary_runner: Callable[[], None] | None = None,
+    auxiliary_close: Callable[[], None] | None = None,
+    stream_health: Callable[[], dict[str, Any]] | None = None,
+) -> None:
+    import uvicorn
+
+    from spx_spark.web.schwab_api import create_app
+
+    apps = (
+        create_app(coordinator),
+        create_app(coordinator, gateway=True, stream_health=stream_health),
+    )
+    bindings = (
+        (settings.oauth_bind_host, settings.oauth_bind_port),
+        (settings.gateway_bind_host, settings.gateway_bind_port),
+    )
+    servers = [
+        uvicorn.Server(uvicorn.Config(
+            app, host=host, port=port, access_log=False, log_config=None))
+        for app, (host, port) in zip(apps, bindings)
+    ]
+    for server in servers:
+        server.capture_signals = lambda: nullcontext()  # type: ignore[method-assign]
+    auxiliary = (
+        threading.Thread(target=auxiliary_runner, name="schwab-stream-supervisor", daemon=True)
+        if auxiliary_runner else None
+    )
+    if auxiliary is not None:
+        auxiliary.start()
+
+    async def supervise() -> None:
+        loop = asyncio.get_running_loop()
+
+        def stop() -> None:
+            for server in servers:
+                server.should_exit = True
+
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            loop.add_signal_handler(signum, stop)
+        tasks = [asyncio.create_task(server.serve()) for server in servers]
+        await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        stop()
+        await asyncio.gather(*tasks)
+
+    try:
+        asyncio.run(supervise())
+    finally:
+        if auxiliary_close is not None:
+            auxiliary_close()
+        if auxiliary is not None:
+            auxiliary.join(timeout=5)
+
+
 def run(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     settings = SchwabSettings.from_env()
@@ -677,19 +429,22 @@ def run(argv: list[str] | None = None) -> int:
                 ),
                 flush=True,
             )
-            with OAuthServers(
-                settings,
-                coordinator,
-                auxiliary_runner=(
-                    stream_runtime.run_forever if stream_runtime is not None else None
-                ),
-                auxiliary_close=(stream_runtime.close if stream_runtime is not None else None),
-                stream_health=(stream_runtime.health if stream_runtime is not None else None),
-            ) as servers:
-                try:
-                    servers.serve_forever()
-                except KeyboardInterrupt:
-                    pass
+            try:
+                serve_fastapi(
+                    settings,
+                    coordinator,
+                    auxiliary_runner=(
+                        stream_runtime.run_forever if stream_runtime is not None else None
+                    ),
+                    auxiliary_close=(
+                        stream_runtime.close if stream_runtime is not None else None
+                    ),
+                    stream_health=(
+                        stream_runtime.health if stream_runtime is not None else None
+                    ),
+                )
+            except KeyboardInterrupt:
+                pass
     except ExclusiveLockUnavailable:
         print(
             "Another Schwab gateway or manual token flow owns this token file.",

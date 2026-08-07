@@ -4,13 +4,12 @@ import json
 import stat
 import threading
 from dataclasses import replace
-from http.client import HTTPConnection
 from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlsplit
-from urllib.request import urlopen
 
 import pytest
+from fastapi.testclient import TestClient
 from schwab.auth import AuthContext
 
 from spx_spark.config import SchwabSettings, SchwabStreamSettings
@@ -19,10 +18,11 @@ from spx_spark.schwab.gateway import GatewayHealth
 from spx_spark.schwab.oauth_service import (
     OAuthCallbackError,
     OAuthCoordinator,
-    OAuthServers,
     initialize_optional_stream_runtime,
+    serve_fastapi,
     validate_oauth_settings,
 )
+from spx_spark.web.schwab_api import create_app
 
 
 CALLBACK_URL = "https://schwab-auth.example.com/oauth/callback"
@@ -59,6 +59,7 @@ class FakeManager:
     def __init__(self, token_file: str) -> None:
         self.token_store = AtomicJsonFile(token_file)
         self.received: list[tuple[AuthContext, str]] = []
+        self.requests: list[tuple[str, list[tuple[str, str]]]] = []
         self.ready = False
 
     def install_callback_token(self, *, auth_context: AuthContext, received_url: str) -> None:
@@ -77,6 +78,14 @@ class FakeManager:
             reauth_required=False,
             last_success_at=None,
             last_error=None,
+        )
+
+    def request(self, path: str, params: list[tuple[str, str]]):
+        self.requests.append((path, params))
+        return SimpleNamespace(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({"path": path, "params": params}).encode(),
         )
 
 
@@ -285,48 +294,45 @@ def test_servers_keep_gateway_local_and_never_log_callback_query(
         auth_context_factory=auth_factory,
     )
     coordinator.authorize()
-    settings = replace(settings, oauth_bind_port=0, gateway_bind_port=0)
-    coordinator.settings = settings
-
-    with OAuthServers(
-        settings,
+    callback = TestClient(create_app(coordinator))
+    gateway = TestClient(create_app(
         coordinator,
+        gateway=True,
         stream_health=lambda: {
             "connected": True,
             "subscribed_option_count": 160,
             "message_counts": {"LEVELONE_OPTIONS": 0},
         },
-    ) as servers:
-        callback_port = servers.callback_server.server_address[1]
-        gateway_port = servers.gateway_server.server_address[1]
-        with urlopen(f"http://127.0.0.1:{callback_port}/healthz") as response:
-            assert json.load(response) == {"ok": True}
-        with urlopen(
-            f"http://127.0.0.1:{callback_port}/oauth/callback"
-            "?code=sensitive-code&state=server-state"
-        ) as response:
-            assert response.status == 200
-        with urlopen(f"http://127.0.0.1:{gateway_port}/healthz") as response:
-            health = json.load(response)
-            assert health["ok"] is True
-            assert health["ready"] is True
-            assert health["reauth_required"] is False
-            assert health["stream"]["connected"] is True
-            assert health["stream"]["subscribed_option_count"] == 160
-        with urlopen(f"http://127.0.0.1:{gateway_port}/livez") as response:
-            assert json.load(response) == {"ok": True}
-        connection = HTTPConnection("127.0.0.1", gateway_port)
-        connection.request("GET", "/healthz", headers={"Host": "public.example.com"})
-        assert connection.getresponse().status == 403
-        connection.close()
+    ))
+    assert callback.get("/healthz").json() == {"ok": True}
+    response = callback.get(
+        "/oauth/callback?code=sensitive-code&state=server-state"
+    )
+    assert response.status_code == 200
+    assert response.headers["x-frame-options"] == "DENY"
+    health = gateway.get("/healthz", headers={"Host": "127.0.0.1"}).json()
+    assert health["ok"] is True and health["ready"] is True
+    assert health["stream"]["connected"] is True
+    assert health["stream"]["subscribed_option_count"] == 160
+    assert gateway.get("/livez", headers={"Host": "localhost"}).json() == {"ok": True}
+    quotes = gateway.get(
+        "/marketdata/v1/quotes?symbols=SPY&symbols=QQQ", headers={"Host": "localhost"}
+    )
+    assert quotes.status_code == 200
+    assert manager.requests[-1] == (
+        "/marketdata/v1/quotes", [("symbols", "SPY"), ("symbols", "QQQ")]
+    )
+    assert gateway.get("/healthz", headers={"Host": "public.example.com"}).status_code == 403
 
     output = capsys.readouterr()
     assert "sensitive-code" not in output.out
     assert "sensitive-code" not in output.err
 
 
-def test_servers_start_and_close_optional_stream_supervisor(tmp_path: Path) -> None:
-    settings = replace(make_settings(tmp_path), oauth_bind_port=0, gateway_bind_port=0)
+def test_servers_start_and_close_optional_stream_supervisor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = make_settings(tmp_path)
     manager = FakeManager(settings.token_file)
     coordinator = OAuthCoordinator(
         settings,
@@ -340,15 +346,34 @@ def test_servers_start_and_close_optional_stream_supervisor(tmp_path: Path) -> N
         started.set()
         stopped.wait(timeout=5)
 
-    with OAuthServers(
+    class Server:
+        should_exit = False
+
+        def __init__(self, _config) -> None:
+            pass
+
+        async def serve(self) -> None:
+            return None
+
+    configs: list[dict[str, object]] = []
+
+    def config(*_args, **kwargs):
+        configs.append(kwargs)
+        return object()
+
+    monkeypatch.setattr("uvicorn.Config", config)
+    monkeypatch.setattr("uvicorn.Server", Server)
+    serve_fastapi(
         settings,
         coordinator,
         auxiliary_runner=auxiliary_runner,
         auxiliary_close=stopped.set,
-    ):
-        assert started.wait(timeout=2)
+    )
 
+    assert started.wait(timeout=2)
     assert stopped.is_set()
+    assert len(configs) == 2
+    assert all(item["access_log"] is False for item in configs)
 
 
 def test_stream_config_failure_is_redacted_and_does_not_block_servers(
@@ -380,13 +405,9 @@ def test_stream_config_failure_is_redacted_and_does_not_block_servers(
 
     assert stream_runtime is None
     assert stream_mode == "disabled_error"
-    with OAuthServers(settings, coordinator) as servers:
-        callback_port = servers.callback_server.server_address[1]
-        gateway_port = servers.gateway_server.server_address[1]
-        with urlopen(f"http://127.0.0.1:{callback_port}/healthz") as response:
-            assert json.load(response) == {"ok": True}
-        with urlopen(f"http://127.0.0.1:{gateway_port}/livez") as response:
-            assert json.load(response) == {"ok": True}
+    assert TestClient(create_app(coordinator)).get("/healthz").json() == {"ok": True}
+    gateway = TestClient(create_app(coordinator, gateway=True))
+    assert gateway.get("/livez", headers={"Host": "localhost"}).json() == {"ok": True}
 
     output = capsys.readouterr()
     assert "SENSITIVE-VALUE" not in output.err
