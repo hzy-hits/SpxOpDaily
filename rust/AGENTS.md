@@ -1,5 +1,9 @@
 # SPX Spark Core collaboration guide
 
+> **FROZEN（2026-08-07）：Rust workspace 已冻结，只接受生产故障与安全修复。**
+> 不新增 crate、wire version、golden fixture、策略、通知、报表和 lifecycle。
+> 退出计划见 `docs/architecture-simplification-execution-plan-v1.md` Phase 6。
+
 This directory is the clean-room Rust production core within the SPX Spark
 monorepo. It does
 not contain broker credentials, research notebooks, HMM training, DuckDB

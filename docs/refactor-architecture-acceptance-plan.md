@@ -1,5 +1,10 @@
 # SPX Spark 工程化重构与验收规格
 
+> **状态（2026-08-07）：本文档部分章节已被取代。**
+> 架构基线见 `docs/architecture-simplification-blueprint-v1.md`，执行基线见 `docs/architecture-simplification-execution-plan-v1.md`。
+> 失效章节：§7 状态机规格、§8 模块级拆分计划、§10 IPC 与消息边界、§11 Rust/NumPy 决策门、§13 验收测试矩阵。
+> 继续有效：数据真实性语义、no-lookahead、fail-closed、replay 因果性原则。
+
 > 历史范围说明：本文保留 2026-07-12 Python 重构的判断与验收证据，其中
 > “本轮不引入 Rust”只描述当时阶段，不再定义当前仓库所有权。现行 monorepo
 > 边界见 `docs/monorepo-layout.md`，Rust 运行时边界见

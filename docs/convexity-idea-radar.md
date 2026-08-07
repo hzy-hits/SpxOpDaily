@@ -1,5 +1,9 @@
 # 0DTE Convexity Idea Radar
 
+> **状态（2026-08-07）：本系统的固定四假设与三 lane 最终排名将被统一策略引擎取代
+> （`docs/strategy-signal-engine-v2.md` §2.5/§18.3，S-track S5）。**
+> 其事实提取、冲突描述与 LLM prompt 继续复用；在 S5 落地前当前实现保持有效。
+
 状态：`convexity_idea_radar.v1`，只读研究层，自动下单关闭。
 
 ## 目标与边界

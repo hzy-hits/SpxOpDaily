@@ -1,5 +1,8 @@
 # SPX Spark Core
 
+> **FROZEN（2026-08-07）：本 workspace 已冻结，只接受生产故障与安全修复；退出计划见
+> `docs/architecture-simplification-execution-plan-v1.md` Phase 6。**
+
 Clean-room Rust production runtime for SPX Spark.
 
 This workspace now lives at `rust/` inside the SPX Spark monorepo. The monorepo

@@ -14,7 +14,10 @@ Current scope:
 
 Current architecture and refactor execution documents:
 
-- `docs/monorepo-layout.md` - current Python/Rust ownership, history, CI, and deployment boundary.
+- `docs/architecture-simplification-blueprint-v1.md` - **architecture simplification baseline; authoritative for all new work.**
+- `docs/architecture-simplification-execution-plan-v1.md` - **verified facts, hard constraints, and phase task cards for the simplification refactor.**
+- `docs/strategy-signal-engine-v2.md` - **unified 0DTE strategy signal engine implementation contract (S-track).**
+- `docs/monorepo-layout.md` - current Python/Rust ownership, history, CI, and deployment boundary (Rust control plane frozen; retirement planned in Phase 6).
 - `module-architecture.md` - enforced Python module layers and dependency rules.
 - `rust/docs/ARCHITECTURE.md` - typed Rust runtime, ledger, report, and delivery architecture.
 - `docs/refactor-architecture-acceptance-plan.md` - Python refactor evidence and acceptance specification.

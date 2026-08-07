@@ -1,5 +1,8 @@
 # 慢速轮询 lane:VIX 族与上下文 ETF 改为轮询,腾行情线给期权链(实施规格)
 
+> **状态（2026-08-07）：历史实施规格，仅作背景记录。** 后续改动遵循
+> `docs/architecture-simplification-execution-plan-v1.md`；不得据此新增 service、state file 或 console script。
+
 状态: 2026-07-07 设计完成,待实施。
 分层约束: 改动集中在 `config.py`(L0)与 `ibkr/stream_collector.py`(L2),无新增跨层依赖。
 

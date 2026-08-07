@@ -1,5 +1,10 @@
 # Notification architecture
 
+> **状态（2026-08-07）：本文档的 lane 语义分级（ops/market/trade/position/report）继续有效；
+> outbox、claims、receipts、receipt mirror 与 Rust report/delivery lane 的实现已冻结。**
+> 该实现将由 `spx-worker` + Huey 单 owner 取代（执行方案 Phase 4，Rust 侧 Phase 6）。
+> 不得扩展 outbox/claim/receipt/mirror 状态机，不得为新 lane 增加耐久化机制。
+
 ## Monorepo ownership overlay
 
 This document defines the Python notification lanes. Python continues to own

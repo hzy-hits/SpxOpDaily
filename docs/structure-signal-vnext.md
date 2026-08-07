@@ -1,5 +1,10 @@
 # SPX structure-first signal system
 
+> **状态（2026-08-07）：策略候选的最终授权已统一到
+> `docs/strategy-signal-engine-v2.md` 的 `strategy_decision` 唯一出口（S-track）。**
+> 本文的事件驱动 operator message 与 opportunity replay 语义继续有效；
+> 与 v2 冲突的候选授权部分以 v2 为准。
+
 Status: implementation contract for the event-driven operator message and
 opportunity replay introduced in August 2026.
 

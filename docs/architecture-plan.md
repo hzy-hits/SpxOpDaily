@@ -5,6 +5,10 @@
 > `docs/pre-rth-refactor-implementation-plan.md` 为准，完整验收以
 > `docs/refactor-architecture-acceptance-plan.md` 为准。本文未同步的模块名或运行判断
 > 不得覆盖上述三份文档。
+>
+> 2026-08-07 起，上述三份文档亦被部分取代：长期架构与执行基线以
+> `docs/architecture-simplification-blueprint-v1.md` 与
+> `docs/architecture-simplification-execution-plan-v1.md` 为准。
 
 ## Goal
 

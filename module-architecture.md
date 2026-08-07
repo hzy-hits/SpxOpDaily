@@ -1,5 +1,8 @@
 # SPX Spark 模块架构与分层协议
 
+> **状态（2026-08-07）：本文档的分层意图继续有效；“新增模块必须同步架构登记测试”的机制将由 Import Linter 取代（执行方案 P1-4）。**
+> 见 `docs/architecture-simplification-execution-plan-v1.md`。
+
 范围说明：本文的分层和 module registry 只约束 `src/spx_spark/` Python
 应用。`rust/` 是同一 monorepo 内独立的 typed operational workspace，遵守
 `rust/AGENTS.md` 与 `rust/docs/ARCHITECTURE.md`；跨语言所有权以

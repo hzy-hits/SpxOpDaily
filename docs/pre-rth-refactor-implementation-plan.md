@@ -1,6 +1,10 @@
 # SPX Spark 首个 RTH 前重构实施计划
 
-状态：实施中  
+> **状态（2026-08-07）：本计划执行窗口已结束，文档转为历史记录。**
+> 未完成项不得按本文继续实施；后续工作以 `docs/architecture-simplification-blueprint-v1.md`
+> 与 `docs/architecture-simplification-execution-plan-v1.md` 为准。
+
+状态：历史记录（原“实施中”）\
 制定日期：2026-07-12（Asia/Shanghai）  
 目标窗口：首个周一 RTH 行情进入系统前完成代码、离线测试、部署和 shadow
 采集准备；五个完整 RTH session 之后才能完成数据质量验收。

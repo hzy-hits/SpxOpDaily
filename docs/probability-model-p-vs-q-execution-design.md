@@ -1,5 +1,9 @@
 # SPX 0DTE 概率模型：从市场隐含分布到可执行净收益
 
+> **状态（2026-08-07）：本研究设计的第一版工程化落地由
+> `docs/strategy-signal-engine-v2.md` §13–§14 规定（S-track S4）。**
+> 两文冲突时以 v2 为准；本文其余部分作为研究背景继续有效。
+
 状态：研究设计，立即进入 shadow 迭代；不构成已验证 edge，不改变
 `automatic_ordering=false`。
 

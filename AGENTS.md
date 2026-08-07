@@ -64,8 +64,10 @@ git@github-spxopdaily:hzy-hits/SpxOpDaily.git
 - `docs/headless-deployment.md`：Oracle、IB Gateway/IBC、VNC 和 systemd 部署说明。
 - `docs/runtime-configuration.md`：typed settings 与部署配置规则。
 - `docs/market-data-capability-matrix.md`：数据源能力和 readiness 语义。
-- `docs/refactor-architecture-acceptance-plan.md`：架构目标与验收门槛。
-- `docs/unified-strategy-runtime-refactor-2026-07-31.md`：本轮策略、采集 session、通知链路和 HMM 的统一重构决策。
+- `docs/architecture-simplification-blueprint-v1.md`：架构简化与第三方能力替代总方案（上位约束）。
+- `docs/architecture-simplification-execution-plan-v1.md`：简化重构的事实基线、偏差澄清与逐阶段任务卡（执行基线）。
+- `docs/strategy-signal-engine-v2.md`：0DTE 统一策略信号引擎实施合同（S-track；排期与边界裁决见执行方案第 2 节 11–16 条）。
+- `docs/refactor-architecture-acceptance-plan.md`：架构目标与验收门槛；与简化方案冲突的章节以简化方案为准。
 - `systemd/`：服务与 timer 定义。
 - `scripts/install-spx-spark-services.sh`：正式部署入口及分支、工作树和 unit drift 防护。
 
@@ -137,3 +139,71 @@ journalctl --user -u <service-name> -n 100 --no-pager
 ## 7. 完成交付标准
 
 最终汇报必须说明：改了什么、验证了什么及结果、是否部署、远端实际状态，以及仍存在的风险或未完成项。不得仅以“代码已写完”或“服务 active”作为完成依据。
+
+## 8. Architecture Simplification Contract
+
+本节约束优先于任何“多写测试、全量验证、多做防御”的默认偏好。完整设计基线见 `docs/architecture-simplification-blueprint-v1.md`；事实核实、偏差澄清与逐阶段任务卡见 `docs/architecture-simplification-execution-plan-v1.md`。所有简化重构工作必须引用其中的 Phase 与任务卡编号。Rust workspace、`service_loop`/runtime scheduler 与自研 notification outbox 处于冻结状态：只准修复生产故障，不接受新功能。
+
+### Before coding
+
+For every non-trivial task, first output a Change Brief:
+
+- User-visible goal
+- Existing owner and files
+- Existing dependency that can solve it
+- New dependency, if any, and why stdlib/existing packages are insufficient
+- Old files/services/config/tests that will be deleted
+- Persistence, process and notification impact
+- Minimal end-to-end acceptance path
+
+Do not edit code until this brief is accepted when the user requested design-first work.
+
+### Implementation rules
+
+1. Prefer extending the existing owner. Do not create a new module unless no current module owns the responsibility.
+2. A new abstraction needs at least two real callers in the current change. Hypothetical future callers do not count.
+3. Do not create a service, timer, database, queue, state machine, schema version or Rust contract without explicit user approval.
+4. Use the blessed dependency for generic infrastructure. Do not hand-write another config loader, HTTP server, scheduler, retry loop, logger, database migrator, CLI parser or architecture linter.
+5. Do not add a second package for a responsibility already covered by the blessed stack.
+6. Build the smallest working vertical slice first. Tests and refactoring follow after the user-visible path works.
+7. Delete the replaced implementation in the same phase. Compatibility wrappers require an explicit deletion issue and may live for at most one release cycle.
+8. Do not use feature flags to retain rejected architecture indefinitely.
+9. Do not turn an internal Python call into a CLI subprocess or JSON-file IPC.
+10. Do not use LLM frameworks for a single structured model call. Use the provider client and typed output directly.
+
+### Test rules
+
+1. Test public behavior, money/time/data invariants and external boundaries.
+2. Do not test helper call order, private dictionaries, exact prose or transient weights.
+3. Prefer Hypothesis for mathematical invariants and timestamps.
+4. Use a small number of frozen replay sessions for strategy semantics.
+5. Run tests proportional to the change. Full Python + Rust validation is a release/cutover gate, not the default for an unrelated small edit.
+6. A test is not a reason to keep an unnecessary abstraction.
+
+### Complexity budget
+
+Every final report must show:
+
+- production files added/deleted
+- net production LOC
+- dependencies added/removed
+- config keys added/removed
+- services/timers added/removed
+- databases/tables added/removed
+- legacy paths removed
+
+A change that increases process count, active languages, mutable stores or ownership paths requires explicit user approval.
+
+### Strategy engine (S-track) constraints
+
+策略信号引擎 v2 的实施合同是 `docs/strategy-signal-engine-v2.md`；排期与边界裁决见
+`docs/architecture-simplification-execution-plan-v1.md` 第 2 节第 11–16 条与 S1–S6 任务卡。要点：
+
+1. 人类可见交易候选只能来自 `payload["strategy_decision"]`（`build_strategy_decision` 唯一出口）；旧 candidates、GTH direct green-card、radar lane 排名在对应 S 卡落地后必须删除或降级，不得双写两套“最终候选”。
+2. 策略候选第一版固定五类（NO_TRADE、Call/Put Debit Vertical、Call/Put Butterfly）；扩大候选空间需用户批准。
+3. bootstrap 阈值是带 `policy_version` 的冻结代码常量，不进 `runtime.yaml`、不进 AppSettings；改阈值 = 改代码 + 版本递增 + replay 对照。
+4. `strategy_decision` 不得进入 `contracts/golden/` 或任何 Rust 消费的投影；候选卡走现有 Python `trade_ready` lane。
+5. 不为策略新增 service、timer、数据库、队列、状态机或 Rust；新文件以 v2 §18.1 的 5 个为上限；预算按 v2 §21.3（生产 ≤1,200 行、测试 ≤600 行）。
+6. 所有判断在 SPX 坐标完成；conservative synthetic BBO 不得用 mid 代替；回放必须满足 `available_at <= decision_at`，冻结验收案例为 2026-08-05 与 2026-08-06。
+7. LLM 只做 bounded idea/critic（结构化假设 + 反证），不计算价格/概率/payoff、不覆盖 hard gate、不直接创建 Trade Ready；不引入 LangChain/LangGraph。
+8. `automatic_ordering=false` 不变；回放通过 v2 §19.5 门后直接进入人工候选卡，不得以“继续 Shadow N 天”代替工程接入。

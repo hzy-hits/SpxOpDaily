@@ -1,5 +1,8 @@
 # SPY 期权直采(IBKR)与微信离线消息时间线汇总(实施规格)
 
+> **状态（2026-08-07）：历史实施规格，仅作背景记录。** 后续改动遵循
+> `docs/architecture-simplification-execution-plan-v1.md`；不得据此新增 service、state file 或 console script。
+
 状态: 2026-07-07 设计完成,待实施。
 分层约束: 遵守 `module-architecture.md`。改动集中在 `ibkr/stream_collector.py`(L2)、
 `config.py`(L0)、`notifier/`(L4)、keepalive 脚本;无新增跨层依赖。

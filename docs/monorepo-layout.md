@@ -1,5 +1,9 @@
 # SPX Spark monorepo contract
 
+> **状态（2026-08-07）：本文档描述的 Python/Rust 双运行时所有权是当前部署现状，不再是目标架构。**
+> Rust 控制面已冻结并按 `docs/architecture-simplification-execution-plan-v1.md` Phase 6 计划退出；
+> 任何新增职责一律落在 Python 侧，不得扩展 Rust 所有权或跨语言 contract。
+
 Status: repository integration contract. This change unifies source and CI; it
 does not by itself authorize a production restart, report-owner switch, or
 network-delivery change.

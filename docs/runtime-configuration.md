@@ -1,5 +1,9 @@
 # Runtime configuration
 
+> **状态（2026-08-07）：本文档描述的 `runtime.yaml` + settings loader 体系为 legacy 现状。**
+> 新配置一律走 pydantic-settings + TOML（执行方案 P1-1）；`runtime.yaml` 计划在 Phase 5 退役。
+> 不得再新增 YAML 键、env helper 或 loader 兼容分支；确需新配置项时按新基线落 `AppSettings`。
+
 Operational runtime defaults live in `config/runtime.yaml`; Python code loads
 them through `spx_spark.runtime_config` and, for new composition roots, through
 typed `spx_spark.settings.load_settings()` (`AppSettings`). Secrets remain in

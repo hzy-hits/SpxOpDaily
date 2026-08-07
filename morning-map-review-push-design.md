@@ -1,5 +1,8 @@
 # 盘前地图推送 + 盘后复盘推送 + agent 解读风格(实施规格)
 
+> **状态（2026-08-07）：历史实施规格，仅作背景记录。** 后续改动遵循
+> `docs/architecture-simplification-execution-plan-v1.md`；不得据此新增 service、state file 或 console script。
+
 状态: 2026-07-07 设计完成,待实施。
 分层约束: 遵守 `module-architecture.md`;新模块 `morning_map.py` 属 L5 orchestration,
 允许 import config(L0)/storage(L1)/options_map/iv_surface/human_focus(L3)/notifier(L4)。

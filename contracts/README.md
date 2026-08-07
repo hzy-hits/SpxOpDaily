@@ -1,5 +1,9 @@
 # Shared wire-contract registry
 
+> **FROZEN（2026-08-07）：本 contract 集已冻结，不得新增 contract、version 或 fixture。**
+> 跨语言 contract 计划随 Rust 控制面退出一并删除，见
+> `docs/architecture-simplification-execution-plan-v1.md` Phase 6（P6-3）。
+
 `contracts/golden/` contains sanitized, versioned JSON examples used at runtime
 boundaries. A file being stored here means its shape is auditable across the
 monorepo; it does not mean both languages produce that shape.
