@@ -229,25 +229,96 @@ def load_raw_quotes(
     start: datetime,
     end: datetime,
 ) -> tuple[Quote, ...]:
+    quotes, _source_rows = _load_bounded_raw_quotes(settings, start=start, end=end)
+    return quotes
+
+
+def _load_bounded_raw_quotes(
+    settings: StorageSettings,
+    *,
+    start: datetime,
+    end: datetime,
+) -> tuple[tuple[Quote, ...], int]:
+    """Load a bounded, causally representative review sample.
+
+    Raw option streams can contain millions of unchanged intraday updates.  A
+    post-close review needs coverage, extrema and edge observations, not every
+    update as a Python object.  Keep one latest option observation per
+    provider/contract/five-minute bucket and first/last/high/low observations
+    per provider/index-or-future/minute.  ``source_rows`` remains the honest
+    count of matching raw input rows.
+    """
+
     start_utc = start.astimezone(timezone.utc)
     end_utc = end.astimezone(timezone.utc)
-    quotes: list[Quote] = []
+    retained: dict[tuple[object, ...], Quote] = {}
+    source_rows = 0
     for path in raw_quote_paths_for_window(settings, start=start, end=end):
         try:
-            lines = path.read_text(encoding="utf-8").splitlines()
+            source = path.open("r", encoding="utf-8")
         except OSError:
             continue
-        for line in lines:
-            if not line.strip():
-                continue
-            try:
-                quote = quote_from_dict(json.loads(line))
-            except (json.JSONDecodeError, TypeError, ValueError):
-                continue
-            received = as_utc(quote.received_at)
-            if start_utc <= received <= end_utc and is_spx_focus_quote(quote):
-                quotes.append(quote)
-    return tuple(sorted(quotes, key=lambda item: item.received_at))
+        with source:
+            for line in source:
+                if not line.strip():
+                    continue
+                try:
+                    quote = quote_from_dict(json.loads(line))
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    continue
+                received = as_utc(quote.received_at)
+                if not (start_utc <= received <= end_utc and is_spx_focus_quote(quote)):
+                    continue
+                source_rows += 1
+                instrument_id = quote.instrument.canonical_id
+                provider = quote.provider.value
+                if quote.instrument.instrument_type == InstrumentType.OPTION:
+                    bucket = int(received.timestamp() // 300)
+                    key = ("option_latest", instrument_id, provider, bucket)
+                    previous = retained.get(key)
+                    if previous is None or quote.received_at >= previous.received_at:
+                        retained[key] = quote
+                    continue
+
+                minute = int(received.timestamp() // 60)
+                prefix = (instrument_id, provider, minute)
+                first_key = ("first", *prefix)
+                last_key = ("last", *prefix)
+                first = retained.get(first_key)
+                last = retained.get(last_key)
+                if first is None or quote.received_at < first.received_at:
+                    retained[first_key] = quote
+                if last is None or quote.received_at >= last.received_at:
+                    retained[last_key] = quote
+                price = finite_price(quote)
+                if price is None:
+                    continue
+                low_key = ("low", *prefix)
+                high_key = ("high", *prefix)
+                low = retained.get(low_key)
+                high = retained.get(high_key)
+                if low is None or price < (finite_price(low) or float("inf")):
+                    retained[low_key] = quote
+                if high is None or price > (finite_price(high) or float("-inf")):
+                    retained[high_key] = quote
+
+    unique: dict[tuple[object, ...], Quote] = {}
+    for quote in retained.values():
+        unique[
+            (
+                quote.instrument.canonical_id,
+                quote.provider.value,
+                as_utc(quote.received_at),
+                quote.bid,
+                quote.ask,
+                quote.last,
+                quote.mark,
+            )
+        ] = quote
+    return (
+        tuple(sorted(unique.values(), key=lambda item: item.received_at)),
+        source_rows,
+    )
 
 
 def load_surface_snapshots(
@@ -522,7 +593,7 @@ def build_review_payload(
     calendar: MarketCalendar = DEFAULT_MARKET_CALENDAR,
 ) -> dict[str, Any]:
     start, end, _ready = session_window(trading_date, calendar=calendar)
-    quotes = load_raw_quotes(settings, start=start, end=end)
+    quotes, raw_quote_rows = _load_bounded_raw_quotes(settings, start=start, end=end)
     snapshots = load_surface_snapshots(settings, start=start, end=end)
     greek_snapshots = load_zero_dte_greeks_snapshots(
         data_root=settings.data_root,
@@ -541,6 +612,7 @@ def build_review_payload(
         now=now,
         policy=policy,
         calendar=calendar,
+        raw_quote_rows=raw_quote_rows,
     )
 
 
@@ -555,6 +627,7 @@ def build_review_payload_from_data(
     now: datetime | None = None,
     policy: ReviewCompletenessPolicy | None = None,
     calendar: MarketCalendar = DEFAULT_MARKET_CALENDAR,
+    raw_quote_rows: int | None = None,
 ) -> dict[str, Any]:
     session = calendar.session(trading_date)
     if session is None:
@@ -608,7 +681,8 @@ def build_review_payload_from_data(
             "expected_five_minute_buckets": session.expected_five_minute_buckets,
         },
         "coverage": {
-            "raw_quote_rows": len(quotes),
+            "raw_quote_rows": len(quotes) if raw_quote_rows is None else raw_quote_rows,
+            "review_quote_samples": len(quotes),
             "iv_surface_snapshots": len(snapshots),
             "zero_dte_greeks_snapshots": len(greek_snapshots),
             "spx_rows": len(spx_quotes),

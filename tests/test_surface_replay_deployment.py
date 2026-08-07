@@ -25,7 +25,7 @@ def test_replay_routes_share_the_resource_bounded_core_socket() -> None:
     assert "ReadWritePaths=/srv/data/spx-spark/data %t" in unit
 
 
-def test_post_close_timer_warms_catalog_and_default_session_surfaces() -> None:
+def test_post_close_timer_warms_only_latest_landing_surface() -> None:
     timer = read("systemd/spx-spark-surface-replay-warm.timer")
     warmer = read("scripts/warm-spxw-surface-replay-catalog.sh")
 
@@ -34,22 +34,16 @@ def test_post_close_timer_warms_catalog_and_default_session_surfaces() -> None:
     assert "23:20:00 UTC" in timer
     assert "$RUNTIME_DIR/core-api.sock" in warmer
     assert "replay-api.sock" not in warmer
-    assert 'for session_date in "${session_dates[@]}"' in warmer
     assert 'latest_session="${session_dates[0]}"' in warmer
-    assert 'surface_times=("${frame_times[-1]}")' in warmer
-    assert 'latest_frame_times=("${frame_times[@]}")' in warmer
-    assert "Land every catalog date first" in warmer
+    assert 'latest_landing_time="${frame_times[-1]}"' in warmer
+    assert "session finalizer is active" in warmer
     assert "/timeline?step_minutes=5" in warmer
     assert 'payload.get("surface_frames") or payload.get("frames", [])' in warmer
     assert 'row["at"]' in warmer
     assert '"role=front"' in warmer
     assert '"weighting=oi_weighted"' in warmer
-    assert '"weighting=volume_weighted"' in warmer
     assert '"bucket_minutes=5"' in warmer
     assert '"price_step=5"' in warmer
-    assert '"price_step=2.5"' in warmer
-    assert "seeds the replay worker's causal" in warmer
-    assert "datetime.timedelta(seconds=3)" in warmer
     assert "/session-surface" in warmer
     assert "/trend?" not in warmer
     assert "/frame?" not in warmer
@@ -71,7 +65,7 @@ def test_replay_shell_entrypoints_parse() -> None:
         )
 
 
-def test_catalog_warmer_lands_every_session_before_latest_full_playback(
+def test_catalog_warmer_lands_latest_session_once(
     tmp_path: Path,
 ) -> None:
     fake_bin = tmp_path / "bin"
@@ -141,12 +135,8 @@ else:
     assert log.read_text(encoding="utf-8").splitlines() == [
         "timeline:2026-07-17",
         "surface:2026-07-17:2026-07-17T14:35:00Z",
-        "timeline:2026-07-16",
-        "surface:2026-07-16:2026-07-16T14:30:00Z",
-        "surface:2026-07-17:2026-07-17T14:34:57Z",
-        "surface:2026-07-17:2026-07-17T00:20:00Z",
     ]
-    assert "warmed 2 replay timelines and 4 session surface requests" in completed.stdout
+    assert "warmed latest replay timeline and landing surface: 2026-07-17" in completed.stdout
 
 
 def test_replay_transport_has_one_fastapi_factory_and_no_console_script() -> None:

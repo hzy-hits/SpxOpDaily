@@ -216,13 +216,20 @@ def test_idempotent_existing_artifact_does_not_repeat_human_push(
     monkeypatch,
 ) -> None:
     write_quote_source(tmp_path)
-    monkeypatch.setattr(
-        "spx_spark.session_finalize.build_review_payload",
-        lambda *, trading_date, settings, now: {
+    payload_calls = 0
+
+    def fake_build_payload(*, trading_date, settings, now):
+        nonlocal payload_calls
+        payload_calls += 1
+        return {
             "created_at": now.isoformat(),
             "trading_date": trading_date.isoformat(),
             "coverage": {"raw_quote_rows": 1, "iv_surface_snapshots": 0},
-        },
+        }
+
+    monkeypatch.setattr(
+        "spx_spark.session_finalize.build_review_payload",
+        fake_build_payload,
     )
     monkeypatch.setattr(
         "spx_spark.session_finalize.render_markdown",
@@ -258,6 +265,7 @@ def test_idempotent_existing_artifact_does_not_repeat_human_push(
         "reason": "artifact_already_published",
     }
     assert len(human_calls) == 1
+    assert payload_calls == 1
 
 
 def test_existing_artifact_remains_idempotent_after_authorized_raw_cleanup(

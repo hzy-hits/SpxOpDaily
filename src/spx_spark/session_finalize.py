@@ -142,13 +142,6 @@ def run_session_finalize(
         dry_run=dry_run,
         max_backlog_days=max_backlog_days,
     )
-    if (
-        core.result.status in {"blocked", "failed", "busy"}
-        or dry_run
-        or core.payload is None
-        or core.deterministic_markdown is None
-    ):
-        return core.result
     if core.result.artifact is not None and core.result.artifact.status == "already_published":
         return replace(
             core.result,
@@ -157,6 +150,13 @@ def run_session_finalize(
                 "reason": "artifact_already_published",
             },
         )
+    if (
+        core.result.status in {"blocked", "failed", "busy"}
+        or dry_run
+        or core.payload is None
+        or core.deterministic_markdown is None
+    ):
+        return core.result
     human_review = _run_human_review(
         payload=core.payload,
         deterministic_markdown=core.deterministic_markdown,
@@ -231,6 +231,56 @@ def _finalize_core(
             end=end,
             raw_file_name=storage_settings.raw_file_name,
         )
+        existing = (
+            _unchanged_existing_artifact(
+                platform_settings.data_root,
+                selected_date=selected_date,
+                partitions=partitions,
+            )
+            if partitions
+            else None
+        )
+        if existing is not None:
+            cleanup = cleanup_authorized_replay_sources(
+                platform_settings.data_root,
+                now=now,
+                pressure=pressure,
+                raw_file_name=storage_settings.raw_file_name,
+                grace_hours=platform_settings.replay_raw_delete_grace_hours,
+                max_backlog_days=max_backlog_days,
+                dry_run=dry_run,
+            )
+            result = SessionFinalizeResult(
+                status=(
+                    "dry_run"
+                    if dry_run
+                    else _status_after_cleanup(
+                        cleanup,
+                        success="complete",
+                        failure="cleanup_failed",
+                    )
+                ),
+                dry_run=dry_run,
+                trading_date=selected_date.isoformat(),
+                window_start=start.isoformat(),
+                window_end=end.isoformat(),
+                discovered_partitions=len(partitions),
+                compaction_status_counts={},
+                preparation_status="artifact_verified_sources_unchanged",
+                preparation_errors=(),
+                artifact=ArtifactPublishResult(
+                    status="already_published",
+                    artifact_id=existing.artifact_id,
+                    revision=existing.revision,
+                    manifest_path=str(
+                        Path(existing.review_json.path).parent / "manifest.json"
+                    ),
+                    source_count=len(existing.sources),
+                ),
+                cleanup=cleanup,
+                human_review=None,
+            )
+            return _FinalizedCore(result, None, None)
         if not partitions:
             try:
                 existing = latest_verified_replay_artifact(
@@ -381,6 +431,35 @@ def _finalize_core(
         human_review=None,
     )
     return _FinalizedCore(result, payload, deterministic_markdown)
+
+
+def _unchanged_existing_artifact(
+    data_root: str | Path,
+    *,
+    selected_date: date,
+    partitions: Sequence[object],
+) -> Any | None:
+    """Return the verified artifact when all still-present raw sources match by stat."""
+
+    try:
+        existing = latest_verified_replay_artifact(data_root, trading_date=selected_date)
+    except ReplayArtifactError:
+        return None
+    if not partitions:
+        return existing
+    by_path = {source.source_path: source for source in existing.sources}
+    current_paths = {partition.source_relative_path for partition in partitions}
+    if current_paths != set(by_path):
+        return None
+    for partition in partitions:
+        evidence = by_path[partition.source_relative_path]
+        try:
+            stat = partition.source_path.stat()
+        except OSError:
+            return None
+        if stat.st_size != evidence.source_size or stat.st_mtime_ns != evidence.source_mtime_ns:
+            return None
+    return existing
 
 
 def _run_human_review(
