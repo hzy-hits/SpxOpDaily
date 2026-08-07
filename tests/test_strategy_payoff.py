@@ -58,6 +58,37 @@ def test_vertical_risk_is_bounded_and_sums_to_width(
         net_debit=debit,
         right="C",
     ) == pytest.approx(-debit)
+    call_low = vertical_payoff(
+        long_strike - width / 2,
+        long_strike=long_strike,
+        short_strike=long_strike + width,
+        net_debit=debit,
+        right="C",
+    )
+    call_mid_left = vertical_payoff(
+        long_strike + width * 0.2,
+        long_strike=long_strike,
+        short_strike=long_strike + width,
+        net_debit=debit,
+        right="C",
+    )
+    call_mid_right = vertical_payoff(
+        long_strike + width * 0.3,
+        long_strike=long_strike,
+        short_strike=long_strike + width,
+        net_debit=debit,
+        right="C",
+    )
+    call_high = vertical_payoff(
+        long_strike + width * 1.5,
+        long_strike=long_strike,
+        short_strike=long_strike + width,
+        net_debit=debit,
+        right="C",
+    )
+    assert call_low == pytest.approx(-debit)
+    assert call_mid_right - call_mid_left == pytest.approx(width * 0.1)
+    assert call_high == pytest.approx(width - debit)
 
     put = vertical_economics(
         long_strike=long_strike + width,

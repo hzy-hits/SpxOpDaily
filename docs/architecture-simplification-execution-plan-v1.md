@@ -376,6 +376,14 @@ exhaustive = false
 
 新文件：无（原地替换）。
 
+执行核实（2026-08-07）：本卡的两个文件前提已被后续重构改变。`collector.py`
+唯一的 `time.sleep` 位于 `run_loop`，职责是 planner cadence，不是网络重试；把它改成
+Tenacity 会改变常驻采集循环语义。当前真实的同步网络 retry owner 是
+`schwab/gateway.py`，而本卡明确禁止触碰该文件。因此步骤 1–2 以“不适用、不得引入未使用
+依赖”收口，gateway 的替换必须另开 Change Brief。`tests/test_trade_geometry.py` 也不存在
+payoff 示例；S2 已在 `tests/test_strategy_payoff.py` 建立 Hypothesis payoff 性质测试，步骤
+3–4 在该真实 owner 完成。以下原施工步骤保留为基线偏差记录，不再机械执行。
+
 施工步骤：
 
 1. `uv add tenacity`；
@@ -383,7 +391,9 @@ exhaustive = false
 3. `uv add --dev hypothesis`；
 4. 在 `tests/test_trade_geometry.py` 中挑 payoff 示例断言改写为性质测试，不变量限于：到期 payoff 分段线性且在行权价外斜率恒定、vertical 的 `max_gain + max_loss == width`（同一乘数下）、breakeven 处 payoff 恰为 0、max loss 有界。被替换的示例断言同 PR 删除。
 
-- 自检断言：`rg -c 'time.sleep' src/spx_spark/schwab/collector.py` 比施工前减少；`rg -c 'from hypothesis' tests/test_trade_geometry.py` ≥1。
+- 自检断言：`rg -n 'time.sleep' src/spx_spark/schwab/collector.py` 恰一处且位于 planner cadence；
+  `rg -c 'from hypothesis' tests/test_strategy_payoff.py` ≥1；Vertical payoff 的分段斜率、
+  `max_gain + max_loss == width`、breakeven 为 0、max loss 有界均有性质断言。
 - 禁止：一次替换所有重试点；给 tenacity 包 wrapper（直接用装饰器）；用 Hypothesis 重写与本卡无关的测试文件。
 
 ### Phase 2：HTTP 统一（P2-1 → P2-2 → P2-3，严格按序）
@@ -612,6 +622,7 @@ def maintenance_daily() -> None:
 | 2026-08-07 | P1-2 | +1 / -0 | production +22 / -0 | +1 / -0 | +0 / -0 | +0 / -0 | +0 / -0 | structlog 单入口；实际 JSON 事件验证通过 |
 | 2026-08-07 | P1-3 | +1 / -0 | production +21 / -0 | +1 / -0 | +0 / -0 | +1 / -0 | +0 / -0 | `spx status` 复用旧读取和渲染，scripts 43→44 |
 | 2026-08-07 | P1-4 | +0 / -2 | production +0 / -0 | dev +1 / -0 | +0 / -0 | +0 / -0 | +0 / -0 | 两个 contracts kept；删除 309 行自研 registry/兼容测试 |
+| 2026-08-07 | P1-5 | +0 / -0 | production +0 / -0 | +0 / -0 | +0 / -0 | +0 / -0 | +0 / -0 | collector 唯一 sleep 核实为 planner cadence，不误加 Tenacity；Hypothesis payoff 不变量在 S2 真实 owner 补齐 |
 | 2026-08-07 | S1 | +3 / -0 | production +453 / -0 | +0 / -0 | +0 / -0 | +0 / -0 | +0 / -0 | 唯一 StrategyDecision/NO_TRADE；未来 frame 拒绝；Rust wire 未污染 |
 | 2026-08-07 | S2 | +2 / -0 | production +794 / -268（S-track 当前 979） | dev +1 / -0 | +0 / -0 | +0 / -0 | +0 / -0 | Vertical BBO/payoff/Anti-Chase/replay；18 sessions、12 可比机会；gate collecting，未切 owner |
 | 2026-08-07 | S3 | +0 / -0 | production +233 / -43（S-track 当前 1139） | +0 / -0 | +0 / -0 | +0 / -0 | +0 / -0 | Stable Pin/De-pin、Q mode/local mass、三腿 BBO；8/5 与 8/6 frozen cases PASS；未切 owner |
