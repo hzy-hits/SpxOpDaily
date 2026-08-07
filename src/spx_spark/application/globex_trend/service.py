@@ -315,6 +315,7 @@ def run(
     argv: list[str] | None = None,
     *,
     now: datetime | None = None,
+    unavailable_is_error: bool = True,
 ) -> int:
     args = parse_args(argv)
     evaluation_now = as_utc(now or datetime.now(tz=timezone.utc))
@@ -410,7 +411,12 @@ def run(
                             save_trend_state(path, latest_state)
     if args.json:
         print(json.dumps(output, sort_keys=True))
-    return 0 if output["ok"] else 1
+    if output["ok"] or (
+        not unavailable_is_error
+        and output.get("skipped_reason") == "no_fresh_direct_es"
+    ):
+        return 0
+    return 1
 
 
 def pending_event(

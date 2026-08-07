@@ -127,7 +127,11 @@ async def main() -> None:
                     runtime.provider_failover_interval_seconds, shutdown))
             if app_settings.globex_trend.enabled:
                 tasks.create_task(_run_periodic(
-                    "globex_trend", partial(globex_trend.run, ["--json"]),
+                    "globex_trend", partial(
+                        globex_trend.run,
+                        ["--json"],
+                        unavailable_is_error=False,
+                    ),
                     app_settings.globex_trend.interval_seconds, shutdown))
             if runtime.realtime_engine_enabled:
                 tasks.create_task(_run_periodic(

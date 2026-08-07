@@ -187,6 +187,44 @@ def test_live_es_selection_rejects_future_source_timestamp() -> None:
     assert select_live_es(state, now=now, policy=GlobexTrendSettings()) is None
 
 
+def test_embedded_runtime_treats_missing_fresh_es_as_nonfatal(
+    tmp_path, monkeypatch
+) -> None:
+    now = datetime(2026, 7, 14, 0, 30, tzinfo=UTC)
+    policy = GlobexTrendSettings()
+
+    class Store:
+        def __init__(self, _storage) -> None:
+            pass
+
+        def load(self, *, now: datetime) -> LatestState:
+            return LatestState(now, now, (), ())
+
+    monkeypatch.setattr(
+        globex_service,
+        "load_app_settings",
+        lambda: SimpleNamespace(globex_trend=policy),
+    )
+    monkeypatch.setattr(
+        globex_service,
+        "StorageSettings",
+        SimpleNamespace(from_env=lambda: SimpleNamespace(data_root=str(tmp_path))),
+    )
+    monkeypatch.setattr(
+        globex_service,
+        "NotificationSettings",
+        SimpleNamespace(
+            from_env=lambda: SimpleNamespace(
+                state_path=str(tmp_path / "notification-state.json")
+            )
+        ),
+    )
+    monkeypatch.setattr(globex_service, "LatestStateStore", Store)
+
+    assert globex_service.run([], now=now) == 1
+    assert globex_service.run([], now=now, unavailable_is_error=False) == 0
+
+
 def test_confirmed_globex_transition_is_audit_only() -> None:
     alert = {
         "kind": "globex_trend_transition",

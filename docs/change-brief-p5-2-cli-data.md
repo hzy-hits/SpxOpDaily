@@ -225,3 +225,20 @@ Ruff, Import Linter 2/2 and `git diff --check` passed.
 - Acceptance: injected policy tests, environment-precedence tests, replay shock
   freshness/skew cases and the full shock state-machine suite pass; resolved
   Oracle values before/after deploy compare equal without printing secrets.
+
+## Core transient Globex-data lifecycle fault
+
+- User-visible behavior: a temporary absence of fresh direct ES remains an
+  explicit fail-closed Globex skip, but it no longer terminates every task in
+  the Core `TaskGroup` and interrupts data or notification production.
+- Existing owner and reuse: keep `globex_trend.run` as the data-quality owner
+  and `core_main._run_periodic` as the process-failure owner. The embedded call
+  opts into nonfatal handling only for the existing `no_fresh_direct_es`
+  result; the CLI default and every exception or other nonzero result remain
+  failures.
+- Delete/add: no file, dependency, service, queue, database, state machine or
+  config key is added. This only removes the incorrect mapping from expected
+  data absence to Core process failure.
+- Acceptance: the default CLI contract still returns `1` without fresh ES,
+  the embedded contract returns `0`, arbitrary periodic nonzero results still
+  raise, and Oracle keeps the new Core activation at zero restarts.
