@@ -12,6 +12,7 @@ from spx_spark.application.runtime.market_features_hot_worker import (
     DEFAULT_MAX_CONSECUTIVE_FAILURES,
     ProcessLock,
     ProcessLockUnavailable,
+    StopEvent,
     default_user_runtime_lock_path,
     install_stop_handlers,
     print_event,
@@ -30,12 +31,12 @@ def default_lock_path() -> Path:
     return default_user_runtime_lock_path(LOCK_FILE_NAME)
 
 
-def run_intraday_shock_cycle() -> int:
+def run_intraday_shock_cycle(*, emit_json: bool = True) -> int:
     # The first cycle pays import cost once. Later cycles reuse the interpreter
     # and module graph instead of spawning and importing every few seconds.
     from spx_spark.application.shock import service
 
-    return service.run(["--json"])
+    return service.run(["--json"] if emit_json else [])
 
 
 def run_locked_intraday_shock_once(
@@ -72,8 +73,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def run(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    app = load_app_settings()
-    loop_settings = ServiceLoopSettings.from_app_settings(app)
+    loop_settings = ServiceLoopSettings.from_app_settings(load_app_settings())
     interval_seconds = (
         float(args.interval_seconds)
         if args.interval_seconds is not None
@@ -81,14 +81,47 @@ def run(argv: list[str] | None = None) -> int:
     )
     lock_path = args.lock_path or default_lock_path()
     stop_event = threading.Event()
-    storage = StorageSettings.from_env()
-    lease_path = (
-        Path(storage.data_root)
-        / "latest"
-        / "intraday_shock_hot_worker.lease.json"
-    )
     install_stop_handlers(stop_event)
+    exit_code = run_with_stop(
+        stop_event=stop_event,
+        lock_path=lock_path,
+        interval_seconds=interval_seconds,
+        max_consecutive_failures=args.max_consecutive_failures,
+        max_cycles=1 if args.once else None,
+    )
+    print_event(
+        {
+            "task": "intraday_shock_hot_worker",
+            "event": "stopped",
+            "ok": exit_code == 0,
+            "exit_code": exit_code,
+        }
+    )
+    return exit_code
 
+
+def run_with_stop(
+    *,
+    stop_event: StopEvent,
+    lock_path: str | os.PathLike[str],
+    interval_seconds: float | None = None,
+    max_consecutive_failures: int = DEFAULT_MAX_CONSECUTIVE_FAILURES,
+    max_cycles: int | None = None,
+    emit_json: bool = True,
+) -> int:
+    loop_settings = ServiceLoopSettings.from_app_settings(load_app_settings())
+    cadence = float(
+        interval_seconds
+        if interval_seconds is not None
+        else loop_settings.intraday_shock_interval_seconds
+    )
+    storage = StorageSettings.from_env()
+    lease_path = Path(storage.data_root) / "latest" / "intraday_shock_hot_worker.lease.json"
+    cycle = (
+        run_intraday_shock_cycle
+        if emit_json
+        else lambda: run_intraday_shock_cycle(emit_json=False)
+    )
     try:
         with ProcessLock(lock_path):
             print_event(
@@ -97,16 +130,16 @@ def run(argv: list[str] | None = None) -> int:
                     "event": "started",
                     "ok": True,
                     "pid": os.getpid(),
-                    "interval_seconds": interval_seconds,
+                    "interval_seconds": cadence,
                     "lock_path": str(lock_path),
                 }
             )
             exit_code = run_worker_loop(
-                run_intraday_shock_cycle,
-                interval_seconds=interval_seconds,
+                cycle,
+                interval_seconds=cadence,
                 stop_event=stop_event,
-                max_consecutive_failures=args.max_consecutive_failures,
-                max_cycles=1 if args.once else None,
+                max_consecutive_failures=max_consecutive_failures,
+                max_cycles=max_cycles,
                 task_name="intraday_shock_hot_worker",
                 lease_path=lease_path,
             )
@@ -121,15 +154,6 @@ def run(argv: list[str] | None = None) -> int:
             }
         )
         return 75
-
-    print_event(
-        {
-            "task": "intraday_shock_hot_worker",
-            "event": "stopped",
-            "ok": exit_code == 0,
-            "exit_code": exit_code,
-        }
-    )
     return exit_code
 
 

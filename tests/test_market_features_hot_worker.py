@@ -188,6 +188,29 @@ def test_direct_market_features_main_uses_the_shared_owner_lock(
     assert calls == ["locked", "cycle"]
 
 
+def test_cycle_forwards_frames_to_the_core_callback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from spx_spark.application.market_features import service
+
+    observed: list[tuple[dict[str, object], dict[str, object]]] = []
+
+    def run(argv, *, on_frames) -> int:
+        assert argv == []
+        on_frames({"frame_id": "market:1"}, {"frame_id": "options:1"})
+        return 0
+
+    monkeypatch.setattr(service, "run", run)
+
+    result = hot_worker.run_market_features_cycle(
+        lambda market, options: observed.append((dict(market), dict(options))),
+        emit_json=False,
+    )
+
+    assert result == 0
+    assert observed == [({"frame_id": "market:1"}, {"frame_id": "options:1"})]
+
+
 def test_cli_once_uses_configured_cadence_and_lock(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

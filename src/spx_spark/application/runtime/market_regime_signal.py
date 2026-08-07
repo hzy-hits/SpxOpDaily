@@ -761,12 +761,14 @@ def produce_once(
     paths: SignalPaths,
     now: datetime,
     freshness_policy: MarketRegimeFreshnessPolicy,
+    market: Mapping[str, object] | None = None,
+    options: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     if now.tzinfo is None or now.utcoffset() is None:
         raise ValueError("now must be timezone-aware")
     evaluated_at = now.astimezone(UTC)
-    market = read_json_object(paths.market)
-    options = read_json_object(paths.options)
+    market = dict(market) if market is not None else read_json_object(paths.market)
+    options = dict(options) if options is not None else read_json_object(paths.options)
     spx_minutes = read_json_object(paths.spx_minutes)
     latest_state = read_json_object(paths.latest_state)
     prior_rth_context = read_json_object(paths.prior_rth_context)

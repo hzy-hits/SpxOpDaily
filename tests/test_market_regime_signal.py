@@ -340,6 +340,29 @@ def test_v2_document_is_advisory_explicit_and_same_frame_does_not_repeat(
     assert _read(paths.state)["online_state"]["observation_count"] == 2
 
 
+def test_direct_feature_frames_do_not_require_projection_roundtrip(
+    tmp_path: Path,
+) -> None:
+    paths = SignalPaths.from_data_root(tmp_path)
+    _seed_rth(paths)
+    paths.market.unlink()
+    paths.options.unlink()
+
+    payload = produce_once(
+        paths=paths,
+        now=RTH_NOW,
+        freshness_policy=DEFAULT_FRESHNESS,
+        market=_rth_market(),
+        options=_options(as_of="2026-08-03T15:04:40+00:00"),
+    )
+
+    assert payload["cross_index_frame"]["status"] == "ready"
+    assert payload["regime"]["update_index"] == 1
+    assert paths.output.exists()
+    assert not paths.market.exists()
+    assert not paths.options.exists()
+
+
 def test_rth_cross_index_prior_context_and_intraday_ranges_feed_realtime_output(
     tmp_path: Path,
 ) -> None:

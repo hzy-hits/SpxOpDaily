@@ -139,6 +139,7 @@ def run(
     *,
     now: datetime | None = None,
     action_clock: Callable[[], datetime] | None = None,
+    on_frames: Callable[[Mapping[str, object], Mapping[str, object]], None] | None = None,
 ) -> int:
     args = parse_args(argv)
     evaluation_now = as_utc(now or datetime.now(tz=timezone.utc))
@@ -625,6 +626,8 @@ def run(
     else:
         state_payload["updated_at"] = evaluation_now.isoformat()
     save_json(state_path, state_payload)
+    if on_frames is not None:
+        on_frames(market_frame.to_dict(), option_frame.to_dict())
     output.update(
         {
             "market_frame_id": market_frame.frame_id,

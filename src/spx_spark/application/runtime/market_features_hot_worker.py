@@ -10,7 +10,7 @@ import signal
 import tempfile
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 from types import FrameType
@@ -98,12 +98,16 @@ def print_event(event: dict[str, object]) -> None:
     print(json.dumps(event, sort_keys=True), flush=True)
 
 
-def run_market_features_cycle() -> int:
+def run_market_features_cycle(
+    on_frames: Callable[[Mapping[str, object], Mapping[str, object]], None] | None = None,
+    *,
+    emit_json: bool = True,
+) -> int:
     # Import once on the first cycle; subsequent calls reuse the same interpreter
     # and module graph instead of paying subprocess and import cost every five seconds.
     from spx_spark.application.market_features import service
 
-    return service.run(["--json"])
+    return service.run(["--json"] if emit_json else [], on_frames=on_frames)
 
 
 def run_locked_market_features_once(
@@ -254,14 +258,49 @@ def run(argv: list[str] | None = None) -> int:
     )
     lock_path = args.lock_path or default_lock_path()
     stop_event = threading.Event()
-    storage = StorageSettings.from_env()
-    lease_path = (
-        Path(storage.data_root)
-        / "latest"
-        / "market_features_hot_worker.lease.json"
-    )
     install_stop_handlers(stop_event)
 
+    exit_code = run_with_stop(
+        stop_event=stop_event,
+        lock_path=lock_path,
+        interval_seconds=interval_seconds,
+        max_consecutive_failures=args.max_consecutive_failures,
+        max_cycles=1 if args.once else None,
+    )
+    print_event(
+        {
+            "task": "market_features_hot_worker",
+            "event": "stopped",
+            "ok": exit_code == 0,
+            "exit_code": exit_code,
+        }
+    )
+    return exit_code
+
+
+def run_with_stop(
+    *,
+    stop_event: StopEvent,
+    lock_path: str | os.PathLike[str],
+    interval_seconds: float | None = None,
+    max_consecutive_failures: int = DEFAULT_MAX_CONSECUTIVE_FAILURES,
+    max_cycles: int | None = None,
+    on_frames: Callable[[Mapping[str, object], Mapping[str, object]], None] | None = None,
+    emit_json: bool = True,
+) -> int:
+    app = load_app_settings()
+    cadence = float(
+        interval_seconds
+        if interval_seconds is not None
+        else app.market_features.interval_seconds
+    )
+    storage = StorageSettings.from_env()
+    lease_path = Path(storage.data_root) / "latest" / "market_features_hot_worker.lease.json"
+    cycle = (
+        run_market_features_cycle
+        if on_frames is None
+        else lambda: run_market_features_cycle(on_frames, emit_json=emit_json)
+    )
     try:
         with ProcessLock(lock_path):
             print_event(
@@ -270,16 +309,16 @@ def run(argv: list[str] | None = None) -> int:
                     "event": "started",
                     "ok": True,
                     "pid": os.getpid(),
-                    "interval_seconds": interval_seconds,
+                    "interval_seconds": cadence,
                     "lock_path": str(lock_path),
                 }
             )
             exit_code = run_worker_loop(
-                run_market_features_cycle,
-                interval_seconds=interval_seconds,
+                cycle,
+                interval_seconds=cadence,
                 stop_event=stop_event,
-                max_consecutive_failures=args.max_consecutive_failures,
-                max_cycles=1 if args.once else None,
+                max_consecutive_failures=max_consecutive_failures,
+                max_cycles=max_cycles,
                 lease_path=lease_path,
             )
     except ProcessLockUnavailable as exc:
@@ -293,15 +332,6 @@ def run(argv: list[str] | None = None) -> int:
             }
         )
         return 75
-
-    print_event(
-        {
-            "task": "market_features_hot_worker",
-            "event": "stopped",
-            "ok": exit_code == 0,
-            "exit_code": exit_code,
-        }
-    )
     return exit_code
 
 

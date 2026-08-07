@@ -78,6 +78,18 @@ def test_direct_intraday_shock_main_uses_the_shared_owner_lock(
     assert calls == ["locked", "cycle"]
 
 
+def test_core_cycle_suppresses_legacy_full_json(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from spx_spark.application.shock import service
+
+    calls: list[list[str]] = []
+    monkeypatch.setattr(service, "run", lambda argv: calls.append(argv) or 0)
+
+    assert hot_worker.run_intraday_shock_cycle(emit_json=False) == 0
+    assert calls == [[]]
+
+
 def test_cli_once_uses_the_service_loop_shock_cadence_and_one_lock(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
