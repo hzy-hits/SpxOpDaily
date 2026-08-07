@@ -170,3 +170,22 @@ Ruff, Import Linter 2/2 and `git diff --check` passed.
 - Acceptance: repeated same-ID candidates with changed observations produce
   one durable row, report `duplicate=1`, keep `outbox_writable=true`, and do not
   block engine health; the generic collision test must continue to raise.
+
+## Time-sensitive notification queue priority
+
+- User-visible goal: a Bark/Feishu execution or safety card must not sit behind
+  several 20–30 second LLM alert reviews in the single Huey worker.
+- Existing owner and reuse: keep the one Huey database, one task function and
+  one worker. Use Huey's native task priority; add no worker, queue, table,
+  scheduler wrapper or delivery path.
+- Change: final Bark/Feishu/operator delivery tasks enter at priority `10`;
+  advisory `alert_pipeline` review tasks enter at priority `-10`. A task already
+  executing is not interrupted, so the bound remains one current review call,
+  but queued reviews and retries cannot overtake an execution notification.
+- Restart repair: bind the existing `recover_notification_tasks` function to
+  Huey's startup hook. Only attempts interrupted before transport are queued
+  again; attempts that may already have reached an external sink remain
+  `uncertain` and are never auto-sent.
+- Acceptance: all existing notification, retry and receipt behavior tests pass;
+  an Oracle notify test must produce Bark and Feishu delivered receipts after
+  the worker cutover.

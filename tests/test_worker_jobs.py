@@ -143,6 +143,30 @@ def test_nonzero_existing_entry_fails_the_huey_task(
         jobs.maintenance_daily.call_local()
 
 
+def test_worker_startup_recovers_only_safe_notification_attempts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    jobs = load_jobs(tmp_path, monkeypatch)
+    calls: list[tuple[object, object, datetime]] = []
+    engine = object()
+    monkeypatch.setattr(
+        "spx_spark.notifier.unified_delivery.default_engine",
+        lambda: engine,
+    )
+    monkeypatch.setattr(
+        "spx_spark.notifier.unified_delivery.recover_notification_tasks",
+        lambda store, *, schedule, now: calls.append((store, schedule, now)) or (1, 1),
+    )
+
+    jobs.recover_notification_delivery_tasks()
+
+    assert len(calls) == 1
+    assert calls[0][0] is engine
+    assert calls[0][1] is jobs.deliver_notification_event
+    assert calls[0][2].tzinfo is timezone.utc
+
+
 def test_migrations_build_only_planned_operational_tables_and_check_status(
     tmp_path: Path,
 ) -> None:

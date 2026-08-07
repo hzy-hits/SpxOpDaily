@@ -256,7 +256,7 @@ def build_realtime_runtime(
             return
         from spx_spark.infrastructure.jobs import deliver_notification_event
 
-        deliver_notification_event(event_id)
+        deliver_notification_event(event_id, priority=-10)
 
     outbox = NotificationEventQueue(notification_engine, schedule=schedule)
     sink = TickProjectionSink()

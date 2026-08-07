@@ -379,10 +379,11 @@ def enqueue_final_notification(
         return UnifiedEnqueueResult(routed, targets, (), "cancelled_before_enqueue", 0, 0, False)
     if schedule is None:
         from spx_spark.infrastructure.jobs import deliver_notification_event
-
-        schedule = deliver_notification_event
-    for event_id in batch.event_ids:
-        schedule(event_id)
+        for event_id in batch.event_ids:
+            deliver_notification_event(event_id, priority=10)
+    else:
+        for event_id in batch.event_ids:
+            schedule(event_id)
     return UnifiedEnqueueResult(
         routed,
         targets,

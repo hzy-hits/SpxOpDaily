@@ -1,5 +1,7 @@
 """Single-worker scheduled jobs for the simplified runtime."""
 
+from datetime import datetime, timezone
+
 from huey import SqliteHuey, crontab
 
 from spx_spark.app_settings import get_settings
@@ -20,6 +22,20 @@ def deliver_notification_event(event_id: int) -> None:
     )
 
     deliver(event_id)
+
+
+@huey.on_startup()
+def recover_notification_delivery_tasks() -> None:
+    from spx_spark.notifier.unified_delivery import (
+        default_engine,
+        recover_notification_tasks,
+    )
+
+    recover_notification_tasks(
+        default_engine(),
+        schedule=deliver_notification_event,
+        now=datetime.now(tz=timezone.utc),
+    )
 
 
 @huey.periodic_task(crontab(minute="30", hour="23", strict=True))
