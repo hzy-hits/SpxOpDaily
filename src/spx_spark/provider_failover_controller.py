@@ -5,12 +5,11 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import os
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from spx_spark.config import StorageSettings, env_bool, env_float, env_int
+from spx_spark.config import StorageSettings
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 from spx_spark.marketdata import (
     MarketDataQuality,
@@ -27,7 +26,8 @@ from spx_spark.provider_failover import (
     FailoverThresholds,
     advance_failover,
 )
-from spx_spark.settings import settings_value
+from spx_spark.settings import AppSettings, current_app_settings, load_app_settings
+from spx_spark.settings.runtime import RuntimeSettingsSlice
 from spx_spark.state_io import atomic_write_json_secure
 from spx_spark.storage import LatestState, LatestStateStore
 
@@ -38,6 +38,7 @@ LOGGER = logging.getLogger(__name__)
 @dataclass(frozen=True)
 class ProviderFailoverSettings:
     enabled: bool
+    control_ibkr_stream_enabled: bool
     state_path: str
     required_instruments: tuple[str, ...]
     globex_required_instruments: tuple[str, ...]
@@ -71,79 +72,65 @@ class ProviderFailoverSettings:
             raise ValueError("GTH option health requires at least one call/put pair")
 
     @classmethod
-    def from_env(cls) -> "ProviderFailoverSettings":
-        data_root = (
-            os.getenv("MARKET_DATA_DATA_ROOT")
-            or os.getenv("MAINTENANCE_DATA_ROOT")
-            or str(settings_value("maintenance.data_root"))
-        )
-        configured_path = str(settings_value("provider_failover.state_path")).strip()
+    def from_policy(
+        cls,
+        policy: RuntimeSettingsSlice,
+        *,
+        data_root: str,
+    ) -> "ProviderFailoverSettings":
+        """Derive runtime failover settings from one resolved typed policy."""
+
+        configured_path = policy.provider_failover_state_path.strip()
         return cls(
-            enabled=env_bool(
-                "PROVIDER_FAILOVER_ENABLED",
-                bool(settings_value("provider_failover.enabled")),
+            enabled=policy.provider_failover_enabled,
+            control_ibkr_stream_enabled=policy.control_ibkr_stream_enabled,
+            state_path=(
+                configured_path
+                or f"{data_root.rstrip('/')}/latest/provider_failover_state.json"
             ),
-            state_path=os.getenv("PROVIDER_FAILOVER_STATE_PATH")
-            or configured_path
-            or f"{data_root.rstrip('/')}/latest/provider_failover_state.json",
-            required_instruments=tuple(
-                str(item) for item in settings_value("provider_failover.required_instruments")
+            required_instruments=policy.provider_failover_required_instruments,
+            globex_required_instruments=(
+                policy.provider_failover_globex_required_instruments
             ),
-            globex_required_instruments=tuple(
-                str(item)
-                for item in settings_value("provider_failover.globex_required_instruments")
+            provider_state_max_age_seconds=(
+                policy.provider_failover_state_max_age_seconds
             ),
-            provider_state_max_age_seconds=env_float(
-                "PROVIDER_FAILOVER_STATE_MAX_AGE_SECONDS",
-                float(settings_value("provider_failover.provider_state_max_age_seconds")),
+            quote_max_age_seconds=policy.provider_failover_quote_max_age_seconds,
+            control_state_max_age_seconds=(
+                policy.provider_failover_control_state_max_age_seconds
             ),
-            quote_max_age_seconds=env_float(
-                "PROVIDER_FAILOVER_QUOTE_MAX_AGE_SECONDS",
-                float(settings_value("provider_failover.quote_max_age_seconds")),
+            transition_alert_max_age_seconds=(
+                policy.provider_failover_transition_alert_max_age_seconds
             ),
-            control_state_max_age_seconds=env_float(
-                "PROVIDER_FAILOVER_CONTROL_STATE_MAX_AGE_SECONDS",
-                float(settings_value("provider_failover.control_state_max_age_seconds")),
+            monitor_rth_only=policy.provider_failover_monitor_rth_only,
+            gth_min_live_option_contracts=(
+                policy.provider_failover_gth_min_live_option_contracts
             ),
-            transition_alert_max_age_seconds=env_float(
-                "PROVIDER_FAILOVER_TRANSITION_ALERT_MAX_AGE_SECONDS",
-                float(settings_value("provider_failover.transition_alert_max_age_seconds")),
-            ),
-            monitor_rth_only=env_bool(
-                "PROVIDER_FAILOVER_RTH_ONLY",
-                bool(settings_value("provider_failover.monitor_rth_only")),
-            ),
-            gth_min_live_option_contracts=env_int(
-                "PROVIDER_FAILOVER_GTH_MIN_LIVE_OPTION_CONTRACTS",
-                int(settings_value("provider_failover.gth_min_live_option_contracts")),
-            ),
-            gth_option_quote_max_age_seconds=env_float(
-                "PROVIDER_FAILOVER_GTH_OPTION_QUOTE_MAX_AGE_SECONDS",
-                float(
-                    settings_value(
-                        "provider_failover.gth_option_quote_max_age_seconds"
-                    )
-                ),
+            gth_option_quote_max_age_seconds=(
+                policy.provider_failover_gth_option_quote_max_age_seconds
             ),
             thresholds=FailoverThresholds(
-                schwab_unhealthy_observations=env_int(
-                    "PROVIDER_FAILOVER_SCHWAB_UNHEALTHY_OBSERVATIONS",
-                    int(settings_value("provider_failover.schwab_unhealthy_observations")),
+                schwab_unhealthy_observations=(
+                    policy.provider_failover_schwab_unhealthy_observations
                 ),
-                schwab_recovery_observations=env_int(
-                    "PROVIDER_FAILOVER_SCHWAB_RECOVERY_OBSERVATIONS",
-                    int(settings_value("provider_failover.schwab_recovery_observations")),
+                schwab_recovery_observations=(
+                    policy.provider_failover_schwab_recovery_observations
                 ),
-                ibkr_unhealthy_observations=env_int(
-                    "PROVIDER_FAILOVER_IBKR_UNHEALTHY_OBSERVATIONS",
-                    int(settings_value("provider_failover.ibkr_unhealthy_observations")),
+                ibkr_unhealthy_observations=(
+                    policy.provider_failover_ibkr_unhealthy_observations
                 ),
-                ibkr_recovery_observations=env_int(
-                    "PROVIDER_FAILOVER_IBKR_RECOVERY_OBSERVATIONS",
-                    int(settings_value("provider_failover.ibkr_recovery_observations")),
+                ibkr_recovery_observations=(
+                    policy.provider_failover_ibkr_recovery_observations
                 ),
             ),
         )
+
+    @classmethod
+    def from_env(cls) -> "ProviderFailoverSettings":
+        """Compatibility composition root honoring the current environment."""
+
+        app = load_app_settings()
+        return cls.from_policy(app.runtime, data_root=app.storage.data_root)
 
 
 @dataclass(frozen=True)
@@ -587,10 +574,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def run(argv: list[str] | None = None) -> int:
+def run(
+    argv: list[str] | None = None,
+    *,
+    app_settings: AppSettings | None = None,
+    storage_settings: StorageSettings | None = None,
+) -> int:
     args = parse_args(argv)
-    settings = ProviderFailoverSettings.from_env()
-    latest = LatestStateStore(StorageSettings.from_env()).load()
+    app = app_settings or current_app_settings()
+    storage = storage_settings or StorageSettings.from_env()
+    settings = ProviderFailoverSettings.from_policy(
+        app.runtime,
+        data_root=storage.data_root,
+    )
+    latest = LatestStateStore(storage).load()
     state = evaluate_and_persist(latest, settings)
     if args.json:
         payload = load_failover_control(settings.state_path) or state.to_dict()

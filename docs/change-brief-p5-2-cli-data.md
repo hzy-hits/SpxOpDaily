@@ -264,3 +264,24 @@ Ruff, Import Linter 2/2 and `git diff --check` passed.
   structure tests remain green; a new RTH REST-reobservation case passes; on
   Oracle a naturally current 120-strike front chain must set
   `front_chain_fresh=true` without changing execution quote policy.
+
+## Provider-failover typed settings cutover
+
+- User-visible behavior: Schwab-primary/IBKR-fallback thresholds, GTH option
+  coverage, state freshness and stream-control policy remain identical, while
+  one process resolves them once instead of re-reading ambient environment and
+  raw TOML from each 15-second Core cycle.
+- Existing owner and reuse: extend the existing `RuntimeSettingsSlice` and
+  AppSettings environment map. `ProviderFailoverSettings.from_policy` derives
+  the domain settings; no module, dependency, config key, service, database,
+  queue or state machine is added.
+- Delete: remove all `env_bool`/`env_int`/`env_float` and `settings_value`
+  reads from the failover settings constructor and IBKR session gate. Core,
+  market-features and the IBKR composition root inject the already resolved
+  policy explicitly; the standalone/test compatibility constructor resolves
+  the current documented environment without bypassing AppSettings.
+- Acceptance: all documented environment overrides retain precedence and the
+  resolved Oracle policy matches the pre-cutover baseline; failover/controller,
+  market-feature and IBKR tests pass; after deployment the five Python units
+  remain active with zero restarts and direct SPX/ES/SPXW plus Bark/Feishu
+  delivery are rechecked.

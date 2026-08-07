@@ -123,7 +123,12 @@ async def main() -> None:
                 stop_event=stop_event), shutdown))
             if runtime.provider_failover_enabled:
                 tasks.create_task(_run_periodic(
-                    "provider_failover", partial(provider_failover_controller.run, ["--json"]),
+                    "provider_failover", partial(
+                        provider_failover_controller.run,
+                        ["--json"],
+                        app_settings=app_settings,
+                        storage_settings=storage,
+                    ),
                     runtime.provider_failover_interval_seconds, shutdown))
             if app_settings.globex_trend.enabled:
                 tasks.create_task(_run_periodic(
@@ -135,11 +140,20 @@ async def main() -> None:
                     app_settings.globex_trend.interval_seconds, shutdown))
             if runtime.realtime_engine_enabled:
                 tasks.create_task(_run_periodic(
-                    "realtime_engine", run_realtime_engine_cycle,
+                    "realtime_engine", partial(
+                        run_realtime_engine_cycle,
+                        app_settings=app_settings,
+                        storage_settings=storage,
+                    ),
                     runtime.realtime_engine_interval_seconds, shutdown))
             if runtime.alerts_enabled:
                 tasks.create_task(_run_periodic(
-                    "alert_engine", partial(alert_engine.run, ["--json"]),
+                    "alert_engine", partial(
+                        alert_engine.run,
+                        ["--json"],
+                        app_settings=app_settings,
+                        storage_settings=storage,
+                    ),
                     runtime.alert_interval_seconds, shutdown))
             if app_settings.alerts.steven_enabled:
                 tasks.create_task(_run_periodic(

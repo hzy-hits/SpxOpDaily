@@ -30,6 +30,7 @@ from spx_spark.iv_surface import (
 from spx_spark.market_context import build_market_context
 from spx_spark.options_map import OptionsMap, build_options_map
 from spx_spark.position_alerts import position_holdings_alerts
+from spx_spark.provider_failover_controller import ProviderFailoverSettings
 from spx_spark.settings import DEFAULT_ALERT_SETTINGS, AlertSettings
 from spx_spark.state_io import read_json_object
 from spx_spark.storage import LatestState
@@ -50,6 +51,7 @@ def evaluate_alerts(
     persist_system_events: bool = False,
     persist_movement_state: bool = False,
     alert_settings: AlertSettings = DEFAULT_ALERT_SETTINGS,
+    provider_failover_settings: ProviderFailoverSettings | None = None,
 ) -> list[Alert]:
     alerts: list[Alert] = []
     required = set(window.required_instruments)
@@ -94,7 +96,13 @@ def evaluate_alerts(
         )
     alerts.extend(position_holdings_alerts(state, options_map=options_map, window=window))
     alerts.extend(market_context_alerts(market_context))
-    alerts.extend(system_event_alerts(state, persist=persist_system_events))
+    alerts.extend(
+        system_event_alerts(
+            state,
+            persist=persist_system_events,
+            failover_settings=provider_failover_settings,
+        )
+    )
     alerts.extend(
         proxy_fallback_watch_alerts(
             state, window=window, market_context=market_context, options_map=options_map
@@ -120,6 +128,7 @@ def evaluate_payload(
     persist_movement_state: bool = False,
     persist_gamma_regime: bool = False,
     alert_settings: AlertSettings | None = None,
+    provider_failover_settings: ProviderFailoverSettings | None = None,
 ) -> dict[str, object]:
     now = now or state.as_of
     policy = alert_settings or DEFAULT_ALERT_SETTINGS
@@ -150,6 +159,7 @@ def evaluate_payload(
         persist_system_events=persist_system_events,
         persist_movement_state=persist_movement_state,
         alert_settings=policy,
+        provider_failover_settings=provider_failover_settings,
     )
     if iv_stale_alert is not None:
         alerts.append(iv_stale_alert)

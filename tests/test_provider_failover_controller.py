@@ -2,6 +2,7 @@ import json
 import logging
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from spx_spark.marketdata import (
     InstrumentId,
@@ -23,6 +24,7 @@ from spx_spark.provider_failover_controller import (
     provider_health,
     transport_health,
 )
+from spx_spark.settings import load_settings
 from spx_spark.storage import LatestState
 
 
@@ -53,6 +55,7 @@ def latest(at: datetime, *quotes: Quote) -> LatestState:
 def settings(tmp_path) -> ProviderFailoverSettings:
     return ProviderFailoverSettings(
         enabled=True,
+        control_ibkr_stream_enabled=False,
         state_path=str(tmp_path / "failover.json"),
         required_instruments=("index:SPX", "future:ES"),
         globex_required_instruments=("future:ES",),
@@ -66,6 +69,34 @@ def settings(tmp_path) -> ProviderFailoverSettings:
             schwab_recovery_observations=2,
             ibkr_unhealthy_observations=2,
         ),
+    )
+
+
+def test_settings_derive_deterministically_from_typed_policy(tmp_path) -> None:
+    fixture = Path(__file__).resolve().parent / "fixtures" / "runtime.defaults.toml"
+    app = load_settings(defaults_path=fixture, environ={})
+
+    resolved = ProviderFailoverSettings.from_policy(
+        app.runtime,
+        data_root=str(tmp_path),
+    )
+
+    assert resolved.enabled is True
+    assert resolved.control_ibkr_stream_enabled is False
+    assert resolved.state_path == str(tmp_path / "latest/provider_failover_state.json")
+    assert resolved.required_instruments == ("index:SPX", "future:ES")
+    assert resolved.globex_required_instruments == ("future:ES",)
+    assert resolved.provider_state_max_age_seconds == 45.0
+    assert resolved.quote_max_age_seconds == 45.0
+    assert resolved.control_state_max_age_seconds == 60.0
+    assert resolved.transition_alert_max_age_seconds == 900.0
+    assert resolved.gth_min_live_option_contracts == 20
+    assert resolved.gth_option_quote_max_age_seconds == 90.0
+    assert resolved.thresholds == FailoverThresholds(
+        schwab_unhealthy_observations=2,
+        schwab_recovery_observations=3,
+        ibkr_unhealthy_observations=4,
+        ibkr_recovery_observations=3,
     )
 
 

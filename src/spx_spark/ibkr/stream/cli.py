@@ -18,6 +18,8 @@ from spx_spark.config import (
 from spx_spark.ibkr.stream.collector import StreamCollector
 from spx_spark.ibkr.stream.supervisor import StreamRuntime
 from spx_spark.ibkr.verifier import prepare_ib_client
+from spx_spark.provider_failover_controller import ProviderFailoverSettings
+from spx_spark.settings import current_app_settings
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -52,6 +54,11 @@ def run(argv: list[str] | None = None) -> int:
     sampling_settings = SamplingSettings.from_env()
     storage_settings = StorageSettings.from_env()
     runtime_policy = RuntimePolicySettings.from_env()
+    app_settings = current_app_settings()
+    provider_failover_settings = ProviderFailoverSettings.from_policy(
+        app_settings.runtime,
+        data_root=storage_settings.data_root,
+    )
 
     if args.print_config:
         print(
@@ -82,6 +89,7 @@ def run(argv: list[str] | None = None) -> int:
         sampling_settings=sampling_settings,
         storage_settings=storage_settings,
         runtime_policy=runtime_policy,
+        provider_failover_settings=provider_failover_settings,
         broker_settings=broker_settings,
         force=args.force,
         skip_options=args.skip_options,
@@ -107,4 +115,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

@@ -37,6 +37,7 @@ from spx_spark.domain.health import EngineMode
 from spx_spark.domain.market import MarketSnapshot
 from spx_spark.infrastructure.notifications import NotificationEventQueue, create_engine
 from spx_spark.notifier.unified_delivery import engine_for_settings
+from spx_spark.provider_failover_controller import ProviderFailoverSettings
 from spx_spark.settings import AppSettings, load_app_settings
 from spx_spark.settings.alerts import AlertSettings
 from spx_spark.settings.analytics import AnalyticsSettings
@@ -168,6 +169,7 @@ def resolve_alert_evaluator(
     *,
     evaluation_enabled: bool | None = None,
     alert_settings: AlertSettings | None = None,
+    provider_failover_settings: ProviderFailoverSettings | None = None,
     event_bucket_seconds: int = 300,
 ):
     if evaluation_enabled is None:
@@ -176,6 +178,7 @@ def resolve_alert_evaluator(
         return AlertEngineEvaluator(
             store,
             alert_settings=alert_settings,
+            provider_failover_settings=provider_failover_settings,
             event_bucket_seconds=event_bucket_seconds,
         )
     return SilentAlertEvaluator()
@@ -240,6 +243,14 @@ def build_realtime_runtime(
     if analytics_policy is None:
         analytics_policy = AnalyticsSettings()
     alert_policy: AlertSettings | None = app_settings.alerts if app_settings is not None else None
+    failover_policy = (
+        ProviderFailoverSettings.from_policy(
+            app_settings.runtime,
+            data_root=storage.data_root,
+        )
+        if app_settings is not None
+        else None
+    )
     notification_settings = notification_settings or NotificationSettings.from_env()
     projection = LatestMarketProjectionStore(storage)
     notification_engine = (
@@ -267,6 +278,7 @@ def build_realtime_runtime(
             projection,
             evaluation_enabled=evaluation_enabled,
             alert_settings=alert_policy,
+            provider_failover_settings=failover_policy,
             event_bucket_seconds=notification_settings.cooldown_seconds,
         ),
         projections=sink,
@@ -287,11 +299,12 @@ def build_realtime_runtime(
 def run_realtime_engine_cycle(
     *,
     app_settings: AppSettings | None = None,
+    storage_settings: StorageSettings | None = None,
 ) -> int:
     """CLI/service-loop entry: one tick + outbox consume, JSON summary on stdout."""
 
     settings = app_settings or load_production_settings()
-    storage = StorageSettings.from_env()
+    storage = storage_settings or StorageSettings.from_env()
     runtime = build_realtime_runtime(storage, app_settings=settings)
     tick_started_at = datetime.now(tz=timezone.utc)
     result = runtime.run_cycle(now=tick_started_at)

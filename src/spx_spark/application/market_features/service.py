@@ -163,7 +163,10 @@ def run(
         return 0
 
     storage = storage_settings or StorageSettings.from_env()
-    failover_settings = ProviderFailoverSettings.from_env()
+    failover_settings = ProviderFailoverSettings.from_policy(
+        app.runtime,
+        data_root=storage.data_root,
+    )
     provider_entry_control = _provider_entry_control(
         failover_settings,
         now=evaluation_now,

@@ -6,6 +6,8 @@ from dataclasses import replace
 
 from spx_spark.alert_profile import parse_at
 from spx_spark.config import NotificationSettings, StorageSettings, direct_alert_delivery_enabled
+from spx_spark.provider_failover_controller import ProviderFailoverSettings
+from spx_spark.settings import AppSettings, load_app_settings
 
 
 def print_alerts(payload: dict[str, object]) -> None:
@@ -35,16 +37,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def run(argv: list[str] | None = None) -> int:
+def run(
+    argv: list[str] | None = None,
+    *,
+    app_settings: AppSettings | None = None,
+    storage_settings: StorageSettings | None = None,
+) -> int:
     # Resolve through the package facade so tests can monkeypatch
     # ``spx_spark.alert_engine.<symbol>`` without chasing submodule bindings.
     from spx_spark import alert_engine as ae
-    from spx_spark.settings import load_app_settings
-
     args = parse_args(argv)
     now = parse_at(args.at) if args.at else None
-    app_settings = load_app_settings()
-    state = ae.LatestStateStore(StorageSettings.from_env()).load(now=now)
+    app_settings = app_settings or load_app_settings()
+    storage_settings = storage_settings or StorageSettings.from_env()
+    failover_settings = ProviderFailoverSettings.from_policy(
+        app_settings.runtime,
+        data_root=storage_settings.data_root,
+    )
+    state = ae.LatestStateStore(storage_settings).load(now=now)
     notification_settings = NotificationSettings.from_env()
     if args.notify:
         notification_settings = replace(notification_settings, enabled=True)
@@ -60,6 +70,7 @@ def run(argv: list[str] | None = None) -> int:
         persist_movement_state=False,
         persist_gamma_regime=True,
         alert_settings=app_settings.alerts,
+        provider_failover_settings=failover_settings,
     )
     system_event_pending = any(
         isinstance(alert, dict)
@@ -80,7 +91,10 @@ def run(argv: list[str] | None = None) -> int:
         and notification_result.outcome in {"consumed", "delivered", "queued"}
     )
     if not system_event_pending or settled:
-        ae.persist_system_event_state(state)
+        ae.persist_system_event_state(
+            state,
+            failover_settings=failover_settings,
+        )
     if not movement_pending or settled:
         ae.persist_movement_state_snapshot(state)
     if args.json:

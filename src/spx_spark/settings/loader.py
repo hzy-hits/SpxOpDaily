@@ -191,6 +191,38 @@ def _env_override(dotted_path: str, environ: Mapping[str, str]) -> Any | None:
         "provider_failover.control_ibkr_stream_enabled": (
             "PROVIDER_FAILOVER_CONTROL_IBKR_STREAM_ENABLED"
         ),
+        "provider_failover.state_path": "PROVIDER_FAILOVER_STATE_PATH",
+        "provider_failover.provider_state_max_age_seconds": (
+            "PROVIDER_FAILOVER_STATE_MAX_AGE_SECONDS"
+        ),
+        "provider_failover.quote_max_age_seconds": (
+            "PROVIDER_FAILOVER_QUOTE_MAX_AGE_SECONDS"
+        ),
+        "provider_failover.control_state_max_age_seconds": (
+            "PROVIDER_FAILOVER_CONTROL_STATE_MAX_AGE_SECONDS"
+        ),
+        "provider_failover.transition_alert_max_age_seconds": (
+            "PROVIDER_FAILOVER_TRANSITION_ALERT_MAX_AGE_SECONDS"
+        ),
+        "provider_failover.monitor_rth_only": "PROVIDER_FAILOVER_RTH_ONLY",
+        "provider_failover.gth_min_live_option_contracts": (
+            "PROVIDER_FAILOVER_GTH_MIN_LIVE_OPTION_CONTRACTS"
+        ),
+        "provider_failover.gth_option_quote_max_age_seconds": (
+            "PROVIDER_FAILOVER_GTH_OPTION_QUOTE_MAX_AGE_SECONDS"
+        ),
+        "provider_failover.schwab_unhealthy_observations": (
+            "PROVIDER_FAILOVER_SCHWAB_UNHEALTHY_OBSERVATIONS"
+        ),
+        "provider_failover.schwab_recovery_observations": (
+            "PROVIDER_FAILOVER_SCHWAB_RECOVERY_OBSERVATIONS"
+        ),
+        "provider_failover.ibkr_unhealthy_observations": (
+            "PROVIDER_FAILOVER_IBKR_UNHEALTHY_OBSERVATIONS"
+        ),
+        "provider_failover.ibkr_recovery_observations": (
+            "PROVIDER_FAILOVER_IBKR_RECOVERY_OBSERVATIONS"
+        ),
         "intraday_shock.anchor_provider_priority": (
             "ALERT_INTRADAY_ANCHOR_PROVIDER_PRIORITY"
         ),
@@ -672,6 +704,46 @@ def load_settings(
     runtime = RuntimeSettingsSlice(
         control_ibkr_stream_enabled=bool(get("provider_failover.control_ibkr_stream_enabled")),
         provider_failover_enabled=bool(get("provider_failover.enabled")),
+        provider_failover_state_path=str(get("provider_failover.state_path")),
+        provider_failover_required_instruments=tuple(
+            str(item) for item in get("provider_failover.required_instruments")
+        ),
+        provider_failover_globex_required_instruments=tuple(
+            str(item) for item in get("provider_failover.globex_required_instruments")
+        ),
+        provider_failover_state_max_age_seconds=float(
+            get("provider_failover.provider_state_max_age_seconds")
+        ),
+        provider_failover_quote_max_age_seconds=float(
+            get("provider_failover.quote_max_age_seconds")
+        ),
+        provider_failover_control_state_max_age_seconds=float(
+            get("provider_failover.control_state_max_age_seconds")
+        ),
+        provider_failover_transition_alert_max_age_seconds=float(
+            get("provider_failover.transition_alert_max_age_seconds")
+        ),
+        provider_failover_monitor_rth_only=bool(
+            get("provider_failover.monitor_rth_only")
+        ),
+        provider_failover_gth_min_live_option_contracts=int(
+            get("provider_failover.gth_min_live_option_contracts")
+        ),
+        provider_failover_gth_option_quote_max_age_seconds=float(
+            get("provider_failover.gth_option_quote_max_age_seconds")
+        ),
+        provider_failover_schwab_unhealthy_observations=int(
+            get("provider_failover.schwab_unhealthy_observations")
+        ),
+        provider_failover_schwab_recovery_observations=int(
+            get("provider_failover.schwab_recovery_observations")
+        ),
+        provider_failover_ibkr_unhealthy_observations=int(
+            get("provider_failover.ibkr_unhealthy_observations")
+        ),
+        provider_failover_ibkr_recovery_observations=int(
+            get("provider_failover.ibkr_recovery_observations")
+        ),
         provider_failover_interval_seconds=int(get("provider_failover.interval_seconds")),
         hyperliquid_enabled=bool(get("service_loop.hyperliquid_enabled")),
         polymarket_enabled=bool(get("service_loop.polymarket_enabled")),

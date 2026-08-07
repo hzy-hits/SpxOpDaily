@@ -183,13 +183,18 @@ def _merge_state_patch(
             payload[key] = value
 
 
-def _provider_failover_context() -> str:
-    settings = ProviderFailoverSettings.from_env()
+def _provider_failover_context(settings: ProviderFailoverSettings | None = None) -> str:
+    settings = settings or ProviderFailoverSettings.from_env()
     raw = load_failover_control(settings.state_path)
     return str(raw.get("monitoring_context") or "closed").lower()
 
 
-def persist_system_event_state(state: LatestState) -> None:
+def persist_system_event_state(
+    state: LatestState,
+    *,
+    failover_settings: ProviderFailoverSettings | None = None,
+) -> None:
+    failover_settings = failover_settings or ProviderFailoverSettings.from_env()
     state_path = system_event_state_path()
     previous = load_system_event_state(state_path)
     payload = dict(previous)
@@ -213,13 +218,16 @@ def persist_system_event_state(state: LatestState) -> None:
             "ibkr_checked_at",
         ):
             payload.pop(key, None)
-    failover_state = load_provider_failover_state(now=state.as_of)
+    failover_state = load_provider_failover_state(
+        now=state.as_of,
+        settings=failover_settings,
+    )
     if failover_state is not None:
         _, patch = provider_failover_incident_evaluation(
             failover_state,
             previous=previous,
             now=state.as_of,
-            monitoring_context=_provider_failover_context(),
+            monitoring_context=_provider_failover_context(failover_settings),
         )
         _merge_state_patch(payload, patch)
         payload["provider_failover_mode"] = failover_state.mode.value
@@ -303,8 +311,12 @@ def ibkr_gateway_login_alert(
     )
 
 
-def load_provider_failover_state(*, now: datetime) -> FailoverState | None:
-    settings = ProviderFailoverSettings.from_env()
+def load_provider_failover_state(
+    *,
+    now: datetime,
+    settings: ProviderFailoverSettings | None = None,
+) -> FailoverState | None:
+    settings = settings or ProviderFailoverSettings.from_env()
     raw = load_failover_control(settings.state_path)
     if not raw or raw.get("monitoring_active") is not True:
         return None
@@ -570,7 +582,12 @@ def ibkr_session_is_position_critical() -> bool:
     )
 
 
-def system_event_alerts(state: LatestState, *, persist: bool = True) -> list[Alert]:
+def system_event_alerts(
+    state: LatestState,
+    *,
+    persist: bool = True,
+    failover_settings: ProviderFailoverSettings | None = None,
+) -> list[Alert]:
     if not env_bool(
         "ALERT_SYSTEM_EVENTS_ENABLED",
         DEFAULT_ALERT_SETTINGS.system_events_enabled,
@@ -579,13 +596,17 @@ def system_event_alerts(state: LatestState, *, persist: bool = True) -> list[Ale
     state_path = system_event_state_path()
     previous = load_system_event_state(state_path)
     alerts: list[Alert] = []
-    failover_state = load_provider_failover_state(now=state.as_of)
+    failover_settings = failover_settings or ProviderFailoverSettings.from_env()
+    failover_state = load_provider_failover_state(
+        now=state.as_of,
+        settings=failover_settings,
+    )
     if failover_state is not None:
         failover_alert, _ = provider_failover_incident_evaluation(
             failover_state,
             previous=previous,
             now=state.as_of,
-            monitoring_context=_provider_failover_context(),
+            monitoring_context=_provider_failover_context(failover_settings),
         )
         if failover_alert is not None:
             alerts.append(failover_alert)
@@ -613,7 +634,10 @@ def system_event_alerts(state: LatestState, *, persist: bool = True) -> list[Ale
                 alerts.append(alert)
 
     if persist:
-        persist_system_event_state(state)
+        persist_system_event_state(
+            state,
+            failover_settings=failover_settings,
+        )
     return alerts
 
 

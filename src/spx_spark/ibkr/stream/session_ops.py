@@ -19,9 +19,7 @@ from spx_spark.ibkr.stream.models import (
 )
 from spx_spark.ibkr.stream.models import replace_client_id
 from spx_spark.ibkr.verifier import IbkrError
-from spx_spark.config import env_bool
 from spx_spark.provider_failover_controller import load_failover_control
-from spx_spark.settings import settings_value
 from spx_spark.runtime_mode import ibkr_market_data_allowed, load_override
 
 cancel_subscriptions = stream_deps.cancel_subscriptions
@@ -159,9 +157,8 @@ class SessionOps:
             self.runtime_policy,
             failover_control=control,
             failover_enabled=self.provider_failover_settings.enabled,
-            control_enabled=env_bool(
-                "PROVIDER_FAILOVER_CONTROL_IBKR_STREAM_ENABLED",
-                bool(settings_value("provider_failover.control_ibkr_stream_enabled")),
+            control_enabled=(
+                self.provider_failover_settings.control_ibkr_stream_enabled
             ),
             control_max_age_seconds=(self.provider_failover_settings.control_state_max_age_seconds),
             override=override,

@@ -59,6 +59,7 @@ class StreamCollector(
         sampling_settings: SamplingSettings,
         storage_settings: StorageSettings,
         runtime_policy: RuntimePolicySettings,
+        provider_failover_settings: ProviderFailoverSettings | None = None,
         broker_settings: IbkrBrokerSettings | None = None,
         force: bool = False,
         skip_options: bool = False,
@@ -72,7 +73,9 @@ class StreamCollector(
         self.broker_settings = broker_settings or IbkrBrokerSettings.from_env()
         self.force = force
         self.skip_options = skip_options or stream_settings.skip_options
-        self.provider_failover_settings = ProviderFailoverSettings.from_env()
+        self.provider_failover_settings = (
+            provider_failover_settings or ProviderFailoverSettings.from_env()
+        )
         self.capacity_tracker = MarketDataCapacityTracker(
             Path(storage_settings.data_root) / "state" / CAPACITY_STATE_NAME,
             configured_capacity=stream_settings.market_data_line_capacity,

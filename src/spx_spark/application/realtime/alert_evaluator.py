@@ -12,6 +12,7 @@ from spx_spark.domain.analytics import AnalyticsResult
 from spx_spark.domain.events import DomainEvent, EventKind
 from spx_spark.domain.market import MarketSnapshot
 from spx_spark.notifier.policy import alert_key, context_only_alerts, is_human_visible_alert
+from spx_spark.provider_failover_controller import ProviderFailoverSettings
 from spx_spark.settings import AlertSettings, DEFAULT_ALERT_SETTINGS
 from spx_spark.storage import LatestMarketProjectionStore, LatestState
 
@@ -98,6 +99,7 @@ class AlertEngineEvaluator:
     persist_movement_state: bool = False
     persist_gamma_regime: bool = False
     alert_settings: AlertSettings | None = None
+    provider_failover_settings: ProviderFailoverSettings | None = None
     event_bucket_seconds: int = 300
 
     def evaluate(
@@ -118,6 +120,7 @@ class AlertEngineEvaluator:
             persist_movement_state=self.persist_movement_state,
             persist_gamma_regime=self.persist_gamma_regime,
             alert_settings=self.alert_settings or DEFAULT_ALERT_SETTINGS,
+            provider_failover_settings=self.provider_failover_settings,
         )
         alerts = payload.get("alerts")
         if isinstance(alerts, list):
@@ -146,6 +149,7 @@ def evaluate_state_to_events(
     persist_movement_state: bool = False,
     persist_gamma_regime: bool = False,
     alert_settings: AlertSettings | None = None,
+    provider_failover_settings: ProviderFailoverSettings | None = None,
     event_bucket_seconds: int = 300,
 ) -> tuple[DomainEvent, ...]:
     """Test/helper entry that skips the projection store."""
@@ -158,6 +162,7 @@ def evaluate_state_to_events(
         persist_movement_state=persist_movement_state,
         persist_gamma_regime=persist_gamma_regime,
         alert_settings=alert_settings or DEFAULT_ALERT_SETTINGS,
+        provider_failover_settings=provider_failover_settings,
     )
     return domain_events_from_payload(
         payload,

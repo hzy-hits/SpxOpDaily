@@ -99,6 +99,49 @@ def test_environment_overrides_defaults(monkeypatch: pytest.MonkeyPatch) -> None
     assert settings.sources["intraday_shock.max_spx_age_seconds"].origin == "environment"
 
 
+def test_provider_failover_environment_overrides_resolve_in_typed_policy() -> None:
+    settings = load_settings(
+        defaults_path=FIXTURE,
+        environ={
+            "PROVIDER_FAILOVER_ENABLED": "false",
+            "PROVIDER_FAILOVER_CONTROL_IBKR_STREAM_ENABLED": "true",
+            "PROVIDER_FAILOVER_STATE_PATH": "/tmp/failover-state.json",
+            "PROVIDER_FAILOVER_STATE_MAX_AGE_SECONDS": "51.5",
+            "PROVIDER_FAILOVER_QUOTE_MAX_AGE_SECONDS": "52.5",
+            "PROVIDER_FAILOVER_CONTROL_STATE_MAX_AGE_SECONDS": "61.5",
+            "PROVIDER_FAILOVER_TRANSITION_ALERT_MAX_AGE_SECONDS": "901.5",
+            "PROVIDER_FAILOVER_RTH_ONLY": "true",
+            "PROVIDER_FAILOVER_GTH_MIN_LIVE_OPTION_CONTRACTS": "24",
+            "PROVIDER_FAILOVER_GTH_OPTION_QUOTE_MAX_AGE_SECONDS": "91.5",
+            "PROVIDER_FAILOVER_SCHWAB_UNHEALTHY_OBSERVATIONS": "5",
+            "PROVIDER_FAILOVER_SCHWAB_RECOVERY_OBSERVATIONS": "6",
+            "PROVIDER_FAILOVER_IBKR_UNHEALTHY_OBSERVATIONS": "7",
+            "PROVIDER_FAILOVER_IBKR_RECOVERY_OBSERVATIONS": "8",
+        },
+    )
+
+    policy = settings.runtime
+    assert policy.provider_failover_enabled is False
+    assert policy.control_ibkr_stream_enabled is True
+    assert policy.provider_failover_state_path == "/tmp/failover-state.json"
+    assert policy.provider_failover_state_max_age_seconds == 51.5
+    assert policy.provider_failover_quote_max_age_seconds == 52.5
+    assert policy.provider_failover_control_state_max_age_seconds == 61.5
+    assert policy.provider_failover_transition_alert_max_age_seconds == 901.5
+    assert policy.provider_failover_monitor_rth_only is True
+    assert policy.provider_failover_gth_min_live_option_contracts == 24
+    assert policy.provider_failover_gth_option_quote_max_age_seconds == 91.5
+    assert policy.provider_failover_schwab_unhealthy_observations == 5
+    assert policy.provider_failover_schwab_recovery_observations == 6
+    assert policy.provider_failover_ibkr_unhealthy_observations == 7
+    assert policy.provider_failover_ibkr_recovery_observations == 8
+    assert settings.sources["provider_failover.state_path"].origin == "environment"
+    assert (
+        settings.sources["provider_failover.ibkr_recovery_observations"].origin
+        == "environment"
+    )
+
+
 def test_deployment_overlay_beats_defaults(tmp_path: Path) -> None:
     deployment = tmp_path / "deployment.toml"
     deployment.write_text("[steven.enabled]\nvalue = true\n", encoding="utf-8")

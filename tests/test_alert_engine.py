@@ -1144,7 +1144,7 @@ def test_run_persists_system_events_when_notifications_disabled(tmp_path, monkey
     persist_calls: list[LatestState] = []
     monkeypatch.setattr(
         "spx_spark.alert_engine.persist_system_event_state",
-        lambda state: persist_calls.append(state),
+        lambda state, **_kwargs: persist_calls.append(state),
     )
     monkeypatch.setenv("ALERT_NOTIFY_ENABLED", "false")
     monkeypatch.setenv("ALERT_SYSTEM_EVENT_STATE_PATH", str(tmp_path / "system-event-state.json"))
@@ -1214,7 +1214,10 @@ def test_run_reconciles_exact_position_event_acknowledgements(monkeypatch) -> No
         "spx_spark.alert_engine.reconcile_position_event_acknowledgements",
         lambda event_ids: reconciled.append(event_ids) or True,
     )
-    monkeypatch.setattr("spx_spark.alert_engine.persist_system_event_state", lambda state: None)
+    monkeypatch.setattr(
+        "spx_spark.alert_engine.persist_system_event_state",
+        lambda state, **_kwargs: None,
+    )
     monkeypatch.setattr("spx_spark.alert_engine.persist_movement_state_snapshot", lambda state: None)
 
     run(["--notify", "--json"])
@@ -1268,7 +1271,10 @@ def test_run_persists_movement_bucket_after_outbox_acceptance(monkeypatch) -> No
         "spx_spark.alert_engine.reconcile_position_event_acknowledgements",
         lambda _event_ids: True,
     )
-    monkeypatch.setattr("spx_spark.alert_engine.persist_system_event_state", lambda _state: None)
+    monkeypatch.setattr(
+        "spx_spark.alert_engine.persist_system_event_state",
+        lambda _state, **_kwargs: None,
+    )
     monkeypatch.setattr(
         "spx_spark.alert_engine.persist_movement_state_snapshot",
         lambda persisted_state: persisted.append(persisted_state),
@@ -1325,7 +1331,10 @@ def test_run_does_not_persist_movement_bucket_after_delivery_failure(monkeypatch
         "spx_spark.alert_engine.reconcile_position_event_acknowledgements",
         lambda _event_ids: True,
     )
-    monkeypatch.setattr("spx_spark.alert_engine.persist_system_event_state", lambda _state: None)
+    monkeypatch.setattr(
+        "spx_spark.alert_engine.persist_system_event_state",
+        lambda _state, **_kwargs: None,
+    )
     monkeypatch.setattr(
         "spx_spark.alert_engine.persist_movement_state_snapshot",
         lambda persisted_state: persisted.append(persisted_state),
