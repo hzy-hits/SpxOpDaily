@@ -1,3 +1,6 @@
+> **状态（2026-08-08）：本表保留历史迁移目标用于审计。P5-2 剩余项、P6 和
+> P7 均不在当前施工队列；标记为 P6/P7 不表示应立即迁移或删除。**
+
 | 实体（unit/script/db/json） | 类型 | 当前 owner 模块 | 唯一消费者 | 目标归属（按 1.3/1.4） | 目标删除 Phase |
 |---|---|---|---|---|---|
 | `systemd/ibc-gateway.service` | unit | `scripts/start-ibc-gateway.sh` | user systemd | 外部 `ibc-gateway` | 保留 |

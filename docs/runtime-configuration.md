@@ -1,8 +1,8 @@
 # Runtime configuration
 
-> **状态（2026-08-08）：旧 `runtime.yaml` 已迁为 `runtime.toml`，重复的 `runtime_config.py` loader 已删除；legacy settings loader 与 `config.py` env helper 尚未完全退役。**
-> 这是 Phase 5 的过渡切片，不是配置简化的终点。新配置只允许进入最小
-> pydantic-settings `AppSettings`；不得向过渡 TOML 增加键、env helper 或 loader 兼容分支。
+> **状态（2026-08-08）：旧 `runtime.yaml` 已迁为 `runtime.toml`，重复的 `runtime_config.py` loader 已删除；剩余 legacy settings loader 与 `config.py` env helper 已按执行方案第 0 节接受为按需技术债，P5-2 不再是施工队列。**
+> 新配置只允许进入最小 pydantic-settings `AppSettings`；不得向过渡 TOML
+> 增加键、env helper 或 loader 兼容分支。仅在实际修改对应 owner 时就地迁移。
 
 Operational runtime defaults currently live in `config/runtime.toml`; Python loads
 them through the typed `spx_spark.settings.load_settings()` (`AppSettings`) owner. Secrets remain in
@@ -85,8 +85,9 @@ Algorithm constants and protocol identities stay in code. Examples include
 basis-point conversions, schema versions, exchange/protocol multipliers and
 un-overridden model thresholds used as mathematical identities or algorithm
 definitions. Only mutable operational defaults belong in the transitional runtime
-TOML; each surviving key must move to the minimal `AppSettings` or be retired
-before P5-2 closes.
+TOML. When an owning module is materially changed, its surviving keys must move
+to the minimal `AppSettings` or be retired in the same change; no repository-wide
+P5-2 cleanup remains scheduled.
 
 ## Session finalization and storage pressure
 
