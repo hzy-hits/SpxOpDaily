@@ -796,7 +796,7 @@ class NotificationSettings:
                 "ALERT_NOTIFY_KIND_RATE_LIMIT_SECONDS",
                 float(settings_value("notification.kind_rate_limit_seconds")),
             ),
-            **notification_delivery_settings(data_root),
+            **notification_delivery_settings(),
             review_audit_path=env_str(
                 "ALERT_NOTIFY_REVIEW_AUDIT_PATH",
                 f"{data_root.rstrip('/')}/latest/alert_review_audit.jsonl",

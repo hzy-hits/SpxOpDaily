@@ -59,8 +59,11 @@ if [[ "${1:-}" == "--now" ]]; then
   # Stop loaded legacy owners before their now-deleted unit files disappear on
   # daemon-reload. The old notification queue must be drained by the cutover
   # preflight before this installer is invoked.
-  systemctl --user disable --now "${retired_units[@]}" || true
   for unit in "${retired_units[@]}"; do
+    # Stop each loaded owner independently. A deleted/not-loaded unit must not
+    # short-circuit later live owners in this list.
+    systemctl --user stop "$unit" || true
+    systemctl --user disable "$unit" || true
     rm -f "$USER_UNIT_DIR/$unit"
   done
 fi

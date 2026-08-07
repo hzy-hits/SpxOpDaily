@@ -6,7 +6,7 @@ import pytest
 from pydantic import ValidationError
 from typer.testing import CliRunner
 
-from spx_spark.app_settings import AppSettings
+from spx_spark.app_settings import AppSettings, get_settings
 from spx_spark.cli import app
 from spx_spark.config import NotificationSettings
 
@@ -109,6 +109,24 @@ def test_notify_test_queues_one_real_verification_event(
     assert envelope.kind == "notification_test"
     assert envelope.lane == "execution_safety"
     assert kwargs["title"] == "SPX notification test"
+
+
+def test_notification_queue_uses_operational_root_not_market_data_root(
+    settings_cwd: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    operational_root = tmp_path / "operational"
+    market_data_root = tmp_path / "market-data"
+    monkeypatch.setenv("SPX_DATA_ROOT", str(operational_root))
+    monkeypatch.setenv("MARKET_DATA_DATA_ROOT", str(market_data_root))
+    monkeypatch.delenv("SPX_NOTIFICATION_DATABASE_PATH", raising=False)
+    get_settings.cache_clear()
+    try:
+        settings = NotificationSettings.from_env()
+    finally:
+        get_settings.cache_clear()
+
+    assert settings.notification_database_path == str(operational_root / "spx.sqlite")
+    assert settings.notification_database_path != str(market_data_root / "spx.sqlite")
 
 
 def test_data_command_forwards_to_existing_owners(

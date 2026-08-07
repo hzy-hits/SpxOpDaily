@@ -6,6 +6,7 @@ import json
 import os
 from typing import Mapping
 
+from spx_spark.app_settings import get_settings
 from spx_spark.settings.loader import settings_value
 
 
@@ -64,17 +65,17 @@ def _target_map(name: str, default: object) -> tuple[tuple[str, str, str], ...]:
     return tuple(targets)
 
 
-def notification_delivery_settings(data_root: str) -> dict[str, object]:
+def notification_delivery_settings() -> dict[str, object]:
     """Return kwargs consumed by ``NotificationSettings.from_env``."""
 
-    root = data_root.rstrip("/")
+    operational_database = get_settings().data_root / "spx.sqlite"
     return {
         "notification_queue_enabled": _bool(
             "SPX_NOTIFICATION_QUEUE_ENABLED",
             bool(settings_value("notification.queue_enabled")),
         ),
         "notification_database_path": _env("SPX_NOTIFICATION_DATABASE_PATH")
-        or f"{root}/spx.sqlite",
+        or str(operational_database),
         "rust_trader_notification_owner": _bool(
             "SPX_RUST_TRADER_NOTIFICATION_OWNER",
             bool(settings_value("notification.rust_trader_notification_owner")),

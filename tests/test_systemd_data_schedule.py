@@ -129,8 +129,17 @@ def test_main_installer_refuses_non_master_dirty_or_unpushed_deployments() -> No
     assert '[[ "$DEPLOY_HEAD" != "$DEPLOY_ORIGIN_MASTER" ]]' in installer
     assert "uv sync --frozen" in installer
     assert installer.index("systemd unit drift") < installer.index(
-        'disable --now "${retired_units[@]}"'
+        'for unit in "${retired_units[@]}"'
     )
+
+
+def test_main_installer_stops_each_retired_owner_independently() -> None:
+    installer = read("scripts/install-spx-spark-services.sh")
+
+    loop = installer[installer.index('for unit in "${retired_units[@]}"') :]
+    assert 'systemctl --user stop "$unit" || true' in loop
+    assert 'systemctl --user disable "$unit" || true' in loop
+    assert 'disable --now "${retired_units[@]}"' not in installer
 
 
 def test_main_installer_owns_the_persistent_order_map_timer() -> None:
