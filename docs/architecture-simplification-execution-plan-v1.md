@@ -555,7 +555,9 @@ def maintenance_daily() -> None:
 - P6-1 ledger：Python DB 接管（依赖 P5-1）；cutover 后用只读查询核对 Rust ledger 最后写入时间戳早于 cutover 时刻，证明无双写（C13）。
 - P6-2 report：report schedule 迁为 Huey task；对比一个周期的 report 产出。
 - P6-3 contract 清理：删除 `contracts/golden/`、`tests/golden/`、`tests/contracts/`、`tests/test_shared_golden_contracts.py`、`tests/test_rust_operator_notification_ingress.py` 及 Python 侧 bridge 写入代码。
-- P6-4 退役：`systemctl --user disable` 全部 `spx-rust-*` unit → 观察一周 → 打 tag `pre-rust-removal` → 从 active tree 删除 `rust/` 与 `rust/systemd/`。
+- P6-4 退役：Rust 在 Oracle 上是 host system units，必须按依赖反序执行
+  `sudo systemctl disable --now spx-rust-normalized-bridge.service spx-rust-report.service spx-rust-delivery.service spx-rust-frame-retention.timer spx-rust-core-shadow.service`
+  （不得使用 `systemctl --user`）→ 观察一周 → 打 tag `pre-rust-removal` → 从 active tree 删除 `rust/` 与 `rust/systemd/`。
 - 每步独立回滚点；报告附 Rust 侧时间戳核对原始输出。
 
 ### Phase 7：数据平台简化
@@ -644,4 +646,5 @@ def maintenance_daily() -> None:
 | 2026-08-07 | production safety: Rust frame retention | +0 / -0 | production +1 / -1 | +0 / -0 | +0 / -0（1 unit 策略值） | +0 / -0 | +0 / -0 | Oracle `/srv/data` 触发 20 GiB reserve 并导致 bridge start-limit；官方 manifest-gated prune 已恢复写入，日终 raw-frame 上限由 12 GiB 降至 8 GiB，归档验证和 7 天 completed-day 保护不变 |
 | 2026-08-08 | P3/P4/P5 production cutover remediation | +0 / -0 | production +6 / -2 | +0 / -0 | +0 / -0（installer stop 语义修复） | +0 / -0 | +0 / -0 | Oracle 首次 cutover 暴露两项真实问题：已删除但仍 loaded 的 unit 使批量 stop 短路，以及旧 market-data root 生成第二个 `spx.sqlite`；改为逐 unit 独立 stop，并强制通知队列使用 AppSettings operational root；56 tests、Ruff、Import Linter PASS；重新部署后 Bark/飞书实投均一次 delivered，错误 DB 已移入 rollback 备份 |
 | 2026-08-08 | deployment idempotence remediation | +0 / -0 | production +1 / -1 | +0 / -0 | +0 / -0（Core restart 语义） | +0 / -0 | +0 / -0 | `--now` 对首次 cutover 和后续部署统一执行 Core enable+restart；避免 editable checkout fast-forward 后旧进程继续运行旧模块；18 个 systemd 测试与 `bash -n` PASS，Oracle 本次已完成等价 restart，后续由 installer 自动执行 |
-| 2026-08-08 | P5-2 duplicate runtime loader removal | +0 / -1 | production +57 / -208（net -151） | +0 / -0 | +0 / -0 | +0 / -0 | +0 / -0 | 删除重复 `runtime_config.py`，Schwab universe 与 human-focus 默认值迁入现有 typed settings owner；128 个相关测试、Ruff、Import Linter、tracked production-config smoke 与 diff-check PASS；Oracle cutover 待完成 |
+| 2026-08-08 | P5-2 duplicate runtime loader removal | +0 / -1 | production +57 / -208（net -151） | +0 / -0 | +0 / -0 | +0 / -0 | +0 / -0 | 删除重复 `runtime_config.py`，Schwab universe 与 human-focus 默认值迁入现有 typed settings owner；128 个相关测试、Ruff、Import Linter、tracked production-config smoke 与 diff-check PASS；Oracle 已 fast-forward 到 `1261e97`，Core/Worker/IBKR/Schwab units active 且 NRestarts=0，Python Bark/飞书测试均一次 delivered |
+| 2026-08-08 | P5-2 obsolete runtime-value budget removal | +0 / -1 | production +0 / -0 | +0 / -0 | +0 / -0 | +0 / -0 | +0 / -0 | `runtime_value()` 已无定义和调用，删除 128 行专属 allowlist 测试；64 个 architecture tests、Ruff、Import Linter 与 diff-check PASS |

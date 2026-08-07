@@ -129,3 +129,6 @@ Ruff, Import Linter 2/2 and `git diff --check` passed.
   dependencies, config keys, units, scripts and DB tables are unchanged.
 - Validation: 128 relevant tests passed; Ruff, Import Linter 2/2, tracked
   production-config smoke and `git diff --check` passed.
+- The obsolete per-file `runtime_value()` call-budget test is deleted after
+  the helper itself reaches zero call sites; Import Linter remains the active
+  architecture boundary.
