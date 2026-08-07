@@ -311,3 +311,10 @@ Ruff, Import Linter 2/2 and `git diff --check` passed.
   tests pass; Ruff, Import Linter 2/2 and `git diff --check` pass. Deployment
   must compare resolved Oracle policy, restart only affected Python owners and
   verify actual Bark/Feishu receipts.
+- Deployment evidence: Oracle fast-forwarded to `161144a`; the official
+  installer completed successfully. Core, Worker, IBKR stream, Schwab market
+  data and Schwab OAuth are active/running with `NRestarts=0`; resolved policy
+  matches the preflight baseline. Test event
+  `notify-test:20260807T211411Z:566185f0` produced first-attempt delivered rows
+  for Bark and Feishu. The weekend SPX quote remains stale by design while the
+  IBKR provider is available, so no natural READY is claimed.
