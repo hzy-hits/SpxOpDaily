@@ -57,7 +57,6 @@ def http_permanent_error(exc: Exception) -> bool:
         and exc.code != 429
     )
 
-
 def resolve_default_weixin_delivery(
     *,
     account: str,
@@ -710,65 +709,6 @@ def run_openclaw_agent(
             ok=completed.returncode == 0 and bool(message),
             exit_code=completed.returncode,
             error=(completed.stderr or completed.stdout).strip() if completed.returncode else None,
-        ),
-        message,
-    )
-
-
-def run_grok_agent(
-    settings: NotificationSettings,
-    prompt: str,
-    *,
-    system: str | None = None,
-    runner: CommandRunner = default_runner,
-) -> tuple[SinkResult, str]:
-    """Run the local Grok CLI as a text-only reviewer or writer."""
-
-    combined_prompt = f"{system}\n\n{prompt}" if system else prompt
-    with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".md", delete=True) as handle:
-        handle.write(combined_prompt)
-        handle.flush()
-        command = [
-            settings.grok_command,
-            "--model",
-            settings.grok_model,
-            "--reasoning-effort",
-            settings.grok_reasoning_effort,
-            "--no-subagents",
-            "--no-memory",
-            "--disable-web-search",
-            "--verbatim",
-            "--max-turns",
-            "1",
-            "--permission-mode",
-            "plan",
-            "--output-format",
-            "plain",
-            "--cwd",
-            settings.grok_cwd,
-            "--prompt-file",
-            handle.name,
-        ]
-        try:
-            completed = runner(command, settings.grok_timeout_seconds)
-        except Exception as exc:  # noqa: BLE001
-            return (
-                SinkResult(sink="grok_cli", attempted=True, ok=False, error=str(exc)),
-                "",
-            )
-
-    message = (completed.stdout or "").strip()
-    if len(message) > settings.grok_output_max_chars:
-        message = message[: settings.grok_output_max_chars].rstrip() + "\n..."
-    return (
-        SinkResult(
-            sink="grok_cli",
-            attempted=True,
-            ok=completed.returncode == 0 and bool(message),
-            exit_code=completed.returncode,
-            error=(completed.stderr or completed.stdout).strip()
-            if completed.returncode or not message
-            else None,
         ),
         message,
     )

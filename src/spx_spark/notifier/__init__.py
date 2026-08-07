@@ -36,7 +36,6 @@ from spx_spark.notifier.prompts import build_codex_prompt, format_alert_message
 from spx_spark.notifier.sinks import (
     openclaw_delivery_error,
     run_codex_exec,
-    run_grok_agent,
     run_openclaw_agent,
     send_bark_friend_message,
     send_bark_message,
@@ -80,7 +79,6 @@ __all__ = [
     "openclaw_delivery_error",
     "run_codex_exec",
     "run_deepseek_reviewer",
-    "run_grok_agent",
     "run_openclaw_agent",
     "select_alerts_for_notification",
     "send_bark_friend_message",

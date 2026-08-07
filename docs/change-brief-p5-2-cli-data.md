@@ -85,6 +85,21 @@ This follow-up deletes 19 files and changes +116/-225 tracked lines
 dependency or notification owner. Full validation: 2,973 tests passed; Import
 Linter kept 2/2 contracts; Ruff and `git diff --check` passed.
 
+## Dead configuration and Grok sink removal
+
+Fifteen settings with no live consumer are removed from the tracked TOML and
+frozen fixture: eight dormant Grok CLI values, three dataclass-only defaults,
+three Schwab endpoint descriptions whose paths are protocol constants in code,
+and one unused diagnostics limit. The exported `run_grok_agent` implementation
+and its eight compatibility fields are deleted; the scheduled writer already
+forces `deepseek,openclaw` and no production path called this sink.
+
+This slice changes +18/-173 lines (production +0/-102), config leaves 663 -> 648,
+and does not change the active DeepSeek model, Bark/Feishu delivery, service
+ownership, dependencies, databases or strategy policy. The TOML fixture remains
+byte-semantically equal after parsing. Full validation: 2,972 tests passed;
+Ruff, Import Linter 2/2 and `git diff --check` passed.
+
 ## Complexity and validation
 
 - Tracked diff: +2,026/-4,235 lines, net -2,209. The compact TOML files are

@@ -18,7 +18,6 @@ from spx_spark.notifier import (
     notify_payload,
     openclaw_delivery_error,
     run_codex_exec,
-    run_grok_agent,
     run_openclaw_agent,
     select_alerts_for_notification,
     send_bark_message,
@@ -320,35 +319,6 @@ def test_openclaw_agent_uses_configured_model_and_thinking(tmp_path) -> None:
     assert "--deliver" not in command
 
 
-def test_grok_agent_uses_configured_model_and_read_only_mode(tmp_path) -> None:
-    calls: list[list[str]] = []
-
-    def runner(command: list[str], timeout_seconds: float) -> subprocess.CompletedProcess[str]:
-        calls.append(command)
-        return subprocess.CompletedProcess(command, 0, stdout="需要看盘: 突破确认", stderr="")
-
-    settings = replace(
-        make_settings(str(tmp_path / "notify-state.json")),
-        grok_enabled=True,
-        grok_model="grok-4.5",
-        grok_reasoning_effort="high",
-        grok_cwd="/home/ubuntu/spx-spark",
-    )
-
-    result, message = run_grok_agent(settings, "analyze this alert", runner=runner)
-
-    assert result.ok is True
-    assert message == "需要看盘: 突破确认"
-    command = calls[0]
-    assert command[command.index("--model") + 1] == "grok-4.5"
-    assert command[command.index("--reasoning-effort") + 1] == "high"
-    assert command[command.index("--permission-mode") + 1] == "plan"
-    assert "--no-subagents" in command
-    assert "--disable-web-search" in command
-    assert "--verbatim" in command
-    assert command[command.index("--max-turns") + 1] == "1"
-
-
 def test_scheduled_writer_forces_deepseek_first_and_excludes_grok(monkeypatch) -> None:
     monkeypatch.setenv(
         "SPX_PUSH_LLM_PROVIDER_ORDER",
@@ -361,10 +331,10 @@ def test_scheduled_writer_forces_deepseek_first_and_excludes_grok(monkeypatch) -
 def test_runtime_settings_ignore_legacy_grok_enable_override(monkeypatch) -> None:
     monkeypatch.setenv("ALERT_NOTIFY_GROK_ENABLED", "true")
 
-    assert NotificationSettings.from_env().grok_enabled is False
+    assert not hasattr(NotificationSettings.from_env(), "grok_enabled")
 
 
-def test_alert_pipeline_ignores_dormant_grok_flag_and_uses_deepseek(
+def test_alert_pipeline_uses_deepseek_without_local_grok_candidate(
     tmp_path,
 ) -> None:
     def runner(command: list[str], timeout_seconds: float) -> subprocess.CompletedProcess[str]:
@@ -383,7 +353,6 @@ def test_alert_pipeline_ignores_dormant_grok_flag_and_uses_deepseek(
     ]
     settings = replace(
         make_settings(str(tmp_path / "notify-state.json")),
-        grok_enabled=True,
         deepseek_enabled=True,
         openclaw_agent_enabled=False,
         codex_enabled=False,
