@@ -29,9 +29,7 @@ _CANCELLATION_SUCCESS_DISPOSITIONS = frozenset(
         "duplicate_ingress",
     }
 )
-_PERMANENT_REJECTIONS = frozenset(
-    {"invalid_contract_json", "invalid_frame_size"}
-)
+_PERMANENT_REJECTIONS = frozenset({"invalid_contract_json", "invalid_frame_size"})
 _ACK_KEYS = frozenset(
     {
         "schema_version",
@@ -73,17 +71,36 @@ def deliver_operator_notification(
 ) -> SinkResult:
     """Send one immutable framed request and classify the typed acknowledgement."""
 
+    return deliver_operator_template(
+        settings,
+        envelope=job.envelope,
+        title=job.title,
+        text=job.text,
+    )
+
+
+def deliver_operator_template(
+    settings: NotificationSettings,
+    *,
+    envelope: NotificationEnvelope,
+    title: str,
+    text: str,
+) -> SinkResult:
+    """Send one final template without requiring the legacy outbox job type."""
+
     try:
         result = _deliver_message(
             settings,
-            build_operator_ingress_message(job),
+            build_operator_ingress_message_fields(
+                envelope=envelope,
+                title=title,
+                text=text,
+            ),
             success_dispositions=_OPERATOR_SUCCESS_DISPOSITIONS,
         )
         return replace(
             result,
-            verdict=(
-                f"forwarded_to_rust:{result.verdict}" if result.ok else result.verdict
-            ),
+            verdict=(f"forwarded_to_rust:{result.verdict}" if result.ok else result.verdict),
         )
     except ValueError as exc:
         return SinkResult(
@@ -124,11 +141,7 @@ def deliver_operator_notification_cancellation(
         )
         return replace(
             result,
-            verdict=(
-                f"rust_cancellation_fenced:{result.verdict}"
-                if result.ok
-                else result.verdict
-            ),
+            verdict=(f"rust_cancellation_fenced:{result.verdict}" if result.ok else result.verdict),
         )
     except ValueError as exc:
         return SinkResult(
@@ -143,16 +156,25 @@ def deliver_operator_notification_cancellation(
             sink="rust_ingress",
             attempted=True,
             ok=False,
-            error=(
-                "rust_ingress_cancellation_outcome_unknown:"
-                f"{type(exc).__name__}:{exc}"
-            ),
+            error=(f"rust_ingress_cancellation_outcome_unknown:{type(exc).__name__}:{exc}"),
             permanent=False,
         )
 
 
 def build_operator_ingress_message(job: DeliveryJob) -> dict[str, object]:
-    envelope = job.envelope
+    return build_operator_ingress_message_fields(
+        envelope=job.envelope,
+        title=job.title,
+        text=job.text,
+    )
+
+
+def build_operator_ingress_message_fields(
+    *,
+    envelope: NotificationEnvelope,
+    title: str,
+    text: str,
+) -> dict[str, object]:
     envelope.validate()
     role = operator_notification_role(envelope)
     if role is None:
@@ -162,19 +184,16 @@ def build_operator_ingress_message(job: DeliveryJob) -> dict[str, object]:
     if not envelope.operator_targets:
         raise ValueError("operator notification requires frozen targets")
     _validate_token(envelope.event_id, "event_id")
-    _validate_token(job.title, "title")
-    if not job.text.strip():
+    _validate_token(title, "title")
+    if not text.strip():
         raise ValueError("body is required")
-    if "\0" in job.text:
+    if "\0" in text:
         raise ValueError("body contains NUL")
-    if len(job.text.encode("utf-8")) > 65_536:
+    if len(text.encode("utf-8")) > 65_536:
         raise ValueError("body exceeds 65536 UTF-8 bytes")
     opportunity_id = envelope.operator_opportunity_id or _opportunity_id(envelope)
     _validate_token(opportunity_id, "opportunity_id")
-    targets = [
-        {"key": key, "channel": channel}
-        for key, channel in envelope.operator_targets
-    ]
+    targets = [{"key": key, "channel": channel} for key, channel in envelope.operator_targets]
     for target in targets:
         _validate_token(str(target["key"]), "target key")
     payload: dict[str, object] = {
@@ -186,8 +205,8 @@ def build_operator_ingress_message(job: DeliveryJob) -> dict[str, object]:
         "role": role,
         "occurred_at": envelope.occurred_at.isoformat(),
         "expires_at": envelope.expires_at.isoformat(),
-        "title": job.title,
-        "body": job.text,
+        "title": title,
+        "body": text,
         "targets": targets,
         "automatic_ordering": False,
     }
@@ -233,8 +252,7 @@ def build_operator_cancellation_message(
     ).encode("utf-8")
     return {
         "schema_version": "spx_ingress.v1",
-        "message_id": "cancel-msg:"
-        + hashlib.sha256(canonical_payload).hexdigest()[:24],
+        "message_id": "cancel-msg:" + hashlib.sha256(canonical_payload).hexdigest()[:24],
         "emitted_at": frozen_at,
         "message": {
             "kind": "operator_notification_cancellation",

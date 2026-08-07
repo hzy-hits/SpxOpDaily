@@ -242,8 +242,11 @@ def begin_attempt(
     engine: Engine,
     event_id: int,
     *,
+    max_attempts: int = 3,
     now: datetime | None = None,
 ) -> Attempt | None:
+    if max_attempts < 1:
+        raise ValueError("max_attempts must be positive")
     at = _now(now)
     with engine.begin() as connection:
         row = (
@@ -272,6 +275,8 @@ def begin_attempt(
             sa.select(sa.func.max(attempts.c.attempt_no)).where(attempts.c.event_id == event_id)
         ).scalar_one_or_none()
         attempt_no = int(previous or 0) + 1
+        if attempt_no > max_attempts:
+            return None
         connection.execute(
             sa.update(events)
             .where(events.c.id == event_id)

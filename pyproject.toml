@@ -120,5 +120,7 @@ ignore_imports = [
   "spx_spark.infrastructure.jobs -> spx_spark.session_finalize",
   # TODO P4-2: replace this direct legacy notifier entry during notification cutover.
   "spx_spark.infrastructure.jobs -> spx_spark.application.schwab_reauth_reminder",
+  # TODO P4-2: remove when Huey task registration moves above both application and infra.
+  "spx_spark.infrastructure.jobs -> spx_spark.application.notifications.unified_delivery",
 ]
 exhaustive = false
