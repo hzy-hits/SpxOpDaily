@@ -85,6 +85,7 @@ fn prune_cli_obeys_the_cross_process_directory_lock() {
             "1",
             "--max-total-bytes",
             "67108864",
+            "--dry-run",
         ])
         .env_remove("SPX_CORE_RAW_LOG_DIR")
         .stdout(Stdio::null())
@@ -115,7 +116,7 @@ fn prune_cli_obeys_the_cross_process_directory_lock() {
         .read_to_string(&mut stderr)
         .expect("read child stderr");
     assert!(status.success(), "prune failed: {stderr}");
-    assert!(!old_segment.exists());
+    assert!(old_segment.exists());
 }
 
 #[test]
@@ -149,4 +150,39 @@ fn prune_cli_rejects_raw_log_environment_redirection() {
     assert!(stderr.contains("SPX_CORE_RAW_LOG_DIR"), "stderr: {stderr}");
     assert!(!configured.join(DIRECTORY_LOCK_FILE).exists());
     assert!(!redirected.join(DIRECTORY_LOCK_FILE).exists());
+}
+
+#[test]
+fn prune_cli_requires_archive_barrier_for_actual_deletion() {
+    let temp = TempDir::new().expect("temporary directory");
+    let raw = temp.path().join("frames");
+    fs::create_dir(&raw).expect("create raw directory");
+    let raw = fs::canonicalize(raw).expect("canonical raw directory");
+    let old_date = Utc::now()
+        .date_naive()
+        .checked_sub_days(Days::new(10))
+        .expect("old date");
+    let source = raw.join(format!("{old_date}.0000.ndjson"));
+    fs::write(&source, b"must remain").expect("write source");
+    let config_path = write_config(&temp, &raw);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_spx-core"))
+        .args([
+            "prune-frames",
+            "--config",
+            config_path.to_str().expect("config path"),
+            "--keep-completed-days",
+            "1",
+            "--max-total-bytes",
+            "67108864",
+        ])
+        .env_remove("SPX_CORE_RAW_LOG_DIR")
+        .output()
+        .expect("run prune process");
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("--require-archive-root is mandatory")
+    );
+    assert!(source.exists());
 }

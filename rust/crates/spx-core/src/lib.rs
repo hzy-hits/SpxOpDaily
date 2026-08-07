@@ -3,6 +3,7 @@
 mod config;
 mod desk_map_projection;
 mod engine;
+mod frame_archive;
 mod projection;
 mod quote_book;
 mod raw_log;
@@ -19,8 +20,16 @@ pub use engine::{
     CoreEngine, CoreError, CoreOutcome, OperatorNotificationDisposition, PersistDisposition,
     QuoteDisposition,
 };
+pub use frame_archive::{
+    FRAME_ARCHIVE_SCHEMA_VERSION, FrameArchiveBatchReport, FrameArchiveError, FrameArchiveManifest,
+    FrameArchiveReport, FrameArchiveReportStatus, FrameArchiveSource, FrameArchiveStatus,
+    archive_completed_utc_backlog, archive_completed_utc_day,
+};
 pub use quote_book::{ApplyBatch, QuoteBook, QuoteBookError};
-pub use raw_log::{RawLogPruneReport, prune_raw_log};
+pub use raw_log::{
+    RawLogArchiveBarrierStatus, RawLogArchiveDenial, RawLogPruneReport, prune_raw_log,
+    prune_raw_log_with_archive,
+};
 pub use readiness::{ReadinessAssessment, assess_readiness};
 pub use research_projection::ResearchDisposition;
 pub use server::serve_unix;

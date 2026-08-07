@@ -65,6 +65,7 @@ LAYERS = {
     "post_close_quality": 5,
     "post_close_render": 5,
     "post_close_runtime": 5,
+    "session_finalize": 5,
     "latest_state": 5,
     "morning_map": 5,
     "order_map": 5,

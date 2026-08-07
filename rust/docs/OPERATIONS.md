@@ -77,6 +77,7 @@ work or create a claim/restart loop.
 /run/spx-spark-core/core.sock            local ingress socket
 /var/lib/spx-spark-core/ledger/          single SQLite/WAL operational ledger
 /var/lib/spx-spark-core/frames/          bounded *.NNNN.ndjson frame segments
+/var/lib/spx-spark-core/archive/         immutable completed-UTC-day archives and manifests
 /var/lib/spx-spark-core/latest/          replaceable health/projection files
 /var/lib/spx-spark-bridge/state.json     durable cursor and exact pending frame
 /var/lib/spx-spark-bridge/health.json    replaceable bridge health projection
@@ -84,13 +85,28 @@ work or create a claim/restart loop.
 ```
 
 The Oracle overlay replaces the generic frame path with
-`/srv/data/spx-spark/rust-core-shadow/frames`. Its
-`spx-rust-frame-retention.timer` runs hourly with a seven-completed-day policy
-and a 40 GiB cap. The retention command considers only strict
-`YYYY-MM-DD.NNNN.ndjson` regular files in the configured directory, never
-follows symlinks, and never deletes the current or a future UTC date. If those
-protected files alone exceed the cap, the timer fails visibly and the append
-reserve remains the final fail-closed guard.
+`/srv/data/spx-spark/rust-core-shadow/frames`; verified archives live in the
+sibling `archive` directory. At 18:30 `America/New_York`, after the Python
+session finalizer window, `spx-rust-frame-retention.timer` first runs
+`archive-frames --backlog-days 7` and then applies a seven-completed-day,
+12 GiB raw-frame policy. Backlog processing prioritizes missing artifacts
+oldest-first; existing artifacts can fill remaining batch slots only after
+idempotent verification, so a history longer than seven days advances instead
+of repeatedly selecting the same dates. Each day is streamed at zstd level 1 into a staging directory; every raw
+line, source size/SHA-256/count, canonical payload hash, compressed stream and
+manifest is verified before an fsync plus atomic rename publishes it.
+
+Pruning considers only strict `YYYY-MM-DD.NNNN.ndjson` regular files, never
+follows symlinks, and never deletes the current or a future UTC date. Production
+passes `--require-archive-root`: every policy candidate must appear in a
+verified manifest and still match the recorded source size and SHA-256. Any
+missing, corrupt or changed candidate withholds the whole deletion and is named
+in the JSON report. The CLI refuses every non-dry-run prune that omits this
+barrier. The oneshot allows up to six hours for AArch64 backfill and intentionally
+does not impose a memory cap on the streaming implementation. If protected files alone exceed the cap, the timer fails
+visibly and the append reserve remains the final fail-closed guard. These
+same-disk archives protect replayability from raw retention; they are not an
+off-host disaster-recovery backup.
 
 Never put broker tokens, API credentials, notification endpoints or private keys
 in TOML, systemd units, command lines, logs or replay artifacts. The delivery
@@ -300,10 +316,26 @@ test -S /run/spx-spark-core-shadow/core.sock
 systemctl --user status spx-spark-order-map-status.timer --no-pager
 /opt/spx-spark-core-shadow/current/bin/spx-core prune-frames \
   --config /etc/spx-spark-core-shadow/core.toml --keep-completed-days 7 \
-  --max-total-bytes 42949672960 --dry-run
+  --max-total-bytes 12884901888 --require-archive-root \
+  /srv/data/spx-spark/rust-core-shadow/archive --dry-run
 sudo systemctl status spx-rust-frame-retention.timer --no-pager
 sudo journalctl -u spx-rust-frame-retention.service -n 20 --no-pager
 ```
+
+Before a manual prune or first timer start, backfill and verify at most seven
+completed UTC days per invocation:
+
+```bash
+/opt/spx-spark-core-shadow/current/bin/spx-core archive-frames \
+  --config /etc/spx-spark-core-shadow/core.toml --backlog-days 7 \
+  --archive-root /srv/data/spx-spark/rust-core-shadow/archive
+```
+
+The command is idempotent: an existing date is accepted only after its archive,
+manifest and every still-present source segment verify. It never overwrites an
+inconsistent date artifact. `--utc-date YYYY-MM-DD` targets one completed day
+and conflicts with `--backlog-days`; with neither flag, the default is the
+previous UTC date.
 
 Do not log full ingress payloads if they can contain notification endpoints or
 other sensitive metadata. Structured logs should use IDs, enum states, ages and

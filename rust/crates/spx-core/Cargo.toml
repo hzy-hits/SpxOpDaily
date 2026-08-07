@@ -7,11 +7,14 @@ rust-version.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+bytecount.workspace = true
 chrono.workspace = true
 clap.workspace = true
+hex.workspace = true
 rustix.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 signal-hook.workspace = true
 spx-domain = { path = "../spx-domain" }
 spx-ledger = { path = "../spx-ledger" }
@@ -20,6 +23,7 @@ toml.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
+zstd.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

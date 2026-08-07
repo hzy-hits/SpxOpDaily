@@ -1,0 +1,12 @@
+[Unit]
+Description=Check SPX Spark storage pressure hourly
+
+[Timer]
+OnCalendar=*-*-* *:20:00
+Persistent=true
+AccuracySec=1min
+RandomizedDelaySec=2min
+Unit=spx-spark-storage-pressure.service
+
+[Install]
+WantedBy=timers.target

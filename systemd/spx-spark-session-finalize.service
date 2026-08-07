@@ -1,0 +1,38 @@
+[Unit]
+Description=Finalize the latest completed SPX trading session from one reusable payload
+After=network-online.target
+Wants=network-online.target
+RequiresMountsFor=/srv/data/spx-spark/data
+ConditionPathExists=/home/ubuntu/spx-spark/scripts/run-session-finalize.sh
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/ubuntu/spx-spark
+EnvironmentFile=-/home/ubuntu/spx-spark/.env
+Environment=PATH=/home/ubuntu/.local/bin:/home/ubuntu/.cargo/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/home/ubuntu/spx-spark/scripts/run-session-finalize.sh --date auto --json
+UMask=0077
+Nice=15
+IOSchedulingClass=idle
+CPUQuota=150%
+TimeoutStartSec=45min
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectClock=true
+ProtectControlGroups=true
+ProtectHome=read-only
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectSystem=strict
+ReadWritePaths=/srv/data/spx-spark/data
+ReadWritePaths=/srv/data/spx-spark/logs
+ReadWritePaths=/srv/data/spx-spark/runtime
+ReadWritePaths=-/home/ubuntu/research/finance/daily/spx-options-review
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+LockPersonality=true

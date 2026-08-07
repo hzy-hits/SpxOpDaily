@@ -83,6 +83,46 @@ basis-point conversions, schema versions, exchange/protocol multipliers and
 un-overridden model thresholds used as mathematical identities or algorithm
 definitions. Only mutable operational defaults belong in runtime YAML.
 
+## Session finalization and storage pressure
+
+`spx-spark-session-finalize.timer` runs daily at 18:00 New York wall time. Its
+top-level application resolves the latest completed exchange session, builds
+one deterministic immutable Replay artifact, verifies it, and then reuses the
+same payload for the optional LLM review and notification. Weekend and holiday
+runs are idempotent repair opportunities; they do not manufacture empty
+sessions. `Persistent=true` recovers a missed timer activation, while
+`data_platform.replay_finalize_backlog_days` bounds how many already-published
+artifact dates one pressure pass verifies. If the host misses multiple trading
+days, backfill each missing date explicitly with `--date YYYY-MM-DD`; automatic
+mode never invents or silently skips a historical review.
+
+The hourly `spx-spark-storage-pressure.timer` calls that same application with
+`--pressure-check`. Watermarks are typed configuration, not systemd literals:
+
+- `data_platform.storage_pressure_action_free_bytes`: 28 GiB by default;
+- `data_platform.storage_pressure_warning_free_bytes`: 24 GiB by default;
+- `data_platform.storage_pressure_critical_free_bytes`: 20 GiB by default;
+- `data_platform.replay_raw_delete_grace_hours`: minimum age after verified
+  publication before an eligible raw source can be removed.
+
+Free-space severity increases as available bytes cross those levels downward.
+The critical default matches the Oracle Rust raw-log reserve, while the higher
+levels leave room to finish compaction before ingress fails closed. Pressure
+never grants deletion authority by itself: the completed-day artifact,
+source/Parquet digests, row counts and grace gate must all pass. Any required
+artifact or verification failure exits non-zero without deleting raw data.
+
+The generic compaction CLI is permanently copy-only, and the hourly/weekend
+units additionally force `DATA_PLATFORM_RAW_DELETE_ENABLED=false` even if a
+legacy `.env` still enables the old 48-hour path. They continue producing
+verified Parquet and manifests; only the session finalizer may remove an exact
+raw partition.
+
+Both timer paths use the same outer `flock`. The systemd units deliberately do
+not pass watermark numbers, so `defaults < deployment < environment` remains
+the sole precedence rule. Put machine-specific overrides in the ignored
+`config/runtime.local.yaml`.
+
 ## Schwab symbol table
 
 `schwab.instruments` is the provider mapping table. It separates:

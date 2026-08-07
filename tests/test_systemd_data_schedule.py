@@ -69,10 +69,83 @@ def test_rth_daily_acceptance_runs_on_new_york_session_clock() -> None:
     assert "OnCalendar=Mon..Fri *-*-* 17:30:00 America/New_York" in timer
     assert "Persistent=true" in timer
     assert "spx_spark.application.order_map.rth_daily_acceptance" in runner
-    assert "enable --now spx-spark-post-close-review.timer" in installer
+    assert "disable --now spx-spark-post-close-review.timer" in installer
+    assert "enable --now spx-spark-post-close-review.timer" not in installer
     assert "spx-spark-rth-daily-acceptance.timer" in installer
     assert "enable --now spx-spark-rth-daily-acceptance.timer" in installer
     assert "restart spx-spark-rth-daily-acceptance.timer" in installer
+
+
+def test_session_finalizer_owns_daily_review_order_on_new_york_clock() -> None:
+    service = read("systemd/spx-spark-session-finalize.service")
+    timer = read("systemd/spx-spark-session-finalize.timer")
+    pressure_service = read("systemd/spx-spark-storage-pressure.service")
+    pressure_timer = read("systemd/spx-spark-storage-pressure.timer")
+    runner = read("scripts/run-session-finalize.sh")
+    installer = read("scripts/install-spx-spark-services.sh")
+
+    assert "OnCalendar=*-*-* 18:00:00 America/New_York" in timer
+    assert "Mon..Fri" not in timer  # weekends/holidays are idempotent repair runs
+    assert " UTC" not in timer  # named exchange timezone owns EDT/EST conversion
+    assert timer.count("OnCalendar=") == 1
+    assert "Persistent=true" in timer
+    assert "AccuracySec=1min" in timer
+    assert "spx-spark-session-finalize.service" in timer
+    assert "scripts/run-session-finalize.sh --date auto --json" in service
+    assert "TimeoutStartSec=45min" in service
+    assert "NoNewPrivileges=true" in service
+    assert "ProtectSystem=strict" in service
+    assert "ProtectHome=read-only" in service
+    assert "ReadWritePaths=/srv/data/spx-spark/data" in service
+    assert "ReadWritePaths=-/home/ubuntu/research/finance/daily/spx-options-review" in service
+    assert "MemoryMax=" not in service
+    assert "/srv/data/spx-spark/rust-core-shadow/frames" not in service
+
+    assert "spx-spark-session-finalize.lock" in runner
+    assert "command -v flock" in runner
+    assert "flock_command_unavailable" in runner
+    assert "flock -n 9" in runner
+    assert "python -m spx_spark.session_finalize" in runner
+    assert "run-post-close-review.sh" not in runner
+
+    assert "--date auto --json --pressure-check" in pressure_service
+    assert "MemoryMax=" not in pressure_service
+    assert "/srv/data/spx-spark/rust-core-shadow/frames" not in pressure_service
+    assert "OnCalendar=*-*-* *:20:00" in pressure_timer
+    assert "Persistent=true" in pressure_timer
+    assert "AccuracySec=1min" in pressure_timer
+    assert "spx-spark-storage-pressure.service" in pressure_timer
+
+    for unit in (
+        "spx-spark-session-finalize.service",
+        "spx-spark-session-finalize.timer",
+        "spx-spark-storage-pressure.service",
+        "spx-spark-storage-pressure.timer",
+    ):
+        assert unit in installer
+    assert "enable --now spx-spark-session-finalize.timer" in installer
+    assert "enable --now spx-spark-storage-pressure.timer" in installer
+    assert "disable --now spx-spark-post-close-review.timer" in installer
+
+
+def test_session_finalize_watermarks_stay_in_typed_config_not_systemd() -> None:
+    service = read("systemd/spx-spark-session-finalize.service")
+    pressure_service = read("systemd/spx-spark-storage-pressure.service")
+    runner = read("scripts/run-session-finalize.sh")
+    wiring = service + pressure_service + runner
+
+    assert "30064771072" not in wiring  # 28 GiB action watermark
+    assert "25769803776" not in wiring  # 24 GiB warning watermark
+    assert "21474836480" not in wiring  # 20 GiB critical/reserve watermark
+    assert "--pressure-check" in pressure_service
+
+
+def test_compactors_cannot_bypass_replay_artifact_deletion_gate() -> None:
+    hourly = read("systemd/spx-spark-data-compact.service")
+    weekend = read("systemd/spx-spark-data-compact-weekend.service")
+
+    assert "Environment=DATA_PLATFORM_RAW_DELETE_ENABLED=false" in hourly
+    assert "Environment=DATA_PLATFORM_RAW_DELETE_ENABLED=false" in weekend
 
 
 def test_main_installer_refuses_non_master_dirty_or_unpushed_deployments() -> None:

@@ -28,6 +28,11 @@ class DataPlatformSettings:
     raw_delete_enabled: bool
     raw_delete_grace_hours: int
     writer_version: str
+    replay_raw_delete_grace_hours: int = 24
+    replay_finalize_backlog_days: int = 7
+    storage_pressure_action_free_bytes: int = 30_064_771_072
+    storage_pressure_warning_free_bytes: int = 25_769_803_776
+    storage_pressure_critical_free_bytes: int = 21_474_836_480
 
     @classmethod
     def from_env(cls) -> "DataPlatformSettings":
@@ -78,6 +83,26 @@ class DataPlatformSettings:
                 str(settings_value("data_platform.writer_version")),
             )
             or str(settings_value("data_platform.writer_version")),
+            replay_raw_delete_grace_hours=env_int(
+                "DATA_PLATFORM_REPLAY_RAW_DELETE_GRACE_HOURS",
+                int(settings_value("data_platform.replay_raw_delete_grace_hours")),
+            ),
+            replay_finalize_backlog_days=env_int(
+                "DATA_PLATFORM_REPLAY_FINALIZE_BACKLOG_DAYS",
+                int(settings_value("data_platform.replay_finalize_backlog_days")),
+            ),
+            storage_pressure_action_free_bytes=env_int(
+                "DATA_PLATFORM_STORAGE_PRESSURE_ACTION_FREE_BYTES",
+                int(settings_value("data_platform.storage_pressure_action_free_bytes")),
+            ),
+            storage_pressure_warning_free_bytes=env_int(
+                "DATA_PLATFORM_STORAGE_PRESSURE_WARNING_FREE_BYTES",
+                int(settings_value("data_platform.storage_pressure_warning_free_bytes")),
+            ),
+            storage_pressure_critical_free_bytes=env_int(
+                "DATA_PLATFORM_STORAGE_PRESSURE_CRITICAL_FREE_BYTES",
+                int(settings_value("data_platform.storage_pressure_critical_free_bytes")),
+            ),
         )
 
     def __post_init__(self) -> None:
@@ -89,6 +114,20 @@ class DataPlatformSettings:
             raise ValueError("compaction minimum age cannot be negative")
         if self.raw_delete_grace_hours < 24:
             raise ValueError("raw delete grace must be at least 24 hours")
+        if self.replay_raw_delete_grace_hours < 24:
+            raise ValueError("replay raw delete grace must be at least 24 hours")
+        if self.replay_finalize_backlog_days <= 0:
+            raise ValueError("replay finalize backlog days must be positive")
+        if self.storage_pressure_critical_free_bytes < 20 * 1024**3:
+            raise ValueError("storage pressure critical threshold must be at least 20 GiB")
+        if not (
+            self.storage_pressure_action_free_bytes
+            > self.storage_pressure_warning_free_bytes
+            >= self.storage_pressure_critical_free_bytes
+        ):
+            raise ValueError(
+                "storage pressure thresholds must satisfy action > warning >= critical"
+            )
         for name in (
             "data_root",
             "ledger_path",

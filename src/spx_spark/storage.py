@@ -36,6 +36,20 @@ from spx_spark.marketdata import (
 LOGGER = logging.getLogger(__name__)
 
 
+@contextmanager
+def _raw_quote_path_lock(path: Path) -> Iterator[None]:
+    """Fence open/write against replay quarantine using a stable path lock."""
+
+    lock_path = path.with_name(f".{path.name}.lock")
+    with lock_path.open("a", encoding="utf-8") as handle:
+        os.fchmod(handle.fileno(), 0o600)
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
 @dataclass(frozen=True)
 class RawWriteResult:
     row_count: int
@@ -93,21 +107,21 @@ class JsonlQuoteWriter:
         path_counts: dict[str, int] = {}
         for path, rows in path_rows.items():
             path.parent.mkdir(parents=True, exist_ok=True)
-            with path.open("a", encoding="utf-8") as handle:
-                # Schwab REST, WebSocket, and other collectors are separate
-                # processes that can target the same provider/hour file.
-                # Hold one advisory lock through buffered flush/close so their
-                # multi-write JSONL records cannot interleave.
-                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-                for quote in rows:
-                    handle.write(
-                        json.dumps(
-                            quote.to_dict(include_raw=self.settings.include_raw_payload),
-                            sort_keys=True,
-                            separators=(",", ":"),
+            with _raw_quote_path_lock(path):
+                with path.open("a", encoding="utf-8") as handle:
+                    # Retain the inode lock for compatibility with older
+                    # writers during rollout; the stable adjacent path lock
+                    # also fences replay quarantine/rename before open().
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+                    for quote in rows:
+                        handle.write(
+                            json.dumps(
+                                quote.to_dict(include_raw=self.settings.include_raw_payload),
+                                sort_keys=True,
+                                separators=(",", ":"),
+                            )
                         )
-                    )
-                    handle.write("\n")
+                        handle.write("\n")
             path_counts[str(path)] = len(rows)
 
         return RawWriteResult(

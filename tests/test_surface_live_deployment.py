@@ -98,6 +98,7 @@ def test_live_deployment_shell_entrypoints_parse() -> None:
         "scripts/run-spxw-surface-live-service.sh",
         "scripts/install-spxw-surface-live-service.sh",
         "scripts/install-spx-spark-services.sh",
+        "scripts/run-session-finalize.sh",
     ):
         subprocess.run(
             ["bash", "-n", str(ROOT / relative)],

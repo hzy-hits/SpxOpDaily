@@ -39,6 +39,10 @@ ln -sfn "$ROOT/systemd/spx-spark-surface-dashboard.service" "$USER_UNIT_DIR/spx-
 ln -sfn "$ROOT/systemd/spx-spark-ibkr-stream.service" "$USER_UNIT_DIR/spx-spark-ibkr-stream.service"
 ln -sfn "$ROOT/systemd/spx-spark-post-close-review.service" "$USER_UNIT_DIR/spx-spark-post-close-review.service"
 ln -sfn "$ROOT/systemd/spx-spark-post-close-review.timer" "$USER_UNIT_DIR/spx-spark-post-close-review.timer"
+ln -sfn "$ROOT/systemd/spx-spark-session-finalize.service" "$USER_UNIT_DIR/spx-spark-session-finalize.service"
+ln -sfn "$ROOT/systemd/spx-spark-session-finalize.timer" "$USER_UNIT_DIR/spx-spark-session-finalize.timer"
+ln -sfn "$ROOT/systemd/spx-spark-storage-pressure.service" "$USER_UNIT_DIR/spx-spark-storage-pressure.service"
+ln -sfn "$ROOT/systemd/spx-spark-storage-pressure.timer" "$USER_UNIT_DIR/spx-spark-storage-pressure.timer"
 ln -sfn "$ROOT/systemd/spx-spark-rth-daily-acceptance.service" "$USER_UNIT_DIR/spx-spark-rth-daily-acceptance.service"
 ln -sfn "$ROOT/systemd/spx-spark-rth-daily-acceptance.timer" "$USER_UNIT_DIR/spx-spark-rth-daily-acceptance.timer"
 ln -sfn "$ROOT/systemd/spx-spark-order-map.service" "$USER_UNIT_DIR/spx-spark-order-map.service"
@@ -83,7 +87,12 @@ systemctl --user enable spx-spark-intraday-shock-hot.service
 systemctl --user enable spx-spark-notification-delivery.service
 systemctl --user enable spx-spark-surface-dashboard.service
 systemctl --user enable spx-spark-ibkr-stream.service
-systemctl --user enable --now spx-spark-post-close-review.timer
+# The deterministic finalizer now owns the post-close artifact, LLM and push
+# ordering from one payload. Keep the old review service for explicit manual
+# compatibility, but fence its timer so a deployment cannot duplicate work.
+systemctl --user disable --now spx-spark-post-close-review.timer
+systemctl --user enable --now spx-spark-session-finalize.timer
+systemctl --user enable --now spx-spark-storage-pressure.timer
 systemctl --user enable --now spx-spark-rth-daily-acceptance.timer
 systemctl --user enable --now spx-spark-order-map.timer
 systemctl --user enable --now spx-spark-order-map-status.timer
@@ -105,7 +114,10 @@ echo "  spx-spark-notification-delivery.service"
 echo "  spx-spark-surface-dashboard.service"
 echo "  spx-spark-surface-live.service"
 echo "  spx-spark-ibkr-stream.service"
-echo "  spx-spark-post-close-review.timer"
+echo "  spx-spark-post-close-review.service (manual compatibility only)"
+echo "  spx-spark-post-close-review.timer (disabled; superseded by session finalizer)"
+echo "  spx-spark-session-finalize.timer (daily 18:00 America/New_York)"
+echo "  spx-spark-storage-pressure.timer (hourly; artifact-gated pressure check)"
 echo "  spx-spark-rth-daily-acceptance.timer (17:30 America/New_York)"
 echo "  spx-spark-order-map.timer"
 echo "  spx-spark-order-map-status.timer (exchange-local GTH/RTH clock)"
@@ -154,9 +166,11 @@ if [[ "${1:-}" == "--now" ]]; then
   systemctl --user restart spx-spark-intraday-shock-hot.service
   systemctl --user restart spx-spark-notification-delivery.service
   systemctl --user restart spx-spark-surface-dashboard.service
+  systemctl --user restart spx-spark-session-finalize.timer
+  systemctl --user restart spx-spark-storage-pressure.timer
   systemctl --user restart spx-spark-rth-daily-acceptance.timer
   systemctl --user restart spx-spark-order-map.timer
   systemctl --user restart spx-spark-order-map-status.timer
   "$ROOT/scripts/install-spxw-surface-live-service.sh" --now
-  systemctl --user status spx-spark-24h.service spx-spark-es-bar-sampler.service spx-spark-spx-minute-sampler.service spx-spark-market-features-hot.service spx-spark-market-regime-signal.service spx-spark-intraday-shock-hot.service spx-spark-notification-delivery.service spx-spark-surface-dashboard.service spx-spark-surface-live.service spx-spark-ibkr-stream.service spx-spark-rth-daily-acceptance.timer spx-spark-order-map.timer spx-spark-order-map-status.timer --no-pager
+  systemctl --user status spx-spark-24h.service spx-spark-es-bar-sampler.service spx-spark-spx-minute-sampler.service spx-spark-market-features-hot.service spx-spark-market-regime-signal.service spx-spark-intraday-shock-hot.service spx-spark-notification-delivery.service spx-spark-surface-dashboard.service spx-spark-surface-live.service spx-spark-ibkr-stream.service spx-spark-session-finalize.timer spx-spark-storage-pressure.timer spx-spark-rth-daily-acceptance.timer spx-spark-order-map.timer spx-spark-order-map-status.timer --no-pager
 fi

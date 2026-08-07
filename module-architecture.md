@@ -23,7 +23,7 @@ import 前先对照本文分层规则与 `tests/architecture/test_module_registr
 ```
 L5 orchestration   application/*（realtime / order_map / shock / morning_map /
                    notifications / runtime）, service_loop, maintenance,
-                   post_close_review, latest_state,
+                   post_close_review, session_finalize, latest_state,
                    morning_map / order_map / intraday_shock 兼容门面
 L4 alerting        alert_engine/*, notifier/*, position_alerts, alert_profile,
                    data_platform, greek_shadow, intraday_event_outcomes,
@@ -105,6 +105,8 @@ L0 foundation      marketdata, market_calendar, alert_model, runtime_config,
   `gth_level_candidate_runtime.py` 负责候选持久化、投递回执对账、人工计划监控、
   gate/replay 日志，候选评估模块仅保留决策与兼容门面；不持有 provider 原始字段
 - `service_loop.py`、`maintenance.py`、`post_close_review.py`、`latest_state.py`
+- `session_finalize.py` — 盘后单次编排：确定性复盘、immutable replay artifact、
+  artifact 授权清理与复用同一 payload 的人类报告/推送
 
 ## 3. 兼容门面预算
 

@@ -356,19 +356,51 @@ human-visible explanation.
 
 ## Post-Close SPX Review
 
-Generate the SPX/SPXW daily review manually:
+The production post-close owner is `spx-spark-session-finalize.timer`. It runs
+at `18:00 America/New_York` every calendar day, so systemd follows EDT/EST
+without duplicate UTC schedules. The application resolves the latest completed
+trading day: weekend and exchange-holiday invocations either repair an
+unfinished session or verify the existing immutable artifact and exit
+idempotently. An `already_published` artifact skips the human LLM/push phase,
+so weekend, holiday and `Persistent=true` replays cannot duplicate a report.
+
+The top-level finalizer builds and verifies the deterministic Replay artifact
+first, then reuses that same payload for the LLM review and human push. It must
+not invoke the older review command for a second full scan. Artifact failure is
+terminal for the run and authorizes no raw deletion; an LLM or notification
+failure is recorded separately and cannot invalidate an already verified
+artifact.
+
+Install the user units through the repository installer:
 
 ```bash
-scripts/run-post-close-review.sh --date auto
+scripts/install-spx-spark-services.sh
+systemctl --user list-timers \
+  spx-spark-session-finalize.timer \
+  spx-spark-storage-pressure.timer
 ```
 
-Install the user timer:
+The installer disables the legacy independent
+`spx-spark-post-close-review.timer`. Its service and runner remain available
+only for explicit manual compatibility:
 
 ```bash
-ln -sfn /home/ubuntu/spx-spark/systemd/spx-spark-post-close-review.service ~/.config/systemd/user/spx-spark-post-close-review.service
-ln -sfn /home/ubuntu/spx-spark/systemd/spx-spark-post-close-review.timer ~/.config/systemd/user/spx-spark-post-close-review.timer
-systemctl --user daemon-reload
-systemctl --user enable --now spx-spark-post-close-review.timer
+scripts/run-post-close-review.sh --date 2026-08-06
+```
+
+An hourly `spx-spark-storage-pressure.timer` runs at `:20` and calls the same finalizer with
+`--pressure-check`. It never invokes a separate review and never bypasses the
+complete-artifact, source-digest, completed-day, or grace-period gates. Both
+paths share `spx-spark-session-finalize.lock`, so a pressure pass cannot race
+the 18:00 finalization; the offset also gives the daily owner first access to
+the lock.
+
+Inspect a run with:
+
+```bash
+systemctl --user status spx-spark-session-finalize.service --no-pager
+journalctl --user -u spx-spark-session-finalize.service -n 100 --no-pager
+systemctl --user status spx-spark-storage-pressure.service --no-pager
 ```
 
 Hermes can append this file to the local daily report:
@@ -414,6 +446,13 @@ SCHWAB_TOKEN_FILE=/srv/data/spx-spark/runtime/schwab-token.json
 ```
 
 Keep the repository, virtual environment, and source files under `/home/ubuntu/spx-spark`; keep raw data and runtime tokens under `/srv/data/spx-spark`.
+
+Storage pressure must be evaluated using absolute free bytes as well as a used
+percentage. The Rust frame writer reserves 20 GiB, so waiting for a 90% disk
+threshold can stop ingress first on the Oracle volume. The typed finalizer
+defaults begin artifact-gated action at 28 GiB free, escalate warning at 24 GiB
+and become critical at 20 GiB. The systemd units intentionally contain none of
+these numbers; deployment overrides belong in `config/runtime.local.yaml`.
 
 For the production Schwab callback, single-owner refresh client, Cloudflare Tunnel route,
 and localhost gateway deployment, follow

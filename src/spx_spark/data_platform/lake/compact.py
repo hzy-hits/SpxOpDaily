@@ -185,6 +185,51 @@ class QuoteLakeCompactor:
         with lock:
             return self._compact_one_unlocked(partition, now=now, dry_run=dry_run)
 
+    def delete_raw_if_manifest_matches(
+        self,
+        partition: RawQuotePartition,
+        *,
+        expected_manifest: CompactionManifest,
+        now: datetime,
+        dry_run: bool = False,
+    ) -> CompactionResult:
+        """Delete only the exact source lineage already authorized by a caller.
+
+        Unlike :meth:`compact_one`, this entry point never rebuilds Parquet or
+        advances a manifest. A late append or concurrent compaction therefore
+        fails closed instead of turning new, unauthorised bytes into a new
+        deletion candidate between replay verification and quarantine.
+        """
+
+        lock = nullcontext() if dry_run else self._exclusive_lock()
+        with lock:
+            with self._exclusive_raw_path_lock(partition.source_path):
+                current = load_manifest(partition.manifest_path)
+                if current != expected_manifest:
+                    return CompactionResult(
+                        partition.source_relative_path,
+                        expected_manifest.output_path,
+                        "raw_delete_blocked",
+                        row_count=expected_manifest.row_count,
+                        source_sha256=expected_manifest.source_sha256,
+                        detail="compaction manifest changed after replay authorization",
+                    )
+                status = "empty_up_to_date" if current.status == "empty" else "up_to_date"
+                result = CompactionResult(
+                    partition.source_relative_path,
+                    current.output_path,
+                    status,
+                    row_count=current.row_count,
+                    source_sha256=current.source_sha256,
+                )
+                return self._maybe_delete_raw(
+                    partition,
+                    result,
+                    manifest=current,
+                    now=_as_utc(now),
+                    dry_run=dry_run,
+                )
+
     def _compact_one_unlocked(
         self,
         partition: RawQuotePartition,
@@ -939,6 +984,17 @@ class QuoteLakeCompactor:
         lock_path = self.data_root / "manifests" / "compaction" / ".compact.lock"
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         with lock_path.open("a", encoding="utf-8") as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+    @contextmanager
+    def _exclusive_raw_path_lock(self, source_path: Path) -> Iterator[None]:
+        lock_path = source_path.with_name(f".{source_path.name}.lock")
+        with lock_path.open("a", encoding="utf-8") as handle:
+            os.fchmod(handle.fileno(), 0o600)
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
             try:
                 yield
