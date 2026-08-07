@@ -13,7 +13,7 @@ from spx_spark.alert_engine.constants import (
 from spx_spark.alert_engine.rules_data import find_best
 from spx_spark.alert_model import Alert, severity_for_priority
 from spx_spark.alert_profile import AlertWindow
-from spx_spark.config import env_bool, env_float, ibkr_account_read_enabled
+from spx_spark.config import ibkr_account_read_enabled
 from spx_spark.marketdata import Provider, ProviderState, ProviderStatus, as_utc, parse_timestamp
 from spx_spark.options_map import OptionsMap
 from spx_spark.position_alerts import has_open_spxw_positions
@@ -22,7 +22,7 @@ from spx_spark.provider_failover_controller import (
     ProviderFailoverSettings,
     load_failover_control,
 )
-from spx_spark.settings import DEFAULT_ALERT_SETTINGS
+from spx_spark.settings import DEFAULT_ALERT_SETTINGS, AlertSettings
 from spx_spark.storage import LatestState, configured_quote_use_decision
 
 
@@ -87,26 +87,44 @@ def provider_state_for(state: LatestState, provider: Provider) -> ProviderState 
     return max(matches, key=lambda item: item.checked_at)
 
 
-def provider_state_is_recent(provider_state: ProviderState, *, now: datetime) -> bool:
-    max_age_seconds = env_float(
-        "ALERT_BROKER_STATE_MAX_AGE_SECONDS",
-        DEFAULT_ALERT_SETTINGS.broker_state_max_age_seconds,
-    )
+def provider_state_is_recent(
+    provider_state: ProviderState,
+    *,
+    now: datetime,
+    settings: AlertSettings = DEFAULT_ALERT_SETTINGS,
+) -> bool:
     age_seconds = (now - provider_state.checked_at).total_seconds()
-    return 0 <= age_seconds <= max_age_seconds
+    return 0 <= age_seconds <= settings.broker_state_max_age_seconds
 
 
-def ibkr_feed_unavailable_for_fallback(state: LatestState) -> bool:
+def ibkr_feed_unavailable_for_fallback(
+    state: LatestState,
+    *,
+    settings: AlertSettings = DEFAULT_ALERT_SETTINGS,
+) -> bool:
     provider_state = provider_state_for(state, Provider.IBKR)
-    if provider_state is None or not provider_state_is_recent(provider_state, now=state.as_of):
+    if provider_state is None or not provider_state_is_recent(
+        provider_state,
+        now=state.as_of,
+        settings=settings,
+    ):
         return False
     if provider_state.status == ProviderStatus.UNAVAILABLE:
         return True
     return provider_state.status == ProviderStatus.DEGRADED and provider_state.connected is not True
 
 
-def ibkr_session_status(provider_state: ProviderState | None, *, now: datetime) -> str:
-    if provider_state is None or not provider_state_is_recent(provider_state, now=now):
+def ibkr_session_status(
+    provider_state: ProviderState | None,
+    *,
+    now: datetime,
+    settings: AlertSettings = DEFAULT_ALERT_SETTINGS,
+) -> str:
+    if provider_state is None or not provider_state_is_recent(
+        provider_state,
+        now=now,
+        settings=settings,
+    ):
         return "unknown"
     reason = (provider_state.reason or "").lower()
     if provider_state.status == ProviderStatus.AVAILABLE:
@@ -193,6 +211,7 @@ def persist_system_event_state(
     state: LatestState,
     *,
     failover_settings: ProviderFailoverSettings | None = None,
+    alert_settings: AlertSettings = DEFAULT_ALERT_SETTINGS,
 ) -> None:
     failover_settings = failover_settings or ProviderFailoverSettings.from_env()
     state_path = system_event_state_path()
@@ -204,7 +223,11 @@ def persist_system_event_state(
     # own provider-failover state and must not inherit stale account state.
     if ibkr_broker_session_supervision_enabled():
         if provider_state is not None:
-            current_status = ibkr_session_status(provider_state, now=state.as_of)
+            current_status = ibkr_session_status(
+                provider_state,
+                now=state.as_of,
+                settings=alert_settings,
+            )
             payload = build_system_event_state_payload(
                 state,
                 provider_state,
@@ -587,11 +610,9 @@ def system_event_alerts(
     *,
     persist: bool = True,
     failover_settings: ProviderFailoverSettings | None = None,
+    alert_settings: AlertSettings = DEFAULT_ALERT_SETTINGS,
 ) -> list[Alert]:
-    if not env_bool(
-        "ALERT_SYSTEM_EVENTS_ENABLED",
-        DEFAULT_ALERT_SETTINGS.system_events_enabled,
-    ):
+    if not alert_settings.system_events_enabled:
         return []
     state_path = system_event_state_path()
     previous = load_system_event_state(state_path)
@@ -613,7 +634,11 @@ def system_event_alerts(
 
     provider_state = provider_state_for(state, Provider.IBKR)
     if provider_state is not None and ibkr_broker_session_supervision_enabled():
-        current_status = ibkr_session_status(provider_state, now=state.as_of)
+        current_status = ibkr_session_status(
+            provider_state,
+            now=state.as_of,
+            settings=alert_settings,
+        )
         previous_status = previous.get("ibkr_session_status")
         previous_status_s = str(previous_status) if previous_status else None
         if current_status not in IBKR_TRANSITIONAL_SESSION_STATUSES:
@@ -637,6 +662,7 @@ def system_event_alerts(
         persist_system_event_state(
             state,
             failover_settings=failover_settings,
+            alert_settings=alert_settings,
         )
     return alerts
 
@@ -647,6 +673,7 @@ def proxy_fallback_watch_alerts(
     window: AlertWindow,
     market_context: dict[str, object] | None,
     options_map: OptionsMap | None = None,
+    alert_settings: AlertSettings = DEFAULT_ALERT_SETTINGS,
 ) -> list[Alert]:
     from spx_spark.alert_engine.constants import MOVE_THRESHOLDS_BPS
     from spx_spark.alert_engine.rules_price import (
@@ -654,10 +681,7 @@ def proxy_fallback_watch_alerts(
         movement_threshold_for_window,
     )
 
-    if not env_bool(
-        "ALERT_ALLOW_BROKER_UNAVAILABLE_PROXY_WATCH",
-        DEFAULT_ALERT_SETTINGS.allow_broker_unavailable_proxy_watch,
-    ):
+    if not alert_settings.allow_broker_unavailable_proxy_watch:
         return []
     gate = hyperliquid_proxy_gate(market_context)
     if gate.get("usable_for_alert") is True:
@@ -667,16 +691,19 @@ def proxy_fallback_watch_alerts(
     # is the only human-facing path allowed without a live TradFi anchor.
     if str(gate.get("state") or "") != "unanchored_context_only":
         return []
-    broker_down = ibkr_feed_unavailable_for_fallback(state)
+    broker_down = ibkr_feed_unavailable_for_fallback(
+        state,
+        settings=alert_settings,
+    )
 
     quote = find_best(state, "crypto_perp:xyz:SP500")
     if quote is None or not configured_quote_use_decision(quote, as_of=state.as_of).alert_allowed:
         return []
     move_bps = move_from_close_bps(quote)
     if options_map is None:
-        threshold = env_float(
-            "ALERT_PROXY_FALLBACK_MOVE_BPS",
-            MOVE_THRESHOLDS_BPS.get(window.priority, MOVE_THRESHOLDS_BPS["normal"]),
+        threshold = MOVE_THRESHOLDS_BPS.get(
+            window.priority,
+            MOVE_THRESHOLDS_BPS["normal"],
         )
         threshold_source = None
         expected_move_pct = None
@@ -685,8 +712,8 @@ def proxy_fallback_watch_alerts(
             window,
             options_map,
             as_of=state.as_of,
+            settings=alert_settings,
         )
-        threshold = env_float("ALERT_PROXY_FALLBACK_MOVE_BPS", threshold)
     if move_bps is None or abs(move_bps) < threshold:
         return []
 

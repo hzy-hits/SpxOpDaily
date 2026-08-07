@@ -2,13 +2,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from spx_spark.config import IbkrPositionSettings, env_csv
 from spx_spark.greek_reference import build_zero_dte_greeks_reference
 from spx_spark.iv_surface import IvSurfaceSnapshot
 from spx_spark.market_context import build_market_context
 from spx_spark.marketdata import MarketDataQuality, Quote
 from spx_spark.options_map import ExpiryOptionsMap, OptionsMap
-from spx_spark.settings import settings_csv
+from spx_spark.settings import AppSettings, current_app_settings
 from spx_spark.storage import LatestState, configured_quote_use_decision
 from spx_spark.strategy.micopedia import MicopediaInputs, build_micopedia_signal
 
@@ -184,6 +183,7 @@ def micopedia_context(
     options_map: OptionsMap,
     window: dict[str, object],
     spx_sector_breadth: dict[str, object] | None = None,
+    event_tags: tuple[str, ...] = (),
 ) -> dict[str, object]:
     front = options_map.expiries[0] if options_map.expiries else None
     key_levels = [
@@ -222,7 +222,7 @@ def micopedia_context(
         gamma_state=gamma_state_for_micopedia(options_map),
         directional_bias=directional_bias,
         time_phase=time_phase_from_window(window),
-        event_tags=tuple(env_csv("MICOPEDIA_EVENT_TAGS", settings_csv("human_focus.event_tags"))),
+        event_tags=event_tags,
         key_levels=tuple(key_levels),
         has_option_chain=bool(options_map.expiries),
         has_es_data=has_es_data,
@@ -315,7 +315,9 @@ def build_human_focus_context(
     iv_surface: IvSurfaceSnapshot | None,
     iv_surface_history_1h: dict[str, Any] | None,
     window: dict[str, object],
+    app_settings: AppSettings | None = None,
 ) -> dict[str, object]:
+    resolved_settings = app_settings or current_app_settings()
     history_by_expiry = {
         str(item.get("expiry") or ""): item
         for item in (iv_surface_history_1h or {}).get("expiries", [])
@@ -325,7 +327,10 @@ def build_human_focus_context(
     surface_expiries = (
         surface_payload.get("expiries", []) if isinstance(surface_payload, dict) else []
     )
-    market_context = build_market_context(state)
+    market_context = build_market_context(
+        state,
+        settings=resolved_settings.market_context,
+    )
     market_derived = market_context.get("derived")
     spx_sector_breadth = (
         market_derived.get("spx_sector_breadth")
@@ -333,7 +338,6 @@ def build_human_focus_context(
         and isinstance(market_derived.get("spx_sector_breadth"), dict)
         else {}
     )
-    position_settings = IbkrPositionSettings.from_env()
     return {
         "visible_scope": (
             "SPX",
@@ -361,10 +365,10 @@ def build_human_focus_context(
         },
         "spx_breadth": spx_sector_breadth,
         "position_awareness": {
-            "enabled": position_settings.enabled,
+            "enabled": resolved_settings.ibkr.account_read_enabled,
             "state": (
                 "enabled_snapshot_required"
-                if position_settings.enabled
+                if resolved_settings.ibkr.account_read_enabled
                 else "disabled_no_account_visibility"
             ),
             "scope": "IBKR SPXW positions only",
@@ -404,6 +408,7 @@ def build_human_focus_context(
             options_map=options_map,
             window=window,
             spx_sector_breadth=spx_sector_breadth,
+            event_tags=resolved_settings.market_context.human_focus_event_tags,
         ),
         "data_warnings": human_data_warnings(state, options_map=options_map, iv_surface=iv_surface),
     }

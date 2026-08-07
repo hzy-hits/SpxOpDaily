@@ -16,7 +16,7 @@ from spx_spark.settings.analytics import AnalyticsSettings
 from spx_spark.settings.globex_trend import GlobexTrendSettings
 from spx_spark.settings.ibkr import IbkrSettingsSlice
 from spx_spark.settings.level_decision import LevelDecisionPolicy
-from spx_spark.settings.market_data import MarketDataSettings
+from spx_spark.settings.market_data import MarketContextSettings, MarketDataSettings
 from spx_spark.settings.market_features import MarketFeatureSettings
 from spx_spark.settings.order_map import OrderMapPolicy
 from spx_spark.settings.runtime import RuntimeSettingsSlice
@@ -38,6 +38,7 @@ class SettingSource:
 @dataclass(frozen=True)
 class AppSettings:
     market_data: MarketDataSettings
+    market_context: MarketContextSettings
     ibkr: IbkrSettingsSlice
     schwab: SchwabSettingsSlice
     analytics: AnalyticsSettings

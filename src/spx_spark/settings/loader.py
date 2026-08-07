@@ -19,7 +19,7 @@ from spx_spark.settings.globex_trend import GlobexTrendSettings
 from spx_spark.settings.market_features import MarketFeatureSettings
 from spx_spark.settings.ibkr import IbkrSettingsSlice
 from spx_spark.settings.level_decision import LevelDecisionPolicy
-from spx_spark.settings.market_data import MarketDataSettings
+from spx_spark.settings.market_data import MarketContextSettings, MarketDataSettings
 from spx_spark.settings.order_map import OrderMapPolicy
 from spx_spark.settings.runtime import RuntimeSettingsSlice
 from spx_spark.settings.schema import AppSettings, SettingSource
@@ -187,6 +187,48 @@ def _env_override(dotted_path: str, environ: Mapping[str, str]) -> Any | None:
         "ibkr_broker.account_read_enabled": "IBKR_BROKER_ACCOUNT_READ_ENABLED",
         "steven.enabled": "SPX_STEVEN_ENABLED",
         "steven.alert_context_enabled": "SPX_STEVEN_ALERT_CONTEXT_ENABLED",
+        "alerts.move_quiet_floor_bps": "ALERT_MOVE_QUIET_FLOOR_BPS",
+        "alerts.move_high_severity_em_fraction": (
+            "ALERT_MOVE_HIGH_SEVERITY_EM_FRACTION"
+        ),
+        "alerts.min_option_live_ratio": "ALERT_MIN_OPTION_LIVE_RATIO",
+        "alerts.max_option_quote_age_ms": "ALERT_MAX_OPTION_QUOTE_AGE_MS",
+        "alerts.require_option_quote_timestamps": (
+            "ALERT_REQUIRE_OPTION_QUOTE_TIMESTAMPS"
+        ),
+        "alerts.gamma_regime_hysteresis_seconds": (
+            "ALERT_GAMMA_REGIME_HYSTERESIS_SECONDS"
+        ),
+        "alerts.max_iv_surface_age_seconds": "ALERT_MAX_IV_SURFACE_AGE_SECONDS",
+        "alerts.broker_state_max_age_seconds": "ALERT_BROKER_STATE_MAX_AGE_SECONDS",
+        "alerts.system_events_enabled": "ALERT_SYSTEM_EVENTS_ENABLED",
+        "alerts.allow_broker_unavailable_proxy_watch": (
+            "ALERT_ALLOW_BROKER_UNAVAILABLE_PROXY_WATCH"
+        ),
+        "alerts.iv_surface_shift_1h_threshold": (
+            "ALERT_IV_SURFACE_SHIFT_1H_THRESHOLD"
+        ),
+        "alerts.iv_atm_change_1h_threshold": "ALERT_IV_ATM_CHANGE_1H_THRESHOLD",
+        "alerts.skew_25d_threshold": "ALERT_SKEW_25D_THRESHOLD",
+        "position_alerts.enabled": "ALERT_POSITIONS_ENABLED",
+        "position_alerts.structural_enabled": "ALERT_POSITION_STRUCTURAL_ENABLED",
+        "position_alerts.pnl_enabled": "ALERT_POSITION_PNL_ENABLED",
+        "position_alerts.pnl_change_usd": "ALERT_POSITION_PNL_CHANGE_USD",
+        "position_alerts.pnl_loss_usd": "ALERT_POSITION_PNL_LOSS_USD",
+        "position_alerts.pnl_critical_loss_usd": (
+            "ALERT_POSITION_PNL_CRITICAL_LOSS_USD"
+        ),
+        "position_alerts.pnl_bucket_usd": "ALERT_POSITION_PNL_DEDUP_BUCKET_USD",
+        "hyperliquid.proxy_basis_warn_bps": "HYPERLIQUID_PROXY_BASIS_WARN_BPS",
+        "hyperliquid.proxy_basis_block_bps": "HYPERLIQUID_PROXY_BASIS_BLOCK_BPS",
+        "hyperliquid.proxy_futures_basis_warn_bps": (
+            "HYPERLIQUID_PROXY_FUTURES_BASIS_WARN_BPS"
+        ),
+        "hyperliquid.proxy_futures_basis_block_bps": (
+            "HYPERLIQUID_PROXY_FUTURES_BASIS_BLOCK_BPS"
+        ),
+        "hyperliquid.es_carry_annual_rate": "HYPERLIQUID_ES_CARRY_ANNUAL_RATE",
+        "human_focus.event_tags": "MICOPEDIA_EVENT_TAGS",
         "provider_failover.enabled": "PROVIDER_FAILOVER_ENABLED",
         "provider_failover.control_ibkr_stream_enabled": (
             "PROVIDER_FAILOVER_CONTROL_IBKR_STREAM_ENABLED"
@@ -288,6 +330,8 @@ def _env_override(dotted_path: str, environ: Mapping[str, str]) -> Any | None:
     if raw is None or not str(raw).strip():
         return None
     text = str(raw).strip()
+    if dotted_path == "human_focus.event_tags":
+        return tuple(part.strip().lower() for part in text.split(",") if part.strip())
     if dotted_path.endswith("provider_priority") or dotted_path.endswith(
         "anchor_provider_priority"
     ):
@@ -699,6 +743,15 @@ def load_settings(
         surface_shift_threshold=float(get("alerts.surface_shift_threshold")),
         term_gap_threshold=float(get("alerts.term_gap_threshold")),
         wall_dedup_band_points=float(get("alerts.wall_dedup_band_points")),
+        positions_enabled=bool(get("position_alerts.enabled")),
+        position_structural_enabled=bool(get("position_alerts.structural_enabled")),
+        position_pnl_enabled=bool(get("position_alerts.pnl_enabled")),
+        position_pnl_change_usd=float(get("position_alerts.pnl_change_usd")),
+        position_pnl_loss_usd=float(get("position_alerts.pnl_loss_usd")),
+        position_pnl_critical_loss_usd=float(
+            get("position_alerts.pnl_critical_loss_usd")
+        ),
+        position_pnl_bucket_usd=float(get("position_alerts.pnl_bucket_usd")),
         ibkr_execution_mode=str(get("ibkr_broker.execution_mode")).lower(),
     )
     runtime = RuntimeSettingsSlice(
@@ -774,6 +827,38 @@ def load_settings(
         env.get("MARKET_DATA_DATA_ROOT")
         or env.get("MAINTENANCE_DATA_ROOT")
         or get("maintenance.data_root")
+    )
+    market_context = MarketContextSettings(
+        spx_sector_instrument_ids=tuple(
+            str(item) for item in get("market_context.spx_sector_instrument_ids")
+        ),
+        sector_breadth_min_usable=int(get("market_context.sector_breadth_min_usable")),
+        sector_quote_max_age_seconds=float(
+            get("market_context.sector_quote_max_age_seconds")
+        ),
+        sector_unchanged_band_bps=float(get("market_context.sector_unchanged_band_bps")),
+        sector_directional_bias_score=float(
+            get("market_context.sector_directional_bias_score")
+        ),
+        direction_confirmation_move_bps=float(
+            get("market_context.direction_confirmation_move_bps")
+        ),
+        hyperliquid_proxy_basis_warn_bps=float(get("hyperliquid.proxy_basis_warn_bps")),
+        hyperliquid_proxy_basis_block_bps=float(
+            get("hyperliquid.proxy_basis_block_bps")
+        ),
+        hyperliquid_proxy_futures_basis_warn_bps=float(
+            get("hyperliquid.proxy_futures_basis_warn_bps")
+        ),
+        hyperliquid_proxy_futures_basis_block_bps=float(
+            get("hyperliquid.proxy_futures_basis_block_bps")
+        ),
+        hyperliquid_es_carry_annual_rate=float(get("hyperliquid.es_carry_annual_rate")),
+        human_focus_event_tags=tuple(str(item) for item in get("human_focus.event_tags")),
+        polymarket_latest_context_path=str(
+            env.get("POLYMARKET_LATEST_CONTEXT_PATH")
+            or Path(data_root) / "latest" / "polymarket_context.json"
+        ),
     )
     shock = ShockSettings(
         anchor_provider_priority=_as_str_tuple(get("intraday_shock.anchor_provider_priority")),
@@ -948,6 +1033,7 @@ def load_settings(
 
     return AppSettings(
         market_data=market_data,
+        market_context=market_context,
         ibkr=ibkr,
         schwab=schwab,
         analytics=analytics,

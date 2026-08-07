@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timezone
 
 from spx_spark.alert_profile import active_window
@@ -8,6 +9,7 @@ from spx_spark.position_alerts import (
     evaluate_position_alerts,
     format_book_detail,
 )
+from spx_spark.settings import DEFAULT_ALERT_SETTINGS
 from spx_spark.ibkr.position_watcher import (
     PositionSnapshot,
     SpxwPosition,
@@ -74,10 +76,15 @@ def make_snapshot(*positions: SpxwPosition) -> PositionSnapshot:
     )
 
 
+def enabled_position_alerts(**overrides):
+    return replace(
+        DEFAULT_ALERT_SETTINGS,
+        positions_enabled=True,
+        **overrides,
+    )
+
+
 def test_book_pnl_alert_on_material_loss(monkeypatch):
-    monkeypatch.setenv("ALERT_POSITIONS_ENABLED", "true")
-    monkeypatch.setenv("ALERT_POSITION_PNL_ENABLED", "true")
-    monkeypatch.setenv("ALERT_POSITION_PNL_LOSS_USD", "400")
     long_leg = make_position(unrealized_pnl=-620.0, unrealized_pnl_pct=-19.4)
     short_leg = make_position(
         strike=7535.0,
@@ -105,6 +112,7 @@ def test_book_pnl_alert_on_material_loss(monkeypatch):
         options_map=None,
         window=window,
         persist_state=False,
+        settings=enabled_position_alerts(position_pnl_enabled=True),
     )
 
     book_alerts = [alert for alert in alerts if alert.kind == "spxw_position_book_pnl"]
@@ -115,9 +123,6 @@ def test_book_pnl_alert_on_material_loss(monkeypatch):
 
 
 def test_book_pnl_alert_waits_for_meaningful_change(monkeypatch):
-    monkeypatch.setenv("ALERT_POSITIONS_ENABLED", "true")
-    monkeypatch.setenv("ALERT_POSITION_PNL_ENABLED", "true")
-    monkeypatch.setenv("ALERT_POSITION_PNL_CHANGE_USD", "200")
     position = make_position(unrealized_pnl=-100.0, unrealized_pnl_pct=-3.1)
     snapshot = make_snapshot(position)
     from spx_spark.storage import LatestState
@@ -136,14 +141,13 @@ def test_book_pnl_alert_waits_for_meaningful_change(monkeypatch):
         options_map=None,
         window=window,
         persist_state=False,
+        settings=enabled_position_alerts(position_pnl_enabled=True),
     )
 
     assert not any(alert.kind == "spxw_position_book_pnl" for alert in alerts)
 
 
 def test_position_qty_change_alert(monkeypatch):
-    monkeypatch.setenv("ALERT_POSITIONS_ENABLED", "true")
-    monkeypatch.setenv("ALERT_POSITION_STRUCTURAL_ENABLED", "true")
     position = make_position(qty=2.0)
     snapshot = make_snapshot(position)
     from spx_spark.storage import LatestState
@@ -166,14 +170,13 @@ def test_position_qty_change_alert(monkeypatch):
         options_map=None,
         window=window,
         persist_state=False,
+        settings=enabled_position_alerts(position_structural_enabled=True),
     )
     assert any(alert.kind == "spxw_position_qty_changed" for alert in alerts)
 
 
 def test_full_flat_emits_close_alerts_and_clears_state(monkeypatch, tmp_path):
     """Empty IB snapshot must still emit closes for previously held legs."""
-    monkeypatch.setenv("ALERT_POSITIONS_ENABLED", "true")
-    monkeypatch.setenv("ALERT_POSITION_STRUCTURAL_ENABLED", "true")
     state_path = tmp_path / "ibkr_position_state.json"
     monkeypatch.setenv("IBKR_POSITIONS_STATE_PATH", str(state_path))
 
@@ -200,6 +203,7 @@ def test_full_flat_emits_close_alerts_and_clears_state(monkeypatch, tmp_path):
         options_map=None,
         window=window,
         persist_state=True,
+        settings=enabled_position_alerts(position_structural_enabled=True),
     )
     closed = [alert for alert in alerts if alert.kind == "spxw_position_closed"]
     assert len(closed) == 2
@@ -213,7 +217,6 @@ def test_full_flat_emits_close_alerts_and_clears_state(monkeypatch, tmp_path):
 
 
 def test_missing_snapshot_does_not_invent_closes(monkeypatch):
-    monkeypatch.setenv("ALERT_POSITIONS_ENABLED", "true")
     from spx_spark.storage import LatestState
 
     state = LatestState(
@@ -239,8 +242,6 @@ def test_missing_snapshot_does_not_invent_closes(monkeypatch):
 
 
 def test_partial_flat_emits_close_for_missing_leg(monkeypatch):
-    monkeypatch.setenv("ALERT_POSITIONS_ENABLED", "true")
-    monkeypatch.setenv("ALERT_POSITION_STRUCTURAL_ENABLED", "true")
     remaining = make_position(qty=2.0)
     snapshot = make_snapshot(remaining)
     from spx_spark.storage import LatestState
@@ -267,6 +268,7 @@ def test_partial_flat_emits_close_for_missing_leg(monkeypatch):
         options_map=None,
         window=window,
         persist_state=False,
+        settings=enabled_position_alerts(position_structural_enabled=True),
     )
     closed = [alert for alert in alerts if alert.kind == "spxw_position_closed"]
     assert len(closed) == 1

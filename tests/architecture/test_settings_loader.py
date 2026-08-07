@@ -47,6 +47,8 @@ def test_load_settings_from_fixture_is_stable(
     assert isinstance(settings, AppSettings)
     assert settings.market_data.provider_priority[:2] == ("schwab", "ibkr")
     assert settings.market_data.standardized_minute_max_age_seconds == 90.0
+    assert settings.market_context.sector_breadth_min_usable == 8
+    assert settings.market_context.hyperliquid_proxy_basis_warn_bps == 50.0
     assert settings.ibkr.account_read_enabled is False
     assert settings.alerts.steven_enabled is False
     assert settings.runtime.control_ibkr_stream_enabled is False
@@ -85,6 +87,15 @@ def test_environment_overrides_defaults(monkeypatch: pytest.MonkeyPatch) -> None
             "ALERT_INTRADAY_REQUIRE_SCHWAB_STREAMING_ANCHORS": "false",
             "ALERT_INTRADAY_PROVIDER_SWITCH_RESET_SECONDS": "45",
             "ALERT_INTRADAY_SHOCK_SPX_MAX_AGE_SECONDS": "21.5",
+            "ALERT_GAMMA_REGIME_HYSTERESIS_SECONDS": "720",
+            "ALERT_IV_SURFACE_SHIFT_1H_THRESHOLD": "0.06",
+            "ALERT_IV_ATM_CHANGE_1H_THRESHOLD": "0.045",
+            "ALERT_SYSTEM_EVENTS_ENABLED": "false",
+            "ALERT_POSITIONS_ENABLED": "true",
+            "ALERT_POSITION_PNL_CHANGE_USD": "250",
+            "HYPERLIQUID_PROXY_BASIS_WARN_BPS": "55",
+            "HYPERLIQUID_ES_CARRY_ANNUAL_RATE": "0.04",
+            "MICOPEDIA_EVENT_TAGS": "FOMC,cpi",
         },
     )
     assert settings.alerts.steven_enabled is True
@@ -94,9 +105,23 @@ def test_environment_overrides_defaults(monkeypatch: pytest.MonkeyPatch) -> None
     assert settings.shock.require_schwab_streaming_anchors is False
     assert settings.shock.provider_switch_reset_seconds == 45
     assert settings.shock.max_spx_age_seconds == 21.5
+    assert settings.alerts.gamma_regime_hysteresis_seconds == 720.0
+    assert settings.alerts.iv_surface_shift_1h_threshold == 0.06
+    assert settings.alerts.iv_atm_change_1h_threshold == 0.045
+    assert settings.alerts.system_events_enabled is False
+    assert settings.alerts.positions_enabled is True
+    assert settings.alerts.position_pnl_change_usd == 250.0
+    assert settings.market_context.hyperliquid_proxy_basis_warn_bps == 55.0
+    assert settings.market_context.hyperliquid_es_carry_annual_rate == 0.04
+    assert settings.market_context.human_focus_event_tags == ("fomc", "cpi")
     assert settings.sources["steven.enabled"].origin == "environment"
     assert settings.sources["market_data.provider_priority"].origin == "environment"
     assert settings.sources["intraday_shock.max_spx_age_seconds"].origin == "environment"
+    assert settings.sources["alerts.gamma_regime_hysteresis_seconds"].origin == "environment"
+    assert settings.sources["alerts.system_events_enabled"].origin == "environment"
+    assert settings.sources["position_alerts.enabled"].origin == "environment"
+    assert settings.sources["hyperliquid.proxy_basis_warn_bps"].origin == "environment"
+    assert settings.sources["human_focus.event_tags"].origin == "environment"
 
 
 def test_provider_failover_environment_overrides_resolve_in_typed_policy() -> None:

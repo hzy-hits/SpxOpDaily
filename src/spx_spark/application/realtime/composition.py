@@ -170,6 +170,7 @@ def resolve_alert_evaluator(
     evaluation_enabled: bool | None = None,
     alert_settings: AlertSettings | None = None,
     provider_failover_settings: ProviderFailoverSettings | None = None,
+    app_settings: AppSettings | None = None,
     event_bucket_seconds: int = 300,
 ):
     if evaluation_enabled is None:
@@ -179,6 +180,7 @@ def resolve_alert_evaluator(
             store,
             alert_settings=alert_settings,
             provider_failover_settings=provider_failover_settings,
+            app_settings=app_settings,
             event_bucket_seconds=event_bucket_seconds,
         )
     return SilentAlertEvaluator()
@@ -279,6 +281,7 @@ def build_realtime_runtime(
             evaluation_enabled=evaluation_enabled,
             alert_settings=alert_policy,
             provider_failover_settings=failover_policy,
+            app_settings=app_settings,
             event_bucket_seconds=notification_settings.cooldown_seconds,
         ),
         projections=sink,

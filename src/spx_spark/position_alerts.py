@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 
 from spx_spark.alert_model import Alert, severity_for_priority
 from spx_spark.alert_profile import AlertWindow
-from spx_spark.config import IbkrPositionSettings, NotificationSettings, env_bool, env_float
+from spx_spark.config import IbkrPositionSettings, NotificationSettings
 from spx_spark.ibkr.position_watcher import (
     PositionSnapshot,
     SpxwPosition,
@@ -24,7 +24,7 @@ from spx_spark.position_events import (
     PositionEventStoreCorrupt,
     PositionObservation,
 )
-from spx_spark.settings import settings_value
+from spx_spark.settings import DEFAULT_ALERT_SETTINGS, AlertSettings
 from spx_spark.state_io import atomic_write_json_secure
 from spx_spark.storage import LatestState
 
@@ -34,11 +34,12 @@ def position_holdings_alerts(
     *,
     options_map: OptionsMap | None,
     window: AlertWindow,
+    settings: AlertSettings = DEFAULT_ALERT_SETTINGS,
 ) -> list[Alert]:
     position_settings = IbkrPositionSettings.from_env()
     if not position_settings.snapshot_path:
         return []
-    if not env_bool("ALERT_POSITIONS_ENABLED", bool(settings_value("position_alerts.enabled"))):
+    if not settings.positions_enabled:
         return []
     snapshot = load_snapshot(position_settings.snapshot_path)
     notification_settings = NotificationSettings.from_env()
@@ -50,30 +51,12 @@ def position_holdings_alerts(
             acknowledged_event_ids=acknowledged_event_ids,
             as_of=state.as_of,
             max_snapshot_age_seconds=position_settings.max_snapshot_age_seconds,
-            pnl_change_usd=env_float(
-                "ALERT_POSITION_PNL_CHANGE_USD",
-                float(settings_value("position_alerts.pnl_change_usd")),
-            ),
-            pnl_loss_usd=env_float(
-                "ALERT_POSITION_PNL_LOSS_USD",
-                float(settings_value("position_alerts.pnl_loss_usd")),
-            ),
-            pnl_critical_loss_usd=env_float(
-                "ALERT_POSITION_PNL_CRITICAL_LOSS_USD",
-                float(settings_value("position_alerts.pnl_critical_loss_usd")),
-            ),
-            pnl_bucket_usd=env_float(
-                "ALERT_POSITION_PNL_DEDUP_BUCKET_USD",
-                float(settings_value("position_alerts.pnl_bucket_usd")),
-            ),
-            structural_enabled=env_bool(
-                "ALERT_POSITION_STRUCTURAL_ENABLED",
-                bool(settings_value("position_alerts.structural_enabled")),
-            ),
-            pnl_enabled=env_bool(
-                "ALERT_POSITION_PNL_ENABLED",
-                bool(settings_value("position_alerts.pnl_enabled")),
-            ),
+            pnl_change_usd=settings.position_pnl_change_usd,
+            pnl_loss_usd=settings.position_pnl_loss_usd,
+            pnl_critical_loss_usd=settings.position_pnl_critical_loss_usd,
+            pnl_bucket_usd=settings.position_pnl_bucket_usd,
+            structural_enabled=settings.position_structural_enabled,
+            pnl_enabled=settings.position_pnl_enabled,
         )
     except PositionEventStoreCorrupt as exc:
         return [
@@ -345,53 +328,31 @@ def evaluate_position_alerts(
     options_map: OptionsMap | None,
     window: AlertWindow,
     persist_state: bool = False,
+    settings: AlertSettings = DEFAULT_ALERT_SETTINGS,
 ) -> list[Alert]:
     # None = fetch failed / snapshot missing — do not invent closes or wipe state.
     if snapshot is None:
         return []
     if not snapshot.fetch_complete:
         return []
-    if not env_bool("ALERT_POSITIONS_ENABLED", bool(settings_value("position_alerts.enabled"))):
+    if not settings.positions_enabled:
         return []
 
     alerts: list[Alert] = []
-    structural_enabled = env_bool(
-        "ALERT_POSITION_STRUCTURAL_ENABLED",
-        bool(settings_value("position_alerts.structural_enabled")),
-    )
-    pnl_enabled = env_bool(
-        "ALERT_POSITION_PNL_ENABLED", bool(settings_value("position_alerts.pnl_enabled"))
-    )
-    pnl_change_usd = env_float(
-        "ALERT_POSITION_PNL_CHANGE_USD",
-        float(settings_value("position_alerts.pnl_change_usd")),
-    )
-    pnl_loss_usd = env_float(
-        "ALERT_POSITION_PNL_LOSS_USD",
-        float(settings_value("position_alerts.pnl_loss_usd")),
-    )
-    pnl_critical_loss_usd = env_float(
-        "ALERT_POSITION_PNL_CRITICAL_LOSS_USD",
-        float(settings_value("position_alerts.pnl_critical_loss_usd")),
-    )
-    pnl_bucket_usd = env_float(
-        "ALERT_POSITION_PNL_DEDUP_BUCKET_USD",
-        float(settings_value("position_alerts.pnl_bucket_usd")),
-    )
 
-    if structural_enabled:
+    if settings.position_structural_enabled:
         alerts.extend(_structural_alerts(snapshot, previous=previous, window=window))
 
     # PnL alerts need live legs; empty book after a full flat is structural-only.
-    if pnl_enabled and snapshot.positions:
+    if settings.position_pnl_enabled and snapshot.positions:
         book_alert = _book_pnl_alert(
             snapshot,
             previous=previous,
             window=window,
-            pnl_change_usd=pnl_change_usd,
-            pnl_loss_usd=pnl_loss_usd,
-            pnl_critical_loss_usd=pnl_critical_loss_usd,
-            pnl_bucket_usd=pnl_bucket_usd,
+            pnl_change_usd=settings.position_pnl_change_usd,
+            pnl_loss_usd=settings.position_pnl_loss_usd,
+            pnl_critical_loss_usd=settings.position_pnl_critical_loss_usd,
+            pnl_bucket_usd=settings.position_pnl_bucket_usd,
         )
         if book_alert is not None:
             alerts.append(book_alert)

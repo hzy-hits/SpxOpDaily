@@ -9,9 +9,8 @@ from dataclasses import dataclass
 class AlertSettings:
     """Typed alert policy injected into alert_engine / shock / service loop.
 
-    Defaults match ``config/runtime.toml`` so rules can use this object instead
-    of calling ``runtime_value()``. Environment overrides still apply via
-    ``env_float`` / ``env_bool`` at call sites when present.
+    Defaults match ``config/runtime.toml``. The AppSettings loader applies
+    documented environment overrides once before rules receive this object.
     """
 
     steven_enabled: bool = False
@@ -39,6 +38,13 @@ class AlertSettings:
     surface_shift_threshold: float = 0.03
     term_gap_threshold: float = 0.05
     wall_dedup_band_points: float = 25.0
+    positions_enabled: bool = False
+    position_structural_enabled: bool = False
+    position_pnl_enabled: bool = False
+    position_pnl_change_usd: float = 200.0
+    position_pnl_loss_usd: float = 400.0
+    position_pnl_critical_loss_usd: float = 1000.0
+    position_pnl_bucket_usd: float = 100.0
     # Used by system session/interrupt gates (ibkr_broker.execution_mode).
     ibkr_execution_mode: str = "manual"
 

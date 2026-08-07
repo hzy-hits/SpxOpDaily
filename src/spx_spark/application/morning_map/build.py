@@ -14,6 +14,7 @@ from spx_spark.iv_surface import IvSurfaceSettings
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 from spx_spark.options_map import build_options_map
 from spx_spark.config import StorageSettings
+from spx_spark.settings import AppSettings, current_app_settings
 from spx_spark.storage import LatestState, LatestStateStore
 
 
@@ -64,7 +65,13 @@ def overnight_gap(state: LatestState) -> dict[str, Any]:
     }
 
 
-def build_morning_payload(state: LatestState, *, now: datetime | None = None) -> dict[str, Any]:
+def build_morning_payload(
+    state: LatestState,
+    *,
+    now: datetime | None = None,
+    app_settings: AppSettings | None = None,
+) -> dict[str, Any]:
+    resolved_app_settings = app_settings or current_app_settings()
     evaluation_time = now or state.as_of
     evaluation_state = replace(state, as_of=evaluation_time)
     options_map = build_options_map(evaluation_state)
@@ -75,6 +82,7 @@ def build_morning_payload(state: LatestState, *, now: datetime | None = None) ->
         iv_surface=iv_surface,
         iv_surface_history_1h=None,
         window={"name": "premarket_map", "priority": "info"},
+        app_settings=resolved_app_settings,
     )
     return {
         "kind": "morning_map",
@@ -112,4 +120,3 @@ def build_morning_payload_with_retry(
         if attempt < attempts - 1:
             time_module.sleep(delay_seconds)
     return payload
-

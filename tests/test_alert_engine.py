@@ -1218,7 +1218,10 @@ def test_run_reconciles_exact_position_event_acknowledgements(monkeypatch) -> No
         "spx_spark.alert_engine.persist_system_event_state",
         lambda state, **_kwargs: None,
     )
-    monkeypatch.setattr("spx_spark.alert_engine.persist_movement_state_snapshot", lambda state: None)
+    monkeypatch.setattr(
+        "spx_spark.alert_engine.persist_movement_state_snapshot",
+        lambda state, **_kwargs: None,
+    )
 
     run(["--notify", "--json"])
 
@@ -1277,7 +1280,7 @@ def test_run_persists_movement_bucket_after_outbox_acceptance(monkeypatch) -> No
     )
     monkeypatch.setattr(
         "spx_spark.alert_engine.persist_movement_state_snapshot",
-        lambda persisted_state: persisted.append(persisted_state),
+        lambda persisted_state, **_kwargs: persisted.append(persisted_state),
     )
 
     run(["--notify", "--json"])

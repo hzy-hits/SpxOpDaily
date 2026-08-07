@@ -14,7 +14,6 @@ from spx_spark.alert_engine.constants import (
 )
 from spx_spark.alert_model import Alert, severity_for_priority
 from spx_spark.alert_profile import AlertWindow
-from spx_spark.config import env_bool, env_float
 from spx_spark.iv_surface import IvSurfaceSnapshot
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 from spx_spark.marketdata import FUTURE_TIMESTAMP_TOLERANCE_SECONDS, as_utc
@@ -30,22 +29,12 @@ def option_coverage_is_fresh(
     coverage = getattr(expiry, "coverage", None)
     if coverage is None or coverage.total <= 0:
         return False
-    min_live_ratio = env_float(
-        "ALERT_MIN_OPTION_LIVE_RATIO",
-        settings.min_option_live_ratio,
-    )
-    if coverage.live / coverage.total < min_live_ratio:
+    if coverage.live / coverage.total < settings.min_option_live_ratio:
         return False
     max_age_ms = coverage.max_age_ms
-    if max_age_ms is not None and max_age_ms > env_float(
-        "ALERT_MAX_OPTION_QUOTE_AGE_MS",
-        settings.max_option_quote_age_ms,
-    ):
+    if max_age_ms is not None and max_age_ms > settings.max_option_quote_age_ms:
         return False
-    if env_bool(
-        "ALERT_REQUIRE_OPTION_QUOTE_TIMESTAMPS",
-        settings.require_option_quote_timestamps,
-    ):
+    if settings.require_option_quote_timestamps:
         known_ratio = (coverage.total - coverage.unknown_age) / coverage.total
         if known_ratio < settings.min_known_option_timestamp_ratio:
             return False
@@ -72,10 +61,7 @@ def option_freshness_alert(
         ),
         quality="degraded",
         value=live_ratio,
-        threshold=env_float(
-            "ALERT_MIN_OPTION_LIVE_RATIO",
-            settings.min_option_live_ratio,
-        ),
+        threshold=settings.min_option_live_ratio,
     )
 
 
@@ -102,21 +88,26 @@ def load_gamma_regime_state(path: str | Path) -> dict[str, object]:
     return payload if isinstance(payload, dict) else {}
 
 
-def gamma_regime_observation_stable(expiry: str, gamma_state: str, *, as_of: datetime) -> bool:
+def gamma_regime_observation_stable(
+    expiry: str,
+    gamma_state: str,
+    *,
+    as_of: datetime,
+    settings: AlertSettings = DEFAULT_ALERT_SETTINGS,
+) -> bool:
     """True when the persisted observation shows this gamma state has held for
     the hysteresis window. Read-only: observations are persisted separately so
     dry runs and tests do not mutate state."""
-    hysteresis = env_float(
-        "ALERT_GAMMA_REGIME_HYSTERESIS_SECONDS",
-        DEFAULT_ALERT_SETTINGS.gamma_regime_hysteresis_seconds,
-    )
     entry = load_gamma_regime_state(gamma_regime_state_path()).get(expiry)
     if not isinstance(entry, dict) or entry.get("state") != gamma_state:
         return False
     since = entry.get("since")
     if not isinstance(since, int | float):
         return False
-    return as_of.timestamp() - float(since) >= hysteresis
+    return (
+        as_of.timestamp() - float(since)
+        >= settings.gamma_regime_hysteresis_seconds
+    )
 
 
 def persist_gamma_regime_observations(options_map: OptionsMap, *, as_of: datetime) -> None:
@@ -191,6 +182,7 @@ def option_map_alerts(
             expiry.expiry,
             expiry.gamma_state,
             as_of=options_map.as_of,
+            settings=settings,
         ):
             gamma_detail = (
                 f"SPXW {expiry.expiry} gamma state is {expiry.gamma_state}; "
@@ -349,11 +341,13 @@ def option_alert_underlier_is_actionable(options_map: OptionsMap) -> bool:
     return option_alert_underlier_gate(options_map, expiry=expiry).allowed
 
 
-def iv_surface_freshness_alert(surface: IvSurfaceSnapshot, *, now: datetime) -> Alert | None:
-    max_age_seconds = env_float(
-        "ALERT_MAX_IV_SURFACE_AGE_SECONDS",
-        DEFAULT_ALERT_SETTINGS.max_iv_surface_age_seconds,
-    )
+def iv_surface_freshness_alert(
+    surface: IvSurfaceSnapshot,
+    *,
+    now: datetime,
+    settings: AlertSettings = DEFAULT_ALERT_SETTINGS,
+) -> Alert | None:
+    max_age_seconds = settings.max_iv_surface_age_seconds
     age_seconds = (now - surface.as_of).total_seconds()
     if age_seconds <= max_age_seconds:
         return None
@@ -410,14 +404,8 @@ def iv_surface_alerts(
     settings: AlertSettings = DEFAULT_ALERT_SETTINGS,
 ) -> list[Alert]:
     alerts: list[Alert] = []
-    shift_1h_threshold = env_float(
-        "ALERT_IV_SURFACE_SHIFT_1H_THRESHOLD",
-        settings.iv_surface_shift_1h_threshold,
-    )
-    atm_change_1h_threshold = env_float(
-        "ALERT_IV_ATM_CHANGE_1H_THRESHOLD",
-        settings.iv_atm_change_1h_threshold,
-    )
+    shift_1h_threshold = settings.iv_surface_shift_1h_threshold
+    atm_change_1h_threshold = settings.iv_atm_change_1h_threshold
     if (
         surface.front_vs_next_atm_iv_gap is not None
         and abs(surface.front_vs_next_atm_iv_gap) >= settings.term_gap_threshold
@@ -488,10 +476,7 @@ def iv_surface_alerts(
                     ),
                 )
             )
-        skew_25d_threshold = env_float(
-            "ALERT_SKEW_25D_THRESHOLD",
-            settings.skew_25d_threshold,
-        )
+        skew_25d_threshold = settings.skew_25d_threshold
         if (
             expiry.skew_method == "delta_25"
             and

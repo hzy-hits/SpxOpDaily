@@ -71,6 +71,7 @@ def run(
         persist_gamma_regime=True,
         alert_settings=app_settings.alerts,
         provider_failover_settings=failover_settings,
+        app_settings=app_settings,
     )
     system_event_pending = any(
         isinstance(alert, dict)
@@ -94,9 +95,13 @@ def run(
         ae.persist_system_event_state(
             state,
             failover_settings=failover_settings,
+            alert_settings=app_settings.alerts,
         )
     if not movement_pending or settled:
-        ae.persist_movement_state_snapshot(state)
+        ae.persist_movement_state_snapshot(
+            state,
+            settings=app_settings.alerts,
+        )
     if args.json:
         print(json.dumps(payload, indent=2, sort_keys=True))
     else:

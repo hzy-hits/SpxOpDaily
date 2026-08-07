@@ -14,12 +14,11 @@ from spx_spark.alert_engine.rules_data import find_best
 from spx_spark.alert_engine.rules_system import hyperliquid_proxy_usable
 from spx_spark.alert_model import Alert, severity_for_priority
 from spx_spark.alert_profile import AlertWindow, active_window
-from spx_spark.config import env_float
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 from spx_spark.market_context import build_market_context
 from spx_spark.marketdata import Quote
 from spx_spark.options_map import OptionsMap, build_options_map
-from spx_spark.settings import DEFAULT_ALERT_SETTINGS
+from spx_spark.settings import DEFAULT_ALERT_SETTINGS, AlertSettings
 from spx_spark.storage import LatestState, configured_quote_use_decision
 
 
@@ -45,6 +44,8 @@ def move_from_close_bps(quote: Quote) -> float | None:
 def effective_move_threshold_bps(
     priority: str,
     expected_move_pct: float | None,
+    *,
+    settings: AlertSettings = DEFAULT_ALERT_SETTINGS,
 ) -> tuple[float, str]:
     """Return effective movement threshold in bps and its source label."""
     static = MOVE_THRESHOLDS_BPS.get(priority, MOVE_THRESHOLDS_BPS["normal"])
@@ -55,11 +56,7 @@ def effective_move_threshold_bps(
     if em_bps > static:
         return (em_bps, "em_normalized")
     if priority == "low":
-        floor = env_float(
-            "ALERT_MOVE_QUIET_FLOOR_BPS",
-            DEFAULT_ALERT_SETTINGS.move_quiet_floor_bps,
-        )
-        return (max(em_bps, floor), "em_normalized_quiet")
+        return (max(em_bps, settings.move_quiet_floor_bps), "em_normalized_quiet")
     return (static, "static")
 
 
@@ -81,13 +78,18 @@ def movement_threshold_for_window(
     options_map: OptionsMap | None,
     *,
     as_of: datetime,
+    settings: AlertSettings = DEFAULT_ALERT_SETTINGS,
 ) -> tuple[float, str | None, float | None]:
     """Resolve movement threshold; when options_map is None match legacy static behavior."""
     static = MOVE_THRESHOLDS_BPS.get(window.priority, MOVE_THRESHOLDS_BPS["normal"])
     if options_map is None:
         return (static, None, None)
     expected_move_pct = front_expected_move_pct(options_map, as_of=as_of)
-    threshold, source = effective_move_threshold_bps(window.priority, expected_move_pct)
+    threshold, source = effective_move_threshold_bps(
+        window.priority,
+        expected_move_pct,
+        settings=settings,
+    )
     return (threshold, source, expected_move_pct)
 
 
@@ -139,11 +141,13 @@ def build_movement_state_payload(
     window: AlertWindow,
     market_context: dict[str, object] | None,
     options_map: OptionsMap | None = None,
+    settings: AlertSettings = DEFAULT_ALERT_SETTINGS,
 ) -> dict[str, object]:
     threshold, _threshold_source, _expected_move_pct = movement_threshold_for_window(
         window,
         options_map,
         as_of=state.as_of,
+        settings=settings,
     )
     instruments: dict[str, object] = {}
     for instrument_id in BASELINE_INSTRUMENTS:
@@ -175,6 +179,7 @@ def persist_movement_state_snapshot(
     window: AlertWindow | None = None,
     market_context: dict[str, object] | None = None,
     options_map: OptionsMap | None = None,
+    settings: AlertSettings = DEFAULT_ALERT_SETTINGS,
 ) -> None:
     window = window or active_window(state.as_of)
     if market_context is None:
@@ -188,6 +193,7 @@ def persist_movement_state_snapshot(
             window=window,
             market_context=market_context,
             options_map=options_map,
+            settings=settings,
         ),
     )
 
@@ -199,11 +205,13 @@ def movement_alerts(
     market_context: dict[str, object] | None,
     persist: bool = False,
     options_map: OptionsMap | None = None,
+    settings: AlertSettings = DEFAULT_ALERT_SETTINGS,
 ) -> list[Alert]:
     threshold, threshold_source, expected_move_pct = movement_threshold_for_window(
         window,
         options_map,
         as_of=state.as_of,
+        settings=settings,
     )
     state_path = movement_state_path()
     previous_payload = load_movement_state(state_path)
@@ -251,12 +259,8 @@ def movement_alerts(
             )
         severity = severity_for_priority(window.priority)
         if expected_move_pct is not None and expected_move_pct > 0:
-            escalation_fraction = env_float(
-                "ALERT_MOVE_HIGH_SEVERITY_EM_FRACTION",
-                DEFAULT_ALERT_SETTINGS.move_high_severity_em_fraction,
-            )
             em_day_bps = expected_move_pct * 10_000.0
-            if abs(move_bps) >= em_day_bps * escalation_fraction and severity in (
+            if abs(move_bps) >= em_day_bps * settings.move_high_severity_em_fraction and severity in (
                 "info",
                 "low",
                 "medium",
@@ -290,4 +294,3 @@ def movement_alerts(
             },
         )
     return alerts
-

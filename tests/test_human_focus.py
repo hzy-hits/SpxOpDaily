@@ -179,9 +179,7 @@ def test_delayed_price_is_labeled_research_only_in_human_context() -> None:
     assert "SPX quote is missing or degraded." in context["data_warnings"]
 
 
-def test_micopedia_context_includes_dip_context_vix_ratio_and_event_tags(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_micopedia_context_includes_dip_context_vix_ratio_and_event_tags() -> None:
     now = datetime(2026, 7, 6, 14, 0, tzinfo=timezone.utc)
     options_map = make_options_map(gamma_state="mixed_gamma")
     vix1d = Quote(
@@ -204,8 +202,12 @@ def test_micopedia_context_includes_dip_context_vix_ratio_and_event_tags(
         quotes=(vix1d, vix),
         best_quotes=(vix1d, vix),
     )
-    monkeypatch.setenv("MICOPEDIA_EVENT_TAGS", "fomc")
-    context = micopedia_context(state, options_map=options_map, window={"name": "rth"})
+    context = micopedia_context(
+        state,
+        options_map=options_map,
+        window={"name": "rth"},
+        event_tags=("fomc",),
+    )
     assert context["dip_context"]
     assert context["vix_ratio"] == 0.95
     assert context["regime"] == "high_vol_event"

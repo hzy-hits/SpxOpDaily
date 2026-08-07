@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import math
-import os
 import re
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta
@@ -10,7 +9,7 @@ from pathlib import Path
 from statistics import median
 
 from spx_spark.marketdata import MarketDataQuality, Quote
-from spx_spark.settings import settings_value
+from spx_spark.settings import MarketContextSettings, current_app_settings
 from spx_spark.storage import LatestState, configured_quote_use_decision
 
 
@@ -97,7 +96,9 @@ def build_market_context(
     state: LatestState,
     *,
     instrument_ids: tuple[str, ...] = DEFAULT_MARKET_CONTEXT_INSTRUMENTS,
+    settings: MarketContextSettings | None = None,
 ) -> dict[str, object]:
+    policy = settings or current_app_settings().market_context
     entries = [context_entry(state, instrument_id) for instrument_id in instrument_ids]
     by_id = {entry.instrument_id: entry for entry in entries}
     live_count = sum(1 for entry in entries if entry.quality == MarketDataQuality.LIVE.value)
@@ -121,9 +122,13 @@ def build_market_context(
             "xlu_spy": ratio(by_id, "equity:XLU", "equity:SPY"),
             "hyg_lqd": ratio(by_id, "equity:HYG", "equity:LQD"),
             "tlt_ief": ratio(by_id, "equity:TLT", "equity:IEF"),
-            "spx_sector_breadth": spx_sector_breadth(state),
-            "hyperliquid_spx_proxy": hyperliquid_spx_proxy_gate(by_id, as_of=state.as_of),
-            "polymarket_context": load_latest_polymarket_context(),
+            "spx_sector_breadth": spx_sector_breadth(state, settings=policy),
+            "hyperliquid_spx_proxy": hyperliquid_spx_proxy_gate(
+                by_id,
+                as_of=state.as_of,
+                settings=policy,
+            ),
+            "polymarket_context": load_latest_polymarket_context(settings=policy),
         },
     }
 
@@ -194,16 +199,17 @@ def ratio(
     return numerator.price / denominator.price
 
 
-def spx_sector_breadth(state: LatestState) -> dict[str, object]:
-    raw_instrument_ids = settings_value("market_context.spx_sector_instrument_ids")
-    if not isinstance(raw_instrument_ids, list):
-        raise TypeError("market_context.spx_sector_instrument_ids must be a list")
-    instrument_ids = tuple(str(value) for value in raw_instrument_ids)
-    min_usable = int(settings_value("market_context.sector_breadth_min_usable"))
-    max_age_ms = float(settings_value("market_context.sector_quote_max_age_seconds")) * 1_000.0
-    unchanged_band = float(settings_value("market_context.sector_unchanged_band_bps"))
-    directional_score = float(settings_value("market_context.sector_directional_bias_score"))
-    confirmation_move = float(settings_value("market_context.direction_confirmation_move_bps"))
+def spx_sector_breadth(
+    state: LatestState,
+    *,
+    settings: MarketContextSettings,
+) -> dict[str, object]:
+    instrument_ids = settings.spx_sector_instrument_ids
+    min_usable = settings.sector_breadth_min_usable
+    max_age_ms = settings.sector_quote_max_age_seconds * 1_000.0
+    unchanged_band = settings.sector_unchanged_band_bps
+    directional_score = settings.sector_directional_bias_score
+    confirmation_move = settings.direction_confirmation_move_bps
 
     usable_moves: list[float] = []
     for instrument_id in instrument_ids:
@@ -298,23 +304,8 @@ def fresh_move_from_close_bps(
     return (price / close - 1.0) * 10_000.0
 
 
-def env_float(name: str, default: float) -> float:
-    raw = os.getenv(name)
-    if not raw:
-        return default
-    return float(raw)
-
-
-def latest_polymarket_context_path() -> Path:
-    explicit = os.getenv("POLYMARKET_LATEST_CONTEXT_PATH")
-    if explicit:
-        return Path(explicit)
-    data_root = (
-        os.getenv("MARKET_DATA_DATA_ROOT")
-        or os.getenv("MAINTENANCE_DATA_ROOT")
-        or str(settings_value("maintenance.data_root"))
-    )
-    return Path(data_root) / "latest" / "polymarket_context.json"
+def latest_polymarket_context_path(*, settings: MarketContextSettings) -> Path:
+    return Path(settings.polymarket_latest_context_path)
 
 
 def missing_polymarket_context() -> dict[str, object]:
@@ -326,8 +317,8 @@ def missing_polymarket_context() -> dict[str, object]:
     }
 
 
-def load_latest_polymarket_context() -> dict[str, object]:
-    path = latest_polymarket_context_path()
+def load_latest_polymarket_context(*, settings: MarketContextSettings) -> dict[str, object]:
+    path = latest_polymarket_context_path(settings=settings)
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
@@ -393,6 +384,7 @@ def _future_carry_adjusted_price(
     anchor: MarketContextEntry,
     *,
     as_of: datetime,
+    settings: MarketContextSettings,
 ) -> float | None:
     """Convert a futures anchor to its cash equivalent by stripping carry.
 
@@ -410,15 +402,7 @@ def _future_carry_adjusted_price(
     days_to_expiry = (expiry - as_of.date()).days
     if days_to_expiry < 0:
         return None
-    try:
-        carry_rate = env_float(
-            "HYPERLIQUID_ES_CARRY_ANNUAL_RATE",
-            float(settings_value("hyperliquid.es_carry_annual_rate")),
-        )
-    except (KeyError, TypeError, ValueError):
-        # Config/code skew during a deploy must not break the status push;
-        # fall back to the raw anchor comparison.
-        return None
+    carry_rate = settings.hyperliquid_es_carry_annual_rate
     return anchor.price * math.exp(-carry_rate * days_to_expiry / 365.0)
 
 
@@ -426,15 +410,10 @@ def hyperliquid_spx_proxy_gate(
     entries: dict[str, MarketContextEntry],
     *,
     as_of: datetime | None = None,
+    settings: MarketContextSettings,
 ) -> dict[str, object]:
-    default_warn_bps = env_float(
-        "HYPERLIQUID_PROXY_BASIS_WARN_BPS",
-        float(settings_value("hyperliquid.proxy_basis_warn_bps")),
-    )
-    default_block_bps = env_float(
-        "HYPERLIQUID_PROXY_BASIS_BLOCK_BPS",
-        float(settings_value("hyperliquid.proxy_basis_block_bps")),
-    )
+    default_warn_bps = settings.hyperliquid_proxy_basis_warn_bps
+    default_block_bps = settings.hyperliquid_proxy_basis_block_bps
     proxy = first_usable_entry(entries, HYPERLIQUID_PROXY_IDS)
     if proxy is None:
         return {
@@ -466,14 +445,8 @@ def hyperliquid_spx_proxy_gate(
 
     anchor_is_future = anchor.instrument_id.startswith("future:")
     if anchor_is_future:
-        warn_bps = env_float(
-            "HYPERLIQUID_PROXY_FUTURES_BASIS_WARN_BPS",
-            float(settings_value("hyperliquid.proxy_futures_basis_warn_bps")),
-        )
-        block_bps = env_float(
-            "HYPERLIQUID_PROXY_FUTURES_BASIS_BLOCK_BPS",
-            float(settings_value("hyperliquid.proxy_futures_basis_block_bps")),
-        )
+        warn_bps = settings.hyperliquid_proxy_futures_basis_warn_bps
+        block_bps = settings.hyperliquid_proxy_futures_basis_block_bps
     else:
         warn_bps = default_warn_bps
         block_bps = default_block_bps
@@ -483,7 +456,11 @@ def hyperliquid_spx_proxy_gate(
     basis_reference = anchor.price
     anchor_cash_equivalent = None
     if anchor_is_future and as_of is not None:
-        anchor_cash_equivalent = _future_carry_adjusted_price(anchor, as_of=as_of)
+        anchor_cash_equivalent = _future_carry_adjusted_price(
+            anchor,
+            as_of=as_of,
+            settings=settings,
+        )
         if anchor_cash_equivalent is not None:
             basis_reference = anchor_cash_equivalent
     basis_bps = (proxy.price / basis_reference - 1.0) * 10_000.0

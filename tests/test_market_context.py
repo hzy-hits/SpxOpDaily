@@ -9,7 +9,7 @@ import pytest
 
 from spx_spark.market_context import _cme_contract_expiry, build_market_context
 from spx_spark.marketdata import InstrumentId, InstrumentType, MarketDataQuality, Provider, Quote
-from spx_spark.settings import settings_value
+from spx_spark.settings import current_app_settings
 from spx_spark.storage import LatestState
 
 
@@ -191,12 +191,15 @@ def test_spx_sector_breadth_does_not_claim_spy_rsp_confirmation_when_missing() -
     assert breadth["directional_bias"] == "neutral_unclear"
 
 
-def test_market_context_missing_polymarket_is_research_only(monkeypatch, tmp_path) -> None:
-    monkeypatch.setenv("POLYMARKET_LATEST_CONTEXT_PATH", str(tmp_path / "missing.json"))
+def test_market_context_missing_polymarket_is_research_only(tmp_path) -> None:
+    settings = replace(
+        current_app_settings().market_context,
+        polymarket_latest_context_path=str(tmp_path / "missing.json"),
+    )
     now = datetime(2026, 7, 7, 3, 15, tzinfo=BJ_TZ)
     state = LatestState(created_at=now, as_of=now, quotes=(), best_quotes=())
 
-    context = build_market_context(state)
+    context = build_market_context(state, settings=settings)
     polymarket = context["derived"]["polymarket_context"]
 
     assert polymarket["state"] == "missing"
@@ -205,7 +208,7 @@ def test_market_context_missing_polymarket_is_research_only(monkeypatch, tmp_pat
     assert polymarket["usage_gate"] == "context_only_no_kelly_no_direct_alert"
 
 
-def test_market_context_loads_latest_polymarket_context(monkeypatch, tmp_path) -> None:
+def test_market_context_loads_latest_polymarket_context(tmp_path) -> None:
     path = tmp_path / "polymarket_context.json"
     path.write_text(
         json.dumps(
@@ -218,11 +221,14 @@ def test_market_context_loads_latest_polymarket_context(monkeypatch, tmp_path) -
         ),
         encoding="utf-8",
     )
-    monkeypatch.setenv("POLYMARKET_LATEST_CONTEXT_PATH", str(path))
+    settings = replace(
+        current_app_settings().market_context,
+        polymarket_latest_context_path=str(path),
+    )
     now = datetime(2026, 7, 7, 3, 15, tzinfo=BJ_TZ)
     state = LatestState(created_at=now, as_of=now, quotes=(), best_quotes=())
 
-    context = build_market_context(state)
+    context = build_market_context(state, settings=settings)
 
     assert context["derived"]["polymarket_context"]["market_count"] == 2
 
@@ -510,7 +516,7 @@ def test_hyperliquid_gate_falls_back_to_raw_basis_without_contract_symbol() -> N
     assert gate["anchor_cash_equivalent"] is None
 
 
-def test_hyperliquid_gate_survives_missing_carry_config(monkeypatch) -> None:
+def test_hyperliquid_gate_uses_injected_carry_policy() -> None:
     now = datetime(2026, 7, 17, 5, 0, tzinfo=timezone.utc)
     es = make_provider_quote(
         InstrumentId.future("ES", provider_symbol="/ESU26"),
@@ -528,15 +534,14 @@ def test_hyperliquid_gate_survives_missing_carry_config(monkeypatch) -> None:
     )
     state = LatestState(created_at=now, as_of=now, quotes=(), best_quotes=(es, proxy))
 
-    def _raise_missing(path: str) -> object:
-        if path == "hyperliquid.es_carry_annual_rate":
-            raise KeyError(path)
-        return settings_value(path)
+    settings = replace(
+        current_app_settings().market_context,
+        hyperliquid_es_carry_annual_rate=0.0,
+    )
+    gate = build_market_context(state, settings=settings)["derived"][
+        "hyperliquid_spx_proxy"
+    ]
 
-    monkeypatch.setattr("spx_spark.market_context.settings_value", _raise_missing)
-
-    gate = build_market_context(state)["derived"]["hyperliquid_spx_proxy"]
-
-    assert gate["anchor_cash_equivalent"] is None
+    assert gate["anchor_cash_equivalent"] == 7513.0
     assert gate["basis_bps"] == pytest.approx(-85.2, abs=0.5)
     assert gate["state"] == "basis_warn"

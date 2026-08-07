@@ -31,7 +31,12 @@ from spx_spark.market_context import build_market_context
 from spx_spark.options_map import OptionsMap, build_options_map
 from spx_spark.position_alerts import position_holdings_alerts
 from spx_spark.provider_failover_controller import ProviderFailoverSettings
-from spx_spark.settings import DEFAULT_ALERT_SETTINGS, AlertSettings
+from spx_spark.settings import (
+    DEFAULT_ALERT_SETTINGS,
+    AlertSettings,
+    AppSettings,
+    current_app_settings,
+)
 from spx_spark.state_io import read_json_object
 from spx_spark.storage import LatestState
 from spx_spark.strategy.steven import (
@@ -75,6 +80,7 @@ def evaluate_alerts(
             market_context=market_context,
             persist=persist_movement_state,
             options_map=options_map,
+            settings=alert_settings,
         )
     )
 
@@ -94,18 +100,30 @@ def evaluate_alerts(
                 settings=alert_settings,
             )
         )
-    alerts.extend(position_holdings_alerts(state, options_map=options_map, window=window))
+    alerts.extend(
+        position_holdings_alerts(
+            state,
+            options_map=options_map,
+            window=window,
+            settings=alert_settings,
+        )
+    )
     alerts.extend(market_context_alerts(market_context))
     alerts.extend(
         system_event_alerts(
             state,
             persist=persist_system_events,
             failover_settings=provider_failover_settings,
+            alert_settings=alert_settings,
         )
     )
     alerts.extend(
         proxy_fallback_watch_alerts(
-            state, window=window, market_context=market_context, options_map=options_map
+            state,
+            window=window,
+            market_context=market_context,
+            options_map=options_map,
+            alert_settings=alert_settings,
         )
     )
     return alerts
@@ -129,8 +147,10 @@ def evaluate_payload(
     persist_gamma_regime: bool = False,
     alert_settings: AlertSettings | None = None,
     provider_failover_settings: ProviderFailoverSettings | None = None,
+    app_settings: AppSettings | None = None,
 ) -> dict[str, object]:
     now = now or state.as_of
+    resolved_app_settings = app_settings or current_app_settings()
     policy = alert_settings or DEFAULT_ALERT_SETTINGS
     window = active_window(now)
     window_payload = window.to_dict(now=now)
@@ -144,9 +164,14 @@ def evaluate_payload(
     iv_surface = load_current_iv_surface(iv_settings)
     iv_surface_history = load_recent_snapshots(iv_settings, as_of=state.as_of, lookback_minutes=60)
     iv_surface_history_1h = summarize_surface_history(iv_surface, iv_surface_history)
-    market_context = build_market_context(state)
+    market_context = build_market_context(
+        state,
+        settings=resolved_app_settings.market_context,
+    )
     iv_stale_alert = (
-        iv_surface_freshness_alert(iv_surface, now=state.as_of) if iv_surface is not None else None
+        iv_surface_freshness_alert(iv_surface, now=state.as_of, settings=policy)
+        if iv_surface is not None
+        else None
     )
     iv_surface_for_alerts = None if iv_stale_alert is not None else iv_surface
     alerts = evaluate_alerts(
@@ -189,6 +214,7 @@ def evaluate_payload(
             iv_surface=iv_surface,
             iv_surface_history_1h=iv_surface_history_1h,
             window=window_payload,
+            app_settings=resolved_app_settings,
         ),
         "decision_context": decision_context,
         "regime_decision": decision_context.get("regime_decision", {}),

@@ -16,6 +16,7 @@ from spx_spark.settings.schema import AppSettings
 from spx_spark.settings.globex_trend import GlobexTrendSettings
 from spx_spark.settings.level_decision import LevelDecisionPolicy
 from spx_spark.settings.market_features import MarketFeatureSettings
+from spx_spark.settings.market_data import MarketContextSettings
 from spx_spark.settings.order_map import DEFAULT_ORDER_MAP_POLICY, OrderMapPolicy
 from spx_spark.settings.shock import DEFAULT_SHOCK_SETTINGS, ShockSettings
 from spx_spark.settings.spring_gamma_v3 import SpringGammaV3Settings
@@ -27,6 +28,7 @@ __all__ = [
     "GlobexTrendSettings",
     "LevelDecisionPolicy",
     "MarketFeatureSettings",
+    "MarketContextSettings",
     "DEFAULT_ORDER_MAP_POLICY",
     "OrderMapPolicy",
     "DEFAULT_ALERT_SETTINGS",

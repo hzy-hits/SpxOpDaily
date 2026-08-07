@@ -285,3 +285,29 @@ Ruff, Import Linter 2/2 and `git diff --check` passed.
   market-feature and IBKR tests pass; after deployment the five Python units
   remain active with zero restarts and direct SPX/ES/SPXW plus Bark/Feishu
   delivery are rechecked.
+
+## Alert, position and market-context typed settings cutover
+
+- User-visible behavior: alert thresholds, position-alert policy, sector
+  breadth, Hyperliquid basis/carry gates and Micopedia event tags keep their
+  existing values while one typed `AppSettings` snapshot supplies each
+  evaluation cycle.
+- Existing owner and reuse: extend `AlertSettings` and add a
+  `MarketContextSettings` slice beside `MarketDataSettings`. All keys already
+  exist in tracked TOML; this adds no config key, module, dependency, service,
+  timer, database, queue or state machine.
+- Delete: remove direct `env_bool`/`env_float`/`env_csv`/`settings_value` reads
+  from the three alert-rule modules, position alerts, human focus and market
+  context. Realtime and alert CLI composition pass their resolved AppSettings;
+  compatibility callers use the existing process cache.
+- Oracle preflight: all Hyperliquid basis/carry and Micopedia event-tag
+  environment overrides are unset. Existing alert/position overrides were
+  recorded before implementation and remain supported by the loader's fixed
+  `defaults < deployment < environment` precedence.
+- Complexity: production +365/-220 lines (net +145), tests +74/-37; direct old
+  helper consumer files decrease by six. The net addition is typed fields,
+  validation and explicit composition wiring rather than a new runtime owner.
+- Acceptance: 170 focused settings, context, alert, position, realtime and Core
+  tests pass; Ruff, Import Linter 2/2 and `git diff --check` pass. Deployment
+  must compare resolved Oracle policy, restart only affected Python owners and
+  verify actual Bark/Feishu receipts.
