@@ -119,6 +119,7 @@ from spx_spark.application.order_map.level_trigger_repricing import (
 from spx_spark.config import StorageSettings
 from spx_spark.features.exposure_map import build_exposure_map
 from spx_spark.greek_reference import build_zero_dte_greeks_reference
+from spx_spark.infrastructure.operational_db import persist_strategy_decision
 from spx_spark.macro_event_clock import macro_event_state
 from spx_spark.marketdata import as_utc
 from spx_spark.analytics.options.models import OptionsMap
@@ -577,11 +578,32 @@ def run(
         "candidates": [],
     }
     strategy_decision = build_strategy_decision(strategy_payload, action_latest, action_now)
-    save_json(Path(storage.data_root) / "latest" / "strategy_decision.json", strategy_decision)
     try:
-        strategy_delivery = enqueue_strategy_decision(strategy_decision, now=action_now)
-    except Exception as exc:  # delivery diagnostics must not stop feature collection
-        strategy_delivery = {"accepted": False, "outcome": f"error:{type(exc).__name__}:{exc}"}
+        persisted_decision_id = persist_strategy_decision(
+            strategy_decision,
+        )
+    except Exception as exc:  # persistence must block READY, not feature collection
+        strategy_persistence = {
+            "ok": False,
+            "error": f"{type(exc).__name__}:{exc}",
+        }
+        strategy_delivery = {
+            "accepted": False,
+            "outcome": "operational_decision_not_persisted",
+        }
+    else:
+        strategy_persistence = {"ok": True, "decision_id": persisted_decision_id}
+        save_json(
+            Path(storage.data_root) / "latest" / "strategy_decision.json",
+            strategy_decision,
+        )
+        try:
+            strategy_delivery = enqueue_strategy_decision(strategy_decision, now=action_now)
+        except Exception as exc:  # delivery diagnostics must not stop feature collection
+            strategy_delivery = {
+                "accepted": False,
+                "outcome": f"error:{type(exc).__name__}:{exc}",
+            }
     virtual_strategy = process_virtual_strategy(
         storage,
         action_latest,
@@ -676,6 +698,7 @@ def run(
             "strategy_distribution_forecast": strategy_distribution_forecast,
             "strategy_distribution_forecast_error": strategy_distribution_forecast_error,
             "strategy_decision": strategy_decision,
+            "strategy_decision_persistence": strategy_persistence,
             "strategy_decision_delivery": strategy_delivery,
         }
     )

@@ -100,10 +100,21 @@ class Recovery:
 
 def create_database_engine(database_path: Path) -> Engine:
     database_path.parent.mkdir(parents=True, exist_ok=True)
-    return sa.create_engine(
+    engine = sa.create_engine(
         f"sqlite:///{database_path}",
         connect_args={"timeout": 5.0},
     )
+    sa.event.listen(engine, "connect", _configure_sqlite_connection)
+    return engine
+
+
+def _configure_sqlite_connection(connection, _record) -> None:
+    cursor = connection.cursor()
+    try:
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.execute("PRAGMA synchronous=NORMAL")
+    finally:
+        cursor.close()
 
 
 def create_engine(data_root: Path) -> Engine:

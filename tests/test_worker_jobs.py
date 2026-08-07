@@ -143,7 +143,7 @@ def test_nonzero_existing_entry_fails_the_huey_task(
         jobs.maintenance_daily.call_local()
 
 
-def test_initial_migration_builds_only_two_business_tables_and_checks_status(
+def test_migrations_build_only_planned_operational_tables_and_check_status(
     tmp_path: Path,
 ) -> None:
     environment = os.environ | {"SPX_DATA_ROOT": str(tmp_path)}
@@ -164,12 +164,20 @@ def test_initial_migration_builds_only_two_business_tables_and_checks_status(
         }
         assert tables == {
             "alembic_version",
+            "compaction_manifests",
+            "decision_legs",
+            "decisions",
+            "events",
             "notification_attempts",
             "notification_events",
+            "outcomes",
+            "provider_incidents",
+            "sessions",
         }
         with pytest.raises(sqlite3.IntegrityError):
             connection.execute(
                 "INSERT INTO notification_events "
-                "(idempotency_key, channel, payload_json, status) VALUES (?, ?, ?, ?)",
-                ("bad", "test", "{}", "typo"),
+                "(idempotency_key, logical_event_id, source, kind, lane, channel, "
+                "payload_json, payload_sha256, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                ("bad", "bad", "test", "test", "test", "test", "{}", "bad", "typo"),
             )

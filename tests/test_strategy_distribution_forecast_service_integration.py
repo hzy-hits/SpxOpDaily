@@ -34,8 +34,10 @@ def test_unified_selector_is_the_only_hot_operator_candidate_owner() -> None:
     legacy_delivery = source.index("_record_and_process_trade_intent(")
     gth_evidence = source.index("process_gth_level_manual_candidate(")
     selector = source.index("build_strategy_decision(")
+    persist = source.index("persist_strategy_decision(")
+    export = source.index('latest" / "strategy_decision.json"')
     enqueue = source.index("enqueue_strategy_decision(")
-    assert legacy_delivery < gth_evidence < selector < enqueue
+    assert legacy_delivery < gth_evidence < selector < persist < export < enqueue
     assert '"status": "selector_candidate"' in source
     assert "operator_authority=False" in source
     assert 'latest" / "strategy_decision.json"' in source

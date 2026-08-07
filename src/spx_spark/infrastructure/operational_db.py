@@ -1,0 +1,261 @@
+"""SQLAlchemy Core persistence for operational strategy decisions."""
+
+from __future__ import annotations
+
+from collections.abc import Mapping, Sequence
+from datetime import datetime, timezone
+from functools import lru_cache
+import json
+from pathlib import Path
+
+import sqlalchemy as sa
+from sqlalchemy import Engine
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+
+from spx_spark.app_settings import get_settings
+from spx_spark.infrastructure.notifications import create_database_engine
+
+
+metadata = sa.MetaData()
+decisions = sa.Table(
+    "decisions",
+    metadata,
+    sa.Column("decision_id", sa.Text(), primary_key=True),
+    sa.Column("event_key", sa.Text()),
+    sa.Column("session_date", sa.Text()),
+    sa.Column("strategy_name", sa.Text(), nullable=False),
+    sa.Column("strategy_version", sa.Text(), nullable=False),
+    sa.Column("decision_at", sa.Text(), nullable=False),
+    sa.Column("available_at", sa.Text(), nullable=False),
+    sa.Column("status", sa.Text(), nullable=False),
+    sa.Column("action", sa.Text(), nullable=False),
+    sa.Column("side", sa.Text(), nullable=False),
+    sa.Column("reason", sa.Text()),
+    sa.Column("gamma_regime", sa.Text()),
+    sa.Column("attributes_json", sa.Text(), nullable=False),
+    sa.Column("created_at", sa.Text(), nullable=False),
+)
+decision_legs = sa.Table(
+    "decision_legs",
+    metadata,
+    sa.Column("decision_id", sa.Text(), primary_key=True),
+    sa.Column("leg_index", sa.Integer(), primary_key=True),
+    sa.Column("instrument_id", sa.Text(), nullable=False),
+    sa.Column("right_code", sa.Text()),
+    sa.Column("expiry", sa.Text()),
+    sa.Column("strike", sa.Float()),
+    sa.Column("quantity", sa.Float()),
+    sa.Column("bid", sa.Float()),
+    sa.Column("ask", sa.Float()),
+    sa.Column("delta", sa.Float()),
+    sa.Column("gamma", sa.Float()),
+    sa.Column("theta", sa.Float()),
+    sa.Column("vega", sa.Float()),
+    sa.Column("quote_source_at", sa.Text(), nullable=False),
+    sa.Column("quote_available_at", sa.Text(), nullable=False),
+    sa.Column("attributes_json", sa.Text(), nullable=False),
+    sa.Column("created_at", sa.Text(), nullable=False),
+)
+
+
+class OperationalDecisionConflict(RuntimeError):
+    """A stable decision id was retried with different immutable content."""
+
+
+@lru_cache(maxsize=8)
+def _engine(path: str) -> Engine:
+    return create_database_engine(Path(path))
+
+
+def persist_strategy_decision(
+    decision: Mapping[str, object],
+    *,
+    database_path: str | Path | None = None,
+) -> str:
+    """Atomically persist one strategy decision and its frozen execution legs."""
+
+    row, legs = _decision_rows(decision)
+    path = Path(database_path) if database_path is not None else get_settings().data_root / "spx.sqlite"
+    engine = _engine(str(path))
+    with engine.begin() as connection:
+        connection.execute(sqlite_insert(decisions).values(row).on_conflict_do_nothing())
+        stored = connection.execute(
+            sa.select(decisions).where(decisions.c.decision_id == row["decision_id"])
+        ).mappings().one()
+        _assert_same("decision", stored, row)
+        for leg in legs:
+            connection.execute(
+                sqlite_insert(decision_legs).values(leg).on_conflict_do_nothing()
+            )
+            stored_leg = connection.execute(
+                sa.select(decision_legs).where(
+                    decision_legs.c.decision_id == leg["decision_id"],
+                    decision_legs.c.leg_index == leg["leg_index"],
+                )
+            ).mappings().one()
+            _assert_same("decision leg", stored_leg, leg)
+        stored_count = connection.execute(
+            sa.select(sa.func.count()).select_from(decision_legs).where(
+                decision_legs.c.decision_id == row["decision_id"]
+            )
+        ).scalar_one()
+        if stored_count != len(legs):
+            raise OperationalDecisionConflict("conflicting immutable decision leg set")
+    return str(row["decision_id"])
+
+
+def read_strategy_decisions(
+    *,
+    database_path: str | Path,
+    session_date: str | None = None,
+) -> tuple[dict[str, object], ...]:
+    """Read persisted strategy payloads for replay without consulting JSON exports."""
+
+    statement = sa.select(decisions.c.attributes_json).order_by(decisions.c.decision_at)
+    if session_date is not None:
+        statement = statement.where(decisions.c.session_date == session_date)
+    with _engine(str(database_path)).begin() as connection:
+        rows = connection.execute(statement).scalars().all()
+    return tuple(json.loads(value) for value in rows)
+
+
+def _decision_rows(
+    value: Mapping[str, object],
+) -> tuple[dict[str, object], tuple[dict[str, object], ...]]:
+    decision_id = _required_text(value, "decision_id")
+    decision_at = _time(value.get("decision_at"), "decision_at")
+    available_at = _time(value.get("available_at"), "available_at")
+    if available_at > decision_at:
+        raise ValueError("strategy decision used facts unavailable at decision time")
+    candidate = _mapping(value.get("candidate"))
+    execution = _mapping(value.get("execution"))
+    regime = _mapping(value.get("regime"))
+    why_not = _mapping(value.get("why_not"))
+    reasons = why_not.get("reasons")
+    reason = next((str(item) for item in reasons if item), None) if isinstance(reasons, list) else None
+    now_text = _utc_text(datetime.now(tz=timezone.utc))
+    row = {
+        "decision_id": decision_id,
+        "event_key": None,
+        "session_date": str(value.get("session_date") or "") or None,
+        "strategy_name": "strategy_signal_engine_v2",
+        "strategy_version": _required_text(value, "policy_version"),
+        "decision_at": _utc_text(decision_at),
+        "available_at": _utc_text(available_at),
+        "status": "selected" if candidate else "no_trade",
+        "action": str(execution.get("action") or "WAIT").lower(),
+        "side": str(candidate.get("direction") or "none").lower(),
+        "reason": reason or str(_mapping(value.get("desk_view")).get("reason") or "") or None,
+        "gamma_regime": str(regime.get("terminal_state") or regime.get("path_state") or "") or None,
+        "attributes_json": _json(value),
+        "created_at": now_text,
+    }
+    return row, _leg_rows(candidate, decision_id, available_at, now_text)
+
+
+def _leg_rows(
+    candidate: Mapping[str, object],
+    decision_id: str,
+    available_at: datetime,
+    created_at: str,
+) -> tuple[dict[str, object], ...]:
+    if not candidate:
+        return ()
+    raw_legs = candidate.get("legs")
+    if isinstance(raw_legs, Sequence) and not isinstance(raw_legs, (str, bytes)):
+        legs = tuple(_mapping(item) for item in raw_legs)
+        quantities = (1.0, -2.0, 1.0)
+    else:
+        legs = (_mapping(candidate.get("long")), _mapping(candidate.get("short")))
+        quantities = (1.0, -1.0)
+    if not legs or any(not leg for leg in legs) or len(legs) != len(quantities):
+        raise ValueError("selected strategy decision requires a complete execution leg set")
+    rows = []
+    for index, (leg, quantity) in enumerate(zip(legs, quantities, strict=True)):
+        instrument = str(leg.get("contract_id") or "").strip()
+        if not instrument:
+            raise ValueError("strategy decision leg contract_id is required")
+        source_at = _time(leg.get("source_at"), "leg source_at")
+        if source_at > available_at:
+            raise ValueError("strategy decision leg quote was unavailable at decision time")
+        expiry, strike, right = _contract_fields(instrument, leg)
+        bid, ask = _number(leg.get("bid")), _number(leg.get("ask"))
+        if bid is None or ask is None:
+            raise ValueError("strategy decision leg requires a two-sided quote")
+        rows.append(
+            {
+                "decision_id": decision_id,
+                "leg_index": index,
+                "instrument_id": instrument,
+                "right_code": right,
+                "expiry": expiry,
+                "strike": strike,
+                "quantity": quantity,
+                "bid": bid,
+                "ask": ask,
+                "delta": _number(leg.get("delta")),
+                "gamma": _number(leg.get("gamma")),
+                "theta": _number(leg.get("theta")),
+                "vega": _number(leg.get("vega")),
+                "quote_source_at": _utc_text(source_at),
+                "quote_available_at": _utc_text(available_at),
+                "attributes_json": _json(
+                    {"provider": leg.get("provider"), "role": "long" if quantity > 0 else "short"}
+                ),
+                "created_at": created_at,
+            }
+        )
+    return tuple(rows)
+
+
+def _contract_fields(
+    instrument: str, leg: Mapping[str, object]
+) -> tuple[str | None, float | None, str | None]:
+    parts = instrument.split(":")
+    expiry = str(leg.get("expiry") or "") or (parts[-3] if len(parts) >= 6 else None)
+    strike = _number(leg.get("strike"))
+    if strike is None and len(parts) >= 6:
+        try:
+            strike = float(parts[-2])
+        except ValueError:
+            pass
+    right = str(leg.get("right") or "").upper() or (parts[-1].upper() if len(parts) >= 6 else None)
+    return expiry, strike, right
+
+
+def _assert_same(kind: str, stored: Mapping[str, object], expected: Mapping[str, object]) -> None:
+    if any(stored[key] != value for key, value in expected.items() if key != "created_at"):
+        raise OperationalDecisionConflict(f"conflicting immutable {kind}")
+
+
+def _required_text(value: Mapping[str, object], key: str) -> str:
+    result = str(value.get(key) or "").strip()
+    if not result:
+        raise ValueError(f"strategy decision {key} is required")
+    return result
+
+
+def _mapping(value: object) -> Mapping[str, object]:
+    return value if isinstance(value, Mapping) else {}
+
+
+def _time(value: object, name: str) -> datetime:
+    try:
+        result = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"strategy decision {name} is invalid") from exc
+    if result.tzinfo is None:
+        raise ValueError(f"strategy decision {name} must be timezone-aware")
+    return result.astimezone(timezone.utc)
+
+
+def _utc_text(value: datetime) -> str:
+    return value.astimezone(timezone.utc).isoformat(timespec="microseconds")
+
+
+def _number(value: object) -> float | None:
+    return float(value) if isinstance(value, int | float) and not isinstance(value, bool) else None
+
+
+def _json(value: Mapping[str, object]) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)

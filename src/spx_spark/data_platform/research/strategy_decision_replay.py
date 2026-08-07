@@ -5,12 +5,27 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from spx_spark.analytics.options.strategy_payoff import vertical_entry_quality
 from spx_spark.application.order_map.strategy_regime import DEFAULT_STRATEGY_POLICY
+from spx_spark.infrastructure.operational_db import read_strategy_decisions
 
 SLIPPAGE_GRID = (0.0, 0.05, 0.10, 0.20)
+
+
+def load_strategy_decisions_for_replay(
+    database_path: str | Path,
+    *,
+    session_date: str | None = None,
+) -> tuple[dict[str, object], ...]:
+    """Load the authoritative SQL decision payloads; JSON is export-only."""
+
+    return read_strategy_decisions(
+        database_path=database_path,
+        session_date=session_date,
+    )
 
 
 def classify_gth_vertical_record(
