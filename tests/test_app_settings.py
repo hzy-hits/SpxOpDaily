@@ -91,3 +91,86 @@ def test_notify_test_queues_one_real_verification_event(
     assert envelope.kind == "notification_test"
     assert envelope.lane == "execution_safety"
     assert kwargs["title"] == "SPX notification test"
+
+
+def test_data_command_forwards_to_existing_owners(
+    settings_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[tuple[str, list[str]]] = []
+    monkeypatch.setattr(
+        "spx_spark.data_platform.cli.run",
+        lambda argv: calls.append(("data", argv)) or 0,
+    )
+    monkeypatch.setattr(
+        "spx_spark.data_platform.lake.compact.main",
+        lambda argv: calls.append(("compact", list(argv))) or 0,
+    )
+
+    status = CliRunner().invoke(app, ["data", "status"])
+    compact = CliRunner().invoke(app, ["data", "compact", "--json", "--limit", "8"])
+
+    assert status.exit_code == compact.exit_code == 0
+    assert calls == [
+        ("data", ["status"]),
+        ("compact", ["--json", "--limit", "8"]),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("target", "command"),
+    (
+        ("spx_spark.alert_profile.run", ["ops", "alert-profile"]),
+        ("spx_spark.maintenance.run", ["ops", "maintenance"]),
+        ("spx_spark.mock_collector.run", ["ops", "mock-collector"]),
+        ("spx_spark.runtime_mode.main", ["ops", "runtime-mode"]),
+        ("spx_spark.sampling.run", ["ops", "sampling-plan"]),
+        ("spx_spark.ibkr.verifier.run", ["verify", "ibkr"]),
+        ("spx_spark.schwab.verifier.run", ["verify", "schwab"]),
+        ("spx_spark.ibkr.trading_hours_report.run", ["report", "ibkr-hours"]),
+        ("spx_spark.strategy.micopedia.run", ["report", "micopedia"]),
+        ("spx_spark.options_map.run", ["report", "options-map"]),
+        ("spx_spark.strategy.steven_replay.run", ["replay", "steven"]),
+        ("spx_spark.surface_dashboard_replay.run", ["replay", "surface"]),
+        ("spx_spark.ibkr.collector.run", ["ibkr", "collect"]),
+        ("spx_spark.ibkr.stream.cli.run", ["ibkr", "stream"]),
+        ("spx_spark.ibkr.farm_health.run_probe_cli", ["ibkr", "farm-probe"]),
+        ("spx_spark.ibkr.position_watcher.run", ["ibkr", "positions"]),
+        ("spx_spark.schwab.collector.run", ["schwab", "collect"]),
+        ("spx_spark.schwab.oauth_service.run", ["schwab", "oauth"]),
+        ("spx_spark.application.morning_map.service.run", ["job", "morning-map"]),
+        ("spx_spark.application.order_map.service.run", ["job", "order-map"]),
+        ("spx_spark.post_close_review.run", ["job", "post-close-review"]),
+        (
+            "spx_spark.application.order_map.rth_daily_acceptance.main",
+            ["job", "rth-daily-acceptance"],
+        ),
+    ),
+)
+def test_operator_commands_forward_arguments(
+    settings_cwd: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    target: str,
+    command: list[str],
+) -> None:
+    captured: list[list[str]] = []
+    monkeypatch.setattr(target, lambda argv: captured.append(list(argv)) or 0)
+
+    result = CliRunner().invoke(app, [*command, "--json", "value"])
+
+    assert result.exit_code == 0
+    assert captured == [["--json", "value"]]
+
+
+def test_schwab_marketdata_command_calls_existing_loop(
+    settings_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: list[bool] = []
+    monkeypatch.setattr(
+        "spx_spark.schwab.collector.run_loop",
+        lambda: captured.append(True) or 0,
+    )
+
+    result = CliRunner().invoke(app, ["schwab", "marketdata"])
+
+    assert result.exit_code == 0
+    assert captured == [True]

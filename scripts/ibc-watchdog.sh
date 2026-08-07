@@ -122,7 +122,7 @@ if timeout 5 bash -c "exec 3<>/dev/tcp/$HOST/$PORT" 2>/dev/null; then
   fi
 
   probe_exit=0
-  probe_output="$(cd "$ROOT" && timeout 60 uv run --no-sync spx-spark-ibkr-farm-probe --json 2>&1)" || probe_exit=$?
+  probe_output="$(cd "$ROOT" && timeout 60 uv run --no-sync spx ibkr farm-probe --json 2>&1)" || probe_exit=$?
   if (( probe_exit == 0 )); then
     rm -f "$STATE_FILE" "$DATA_PLANE_STATE"
     log "API port $HOST:$PORT and data plane are healthy"

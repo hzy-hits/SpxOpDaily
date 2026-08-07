@@ -1,4 +1,4 @@
-"""Load AppSettings from defaults YAML, optional deployment YAML, and environ.
+"""Load AppSettings from defaults TOML, optional deployment TOML, and environ.
 
 Priority is fixed: defaults < deployment < environment.
 Secret values must never be written into SettingSource or logs.
@@ -8,11 +8,10 @@ from __future__ import annotations
 
 import math
 import os
+import tomllib
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Mapping
-
-import yaml
 
 from spx_spark.settings.alerts import AlertSettings
 from spx_spark.settings.analytics import AnalyticsSettings
@@ -49,14 +48,14 @@ _SECRET_KEY_FRAGMENTS = (
 
 _CONFIG_ENV_VAR = "SPX_SPARK_RUNTIME_CONFIG"
 _OVERRIDES_ENV_VAR = "SPX_SPARK_RUNTIME_OVERRIDES"
-_DEFAULT_CONFIG_RELATIVE_PATH = Path("config/runtime.yaml")
-_DEFAULT_OVERRIDES_RELATIVE_PATH = Path("config/runtime.local.yaml")
+_DEFAULT_CONFIG_RELATIVE_PATH = Path("config/runtime.toml")
+_DEFAULT_OVERRIDES_RELATIVE_PATH = Path("config/runtime.local.toml")
 
 
 def default_defaults_path() -> Path:
-    """Repository ``config/runtime.yaml`` (settings package is composition-safe)."""
+    """Repository ``config/runtime.toml`` (settings package is composition-safe)."""
 
-    return Path(__file__).resolve().parents[3] / "config" / "runtime.yaml"
+    return Path(__file__).resolve().parents[3] / "config" / "runtime.toml"
 
 
 def _runtime_config_path() -> Path:
@@ -97,10 +96,10 @@ def _is_secret_path(dotted_path: str) -> bool:
     return any(fragment in lowered for fragment in _SECRET_KEY_FRAGMENTS)
 
 
-def _read_yaml_mapping(path: Path) -> dict[str, Any]:
+def _read_toml_mapping(path: Path) -> dict[str, Any]:
     if not path.is_file():
         raise FileNotFoundError(f"Settings file not found: {path}")
-    payload = yaml.safe_load(path.read_text(encoding="utf-8"))
+    payload = tomllib.loads(path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
         raise ValueError(f"Settings root must be a mapping: {path}")
     return payload
@@ -256,8 +255,8 @@ def load_settings(
     environ: Mapping[str, str] | None = None,
 ) -> AppSettings:
     env = environ if environ is not None else os.environ
-    defaults = _read_yaml_mapping(defaults_path)
-    deployment = _read_yaml_mapping(deployment_path) if deployment_path is not None else None
+    defaults = _read_toml_mapping(defaults_path)
+    deployment = _read_toml_mapping(deployment_path) if deployment_path is not None else None
     merged = _merge_maps(defaults, deployment) if deployment is not None else defaults
     sources: dict[str, SettingSource] = {}
 
@@ -833,10 +832,10 @@ def load_app_settings(
     deployment_path: Path | None = None,
     environ: Mapping[str, str] | None = None,
 ) -> AppSettings:
-    """Composition-root convenience: load documented runtime YAML (+ local overlay).
+    """Composition-root convenience: load documented runtime TOML (+ local overlay).
 
     Path discovery mirrors ``runtime_config`` so ``SPX_SPARK_RUNTIME_CONFIG`` and
-    ``SPX_SPARK_RUNTIME_OVERRIDES`` / ``runtime.local.yaml`` keep working.
+    ``SPX_SPARK_RUNTIME_OVERRIDES`` / ``runtime.local.toml`` keep working.
     """
 
     if defaults_path is None:
@@ -859,7 +858,7 @@ def _cached_app_settings(defaults_text: str, deployment_text: str) -> AppSetting
 
 
 def clear_settings_cache() -> None:
-    """Drop cached AppSettings (tests that retarget runtime YAML must call this)."""
+    """Drop cached AppSettings (tests that retarget runtime TOML must call this)."""
 
     _cached_app_settings.cache_clear()
 

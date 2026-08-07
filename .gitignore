@@ -3,7 +3,7 @@
 .codex-log/
 .firecrawl/
 .env
-config/runtime.local.yaml
+config/runtime.local.toml
 config/production.toml
 logs/
 /runtime/

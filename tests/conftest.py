@@ -11,7 +11,7 @@ import sys
 import pytest
 
 _TESTS_ROOT = Path(__file__).resolve().parent
-_FIXTURE_RUNTIME_CONFIG = _TESTS_ROOT / "fixtures" / "runtime.defaults.yaml"
+_FIXTURE_RUNTIME_CONFIG = _TESTS_ROOT / "fixtures" / "runtime.defaults.toml"
 
 # Pin before any spx_spark import evaluates runtime_value() dataclass defaults.
 os.environ["SPX_SPARK_DISABLE_DOTENV"] = "1"

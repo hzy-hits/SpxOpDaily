@@ -1,20 +1,20 @@
 # Runtime configuration
 
-> **状态（2026-08-07）：本文档描述的 `runtime.yaml` + settings loader 体系为 legacy 现状。**
-> 新配置一律走 pydantic-settings + TOML（执行方案 P1-1）；`runtime.yaml` 计划在 Phase 5 退役。
-> 不得再新增 YAML 键、env helper 或 loader 兼容分支；确需新配置项时按新基线落 `AppSettings`。
+> **状态（2026-08-07）：旧 `runtime.yaml` 已机械迁为 `runtime.toml`，但 legacy settings loader 尚未退役。**
+> 这是 Phase 5 的过渡切片，不是配置简化的终点。新配置只允许进入最小
+> pydantic-settings `AppSettings`；不得向过渡 TOML 增加键、env helper 或 loader 兼容分支。
 
-Operational runtime defaults live in `config/runtime.yaml`; Python code loads
+Operational runtime defaults currently live in `config/runtime.toml`; legacy Python code loads
 them through `spx_spark.runtime_config` and, for new composition roots, through
 typed `spx_spark.settings.load_settings()` (`AppSettings`). Secrets remain in
 `.env` and are never loaded during unit tests (`SPX_SPARK_DISABLE_DOTENV=1` plus
-`tests/fixtures/runtime.defaults.yaml`).
+`tests/fixtures/runtime.defaults.toml`).
 
 This file describes Python configuration only. Rust has strict TOML examples
 and Oracle overlays under `rust/config/`; production Rust config and secrets
 remain outside the checkout as documented in `rust/docs/OPERATIONS.md`. The
 shared precedence `defaults < deployment < environment` does not permit Python
-YAML to silently override Rust TOML or vice versa.
+TOML to silently override Rust TOML or vice versa.
 
 Each mutable value is represented as a `value` plus a human-readable
 `description`. Numeric settings therefore carry their unit and purpose beside
@@ -22,19 +22,19 @@ the number instead of appearing as unexplained literals in collector code.
 
 ## Test isolation
 
-Unit tests pin `SPX_SPARK_RUNTIME_CONFIG` to `tests/fixtures/runtime.defaults.yaml`
-and disable `.env` loading plus `config/runtime.local.yaml` overlays
+Unit tests pin `SPX_SPARK_RUNTIME_CONFIG` to `tests/fixtures/runtime.defaults.toml`
+and disable `.env` loading plus `config/runtime.local.toml` overlays
 (`SPX_SPARK_DISABLE_DOTENV=1`, `SPX_SPARK_DISABLE_RUNTIME_OVERRIDES=1`). Deployment
-edits to the workspace `.env`, local overrides, or live `config/runtime.yaml` must
+edits to the workspace `.env`, local overrides, or live `config/runtime.toml` must
 not change unit-test outcomes. When product defaults change intentionally, update
-both `config/runtime.yaml` and the frozen fixture.
+both `config/runtime.toml` and the frozen fixture.
 
-Machine-local deployment values belong in `config/runtime.local.yaml` (gitignored;
-see `config/runtime.local.yaml.example`), not in the tracked defaults file.
+Machine-local deployment values belong in `config/runtime.local.toml` (gitignored;
+see `config/runtime.local.toml.example`), not in the tracked defaults file.
 
 ## Scope
 
-The YAML file is the documented source for mutable, non-secret defaults across
+The transitional TOML file is the documented source for legacy mutable, non-secret defaults across
 market data and operations: Schwab, IBKR snapshot/stream/positions, runtime
 policy, Hyperliquid, Polymarket, maintenance, storage, IV surface generation,
 notification delivery policy, SPXW sampling, alert thresholds, intraday
@@ -57,8 +57,8 @@ Phase 1 defaults include `sampling.hot_window_points=55`, Schwab REST
 5s/`strikeCount=40`; B: SPY/QQQ/IWM/XSP at 15s), and IBKR session-hardening
 keys `ibkr_stream.freeze_quotes_on_connectivity_loss` plus
 `provider_failover.ibkr_recovery_observations`. Environment variables still
-override YAML (notably a local `IBKR_STREAM_MAX_OPTION_LINES` may pin the stream
-below the YAML default until removed).
+override TOML (notably a local `IBKR_STREAM_MAX_OPTION_LINES` may pin the stream
+below the tracked default until removed).
 
 The Paper username receives shared Live subscriptions only while the sharing
 Live username is not consuming them in TWS, Mobile, or Client Portal. IBKR
@@ -77,7 +77,7 @@ systemd process state separate from market-data readiness with explicit
 `circuit_state`, and `reason` fields. Operators must not interpret an active
 systemd unit as proof that the IBKR data plane is healthy.
 
-Secrets and operator-private endpoints stay out of YAML. API keys, app secrets,
+Secrets and operator-private endpoints stay out of tracked TOML. API keys, app secrets,
 device-specific Bark URLs, Feishu webhook URLs/secrets and other credentials
 must be supplied through the environment or an ignored env file. Empty secret
 URL fields intentionally default to `""` in code via single-argument env reads.
@@ -85,7 +85,9 @@ URL fields intentionally default to `""` in code via single-argument env reads.
 Algorithm constants and protocol identities stay in code. Examples include
 basis-point conversions, schema versions, exchange/protocol multipliers and
 un-overridden model thresholds used as mathematical identities or algorithm
-definitions. Only mutable operational defaults belong in runtime YAML.
+definitions. Only mutable operational defaults belong in the transitional runtime
+TOML; each surviving key must move to the minimal `AppSettings` or be retired
+before P5-2 closes.
 
 ## Session finalization and storage pressure
 
@@ -125,7 +127,7 @@ raw partition.
 Both timer paths use the same outer `flock`. The systemd units deliberately do
 not pass watermark numbers, so `defaults < deployment < environment` remains
 the sole precedence rule. Put machine-specific overrides in the ignored
-`config/runtime.local.yaml`.
+`config/runtime.local.toml`.
 
 ## Schwab symbol table
 
@@ -186,21 +188,20 @@ whole blind interval look newly observed.
 
 ## Override order
 
-1. The repository `config/runtime.yaml` supplies tracked defaults.
-2. `SPX_SPARK_RUNTIME_CONFIG` may select another complete base YAML file.
-3. An optional `config/runtime.local.yaml` overlays machine-specific values.
+1. The repository `config/runtime.toml` supplies transitional tracked defaults.
+2. `SPX_SPARK_RUNTIME_CONFIG` may select another complete base TOML file.
+3. An optional `config/runtime.local.toml` overlays machine-specific values.
    The file is ignored by git. `SPX_SPARK_RUNTIME_OVERRIDES` may point to a
    different override file.
-4. Environment variables and `.env` values override the merged YAML values.
+4. Environment variables and `.env` values override the merged TOML values.
 
 Override files contain only existing paths and `value` leaves; descriptions
 remain in the tracked base file. Unknown paths, missing explicit files, and
 attempts to replace descriptions fail at startup. Example:
 
-```yaml
-steven:
-  enabled:
-    value: true
+```toml
+[steven.enabled]
+value = true
 ```
 Production uses `schwab,ibkr,...` provider priority. Freshness and quality are
 still evaluated before provider preference, so missing or stale Schwab data
@@ -231,7 +232,8 @@ rejected analytical leg may remain visible for source auditing but cannot
 satisfy the pair minimum. Local overrides must not lower this gate merely to
 make a historical replay reach the 75% daily acceptance threshold.
 
-Every setting consumed with `runtime_value("path.to.setting")` must have both
+Every legacy setting consumed with `runtime_value("path.to.setting")` must have both
 `value` and `description`. The architecture tests reject new literal defaults
 passed directly to `env_bool`, `env_int`, `env_float`, `env_str`, `env_csv` or
-`env_csv_preserve`; use `runtime_value` or `runtime_csv` instead.
+`env_csv_preserve`. New code must use the pydantic-settings `AppSettings`, not add
+another `runtime_value` consumer.

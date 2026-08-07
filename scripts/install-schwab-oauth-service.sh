@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 USER_UNIT_DIR="$HOME/.config/systemd/user"
 
 cd "$ROOT"
-uv run --frozen spx-spark-schwab-oauth status >/dev/null
+uv run --frozen spx schwab oauth status >/dev/null
 
 mkdir -p "$USER_UNIT_DIR"
 ln -sfn \

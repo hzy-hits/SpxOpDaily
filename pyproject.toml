@@ -13,7 +13,6 @@ dependencies = [
   "openai>=2,<3",
   "pydantic-settings>=2.14.2",
   "pytz>=2025.2",
-  "pyyaml>=6.0,<7",
   "schwab-py==1.5.1",
   "scikit-learn>=1.7,<2",
   "scipy>=1.15,<2",
@@ -24,32 +23,6 @@ dependencies = [
 
 [project.scripts]
 spx = "spx_spark.cli:app"
-spx-spark-alert-profile = "spx_spark.alert_profile:main"
-spx-spark-data-platform = "spx_spark.data_platform.cli:main"
-spx-spark-data-compact = "spx_spark.data_platform.lake.compact:main"
-spx-spark-ibkr-verifier = "spx_spark.ibkr.verifier:main"
-spx-spark-ibkr-collector = "spx_spark.ibkr.collector:main"
-spx-spark-ibkr-stream = "spx_spark.ibkr.stream_collector:main"
-spx-spark-ibkr-farm-probe = "spx_spark.ibkr.farm_health:main"
-spx-spark-ibkr-positions = "spx_spark.ibkr.position_watcher:main"
-spx-spark-ibkr-trading-hours-report = "spx_spark.ibkr.trading_hours_report:main"
-spx-spark-latest-state = "spx_spark.latest_state:main"
-spx-spark-maintenance = "spx_spark.maintenance:main"
-spx-spark-micopedia-guidance = "spx_spark.strategy.micopedia:main"
-spx-spark-steven-replay = "spx_spark.strategy.steven_replay:main"
-spx-spark-morning-map = "spx_spark.morning_map:main"
-spx-spark-order-map = "spx_spark.order_map:run"
-spx-spark-mock-collector = "spx_spark.mock_collector:main"
-spx-spark-options-map = "spx_spark.options_map:main"
-spx-spark-post-close-review = "spx_spark.post_close_review:main"
-spx-spark-rth-daily-acceptance = "spx_spark.application.order_map.rth_daily_acceptance:main"
-spx-spark-runtime-mode = "spx_spark.runtime_mode:main"
-spx-spark-sampling-plan = "spx_spark.sampling:main"
-spx-spark-schwab-verifier = "spx_spark.schwab.verifier:main"
-spx-spark-schwab-collector = "spx_spark.schwab.collector:main"
-spx-spark-schwab-marketdata = "spx_spark.schwab.collector:loop_main"
-spx-spark-schwab-oauth = "spx_spark.schwab.oauth_service:main"
-spx-spark-surface-dashboard-replay = "spx_spark.surface_dashboard_replay:main"
 
 [dependency-groups]
 dev = [

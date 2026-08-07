@@ -227,7 +227,7 @@ class IntradayShockSettings:
         try:
             return cls.from_app_settings(app_settings or current_app_settings())
         except (FileNotFoundError, KeyError, ValueError, TypeError):
-            # Tests / minimal environments without full runtime.yaml still work.
+            # Tests / minimal environments without full runtime.toml still work.
             return cls.from_policy(DEFAULT_SHOCK_SETTINGS)
 
 

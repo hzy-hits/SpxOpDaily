@@ -1,19 +1,18 @@
-"""Load documented runtime defaults from the repository YAML file."""
+"""Load documented runtime defaults from the repository TOML file."""
 
 from __future__ import annotations
 
 import os
+import tomllib
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-import yaml
-
 
 CONFIG_ENV_VAR = "SPX_SPARK_RUNTIME_CONFIG"
 OVERRIDES_ENV_VAR = "SPX_SPARK_RUNTIME_OVERRIDES"
-DEFAULT_CONFIG_RELATIVE_PATH = Path("config/runtime.yaml")
-DEFAULT_OVERRIDES_RELATIVE_PATH = Path("config/runtime.local.yaml")
+DEFAULT_CONFIG_RELATIVE_PATH = Path("config/runtime.toml")
+DEFAULT_OVERRIDES_RELATIVE_PATH = Path("config/runtime.local.toml")
 
 
 def runtime_config_path() -> Path:
@@ -49,7 +48,7 @@ def runtime_overrides_path() -> Path | None:
 def _read_mapping(path: Path, *, label: str) -> dict[str, Any]:
     if not path.is_file():
         raise FileNotFoundError(f"{label} not found at {path}")
-    payload = yaml.safe_load(path.read_text(encoding="utf-8"))
+    payload = tomllib.loads(path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
         raise ValueError(f"{label} root must be a mapping: {path}")
     return payload

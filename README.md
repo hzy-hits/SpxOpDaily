@@ -85,10 +85,10 @@ The wrapper uses project-local `.codex-home` and `.codex-log` directories. It do
 ## Runtime Mode
 
 ```bash
-uv run spx-spark-runtime-mode status
-uv run spx-spark-runtime-mode ibkr-on --ttl-minutes 120 --reason "manual monitor request"
-uv run spx-spark-runtime-mode protected --ttl-minutes 180 --reason "phone trading"
-uv run spx-spark-runtime-mode clear
+uv run spx ops runtime-mode status
+uv run spx ops runtime-mode ibkr-on --ttl-minutes 120 --reason "manual monitor request"
+uv run spx ops runtime-mode protected --ttl-minutes 180 --reason "phone trading"
+uv run spx ops runtime-mode clear
 ```
 
 The runtime mode file is local state under `runtime/`. It lets an agent temporarily allow or block IBKR collection without changing permanent config.
@@ -112,7 +112,7 @@ Suggested real-data acceptance sequence:
 ```bash
 scripts/start-ibgateway-xvfb.sh
 scripts/start-ibgateway-vnc.sh
-uv run spx-spark-runtime-mode ibkr-on --ttl-minutes 120 --reason "manual IBKR data test"
+uv run spx ops runtime-mode ibkr-on --ttl-minutes 120 --reason "manual IBKR data test"
 scripts/run-ibkr-collector.sh --force --skip-options --json
 scripts/show-latest-state.sh --all-providers
 scripts/run-ibkr-collector.sh --force --json

@@ -44,7 +44,7 @@ from spx_spark.storage import LatestMarketProjectionStore
 
 
 def default_runtime_defaults_path() -> Path:
-    """Resolve config/runtime.yaml relative to the repository root."""
+    """Resolve config/runtime.toml relative to the repository root."""
 
     from spx_spark.settings.loader import default_defaults_path
 

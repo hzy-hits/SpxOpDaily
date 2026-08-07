@@ -8,7 +8,7 @@ from datetime import time
 
 @dataclass(frozen=True)
 class ShockSettings:
-    """Typed intraday-shock policy (defaults match config/runtime.yaml)."""
+    """Typed intraday-shock policy (defaults match config/runtime.toml)."""
 
     anchor_provider_priority: tuple[str, ...] = ("schwab", "ibkr")
     require_schwab_streaming_anchors: bool = True

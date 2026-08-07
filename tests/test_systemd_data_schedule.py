@@ -29,14 +29,14 @@ def test_weekly_prune_is_threshold_gated() -> None:
     assert "OnCalendar=Sun *-*-* 13:00:00 Asia/Shanghai" in weekly
     # Deletion only fires when the dry-run report crosses the prune watermark;
     # below it the weekly pass stays audit-only.
-    assert "spx-spark-maintenance dry-run --json --no-write" in weekly_script
+    assert "spx ops maintenance dry-run --json --no-write" in weekly_script
     assert "action_level" in weekly_script
     assert "prune|critical_stop_raw)" in weekly_script
-    assert "spx-spark-maintenance prune --execute" in weekly_script
-    assert "spx-spark-maintenance prune\n" in weekly_script
+    assert "spx ops maintenance prune --execute" in weekly_script
+    assert "spx ops maintenance prune\n" in weekly_script
     # Notification retention is now owned by the unified operational database.
     assert "purge-outbox" not in weekly_script
-    assert "spx-spark-maintenance trim-review-audit" in weekly_script
+    assert "spx ops maintenance trim-review-audit" in weekly_script
 
 
 def test_installer_enables_weekend_bulk_timer() -> None:
@@ -56,7 +56,7 @@ def test_rth_daily_acceptance_runs_on_new_york_session_clock() -> None:
     assert "--date auto --strict" in service
     assert "OnCalendar=Mon..Fri *-*-* 17:30:00 America/New_York" in timer
     assert "Persistent=true" in timer
-    assert "spx_spark.application.order_map.rth_daily_acceptance" in runner
+    assert "spx job rth-daily-acceptance" in runner
     assert "disable --now spx-spark-post-close-review.timer" in installer
     assert "enable --now spx-spark-post-close-review.timer" not in installer
     assert "spx-spark-rth-daily-acceptance.timer" in installer
@@ -221,6 +221,9 @@ def test_compaction_runner_has_a_non_blocking_whole_run_lock() -> None:
     assert "spx-spark-data-compact.lock" in runner
     assert "flock -n 9" in runner
     assert "compaction_already_running" in runner
+    assert "spx data compact" in runner
+    assert "spx data replay-spool" in runner
+    assert "spx data sync-manifests" in runner
 
 
 def test_schwab_oauth_service_is_loopback_only_and_private_by_default() -> None:
@@ -236,7 +239,7 @@ def test_schwab_oauth_service_is_loopback_only_and_private_by_default() -> None:
     assert "MemoryMax=512M" in service
     assert "LimitCORE=0" in service
     assert "uv run --frozen" in runner
-    assert "spx-spark-schwab-oauth status" in installer
+    assert "spx schwab oauth status" in installer
     assert "enable --now spx-spark-schwab-oauth.service" in installer
     assert "Unsupported Schwab environment key" in env_writer
     assert "umask 077" in env_writer

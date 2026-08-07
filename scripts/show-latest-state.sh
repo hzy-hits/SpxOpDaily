@@ -2,4 +2,4 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
-uv run spx-spark-latest-state "$@"
+uv run spx status "$@"

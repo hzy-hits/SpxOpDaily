@@ -9,7 +9,7 @@ from dataclasses import dataclass
 class AlertSettings:
     """Typed alert policy injected into alert_engine / shock / service loop.
 
-    Defaults match ``config/runtime.yaml`` so rules can use this object instead
+    Defaults match ``config/runtime.toml`` so rules can use this object instead
     of calling ``runtime_value()``. Environment overrides still apply via
     ``env_float`` / ``env_bool`` at call sites when present.
     """

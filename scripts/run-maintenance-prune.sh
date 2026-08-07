@@ -4,4 +4,4 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-exec uv run spx-spark-maintenance prune "$@"
+exec uv run spx ops maintenance prune "$@"

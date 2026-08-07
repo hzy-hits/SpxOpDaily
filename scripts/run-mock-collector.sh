@@ -2,4 +2,4 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
-uv run spx-spark-mock-collector "$@"
+uv run spx ops mock-collector "$@"

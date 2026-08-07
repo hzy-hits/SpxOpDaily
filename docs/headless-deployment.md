@@ -452,7 +452,7 @@ percentage. The Rust frame writer reserves 20 GiB, so waiting for a 90% disk
 threshold can stop ingress first on the Oracle volume. The typed finalizer
 defaults begin artifact-gated action at 28 GiB free, escalate warning at 24 GiB
 and become critical at 20 GiB. The systemd units intentionally contain none of
-these numbers; deployment overrides belong in `config/runtime.local.yaml`.
+these numbers; deployment overrides belong in `config/runtime.local.toml`.
 
 For the production Schwab callback, single-owner refresh client, Cloudflare Tunnel route,
 and localhost gateway deployment, follow

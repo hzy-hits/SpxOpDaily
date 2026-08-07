@@ -4,7 +4,6 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-import yaml
 
 from spx_spark.application.shock import models as shock_models
 from spx_spark.application.shock.models import IntradayShockSettings
@@ -18,7 +17,7 @@ from spx_spark.settings.market_features import MarketFeatureSettings
 from spx_spark.settings.shock import ShockSettings
 
 
-FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "runtime.defaults.yaml"
+FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "runtime.defaults.toml"
 
 
 def test_intraday_shock_reuses_explicit_app_settings(
@@ -27,7 +26,7 @@ def test_intraday_shock_reuses_explicit_app_settings(
     app = load_settings(defaults_path=FIXTURE, environ={})
 
     def unexpected_reload() -> AppSettings:
-        raise AssertionError("shock tick must not reload runtime YAML")
+        raise AssertionError("shock tick must not reload runtime TOML")
 
     monkeypatch.setattr(shock_models, "current_app_settings", unexpected_reload)
 
@@ -92,15 +91,8 @@ def test_environment_overrides_defaults(monkeypatch: pytest.MonkeyPatch) -> None
 
 
 def test_deployment_overlay_beats_defaults(tmp_path: Path) -> None:
-    overlay = {
-        "steven": {
-            "enabled": {
-                "value": True,
-            }
-        }
-    }
-    deployment = tmp_path / "deployment.yaml"
-    deployment.write_text(yaml.safe_dump(overlay), encoding="utf-8")
+    deployment = tmp_path / "deployment.toml"
+    deployment.write_text("[steven.enabled]\nvalue = true\n", encoding="utf-8")
 
     settings = load_settings(
         defaults_path=FIXTURE,
@@ -112,15 +104,11 @@ def test_deployment_overlay_beats_defaults(tmp_path: Path) -> None:
 
 
 def test_level_decision_gth_timeout_follows_typed_precedence(tmp_path: Path) -> None:
-    overlay = {
-        "level_decision_shadow": {
-            "gth_phase_timeout_seconds": {
-                "value": 240.0,
-            }
-        }
-    }
-    deployment = tmp_path / "deployment.yaml"
-    deployment.write_text(yaml.safe_dump(overlay), encoding="utf-8")
+    deployment = tmp_path / "deployment.toml"
+    deployment.write_text(
+        "[level_decision_shadow.gth_phase_timeout_seconds]\nvalue = 240.0\n",
+        encoding="utf-8",
+    )
 
     deployed = load_settings(
         defaults_path=FIXTURE,
@@ -159,14 +147,12 @@ def test_level_decision_gth_timeout_rejects_non_finite_or_boolean_environment(
 
 
 def test_spring_gamma_v3_deployment_overlay_remains_shadow_only(tmp_path: Path) -> None:
-    overlay = {
-        "spring_gamma_v3": {
-            "report_enabled": {"value": False},
-            "min_probability": {"value": 0.65},
-        }
-    }
-    deployment = tmp_path / "deployment.yaml"
-    deployment.write_text(yaml.safe_dump(overlay), encoding="utf-8")
+    deployment = tmp_path / "deployment.toml"
+    deployment.write_text(
+        "[spring_gamma_v3.report_enabled]\nvalue = false\n"
+        "[spring_gamma_v3.min_probability]\nvalue = 0.65\n",
+        encoding="utf-8",
+    )
 
     settings = load_settings(
         defaults_path=FIXTURE,
@@ -182,29 +168,19 @@ def test_spring_gamma_v3_deployment_overlay_remains_shadow_only(tmp_path: Path) 
 
 
 def test_deployment_overlay_rejects_unknown_paths(tmp_path: Path) -> None:
-    deployment = tmp_path / "deployment.yaml"
-    deployment.write_text(
-        yaml.safe_dump({"steven": {"typo": {"value": True}}}),
-        encoding="utf-8",
-    )
+    deployment = tmp_path / "deployment.toml"
+    deployment.write_text("[steven.typo]\nvalue = true\n", encoding="utf-8")
 
     with pytest.raises(KeyError, match="Unknown deployment settings"):
         load_settings(defaults_path=FIXTURE, deployment_path=deployment, environ={})
 
 
 def test_deployment_overlay_cannot_replace_descriptions(tmp_path: Path) -> None:
-    deployment = tmp_path / "deployment.yaml"
+    deployment = tmp_path / "deployment.toml"
     deployment.write_text(
-        yaml.safe_dump(
-            {
-                "steven": {
-                    "enabled": {
-                        "value": True,
-                        "description": "Local description must not replace the tracked one.",
-                    }
-                }
-            }
-        ),
+        "[steven.enabled]\n"
+        "value = true\n"
+        'description = "Local description must not replace the tracked one."\n',
         encoding="utf-8",
     )
 
@@ -213,8 +189,11 @@ def test_deployment_overlay_cannot_replace_descriptions(tmp_path: Path) -> None:
 
 
 def test_missing_required_path_fails_fast(tmp_path: Path) -> None:
-    broken = tmp_path / "broken.yaml"
-    broken.write_text("schema_version:\n  value: 1\n  description: x\n", encoding="utf-8")
+    broken = tmp_path / "broken.toml"
+    broken.write_text(
+        '[schema_version]\nvalue = 1\ndescription = "x"\n',
+        encoding="utf-8",
+    )
     with pytest.raises(KeyError, match="market_data.known_providers"):
         load_settings(defaults_path=broken, environ={})
 

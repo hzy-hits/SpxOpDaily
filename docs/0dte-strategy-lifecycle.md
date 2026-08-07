@@ -97,7 +97,7 @@ confidence or a virtual exit.  Otherwise the entire layer is explanation-only.
 
 ## Macro clock and virtual lifecycle
 
-Scheduled releases are explicit records in `config/macro_events.yaml`; the
+Scheduled releases are explicit records in `config/macro_events.toml`; the
 model cannot invent event times.  The clock reports normal, pre-event or
 post-event mode.  The virtual lifecycle tracks the system's naked RTH option
 or exact two-leg GTH debit spread without IBKR positions, records entry/current

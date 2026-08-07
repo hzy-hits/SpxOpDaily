@@ -1,16 +1,14 @@
-"""Deterministic macro-event clock loaded from an explicit YAML calendar."""
+"""Deterministic macro-event clock loaded from an explicit TOML calendar."""
 
 from __future__ import annotations
 
 import os
+import tomllib
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Mapping
 
-import yaml
-
-
-DEFAULT_PATH = Path(__file__).resolve().parents[2] / "config" / "macro_events.yaml"
+DEFAULT_PATH = Path(__file__).resolve().parents[2] / "config" / "macro_events.toml"
 
 
 def macro_event_state(
@@ -23,8 +21,8 @@ def macro_event_state(
         path or os.getenv("SPX_SPARK_MACRO_EVENTS_CONFIG") or DEFAULT_PATH
     )
     try:
-        payload = yaml.safe_load(resolved.read_text(encoding="utf-8")) or {}
-    except (OSError, yaml.YAMLError) as exc:
+        payload = tomllib.loads(resolved.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError) as exc:
         return {
             "mode": "unavailable",
             "entry_allowed": False,

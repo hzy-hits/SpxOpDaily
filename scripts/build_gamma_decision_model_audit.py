@@ -1122,7 +1122,7 @@ def build_artifact(analysis: dict) -> None:
         _source(
             "steven_audit",
             "Steven episode and bar lake",
-            "config/runtime.yaml + deployed .env + lake/steven/{episodes,bars}/date=*",
+            "config/runtime.toml + deployed .env + lake/steven/{episodes,bars}/date=*",
             "Checks effective enablement and counts revisions, transitions, setups and missing inputs.",
             [
                 "YAML default is off, but the deployed environment overrides Steven on.",
@@ -1408,7 +1408,7 @@ def build_artifact(analysis: dict) -> None:
             "sourceId": "steven_audit",
             "body": (
                 "### Steven model status\n\n"
-                "`config/runtime.yaml` 默认关闭 Steven，但部署环境已覆盖为开启，所以服务确实在运行。"
+                "`config/runtime.toml` 默认关闭 Steven，但部署环境已覆盖为开启，所以服务确实在运行。"
                 "问题不是“没启动”，而是每轮只恢复 closed bars、不恢复 open partial bar，并读取错误的 flow 输入路径；"
                 "因此 1m/5m bar 与 ES/HL volume 长期缺失。"
                 "15 分钟 order-map payload 只装载 market/option/decision projections，不装载 `steven_state`。"

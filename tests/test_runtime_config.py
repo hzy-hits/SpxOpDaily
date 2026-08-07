@@ -94,13 +94,13 @@ def test_schwab_spx_reference_universe_is_configured_without_obsolete_splg() -> 
 def test_runtime_local_overrides_replace_values_without_repeating_descriptions(
     tmp_path: Path,
 ) -> None:
-    base = tmp_path / "base.yaml"
-    overrides = tmp_path / "overrides.yaml"
+    base = tmp_path / "base.toml"
+    overrides = tmp_path / "overrides.toml"
     base.write_text(
-        "feature:\n  enabled:\n    value: false\n    description: Feature gate.\n",
+        '[feature.enabled]\nvalue = false\ndescription = "Feature gate."\n',
         encoding="utf-8",
     )
-    overrides.write_text("feature:\n  enabled:\n    value: true\n", encoding="utf-8")
+    overrides.write_text("[feature.enabled]\nvalue = true\n", encoding="utf-8")
 
     merged = _load_runtime_config(str(base), str(overrides))
 
@@ -111,27 +111,27 @@ def test_runtime_local_overrides_replace_values_without_repeating_descriptions(
 
 
 def test_runtime_local_overrides_reject_unknown_paths(tmp_path: Path) -> None:
-    base = tmp_path / "base.yaml"
-    overrides = tmp_path / "overrides.yaml"
+    base = tmp_path / "base.toml"
+    overrides = tmp_path / "overrides.toml"
     base.write_text(
-        "feature:\n  enabled:\n    value: false\n    description: Feature gate.\n",
+        '[feature.enabled]\nvalue = false\ndescription = "Feature gate."\n',
         encoding="utf-8",
     )
-    overrides.write_text("feature:\n  typo:\n    value: true\n", encoding="utf-8")
+    overrides.write_text("[feature.typo]\nvalue = true\n", encoding="utf-8")
 
     with pytest.raises(KeyError, match="Unknown runtime override keys"):
         _load_runtime_config(str(base), str(overrides))
 
 
 def test_runtime_local_overrides_cannot_replace_descriptions(tmp_path: Path) -> None:
-    base = tmp_path / "base.yaml"
-    overrides = tmp_path / "overrides.yaml"
+    base = tmp_path / "base.toml"
+    overrides = tmp_path / "overrides.toml"
     base.write_text(
-        "feature:\n  enabled:\n    value: false\n    description: Feature gate.\n",
+        '[feature.enabled]\nvalue = false\ndescription = "Feature gate."\n',
         encoding="utf-8",
     )
     overrides.write_text(
-        "feature:\n  enabled:\n    value: true\n    description: Local text.\n",
+        '[feature.enabled]\nvalue = true\ndescription = "Local text."\n',
         encoding="utf-8",
     )
 
@@ -140,20 +140,20 @@ def test_runtime_local_overrides_cannot_replace_descriptions(tmp_path: Path) -> 
 
 
 def test_runtime_local_overrides_reject_value_type_changes(tmp_path: Path) -> None:
-    base = tmp_path / "base.yaml"
-    overrides = tmp_path / "overrides.yaml"
+    base = tmp_path / "base.toml"
+    overrides = tmp_path / "overrides.toml"
     base.write_text(
-        "feature:\n  enabled:\n    value: false\n    description: Feature gate.\n",
+        '[feature.enabled]\nvalue = false\ndescription = "Feature gate."\n',
         encoding="utf-8",
     )
-    overrides.write_text("feature:\n  enabled:\n    value: 'true'\n", encoding="utf-8")
+    overrides.write_text('[feature.enabled]\nvalue = "true"\n', encoding="utf-8")
 
     with pytest.raises(TypeError, match="must match bool"):
         _load_runtime_config(str(base), str(overrides))
 
 
 def test_explicit_runtime_override_path_must_exist(monkeypatch, tmp_path: Path) -> None:
-    missing = tmp_path / "missing.yaml"
+    missing = tmp_path / "missing.toml"
     monkeypatch.setenv("SPX_SPARK_RUNTIME_OVERRIDES", str(missing))
 
     with pytest.raises(FileNotFoundError, match="Runtime overrides not found"):

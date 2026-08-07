@@ -67,7 +67,7 @@ WIDE_INVALIDATION_EM_FRACTION = 0.15
 GTH_TIME_STOP = timedelta(minutes=360)
 GTH_MAX_HOLD = timedelta(minutes=370)
 
-# production gth_dip._spread_structure defaults (config/runtime.yaml gth_spread_*)
+# production gth_dip._spread_structure defaults (config/runtime.toml gth_spread_*)
 SPREAD_WALL_MIN_WIDTH = 15.0
 SPREAD_WALL_MAX_WIDTH = 75.0
 SPREAD_WALL_DEFAULT_WIDTH = 50.0

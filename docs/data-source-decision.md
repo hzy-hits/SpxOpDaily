@@ -287,10 +287,10 @@ Command examples:
 
 ```bash
 cd /home/ubuntu/spx-spark
-uv run spx-spark-runtime-mode status
-uv run spx-spark-runtime-mode ibkr-on --ttl-minutes 120 --reason "manual monitor request"
-uv run spx-spark-runtime-mode protected --ttl-minutes 180 --reason "phone trading"
-uv run spx-spark-runtime-mode clear
+uv run spx ops runtime-mode status
+uv run spx ops runtime-mode ibkr-on --ttl-minutes 120 --reason "manual monitor request"
+uv run spx ops runtime-mode protected --ttl-minutes 180 --reason "phone trading"
+uv run spx ops runtime-mode clear
 ```
 
 The collector should treat IBKR as opportunistic:

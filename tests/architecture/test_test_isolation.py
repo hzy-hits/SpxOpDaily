@@ -12,7 +12,7 @@ from spx_spark.settings import load_settings
 
 def test_runtime_config_points_at_test_fixture() -> None:
     path = runtime_config_path()
-    assert path.name == "runtime.defaults.yaml"
+    assert path.name == "runtime.defaults.toml"
     assert "tests/fixtures" in str(path).replace("\\", "/")
 
 
@@ -53,7 +53,7 @@ def test_broker_account_read_defaults_match_fixture_not_workspace_env(
 
 
 def test_app_settings_match_fixture_defaults() -> None:
-    fixture = Path(__file__).resolve().parents[1] / "fixtures" / "runtime.defaults.yaml"
+    fixture = Path(__file__).resolve().parents[1] / "fixtures" / "runtime.defaults.toml"
     settings = load_settings(defaults_path=fixture, environ={})
     assert settings.runtime.control_ibkr_stream_enabled is False
     assert settings.alerts.steven_enabled is False
