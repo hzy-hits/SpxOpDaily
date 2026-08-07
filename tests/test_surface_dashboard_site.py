@@ -22,9 +22,9 @@ def test_site_exposes_live_snapshot_archived_frame_and_read_only_replay_api() ->
         in nginx
     )
     assert "location ^~ /api/v1/replay/" in nginx
-    assert "proxy_pass http://unix:/usr/share/nginx/replay-runtime/replay-api.sock:;" in nginx
+    assert "proxy_pass http://unix:/usr/share/nginx/replay-runtime/core-api.sock:;" in nginx
     assert (
-        "proxy_pass http://unix:/usr/share/nginx/replay-runtime/replay-api.sock:/healthz;"
+        "proxy_pass http://unix:/usr/share/nginx/replay-runtime/core-api.sock:/healthz;"
         in nginx
     )
     assert "proxy_hide_header Cache-Control;" in nginx

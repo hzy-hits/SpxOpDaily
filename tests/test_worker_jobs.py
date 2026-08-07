@@ -7,7 +7,7 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -80,6 +80,56 @@ def test_worker_schedules_match_the_documented_utc_crontabs(
     assert not jobs.schwab_reauth_reminder.task_class().validate_datetime(
         datetime(2026, 8, 10, 12, 0, tzinfo=utc)
     )
+    assert jobs.hyperliquid_context.task_class().validate_datetime(
+        datetime(2026, 8, 7, 12, 1, tzinfo=utc)
+    )
+    assert jobs.iv_surface_context.task_class().validate_datetime(
+        datetime(2026, 8, 7, 12, 5, tzinfo=utc)
+    )
+    assert not jobs.iv_surface_context.task_class().validate_datetime(
+        datetime(2026, 8, 7, 12, 6, tzinfo=utc)
+    )
+
+
+def test_slow_context_jobs_reuse_existing_entries_and_runtime_flags(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    jobs = load_jobs(tmp_path, monkeypatch)
+    calls: list[str] = []
+    runtime = SimpleNamespace(
+        hyperliquid_enabled=True,
+        polymarket_enabled=False,
+        greek_shadow_enabled=True,
+        iv_surface_enabled=True,
+    )
+    monkeypatch.setattr(
+        "spx_spark.settings.load_app_settings",
+        lambda: SimpleNamespace(runtime=runtime),
+    )
+    monkeypatch.setattr(
+        "spx_spark.hyperliquid.collector.run",
+        lambda _argv: calls.append("hyperliquid") or 0,
+    )
+    monkeypatch.setattr(
+        "spx_spark.polymarket.collector.run",
+        lambda _argv: calls.append("polymarket") or 0,
+    )
+    monkeypatch.setattr(
+        "spx_spark.greek_shadow.run",
+        lambda _argv: calls.append("greek_shadow") or 0,
+    )
+    monkeypatch.setattr(
+        "spx_spark.iv_surface.run",
+        lambda _argv: calls.append("iv_surface") or 0,
+    )
+
+    jobs.hyperliquid_context.call_local()
+    jobs.polymarket_context.call_local()
+    jobs.greek_shadow_context.call_local()
+    jobs.iv_surface_context.call_local()
+
+    assert calls == ["hyperliquid", "greek_shadow", "iv_surface"]
 
 
 def test_nonzero_existing_entry_fails_the_huey_task(

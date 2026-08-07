@@ -1,7 +1,7 @@
 [Unit]
 Description=Warm the latest SPXW Session Replay catalog and session surfaces
-After=spx-spark-surface-replay.service
-Wants=spx-spark-surface-replay.service
+After=spx-core.service
+Wants=spx-core.service
 
 [Service]
 Type=oneshot

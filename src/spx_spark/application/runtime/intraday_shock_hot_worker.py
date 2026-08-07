@@ -24,7 +24,6 @@ from spx_spark.application.runtime.market_features_hot_worker import (
     run_locked_once,
     run_worker_loop,
 )
-from spx_spark.application.runtime.settings import ServiceLoopSettings
 from spx_spark.config import StorageSettings
 from spx_spark.settings import AppSettings, load_app_settings
 from spx_spark.state_io import atomic_write_json_secure
@@ -158,11 +157,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def run(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     app_settings = load_app_settings()
-    loop_settings = ServiceLoopSettings.from_app_settings(app_settings)
     interval_seconds = (
         float(args.interval_seconds)
         if args.interval_seconds is not None
-        else float(loop_settings.intraday_shock_interval_seconds)
+        else float(app_settings.runtime.intraday_shock_interval_seconds)
     )
     lock_path = args.lock_path or default_lock_path()
     stop_event = threading.Event()
@@ -197,11 +195,10 @@ def run_with_stop(
     app_settings: AppSettings | None = None,
 ) -> int:
     app = app_settings or load_app_settings()
-    loop_settings = ServiceLoopSettings.from_app_settings(app)
     cadence = float(
         interval_seconds
         if interval_seconds is not None
-        else loop_settings.intraday_shock_interval_seconds
+        else app.runtime.intraday_shock_interval_seconds
     )
     storage = StorageSettings.from_env()
     lease_path = Path(storage.data_root) / "latest" / "intraday_shock_hot_worker.lease.json"

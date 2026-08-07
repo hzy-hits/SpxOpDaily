@@ -44,3 +44,39 @@ def schwab_reauth_reminder() -> None:
 
     if run() != 0:
         raise RuntimeError("Schwab reauthorization reminder failed")
+
+
+@huey.periodic_task(crontab(minute="*", strict=True))
+def hyperliquid_context() -> None:
+    from spx_spark.hyperliquid import collector
+    from spx_spark.settings import load_app_settings
+
+    if load_app_settings().runtime.hyperliquid_enabled and collector.run(["--json"]) != 0:
+        raise RuntimeError("hyperliquid failed")
+
+
+@huey.periodic_task(crontab(minute="*", strict=True))
+def polymarket_context() -> None:
+    from spx_spark.polymarket import collector
+    from spx_spark.settings import load_app_settings
+
+    if load_app_settings().runtime.polymarket_enabled and collector.run(["--json"]) != 0:
+        raise RuntimeError("polymarket failed")
+
+
+@huey.periodic_task(crontab(minute="*", strict=True))
+def greek_shadow_context() -> None:
+    from spx_spark import greek_shadow
+    from spx_spark.settings import load_app_settings
+
+    if load_app_settings().runtime.greek_shadow_enabled and greek_shadow.run(["--json"]) != 0:
+        raise RuntimeError("greek shadow failed")
+
+
+@huey.periodic_task(crontab(minute="*/5", strict=True))
+def iv_surface_context() -> None:
+    from spx_spark import iv_surface
+    from spx_spark.settings import load_app_settings
+
+    if load_app_settings().runtime.iv_surface_enabled and iv_surface.run(["--json"]) != 0:
+        raise RuntimeError("IV surface failed")

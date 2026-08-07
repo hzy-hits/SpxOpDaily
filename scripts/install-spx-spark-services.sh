@@ -30,13 +30,6 @@ uv sync --frozen
 mkdir -p "$USER_UNIT_DIR"
 ln -sfn "$ROOT/systemd/spx-core.service" "$USER_UNIT_DIR/spx-core.service"
 ln -sfn "$ROOT/systemd/spx-worker.service" "$USER_UNIT_DIR/spx-worker.service"
-ln -sfn "$ROOT/systemd/spx-spark-24h.service" "$USER_UNIT_DIR/spx-spark-24h.service"
-ln -sfn "$ROOT/systemd/spx-spark-es-bar-sampler.service" "$USER_UNIT_DIR/spx-spark-es-bar-sampler.service"
-ln -sfn "$ROOT/systemd/spx-spark-spx-minute-sampler.service" "$USER_UNIT_DIR/spx-spark-spx-minute-sampler.service"
-ln -sfn "$ROOT/systemd/spx-spark-market-features-hot.service" "$USER_UNIT_DIR/spx-spark-market-features-hot.service"
-ln -sfn "$ROOT/systemd/spx-spark-market-regime-signal.service" "$USER_UNIT_DIR/spx-spark-market-regime-signal.service"
-ln -sfn "$ROOT/systemd/spx-spark-intraday-shock-hot.service" "$USER_UNIT_DIR/spx-spark-intraday-shock-hot.service"
-ln -sfn "$ROOT/systemd/spx-spark-surface-dashboard.service" "$USER_UNIT_DIR/spx-spark-surface-dashboard.service"
 ln -sfn "$ROOT/systemd/spx-spark-ibkr-stream.service" "$USER_UNIT_DIR/spx-spark-ibkr-stream.service"
 ln -sfn "$ROOT/systemd/spx-spark-post-close-review.service" "$USER_UNIT_DIR/spx-spark-post-close-review.service"
 ln -sfn "$ROOT/systemd/spx-spark-post-close-review.timer" "$USER_UNIT_DIR/spx-spark-post-close-review.timer"
@@ -63,10 +56,6 @@ ln -sfn "$ROOT/systemd/spx-spark-data-compact-weekend.timer" "$USER_UNIT_DIR/spx
 ln -sfn "$ROOT/systemd/spx-spark-backtest-weekly.service" "$USER_UNIT_DIR/spx-spark-backtest-weekly.service"
 ln -sfn "$ROOT/systemd/spx-spark-backtest-weekly.timer" "$USER_UNIT_DIR/spx-spark-backtest-weekly.timer"
 
-# Pre-create the narrowly writable live-surface paths before its strict
-# filesystem sandbox is established, then install its user unit idempotently.
-"$ROOT/scripts/install-spxw-surface-live-service.sh"
-
 # A clean Git tree is not enough if an older copied user unit remains active.
 # Refuse the deployment when any already-installed tracked unit differs from
 # the exact unit in origin/master.
@@ -79,14 +68,7 @@ for tracked_unit in "$ROOT"/systemd/spx-spark-*; do
 done
 
 systemctl --user daemon-reload
-systemctl --user enable spx-spark-24h.service
-systemctl --user enable spx-spark-es-bar-sampler.service
-systemctl --user enable spx-spark-spx-minute-sampler.service
-systemctl --user enable spx-spark-market-features-hot.service
-systemctl --user enable spx-spark-market-regime-signal.service
-systemctl --user enable spx-spark-intraday-shock-hot.service
 systemctl --user enable spx-worker.service
-systemctl --user enable spx-spark-surface-dashboard.service
 systemctl --user enable spx-spark-ibkr-stream.service
 # The deterministic finalizer now owns the post-close artifact, LLM and push
 # ordering from one payload. Keep the old review service for explicit manual
@@ -105,16 +87,8 @@ systemctl --user enable --now spx-spark-data-compact-weekend.timer
 systemctl --user enable --now spx-spark-backtest-weekly.timer
 
 echo "Installed user services:"
-echo "  spx-core.service (installed but disabled pending staging/cutover)"
-echo "  spx-spark-24h.service"
-echo "  spx-spark-es-bar-sampler.service"
-echo "  spx-spark-spx-minute-sampler.service"
-echo "  spx-spark-market-features-hot.service"
-echo "  spx-spark-market-regime-signal.service"
-echo "  spx-spark-intraday-shock-hot.service"
+echo "  spx-core.service (enabled only by --now owner cutover)"
 echo "  spx-worker.service"
-echo "  spx-spark-surface-dashboard.service"
-echo "  spx-spark-surface-live.service"
 echo "  spx-spark-ibkr-stream.service"
 echo "  spx-spark-post-close-review.service (manual compatibility only)"
 echo "  spx-spark-post-close-review.timer (disabled; superseded by session finalizer)"
@@ -136,43 +110,29 @@ if ! loginctl show-user "$USER" -p Linger 2>/dev/null | grep -q 'Linger=yes'; th
 fi
 
 if [[ "${1:-}" == "--now" ]]; then
-  # Stop the legacy embedded writer before the independent canonical writer
-  # starts. Only after the sampler is active may the new read-only heavy worker
-  # return, so a rolling deployment cannot create a dual-writer window.
-  systemctl --user stop spx-spark-market-features-hot.service
-  systemctl --user restart spx-spark-ibkr-stream.service
-  systemctl --user restart spx-spark-es-bar-sampler.service
-  systemctl --user restart spx-spark-spx-minute-sampler.service
-  SAMPLER_READY_TIMEOUT_SECONDS="${SPX_SPARK_ES_BAR_READY_TIMEOUT_SECONDS:-45}"
-  if [[ ! "$SAMPLER_READY_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
-    echo "Invalid SPX_SPARK_ES_BAR_READY_TIMEOUT_SECONDS: $SAMPLER_READY_TIMEOUT_SECONDS" >&2
-    exit 1
-  fi
-  SAMPLER_READY_DEADLINE=$((SECONDS + SAMPLER_READY_TIMEOUT_SECONDS))
-  until "$ROOT/scripts/run-es-bar-sampler.sh" --check-ready >/dev/null 2>&1; do
-    if ! systemctl --user is-active --quiet spx-spark-es-bar-sampler.service; then
-      echo "Refusing to restart market features: ES bar sampler stopped before readiness" >&2
-      exit 1
-    fi
-    if (( SECONDS >= SAMPLER_READY_DEADLINE )); then
-      echo "Refusing to restart market features: ES bar sampler did not publish a fresh fenced observation within ${SAMPLER_READY_TIMEOUT_SECONDS}s" >&2
-      "$ROOT/scripts/run-es-bar-sampler.sh" --check-ready || true
-      exit 1
-    fi
-    sleep 1
+  retired_units=(
+    spx-spark-24h.service
+    spx-spark-es-bar-sampler.service
+    spx-spark-spx-minute-sampler.service
+    spx-spark-market-features-hot.service
+    spx-spark-market-regime-signal.service
+    spx-spark-intraday-shock-hot.service
+    spx-spark-surface-dashboard.service
+    spx-spark-surface-live.service
+    spx-spark-surface-replay.service
+  )
+  systemctl --user disable --now "${retired_units[@]}" || true
+  for unit in "${retired_units[@]}"; do
+    rm -f "$USER_UNIT_DIR/$unit"
   done
-  # Remove both hot paths from the shared scheduler before starting their sole owners.
-  systemctl --user restart spx-spark-24h.service
-  systemctl --user restart spx-spark-market-features-hot.service
-  systemctl --user restart spx-spark-market-regime-signal.service
-  systemctl --user restart spx-spark-intraday-shock-hot.service
+  systemctl --user daemon-reload
+  systemctl --user restart spx-spark-ibkr-stream.service
+  systemctl --user enable --now spx-core.service
   systemctl --user restart spx-worker.service
-  systemctl --user restart spx-spark-surface-dashboard.service
   systemctl --user restart spx-spark-session-finalize.timer
   systemctl --user restart spx-spark-storage-pressure.timer
   systemctl --user restart spx-spark-rth-daily-acceptance.timer
   systemctl --user restart spx-spark-order-map.timer
   systemctl --user restart spx-spark-order-map-status.timer
-  "$ROOT/scripts/install-spxw-surface-live-service.sh" --now
-  systemctl --user status spx-spark-24h.service spx-spark-es-bar-sampler.service spx-spark-spx-minute-sampler.service spx-spark-market-features-hot.service spx-spark-market-regime-signal.service spx-spark-intraday-shock-hot.service spx-worker.service spx-spark-surface-dashboard.service spx-spark-surface-live.service spx-spark-ibkr-stream.service spx-spark-session-finalize.timer spx-spark-storage-pressure.timer spx-spark-rth-daily-acceptance.timer spx-spark-order-map.timer spx-spark-order-map-status.timer --no-pager
+  systemctl --user status spx-core.service spx-worker.service spx-spark-ibkr-stream.service spx-spark-session-finalize.timer spx-spark-storage-pressure.timer spx-spark-rth-daily-acceptance.timer spx-spark-order-map.timer spx-spark-order-map-status.timer --no-pager
 fi

@@ -39,7 +39,7 @@ api/v1/live/session-surface?role=front&weighting=oi_weighted&bucket_minutes=1&pr
 
 The host accumulator validates the publisher self hash, freezes completed
 one-minute Live columns durably, and serves the shared Live/Replay matrix contract
-over `runtime/live/live-api.sock`. The legacy rolling scenario diagnostic reads
+over `runtime/core-api.sock`. The legacy rolling scenario diagnostic reads
 `api/v1/snapshot` only when its drawer is opened. That endpoint maps only to the
 dedicated publisher output:
 
@@ -113,26 +113,19 @@ configurable UID/GID and does not require broader permissions.
 The live producer must publish at least one validated GTH or RTH snapshot before
 the Session Canvas endpoint can return 200. Weekends, holidays, the scheduled
 closed gap, and a missing or expired lease remain fail-closed. Install the
-independent Live service and the Unix-socket Replay service first:
+consolidated Core service and the replay warmer first:
 
 ```bash
-systemctl --user restart spx-spark-surface-dashboard.service
-/home/ubuntu/spx-spark/scripts/install-spxw-surface-live-service.sh --now
 install -m 0644 \
-  /home/ubuntu/spx-spark/systemd/spx-spark-surface-replay.service \
-  /home/ubuntu/.config/systemd/user/spx-spark-surface-replay.service
-install -m 0644 \
+  /home/ubuntu/spx-spark/systemd/spx-core.service \
   /home/ubuntu/spx-spark/systemd/spx-spark-surface-replay-warm.service \
   /home/ubuntu/spx-spark/systemd/spx-spark-surface-replay-warm.timer \
   /home/ubuntu/.config/systemd/user/
 systemctl --user daemon-reload
-systemctl --user enable --now spx-spark-surface-replay.service
+systemctl --user enable --now spx-core.service
 systemctl --user enable --now spx-spark-surface-replay-warm.timer
 curl --unix-socket \
-  /srv/data/spx-spark/data/published/spxw-surface/runtime/replay-api.sock \
-  http://localhost/healthz
-curl --unix-socket \
-  /srv/data/spx-spark/data/published/spxw-surface/runtime/live/live-api.sock \
+  /srv/data/spx-spark/data/published/spxw-surface/runtime/core-api.sock \
   http://localhost/healthz
 ```
 
@@ -144,12 +137,13 @@ docker compose -f /home/ubuntu/spx-spark/site/spxw-surface/compose.yaml up -d
 docker compose -f /home/ubuntu/spx-spark/site/spxw-surface/compose.yaml ps
 ```
 
-The replay process runs with low CPU/IO weight and a single advisory generation
+The consolidated Core owns the replay routes; the warmer runs with low CPU/IO
+weight and a single advisory generation
 lock. The persistent coordination inode is never removed as a stale-lock fix;
 kernel `flock` ownership is released when the process exits. It
 does not expose TCP; nginx connects through
-`published/spxw-surface/runtime/replay-api.sock`. Nginx mounts both the publish
-and runtime directories read-only. The timer checks the newest post-close-grace
+`published/spxw-surface/runtime/core-api.sock`. Nginx mounts both the publish and
+runtime directories read-only. The timer checks the newest post-close-grace
 session catalog at 21:20, 22:20, and 23:20 UTC on weekdays (covering New York
 DST), then materializes the default compact trend artifact. It does not touch
 live strategy state. Frame and trend URLs use private revalidation.

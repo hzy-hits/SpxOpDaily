@@ -381,8 +381,8 @@ def test_stopped_sampler_guard_uses_fixed_unit_and_process_lock(
         assert lock_path.exists()
 
     assert observed == [
-        "spx-spark-es-bar-sampler.service",
-        "spx-spark-es-bar-sampler.service",
+        "spx-core.service",
+        "spx-core.service",
     ]
 
     with namespace["ProcessLock"](lock_path):

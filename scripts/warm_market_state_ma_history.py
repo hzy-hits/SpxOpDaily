@@ -48,7 +48,7 @@ from spx_spark.state_io import (
 
 
 UTC = timezone.utc
-DEFAULT_SERVICE_UNIT = "spx-spark-es-bar-sampler.service"
+DEFAULT_SERVICE_UNIT = "spx-core.service"
 MIN_APPLY_OVERLAP_BARS = 6
 MAX_APPLY_OVERLAP_CLOSE_DIFFERENCE = 2.0
 FUTURES_RTH_POST_CASH_CLOSE = time(17, 0)

@@ -12,24 +12,17 @@ def read(relative: str) -> str:
     return (ROOT / relative).read_text(encoding="utf-8")
 
 
-def test_replay_service_is_unix_socket_only_and_resource_bounded() -> None:
-    unit = read("systemd/spx-spark-surface-replay.service")
+def test_replay_routes_share_the_resource_bounded_core_socket() -> None:
+    unit = read("systemd/spx-core.service")
 
-    assert ".venv/bin/uvicorn spx_spark.web.replay_api:create_default_app" in unit
-    assert "--factory" in unit
-    assert "--uds /srv/data/spx-spark/data/published/spxw-surface/runtime/replay-api.sock" in unit
-    assert "--no-access-log" in unit
+    assert ".venv/bin/spx core run" in unit
+    assert "runtime/core-api.sock" in unit
     assert "ExecStartPre=/usr/bin/install -d -m 0700" in unit
-    assert "Nice=10" in unit
-    assert "IOSchedulingClass=idle" in unit
-    assert "MemoryHigh=2G" in unit
-    assert "MemoryMax=3G" in unit
+    assert "MemoryMax=2G" in unit
     assert "ProtectSystem=strict" in unit
-    assert "EnvironmentFile=" not in unit
-    assert "SPX_SPARK_DISABLE_DOTENV=1" in unit
     assert "PrivateNetwork=true" in unit
     assert "RestrictAddressFamilies=AF_UNIX" in unit
-    assert "ReadWritePaths=/srv/data/spx-spark/data/published/spxw-surface" in unit
+    assert "ReadWritePaths=/srv/data/spx-spark/data %t" in unit
 
 
 def test_post_close_timer_warms_catalog_and_default_session_surfaces() -> None:
@@ -39,6 +32,8 @@ def test_post_close_timer_warms_catalog_and_default_session_surfaces() -> None:
     assert "21:20:00 UTC" in timer
     assert "22:20:00 UTC" in timer
     assert "23:20:00 UTC" in timer
+    assert "$RUNTIME_DIR/core-api.sock" in warmer
+    assert "replay-api.sock" not in warmer
     assert 'for session_date in "${session_dates[@]}"' in warmer
     assert 'latest_session="${session_dates[0]}"' in warmer
     assert 'surface_times=("${frame_times[-1]}")' in warmer
@@ -66,7 +61,6 @@ def test_post_close_timer_warms_catalog_and_default_session_surfaces() -> None:
 
 def test_replay_shell_entrypoints_parse() -> None:
     for relative in (
-        "scripts/run-spxw-surface-replay-service.sh",
         "scripts/warm-spxw-surface-replay-catalog.sh",
     ):
         subprocess.run(

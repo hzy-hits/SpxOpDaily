@@ -8,16 +8,6 @@ def read(relative: str) -> str:
     return (ROOT / relative).read_text(encoding="utf-8")
 
 
-def test_realtime_regime_signal_is_installed_as_an_independent_advisory_worker() -> None:
-    service = read("systemd/spx-spark-market-regime-signal.service")
-    installer = read("scripts/install-spx-spark-services.sh")
-
-    assert "After=spx-spark-market-features-hot.service" in service
-    assert ".venv/bin/spx-spark-market-regime-signal --interval-seconds=5" in service
-    assert "Restart=always" in service
-    assert "spx-spark-market-regime-signal.service" in installer
-
-
 def test_weekend_bulk_compaction_is_bounded_low_priority_and_persistent() -> None:
     service = read("systemd/spx-spark-data-compact-weekend.service")
     timer = read("systemd/spx-spark-data-compact-weekend.timer")
@@ -185,86 +175,26 @@ def test_order_map_status_timer_covers_full_exchange_local_rth() -> None:
     assert "restart spx-spark-order-map-status.timer" in installer
 
 
-def test_market_features_hot_worker_is_a_dedicated_single_owner_service() -> None:
-    hot_service = read("systemd/spx-spark-market-features-hot.service")
-    shared_service = read("systemd/spx-spark-24h.service")
-    runner = read("scripts/run-market-features-hot-worker.sh")
+def test_core_cutover_retires_all_legacy_realtime_units() -> None:
+    core = read("systemd/spx-core.service")
     installer = read("scripts/install-spx-spark-services.sh")
 
-    assert "scripts/run-market-features-hot-worker.sh" in hot_service
-    assert "RuntimeDirectory=" not in hot_service
-    assert "--lock-path=%t/spx-spark-market-features-hot-worker.lock" in hot_service
-    assert "RestartPreventExitStatus" not in hot_service
-    assert "RestartSec=10" in hot_service
-    assert "KillSignal=SIGTERM" in hot_service
-    assert "SPX_SERVICE_ENABLE_MARKET_FEATURES=false" in shared_service
-    assert "--exclude-task market_features" in shared_service
-    assert 'exec "$ENTRYPOINT" "$@"' in runner
-    assert "spx_spark.application.runtime.market_features_hot_worker" in runner
-    assert "enable spx-spark-market-features-hot.service" in installer
-    assert installer.index("restart spx-spark-24h.service") < installer.index(
-        "restart spx-spark-market-features-hot.service"
-    )
-
-
-def test_es_bar_sampler_is_the_canonical_writer_with_safe_deploy_order() -> None:
-    sampler_service = read("systemd/spx-spark-es-bar-sampler.service")
-    feature_service = read("systemd/spx-spark-market-features-hot.service")
-    runner = read("scripts/run-es-bar-sampler.sh")
-    installer = read("scripts/install-spx-spark-services.sh")
-
-    assert "scripts/run-es-bar-sampler.sh" in sampler_service
-    assert "--mark-starting" in sampler_service
-    assert "--interval-seconds=5" in sampler_service
-    assert "--lock-path=%t/spx-spark-es-bar-sampler.lock" in sampler_service
-    assert "Restart=always" in sampler_service
-    assert "RestartSec=2" in sampler_service
-    assert "spx-spark-es-bar-sampler.service" in feature_service
-    assert 'exec "$ENTRYPOINT" "$@"' in runner
-    assert "spx_spark.application.runtime.es_bar_sampler" in runner
-    assert "enable spx-spark-es-bar-sampler.service" in installer
-
-    stop_writer = installer.index("stop spx-spark-market-features-hot.service")
-    start_sampler = installer.index("restart spx-spark-es-bar-sampler.service")
-    start_reader = installer.index("restart spx-spark-market-features-hot.service")
-    assert stop_writer < start_sampler < start_reader
-    assert "is-active --quiet spx-spark-es-bar-sampler.service" in installer
-    assert "--check-ready" in installer
-
-
-def test_official_spx_sampler_is_independent_and_rth_only() -> None:
-    sampler_service = read("systemd/spx-spark-spx-minute-sampler.service")
-    feature_service = read("systemd/spx-spark-market-features-hot.service")
-    runner = read("scripts/run-spx-minute-sampler.sh")
-    installer = read("scripts/install-spx-spark-services.sh")
-
-    assert "scripts/run-spx-minute-sampler.sh" in sampler_service
-    assert "spx_spark.application.runtime.spx_minute_sampler" in runner
-    assert "--lock-path=%t/spx-spark-spx-minute-sampler.lock" in sampler_service
-    assert "spx-spark-spx-minute-sampler.service" in feature_service
-    assert "enable spx-spark-spx-minute-sampler.service" in installer
-
-
-def test_intraday_shock_hot_worker_is_a_dedicated_single_owner_service() -> None:
-    hot_service = read("systemd/spx-spark-intraday-shock-hot.service")
-    shared_service = read("systemd/spx-spark-24h.service")
-    runner = read("scripts/run-intraday-shock-hot-worker.sh")
-    installer = read("scripts/install-spx-spark-services.sh")
-
-    assert "scripts/run-intraday-shock-hot-worker.sh" in hot_service
-    assert "RuntimeDirectory=" not in hot_service
-    assert "--lock-path=%t/spx-spark-intraday-shock-hot-worker.lock" in hot_service
-    assert "RestartPreventExitStatus" not in hot_service
-    assert "RestartSec=10" in hot_service
-    assert "KillSignal=SIGTERM" in hot_service
-    assert "SPX_SERVICE_ENABLE_INTRADAY_SHOCK=false" in shared_service
-    assert "--exclude-task intraday_shock" in shared_service
-    assert 'exec "$ENTRYPOINT" "$@"' in runner
-    assert "spx_spark.application.runtime.intraday_shock_hot_worker" in runner
-    assert "enable spx-spark-intraday-shock-hot.service" in installer
-    assert installer.index("restart spx-spark-24h.service") < installer.index(
-        "restart spx-spark-intraday-shock-hot.service"
-    )
+    assert ".venv/bin/spx core run" in core
+    assert "runtime/core-api.sock" in core
+    assert "enable --now spx-core.service" in installer
+    for unit in (
+        "spx-spark-24h.service",
+        "spx-spark-es-bar-sampler.service",
+        "spx-spark-spx-minute-sampler.service",
+        "spx-spark-market-features-hot.service",
+        "spx-spark-market-regime-signal.service",
+        "spx-spark-intraday-shock-hot.service",
+        "spx-spark-surface-dashboard.service",
+        "spx-spark-surface-live.service",
+        "spx-spark-surface-replay.service",
+    ):
+        assert unit in installer
+        assert not (ROOT / "systemd" / unit).exists()
 
 
 def test_notification_delivery_uses_the_single_huey_worker() -> None:
@@ -277,18 +207,12 @@ def test_notification_delivery_uses_the_single_huey_worker() -> None:
     assert "enable spx-worker.service" in installer
 
 
-def test_surface_dashboard_worker_publishes_to_an_isolated_read_only_feed() -> None:
-    service = read("systemd/spx-spark-surface-dashboard.service")
-    runner = read("scripts/run-spxw-surface-dashboard.sh")
-    installer = read("scripts/install-spx-spark-services.sh")
+def test_core_publishes_the_surface_projection_for_its_live_api() -> None:
+    core = read("src/spx_spark/core_main.py")
 
-    assert "scripts/run-spxw-surface-dashboard.sh --interval-seconds 5" in service
-    assert "Restart=always" in service
-    assert "SuccessExitStatus=143 SIGTERM" in service
-    assert "/published/spxw-surface/snapshot.json" in runner
-    assert "--output-path" in runner
-    assert "spx_spark.surface_dashboard" in runner
-    assert "enable spx-spark-surface-dashboard.service" in installer
+    assert "surface_dashboard.run_loop" in core
+    assert "published/spxw-surface/snapshot.json" in core
+    assert "from spx_spark.web.live_api import create_default_app" in core
 
 
 def test_compaction_runner_has_a_non_blocking_whole_run_lock() -> None:

@@ -138,23 +138,14 @@ def test_embedded_cycle_reuses_snapshot_and_keeps_a_separate_lease(
     assert emitted == lease
 
 
-def test_cli_once_uses_the_service_loop_shock_cadence_and_one_lock(
+def test_cli_once_uses_the_typed_runtime_shock_cadence_and_one_lock(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    app = object()
+    app = SimpleNamespace(runtime=SimpleNamespace(intraday_shock_interval_seconds=7))
     calls: list[str] = []
     monkeypatch.setattr(hot_worker, "load_app_settings", lambda: app)
-    monkeypatch.setattr(
-        hot_worker,
-        "ServiceLoopSettings",
-        SimpleNamespace(
-            from_app_settings=lambda loaded: SimpleNamespace(
-                intraday_shock_interval_seconds=7
-            )
-        ),
-    )
     monkeypatch.setattr(
         hot_worker,
         "run_intraday_shock_cycle",
