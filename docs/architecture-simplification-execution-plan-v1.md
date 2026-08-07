@@ -613,3 +613,4 @@ def maintenance_daily() -> None:
 | 2026-08-07 | P1-3 | +1 / -0 | production +21 / -0 | +1 / -0 | +0 / -0 | +1 / -0 | +0 / -0 | `spx status` 复用旧读取和渲染，scripts 43→44 |
 | 2026-08-07 | P1-4 | +0 / -2 | production +0 / -0 | dev +1 / -0 | +0 / -0 | +0 / -0 | +0 / -0 | 两个 contracts kept；删除 309 行自研 registry/兼容测试 |
 | 2026-08-07 | S1 | +3 / -0 | production +453 / -0 | +0 / -0 | +0 / -0 | +0 / -0 | +0 / -0 | 唯一 StrategyDecision/NO_TRADE；未来 frame 拒绝；Rust wire 未污染 |
+| 2026-08-07 | S2 | +2 / -0 | production +794 / -268（S-track 当前 979） | dev +1 / -0 | +0 / -0 | +0 / -0 | +0 / -0 | Vertical BBO/payoff/Anti-Chase/replay；18 sessions、12 可比机会；gate collecting，未切 owner |

@@ -63,6 +63,7 @@ spx-spark-surface-live-service = "spx_spark.surface_live_session_http:main"
 
 [dependency-groups]
 dev = [
+  "hypothesis>=6.165.2",
   "import-linter>=2.13",
   "ipykernel>=6,<8",
   "nbclient>=0.10,<1",
